@@ -119,31 +119,36 @@ func (a internalCallerAuthorizer) verifyExecutionEventStreamWriter(
 }
 
 func (a internalCallerAuthorizer) verifyTaskWorker(ctx context.Context, userInfo *UserInfo, task *corev1alpha1.Task) error {
+	_, err := a.taskWorkerJob(ctx, userInfo, task)
+	return err
+}
+
+func (a internalCallerAuthorizer) taskWorkerJob(ctx context.Context, userInfo *UserInfo, task *corev1alpha1.Task) (*batchv1.Job, error) {
 	if a.k8sReader == nil || userInfo == nil || task == nil {
-		return fiber.NewError(fiber.StatusUnauthorized, "authentication required")
+		return nil, fiber.NewError(fiber.StatusUnauthorized, "authentication required")
 	}
 	if userInfo.AuthType != AuthTypeTokenReview {
-		return fiber.NewError(fiber.StatusForbidden, "caller pod token required")
+		return nil, fiber.NewError(fiber.StatusForbidden, "caller pod token required")
 	}
 	podName := firstUserExtra(userInfo, "authentication.kubernetes.io/pod-name")
 	podUID := firstUserExtra(userInfo, "authentication.kubernetes.io/pod-uid")
 	if podName == "" || podUID == "" {
-		return fiber.NewError(fiber.StatusForbidden, "caller pod identity required")
+		return nil, fiber.NewError(fiber.StatusForbidden, "caller pod identity required")
 	}
 
 	pod := &corev1.Pod{}
 	if err := a.k8sReader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: podName}, pod); err != nil {
-		return fiber.NewError(fiber.StatusForbidden, "caller pod not found")
+		return nil, fiber.NewError(fiber.StatusForbidden, "caller pod not found")
 	}
 	if string(pod.UID) != podUID {
-		return fiber.NewError(fiber.StatusForbidden, "caller pod identity mismatch")
+		return nil, fiber.NewError(fiber.StatusForbidden, "caller pod identity mismatch")
 	}
 	if pod.Labels[labels.LabelTask] != labels.SelectorValue(task.Name) {
-		return fiber.NewError(fiber.StatusForbidden, "caller pod does not belong to task")
+		return nil, fiber.NewError(fiber.StatusForbidden, "caller pod does not belong to task")
 	}
 	currentJobName := strings.TrimSpace(task.Status.JobName)
 	if currentJobName == "" {
-		return fiber.NewError(fiber.StatusForbidden, "task has no active worker job")
+		return nil, fiber.NewError(fiber.StatusForbidden, "task has no active worker job")
 	}
 
 	for _, owner := range pod.OwnerReferences {
@@ -152,18 +157,18 @@ func (a internalCallerAuthorizer) verifyTaskWorker(ctx context.Context, userInfo
 		}
 		job := &batchv1.Job{}
 		if err := a.k8sReader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: owner.Name}, job); err != nil {
-			return fiber.NewError(fiber.StatusForbidden, "caller job not found")
+			return nil, fiber.NewError(fiber.StatusForbidden, "caller job not found")
 		}
 		if owner.UID != "" && owner.UID != job.UID {
 			continue
 		}
 		for _, jobOwner := range job.OwnerReferences {
 			if jobOwner.Kind == "Task" && jobOwner.UID == task.UID {
-				return nil
+				return job, nil
 			}
 		}
 	}
-	return fiber.NewError(fiber.StatusForbidden, "caller is not the current worker for this task")
+	return nil, fiber.NewError(fiber.StatusForbidden, "caller is not the current worker for this task")
 }
 
 func firstUserExtra(userInfo *UserInfo, key string) string {

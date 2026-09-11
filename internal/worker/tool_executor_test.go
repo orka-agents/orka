@@ -19,6 +19,7 @@ import (
 	neturl "net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -31,6 +32,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/outboundaccess"
+	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/tokenexchange"
 	"github.com/orka-agents/orka/internal/tracing"
 	"github.com/orka-agents/orka/internal/tracing/genai"
@@ -1331,6 +1333,61 @@ func TestToolExecutor_Execute_FailsClosedOnConfiguredTransactionTokenHeader(t *t
 	}
 }
 
+func TestToolExecutorTracksConfiguredCredentialsWhenPreparationFails(t *testing.T) {
+	for _, failure := range []string{"invalid arguments", "invalid URL", "transaction header", "idempotency header", "transaction authority"} {
+		t.Run(failure, func(t *testing.T) {
+			var called atomic.Bool
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				called.Store(true)
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer server.Close()
+			const bearerValue = "opaque-header-bearer-placeholder"
+			const keyValue = "opaque-header-key-placeholder"
+			executor := &ToolExecutor{client: server.Client(), namespace: "default"}
+			tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+				URL: server.URL, Headers: map[string]string{
+					"Authorization": "Bearer " + bearerValue,
+					"X-API-Key":     keyValue,
+				},
+			}}}
+			ctx := redact.WithTrackedSecrets(context.Background())
+			var arguments json.RawMessage
+			wantError := "reserved header"
+			switch failure {
+			case "invalid arguments":
+				arguments = json.RawMessage(`{`)
+				wantError = "failed to parse tool arguments"
+			case "invalid URL":
+				tool.Spec.HTTP.URL = "%"
+				wantError = "failed to create request"
+			case "transaction header":
+				tool.Spec.HTTP.Headers[transactiontoken.HeaderName] = "reserved-placeholder"
+			case "idempotency header":
+				tool.Spec.HTTP.Headers[toolIdempotencyKeyHeader] = "configured-key"
+				ctx = WithToolIdempotencyKey(ctx, "approved-key")
+			case "transaction authority":
+				executor.SetTransactionAuthority("", []string{"api.read"})
+				executor.SetTransactionExchangeConfig(&TransactionExchangeConfig{TTS: contexttoken.TTSConfig{
+					Endpoint: "https://issuer.example.test/token", TokenSource: contexttoken.TTSTokenSourceIncoming,
+				}})
+				wantError = "task-scoped incoming"
+			}
+			_, err := executor.Execute(ctx, tool, arguments)
+			if err == nil || !strings.Contains(err.Error(), wantError) {
+				t.Fatalf("Execute() error = %v, want %s", err, wantError)
+			}
+			if called.Load() {
+				t.Fatal("failed request preparation must not reach the tool server")
+			}
+			values := redact.TrackedSecrets(ctx)
+			if !slices.Contains(values, bearerValue) || !slices.Contains(values, keyValue) {
+				t.Fatal("configured credentials were not retained after request preparation failed")
+			}
+		})
+	}
+}
+
 func TestToolExecutor_Execute_ExchangesOutboundTransactionTokenWithTTS(t *testing.T) {
 	subjectTokenPath := filepath.Join(t.TempDir(), "subject-token")
 	if err := os.WriteFile(subjectTokenPath, []byte(testParentTransactionToken), 0600); err != nil {
@@ -1923,7 +1980,8 @@ func TestToolExecutor_getSecretKey_MountedSecret(t *testing.T) {
 		namespace:  "default",
 	}
 
-	value, err := executor.getSecretKey(context.Background(), "my-secret", "my-key")
+	ctx := redact.WithTrackedSecrets(context.Background())
+	value, err := executor.getSecretKey(ctx, "my-secret", "my-key")
 	if err != nil {
 		t.Fatalf("getSecretKey() error = %v", err)
 	}
@@ -1931,6 +1989,9 @@ func TestToolExecutor_getSecretKey_MountedSecret(t *testing.T) {
 	// Should trim whitespace
 	if value != "secret-value" {
 		t.Errorf("getSecretKey() = %q, want %q", value, "secret-value")
+	}
+	if tracked := redact.TrackedSecrets(ctx); len(tracked) != 1 || tracked[0] != value {
+		t.Fatal("mounted credential was not retained for context redaction")
 	}
 }
 
@@ -1954,13 +2015,17 @@ func TestToolExecutor_getSecretKey_K8sAPISecret(t *testing.T) {
 		k8sClient:  fakeClient,
 	}
 
-	value, err := executor.getSecretKey(context.Background(), "k8s-secret", "api-key")
+	ctx := redact.WithTrackedSecrets(context.Background())
+	value, err := executor.getSecretKey(ctx, "k8s-secret", "api-key")
 	if err != nil {
 		t.Fatalf("getSecretKey() error = %v", err)
 	}
 
 	if value != "k8s-secret-value" {
 		t.Errorf("getSecretKey() = %q, want %q", value, "k8s-secret-value")
+	}
+	if tracked := redact.TrackedSecrets(ctx); len(tracked) != 1 || tracked[0] != value {
+		t.Fatal("API-loaded credential was not retained for context redaction")
 	}
 }
 
@@ -2947,6 +3012,36 @@ func TestToolExecutorDirectOutboundAccessRedactsCredentialFromSuccessfulResult(t
 	}
 	if strings.Contains(result, "resource-credential") || !strings.Contains(result, "[REDACTED]") {
 		t.Fatalf("successful Tool result was not redacted: %s", result)
+	}
+}
+
+func TestToolExecutorRedactsKnownValuesOverlappingCredentialLabels(t *testing.T) {
+	const value = "opaque-response-placeholder"
+	for _, fixture := range []struct{ label, content string }{
+		{"password", "password=" + value},
+		{"Authorization", "Authorization: Bearer " + value},
+		{"Txn-Token", "Txn-Token: " + value},
+		{"Cookie", "Cookie: sessionid=" + value},
+		{"password", "password is " + value},
+	} {
+		t.Run(fixture.content[:len(fixture.content)-len(value)], func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(fixture.content))
+			}))
+			defer server.Close()
+			executor := NewToolExecutor()
+			executor.SetAuthSecretValue("http-auth", "authref", fixture.label)
+			tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+				URL: server.URL, AuthSecretRef: &corev1alpha1.SecretKeySelector{Name: "http-auth", Key: "authref"},
+			}}}
+			result, err := executor.Execute(context.Background(), tool, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(result, value) || !strings.Contains(result, "[REDACTED]") {
+				t.Fatal("a known value hid a credential label in an HTTP tool result")
+			}
+		})
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/sessioncontext"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -187,7 +188,8 @@ func (m *SessionManager) AppendMessages(ctx context.Context, task *corev1alpha1.
 		return nil
 	}
 
-	if _, err := m.store.GetSession(ctx, task.Namespace, task.Spec.SessionRef.Name); err != nil {
+	session, err := m.store.GetSession(ctx, task.Namespace, task.Spec.SessionRef.Name)
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return nil
 		}
@@ -195,8 +197,20 @@ func (m *SessionManager) AppendMessages(ctx context.Context, task *corev1alpha1.
 	}
 
 	var prompt, response string
+	// AI checkpoint workers already commit their model/tool history before
+	// returning. Stable terminal IDs also make repeated controller saves safe.
+	identity := string(task.UID)
+	if identity == "" {
+		identity = task.Namespace + "/" + task.Name
+	}
+	promptID, finalID := sessioncontext.PromptMessageID(identity), sessioncontext.FinalMessageID(identity)
+	var promptSaved, finalSaved bool
+	for _, message := range session.Messages {
+		promptSaved = promptSaved || message.ID == promptID
+		finalSaved = finalSaved || message.ID == finalID
+	}
 
-	if !task.Spec.SessionRef.PromptIncluded {
+	if !task.Spec.SessionRef.PromptIncluded && !promptSaved {
 		if task.Spec.AI != nil && task.Spec.AI.Prompt != "" {
 			prompt = task.Spec.AI.Prompt
 		} else if task.Spec.Prompt != "" {
@@ -205,29 +219,28 @@ func (m *SessionManager) AppendMessages(ctx context.Context, task *corev1alpha1.
 	}
 
 	// Try to get the response from the result store
-	if resultStore != nil && task.Status.ResultRef != nil && task.Status.ResultRef.Available {
+	if !finalSaved && resultStore != nil && task.Status.ResultRef != nil && task.Status.ResultRef.Available {
 		data, err := resultStore.GetResult(ctx, task.Namespace, task.Name)
 		if err == nil {
 			response = string(data)
 		}
 	}
 
-	now := time.Now()
 	var messages []store.SessionMessage
 
 	if prompt != "" {
 		messages = append(messages, store.SessionMessage{
-			Role:      "user",
-			Content:   prompt,
-			Timestamp: now,
+			ID:      promptID,
+			Role:    "user",
+			Content: prompt,
 		})
 	}
 
 	if response != "" {
 		messages = append(messages, store.SessionMessage{
-			Role:      "assistant",
-			Content:   response,
-			Timestamp: now,
+			ID:      finalID,
+			Role:    "assistant",
+			Content: response,
 		})
 	}
 

@@ -43,6 +43,8 @@ import (
 	"github.com/orka-agents/orka/internal/llm"
 	_ "github.com/orka-agents/orka/internal/llm/anthropic"
 	_ "github.com/orka-agents/orka/internal/llm/openai"
+	"github.com/orka-agents/orka/internal/redact"
+	"github.com/orka-agents/orka/internal/sessioncontext"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/tracing"
@@ -78,6 +80,7 @@ var memoryToolNames = []string{"recall_memory", "remember", "propose_memory", "s
 const modelLoopEventTimeout = 250 * time.Millisecond
 const maxSessionContextBytes = 96 << 10
 const roleUser = "user"
+const roleAssistant = "assistant"
 
 const finalAnswerRetryPrompt = "Your last response was empty. Return the final answer now using the evidence " +
 	"already gathered. Do not call tools."
@@ -122,6 +125,9 @@ func run() (err error) {
 	}()
 	if err := workerEnv.ValidateRequired(); err != nil {
 		return err
+	}
+	if workerenv.IsTrue(os.Getenv(workerenv.SessionCheckpointsEnabled)) {
+		ctx = redact.WithTrackedSecrets(ctx)
 	}
 	settings, err := parseModelSettings(workerEnv)
 	if err != nil {
@@ -181,6 +187,7 @@ func run() (err error) {
 	if apiKey == "" {
 		return fmt.Errorf("API key for %s not found", provider)
 	}
+	redact.TrackSecrets(ctx, apiKey)
 
 	// Create LLM provider
 	llmProvider, err := llm.NewProvider(provider, llm.ProviderConfig{
@@ -204,6 +211,13 @@ func run() (err error) {
 				fmt.Printf("Warning: skipping fallback %d: missing provider or API key\n", i)
 				continue
 			}
+			fallbackWindow, windowErr := contextWindowFromEnv(
+				workerenv.FallbackPrefix(i)+"_CONTEXT_WINDOW_TOKENS",
+				workerenv.IsTrue(os.Getenv(workerenv.SessionCheckpointsEnabled)),
+			)
+			if windowErr != nil {
+				return windowErr
+			}
 
 			fbProvider, err := llm.NewProvider(fallbackEnv.Provider, llm.ProviderConfig{
 				APIKey:          fallbackEnv.APIKey,
@@ -215,10 +229,12 @@ func run() (err error) {
 				fmt.Printf("Warning: skipping fallback %d: %v\n", i, err)
 				continue
 			}
+			redact.TrackSecrets(ctx, fallbackEnv.APIKey)
 
 			fallbacks = append(fallbacks, llm.FallbackEntry{
-				Provider: llm.NewRetryProvider(fbProvider, 0),
-				Model:    fallbackEnv.Model,
+				Provider:      llm.NewRetryProvider(fbProvider, 0),
+				Model:         fallbackEnv.Model,
+				ContextWindow: fallbackWindow,
 			})
 		}
 		if len(fallbacks) > 0 {
@@ -442,6 +458,7 @@ func loadCustomTools(
 			fmt.Printf("Warning: tool %q not found as built-in or CRD: %v\n", name, err)
 			continue
 		}
+		worker.TrackToolHeaderCredentials(ctx, tool)
 		bindApprovalAuthRefVersion(ctx, k8sClient, namespace, tool)
 		if err := bindApprovalOutboundAccessPolicyVersion(ctx, k8sClient, namespace, tool); err != nil {
 			fmt.Printf("Warning: outbound access policy approval binding for tool %q failed: %v\n", tool.Name, err)
@@ -493,6 +510,7 @@ func bindApprovalAuthRefVersion(
 		)
 		return
 	}
+	redact.TrackSecrets(ctx, strings.TrimSpace(string(secret.Data[tool.Spec.HTTP.AuthSecretRef.Key])))
 	if tool.Annotations == nil {
 		tool.Annotations = map[string]string{}
 	}
@@ -1069,7 +1087,7 @@ func boundInitialMessages(messages []llm.Message) []llm.Message {
 		}
 	}
 	mandatoryMessage := messages[mandatory]
-	used := initialMessageBytes(mandatoryMessage)
+	used := 1 + initialMessageBytes(mandatoryMessage)
 	start := mandatory
 	for i := mandatory - 1; i >= 0; i-- {
 		size := initialMessageBytes(messages[i])
@@ -1088,7 +1106,12 @@ func boundInitialMessages(messages []llm.Message) []llm.Message {
 }
 
 func initialMessageBytes(message llm.Message) int {
-	return len(message.Role) + len(message.Content) + len(message.Name) + len(message.ToolCallID) + 16
+	data, err := json.Marshal(message)
+	if err != nil {
+		return maxSessionContextBytes + 1
+	}
+	// Include each message's separator; the caller reserves the closing bracket.
+	return len(data) + 1
 }
 
 // loadSessionContext loads messages from the session transcript
@@ -1111,15 +1134,18 @@ func parseSessionContext(data []byte) []llm.Message {
 		}
 
 		var msg store.SessionMessage
-		if err := json.Unmarshal([]byte(line), &msg); err != nil {
+		decoder := json.NewDecoder(strings.NewReader(line))
+		decoder.UseNumber()
+		if err := decoder.Decode(&msg); err != nil || decoder.Decode(new(any)) != io.EOF {
 			continue
 		}
 
-		if msg.Role == roleUser || msg.Role == "assistant" {
-			messages = append(messages, llm.Message{
-				Role:    msg.Role,
-				Content: store.RuntimeSessionMessageContent(msg),
-			})
+		if msg.Role == roleUser || msg.Role == roleAssistant || msg.Role == roleTool {
+			message, err := sessioncontext.ModelMessage(msg)
+			if err != nil {
+				continue
+			}
+			messages = append(messages, message)
 		}
 	}
 
@@ -1199,6 +1225,28 @@ func executeAgentLoopWithEvents(
 	eventRecorder common.EventRecorder,
 	baseToolCtxOpt ...*tools.ToolContext,
 ) (string, error) {
+	if workerenv.IsTrue(os.Getenv(workerenv.SessionCheckpointsEnabled)) {
+		ctx = redact.WithTrackedSecrets(ctx)
+		for _, tool := range customTools {
+			worker.TrackToolHeaderCredentials(ctx, tool)
+		}
+	}
+	sessionContext, active, err := newWorkerSessionContext(ctx, messages)
+	if err != nil {
+		return "", err
+	}
+	messages = active
+	currentRequestIndex := currentUserMessageIndex(messages)
+	var currentRequest llm.Message
+	if currentRequestIndex >= 0 {
+		currentRequest = messages[currentRequestIndex]
+	}
+	if sessionContext != nil {
+		if customTools[readSessionHistoryTool] != nil {
+			return "", fmt.Errorf("%s is reserved for authenticated Session history", readSessionHistoryTool)
+		}
+		llmTools = append(slices.Clone(llmTools), sessionHistoryToolDefinition())
+	}
 	baseToolCtx := optionalToolContext(baseToolCtxOpt)
 	coordinationEnv := workerenv.ParseCoordinationEnv(os.Getenv)
 	maxIterations := agentLoopMaxIterations(coordinationEnv)
@@ -1216,6 +1264,9 @@ func executeAgentLoopWithEvents(
 	blankFinalRetried := false
 	finalAnswerRetry := false
 	for iteration := 0; iteration < iterationLimit; iteration++ {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		requestTools := llmTools
 		if finalAnswerRetry {
 			requestTools = nil
@@ -1230,6 +1281,14 @@ func executeAgentLoopWithEvents(
 			TemperatureSet: settings.temperatureSet,
 			Tools:          requestTools,
 		}
+		if sessionContext != nil {
+			req.ContextWindow = sessionContext.window
+			if fitErr := sessionContext.fit(stepCtx, provider, req, false, eventRecorder); fitErr != nil {
+				stepSpan.End()
+				return "", fitErr
+			}
+			messages = req.Messages
+		}
 		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeModelRequestStarted, modelLoopEventTimeout,
 			common.WithEventSummary("model request started"),
 			common.WithEventContent(eventContent(map[string]any{
@@ -1243,13 +1302,39 @@ func executeAgentLoopWithEvents(
 
 		resp, err := provider.Complete(stepCtx, req)
 		if err != nil && llm.IsContextTooLongErr(err) {
-			tokenEstimate := 0
-			for _, m := range messages {
-				tokenEstimate += len(m.Content) / 4
-			}
 			beforeCount := len(messages)
-			messages = llm.TruncateMessages(messages, tokenEstimate/2)
-			req.Messages = messages
+			anchor := -1
+			if sessionContext != nil {
+				anchor = sessionContext.currentIndex(messages)
+			} else {
+				for i, message := range messages {
+					if message.Role == roleUser && message.Content == currentRequest.Content && message.ID == currentRequest.ID {
+						anchor = i
+						break
+					}
+				}
+			}
+			var requiredHistory []int
+			if sessionContext != nil {
+				requiredHistory = sessionContext.requiredHistoryIndices(messages)
+			}
+			window := contextRecoveryWindow(req, err, anchor, requiredHistory...)
+			if sessionContext != nil {
+				req.ContextWindow = min(req.ContextWindow, window)
+				sessionContext.window = req.ContextWindow
+				err = sessionContext.fit(stepCtx, provider, req, true, eventRecorder)
+			} else {
+				beforeTokens := llm.EstimateRequestTokens(req)
+				req.Messages, err = llm.FitRequestMessagesKeeping(req, window, anchor)
+				if err == nil && llm.EstimateRequestTokens(req) >= beforeTokens {
+					err = fmt.Errorf("%w: no optional history can be removed", llm.ErrRequiredContextTooLarge)
+				}
+			}
+			if err != nil {
+				stepSpan.End()
+				return "", fmt.Errorf("context reduction failed while preserving the current request: %w", err)
+			}
+			messages = req.Messages
 			common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeContextTruncated, modelLoopEventTimeout,
 				common.WithEventSeverity(events.ExecutionEventSeverityWarning),
 				common.WithEventSummary("model context truncated after provider context limit error"),
@@ -1278,6 +1363,9 @@ func executeAgentLoopWithEvents(
 			stepSpan.End()
 			return "", fmt.Errorf("completion failed: %w", err)
 		}
+		if sessionContext != nil {
+			clear(sessionContext.unreadHistory)
+		}
 		stepSpan.SetAttributes(attribute.Int("agent.step.tool_call_count", len(resp.ToolCalls)))
 		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeModelRequestCompleted, modelLoopEventTimeout,
 			common.WithEventSummary("model request completed"),
@@ -1303,6 +1391,17 @@ func executeAgentLoopWithEvents(
 		)
 
 		decision, result, completionErr := evaluateCompletionResponse(resp, finalAnswerRetry, blankFinalRetried)
+		assistantMessage := llm.Message{Role: roleAssistant, Content: resp.Content, ToolCalls: resp.ToolCalls}
+		if sessionContext != nil {
+			if decision == completionDecisionReturn && completionErr == nil {
+				assistantMessage.ID = sessioncontext.FinalMessageID(sessionContext.taskUID)
+			}
+			assistantMessage, err = sessionContext.persist(stepCtx, assistantMessage)
+			if err != nil {
+				stepSpan.End()
+				return "", err
+			}
+		}
 		if completionErr != nil {
 			stepSpan.RecordError(completionErr)
 			stepSpan.SetStatus(codes.Error, aiWorkerErrorType(completionErr))
@@ -1319,7 +1418,15 @@ func executeAgentLoopWithEvents(
 			blankFinalRetried = true
 			finalAnswerRetry = true
 			iterationLimit++
-			messages = append(messages, llm.Message{Role: "user", Content: finalAnswerRetryPrompt})
+			retryMessage := llm.Message{Role: "user", Content: finalAnswerRetryPrompt}
+			if sessionContext != nil {
+				retryMessage, err = sessionContext.persist(stepCtx, retryMessage)
+				if err != nil {
+					stepSpan.End()
+					return "", err
+				}
+			}
+			messages = append(messages, retryMessage)
 			stepSpan.End()
 			continue
 		case completionDecisionToolCalls:
@@ -1327,11 +1434,8 @@ func executeAgentLoopWithEvents(
 		}
 
 		// Add assistant message with tool calls
-		messages = append(messages, llm.Message{
-			Role:      "assistant",
-			Content:   resp.Content,
-			ToolCalls: resp.ToolCalls,
-		})
+		messages = append(messages, assistantMessage)
+		approvalMessageStart := len(messages)
 
 		var approvalResult string
 		var done bool
@@ -1347,6 +1451,29 @@ func executeAgentLoopWithEvents(
 			eventRecorder,
 			baseToolCtx,
 		)
+		if sessionContext != nil {
+			if done {
+				// Approval handling parked the batch before normal tool execution.
+				// Save that outcome for every call without treating it as permission.
+				for _, call := range resp.ToolCalls {
+					messages = append(messages, llm.Message{
+						Role: roleTool, ToolCallID: call.ID, Name: call.Name,
+						Content: "Tool batch paused by approval handling. " +
+							"Check approval records before execution. " + approvalResult,
+					})
+				}
+				messages = append(messages, llm.Message{
+					ID: sessioncontext.FinalMessageID(sessionContext.taskUID), Role: roleAssistant, Content: approvalResult,
+				})
+			}
+			for i := approvalMessageStart; i < len(messages); i++ {
+				messages[i], err = sessionContext.persist(stepCtx, messages[i])
+				if err != nil {
+					stepSpan.End()
+					return "", err
+				}
+			}
+		}
 		if approvalErr != nil {
 			stepSpan.RecordError(approvalErr)
 			stepSpan.SetStatus(codes.Error, aiWorkerErrorType(approvalErr))
@@ -1365,6 +1492,10 @@ func executeAgentLoopWithEvents(
 
 		// Execute tool calls
 		for _, tc := range resp.ToolCalls {
+			if err := stepCtx.Err(); err != nil {
+				stepSpan.End()
+				return "", err
+			}
 			fmt.Printf("Executing tool: %s\n", tc.Name)
 
 			var result string
@@ -1400,6 +1531,8 @@ func executeAgentLoopWithEvents(
 				// execErr is handled by the common error path below.
 			} else if alreadyFired {
 				result = fmt.Sprintf("already executed approved action for idempotency key %s; skipping duplicate", approvalKey)
+			} else if sessionContext != nil && toolName == readSessionHistoryTool {
+				result, execErr = sessionContext.readHistory(stepCtx, execArgs)
 			} else if customToolForCall != nil {
 				customTool := customToolForCall
 				execCtx := worker.WithToolCallID(stepCtx, tc.ID)
@@ -1452,12 +1585,20 @@ func executeAgentLoopWithEvents(
 			}
 
 			// Add tool result
-			messages = append(messages, llm.Message{
-				Role:       "tool",
+			toolMessage := llm.Message{
+				Role:       roleTool,
 				Content:    result,
 				ToolCallID: tc.ID,
 				Name:       tc.Name,
-			})
+			}
+			if sessionContext != nil {
+				toolMessage, err = sessionContext.persist(stepCtx, toolMessage)
+				if err != nil {
+					stepSpan.End()
+					return "", err
+				}
+			}
+			messages = append(messages, toolMessage)
 		}
 		stepSpan.End()
 	}

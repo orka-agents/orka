@@ -8,6 +8,7 @@ package llm
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -62,77 +63,166 @@ func groupMessageBlocks(messages []Message) []messageBlock {
 	return blocks
 }
 
-// TruncateMessages keeps the first message and the newest messages that fit
-// within the token budget. Tool-call/tool-result groups are kept or dropped
-// atomically so the LLM never sees orphaned tool results.
+// ErrRequiredContextTooLarge means that normal instructions and the current
+// request cannot fit without losing required content.
+var ErrRequiredContextTooLarge = errors.New("required model context exceeds token budget")
+
+// TruncateMessages preserves instructions and the latest user message, then
+// keeps recent complete exchanges within the token budget. Callers that need a
+// hard limit should use FitMessages. This compatibility wrapper leaves the
+// context intact when it cannot be safely reduced.
 func TruncateMessages(messages []Message, tokenBudget int) []Message {
-	if len(messages) == 0 {
+	fitted, err := FitMessages(messages, tokenBudget)
+	if err != nil {
 		return messages
 	}
+	return fitted
+}
 
-	totalTokens := 0
-	for _, m := range messages {
-		totalTokens += estimateMessageTokens(m)
+// FitMessages keeps all system messages and the latest user message unchanged.
+// Older exchanges are optional, and tool calls and results stay together.
+func FitMessages(messages []Message, tokenBudget int) ([]Message, error) {
+	currentRequestIndex := -1
+	for i, message := range slices.Backward(messages) {
+		if message.Role == "user" {
+			currentRequestIndex = i
+			break
+		}
 	}
+	return FitMessagesKeeping(messages, tokenBudget, currentRequestIndex)
+}
+
+// FitMessagesKeeping pins the user request at currentRequestIndex even when
+// newer user-role messages are control prompts. Use -1 if there is no current
+// request. The returned messages retain their roles, contents, and order, except
+// for an optional assistant reference note describing omitted history.
+// tokenBudget covers message content only. Callers fitting a complete provider
+// request should use FitRequestMessagesKeeping to include framing and reserves.
+func FitMessagesKeeping(messages []Message, tokenBudget, currentRequestIndex int) ([]Message, error) {
+	return fitMessagesKeeping(messages, tokenBudget, currentRequestIndex, false)
+}
+
+func fitMessagesKeeping(messages []Message, tokenBudget, currentRequestIndex int, includeFraming bool, requiredMessageIndexes ...int) ([]Message, error) {
+	if currentRequestIndex < -1 || currentRequestIndex >= len(messages) {
+		return nil, errors.New("current request index is outside model context")
+	}
+	if currentRequestIndex >= 0 && messages[currentRequestIndex].Role != "user" {
+		return nil, errors.New("current request must retain its user role")
+	}
+	for _, index := range requiredMessageIndexes {
+		if index < 0 || index >= len(messages) {
+			return nil, errors.New("required message index is outside model context")
+		}
+	}
+
+	blocks := groupMessageBlocks(messages)
+	if includeFraming {
+		for i := range blocks {
+			for _, message := range blocks[i].messages {
+				blocks[i].tokens += messageFramingTokens(message)
+			}
+		}
+	}
+	if err := validateToolBlocks(blocks); err != nil {
+		return nil, err
+	}
+	kept, totalTokens, requiredTokens := requiredMessageBlocks(blocks, currentRequestIndex, requiredMessageIndexes...)
 	if totalTokens <= tokenBudget {
-		return messages
+		return messages, nil
+	}
+	if requiredTokens > tokenBudget {
+		return nil, fmt.Errorf("%w: system instructions and current request need at least %d tokens; budget is %d",
+			ErrRequiredContextTooLarge, requiredTokens, tokenBudget)
 	}
 
-	// Always keep the first message
-	first := messages[0]
-	firstTokens := estimateMessageTokens(first)
-	remaining := tokenBudget - firstTokens
-	if remaining <= 0 {
-		return []Message{first}
-	}
-
-	// Group remaining messages into atomic blocks
-	blocks := groupMessageBlocks(messages[1:])
-
-	// From the tail, collect blocks that fit
-	var kept []messageBlock
-	for _, block := range slices.Backward(blocks) {
-		if remaining-block.tokens < 0 {
+	remaining := tokenBudget - requiredTokens
+	for i, block := range slices.Backward(blocks) {
+		if kept[i] {
+			continue
+		}
+		if block.tokens > remaining {
 			break
 		}
 		remaining -= block.tokens
-		kept = append([]messageBlock{block}, kept...)
+		kept[i] = true
 	}
-
-	// Count how many blocks we dropped
-	droppedBlocks := len(blocks) - len(kept)
-	if droppedBlocks > 0 {
-		noteContent := extractDroppedSummary(blocks[:droppedBlocks])
-		noteTokens := estimateTokens(noteContent)
-
-		// If the note doesn't fit, drop more kept blocks to make room
-		for noteTokens > remaining && len(kept) > 0 {
-			remaining += kept[0].tokens
-			droppedBlocks++
-			kept = kept[1:]
-			noteContent = extractDroppedSummary(blocks[:droppedBlocks])
-			noteTokens = estimateTokens(noteContent)
-		}
-
-		// If the note still doesn't fit (very tight budget), use a minimal note
-		if noteTokens > remaining {
-			noteContent = "[Earlier messages truncated.]"
-		}
-
-		note := Message{
-			Role:    "system",
-			Content: noteContent,
-		}
-		result := []Message{first, note}
-		for _, b := range kept {
-			result = append(result, b.messages...)
-		}
-		return result
+	if includeFraming {
+		remaining -= messageFramingTokens(Message{Role: contextRoleAssistant})
 	}
+	return messagesWithTruncationNote(blocks, kept, remaining), nil
+}
 
-	result := []Message{first}
-	for _, b := range kept {
-		result = append(result, b.messages...)
+func requiredMessageBlocks(blocks []messageBlock, currentRequestIndex int, requiredMessageIndexes ...int) ([]bool, int, int) {
+	kept := make([]bool, len(blocks))
+	totalTokens, requiredTokens, messageIndex := 0, 0, 0
+	for i, block := range blocks {
+		for _, message := range block.messages {
+			if message.Role == "system" || messageIndex == currentRequestIndex || slices.Contains(requiredMessageIndexes, messageIndex) {
+				kept[i] = true
+			}
+			messageIndex++
+		}
+		totalTokens += block.tokens
+		if kept[i] {
+			requiredTokens += block.tokens
+		}
+	}
+	return kept, totalTokens, requiredTokens
+}
+
+func validateToolBlocks(blocks []messageBlock) error {
+	for i, block := range blocks {
+		first := block.messages[0]
+		if first.Role == "tool" {
+			return fmt.Errorf("invalid model context: tool result without a matching call in block %d", i)
+		}
+		if first.Role != "assistant" || len(first.ToolCalls) == 0 {
+			continue
+		}
+		pending := make(map[string]bool, len(first.ToolCalls))
+		for _, call := range first.ToolCalls {
+			if call.ID == "" || pending[call.ID] {
+				return fmt.Errorf("invalid model context: missing or duplicate tool call ID in block %d", i)
+			}
+			pending[call.ID] = true
+		}
+		for _, result := range block.messages[1:] {
+			if !pending[result.ToolCallID] {
+				return fmt.Errorf("invalid model context: tool result without a matching call in block %d", i)
+			}
+			delete(pending, result.ToolCallID)
+		}
+		if len(pending) > 0 {
+			return fmt.Errorf("invalid model context: incomplete tool exchange in block %d", i)
+		}
+	}
+	return nil
+}
+
+func messagesWithTruncationNote(blocks []messageBlock, kept []bool, remaining int) []Message {
+	var dropped []messageBlock
+	for i, block := range blocks {
+		if !kept[i] {
+			dropped = append(dropped, block)
+		}
+	}
+	note := extractDroppedSummary(dropped)
+	if estimateTokens(note) > remaining {
+		note = "[Earlier messages truncated.]"
+	}
+	if estimateTokens(note) > remaining {
+		note = ""
+	}
+	var result []Message
+	for i, block := range blocks {
+		if kept[i] {
+			result = append(result, block.messages...)
+		} else if note != "" {
+			// A note is reference material. It cannot override instructions or
+			// displace the current request or a complete retained exchange.
+			result = append(result, Message{Role: "assistant", Content: note})
+			note = ""
+		}
 	}
 	return result
 }

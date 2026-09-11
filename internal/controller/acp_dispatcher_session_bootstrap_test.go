@@ -23,6 +23,7 @@ func TestPrepareTaskSessionSkipsBootstrapForLiveRuntimeSessionReuse(t *testing.T
 	continuity, transcriptStore := newBootstrapTrackingSessionContinuity(t, controlStore, "live-reuse-session-uid")
 	control := ensureACPSessionForTest(t, continuity, fence, "live-reuse")
 	appendBootstrapHistoryForTest(t, controlStore, control)
+	saveBootstrapCheckpointForTest(t, controlStore, control, "prior-checkpoint", "prior-assistant", "Keep the public API unchanged.", "prior-user", "prior-assistant")
 
 	profileDigest := harnessv2.ProfileDigest(testControlDigestForDispatcher("live-reuse-profile"))
 	mcpDigest := testControlDigestForDispatcher("live-reuse-mcp")
@@ -52,10 +53,10 @@ func TestPrepareTaskSessionSkipsBootstrapForLiveRuntimeSessionReuse(t *testing.T
 	if session.Bootstrap != nil || bootstrapPromptText(session.Bootstrap) != "" {
 		t.Fatalf("live RuntimeSession reuse attached canonical bootstrap history: %#v", session.Bootstrap)
 	}
-	if transcriptStore.loadTranscriptCalls != 0 || transcriptStore.loadTranscriptThroughCalls != 0 {
+	if transcriptStore.loadTranscriptCalls != 0 || transcriptStore.loadTranscriptThroughCalls != 0 || transcriptStore.loadCheckpointCalls != 0 {
 		t.Fatalf(
-			"live RuntimeSession reuse loaded canonical transcript: LoadTranscript=%d LoadTranscriptThrough=%d",
-			transcriptStore.loadTranscriptCalls, transcriptStore.loadTranscriptThroughCalls,
+			"live RuntimeSession reuse loaded saved context: LoadTranscript=%d LoadTranscriptThrough=%d LoadSessionCheckpoint=%d",
+			transcriptStore.loadTranscriptCalls, transcriptStore.loadTranscriptThroughCalls, transcriptStore.loadCheckpointCalls,
 		)
 	}
 }
@@ -67,6 +68,7 @@ func TestPrepareTaskSessionRetainsBootstrapWhenRuntimeSessionRecreationIsRequire
 	continuity, transcriptStore := newBootstrapTrackingSessionContinuity(t, controlStore, "recreate-session-uid")
 	control := ensureACPSessionForTest(t, continuity, fence, "recreate")
 	appendBootstrapHistoryForTest(t, controlStore, control)
+	saveBootstrapCheckpointForTest(t, controlStore, control, "prior-checkpoint", "prior-assistant", "Keep the public API unchanged.", "prior-user", "prior-assistant")
 
 	profileDigest := harnessv2.ProfileDigest(testControlDigestForDispatcher("recreate-profile"))
 	mcpDigest := testControlDigestForDispatcher("recreate-mcp")
@@ -94,17 +96,22 @@ func TestPrepareTaskSessionRetainsBootstrapWhenRuntimeSessionRecreationIsRequire
 	if session.Binding.Generation != 2 {
 		t.Fatalf("recreated RuntimeSession generation = %d, want 2", session.Binding.Generation)
 	}
-	if session.Bootstrap == nil || session.Bootstrap.MessageCount != 2 {
-		t.Fatalf("recreated RuntimeSession bootstrap = %#v, want retained two-message history", session.Bootstrap)
+	if session.Bootstrap == nil || session.Bootstrap.MessageCount != 3 || session.Bootstrap.Messages[0].Name != acpBootstrapCheckpointName {
+		t.Fatalf("recreated RuntimeSession bootstrap = %#v, want checkpoint and retained two-message history", session.Bootstrap)
 	}
 	bootstrapText := bootstrapPromptText(session.Bootstrap)
-	if !strings.Contains(bootstrapText, "prior request") || !strings.Contains(bootstrapText, "prior response") {
-		t.Fatalf("recreated RuntimeSession bootstrap text = %q, want canonical history", bootstrapText)
+	if !strings.Contains(bootstrapText, "prior request") || !strings.Contains(bootstrapText, "prior response") ||
+		!strings.Contains(bootstrapText, "Keep the public API unchanged.") {
+		t.Fatalf("recreated RuntimeSession bootstrap text = %q, want checkpoint and canonical history", bootstrapText)
 	}
-	if transcriptStore.loadTranscriptCalls != 1 || transcriptStore.loadTranscriptThroughCalls != 0 {
+	content := acpPromptInputContent(bootstrapText, session.UserPrompt)
+	if len(content) != 2 || content[1].Text != task.Spec.Prompt || strings.Contains(content[0].Text, task.Spec.Prompt) {
+		t.Fatalf("replacement runtime input = %#v, want separate exact current request", content)
+	}
+	if transcriptStore.loadTranscriptCalls != 1 || transcriptStore.loadTranscriptThroughCalls != 0 || transcriptStore.loadCheckpointCalls != 1 {
 		t.Fatalf(
-			"recreated RuntimeSession transcript loads: LoadTranscript=%d LoadTranscriptThrough=%d, want 1 and 0",
-			transcriptStore.loadTranscriptCalls, transcriptStore.loadTranscriptThroughCalls,
+			"recreated RuntimeSession context loads: LoadTranscript=%d LoadTranscriptThrough=%d LoadSessionCheckpoint=%d, want 1, 0, 1",
+			transcriptStore.loadTranscriptCalls, transcriptStore.loadTranscriptThroughCalls, transcriptStore.loadCheckpointCalls,
 		)
 	}
 }
@@ -203,8 +210,10 @@ func TestPrepareTaskSessionAdvancesPastDurableSessionGenerationWithoutCachedBind
 
 type bootstrapTrackingSessionStore struct {
 	store.SessionStore
+	store.SessionContextStore
 	loadTranscriptCalls        int
 	loadTranscriptThroughCalls int
+	loadCheckpointCalls        int
 }
 
 func (s *bootstrapTrackingSessionStore) LoadTranscript(
@@ -219,6 +228,16 @@ func (s *bootstrapTrackingSessionStore) LoadTranscriptThrough(
 ) ([]store.SessionMessage, error) {
 	s.loadTranscriptThroughCalls++
 	return s.SessionStore.LoadTranscriptThrough(ctx, namespace, name, throughMessageID, maxMessages)
+}
+
+func (s *bootstrapTrackingSessionStore) LoadSessionCheckpoint(
+	ctx context.Context, namespace, name, throughMessageID string,
+) (*store.SessionCheckpoint, error) {
+	s.loadCheckpointCalls++
+	if s.SessionContextStore == nil {
+		return nil, store.ErrNotFound
+	}
+	return s.SessionContextStore.LoadSessionCheckpoint(ctx, namespace, name, throughMessageID)
 }
 
 type bootstrapSessionTestStore interface {
@@ -249,7 +268,8 @@ func newBootstrapTrackingSessionContinuity(
 	sessionUID string,
 ) (*ACPSessionContinuity, *bootstrapTrackingSessionStore) {
 	t.Helper()
-	transcriptStore := &bootstrapTrackingSessionStore{SessionStore: controlStore}
+	checkpointStore, _ := controlStore.(store.SessionContextStore)
+	transcriptStore := &bootstrapTrackingSessionStore{SessionStore: controlStore, SessionContextStore: checkpointStore}
 	continuity, err := NewACPSessionContinuity(ACPSessionContinuityConfig{
 		SessionControls: controlStore,
 		Transcripts:     transcriptStore,
@@ -268,7 +288,7 @@ func appendBootstrapHistoryForTest(
 ) {
 	t.Helper()
 	if err := sessionStore.AppendMessages(context.Background(), control.Namespace, control.SessionName, []store.SessionMessage{
-		{ID: "prior-user", Role: "user", Content: "prior request", Timestamp: time.Now().UTC()},
+		{ID: "prior-user", Role: "user", Content: "prior request: keep the public API unchanged", Timestamp: time.Now().UTC()},
 		{ID: "prior-assistant", Role: "assistant", Content: "prior response", Timestamp: time.Now().UTC()},
 	}); err != nil {
 		t.Fatal(err)

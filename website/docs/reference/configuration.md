@@ -75,6 +75,12 @@ PR-reconciliation only. The controller freezes each selected Secret version and
 the credential broker releases it only to the Workspace/Publisher for the exact
 operation. None enters the ACP runtime process tree.
 
+Native AI Tasks can opt into [Session checkpoints](../guides/session-checkpoints.md)
+through `spec.env`. Set `ORKA_SESSION_CHECKPOINTS_ENABLED=true` and
+`ORKA_AI_CONTEXT_WINDOW_TOKENS` for the selected model. Each configured fallback
+also needs `ORKA_AI_FALLBACK_<index>_CONTEXT_WINDOW_TOKENS`. Checkpoint creation
+requires an appending Session without a pinned history boundary.
+
 ### Agent
 
 Reusable agent configurations with model settings, tools, skills, and optional agent-to-agent coordination.

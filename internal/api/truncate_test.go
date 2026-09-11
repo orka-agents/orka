@@ -34,20 +34,20 @@ func TestTruncateMessages_EmptyInput(t *testing.T) {
 
 func TestTruncateMessages_DropsMiddleKeepsFirstAndRecent(t *testing.T) {
 	msgs := []llm.Message{
-		{Role: "user", Content: "original request"},            // ~4 tokens
+		{Role: "system", Content: "normal instructions"},       // ~5 tokens
 		{Role: "assistant", Content: strings.Repeat("a", 100)}, // ~25 tokens — will be dropped
 		{Role: "user", Content: strings.Repeat("b", 100)},      // ~25 tokens — will be dropped
 		{Role: "assistant", Content: strings.Repeat("c", 100)}, // ~25 tokens
 		{Role: "user", Content: "latest question"},             // ~4 tokens
 	}
 	// Budget: enough for first + note + last two, but not all messages
-	// Total ~83 tokens. Budget 60 forces truncation but leaves room for note + recent blocks.
-	result := llm.TruncateMessages(msgs, 60)
+	// Budget 45 leaves room for the required messages, a recent answer, and a note.
+	result := llm.TruncateMessages(msgs, 45)
 
-	if result[0].Content != "original request" {
+	if result[0].Content != "normal instructions" {
 		t.Errorf("first message should be preserved, got %q", result[0].Content)
 	}
-	if result[1].Role != oaiRoleSystem {
+	if result[1].Role != testRoleAssistant {
 		t.Errorf("second message should be truncation note, got role %q", result[1].Role)
 	}
 	if !strings.Contains(result[1].Content, "truncated") {
@@ -97,7 +97,7 @@ func TestTruncateMessages_ToolCallsKeptAtomic(t *testing.T) {
 
 	// Verify truncation note content when truncation occurred
 	for _, m := range result {
-		if m.Role == oaiRoleSystem {
+		if m.Role == testRoleAssistant && strings.Contains(m.Content, "truncated") {
 			if !strings.Contains(m.Content, "truncated") {
 				t.Errorf("truncation note should contain 'truncated', got %q", m.Content)
 			}
@@ -108,14 +108,14 @@ func TestTruncateMessages_ToolCallsKeptAtomic(t *testing.T) {
 	}
 }
 
-func TestTruncateMessages_BudgetTooSmallForAnythingButFirst(t *testing.T) {
+func TestTruncateMessages_UnfittableRequestRetainsOriginalContext(t *testing.T) {
 	msgs := []llm.Message{
 		{Role: "user", Content: "hello world this is a long message"},
 		{Role: "assistant", Content: "response"},
 	}
 	result := llm.TruncateMessages(msgs, 1)
-	if len(result) != 1 {
-		t.Fatalf("expected 1 message, got %d", len(result))
+	if len(result) != len(msgs) {
+		t.Fatalf("expected original context when required input cannot fit, got %d messages", len(result))
 	}
 	if result[0].Content != "hello world this is a long message" {
 		t.Error("should keep first message even if over budget")

@@ -11,8 +11,9 @@ import (
 
 // FallbackEntry represents a fallback provider with an optional model override.
 type FallbackEntry struct {
-	Provider Provider
-	Model    string
+	Provider      Provider
+	Model         string
+	ContextWindow int
 }
 
 // FallbackProvider tries a primary provider and falls back to alternatives on failure.
@@ -55,34 +56,48 @@ func (f *FallbackProvider) Complete(ctx context.Context, req *CompletionRequest)
 	type candidate struct {
 		provider Provider
 		model    string
+		window   int
 	}
 	candidates := make([]candidate, 0, 1+len(f.fallbacks))
 
 	// Add primary if not cooling down
 	if f.tracker == nil || !f.tracker.IsCoolingDown(f.primary.Name()) {
-		candidates = append(candidates, candidate{provider: f.primary})
+		candidates = append(candidates, candidate{provider: f.primary, window: req.ContextWindow})
 	}
 
 	// Add fallbacks that aren't cooling down
 	for _, fb := range f.fallbacks {
 		if f.tracker == nil || !f.tracker.IsCoolingDown(fb.Provider.Name()) {
-			candidates = append(candidates, candidate{provider: fb.Provider, model: fb.Model})
+			candidates = append(candidates, candidate{provider: fb.Provider, model: fb.Model, window: fb.ContextWindow})
 		}
 	}
 
 	// If all are cooling down, try the one with shortest remaining cooldown
 	if len(candidates) == 0 {
-		shortest := f.shortestCooldown()
-		candidates = append(candidates, candidate{provider: shortest})
+		shortest := f.shortestCooldown(req.ContextWindow)
+		candidates = append(candidates, candidate{provider: shortest.Provider, model: shortest.Model, window: shortest.ContextWindow})
 	}
 
 	var lastErr error
+	var admissionErr error
+	var admissionWindow int
 	for _, c := range candidates {
-		callReq := req
+		clone := *req
+		callReq := &clone
 		if c.model != "" {
-			clone := *req
-			clone.Model = c.model
-			callReq = &clone
+			callReq.Model = c.model
+		}
+		if req.ContextWindow > 0 {
+			if c.window <= 0 {
+				return nil, fmt.Errorf("context allowance is required for fallback model %q", callReq.Model)
+			}
+			callReq.ContextWindow = min(req.ContextWindow, c.window)
+			if err := CheckContextWindow(callReq); err != nil {
+				if admissionErr == nil || callReq.ContextWindow > admissionWindow {
+					admissionErr, admissionWindow = err, callReq.ContextWindow
+				}
+				continue
+			}
 		}
 
 		resp, err := c.provider.Complete(ctx, callReq)
@@ -113,6 +128,9 @@ func (f *FallbackProvider) Complete(ctx context.Context, req *CompletionRequest)
 		}
 	}
 
+	if admissionErr != nil {
+		return nil, admissionErr
+	}
 	return nil, fmt.Errorf("all providers failed: %w", lastErr)
 }
 
@@ -123,29 +141,43 @@ func (f *FallbackProvider) Stream(ctx context.Context, req *CompletionRequest) (
 	type candidate struct {
 		provider Provider
 		model    string
+		window   int
 	}
 	candidates := make([]candidate, 0, 1+len(f.fallbacks))
 
 	if f.tracker == nil || !f.tracker.IsCoolingDown(f.primary.Name()) {
-		candidates = append(candidates, candidate{provider: f.primary})
+		candidates = append(candidates, candidate{provider: f.primary, window: req.ContextWindow})
 	}
 	for _, fb := range f.fallbacks {
 		if f.tracker == nil || !f.tracker.IsCoolingDown(fb.Provider.Name()) {
-			candidates = append(candidates, candidate{provider: fb.Provider, model: fb.Model})
+			candidates = append(candidates, candidate{provider: fb.Provider, model: fb.Model, window: fb.ContextWindow})
 		}
 	}
 	if len(candidates) == 0 {
-		shortest := f.shortestCooldown()
-		candidates = append(candidates, candidate{provider: shortest})
+		shortest := f.shortestCooldown(req.ContextWindow)
+		candidates = append(candidates, candidate{provider: shortest.Provider, model: shortest.Model, window: shortest.ContextWindow})
 	}
 
 	var lastErr error
+	var admissionErr error
+	var admissionWindow int
 	for _, c := range candidates {
-		callReq := req
+		clone := *req
+		callReq := &clone
 		if c.model != "" {
-			clone := *req
-			clone.Model = c.model
-			callReq = &clone
+			callReq.Model = c.model
+		}
+		if req.ContextWindow > 0 {
+			if c.window <= 0 {
+				return nil, fmt.Errorf("context allowance is required for fallback model %q", callReq.Model)
+			}
+			callReq.ContextWindow = min(req.ContextWindow, c.window)
+			if err := CheckContextWindow(callReq); err != nil {
+				if admissionErr == nil || callReq.ContextWindow > admissionWindow {
+					admissionErr, admissionWindow = err, callReq.ContextWindow
+				}
+				continue
+			}
 		}
 
 		innerCh, err := c.provider.Stream(ctx, callReq)
@@ -200,6 +232,9 @@ func (f *FallbackProvider) Stream(ctx context.Context, req *CompletionRequest) (
 	}
 
 	// All failed
+	if admissionErr != nil {
+		return nil, admissionErr
+	}
 	ch := make(chan StreamChunk, 1)
 	if lastErr != nil {
 		ch <- StreamChunk{Error: fmt.Errorf("all providers failed: %w", lastErr), Done: true}
@@ -218,20 +253,20 @@ func withStreamTelemetry(chunk StreamChunk, providerName, modelName string) Stre
 	return chunk
 }
 
-// shortestCooldown returns the provider with the shortest remaining cooldown.
-func (f *FallbackProvider) shortestCooldown() Provider {
+// shortestCooldown retains the selected provider's model and allowance.
+func (f *FallbackProvider) shortestCooldown(primaryWindow int) FallbackEntry {
+	shortest := FallbackEntry{Provider: f.primary, ContextWindow: primaryWindow}
 	if f.tracker == nil {
-		return f.primary
+		return shortest
 	}
 
-	shortest := f.primary
 	shortestDur := f.tracker.CooldownRemaining(f.primary.Name())
 
 	for _, fb := range f.fallbacks {
 		dur := f.tracker.CooldownRemaining(fb.Provider.Name())
 		if dur < shortestDur {
 			shortestDur = dur
-			shortest = fb.Provider
+			shortest = fb
 		}
 	}
 	return shortest

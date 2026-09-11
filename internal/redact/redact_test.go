@@ -14,9 +14,16 @@ import (
 func TestSensitiveTextPreservesRedactedMarkdown(t *testing.T) {
 	value := strings.Repeat("a", 32)
 	for input, want := range map[string]string{
-		"Environment assignment `API_KEY=\"" + value + "\"`.": "Environment assignment `API_KEY=\"[REDACTED]\"`.",
-		"Environment assignment `API_KEY='" + value + "'`.":   "Environment assignment `API_KEY='[REDACTED]'`.",
-		`{"api_key":"` + value + `","line":12}`:               `{"api_key":"[REDACTED]","line":12}`,
+		"Environment assignment `API_KEY=\"" + value + "\"`.":    "Environment assignment `API_KEY=\"[REDACTED]\"`.",
+		"Environment assignment `API_KEY='" + value + "'`.":      "Environment assignment `API_KEY='[REDACTED]'`.",
+		`{"api_key":"` + value + `","line":12}`:                  `{"api_key":"[REDACTED]","line":12}`,
+		`{"api_key":"a\"opaque-tail","line":12}`:                 `{"api_key":"[REDACTED]","line":12}`,
+		`{"api_key":"a\\\"opaque-tail","line":12}`:               `{"api_key":"[REDACTED]","line":12}`,
+		`API_KEY='a\'opaque-tail' followed by text`:              `API_KEY='[REDACTED]' followed by text`,
+		`API_KEY='opaque-shell-placeholder\'`:                    `API_KEY='[REDACTED]'`,
+		`API_KEY='opaque-shell-placeholder\' followed by text`:   `API_KEY='[REDACTED]' followed by text`,
+		`API_KEY="opaque-literal-placeholder\"`:                  `API_KEY="[REDACTED]"`,
+		`API_KEY="opaque-literal-placeholder\" followed by text`: `API_KEY="[REDACTED]" followed by text`,
 	} {
 		if got := SensitiveText(input); got != want || SensitiveText(got) != got {
 			t.Fatal("redaction changed delimiters outside the credential or was not stable on a second pass")
@@ -88,6 +95,218 @@ func TestSensitiveTextRedactsCookieHeaders(t *testing.T) {
 		got := SensitiveText(input)
 		if strings.Contains(got, "correct-horse-battery-staple") || !strings.Contains(got, redactedValue) {
 			t.Fatalf("SensitiveText(%q) = %q, want the cookie value redacted", input, got)
+		}
+	}
+}
+
+func TestSensitiveTextRedactsAdjacentQuotedAssignments(t *testing.T) {
+	for _, quote := range []string{"'", `"`} {
+		for _, second := range []string{"second-placeholder", "second-prefix\\" + quote + "tail-placeholder"} {
+			input := "API_KEY=" + quote + "first-placeholder\\" + quote + " PASSWORD=" + quote + second + quote
+			got := SensitiveText(input)
+			if strings.Contains(got, "first-placeholder") || strings.Contains(got, "second-placeholder") ||
+				strings.Contains(got, "second-prefix") || strings.Contains(got, "tail-placeholder") {
+				t.Error("adjacent quoted assignment retained credential content")
+			}
+			if SensitiveText(got) != got {
+				t.Error("adjacent assignment redaction was not stable")
+			}
+		}
+	}
+}
+
+func TestSensitiveTextRedactsOverlappingCredentialPatterns(t *testing.T) {
+	for _, input := range []string{
+		`API_KEY='first-placeholder\' token is 'second-placeholder'`,
+		`API_KEY="first-placeholder\" token is "second-placeholder"`,
+		`API_KEY='first-placeholder\' https://'second-placeholder'@example.com`,
+		`API_KEY="first-placeholder\" https://"second-placeholder"@example.com`,
+	} {
+		got := SensitiveText(input)
+		if strings.Contains(got, "first-placeholder") || strings.Contains(got, "second-placeholder") {
+			t.Fatal("quoted assignment hid another credential pattern before redaction")
+		}
+		if SensitiveText(got) != got {
+			t.Fatal("overlapping credential redaction was not stable")
+		}
+	}
+}
+
+func TestSensitiveTextWithValuesMatchesOriginalText(t *testing.T) {
+	const value = "opaque-assignment-placeholder"
+	for _, test := range []struct {
+		name, input, want string
+		values            []string
+	}{
+		{"assignment label", "password=" + value, "[REDACTED]=[REDACTED]", []string{"password"}},
+		{"quoted label", `{"password":"` + value + `"}`, `{"[REDACTED]":"[REDACTED]"}`, []string{"password"}},
+		{"header label", "Authorization: Bearer " + value, "[REDACTED]: [REDACTED]", []string{"Authorization"}},
+		{"header value", "Authorization: Bearer part!tail", "Authorization: [REDACTED]", []string{"part!tail"}},
+		{"header pattern overlap", "Authorization: Bearer password is " + value, "Authorization: [REDACTED] is [REDACTED]", nil},
+		{"signed URL label", "https://example.test?sig=" + value, "https://example.test?[REDACTED]=[REDACTED]", []string{"sig"}},
+		{"userinfo label", "https://" + value + "@example.test", "[REDACTED]://[REDACTED]@example.test", []string{"https"}},
+		{"overlapping values", "prefix-middle-suffix", "[REDACTED]", []string{"prefix-middle", "middle-suffix"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := SensitiveTextWithValues(test.input, test.values...)
+			if got != test.want {
+				t.Fatal("redaction lost an original match or changed text outside the matched ranges")
+			}
+			if SensitiveTextWithValues(got, test.values...) != got {
+				t.Fatal("redaction was not stable on a second pass")
+			}
+		})
+	}
+}
+
+func TestKnownValuesPreservesUnmatchedPatterns(t *testing.T) {
+	const input = "password=untracked-placeholder"
+	if got := KnownValues(input, "other-placeholder"); got != input {
+		t.Fatal("known-value validation must not redact unrelated patterns in saved history pages")
+	}
+	for _, test := range []struct {
+		input  string
+		values []string
+	}{
+		{"prefix-middle-suffix", []string{"prefix-middle", "middle-suffix"}},
+		{"ababab", []string{"abab"}},
+		{`opaque\"quoted-placeholder`, []string{`opaque"quoted-placeholder`}},
+	} {
+		if got := KnownValues(test.input, test.values...); got != redactedValue {
+			t.Fatal("known-value redaction retained overlapping or escaped credential content")
+		}
+	}
+}
+
+func TestSensitiveTextPreservesUnambiguousFollowingQuotedAssignments(t *testing.T) {
+	for input, want := range map[string]string{
+		`API_KEY='fixture\\' note='keep this'`:                     `API_KEY='[REDACTED]' note='keep this'`,
+		`API_KEY='fixture\\' note = 'keep this'`:                   `API_KEY='[REDACTED]' note = 'keep this'`,
+		`API_KEY="fixture\\" note="keep this"`:                     `API_KEY="[REDACTED]" note="keep this"`,
+		`API_KEY='fixture\\' note='keep' PASSWORD='other-fixture'`: `API_KEY='[REDACTED]' note='keep' PASSWORD='[REDACTED]'`,
+		`API_KEY='first\' note='`:                                  `API_KEY='[REDACTED]'`,
+		`API_KEY='first\' note=\'opaque tail'`:                     `API_KEY='[REDACTED]'`,
+		`API_KEY='first\' note="opaque tail" more'`:                `API_KEY='[REDACTED]'`,
+	} {
+		if got := SensitiveText(input); got != want || SensitiveText(got) != got {
+			t.Errorf("SensitiveText(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestSensitiveTextPreservesUnambiguousQuotedFieldsAtCommandBoundaries(t *testing.T) {
+	for _, suffix := range []string{"\n", "\r\n", "; echo done", "&& echo done", "| cat"} {
+		input := `API_KEY='fixture\\' note='keep this'` + suffix
+		want := `API_KEY='[REDACTED]' note='keep this'` + suffix
+		if got := SensitiveText(input); got != want || SensitiveText(got) != got {
+			t.Errorf("SensitiveText() = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestSensitiveTextPreservesUnambiguousFollowingCommandAssignments(t *testing.T) {
+	for _, separator := range []string{";", "; ", " && ", " | "} {
+		input := `API_KEY='fixture\\'` + separator + `note='keep this'`
+		want := `API_KEY='[REDACTED]'` + separator + `note='keep this'`
+		if got := SensitiveText(input); got != want || SensitiveText(got) != got {
+			t.Errorf("SensitiveText(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestSensitiveTextPreservesUnambiguousFollowingQuotedCommands(t *testing.T) {
+	for _, command := range []string{
+		`; printf '%s' 'keep this'`,
+		` printf '%s' 'keep this'`,
+		` && printf '%s' 'keep this'`,
+		`; export NOTE='keep this'`,
+	} {
+		input := `API_KEY='fixture\\'` + command
+		want := `API_KEY='[REDACTED]'` + command
+		if got := SensitiveText(input); got != want || SensitiveText(got) != got {
+			t.Errorf("SensitiveText(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestSensitiveTextPreservesUnambiguousMixedQuotedCommands(t *testing.T) {
+	for _, command := range []string{
+		` SAFE="keep one" NOTE='keep two'`,
+		` NOTE="it's safe"`,
+		` NOTE="$(printf "it's safe")"`,
+		` NOTE="$(printf "%s" "it's safe")"`,
+		` printf "%s's" 'keep this'`,
+		`; SAFE="keep one"; NOTE='keep two'`,
+		` printf "%s" 'keep this'`,
+		` printf "\"%s\"" 'keep this'`,
+		` first="a\"b" second='keep two'`,
+		` >"out" printf '%s' 'keep this'`,
+		` printf --prefix="good" '%s' 'keep this'`,
+	} {
+		input := `API_KEY='fixture\\'` + command
+		want := `API_KEY='[REDACTED]'` + command
+		if got := SensitiveText(input); got != want || SensitiveText(got) != got {
+			t.Errorf("SensitiveText(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestSensitiveTextRedactsMixedQuotedAssignments(t *testing.T) {
+	input := `API_KEY='first-fixture\\' PASSWORD="second-fixture" NOTE='keep this'`
+	want := `API_KEY='[REDACTED]' PASSWORD="[REDACTED]" NOTE='keep this'`
+	if got := SensitiveText(input); got != want || SensitiveText(got) != got {
+		t.Errorf("SensitiveText(%q) = %q, want %q", input, got, want)
+	}
+}
+
+func TestSensitiveTextPreservesUnambiguousConcatenatedQuotedWords(t *testing.T) {
+	for _, command := range []string{
+		`; export NOTE='keep'tail`,
+		`; export NOTE='keep'" more"`,
+		`; printf '%s'\n 'keep this'`,
+		`; printf '%s''more' 'keep this'`,
+		`; export NOTE='keep'\''tail'`,
+		`; export NOTE=prefix'keep'tail`,
+		`; export NOTE="keep"tail OTHER='also'`,
+	} {
+		input := `API_KEY='fixture\\'` + command
+		want := `API_KEY='[REDACTED]'` + command
+		if got := SensitiveText(input); got != want || SensitiveText(got) != got {
+			t.Errorf("SensitiveText(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestSensitiveTextPreservesUnambiguousFollowingANSIQuotedWords(t *testing.T) {
+	for _, command := range []string{
+		`; printf $'it\'s-safe'`,
+		`; export NOTE=$'it\'s-safe'`,
+		`; export NOTE=prefix$'it\'s-safe'tail`,
+		`; printf $'it\'s-safe'" and safe"`,
+		`; printf $'it\'s-safe\\'`,
+	} {
+		input := `API_KEY='fixture\\'` + command
+		want := `API_KEY='[REDACTED]'` + command
+		if got := SensitiveText(input); got != want || SensitiveText(got) != got {
+			t.Errorf("SensitiveText(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestSensitiveTextProtectsAmbiguousEscapedCredentialValues(t *testing.T) {
+	// Each input is valid shell syntax and a Python assignment whose credential
+	// contains the opaque tail. Text alone cannot authorize a shell-only parse.
+	for _, input := range []string{
+		`API_KEY='fixture\' NOTE="opaque-credential-tail' # safe"`,
+		`API_KEY='fixture\' NOTE="$(printf "opaque-credential-tail' # safe")"`,
+		`API_KEY='fixture\' # opaque-credential-tail'`,
+	} {
+		got := SensitiveText(input)
+		if strings.Contains(got, "opaque-credential-tail") || strings.Contains(got, "fixture") {
+			t.Fatal("ambiguous quoted assignment retained credential content")
+		}
+		if SensitiveText(got) != got {
+			t.Fatal("ambiguous assignment redaction was not stable")
 		}
 	}
 }
