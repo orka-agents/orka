@@ -109,9 +109,10 @@ func TestInternalWritesRevalidateAfterStreamedBody(t *testing.T) {
 					return c.Next()
 				})
 				route := "/internal/v1/" + endpoint.name + "s/:namespace/:taskName"
-				if endpoint.name == "artifact" {
+				switch endpoint.name {
+				case "artifact":
 					route += "/:filename"
-				} else if endpoint.name == "event" {
+				case "event":
 					route = "/internal/v1/events/:namespace/:streamType/:streamID"
 				}
 				app.Post(route, endpoint.handler(h))
