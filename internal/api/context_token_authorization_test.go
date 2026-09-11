@@ -271,6 +271,50 @@ func TestAuthorizeContextTokenToolAgentCreateRejectsSpecOutsideTokenConstraints(
 	require.NotContains(t, joined, `agent tool "Bash" is not allowed by token context`)
 }
 
+func TestAuthorizeContextTokenToolAgentMutationsWithRuntimeCoordination(t *testing.T) {
+	cfg := enforceContextTokenAuthorizationConfig()
+	cfg.AgentWriteScopes = []string{ContextTokenScopeAgentsWrite}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "runtime-agent", Namespace: "team-a"},
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{Name: "model"},
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type:                corev1alpha1.AgentRuntimeClaude,
+				ContractVersion:     new(corev1alpha1.AgentRuntimeContractHarnessV2),
+				DefaultAllowedTools: []string{"Read"},
+				DefaultAllowBash:    new(false),
+			},
+			Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true},
+		},
+	}
+
+	for _, tt := range []struct {
+		name      string
+		authorize func(context.Context, client.Reader, *ContextToken, ContextTokenAuthorizationConfig, string, *corev1alpha1.Agent) error
+	}{
+		{name: "create", authorize: authorizeContextTokenToolAgentCreate},
+		{name: "update", authorize: authorizeContextTokenToolAgentUpdate},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			token := &ContextToken{
+				Scopes:             []string{ContextTokenScopeAgentsWrite},
+				TransactionContext: map[string]any{"allowedTools": []any{"Read"}},
+			}
+			err := tt.authorize(context.Background(), nil, token, cfg, tt.name+"Agent", agent)
+			require.NoError(t, err)
+
+			token.TransactionContext["allowedTools"] = []any{}
+			err = tt.authorize(context.Background(), nil, token, cfg, tt.name+"Agent", agent)
+			var forbidden *fiber.Error
+			require.ErrorAs(t, err, &forbidden)
+			require.Equal(t, fiber.StatusForbidden, forbidden.Code)
+			failures, failureErr := contextTokenAgentSpecFailures(context.Background(), nil, token, agent)
+			require.NoError(t, failureErr)
+			require.Equal(t, []string{`agent tool "Read" is not allowed by token context`}, failures)
+		})
+	}
+}
+
 func TestContextTokenAgentSpecFailuresRejectsCrossNamespaceProviderRef(t *testing.T) {
 	token := &ContextToken{
 		TransactionContext: map[string]any{

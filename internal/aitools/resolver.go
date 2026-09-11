@@ -145,7 +145,8 @@ func containsTool(tools []string, name string) bool {
 }
 
 func usesAIWorkerToolRegistry(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
-	if agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.RuntimeRef != nil {
+	// Runtime Agents use their runtime's tool policy even without a Task.
+	if agent != nil && agent.Spec.Runtime != nil {
 		return false
 	}
 	return task == nil || task.Spec.Type == "" || task.Spec.Type == corev1alpha1.TaskTypeAI

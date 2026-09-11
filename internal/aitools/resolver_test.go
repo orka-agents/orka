@@ -180,6 +180,37 @@ func TestRegistersCoordinationTools(t *testing.T) {
 	}
 }
 
+func TestAgentOnlyCoordinationTools(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		task *corev1alpha1.Task
+	}{
+		{name: "no task"},
+		{name: "no task type", task: &corev1alpha1.Task{}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{
+				Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true},
+			}}
+			want := append(append([]string{}, implicitCoordinationToolNames...), "request_approval")
+			if got := Resolve(tt.task, agent); !slices.Equal(got, want) {
+				t.Fatalf("AI Agent tools = %#v, want %#v", got, want)
+			}
+
+			agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeClaude}
+			if got := Resolve(tt.task, agent); len(got) != 0 {
+				t.Fatalf("runtime Agent tools = %#v, want none", got)
+			}
+			if RegistersCoordinationTools(tt.task, agent) {
+				t.Fatal("runtime Agent registered AI worker coordination tools")
+			}
+			if IsImplicitTool(tt.task, agent, "request_approval") {
+				t.Fatal("runtime Agent implicitly exposed request_approval")
+			}
+		})
+	}
+}
+
 func TestIsImplicitTool(t *testing.T) {
 	child := aiToolTask(map[string]string{labels.LabelParentTask: "parent"}, nil, nil)
 	if !IsImplicitTool(child, nil, "send_message") {
