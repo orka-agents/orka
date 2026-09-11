@@ -101,9 +101,8 @@ func TestTaskProvenanceValidatorCoordinationAncestryImmutable(t *testing.T) {
 		}
 	}
 
-	// Delegation establishes the child's parent at creation, before any worker
-	// can use that Task's identity to access its coordination tree.
-	resp := validator.Handle(t.Context(), admissionRequest(t, admissionv1.Create, trustedWorkerUser, child, nil, ""))
+	// The controller may establish a delegated child's ancestry at creation.
+	resp := validator.Handle(t.Context(), admissionRequest(t, admissionv1.Create, trustedControllerUser, child, nil, ""))
 	require.True(t, resp.Allowed)
 
 	for _, user := range []string{genericGarbageCollectorUsername, kubeControllerManagerUsername} {

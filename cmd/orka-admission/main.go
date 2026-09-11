@@ -193,6 +193,7 @@ func main() {
 			opts.taskProvenanceTrustedSAs,
 			"",
 		),
+		mgr.GetAPIReader(),
 	)
 	orkaadmission.RegisterWorkspaceClassUseWebhooks(
 		webhookServer,

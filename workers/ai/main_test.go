@@ -424,7 +424,10 @@ func TestLoadPlanContext(t *testing.T) {
 		t.Setenv("ORKA_TASK_NAME", "test-task")
 		t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
-		result := loadPlanContext()
+		result, err := loadPlanContext(t.Context())
+		if err != nil {
+			t.Fatalf("load plan context: %v", err)
+		}
 		if result == "" {
 			t.Fatal("expected non-empty plan context")
 		}
@@ -446,7 +449,10 @@ func TestLoadPlanContext(t *testing.T) {
 		t.Setenv("ORKA_TASK_NAME", "test-task")
 		t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
-		result := loadPlanContext()
+		result, err := loadPlanContext(t.Context())
+		if err != nil {
+			t.Fatalf("load plan context: %v", err)
+		}
 		if result != "" {
 			t.Errorf("expected empty result for 404, got: %s", result)
 		}
@@ -457,7 +463,10 @@ func TestLoadPlanContext(t *testing.T) {
 		t.Setenv("ORKA_TASK_NAME", "")
 		t.Setenv("ORKA_TASK_NAMESPACE", "")
 
-		result := loadPlanContext()
+		result, err := loadPlanContext(t.Context())
+		if err != nil {
+			t.Fatalf("load plan context: %v", err)
+		}
 		if result != "" {
 			t.Errorf("expected empty result for missing env vars, got: %s", result)
 		}
@@ -1190,7 +1199,10 @@ func TestLoadPlanContext_ServerError(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAME", "test-task")
 	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
-	result := loadPlanContext()
+	result, err := loadPlanContext(t.Context())
+	if err == nil {
+		t.Fatal("expected plan fetch error")
+	}
 	if result != "" {
 		t.Errorf("expected empty result for server error, got: %s", result)
 	}
@@ -1213,7 +1225,10 @@ func TestLoadPlanContext_EmptyPlanDocument(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAME", "test-task")
 	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
-	result := loadPlanContext()
+	result, err := loadPlanContext(t.Context())
+	if err != nil {
+		t.Fatalf("load plan context: %v", err)
+	}
 	if result != "" {
 		t.Errorf("expected empty result for empty PlanDocument, got: %s", result)
 	}
@@ -1230,7 +1245,10 @@ func TestLoadPlanContext_MalformedJSON(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAME", "test-task")
 	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
-	result := loadPlanContext()
+	result, err := loadPlanContext(t.Context())
+	if err == nil {
+		t.Fatal("expected plan fetch error")
+	}
 	if result != "" {
 		t.Errorf("expected empty result for malformed JSON, got: %s", result)
 	}

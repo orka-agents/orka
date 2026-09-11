@@ -244,6 +244,19 @@ rules:
   - ""
   resources:
   - namespaces
+  - pods
+  verbs:
+  - get
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - get
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - tasks
   verbs:
   - get
 ---
@@ -2751,6 +2764,7 @@ spec:
         - --substrate-claim-timeout=2m
         - --substrate-command-timeout=30m
         - --substrate-cleanup-policy=delete
+        - --task-provenance-admission-external=true
         command:
         - /manager
         env:

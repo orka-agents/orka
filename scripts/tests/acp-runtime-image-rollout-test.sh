@@ -156,6 +156,9 @@ jq -e '
     select(. == "--watch-namespace=orka-system")] | length) == 1 and
   ([.[] | select(.kind == "Deployment" and .metadata.name == "orka-controller-manager") |
     .spec.template.spec.containers[] | select(.name == "manager") | .args[] |
+    select(. == "--task-provenance-admission-external=true")] | length) == 1 and
+  ([.[] | select(.kind == "Deployment" and .metadata.name == "orka-controller-manager") |
+    .spec.template.spec.containers[] | select(.name == "manager") | .args[] |
     select(. == "--task-provenance-admission-enabled=true" or
            . == "--workspace-class-use-admission-enabled=true")] | length) == 0 and
   ([.[] | select(.kind == "Deployment" and .metadata.name == "orka-controller-manager") |

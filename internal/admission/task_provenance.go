@@ -19,6 +19,7 @@ import (
 	authenticationv1 "k8s.io/api/authentication/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	ctrladmission "sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
@@ -130,12 +131,12 @@ func NewTaskProvenanceConfig(
 
 // RegisterTaskProvenanceWebhook registers the Task provenance validating webhook
 // when enabled by configuration.
-func RegisterTaskProvenanceWebhook(server webhook.Server, scheme *runtime.Scheme, cfg TaskProvenanceConfig) {
+func RegisterTaskProvenanceWebhook(server webhook.Server, scheme *runtime.Scheme, cfg TaskProvenanceConfig, reader client.Reader) {
 	if !cfg.Enabled {
 		return
 	}
 	server.Register(TaskProvenanceWebhookPath, &ctrladmission.Webhook{
-		Handler: NewTaskProvenanceValidator(scheme, cfg),
+		Handler: NewTaskProvenanceValidator(scheme, cfg, reader),
 	})
 }
 
@@ -144,18 +145,20 @@ func RegisterTaskProvenanceWebhook(server webhook.Server, scheme *runtime.Scheme
 type TaskProvenanceValidator struct {
 	decoder ctrladmission.Decoder
 	config  TaskProvenanceConfig
+	reader  client.Reader
 }
 
 // NewTaskProvenanceValidator creates a Task provenance admission handler.
-func NewTaskProvenanceValidator(scheme *runtime.Scheme, cfg TaskProvenanceConfig) *TaskProvenanceValidator {
+func NewTaskProvenanceValidator(scheme *runtime.Scheme, cfg TaskProvenanceConfig, reader client.Reader) *TaskProvenanceValidator {
 	return &TaskProvenanceValidator{
 		decoder: ctrladmission.NewDecoder(scheme),
 		config:  cfg,
+		reader:  reader,
 	}
 }
 
 // Handle implements admission.Handler.
-func (v *TaskProvenanceValidator) Handle(_ context.Context, req ctrladmission.Request) ctrladmission.Response {
+func (v *TaskProvenanceValidator) Handle(ctx context.Context, req ctrladmission.Request) ctrladmission.Response {
 	if (req.SubResource != "" && req.SubResource != statusSubresource) ||
 		(req.Operation != admissionv1.Create && req.Operation != admissionv1.Update) {
 		return ctrladmission.Allowed("not a Task provenance write")
@@ -185,6 +188,13 @@ func (v *TaskProvenanceValidator) Handle(_ context.Context, req ctrladmission.Re
 		fields := presentTaskProvenanceFields(task, workerTrusted)
 		if len(fields) > 0 {
 			return ctrladmission.Denied("direct Task create cannot set Orka-managed provenance fields: " + strings.Join(fields, ", "))
+		}
+		allowed, err := v.authorizedTaskCoordinationParent(ctx, req, task)
+		if err != nil {
+			return ctrladmission.Errored(http.StatusInternalServerError, fmt.Errorf("verify Task coordination parent: %w", err))
+		}
+		if !allowed {
+			return ctrladmission.Denied("Task coordination parent must be the caller's active Task")
 		}
 	case admissionv1.Update:
 		fields := changedTaskProvenanceFields(oldTask, task, workerTrusted)

@@ -253,6 +253,7 @@ func main() {
 	var metricsCertPath, metricsCertName, metricsCertKey string
 	var webhookCertPath, webhookCertName, webhookCertKey string
 	var taskProvenanceAdmissionEnabled bool
+	var taskProvenanceAdmissionExternal bool
 	var workspaceClassUseAdmissionEnabled bool
 	var taskProvenanceAdmissionTrustedUsers string
 	var taskProvenanceAdmissionTrustedServiceAccounts string
@@ -406,6 +407,9 @@ func main() {
 		envBool("ORKA_TASK_PROVENANCE_ADMISSION_ENABLED"),
 		"Enable validating admission that rejects untrusted direct Task writes to Orka-managed "+
 			"provenance fields.")
+	flag.BoolVar(&taskProvenanceAdmissionExternal, "task-provenance-admission-external",
+		envBool("ORKA_TASK_PROVENANCE_ADMISSION_EXTERNAL"),
+		"Task provenance is protected by a separately deployed fail-closed admission webhook.")
 	flag.StringVar(&taskProvenanceAdmissionTrustedUsers, "task-provenance-admission-trusted-users",
 		os.Getenv("ORKA_TASK_PROVENANCE_ADMISSION_TRUSTED_USERS"),
 		"Comma-separated Kubernetes usernames trusted to set Orka-managed Task provenance fields. "+
@@ -774,6 +778,7 @@ func main() {
 	opts.BindFlags(flag.CommandLine)
 	acpUpgradeDrainOptions.BindFlags(flag.CommandLine)
 	flag.Parse()
+	taskProvenanceProtected := taskProvenanceAdmissionEnabled || taskProvenanceAdmissionExternal
 	if handled, err := controller.RunACPUpgradeDrainTriggerMode(context.Background(), acpUpgradeDrainOptions); handled {
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "ACP planned-upgrade drain trigger failed")
@@ -1156,7 +1161,7 @@ func main() {
 			taskProvenanceAdmissionTrustedServiceAccounts,
 			currentPodNamespace(),
 		)
-		orkaadmission.RegisterTaskProvenanceWebhook(mgr.GetWebhookServer(), mgr.GetScheme(), admissionConfig)
+		orkaadmission.RegisterTaskProvenanceWebhook(mgr.GetWebhookServer(), mgr.GetScheme(), admissionConfig, mgr.GetAPIReader())
 		setupLog.Info("enabled Task provenance validating admission",
 			"trustedUsers", strings.Join(admissionConfig.TrustedUsernames, ","),
 			"trustedServiceAccounts", strings.Join(admissionConfig.TrustedServiceAccountNames, ","),
@@ -1979,7 +1984,7 @@ func main() {
 		Clientset:                 kubeClient,
 		APIReader:                 mgr.GetAPIReader(),
 		ControllerEpochs:          publisherControllerEpochs,
-		TaskProvenanceProtected:   taskProvenanceAdmissionEnabled,
+		TaskProvenanceProtected:   taskProvenanceProtected,
 		E2EPromptFaultEnabled:     strings.TrimSpace(acpE2EPromptWriteAmbiguityMarker) != "",
 		Chat: api.ChatConfig{
 			Enabled:                chatEnabled,
@@ -2020,7 +2025,7 @@ func main() {
 					OperationID: string(request.Metadata.OperationID), ExternalEffects: durableControlStore,
 					Tenant: request.Namespace, WatchNamespace: watchNamespace,
 					EnforceNamespaceIsolation: enforceNamespaceIsolation, Brokered: true,
-					TaskProvenanceProtected:      taskProvenanceAdmissionEnabled,
+					TaskProvenanceProtected:      taskProvenanceProtected,
 					RepositoryValidationBindings: sqliteStore,
 					ResultStore:                  sqliteStore, MessageStore: sqliteStore, SessionDeleter: sessionManager,
 					MemoryReader: sqliteStore, MemoryProposalWriter: sqliteStore, TranscriptSearcher: sqliteStore,
