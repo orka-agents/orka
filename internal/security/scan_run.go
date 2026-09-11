@@ -9,6 +9,7 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -71,7 +72,7 @@ func EnsureRepositoryScanRunFinalizer(ctx context.Context, c client.Client, read
 // RetireStaleScanRuns releases reservations from an earlier object or spec.
 // It also reports a stale status binding even if that run is already terminal.
 // Legacy rows remain unbound; no identity is inferred from the current object.
-func RetireStaleScanRuns(ctx context.Context, s store.SecurityStore, scan *corev1alpha1.RepositoryScan) (bool, error) {
+func RetireStaleScanRuns(ctx context.Context, s store.SecurityStore, c client.Client, reader client.Reader, scan *corev1alpha1.RepositoryScan) (bool, error) {
 	runs, err := s.ListActiveScanRuns(ctx, scan.Namespace, scan.Name)
 	if err != nil {
 		return false, err
@@ -117,6 +118,9 @@ func RetireStaleScanRuns(ctx context.Context, s store.SecurityStore, scan *corev
 		if run.Phase != "pending" && run.Phase != "running" {
 			continue
 		}
+		if err := DeleteScanRunPipelineTasks(ctx, c, reader, scan, run); err != nil {
+			return false, err
+		}
 		now := time.Now().UTC()
 		run.Phase = "failed"
 		run.CompletedAt = &now
@@ -127,6 +131,61 @@ func RetireStaleScanRuns(ctx context.Context, s store.SecurityStore, scan *corev
 		}
 	}
 	return staleStatus, nil
+}
+
+// DeleteScanRunPipelineTasks requests cancellation through Task deletion before
+// releasing a run reservation. Terminal Tasks and other owners are preserved.
+func DeleteScanRunPipelineTasks(ctx context.Context, c client.Client, reader client.Reader, scan *corev1alpha1.RepositoryScan, run *store.ScanRun) error {
+	if reader == nil {
+		reader = c
+	}
+	var tasks corev1alpha1.TaskList
+	if err := reader.List(ctx, &tasks, client.InNamespace(run.Namespace), client.MatchingLabels{
+		labels.LabelSecurityTarget: labels.SelectorValue(run.RepositoryScan),
+		labels.LabelSecurityScanID: run.ID,
+	}); err != nil {
+		return err
+	}
+	ownerUID := types.UID(run.RepositoryScanUID)
+	if ownerUID == "" {
+		ownerUID = scan.UID
+	}
+	for i := range tasks.Items {
+		task := &tasks.Items[i]
+		owner := metav1.GetControllerOf(task)
+		if owner == nil || owner.UID != ownerUID || owner.Name != run.RepositoryScan || owner.Kind != "RepositoryScan" {
+			continue
+		}
+		switch task.Labels[labels.LabelSecurityStage] {
+		case StageThreatModel, StageMapper, StageReview:
+		default:
+			continue
+		}
+		switch task.Status.Phase {
+		case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
+			continue
+		}
+		if !task.DeletionTimestamp.IsZero() {
+			continue
+		}
+		if err := c.Delete(ctx, task, client.Preconditions{UID: &task.UID, ResourceVersion: &task.ResourceVersion}); client.IgnoreNotFound(err) != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// RollbackScanRunAdmission cancels work whose admission lost status ownership.
+// Failed cancellation keeps the reservation active instead of releasing it.
+func RollbackScanRunAdmission(ctx context.Context, s store.SecurityStore, c client.Client, reader client.Reader, scan *corev1alpha1.RepositoryScan, run *store.ScanRun) error {
+	if err := DeleteScanRunPipelineTasks(ctx, c, reader, scan, run); err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	run.Phase = "failed"
+	run.CompletedAt = &now
+	run.ErrorMessage = "scan admission lost repository scan status ownership"
+	return s.UpdateScanRun(ctx, run)
 }
 
 // CurrentRepositoryScanTasks excludes foreign owners and pipeline Tasks whose

@@ -27,7 +27,7 @@ func (r *RepositoryScanReconciler) reconcileScanRunIdentity(ctx context.Context,
 			return false, err
 		}
 	}
-	staleStatus, err := security.RetireStaleScanRuns(ctx, r.SecurityStore, scan)
+	staleStatus, err := security.RetireStaleScanRuns(ctx, r.SecurityStore, r.Client, r.APIReader, scan)
 	if err != nil {
 		return false, err
 	}

@@ -199,10 +199,14 @@ func (r *RepositoryScanReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		logger.Error(err, "failed to ingest security tasks")
 		return ctrl.Result{}, err
 	}
-	// Ingestion can publish a new run binding. Observe that status before
-	// applying any subsequent transition in this reconciliation.
+	// Ingestion can publish a new run binding or completion. Read live status
+	// because those writes may not have reached the informer cache yet.
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
 	current := &corev1alpha1.RepositoryScan{}
-	if err := r.Get(ctx, req.NamespacedName, current); err != nil {
+	if err := reader.Get(ctx, req.NamespacedName, current); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if current.UID != scan.UID || current.Generation != scan.Generation || !current.DeletionTimestamp.IsZero() {
@@ -396,7 +400,7 @@ func (r *RepositoryScanReconciler) createScanRun(ctx context.Context, scan *core
 		return err
 	}
 	if r.SecurityStore != nil {
-		if _, err := security.RetireStaleScanRuns(ctx, r.SecurityStore, scan); err != nil {
+		if _, err := security.RetireStaleScanRuns(ctx, r.SecurityStore, r.Client, r.APIReader, scan); err != nil {
 			return err
 		}
 	}
@@ -496,7 +500,7 @@ func (r *RepositoryScanReconciler) createScanRun(ctx context.Context, scan *core
 		return err
 	}
 
-	return r.updateStatusWithRetry(ctx, scan, func(s *corev1alpha1.RepositoryScan) {
+	err = r.updateStatusWithRetry(ctx, scan, func(s *corev1alpha1.RepositoryScan) {
 		s.Status.Phase = repositoryScanPhaseScanning
 		s.Status.LastScanID = scanID
 		s.Status.LastScanTaskName = taskName
@@ -509,6 +513,12 @@ func (r *RepositoryScanReconciler) createScanRun(ctx context.Context, scan *core
 			ObservedGeneration: s.Generation,
 		})
 	})
+	if errors.Is(err, store.ErrConflict) || apierrors.IsConflict(err) {
+		if rollbackErr := security.RollbackScanRunAdmission(ctx, r.SecurityStore, r.Client, r.APIReader, scan, run); rollbackErr != nil {
+			return errors.Join(err, rollbackErr)
+		}
+	}
+	return err
 }
 
 func (r *RepositoryScanReconciler) hasActiveScanRun(

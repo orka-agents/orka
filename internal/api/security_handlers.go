@@ -358,7 +358,10 @@ func (h *Handlers) createSecurityScanRun(ctx context.Context, ui *UserInfo, scan
 		}
 		return nil, err
 	}
-	if _, err := security.RetireStaleScanRuns(ctx, h.securityStore, scan); err != nil {
+	if _, err := security.RetireStaleScanRuns(ctx, h.securityStore, h.client, h.apiReader, scan); err != nil {
+		if errors.Is(err, store.ErrConflict) || apierrors.IsConflict(err) {
+			return nil, fiber.NewError(fiber.StatusConflict, "repository scan changed before run admission")
+		}
 		return nil, err
 	}
 
@@ -399,6 +402,9 @@ func (h *Handlers) createSecurityScanRun(ctx context.Context, ui *UserInfo, scan
 	}
 	if err := h.updateRepositoryScanRunStatus(ctx, scan, scanID, taskName, staleStatus); err != nil {
 		if apiErr, ok := errors.AsType[*fiber.Error](err); ok && apiErr.Code == fiber.StatusConflict {
+			if rollbackErr := security.RollbackScanRunAdmission(ctx, h.securityStore, h.client, h.apiReader, scan, run); rollbackErr != nil {
+				return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to roll back conflicted scan admission")
+			}
 			return nil, err
 		}
 		return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update repository scan status: %v", err))
