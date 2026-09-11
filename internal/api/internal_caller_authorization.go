@@ -438,7 +438,11 @@ func (a internalCallerAuthorizer) verifyMessageSender(
 	if err != nil {
 		return err
 	}
-	parent, err := a.verifiedCoordinationParent(c.Context(), callerTask, parentTask)
+	return a.verifyTaskMessageScope(c.Context(), callerTask, toTask, parentTask)
+}
+
+func (a internalCallerAuthorizer) verifyTaskMessageScope(ctx context.Context, callerTask *corev1alpha1.Task, toTask, parentTask string) error {
+	parent, err := a.verifiedCoordinationParent(ctx, callerTask, parentTask)
 	if err != nil {
 		return err
 	}
@@ -446,7 +450,7 @@ func (a internalCallerAuthorizer) verifyMessageSender(
 		return nil
 	}
 	target := &corev1alpha1.Task{}
-	if err := a.k8sReader.Get(c.Context(), types.NamespacedName{Namespace: namespace, Name: toTask}, target); err != nil {
+	if err := a.k8sReader.Get(ctx, types.NamespacedName{Namespace: callerTask.Namespace, Name: toTask}, target); err != nil {
 		if apierrors.IsNotFound(err) {
 			return fiber.NewError(fiber.StatusForbidden, "message target is outside caller coordination scope")
 		}

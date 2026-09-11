@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -77,5 +78,54 @@ func TestTaskJobRevocationCleanupFencesAccess(t *testing.T) {
 			require.NoError(t, data.CheckTaskJobAuthority(t.Context(), identity))
 			require.ErrorIs(t, data.CheckTaskJobAuthority(t.Context(), other), store.ErrTaskJobRevoked)
 		})
+	}
+}
+
+func TestTaskFinalizationReclaimsGenerationRows(t *testing.T) {
+	s := newCoexistenceTestStore(t)
+	allow := func(context.Context) error { return nil }
+	require.NoError(t, s.WithAuthorizedTaskDataTransaction(t.Context(), "ns", "active", allow, allow))
+	for index := range 25 {
+		name := "finished-" + strconv.Itoa(index)
+		require.NoError(t, s.WithAuthorizedTaskDataTransaction(t.Context(), "ns", name, allow, allow))
+		require.NoError(t, s.DeleteResult(t.Context(), "ns", name))
+		require.NoError(t, s.DeleteTaskJobRevocations(t.Context(), "ns", name, "uid-"+name))
+	}
+	var count int
+	require.NoError(t, s.db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM task_data_task_generations WHERE namespace = 'ns'`).Scan(&count))
+	require.Equal(t, 1, count, "only the live Task's generation should remain")
+	require.NoError(t, s.db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM task_data_cleanup_generations WHERE namespace = 'ns'`).Scan(&count))
+	require.Equal(t, 1, count, "reclamation uses one persistent generation per namespace")
+}
+
+func TestTaskGenerationReclamationDoesNotReuseAnAuthorization(t *testing.T) {
+	for _, registered := range []bool{false, true} {
+		for _, reused := range []bool{false, true} {
+			t.Run("registered="+strconv.FormatBool(registered)+"/reused="+strconv.FormatBool(reused), func(t *testing.T) {
+				s := newCoexistenceTestStore(t)
+				allow := func(context.Context) error { return nil }
+				if registered {
+					require.NoError(t, s.WithAuthorizedTaskDataTransaction(t.Context(), "ns", "task", allow, allow))
+					require.NoError(t, s.DeletePlan(t.Context(), "ns", "task"))
+				}
+				accessed := false
+				err := s.WithAuthorizedTaskDataTransaction(t.Context(), "ns", "task", func(ctx context.Context) error {
+					if err := s.DeleteTaskJobRevocations(ctx, "ns", "task", "old-task-uid"); err != nil {
+						return err
+					}
+					if reused {
+						// A new incarnation re-registers the same name before the old
+						// request reaches its data transaction.
+						return s.WithAuthorizedTaskDataTransaction(ctx, "ns", "task", allow, allow)
+					}
+					return nil
+				}, func(context.Context) error {
+					accessed = true
+					return nil
+				})
+				require.ErrorIs(t, err, store.ErrTaskDataCleanupChanged)
+				require.False(t, accessed)
+			})
+		}
 	}
 }

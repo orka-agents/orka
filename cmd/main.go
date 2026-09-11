@@ -406,10 +406,11 @@ func main() {
 	flag.BoolVar(&taskProvenanceAdmissionEnabled, "task-provenance-admission-enabled",
 		envBool("ORKA_TASK_PROVENANCE_ADMISSION_ENABLED"),
 		"Enable validating admission that rejects untrusted direct Task writes to Orka-managed "+
-			"provenance fields.")
+			"provenance fields. Requires removal of Tasks whose ancestry predates authenticated admission.")
 	flag.BoolVar(&taskProvenanceAdmissionExternal, "task-provenance-admission-external",
 		envBool("ORKA_TASK_PROVENANCE_ADMISSION_EXTERNAL"),
-		"Task provenance is protected by a separately deployed fail-closed admission webhook.")
+		"Task provenance is protected by a separately deployed fail-closed admission webhook. "+
+			"Requires removal of Tasks whose ancestry predates authenticated admission.")
 	flag.StringVar(&taskProvenanceAdmissionTrustedUsers, "task-provenance-admission-trusted-users",
 		os.Getenv("ORKA_TASK_PROVENANCE_ADMISSION_TRUSTED_USERS"),
 		"Comma-separated Kubernetes usernames trusted to set Orka-managed Task provenance fields. "+
@@ -2027,7 +2028,9 @@ func main() {
 					EnforceNamespaceIsolation: enforceNamespaceIsolation, Brokered: true,
 					TaskProvenanceProtected:      taskProvenanceProtected,
 					RepositoryValidationBindings: sqliteStore,
-					ResultStore:                  sqliteStore, MessageStore: sqliteStore, SessionDeleter: sessionManager,
+					ResultStore:                  sqliteStore, SessionDeleter: sessionManager,
+					MessageStore: api.NewTaskMessageStore(mgr.GetAPIReader(), sqliteStore,
+						crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, taskProvenanceProtected),
 					MemoryReader: sqliteStore, MemoryProposalWriter: sqliteStore,
 					TranscriptSearcher: api.NewTaskTranscriptSearcher(mgr.GetAPIReader(), sqliteStore, sqliteStore,
 						crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, taskProvenanceProtected),

@@ -18,16 +18,28 @@ func (s *Store) RevokeTaskJob(ctx context.Context, identity store.TaskJobIdentit
 	return err
 }
 
-// DeleteTaskJobRevocations is the finalizer-only reclamation step. Advancing
-// the Task and namespace cleanup generations atomically with removal prevents
-// an in-flight authorization from treating a reclaimed revocation as active.
+// DeleteTaskJobRevocations is the finalizer-only reclamation step. A fresh
+// namespace generation replaces the removed Task generation, so in-flight
+// authorization cannot reuse its old generation after reclamation or name reuse.
 func (s *Store) DeleteTaskJobRevocations(ctx context.Context, namespace, taskName, taskUID string) error {
 	if namespace == "" || taskName == "" || taskUID == "" {
 		return store.ValidationErrorf("task identity is incomplete")
 	}
-	return s.deleteTaskData(ctx, namespace, taskName,
-		`DELETE FROM task_job_revocations WHERE namespace = ? AND task_uid = ?`, namespace, taskUID,
-	)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := advanceTaskDataCleanupGeneration(ctx, tx, namespace); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM task_job_revocations WHERE namespace = ? AND task_uid = ?`, namespace, taskUID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM task_data_task_generations WHERE namespace = ? AND task_name = ?`, namespace, taskName); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) CheckTaskJobAuthority(ctx context.Context, identity store.TaskJobIdentity) error {

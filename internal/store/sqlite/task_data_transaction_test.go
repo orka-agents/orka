@@ -124,6 +124,49 @@ func TestTaskDataAuthorizationAllowsUnrelatedWork(t *testing.T) {
 	require.Equal(t, "authorized write", string(result))
 }
 
+func TestTaskGenerationRegistrationRequiresAuthorization(t *testing.T) {
+	s := newCoexistenceTestStore(t)
+	allow := func(context.Context) error { return nil }
+	denied := errors.New("task identity unavailable")
+	err := s.WithAuthorizedTaskDataTransaction(t.Context(), "ns", "missing", func(context.Context) error { return denied }, allow)
+	require.ErrorIs(t, err, denied)
+	var count int
+	require.NoError(t, s.db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM task_data_task_generations`).Scan(&count))
+	require.Zero(t, count, "rejected requests must not create persistent generation rows")
+
+	require.NoError(t, s.WithAuthorizedTaskDataTransaction(t.Context(), "ns", "active", allow, allow))
+	require.NoError(t, s.WithAuthorizedTaskDataTransaction(t.Context(), "ns", "active", func(ctx context.Context) error {
+		return s.DeleteTaskJobRevocations(ctx, "ns", "unrelated", "other-uid")
+	}, allow), "an authorized live Task must not retry because another Task was finalized")
+}
+
+func TestTaskGenerationRegistrationIsRemovedAfterRejectedAccess(t *testing.T) {
+	for _, failure := range []string{"authorization", "cancellation", "data access"} {
+		t.Run(failure, func(t *testing.T) {
+			s := newCoexistenceTestStore(t)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			denied := errors.New("access denied")
+			authorizations := 0
+			err := s.WithAuthorizedTaskDataTransaction(ctx, "ns", "task", func(context.Context) error {
+				authorizations++
+				if authorizations == 1 || failure == "data access" {
+					return nil
+				}
+				if failure == "cancellation" {
+					cancel()
+				}
+				return denied
+			}, func(context.Context) error { return denied })
+			require.ErrorIs(t, err, denied)
+			require.Equal(t, 2, authorizations, "registration must not reuse its initial authorization")
+			var count int
+			require.NoError(t, s.db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM task_data_task_generations`).Scan(&count))
+			require.Zero(t, count)
+		})
+	}
+}
+
 func TestTaskDataTransactionRollsBackRejectedMutation(t *testing.T) {
 	s := newCoexistenceTestStore(t)
 	ctx := context.Background()

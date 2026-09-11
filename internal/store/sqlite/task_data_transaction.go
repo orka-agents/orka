@@ -3,7 +3,9 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"time"
 
 	"github.com/orka-agents/orka/internal/store"
 )
@@ -47,10 +49,27 @@ func (s *Store) WithTaskDataTransaction(ctx context.Context, mutate func(context
 // WithAuthorizedTaskDataTransaction fences authorization using a durable
 // cleanup generation. Kubernetes latency does not reserve a SQLite connection
 // or writer. Only cleanup, rather than unrelated writes, invalidates the proof.
-func (s *Store) WithAuthorizedTaskDataTransaction(ctx context.Context, namespace, taskName string, authorize, access func(context.Context) error) error {
-	generation, err := s.taskDataCleanupGeneration(ctx, namespace, taskName)
+func (s *Store) WithAuthorizedTaskDataTransaction(ctx context.Context, namespace, taskName string, authorize, access func(context.Context) error) (accessErr error) {
+	generation, registered, err := s.prepareTaskDataGeneration(ctx, namespace, taskName, authorize)
 	if err != nil {
 		return err
+	}
+	if registered {
+		defer func() {
+			if accessErr == nil {
+				return
+			}
+			// Failed or cancelled requests must not leave provisional rows behind.
+			// No data changed, so removing this unchanged registration does not
+			// need another cleanup epoch. Preserve any later cleanup generation.
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			_, err := s.db.ExecContext(cleanupCtx,
+				`DELETE FROM task_data_task_generations WHERE namespace = ? AND task_name = ? AND generation = ?`,
+				namespace, taskName, generation,
+			)
+			accessErr = errors.Join(accessErr, err)
+		}()
 	}
 	if err := authorize(ctx); err != nil {
 		return err
@@ -63,16 +82,60 @@ func (s *Store) WithAuthorizedTaskDataTransaction(ctx context.Context, namespace
 		if current != generation {
 			return store.ErrTaskDataCleanupChanged
 		}
+		if taskName != "" {
+			// Register a Task only after successful live authorization. Its row
+			// avoids retries on unrelated cleanup and is reclaimed by the finalizer.
+			if _, err := s.taskDataExecutor(txCtx).ExecContext(txCtx,
+				`INSERT INTO task_data_task_generations(namespace, task_name, generation) VALUES (?, ?, ?)
+				 ON CONFLICT(namespace, task_name) DO NOTHING`, namespace, taskName, current,
+			); err != nil {
+				return err
+			}
+		}
 		return access(txCtx)
 	})
+}
+
+func (s *Store) prepareTaskDataGeneration(ctx context.Context, namespace, taskName string, authorize func(context.Context) error) (int64, bool, error) {
+	if taskName == "" {
+		generation, err := s.taskDataCleanupGeneration(ctx, namespace, taskName)
+		return generation, false, err
+	}
+	var generation int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT generation FROM task_data_task_generations WHERE namespace = ? AND task_name = ?`, namespace, taskName,
+	).Scan(&generation)
+	if !errors.Is(err, sql.ErrNoRows) {
+		return generation, false, err
+	}
+	// Authenticate before allocating a row, then discard this proof. A fresh
+	// authorization after registration gets a stable Task fence even when
+	// unrelated cleanup happens during every Kubernetes lookup.
+	if err := authorize(ctx); err != nil {
+		return 0, false, err
+	}
+	err = s.db.QueryRowContext(ctx,
+		`INSERT INTO task_data_task_generations(namespace, task_name, generation)
+		 VALUES (?, ?, COALESCE((SELECT generation FROM task_data_cleanup_generations WHERE namespace = ?), 0))
+		 ON CONFLICT(namespace, task_name) DO NOTHING RETURNING generation`, namespace, taskName, namespace,
+	).Scan(&generation)
+	if errors.Is(err, sql.ErrNoRows) {
+		generation, err = s.taskDataCleanupGeneration(ctx, namespace, taskName)
+		return generation, false, err
+	}
+	return generation, err == nil, err
 }
 
 func (s *Store) taskDataCleanupGeneration(ctx context.Context, namespace, taskName string) (int64, error) {
 	var generation int64
 	if taskName != "" {
+		// Missing rows inherit the namespace epoch instead of resetting to zero.
+		// Reclaiming and recreating a Task row cannot repeat an old generation.
 		err := s.taskDataExecutor(ctx).QueryRowContext(ctx,
-			`SELECT COALESCE((SELECT generation FROM task_data_task_generations WHERE namespace = ? AND task_name = ?), 0)`,
-			namespace, taskName,
+			`SELECT COALESCE(
+			 (SELECT generation FROM task_data_task_generations WHERE namespace = ? AND task_name = ?),
+			 (SELECT generation FROM task_data_cleanup_generations WHERE namespace = ?), 0)`,
+			namespace, taskName, namespace,
 		).Scan(&generation)
 		return generation, err
 	}
@@ -95,8 +158,9 @@ func advanceTaskDataCleanupGeneration(ctx context.Context, tx *sql.Tx, namespace
 			continue
 		}
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO task_data_task_generations(namespace, task_name, generation) VALUES (?, ?, 1)
-			 ON CONFLICT(namespace, task_name) DO UPDATE SET generation = generation + 1`, namespace, taskName,
+			`INSERT INTO task_data_task_generations(namespace, task_name, generation)
+			 SELECT namespace, ?, generation FROM task_data_cleanup_generations WHERE namespace = ?
+			 ON CONFLICT(namespace, task_name) DO UPDATE SET generation = excluded.generation`, taskName, namespace,
 		); err != nil {
 			return err
 		}

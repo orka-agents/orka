@@ -83,7 +83,11 @@ func (t *SendMessageTool) Execute(ctx context.Context, args json.RawMessage) (st
 		return "", fmt.Errorf("to_task and content are required")
 	}
 
-	if toolCtx := GetToolContext(ctx); toolCtx != nil && toolCtx.MessageStore != nil {
+	toolCtx := GetToolContext(ctx)
+	if toolCtx != nil && toolCtx.Brokered && toolCtx.MessageStore == nil {
+		return "", fmt.Errorf("brokered message store is not configured")
+	}
+	if toolCtx != nil && toolCtx.MessageStore != nil {
 		taskName := strings.TrimSpace(toolCtx.TaskID)
 		namespace := strings.TrimSpace(toolCtx.Namespace)
 		parentTask := strings.TrimSpace(toolCtx.ParentTaskID)

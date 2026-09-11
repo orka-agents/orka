@@ -17,18 +17,28 @@ import (
 
 func TestInternalDataRejectsJobRevokedDuringAuthorization(t *testing.T) {
 	for _, test := range []struct {
-		name      string
-		method    string
-		path      string
-		taskReads int
+		name       string
+		method     string
+		path       string
+		taskReads  int
+		registered bool
 	}{
-		{"plan read", http.MethodGet, "/internal/v1/plans/default/my-task", 2},
-		{"result write", http.MethodPost, "/internal/v1/results/default/my-task", 4},
+		{"first plan read", http.MethodGet, "/internal/v1/plans/default/my-task", 4, false},
+		{"first result write", http.MethodPost, "/internal/v1/results/default/my-task", 6, false},
+		{"registered plan read", http.MethodGet, "/internal/v1/plans/default/my-task", 2, true},
+		{"registered result write", http.MethodPost, "/internal/v1/results/default/my-task", 4, true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			h, _, data := setupTestInternalHandlers()
 			require.NoError(t, data.SavePlan(t.Context(), "default", "my-task", &store.PlanState{Summary: "current plan"}))
 			require.NoError(t, data.SaveResult(t.Context(), "default", "my-task", []byte("current result")))
+			app := newTaskScopedInternalApp(h, internalCallerAuthWorkerUser("my-task-pod", "my-task-pod-uid"))
+			if test.registered {
+				response, err := app.Test(httptest.NewRequest(http.MethodGet, "/internal/v1/plans/default/my-task", nil))
+				require.NoError(t, err)
+				require.Equal(t, http.StatusOK, response.StatusCode)
+				require.NoError(t, response.Body.Close())
+			}
 			reads := 0
 			h.apiReader = interceptor.NewClient(h.k8sClient.(client.WithWatch), interceptor.Funcs{
 				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
@@ -58,7 +68,6 @@ func TestInternalDataRejectsJobRevokedDuringAuthorization(t *testing.T) {
 					return err
 				},
 			})
-			app := newTaskScopedInternalApp(h, internalCallerAuthWorkerUser("my-task-pod", "my-task-pod-uid"))
 			response, err := app.Test(httptest.NewRequest(test.method, test.path, strings.NewReader("stale result")))
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = response.Body.Close() })
@@ -88,9 +97,14 @@ func TestInternalPlanReadAllowsOtherTaskCleanupDuringAuthorization(t *testing.T)
 		},
 	})
 	app := newTaskScopedInternalApp(h, internalCallerAuthWorkerUser("my-task-pod", "my-task-pod-uid"))
-	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/internal/v1/plans/default/my-task", nil))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = response.Body.Close() })
-	require.Equal(t, http.StatusOK, response.StatusCode)
-	require.Equal(t, 2, reads, "another Task's cleanup must not repeat Kubernetes authorization")
+	// The first request authorizes once to register its Task, then again under
+	// that stable fence. Later reads require only the normal authorization.
+	for _, expectedReads := range []int{4, 2} {
+		reads = 0
+		response, err := app.Test(httptest.NewRequest(http.MethodGet, "/internal/v1/plans/default/my-task", nil))
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, response.StatusCode)
+		require.NoError(t, response.Body.Close())
+		require.Equal(t, expectedReads, reads, "another Task's cleanup must not cause extra authorization retries")
+	}
 }
