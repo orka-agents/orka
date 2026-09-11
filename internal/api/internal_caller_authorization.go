@@ -124,11 +124,6 @@ func (a internalCallerAuthorizer) verifyTaskCaller(
 	return task, nil
 }
 
-func (a internalCallerAuthorizer) verifyArtifactUploadCaller(c fiber.Ctx, namespace, taskName string) error {
-	_, err := a.verifyTaskCaller(c, namespace, taskName)
-	return err
-}
-
 func (a internalCallerAuthorizer) verifyExecutionEventStreamWriter(
 	c fiber.Ctx,
 	namespace string,
@@ -178,11 +173,11 @@ func (a internalCallerAuthorizer) verifyTaskWorker(ctx context.Context, userInfo
 	return nil
 }
 
-func (a internalCallerAuthorizer) resolveTaskWorker(
+func (a internalCallerAuthorizer) resolveCallerPod(
 	ctx context.Context,
 	userInfo *UserInfo,
 	namespace string,
-) (*corev1alpha1.Task, error) {
+) (*corev1.Pod, error) {
 	if userInfo == nil {
 		return nil, fiber.NewError(fiber.StatusUnauthorized, "authentication required")
 	}
@@ -214,7 +209,18 @@ func (a internalCallerAuthorizer) resolveTaskWorker(
 	if strings.TrimSpace(pod.Spec.ServiceAccountName) != serviceAccountNameFromUsername(userInfo.Username) {
 		return nil, fiber.NewError(fiber.StatusForbidden, "caller pod ServiceAccount mismatch")
 	}
+	return pod, nil
+}
 
+func (a internalCallerAuthorizer) resolveTaskWorker(
+	ctx context.Context,
+	userInfo *UserInfo,
+	namespace string,
+) (*corev1alpha1.Task, error) {
+	pod, err := a.resolveCallerPod(ctx, userInfo, namespace)
+	if err != nil {
+		return nil, err
+	}
 	for _, owner := range pod.OwnerReferences {
 		if !validControllerOwnerReference(owner, batchv1.SchemeGroupVersion.String(), kubernetesJobKind) {
 			continue

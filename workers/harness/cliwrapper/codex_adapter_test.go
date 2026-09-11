@@ -364,7 +364,7 @@ fi
 	t.Setenv(workerenv.AllowBash, "true")
 	t.Setenv(workerenv.Prompt, "inherited-parent-value")
 	cfg := DefaultConfig()
-	cfg.AllowUnauthenticated = true
+	cfg.AuthValue = strings.Repeat("artifact-fixture-", 3)
 	cfg.Runtime = RuntimeCodex
 	cfg.WorkDir = dir
 	cfg.CommandEnv = []string{
@@ -375,12 +375,13 @@ fi
 	adapter := NewCodexAdapter(CodexAdapterConfig{Path: fakeCodex, WorkDir: dir})
 	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, adapter)
 	defer cleanup()
-	client, err := harness.NewClient(baseURL)
+	client, err := harness.NewClient(baseURL, harness.WithBearerToken(cfg.AuthValue))
 	if err != nil {
 		t.Fatal(err)
 	}
 	request := validWrapperStartTurnRequest()
 	request.Input.Prompt = "REQUIRED_SECURITY_ARTIFACTS: security-threat-model.md\nreview the repository"
+	request = sealDurableWrapperRequest(request)
 	if _, err := client.StartTurn(context.Background(), request); err != nil {
 		t.Fatalf("StartTurn: %v", err)
 	}

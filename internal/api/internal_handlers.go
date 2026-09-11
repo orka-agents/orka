@@ -23,6 +23,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/artifactcap"
+	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/workspace/statusrules"
 )
@@ -88,7 +90,9 @@ func (h *InternalHandlers) SubmitResult(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "namespace and taskName are required")
 	}
 
-	if _, err := h.internalCallerAuthorizer().verifyTaskCaller(c, namespace, taskName); err != nil {
+	authorizer := h.internalCallerAuthorizer()
+	authorizedTask, err := authorizer.verifyTaskCaller(c, namespace, taskName)
+	if err != nil {
 		return err
 	}
 
@@ -96,28 +100,17 @@ func (h *InternalHandlers) SubmitResult(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusNotImplemented, "result storage not enabled")
 	}
 
-	// Read body with size limit
+	// Finish the bounded body read before reserving the store writer. A slow
+	// upload must not hold up Task deletion or preserve an earlier authorization.
 	body := c.Request().BodyStream()
+	var data []byte
 	if body == nil {
-		// Fiber may buffer the body; fall back to c.Body()
-		data := c.Body()
-		if len(data) == 0 {
-			return fiber.NewError(fiber.StatusBadRequest, "empty request body")
+		data = c.Body()
+	} else {
+		data, err = io.ReadAll(io.LimitReader(body, int64(maxResultSize)+1))
+		if err != nil {
+			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to read request body: %v", err))
 		}
-		if len(data) > maxResultSize {
-			return fiber.NewError(fiber.StatusRequestEntityTooLarge, "result exceeds 10MB limit")
-		}
-		ctx := c.Context()
-		if err := h.resultStore.SaveResult(ctx, namespace, taskName, data); err != nil {
-			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to save result: %v", err))
-		}
-		return c.SendStatus(fiber.StatusNoContent)
-	}
-
-	lr := io.LimitReader(body, int64(maxResultSize)+1)
-	data, err := io.ReadAll(lr)
-	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to read request body: %v", err))
 	}
 	if len(data) > maxResultSize {
 		return fiber.NewError(fiber.StatusRequestEntityTooLarge, "result exceeds 10MB limit")
@@ -126,9 +119,13 @@ func (h *InternalHandlers) SubmitResult(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "empty request body")
 	}
 
-	ctx := c.Context()
-	if err := h.resultStore.SaveResult(ctx, namespace, taskName, data); err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to save result: %v", err))
+	if err := withInternalTaskDataTransaction(c, h.resultStore, func(ctx context.Context) error {
+		if err := authorizer.revalidateTaskCaller(c, authorizedTask); err != nil {
+			return err
+		}
+		return h.resultStore.SaveResult(ctx, namespace, taskName, data)
+	}); err != nil {
+		return err
 	}
 
 	return c.SendStatus(fiber.StatusNoContent)
@@ -214,8 +211,13 @@ func (h *InternalHandlers) UploadArtifact(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid filename")
 	}
 
-	if err := h.internalCallerAuthorizer().verifyArtifactUploadCaller(c, namespace, taskName); err != nil {
-		return err
+	var authorizedWorker *corev1alpha1.Task
+	if c.Get(artifactcap.CapabilityHeader) == "" {
+		var err error
+		authorizedWorker, err = h.internalCallerAuthorizer().verifyTaskCaller(c, namespace, taskName)
+		if err != nil {
+			return err
+		}
 	}
 
 	if h.artifactStore == nil {
@@ -235,9 +237,19 @@ func (h *InternalHandlers) UploadArtifact(c fiber.Ctx) error {
 		contentType = "application/octet-stream"
 	}
 
-	ctx := c.Context()
-	if err := h.artifactStore.SaveArtifact(ctx, namespace, taskName, filename, contentType, data); err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to save artifact: %v", err))
+	if err := withInternalTaskDataTransaction(c, h.artifactStore, func(ctx context.Context) error {
+		if authorizedWorker != nil {
+			if err := h.internalCallerAuthorizer().revalidateTaskCaller(c, authorizedWorker); err != nil {
+				return err
+			}
+		} else if err := h.verifyHarnessV1ArtifactUpload(ctx, c, harness.ArtifactUpload{
+			Namespace: namespace, TaskName: taskName, Filename: filename, ContentType: contentType, Data: data,
+		}); err != nil {
+			return err
+		}
+		return h.artifactStore.SaveArtifact(ctx, namespace, taskName, filename, contentType, data)
+	}); err != nil {
+		return err
 	}
 
 	return c.SendStatus(fiber.StatusCreated)
@@ -497,7 +509,9 @@ func (h *InternalHandlers) SubmitPlan(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "namespace and taskName are required")
 	}
 
-	if _, err := h.internalCallerAuthorizer().verifyTaskCaller(c, namespace, taskName); err != nil {
+	authorizer := h.internalCallerAuthorizer()
+	authorizedTask, err := authorizer.verifyTaskCaller(c, namespace, taskName)
+	if err != nil {
 		return err
 	}
 
@@ -524,9 +538,13 @@ func (h *InternalHandlers) SubmitPlan(c fiber.Ctx) error {
 		PlanDocument: plan.PlanDocument,
 	}
 
-	ctx := c.Context()
-	if err := h.planStore.SavePlan(ctx, namespace, taskName, planState); err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to save plan: %v", err))
+	if err := withInternalTaskDataTransaction(c, h.planStore, func(ctx context.Context) error {
+		if err := authorizer.revalidateTaskCaller(c, authorizedTask); err != nil {
+			return err
+		}
+		return h.planStore.SavePlan(ctx, namespace, taskName, planState)
+	}); err != nil {
+		return err
 	}
 
 	return c.SendStatus(fiber.StatusNoContent)
@@ -587,16 +605,6 @@ func (h *InternalHandlers) SendMessage(c fiber.Ctx) error {
 	if req.FromTask == "" || req.ToTask == "" || req.Content == "" || req.ParentTask == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "fromTask, toTask, parentTask, and content are required")
 	}
-	if err := h.internalCallerAuthorizer().verifyMessageSender(
-		c,
-		namespace,
-		req.FromTask,
-		req.ToTask,
-		req.ParentTask,
-	); err != nil {
-		return err
-	}
-
 	msg := &store.Message{
 		Namespace:  namespace,
 		FromTask:   req.FromTask,
@@ -605,9 +613,13 @@ func (h *InternalHandlers) SendMessage(c fiber.Ctx) error {
 		Content:    req.Content,
 	}
 
-	ctx := c.Context()
-	if err := h.messageStore.SendMessage(ctx, msg); err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to send message: %v", err))
+	if err := withInternalTaskDataTransaction(c, h.messageStore, func(ctx context.Context) error {
+		if err := h.internalCallerAuthorizer().verifyMessageSender(c, namespace, req.FromTask, req.ToTask, req.ParentTask); err != nil {
+			return err
+		}
+		return h.messageStore.SendMessage(ctx, msg)
+	}); err != nil {
+		return err
 	}
 
 	return c.SendStatus(fiber.StatusNoContent)

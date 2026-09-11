@@ -17,7 +17,7 @@ import (
 
 // SavePlan upserts an autonomous plan state.
 func (s *Store) SavePlan(ctx context.Context, namespace, taskName string, plan *store.PlanState) error {
-	return upsertSQLitePlan(ctx, s.db, namespace, taskName, plan, time.Now().UTC())
+	return upsertSQLitePlan(ctx, s.taskDataExecutor(ctx), namespace, taskName, plan, time.Now().UTC())
 }
 
 type sqlitePlanExecutor interface {

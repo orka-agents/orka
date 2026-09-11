@@ -1922,18 +1922,19 @@ printf 'done'
 	}
 	t.Setenv(workerenv.AllowBash, "true")
 	cfg := DefaultConfig()
-	cfg.AllowUnauthenticated = true
+	cfg.AuthValue = strings.Repeat("artifact-fixture-", 3)
 	cfg.Runtime = RuntimeCodex
 	adapter := NewCodexAdapter(CodexAdapterConfig{Path: fakeCodex, WorkDir: dir})
 	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, adapter)
 	defer cleanup()
-	client, err := harness.NewClient(baseURL)
+	client, err := harness.NewClient(baseURL, harness.WithBearerToken(cfg.AuthValue))
 	if err != nil {
 		t.Fatal(err)
 	}
 	request := validWrapperStartTurnRequest()
 	request.Input.Prompt = "REQUIRED_SECURITY_ARTIFACTS: security-threat-model.md\nwrite artifact"
 	request.Input.Env = []harness.TurnEnvVar{{Name: "ORKA_SECURITY_STAGE", Value: "threat-model"}}
+	request = sealDurableWrapperRequest(request)
 	if _, err := client.StartTurn(context.Background(), request); err != nil {
 		t.Fatalf("StartTurn: %v", err)
 	}
@@ -1947,7 +1948,7 @@ printf 'done'
 func TestServerCreatesWorkspaceArtifactLinkAndEnforcesRequiredArtifacts(t *testing.T) {
 	configureSuccessfulArtifactUpload(t)
 	cfg := DefaultConfig()
-	cfg.AllowUnauthenticated = true
+	cfg.AuthValue = strings.Repeat("artifact-fixture-", 3)
 	cfg.Generic = GenericAdapterConfig{
 		Command: wrapperTestShellPath,
 		Args: []string{"-c", strings.Join([]string{
@@ -1960,12 +1961,13 @@ func TestServerCreatesWorkspaceArtifactLinkAndEnforcesRequiredArtifacts(t *testi
 	}
 	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, NewGenericAdapter(cfg.Generic))
 	defer cleanup()
-	client, err := harness.NewClient(baseURL)
+	client, err := harness.NewClient(baseURL, harness.WithBearerToken(cfg.AuthValue))
 	if err != nil {
 		t.Fatal(err)
 	}
 	request := validWrapperStartTurnRequest()
 	request.Input.Prompt = "REQUIRED_SECURITY_ARTIFACTS: security-threat-model.md\nwrite artifact"
+	request = sealDurableWrapperRequest(request)
 	if _, err := client.StartTurn(context.Background(), request); err != nil {
 		t.Fatalf("StartTurn: %v", err)
 	}

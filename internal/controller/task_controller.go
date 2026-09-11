@@ -587,15 +587,14 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 		// Clean up result data from store
 		if r.ResultStore != nil {
 			if err := r.ResultStore.DeleteResult(ctx, task.Namespace, task.Name); err != nil {
-				log.Error(err, "failed to delete result from store", "task", task.Name)
-				// Continue with finalizer removal anyway
+				return ctrl.Result{}, fmt.Errorf("delete result for task %s/%s: %w", task.Namespace, task.Name, err)
 			}
 		}
 
 		// Clean up artifacts
 		if r.ArtifactStore != nil {
 			if err := r.ArtifactStore.DeleteArtifacts(ctx, task.Namespace, task.Name); err != nil {
-				log.Error(err, "failed to delete artifacts", "task", task.Name)
+				return ctrl.Result{}, fmt.Errorf("delete artifacts for task %s/%s: %w", task.Namespace, task.Name, err)
 			}
 		}
 
@@ -609,11 +608,11 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 		// Clean up inter-agent messages
 		if r.MessageStore != nil {
 			if err := r.MessageStore.DeleteTaskMessages(ctx, task.Namespace, task.Name); err != nil {
-				log.Error(err, "failed to delete task messages", "task", task.Name)
+				return ctrl.Result{}, fmt.Errorf("delete messages for task %s/%s: %w", task.Namespace, task.Name, err)
 			}
 			// If this is a coordinator, clean up all children's messages
 			if err := r.MessageStore.DeleteParentMessages(ctx, task.Namespace, task.Name); err != nil {
-				log.Error(err, "failed to delete parent messages", "task", task.Name)
+				return ctrl.Result{}, fmt.Errorf("delete child messages for task %s/%s: %w", task.Namespace, task.Name, err)
 			}
 		}
 

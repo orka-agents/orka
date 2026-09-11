@@ -18,7 +18,7 @@ const initialMessageBatchCapacity = 32
 
 // SendMessage stores a new inter-agent message.
 func (s *Store) SendMessage(ctx context.Context, msg *store.Message) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`INSERT INTO messages (namespace, from_task, to_task, parent_task, content, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
 		msg.Namespace, msg.FromTask, msg.ToTask, msg.ParentTask, msg.Content, time.Now().UTC(),

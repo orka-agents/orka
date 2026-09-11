@@ -164,6 +164,13 @@ func artifactFilename(filename string) (string, error) {
 // It is called after SubmitResult to persist any files the agent wrote.
 // Returns nil if the artifacts directory does not exist or is empty.
 func UploadArtifacts() error {
+	return UploadArtifactsWithRequestAuthorization(nil)
+}
+
+// UploadArtifactsWithRequestAuthorization applies wrapper-only authorization
+// to each request after the artifact bytes are fixed, including on retries.
+// The callback runs in the uploader and is never passed to an agent process.
+func UploadArtifactsWithRequestAuthorization(authorize func(*http.Request, []byte) error) error {
 	artifactRoot := artifactsDir()
 	info, err := os.Lstat(artifactRoot)
 	if os.IsNotExist(err) {
@@ -293,7 +300,8 @@ func UploadArtifacts() error {
 
 	for _, artifact := range pending {
 		endpoint := fmt.Sprintf("%s/%s", baseEndpoint, url.PathEscape(artifact.filename))
-		if err := doPostWithContentType(endpoint, artifact.data, saToken, artifact.contentType); err != nil {
+		err := postArtifactWithAuthorization(endpoint, artifact.data, saToken, artifact.contentType, authorize)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "artifact: failed to upload %s: %v\n", artifact.filename, err)
 			uploadErrors = append(uploadErrors, fmt.Sprintf("%s: %v", artifact.filename, err))
 		} else {
@@ -369,6 +377,15 @@ func detectContentType(filename string, data []byte) string {
 }
 
 func doPostWithContentType(endpoint string, data []byte, saToken, contentType string) error {
+	return postArtifactWithAuthorization(endpoint, data, saToken, contentType, nil)
+}
+
+func postArtifactWithAuthorization(
+	endpoint string,
+	data []byte,
+	saToken, contentType string,
+	authorize func(*http.Request, []byte) error,
+) error {
 	var lastErr error
 	for attempt := range artifactMaxRetries {
 		if attempt > 0 {
@@ -384,8 +401,16 @@ func doPostWithContentType(endpoint string, data []byte, saToken, contentType st
 		if saToken != "" {
 			req.Header.Set("Authorization", "Bearer "+saToken)
 		}
+		if authorize != nil {
+			if err := authorize(req, data); err != nil {
+				return fmt.Errorf("artifact request authorization failed: %w", err)
+			}
+		}
 
 		client := &http.Client{Timeout: 30 * time.Second}
+		if authorize != nil {
+			client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		}
 		resp, err := client.Do(req)
 		if err != nil {
 			lastErr = fmt.Errorf("HTTP request failed: %w", err)
