@@ -485,11 +485,7 @@ func (r *RepositoryMonitorReconciler) cleanupRepositoryMonitorValidationTask(ctx
 			if err := validateRepositoryMonitorValidationCleanupIdentity(monitor, reviewTask, current); err != nil {
 				return err
 			}
-			now := metav1.Now()
-			current.Status.Phase = corev1alpha1.TaskPhaseCancelled
-			current.Status.CompletionTime = &now
-			current.Status.Message = "parent review ended before repository validation completed"
-			return r.Status().Update(ctx, current)
+			return r.cancelRepositoryMonitorTask(ctx, current, "parent review ended before repository validation completed")
 		}); err != nil {
 			return false, err
 		}

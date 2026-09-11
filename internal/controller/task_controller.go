@@ -248,7 +248,7 @@ func (r *TaskReconciler) updateStatusWithRetry(ctx context.Context, task *corev1
 		previousJobName := task.Status.JobName
 		mutate(task)
 		if taskJobAuthorityChanged(previousJob, previousJobName, task) {
-			if err := r.revokeTaskJobAuthority(ctx, previousJob); err != nil {
+			if err := revokeTaskJobAuthority(ctx, r.ResultStore, previousJob); err != nil {
 				return err
 			}
 		}
@@ -4549,7 +4549,7 @@ func (r *TaskReconciler) handleAutonomousIteration(ctx context.Context, task *co
 	}
 
 	// Delete old Job
-	if err := r.revokeTaskJobAuthority(ctx, store.TaskJobIdentity{
+	if err := revokeTaskJobAuthority(ctx, r.ResultStore, store.TaskJobIdentity{
 		Namespace: task.Namespace, TaskUID: string(task.UID), JobUID: task.Status.JobUID,
 	}); err != nil {
 		return ctrl.Result{}, err

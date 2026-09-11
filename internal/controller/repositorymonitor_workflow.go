@@ -309,11 +309,7 @@ func (r *RepositoryMonitorReconciler) cancelRepositoryMonitorTargetTasks(ctx con
 			if repositoryMonitorReviewTaskTerminal(current.Status.Phase) {
 				return nil
 			}
-			now := metav1.Now()
-			current.Status.Phase = corev1alpha1.TaskPhaseCancelled
-			current.Status.CompletionTime = &now
-			current.Status.Message = reason
-			if err := r.Status().Update(ctx, &current); apierrors.IsNotFound(err) {
+			if err := r.cancelRepositoryMonitorTask(ctx, &current, reason); apierrors.IsNotFound(err) {
 				return nil
 			} else {
 				return err
@@ -323,6 +319,19 @@ func (r *RepositoryMonitorReconciler) cancelRepositoryMonitorTargetTasks(ctx con
 		}
 	}
 	return nil
+}
+
+func (r *RepositoryMonitorReconciler) cancelRepositoryMonitorTask(ctx context.Context, task *corev1alpha1.Task, reason string) error {
+	if err := revokeTaskJobAuthority(ctx, r.ResultStore, store.TaskJobIdentity{
+		Namespace: task.Namespace, TaskUID: string(task.UID), JobUID: task.Status.JobUID,
+	}); err != nil {
+		return err
+	}
+	now := metav1.Now()
+	task.Status.Phase = corev1alpha1.TaskPhaseCancelled
+	task.Status.CompletionTime = &now
+	task.Status.Message = reason
+	return r.Status().Update(ctx, task)
 }
 
 func repositoryMonitorImplementationJobID(taskName string) string {

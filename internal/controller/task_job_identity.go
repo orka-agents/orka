@@ -40,11 +40,11 @@ func taskJobAuthorityChanged(previous store.TaskJobIdentity, jobName string, tas
 	}
 }
 
-func (r *TaskReconciler) revokeTaskJobAuthority(ctx context.Context, identity store.TaskJobIdentity) error {
+func revokeTaskJobAuthority(ctx context.Context, resultStore store.ResultStore, identity store.TaskJobIdentity) error {
 	if identity.JobUID == "" {
 		return nil
 	}
-	authority, ok := r.ResultStore.(store.TaskJobAuthorityStore)
+	authority, ok := resultStore.(store.TaskJobAuthorityStore)
 	if !ok {
 		return errors.New("task Job authority store unavailable")
 	}
