@@ -207,7 +207,7 @@ func Resolve(task *corev1alpha1.Task, agent *corev1alpha1.Agent) []string {
 			appendTool(tool.Name)
 		}
 	}
-	if task != nil && task.Spec.AI != nil {
+	if task != nil && task.Spec.AI != nil && usesAIWorkerToolRegistry(task, agent) {
 		appendTools(task.Spec.AI.Tools)
 	}
 

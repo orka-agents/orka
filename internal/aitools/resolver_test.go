@@ -53,23 +53,23 @@ func TestResolve(t *testing.T) {
 			want: []string{"send_message", "check_messages", "recall_memory", "remember", "propose_memory", "search_transcript"},
 		},
 		{
-			name: "agent child adds messaging without AI worker implicit tools",
+			name: "agent child ignores AI fields and keeps messaging",
 			task: &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{labels.LabelParentTask: "parent"}},
-				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, AI: &corev1alpha1.AISpec{Tools: []string{"brokered"}}},
+				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, AI: &corev1alpha1.AISpec{Tools: []string{"ai_only_tool"}}},
 			},
 			agent: &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{
 				Tools:        []corev1alpha1.ToolReference{{Name: "agent_tool"}},
 				Runtime:      &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
 				Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true},
 			}},
-			want: []string{"agent_tool", "brokered", "send_message", "check_messages"},
+			want: []string{"agent_tool", "send_message", "check_messages"},
 		},
 		{
-			name: "runtimeRef child retains only configured tools",
+			name: "runtimeRef child ignores AI fields and implicit tools",
 			task: &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{labels.LabelParentTask: "parent"}},
-				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, AI: &corev1alpha1.AISpec{Tools: []string{"brokered"}}},
+				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, AI: &corev1alpha1.AISpec{Tools: []string{"ai_only_tool"}}},
 			},
 			agent: &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{
 				Tools: []corev1alpha1.ToolReference{{Name: "agent_tool"}},
@@ -78,7 +78,7 @@ func TestResolve(t *testing.T) {
 				},
 				Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true},
 			}},
-			want: []string{"agent_tool", "brokered"},
+			want: []string{"agent_tool"},
 		},
 		{
 			name: "agent child respects disabled injection",
@@ -87,9 +87,9 @@ func TestResolve(t *testing.T) {
 					Labels:      map[string]string{labels.LabelParentTask: "parent"},
 					Annotations: map[string]string{labels.AnnotationDisableCoordinationToolInject: "true"},
 				},
-				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, AI: &corev1alpha1.AISpec{Tools: []string{"brokered"}}},
+				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, AI: &corev1alpha1.AISpec{Tools: []string{"ai_only_tool"}}},
 			},
-			want: []string{"brokered"},
+			want: nil,
 		},
 		{
 			name: "container task has no AI tools",

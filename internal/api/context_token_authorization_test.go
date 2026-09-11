@@ -444,6 +444,7 @@ func TestContextTokenTaskCreateAuthorizationUsesExternalRuntimeProfile(t *testin
 		Type:         corev1alpha1.TaskTypeAgent,
 		AgentRef:     &corev1alpha1.AgentReference{Name: agent.Name},
 		AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"Bash", "read_tool", "write_tool"}},
+		AI:           &corev1alpha1.AISpec{Tools: []string{"ai_only_tool"}},
 	}, "team-a")
 	require.NoError(t, err)
 	require.Equal(t, ProviderResolutionInfo{Type: "operator-managed"}, authzCtx.EffectiveProvider)
@@ -1801,10 +1802,10 @@ func TestContextTokenTaskCreateEffectiveAIToolsExcludesAIWorkerToolsFromAgentTas
 	req := CreateTaskRequest{
 		Type:     corev1alpha1.TaskTypeAgent,
 		Metadata: MetadataRequest{Labels: map[string]string{labels.LabelParentTask: "parent-task"}},
-		AI:       &corev1alpha1.AISpec{Tools: []string{"brokered_tool"}},
+		AI:       &corev1alpha1.AISpec{Tools: []string{"ai_only_tool"}},
 	}
 
-	require.Equal(t, []string{"agent_tool", "brokered_tool", "send_message", "check_messages"}, contextTokenTaskCreateEffectiveAITools(req, agent))
+	require.Equal(t, []string{"agent_tool", "send_message", "check_messages"}, contextTokenTaskCreateEffectiveAITools(req, agent))
 }
 
 func TestContextTokenTaskCreateEffectiveAIToolsMatchesSharedResolver(t *testing.T) {

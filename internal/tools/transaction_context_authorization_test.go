@@ -848,7 +848,7 @@ func readyChildTransactionOutboundPolicy(name string, spec corev1alpha1.Outbound
 	}
 }
 
-func TestValidateChildTaskAgainstParentTransactionDoesNotRequireAIWorkerCoordinationForAgentChild(t *testing.T) {
+func TestValidateChildTaskAgainstParentTransactionDoesNotRequireAIWorkerToolsForAgentChild(t *testing.T) {
 	agent := researcherAgent()
 	agent.Spec.Coordination = &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true}
 	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
@@ -858,6 +858,7 @@ func TestValidateChildTaskAgainstParentTransactionDoesNotRequireAIWorkerCoordina
 	}
 	child := childTaskForResearcherAgent()
 	child.Spec.Type = corev1alpha1.TaskTypeAgent
+	child.Spec.AI = &corev1alpha1.AISpec{Tools: []string{"ai_only_tool"}}
 	child.Labels = map[string]string{labels.LabelParentTask: "parent-task"}
 	parent := parentTask()
 	parent.Spec.Transaction.Context = map[string]string{
