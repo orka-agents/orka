@@ -142,9 +142,10 @@ func (f *harnessArtifactFixture) advanceAttempt(t *testing.T, state store.Harnes
 
 func TestHarnessArtifactUploadRequiresCurrentTurnCapability(t *testing.T) {
 	cases := []struct {
-		name    string
-		change  func(*testing.T, *harnessArtifactFixture)
-		allowed bool
+		name                string
+		change              func(*testing.T, *harnessArtifactFixture)
+		duringAuthorization func(*testing.T, *harnessArtifactFixture)
+		allowed             bool
 	}{
 		{name: "active Deployment Pod with capability", allowed: true},
 		{name: "escaped filename", allowed: true, change: func(t *testing.T, f *harnessArtifactFixture) {
@@ -190,6 +191,26 @@ func TestHarnessArtifactUploadRequiresCurrentTurnCapability(t *testing.T) {
 			current.Status.Phase = corev1alpha1.TaskPhaseSucceeded
 			require.NoError(t, f.kube.Update(context.Background(), current))
 		}},
+		{name: "Task cancelled during Kubernetes authorization", duringAuthorization: func(t *testing.T, f *harnessArtifactFixture) {
+			current := &corev1alpha1.Task{}
+			require.NoError(t, f.kube.Get(t.Context(), client.ObjectKeyFromObject(f.task), current))
+			current.Status.Phase = corev1alpha1.TaskPhaseCancelled
+			require.NoError(t, f.kube.Update(t.Context(), current))
+		}},
+		{name: "Task deleting during Kubernetes authorization", duringAuthorization: func(t *testing.T, f *harnessArtifactFixture) {
+			current := &corev1alpha1.Task{}
+			require.NoError(t, f.kube.Get(t.Context(), client.ObjectKeyFromObject(f.task), current))
+			current.Finalizers = []string{"test/retain"}
+			require.NoError(t, f.kube.Update(t.Context(), current))
+			require.NoError(t, f.kube.Delete(t.Context(), current))
+		}},
+		{name: "Task replaced during Kubernetes authorization", duringAuthorization: func(t *testing.T, f *harnessArtifactFixture) {
+			require.NoError(t, f.kube.Delete(t.Context(), f.task))
+			replacement := f.task.DeepCopy()
+			replacement.UID, replacement.ResourceVersion = "replacement-task-uid", ""
+			replacement.Status.AgentExecutionBinding.Task.UID = replacement.UID
+			require.NoError(t, f.kube.Create(t.Context(), replacement))
+		}},
 		{name: "terminal attempt before Task projection", change: func(t *testing.T, f *harnessArtifactFixture) {
 			f.advanceAttempt(t, store.HarnessV1AttemptAccepted)
 			f.advanceAttempt(t, store.HarnessV1AttemptSucceeded)
@@ -230,6 +251,16 @@ func TestHarnessArtifactUploadRequiresCurrentTurnCapability(t *testing.T) {
 			f := newHarnessArtifactFixture(t)
 			if tc.change != nil {
 				tc.change(t, f)
+			}
+			if tc.duringAuthorization != nil {
+				f.handlers.apiReader = interceptor.NewClient(f.kube.(client.WithWatch), interceptor.Funcs{
+					Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+						if _, ok := object.(*corev1.Secret); ok {
+							tc.duringAuthorization(t, f)
+						}
+						return c.Get(ctx, key, object, opts...)
+					},
+				})
 			}
 			request := httptest.NewRequest(http.MethodPost, "/internal/v1/artifacts/tenant/task-a/"+f.upload.Filename, bytes.NewReader(f.upload.Data))
 			request.Header.Set("Content-Type", f.upload.ContentType)

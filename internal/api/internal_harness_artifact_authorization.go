@@ -49,6 +49,18 @@ func (h *InternalHandlers) prepareHarnessV1ArtifactUpload(ctx context.Context, c
 	if string(secret.UID) != latest.AuthSecretUID || secret.ResourceVersion != latest.AuthSecretResourceVersion || !secret.DeletionTimestamp.IsZero() {
 		return nil, denied
 	}
+	// Cancellation and deletion can start while workload and Secret checks run.
+	// Recheck the live Task before reserving the writer; durable attempt state
+	// and the cleanup generation still fence the database access itself.
+	currentTask := &corev1alpha1.Task{}
+	if err := authorizer.k8sReader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, currentTask); err != nil {
+		return nil, denied
+	}
+	if currentTask.UID != task.UID || !activeInternalWorkerTask(currentTask) || currentTask.Status.JobName != "" ||
+		currentTask.Status.AgentExecutionBinding == nil || !activeHarnessV1ArtifactAttempt(currentTask, latest) {
+		return nil, denied
+	}
+	task = currentTask
 	upload.TaskUID, upload.TurnID, upload.BindingDigest = string(task.UID), latest.TurnID, latest.BindingDigest
 	capability := artifactcap.Authorization{
 		Capability: c.Get(artifactcap.CapabilityHeader), RequestDigest: c.Get(artifactcap.RequestDigestHeader),
