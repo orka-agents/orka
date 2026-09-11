@@ -880,8 +880,14 @@ func TestGetSessionTranscript(t *testing.T) {
 
 type countingTranscriptSearchStore struct {
 	store.SessionStore
-	calls   int
-	filters []store.TranscriptSearchFilter
+	calls       int
+	policyReads int
+	filters     []store.TranscriptSearchFilter
+}
+
+func (s *countingTranscriptSearchStore) GetSessionType(ctx context.Context, namespace, name string) (string, error) {
+	s.policyReads++
+	return transcriptSessionType(ctx, s.SessionStore, namespace, name)
 }
 
 func (s *countingTranscriptSearchStore) SearchTranscript(
@@ -923,6 +929,8 @@ func TestSearchAuthorizedTranscriptResultsUsesSingleBoundedQuery(t *testing.T) {
 
 func TestSearchTranscript(t *testing.T) {
 	h, app, ss := setupTestInternalHandlers()
+	capture := &countingTranscriptSearchStore{SessionStore: ss}
+	h.sessionStore = capture
 	app.Get("/internal/v1/sessions/:namespace/search", h.SearchTranscript)
 
 	now := time.Now().UTC()
@@ -965,6 +973,8 @@ func TestSearchTranscript(t *testing.T) {
 		require.Equal(t, "prior", results[0].SessionName)
 		require.Equal(t, "assistant", results[0].Role)
 		require.Contains(t, results[0].Snippet, "needle")
+		require.Equal(t, 1, capture.calls)
+		require.Zero(t, capture.policyReads)
 	})
 
 	t.Run("gateway session is not searchable without a cutoff", func(t *testing.T) {

@@ -99,6 +99,8 @@ type SessionStore interface {
 	AppendMessages(ctx context.Context, namespace, name string, messages []SessionMessage) error
 	LoadTranscript(ctx context.Context, namespace, name string, maxMessages int) ([]SessionMessage, error)
 	LoadTranscriptThrough(ctx context.Context, namespace, name, throughMessageID string, maxMessages int) ([]SessionMessage, error)
+	// SearchTranscript excludes gateway sessions and applies the result limit
+	// after filtering by the authorized session names.
 	SearchTranscript(ctx context.Context, filter TranscriptSearchFilter) ([]TranscriptSearchResult, error)
 
 	// Token tracking

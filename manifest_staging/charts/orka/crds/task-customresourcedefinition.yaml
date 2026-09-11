@@ -1721,7 +1721,9 @@ spec:
                 - name
                 type: object
               sessionRef:
-                description: SessionRef references a session for conversation continuity
+                description: |-
+                  SessionRef references a session for conversation continuity.
+                  It is immutable after Task creation because it bounds transcript access.
                 properties:
                   append:
                     default: true
@@ -2126,9 +2128,9 @@ spec:
             - message: agentRuntime is immutable for agent Tasks
               rule: self.type != 'agent' || (has(self.agentRuntime) == has(oldSelf.agentRuntime)
                 && (!has(self.agentRuntime) || self.agentRuntime == oldSelf.agentRuntime))
-            - message: sessionRef is immutable for agent Tasks
-              rule: self.type != 'agent' || (has(self.sessionRef) == has(oldSelf.sessionRef)
-                && (!has(self.sessionRef) || self.sessionRef == oldSelf.sessionRef))
+            - message: sessionRef is immutable
+              rule: has(self.sessionRef) == has(oldSelf.sessionRef) && (!has(self.sessionRef)
+                || self.sessionRef == oldSelf.sessionRef)
             - message: workspace is immutable for agent Tasks
               rule: self.type != 'agent' || (has(self.workspace) == has(oldSelf.workspace)
                 && (!has(self.workspace) || self.workspace == oldSelf.workspace))

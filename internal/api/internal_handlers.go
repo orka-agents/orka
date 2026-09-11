@@ -395,16 +395,18 @@ func (h *InternalHandlers) SearchTranscript(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusInternalServerError, "failed to load gateway transcript ownership")
 		}
 	}
-	allowedSessions, err = searchableTranscriptSessionNames(c.Context(), h.sessionStore, namespace, allowedSessions)
-	if err != nil {
-		return err
-	}
-
 	sessionName := strings.TrimSpace(c.Query("sessionName", ""))
 	excludeSessionName := strings.TrimSpace(c.Query("excludeSessionName", ""))
 	if sessionName != "" {
 		if _, ok := allowedSessions[sessionName]; !ok {
 			return fiber.NewError(fiber.StatusForbidden, "caller is not authorized for this session")
+		}
+		sessionType, err := transcriptSessionType(c.Context(), h.sessionStore, namespace, sessionName)
+		switch {
+		case errors.Is(err, store.ErrNotFound), sessionType == store.SessionTypeGateway:
+			return fiber.NewError(fiber.StatusForbidden, "caller is not authorized for this session")
+		case err != nil:
+			return fiber.NewError(fiber.StatusInternalServerError, "failed to load session transcript policy")
 		}
 	}
 
@@ -438,29 +440,6 @@ func (h *InternalHandlers) SearchTranscript(c fiber.Ctx) error {
 		results = []store.TranscriptSearchResult{}
 	}
 	return c.JSON(results)
-}
-
-func searchableTranscriptSessionNames(
-	ctx context.Context,
-	sessionStore store.SessionStore,
-	namespace string,
-	allowedSessions map[string]struct{},
-) (map[string]struct{}, error) {
-	searchable := make(map[string]struct{}, len(allowedSessions))
-	for sessionName := range allowedSessions {
-		sessionType, err := transcriptSessionType(ctx, sessionStore, namespace, sessionName)
-		switch {
-		case errors.Is(err, store.ErrNotFound):
-			continue
-		case err != nil:
-			return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to load session transcript policy")
-		case sessionType == store.SessionTypeGateway:
-			continue
-		default:
-			searchable[sessionName] = struct{}{}
-		}
-	}
-	return searchable, nil
 }
 
 func searchAuthorizedTranscriptResults(
