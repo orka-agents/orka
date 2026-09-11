@@ -142,7 +142,7 @@ func (s *Store) UpdateScanRun(ctx context.Context, run *store.ScanRun) error {
 		 WHERE namespace = ? AND id = ? AND repository_scan = ?
 		   AND repository_scan_uid = ? AND repository_scan_generation = ?
 		   AND (? NOT IN ('pending', 'running') OR (
-		     NOT EXISTS (
+		     security_scan_runs.phase IN ('pending', 'running') AND NOT EXISTS (
 		       SELECT 1 FROM security_scan_runs other
 		       WHERE other.namespace = security_scan_runs.namespace
 		         AND other.repository_scan = security_scan_runs.repository_scan

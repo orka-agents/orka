@@ -71,6 +71,28 @@ func TestScanRunLateUpdateCannotReactivateAfterNewerRunFinishes(t *testing.T) {
 	require.Equal(t, "failed", after.Phase)
 }
 
+func TestScanRunLateUpdateCannotReactivateTerminalReservation(t *testing.T) {
+	for _, terminal := range []string{"succeeded", "failed"} {
+		for _, active := range []string{"pending", "running"} {
+			t.Run(terminal+"/"+active, func(t *testing.T) {
+				ctx := context.Background()
+				s := setupTestStore(t)
+				run := &store.ScanRun{ID: "scan", Namespace: "ns", RepositoryScan: "repo", Phase: "running"}
+				require.NoError(t, s.CreateScanRun(ctx, run))
+				stale := *run
+				completed := time.Now().UTC()
+				run.Phase, run.CompletedAt, run.Summary = terminal, &completed, "terminal result"
+				require.NoError(t, s.UpdateScanRun(ctx, run))
+				stale.Phase = active
+				require.ErrorIs(t, s.UpdateScanRun(ctx, &stale), store.ErrConflict)
+				after, err := s.GetScanRun(ctx, run.Namespace, run.ID)
+				require.NoError(t, err)
+				require.Equal(t, run, after)
+			})
+		}
+	}
+}
+
 func TestScanRunLegacyMigrationDoesNotInventIdentity(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()

@@ -199,6 +199,16 @@ func (r *RepositoryScanReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		logger.Error(err, "failed to ingest security tasks")
 		return ctrl.Result{}, err
 	}
+	// Ingestion can publish a new run binding. Observe that status before
+	// applying any subsequent transition in this reconciliation.
+	current := &corev1alpha1.RepositoryScan{}
+	if err := r.Get(ctx, req.NamespacedName, current); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	if current.UID != scan.UID || current.Generation != scan.Generation || !current.DeletionTimestamp.IsZero() {
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+	scan = current
 
 	if security.IsSuspended(scan) {
 		if scan.Status.Phase != repositoryScanPhaseSuspended {
@@ -4501,11 +4511,10 @@ func (r *RepositoryScanReconciler) updateStatusWithRetry(ctx context.Context, sc
 		if current.UID != scan.UID || current.Generation != scan.Generation || !current.DeletionTimestamp.IsZero() {
 			return fmt.Errorf("%w: repository scan changed before status update", store.ErrConflict)
 		}
-		previousRunID := current.Status.LastScanID
-		mutate(current)
-		if previousRunID != scan.Status.LastScanID && previousRunID != current.Status.LastScanID {
+		if current.Status.LastScanID != scan.Status.LastScanID {
 			return fmt.Errorf("%w: a newer scan run already owns repository scan status", store.ErrConflict)
 		}
+		mutate(current)
 		return r.Status().Update(ctx, current)
 	})
 }

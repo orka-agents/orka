@@ -23,15 +23,18 @@ func TestCreateManualSecurityScanReplacesStaleRunIdentity(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	config := testContextTokenConfig(t, provider, "")
 	for _, tt := range []struct {
-		name        string
-		uid         string
-		generation  int64
-		clearStatus bool
+		name           string
+		uid            string
+		generation     int64
+		clearStatus    bool
+		invalidBinding string
 	}{
 		{name: "edited", uid: "current-uid", generation: 1},
 		{name: "recreated", uid: "previous-uid", generation: 2},
 		{name: "legacy"},
 		{name: "status cleared during admission", uid: "current-uid", generation: 1, clearStatus: true},
+		{name: "missing binding", uid: "current-uid", generation: 2, invalidBinding: "missing"},
+		{name: "foreign binding", uid: "current-uid", generation: 2, invalidBinding: "foreign"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -76,10 +79,16 @@ func TestCreateManualSecurityScanReplacesStaleRunIdentity(t *testing.T) {
 					},
 				})
 			}
-			require.NoError(t, handlers.securityStore.CreateScanRun(ctx, &store.ScanRun{
+			old := &store.ScanRun{
 				ID: "scan_old", Namespace: scan.Namespace, RepositoryScan: scan.Name,
 				RepositoryScanUID: tt.uid, RepositoryScanGeneration: tt.generation, Phase: "running",
-			}))
+			}
+			if tt.invalidBinding == "foreign" {
+				old.RepositoryScan = "other-scan"
+			}
+			if tt.invalidBinding != "missing" {
+				require.NoError(t, handlers.securityStore.CreateScanRun(ctx, old))
+			}
 			token := issueTestContextToken(t, provider, nil, map[string]any{"scope": ContextTokenScopeSecurityWrite})
 			request := httptest.NewRequest(http.MethodPost, "/security/repositories/identity-scan/scans?namespace=demo", nil)
 			request.Header.Set(TransactionTokenHeaderName, token)
@@ -93,9 +102,17 @@ func TestCreateManualSecurityScanReplacesStaleRunIdentity(t *testing.T) {
 			require.NotEqual(t, "scan_old", run.ID)
 			require.Empty(t, run.BaseCommit)
 			oldRun, err := handlers.securityStore.GetScanRun(ctx, scan.Namespace, "scan_old")
-			require.NoError(t, err)
-			require.Equal(t, "failed", oldRun.Phase)
-			require.Equal(t, tt.uid, oldRun.RepositoryScanUID)
+			if tt.invalidBinding == "missing" {
+				require.ErrorIs(t, err, store.ErrNotFound)
+			} else {
+				require.NoError(t, err)
+				wantPhase := "failed"
+				if tt.invalidBinding == "foreign" {
+					wantPhase = "running"
+				}
+				require.Equal(t, wantPhase, oldRun.Phase)
+				require.Equal(t, tt.uid, oldRun.RepositoryScanUID)
+			}
 			current := &corev1alpha1.RepositoryScan{}
 			require.NoError(t, handlers.client.Get(ctx, client.ObjectKeyFromObject(scan), current))
 			require.Equal(t, run.ID, current.Status.LastScanID)

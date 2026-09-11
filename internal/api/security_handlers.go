@@ -283,7 +283,7 @@ func (h *Handlers) createSecurityScanRun(ctx context.Context, ui *UserInfo, scan
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			return nil, err
 		}
-		staleStatus = err == nil && bound.RepositoryScan == scan.Name && !security.ScanRunMatchesRepositoryScan(bound, scan)
+		staleStatus = errors.Is(err, store.ErrNotFound) || !security.ScanRunMatchesRepositoryScan(bound, scan)
 	}
 	if staleStatus {
 		baseCommit = ""

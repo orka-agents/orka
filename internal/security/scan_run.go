@@ -82,6 +82,7 @@ func RetireStaleScanRuns(ctx context.Context, s store.SecurityStore, scan *corev
 		return false, err
 	}
 	runs = append(latest, runs...)
+	staleStatus := false
 	if scan.Status.LastScanID != "" {
 		bound, err := s.GetScanRun(ctx, scan.Namespace, scan.Status.LastScanID)
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -89,10 +90,11 @@ func RetireStaleScanRuns(ctx context.Context, s store.SecurityStore, scan *corev
 		}
 		if err == nil && bound.RepositoryScan == scan.Name {
 			runs = append(runs, *bound)
+		} else {
+			staleStatus = true
 		}
 	}
 
-	staleStatus := false
 	seen := make(map[string]bool, len(runs))
 	for i := range runs {
 		run := &runs[i]

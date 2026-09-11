@@ -161,6 +161,30 @@ func TestRepositoryScanStatusRejectsChangedIdentity(t *testing.T) {
 	require.Empty(t, current.Status.LastScanID)
 }
 
+func TestRepositoryScanStatusRejectsChangedRunBindingBeforeMutation(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	current := &corev1alpha1.RepositoryScan{
+		ObjectMeta: metav1.ObjectMeta{Name: "scan", Namespace: defaultNS, UID: "uid", Generation: 1},
+		Status:     corev1alpha1.RepositoryScanStatus{LastScanID: "scan_manual", Phase: repositoryScanPhaseScanning},
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(current).WithObjects(current).Build()
+	r := &RepositoryScanReconciler{Client: cl}
+	stale := current.DeepCopy()
+	stale.Status = corev1alpha1.RepositoryScanStatus{}
+	mutated := false
+	err := r.updateStatusWithRetry(ctx, stale, func(scan *corev1alpha1.RepositoryScan) {
+		mutated = true
+		scan.Status.Phase = repositoryScanPhasePending
+	})
+	require.ErrorIs(t, err, store.ErrConflict)
+	require.False(t, mutated)
+	after := &corev1alpha1.RepositoryScan{}
+	require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(current), after))
+	require.Equal(t, current.Status, after.Status)
+}
+
 func TestRepositoryScanReconcileDoesNotRetireNewerRunFromStaleCache(t *testing.T) {
 	ctx := context.Background()
 	db := setupControllerSQLiteStore(t)
@@ -281,20 +305,54 @@ func TestRetireStaleScanRunsChecksTerminalStatusBinding(t *testing.T) {
 	require.ErrorIs(t, err, store.ErrConflict, "a completed newer generation still fences a stale caller")
 }
 
-func TestRetireStaleScanRunsDoesNotRetireForeignStatusBinding(t *testing.T) {
-	ctx := context.Background()
-	db := setupControllerSQLiteStore(t)
-	scan := &corev1alpha1.RepositoryScan{
-		ObjectMeta: metav1.ObjectMeta{Name: "scan", Namespace: defaultNS, UID: "uid", Generation: 2},
-		Status:     corev1alpha1.RepositoryScanStatus{LastScanID: "scan_foreign"},
+func TestRepositoryScanRecoversOrphanedStatusBinding(t *testing.T) {
+	for _, binding := range []string{"missing", "foreign"} {
+		t.Run(binding, func(t *testing.T) {
+			ctx := context.Background()
+			db := setupControllerSQLiteStore(t)
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1alpha1.AddToScheme(scheme))
+			scan := &corev1alpha1.RepositoryScan{
+				ObjectMeta: metav1.ObjectMeta{Name: "scan", Namespace: defaultNS, UID: "uid", Generation: 2},
+				Spec: corev1alpha1.RepositoryScanSpec{
+					RepoURL: "https://github.com/example/repo", AnalysisAgentRef: corev1alpha1.AgentReference{Name: "analysis"},
+				},
+				Status: corev1alpha1.RepositoryScanStatus{LastScanID: "scan_orphaned", LastProcessedCommit: "old-base", Phase: repositoryScanPhaseScanning},
+			}
+			if binding == "foreign" {
+				require.NoError(t, db.CreateScanRun(ctx, &store.ScanRun{
+					ID: scan.Status.LastScanID, Namespace: scan.Namespace, RepositoryScan: "other-scan", Phase: scanRunPhaseRunning,
+				}))
+			}
+			cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(scan).
+				WithObjects(scan, repositoryScanTestAgent(scan.Spec.AnalysisAgentRef.Name)).Build()
+			r := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: db}
+			request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(scan)}
+			_, err := r.Reconcile(ctx, request)
+			require.NoError(t, err)
+			current := &corev1alpha1.RepositoryScan{}
+			require.NoError(t, cl.Get(ctx, request.NamespacedName, current))
+			require.Empty(t, current.Status.LastScanID)
+			require.Empty(t, current.Status.LastProcessedCommit)
+			require.Equal(t, repositoryScanPhasePending, current.Status.Phase)
+			for range 2 {
+				_, err = r.Reconcile(ctx, request)
+				require.NoError(t, err)
+			}
+			require.NoError(t, cl.Get(ctx, request.NamespacedName, current))
+			require.NotEmpty(t, current.Status.LastScanID)
+			replacement, err := db.GetScanRun(ctx, scan.Namespace, current.Status.LastScanID)
+			require.NoError(t, err)
+			require.True(t, security.ScanRunMatchesRepositoryScan(replacement, scan))
+			old, err := db.GetScanRun(ctx, scan.Namespace, scan.Status.LastScanID)
+			if binding == "foreign" {
+				require.NoError(t, err)
+				require.Equal(t, scanRunPhaseRunning, old.Phase)
+			} else {
+				require.ErrorIs(t, err, store.ErrNotFound)
+			}
+		})
 	}
-	foreign := &store.ScanRun{ID: scan.Status.LastScanID, Namespace: scan.Namespace, RepositoryScan: "other-scan", Phase: scanRunPhaseRunning}
-	require.NoError(t, db.CreateScanRun(ctx, foreign))
-	_, err := security.RetireStaleScanRuns(ctx, db, scan)
-	require.NoError(t, err)
-	after, err := db.GetScanRun(ctx, scan.Namespace, foreign.ID)
-	require.NoError(t, err)
-	require.Equal(t, scanRunPhaseRunning, after.Phase)
 }
 
 func TestMapperStageTaskReplayValidatesRunAndSpec(t *testing.T) {
