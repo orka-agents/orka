@@ -98,17 +98,17 @@ func TestCreateManualSecurityScanReplacesStaleRunIdentity(t *testing.T) {
 			request.Header.Set(TransactionTokenHeaderName, token)
 			response, err := app.Test(request)
 			require.NoError(t, err)
+			require.Equal(t, http.StatusConflict, response.StatusCode)
+			require.NoError(t, response.Body.Close())
 			if tt.invalidBinding == "" {
-				require.Equal(t, http.StatusConflict, response.StatusCode)
-				require.NoError(t, response.Body.Close())
 				pending, err := handlers.securityStore.GetScanRun(ctx, scan.Namespace, old.ID)
 				require.NoError(t, err)
 				require.True(t, pending.CancellationPending)
-				request = httptest.NewRequest(http.MethodPost, "/security/repositories/identity-scan/scans?namespace=demo", nil)
-				request.Header.Set(TransactionTokenHeaderName, token)
-				response, err = app.Test(request)
-				require.NoError(t, err)
 			}
+			request = httptest.NewRequest(http.MethodPost, "/security/repositories/identity-scan/scans?namespace=demo", nil)
+			request.Header.Set(TransactionTokenHeaderName, token)
+			response, err = app.Test(request)
+			require.NoError(t, err)
 			t.Cleanup(func() { _ = response.Body.Close() })
 			require.Equal(t, http.StatusCreated, response.StatusCode)
 			var run store.ScanRun
@@ -129,11 +129,7 @@ func TestCreateManualSecurityScanReplacesStaleRunIdentity(t *testing.T) {
 				require.Equal(t, tt.uid, oldRun.RepositoryScanUID)
 			}
 			oldTaskErr := handlers.client.Get(ctx, client.ObjectKeyFromObject(oldTask), &corev1alpha1.Task{})
-			if tt.invalidBinding == "" {
-				require.True(t, apierrors.IsNotFound(oldTaskErr), "obsolete pipeline Task must be cancelled")
-			} else {
-				require.NoError(t, oldTaskErr, "missing or foreign run bindings do not authorize deleting Tasks")
-			}
+			require.True(t, apierrors.IsNotFound(oldTaskErr), "obsolete owned pipeline Task must be cancelled")
 			current := &corev1alpha1.RepositoryScan{}
 			require.NoError(t, handlers.client.Get(ctx, client.ObjectKeyFromObject(scan), current))
 			require.Equal(t, run.ID, current.Status.LastScanID)

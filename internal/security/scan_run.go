@@ -18,7 +18,10 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-const RepositoryScanRunFinalizer = "orka.ai/security-scan-runs"
+const (
+	RepositoryScanRunFinalizer = "orka.ai/security-scan-runs"
+	repositoryScanKind         = "RepositoryScan"
+)
 
 var ErrScanRunCancellationPending = fmt.Errorf("%w: scan run cancellation is pending", store.ErrConflict)
 
@@ -149,13 +152,13 @@ func RetireStaleScanRuns(ctx context.Context, s store.SecurityStore, c client.Cl
 	}
 
 	// The parent may have changed while the run snapshots were collected.
-	// Reject stale cleanup callers before cancelling any of those runs.
-	if err := validateScanRunRetirementIdentity(ctx, c, reader, scan); err != nil {
+	// Include late Tasks, then validate the caller before any cancellation.
+	cleanupPending, err := resumeScanPipelineCleanup(ctx, s, c, reader, scan)
+	if err != nil {
 		return false, err
 	}
 
 	seen := make(map[string]bool, len(runs))
-	cleanupPending := false
 	for i := range runs {
 		run := &runs[i]
 		if seen[run.ID] {
@@ -197,6 +200,72 @@ func RetireStaleScanRuns(ctx context.Context, s store.SecurityStore, c client.Cl
 	return staleStatus, nil
 }
 
+// Owned Task events requeue the parent, including after a controller restart.
+// Use their run IDs to find cancelled history without paging through all runs.
+// Tasks without a matching run must finish deletion before new admission.
+func resumeScanPipelineCleanup(ctx context.Context, s store.SecurityStore, c client.Client, reader client.Reader, scan *corev1alpha1.RepositoryScan) (bool, error) {
+	if reader == nil {
+		reader = c
+	}
+	var tasks corev1alpha1.TaskList
+	if err := reader.List(ctx, &tasks, client.InNamespace(scan.Namespace), client.MatchingLabels{
+		labels.LabelSecurityTarget: labels.SelectorValue(scan.Name),
+	}); err != nil {
+		return false, err
+	}
+	snapshots := make(map[string]*store.ScanRun)
+	late := make(map[string]*store.ScanRun)
+	var orphans []*corev1alpha1.Task
+	for i := range tasks.Items {
+		task := &tasks.Items[i]
+		if !activeScanPipelineTask(task) {
+			continue
+		}
+		owner := metav1.GetControllerOf(task)
+		if owner == nil || owner.Name != scan.Name || owner.Kind != repositoryScanKind {
+			continue
+		}
+		runID := task.Labels[labels.LabelSecurityScanID]
+		run, known := snapshots[runID]
+		if runID != "" && !known {
+			var err error
+			run, err = s.GetScanRun(ctx, scan.Namespace, runID)
+			if errors.Is(err, store.ErrNotFound) {
+				run = nil
+			} else if err != nil {
+				return false, err
+			}
+			snapshots[runID] = run
+		}
+		if !scanRunOwnsTask(run, scan, task) {
+			// Missing history cannot authorize cleanup for another owner or
+			// justify reconstructing a run from Task labels.
+			if owner.UID == scan.UID {
+				orphans = append(orphans, task)
+			}
+			continue
+		}
+		if run.CancellationVersion == 0 || run.CancellationPending || (!scan.DeletionTimestamp.IsZero() && owner.UID != scan.UID) {
+			continue
+		}
+		late[run.ID] = run
+	}
+	if err := validateScanRunRetirementIdentity(ctx, c, reader, scan); err != nil {
+		return false, err
+	}
+	for _, run := range late {
+		if err := CancelScanRun(ctx, s, c, reader, scan, run, "late pipeline Task appeared after scan run cancellation"); err != nil {
+			return false, err
+		}
+	}
+	for _, task := range orphans {
+		if err := deleteScanPipelineTask(ctx, c, task); err != nil {
+			return false, err
+		}
+	}
+	return len(late) > 0 || len(orphans) > 0, nil
+}
+
 func validateScanRunRetirementIdentity(ctx context.Context, c client.Client, reader client.Reader, scan *corev1alpha1.RepositoryScan) error {
 	if reader == nil {
 		reader = c
@@ -227,34 +296,49 @@ func DeleteScanRunPipelineTasks(ctx context.Context, c client.Client, reader cli
 		return false, err
 	}
 	observedActive := false
-	ownerUID := types.UID(run.RepositoryScanUID)
-	if ownerUID == "" {
-		ownerUID = scan.UID
-	}
 	for i := range tasks.Items {
 		task := &tasks.Items[i]
-		owner := metav1.GetControllerOf(task)
-		if owner == nil || owner.UID != ownerUID || owner.Name != run.RepositoryScan || owner.Kind != "RepositoryScan" {
-			continue
-		}
-		switch task.Labels[labels.LabelSecurityStage] {
-		case StageThreatModel, StageMapper, StageReview:
-		default:
-			continue
-		}
-		switch task.Status.Phase {
-		case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
+		if !scanRunOwnsTask(run, scan, task) || !activeScanPipelineTask(task) {
 			continue
 		}
 		observedActive = true
-		if !task.DeletionTimestamp.IsZero() {
-			continue
-		}
-		if err := c.Delete(ctx, task, client.Preconditions{UID: &task.UID, ResourceVersion: &task.ResourceVersion}); client.IgnoreNotFound(err) != nil {
+		if err := deleteScanPipelineTask(ctx, c, task); err != nil {
 			return true, err
 		}
 	}
 	return observedActive, nil
+}
+
+func scanRunOwnsTask(run *store.ScanRun, scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task) bool {
+	if run == nil || run.Namespace != task.Namespace || run.ID != task.Labels[labels.LabelSecurityScanID] {
+		return false
+	}
+	ownerUID := types.UID(run.RepositoryScanUID)
+	if ownerUID == "" {
+		ownerUID = scan.UID
+	}
+	owner := metav1.GetControllerOf(task)
+	return owner != nil && owner.UID == ownerUID && owner.Name == run.RepositoryScan && owner.Kind == repositoryScanKind
+}
+
+func deleteScanPipelineTask(ctx context.Context, c client.Client, task *corev1alpha1.Task) error {
+	if !task.DeletionTimestamp.IsZero() {
+		return nil
+	}
+	return client.IgnoreNotFound(c.Delete(ctx, task, client.Preconditions{UID: &task.UID, ResourceVersion: &task.ResourceVersion}))
+}
+
+func activeScanPipelineTask(task *corev1alpha1.Task) bool {
+	switch task.Labels[labels.LabelSecurityStage] {
+	case StageThreatModel, StageMapper, StageReview:
+	default:
+		return false
+	}
+	switch task.Status.Phase {
+	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
+		return false
+	}
+	return true
 }
 
 // RollbackScanRunAdmission cancels work whose admission lost status ownership.
@@ -305,7 +389,7 @@ func CurrentRepositoryScanTasks(ctx context.Context, s store.SecurityStore, scan
 		task := &tasks[i]
 		owner := metav1.GetControllerOf(task)
 		if owner == nil || owner.UID != scan.UID || owner.Name != scan.Name ||
-			owner.Kind != "RepositoryScan" || task.Namespace != scan.Namespace {
+			owner.Kind != repositoryScanKind || task.Namespace != scan.Namespace {
 			continue
 		}
 		stage := task.Labels[labels.LabelSecurityStage]

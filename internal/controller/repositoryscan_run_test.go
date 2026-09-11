@@ -629,6 +629,14 @@ func TestRetireStaleScanRunsCancelsOwnedPipelineBeforeRelease(t *testing.T) {
 			for _, preserved := range []*corev1alpha1.Task{foreign, terminal, validation} {
 				require.NoError(t, base.Get(ctx, client.ObjectKeyFromObject(preserved), &corev1alpha1.Task{}))
 			}
+			if scenario != "deletion fails" {
+				_, err = security.RetireStaleScanRuns(ctx, db, cl, base, scan)
+				require.NoError(t, err)
+				confirmed, err := db.GetScanRun(ctx, run.Namespace, run.ID)
+				require.NoError(t, err)
+				require.False(t, confirmed.CancellationPending)
+				require.Equal(t, after.CancellationVersion, confirmed.CancellationVersion)
+			}
 		})
 	}
 }
@@ -850,8 +858,89 @@ func TestRepositoryScanCancellationConfirmsLateTasksAfterCreatorCrash(t *testing
 	require.NoError(t, db.CreateScanRun(ctx, replacement))
 }
 
+func TestRepositoryScanCancellationRediscoversLateTasksAfterReplacement(t *testing.T) {
+	ctx := context.Background()
+	db := setupControllerSQLiteStore(t)
+	scan := &corev1alpha1.RepositoryScan{
+		ObjectMeta: metav1.ObjectMeta{Name: "scan", Namespace: defaultNS, UID: "uid", Generation: 1},
+		Status:     corev1alpha1.RepositoryScanStatus{Phase: repositoryScanPhaseScanning, LastScanID: "old-run"},
+	}
+	run := &store.ScanRun{
+		ID: scan.Status.LastScanID, Namespace: scan.Namespace, RepositoryScan: scan.Name, Phase: scanRunPhaseRunning,
+		RepositoryScanUID: string(scan.UID), RepositoryScanGeneration: scan.Generation,
+	}
+	require.NoError(t, db.CreateScanRun(ctx, run))
+	base := repositoryScanRunTestClient(t, scan)
+	creator := &RepositoryScanReconciler{Client: base, APIReader: base, Scheme: base.Scheme(), SecurityStore: db}
+	require.NoError(t, creator.validateScanStageRun(ctx, scan, run))
+	current := &corev1alpha1.RepositoryScan{}
+	require.NoError(t, base.Get(ctx, client.ObjectKeyFromObject(scan), current))
+	current.Generation++
+	require.NoError(t, base.Update(ctx, current))
+	_, err := security.RetireStaleScanRuns(ctx, db, base, base, current)
+	require.ErrorIs(t, err, security.ErrScanRunCancellationPending)
+	_, err = security.RetireStaleScanRuns(ctx, db, base, base, current)
+	require.NoError(t, err)
+	confirmed, err := db.GetScanRun(ctx, scan.Namespace, run.ID)
+	require.NoError(t, err)
+	require.False(t, confirmed.CancellationPending)
+	replacement := &store.ScanRun{
+		ID: "replacement", Namespace: scan.Namespace, RepositoryScan: scan.Name, Phase: scanRunPhaseRunning,
+		RepositoryScanUID: string(current.UID), RepositoryScanGeneration: current.Generation,
+	}
+	require.NoError(t, db.CreateScanRun(ctx, replacement))
+	current.Status.LastScanID = replacement.ID
+	require.NoError(t, base.Status().Update(ctx, current))
+	// Create succeeds only after cleanup completed and a replacement became
+	// newest. The creator crashes without reaching post-create validation.
+	late := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "late-mapper", Namespace: scan.Namespace, UID: "late-uid", Finalizers: []string{"test.orka.ai/hold-cleanup"},
+			Labels: map[string]string{
+				labels.LabelSecurityTarget: scan.Name, labels.LabelSecurityScanID: run.ID, labels.LabelSecurityStage: security.StageMapper,
+			},
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(scan, corev1alpha1.GroupVersion.WithKind("RepositoryScan"))},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	require.NoError(t, base.Create(ctx, late))
+	newTask := late.DeepCopy()
+	newTask.Name, newTask.UID = "current-mapper", "current-uid"
+	newTask.ResourceVersion, newTask.Finalizers = "", nil
+	newTask.Labels[labels.LabelSecurityScanID] = replacement.ID
+	require.NoError(t, base.Create(ctx, newTask))
+	restarted := &RepositoryScanReconciler{Client: base, APIReader: base, Scheme: base.Scheme(), SecurityStore: db}
+	for range 2 {
+		done, err := restarted.reconcileScanRunIdentity(ctx, current)
+		require.NoError(t, err)
+		require.True(t, done)
+		pending, err := db.GetScanRun(ctx, scan.Namespace, run.ID)
+		require.NoError(t, err)
+		require.True(t, pending.CancellationPending)
+		require.Equal(t, confirmed.CompletedAt, pending.CompletedAt)
+	}
+	deleting := &corev1alpha1.Task{}
+	require.NoError(t, base.Get(ctx, client.ObjectKeyFromObject(late), deleting))
+	require.False(t, deleting.DeletionTimestamp.IsZero())
+	deleting.Finalizers = nil
+	require.NoError(t, base.Update(ctx, deleting))
+	_, err = restarted.reconcileScanRunIdentity(ctx, current)
+	require.NoError(t, err)
+	retired, err := db.GetScanRun(ctx, scan.Namespace, run.ID)
+	require.NoError(t, err)
+	require.False(t, retired.CancellationPending)
+	require.Equal(t, confirmed.CompletedAt, retired.CompletedAt)
+	untouched, err := db.GetScanRun(ctx, scan.Namespace, replacement.ID)
+	require.NoError(t, err)
+	require.Equal(t, scanRunPhaseRunning, untouched.Phase)
+	require.Zero(t, untouched.CancellationVersion)
+	preserved := &corev1alpha1.Task{}
+	require.NoError(t, base.Get(ctx, client.ObjectKeyFromObject(newTask), preserved))
+	require.True(t, preserved.DeletionTimestamp.IsZero())
+}
+
 func TestRepositoryScanRecoversOrphanedStatusBinding(t *testing.T) {
-	for _, binding := range []string{"missing", "foreign"} {
+	for _, binding := range []string{"missing", "foreign", "unlabeled"} {
 		t.Run(binding, func(t *testing.T) {
 			ctx := context.Background()
 			db := setupControllerSQLiteStore(t)
@@ -869,10 +958,50 @@ func TestRepositoryScanRecoversOrphanedStatusBinding(t *testing.T) {
 					ID: scan.Status.LastScanID, Namespace: scan.Namespace, RepositoryScan: "other-scan", Phase: scanRunPhaseRunning,
 				}))
 			}
+			orphan := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "orphan-mapper", Namespace: scan.Namespace, UID: "orphan-uid", Finalizers: []string{"test.orka.ai/hold-cleanup"},
+					Labels: map[string]string{
+						labels.LabelSecurityTarget: scan.Name, labels.LabelSecurityScanID: scan.Status.LastScanID, labels.LabelSecurityStage: security.StageMapper,
+					},
+					OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(scan, corev1alpha1.GroupVersion.WithKind("RepositoryScan"))},
+				},
+				Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+			}
+			if binding == "unlabeled" {
+				delete(orphan.Labels, labels.LabelSecurityScanID)
+			}
+			foreign := orphan.DeepCopy()
+			foreign.Name, foreign.UID = "foreign-mapper", "foreign-uid"
+			foreign.OwnerReferences[0].UID = "other-owner"
+			terminal := orphan.DeepCopy()
+			terminal.Name, terminal.UID = "terminal-mapper", "terminal-uid"
+			terminal.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+			validation := orphan.DeepCopy()
+			validation.Name, validation.UID = "validation", "validation-uid"
+			validation.Labels[labels.LabelSecurityStage] = security.StageValidation
+			patch := validation.DeepCopy()
+			patch.Name, patch.UID = "patch", "patch-uid"
+			patch.Labels[labels.LabelSecurityStage] = security.StagePatch
 			cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(scan).
-				WithObjects(scan, repositoryScanTestAgent(scan.Spec.AnalysisAgentRef.Name)).Build()
-			r := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: db}
+				WithObjects(scan, orphan, foreign, terminal, validation, patch, repositoryScanTestAgent(scan.Spec.AnalysisAgentRef.Name)).Build()
+			r := &RepositoryScanReconciler{Client: cl, APIReader: cl, Scheme: scheme, SecurityStore: db}
 			request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(scan)}
+			for range 2 {
+				_, err := r.Reconcile(ctx, request)
+				require.NoError(t, err)
+				current := &corev1alpha1.RepositoryScan{}
+				require.NoError(t, cl.Get(ctx, request.NamespacedName, current))
+				require.Equal(t, scan.Status.LastScanID, current.Status.LastScanID, "cleanup must finish before admitting a replacement")
+				runs, _, err := db.ListScanRuns(ctx, scan.Namespace, scan.Name, 10, "")
+				require.NoError(t, err)
+				require.Empty(t, runs)
+			}
+			deleting := &corev1alpha1.Task{}
+			require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(orphan), deleting))
+			require.False(t, deleting.DeletionTimestamp.IsZero())
+			deleting.Finalizers = nil
+			require.NoError(t, cl.Update(ctx, deleting))
 			_, err := r.Reconcile(ctx, request)
 			require.NoError(t, err)
 			current := &corev1alpha1.RepositoryScan{}
@@ -895,6 +1024,11 @@ func TestRepositoryScanRecoversOrphanedStatusBinding(t *testing.T) {
 				require.Equal(t, scanRunPhaseRunning, old.Phase)
 			} else {
 				require.ErrorIs(t, err, store.ErrNotFound)
+			}
+			for _, task := range []*corev1alpha1.Task{foreign, terminal, validation, patch} {
+				preserved := &corev1alpha1.Task{}
+				require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(task), preserved))
+				require.True(t, preserved.DeletionTimestamp.IsZero())
 			}
 		})
 	}

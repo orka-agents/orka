@@ -3350,8 +3350,10 @@ func TestCreateScanRunDoesNotAdoptUnreservedTask(t *testing.T) {
 			Kind:       "RepositoryScan",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "demo-security-repository-20260425175643",
-			Namespace: defaultNS,
+			Name:       "demo-security-repository-20260425175643",
+			Namespace:  defaultNS,
+			UID:        "scan-uid",
+			Generation: 1,
 		},
 		Spec: corev1alpha1.RepositoryScanSpec{
 			RepoURL:          "https://github.com/sozercan/actions-test.git",
@@ -3405,6 +3407,15 @@ func TestCreateScanRunDoesNotAdoptUnreservedTask(t *testing.T) {
 		SecurityStore: store,
 	}
 
+	if err := reconciler.createScanRun(ctx, scan, "initial", "", ""); !errors.Is(err, security.ErrScanRunCancellationPending) {
+		t.Fatalf("createScanRun() error = %v, want pending orphan cleanup", err)
+	}
+	if err := cl.Get(ctx, client.ObjectKeyFromObject(existingTask), &corev1alpha1.Task{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("unreserved task cleanup error = %v, want NotFound", err)
+	}
+	if runs, _, err := store.ListScanRuns(ctx, scan.Namespace, scan.Name, 10, ""); err != nil || len(runs) != 0 {
+		t.Fatalf("ListScanRuns() = %#v, %v; want no admission before cleanup confirmation", runs, err)
+	}
 	if err := reconciler.createScanRun(ctx, scan, "initial", "", ""); err != nil {
 		t.Fatalf("createScanRun() error = %v", err)
 	}
