@@ -9,6 +9,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
@@ -326,19 +327,15 @@ func (a internalCallerAuthorizer) resolveActiveTaskCaller(c fiber.Ctx, namespace
 	return task, nil
 }
 
-func (a internalCallerAuthorizer) coordinationTreeSessionNames(
+func (a internalCallerAuthorizer) coordinationTreeSessionReferences(
 	ctx context.Context,
 	callerTask *corev1alpha1.Task,
-) (map[string]struct{}, error) {
+) (map[string][]corev1alpha1.SessionReference, error) {
 	if a.k8sReader == nil || callerTask == nil || callerTask.UID == "" {
 		return nil, fiber.NewError(fiber.StatusForbidden, "caller task identity required")
 	}
-	allowed := map[string]struct{}{}
-	if callerTask.Spec.SessionRef != nil {
-		if sessionName := strings.TrimSpace(callerTask.Spec.SessionRef.Name); sessionName != "" {
-			allowed[sessionName] = struct{}{}
-		}
-	}
+	allowed := map[string][]corev1alpha1.SessionReference{}
+	addTranscriptSessionReference(allowed, callerTask.Spec.SessionRef)
 	if !a.taskProvenanceProtected {
 		return allowed, nil
 	}
@@ -362,15 +359,27 @@ func (a internalCallerAuthorizer) coordinationTreeSessionNames(
 	for i := range tasks.Items {
 		task := &tasks.Items[i]
 		root, valid := coordinationRootTask(task, tasksByName)
-		if !valid || root.UID != callerRoot.UID || task.Spec.SessionRef == nil {
+		if !valid || root.UID != callerRoot.UID {
 			continue
 		}
-		sessionName := strings.TrimSpace(task.Spec.SessionRef.Name)
-		if sessionName != "" {
-			allowed[sessionName] = struct{}{}
-		}
+		addTranscriptSessionReference(allowed, task.Spec.SessionRef)
 	}
 	return allowed, nil
+}
+
+func addTranscriptSessionReference(allowed map[string][]corev1alpha1.SessionReference, ref *corev1alpha1.SessionReference) {
+	if ref == nil {
+		return
+	}
+	name := strings.TrimSpace(ref.Name)
+	if name == "" {
+		return
+	}
+	// Keep every distinct reference so another Task cannot widen the caller's
+	// history window for the same session.
+	if !slices.Contains(allowed[name], *ref) {
+		allowed[name] = append(allowed[name], *ref)
+	}
 }
 
 func coordinationRootTask(

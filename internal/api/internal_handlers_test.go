@@ -918,7 +918,7 @@ func TestSearchAuthorizedTranscriptResultsUsesSingleBoundedQuery(t *testing.T) {
 	capture := &countingTranscriptSearchStore{SessionStore: dataStore, TaskDataTransactionStore: dataStore}
 	results, err := searchAuthorizedTranscriptResults(t.Context(), capture, store.TranscriptSearchFilter{
 		Namespace: "default", Query: "needle", ExcludeSessionName: "excluded", Limit: 10,
-	}, map[string]struct{}{
+	}, map[string][]corev1alpha1.SessionReference{
 		"session-a": {}, "session-b": {}, "excluded": {},
 	})
 	require.NoError(t, err)

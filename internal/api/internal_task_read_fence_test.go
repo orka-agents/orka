@@ -123,6 +123,8 @@ func TestInternalReadsSerializeAuthorizationWithTaskReuse(t *testing.T) {
 		{name: "transcript cutoff", path: "/internal/v1/sessions/default/my-session/transcript", through: true},
 		{name: "explicit session search", path: "/internal/v1/sessions/default/search?query=history&sessionName=my-session"},
 		{name: "coordination search", path: "/internal/v1/sessions/default/search?query=history"},
+		{name: "explicit bounded search", path: "/internal/v1/sessions/default/search?query=history&sessionName=my-session", through: true},
+		{name: "bounded coordination search", path: "/internal/v1/sessions/default/search?query=history", through: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			h, _, _ := setupTestInternalHandlers()

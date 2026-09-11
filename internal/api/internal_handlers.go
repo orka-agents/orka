@@ -401,7 +401,7 @@ func (h *InternalHandlers) SearchTranscript(c fiber.Ctx) error {
 
 	var results []store.TranscriptSearchResult
 	var callerTask *corev1alpha1.Task
-	var allowedSessions map[string]struct{}
+	var allowedSessions map[string][]corev1alpha1.SessionReference
 	if err := withInternalTaskDataTransaction(c, h.sessionStore, "", func(ctx context.Context) error {
 		authorizer := h.internalCallerAuthorizer()
 		var err error
@@ -409,16 +409,15 @@ func (h *InternalHandlers) SearchTranscript(c fiber.Ctx) error {
 		if err != nil {
 			return err
 		}
-		allowedSessions, err = authorizer.coordinationTreeSessionNames(ctx, callerTask)
+		allowedSessions, err = authorizer.coordinationTreeSessionReferences(ctx, callerTask)
 		return err
 	}, func(ctx context.Context) error {
 		if h.gatewayEventStore != nil {
 			_, eventErr := h.gatewayEventStore.GetGatewayEventForTask(ctx, namespace, callerTask.Name, string(callerTask.UID))
 			switch {
 			case eventErr == nil:
-				// Gateway turns are authorized against an event-specific transcript
-				// cutoff. Transcript search has no cutoff field, so fail closed
-				// instead of searching the full canonical session.
+				// Gateway turns use an event-specific cutoff rather than the Task
+				// session references checked below. Keep gateway search disabled.
 				return fiber.NewError(fiber.StatusForbidden, "gateway session transcript search is unavailable")
 			case errors.Is(eventErr, store.ErrNotFound):
 			default:
@@ -480,9 +479,10 @@ func searchAuthorizedTranscriptResults(
 	ctx context.Context,
 	sessionStore store.SessionStore,
 	filter store.TranscriptSearchFilter,
-	allowedSessions map[string]struct{},
+	allowedSessions map[string][]corev1alpha1.SessionReference,
 ) ([]store.TranscriptSearchResult, error) {
 	if filter.SessionName != "" {
+		filter.HistoryBounds = transcriptSearchHistoryBounds(filter.SessionName, allowedSessions[filter.SessionName])
 		return sessionStore.SearchTranscript(ctx, filter)
 	}
 
@@ -507,7 +507,22 @@ func searchAuthorizedTranscriptResults(
 	filter.SessionNames = sessionNames
 	filter.ExcludeSessionName = ""
 	filter.Limit = limit
+	for _, sessionName := range sessionNames {
+		filter.HistoryBounds = append(filter.HistoryBounds, transcriptSearchHistoryBounds(sessionName, allowedSessions[sessionName])...)
+	}
 	return sessionStore.SearchTranscript(ctx, filter)
+}
+
+func transcriptSearchHistoryBounds(sessionName string, refs []corev1alpha1.SessionReference) []store.TranscriptSearchHistoryBound {
+	var bounds []store.TranscriptSearchHistoryBound
+	for _, ref := range refs {
+		if ref.MaxMessages != 0 || ref.ThroughMessageID != "" {
+			bounds = append(bounds, store.TranscriptSearchHistoryBound{
+				SessionName: sessionName, MaxMessages: int(ref.MaxMessages), ThroughMessageID: ref.ThroughMessageID,
+			})
+		}
+	}
+	return bounds
 }
 
 func parseOptionalNonNegativeQueryInt(raw, name string) (int, error) {
