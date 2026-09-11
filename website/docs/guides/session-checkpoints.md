@@ -50,7 +50,9 @@ limit must leave room for input; the worker's default response reserve is 4,096
 tokens.
 
 Creation requires `append: true`, no `throughMessageID`, and
-`promptIncluded: false`. Gateway-owned and read-only Sessions cannot create
+`promptIncluded: false`. The opt-in must be a literal `true` in `spec.env`;
+the API also verifies it in the controller-created AI worker Job.
+Gateway-owned and read-only Sessions cannot create
 checkpoints through this worker path. A Task needs the controller URL and its
 normal ServiceAccount identity, supplied by the controller.
 
@@ -69,9 +71,26 @@ record includes the Session identity, format version, and last included message
 ID. Execution events remain diagnostic data, not the history archive.
 
 Storage redacts recognizable credential patterns from source data. The worker
-also removes configured secret values from text and rejects checkpoint notes
-containing them. Source retrieval returns the saved, sanitized representation.
+tracks credentials loaded for providers and custom tools, alongside configured
+environment values, and removes them from saved text and tool arguments.
+When quote syntax is ambiguous, redaction may remove nearby text to avoid
+keeping part of a credential. Checkpoint notes containing those values are rejected.
+Source retrieval returns the saved, sanitized representation.
 The active current request remains unchanged.
+
+The worker may load a complete saved source to check for credentials split across
+a history-page boundary. This check is limited to 2 MiB and retains one source
+copy in the worker. The requested page data and cursor remain unchanged. If a
+credential is learned after a page was saved, new checkpoints omit affected
+fragments while retaining their source references. Copied and nested history
+receipts are checked against their original source ranges regardless of message
+role. Copies are validated before redaction and stored with their canonical
+receipt fields. Transcript previews, including copied and cached history
+receipts, are rebuilt from the complete, redacted source when newly loaded
+credentials affect them.
+A check follows at most eight source messages within ten seconds. Checkpoint
+reference preparation shares one ten-second budget across its sources; cycles
+and deeper chains fail closed.
 
 | Item | Limit |
 | --- | --- |

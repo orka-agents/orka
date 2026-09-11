@@ -8,9 +8,11 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -665,6 +667,36 @@ func runNonStreamingToolLoop(
 	return runToolLoopWithObserver(ctx, provider, req, model, config, toolCtx, nil)
 }
 
+// newToolLoopMessages gives the original request an internal identity that
+// survives truncation and cannot be confused with later user-role controls.
+func newToolLoopMessages(initial []llm.Message) ([]llm.Message, string) {
+	messages := slices.Clone(initial)
+	for i, message := range slices.Backward(messages) {
+		if message.Role == sessionContextRoleUser {
+			messages[i].ID = "tool-loop-request-" + rand.Text()
+			return messages, messages[i].ID
+		}
+	}
+	return messages, ""
+}
+
+func truncateToolLoopMessages(messages []llm.Message, tokenBudget int, requestID string) []llm.Message {
+	requestIndex := -1
+	if requestID != "" {
+		requestIndex = slices.IndexFunc(messages, func(message llm.Message) bool { return message.ID == requestID })
+		if requestIndex < 0 {
+			return messages
+		}
+	}
+	fitted, err := llm.FitMessagesKeeping(messages, tokenBudget, requestIndex)
+	if err != nil {
+		// Preserve the compatibility path's fallback when required context cannot
+		// fit. Never shorten the original request to make the retry fit.
+		return messages
+	}
+	return fitted
+}
+
 func runToolLoopWithObserver(
 	ctx context.Context,
 	provider llm.Provider,
@@ -676,8 +708,7 @@ func runToolLoopWithObserver(
 ) (*llm.CompletionResponse, error) {
 	repetitionTracker := make(map[string]int)
 	exposedToolNames := completionToolNameSet(req.Tools)
-	messages := make([]llm.Message, len(req.Messages))
-	copy(messages, req.Messages)
+	messages, currentRequestID := newToolLoopMessages(req.Messages)
 	prematureEndRetries := 0
 
 	for iteration := 0; ; iteration++ {
@@ -724,7 +755,7 @@ func runToolLoopWithObserver(
 		// Truncate conversation if it exceeds the session size budget
 		if config.MaxSessionSize > 0 {
 			tokenBudget := config.MaxSessionSize / 4
-			messages = llm.TruncateMessages(messages, tokenBudget)
+			messages = truncateToolLoopMessages(messages, tokenBudget, currentRequestID)
 		}
 
 		// Call LLM with tools
@@ -751,7 +782,7 @@ func runToolLoopWithObserver(
 			for _, m := range messages {
 				tokenEstimate += len(m.Content) / 4
 			}
-			messages = llm.TruncateMessages(messages, tokenEstimate/2)
+			messages = truncateToolLoopMessages(messages, tokenEstimate/2, currentRequestID)
 			compReq.Messages = messages
 			resp, err = provider.Complete(ctx, compReq)
 			if err != nil && isStreamingRequiredErr(err) {

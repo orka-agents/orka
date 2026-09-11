@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
@@ -75,6 +76,7 @@ func (c *sessionContextClient) call(ctx context.Context, method, suffix string, 
 		if token == "" {
 			return fmt.Errorf("session context requires the worker ServiceAccount token")
 		}
+		redact.TrackSecrets(ctx, token)
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := c.client.Do(req)
@@ -112,6 +114,7 @@ func (c *sessionContextClient) call(ctx context.Context, method, suffix string, 
 
 type workerSessionContext struct {
 	client           *sessionContextClient
+	secretContext    context.Context
 	taskUID          string
 	namespace        string
 	sessionName      string
@@ -122,6 +125,9 @@ type workerSessionContext struct {
 	window           int
 	checkpointFailed bool
 	unreadHistory    map[string]bool
+	historyPages     map[string]store.SessionHistoryResult
+	historySource    *workerHistorySource
+	toolCallIDs      map[string]string
 }
 
 func contextWindowFromEnv(name string, required bool) (int, error) {
@@ -154,6 +160,7 @@ func newWorkerSessionContext(
 		return nil, nil, fmt.Errorf("session checkpoints require authenticated Task identity and a controller URL")
 	}
 	state := &workerSessionContext{
+		secretContext: ctx,
 		client: &sessionContextClient{
 			endpoint: controllerURL + "/internal/v1/tasks/" + url.PathEscape(namespace) + "/" +
 				url.PathEscape(taskName) + "/session-context",
@@ -229,38 +236,57 @@ func (s *workerSessionContext) currentIndex(messages []llm.Message) int {
 }
 
 func (s *workerSessionContext) persist(ctx context.Context, message llm.Message) (llm.Message, error) {
+	// Finish only the durable receipt on cancellation. No further tool runs, and
+	// the exact Session owner must still be valid throughout the store transaction.
+	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionContextIOTimeout)
+	defer cancel()
+	secrets := redact.TrackedSecrets(s.secretContext)
 	if message.ID == "" {
 		s.sequence++
 		message.ID = sessioncontext.TaskMessagePrefix(s.taskUID) + strconv.Itoa(s.sequence)
 	}
 	source := store.SessionMessage{
-		ID: message.ID, Role: message.Role, Content: sanitizeCheckpointText(message.Content),
-		ToolCallID: sanitizeCheckpointText(message.ToolCallID), Name: sanitizeCheckpointText(message.Name),
+		ID: message.ID, Role: message.Role,
+		ToolCallID: sanitizeCheckpointText(message.ToolCallID, secrets...),
+		Name:       sanitizeCheckpointText(message.Name, secrets...),
 	}
-	historyPage := false
-	if message.Role == roleTool && strings.TrimSpace(message.Name) == readSessionHistoryTool {
-		if page, ok := sessioncontext.HistoryPage(message.Content); ok {
-			if sanitizeConfiguredCheckpointText(page.Data) != page.Data ||
-				sanitizeConfiguredCheckpointText(message.Content) != message.Content {
-				return message, fmt.Errorf("saved history contains a configured secret; its byte cursor cannot be safely rewritten")
-			}
-			// The controller verifies this immutable fragment against its saved
-			// source in the same transaction as the receipt. Redaction happened
-			// before pagination; another text pass would corrupt the JSON.
-			source.Content, historyPage = message.Content, true
+	if savedID, ok := s.toolCallIDs[message.ToolCallID]; ok {
+		source.ToolCallID = savedID
+	}
+	var historyPage *store.SessionHistoryResult
+	if page, ok := sessioncontext.HistoryPage(message.Content); ok {
+		historyRead := message.Role == roleTool && strings.TrimSpace(message.Name) == readSessionHistoryTool
+		if historyRead && source.Name != message.Name {
+			return message, fmt.Errorf("saved history contains a configured secret in its tool identity")
 		}
-	}
-	if len(message.ToolCalls) > 0 {
-		calls, _, err := sanitizeCheckpointJSON(message.ToolCalls)
+		// Copies in any role retain receipt semantics. Check the original data
+		// before a text replacement can invalidate its byte coordinates.
+		if err := s.validateHistoryPage(saveCtx, page, secrets...); err != nil {
+			return message, err
+		}
+		if sanitizeConfiguredCheckpointText(message.Content, secrets...) != message.Content {
+			return message, fmt.Errorf("saved history contains a configured secret; its byte cursor cannot be safely rewritten")
+		}
+		canonical, err := json.Marshal(page)
 		if err != nil {
-			return message, fmt.Errorf("cannot sanitize Session tool arguments")
+			return message, fmt.Errorf("cannot encode saved history receipt")
 		}
+		// The controller checks this canonical fragment against the saved source
+		// in the same transaction as its receipt, regardless of message role.
+		source.Content = string(canonical)
+		if historyRead {
+			historyPage = &page
+		}
+	} else {
+		source.Content = sanitizeCheckpointText(message.Content, secrets...)
+	}
+	calls, callIDs, err := sanitizeCheckpointToolCalls(message, secrets...)
+	if err != nil {
+		return message, err
+	}
+	if len(calls) > 0 {
 		source.ToolCalls = calls
 	}
-	// Finish only the durable receipt on cancellation. No further tool runs, and
-	// the exact Session owner must still be valid throughout the store transaction.
-	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionContextIOTimeout)
-	defer cancel()
 	var saved []store.SessionMessage
 	if err := s.client.call(saveCtx, http.MethodPost, "/messages", []store.SessionMessage{source}, &saved,
 		store.MaxSessionContextMessageBytes+64*1024); err != nil {
@@ -269,12 +295,29 @@ func (s *workerSessionContext) persist(ctx context.Context, message llm.Message)
 	if len(saved) != 1 || saved[0].ID != message.ID || saved[0].Role != message.Role {
 		return message, fmt.Errorf("session source receipt does not match the saved message")
 	}
+	stored, err := sessioncontext.ModelMessage(saved[0])
+	if err != nil {
+		return message, err
+	}
+	if stored.ToolCallID != source.ToolCallID || len(stored.ToolCalls) != len(calls) {
+		return message, fmt.Errorf("session source receipt does not match the saved tool identities")
+	}
+	for i, call := range calls {
+		if stored.ToolCalls[i].ID != call.ID {
+			return message, fmt.Errorf("session source receipt does not match the saved tool identities")
+		}
+	}
+	// Register aliases only after a confirmed save. Execution and approval still
+	// use the provider's original IDs, even if a tool loads a credential later.
+	if len(callIDs) > 0 && s.toolCallIDs == nil {
+		s.toolCallIDs = make(map[string]string)
+	}
+	maps.Copy(s.toolCallIDs, callIDs)
 	s.sources[message.ID] = saved[0]
 	if message.ID == s.current.ID {
 		return message, nil
 	}
-	stored, err := sessioncontext.ModelMessage(saved[0])
-	if err == nil && historyPage {
+	if historyPage != nil {
 		// History reads are already bounded. Preserve the full page and its cursor
 		// in active context after committing the source and transcript preview.
 		stored.Content = source.Content
@@ -282,37 +325,69 @@ func (s *workerSessionContext) persist(ctx context.Context, message llm.Message)
 			s.unreadHistory = make(map[string]bool)
 		}
 		s.unreadHistory[stored.ID] = true
+		if s.historyPages == nil {
+			s.historyPages = make(map[string]store.SessionHistoryResult)
+		}
+		// Keep coordinates for later checkpoint checks, without retaining another
+		// copy of the page data alongside its saved transcript preview.
+		historyPage.Data = ""
+		s.historyPages[stored.ID] = *historyPage
 	}
-	return stored, err
+	return stored, nil
 }
 
-func sanitizeCheckpointText(value string) string {
-	return sanitizeConfiguredCheckpointText(redact.SensitiveText(value))
+func sanitizeCheckpointToolCalls(message llm.Message, secrets ...string) ([]llm.ToolCall, map[string]string, error) {
+	calls := make([]llm.ToolCall, len(message.ToolCalls))
+	ids := make(map[string]string, len(calls))
+	for i, call := range message.ToolCalls {
+		if call.ID == "" || ids[call.ID] != "" {
+			return nil, nil, fmt.Errorf("session tool calls require distinct, nonempty IDs")
+		}
+		// Derive the persisted identity from the source position, never from a
+		// provider ID that could contain a credential learned during execution.
+		digest := sha256.Sum256([]byte(message.ID + "\x00" + strconv.Itoa(i)))
+		id := "call_" + hex.EncodeToString(digest[:16])
+		arguments, _, err := sanitizeCheckpointJSON(call.Arguments, secrets...)
+		if err != nil {
+			return nil, nil, fmt.Errorf("cannot sanitize Session tool arguments")
+		}
+		encoded, err := json.Marshal(arguments)
+		if err != nil {
+			return nil, nil, fmt.Errorf("cannot encode sanitized Session tool arguments")
+		}
+		calls[i] = llm.ToolCall{ID: id, Name: sanitizeCheckpointText(call.Name, secrets...), Arguments: encoded}
+		ids[call.ID] = id
+	}
+	return calls, ids, nil
 }
 
-func sanitizeConfiguredCheckpointText(value string) string {
-	replace := func(secret string) {
-		value = strings.ReplaceAll(value, secret, "[REDACTED]")
-		encoded, _ := json.Marshal(secret)
-		value = strings.ReplaceAll(value, string(encoded[1:len(encoded)-1]), "[REDACTED]")
-	}
+func sanitizeCheckpointText(value string, secrets ...string) string {
+	return redact.SensitiveTextWithValues(value, configuredCheckpointSecrets(secrets...)...)
+}
+
+func sanitizeConfiguredCheckpointText(value string, secrets ...string) string {
+	return redact.KnownValues(value, configuredCheckpointSecrets(secrets...)...)
+}
+
+func configuredCheckpointSecrets(secrets ...string) []string {
+	values := slices.Clone(secrets)
 	for _, entry := range os.Environ() {
 		name, secret, _ := strings.Cut(entry, "=")
 		name = strings.ToUpper(name)
 		if len(secret) >= 8 && (strings.Contains(name, "API_KEY") || strings.Contains(name, "TOKEN") ||
 			strings.Contains(name, "PASSWORD") || strings.Contains(name, "SECRET")) {
-			replace(secret)
+			values = append(values, secret)
 		}
 	}
 	if token := workerServiceAccountToken(); len(token) >= 8 {
-		replace(token)
+		values = append(values, token)
 	}
-	return value
+	return values
 }
 
 // sanitizeCheckpointJSON checks decoded strings so JSON escaping cannot hide
 // configured secrets. Number-preserving decoding keeps tool arguments exact.
-func sanitizeCheckpointJSON(input any) (any, bool, error) {
+func sanitizeCheckpointJSON(input any, secrets ...string) (any, bool, error) {
 	data, err := json.Marshal(input)
 	if err != nil {
 		return nil, false, err
@@ -325,7 +400,7 @@ func sanitizeCheckpointJSON(input any) (any, bool, error) {
 	}
 	redacted := false
 	sanitizeText := func(text string) string {
-		clean := sanitizeCheckpointText(text)
+		clean := sanitizeCheckpointText(text, secrets...)
 		redacted = redacted || clean != text
 		return clean
 	}
@@ -335,7 +410,14 @@ func sanitizeCheckpointJSON(input any) (any, bool, error) {
 		case map[string]any:
 			clean := make(map[string]any, len(typed))
 			for key, child := range typed {
-				clean[sanitizeText(key)] = sanitize(child)
+				// Match the original field before a known value can mask its name.
+				if events.IsSensitiveExecutionEventKey(key) {
+					text, ok := child.(string)
+					redacted = redacted || !ok || text != events.ExecutionEventRedactedValue
+					clean[sanitizeText(key)] = events.ExecutionEventRedactedValue
+				} else {
+					clean[sanitizeText(key)] = sanitize(child)
+				}
 			}
 			return clean
 		case []any:
@@ -374,6 +456,7 @@ type checkpointDraft struct {
 func (s *workerSessionContext) makeCheckpoint(
 	ctx context.Context, provider llm.Provider, req *llm.CompletionRequest, recorder common.EventRecorder,
 ) (*store.SessionCheckpoint, error) {
+	secrets := redact.TrackedSecrets(s.secretContext)
 	var sources []store.SessionMessage
 	allowedIDs := make(map[string]bool)
 	var last store.SessionMessage
@@ -399,11 +482,20 @@ func (s *workerSessionContext) makeCheckpoint(
 	}
 	// Source JSON retains the original roles. Long tool output is already linked
 	// to saved data; further excerpts are explicit and remain retrievable by ID.
+	referenceCtx, cancelReferences := context.WithTimeout(ctx, sessionContextIOTimeout)
+	defer cancelReferences()
 	for i := range sources {
 		if sources[i].ID == s.current.ID {
 			// The exact current request appears once, with its committed source ID.
-			sources[i].Content = sanitizeCheckpointText(s.current.Content)
-		} else if sources[i].Role != roleUser && len(sources[i].Content) > 2048 {
+			sources[i].Content = s.current.Content
+		}
+		if err := s.prepareCheckpointSource(referenceCtx, &sources[i], secrets...); err != nil {
+			return nil, err
+		}
+		// Redact before excerpting so the cut cannot hide a nearly complete
+		// credential from full-value matching.
+		sources[i].Content = sanitizeCheckpointText(sources[i].Content, secrets...)
+		if sources[i].Role != roleUser && len(sources[i].Content) > 2048 {
 			sources[i].Content = truncateUTF8(sources[i].Content, 2048) +
 				"\n[Source excerpt; use read_session_history for the saved result.]"
 		}
@@ -413,7 +505,13 @@ func (s *workerSessionContext) makeCheckpoint(
 		Previous         *store.SessionCheckpoint `json:"previousCheckpoint,omitempty"`
 		Sources          []store.SessionMessage   `json:"sources"`
 	}{s.current.ID, s.checkpoint, sources}
-	data, err := json.Marshal(payload)
+	// A credential may have been loaded after an older source or checkpoint was
+	// read. Apply the current value set to all reference fields before generation.
+	cleanPayload, _, err := sanitizeCheckpointJSON(payload, secrets...)
+	if err != nil {
+		return nil, fmt.Errorf("cannot sanitize checkpoint sources")
+	}
+	data, err := json.Marshal(cleanPayload)
 	if err != nil {
 		return nil, fmt.Errorf("cannot encode checkpoint sources")
 	}
@@ -449,7 +547,7 @@ func (s *workerSessionContext) makeCheckpoint(
 		common.WithEventContent(eventContent(map[string]any{
 			"purpose": "session_checkpoint", "inputTokens": response.InputTokens, "outputTokens": response.OutputTokens,
 		})))
-	note, referenced, err := parseCheckpointNote(response.Content, allowedIDs)
+	note, referenced, err := parseCheckpointNote(response.Content, allowedIDs, secrets...)
 	if err != nil {
 		return nil, err
 	}
@@ -470,8 +568,8 @@ func (s *workerSessionContext) makeCheckpoint(
 	return &committed, nil
 }
 
-func parseCheckpointNote(content string, allowedIDs map[string]bool) ([]byte, []string, error) {
-	if sanitizeCheckpointText(content) != content {
+func parseCheckpointNote(content string, allowedIDs map[string]bool, secrets ...string) ([]byte, []string, error) {
+	if sanitizeCheckpointText(content, secrets...) != content {
 		return nil, nil, fmt.Errorf("checkpoint note contains credential-shaped or configured secret content")
 	}
 	var draft checkpointDraft
@@ -483,7 +581,7 @@ func parseCheckpointNote(content string, allowedIDs map[string]bool) ([]byte, []
 	if decoder.Decode(new(any)) != io.EOF {
 		return nil, nil, fmt.Errorf("checkpoint note contains trailing data")
 	}
-	if _, sensitive, err := sanitizeCheckpointJSON(draft); err != nil || sensitive {
+	if _, sensitive, err := sanitizeCheckpointJSON(draft, secrets...); err != nil || sensitive {
 		return nil, nil, fmt.Errorf("checkpoint note contains credential-shaped or configured secret content")
 	}
 	claims := append([]checkpointClaim{draft.Goal}, draft.Constraints...)
@@ -660,15 +758,12 @@ func (s *workerSessionContext) readHistory(ctx context.Context, arguments json.R
 		args.Limit < 1 || args.Limit > store.MaxSessionHistoryReadBytes {
 		return "", fmt.Errorf("history message ID, offset, or limit is outside the allowed bounds")
 	}
-	suffix := "/history/" + url.PathEscape(args.MessageID) +
-		"?offset=" + strconv.Itoa(args.Offset) + "&limit=" + strconv.Itoa(args.Limit)
-	var result store.SessionHistoryResult
-	if err := s.client.call(ctx, http.MethodGet, suffix, nil, &result, 128*1024); err != nil {
+	result, err := s.readHistoryPage(ctx, args.MessageID, args.Offset, args.Limit)
+	if err != nil {
 		return "", err
 	}
-	if result.MessageID != args.MessageID || result.Offset != args.Offset || len(result.Data) > args.Limit ||
-		result.NextOffset != result.Offset+len(result.Data) || result.NextOffset > result.TotalBytes {
-		return "", fmt.Errorf("history receipt does not match the bounded source request")
+	if err := s.validateHistoryPage(ctx, result, redact.TrackedSecrets(s.secretContext)...); err != nil {
+		return "", err
 	}
 	data, err := json.Marshal(result)
 	return string(data), err

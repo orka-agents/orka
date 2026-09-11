@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -18,6 +20,7 @@ import (
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/sessioncontext"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 const (
@@ -56,7 +59,8 @@ func (h *InternalHandlers) sessionContextPolicy(c fiber.Ctx, write bool) (*taskS
 		}
 		return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to load task context policy")
 	}
-	if err := authorizer.verifyTaskWorker(c.Context(), GetUserInfo(c), task); err != nil {
+	job, err := authorizer.taskWorkerJob(c.Context(), GetUserInfo(c), task)
+	if err != nil {
 		return nil, err
 	}
 	storage, ok := h.sessionStore.(store.SessionContextStore)
@@ -68,7 +72,8 @@ func (h *InternalHandlers) sessionContextPolicy(c fiber.Ctx, write bool) (*taskS
 		ref := task.Spec.SessionRef
 		policy.name, policy.through = ref.Name, ref.ThroughMessageID
 		policy.promptIncluded = ref.PromptIncluded
-		policy.writable = ref.Append && ref.ThroughMessageID == "" && !ref.PromptIncluded
+		policy.writable = ref.Append && ref.ThroughMessageID == "" && !ref.PromptIncluded &&
+			sessionContextWorkerEnabled(task, job)
 		if ref.MaxMessages > 0 {
 			policy.maxMessages = min(int(ref.MaxMessages), sessioncontext.MaxBootstrapMessages)
 		}
@@ -102,9 +107,34 @@ func (h *InternalHandlers) sessionContextPolicy(c fiber.Ctx, write bool) (*taskS
 		policy.writable = false
 	}
 	if write && (!policy.writable || task.UID == "" || !task.DeletionTimestamp.IsZero() || isTerminalInternalTaskPhase(task.Status.Phase)) {
-		return nil, fiber.NewError(fiber.StatusForbidden, "checkpoint writes require a live Task with an appending, unbounded Session")
+		return nil, fiber.NewError(fiber.StatusForbidden, "checkpoint writes require an opted-in AI worker with a live Task and an appending, unbounded Session")
 	}
 	return policy, nil
+}
+
+func sessionContextWorkerEnabled(task *corev1alpha1.Task, job *batchv1.Job) bool {
+	if task.Spec.Type != corev1alpha1.TaskTypeAI || !sessionContextOptIn(task.Spec.Env) {
+		return false
+	}
+	// The authenticated Pod is tied to this current controller-owned Job. Its
+	// immutable template prevents a later Task edit or a Pod's environment from
+	// granting a capability absent at dispatch.
+	for _, container := range job.Spec.Template.Spec.Containers {
+		if container.Name == "worker" {
+			return sessionContextOptIn(container.Env)
+		}
+	}
+	return false
+}
+
+func sessionContextOptIn(envVars []corev1.EnvVar) bool {
+	enabled := false
+	for _, envVar := range envVars {
+		if envVar.Name == workerenv.SessionCheckpointsEnabled {
+			enabled = envVar.ValueFrom == nil && workerenv.IsTrue(envVar.Value)
+		}
+	}
+	return enabled
 }
 
 func (p *taskSessionContextPolicy) write() store.SessionContextWrite {

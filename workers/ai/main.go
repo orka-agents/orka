@@ -43,6 +43,7 @@ import (
 	"github.com/orka-agents/orka/internal/llm"
 	_ "github.com/orka-agents/orka/internal/llm/anthropic"
 	_ "github.com/orka-agents/orka/internal/llm/openai"
+	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/sessioncontext"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
@@ -125,6 +126,9 @@ func run() (err error) {
 	if err := workerEnv.ValidateRequired(); err != nil {
 		return err
 	}
+	if workerenv.IsTrue(os.Getenv(workerenv.SessionCheckpointsEnabled)) {
+		ctx = redact.WithTrackedSecrets(ctx)
+	}
 	settings, err := parseModelSettings(workerEnv)
 	if err != nil {
 		return err
@@ -183,6 +187,7 @@ func run() (err error) {
 	if apiKey == "" {
 		return fmt.Errorf("API key for %s not found", provider)
 	}
+	redact.TrackSecrets(ctx, apiKey)
 
 	// Create LLM provider
 	llmProvider, err := llm.NewProvider(provider, llm.ProviderConfig{
@@ -224,6 +229,7 @@ func run() (err error) {
 				fmt.Printf("Warning: skipping fallback %d: %v\n", i, err)
 				continue
 			}
+			redact.TrackSecrets(ctx, fallbackEnv.APIKey)
 
 			fallbacks = append(fallbacks, llm.FallbackEntry{
 				Provider:      llm.NewRetryProvider(fbProvider, 0),
@@ -452,6 +458,7 @@ func loadCustomTools(
 			fmt.Printf("Warning: tool %q not found as built-in or CRD: %v\n", name, err)
 			continue
 		}
+		worker.TrackToolHeaderCredentials(ctx, tool)
 		bindApprovalAuthRefVersion(ctx, k8sClient, namespace, tool)
 		if err := bindApprovalOutboundAccessPolicyVersion(ctx, k8sClient, namespace, tool); err != nil {
 			fmt.Printf("Warning: outbound access policy approval binding for tool %q failed: %v\n", tool.Name, err)
@@ -503,6 +510,7 @@ func bindApprovalAuthRefVersion(
 		)
 		return
 	}
+	redact.TrackSecrets(ctx, strings.TrimSpace(string(secret.Data[tool.Spec.HTTP.AuthSecretRef.Key])))
 	if tool.Annotations == nil {
 		tool.Annotations = map[string]string{}
 	}
@@ -1217,6 +1225,12 @@ func executeAgentLoopWithEvents(
 	eventRecorder common.EventRecorder,
 	baseToolCtxOpt ...*tools.ToolContext,
 ) (string, error) {
+	if workerenv.IsTrue(os.Getenv(workerenv.SessionCheckpointsEnabled)) {
+		ctx = redact.WithTrackedSecrets(ctx)
+		for _, tool := range customTools {
+			worker.TrackToolHeaderCredentials(ctx, tool)
+		}
+	}
 	sessionContext, active, err := newWorkerSessionContext(ctx, messages)
 	if err != nil {
 		return "", err

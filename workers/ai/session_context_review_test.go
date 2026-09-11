@@ -91,9 +91,14 @@ func TestSessionCheckpointParkedApprovalKeepsCompleteExchange(t *testing.T) {
 	}
 	_, err = llm.FitMessagesKeeping(messages, 10000, 0)
 	require.NoError(t, err, "parking a known unexecuted action must leave a complete exchange for a later Task")
-	for _, callID := range []string{"call-dispatch", "call-read"} {
+	var calls []llm.ToolCall
+	for _, message := range messages {
+		calls = append(calls, message.ToolCalls...)
+	}
+	require.Len(t, calls, 2)
+	for _, call := range calls {
 		require.True(t, slices.ContainsFunc(messages, func(message llm.Message) bool {
-			return message.Role == "tool" && message.ToolCallID == callID && strings.TrimSpace(message.Content) != ""
+			return message.Role == "tool" && message.ToolCallID == call.ID && strings.TrimSpace(message.Content) != ""
 		}))
 	}
 }

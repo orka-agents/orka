@@ -47,21 +47,20 @@ func (s *Store) AppendContextMessages(
 			// matchSessionContextMessageTx checks it before accepting the retry.
 			prepared[i].Content = message.Content
 		}
-		if message.Role == "tool" && strings.TrimSpace(message.Name) == sessioncontext.HistoryToolName {
-			if page, ok := sessioncontext.HistoryPage(message.Content); ok {
-				// The transaction below verifies every byte against saved source
-				// data before this page can bypass ordinary text redaction.
-				// Encode only the decoded fields: duplicate JSON members must not
-				// smuggle unverified text through the original envelope.
-				canonical, err := json.Marshal(page)
-				if err != nil {
-					return nil, err
-				}
-				prepared[i].Content = string(canonical)
-				historyPages[i] = page
-			} else if json.Valid([]byte(message.Content)) {
-				return nil, store.ValidationErrorf("history tool result contains an invalid page")
+		if page, ok := sessioncontext.HistoryPage(message.Content); ok {
+			// Copies retain receipt semantics in every role. The transaction
+			// verifies every byte against saved source data before bypassing text
+			// redaction. Encode only decoded fields so duplicate JSON members
+			// cannot retain unverified text from the original envelope.
+			canonical, err := json.Marshal(page)
+			if err != nil {
+				return nil, err
 			}
+			prepared[i].Content = string(canonical)
+			historyPages[i] = page
+		} else if message.Role == "tool" && strings.TrimSpace(message.Name) == sessioncontext.HistoryToolName &&
+			json.Valid([]byte(message.Content)) {
+			return nil, store.ValidationErrorf("history tool result contains an invalid page")
 		}
 	}
 	tx, err := s.db.BeginTx(ctx, nil)

@@ -54,8 +54,7 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 		}
 
 		blockIndex := 0
-		messages := make([]llm.Message, len(capturedReq.Messages))
-		copy(messages, capturedReq.Messages)
+		messages, currentRequestID := newToolLoopMessages(capturedReq.Messages)
 		totalOutputTokens := 0
 		repetitionTracker := make(map[string]int)
 		exposedToolNames := completionToolNameSet(capturedReq.Tools)
@@ -79,7 +78,7 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 			// Truncate conversation if needed
 			if h.config.MaxSessionSize > 0 {
 				tokenBudget := h.config.MaxSessionSize / 4
-				messages = llm.TruncateMessages(messages, tokenBudget)
+				messages = truncateToolLoopMessages(messages, tokenBudget, currentRequestID)
 			}
 
 			// Build request for this iteration

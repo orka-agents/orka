@@ -739,6 +739,8 @@ func decodeToolArguments(args json.RawMessage) (map[string]any, error) {
 
 //nolint:gocyclo // Request preparation centralizes auth, protocol, transaction, and outbound policy invariants.
 func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage) (preparedToolRequest, error) {
+	configuredSecrets := configuredToolHeaderSecrets(tool)
+	redact.TrackSecrets(ctx, configuredSecrets...)
 	params, err := decodeToolArguments(args)
 	if err != nil {
 		return preparedToolRequest{}, fmt.Errorf("failed to parse tool arguments: %w", err)
@@ -801,12 +803,8 @@ func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.To
 		req.Header.Set("Accept", "application/json, text/event-stream")
 		req.Header.Set(mcpProtocolVersionHeader, mcpProtocolVersion)
 	}
-	configuredSecrets := []string{}
 	for k, v := range httpConfig.Headers {
 		req.Header.Set(k, v)
-		if sensitiveToolHeader(k) {
-			configuredSecrets = append(configuredSecrets, sensitiveHeaderValues(v)...)
-		}
 	}
 	approvalIdempotencyKey := toolIdempotencyKeyFromContext(ctx)
 	if approvalIdempotencyKey != "" {
@@ -847,6 +845,7 @@ func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.To
 		mcp:               isMCP,
 		trustedActorRoute: isMCP && routeHost != "",
 	}
+	defer func() { redact.TrackSecrets(ctx, prepared.redactionSecrets...) }()
 	if tool != nil && tool.Spec.HTTP != nil && tool.Spec.HTTP.OutboundAccessPolicyRef != nil {
 		if err := e.applyOutboundAccessPolicy(ctx, tool, &prepared); err != nil {
 			return preparedToolRequest{}, err
@@ -1010,6 +1009,25 @@ func sensitiveHeaderValues(value string) []string {
 	fields := strings.Fields(value)
 	if len(fields) == 2 && (strings.EqualFold(fields[0], "Bearer") || strings.EqualFold(fields[0], "Basic")) {
 		values = append(values, fields[1])
+	}
+	return values
+}
+
+// TrackToolHeaderCredentials records already-loaded sensitive headers for later
+// persistence redaction. It performs no credential lookups.
+func TrackToolHeaderCredentials(ctx context.Context, tool *corev1alpha1.Tool) {
+	redact.TrackSecrets(ctx, configuredToolHeaderSecrets(tool)...)
+}
+
+func configuredToolHeaderSecrets(tool *corev1alpha1.Tool) []string {
+	if tool == nil || tool.Spec.HTTP == nil {
+		return nil
+	}
+	var values []string
+	for name, value := range tool.Spec.HTTP.Headers {
+		if sensitiveToolHeader(name) {
+			values = append(values, sensitiveHeaderValues(value)...)
+		}
 	}
 	return values
 }
@@ -1660,15 +1678,7 @@ func safeToolTransportError(ctx context.Context, err error, secrets ...string) e
 }
 
 func redactToolSensitiveText(body string, secrets ...string) string {
-	redacted := body
-	for _, secret := range secrets {
-		secret = strings.TrimSpace(secret)
-		if secret == "" {
-			continue
-		}
-		redacted = strings.ReplaceAll(redacted, secret, "[REDACTED]")
-	}
-	return redact.SensitiveText(redacted)
+	return redact.SensitiveTextWithValues(body, compactToolSecrets(secrets...)...)
 }
 
 func redactToolHTTPErrorBody(body string, secrets ...string) string {
@@ -1680,7 +1690,12 @@ func redactToolHTTPErrorBody(body string, secrets ...string) string {
 }
 
 // getSecretKey reads a key from a secret (mounted path or Kubernetes API)
-func (e *ToolExecutor) getSecretKey(ctx context.Context, secretName, key string) (string, error) {
+func (e *ToolExecutor) getSecretKey(ctx context.Context, secretName, key string) (value string, err error) {
+	defer func() {
+		if err == nil {
+			redact.TrackSecrets(ctx, value)
+		}
+	}()
 	if e != nil {
 		if err := outboundaccess.ValidateCredentialAuthority(
 			e.credentialAuthorityEnforced,

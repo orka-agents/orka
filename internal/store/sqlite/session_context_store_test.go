@@ -182,6 +182,48 @@ func TestSessionContextHistoryPagesRequireMatchingSavedSources(t *testing.T) {
 	require.JSONEq(t, original.Content, recovered.Content)
 }
 
+func TestSessionContextCopiedHistoryPagesPreserveCanonicalData(t *testing.T) {
+	for _, role := range []string{"assistant", "user", "tool"} {
+		t.Run(role, func(t *testing.T) {
+			s, write := newSessionContextTestStore(t)
+			ctx := context.Background()
+			appendSessionContextTestMessages(t, s, write, store.SessionMessage{
+				ID: "source", Role: "assistant", Content: "token is [REDACTED]",
+				SourceType: sessioncontext.SourceType,
+			})
+			page, err := s.ReadSessionHistory(ctx, store.SessionHistoryRead{
+				Namespace: write.Namespace, SessionName: write.SessionName, MessageID: "source", Limit: 4096,
+			})
+			require.NoError(t, err)
+			canonical, err := json.Marshal(page)
+			require.NoError(t, err)
+			original := store.SessionMessage{
+				ID: "copy", Role: role, Content: `{"data":"unverified-placeholder",` + string(canonical[1:]),
+				SourceType: sessioncontext.SourceType,
+			}
+			if role == "tool" {
+				original.Name, original.ToolCallID = "inspect", "copy-call"
+			}
+			saved := appendSessionContextTestMessages(t, s, write, original)
+			require.Equal(t, string(canonical), saved[0].Content)
+			require.Equal(t, saved, appendSessionContextTestMessages(t, s, write, original))
+			data := readAllSessionContextTestHistory(t, s, store.SessionHistoryRead{
+				Namespace: write.Namespace, SessionName: write.SessionName, MessageID: original.ID, Limit: 4096,
+			})
+			var recovered store.SessionMessage
+			require.NoError(t, json.Unmarshal(data, &recovered))
+			require.Equal(t, string(canonical), recovered.Content)
+			forged := *page
+			forged.Data = strings.Repeat("x", len(forged.Data))
+			content, err := json.Marshal(forged)
+			require.NoError(t, err)
+			original.ID, original.Content = "forged-copy", string(content)
+			_, err = s.AppendContextMessages(ctx, write, []store.SessionMessage{original})
+			require.ErrorContains(t, err, "does not match")
+		})
+	}
+}
+
 func TestSessionCheckpointRejectsMissingSavedOutput(t *testing.T) {
 	s, write := newSessionContextTestStore(t)
 	ctx := context.Background()

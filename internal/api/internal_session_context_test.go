@@ -29,6 +29,7 @@ import (
 	"github.com/orka-agents/orka/internal/sessioncontext"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 func TestTaskSessionContextPreservesNumericArguments(t *testing.T) {
@@ -371,6 +372,63 @@ func TestTaskSessionContextWritesRequireCurrentWorkerAndAppendingSession(t *test
 	}
 }
 
+func TestTaskSessionContextWritesRequireAdmittedAIOptIn(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change func(*taskSessionContextAPI)
+	}{
+		{"container Task", func(f *taskSessionContextAPI) { f.task.Spec.Type = corev1alpha1.TaskTypeContainer }},
+		{"agent Task", func(f *taskSessionContextAPI) { f.task.Spec.Type = corev1alpha1.TaskTypeAgent }},
+		{"Task opt-in absent", func(f *taskSessionContextAPI) { f.task.Spec.Env = nil }},
+		{"Task opt-in disabled", func(f *taskSessionContextAPI) { f.task.Spec.Env[0].Value = "false" }},
+		{"Task opt-in indirect", func(f *taskSessionContextAPI) {
+			f.task.Spec.Env[0].ValueFrom = &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "settings"}, Key: "checkpoints",
+			}}
+		}},
+		{"Job opt-in absent", func(f *taskSessionContextAPI) {
+			f.job.Spec.Template.Spec.Containers[0].Env = nil
+		}},
+		{"Job opt-in disabled", func(f *taskSessionContextAPI) {
+			f.job.Spec.Template.Spec.Containers[0].Env[0].Value = "false"
+		}},
+		{"Job opt-in indirect", func(f *taskSessionContextAPI) {
+			f.job.Spec.Template.Spec.Containers[0].Env[0].ValueFrom = &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "settings"}, Key: "checkpoints",
+				},
+			}
+		}},
+		{"sidecar opt-in only", func(f *taskSessionContextAPI) {
+			f.job.Spec.Template.Spec.Containers[0].Name = "sidecar"
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newTaskSessionContextAPI(t)
+			test.change(f)
+			f.updateTask(t)
+			require.NoError(t, f.client.Update(context.Background(), f.job))
+			message := f.message("source", "assistant", "Preserve the user constraint.")
+			checkpoint := f.checkpoint("checkpoint", message.ID, "Preserve the user constraint.", message.ID)
+			for _, request := range []struct {
+				path string
+				body any
+			}{{"/messages", []store.SessionMessage{message}}, {"/checkpoints", checkpoint}} {
+				status, body := f.request(t, http.MethodPost, f.path()+request.path, request.body)
+				require.Equal(t, http.StatusForbidden, status, string(body))
+			}
+			status, body := f.request(t, http.MethodGet, f.path(), nil)
+			require.Equal(t, http.StatusOK, status, string(body))
+			var bootstrap sessioncontext.Bootstrap
+			require.NoError(t, json.Unmarshal(body, &bootstrap))
+			require.False(t, bootstrap.Writable)
+			saved, err := f.store.GetSession(context.Background(), f.task.Namespace, f.sessionName)
+			require.NoError(t, err)
+			require.Zero(t, saved.MessageCount)
+		})
+	}
+}
+
 func TestTaskSessionContextMessageIdentityRolesAndIdempotency(t *testing.T) {
 	f := newTaskSessionContextAPI(t)
 	request := f.message("request", "user", "Keep the API unchanged.")
@@ -651,10 +709,16 @@ func newTaskSessionContextAPI(t *testing.T) *taskSessionContextAPI {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	f := &taskSessionContextAPI{db: db, store: sqlite.NewStore(db, ":memory:"), task: internalCallerAuthTask(), sessionName: "work-session"}
+	f.task.Spec.Type = corev1alpha1.TaskTypeAI
+	f.task.Spec.Env = []corev1.EnvVar{workerenv.Env(workerenv.SessionCheckpointsEnabled, "true")}
 	f.task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: f.sessionName, Append: true, MaxMessages: 50}
 	f.task.Status.Phase = corev1alpha1.TaskPhaseRunning
 	f.job = internalCallerAuthJob(f.task, "job-a", "job-uid")
+	f.job.Spec.Template.Spec.Containers = []corev1.Container{{
+		Name: "worker", Env: append([]corev1.EnvVar(nil), f.task.Spec.Env...),
+	}}
 	f.pod = internalCallerAuthPod(f.task, "worker-pod", "worker-pod-uid", f.job)
+	f.pod.Spec.Containers = []corev1.Container{{Name: "worker", Env: append([]corev1.EnvVar(nil), f.task.Spec.Env...)}}
 	f.user = internalCallerAuthWorkerUser(f.pod.Name, string(f.pod.UID))
 	f.client = fake.NewClientBuilder().WithScheme(internalCallerAuthScheme(t)).WithObjects(f.task, f.job, f.pod).Build()
 	f.createSession(t, f.task.Namespace, f.sessionName, "task")
