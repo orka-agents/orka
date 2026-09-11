@@ -4009,21 +4009,15 @@ func TestHandlers_CreateAgent_DefaultsBuiltInContractFromExecutionMode(t *testin
 		wantStatus int
 	}{
 		{
-			name:       "harness v1",
-			mode:       executionmode.HarnessV1,
-			want:       corev1alpha1.AgentRuntimeContractHarnessV1,
-			wantStatus: http.StatusCreated,
-		},
-		{
 			name:       "harness v2",
 			mode:       executionmode.HarnessV2,
 			want:       corev1alpha1.AgentRuntimeContractHarnessV2,
 			wantStatus: http.StatusCreated,
 		},
 		{
-			name:       "opposite explicit contract",
-			mode:       executionmode.HarnessV1,
-			explicit:   corev1alpha1.AgentRuntimeContractHarnessV2,
+			name:       "reject explicit v1 contract",
+			mode:       executionmode.HarnessV2,
+			explicit:   corev1alpha1.AgentRuntimeContractVersion("orka.harness.v1"),
 			wantStatus: http.StatusBadRequest,
 		},
 	}

@@ -15,9 +15,7 @@ import (
 	"flag"
 	"fmt"
 	"math"
-	"net/http"
 	"os"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -71,7 +69,6 @@ import (
 	_ "github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
-	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 
 	"github.com/orka-agents/orka/internal/store/sqlite"
@@ -195,7 +192,6 @@ func validateDisabledSubstrateRecoveryConfig(
 	reader crclient.Reader,
 	watchNamespace string,
 	controllerNamespace string,
-	acpRuntimeEnabled bool,
 	cfg controller.SubstrateConfig,
 	configErr error,
 ) error {
@@ -204,22 +200,21 @@ func validateDisabledSubstrateRecoveryConfig(
 	}
 
 	recoveryState := ""
-	// Only registered cleanup controllers can service these obligations.
-	// MCP Tool and actor-pool cleanup is independent of the ACP runtime mode.
-	if acpRuntimeEnabled {
-		pools := &corev1alpha1.RuntimePoolList{}
-		if err := reader.List(ctx, pools, crclient.InNamespace(strings.TrimSpace(watchNamespace))); err != nil {
-			return fmt.Errorf("list RuntimePools for disabled substrate recovery: %w", err)
-		}
-		for i := range pools.Items {
-			workspace := pools.Items[i].Spec.ExecutionWorkspace
-			if workspace == nil || workspace.Provider != corev1alpha1.WorkspaceProviderSubstrate {
-				continue
-			}
-			recoveryState = fmt.Sprintf("RuntimePool %s/%s", pools.Items[i].Namespace, pools.Items[i].Name)
-			break
-		}
+	// Retain recovery configuration while any owned resource still needs cleanup.
+
+	pools := &corev1alpha1.RuntimePoolList{}
+	if err := reader.List(ctx, pools, crclient.InNamespace(strings.TrimSpace(watchNamespace))); err != nil {
+		return fmt.Errorf("list RuntimePools for disabled substrate recovery: %w", err)
 	}
+	for i := range pools.Items {
+		workspace := pools.Items[i].Spec.ExecutionWorkspace
+		if workspace == nil || workspace.Provider != corev1alpha1.WorkspaceProviderSubstrate {
+			continue
+		}
+		recoveryState = fmt.Sprintf("RuntimePool %s/%s", pools.Items[i].Namespace, pools.Items[i].Name)
+		break
+	}
+
 	if recoveryState == "" {
 		var err error
 		recoveryState, err = controller.FindSubstrateMCPRecoveryState(ctx, reader, watchNamespace)
@@ -227,7 +222,7 @@ func validateDisabledSubstrateRecoveryConfig(
 			return err
 		}
 	}
-	if recoveryState == "" && acpRuntimeEnabled {
+	if recoveryState == "" {
 		var err error
 		recoveryState, err = controller.FindSubstrateRecoveryJournal(ctx, reader, controllerNamespace)
 		if err != nil {
@@ -303,13 +298,6 @@ func main() {
 	var maxTasksPerNamespace int
 	var controllerModeValue string
 	var executionModeControllerUsernames string
-	var harnessV1Endpoint string
-	var harnessV1CAFile string
-	var harnessV1AuthSecretNamespace string
-	var harnessV1AuthSecretName string
-	var harnessV1AuthSecretKey string
-	var harnessV1DispatchInterval time.Duration
-	var harnessV1DispatchWorkers int
 	var acpIdlePoolTTL time.Duration
 	var acpCodexRuntimeImage string
 	var acpClaudeRuntimeImage string
@@ -393,8 +381,8 @@ func main() {
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
-	flag.StringVar(&controllerModeValue, "controller-mode", os.Getenv("ORKA_CONTROLLER_MODE"),
-		"Required controller mode: harness-v1 or harness-v2. An installation never serves both modes.")
+	flag.StringVar(&controllerModeValue, "controller-mode", envStringDefault("ORKA_CONTROLLER_MODE", string(executionmode.HarnessV2)),
+		"Controller execution identity. Only harness-v2 is supported.")
 	flag.StringVar(&executionModeControllerUsernames, "execution-mode-controller-usernames",
 		os.Getenv("ORKA_EXECUTION_MODE_CONTROLLER_USERNAMES"),
 		"Comma-separated exact Kubernetes usernames authorized for controller-owned admission writes.")
@@ -508,25 +496,6 @@ func main() {
 		"When true, restrict users to their ServiceAccount's namespace for all operations.")
 	flag.IntVar(&maxTasksPerNamespace, "max-tasks-per-namespace", 0,
 		"Maximum active tasks per namespace (0 = unlimited).")
-	flag.StringVar(&harnessV1Endpoint, "harness-v1-endpoint", os.Getenv("ORKA_HARNESS_V1_ENDPOINT"),
-		"Base URL of the built-in harness v1 wrapper Service.")
-	flag.StringVar(&harnessV1CAFile, "harness-v1-ca-file", os.Getenv("ORKA_HARNESS_V1_CA_FILE"),
-		"CA bundle used to authenticate built-in and registered harness v1 Services.")
-	flag.StringVar(&harnessV1AuthSecretNamespace, "harness-v1-auth-secret-namespace",
-		os.Getenv("ORKA_HARNESS_V1_AUTH_SECRET_NAMESPACE"),
-		"Namespace of the dedicated harness v1 wrapper bearer-token Secret.")
-	flag.StringVar(&harnessV1AuthSecretName, "harness-v1-auth-secret-name",
-		os.Getenv("ORKA_HARNESS_V1_AUTH_SECRET_NAME"),
-		"Name of the dedicated harness v1 wrapper bearer-token Secret.")
-	flag.StringVar(&harnessV1AuthSecretKey, "harness-v1-auth-secret-key",
-		envStringDefault("ORKA_HARNESS_V1_AUTH_SECRET_KEY", "token"),
-		"Key in the dedicated harness v1 wrapper bearer-token Secret.")
-	flag.DurationVar(&harnessV1DispatchInterval, "harness-v1-dispatch-interval",
-		envDurationDefault("ORKA_HARNESS_V1_DISPATCH_INTERVAL", controller.DefaultHarnessV1DispatchInterval),
-		"Interval between durable harness v1 attempt recovery scans.")
-	flag.IntVar(&harnessV1DispatchWorkers, "harness-v1-dispatch-workers",
-		controller.DefaultHarnessV1DispatchWorkers,
-		"Maximum concurrent harness v1 attempt workers.")
 	flag.DurationVar(&acpIdlePoolTTL, "acp-idle-pool-ttl", envDurationDefault("ORKA_ACP_IDLE_POOL_TTL", controller.DefaultACPIdlePoolTTL),
 		"Scale an idle ACP RuntimePool to zero after this duration.")
 	flag.StringVar(&acpCodexRuntimeImage, "acp-codex-runtime-image", os.Getenv("ORKA_ACP_CODEX_RUNTIME_IMAGE"),
@@ -780,6 +749,11 @@ func main() {
 	acpUpgradeDrainOptions.BindFlags(flag.CommandLine)
 	flag.Parse()
 	taskProvenanceProtected := taskProvenanceAdmissionEnabled || taskProvenanceAdmissionExternal
+	mode, err := executionmode.Parse(controllerModeValue)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	if handled, err := controller.RunACPUpgradeDrainTriggerMode(context.Background(), acpUpgradeDrainOptions); handled {
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "ACP planned-upgrade drain trigger failed")
@@ -787,14 +761,9 @@ func main() {
 		}
 		return
 	}
-	mode, err := executionmode.Parse(controllerModeValue)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
 	watchNamespace = strings.TrimSpace(watchNamespace)
 	if watchNamespace == "" {
-		fmt.Fprintln(os.Stderr, "--watch-namespace is required; controller modes cannot use a cluster-wide watch")
+		fmt.Fprintln(os.Stderr, "--watch-namespace is required; controllers cannot use a cluster-wide watch")
 		os.Exit(1)
 	}
 	acpUpgradeDrainOptions.WatchNamespace = watchNamespace
@@ -802,16 +771,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "--enforce-namespace-isolation=true is required for a static controller installation")
 		os.Exit(1)
 	}
-	harnessV1Enabled := mode == executionmode.HarnessV1
-	acpRuntimeEnabled := mode == executionmode.HarnessV2
-	if harnessV1Enabled {
-		// Cluster-scoped gateway/workspace infrastructure is owned only by the
-		// harness-v2 installation. A v1 installation must remain namespaced.
-		gatewayEnabled = false
-		workspaceProviderAPIEnabled = false
-		workspaceClassUseAdmissionEnabled = false
-		fakeWorkspaceProviderEnabled = false
-	}
+
 	if !enableLeaderElection {
 		fmt.Fprintln(os.Stderr, "--leader-elect=true is required for an isolated controller installation")
 		os.Exit(1)
@@ -821,40 +781,12 @@ func main() {
 		os.Exit(1)
 	}
 	if err := validateAgentExecutionSnapshotOptions(
-		mode,
 		agentExecutionSnapshotKeyFile,
 		agentExecutionSnapshotRetention,
 		agentExecutionSnapshotRetentionInterval,
 	); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
-	}
-	if harnessV1Enabled {
-		missing := make([]string, 0, 5)
-		for name, value := range map[string]string{
-			"--harness-v1-endpoint":              harnessV1Endpoint,
-			"--harness-v1-ca-file":               harnessV1CAFile,
-			"--harness-v1-auth-secret-namespace": harnessV1AuthSecretNamespace,
-			"--harness-v1-auth-secret-name":      harnessV1AuthSecretName,
-			"--harness-v1-auth-secret-key":       harnessV1AuthSecretKey,
-		} {
-			if strings.TrimSpace(value) == "" {
-				missing = append(missing, name)
-			}
-		}
-		if len(missing) != 0 {
-			slices.Sort(missing)
-			fmt.Fprintf(os.Stderr, "harness v1 requires %s\n", strings.Join(missing, ", "))
-			os.Exit(1)
-		}
-		if err := validateHarnessV1TLSEndpoint(harnessV1Endpoint); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		if err := validateHarnessV1DispatchOptions(harnessV1DispatchInterval, harnessV1DispatchWorkers); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
 	}
 
 	// Empty worker ServiceAccount flags retain the package defaults for callers that
@@ -1079,12 +1011,9 @@ func main() {
 
 	// Tenant resources remain namespace-scoped. Harness v2 also watches its
 	// runtime children and the controller's durable checkpoint records.
-	runtimeCacheNamespace := ""
-	controllerCacheNamespace := ""
-	if acpRuntimeEnabled {
-		runtimeCacheNamespace = acpRuntimeNamespace
-		controllerCacheNamespace = currentPodNamespace()
-	}
+	runtimeCacheNamespace := acpRuntimeNamespace
+	controllerCacheNamespace := currentPodNamespace()
+
 	mgrOptions.Cache = managerCacheOptions(
 		watchNamespace,
 		runtimeCacheNamespace,
@@ -1120,7 +1049,6 @@ func main() {
 			mgr.GetAPIReader(),
 			watchNamespace,
 			currentPodNamespace(),
-			acpRuntimeEnabled,
 			substrateConfig,
 			substrateConfigErr,
 		)
@@ -1204,30 +1132,29 @@ func main() {
 		}
 	}
 	var acpMCPRegistry *tools.Registry
-	if acpRuntimeEnabled {
-		acpMCPRegistry = tools.NewRegistry()
-		if err := tools.RegisterBrokeredWebTools(acpMCPRegistry); err != nil {
-			setupLog.Error(err, "unable to register ACP MCP broker web tools")
-			os.Exit(1)
-		}
-		if err := tools.RegisterBrokeredCoordinationTools(acpMCPRegistry, mgr.GetClient()); err != nil {
-			setupLog.Error(err, "unable to register ACP MCP broker coordination tools")
-			os.Exit(1)
-		}
-		if err := tools.RegisterBrokeredDelegateTaskTool(
-			acpMCPRegistry,
-			mgr.GetClient(),
-			tools.BrokeredDelegateTaskTransactionExchangeConfig{
-				TTS:                 contextTokenTTSConfig,
-				Exchanger:           brokeredTTSExchanger,
-				SubjectTokenType:    contextTokenSubjectTokenType,
-				ChildScope:          contextTokenChildScope,
-				ResolveSubjectToken: newBrokeredDelegateTaskSubjectTokenResolver(mgr.GetAPIReader(), workerenv.ServiceAccountTokenFile),
-			},
-		); err != nil {
-			setupLog.Error(err, "unable to register configured ACP delegate_task broker")
-			os.Exit(1)
-		}
+
+	acpMCPRegistry = tools.NewRegistry()
+	if err := tools.RegisterBrokeredWebTools(acpMCPRegistry); err != nil {
+		setupLog.Error(err, "unable to register ACP MCP broker web tools")
+		os.Exit(1)
+	}
+	if err := tools.RegisterBrokeredCoordinationTools(acpMCPRegistry, mgr.GetClient()); err != nil {
+		setupLog.Error(err, "unable to register ACP MCP broker coordination tools")
+		os.Exit(1)
+	}
+	if err := tools.RegisterBrokeredDelegateTaskTool(
+		acpMCPRegistry,
+		mgr.GetClient(),
+		tools.BrokeredDelegateTaskTransactionExchangeConfig{
+			TTS:                 contextTokenTTSConfig,
+			Exchanger:           brokeredTTSExchanger,
+			SubjectTokenType:    contextTokenSubjectTokenType,
+			ChildScope:          contextTokenChildScope,
+			ResolveSubjectToken: newBrokeredDelegateTaskSubjectTokenResolver(mgr.GetAPIReader(), workerenv.ServiceAccountTokenFile),
+		},
+	); err != nil {
+		setupLog.Error(err, "unable to register configured ACP delegate_task broker")
+		os.Exit(1)
 	}
 
 	// Create SQLite store
@@ -1269,116 +1196,85 @@ func main() {
 		setupLog.Error(err, "unable to add agent execution snapshot retention manager")
 		os.Exit(1)
 	}
-	controlNamespace, err := acpControlNamespace(acpRuntimeEnabled || harnessV1Enabled, currentPodNamespace())
+	controlNamespace, err := acpControlNamespace(currentPodNamespace())
 	if err != nil {
 		setupLog.Error(err, "unable to configure Kubernetes ACP control store")
 		os.Exit(1)
 	}
 
-	// Create helper components. Kubernetes ACP admission is feature-gated, but
-	// the control store, epoch manager, and cleanup recovery remain available in
-	// a controller Pod after admission is disabled so pre-existing durable ACP
-	// Sessions can still be reclaimed safely.
+	// Create the durable control store, epoch manager, and Session cleanup recovery.
 	acpAdmissionGate := controller.NewACPAdmissionGate()
 	sessionManager := controller.NewSessionManager(sqliteStore)
-	var taskCleanupControlStore store.DurableControlStore
-	var durableControlStore store.DurableControlStore
-	var controllerEpochManager *controller.ControllerEpochManager
-	var acpSessionContinuity *controller.ACPSessionContinuity
-	var kubeControlStore *storekube.Store
-	if controlNamespace != "" {
-		// Session deletion must retain runtime cleanup even when admission is
-		// disabled. This dispatcher only performs authenticated recovery; it
-		// does not run the admission loop.
-		sessionCleanupDispatcher := &controller.ACPDispatcher{
-			Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), ResultStore: sqliteStore,
-			Snapshots:               agentExecutionSnapshotStore,
-			SubstrateRouterURL:      substrateConfig.RouterURL,
-			SubstrateActorDNSSuffix: substrateConfig.ActorDNSSuffix,
-		}
-		controlStoreOptions := []storekube.Option{
-			storekube.WithAPIReader(mgr.GetAPIReader()),
-			storekube.WithWatchNamespace(watchNamespace),
-			storekube.WithSessionRuntimeCleanup(sessionCleanupDispatcher.CleanupSessionRuntime),
-		}
-		if harnessV1Enabled {
-			controlStoreOptions = append(controlStoreOptions, storekube.WithoutClusterScopedBranchClaims())
-		}
-		kubeControlStore, err = storekube.NewComposite(
-			mgr.GetClient(), controlNamespace, sqliteStore, controlStoreOptions...,
-		)
-		if err != nil {
-			setupLog.Error(err, "unable to configure Kubernetes ACP control store")
-			os.Exit(1)
-		}
-		controllerEpochManager = controller.NewControllerEpochManager(kubeControlStore, controllerHolderID).
-			WithMirror(sqliteStore)
-		sessionCleanupDispatcher.Store = kubeControlStore
-		sessionCleanupDispatcher.Epochs = controllerEpochManager
-		sessionManager.SetACPSessionCleanup(kubeControlStore, controllerEpochManager)
-		if err := mgr.Add(controllerEpochManager); err != nil {
-			setupLog.Error(err, "unable to add controller epoch manager")
-			os.Exit(1)
-		}
-		sessionCleanupRecovery := controller.NewSessionCleanupRecoveryManager(kubeControlStore, controllerEpochManager)
-		if err := mgr.Add(sessionCleanupRecovery); err != nil {
-			setupLog.Error(err, "unable to add Session cleanup recovery manager")
-			os.Exit(1)
-		}
+
+	// Session deletion retains authenticated cleanup while new admission is closed.
+	sessionCleanupDispatcher := &controller.ACPDispatcher{
+		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), ResultStore: sqliteStore,
+		Snapshots:               agentExecutionSnapshotStore,
+		SubstrateRouterURL:      substrateConfig.RouterURL,
+		SubstrateActorDNSSuffix: substrateConfig.ActorDNSSuffix,
 	}
-	controlStoreWiring, err := newACPControlStoreWiring(acpRuntimeEnabled, kubeControlStore)
+	controlStoreOptions := []storekube.Option{
+		storekube.WithAPIReader(mgr.GetAPIReader()),
+		storekube.WithWatchNamespace(watchNamespace),
+		storekube.WithSessionRuntimeCleanup(sessionCleanupDispatcher.CleanupSessionRuntime),
+	}
+
+	kubeControlStore, err := storekube.NewComposite(
+		mgr.GetClient(), controlNamespace, sqliteStore, controlStoreOptions...,
+	)
 	if err != nil {
-		setupLog.Error(err, "unable to configure ACP control-store wiring")
+		setupLog.Error(err, "unable to configure Kubernetes ACP control store")
 		os.Exit(1)
 	}
-	taskCleanupControlStore = controlStoreWiring.taskCleanup
-	durableControlStore = controlStoreWiring.runtime
-	if acpRuntimeEnabled || harnessV1Enabled {
-		if kubeControlStore == nil {
-			setupLog.Error(errors.New("kubernetes session control store is unavailable"),
-				"unable to create shared agent Session continuity manager")
-			os.Exit(1)
-		}
-		if harnessV1Enabled {
-			acpSessionContinuity, err = controller.NewHarnessV1SessionContinuity(controller.HarnessV1SessionContinuityConfig{
-				SessionControls: kubeControlStore, Transcripts: sqliteStore, GatewayEvents: sqliteStore, Lineages: sqliteStore,
-			})
-		} else {
-			acpSessionContinuity, err = controller.NewACPSessionContinuity(controller.ACPSessionContinuityConfig{
-				SessionControls: kubeControlStore, Transcripts: sqliteStore, Publications: kubeControlStore, BranchClaims: kubeControlStore,
-				GatewayEvents: sqliteStore, Lineages: sqliteStore,
-			})
-		}
-		if err != nil {
-			setupLog.Error(err, "unable to create shared agent Session continuity manager")
-			os.Exit(1)
-		}
+	controllerEpochManager := controller.NewControllerEpochManager(kubeControlStore, controllerHolderID).
+		WithMirror(sqliteStore)
+	sessionCleanupDispatcher.Store = kubeControlStore
+	sessionCleanupDispatcher.Epochs = controllerEpochManager
+	sessionManager.SetACPSessionCleanup(kubeControlStore, controllerEpochManager)
+	if err := mgr.Add(controllerEpochManager); err != nil {
+		setupLog.Error(err, "unable to add controller epoch manager")
+		os.Exit(1)
+	}
+	sessionCleanupRecovery := controller.NewSessionCleanupRecoveryManager(kubeControlStore, controllerEpochManager)
+	if err := mgr.Add(sessionCleanupRecovery); err != nil {
+		setupLog.Error(err, "unable to add Session cleanup recovery manager")
+		os.Exit(1)
+	}
+
+	acpSessionContinuity, err := controller.NewACPSessionContinuity(controller.ACPSessionContinuityConfig{
+		SessionControls: kubeControlStore, Transcripts: sqliteStore, Publications: kubeControlStore, BranchClaims: kubeControlStore,
+		GatewayEvents: sqliteStore, Lineages: sqliteStore,
+	})
+
+	if err != nil {
+		setupLog.Error(err, "unable to create shared agent Session continuity manager")
+		os.Exit(1)
 	}
 
 	var artifactRetentionWiring acpArtifactRetentionWiring
 	var publisherClient *publisherservice.Client
 	var artifactCapabilitySecret []byte
 	publisherWorkspaceArtifactMaxBytes := artifactcap.DefaultWorkspaceArtifactMaxBytes
-	if acpRuntimeEnabled {
-		artifactRoot := strings.TrimSpace(os.Getenv("ORKA_ACP_ARTIFACT_ROOT"))
-		if artifactRoot == "" {
-			artifactRoot = artifactcap.DefaultRoot
-		}
-		artifactRetentionWiring, err = newACPArtifactRetentionWiring(true, artifactRoot)
-		if err != nil {
-			setupLog.Error(err, "unable to configure ACP artifact retention")
-			os.Exit(1)
-		}
-		if err := mgr.Add(artifactRetentionWiring.collector); err != nil {
-			setupLog.Error(err, "unable to add ACP artifact retention")
-			os.Exit(1)
-		}
-		publisherClient, artifactCapabilitySecret, publisherWorkspaceArtifactMaxBytes, err = workspacePublisherClientFromEnv()
-		if err != nil {
-			setupLog.Error(err, "unable to configure Workspace/Publisher client")
-			os.Exit(1)
-		}
+
+	artifactRoot := strings.TrimSpace(os.Getenv("ORKA_ACP_ARTIFACT_ROOT"))
+	if artifactRoot == "" {
+		artifactRoot = artifactcap.DefaultRoot
 	}
+	artifactRetentionWiring, err = newACPArtifactRetentionWiring(artifactRoot)
+	if err != nil {
+		setupLog.Error(err, "unable to configure ACP artifact retention")
+		os.Exit(1)
+	}
+	if err := mgr.Add(artifactRetentionWiring.collector); err != nil {
+		setupLog.Error(err, "unable to add ACP artifact retention")
+		os.Exit(1)
+	}
+	publisherClient, artifactCapabilitySecret, publisherWorkspaceArtifactMaxBytes, err = workspacePublisherClientFromEnv()
+	if err != nil {
+		setupLog.Error(err, "unable to configure Workspace/Publisher client")
+		os.Exit(1)
+	}
+
 	sessionManager.SetGatewayEventStore(sqliteStore)
 	maxTasksPerNamespaceValue := int32(maxTasksPerNamespace) //nolint:gosec // flag default is non-negative
 	gatewayConfig := gatewayruntime.Config{
@@ -1458,64 +1354,63 @@ func main() {
 	}
 
 	substrateCheckpointsEnabled := false
-	if acpRuntimeEnabled {
-		runtimePoolReconciler := &controller.RuntimePoolReconciler{
-			Client:           mgr.GetClient(),
-			APIReader:        mgr.GetAPIReader(),
-			Scheme:           mgr.GetScheme(),
-			RuntimeNamespace: acpRuntimeNamespace,
-		}
-		providerProxyLabels, err := parseExactLabels(acpProviderProxyPodLabels)
-		if err != nil {
-			setupLog.Error(err, "unable to configure authenticated ACP provider proxy labels")
-			os.Exit(1)
-		}
-		runtimePoolReconciler.ControllerNamespace = controlNamespace
-		runtimePoolReconciler.ControllerAPIURL = jobBuilder.ControllerURL
-		runtimePoolReconciler.ControllerAPIPort = int32(apiPort)
-		runtimePoolReconciler.WorkspaceArtifactMaxBytes = publisherWorkspaceArtifactMaxBytes
-		runtimePoolReconciler.ProviderProxy = controller.RuntimePoolProviderProxyConfig{
-			BaseURL:         acpProviderProxyBaseURL,
-			Namespace:       acpProviderProxyNamespace,
-			PodLabels:       providerProxyLabels,
-			BearerTokenFile: acpProviderProxyTokenFile,
-		}
-		runtimePoolReconciler.Epochs = controllerEpochManager
-		runtimePoolReconciler.EnablePDB = true
-		runtimePoolReconciler.E2EPromptWriteAmbiguityMarker = acpE2EPromptWriteAmbiguityMarker
-		runtimePoolReconciler.AgentSandboxEnabled = agentSandboxEnabled
-		runtimePoolReconciler.SubstrateEnabled = substrateEnabled
-		// Keep the provider connection and trust configuration available after
-		// admission is disabled so existing Substrate-backed pools can still
-		// destroy actors and release their finalizers.
-		runtimePoolReconciler.SubstrateConfig = substrateConfig
-		runtimePoolReconciler.AllowedImages = controller.ACPRuntimeImages{
-			Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
-			Opencode: acpOpencodeRuntimeImage,
-		}
-		if err := runtimePoolReconciler.SetupWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to create controller", "controller", "RuntimePool")
-			os.Exit(1)
-		}
-		// Keep reference and template cleanup running when new workspace
-		// admission is disabled, just like RuntimePool finalization. Minimal
-		// and controller-first upgrades may not have the optional checkpoint CRD.
-		checkpointAPIInstalled, err := substrateCheckpointAPIInstalled(mgr.GetRESTMapper())
-		if err != nil {
-			setupLog.Error(err, "unable to discover substrate checkpoint API")
-			os.Exit(1)
-		}
-		checkpointReconciler := &controller.SubstrateCheckpointReconciler{
-			RuntimePools: runtimePoolReconciler, CheckpointAPIInstalled: checkpointAPIInstalled,
-		}
-		if err := checkpointReconciler.SetupWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to create controller", "controller", "SubstrateCheckpoint")
-			os.Exit(1)
-		}
-		substrateCheckpointsEnabled = checkpointAPIInstalled
-		if !checkpointAPIInstalled {
-			setupLog.Info("checkpoint CRD is not installed; substrate catalog and template cleanup remain enabled")
-		}
+
+	runtimePoolReconciler := &controller.RuntimePoolReconciler{
+		Client:           mgr.GetClient(),
+		APIReader:        mgr.GetAPIReader(),
+		Scheme:           mgr.GetScheme(),
+		RuntimeNamespace: acpRuntimeNamespace,
+	}
+	providerProxyLabels, err := parseExactLabels(acpProviderProxyPodLabels)
+	if err != nil {
+		setupLog.Error(err, "unable to configure authenticated ACP provider proxy labels")
+		os.Exit(1)
+	}
+	runtimePoolReconciler.ControllerNamespace = controlNamespace
+	runtimePoolReconciler.ControllerAPIURL = jobBuilder.ControllerURL
+	runtimePoolReconciler.ControllerAPIPort = int32(apiPort)
+	runtimePoolReconciler.WorkspaceArtifactMaxBytes = publisherWorkspaceArtifactMaxBytes
+	runtimePoolReconciler.ProviderProxy = controller.RuntimePoolProviderProxyConfig{
+		BaseURL:         acpProviderProxyBaseURL,
+		Namespace:       acpProviderProxyNamespace,
+		PodLabels:       providerProxyLabels,
+		BearerTokenFile: acpProviderProxyTokenFile,
+	}
+	runtimePoolReconciler.Epochs = controllerEpochManager
+	runtimePoolReconciler.EnablePDB = true
+	runtimePoolReconciler.E2EPromptWriteAmbiguityMarker = acpE2EPromptWriteAmbiguityMarker
+	runtimePoolReconciler.AgentSandboxEnabled = agentSandboxEnabled
+	runtimePoolReconciler.SubstrateEnabled = substrateEnabled
+	// Keep the provider connection and trust configuration available after
+	// admission is disabled so existing Substrate-backed pools can still
+	// destroy actors and release their finalizers.
+	runtimePoolReconciler.SubstrateConfig = substrateConfig
+	runtimePoolReconciler.AllowedImages = controller.ACPRuntimeImages{
+		Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
+		Opencode: acpOpencodeRuntimeImage,
+	}
+	if err := runtimePoolReconciler.SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "RuntimePool")
+		os.Exit(1)
+	}
+	// Keep reference and template cleanup running when new workspace
+	// admission is disabled, just like RuntimePool finalization. Minimal
+	// and controller-first upgrades may not have the optional checkpoint CRD.
+	checkpointAPIInstalled, err := substrateCheckpointAPIInstalled(mgr.GetRESTMapper())
+	if err != nil {
+		setupLog.Error(err, "unable to discover substrate checkpoint API")
+		os.Exit(1)
+	}
+	checkpointReconciler := &controller.SubstrateCheckpointReconciler{
+		RuntimePools: runtimePoolReconciler, CheckpointAPIInstalled: checkpointAPIInstalled,
+	}
+	if err := checkpointReconciler.SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "SubstrateCheckpoint")
+		os.Exit(1)
+	}
+	substrateCheckpointsEnabled = checkpointAPIInstalled
+	if !checkpointAPIInstalled {
+		setupLog.Info("checkpoint CRD is not installed; substrate catalog and template cleanup remain enabled")
 	}
 
 	// Setup Task controller with helper components.
@@ -1532,22 +1427,15 @@ func main() {
 		MessageStore:                 sqliteStore,
 		ArtifactStore:                sqliteStore,
 		ExecutionEventStore:          sqliteStore,
-		DurableControlStore:          taskCleanupControlStore,
+		DurableControlStore:          kubeControlStore,
 		AgentExecutionSnapshots:      agentExecutionSnapshotStore,
 		RepositoryValidationBindings: sqliteStore,
 		MCPRegistry:                  acpMCPRegistry,
-		HarnessV1Enabled:             harnessV1Enabled,
-		HarnessV1Endpoint:            harnessV1Endpoint,
-		HarnessV1AuthSecretNamespace: harnessV1AuthSecretNamespace,
-		HarnessV1AuthSecretName:      harnessV1AuthSecretName,
-		HarnessV1AuthSecretKey:       harnessV1AuthSecretKey,
-		HarnessV1Attempts:            sqliteStore,
 		ACPArtifactRetirer:           artifactRetentionWiring.taskCleanup,
 		ACPPublicationReclaimer:      workspacePublicationReclaimer(publisherClient),
 		ControllerEpochManager:       controllerEpochManager,
 		ControllerNamespace:          controlNamespace,
 		ACPAdmissionGate:             acpAdmissionGate,
-		ACPRuntimeEnabled:            acpRuntimeEnabled,
 		ACPRuntimeImages: controller.ACPRuntimeImages{
 			Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
 			Opencode: acpOpencodeRuntimeImage,
@@ -1584,105 +1472,57 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "Task")
 		os.Exit(1)
 	}
-	var harnessV1HTTPClient *http.Client
-	if harnessV1Enabled {
-		if controllerEpochManager == nil || agentExecutionSnapshotStore == nil {
-			setupLog.Error(errors.New("harness v1 requires controller epoch and encrypted snapshot stores"),
-				"unable to add harness v1 dispatcher")
-			os.Exit(1)
-		}
-		var clientErr error
-		harnessV1HTTPClient, clientErr = newHarnessV1TLSHTTPClient(harnessV1CAFile)
-		if clientErr != nil {
-			setupLog.Error(clientErr, "unable to configure harness v1 TLS client")
-			os.Exit(1)
-		}
-		harnessV1Dispatcher := &controller.HarnessV1Dispatcher{
-			Client:          mgr.GetClient(),
-			APIReader:       mgr.GetAPIReader(),
-			Attempts:        sqliteStore,
-			Snapshots:       agentExecutionSnapshotStore,
-			ResultStore:     sqliteStore,
-			EventStore:      sqliteStore,
-			ExternalEffects: kubeControlStore,
-			BrokeredToolExecutor: &controller.KubernetesHarnessV1BrokeredToolExecutor{
-				Reader:              mgr.GetAPIReader(),
-				KubeClient:          kubeClient,
-				OutboundAccess:      outboundAccessResolver,
-				TransactionExchange: brokeredTransactionExchange,
-				EnforceTransactionCredentialAuth: contextTokenAuthzConfig.Mode ==
-					api.ContextTokenAuthorizationModeEnforce,
-				TransactionCredentialReadScopes: append(
-					[]string(nil),
-					contextTokenAuthzConfig.SecretCredentialReadScopes()...,
-				),
-			},
-			Sessions:      acpSessionContinuity,
-			Epochs:        controllerEpochManager,
-			Interval:      harnessV1DispatchInterval,
-			MaxConcurrent: harnessV1DispatchWorkers,
-			HTTPClient:    harnessV1HTTPClient,
-		}
-		taskReconciler.HarnessV1SettlementAcknowledger = harnessV1Dispatcher
-		if err := mgr.Add(harnessV1Dispatcher); err != nil {
-			setupLog.Error(err, "unable to add harness v1 dispatcher")
-			os.Exit(1)
-		}
+
+	// Session settlement commits terminal Task status through the Kubernetes outbox.
+	agentOutboxProjector := &controller.ACPOutboxProjector{
+		Client: mgr.GetClient(), Store: kubeControlStore, Epochs: controllerEpochManager, WorkerID: controllerHolderID + "-outbox",
 	}
-	if harnessV1Enabled || acpRuntimeEnabled {
-		// Session settlement in both harness planes commits terminal Task status
-		// through the shared Kubernetes outbox.
-		agentOutboxProjector := &controller.ACPOutboxProjector{
-			Client: mgr.GetClient(), Store: kubeControlStore, Epochs: controllerEpochManager, WorkerID: controllerHolderID + "-outbox",
-		}
-		if err := mgr.Add(agentOutboxProjector); err != nil {
-			setupLog.Error(err, "unable to add agent outbox projector")
-			os.Exit(1)
-		}
+	if err := mgr.Add(agentOutboxProjector); err != nil {
+		setupLog.Error(err, "unable to add agent outbox projector")
+		os.Exit(1)
 	}
-	if acpRuntimeEnabled {
-		acpDispatcher := &controller.ACPDispatcher{
-			Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Store: durableControlStore, ResultStore: sqliteStore,
-			EventStore: sqliteStore, PlanStore: sqliteStore,
-			Snapshots: agentExecutionSnapshotStore,
-			Epochs:    controllerEpochManager, Sessions: acpSessionContinuity,
-			Publisher: publisherClient, ArtifactCapabilitySecret: artifactCapabilitySecret,
-			ArtifactReservations: artifactRetentionWiring.collector,
-			AdmissionGate:        acpAdmissionGate,
-			IdlePoolTTL:          acpIdlePoolTTL,
-			MCPRegistry:          acpMCPRegistry,
-			ACPRuntimeImages: controller.ACPRuntimeImages{
-				Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
-				Opencode: acpOpencodeRuntimeImage,
-			},
-			// Keep routing available after new Substrate admission is disabled:
-			// existing Tasks and RuntimeSessions still need authenticated recovery,
-			// cancellation, finalization, drain, and cleanup against their actors.
-			SubstrateRouterURL:      substrateConfig.RouterURL,
-			SubstrateActorDNSSuffix: substrateConfig.ActorDNSSuffix,
-		}
-		if err := mgr.Add(acpDispatcher); err != nil {
-			setupLog.Error(err, "unable to add ACP dispatcher")
-			os.Exit(1)
-		}
-		if strings.TrimSpace(acpUpgradeDrainOptions.MarkerNamespace) == "" {
-			acpUpgradeDrainOptions.MarkerNamespace = controlNamespace
-		}
-		upgradeDrain := controller.NewACPUpgradeDrainCoordinator(
-			mgr.GetClient(), mgr.GetAPIReader(), controllerEpochManager, durableControlStore,
-			&controller.KubernetesACPUpgradeDrainBarrierObserver{Reader: mgr.GetAPIReader(), Outbox: sqliteStore},
-			acpAdmissionGate, acpUpgradeDrainOptions,
-		)
-		upgradeDrain.SubstrateConfig = substrateConfig
-		upgradeDrain.ControllerNamespace = controlNamespace
-		if err := mgr.Add(upgradeDrain); err != nil {
-			setupLog.Error(err, "unable to add ACP planned-upgrade drain coordinator")
-			os.Exit(1)
-		}
-		if err := mgr.AddReadyzCheck("acp-upgrade-drain", upgradeDrain.ReadyzChecker()); err != nil {
-			setupLog.Error(err, "unable to add ACP planned-upgrade readiness check")
-			os.Exit(1)
-		}
+
+	acpDispatcher := &controller.ACPDispatcher{
+		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Store: kubeControlStore, ResultStore: sqliteStore,
+		EventStore: sqliteStore, PlanStore: sqliteStore,
+		Snapshots: agentExecutionSnapshotStore,
+		Epochs:    controllerEpochManager, Sessions: acpSessionContinuity,
+		Publisher: publisherClient, ArtifactCapabilitySecret: artifactCapabilitySecret,
+		ArtifactReservations: artifactRetentionWiring.collector,
+		AdmissionGate:        acpAdmissionGate,
+		IdlePoolTTL:          acpIdlePoolTTL,
+		MCPRegistry:          acpMCPRegistry,
+		ACPRuntimeImages: controller.ACPRuntimeImages{
+			Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
+			Opencode: acpOpencodeRuntimeImage,
+		},
+		// Keep routing available after new Substrate admission is disabled:
+		// existing Tasks and RuntimeSessions still need authenticated recovery,
+		// cancellation, finalization, drain, and cleanup against their actors.
+		SubstrateRouterURL:      substrateConfig.RouterURL,
+		SubstrateActorDNSSuffix: substrateConfig.ActorDNSSuffix,
+	}
+	if err := mgr.Add(acpDispatcher); err != nil {
+		setupLog.Error(err, "unable to add ACP dispatcher")
+		os.Exit(1)
+	}
+	if strings.TrimSpace(acpUpgradeDrainOptions.MarkerNamespace) == "" {
+		acpUpgradeDrainOptions.MarkerNamespace = controlNamespace
+	}
+	upgradeDrain := controller.NewACPUpgradeDrainCoordinator(
+		mgr.GetClient(), mgr.GetAPIReader(), controllerEpochManager, kubeControlStore,
+		&controller.KubernetesACPUpgradeDrainBarrierObserver{Reader: mgr.GetAPIReader(), Outbox: sqliteStore},
+		acpAdmissionGate, acpUpgradeDrainOptions,
+	)
+	upgradeDrain.SubstrateConfig = substrateConfig
+	upgradeDrain.ControllerNamespace = controlNamespace
+	if err := mgr.Add(upgradeDrain); err != nil {
+		setupLog.Error(err, "unable to add ACP planned-upgrade drain coordinator")
+		os.Exit(1)
+	}
+	if err := mgr.AddReadyzCheck("acp-upgrade-drain", upgradeDrain.ReadyzChecker()); err != nil {
+		setupLog.Error(err, "unable to add ACP planned-upgrade readiness check")
+		os.Exit(1)
 	}
 
 	if err := (&controller.OutboundAccessPolicyReconciler{
@@ -1726,8 +1566,8 @@ func main() {
 		)
 		os.Exit(1)
 	}
-	registerWorkspaceCoreControllers := acpRuntimeEnabled && workspaceProviderAPIEnabled
-	if acpRuntimeEnabled && !workspaceProviderAPIEnabled {
+	registerWorkspaceCoreControllers := workspaceProviderAPIEnabled
+	if !workspaceProviderAPIEnabled {
 		workspaceAPIsInstalled, err := workspaceCleanupAPIsInstalled(mgr.GetRESTMapper())
 		if err != nil {
 			setupLog.Error(err, "unable to discover workspace cleanup APIs")
@@ -1778,7 +1618,7 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	if registerWorkspaceCoreControllers && acpRuntimeEnabled {
+	if registerWorkspaceCoreControllers {
 		// The in-tree ACP RuntimePool workspace adapter serves class-backed
 		// execution workspaces. It registers even when dispatch or provider
 		// flags are off so existing workspaces keep converging toward cleanup;
@@ -1806,7 +1646,7 @@ func main() {
 		if err := (&controller.ACPWorkspaceRetentionReconciler{
 			Client:              mgr.GetClient(),
 			APIReader:           mgr.GetAPIReader(),
-			DurableControlStore: durableControlStore,
+			DurableControlStore: kubeControlStore,
 			Recorder:            mgr.GetEventRecorder("acp-workspace-retention"),
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "ACPWorkspaceRetention")
@@ -1850,10 +1690,9 @@ func main() {
 		Client:                 mgr.GetClient(),
 		APIReader:              mgr.GetAPIReader(),
 		Scheme:                 mgr.GetScheme(),
-		HarnessV1HTTPClient:    harnessV1HTTPClient,
 		MCPRegistry:            acpMCPRegistry,
 		ControllerEpochManager: controllerEpochManager,
-		ControlStore:           durableControlStore,
+		ControlStore:           kubeControlStore,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentRuntime")
 		os.Exit(1)
@@ -1906,7 +1745,7 @@ func main() {
 		// Governed publications are recorded by the ACP dispatcher in the
 		// durable control store; verifying patch proposals must read the same
 		// store, not the SQLite payload store.
-		PublicationStore: durableControlStore,
+		PublicationStore: kubeControlStore,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "RepositoryScan")
 		os.Exit(1)
@@ -1918,7 +1757,7 @@ func main() {
 		Store:                     sqliteStore,
 		ResultStore:               sqliteStore,
 		ArtifactStore:             sqliteStore,
-		DurableControlStore:       durableControlStore,
+		DurableControlStore:       kubeControlStore,
 		ControllerEpochManager:    controllerEpochManager,
 		EnforceNamespaceIsolation: enforceNamespaceIsolation,
 	}).SetupWithManager(mgr); err != nil {
@@ -2001,56 +1840,55 @@ func main() {
 			MaxSessionSize:         chatMaxSessionSize,
 			MaxPrematureEndRetries: chatMaxPrematureEndRetries,
 			RuntimeAvailability: api.ACPRuntimeAvailability{
-				Codex:    acpRuntimeEnabled && controller.ACPRuntimeImageAvailable(acpCodexRuntimeImage),
-				Claude:   acpRuntimeEnabled && controller.ACPRuntimeImageAvailable(acpClaudeRuntimeImage),
-				Copilot:  acpRuntimeEnabled && controller.ACPRuntimeImageAvailable(acpCopilotRuntimeImage),
-				OpenCode: acpRuntimeEnabled && controller.ACPRuntimeImageAvailable(acpOpencodeRuntimeImage),
+				Codex:    controller.ACPRuntimeImageAvailable(acpCodexRuntimeImage),
+				Claude:   controller.ACPRuntimeImageAvailable(acpClaudeRuntimeImage),
+				Copilot:  controller.ACPRuntimeImageAvailable(acpCopilotRuntimeImage),
+				OpenCode: controller.ACPRuntimeImageAvailable(acpOpencodeRuntimeImage),
 			},
 		},
 	})
-	if acpRuntimeEnabled {
-		mcpBroker, err := controller.NewProductionACPMCPBroker(controller.ACPMCPBrokerDependencies{
-			Reader: mgr.GetAPIReader(), Epochs: controllerEpochManager, ControlStore: durableControlStore,
-			AgentExecutionSnapshots: agentExecutionSnapshotStore,
-			KubeClient:              kubeClient, Registry: acpMCPRegistry,
-			OutboundAccess: outboundAccessResolver, TransactionExchange: brokeredTransactionExchange,
-			EnforceTransactionCredentialAuth: contextTokenAuthzConfig.Mode == api.ContextTokenAuthorizationModeEnforce,
-			TransactionCredentialReadScopes:  contextTokenAuthzConfig.SecretCredentialReadScopes(),
-			ContextFactory: func(ctx context.Context, request harnessv2.MCPBrokerCallRequest) (*tools.ToolContext, error) {
-				task, ok := controller.ACPMCPAuthenticatedTaskFromContext(ctx)
-				if !ok || task.Namespace != request.Namespace || task.UID != string(request.Metadata.TaskUID) {
-					return nil, fmt.Errorf("authenticated ACP MCP task context is unavailable")
-				}
-				dataGuard, ok := controller.ACPMCPTaskDataGuardFromContext(ctx)
-				if !ok {
-					return nil, fmt.Errorf("authenticated ACP MCP prompt data guard is unavailable")
-				}
-				return &tools.ToolContext{
-					Client: mgr.GetClient(), PolicyReader: mgr.GetAPIReader(), KubeClient: kubeClient, Namespace: request.Namespace,
-					SessionID: string(request.Authorization.RuntimeSessionUID), TaskID: task.Name,
-					TaskUID: task.UID, ParentTaskID: task.ParentTaskID, AgentName: task.AgentName,
-					OperationID: string(request.Metadata.OperationID), ExternalEffects: durableControlStore,
-					Tenant: request.Namespace, WatchNamespace: watchNamespace,
-					EnforceNamespaceIsolation: enforceNamespaceIsolation, Brokered: true,
-					TaskProvenanceProtected:      taskProvenanceProtected,
-					RepositoryValidationBindings: sqliteStore,
-					ResultStore:                  sqliteStore, SessionDeleter: sessionManager,
-					MessageStore: api.NewTaskMessageStore(mgr.GetAPIReader(), sqliteStore,
-						crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, taskProvenanceProtected, dataGuard),
-					MemoryReader: sqliteStore, MemoryProposalWriter: sqliteStore,
-					TranscriptSearcher: api.NewTaskTranscriptSearcher(mgr.GetAPIReader(), sqliteStore, sqliteStore,
-						crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, taskProvenanceProtected, dataGuard),
-				}, nil
-			},
-		})
-		if err != nil {
-			setupLog.Error(err, "unable to construct ACP MCP broker")
-			os.Exit(1)
-		}
-		if err := apiServer.RegisterACPMCPBroker(mcpBroker); err != nil {
-			setupLog.Error(err, "unable to register ACP MCP broker")
-			os.Exit(1)
-		}
+
+	mcpBroker, err := controller.NewProductionACPMCPBroker(controller.ACPMCPBrokerDependencies{
+		Reader: mgr.GetAPIReader(), Epochs: controllerEpochManager, ControlStore: kubeControlStore,
+		AgentExecutionSnapshots: agentExecutionSnapshotStore,
+		KubeClient:              kubeClient, Registry: acpMCPRegistry,
+		OutboundAccess: outboundAccessResolver, TransactionExchange: brokeredTransactionExchange,
+		EnforceTransactionCredentialAuth: contextTokenAuthzConfig.Mode == api.ContextTokenAuthorizationModeEnforce,
+		TransactionCredentialReadScopes:  contextTokenAuthzConfig.SecretCredentialReadScopes(),
+		ContextFactory: func(ctx context.Context, request harnessv2.MCPBrokerCallRequest) (*tools.ToolContext, error) {
+			task, ok := controller.ACPMCPAuthenticatedTaskFromContext(ctx)
+			if !ok || task.Namespace != request.Namespace || task.UID != string(request.Metadata.TaskUID) {
+				return nil, fmt.Errorf("authenticated ACP MCP task context is unavailable")
+			}
+			dataGuard, ok := controller.ACPMCPTaskDataGuardFromContext(ctx)
+			if !ok {
+				return nil, fmt.Errorf("authenticated ACP MCP prompt data guard is unavailable")
+			}
+			return &tools.ToolContext{
+				Client: mgr.GetClient(), PolicyReader: mgr.GetAPIReader(), KubeClient: kubeClient, Namespace: request.Namespace,
+				SessionID: string(request.Authorization.RuntimeSessionUID), TaskID: task.Name,
+				TaskUID: task.UID, ParentTaskID: task.ParentTaskID, AgentName: task.AgentName,
+				OperationID: string(request.Metadata.OperationID), ExternalEffects: kubeControlStore,
+				Tenant: request.Namespace, WatchNamespace: watchNamespace,
+				EnforceNamespaceIsolation: enforceNamespaceIsolation, Brokered: true,
+				TaskProvenanceProtected:      taskProvenanceProtected,
+				RepositoryValidationBindings: sqliteStore,
+				ResultStore:                  sqliteStore, SessionDeleter: sessionManager,
+				MessageStore: api.NewTaskMessageStore(mgr.GetAPIReader(), sqliteStore,
+					crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, taskProvenanceProtected, dataGuard),
+				MemoryReader: sqliteStore, MemoryProposalWriter: sqliteStore,
+				TranscriptSearcher: api.NewTaskTranscriptSearcher(mgr.GetAPIReader(), sqliteStore, sqliteStore,
+					crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, taskProvenanceProtected, dataGuard),
+			}, nil
+		},
+	})
+	if err != nil {
+		setupLog.Error(err, "unable to construct ACP MCP broker")
+		os.Exit(1)
+	}
+	if err := apiServer.RegisterACPMCPBroker(mcpBroker); err != nil {
+		setupLog.Error(err, "unable to register ACP MCP broker")
+		os.Exit(1)
 	}
 
 	// Add API server as a runnable
@@ -2274,12 +2112,9 @@ func envBool(name string) bool {
 	return parsed
 }
 
-func acpControlNamespace(runtimeEnabled bool, controllerNamespace string) (string, error) {
+func acpControlNamespace(controllerNamespace string) (string, error) {
 	controllerNamespace = strings.TrimSpace(controllerNamespace)
 	if controllerNamespace == "" {
-		if !runtimeEnabled {
-			return "", nil
-		}
 		return "", fmt.Errorf("controller namespace is unavailable")
 	}
 	return controllerNamespace, nil
@@ -2291,10 +2126,7 @@ type acpArtifactRetentionWiring struct {
 	runtimeReservations artifactcap.CapabilityReservationRecorder
 }
 
-func newACPArtifactRetentionWiring(runtimeEnabled bool, root string) (acpArtifactRetentionWiring, error) {
-	if !runtimeEnabled {
-		return acpArtifactRetentionWiring{}, nil
-	}
+func newACPArtifactRetentionWiring(root string) (acpArtifactRetentionWiring, error) {
 	collector, err := artifactcap.NewCollector(artifactcap.CollectorConfig{Root: root})
 	if err != nil {
 		return acpArtifactRetentionWiring{}, err
@@ -2304,24 +2136,6 @@ func newACPArtifactRetentionWiring(runtimeEnabled bool, root string) (acpArtifac
 		taskCleanup:         collector,
 		runtimeReservations: collector,
 	}
-	return wiring, nil
-}
-
-type acpControlStoreWiring struct {
-	taskCleanup store.DurableControlStore
-	runtime     store.DurableControlStore
-}
-
-func newACPControlStoreWiring(runtimeEnabled bool, kubeControlStore *storekube.Store) (acpControlStoreWiring, error) {
-	var wiring acpControlStoreWiring
-	if !runtimeEnabled {
-		return wiring, nil
-	}
-	if kubeControlStore == nil {
-		return acpControlStoreWiring{}, fmt.Errorf("kubernetes ACP control store is unavailable")
-	}
-	wiring.taskCleanup = kubeControlStore
-	wiring.runtime = kubeControlStore
 	return wiring, nil
 }
 
@@ -2374,23 +2188,15 @@ func loadAgentExecutionSnapshotCipher(path string) (*sqlite.AgentExecutionSnapsh
 }
 
 func validateAgentExecutionSnapshotOptions(
-	mode executionmode.Mode,
 	keyFile string,
 	retention time.Duration,
 	interval time.Duration,
 ) error {
 	if strings.TrimSpace(keyFile) == "" {
-		return fmt.Errorf("%s requires --agent-execution-snapshot-key-file", mode)
+		return errors.New("--agent-execution-snapshot-key-file is required")
 	}
 	if retention <= 0 || interval <= 0 {
 		return errors.New("agent execution snapshot retention and retention interval must be positive")
 	}
 	return nil
-}
-
-func validateHarnessV1DispatchOptions(interval time.Duration, workers int) error {
-	if interval <= 0 {
-		return errors.New("harness v1 dispatch interval must be positive")
-	}
-	return controller.ValidateHarnessV1DispatchWorkers(workers)
 }

@@ -210,7 +210,8 @@ var _ = Describe("Agent Controller", func() {
 							Name: "some-provider",
 						},
 						Runtime: &corev1alpha1.AgentCLIRuntime{
-							Type: "claude",
+							Type:            "claude",
+							ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 						},
 					},
 				}
@@ -316,7 +317,8 @@ var _ = Describe("Agent Controller", func() {
 					},
 					Spec: corev1alpha1.AgentSpec{
 						Runtime: &corev1alpha1.AgentCLIRuntime{
-							Type: "claude",
+							Type:            "claude",
+							ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 						},
 					},
 				}

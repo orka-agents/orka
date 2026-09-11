@@ -12,12 +12,10 @@ import (
 )
 
 // AgentExecutionBackend identifies the isolated execution dispatcher backend.
-// +kubebuilder:validation:Enum=harness-wrapper;runtime-pool;external-endpoint
+// +kubebuilder:validation:Enum=runtime-pool;external-endpoint
 type AgentExecutionBackend string
 
 const (
-	// AgentExecutionBackendHarnessWrapper is the built-in harness v1 wrapper.
-	AgentExecutionBackendHarnessWrapper AgentExecutionBackend = "harness-wrapper"
 	// AgentExecutionBackendRuntimePool is the managed ACP v2 RuntimePool path.
 	AgentExecutionBackendRuntimePool AgentExecutionBackend = "runtime-pool"
 	// AgentExecutionBackendExternalEndpoint is an external AgentRuntime endpoint.
@@ -92,8 +90,6 @@ type AgentExecutionRuntimeRef struct {
 // routing, recovery, cancellation, terminal settlement, and finalization, and
 // is preserved across retries. Dispatchers build requests only from the
 // referenced immutable snapshot.
-// +kubebuilder:validation:XValidation:rule="self.backend != 'harness-wrapper' || self.contractVersion == 'orka.harness.v1'",message="the harness-wrapper backend requires an orka.harness.v1 binding"
-// +kubebuilder:validation:XValidation:rule="self.backend != 'runtime-pool' || self.contractVersion == 'orka.harness.v2'",message="the runtime-pool backend requires an orka.harness.v2 binding"
 type AgentExecutionBinding struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Enum=1

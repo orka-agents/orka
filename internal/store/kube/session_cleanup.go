@@ -119,9 +119,6 @@ func (s *Store) loadOrPrepareSessionCleanupIntent(ctx context.Context, request s
 	if intent.OperationID != request.OperationID || intent.OperationDigest != request.OperationDigest {
 		return nil, store.ConflictErrorf("session cleanup for %s/%s belongs to a different operation", request.Namespace, request.SessionName)
 	}
-	if err := s.validateSessionCleanupBranchClaimScope(*intent); err != nil {
-		return nil, err
-	}
 	return intent, nil
 }
 
@@ -258,9 +255,6 @@ func (s *Store) sessionBranchClaimCleanupPlan(
 	ctx context.Context,
 	sessionUID string,
 ) ([]store.SessionCleanupBranchClaim, error) {
-	if !s.branchClaimsEnabled {
-		return nil, nil
-	}
 	list := &corev1alpha1.BranchClaimList{}
 	if err := s.readClient().List(ctx, list); err != nil {
 		return nil, mapKubernetesError("list Session-owned branch claims", err)
@@ -291,9 +285,6 @@ func (s *Store) sessionBranchClaimCleanupPlan(
 }
 
 func (s *Store) reclaimSessionBranchClaims(ctx context.Context, intent store.SessionCleanupIntent) error {
-	if !s.branchClaimsEnabled {
-		return s.validateSessionCleanupBranchClaimScope(intent)
-	}
 	for _, expected := range intent.BranchClaims {
 		object, err := s.getBranchClaimObject(ctx, expected.ID)
 		if errors.Is(err, store.ErrNotFound) {
@@ -339,9 +330,6 @@ func (s *Store) ensureNoSessionBranchClaims(ctx context.Context, sessionUID stri
 	if sessionUID == "" {
 		return nil
 	}
-	if !s.branchClaimsEnabled {
-		return nil
-	}
 	list := &corev1alpha1.BranchClaimList{}
 	if err := s.readClient().List(ctx, list); err != nil {
 		return mapKubernetesError("verify Session-owned branch claim cleanup", err)
@@ -351,16 +339,6 @@ func (s *Store) ensureNoSessionBranchClaims(ctx context.Context, sessionUID stri
 		if store.BranchClaimOwnerKind(claim.Spec.OwnerKind) == store.BranchClaimOwnerSession && claim.Spec.OwnerUID == sessionUID {
 			return store.ConflictErrorf("Session UID %q still owns branch claim %q after cleanup", sessionUID, claim.Spec.ID)
 		}
-	}
-	return nil
-}
-
-func (s *Store) validateSessionCleanupBranchClaimScope(intent store.SessionCleanupIntent) error {
-	if s.branchClaimsEnabled {
-		return nil
-	}
-	if len(intent.BranchClaims) != 0 || intent.ExpectedVerifiedBaseline != nil {
-		return fmt.Errorf("%w: Session cleanup contains publication state", ErrBranchClaimAccessDisabled)
 	}
 	return nil
 }

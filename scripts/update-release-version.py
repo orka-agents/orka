@@ -65,7 +65,6 @@ def main() -> int:
     for repository in (
         "ghcr.io/orka-agents/orka",
         "ghcr.io/orka-agents/orka/workspace-publisher",
-        "ghcr.io/orka-agents/orka/agent-harness-wrapper",
         "ghcr.io/orka-agents/orka/ai-worker",
         "ghcr.io/orka-agents/orka/general-worker",
     ):

@@ -172,14 +172,14 @@ func (v *AgentContractValidator) Handle(ctx context.Context, req ctrladmission.R
 	if *object.Spec.Runtime.ContractVersion != mode.ContractVersion() {
 		return ctrladmission.Denied(fmt.Sprintf("Agent contractVersion must match namespace execution mode %q", mode))
 	}
-	if mode == executionmode.HarnessV2 && (object.Spec.Model == nil || strings.TrimSpace(object.Spec.Model.Name) == "") {
+	if object.Spec.Model == nil || strings.TrimSpace(object.Spec.Model.Name) == "" {
 		// The ACP session configuration requires a model; rejecting here
 		// turns a run-time Task failure into an immediate, actionable error.
 		return ctrladmission.Denied("built-in Agent runtime requires spec.model.name (the ACP runtime session has no default model)")
 	}
 	if oldObject != nil {
 		if oldObject.Spec.Runtime == nil || oldObject.Spec.Runtime.ContractVersion == nil {
-			return ctrladmission.Denied("stored unclassified Agent cannot be adopted; recreate it in the mode namespace")
+			return ctrladmission.Denied("stored Agent has no contractVersion; recreate it with orka.harness.v2")
 		}
 		if *oldObject.Spec.Runtime.ContractVersion != *object.Spec.Runtime.ContractVersion {
 			return ctrladmission.Denied("Agent contractVersion is immutable")
@@ -194,12 +194,15 @@ type AgentRuntimeContractValidator struct {
 }
 
 func (v *AgentRuntimeContractValidator) Handle(ctx context.Context, req ctrladmission.Request) ctrladmission.Response {
-	if req.SubResource == statusSubresource || (req.Operation != admissionv1.Create && req.Operation != admissionv1.Update) {
+	if req.Operation != admissionv1.Create && req.Operation != admissionv1.Update {
 		return ctrladmission.Allowed("not an AgentRuntime contract write")
 	}
 	object := &corev1alpha1.AgentRuntime{}
 	if err := v.decoder.Decode(req, object); err != nil {
 		return ctrladmission.Errored(http.StatusBadRequest, fmt.Errorf("decode AgentRuntime: %w", err))
+	}
+	if req.SubResource == statusSubresource {
+		return ctrladmission.Allowed("not an AgentRuntime contract write")
 	}
 	mode, response := namespaceExecutionMode(ctx, v.reader, object.Namespace)
 	if !response.Allowed {
@@ -217,7 +220,7 @@ func (v *AgentRuntimeContractValidator) Handle(ctx context.Context, req ctrladmi
 			return ctrladmission.Errored(http.StatusBadRequest, fmt.Errorf("decode old AgentRuntime: %w", err))
 		}
 		if oldObject.Spec.ContractVersion == nil {
-			return ctrladmission.Denied("stored unclassified AgentRuntime cannot be adopted; recreate it in the mode namespace")
+			return ctrladmission.Denied("stored AgentRuntime has no contractVersion; recreate it with orka.harness.v2")
 		}
 		if *oldObject.Spec.ContractVersion != *object.Spec.ContractVersion {
 			return ctrladmission.Denied("AgentRuntime contractVersion is immutable")
@@ -332,16 +335,9 @@ func bindingBackendMatchesMode(binding *corev1alpha1.AgentExecutionBinding, mode
 	if binding == nil {
 		return false
 	}
-	switch mode {
-	case executionmode.HarnessV1:
-		return binding.Backend == corev1alpha1.AgentExecutionBackendHarnessWrapper ||
-			binding.Backend == corev1alpha1.AgentExecutionBackendExternalEndpoint
-	case executionmode.HarnessV2:
-		return binding.Backend == corev1alpha1.AgentExecutionBackendRuntimePool ||
-			binding.Backend == corev1alpha1.AgentExecutionBackendExternalEndpoint
-	default:
-		return false
-	}
+	return mode == executionmode.HarnessV2 &&
+		(binding.Backend == corev1alpha1.AgentExecutionBackendRuntimePool ||
+			binding.Backend == corev1alpha1.AgentExecutionBackendExternalEndpoint)
 }
 
 func agentUsesBuiltInRuntime(agent *corev1alpha1.Agent) bool {

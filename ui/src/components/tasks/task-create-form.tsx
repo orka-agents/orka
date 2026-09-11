@@ -336,10 +336,7 @@ export function TaskCreateForm() {
         if (prBaseBranch.trim()) workspace.prBaseBranch = prBaseBranch.trim()
         if (createPR) workspace.createPR = true
       }
-      // Only serialize workspace when a workspace field is actually configured:
-      // a bare {intent: "read"} would make an otherwise valid prompt-only Task
-      // fail preflight in harness-v1 mode, which requires gitRepo on any
-      // non-nil workspace.
+      // The implicit read workspace needs no serialized configuration.
       if (Object.keys(workspace).length > 1) {
         const workspaceResult = workspaceConfigSchema.safeParse(workspace)
         if (!workspaceResult.success) {
@@ -360,27 +357,18 @@ export function TaskCreateForm() {
           toast.error(`Failed to load AgentRuntime ${runtimeName}: ${err instanceof Error ? err.message : 'Unknown error'}`)
           return
         }
-        if (registeredRuntime.spec.contractVersion === 'orka.harness.v2') {
-          const mcpPolicy = registeredRuntime.spec.capabilities.mcpPolicy
-          if (!mcpPolicy) {
-            toast.error(`AgentRuntime ${runtimeName} must define capabilities.mcpPolicy before orka.harness.v2 Task dispatch`)
-            return
-          }
-          const profileIntent = registeredRuntime.spec.capabilities.profile.workspaceIntent
-          if (profileIntent !== workspaceIntent) {
-            toast.error(`AgentRuntime ${runtimeName} profile workspace intent "${profileIntent}" does not match Task intent "${workspaceIntent}"`)
-            return
-          }
-          body.agentRuntime = {
-            allowedTools: [...mcpPolicy.allowedTools],
-          }
-        } else if (registeredRuntime.spec.contractVersion === 'orka.harness.v1') {
-          // External harness-v1 bindings require an explicit task-level list,
-          // even when the Task requests no brokered tools.
-          body.agentRuntime = { allowedTools: [] }
-        } else {
-          toast.error(`AgentRuntime ${runtimeName} must declare orka.harness.v1 or orka.harness.v2`)
+        const mcpPolicy = registeredRuntime.spec.capabilities.mcpPolicy
+        if (!mcpPolicy) {
+          toast.error(`AgentRuntime ${runtimeName} must define capabilities.mcpPolicy before orka.harness.v2 Task dispatch`)
           return
+        }
+        const profileIntent = registeredRuntime.spec.capabilities.profile.workspaceIntent
+        if (profileIntent !== workspaceIntent) {
+          toast.error(`AgentRuntime ${runtimeName} profile workspace intent "${profileIntent}" does not match Task intent "${workspaceIntent}"`)
+          return
+        }
+        body.agentRuntime = {
+          allowedTools: [...mcpPolicy.allowedTools],
         }
       }
     }

@@ -12,7 +12,7 @@ import {
   agentRuntimeSpecSchema,
   taskExecutionStatusSchema,
   taskDeliveryStatusSchema,
-  harnessRuntimeStatusSchema,
+  harnessContractVersionSchema,
   resultRefSchema,
   childTaskStatusSchema,
   taskSpecSchema,
@@ -228,22 +228,13 @@ describe('agentRuntimeSpecSchema', () => {
     expect(() => agentRuntimeSpecSchema.parse({ unknownField: true })).toThrow()
   })
 
-  it('parses the preserved legacy harness v1 workspace surface', () => {
-    // Stored v1 Tasks keep spec.agentRuntime.workspace as a read-only
-    // coexistence compatibility surface; the CRD forbids introducing it on
-    // new Tasks, but the UI must render stored objects without pruning.
-    const legacy = {
-      workspace: {
-        gitRepo: 'https://github.com/org/repo.git',
-        branch: 'main',
-        gitSecretRef: { name: 'git-credentials' },
-        forkRepo: 'https://github.com/bot/repo.git',
-        pushBranch: 'agent/fix-1',
-      },
-      maxTurns: 25,
-    }
-    expect(agentRuntimeSpecSchema.parse(legacy)).toEqual(legacy)
+  it('rejects the removed agentRuntime.workspace field', () => {
+    expect(() => agentRuntimeSpecSchema.parse({
+      workspace: { gitRepo: 'https://github.com/org/repo.git' },
+    })).toThrow()
+    expect(() => agentRuntimeSpecSchema.parse({ workspace: null })).toThrow()
   })
+
 })
 
 describe('structured ACP task status', () => {
@@ -277,15 +268,12 @@ describe('structured ACP task status', () => {
     })
   })
 
-  it('preserves harness v1 reconciliation context', () => {
-    const status = {
-      state: 'OutcomeUnknown' as const,
-      outcome: 'OutcomeUnknown' as const,
-      reason: 'WrapperRestarted',
-      message: 'accepted turn could not be settled after restart',
-    }
-    expect(harnessRuntimeStatusSchema.parse(status)).toEqual(status)
+  it('rejects v1 contract and reconciliation state', () => {
+    expect(() => harnessContractVersionSchema.parse('orka.harness.v1')).toThrow()
+    expect(() => taskStatusSchema.parse({ harnessRuntime: { state: 'OutcomeUnknown' } })).toThrow(/no longer supported/)
+    expect(() => taskStatusSchema.parse({ harnessRuntime: null })).toThrow(/no longer supported/)
   })
+
 })
 
 describe('resultRefSchema', () => {

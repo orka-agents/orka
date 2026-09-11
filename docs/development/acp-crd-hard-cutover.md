@@ -1,5 +1,10 @@
 # ACP v2 CRD hard cutover
 
+Historical procedure, retired by [#568](https://github.com/orka-agents/orka/issues/568).
+The referenced v1 retirement helper and its tests have been removed. Current
+installations use the [v2 upgrade procedure](../../website/docs/operations/upgrading.md).
+The original procedure follows for historical context.
+
 `scripts/upgrade-orka-crds.sh` is the only supported helper for replacing a
 cluster that may still contain `orka.harness.v1` AgentRuntime state. It is a
 fail-closed gate, not a migration tool. It never migrates or deletes

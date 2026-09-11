@@ -402,7 +402,6 @@ func prepareBoundACPDispatcherTaskWithStoresForTest(
 		Scheme:                  scheme,
 		DurableControlStore:     controlStore,
 		AgentExecutionSnapshots: persistence,
-		ACPRuntimeEnabled:       true,
 		ACPRuntimeImages:        images,
 	}
 	bound := bindACPQueueTaskForTest(t, ctx, binder, task, agent)
@@ -788,7 +787,7 @@ func TestACPTaskDeadlineIncludesTimeBeforeRuntimeAdmission(t *testing.T) {
 		t.Fatalf("unbound default deadline = %s, %v; want zero, false", deadline, ok)
 	}
 	task.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{
-		ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV1,
+		ContractVersion: corev1alpha1.AgentRuntimeContractVersion("orka.harness.v1"),
 	}
 	if deadline, ok = acpTaskDeadline(task, now); ok || !deadline.IsZero() {
 		t.Fatalf("harness v1 default deadline = %s, %v; want zero, false", deadline, ok)
@@ -1596,7 +1595,7 @@ func TestPromptTimeoutPersistsProvenCancellationSettlement(t *testing.T) {
 				TerminalEvent: harnessv2.EventFailed, Outcome: harnessv2.PromptOutcomeFailed,
 				StopReason: harnessv2.ACPStopReasonRefusal, SettledAt: time.Now().UTC(),
 			},
-			wantState: corev1alpha1.TaskExecutionStateFailed, wantReason: harnessV1ReasonFailed,
+			wantState: corev1alpha1.TaskExecutionStateFailed, wantReason: "PromptFailed",
 			wantAttempt: store.PromptExecutionFailed, wantTerminal: harnessv2.EventFailed,
 		},
 	} {

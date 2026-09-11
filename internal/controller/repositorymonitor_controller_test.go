@@ -4656,8 +4656,11 @@ func TestRepositoryMonitorValidationAllowsOpenCodeReviewerWithoutSecret(t *testi
 	reviewer := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "opencode-reviewer", Namespace: "default"},
 		Spec: corev1alpha1.AgentSpec{
-			Model:   testOpenCodeModelConfig(),
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+			Model: testOpenCodeModelConfig(),
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type:            corev1alpha1.AgentRuntimeOpencode,
+				ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
+			},
 		},
 	}
 	reconciler := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(reviewer).Build()}
@@ -8011,8 +8014,11 @@ func TestRepositoryMonitorValidationAllowsOpenCodeIssueReadOnlyRolesWithoutSecre
 			agent := &corev1alpha1.Agent{
 				ObjectMeta: metav1.ObjectMeta{Name: role, Namespace: "default"},
 				Spec: corev1alpha1.AgentSpec{
-					Model:   testOpenCodeModelConfig(),
-					Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+					Model: testOpenCodeModelConfig(),
+					Runtime: &corev1alpha1.AgentCLIRuntime{
+						Type:            corev1alpha1.AgentRuntimeOpencode,
+						ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
+					},
 				},
 			}
 			monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: role + "-monitor", Namespace: "default"}}

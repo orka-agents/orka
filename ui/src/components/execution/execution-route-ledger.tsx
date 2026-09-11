@@ -103,9 +103,8 @@ function ExecutionRouteLedger({ title, summary, summaryTone, rows }: LedgerProps
 function bindingRouteTitle(task: Task) {
   const binding = task.status?.agentExecutionBinding
   if (!binding) return 'No execution route recorded'
-  const contract = binding.contractVersion === 'orka.harness.v1' ? 'Harness v1' : 'ACP v2'
   const backend = words(binding.backend)
-  return `${contract} · ${backend}`
+  return `ACP v2 · ${backend}`
 }
 
 export function TaskExecutionRouteLedger({ task }: { task: Task }) {
@@ -115,8 +114,6 @@ export function TaskExecutionRouteLedger({ task }: { task: Task }) {
   const binding = status?.agentExecutionBinding
   const outcomeUnknown = status?.execution?.outcome === 'OutcomeUnknown'
     || status?.execution?.state === 'OutcomeUnknown'
-    || status?.harnessRuntime?.outcome === 'OutcomeUnknown'
-    || status?.harnessRuntime?.state === 'OutcomeUnknown'
 
   if (!binding) {
     return (
@@ -165,9 +162,7 @@ export function TaskExecutionRouteLedger({ task }: { task: Task }) {
               label: 'Reconciliation',
               title: 'Human reconciliation required',
               detail: status?.execution?.reason
-                || status?.execution?.message
-                || status?.harnessRuntime?.reason
-                || status?.harnessRuntime?.message,
+                || status?.execution?.message,
               icon: ShieldAlert,
               tone: 'danger',
             }
@@ -191,7 +186,7 @@ export function SessionExecutionRouteLedger({ session }: { session: Session }) {
   const blocked = control.availability === 'ReconciliationBlocked'
   const available = control.availability === 'Available'
   const routeTitle = lineage
-    ? `${lineage.contractVersion === 'orka.harness.v1' ? 'Harness v1' : 'ACP v2'} · lineage ${lineage.generation}`
+    ? `ACP v2 · lineage ${lineage.generation}`
     : 'Lineage not yet established'
 
   return (

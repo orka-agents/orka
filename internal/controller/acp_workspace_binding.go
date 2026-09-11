@@ -447,10 +447,12 @@ func (r *TaskReconciler) ensureACPWorkspaceSessionUID(
 	if err != nil {
 		return "", err
 	}
-	continuity, err := NewHarnessV1SessionContinuity(HarnessV1SessionContinuityConfig{
+	continuity, err := NewACPSessionContinuity(ACPSessionContinuityConfig{
 		SessionControls: r.DurableControlStore,
 		Transcripts:     r.SessionManager.store,
 		NewSessionUID:   func() (string, error) { return proposedUID, nil },
+		Publications:    r.DurableControlStore,
+		BranchClaims:    r.DurableControlStore,
 	})
 	if err != nil {
 		return "", err

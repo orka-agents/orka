@@ -5,7 +5,7 @@ MIT License - see LICENSE file for details.
 */
 
 // orka-admission serves the stateless, fail-closed admission boundary shared
-// by isolated harness-v1 and harness-v2 installations. It owns no controllers,
+// by namespace-isolated installations. It owns no controllers,
 // dispatch state, runtime credentials, SQLite database, or leader-election
 // lease.
 package main

@@ -176,24 +176,6 @@ func (d *ACPDispatcher) sessionRuntimeCleanupTarget(
 		int64(payload.Attempt) != turn.Key.Attempt || strings.TrimSpace(payload.Task) == "" {
 		return nil, fmt.Errorf("%w: Session runtime cleanup projection Task identity changed", store.ErrConflict)
 	}
-	if payload.HarnessRuntime != nil {
-		// Harness v1 has no resident v2 RuntimeSession. Its immutable terminal
-		// projection remains sufficient even after its Task was reclaimed.
-		if payload.Execution.RuntimeSessionUID != "" || payload.Execution.RuntimeInstanceID != "" {
-			return nil, fmt.Errorf("%w: harness v1 projection contains v2 runtime ownership", store.ErrConflict)
-		}
-		if payload.HarnessRuntime.Attempt != payload.Attempt ||
-			!store.IsTerminalPromptExecutionState(store.PromptExecutionState(payload.HarnessRuntime.State)) ||
-			string(payload.HarnessRuntime.State) != string(payload.HarnessRuntime.Outcome) {
-			return nil, fmt.Errorf("%w: harness v1 projection lacks a terminal attempt", store.ErrConflict)
-		}
-		// V1 has no exact resident-runtime retirement proof for an unknown
-		// outcome. Retain that barrier even when its control object is absent.
-		if payload.HarnessRuntime.State == corev1alpha1.TaskExecutionStateOutcomeUnknown {
-			return nil, fmt.Errorf("%w: harness v1 unknown outcome requires reconciliation", store.ErrConflict)
-		}
-		return nil, nil
-	}
 	if payload.Execution.Attempt != payload.Attempt || payload.Execution.PromptID != turn.Key.PromptID ||
 		!store.IsTerminalPromptExecutionState(store.PromptExecutionState(payload.Execution.State)) ||
 		payload.Delivery == nil || !store.IsTerminalPromptDeliveryState(store.PromptDeliveryState(payload.Delivery.State)) {

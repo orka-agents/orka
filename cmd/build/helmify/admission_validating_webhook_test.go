@@ -25,68 +25,90 @@ const (
 )
 
 func TestControllerWebhooksAreReleaseLocalAndModeScoped(t *testing.T) {
-	digest := "sha256:" + strings.Repeat("3", 64)
-	for _, mode := range []string{"harness-v1", "harness-v2"} {
-		t.Run(mode, func(t *testing.T) {
-			args := []string{
-				"--set-string", "controller.mode=" + mode,
-				"--show-only", "templates/controller-validating-webhook.yaml",
-			}
-			if mode == "harness-v1" {
-				args = append(args,
-					"--set-string", "harnessV1.image.digest="+digest,
-					"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
-					"--set-string", "harnessV1.tls.existingSecret=harness-wrapper-tls",
-				)
-			}
+	const mode = "harness-v2"
+	args := []string{
+		"--set-string", "controller.mode=" + mode,
+		"--show-only", "templates/controller-validating-webhook.yaml",
+	}
 
-			rendered := requireHelmRender(t, args...)
-			configuration := admissionregistrationv1.ValidatingWebhookConfiguration{}
-			if err := yaml.Unmarshal([]byte(rendered), &configuration); err != nil {
-				t.Fatalf("decode controller validating webhook configuration: %v", err)
-			}
-			if configuration.Name != "test-orka-controller" {
-				t.Fatalf("controller webhook name = %q, want test-orka-controller", configuration.Name)
-			}
+	rendered := requireHelmRender(t, args...)
+	configuration := admissionregistrationv1.ValidatingWebhookConfiguration{}
+	if err := yaml.Unmarshal([]byte(rendered), &configuration); err != nil {
+		t.Fatalf("decode controller validating webhook configuration: %v", err)
+	}
+	if configuration.Name != "test-orka-controller" {
+		t.Fatalf("controller webhook name = %q, want test-orka-controller", configuration.Name)
+	}
 
-			webhooks := make(map[string]admissionregistrationv1.ValidatingWebhook, len(configuration.Webhooks))
+	webhooks := make(map[string]admissionregistrationv1.ValidatingWebhook, len(configuration.Webhooks))
+	for _, webhook := range configuration.Webhooks {
+		webhooks[webhook.Name] = webhook
+		if !strings.HasSuffix(webhook.Name, "."+mode+".orka.ai") {
+			t.Errorf("webhook name %q is not scoped to mode %q", webhook.Name, mode)
+		}
+		if webhook.FailurePolicy == nil || *webhook.FailurePolicy != admissionregistrationv1.Fail {
+			t.Errorf("%s failurePolicy = %v, want Fail", webhook.Name, webhook.FailurePolicy)
+		}
+		service := webhook.ClientConfig.Service
+		if service == nil || service.Name != "test-orka-webhook" || service.Namespace != staticChartTestNamespace ||
+			service.Port == nil || *service.Port != 443 {
+			t.Errorf("%s service = %#v, want test-orka-webhook:443 in orka-test", webhook.Name, service)
+		}
+		selector := webhook.NamespaceSelector
+		if strings.HasPrefix(webhook.Name, "namespace-mode.") {
+			selector = webhook.ObjectSelector
+		}
+		if selector == nil || selector.MatchLabels["orka.ai/controller-mode"] != mode {
+			t.Errorf("%s execution-mode selector = %#v, want %q", webhook.Name, selector, mode)
+		}
+		if selector == nil || selector.MatchLabels["kubernetes.io/metadata.name"] != staticChartTestNamespace {
+			t.Errorf("%s namespace selector = %#v, want orka-test", webhook.Name, selector)
+		}
+	}
+
+	_, hasTaskWorkspace := webhooks["task-workspace-class."+mode+".orka.ai"]
+	_, hasToolWorkspace := webhooks["tool-workspace-class."+mode+".orka.ai"]
+	_, hasAttachmentSecret := webhooks["workspace-attachment-secret."+mode+".orka.ai"]
+	_, hasSuspendQuotaLease := webhooks["acp-suspend-quota-lease."+mode+".orka.ai"]
+	_, hasCheckpointSource := webhooks["checkpoint-source-use."+mode+".orka.ai"]
+	wantWorkspace := mode == "harness-v2"
+	if hasTaskWorkspace != wantWorkspace || hasToolWorkspace != wantWorkspace ||
+		hasAttachmentSecret != wantWorkspace || hasSuspendQuotaLease != wantWorkspace ||
+		hasCheckpointSource != wantWorkspace {
+		t.Fatalf("workspace webhooks = task:%t tool:%t attachment:%t suspend quota:%t checkpoint source:%t, want %t",
+			hasTaskWorkspace, hasToolWorkspace, hasAttachmentSecret, hasSuspendQuotaLease, hasCheckpointSource, wantWorkspace)
+	}
+}
+
+func TestAgentRuntimeContractWebhooksValidateStatusUpdates(t *testing.T) {
+	sharedPath := filepath.Join("..", "..", "..", "config", "orka-admission-webhooks", "validating_webhook.yaml")
+	shared, err := os.ReadFile(sharedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, manifest := range map[string][]byte{
+		sharedAdmissionVariant: shared,
+		releaseLocalAdmissionVariant: []byte(requireHelmRender(t,
+			"--show-only", "templates/controller-validating-webhook.yaml")),
+	} {
+		t.Run(name, func(t *testing.T) {
+			var configuration admissionregistrationv1.ValidatingWebhookConfiguration
+			if err := yaml.Unmarshal(manifest, &configuration); err != nil {
+				t.Fatal(err)
+			}
 			for _, webhook := range configuration.Webhooks {
-				webhooks[webhook.Name] = webhook
-				if !strings.HasSuffix(webhook.Name, "."+mode+".orka.ai") {
-					t.Errorf("webhook name %q is not scoped to mode %q", webhook.Name, mode)
+				if webhook.ClientConfig.Service == nil || webhook.ClientConfig.Service.Path == nil ||
+					*webhook.ClientConfig.Service.Path != "/validate-core-orka-ai-v1alpha1-agentruntime-contract" {
+					continue
 				}
-				if webhook.FailurePolicy == nil || *webhook.FailurePolicy != admissionregistrationv1.Fail {
-					t.Errorf("%s failurePolicy = %v, want Fail", webhook.Name, webhook.FailurePolicy)
+				if len(webhook.Rules) != 1 ||
+					!slices.Contains(webhook.Rules[0].Operations, admissionregistrationv1.Update) ||
+					!slices.Contains(webhook.Rules[0].Resources, "agentruntimes/status") {
+					t.Fatalf("runtime contract webhook does not validate status updates: %#v", webhook.Rules)
 				}
-				service := webhook.ClientConfig.Service
-				if service == nil || service.Name != "test-orka-webhook" || service.Namespace != staticChartTestNamespace ||
-					service.Port == nil || *service.Port != 443 {
-					t.Errorf("%s service = %#v, want test-orka-webhook:443 in orka-test", webhook.Name, service)
-				}
-				selector := webhook.NamespaceSelector
-				if strings.HasPrefix(webhook.Name, "namespace-mode.") {
-					selector = webhook.ObjectSelector
-				}
-				if selector == nil || selector.MatchLabels["orka.ai/controller-mode"] != mode {
-					t.Errorf("%s execution-mode selector = %#v, want %q", webhook.Name, selector, mode)
-				}
-				if selector == nil || selector.MatchLabels["kubernetes.io/metadata.name"] != staticChartTestNamespace {
-					t.Errorf("%s namespace selector = %#v, want orka-test", webhook.Name, selector)
-				}
+				return
 			}
-
-			_, hasTaskWorkspace := webhooks["task-workspace-class."+mode+".orka.ai"]
-			_, hasToolWorkspace := webhooks["tool-workspace-class."+mode+".orka.ai"]
-			_, hasAttachmentSecret := webhooks["workspace-attachment-secret."+mode+".orka.ai"]
-			_, hasSuspendQuotaLease := webhooks["acp-suspend-quota-lease."+mode+".orka.ai"]
-			_, hasCheckpointSource := webhooks["checkpoint-source-use."+mode+".orka.ai"]
-			wantWorkspace := mode == "harness-v2"
-			if hasTaskWorkspace != wantWorkspace || hasToolWorkspace != wantWorkspace ||
-				hasAttachmentSecret != wantWorkspace || hasSuspendQuotaLease != wantWorkspace ||
-				hasCheckpointSource != wantWorkspace {
-				t.Fatalf("workspace webhooks = task:%t tool:%t attachment:%t suspend quota:%t checkpoint source:%t, want %t",
-					hasTaskWorkspace, hasToolWorkspace, hasAttachmentSecret, hasSuspendQuotaLease, hasCheckpointSource, wantWorkspace)
-			}
+			t.Fatal("runtime contract webhook is missing")
 		})
 	}
 }

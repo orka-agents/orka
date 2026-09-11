@@ -55,10 +55,31 @@ type ModelArgs struct {
 
 // RuntimeArgs specifies agent CLI runtime configuration
 type RuntimeArgs struct {
-	Type                string   `json:"type"`
-	SecretRef           string   `json:"secretRef,omitempty"`
-	DefaultAllowedTools []string `json:"defaultAllowedTools,omitempty"`
-	DefaultAllowBash    *bool    `json:"defaultAllowBash,omitempty"`
+	Type                string                                    `json:"type"`
+	ContractVersion     *corev1alpha1.AgentRuntimeContractVersion `json:"contractVersion,omitempty"`
+	DefaultAllowedTools []string                                  `json:"defaultAllowedTools,omitempty"`
+	DefaultAllowBash    *bool                                     `json:"defaultAllowBash,omitempty"`
+}
+
+// UnmarshalJSON rejects removed runtime credentials before argument decoding
+// can discard them and preserves explicit contract requests for validation.
+func (in *RuntimeArgs) UnmarshalJSON(data []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	for name := range fields {
+		if strings.EqualFold(name, "secretRef") {
+			return fmt.Errorf("runtime.secretRef is no longer supported; provider access is controller-proxied")
+		}
+	}
+	type plain RuntimeArgs
+	var value plain
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*in = RuntimeArgs(value)
+	return nil
 }
 
 func applyOpencodeRuntimeDefaults(runtime *corev1alpha1.AgentCLIRuntime, allowedToolsSupplied, allowBashSupplied bool) {
@@ -202,9 +223,10 @@ func (t *CreateAgentTool) Parameters() json.RawMessage {
 						"type": "string",
 							"description": "Runtime type: copilot, claude, codex, or opencode"
 					},
-					"secretRef": {
+					"contractVersion": {
 						"type": "string",
-						"description": "Deprecated legacy field. Built-in ACP runtimes are credential-free at the Agent boundary; OpenCode rejects it."
+						"enum": ["orka.harness.v2"],
+						"description": "Orka runtime protocol. Defaults to orka.harness.v2."
 					},
 					"defaultAllowedTools": {
 						"type": "array",
@@ -231,7 +253,7 @@ func isBuiltInACPRuntime(runtimeType corev1alpha1.AgentRuntimeType) bool {
 	}
 }
 
-func normalizedCreateAgentModel(runtime *RuntimeArgs, model *ModelArgs, mode executionmode.Mode) (string, error) {
+func normalizedCreateAgentModel(runtime *RuntimeArgs, model *ModelArgs) (string, error) {
 	requested := ""
 	if model != nil {
 		requested = strings.TrimSpace(model.Name)
@@ -253,7 +275,7 @@ func normalizedCreateAgentModel(runtime *RuntimeArgs, model *ModelArgs, mode exe
 		// spec.model.name (the ACP session has no default model); failing
 		// here keeps the tool's contract aligned with what the cluster
 		// will actually accept.
-		if mode == executionmode.HarnessV2 && isBuiltInACPRuntime(runtimeType) && requested == "" {
+		if isBuiltInACPRuntime(runtimeType) && requested == "" {
 			return "", fmt.Errorf("model.name is required for %s runtime Agents: the ACP runtime session has no default model", runtimeType)
 		}
 		return requested, nil
@@ -279,7 +301,7 @@ func configureCreatedAgentRuntime(agent *corev1alpha1.Agent, runtimeArgs *Runtim
 		return nil
 	}
 	runtimeType := corev1alpha1.AgentRuntimeType(strings.TrimSpace(runtimeArgs.Type))
-	runtime := &corev1alpha1.AgentCLIRuntime{Type: runtimeType}
+	runtime := &corev1alpha1.AgentCLIRuntime{Type: runtimeType, ContractVersion: runtimeArgs.ContractVersion}
 	if runtimeArgs.DefaultAllowedTools != nil {
 		runtime.DefaultAllowedTools = append([]string{}, runtimeArgs.DefaultAllowedTools...)
 	}
@@ -288,9 +310,6 @@ func configureCreatedAgentRuntime(agent *corev1alpha1.Agent, runtimeArgs *Runtim
 		runtime.DefaultAllowBash = &allowBash
 	}
 	if runtimeType == corev1alpha1.AgentRuntimeOpencode {
-		if strings.TrimSpace(runtimeArgs.SecretRef) != "" {
-			return fmt.Errorf("opencode runtime does not accept runtime.secretRef; provider access is controller-proxied")
-		}
 		applyOpencodeRuntimeDefaults(runtime, runtimeArgs.DefaultAllowedTools != nil, runtimeArgs.DefaultAllowBash != nil)
 		if agent.Spec.Model != nil {
 			agent.Spec.Model.Provider = ""
@@ -341,7 +360,7 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 			effectiveModel = &modelCopy
 		}
 	}
-	requestedModel, err := normalizedCreateAgentModel(a.Runtime, effectiveModel, t.executionMode)
+	requestedModel, err := normalizedCreateAgentModel(a.Runtime, effectiveModel)
 	if err != nil {
 		return "", err
 	}

@@ -804,6 +804,7 @@ func setRestoredPromptAttemptOwner(
 	}
 	restored.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{
 		SchemaVersion: 1, ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2,
+		Backend:       corev1alpha1.AgentExecutionBackendRuntimePool,
 		BindingDigest: attempt.BindingDigest,
 		Task:          corev1alpha1.AgentExecutionBindingTaskRef{UID: types.UID(attempt.Key.TaskUID)},
 		Snapshot: corev1alpha1.AgentExecutionSnapshotRef{

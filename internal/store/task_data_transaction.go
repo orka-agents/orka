@@ -38,7 +38,7 @@ type TaskJobAuthorityStore interface {
 // GetPlan, SendMessage, GetMessages, GetSession, GetSessionType, LoadTranscript,
 // LoadTranscriptThrough, SearchTranscript, GetGatewayEventForTask,
 // AppendExecutionEvent (including deduplicated and plan-aware variants), and
-// ListHarnessV1AttemptsByTask and CheckTaskJobAuthority. Other store methods must
+// CheckTaskJobAuthority. Other store methods must
 // not be called from the callback.
 type TaskDataTransactionStore interface {
 	TaskJobAuthorityStore

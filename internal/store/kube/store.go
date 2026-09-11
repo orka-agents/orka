@@ -25,11 +25,6 @@ var ErrSessionTurnStoreNotConfigured = errors.New("session turn persistence is n
 // persistence adapter was not configured.
 var ErrOutboxStoreNotConfigured = errors.New("outbox persistence is not configured")
 
-// ErrBranchClaimAccessDisabled is returned when a static harness v1
-// installation reaches a publication-only BranchClaim path. Harness v1 must
-// never observe or mutate the cluster-scoped claims owned by harness v2.
-var ErrBranchClaimAccessDisabled = errors.New("cluster-scoped branch claim access is disabled")
-
 // SQLitePersistence is the complete SQLite-owned half of the hard-cutover
 // control store. The concrete sqlite.Store satisfies this interface without
 // treating any SQLite control row as authoritative.
@@ -50,21 +45,6 @@ func WithSessionTurnPersistence(turns store.SessionTurnPersistenceStore) Option 
 			return store.ValidationErrorf("session turn persistence must not be nil")
 		}
 		s.sessionTurns = turns
-		return nil
-	}
-}
-
-// WithHarnessV1Attempts supplies the route-specific receipt store used when a
-// protocol-neutral SessionTurn references a harness v1 attempt rather than a
-// v2 PromptAttempt. Kubernetes SessionControl and Lease state remain the
-// mutation authority; this store is consulted only for immutable attempt
-// identity and terminal-receipt validation.
-func WithHarnessV1Attempts(attempts store.HarnessV1AttemptStore) Option {
-	return func(s *Store) error {
-		if attempts == nil {
-			return store.ValidationErrorf("harness v1 attempt store must not be nil")
-		}
-		s.harnessV1Attempts = attempts
 		return nil
 	}
 }
@@ -92,16 +72,6 @@ func WithWatchNamespace(namespace string) Option {
 			return err
 		}
 		s.watchNamespace = namespace
-		return nil
-	}
-}
-
-// WithoutClusterScopedBranchClaims configures the publication-free harness v1
-// control-store path. Session continuity remains Kubernetes-authoritative, but
-// Session cleanup cannot list or mutate the cluster-scoped BranchClaim kind.
-func WithoutClusterScopedBranchClaims() Option {
-	return func(s *Store) error {
-		s.branchClaimsEnabled = false
 		return nil
 	}
 }
@@ -149,12 +119,10 @@ type Store struct {
 	controlNamespace      string
 	watchNamespace        string
 	sessionTurns          store.SessionTurnPersistenceStore
-	harnessV1Attempts     store.HarnessV1AttemptStore
 	outbox                store.OutboxPersistenceStore
 	sessionCleanup        store.SessionCleanupPersistenceStore
 	sessionRuntimeCleanup store.SessionRuntimeCleanupFunc
 	sessionCleanupLocks   sessionCleanupLockSet
-	branchClaimsEnabled   bool
 	epochMutations        *semaphore.Weighted
 }
 
@@ -167,9 +135,6 @@ func NewComposite(kubeClient client.Client, controlNamespace string, persistence
 	}
 	combined := make([]Option, 0, len(options)+3)
 	combined = append(combined, WithSessionTurnPersistence(persistence), WithOutboxPersistence(persistence), WithSessionCleanupPersistence(persistence))
-	if attempts, ok := persistence.(store.HarnessV1AttemptStore); ok {
-		combined = append(combined, WithHarnessV1Attempts(attempts))
-	}
 	combined = append(combined, options...)
 	return New(kubeClient, controlNamespace, combined...)
 }
@@ -186,7 +151,7 @@ func New(kubeClient client.Client, controlNamespace string, options ...Option) (
 		return nil, err
 	}
 	result := &Store{
-		client: kubeClient, controlNamespace: controlNamespace, branchClaimsEnabled: true,
+		client: kubeClient, controlNamespace: controlNamespace,
 		epochMutations: semaphore.NewWeighted(1),
 	}
 	for _, option := range options {
@@ -198,13 +163,6 @@ func New(kubeClient client.Client, controlNamespace string, options ...Option) (
 		}
 	}
 	return result, nil
-}
-
-func (s *Store) requireBranchClaimAccess() error {
-	if s == nil || !s.branchClaimsEnabled {
-		return ErrBranchClaimAccessDisabled
-	}
-	return nil
 }
 
 // GetSessionTurn delegates SQLite-only SessionTurn reads.

@@ -31,7 +31,7 @@ shipped.
 | --- | --- | --- |
 | [0016](0016-harness-migration-strategy.md) | Full active coexistence for the v1/v2 migration | Superseded by 0018 |
 | [0017](0017-harness-coexistence-architecture.md) | Coexistence architecture and ownership contracts | Superseded by 0018 |
-| [0018](0018-static-harness-modes-and-namespace-isolation.md) | Static harness modes and namespace-isolated control planes | Accepted |
+| [0018](0018-static-harness-modes-and-namespace-isolation.md) | Static harness modes and namespace-isolated control planes | Superseded by #568 |
 
 ### The execution workspace model
 

@@ -184,7 +184,7 @@ webhooks:
     clientConfig:
       service: {name: orka-admission, namespace: orka-system, path: /validate-core-orka-ai-v1alpha1-agentruntime-contract, port: 443}
     rules:
-      - {operations: [CREATE, UPDATE], apiGroups: [core.orka.ai], apiVersions: [v1alpha1], resources: [agentruntimes], scope: Namespaced}
+      - {operations: [CREATE, UPDATE], apiGroups: [core.orka.ai], apiVersions: [v1alpha1], resources: [agentruntimes, agentruntimes/status], scope: Namespaced}
   - name: taskexecutionauthority.core.orka.ai
     admissionReviewVersions: [v1]
     sideEffects: None

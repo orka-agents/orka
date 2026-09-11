@@ -23,6 +23,26 @@ func TestValidateRestoredProjectionAcceptsExactSourceEvidence(t *testing.T) {
 	}
 }
 
+func TestValidateRestoredProjectionRejectsHarnessV1Fields(t *testing.T) {
+	for _, field := range []string{"harnessRuntime", "resultRef"} {
+		t.Run(field, func(t *testing.T) {
+			task, sourceUID, attempt, projection := restoredProjectionFixture()
+			payload := map[string]json.RawMessage{}
+			if err := json.Unmarshal(marshalProjection(t, projection), &payload); err != nil {
+				t.Fatal(err)
+			}
+			payload[field] = json.RawMessage(`{}`)
+			encoded, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ValidateRestoredProjection(encoded, task, sourceUID, attempt); !errors.Is(err, store.ErrConflict) {
+				t.Fatalf("ValidateRestoredProjection() error = %v, want ErrConflict", err)
+			}
+		})
+	}
+}
+
 func TestValidateRestoredProjectionAcceptsDocumentedDeliverySettlementRewrite(t *testing.T) {
 	task, sourceUID, attempt, projection := restoredProjectionFixture()
 	attempt.DeliveryState = store.PromptDeliveryPublicationOutcomeUnknown
@@ -257,8 +277,6 @@ func TestValidateRestoredProjectionRejectsForgedOrIncompletePayload(t *testing.T
 		{name: "artifact digest", mutate: func(p *Projection) { p.Delivery.ArtifactDigest = digest("other-artifact") }},
 		{name: "pull request receipt", mutate: func(p *Projection) { p.Delivery.PRReceipt.ID = forgedValue }},
 		{name: "delivery message", mutate: func(p *Projection) { p.Delivery.Message = forgedValue }},
-		{name: "harness v1 runtime", mutate: func(p *Projection) { p.HarnessRuntime = &corev1alpha1.HarnessRuntimeStatus{} }},
-		{name: "harness v1 result", mutate: func(p *Projection) { p.ResultRef = &corev1alpha1.ResultReference{} }},
 		{name: "unproved restore marker", mutate: func(p *Projection) { p.Execution.Reason = restoreIdentityChangedReason }},
 	}
 

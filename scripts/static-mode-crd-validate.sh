@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Validates the shared harness v1/v2 CRDs against a live cluster:
-# both-baseline object acceptance, discriminator CEL, contract immutability,
-# legacy-surface ratcheting, and static-mode Task binding invariants. The CRDs
+# Validates the harness v2 CRDs against a live cluster: runtime registration,
+# unsupported protocol rejection, and immutable Task execution bindings. The CRDs
 # from config/crd/bases must already be applied and Established by their one
 # designated platform owner.
 #
@@ -72,9 +71,9 @@ for removed_crd in \
   agentexecutionpolicies.core.orka.ai \
   agentexecutionadjudications.core.orka.ai; do
   if k get crd "${removed_crd}" >/dev/null 2>&1; then
-    fail "superseded coexistence CRD is absent: ${removed_crd}"
+    fail "retired CRD is absent: ${removed_crd}"
   else
-    pass "superseded coexistence CRD is absent: ${removed_crd}"
+    pass "retired CRD is absent: ${removed_crd}"
   fi
 done
 
@@ -83,21 +82,6 @@ cleanup() { k delete namespace "${NAMESPACE}" --ignore-not-found --wait=false >/
 trap cleanup EXIT
 
 echo "== AgentRuntime discriminated union =="
-
-expect_accept "stored v1 AgentRuntime shape is accepted" <<EOF
-apiVersion: core.orka.ai/v1alpha1
-kind: AgentRuntime
-metadata: {name: v1-runtime, namespace: ${NAMESPACE}}
-spec:
-  contractVersion: orka.harness.v1
-  deployment: {mode: external-endpoint, endpoint: "https://harness.example.com"}
-  clientAuth:
-    bearerTokenSecretRef: {name: harness-auth, key: token}
-  capabilities:
-    toolExecutionModes: [observed, brokered]
-    brokeredToolClasses: [read]
-    supportsCancel: true
-EOF
 
 expect_accept "v2 AgentRuntime shape is accepted" <<EOF
 apiVersion: core.orka.ai/v1alpha1
@@ -157,77 +141,19 @@ spec:
       cancellationSettlement: true
 EOF
 
-expect_reject "mixed v1+v2 client auth shapes are rejected" "mutually exclusive" <<EOF
-apiVersion: core.orka.ai/v1alpha1
-kind: AgentRuntime
-metadata: {name: mixed-auth, namespace: ${NAMESPACE}}
-spec:
-  contractVersion: orka.harness.v1
-  deployment: {mode: external-endpoint, endpoint: "https://harness.example.com"}
-  clientAuth:
-    bearerTokenSecretRef: {name: harness-auth, key: token}
-    controllerBearerTokenSecretRef: {name: auth, key: controller}
-    operationCapabilitySecretRef: {name: auth, key: capability}
-EOF
-
-expect_reject "v1 contract with v2 auth shape is rejected" "legacy bearerTokenSecretRef" <<EOF
-apiVersion: core.orka.ai/v1alpha1
-kind: AgentRuntime
-metadata: {name: v1-with-v2-auth, namespace: ${NAMESPACE}}
-spec:
-  contractVersion: orka.harness.v1
-  deployment: {mode: external-endpoint, endpoint: "https://harness.example.com"}
-  clientAuth:
-    controllerBearerTokenSecretRef: {name: auth, key: controller}
-    operationCapabilitySecretRef: {name: auth, key: capability}
-EOF
-
-expect_reject "v2 contract without pinned capabilities is rejected" "pinned instance" <<EOF
-apiVersion: core.orka.ai/v1alpha1
-kind: AgentRuntime
-metadata: {name: v2-no-caps, namespace: ${NAMESPACE}}
-spec:
-  contractVersion: orka.harness.v2
-  deployment: {mode: external-endpoint, endpoint: "https://runtime.example.com"}
-  clientAuth:
-    controllerBearerTokenSecretRef: {name: auth, key: controller}
-    operationCapabilitySecretRef: {name: auth, key: capability}
-EOF
-
-expect_reject "contractVersion mutation is rejected" "immutable" <<EOF
-apiVersion: core.orka.ai/v1alpha1
-kind: AgentRuntime
-metadata: {name: v1-runtime, namespace: ${NAMESPACE}}
-spec:
-  contractVersion: orka.harness.v2
-  deployment: {mode: external-endpoint, endpoint: "https://harness.example.com"}
-  clientAuth:
-    controllerBearerTokenSecretRef: {name: auth, key: controller}
-    operationCapabilitySecretRef: {name: auth, key: capability}
-  capabilities:
-    runtimeInstanceID: instance-1
-EOF
-
-expect_accept "unclassified stored AgentRuntime is tolerated by the bridge schema" <<EOF
-apiVersion: core.orka.ai/v1alpha1
-kind: AgentRuntime
-metadata: {name: unclassified-runtime, namespace: ${NAMESPACE}}
-spec:
-  deployment: {mode: external-endpoint, endpoint: "https://harness.example.com"}
-  clientAuth:
-    bearerTokenSecretRef: {name: harness-auth, key: token}
-EOF
-
-expect_accept "one-time absent-to-explicit classification is accepted" <<EOF
-apiVersion: core.orka.ai/v1alpha1
-kind: AgentRuntime
-metadata: {name: unclassified-runtime, namespace: ${NAMESPACE}}
-spec:
-  contractVersion: orka.harness.v1
-  deployment: {mode: external-endpoint, endpoint: "https://harness.example.com"}
-  clientAuth:
-    bearerTokenSecretRef: {name: harness-auth, key: token}
-EOF
+RUNTIME_JSON="$(k -n "${NAMESPACE}" get agentruntime v2-runtime -o json)"
+expect_reject "harness v1 registration is rejected" "Unsupported value" <<<"$(
+  jq 'del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.managedFields, .status)
+      | .metadata.name = "v1-runtime" | .spec.contractVersion = "orka.harness.v1"' <<<"${RUNTIME_JSON}"
+)"
+expect_reject "runtime contract is required" "contractVersion" <<<"$(
+  jq 'del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.managedFields, .status)
+      | .metadata.name = "unclassified-runtime" | del(.spec.contractVersion)' <<<"${RUNTIME_JSON}"
+)"
+expect_reject "runtime requires pinned capabilities" "pinned instance" <<<"$(
+  jq 'del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.managedFields, .status)
+      | .metadata.name = "v2-no-caps" | .spec.capabilities = {}' <<<"${RUNTIME_JSON}"
+)"
 
 echo "== Agent contract selector =="
 
@@ -240,7 +166,7 @@ spec:
   model: {name: gpt-5.2-codex}
 EOF
 
-expect_reject "Agent selector mutation is rejected" "immutable" <<EOF
+expect_reject "Agent rejects a harness v1 selector" "Unsupported value" <<EOF
 apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata: {name: v2-agent, namespace: ${NAMESPACE}}
@@ -269,33 +195,7 @@ spec:
   systemPrompt: {inline: "not allowed"}
 EOF
 
-expect_accept "stored v1 OpenCode Agent with legacy shape survives" <<EOF
-apiVersion: core.orka.ai/v1alpha1
-kind: Agent
-metadata: {name: v1-opencode, namespace: ${NAMESPACE}}
-spec:
-  runtime: {type: opencode, contractVersion: orka.harness.v1}
-  model: {name: gpt-5.2, maxTokens: 8192}
-  systemPrompt: {inline: "You are a careful engineer."}
-  secretRef: {name: opencode-credentials}
-EOF
-
-expect_status_patch accept "stored v1 OpenCode Agent /status remains updatable" \
-  agents.core.orka.ai/v1-opencode '{"status":{"ready":true,"activeTasks":0}}'
-
-echo "== Task legacy workspace ratchet and binding invariants =="
-
-expect_reject "new Task cannot introduce legacy agentRuntime.workspace" "preserved harness v1 compatibility surface" <<EOF
-apiVersion: core.orka.ai/v1alpha1
-kind: Task
-metadata: {name: legacy-workspace-task, namespace: ${NAMESPACE}}
-spec:
-  type: agent
-  prompt: fix it
-  agentRef: {name: v2-agent}
-  agentRuntime:
-    workspace: {gitRepo: "https://github.com/org/repo.git"}
-EOF
+echo "== Task binding invariants =="
 
 expect_accept "plain agent Task is accepted" <<EOF
 apiVersion: core.orka.ai/v1alpha1
@@ -308,25 +208,26 @@ spec:
 EOF
 
 BINDING=$(cat <<JSON
-{"schemaVersion":1,"contractVersion":"orka.harness.v1","backend":"harness-wrapper","bindingDigest":"${ZERO_DIGEST}","task":{"namespaceUID":"ns-uid","uid":"task-uid","boundSpecGeneration":1},"snapshot":{"id":"task-uid/${ZERO_DIGEST}","digest":"${ZERO_DIGEST}","schemaVersion":1},"boundAt":"2026-08-05T00:00:00Z"}
+{"schemaVersion":1,"contractVersion":"orka.harness.v2","backend":"runtime-pool","bindingDigest":"${ZERO_DIGEST}","task":{"namespaceUID":"ns-uid","uid":"task-uid","boundSpecGeneration":1},"snapshot":{"id":"task-uid/${ZERO_DIGEST}","digest":"${ZERO_DIGEST}","schemaVersion":1},"boundAt":"2026-08-05T00:00:00Z"}
 JSON
 )
 
-expect_status_patch accept "v1 execution binding writes once" \
+expect_status_patch accept "v2 execution binding writes once" \
   tasks.core.orka.ai/bound-task "{\"status\":{\"agentExecutionBinding\":${BINDING}}}"
 
-MUTATED_BINDING=${BINDING/harness-wrapper/external-endpoint}
+MUTATED_BINDING=${BINDING/runtime-pool/external-endpoint}
 expect_status_patch reject "binding mutation is rejected" \
   tasks.core.orka.ai/bound-task "{\"status\":{\"agentExecutionBinding\":${MUTATED_BINDING}}}" "write-once and immutable"
 
 expect_status_patch reject "binding removal is rejected" \
   tasks.core.orka.ai/bound-task '{"status":{"agentExecutionBinding":null}}' "write-once and immutable"
 
-expect_status_patch reject "a v1-bound Task cannot acquire v2 execution state" \
-  tasks.core.orka.ai/bound-task '{"status":{"execution":{"state":"Queued"}}}' "cannot acquire new v2 execution"
+expect_status_patch accept "a v2-bound Task records execution state" \
+  tasks.core.orka.ai/bound-task '{"status":{"execution":{"state":"Queued"}}}'
 
-expect_status_patch accept "a v1-bound Task may record v1 harness state" \
-  tasks.core.orka.ai/bound-task '{"status":{"harnessRuntime":{"contractVersion":"orka.harness.v1","runtimeName":"wrapper"}}}'
+expect_reject "bound Task spec is immutable" "Task spec is immutable" <<<"$(
+  k -n "${NAMESPACE}" get task bound-task -o json | jq '.spec.prompt = "changed"'
+)"
 
 expect_accept "second plain agent Task is accepted" <<EOF
 apiVersion: core.orka.ai/v1alpha1
@@ -342,8 +243,12 @@ INCOHERENT_BINDING=$(cat <<JSON
 {"schemaVersion":1,"contractVersion":"orka.harness.v1","backend":"runtime-pool","bindingDigest":"${ZERO_DIGEST}","task":{"namespaceUID":"a","uid":"b","boundSpecGeneration":1},"snapshot":{"id":"b/${ZERO_DIGEST}","digest":"${ZERO_DIGEST}","schemaVersion":1},"boundAt":"2026-08-05T00:00:00Z"}
 JSON
 )
-expect_status_patch reject "runtime-pool backend requires a v2 binding (coherence)" \
-  tasks.core.orka.ai/incoherent-binding-task "{\"status\":{\"agentExecutionBinding\":${INCOHERENT_BINDING}}}" "requires an orka.harness.v2 binding"
+expect_status_patch reject "binding rejects a harness v1 contract" \
+  tasks.core.orka.ai/incoherent-binding-task "{\"status\":{\"agentExecutionBinding\":${INCOHERENT_BINDING}}}" "Unsupported value"
+
+REMOVED_BACKEND_BINDING=${BINDING/runtime-pool/harness-wrapper}
+expect_status_patch reject "binding rejects the removed wrapper backend" \
+  tasks.core.orka.ai/incoherent-binding-task "{\"status\":{\"agentExecutionBinding\":${REMOVED_BACKEND_BINDING}}}" "Unsupported value"
 
 echo
 if [[ ${FAILURES} -gt 0 ]]; then

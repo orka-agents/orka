@@ -543,8 +543,6 @@ func (r *GatewayBindingReconciler) validateBindingAgentRuntimeDefaults(
 		return "", err
 	}
 	switch runtimeObject.RegisteredContractVersion() {
-	case corev1alpha1.AgentRuntimeContractHarnessV1:
-		return "", nil
 	case corev1alpha1.AgentRuntimeContractHarnessV2:
 		if binding.Spec.TaskDefaults.AgentRuntimeMaxTurns != nil {
 			return fmt.Sprintf("taskDefaults.agentRuntimeMaxTurns is not supported by external %s AgentRuntime %q", corev1alpha1.AgentRuntimeContractHarnessV2, runtimeName), nil

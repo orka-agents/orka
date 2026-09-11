@@ -151,33 +151,6 @@ func TestValidateAgent_OpenCodeRequirements(t *testing.T) {
 		})
 	}
 
-	// runtime.type: opencode exists in both harness protocols and is never
-	// protocol evidence: the v2 rules must not fire for v1-classified or
-	// still-unclassified stored legacy OpenCode Agents, even when they carry
-	// historically valid v1 shapes the v2 contract forbids.
-	for _, test := range []struct {
-		name            string
-		contractVersion *corev1alpha1.AgentRuntimeContractVersion
-	}{
-		{name: "unclassified legacy opencode agent is preserved", contractVersion: nil},
-		{name: "harness v1 opencode agent is preserved", contractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV1)},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			agent := baseAgent("opencode-legacy")
-			agent.Spec.ProviderRef = nil
-			agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
-				Type:            corev1alpha1.AgentRuntimeOpencode,
-				ContractVersion: test.contractVersion,
-			}
-			agent.Spec.SystemPrompt = &corev1alpha1.PromptSource{Inline: "legacy prompt"}
-			agent.Spec.Model = &corev1alpha1.ModelConfig{Name: "gpt-5.4"}
-			agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: "legacy-provider-creds"}
-
-			if err := ValidateOpenCodeAgentSpec(agent); err != nil {
-				t.Fatalf("ValidateOpenCodeAgentSpec() error = %v, want nil for preserved legacy opencode agent", err)
-			}
-		})
-	}
 }
 
 func TestValidateAgent_BuiltInRuntimeRejectsCredentialSecretRef(t *testing.T) {

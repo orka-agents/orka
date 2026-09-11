@@ -1,12 +1,13 @@
 ---
 slug: /release-status
-description: "What is in the latest tagged release versus what these docs describe."
+description: "Historical release differences and the current source installation."
 ---
 
 # Release status
 
-**These docs describe `main`.** The newest tagged release, **v0.1.3**, is older than a
-large part of what is written here.
+**These docs describe `main`.** The historical **v0.1.3** release predates the
+current harness v2 execution model. The comparison below records that difference;
+its older execution protocol is no longer supported by current source.
 
 That gap is deliberate — `main` is where the current work lands — but it means you can
 follow a page here exactly and get "unknown field" or "no matches for kind" from a v0.1.3
@@ -46,7 +47,7 @@ included the `AgentRuntime` CRD and the `orka.harness.v1` contract for external 
 | `RuntimePool` / `RuntimeSession` | **No** | Yes |
 | `PromptAttempt`, `ControllerEpoch`, `Publication`, `BranchClaim`, `ExternalEffect` | **No** | Yes |
 | `RuntimeProviderConfig`, `RuntimeWorkspaceProfile`, `RuntimeSessionControl` | **No** | Yes |
-| [Harness modes](../operations/harness-modes.md) (`orka.ai/controller-mode`) | **No** | Yes |
+| [Installation identity](../operations/harness-modes.md) (`orka.ai/controller-mode`) | **No** | Yes |
 | `--watch-namespace` | Optional; empty watches the whole cluster | **Required** |
 
 Nine CRDs are new on `main`. If a page here mentions a `RuntimePool`, a supervisor, a
@@ -54,29 +55,11 @@ prompt attempt, or clean-room publication, it does not apply to v0.1.3. v0.1.3 d
 `type: agent` Tasks — what it lacks is the ACP execution path that replaced the older
 per-Task Job.
 
-## Installing v0.1.3
+## Historical installation packages
 
-No clone needed:
-
-```bash
-# The manifest mounts a harness-wrapper-auth Secret but does not create it,
-# so make the namespace and that Secret first or the Pods never start.
-kubectl create namespace orka-system
-kubectl -n orka-system create secret generic harness-wrapper-auth \
-  --from-literal=token="$(openssl rand -hex 32)"
-
-kubectl apply -f https://raw.githubusercontent.com/orka-agents/orka/v0.1.3/deploy/orka.yaml
-```
-
-Or with Helm:
-
-```bash
-helm repo add orka https://orka-agents.github.io/orka/charts
-helm repo update
-helm install orka orka/orka --namespace orka-system --create-namespace
-```
-
-Both are published by the release workflow, which runs only on a `v*` tag.
+The v0.1.3 packages contain the older execution model. They are historical
+artifacts, not the installation described by this documentation. Current source
+has no protocol migration or conversion of their Tasks and Sessions.
 
 ## Installing `main`
 

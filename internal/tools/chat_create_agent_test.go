@@ -254,7 +254,7 @@ func TestChatCreateAgentTool_Execute_RejectsOpenCodeLegacySecret(t *testing.T) {
 	if err := json.Unmarshal([]byte(result), &response); err != nil {
 		t.Fatalf("failed to parse result: %v", err)
 	}
-	if response.Success || response.ErrorType != errTypeInvalidArgs || !strings.Contains(response.Error, "does not accept runtime.secretRef") {
+	if response.Success || response.ErrorType != errTypeInvalidArgs || !strings.Contains(response.Error, "runtime.secretRef is no longer supported") {
 		t.Fatalf("response = %#v, want legacy secret rejection", response)
 	}
 	var created corev1alpha1.Agent
@@ -300,36 +300,6 @@ func TestChatCreateAgentTool_Execute_UsesBuiltInOpenCode(t *testing.T) {
 	}
 }
 
-func TestChatCreateAgentTool_Execute_DefaultsHarnessV1Contract(t *testing.T) {
-	fc := newFakeClient()
-	ctx := WithToolContext(context.Background(), &ToolContext{
-		Client:        fc,
-		Namespace:     defaultNamespace,
-		ExecutionMode: executionmode.HarnessV1,
-	})
-	result, err := (&ChatCreateAgentTool{}).Execute(ctx, json.RawMessage(`{
-		"name":"v1-runtime-agent",
-		"runtime":{"type":"codex"}
-	}`))
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	var response ChatToolResult
-	if err := json.Unmarshal([]byte(result), &response); err != nil {
-		t.Fatalf("failed to parse result: %v", err)
-	}
-	if !response.Success {
-		t.Fatalf("response = %#v, want success", response)
-	}
-	created := &corev1alpha1.Agent{}
-	if err := fc.Get(context.Background(), client.ObjectKey{Name: "v1-runtime-agent", Namespace: defaultNamespace}, created); err != nil {
-		t.Fatalf("failed to get Agent: %v", err)
-	}
-	if got := created.BuiltInContractVersion(); got != corev1alpha1.AgentRuntimeContractHarnessV1 {
-		t.Fatalf("contractVersion = %q, want %q", got, corev1alpha1.AgentRuntimeContractHarnessV1)
-	}
-}
-
 func TestChatCreateAgentTool_Execute_RollsBackAgentWhenInitialTaskAuthorizationFails(t *testing.T) {
 	fc := newFakeClient()
 	ctx := WithToolContext(context.Background(), &ToolContext{
@@ -367,6 +337,38 @@ func TestChatCreateAgentTool_Execute_RollsBackAgentWhenInitialTaskAuthorizationF
 	err = fc.Get(context.Background(), client.ObjectKey{Name: "agent-rollback", Namespace: defaultNamespace}, &created)
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("agent should have been rolled back, get err=%v", err)
+	}
+}
+
+func TestChatCreateAgentToolRejectsRemovedRuntimeInputs(t *testing.T) {
+	for _, input := range []string{
+		`{"type":"codex","contractVersion":"orka.harness.v1"}`,
+		`{"type":"codex","contractVersion":"harness-v1"}`,
+		`{"type":"codex","secretRef":"removed-reference"}`,
+	} {
+		fc := newFakeClient()
+		ctx := WithToolContext(t.Context(), &ToolContext{
+			Client: fc, Namespace: defaultNamespace, ExecutionMode: executionmode.HarnessV2,
+		})
+		result, err := (&ChatCreateAgentTool{}).Execute(ctx,
+			json.RawMessage(`{"name":"rejected-runtime","model":{"name":"test-model"},"runtime":`+input+`}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var response ChatToolResult
+		if err := json.Unmarshal([]byte(result), &response); err != nil {
+			t.Fatal(err)
+		}
+		if response.Success || response.ErrorType != errTypeInvalidArgs {
+			t.Fatalf("response = %#v, want invalid runtime rejection", response)
+		}
+		var agents corev1alpha1.AgentList
+		if err := fc.List(ctx, &agents); err != nil {
+			t.Fatal(err)
+		}
+		if len(agents.Items) != 0 {
+			t.Fatal("rejected runtime input created an Agent")
+		}
 	}
 }
 
@@ -415,9 +417,8 @@ func TestParseRuntimeConfig_BuiltInRuntimesAreCredentialFree(t *testing.T) {
 			}}
 			args := map[string]any{runtimeField: map[string]any{
 				jsonSchemaTypeField: string(runtimeType),
-				secretRefField:      "missing-legacy-runtime",
 			}}
-			if errResult, ok := parseRuntimeConfig(args, agent, executionmode.HarnessV2); !ok {
+			if errResult, ok := parseRuntimeConfig(args, agent); !ok {
 				t.Fatalf("parseRuntimeConfig returned error: %s", errResult)
 			}
 			if agent.Spec.Runtime == nil || agent.Spec.Runtime.Type != runtimeType {
@@ -435,7 +436,7 @@ func TestParseRuntimeConfig_BuiltInRuntimesAreCredentialFree(t *testing.T) {
 			SecretRef:   &corev1.LocalObjectReference{Name: "legacy-runtime"},
 		}}
 		args := map[string]any{runtimeField: map[string]any{jsonSchemaTypeField: "opencode"}}
-		if errResult, ok := parseRuntimeConfig(args, agent, executionmode.HarnessV2); !ok {
+		if errResult, ok := parseRuntimeConfig(args, agent); !ok {
 			t.Fatalf("parseRuntimeConfig returned error: %s", errResult)
 		}
 		wantTools := []string{"Read", "Write", "Edit", "Bash", "Glob", "Grep"}
@@ -449,7 +450,7 @@ func TestParseRuntimeConfig_BuiltInRuntimesAreCredentialFree(t *testing.T) {
 	t.Run("normalizes runtime type", func(t *testing.T) {
 		agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{Name: "test-model"}}}
 		args := map[string]any{runtimeField: map[string]any{jsonSchemaTypeField: "  claude  "}}
-		if errResult, ok := parseRuntimeConfig(args, agent, executionmode.HarnessV2); !ok {
+		if errResult, ok := parseRuntimeConfig(args, agent); !ok {
 			t.Fatalf("parseRuntimeConfig returned error: %s", errResult)
 		}
 		if agent.Spec.Runtime == nil || agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeClaude {
@@ -473,7 +474,7 @@ func TestParseRuntimeConfig_RejectsModelLimitsForNonOpenCodeBuiltIns(t *testing.
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Model: tt.model}}
-			result, ok := parseRuntimeConfig(map[string]any{runtimeField: map[string]any{jsonSchemaTypeField: string(tt.runtime)}}, agent, executionmode.HarnessV2)
+			result, ok := parseRuntimeConfig(map[string]any{runtimeField: map[string]any{jsonSchemaTypeField: string(tt.runtime)}}, agent)
 			if ok {
 				t.Fatal("parseRuntimeConfig accepted ignored built-in model limits")
 			}
@@ -493,7 +494,7 @@ func TestParseRuntimeConfig_RejectsUnsupportedRuntime(t *testing.T) {
 		t.Run(runtimeType, func(t *testing.T) {
 			agent := &corev1alpha1.Agent{}
 			args := map[string]any{runtimeField: map[string]any{jsonSchemaTypeField: runtimeType}}
-			errResult, ok := parseRuntimeConfig(args, agent, executionmode.HarnessV2)
+			errResult, ok := parseRuntimeConfig(args, agent)
 			if ok {
 				t.Fatal("parseRuntimeConfig accepted invalid runtime")
 			}
@@ -522,7 +523,7 @@ func TestParseRuntimeConfig_AppliesRuntimeDefaults(t *testing.T) {
 	},
 	}
 
-	if errResult, ok := parseRuntimeConfig(args, agent, executionmode.HarnessV2); !ok {
+	if errResult, ok := parseRuntimeConfig(args, agent); !ok {
 		t.Fatalf("parseRuntimeConfig returned error: %s", errResult)
 	}
 
@@ -577,7 +578,7 @@ func TestParseRuntimeConfig_PreservesExplicitEmptyOpenCodeTools(t *testing.T) {
 		"defaultAllowedTools": []any{},
 		"defaultAllowBash":    allowBash,
 	}}
-	if errResult, ok := parseRuntimeConfig(args, agent, executionmode.HarnessV2); !ok {
+	if errResult, ok := parseRuntimeConfig(args, agent); !ok {
 		t.Fatalf("parseRuntimeConfig returned error: %s", errResult)
 	}
 	if agent.Spec.Runtime == nil || agent.Spec.Runtime.DefaultAllowedTools == nil || len(agent.Spec.Runtime.DefaultAllowedTools) != 0 {
@@ -602,7 +603,7 @@ func TestParseRuntimeConfig_RejectsInvalidOpenCodeModel(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Model: model}}
-			errResult, ok := parseRuntimeConfig(map[string]any{runtimeField: map[string]any{jsonSchemaTypeField: "opencode"}}, agent, executionmode.HarnessV2)
+			errResult, ok := parseRuntimeConfig(map[string]any{runtimeField: map[string]any{jsonSchemaTypeField: "opencode"}}, agent)
 			if ok {
 				t.Fatal("parseRuntimeConfig accepted invalid OpenCode model")
 			}

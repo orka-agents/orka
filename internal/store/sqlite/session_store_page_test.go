@@ -9,7 +9,7 @@ import (
 )
 
 func TestListSessionsPageCursorsInSQL(t *testing.T) {
-	s := newCoexistenceTestStore(t)
+	s := newAgentExecutionTestStore(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
 	for _, name := range []string{"a-chat", "b-gateway", "c-chat", "d-chat", "e-chat"} {

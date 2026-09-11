@@ -128,14 +128,6 @@ type TaskReconciler struct {
 	ControllerEpochManager            *ControllerEpochManager
 	ControllerNamespace               string
 	ACPAdmissionGate                  *ACPAdmissionGate
-	HarnessV1Enabled                  bool
-	HarnessV1Endpoint                 string
-	HarnessV1AuthSecretNamespace      string
-	HarnessV1AuthSecretName           string
-	HarnessV1AuthSecretKey            string
-	HarnessV1Attempts                 store.HarnessV1AttemptStore
-	HarnessV1SettlementAcknowledger   HarnessV1SettlementAcknowledger
-	ACPRuntimeEnabled                 bool
 	ACPRuntimeImages                  ACPRuntimeImages
 	ACPRuntimeNamespace               string
 	EnforceNamespaceIsolation         bool
@@ -557,60 +549,45 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 	log := logf.FromContext(ctx)
 
 	if controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
-		if taskManagedByHarnessV1(task) {
-			ready, err := r.harnessV1TaskDeletionReady(ctx, task)
-			if err != nil {
-				return ctrl.Result{}, err
+		prepared, err := r.prepareACPClassWorkspaceDeletion(ctx, task)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !prepared {
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
+		ready, err := r.acpTaskDeletionReady(ctx, task)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !ready {
+			// Publish while terminal status is retained for cleanup. Do not
+			// recreate erased history when finalizer removal later retries.
+			if !r.recordTerminalTaskLifecycleEventIfMissing(ctx, task) {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
 			}
-			if !ready {
-				// Publish while terminal status is retained for cleanup. Do not
-				// recreate erased history when finalizer removal later retries.
-				if !r.recordTerminalTaskLifecycleEventIfMissing(ctx, task) {
-					return ctrl.Result{RequeueAfter: time.Second}, nil
-				}
-				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
-			}
-		} else {
-			prepared, err := r.prepareACPClassWorkspaceDeletion(ctx, task)
-			if err != nil {
-				return ctrl.Result{}, err
-			}
-			if !prepared {
-				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
-			}
-			ready, err := r.acpTaskDeletionReady(ctx, task)
-			if err != nil {
-				return ctrl.Result{}, err
-			}
-			if !ready {
-				// Publish while terminal status is retained for cleanup. Do not
-				// recreate erased history when finalizer removal later retries.
-				if !r.recordTerminalTaskLifecycleEventIfMissing(ctx, task) {
-					return ctrl.Result{RequeueAfter: time.Second}, nil
-				}
-				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
-			}
-			reclaimed, err := r.reclaimACPTaskPublicationBundles(ctx, task)
-			if err != nil {
-				return ctrl.Result{}, err
-			}
-			if !reclaimed {
-				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
-			}
-			retired, err := r.retireACPArtifactIdentities(ctx, task)
-			if err != nil {
-				return ctrl.Result{}, err
-			}
-			if !retired {
-				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
-			}
-			settled, err := r.settleACPClassWorkspace(ctx, task)
-			if err != nil {
-				return ctrl.Result{}, err
-			}
-			if !settled {
-				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
-			}
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
+		reclaimed, err := r.reclaimACPTaskPublicationBundles(ctx, task)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !reclaimed {
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
+		retired, err := r.retireACPArtifactIdentities(ctx, task)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !retired {
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
+		settled, err := r.settleACPClassWorkspace(ctx, task)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !settled {
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 		}
 		// Clean up result data from store
 		if r.ResultStore != nil {
@@ -823,17 +800,7 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		switch plan.path {
 		case agentExecutionPathRejected:
 			return r.rejectPlannedAgentExecution(ctx, task, plan)
-		case agentExecutionPathACP:
-			if result, err, handled := r.ensureAgentExecutionBinding(ctx, task, agent); handled {
-				return result, err
-			}
-			return r.queueACPRuntimeTask(ctx, task, agent)
-		case agentExecutionPathHarnessV1:
-			if result, err, handled := r.ensureHarnessV1ExecutionBinding(ctx, task, agent); handled {
-				return result, err
-			}
-			return r.queueHarnessV1Task(ctx, task)
-		case agentExecutionPathExternal:
+		case agentExecutionPathACP, agentExecutionPathExternal:
 			if result, err, handled := r.ensureAgentExecutionBinding(ctx, task, agent); handled {
 				return result, err
 			}
@@ -881,11 +848,6 @@ func (r *TaskReconciler) handleBoundAgentTaskPending(
 		return ctrl.Result{}, errors.New("bound agent Task is missing its execution binding")
 	}
 	switch binding.ContractVersion {
-	case corev1alpha1.AgentRuntimeContractHarnessV1:
-		if result, err, handled := r.ensureHarnessV1ExecutionBinding(ctx, task, nil); handled {
-			return result, err
-		}
-		return r.queueHarnessV1Task(ctx, task)
 	case corev1alpha1.AgentRuntimeContractHarnessV2:
 		if task.Status.Execution == nil {
 			now := time.Now().UTC()
@@ -1600,11 +1562,6 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 		// lease renewal, cancellation barrier, and terminal status projection.
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
-	if taskManagedByHarnessV1(task) {
-		// HarnessV1Dispatcher owns submission, stream recovery, cancellation,
-		// terminal settlement, and Task projection for binding-gated v1 work.
-		return ctrl.Result{RequeueAfter: time.Second}, nil
-	}
 
 	// Check timeout
 	if task.Spec.Timeout != nil && task.Status.StartTime != nil {
@@ -1844,12 +1801,6 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 
 	// Job still running, requeue
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
-}
-
-func taskManagedByHarnessV1(task *corev1alpha1.Task) bool {
-	return task != nil && task.Spec.Type == corev1alpha1.TaskTypeAgent &&
-		task.Status.AgentExecutionBinding != nil &&
-		task.Status.AgentExecutionBinding.ContractVersion == corev1alpha1.AgentRuntimeContractHarnessV1
 }
 
 func podWaitingForMountInitialization(pod *corev1.Pod) bool {
@@ -3139,7 +3090,7 @@ func validatePlannedRuntimeRefAgentTaskRestrictions(
 	plan agentExecutionPlan,
 ) error {
 	// planAgentExecution resolves runtimeRef before selecting the external path,
-	// so these v2-only checks cannot change harness v1 compatibility.
+	// before any agent runtime receives work.
 	if plan.path != agentExecutionPathExternal {
 		return nil
 	}

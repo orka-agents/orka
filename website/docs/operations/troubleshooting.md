@@ -41,7 +41,7 @@ The chart validates its inputs before producing any manifests, so a bad install 
 | `@sha256:` | Runtime and controller images must be digest references, not tags. |
 | `replicas` / `leaderElect` | Must be `1` and `true`. The controller is a single writer. |
 | `webhooks.tls.existingSecret` | A TLS Secret for the admission webhooks. |
-| `mode` | Only `harness-v1` or `harness-v2`, and it cannot change on upgrade. |
+| `mode` | Only `harness-v2` is supported. |
 
 ### The snapshot key
 
@@ -94,15 +94,10 @@ namespace.
 **`controller-mode namespace claim failed`** or `namespace "..." is claimed by execution
 mode "..."`
 
-The namespace must carry a label matching the controller's mode:
-
-```bash
-kubectl label namespace orka-system orka.ai/controller-mode=harness-v2
-```
-
-This is how two installs on one cluster avoid fighting over the same Tasks. If the label
-says `harness-v1` and you are installing `harness-v2`, use a different namespace — do not
-relabel a namespace that another install is using.
+Create the namespace with `orka.ai/controller-mode: harness-v2` before installing
+Orka, as shown in [Getting started](../getting-started.md#install). Use a new
+namespace if the existing namespace has a missing or incompatible claim. Do
+not relabel a namespace another installation owns.
 
 **`unable to read controller-mode namespace`**
 

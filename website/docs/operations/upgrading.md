@@ -5,8 +5,9 @@ description: "Upgrading Orka, including the CRD step Helm will not do for you."
 
 # Upgrading
 
-Orka is pre-1.0 and its CRDs still change between releases. Upgrades are safe but not
-automatic — there is one manual step Helm cannot do for you.
+This procedure upgrades a current harness v2 installation while preserving its
+Tasks, Sessions, SQLite data, and execution recovery records. Apply the target
+CRDs before upgrading the controller.
 
 ## The one thing that will bite you
 
@@ -163,7 +164,7 @@ in two:
 | The release fullname | Every owned resource is named from it. |
 
 To change one, install a new release alongside the old one and migrate producers across.
-See [Harness modes](harness-modes.md).
+See [installation ownership](harness-modes.md).
 
 ## `--skip-crds`
 
@@ -189,14 +190,8 @@ undo. Treat it as a deliberate cluster-wide data destruction step, performed onl
 resources are gone or backed up.
 :::
 
-## Migrating harness v1 to v2
+## Unsupported installations
 
-This is not an upgrade. The two contracts run as separate installations, and Tasks do not
-move between them. The procedure — stand v2 up, point producers at it, drain v1 — is in
-[Harness modes](harness-modes.md).
-
-For clusters still holding `orka.harness.v1` AgentRuntimes, `scripts/upgrade-orka-crds.sh`
-performs the one-way cutover. It refuses to run while any v1 AgentRuntime, dependent Agent,
-affected GatewayBinding, Task using the removed `gitSecretRef` fields, or legacy wrapper
-workload remains, and it requires attested backups of both the store and the custom
-resources before it will apply anything.
+The current controller only supports harness v2. Older execution protocols have
+no in-place upgrade, automatic Task or Session conversion, or database backfill.
+Use a fresh installation with the current schema and images.

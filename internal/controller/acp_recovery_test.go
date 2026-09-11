@@ -424,12 +424,12 @@ func TestACPDispatcherPatchRecoveredTerminalExecutionPreservesTerminalClassifica
 			name: "legacy cancellation uses terminal default", attemptState: store.PromptExecutionCancelled,
 			taskState: corev1alpha1.TaskExecutionStateCancelled, taskOutcome: corev1alpha1.TaskExecutionOutcomeCancelled,
 			latestReason: acpControllerRestartRecoveredReason, latestMessage: "terminal ACP attempt recovered under the new controller epoch",
-			wantReason: corev1alpha1.TaskExecutionReason(harnessV1ReasonCancelled), wantMessage: acpRecoveryPromptCancelledMessage,
+			wantReason: corev1alpha1.TaskExecutionReason("Cancelled"), wantMessage: acpRecoveryPromptCancelledMessage,
 		},
 		{
 			name: "legacy failure uses terminal default", attemptState: store.PromptExecutionFailed,
 			taskState: corev1alpha1.TaskExecutionStateFailed, taskOutcome: corev1alpha1.TaskExecutionOutcomeFailed,
-			wantReason: corev1alpha1.TaskExecutionReason(harnessV1ReasonFailed), wantMessage: acpRecoveryPromptFailedMessage,
+			wantReason: corev1alpha1.TaskExecutionReason("PromptFailed"), wantMessage: acpRecoveryPromptFailedMessage,
 		},
 		{
 			name: "credential block maps internal operation to public classification", attemptState: store.PromptExecutionFailed,
@@ -453,7 +453,7 @@ func TestACPDispatcherPatchRecoveredTerminalExecutionPreservesTerminalClassifica
 				}},
 			}
 			stale := latest.DeepCopy()
-			stale.Status.Execution.Reason = corev1alpha1.TaskExecutionReason(harnessV1ReasonCancelled)
+			stale.Status.Execution.Reason = corev1alpha1.TaskExecutionReason("Cancelled")
 			stale.Status.Execution.Message = "stale caller classification"
 			kubeClient := fake.NewClientBuilder().
 				WithScheme(scheme).
