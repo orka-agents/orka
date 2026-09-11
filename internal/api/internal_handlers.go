@@ -276,75 +276,79 @@ func (h *InternalHandlers) GetSessionTranscript(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusNotImplemented, "session storage not enabled")
 	}
 
-	authorizer := h.internalCallerAuthorizer()
-	callerTask, err := authorizer.resolveActiveTaskCaller(c, namespace)
-	if err != nil {
-		return err
-	}
-	taskHint := strings.TrimSpace(c.Query("taskName", ""))
-	if taskHint != "" && taskHint != callerTask.Name {
-		return fiber.NewError(fiber.StatusForbidden, "task identity does not match caller")
-	}
+	var messages []store.SessionMessage
+	if err := withInternalTaskDataTransaction(c, h.sessionStore, func(ctx context.Context) error {
+		authorizer := h.internalCallerAuthorizer()
+		callerTask, err := authorizer.resolveActiveTaskCaller(c, namespace)
+		if err != nil {
+			return err
+		}
+		taskHint := strings.TrimSpace(c.Query("taskName", ""))
+		if taskHint != "" && taskHint != callerTask.Name {
+			return fiber.NewError(fiber.StatusForbidden, "task identity does not match caller")
+		}
 
-	ctx := c.Context()
-	callerOwnsSession := callerTask.Spec.SessionRef != nil && callerTask.Spec.SessionRef.Name == name
-	gatewayOwned := false
-	var gatewayEvent *store.GatewayEvent
-	if h.gatewayEventStore != nil {
-		event, eventErr := h.gatewayEventStore.GetGatewayEventForTask(ctx, namespace, callerTask.Name, string(callerTask.UID))
-		switch {
-		case eventErr == nil:
-			gatewayOwned = true
-			gatewayEvent = event
-			if strings.TrimSpace(event.SessionName) == "" || event.SessionName != name {
+		callerOwnsSession := callerTask.Spec.SessionRef != nil && callerTask.Spec.SessionRef.Name == name
+		gatewayOwned := false
+		var gatewayEvent *store.GatewayEvent
+		if h.gatewayEventStore != nil {
+			event, eventErr := h.gatewayEventStore.GetGatewayEventForTask(ctx, namespace, callerTask.Name, string(callerTask.UID))
+			switch {
+			case eventErr == nil:
+				gatewayOwned = true
+				gatewayEvent = event
+				if strings.TrimSpace(event.SessionName) == "" || event.SessionName != name {
+					return fiber.NewError(fiber.StatusForbidden, "task does not own this gateway session")
+				}
+			case errors.Is(eventErr, store.ErrNotFound):
+			default:
+				return fiber.NewError(fiber.StatusInternalServerError, "failed to load gateway transcript ownership")
+			}
+		}
+		if !gatewayOwned && !callerOwnsSession {
+			return fiber.NewError(fiber.StatusForbidden, "caller is not authorized for this session")
+		}
+
+		sessionType, err := transcriptSessionType(ctx, h.sessionStore, namespace, name)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return fiber.NewError(fiber.StatusNotFound, "session not found")
+			}
+			return fiber.NewError(fiber.StatusInternalServerError, "failed to load session transcript policy")
+		}
+		if sessionType == store.SessionTypeGateway {
+			if h.gatewayEventStore == nil {
+				return fiber.NewError(fiber.StatusInternalServerError, "gateway transcript ownership lookup is unavailable")
+			}
+			if !gatewayOwned {
 				return fiber.NewError(fiber.StatusForbidden, "task does not own this gateway session")
 			}
-		case errors.Is(eventErr, store.ErrNotFound):
-		default:
-			return fiber.NewError(fiber.StatusInternalServerError, "failed to load gateway transcript ownership")
 		}
-	}
-	if !gatewayOwned && !callerOwnsSession {
-		return fiber.NewError(fiber.StatusForbidden, "caller is not authorized for this session")
-	}
 
-	sessionType, err := transcriptSessionType(ctx, h.sessionStore, namespace, name)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return fiber.NewError(fiber.StatusNotFound, "session not found")
+		maxMessages := 0
+		throughMessageID := ""
+		if gatewayOwned {
+			maxMessages = store.GatewayTranscriptMessageLimit
+			throughMessageID = store.GatewayUserMessageID(gatewayEvent.ID)
+		} else if callerTask.Spec.SessionRef != nil && callerTask.Spec.SessionRef.Name == name {
+			maxMessages = int(callerTask.Spec.SessionRef.MaxMessages)
+			throughMessageID = callerTask.Spec.SessionRef.ThroughMessageID
 		}
-		return fiber.NewError(fiber.StatusInternalServerError, "failed to load session transcript policy")
-	}
-	if sessionType == store.SessionTypeGateway {
-		if h.gatewayEventStore == nil {
-			return fiber.NewError(fiber.StatusInternalServerError, "gateway transcript ownership lookup is unavailable")
-		}
-		if !gatewayOwned {
-			return fiber.NewError(fiber.StatusForbidden, "task does not own this gateway session")
-		}
-	}
 
-	maxMessages := 0
-	throughMessageID := ""
-	if gatewayOwned {
-		maxMessages = store.GatewayTranscriptMessageLimit
-		throughMessageID = store.GatewayUserMessageID(gatewayEvent.ID)
-	} else if callerTask.Spec.SessionRef != nil && callerTask.Spec.SessionRef.Name == name {
-		maxMessages = int(callerTask.Spec.SessionRef.MaxMessages)
-		throughMessageID = callerTask.Spec.SessionRef.ThroughMessageID
-	}
-
-	var messages []store.SessionMessage
-	if throughMessageID != "" {
-		messages, err = h.sessionStore.LoadTranscriptThrough(ctx, namespace, name, throughMessageID, maxMessages)
-	} else {
-		messages, err = h.sessionStore.LoadTranscript(ctx, namespace, name, maxMessages)
-	}
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return fiber.NewError(fiber.StatusNotFound, "session not found")
+		if throughMessageID != "" {
+			messages, err = h.sessionStore.LoadTranscriptThrough(ctx, namespace, name, throughMessageID, maxMessages)
+		} else {
+			messages, err = h.sessionStore.LoadTranscript(ctx, namespace, name, maxMessages)
 		}
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to load transcript: %v", err))
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return fiber.NewError(fiber.StatusNotFound, "session not found")
+			}
+			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to load transcript: %v", err))
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	c.Set("Content-Type", "application/x-ndjson")
@@ -387,68 +391,74 @@ func (h *InternalHandlers) SearchTranscript(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusNotImplemented, "session storage not enabled")
 	}
 
-	authorizer := h.internalCallerAuthorizer()
-	callerTask, err := authorizer.resolveActiveTaskCaller(c, namespace)
-	if err != nil {
-		return err
-	}
-	allowedSessions, err := authorizer.coordinationTreeSessionNames(c.Context(), callerTask)
-	if err != nil {
-		return err
-	}
-	if h.gatewayEventStore != nil {
-		_, eventErr := h.gatewayEventStore.GetGatewayEventForTask(c.Context(), namespace, callerTask.Name, string(callerTask.UID))
-		switch {
-		case eventErr == nil:
-			// Gateway turns are authorized against an event-specific transcript
-			// cutoff. Transcript search has no cutoff field, so fail closed
-			// instead of searching the full canonical session.
-			return fiber.NewError(fiber.StatusForbidden, "gateway session transcript search is unavailable")
-		case errors.Is(eventErr, store.ErrNotFound):
-		default:
-			return fiber.NewError(fiber.StatusInternalServerError, "failed to load gateway transcript ownership")
+	var results []store.TranscriptSearchResult
+	if err := withInternalTaskDataTransaction(c, h.sessionStore, func(ctx context.Context) error {
+		authorizer := h.internalCallerAuthorizer()
+		callerTask, err := authorizer.resolveActiveTaskCaller(c, namespace)
+		if err != nil {
+			return err
 		}
-	}
-	sessionName := strings.TrimSpace(c.Query("sessionName", ""))
-	excludeSessionName := strings.TrimSpace(c.Query("excludeSessionName", ""))
-	if sessionName != "" {
-		if _, ok := allowedSessions[sessionName]; !ok {
-			return fiber.NewError(fiber.StatusForbidden, "caller is not authorized for this session")
+		allowedSessions, err := authorizer.coordinationTreeSessionNames(ctx, callerTask)
+		if err != nil {
+			return err
 		}
-		sessionType, err := transcriptSessionType(c.Context(), h.sessionStore, namespace, sessionName)
-		switch {
-		case errors.Is(err, store.ErrNotFound), sessionType == store.SessionTypeGateway:
-			return fiber.NewError(fiber.StatusForbidden, "caller is not authorized for this session")
-		case err != nil:
-			return fiber.NewError(fiber.StatusInternalServerError, "failed to load session transcript policy")
+		if h.gatewayEventStore != nil {
+			_, eventErr := h.gatewayEventStore.GetGatewayEventForTask(ctx, namespace, callerTask.Name, string(callerTask.UID))
+			switch {
+			case eventErr == nil:
+				// Gateway turns are authorized against an event-specific transcript
+				// cutoff. Transcript search has no cutoff field, so fail closed
+				// instead of searching the full canonical session.
+				return fiber.NewError(fiber.StatusForbidden, "gateway session transcript search is unavailable")
+			case errors.Is(eventErr, store.ErrNotFound):
+			default:
+				return fiber.NewError(fiber.StatusInternalServerError, "failed to load gateway transcript ownership")
+			}
 		}
-	}
+		sessionName := strings.TrimSpace(c.Query("sessionName", ""))
+		excludeSessionName := strings.TrimSpace(c.Query("excludeSessionName", ""))
+		if sessionName != "" {
+			if _, ok := allowedSessions[sessionName]; !ok {
+				return fiber.NewError(fiber.StatusForbidden, "caller is not authorized for this session")
+			}
+			sessionType, err := transcriptSessionType(ctx, h.sessionStore, namespace, sessionName)
+			switch {
+			case errors.Is(err, store.ErrNotFound), sessionType == store.SessionTypeGateway:
+				return fiber.NewError(fiber.StatusForbidden, "caller is not authorized for this session")
+			case err != nil:
+				return fiber.NewError(fiber.StatusInternalServerError, "failed to load session transcript policy")
+			}
+		}
 
-	query := strings.TrimSpace(c.Query("query", ""))
-	if query == "" {
-		return fiber.NewError(fiber.StatusBadRequest, "query is required")
-	}
+		query := strings.TrimSpace(c.Query("query", ""))
+		if query == "" {
+			return fiber.NewError(fiber.StatusBadRequest, "query is required")
+		}
 
-	limit, err := parseOptionalLimit(c.Query("limit", ""))
-	if err != nil {
+		limit, err := parseOptionalLimit(c.Query("limit", ""))
+		if err != nil {
+			return err
+		}
+		maxSnippetLength, err := parseOptionalNonNegativeQueryInt(c.Query("maxSnippetLength", ""), "maxSnippetLength")
+		if err != nil {
+			return err
+		}
+
+		results, err = searchAuthorizedTranscriptResults(ctx, h.sessionStore, store.TranscriptSearchFilter{
+			Namespace:          namespace,
+			Query:              query,
+			SessionName:        sessionName,
+			ExcludeSessionName: excludeSessionName,
+			Roles:              splitCSV(c.Query("roles", "")),
+			Limit:              limit,
+			MaxSnippetLength:   maxSnippetLength,
+		}, allowedSessions)
+		if err != nil {
+			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to search transcript: %v", err))
+		}
+		return nil
+	}); err != nil {
 		return err
-	}
-	maxSnippetLength, err := parseOptionalNonNegativeQueryInt(c.Query("maxSnippetLength", ""), "maxSnippetLength")
-	if err != nil {
-		return err
-	}
-
-	results, err := searchAuthorizedTranscriptResults(c.Context(), h.sessionStore, store.TranscriptSearchFilter{
-		Namespace:          namespace,
-		Query:              query,
-		SessionName:        sessionName,
-		ExcludeSessionName: excludeSessionName,
-		Roles:              splitCSV(c.Query("roles", "")),
-		Limit:              limit,
-		MaxSnippetLength:   maxSnippetLength,
-	}, allowedSessions)
-	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to search transcript: %v", err))
 	}
 	if results == nil {
 		results = []store.TranscriptSearchResult{}
@@ -562,21 +572,26 @@ func (h *InternalHandlers) GetPlan(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "namespace and taskName are required")
 	}
 
-	if _, err := h.internalCallerAuthorizer().verifyTaskCaller(c, namespace, taskName); err != nil {
-		return err
-	}
-
 	if h.planStore == nil {
 		return fiber.NewError(fiber.StatusNotImplemented, "plan storage not enabled")
 	}
 
-	ctx := c.Context()
-	plan, err := h.planStore.GetPlan(ctx, namespace, taskName)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return fiber.NewError(fiber.StatusNotFound, "plan not found")
+	var plan *store.PlanState
+	if err := withInternalTaskDataTransaction(c, h.planStore, func(ctx context.Context) error {
+		if _, err := h.internalCallerAuthorizer().verifyTaskCaller(c, namespace, taskName); err != nil {
+			return err
 		}
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get plan: %v", err))
+		var err error
+		plan, err = h.planStore.GetPlan(ctx, namespace, taskName)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return fiber.NewError(fiber.StatusNotFound, "plan not found")
+			}
+			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get plan: %v", err))
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	return c.JSON(plan)

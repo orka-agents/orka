@@ -881,6 +881,7 @@ func TestGetSessionTranscript(t *testing.T) {
 
 type countingTranscriptSearchStore struct {
 	store.SessionStore
+	store.TaskDataTransactionStore
 	calls       int
 	policyReads int
 	filters     []store.TranscriptSearchFilter
@@ -913,7 +914,7 @@ func TestSearchAuthorizedTranscriptResultsUsesSingleBoundedQuery(t *testing.T) {
 		}}))
 	}
 
-	capture := &countingTranscriptSearchStore{SessionStore: dataStore}
+	capture := &countingTranscriptSearchStore{SessionStore: dataStore, TaskDataTransactionStore: dataStore}
 	results, err := searchAuthorizedTranscriptResults(t.Context(), capture, store.TranscriptSearchFilter{
 		Namespace: "default", Query: "needle", ExcludeSessionName: "excluded", Limit: 10,
 	}, map[string]struct{}{
@@ -930,7 +931,7 @@ func TestSearchAuthorizedTranscriptResultsUsesSingleBoundedQuery(t *testing.T) {
 
 func TestSearchTranscript(t *testing.T) {
 	h, app, ss := setupTestInternalHandlers()
-	capture := &countingTranscriptSearchStore{SessionStore: ss}
+	capture := &countingTranscriptSearchStore{SessionStore: ss, TaskDataTransactionStore: ss}
 	h.sessionStore = capture
 	app.Get("/internal/v1/sessions/:namespace/search", h.SearchTranscript)
 

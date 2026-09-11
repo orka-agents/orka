@@ -442,7 +442,7 @@ func (s *Store) GetGatewayEventForTask(ctx context.Context, namespace, taskName,
 	if strings.TrimSpace(namespace) == "" || strings.TrimSpace(taskName) == "" || strings.TrimSpace(taskUID) == "" {
 		return nil, store.ValidationErrorf("namespace, taskName, and taskUID are required")
 	}
-	row := s.db.QueryRowContext(ctx, `SELECT `+gatewayEventColumns+` FROM gateway_events
+	row := s.taskDataExecutor(ctx).QueryRowContext(ctx, `SELECT `+gatewayEventColumns+` FROM gateway_events
 		WHERE namespace = ? AND task_name = ? AND task_uid = ?
 		ORDER BY created_at DESC, id DESC LIMIT 1`,
 		namespace, taskName, taskUID,

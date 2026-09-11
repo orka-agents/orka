@@ -8,9 +8,11 @@ import "context"
 // must be fully read before entering the transaction.
 //
 // The transactional context supports SaveResult, SaveArtifact, SavePlan,
-// SendMessage, GetMessages, AppendExecutionEvent (including deduplicated and
-// plan-aware variants), and ListHarnessV1AttemptsByTask. Other store methods
-// must not be called from the callback.
+// GetPlan, SendMessage, GetMessages, GetSession, GetSessionType, LoadTranscript,
+// LoadTranscriptThrough, SearchTranscript, GetGatewayEventForTask,
+// AppendExecutionEvent (including deduplicated and plan-aware variants), and
+// ListHarnessV1AttemptsByTask. Other store methods must not be called from the
+// callback.
 type TaskDataTransactionStore interface {
 	WithTaskDataTransaction(context.Context, func(context.Context) error) error
 }

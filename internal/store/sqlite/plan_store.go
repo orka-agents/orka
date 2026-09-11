@@ -49,7 +49,7 @@ func upsertSQLitePlan(
 
 // GetPlan retrieves the autonomous plan state for a task.
 func (s *Store) GetPlan(ctx context.Context, namespace, taskName string) (*store.PlanState, error) {
-	row := s.db.QueryRowContext(ctx,
+	row := s.taskDataExecutor(ctx).QueryRowContext(ctx,
 		`SELECT namespace, task_name, iteration, summary, progress_pct, goal_complete, plan_document, created_at, updated_at
 		 FROM plan_states WHERE namespace = ? AND task_name = ?`,
 		namespace, taskName,

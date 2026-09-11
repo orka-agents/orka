@@ -22,7 +22,7 @@ type taskDataExecutor interface {
 // WithTaskDataTransaction acquires SQLite's writer lock before the callback
 // checks Kubernetes authority. Task finalizer cleanup uses the same database,
 // so it either precedes that check (which rejects a deleting/recreated Task) or
-// follows the committed write and removes it before permitting name reuse.
+// follows the authorized access and removes task data before permitting name reuse.
 func (s *Store) WithTaskDataTransaction(ctx context.Context, mutate func(context.Context) error) error {
 	if ctx.Value(taskDataTransactionKey{}) != nil {
 		return fmt.Errorf("nested task data transaction")

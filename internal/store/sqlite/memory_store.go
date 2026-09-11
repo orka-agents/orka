@@ -231,7 +231,7 @@ func (s *Store) SearchTranscript(ctx context.Context, filter store.TranscriptSea
 	query.WriteString(` ORDER BY message.created_at DESC, message.id DESC LIMIT ?`)
 	args = append(args, boundedLimit(filter.Limit, defaultTranscriptLimit, maxTranscriptLimit))
 
-	rows, err := s.db.QueryContext(ctx, query.String(), args...)
+	rows, err := s.taskDataExecutor(ctx).QueryContext(ctx, query.String(), args...)
 	if err != nil {
 		return nil, err
 	}
