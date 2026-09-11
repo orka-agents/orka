@@ -366,6 +366,9 @@ func (h *Handlers) createSecurityScanRun(ctx context.Context, ui *UserInfo, scan
 		return nil, err
 	}
 	if _, err := security.RetireStaleScanRuns(ctx, h.securityStore, h.client, h.apiReader, scan); err != nil {
+		if errors.Is(err, security.ErrScanRunCancellationPending) {
+			return nil, fiber.NewError(fiber.StatusConflict, "obsolete scan tasks are still being cancelled; retry after cleanup")
+		}
 		if errors.Is(err, store.ErrConflict) || apierrors.IsConflict(err) {
 			return nil, fiber.NewError(fiber.StatusConflict, "repository scan changed before run admission")
 		}
@@ -394,16 +397,12 @@ func (h *Handlers) createSecurityScanRun(ctx context.Context, ui *UserInfo, scan
 		}
 		return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create scan run: %v", err))
 	}
-	if err := h.client.Create(ctx, task); err != nil {
-		now := time.Now()
-		run.Phase = "failed"
-		run.CompletedAt = &now
-		run.ErrorMessage = "scan task creation failed"
-		if releaseErr := h.securityStore.UpdateScanRun(ctx, run); releaseErr != nil {
-			return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to create scan task and release scan admission")
-		}
+	if err := security.CreateInitialScanTask(ctx, h.securityStore, h.client, h.apiReader, scan, run, task); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			return nil, fiber.NewError(fiber.StatusConflict, "a security scan is already running for this repository")
+		}
+		if errors.Is(err, store.ErrConflict) || apierrors.IsConflict(err) {
+			return nil, fiber.NewError(fiber.StatusConflict, "repository scan changed during run admission")
 		}
 		return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create scan task: %v", err))
 	}

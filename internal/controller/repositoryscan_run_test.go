@@ -95,6 +95,11 @@ func TestRepositoryScanReconcileRetiresStaleIdentityBeforeIngestion(t *testing.T
 			request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(scan)}
 			_, err = r.Reconcile(ctx, request)
 			require.NoError(t, err)
+			pending, err := db.GetScanRun(ctx, scan.Namespace, run.ID)
+			require.NoError(t, err)
+			require.True(t, pending.CancellationPending)
+			_, err = r.Reconcile(ctx, request)
+			require.NoError(t, err)
 			retired, err := db.GetScanRun(ctx, scan.Namespace, run.ID)
 			require.NoError(t, err)
 			require.Equal(t, scanRunPhaseFailed, retired.Phase)
@@ -141,6 +146,9 @@ func TestRepositoryScanDeletionReleasesRunReservation(t *testing.T) {
 	require.NoError(t, cl.Delete(ctx, scan))
 	r := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: db}
 	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(scan)})
+	require.NoError(t, err)
+	require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(scan), &corev1alpha1.RepositoryScan{}), "cleanup must retain the finalizer for confirmation")
+	_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(scan)})
 	require.NoError(t, err)
 	err = cl.Get(ctx, client.ObjectKeyFromObject(scan), &corev1alpha1.RepositoryScan{})
 	require.True(t, apierrors.IsNotFound(err))
@@ -328,12 +336,109 @@ func TestCreateScanRunRollsBackChangedIdentity(t *testing.T) {
 	})
 	r := &RepositoryScanReconciler{Client: cl, APIReader: base, Scheme: base.Scheme(), SecurityStore: db}
 	require.ErrorIs(t, r.createScanRun(ctx, scan, "initial", "", ""), store.ErrConflict)
+	current := &corev1alpha1.RepositoryScan{}
+	require.NoError(t, base.Get(ctx, client.ObjectKeyFromObject(scan), current))
+	_, err := security.RetireStaleScanRuns(ctx, db, base, base, current)
+	require.NoError(t, err)
 	runs, _, err := db.ListScanRuns(ctx, scan.Namespace, scan.Name, 10, "")
 	require.NoError(t, err)
 	require.Len(t, runs, 1)
 	require.Equal(t, scanRunPhaseFailed, runs[0].Phase)
 	require.NotNil(t, runs[0].CompletedAt)
 	require.True(t, apierrors.IsNotFound(base.Get(ctx, client.ObjectKey{Namespace: scan.Namespace, Name: runs[0].TaskName}, &corev1alpha1.Task{})))
+}
+
+type scanRunAdmissionHookStore struct {
+	store.SecurityStore
+	afterCreate func()
+}
+
+func (s *scanRunAdmissionHookStore) CreateScanRun(ctx context.Context, run *store.ScanRun) error {
+	if err := s.SecurityStore.CreateScanRun(ctx, run); err != nil {
+		return err
+	}
+	s.afterCreate()
+	return nil
+}
+
+func TestCreateScanRunFencesInitialTaskAdmission(t *testing.T) {
+	for _, failure := range []string{"retired reservation", "lost create response", "failed ownership read"} {
+		t.Run(failure, func(t *testing.T) {
+			ctx := context.Background()
+			db := setupControllerSQLiteStore(t)
+			scan := &corev1alpha1.RepositoryScan{
+				ObjectMeta: metav1.ObjectMeta{Name: "scan", Namespace: defaultNS, UID: "scan-uid", Generation: 1},
+				Spec: corev1alpha1.RepositoryScanSpec{
+					RepoURL: "https://github.com/example/repo", AnalysisAgentRef: corev1alpha1.AgentReference{Name: "analysis"},
+				},
+			}
+			base := repositoryScanRunTestClient(t, scan, repositoryScanTestAgent(scan.Spec.AnalysisAgentRef.Name))
+			retire := func() {
+				current := &corev1alpha1.RepositoryScan{}
+				require.NoError(t, base.Get(ctx, client.ObjectKeyFromObject(scan), current))
+				current.Generation++
+				require.NoError(t, base.Update(ctx, current))
+				_, err := security.RetireStaleScanRuns(ctx, db, base, base, current)
+				require.ErrorIs(t, err, security.ErrScanRunCancellationPending)
+				_, err = security.RetireStaleScanRuns(ctx, db, base, base, current)
+				require.NoError(t, err)
+			}
+			admissionErr := fmt.Errorf("injected admission failure")
+			created := false
+			cl := interceptor.NewClient(base, interceptor.Funcs{
+				Create: func(ctx context.Context, c client.WithWatch, object client.Object, opts ...client.CreateOption) error {
+					if task, ok := object.(*corev1alpha1.Task); ok {
+						retire()
+						task.Finalizers = []string{"test.orka.ai/hold-cleanup"}
+					}
+					if err := c.Create(ctx, object, opts...); err != nil {
+						return err
+					}
+					created = true
+					if failure == "lost create response" {
+						return admissionErr
+					}
+					return nil
+				},
+			})
+			reader := interceptor.NewClient(base, interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+					if _, ok := object.(*corev1alpha1.RepositoryScan); ok && created && failure == "failed ownership read" {
+						return admissionErr
+					}
+					return c.Get(ctx, key, object, opts...)
+				},
+			})
+			r := &RepositoryScanReconciler{Client: cl, APIReader: reader, Scheme: base.Scheme(), SecurityStore: db}
+			if failure == "retired reservation" {
+				r.SecurityStore = &scanRunAdmissionHookStore{SecurityStore: db, afterCreate: retire}
+				admissionErr = store.ErrConflict
+			}
+			require.ErrorIs(t, r.createScanRun(ctx, scan, "initial", "", ""), admissionErr)
+			runs, _, err := db.ListScanRuns(ctx, scan.Namespace, scan.Name, 10, "")
+			require.NoError(t, err)
+			require.Len(t, runs, 1)
+			require.True(t, runs[0].CancellationPending, "late creation must request durable cleanup even after retirement completed")
+			current := &corev1alpha1.RepositoryScan{}
+			require.NoError(t, base.Get(ctx, client.ObjectKeyFromObject(scan), current))
+			if failure == "retired reservation" {
+				require.False(t, created)
+			} else {
+				task := &corev1alpha1.Task{}
+				require.NoError(t, base.Get(ctx, client.ObjectKey{Namespace: scan.Namespace, Name: runs[0].TaskName}, task))
+				require.False(t, task.DeletionTimestamp.IsZero())
+				_, err = security.RetireStaleScanRuns(ctx, db, base, base, current)
+				require.ErrorIs(t, err, security.ErrScanRunCancellationPending)
+				task.Finalizers = nil
+				require.NoError(t, base.Update(ctx, task))
+			}
+			_, err = security.RetireStaleScanRuns(ctx, db, base, base, current)
+			require.NoError(t, err)
+			retired, err := db.GetScanRun(ctx, scan.Namespace, runs[0].ID)
+			require.NoError(t, err)
+			require.False(t, retired.CancellationPending)
+		})
+	}
 }
 
 func TestCurrentRepositoryScanTasksIgnoresLateTasksFromOlderRun(t *testing.T) {
@@ -373,8 +478,11 @@ func TestRetireStaleScanRunsFindsReservationsBeyondFirstPage(t *testing.T) {
 	}
 	cleanupStore := &boundedScanRunCleanupStore{SecurityStore: db, t: t}
 	_, err := security.RetireStaleScanRuns(ctx, cleanupStore, repositoryScanRunTestClient(t), nil, scan)
-	require.NoError(t, err)
+	require.ErrorIs(t, err, security.ErrScanRunCancellationPending)
 	require.Equal(t, 1, cleanupStore.historyQueries)
+	_, err = security.RetireStaleScanRuns(ctx, cleanupStore, repositoryScanRunTestClient(t), nil, scan)
+	require.NoError(t, err)
+	require.Equal(t, 2, cleanupStore.historyQueries)
 	after, err := db.GetScanRun(ctx, scan.Namespace, old.ID)
 	require.NoError(t, err)
 	require.Equal(t, scanRunPhaseFailed, after.Phase)
@@ -476,9 +584,15 @@ func TestRetireStaleScanRunsCancelsOwnedPipelineBeforeRelease(t *testing.T) {
 				require.Equal(t, scanRunPhaseRunning, after.Phase)
 				require.NoError(t, base.Get(ctx, client.ObjectKeyFromObject(owned), &corev1alpha1.Task{}))
 			} else {
+				require.ErrorIs(t, err, security.ErrScanRunCancellationPending)
+				require.True(t, after.CancellationPending)
+				require.Equal(t, scanRunPhaseRunning, after.Phase)
+				require.True(t, apierrors.IsNotFound(base.Get(ctx, client.ObjectKeyFromObject(owned), &corev1alpha1.Task{})))
+				_, err = security.RetireStaleScanRuns(ctx, db, cl, base, scan)
+				require.NoError(t, err)
+				after, err = db.GetScanRun(ctx, run.Namespace, run.ID)
 				require.NoError(t, err)
 				require.Equal(t, scanRunPhaseFailed, after.Phase)
-				require.True(t, apierrors.IsNotFound(base.Get(ctx, client.ObjectKeyFromObject(owned), &corev1alpha1.Task{})))
 			}
 			for _, preserved := range []*corev1alpha1.Task{foreign, terminal, validation} {
 				require.NoError(t, base.Get(ctx, client.ObjectKeyFromObject(preserved), &corev1alpha1.Task{}))
@@ -538,6 +652,8 @@ func TestRepositoryScanReconcileRetriesScanRunCancellation(t *testing.T) {
 			restarted := &RepositoryScanReconciler{Client: base, APIReader: base, Scheme: base.Scheme(), SecurityStore: db}
 			_, err = restarted.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(scan)})
 			require.NoError(t, err)
+			_, err = restarted.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(scan)})
+			require.NoError(t, err)
 			after, err := db.GetScanRun(ctx, run.Namespace, run.ID)
 			require.NoError(t, err)
 			require.Equal(t, scanRunPhaseFailed, after.Phase)
@@ -579,6 +695,8 @@ func TestMapperStageCreationFencesConcurrentRetirement(t *testing.T) {
 				current.Spec.SubPath = "edited"
 				require.NoError(t, base.Update(ctx, current))
 				_, err := security.RetireStaleScanRuns(ctx, db, base, base, current)
+				require.ErrorIs(t, err, security.ErrScanRunCancellationPending)
+				_, err = security.RetireStaleScanRuns(ctx, db, base, base, current)
 				require.NoError(t, err)
 				retired, err := db.GetScanRun(ctx, run.Namespace, run.ID)
 				require.NoError(t, err)
@@ -619,8 +737,12 @@ func TestMapperStageCreationFencesConcurrentRetirement(t *testing.T) {
 				require.NoError(t, err)
 				require.Len(t, pending, 1)
 				require.Equal(t, scanRunPhaseFailed, pending[0].Phase, "late cleanup must remain retryable for a terminal run")
-				restarted := &RepositoryScanReconciler{Client: base, APIReader: base, Scheme: base.Scheme(), SecurityStore: db}
-				_, err = restarted.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(scan)})
+			}
+			restarted := &RepositoryScanReconciler{Client: base, APIReader: base, Scheme: base.Scheme(), SecurityStore: db}
+			for range 2 {
+				current := &corev1alpha1.RepositoryScan{}
+				require.NoError(t, base.Get(ctx, client.ObjectKeyFromObject(scan), current))
+				_, err = restarted.reconcileScanRunIdentity(ctx, current)
 				require.NoError(t, err)
 			}
 			var tasks corev1alpha1.TaskList
@@ -634,6 +756,66 @@ func TestMapperStageCreationFencesConcurrentRetirement(t *testing.T) {
 			require.Equal(t, retired.Summary, after.Summary)
 		})
 	}
+}
+
+func TestRepositoryScanCancellationConfirmsLateTasksAfterCreatorCrash(t *testing.T) {
+	ctx := context.Background()
+	db := setupControllerSQLiteStore(t)
+	scan := &corev1alpha1.RepositoryScan{
+		ObjectMeta: metav1.ObjectMeta{Name: "scan", Namespace: defaultNS, UID: "uid", Generation: 1},
+		Status:     corev1alpha1.RepositoryScanStatus{Phase: repositoryScanPhaseScanning, LastScanID: "old-run"},
+	}
+	run := &store.ScanRun{
+		ID: scan.Status.LastScanID, Namespace: scan.Namespace, RepositoryScan: scan.Name, Phase: scanRunPhaseRunning,
+		RepositoryScanUID: string(scan.UID), RepositoryScanGeneration: scan.Generation,
+	}
+	require.NoError(t, db.CreateScanRun(ctx, run))
+	base := repositoryScanRunTestClient(t, scan)
+	creator := &RepositoryScanReconciler{Client: base, APIReader: base, Scheme: base.Scheme(), SecurityStore: db}
+	require.NoError(t, creator.validateScanStageRun(ctx, scan, run))
+	current := &corev1alpha1.RepositoryScan{}
+	require.NoError(t, base.Get(ctx, client.ObjectKeyFromObject(scan), current))
+	current.Generation++
+	require.NoError(t, base.Update(ctx, current))
+	_, err := security.RetireStaleScanRuns(ctx, db, base, base, current)
+	require.ErrorIs(t, err, security.ErrScanRunCancellationPending)
+	// The creator's preflight succeeded, but its Create response is lost and it
+	// never reaches post-create validation. No in-memory compensation can run.
+	late := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "late-mapper", Namespace: scan.Namespace, UID: "task-uid", Finalizers: []string{"test.orka.ai/hold-cleanup"},
+			Labels: map[string]string{
+				labels.LabelSecurityTarget: scan.Name, labels.LabelSecurityScanID: run.ID, labels.LabelSecurityStage: security.StageMapper,
+			},
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(scan, corev1alpha1.GroupVersion.WithKind("RepositoryScan"))},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	require.NoError(t, base.Create(ctx, late))
+	restarted := &RepositoryScanReconciler{Client: base, APIReader: base, Scheme: base.Scheme(), SecurityStore: db}
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(scan)}
+	for range 2 {
+		_, err = restarted.Reconcile(ctx, req)
+		require.NoError(t, err)
+		pending, err := db.GetScanRun(ctx, run.Namespace, run.ID)
+		require.NoError(t, err)
+		require.True(t, pending.CancellationPending)
+		require.Equal(t, scanRunPhaseRunning, pending.Phase)
+	}
+	deleting := &corev1alpha1.Task{}
+	require.NoError(t, base.Get(ctx, client.ObjectKeyFromObject(late), deleting))
+	require.False(t, deleting.DeletionTimestamp.IsZero())
+	replacement := &store.ScanRun{ID: "replacement", Namespace: scan.Namespace, RepositoryScan: scan.Name, Phase: scanRunPhasePending}
+	require.ErrorIs(t, db.CreateScanRun(ctx, replacement), store.ErrConflict)
+	deleting.Finalizers = nil
+	require.NoError(t, base.Update(ctx, deleting))
+	_, err = restarted.Reconcile(ctx, req)
+	require.NoError(t, err)
+	retired, err := db.GetScanRun(ctx, run.Namespace, run.ID)
+	require.NoError(t, err)
+	require.Equal(t, scanRunPhaseFailed, retired.Phase)
+	require.False(t, retired.CancellationPending)
+	require.NoError(t, db.CreateScanRun(ctx, replacement))
 }
 
 func TestRepositoryScanRecoversOrphanedStatusBinding(t *testing.T) {
@@ -744,6 +926,12 @@ func TestCreateScanRunReleasesReservationWhenTaskAlreadyExists(t *testing.T) {
 	r := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: db}
 	require.True(t, apierrors.IsAlreadyExists(r.createScanRun(ctx, scan, "initial", "", "")))
 	runs, _, err := db.ListScanRuns(ctx, scan.Namespace, scan.Name, 10, "")
+	require.NoError(t, err)
+	require.Len(t, runs, 1)
+	require.True(t, runs[0].CancellationPending)
+	_, err = security.RetireStaleScanRuns(ctx, db, cl, cl, scan)
+	require.NoError(t, err)
+	runs, _, err = db.ListScanRuns(ctx, scan.Namespace, scan.Name, 10, "")
 	require.NoError(t, err)
 	require.Len(t, runs, 1)
 	require.Equal(t, scanRunPhaseFailed, runs[0].Phase)

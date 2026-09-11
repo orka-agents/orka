@@ -192,8 +192,9 @@ type SecurityStore interface {
 	GetScanTaskIngestion(ctx context.Context, task ScanTaskIdentity) (*ScanTaskIngestion, error)
 	// ApplyScanTaskIngestion atomically applies results, updates the current run,
 	// and records the receipt. It skips already ingested Tasks and terminal runs.
+	// If supplied, validate runs before application and immediately before commit.
 	// The callback must use the supplied store and must not perform external mutations.
-	ApplyScanTaskIngestion(ctx context.Context, ingestion *ScanTaskIngestion, apply func(SecurityStore, *ScanRun) error) (bool, error)
+	ApplyScanTaskIngestion(ctx context.Context, ingestion *ScanTaskIngestion, validate func(*ScanRun) error, apply func(SecurityStore, *ScanRun) error) (bool, error)
 	CompleteScanTaskIngestion(ctx context.Context, task ScanTaskIdentity) error
 
 	CreateScanRun(ctx context.Context, run *ScanRun) error

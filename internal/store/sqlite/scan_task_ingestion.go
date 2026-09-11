@@ -63,7 +63,7 @@ func (s *Store) GetScanTaskIngestion(ctx context.Context, task store.ScanTaskIde
 	return ingestion, nil
 }
 
-func (s *Store) ApplyScanTaskIngestion(ctx context.Context, ingestion *store.ScanTaskIngestion, apply func(store.SecurityStore, *store.ScanRun) error) (bool, error) {
+func (s *Store) ApplyScanTaskIngestion(ctx context.Context, ingestion *store.ScanTaskIngestion, validate func(*store.ScanRun) error, apply func(store.SecurityStore, *store.ScanRun) error) (bool, error) {
 	if ingestion == nil || ingestion.Namespace == "" || ingestion.RepositoryScan == "" ||
 		ingestion.ScanRunID == "" || ingestion.TaskName == "" || ingestion.Stage == "" || apply == nil {
 		return false, store.ValidationErrorf("scan Task ingestion requires a run, Task identity, and apply callback")
@@ -85,6 +85,11 @@ func (s *Store) ApplyScanTaskIngestion(ctx context.Context, ingestion *store.Sca
 		if run.CancellationVersion != 0 || run.Phase == "succeeded" || run.Phase == "failed" {
 			return nil
 		}
+		if validate != nil {
+			if err := validate(run); err != nil {
+				return err
+			}
+		}
 		if err := apply(tx, run); err != nil {
 			return err
 		}
@@ -104,6 +109,11 @@ func (s *Store) ApplyScanTaskIngestion(ctx context.Context, ingestion *store.Sca
 			ingestion.TaskUID, ingestion.Stage, ingestion.SliceID, findingIDs,
 			ingestion.DroppedFindingsJSON, ingestion.Completed, ingestion.IngestedAt); err != nil {
 			return err
+		}
+		if validate != nil {
+			if err := validate(run); err != nil {
+				return err
+			}
 		}
 		applied = true
 		return nil

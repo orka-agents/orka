@@ -489,14 +489,7 @@ func (r *RepositoryScanReconciler) createScanRun(ctx context.Context, scan *core
 		}
 		return err
 	}
-	if err := r.Create(ctx, task); err != nil {
-		now := time.Now().UTC()
-		run.Phase = scanRunPhaseFailed
-		run.CompletedAt = &now
-		run.ErrorMessage = "scan task creation failed"
-		if releaseErr := r.SecurityStore.UpdateScanRun(ctx, run); releaseErr != nil {
-			return errors.Join(err, releaseErr)
-		}
+	if err := security.CreateInitialScanTask(ctx, r.SecurityStore, r.Client, r.APIReader, scan, run, task); err != nil {
 		return err
 	}
 
@@ -1576,8 +1569,8 @@ func (r *RepositoryScanReconciler) getScanRunForTask(ctx context.Context, scan *
 	if err != nil {
 		return nil, err
 	}
-	if !security.ScanRunMatchesRepositoryScan(run, scan) {
-		return nil, store.ErrConflict
+	if err := r.validateScanRunIngestionIdentity(ctx, scan, run); err != nil {
+		return nil, r.cancelScanRunAfterIdentityConflict(ctx, scan, run, err)
 	}
 	return run, nil
 }

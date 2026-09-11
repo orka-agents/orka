@@ -98,6 +98,17 @@ func TestCreateManualSecurityScanReplacesStaleRunIdentity(t *testing.T) {
 			request.Header.Set(TransactionTokenHeaderName, token)
 			response, err := app.Test(request)
 			require.NoError(t, err)
+			if tt.invalidBinding == "" {
+				require.Equal(t, http.StatusConflict, response.StatusCode)
+				require.NoError(t, response.Body.Close())
+				pending, err := handlers.securityStore.GetScanRun(ctx, scan.Namespace, old.ID)
+				require.NoError(t, err)
+				require.True(t, pending.CancellationPending)
+				request = httptest.NewRequest(http.MethodPost, "/security/repositories/identity-scan/scans?namespace=demo", nil)
+				request.Header.Set(TransactionTokenHeaderName, token)
+				response, err = app.Test(request)
+				require.NoError(t, err)
+			}
 			t.Cleanup(func() { _ = response.Body.Close() })
 			require.Equal(t, http.StatusCreated, response.StatusCode)
 			var run store.ScanRun
@@ -238,9 +249,83 @@ func TestCreateManualSecurityScanDoesNotProjectStatusOntoEditedScan(t *testing.T
 	runs, _, err := handlers.securityStore.ListScanRuns(context.Background(), scan.Namespace, scan.Name, 10, "")
 	require.NoError(t, err)
 	require.Len(t, runs, 1)
-	require.Equal(t, "failed", runs[0].Phase)
-	require.NotNil(t, runs[0].CompletedAt)
+	require.Equal(t, "pending", runs[0].Phase)
+	require.True(t, runs[0].CancellationPending)
 	require.True(t, apierrors.IsNotFound(base.Get(context.Background(), client.ObjectKey{Namespace: scan.Namespace, Name: runs[0].TaskName}, &corev1alpha1.Task{})))
+	_, err = security.RetireStaleScanRuns(context.Background(), handlers.securityStore, base, base, current)
+	require.NoError(t, err)
+	retired, err := handlers.securityStore.GetScanRun(context.Background(), scan.Namespace, runs[0].ID)
+	require.NoError(t, err)
+	require.Equal(t, "failed", retired.Phase)
+	require.False(t, retired.CancellationPending)
+}
+
+func TestCreateManualSecurityScanCleansUpUnconfirmedTaskAdmission(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	config := testContextTokenConfig(t, provider, "")
+	for _, failure := range []string{"lost create response", "failed ownership read"} {
+		t.Run(failure, func(t *testing.T) {
+			ctx := context.Background()
+			scan := &corev1alpha1.RepositoryScan{
+				ObjectMeta: metav1.ObjectMeta{Name: "scan", Namespace: "demo", UID: "scan-uid", Generation: 1},
+				Spec: corev1alpha1.RepositoryScanSpec{
+					RepoURL: securityTestRepoURL, AnalysisAgentRef: corev1alpha1.AgentReference{Name: "analysis"},
+				},
+			}
+			app, handlers := setupSecurityHandlersWithAuthzFixture(t, config, ContextTokenAuthorizationModeEnforce, scan, securityRuntimeTestAgent(scan.Spec.AnalysisAgentRef.Name))
+			base, ok := handlers.client.(client.WithWatch)
+			require.True(t, ok)
+			admissionErr := fmt.Errorf("injected admission failure")
+			created := false
+			handlers.client = interceptor.NewClient(base, interceptor.Funcs{
+				Create: func(ctx context.Context, c client.WithWatch, object client.Object, opts ...client.CreateOption) error {
+					if task, ok := object.(*corev1alpha1.Task); ok {
+						task.Finalizers = []string{"test.orka.ai/hold-cleanup"}
+					}
+					if err := c.Create(ctx, object, opts...); err != nil {
+						return err
+					}
+					created = true
+					if failure == "lost create response" {
+						return admissionErr
+					}
+					return nil
+				},
+			})
+			handlers.apiReader = interceptor.NewClient(base, interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+					if _, ok := object.(*corev1alpha1.RepositoryScan); ok && created && failure == "failed ownership read" {
+						return admissionErr
+					}
+					return c.Get(ctx, key, object, opts...)
+				},
+			})
+			token := issueTestContextToken(t, provider, nil, map[string]any{"scope": ContextTokenScopeSecurityWrite})
+			request := httptest.NewRequest(http.MethodPost, "/security/repositories/scan/scans?namespace=demo", nil)
+			request.Header.Set(TransactionTokenHeaderName, token)
+			response, err := app.Test(request)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = response.Body.Close() })
+			require.Equal(t, http.StatusInternalServerError, response.StatusCode)
+			runs, _, err := handlers.securityStore.ListScanRuns(ctx, scan.Namespace, scan.Name, 10, "")
+			require.NoError(t, err)
+			require.Len(t, runs, 1)
+			require.True(t, runs[0].CancellationPending)
+			task := &corev1alpha1.Task{}
+			require.NoError(t, base.Get(ctx, client.ObjectKey{Namespace: scan.Namespace, Name: runs[0].TaskName}, task))
+			require.False(t, task.DeletionTimestamp.IsZero())
+			_, err = security.RetireStaleScanRuns(ctx, handlers.securityStore, base, base, scan)
+			require.ErrorIs(t, err, security.ErrScanRunCancellationPending)
+			task.Finalizers = nil
+			require.NoError(t, base.Update(ctx, task))
+			_, err = security.RetireStaleScanRuns(ctx, handlers.securityStore, base, base, scan)
+			require.NoError(t, err)
+			retired, err := handlers.securityStore.GetScanRun(ctx, scan.Namespace, runs[0].ID)
+			require.NoError(t, err)
+			require.Equal(t, "failed", retired.Phase)
+			require.False(t, retired.CancellationPending)
+		})
+	}
 }
 
 func TestCreateManualSecurityScanRollsBackChangedStatusBinding(t *testing.T) {
@@ -284,6 +369,8 @@ func TestCreateManualSecurityScanRollsBackChangedStatusBinding(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = response.Body.Close() })
 	require.Equal(t, http.StatusConflict, response.StatusCode)
+	_, err = security.RetireStaleScanRuns(ctx, handlers.securityStore, base, base, scan)
+	require.NoError(t, err)
 	runs, _, err := handlers.securityStore.ListScanRuns(ctx, scan.Namespace, scan.Name, 10, "")
 	require.NoError(t, err)
 	require.Len(t, runs, 2)
@@ -335,11 +422,15 @@ func TestCreateManualSecurityScanRollsBackExhaustedStatusConflicts(t *testing.T)
 	runs, _, err := handlers.securityStore.ListScanRuns(ctx, scan.Namespace, scan.Name, 10, "")
 	require.NoError(t, err)
 	require.Len(t, runs, 1)
-	require.Equal(t, "failed", runs[0].Phase)
-	require.NotNil(t, runs[0].CompletedAt)
-	require.False(t, runs[0].CancellationPending)
+	require.Equal(t, "pending", runs[0].Phase)
+	require.True(t, runs[0].CancellationPending)
 	require.True(t, apierrors.IsNotFound(base.Get(ctx, client.ObjectKey{Namespace: scan.Namespace, Name: runs[0].TaskName}, &corev1alpha1.Task{})))
 	active, err := handlers.securityStore.ListActiveScanRuns(ctx, scan.Namespace, scan.Name)
+	require.NoError(t, err)
+	require.Len(t, active, 1, "rollback reserves the run until a later empty read")
+	_, err = security.RetireStaleScanRuns(ctx, handlers.securityStore, base, base, scan)
+	require.NoError(t, err)
+	active, err = handlers.securityStore.ListActiveScanRuns(ctx, scan.Namespace, scan.Name)
 	require.NoError(t, err)
 	require.Empty(t, active)
 }

@@ -1172,6 +1172,7 @@ func TestIngestMapperTaskPersistsReviewSlices(t *testing.T) {
 		t.Fatalf("CreateScanRun() error = %v", err)
 	}
 
+	reconciler.APIReader = repositoryScanRunTestClient(t, scan)
 	if err := reconciler.ingestScanTask(ctx, scan, task); err != nil {
 		t.Fatalf("ingestScanTask() error = %v", err)
 	}
@@ -1286,6 +1287,7 @@ func TestIngestMapperTaskSelectsIncrementalSlicesFromChangedFiles(t *testing.T) 
 		t.Fatalf("CreateScanRun() error = %v", err)
 	}
 
+	reconciler.APIReader = repositoryScanRunTestClient(t, scan)
 	if err := reconciler.ingestScanTask(ctx, scan, task); err != nil {
 		t.Fatalf("ingestScanTask() error = %v", err)
 	}
@@ -1411,6 +1413,7 @@ func TestMapperReingestPreservesReviewedSliceForCurrentRun(t *testing.T) {
 			}},
 		}},
 	}
+	reconciler.APIReader = repositoryScanRunTestClient(t, scan)
 	if err := reconciler.ingestScanTask(ctx, scan, mapperTask); err != nil {
 		t.Fatalf("ingest mapper error = %v", err)
 	}
@@ -2335,6 +2338,7 @@ func TestIngestReviewTaskRejectsMismatchedV2SliceID(t *testing.T) {
 	}
 	saveFindingsTaskResult(t, store, task, scan.Name, "scan_mismatched_slice", policyDigest, reviewSlice.ReviewContextHash, "slice_other", findings)
 
+	reconciler.APIReader = repositoryScanRunTestClient(t, scan)
 	if err := reconciler.ingestScanTask(ctx, scan, task); err != nil {
 		t.Fatalf("ingestScanTask() error = %v", err)
 	}
@@ -2478,6 +2482,7 @@ func TestIngestReviewTaskPartitionsV2FindingsAndMarksSliceReviewed(t *testing.T)
 	}
 	saveFindingsTaskResult(t, store, task, scan.Name, "scan_review_ingest", policyDigest, reviewSlice.ReviewContextHash, "slice_api", findings)
 
+	reconciler.APIReader = repositoryScanRunTestClient(t, scan)
 	if err := reconciler.ingestScanTask(ctx, scan, task); err != nil {
 		t.Fatalf("ingestScanTask() error = %v", err)
 	}
@@ -2555,6 +2560,7 @@ func TestIngestReviewTaskPersistsFilterDroppedDiagnosticsBeforeCap(t *testing.T)
 	}}
 	saveFindingsTaskResult(t, store, task, scan.Name, "scan_review_filter", policyDigest, reviewSlice.ReviewContextHash, "slice_filter", findings)
 
+	reconciler.APIReader = repositoryScanRunTestClient(t, scan)
 	if err := reconciler.ingestScanTask(ctx, scan, task); err != nil {
 		t.Fatalf("ingestScanTask() error = %v", err)
 	}
@@ -2752,6 +2758,7 @@ func TestIngestReviewTaskSkipsStaleSliceRun(t *testing.T) {
 		t.Fatalf("SaveArtifact(findings v2) error = %v", err)
 	}
 
+	reconciler.APIReader = repositoryScanRunTestClient(t, scan)
 	if err := reconciler.ingestScanTask(ctx, scan, task); err != nil {
 		t.Fatalf("ingestScanTask() error = %v", err)
 	}

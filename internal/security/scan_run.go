@@ -20,6 +20,8 @@ import (
 
 const RepositoryScanRunFinalizer = "orka.ai/security-scan-runs"
 
+var ErrScanRunCancellationPending = fmt.Errorf("%w: scan run cancellation is pending", store.ErrConflict)
+
 // NewScanRunID does not depend on second-resolution Task names. The full ID
 // fits in a Kubernetes label and remains stable for every stage of the run.
 func NewScanRunID() string {
@@ -42,6 +44,50 @@ func ScanRunMatchesRepositoryScan(run *store.ScanRun, scan *corev1alpha1.Reposit
 	return run != nil && scan != nil && scan.DeletionTimestamp.IsZero() &&
 		run.Namespace == scan.Namespace && run.RepositoryScan == scan.Name &&
 		run.RepositoryScanUID == string(scan.UID) && run.RepositoryScanGeneration == scan.Generation
+}
+
+// ValidateScanStageRun checks live parent identity and durable run ownership.
+func ValidateScanStageRun(ctx context.Context, s store.SecurityStore, reader client.Reader, scan *corev1alpha1.RepositoryScan, run *store.ScanRun) error {
+	if s == nil {
+		return fmt.Errorf("security store is required to validate scan stage admission")
+	}
+	current := &corev1alpha1.RepositoryScan{}
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(scan), current); err != nil {
+		return err
+	}
+	if !ScanRunMatchesRepositoryScan(run, current) {
+		return fmt.Errorf("%w: repository scan changed before stage admission", store.ErrConflict)
+	}
+	latest, _, err := s.ListScanRuns(ctx, scan.Namespace, scan.Name, 1, "")
+	if err != nil {
+		return err
+	}
+	if len(latest) != 1 || latest[0].ID != run.ID || !ScanRunMatchesRepositoryScan(&latest[0], current) ||
+		(latest[0].Phase != "pending" && latest[0].Phase != "running") || latest[0].CancellationVersion != 0 {
+		return fmt.Errorf("%w: scan run no longer admits stage Tasks", store.ErrConflict)
+	}
+	return nil
+}
+
+// CreateInitialScanTask keeps a failed admission reserved until cleanup confirms
+// that no Task remains, including when Create returns an ambiguous response.
+func CreateInitialScanTask(ctx context.Context, s store.SecurityStore, c client.Client, reader client.Reader, scan *corev1alpha1.RepositoryScan, run *store.ScanRun, task *corev1alpha1.Task) error {
+	if s == nil {
+		return fmt.Errorf("security store is required to admit an initial scan Task")
+	}
+	if reader == nil {
+		reader = c
+	}
+	if err := ValidateScanStageRun(ctx, s, reader, scan, run); err != nil {
+		return errors.Join(err, CancelScanRun(ctx, s, c, reader, scan, run, "initial scan Task admission lost run ownership"))
+	}
+	if err := c.Create(ctx, task); err != nil {
+		return errors.Join(err, CancelScanRun(ctx, s, c, reader, scan, run, "scan task creation failed"))
+	}
+	if err := ValidateScanStageRun(ctx, s, reader, scan, run); err != nil {
+		return errors.Join(err, CancelScanRun(ctx, s, c, reader, scan, run, "initial scan Task admission lost run ownership"))
+	}
+	return nil
 }
 
 // EnsureRepositoryScanRunFinalizer installs deletion cleanup before reserving a
@@ -103,6 +149,7 @@ func RetireStaleScanRuns(ctx context.Context, s store.SecurityStore, c client.Cl
 	}
 
 	seen := make(map[string]bool, len(runs))
+	cleanupPending := false
 	for i := range runs {
 		run := &runs[i]
 		if seen[run.ID] {
@@ -127,6 +174,7 @@ func RetireStaleScanRuns(ctx context.Context, s store.SecurityStore, c client.Cl
 		}
 		staleStatus = staleStatus || run.ID == scan.Status.LastScanID
 		if run.CancellationVersion != 0 {
+			cleanupPending = cleanupPending || run.CancellationPending
 			continue
 		}
 		if run.Phase != "pending" && run.Phase != "running" {
@@ -135,13 +183,18 @@ func RetireStaleScanRuns(ctx context.Context, s store.SecurityStore, c client.Cl
 		if err := CancelScanRun(ctx, s, c, reader, scan, run, "repository scan identity changed or was deleted; start a new scan"); err != nil {
 			return false, err
 		}
+		cleanupPending = true
+	}
+	if cleanupPending {
+		return false, ErrScanRunCancellationPending
 	}
 	return staleStatus, nil
 }
 
 // DeleteScanRunPipelineTasks requests cancellation through Task deletion before
 // releasing a run reservation. Terminal Tasks and other owners are preserved.
-func DeleteScanRunPipelineTasks(ctx context.Context, c client.Client, reader client.Reader, scan *corev1alpha1.RepositoryScan, run *store.ScanRun) error {
+// The result reports whether this live read observed any nonterminal owned Tasks.
+func DeleteScanRunPipelineTasks(ctx context.Context, c client.Client, reader client.Reader, scan *corev1alpha1.RepositoryScan, run *store.ScanRun) (bool, error) {
 	if reader == nil {
 		reader = c
 	}
@@ -150,8 +203,9 @@ func DeleteScanRunPipelineTasks(ctx context.Context, c client.Client, reader cli
 		labels.LabelSecurityTarget: labels.SelectorValue(run.RepositoryScan),
 		labels.LabelSecurityScanID: run.ID,
 	}); err != nil {
-		return err
+		return false, err
 	}
+	observedActive := false
 	ownerUID := types.UID(run.RepositoryScanUID)
 	if ownerUID == "" {
 		ownerUID = scan.UID
@@ -171,14 +225,15 @@ func DeleteScanRunPipelineTasks(ctx context.Context, c client.Client, reader cli
 		case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
 			continue
 		}
+		observedActive = true
 		if !task.DeletionTimestamp.IsZero() {
 			continue
 		}
 		if err := c.Delete(ctx, task, client.Preconditions{UID: &task.UID, ResourceVersion: &task.ResourceVersion}); client.IgnoreNotFound(err) != nil {
-			return err
+			return true, err
 		}
 	}
-	return nil
+	return observedActive, nil
 }
 
 // RollbackScanRunAdmission cancels work whose admission lost status ownership.
@@ -193,12 +248,19 @@ func CancelScanRun(ctx context.Context, s store.SecurityStore, c client.Client, 
 	if err := s.RequestScanRunCancellation(ctx, run, reason); err != nil {
 		return err
 	}
-	return finishScanRunCancellation(ctx, s, c, reader, scan, run)
+	// A creator can outlive its preflight and crash after Create succeeds. Keep
+	// intent pending until a later cleanup pass checks the live Task collection.
+	_, err := DeleteScanRunPipelineTasks(ctx, c, reader, scan, run)
+	return err
 }
 
 func finishScanRunCancellation(ctx context.Context, s store.SecurityStore, c client.Client, reader client.Reader, scan *corev1alpha1.RepositoryScan, run *store.ScanRun) error {
-	if err := DeleteScanRunPipelineTasks(ctx, c, reader, scan, run); err != nil {
+	observedActive, err := DeleteScanRunPipelineTasks(ctx, c, reader, scan, run)
+	if err != nil {
 		return err
+	}
+	if observedActive {
+		return nil
 	}
 	return s.CompleteScanRunCancellation(ctx, run)
 }

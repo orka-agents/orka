@@ -29,6 +29,9 @@ func (r *RepositoryScanReconciler) reconcileScanRunIdentity(ctx context.Context,
 		}
 	}
 	staleStatus, err := security.RetireStaleScanRuns(ctx, r.SecurityStore, r.Client, r.APIReader, scan)
+	if errors.Is(err, security.ErrScanRunCancellationPending) {
+		return true, nil
+	}
 	if err != nil {
 		return false, err
 	}
@@ -103,27 +106,9 @@ func (r *RepositoryScanReconciler) createOrValidateScanStageTask(ctx context.Con
 }
 
 func (r *RepositoryScanReconciler) validateScanStageRun(ctx context.Context, scan *corev1alpha1.RepositoryScan, run *store.ScanRun) error {
-	if r.SecurityStore == nil {
-		return fmt.Errorf("security store is required to validate scan stage admission")
-	}
 	reader := r.APIReader
 	if reader == nil {
 		reader = r.Client
 	}
-	current := &corev1alpha1.RepositoryScan{}
-	if err := reader.Get(ctx, client.ObjectKeyFromObject(scan), current); err != nil {
-		return err
-	}
-	if !security.ScanRunMatchesRepositoryScan(run, current) {
-		return fmt.Errorf("%w: repository scan changed before stage admission", store.ErrConflict)
-	}
-	latest, _, err := r.SecurityStore.ListScanRuns(ctx, scan.Namespace, scan.Name, 1, "")
-	if err != nil {
-		return err
-	}
-	if len(latest) != 1 || latest[0].ID != run.ID || !security.ScanRunMatchesRepositoryScan(&latest[0], current) ||
-		!activeScanRunPhase(latest[0].Phase) || latest[0].CancellationVersion != 0 {
-		return fmt.Errorf("%w: scan run no longer admits stage Tasks", store.ErrConflict)
-	}
-	return nil
+	return security.ValidateScanStageRun(ctx, r.SecurityStore, reader, scan, run)
 }
