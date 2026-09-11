@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7.1@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 
 # Build the UI
-FROM --platform=$BUILDPLATFORM docker.io/oven/bun:1@sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188ab750cf10024a6d700e5c4 AS ui-builder
+FROM --platform=$BUILDPLATFORM docker.io/oven/bun:1@sha256:5ff609364c049b54eb0ff560ec96319729a972078ef2c755d758f0c6ef89c2d6 AS ui-builder
 WORKDIR /app
 COPY ui/package.json ui/bun.lock ./
 RUN bun install --frozen-lockfile
