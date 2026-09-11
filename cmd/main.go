@@ -2028,7 +2028,9 @@ func main() {
 					TaskProvenanceProtected:      taskProvenanceProtected,
 					RepositoryValidationBindings: sqliteStore,
 					ResultStore:                  sqliteStore, MessageStore: sqliteStore, SessionDeleter: sessionManager,
-					MemoryReader: sqliteStore, MemoryProposalWriter: sqliteStore, TranscriptSearcher: sqliteStore,
+					MemoryReader: sqliteStore, MemoryProposalWriter: sqliteStore,
+					TranscriptSearcher: api.NewTaskTranscriptSearcher(mgr.GetAPIReader(), sqliteStore, sqliteStore,
+						crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, taskProvenanceProtected),
 				}, nil
 			},
 		})

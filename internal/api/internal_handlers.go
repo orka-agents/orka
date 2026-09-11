@@ -412,31 +412,10 @@ func (h *InternalHandlers) SearchTranscript(c fiber.Ctx) error {
 		allowedSessions, err = authorizer.coordinationTreeSessionReferences(ctx, callerTask)
 		return err
 	}, func(ctx context.Context) error {
-		if h.gatewayEventStore != nil {
-			_, eventErr := h.gatewayEventStore.GetGatewayEventForTask(ctx, namespace, callerTask.Name, string(callerTask.UID))
-			switch {
-			case eventErr == nil:
-				// Gateway turns use an event-specific cutoff rather than the Task
-				// session references checked below. Keep gateway search disabled.
-				return fiber.NewError(fiber.StatusForbidden, "gateway session transcript search is unavailable")
-			case errors.Is(eventErr, store.ErrNotFound):
-			default:
-				return fiber.NewError(fiber.StatusInternalServerError, "failed to load gateway transcript ownership")
-			}
-		}
 		sessionName := strings.TrimSpace(c.Query("sessionName", ""))
 		excludeSessionName := strings.TrimSpace(c.Query("excludeSessionName", ""))
-		if sessionName != "" {
-			if _, ok := allowedSessions[sessionName]; !ok {
-				return fiber.NewError(fiber.StatusForbidden, "caller is not authorized for this session")
-			}
-			sessionType, err := transcriptSessionType(ctx, h.sessionStore, namespace, sessionName)
-			switch {
-			case errors.Is(err, store.ErrNotFound), sessionType == store.SessionTypeGateway:
-				return fiber.NewError(fiber.StatusForbidden, "caller is not authorized for this session")
-			case err != nil:
-				return fiber.NewError(fiber.StatusInternalServerError, "failed to load session transcript policy")
-			}
+		if err := authorizeTaskTranscriptSearch(ctx, h.sessionStore, h.gatewayEventStore, callerTask, sessionName, allowedSessions); err != nil {
+			return err
 		}
 
 		query := strings.TrimSpace(c.Query("query", ""))
