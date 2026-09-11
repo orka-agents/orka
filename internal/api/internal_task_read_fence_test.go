@@ -6,14 +6,84 @@ import (
 	"net/http"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
+
+func TestInternalAuthorizationDoesNotHoldStoreConnection(t *testing.T) {
+	h, _, dataStore := setupTestInternalHandlers()
+	require.NoError(t, dataStore.SavePlan(t.Context(), "default", "my-task", &store.PlanState{Summary: "plan"}))
+	checked := false
+	var storeErr error
+	h.apiReader = interceptor.NewClient(h.k8sClient.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+			if !checked {
+				checked = true
+				storeCtx, cancel := context.WithTimeout(t.Context(), 250*time.Millisecond)
+				defer cancel()
+				storeErr = dataStore.SaveResult(storeCtx, "default", "unrelated-task", []byte("unrelated result"))
+				if storeErr != nil {
+					return storeErr
+				}
+			}
+			return c.Get(ctx, key, object, opts...)
+		},
+	})
+	app := newTaskScopedInternalApp(h, internalCallerAuthWorkerUser("my-task-pod", "my-task-pod-uid"))
+	response := doTaskScopedInternalRequest(t, app, taskScopedRequest{method: http.MethodGet, path: "/internal/v1/plans/default/my-task"})
+	require.True(t, checked)
+	require.NoError(t, storeErr, "Kubernetes authorization must not reserve the sole SQLite connection")
+	require.Equal(t, http.StatusOK, response.StatusCode)
+}
+
+func TestInternalReadRejectsCleanupDuringAuthorization(t *testing.T) {
+	h, _, dataStore := setupTestInternalHandlers()
+	require.NoError(t, dataStore.SavePlan(t.Context(), "default", "my-task", &store.PlanState{Summary: "original plan"}))
+	taskReads := 0
+	h.apiReader = interceptor.NewClient(h.k8sClient.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+			if err := c.Get(ctx, key, object, opts...); err != nil {
+				return err
+			}
+			task, ok := object.(*corev1alpha1.Task)
+			if !ok || task.Name != "my-task" {
+				return nil
+			}
+			taskReads++
+			if taskReads != 2 {
+				return nil
+			}
+			// The final API response already contains the old active Task, but
+			// its finalizer completes before database access can start.
+			if err := dataStore.DeletePlan(t.Context(), task.Namespace, task.Name); err != nil {
+				return err
+			}
+			replacement := task.DeepCopy()
+			if err := c.Delete(ctx, replacement); err != nil {
+				return err
+			}
+			replacement.UID, replacement.ResourceVersion = "replacement-task-uid", ""
+			if err := c.Create(ctx, replacement); err != nil {
+				return err
+			}
+			return dataStore.SavePlan(t.Context(), task.Namespace, task.Name, &store.PlanState{Summary: "replacement plan"})
+		},
+	})
+	app := newTaskScopedInternalApp(h, internalCallerAuthWorkerUser("my-task-pod", "my-task-pod-uid"))
+	response := doTaskScopedInternalRequest(t, app, taskScopedRequest{method: http.MethodGet, path: "/internal/v1/plans/default/my-task"})
+	require.Equal(t, http.StatusForbidden, response.StatusCode)
+	body, err := io.ReadAll(response.Body)
+	require.NoError(t, err)
+	require.NotContains(t, string(body), "replacement plan")
+	require.Greater(t, taskReads, 2, "cleanup must trigger fresh Kubernetes authorization")
+}
 
 type taskReadRaceStore struct {
 	*sqlite.Store

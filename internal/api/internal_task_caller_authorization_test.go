@@ -45,6 +45,25 @@ func TestInternalTaskCallerRejectsRecreatedWorkloadIdentity(t *testing.T) {
 		requireInternalForbidden(t, err)
 	})
 
+	t.Run("replacement Job and Pod", func(t *testing.T) {
+		task := internalCallerAuthTask()
+		job := internalCallerAuthJob(task, "job-a", "replacement-job-uid")
+		pod := internalCallerAuthPod(task, "replacement-pod", "replacement-pod-uid", job)
+		authorizer := internalCallerAuthorizer{k8sReader: fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, job, pod).Build()}
+		_, err := authorizer.resolveTaskWorker(context.Background(), internalCallerAuthWorkerUser(pod.Name, string(pod.UID)), "default")
+		requireInternalForbidden(t, err)
+	})
+
+	t.Run("missing recorded Job UID", func(t *testing.T) {
+		task := internalCallerAuthTask()
+		task.Status.JobUID = ""
+		job := internalCallerAuthJob(task, "job-a", "job-uid")
+		pod := internalCallerAuthPod(task, "pod-a", "pod-uid", job)
+		authorizer := internalCallerAuthorizer{k8sReader: fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, job, pod).Build()}
+		_, err := authorizer.resolveTaskWorker(context.Background(), internalCallerAuthWorkerUser(pod.Name, string(pod.UID)), "default")
+		requireInternalForbidden(t, err)
+	})
+
 	t.Run("Task UID", func(t *testing.T) {
 		task := internalCallerAuthTask()
 		job := internalCallerAuthJob(task, "job-a", "job-uid")

@@ -49,10 +49,12 @@ func newCoordinationCreateFixture() coordinationCreateFixture {
 	parent := newAdmissionTestTask()
 	parent.Name, parent.UID = "parent", "parent-uid"
 	parent.Status.JobName = "parent-job"
+	parent.Status.JobUID = "job-uid"
 	parent.Status.Phase = corev1alpha1.TaskPhaseRunning
 	other := parent.DeepCopy()
 	other.Name, other.UID = "unrelated-root", "unrelated-root-uid"
 	other.Status.JobName = "unrelated-job"
+	other.Status.JobUID = "unrelated-job-uid"
 	parentOwner := metav1.OwnerReference{
 		APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task",
 		Name: parent.Name, UID: parent.UID, Controller: &controller,
@@ -115,8 +117,13 @@ func TestTaskProvenanceValidatorChildCreationUsesLiveParentIdentity(t *testing.T
 		}},
 		{name: "recreated Pod", change: func(f *coordinationCreateFixture) { f.pod.UID = "new-pod-uid" }},
 		{name: "recreated Job", change: func(f *coordinationCreateFixture) { f.job.UID = "new-job-uid" }},
+		{name: "replacement Job and Pod", change: func(f *coordinationCreateFixture) {
+			f.job.UID = "replacement-job-uid"
+			f.pod.OwnerReferences[0].UID = f.job.UID
+		}},
 		{name: "recreated parent", change: func(f *coordinationCreateFixture) { f.parent.UID = "new-parent-uid" }},
 		{name: "previous Job", change: func(f *coordinationCreateFixture) { f.parent.Status.JobName = "new-job" }},
+		{name: "missing Job UID binding", change: func(f *coordinationCreateFixture) { f.parent.Status.JobUID = "" }},
 		{name: "unbound token", change: func(f *coordinationCreateFixture) { f.user.Extra = nil }},
 		{name: "other ServiceAccount", change: func(f *coordinationCreateFixture) { f.pod.Spec.ServiceAccountName = "other" }},
 		{name: "other namespace", change: func(f *coordinationCreateFixture) {

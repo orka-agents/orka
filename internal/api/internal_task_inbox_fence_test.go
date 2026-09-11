@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -17,7 +16,7 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
-func TestInternalInboxSerializesAuthorizationWithTaskReuse(t *testing.T) {
+func TestInternalInboxRejectsTaskReuseDuringAuthorization(t *testing.T) {
 	for _, markRead := range []bool{false, true} {
 		t.Run("markRead="+strconv.FormatBool(markRead), func(t *testing.T) {
 			h, _, _ := setupTestInternalHandlers()
@@ -79,20 +78,15 @@ func TestInternalInboxSerializesAuthorizationWithTaskReuse(t *testing.T) {
 				path:   "/internal/v1/messages/default/my-task?parentTask=coordinator&markRead=" + strconv.FormatBool(markRead),
 			}
 			resp := doTaskScopedInternalRequest(t, app, request)
-			require.Equal(t, http.StatusOK, resp.StatusCode)
-			var messages []store.Message
-			require.NoError(t, json.NewDecoder(resp.Body).Decode(&messages))
-			require.Len(t, messages, 1)
-			require.Equal(t, "original Task message", messages[0].Content)
+			require.Equal(t, http.StatusForbidden, resp.StatusCode)
 			require.True(t, attemptedCleanup)
-			require.ErrorContains(t, cleanupErr, "locked")
+			require.NoError(t, cleanupErr)
 
-			// Cleanup and name reuse can proceed after the authorized read commits.
-			require.NoError(t, cleanup.DeleteTaskMessages(t.Context(), "default", "my-task"))
-			require.NoError(t, recreateTask(t.Context()))
+			// Cleanup can finish during network authorization. Its generation
+			// change forces a fresh identity check before reading or marking data.
 			stale := doTaskScopedInternalRequest(t, app, request)
 			require.Equal(t, http.StatusForbidden, stale.StatusCode)
-			messages, err = cleanup.GetMessages(t.Context(), "default", "my-task", "coordinator", false)
+			messages, err := cleanup.GetMessages(t.Context(), "default", "my-task", "coordinator", false)
 			require.NoError(t, err)
 			require.Len(t, messages, 1, "stale worker must not mark replacement messages read")
 			require.Equal(t, "replacement Task message", messages[0].Content)

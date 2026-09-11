@@ -334,7 +334,7 @@ func setupOwnedInternalExecutionEventApp(t *testing.T, eventStore store.Executio
 	}
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: taskName, Namespace: "default", UID: taskUID},
-		Status:     corev1alpha1.TaskStatus{JobName: taskName + "-job"},
+		Status:     corev1alpha1.TaskStatus{JobName: taskName + "-job", JobUID: string(jobUID)},
 	}
 	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
 		Name:      taskName + "-job",
@@ -442,7 +442,7 @@ func testInternalExecutionEventOwnedWorkerObjects(taskName string) (*corev1alpha
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: taskName, Namespace: "default", UID: taskUID},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
-		Status:     corev1alpha1.TaskStatus{JobName: jobName},
+		Status:     corev1alpha1.TaskStatus{JobName: jobName, JobUID: string(jobUID)},
 	}
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{

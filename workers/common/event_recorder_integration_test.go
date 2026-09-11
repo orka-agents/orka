@@ -231,7 +231,9 @@ func setupWorkerInternalEventAPI(
 			Type:       corev1alpha1.TaskTypeAI,
 			SessionRef: &corev1alpha1.SessionReference{Name: "session-worker"},
 		},
-		Status: corev1alpha1.TaskStatus{JobName: "task-worker-job", Phase: corev1alpha1.TaskPhaseRunning},
+		Status: corev1alpha1.TaskStatus{
+			JobName: "task-worker-job", JobUID: "task-worker-job-uid", Phase: corev1alpha1.TaskPhaseRunning,
+		},
 	}
 	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
 		Name: "task-worker-job", Namespace: "default", UID: types.UID("task-worker-job-uid"),

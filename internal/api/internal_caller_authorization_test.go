@@ -138,7 +138,7 @@ func internalCallerAuthScheme(t *testing.T) *runtime.Scheme {
 func internalCallerAuthTask() *corev1alpha1.Task {
 	return &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: "task-a", Namespace: "default", UID: types.UID("task-uid")},
-		Status:     corev1alpha1.TaskStatus{JobName: "job-a", Phase: corev1alpha1.TaskPhaseRunning},
+		Status:     corev1alpha1.TaskStatus{JobName: "job-a", JobUID: "job-uid", Phase: corev1alpha1.TaskPhaseRunning},
 	}
 }
 
@@ -179,6 +179,9 @@ func internalCallerAuthTaskObject(name, uid, jobName, parentTask, sessionName st
 		},
 		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
 		Status: corev1alpha1.TaskStatus{JobName: jobName, Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	if jobName != "" {
+		task.Status.JobUID = jobName + "-uid"
 	}
 	if parentTask != "" {
 		task.Labels[labels.LabelParentTask] = labels.SelectorValue(parentTask)

@@ -69,6 +69,10 @@ func NewDB(path string) (*sql.DB, error) {
 //nolint:gocyclo // schema migrations intentionally keep ordered, fail-fast upgrade steps in one transaction boundary
 func migrate(db *sql.DB) error {
 	statements := []string{
+		`CREATE TABLE IF NOT EXISTS task_data_cleanup_generations (
+			namespace TEXT PRIMARY KEY,
+			generation INTEGER NOT NULL
+		)`,
 		`CREATE TABLE IF NOT EXISTS results (
 			namespace  TEXT NOT NULL,
 			task_name  TEXT NOT NULL,

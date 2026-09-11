@@ -1394,7 +1394,11 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	log := logf.FromContext(ctx)
 
 	latest := &corev1alpha1.Task{}
-	if err := r.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	if err := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
 		return ctrl.Result{}, err
 	}
 	if !canStartTaskJob(latest.Status.Phase) || executionOutcomePreventsReplay(latest.Status.ExecutionOutcome) {
@@ -1466,26 +1470,21 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	// Create the Job
 	if err := r.Create(ctx, job); err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			if validationTask {
-				existing := &batchv1.Job{}
-				if getErr := r.validationResourceReader().Get(ctx, types.NamespacedName{Name: job.Name, Namespace: job.Namespace}, existing); getErr != nil {
-					return ctrl.Result{}, getErr
+			existing, recoveryErr := r.recoverTaskJob(ctx, latest, job, validationTask)
+			if recoveryErr != nil {
+				if errors.Is(recoveryErr, errTaskJobIdentity) || errors.Is(recoveryErr, errRepositoryMonitorValidationConfinement) {
+					return r.failTask(ctx, task, recoveryErr.Error())
 				}
-				if validationErr := validateRepositoryMonitorValidationJobAgainstExpected(latest, existing, job); validationErr != nil {
-					log.Error(validationErr, "refusing to adopt repository validation Job")
-					return r.failTask(ctx, task, validationErr.Error())
-				}
-				job = existing
+				return ctrl.Result{}, recoveryErr
 			}
-			// Job already exists, update status.
-			task.Status.JobName = job.Name
+			job = existing
 		} else {
 			log.Error(err, "failed to create Job")
 			return r.failTask(ctx, task, fmt.Sprintf("failed to create job: %v", err))
 		}
-	} else {
-		task.Status.JobName = job.Name
 	}
+	task.Status.JobName = job.Name
+	task.Status.JobUID = string(job.UID)
 
 	// Update status to Running
 	now := metav1.Now()
@@ -1500,17 +1499,20 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	}
 
 	attempts := task.Status.Attempts
+	taskUID := task.UID
 	jobName := task.Status.JobName
+	jobUID := task.Status.JobUID
 	transitionedToRunning := false
 	if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
 		transitionedToRunning = false
-		if !canStartTaskJob(t.Status.Phase) {
+		if t.UID != taskUID || !canStartTaskJob(t.Status.Phase) {
 			return
 		}
 		t.Status.Phase = corev1alpha1.TaskPhaseRunning
 		t.Status.StartTime = &now
 		t.Status.Attempts = attempts
 		t.Status.JobName = jobName
+		t.Status.JobUID = jobUID
 		meta.SetStatusCondition(&t.Status.Conditions, metav1.Condition{
 			Type:               ConditionTypeJobCreated,
 			Status:             metav1.ConditionTrue,
@@ -1688,6 +1690,9 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 		}
 		log.Error(err, "failed to get Job")
 		return ctrl.Result{}, err
+	}
+	if task.Status.JobUID != "" && task.Status.JobUID != string(job.UID) {
+		return r.failTask(ctx, task, "task Job identity changed")
 	}
 	if err := r.reconcileRepositoryMonitorValidationConfinement(ctx, task, job); err != nil {
 		log.Error(err, "repository validation confinement failed")
@@ -2641,6 +2646,7 @@ func (r *TaskReconciler) retryTask(ctx context.Context, task *corev1alpha1.Task)
 	if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
 		t.Status.Phase = corev1alpha1.TaskPhasePending
 		t.Status.JobName = ""
+		t.Status.JobUID = ""
 		t.Status.Message = ""
 		t.Status.CompletionTime = nil
 		t.Status.ResultRef = nil
@@ -4524,6 +4530,7 @@ func (r *TaskReconciler) handleAutonomousIteration(ctx context.Context, task *co
 	task.Status.Iteration++
 	task.Status.Phase = corev1alpha1.TaskPhasePending
 	task.Status.JobName = ""
+	task.Status.JobUID = ""
 	task.Status.Message = fmt.Sprintf("autonomous iteration %d", task.Status.Iteration)
 
 	if err := r.Status().Update(ctx, task); err != nil {

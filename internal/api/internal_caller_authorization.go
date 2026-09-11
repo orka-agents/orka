@@ -250,7 +250,7 @@ func (a internalCallerAuthorizer) resolveTaskWorker(
 			if task.UID == "" || jobOwner.UID != task.UID {
 				continue
 			}
-			if strings.TrimSpace(task.Status.JobName) != job.Name {
+			if strings.TrimSpace(task.Status.JobName) != job.Name || task.Status.JobUID == "" || task.Status.JobUID != string(job.UID) {
 				continue
 			}
 			if pod.Labels[labels.LabelTask] != labels.SelectorValue(task.Name) {

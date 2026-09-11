@@ -16,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/artifactcap"
@@ -25,6 +26,7 @@ import (
 )
 
 type harnessArtifactFixture struct {
+	handlers      *InternalHandlers
 	kube          client.Client
 	data          *sqlite.Store
 	app           *fiber.App
@@ -95,6 +97,7 @@ func newHarnessArtifactFixture(t *testing.T) *harnessArtifactFixture {
 	f.authorization, err = harness.SignArtifactUpload(bearer, f.upload, time.Now().UTC())
 	require.NoError(t, err)
 	h := NewInternalHandlers(data, data, data, data, data, InternalHandlersConfig{Client: kube, APIReader: kube})
+	f.handlers = h
 	user := internalCallerAuthWorkerUser(pod.Name, string(pod.UID))
 	user.Namespace, user.Username = pod.Namespace, "system:serviceaccount:control:wrapper"
 	f.app = newTaskScopedInternalApp(h, user)
@@ -150,6 +153,17 @@ func TestHarnessArtifactUploadRequiresCurrentTurnCapability(t *testing.T) {
 		{name: "terminal attempt before Task projection", change: func(t *testing.T, f *harnessArtifactFixture) {
 			f.advanceAttempt(t, store.HarnessV1AttemptAccepted)
 			f.advanceAttempt(t, store.HarnessV1AttemptSucceeded)
+		}},
+		{name: "terminal attempt during Kubernetes authorization", change: func(t *testing.T, f *harnessArtifactFixture) {
+			f.advanceAttempt(t, store.HarnessV1AttemptAccepted)
+			f.handlers.apiReader = interceptor.NewClient(f.kube.(client.WithWatch), interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+					if _, ok := object.(*corev1.Secret); ok {
+						f.advanceAttempt(t, store.HarnessV1AttemptSucceeded)
+					}
+					return c.Get(ctx, key, object, opts...)
+				},
+			})
 		}},
 		{name: "older turn", change: func(t *testing.T, f *harnessArtifactFixture) {
 			next := f.attempt

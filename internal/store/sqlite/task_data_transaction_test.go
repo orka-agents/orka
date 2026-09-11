@@ -28,8 +28,8 @@ func TestTaskDataTransactionSerializesCleanupAcrossConnections(t *testing.T) {
 	_, err = cleanupDB.ExecContext(ctx, `PRAGMA busy_timeout=0`)
 	require.NoError(t, err)
 	require.NoError(t, writer.WithTaskDataTransaction(ctx, func(txCtx context.Context) error {
-		// The cleanup writer is already excluded before authority is checked
-		// and before any payload has been written.
+		// The database callback excludes cleanup before any payload is read
+		// or written. Network authorization runs before this callback.
 		cleanupErr := cleanup.DeleteArtifacts(ctx, "ns", "task")
 		require.Error(t, cleanupErr)
 		require.True(t, isSQLiteRetryableError(cleanupErr))
@@ -71,6 +71,57 @@ func TestTaskDataTransactionSerializesCleanupAcrossConnections(t *testing.T) {
 	messages, err = cleanup.GetMessages(ctx, "ns", "peer", "parent", false)
 	require.NoError(t, err)
 	require.Empty(t, messages)
+}
+
+func TestTaskDataAuthorizationDetectsCleanupAcrossConnections(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		cleanup func(context.Context, *Store) error
+	}{
+		{"result", func(ctx context.Context, s *Store) error { return s.DeleteResult(ctx, "ns", "task") }},
+		{"artifact", func(ctx context.Context, s *Store) error { return s.DeleteArtifacts(ctx, "ns", "task") }},
+		{"plan", func(ctx context.Context, s *Store) error { return s.DeletePlan(ctx, "ns", "task") }},
+		{"messages", func(ctx context.Context, s *Store) error { return s.DeleteTaskMessages(ctx, "ns", "task") }},
+		{"parent messages", func(ctx context.Context, s *Store) error { return s.DeleteParentMessages(ctx, "ns", "parent") }},
+		{"events", func(ctx context.Context, s *Store) error { return s.DeleteExecutionEvents(ctx, "ns", "task", "task") }},
+		{"session", func(ctx context.Context, s *Store) error { return s.DeleteSession(ctx, "ns", "session") }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "authorization.db")
+			db, err := NewDB(path)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = db.Close() })
+			cleanupDB, err := NewDB(path)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = cleanupDB.Close() })
+			data, cleanup := NewStore(db, path), NewStore(cleanupDB, path)
+			accessed := false
+			err = data.WithAuthorizedTaskDataTransaction(t.Context(), "ns", func(ctx context.Context) error {
+				return test.cleanup(ctx, cleanup)
+			}, func(context.Context) error {
+				accessed = true
+				return nil
+			})
+			require.ErrorIs(t, err, store.ErrTaskDataCleanupChanged)
+			require.False(t, accessed)
+		})
+	}
+}
+
+func TestTaskDataAuthorizationAllowsUnrelatedWork(t *testing.T) {
+	s := newCoexistenceTestStore(t)
+	err := s.WithAuthorizedTaskDataTransaction(t.Context(), "ns", func(ctx context.Context) error {
+		if err := s.SaveResult(ctx, "ns", "other-task", []byte("unrelated write")); err != nil {
+			return err
+		}
+		return s.DeleteResult(ctx, "other-namespace", "task")
+	}, func(ctx context.Context) error {
+		return s.SaveResult(ctx, "ns", "task", []byte("authorized write"))
+	})
+	require.NoError(t, err)
+	result, err := s.GetResult(t.Context(), "ns", "task")
+	require.NoError(t, err)
+	require.Equal(t, "authorized write", string(result))
 }
 
 func TestTaskDataTransactionRollsBackRejectedMutation(t *testing.T) {

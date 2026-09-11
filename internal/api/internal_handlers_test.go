@@ -438,7 +438,7 @@ func TestUpdateExecutionWorkspaceStatus(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: "my-task", Namespace: "default", UID: taskUID},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
-		Status:     corev1alpha1.TaskStatus{JobName: "my-task-job"},
+		Status:     corev1alpha1.TaskStatus{JobName: "my-task-job", JobUID: "job-uid"},
 	}
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -673,6 +673,7 @@ func TestUpdateExecutionWorkspaceStatusBuildsFreshStatusOnConflictRetry(t *testi
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
 		Status: corev1alpha1.TaskStatus{
 			JobName: "my-task-job",
+			JobUID:  "job-uid",
 			ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
 				Provider: corev1alpha1.WorkspaceProviderSubstrate,
 				Phase:    corev1alpha1.ExecutionWorkspacePhaseReady,
@@ -1324,7 +1325,7 @@ func TestGetSessionTranscriptAppliesTaskCutoff(t *testing.T) {
 		Spec: corev1alpha1.TaskSpec{SessionRef: &corev1alpha1.SessionReference{
 			Name: "mutated-session", MaxMessages: 1, ThroughMessageID: "future-user", PromptIncluded: false,
 		}},
-		Status: corev1alpha1.TaskStatus{JobName: "gateway-task-job"},
+		Status: corev1alpha1.TaskStatus{JobName: "gateway-task-job", JobUID: "job-uid"},
 	}
 	now := time.Now().UTC()
 	if _, _, err := ss.AdmitGatewayEvent(ctx, store.GatewayEventAdmission{Event: store.GatewayEvent{

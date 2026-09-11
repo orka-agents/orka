@@ -94,7 +94,7 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 		}
 	}
 	var appended *store.ExecutionEvent
-	if err := withInternalTaskDataTransaction(c, h.executionEventStore, func(ctx context.Context) error {
+	if err := withInternalTaskDataTransaction(c, h.executionEventStore, func(context.Context) error {
 		current, err := authorizer.verifyExecutionEventStreamWriter(c, namespace, streamType, streamID)
 		if err != nil {
 			return err
@@ -102,6 +102,9 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 		if current.UID != writerTask.UID {
 			return fiber.NewError(fiber.StatusForbidden, "task identity changed")
 		}
+		return nil
+	}, func(ctx context.Context) error {
+		var err error
 		appended, err = h.executionEventStore.AppendExecutionEvent(ctx, event)
 		if err != nil {
 			if errors.Is(err, store.ErrValidation) {

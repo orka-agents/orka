@@ -1706,7 +1706,7 @@ func sessionTranscriptMaxAttempts(promptIncluded bool, timeout *metav1.Duration)
 	attempts := 5
 	if promptIncluded {
 		// Required transcripts must keep retrying through the Task startup window.
-		// Worker authorization intentionally waits for controller-persisted JobName;
+		// Worker authorization waits for the controller-persisted Job name and UID;
 		// extending this retry budget preserves that security boundary without a
 		// pre-status identity fallback.
 		attempts = 300

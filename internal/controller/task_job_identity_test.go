@@ -1,0 +1,188 @@
+package controller
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+	batchv1 "k8s.io/api/batch/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+)
+
+func TestCreateTaskJobPersistsCreatedUID(t *testing.T) {
+	task := taskJobIdentityFixture()
+	r := newUnitReconciler(newTestScheme(), task)
+	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, object client.Object, opts ...client.CreateOption) error {
+			if job, ok := object.(*batchv1.Job); ok {
+				job.UID = "controller-created-job-uid"
+			}
+			return c.Create(ctx, object, opts...)
+		},
+	})
+	_, err := r.createTaskJob(t.Context(), task, nil, nil)
+	require.NoError(t, err)
+	current := &corev1alpha1.Task{}
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(task), current))
+	require.Equal(t, "controller-created-job-uid", current.Status.JobUID)
+	job := &batchv1.Job{}
+	require.NoError(t, r.Get(t.Context(), client.ObjectKey{Namespace: task.Namespace, Name: current.Status.JobName}, job))
+	require.Equal(t, string(job.UID), current.Status.JobUID)
+
+	_, err = r.retryTask(t.Context(), current)
+	require.NoError(t, err)
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(task), current))
+	require.Empty(t, current.Status.JobName)
+	require.Empty(t, current.Status.JobUID)
+}
+
+func TestCreateTaskJobDoesNotAdoptUnboundOrReplacedJob(t *testing.T) {
+	for _, bound := range []bool{false, true} {
+		t.Run(map[bool]string{false: "unbound after crash", true: "replaced after binding"}[bound], func(t *testing.T) {
+			task := taskJobIdentityFixture()
+			r := newUnitReconciler(newTestScheme(), task)
+			existing, err := r.JobBuilder.Build(t.Context(), task, nil, nil)
+			require.NoError(t, err)
+			existing.UID = "untrusted-job-uid"
+			require.NoError(t, controllerutil.SetControllerReference(task, existing, r.Scheme))
+			require.NoError(t, r.Create(t.Context(), existing))
+			if bound {
+				task.Status.JobName, task.Status.JobUID = existing.Name, "original-job-uid"
+				require.NoError(t, r.Status().Update(t.Context(), task))
+			}
+			result, err := r.createTaskJob(t.Context(), task, nil, nil)
+			require.NoError(t, err)
+			require.Equal(t, time.Second, result.RequeueAfter)
+			require.Equal(t, corev1alpha1.TaskPhaseFailed, task.Status.Phase)
+			require.NotEqual(t, string(existing.UID), task.Status.JobUID)
+			require.Contains(t, task.Status.Message, "no matching recorded UID")
+			observed := &batchv1.Job{}
+			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(existing), observed))
+			require.Equal(t, existing.UID, observed.UID, "uncertain execution must not be automatically replaced")
+			_, err = r.createTaskJob(t.Context(), task, nil, nil)
+			require.NoError(t, err)
+			require.Zero(t, task.Status.Attempts, "failed identity recovery must not restart execution")
+		})
+	}
+}
+
+func TestCreateTaskJobRecoversOnlyRecordedJobUID(t *testing.T) {
+	task := taskJobIdentityFixture()
+	r := newUnitReconciler(newTestScheme(), task)
+	existing, err := r.JobBuilder.Build(t.Context(), task, nil, nil)
+	require.NoError(t, err)
+	existing.UID = "recorded-job-uid"
+	require.NoError(t, controllerutil.SetControllerReference(task, existing, r.Scheme))
+	require.NoError(t, r.Create(t.Context(), existing))
+	task.Status.JobName, task.Status.JobUID = existing.Name, string(existing.UID)
+	require.NoError(t, r.Status().Update(t.Context(), task))
+	_, err = r.createTaskJob(t.Context(), task, nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, corev1alpha1.TaskPhaseRunning, task.Status.Phase)
+	require.Equal(t, string(existing.UID), task.Status.JobUID)
+}
+
+func TestCreateTaskJobDoesNotReplayJobRemovedDuringRecovery(t *testing.T) {
+	for _, deleting := range []bool{false, true} {
+		t.Run(map[bool]string{false: "disappeared", true: "deleting"}[deleting], func(t *testing.T) {
+			task := taskJobIdentityFixture()
+			r := newUnitReconciler(newTestScheme(), task)
+			existing, err := r.JobBuilder.Build(t.Context(), task, nil, nil)
+			require.NoError(t, err)
+			existing.UID = "uncertain-job-uid"
+			if deleting {
+				existing.Finalizers = []string{"test.orka.ai/hold-deletion"}
+			}
+			require.NoError(t, controllerutil.SetControllerReference(task, existing, r.Scheme))
+			require.NoError(t, r.Create(t.Context(), existing))
+			creates := 0
+			r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+				Create: func(ctx context.Context, c client.WithWatch, object client.Object, opts ...client.CreateOption) error {
+					if _, ok := object.(*batchv1.Job); !ok {
+						return c.Create(ctx, object, opts...)
+					}
+					creates++
+					err := c.Create(ctx, object, opts...)
+					require.True(t, apierrors.IsAlreadyExists(err))
+					require.NoError(t, c.Delete(ctx, existing))
+					return err
+				},
+			})
+			_, err = r.createTaskJob(t.Context(), task, nil, nil)
+			require.NoError(t, err)
+			require.Equal(t, corev1alpha1.TaskPhaseFailed, task.Status.Phase)
+			require.Empty(t, task.Status.JobUID)
+			require.Contains(t, task.Status.Message, "task Job identity cannot be verified")
+			_, err = r.createTaskJob(t.Context(), task, nil, nil)
+			require.NoError(t, err)
+			require.Equal(t, 1, creates, "uncertain execution must not be automatically replayed")
+		})
+	}
+}
+
+func TestCreateTaskJobPreservesLiveBindingWhenCacheIsStale(t *testing.T) {
+	task := taskJobIdentityFixture()
+	r := newUnitReconciler(newTestScheme(), task)
+	existing, err := r.JobBuilder.Build(t.Context(), task, nil, nil)
+	require.NoError(t, err)
+	existing.UID = "recorded-job-uid"
+	require.NoError(t, controllerutil.SetControllerReference(task, existing, r.Scheme))
+	require.NoError(t, r.Create(t.Context(), existing))
+	current := task.DeepCopy()
+	current.Status.Phase = corev1alpha1.TaskPhaseRunning
+	current.Status.JobName, current.Status.JobUID = existing.Name, string(existing.UID)
+	r.APIReader = fake.NewClientBuilder().WithScheme(r.Scheme).WithObjects(current, existing).Build()
+	_, err = r.createTaskJob(t.Context(), task, nil, nil)
+	require.NoError(t, err)
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(existing), &batchv1.Job{}))
+	require.Equal(t, current.Status, task.Status)
+}
+
+func TestCreateTaskJobDoesNotBindRecreatedTask(t *testing.T) {
+	task := taskJobIdentityFixture()
+	r := newUnitReconciler(newTestScheme(), task)
+	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, object client.Object, opts ...client.CreateOption) error {
+			job, ok := object.(*batchv1.Job)
+			if !ok {
+				return c.Create(ctx, object, opts...)
+			}
+			job.UID = "original-task-job-uid"
+			if err := c.Create(ctx, job, opts...); err != nil {
+				return err
+			}
+			replacement := task.DeepCopy()
+			if err := c.Delete(ctx, replacement); err != nil {
+				return err
+			}
+			replacement.UID, replacement.ResourceVersion = "replacement-task-uid", ""
+			return c.Create(ctx, replacement)
+		},
+	})
+	_, err := r.createTaskJob(t.Context(), task, nil, nil)
+	require.NoError(t, err)
+	current := &corev1alpha1.Task{}
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(task), current))
+	require.EqualValues(t, "replacement-task-uid", current.UID)
+	require.Equal(t, corev1alpha1.TaskPhasePending, current.Status.Phase)
+	require.Empty(t, current.Status.JobName)
+	require.Empty(t, current.Status.JobUID)
+}
+
+func taskJobIdentityFixture() *corev1alpha1.Task {
+	return &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "bound-task-job", Namespace: "default", UID: "task-uid"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeContainer, Image: "busybox:latest", Command: []string{"true"},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+}

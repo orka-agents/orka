@@ -111,18 +111,16 @@ func scanUnreadMessages(rows *sql.Rows, namespace string) ([]store.Message, erro
 
 // DeleteTaskMessages deletes all messages involving a task (sent or received).
 func (s *Store) DeleteTaskMessages(ctx context.Context, namespace, taskName string) error {
-	_, err := s.db.ExecContext(ctx,
+	return s.deleteTaskData(ctx, namespace,
 		`DELETE FROM messages WHERE namespace = ? AND (from_task = ? OR to_task = ?)`,
 		namespace, taskName, taskName,
 	)
-	return err
 }
 
 // DeleteParentMessages deletes all messages for children of a parent task.
 func (s *Store) DeleteParentMessages(ctx context.Context, namespace, parentTask string) error {
-	_, err := s.db.ExecContext(ctx,
+	return s.deleteTaskData(ctx, namespace,
 		`DELETE FROM messages WHERE namespace = ? AND parent_task = ?`,
 		namespace, parentTask,
 	)
-	return err
 }

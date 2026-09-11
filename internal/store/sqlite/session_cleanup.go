@@ -353,6 +353,9 @@ func (s *Store) CompleteSessionCleanup(ctx context.Context, request store.Comple
 	} else if rows != 1 {
 		return store.ConflictErrorf("session cleanup completion belongs to a different operation")
 	}
+	if err := advanceTaskDataCleanupGeneration(ctx, tx, request.Namespace); err != nil {
+		return err
+	}
 	result, err := tx.ExecContext(ctx,
 		`DELETE FROM sessions WHERE namespace = ? AND name = ? AND session_type <> ?`,
 		request.Namespace, request.SessionName, store.SessionTypeGateway,

@@ -263,6 +263,9 @@ func (s *Store) DeleteSession(ctx context.Context, namespace, name string) error
 	if _, err := tx.ExecContext(ctx, `DELETE FROM session_controls WHERE namespace = ? AND session_name = ?`, namespace, name); err != nil {
 		return err
 	}
+	if err := advanceTaskDataCleanupGeneration(ctx, tx, namespace); err != nil {
+		return err
+	}
 	deleteResult, err := tx.ExecContext(ctx,
 		`DELETE FROM sessions WHERE namespace = ? AND name = ? AND session_type <> ?`,
 		namespace, name, store.SessionTypeGateway,

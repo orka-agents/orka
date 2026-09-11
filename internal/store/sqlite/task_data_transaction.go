@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+
+	"github.com/orka-agents/orka/internal/store"
 )
 
 type taskDataTransactionKey struct{}
@@ -19,10 +21,8 @@ type taskDataExecutor interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }
 
-// WithTaskDataTransaction acquires SQLite's writer lock before the callback
-// checks Kubernetes authority. Task finalizer cleanup uses the same database,
-// so it either precedes that check (which rejects a deleting/recreated Task) or
-// follows the authorized access and removes task data before permitting name reuse.
+// WithTaskDataTransaction serializes a database-only callback with cleanup.
+// Network authorization belongs in WithAuthorizedTaskDataTransaction.
 func (s *Store) WithTaskDataTransaction(ctx context.Context, mutate func(context.Context) error) error {
 	if ctx.Value(taskDataTransactionKey{}) != nil {
 		return fmt.Errorf("nested task data transaction")
@@ -39,6 +39,60 @@ func (s *Store) WithTaskDataTransaction(ctx context.Context, mutate func(context
 	}
 	ctx = context.WithValue(ctx, taskDataTransactionKey{}, taskDataTransaction{db: s.db, tx: tx})
 	if err := mutate(ctx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// WithAuthorizedTaskDataTransaction fences authorization using a durable
+// cleanup generation. Kubernetes latency does not reserve a SQLite connection
+// or writer. Only cleanup, rather than unrelated writes, invalidates the proof.
+func (s *Store) WithAuthorizedTaskDataTransaction(ctx context.Context, namespace string, authorize, access func(context.Context) error) error {
+	generation, err := s.taskDataCleanupGeneration(ctx, namespace)
+	if err != nil {
+		return err
+	}
+	if err := authorize(ctx); err != nil {
+		return err
+	}
+	return s.WithTaskDataTransaction(ctx, func(txCtx context.Context) error {
+		current, err := s.taskDataCleanupGeneration(txCtx, namespace)
+		if err != nil {
+			return err
+		}
+		if current != generation {
+			return store.ErrTaskDataCleanupChanged
+		}
+		return access(txCtx)
+	})
+}
+
+func (s *Store) taskDataCleanupGeneration(ctx context.Context, namespace string) (int64, error) {
+	var generation int64
+	err := s.taskDataExecutor(ctx).QueryRowContext(ctx,
+		`SELECT COALESCE((SELECT generation FROM task_data_cleanup_generations WHERE namespace = ?), 0)`, namespace,
+	).Scan(&generation)
+	return generation, err
+}
+
+func advanceTaskDataCleanupGeneration(ctx context.Context, tx *sql.Tx, namespace string) error {
+	_, err := tx.ExecContext(ctx,
+		`INSERT INTO task_data_cleanup_generations(namespace, generation) VALUES (?, 1)
+		 ON CONFLICT(namespace) DO UPDATE SET generation = generation + 1`, namespace,
+	)
+	return err
+}
+
+func (s *Store) deleteTaskData(ctx context.Context, namespace, statement string, args ...any) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := advanceTaskDataCleanupGeneration(ctx, tx, namespace); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, statement, args...); err != nil {
 		return err
 	}
 	return tx.Commit()

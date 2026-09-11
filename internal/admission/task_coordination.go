@@ -56,7 +56,7 @@ func (v *TaskProvenanceValidator) authorizedTaskCoordinationParent(
 	if err := v.reader.Get(ctx, client.ObjectKey{Namespace: req.Namespace, Name: parentName}, parent); err != nil {
 		return false, client.IgnoreNotFound(err)
 	}
-	if parent.UID != parentOwner.UID || parent.Status.JobName != job.Name ||
+	if parent.UID != parentOwner.UID || parent.Status.JobName != job.Name || parent.Status.JobUID == "" || parent.Status.JobUID != string(job.UID) ||
 		!parent.DeletionTimestamp.IsZero() || parent.Status.ExecutionOutcome != nil {
 		return false, nil
 	}

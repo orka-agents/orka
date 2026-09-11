@@ -456,6 +456,11 @@ type TaskStatus struct {
 	// +optional
 	JobName string `json:"jobName,omitempty"`
 
+	// JobUID is the immutable identity returned when the controller creates the
+	// current Job. A Job with the same name and a different UID has no worker authority.
+	// +optional
+	JobUID string `json:"jobUID,omitempty"`
+
 	// ResultRef indicates whether a result is available
 	// +optional
 	ResultRef *ResultReference `json:"resultRef,omitempty"`

@@ -687,6 +687,7 @@ func setupExecutionEventIntegrationApp(
 			workerTask.Status.JobName = workerTask.Name + "-job"
 		}
 		job := internalCallerAuthJob(workerTask, workerTask.Status.JobName, workerTask.Name+"-job-uid")
+		workerTask.Status.JobUID = string(job.UID)
 		pod := internalCallerAuthPod(workerTask, workerTask.Name+"-pod", workerTask.Name+"-pod-uid", job)
 		workerClient = testInternalExecutionEventClient(t, workerTask, job, pod)
 		if userInfo != nil {

@@ -3,34 +3,48 @@ package api
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
 )
 
-func withInternalTaskDataTransaction(c fiber.Ctx, backing any, mutate func(context.Context) error) error {
+func withInternalTaskDataTransaction(c fiber.Ctx, backing any, authorize, mutate func(context.Context) error) error {
 	transactions, ok := backing.(store.TaskDataTransactionStore)
 	if !ok {
 		return fiber.NewError(fiber.StatusServiceUnavailable, "task data transactions unavailable")
 	}
-	// Bound uncached Kubernetes checks while holding the SQLite writer so an
-	// unavailable API server cannot block unrelated store work indefinitely.
+	// Bound live authorization and cleanup retries without holding the SQLite
+	// writer during Kubernetes reads.
 	previousContext := c.Context()
 	ctx, cancel := context.WithTimeout(previousContext, 10*time.Second)
 	defer cancel()
-	if err := transactions.WithTaskDataTransaction(ctx, func(txCtx context.Context) error {
-		c.SetContext(txCtx)
-		defer c.SetContext(previousContext)
-		return mutate(txCtx)
-	}); err != nil {
+	defer c.SetContext(previousContext)
+	var err error
+	for range 3 {
+		err = transactions.WithAuthorizedTaskDataTransaction(ctx, c.Params("namespace"), func(authCtx context.Context) error {
+			c.SetContext(authCtx)
+			return authorize(authCtx)
+		}, func(txCtx context.Context) error {
+			c.SetContext(txCtx)
+			return mutate(txCtx)
+		})
+		if !errors.Is(err, store.ErrTaskDataCleanupChanged) {
+			break
+		}
+	}
+	if err != nil {
 		if fiberErr, ok := errors.AsType[*fiber.Error](err); ok {
 			return fiberErr
 		}
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to persist task data: %v", err))
+		if errors.Is(err, store.ErrTaskDataCleanupChanged) {
+			return fiber.NewError(fiber.StatusServiceUnavailable, "task data cleanup is in progress; retry the request")
+		}
+		logf.FromContext(ctx).Error(err, "internal task data access failed", "namespace", c.Params("namespace"))
+		return fiber.NewError(fiber.StatusInternalServerError, "task data access failed")
 	}
 	return nil
 }

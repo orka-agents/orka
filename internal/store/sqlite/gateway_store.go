@@ -1661,6 +1661,9 @@ func (s *Store) MaintainGatewayRecords(ctx context.Context, namespace string, no
 		if deleted == 0 {
 			continue
 		}
+		if err := advanceTaskDataCleanupGeneration(ctx, tx, session.Namespace); err != nil {
+			return result, err
+		}
 		result.DeletedSessions += int(deleted)
 		if _, err := tx.ExecContext(ctx, `UPDATE execution_events SET session_name = '', session_seq = 0
 			WHERE namespace = ? AND session_name = ?`, session.Namespace, session.Name); err != nil {

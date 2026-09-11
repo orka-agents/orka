@@ -42,6 +42,9 @@ func (s *Store) DeleteResult(ctx context.Context, namespace, taskName string) er
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := advanceTaskDataCleanupGeneration(ctx, tx, namespace); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM prompt_result_receipts WHERE namespace = ? AND task_name = ?`,
 		namespace, taskName,
