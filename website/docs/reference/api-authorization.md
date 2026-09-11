@@ -230,7 +230,7 @@ otherwise. In the additional-checks column:
 | `GET` | `/api/v1/security/repositories/:name/threat-model` | `core.orka.ai` | `repositoryscans/threatmodel` | `get` | `:name` | `Q` | none |
 | `PUT` | `/api/v1/security/repositories/:name/threat-model` | `core.orka.ai` | `repositoryscans/threatmodel` | `update` | `:name` | `Q` | none |
 | `GET` | `/api/v1/security/repositories/:name/scans` | `core.orka.ai` | `repositoryscans/scans` | `list` | `:name` | `Q` | none |
-| `POST` | `/api/v1/security/repositories/:name/scans` | `core.orka.ai` | `repositoryscans/scans` | `create` | `:name` | `Q` | `list` and `create` on `core.orka.ai/tasks`, empty name; `patch` on `core.orka.ai/repositoryscans/status`, `:name`; Class use; named `get` on core `configmaps` for configured scanner-policy references |
+| `POST` | `/api/v1/security/repositories/:name/scans` | `core.orka.ai` | `repositoryscans/scans` | `create` | `:name` | `Q` | `list`, `create`, and `delete` on `core.orka.ai/tasks`, empty name; `patch` on `core.orka.ai/repositoryscans` and `core.orka.ai/repositoryscans/status`, `:name`; Class use; named `get` on core `configmaps` for configured scanner-policy references |
 | `GET` | `/api/v1/security/repositories/:name/slices` | `core.orka.ai` | `repositoryscans/slices` | `list` | `:name` | `Q` | none |
 | `GET` | `/api/v1/security/repositories/:name/slices/:sliceID` | `core.orka.ai` | `repositoryscans/slices` | `get` | `:name` | `Q` | none |
 | `GET` | `/api/v1/security/repositories/:name/dropped-findings` | `core.orka.ai` | `repositoryscans/droppedfindings` | `list` | `:name` | `Q` | none |
