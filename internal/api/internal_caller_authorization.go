@@ -252,10 +252,16 @@ func (a internalCallerAuthorizer) resolveTaskWorker(
 			if task.UID == "" || jobOwner.UID != task.UID {
 				continue
 			}
-			if strings.TrimSpace(task.Status.JobName) != job.Name || task.Status.JobUID == "" || task.Status.JobUID != string(job.UID) {
+			if pod.Labels[labels.LabelTask] != labels.SelectorValue(task.Name) {
 				continue
 			}
-			if pod.Labels[labels.LabelTask] != labels.SelectorValue(task.Name) {
+			if task.Status.JobName == "" && task.Status.JobUID == "" && activeInternalWorkerTask(task) {
+				// Job creation precedes the status write that publishes its identity.
+				// Deny access until that write completes, but let a fast worker retry
+				// its result instead of treating the publication delay as permanent.
+				return nil, fiber.NewError(fiber.StatusServiceUnavailable, "task worker identity is not yet published")
+			}
+			if strings.TrimSpace(task.Status.JobName) != job.Name || task.Status.JobUID == "" || task.Status.JobUID != string(job.UID) {
 				continue
 			}
 			recordInternalTaskJobAuthority(ctx, task)

@@ -1139,7 +1139,7 @@ func loadPlanContext(ctx context.Context) (string, error) {
 		return "", nil
 	}
 
-	// A Pod can start before the controller persists Task.status.jobName.
+	// A Pod can start before the controller persists its Job name and UID.
 	// Preserve the same startup window as required session transcripts while
 	// honoring worker cancellation and keeping authorization fail-closed.
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -1163,7 +1163,7 @@ func loadPlanContext(ctx context.Context) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("fetch plan: %w", err)
 		}
-		if resp.StatusCode != http.StatusForbidden {
+		if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusServiceUnavailable {
 			break
 		}
 		_ = resp.Body.Close()
