@@ -25,10 +25,87 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
+	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/sessioncontext"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
+
+func TestTaskSessionContextPreservesNumericArguments(t *testing.T) {
+	f := newTaskSessionContextAPI(t)
+	source := f.message("numeric-source", "assistant", "Inspect the selected record.")
+	source.Input = map[string]any{"record_id": json.Number("9007199254740993")}
+	source.ToolCalls = []llm.ToolCall{{ID: "numeric-call", Name: "inspect", Arguments: json.RawMessage(`{"record_id":9007199254740993}`)}}
+	status, body := f.request(t, http.MethodPost, f.path()+"/messages", []store.SessionMessage{source})
+	require.Equal(t, http.StatusOK, status, string(body))
+	require.Equal(t, 2, strings.Count(string(body), "9007199254740993"))
+	page, err := f.store.ReadSessionHistory(context.Background(), store.SessionHistoryRead{
+		Namespace: f.task.Namespace, SessionName: f.sessionName, MessageID: source.ID, Limit: 4096,
+	})
+	require.NoError(t, err)
+	require.Equal(t, 2, strings.Count(page.Data, "9007199254740993"))
+}
+
+func TestTaskSessionContextHistoryPageDropsUnverifiedDuplicateFields(t *testing.T) {
+	f := newTaskSessionContextAPI(t)
+	source := f.message("history-source", "assistant", "Saved evidence.")
+	status, body := f.request(t, http.MethodPost, f.path()+"/messages", []store.SessionMessage{source})
+	require.Equal(t, http.StatusOK, status, string(body))
+	page, err := f.store.ReadSessionHistory(context.Background(), store.SessionHistoryRead{
+		Namespace: f.task.Namespace, SessionName: f.sessionName, MessageID: source.ID, Limit: 4096,
+	})
+	require.NoError(t, err)
+	canonical, err := json.Marshal(page)
+	require.NoError(t, err)
+	const hiddenValue = "history-envelope-private-placeholder"
+	duplicate := `{"data":"token is ` + hiddenValue + `",` + string(canonical[1:])
+	message := f.message("history-page", "tool", duplicate)
+	message.Name, message.ToolCallID = sessioncontext.HistoryToolName, "history-call"
+	status, body = f.request(t, http.MethodPost, f.path()+"/messages", []store.SessionMessage{message})
+	require.Equal(t, http.StatusOK, status, string(body))
+	require.NotContains(t, string(body), hiddenValue)
+	archived, err := f.store.ReadSessionHistory(context.Background(), store.SessionHistoryRead{
+		Namespace: f.task.Namespace, SessionName: f.sessionName, MessageID: message.ID, Limit: 4096,
+	})
+	require.NoError(t, err)
+	var saved store.SessionMessage
+	require.NoError(t, json.Unmarshal([]byte(archived.Data), &saved))
+	require.Equal(t, string(canonical), saved.Content)
+}
+
+func TestTaskSessionContextByteTrimmingKeepsToolExchangeAtomic(t *testing.T) {
+	f := newTaskSessionContextAPI(t)
+	arguments, err := json.Marshal(map[string]string{"path": "/workspace/large.txt", "content": strings.Repeat("x", sessioncontext.MaxBootstrapBytes+4096)})
+	require.NoError(t, err)
+	f.seed(t, f.task.Namespace, f.sessionName,
+		store.SessionMessage{ID: "prior-user", Role: "user", Content: "Prepare the file."},
+		store.SessionMessage{ID: "prior-call", Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "large-call", Name: "file_write", Arguments: arguments}}},
+		store.SessionMessage{ID: "prior-result", Role: "tool", ToolCallID: "large-call", Name: "file_write", Content: "The file was saved."},
+	)
+	status, body := f.request(t, http.MethodGet, f.path(), nil)
+	require.Equal(t, http.StatusOK, status, string(body))
+	var bootstrap sessioncontext.Bootstrap
+	require.NoError(t, json.Unmarshal(body, &bootstrap))
+	require.False(t, bootstrap.PromptIncluded)
+	require.Empty(t, bootstrap.Messages)
+}
+
+func TestTaskSessionContextByteTrimmingRejectsIncompleteToolTail(t *testing.T) {
+	f := newTaskSessionContextAPI(t)
+	arguments, err := json.Marshal(map[string]string{"content": strings.Repeat("x", sessioncontext.MaxBootstrapBytes+4096)})
+	require.NoError(t, err)
+	f.seed(t, f.task.Namespace, f.sessionName,
+		store.SessionMessage{ID: "prior-user", Role: "user", Content: "Prepare both files."},
+		store.SessionMessage{ID: "prior-call", Role: "assistant", ToolCalls: []llm.ToolCall{
+			{ID: "first-call", Name: "file_write", Arguments: arguments},
+			{ID: "second-call", Name: "file_write", Arguments: json.RawMessage(`{}`)},
+		}},
+		store.SessionMessage{ID: "prior-result", Role: "tool", ToolCallID: "first-call", Name: "file_write", Content: "The first file was saved."},
+	)
+	status, body := f.request(t, http.MethodGet, f.path(), nil)
+	require.Equal(t, http.StatusUnprocessableEntity, status, string(body))
+	require.Contains(t, string(body), "incomplete exchange")
+}
 
 func TestTaskSessionContextBootstrapUsesOlderCheckpointWithinTaskBoundary(t *testing.T) {
 	f := newTaskSessionContextAPI(t)

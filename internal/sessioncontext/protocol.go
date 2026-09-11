@@ -5,6 +5,9 @@ package sessioncontext
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/store"
@@ -15,6 +18,7 @@ const (
 	MaxBootstrapBytes    = 128 * 1024
 	SourceType           = "ai-worker-context"
 	CheckpointName       = "orka_session_checkpoint"
+	HistoryToolName      = "read_session_history"
 )
 
 // Bootstrap is bounded, authorized Session data. The current request is supplied
@@ -33,6 +37,23 @@ type Bootstrap struct {
 func TaskMessagePrefix(taskUID string) string { return "task:" + taskUID + ":context:" }
 func PromptMessageID(taskUID string) string   { return TaskMessagePrefix(taskUID) + "request" }
 func FinalMessageID(taskUID string) string    { return TaskMessagePrefix(taskUID) + "final" }
+
+// HistoryPage recognizes a complete bounded page, rather than a history-tool
+// error. Data is opaque source JSON: re-redacting a fragment can corrupt its
+// delimiters and byte offsets. Persistence must verify it against its source.
+func HistoryPage(content string) (store.SessionHistoryResult, bool) {
+	var page store.SessionHistoryResult
+	decoder := json.NewDecoder(strings.NewReader(content))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&page); err != nil || decoder.Decode(new(any)) != io.EOF {
+		return page, false
+	}
+	valid := page.MessageID != "" && len(page.MessageID) <= 256 && page.Role != "" &&
+		page.Offset >= 0 && page.NextOffset >= page.Offset && page.NextOffset <= page.TotalBytes &&
+		page.TotalBytes <= store.MaxSessionContextMessageBytes && len(page.Data) <= store.MaxSessionHistoryReadBytes &&
+		page.NextOffset-page.Offset == len(page.Data) && utf8.ValidString(page.Data)
+	return page, valid
+}
 
 // ModelMessage keeps the stored role and tool-call relationship. Only Gateway
 // user text gains its existing untrusted provenance wrapper.

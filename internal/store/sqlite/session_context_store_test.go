@@ -12,6 +12,9 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/stretchr/testify/require"
+
+	"github.com/orka-agents/orka/internal/sessioncontext"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -125,6 +128,58 @@ func TestSessionContextHistoryPreservesSourcesAndPreviews(t *testing.T) {
 	if session.Messages[2].Content != canonical[2].Content {
 		t.Fatal("Session transcript did not retain the canonical preview")
 	}
+}
+
+func TestSessionContextHistoryPagesRequireMatchingSavedSources(t *testing.T) {
+	s, write := newSessionContextTestStore(t)
+	ctx := context.Background()
+	appendSessionContextTestMessages(t, s, write, store.SessionMessage{
+		ID: "source", Role: "assistant", Content: "token is [REDACTED] " + strings.Repeat("evidence ", 2000),
+		SourceType: sessioncontext.SourceType,
+	})
+	page, err := s.ReadSessionHistory(ctx, store.SessionHistoryRead{
+		Namespace: write.Namespace, SessionName: write.SessionName, MessageID: "source", Limit: store.MaxSessionHistoryReadBytes,
+	})
+	require.NoError(t, err)
+	for _, mutation := range []string{"data", "role", "source", "cursor"} {
+		t.Run(mutation, func(t *testing.T) {
+			forged := *page
+			switch mutation {
+			case "data":
+				forged.Data = strings.Repeat("x", len(page.Data))
+			case "role":
+				forged.Role = "system"
+			case "source":
+				forged.MessageID = "missing"
+			case "cursor":
+				forged.NextOffset++
+			}
+			content, marshalErr := json.Marshal(forged)
+			require.NoError(t, marshalErr)
+			_, saveErr := s.AppendContextMessages(ctx, write, []store.SessionMessage{{
+				ID: "forged-" + mutation, Role: "tool", Name: sessioncontext.HistoryToolName,
+				Content: string(content), SourceType: sessioncontext.SourceType,
+			}})
+			require.Error(t, saveErr)
+		})
+	}
+	content, err := json.Marshal(page)
+	require.NoError(t, err)
+	original := store.SessionMessage{ID: "page", Role: "tool", Name: sessioncontext.HistoryToolName,
+		Content: string(content), SourceType: sessioncontext.SourceType}
+	saved := appendSessionContextTestMessages(t, s, write, original)
+	require.Len(t, saved, 1)
+	require.Equal(t, original.ID, saved[0].Metadata[store.SessionContextOutputRefKey])
+	for _, retry := range []store.SessionMessage{original, saved[0]} {
+		repeated := appendSessionContextTestMessages(t, s, write, retry)
+		require.Equal(t, saved, repeated)
+	}
+	data := readAllSessionContextTestHistory(t, s, store.SessionHistoryRead{
+		Namespace: write.Namespace, SessionName: write.SessionName, MessageID: original.ID, Limit: store.MaxSessionHistoryReadBytes,
+	})
+	var recovered store.SessionMessage
+	require.NoError(t, json.Unmarshal(data, &recovered))
+	require.JSONEq(t, original.Content, recovered.Content)
 }
 
 func TestSessionCheckpointRejectsMissingSavedOutput(t *testing.T) {

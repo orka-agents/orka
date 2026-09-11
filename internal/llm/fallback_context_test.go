@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -112,6 +113,60 @@ func TestFallbackContextAdmissionKeepsSelectedModelAndRequest(t *testing.T) {
 			require.NotSame(t, req, primary.requests[0])
 			require.NotSame(t, req, fallback.requests[0])
 			assertFallbackContextRequestUnchanged(t, req, original, 4096)
+		})
+	}
+}
+
+func TestFallbackContextTriesLaterFittingModels(t *testing.T) {
+	for _, mode := range []string{"complete", "stream"} {
+		for _, firstChunk := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/first-chunk=%t", mode, firstChunk), func(t *testing.T) {
+				primary := &fallbackContextCaptureProvider{name: "primary", err: &ProviderError{StatusCode: 503, Message: "unavailable"}, firstChunkFailure: firstChunk}
+				small := &fallbackContextCaptureProvider{name: "small"}
+				large := &fallbackContextCaptureProvider{name: "large"}
+				provider := NewFallbackProvider(primary, []FallbackEntry{
+					{Provider: small, Model: "small-model", ContextWindow: 1024},
+					{Provider: large, Model: "large-model", ContextWindow: 8192},
+				})
+				req := contextBudgetTestRequest()
+				req.ContextWindow = 8192
+				req.Messages[0].Content = strings.Repeat("required request ", 500)
+				original, err := json.Marshal(req)
+				require.NoError(t, err)
+				require.NoError(t, callFallbackContextProvider(provider, req, mode))
+				require.Len(t, primary.requests, 1)
+				require.Empty(t, small.requests)
+				require.Len(t, large.requests, 1)
+				require.Equal(t, "large-model", large.requests[0].Model)
+				assertFallbackContextRequestUnchanged(t, req, original, 8192)
+			})
+		}
+	}
+}
+
+func TestFallbackContextReturnsLargestRejectedAllowance(t *testing.T) {
+	for _, mode := range []string{"complete", "stream"} {
+		t.Run(mode, func(t *testing.T) {
+			primary := &fallbackContextCaptureProvider{name: "primary", err: &ProviderError{StatusCode: 503, Message: "unavailable"}}
+			small := &fallbackContextCaptureProvider{name: "small"}
+			medium := &fallbackContextCaptureProvider{name: "medium"}
+			failed := &fallbackContextCaptureProvider{name: "failed", err: &ProviderError{StatusCode: 503, Message: "unavailable"}}
+			provider := NewFallbackProvider(primary, []FallbackEntry{
+				{Provider: small, Model: "small-model", ContextWindow: 1024},
+				{Provider: medium, Model: "medium-model", ContextWindow: 2048},
+				{Provider: failed, Model: "failed-model", ContextWindow: 8192},
+			})
+			req := contextBudgetTestRequest()
+			req.ContextWindow = 8192
+			req.Messages[0].Content = strings.Repeat("required request ", 500)
+			err := callFallbackContextProvider(provider, req, mode)
+			var limit *ContextLimitError
+			require.ErrorAs(t, err, &limit)
+			require.Equal(t, "medium-model", limit.Model)
+			require.Equal(t, 2048, limit.Window)
+			require.Empty(t, small.requests)
+			require.Empty(t, medium.requests)
+			require.Len(t, failed.requests, 1)
 		})
 	}
 }

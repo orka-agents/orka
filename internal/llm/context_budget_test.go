@@ -116,10 +116,12 @@ func TestMessageTokenBudgetCoversGeneratedReferenceNote(t *testing.T) {
 			{ID: "current", Role: "user", Content: "now"},
 		},
 	}
-	// Leave exactly nine payload tokens for the current request and minimal
-	// truncation note. The note's assistant role also needs framing space.
-	req.ContextWindow = 8192 - MessageTokenBudget(req, 8192) + 9
-	fitted, err := FitMessagesKeeping(req.Messages, MessageTokenBudget(req, req.ContextWindow), 1)
+	// Leave exactly enough space for the current request and the minimal note,
+	// including both roles' framing and the reserved response.
+	minimal := *req
+	minimal.Messages = []Message{{Role: "assistant", Content: "[Earlier messages truncated.]"}, req.Messages[1]}
+	req.ContextWindow = EstimateRequestTokens(&minimal) + ResponseTokenReserve(&minimal)
+	fitted, err := FitRequestMessagesKeeping(req, req.ContextWindow, 1)
 	require.NoError(t, err)
 	require.Len(t, fitted, 2)
 	require.Equal(t, "assistant", fitted[0].Role)
@@ -134,8 +136,7 @@ func TestContextWindowRejectsImpossibleRequestWithoutMutation(t *testing.T) {
 	req.ContextWindow = 512
 	before, err := json.Marshal(req)
 	require.NoError(t, err)
-	budget := MessageTokenBudget(req, req.ContextWindow)
-	fitted, err := FitMessagesKeeping(req.Messages, budget, 0)
+	fitted, err := FitRequestMessagesKeeping(req, req.ContextWindow, 0)
 	require.ErrorIs(t, err, ErrRequiredContextTooLarge)
 	require.Nil(t, fitted)
 	err = CheckContextWindow(req)
@@ -161,4 +162,31 @@ func TestContextWindowAdmissionBoundaryAndDisabledCompatibility(t *testing.T) {
 	req.ContextWindow = 0
 	require.NoError(t, CheckContextWindow(req))
 	require.NoError(t, CheckContextWindow(nil))
+}
+
+func TestFitRequestMessagesReleasesDiscardedFraming(t *testing.T) {
+	messages := make([]Message, 0, 51)
+	for i := range 50 {
+		role := "user"
+		if i%2 != 0 {
+			role = "assistant"
+		}
+		messages = append(messages, Message{Role: role, Content: "ok"})
+	}
+	current := Message{ID: "current", Role: "user", Content: strings.Repeat("c", 14000)}
+	messages = append(messages, current)
+	req := &CompletionRequest{Model: "fixture", Messages: messages, MaxTokens: 4096, ContextWindow: 8192}
+	require.ErrorIs(t, CheckContextWindow(req), ErrContextLimit)
+	original, err := json.Marshal(req)
+	require.NoError(t, err)
+	fitted, err := FitRequestMessagesKeeping(req, req.ContextWindow, len(messages)-1)
+	require.NoError(t, err)
+	require.Less(t, len(fitted), len(messages))
+	require.Equal(t, current, fitted[len(fitted)-1])
+	unchanged, err := json.Marshal(req)
+	require.NoError(t, err)
+	require.Equal(t, original, unchanged)
+	reduced := *req
+	reduced.Messages = fitted
+	require.NoError(t, CheckContextWindow(&reduced))
 }

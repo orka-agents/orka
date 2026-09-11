@@ -30,7 +30,7 @@ const (
 	checkpointTimeout       = 20 * time.Second
 	checkpointOutputTokens  = 1024
 	sessionContextIOTimeout = 10 * time.Second
-	readSessionHistoryTool  = "read_session_history"
+	readSessionHistoryTool  = sessioncontext.HistoryToolName
 	roleSystem              = "system"
 	roleTool                = "tool"
 	checkpointInstructions  = `Write a short Session checkpoint as JSON only.
@@ -43,6 +43,7 @@ Return {"goal":{"text":"...","sources":["saved message ID"]},
 "remaining":["..."],"questions":["..."]}.
 Every goal, constraint, and finding must cite one or more IDs present in the supplied source messages
 or previous checkpoint's sources. Do not invent IDs or details absent from the source excerpts.
+currentRequestMessageID identifies the exact current request in sources.
 Keep the entire JSON under 6000 UTF-8 bytes.
 Keep the current request separate from the note: the note never replaces it.`
 )
@@ -98,7 +99,9 @@ func (c *sessionContextClient) call(ctx context.Context, method, suffix string, 
 			return fmt.Errorf("session context receipt is incomplete or exceeds its byte allowance")
 		}
 		if output != nil {
-			if err := json.Unmarshal(data, output); err != nil {
+			decoder := json.NewDecoder(bytes.NewReader(data))
+			decoder.UseNumber()
+			if err := decoder.Decode(output); err != nil || decoder.Decode(new(any)) != io.EOF {
 				return fmt.Errorf("session context receipt is invalid")
 			}
 		}
@@ -118,6 +121,7 @@ type workerSessionContext struct {
 	sequence         int
 	window           int
 	checkpointFailed bool
+	unreadHistory    map[string]bool
 }
 
 func contextWindowFromEnv(name string, required bool) (int, error) {
@@ -231,10 +235,27 @@ func (s *workerSessionContext) persist(ctx context.Context, message llm.Message)
 	}
 	source := store.SessionMessage{
 		ID: message.ID, Role: message.Role, Content: sanitizeCheckpointText(message.Content),
-		ToolCallID: message.ToolCallID, Name: message.Name,
+		ToolCallID: sanitizeCheckpointText(message.ToolCallID), Name: sanitizeCheckpointText(message.Name),
+	}
+	historyPage := false
+	if message.Role == roleTool && strings.TrimSpace(message.Name) == readSessionHistoryTool {
+		if page, ok := sessioncontext.HistoryPage(message.Content); ok {
+			if sanitizeConfiguredCheckpointText(page.Data) != page.Data ||
+				sanitizeConfiguredCheckpointText(message.Content) != message.Content {
+				return message, fmt.Errorf("saved history contains a configured secret; its byte cursor cannot be safely rewritten")
+			}
+			// The controller verifies this immutable fragment against its saved
+			// source in the same transaction as the receipt. Redaction happened
+			// before pagination; another text pass would corrupt the JSON.
+			source.Content, historyPage = message.Content, true
+		}
 	}
 	if len(message.ToolCalls) > 0 {
-		source.ToolCalls = message.ToolCalls
+		calls, _, err := sanitizeCheckpointJSON(message.ToolCalls)
+		if err != nil {
+			return message, fmt.Errorf("cannot sanitize Session tool arguments")
+		}
+		source.ToolCalls = calls
 	}
 	// Finish only the durable receipt on cancellation. No further tool runs, and
 	// the exact Session owner must still be valid throughout the store transaction.
@@ -252,23 +273,89 @@ func (s *workerSessionContext) persist(ctx context.Context, message llm.Message)
 	if message.ID == s.current.ID {
 		return message, nil
 	}
-	return sessioncontext.ModelMessage(saved[0])
+	stored, err := sessioncontext.ModelMessage(saved[0])
+	if err == nil && historyPage {
+		// History reads are already bounded. Preserve the full page and its cursor
+		// in active context after committing the source and transcript preview.
+		stored.Content = source.Content
+		if s.unreadHistory == nil {
+			s.unreadHistory = make(map[string]bool)
+		}
+		s.unreadHistory[stored.ID] = true
+	}
+	return stored, err
 }
 
 func sanitizeCheckpointText(value string) string {
-	value = redact.SensitiveText(value)
+	return sanitizeConfiguredCheckpointText(redact.SensitiveText(value))
+}
+
+func sanitizeConfiguredCheckpointText(value string) string {
+	replace := func(secret string) {
+		value = strings.ReplaceAll(value, secret, "[REDACTED]")
+		encoded, _ := json.Marshal(secret)
+		value = strings.ReplaceAll(value, string(encoded[1:len(encoded)-1]), "[REDACTED]")
+	}
 	for _, entry := range os.Environ() {
 		name, secret, _ := strings.Cut(entry, "=")
 		name = strings.ToUpper(name)
 		if len(secret) >= 8 && (strings.Contains(name, "API_KEY") || strings.Contains(name, "TOKEN") ||
 			strings.Contains(name, "PASSWORD") || strings.Contains(name, "SECRET")) {
-			value = strings.ReplaceAll(value, secret, "[REDACTED]")
+			replace(secret)
 		}
 	}
 	if token := workerServiceAccountToken(); len(token) >= 8 {
-		value = strings.ReplaceAll(value, token, "[REDACTED]")
+		replace(token)
 	}
 	return value
+}
+
+// sanitizeCheckpointJSON checks decoded strings so JSON escaping cannot hide
+// configured secrets. Number-preserving decoding keeps tool arguments exact.
+func sanitizeCheckpointJSON(input any) (any, bool, error) {
+	data, err := json.Marshal(input)
+	if err != nil {
+		return nil, false, err
+	}
+	var value any
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
+		return nil, false, err
+	}
+	redacted := false
+	sanitizeText := func(text string) string {
+		clean := sanitizeCheckpointText(text)
+		redacted = redacted || clean != text
+		return clean
+	}
+	var sanitize func(any) any
+	sanitize = func(value any) any {
+		switch typed := value.(type) {
+		case map[string]any:
+			clean := make(map[string]any, len(typed))
+			for key, child := range typed {
+				clean[sanitizeText(key)] = sanitize(child)
+			}
+			return clean
+		case []any:
+			for i, child := range typed {
+				typed[i] = sanitize(child)
+			}
+			return typed
+		case string:
+			return sanitizeText(typed)
+		case json.Number:
+			if clean := sanitizeText(typed.String()); clean != typed.String() {
+				return clean
+			}
+			return typed
+		default:
+			return typed
+		}
+	}
+	value = sanitize(value)
+	return value, redacted, nil
 }
 
 type checkpointClaim struct {
@@ -313,16 +400,19 @@ func (s *workerSessionContext) makeCheckpoint(
 	// Source JSON retains the original roles. Long tool output is already linked
 	// to saved data; further excerpts are explicit and remain retrievable by ID.
 	for i := range sources {
-		if sources[i].Role != roleUser && len(sources[i].Content) > 2048 {
+		if sources[i].ID == s.current.ID {
+			// The exact current request appears once, with its committed source ID.
+			sources[i].Content = sanitizeCheckpointText(s.current.Content)
+		} else if sources[i].Role != roleUser && len(sources[i].Content) > 2048 {
 			sources[i].Content = truncateUTF8(sources[i].Content, 2048) +
 				"\n[Source excerpt; use read_session_history for the saved result.]"
 		}
 	}
 	payload := struct {
-		CurrentRequest string                   `json:"currentRequest"`
-		Previous       *store.SessionCheckpoint `json:"previousCheckpoint,omitempty"`
-		Sources        []store.SessionMessage   `json:"sources"`
-	}{sanitizeCheckpointText(s.current.Content), s.checkpoint, sources}
+		CurrentRequestID string                   `json:"currentRequestMessageID"`
+		Previous         *store.SessionCheckpoint `json:"previousCheckpoint,omitempty"`
+		Sources          []store.SessionMessage   `json:"sources"`
+	}{s.current.ID, s.checkpoint, sources}
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("cannot encode checkpoint sources")
@@ -393,6 +483,9 @@ func parseCheckpointNote(content string, allowedIDs map[string]bool) ([]byte, []
 	if decoder.Decode(new(any)) != io.EOF {
 		return nil, nil, fmt.Errorf("checkpoint note contains trailing data")
 	}
+	if _, sensitive, err := sanitizeCheckpointJSON(draft); err != nil || sensitive {
+		return nil, nil, fmt.Errorf("checkpoint note contains credential-shaped or configured secret content")
+	}
 	claims := append([]checkpointClaim{draft.Goal}, draft.Constraints...)
 	claims = append(claims, draft.Findings...)
 	var referenced []string
@@ -431,7 +524,7 @@ func (s *workerSessionContext) fit(
 	}
 	fitErr := llm.CheckContextWindow(req)
 	belowThreshold := llm.EstimateRequestTokens(req)+llm.ResponseTokenReserve(req) <= req.ContextWindow*4/5
-	if !forced && fitErr == nil && (s.checkpointFailed || belowThreshold) {
+	if !forced && fitErr == nil && (s.checkpointFailed || belowThreshold || len(s.unreadHistory) > 0) {
 		return nil
 	}
 	minimal := *req
@@ -487,8 +580,9 @@ func (s *workerSessionContext) fitCheckpoint(
 	// Reserve the complete checkpoint while fitting recent exchanges. Its role
 	// remains assistant in the final request, irrespective of this accounting.
 	checkpointCost := llm.EstimateRequestTokens(&llm.CompletionRequest{Messages: []llm.Message{checkpointMessage}}) - 256
-	budget := llm.MessageTokenBudget(&working, req.ContextWindow) - checkpointCost
-	fitted, err := llm.FitMessagesKeeping(working.Messages, budget, s.currentIndex(working.Messages))
+	fitted, err := llm.FitRequestMessagesKeeping(
+		&working, req.ContextWindow-checkpointCost, s.currentIndex(working.Messages),
+		s.requiredHistoryIndices(working.Messages)...)
 	if err != nil {
 		return nil, fmt.Errorf("saved checkpoint and current request cannot fit with tools and response reserve: %w", err)
 	}
@@ -512,6 +606,27 @@ func (s *workerSessionContext) fitCheckpoint(
 		return nil, fmt.Errorf("checkpoint cannot reduce this input while preserving the exact current request")
 	}
 	return active, nil
+}
+
+// An unread page pins its whole exchange until a normal model call succeeds.
+// Checkpoint generation is not delivery to the model that requested the page.
+func (s *workerSessionContext) requiredHistoryIndices(messages []llm.Message) []int {
+	var required []int
+	for start := 0; start < len(messages); {
+		end := start + 1
+		if messages[start].Role == roleAssistant && len(messages[start].ToolCalls) > 0 {
+			for end < len(messages) && messages[end].Role == roleTool {
+				end++
+			}
+		}
+		if slices.ContainsFunc(messages[start:end], func(message llm.Message) bool { return s.unreadHistory[message.ID] }) {
+			for i := start; i < end; i++ {
+				required = append(required, i)
+			}
+		}
+		start = end
+	}
+	return required
 }
 
 func sessionHistoryToolDefinition() llm.Tool {
@@ -559,11 +674,21 @@ func (s *workerSessionContext) readHistory(ctx context.Context, arguments json.R
 	return string(data), err
 }
 
-func contextRecoveryWindow(req *llm.CompletionRequest, err error) int {
+func contextRecoveryWindow(
+	req *llm.CompletionRequest, err error, currentRequestIndex int, requiredMessageIndexes ...int,
+) int {
 	if limit, ok := errors.AsType[*llm.ContextLimitError](err); ok {
 		return limit.Window
 	}
-	// The configured estimate can differ from provider tokenization. A bounded
-	// retry tightens the allowance while reserving instructions/tools/output.
-	return llm.ResponseTokenReserve(req) + llm.EstimateRequestTokens(req)/2
+	// Only optional history can shrink. Instructions, tools, the exact current
+	// request, and output remain fully reserved even after provider rejection.
+	fixed := *req
+	fixed.Messages = nil
+	for i, message := range req.Messages {
+		if message.Role == roleSystem || i == currentRequestIndex || slices.Contains(requiredMessageIndexes, i) {
+			fixed.Messages = append(fixed.Messages, message)
+		}
+	}
+	fixedTokens := llm.EstimateRequestTokens(&fixed)
+	return llm.ResponseTokenReserve(req) + fixedTokens + (llm.EstimateRequestTokens(req)-fixedTokens)/2
 }

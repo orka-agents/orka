@@ -9,11 +9,13 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/redact"
+	"github.com/orka-agents/orka/internal/sessioncontext"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -33,11 +35,33 @@ func (s *Store) AppendContextMessages(
 		return nil, store.ValidationErrorf("session context appends require an unbounded appendable Session")
 	}
 	prepared := make([]store.SessionMessage, len(messages))
+	historyPages := make(map[int]store.SessionHistoryResult)
 	for i, message := range messages {
 		var err error
 		prepared[i], err = sanitizeSessionContextMessage(message)
 		if err != nil {
 			return nil, err
+		}
+		if message.Metadata[store.SessionContextOutputRefKey] == message.ID {
+			// Only an exact existing preview can use this reserved reference;
+			// matchSessionContextMessageTx checks it before accepting the retry.
+			prepared[i].Content = message.Content
+		}
+		if message.Role == "tool" && strings.TrimSpace(message.Name) == sessioncontext.HistoryToolName {
+			if page, ok := sessioncontext.HistoryPage(message.Content); ok {
+				// The transaction below verifies every byte against saved source
+				// data before this page can bypass ordinary text redaction.
+				// Encode only the decoded fields: duplicate JSON members must not
+				// smuggle unverified text through the original envelope.
+				canonical, err := json.Marshal(page)
+				if err != nil {
+					return nil, err
+				}
+				prepared[i].Content = string(canonical)
+				historyPages[i] = page
+			} else if json.Valid([]byte(message.Content)) {
+				return nil, store.ValidationErrorf("history tool result contains an invalid page")
+			}
 		}
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -51,6 +75,11 @@ func (s *Store) AppendContextMessages(
 	canonical := make([]store.SessionMessage, len(prepared))
 	inserted := 0
 	for i, message := range prepared {
+		if page, ok := historyPages[i]; ok {
+			if err := verifySessionHistoryPageTx(ctx, tx, write, page); err != nil {
+				return nil, err
+			}
+		}
 		var added bool
 		canonical[i], added, err = appendSessionContextMessageTx(ctx, tx, write, message)
 		if err != nil {
@@ -397,7 +426,7 @@ func (s *Store) ReadSessionHistory(ctx context.Context, read store.SessionHistor
 	if err != nil {
 		return nil, err
 	}
-	data, err := sessionContextMessageDataTx(ctx, tx, read.Namespace, read.SessionName, message)
+	data, err := sessionHistoryMessageDataTx(ctx, tx, read.Namespace, read.SessionName, message)
 	if err != nil {
 		return nil, err
 	}
@@ -418,6 +447,43 @@ func (s *Store) ReadSessionHistory(ctx context.Context, read store.SessionHistor
 		MessageID: message.ID, Role: message.Role, Data: string(data[read.Offset:end]),
 		Offset: read.Offset, NextOffset: end, TotalBytes: len(data),
 	}, nil
+}
+
+func verifySessionHistoryPageTx(ctx context.Context, tx *sql.Tx, write store.SessionContextWrite, page store.SessionHistoryResult) error {
+	source, err := loadSessionContextMessageTx(ctx, tx, write.Namespace, write.SessionName, page.MessageID, 0)
+	if err != nil {
+		return err
+	}
+	data, err := sessionHistoryMessageDataTx(ctx, tx, write.Namespace, write.SessionName, source)
+	if err != nil {
+		return err
+	}
+	if page.Role != source.Role || page.TotalBytes != len(data) || page.NextOffset > len(data) ||
+		string(data[page.Offset:page.NextOffset]) != page.Data {
+		return store.ValidationErrorf("history page does not match its saved source")
+	}
+	return nil
+}
+
+// Context sources were sanitized before storage. Legacy messages are sanitized
+// before pagination, so neither source JSON nor the page envelope needs a text
+// redactor after byte boundaries have been assigned.
+func sessionHistoryMessageDataTx(ctx context.Context, tx *sql.Tx, namespace, name string, message store.SessionMessage) ([]byte, error) {
+	data, err := sessionContextMessageDataTx(ctx, tx, namespace, name, message)
+	if err != nil || message.SourceType == sessioncontext.SourceType {
+		return data, err
+	}
+	var source store.SessionMessage
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := decoder.Decode(&source); err != nil {
+		return nil, err
+	}
+	source, err = sanitizeSessionContextMessage(source)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(source)
 }
 
 func validateSessionContextReadIdentity(namespace, sessionName, throughMessageID string) error {

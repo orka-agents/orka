@@ -1506,6 +1506,56 @@ func TestBuildInitialMessagesPreservesOversizedTaskPrompt(t *testing.T) {
 	}
 }
 
+func TestBuildInitialMessagesCountsRestoredToolArguments(t *testing.T) {
+	for _, size := range []int{88 << 10, 100 << 10} {
+		t.Run(fmt.Sprintf("%d", size), func(t *testing.T) {
+			arguments, err := json.Marshal(map[string]any{
+				"content": strings.Repeat("x", size), "record_id": json.Number("9007199254740993"),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			sources := []store.SessionMessage{
+				{ID: "prior-user", Role: "user", Content: "Prepare the file."},
+				{ID: "prior-call", Role: "assistant",
+					ToolCalls: []llm.ToolCall{{ID: "call", Name: "file_write", Arguments: arguments}}},
+				{ID: "prior-result", Role: "tool", ToolCallID: "call", Name: "file_write", Content: "Saved."},
+			}
+			var transcript strings.Builder
+			encoder := json.NewEncoder(&transcript)
+			for _, source := range sources {
+				if err := encoder.Encode(source); err != nil {
+					t.Fatal(err)
+				}
+			}
+			parsed := parseSessionContext([]byte(transcript.String()))
+			if len(parsed) != 3 || len(parsed[1].ToolCalls) != 1 ||
+				!strings.Contains(string(parsed[1].ToolCalls[0].Arguments), "9007199254740993") {
+				t.Fatal("transcript decoding changed numeric tool arguments")
+			}
+			const current = "Continue the investigation."
+			messages := buildInitialMessages(parsed, current, false, "", "")
+			encoded, err := json.Marshal(messages)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(encoded) > maxSessionContextBytes {
+				t.Fatalf("initial history uses %d bytes, allowance is %d", len(encoded), maxSessionContextBytes)
+			}
+			wantMessages := 4
+			if size > maxSessionContextBytes {
+				wantMessages = 1
+			}
+			if len(messages) != wantMessages || messages[len(messages)-1].Content != current {
+				t.Fatal("byte fitting did not retain the expected complete turns and exact current request")
+			}
+			if _, err := llm.FitMessagesKeeping(messages, 100000, len(messages)-1); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestBuildInitialMessagesDropsLeadingOrphanAssistant(t *testing.T) {
 	messages := buildInitialMessages([]llm.Message{
 		{Role: roleUser, Content: strings.Repeat("q", 96<<10)},

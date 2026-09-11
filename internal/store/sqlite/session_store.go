@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"strings"
 	"time"
 
 	"github.com/orka-agents/orka/internal/store"
@@ -717,13 +719,23 @@ func scanSessionMessage(row gatewayRowScanner) (store.SessionMessage, error) {
 	msg.Name = nameStr.String
 	msg.ToolCallID = toolCallID.String
 	if inputJSON.Valid && inputJSON.String != "" {
-		if err := json.Unmarshal([]byte(inputJSON.String), &msg.Input); err != nil {
+		decoder := json.NewDecoder(strings.NewReader(inputJSON.String))
+		decoder.UseNumber()
+		if err := decoder.Decode(&msg.Input); err != nil {
 			return msg, fmt.Errorf("failed to unmarshal input: %w", err)
+		}
+		if decoder.Decode(new(any)) != io.EOF {
+			return msg, fmt.Errorf("failed to unmarshal input: trailing data")
 		}
 	}
 	if toolCallsJSON.Valid && toolCallsJSON.String != "" {
-		if err := json.Unmarshal([]byte(toolCallsJSON.String), &msg.ToolCalls); err != nil {
+		decoder := json.NewDecoder(strings.NewReader(toolCallsJSON.String))
+		decoder.UseNumber()
+		if err := decoder.Decode(&msg.ToolCalls); err != nil {
 			return msg, fmt.Errorf("failed to unmarshal tool_calls: %w", err)
+		}
+		if decoder.Decode(new(any)) != io.EOF {
+			return msg, fmt.Errorf("failed to unmarshal tool_calls: trailing data")
 		}
 	}
 	if metadataJSON != "" && metadataJSON != "{}" {

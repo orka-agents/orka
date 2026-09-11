@@ -96,21 +96,37 @@ func FitMessages(messages []Message, tokenBudget int) ([]Message, error) {
 // newer user-role messages are control prompts. Use -1 if there is no current
 // request. The returned messages retain their roles, contents, and order, except
 // for an optional assistant reference note describing omitted history.
-// tokenBudget covers messages only; callers must reserve instructions supplied
-// outside Messages, tool definitions, and response space separately.
+// tokenBudget covers message content only. Callers fitting a complete provider
+// request should use FitRequestMessagesKeeping to include framing and reserves.
 func FitMessagesKeeping(messages []Message, tokenBudget, currentRequestIndex int) ([]Message, error) {
+	return fitMessagesKeeping(messages, tokenBudget, currentRequestIndex, false)
+}
+
+func fitMessagesKeeping(messages []Message, tokenBudget, currentRequestIndex int, includeFraming bool, requiredMessageIndexes ...int) ([]Message, error) {
 	if currentRequestIndex < -1 || currentRequestIndex >= len(messages) {
 		return nil, errors.New("current request index is outside model context")
 	}
 	if currentRequestIndex >= 0 && messages[currentRequestIndex].Role != "user" {
 		return nil, errors.New("current request must retain its user role")
 	}
+	for _, index := range requiredMessageIndexes {
+		if index < 0 || index >= len(messages) {
+			return nil, errors.New("required message index is outside model context")
+		}
+	}
 
 	blocks := groupMessageBlocks(messages)
+	if includeFraming {
+		for i := range blocks {
+			for _, message := range blocks[i].messages {
+				blocks[i].tokens += messageFramingTokens(message)
+			}
+		}
+	}
 	if err := validateToolBlocks(blocks); err != nil {
 		return nil, err
 	}
-	kept, totalTokens, requiredTokens := requiredMessageBlocks(blocks, currentRequestIndex)
+	kept, totalTokens, requiredTokens := requiredMessageBlocks(blocks, currentRequestIndex, requiredMessageIndexes...)
 	if totalTokens <= tokenBudget {
 		return messages, nil
 	}
@@ -130,15 +146,18 @@ func FitMessagesKeeping(messages []Message, tokenBudget, currentRequestIndex int
 		remaining -= block.tokens
 		kept[i] = true
 	}
+	if includeFraming {
+		remaining -= messageFramingTokens(Message{Role: contextRoleAssistant})
+	}
 	return messagesWithTruncationNote(blocks, kept, remaining), nil
 }
 
-func requiredMessageBlocks(blocks []messageBlock, currentRequestIndex int) ([]bool, int, int) {
+func requiredMessageBlocks(blocks []messageBlock, currentRequestIndex int, requiredMessageIndexes ...int) ([]bool, int, int) {
 	kept := make([]bool, len(blocks))
 	totalTokens, requiredTokens, messageIndex := 0, 0, 0
 	for i, block := range blocks {
 		for _, message := range block.messages {
-			if message.Role == "system" || messageIndex == currentRequestIndex {
+			if message.Role == "system" || messageIndex == currentRequestIndex || slices.Contains(requiredMessageIndexes, messageIndex) {
 				kept[i] = true
 			}
 			messageIndex++

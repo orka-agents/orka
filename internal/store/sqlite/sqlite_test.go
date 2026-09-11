@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -589,7 +590,7 @@ func TestSessionMessages(t *testing.T) {
 				Role:       roleAssistant,
 				Content:    "",
 				Name:       "tool-use",
-				Input:      map[string]any{"key": "value", "num": float64(42)},
+				Input:      map[string]any{"key": "value", "num": float64(42), "large_number": json.Number("9007199254740993")},
 				ToolCalls:  []map[string]any{{"id": "call1", "type": "function"}},
 				ToolCallID: "call1",
 				Timestamp:  now,
@@ -617,8 +618,11 @@ func TestSessionMessages(t *testing.T) {
 		if msg.Input["key"] != "value" {
 			t.Errorf("Input[key]: got %v, want %q", msg.Input["key"], "value")
 		}
-		if msg.Input["num"] != float64(42) {
+		if msg.Input["num"] != json.Number("42") {
 			t.Errorf("Input[num]: got %v, want 42", msg.Input["num"])
+		}
+		if msg.Input["large_number"] != json.Number("9007199254740993") {
+			t.Errorf("Input[large_number]: got %v, want 9007199254740993", msg.Input["large_number"])
 		}
 		// ToolCalls is deserialized as []any
 		toolCalls, ok := msg.ToolCalls.([]any)

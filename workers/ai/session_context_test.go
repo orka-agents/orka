@@ -88,7 +88,9 @@ func (f *workerContextFixture) serveHTTP(w http.ResponseWriter, r *http.Request)
 		result = bootstrap
 	case strings.HasSuffix(path, "/messages"):
 		var messages []store.SessionMessage
-		err = json.NewDecoder(r.Body).Decode(&messages)
+		decoder := json.NewDecoder(r.Body)
+		decoder.UseNumber()
+		err = decoder.Decode(&messages)
 		for i := range messages {
 			messages[i].SourceType, messages[i].SourceRef = sessioncontext.SourceType, f.write.OwnerUID
 			if messages[i].ID == f.sourceErrorID.Load().(string) {

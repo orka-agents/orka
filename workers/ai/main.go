@@ -1079,7 +1079,7 @@ func boundInitialMessages(messages []llm.Message) []llm.Message {
 		}
 	}
 	mandatoryMessage := messages[mandatory]
-	used := initialMessageBytes(mandatoryMessage)
+	used := 1 + initialMessageBytes(mandatoryMessage)
 	start := mandatory
 	for i := mandatory - 1; i >= 0; i-- {
 		size := initialMessageBytes(messages[i])
@@ -1098,7 +1098,12 @@ func boundInitialMessages(messages []llm.Message) []llm.Message {
 }
 
 func initialMessageBytes(message llm.Message) int {
-	return len(message.Role) + len(message.Content) + len(message.Name) + len(message.ToolCallID) + 16
+	data, err := json.Marshal(message)
+	if err != nil {
+		return maxSessionContextBytes + 1
+	}
+	// Include each message's separator; the caller reserves the closing bracket.
+	return len(data) + 1
 }
 
 // loadSessionContext loads messages from the session transcript
@@ -1121,7 +1126,9 @@ func parseSessionContext(data []byte) []llm.Message {
 		}
 
 		var msg store.SessionMessage
-		if err := json.Unmarshal([]byte(line), &msg); err != nil {
+		decoder := json.NewDecoder(strings.NewReader(line))
+		decoder.UseNumber()
+		if err := decoder.Decode(&msg); err != nil || decoder.Decode(new(any)) != io.EOF {
 			continue
 		}
 
@@ -1282,20 +1289,32 @@ func executeAgentLoopWithEvents(
 		resp, err := provider.Complete(stepCtx, req)
 		if err != nil && llm.IsContextTooLongErr(err) {
 			beforeCount := len(messages)
-			window := contextRecoveryWindow(req, err)
+			anchor := -1
 			if sessionContext != nil {
-				req.ContextWindow = min(req.ContextWindow, window)
-				sessionContext.window = req.ContextWindow
-				err = sessionContext.fit(stepCtx, provider, req, true, eventRecorder)
+				anchor = sessionContext.currentIndex(messages)
 			} else {
-				anchor := -1
 				for i, message := range messages {
 					if message.Role == roleUser && message.Content == currentRequest.Content && message.ID == currentRequest.ID {
 						anchor = i
 						break
 					}
 				}
-				req.Messages, err = llm.FitMessagesKeeping(messages, llm.MessageTokenBudget(req, window), anchor)
+			}
+			var requiredHistory []int
+			if sessionContext != nil {
+				requiredHistory = sessionContext.requiredHistoryIndices(messages)
+			}
+			window := contextRecoveryWindow(req, err, anchor, requiredHistory...)
+			if sessionContext != nil {
+				req.ContextWindow = min(req.ContextWindow, window)
+				sessionContext.window = req.ContextWindow
+				err = sessionContext.fit(stepCtx, provider, req, true, eventRecorder)
+			} else {
+				beforeTokens := llm.EstimateRequestTokens(req)
+				req.Messages, err = llm.FitRequestMessagesKeeping(req, window, anchor)
+				if err == nil && llm.EstimateRequestTokens(req) >= beforeTokens {
+					err = fmt.Errorf("%w: no optional history can be removed", llm.ErrRequiredContextTooLarge)
+				}
 			}
 			if err != nil {
 				stepSpan.End()
@@ -1329,6 +1348,9 @@ func executeAgentLoopWithEvents(
 			)
 			stepSpan.End()
 			return "", fmt.Errorf("completion failed: %w", err)
+		}
+		if sessionContext != nil {
+			clear(sessionContext.unreadHistory)
 		}
 		stepSpan.SetAttributes(attribute.Int("agent.step.tool_call_count", len(resp.ToolCalls)))
 		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeModelRequestCompleted, modelLoopEventTimeout,

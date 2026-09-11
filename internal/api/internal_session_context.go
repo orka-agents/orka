@@ -1,9 +1,11 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/url"
 	"strconv"
 	"strings"
@@ -13,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/sessioncontext"
 	"github.com/orka-agents/orka/internal/store"
 )
@@ -169,6 +172,20 @@ func (h *InternalHandlers) GetTaskSessionContext(c fiber.Ctx) error {
 	for len(bootstrap.Messages) > 0 && bootstrap.Messages[0].Role == sessionContextRoleTool {
 		bootstrap.Messages = bootstrap.Messages[1:]
 	}
+	// Check the remaining exchanges before byte trimming can hide an unfinished
+	// batch from a previous Task. Complete exchanges may still be omitted.
+	modelMessages := make([]llm.Message, 0, len(bootstrap.Messages))
+	for _, message := range bootstrap.Messages {
+		modelMessage, convertErr := sessioncontext.ModelMessage(message)
+		if convertErr != nil {
+			return fiber.NewError(fiber.StatusUnprocessableEntity, "saved history contains invalid tool calls")
+		}
+		modelMessages = append(modelMessages, modelMessage)
+	}
+	validationBudget := llm.EstimateRequestTokens(&llm.CompletionRequest{Messages: modelMessages})
+	if _, err := llm.FitMessagesKeeping(modelMessages, validationBudget, -1); err != nil {
+		return fiber.NewError(fiber.StatusUnprocessableEntity, "saved history contains an incomplete exchange; inspect execution records before continuing")
+	}
 	for {
 		data, marshalErr := json.Marshal(bootstrap)
 		if marshalErr != nil {
@@ -182,7 +199,7 @@ func (h *InternalHandlers) GetTaskSessionContext(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusUnprocessableEntity, "session context cannot fit its byte allowance; the current request was not shortened")
 		}
 		bootstrap.Messages = bootstrap.Messages[1:]
-		for len(bootstrap.Messages) > 1 && bootstrap.Messages[0].Role == sessionContextRoleTool {
+		for len(bootstrap.Messages) > 0 && bootstrap.Messages[0].Role == sessionContextRoleTool {
 			bootstrap.Messages = bootstrap.Messages[1:]
 		}
 	}
@@ -218,7 +235,10 @@ func (h *InternalHandlers) AppendTaskContextMessages(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusRequestEntityTooLarge, "session source batch exceeds its byte allowance")
 	}
 	var messages []store.SessionMessage
-	if err := json.Unmarshal(c.Body(), &messages); err != nil || len(messages) == 0 || len(messages) > 16 {
+	decoder := json.NewDecoder(bytes.NewReader(c.Body()))
+	decoder.UseNumber()
+	if err := decoder.Decode(&messages); err != nil || decoder.Decode(new(any)) != io.EOF ||
+		len(messages) == 0 || len(messages) > 16 {
 		return fiber.NewError(fiber.StatusBadRequest, "expected between 1 and 16 session source messages")
 	}
 	prefix := sessioncontext.TaskMessagePrefix(string(policy.task.UID))

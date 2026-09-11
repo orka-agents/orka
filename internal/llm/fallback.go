@@ -79,6 +79,8 @@ func (f *FallbackProvider) Complete(ctx context.Context, req *CompletionRequest)
 	}
 
 	var lastErr error
+	var admissionErr error
+	var admissionWindow int
 	for _, c := range candidates {
 		clone := *req
 		callReq := &clone
@@ -91,7 +93,10 @@ func (f *FallbackProvider) Complete(ctx context.Context, req *CompletionRequest)
 			}
 			callReq.ContextWindow = min(req.ContextWindow, c.window)
 			if err := CheckContextWindow(callReq); err != nil {
-				return nil, err
+				if admissionErr == nil || callReq.ContextWindow > admissionWindow {
+					admissionErr, admissionWindow = err, callReq.ContextWindow
+				}
+				continue
 			}
 		}
 
@@ -123,6 +128,9 @@ func (f *FallbackProvider) Complete(ctx context.Context, req *CompletionRequest)
 		}
 	}
 
+	if admissionErr != nil {
+		return nil, admissionErr
+	}
 	return nil, fmt.Errorf("all providers failed: %w", lastErr)
 }
 
@@ -151,6 +159,8 @@ func (f *FallbackProvider) Stream(ctx context.Context, req *CompletionRequest) (
 	}
 
 	var lastErr error
+	var admissionErr error
+	var admissionWindow int
 	for _, c := range candidates {
 		clone := *req
 		callReq := &clone
@@ -163,7 +173,10 @@ func (f *FallbackProvider) Stream(ctx context.Context, req *CompletionRequest) (
 			}
 			callReq.ContextWindow = min(req.ContextWindow, c.window)
 			if err := CheckContextWindow(callReq); err != nil {
-				return nil, err
+				if admissionErr == nil || callReq.ContextWindow > admissionWindow {
+					admissionErr, admissionWindow = err, callReq.ContextWindow
+				}
+				continue
 			}
 		}
 
@@ -219,6 +232,9 @@ func (f *FallbackProvider) Stream(ctx context.Context, req *CompletionRequest) (
 	}
 
 	// All failed
+	if admissionErr != nil {
+		return nil, admissionErr
+	}
 	ch := make(chan StreamChunk, 1)
 	if lastErr != nil {
 		ch <- StreamChunk{Error: fmt.Errorf("all providers failed: %w", lastErr), Done: true}

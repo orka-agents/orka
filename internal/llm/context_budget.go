@@ -69,19 +69,21 @@ func ResponseTokenReserve(req *CompletionRequest) int {
 	return 4096
 }
 
-// MessageTokenBudget subtracts every non-message input and output allowance.
-// Framing is reserved for the original messages and for any increase from
-// replacing a dropped message with an assistant reference note.
+// MessageTokenBudget reserves non-message inputs and output. The remaining
+// allowance covers both content and framing of the messages actually retained.
 func MessageTokenBudget(req *CompletionRequest, window int) int {
-	overhead := EstimateRequestTokens(req)
-	noteFraming := messageFramingTokens(Message{Role: contextRoleAssistant})
-	minimumFraming := noteFraming
-	for _, message := range req.Messages {
-		overhead -= estimateMessageTokens(message)
-		minimumFraming = min(minimumFraming, messageFramingTokens(message))
-	}
-	overhead += noteFraming - minimumFraming
-	return window - ResponseTokenReserve(req) - overhead
+	fixed := *req
+	fixed.Messages = nil
+	return window - ResponseTokenReserve(req) - EstimateRequestTokens(&fixed)
+}
+
+// FitRequestMessagesKeeping fits a complete request's messages, including their
+// framing, while reserving instructions, tools, and output outside Messages.
+// It preserves the same required messages and atomic exchanges as
+// FitMessagesKeeping without charging for messages that are discarded.
+// Extra required indexes pin complete exchanges, such as unread tool results.
+func FitRequestMessagesKeeping(req *CompletionRequest, window, currentRequestIndex int, requiredMessageIndexes ...int) ([]Message, error) {
+	return fitMessagesKeeping(req.Messages, MessageTokenBudget(req, window), currentRequestIndex, true, requiredMessageIndexes...)
 }
 
 // CheckContextWindow performs admission without changing message content.
