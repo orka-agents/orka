@@ -6,7 +6,7 @@ description: "Agent Substrate execution, data-only suspension, checkpoints, and 
 # Agent Substrate workspaces
 
 Orka runs direct workspaces, MCP servers, and built-in ACP runtimes on the
-unmodified [Agent Substrate](https://github.com/agent-substrate/substrate)
+unmodified [Agent Substrate v0.1.0](https://github.com/agent-substrate/substrate/tree/v0.1.0)
 provider. The supported source and protocol are pinned together in
 `hack/agent-substrate/upstream.env`. Provider forks, local patches, and
 fork-specific `ActorSnapshot` APIs are not part of this integration.
