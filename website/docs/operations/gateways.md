@@ -58,6 +58,14 @@ kubectl -n orka-system rollout restart deployment/orka-controller
 kubectl -n orka-system rollout status deployment/orka-controller
 ```
 
+## Agent execution
+
+`GatewayBinding.spec.agentRef` supports both native AI Agents and runtime-backed Agents. At Task creation, an Agent without `spec.runtime` produces a `type: ai` Task using the Agent's model/provider configuration and the AI worker. An Agent with `spec.runtime` continues to produce a `type: agent` Task. `taskDefaults.agentRuntimeMaxTurns` is runtime-only and makes a binding to a native AI Agent not ready; dispatch also rejects it if an Agent edit races readiness reconciliation.
+
+Admission pins the Agent UID, not its generation or execution kind. Agent edits before Task creation can therefore change the selected execution kind. Once the Task exists, crash recovery adopts that Task with its immutable kind instead of selecting again from the edited Agent. Frozen external-runtime tool policy remains authoritative and cannot be discarded by switching to native AI.
+
+Both paths consume the canonical Session transcript through the admitted user message, without copying external text into the Task CR or adding the current prompt twice. Native AI startup fails closed when a required transcript has no non-empty final user turn. Gateway terminal projection—not generic Task finalization—appends the canonical assistant message, creates the delivery, and releases the Session lock.
+
 ## Task and Session access
 
 Gateway-created Tasks remain ordinary Orka Task objects for controller execution, but their CRs contain no external message text; the prompt is loaded from the bounded, task-owned Session transcript. Public Task list/get/log/result/event/trace/fork surfaces require both the ordinary Task permission and gateway-read authorization for the owning Gateway. Destructive Task actions and approval decisions additionally require gateway-operate authorization. The default Helm and Kustomize installs also create a fail-closed `ValidatingAdmissionPolicy` that permits direct Kubernetes create/update/delete of gateway-owned Tasks only from the owning Orka controller or trusted worker ServiceAccounts. Namespace-isolated Helm releases scope the policy by the immutable Gateway namespace encoded in `requestedBy.issuer`, so multiple releases do not deny one another and coordinated workers can create inherited child Tasks. Canonical gateway Sessions are hidden from generic Session, Session-event, transcript-search, and chat-loading surfaces; gateway event/delivery APIs are the supported operator view.

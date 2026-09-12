@@ -750,7 +750,8 @@ func (s *Service) reconcileExistingDispatchTask(
 		return true, s.expireDispatchEvent(ctx, event, "The admitted Agent identity changed.")
 	}
 
-	expected, err := s.materializedTaskForGatewayEvent(ctx, event, binding, agent, now)
+	// Task kind is immutable. Agent edits after creation must not reroute recovery.
+	expected, err := s.materializedTaskForGatewayEvent(ctx, event, binding, agent, existing.Spec.Type, now)
 	if err != nil {
 		return true, err
 	}
@@ -788,7 +789,7 @@ func (s *Service) handleExpiredDispatchClaim(
 		return true, err
 	}
 	if binding != nil {
-		expected, err := s.materializedTaskForGatewayEvent(ctx, event, binding, agent, now)
+		expected, err := s.materializedTaskForGatewayEvent(ctx, event, binding, agent, existing.Spec.Type, now)
 		if err != nil {
 			return true, err
 		}
@@ -966,7 +967,11 @@ func (s *Service) createOrFindGatewayTask(
 	agent *corev1alpha1.Agent,
 	now time.Time,
 ) (*corev1alpha1.Task, bool, bool, error) {
-	task, err := s.materializedTaskForGatewayEvent(ctx, event, binding, agent, now)
+	taskType := corev1alpha1.TaskTypeAgent
+	if agent.Spec.Runtime == nil {
+		taskType = corev1alpha1.TaskTypeAI
+	}
+	task, err := s.materializedTaskForGatewayEvent(ctx, event, binding, agent, taskType, now)
 	if err != nil {
 		return nil, false, false, err
 	}
@@ -1533,7 +1538,8 @@ func deriveSessionName(object *gatewayv1alpha1.Gateway, binding *gatewayv1alpha1
 
 func gatewayTaskCorrelatesWithEvent(task *corev1alpha1.Task, event *store.GatewayEvent) bool {
 	if task == nil || event == nil || task.Name != event.TaskName || task.Namespace != event.Namespace ||
-		task.Spec.Type != corev1alpha1.TaskTypeAgent || task.Spec.AgentRef == nil || task.Spec.AgentRef.Name != event.AgentName ||
+		(task.Spec.Type != corev1alpha1.TaskTypeAgent && task.Spec.Type != corev1alpha1.TaskTypeAI) ||
+		task.Spec.AgentRef == nil || task.Spec.AgentRef.Name != event.AgentName ||
 		task.Spec.Prompt != "" || task.Spec.SessionRef == nil || task.Spec.SessionRef.Name != event.SessionName ||
 		task.Spec.SessionRef.ThroughMessageID != store.GatewayUserMessageID(event.ID) || !task.Spec.SessionRef.PromptIncluded ||
 		task.Spec.RequestedBy == nil || task.Spec.RequestedBy.Subject != event.SenderID ||
@@ -1623,9 +1629,20 @@ func (s *Service) materializedTaskForGatewayEvent(
 	event *store.GatewayEvent,
 	binding *gatewayv1alpha1.GatewayBinding,
 	agent *corev1alpha1.Agent,
+	taskType corev1alpha1.TaskType,
 	now time.Time,
 ) (*corev1alpha1.Task, error) {
 	task := taskForGatewayEvent(event, binding, now)
+	if taskType == corev1alpha1.TaskTypeAI {
+		if event.TaskPolicyFrozen {
+			return nil, fmt.Errorf("native AI Tasks cannot discard a frozen runtime policy")
+		}
+		if binding.Spec.TaskDefaults.AgentRuntimeMaxTurns != nil {
+			return nil, fmt.Errorf("taskDefaults.agentRuntimeMaxTurns is not supported by native AI Tasks")
+		}
+		task.Spec.Type = corev1alpha1.TaskTypeAI
+		return task, nil
+	}
 	if event.TaskPolicyFrozen {
 		if task.Spec.AgentRuntime == nil {
 			task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{}

@@ -96,7 +96,10 @@ func TestGetAPIKey_NotFound(t *testing.T) {
 
 func TestLoadSessionContext_NoFile(t *testing.T) {
 	// When file doesn't exist, should return nil
-	messages := loadSessionContext()
+	messages, err := loadSessionContext(filepath.Join(t.TempDir(), "missing.jsonl"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if messages != nil {
 		t.Errorf("loadSessionContext() = %v, want nil", messages)
 	}
@@ -513,7 +516,7 @@ func TestRun_MissingProvider(t *testing.T) {
 	t.Setenv("ORKA_AI_MODEL", "test-model")
 	t.Setenv("ORKA_AI_PROMPT", "hello")
 
-	err := run()
+	err := run("")
 	if err == nil {
 		t.Fatal("expected error for missing ORKA_AI_PROVIDER")
 	}
@@ -527,7 +530,7 @@ func TestRun_MissingModel(t *testing.T) {
 	t.Setenv("ORKA_AI_MODEL", "")
 	t.Setenv("ORKA_AI_PROMPT", "hello")
 
-	err := run()
+	err := run("")
 	if err == nil {
 		t.Fatal("expected error for missing ORKA_AI_MODEL")
 	}
@@ -541,7 +544,7 @@ func TestRun_MissingPrompt(t *testing.T) {
 	t.Setenv("ORKA_AI_MODEL", "gpt-4")
 	t.Setenv("ORKA_AI_PROMPT", "")
 
-	err := run()
+	err := run("")
 	if err == nil {
 		t.Fatal("expected error for missing ORKA_AI_PROMPT")
 	}
@@ -576,7 +579,7 @@ func TestRun_InvalidModelSettingsFailBeforeDependencies(t *testing.T) {
 				}
 				t.Setenv(tt.field, tt.value)
 
-				err := run()
+				err := run("")
 				if err == nil || !strings.Contains(err.Error(), tt.field) {
 					t.Fatalf("run() error = %v, want validation failure naming %s before dependency setup", err, tt.field)
 				}
@@ -595,7 +598,7 @@ func TestRun_MissingAPIKey(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "")
 	t.Setenv("ANTHROPIC_API_KEY", "")
 
-	err := run()
+	err := run("")
 	if err == nil {
 		t.Fatal("expected error for missing API key")
 	}
@@ -1105,7 +1108,7 @@ func TestAIWorkerEventRecordsValidationFailure(t *testing.T) {
 	t.Setenv(workerenv.AIModel, "")
 	t.Setenv(workerenv.AIPrompt, "")
 
-	err := run()
+	err := run("")
 	if err == nil {
 		t.Fatal("run() error = nil, want validation failure")
 	}
@@ -1180,12 +1183,12 @@ func TestLoadSessionContext_WithTempFile(t *testing.T) {
 	transcriptPath := filepath.Join(transcriptDir, "transcript.jsonl")
 	os.WriteFile(transcriptPath, []byte(content), 0o644) //nolint:errcheck
 
-	// loadSessionContext reads from /session/transcript.jsonl which won't
-	// exist in tests. The existing test already covers the nil return.
-	// Here we verify the function handles missing file gracefully.
-	messages := loadSessionContext()
-	if messages != nil {
-		t.Errorf("expected nil (file doesn't exist at fixed path), got %d messages", len(messages))
+	messages, err := loadSessionContext(transcriptPath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 2 || messages[0].Content != "Hello" || messages[1].Content != "Hi there" {
+		t.Fatalf("loadSessionContext() = %#v, want user and assistant messages only", messages)
 	}
 }
 
@@ -1542,7 +1545,10 @@ func TestParseSessionContextIncludesGatewaySenderProvenance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	messages := parseSessionContext(append(encoded, '\n'))
+	messages, err := parseSessionContext(append(encoded, '\n'), false)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(messages) != 1 || messages[0].Role != roleUser {
 		t.Fatalf("parseSessionContext() = %#v", messages)
 	}

@@ -54,7 +54,7 @@ func TestAIWorkerEnvRoundTrip(t *testing.T) {
 	}
 
 	parsed := ParseAIWorkerEnv(func(name string) string { return values[name] })
-	if err := parsed.ValidateRequired(); err != nil {
+	if err := parsed.ValidateRequired(false); err != nil {
 		t.Fatalf("ValidateRequired() returned error: %v", err)
 	}
 	if parsed.BaseEnv != env.BaseEnv {
@@ -216,16 +216,26 @@ func TestRequireTokenFileEnvUnset(t *testing.T) {
 
 func TestAIWorkerEnvValidateRequired(t *testing.T) {
 	for _, tt := range []struct {
-		name string
-		env  AIWorkerEnv
-		want string
+		name             string
+		env              AIWorkerEnv
+		hasSessionPrompt bool
+		want             string
 	}{
 		{name: "missing provider", env: AIWorkerEnv{Model: "m", Prompt: "p"}, want: AIProvider},
 		{name: "missing model", env: AIWorkerEnv{Provider: "p", Prompt: "prompt"}, want: AIModel},
 		{name: "missing prompt", env: AIWorkerEnv{Provider: "p", Model: "m"}, want: AIPrompt},
+		{name: "transcript prompt", env: AIWorkerEnv{Provider: "p", Model: "m"}, hasSessionPrompt: true},
+		{name: "transcript still requires provider", env: AIWorkerEnv{Model: "m"}, hasSessionPrompt: true, want: AIProvider},
+		{name: "transcript still requires model", env: AIWorkerEnv{Provider: "p"}, hasSessionPrompt: true, want: AIModel},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			err := tt.env.ValidateRequired()
+			err := tt.env.ValidateRequired(tt.hasSessionPrompt)
+			if tt.want == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
 			if err == nil {
 				t.Fatal("expected error")
 			}

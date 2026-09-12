@@ -774,6 +774,126 @@ func TestSessionManager_AppendMessages_NoPromptNoResult(t *testing.T) {
 	}
 }
 
+func TestSessionManagerNativeAIGatewayFinalization(t *testing.T) {
+	ctx := context.Background()
+	db, err := sqlite.NewDB(":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	ss := sqlite.NewStore(db, ":memory:")
+	manager := NewSessionManager(ss)
+	manager.SetGatewayEventStore(ss)
+	now := time.Now().UTC()
+	event := store.GatewayEvent{
+		ID: "native-event", Namespace: "default", NamespaceUID: "namespace-uid",
+		GatewayUID: "gateway-uid", GatewayGeneration: 1, GatewayName: "chat",
+		BindingName: "room", BindingUID: "binding-uid", ExternalEventID: "external-event",
+		ProtocolVersion: "orka.gateway.v1", EventType: "text",
+		AccountID: "acct", ContextID: "room", SenderID: "sender", Text: "question",
+		ReplyTarget: "room", SessionName: "native-session", TaskName: "native-task",
+		ReceivedAt: now, NextAttemptAt: now, ExpiresAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now,
+	}
+	admitted, created, err := ss.AdmitGatewayEvent(ctx, store.GatewayEventAdmission{Event: event, AppendUserMessage: true})
+	require.NoError(t, err)
+	require.True(t, created)
+	require.Equal(t, store.GatewayEventQueued, admitted.State)
+	var canonicalSessionType, canonicalOwnerType, canonicalOwnerRef string
+	require.NoError(t, db.QueryRowContext(ctx,
+		`SELECT session_type, owner_type, owner_ref FROM sessions WHERE namespace = ? AND name = ?`,
+		event.Namespace, event.SessionName,
+	).Scan(&canonicalSessionType, &canonicalOwnerType, &canonicalOwnerRef))
+	require.Equal(t, "gateway", canonicalSessionType)
+	require.Equal(t, "gateway", canonicalOwnerType)
+	require.Equal(t, "gateway-uid/binding-uid", canonicalOwnerRef)
+	claimed, err := ss.ClaimNextGatewayEvent(ctx, event.Namespace, "dispatcher", now, time.Minute)
+	require.NoError(t, err)
+	require.Equal(t, event.ID, claimed.ID)
+	require.NoError(t, ss.SaveResult(ctx, "default", "native-task", []byte("native answer")))
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "native-task", Namespace: "default", UID: "native-task-uid"},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, SessionRef: &corev1alpha1.SessionReference{
+			Name: "native-session", MaxMessages: store.GatewayTranscriptMessageLimit,
+			ThroughMessageID: store.GatewayUserMessageID("native-event"), PromptIncluded: true,
+		}},
+		Status: corev1alpha1.TaskStatus{
+			Phase: corev1alpha1.TaskPhaseSucceeded, ResultRef: &corev1alpha1.ResultReference{Available: true},
+		},
+	}
+	require.NoError(t, ss.MarkGatewayEventTaskCreated(ctx, event.Namespace, event.ID, task.Name, string(task.UID), "dispatcher", now))
+	require.NoError(t, manager.AcquireLock(ctx, task))
+	nextEvent := event
+	nextEvent.ID = "native-event-next"
+	nextEvent.ExternalEventID = "external-event-next"
+	nextEvent.TaskName = "native-task-next"
+	nextEvent.Text = "follow-up"
+	queued, created, err := ss.AdmitGatewayEvent(ctx, store.GatewayEventAdmission{Event: nextEvent, AppendUserMessage: true})
+	require.NoError(t, err)
+	require.True(t, created)
+	require.Equal(t, store.GatewayEventQueued, queued.State)
+	// A non-nil interface with no implementation panics if generic finalization reads the result.
+	unreadResultStore := struct{ store.ResultStore }{}
+	for _, appendEnabled := range []bool{false, true} {
+		task.Spec.SessionRef.Append = appendEnabled
+		require.NoError(t, manager.AppendMessages(ctx, task, ss))
+		require.NoError(t, manager.AppendMessages(ctx, task, unreadResultStore))
+		require.NoError(t, manager.ReleaseLock(ctx, task))
+		session, err := ss.GetSession(ctx, "default", "native-session")
+		require.NoError(t, err)
+		require.Equal(t, "native-task", session.ActiveTask)
+		require.Equal(t, "native-task-uid", session.ActiveTaskUID)
+		require.Len(t, session.Messages, 2, "only gateway terminal projection may append the native result")
+		require.Equal(t, "gateway:native-event:user", session.Messages[0].ID)
+		require.Equal(t, "question", session.Messages[0].Content)
+		require.Equal(t, "gateway:native-event-next:user", session.Messages[1].ID)
+		require.Equal(t, "follow-up", session.Messages[1].Content)
+		_, err = ss.ClaimNextGatewayEvent(ctx, event.Namespace, "next-dispatcher", now, time.Minute)
+		require.ErrorIs(t, err, store.ErrNotFound, "queued event must wait for gateway terminal projection")
+	}
+
+	projection := store.GatewayTerminalProjection{
+		EventID: event.ID,
+		Message: store.SessionMessage{
+			ID: store.GatewayAssistantMessageID(event.ID), Role: "assistant", Content: "native answer",
+			SourceType: "gateway-task", SourceRef: task.Name, Timestamp: now,
+		},
+		Delivery: store.GatewayDelivery{
+			ID: "native-delivery", IdempotencyID: "native-delivery", Namespace: event.Namespace,
+			NamespaceUID: event.NamespaceUID, GatewayUID: event.GatewayUID, GatewayGeneration: event.GatewayGeneration,
+			GatewayName: event.GatewayName, BindingName: event.BindingName,
+			EventID: event.ID, TaskName: task.Name, SessionName: event.SessionName,
+			Kind: "final", State: store.GatewayDeliveryPending, AccountID: event.AccountID,
+			ContextID: event.ContextID, ReplyTarget: event.ReplyTarget, Text: "native answer", MaxAttempts: 10,
+			NextAttemptAt: now, ExpiresAt: event.ExpiresAt, CreatedAt: now, UpdatedAt: now,
+		},
+		CompletedAt: now,
+	}
+	for _, wantCreated := range []bool{true, false} {
+		delivery, created, err := ss.ProjectGatewayTerminal(ctx, projection)
+		require.NoError(t, err)
+		require.Equal(t, wantCreated, created)
+		require.Equal(t, "native-delivery", delivery.ID)
+	}
+	session, err := ss.GetSession(ctx, event.Namespace, event.SessionName)
+	require.NoError(t, err)
+	require.Empty(t, session.ActiveTask)
+	require.Empty(t, session.ActiveTaskUID)
+	require.Len(t, session.Messages, 3, "projection must append exactly one canonical assistant message")
+	require.Equal(t, "gateway:native-event:user", session.Messages[0].ID)
+	require.Equal(t, "gateway:native-event:assistant", session.Messages[1].ID)
+	require.Equal(t, "assistant", session.Messages[1].Role)
+	require.Equal(t, "native answer", session.Messages[1].Content)
+	require.Equal(t, "gateway:native-event-next:user", session.Messages[2].ID)
+	deliveries, err := ss.ListGatewayDeliveries(ctx, store.GatewayDeliveryFilter{Namespace: event.Namespace, EventID: event.ID})
+	require.NoError(t, err)
+	require.Len(t, deliveries, 1, "repeated projection must not duplicate the delivery")
+	require.Equal(t, "native-delivery", deliveries[0].ID)
+	completed, err := ss.GetGatewayEvent(ctx, event.Namespace, event.ID)
+	require.NoError(t, err)
+	require.Equal(t, store.GatewayEventCompleted, completed.State)
+	claimed, err = ss.ClaimNextGatewayEvent(ctx, event.Namespace, "next-dispatcher", now, time.Minute)
+	require.NoError(t, err)
+	require.Equal(t, nextEvent.ID, claimed.ID)
+}
+
 func TestSessionManagerLoadsTranscriptThroughStableMessageID(t *testing.T) {
 	db, err := sqlite.NewDB(":memory:")
 	if err != nil {
@@ -810,7 +930,7 @@ func TestSessionManagerLoadsTranscriptThroughStableMessageID(t *testing.T) {
 	manager.SetGatewayEventStore(ss)
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: "task", Namespace: "default", UID: "task-uid"},
-		Spec: corev1alpha1.TaskSpec{SessionRef: &corev1alpha1.SessionReference{
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, SessionRef: &corev1alpha1.SessionReference{
 			Name: "mutated-session", MaxMessages: 1, ThroughMessageID: "future-user",
 		}},
 	}

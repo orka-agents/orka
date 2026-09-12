@@ -91,13 +91,13 @@ const (
 )
 
 func main() {
-	if err := run(); err != nil {
+	if err := run("/session/transcript.jsonl"); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run() (err error) {
+func run(transcriptPath string) (err error) {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
@@ -120,10 +120,10 @@ func run() (err error) {
 			common.WithEventSummary("AI worker completed"),
 		)
 	}()
-	if err := workerEnv.ValidateRequired(); err != nil {
-		return err
-	}
-	settings, err := parseModelSettings(workerEnv)
+	// Gateway Tasks carry their current user turn only in the canonical transcript.
+	// Never substitute a direct prompt when that required input is missing.
+	promptIncluded := strings.EqualFold(strings.TrimSpace(os.Getenv(workerenv.SessionPromptIncluded)), "true")
+	sessionContext, settings, err := prepareAIWorkerInput(workerEnv, transcriptPath, promptIncluded)
 	if err != nil {
 		return err
 	}
@@ -258,9 +258,6 @@ func run() (err error) {
 	// Load custom Tool CRDs
 	customTools := loadCustomTools(ctx, k8sClient, taskNamespace, enabledTools)
 
-	// Load session context if available
-	sessionContext := loadSessionContext()
-
 	// Load skills from mounted volume and prepend to system prompt
 	if skillContent := loadSkillsFromVolume(); skillContent != "" {
 		systemPrompt = skillContent + "\n\n" + systemPrompt
@@ -285,12 +282,9 @@ func run() (err error) {
 		if err != nil {
 			return err
 		}
-		resolvedContext := strings.TrimSpace(formatResolvedApprovalsContext(resolvedApprovals))
+		approvalPromptContext = strings.TrimSpace(formatResolvedApprovalsContext(resolvedApprovals))
 		if planContext != "" {
 			planPromptContext = "## Previous Plan State\n\n" + planContext
-		}
-		if resolvedContext != "" {
-			approvalPromptContext = resolvedContext
 		}
 		promptSections := make([]string, 0, 2)
 		if planPromptContext != "" {
@@ -318,7 +312,6 @@ func run() (err error) {
 	}
 
 	// Build messages
-	promptIncluded := strings.EqualFold(strings.TrimSpace(os.Getenv(workerenv.SessionPromptIncluded)), "true")
 	messages := buildInitialMessages(sessionContext, prompt, promptIncluded, planPromptContext, approvalPromptContext)
 
 	// Build tools for LLM (built-in + custom)
@@ -381,6 +374,22 @@ func run() (err error) {
 
 	fmt.Printf("Task %s/%s completed successfully%s\n", taskNamespace, taskName, transactionLogFields)
 	return nil
+}
+
+func prepareAIWorkerInput(
+	workerEnv workerenv.AIWorkerEnv,
+	transcriptPath string,
+	promptIncluded bool,
+) ([]llm.Message, modelSettings, error) {
+	sessionContext, err := loadSessionContext(transcriptPath, promptIncluded)
+	if err != nil {
+		return nil, modelSettings{}, err
+	}
+	if err := workerEnv.ValidateRequired(promptIncluded); err != nil {
+		return nil, modelSettings{}, err
+	}
+	settings, err := parseModelSettings(workerEnv)
+	return sessionContext, settings, err
 }
 
 func registerModeAwareCoordinationTools(k8sClient client.Client, rawMode string, enabled bool) error {
@@ -1094,28 +1103,42 @@ func initialMessageBytes(message llm.Message) int {
 	return len(message.Role) + len(message.Content) + len(message.Name) + len(message.ToolCallID) + 16
 }
 
-// loadSessionContext loads messages from the session transcript
-func loadSessionContext() []llm.Message {
-	transcriptPath := "/session/transcript.jsonl"
+// loadSessionContext loads required input or best-effort optional history.
+func loadSessionContext(transcriptPath string, required bool) ([]llm.Message, error) {
 	data, err := os.ReadFile(transcriptPath)
 	if err != nil {
-		return nil
+		if required {
+			return nil, fmt.Errorf("failed to read required session transcript: %w", err)
+		}
+		return nil, nil
 	}
-	return parseSessionContext(data)
+	return parseSessionContext(data, required)
 }
 
-func parseSessionContext(data []byte) []llm.Message {
+func parseSessionContext(data []byte, required bool) ([]llm.Message, error) {
 	var messages []llm.Message
-	lines := strings.SplitSeq(string(data), "\n")
-	for line := range lines {
+	// Allow the JSONL terminator without hiding an actual blank final row.
+	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	for i, line := range lines {
 		line = strings.TrimSpace(line)
-		if line == "" {
+		if line == "" && !required {
 			continue
 		}
 
 		var msg store.SessionMessage
 		if err := json.Unmarshal([]byte(line), &msg); err != nil {
+			if required {
+				// Decoder errors can include transcript contents; report only the line.
+				return nil, fmt.Errorf("session transcript contains an invalid message at line %d", i+1)
+			}
 			continue
+		}
+		// Validate the actual final row before filtering roles or adding provenance.
+		if required && i == len(lines)-1 && (msg.Role != roleUser || strings.TrimSpace(msg.Content) == "") {
+			return nil, fmt.Errorf(
+				"session transcript must end with a non-empty user message when %s is true",
+				workerenv.SessionPromptIncluded,
+			)
 		}
 
 		if msg.Role == roleUser || msg.Role == "assistant" {
@@ -1126,7 +1149,7 @@ func parseSessionContext(data []byte) []llm.Message {
 		}
 	}
 
-	return messages
+	return messages, nil
 }
 
 // loadPlanContext fetches the current plan state from the controller API.

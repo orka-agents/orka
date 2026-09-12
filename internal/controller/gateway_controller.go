@@ -528,7 +528,16 @@ func (r *GatewayBindingReconciler) validateBindingAgentRuntimeDefaults(
 	binding *gatewayv1alpha1.GatewayBinding,
 	agent *corev1alpha1.Agent,
 ) (string, error) {
-	if binding == nil || agent == nil || agent.Spec.Runtime == nil || agent.Spec.Runtime.RuntimeRef == nil {
+	if binding == nil || agent == nil {
+		return "", nil
+	}
+	if agent.Spec.Runtime == nil {
+		if binding.Spec.TaskDefaults.AgentRuntimeMaxTurns != nil {
+			return fmt.Sprintf("taskDefaults.agentRuntimeMaxTurns is not supported by native AI Agent %q", agent.Name), nil
+		}
+		return "", nil
+	}
+	if agent.Spec.Runtime.RuntimeRef == nil {
 		return "", nil
 	}
 	runtimeName := strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name)
