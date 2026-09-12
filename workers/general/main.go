@@ -171,15 +171,18 @@ func finishGeneralWorkerRun(
 	if runErr == nil {
 		runErr = ctx.Err()
 	}
+	if runErr == nil {
+		common.RecordEvent(ctx, recorder, "WorkerCompleted",
+			common.WithEventTaskName(taskName),
+			common.WithEventSummary("General worker completed"),
+		)
+		runErr = ctx.Err()
+	}
 	if runErr != nil {
 		recordGeneralWorkerFailed(recorder, taskName, runErr)
 		return runErr
 	}
-	common.RecordEvent(ctx, recorder, "WorkerCompleted",
-		common.WithEventTaskName(taskName),
-		common.WithEventSummary("General worker completed"),
-	)
-	return ctx.Err()
+	return nil
 }
 
 func recordGeneralResultSubmitted(

@@ -1146,10 +1146,12 @@ func TestExecuteAgentLoop_CompletionError(t *testing.T) {
 
 func TestFinishAIWorkerRun_CancelsBlockedCompletionEvent(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	started := make(chan struct{})
+	failed := make(chan context.Context, 1)
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- finishAIWorkerRun(ctx, blockingAIEventRecorder{started: started}, "task", nil)
+		errCh <- finishAIWorkerRun(ctx, blockingAIEventRecorder{started: started, failed: failed}, "task", nil)
 	}()
 
 	select {
@@ -1166,13 +1168,30 @@ func TestFinishAIWorkerRun_CancelsBlockedCompletionEvent(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("finishAIWorkerRun() did not stop after cancellation")
 	}
+	select {
+	case failureCtx := <-failed:
+		if failureCtx.Err() != context.Canceled {
+			t.Fatal("failure context was not released after recording")
+		}
+	default:
+		t.Fatal("WorkerFailed was not attempted after interrupted completion")
+	}
 }
 
 type blockingAIEventRecorder struct {
 	started chan struct{}
+	failed  chan context.Context
 }
 
-func (r blockingAIEventRecorder) Record(ctx context.Context, _ string, _ ...common.EventOption) {
+func (r blockingAIEventRecorder) Record(ctx context.Context, eventType string, _ ...common.EventOption) {
+	if eventType == "WorkerFailed" {
+		if ctx.Err() == nil {
+			if _, bounded := ctx.Deadline(); bounded {
+				r.failed <- ctx
+			}
+		}
+		return
+	}
 	close(r.started)
 	<-ctx.Done()
 }

@@ -1537,6 +1537,13 @@ func finishAIWorkerRun(
 	if runErr == nil {
 		runErr = ctx.Err()
 	}
+	if runErr == nil {
+		common.RecordEvent(ctx, eventRecorder, events.ExecutionEventTypeWorkerCompleted,
+			common.WithEventTaskName(taskName),
+			common.WithEventSummary("AI worker completed"),
+		)
+		runErr = ctx.Err()
+	}
 	if runErr != nil {
 		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeWorkerFailed, 0,
 			common.WithEventSeverity(events.ExecutionEventSeverityError),
@@ -1545,11 +1552,7 @@ func finishAIWorkerRun(
 		)
 		return runErr
 	}
-	common.RecordEvent(ctx, eventRecorder, events.ExecutionEventTypeWorkerCompleted,
-		common.WithEventTaskName(taskName),
-		common.WithEventSummary("AI worker completed"),
-	)
-	return ctx.Err()
+	return nil
 }
 
 func uploadAIArtifacts(ctx context.Context, eventRecorder common.EventRecorder, taskName string) error {
