@@ -167,21 +167,36 @@ func (s *Service) Start(ctx context.Context) error {
 		defer close(deliveryDone)
 		s.runDeliveryLoop(ctx, logger)
 	}()
+	maintenanceDone := make(chan struct{})
+	go func() {
+		defer close(maintenanceDone)
+		s.runMaintenanceLoop(ctx, logger)
+	}()
 
 	ticker := time.NewTicker(s.Config.PollInterval)
 	defer ticker.Stop()
-	maintenanceTicker := time.NewTicker(time.Minute)
-	defer maintenanceTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			<-deliveryDone
+			<-maintenanceDone
 			return nil
 		case <-ticker.C:
 			if err := s.processCoreOnce(ctx); err != nil {
 				logger.Error(err, "gateway processing iteration failed")
 			}
-		case now := <-maintenanceTicker.C:
+		}
+	}
+}
+
+func (s *Service) runMaintenanceLoop(ctx context.Context, logger logr.Logger) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
 			terminalCutoff := now.Add(-s.Config.TerminalRetention)
 			if _, err := s.DeliveryStore.MaintainGatewayRecords(ctx, s.Config.Namespace, now, terminalCutoff); err != nil {
 				logger.Error(err, "gateway maintenance failed")
