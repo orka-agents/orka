@@ -12,14 +12,23 @@ import (
 )
 
 // ToolSpec defines the desired state of Tool
-// +kubebuilder:validation:XValidation:rule="has(self.http) || (has(self.mcp) && (has(self.mcp.substrateActor) || has(self.mcp.workspace)))",message="http or an MCP workspace backend is required"
-// +kubebuilder:validation:XValidation:rule="!has(self.http) || (has(self.mcp) && (has(self.mcp.substrateActor) || has(self.mcp.workspace))) || (has(self.http.url) && self.http.url.size() > 0)",message="http.url is required unless an MCP workspace backend is set"
+// +kubebuilder:validation:XValidation:rule="has(self.http) || has(self.mcp)",message="http or an MCP backend is required"
+// +kubebuilder:validation:XValidation:rule="!has(self.http) || has(self.mcp) || (has(self.http.url) && self.http.url.size() > 0)",message="http.url is required unless an MCP backend is set"
+// +kubebuilder:validation:XValidation:rule="!has(self.mcp) || !has(self.mcp.remote) || (has(self.http) && has(self.http.authSecretRef) && self.http.authSecretRef.name.size() > 0 && self.http.authSecretRef.key.size() > 0 && has(self.http.outboundAccessPolicyRef))",message="remote MCP requires a named auth Secret key and outbound access policy"
+// +kubebuilder:validation:XValidation:rule="!has(self.mcp) || !has(self.mcp.remote) || !has(self.http) || ((!has(self.http.url) || self.http.url.size() == 0) && (!has(self.http.authInject) || self.http.authInject == 'header') && (!has(self.http.authBodyKey) || self.http.authBodyKey.size() == 0) && (!has(self.http.method) || self.http.method == 'POST'))",message="remote MCP forbids http.url, body auth and method overrides"
+// +kubebuilder:validation:XValidation:rule="!has(self.mcp) || !has(self.mcp.remote) || !has(self.http) || !has(self.http.headers) || self.http.headers.all(k, !(k.lowerAscii() in ['host','authorization','cookie','txn-token','accept','content-type']))",message="remote MCP forbids authority and credential header overrides"
+// +kubebuilder:validation:XValidation:rule="!has(self.mcp) || !has(self.mcp.remote) || !has(self.http) || !has(self.http.headers) || self.http.headers.all(k, !(k.lowerAscii() in ['content-length','connection','transfer-encoding','upgrade','idempotency-key','last-event-id']))",message="remote MCP forbids protocol header overrides"
+// +kubebuilder:validation:XValidation:rule="!has(self.mcp) || !has(self.mcp.remote) || !has(self.http) || !has(self.http.headers) || self.http.headers.all(k, !k.lowerAscii().startsWith('mcp-') && !k.lowerAscii().startsWith('proxy-'))",message="remote MCP forbids MCP session and proxy header overrides"
+// +kubebuilder:validation:XValidation:rule="!has(self.mcp) || !has(self.mcp.remote) || !has(self.http) || !has(self.http.headers) || self.http.headers.all(k, !k.lowerAscii().matches('token|secret|password|credential|authorization|api[-_]?key'))",message="remote MCP credentials must use authSecretRef, not custom headers"
 type ToolSpec struct {
 	// Description is the tool description shown to the LLM
 	// +kubebuilder:validation:Required
 	Description string `json:"description"`
 
-	// Parameters is the JSON Schema for tool parameters (OpenAI function calling format)
+	// Parameters is the JSON Schema for tool parameters (OpenAI function calling format).
+	// Remote MCP requires a reviewed object schema, checked by the controller and
+	// native worker before discovery/execution. It stays schemaless at admission
+	// to preserve compatibility with existing Tool parameter schemas.
 	// +optional
 	Parameters *apiextensionsv1.JSON `json:"parameters,omitempty"`
 
@@ -33,8 +42,7 @@ type ToolSpec struct {
 	// +optional
 	HTTP *HTTPExecution `json:"http,omitempty"`
 
-	// MCP defines a durable MCP server backend for this tool. MCP tools must set
-	// substrateActor.
+	// MCP defines a managed or remote MCP server backend for this tool.
 	// +optional
 	MCP *MCPToolServer `json:"mcp,omitempty"`
 }
@@ -110,8 +118,14 @@ type SecretKeySelector struct {
 }
 
 // MCPToolServer configures a Model Context Protocol server backend.
-// +kubebuilder:validation:XValidation:rule="has(self.substrateActor) != has(self.workspace)",message="exactly one of substrateActor or workspace is required"
+// +kubebuilder:validation:XValidation:rule="(has(self.substrateActor) ? 1 : 0) + (has(self.workspace) ? 1 : 0) + (has(self.remote) ? 1 : 0) == 1",message="exactly one of substrateActor, workspace or remote is required"
+// +kubebuilder:validation:XValidation:rule="!has(self.remote) || !has(self.path) || self.path.size() == 0",message="remote MCP uses remote.url, not mcp.path"
 type MCPToolServer struct {
+	// Remote selects one reviewed callable on an independently operated server.
+	// Only native AI Tasks with an explicitly selecting Agent are supported.
+	// +optional
+	Remote *RemoteMCPServer `json:"remote,omitempty"`
+
 	// Path is the HTTP path exposed by the MCP server inside the actor.
 	// Defaults to /mcp.
 	// +optional
@@ -124,6 +138,21 @@ type MCPToolServer struct {
 	// SubstrateActor configures the legacy durable Substrate actor backend.
 	// +optional
 	SubstrateActor *SubstrateMCPActor `json:"substrateActor,omitempty"`
+}
+
+// RemoteMCPServer selects a Streamable HTTP endpoint and exact remote tool name.
+type RemoteMCPServer struct {
+	// URL is the fixed endpoint. Credentials belong in http.authSecretRef.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=2048
+	// +kubebuilder:validation:Pattern=`^https?://[^{}#]+$`
+	URL string `json:"url"`
+
+	// ToolName is the exact tools/list name, independent of the Kubernetes alias.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_.-]+$`
+	ToolName string `json:"toolName"`
 }
 
 // MCPWorkspace selects a Service-mode ExecutionWorkspaceClass for hosting an MCP server.

@@ -64,7 +64,7 @@ func TestCompatCoordinatorToolsExcludeKubernetesTools(t *testing.T) {
 				switch modelCalls.Add(1) {
 				case 1:
 					// Also attempt an unadvertised custom tool to verify rejection.
-					_, _ = fmt.Fprintf(w, `{"id":"msg-tools","type":"message","role":"assistant","model":"test-model","content":[{"type":"tool_use","id":"custom-call","name":"example-lookup","input":{"query":"test"}},{"type":"tool_use","id":"builtin-call","name":"file_read","input":{"path":%q}}],"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}`, file.Name())
+					_, _ = fmt.Fprintf(w, `{"id":"msg-tools","type":"message","role":"assistant","model":"test-model","content":[{"type":"tool_use","id":"custom-call","name":"example-lookup","input":{"query":"test"}},{"type":"tool_use","id":"remote-call","name":"remote-lookup","input":{}},{"type":"tool_use","id":"builtin-call","name":"file_read","input":{"path":%q}}],"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}`, file.Name())
 				case 2:
 					_, _ = fmt.Fprintf(w, `{"id":"msg-result","type":"message","role":"assistant","model":"test-model","content":[{"type":"text","text":%q}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`, goalStateSentinel+"\n"+fileContent)
 				default:
@@ -102,9 +102,11 @@ func TestCompatCoordinatorToolsExcludeKubernetesTools(t *testing.T) {
 				}
 				require.Contains(t, names, "file_read")
 				require.NotContains(t, names, "example-lookup")
+				require.NotContains(t, names, "remote-lookup")
 			}
 			results := compatCustomToolResults(t, requests[1].Messages)
 			require.JSONEq(t, `{"success":false,"error":"tool \"example-lookup\" is not available in this request"}`, results["custom-call"])
+			require.JSONEq(t, `{"success":false,"error":"tool \"remote-lookup\" is not available in this request"}`, results["remote-call"])
 			var result tools.FileReadResult
 			require.NoError(t, json.Unmarshal([]byte(results["builtin-call"]), &result))
 			require.Equal(t, fileContent, result.Content)
@@ -195,6 +197,15 @@ func setupCompatCustomToolsApp(t *testing.T, api, modelURL, toolURL string) (*fi
 			Data:       map[string][]byte{"api-key": []byte("test-key")},
 		},
 	)
+	objects = append(objects, &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "remote-lookup", Namespace: "default"},
+		Spec: corev1alpha1.ToolSpec{
+			Description: "Remote MCP must never be exposed through compatibility chat",
+			Parameters:  &apiextensionsv1.JSON{Raw: []byte(`{"type":"object"}`)},
+			MCP:         &corev1alpha1.MCPToolServer{Remote: &corev1alpha1.RemoteMCPServer{URL: toolURL, ToolName: "remote_read"}},
+			HTTP:        &corev1alpha1.HTTPExecution{AuthSecretRef: &corev1alpha1.SecretKeySelector{Name: "remote-auth", Key: "token"}, OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "gateway"}},
+		},
+	})
 	for _, name := range []string{"example-lookup", "file_read"} {
 		objects = append(objects, &corev1alpha1.Tool{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},

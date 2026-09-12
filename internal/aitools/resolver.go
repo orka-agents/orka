@@ -176,6 +176,8 @@ func injectsChildMessagingTools(task *corev1alpha1.Task, agent *corev1alpha1.Age
 // exposed for task. Container tasks do not expose AI tools. Agent tasks retain
 // configured/brokered tools and built-in agent children get messaging tools.
 // The in-process AI worker additionally gets its always-on memory tools.
+// Consumers loading Tool CRs must also enforce ValidateRemoteMCPSelection;
+// this name-only resolver cannot distinguish remote backends from legacy Tools.
 func Resolve(task *corev1alpha1.Task, agent *corev1alpha1.Agent) []string {
 	if task != nil && task.Spec.Type == corev1alpha1.TaskTypeContainer {
 		return nil

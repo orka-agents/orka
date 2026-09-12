@@ -4,7 +4,7 @@ description: "Giving Tools a reusable, namespaced way to reach an external API w
 
 # Outbound access policies
 
-`OutboundAccessPolicy` gives HTTP and MCP-over-HTTP Tools one reusable, namespaced access adapter. The Tool and policy must be in the same namespace.
+`OutboundAccessPolicy` gives HTTP and MCP-over-HTTP Tools one reusable, namespaced access adapter. The Tool and policy must be in the same namespace. [Remote MCP Tools](remote-mcp.md) initially require the gateway adapter and explicit native Task authority; direct exchange below remains available to existing supported backends.
 
 ## Direct credential exchange
 

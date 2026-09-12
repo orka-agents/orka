@@ -38,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/llm"
@@ -257,6 +258,12 @@ func run() (err error) {
 
 	// Load custom Tool CRDs
 	customTools := loadCustomTools(ctx, k8sClient, taskNamespace, enabledTools)
+	ctx, err = prepareNativeRemoteTools(
+		ctx, k8sClient, taskNamespace, taskName, enabledTools, customTools, worker.NewToolExecutor(),
+	)
+	if err != nil {
+		return fmt.Errorf("prepare remote MCP tools: %w", err)
+	}
 
 	// Load session context if available
 	sessionContext := loadSessionContext()
@@ -332,6 +339,7 @@ func run() (err error) {
 		Namespace: taskNamespace,
 		Tenant:    taskNamespace,
 		TaskID:    taskName,
+		TaskUID:   os.Getenv(workerenv.TaskUID),
 		AuthorizeSecretRead: workerSecretReadAuthorizer(
 			k8sClient,
 			taskNamespace,
@@ -445,6 +453,12 @@ func loadCustomTools(
 			fmt.Printf("Warning: tool %q not found as built-in or CRD: %v\n", name, err)
 			continue
 		}
+		if aitools.IsRemoteMCP(tool) {
+			// Remote binding/discovery is mandatory and Task-authorized, not a
+			// best-effort load that may silently omit a selected capability.
+			customTools[name] = tool
+			continue
+		}
 		bindApprovalAuthRefVersion(ctx, k8sClient, namespace, tool)
 		if err := bindApprovalOutboundAccessPolicyVersion(ctx, k8sClient, namespace, tool); err != nil {
 			fmt.Printf("Warning: outbound access policy approval binding for tool %q failed: %v\n", tool.Name, err)
@@ -528,6 +542,19 @@ func bindApprovalOutboundAccessPolicyVersion(
 	if err := k8sClient.Get(ctx, key, policy); err != nil {
 		return fmt.Errorf("read outbound access policy %q for approval binding: %w", key.Name, err)
 	}
+	return bindApprovalResolvedOutboundPolicyVersion(ctx, k8sClient, namespace, tool, policy)
+}
+
+// bindApprovalResolvedOutboundPolicyVersion binds the exact policy snapshot the
+// caller validated, without a second policy read introducing different selectors.
+func bindApprovalResolvedOutboundPolicyVersion(
+	ctx context.Context,
+	k8sClient client.Client,
+	namespace string,
+	tool *corev1alpha1.Tool,
+	policy *corev1alpha1.OutboundAccessPolicy,
+) error {
+	clearApprovalOutboundAccessPolicyVersion(tool)
 	secretRefs := approvalOutboundPolicySecretRefs(policy)
 	serviceAccountNames := approvalOutboundPolicyServiceAccountNames(policy)
 	serviceRefs := approvalOutboundPolicyServiceRefs(policy)
@@ -1422,7 +1449,7 @@ func executeAgentLoopWithEvents(
 				if approvalKey != "" {
 					execCtx = worker.WithToolIdempotencyKey(execCtx, approvalKey)
 				}
-				result, execErr = toolExecutor.Execute(execCtx, customTool, execArgs)
+				result, execErr = executeNativeCustomTool(execCtx, baseToolCtx, toolExecutor, customTool, execArgs)
 				if execErr == nil || worker.ToolRequestWasAttempted(execErr) {
 					approvalGate.markFired(approvalKey)
 				}
