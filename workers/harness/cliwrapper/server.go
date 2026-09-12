@@ -939,14 +939,18 @@ func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request, turn *turn
 		writeSafeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	turn.requestCancel()
-	harness.WriteJSON(w, http.StatusAccepted, harness.CancelTurnResponse{
+	accepted := turn.requestCancel()
+	status, message := http.StatusAccepted, "cancel accepted"
+	if !accepted {
+		status, message = http.StatusOK, "turn already settled"
+	}
+	harness.WriteJSON(w, status, harness.CancelTurnResponse{
 		Version:          harness.ProtocolVersion,
-		Accepted:         true,
+		Accepted:         accepted,
 		RuntimeSessionID: request.RuntimeSessionID,
 		TurnID:           request.TurnID,
 		CorrelationID:    request.CorrelationID,
-		Message:          "cancel accepted",
+		Message:          message,
 	})
 }
 
@@ -2201,9 +2205,15 @@ func (t *turnState) markOutputFetched() {
 
 func (t *turnState) cleanupOutput() {
 	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.cleanupOutputLocked()
+}
+
+func (t *turnState) cleanupOutputLocked() {
 	outputPath := t.resultPath
 	t.resultPath = ""
-	t.mu.Unlock()
+	t.resultRead = false
+	t.resultKeepUntil = time.Time{}
 	if outputPath != "" {
 		_ = os.Remove(outputPath)
 	}
@@ -2233,6 +2243,7 @@ func (t *turnState) tryAppendTerminalFrame(
 
 func (t *turnState) appendFrameLocked(frame harness.HarnessEventFrame) {
 	if t.cancelRequested && frame.Type != harness.FrameTurnCancelled && isTerminalFrameType(frame.Type) {
+		t.cleanupOutputLocked()
 		frame.Type = harness.FrameTurnCancelled
 		frame.Severity = events.ExecutionEventSeverityInfo
 		frame.Summary = "turn cancelled"
@@ -2268,14 +2279,17 @@ func isTerminalFrameType(frameType harness.FrameType) bool {
 	}
 }
 
-func (t *turnState) requestCancel() {
+func (t *turnState) requestCancel() bool {
 	t.mu.Lock()
-	if !t.terminal {
-		t.cancelRequested = true
+	if t.terminal {
+		t.mu.Unlock()
+		return false
 	}
+	t.cancelRequested = true
 	cancel := t.cancel
 	t.mu.Unlock()
 	cancel()
+	return true
 }
 
 func (t *turnState) exactRedactionValuesSnapshot() []string {

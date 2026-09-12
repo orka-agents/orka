@@ -2265,3 +2265,60 @@ func TestServerRejectsUnsupportedRuntimeAuthOnlyCommand(t *testing.T) {
 		t.Fatalf("failed message = %q, want %q", got, want)
 	}
 }
+
+func TestHandleCancelReportsUnacceptedAfterSettlement(t *testing.T) {
+	request := validWrapperStartTurnRequest()
+	turn := newTurnState(request, time.Now)
+	turn.appendFrame(harness.HarnessEventFrame{Type: harness.FrameTurnCompleted})
+	body, err := json.Marshal(harness.CancelTurnRequest{
+		Version: harness.ProtocolVersion, Namespace: request.Namespace, TaskName: request.TaskName,
+		SessionName: request.SessionName, RuntimeSessionID: request.RuntimeSessionID,
+		TurnID: request.TurnID, CorrelationID: request.CorrelationID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	server := &Server{}
+	server.handleCancel(recorder, httptest.NewRequest(http.MethodPost, "/cancel", bytes.NewReader(body)), turn)
+	var response harness.CancelTurnResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if recorder.Code != http.StatusOK || response.Accepted {
+		t.Fatalf("late cancellation = status %d accepted %v", recorder.Code, response.Accepted)
+	}
+	if turn.cancelRequested {
+		t.Fatal("settled turn was marked for cancellation")
+	}
+}
+
+func TestCancelledFailureRemovesUnreachableOutput(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	server, err := NewServer(cfg, NewFakeAdapter(FakeBehaviorSuccess))
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn := newTurnState(validWrapperStartTurnRequest(), time.Now)
+	t.Cleanup(turn.cleanupOutput)
+	frame := server.failedFrameWithResult(turn, "command_failed", "failed", "partial result", false)
+	outputPath := turn.resultPath
+	if outputPath == "" {
+		t.Fatal("failed frame did not store output")
+	}
+	if !turn.requestCancel() {
+		t.Fatal("active turn rejected cancellation")
+	}
+	turn.appendFrame(frame)
+	frames, _ := turn.framesFrom(0)
+	if !turn.terminal || len(frames) != 1 || frames[0].Type != harness.FrameTurnCancelled {
+		t.Fatalf("terminal frames = %#v", frames)
+	}
+	if turn.hasUnfetchedOutput() || turn.outputRetentionActive() {
+		t.Fatal("cancelled turn retained unreachable output")
+	}
+	if _, err := os.Stat(outputPath); !os.IsNotExist(err) {
+		t.Fatalf("cancelled output still exists: %v", err)
+	}
+}
