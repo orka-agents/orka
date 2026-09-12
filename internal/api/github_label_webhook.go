@@ -27,6 +27,7 @@ import (
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/agentruntimepolicy"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/workerenv"
@@ -251,7 +252,8 @@ func (h *Handlers) HandleGitHubWebhook(c fiber.Ctx) error {
 		}
 		return fiber.NewError(fiber.StatusServiceUnavailable, "GitHub label trigger agent is not configured")
 	}
-	if err := h.ensureAgentExists(c, namespace, agentName); err != nil {
+	runtimePolicy, err := h.ensureAgentExists(c, namespace, agentName)
+	if err != nil {
 		if monitorResult.Matched > 0 && githubWebhookAgentNotFound(err) {
 			return githubRepositoryMonitorEventResponse(c, monitorResult)
 		}
@@ -267,7 +269,14 @@ func (h *Handlers) HandleGitHubWebhook(c fiber.Ctx) error {
 		delivery = githubReplayKeySuffix(replayKey)
 	}
 
-	task := buildGitHubLabelTask(namespace, agentName, action, replayKey, delivery, event, payload, target)
+	maxTurns := githubMaxTurns()
+	if runtimePolicy != nil {
+		maxTurns = nil
+	}
+	task := buildGitHubLabelTask(namespace, agentName, action, replayKey, delivery, event, payload, target, maxTurns)
+	if err := agentruntimepolicy.MaterializeRuntimeRefAllowedTools(task, runtimePolicy); err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to apply AgentRuntime policy: %v", err))
+	}
 	if err := h.client.Create(c.Context(), task); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
@@ -688,28 +697,60 @@ func githubActionAgentEnv(action string) string {
 	return "ORKA_GITHUB_LABEL_AGENT_" + strings.Trim(b.String(), "_")
 }
 
-func (h *Handlers) ensureAgentExists(c fiber.Ctx, namespace, agentName string) error {
+func (h *Handlers) ensureAgentExists(c fiber.Ctx, namespace, agentName string) (*agentruntimepolicy.RuntimeRefPolicy, error) {
+	reader := h.apiReader
+	if reader == nil {
+		reader = h.client
+	}
+
 	var agent corev1alpha1.Agent
-	if err := h.client.Get(c.Context(), types.NamespacedName{Name: agentName, Namespace: namespace}, &agent); err != nil {
+	if err := reader.Get(c.Context(), types.NamespacedName{Name: agentName, Namespace: namespace}, &agent); err != nil {
 		if apierrors.IsNotFound(err) {
-			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("agent %q not found in namespace %q", agentName, namespace))
+			return nil, fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("agent %q not found in namespace %q", agentName, namespace))
 		}
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get agent: %v", err))
+		return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get agent: %v", err))
 	}
 	if agent.Spec.Runtime == nil {
-		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("agent %q must have runtime configured", agentName))
+		return nil, fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("agent %q must have runtime configured", agentName))
 	}
-	return nil
+	if agent.Spec.Runtime.RuntimeRef == nil {
+		return nil, nil
+	}
+
+	runtimeName := strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name)
+	if runtimeName == "" {
+		return nil, fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("agent %q runtimeRef.name is required", agentName))
+	}
+	var registered corev1alpha1.AgentRuntime
+	if err := reader.Get(c.Context(), types.NamespacedName{Name: runtimeName, Namespace: namespace}, &registered); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("AgentRuntime %q referenced by agent %q not found in namespace %q", runtimeName, agentName, namespace))
+		}
+		return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get AgentRuntime %q: %v", runtimeName, err))
+	}
+	switch registered.RegisteredContractVersion() {
+	case corev1alpha1.AgentRuntimeContractHarnessV1:
+		return nil, nil
+	case corev1alpha1.AgentRuntimeContractHarnessV2:
+		policy, err := agentruntimepolicy.PolicyForRuntime(&registered)
+		if err != nil {
+			return nil, fiber.NewError(fiber.StatusBadRequest, err.Error())
+		}
+		return policy, nil
+	default:
+		return nil, fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("AgentRuntime %q referenced by agent %q has no supported contractVersion", runtimeName, agentName))
+	}
 }
 
 func githubWebhookAgentNotFound(err error) bool {
 	var fiberErr *fiber.Error
 	return errors.As(err, &fiberErr) &&
 		fiberErr.Code == fiber.StatusBadRequest &&
+		strings.HasPrefix(fiberErr.Message, "agent ") &&
 		strings.Contains(fiberErr.Message, " not found in namespace ")
 }
 
-func buildGitHubLabelTask(namespace, agentName, action, replayKey, delivery, event string, payload githubLabelWebhookPayload, target githubLabelTarget) *corev1alpha1.Task {
+func buildGitHubLabelTask(namespace, agentName, action, replayKey, delivery, event string, payload githubLabelWebhookPayload, target githubLabelTarget, maxTurns *int32) *corev1alpha1.Task {
 	workspace := githubWorkspace(action, target, replayKey)
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
@@ -737,38 +778,19 @@ func buildGitHubLabelTask(namespace, agentName, action, replayKey, delivery, eve
 			AgentRef: &corev1alpha1.AgentReference{
 				Name: agentName,
 			},
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				MaxTurns:  githubMaxTurns(),
-				Workspace: workspace,
-			},
-			Timeout: githubTimeout(),
-			Env: []corev1.EnvVar{
-				{Name: "ORKA_GITHUB_EVENT", Value: event},
-				{Name: "ORKA_GITHUB_DELIVERY", Value: delivery},
-				{Name: "ORKA_GITHUB_LABEL", Value: payload.Label.Name},
-				{Name: "ORKA_GITHUB_ACTION", Value: action},
-				{Name: "ORKA_GITHUB_REPOSITORY", Value: payload.Repository.FullName},
-				{Name: "ORKA_GITHUB_TARGET_URL", Value: target.HTMLURL},
-			},
+			Workspace: workspace,
+			Timeout:   githubTimeout(),
 		},
 	}
-	if action == githubActionReview && workspace != nil && workspace.GitSecretRef != nil {
+	if maxTurns != nil {
+		task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{MaxTurns: maxTurns}
+	}
+	if action == githubActionReview && workspace != nil && workspace.ReadCredentialRef != nil {
 		task.Annotations[labels.AnnotationWorkspaceInitContainer] = queryTrue
 	}
 	if target.Number > 0 {
 		task.Labels[labels.LabelGitHubNumber] = labels.SelectorValue(strconv.Itoa(target.Number))
 		task.Annotations[labels.AnnotationGitHubNumber] = strconv.Itoa(target.Number)
-	}
-	if target.IsPR {
-		if baseRepo := repoURL(target.BaseRepo); baseRepo != "" {
-			task.Spec.Env = append(task.Spec.Env, corev1.EnvVar{Name: workerenv.PRBaseRepo, Value: baseRepo})
-		}
-		if target.BaseSHA != "" {
-			task.Spec.Env = append(task.Spec.Env, corev1.EnvVar{Name: workerenv.PRBaseSHA, Value: target.BaseSHA})
-		}
-	}
-	if action == githubActionUpdateBranch {
-		task.Spec.Env = append(task.Spec.Env, corev1.EnvVar{Name: workerenv.AllowEmptyPushBranch, Value: "true"})
 	}
 	return task
 }
@@ -807,6 +829,7 @@ func githubWorkspace(action string, target githubLabelTarget, replayKey string) 
 		repo = target.HeadRepo
 	}
 	ws := &corev1alpha1.WorkspaceConfig{
+		Intent:  corev1alpha1.WorkspaceIntentRead,
 		GitRepo: repoURL(repo),
 	}
 
@@ -838,9 +861,19 @@ func githubWorkspace(action string, target githubLabelTarget, replayKey string) 
 	}
 
 	if gitSecret != "" {
-		ws.GitSecretRef = &corev1.LocalObjectReference{Name: gitSecret}
+		ws.ReadCredentialRef = &corev1alpha1.WorkspaceCredentialReference{Name: gitSecret}
 	}
-	if target.IsPR && target.BaseBranch != "" {
+	if ws.PushBranch != "" {
+		ws.Intent = corev1alpha1.WorkspaceIntentWrite
+		ws.PublicationGitRepo = ws.GitRepo
+		if gitSecret != "" {
+			ws.PublicationReadCredentialRef = &corev1alpha1.WorkspaceCredentialReference{Name: gitSecret}
+			ws.PublicationCredentialRef = &corev1alpha1.WorkspaceCredentialReference{Name: gitSecret}
+		}
+	}
+	// prBaseBranch is a publication field: the ACP workspace preflight rejects it
+	// on non-write intents, and read flows carry base-branch context in the prompt.
+	if target.IsPR && target.BaseBranch != "" && ws.Intent == corev1alpha1.WorkspaceIntentWrite {
 		ws.PRBaseBranch = target.BaseBranch
 	}
 	return ws
@@ -924,28 +957,28 @@ func buildGitHubActionPrompt(action string, payload githubLabelWebhookPayload, t
 	var b strings.Builder
 	b.WriteString("You are an Orka agent task triggered by a GitHub label.\n\n")
 	b.WriteString("Trigger details:\n")
-	b.WriteString(fmt.Sprintf("- Label: %s\n", payload.Label.Name))
-	b.WriteString(fmt.Sprintf("- Action: %s\n", action))
-	b.WriteString(fmt.Sprintf("- Repository: %s\n", payload.Repository.FullName))
-	b.WriteString(fmt.Sprintf("- Target: %s #%d\n", target.Kind, target.Number))
-	b.WriteString(fmt.Sprintf("- URL: %s\n", target.HTMLURL))
+	fmt.Fprintf(&b, "- Label: %s\n", payload.Label.Name)
+	fmt.Fprintf(&b, "- Action: %s\n", action)
+	fmt.Fprintf(&b, "- Repository: %s\n", payload.Repository.FullName)
+	fmt.Fprintf(&b, "- Target: %s #%d\n", target.Kind, target.Number)
+	fmt.Fprintf(&b, "- URL: %s\n", target.HTMLURL)
 	if payload.Sender.Login != "" {
-		b.WriteString(fmt.Sprintf("- Triggered by: %s\n", payload.Sender.Login))
+		fmt.Fprintf(&b, "- Triggered by: %s\n", payload.Sender.Login)
 	}
 	if target.IsPR {
-		b.WriteString(fmt.Sprintf("- Base branch: %s\n", target.BaseBranch))
-		b.WriteString(fmt.Sprintf("- Head branch: %s\n", target.HeadBranch))
+		fmt.Fprintf(&b, "- Base branch: %s\n", target.BaseBranch)
+		fmt.Fprintf(&b, "- Head branch: %s\n", target.HeadBranch)
 		if target.HeadSHA != "" {
-			b.WriteString(fmt.Sprintf("- Head SHA: %s\n", target.HeadSHA))
+			fmt.Fprintf(&b, "- Head SHA: %s\n", target.HeadSHA)
 		}
 	}
 	if workspace != nil {
-		b.WriteString(fmt.Sprintf("- Workspace repo: %s\n", workspace.GitRepo))
+		fmt.Fprintf(&b, "- Workspace repo: %s\n", workspace.GitRepo)
 		if workspace.Branch != "" {
-			b.WriteString(fmt.Sprintf("- Workspace branch: %s\n", workspace.Branch))
+			fmt.Fprintf(&b, "- Workspace branch: %s\n", workspace.Branch)
 		}
 		if workspace.PushBranch != "" {
-			b.WriteString(fmt.Sprintf("- Push branch: %s\n", workspace.PushBranch))
+			fmt.Fprintf(&b, "- Push branch: %s\n", workspace.PushBranch)
 			b.WriteString("- Push handling: do not commit or push yourself; leave final workspace changes uncommitted so Orka can commit and push them.\n")
 		}
 	}
@@ -978,7 +1011,7 @@ func buildGitHubActionPrompt(action string, payload githubLabelWebhookPayload, t
 	case githubActionToIssues:
 		b.WriteString("Break the request into small, independently implementable GitHub issues. Prefer tracer-bullet vertical slices with acceptance criteria. If you can create issues with available GitHub credentials, do so; otherwise return issue drafts with titles, bodies, and labels.\n")
 	default:
-		b.WriteString(fmt.Sprintf("Perform the requested %q action for this GitHub target. Keep changes scoped, run relevant verification, and summarize the outcome.\n", action))
+		fmt.Fprintf(&b, "Perform the requested %q action for this GitHub target. Keep changes scoped, run relevant verification, and summarize the outcome.\n", action)
 	}
 
 	b.WriteString("\nSafety constraints:\n")

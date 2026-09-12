@@ -1,5 +1,7 @@
 # Demo recording design
 
+> **ACP v2 cutover:** the Demo 60/70 storyboards below capture a retired execution-workspace prototype. Current built-in agent Tasks use RuntimePools, top-level `spec.workspace`, and the separate Workspace/Publisher. Keep these storyboards archived until the scripts and manifests are rebuilt around an ACP v2 supervisor; they are not release evidence.
+
 This is the design doc for turning `hack/demos/` from a presenter rehearsal kit
 into a small, tasteful library of recorded terminal demos. The goal is to
 publish a handful of artifacts that hold up on the README, in the docs, and on
@@ -69,8 +71,9 @@ Six demos total. Four exist; two are new.
 | 20 | YAML workflow | `20-manual-workflow.sh` | exists, needs polish | Same payload, declarative `Task` CR — GitOps-friendly |
 | 30 | Scheduled workflow | `30-cron-workflow.sh` | exists, needs polish | Cron-scheduled stale-PR triage report |
 | 40 | Security remediation | `40-security-scanning.sh` | exists, needs polish | Finding → patch proposal → reviewable PR |
-| 60 | **Agent sandbox workspaces** | `60-agent-sandbox.sh` | **new** | One session, two agents, three turns — Scout, Builder, and a CI fixup share one warm sandbox |
-| 70 | **Agent Substrate workspaces** | `70-agent-substrate.sh` | **new** | Real gpt-5.5 agent in a gVisor Actor clones + edits + opens a PR; warm reuse with no cold start |
+| 50 | **Kontxt transaction tokens** | `50-kontxt.sh` | **new** | Caller Pod proves identity → kontxt mints TxToken → Orka stamps immutable provenance |
+| 60 | **Agent sandbox workspaces** | `60-agent-sandbox.sh` | archived prototype | Requires a future sandbox-backed ACP v2 supervisor |
+| 70 | **Agent Substrate workspaces** | `70-agent-substrate.sh` | archived prototype | Requires a future Actor-backed ACP v2 supervisor and clean-room publication |
 
 Demos 50 and 60 are designed in [§7](#7-new-scenario-storyboards).
 
@@ -568,7 +571,7 @@ the successful Task and renders:
 ╰─────────────────────────────────────────────────────────────╯
 ```
 
-### Demo 60 — Agent sandbox workspaces (`60-agent-sandbox.sh`)
+### Demo 60 — Agent sandbox workspaces (`60-agent-sandbox.sh`, archived prototype)
 
 **Why this matters.** The other demos all show one-shot work. Demo 60 shows
 *continuity*: a coding session's repo, dependency cache, and built artifacts
@@ -687,7 +690,7 @@ by an order of magnitude.
 
 ---
 
-### Demo 70 — Agent Substrate workspaces (`70-agent-substrate.sh`)
+### Demo 70 — Agent Substrate workspaces (`70-agent-substrate.sh`, archived prototype)
 
 **Why this matters.** Orka's execution workspace is provider-neutral. Demo 60
 shows agent-sandbox; Demo 70 shows the *same Orka agent Task API* backed by a
@@ -716,8 +719,7 @@ demo-magic cluster. Stand it up with `make demo-substrate-up`
 `scripts/agent-substrate-e2e.sh` standup (`KEEP_CLUSTER=1`) — Substrate control
 plane in `ate-system`, a `WorkerPool` + gVisor `ActorTemplate` (`orka-codex-ci`
 in `ate-demo`), Orka wired with `--substrate-*` flags; (2) builds a
-**codex-capable Actor image** (the production `agent-harness-wrapper` — daemon +
-codex CLI + git) and points the ActorTemplate at it; (3) deploys the **vekil**
+**prototype codex-capable Actor image** (workspace daemon + Codex CLI + git; not a supported ACP v2 runtime image) and points the ActorTemplate at it; (3) deploys the **vekil**
 model proxy (one-time GitHub **device-code** login — the operator completes it
 from the pod logs, since a plain `gho_` gh token has no Copilot entitlement);
 (4) creates the model Secret (endpoint → vekil) and the git Secret. Requires
@@ -729,15 +731,14 @@ comes from `GIT_TOKEN`/`GITHUB_TOKEN` or the local `gh` CLI.
 
 | # | Beat | What the audience sees |
 |---|------|------------------------|
-| 1 | Cold | A Task with `provider: substrate` + `reusePolicy: session` + `sessionRef.create: true`. A fresh gVisor Actor; a real `gpt-5.5` agent clones the repo, edits a file, stops. Orka pushes the branch; the demo opens a real PR. `status.executionWorkspace.provider == substrate`. |
-| 2 | PR | The demo opens the pull request via `gh` (the agent edited only — clean exit; Orka pushed). The real PR URL appears. |
-| 3 | Warm | A second Task, same `sessionRef` (`create: false`). Reattaches the retained workspace: `status.executionWorkspace.reused == true` — repo already cloned, no cold start. A follow-up commit lands on the same PR. |
+| 1 | Cold | Archived prototype: a fresh gVisor Actor hosted the agent. A revived ACP v2 version must start from a sanitized source artifact and leave publication to the Workspace/Publisher. |
+| 2 | PR | Future v2 version requires an independently verified publisher receipt and Orka-owned PR reconciliation. |
+| 3 | Warm | Future v2 version must resume one fenced RuntimeSession without replaying a prompt or bypassing validation/publication barriers. |
 
-**Clean-exit contract (load-bearing).** The agent **edits files only** and
-stops; Orka's `pushBranch` pushes the branch; the **demo script** opens/updates
-the PR via `gh`. If the agent runs post-edit commands itself (git status, a PR
-curl), a nonzero one makes the codex CLI exit 1 even though the work succeeded —
-so the prompt forbids it.
+**Clean-exit contract (load-bearing).** The ACP child edits files only. A
+revived demo must freeze and validate the RuntimeSession, upload a durable delta,
+and require the separate Workspace/Publisher to prepare, publish, verify, and
+reconcile the PR. Runtime-local Git state is never publication authority.
 
 **gVisor contract (load-bearing).** The Task sets
 `ORKA_CODEX_DISABLE_SANDBOX=true`. Codex's inner bubblewrap sandbox cannot nest
@@ -870,18 +871,18 @@ spec:
     - name: file_write
     - name: code_exec
   systemPrompt: |
-    You implement changes proposed by the scout. You read
-    /workspace/scout-report.md, apply the changes, run tests via
-    code_exec, and use the in-workspace git CLI (cloned and authenticated
-    by the agent runtime) to push branches and open pull requests
-    against sozercan/vekil.
+    You implement changes proposed by the scout. Read the supplied report,
+    edit the verified workspace, and run focused tests. Do not commit, alter
+    Git configuration/remotes, push, or create a pull request; Orka owns
+    clean-room publication.
 ```
 
 **Tool-name caveat.** Built-in Orka tools verified against
 `internal/tools/common_constants.go` and `workers/ai/main_test.go`:
 `file_read`, `file_write`, `code_exec`, `web_search`, `web_fetch` are
-real. There is *no* `open_pr` built-in tool — PR creation is done by the
-agent runtime using `git` + `gh` (or the GitHub HTTP API) from inside the
+real. There is *no* `open_pr` built-in tool. Under ACP v2, PR creation is an
+Orka-owned Workspace/Publisher or governed GitHub-tool operation, never a
+runtime-local `git`/forge action inside the
 sandbox workspace. The scout/builder split is enforced by `file_write` +
 `code_exec` *presence on builder, absence on scout*, not by an `open_pr`
 tool.
@@ -924,15 +925,11 @@ Prompt files in `hack/demos/prompts/`:
   issue #77 (Prometheus metrics gap). Profile what's missing. Write your
   proposal to `/workspace/scout-report.md` with: counter names, where they
   go, test outline. Do not modify any vekil source."*
-- `sandbox-turn-2-builder.txt` — *"Read `/workspace/scout-report.md`.
-  Implement the counters and tests in the vekil checkout under
-  `/workspace/vekil`. Push the branch with `git` and open a pull request
-  against sozercan/vekil (using `gh pr create`) with title 'Add Prometheus
-  /metrics endpoint (closes #77)'."*
-- `sandbox-turn-3-fixup.txt` — *"CI on the open PR flagged that
-  `metrics_handler_test.go` is missing a test for the `error_total`
-  counter. Add it. Push as a fixup commit on the same branch. Do not
-  open a new PR."*
+- `sandbox-turn-2-builder.txt` — must be rewritten to edit and test only.
+  A future ACP v2 demo supplies a verified workspace artifact and asks the
+  Workspace/Publisher to prepare, publish, verify, and reconcile the PR.
+- `sandbox-turn-3-fixup.txt` — must be rewritten as another fenced write Task
+  against the claimed branch baseline; the ACP child must not commit or publish.
 
 ### Substrate manifests (Demo 70)
 
@@ -946,12 +943,13 @@ demo only applies the Orka `Agent` + two `Task`s and opens the PR. All carry
   `codex`, model `gpt-5.5`. A real model run: `secretRef` (NOT `providerRef` —
   mutually exclusive with `runtime`) points at a Secret carrying
   `OPENAI_BASE_URL` (→ the in-cluster vekil proxy) + a placeholder
-  `OPENAI_API_KEY`. The system prompt tells the agent to edit files only and
-  stop (Orka pushes; the demo opens the PR).
+  `OPENAI_API_KEY`. The system prompt tells the agent to edit files only and stop. A revived v2
+  demo requires the Workspace/Publisher to prepare, publish, verify, and reconcile the PR.
 - **Task** (`render_substrate_task <name> <none|session> <create> <prompt>`) —
   agent Task whose `execution.workspace` selects `provider: substrate` with
-  `templateRef` → `ate-demo/orka-codex-ci`, plus `agentRuntime.workspace`
-  (`gitRepo`, `branch`, `pushBranch`, `gitSecretRef`) and
+  `templateRef` → `ate-demo/orka-codex-ci`, plus top-level `spec.workspace`
+  (`intent`, `gitRepo`, `branch`, `readCredentialRef`, `publicationGitRepo`,
+  `publicationCredentialRef`, and `pushBranch`) and
   `env: ORKA_CODEX_DISABLE_SANDBOX=true` (gVisor is the sandbox). `reusePolicy`
   defaults to `session`; `cleanupPolicy` is `retain` for session tasks so the
   workspace stays warm. The 3rd arg sets `sessionRef.create`.
@@ -1175,8 +1173,9 @@ and by the payoff cards):
 | 20 | "GitOps workflow" | "Same workflow from YAML. The agent isn't magic — it's a CR." |
 | 30 | "Scheduled work" | "Recurring AI triage queue — same auditable Task model, just add a `schedule:`." |
 | 40 | "Security remediation" | "Finding → patch proposal → reviewable PR. No human triage required." |
-| 60 | "Warm agent sandboxes" | "One session, two agents, three turns. Scout, Builder, CI fixup — one warm workspace." |
-| 70 | "Agent Substrate workspaces" | "A real agent clones, edits, and opens a PR from inside a gVisor sandbox — then reuses the warm workspace with no cold start." |
+| 50 | "Kontxt transaction tokens" | "Zero-secret caller, one-shot transaction token, sealed Kubernetes provenance." |
+| 60 | "Warm agent sandboxes" | "Archived until agent-sandbox hosts an ACP v2 RuntimeSession without weakening workspace governance." |
+| 70 | "Agent Substrate workspaces" | "Archived until an Actor-backed ACP v2 supervisor and clean-room publication path are implemented." |
 
 ---
 
@@ -1230,12 +1229,10 @@ writing the relevant render functions:
   as a placeholder. The implementer must inspect what `00-preflight.sh`
   applies (or what `cluster/cluster-up.sh` installs) and use that exact
   name in the scout/builder Agent specs.
-- **`gh` is preinstalled in the sandbox image.** The builder prompt
-  assumes `gh pr create` works inside the sandbox. Phase 1's
-  `cluster/templates/orka-live-template.yaml` is the implementer's
-  source of truth — make sure the template's image bundles `git` + `gh`
-  + a writable workspace. If not, either add them to the template image
-  or swap the builder prompt to use the GitHub REST API (`curl + jq`).
+- **SCM publication is outside the sandbox.** A future template must not
+  depend on Git publication tools or credentials inside the ACP process tree.
+  The Workspace/Publisher owns clone credentials, deterministic commit creation,
+  exact-ref publication, independent verification, and PR reconciliation.
 - **Sandbox claim name shape.** §7.5's `payoff_card_sandbox` extracts the
   claim name from `completed in sandbox workspace <name>` — that line is
   verified, but the literal claim *name* (`orka-vekil-metrics-77` in the
@@ -1265,8 +1262,8 @@ writing the relevant render functions:
      are needed.
    - `install-agent-sandbox.sh` — installs the upstream `agent-sandbox`
      operator via its published manifests, then applies
-     `cluster/templates/orka-live-template.yaml` (a `SandboxTemplate`
-     containing the agent CLI runtime image + git/gh + workspace dirs).
+     `cluster/templates/orka-live-template.yaml` (an archived `SandboxTemplate`;
+     replace it with an ACP v2 supervisor image before reviving the demo).
    - `cluster-down.sh` — `kind delete cluster --name orka-demo`.
 - [ ] Makefile — add `demo-record-%`, `demo-record-hero`, `demo-record-all`,
       `demo-diff`, `demo-images`, **`demo-cluster-up`**, **`demo-cluster-down`**

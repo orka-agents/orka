@@ -3,6 +3,10 @@ name: Lint
 on:
   workflow_dispatch:
   push:
+    # PR branches are linted by the pull_request event. Keep push coverage on
+    # main without running the same branch change twice.
+    branches:
+      - main
     paths-ignore:
       - ".agents/**"
       - ".claude/**"
@@ -21,6 +25,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   lint:
@@ -29,11 +34,14 @@ jobs:
     steps:
       - name: Clone the code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          go-version: '1.27'
+          check-latest: true
 
       - name: Create UI embed stub
         run: make ensure-ui-embed
@@ -41,8 +49,11 @@ jobs:
       - name: Run linter
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: v2.7.2
+          version: v2.13.1
           install-mode: goinstall
+          # GitHub refuses REST PR diffs over 20,000 lines. Compare revisions
+          # locally so large PRs still filter out pre-existing lint findings.
+          args: --new-from-rev=${{ github.event.pull_request.base.sha || github.event.before || 'HEAD~1' }}
 
   ui-lint:
     name: UI Lint

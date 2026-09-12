@@ -2,11 +2,12 @@ package sqlite
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -337,6 +338,69 @@ func TestGatewayDispatchProjectionAndDeliveryLifecycle(t *testing.T) {
 	stored, err := s.GetGatewayDelivery(ctx, delivery.Namespace, delivery.ID)
 	if err != nil || stored.State != store.GatewayDeliveryDelivered || stored.ProviderMessageID != providerMessageID {
 		t.Fatalf("stored delivery = (%+v, %v)", stored, err)
+	}
+}
+
+func TestFreezeGatewayEventTaskRuntimeAllowedToolsIsClaimFencedAndFirstWriteWins(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		allowedTools []string
+	}{
+		{name: "registered tools", allowedTools: []string{"read_evidence"}},
+		{name: "explicit deny all", allowedTools: []string{}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			s := setupTestStore(t)
+			ctx := context.Background()
+			now := time.Now().UTC().Truncate(time.Second)
+			event := testGatewayEvent(now, "freeze-policy-"+strings.ReplaceAll(test.name, " ", "-"))
+			if _, _, err := s.AdmitGatewayEvent(ctx, store.GatewayEventAdmission{
+				Event: event, AppendUserMessage: true, PendingLimit: 100,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.FreezeGatewayEventTaskRuntimeAllowedTools(
+				ctx, event.Namespace, event.ID, "owner-a", test.allowedTools, now,
+			); !errors.Is(err, store.ErrConflict) {
+				t.Fatalf("unclaimed freeze error = %v, want ErrConflict", err)
+			}
+			if _, err := s.ClaimNextGatewayEvent(ctx, event.Namespace, "owner-a", now, time.Minute); err != nil {
+				t.Fatal(err)
+			}
+			frozen, err := s.FreezeGatewayEventTaskRuntimeAllowedTools(
+				ctx, event.Namespace, event.ID, "owner-a", test.allowedTools, now,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !frozen.TaskPolicyFrozen || frozen.TaskAllowedTools == nil ||
+				!slices.Equal(frozen.TaskAllowedTools, test.allowedTools) {
+				t.Fatalf("frozen allowedTools = %#v, frozen=%v", frozen.TaskAllowedTools, frozen.TaskPolicyFrozen)
+			}
+			if _, err := s.FreezeGatewayEventTaskRuntimeAllowedTools(
+				ctx, event.Namespace, event.ID, "owner-a", test.allowedTools, now.Add(time.Second),
+			); err != nil {
+				t.Fatalf("idempotent freeze error = %v", err)
+			}
+			if _, err := s.FreezeGatewayEventTaskRuntimeAllowedTools(
+				ctx, event.Namespace, event.ID, "owner-a", []string{"different_tool"}, now.Add(2*time.Second),
+			); !errors.Is(err, store.ErrConflict) {
+				t.Fatalf("overwrite error = %v, want ErrConflict", err)
+			}
+			if _, err := s.FreezeGatewayEventTaskRuntimeAllowedTools(
+				ctx, event.Namespace, event.ID, "owner-b", test.allowedTools, now.Add(2*time.Second),
+			); !errors.Is(err, store.ErrConflict) {
+				t.Fatalf("stale-owner freeze error = %v, want ErrConflict", err)
+			}
+			stored, err := s.GetGatewayEvent(ctx, event.Namespace, event.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !stored.TaskPolicyFrozen || stored.TaskAllowedTools == nil ||
+				!slices.Equal(stored.TaskAllowedTools, test.allowedTools) {
+				t.Fatalf("stored allowedTools = %#v, frozen=%v", stored.TaskAllowedTools, stored.TaskPolicyFrozen)
+			}
+		})
 	}
 }
 
@@ -822,7 +886,7 @@ func TestGatewayBackupRestoreResumesQueuedWorkWithoutReplayingTerminalDelivery(t
 	}
 }
 
-func TestGatewayMigrationBackfillsActiveTaskUID(t *testing.T) {
+func TestGatewayActiveTaskUIDPersistsAcrossReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "active-task-uid.db")
 	db, err := NewDB(path)
 	if err != nil {
@@ -847,10 +911,6 @@ func TestGatewayMigrationBackfillsActiveTaskUID(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `UPDATE sessions SET active_task_uid = ''
-		WHERE namespace = ? AND name = ?`, event.Namespace, event.SessionName); err != nil {
-		t.Fatal(err)
-	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -863,54 +923,7 @@ func TestGatewayMigrationBackfillsActiveTaskUID(t *testing.T) {
 	s = NewStore(db, path)
 	session, err := s.GetSession(ctx, event.Namespace, event.SessionName)
 	if err != nil || session.ActiveTask != claimed.TaskName || session.ActiveTaskUID != "task-uid" {
-		t.Fatalf("migrated active Task identity = (%+v, %v)", session, err)
-	}
-}
-
-func TestGatewayMigrationBackfillsLegacySessionMessageIDs(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "legacy.db")
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`CREATE TABLE sessions (
-		namespace TEXT NOT NULL, name TEXT NOT NULL, session_type TEXT NOT NULL DEFAULT 'task',
-		active_task TEXT NOT NULL DEFAULT '', message_count INTEGER NOT NULL DEFAULT 0,
-		input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
-		cancelled BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMP, updated_at TIMESTAMP,
-		PRIMARY KEY(namespace, name));
-		CREATE TABLE session_messages (
-		id INTEGER PRIMARY KEY AUTOINCREMENT, namespace TEXT NOT NULL, session_name TEXT NOT NULL,
-		role TEXT NOT NULL, content TEXT NOT NULL DEFAULT '', name TEXT, input TEXT, tool_calls TEXT,
-		tool_call_id TEXT, created_at TIMESTAMP);`); err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now().UTC().Truncate(time.Second)
-	if _, err := db.Exec(`INSERT INTO sessions(namespace, name, message_count, created_at, updated_at) VALUES('default','legacy',1,?,?);
-		INSERT INTO session_messages(namespace, session_name, role, content, created_at) VALUES('default','legacy','user','old message',?)`, now, now, now); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	db, err = NewDB(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	db, err = NewDB(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	messages, err := NewStore(db, path).LoadTranscript(context.Background(), "default", "legacy", 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(messages) != 1 || messages[0].ID != "legacy:1" || messages[0].Content != "old message" {
-		t.Fatalf("migrated messages = %#v", messages)
+		t.Fatalf("reopened active Task identity = (%+v, %v)", session, err)
 	}
 }
 

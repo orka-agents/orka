@@ -7,12 +7,15 @@ MIT License - see LICENSE file for details.
 package v1alpha1
 
 import (
+	"encoding/json"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // AgentSpec defines the desired state of Agent
 // +kubebuilder:validation:XValidation:rule="!has(self.execution) || !has(self.execution.workspace) || !has(self.execution.workspace.classRef)",message="execution.workspace.classRef is only supported on Task specs"
+// +kubebuilder:validation:XValidation:rule="!(has(self.runtime) && has(self.runtime.type) && self.runtime.type == 'opencode' && has(self.runtime.contractVersion) && self.runtime.contractVersion == 'orka.harness.v2' && has(self.systemPrompt) && ((has(self.systemPrompt.inline) && self.systemPrompt.inline.size() > 0) || has(self.systemPrompt.configMapRef)))",message="opencode orka.harness.v2 runtime does not support spec.systemPrompt"
 type AgentSpec struct {
 	// ProviderRef references a Provider CRD for LLM configuration
 	// If set, model.provider is optional (inherited from Provider)
@@ -52,10 +55,6 @@ type AgentSpec struct {
 	// +optional
 	Session *SessionConfig `json:"session,omitempty"`
 
-	// RateLimit defines rate limiting configuration
-	// +optional
-	RateLimit *RateLimitConfig `json:"rateLimit,omitempty"`
-
 	// Coordination enables agent-to-agent delegation
 	// +optional
 	Coordination *CoordinationConfig `json:"coordination,omitempty"`
@@ -74,10 +73,20 @@ type AgentSpec struct {
 
 // AgentCLIRuntime defines agent CLI runtime configuration for an Agent.
 // +kubebuilder:validation:XValidation:rule="has(self.type) != has(self.runtimeRef)",message="exactly one of type or runtimeRef is required"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.contractVersion) || (has(self.contractVersion) && self.contractVersion == oldSelf.contractVersion)",message="runtime.contractVersion is immutable once set"
+// +kubebuilder:validation:XValidation:rule="!has(self.contractVersion) || has(self.type)",message="runtime.contractVersion applies only to built-in runtime types; runtimeRef derives the protocol from the referenced AgentRuntime"
 type AgentCLIRuntime struct {
 	// Type specifies which built-in CLI runtime to use. Use runtimeRef for admin-registered custom runtimes.
 	// +optional
 	Type AgentRuntimeType `json:"type,omitempty"`
+
+	// ContractVersion is the immutable harness protocol selector for built-in
+	// runtime types. There is no default: a missing selector is never
+	// interpreted as either protocol, and fail-closed admission requires an
+	// explicit value on new built-in Agents. runtime.type alone (including
+	// opencode, which exists in both protocols) is never protocol evidence.
+	// +optional
+	ContractVersion *AgentRuntimeContractVersion `json:"contractVersion,omitempty"`
 
 	// RuntimeRef selects an admin-governed AgentRuntime for custom/BYO harness runtimes.
 	// +optional
@@ -86,7 +95,6 @@ type AgentCLIRuntime struct {
 	// DefaultMaxTurns is the default maximum agent loop iterations for tasks using this Agent
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=1000
-	// +kubebuilder:default=50
 	// +optional
 	DefaultMaxTurns *int32 `json:"defaultMaxTurns,omitempty"`
 
@@ -104,6 +112,46 @@ type AgentCLIRuntime struct {
 	// +kubebuilder:validation:Enum=low;medium;high;xhigh;max
 	// +optional
 	DefaultReasoningEffort string `json:"defaultReasoningEffort,omitempty"`
+}
+
+// MarshalJSON preserves the distinction between an omitted tool allowlist and
+// an explicitly empty deny-all allowlist. The standard omitempty handling for
+// slices would otherwise serialize both states as omission.
+func (in AgentCLIRuntime) MarshalJSON() ([]byte, error) {
+	type agentCLIRuntimeJSON struct {
+		Type                   AgentRuntimeType             `json:"type,omitempty"`
+		ContractVersion        *AgentRuntimeContractVersion `json:"contractVersion,omitempty"`
+		RuntimeRef             *AgentRuntimeReference       `json:"runtimeRef,omitempty"`
+		DefaultMaxTurns        *int32                       `json:"defaultMaxTurns,omitempty"`
+		DefaultAllowedTools    *[]string                    `json:"defaultAllowedTools,omitempty"`
+		DefaultAllowBash       *bool                        `json:"defaultAllowBash,omitempty"`
+		DefaultReasoningEffort string                       `json:"defaultReasoningEffort,omitempty"`
+	}
+	var defaultAllowedTools *[]string
+	if in.DefaultAllowedTools != nil {
+		tools := append([]string{}, in.DefaultAllowedTools...)
+		defaultAllowedTools = &tools
+	}
+	return json.Marshal(agentCLIRuntimeJSON{
+		Type:                   in.Type,
+		ContractVersion:        in.ContractVersion,
+		RuntimeRef:             in.RuntimeRef,
+		DefaultMaxTurns:        in.DefaultMaxTurns,
+		DefaultAllowedTools:    defaultAllowedTools,
+		DefaultAllowBash:       in.DefaultAllowBash,
+		DefaultReasoningEffort: in.DefaultReasoningEffort,
+	})
+}
+
+// BuiltInContractVersion returns the Agent's explicit built-in harness
+// protocol selector, or empty when unclassified. Callers must treat empty as
+// neither protocol and fail closed; runtime.type alone is never protocol
+// evidence.
+func (in *Agent) BuiltInContractVersion() AgentRuntimeContractVersion {
+	if in == nil || in.Spec.Runtime == nil || in.Spec.Runtime.ContractVersion == nil {
+		return ""
+	}
+	return *in.Spec.Runtime.ContractVersion
 }
 
 // ModelFallback defines a fallback provider configuration
@@ -133,11 +181,18 @@ type ModelConfig struct {
 	// Temperature controls randomness in generation
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=2
-	// +kubebuilder:default=0.7
 	// +optional
 	Temperature *float64 `json:"temperature,omitempty"`
 
-	// MaxTokens limits the response length
+	// ContextWindow is the reviewed model context capacity in tokens. Built-in
+	// runtimes that manage their own compaction require this value explicitly.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	ContextWindow *int32 `json:"contextWindow,omitempty"`
+
+	// MaxTokens limits the response length. OpenCode validates positive reviewed
+	// limits at its runtime-specific admission boundary; existing Agent objects
+	// may retain the legacy zero value.
 	// +optional
 	MaxTokens *int32 `json:"maxTokens,omitempty"`
 
@@ -148,6 +203,7 @@ type ModelConfig struct {
 }
 
 // PromptSource defines where to get a prompt from
+// +kubebuilder:validation:XValidation:rule="!(has(self.inline) && self.inline.size() > 0 && has(self.configMapRef))",message="system prompt must use only one of inline or configMapRef"
 type PromptSource struct {
 	// Inline is the inline prompt text
 	// +optional
@@ -183,32 +239,11 @@ type ToolReference struct {
 
 // SessionConfig defines session behavior defaults
 type SessionConfig struct {
-	// Persistence defines the storage backend (configmap, pvc, none)
-	// +kubebuilder:validation:Enum=configmap;pvc;none
-	// +kubebuilder:default=configmap
-	// +optional
-	Persistence string `json:"persistence,omitempty"`
-
-	// TTL defines the session time-to-live (auto-expire)
-	// +optional
-	TTL *metav1.Duration `json:"ttl,omitempty"`
-
 	// MaxMessages is the maximum messages to load from session
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:default=50
 	// +optional
 	MaxMessages int32 `json:"maxMessages,omitempty"`
-}
-
-// RateLimitConfig defines rate limiting for an agent
-type RateLimitConfig struct {
-	// RequestsPerMinute limits requests per minute
-	// +optional
-	RequestsPerMinute *int32 `json:"requestsPerMinute,omitempty"`
-
-	// TokensPerMinute limits tokens per minute
-	// +optional
-	TokensPerMinute *int64 `json:"tokensPerMinute,omitempty"`
 }
 
 // CoordinationConfig enables agent-to-agent delegation

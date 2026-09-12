@@ -151,6 +151,112 @@ var _ = Describe("workspace.orka.ai schema validation", func() {
 		Expect(k8sClient.Create(ctx, cleanupMixed)).NotTo(Succeed())
 	})
 
+	It("rejects ACP-only workspace publication guarantees for container Tasks", func(ctx context.Context) {
+		validContainer := &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{Name: "container-workspace-supported", Namespace: namespace},
+			Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeContainer,
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					Intent:                       corev1alpha1.WorkspaceIntentWrite,
+					GitRepo:                      "https://github.com/example/source.git",
+					PushBranch:                   "orka/container-supported",
+					PublicationCredentialRef:     &corev1alpha1.WorkspaceCredentialReference{Name: "publication-write"},
+					PublicationReadCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: "publication-read"},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, validContainer)).To(Succeed())
+
+		customImage := validContainer.DeepCopy()
+		customImage.ResourceVersion = ""
+		customImage.UID = ""
+		customImage.Name = "container-workspace-custom-image"
+		customImage.Spec.Image = "busybox:latest"
+		Expect(k8sClient.Create(ctx, customImage)).To(
+			MatchError(ContainSubstring("custom-image container Tasks do not support workspace.pushBranch publication")),
+		)
+
+		tests := []struct {
+			name   string
+			mutate func(*corev1alpha1.WorkspaceConfig)
+		}{
+			{
+				name: "expected-remote-sha",
+				mutate: func(workspace *corev1alpha1.WorkspaceConfig) {
+					workspace.ExpectedRemoteSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+				},
+			},
+			{
+				name: "create-pr",
+				mutate: func(workspace *corev1alpha1.WorkspaceConfig) {
+					workspace.CreatePR = true
+				},
+			},
+			{
+				name: "max-changed-files",
+				mutate: func(workspace *corev1alpha1.WorkspaceConfig) {
+					limit := int32(1)
+					workspace.MaxChangedFiles = &limit
+				},
+			},
+			{
+				name: "allowed-paths",
+				mutate: func(workspace *corev1alpha1.WorkspaceConfig) {
+					workspace.AllowedPaths = []string{"src/**"}
+				},
+			},
+			{
+				name: "deny-repository-control-paths",
+				mutate: func(workspace *corev1alpha1.WorkspaceConfig) {
+					workspace.DenyRepositoryControlPaths = true
+				},
+			},
+			{
+				name: "reject-binary-files",
+				mutate: func(workspace *corev1alpha1.WorkspaceConfig) {
+					workspace.RejectBinaryFiles = true
+				},
+			},
+			{
+				name: "reject-secret-like-content",
+				mutate: func(workspace *corev1alpha1.WorkspaceConfig) {
+					workspace.RejectSecretLikeContent = true
+				},
+			},
+		}
+
+		for _, tt := range tests {
+			task := validContainer.DeepCopy()
+			task.ResourceVersion = ""
+			task.UID = ""
+			task.Name = "container-workspace-" + tt.name
+			tt.mutate(task.Spec.Workspace)
+			Expect(k8sClient.Create(ctx, task)).NotTo(Succeed(), tt.name)
+		}
+
+		limit := int32(1)
+		agentTask := &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{Name: "agent-workspace-publication-guarantees", Namespace: namespace},
+			Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAgent,
+				Workspace: &corev1alpha1.WorkspaceConfig{
+					Intent:                       corev1alpha1.WorkspaceIntentWrite,
+					ExpectedRemoteSHA:            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+					MaxChangedFiles:              &limit,
+					AllowedPaths:                 []string{"src/**"},
+					DenyRepositoryControlPaths:   true,
+					RejectBinaryFiles:            true,
+					RejectSecretLikeContent:      true,
+					CreatePR:                     true,
+					ForgeCredentialRef:           &corev1alpha1.WorkspaceCredentialReference{Name: "forge-write"},
+					PublicationCredentialRef:     &corev1alpha1.WorkspaceCredentialReference{Name: "publication-write"},
+					PublicationReadCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: "publication-read"},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, agentTask)).To(Succeed())
+	})
+
 	It("validates provider-neutral MCP workspace selection", func(ctx context.Context) {
 		tool := &corev1alpha1.Tool{
 			ObjectMeta: metav1.ObjectMeta{Name: "workspace-mcp", Namespace: namespace},
@@ -191,7 +297,7 @@ var _ = Describe("workspace.orka.ai schema validation", func() {
 		}
 		Expect(k8sClient.Create(ctx, task)).To(Succeed())
 		task.Status.Phase = corev1alpha1.TaskPhaseFinalizing
-		task.Status.ExecutionOutcome = &corev1alpha1.TaskExecutionOutcome{
+		task.Status.ExecutionOutcome = &corev1alpha1.TaskWorkloadExecutionOutcome{
 			Phase:      corev1alpha1.TaskPhaseSucceeded,
 			Attempt:    1,
 			RecordedAt: metav1.Now(),

@@ -1,61 +1,78 @@
-# GitHub CI/CD Integration
+# GitHub implementation and CI handoff
 
-This maintained example shows how to use Orka's multi-agent coordination to automate a GitHub PR workflow:
+A native AI coordinator delegates one implementation to a Claude ACP runtime.
+Orka's publisher commits and verifies the branch, then the coordinator opens a
+pull request and waits up to five minutes for CI. It reports the exact CI status
+and stops. It does not merge or attempt another delegated write to that branch.
 
-1. An AI coordinator delegates code changes to a Claude Code runtime agent.
-2. The runtime agent pushes a feature branch.
-3. The coordinator opens a PR with Orka's built-in `create_pull_request` tool.
-4. The coordinator waits for CI and merges with `auto_merge_pull_request`.
-5. If CI fails, the coordinator loops back with fix feedback on the same branch.
+Delegation cannot supply `workspace.expectedRemoteSHA`, which is required to
+update an existing publication branch. Use the optional direct repair workflow
+below or a [RepositoryMonitor](../repository-monitor-pr-review-repair) for repairs.
 
-## How It Works
+## Configure it
 
-1. A **coordinator agent** (AI type with coordination enabled) receives a task
-2. It delegates work to a **Claude Code agent** via `delegate_task`, including workspace details for clone, push, and PR creation
-3. It uses built-in GitHub coordination tools to create the PR and auto-merge when checks pass
-4. On CI failure, it can delegate a follow-up fix using `prior_task`
+The cluster needs the native AI worker, the Claude ACP runtime, the provider
+proxy, and Workspace/Publisher configured. In `agents.yaml`, replace
+`my-provider` and the model names with ones available in your installation.
+The Claude runtime receives provider access through the proxy.
 
-## Files
-
-| File | Description |
-|------|-------------|
-| `agents.yaml` | Coordinator and Claude Code agent definitions |
-| `secret.yaml` | Example `git-credentials` Secret for clone/push/PR auth |
-| `task.yaml` | Sample task to trigger the workflow |
-| `github-actions-webhook.yaml` | Optional GitHub Actions workflow that triggers a branch-fix agent task on CI failure |
-
-## Setup
+Create three Secrets in the controller's watched namespace:
 
 ```bash
-# Update `spec.providerRef.name` in agents.yaml to match your Provider CRD.
-# Edit secret.yaml and replace the token value.
-kubectl apply -f examples/github-cicd/secret.yaml
-
-# Create Claude runtime credentials if you do not already have them
-kubectl create secret generic claude-credentials \
-  --from-literal=ANTHROPIC_API_KEY=sk-ant-your-key
-
-# Deploy the example
-kubectl apply -k examples/github-cicd
-
-# Submit a task
-kubectl apply -f examples/github-cicd/task.yaml
+kubectl -n orka-system create secret generic repository-read \
+  --from-literal=token='<read-token>'
+kubectl -n orka-system create secret generic repository-publish \
+  --from-literal=token='<write-token>'
+kubectl -n orka-system create secret generic repository-forge \
+  --from-literal=token='<forge-token>'
 ```
 
-Before running the task, edit `task.yaml` and replace the placeholder repository details:
+There are four credential roles. This same-repository example uses
+`repository-read` for both `readCredentialRef` and
+`publicationReadCredentialRef`. If the publication repository differs, provide
+a target-read Secret for `publicationReadCredentialRef`.
+`publicationCredentialRef` authorizes the push; `forgeCredentialRef` authorizes
+PR creation. None enters the ACP process tree.
 
-- `gitRepo`
-- `branch`
-- `gitSecretRef`
-- `pushBranch`
+`secret.yaml` is an optional template for those Secrets. Replace its placeholders
+before applying it. The kustomization applies only Agents, so it cannot overwrite
+credentials or start a Task before configuration is ready.
 
-## Optional GitHub Actions Integration
+Edit `task.yaml` before creating a Task:
 
-The `github-actions-webhook.yaml` file is a workflow you can copy into `.github/workflows/` in a repository. When a CI job fails, it creates a direct `type: agent` task for `claude-coder` to investigate and push a fix to the same branch.
+- Set the source and publication repository URLs and source branch.
+- Set all four credential references.
+- Choose a new, unused `pushBranch` for each run and the intended `prBaseBranch`.
+- Replace the sample implementation request with work appropriate to that repository.
 
-Configure these repository secrets:
+## Run and verify
 
-- `ORKA_API_URL`
-- `ORKA_TOKEN`
+```bash
+kubectl -n orka-system apply -k examples/github-cicd
+task_name="$(kubectl -n orka-system create -f examples/github-cicd/task.yaml -o jsonpath='{.metadata.name}')"
+kubectl -n orka-system get task "$task_name" -w
+```
 
-And make sure the Orka namespace already has a `git-credentials` Secret that matches the name used in the workflow payload.
+Inspect the coordinator result and its child Task. Require a verified
+`status.delivery` receipt with a `headSHA`, then inspect that commit and the PR.
+The coordinator reports `passed`, `failed`, `pending`, `no_checks`, or `closed`;
+only `passed` means CI is green. A successful model response alone does not prove
+that publication or CI succeeded.
+
+## Optional direct CI repair
+
+Copy `github-actions-webhook.yaml` into `.github/workflows/` in the repository.
+It handles failed runs of a workflow named `CI` for same-repository PRs. Fork PRs
+and branch-only runs are skipped. Configure repository secrets `ORKA_API_URL`
+and `ORKA_TOKEN`; the optional `ORKA_NAMESPACE` repository variable defaults to
+`orka-system`.
+
+The Task namespace needs `claude-coder`, `repository-read`, and
+`repository-publish`. The repair Task checks out the failed commit using `ref`
+and supplies that same SHA as `expectedRemoteSHA`. Publication stops if the
+branch has moved. A source branch protected by repository rules can also reject
+the update. This workflow leaves the existing PR open and never merges it.
+
+This GitHub Actions workflow is separate from the coordinator's single pass.
+It starts an Orka Task through the API and does not wait for its result; inspect
+the resulting Task and delivery receipt in Orka.

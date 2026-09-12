@@ -49,9 +49,11 @@ export function StructuredLogViewer({ taskId, taskPhase }: { taskId: string; tas
   const bottomRef = useRef<HTMLDivElement>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
 
+  const indexedLogs = logs.map((line, index) => ({ index: index + 1, line }))
+
   const filteredLogs = search
-    ? logs.filter(line => line.toLowerCase().includes(search.toLowerCase()))
-    : logs
+    ? indexedLogs.filter(({ line }) => line.toLowerCase().includes(search.toLowerCase()))
+    : indexedLogs
 
   const scrollToBottom = useCallback(() => {
     if (bottomRef.current?.scrollIntoView) {
@@ -112,7 +114,9 @@ export function StructuredLogViewer({ taskId, taskPhase }: { taskId: string; tas
           <CardTitle className="flex items-center gap-2">
             Logs
             <span className="text-xs font-normal text-muted-foreground">
-              ({filteredLogs.length} line{filteredLogs.length !== 1 ? 's' : ''})
+              {search
+                ? `(${filteredLogs.length} of ${logs.length} loaded line${logs.length !== 1 ? 's' : ''})`
+                : `(${filteredLogs.length} line${filteredLogs.length !== 1 ? 's' : ''})`}
             </span>
             {isLive && (
               <span className="flex items-center gap-1 text-xs font-normal text-live">
@@ -171,12 +175,17 @@ export function StructuredLogViewer({ taskId, taskPhase }: { taskId: string; tas
             onScroll={handleScroll}
             className="p-4 font-mono text-xs"
           >
-            {filteredLogs.map((line, i) => {
-              const level = parseLogLevel(line)
+            {search && filteredLogs.length === 0 && (
+              <div className="py-4 text-sm text-muted-foreground" data-testid="log-no-matches">
+                {`No matching lines for "${search}".`}
+              </div>
+            )}
+            {filteredLogs.map(row => {
+              const level = parseLogLevel(row.line)
               return (
-                <div key={i} className={`py-0.5 ${levelColors[level]}`} data-testid="log-line">
-                  <span className="mr-3 select-none text-muted-foreground">{i + 1}</span>
-                  <HighlightedText text={line} search={search} />
+                <div key={`log-${row.index}`} className={`py-0.5 ${levelColors[level]}`} data-testid="log-line">
+                  <span className="mr-3 select-none text-muted-foreground">{row.index}</span>
+                  <HighlightedText text={row.line} search={search} />
                 </div>
               )
             })}

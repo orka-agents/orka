@@ -16,6 +16,8 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
+const concurrentDedupeTaskName = "task-dedupe-concurrent"
+
 //nolint:gocyclo // Keeps append/list/latest/delete coverage together for store lifecycle readability.
 func TestExecutionEventStoreAppendListLatestDelete(t *testing.T) {
 	s := setupDiskStore(t)
@@ -246,10 +248,136 @@ func TestExecutionEventStoreConcurrentSameStreamAppendsMultiConnection(t *testin
 	if _, err := db.Exec("PRAGMA foreign_keys=ON"); err != nil {
 		t.Fatalf("set foreign keys: %v", err)
 	}
-	if err := migrate(db); err != nil {
-		t.Fatalf("migrate: %v", err)
+	if err := initializeSchema(db); err != nil {
+		t.Fatalf("initializeSchema: %v", err)
 	}
 	assertConcurrentExecutionEventAppends(t, NewStore(db, dbPath))
+}
+
+func TestExecutionEventStoreAppendIfAbsentConcurrentAcrossStoreInstances(t *testing.T) {
+	s := setupDiskStore(t)
+	stores := []*Store{s, NewStore(s.db, s.dbPath)}
+	ctx := context.Background()
+	const count = 32
+
+	type result struct {
+		event    *store.ExecutionEvent
+		appended bool
+		err      error
+	}
+	results := make(chan result, count)
+	var wg sync.WaitGroup
+	for i := range count {
+		wg.Go(func() {
+			event, appended, err := stores[i%len(stores)].AppendExecutionEventIfAbsent(ctx, &store.ExecutionEvent{
+				Namespace:  "default",
+				StreamType: store.ExecutionEventStreamTypeTask,
+				StreamID:   concurrentDedupeTaskName,
+				TaskName:   concurrentDedupeTaskName,
+				Type:       events.ExecutionEventTypeToolCallStarted,
+			}, "shared-event-key")
+			results <- result{event: event, appended: appended, err: err}
+		})
+	}
+	wg.Wait()
+	close(results)
+
+	appendedCount := 0
+	for result := range results {
+		if result.err != nil {
+			t.Fatalf("AppendExecutionEventIfAbsent concurrent: %v", result.err)
+		}
+		if result.event == nil || result.event.Seq != 1 {
+			t.Fatalf("deduplicated event = %#v, want seq 1", result.event)
+		}
+		if result.appended {
+			appendedCount++
+		}
+	}
+	if appendedCount != 1 {
+		t.Fatalf("new appends = %d, want 1", appendedCount)
+	}
+
+	listed, err := s.ListExecutionEvents(ctx, store.ExecutionEventFilter{
+		Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: concurrentDedupeTaskName,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 {
+		t.Fatalf("deduplicated events = %#v, want one event", listed)
+	}
+}
+
+func TestExecutionEventStoreAtomicallyPersistsPlanProjection(t *testing.T) {
+	const (
+		firstPlanSummary  = "first"
+		secondPlanSummary = "second"
+	)
+	s := setupDiskStore(t)
+	ctx := context.Background()
+	const taskName = "task-plan-atomic"
+
+	event := &store.ExecutionEvent{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   taskName,
+		TaskName:   taskName,
+		Type:       events.ExecutionEventTypePlanUpdated,
+	}
+	firstPlan := &store.PlanState{
+		Namespace: "default", TaskName: taskName,
+		Summary: firstPlanSummary, ProgressPct: 10, PlanDocument: "# First",
+	}
+
+	if _, err := s.db.ExecContext(ctx, `CREATE TRIGGER fail_atomic_plan_projection
+		BEFORE INSERT ON plan_states
+		BEGIN
+			SELECT RAISE(ABORT, 'injected plan projection failure');
+		END`); err != nil {
+		t.Fatal(err)
+	}
+	appended, isNew, err := s.AppendExecutionEventWithPlanIfAbsent(ctx, event, "plan-update-1", firstPlan)
+	if err == nil || appended != nil || isNew {
+		t.Fatalf("failed atomic append = %#v new=%t err=%v", appended, isNew, err)
+	}
+	latest, latestErr := s.GetLatestExecutionEventSeq(ctx, "default", store.ExecutionEventStreamTypeTask, taskName)
+	if latestErr != nil || latest != 0 {
+		t.Fatalf("latest after rolled-back plan append = %d err=%v, want 0", latest, latestErr)
+	}
+	if plan, planErr := s.GetPlan(ctx, "default", taskName); !errors.Is(planErr, store.ErrNotFound) || plan != nil {
+		t.Fatalf("plan after rolled-back append = %#v err=%v", plan, planErr)
+	}
+	if _, err := s.db.ExecContext(ctx, `DROP TRIGGER fail_atomic_plan_projection`); err != nil {
+		t.Fatal(err)
+	}
+
+	appended, isNew, err = s.AppendExecutionEventWithPlanIfAbsent(ctx, event, "plan-update-1", firstPlan)
+	if err != nil || !isNew || appended == nil || appended.Seq != 1 {
+		t.Fatalf("first atomic append = %#v new=%t err=%v", appended, isNew, err)
+	}
+	secondPlan := &store.PlanState{
+		Namespace: "default", TaskName: taskName,
+		Summary: secondPlanSummary, ProgressPct: 90, PlanDocument: "# Second",
+	}
+	secondEvent := *event
+	appended, isNew, err = s.AppendExecutionEventWithPlanIfAbsent(ctx, &secondEvent, "plan-update-2", secondPlan)
+	if err != nil || !isNew || appended == nil || appended.Seq != 2 {
+		t.Fatalf("second atomic append = %#v new=%t err=%v", appended, isNew, err)
+	}
+
+	staleReplay := *event
+	appended, isNew, err = s.AppendExecutionEventWithPlanIfAbsent(ctx, &staleReplay, "plan-update-1", firstPlan)
+	if err != nil || isNew || appended == nil || appended.Seq != 1 {
+		t.Fatalf("stale replay = %#v new=%t err=%v", appended, isNew, err)
+	}
+	plan, err := s.GetPlan(ctx, "default", taskName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Summary != secondPlan.Summary || plan.ProgressPct != secondPlan.ProgressPct || plan.PlanDocument != secondPlan.PlanDocument {
+		t.Fatalf("plan after stale replay = %#v, want second projection %#v", plan, secondPlan)
+	}
 }
 
 func assertConcurrentExecutionEventAppends(t *testing.T, s *Store) {
@@ -312,84 +440,6 @@ func executionEventAuditSecrets() map[string]string {
 		"txn":       strings.Join([]string{"txn", "value", "for", "redaction"}, "-"),
 		"github":    "github" + "_pat_" + strings.Repeat("a", 32),
 		"anthropic": strings.Join([]string{"sk", "ant", "api03", strings.Repeat("a", 32)}, "-"),
-	}
-}
-
-func TestMigrateBackfillsExecutionEventSessionCursors(t *testing.T) {
-	const taskC = "task-c"
-	path := filepath.Join(t.TempDir(), "old.db")
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatalf("open old db: %v", err)
-	}
-	_, err = db.Exec(`CREATE TABLE execution_events (
-		id              TEXT PRIMARY KEY,
-		namespace       TEXT NOT NULL,
-		stream_type     TEXT NOT NULL,
-		stream_id       TEXT NOT NULL,
-		seq             INTEGER NOT NULL,
-		type            TEXT NOT NULL,
-		severity        TEXT NOT NULL DEFAULT 'info',
-		task_name       TEXT NOT NULL DEFAULT '',
-		session_name    TEXT NOT NULL DEFAULT '',
-		agent_name      TEXT NOT NULL DEFAULT '',
-		tool_name       TEXT NOT NULL DEFAULT '',
-		tool_call_id    TEXT NOT NULL DEFAULT '',
-		summary         TEXT NOT NULL DEFAULT '',
-		content_json    TEXT,
-		content_text    TEXT NOT NULL DEFAULT '',
-		truncation_json TEXT,
-		created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-		UNIQUE(namespace, stream_type, stream_id, seq)
-	)`)
-	if err != nil {
-		t.Fatalf("create old execution_events: %v", err)
-	}
-	for _, stmt := range []string{
-		`INSERT INTO execution_events(id, namespace, stream_type, stream_id, seq, type, severity, task_name, session_name)
-		 VALUES ('default/task/task-a/1', 'default', 'task', 'task-a', 1, 'TaskStarted', 'info', 'task-a', 'session-1')`,
-		`INSERT INTO execution_events(id, namespace, stream_type, stream_id, seq, type, severity, task_name, session_name)
-		 VALUES ('default/task/task-b/1', 'default', 'task', 'task-b', 1, 'WorkerStarted', 'info', 'task-b', 'session-1')`,
-	} {
-		if _, err := db.Exec(stmt); err != nil {
-			t.Fatalf("insert old event: %v", err)
-		}
-	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("close old db: %v", err)
-	}
-
-	migratedDB, err := NewDB(path)
-	if err != nil {
-		t.Fatalf("NewDB(migrated) error = %v", err)
-	}
-	defer migratedDB.Close() //nolint:errcheck
-	s := NewStore(migratedDB, path)
-	ctx := context.Background()
-	if err := s.DeleteExecutionEvents(ctx, "default", store.ExecutionEventStreamTypeTask, "task-a"); err != nil {
-		t.Fatalf("DeleteExecutionEvents(task-a): %v", err)
-	}
-	if err := s.DeleteExecutionEvents(ctx, "default", store.ExecutionEventStreamTypeTask, "task-b"); err != nil {
-		t.Fatalf("DeleteExecutionEvents(task-b): %v", err)
-	}
-	if _, err := s.AppendExecutionEvent(ctx, &store.ExecutionEvent{
-		Namespace:   "default",
-		StreamType:  store.ExecutionEventStreamTypeTask,
-		StreamID:    taskC,
-		TaskName:    taskC,
-		SessionName: "session-1",
-		Type:        events.ExecutionEventTypeTaskSucceeded,
-	}); err != nil {
-		t.Fatalf("AppendExecutionEvent(task-c): %v", err)
-	}
-	listed, latest, err := s.ListSessionExecutionEvents(ctx, store.SessionExecutionEventFilter{
-		Namespace: "default", SessionName: "session-1", AfterSeq: 2,
-	})
-	if err != nil {
-		t.Fatalf("ListSessionExecutionEvents: %v", err)
-	}
-	if latest != 3 || len(listed) != 1 || listed[0].SessionSeq != 3 || listed[0].TaskName != taskC {
-		t.Fatalf("latest=%d listed=%#v, want migrated cursor to continue at 3", latest, listed)
 	}
 }
 
@@ -463,7 +513,7 @@ func TestExecutionEventStoreListSessionExecutionEvents(t *testing.T) {
 	}
 }
 
-func TestExecutionEventStoreListSessionCursorSurvivesTaskDeletion(t *testing.T) {
+func TestExecutionEventStoreListSessionCursorSurvivesDeletionAndReopen(t *testing.T) {
 	const taskC = "task-c"
 	s := setupDiskStore(t)
 	ctx := context.Background()
@@ -488,6 +538,18 @@ func TestExecutionEventStoreListSessionCursorSurvivesTaskDeletion(t *testing.T) 
 	if err := s.DeleteExecutionEvents(ctx, "default", store.ExecutionEventStreamTypeTask, "task-a"); err != nil {
 		t.Fatalf("DeleteExecutionEvents: %v", err)
 	}
+	if err := s.DeleteExecutionEvents(ctx, "default", store.ExecutionEventStreamTypeTask, "task-b"); err != nil {
+		t.Fatalf("DeleteExecutionEvents: %v", err)
+	}
+	if err := s.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := NewDB(s.dbPath)
+	if err != nil {
+		t.Fatalf("reopen after deleting all events: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	s = NewStore(db, s.dbPath)
 	if _, err := s.AppendExecutionEvent(ctx, &store.ExecutionEvent{
 		Namespace:   "default",
 		StreamType:  store.ExecutionEventStreamTypeTask,

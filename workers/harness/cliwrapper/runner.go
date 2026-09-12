@@ -19,6 +19,8 @@ type CommandRunner struct {
 	CancelGrace      time.Duration
 }
 
+var errChildCredentialProcessCleanupUnproven = errors.New("child credential process cleanup was not proven")
+
 func NewCommandRunner(cfg Config) CommandRunner {
 	stdoutLimit := cfg.StdoutLimitBytes
 	if stdoutLimit == 0 {
@@ -45,7 +47,10 @@ func (r CommandRunner) Run(ctx context.Context, spec *CommandSpec) (CommandResul
 
 	cmd := exec.Command(spec.Path, spec.Args...)
 	cmd.Dir = spec.Dir
-	baseEnv := sanitizedProcessEnv(os.Environ())
+	// The wrapper Pod can carry controller-only credentials through envFrom or
+	// secretKeyRef. Agent-controlled children receive only a fixed process
+	// baseline plus the environment explicitly frozen for this turn.
+	baseEnv := baselineChildProcessEnv()
 	if spec.ClearEnv {
 		baseEnv = nil
 	}
@@ -59,17 +64,31 @@ func (r CommandRunner) Run(ctx context.Context, spec *CommandSpec) (CommandResul
 	stdout := newLimitedBuffer(r.StdoutLimitBytes)
 	stdoutFull := newLimitedBuffer(maxStoredResultBytes)
 	stderr := newLimitedBuffer(r.StderrLimitBytes)
-	stdoutPipe, err := cmd.StdoutPipe()
+	// Parent-owned pipes instead of cmd.StdoutPipe/StderrPipe: Wait closes the
+	// pipes it created as soon as the process exits, racing the copy goroutines
+	// and silently truncating child output. With os.Pipe the read ends stay
+	// open until the copies drain to EOF or waitForPipeCopies times out.
+	stdoutRead, stdoutWrite, err := os.Pipe()
 	if err != nil {
 		return CommandResult{}, fmt.Errorf("open stdout pipe: %w", err)
 	}
-	stderrPipe, err := cmd.StderrPipe()
+	stderrRead, stderrWrite, err := os.Pipe()
 	if err != nil {
+		_ = stdoutRead.Close()
+		_ = stdoutWrite.Close()
 		return CommandResult{}, fmt.Errorf("open stderr pipe: %w", err)
 	}
+	closePipes := func(pipes ...*os.File) {
+		for _, pipe := range pipes {
+			_ = pipe.Close()
+		}
+	}
+	cmd.Stdout = stdoutWrite
+	cmd.Stderr = stderrWrite
 
 	started := time.Now().UTC()
 	if err := ctx.Err(); err != nil {
+		closePipes(stdoutRead, stdoutWrite, stderrRead, stderrWrite)
 		return CommandResult{
 			StartedAt:  started,
 			FinishedAt: time.Now().UTC(),
@@ -80,18 +99,22 @@ func (r CommandRunner) Run(ctx context.Context, spec *CommandSpec) (CommandResul
 		}, err
 	}
 	if err := cmd.Start(); err != nil {
+		closePipes(stdoutRead, stdoutWrite, stderrRead, stderrWrite)
 		return CommandResult{StartedAt: started, FinishedAt: time.Now().UTC(), ExitCode: -1, ResultFile: spec.ResultFile}, err
 	}
+	// The child holds duplicated write ends; the parent's copies must close so
+	// the readers reach EOF once the process (group) exits.
+	closePipes(stdoutWrite, stderrWrite)
 
 	var copyWG sync.WaitGroup
 	copyWG.Add(2)
 	go func() {
 		defer copyWG.Done()
-		_, _ = io.Copy(io.MultiWriter(stdout, stdoutFull), stdoutPipe)
+		_, _ = io.Copy(io.MultiWriter(stdout, stdoutFull), stdoutRead)
 	}()
 	go func() {
 		defer copyWG.Done()
-		_, _ = io.Copy(stderr, stderrPipe)
+		_, _ = io.Copy(stderr, stderrRead)
 	}()
 
 	waitCh := make(chan error, 1)
@@ -111,7 +134,7 @@ func (r CommandRunner) Run(ctx context.Context, spec *CommandSpec) (CommandResul
 	if !cancelled {
 		terminateProcessGroup(cmd.Process, 0)
 	}
-	terminateChildCredentialProcesses(r.CancelGrace)
+	cleanupErr := terminateChildCredentialProcesses(r.CancelGrace)
 	if waitErr == nil {
 		if err := ctx.Err(); err != nil {
 			cancelled = true
@@ -119,7 +142,17 @@ func (r CommandRunner) Run(ctx context.Context, spec *CommandSpec) (CommandResul
 			waitErr = err
 		}
 	}
-	waitForPipeCopies(&copyWG, stdoutPipe, stderrPipe, 5*time.Second)
+	if cleanupErr != nil {
+		waitErr = errors.Join(
+			waitErr,
+			fmt.Errorf("%w: %w", errChildCredentialProcessCleanupUnproven, cleanupErr),
+		)
+	}
+	waitForPipeCopies(&copyWG, stdoutRead, stderrRead, 5*time.Second)
+	// waitForPipeCopies closes the readers only on its timeout path; close
+	// them on every path so successful commands do not leak two descriptors
+	// per turn (Close after close is a harmless ErrClosed).
+	closePipes(stdoutRead, stderrRead)
 
 	finished := time.Now().UTC()
 	exitCode := exitCodeFromError(waitErr)
@@ -175,8 +208,7 @@ func exitCodeFromError(err error) int {
 	if err == nil {
 		return 0
 	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
+	if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
 		return exitErr.ExitCode()
 	}
 	return -1
@@ -195,6 +227,13 @@ func sanitizedProcessEnv(env []string) []string {
 		out = append(out, entry)
 	}
 	return out
+}
+
+func baselineChildProcessEnv() []string {
+	return []string{
+		"PATH=" + wrapperSafeCommandPath,
+		"TMPDIR=/tmp",
+	}
 }
 
 func mergeCommandEnv(base, overrides []string) []string {

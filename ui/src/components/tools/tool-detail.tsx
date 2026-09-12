@@ -23,6 +23,13 @@ export function ToolDetail({ toolName }: { toolName: string }) {
   const httpConfig = !isBuiltin ? tool.spec?.http : undefined
   const mcpConfig = !isBuiltin ? tool.spec?.mcp : undefined
   const actor = !isBuiltin ? tool.status?.actor : undefined
+  // Built-in tools return a flat {name, builtin, description, parameters}
+  // payload; custom tools carry the schema under spec.parameters.
+  const rawParameters = isBuiltin ? (tool as Record<string, unknown>).parameters : tool.spec?.parameters
+  const parameters =
+    rawParameters && typeof rawParameters === 'object' && Object.keys(rawParameters as object).length > 0
+      ? rawParameters
+      : undefined
 
   return (
     <div className="space-y-4">
@@ -105,15 +112,6 @@ export function ToolDetail({ toolName }: { toolName: string }) {
             </Card>
           )}
 
-          {tool.spec.parameters && (
-            <Card>
-              <CardHeader><CardTitle>Parameters (JSON Schema)</CardTitle></CardHeader>
-              <CardContent>
-                <pre className="max-h-64 overflow-auto rounded-md bg-muted p-4 text-xs">{JSON.stringify(tool.spec.parameters, null, 2)}</pre>
-              </CardContent>
-            </Card>
-          )}
-
           {tool.status && (
             <Card>
               <CardHeader><CardTitle>Status</CardTitle></CardHeader>
@@ -130,6 +128,15 @@ export function ToolDetail({ toolName }: { toolName: string }) {
             </Card>
           )}
         </>
+      )}
+
+      {parameters && (
+        <Card>
+          <CardHeader><CardTitle>Parameters (JSON Schema)</CardTitle></CardHeader>
+          <CardContent>
+            <pre className="max-h-64 overflow-auto rounded-md bg-muted p-4 text-xs">{JSON.stringify(parameters, null, 2)}</pre>
+          </CardContent>
+        </Card>
       )}
     </div>
   )

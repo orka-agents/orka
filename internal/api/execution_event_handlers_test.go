@@ -19,10 +19,11 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/store"
+	storetest "github.com/orka-agents/orka/internal/store/storetest"
 )
 
 func TestListTaskEvents(t *testing.T) {
-	eventStore := store.NewFakeExecutionEventStoreWithClock(func() time.Time {
+	eventStore := storetest.NewFakeExecutionEventStoreWithClock(func() time.Time {
 		return time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
 	})
 	appendTestTaskEvent(t, eventStore, "task-1", events.ExecutionEventTypeTaskStarted)
@@ -57,7 +58,7 @@ func TestListTaskEvents(t *testing.T) {
 }
 
 func TestTaskEventsMissingTaskAndNamespaceAuthorization(t *testing.T) {
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 
 	t.Run("missing task returns 404", func(t *testing.T) {
 		h, app := setupTaskEventHandlers(t, eventStore)
@@ -88,7 +89,7 @@ func TestTaskEventsMissingTaskAndNamespaceAuthorization(t *testing.T) {
 }
 
 func TestListTaskEventsUsesStreamIDWhenTaskNameMetadataDiffers(t *testing.T) {
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
 		Namespace:  "default",
 		StreamType: store.ExecutionEventStreamTypeTask,
@@ -120,7 +121,7 @@ func TestListTaskEventsUsesStreamIDWhenTaskNameMetadataDiffers(t *testing.T) {
 }
 
 func TestStreamTaskEventsSSEReplayHeartbeatAndPolling(t *testing.T) {
-	eventStore := store.NewFakeExecutionEventStoreWithClock(func() time.Time {
+	eventStore := storetest.NewFakeExecutionEventStoreWithClock(func() time.Time {
 		return time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
 	})
 	appendTestTaskEvent(t, eventStore, "task-1", events.ExecutionEventTypeTaskStarted)
@@ -143,7 +144,7 @@ func TestStreamTaskEventsSSEReplayHeartbeatAndPolling(t *testing.T) {
 	})
 
 	t.Run("emits newly appended event without reconnect", func(t *testing.T) {
-		liveStore := store.NewFakeExecutionEventStore()
+		liveStore := storetest.NewFakeExecutionEventStore()
 		h, app := setupTaskEventHandlers(t, liveStore, testTask("default", "task-live"))
 		configureShortTaskEventStream(h)
 		useCancelingContext(app, 60*time.Millisecond)
@@ -172,7 +173,7 @@ func TestStreamTaskEventsSSEReplayHeartbeatAndPolling(t *testing.T) {
 	})
 
 	t.Run("heartbeat when idle", func(t *testing.T) {
-		idleStore := store.NewFakeExecutionEventStore()
+		idleStore := storetest.NewFakeExecutionEventStore()
 		h, app := setupTaskEventHandlers(t, idleStore, testTask("default", "task-idle"))
 		configureShortTaskEventStream(h)
 		useCancelingContext(app, 25*time.Millisecond)
@@ -185,7 +186,7 @@ func TestStreamTaskEventsSSEReplayHeartbeatAndPolling(t *testing.T) {
 }
 
 func TestStreamTaskEventsFlushesCompletionAfterExactLimitBatch(t *testing.T) {
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	for range store.MaxExecutionEventLimit - 1 {
 		appendTestTaskEvent(t, eventStore, "task-limit", events.ExecutionEventTypeWorkerStarted)
 	}
@@ -201,7 +202,7 @@ func TestStreamTaskEventsFlushesCompletionAfterExactLimitBatch(t *testing.T) {
 }
 
 func TestStreamTaskEventsReplaysPostTerminalEventsBeforeComplete(t *testing.T) {
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	appendTestTaskEvent(t, eventStore, "task-terminal", events.ExecutionEventTypeTaskStarted)
 	appendTestTaskEvent(t, eventStore, "task-terminal", events.ExecutionEventTypeTaskSucceeded)
 	appendTestTaskEvent(t, eventStore, "task-terminal", events.ExecutionEventTypeTaskForkCreated)
@@ -221,7 +222,7 @@ func TestStreamTaskEventsReplaysPostTerminalEventsBeforeComplete(t *testing.T) {
 }
 
 func TestSSETaskEventsCancellationExitsCleanly(t *testing.T) {
-	eventStore := store.NewFakeExecutionEventStore()
+	eventStore := storetest.NewFakeExecutionEventStore()
 	h, app := setupTaskEventHandlers(t, eventStore, testTask("default", "task-cancel"))
 	configureShortTaskEventStream(h)
 	app.Use(func(c fiber.Ctx) error {

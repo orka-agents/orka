@@ -11,18 +11,25 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
+
+	"github.com/orka-agents/orka/internal/tokenexchange"
 )
 
 const extractorRaw = "raw"
 
 // WebFetchTool implements URL content fetching and extraction
 type WebFetchTool struct {
-	client *http.Client
+	client               *http.Client
+	allowPrivateForTests bool
+	maxChars             int
+	maxURLBytes          int
 }
 
 // WebFetchArgs are the arguments for the web fetch tool
@@ -42,21 +49,58 @@ type WebFetchResult struct {
 	Extractor string `json:"extractor"`
 }
 
-const maxBodySize = 5 * 1024 * 1024 // 5MB
+const (
+	maxBodySize                 = 5 * 1024 * 1024 // 5MB
+	defaultWebFetchMaxChars     = 50000
+	brokeredWebFetchMaxChars    = defaultWebFetchMaxChars
+	brokeredWebFetchMaxURLBytes = 64 << 10
+)
 
 // NewWebFetchTool creates a new web fetch tool
 func NewWebFetchTool() *WebFetchTool {
-	return &WebFetchTool{
-		client: &http.Client{
-			Timeout: 60 * time.Second,
-			CheckRedirect: func(_ *http.Request, via []*http.Request) error {
-				if len(via) >= 5 {
-					return fmt.Errorf("too many redirects (max 5)")
-				}
-				return nil
-			},
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.DialContext = tokenexchange.PublicEndpointDialContext
+	transport.DisableKeepAlives = true
+	tool := &WebFetchTool{}
+	tool.client = &http.Client{
+		Transport: transport,
+		Timeout:   60 * time.Second,
+		CheckRedirect: func(request *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return fmt.Errorf("too many redirects (max 5)")
+			}
+			return validateWebFetchURL(request.URL, false)
 		},
 	}
+	return tool
+}
+
+// NewBrokeredWebFetchTool creates the bounded web fetch implementation exposed
+// through the controller MCP broker.
+func NewBrokeredWebFetchTool() *WebFetchTool {
+	tool := NewWebFetchTool()
+	tool.maxChars = brokeredWebFetchMaxChars
+	tool.maxURLBytes = brokeredWebFetchMaxURLBytes
+	return tool
+}
+
+func validateWebFetchURL(parsed *url.URL, allowPrivate bool) error {
+	if parsed == nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return fmt.Errorf("only http and https URLs are supported")
+	}
+	if parsed.Host == "" || parsed.Hostname() == "" {
+		return fmt.Errorf("URL must have a host")
+	}
+	if parsed.User != nil {
+		return fmt.Errorf("URL userinfo is not supported")
+	}
+	if !allowPrivate {
+		if address := net.ParseIP(parsed.Hostname()); address != nil && !tokenexchange.IsPublicAddress(address) {
+			return fmt.Errorf("URL must not target private, loopback, or link-local addresses")
+		}
+	}
+	return nil
 }
 
 // Name returns the tool name
@@ -71,17 +115,25 @@ func (t *WebFetchTool) Description() string {
 
 // Parameters returns the JSON Schema for parameters
 func (t *WebFetchTool) Parameters() json.RawMessage {
-	return json.RawMessage(`{
+	maximum := ""
+	if t.maxChars > 0 {
+		maximum = fmt.Sprintf(",\n\t\t\t\t\"maximum\": %d", t.maxChars)
+	}
+	maxLength := ""
+	if t.maxURLBytes > 0 {
+		maxLength = fmt.Sprintf(",\n\t\t\t\t\"maxLength\": %d", t.maxURLBytes/utf8.UTFMax)
+	}
+	return json.RawMessage(fmt.Sprintf(`{
 		"type": "object",
 		"properties": {
 			"url": {
 				"type": "string",
-				"description": "The URL to fetch (http or https only)"
+				"description": "The URL to fetch (http or https only)"%s
 			},
 			"max_chars": {
 				"type": "integer",
 				"description": "Maximum characters to return (default: 50000)",
-				"default": 50000
+				"default": %d%s
 			},
 			"raw": {
 				"type": "boolean",
@@ -90,7 +142,7 @@ func (t *WebFetchTool) Parameters() json.RawMessage {
 			}
 		},
 		"required": ["url"]
-	}`)
+	}`, maxLength, defaultWebFetchMaxChars, maximum))
 }
 
 // Execute fetches the URL and extracts content
@@ -103,24 +155,26 @@ func (t *WebFetchTool) Execute(ctx context.Context, args json.RawMessage) (strin
 	if fetchArgs.URL == "" {
 		return "", fmt.Errorf("url is required")
 	}
+	if t.maxURLBytes > 0 && len(fetchArgs.URL) > t.maxURLBytes {
+		return "", fmt.Errorf("url must be no greater than %d bytes", t.maxURLBytes)
+	}
 
-	// Validate URL
 	parsed, err := url.Parse(fetchArgs.URL)
 	if err != nil {
 		return "", fmt.Errorf("invalid URL: %w", err)
 	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return "", fmt.Errorf("only http and https URLs are supported")
-	}
-	if parsed.Host == "" {
-		return "", fmt.Errorf("URL must have a host")
+	if err := validateWebFetchURL(parsed, t.allowPrivateForTests); err != nil {
+		return "", err
 	}
 
 	if fetchArgs.MaxChars <= 0 {
-		fetchArgs.MaxChars = 50000
+		fetchArgs.MaxChars = defaultWebFetchMaxChars
+	}
+	if t.maxChars > 0 && fetchArgs.MaxChars > t.maxChars {
+		return "", fmt.Errorf("max_chars must be no greater than %d", t.maxChars)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fetchArgs.URL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
@@ -158,17 +212,13 @@ func (t *WebFetchTool) Execute(ctx context.Context, args json.RawMessage) (strin
 		extractor = extractorRaw
 	}
 
-	truncated := false
-	if len(content) > fetchArgs.MaxChars {
-		content = content[:fetchArgs.MaxChars]
-		truncated = true
-	}
+	content, contentLength, truncated := truncateByRuneCount(content, fetchArgs.MaxChars)
 
 	result := WebFetchResult{
 		URL:       fetchArgs.URL,
 		Status:    resp.StatusCode,
 		Content:   content,
-		Length:    len(content),
+		Length:    contentLength,
 		Truncated: truncated,
 		Extractor: extractor,
 	}
@@ -179,6 +229,17 @@ func (t *WebFetchTool) Execute(ctx context.Context, args json.RawMessage) (strin
 	}
 
 	return string(output), nil
+}
+
+func truncateByRuneCount(value string, maxRunes int) (string, int, bool) {
+	runeCount := 0
+	for byteOffset := range value {
+		if runeCount == maxRunes {
+			return value[:byteOffset], runeCount, true
+		}
+		runeCount++
+	}
+	return value, runeCount, false
 }
 
 // extractJSON pretty-prints JSON content

@@ -1,0 +1,28 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  generateName: code-review-
+spec:
+  type: ai
+  agentRef:
+    name: code-review-coordinator
+  prompt: |
+    Implement JWT authentication for the API.
+
+    Repository details for delegated agent tasks:
+    - gitRepo: https://github.com/example/api.git
+    - branch: main
+    - readCredentialRef: repository-read
+    - publicationGitRepo: https://github.com/example/api.git
+    - publicationReadCredentialRef: repository-read
+    - publicationCredentialRef: repository-publish
+    - forgeCredentialRef: repository-forge
+    - pushBranch: feature/jwt-auth
+    - prBaseBranch: main
+
+    Requirements:
+    - Login endpoint with username/password
+    - Token refresh endpoint
+    - Middleware for protected routes
+    - Unit tests for all endpoints
+  timeout: 1h

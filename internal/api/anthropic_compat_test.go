@@ -20,7 +20,6 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	corev1 "k8s.io/api/core/v1"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -51,7 +50,7 @@ func setupTestAnthropicHandler(objs ...runtime.Object) (*AnthropicCompatHandler,
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
 	config := DefaultChatConfig()
 	resolver := NewProviderResolver(fakeClient, config)
-	handler := NewAnthropicCompatHandler(fakeClient, "default", false, config, resolver, nil)
+	handler := NewAnthropicCompatHandler(fakeClient, nil, "default", false, config, resolver, nil)
 
 	app := fiber.New()
 	return handler, app
@@ -1541,9 +1540,8 @@ func TestHandleStreamingMessages_DoesNotStreamPrematureCoordinatorText(t *testin
 // --- Tests: injectOrkaTools ---
 
 func TestInjectOrkaTools_BuiltinTools(t *testing.T) {
-	handler, _ := setupTestAnthropicHandler()
 	req := &llm.CompletionRequest{}
-	injectOrkaTools(context.Background(), handler.client, req, "default")
+	injectOrkaTools(req)
 
 	if len(req.Tools) < len(builtinProxyTools) {
 		t.Fatalf("expected at least %d tools, got %d", len(builtinProxyTools), len(req.Tools))
@@ -1561,7 +1559,6 @@ func TestInjectOrkaTools_BuiltinTools(t *testing.T) {
 }
 
 func TestInjectOrkaTools_PreservesClientTools(t *testing.T) {
-	handler, _ := setupTestAnthropicHandler()
 	clientTool := llm.Tool{
 		Name:        "my_custom_tool",
 		Description: "A client-provided tool",
@@ -1569,7 +1566,7 @@ func TestInjectOrkaTools_PreservesClientTools(t *testing.T) {
 	}
 	req := &llm.CompletionRequest{Tools: []llm.Tool{clientTool}}
 
-	injectOrkaTools(context.Background(), handler.client, req, "default")
+	injectOrkaTools(req)
 
 	// Client tool should still be first
 	if req.Tools[0].Name != "my_custom_tool" {
@@ -1591,34 +1588,6 @@ func TestInjectOrkaTools_PreservesClientTools(t *testing.T) {
 	}
 }
 
-func TestInjectOrkaTools_WithToolCRDs(t *testing.T) {
-	toolCRD := &corev1alpha1.Tool{
-		ObjectMeta: metav1.ObjectMeta{Name: "custom-tool", Namespace: "default"},
-		Spec: corev1alpha1.ToolSpec{
-			Description: "A custom tool",
-			Parameters:  &apiextensionsv1.JSON{Raw: json.RawMessage(`{"type":"object"}`)},
-			HTTP:        &corev1alpha1.HTTPExecution{URL: "http://example.com/tool"},
-		},
-	}
-
-	handler, _ := setupTestAnthropicHandler(toolCRD)
-	req := &llm.CompletionRequest{}
-	injectOrkaTools(context.Background(), handler.client, req, "default")
-
-	names := map[string]bool{}
-	for _, tool := range req.Tools {
-		names[tool.Name] = true
-	}
-	if !names["custom-tool"] {
-		t.Error("expected Tool CRD 'custom-tool' not found in injected tools")
-	}
-	for _, expected := range builtinProxyTools {
-		if !names[expected] {
-			t.Errorf("expected built-in tool %q not found", expected)
-		}
-	}
-}
-
 // TestInjectOrkaTools_CoordinatorToolsAllRegistered guards against a class of
 // outages where coordinatorProxyTools lists a tool name that is not registered
 // in DefaultRegistry. When that happens ToLLMTools silently drops the tool, the
@@ -1635,7 +1604,7 @@ func TestInjectOrkaTools_CoordinatorToolsAllRegistered(t *testing.T) {
 	tools.RegisterProxyPRTools(handler.client)
 
 	req := &llm.CompletionRequest{}
-	injectOrkaTools(context.Background(), handler.client, req, "default")
+	injectOrkaTools(req)
 
 	names := map[string]bool{}
 	for _, tool := range req.Tools {
@@ -1831,18 +1800,12 @@ func TestRunNonStreamingToolLoop_IterationLimit(t *testing.T) {
 	config := DefaultChatConfig()
 	config.MaxIterations = 2
 
-	scheme := runtime.NewScheme()
-	_ = corev1alpha1.AddToScheme(scheme)
-	_ = corev1.AddToScheme(scheme)
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
-	_ = NewAnthropicCompatHandler(fakeClient, "default", false, config, NewProviderResolver(fakeClient, config), nil)
-
 	mock := &mockAnthropicProvider{
 		responses: []*llm.CompletionResponse{
 			// Iteration 0: tool call
-			{StopReason: oaiStopReasonToolUse, ToolCalls: []llm.ToolCall{{ID: "tc_1", Name: "web_search", Arguments: json.RawMessage(`{"query":"a"}`)}}},
+			{StopReason: oaiStopReasonToolUse, ToolCalls: []llm.ToolCall{{ID: "tc_1", Name: "test_tool", Arguments: json.RawMessage(`{}`)}}},
 			// Iteration 1: tool call
-			{StopReason: oaiStopReasonToolUse, ToolCalls: []llm.ToolCall{{ID: "tc_2", Name: "web_search", Arguments: json.RawMessage(`{"query":"b"}`)}}},
+			{StopReason: oaiStopReasonToolUse, ToolCalls: []llm.ToolCall{{ID: "tc_2", Name: "test_tool", Arguments: json.RawMessage(`{}`)}}},
 			// Iteration 2: hits limit, summary call
 			{Content: "Summary of work done.", StopReason: "end_turn"},
 		},
@@ -1850,9 +1813,10 @@ func TestRunNonStreamingToolLoop_IterationLimit(t *testing.T) {
 	req := &llm.CompletionRequest{
 		Model:    "test-model",
 		Messages: []llm.Message{{Role: "user", Content: "Do many things"}},
+		Tools:    []llm.Tool{{Name: "test_tool"}},
 	}
 
-	resp, err := runNonStreamingToolLoop(context.Background(), mock, req, "test-model", ChatConfig{MaxIterations: 20, ToolTimeout: 30 * time.Second}, nil)
+	resp, err := runNonStreamingToolLoop(context.Background(), mock, req, "test-model", config, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1861,6 +1825,21 @@ func TestRunNonStreamingToolLoop_IterationLimit(t *testing.T) {
 	}
 	if mock.callIdx != 3 {
 		t.Errorf("expected 3 LLM calls (2 iterations + 1 summary), got %d", mock.callIdx)
+	}
+	if len(mock.requests) != 3 {
+		t.Fatalf("expected 3 recorded requests, got %d", len(mock.requests))
+	}
+	for i := range 2 {
+		if len(mock.requests[i].Tools) != 1 || mock.requests[i].Tools[0].Name != "test_tool" {
+			t.Errorf("request %d tools = %#v, want test_tool", i+1, mock.requests[i].Tools)
+		}
+	}
+	if len(mock.requests[2].Tools) != 0 {
+		t.Errorf("summary request tools = %#v, want none", mock.requests[2].Tools)
+	}
+	summaryMessages := mock.requests[2].Messages
+	if len(summaryMessages) == 0 || !strings.Contains(summaryMessages[len(summaryMessages)-1].Content, "maximum number of iterations") {
+		t.Errorf("summary request does not contain the iteration-limit instruction: %#v", summaryMessages)
 	}
 }
 
@@ -2046,5 +2025,43 @@ func TestAnthropicCompat_ContextTokenAuthorizationRejectsDisallowedProvider(t *t
 	}
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+}
+
+func TestHandleStreamingMessages_MaxTokensTextTerminatesWithMaxTokens(t *testing.T) {
+	// A text-only response truncated by the caller's max_tokens budget must be
+	// delivered with stop_reason max_tokens instead of entering the
+	// premature-end retry loop and ending as end_turn.
+	mock := &mockAnthropicProvider{
+		streamChunks: []llm.StreamChunk{
+			{Content: "partial answer that ran out of"},
+			{Done: true, StopReason: oaiParamMaxTokens, OutputTokens: 7},
+		},
+	}
+	handler, app := setupTestAnthropicHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleStreamingMessages(
+			c, context.Background(), mock,
+			&llm.CompletionRequest{Model: "claude-sonnet-4-20250514", MaxTokens: 7},
+			"claude-sonnet-4-20250514", nil,
+		)
+	})
+	resp, err := app.Test(httptest.NewRequest(http.MethodPost, "/test", nil))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, `"stop_reason":"max_tokens"`) {
+		t.Fatalf("expected max_tokens stop reason in stream, got: %s", bodyStr)
+	}
+	if strings.Contains(bodyStr, `"stop_reason":"end_turn"`) || strings.Contains(bodyStr, "Continuing workflow") {
+		t.Fatalf("truncated text was retried or reported as end_turn: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "message_stop") {
+		t.Fatalf("stream did not terminate cleanly: %s", bodyStr)
+	}
+	if mock.callIdx > 0 {
+		t.Fatalf("expected no non-streaming retry after the truncated text, got %d Complete calls", mock.callIdx)
 	}
 }

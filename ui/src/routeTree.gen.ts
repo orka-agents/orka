@@ -19,6 +19,7 @@ import { Route as ToolsIndexRouteImport } from './routes/tools/index'
 import { Route as TasksIndexRouteImport } from './routes/tasks/index'
 import { Route as SessionsIndexRouteImport } from './routes/sessions/index'
 import { Route as SecurityIndexRouteImport } from './routes/security/index'
+import { Route as RuntimesIndexRouteImport } from './routes/runtimes/index'
 import { Route as MonitorsIndexRouteImport } from './routes/monitors/index'
 import { Route as GatewaysIndexRouteImport } from './routes/gateways/index'
 import { Route as AgentsIndexRouteImport } from './routes/agents/index'
@@ -84,6 +85,11 @@ const SessionsIndexRoute = SessionsIndexRouteImport.update({
 const SecurityIndexRoute = SecurityIndexRouteImport.update({
   id: '/security/',
   path: '/security/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const RuntimesIndexRoute = RuntimesIndexRouteImport.update({
+  id: '/runtimes/',
+  path: '/runtimes/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const MonitorsIndexRoute = MonitorsIndexRouteImport.update({
@@ -189,6 +195,7 @@ export interface FileRoutesByFullPath {
   '/agents/': typeof AgentsIndexRoute
   '/gateways/': typeof GatewaysIndexRoute
   '/monitors/': typeof MonitorsIndexRoute
+  '/runtimes/': typeof RuntimesIndexRoute
   '/security/': typeof SecurityIndexRoute
   '/sessions/': typeof SessionsIndexRoute
   '/tasks/': typeof TasksIndexRoute
@@ -217,6 +224,7 @@ export interface FileRoutesByTo {
   '/agents': typeof AgentsIndexRoute
   '/gateways': typeof GatewaysIndexRoute
   '/monitors': typeof MonitorsIndexRoute
+  '/runtimes': typeof RuntimesIndexRoute
   '/security': typeof SecurityIndexRoute
   '/sessions': typeof SessionsIndexRoute
   '/tasks': typeof TasksIndexRoute
@@ -246,6 +254,7 @@ export interface FileRoutesById {
   '/agents/': typeof AgentsIndexRoute
   '/gateways/': typeof GatewaysIndexRoute
   '/monitors/': typeof MonitorsIndexRoute
+  '/runtimes/': typeof RuntimesIndexRoute
   '/security/': typeof SecurityIndexRoute
   '/sessions/': typeof SessionsIndexRoute
   '/tasks/': typeof TasksIndexRoute
@@ -276,6 +285,7 @@ export interface FileRouteTypes {
     | '/agents/'
     | '/gateways/'
     | '/monitors/'
+    | '/runtimes/'
     | '/security/'
     | '/sessions/'
     | '/tasks/'
@@ -304,6 +314,7 @@ export interface FileRouteTypes {
     | '/agents'
     | '/gateways'
     | '/monitors'
+    | '/runtimes'
     | '/security'
     | '/sessions'
     | '/tasks'
@@ -332,6 +343,7 @@ export interface FileRouteTypes {
     | '/agents/'
     | '/gateways/'
     | '/monitors/'
+    | '/runtimes/'
     | '/security/'
     | '/sessions/'
     | '/tasks/'
@@ -361,6 +373,7 @@ export interface RootRouteChildren {
   AgentsIndexRoute: typeof AgentsIndexRoute
   GatewaysIndexRoute: typeof GatewaysIndexRoute
   MonitorsIndexRoute: typeof MonitorsIndexRoute
+  RuntimesIndexRoute: typeof RuntimesIndexRoute
   SecurityIndexRoute: typeof SecurityIndexRoute
   SessionsIndexRoute: typeof SessionsIndexRoute
   TasksIndexRoute: typeof TasksIndexRoute
@@ -440,6 +453,13 @@ declare module '@tanstack/react-router' {
       path: '/security'
       fullPath: '/security/'
       preLoaderRoute: typeof SecurityIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/runtimes/': {
+      id: '/runtimes/'
+      path: '/runtimes'
+      fullPath: '/runtimes/'
+      preLoaderRoute: typeof RuntimesIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/monitors/': {
@@ -577,6 +597,7 @@ const rootRouteChildren: RootRouteChildren = {
   AgentsIndexRoute: AgentsIndexRoute,
   GatewaysIndexRoute: GatewaysIndexRoute,
   MonitorsIndexRoute: MonitorsIndexRoute,
+  RuntimesIndexRoute: RuntimesIndexRoute,
   SecurityIndexRoute: SecurityIndexRoute,
   SessionsIndexRoute: SessionsIndexRoute,
   TasksIndexRoute: TasksIndexRoute,

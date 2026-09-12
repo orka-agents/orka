@@ -45,6 +45,27 @@ func TestWorkspaceAgentRejectsUnauthenticatedExec(t *testing.T) {
 	}
 }
 
+func TestWorkspaceAgentReportsCommandStartFailure(t *testing.T) {
+	t.Setenv(envHandoffAuth, "secret")
+	server := newWorkspaceAgentServer()
+	body := mustJSON(t, execRequest{Command: []string{filepath.Join(t.TempDir(), "missing-command")}, WorkDir: "/tmp"})
+	req := httptest.NewRequest(http.MethodPost, workspaceagent.ExecPath, bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer secret")
+	resp := httptest.NewRecorder()
+	server.routes().ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusOK)
+	}
+	var result execResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode == 0 || !strings.Contains(result.Stderr, "start command:") ||
+		!strings.Contains(result.Stderr, "missing-command") {
+		t.Fatalf("command start failure is not diagnosable: exit=%d stderr=%q", result.ExitCode, result.Stderr)
+	}
+}
+
 func TestSafePathRejectsTraversal(t *testing.T) {
 	if _, err := safePath("/workspace/../etc/passwd"); err == nil {
 		t.Fatal("safePath accepted path traversal")
@@ -1880,7 +1901,22 @@ func TestWorkspaceAgentBoundsRetainedOperationResults(t *testing.T) {
 	); !errors.Is(err, errOperationResultExpired) {
 		t.Fatalf("expired operation retry error = %v, want %v", err, errOperationResultExpired)
 	}
-	newRequest := execRequest{OperationID: "after-result-expiry", Command: []string{"true"}}
+	releasePath := filepath.Join(t.TempDir(), "release-after-tombstone-eviction")
+	t.Cleanup(func() {
+		_ = os.WriteFile(releasePath, nil, 0o600)
+		server.mu.Lock()
+		cancel := server.executionCancels["after-result-expiry"]
+		server.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+	})
+	newRequest := execRequest{
+		OperationID: "after-result-expiry",
+		Command: []string{
+			"sh", "-c", `while [ ! -e "$1" ]; do sleep 0.01; done`, "sh", releasePath,
+		},
+	}
 	if _, err := server.startExecution(newRequest, normalized, 1); err != nil {
 		t.Fatalf("new operation rejected by tombstones: %v", err)
 	}
@@ -1892,6 +1928,29 @@ func TestWorkspaceAgentBoundsRetainedOperationResults(t *testing.T) {
 	server.mu.Unlock()
 	if remainingTombstones != 0 {
 		t.Fatalf("expired tombstones retained = %d", remainingTombstones)
+	}
+	if err := os.WriteFile(releasePath, nil, 0o600); err != nil {
+		t.Fatalf("release operation after tombstone eviction: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		result, found, conflict, expired := server.loadExecution(newRequest.OperationID, 1)
+		if conflict || expired || !found {
+			t.Fatalf(
+				"released operation unavailable: found=%t conflict=%t expired=%t",
+				found, conflict, expired,
+			)
+		}
+		if !result.Running {
+			if result.State != workspaceagent.OperationStateSucceeded {
+				t.Fatalf("released operation state = %q, want %q", result.State, workspaceagent.OperationStateSucceeded)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("released operation did not complete")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if _, err := server.startExecution(request, normalized, 1); !errors.Is(err, errOperationResultExpired) {
 		t.Fatalf("operation ownership expired within active epoch: %v", err)

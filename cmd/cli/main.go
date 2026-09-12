@@ -74,6 +74,8 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(newAuthCmd())
 	cmd.AddCommand(newModelsCmd())
 	cmd.AddCommand(newWorkspaceCmd())
+	cmd.AddCommand(newRuntimePoolCmd())
+	cmd.AddCommand(newAgentRuntimeCmd())
 	cmd.AddCommand(newSubstrateCmd())
 	cmd.AddCommand(newGatewayCmd())
 

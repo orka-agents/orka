@@ -15,4 +15,3 @@ export const listArtifactsResponseSchema = z.object({
 })
 
 export type ArtifactMetadata = z.infer<typeof artifactMetadataSchema>
-export type ListArtifactsResponse = z.infer<typeof listArtifactsResponseSchema>

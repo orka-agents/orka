@@ -56,12 +56,13 @@ func buildIntegrationObjects(token string) (*corev1alpha1.Task, *corev1.Secret) 
 			Namespace: defaultNamespace,
 		},
 		Spec: corev1alpha1.TaskSpec{
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: integrationRepo,
-					GitSecretRef: &corev1.LocalObjectReference{
-						Name: integrationSecretName,
-					},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: integrationRepo,
+				PublicationCredentialRef: &corev1alpha1.WorkspaceCredentialReference{
+					Name: integrationSecretName,
+				},
+				ForgeCredentialRef: &corev1alpha1.WorkspaceCredentialReference{
+					Name: integrationSecretName,
 				},
 			},
 		},

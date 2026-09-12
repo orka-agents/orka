@@ -81,6 +81,50 @@ func TestGetMessagesNamespaceIsolation(t *testing.T) {
 	}
 }
 
+func TestGetMessagesScopesDirectDeliveryAndMarkReadByParent(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	const (
+		namespace = "ns-direct-family"
+		receiver  = "receiver"
+		parentA   = "parent-a"
+		parentB   = "parent-b"
+	)
+
+	for _, message := range []*store.Message{
+		{Namespace: namespace, FromTask: "sender-a", ToTask: receiver, ParentTask: parentA, Content: "family-a"},
+		{Namespace: namespace, FromTask: "sender-b", ToTask: receiver, ParentTask: parentB, Content: "family-b"},
+	} {
+		if err := s.SendMessage(ctx, message); err != nil {
+			t.Fatalf("SendMessage: %v", err)
+		}
+	}
+
+	messages, err := s.GetMessages(ctx, namespace, receiver, parentB, true)
+	if err != nil {
+		t.Fatalf("GetMessages parent B: %v", err)
+	}
+	if len(messages) != 1 || messages[0].Content != "family-b" {
+		t.Fatalf("parent B messages = %#v, want only family-b", messages)
+	}
+
+	messages, err = s.GetMessages(ctx, namespace, receiver, parentA, false)
+	if err != nil {
+		t.Fatalf("GetMessages parent A: %v", err)
+	}
+	if len(messages) != 1 || messages[0].Content != "family-a" {
+		t.Fatalf("parent A messages = %#v, want unread family-a", messages)
+	}
+
+	messages, err = s.GetMessages(ctx, namespace, receiver, parentB, false)
+	if err != nil {
+		t.Fatalf("GetMessages parent B after mark-read: %v", err)
+	}
+	if len(messages) != 0 {
+		t.Fatalf("parent B messages after mark-read = %#v, want none", messages)
+	}
+}
+
 func TestGetMessagesMultipleMarkRead(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()

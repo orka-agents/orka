@@ -68,7 +68,11 @@ func (t *CheckMessagesTool) Execute(ctx context.Context, args json.RawMessage) (
 	if a.MarkRead != nil && !*a.MarkRead {
 		markRead = falseStr
 	}
-	if toolCtx := GetToolContext(ctx); toolCtx != nil && toolCtx.MessageStore != nil {
+	toolCtx := GetToolContext(ctx)
+	if toolCtx != nil && toolCtx.Brokered && toolCtx.MessageStore == nil {
+		return "", fmt.Errorf("brokered message store is not configured")
+	}
+	if toolCtx != nil && toolCtx.MessageStore != nil {
 		taskName := strings.TrimSpace(toolCtx.TaskID)
 		namespace := strings.TrimSpace(toolCtx.Namespace)
 		parentTask := strings.TrimSpace(toolCtx.ParentTaskID)

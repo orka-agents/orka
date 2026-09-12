@@ -55,7 +55,12 @@ describe('AgentList', () => {
             },
             {
               metadata: { name: 'agent-b', namespace: 'default', uid: 'uid-b' },
-              spec: { runtime: { type: 'copilot' } },
+              spec: { runtime: { type: 'codex' } },
+              status: { activeTasks: 0 },
+            },
+            {
+              metadata: { name: 'agent-c', namespace: 'default', uid: 'uid-c' },
+              spec: { model: { name: 'openai/gpt-5.4' }, runtime: { type: 'opencode' } },
               status: { activeTasks: 0 },
             },
           ],
@@ -78,7 +83,11 @@ describe('AgentList', () => {
 
     // Agent B: name, runtime badge
     expect(screen.getByText('agent-b')).toBeInTheDocument()
-    expect(screen.getByText('copilot runtime')).toBeInTheDocument()
+    expect(screen.getByText('codex ACP')).toBeInTheDocument()
+
+    // Agent C: OpenCode keeps its branded runtime label.
+    expect(screen.getByText('agent-c')).toBeInTheDocument()
+    expect(screen.getByText('OpenCode ACP')).toBeInTheDocument()
   })
 
   it('agent card shows namespace', async () => {

@@ -12,6 +12,8 @@ import (
 	"reflect"
 	"slices"
 	"testing"
+
+	"github.com/orka-agents/orka/internal/executionmode"
 )
 
 // mockTool is a simple mock tool for testing
@@ -116,50 +118,6 @@ func TestRegistry_Get(t *testing.T) {
 			}
 			if !tt.wantFound && tool != nil {
 				t.Error("Get() returned non-nil tool when not found")
-			}
-		})
-	}
-}
-
-func TestRegistry_List(t *testing.T) {
-	tests := []struct {
-		name    string
-		tools   []Tool
-		wantLen int
-	}{
-		{
-			name:    "empty registry",
-			tools:   nil,
-			wantLen: 0,
-		},
-		{
-			name: "one tool",
-			tools: []Tool{
-				&mockTool{name: testTool1Name},
-			},
-			wantLen: 1,
-		},
-		{
-			name: "multiple tools",
-			tools: []Tool{
-				&mockTool{name: testTool1Name},
-				&mockTool{name: testTool2Name},
-				&mockTool{name: "tool3"},
-			},
-			wantLen: 3,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			r := NewRegistry()
-			for _, tool := range tt.tools {
-				r.Register(tool)
-			}
-
-			list := r.List()
-			if len(list) != tt.wantLen {
-				t.Errorf("List() len = %d, want %d", len(list), tt.wantLen)
 			}
 		})
 	}
@@ -325,7 +283,7 @@ func TestRegisterCoordinationTools(t *testing.T) {
 	defer func() { DefaultRegistry = origRegistry }()
 
 	k8sClient := newFakeClient()
-	RegisterCoordinationTools(k8sClient)
+	RegisterCoordinationTools(k8sClient, executionmode.HarnessV2)
 
 	expectedTools := []string{
 		delegateTaskToolName,

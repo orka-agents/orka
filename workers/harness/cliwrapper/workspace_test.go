@@ -107,16 +107,20 @@ func TestFetchAndCheckoutWorkspaceRefRejectsPathspecFallback(t *testing.T) {
 
 func TestFetchWorkspaceRemoteBranchRedactsRawRepoURL(t *testing.T) {
 	cloneDir, _ := newWorkspaceGitFixture(t)
-	rawRepo := "https://user:token@example.invalid/private/repo.git?secret=value#frag"
-	err := fetchWorkspaceRemoteBranch(context.Background(), cloneDir, "missing", rawRepo)
+	const (
+		testUser     = "test-user"
+		testPassword = "test-passphrase"
+	)
+	rawRepo := "https://" + testUser + ":" + testPassword + "@example.invalid/org/repo.git"
+	err := fetchWorkspaceRemoteBranch(context.Background(), cloneDir, "missing-remote", rawRepo)
 	if err == nil {
-		t.Fatal("fetchWorkspaceRemoteBranch error = nil, want fetch failure")
+		t.Fatal("expected fetch failure")
 	}
 	message := err.Error()
-	if strings.Contains(message, "user:token") ||
-		strings.Contains(message, "secret=value") ||
-		strings.Contains(message, "#frag") {
-		t.Fatalf("fetchWorkspaceRemoteBranch error leaked raw repo URL: %v", err)
+	if strings.Contains(message, rawRepo) ||
+		strings.Contains(message, testUser) ||
+		strings.Contains(message, testPassword) {
+		t.Fatalf("fetch error leaked credential-bearing repository URL: %v", err)
 	}
 }
 

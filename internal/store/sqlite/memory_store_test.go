@@ -57,17 +57,6 @@ func TestMemoryStore(t *testing.T) {
 		t.Fatalf("ListMemories = %+v, want created memory", listed)
 	}
 
-	if err := s.MarkMemoriesRecalled(ctx, "ns-mem", []string{memory.ID}); err != nil {
-		t.Fatalf("MarkMemoriesRecalled: %v", err)
-	}
-	got, err = s.GetMemory(ctx, "ns-mem", memory.ID)
-	if err != nil {
-		t.Fatalf("GetMemory after recall: %v", err)
-	}
-	if got.RecalledCount != 1 || got.LastRecalledAt == nil {
-		t.Fatalf("recall stats not updated: %+v", got)
-	}
-
 	if err := s.SetMemoryDisabled(ctx, "ns-mem", memory.ID, true); err != nil {
 		t.Fatalf("SetMemoryDisabled: %v", err)
 	}
@@ -135,7 +124,7 @@ func TestMemoryProposalStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListMemoryProposals: %v", err)
 	}
-	if len(listed) != 1 || listed[0].ID != proposal.ID || listed[0].Status != "pending" {
+	if len(listed) != 1 || listed[0].ID != proposal.ID || listed[0].Status != proposalStatusPending {
 		t.Fatalf("unexpected proposals: %+v", listed)
 	}
 
@@ -676,5 +665,23 @@ func TestTranscriptSearch(t *testing.T) {
 	}
 	if len([]rune(results[0].Snippet)) > 92 { // allow ellipsis on both sides
 		t.Fatalf("snippet too long: %d %q", len([]rune(results[0].Snippet)), results[0].Snippet)
+	}
+
+	sessionNames := make([]string, 0, 2001)
+	for i := range 2000 {
+		sessionNames = append(sessionNames, fmt.Sprintf("missing-%d", i))
+	}
+	sessionNames = append(sessionNames, "current")
+	results, err = s.SearchTranscript(ctx, store.TranscriptSearchFilter{
+		Namespace:    "ns-transcript",
+		Query:        "needle",
+		SessionNames: sessionNames,
+		Limit:        5,
+	})
+	if err != nil {
+		t.Fatalf("SearchTranscript with session set: %v", err)
+	}
+	if len(results) != 1 || results[0].SessionName != "current" {
+		t.Fatalf("session-set results = %+v, want current only", results)
 	}
 }

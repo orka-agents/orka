@@ -1,11 +1,13 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	neturl "net/url"
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
@@ -195,6 +197,9 @@ func (h *Handlers) ListProviders(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.authorizeProviderResourceAction(c, "list", namespace, ""); err != nil {
+		return err
+	}
 	if err := h.authorizeContextTokenAction(
 		c,
 		"listProviders",
@@ -206,43 +211,53 @@ func (h *Handlers) ListProviders(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
-	list := &corev1alpha1.ProviderList{}
-	if err := h.client.List(c.Context(), list, &client.ListOptions{
-		Namespace: namespace,
-		Limit:     pagination.Limit,
-		Continue:  pagination.Continue,
-	}); err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list providers: %v", err))
-	}
-	items := list.Items
 	filteredList := false
-	if h.contextTokenAuthorization.Enabled() {
-		filtered := make([]corev1alpha1.Provider, 0, len(items))
-		for i := range items {
-			provider := &items[i]
-			allowed := contextTokenAllowsListedProviderModel(
-				c,
-				h.contextTokenAuthorization,
-				"listProviders",
-				namespace,
-				providerResolutionInfo(provider),
-				provider.Spec.DefaultModel,
-			)
-			if allowed {
-				filtered = append(filtered, *provider)
-			}
+	var remainingItemCount *int64
+	items, continueToken, err := collectAuthorizedPages(pagination.Limit, pagination.Continue, func(continueToken string, pageLimit int64) ([]corev1alpha1.Provider, string, error) {
+		list := &corev1alpha1.ProviderList{}
+		if err := h.listPage(c.Context(), list, &client.ListOptions{
+			Namespace: namespace,
+			Limit:     pageLimit,
+			Continue:  continueToken,
+		}, "providers"); err != nil {
+			return nil, "", err
 		}
-		filteredList = len(filtered) != len(items)
-		items = filtered
+		remainingItemCount = list.RemainingItemCount
+		items := list.Items
+		if h.contextTokenAuthorization.Enabled() {
+			filtered := make([]corev1alpha1.Provider, 0, len(items))
+			for i := range items {
+				provider := &items[i]
+				allowed := contextTokenAllowsListedProviderModel(
+					c,
+					h.contextTokenAuthorization,
+					"listProviders",
+					namespace,
+					providerResolutionInfo(provider),
+					provider.Spec.DefaultModel,
+				)
+				if allowed {
+					filtered = append(filtered, *provider)
+				}
+			}
+			if len(filtered) != len(items) {
+				filteredList = true
+			}
+			items = filtered
+		}
+		return items, list.Continue, nil
+	})
+	if err != nil {
+		return err
 	}
-	remainingItemCount := list.RemainingItemCount
 	if filteredList {
+		// The raw count describes Providers the caller is not allowed to see.
 		remainingItemCount = nil
 	}
 	return c.JSON(ListResponse{
 		Items: providerReadItems(c, items),
 		Metadata: ListMeta{
-			Continue:           list.Continue,
+			Continue:           NormalizeListContinue(continueToken),
 			RemainingItemCount: remainingItemCount,
 		},
 	})
@@ -250,6 +265,16 @@ func (h *Handlers) ListProviders(c fiber.Ctx) error {
 
 // GetProvider returns a configured LLM provider.
 func (h *Handlers) GetProvider(c fiber.Ctx) error {
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	if err != nil {
+		return err
+	}
+	// Authorize the requested name before any controller-credential read so
+	// an unauthorized caller cannot tell an existing Provider (403) from an
+	// unknown one (404).
+	if err := h.authorizeProviderResourceAction(c, "get", namespace, c.Params("name")); err != nil {
+		return err
+	}
 	provider, err := h.fetchProvider(c, c.Params("name"))
 	if err != nil {
 		return err
@@ -315,7 +340,8 @@ func (h *Handlers) UpdateProvider(c fiber.Ctx) error {
 	if err := rejectContextTokenResourceMutation(c, "provider"); err != nil {
 		return err
 	}
-	provider, err := h.fetchProvider(c, c.Params("name"))
+	name := c.Params("name")
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
 		return err
 	}
@@ -323,14 +349,61 @@ func (h *Handlers) UpdateProvider(c fiber.Ctx) error {
 	if err := c.Bind().JSON(&req); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
-	if err := validateProviderRESTUpdate(req.Spec, provider.Spec); err != nil {
-		return err
+
+	reader := h.apiReader
+	if reader == nil {
+		reader = h.client
 	}
-	// REST updates cannot set protected routing fields, but they also must not
-	// clear values that were created through the Kubernetes API/RBAC path.
-	req.Spec.BaseURL = provider.Spec.BaseURL
-	provider.Spec = req.Spec
-	if err := h.client.Update(c.Context(), provider); err != nil {
+	ctx := c.Context()
+	key := types.NamespacedName{Name: name, Namespace: namespace}
+	var (
+		provider          *corev1alpha1.Provider
+		initialGeneration int64
+		initialSpec       *corev1alpha1.ProviderSpec
+		initialUID        types.UID
+	)
+	errProviderSpecChanged := errors.New("provider spec changed concurrently")
+	err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current := &corev1alpha1.Provider{}
+		if err := reader.Get(ctx, key, current); err != nil {
+			return err
+		}
+		if initialSpec == nil {
+			initialGeneration = current.Generation
+			initialSpec = current.Spec.DeepCopy()
+			initialUID = current.UID
+		} else if current.UID != initialUID ||
+			current.Generation != initialGeneration ||
+			!apiequality.Semantic.DeepEqual(current.Spec, *initialSpec) {
+			return errProviderSpecChanged
+		}
+		if err := validateProviderRESTUpdate(req.Spec, current.Spec); err != nil {
+			return err
+		}
+		// REST updates cannot set protected routing fields, but they also must
+		// not clear values that were created through the Kubernetes API/RBAC path.
+		desiredSpec := req.Spec.DeepCopy()
+		desiredSpec.BaseURL = current.Spec.BaseURL
+		current.Spec = *desiredSpec
+		if err := h.client.Update(ctx, current); err != nil {
+			return err
+		}
+		provider = current
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, errProviderSpecChanged) {
+			return fiber.NewError(fiber.StatusConflict, "provider spec was modified concurrently")
+		}
+		if _, ok := errors.AsType[*fiber.Error](err); ok {
+			return err
+		}
+		if apierrors.IsNotFound(err) {
+			return fiber.NewError(fiber.StatusNotFound, "provider not found")
+		}
+		if apierrors.IsConflict(err) {
+			return fiber.NewError(fiber.StatusConflict, "provider was modified concurrently")
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update provider: %v", err))
 	}
 	return c.JSON(provider)
@@ -349,6 +422,18 @@ func (h *Handlers) DeleteProvider(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to delete provider: %v", err))
 	}
 	return c.SendStatus(fiber.StatusNoContent)
+}
+
+// authorizeProviderResourceAction enforces Kubernetes RBAC for Provider
+// reads, like the RuntimePool, AgentRuntime, Session, and gateway paths: a
+// TokenReview-authenticated identity must pass a SubjectAccessReview for the
+// exact verb, resource, and name before the controller client reads on its
+// behalf. It is a no-op for non-TokenReview auth (context tokens carry their
+// own provider-use scope checks).
+func (h *Handlers) authorizeProviderResourceAction(c fiber.Ctx, verb, namespace, name string) error {
+	return authorizeKubernetesResourceAction(
+		c.Context(), h.clientset, GetUserInfo(c), namespace, verb, corev1alpha1.GroupVersion.Group, "providers", name,
+	)
 }
 
 func (h *Handlers) fetchProvider(c fiber.Ctx, name string) (*corev1alpha1.Provider, error) {
@@ -421,15 +506,9 @@ func (h *Handlers) UpdateTool(c fiber.Ctx) error {
 	if _, builtin := builtinToolsMap[name]; builtin {
 		return fiber.NewError(fiber.StatusConflict, "built-in tools cannot be updated")
 	}
-	tool, err := h.fetchToolCRD(c, name)
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
 		return err
-	}
-	if toolSpecHasProtectedAuth(tool.Spec) {
-		return fiber.NewError(
-			fiber.StatusBadRequest,
-			"tools with protected HTTP auth configuration must be updated with Kubernetes RBAC",
-		)
 	}
 	var req UpdateToolRequest
 	if err := c.Bind().JSON(&req); err != nil {
@@ -438,11 +517,63 @@ func (h *Handlers) UpdateTool(c fiber.Ctx) error {
 	if err := validateToolRESTMutation(req.Spec); err != nil {
 		return err
 	}
-	tool.Spec = req.Spec
-	if err := authorizeToolWorkspaceClassUse(c.Context(), h.clientset, GetUserInfo(c), tool); err != nil {
-		return err
+
+	reader := h.apiReader
+	if reader == nil {
+		reader = h.client
 	}
-	if err := h.client.Update(c.Context(), tool); err != nil {
+	ctx := c.Context()
+	key := types.NamespacedName{Name: name, Namespace: namespace}
+	var (
+		tool              *corev1alpha1.Tool
+		initialGeneration int64
+		initialSpec       *corev1alpha1.ToolSpec
+		initialUID        types.UID
+	)
+	errToolSpecChanged := errors.New("tool spec changed concurrently")
+	err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current := &corev1alpha1.Tool{}
+		if err := reader.Get(ctx, key, current); err != nil {
+			return err
+		}
+		if initialSpec == nil {
+			initialGeneration = current.Generation
+			initialSpec = current.Spec.DeepCopy()
+			initialUID = current.UID
+		} else if current.UID != initialUID ||
+			current.Generation != initialGeneration ||
+			!apiequality.Semantic.DeepEqual(current.Spec, *initialSpec) {
+			return errToolSpecChanged
+		}
+		if toolSpecHasProtectedAuth(current.Spec) {
+			return fiber.NewError(
+				fiber.StatusBadRequest,
+				"tools with protected HTTP auth configuration must be updated with Kubernetes RBAC",
+			)
+		}
+		current.Spec = req.Spec
+		if err := authorizeToolWorkspaceClassUse(ctx, h.clientset, GetUserInfo(c), current); err != nil {
+			return err
+		}
+		if err := h.client.Update(ctx, current); err != nil {
+			return err
+		}
+		tool = current
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, errToolSpecChanged) {
+			return fiber.NewError(fiber.StatusConflict, "tool spec was modified concurrently")
+		}
+		if _, ok := errors.AsType[*fiber.Error](err); ok {
+			return err
+		}
+		if apierrors.IsNotFound(err) {
+			return fiber.NewError(fiber.StatusNotFound, "tool not found")
+		}
+		if apierrors.IsConflict(err) {
+			return fiber.NewError(fiber.StatusConflict, "tool was modified concurrently")
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update tool: %v", err))
 	}
 	return c.JSON(tool)
@@ -500,17 +631,17 @@ func (h *Handlers) ListSubstrateActorPools(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
 	list := &corev1alpha1.SubstrateActorPoolList{}
-	if err := h.client.List(c.Context(), list, &client.ListOptions{
+	if err := h.listPage(c.Context(), list, &client.ListOptions{
 		Namespace: namespace,
 		Limit:     pagination.Limit,
 		Continue:  pagination.Continue,
-	}); err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list substrate actor pools: %v", err))
+	}, "substrate actor pools"); err != nil {
+		return err
 	}
 	return c.JSON(ListResponse{
 		Items: list.Items,
 		Metadata: ListMeta{
-			Continue:           list.Continue,
+			Continue:           NormalizeListContinue(list.Continue),
 			RemainingItemCount: list.RemainingItemCount,
 		},
 	})

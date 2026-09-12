@@ -1,29 +1,28 @@
-# Agent Substrate Deploy — Troubleshooting
+# Native Substrate troubleshooting
 
-- `... requires substrate to be enabled`: controller missing
-  `--substrate-enabled=true`.
-- `bootstrap token secret name is required`: set
-  `--substrate-bootstrap-token-secret-name` and create that Secret in the Task
-  namespace **and** the `ActorTemplate` namespace.
-- `ActorTemplate ... missing label/annotation` / `not Orka-compatible`: the
-  template needs `orka.ai/execution-workspace: "true"`,
-  `orka.ai/workspace-provider: substrate`, the daemon-port/protocol/staging-root
-  annotations, and must run `/orka-workspace-agent` from the agent harness
-  wrapper image. See the ActorTemplate contract in the concept doc.
-- `ActorTemplate ... is not Ready`: inspect Substrate `WorkerPool`, snapshot
-  config, image pulls, and `runsc` configuration.
-- Direct workspace-agent exec returns exit code 1 with empty output: confirm the
-  installer applied the reviewed compatibility patch. It adds
-  `CAP_SETUID`/`CAP_SETGID` and makes only the workspace-agent rootfs traversable
-  after the UID/GID 1000 credential drop. The workspace agent stays a root
-  supervisor; do not work around a capability or rootfs-permission mismatch by
-  running task commands as root.
-- Task `Failed` with `WorkspaceCleanupFailed` after `resultRef.available=true`:
-  command + result succeeded but Substrate failed to checkpoint/delete the actor
-  (a known pinned-revision `runsc delete` flake in GitHub-hosted kind). Inspect
-  `atelet` / `ateom-gvisor` logs.
-- Inspect Substrate directly:
-  `kubectl --context "$ctx" -n ate-system get pods`,
-  `kubectl --context "$ctx" -n ate-demo get workerpool,actortemplate`,
-  `kubectl --context "$ctx" -n ate-system logs deployment/atenet-router`.
-- Full troubleshooting matrix: `website/docs/concepts/substrate.md`.
+- Docker preflight timeout: restore the engine before retrying. Inspect other
+  users of Docker before restarting it. The installer fails before touching a
+  cluster when preflight fails.
+- Source mismatch: compare the origin, commit, and protocol digest with
+  `hack/agent-substrate/upstream.env`. Upgrade them together with conformance;
+  do not reapply the removed provider patches.
+- Control authentication: use a verified server CA and exactly one of rotating
+  mTLS or a bearer file. The official local install projects PodCertificate and
+  ClusterTrustBundle volumes. Never copy private credentials into templates.
+- Missing template: use `kubectl ate get actor-template --atespace <space>`.
+  `templateRef.namespace` means native Atespace, not an ActorTemplate CRD namespace.
+- Pending placement: verify the infrastructure template selects exactly one
+  dedicated WorkerPool and that a worker is Active with capacity for one Actor.
+  Physical worker capacity is separate from Actor count.
+- Stream stops early: configure the native router's `--route-timeout` for the
+  longest Task, and its shutdown grace if long turns must survive router drain.
+- Suspended or failed workspace: inspect sanitized conditions first. Private
+  controller ConfigMaps retain Actor and Tag provenance. A snapshot alone is
+  not workload termination proof. Do not forge consent annotations or unstick
+  finalizers while a workload may remain.
+- Explicit recovery: export with `recoverLastCheckpoint: true`, then create a
+  new workspace from the Ready checkpoint's exact UID/digest. The failed source
+  Task remains uncertain and is never automatically replayed.
+- Finalizer blocked: restore access to the same provider and worker namespace.
+  Existing data cleanup remains active when new admission is disabled. Removing
+  public checkpoint references cannot remove data already acquired by a target.

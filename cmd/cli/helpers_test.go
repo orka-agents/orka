@@ -611,7 +611,7 @@ func TestRootCmdIncludesCoverageCommands(t *testing.T) {
 	cmd := newRootCmd()
 	want := []string{
 		"provider", "tool", "session", "secret", "security", "monitor",
-		"memory", "auth", "models", "workspace", "substrate",
+		"memory", "auth", "models", "workspace", "runtime-pool", "agent-runtime", "substrate",
 	}
 	seen := map[string]bool{}
 	for _, sub := range cmd.Commands() {

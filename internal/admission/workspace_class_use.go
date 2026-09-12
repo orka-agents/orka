@@ -19,6 +19,7 @@ import (
 	ctrladmission "sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 )
 
 const (
@@ -26,6 +27,7 @@ const (
 	TaskWorkspaceClassUseWebhookPath = "/validate-core-orka-ai-v1alpha1-task-workspace-class-use"
 	// ToolWorkspaceClassUseWebhookPath validates Tool workspace class selection.
 	ToolWorkspaceClassUseWebhookPath = "/validate-core-orka-ai-v1alpha1-tool-workspace-class-use"
+	CheckpointSourceUseWebhookPath   = "/validate-workspace-orka-ai-v1alpha1-checkpoint-source-use"
 )
 
 // WorkspaceClassUseAuthorizer checks the live admission caller's permission to
@@ -39,6 +41,7 @@ type workspaceClassResource int
 const (
 	workspaceClassTask workspaceClassResource = iota
 	workspaceClassTool
+	workspaceCheckpointSource
 )
 
 // RegisterWorkspaceClassUseWebhooks registers fail-closed Task and Tool class
@@ -54,6 +57,9 @@ func RegisterWorkspaceClassUseWebhooks(
 	})
 	server.Register(ToolWorkspaceClassUseWebhookPath, &ctrladmission.Webhook{
 		Handler: newWorkspaceClassUseValidator(scheme, authorizer, workspaceClassTool),
+	})
+	server.Register(CheckpointSourceUseWebhookPath, &ctrladmission.Webhook{
+		Handler: newWorkspaceClassUseValidator(scheme, authorizer, workspaceCheckpointSource),
 	})
 }
 
@@ -85,6 +91,27 @@ func (v *WorkspaceClassUseValidator) Handle(
 	if req.SubResource != "" || (req.Operation != admissionv1.Create && req.Operation != admissionv1.Update) {
 		return ctrladmission.Allowed("not a workspace class selection write")
 	}
+	if v.resource == workspaceCheckpointSource {
+		// The CRD makes the source immutable. Only creation introduces access;
+		// controller finalizer updates must remain possible after revocation.
+		if req.Operation != admissionv1.Create {
+			return ctrladmission.Allowed("checkpoint source is immutable")
+		}
+		checkpoint := &workspacev1alpha1.ExecutionWorkspaceCheckpoint{}
+		if err := v.decoder.Decode(req, checkpoint); err != nil {
+			return ctrladmission.Errored(http.StatusBadRequest, err)
+		}
+		authorizer, ok := v.authorizer.(interface {
+			AuthorizeCheckpointSource(context.Context, string, string, authenticationv1.UserInfo) error
+		})
+		if !ok {
+			return ctrladmission.Denied("workspace checkpoint source authorizer is unavailable")
+		}
+		if err := authorizer.AuthorizeCheckpointSource(ctx, requestNamespace(req.Namespace, checkpoint.Namespace), checkpoint.Spec.WorkspaceRef.Name, req.UserInfo); err != nil {
+			return ctrladmission.Denied("workspace checkpoint source use authorization failed")
+		}
+		return ctrladmission.Allowed("workspace checkpoint source use authorized")
+	}
 
 	className, namespace, err := v.decodeSelection(req)
 	if err != nil {
@@ -101,6 +128,23 @@ func (v *WorkspaceClassUseValidator) Handle(
 	}
 	if err := v.authorizer.Authorize(ctx, namespace, className, req.UserInfo); err != nil {
 		return ctrladmission.Denied("workspace class use authorization failed: " + err.Error())
+	}
+	if v.resource == workspaceClassTask {
+		task := &corev1alpha1.Task{}
+		if err := v.decoder.Decode(req, task); err != nil {
+			return ctrladmission.Errored(http.StatusBadRequest, err)
+		}
+		if task.Spec.Execution != nil && task.Spec.Execution.Workspace != nil && task.Spec.Execution.Workspace.RestoreFrom != nil {
+			authorizer, ok := v.authorizer.(interface {
+				AuthorizeCheckpoint(context.Context, string, string, authenticationv1.UserInfo) error
+			})
+			if !ok {
+				return ctrladmission.Denied("workspace checkpoint use authorizer is unavailable")
+			}
+			if err := authorizer.AuthorizeCheckpoint(ctx, namespace, task.Spec.Execution.Workspace.RestoreFrom.Name, req.UserInfo); err != nil {
+				return ctrladmission.Denied("workspace checkpoint use authorization failed")
+			}
+		}
 	}
 	return ctrladmission.Allowed("workspace class use authorized")
 }

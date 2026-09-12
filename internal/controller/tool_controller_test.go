@@ -75,6 +75,7 @@ var _ = Describe("Tool Controller", func() {
 				Client:             k8sClient,
 				Scheme:             k8sClient.Scheme(),
 			}
+			controllerReconciler.SubstrateTemplateValidator = substrateFixtureTemplateValidator(controllerReconciler.Client)
 
 			result, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
@@ -141,6 +142,7 @@ var _ = Describe("Tool Controller", func() {
 					Timeout: 1 * time.Second,
 				},
 			}
+			controllerReconciler.SubstrateTemplateValidator = substrateFixtureTemplateValidator(controllerReconciler.Client)
 
 			result, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
@@ -207,6 +209,7 @@ var _ = Describe("Tool Controller", func() {
 				Client:             k8sClient,
 				Scheme:             k8sClient.Scheme(),
 			}
+			controllerReconciler.SubstrateTemplateValidator = substrateFixtureTemplateValidator(controllerReconciler.Client)
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
@@ -288,6 +291,7 @@ var _ = Describe("Tool Controller", func() {
 				Client:             k8sClient,
 				Scheme:             k8sClient.Scheme(),
 			}
+			controllerReconciler.SubstrateTemplateValidator = substrateFixtureTemplateValidator(controllerReconciler.Client)
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
@@ -344,6 +348,7 @@ var _ = Describe("Tool Controller", func() {
 				Client:             k8sClient,
 				Scheme:             k8sClient.Scheme(),
 			}
+			controllerReconciler.SubstrateTemplateValidator = substrateFixtureTemplateValidator(controllerReconciler.Client)
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
@@ -401,6 +406,7 @@ var _ = Describe("Tool Controller", func() {
 				Client:             k8sClient,
 				Scheme:             k8sClient.Scheme(),
 			}
+			controllerReconciler.SubstrateTemplateValidator = substrateFixtureTemplateValidator(controllerReconciler.Client)
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
@@ -427,6 +433,7 @@ var _ = Describe("Tool Controller", func() {
 				Client:             k8sClient,
 				Scheme:             k8sClient.Scheme(),
 			}
+			controllerReconciler.SubstrateTemplateValidator = substrateFixtureTemplateValidator(controllerReconciler.Client)
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,

@@ -1,0 +1,6 @@
+apiVersion: acp.workspace.orka.ai/v1alpha1
+kind: RuntimeProviderConfig
+metadata:
+  name: acp-agent-sandbox
+spec:
+  backend: agent-sandbox

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 	"time"
@@ -57,17 +58,33 @@ func NewDB(path string) (*sql.DB, error) {
 		}
 	}
 
-	if err := migrate(db); err != nil {
+	if err := initializeSchema(db); err != nil {
 		db.Close() //nolint:errcheck
-		return nil, fmt.Errorf("failed to run migrations: %w", err)
+		return nil, fmt.Errorf("failed to initialize SQLite schema: %w", err)
 	}
 
 	return db, nil
 }
 
-//nolint:gocyclo // schema migrations intentionally keep ordered, fail-fast upgrade steps in one transaction boundary
-func migrate(db *sql.DB) error {
+// currentSchemaStatements defines the complete supported SQLite layout.
+func currentSchemaStatements() []string {
 	statements := []string{
+		`CREATE TABLE IF NOT EXISTS task_data_cleanup_generations (
+			namespace TEXT PRIMARY KEY,
+			generation INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS task_data_task_generations (
+			namespace TEXT NOT NULL,
+			task_name TEXT NOT NULL,
+			generation INTEGER NOT NULL,
+			PRIMARY KEY (namespace, task_name)
+		)`,
+		`CREATE TABLE IF NOT EXISTS task_job_revocations (
+			namespace TEXT NOT NULL,
+			task_uid TEXT NOT NULL,
+			job_uid TEXT NOT NULL,
+			PRIMARY KEY (namespace, task_uid, job_uid)
+		)`,
 		`CREATE TABLE IF NOT EXISTS results (
 			namespace  TEXT NOT NULL,
 			task_name  TEXT NOT NULL,
@@ -76,21 +93,65 @@ func migrate(db *sql.DB) error {
 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (namespace, task_name)
 		)`,
+		`CREATE TABLE IF NOT EXISTS prompt_result_receipts (
+			attempt_id       TEXT NOT NULL PRIMARY KEY,
+			namespace        TEXT NOT NULL,
+			task_name        TEXT NOT NULL,
+			operation_id     TEXT NOT NULL,
+			operation_digest TEXT NOT NULL,
+			data             BLOB NOT NULL,
+			created_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_prompt_result_receipts_task
+			ON prompt_result_receipts(namespace, task_name)`,
 		`CREATE TABLE IF NOT EXISTS sessions (
 			namespace     TEXT NOT NULL,
 			name          TEXT NOT NULL,
 			session_type  TEXT NOT NULL DEFAULT 'task',
 			owner_type    TEXT NOT NULL DEFAULT '',
 			owner_ref     TEXT NOT NULL DEFAULT '',
-			active_task     TEXT NOT NULL DEFAULT '',
-			active_task_uid TEXT NOT NULL DEFAULT '',
-			message_count   INTEGER NOT NULL DEFAULT 0,
+			active_task            TEXT NOT NULL DEFAULT '',
+			active_task_uid        TEXT NOT NULL DEFAULT '',
+			active_task_expires_at TIMESTAMP,
+			chat_turn_id           TEXT NOT NULL DEFAULT '',
+			chat_turn_expires_at   TIMESTAMP,
+			control_session_uid    TEXT NOT NULL DEFAULT '',
+			message_count         INTEGER NOT NULL DEFAULT 0,
 			input_tokens  INTEGER NOT NULL DEFAULT 0,
 			output_tokens INTEGER NOT NULL DEFAULT 0,
 			cancelled     BOOLEAN NOT NULL DEFAULT FALSE,
 			created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (namespace, name)
+		)`,
+		`CREATE TABLE IF NOT EXISTS session_cleanup_intents (
+			namespace        TEXT NOT NULL,
+			session_name     TEXT NOT NULL,
+			operation_id     TEXT NOT NULL,
+			operation_digest TEXT NOT NULL,
+			plan             BLOB NOT NULL,
+			created_at       TIMESTAMP NOT NULL,
+			PRIMARY KEY(namespace, session_name)
+		)`,
+		`CREATE TABLE IF NOT EXISTS session_cleanup_completions (
+			namespace        TEXT NOT NULL,
+			session_name     TEXT NOT NULL,
+			session_uid      TEXT NOT NULL DEFAULT '',
+			operation_id     TEXT NOT NULL,
+			operation_digest TEXT NOT NULL,
+			completed_at     TIMESTAMP NOT NULL,
+			PRIMARY KEY(namespace, session_name)
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_session_cleanup_completions_uid
+			ON session_cleanup_completions(session_uid) WHERE session_uid <> ''`,
+		`CREATE TABLE IF NOT EXISTS session_turn_cleanup_receipts (
+			turn_id           TEXT PRIMARY KEY,
+			prompt_attempt_id TEXT NOT NULL UNIQUE,
+			namespace         TEXT NOT NULL,
+			session_name      TEXT NOT NULL,
+			session_uid       TEXT NOT NULL,
+			receipt_digest    TEXT NOT NULL,
+			receipt           BLOB NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS session_messages (
 			id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,6 +171,12 @@ func migrate(db *sql.DB) error {
 			created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			FOREIGN KEY (namespace, session_name) REFERENCES sessions(namespace, name) ON DELETE CASCADE
 		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_message_id
+			ON session_messages(namespace, session_name, message_id) WHERE message_id <> ''`,
+		`CREATE INDEX IF NOT EXISTS idx_session_messages_namespace_message_id
+			ON session_messages(namespace, message_id) WHERE message_id <> ''`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_sort_order
+			ON session_messages(namespace, session_name, sort_order) WHERE sort_order > 0`,
 		`CREATE TABLE IF NOT EXISTS runtime_sessions (
 			id              TEXT NOT NULL,
 			namespace       TEXT NOT NULL,
@@ -153,6 +220,7 @@ func migrate(db *sql.DB) error {
 			stream_id       TEXT NOT NULL,
 			seq             INTEGER NOT NULL,
 			session_seq     INTEGER NOT NULL DEFAULT 0,
+			dedupe_key      TEXT NOT NULL DEFAULT '',
 			type            TEXT NOT NULL,
 			severity        TEXT NOT NULL DEFAULT 'info',
 			task_name       TEXT NOT NULL DEFAULT '',
@@ -179,6 +247,10 @@ func migrate(db *sql.DB) error {
 			ON execution_events(namespace, task_name, seq)`,
 		`CREATE INDEX IF NOT EXISTS idx_execution_events_session
 			ON execution_events(namespace, session_name, seq)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_execution_events_stream_dedupe_key
+			ON execution_events(namespace, stream_type, stream_id, dedupe_key) WHERE dedupe_key <> ''`,
+		`CREATE INDEX IF NOT EXISTS idx_execution_events_session_seq
+			ON execution_events(namespace, session_name, session_seq)`,
 		`CREATE TABLE IF NOT EXISTS execution_event_session_sequences (
 			namespace    TEXT NOT NULL,
 			session_name TEXT NOT NULL,
@@ -207,6 +279,9 @@ func migrate(db *sql.DB) error {
 			ON memories(namespace, deleted, disabled, updated_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_memories_task ON memories(namespace, task_name)`,
 		`CREATE INDEX IF NOT EXISTS idx_memories_agent ON memories(namespace, agent_name)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_source_proposal
+			ON memories(namespace, source_proposal_id)
+			WHERE source_proposal_id <> ''`,
 		`CREATE TABLE IF NOT EXISTS memory_proposals (
 			id          TEXT PRIMARY KEY,
 			namespace   TEXT NOT NULL,
@@ -273,10 +348,37 @@ func migrate(db *sql.DB) error {
 			summary         TEXT NOT NULL DEFAULT '',
 			error_message   TEXT NOT NULL DEFAULT '',
 			started_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			completed_at    TIMESTAMP
+			completed_at    TIMESTAMP,
+			repository_scan_uid TEXT NOT NULL DEFAULT '',
+			repository_scan_generation INTEGER NOT NULL DEFAULT 0,
+			cancellation_version INTEGER NOT NULL DEFAULT 0,
+			cancellation_pending BOOLEAN NOT NULL DEFAULT FALSE,
+			scanner_policy_version TEXT NOT NULL DEFAULT '',
+			policy_digest TEXT NOT NULL DEFAULT '',
+			idempotency_key TEXT NOT NULL DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_security_scan_runs_repo
 			ON security_scan_runs(namespace, repository_scan, started_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_security_scan_runs_admission
+			ON security_scan_runs(namespace, repository_scan)`,
+		`CREATE INDEX IF NOT EXISTS idx_security_scan_runs_active
+			ON security_scan_runs(namespace, repository_scan) WHERE phase IN ('pending', 'running')`,
+		`CREATE INDEX IF NOT EXISTS idx_security_scan_runs_cancellation
+			ON security_scan_runs(namespace, repository_scan) WHERE cancellation_pending = TRUE`,
+		`CREATE TABLE IF NOT EXISTS security_scan_task_ingestions (
+			namespace TEXT NOT NULL,
+			repository_scan TEXT NOT NULL,
+			scan_run_id TEXT NOT NULL,
+			task_name TEXT NOT NULL,
+			task_uid TEXT NOT NULL,
+			stage TEXT NOT NULL,
+			slice_id TEXT NOT NULL,
+			finding_ids_json TEXT NOT NULL DEFAULT '[]',
+			dropped_findings_json TEXT NOT NULL DEFAULT '',
+			completed BOOLEAN NOT NULL DEFAULT FALSE,
+			ingested_at TIMESTAMP NOT NULL,
+			PRIMARY KEY (namespace, scan_run_id, task_name, task_uid)
+		)`,
 		`CREATE TABLE IF NOT EXISTS security_threat_models (
 			namespace         TEXT NOT NULL,
 			repository_scan   TEXT NOT NULL,
@@ -297,6 +399,7 @@ func migrate(db *sql.DB) error {
 			scan_run_id       TEXT NOT NULL,
 			slice_id          TEXT NOT NULL DEFAULT '',
 			fingerprint       TEXT NOT NULL,
+			target_key        TEXT NOT NULL DEFAULT '',
 			title             TEXT NOT NULL,
 			category          TEXT NOT NULL DEFAULT '',
 			summary           TEXT NOT NULL,
@@ -305,6 +408,8 @@ func migrate(db *sql.DB) error {
 			triage            TEXT NOT NULL DEFAULT '',
 			validation_status TEXT NOT NULL,
 			state             TEXT NOT NULL,
+			decision_at       TIMESTAMP,
+			duplicate_of      TEXT NOT NULL DEFAULT '',
 			file_path         TEXT NOT NULL DEFAULT '',
 			line              INTEGER NOT NULL DEFAULT 0,
 			commit_sha        TEXT NOT NULL DEFAULT '',
@@ -326,6 +431,10 @@ func migrate(db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_security_findings_repo
 			ON security_findings(namespace, repository_scan, severity, validation_status, state, updated_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_security_findings_slice
+			ON security_findings(namespace, repository_scan, slice_id, category, updated_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_security_findings_duplicates
+			ON security_findings(namespace, repository_scan, duplicate_of, updated_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS security_review_slices (
 			id                TEXT NOT NULL,
 			namespace         TEXT NOT NULL,
@@ -342,12 +451,18 @@ func migrate(db *sql.DB) error {
 			tests_json        TEXT NOT NULL DEFAULT '[]',
 			tags_json         TEXT NOT NULL DEFAULT '[]',
 			trust_boundaries_json TEXT NOT NULL DEFAULT '[]',
+			changed_files_json TEXT NOT NULL DEFAULT '[]',
+			changed_line_ranges_json TEXT NOT NULL DEFAULT '[]',
+			review_context_json TEXT NOT NULL DEFAULT '',
+			review_context_hash TEXT NOT NULL DEFAULT '',
 			last_scan_run_id  TEXT NOT NULL DEFAULT '',
 			last_reviewed_at  TIMESTAMP,
 			created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (namespace, repository_scan, id)
 		)`,
+		`CREATE INDEX IF NOT EXISTS idx_security_review_slices_repo
+			ON security_review_slices(namespace, repository_scan, status, updated_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS security_dropped_findings (
 			id                TEXT PRIMARY KEY,
 			namespace         TEXT NOT NULL,
@@ -357,10 +472,13 @@ func migrate(db *sql.DB) error {
 			slice_id          TEXT NOT NULL DEFAULT '',
 			reason            TEXT NOT NULL,
 			sample_json       TEXT NOT NULL DEFAULT '',
-			created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+			created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			layer TEXT NOT NULL DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_security_dropped_findings_run
 			ON security_dropped_findings(namespace, repository_scan, scan_run_id, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_security_dropped_findings_layer
+			ON security_dropped_findings(namespace, repository_scan, layer, created_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS security_patch_proposals (
 			id                TEXT PRIMARY KEY,
 			namespace         TEXT NOT NULL,
@@ -371,8 +489,10 @@ func migrate(db *sql.DB) error {
 			diff_artifact     TEXT NOT NULL DEFAULT '',
 			summary_artifact  TEXT NOT NULL DEFAULT '',
 			status            TEXT NOT NULL,
+			reason            TEXT NOT NULL DEFAULT '',
 			pr_number         INTEGER,
 			pr_url            TEXT NOT NULL DEFAULT '',
+			publication_evidence_json TEXT NOT NULL DEFAULT '',
 			created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
@@ -414,8 +534,6 @@ func migrate(db *sql.DB) error {
 			ON monitor_runs(monitor_namespace, monitor_name, started_at DESC, id DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_monitor_runs_target
 			ON monitor_runs(monitor_namespace, monitor_name, phase, trigger, target_kind, target_number, target_sha)`,
-		`DROP INDEX IF EXISTS idx_monitor_runs_active`,
-		`DROP INDEX IF EXISTS idx_monitor_runs_queued`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_monitor_runs_running
 			ON monitor_runs(monitor_namespace, monitor_name)
 			WHERE phase = 'running'`,
@@ -500,7 +618,6 @@ func migrate(db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_work_actions_monitor
 			ON work_actions(monitor_namespace, monitor_name, target_kind, target_number, desired_action, status, updated_at DESC)`,
-		`DROP INDEX IF EXISTS idx_work_actions_dedupe`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_work_actions_dedupe
 			ON work_actions(monitor_namespace, monitor_name, dedupe_key)
 			WHERE dedupe_key <> '' AND status IN ('queued', 'leased', 'running')`,
@@ -542,6 +659,11 @@ func migrate(db *sql.DB) error {
 			findings_json      TEXT NOT NULL DEFAULT '[]',
 			summary            TEXT NOT NULL DEFAULT '',
 			suggested_comment  TEXT NOT NULL DEFAULT '',
+			validation_task          TEXT NOT NULL DEFAULT '',
+			validation_image         TEXT NOT NULL DEFAULT '',
+			validation_command_digest TEXT NOT NULL DEFAULT '',
+			validation_status        TEXT NOT NULL DEFAULT '',
+			validation_evidence      TEXT NOT NULL DEFAULT '',
 			rendered_comment   TEXT NOT NULL DEFAULT '',
 			marker             TEXT NOT NULL DEFAULT '',
 			github_review_id   TEXT NOT NULL DEFAULT '',
@@ -615,6 +737,9 @@ func migrate(db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_command_events_monitor
 			ON command_events(monitor_namespace, monitor_name, created_at DESC)`,
 
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_command_events_dedupe
+			ON command_events(monitor_namespace, monitor_name, dedupe_key)
+		WHERE dedupe_key <> ''`,
 		`CREATE TABLE IF NOT EXISTS implementation_jobs (
 			id                 TEXT PRIMARY KEY,
 			monitor_namespace  TEXT NOT NULL,
@@ -661,6 +786,7 @@ func migrate(db *sql.DB) error {
 			external_id        TEXT NOT NULL DEFAULT '',
 			status             TEXT NOT NULL DEFAULT '',
 			error              TEXT NOT NULL DEFAULT '',
+			pending_at         TIMESTAMP,
 			created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_github_mutation_records_monitor
@@ -675,6 +801,7 @@ func migrate(db *sql.DB) error {
 			source              TEXT NOT NULL DEFAULT '',
 			head_sha            TEXT NOT NULL DEFAULT '',
 			base_sha            TEXT NOT NULL DEFAULT '',
+			base_branch         TEXT NOT NULL DEFAULT '',
 			phase               TEXT NOT NULL DEFAULT '',
 			repair_count_pr     INTEGER NOT NULL DEFAULT 0,
 			repair_count_head   INTEGER NOT NULL DEFAULT 0,
@@ -734,6 +861,7 @@ func migrate(db *sql.DB) error {
 			session_name          TEXT NOT NULL DEFAULT '',
 			 task_name             TEXT NOT NULL DEFAULT '',
 			 task_uid              TEXT NOT NULL DEFAULT '',
+			 task_runtime_allowed_tools_json TEXT,
 			 delivery_id           TEXT NOT NULL DEFAULT '',
 			 provider_message_id    TEXT NOT NULL DEFAULT '',
 			 trace_parent          TEXT NOT NULL DEFAULT '',
@@ -779,6 +907,8 @@ func migrate(db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_gateway_event_tombstones_expiry
 			ON gateway_event_tombstones(namespace, expires_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_gateway_event_tombstones_task
+			ON gateway_event_tombstones(namespace, task_name, task_uid)`,
 		`CREATE TABLE IF NOT EXISTS gateway_deliveries (
 			id                    TEXT NOT NULL,
 			idempotency_id        TEXT NOT NULL,
@@ -824,410 +954,21 @@ func migrate(db *sql.DB) error {
 			ON gateway_deliveries(namespace, gateway_name, created_at DESC)`,
 	}
 
-	for _, stmt := range statements {
-		if _, err := db.Exec(stmt); err != nil {
-			return fmt.Errorf("migration failed: %w", err)
-		}
-	}
-
-	if err := ensureSQLiteColumns(db, "sessions", []sqliteColumnMigration{
-		{Name: "owner_type", Definition: "owner_type TEXT NOT NULL DEFAULT ''"},
-		{Name: "owner_ref", Definition: "owner_ref TEXT NOT NULL DEFAULT ''"},
-		{Name: "active_task_uid", Definition: "active_task_uid TEXT NOT NULL DEFAULT ''"},
-	}); err != nil {
-		return err
-	}
-	if _, err := db.Exec(`UPDATE sessions SET active_task_uid = COALESCE((
-		SELECT event.task_uid FROM gateway_events event
-		WHERE event.namespace = sessions.namespace AND event.session_name = sessions.name
-		  AND event.task_name = sessions.active_task AND event.state = 'TaskCreated' AND event.task_uid <> ''
-		ORDER BY event.created_at DESC, event.id DESC LIMIT 1
-	), '') WHERE active_task <> '' AND active_task_uid = ''`); err != nil {
-		return fmt.Errorf("migration failed: %w", err)
-	}
-	if err := ensureSQLiteColumns(db, "gateway_events", []sqliteColumnMigration{
-		{Name: "namespace_uid", Definition: "namespace_uid TEXT NOT NULL DEFAULT ''"},
-		{Name: "gateway_generation", Definition: "gateway_generation INTEGER NOT NULL DEFAULT 0"},
-	}); err != nil {
-		return err
-	}
-	if err := ensureGatewayEventTombstoneSchema(db); err != nil {
-		return err
-	}
-	if err := ensureSQLiteColumns(db, "gateway_deliveries", []sqliteColumnMigration{
-		{Name: "namespace_uid", Definition: "namespace_uid TEXT NOT NULL DEFAULT ''"},
-		{Name: "gateway_generation", Definition: "gateway_generation INTEGER NOT NULL DEFAULT 0"},
-	}); err != nil {
-		return err
-	}
-
-	if err := ensureSQLiteColumns(db, "session_messages", []sqliteColumnMigration{
-		{Name: "message_id", Definition: "message_id TEXT NOT NULL DEFAULT ''"},
-		{Name: "sort_order", Definition: "sort_order INTEGER NOT NULL DEFAULT 0"},
-		{Name: "source_type", Definition: "source_type TEXT NOT NULL DEFAULT ''"},
-		{Name: "source_ref", Definition: "source_ref TEXT NOT NULL DEFAULT ''"},
-		{Name: "metadata_json", Definition: "metadata_json TEXT NOT NULL DEFAULT '{}'"},
-	}); err != nil {
-		return err
-	}
-	if _, err := db.Exec(`UPDATE session_messages SET message_id = 'legacy:' || id WHERE message_id = ''`); err != nil {
-		return fmt.Errorf("migration failed: %w", err)
-	}
-	if _, err := db.Exec(`UPDATE session_messages SET sort_order = id * 2 WHERE sort_order = 0`); err != nil {
-		return fmt.Errorf("migration failed: %w", err)
-	}
-	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_message_id
-		ON session_messages(namespace, session_name, message_id) WHERE message_id <> ''`); err != nil {
-		return fmt.Errorf("migration failed: %w", err)
-	}
-	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_session_messages_namespace_message_id
-		ON session_messages(namespace, message_id) WHERE message_id <> ''`); err != nil {
-		return fmt.Errorf("migration failed: %w", err)
-	}
-	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_sort_order
-		ON session_messages(namespace, session_name, sort_order) WHERE sort_order > 0`); err != nil {
-		return fmt.Errorf("migration failed: %w", err)
-	}
-
-	if err := ensureSQLiteColumns(db, "gateway_events", []sqliteColumnMigration{
-		{Name: "transcript_order", Definition: "transcript_order INTEGER NOT NULL DEFAULT 0"},
-		{Name: "binding_uid", Definition: "binding_uid TEXT NOT NULL DEFAULT ''"},
-		{Name: "binding_generation", Definition: "binding_generation INTEGER NOT NULL DEFAULT 0"},
-		{Name: "agent_name", Definition: "agent_name TEXT NOT NULL DEFAULT ''"},
-		{Name: "agent_uid", Definition: "agent_uid TEXT NOT NULL DEFAULT ''"},
-		{Name: "task_uid", Definition: "task_uid TEXT NOT NULL DEFAULT ''"},
-		{Name: "delivery_id", Definition: "delivery_id TEXT NOT NULL DEFAULT ''"},
-		{Name: "provider_message_id", Definition: "provider_message_id TEXT NOT NULL DEFAULT ''"},
-		{Name: "trace_parent", Definition: "trace_parent TEXT NOT NULL DEFAULT ''"},
-		{Name: "trace_state", Definition: "trace_state TEXT NOT NULL DEFAULT ''"},
-	}); err != nil {
-		return err
-	}
-	if err := ensureSQLiteColumns(db, "gateway_deliveries", []sqliteColumnMigration{
-		{Name: "trace_parent", Definition: "trace_parent TEXT NOT NULL DEFAULT ''"},
-		{Name: "trace_state", Definition: "trace_state TEXT NOT NULL DEFAULT ''"},
-	}); err != nil {
-		return err
-	}
-
-	if err := ensureSQLiteColumns(db, "execution_events", []sqliteColumnMigration{
-		{Name: "session_seq", Definition: "session_seq INTEGER NOT NULL DEFAULT 0"},
-	}); err != nil {
-		return err
-	}
-	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_execution_events_session_seq
-		ON execution_events(namespace, session_name, session_seq)`); err != nil {
-		return fmt.Errorf("migration failed: %w", err)
-	}
-	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS execution_event_session_sequences (
-		namespace    TEXT NOT NULL,
-		session_name TEXT NOT NULL,
-		latest_seq   INTEGER NOT NULL DEFAULT 0,
-		PRIMARY KEY (namespace, session_name)
-	)`); err != nil {
-		return fmt.Errorf("migration failed: %w", err)
-	}
-	if err := backfillExecutionEventSessionCursors(db); err != nil {
-		return err
-	}
-
-	if err := ensureSQLiteColumns(db, "memories", []sqliteColumnMigration{
-		{Name: "source_proposal_id", Definition: "source_proposal_id TEXT NOT NULL DEFAULT ''"},
-	}); err != nil {
-		return err
-	}
-	if err := ensureSQLiteColumns(db, "memory_proposals", []sqliteColumnMigration{
-		{Name: "applied_memory_id", Definition: "applied_memory_id TEXT NOT NULL DEFAULT ''"},
-		{Name: "applied_by", Definition: "applied_by TEXT NOT NULL DEFAULT ''"},
-		{Name: "applied_at", Definition: "applied_at TIMESTAMP"},
-	}); err != nil {
-		return err
-	}
-	if err := ensureSQLiteColumns(db, "monitor_runs", []sqliteColumnMigration{
-		{Name: "command_event_id", Definition: "command_event_id TEXT NOT NULL DEFAULT ''"},
-	}); err != nil {
-		return err
-	}
-	if err := ensureSQLiteColumns(db, "monitor_items", []sqliteColumnMigration{
-		{Name: "body", Definition: "body TEXT NOT NULL DEFAULT ''"},
-		{Name: "html_url", Definition: "html_url TEXT NOT NULL DEFAULT ''"},
-		{Name: "skip_reason", Definition: "skip_reason TEXT NOT NULL DEFAULT ''"},
-		{Name: "last_publish_id", Definition: "last_publish_id TEXT NOT NULL DEFAULT ''"},
-		{Name: "last_publish_phase", Definition: "last_publish_phase TEXT NOT NULL DEFAULT ''"},
-		{Name: "last_publish_reason", Definition: "last_publish_reason TEXT NOT NULL DEFAULT ''"},
-		{Name: "last_publish_url", Definition: "last_publish_url TEXT NOT NULL DEFAULT ''"},
-		{Name: "snapshot_digest", Definition: "snapshot_digest TEXT NOT NULL DEFAULT ''"},
-		{Name: "github_updated_at", Definition: "github_updated_at TIMESTAMP NOT NULL DEFAULT '0001-01-01T00:00:00Z'"},
-		{Name: "workflow_phase", Definition: "workflow_phase TEXT NOT NULL DEFAULT ''"},
-		{Name: "linked_pr_number", Definition: "linked_pr_number INTEGER NOT NULL DEFAULT 0"},
-		{Name: "last_command_id", Definition: "last_command_id TEXT NOT NULL DEFAULT ''"},
-		{Name: "last_command_intent", Definition: "last_command_intent TEXT NOT NULL DEFAULT ''"},
-		{Name: "last_action_id", Definition: "last_action_id TEXT NOT NULL DEFAULT ''"},
-		{Name: "last_action_kind", Definition: "last_action_kind TEXT NOT NULL DEFAULT ''"},
-		{Name: "last_action_task_name", Definition: "last_action_task_name TEXT NOT NULL DEFAULT ''"},
-	}); err != nil {
-		return err
-	}
-	if _, err := db.Exec(`UPDATE monitor_items SET github_updated_at = updated_at WHERE github_updated_at IS NULL OR github_updated_at = '0001-01-01T00:00:00Z'`); err != nil {
-		return fmt.Errorf("migration failed: %w", err)
-	}
-	if err := ensureSQLiteColumns(db, "command_events", []sqliteColumnMigration{
-		{Name: "source", Definition: "source TEXT NOT NULL DEFAULT ''"},
-		{Name: "delivery_id", Definition: "delivery_id TEXT NOT NULL DEFAULT ''"},
-		{Name: "label", Definition: "label TEXT NOT NULL DEFAULT ''"},
-		{Name: "monitor_generation", Definition: "monitor_generation INTEGER NOT NULL DEFAULT 0"},
-		{Name: "dedupe_key", Definition: "dedupe_key TEXT NOT NULL DEFAULT ''"},
-		{Name: "idempotency_key", Definition: "idempotency_key TEXT NOT NULL DEFAULT ''"},
-		{Name: "issue_snapshot_digest", Definition: "issue_snapshot_digest TEXT NOT NULL DEFAULT ''"},
-	}); err != nil {
-		return err
-	}
-	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_command_events_dedupe
-		ON command_events(monitor_namespace, monitor_name, dedupe_key)
-		WHERE dedupe_key <> ''`); err != nil {
-		return fmt.Errorf("migration failed: %w", err)
-	}
-	if err := ensureSQLiteColumns(db, "security_scan_runs", []sqliteColumnMigration{
-		{Name: "slice_count", Definition: "slice_count INTEGER NOT NULL DEFAULT 0"},
-		{Name: "reviewed_slice_count", Definition: "reviewed_slice_count INTEGER NOT NULL DEFAULT 0"},
-		{Name: "skipped_slice_count", Definition: "skipped_slice_count INTEGER NOT NULL DEFAULT 0"},
-		{Name: "accepted_findings", Definition: "accepted_findings INTEGER NOT NULL DEFAULT 0"},
-		{Name: "dropped_findings", Definition: "dropped_findings INTEGER NOT NULL DEFAULT 0"},
-		{Name: "scanner_policy_version", Definition: "scanner_policy_version TEXT NOT NULL DEFAULT ''"},
-		{Name: "policy_digest", Definition: "policy_digest TEXT NOT NULL DEFAULT ''"},
-		{Name: "idempotency_key", Definition: "idempotency_key TEXT NOT NULL DEFAULT ''"},
-	}); err != nil {
-		return err
-	}
-	if err := ensureSQLiteColumns(db, "security_findings", []sqliteColumnMigration{
-		{Name: "slice_id", Definition: "slice_id TEXT NOT NULL DEFAULT ''"},
-		{Name: "category", Definition: "category TEXT NOT NULL DEFAULT ''"},
-		{Name: "triage", Definition: "triage TEXT NOT NULL DEFAULT ''"},
-		{Name: "reproduction", Definition: "reproduction TEXT NOT NULL DEFAULT ''"},
-		{Name: "why_tests_do_not_cover", Definition: "why_tests_do_not_cover TEXT NOT NULL DEFAULT ''"},
-		{Name: "suggested_regression_test", Definition: "suggested_regression_test TEXT NOT NULL DEFAULT ''"},
-		{Name: "minimum_fix_scope", Definition: "minimum_fix_scope TEXT NOT NULL DEFAULT ''"},
-	}); err != nil {
-		return err
-	}
-	if err := ensureSQLiteColumns(db, "security_review_slices", []sqliteColumnMigration{
-		{Name: "changed_files_json", Definition: "changed_files_json TEXT NOT NULL DEFAULT '[]'"},
-		{Name: "changed_line_ranges_json", Definition: "changed_line_ranges_json TEXT NOT NULL DEFAULT '[]'"},
-	}); err != nil {
-		return err
-	}
-	if err := ensureSQLiteColumns(db, "security_dropped_findings", []sqliteColumnMigration{
-		{Name: "layer", Definition: "layer TEXT NOT NULL DEFAULT ''"},
-	}); err != nil {
-		return err
-	}
-	if err := ensureSecurityReviewSlicesScopedPrimaryKey(db); err != nil {
-		return err
-	}
-	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_security_findings_slice
-		ON security_findings(namespace, repository_scan, slice_id, category, updated_at DESC)`); err != nil {
-		return fmt.Errorf("migration failed: %w", err)
-	}
-	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_security_review_slices_repo
-		ON security_review_slices(namespace, repository_scan, status, updated_at DESC)`); err != nil {
-		return fmt.Errorf("migration failed: %w", err)
-	}
-	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_security_dropped_findings_layer
-		ON security_dropped_findings(namespace, repository_scan, layer, created_at DESC)`); err != nil {
-		return fmt.Errorf("migration failed: %w", err)
-	}
-	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_source_proposal
-		ON memories(namespace, source_proposal_id)
-		WHERE source_proposal_id <> ''`); err != nil {
-		return fmt.Errorf("migration failed: %w", err)
-	}
-
-	return nil
-}
-
-func backfillExecutionEventSessionCursors(db *sql.DB) error {
-	_, err := db.Exec(`INSERT INTO execution_event_session_sequences(namespace, session_name, latest_seq)
-		SELECT namespace, session_name, MAX(CASE WHEN session_seq > 0 THEN session_seq ELSE rowid END)
-		FROM execution_events
-		WHERE session_name <> ''
-		GROUP BY namespace, session_name
-		ON CONFLICT(namespace, session_name) DO UPDATE SET latest_seq =
-			CASE
-				WHEN execution_event_session_sequences.latest_seq > excluded.latest_seq
-				THEN execution_event_session_sequences.latest_seq
-				ELSE excluded.latest_seq
-			END`)
-	if err != nil {
-		return fmt.Errorf("migration failed: %w", err)
-	}
-	return nil
-}
-
-func ensureGatewayEventTombstoneSchema(db *sql.DB) error {
-	if err := ensureSQLiteColumns(db, "gateway_event_tombstones", []sqliteColumnMigration{
-		{Name: "task_name", Definition: "task_name TEXT NOT NULL DEFAULT ''"},
-		{Name: "task_uid", Definition: "task_uid TEXT NOT NULL DEFAULT ''"},
-	}); err != nil {
-		return err
-	}
-	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_gateway_event_tombstones_task
-		ON gateway_event_tombstones(namespace, task_name, task_uid)`); err != nil {
-		return fmt.Errorf("migration failed: %w", err)
-	}
-	return nil
-}
-
-type sqliteColumnMigration struct {
-	Name       string
-	Definition string
-}
-
-func ensureSQLiteColumns(db *sql.DB, table string, columns []sqliteColumnMigration) error {
-	existing := map[string]struct{}{}
-	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
-	if err != nil {
-		return fmt.Errorf("migration failed: %w", err)
-	}
-	defer rows.Close() //nolint:errcheck
-	for rows.Next() {
-		var cid int
-		var name, columnType string
-		var notNull, pk int
-		var defaultValue sql.NullString
-		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
-			return fmt.Errorf("migration failed: %w", err)
-		}
-		existing[name] = struct{}{}
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("migration failed: %w", err)
-	}
-
-	for _, column := range columns {
-		if _, ok := existing[column.Name]; ok {
-			continue
-		}
-		if _, err := db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s", table, column.Definition)); err != nil {
-			return fmt.Errorf("migration failed: %w", err)
-		}
-	}
-	return nil
-}
-
-func ensureSecurityReviewSlicesScopedPrimaryKey(db *sql.DB) error {
-	pkColumns, err := sqlitePrimaryKeyColumns(db, "security_review_slices")
-	if err != nil {
-		return err
-	}
-	if len(pkColumns) == 3 &&
-		pkColumns[0] == "namespace" &&
-		pkColumns[1] == "repository_scan" &&
-		pkColumns[2] == "id" {
-		return nil
-	}
-
-	tx, err := db.Begin()
-	if err != nil {
-		return fmt.Errorf("migration failed: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if _, err := tx.Exec(`DROP TABLE IF EXISTS security_review_slices_migration`); err != nil {
-		return fmt.Errorf("migration failed: %w", err)
-	}
-	if _, err := tx.Exec(`CREATE TABLE security_review_slices_migration (
-		id                TEXT NOT NULL,
-		namespace         TEXT NOT NULL,
-		repository_scan   TEXT NOT NULL,
-		source            TEXT NOT NULL,
-		title             TEXT NOT NULL,
-		summary           TEXT NOT NULL DEFAULT '',
-		kind              TEXT NOT NULL DEFAULT 'unknown',
-		confidence        TEXT NOT NULL DEFAULT 'medium',
-		status            TEXT NOT NULL DEFAULT 'pending',
-		entrypoints_json  TEXT NOT NULL DEFAULT '[]',
-		owned_files_json  TEXT NOT NULL DEFAULT '[]',
-		context_files_json TEXT NOT NULL DEFAULT '[]',
-		tests_json        TEXT NOT NULL DEFAULT '[]',
-		tags_json         TEXT NOT NULL DEFAULT '[]',
-		trust_boundaries_json TEXT NOT NULL DEFAULT '[]',
-		changed_files_json TEXT NOT NULL DEFAULT '[]',
-		changed_line_ranges_json TEXT NOT NULL DEFAULT '[]',
-		last_scan_run_id  TEXT NOT NULL DEFAULT '',
-		last_reviewed_at  TIMESTAMP,
-		created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-		updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-		PRIMARY KEY (namespace, repository_scan, id)
-	)`); err != nil {
-		return fmt.Errorf("migration failed: %w", err)
-	}
-	if _, err := tx.Exec(`INSERT INTO security_review_slices_migration
-		(id, namespace, repository_scan, source, title, summary, kind, confidence, status,
-		 entrypoints_json, owned_files_json, context_files_json, tests_json, tags_json,
-		 trust_boundaries_json, changed_files_json, changed_line_ranges_json, last_scan_run_id, last_reviewed_at, created_at, updated_at)
-		SELECT id, namespace, repository_scan, source, title, summary, kind, confidence, status,
-		 entrypoints_json, owned_files_json, context_files_json, tests_json, tags_json,
-		 trust_boundaries_json, changed_files_json, changed_line_ranges_json, last_scan_run_id, last_reviewed_at, created_at, updated_at
-		FROM security_review_slices`); err != nil {
-		return fmt.Errorf("migration failed: %w", err)
-	}
-	if _, err := tx.Exec(`DROP TABLE security_review_slices`); err != nil {
-		return fmt.Errorf("migration failed: %w", err)
-	}
-	if _, err := tx.Exec(`ALTER TABLE security_review_slices_migration RENAME TO security_review_slices`); err != nil {
-		return fmt.Errorf("migration failed: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("migration failed: %w", err)
-	}
-	return nil
-}
-
-func sqlitePrimaryKeyColumns(db *sql.DB, table string) ([]string, error) {
-	type pkColumn struct {
-		name string
-		seq  int
-	}
-	var columns []pkColumn
-	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
-	if err != nil {
-		return nil, fmt.Errorf("migration failed: %w", err)
-	}
-	defer rows.Close() //nolint:errcheck
-	for rows.Next() {
-		var cid int
-		var name, columnType string
-		var notNull, pk int
-		var defaultValue sql.NullString
-		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
-			return nil, fmt.Errorf("migration failed: %w", err)
-		}
-		if pk > 0 {
-			columns = append(columns, pkColumn{name: name, seq: pk})
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("migration failed: %w", err)
-	}
-	for i := range columns {
-		for j := i + 1; j < len(columns); j++ {
-			if columns[j].seq < columns[i].seq {
-				columns[i], columns[j] = columns[j], columns[i]
-			}
-		}
-	}
-	names := make([]string, 0, len(columns))
-	for _, column := range columns {
-		names = append(names, column.name)
-	}
-	return names, nil
+	statements = append(statements, controlSchemaStatements()...)
+	return append(statements, agentExecutionSchemaStatements()...)
 }
 
 // Store implements both store.ResultStore and store.SessionStore.
 type Store struct {
 	db               *sql.DB
+	securityTx       *sql.Tx
 	dbPath           string
+	processLock      io.Closer
 	executionEventMu sync.Mutex
+
+	// snapshotCipher encrypts immutable agent execution snapshot bodies at
+	// rest. Snapshot persistence fails closed while it is nil.
+	snapshotCipher *AgentExecutionSnapshotCipher
 
 	// applyMemoryProposalAfterAcceptedRead is a test hook used to coordinate
 	// multi-connection proposal-apply races after an accepted proposal is read.
@@ -1244,8 +985,25 @@ func NewStore(db *sql.DB, dbPath string) *Store {
 	return &Store{db: db, dbPath: dbPath}
 }
 
+// OpenLockedStore acquires the process-lifetime filesystem lock adjacent to
+// path before SQLite is opened. Production controller wiring must use this
+// constructor so overlapping Pods or releases cannot initialize or write
+// the same database even if Kubernetes ownership fencing is misconfigured.
+func OpenLockedStore(path string) (*Store, error) {
+	lock, err := lockDatabaseFile(path)
+	if err != nil {
+		return nil, err
+	}
+	db, err := NewDB(path)
+	if err != nil {
+		_ = lock.Close()
+		return nil, err
+	}
+	return &Store{db: db, dbPath: path, processLock: lock}, nil
+}
+
 // Start runs background maintenance and blocks until ctx is cancelled,
-// then optimizes and closes the database.
+// then closes the database without issuing any final writes.
 // It satisfies the controller-runtime manager.Runnable interface.
 func (s *Store) Start(ctx context.Context) error {
 	logger := log.FromContext(ctx).WithName("sqlite-store")
@@ -1262,12 +1020,30 @@ func (s *Store) Start(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			s.db.Exec("PRAGMA optimize") //nolint:errcheck
-			return s.db.Close()
+			return s.close()
 		case <-ticker.C:
 			s.updateDBSizeMetric()
 		}
 	}
+}
+
+// NeedLeaderElection keeps SQLite-backed background mutation behind the
+// controller-runtime leader gate. The filesystem lock remains held for the
+// whole process lifetime, including standby/startup, and is the final defense
+// against overlapping writers.
+func (s *Store) NeedLeaderElection() bool { return true }
+
+func (s *Store) close() error {
+	dbErr := s.db.Close()
+	var lockErr error
+	if s.processLock != nil {
+		lockErr = s.processLock.Close()
+		s.processLock = nil
+	}
+	if dbErr != nil {
+		return dbErr
+	}
+	return lockErr
 }
 
 // updateDBSizeMetric reads the database file size and updates the gauge.

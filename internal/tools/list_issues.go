@@ -93,7 +93,7 @@ func (t *ListIssuesTool) Execute(ctx context.Context, argsJSON json.RawMessage) 
 	}
 
 	// Resolve repo and token using the shared helper
-	owner, repo, token, baseURL, err := resolveRepoAndToken(ctx, t.k8sClient, args.TaskName, args.RepoURL, t.apiBaseURL)
+	owner, repo, token, baseURL, err := resolveReadRepoAndToken(ctx, t.k8sClient, args.TaskName, args.RepoURL, t.apiBaseURL)
 	if err != nil {
 		return "", err
 	}

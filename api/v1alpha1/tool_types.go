@@ -58,6 +58,11 @@ type HTTPExecution struct {
 	Headers map[string]string `json:"headers,omitempty"`
 
 	// Timeout is the request timeout (default: 30s)
+	// Consequential (non-read) tools brokered to ACP runtimes execute under a
+	// fixed external-effect ledger lease; their timeout must stay at or below
+	// the controller's brokered call bound (currently four minutes). Longer
+	// timeouts are rejected when the tool is exposed to an ACP prompt, and
+	// brokered calls are always clamped to that bound at execution time.
 	// +optional
 	Timeout *metav1.Duration `json:"timeout,omitempty"`
 

@@ -38,6 +38,7 @@ func TestAIWorkerEnvRoundTrip(t *testing.T) {
 		TraceParent:                      "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
 		TraceState:                       "vendor=value",
 		TraceBaggage:                     "tenant=acme",
+		ControllerMode:                   "harness-v2",
 		Fallbacks: []FallbackProviderEnv{{
 			Provider:        "anthropic",
 			APIKey:          "secret",
@@ -73,11 +74,56 @@ func TestAIWorkerEnvRoundTrip(t *testing.T) {
 	if !parsed.EnableTelemetry || parsed.TraceParent != env.TraceParent || parsed.TraceState != env.TraceState || parsed.TraceBaggage != env.TraceBaggage {
 		t.Fatalf("telemetry env mismatch: got %#v, want parent=%q state=%q baggage=%q", parsed, env.TraceParent, env.TraceState, env.TraceBaggage)
 	}
+	if parsed.ControllerMode != env.ControllerMode {
+		t.Fatalf("controller mode = %q, want %q", parsed.ControllerMode, env.ControllerMode)
+	}
 	if len(parsed.Fallbacks) != 1 {
 		t.Fatalf("fallback count = %d, want 1", len(parsed.Fallbacks))
 	}
 	if parsed.Fallbacks[0] != env.Fallbacks[0] {
 		t.Fatalf("fallback = %#v, want %#v", parsed.Fallbacks[0], env.Fallbacks[0])
+	}
+}
+
+func TestAIWorkerEnvModelSettingsRoundTrip(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		absent      bool
+		temperature string
+		maxTokens   string
+	}{
+		{name: "absent", absent: true},
+		{name: "explicit empty"},
+		{name: "explicit zero", temperature: "0", maxTokens: "0"},
+		{name: "positive values", temperature: "0.123456789", maxTokens: "256"},
+		{name: "temperature only", temperature: "0.5"},
+		{name: "maxTokens only", maxTokens: "8192"},
+		{name: "negative maxTokens", maxTokens: "-256"},
+		{name: "malformed values reach worker validation", temperature: "invalid", maxTokens: "3.5"},
+		{name: "non-finite reaches worker validation", temperature: "NaN", maxTokens: "999999999999999999999999"},
+		{name: "whitespace preserved", temperature: " 0 ", maxTokens: " 256 "},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			values := map[string]string{}
+			if !tt.absent {
+				values[AITemperature] = tt.temperature
+				values[AIMaxTokens] = tt.maxTokens
+			}
+			parsed := ParseAIWorkerEnv(func(name string) string { return values[name] })
+			if parsed.Temperature != tt.temperature || parsed.MaxTokens != tt.maxTokens {
+				t.Fatalf("parsed model settings = (%q, %q), want (%q, %q)", parsed.Temperature, parsed.MaxTokens, tt.temperature, tt.maxTokens)
+			}
+
+			rendered := map[string]string{}
+			for _, envVar := range parsed.EnvVars() {
+				rendered[envVar.Name] = envVar.Value
+			}
+			for key, want := range map[string]string{AITemperature: tt.temperature, AIMaxTokens: tt.maxTokens} {
+				if got, ok := rendered[key]; !ok || got != want {
+					t.Errorf("rendered %s = %q, present=%v; want explicit %q", key, got, ok, want)
+				}
+			}
+		})
 	}
 }
 
@@ -196,7 +242,7 @@ func TestAgentSandboxEnvVarsDisabledReturnsEmpty(t *testing.T) {
 	}
 }
 
-func TestExecutionWorkspaceEnvRenderAndParse(t *testing.T) {
+func TestExecutionWorkspaceEnvRender(t *testing.T) {
 	env := ExecutionWorkspaceEnv{
 		Enabled:           true,
 		Provider:          "substrate",
@@ -219,22 +265,24 @@ func TestExecutionWorkspaceEnvRenderAndParse(t *testing.T) {
 		values[envVar.Name] = envVar.Value
 	}
 
-	parsed := ParseExecutionWorkspaceEnv(func(name string) string { return values[name] })
-	if !parsed.Enabled {
-		t.Fatal("parsed execution workspace env is not enabled")
+	want := map[string]string{
+		ExecutionWorkspaceEnabled:               "true",
+		ExecutionWorkspaceProvider:              env.Provider,
+		ExecutionWorkspaceClaimName:             env.ClaimName,
+		ExecutionWorkspaceBoot:                  "true",
+		ExecutionWorkspaceClaimTimeoutSeconds:   "120",
+		ExecutionWorkspaceCommandTimeoutSeconds: "1800",
+		ExecutionWorkspaceStatusEndpoint:        env.StatusEndpoint,
+		ExecutionWorkspaceDepth:                 "0",
 	}
-	if parsed.Provider != env.Provider || parsed.ClaimName != env.ClaimName {
-		t.Fatalf("parsed provider/claim = %s/%s, want %s/%s", parsed.Provider, parsed.ClaimName, env.Provider, env.ClaimName)
-	}
-	if parsed.ClaimTimeout != env.ClaimTimeout || parsed.CommandTimeout != env.CommandTimeout {
-		t.Fatalf("parsed timeouts = %s/%s, want %s/%s", parsed.ClaimTimeout, parsed.CommandTimeout, env.ClaimTimeout, env.CommandTimeout)
-	}
-	if !parsed.Boot {
-		t.Fatal("parsed boot = false, want true")
+	for name, wantValue := range want {
+		if values[name] != wantValue {
+			t.Fatalf("%s = %q, want %q", name, values[name], wantValue)
+		}
 	}
 }
 
-func TestSubstrateEnvRenderAndParse(t *testing.T) {
+func TestSubstrateEnvRender(t *testing.T) {
 	env := SubstrateEnv{
 		APIEndpoint:             "api.ate-system.svc:443",
 		APICAFile:               "/var/run/orka/substrate/ca.crt",
@@ -253,23 +301,24 @@ func TestSubstrateEnvRenderAndParse(t *testing.T) {
 		values[envVar.Name] = envVar.Value
 	}
 
-	parsed := ParseSubstrateEnv(func(name string) string { return values[name] })
-	if parsed.APIEndpoint != env.APIEndpoint || parsed.RouterURL != env.RouterURL {
-		t.Fatalf("parsed endpoints = %#v, want %#v", parsed, env)
+	want := map[string]string{
+		SubstrateAPIEndpoint:             env.APIEndpoint,
+		SubstrateAPIInsecureSkipVerify:   "true",
+		SubstrateRouterURL:               env.RouterURL,
+		SubstrateSessionIdentityToken:    env.SessionIdentityToken,
+		SubstrateSessionIdentityRequired: "true",
+		SubstrateSessionIdentityAudience: env.SessionIdentityAudience,
+		SubstrateSessionIdentityAppID:    env.SessionIdentityAppID,
+		SubstrateSessionIdentityUserID:   env.SessionIdentityUserID,
 	}
-	if !parsed.APIInsecureSkipVerify {
-		t.Fatal("parsed insecure skip verify = false, want true")
-	}
-	if parsed.SessionIdentityToken != env.SessionIdentityToken ||
-		!parsed.SessionIdentityRequired ||
-		parsed.SessionIdentityAudience != env.SessionIdentityAudience ||
-		parsed.SessionIdentityAppID != env.SessionIdentityAppID ||
-		parsed.SessionIdentityUserID != env.SessionIdentityUserID {
-		t.Fatalf("parsed SessionIdentity env = %#v, want %#v", parsed, env)
+	for name, wantValue := range want {
+		if values[name] != wantValue {
+			t.Fatalf("%s = %q, want %q", name, values[name], wantValue)
+		}
 	}
 }
 
-func TestAgentSandboxEnvRenderAndParse(t *testing.T) {
+func TestAgentSandboxEnvRender(t *testing.T) {
 	env := AgentSandboxEnv{
 		Enabled:           true,
 		RouterURL:         "http://sandbox-router",
@@ -289,25 +338,23 @@ func TestAgentSandboxEnvRenderAndParse(t *testing.T) {
 	for _, envVar := range env.EnvVars() {
 		values[envVar.Name] = envVar.Value
 	}
-	if values[AgentSandboxDepth] != "0" {
-		t.Fatalf("%s = %q, want 0", AgentSandboxDepth, values[AgentSandboxDepth])
-	}
 
-	parsed := ParseAgentSandboxEnv(func(name string) string { return values[name] })
-	if !parsed.Enabled {
-		t.Fatal("parsed sandbox env is not enabled")
+	want := map[string]string{
+		AgentSandboxEnabled:               "true",
+		AgentSandboxDepth:                 "0",
+		AgentSandboxTemplateName:          env.TemplateName,
+		AgentSandboxTemplateNamespace:     env.TemplateNamespace,
+		AgentSandboxClaimNamespace:        env.ClaimNamespace,
+		AgentSandboxReusePolicy:           env.ReusePolicy,
+		AgentSandboxReuseKey:              env.ReuseKey,
+		AgentSandboxCleanupPolicy:         env.CleanupPolicy,
+		AgentSandboxClaimTimeoutSeconds:   "120",
+		AgentSandboxCommandTimeoutSeconds: "1800",
 	}
-	if parsed.TemplateName != env.TemplateName || parsed.TemplateNamespace != env.TemplateNamespace {
-		t.Fatalf("parsed template = %s/%s, want %s/%s", parsed.TemplateNamespace, parsed.TemplateName, env.TemplateNamespace, env.TemplateName)
-	}
-	if parsed.ClaimNamespace != env.ClaimNamespace {
-		t.Fatalf("parsed claim namespace = %q, want %q", parsed.ClaimNamespace, env.ClaimNamespace)
-	}
-	if parsed.CleanupPolicy != env.CleanupPolicy || parsed.ReusePolicy != env.ReusePolicy || parsed.ReuseKey != env.ReuseKey {
-		t.Fatalf("parsed policies = %#v, want %#v", parsed, env)
-	}
-	if parsed.ClaimTimeout != env.ClaimTimeout || parsed.CommandTimeout != env.CommandTimeout {
-		t.Fatalf("parsed timeouts = %s/%s, want %s/%s", parsed.ClaimTimeout, parsed.CommandTimeout, env.ClaimTimeout, env.CommandTimeout)
+	for name, wantValue := range want {
+		if values[name] != wantValue {
+			t.Fatalf("%s = %q, want %q", name, values[name], wantValue)
+		}
 	}
 }
 

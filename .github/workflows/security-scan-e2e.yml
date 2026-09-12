@@ -16,7 +16,12 @@ on:
       - "hack/**"
       - "internal/**"
       - "pkg/**"
+      - "scripts/lib/e2e-admission-tls.sh"
+      - "scripts/lib/ensure-static-mode-namespace.sh"
+      - "scripts/lib/kind-local-registry.sh"
+      - "scripts/fixtures/security-scan-fake-acp/**"
       - "scripts/security-scan-e2e.sh"
+      - "scripts/tests/security-scan-e2e-test.sh"
       - "workers/**"
   push:
     paths:
@@ -32,7 +37,12 @@ on:
       - "hack/**"
       - "internal/**"
       - "pkg/**"
+      - "scripts/lib/e2e-admission-tls.sh"
+      - "scripts/lib/ensure-static-mode-namespace.sh"
+      - "scripts/lib/kind-local-registry.sh"
+      - "scripts/fixtures/security-scan-fake-acp/**"
       - "scripts/security-scan-e2e.sh"
+      - "scripts/tests/security-scan-e2e-test.sh"
       - "workers/**"
 
 permissions:
@@ -48,8 +58,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
-      KIND_CLUSTER: orka-security-scan-e2e
-      KIND_VERSION: v0.31.0
+      KIND_CLUSTER: orka-security-scan-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -57,15 +66,16 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          go-version: '1.27'
+          check-latest: true
+
+      - name: Install kind
+        uses: ./.github/actions/setup-kind
 
       - name: Install prerequisites
         run: |
           sudo apt-get update
           sudo apt-get install -y jq
-          curl -fsSL -o ./kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-$(go env GOARCH)"
-          chmod +x ./kind
-          sudo mv ./kind /usr/local/bin/kind
 
       - name: Verify toolchain
         run: |
@@ -73,5 +83,21 @@ jobs:
           kubectl version --client=true
           jq --version
 
-      - name: Run security scan e2e
+      - name: Verify security scan and ACP authority assertions
+        run: |
+          bash -n scripts/security-scan-e2e.sh scripts/tests/security-scan-e2e-test.sh
+          bash scripts/tests/security-scan-e2e-test.sh
+
+      - name: Run security scan and ACP authority e2e
+        env:
+          ORKA_SECURITY_SCAN_DIAGNOSTICS_DIR: ${{ runner.temp }}/security-scan-e2e-diagnostics
         run: bash scripts/security-scan-e2e.sh
+
+      - name: Upload security scan failure diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: security-scan-e2e-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/security-scan-e2e-diagnostics
+          if-no-files-found: warn
+          retention-days: 14

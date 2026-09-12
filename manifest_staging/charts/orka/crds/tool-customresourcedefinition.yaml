@@ -125,7 +125,13 @@ spec:
                     - name
                     type: object
                   timeout:
-                    description: 'Timeout is the request timeout (default: 30s)'
+                    description: |-
+                      Timeout is the request timeout (default: 30s)
+                      Consequential (non-read) tools brokered to ACP runtimes execute under a
+                      fixed external-effect ledger lease; their timeout must stay at or below
+                      the controller's brokered call bound (currently four minutes). Longer
+                      timeouts are rejected when the tool is exposed to an ACP prompt, and
+                      brokered calls are always clamped to that bound at execution time.
                     type: string
                   url:
                     description: |-

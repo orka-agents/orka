@@ -7,7 +7,11 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
+	"errors"
 	"testing"
+
+	"github.com/gofiber/fiber/v3"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 func TestParsePagination(t *testing.T) {
@@ -128,5 +132,38 @@ func TestParsePagination_Constants(t *testing.T) {
 	}
 	if MaxLimit != 500 {
 		t.Errorf("MaxLimit = %d, want 500", MaxLimit)
+	}
+}
+
+func TestParsePaginationDropsCacheContinueSentinel(t *testing.T) {
+	p, err := ParsePagination("50", cacheContinueUnsupported)
+	if err != nil {
+		t.Fatalf("ParsePagination() error = %v", err)
+	}
+	if p.Continue != "" {
+		t.Fatalf("ParsePagination() Continue = %q, want empty", p.Continue)
+	}
+	if got := NormalizeListContinue(cacheContinueUnsupported); got != "" {
+		t.Fatalf("NormalizeListContinue(sentinel) = %q, want empty", got)
+	}
+	if got := NormalizeListContinue("eyJ2IjoibWV0YSJ9"); got != "eyJ2IjoibWV0YSJ9" {
+		t.Fatalf("NormalizeListContinue(real token) = %q, want unchanged", got)
+	}
+}
+
+func TestListPageErrorPreservesExpiredContinue(t *testing.T) {
+	expired := apierrors.NewResourceExpired("too old resource version")
+	err := listPageError("tasks", expired)
+	var fiberErr *fiber.Error
+	if !errors.As(err, &fiberErr) || fiberErr.Code != fiber.StatusGone {
+		t.Fatalf("expired continue error = %v, want HTTP 410", err)
+	}
+	bad := listPageError("tasks", apierrors.NewBadRequest("invalid continue token"))
+	if !errors.As(bad, &fiberErr) || fiberErr.Code != fiber.StatusBadRequest {
+		t.Fatalf("malformed continue error = %v, want HTTP 400", bad)
+	}
+	other := listPageError("tasks", errors.New("boom"))
+	if !errors.As(other, &fiberErr) || fiberErr.Code != fiber.StatusInternalServerError {
+		t.Fatalf("generic list error = %v, want HTTP 500", other)
 	}
 }

@@ -8,12 +8,15 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/stretchr/testify/require"
 )
 
 // setupDiskStore creates a Store backed by a real on-disk SQLite file.
@@ -30,57 +33,142 @@ func setupDiskStore(t *testing.T) *Store {
 }
 
 func TestIntegration_DiskPersistence(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "persist.db")
+	s := setupDiskStore(t)
 	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	require.NoError(t, s.CreateSession(ctx, &store.SessionRecord{
+		Namespace: "ns", Name: "session", SessionType: "task", CreatedAt: now, UpdatedAt: now,
+	}))
+	savedMessages := []store.SessionMessage{}
+	savedEvents := make([]store.SessionExecutionEvent, 0, 3)
+	for cycle := range 3 {
+		taskName := fmt.Sprintf("task-%d", cycle)
+		content := "saved result for " + taskName
+		require.NoError(t, s.SaveResult(ctx, "ns", taskName, []byte(content)))
+		require.NoError(t, s.AppendMessages(ctx, "ns", "session", []store.SessionMessage{
+			{Role: "user", Content: content, SourceType: "task", SourceRef: taskName},
+		}))
+		messages, err := s.LoadTranscript(ctx, "ns", "session", 0)
+		require.NoError(t, err)
+		require.Len(t, messages, cycle+1)
+		require.Equal(t, savedMessages, messages[:cycle])
+		message := messages[cycle]
+		require.NotEmpty(t, message.ID)
+		require.False(t, strings.HasPrefix(message.ID, "legacy:"))
+		require.Equal(t, int64((cycle+1)*2), message.Order)
+		require.False(t, message.Timestamp.IsZero())
+		savedMessages = messages
 
-	// Open, write, close
-	db1, err := NewDB(dbPath)
-	if err != nil {
-		t.Fatalf("NewDB: %v", err)
-	}
-	s1 := NewStore(db1, dbPath)
+		event, appended, err := s.AppendExecutionEventIfAbsent(ctx, &store.ExecutionEvent{
+			Namespace: "ns", StreamType: store.ExecutionEventStreamTypeTask, StreamID: taskName,
+			TaskName: taskName, SessionName: "session", Type: events.ExecutionEventTypeTaskSucceeded,
+			Summary: content,
+		}, "task-complete")
+		require.NoError(t, err)
+		require.True(t, appended)
+		savedEvents = append(savedEvents, store.SessionExecutionEvent{
+			ExecutionEvent: *event, SessionSeq: int64(cycle + 1), TaskSeq: event.Seq,
+		})
+		session, err := s.GetSession(ctx, "ns", "session")
+		require.NoError(t, err)
+		require.NoError(t, s.db.Close())
 
-	if err := s1.SaveResult(ctx, "ns", "task1", []byte("persisted-data")); err != nil {
-		t.Fatalf("SaveResult: %v", err)
+		db, err := NewDB(s.dbPath)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = db.Close() })
+		s = NewStore(db, s.dbPath)
+		for previous := range cycle + 1 {
+			name := fmt.Sprintf("task-%d", previous)
+			data, err := s.GetResult(ctx, "ns", name)
+			require.NoError(t, err)
+			require.Equal(t, "saved result for "+name, string(data))
+		}
+		reopenedSession, err := s.GetSession(ctx, "ns", "session")
+		require.NoError(t, err)
+		require.Equal(t, session, reopenedSession)
+		messages, err = s.LoadTranscript(ctx, "ns", "session", 0)
+		require.NoError(t, err)
+		require.Equal(t, savedMessages, messages)
+		listed, latest, err := s.ListSessionExecutionEvents(ctx, store.SessionExecutionEventFilter{
+			Namespace: "ns", SessionName: "session",
+		})
+		require.NoError(t, err)
+		require.Equal(t, savedEvents, listed)
+		require.Equal(t, int64(cycle+1), latest)
+		replay, appended, err := s.AppendExecutionEventIfAbsent(ctx, event, "task-complete")
+		require.NoError(t, err)
+		require.False(t, appended)
+		require.Equal(t, event, replay)
+		require.NoError(t, s.AppendMessages(ctx, "ns", "session", []store.SessionMessage{message}))
 	}
+}
 
-	now := time.Now().Truncate(time.Second)
-	if err := s1.CreateSession(ctx, &store.SessionRecord{
-		Namespace: "ns", Name: "sess1", SessionType: "task", CreatedAt: now, UpdatedAt: now,
-	}); err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
-	if err := s1.AppendMessages(ctx, "ns", "sess1", []store.SessionMessage{
-		{Role: "user", Content: "persisted-msg", Timestamp: now},
-	}); err != nil {
-		t.Fatalf("AppendMessages: %v", err)
-	}
-
-	_ = db1.Close()
-
-	// Reopen and verify
-	db2, err := NewDB(dbPath)
-	if err != nil {
-		t.Fatalf("NewDB reopen: %v", err)
-	}
-	defer db2.Close() //nolint:errcheck
-	s2 := NewStore(db2, dbPath)
-
-	got, err := s2.GetResult(ctx, "ns", "task1")
-	if err != nil {
-		t.Fatalf("GetResult after reopen: %v", err)
-	}
-	if string(got) != "persisted-data" {
-		t.Errorf("result = %q, want %q", got, "persisted-data")
-	}
-
-	msgs, err := s2.LoadTranscript(ctx, "ns", "sess1", 0)
-	if err != nil {
-		t.Fatalf("LoadTranscript after reopen: %v", err)
-	}
-	if len(msgs) != 1 || msgs[0].Content != "persisted-msg" {
-		t.Errorf("transcript = %+v, want 1 message with 'persisted-msg'", msgs)
+func TestIntegration_MonitorAndSecurityRecordsPersistAcrossReopen(t *testing.T) {
+	s := setupDiskStore(t)
+	ctx := context.Background()
+	for cycle := range 3 {
+		id := fmt.Sprintf("record-%d", cycle)
+		require.NoError(t, s.UpsertMonitorItem(ctx, &store.MonitorItem{
+			MonitorNamespace: "ns", MonitorName: "monitor", Kind: "issue", ItemKey: id, Title: id,
+		}))
+		require.NoError(t, s.CreateScanRun(ctx, &store.ScanRun{
+			ID: id, Namespace: "ns", RepositoryScan: "repo", RepositoryScanUID: "repo-uid",
+			RepositoryScanGeneration: 3, Phase: "succeeded", TaskName: id,
+			ScannerPolicyVersion: "policy-v1", PolicyDigest: "policy-digest", IdempotencyKey: id,
+		}))
+		require.NoError(t, s.UpsertReviewSlice(ctx, &store.ReviewSlice{
+			ID: id, Namespace: "ns", RepositoryScan: "repo", Source: "test", Title: id,
+		}))
+		require.NoError(t, s.UpsertReviewSlice(ctx, &store.ReviewSlice{
+			ID: id, Namespace: "other", RepositoryScan: "other-repo", Source: "test", Title: "other " + id,
+		}))
+		require.NoError(t, s.CreateDroppedFinding(ctx, &store.DroppedFinding{
+			ID: id, Namespace: "ns", RepositoryScan: "repo", ScanRunID: id, TaskName: id,
+			SliceID: id, Layer: "validation", Reason: "missing evidence", SampleJSON: `{"title":"example"}`,
+		}))
+		items := make([]*store.MonitorItem, 0, cycle+1)
+		runs := make([]*store.ScanRun, 0, cycle+1)
+		slices := make([]*store.ReviewSlice, 0, cycle+1)
+		for previous := range cycle + 1 {
+			name := fmt.Sprintf("record-%d", previous)
+			item, err := s.GetMonitorItem(ctx, "ns", "monitor", "issue", name)
+			require.NoError(t, err)
+			require.False(t, item.GitHubUpdatedAt.IsZero())
+			items = append(items, item)
+			run, err := s.GetScanRun(ctx, "ns", name)
+			require.NoError(t, err)
+			runs = append(runs, run)
+			slice, err := s.GetReviewSlice(ctx, "ns", "repo", name)
+			require.NoError(t, err)
+			slices = append(slices, slice)
+		}
+		filter := store.DroppedFindingFilter{Namespace: "ns", RepositoryScan: "repo"}
+		dropped, _, err := s.ListDroppedFindings(ctx, filter)
+		require.NoError(t, err)
+		require.Len(t, dropped, cycle+1)
+		require.NoError(t, s.db.Close())
+		db, err := NewDB(s.dbPath)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = db.Close() })
+		s = NewStore(db, s.dbPath)
+		for previous := range cycle + 1 {
+			name := fmt.Sprintf("record-%d", previous)
+			item, err := s.GetMonitorItem(ctx, "ns", "monitor", "issue", name)
+			require.NoError(t, err)
+			require.Equal(t, items[previous], item)
+			run, err := s.GetScanRun(ctx, "ns", name)
+			require.NoError(t, err)
+			require.Equal(t, runs[previous], run)
+			slice, err := s.GetReviewSlice(ctx, "ns", "repo", name)
+			require.NoError(t, err)
+			require.Equal(t, slices[previous], slice)
+			other, err := s.GetReviewSlice(ctx, "other", "other-repo", name)
+			require.NoError(t, err)
+			require.Equal(t, "other "+name, other.Title)
+		}
+		reopenedDropped, _, err := s.ListDroppedFindings(ctx, filter)
+		require.NoError(t, err)
+		require.Equal(t, dropped, reopenedDropped)
 	}
 }
 
@@ -615,6 +703,71 @@ func TestIntegration_GracefulShutdown(t *testing.T) {
 	}
 }
 
+func TestIntegration_ShutdownDoesNotWritePlannerStatistics(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "shutdown-no-write.db")
+
+	db, err := NewDB(dbPath)
+	if err != nil {
+		t.Fatalf("NewDB: %v", err)
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE shutdown_optimizer_probe (
+			id INTEGER PRIMARY KEY,
+			value TEXT NOT NULL
+		);
+		CREATE INDEX shutdown_optimizer_probe_value
+			ON shutdown_optimizer_probe(value);
+		WITH RECURSIVE sequence(value) AS (
+			SELECT 1
+			UNION ALL
+			SELECT value + 1 FROM sequence WHERE value < 10000
+		)
+		INSERT INTO shutdown_optimizer_probe(value)
+			SELECT printf('value-%05d', value) FROM sequence;
+	`); err != nil {
+		_ = db.Close()
+		t.Fatalf("seed optimizer probe: %v", err)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM shutdown_optimizer_probe WHERE value = ?`, "value-05000").Scan(&count); err != nil {
+		_ = db.Close()
+		t.Fatalf("query optimizer probe: %v", err)
+	}
+	if count != 1 {
+		_ = db.Close()
+		t.Fatalf("optimizer probe count = %d, want 1", count)
+	}
+
+	var statisticsTables int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_schema WHERE name = 'sqlite_stat1'`).Scan(&statisticsTables); err != nil {
+		_ = db.Close()
+		t.Fatalf("query pre-shutdown statistics tables: %v", err)
+	}
+	if statisticsTables != 0 {
+		_ = db.Close()
+		t.Fatalf("pre-shutdown sqlite_stat1 tables = %d, want 0", statisticsTables)
+	}
+
+	shutdownCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := NewStore(db, dbPath).Start(shutdownCtx); err != nil {
+		t.Fatalf("Start after cancellation: %v", err)
+	}
+
+	reopened, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open after shutdown: %v", err)
+	}
+	defer reopened.Close() //nolint:errcheck
+	if err := reopened.QueryRow(`SELECT COUNT(*) FROM sqlite_schema WHERE name = 'sqlite_stat1'`).Scan(&statisticsTables); err != nil {
+		t.Fatalf("query post-shutdown statistics tables: %v", err)
+	}
+	if statisticsTables != 0 {
+		t.Fatalf("post-shutdown sqlite_stat1 tables = %d, want 0", statisticsTables)
+	}
+}
+
 func TestIntegration_HealthCheckOnDisk(t *testing.T) {
 	s := setupDiskStore(t)
 	ctx := context.Background()
@@ -730,151 +883,48 @@ func TestIntegration_ReleaseLockWrongTask(t *testing.T) {
 	}
 }
 
-func TestIntegration_MigrateIdempotent(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "migrate.db")
-
-	// Run NewDB twice — migrations should be idempotent (IF NOT EXISTS)
-	db1, err := NewDB(dbPath)
-	if err != nil {
-		t.Fatalf("NewDB first: %v", err)
-	}
-	_ = db1.Close()
-
-	db2, err := NewDB(dbPath)
-	if err != nil {
-		t.Fatalf("NewDB second (idempotent migration): %v", err)
-	}
-	defer db2.Close() //nolint:errcheck
-
-	// Verify DB is functional
-	s := NewStore(db2, dbPath)
-	if err := s.HealthCheck(context.Background()); err != nil {
-		t.Fatalf("HealthCheck after double-migrate: %v", err)
-	}
-}
-
-func TestIntegration_MigrateSecurityScanLegacySchema(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "security-legacy.db")
-	legacyDB, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("sql.Open() error = %v", err)
-	}
-	if _, err := legacyDB.Exec(`
-		CREATE TABLE security_findings (
-			id                TEXT PRIMARY KEY,
-			namespace         TEXT NOT NULL,
-			repository_scan   TEXT NOT NULL,
-			scan_run_id       TEXT NOT NULL,
-			fingerprint       TEXT NOT NULL,
-			title             TEXT NOT NULL,
-			summary           TEXT NOT NULL,
-			severity          TEXT NOT NULL,
-			confidence        TEXT NOT NULL,
-			validation_status TEXT NOT NULL,
-			state             TEXT NOT NULL,
-			file_path         TEXT NOT NULL DEFAULT '',
-			line              INTEGER NOT NULL DEFAULT 0,
-			commit_sha        TEXT NOT NULL DEFAULT '',
-			root_cause        TEXT NOT NULL DEFAULT '',
-			remediation       TEXT NOT NULL DEFAULT '',
-			suggested_action  TEXT NOT NULL DEFAULT '',
-			evidence_json     TEXT NOT NULL DEFAULT '',
-			validation_json   TEXT NOT NULL DEFAULT '',
-			patch_proposal_id TEXT NOT NULL DEFAULT '',
-			pr_number         INTEGER,
-			pr_url            TEXT NOT NULL DEFAULT '',
-			created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			UNIQUE(namespace, repository_scan, fingerprint)
-		);
-		CREATE TABLE security_review_slices (
-			id                TEXT PRIMARY KEY,
-			namespace         TEXT NOT NULL,
-			repository_scan   TEXT NOT NULL,
-			source            TEXT NOT NULL,
-			title             TEXT NOT NULL,
-			summary           TEXT NOT NULL DEFAULT '',
-			kind              TEXT NOT NULL DEFAULT 'unknown',
-			confidence        TEXT NOT NULL DEFAULT 'medium',
-			status            TEXT NOT NULL DEFAULT 'pending',
-			entrypoints_json  TEXT NOT NULL DEFAULT '[]',
-			owned_files_json  TEXT NOT NULL DEFAULT '[]',
-			context_files_json TEXT NOT NULL DEFAULT '[]',
-			tests_json        TEXT NOT NULL DEFAULT '[]',
-			tags_json         TEXT NOT NULL DEFAULT '[]',
-			trust_boundaries_json TEXT NOT NULL DEFAULT '[]',
-			last_scan_run_id  TEXT NOT NULL DEFAULT '',
-			last_reviewed_at  TIMESTAMP,
-			created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			UNIQUE(namespace, repository_scan, id)
-		);
-		INSERT INTO security_review_slices (id, namespace, repository_scan, source, title)
-		VALUES ('slice_api', 'ns1', 'repo1', 'legacy', 'Legacy API slice');
-	`); err != nil {
-		_ = legacyDB.Close()
-		t.Fatalf("seed legacy schema error = %v", err)
-	}
-	if err := legacyDB.Close(); err != nil {
-		t.Fatalf("legacyDB.Close() error = %v", err)
-	}
-
+func TestIntegration_ReopenPatchProposalPublicationEvidence(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "patch-publication.db")
+	initial, bound := testPatchProposalPublication("reopen")
 	db, err := NewDB(dbPath)
 	if err != nil {
-		t.Fatalf("NewDB() migrated legacy security schema error = %v", err)
+		t.Fatal(err)
 	}
-	defer db.Close() //nolint:errcheck
-	secStore := NewStore(db, dbPath)
+	t.Cleanup(func() { _ = db.Close() })
+	s := NewStore(db, dbPath)
+	if err := s.CreatePatchProposal(context.Background(), initial); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.BindPatchProposalPublicationEvidence(context.Background(), bound); err != nil {
+		t.Fatal(err)
+	}
+	boundUpdatedAt := bound.UpdatedAt
+	if err := db.Close(); err != nil {
+		t.Fatalf("db.Close() error = %v", err)
+	}
 
-	if _, err := secStore.GetReviewSlice(context.Background(), "ns1", "repo1", "slice_api"); err != nil {
-		t.Fatalf("GetReviewSlice() after migration error = %v", err)
-	}
-	for _, column := range []string{"slice_id", "category", "triage", "reproduction", "minimum_fix_scope"} {
-		if !sqliteTableHasColumn(t, db, "security_findings", column) {
-			t.Fatalf("security_findings missing migrated column %q", column)
-		}
-	}
-
-	ctx := context.Background()
-	if err := secStore.UpsertReviewSlice(ctx, &store.ReviewSlice{
-		ID:             "slice_api",
-		Namespace:      "ns2",
-		RepositoryScan: "repo1",
-		Source:         "legacy-migration-test",
-		Title:          "Same ID in different namespace",
-	}); err != nil {
-		t.Fatalf("UpsertReviewSlice() same id in different namespace error = %v", err)
-	}
-	if _, err := secStore.GetReviewSlice(ctx, "ns2", "repo1", "slice_api"); err != nil {
-		t.Fatalf("GetReviewSlice(ns2) error = %v", err)
-	}
-}
-
-func sqliteTableHasColumn(t *testing.T, db *sql.DB, table, column string) bool {
-	t.Helper()
-	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	reopenedDB, err := NewDB(dbPath)
 	if err != nil {
-		t.Fatalf("PRAGMA table_info(%s) error = %v", table, err)
+		t.Fatalf("NewDB() reopen error = %v", err)
 	}
-	defer rows.Close() //nolint:errcheck
-	for rows.Next() {
-		var cid int
-		var name, columnType string
-		var notNull, pk int
-		var defaultValue sql.NullString
-		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
-			t.Fatalf("scan table_info(%s) error = %v", table, err)
-		}
-		if name == column {
-			return true
-		}
+	defer reopenedDB.Close() //nolint:errcheck
+	reopenedStore := NewStore(reopenedDB, dbPath)
+	stored := onlyPatchProposal(t, reopenedStore, initial.Namespace, initial.FindingID)
+	if !reflect.DeepEqual(stored.PublicationEvidence, bound.PublicationEvidence) {
+		t.Fatalf("reopened publication evidence = %#v, want %#v", stored.PublicationEvidence, bound.PublicationEvidence)
 	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("table_info(%s) rows error = %v", table, err)
+	if !stored.UpdatedAt.Equal(boundUpdatedAt) {
+		t.Fatalf("reopened updatedAt = %v, want %v", stored.UpdatedAt, boundUpdatedAt)
 	}
-	return false
+
+	replay := clonePatchProposal(bound)
+	replay.UpdatedAt = time.Time{}
+	if err := reopenedStore.BindPatchProposalPublicationEvidence(context.Background(), replay); err != nil {
+		t.Fatalf("identical replay after reopen error = %v", err)
+	}
+	if !replay.UpdatedAt.Equal(boundUpdatedAt) {
+		t.Fatalf("replay after reopen updatedAt = %v, want unchanged %v", replay.UpdatedAt, boundUpdatedAt)
+	}
 }
 
 func TestIntegration_WALModeEnabled(t *testing.T) {

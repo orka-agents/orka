@@ -119,7 +119,7 @@ func TestSubstrateClaimReattachesAfterConcurrentCreateAlreadyExists(t *testing.T
 	if !got.Reused || got.Created {
 		t.Fatalf("Claim() reused=%t created=%t, want reused existing actor", got.Reused, got.Created)
 	}
-	if got.Ref.ID != actorID || got.ReuseKey != reuseKey {
+	if got.Ref.ID != SubstrateActorKey("ate-demo", actorID) || got.ReuseKey != reuseKey {
 		t.Fatalf("Claim() ref=%#v reuseKey=%q, want %s/%s", got.Ref, got.ReuseKey, actorID, reuseKey)
 	}
 }
@@ -585,7 +585,7 @@ func TestSubstrateBootstrapHandoffUploadUsesBootstrapToken(t *testing.T) {
 	}
 
 	_, err := executor.Upload(t.Context(), UploadRequest{
-		Ref:              WorkspaceRef{ID: "actor-1"},
+		Ref:              WorkspaceRef{Namespace: "ate-demo", ID: "actor-1"},
 		BootstrapHandoff: true,
 		Artifacts: []UploadArtifact{{
 			Path: substrateHandoffTokenUploadPath,
@@ -647,6 +647,7 @@ func TestSubstrateBootstrapHandoffUploadUsesMintedSessionIdentity(t *testing.T) 
 		actorDNSSuffix:          "actors.test",
 		handoffToken:            substrateTestToken,
 		bootstrapToken:          "bootstrap-token",
+		control:                 &recordingSubstrateControlClient{},
 		sessionIdentity:         identity,
 		sessionIdentityToken:    "worker-sa-token",
 		sessionIdentityAudience: []string{substrateDefaultIdentityAudience},
@@ -655,7 +656,7 @@ func TestSubstrateBootstrapHandoffUploadUsesMintedSessionIdentity(t *testing.T) 
 	}
 
 	_, err := executor.Upload(t.Context(), UploadRequest{
-		Ref:              WorkspaceRef{ID: "actor-1"},
+		Ref:              WorkspaceRef{Namespace: "ate-demo", ID: "actor-1"},
 		BootstrapHandoff: true,
 		Artifacts: []UploadArtifact{{
 			Path: substrateHandoffTokenUploadPath,
@@ -676,9 +677,9 @@ func TestSubstrateBootstrapHandoffUploadUsesMintedSessionIdentity(t *testing.T) 
 	if identity.bearerToken != "worker-sa-token" {
 		t.Fatalf("MintJWT bearer token = %q, want worker-sa-token", identity.bearerToken)
 	}
-	if identity.req.SessionID != "actor-1" ||
-		identity.req.AppID != substrateDefaultIdentityAppID ||
-		identity.req.UserID != substrateDefaultIdentityUserID ||
+	if identity.req.ActorName != "actor-1" ||
+		identity.req.Atespace != "ate-demo" ||
+		identity.req.ActorUID != "test-actor-uid" ||
 		!slices.Equal(identity.req.Audience, []string{substrateDefaultIdentityAudience}) {
 		t.Fatalf("MintJWT request = %#v, want default Orka identity for actor-1", identity.req)
 	}
@@ -733,7 +734,7 @@ func TestSubstrateBootstrapHandoffRequiredSessionIdentityFailsClosedWithoutCrede
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := tt.executor.Upload(t.Context(), UploadRequest{
-				Ref:              WorkspaceRef{ID: "actor-1"},
+				Ref:              WorkspaceRef{Namespace: "ate-demo", ID: "actor-1"},
 				BootstrapHandoff: true,
 				Artifacts: []UploadArtifact{{
 					Path: substrateHandoffTokenUploadPath,
@@ -782,12 +783,13 @@ func TestSubstrateBootstrapHandoffConfiguredSessionIdentityFailsClosed(t *testin
 				routerURL:            server.URL,
 				actorDNSSuffix:       "actors.test",
 				bootstrapToken:       "bootstrap-token",
+				control:              &recordingSubstrateControlClient{},
 				sessionIdentity:      tt.identity,
 				sessionIdentityToken: "session-identity-bearer",
 			}
 
 			_, err := executor.Upload(t.Context(), UploadRequest{
-				Ref:              WorkspaceRef{ID: "actor-1"},
+				Ref:              WorkspaceRef{Namespace: "ate-demo", ID: "actor-1"},
 				BootstrapHandoff: true,
 				Artifacts: []UploadArtifact{{
 					Path: substrateHandoffTokenUploadPath,
@@ -928,9 +930,9 @@ func TestSubstrateWaitReadyReportsPlacementAndResumeLatency(t *testing.T) {
 		workers: []substrateWorker{{
 			WorkerNamespace: "ate-demo",
 			WorkerPool:      "codex-pool",
-			WorkerPod:       "ateom-worker-1",
+			WorkerPod:       "ateom-pod-1",
 			ActorID:         "actor-1",
-			IP:              "10.244.0.42",
+			IP:              "10.244.0.10",
 		}},
 		actors: []substrateActor{
 			{ActorID: "actor-1", Status: substrateStatusRunning},
@@ -970,8 +972,8 @@ func TestSubstrateWaitReadyReportsPlacementAndResumeLatency(t *testing.T) {
 	wantPlacement := Placement{
 		WorkerNamespace: "ate-demo",
 		WorkerPool:      "codex-pool",
-		WorkerPodName:   "ateom-worker-1",
-		PodIP:           "10.244.0.42",
+		WorkerPodName:   "ateom-pod-1",
+		PodIP:           "10.244.0.10",
 	}
 	if got.Placement != wantPlacement {
 		t.Fatalf("placement = %#v, want %#v", got.Placement, wantPlacement)
@@ -1081,7 +1083,7 @@ func TestSubstrateWaitReadyPassesBootToResumeActor(t *testing.T) {
 	}
 }
 
-func TestSubstrateDeleteWaitsForSuspendedAfterSuspend(t *testing.T) {
+func TestSubstrateDeleteScrubsBeforeNativeTermination(t *testing.T) {
 	var scrubbed bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == substrateTestScrubPath {
@@ -1094,8 +1096,7 @@ func TestSubstrateDeleteWaitsForSuspendedAfterSuspend(t *testing.T) {
 	defer server.Close()
 
 	control := &recordingSubstrateControlClient{
-		getStatuses:   []string{substrateStatusRunning, substrateStatusSuspending, substrateStatusSuspended},
-		suspendStatus: substrateStatusSuspending,
+		getStatuses: []string{substrateStatusRunning},
 	}
 	executor := &SubstrateWorkspaceExecutor{
 		control:        control,
@@ -1116,8 +1117,8 @@ func TestSubstrateDeleteWaitsForSuspendedAfterSuspend(t *testing.T) {
 	if !scrubbed {
 		t.Fatal("Delete() did not scrub the running actor")
 	}
-	if control.suspendCalls != 1 {
-		t.Fatalf("SuspendActor calls = %d, want 1", control.suspendCalls)
+	if control.suspendCalls != 0 {
+		t.Fatalf("SuspendActor calls = %d, want 0 during deletion", control.suspendCalls)
 	}
 	if !control.deleted {
 		t.Fatal("DeleteActor was not called")
@@ -1127,7 +1128,7 @@ func TestSubstrateDeleteWaitsForSuspendedAfterSuspend(t *testing.T) {
 	}
 }
 
-func TestSubstrateDeleteWaitsWhenSuspendReturnsAfterStartingTransition(t *testing.T) {
+func TestSubstrateDeleteDoesNotRequireSuccessfulSnapshot(t *testing.T) {
 	var scrubbed bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == substrateTestScrubPath {
@@ -1140,8 +1141,8 @@ func TestSubstrateDeleteWaitsWhenSuspendReturnsAfterStartingTransition(t *testin
 	defer server.Close()
 
 	control := &recordingSubstrateControlClient{
-		getStatuses: []string{substrateStatusRunning, substrateStatusSuspending, substrateStatusSuspended},
-		suspendErr:  fmt.Errorf("suspend transition still in progress"),
+		getStatuses: []string{substrateStatusRunning},
+		suspendErr:  fmt.Errorf("snapshot is unavailable"),
 	}
 	executor := &SubstrateWorkspaceExecutor{
 		control:        control,
@@ -1162,8 +1163,8 @@ func TestSubstrateDeleteWaitsWhenSuspendReturnsAfterStartingTransition(t *testin
 	if !scrubbed {
 		t.Fatal("Delete() did not scrub the running actor")
 	}
-	if control.suspendCalls != 1 {
-		t.Fatalf("SuspendActor calls = %d, want 1", control.suspendCalls)
+	if control.suspendCalls != 0 {
+		t.Fatalf("SuspendActor calls = %d, want 0 during deletion", control.suspendCalls)
 	}
 	if !control.deleted {
 		t.Fatal("DeleteActor was not called")
@@ -1208,8 +1209,8 @@ func TestSubstrateDeleteSkipScrubDeletesRunningActor(t *testing.T) {
 	if scrubbed {
 		t.Fatal("Delete() scrubbed despite SkipScrub")
 	}
-	if control.suspendCalls != 1 {
-		t.Fatalf("SuspendActor calls = %d, want 1", control.suspendCalls)
+	if control.suspendCalls != 0 {
+		t.Fatalf("SuspendActor calls = %d, want 0 during deletion", control.suspendCalls)
 	}
 	if !control.deleted {
 		t.Fatal("DeleteActor was not called")
@@ -1253,8 +1254,8 @@ func TestSubstrateDeleteContinuesWhenRunningScrubFails(t *testing.T) {
 	if !scrubbed {
 		t.Fatal("Delete() did not attempt scrub before fallback delete")
 	}
-	if control.suspendCalls != 1 {
-		t.Fatalf("SuspendActor calls = %d, want 1 after scrub failure", control.suspendCalls)
+	if control.suspendCalls != 0 {
+		t.Fatalf("SuspendActor calls = %d, want 0 after scrub failure", control.suspendCalls)
 	}
 	if !control.deleted {
 		t.Fatal("DeleteActor was not called after scrub failure")
@@ -1264,36 +1265,14 @@ func TestSubstrateDeleteContinuesWhenRunningScrubFails(t *testing.T) {
 	}
 }
 
-func TestSubstrateDeleteRestoresHandoffTokenWhenSuspendFailsAfterScrub(t *testing.T) {
-	var restored bool
+func TestSubstrateDeleteKeepsCredentialsRevokedAfterUncertainTermination(t *testing.T) {
+	var scrubbed, restored bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == substrateTestScrubPath:
-			if got := r.Header.Get("Authorization"); got != substrateTestBearer {
-				t.Errorf("scrub Authorization = %q, want handoff bearer", got)
-			}
+			scrubbed = true
 			w.WriteHeader(http.StatusNoContent)
 		case r.Method == http.MethodPut && r.URL.Path == substrateTestFilesPath:
-			if got := r.Header.Get("Authorization"); got != substrateTestBootstrapBearer {
-				t.Errorf("restore Authorization = %q, want bootstrap bearer", got)
-			}
-			var req substrateUploadRequest
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				t.Errorf("decode restore request: %v", err)
-				http.Error(w, "bad request", http.StatusBadRequest)
-				return
-			}
-			if len(req.Files) != 1 {
-				t.Errorf("restore files len = %d, want 1", len(req.Files))
-				http.Error(w, "bad request", http.StatusBadRequest)
-				return
-			}
-			file := req.Files[0]
-			if file.Path != substrateHandoffTokenUploadPath ||
-				string(file.Data) != substrateTestToken ||
-				file.Mode != 0o600 {
-				t.Errorf("restore file = path %q data %q mode %#o, want handoff token", file.Path, string(file.Data), file.Mode)
-			}
 			restored = true
 			w.WriteHeader(http.StatusOK)
 		default:
@@ -1302,10 +1281,8 @@ func TestSubstrateDeleteRestoresHandoffTokenWhenSuspendFailsAfterScrub(t *testin
 	}))
 	defer server.Close()
 
-	control := &recordingSubstrateControlClient{
-		getStatuses: []string{substrateStatusRunning, substrateStatusRunning},
-		suspendErr:  fmt.Errorf("suspend failed"),
-	}
+	deleteErr := fmt.Errorf("native delete outcome is unknown")
+	control := &recordingSubstrateControlClient{getStatuses: []string{substrateStatusRunning}, deleteErrs: []error{deleteErr}}
 	executor := &SubstrateWorkspaceExecutor{
 		control:        control,
 		httpClient:     server.Client(),
@@ -1316,18 +1293,18 @@ func TestSubstrateDeleteRestoresHandoffTokenWhenSuspendFailsAfterScrub(t *testin
 		now:            time.Now,
 	}
 
-	_, err := executor.Delete(t.Context(), DeleteRequest{
+	result, err := executor.Delete(t.Context(), DeleteRequest{
 		Ref:     WorkspaceRef{Namespace: "ate-demo", ID: "actor-1"},
 		Timeout: time.Second,
 	})
-	if err == nil {
-		t.Fatal("Delete() error = nil, want suspend failure")
+	if !errors.Is(err, deleteErr) || result != nil {
+		t.Fatalf("Delete() result=%v err=%v, want no completion and the uncertain delete error", result, err)
 	}
-	if !restored {
-		t.Fatal("Delete() did not restore handoff token after suspend failure")
+	if !scrubbed || restored {
+		t.Fatalf("scrubbed=%t restored=%t, want scrubbed credentials to remain revoked", scrubbed, restored)
 	}
-	if control.deleted {
-		t.Fatal("DeleteActor was called after suspend failure")
+	if control.suspendCalls != 0 || len(control.deletedActorIDs) != 1 {
+		t.Fatal("Delete() must request termination once without taking a snapshot")
 	}
 }
 
@@ -1623,6 +1600,7 @@ func (c *recordingSubstrateControlClient) GetActor(ctx context.Context, actorID 
 	}
 	return &substrateActor{
 		ActorID:           actorID,
+		ActorUID:          "test-actor-uid",
 		TemplateNamespace: templateNamespace,
 		TemplateName:      templateName,
 		Status:            status,
@@ -1648,6 +1626,7 @@ func (c *recordingSubstrateControlClient) ResumeActor(ctx context.Context, actor
 	}
 	return &substrateActor{
 		ActorID:           actorID,
+		ActorUID:          "test-actor-uid",
 		TemplateNamespace: "ate-demo",
 		TemplateName:      "orka-codex-ci",
 		Status:            substrateStatusResuming,
@@ -1668,6 +1647,7 @@ func (c *recordingSubstrateControlClient) SuspendActor(ctx context.Context, acto
 	}
 	return &substrateActor{
 		ActorID:           actorID,
+		ActorUID:          "test-actor-uid",
 		TemplateNamespace: "ate-demo",
 		TemplateName:      "orka-codex-ci",
 		Status:            status,

@@ -388,7 +388,10 @@ func runAuthProbe(ctx context.Context, target Target, result *Result, baseURL st
 	if target.StartTurnRequest != nil {
 		request = cloneStartTurnRequest(*target.StartTurnRequest)
 	}
-	assertUnauthenticatedStartRejected(ctx, target, result, baseURL, controlTimeout, request)
+	if !assertUnauthenticatedStartRejected(ctx, target, result, baseURL, controlTimeout, request) {
+		return
+	}
+	assertAuthenticatedEventStreamNotFound(ctx, target, result, baseURL, controlTimeout)
 }
 
 func runTurnProbe(ctx context.Context, target Target, result *Result, baseURL string, controlTimeout time.Duration) {
@@ -1227,8 +1230,7 @@ func isDuplicateStartRejectedError(err error) bool {
 	if err == nil {
 		return false
 	}
-	var clientErr harness.ClientError
-	if errors.As(err, &clientErr) {
+	if clientErr, ok := errors.AsType[harness.ClientError](err); ok {
 		return clientErr.IsDuplicateTurn()
 	}
 	message := strings.ToLower(err.Error())
@@ -1285,6 +1287,40 @@ func assertUnauthenticatedStartRejected(
 		return false
 	}
 	return true
+}
+
+func assertAuthenticatedEventStreamNotFound(
+	ctx context.Context,
+	target Target,
+	result *Result,
+	baseURL string,
+	controlTimeout time.Duration,
+) bool {
+	client, err := newClient(baseURL, target.BearerToken, target.HTTPClient, controlTimeout)
+	if err != nil {
+		result.addFailure(fmt.Sprintf("create authenticated client: %v", err))
+		return false
+	}
+	turnID := harness.HarnessTurnID("conformance-auth-" + uuid.NewString())
+	err = client.StreamFrames(ctx, turnID, 0, func(harness.HarnessEventFrame) error { return nil })
+	if err == nil {
+		result.addFailure("authenticated event stream probe unexpectedly found a nonexistent turn")
+		return false
+	}
+	var clientErr harness.ClientError
+	if !errors.As(err, &clientErr) {
+		result.addFailure(fmt.Sprintf("authenticated event stream probe failed: %v", err))
+		return false
+	}
+	switch clientErr.StatusCode {
+	case http.StatusNotFound:
+		return true
+	case http.StatusUnauthorized, http.StatusForbidden:
+		result.addFailure("configured bearer was rejected by authenticated event stream probe")
+	default:
+		result.addFailure(fmt.Sprintf("authenticated event stream probe returned %v, want 404", err))
+	}
+	return false
 }
 
 func assertUnauthenticatedTurnResourcesRejected(

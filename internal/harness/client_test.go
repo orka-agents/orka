@@ -3,6 +3,7 @@ package harness
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,18 @@ import (
 	"testing/iotest"
 	"time"
 )
+
+func readSSEFrames(r io.Reader, emit func(HarnessEventFrame) error) error {
+	return readSSEFramesWithSanitizers(r, func(frame HarnessEventFrame, _ int) error {
+		return emit(frame)
+	}, nil, nil)
+}
+
+func readSSEFramesWithSanitizer(r io.Reader, emit func(HarnessEventFrame) error, sanitize func(error) error) error {
+	return readSSEFramesWithSanitizers(r, func(frame HarnessEventFrame, _ int) error {
+		return emit(frame)
+	}, sanitize, nil)
+}
 
 func TestClientDecodesJSONEscapesBeforeBearerSanitization(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -208,6 +221,134 @@ func TestClientHealthSanitizesPresentationFields(t *testing.T) {
 	if strings.Contains(string(encoded), value) || strings.Contains(string(encoded), "opaque") {
 		t.Fatalf("Health() leaked sensitive data: %s", encoded)
 	}
+}
+
+func TestClientDurableTurnStatusVerifiesCanonicalReceipt(t *testing.T) {
+	status := validDurableTurnStatus(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != AdminTurnsPath+"/turn-a" {
+			t.Fatalf("request path = %q, want durable turn path", r.URL.Path)
+		}
+		WriteJSON(w, http.StatusOK, status)
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, WithBearerToken("controller-bearer"))
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	got, err := client.DurableTurnStatus(context.Background(), "turn-a")
+	if err != nil {
+		t.Fatalf("DurableTurnStatus() error = %v", err)
+	}
+	if got.TerminalReceipt == nil || got.TerminalReceipt.Kind != DurableTurnTerminalCompleted ||
+		got.TerminalReceiptDigest != status.TerminalReceiptDigest {
+		t.Fatalf("DurableTurnStatus() = %#v, want verified completed receipt", got)
+	}
+}
+
+func TestClientDurableTurnStatusRejectsInvalidRecoveryEvidence(t *testing.T) {
+	const reflectedBearer = "controller-bearer"
+	tests := []struct {
+		name   string
+		mutate func(*DurableTurnStatus)
+	}{
+		{
+			name: "noncanonical request digest",
+			mutate: func(status *DurableTurnStatus) {
+				status.RequestDigest = "sha256:" + strings.Repeat("A", sha256.Size*2)
+			},
+		},
+		{
+			name: "malformed kind body pairing",
+			mutate: func(status *DurableTurnStatus) {
+				status.TerminalReceipt.Completed = nil
+				status.TerminalReceipt.Failed = &DurableTurnFailedReceipt{Reason: "failed"}
+			},
+		},
+		{
+			name: "oversized terminal result",
+			mutate: func(status *DurableTurnStatus) {
+				status.TerminalReceipt.Completed.Result = strings.Repeat("x", maxDurableTurnCompletedResultBytes+1)
+			},
+		},
+		{
+			name: "receipt digest mismatch",
+			mutate: func(status *DurableTurnStatus) {
+				status.TerminalReceiptDigest = "sha256:" + strings.Repeat("b", sha256.Size*2)
+			},
+		},
+		{
+			name: "receipt turn mismatch",
+			mutate: func(status *DurableTurnStatus) {
+				status.TerminalReceipt.TurnID = "turn-other"
+				status.TerminalReceiptDigest = durableReceiptDigestForTest(t, *status.TerminalReceipt)
+			},
+		},
+		{
+			name: "outcome state kind mismatch",
+			mutate: func(status *DurableTurnStatus) {
+				status.State = DurableTurnOutcomeUnknown
+			},
+		},
+		{
+			name: "terminal receipt on nonterminal state",
+			mutate: func(status *DurableTurnStatus) {
+				status.State = DurableTurnAccepted
+			},
+		},
+		{
+			name: "configured bearer reflection",
+			mutate: func(status *DurableTurnStatus) {
+				status.TerminalReceipt.Completed.Result = "reflected " + reflectedBearer
+				status.TerminalReceiptDigest = durableReceiptDigestForTest(t, *status.TerminalReceipt)
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			status := validDurableTurnStatus(t)
+			test.mutate(&status)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				WriteJSON(w, http.StatusOK, status)
+			}))
+			defer server.Close()
+			client, err := NewClient(server.URL, WithBearerToken(reflectedBearer))
+			if err != nil {
+				t.Fatalf("NewClient() error = %v", err)
+			}
+			if got, err := client.DurableTurnStatus(context.Background(), "turn-a"); err == nil {
+				t.Fatalf("DurableTurnStatus() = %#v, want invalid recovery evidence error", got)
+			} else if strings.Contains(err.Error(), reflectedBearer) {
+				t.Fatalf("DurableTurnStatus() error leaked configured bearer: %v", err)
+			}
+		})
+	}
+}
+
+func validDurableTurnStatus(t *testing.T) DurableTurnStatus {
+	t.Helper()
+	receipt := DurableTurnTerminalReceipt{
+		Version: ProtocolVersion, Kind: DurableTurnTerminalCompleted,
+		RuntimeSessionID: "runtime-a", TurnID: "turn-a", CorrelationID: "corr-a", Seq: 3,
+		Completed: &DurableTurnCompletedReceipt{Result: "done", FinalEventSeq: 3},
+	}
+	return DurableTurnStatus{
+		TurnID: "turn-a", TaskUID: "task-uid", Attempt: 1,
+		RequestDigest: "sha256:" + strings.Repeat("a", sha256.Size*2), State: DurableTurnTerminal,
+		TerminalReceiptDigest: durableReceiptDigestForTest(t, receipt), TerminalReceipt: &receipt,
+		UpdatedAt: time.Date(2026, time.August, 6, 12, 0, 0, 0, time.UTC),
+	}
+}
+
+func durableReceiptDigestForTest(t *testing.T, receipt DurableTurnTerminalReceipt) string {
+	t.Helper()
+	digest, err := DurableTurnTerminalReceiptDigest(receipt)
+	if err != nil {
+		t.Fatalf("DurableTurnTerminalReceiptDigest() error = %v", err)
+	}
+	return digest
 }
 
 func TestSanitizeHarnessFrameRedactsConfiguredBearer(t *testing.T) {
@@ -1187,8 +1328,49 @@ func TestNewClientDefaultDoesNotSetTotalHTTPTimeout(t *testing.T) {
 }
 
 func TestClientRejectsInvalidBaseURL(t *testing.T) {
-	if _, err := NewClient("localhost:8080"); err == nil {
-		t.Fatal("NewClient() error = nil, want invalid base URL")
+	tests := []struct {
+		name       string
+		baseURL    string
+		wantError  string
+		notInError []string
+	}{
+		{
+			name: "missing scheme", baseURL: "localhost:8080",
+			wantError: "must include scheme and host",
+		},
+		{
+			name: "username", baseURL: "https://" + "operator" + "@adapter.example",
+			wantError: "must not include userinfo", notInError: []string{"operator@"},
+		},
+		{
+			name: "username and password", baseURL: "https://" + "operator" + ":" + "passphrase" + "@adapter.example",
+			wantError: "must not include userinfo", notInError: []string{"operator", "passphrase"},
+		},
+		{
+			name: "percent-encoded userinfo", baseURL: "https://" + "%6fperator" + ":" + "p%40ss" + "@adapter.example",
+			wantError: "must not include userinfo", notInError: []string{"%6fperator", "p%40ss", "operator", "p@ss"},
+		},
+		{
+			name: "query", baseURL: "https://adapter.example?" + "access_token=sensitive-query-value",
+			wantError: "must not include a query", notInError: []string{"access_token", "sensitive-query-value"},
+		},
+		{
+			name: "fragment", baseURL: "https://adapter.example#" + "sensitive-fragment-value",
+			wantError: "must not include a fragment", notInError: []string{"sensitive-fragment-value"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewClient(tt.baseURL)
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("NewClient() error = %v, want %q", err, tt.wantError)
+			}
+			for _, forbidden := range tt.notInError {
+				if strings.Contains(err.Error(), forbidden) {
+					t.Fatalf("NewClient() error disclosed rejected URL component: %q", err)
+				}
+			}
+		})
 	}
 }
 

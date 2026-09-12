@@ -281,11 +281,11 @@ func outboundTokenRequestRBACName(
 
 func outboundTokenRequestObjectMetadata(policy *corev1alpha1.OutboundAccessPolicy) (map[string]string, map[string]string) {
 	return map[string]string{
-			outboundTokenRequestManagedByLabelKey: outboundTokenRequestManagedByLabelValue,
-		}, map[string]string{
-			outboundTokenRequestPolicyAnnotationKey:    policy.Name,
-			outboundTokenRequestPolicyUIDAnnotationKey: string(policy.UID),
-		}
+		outboundTokenRequestManagedByLabelKey: outboundTokenRequestManagedByLabelValue,
+	}, map[string]string{
+		outboundTokenRequestPolicyAnnotationKey:    policy.Name,
+		outboundTokenRequestPolicyUIDAnnotationKey: string(policy.UID),
+	}
 }
 
 func outboundTokenRequestControlledBy(policy *corev1alpha1.OutboundAccessPolicy, object metav1.Object) bool {

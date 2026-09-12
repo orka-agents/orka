@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
 )
 
@@ -28,15 +29,6 @@ type Client struct {
 	TxnToken   string
 	Namespace  string
 	HTTPClient *http.Client
-}
-
-// New creates a new Orka API client.
-func New(baseURL, token string) *Client {
-	return &Client{
-		BaseURL:    baseURL,
-		Token:      token,
-		HTTPClient: http.DefaultClient,
-	}
 }
 
 // NewWithNamespace creates a new Orka API client with a default namespace.
@@ -421,7 +413,8 @@ type CreateTaskRequest struct {
 	AgentRef *struct {
 		Name string `json:"name"`
 	} `json:"agentRef,omitempty"`
-	AI *struct {
+	AgentRuntime *corev1alpha1.AgentRuntimeSpec `json:"agentRuntime,omitempty"`
+	AI           *struct {
 		ProviderRef *struct {
 			Name string `json:"name"`
 		} `json:"providerRef,omitempty"`
@@ -479,15 +472,6 @@ type TaskLogsResponse struct {
 // TaskResultResponse is the response for getting task results.
 type TaskResultResponse struct {
 	Result string `json:"result"`
-}
-
-// CreateTask creates a new task.
-func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (*TaskDetail, error) {
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
-	return c.CreateTaskRaw(ctx, body)
 }
 
 // CreateTaskRaw creates a task from a JSON request body.

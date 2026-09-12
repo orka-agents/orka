@@ -1,0 +1,46 @@
+name: Set up kind
+description: >-
+  Install a pinned kind release for the runner architecture and always verify
+  the download against a pinned per-arch SHA256 before installing it.
+inputs:
+  version:
+    description: kind release tag to install.
+    required: false
+    default: v0.31.0
+  sha256-amd64:
+    description: Pinned SHA256 of kind-linux-amd64 for the requested version.
+    required: false
+    default: eb244cbafcc157dff60cf68693c14c9a75c4e6e6fedaf9cd71c58117cb93e3fa
+  sha256-arm64:
+    description: Pinned SHA256 of kind-linux-arm64 for the requested version.
+    required: false
+    default: 8e1014e87c34901cc422a1445866835d1e666f2a61301c27e722bdeab5a1f7e4
+runs:
+  using: composite
+  steps:
+    - name: Install kind
+      shell: bash
+      env:
+        KIND_VERSION: ${{ inputs.version }}
+        KIND_SHA256_AMD64: ${{ inputs.sha256-amd64 }}
+        KIND_SHA256_ARM64: ${{ inputs.sha256-arm64 }}
+      run: |
+        set -Eeuo pipefail
+        arch="$(uname -m)"
+        case "${arch}" in
+          x86_64|amd64) arch=amd64; expected_sha="${KIND_SHA256_AMD64}" ;;
+          aarch64|arm64) arch=arm64; expected_sha="${KIND_SHA256_ARM64}" ;;
+          *) echo "unsupported runner architecture: ${arch}" >&2; exit 1 ;;
+        esac
+        if [[ -z "${expected_sha}" ]]; then
+          echo "missing pinned kind SHA256 for ${arch}" >&2
+          exit 1
+        fi
+        tmp_dir="$(mktemp -d)"
+        curl -fsSL --retry 3 --retry-delay 2 -o "${tmp_dir}/kind" \
+          "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-${arch}"
+        printf '%s  %s\n' "${expected_sha}" "${tmp_dir}/kind" | sha256sum --check --strict -
+        chmod +x "${tmp_dir}/kind"
+        sudo mv "${tmp_dir}/kind" /usr/local/bin/kind
+        rmdir "${tmp_dir}"
+        kind version

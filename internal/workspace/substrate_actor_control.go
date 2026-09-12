@@ -12,10 +12,7 @@ type SubstrateActorPoolExecutor struct {
 }
 
 // NewSubstrateActorPoolExecutor returns the control-only adapter used by the actor pool controller.
-func NewSubstrateActorPoolExecutor(cfg SubstrateConfig, opts ...SubstrateOption) (*SubstrateActorPoolExecutor, error) {
-	for _, opt := range opts {
-		opt(&cfg)
-	}
+func NewSubstrateActorPoolExecutor(cfg SubstrateConfig) (*SubstrateActorPoolExecutor, error) {
 	if cfg.ControlClient == nil {
 		client, err := newGRPCSubstrateControlClient(cfg)
 		if err != nil {
@@ -54,7 +51,6 @@ func (e *SubstrateActorPoolExecutor) SubstratePoolTelemetry(
 		return Density{}, err
 	}
 	filteredActors := make([]substrateActor, 0, len(actors))
-	actorIDs := make(map[string]struct{}, len(actors))
 	for _, actor := range actors {
 		actorID := strings.TrimSpace(actor.ActorID)
 		if prefix != "" && !strings.HasPrefix(actorID, prefix+"-") {
@@ -67,7 +63,6 @@ func (e *SubstrateActorPoolExecutor) SubstratePoolTelemetry(
 			continue
 		}
 		filteredActors = append(filteredActors, actor)
-		actorIDs[actorID] = struct{}{}
 	}
 	filteredWorkers := make([]substrateWorker, 0, len(workers))
 	for _, worker := range workers {
@@ -77,13 +72,17 @@ func (e *SubstrateActorPoolExecutor) SubstratePoolTelemetry(
 		if strings.TrimSpace(workerPool.Namespace) != "" && strings.TrimSpace(worker.WorkerNamespace) != strings.TrimSpace(workerPool.Namespace) {
 			continue
 		}
-		if workerActorID := strings.TrimSpace(worker.ActorID); workerActorID != "" {
-			if _, ok := actorIDs[workerActorID]; !ok {
-				continue
+		assignedToPool := false
+		for _, actor := range filteredActors {
+			if substrateWorkerHostsActor(worker, actor) {
+				assignedToPool = true
+				break
 			}
-		} else if strings.TrimSpace(workerPool.Name) == "" {
+		}
+		if !assignedToPool && strings.TrimSpace(workerPool.Name) == "" {
 			continue
 		}
+
 		filteredWorkers = append(filteredWorkers, worker)
 	}
 	return substrateDensity(filteredWorkers, filteredActors), nil
@@ -105,7 +104,7 @@ func (e *SubstrateActorPoolExecutor) EnsureSubstrateActors(
 	}
 	created := 0
 	for i := range target {
-		actorID := deterministicSubstratePoolActorID(prefix, i)
+		actorID := SubstrateActorKey(template.Namespace, deterministicSubstratePoolActorID(prefix, i))
 		if actor, err := e.control.GetActor(ctx, actorID); err == nil {
 			if err := validateSubstrateActorTemplateForOp("ensure substrate actors", actor, template); err != nil {
 				return created, err
@@ -192,7 +191,7 @@ func (e *SubstrateActorPoolExecutor) PruneSubstrateActors(
 		if _, exists := actorsByOrdinal[ordinal]; exists {
 			continue
 		}
-		actorsByOrdinal[ordinal] = strings.TrimSpace(actor.ActorID)
+		actorsByOrdinal[ordinal] = SubstrateActorKey(actor.Atespace, actor.ActorID)
 		ordinals = append(ordinals, ordinal)
 	}
 	sort.Sort(sort.Reverse(sort.IntSlice(ordinals)))

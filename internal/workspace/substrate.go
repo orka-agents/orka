@@ -8,21 +8,16 @@ package workspace
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
-	ateapipb "github.com/orka-agents/orka/internal/substratepb"
 	"github.com/orka-agents/orka/internal/workspace/daemonprotocol"
-	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -32,6 +27,7 @@ const (
 	substratePlacementLookupTimeout   = 100 * time.Millisecond
 	substrateExecInitialPollInterval  = 250 * time.Millisecond
 	substrateExecMaxPollInterval      = 2 * time.Second
+	substrateExecResultTimeout        = 5 * time.Second
 	substrateDefaultHandoffTokenEnv   = "ORKA_WORKSPACE_HANDOFF_TOKEN"
 	substrateDefaultBootstrapTokenEnv = "ORKA_WORKSPACE_BOOTSTRAP_TOKEN"
 	substrateHandoffTokenUploadPath   = "orka-workspace-handoff-token"
@@ -45,17 +41,27 @@ const (
 	substrateStatusRunning    = "STATUS_RUNNING"
 	substrateStatusSuspending = "STATUS_SUSPENDING"
 	substrateStatusSuspended  = "STATUS_SUSPENDED"
+	substrateStatusCrashed    = "STATUS_CRASHED"
 )
 
 // SubstrateConfig configures a Substrate-backed WorkspaceExecutor.
 type SubstrateConfig struct {
-	APIEndpoint             string
-	APICAFile               string
-	APIInsecureSkipVerify   bool
-	RouterURL               string
-	ActorDNSSuffix          string
-	HandoffToken            string
-	BootstrapToken          string
+	APIEndpoint        string
+	APICAFile          string
+	APICertFile        string
+	APIKeyFile         string
+	APIBearerTokenFile string
+	// Atespace scopes unqualified actor names. Qualified name.atespace IDs
+	// carry their own scope and never depend on a name-to-namespace cache.
+	Atespace              string
+	APIInsecureSkipVerify bool
+	RouterURL             string
+	ActorDNSSuffix        string
+	HandoffToken          string
+	BootstrapToken        string
+	// SealedBootstrap enables native process-bound credential delivery for injected clients.
+	// Real upstream control clients always use this protocol.
+	SealedBootstrap         bool
 	HTTPClient              *http.Client
 	ControlClient           substrateControlClient
 	SessionIdentityToken    string
@@ -65,39 +71,6 @@ type SubstrateConfig struct {
 	SessionIdentityRequired bool
 	SessionIdentityMintCert bool
 	SessionIdentityClient   substrateSessionIdentityClient
-}
-
-// SubstrateOption configures a SubstrateWorkspaceExecutor.
-type SubstrateOption func(*SubstrateConfig)
-
-func WithSubstrateControlClient(client substrateControlClient) SubstrateOption {
-	return func(c *SubstrateConfig) {
-		c.ControlClient = client
-	}
-}
-
-func WithSubstrateHTTPClient(client *http.Client) SubstrateOption {
-	return func(c *SubstrateConfig) {
-		c.HTTPClient = client
-	}
-}
-
-func WithSubstrateHandoffToken(token string) SubstrateOption {
-	return func(c *SubstrateConfig) {
-		c.HandoffToken = token
-	}
-}
-
-func WithSubstrateBootstrapToken(token string) SubstrateOption {
-	return func(c *SubstrateConfig) {
-		c.BootstrapToken = token
-	}
-}
-
-func WithSubstrateSessionIdentityClient(client substrateSessionIdentityClient) SubstrateOption {
-	return func(c *SubstrateConfig) {
-		c.SessionIdentityClient = client
-	}
 }
 
 func normalizeSubstrateIdentityAudience(audience []string) []string {
@@ -114,10 +87,7 @@ func normalizeSubstrateIdentityAudience(audience []string) []string {
 }
 
 // NewSubstrateExecutor returns a WorkspaceExecutor backed by Agent Substrate.
-func NewSubstrateExecutor(cfg SubstrateConfig, opts ...SubstrateOption) (*SubstrateWorkspaceExecutor, error) {
-	for _, opt := range opts {
-		opt(&cfg)
-	}
+func NewSubstrateExecutor(cfg SubstrateConfig) (*SubstrateWorkspaceExecutor, error) {
 	if strings.TrimSpace(cfg.RouterURL) == "" {
 		return nil, NewError("configure substrate", ErrorKindInvalidArgument, "router URL is required", false, nil)
 	}
@@ -150,6 +120,7 @@ func NewSubstrateExecutor(cfg SubstrateConfig, opts ...SubstrateOption) (*Substr
 		cfg.SessionIdentityUserID = substrateDefaultIdentityUserID
 	}
 	if cfg.ControlClient == nil {
+		cfg.SealedBootstrap = true
 		client, err := newGRPCSubstrateControlClient(cfg)
 		if err != nil {
 			return nil, err
@@ -172,6 +143,7 @@ func NewSubstrateExecutor(cfg SubstrateConfig, opts ...SubstrateOption) (*Substr
 		actorDNSSuffix:          strings.Trim(strings.TrimSpace(cfg.ActorDNSSuffix), "."),
 		handoffToken:            cfg.HandoffToken,
 		bootstrapToken:          cfg.BootstrapToken,
+		sealedBootstrap:         cfg.SealedBootstrap,
 		sessionIdentityToken:    strings.TrimSpace(cfg.SessionIdentityToken),
 		sessionIdentityAudience: cfg.SessionIdentityAudience,
 		sessionIdentityAppID:    strings.TrimSpace(cfg.SessionIdentityAppID),
@@ -189,12 +161,24 @@ type SubstrateWorkspaceExecutor struct {
 	actorDNSSuffix          string
 	handoffToken            string
 	bootstrapToken          string
+	sealedBootstrap         bool
 	sessionIdentityToken    string
 	sessionIdentityAudience []string
 	sessionIdentityAppID    string
 	sessionIdentityUserID   string
 	sessionIdentityRequired bool
-	now                     func() time.Time
+	// Native bootstrap retries must use the JWT already delivered to this
+	// Actor/Pod lifetime. Cache it before a possibly ambiguous PUT; a new
+	// executor recovers the installed JWT through an authenticated sealed reply.
+	sessionIdentityHandoffMu sync.Mutex
+	sessionIdentityHandoffs  map[string]substrateSessionIdentityHandoff
+	now                      func() time.Time
+}
+
+type substrateSessionIdentityHandoff struct {
+	actorUID string
+	podUID   string
+	token    string
 }
 
 var _ WorkspaceExecutor = (*SubstrateWorkspaceExecutor)(nil)
@@ -204,6 +188,7 @@ type substrateControlClient interface {
 	CreateActor(ctx context.Context, actorID, templateNamespace, templateName string) (*substrateActor, error)
 	ResumeActor(ctx context.Context, actorID string, boot bool) (*substrateActor, error)
 	SuspendActor(ctx context.Context, actorID string) (*substrateActor, error)
+	// DeleteActor terminates in any state without creating a snapshot.
 	DeleteActor(ctx context.Context, actorID string) error
 	ListWorkers(ctx context.Context) ([]substrateWorker, error)
 	ListActors(ctx context.Context) ([]substrateActor, error)
@@ -214,6 +199,14 @@ type substrateSessionIdentityClient interface {
 }
 
 type substrateActor struct {
+	Atespace           string
+	ActorUID           string
+	ActorVersion       int64
+	PodUID             string
+	WorkerName         string
+	WorkerPool         string
+	TemplateUID        string
+	SnapshotScope      SubstrateSnapshotContentScope
 	ActorID            string
 	TemplateNamespace  string
 	TemplateName       string
@@ -226,6 +219,9 @@ type substrateActor struct {
 }
 
 type substrateMintJWTRequest struct {
+	Atespace  string
+	ActorName string
+	ActorUID  string
 	Audience  []string
 	AppID     string
 	UserID    string
@@ -233,6 +229,8 @@ type substrateMintJWTRequest struct {
 }
 
 type substrateWorker struct {
+	WorkerName      string
+	WorkerPodUID    string
 	WorkerNamespace string
 	WorkerPool      string
 	WorkerPod       string
@@ -246,7 +244,7 @@ func (e *SubstrateWorkspaceExecutor) Claim(ctx context.Context, req ClaimRequest
 	if err := ctx.Err(); err != nil {
 		return nil, contextError("claim", err)
 	}
-	actorID := strings.TrimSpace(req.ClaimName)
+	actorID := SubstrateActorKey(req.Template.Namespace, req.ClaimName)
 	if actorID == "" {
 		return nil, NewError("claim", ErrorKindInvalidArgument, "claim name must contain the Substrate actor id", false, nil)
 	}
@@ -279,6 +277,9 @@ func (e *SubstrateWorkspaceExecutor) Claim(ctx context.Context, req ClaimRequest
 				return nil, contextError("claim", ctxErr)
 			}
 		}
+		return nil, err
+	}
+	if err := validateSubstrateActorTemplate(actor, req.Template); err != nil {
 		return nil, err
 	}
 	now := e.now()
@@ -325,6 +326,16 @@ func validateSubstrateActorTemplateForOp(op string, actor *substrateActor, templ
 	wantNamespace := strings.TrimSpace(template.Namespace)
 	wantName := strings.TrimSpace(template.Name)
 	if actualNamespace == wantNamespace && actualName == wantName {
+		if template.UID != "" && actor.TemplateUID != template.UID {
+			// Fresh upstream Actors have no current template UID until their first
+			// boot. Their identity must be checked again before readiness is returned.
+			unbooted := actor.TemplateUID == "" && actor.Status == substrateStatusSuspended &&
+				actor.WorkerName == "" && actor.PodName == "" && actor.PodUID == "" &&
+				actor.LastSnapshot == "" && actor.InProgressSnapshot == ""
+			if !unbooted {
+				return NewError(op, ErrorKindFailedPrecondition, "existing Substrate actor uses a different immutable template identity", false, nil)
+			}
+		}
 		return nil
 	}
 	return NewError(
@@ -344,6 +355,7 @@ func validateSubstrateActorTemplateForOp(op string, actor *substrateActor, templ
 
 // Close releases network resources owned by this executor.
 func (e *SubstrateWorkspaceExecutor) Close() error {
+	e.forgetSessionIdentityHandoff("")
 	var closeErr error
 	if closer, ok := e.control.(interface{ Close() error }); ok {
 		closeErr = errors.Join(closeErr, closer.Close())
@@ -374,6 +386,15 @@ func (e *SubstrateWorkspaceExecutor) WaitReady(ctx context.Context, req WaitRead
 		)
 	}
 	resumeStartedAt := e.now()
+	if req.Template.UID != "" {
+		actor, err := e.control.GetActor(ctx, actorID)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateSubstrateActorTemplateForOp("wait ready", actor, req.Template); err != nil {
+			return nil, err
+		}
+	}
 	if _, err := e.control.ResumeActor(ctx, actorID, req.Boot); err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, contextError("wait ready", ctxErr)
@@ -393,6 +414,11 @@ func (e *SubstrateWorkspaceExecutor) WaitReady(ctx context.Context, req WaitRead
 			}
 		}
 		if err == nil && actor.Status == substrateStatusRunning && strings.TrimSpace(actor.PodIP) != "" {
+			if req.Template.UID != "" {
+				if err := validateSubstrateActorTemplateForOp("wait ready", actor, req.Template); err != nil {
+					return nil, err
+				}
+			}
 			if req.SkipDaemonHealthCheck {
 				readyAt := e.now()
 				resumeLatency := max(readyAt.Sub(resumeStartedAt), 0)
@@ -440,7 +466,7 @@ func (e *SubstrateWorkspaceExecutor) WaitReady(ctx context.Context, req WaitRead
 }
 
 func (e *SubstrateWorkspaceExecutor) Exec(ctx context.Context, req ExecRequest) (*ExecResult, error) {
-	ctx, cancel := contextWithTimeout(ctx, req.Timeout)
+	ctx, cancel := substrateExecContext(ctx, req.Timeout)
 	defer cancel()
 	if len(req.Command) == 0 || strings.TrimSpace(req.Command[0]) == "" {
 		return nil, NewError("exec", ErrorKindInvalidArgument, "command is required", false, nil)
@@ -502,6 +528,19 @@ func (e *SubstrateWorkspaceExecutor) Exec(ctx context.Context, req ExecRequest) 
 	return result, nil
 }
 
+func substrateExecContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout < time.Second {
+		return contextWithTimeout(ctx, timeout)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// The daemon's whole-second command timer expires before it can publish
+	// the final result. Bound that collection window without extending the
+	// caller's deadline or cancellation, and never replay the command.
+	return context.WithDeadline(ctx, time.Now().Add(timeout).Add(substrateExecResultTimeout))
+}
+
 func (e *SubstrateWorkspaceExecutor) pollExec(ctx context.Context, actorID, execID string) (*daemonprotocol.ExecResponse, error) {
 	backoff := substrateExecInitialPollInterval
 	for {
@@ -561,6 +600,15 @@ func (e *SubstrateWorkspaceExecutor) Upload(ctx context.Context, req UploadReque
 			e.handoffToken = mintedToken
 			replaceSubstrateHandoffUploadToken(files, mintedToken)
 		}
+		if e.sealedBootstrap {
+			if len(files) != 1 || !isSubstrateHandoffUpload(files[0].Path) {
+				return nil, NewError("upload", ErrorKindInvalidArgument, "native bootstrap accepts only the handoff credential", false, nil)
+			}
+			if err := e.seedNativeWorkspaceCredential(ctx, actorID, string(files[0].Data)); err != nil {
+				return nil, err
+			}
+			return &UploadResult{Ref: req.Ref}, nil
+		}
 	}
 	resp, err := e.workspaceDaemonClient().Upload(ctx, e.workspaceDaemonActorRequest(actorID, authToken), daemonprotocol.UploadRequest{Files: files})
 	if err != nil {
@@ -588,8 +636,35 @@ func (e *SubstrateWorkspaceExecutor) mintSessionIdentityHandoffToken(ctx context
 	if actorID == "" {
 		return "", NewError("mint session identity", ErrorKindInvalidArgument, "actor id is required", false, nil)
 	}
+	if e.control == nil {
+		return "", NewError("mint actor identity", ErrorKindFailedPrecondition, "Substrate control client is required to bind ActorIdentity", false, nil)
+	}
+	actor, err := e.control.GetActor(ctx, actorID)
+	if err != nil {
+		return "", err
+	}
+	if actor == nil || strings.TrimSpace(actor.ActorUID) == "" {
+		return "", NewError("mint actor identity", ErrorKindFailedPrecondition, "Substrate Actor identity is unavailable", false, nil)
+	}
+	if e.sealedBootstrap {
+		if prior := e.cacheSessionIdentityHandoff(actorID, actor, ""); prior != "" {
+			return prior, nil
+		}
+		installed, err := e.recoverNativeWorkspaceCredential(ctx, actorID, actor)
+		if err != nil {
+			return "", err
+		}
+		if installed != "" {
+			return e.cacheSessionIdentityHandoff(actorID, actor, installed), nil
+		}
+	}
+	actorRef, err := substrateObjectRef(actorID, ref.Namespace)
+	if err != nil {
+		return "", err
+	}
 	token, err := e.sessionIdentity.MintJWT(ctx, substrateMintJWTRequest{
-		Audience:  append([]string(nil), e.sessionIdentityAudience...),
+		Audience: append([]string(nil), e.sessionIdentityAudience...),
+		Atespace: actorRef.Atespace, ActorName: actorRef.Name, ActorUID: actor.ActorUID,
 		AppID:     e.sessionIdentityAppID,
 		UserID:    e.sessionIdentityUserID,
 		SessionID: actorID,
@@ -601,7 +676,35 @@ func (e *SubstrateWorkspaceExecutor) mintSessionIdentityHandoffToken(ctx context
 	if token == "" {
 		return "", NewError("mint session identity", ErrorKindFailedPrecondition, "Substrate SessionIdentity returned an empty JWT", false, nil)
 	}
+	if e.sealedBootstrap {
+		token = e.cacheSessionIdentityHandoff(actorID, actor, token)
+	}
 	return token, nil
+}
+
+func (e *SubstrateWorkspaceExecutor) cacheSessionIdentityHandoff(actorID string, actor *substrateActor, minted string) string {
+	e.sessionIdentityHandoffMu.Lock()
+	defer e.sessionIdentityHandoffMu.Unlock()
+	if prior, ok := e.sessionIdentityHandoffs[actorID]; ok && prior.actorUID == actor.ActorUID && prior.podUID == actor.PodUID {
+		return prior.token
+	}
+	if minted != "" {
+		if e.sessionIdentityHandoffs == nil {
+			e.sessionIdentityHandoffs = make(map[string]substrateSessionIdentityHandoff)
+		}
+		e.sessionIdentityHandoffs[actorID] = substrateSessionIdentityHandoff{actorUID: actor.ActorUID, podUID: actor.PodUID, token: minted}
+	}
+	return minted
+}
+
+func (e *SubstrateWorkspaceExecutor) forgetSessionIdentityHandoff(actorID string) {
+	e.sessionIdentityHandoffMu.Lock()
+	defer e.sessionIdentityHandoffMu.Unlock()
+	if actorID == "" {
+		clear(e.sessionIdentityHandoffs)
+	} else {
+		delete(e.sessionIdentityHandoffs, actorID)
+	}
 }
 
 func replaceSubstrateHandoffUploadToken(files []daemonprotocol.UploadFile, token string) {
@@ -695,6 +798,7 @@ func (e *SubstrateWorkspaceExecutor) Release(ctx context.Context, req ReleaseReq
 		}
 		return nil, err
 	}
+	e.forgetSessionIdentityHandoff(actorID)
 	if req.Retain {
 		return &ReleaseResult{Ref: substrateRef(req.Ref.Namespace, actor), Retained: true, Phase: PhaseRetained, Message: releaseMessage(req.Reason, "workspace retained")}, nil
 	}
@@ -712,44 +816,19 @@ func (e *SubstrateWorkspaceExecutor) Delete(ctx context.Context, req DeleteReque
 	actor, err := e.control.GetActor(ctx, actorID)
 	if err != nil {
 		if IsKind(err, ErrorKindNotFound) {
+			e.forgetSessionIdentityHandoff(actorID)
 			return &DeleteResult{Ref: req.Ref, Deleted: false, Phase: PhaseDeleted, Message: "workspace already deleted"}, nil
 		}
 		return nil, err
 	}
-	scrubbed := false
 	var scrubErr error
 	if actor.Status == substrateStatusRunning && !req.SkipScrub {
-		if err := e.scrubDaemon(ctx, actorID); err != nil {
-			scrubErr = err
-		} else {
-			scrubbed = true
-		}
+		scrubErr = e.scrubDaemon(ctx, actorID)
 	}
-	if actor.Status != substrateStatusSuspended {
-		if actor, err = e.suspendActorAndWait(ctx, actorID); err != nil {
-			if scrubbed {
-				if restoreErr := e.restoreHandoffToken(ctx, actorID); restoreErr != nil {
-					return nil, NewError(
-						"delete",
-						ErrorKindFailedPrecondition,
-						"failed to restore workspace handoff token after delete failure",
-						true,
-						errors.Join(err, restoreErr),
-					)
-				}
-			}
-			if scrubErr != nil {
-				return nil, NewError(
-					"delete",
-					ErrorKindFailedPrecondition,
-					"failed to delete workspace after scrub failed",
-					true,
-					errors.Join(scrubErr, err),
-				)
-			}
-			return nil, err
-		}
-	}
+	// Native AnyState deletion terminates the workload. Suspending first would
+	// create an unwanted snapshot and prevents stateless MCP Actors from being
+	// deleted when their template's Data policy has no durable volume.
+	// An uncertain delete must not restore credentials or report completion.
 	if err := e.control.DeleteActor(ctx, actorID); err != nil {
 		if scrubErr != nil {
 			return nil, NewError(
@@ -762,6 +841,7 @@ func (e *SubstrateWorkspaceExecutor) Delete(ctx context.Context, req DeleteReque
 		}
 		return nil, err
 	}
+	e.forgetSessionIdentityHandoff(actorID)
 	return &DeleteResult{Ref: substrateRef(req.Ref.Namespace, actor), Deleted: true, Phase: PhaseDeleted, Message: releaseMessage(req.Reason, "workspace deleted")}, nil
 }
 
@@ -850,7 +930,7 @@ func deterministicSubstratePoolActorID(prefix string, ordinal int) string {
 }
 
 func substratePoolActorOrdinal(actorID, prefix string) (int, bool) {
-	actorID = strings.TrimSpace(actorID)
+	actorID, _, _ = strings.Cut(strings.TrimSpace(actorID), ".")
 	prefix = strings.Trim(strings.TrimSpace(prefix), "-")
 	suffix, ok := strings.CutPrefix(actorID, prefix+"-")
 	if !ok || len(suffix) != 5 {
@@ -903,12 +983,13 @@ func substratePlacement(actor *substrateActor, workers []substrateWorker) Placem
 		placement.WorkerNamespace = strings.TrimSpace(actor.PodNamespace)
 		placement.WorkerPodName = strings.TrimSpace(actor.PodName)
 		placement.PodIP = strings.TrimSpace(actor.PodIP)
+		placement.WorkerPool = strings.TrimSpace(actor.WorkerPool)
 	}
 	if actor == nil {
 		return placement
 	}
 	for _, worker := range workers {
-		if strings.TrimSpace(worker.ActorID) != strings.TrimSpace(actor.ActorID) {
+		if !substrateWorkerHostsActor(worker, *actor) {
 			continue
 		}
 		if namespace := strings.TrimSpace(worker.WorkerNamespace); namespace != "" {
@@ -970,6 +1051,9 @@ func (e *SubstrateWorkspaceExecutor) restoreHandoffToken(ctx context.Context, ac
 	}
 	restoreCtx, cancel := context.WithTimeout(restoreCtx, 10*time.Second)
 	defer cancel()
+	if e.sealedBootstrap {
+		return e.seedNativeWorkspaceCredential(restoreCtx, actorID, e.handoffToken)
+	}
 
 	err = e.workspaceDaemonClient().UploadNoResponse(
 		restoreCtx,
@@ -1026,8 +1110,7 @@ func (e *SubstrateWorkspaceExecutor) requireBootstrapToken(op string) (string, e
 }
 
 func retryableWorkspaceError(err error) bool {
-	var workspaceErr *Error
-	if errors.As(err, &workspaceErr) {
+	if workspaceErr, ok := errors.AsType[*Error](err); ok {
 		return workspaceErr.Retryable
 	}
 	return true
@@ -1035,9 +1118,9 @@ func retryableWorkspaceError(err error) bool {
 
 func substrateActorID(ref WorkspaceRef) string {
 	if strings.TrimSpace(ref.ID) != "" {
-		return strings.TrimSpace(ref.ID)
+		return SubstrateActorKey(ref.Namespace, ref.ID)
 	}
-	return strings.TrimSpace(ref.ClaimName)
+	return SubstrateActorKey(ref.Namespace, ref.ClaimName)
 }
 
 func substrateRef(namespace string, actor *substrateActor) WorkspaceRef {
@@ -1047,7 +1130,7 @@ func substrateRef(namespace string, actor *substrateActor) WorkspaceRef {
 	return WorkspaceRef{
 		Namespace: namespace,
 		ClaimName: actor.ActorID,
-		ID:        actor.ActorID,
+		ID:        SubstrateActorKey(namespace, actor.ActorID),
 	}
 }
 
@@ -1086,202 +1169,6 @@ func defaultSubstrateScrubPaths() []string {
 	}
 }
 
-type grpcSubstrateControlClient struct {
-	conn   *grpc.ClientConn
-	client ateapipb.ControlClient
-}
-
-type grpcSubstrateSessionIdentityClient struct {
-	conn   *grpc.ClientConn
-	client ateapipb.SessionIdentityClient
-}
-
-func newGRPCSubstrateControlClient(cfg SubstrateConfig) (*grpcSubstrateControlClient, error) {
-	if strings.TrimSpace(cfg.APIEndpoint) == "" {
-		return nil, NewError("configure substrate", ErrorKindInvalidArgument, "API endpoint is required", false, nil)
-	}
-	transportCredentials, err := substrateTransportCredentials(cfg)
-	if err != nil {
-		return nil, err
-	}
-	conn, err := grpc.NewClient(cfg.APIEndpoint, grpc.WithTransportCredentials(transportCredentials))
-	if err != nil {
-		return nil, NewError("configure substrate", ErrorKindUnknown, "failed to create Substrate API client", false, err)
-	}
-	return &grpcSubstrateControlClient{conn: conn, client: ateapipb.NewControlClient(conn)}, nil
-}
-
-func newGRPCSubstrateSessionIdentityClient(cfg SubstrateConfig) (*grpcSubstrateSessionIdentityClient, error) {
-	if strings.TrimSpace(cfg.APIEndpoint) == "" {
-		return nil, NewError("configure substrate", ErrorKindInvalidArgument, "API endpoint is required", false, nil)
-	}
-	transportCredentials, err := substrateTransportCredentials(cfg)
-	if err != nil {
-		return nil, err
-	}
-	conn, err := grpc.NewClient(cfg.APIEndpoint, grpc.WithTransportCredentials(transportCredentials))
-	if err != nil {
-		return nil, NewError("configure substrate", ErrorKindUnknown, "failed to create Substrate SessionIdentity client", false, err)
-	}
-	return &grpcSubstrateSessionIdentityClient{conn: conn, client: ateapipb.NewSessionIdentityClient(conn)}, nil
-}
-
-func (c *grpcSubstrateControlClient) Close() error {
-	if c == nil || c.conn == nil {
-		return nil
-	}
-	return c.conn.Close()
-}
-
-func (c *grpcSubstrateSessionIdentityClient) Close() error {
-	if c == nil || c.conn == nil {
-		return nil
-	}
-	return c.conn.Close()
-}
-
-func substrateTransportCredentials(cfg SubstrateConfig) (credentials.TransportCredentials, error) {
-	if cfg.APIInsecureSkipVerify {
-		return credentials.NewTLS(&tls.Config{InsecureSkipVerify: true}), nil //nolint:gosec // explicit local smoke-test option
-	}
-	if strings.TrimSpace(cfg.APICAFile) == "" {
-		return nil, NewError(
-			"configure substrate",
-			ErrorKindInvalidArgument,
-			"Substrate API trust requires a CA file or insecure skip verify",
-			false,
-			nil,
-		)
-	}
-	data, err := os.ReadFile(cfg.APICAFile)
-	if err != nil {
-		return nil, NewError("configure substrate", ErrorKindInvalidArgument, "failed to read Substrate API CA file", false, err)
-	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(data) {
-		return nil, NewError("configure substrate", ErrorKindInvalidArgument, "Substrate API CA file has no PEM certificates", false, nil)
-	}
-	return credentials.NewTLS(&tls.Config{RootCAs: pool}), nil
-}
-
-func (c *grpcSubstrateControlClient) GetActor(ctx context.Context, actorID string) (*substrateActor, error) {
-	resp, err := c.client.GetActor(ctx, &ateapipb.GetActorRequest{ActorId: actorID})
-	if err != nil {
-		return nil, substrateControlError("get actor", err)
-	}
-	return substrateActorFromProto(resp.GetActor()), nil
-}
-
-func (c *grpcSubstrateControlClient) CreateActor(ctx context.Context, actorID, templateNamespace, templateName string) (*substrateActor, error) {
-	resp, err := c.client.CreateActor(ctx, &ateapipb.CreateActorRequest{
-		ActorId:                actorID,
-		ActorTemplateNamespace: templateNamespace,
-		ActorTemplateName:      templateName,
-	})
-	if err != nil {
-		return nil, substrateControlError("create actor", err)
-	}
-	return substrateActorFromProto(resp.GetActor()), nil
-}
-
-func (c *grpcSubstrateControlClient) ResumeActor(ctx context.Context, actorID string, boot bool) (*substrateActor, error) {
-	resp, err := c.client.ResumeActor(ctx, &ateapipb.ResumeActorRequest{ActorId: actorID, Boot: boot})
-	if err != nil {
-		return nil, substrateControlError("resume actor", err)
-	}
-	return substrateActorFromProto(resp.GetActor()), nil
-}
-
-func (c *grpcSubstrateControlClient) SuspendActor(ctx context.Context, actorID string) (*substrateActor, error) {
-	resp, err := c.client.SuspendActor(ctx, &ateapipb.SuspendActorRequest{ActorId: actorID})
-	if err != nil {
-		return nil, substrateControlError("suspend actor", err)
-	}
-	return substrateActorFromProto(resp.GetActor()), nil
-}
-
-func (c *grpcSubstrateControlClient) DeleteActor(ctx context.Context, actorID string) error {
-	_, err := c.client.DeleteActor(ctx, &ateapipb.DeleteActorRequest{ActorId: actorID})
-	if err != nil {
-		return substrateControlError("delete actor", err)
-	}
-	return nil
-}
-
-func (c *grpcSubstrateControlClient) ListWorkers(ctx context.Context) ([]substrateWorker, error) {
-	resp, err := c.client.ListWorkers(ctx, &ateapipb.ListWorkersRequest{})
-	if err != nil {
-		return nil, substrateControlError("list workers", err)
-	}
-	workers := make([]substrateWorker, 0, len(resp.GetWorkers()))
-	for _, worker := range resp.GetWorkers() {
-		workers = append(workers, substrateWorkerFromProto(worker))
-	}
-	return workers, nil
-}
-
-func (c *grpcSubstrateControlClient) ListActors(ctx context.Context) ([]substrateActor, error) {
-	resp, err := c.client.ListActors(ctx, &ateapipb.ListActorsRequest{})
-	if err != nil {
-		return nil, substrateControlError("list actors", err)
-	}
-	actors := make([]substrateActor, 0, len(resp.GetActors()))
-	for _, actor := range resp.GetActors() {
-		if converted := substrateActorFromProto(actor); converted != nil {
-			actors = append(actors, *converted)
-		}
-	}
-	return actors, nil
-}
-
-func (c *grpcSubstrateSessionIdentityClient) MintJWT(
-	ctx context.Context,
-	req substrateMintJWTRequest,
-	bearerToken string,
-) (string, error) {
-	ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+strings.TrimSpace(bearerToken))
-	resp, err := c.client.MintJWT(ctx, &ateapipb.MintJWTRequest{
-		Audience:  append([]string(nil), req.Audience...),
-		AppId:     req.AppID,
-		UserId:    req.UserID,
-		SessionId: req.SessionID,
-	})
-	if err != nil {
-		return "", substrateControlError("mint session identity", err)
-	}
-	return resp.GetSessionJwt(), nil
-}
-
-func substrateActorFromProto(actor *ateapipb.Actor) *substrateActor {
-	if actor == nil {
-		return nil
-	}
-	return &substrateActor{
-		ActorID:            actor.GetActorId(),
-		TemplateNamespace:  actor.GetActorTemplateNamespace(),
-		TemplateName:       actor.GetActorTemplateName(),
-		Status:             actor.GetStatus().String(),
-		PodNamespace:       actor.GetAteomPodNamespace(),
-		PodName:            actor.GetAteomPodName(),
-		PodIP:              actor.GetAteomPodIp(),
-		LastSnapshot:       actor.GetLastSnapshot(),
-		InProgressSnapshot: actor.GetInProgressSnapshot(),
-	}
-}
-
-func substrateWorkerFromProto(worker *ateapipb.Worker) substrateWorker {
-	if worker == nil {
-		return substrateWorker{}
-	}
-	return substrateWorker{
-		WorkerNamespace: worker.GetWorkerNamespace(),
-		WorkerPool:      worker.GetWorkerPool(),
-		WorkerPod:       worker.GetWorkerPod(),
-		ActorID:         worker.GetActorId(),
-		IP:              worker.GetIp(),
-	}
-}
-
 func substrateControlError(op string, err error) error {
 	if err == nil {
 		return nil
@@ -1312,4 +1199,17 @@ func substrateControlError(op string, err error) error {
 	default:
 		return NewError(op, ErrorKindUnknown, st.Message(), true, err)
 	}
+}
+
+// Native Workers do not contain an Actor ID. Correlate inventory with the
+// Actor's immutable worker assignment, checking the Pod UID when available.
+func substrateWorkerHostsActor(worker substrateWorker, actor substrateActor) bool {
+	if worker.WorkerName != "" && actor.WorkerName != "" {
+		return worker.WorkerName == actor.WorkerName && (actor.PodUID == "" || worker.WorkerPodUID == actor.PodUID)
+	}
+	if worker.WorkerPod != "" && actor.PodName != "" {
+		return worker.WorkerNamespace == actor.PodNamespace && worker.WorkerPod == actor.PodName &&
+			(actor.PodUID == "" || worker.WorkerPodUID == actor.PodUID)
+	}
+	return worker.ActorID != "" && worker.ActorID == actor.ActorID
 }

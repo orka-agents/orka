@@ -195,7 +195,7 @@ export function ForkDialog({ taskId, event, open, onOpenChange }: ForkDialogProp
             </div>
             <div className="space-y-1">
               <label htmlFor="fork-prompt" className="text-xs font-medium text-muted-foreground">
-                Prompt override / continuation (optional)
+                Prompt override (optional)
               </label>
               <textarea
                 id="fork-prompt"

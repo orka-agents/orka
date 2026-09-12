@@ -189,7 +189,7 @@ func buildRequestParams(req *llm.CompletionRequest, messages []anthropic.Message
 		}
 	}
 
-	if req.Temperature > 0 {
+	if req.HasTemperature() {
 		params.Temperature = anthropic.Float(req.Temperature)
 	}
 
@@ -327,8 +327,7 @@ func (p *Provider) Stream(ctx context.Context, req *llm.CompletionRequest) (<-ch
 // code from the Anthropic SDK error type when available.
 func toProviderError(err error) *llm.ProviderError {
 	pe := &llm.ProviderError{Provider: "anthropic", Message: err.Error()}
-	var apiErr *anthropic.Error
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[*anthropic.Error](err); ok {
 		pe.StatusCode = apiErr.StatusCode
 	}
 	return pe

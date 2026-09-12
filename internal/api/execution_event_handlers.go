@@ -262,6 +262,9 @@ func (h *Handlers) ListSessionEvents(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenAction(c, "listSessionEvents", h.contextTokenAuthorization.SessionReadScopes); err != nil {
 		return err
 	}
+	if err := h.authorizeSessionResourceAction(c, "get", namespace, sessionName); err != nil {
+		return err
+	}
 	if err := h.ensureSessionReadable(c, namespace, sessionName); err != nil {
 		return err
 	}
@@ -296,6 +299,9 @@ func (h *Handlers) StreamSessionEvents(c fiber.Ctx) error {
 		return err
 	}
 	if err := h.authorizeContextTokenAction(c, "streamSessionEvents", h.contextTokenAuthorization.SessionReadScopes); err != nil {
+		return err
+	}
+	if err := h.authorizeSessionResourceAction(c, "get", namespace, sessionName); err != nil {
 		return err
 	}
 	if err := h.ensureSessionReadable(c, namespace, sessionName); err != nil {

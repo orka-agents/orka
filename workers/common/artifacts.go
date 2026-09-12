@@ -21,6 +21,12 @@ import (
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
+// artifactMaxRetries and the shared maxBackoff cap size artifact uploads to
+// the same ~4 minute window as result submission (2s, 4s, 8s, 16s, 32s, then
+// 60s steps), so a worker that reaches its uploads during a routine
+// single-replica controller restart still persists its output.
+const artifactMaxRetries = 9
+
 const (
 	artifactsDirEnv           = "ORKA_ARTIFACTS_DIR"
 	defaultArtifactsDir       = "/tmp/artifacts"
@@ -53,15 +59,17 @@ func EnsureWorkspaceArtifactsLink(workspaceDir string) error {
 	if err := os.MkdirAll(artifactRoot, 0o755); err != nil {
 		return fmt.Errorf("failed to create artifacts directory: %w", err)
 	}
-	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
-		return fmt.Errorf("failed to create workspace directory: %w", err)
+	workspaceRoot, err := os.OpenRoot(workspaceDir)
+	if err != nil {
+		return fmt.Errorf("failed to open workspace directory: %w", err)
 	}
+	defer workspaceRoot.Close() //nolint:errcheck
 
 	linkPath := filepath.Join(workspaceDir, workspaceArtifactsDirName)
-	info, err := os.Lstat(linkPath)
+	info, err := workspaceRoot.Lstat(workspaceArtifactsDirName)
 	if err == nil {
 		if info.Mode()&os.ModeSymlink != 0 {
-			target, readErr := os.Readlink(linkPath)
+			target, readErr := workspaceRoot.Readlink(workspaceArtifactsDirName)
 			if readErr == nil {
 				resolved := target
 				if !filepath.IsAbs(resolved) {
@@ -78,7 +86,7 @@ func EnsureWorkspaceArtifactsLink(workspaceDir string) error {
 		return fmt.Errorf("failed to inspect workspace artifact path: %w", err)
 	}
 
-	if err := os.Symlink(artifactRoot, linkPath); err != nil {
+	if err := workspaceRoot.Symlink(artifactRoot, workspaceArtifactsDirName); err != nil {
 		return fmt.Errorf("failed to create workspace artifact symlink: %w", err)
 	}
 	return nil
@@ -169,6 +177,20 @@ func UploadArtifacts() error {
 // using the worker lifecycle context. It returns nil when the directory does
 // not exist or is empty.
 func UploadArtifactsContext(ctx context.Context) error {
+	return UploadArtifactsWithRequestAuthorizationContext(ctx, nil)
+}
+
+// UploadArtifactsWithRequestAuthorization applies wrapper-only authorization to every request.
+func UploadArtifactsWithRequestAuthorization(authorize func(*http.Request, []byte) error) error {
+	return UploadArtifactsWithRequestAuthorizationContext(context.Background(), authorize)
+}
+
+// UploadArtifactsWithRequestAuthorizationContext signs each request, including retries,
+// and stops uploads when the worker lifecycle ends. The callback stays in the wrapper.
+func UploadArtifactsWithRequestAuthorizationContext(
+	ctx context.Context,
+	authorize func(*http.Request, []byte) error,
+) error {
 	ctx = contextOrBackground(ctx)
 	if err := ctx.Err(); err != nil {
 		return err
@@ -297,7 +319,7 @@ func UploadArtifactsContext(ctx context.Context) error {
 		})
 	}
 
-	return uploadPendingArtifacts(ctx, baseEndpoint, saToken, pending, uploadErrors)
+	return uploadPendingArtifacts(ctx, baseEndpoint, saToken, pending, uploadErrors, authorize)
 }
 
 func uploadPendingArtifacts(
@@ -305,14 +327,16 @@ func uploadPendingArtifacts(
 	baseEndpoint, saToken string,
 	pending []pendingArtifact,
 	uploadErrors []string,
+	authorize func(*http.Request, []byte) error,
 ) error {
 	for _, artifact := range pending {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		endpoint := fmt.Sprintf("%s/%s", baseEndpoint, url.PathEscape(artifact.filename))
-		if err := doPostWithRetryContext(
-			ctx, "artifact upload", endpoint, artifact.data, saToken, artifact.contentType, 30*time.Second,
+		if err := doPostWithRetryAuthorization(
+			ctx, "artifact upload", endpoint, artifact.data, saToken, artifact.contentType,
+			30*time.Second, retryWait, artifactMaxRetries, authorize,
 		); err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return fmt.Errorf("artifact upload canceled: %w", ctxErr)
@@ -391,4 +415,9 @@ func detectContentType(filename string, data []byte) string {
 	}
 
 	return http.DetectContentType(data)
+}
+
+func doPostWithContentType(endpoint string, data []byte, saToken, contentType string) error {
+	return doPostWithRetryAuthorization(context.Background(), "artifact upload", endpoint, data,
+		saToken, contentType, 30*time.Second, retryWait, artifactMaxRetries, nil)
 }

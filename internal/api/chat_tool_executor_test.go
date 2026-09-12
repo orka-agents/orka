@@ -25,6 +25,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/controller"
+	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/store"
@@ -66,6 +67,7 @@ func (e *ToolExecutor) executeTool(ctx context.Context, name string, args map[st
 	tc := &tools.ToolContext{
 		Client:                    e.client,
 		Namespace:                 e.namespace,
+		ExecutionMode:             e.executionMode,
 		WatchNamespace:            e.watchNamespace,
 		EnforceNamespaceIsolation: e.enforceNamespaceIsolation,
 		ResultStore:               e.resultStore,
@@ -189,7 +191,9 @@ func newTestExecutor(objs ...runtime.Object) *ToolExecutor {
 	}
 	c := cb.Build()
 	sm := controller.NewSessionManager(&fakeSessionStore{})
-	return NewToolExecutor(c, sm, testDefaultNamespace, "sess-12345678", "", false, 5, 30*time.Second, &fakeResultStore{})
+	executor := NewToolExecutor(c, sm, testDefaultNamespace, "sess-12345678", "", false, 5, 30*time.Second, &fakeResultStore{})
+	executor.SetExecutionMode(executionmode.HarnessV2)
+	return executor
 }
 
 // fakeResultStore implements store.ResultStore for testing.
@@ -236,6 +240,10 @@ func (f *fakeSessionStore) GetSession(_ context.Context, _, _ string) (*store.Se
 }
 func (f *fakeSessionStore) ListSessions(_ context.Context, _ string) ([]store.SessionMetadata, error) {
 	return nil, nil
+}
+
+func (f *fakeSessionStore) ListSessionsPage(_ context.Context, _, _ string, _ int, _ string) ([]store.SessionMetadata, bool, error) {
+	return nil, false, nil
 }
 func (f *fakeSessionStore) DeleteSession(_ context.Context, ns, name string) error {
 	if f.errOnDel != nil {
@@ -618,6 +626,134 @@ func TestExecute_InvalidJSON(t *testing.T) {
 	}
 }
 
+func TestExecute_ChildSessionNamespace(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		namespace    any
+		sessionRef   string
+		schedule     any
+		isolation    bool
+		watchNS      string
+		wantError    string
+		wantTaskNS   string
+		wantSchedule string
+	}{
+		{name: "default namespace rejects active session", sessionRef: "sess-12345678", wantError: "invalid_arguments"},
+		{name: "explicit namespace rejects active session", namespace: "default", sessionRef: "sess-12345678", wantError: "invalid_arguments"},
+		{name: "other namespace permits same name", namespace: "other", sessionRef: "sess-12345678", wantTaskNS: "other"},
+		{name: "stringified namespace permits same name", namespace: 789, sessionRef: "sess-12345678", wantTaskNS: "789"},
+		{name: "same namespace permits other session", sessionRef: "child-session", wantTaskNS: "default"},
+		{name: "empty schedule rejects active session", sessionRef: "sess-12345678", schedule: "", wantError: "invalid_arguments"},
+		{name: "scheduled parent permits active session", sessionRef: "sess-12345678", schedule: "0 */6 * * *", wantTaskNS: "default", wantSchedule: "0 */6 * * *"},
+		{name: "stringified schedule permits active session", sessionRef: "sess-12345678", schedule: 123, wantTaskNS: "default", wantSchedule: "123"},
+		{name: "namespace isolation remains enforced", namespace: "other", sessionRef: "sess-12345678", isolation: true, wantError: "permission_denied"},
+		{name: "watch namespace remains enforced", namespace: "other", sessionRef: "sess-12345678", watchNS: "default", wantError: "permission_denied"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newTestExecutor()
+			e.enforceNamespaceIsolation = tt.isolation
+			e.watchNamespace = tt.watchNS
+			args := map[string]any{"name": "child", "prompt": "hello", "sessionRef": tt.sessionRef}
+			if tt.schedule != nil {
+				args["schedule"] = tt.schedule
+			}
+			if tt.namespace != nil {
+				args["namespace"] = tt.namespace
+			}
+			result, err := e.Execute(context.Background(), llm.ToolCall{
+				ID: "child-call", Name: "create_ai_task", Arguments: mustJSON(args),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var tr ToolResult
+			if err := json.Unmarshal([]byte(result), &tr); err != nil {
+				t.Fatal(err)
+			}
+			if tr.ErrorType != tt.wantError || tr.Success != (tt.wantError == "") {
+				t.Fatalf("unexpected tool result: %s", result)
+			}
+			var tasks corev1alpha1.TaskList
+			if err := e.client.List(context.Background(), &tasks); err != nil {
+				t.Fatal(err)
+			}
+			if tt.wantError != "" {
+				if len(tasks.Items) != 0 {
+					t.Fatal("rejected tool call created a Task")
+				}
+				return
+			}
+			if len(tasks.Items) != 1 {
+				t.Fatalf("created %d Tasks, want 1", len(tasks.Items))
+			}
+			task := tasks.Items[0]
+			if task.Spec.Schedule != tt.wantSchedule {
+				t.Fatalf("child schedule = %q, want %q", task.Spec.Schedule, tt.wantSchedule)
+			}
+			if task.Namespace != tt.wantTaskNS || task.Spec.SessionRef == nil || task.Spec.SessionRef.Name != tt.sessionRef {
+				t.Fatalf("unexpected child session: namespace=%q sessionRef=%+v", task.Namespace, task.Spec.SessionRef)
+			}
+		})
+	}
+}
+
+func TestExecute_FencesStringifiedSessionIdentity(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		field string
+		value any
+	}{
+		{name: "numeric session", field: "sessionRef", value: 123},
+		{name: "numeric namespace", field: "namespace", value: 456},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newTestExecutor()
+			e.sessionID = "123"
+			e.namespace = "456"
+			args := map[string]any{"name": "child", "prompt": "hello", "sessionRef": "123", "namespace": "456"}
+			args[tt.field] = tt.value
+			result, err := e.Execute(context.Background(), llm.ToolCall{
+				ID: "child-call", Name: "create_ai_task", Arguments: mustJSON(args),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var tr ToolResult
+			if err := json.Unmarshal([]byte(result), &tr); err != nil {
+				t.Fatal(err)
+			}
+			if tr.Success || tr.ErrorType != "invalid_arguments" {
+				t.Fatalf("unexpected tool result: %s", result)
+			}
+			var tasks corev1alpha1.TaskList
+			if err := e.client.List(context.Background(), &tasks); err != nil {
+				t.Fatal(err)
+			}
+			if len(tasks.Items) != 0 {
+				t.Fatal("stringified active session identity created a Task")
+			}
+		})
+	}
+}
+
+func TestExecute_NonCreatingToolIgnoresSessionRef(t *testing.T) {
+	e := newTestExecutor()
+	result, err := e.Execute(context.Background(), llm.ToolCall{
+		ID: "list-call", Name: "list_tasks",
+		Arguments: mustJSON(map[string]any{"sessionRef": e.sessionID}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tr ToolResult
+	if err := json.Unmarshal([]byte(result), &tr); err != nil {
+		t.Fatal(err)
+	}
+	if !tr.Success {
+		t.Fatalf("non-creating tool rejected unused sessionRef: %s", result)
+	}
+}
+
 func TestExecute_UnknownTool(t *testing.T) {
 	e := newTestExecutor()
 	tc := llm.ToolCall{
@@ -993,10 +1129,11 @@ func TestExecuteCreateAgentTask_WithWorkspace(t *testing.T) {
 		"prompt":   "work on repo",
 		"agentRef": "my-agent",
 		"workspace": map[string]any{
-			"gitRepo":    "https://github.com/org/repo",
-			"branch":     "main",
-			"subPath":    "src",
-			"pushBranch": "feature-1",
+			"gitRepo":                  "https://github.com/org/repo",
+			"branch":                   "main",
+			"subPath":                  "src",
+			"pushBranch":               "feature-1",
+			"publicationCredentialRef": "github-publication-credentials",
 		},
 		"maxTurns": float64(10),
 	}
@@ -1009,14 +1146,14 @@ func TestExecuteCreateAgentTask_WithWorkspace(t *testing.T) {
 	if err := e.client.Get(context.Background(), apitypes.NamespacedName{Name: data["name"].(string), Namespace: "default"}, task); err != nil {
 		t.Fatalf("failed to get created task: %v", err)
 	}
-	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil {
+	if task.Spec.AgentRuntime == nil || task.Spec.Workspace == nil {
 		t.Fatal("expected workspace to be set")
 	}
-	if task.Spec.AgentRuntime.Workspace.GitSecretRef == nil {
-		t.Fatal("expected gitSecretRef to be auto-discovered")
+	if task.Spec.Workspace.ReadCredentialRef == nil {
+		t.Fatal("expected readCredentialRef to be auto-discovered")
 	}
-	if task.Spec.AgentRuntime.Workspace.GitSecretRef.Name != "github-credentials" {
-		t.Fatalf("gitSecretRef = %q, want %q", task.Spec.AgentRuntime.Workspace.GitSecretRef.Name, "github-credentials")
+	if task.Spec.Workspace.ReadCredentialRef.Name != "github-credentials" {
+		t.Fatalf("readCredentialRef = %q, want %q", task.Spec.Workspace.ReadCredentialRef.Name, "github-credentials")
 	}
 }
 
@@ -1026,8 +1163,8 @@ func TestExecuteCreateAgentTask_WithExplicitGitSecret(t *testing.T) {
 		"prompt":   "work on repo",
 		"agentRef": "my-agent",
 		"workspace": map[string]any{
-			"gitRepo":      "https://github.com/org/repo",
-			"gitSecretRef": "my-secret",
+			"gitRepo":           "https://github.com/org/repo",
+			"readCredentialRef": "my-secret",
 		},
 	}
 	r := e.executeTool(context.Background(), "create_agent_task", args)
@@ -1039,11 +1176,11 @@ func TestExecuteCreateAgentTask_WithExplicitGitSecret(t *testing.T) {
 	if err := e.client.Get(context.Background(), apitypes.NamespacedName{Name: data["name"].(string), Namespace: "default"}, task); err != nil {
 		t.Fatalf("failed to get created task: %v", err)
 	}
-	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil || task.Spec.AgentRuntime.Workspace.GitSecretRef == nil {
-		t.Fatal("expected explicit gitSecretRef to be preserved")
+	if task.Spec.Workspace == nil || task.Spec.Workspace.ReadCredentialRef == nil {
+		t.Fatal("expected explicit readCredentialRef to be preserved")
 	}
-	if task.Spec.AgentRuntime.Workspace.GitSecretRef.Name != "my-secret" {
-		t.Errorf("gitSecretRef = %q, want %q", task.Spec.AgentRuntime.Workspace.GitSecretRef.Name, "my-secret")
+	if task.Spec.Workspace.ReadCredentialRef.Name != "my-secret" {
+		t.Errorf("readCredentialRef = %q, want %q", task.Spec.Workspace.ReadCredentialRef.Name, "my-secret")
 	}
 }
 
@@ -1465,7 +1602,8 @@ func TestExecuteCreateAgent_WithRuntime(t *testing.T) {
 		},
 	})
 	args := map[string]any{
-		"name": "runtime-agent",
+		"name":  "runtime-agent",
+		"model": map[string]any{"name": "test-model"},
 		"runtime": map[string]any{
 			"type": "copilot",
 		},
@@ -1857,6 +1995,7 @@ func TestHandleInitialPrompt_WithRuntimeAgent(t *testing.T) {
 	})
 	r := e.executeTool(context.Background(), "create_agent", map[string]any{
 		"name":          "rt-agent",
+		"model":         map[string]any{"name": "test-model"},
 		"runtime":       map[string]any{"type": "copilot"},
 		"initialPrompt": "do work",
 	})
