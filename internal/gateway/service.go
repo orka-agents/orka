@@ -113,14 +113,19 @@ func (e *HTTPError) Error() string { return e.Message }
 
 // Service owns durable admission, dispatch, terminal projection, and delivery.
 type Service struct {
-	Client        client.Client
-	APIReader     client.Reader
-	EventStore    store.GatewayEventStore
-	DeliveryStore store.GatewayDeliveryStore
-	ResultStore   store.ResultStore
-	HTTPClient    *http.Client
-	Config        Config
-	Owner         string
+	Client                   client.Client
+	APIReader                client.Reader
+	EventStore               store.GatewayEventStore
+	DeliveryStore            store.GatewayDeliveryStore
+	ResultStore              store.ResultStore
+	HTTPClient               *http.Client
+	Config                   Config
+	Owner                    string
+	SessionCleanup           store.GatewaySessionCleanupStore
+	SessionCleanupCandidates store.GatewaySessionCleanupCandidateStore
+	SessionCleanupEpochs     interface {
+		CurrentFence(context.Context) (store.ControllerEpochFence, error)
+	}
 }
 
 func (s *Service) freshReader() client.Reader {
@@ -180,11 +185,39 @@ func (s *Service) Start(ctx context.Context) error {
 			terminalCutoff := now.Add(-s.Config.TerminalRetention)
 			if _, err := s.DeliveryStore.MaintainGatewayRecords(ctx, s.Config.Namespace, now, terminalCutoff); err != nil {
 				logger.Error(err, "gateway maintenance failed")
-			} else if err := s.cleanupRetainedGatewayTasks(ctx, terminalCutoff); err != nil {
+				continue
+			}
+			if err := s.cleanupRetainedGatewaySessions(ctx, now, terminalCutoff); err != nil {
+				logger.Error(err, "gateway Session retention cleanup remains pending")
+			}
+			if err := s.cleanupRetainedGatewayTasks(ctx, terminalCutoff); err != nil {
 				logger.Error(err, "gateway Task retention cleanup failed")
 			}
 		}
 	}
+}
+
+func (s *Service) cleanupRetainedGatewaySessions(ctx context.Context, now, terminalCutoff time.Time) error {
+	if s.SessionCleanup == nil || s.SessionCleanupCandidates == nil || s.SessionCleanupEpochs == nil {
+		return nil
+	}
+	candidates, err := s.SessionCleanupCandidates.ListGatewaySessionCleanupCandidates(ctx, s.Config.Namespace, terminalCutoff)
+	if err != nil || len(candidates) == 0 {
+		return err
+	}
+	fence, err := s.SessionCleanupEpochs.CurrentFence(ctx)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, candidate := range candidates {
+		if err := s.SessionCleanup.ReclaimGatewaySession(ctx, store.ReclaimGatewaySessionRequest{
+			Session: candidate, Fence: fence, RequestedAt: now,
+		}); err != nil {
+			errs = append(errs, fmt.Errorf("reclaim Gateway Session %s/%s: %w", candidate.Namespace, candidate.SessionName, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (s *Service) cleanupRetainedGatewayTasks(ctx context.Context, terminalCutoff time.Time) error {
@@ -206,11 +239,12 @@ func (s *Service) cleanupRetainedGatewayTasks(ctx context.Context, terminalCutof
 	var errs []error
 	for i := range tasks.Items {
 		task := &tasks.Items[i]
-		if !task.DeletionTimestamp.IsZero() || task.CreationTimestamp.IsZero() || !task.CreationTimestamp.Time.Before(terminalCutoff) {
+		if !task.DeletionTimestamp.IsZero() || task.CreationTimestamp.IsZero() || !task.CreationTimestamp.Time.Before(terminalCutoff) ||
+			!isTerminalTaskPhase(task.Status.Phase) {
 			continue
 		}
 		owner, gatewayOwned := TaskOwner(task)
-		if !gatewayOwned || owner.GatewayNamespace == "" || owner.NamespaceUID == "" ||
+		if !gatewayOwned || owner.GatewayNamespace != task.Namespace || owner.NamespaceUID == "" ||
 			owner.GatewayName == "" || owner.GatewayUID == "" || task.UID == "" {
 			continue
 		}
@@ -230,7 +264,14 @@ func (s *Service) cleanupRetainedGatewayTasks(ctx context.Context, terminalCutof
 				continue
 			}
 			if !tombstoned {
-				continue
+				archived, err := s.gatewayTaskCleanupArchived(ctx, task)
+				if err != nil {
+					errs = append(errs, fmt.Errorf("check retained gateway Task archive %s/%s: %w", task.Namespace, task.Name, err))
+					continue
+				}
+				if !archived {
+					continue
+				}
 			}
 		}
 		if eventFound {
@@ -248,6 +289,38 @@ func (s *Service) cleanupRetainedGatewayTasks(ctx context.Context, terminalCutof
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// Archive evidence outlives the bounded event tombstones. A controller that was
+// offline for that whole window must still be able to request Task deletion.
+func (s *Service) gatewayTaskCleanupArchived(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+	reader, ok := s.ResultStore.(store.SessionTurnCleanupReceiptStore)
+	if !ok || task.Spec.SessionRef == nil || task.Status.Execution == nil {
+		return false, nil
+	}
+	execution := task.Status.Execution
+	attemptID, err := (store.PromptAttemptKey{
+		Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: int64(execution.Attempt), PromptID: execution.PromptID,
+	}).CanonicalID()
+	if err != nil {
+		return false, nil // No admitted prompt can have a matching archive.
+	}
+	receipt, err := reader.GetSessionTurnCleanupReceipt(ctx, task.Namespace, task.Spec.SessionRef.Name, attemptID)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if receipt == nil || receipt.PromptAttemptID != attemptID || receipt.Key.TaskUID != string(task.UID) ||
+		receipt.Key.SessionUID != execution.RuntimeSessionUID || receipt.Key.Attempt != int64(execution.Attempt) ||
+		receipt.Key.PromptID != execution.PromptID || !strings.HasPrefix(receipt.OperationID, store.GatewaySessionCleanupOperationPrefix) {
+		return false, store.ConflictErrorf("Gateway Task archive does not match its exact execution identity")
+	}
+	if err := receipt.Validate(task.Namespace, task.Spec.SessionRef.Name, receipt.TurnID); err != nil {
+		return false, err
+	}
+	return receipt.ProjectionState == store.OutboxProjectionDelivered, nil
 }
 
 func (s *Service) runDeliveryLoop(ctx context.Context, logger logr.Logger) {
@@ -503,6 +576,9 @@ func (s *Service) AdmitEvent(ctx context.Context, namespace, gatewayName, author
 		RejectedRecordLimit: s.Config.MaxRejectedRecordsPerGateway,
 	})
 	if err != nil {
+		if errors.Is(err, store.ErrGatewaySessionCleanupPending) {
+			return nil, &HTTPError{Code: http.StatusServiceUnavailable, Message: "the previous Gateway Session is being reclaimed; retry this event"}
+		}
 		if errors.Is(err, store.ErrDuplicateMismatch) {
 			return nil, &HTTPError{Code: http.StatusConflict, Message: "externalEventId already identifies a different gateway event"}
 		}

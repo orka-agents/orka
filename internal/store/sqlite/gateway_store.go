@@ -94,6 +94,20 @@ func (s *Store) AdmitGatewayEvent(ctx context.Context, admission store.GatewayEv
 		event.TranscriptOrder = retainedOrder
 		return &event, false, nil
 	}
+	if existing, err := getGatewayEventByExternalIDQuery(ctx, tx, event.Namespace, event.GatewayUID, event.ExternalEventID); err == nil {
+		if !gatewayEventsHaveSameEnvelope(existing, &event) {
+			return nil, false, store.ErrDuplicateMismatch
+		}
+		return existing, false, nil
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return nil, false, err
+	}
+	if appendUserMessage {
+		event.SessionName, err = resolveGatewaySessionNameTx(ctx, tx, &event)
+		if err != nil {
+			return nil, false, err
+		}
+	}
 	limit := admission.GatewayRecordLimit
 	statePredicate := `state <> ?`
 	stateArg := store.GatewayEventRejected
@@ -1532,7 +1546,9 @@ func (s *Store) GetGatewayQueueStats(ctx context.Context, namespace string) (sto
 }
 
 // MaintainGatewayRecords expires pending deliveries, compacts terminal event identities into
-// bounded tombstones, prunes their transcript messages, and removes empty gateway Sessions.
+// bounded tombstones, and prunes their transcript messages. Transcripts without ACP
+// records are reclaimed atomically with a cleanup completion. Sessions with ACP
+// identity or records remain for coordinated runtime and Kubernetes cleanup.
 // Event expiry stays in the gateway service so it can atomically create a visible error delivery.
 func (s *Store) MaintainGatewayRecords(ctx context.Context, namespace string, now, terminalCutoff time.Time) (store.GatewayMaintenanceResult, error) {
 	var result store.GatewayMaintenanceResult
@@ -1641,37 +1657,12 @@ func (s *Store) MaintainGatewayRecords(ctx context.Context, namespace string, no
 			session.Namespace, session.Name, session.Namespace, session.Name, store.SessionTypeGateway); err != nil {
 			return result, err
 		}
-		sessionDelete, err := tx.ExecContext(ctx, `DELETE FROM sessions AS session
-			WHERE session.namespace = ? AND session.name = ? AND session.session_type = ?
-			  AND session.active_task = '' AND session.updated_at < ?
-			  AND NOT EXISTS (SELECT 1 FROM session_messages message
-				WHERE message.namespace = session.namespace AND message.session_name = session.name)
-			  AND NOT EXISTS (SELECT 1 FROM gateway_events event
-				WHERE event.namespace = session.namespace AND event.session_name = session.name)
-			  AND NOT EXISTS (SELECT 1 FROM gateway_deliveries delivery
-				WHERE delivery.namespace = session.namespace AND delivery.session_name = session.name)`,
-			session.Namespace, session.Name, store.SessionTypeGateway, terminalCutoff)
+		deleted, err := reclaimGatewayTranscriptTx(ctx, tx, session.Namespace, session.Name, now, terminalCutoff)
 		if err != nil {
 			return result, err
 		}
-		deleted, rowsErr := sessionDelete.RowsAffected()
-		if rowsErr != nil {
-			return result, rowsErr
-		}
-		if deleted == 0 {
-			continue
-		}
-		if err := advanceTaskDataCleanupGeneration(ctx, tx, session.Namespace); err != nil {
-			return result, err
-		}
-		result.DeletedSessions += int(deleted)
-		if _, err := tx.ExecContext(ctx, `UPDATE execution_events SET session_name = '', session_seq = 0
-			WHERE namespace = ? AND session_name = ?`, session.Namespace, session.Name); err != nil {
-			return result, err
-		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM execution_event_session_sequences
-			WHERE namespace = ? AND session_name = ?`, session.Namespace, session.Name); err != nil {
-			return result, err
+		if deleted {
+			result.DeletedSessions++
 		}
 	}
 

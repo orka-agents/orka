@@ -1393,6 +1393,11 @@ func main() {
 	}
 	gatewayService := gatewayruntime.NewService(mgr.GetClient(), sqliteStore, sqliteStore, sqliteStore, gatewayConfig)
 	gatewayService.APIReader = mgr.GetAPIReader()
+	if kubeControlStore != nil {
+		gatewayService.SessionCleanup = kubeControlStore
+		gatewayService.SessionCleanupCandidates = sqliteStore
+		gatewayService.SessionCleanupEpochs = controllerEpochManager
+	}
 	if gatewayEnabled {
 		if err := mgr.Add(gatewayService); err != nil {
 			setupLog.Error(err, "unable to add gateway service")

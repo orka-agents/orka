@@ -26,13 +26,13 @@ func (s *Store) CreateSession(ctx context.Context, session *store.SessionRecord)
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	// Transcript-only completions are an idempotency receipt until the name is
-	// deliberately reused. Kubernetes-backed completions retain a SessionUID and
-	// permanently reserve the deleted identity.
+	// Non-Gateway transcript-only completions permit deliberate name reuse.
+	// Kubernetes identities and Gateway continuation chains remain reserved.
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM session_cleanup_completions
-		 WHERE namespace = ? AND session_name = ? AND session_uid = ''`,
-		session.Namespace, session.Name,
+		 WHERE namespace = ? AND session_name = ? AND session_uid = ''
+		   AND substr(operation_id, 1, ?) <> ?`,
+		session.Namespace, session.Name, len(store.GatewaySessionCleanupOperationPrefix), store.GatewaySessionCleanupOperationPrefix,
 	); err != nil {
 		return err
 	}
@@ -493,12 +493,13 @@ func (s *Store) AcquireChatTurn(
 	if err := ensureNoSessionCleanupIntentTx(ctx, tx, session.Namespace, session.Name); err != nil {
 		return false, err
 	}
-	// Preserve the upstream name-reuse policy: only transcript-only cleanup
-	// receipts can be replaced; deleted Kubernetes identities remain reserved.
+	// Only non-Gateway transcript-only receipts permit name reuse. Gateway
+	// completions also retain the route to the next Session incarnation.
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM session_cleanup_completions
-		 WHERE namespace = ? AND session_name = ? AND session_uid = ''`,
-		session.Namespace, session.Name,
+		 WHERE namespace = ? AND session_name = ? AND session_uid = ''
+		   AND substr(operation_id, 1, ?) <> ?`,
+		session.Namespace, session.Name, len(store.GatewaySessionCleanupOperationPrefix), store.GatewaySessionCleanupOperationPrefix,
 	); err != nil {
 		return false, err
 	}
