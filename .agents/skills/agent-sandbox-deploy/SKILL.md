@@ -223,8 +223,7 @@ test -x "$kindctl"
 > **Current boundary:** Orka ACP RuntimeSessions map to controller-rendered
 > SandboxClaims only when both provider and workspace-dispatch gates are on.
 > The bundled E2E enables both and proves fixture-backed prompt completion; a
-> manual deployment with the dispatch gate off must still fail closed. The
-> removed v1 harness-wrapper path must not be reintroduced.
+> manual deployment with the dispatch gate off must still fail closed.
 
 Choose validation according to the deployed gates:
 

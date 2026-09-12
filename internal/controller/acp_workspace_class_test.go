@@ -740,7 +740,6 @@ func TestResolveAgentExecutionCandidatePreservesTransientStorageClassReadErrors(
 			r := acpClassTestReconciler(t, objects...)
 			bindingReconciler, _ := newBindingTestReconciler(t)
 			r.AgentExecutionSnapshots = bindingReconciler.AgentExecutionSnapshots
-			r.ACPRuntimeEnabled = bindingReconciler.ACPRuntimeEnabled
 			r.ACPRuntimeNamespace = bindingReconciler.ACPRuntimeNamespace
 			r.ACPRuntimeImages = bindingReconciler.ACPRuntimeImages
 

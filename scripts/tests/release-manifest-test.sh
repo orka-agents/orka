@@ -67,12 +67,6 @@ publisher:
   image:
     repository: ghcr.io/orka-agents/orka/workspace-publisher
     tag: "0.0.1"
-harnessV1:
-  image:
-    repository: ghcr.io/orka-agents/orka/agent-harness-wrapper
-    # Releases publish the compatibility image, but harness-v1 renders still
-    # require operators to supply its immutable digest.
-    tag: "0.0.1"
 workers:
   ai:
     image:
@@ -103,7 +97,7 @@ python3 "${test_root}/scripts/update-release-version.py" v9.8.7-rc.3 >/dev/null
 grep -Fx 'VERSION := v9.8.7-rc.3' "${test_root}/Makefile" >/dev/null
 grep -Fx 'version: 9.8.7-rc.3' "${test_root}/cmd/build/helmify/static/Chart.yaml" >/dev/null
 grep -Fx 'appVersion: "v9.8.7-rc.3"' "${test_root}/cmd/build/helmify/static/Chart.yaml" >/dev/null
-test "$(grep -Fc 'tag: "9.8.7-rc.3"' "${test_root}/cmd/build/helmify/static/values.yaml")" -eq 5
+test "$(grep -Fc 'tag: "9.8.7-rc.3"' "${test_root}/cmd/build/helmify/static/values.yaml")" -eq 4
 grep -Fq 'ghcr.io/orka-agents/orka/ai-worker:9.8.7-rc.3' "${test_root}/config/manager/manager.yaml"
 grep -Fq 'ghcr.io/orka-agents/orka/general-worker:9.8.7-rc.3' "${test_root}/config/manager/manager.yaml"
 test "$(grep -Fc 'newTag: 9.8.7-rc.3' "${test_root}/config/manager/kustomization.yaml")" -eq 2
@@ -117,17 +111,19 @@ grep -Fq 'run: scripts/validate-release-manifest.sh "${GITHUB_REF_NAME}"' \
   "${root}/.github/workflows/release.yml"
 grep -Fq 'make verify-release-manifest NEWVERSION="${NEWVERSION}"' \
   "${root}/.github/workflows/release-pr.yml"
-build_job="$(workflow_job build-and-push)"
-scan_job="$(workflow_job scan)"
-sign_job="$(workflow_job sign-and-attest)"
-promotion_job="$(workflow_job promote-release-tags)"
-test "$(grep -Fc -- '- image: agent-harness-wrapper' <<<"${build_job}")" -eq 1
-test "$(grep -Fc 'image_suffix: "/agent-harness-wrapper"' <<<"${build_job}")" -eq 1
-grep -Fq 'dockerfile: workers/harness/Dockerfile' <<<"${build_job}"
-test "$(grep -Fc -- '- image: agent-harness-wrapper' <<<"${scan_job}")" -eq 2
-test "$(grep -Fc 'image_suffix: "/agent-harness-wrapper"' <<<"${scan_job}")" -eq 2
-test "$(grep -Fc -- '- image: agent-harness-wrapper' <<<"${sign_job}")" -eq 1
-test "$(grep -Fc 'image_suffix: "/agent-harness-wrapper"' <<<"${sign_job}")" -eq 1
-grep -Fq 'promote_image agent-harness-wrapper "/agent-harness-wrapper"' <<<"${promotion_job}"
+for job in build-and-push scan sign-and-attest promote-release-tags; do
+  rendered_job="$(workflow_job "${job}")"
+  if grep -Eq 'agent-harness-wrapper|workers/harness/Dockerfile' <<<"${rendered_job}"; then
+    echo "release job ${job} still builds or publishes the removed wrapper" >&2
+    exit 1
+  fi
+done
+for target in docker-build-all docker-push-all; do
+  rendered_target="$(make --no-print-directory -s -n -C "${root}" "${target}")"
+  if grep -Eq 'agent-harness-wrapper|workers/harness/Dockerfile' <<<"${rendered_target}"; then
+    echo "${target} still includes the removed wrapper" >&2
+    exit 1
+  fi
+done
 
-printf '%s\n' 'ok - release versioning and harness compatibility image policy are coherent'
+printf '%s\n' 'ok - release versioning and current image policy are coherent'

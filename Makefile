@@ -7,7 +7,6 @@ VERSION := v0.1.1
 IMG ?= controller:latest
 AI_WORKER_IMG ?= ghcr.io/orka-agents/orka/ai-worker:latest
 GENERAL_WORKER_IMG ?= ghcr.io/orka-agents/orka/general-worker:latest
-HARNESS_WRAPPER_IMG ?= ghcr.io/orka-agents/orka/agent-harness-wrapper:latest
 ACP_CODEX_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-codex-runtime:latest
 ACP_CLAUDE_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-claude-runtime:latest
 ACP_COPILOT_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-copilot-runtime:latest
@@ -213,7 +212,6 @@ test-e2e-setup-only: setup-test-e2e docker-build-all ## Set up Kind cluster and 
 	$(KIND) load docker-image $(IMG) --name $(KIND_CLUSTER)
 	$(KIND) load docker-image $(AI_WORKER_IMG) --name $(KIND_CLUSTER)
 	$(KIND) load docker-image $(GENERAL_WORKER_IMG) --name $(KIND_CLUSTER)
-	$(KIND) load docker-image $(HARNESS_WRAPPER_IMG) --name $(KIND_CLUSTER)
 	set -e; for img in $(ACP_RUNTIME_IMGS); do $(KIND) load docker-image $$img --name $(KIND_CLUSTER); done
 	$(KIND) load docker-image $(WORKSPACE_PUBLISHER_IMG) --name $(KIND_CLUSTER)
 
@@ -339,10 +337,6 @@ docker-build-ai-worker: ## Build docker image for the AI worker.
 docker-build-general-worker: ## Build docker image for the general worker.
 	$(CONTAINER_TOOL) build -t ${GENERAL_WORKER_IMG} -f workers/general/Dockerfile .
 
-.PHONY: docker-build-harness-wrapper
-docker-build-harness-wrapper: ## Build the opt-in harness v1 compatibility wrapper image.
-	$(CONTAINER_TOOL) build -t ${HARNESS_WRAPPER_IMG} -f workers/harness/Dockerfile .
-
 # Recipes for the docker-build-acp-<provider>-runtime targets are generated
 # from ACP_RUNTIME_PROVIDERS below; these dependency-less rules carry their
 # `make help` entries.
@@ -378,10 +372,6 @@ docker-push-ai-worker: ## Push docker image for the AI worker.
 .PHONY: docker-push-general-worker
 docker-push-general-worker: ## Push docker image for the general worker.
 	$(CONTAINER_TOOL) push ${GENERAL_WORKER_IMG}
-
-.PHONY: docker-push-harness-wrapper
-docker-push-harness-wrapper: ## Push the opt-in harness v1 compatibility wrapper image.
-	$(CONTAINER_TOOL) push ${HARNESS_WRAPPER_IMG}
 
 # Recipes for the docker-push-acp-<provider>-runtime targets are generated
 # from ACP_RUNTIME_PROVIDERS below; these dependency-less rules carry their
@@ -421,10 +411,10 @@ docker-push-workspace-publisher: ## Push the clean-room workspace publisher imag
 	$(CONTAINER_TOOL) push ${WORKSPACE_PUBLISHER_IMG}
 
 .PHONY: docker-build-all
-docker-build-all: docker-build docker-build-ai-worker docker-build-general-worker docker-build-harness-wrapper docker-build-acp-codex-runtime docker-build-acp-claude-runtime docker-build-acp-copilot-runtime docker-build-acp-opencode-runtime docker-build-workspace-publisher ## Build all docker images.
+docker-build-all: docker-build docker-build-ai-worker docker-build-general-worker docker-build-acp-codex-runtime docker-build-acp-claude-runtime docker-build-acp-copilot-runtime docker-build-acp-opencode-runtime docker-build-workspace-publisher ## Build all docker images.
 
 .PHONY: docker-push-all
-docker-push-all: docker-push docker-push-ai-worker docker-push-general-worker docker-push-harness-wrapper docker-push-acp-codex-runtime docker-push-acp-claude-runtime docker-push-acp-copilot-runtime docker-push-acp-opencode-runtime docker-push-workspace-publisher ## Push all docker images.
+docker-push-all: docker-push docker-push-ai-worker docker-push-general-worker docker-push-acp-codex-runtime docker-push-acp-claude-runtime docker-push-acp-copilot-runtime docker-push-acp-opencode-runtime docker-push-workspace-publisher ## Push all docker images.
 
 ##@ Deployment
 
@@ -490,18 +480,18 @@ verify-static-mode-crds: ## Refuse workload deployment until the platform-owned 
 	done
 	@for crd in agentexecutioncontrols.core.orka.ai agentexecutionpolicies.core.orka.ai agentexecutionadjudications.core.orka.ai; do \
 		if "$(KUBECTL)" get crd "$$crd" >/dev/null 2>&1; then \
-			echo "unsupported superseded coexistence CRD remains installed: $$crd" >&2; \
+			echo "unsupported retired CRD remains installed: $$crd" >&2; \
 			exit 1; \
 		fi; \
 	done
 	@"$(KUBECTL)" get crd agentruntimes.core.orka.ai -o json | jq -e \
-		'[.spec.versions[] | select(.served == true) | .schema.openAPIV3Schema.properties.spec.properties.contractVersion.enum] as $$enums | ($$enums | length) > 0 and ($$enums | all(sort == ["orka.harness.v1","orka.harness.v2"]))' >/dev/null || \
-		{ echo "AgentRuntime CRD is not the shared orka.harness.v1/orka.harness.v2 schema; apply the platform-owned static-mode CRD wave before workloads" >&2; exit 1; }
+		'[.spec.versions[] | select(.served == true) | .schema.openAPIV3Schema.properties.spec.properties.contractVersion.enum] as $$enums | ($$enums | length) > 0 and ($$enums | all(sort == ["orka.harness.v2"]))' >/dev/null || \
+		{ echo "AgentRuntime CRD is not the orka.harness.v2 schema; apply the platform-owned static-mode CRD wave before workloads" >&2; exit 1; }
 	@"$(KUBECTL)" get crd agents.core.orka.ai -o json | jq -e \
-		'[.spec.versions[] | select(.served == true) | .schema.openAPIV3Schema.properties.spec.properties.runtime as $$runtime | (((($$runtime.properties.contractVersion.enum // []) | sort) == ["orka.harness.v1","orka.harness.v2"]) and ((($$runtime["x-kubernetes-validations"] // []) | map(.message) | index("runtime.contractVersion is immutable once set")) != null))] as $$checks | ($$checks | length) > 0 and ($$checks | all)' >/dev/null || \
+		'[.spec.versions[] | select(.served == true) | .schema.openAPIV3Schema.properties.spec.properties.runtime as $$runtime | (((($$runtime.properties.contractVersion.enum // []) | sort) == ["orka.harness.v2"]) and ((($$runtime["x-kubernetes-validations"] // []) | map(.message) | index("runtime.contractVersion is immutable once set")) != null))] as $$checks | ($$checks | length) > 0 and ($$checks | all)' >/dev/null || \
 		{ echo "Agent CRD is missing the immutable shared contract selector; apply the platform-owned static-mode CRD wave before workloads" >&2; exit 1; }
 	@"$(KUBECTL)" get crd tasks.core.orka.ai -o json | jq -e \
-		'[.spec.versions[] | select(.served == true) | .schema.openAPIV3Schema as $$schema | $$schema.properties.status as $$status | ((($$status.properties.agentExecutionBinding.type // "") == "object") and ((($$status.properties.agentExecutionBinding.properties.contractVersion.enum // []) | sort) == ["orka.harness.v1","orka.harness.v2"]) and (($$status.properties | has("agentExecutionNoExecution")) | not) and (($$status.properties | has("agentExecutionQuarantine")) | not) and (($$status.properties | has("agentExecutionResolutionRef")) | not) and ((($$status["x-kubernetes-validations"] // []) | map(.message) | index("agentExecutionBinding is write-once and immutable")) != null) and ((($$schema["x-kubernetes-validations"] // []) | map(.message) | index("Task spec is immutable after execution authority is recorded")) != null))] as $$checks | ($$checks | length) > 0 and ($$checks | all)' >/dev/null || \
+		'[.spec.versions[] | select(.served == true) | .schema.openAPIV3Schema as $$schema | $$schema.properties.status as $$status | ((($$status.properties.agentExecutionBinding.type // "") == "object") and ((($$status.properties.agentExecutionBinding.properties.contractVersion.enum // []) | sort) == ["orka.harness.v2"]) and (($$status.properties | has("agentExecutionNoExecution")) | not) and (($$status.properties | has("agentExecutionQuarantine")) | not) and (($$status.properties | has("agentExecutionResolutionRef")) | not) and ((($$status["x-kubernetes-validations"] // []) | map(.message) | index("agentExecutionBinding is write-once and immutable")) != null) and ((($$schema["x-kubernetes-validations"] // []) | map(.message) | index("Task spec is immutable after execution authority is recorded")) != null))] as $$checks | ($$checks | length) > 0 and ($$checks | all)' >/dev/null || \
 		{ echo "Task CRD is missing the static-mode execution-authority schema; apply the platform-owned static-mode CRD wave before workloads" >&2; exit 1; }
 
 .PHONY: deploy

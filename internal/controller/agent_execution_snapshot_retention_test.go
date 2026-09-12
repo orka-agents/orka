@@ -117,7 +117,10 @@ func TestAgentExecutionSnapshotRetentionDoesNotTreatLineageConfigAsSnapshot(t *t
 	session := &corev1alpha1.RuntimeSessionControl{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "unrelated-lineage"},
 		Status: corev1alpha1.RuntimeSessionControlStatus{
-			Lineage: &corev1alpha1.RuntimeSessionLineageStatus{ConfigDigest: item.Key.Digest},
+			Lineage: &corev1alpha1.RuntimeSessionLineageStatus{
+				ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2,
+				ConfigDigest:    item.Key.Digest,
+			},
 		},
 	}
 	manager := &AgentExecutionSnapshotRetentionManager{

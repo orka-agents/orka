@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { conditionSchema } from './task'
+import { conditionSchema, harnessContractVersionSchema } from './task'
 
 export const modelConfigSchema = z.object({
   provider: z.string().optional(),
@@ -27,6 +27,7 @@ export const builtInAgentRuntimeTypeSchema = z.enum(builtInAgentRuntimeTypes)
 
 export const builtInAgentRuntimeSchema = z.object({
   type: builtInAgentRuntimeTypeSchema,
+  contractVersion: harnessContractVersionSchema.optional(),
   ...agentRuntimeDefaultsSchema,
 }).strict()
 

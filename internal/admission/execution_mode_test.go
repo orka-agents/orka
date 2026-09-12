@@ -37,8 +37,14 @@ func TestNamespaceExecutionModeValidatorOnlyAcquiresClaimOnCreate(t *testing.T) 
 		{
 			name:      "create claimed namespace",
 			operation: admissionv1.Create,
-			newMode:   string(executionmode.HarnessV1),
+			newMode:   string(executionmode.HarnessV2),
 			allowed:   true,
+		},
+		{
+			name:        "reject v1 namespace claim",
+			operation:   admissionv1.Create,
+			newMode:     "harness-v1",
+			messagePart: "harness-v1",
 		},
 		{
 			name:      "preserve absent claim",
@@ -54,21 +60,21 @@ func TestNamespaceExecutionModeValidatorOnlyAcquiresClaimOnCreate(t *testing.T) 
 		{
 			name:      "preserve existing claim",
 			operation: admissionv1.Update,
-			oldMode:   string(executionmode.HarnessV1),
-			newMode:   string(executionmode.HarnessV1),
+			oldMode:   string(executionmode.HarnessV2),
+			newMode:   string(executionmode.HarnessV2),
 			allowed:   true,
 		},
 		{
 			name:        "reject changed claim",
 			operation:   admissionv1.Update,
-			oldMode:     string(executionmode.HarnessV1),
-			newMode:     string(executionmode.HarnessV2),
+			oldMode:     string(executionmode.HarnessV2),
+			newMode:     "harness-v1",
 			messagePart: "claim is immutable",
 		},
 		{
 			name:        "reject removed claim",
 			operation:   admissionv1.Update,
-			oldMode:     string(executionmode.HarnessV1),
+			oldMode:     string(executionmode.HarnessV2),
 			messagePart: "claim is immutable",
 		},
 	}
@@ -105,14 +111,6 @@ func TestTaskExecutionAuthorityValidatorRestrictsStatusWriters(t *testing.T) {
 			},
 		},
 		{
-			name: "harness runtime",
-			mutate: func(task *corev1alpha1.Task) {
-				task.Status.HarnessRuntime = &corev1alpha1.HarnessRuntimeStatus{
-					ContractVersion: "orka.harness.v1",
-				}
-			},
-		},
-		{
 			name: "execution",
 			mutate: func(task *corev1alpha1.Task) {
 				task.Status.Execution = &corev1alpha1.TaskExecutionStatus{
@@ -133,7 +131,7 @@ func TestTaskExecutionAuthorityValidatorRestrictsStatusWriters(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			oldTask := newAdmissionTestTask()
-			oldTask.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{}
+			oldTask.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2, Backend: corev1alpha1.AgentExecutionBackendRuntimePool}
 			statusUpdate := oldTask.DeepCopy()
 			tt.mutate(statusUpdate)
 
@@ -149,7 +147,7 @@ func TestTaskExecutionAuthorityValidatorRestrictsStatusWriters(t *testing.T) {
 func TestTaskExecutionAuthorityValidatorAllowsControllerStatusUpdate(t *testing.T) {
 	validator := newTestTaskExecutionAuthorityValidator(t)
 	oldTask := newAdmissionTestTask()
-	oldTask.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{}
+	oldTask.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2, Backend: corev1alpha1.AgentExecutionBackendRuntimePool}
 	statusUpdate := oldTask.DeepCopy()
 	statusUpdate.Status.Phase = corev1alpha1.TaskPhaseRunning
 

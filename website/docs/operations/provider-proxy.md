@@ -134,7 +134,7 @@ The API key is deliberately `dummy` — Vekil supplies the real one.
 ## Enable it in Orka
 
 For a fresh Helm installation, complete the in-cluster Vekil setup above, then follow
-the [source-install procedure](../getting-started.md#option-b-current-main-from-source).
+the [source-install procedure](../getting-started.md#install).
 It includes the required image pins, Secret setup, and `providerProxy.enabled=true`.
 
 Existing `harness-v2` releases already require the proxy to be enabled. Follow

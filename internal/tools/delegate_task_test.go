@@ -888,7 +888,7 @@ func TestDelegateTaskTool_Execute_AgentType(t *testing.T) {
 		t.Fatal("spec.agentRuntime is nil")
 	}
 	if childTask.Spec.Workspace == nil {
-		t.Fatal("spec.agentRuntime.workspace is nil")
+		t.Fatal("spec.workspace is nil")
 	}
 	if childTask.Spec.Workspace.GitRepo != "https://github.com/myorg/myrepo" {
 		t.Errorf("workspace.gitRepo = %q, want %q", childTask.Spec.Workspace.GitRepo, "https://github.com/myorg/myrepo")
@@ -1013,7 +1013,7 @@ func TestDelegateTaskTool_Execute_AgentTypeNoWorkspace(t *testing.T) {
 		t.Fatal("spec.agentRuntime should not be nil for agent-type tasks")
 	}
 	if childTask.Spec.Workspace != nil {
-		t.Error("spec.agentRuntime.workspace should be nil when not provided")
+		t.Error("spec.workspace should be nil when not provided")
 	}
 	if childTask.Spec.AgentRuntime.MaxTurns != nil {
 		t.Error("spec.agentRuntime.maxTurns should be nil when not provided")

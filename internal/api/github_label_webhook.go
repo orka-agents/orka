@@ -729,8 +729,6 @@ func (h *Handlers) ensureAgentExists(c fiber.Ctx, namespace, agentName string) (
 		return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get AgentRuntime %q: %v", runtimeName, err))
 	}
 	switch registered.RegisteredContractVersion() {
-	case corev1alpha1.AgentRuntimeContractHarnessV1:
-		return nil, nil
 	case corev1alpha1.AgentRuntimeContractHarnessV2:
 		policy, err := agentruntimepolicy.PolicyForRuntime(&registered)
 		if err != nil {
@@ -738,7 +736,7 @@ func (h *Handlers) ensureAgentExists(c fiber.Ctx, namespace, agentName string) (
 		}
 		return policy, nil
 	default:
-		return nil, fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("AgentRuntime %q referenced by agent %q has no supported contractVersion", runtimeName, agentName))
+		return nil, fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("AgentRuntime %q referenced by agent %q requires contractVersion orka.harness.v2", runtimeName, agentName))
 	}
 }
 

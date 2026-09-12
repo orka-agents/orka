@@ -45,7 +45,7 @@ func (t *ChatCreateAgentTool) Parameters() json.RawMessage {
 	},
 	}, runtimeField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaDescriptionField: "CLI runtime configuration. OpenCode uses the built-in ACP RuntimePool profile and controller provider proxy.", jsonSchemaPropertiesField: map[string]any{jsonSchemaTypeField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Runtime type: copilot, claude, codex, or opencode"}, "defaultMaxTurns": map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Default max agent loop iterations"},
 		"defaultAllowedTools": map[string]any{jsonSchemaTypeField: jsonSchemaTypeArray, itemsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}, jsonSchemaDescriptionField: "Default CLI tools allowed for tasks using this runtime agent. OpenCode defaults to Read, Write, Edit, Bash, Glob, and Grep when omitted."},
-		"defaultAllowBash":    map[string]any{jsonSchemaTypeField: jsonSchemaTypeBoolean, jsonSchemaDescriptionField: "Whether bash is allowed by default for tasks using this runtime agent. OpenCode defaults to true when omitted."}, secretRefField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Deprecated legacy field. Built-in ACP runtimes are credential-free at the Agent boundary; OpenCode rejects it."},
+		"defaultAllowBash":    map[string]any{jsonSchemaTypeField: jsonSchemaTypeBoolean, jsonSchemaDescriptionField: "Whether bash is allowed by default for tasks using this runtime agent. OpenCode defaults to true when omitted."}, "contractVersion": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaEnumField: []string{"orka.harness.v2"}, jsonSchemaDescriptionField: "Orka runtime protocol. Defaults to orka.harness.v2."},
 	},
 	}, "initialPrompt": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "When provided, automatically create and start a Task using this agent with this prompt. One tool call = agent + task. Leave empty to only create the agent config without running it."},
 		"coordination": map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaDescriptionField: "Enable multi-agent coordination so this agent can delegate tasks to other agents via delegate_task/wait_for_tasks tools", jsonSchemaPropertiesField: map[string]any{
@@ -164,7 +164,7 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 		agent.Spec.Resources = resources
 	}
 
-	if errResult, ok := parseRuntimeConfig(a, agent, tc.ExecutionMode); !ok {
+	if errResult, ok := parseRuntimeConfig(a, agent); !ok {
 		return errResult, nil
 	}
 	if err := executionmode.DefaultBuiltInAgentContract(agent, tc.ExecutionMode); err != nil {
@@ -311,7 +311,18 @@ func parseResourceListArg(resourcesMap map[string]any, key string) (corev1.Resou
 }
 
 // parseRuntimeConfig extracts runtime configuration from chat args into the agent spec.
-func parseRuntimeConfig(a map[string]any, agent *corev1alpha1.Agent, mode executionmode.Mode) (string, bool) {
+func parseRuntimeConfig(a map[string]any, agent *corev1alpha1.Agent) (string, bool) {
+	var requested RuntimeArgs
+	if value, exists := a[runtimeField]; exists {
+		data, err := json.Marshal(value)
+		if err == nil {
+			err = json.Unmarshal(data, &requested)
+		}
+		if err != nil {
+			result, _ := ChatToolErrorResult("invalid_arguments", err.Error(), "Use a built-in runtime with contractVersion orka.harness.v2.")
+			return result, false
+		}
+	}
 	if coord, ok := a["coordination"].(map[string]any); ok {
 		if enabled, ok := coord[enabledString].(bool); ok && enabled {
 			return "", true
@@ -351,7 +362,7 @@ func parseRuntimeConfig(a map[string]any, agent *corev1alpha1.Agent, mode execut
 		)
 		return result, false
 	}
-	if mode == executionmode.HarnessV2 && resolvedRuntimeType != corev1alpha1.AgentRuntimeOpencode &&
+	if resolvedRuntimeType != corev1alpha1.AgentRuntimeOpencode &&
 		(agent.Spec.Model == nil || strings.TrimSpace(agent.Spec.Model.Name) == "") {
 		// Admission rejects a harness-v2 built-in runtime Agent without
 		// spec.model.name; surface the requirement here instead of after a
@@ -372,19 +383,11 @@ func parseRuntimeConfig(a map[string]any, agent *corev1alpha1.Agent, mode execut
 			)
 			return result, false
 		}
-		if secretRef := strings.TrimSpace(chatGetStringArg(rtMap, secretRefField)); secretRef != "" {
-			result, _ := ChatToolErrorResult(
-				"invalid_arguments",
-				"opencode runtime does not accept runtime.secretRef; provider access is controller-proxied",
-				"Remove runtime.secretRef for OpenCode Agents.",
-			)
-			return result, false
-		}
 		if result, ok := normalizeChatOpenCodeModel(agent); !ok {
 			return result, false
 		}
 	}
-	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{Type: resolvedRuntimeType}
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{Type: resolvedRuntimeType, ContractVersion: requested.ContractVersion}
 	if agent.Spec.Model != nil {
 		agent.Spec.Model.Provider = ""
 	}

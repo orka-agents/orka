@@ -373,7 +373,7 @@ Resolution order:
 
 #### Execution workspace requests
 
-`Task.spec.execution.workspace` requests a physical execution-workspace provider for the Task's ACP RuntimeSession. With `--acp-workspace-dispatch-enabled`, `provider: agent-sandbox` (requires `--agent-sandbox-enabled`; `templateRef` must be omitted) or `provider: substrate` (requires `--substrate-enabled`; an infrastructure `templateRef` is required) executes the RuntimeSession in a dedicated workspace-provider-backed RuntimePool. Unsupported options (`cleanupPolicy: retain`, boot/pool/snapshot/hibernation, `onDetach`) fail closed before any workspace or RuntimePool demand, with the reason projected to `Task.status.executionWorkspace`. There is no worker Job fallback and no harness-v1 fallback. Top-level `Task.spec.workspace` remains the verified source/publication contract.
+`Task.spec.execution.workspace` requests a physical execution-workspace provider for the Task's ACP RuntimeSession. With `--acp-workspace-dispatch-enabled`, `provider: agent-sandbox` (requires `--agent-sandbox-enabled`; `templateRef` must be omitted) or `provider: substrate` (requires `--substrate-enabled`; an infrastructure `templateRef` is required) executes the RuntimeSession in a dedicated workspace-provider-backed RuntimePool. Unsupported options (`cleanupPolicy: retain`, boot/pool/snapshot/hibernation, `onDetach`) fail closed before any workspace or RuntimePool demand, with the reason projected to `Task.status.executionWorkspace`. Agent tasks execute only through the ACP RuntimeSession path. Top-level `Task.spec.workspace` remains the verified source/publication contract.
 
 See [Agent Sandbox Workspaces](../concepts/agent-sandbox.md), [Agent Substrate Workspaces](../concepts/substrate.md), and ADRs 0024/0025 for the provider-neutral contract.
 
@@ -697,7 +697,7 @@ Key configuration values for the Helm chart:
 |-----------|---------|-------------|
 | `controller.replicas` | `1` | Controller replicas |
 | `controller.image.repository` | `ghcr.io/orka-agents/orka` | Controller image |
-| `controller.mode` | `harness-v2` | Static agent execution mode: `harness-v1` or `harness-v2`. Select v1 explicitly for a compatibility release; a release never serves both or changes mode in place. |
+| `controller.mode` | `harness-v2` | Fixed agent execution protocol identity. Only `harness-v2` is supported. |
 | `controller.watchNamespace` | required | One non-empty namespace labeled `orka.ai/controller-mode` with the matching mode. Cluster-wide watch is rejected. |
 | `controller.enforceNamespaceIsolation` | `true` | Restrict namespace-bound API callers and default Helm RBAC to their namespace |
 | `service.port` | `8080` | Controller Service port used by controller and Publisher in-cluster URLs. |
@@ -712,8 +712,6 @@ Key configuration values for the Helm chart:
 | `controller.acpRuntime.copilotImage` | `""` | Digest-pinned GitHub Copilot ACP image; Tasks fail closed when empty. |
 | `controller.acpRuntime.opencodeImage` | `""` | Digest-pinned OpenCode ACP image; Tasks fail closed when empty. |
 | `controller.acpRuntime.upgradeDrain.*` | enabled | Two-phase planned-upgrade admission closure and RuntimePool drain settings. |
-| `harnessV1.image.digest` | `""` | Required immutable wrapper image digest for a `harness-v1` release. |
-| `harnessV1.auth.existingSecret` | `""` | Dedicated v1 wrapper bearer/TLS Secret. Never share it with v2. |
 | `providerProxy.enabled` | `false` | Deploy the authenticated provider boundary in front of Vekil. Required for built-in ACP profiles. |
 | `providerProxy.upstreamBaseURL` | `http://vekil.vekil-system.svc:1337` | Exact supported Vekil upstream. An optional trailing slash is normalized; alternate hosts, namespaces, and ports are rejected to preserve the fixed NetworkPolicies. |
 | `providerProxy.auth.existingSecret` | `""` | Existing current/optional-overlap proxy bearer Secret. RuntimePool copies are controller-managed. |
@@ -803,9 +801,9 @@ When `ORKA_PUBLISHER_PUBLISH_TIMEOUT` is raised above the default on the Publish
 
 CRD behavior is not controlled through chart values. A fresh install creates all CRDs in the chart unless `--skip-crds` is used. Because CRDs are cluster-scoped, designate one lifecycle owner and use `--skip-crds` for other Orka releases. Helm does not update CRDs during `helm upgrade`; apply the CRDs from the exact target chart before upgrading the controller. Helm retains CRDs and Orka custom resources on uninstall. See the [Helm CRD lifecycle guide](https://github.com/orka-agents/orka/blob/main/charts/orka/README.md).
 
-Harness v1 and v2 use separate releases, endpoints, watched namespaces, RBAC,
-Leases, stores, and data planes. They do not migrate Tasks or continue Sessions
-across modes. See [Operating harness v1 and v2 on one cluster](../operations/harness-modes.md).
+Each installation owns a separate watched namespace, runtime namespace, endpoint,
+RBAC, Lease, database, and credentials. See
+[installation ownership](../operations/harness-modes.md).
 
 Context-token flags can also be configured through Helm under
 `controller.contextToken`. For example:
@@ -875,7 +873,7 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--gateway-claim-lease` | `1m` | Event and delivery claim lease |
 | `--gateway-poll-interval` | `500ms` | Dispatcher and delivery poll interval |
 | `--gateway-batch-size` | `25` | Maximum gateway records processed per iteration |
-| `--controller-mode` / `ORKA_CONTROLLER_MODE` | required | Static controller mode: `harness-v1` or `harness-v2`. `dual`, `auto`, and drain modes are rejected. |
+| `--controller-mode` / `ORKA_CONTROLLER_MODE` | required | Fixed `harness-v2` protocol identity. Other values are rejected. |
 | `--watch-namespace` | required | One non-empty watched namespace carrying the matching `orka.ai/controller-mode` label. |
 | `--enforce-namespace-isolation` | `false` | Restrict users to their ServiceAccount's namespace |
 | `--max-tasks-per-namespace` | `0` | Max active tasks per namespace (0 = unlimited) |
@@ -1238,7 +1236,6 @@ Before upgrading from a controller that does not record `Task.status.jobUID`, pa
 
 The new authorization checks require the controller-recorded Job UID. They reject workers whose Tasks have only `status.jobName`, including otherwise valid Pods from the previous controller. Orka does not backfill UIDs by looking up Job names: namespace Job creators can replace those Jobs. Do not patch missing UIDs from a name lookup; finish the attempt before upgrading or explicitly submit a new Task after the upgrade.
 
-Built-in harness v1 artifact uploads also require the wrapper's Kubernetes workload identity. Configure the bound wrapper endpoint as a Kubernetes Service in the auth Secret's namespace. The uploading Pod must belong to a live ReplicaSet and Deployment selected by that Service. A worker Pod with a copy of the wrapper bearer does not receive artifact access.
 
 ## Prometheus metrics
 

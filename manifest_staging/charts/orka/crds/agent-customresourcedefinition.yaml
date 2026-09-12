@@ -1415,13 +1415,9 @@ spec:
                 properties:
                   contractVersion:
                     description: |-
-                      ContractVersion is the immutable harness protocol selector for built-in
-                      runtime types. There is no default: a missing selector is never
-                      interpreted as either protocol, and fail-closed admission requires an
-                      explicit value on new built-in Agents. runtime.type alone (including
-                      opencode, which exists in both protocols) is never protocol evidence.
+                      ContractVersion pins the harness identity for built-in runtime types.
+                      Built-in Agents require an explicit orka.harness.v2 value.
                     enum:
-                    - orka.harness.v1
                     - orka.harness.v2
                     type: string
                   defaultAllowBash:
@@ -1475,12 +1471,15 @@ spec:
                     - opencode
                     type: string
                 type: object
+                x-kubernetes-preserve-unknown-fields: true
                 x-kubernetes-validations:
                 - message: exactly one of type or runtimeRef is required
                   rule: has(self.type) != has(self.runtimeRef)
                 - message: runtime.contractVersion is immutable once set
                   rule: '!has(oldSelf.contractVersion) || (has(self.contractVersion)
                     && self.contractVersion == oldSelf.contractVersion)'
+                - message: built-in runtimes require an explicit orka.harness.v2 contractVersion
+                  rule: '!has(self.type) || has(self.contractVersion)'
                 - message: runtime.contractVersion applies only to built-in runtime
                     types; runtimeRef derives the protocol from the referenced AgentRuntime
                   rule: '!has(self.contractVersion) || has(self.type)'

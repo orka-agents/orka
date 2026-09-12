@@ -1,16 +1,14 @@
-name: Static Harness Modes
+name: Harness v2 Smoke
 
 on:
   push:
     paths:
-      - ".github/workflows/coexistence-smoke.yml"
+      - ".github/workflows/harness-v2-smoke.yml"
       - "Makefile"
       - "api/**"
       - "cmd/main.go"
       - "cmd/build/helmify/**"
       - "cmd/orka-admission/**"
-      - "cmd/orka-agent-harness-wrapper/**"
-      - "config/harness-wrapper/**"
       - "config/acp-production/**"
       - "config/acp-workload/**"
       - "config/orka-admission/**"
@@ -19,25 +17,23 @@ on:
       - "go.sum"
       - "internal/admission/**"
       - "internal/controller/agent_execution*"
-      - "internal/controller/acp_upgrade_drain*"
-      - "internal/controller/harness_v1*"
+      - "internal/controller/acp*"
+      - "internal/controller/runtime_pool*"
       - "internal/executionmode/**"
-      - "internal/harness/**"
+      - "internal/harness/v2/**"
+      - "workers/acp/**"
       - "internal/store/**"
       # The script jobs syntax-check every script and execute every
       # scripts/tests/*-test.sh suite, so any script change is relevant.
       - "scripts/**"
-      - "workers/harness/**"
   pull_request:
     paths:
-      - ".github/workflows/coexistence-smoke.yml"
+      - ".github/workflows/harness-v2-smoke.yml"
       - "Makefile"
       - "api/**"
       - "cmd/main.go"
       - "cmd/build/helmify/**"
       - "cmd/orka-admission/**"
-      - "cmd/orka-agent-harness-wrapper/**"
-      - "config/harness-wrapper/**"
       - "config/acp-production/**"
       - "config/acp-workload/**"
       - "config/orka-admission/**"
@@ -46,22 +42,22 @@ on:
       - "go.sum"
       - "internal/admission/**"
       - "internal/controller/agent_execution*"
-      - "internal/controller/acp_upgrade_drain*"
-      - "internal/controller/harness_v1*"
+      - "internal/controller/acp*"
+      - "internal/controller/runtime_pool*"
       - "internal/executionmode/**"
-      - "internal/harness/**"
+      - "internal/harness/v2/**"
+      - "workers/acp/**"
       - "internal/store/**"
       # The script jobs syntax-check every script and execute every
       # scripts/tests/*-test.sh suite, so any script change is relevant.
       - "scripts/**"
-      - "workers/harness/**"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: static-harness-modes-${{ github.event.pull_request.number || github.ref }}
+  group: harness-v2-smoke-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -84,23 +80,29 @@ jobs:
       - name: Create UI embed stub
         run: make ensure-ui-embed
 
-      - name: Run static-mode focused tests
+      - name: Set up envtest
+        run: |
+          make setup-envtest
+          envtest_assets="$(./bin/setup-envtest use -i --bin-dir "$PWD/bin" -p path)"
+          echo "KUBEBUILDER_ASSETS=$envtest_assets" >> "$GITHUB_ENV"
+
+      - name: Run v2 recovery and cleanup tests
         run: |
           go test \
             ./api/v1alpha1 \
             ./internal/admission \
             ./internal/controller \
             ./internal/executionmode \
-            ./internal/harness/... \
             ./internal/store/... \
-            ./workers/harness/... \
             ./cmd/orka-admission \
-            ./cmd/orka-agent-harness-wrapper \
-            -run '(ExecutionMode|ControllerMode|AgentContract|AgentRuntimeContract|TaskExecutionAuthority|HarnessV1|ACPUpgradeDrain|AgentExecutionSnapshotRetention|RecoverAmbiguousSubmission|RecoverActiveAttempt|DurableAdmission|DurableTurn|Ledger|SessionLineage|ReceiptPersistence|AdmissionClose)' \
+            -run '(ExecutionMode|ControllerMode|AgentContract|AgentRuntimeContract|TaskExecutionAuthority|ACPUpgradeDrain|AgentExecutionSnapshotRetention|ACPDispatcher|ACPRecovery|ACPRuntime|ACPExternal|ACPSession|SessionRuntimeCleanup|ArchivedSessionRecovery|SessionLineage|ReceiptPersistence|AdmissionClose|HarnessV2|Cancel|Timeout|Publication|Cleanup)' \
             -count=1
 
+      - name: Run v2 client and supervisor tests
+        run: go test ./internal/harness/v2/... ./workers/acp/... -count=1
+
   shell-syntax:
-    name: Static-mode deployment scripts
+    name: Deployment scripts
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

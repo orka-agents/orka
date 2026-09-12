@@ -1,5 +1,3 @@
-{{- $harnessV1 := eq .Values.controller.mode "harness-v1" -}}
-{{- $harnessV2 := eq .Values.controller.mode "harness-v2" -}}
 {{- include "orka.validateControllerMode" . }}
 {{- include "orka.validateProviderProxyConfig" . }}
 {{- include "orka.validateSQLiteController" . }}
@@ -11,10 +9,7 @@
 {{- if not (regexMatch "^sha256:[0-9a-f]{64}$" (.Values.controller.image.digest | default "")) }}
 {{- fail "controller.image.digest must be a sha256 digest" }}
 {{- end }}
-{{- if $harnessV2 }}
-{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" (.Values.controller.image.digest | default "")) }}
-{{- fail "controller.image.digest must be a sha256 digest when controller.mode=harness-v2" }}
-{{- end }}
+
 {{- if or (not .Values.publisher.enabled) (not (regexMatch "^sha256:[0-9a-f]{64}$" (.Values.publisher.image.digest | default ""))) }}
 {{- fail "publisher must be enabled with publisher.image.digest set when controller.mode=harness-v2" }}
 {{- end }}
@@ -28,9 +23,9 @@
 {{- if not .Values.providerProxy.enabled }}
 {{- fail "providerProxy.enabled must be true when controller.mode=harness-v2" }}
 {{- end }}
-{{- end }}
+
 {{- $gatewayCRDsReady := false -}}
-{{- if and $harnessV2 .Values.controller.gateway.enabled (not .Values.controller.gateway.crdsReadyOverride) -}}
+{{- if and .Values.controller.gateway.enabled (not .Values.controller.gateway.crdsReadyOverride) -}}
 {{- $gatewayClassCRD := lookup "apiextensions.k8s.io/v1" "CustomResourceDefinition" "" "gatewayclasses.gateway.orka.ai" -}}
 {{- $gatewayCRD := lookup "apiextensions.k8s.io/v1" "CustomResourceDefinition" "" "gateways.gateway.orka.ai" -}}
 {{- $gatewayBindingCRD := lookup "apiextensions.k8s.io/v1" "CustomResourceDefinition" "" "gatewaybindings.gateway.orka.ai" -}}
@@ -41,7 +36,7 @@
 {{- end -}}
 {{- $gatewayCRDsReady = and (not (empty $gatewayClassCRD)) (not (empty $gatewayCRD)) (not (empty $gatewayBindingCRD)) $taskSchemaReady -}}
 {{- end -}}
-{{- $gatewayRuntimeEnabled := and $harnessV2 .Values.controller.gateway.enabled (or .Values.controller.gateway.crdsReadyOverride $gatewayCRDsReady) -}}
+{{- $gatewayRuntimeEnabled := and .Values.controller.gateway.enabled (or .Values.controller.gateway.crdsReadyOverride $gatewayCRDsReady) -}}
 {{- if and $gatewayRuntimeEnabled (not .Values.store.persistence.enabled) (not .Values.controller.gateway.allowEphemeralStore) -}}
 {{- fail "controller.gateway.enabled requires store.persistence.enabled=true; set controller.gateway.allowEphemeralStore=true only for disposable development" -}}
 {{- end -}}
@@ -66,16 +61,13 @@ spec:
         {{- include "orka.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: controller
         orka.ai/network-role: controller
-      {{- if or .Values.annotations (and $harnessV2 .Values.publisher.auth.rolloutNonce) (and $harnessV1 .Values.harnessV1.tls.rolloutNonce) }}
+      {{- if or .Values.annotations .Values.publisher.auth.rolloutNonce }}
       annotations:
         {{- with .Values.annotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
         {{- with .Values.publisher.auth.rolloutNonce }}
         orka.ai/publisher-auth-rollout-nonce: {{ . | quote }}
-        {{- end }}
-        {{- with .Values.harnessV1.tls.rolloutNonce }}
-        orka.ai/harness-v1-tls-rollout-nonce: {{ . | quote }}
         {{- end }}
       {{- end }}
     spec:
@@ -84,7 +76,7 @@ spec:
       securityContext:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if and $harnessV2 .Values.controller.acpRuntime.upgradeDrain.enabled }}
+      {{- if .Values.controller.acpRuntime.upgradeDrain.enabled }}
       terminationGracePeriodSeconds: {{ .Values.controller.acpRuntime.upgradeDrain.terminationGracePeriodSeconds }}
       {{- end }}
       containers:
@@ -106,30 +98,22 @@ spec:
             - {{ printf "--webhook-cert-key=%s" .Values.webhooks.tls.privateKeyKey | quote }}
             - --task-provenance-admission-enabled=true
             - {{ printf "--task-provenance-admission-trusted-users=%s" (include "orka.controllerUsername" .) | quote }}
-            - --workspace-class-use-admission-enabled={{ $harnessV2 }}
-            {{- if $harnessV1 }}
-            - --harness-v1-endpoint=https://{{ include "orka.harnessV1Name" . }}.{{ .Release.Namespace }}.svc:8080
-            - --harness-v1-ca-file=/var/run/orka/harness-v1-tls/ca.crt
-            - --harness-v1-auth-secret-namespace={{ .Release.Namespace }}
-            - --harness-v1-auth-secret-name={{ .Values.harnessV1.auth.existingSecret }}
-            - --harness-v1-auth-secret-key={{ .Values.harnessV1.auth.tokenKey }}
-            - --harness-v1-dispatch-interval={{ .Values.harnessV1.dispatch.interval }}
-            - --harness-v1-dispatch-workers={{ .Values.harnessV1.dispatch.workers }}
-            {{- end }}
+            - --workspace-class-use-admission-enabled=true
+
             - --agent-execution-snapshot-key-file=/var/run/orka/agent-execution-snapshot/key
             - --agent-execution-snapshot-retention={{ .Values.controller.agentExecutionSnapshot.retention }}
             - --agent-execution-snapshot-retention-interval={{ .Values.controller.agentExecutionSnapshot.retentionInterval }}
-            {{- if $harnessV2 }}
+
             - --acp-runtime-namespace={{ .Values.controller.acpRuntime.namespace }}
-            {{- end }}
-            {{- if and $harnessV2 .Values.controller.acpRuntime.upgradeDrain.enabled }}
+
+            {{- if .Values.controller.acpRuntime.upgradeDrain.enabled }}
             - --acp-upgrade-drain-bind-address=127.0.0.1:{{ .Values.controller.acpRuntime.upgradeDrain.port }}
             - --acp-upgrade-drain-timeout={{ .Values.controller.acpRuntime.upgradeDrain.timeout }}
             - --acp-upgrade-drain-poll-interval={{ .Values.controller.acpRuntime.upgradeDrain.pollInterval }}
             - --acp-upgrade-drain-trigger-timeout={{ .Values.controller.acpRuntime.upgradeDrain.triggerTimeout }}
             - --acp-upgrade-drain-marker-namespace={{ .Release.Namespace }}
             {{- end }}
-            {{- if and $harnessV2 .Values.providerProxy.enabled }}
+            {{- if .Values.providerProxy.enabled }}
             - --acp-provider-proxy-base-url=http://{{ include "orka.providerProxyName" . }}.{{ .Release.Namespace }}.svc:8080
             - --acp-provider-proxy-namespace={{ .Release.Namespace }}
             - --acp-provider-proxy-pod-labels=orka.ai/network-role=provider-auth-proxy
@@ -403,15 +387,15 @@ spec:
               value: {{ include "orka.vendorWorkerClusterRoleName" . | quote }}
             - name: ORKA_CONTAINER_WORKER_CLUSTER_ROLE_NAME
               value: {{ include "orka.containerWorkerClusterRoleName" . | quote }}
-            {{- if $harnessV2 }}
+
             - name: ORKA_ACP_ARTIFACT_CAPABILITY_SECRET_FILE
               value: /var/run/orka/acp-artifacts/capability-secret
             - name: ORKA_ACP_ARTIFACT_ROOT
               value: /data/acp-artifacts
             - name: ORKA_ACP_ARTIFACT_MAX_BYTES
               value: {{ .Values.controller.acpArtifact.maxBytes | int64 | quote }}
-            {{- end }}
-            {{- if and $harnessV2 .Values.publisher.enabled }}
+
+            {{- if .Values.publisher.enabled }}
             - name: ORKA_WORKSPACE_PUBLISHER_URL
               value: http://{{ include "orka.publisherName" . }}:8080
             - name: ORKA_WORKSPACE_PUBLISHER_CONTROLLER_TOKEN_FILE
@@ -469,7 +453,7 @@ spec:
             - name: webhook
               containerPort: 9443
               protocol: TCP
-          {{- if and $harnessV2 .Values.controller.acpRuntime.upgradeDrain.enabled }}
+          {{- if .Values.controller.acpRuntime.upgradeDrain.enabled }}
           lifecycle:
             preStop:
               exec:
@@ -508,17 +492,17 @@ spec:
             {{- end }}
             - name: store
               mountPath: /data
-            {{- if $harnessV2 }}
+
             - name: acp-artifact-capability
               mountPath: /var/run/orka/acp-artifacts
               readOnly: true
-            {{- end }}
-            {{- if and $harnessV2 .Values.publisher.enabled }}
+
+            {{- if .Values.publisher.enabled }}
             - name: workspace-publisher-auth
               mountPath: /var/run/orka/publisher-auth
               readOnly: true
             {{- end }}
-            {{- if and $harnessV2 .Values.providerProxy.enabled }}
+            {{- if .Values.providerProxy.enabled }}
             - name: provider-auth-proxy
               mountPath: /var/run/orka/provider-auth
               readOnly: true
@@ -529,11 +513,7 @@ spec:
             - name: webhook-tls
               mountPath: /var/run/orka/webhook/tls
               readOnly: true
-            {{- if $harnessV1 }}
-            - name: harness-v1-tls
-              mountPath: /var/run/orka/harness-v1-tls
-              readOnly: true
-            {{- end }}
+
       volumes:
         - name: tmp
           emptyDir: {}
@@ -558,7 +538,7 @@ spec:
                 path: ca.crt
               {{- end }}
         {{- end }}
-        {{- if $harnessV2 }}
+
         - name: acp-artifact-capability
           secret:
             secretName: {{ .Values.controller.acpArtifact.existingSecret | default (include "orka.acpArtifactSecretName" .) }}
@@ -566,7 +546,7 @@ spec:
             items:
               - key: {{ .Values.controller.acpArtifact.secretKey | default "capability-secret" }}
                 path: capability-secret
-        {{- end }}
+
         - name: store
           {{- if .Values.store.persistence.enabled }}
           persistentVolumeClaim:
@@ -574,7 +554,7 @@ spec:
           {{- else }}
           emptyDir: {}
           {{- end }}
-        {{- if and $harnessV2 .Values.publisher.enabled }}
+        {{- if .Values.publisher.enabled }}
         - name: workspace-publisher-auth
           secret:
             secretName: {{ .Values.publisher.auth.existingSecret | default (include "orka.publisherAuthSecretName" .) }}
@@ -585,7 +565,7 @@ spec:
               - key: {{ .Values.publisher.auth.capabilitySecretKey | default "operation-capability-secret" }}
                 path: operation-capability-secret
         {{- end }}
-        {{- if and $harnessV2 .Values.providerProxy.enabled }}
+        {{- if .Values.providerProxy.enabled }}
         - name: provider-auth-proxy
           secret:
             secretName: {{ .Values.providerProxy.auth.existingSecret | default (include "orka.providerProxyName" .) }}
@@ -610,15 +590,7 @@ spec:
                 path: {{ .Values.webhooks.tls.certKey | quote }}
               - key: {{ .Values.webhooks.tls.privateKeyKey | quote }}
                 path: {{ .Values.webhooks.tls.privateKeyKey | quote }}
-        {{- if $harnessV1 }}
-        - name: harness-v1-tls
-          secret:
-            secretName: {{ .Values.harnessV1.tls.existingSecret | quote }}
-            defaultMode: 0400
-            items:
-              - key: ca.crt
-                path: ca.crt
-        {{- end }}
+
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

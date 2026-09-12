@@ -72,19 +72,19 @@ type AgentSpec struct {
 }
 
 // AgentCLIRuntime defines agent CLI runtime configuration for an Agent.
+// Unknown fields reach admission so removed fields are rejected.
+// +kubebuilder:pruning:PreserveUnknownFields
 // +kubebuilder:validation:XValidation:rule="has(self.type) != has(self.runtimeRef)",message="exactly one of type or runtimeRef is required"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.contractVersion) || (has(self.contractVersion) && self.contractVersion == oldSelf.contractVersion)",message="runtime.contractVersion is immutable once set"
+// +kubebuilder:validation:XValidation:rule="!has(self.type) || has(self.contractVersion)",message="built-in runtimes require an explicit orka.harness.v2 contractVersion"
 // +kubebuilder:validation:XValidation:rule="!has(self.contractVersion) || has(self.type)",message="runtime.contractVersion applies only to built-in runtime types; runtimeRef derives the protocol from the referenced AgentRuntime"
 type AgentCLIRuntime struct {
 	// Type specifies which built-in CLI runtime to use. Use runtimeRef for admin-registered custom runtimes.
 	// +optional
 	Type AgentRuntimeType `json:"type,omitempty"`
 
-	// ContractVersion is the immutable harness protocol selector for built-in
-	// runtime types. There is no default: a missing selector is never
-	// interpreted as either protocol, and fail-closed admission requires an
-	// explicit value on new built-in Agents. runtime.type alone (including
-	// opencode, which exists in both protocols) is never protocol evidence.
+	// ContractVersion pins the harness identity for built-in runtime types.
+	// Built-in Agents require an explicit orka.harness.v2 value.
 	// +optional
 	ContractVersion *AgentRuntimeContractVersion `json:"contractVersion,omitempty"`
 
@@ -144,9 +144,7 @@ func (in AgentCLIRuntime) MarshalJSON() ([]byte, error) {
 }
 
 // BuiltInContractVersion returns the Agent's explicit built-in harness
-// protocol selector, or empty when unclassified. Callers must treat empty as
-// neither protocol and fail closed; runtime.type alone is never protocol
-// evidence.
+// protocol, or empty when absent. Callers must reject an absent contract.
 func (in *Agent) BuiltInContractVersion() AgentRuntimeContractVersion {
 	if in == nil || in.Spec.Runtime == nil || in.Spec.Runtime.ContractVersion == nil {
 		return ""

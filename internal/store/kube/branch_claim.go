@@ -26,9 +26,6 @@ func (s *Store) CreateBranchClaimWithResult(ctx context.Context, claim *store.Br
 	if err := s.requireClient(); err != nil {
 		return nil, false, err
 	}
-	if err := s.requireBranchClaimAccess(); err != nil {
-		return nil, false, err
-	}
 	normalized, normalizedFence, err := store.NormalizeBranchClaimForCreate(claim, fence)
 	if err != nil {
 		return nil, false, err
@@ -89,9 +86,6 @@ func (s *Store) GetBranchClaim(ctx context.Context, id string) (*store.BranchCla
 	if err := s.requireClient(); err != nil {
 		return nil, err
 	}
-	if err := s.requireBranchClaimAccess(); err != nil {
-		return nil, err
-	}
 	id = strings.TrimSpace(id)
 	if err := store.ValidateControlIdentifier("branch claim ID", id); err != nil {
 		return nil, err
@@ -110,9 +104,6 @@ func (s *Store) GetBranchClaim(ctx context.Context, id string) (*store.BranchCla
 // already reclaimed and possibly replaced, so the retry is a safe no-op.
 func (s *Store) ReclaimBranchClaim(ctx context.Context, request store.ReclaimBranchClaimRequest) error {
 	if err := s.requireClient(); err != nil {
-		return err
-	}
-	if err := s.requireBranchClaimAccess(); err != nil {
 		return err
 	}
 	normalized, err := store.NormalizeBranchClaimReclamationRequest(request)
@@ -164,7 +155,7 @@ func (s *Store) ReclaimBranchClaim(ctx context.Context, request store.ReclaimBra
 // CompareAndSwapBranchClaim applies exact version, generation, baseline,
 // availability, resourceVersion, and controller-epoch fences.
 func (s *Store) CompareAndSwapBranchClaim(ctx context.Context, change store.BranchClaimCAS) (*store.BranchClaim, error) {
-	if err := s.requireBranchClaimAccess(); err != nil {
+	if err := s.requireClient(); err != nil {
 		return nil, err
 	}
 	change.ID = strings.TrimSpace(change.ID)
@@ -247,7 +238,7 @@ func (s *Store) completeBranchClaimCreation(ctx context.Context, object *corev1a
 }
 
 func (s *Store) getBranchClaimObject(ctx context.Context, id string) (*corev1alpha1.BranchClaim, error) {
-	if err := s.requireBranchClaimAccess(); err != nil {
+	if err := s.requireClient(); err != nil {
 		return nil, err
 	}
 	object := &corev1alpha1.BranchClaim{}

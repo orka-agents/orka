@@ -16,10 +16,6 @@ func executionBinding(
 	return binding
 }
 
-func taskDispatchableByHarnessV1(task *corev1alpha1.Task) bool {
-	return executionBinding(task, corev1alpha1.AgentRuntimeContractHarnessV1) != nil
-}
-
 func taskDispatchableByACP(task *corev1alpha1.Task) bool {
 	return executionBinding(task, corev1alpha1.AgentRuntimeContractHarnessV2) != nil
 }

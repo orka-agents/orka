@@ -51,7 +51,7 @@ kubectl -n orka-system create secret generic orka-webhook-tls \
 WEBHOOK_CA_BUNDLE="$(kubectl -n orka-system get secret orka-webhook-tls \
   -o jsonpath='{.data.ca\.crt}')"
 
-helm install orka charts/orka \
+helm install orka manifest_staging/charts/orka \
   --namespace orka-system \
   --set controller.mode=harness-v2 \
   --set controller.watchNamespace=orka-system \
@@ -65,8 +65,8 @@ helm install orka charts/orka \
   --wait
 ```
 
-The chart defaults new installations to `harness-v2`. Controller mode remains
-an immutable installation identity and cannot be changed during an upgrade.
+The chart only supports `harness-v2`. The protocol remains a fixed installation
+identity, and any other controller mode or removed wrapper setting is rejected.
 
 The chart installs the exact cross-namespace ingress policy for Vekil. The
 chart-managed provider proxy itself always runs in the Helm release namespace. Leave
@@ -102,56 +102,16 @@ The Publisher and SCM egress proxy read their authentication material at process
 
 The nonce is a revision label, not a credential. Never put Secret content in it. A coordinated upgrade may briefly fail closed while Pods roll, but it avoids an indefinite split generation.
 
-The harness-v1 wrapper likewise keeps execution authority and transport
-material separate. `harnessV1.auth.existingSecret` contains only the bearer
-token and is immutable while v1 work exists. `harnessV1.tls.existingSecret`
-contains `tls.crt`, `tls.key`, and `ca.crt`. A TLS Secret name change is a
-wrapper Pod-template change and automatically uses the existing drained
-rollover. For same-name certificate renewal, update the TLS Secret and bump
-`harnessV1.tls.rolloutNonce` in the Helm upgrade; the hook drains the live
-wrapper before both wrapper and controller restart. Keep the updated `ca.crt`
-able to verify the certificate currently being served during that drain, or
-rotate to a versioned TLS Secret so the hook can mount the prior CA.
-
 CRDs are cluster-scoped and shared by every Orka release. Use `--skip-crds`
 only when a designated platform or GitOps workflow already manages compatible
 Orka CRDs for the cluster.
 
-## Static harness mode
+## Installation ownership
 
-Every release selects exactly one controller mode: `harness-v1` or
-`harness-v2`. Fresh installs default to `harness-v2`; select `harness-v1`
-explicitly only for a compatibility release. `dual`, `auto`, and
-`harness-v1-drain` are rejected. Each release also requires a distinct,
-non-empty `controller.watchNamespace` labeled with the matching mode:
-
-```bash
-kubectl create -f - <<'EOF'
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: orka-v2-system
-  labels:
-    orka.ai/controller-mode: harness-v2
-EOF
-
-helm install orka-v2 charts/orka \
-  --namespace orka-v2-system \
-  --set controller.mode=harness-v2 \
-  --set controller.watchNamespace=orka-v2-system
-```
-
-The mode is an installation identity, not an upgrade toggle. Never change a
-release from v1 to v2 in place or reuse its PVC, SQLite store, ledger, Session,
-or Task identities under the other mode.
-
-A v1 and v2 release may share a cluster only when their release/watch
-namespaces, Services, ServiceAccounts/RBAC, Leases, stores, Secrets, and
-data-plane resources are disjoint. The chart intentionally requires
-`controller.watchNamespace` to equal the Helm release namespace. The v2
-release must also have its own runtime namespace. Install the shared compatible
-CRDs and common admission resources through one designated owner; install the
-second release with `--skip-crds`.
+Every release runs `harness-v2` and requires a distinct, non-empty
+`controller.watchNamespace` labeled `orka.ai/controller-mode: harness-v2`.
+The watch namespace must equal the Helm release namespace. The runtime
+namespace must differ from the release namespace and belong to that release.
 
 Controller Services, worker ServiceAccounts, and worker RBAC are scoped to the
 Helm release name. Run only one Orka controller release per namespace. If a
@@ -159,19 +119,15 @@ cluster has multiple releases, every release (including the first) must use a
 cluster-unique release name or `fullnameOverride`, a separate controller
 namespace, and a distinct, non-empty `controller.watchNamespace`. Cluster-wide
 watchers are rejected. All releases share the same cluster-scoped CRDs, and
-cluster-scoped gateway/workspace ownership belongs only to the v2 release.
+shared cluster admission resources require one designated owner.
 
 ## Upgrade
 
-An in-place controller upgrade is supported only when the release namespace
-already carries the same static mode claim and any live controller declares
-that mode and watch namespace. A deleted controller can be recreated only
-under that retained same-mode namespace claim. A pre-static controller that
-implicitly enabled ACP is not a supported `harness-v2` upgrade source because
-its accepted attempts may lack the immutable execution authority required for
-recovery. Settle or retire that installation and install static `harness-v2`
-as a new release and namespace. The chart rejects missing, opposite-mode, and
-legacy identity before rendering upgrade resources.
+An in-place controller upgrade preserves the existing `harness-v2` namespace
+claim and the live controller's protocol, watch namespace, chart fullname,
+runtime namespace, and snapshot encryption Secret identity. A deleted
+controller can be recreated under that retained namespace claim. Unsupported
+or unclassified installations require a new release and namespace.
 
 Helm installs files from `crds/` only during installation. It does not create or
 update them during `helm upgrade`, including when upgrading from an older Orka

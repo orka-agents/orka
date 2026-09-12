@@ -110,7 +110,7 @@ func TestGitHubWebhook_IssueImplementLabelCreatesAgentTask(t *testing.T) {
 	}
 }
 
-func TestGitHubWebhook_RuntimeRefMaxTurnsCompatibility(t *testing.T) {
+func TestGitHubWebhook_RuntimeRefUsesRegisteredPolicy(t *testing.T) {
 	body := []byte(`{
 		"action":"labeled",
 		"label":{"name":"agent:implement"},
@@ -123,7 +123,6 @@ func TestGitHubWebhook_RuntimeRefMaxTurnsCompatibility(t *testing.T) {
 		name         string
 		contract     corev1alpha1.AgentRuntimeContractVersion
 		allowedTools []string
-		wantTurns    bool
 	}{
 		{
 			name:         "harness v2 materializes registered tools and omits unsupported override",
@@ -135,7 +134,6 @@ func TestGitHubWebhook_RuntimeRefMaxTurnsCompatibility(t *testing.T) {
 			contract:     corev1alpha1.AgentRuntimeContractHarnessV2,
 			allowedTools: []string{},
 		},
-		{name: "harness v1 preserves override", contract: corev1alpha1.AgentRuntimeContractHarnessV1, wantTurns: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			secret := configureGitHubWebhookTest(t, map[string]string{
@@ -158,17 +156,11 @@ func TestGitHubWebhook_RuntimeRefMaxTurnsCompatibility(t *testing.T) {
 			if err := fc.Get(t.Context(), key, &task); err != nil {
 				t.Fatalf("created task not found: %v", err)
 			}
-			if !test.wantTurns {
-				if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.MaxTurns != nil {
-					t.Fatalf("agentRuntime = %#v, want allowedTools without maxTurns for external harness v2", task.Spec.AgentRuntime)
-				}
-				if task.Spec.AgentRuntime.AllowedTools == nil || !slices.Equal(task.Spec.AgentRuntime.AllowedTools, test.allowedTools) {
-					t.Fatalf("allowedTools = %#v, want explicit %#v", task.Spec.AgentRuntime.AllowedTools, test.allowedTools)
-				}
-				return
+			if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.MaxTurns != nil {
+				t.Fatalf("agentRuntime = %#v, want allowedTools without maxTurns for external runtimes", task.Spec.AgentRuntime)
 			}
-			if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.MaxTurns == nil || *task.Spec.AgentRuntime.MaxTurns != 17 {
-				t.Fatalf("agentRuntime = %#v, want maxTurns 17", task.Spec.AgentRuntime)
+			if task.Spec.AgentRuntime.AllowedTools == nil || !slices.Equal(task.Spec.AgentRuntime.AllowedTools, test.allowedTools) {
+				t.Fatalf("allowedTools = %#v, want explicit %#v", task.Spec.AgentRuntime.AllowedTools, test.allowedTools)
 			}
 		})
 	}

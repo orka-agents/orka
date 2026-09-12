@@ -1,4 +1,4 @@
-{{- if and .Values.rbac.create (eq .Values.controller.mode "harness-v2") -}}
+{{- if .Values.rbac.create -}}
 {{- range .Values.controller.substrate.workerNamespaces | uniq }}
 ---
 # Dedicated native Substrate worker namespace. Retained when admission is disabled.

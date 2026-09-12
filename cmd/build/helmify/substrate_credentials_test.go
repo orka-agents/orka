@@ -14,31 +14,20 @@ import (
 
 func TestStaticChartMountsRotatableSubstrateCredentials(t *testing.T) {
 	for _, tc := range []struct {
-		harness string
 		auth    string
 		enabled bool
 	}{
-		{"harness-v2", "mtls", true},
-		{"harness-v2", "bearer", true},
-		{"harness-v2", "mtls", false},
-		{"harness-v2", "bearer", false},
-		{"harness-v1", "mtls", false},
-		{"harness-v1", "bearer", false},
+		{"mtls", true},
+		{"bearer", true},
+		{"mtls", false},
+		{"bearer", false},
 	} {
-		t.Run(tc.harness+"/"+tc.auth+"/enabled="+strconv.FormatBool(tc.enabled), func(t *testing.T) {
+		t.Run(tc.auth+"/enabled="+strconv.FormatBool(tc.enabled), func(t *testing.T) {
 			args := []string{
-				"--set-string", "controller.mode=" + tc.harness,
 				"--set", "controller.substrate.enabled=" + strconv.FormatBool(tc.enabled),
 				"--set-string", "controller.substrate.apiCredentials.existingSecret=substrate-control",
 				"--set-string", "controller.substrate.apiCredentials.caKey=server-ca",
 				"--show-only", "templates/deployment.yaml",
-			}
-			if tc.harness == "harness-v1" {
-				args = append(args,
-					"--set-string", "harnessV1.image.digest=sha256:"+strings.Repeat("1", 64),
-					"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
-					"--set-string", "harnessV1.tls.existingSecret=harness-wrapper-tls",
-				)
 			}
 			wantKeys := map[string]string{"server-ca": "ca.crt"}
 			wantArgs := []string{"--substrate-api-ca-file=/var/run/orka/substrate-api/ca.crt"}

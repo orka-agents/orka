@@ -62,7 +62,7 @@ webhooks:
       matchLabels:
         orka.ai/controller-mode: {{ .Values.controller.mode | quote }}
         kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
-  {{- if eq .Values.controller.mode "harness-v2" }}
+
   - name: workspace-attachment-secret.{{ .Values.controller.mode }}.orka.ai
     admissionReviewVersions: [v1]
     sideEffects: None
@@ -200,7 +200,7 @@ webhooks:
       matchLabels:
         orka.ai/controller-mode: {{ .Values.controller.mode | quote }}
         kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
-  {{- end }}
+
   - name: agent-contract.{{ .Values.controller.mode }}.orka.ai
     admissionReviewVersions: [v1]
     sideEffects: None
@@ -245,7 +245,7 @@ webhooks:
       - operations: [CREATE, UPDATE]
         apiGroups: [core.orka.ai]
         apiVersions: [v1alpha1]
-        resources: [agentruntimes]
+        resources: [agentruntimes, agentruntimes/status]
         scope: Namespaced
     namespaceSelector:
       matchLabels:

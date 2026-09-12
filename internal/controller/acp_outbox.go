@@ -316,42 +316,6 @@ func (p *ACPOutboxProjector) deliver(ctx context.Context, projection store.Outbo
 			deliveredResourceVersion = task.ResourceVersion
 			return nil
 		}
-		if payload.HarnessRuntime != nil {
-			binding := task.Status.AgentExecutionBinding
-			if binding == nil || binding.ContractVersion != corev1alpha1.AgentRuntimeContractHarnessV1 ||
-				payload.BindingDigest == "" || binding.BindingDigest != payload.BindingDigest {
-				// Permanent for the same reason as the UID mismatch above: an
-				// incompatible binding cannot become deliverable, so it must
-				// dead-letter after MaxAttempts instead of retrying forever.
-				return permanentOutboxDelivery(fmt.Errorf("harness v1 task binding does not match outbox projection"))
-			}
-			if task.Status.HarnessRuntime != nil && task.Status.HarnessRuntime.Attempt > payload.Attempt {
-				deliveredResourceVersion = task.ResourceVersion
-				return nil
-			}
-			base := task.DeepCopy()
-			now := metav1.Now()
-			task.Status.Phase = payload.Phase
-			task.Status.Message = payload.Message
-			task.Status.Attempts = payload.Attempt
-			if payload.ResultRef != nil {
-				task.Status.ResultRef = payload.ResultRef.DeepCopy()
-			}
-			harnessRuntime := payload.HarnessRuntime.DeepCopy()
-			harnessRuntime.LastTransitionTime = &now
-			task.Status.HarnessRuntime = harnessRuntime
-			switch payload.Phase {
-			case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
-				task.Status.CompletionTime = &now
-			default:
-				task.Status.CompletionTime = nil
-			}
-			if err := p.Client.Status().Patch(ctx, task, client.MergeFrom(base)); err != nil {
-				return err
-			}
-			deliveredResourceVersion = task.ResourceVersion
-			return nil
-		}
 		if task.Status.Execution != nil && task.Status.Execution.Attempt > payload.Attempt {
 			return fmt.Errorf("task has advanced beyond projected attempt")
 		}

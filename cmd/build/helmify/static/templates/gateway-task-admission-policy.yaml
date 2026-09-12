@@ -1,4 +1,3 @@
-{{- if eq .Values.controller.mode "harness-v2" }}
 {{- $issuerPrefix := "gateway.orka.ai/" -}}
 {{- if .Values.controller.watchNamespace -}}
 {{- $issuerPrefix = printf "gateway.orka.ai/%s/" .Values.controller.watchNamespace -}}
@@ -44,4 +43,3 @@ metadata:
 spec:
   policyName: {{ include "orka.fullname" . }}-gateway-task-protection
   validationActions: [Deny]
-{{- end }}

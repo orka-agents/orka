@@ -135,7 +135,7 @@ func TestQueueACPRuntimeTaskRejectsEnabledAgentToolsBeforePoolDemand(t *testing.
 
 	reconciler := &TaskReconciler{
 		Client: kubeClient, Scheme: scheme, DurableControlStore: controlStore,
-		ControllerEpochManager: epochs, ACPRuntimeEnabled: true, ACPRuntimeNamespace: "orka-runtimes",
+		ControllerEpochManager: epochs, ACPRuntimeNamespace: "orka-runtimes",
 		ACPRuntimeImages: acpAgentToolTestImages(),
 	}
 	current := configureAgentExecutionBindingTest(t, ctx, reconciler, task)

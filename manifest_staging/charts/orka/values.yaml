@@ -2,9 +2,7 @@
 
 # Controller configuration
 controller:
-  # Immutable execution contract for this installation. Fresh installs default
-  # to v2; select v1 explicitly only for a separate compatibility release.
-  # One release never serves both contracts or changes mode in place.
+  # Fixed execution protocol identity. Only harness-v2 is supported.
   mode: harness-v2
 
   # Number of controller replicas
@@ -388,69 +386,6 @@ providerProxy:
       cpu: 250m
       memory: 128Mi
       ephemeral-storage: 128Mi
-
-# orka.harness.v1 data plane configuration. It is rendered only when
-# controller.mode is harness-v1 and is never an ACP fallback.
-harnessV1:
-  dispatch:
-    interval: 1s
-    workers: 1
-  upgradeDrain:
-    # Before an upgrade, rollback, or deletion mutates an existing wrapper, a
-    # Helm hook durably closes admission and proves that no unsettled turns
-    # remain. Keep this below Helm's default five-minute operation timeout.
-    timeout: 4m
-    pollInterval: 2s
-    resources:
-      requests:
-        cpu: 10m
-        memory: 32Mi
-        ephemeral-storage: 16Mi
-      limits:
-        cpu: 100m
-        memory: 64Mi
-        ephemeral-storage: 64Mi
-  image:
-    repository: ghcr.io/orka-agents/orka/agent-harness-wrapper
-    tag: "0.1.1"
-    # Required when controller.mode is harness-v1. Tags are never accepted for
-    # a running wrapper.
-    digest: ""
-    pullPolicy: IfNotPresent
-  auth:
-    # Use a dedicated operator-created Secret. Bearer credentials are never
-    # accepted through Helm values or emitted into rendered release manifests.
-    # The Secret source and key are immutable while a harness-v1 wrapper
-    # Deployment exists because controller attempts pin its resourceVersion.
-    existingSecret: ""
-    tokenKey: token
-  tls:
-    # Use a different operator-created Secret containing tls.crt, tls.key, and
-    # ca.crt. Its serving certificate must authenticate the release-scoped
-    # Service DNS name: <release>-orka-agent-harness-wrapper.<namespace>.svc.
-    existingSecret: ""
-    # Bump this non-secret revision whenever certificate data changes without
-    # changing existingSecret. The chart drains the live wrapper before it
-    # restarts both the wrapper and controller onto the new TLS generation.
-    rolloutNonce: ""
-  ledger:
-    # The admission ledger is always PVC-backed when harness v1 is enabled.
-    size: 1Gi
-    storageClass: ""
-    # Controller-acknowledged terminal records remain replay-safe for this
-    # audit/backup window before bounded wrapper GC may reclaim them.
-    retention: 720h
-  # Codex defaults to workspace-write. Broader modes require explicit policy.
-  codexSandboxMode: workspace-write
-  resources:
-    requests:
-      cpu: 100m
-      memory: 256Mi
-      ephemeral-storage: 512Mi
-    limits:
-      cpu: "2"
-      memory: 2Gi
-      ephemeral-storage: 2Gi
 
 # Worker configuration
 workers:

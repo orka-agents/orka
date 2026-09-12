@@ -39,7 +39,7 @@ func TestNewServer(t *testing.T) {
 	config := ServerConfig{
 		Port:           8080,
 		WatchNamespace: "default",
-		ExecutionMode:  executionmode.HarnessV1,
+		ExecutionMode:  executionmode.HarnessV2,
 	}
 
 	server := NewServer(fakeClient, nil, config)
@@ -56,9 +56,9 @@ func TestNewServer(t *testing.T) {
 	if server.config.Port != 8080 {
 		t.Errorf("Port = %d, want 8080", server.config.Port)
 	}
-	if server.config.Chat.ExecutionMode != executionmode.HarnessV1 ||
-		server.handlers.executionMode != executionmode.HarnessV1 ||
-		server.chatHandler.config.ExecutionMode != executionmode.HarnessV1 {
+	if server.config.Chat.ExecutionMode != executionmode.HarnessV2 ||
+		server.handlers.executionMode != executionmode.HarnessV2 ||
+		server.chatHandler.config.ExecutionMode != executionmode.HarnessV2 {
 		t.Fatal("execution mode was not propagated to every Agent producer")
 	}
 }

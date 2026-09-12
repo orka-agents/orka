@@ -98,42 +98,13 @@ credential broker. Artifact access is separately operation-scoped.
 
 ### Install
 
-Two versions of Orka exist and they are not the same product yet.
+Orka uses harness v2 for all agent Tasks. Build the current source images and
+install the matching generated chart with the
+[installation guide](website/docs/getting-started.md#install). It covers both
+native worker images and the required controller, publisher, and runtime digests.
 
-| | Latest release (v0.1.3) | `main` |
-| --- | --- | --- |
-| Install | Published images, no clone | Build the images yourself |
-| `type: ai` and `type: container` Tasks | Yes | Yes |
-| Chat, gateways, monitors, security scanning | Yes | Yes |
-| `type: agent` coding agents | Yes, via the legacy Job path | Yes, via RuntimePools |
-| RuntimePools, harness modes, workspace providers | **No** | Yes |
-
-This README and the docs describe `main`. See
-[Release status](website/docs/reference/release-status.md) for the full difference.
-
-**Latest release** — no clone needed:
-
-```bash
-# The manifest mounts a harness-wrapper-auth Secret but does not create it,
-# so make the namespace and that Secret first or the Pods never start.
-kubectl create namespace orka-system
-kubectl -n orka-system create secret generic harness-wrapper-auth \
-  --from-literal=token="$(openssl rand -hex 32)"
-
-kubectl apply -f https://raw.githubusercontent.com/orka-agents/orka/v0.1.3/deploy/orka.yaml
-```
-
-or with Helm:
-
-```bash
-helm repo add orka https://orka-agents.github.io/orka/charts
-helm install orka orka/orka --namespace orka-system --create-namespace
-```
-
-**Current `main`** — images are published only for release tags, so build them and make
-them available to your cluster. Follow [Installing from source](website/docs/getting-started.md#option-b-current-main-from-source)
-for the matching build, push, and Helm commands, including both native worker images and
-the required controller, publisher, and runtime digests.
+Published release snapshots may predate the current execution model. See
+[Release status](website/docs/reference/release-status.md) before choosing a tag.
 
 The guide also covers the namespace label, authenticated
 [provider proxy](website/docs/operations/provider-proxy.md), webhook TLS certificate, and
@@ -146,8 +117,8 @@ snapshot key required by the chart. If something fails,
 > they are behind the source. Use `manifest_staging/charts/orka/`, which `make manifests`
 > regenerates from current source.
 
-New installations default to `harness-v2`. Controller mode is an immutable installation
-identity and cannot be changed by an upgrade.
+The installation protocol is fixed to `harness-v2`. Each controller requires an
+exclusive watched namespace carrying that identity.
 
 For Kustomize instead of Helm, follow the
 [`make deploy` prerequisites and image settings](website/docs/operations/provider-proxy.md#enable-it-in-orka).
@@ -161,9 +132,8 @@ image references are placeholders, so applying it directly is not a runnable ins
 > CRDs from the exact target chart before every controller upgrade, and designate one
 > owner for cluster-scoped CRDs. See [Upgrading](website/docs/operations/upgrading.md).
 
-Harness v1 and v2 can share a cluster only as separate static-mode releases with disjoint
-namespaces, endpoints, RBAC, Leases, stores, and data planes. Tasks and Sessions never move
-between them. See [harness modes](website/docs/operations/harness-modes.md).
+See [installation ownership](website/docs/operations/harness-modes.md) for namespace,
+RBAC, storage, and resource boundaries when running multiple releases.
 
 ### Create an API client
 

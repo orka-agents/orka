@@ -184,7 +184,6 @@ func TestDeletingACPTaskStillUsesDurableCleanupStoreWhenACPAdmissionDisabled(t *
 	reconciler := &TaskReconciler{
 		DurableControlStore:    controlStore,
 		ControllerEpochManager: readyPromptAttemptReclaimEpochManager(),
-		ACPRuntimeEnabled:      false,
 	}
 
 	ready, err := reconciler.retireACPArtifactIdentities(context.Background(), task)

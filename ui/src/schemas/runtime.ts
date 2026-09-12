@@ -97,9 +97,6 @@ const agentRuntimeDeploymentSchema = z.object({
   endpoint: z.string(),
 })
 
-const agentRuntimeToolExecutionModeSchema = z.enum(['observed', 'brokered'])
-const agentRuntimeBrokeredToolClassSchema = z.enum(['read', 'write', 'coordination'])
-
 const agentRuntimeLimitsSchema = z.object({
   maxResidentSessions: z.number(),
   maxConcurrentPrompts: z.number(),
@@ -152,25 +149,7 @@ const agentRuntimeProfileSchema = z.object({
   resourceClass: z.string(),
 })
 
-const agentRuntimeV1CapabilitiesSchema = z.object({
-  toolExecutionModes: z.array(agentRuntimeToolExecutionModeSchema).optional(),
-  brokeredToolClasses: z.array(agentRuntimeBrokeredToolClassSchema).optional(),
-  supportsCancel: z.boolean().optional(),
-  supportsRuntimeSessions: z.boolean().optional(),
-  supportsContinuation: z.boolean().optional(),
-  supportsArtifacts: z.boolean().optional(),
-}).strict()
-
-const agentRuntimeV1SpecSchema = z.object({
-  contractVersion: z.literal('orka.harness.v1'),
-  deployment: agentRuntimeDeploymentSchema,
-  clientAuth: z.object({
-    bearerTokenSecretRef: secretKeyRefSchema,
-  }).strict(),
-  capabilities: agentRuntimeV1CapabilitiesSchema.optional(),
-}).strict()
-
-const agentRuntimeV2SpecSchema = z.object({
+const agentRuntimeSpecSchema = z.object({
   contractVersion: z.literal('orka.harness.v2'),
   deployment: agentRuntimeDeploymentSchema,
   clientAuth: z.object({
@@ -191,21 +170,8 @@ const agentRuntimeV2SpecSchema = z.object({
   }).strict(),
 }).strict()
 
-const agentRuntimeUnclassifiedSpecSchema = z.object({
-  contractVersion: z.undefined().optional(),
-  deployment: agentRuntimeDeploymentSchema,
-  clientAuth: z.record(z.string(), z.unknown()),
-  capabilities: z.record(z.string(), z.unknown()).optional(),
-}).strict()
-
-const agentRuntimeSpecSchema = z.union([
-  agentRuntimeV1SpecSchema,
-  agentRuntimeV2SpecSchema,
-  agentRuntimeUnclassifiedSpecSchema,
-])
-
 const agentRuntimeObservedCapabilitiesSchema = z.object({
-  protocolVersion: z.string().optional(),
+  protocolVersion: z.literal('orka.harness.v2').optional(),
   transport: z.string().optional(),
   acpVersion: z.string().optional(),
   runtimeInstanceID: z.string().optional(),
@@ -219,25 +185,13 @@ const agentRuntimeObservedCapabilitiesSchema = z.object({
   adapterDigest: z.string().optional(),
   providerKind: z.string().optional(),
   model: z.string().optional(),
+  mcpToolDescriptorDigest: z.string().optional(),
   limits: agentRuntimeLimitsSchema.partial().optional(),
   supportsDrain: z.boolean().optional(),
   supportsPublicationFinalization: z.boolean().optional(),
   workspaceGovernance: workspaceGovernanceSchema.partial().optional(),
   lifecycle: z.string().optional(),
-  runtimeName: z.string().optional(),
-  runtimeVersion: z.string().optional(),
-  toolExecutionModes: z.array(agentRuntimeToolExecutionModeSchema).optional(),
-  brokeredToolClasses: z.array(agentRuntimeBrokeredToolClassSchema).optional(),
-  supportsCancel: z.boolean().optional(),
-  supportsRuntimeSessions: z.boolean().optional(),
-  supportsContinuation: z.boolean().optional(),
-  supportsArtifacts: z.boolean().optional(),
-  supportsSuspend: z.boolean().optional(),
-  supportsWorkspaceSnapshot: z.boolean().optional(),
-  maxConcurrentTurns: z.number().optional(),
-  maxTurnSeconds: z.number().optional(),
-  maxOutputBytes: z.number().optional(),
-})
+}).strict()
 
 export const agentRuntimeSchema = z.object({
   apiVersion: z.string().optional(),
@@ -251,7 +205,6 @@ export const agentRuntimeSchema = z.object({
     lastValidated: z.string().optional(),
     observedControllerAuthRefResourceVersion: z.string().optional(),
     observedOperationCapabilityRefResourceVersion: z.string().optional(),
-    observedAuthRefResourceVersion: z.string().optional(),
     message: z.string().optional(),
     conditions: z.array(conditionSchema).optional(),
   }).optional(),

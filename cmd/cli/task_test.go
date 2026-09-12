@@ -286,12 +286,6 @@ func TestTaskCreateMaterializesExternalRuntimeAllowedTools(t *testing.T) {
 			allowedTools:    []string{},
 			explicitType:    true,
 		},
-		{
-			name:            "harness v1 required deny-all",
-			contractVersion: corev1alpha1.AgentRuntimeContractHarnessV1,
-			allowedTools:    []string{},
-			explicitType:    true,
-		},
 	}
 
 	for _, tt := range tests {
@@ -348,6 +342,68 @@ func TestTaskCreateMaterializesExternalRuntimeAllowedTools(t *testing.T) {
 			}
 			if !slices.Equal(*created.AgentRuntime.AllowedTools, tt.allowedTools) {
 				t.Fatalf("allowedTools = %#v, want %#v", *created.AgentRuntime.AllowedTools, tt.allowedTools)
+			}
+		})
+	}
+}
+
+func TestTaskCreateRejectsUnsupportedRuntimeBeforePosting(t *testing.T) {
+	tests := []struct {
+		name        string
+		agentBody   string
+		runtimeBody string
+		want        string
+	}{
+		{
+			name:      "built-in v1 contract",
+			agentBody: `{"metadata":{"name":"selected-agent"},"spec":{"runtime":{"type":"codex","contractVersion":"orka.harness.v1"}}}`,
+			want:      "only orka.harness.v2",
+		},
+		{
+			name:      "removed built-in credentials",
+			agentBody: `{"metadata":{"name":"selected-agent"},"spec":{"runtime":{"type":"codex","secretRef":null}}}`,
+			want:      "spec.runtime.secretRef is no longer supported",
+		},
+		{
+			name:        "external v1 contract",
+			agentBody:   `{"metadata":{"name":"selected-agent"},"spec":{"runtime":{"runtimeRef":{"name":"external-runtime"}}}}`,
+			runtimeBody: `{"metadata":{"name":"external-runtime"},"spec":{"contractVersion":"orka.harness.v1"}}`,
+			want:        "only orka.harness.v2",
+		},
+		{
+			name:        "external unclassified contract",
+			agentBody:   `{"metadata":{"name":"selected-agent"},"spec":{"runtime":{"runtimeRef":{"name":"external-runtime"}}}}`,
+			runtimeBody: `{"metadata":{"name":"external-runtime"},"spec":{}}`,
+			want:        "contractVersion must be orka.harness.v2",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			postCount := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/api/v1/agents/selected-agent":
+					fmt.Fprint(w, tt.agentBody) //nolint:errcheck
+				case r.Method == http.MethodGet && r.URL.Path == "/api/v1/agent-runtimes/external-runtime":
+					fmt.Fprint(w, tt.runtimeBody) //nolint:errcheck
+				case r.Method == http.MethodPost && r.URL.Path == tasksAPIPath:
+					postCount++
+					w.WriteHeader(http.StatusCreated)
+					fmt.Fprint(w, `{"metadata":{"name":"unexpected-task"}}`) //nolint:errcheck
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer srv.Close()
+			root := newRootCmd()
+			root.SetArgs([]string{"task", "create", "--server", srv.URL, "--agent", "selected-agent", "--type", "agent", "do stuff"})
+			err := root.Execute()
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Execute() error = %v, want %q", err, tt.want)
+			}
+			if postCount != 0 {
+				t.Fatalf("Task POST count = %d, want 0", postCount)
 			}
 		})
 	}

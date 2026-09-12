@@ -7,15 +7,11 @@ import (
 
 func TestStaticChartValidatesAgentSandboxControllerMode(t *testing.T) {
 	t.Run("rejects harness v1", func(t *testing.T) {
-		digest := "sha256:" + strings.Repeat("1", 64)
 		output, err := helmTemplateStaticChart(t,
 			"--set-string", "controller.mode=harness-v1",
 			"--set", "controller.agentSandbox.enabled=true",
-			"--set-string", "harnessV1.image.digest="+digest,
-			"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
-			"--set-string", "harnessV1.tls.existingSecret=harness-wrapper-tls",
 		)
-		const want = "controller.agentSandbox.enabled is unsupported when controller.mode=harness-v1"
+		const want = "controller.mode must be harness-v2"
 		if err == nil || !strings.Contains(output, want) {
 			t.Fatalf("helm render error = %v, want %q:\n%s", err, want, output)
 		}

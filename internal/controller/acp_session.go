@@ -41,17 +41,6 @@ type ACPSessionContinuityConfig struct {
 	Lineages store.SessionLineageStore
 }
 
-// HarnessV1SessionContinuityConfig supplies only the namespaced continuity
-// stores used by the publication-free harness v1 contract.
-type HarnessV1SessionContinuityConfig struct {
-	SessionControls store.SessionControlStore
-	Transcripts     store.SessionStore
-	GatewayEvents   store.GatewayEventStore
-	BootstrapLimits ACPBootstrapLimits
-	NewSessionUID   func() (string, error)
-	Lineages        store.SessionLineageStore
-}
-
 // ACPSessionContinuity is the controller-side integration boundary for durable
 // ACP Session identity, mutation fencing, canonical transcript bootstrap, and
 // atomic SessionTurn completion. It deliberately does not submit prompts.
@@ -79,23 +68,6 @@ func NewACPSessionContinuity(config ACPSessionContinuityConfig) (*ACPSessionCont
 		return nil, fmt.Errorf("ACP session continuity requires session-control, transcript, publication, and branch-claim stores")
 	}
 	return newSessionContinuity(config)
-}
-
-// NewHarnessV1SessionContinuity creates the publication-free v1 continuity
-// boundary. A nonempty publication ID fails closed because no PublicationStore
-// or cluster-scoped BranchClaimStore is attached.
-func NewHarnessV1SessionContinuity(config HarnessV1SessionContinuityConfig) (*ACPSessionContinuity, error) {
-	if config.SessionControls == nil || config.Transcripts == nil {
-		return nil, fmt.Errorf("harness v1 session continuity requires session-control and transcript stores")
-	}
-	return newSessionContinuity(ACPSessionContinuityConfig{
-		SessionControls: config.SessionControls,
-		Transcripts:     config.Transcripts,
-		GatewayEvents:   config.GatewayEvents,
-		BootstrapLimits: config.BootstrapLimits,
-		NewSessionUID:   config.NewSessionUID,
-		Lineages:        config.Lineages,
-	})
 }
 
 func newSessionContinuity(config ACPSessionContinuityConfig) (*ACPSessionContinuity, error) {
@@ -826,9 +798,6 @@ func (c *ACPSessionContinuity) publicationBlockReason(ctx context.Context, publi
 	}
 	if err := store.ValidateControlIdentifier("publication ID", publicationID); err != nil {
 		return "", err
-	}
-	if c.publications == nil {
-		return "", fmt.Errorf("%w: harness v1 Session finalization cannot reference a publication", store.ErrConflict)
 	}
 	publication, err := c.publications.GetPublication(ctx, publicationID)
 	if err != nil {

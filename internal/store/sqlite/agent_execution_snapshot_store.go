@@ -253,17 +253,13 @@ func (s *Store) CountAgentExecutionSnapshotReferences(
 	}
 	var counts store.AgentExecutionSnapshotReferenceCounts
 	err := s.db.QueryRowContext(ctx, `SELECT
-		(SELECT COUNT(*) FROM harness_v1_attempts
-			WHERE task_uid = ? AND snapshot_digest = ?),
 		(SELECT COUNT(*) FROM prompt_attempts
 			WHERE task_uid = ? AND snapshot_digest = ?),
 		(SELECT COUNT(*) FROM session_turns
 			WHERE task_uid = ?)`,
 		key.TaskUID, key.Digest,
-		key.TaskUID, key.Digest,
 		key.TaskUID,
 	).Scan(
-		&counts.HarnessV1Attempts,
 		&counts.PromptAttempts,
 		&counts.SessionTurns,
 	)

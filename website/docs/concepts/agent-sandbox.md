@@ -84,8 +84,6 @@ RuntimePool demand exists, with the reason projected to
   exact unit. The provider-visible template carries no credential references;
 - `cleanupPolicy: retain`, `onDetach`, `boot`, `poolRef`, `snapshot`,
   `hibernation`;
-- any workspace request on the harness-v1 path — there is no cross-mode
-  fallback in either direction;
 - missing provider CRDs — the pool degrades and closes admission rather than
   falling back to a Deployment workload.
 
