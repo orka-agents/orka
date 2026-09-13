@@ -76,6 +76,18 @@ class ReleaseFixture(unittest.TestCase):
             "candidateSHA256": release.file_hash(self.bundle / "candidate.json"),
         })
 
+    def release_record(self, version=VERSION, draft=False):
+        return {
+            "id": 789, "tag_name": version, "target_commitish": SHA, "name": version,
+            "draft": draft, "prerelease": "-" in version,
+            "body": f"Release candidate `{SHA}`.\n\n"
+                    "[Build and approval](https://github.com/orka-agents/orka/actions/runs/123).\n"
+                    "[Release qualification evidence](https://github.com/orka-agents/orka/actions/runs/456).\n\n"
+                    "Attached manifests bind the exact chart, images, and qualification evidence.",
+            "assets": [{"name": name} for name in
+                       ("candidate.json", "qualification.json", "acceptance.json", "orka-0.2.0.tgz")],
+        }
+
     def copy_bundle(self, target):
         shutil.copytree(self.bundle, target, dirs_exist_ok=True)
 
@@ -254,6 +266,36 @@ class ReleaseTest(ReleaseFixture):
             dispatch.assert_not_called()
         self.assertFalse((self.bundle / "qualification.json").exists())
 
+    def test_raced_qualification_cancels_only_its_queued_child_without_approval_evidence(self):
+        for statuses in (("pending",), ("queued", "pending")):
+            states = [run("release-qualification.yml", id=456, status=status,
+                          display_title="Release Qualification (release-123-1)") for status in statuses]
+            responses = [{"workflow_runs": []}, None, {"workflow_runs": [states[0]]}, *states[1:], None]
+            with self.subTest(statuses=statuses), patch.object(release, "check_context"), \
+                    patch.object(release, "paginated", return_value=[]), \
+                    patch.object(release, "branch_head", return_value=SHA), \
+                    patch.object(release, "api", side_effect=responses) as api, \
+                    patch.object(release, "command") as command, patch.object(release.time, "sleep"), \
+                    self.assertRaisesRegex(RuntimeError, "queued behind another run; cancellation requested"):
+                release.qualify(self.bundle)
+            api.assert_called_with(f"repos/{release.REPOSITORY}/actions/runs/456/cancel", {})
+            command.assert_not_called()
+            self.assertFalse((self.bundle / "qualification.json").exists())
+
+    def test_qualification_allows_approval_waiting_and_runner_queues(self):
+        states = [run("release-qualification.yml", id=456, status=status,
+                      display_title="Release Qualification (release-123-1)")
+                  for status in ("queued", "waiting", "in_progress", "completed")]
+        states[-1]["conclusion"] = "success"
+        with patch.object(release, "branch_head", return_value=SHA), \
+                patch.object(release, "api", side_effect=[{"workflow_runs": []}, None,
+                                                        {"workflow_runs": [states[0]]}, *states[1:]]) as api, \
+                patch.object(release.time, "sleep"):
+            actual = release.dispatch("release-qualification.yml", BRANCH, SHA,
+                                      {"dispatch_id": "release-123-1"}, wait=True)
+        self.assertEqual(actual, states[-1])
+        self.assertFalse(any(call.args[0].endswith("/cancel") for call in api.call_args_list))
+
     def test_registry_absence_is_distinct_from_auth_or_transport_failure(self):
         def result(code, out="", err=""):
             return subprocess.CompletedProcess([], code, out, err)
@@ -350,8 +392,7 @@ class ReleaseTest(ReleaseFixture):
         self.qualification()
         files = {name: (self.bundle / name).read_bytes() for name in
                  ("candidate.json", "qualification.json", "acceptance.json", "orka-0.2.0.tgz")}
-        record = {"id": 789, "tag_name": VERSION, "draft": False,
-                  "assets": [{"name": name} for name in files]}
+        record = self.release_record()
         def download(*args, **kwargs):
             self.assertEqual(args[:3], ("gh", "release", "download"))
             name = args[args.index("--pattern") + 1]
@@ -363,6 +404,39 @@ class ReleaseTest(ReleaseFixture):
             files["acceptance.json"] = b"changed published evidence"
             with self.assertRaisesRegex(RuntimeError, "refusing to overwrite"):
                 release.archive_release(self.data, self.bundle)
+
+    def test_archive_rejects_mismatched_metadata_before_uploading_or_publishing(self):
+        self.qualification()
+        for version in (VERSION, "v0.2.0-rc.1"):
+            for draft in (True, False):
+                record = self.release_record(version, draft)
+                changes = {"target_commitish": "c" * 40, "name": "Stale title",
+                           "prerelease": not record["prerelease"], "body": "Stale evidence links"}
+                for field, value in changes.items():
+                    with self.subTest(version=version, draft=draft, field=field), \
+                            patch.object(release, "paginated", return_value=[{**record, field: value}]), \
+                            patch.object(release, "api") as api, patch.object(release, "command") as command, \
+                            self.assertRaisesRegex(RuntimeError, "GitHub Release metadata differs"):
+                        release.archive_release({**self.data, "version": version}, self.bundle)
+                    api.assert_not_called()
+                    command.assert_not_called()
+
+    def test_matching_rc_draft_publishes_after_verifying_existing_assets(self):
+        self.qualification()
+        version = "v0.2.0-rc.1"
+        record = self.release_record(version, draft=True)
+        def download(*args, **kwargs):
+            self.assertEqual(args[:4], ("gh", "release", "download", version))
+            name = args[args.index("--pattern") + 1]
+            shutil.copyfile(self.bundle / name, Path(args[args.index("--dir") + 1]) / name)
+            return ""
+        with patch.object(release, "paginated", return_value=[record]), \
+                patch.object(release, "api", return_value=record) as api, \
+                patch.object(release, "command", side_effect=download) as command:
+            release.archive_release({**self.data, "version": version}, self.bundle)
+        self.assertEqual(command.call_count, len(record["assets"]))
+        api.assert_called_with(f"repos/{release.REPOSITORY}/releases/789",
+                               {"draft": False, "make_latest": "false"}, method="PATCH")
 
 
 @unittest.skipUnless(shutil.which("helm"), "Helm is required for the chart publication integration test")

@@ -91,7 +91,10 @@ After qualification succeeds, review the acceptance evidence and approve the
 use the canary credentials, and approval to publish.
 
 Finish or cancel any existing qualification run before starting another. The
-release refuses to enqueue behind an active or approval-pending standalone run.
+release checks for active or approval-pending runs before dispatch. If a
+simultaneous dispatch takes the concurrency slot first, the release requests
+cancellation of its queued child and fails promptly. Finish the active run,
+then retry the failed qualification job.
 Approve the new qualification run within 90 minutes so its four-hour execution
 budget fits inside the parent workflow's six-hour job limit. If that budget
 expires, cancel the pending qualification run and retry the failed qualification
@@ -105,8 +108,10 @@ and dispatches a new gate attempt.
 After tagging has started, use **Re-run failed jobs** in the original Release
 run. It retains the original candidate and qualification evidence, asks for
 approval again, and resumes publication. Existing version tags, image tags,
-chart archives, and release assets must match the original bytes. The workflow
-refuses to replace them. A full rebuild or a new preparation run cannot reuse
+chart archives, and release assets must match the original bytes. An existing
+GitHub Release must also match the candidate SHA, version, prerelease flag, and
+evidence links. The workflow refuses to reuse mismatched metadata or replace
+existing bytes. A full rebuild or a new preparation run cannot reuse
 an already tagged version. Retry while the Actions artifacts remain available.
 
 A changed release-branch head invalidates the candidate, even after approval.

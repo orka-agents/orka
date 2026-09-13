@@ -190,6 +190,13 @@ def dispatch(workflow: str, branch: str, candidate: str, inputs: dict, wait: boo
         # environment approval within the parent's six-hour runner limit.
         deadline = time.monotonic() + 5 * 60 * 60 + 40 * 60
         while run["status"] != "completed":
+            # The pre-dispatch check cannot reserve the concurrency group.
+            # GitHub reports contention as pending, distinct from approval
+            # waiting or a queued runner. Cancel only this dispatched child.
+            if run["status"] == "pending":
+                api(f"repos/{REPOSITORY}/actions/runs/{run['id']}/cancel", {})
+                raise RuntimeError("Qualification queued behind another run; cancellation requested. "
+                                   "Finish the active run and retry this qualification job")
             require(time.monotonic() < deadline, "qualification timed out; publication is blocked")
             time.sleep(15)
             run = api(f"repos/{REPOSITORY}/actions/runs/{run['id']}")
@@ -555,21 +562,24 @@ def verify_served_chart(data: dict, index_hash: str) -> None:
 
 
 def archive_release(data: dict, directory: Path) -> None:
+    proof = json.loads((directory / "qualification.json").read_text())
+    metadata = {
+        "tag_name": data["version"], "target_commitish": data["candidateSHA"], "name": data["version"],
+        "prerelease": "-" in data["version"],
+        "body": f"Release candidate `{data['candidateSHA']}`.\n\n"
+                f"[Build and approval](https://github.com/{REPOSITORY}/actions/runs/{data['buildRunID']}).\n"
+                f"[Release qualification evidence](https://github.com/{REPOSITORY}/actions/runs/{proof['runID']}).\n\n"
+                "Attached manifests bind the exact chart, images, and qualification evidence.",
+    }
     releases = paginated(f"repos/{REPOSITORY}/releases?per_page=100", "")
     matches = [release for release in releases if release["tag_name"] == data["version"]]
     require(len(matches) <= 1, "ambiguous GitHub Release")
     if matches:
         release = matches[0]
     else:
-        proof = json.loads((directory / "qualification.json").read_text())
-        release = api(f"repos/{REPOSITORY}/releases", {
-            "tag_name": data["version"], "target_commitish": data["candidateSHA"], "name": data["version"],
-            "draft": True, "prerelease": "-" in data["version"],
-            "body": f"Release candidate `{data['candidateSHA']}`.\n\n"
-                    f"[Build and approval](https://github.com/{REPOSITORY}/actions/runs/{data['buildRunID']}).\n"
-                    f"[Release qualification evidence](https://github.com/{REPOSITORY}/actions/runs/{proof['runID']}).\n\n"
-                    "Attached manifests bind the exact chart, images, and qualification evidence.",
-        })
+        release = api(f"repos/{REPOSITORY}/releases", {**metadata, "draft": True})
+    require(all(release.get(key) == value for key, value in metadata.items()),
+            "GitHub Release metadata differs from this candidate; refusing to reuse it")
     files = [directory / name for name in ("candidate.json", "qualification.json", "acceptance.json", data["chart"]["file"])]
     for path in files:
         current = api(f"repos/{REPOSITORY}/releases/{release['id']}")
