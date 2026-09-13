@@ -1537,12 +1537,12 @@ func finishAIWorkerRun(
 	if runErr == nil {
 		runErr = ctx.Err()
 	}
+	// Settle the outcome before publishing; a lost response must not change it.
 	if runErr == nil {
-		common.RecordEvent(ctx, eventRecorder, events.ExecutionEventTypeWorkerCompleted,
+		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeWorkerCompleted, 0,
 			common.WithEventTaskName(taskName),
 			common.WithEventSummary("AI worker completed"),
 		)
-		runErr = ctx.Err()
 	}
 	if runErr != nil {
 		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeWorkerFailed, 0,

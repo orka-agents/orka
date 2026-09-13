@@ -31,56 +31,53 @@ import (
 	"github.com/orka-agents/orka/workers/common"
 )
 
-func TestFinishGeneralWorkerRun_CancelsBlockedCompletionEvent(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	started := make(chan struct{})
-	failed := make(chan context.Context, 1)
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- finishGeneralWorkerRun(ctx, blockingGeneralEventRecorder{started: started, failed: failed}, "task", nil)
-	}()
-
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for completion event")
-	}
-	cancel()
-	select {
-	case err := <-errCh:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("finishGeneralWorkerRun() error = %v, want context canceled", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("finishGeneralWorkerRun() did not stop after cancellation")
-	}
-	select {
-	case failureCtx := <-failed:
-		if failureCtx.Err() != context.Canceled {
-			t.Fatal("failure context was not released after recording")
-		}
-	default:
-		t.Fatal("WorkerFailed was not attempted after interrupted completion")
-	}
-}
-
-type blockingGeneralEventRecorder struct {
-	started chan struct{}
-	failed  chan context.Context
-}
-
-func (r blockingGeneralEventRecorder) Record(ctx context.Context, eventType string, _ ...common.EventOption) {
-	if eventType == "WorkerFailed" {
-		if ctx.Err() == nil {
-			if _, bounded := ctx.Deadline(); bounded {
-				r.failed <- ctx
+func TestFinishGeneralWorkerRun_SettlesBeforeTerminalPublication(t *testing.T) {
+	for _, canceledBefore := range []bool{false, true} {
+		t.Run(fmt.Sprintf("canceledBefore=%t", canceledBefore), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if canceledBefore {
+				cancel()
 			}
-		}
-		return
+			recorder := &terminalGeneralEventRecorder{cancel: cancel}
+			err := finishGeneralWorkerRun(ctx, recorder, "task", nil)
+			want := "WorkerCompleted"
+			if canceledBefore {
+				want = "WorkerFailed"
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("error = %v, want cancellation", err)
+				}
+			} else if err != nil {
+				t.Fatalf("settled success changed after publication: %v", err)
+			}
+			if len(recorder.types) != 1 || recorder.types[0] != want {
+				t.Fatalf("terminal events = %v, want only %s", recorder.types, want)
+			}
+			if !recorder.bounded || !recorder.activeAfterCancel {
+				t.Fatal("terminal publication needs an independent bounded context")
+			}
+			if !errors.Is(recorder.ctx.Err(), context.Canceled) {
+				t.Fatal("publication context was not released")
+			}
+		})
 	}
-	close(r.started)
-	<-ctx.Done()
+}
+
+type terminalGeneralEventRecorder struct {
+	cancel            context.CancelFunc
+	types             []string
+	ctx               context.Context
+	bounded           bool
+	activeAfterCancel bool
+}
+
+func (r *terminalGeneralEventRecorder) Record(ctx context.Context, eventType string, _ ...common.EventOption) {
+	// Model persistence followed by cancellation before the response is read.
+	r.types = append(r.types, eventType)
+	r.cancel()
+	r.ctx = ctx
+	_, r.bounded = ctx.Deadline()
+	r.activeAfterCancel = ctx.Err() == nil
 }
 
 func TestRun_SIGTERMStopsResultDeliveryWithoutLateEvents(t *testing.T) {

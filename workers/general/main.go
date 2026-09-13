@@ -171,12 +171,12 @@ func finishGeneralWorkerRun(
 	if runErr == nil {
 		runErr = ctx.Err()
 	}
+	// Settle the outcome before publishing; a lost response must not change it.
 	if runErr == nil {
-		common.RecordEvent(ctx, recorder, "WorkerCompleted",
+		common.RecordEventWithTimeout(recorder, "WorkerCompleted", 0,
 			common.WithEventTaskName(taskName),
 			common.WithEventSummary("General worker completed"),
 		)
-		runErr = ctx.Err()
 	}
 	if runErr != nil {
 		recordGeneralWorkerFailed(recorder, taskName, runErr)
