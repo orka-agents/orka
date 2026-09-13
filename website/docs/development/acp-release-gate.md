@@ -55,7 +55,8 @@ Create a `release` environment with:
 
 - A required reviewer and administrator bypass disabled.
 - Selected deployment branches, with an exact branch rule for each release
-  line, such as `release-0.2`. Wildcards are insufficient.
+  line, such as `release-0.2`. Wildcard, tag, and unrelated branch rules are
+  rejected even when an exact release-branch rule is also present.
 - Prevent self-review disabled if the person dispatching the release will also
   approve it. Enable it when another reviewer is available and required.
 

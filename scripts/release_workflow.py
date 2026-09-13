@@ -112,6 +112,11 @@ def check_environment(name: str, branch: str, approval: bool = False) -> None:
     policies = paginated(f"repos/{REPOSITORY}/environments/{name}/deployment-branch-policies?per_page=100", "branch_policies")
     require(any(p.get("type") == "branch" and p.get("name") == branch for p in policies),
             f"Add the exact {branch} branch to the {name} environment; wildcard rules are insufficient")
+    default = api(f"repos/{REPOSITORY}")["default_branch"] if name == "live-acp-release-gate" else None
+    require(all(p.get("type") == "branch" and isinstance(p.get("name"), str)
+                and (re.fullmatch(r"release-(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", p["name"])
+                     or p["name"] == default) for p in policies),
+            f"Remove wildcard, tag, and unrelated branch rules from the {name} environment")
     if approval or name in {"release", "live-acp-release-gate"}:
         require(any(rule.get("type") == "required_reviewers" and rule.get("reviewers")
                     for rule in environment.get("protection_rules", [])),

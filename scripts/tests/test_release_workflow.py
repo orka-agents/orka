@@ -93,9 +93,25 @@ class ReleaseTest(ReleaseFixture):
                        "can_admins_bypass": False,
                        "protection_rules": [{"type": "required_reviewers", "reviewers": [{"id": 42}]}]}
         policies = [{"type": "branch", "name": BRANCH}]
-        with patch.object(release, "api", return_value=environment), patch.object(release, "paginated", return_value=policies):
+
+        def api_result(environment, default="main"):
+            return lambda path: {"default_branch": default} if path == f"repos/{release.REPOSITORY}" else environment
+
+        with patch.object(release, "api", side_effect=api_result(environment)), \
+                patch.object(release, "paginated", return_value=policies):
             for name in ("release", "live-acp-release-gate"):
                 release.check_environment(name, BRANCH)
+        release_lines = policies + [{"type": "branch", "name": "release-1.0"}]
+        for default in ("main", "trunk"):
+            with patch.object(release, "api", side_effect=api_result(environment, default)), \
+                    patch.object(release, "paginated", return_value=release_lines):
+                release.check_environment("release", BRANCH)
+            with patch.object(release, "api", side_effect=api_result(environment, default)), \
+                    patch.object(release, "paginated", return_value=release_lines + [{"type": "branch", "name": default}]):
+                release.check_environment("live-acp-release-gate", BRANCH)
+                release.check_environment("live-acp-release-gate", default)
+                with self.assertRaises(RuntimeError):
+                    release.check_environment("release", BRANCH)
         mutations = [
             ({**environment, "protection_rules": []}, policies),
             ({**environment, "protection_rules": [{"type": "required_reviewers", "reviewers": []}]}, policies),
@@ -105,9 +121,15 @@ class ReleaseTest(ReleaseFixture):
             (environment, [{"type": "tag", "name": BRANCH}]),
             (environment, [{"type": "branch", "name": "main"}]),
         ]
+        mutations += [(environment, policies + [extra]) for extra in (
+            {"type": "branch", "name": "release-*"},
+            {"type": "tag", "name": BRANCH},
+            {"type": "branch", "name": "feature/unreviewed"},
+            {"type": "branch", "name": "release-00.2"},
+        )]
         for name in ("release", "live-acp-release-gate"):
             for env, rules in mutations:
-                with self.subTest(name=name, env=env, rules=rules), patch.object(release, "api", return_value=env), \
+                with self.subTest(name=name, env=env, rules=rules), patch.object(release, "api", side_effect=api_result(env)), \
                         patch.object(release, "paginated", return_value=rules), self.assertRaises(RuntimeError):
                     release.check_environment(name, BRANCH)
 
