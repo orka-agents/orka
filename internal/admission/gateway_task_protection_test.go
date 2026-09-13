@@ -79,13 +79,83 @@ func TestGatewayTaskProtectionForegroundFinalizationWithFieldManager(t *testing.
 	require.NoError(t, err)
 	fieldManager := managedfieldstest.NewFakeFieldManager(converter, corev1alpha1.GroupVersion.WithKind("Task"))
 
-	// Foreground DELETE adds an unowned foregroundDeletion finalizer directly
-	// through storage. GC's subsequent patch passes through field management
-	// before admission, and must still preserve the existing managedFields.
-	oldTask := gatewayPolicyTask()
-	newTask, err := fieldManager.Update(oldTask.DeepCopy(), gatewayPolicyFinalizedTask(oldTask), "kube-controller-manager")
-	require.NoError(t, err)
-	require.True(t, policy.allows(t, apiserveradmission.Update, gatewayGarbageCollectorUser, "", newTask.(*unstructured.Unstructured), oldTask))
+	t.Run("unowned foreground finalizer", func(t *testing.T) {
+		oldTask := gatewayPolicyTask()
+		newTask, err := fieldManager.Update(oldTask.DeepCopy(), gatewayPolicyFinalizedTask(oldTask), "kube-controller-manager")
+		require.NoError(t, err)
+		require.True(t, policy.allows(t, apiserveradmission.Update, gatewayGarbageCollectorUser, "", newTask.(*unstructured.Unstructured), oldTask))
+	})
+	for _, tc := range []struct {
+		name             string
+		initial          []string
+		remaining        []string
+		foregroundDelete bool
+	}{
+		{
+			name:    "tracked finalizer preserves Orka and other finalizers",
+			initial: []string{"orka.ai/cleanup", "foregroundDeletion", "example.org/hold"}, remaining: []string{"orka.ai/cleanup", "example.org/hold"},
+		},
+		{name: "last tracked finalizer", initial: []string{"foregroundDeletion"}},
+		{name: "last unowned finalizer after Orka cleanup", initial: []string{"orka.ai/cleanup"}, foregroundDelete: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Record ownership through Kubernetes field management. Tracking
+			// only the Orka finalizer by hand misses changes to the finalizer
+			// field set when GC removes a tracked value or the list itself.
+			initial := gatewayPolicyTask()
+			initial.SetManagedFields(nil)
+			initial.SetFinalizers(tc.initial)
+			empty := &unstructured.Unstructured{}
+			empty.SetGroupVersionKind(corev1alpha1.GroupVersion.WithKind("Task"))
+			tracked, err := fieldManager.Update(empty, initial, "manager")
+			require.NoError(t, err)
+			oldTask := tracked.(*unstructured.Unstructured)
+			require.NotEmpty(t, oldTask.GetManagedFields())
+			if tc.foregroundDelete {
+				// Foreground DELETE adds its finalizer directly through storage.
+				// The controller then removes its own cleanup finalizer, leaving
+				// GC to remove the list whose presence the controller tracked.
+				oldTask.SetFinalizers([]string{"orka.ai/cleanup", metav1.FinalizerDeleteDependents})
+				withoutOrka := oldTask.DeepCopy()
+				withoutOrka.SetFinalizers([]string{metav1.FinalizerDeleteDependents})
+				tracked, err = fieldManager.Update(oldTask.DeepCopy(), withoutOrka, "manager")
+				require.NoError(t, err)
+				oldTask = tracked.(*unstructured.Unstructured)
+			}
+			newTask := oldTask.DeepCopy()
+			newTask.SetFinalizers(tc.remaining)
+			updated, err := fieldManager.Update(oldTask.DeepCopy(), newTask, "kube-controller-manager")
+			require.NoError(t, err)
+			newTask = updated.(*unstructured.Unstructured)
+			require.NotEqual(t, oldTask.GetManagedFields(), newTask.GetManagedFields(), "the regression requires a real field-management change")
+			require.Equal(t, tc.remaining, newTask.GetFinalizers())
+			require.True(t, policy.allows(t, apiserveradmission.Update, gatewayGarbageCollectorUser, "", newTask, oldTask))
+		})
+	}
+}
+
+func TestGatewayTaskProtectionManagedFieldsRequireForegroundRemoval(t *testing.T) {
+	policy := compileGatewayTaskProtection(t)
+	for _, change := range []string{"added", "changed", "removed"} {
+		t.Run(change, func(t *testing.T) {
+			oldTask := gatewayPolicyTask()
+			newTask := gatewayPolicyFinalizedTask(oldTask)
+			switch change {
+			case "added":
+				oldTask.SetManagedFields(nil)
+			case "changed":
+				fields := newTask.GetManagedFields()
+				fields[0].Manager = "kube-controller-manager"
+				newTask.SetManagedFields(fields)
+			case "removed":
+				newTask.SetManagedFields(nil)
+			}
+			require.True(t, policy.allows(t, apiserveradmission.Update, gatewayGarbageCollectorUser, "", newTask, oldTask))
+			require.False(t, policy.allows(t, apiserveradmission.Update, untrustedUsername, "", newTask, oldTask))
+			newTask.SetFinalizers(oldTask.GetFinalizers())
+			require.False(t, policy.allows(t, apiserveradmission.Update, gatewayGarbageCollectorUser, "", newTask, oldTask), "managedFields alone does not authorize a GC update")
+		})
+	}
 }
 
 func TestGatewayTaskProtectionRejectsChangesDuringFinalization(t *testing.T) {
@@ -113,7 +183,6 @@ func TestGatewayTaskProtectionRejectsChangesDuringFinalization(t *testing.T) {
 		{"labels", []string{"metadata", "labels"}, map[string]any{"changed": "true"}},
 		{"annotations", []string{"metadata", "annotations"}, map[string]any{"changed": "true"}},
 		{"owner references", []string{"metadata", "ownerReferences"}, []any{}},
-		{"managed fields", []string{"metadata", "managedFields"}, []any{}},
 		{"new metadata field", []string{"metadata", "other"}, "new-value"},
 		{"Orka finalizer removed", []string{"metadata", "finalizers"}, []any{"example.org/hold"}},
 		{"other finalizer removed", []string{"metadata", "finalizers"}, []any{"orka.ai/cleanup"}},
@@ -126,14 +195,16 @@ func TestGatewayTaskProtectionRejectsChangesDuringFinalization(t *testing.T) {
 		t.Run(change.name, func(t *testing.T) {
 			oldTask := gatewayPolicyTask()
 			newTask := gatewayPolicyFinalizedTask(oldTask)
+			newTask.SetManagedFields(nil)
 			require.NoError(t, unstructured.SetNestedField(newTask.Object, change.value, change.path...))
 			require.False(t, policy.allows(t, apiserveradmission.Update, gatewayGarbageCollectorUser, "", newTask, oldTask))
 		})
 	}
-	for _, field := range []string{"status", "metadata.labels", "metadata.annotations", "metadata.ownerReferences", "metadata.managedFields", "metadata.deletionTimestamp"} {
+	for _, field := range []string{"status", "metadata.labels", "metadata.annotations", "metadata.ownerReferences", "metadata.deletionTimestamp"} {
 		t.Run("remove "+field, func(t *testing.T) {
 			oldTask := gatewayPolicyTask()
 			newTask := gatewayPolicyFinalizedTask(oldTask)
+			newTask.SetManagedFields(nil)
 			unstructured.RemoveNestedField(newTask.Object, strings.Split(field, ".")...)
 			require.False(t, policy.allows(t, apiserveradmission.Update, gatewayGarbageCollectorUser, "", newTask, oldTask))
 		})

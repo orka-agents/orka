@@ -3421,10 +3421,10 @@ spec:
       dyn(object).all(k, k == 'metadata' ||
 
         (k in dyn(oldObject) && dyn(object)[k] == dyn(oldObject)[k])) &&
-      dyn(oldObject).all(k, k == 'metadata' || k in dyn(object)) && dyn(object.metadata).all(k, k == 'finalizers' ||
+      dyn(oldObject).all(k, k == 'metadata' || k in dyn(object)) && dyn(object.metadata).all(k, k == 'finalizers' || k == 'managedFields' ||
 
         (k in dyn(oldObject.metadata) && dyn(object.metadata)[k] == dyn(oldObject.metadata)[k])) &&
-      dyn(oldObject.metadata).all(k, k == 'finalizers' || k in dyn(object.metadata))
+      dyn(oldObject.metadata).all(k, k == 'finalizers' || k == 'managedFields' || k in dyn(object.metadata))
     name: foregroundFinalizerRemoval
 ---
 apiVersion: admissionregistration.k8s.io/v1

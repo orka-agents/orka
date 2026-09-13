@@ -43,8 +43,8 @@ spec:
           'system:serviceaccount:kube-system:generic-garbage-collector',
           'system:serviceaccount:kube-system:garbage-collector',
           'system:kube-controller-manager']
-    # Compare all object and metadata fields in both directions so this exception
-    # cannot add, remove, or change anything except the GC's own finalizer.
+    # The API server may rewrite managedFields while applying the finalizer patch.
+    # All other Task content and metadata must remain unchanged.
     - name: foregroundFinalizerRemoval
       expression: >-
         request.operation == 'UPDATE' &&
@@ -57,9 +57,9 @@ spec:
         dyn(object).all(k, k == 'metadata' ||
           (k in dyn(oldObject) && dyn(object)[k] == dyn(oldObject)[k])) &&
         dyn(oldObject).all(k, k == 'metadata' || k in dyn(object)) &&
-        dyn(object.metadata).all(k, k == 'finalizers' ||
+        dyn(object.metadata).all(k, k == 'finalizers' || k == 'managedFields' ||
           (k in dyn(oldObject.metadata) && dyn(object.metadata)[k] == dyn(oldObject.metadata)[k])) &&
-        dyn(oldObject.metadata).all(k, k == 'finalizers' || k in dyn(object.metadata))
+        dyn(oldObject.metadata).all(k, k == 'finalizers' || k == 'managedFields' || k in dyn(object.metadata))
   validations:
     - expression: >-
         (request.operation == 'DELETE' &&
