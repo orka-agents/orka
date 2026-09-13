@@ -279,7 +279,10 @@ func (s *Service) cleanupRetainedGatewayTasks(ctx context.Context, terminalCutof
 				continue
 			}
 			if !tombstoned {
-				archived, err := s.gatewayTaskCleanupArchived(ctx, task)
+				archived, err := s.gatewayTaskCompactionArchived(ctx, task)
+				if err == nil && !archived {
+					archived, err = s.gatewayTaskCleanupArchived(ctx, task)
+				}
 				if err != nil {
 					errs = append(errs, fmt.Errorf("check retained gateway Task archive %s/%s: %w", task.Namespace, task.Name, err))
 					continue
@@ -304,6 +307,35 @@ func (s *Service) cleanupRetainedGatewayTasks(ctx context.Context, terminalCutof
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// Compaction receipts preserve the exact Task deletion authority after event
+// deduplication expires, including Tasks that never acquired a SessionTurn.
+// Requesting ordinary deletion still leaves runtime and archive finalizers in
+// charge of deciding when the Task itself can be removed.
+func (s *Service) gatewayTaskCompactionArchived(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+	reader, ok := s.EventStore.(store.GatewayTaskCleanupReceiptStore)
+	if !ok {
+		return false, nil
+	}
+	receipt, err := reader.GetGatewayTaskCleanupReceipt(ctx, task.Namespace, task.Name, string(task.UID))
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	owner, owned := TaskOwner(task)
+	if receipt == nil || !owned || receipt.Namespace != task.Namespace || receipt.TaskName != task.Name || receipt.TaskUID != string(task.UID) ||
+		receipt.NamespaceUID != owner.NamespaceUID || receipt.GatewayName != owner.GatewayName || receipt.GatewayUID != owner.GatewayUID ||
+		receipt.BindingUID == "" || receipt.BindingName != task.Annotations[TaskGatewayBindingAnnotation] ||
+		receipt.EventID == "" || receipt.EventID != task.Annotations[TaskGatewayEventAnnotation] ||
+		task.Spec.SessionRef == nil || receipt.SessionName != task.Spec.SessionRef.Name ||
+		task.Spec.SessionRef.ThroughMessageID != store.GatewayUserMessageID(receipt.EventID) ||
+		receipt.CompactedAt.IsZero() || receipt.CompactedAt.Before(task.CreationTimestamp.Time) {
+		return false, store.ConflictErrorf("Gateway Task compaction receipt does not match its exact ownership")
+	}
+	return true, nil
 }
 
 // Archive evidence outlives the bounded event tombstones. A controller that was

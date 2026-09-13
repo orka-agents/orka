@@ -1601,6 +1601,9 @@ func (s *Store) MaintainGatewayRecords(ctx context.Context, namespace string, no
 	affectedSessions := map[gatewaySessionKey]struct{}{}
 	for i := range terminalEvents {
 		event := &terminalEvents[i]
+		if err := archiveGatewayTaskCleanupReceiptTx(ctx, tx, event, now); err != nil {
+			return result, err
+		}
 		upsert, upsertErr := tx.ExecContext(ctx, `INSERT INTO gateway_event_tombstones (
 			namespace, gateway_uid, external_event_id, event_id, task_name, task_uid, envelope_digest, session_name, transcript_order, expires_at, created_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)

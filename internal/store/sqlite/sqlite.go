@@ -955,6 +955,7 @@ func currentSchemaStatements() []string {
 	}
 
 	statements = append(statements, controlSchemaStatements()...)
+	statements = append(statements, gatewayTaskCleanupSchemaStatements()...)
 	return append(statements, agentExecutionSchemaStatements()...)
 }
 
