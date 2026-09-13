@@ -945,8 +945,9 @@ func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request, turn *turn
 		status, message = http.StatusOK, "turn already settled"
 	}
 	harness.WriteJSON(w, status, harness.CancelTurnResponse{
-		Version:          harness.ProtocolVersion,
-		Accepted:         accepted,
+		Version: harness.ProtocolVersion,
+		// A settled turn already satisfies cancellation; clients must still drain its frames.
+		Accepted:         true,
 		RuntimeSessionID: request.RuntimeSessionID,
 		TurnID:           request.TurnID,
 		CorrelationID:    request.CorrelationID,

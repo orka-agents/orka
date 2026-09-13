@@ -2266,30 +2266,39 @@ func TestServerRejectsUnsupportedRuntimeAuthOnlyCommand(t *testing.T) {
 	}
 }
 
-func TestHandleCancelReportsUnacceptedAfterSettlement(t *testing.T) {
+func TestHandleCancelAcceptsRepeatedCancellationAfterSettlement(t *testing.T) {
 	request := validWrapperStartTurnRequest()
 	turn := newTurnState(request, time.Now)
+	defer turn.cancel()
 	turn.appendFrame(harness.HarnessEventFrame{Type: harness.FrameTurnCompleted})
-	body, err := json.Marshal(harness.CancelTurnRequest{
-		Version: harness.ProtocolVersion, Namespace: request.Namespace, TaskName: request.TaskName,
-		SessionName: request.SessionName, RuntimeSessionID: request.RuntimeSessionID,
-		TurnID: request.TurnID, CorrelationID: request.CorrelationID,
-	})
+	server := &Server{}
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server.handleCancel(w, r, turn)
+	}))
+	defer httpServer.Close()
+	client, err := harness.NewClient(httpServer.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	recorder := httptest.NewRecorder()
-	server := &Server{}
-	server.handleCancel(recorder, httptest.NewRequest(http.MethodPost, "/cancel", bytes.NewReader(body)), turn)
-	var response harness.CancelTurnResponse
-	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-		t.Fatal(err)
-	}
-	if recorder.Code != http.StatusOK || response.Accepted {
-		t.Fatalf("late cancellation = status %d accepted %v", recorder.Code, response.Accepted)
+	for range 2 {
+		response, err := client.CancelTurn(context.Background(), harness.CancelTurnRequest{
+			Version: harness.ProtocolVersion, Namespace: request.Namespace, TaskName: request.TaskName,
+			SessionName: request.SessionName, RuntimeSessionID: request.RuntimeSessionID,
+			TurnID: request.TurnID, CorrelationID: request.CorrelationID,
+		})
+		if err != nil {
+			t.Fatalf("client rejected settled cancellation: %v", err)
+		}
+		if !response.Accepted || response.Message != "turn already settled" {
+			t.Fatalf("late cancellation response = %#v", response)
+		}
 	}
 	if turn.cancelRequested {
 		t.Fatal("settled turn was marked for cancellation")
+	}
+	frames, _ := turn.framesFrom(0)
+	if len(frames) != 1 || frames[0].Type != harness.FrameTurnCompleted {
+		t.Fatalf("cancellation changed settled frames: %#v", frames)
 	}
 }
 
