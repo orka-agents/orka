@@ -193,7 +193,8 @@ jobs:
           ACP_E2E_KEEP_CLUSTER: "1"
           ACP_E2E_WRITE_CREDENTIAL_TOKEN: ${{ secrets.ACP_E2E_WRITE_CREDENTIAL_TOKEN }}
           ACP_E2E_WRITE_FORGE_CREDENTIAL_TOKEN: ${{ secrets.ACP_E2E_WRITE_FORGE_CREDENTIAL_TOKEN }}
-          ACP_E2E_WRITE_READ_CREDENTIAL_TOKEN: ${{ secrets.ACP_E2E_WRITE_READ_CREDENTIAL_TOKEN }}
+          # Source reads stay in this repository and use the job's temporary token.
+          ACP_E2E_WRITE_READ_CREDENTIAL_TOKEN: ${{ github.token }}
           ACP_E2E_WRITE_TARGET_READ_CREDENTIAL_TOKEN: ${{ secrets.ACP_E2E_WRITE_TARGET_READ_CREDENTIAL_TOKEN }}
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.ACP_E2E_WRITE_FORGE_CREDENTIAL_TOKEN }}

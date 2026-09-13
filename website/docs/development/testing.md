@@ -153,14 +153,16 @@ missing or mismatched artifacts staying not ready.
   branches, require a trusted reviewer, and disable administrator bypass before
   exposing canary credentials. It accepts the configured canary fork and a full
   source SHA that must equal both the dispatched workflow commit and selected branch head.
-  The canary PR base must be that same branch. It requires these environment
-  secrets:
-  `COPILOT_GITHUB_TOKEN`, `ACP_E2E_WRITE_READ_CREDENTIAL_TOKEN`,
+  The canary PR base must be that same branch. Source reads use the job's
+  short-lived `GITHUB_TOKEN` with `contents: read`; no source-read environment
+  secret is needed. It requires these configured secrets:
+  `COPILOT_GITHUB_TOKEN`,
   `ACP_E2E_WRITE_TARGET_READ_CREDENTIAL_TOKEN`,
   `ACP_E2E_WRITE_CREDENTIAL_TOKEN`, and
-  `ACP_E2E_WRITE_FORGE_CREDENTIAL_TOKEN`. Configure the four publication
-  credentials as distinct, least-privilege GitHub credentials for source read,
-  target read, target write, and forge/verification cleanup respectively.
+  `ACP_E2E_WRITE_FORGE_CREDENTIAL_TOKEN`. Configure the three stored GitHub
+  credentials as distinct, least-privilege credentials for target read,
+  target write, and forge/verification cleanup respectively. The provider
+  token can come from the existing repository secret.
   [Release qualification](acp-release-gate.md) documents the
   dedicated fork, exact permissions, trusted dispatch, report verification,
   and recovery from a moved base or preserved canary. Release qualification
@@ -221,8 +223,13 @@ export ACP_E2E_OPENCODE_MAX_TOKENS=4096
 ACP_E2E_KIND_TAG=local bash scripts/live-acp-runtime-kind-e2e.sh
 ```
 
-For a manual release gate, also export the four role-specific credential values,
-set `ACP_E2E_WRITE_SOURCE_REPO`, `ACP_E2E_WRITE_PUBLICATION_REPO`,
+The local release gate needs four role-specific credentials, including an
+explicitly supplied source-read credential. GitHub's automatic job token is
+available only inside Actions. If organization policy prevents supplying
+that credential locally, dispatch
+[Release Qualification](acp-release-gate.md#standalone-qualification) instead.
+
+For a local run, set `ACP_E2E_WRITE_SOURCE_REPO`, `ACP_E2E_WRITE_PUBLICATION_REPO`,
 `ACP_E2E_WRITE_SOURCE_REF`, and `ACP_E2E_WRITE_PR_BASE`, then run:
 
 ```bash

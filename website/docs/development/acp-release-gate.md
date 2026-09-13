@@ -140,16 +140,26 @@ Configure the `release-qualification` environment in `orka-agents/orka`:
 - Set the environment variable `ACP_E2E_WRITE_PUBLICATION_REPO` to
   `https://github.com/sozercan/orka-acp-release-gate.git`. An optional dispatch
   override must identify this same repository.
-- Configure the following secrets. The four GitHub credentials must have
-  distinct values. Each Kubernetes copy uses the `token` key.
+- Configure the following secrets. The three stored GitHub credentials must
+  have distinct values. Each Kubernetes copy uses the `token` key.
 
 | Secret | Required access and use |
 | --- | --- |
 | `COPILOT_GITHUB_TOKEN` | Provider authentication for the configured Codex, OpenCode, Claude, and Copilot models through Vekil. The repository secret can supply this value. It is not Git publication authority. |
-| `ACP_E2E_WRITE_READ_CREDENTIAL_TOKEN` | Source repository Contents read and metadata read. Used by the source clone boundary. |
 | `ACP_E2E_WRITE_TARGET_READ_CREDENTIAL_TOKEN` | Canary fork Contents read and metadata read. Used for target preflight and publication verification. |
 | `ACP_E2E_WRITE_CREDENTIAL_TOKEN` | Canary fork Contents write and metadata read. Used by the separate publisher for the branch compare-and-swap push. No source write or PR authority is needed. |
 | `ACP_E2E_WRITE_FORGE_CREDENTIAL_TOKEN` | Source Pull requests write, source and fork Contents read, and fork Contents write for branch cleanup. Used for PR reconciliation and by the independent `gh`/Git observer to verify both repositories, close the exact unmerged PR, and delete its branch with an exact-head lease. |
+
+The workflow supplies `ACP_E2E_WRITE_READ_CREDENTIAL_TOKEN` from its own
+`GITHUB_TOKEN`, with `contents: read` on `orka-agents/orka`. Do not configure a
+GitHub secret for this source-read role. GitHub creates a
+[token for each job](https://docs.github.com/en/actions/concepts/security/github_token),
+and it expires when the job ends. The test still uses a separate temporary
+Kubernetes Secret for source reads and verifies all four credential roles.
+Once this workflow replaces the legacy gate on `main`, remove the old
+`ACP_E2E_WRITE_READ_CREDENTIAL_TOKEN` environment secret. Deleting that secret
+does not revoke the underlying token; revoke it separately once nothing else
+uses it.
 
 These are the existing ACP canary credentials, separate from release
 orchestration. The forge/observer credential must work across the source
