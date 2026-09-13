@@ -204,7 +204,7 @@ jobs:
               grep -Fq -- "name: ${account}" "${serviceaccounts}"
               grep -Fq -- "name: ${account}" "${rbac}"
               if [[ -n "${gateway_policy}" ]]; then
-                grep -Fq -- ":${account}'" "${gateway_policy}"
+                grep -Fq -- "expression: \"'${account}'\"" "${gateway_policy}"
               fi
             done
           }
