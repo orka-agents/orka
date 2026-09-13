@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016 # Workflow assertions match literal shell expressions.
 
 set -Eeuo pipefail
 
@@ -113,14 +114,14 @@ if python3 "${test_root}/scripts/update-release-version.py" 9.8.7 >/dev/null 2>&
   exit 1
 fi
 
-grep -Fq 'run: scripts/validate-release-manifest.sh "${GITHUB_REF_NAME}"' \
+grep -Fq 'run: scripts/validate-release-manifest.sh "${RELEASE_VERSION}"' \
   "${root}/.github/workflows/release.yml"
-grep -Fq 'make verify-release-manifest NEWVERSION="${NEWVERSION}"' \
+grep -Fq 'run: python3 scripts/release_workflow.py prepare "${RELEASE_VERSION}"' \
   "${root}/.github/workflows/release-pr.yml"
 build_job="$(workflow_job build-and-push)"
 scan_job="$(workflow_job scan)"
 sign_job="$(workflow_job sign-and-attest)"
-promotion_job="$(workflow_job promote-release-tags)"
+promotion_job="$(workflow_job publish)"
 test "$(grep -Fc -- '- image: agent-harness-wrapper' <<<"${build_job}")" -eq 1
 test "$(grep -Fc 'image_suffix: "/agent-harness-wrapper"' <<<"${build_job}")" -eq 1
 grep -Fq 'dockerfile: workers/harness/Dockerfile' <<<"${build_job}"
@@ -128,6 +129,6 @@ test "$(grep -Fc -- '- image: agent-harness-wrapper' <<<"${scan_job}")" -eq 2
 test "$(grep -Fc 'image_suffix: "/agent-harness-wrapper"' <<<"${scan_job}")" -eq 2
 test "$(grep -Fc -- '- image: agent-harness-wrapper' <<<"${sign_job}")" -eq 1
 test "$(grep -Fc 'image_suffix: "/agent-harness-wrapper"' <<<"${sign_job}")" -eq 1
-grep -Fq 'promote_image agent-harness-wrapper "/agent-harness-wrapper"' <<<"${promotion_job}"
+grep -Fq 'run: python3 scripts/release_workflow.py publish "${RUNNER_TEMP}/release-candidate"' <<<"${promotion_job}"
 
 printf '%s\n' 'ok - release versioning and harness compatibility image policy are coherent'

@@ -28,6 +28,7 @@ Environment:
   ACP_E2E_ROLLOUT_TIMEOUT rollout timeout (default: 10m)
   RELEASE_GATE=1          forwarded to the canonical validator
   ACP_E2E_REPORT_FILE     redacted acceptance JSON (release mode only)
+  ACP_E2E_RELEASE_BUNDLE_DIR verified candidate bundle; install its chart/images
 USAGE
 }
 
@@ -90,11 +91,12 @@ LIVE_ACP_GENERAL_WORKER_IMAGE="orka-general-worker:live-acp-${image_tag}"
 LIVE_ACP_KIND_CREATED=0
 LIVE_ACP_REGISTRY_STARTED=0
 LIVE_ACP_SECRET_DIR=""
+LIVE_ACP_RELEASE_BUNDLE_DIR="${ACP_E2E_RELEASE_BUNDLE_DIR:-}"
 export LIVE_ACP_REPO_ROOT LIVE_ACP_KINDCTL_BIN LIVE_ACP_VEKIL_DEPLOY_SCRIPT LIVE_ACP_VALIDATOR_SCRIPT
 export LIVE_ACP_KIND_TAG LIVE_ACP_KIND_CONFIG LIVE_ACP_KEEP_CLUSTER LIVE_ACP_VEKIL_IMAGE LIVE_ACP_ROLLOUT_TIMEOUT
 export LIVE_ACP_CONTROLLER_IMAGE LIVE_ACP_CODEX_IMAGE LIVE_ACP_CLAUDE_IMAGE LIVE_ACP_COPILOT_IMAGE
 export LIVE_ACP_OPENCODE_IMAGE LIVE_ACP_PUBLISHER_IMAGE LIVE_ACP_GENERAL_WORKER_IMAGE
-export LIVE_ACP_SECRET_DIR
+export LIVE_ACP_SECRET_DIR LIVE_ACP_RELEASE_BUNDLE_DIR
 
 finish_kind_run() {
   local status=$? cleanup_status=0
@@ -113,6 +115,12 @@ if live_acp_kind_enabled "${RELEASE_GATE:-0}"; then
   export RELEASE_GATE=1
   export ACP_E2E_REPORT_FILE="${ACP_E2E_REPORT_FILE:-${repo_root}/bin/acp-release-${image_tag}/acceptance.json}"
   acp_report_init "${repo_root}"
+  if [[ -n "${LIVE_ACP_RELEASE_BUNDLE_DIR}" ]]; then
+    python3 "${repo_root}/scripts/release_workflow.py" check-bundle "${LIVE_ACP_RELEASE_BUNDLE_DIR}"
+    bundle_sha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "${LIVE_ACP_RELEASE_BUNDLE_DIR}/candidate.json")"
+    acp_report_update '.release = ($candidate[0] | {buildRunID, buildRunAttempt, version}) + {bundleSHA256:$hash}' \
+      --slurpfile candidate "${LIVE_ACP_RELEASE_BUNDLE_DIR}/candidate.json" --arg hash "${bundle_sha}"
+  fi
   export LIVE_ACP_REPORT_INITIALIZED=1
 fi
 trap finish_kind_run EXIT
@@ -166,13 +174,13 @@ fi
 
 if live_acp_kind_enabled "${RELEASE_GATE:-0}"; then
   [[ "$(git -C "${repo_root}" rev-parse HEAD)" == "${write_ref_lower}" ]] || \
-    live_acp_kind_die "release candidate must equal the image build checkout HEAD"
+    live_acp_kind_die "release candidate must equal the checkout HEAD"
   [[ -z "$(git -C "${repo_root}" status --porcelain --untracked-files=normal)" ]] || \
-    live_acp_kind_die "release images must be built from a clean candidate checkout"
+    live_acp_kind_die "release qualification requires a clean candidate checkout"
 fi
 
 LIVE_ACP_SECRET_DIR="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/live-acp-kind-secrets.XXXXXX")"
-export LIVE_ACP_SECRET_DIR
+export LIVE_ACP_SECRET_DIR LIVE_ACP_RELEASE_BUNDLE_DIR
 acp_report_update '.stage = "bootstrap"'
 live_acp_kind_bootstrap
 

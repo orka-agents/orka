@@ -113,6 +113,8 @@ acp_report_qualified() {
     def sha: type == "string" and test("^[a-f0-9]{40}$");
     def digest: type == "string" and test("^sha256:[a-f0-9]{64}$");
     def present: type == "string" and length > 0;
+    def hash: type == "string" and test("^[a-f0-9]{64}$");
+    def run: type == "string" and test("^[1-9][0-9]*$");
     . as $r
     | .schemaVersion == 1 and .gate == "live-acp-release-gate" and .mode == "release"
       and (.candidateSHA | sha) and .candidateSHA == .checkoutSHA
@@ -172,6 +174,23 @@ acp_report_qualified() {
       and .cleanup.validatorCredentials == "passed" and .cleanup.bootstrapCredentials == "passed"
       and .cleanup.cluster == "passed" and .cleanup.registry == "passed"
       and .preserved == null
+      and (if has("release") then
+        (.release.buildRunID | run) and (.release.buildRunAttempt | run)
+        and (.release.bundleSHA256 | hash) and (.release.version | present)
+        and (.chart.packageSHA256 | hash)
+        and .chart.install == true and .chart.containerTask == true
+        and .chart.recovery == true and .chart.noReplay == true
+        and .chart.oppositeModeRejected == true and .chart.jobRemovedBeforeRestart == true
+        and .chart.noReplayObservationSeconds >= 10
+        and (.chart.pvcs | length) == 2
+        and (.chart.pvcs | map(.name) | sort) == ["orka-store", "orka-workspace-publisher"]
+        and all(.chart.pvcs[]; (.uid | present) and (.volumeName | present) and .phase == "Bound")
+        and (.chart.controllerPodUIDBefore | present) and (.chart.controllerPodUIDAfter | present)
+        and .chart.controllerPodUIDBefore != .chart.controllerPodUIDAfter
+        and (.chart.task.uid | present) and .chart.task.phase == "Succeeded"
+        and .chart.task.attempts == 1 and .chart.task.resultAvailable == true
+        and (.chart.task.jobUID | present)
+      else true end)
   ' "$1" >/dev/null
 }
 

@@ -1,6 +1,7 @@
 name: Helm Chart
 
 on:
+  workflow_call:
   push:
     branches:
       - main

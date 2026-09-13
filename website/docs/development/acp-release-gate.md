@@ -2,14 +2,97 @@
 description: Qualify an ACP release candidate with deployed publication, independent GitHub verification, and safe cleanup.
 ---
 
-# ACP publication release qualification
+# Release automation and ACP qualification
 
-A release containing the RuntimePool ACP path requires a successful **Live ACP
-Release Gate** report for its exact candidate commit. Ordinary ACP smoke, Task
-success, component tests, and a report for another commit do not qualify it.
-Complete this check after reviewing release metadata and before tagging the
-candidate. The tag publication workflow does not run this credentialed gate for
-you.
+Start a release with **Prepare Release**, then approve the qualified candidate
+in the `release` environment. Preparation, workflow dispatch, tagging, image
+promotion, chart publication, and release evidence archival use only
+`GITHUB_TOKEN`. The organization can keep its policy that prohibits Actions
+from creating or approving PRs. Release preparation does not create a PR.
+
+The flow is:
+
+1. Dispatch `release-pr.yml` from `main` with `release_version`, such as `v0.2.0`.
+2. Preparation updates the version, generates staging, promotes the release
+   snapshots, and commits them on `release-0.2`. A new release line starts from
+   the dispatched `main` commit. An existing line starts from its own head.
+   Beta and RC versions use the same `release-X.Y` branch. Preparation never
+   pushes to `main`.
+3. Preparation explicitly dispatches `release.yml` at that generated commit.
+   Release runs full Go/UI lint and tests, Helm checks, and govulncheck. It
+   builds all nine images for amd64 and arm64, runs Trivy, generates platform
+   SBOMs, and signs the images. Trivy findings remain advisory; scanner and
+   SARIF-upload failures still fail the run.
+4. Release dispatches **Live ACP Release Gate** with the exact candidate
+   bundle. The gate installs the packaged chart using the built image digests,
+   verifies durable results after controller replacement, rejects an
+   opposite-mode upgrade, and runs canonical ACP acceptance and canary cleanup.
+   It does not rebuild the release images.
+5. The **Approve and publish the qualified candidate** job waits for an
+   environment reviewer. After approval it rechecks the branch, build,
+   qualification, and artifact hashes. It creates an annotated version tag,
+   promotes the qualified image digests, copies the exact tested chart to
+   `gh-pages/charts`, requests and verifies a Pages build, and creates a GitHub
+   Release with the candidate manifest, chart, and acceptance evidence.
+
+A tag push does not start publication. Publication stays in the dispatched
+workflow because `GITHUB_TOKEN` pushes do not trigger another push workflow.
+See GitHub's [workflow trigger rules](https://docs.github.com/en/actions/how-tos/writing-workflows/choosing-when-your-workflow-runs/triggering-a-workflow).
+
+## One-time configuration
+
+The automation must first be merged into `main`. Backport it to an existing
+release line before preparing another version on that line.
+
+Create a `release` environment with:
+
+- A required reviewer and administrator bypass disabled.
+- Selected deployment branches, with an exact branch rule for each release
+  line, such as `release-0.2`. Wildcards are insufficient.
+- Prevent self-review disabled if the person dispatching the release will also
+  approve it. Enable it when another reviewer is available and required.
+
+No release environment secret is needed. Add the same exact release branch to
+`live-acp-release-gate`, retaining `main` for standalone qualification. These
+settings are prerequisites; the workflows check them but do not change them.
+GitHub documents [environment protection rules](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments).
+
+Allow the native workflow token to push to the release branches and `gh-pages`.
+A ruleset requiring PRs on those branches would block this flow. The PR-creation
+policy can remain disabled. Pages must continue serving the `gh-pages` branch
+root, as configured for this repository.
+
+## Start and approve a release
+
+Use **Actions → Prepare Release → Run workflow**, choose `main`, and enter the
+version, or run:
+
+```bash
+gh workflow run release-pr.yml --repo orka-agents/orka --ref main \
+  -f release_version=v0.2.0
+```
+
+Preparation links the generated commit diff and the Release run in its job
+summary. Review that diff and the linked qualification evidence, then approve
+the waiting `release` deployment. Those are the two per-release human actions:
+dispatch and approval.
+
+Before a tag exists, use **Re-run all jobs** if an interrupted build left partial
+artifacts. This makes a new artifact set and requires fresh qualification. If
+only qualification failed, **Re-run failed jobs** reuses the successful build
+and dispatches a new gate attempt.
+
+After tagging has started, use **Re-run failed jobs** in the original Release
+run. It retains the original candidate and qualification evidence, asks for
+approval again, and resumes publication. Existing version tags, image tags,
+chart archives, and release assets must match the original bytes. The workflow
+refuses to replace them. A full rebuild or a new preparation run cannot reuse
+an already tagged version. Retry while the Actions artifacts remain available.
+
+A changed release-branch head invalidates the candidate, even after approval.
+Prepare and qualify the new head. Only the newest stable release updates
+`latest`; an older release line cannot move it backwards. Beta and RC versions
+never update `latest` or the minor-version alias.
 
 ## Canary and environment
 
@@ -17,14 +100,15 @@ The source is `orka-agents/orka`. The dedicated publication target is
 [`sozercan/orka-acp-release-gate`](https://github.com/sozercan/orka-acp-release-gate),
 an actual fork of that source. Do not use it for development branches. Each
 attempt creates a unique `orka/acp-release-gate-*` branch and a temporary PR
-against the source default branch. The validator checks the fork relationship
+against the dispatched source branch. The validator checks the fork relationship
 through GitHub before submitting work.
 
 Configure the `live-acp-release-gate` environment in `orka-agents/orka`:
 
-- Select deployment branches by name and allow only the `main` branch. Do not
-  allow tags, PR refs, or arbitrary branches. Required reviewers can be added if
-  maintainer approval is desired.
+- Select deployment branches by name. Allow `main` and explicitly selected
+  release lines, such as `release-0.2`. Do not allow tags, PR refs, or arbitrary
+  branches. The final release approval belongs to the `release` environment;
+  adding reviewers here would require another approval before qualification.
 - Set the environment variable `ACP_E2E_WRITE_PUBLICATION_REPO` to
   `https://github.com/sozercan/orka-acp-release-gate.git`. An optional dispatch
   override must identify this same repository.
@@ -39,13 +123,11 @@ Configure the `live-acp-release-gate` environment in `orka-agents/orka`:
 | `ACP_E2E_WRITE_CREDENTIAL_TOKEN` | Canary fork Contents write and metadata read. Used by the separate publisher for the branch compare-and-swap push. No source write or PR authority is needed. |
 | `ACP_E2E_WRITE_FORGE_CREDENTIAL_TOKEN` | Source Pull requests write, source and fork Contents read, and fork Contents write for branch cleanup. Used for PR reconciliation and by the independent `gh`/Git observer to verify both repositories, close the exact unmerged PR, and delete its branch with an exact-head lease. |
 
-The forge/observer credential must work across the source organization and the
-fork owner. A fine-grained PAT grants write access under only one resource
-owner. For this public repository pair, a dedicated canary account with a
-classic PAT scoped to `public_repo` is one option; keep that account's write
-memberships limited to the canary resources. Follow organization token policy
-and expiry requirements. See GitHub's
-[personal access token permissions and limitations](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens).
+These are the existing ACP canary credentials, separate from release
+orchestration. The forge/observer credential must work across the source
+organization and fork owner. None of these credentials is used to prepare,
+tag, or publish an Orka release, and the release automation adds no PAT or
+GitHub App.
 
 Set values through the environment settings or the interactive `gh secret set`
 prompt. Do not put values in dispatch inputs, shell command literals, reports,
@@ -55,15 +137,16 @@ broker and must continue to fail the gate if its ServiceAccount can read these
 Secrets directly. Reports record only Secret names, namespaces, and resource
 versions.
 
-## Run and qualify a candidate
+## Standalone ACP qualification
 
-The workflow is manual, serialized, and restricted to the trusted default
-branch. Its code must already be on that branch. Build and publication use the
-same full source SHA. Release changes made on another branch must first land on
-the default branch; evidence for the parent commit cannot qualify a different
-release commit.
+The release workflow dispatches and verifies the gate automatically. A
+standalone gate run remains useful for diagnosis. It builds local images from
+the candidate and does not supply the packaged-chart evidence required by the
+release publication job.
 
-From a trusted checkout, dispatch the current candidate:
+Dispatch from `main` or an explicitly permitted `release-X.Y` branch. The
+workflow SHA, source SHA, current branch head, and canary PR base must agree.
+For example:
 
 ```bash
 candidate="$(gh api repos/orka-agents/orka/commits/main --jq .sha)"
@@ -75,33 +158,32 @@ gh workflow run live-acp-release-gate.yml --repo orka-agents/orka --ref main \
 gh run list --repo orka-agents/orka --workflow live-acp-release-gate.yml \
   --commit "${candidate}" --event workflow_dispatch \
   --json databaseId,headSha,status,conclusion,url
-```
 
-Select the dispatched run ID from that list, wait for completion, and verify it:
-
-```bash
 gh run watch RUN_ID --repo orka-agents/orka --exit-status
-bash scripts/verify-acp-release-qualification.sh "${candidate}" RUN_ID
+bash scripts/verify-acp-release-qualification.sh "${candidate}" RUN_ID main
 ```
 
-The verifier requires a successful dispatch of `live-acp-release-gate.yml` from
-this repository's default branch at the exact candidate SHA. It downloads the
-final report for the current run attempt and checks its candidate, workflow
-identity, publication evidence, image observations, and cleanup results. It
-exits nonzero for missing, expired, incomplete, or mismatched evidence. Keep its
-local `bin/acp-release-qualification-RUN_ID-ATTEMPT/acceptance.json` with the
-release records and link the workflow run from the release checklist. Do not tag
-an ACP candidate until this command succeeds. A local disposable-cluster run is
-useful for diagnosis; release qualification requires the trusted workflow run.
+The verifier's optional third argument is the expected branch and defaults to
+`main`. For a release-line run, pass that exact branch. The verifier requires a
+successful dispatch from this repository at the exact candidate SHA. It
+downloads the current attempt's final report and checks workflow identity,
+publication evidence, observed images, and cleanup. Missing, expired,
+incomplete, or mismatched evidence fails verification. A local run is useful
+for diagnosis; release qualification requires a trusted workflow run.
 
 ## Evidence and failures
 
 The job uploads `live-acp-release-evidence-RUN_ID-ATTEMPT` before tearing down
 Kind, then `live-acp-release-acceptance-RUN_ID-ATTEMPT` after teardown. Both
-contain only `acceptance.json` and remain available for 90 days. Archive the
-verified final artifact with longer-lived release records before it expires.
+contain only `acceptance.json` and remain available for 90 days. Successful
+release publication archives the verified report, candidate and qualification
+manifests, and exact chart archive as GitHub Release assets.
 The first artifact is diagnostic evidence and cannot qualify a release while
 cluster cleanup is pending.
+
+A bundled release report also records the build run and artifact attempt,
+candidate-manifest hash, chart hash, retained PVC identities, controller Pod
+replacement, completed Task identity, and chart acceptance results.
 
 The report includes the dispatched and checked-out SHAs, built image references,
 actual controller, publisher, and runtime Pod image digests, Task UID and attempt
@@ -125,7 +207,7 @@ cleanup to succeed. A preserved cluster, failed branch deletion, skipped
 publication, or missing credential cannot produce a qualified report.
 
 The source base must still equal the candidate at preflight, Task submission,
-PR verification, and completion. If `main` moves, the report shows the observed
+PR verification, and completion. If the selected branch moves, the report shows the observed
 base SHA and the candidate remains unqualified. Let safe cleanup finish, then
 dispatch the new full head SHA. Do not edit the report or reuse an earlier
 report for the new candidate.

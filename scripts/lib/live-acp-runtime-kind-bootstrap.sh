@@ -12,6 +12,8 @@ live_acp_kind_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${live_acp_kind_lib_dir}/e2e-admission-tls.sh"
 # shellcheck source=scripts/lib/live-acp-release-report.sh
 . "${live_acp_kind_lib_dir}/live-acp-release-report.sh"
+# shellcheck source=scripts/lib/live-acp-release-chart.sh
+. "${live_acp_kind_lib_dir}/live-acp-release-chart.sh"
 unset live_acp_kind_lib_dir
 
 # Internal port-forward state is process-local. Reset inherited values so a
@@ -54,6 +56,13 @@ live_acp_kind_preflight() {
   for command in curl docker git go jq kind kubectl make openssl python3; do
     live_acp_kind_require_cmd "${command}" || return 1
   done
+  if [[ -n "${LIVE_ACP_RELEASE_BUNDLE_DIR:-}" ]]; then
+    live_acp_kind_require_cmd helm || return 1
+    live_acp_kind_enabled "${RELEASE_GATE:-0}" || live_acp_kind_die "a release bundle requires RELEASE_GATE=1" || return 1
+    python3 "${LIVE_ACP_REPO_ROOT}/scripts/release_workflow.py" check-bundle "${LIVE_ACP_RELEASE_BUNDLE_DIR}" || return 1
+    jq -e --arg sha "$(git -C "${LIVE_ACP_REPO_ROOT}" rev-parse HEAD)" \
+      '.candidateSHA == $sha' "${LIVE_ACP_RELEASE_BUNDLE_DIR}/candidate.json" >/dev/null || return 1
+  fi
   if live_acp_kind_enabled "${RELEASE_GATE:-0}"; then
     live_acp_kind_require_cmd gh || return 1
     local token_var
@@ -161,6 +170,27 @@ live_acp_kind_build_and_publish_images() {
   LIVE_ACP_GENERAL_WORKER_REF="$(orka_kind_registry_push "${LIVE_ACP_GENERAL_WORKER_IMAGE}" orka/general-worker)"
   export LIVE_ACP_CONTROLLER_REF LIVE_ACP_CODEX_REF LIVE_ACP_CLAUDE_REF LIVE_ACP_COPILOT_REF
   export LIVE_ACP_OPENCODE_REF LIVE_ACP_PUBLISHER_REF LIVE_ACP_GENERAL_WORKER_REF
+  live_acp_kind_report_images
+}
+
+# Release candidates use the already built GHCR digests. Rebuilding here would
+# qualify different bytes from the images awaiting release approval.
+live_acp_kind_use_release_images() {
+  local manifest="${LIVE_ACP_RELEASE_BUNDLE_DIR}/candidate.json"
+  python3 "${LIVE_ACP_REPO_ROOT}/scripts/release_workflow.py" check-bundle "${LIVE_ACP_RELEASE_BUNDLE_DIR}" || return 1
+  LIVE_ACP_CONTROLLER_REF="$(jq -er '.images.controller' "${manifest}")"
+  LIVE_ACP_CODEX_REF="$(jq -er '.images["acp-codex-runtime"]' "${manifest}")"
+  LIVE_ACP_CLAUDE_REF="$(jq -er '.images["acp-claude-runtime"]' "${manifest}")"
+  LIVE_ACP_COPILOT_REF="$(jq -er '.images["acp-copilot-runtime"]' "${manifest}")"
+  LIVE_ACP_OPENCODE_REF="$(jq -er '.images["acp-opencode-runtime"]' "${manifest}")"
+  LIVE_ACP_PUBLISHER_REF="$(jq -er '.images["workspace-publisher"]' "${manifest}")"
+  LIVE_ACP_GENERAL_WORKER_REF="$(jq -er '.images["general-worker"]' "${manifest}")"
+  export LIVE_ACP_CONTROLLER_REF LIVE_ACP_CODEX_REF LIVE_ACP_CLAUDE_REF LIVE_ACP_COPILOT_REF
+  export LIVE_ACP_OPENCODE_REF LIVE_ACP_PUBLISHER_REF LIVE_ACP_GENERAL_WORKER_REF
+  live_acp_kind_report_images
+}
+
+live_acp_kind_report_images() {
   acp_report_update '.builtImages = {controller:$controller, publisher:$publisher,
     codex:$codex, claude:$claude, copilot:$copilot, opencode:$opencode}' \
     --arg controller "${LIVE_ACP_CONTROLLER_REF}" --arg publisher "${LIVE_ACP_PUBLISHER_REF}" \
@@ -527,8 +557,13 @@ live_acp_kind_bootstrap() {
   live_acp_kind_create_cluster
   live_acp_kind_start_registry
   live_acp_kind_deploy_vekil
-  live_acp_kind_build_and_publish_images
-  live_acp_kind_deploy_orka
+  if [[ -n "${LIVE_ACP_RELEASE_BUNDLE_DIR:-}" ]]; then
+    live_acp_kind_use_release_images
+    live_acp_kind_deploy_release_chart
+  else
+    live_acp_kind_build_and_publish_images
+    live_acp_kind_deploy_orka
+  fi
   live_acp_kind_create_release_credentials
 }
 
