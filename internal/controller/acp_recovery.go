@@ -2439,6 +2439,12 @@ func (d *ACPDispatcher) recoveredTerminalDeliveryStatus(
 
 func (d *ACPDispatcher) patchRecoveredTerminalExecution(ctx context.Context, task *corev1alpha1.Task, attempt *store.PromptAttempt, epoch int64) error {
 	if attempt.ExecutionState == store.PromptExecutionSucceeded {
+		// The live settlement may have committed its projection before the
+		// terminal Task status reached this recovery pass. Preserve that record's
+		// message and delivery evidence instead of rebuilding a different payload.
+		if exists, err := d.validateExistingStandaloneTaskProjection(ctx, task, attempt); err != nil || exists {
+			return err
+		}
 		status, err := d.recoveredTerminalDeliveryStatus(ctx, task, attempt)
 		if err != nil {
 			return err

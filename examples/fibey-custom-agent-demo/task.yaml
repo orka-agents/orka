@@ -1,0 +1,26 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: fibey-quincy-north-alert
+  labels:
+    app.kubernetes.io/part-of: fibey-v2-demo
+spec:
+  type: agent
+  agentRef:
+    name: fibey-remote-agentkit
+  timeout: 5m
+  workspace:
+    intent: read
+  agentRuntime:
+    allowedTools: []
+  prompt: |
+    Investigate this synthetic Quincy North pump alert using only the evidence
+    below. Separate observations from hypotheses. Summarize the likely cause,
+    missing evidence, and safest next action. Do not claim to have contacted
+    anyone, changed equipment, or performed work outside this conversation.
+
+    Maintenance ended at 02:00. At 02:15 the discharge-pressure sensor began
+    reporting 0.2 bar, down from its prior 3.1 bar. The redundant gauge still
+    reads 3.0 bar. Flow, motor current, and vibration remain within their usual
+    ranges. The maintenance note says the pressure transmitter was replaced;
+    its calibration and wiring have not yet been independently checked.
