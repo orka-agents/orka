@@ -154,6 +154,43 @@ func TestUploadArtifactsContext_CanceledBeforeDelivery(t *testing.T) {
 	}
 }
 
+func TestUploadArtifactsContext_CancellationAfterAcceptedArtifact(t *testing.T) {
+	for _, artifactCount := range []int{1, 2} {
+		t.Run(fmt.Sprintf("artifacts=%d", artifactCount), func(t *testing.T) {
+			prepareArtifactsDir(t)
+			for i := range artifactCount {
+				writeArtifactFile(t, fmt.Sprintf("evidence-%d.txt", i), []byte("evidence"))
+			}
+			t.Setenv(workerenv.ControllerURL, "http://controller.invalid")
+			t.Setenv(workerenv.TaskNamespace, "test-ns")
+			t.Setenv(workerenv.TaskName, "test-task")
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			body := &cancelingDeliveryBody{cancel: cancel}
+			attempts := 0
+			originalTransport := http.DefaultTransport
+			http.DefaultTransport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				attempts++
+				_ = request.Body.Close()
+				return &http.Response{StatusCode: http.StatusCreated, Body: body, Header: make(http.Header)}, nil
+			})
+			t.Cleanup(func() { http.DefaultTransport = originalTransport })
+
+			err := UploadArtifactsContext(ctx)
+			if artifactCount == 1 && err != nil {
+				t.Fatalf("accepted artifact batch returned error: %v", err)
+			}
+			if artifactCount == 2 && !errors.Is(err, context.Canceled) {
+				t.Fatalf("incomplete artifact batch error = %v, want cancellation", err)
+			}
+			if attempts != 1 || !body.closed || ctx.Err() == nil {
+				t.Fatalf("attempts = %d, body closed = %v, context error = %v", attempts, body.closed, ctx.Err())
+			}
+		})
+	}
+}
+
 func TestUploadArtifactsContext_CancelsBlockedTransport(t *testing.T) {
 	prepareArtifactsDir(t)
 	writeArtifactFile(t, "evidence.txt", []byte("evidence"))

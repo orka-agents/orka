@@ -78,7 +78,8 @@ func SubmitResultContext(ctx context.Context, result []byte) error {
 			fmt.Fprintf(os.Stderr, "warning: failed to write stdout result marker file: %v\n", err)
 		}
 		fmt.Println(marker)
-		return ctx.Err()
+		// Publishing the marker completes delivery even if the caller cancels during the write.
+		return nil
 	}
 
 	endpoint, err := resultEndpoint()

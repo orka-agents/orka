@@ -353,7 +353,8 @@ func uploadPendingArtifacts(
 	if len(uploadErrors) > 0 {
 		return fmt.Errorf("some artifacts failed to upload: %s", strings.Join(uploadErrors, "; "))
 	}
-	return ctx.Err()
+	// Every upload succeeded; later cancellation cannot undo the completed batch.
+	return nil
 }
 
 func artifactEndpointBase() (string, error) {

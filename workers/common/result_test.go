@@ -358,6 +358,55 @@ func TestSubmitResult_ResultStdoutWritesMarkerFile(t *testing.T) {
 	}
 }
 
+func TestSubmitResultContext_PreservesPublishedStdoutMarkerAfterCancellation(t *testing.T) {
+	markerPath := filepath.Join(t.TempDir(), "orka-result-marker")
+	originalMarkerPath := resultStdoutMarkerPath
+	resultStdoutMarkerPath = markerPath
+	t.Cleanup(func() { resultStdoutMarkerPath = originalMarkerPath })
+	t.Setenv(workerenv.ResultStdout, "true")
+	t.Setenv(workerenv.ResultStdoutToken, "")
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close() //nolint:errcheck
+	defer writer.Close() //nolint:errcheck
+	originalStdout := os.Stdout
+	os.Stdout = writer
+	defer func() { os.Stdout = originalStdout }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Exceed the pipe buffer so cancellation lands during marker publication.
+	result := []byte(strings.Repeat("x", 1<<20))
+	done := make(chan error, 1)
+	go func() {
+		done <- SubmitResultContext(ctx, result)
+		_ = writer.Close()
+	}()
+	first := make([]byte, 1)
+	if _, err := io.ReadFull(reader, first); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	rest, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("published stdout result returned error: %v", err)
+	}
+	wantMarker := workerenv.ResultStdoutPrefix + base64.StdEncoding.EncodeToString(result) + "\n"
+	if string(first)+string(rest) != wantMarker {
+		t.Fatal("stdout marker was not fully published")
+	}
+	data, err := os.ReadFile(markerPath)
+	if err != nil || string(data) != wantMarker {
+		t.Fatalf("marker file was not fully published: %v", err)
+	}
+}
+
 func TestDoPostWithRetry_Retries500ThenSucceeds(t *testing.T) {
 	var attempts atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
