@@ -72,10 +72,11 @@ copies staging into `deploy/` and `charts/orka/`. **Prepare Release** in
 candidate, and dispatches its checks and publication workflow using
 `GITHUB_TOKEN`. It does not create a release-preparation PR or push to `main`.
 
-The workflow builds the release images and qualifies the exact packaged chart
-and image digests before waiting for approval in the `release` environment.
-After approval, it rechecks the evidence, tags the candidate, and publishes the
-qualified artifacts. See [release automation and ACP qualification](acp-release-gate.md)
+The workflow builds the release images, then waits for approval in
+`live-acp-release-gate` before credentialed qualification of the exact packaged
+chart and image digests. After qualification, a separate `release` environment
+approval permits tagging and publication of the qualified artifacts. See
+[release automation and ACP qualification](acp-release-gate.md)
 for environment setup, dispatch, evidence, and retries. Ordinary nightly smoke
 and component tests do not satisfy the publication gate.
 

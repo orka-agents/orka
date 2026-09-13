@@ -533,7 +533,7 @@ jobs:
     name: Qualify the published digests and packaged chart
     needs: [validate-release, candidate-bundle, lint, tests, helm, govulncheck, sign-and-attest]
     runs-on: ubuntu-latest
-    timeout-minutes: 270
+    timeout-minutes: 360
     permissions:
       actions: write
       contents: read

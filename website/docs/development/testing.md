@@ -150,8 +150,9 @@ missing or mismatched artifacts staying not ready.
 - `.github/workflows/live-acp-release-gate.yml` uses `workflow_dispatch` and is
   serialized. The release workflow dispatches it automatically. Restrict the
   `live-acp-release-gate` environment to `main` and exact permitted release
-  branches. It accepts the configured canary fork and a full source SHA that
-  must equal both the dispatched workflow commit and selected branch head.
+  branches, require a trusted reviewer, and disable administrator bypass before
+  exposing canary credentials. It accepts the configured canary fork and a full
+  source SHA that must equal both the dispatched workflow commit and selected branch head.
   The canary PR base must be that same branch. It requires these environment
   secrets:
   `COPILOT_GITHUB_TOKEN`, `ACP_E2E_WRITE_READ_CREDENTIAL_TOKEN`,

@@ -4,10 +4,10 @@ description: Qualify an ACP release candidate with deployed publication, indepen
 
 # Release automation and ACP qualification
 
-Start a release with **Prepare Release**, then approve the qualified candidate
-in the `release` environment. Preparation, workflow dispatch, tagging, image
-promotion, chart publication, and release evidence archival use only
-`GITHUB_TOKEN`. The organization can keep its policy that prohibits Actions
+Start a release with **Prepare Release**, approve credentialed qualification,
+then approve publication of the qualified candidate. Preparation, workflow
+dispatch, tagging, image promotion, chart publication, and release evidence
+archival use only `GITHUB_TOKEN`. The organization can keep its policy that prohibits Actions
 from creating or approving PRs. Release preparation does not create a PR.
 
 The flow is:
@@ -16,6 +16,8 @@ The flow is:
 2. Preparation updates the version, generates staging, promotes the release
    snapshots, and commits them on `release-0.2`. A new release line starts from
    the dispatched `main` commit. An existing line starts from its own head.
+   Before running that line's commands, preparation verifies its workflows,
+   scripts, generator code, and toolchain against the dispatched `main` commit.
    Beta and RC versions use the same `release-X.Y` branch. Preparation never
    pushes to `main`.
 3. Preparation explicitly dispatches `release.yml` at that generated commit.
@@ -24,7 +26,9 @@ The flow is:
    SBOMs, and signs the images. Trivy findings remain advisory; scanner and
    SARIF-upload failures still fail the run.
 4. Release dispatches **Live ACP Release Gate** with the exact candidate
-   bundle. The gate installs the packaged chart using the built image digests,
+   bundle. A `live-acp-release-gate` environment reviewer must approve the
+   candidate source and workflow before the job can receive canary credentials.
+   The gate installs the packaged chart using the built image digests,
    verifies durable results after controller replacement, rejects an
    opposite-mode upgrade, and runs canonical ACP acceptance and canary cleanup.
    It does not rebuild the release images.
@@ -41,8 +45,11 @@ See GitHub's [workflow trigger rules](https://docs.github.com/en/actions/how-tos
 
 ## One-time configuration
 
-The automation must first be merged into `main`. Backport it to an existing
-release line before preparing another version on that line.
+The automation must first be merged into `main`. Backport the current release
+tooling to an existing release line before preparing another version on that
+line. Runtime backports can differ, but executable release tooling must match
+the dispatched `main` commit. Only the literal Makefile version assignment is
+excluded from that comparison.
 
 Create a `release` environment with:
 
@@ -55,6 +62,9 @@ Create a `release` environment with:
 No release environment secret is needed. Add the same exact release branch to
 `live-acp-release-gate`, retaining `main` for standalone qualification. These
 settings are prerequisites; the workflows check them but do not change them.
+The `live-acp-release-gate` environment also requires a reviewer with
+administrator bypass disabled. Review approval must protect credentials before
+any release-branch workflow runs, including a direct standalone dispatch.
 GitHub documents [environment protection rules](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments).
 
 Allow the native workflow token to push to the release branches and `gh-pages`.
@@ -72,10 +82,18 @@ gh workflow run release-pr.yml --repo orka-agents/orka --ref main \
   -f release_version=v0.2.0
 ```
 
-Preparation links the generated commit diff and the Release run in its job
-summary. Review that diff and the linked qualification evidence, then approve
-the waiting `release` deployment. Those are the two per-release human actions:
-dispatch and approval.
+Preparation links the source and generated commit diffs and the Release run in
+its job summary. Review the candidate source, workflows, generated changes, and
+build bundle before approving the waiting `live-acp-release-gate` deployment.
+After qualification succeeds, review the acceptance evidence and approve the
+`release` deployment. The per-release human actions are dispatch, approval to
+use the canary credentials, and approval to publish.
+
+Finish or cancel any existing live gate before qualification. The release
+refuses to enqueue behind an active or approval-pending standalone run. Approve
+the new live gate within 90 minutes so its four-hour execution budget fits
+inside the parent workflow's six-hour job limit. If that budget expires, cancel
+the pending gate and retry the failed qualification job.
 
 Before a tag exists, use **Re-run all jobs** if an interrupted build left partial
 artifacts. This makes a new artifact set and requires fresh qualification. If
@@ -107,8 +125,12 @@ Configure the `live-acp-release-gate` environment in `orka-agents/orka`:
 
 - Select deployment branches by name. Allow `main` and explicitly selected
   release lines, such as `release-0.2`. Do not allow tags, PR refs, or arbitrary
-  branches. The final release approval belongs to the `release` environment;
-  adding reviewers here would require another approval before qualification.
+  branches.
+- Require a trusted reviewer and disable administrator bypass. This approval
+  protects the canary credentials from unreviewed release-branch workflows.
+  Keep Prevent self-review disabled if the trusted release maintainer also
+  dispatches and approves the run. Final publication has a separate approval
+  in the `release` environment.
 - Set the environment variable `ACP_E2E_WRITE_PUBLICATION_REPO` to
   `https://github.com/sozercan/orka-acp-release-gate.git`. An optional dispatch
   override must identify this same repository.

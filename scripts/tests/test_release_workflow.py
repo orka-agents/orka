@@ -94,7 +94,8 @@ class ReleaseTest(ReleaseFixture):
                        "protection_rules": [{"type": "required_reviewers", "reviewers": [{"id": 42}]}]}
         policies = [{"type": "branch", "name": BRANCH}]
         with patch.object(release, "api", return_value=environment), patch.object(release, "paginated", return_value=policies):
-            release.check_environment("release", BRANCH, approval=True)
+            for name in ("release", "live-acp-release-gate"):
+                release.check_environment(name, BRANCH)
         mutations = [
             ({**environment, "protection_rules": []}, policies),
             ({**environment, "protection_rules": [{"type": "required_reviewers", "reviewers": []}]}, policies),
@@ -104,10 +105,11 @@ class ReleaseTest(ReleaseFixture):
             (environment, [{"type": "tag", "name": BRANCH}]),
             (environment, [{"type": "branch", "name": "main"}]),
         ]
-        for env, rules in mutations:
-            with self.subTest(env=env, rules=rules), patch.object(release, "api", return_value=env), \
-                    patch.object(release, "paginated", return_value=rules), self.assertRaises(RuntimeError):
-                release.check_environment("release", BRANCH, approval=True)
+        for name in ("release", "live-acp-release-gate"):
+            for env, rules in mutations:
+                with self.subTest(name=name, env=env, rules=rules), patch.object(release, "api", return_value=env), \
+                        patch.object(release, "paginated", return_value=rules), self.assertRaises(RuntimeError):
+                    release.check_environment(name, BRANCH)
 
     def test_missing_environment_stops_preparation_before_push_or_dispatch(self):
         with patch.object(release, "api", return_value={"default_branch": "main"}), \
@@ -215,8 +217,19 @@ class ReleaseTest(ReleaseFixture):
 
     def test_failed_live_gate_never_prepares_approval_evidence(self):
         with patch.object(release, "check_context"), patch.object(release, "dispatch", side_effect=RuntimeError("gate failed")), \
+                patch.object(release, "paginated", return_value=[]), \
                 self.assertRaises(RuntimeError):
             release.qualify(self.bundle)
+        self.assertFalse((self.bundle / "qualification.json").exists())
+
+    def test_busy_live_gate_stops_before_dispatch_or_approval_evidence(self):
+        for status in ("queued", "in_progress", "waiting", "requested", "pending"):
+            with self.subTest(status=status), patch.object(release, "check_context"), \
+                    patch.object(release, "paginated", return_value=[run(status=status)]), \
+                    patch.object(release, "dispatch") as dispatch, \
+                    self.assertRaisesRegex(RuntimeError, "Another live ACP release gate"):
+                release.qualify(self.bundle)
+            dispatch.assert_not_called()
         self.assertFalse((self.bundle / "qualification.json").exists())
 
     def test_registry_absence_is_distinct_from_auth_or_transport_failure(self):
@@ -391,7 +404,8 @@ class PreparationTest(unittest.TestCase):
             "scripts/release_workflow.py": "# automation is present on this release line\n",
             "manifest_staging/generated.txt": "initial\n", "deploy/generated.txt": "initial\n",
             "charts/orka/generated.txt": "initial\n",
-            "Makefile": "release-manifest:\n\t@printf '%s\\n' '$(NEWVERSION)' > manifest_staging/generated.txt\n"
+            "Makefile": "VERSION := v0.1.1\n"
+                        "release-manifest:\n\t@printf '%s\\n' '$(NEWVERSION)' > manifest_staging/generated.txt\n"
                         "promote-staging-manifest:\n\t@cp manifest_staging/generated.txt deploy/generated.txt\n"
                         "\t@cp manifest_staging/generated.txt charts/orka/generated.txt\n"
                         "verify-release-manifest:\n\t@test \"$$(cat deploy/generated.txt)\" = '$(NEWVERSION)'\n",
@@ -481,6 +495,53 @@ class PreparationTest(unittest.TestCase):
             release.prepare(VERSION)
         dispatch.assert_not_called()
         self.assertEqual(self.ref(f"refs/heads/{BRANCH}"), self.main)
+
+    def test_release_tooling_changes_stop_before_checkout_generation_or_dispatch(self):
+        changes = {
+            "Makefile": "VERSION := $(shell touch untrusted-command-ran)\n",
+            "GNUmakefile": "release-manifest:\n\t@touch untrusted-command-ran\n",
+            ".github/workflows/release.yml": "name: altered release workflow\n",
+            "scripts/release_workflow.py": "# altered release automation\n",
+            "cmd/build/helmify/untrusted.go": "package main\nfunc init() {}\n",
+            "bin/controller-gen": "#!/bin/sh\ntouch untrusted-command-ran\n",
+            "vendor/modules.txt": "# unreviewed vendored toolchain\n",
+            "go.mod": "module untrusted.invalid/release\n",
+            "go.work": "go 1.27\n",
+            ".agents/skills/kindctl/bin/kindctl": "#!/bin/sh\ntouch untrusted-command-ran\n",
+        }
+        for name, contents in changes.items():
+            with self.subTest(name=name):
+                self.git("checkout", "-B", BRANCH, "main")
+                path = self.checkout / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(contents)
+                self.git("add", name)
+                self.git("commit", "-m", "unreviewed release tooling")
+                base = self.git("rev-parse", "HEAD")
+                self.git("push", "--force", "origin", BRANCH)
+                self.git("checkout", "main")
+                with patch.object(release, "dispatch") as dispatch, \
+                        self.assertRaisesRegex(RuntimeError, "Release automation differs"):
+                    release.prepare(VERSION)
+                dispatch.assert_not_called()
+                self.assertEqual(self.git("rev-parse", "HEAD"), self.main)
+                self.assertEqual(self.ref(f"refs/heads/{BRANCH}"), base)
+                self.assertEqual((self.checkout / "deploy/generated.txt").read_text(), "initial\n")
+                self.assertFalse((self.checkout / "untrusted-command-ran").exists())
+
+    def test_previous_release_version_does_not_change_tooling_identity(self):
+        self.git("checkout", "-b", BRANCH)
+        makefile = self.checkout / "Makefile"
+        makefile.write_text(makefile.read_text().replace("VERSION := v0.1.1", "VERSION := v0.2.0-rc.1"))
+        self.git("add", "Makefile")
+        self.git("commit", "-m", "previous release version")
+        base = self.git("rev-parse", "HEAD")
+        self.git("push", "origin", BRANCH)
+        self.git("checkout", "main")
+        with patch.object(release, "dispatch", return_value=run()):
+            release.prepare(VERSION)
+        self.assertEqual(self.git("rev-parse", "HEAD^"), base)
+        self.assertEqual(self.ref("refs/heads/main"), self.main)
 
     def test_unexpected_untracked_generation_output_stops_before_push(self):
         makefile = self.checkout / "Makefile"

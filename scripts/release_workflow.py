@@ -112,12 +112,36 @@ def check_environment(name: str, branch: str, approval: bool = False) -> None:
     policies = paginated(f"repos/{REPOSITORY}/environments/{name}/deployment-branch-policies?per_page=100", "branch_policies")
     require(any(p.get("type") == "branch" and p.get("name") == branch for p in policies),
             f"Add the exact {branch} branch to the {name} environment; wildcard rules are insufficient")
-    if approval:
+    if approval or name in {"release", "live-acp-release-gate"}:
         require(any(rule.get("type") == "required_reviewers" and rule.get("reviewers")
                     for rule in environment.get("protection_rules", [])),
-                "The release environment must have a required reviewer before starting a release")
+                f"The {name} environment must have a required reviewer before starting a release")
         require(environment.get("can_admins_bypass") is False,
-                "Disable administrator bypass for the release environment")
+                f"Disable administrator bypass for the {name} environment")
+
+
+def check_preparation_automation(trusted: str, candidate: str) -> None:
+    """Check executable release tooling before checking out an existing line."""
+    require(SHA.fullmatch(trusted) and SHA.fullmatch(candidate), "invalid preparation source identity")
+    paths = (".github", "scripts", "cmd/build", ".agents/skills/kindctl", "bin", "vendor",
+             "go.mod", "go.sum", "go.work", "go.work.sum", "Makefile", "GNUmakefile", "makefile",
+             ":(exclude)cmd/build/helmify/static")
+    changed = command("git", "diff", "--name-only", "--no-renames", trusted, candidate, "--", *paths).splitlines()
+    if "Makefile" in changed:
+        # A previous preparation changes only this literal version assignment.
+        # Do not normalize arbitrary Make expressions, additions, or file modes.
+        def makefile_identity(commit: str) -> tuple[str, str]:
+            entry = command("git", "ls-tree", commit, "--", "Makefile").split()
+            require(len(entry) == 4 and entry[1] == "blob", "release Makefile is missing")
+            content = command("git", "show", f"{commit}:Makefile")
+            content = re.sub(rf"(?m)^VERSION := {VERSION.pattern}$", "VERSION := RELEASE_VERSION", content)
+            return entry[0], content
+
+        if makefile_identity(trusted) == makefile_identity(candidate):
+            changed.remove("Makefile")
+    require(not changed,
+            "Release automation differs from the dispatched default-branch commit; "
+            "backport the reviewed workflows, scripts, generator, and toolchain before preparation")
 
 
 def check_context(branch: str, candidate: str) -> None:
@@ -157,7 +181,9 @@ def dispatch(workflow: str, branch: str, candidate: str, inputs: dict, wait: boo
         time.sleep(5)
     print(f"Started https://github.com/{REPOSITORY}/actions/runs/{run['id']}")
     if wait:
-        deadline = time.monotonic() + 4 * 60 * 60 + 10 * 60
+        # The child has a four-hour execution limit. Leave time for its
+        # environment approval within the parent's six-hour runner limit.
+        deadline = time.monotonic() + 5 * 60 * 60 + 40 * 60
         while run["status"] != "completed":
             require(time.monotonic() < deadline, "qualification timed out; publication is blocked")
             time.sleep(15)
@@ -178,7 +204,8 @@ def tag_ref(version: str) -> dict | None:
 def prepare(version: str) -> None:
     branch = branch_for(version)
     default = api(f"repos/{REPOSITORY}")["default_branch"]
-    check_context(default, os.environ.get("GITHUB_SHA", ""))
+    trusted = os.environ.get("GITHUB_SHA", "")
+    check_context(default, trusted)
     require(not command("git", "status", "--porcelain"), "preparation requires a clean checkout")
     check_environment("release", branch, approval=True)
     check_environment("live-acp-release-gate", branch)
@@ -191,9 +218,10 @@ def prepare(version: str) -> None:
     if existing:
         command("git", "fetch", "origin", f"refs/heads/{branch}")
         base = existing["object"]["sha"]
+        check_preparation_automation(trusted, base)
         command("git", "checkout", "--detach", base)
     else:
-        base = os.environ["GITHUB_SHA"]
+        base = trusted
     require((ROOT / "scripts/release_workflow.py").is_file(), "backport release automation to this branch first")
     for args in (("make", "release-manifest", f"NEWVERSION={version}"),
                  ("make", "promote-staging-manifest"),
@@ -224,6 +252,9 @@ def prepare(version: str) -> None:
                            "permission; the expected branch head may also have changed.") from None
     summary(f"Prepared `{version}` at `{candidate}` on `{branch}`.\n\n"
             f"[Review generated changes](https://github.com/{REPOSITORY}/compare/{base}...{candidate}).")
+    if base != trusted:
+        summary(f"[Review release-line source changes](https://github.com/{REPOSITORY}/compare/{trusted}...{base}) "
+                "before approving qualification. Release tooling matches the dispatched default-branch commit.")
     run = dispatch("release.yml", branch, candidate, {
         "release_version": version, "candidate_sha": candidate,
         "dispatch_id": f"prepare-{os.environ['GITHUB_RUN_ID']}-{os.environ['GITHUB_RUN_ATTEMPT']}",
@@ -320,6 +351,9 @@ def qualify(directory: Path) -> None:
     check_context(data["branch"], data["candidateSHA"])
     require(data["buildRunID"] == os.environ.get("GITHUB_RUN_ID"),
             "qualification must use this workflow's own candidate bundle")
+    runs = paginated(f"repos/{REPOSITORY}/actions/workflows/live-acp-release-gate.yml/runs?per_page=100", "workflow_runs")
+    require(not any(run["status"] != "completed" for run in runs),
+            "Another live ACP release gate is active or awaiting approval; finish or cancel it before retrying qualification")
     run = dispatch("live-acp-release-gate.yml", data["branch"], data["candidateSHA"], {
         "source_repository": f"https://github.com/{REPOSITORY}.git",
         "source_ref": data["candidateSHA"], "pr_base": data["branch"],
