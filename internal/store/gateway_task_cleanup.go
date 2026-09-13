@@ -8,6 +8,7 @@ import (
 // GatewayTaskCleanupReceipt preserves the exact event-to-Task ownership after
 // retention compacts the event. It authorizes requesting ordinary Task deletion;
 // it does not replace runtime, Session, or Task finalizer cleanup evidence.
+// Keep it until an uncached Kubernetes read proves the exact Task UID is gone.
 type GatewayTaskCleanupReceipt struct {
 	Namespace    string    `json:"namespace"`
 	NamespaceUID string    `json:"namespaceUid"`
@@ -26,6 +27,23 @@ type GatewayTaskCleanupReceipt struct {
 // writer is event compaction; Task metadata cannot manufacture a receipt.
 type GatewayTaskCleanupReceiptStore interface {
 	GetGatewayTaskCleanupReceipt(context.Context, string, string, string) (*GatewayTaskCleanupReceipt, error)
+}
+
+// GatewayTaskCleanupReceiptFilter selects a bounded page in namespace/Task UID
+// order. The cursor is exclusive; Limit must be between 1 and 100.
+type GatewayTaskCleanupReceiptFilter struct {
+	Namespace      string
+	AfterNamespace string
+	AfterTaskUID   string
+	Limit          int
+}
+
+// GatewayTaskCleanupReceiptMaintenanceStore removes only receipts whose exact
+// Tasks no longer exist. The caller must establish absence with an uncached
+// Kubernetes read; elapsed retention or a cached miss is not sufficient.
+type GatewayTaskCleanupReceiptMaintenanceStore interface {
+	ListGatewayTaskCleanupReceipts(context.Context, GatewayTaskCleanupReceiptFilter) ([]GatewayTaskCleanupReceipt, error)
+	DeleteGatewayTaskCleanupReceipt(context.Context, string, string, string) error
 }
 
 // Validate checks the recorded ownership and the exact requested Task identity.

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -50,21 +52,39 @@ type gatewayCleanupTestCoordinator struct {
 	candidates []store.GatewaySessionCleanupCandidate
 	requests   []store.ReclaimGatewaySessionRequest
 	fence      store.ControllerEpochFence
+	listError  error
+	fenceError error
 }
 
-func (s *gatewayCleanupTestCoordinator) ListGatewaySessionCleanupCandidates(_ context.Context, namespace string, cutoff time.Time) ([]store.GatewaySessionCleanupCandidate, error) {
+func (s *gatewayCleanupTestCoordinator) ListGatewaySessionCleanupCandidates(_ context.Context, filter store.GatewaySessionCleanupFilter) (store.GatewaySessionCleanupPage, error) {
+	if s.listError != nil {
+		return store.GatewaySessionCleanupPage{}, s.listError
+	}
 	var candidates []store.GatewaySessionCleanupCandidate
 	for _, candidate := range s.candidates {
-		if candidate.Namespace == namespace {
-			candidate.Proof.TerminalCutoff = cutoff
+		if (filter.Namespace == "" || candidate.Namespace == filter.Namespace) &&
+			(candidate.Namespace > filter.AfterNamespace || (candidate.Namespace == filter.AfterNamespace && candidate.SessionName > filter.AfterSessionName)) {
+			candidate.Proof.TerminalCutoff = filter.TerminalCutoff
 			candidates = append(candidates, candidate)
 		}
 	}
-	return candidates, nil
+	slices.SortFunc(candidates, func(a, b store.GatewaySessionCleanupCandidate) int {
+		if a.Namespace != b.Namespace {
+			return strings.Compare(a.Namespace, b.Namespace)
+		}
+		return strings.Compare(a.SessionName, b.SessionName)
+	})
+	page := store.GatewaySessionCleanupPage{Complete: len(candidates) < filter.Limit}
+	page.Candidates = candidates[:min(len(candidates), filter.Limit)]
+	if len(page.Candidates) > 0 {
+		last := page.Candidates[len(page.Candidates)-1]
+		page.NextNamespace, page.NextSessionName = last.Namespace, last.SessionName
+	}
+	return page, nil
 }
 
 func (s *gatewayCleanupTestCoordinator) CurrentFence(context.Context) (store.ControllerEpochFence, error) {
-	return s.fence, nil
+	return s.fence, s.fenceError
 }
 
 func (s *gatewayCleanupTestCoordinator) ReclaimGatewaySession(_ context.Context, request store.ReclaimGatewaySessionRequest) error {
@@ -82,7 +102,7 @@ func TestGatewaySessionRetentionContinuesPastBlockedSession(t *testing.T) {
 		},
 		fence: store.ControllerEpochFence{Name: store.DefaultControllerEpochName, Epoch: 3, HolderID: "controller"},
 	}
-	service := &Service{Config: Config{Namespace: "default"}, SessionCleanup: coordinator, SessionCleanupCandidates: coordinator, SessionCleanupEpochs: coordinator}
+	service := &Service{Config: Config{Namespace: "default", BatchSize: 2}, SessionCleanup: coordinator, SessionCleanupCandidates: coordinator, SessionCleanupEpochs: coordinator}
 	now := time.Now().UTC()
 	cutoff := now.Add(-time.Hour)
 	if err := service.cleanupRetainedGatewaySessions(context.Background(), now, cutoff); !errors.Is(err, store.ErrConflict) {
@@ -95,6 +115,52 @@ func TestGatewaySessionRetentionContinuesPastBlockedSession(t *testing.T) {
 		if request.Fence != coordinator.fence || !request.RequestedAt.Equal(now) || !request.Session.Proof.TerminalCutoff.Equal(cutoff) {
 			t.Fatalf("cleanup lost current epoch or retention boundary: %+v", request)
 		}
+	}
+}
+
+func TestGatewaySessionRetentionPagesPastBlockedCandidatesAndWraps(t *testing.T) {
+	coordinator := &gatewayCleanupTestCoordinator{
+		candidates: []store.GatewaySessionCleanupCandidate{
+			{Namespace: "default", SessionName: "blocked"}, {Namespace: "default", SessionName: "ready"}, {Namespace: "unrelated", SessionName: "other"},
+		},
+		fence: store.ControllerEpochFence{Name: store.DefaultControllerEpochName, Epoch: 3, HolderID: "controller"},
+	}
+	service := &Service{Config: Config{Namespace: "default", BatchSize: 1}, SessionCleanup: coordinator, SessionCleanupCandidates: coordinator, SessionCleanupEpochs: coordinator}
+	now := time.Now().UTC()
+	cutoff := now.Add(-time.Hour)
+	for _, failedRead := range []*error{&coordinator.listError, &coordinator.fenceError} {
+		*failedRead = store.ErrConflict
+		if err := service.cleanupRetainedGatewaySessions(t.Context(), now, cutoff); !errors.Is(err, store.ErrConflict) {
+			t.Fatalf("read failure lost: %v", err)
+		}
+		*failedRead = nil
+		if len(coordinator.requests) != 0 {
+			t.Fatal("cleanup continued without its candidate page and current fence")
+		}
+	}
+	if err := service.cleanupRetainedGatewaySessions(t.Context(), now, cutoff); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("blocked Session error lost: %v", err)
+	}
+	if len(coordinator.requests) != 1 || coordinator.requests[0].Session.SessionName != "blocked" {
+		t.Fatalf("first bounded pass = %+v", coordinator.requests)
+	}
+	if err := service.cleanupRetainedGatewaySessions(t.Context(), now, cutoff); err != nil {
+		t.Fatal(err)
+	}
+	if len(coordinator.requests) != 2 || coordinator.requests[1].Session.SessionName != "ready" {
+		t.Fatalf("blocked Session starved the next page: %+v", coordinator.requests)
+	}
+	if err := service.cleanupRetainedGatewaySessions(t.Context(), now, cutoff); err != nil {
+		t.Fatal(err)
+	}
+	if len(coordinator.requests) != 2 {
+		t.Fatalf("cleanup crossed its namespace: %+v", coordinator.requests)
+	}
+	if err := service.cleanupRetainedGatewaySessions(t.Context(), now, cutoff); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("blocked Session was not retried after the scan wrapped: %v", err)
+	}
+	if len(coordinator.requests) != 3 || coordinator.requests[2].Session.SessionName != "blocked" {
+		t.Fatalf("wrapped pass = %+v", coordinator.requests)
 	}
 }
 

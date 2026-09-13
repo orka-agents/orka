@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -83,16 +84,20 @@ func TestGatewayRetentionArchivesTurnsAfterEventCompaction(t *testing.T) {
 	if _, err := s.MaintainGatewayRecords(ctx, intent.Namespace, intent.PreparedAt.Add(time.Minute), intent.Gateway.TerminalCutoff); err != nil {
 		t.Fatal(err)
 	}
-	candidates, err := s.ListGatewaySessionCleanupCandidates(ctx, intent.Namespace, intent.Gateway.TerminalCutoff)
-	if err != nil || len(candidates) != 1 {
-		t.Fatalf("candidates after event removal = %+v, %v", candidates, err)
+	page, err := s.ListGatewaySessionCleanupCandidates(ctx, store.GatewaySessionCleanupFilter{
+		Namespace: intent.Namespace, TerminalCutoff: intent.Gateway.TerminalCutoff, Limit: 25,
+	})
+	if err != nil || len(page.Candidates) != 1 {
+		t.Fatalf("candidates after event removal = %+v, %v", page, err)
 	}
-	candidate := candidates[0]
+	candidate := page.Candidates[0]
 	if candidate.SessionUID != turn.Key.SessionUID || candidate.Proof.GatewayUID != event.GatewayUID ||
 		candidate.Proof.BindingUID != event.BindingUID || !candidate.Proof.CreatedAt.Equal(intent.Gateway.CreatedAt) {
 		t.Fatalf("candidate lost immutable ownership: %+v", candidate)
 	}
-	if other, err := s.ListGatewaySessionCleanupCandidates(ctx, "another-namespace", intent.Gateway.TerminalCutoff); err != nil || len(other) != 0 {
+	if other, err := s.ListGatewaySessionCleanupCandidates(ctx, store.GatewaySessionCleanupFilter{
+		Namespace: "another-namespace", TerminalCutoff: intent.Gateway.TerminalCutoff, Limit: 25,
+	}); err != nil || len(other.Candidates) != 0 {
 		t.Fatalf("candidate lookup crossed namespace: %+v, %v", other, err)
 	}
 	if _, err := s.PrepareSessionCleanup(ctx, intent); err != nil {
@@ -293,9 +298,11 @@ func TestGatewayCleanupKeepsPendingEventsAndReplies(t *testing.T) {
 			if _, err := s.PrepareSessionCleanup(ctx, intent); !errors.Is(err, store.ErrConflict) {
 				t.Fatalf("pending %s must prevent cleanup: %v", state, err)
 			}
-			candidates, err := s.ListGatewaySessionCleanupCandidates(ctx, event.Namespace, intent.Gateway.TerminalCutoff)
-			if err != nil || len(candidates) != 0 {
-				t.Fatalf("pending %s became a candidate: %+v, %v", state, candidates, err)
+			page, err := s.ListGatewaySessionCleanupCandidates(ctx, store.GatewaySessionCleanupFilter{
+				Namespace: event.Namespace, TerminalCutoff: intent.Gateway.TerminalCutoff, Limit: 25,
+			})
+			if err != nil || len(page.Candidates) != 0 {
+				t.Fatalf("pending %s became a candidate: %+v, %v", state, page, err)
 			}
 		})
 	}
@@ -372,5 +379,215 @@ func TestGatewayCleanupMixedAgeTurnsAndAtomicReceiptArchive(t *testing.T) {
 		if _, err := s.GetSessionTurnCleanupReceipt(ctx, intent.Namespace, intent.SessionName, turn.PromptAttemptID); err != nil {
 			t.Fatalf("completed cleanup lost turn receipt: %v", err)
 		}
+	}
+}
+
+func seedGatewayCleanupSession(t *testing.T, s *Store, namespace, name, ownerRef string, updatedAt time.Time) {
+	t.Helper()
+	if _, err := s.db.ExecContext(t.Context(), `INSERT INTO sessions
+		(namespace, name, session_type, owner_type, owner_ref, created_at, updated_at)
+		VALUES (?, ?, 'gateway', 'gateway', ?, ?, ?)`,
+		namespace, name, ownerRef, updatedAt.Add(-time.Hour).UTC(), updatedAt.UTC()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGatewayCleanupCandidatePagesAcrossNamespaces(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := t.Context()
+	cutoff := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	for _, identity := range [][2]string{{"team-b", "b"}, {"team-a", "b"}, {"team-c", "a"}, {"team-b", "a"}, {"team-a", "a"}} {
+		seedGatewayCleanupSession(t, s, identity[0], identity[1], "gateway-uid/binding-uid", cutoff.Add(-time.Hour))
+	}
+	filter := store.GatewaySessionCleanupFilter{TerminalCutoff: cutoff, Limit: 2}
+	for step, want := range [][]string{{"team-a/a", "team-a/b"}, {"team-b/a", "team-b/b"}, {"team-c/a"}} {
+		page, err := s.ListGatewaySessionCleanupCandidates(ctx, filter)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := make([]string, 0, len(page.Candidates))
+		for _, candidate := range page.Candidates {
+			got = append(got, candidate.Namespace+"/"+candidate.SessionName)
+		}
+		if !slices.Equal(got, want) || page.NextNamespace+"/"+page.NextSessionName != want[len(want)-1] || page.Complete != (step == 2) {
+			t.Fatalf("page %d = %+v, want %v", step, page, want)
+		}
+		filter.AfterNamespace, filter.AfterSessionName = page.NextNamespace, page.NextSessionName
+		if step == 0 {
+			// Removing the first page, including its cursor row, must not shift
+			// the next page past Sessions in the following namespace.
+			if _, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE namespace = 'team-a'`); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
+func TestGatewayCleanupCandidatePagesAdvancePastMalformedOwners(t *testing.T) {
+	s := setupTestStore(t)
+	cutoff := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	for _, row := range [][2]string{
+		{"a", ""}, {"b", "gateway-uid/"}, {"c", "/binding-uid"},
+		{"d", "gateway-uid/binding-uid/extra"}, {"e", "gateway-uid/binding-uid"}, {"f", "malformed"},
+	} {
+		seedGatewayCleanupSession(t, s, "default", row[0], row[1], cutoff.Add(-time.Hour))
+	}
+	filter := store.GatewaySessionCleanupFilter{TerminalCutoff: cutoff, Limit: 2}
+	for step, want := range []struct {
+		candidateNames []string
+		nextNamespace  string
+		nextName       string
+		complete       bool
+	}{
+		{nextNamespace: "default", nextName: "b"},
+		{nextNamespace: "default", nextName: "d"},
+		{candidateNames: []string{"e"}, nextNamespace: "default", nextName: "f"},
+		{complete: true},
+	} {
+		page, err := s.ListGatewaySessionCleanupCandidates(t.Context(), filter)
+		if err != nil {
+			t.Fatal(err)
+		}
+		names := make([]string, 0, len(page.Candidates))
+		for _, candidate := range page.Candidates {
+			names = append(names, candidate.SessionName)
+		}
+		if !slices.Equal(names, want.candidateNames) || page.NextNamespace != want.nextNamespace ||
+			page.NextSessionName != want.nextName || page.Complete != want.complete {
+			t.Fatalf("page %d lost raw row progress: %+v, want %+v", step, page, want)
+		}
+		filter.AfterNamespace, filter.AfterSessionName = page.NextNamespace, page.NextSessionName
+	}
+}
+
+func TestGatewayCleanupCandidatePagesProgressPastBlockedCleanup(t *testing.T) {
+	s, intent, _, _ := gatewayCleanupFixture(t)
+	ctx := t.Context()
+	compactGatewayCleanupFixture(t, s, intent)
+	if _, err := s.db.ExecContext(ctx, `UPDATE outbox_projections SET state = 'Pending', delivered_at = NULL, delivery_digest = ''`); err != nil {
+		t.Fatal(err)
+	}
+	seedGatewayCleanupSession(t, s, intent.Namespace, "later-session", "gateway-uid/binding-uid", intent.Gateway.CreatedAt)
+	filter := store.GatewaySessionCleanupFilter{TerminalCutoff: intent.Gateway.TerminalCutoff, Limit: 1}
+	first, err := s.ListGatewaySessionCleanupCandidates(ctx, filter)
+	if err != nil || len(first.Candidates) != 1 || first.Candidates[0].SessionName != intent.SessionName || first.Complete {
+		t.Fatalf("first page = %+v, %v", first, err)
+	}
+	if _, err := s.PrepareSessionCleanup(ctx, intent); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("pending projection must block the first cleanup: %v", err)
+	}
+	filter.AfterNamespace, filter.AfterSessionName = first.NextNamespace, first.NextSessionName
+	second, err := s.ListGatewaySessionCleanupCandidates(ctx, filter)
+	if err != nil || len(second.Candidates) != 1 || second.Candidates[0].SessionName != "later-session" || second.Complete {
+		t.Fatalf("blocked first Session prevented later progress: %+v, %v", second, err)
+	}
+	candidate := second.Candidates[0]
+	operationID, operationDigest := store.GatewaySessionCleanupOperation(candidate.Namespace, candidate.SessionName, candidate.SessionUID,
+		candidate.Proof.GatewayUID, candidate.Proof.BindingUID)
+	later := store.SessionCleanupIntent{
+		Namespace: candidate.Namespace, SessionName: candidate.SessionName, SessionUID: candidate.SessionUID,
+		OperationID: operationID, OperationDigest: operationDigest, PreparedAt: intent.PreparedAt, Gateway: &candidate.Proof,
+	}
+	if _, err := s.PrepareSessionCleanup(ctx, later); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CompleteSessionCleanup(ctx, store.CompleteSessionCleanupRequest{
+		Namespace: later.Namespace, SessionName: later.SessionName, OperationID: later.OperationID, OperationDigest: later.OperationDigest,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetSession(ctx, later.Namespace, later.SessionName); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("later Session did not complete cleanup: %v", err)
+	}
+	if _, err := s.GetSession(ctx, intent.Namespace, intent.SessionName); err != nil {
+		t.Fatalf("pagination removed the blocked Session: %v", err)
+	}
+	filter.AfterNamespace, filter.AfterSessionName = second.NextNamespace, second.NextSessionName
+	last, err := s.ListGatewaySessionCleanupCandidates(ctx, filter)
+	if err != nil || len(last.Candidates) != 0 || !last.Complete {
+		t.Fatalf("last page = %+v, %v", last, err)
+	}
+	filter.AfterNamespace, filter.AfterSessionName = "", ""
+	retry, err := s.ListGatewaySessionCleanupCandidates(ctx, filter)
+	if err != nil || len(retry.Candidates) != 1 || retry.Candidates[0].SessionName != intent.SessionName {
+		t.Fatalf("wrapped scan lost the blocked Session retry: %+v, %v", retry, err)
+	}
+}
+
+func TestGatewayCleanupCandidatePagesKeepExactCutoffAndScope(t *testing.T) {
+	s := setupTestStore(t)
+	cutoff := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	for _, namespace := range []string{"team-a", "team-b"} {
+		for i, name := range []string{"a-old", "b-boundary", "c-new"} {
+			seedGatewayCleanupSession(t, s, namespace, name, "gateway-uid/binding-uid", cutoff.Add(time.Duration(i-1)*time.Second))
+		}
+	}
+	filter := store.GatewaySessionCleanupFilter{
+		Namespace: "team-a", TerminalCutoff: cutoff.In(time.FixedZone("offset", -7*60*60)), Limit: 100,
+	}
+	page, err := s.ListGatewaySessionCleanupCandidates(t.Context(), filter)
+	if err != nil || len(page.Candidates) != 1 || !page.Complete || page.NextNamespace != "team-a" || page.NextSessionName != "a-old" {
+		t.Fatalf("scoped exclusive cutoff = %+v, %v", page, err)
+	}
+	candidate := page.Candidates[0]
+	if candidate.Namespace != "team-a" || candidate.SessionName != "a-old" || !candidate.Proof.TerminalCutoff.Equal(cutoff) ||
+		candidate.Proof.TerminalCutoff.Location() != time.UTC || candidate.Proof.CreatedAt.Location() != time.UTC {
+		t.Fatalf("candidate lost exact UTC retention proof: %+v", candidate)
+	}
+	filter.AfterNamespace, filter.AfterSessionName = page.NextNamespace, page.NextSessionName
+	filter.TerminalCutoff = cutoff.Add(time.Second)
+	page, err = s.ListGatewaySessionCleanupCandidates(t.Context(), filter)
+	if err != nil || len(page.Candidates) != 1 || page.Candidates[0].Namespace != "team-a" ||
+		page.Candidates[0].SessionName != "b-boundary" || !page.Complete {
+		t.Fatalf("scoped cursor with advanced cutoff = %+v, %v", page, err)
+	}
+	filter.Namespace, filter.AfterNamespace, filter.AfterSessionName = "missing", "", ""
+	page, err = s.ListGatewaySessionCleanupCandidates(t.Context(), filter)
+	if err != nil || len(page.Candidates) != 0 || !page.Complete || page.NextNamespace != "" || page.NextSessionName != "" {
+		t.Fatalf("empty namespace crossed its scope: %+v, %v", page, err)
+	}
+}
+
+func TestGatewayCleanupCandidatePagesRejectInvalidLimitsAndCursors(t *testing.T) {
+	s := setupTestStore(t)
+	for _, filter := range []store.GatewaySessionCleanupFilter{
+		{Limit: 0}, {Limit: -1}, {Limit: 101},
+		{Limit: 1, Namespace: " default"},
+		{Limit: 1, Namespace: "de\x00fault"},
+		{Limit: 1, AfterNamespace: "default"},
+		{Limit: 1, AfterSessionName: "session"},
+		{Limit: 1, AfterNamespace: " default", AfterSessionName: "session"},
+		{Limit: 1, AfterNamespace: "default", AfterSessionName: "session\n"},
+		{Limit: 1, AfterNamespace: "default", AfterSessionName: "ses\x00sion"},
+	} {
+		page, err := s.ListGatewaySessionCleanupCandidates(t.Context(), filter)
+		if !errors.Is(err, store.ErrValidation) {
+			t.Fatalf("filter %+v did not reject invalid input: %v", filter, err)
+		}
+		if len(page.Candidates) != 0 || page.NextNamespace != "" || page.NextSessionName != "" || page.Complete {
+			t.Fatalf("invalid filter returned progress: %+v", page)
+		}
+	}
+}
+
+func TestGatewayCleanupCandidatePagesDoNotReturnProgressOnReadError(t *testing.T) {
+	s := setupTestStore(t)
+	cutoff := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	for _, name := range []string{"a", "b"} {
+		seedGatewayCleanupSession(t, s, "default", name, "gateway-uid/binding-uid", cutoff.Add(-time.Hour))
+	}
+	filter := store.GatewaySessionCleanupFilter{TerminalCutoff: cutoff, Limit: 2}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	page, err := s.ListGatewaySessionCleanupCandidates(ctx, filter)
+	if !errors.Is(err, context.Canceled) || len(page.Candidates) != 0 || page.NextNamespace != "" || page.NextSessionName != "" || page.Complete {
+		t.Fatalf("canceled read = %+v, %v", page, err)
+	}
+	if _, err := s.db.ExecContext(t.Context(), `UPDATE sessions SET created_at = 'not-a-time' WHERE namespace = 'default' AND name = 'b'`); err != nil {
+		t.Fatal(err)
+	}
+	page, err = s.ListGatewaySessionCleanupCandidates(t.Context(), filter)
+	if err == nil || len(page.Candidates) != 0 || page.NextNamespace != "" || page.NextSessionName != "" || page.Complete {
+		t.Fatalf("failed second row scan returned partial progress: %+v, %v", page, err)
 	}
 }

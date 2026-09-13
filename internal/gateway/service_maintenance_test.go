@@ -191,13 +191,13 @@ func (b *gatewayMaintenanceBlocker) MaintainGatewayRecords(ctx context.Context, 
 	return b.GatewayDeliveryStore.MaintainGatewayRecords(ctx, namespace, now, cutoff)
 }
 
-func (*gatewayMaintenanceBlocker) ListGatewaySessionCleanupCandidates(_ context.Context, namespace string, cutoff time.Time) ([]store.GatewaySessionCleanupCandidate, error) {
-	return []store.GatewaySessionCleanupCandidate{{
-		Namespace: namespace, SessionName: "blocked-retained-session", SessionUID: "blocked-session-uid",
+func (*gatewayMaintenanceBlocker) ListGatewaySessionCleanupCandidates(_ context.Context, filter store.GatewaySessionCleanupFilter) (store.GatewaySessionCleanupPage, error) {
+	return store.GatewaySessionCleanupPage{Complete: true, Candidates: []store.GatewaySessionCleanupCandidate{{
+		Namespace: filter.Namespace, SessionName: "blocked-retained-session", SessionUID: "blocked-session-uid",
 		Proof: store.GatewaySessionCleanupProof{
-			GatewayUID: "gateway-uid", BindingUID: "binding-uid", CreatedAt: cutoff.Add(-time.Hour), TerminalCutoff: cutoff,
+			GatewayUID: "gateway-uid", BindingUID: "binding-uid", CreatedAt: filter.TerminalCutoff.Add(-time.Hour), TerminalCutoff: filter.TerminalCutoff,
 		},
-	}}, nil
+	}}}, nil
 }
 
 func (*gatewayMaintenanceBlocker) CurrentFence(context.Context) (store.ControllerEpochFence, error) {

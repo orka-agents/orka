@@ -126,6 +126,10 @@ type Service struct {
 	SessionCleanupEpochs     interface {
 		CurrentFence(context.Context) (store.ControllerEpochFence, error)
 	}
+	taskCleanupAfterNamespace    string
+	taskCleanupAfterUID          string
+	sessionCleanupAfterNamespace string
+	sessionCleanupAfterName      string
 }
 
 func (s *Service) freshReader() client.Reader {
@@ -208,29 +212,96 @@ func (s *Service) runMaintenanceLoop(ctx context.Context, logger logr.Logger) {
 			if err := s.cleanupRetainedGatewayTasks(ctx, terminalCutoff); err != nil {
 				logger.Error(err, "gateway Task retention cleanup failed")
 			}
+			if err := s.pruneGatewayTaskCleanupReceipts(ctx); err != nil {
+				logger.Error(err, "gateway Task cleanup receipt pruning remains pending")
+			}
 		}
 	}
+}
+
+// Receipt authority is needed until the exact Task disappears, even when it
+// has been deleting for longer than retention. Never infer absence from the
+// cache: a lagging informer must not strand a Task by losing its receipt.
+func (s *Service) pruneGatewayTaskCleanupReceipts(ctx context.Context) error {
+	if s == nil || s.APIReader == nil {
+		return nil
+	}
+	receipts, ok := s.EventStore.(store.GatewayTaskCleanupReceiptMaintenanceStore)
+	if !ok {
+		return nil
+	}
+	limit := min(max(s.Config.BatchSize, 1), 100)
+	page, err := receipts.ListGatewayTaskCleanupReceipts(ctx, store.GatewayTaskCleanupReceiptFilter{
+		Namespace: s.Config.Namespace, AfterNamespace: s.taskCleanupAfterNamespace,
+		AfterTaskUID: s.taskCleanupAfterUID, Limit: limit,
+	})
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, receipt := range page {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(append(errs, err)...)
+		}
+		// Advance even on a retained receipt or failed read/delete. Retry those
+		// entries after the scan wraps without starving independent receipts.
+		s.taskCleanupAfterNamespace, s.taskCleanupAfterUID = receipt.Namespace, receipt.TaskUID
+		var task corev1alpha1.Task
+		err := s.APIReader.Get(ctx, client.ObjectKey{Namespace: receipt.Namespace, Name: receipt.TaskName}, &task)
+		if err == nil && (task.UID == "" || string(task.UID) == receipt.TaskUID) {
+			continue
+		}
+		if err != nil && !apierrors.IsNotFound(err) {
+			errs = append(errs, fmt.Errorf("check Gateway Task cleanup receipt %s/%s: %w", receipt.Namespace, receipt.TaskName, err))
+			continue
+		}
+		if err := receipts.DeleteGatewayTaskCleanupReceipt(ctx, receipt.Namespace, receipt.TaskName, receipt.TaskUID); err != nil {
+			errs = append(errs, fmt.Errorf("prune Gateway Task cleanup receipt %s/%s: %w", receipt.Namespace, receipt.TaskName, err))
+		}
+	}
+	if len(page) < limit {
+		s.taskCleanupAfterNamespace, s.taskCleanupAfterUID = "", ""
+	}
+	return errors.Join(errs...)
 }
 
 func (s *Service) cleanupRetainedGatewaySessions(ctx context.Context, now, terminalCutoff time.Time) error {
 	if s.SessionCleanup == nil || s.SessionCleanupCandidates == nil || s.SessionCleanupEpochs == nil {
 		return nil
 	}
-	candidates, err := s.SessionCleanupCandidates.ListGatewaySessionCleanupCandidates(ctx, s.Config.Namespace, terminalCutoff)
-	if err != nil || len(candidates) == 0 {
-		return err
-	}
-	fence, err := s.SessionCleanupEpochs.CurrentFence(ctx)
+	page, err := s.SessionCleanupCandidates.ListGatewaySessionCleanupCandidates(ctx, store.GatewaySessionCleanupFilter{
+		Namespace: s.Config.Namespace, TerminalCutoff: terminalCutoff,
+		AfterNamespace: s.sessionCleanupAfterNamespace, AfterSessionName: s.sessionCleanupAfterName,
+		Limit: min(max(s.Config.BatchSize, 1), 100),
+	})
 	if err != nil {
 		return err
 	}
+	var fence store.ControllerEpochFence
+	if len(page.Candidates) > 0 {
+		fence, err = s.SessionCleanupEpochs.CurrentFence(ctx)
+		if err != nil {
+			return err
+		}
+	}
 	var errs []error
-	for _, candidate := range candidates {
+	for _, candidate := range page.Candidates {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(append(errs, err)...)
+		}
+		s.sessionCleanupAfterNamespace, s.sessionCleanupAfterName = candidate.Namespace, candidate.SessionName
 		if err := s.SessionCleanup.ReclaimGatewaySession(ctx, store.ReclaimGatewaySessionRequest{
 			Session: candidate, Fence: fence, RequestedAt: now,
 		}); err != nil {
 			errs = append(errs, fmt.Errorf("reclaim Gateway Session %s/%s: %w", candidate.Namespace, candidate.SessionName, err))
 		}
+	}
+	// Use raw query progress, including rows excluded for invalid ownership.
+	// Blocked candidates are retried when the scan wraps, without preventing
+	// later Sessions or Task receipt maintenance from making progress.
+	s.sessionCleanupAfterNamespace, s.sessionCleanupAfterName = page.NextNamespace, page.NextSessionName
+	if page.Complete {
+		s.sessionCleanupAfterNamespace, s.sessionCleanupAfterName = "", ""
 	}
 	return errors.Join(errs...)
 }

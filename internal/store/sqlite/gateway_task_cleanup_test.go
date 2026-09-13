@@ -183,6 +183,29 @@ func TestGatewayTaskCleanupReceiptSurvivesTombstoneExpiryAndReopen(t *testing.T)
 	var receipts int
 	require.NoError(t, s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM gateway_task_cleanup_receipts`).Scan(&receipts))
 	require.Equal(t, 2, receipts)
+
+	// Once the original Task is gone, removing its exact receipt must preserve
+	// the replacement's authority and both Sessions' independent completions.
+	for _, identity := range [][3]string{
+		{"other", event.TaskName, event.TaskUID},
+		{event.Namespace, "other-task", event.TaskUID},
+		{event.Namespace, event.TaskName, "other-uid"},
+	} {
+		require.NoError(t, s.DeleteGatewayTaskCleanupReceipt(ctx, identity[0], identity[1], identity[2]))
+		require.Equal(t, originalReceipt, requireGatewayTaskCleanupReceipt(t, s, event, now))
+	}
+	require.NoError(t, s.DeleteGatewayTaskCleanupReceipt(ctx, event.Namespace, event.TaskName, event.TaskUID))
+	require.NoError(t, s.DeleteGatewayTaskCleanupReceipt(ctx, event.Namespace, event.TaskName, event.TaskUID))
+	_, err = s.GetGatewayTaskCleanupReceipt(ctx, event.Namespace, event.TaskName, event.TaskUID)
+	require.ErrorIs(t, err, store.ErrNotFound)
+	requireGatewayTaskCleanupReceipt(t, s, fresh, nextCompaction)
+	for _, sessionName := range []string{event.SessionName, fresh.SessionName} {
+		_, err = s.GetSessionCleanupCompletion(ctx, event.Namespace, sessionName)
+		require.NoError(t, err)
+	}
+	duplicate, err = s.GetGatewayEventDuplicate(ctx, &fresh, nextCompaction.Add(time.Minute))
+	require.NoError(t, err)
+	require.Equal(t, fresh.SessionName, duplicate.SessionName)
 }
 
 func TestGatewayTaskCleanupReceiptRollsBackWithCompaction(t *testing.T) {
@@ -356,4 +379,72 @@ func TestGatewayTaskCleanupReceiptReadPropagatesStoreError(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 	require.False(t, errors.Is(err, store.ErrNotFound))
 	require.Nil(t, receipt)
+}
+
+func TestGatewayTaskCleanupReceiptPagesUseExactCursor(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := t.Context()
+	now := time.Now().UTC()
+	for _, identity := range [][2]string{{"team-b", "b-uid"}, {"team-a", "b-uid"}, {"team-b", "a-uid"}, {"team-a", "a-uid"}} {
+		event := gatewayTaskCleanupTestEvent(now.Add(-time.Hour), identity[0]+identity[1])
+		event.Namespace, event.TaskName, event.TaskUID = identity[0], "reused-name", identity[1]
+		tx, err := s.db.BeginTx(ctx, nil)
+		require.NoError(t, err)
+		require.NoError(t, archiveGatewayTaskCleanupReceiptTx(ctx, tx, &event, now))
+		require.NoError(t, tx.Commit())
+	}
+	first, err := s.ListGatewayTaskCleanupReceipts(ctx, store.GatewayTaskCleanupReceiptFilter{Limit: 2})
+	require.NoError(t, err)
+	require.Len(t, first, 2)
+	require.Equal(t, "team-a", first[0].Namespace)
+	require.Equal(t, "a-uid", first[0].TaskUID)
+	require.Equal(t, "team-a", first[1].Namespace)
+	require.Equal(t, "b-uid", first[1].TaskUID)
+	for _, receipt := range first {
+		require.NoError(t, s.DeleteGatewayTaskCleanupReceipt(ctx, receipt.Namespace, receipt.TaskName, receipt.TaskUID))
+	}
+	second, err := s.ListGatewayTaskCleanupReceipts(ctx, store.GatewayTaskCleanupReceiptFilter{
+		AfterNamespace: first[1].Namespace, AfterTaskUID: first[1].TaskUID, Limit: 2,
+	})
+	require.NoError(t, err)
+	require.Len(t, second, 2, "deleting a prior page must not skip rows in the next namespace")
+	require.Equal(t, "team-b", second[0].Namespace)
+	require.Equal(t, "a-uid", second[0].TaskUID)
+	require.Equal(t, "team-b", second[1].Namespace)
+	require.Equal(t, "b-uid", second[1].TaskUID)
+	last, err := s.ListGatewayTaskCleanupReceipts(ctx, store.GatewayTaskCleanupReceiptFilter{
+		AfterNamespace: second[1].Namespace, AfterTaskUID: second[1].TaskUID, Limit: 2,
+	})
+	require.NoError(t, err)
+	require.Empty(t, last)
+	scoped, err := s.ListGatewayTaskCleanupReceipts(ctx, store.GatewayTaskCleanupReceiptFilter{Namespace: "team-a", Limit: 2})
+	require.NoError(t, err)
+	require.Empty(t, scoped, "namespace scope must not match another namespace's identical Task UIDs")
+	scoped, err = s.ListGatewayTaskCleanupReceipts(ctx, store.GatewayTaskCleanupReceiptFilter{Namespace: "team-b", Limit: 1})
+	require.NoError(t, err)
+	require.Equal(t, second[:1], scoped)
+}
+
+func TestGatewayTaskCleanupReceiptMaintenanceRejectsInvalidInputAndStoreErrors(t *testing.T) {
+	s := setupTestStore(t)
+	for _, filter := range []store.GatewayTaskCleanupReceiptFilter{
+		{Limit: 0}, {Limit: -1}, {Limit: 101},
+		{Limit: 1, Namespace: " default"},
+		{Limit: 1, AfterNamespace: "default"},
+		{Limit: 1, AfterTaskUID: "task-uid"},
+		{Limit: 1, AfterNamespace: "default", AfterTaskUID: "task-uid\n"},
+	} {
+		_, err := s.ListGatewayTaskCleanupReceipts(t.Context(), filter)
+		require.ErrorIs(t, err, store.ErrValidation)
+	}
+	for _, identity := range [][3]string{
+		{"", "task", "uid"}, {"default", "", "uid"}, {"default", "task", ""}, {"default", " task", "uid"},
+	} {
+		require.ErrorIs(t, s.DeleteGatewayTaskCleanupReceipt(t.Context(), identity[0], identity[1], identity[2]), store.ErrValidation)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err := s.ListGatewayTaskCleanupReceipts(ctx, store.GatewayTaskCleanupReceiptFilter{Limit: 1})
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, s.DeleteGatewayTaskCleanupReceipt(ctx, "default", "task", "uid"), context.Canceled)
 }

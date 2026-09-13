@@ -73,41 +73,71 @@ func reclaimGatewayTranscriptTx(ctx context.Context, tx *sql.Tx, namespace, sess
 // ListGatewaySessionCleanupCandidates also finds Sessions whose event records
 // were compacted in an earlier maintenance pass. Runtime retirement must not
 // depend on the continued presence of that bounded event history.
-func (s *Store) ListGatewaySessionCleanupCandidates(ctx context.Context, namespace string, terminalCutoff time.Time) ([]store.GatewaySessionCleanupCandidate, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT session.namespace, session.name,
+func (s *Store) ListGatewaySessionCleanupCandidates(ctx context.Context, filter store.GatewaySessionCleanupFilter) (store.GatewaySessionCleanupPage, error) {
+	if filter.Limit < 1 || filter.Limit > 100 {
+		return store.GatewaySessionCleanupPage{}, store.ValidationErrorf("Gateway Session cleanup candidate limit must be between 1 and 100")
+	}
+	if filter.Namespace != "" {
+		if err := store.ValidateControlIdentifier("Session namespace", filter.Namespace); err != nil {
+			return store.GatewaySessionCleanupPage{}, err
+		}
+	}
+	if filter.AfterNamespace != "" || filter.AfterSessionName != "" {
+		for field, value := range map[string]string{"cursor namespace": filter.AfterNamespace, "cursor Session name": filter.AfterSessionName} {
+			if err := store.ValidateControlIdentifier(field, value); err != nil {
+				return store.GatewaySessionCleanupPage{}, err
+			}
+		}
+	}
+	query := `SELECT session.namespace, session.name,
 		COALESCE(NULLIF(session.control_session_uid, ''),
 		  (SELECT MIN(turn.session_uid) FROM session_turns turn
 		   WHERE turn.namespace = session.namespace AND turn.session_name = session.name), ''),
 		session.owner_ref, session.created_at
 		FROM sessions session
-		WHERE (? = '' OR session.namespace = ?) AND session.session_type = 'gateway' AND session.owner_type = 'gateway'
+		WHERE (session.namespace, session.name) > (?, ?)
+		  AND session.session_type = 'gateway' AND session.owner_type = 'gateway'
 		  AND session.active_task = '' AND session.active_task_uid = '' AND session.chat_turn_id = ''
 		  AND session.updated_at < ?
 		  AND NOT EXISTS (SELECT 1 FROM session_messages message WHERE message.namespace = session.namespace AND message.session_name = session.name)
 		  AND NOT EXISTS (SELECT 1 FROM gateway_events event WHERE event.namespace = session.namespace AND event.session_name = session.name)
-		  AND NOT EXISTS (SELECT 1 FROM gateway_deliveries delivery WHERE delivery.namespace = session.namespace AND delivery.session_name = session.name)
-		ORDER BY session.namespace, session.name`, namespace, namespace, terminalCutoff.UTC())
+		  AND NOT EXISTS (SELECT 1 FROM gateway_deliveries delivery WHERE delivery.namespace = session.namespace AND delivery.session_name = session.name)`
+	args := []any{filter.AfterNamespace, filter.AfterSessionName, filter.TerminalCutoff.UTC()}
+	if filter.Namespace != "" {
+		query += " AND session.namespace = ?"
+		args = append(args, filter.Namespace)
+	}
+	query += " ORDER BY session.namespace, session.name LIMIT ?"
+	args = append(args, filter.Limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return store.GatewaySessionCleanupPage{}, err
 	}
 	defer rows.Close() //nolint:errcheck
-	var candidates []store.GatewaySessionCleanupCandidate
+	var page store.GatewaySessionCleanupPage
+	var scanned int
 	for rows.Next() {
 		var candidate store.GatewaySessionCleanupCandidate
 		var ownerRef string
 		if err := rows.Scan(&candidate.Namespace, &candidate.SessionName, &candidate.SessionUID, &ownerRef, &candidate.Proof.CreatedAt); err != nil {
-			return nil, err
+			return store.GatewaySessionCleanupPage{}, err
 		}
+		scanned++
+		page.NextNamespace, page.NextSessionName = candidate.Namespace, candidate.SessionName
 		parts := strings.Split(ownerRef, "/")
 		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 			continue // No exact Gateway/Binding identity authorizes this row.
 		}
 		candidate.Proof.GatewayUID, candidate.Proof.BindingUID = parts[0], parts[1]
 		candidate.Proof.CreatedAt = candidate.Proof.CreatedAt.UTC()
-		candidate.Proof.TerminalCutoff = terminalCutoff.UTC()
-		candidates = append(candidates, candidate)
+		candidate.Proof.TerminalCutoff = filter.TerminalCutoff.UTC()
+		page.Candidates = append(page.Candidates, candidate)
 	}
-	return candidates, rows.Err()
+	if err := rows.Err(); err != nil {
+		return store.GatewaySessionCleanupPage{}, err
+	}
+	page.Complete = scanned < filter.Limit
+	return page, nil
 }
 
 func validateGatewayCleanupProof(intent store.SessionCleanupIntent) error {

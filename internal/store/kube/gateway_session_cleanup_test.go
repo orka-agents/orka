@@ -280,8 +280,11 @@ func seedGatewaySessionCleanupState(t *testing.T, ctx context.Context, s *Store,
 		VALUES (?, ?, ?, ?, 'published-task', ?, ?, ?, 1, ?, ?)`,
 		control.Namespace, proof.GatewayUID, name+"-external-event", name+"-event", turn.Key.TaskUID,
 		testDigest(name+"-envelope"), name, testNow.Add(48*time.Hour), testNow.Add(time.Hour))
-	candidates, err := persistence.ListGatewaySessionCleanupCandidates(ctx, control.Namespace, proof.TerminalCutoff)
+	page, err := persistence.ListGatewaySessionCleanupCandidates(ctx, controlstore.GatewaySessionCleanupFilter{
+		Namespace: control.Namespace, TerminalCutoff: proof.TerminalCutoff, Limit: 25,
+	})
 	require.NoError(t, err)
+	candidates := page.Candidates
 	require.Equal(t, []controlstore.GatewaySessionCleanupCandidate{{
 		Namespace: control.Namespace, SessionName: name, SessionUID: control.SessionUID, Proof: proof,
 	}}, candidates, "retention must still find the Session after its source event was compacted")

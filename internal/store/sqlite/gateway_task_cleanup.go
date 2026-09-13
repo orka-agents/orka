@@ -11,6 +11,7 @@ import (
 )
 
 var _ store.GatewayTaskCleanupReceiptStore = (*Store)(nil)
+var _ store.GatewayTaskCleanupReceiptMaintenanceStore = (*Store)(nil)
 
 func gatewayTaskCleanupSchemaStatements() []string {
 	return []string{
@@ -41,6 +42,71 @@ func (s *Store) GetGatewayTaskCleanupReceipt(ctx context.Context, namespace, tas
 		}
 	}
 	return getGatewayTaskCleanupReceiptQuery(ctx, s.db, namespace, taskName, taskUID)
+}
+
+// ListGatewayTaskCleanupReceipts uses the primary key as an exclusive cursor so
+// receipts retained for live Tasks cannot starve later entries.
+func (s *Store) ListGatewayTaskCleanupReceipts(ctx context.Context, filter store.GatewayTaskCleanupReceiptFilter) ([]store.GatewayTaskCleanupReceipt, error) {
+	if filter.Limit < 1 || filter.Limit > 100 {
+		return nil, store.ValidationErrorf("Gateway Task cleanup receipt limit must be between 1 and 100")
+	}
+	if filter.Namespace != "" {
+		if err := store.ValidateControlIdentifier("Task namespace", filter.Namespace); err != nil {
+			return nil, err
+		}
+	}
+	if filter.AfterNamespace != "" || filter.AfterTaskUID != "" {
+		for field, value := range map[string]string{"cursor namespace": filter.AfterNamespace, "cursor Task UID": filter.AfterTaskUID} {
+			if err := store.ValidateControlIdentifier(field, value); err != nil {
+				return nil, err
+			}
+		}
+	}
+	query := `SELECT namespace, namespace_uid, gateway_name, gateway_uid,
+		binding_name, binding_uid, event_id, task_name, task_uid, session_name, compacted_at
+		FROM gateway_task_cleanup_receipts WHERE (namespace, task_uid) > (?, ?)`
+	args := []any{filter.AfterNamespace, filter.AfterTaskUID}
+	if filter.Namespace != "" {
+		query += " AND namespace = ?"
+		args = append(args, filter.Namespace)
+	}
+	query += " ORDER BY namespace, task_uid LIMIT ?"
+	args = append(args, filter.Limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list Gateway Task cleanup receipts: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+	var receipts []store.GatewayTaskCleanupReceipt
+	for rows.Next() {
+		var receipt store.GatewayTaskCleanupReceipt
+		if err := rows.Scan(&receipt.Namespace, &receipt.NamespaceUID, &receipt.GatewayName, &receipt.GatewayUID,
+			&receipt.BindingName, &receipt.BindingUID, &receipt.EventID, &receipt.TaskName, &receipt.TaskUID,
+			&receipt.SessionName, &receipt.CompactedAt); err != nil {
+			return nil, err
+		}
+		receipt.CompactedAt = receipt.CompactedAt.UTC()
+		if err := receipt.Validate(receipt.Namespace, receipt.TaskName, receipt.TaskUID); err != nil {
+			return nil, err
+		}
+		receipts = append(receipts, receipt)
+	}
+	return receipts, rows.Err()
+}
+
+// DeleteGatewayTaskCleanupReceipt is idempotent and never deletes another
+// incarnation that reused the Task name.
+func (s *Store) DeleteGatewayTaskCleanupReceipt(ctx context.Context, namespace, taskName, taskUID string) error {
+	for field, value := range map[string]string{"Task namespace": namespace, "Task name": taskName, "Task UID": taskUID} {
+		if err := store.ValidateControlIdentifier(field, value); err != nil {
+			return err
+		}
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM gateway_task_cleanup_receipts WHERE namespace = ? AND task_name = ? AND task_uid = ?`, namespace, taskName, taskUID)
+	if err != nil {
+		return fmt.Errorf("delete Gateway Task cleanup receipt: %w", err)
+	}
+	return nil
 }
 
 func getGatewayTaskCleanupReceiptQuery(ctx context.Context, q queryRower, namespace, taskName, taskUID string) (*store.GatewayTaskCleanupReceipt, error) {
