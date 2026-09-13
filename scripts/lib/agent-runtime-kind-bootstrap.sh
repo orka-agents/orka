@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2016 # acp_report_update arguments are jq programs.
-# Shared, source-only bootstrap for the live ACP runtime validator on Kind.
+# Shared, source-only bootstrap for the agent runtime validator on Kind.
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-  echo "error: source scripts/lib/live-acp-runtime-kind-bootstrap.sh; do not execute it directly" >&2
+  echo "error: source scripts/lib/agent-runtime-kind-bootstrap.sh; do not execute it directly" >&2
   exit 2
 fi
 
 live_acp_kind_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/e2e-admission-tls.sh
 . "${live_acp_kind_lib_dir}/e2e-admission-tls.sh"
-# shellcheck source=scripts/lib/live-acp-release-report.sh
-. "${live_acp_kind_lib_dir}/live-acp-release-report.sh"
-# shellcheck source=scripts/lib/live-acp-release-chart.sh
-. "${live_acp_kind_lib_dir}/live-acp-release-chart.sh"
+# shellcheck source=scripts/lib/release-qualification-report.sh
+. "${live_acp_kind_lib_dir}/release-qualification-report.sh"
+# shellcheck source=scripts/lib/release-chart-acceptance.sh
+. "${live_acp_kind_lib_dir}/release-chart-acceptance.sh"
 unset live_acp_kind_lib_dir
 
 # Internal port-forward state is process-local. Reset inherited values so a
@@ -89,7 +89,7 @@ live_acp_kind_preflight() {
   fi
   [[ -x "${LIVE_ACP_KINDCTL_BIN}" ]] || live_acp_kind_die "kindctl is not executable: ${LIVE_ACP_KINDCTL_BIN}" || return 1
   [[ -x "${LIVE_ACP_VEKIL_DEPLOY_SCRIPT}" ]] || live_acp_kind_die "Vekil deploy script is not executable: ${LIVE_ACP_VEKIL_DEPLOY_SCRIPT}" || return 1
-  [[ -x "${LIVE_ACP_VALIDATOR_SCRIPT}" ]] || live_acp_kind_die "live ACP validator is not executable: ${LIVE_ACP_VALIDATOR_SCRIPT}" || return 1
+  [[ -x "${LIVE_ACP_VALIDATOR_SCRIPT}" ]] || live_acp_kind_die "agent runtime validator is not executable: ${LIVE_ACP_VALIDATOR_SCRIPT}" || return 1
   if [[ -n "${LIVE_ACP_VEKIL_LOCAL_IMAGE:-}" ]]; then
     # A locally built Vekil is published through the run's own registry and
     # digest-pinned there, so development builds stay immutable end to end.
@@ -335,7 +335,7 @@ live_acp_kind_probe_vekil_wire_path() {
   local provider="$1"
   local model="$2"
   local endpoint="$3"
-  local payload payload_file response_file error_file url http_code probe_value="live-acp-preflight"
+  local payload payload_file response_file error_file url http_code probe_value="agent-runtime-preflight"
   local authorization_header="Authori""zation" api_key_header="x-api-""key"
   local -a headers
 
@@ -470,7 +470,7 @@ live_acp_kind_deploy_vekil() {
     --name vekil \
     --image "${LIVE_ACP_VEKIL_IMAGE}" \
     --image-pull-policy IfNotPresent \
-    --create-copilot-token-secret live-acp-runtime-copilot:token \
+    --create-copilot-token-secret agent-runtime-copilot:token \
     --timeout "${LIVE_ACP_ROLLOUT_TIMEOUT}"
 
   local models_file="${LIVE_ACP_SECRET_DIR}/vekil-models.json"
@@ -523,10 +523,10 @@ live_acp_kind_create_release_credentials() {
     ACP_E2E_WRITE_FORGE_CREDENTIAL_TOKEN
   )
   local -a secret_names=(
-    live-acp-source-read
-    live-acp-target-read
-    live-acp-target-write
-    live-acp-forge
+    release-source-read
+    release-target-read
+    release-target-write
+    release-forge
   )
 
   live_acp_kind_log "Creating four role-separated release-gate credential Secrets"

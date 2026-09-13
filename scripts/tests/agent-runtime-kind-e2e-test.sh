@@ -11,8 +11,8 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
 fi
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-wrapper="${root}/scripts/live-acp-runtime-kind-e2e.sh"
-bootstrap="${root}/scripts/lib/live-acp-runtime-kind-bootstrap.sh"
+wrapper="${root}/scripts/agent-runtime-kind-e2e.sh"
+bootstrap="${root}/scripts/lib/agent-runtime-kind-bootstrap.sh"
 
 export ACP_E2E_OPENCODE_CONTEXT_WINDOW=32768
 export ACP_E2E_OPENCODE_MAX_TOKENS=4096
@@ -21,11 +21,11 @@ help="$(${wrapper} --help)"
 grep -F 'intentionally noninteractive' <<<"${help}" >/dev/null
 grep -F 'COPILOT_GITHUB_TOKEN is required' <<<"${help}" >/dev/null
 
-grep -F -- '--create-copilot-token-secret live-acp-runtime-copilot:token' "${bootstrap}" >/dev/null
+grep -F -- '--create-copilot-token-secret agent-runtime-copilot:token' "${bootstrap}" >/dev/null
 grep -F '/api/v1/namespaces/vekil-system/services/http:vekil:1337/proxy/v1/models' "${bootstrap}" >/dev/null
 grep -F 'ACP_E2E_COPILOT_MODEL:-gpt-5.3-codex' "${bootstrap}" >/dev/null
-grep -F 'LIVE_ACP_OPENCODE_IMAGE="orka-acp-opencode:live-acp-${image_tag}"' "${wrapper}" >/dev/null
-grep -F 'LIVE_ACP_GENERAL_WORKER_IMAGE="orka-general-worker:live-acp-${image_tag}"' "${wrapper}" >/dev/null
+grep -F 'LIVE_ACP_OPENCODE_IMAGE="orka-acp-opencode:agent-runtime-${image_tag}"' "${wrapper}" >/dev/null
+grep -F 'LIVE_ACP_GENERAL_WORKER_IMAGE="orka-general-worker:agent-runtime-${image_tag}"' "${wrapper}" >/dev/null
 grep -F 'ACP_OPENCODE_RUNTIME_IMG="${LIVE_ACP_OPENCODE_IMAGE}"' "${bootstrap}" >/dev/null
 grep -F 'GENERAL_WORKER_IMG="${LIVE_ACP_GENERAL_WORKER_IMAGE}"' "${bootstrap}" >/dev/null
 grep -F 'docker-build-acp-opencode-runtime' "${bootstrap}" >/dev/null
@@ -51,7 +51,7 @@ if grep -Eq 'set +-x|echo .*COPILOT_GITHUB_TOKEN' "${bootstrap}" "${wrapper}"; t
   exit 1
 fi
 
-# shellcheck source=scripts/lib/live-acp-runtime-kind-bootstrap.sh
+# shellcheck source=scripts/lib/agent-runtime-kind-bootstrap.sh
 . "${bootstrap}"
 inherited_state="$(
   LIVE_ACP_VEKIL_PORT_FORWARD_PID=123 \
@@ -65,7 +65,7 @@ inherited_state="$(
   exit 1
 }
 
-unowned_root="$(mktemp -d "${TMPDIR:-/tmp}/live-acp-unowned-forward.XXXXXX")"
+unowned_root="$(mktemp -d "${TMPDIR:-/tmp}/agent-runtime-unowned-forward.XXXXXX")"
 mkdir -p "${unowned_root}/owned"
 unowned_log="${unowned_root}/vekil-port-forward.unowned"
 printf 'keep\n' >"${unowned_log}"
@@ -80,7 +80,7 @@ live_acp_kind_stop_vekil_port_forward
 }
 rm -rf "${unowned_root}"
 
-catalog_root="$(mktemp -d "${TMPDIR:-/tmp}/live-acp-catalog-test.XXXXXX")"
+catalog_root="$(mktemp -d "${TMPDIR:-/tmp}/agent-runtime-catalog-test.XXXXXX")"
 catalog_file="${catalog_root}/models.json"
 cat >"${catalog_file}" <<'JSON'
 {
@@ -117,7 +117,7 @@ fi
 grep -F 'does not advertise required endpoint /chat/completions or compatible /responses' \
   <<<"${catalog_error}" >/dev/null
 
-LIVE_ACP_CONTEXT='kind-live-acp-test'
+LIVE_ACP_CONTEXT='kind-agent-runtime-test'
 LIVE_ACP_SECRET_DIR="${catalog_root}"
 wire_log="${catalog_root}/wire.log"
 port_forward_command_log="${catalog_root}/port-forward-command.log"
@@ -256,7 +256,7 @@ fi
 rm -rf "${catalog_root}"
 printf '%s\n' 'ok - Vekil preflight requires endpoint metadata and live streaming wire compatibility without credential disclosure'
 
-fake_bin="$(mktemp -d "${TMPDIR:-/tmp}/live-acp-kind-test.XXXXXX")"
+fake_bin="$(mktemp -d "${TMPDIR:-/tmp}/agent-runtime-kind-test.XXXXXX")"
 trap 'rm -rf "${fake_bin}"' EXIT
 for command in curl gh go kind kubectl make python3; do
   cat >"${fake_bin}/${command}" <<'STUB'
@@ -290,7 +290,7 @@ case "${1:-}" in
 esac
 STUB
 chmod +x "${fake_bin}/partial-kindctl"
-partial_secret_dir="$(mktemp -d "${TMPDIR:-/tmp}/live-acp-partial-create.XXXXXX")"
+partial_secret_dir="$(mktemp -d "${TMPDIR:-/tmp}/agent-runtime-partial-create.XXXXXX")"
 LIVE_ACP_SECRET_DIR="${partial_secret_dir}"
 LIVE_ACP_KEEP_CLUSTER=0
 LIVE_ACP_REGISTRY_STARTED=0
@@ -322,7 +322,7 @@ grep -Fx 'delete --tag partial-create-test' "${partial_create_log}" >/dev/null
 }
 printf '%s\n' 'ok - partial Kind create failures exact-clean by tag'
 
-cleanup_secret_dir="$(mktemp -d "${TMPDIR:-/tmp}/live-acp-cleanup-test.XXXXXX")"
+cleanup_secret_dir="$(mktemp -d "${TMPDIR:-/tmp}/agent-runtime-cleanup-test.XXXXXX")"
 LIVE_ACP_SECRET_DIR="${cleanup_secret_dir}"
 LIVE_ACP_KEEP_CLUSTER=0
 LIVE_ACP_REGISTRY_STARTED=0
@@ -337,7 +337,7 @@ if [[ -d "${cleanup_secret_dir}" ]]; then
   echo 'Kind cleanup did not remove its secret directory after deletion failure' >&2
   exit 1
 fi
-cleanup_secret_dir="$(mktemp -d "${TMPDIR:-/tmp}/live-acp-cleanup-test.XXXXXX")"
+cleanup_secret_dir="$(mktemp -d "${TMPDIR:-/tmp}/agent-runtime-cleanup-test.XXXXXX")"
 LIVE_ACP_SECRET_DIR="${cleanup_secret_dir}"
 set +e
 live_acp_kind_cleanup 23
@@ -440,7 +440,7 @@ fi
 grep -F 'ACP_E2E_REPO must equal ACP_E2E_WRITE_SOURCE_REPO' \
   "${fake_bin}/release-mismatch.out" >/dev/null
 
-printf '%s\n' 'ok - live ACP Kind bootstrap is noninteractive, secret-safe, and delegates to the canonical validator'
+printf '%s\n' 'ok - agent runtime Kind bootstrap is noninteractive, secret-safe, and delegates to the canonical validator'
 
 cat >"${fake_bin}/record-kindctl" <<'STUB'
 #!/usr/bin/env bash

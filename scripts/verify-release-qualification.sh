@@ -8,8 +8,8 @@ if [[ ( $# != 2 && $# != 3 ) || ! "$1" =~ ^[a-fA-F0-9]{40}$ || ! "$2" =~ ^[1-9][
 fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=scripts/lib/live-acp-release-report.sh
-. "${script_dir}/lib/live-acp-release-report.sh"
+# shellcheck source=scripts/lib/release-qualification-report.sh
+. "${script_dir}/lib/release-qualification-report.sh"
 candidate="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
 run_id="$2"
 repository=orka-agents/orka

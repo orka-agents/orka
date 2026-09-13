@@ -10,9 +10,9 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
 fi
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-script="${root}/scripts/live-acp-runtime-e2e.sh"
-# shellcheck source=scripts/lib/live-acp-release-report.sh
-. "${root}/scripts/lib/live-acp-release-report.sh"
+script="${root}/scripts/agent-runtime-e2e.sh"
+# shellcheck source=scripts/lib/release-qualification-report.sh
+. "${root}/scripts/lib/release-qualification-report.sh"
 export ACP_E2E_OPENCODE_CONTEXT_WINDOW=32768
 export ACP_E2E_OPENCODE_MAX_TOKENS=4096
 body="$(awk '/^delete_test_namespace_now\(\) \{/,/^\}$/' "${script}")"
@@ -43,7 +43,7 @@ done
 (( claims_line < namespace_line ))
 
 if grep -F -- '--subresource=status' "${script}" >/dev/null; then
-  echo 'live ACP validator still mutates controller-owned Task status' >&2
+  echo 'agent runtime validator still mutates controller-owned Task status' >&2
   exit 1
 fi
 grep -F 'task_observer_finalizer="acp-e2e.orka.ai/cancellation-observer"' "${script}" >/dev/null

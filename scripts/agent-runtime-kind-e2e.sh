@@ -5,10 +5,11 @@ umask 077
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/live-acp-runtime-kind-e2e.sh [--namespace NAME] [--keep-cluster] [--preflight-only]
+Usage: scripts/agent-runtime-kind-e2e.sh [--namespace NAME] [--keep-cluster] [--preflight-only]
 
-Builds current Orka ACP images, creates a repo-scoped Kind cluster, deploys a
-pinned Vekil proxy and Orka, then runs scripts/live-acp-runtime-e2e.sh.
+Builds the Orka controller, worker, and agent runtime images, creates a
+repo-scoped Kind cluster, deploys a pinned Vekil proxy and Orka, then runs
+scripts/agent-runtime-e2e.sh against real model providers.
 
 This wrapper is intentionally noninteractive: COPILOT_GITHUB_TOKEN is required
 and is written only through the Vekil deploy helper into a Kubernetes Secret.
@@ -16,7 +17,7 @@ It never prints the token or starts GitHub device-code login. CI uses the same
 path as local runs.
 
 Environment:
-  ACP_E2E_KIND_TAG        kindctl tag (default: run-scoped live-acp-runtime)
+  ACP_E2E_KIND_TAG        kindctl tag (default: run-scoped agent-runtime)
   ACP_E2E_KIND_CONFIG     optional Kind config path
   ACP_E2E_KEEP_CLUSTER=1  keep the cluster and local registry after the run
   ACP_E2E_VEKIL_IMAGE     digest-pinned Vekil image override
@@ -34,8 +35,8 @@ USAGE
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
-# shellcheck source=scripts/lib/live-acp-runtime-kind-bootstrap.sh
-. "${script_dir}/lib/live-acp-runtime-kind-bootstrap.sh"
+# shellcheck source=scripts/lib/agent-runtime-kind-bootstrap.sh
+. "${script_dir}/lib/agent-runtime-kind-bootstrap.sh"
 
 namespace=""
 preflight_only=0
@@ -73,21 +74,21 @@ export ACP_E2E_RUN_ID="${run_id}"
 LIVE_ACP_REPO_ROOT="${repo_root}"
 LIVE_ACP_KINDCTL_BIN="${ACP_E2E_KINDCTL_BIN:-${repo_root}/.agents/skills/kindctl/bin/kindctl}"
 LIVE_ACP_VEKIL_DEPLOY_SCRIPT="${ACP_E2E_VEKIL_DEPLOY_SCRIPT:-${repo_root}/.agents/skills/vekil-reverse-proxy-deploy/scripts/deploy_vekil_reverse_proxy.sh}"
-LIVE_ACP_VALIDATOR_SCRIPT="${ACP_E2E_VALIDATOR_SCRIPT:-${repo_root}/scripts/live-acp-runtime-e2e.sh}"
-LIVE_ACP_KIND_TAG="${ACP_E2E_KIND_TAG:-live-acp-runtime-${image_tag}}"
+LIVE_ACP_VALIDATOR_SCRIPT="${ACP_E2E_VALIDATOR_SCRIPT:-${repo_root}/scripts/agent-runtime-e2e.sh}"
+LIVE_ACP_KIND_TAG="${ACP_E2E_KIND_TAG:-agent-runtime-${image_tag}}"
 LIVE_ACP_KIND_CONFIG="${ACP_E2E_KIND_CONFIG:-}"
 LIVE_ACP_KEEP_CLUSTER="${ACP_E2E_KEEP_CLUSTER:-0}"
 LIVE_ACP_VEKIL_IMAGE="${ACP_E2E_VEKIL_IMAGE:-ghcr.io/sozercan/vekil:v0.14.1@sha256:2fa0558f6304cc6ed1fb5b0135f62f12f28f1cdd0a8c057c4283414bceac1362}"
 LIVE_ACP_VEKIL_LOCAL_IMAGE="${ACP_E2E_VEKIL_LOCAL_IMAGE:-}"
 export LIVE_ACP_VEKIL_LOCAL_IMAGE
 LIVE_ACP_ROLLOUT_TIMEOUT="${ACP_E2E_ROLLOUT_TIMEOUT:-10m}"
-LIVE_ACP_CONTROLLER_IMAGE="orka-controller:live-acp-${image_tag}"
-LIVE_ACP_CODEX_IMAGE="orka-acp-codex:live-acp-${image_tag}"
-LIVE_ACP_CLAUDE_IMAGE="orka-acp-claude:live-acp-${image_tag}"
-LIVE_ACP_COPILOT_IMAGE="orka-acp-copilot:live-acp-${image_tag}"
-LIVE_ACP_OPENCODE_IMAGE="orka-acp-opencode:live-acp-${image_tag}"
-LIVE_ACP_PUBLISHER_IMAGE="orka-workspace-publisher:live-acp-${image_tag}"
-LIVE_ACP_GENERAL_WORKER_IMAGE="orka-general-worker:live-acp-${image_tag}"
+LIVE_ACP_CONTROLLER_IMAGE="orka-controller:agent-runtime-${image_tag}"
+LIVE_ACP_CODEX_IMAGE="orka-acp-codex:agent-runtime-${image_tag}"
+LIVE_ACP_CLAUDE_IMAGE="orka-acp-claude:agent-runtime-${image_tag}"
+LIVE_ACP_COPILOT_IMAGE="orka-acp-copilot:agent-runtime-${image_tag}"
+LIVE_ACP_OPENCODE_IMAGE="orka-acp-opencode:agent-runtime-${image_tag}"
+LIVE_ACP_PUBLISHER_IMAGE="orka-workspace-publisher:agent-runtime-${image_tag}"
+LIVE_ACP_GENERAL_WORKER_IMAGE="orka-general-worker:agent-runtime-${image_tag}"
 LIVE_ACP_KIND_CREATED=0
 LIVE_ACP_REGISTRY_STARTED=0
 LIVE_ACP_SECRET_DIR=""
@@ -168,7 +169,7 @@ fi
 
 live_acp_kind_preflight
 if (( preflight_only )); then
-  live_acp_kind_log "Live ACP Kind E2E preflight passed"
+  live_acp_kind_log "Agent Runtime Kind E2E preflight passed"
   exit 0
 fi
 
@@ -179,7 +180,7 @@ if live_acp_kind_enabled "${RELEASE_GATE:-0}"; then
     live_acp_kind_die "release qualification requires a clean candidate checkout"
 fi
 
-LIVE_ACP_SECRET_DIR="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/live-acp-kind-secrets.XXXXXX")"
+LIVE_ACP_SECRET_DIR="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/agent-runtime-kind-secrets.XXXXXX")"
 export LIVE_ACP_SECRET_DIR LIVE_ACP_RELEASE_BUNDLE_DIR
 acp_report_update '.stage = "bootstrap"'
 live_acp_kind_bootstrap
@@ -194,7 +195,7 @@ validator_args+=(--namespace "${namespace}")
 # This wrapper owns a dedicated Kind cluster, so the shared controller watch
 # namespace cannot contain unrelated RuntimePool consumers.
 export ACP_E2E_ALLOW_SHARED_POOL_MUTATION="${ACP_E2E_ALLOW_SHARED_POOL_MUTATION:-1}"
-live_acp_kind_log "Running canonical live ACP runtime validator"
+live_acp_kind_log "Running agent runtime validator against real model providers"
 # Persist this before launching the child. If it is killed, an absent Task
 # receipt alone cannot establish that publication never started.
 acp_report_update '.validatorStarted = true'

@@ -3,8 +3,8 @@
 set -Eeuo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-# shellcheck source=scripts/lib/live-acp-release-report.sh
-. "${root}/scripts/lib/live-acp-release-report.sh"
+# shellcheck source=scripts/lib/release-qualification-report.sh
+. "${root}/scripts/lib/release-qualification-report.sh"
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/acp-release-report-test.XXXXXX")"
 trap 'rm -rf "${fixture}"' EXIT
 export RELEASE_GATE=1 ACP_E2E_REPORT_FILE="${fixture}/acceptance.json"
@@ -243,7 +243,7 @@ done <<'MUTATIONS'
 .head_branch = "topic"
 .head_sha = "0000000000000000000000000000000000000000"
 .head_repository.full_name = "external/orka"
-.path = ".github/workflows/live-acp-runtime-e2e.yml"
+.path = ".github/workflows/agent-runtime-e2e.yml"
 .conclusion = "failure"
 .status = "in_progress"
 .run_attempt = 2

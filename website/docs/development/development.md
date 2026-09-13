@@ -102,27 +102,27 @@ See [Testing](testing.md) for full test structure and patterns.
 
 The repository has additional GitHub Actions workflows in addition to the normal test matrix:
 
-- `Live ACP Runtime E2E` — runs on trusted default-branch changes, nightly, or by manual dispatch. It builds the current controller and all four built-in runtime images, bootstraps Kind plus Vekil and the production ACP topology, and executes live Codex, OpenCode, Claude, and Copilot RuntimePools through the canonical smoke validator.
+- `Agent Runtime E2E` runs on trusted default-branch changes, nightly, or by manual dispatch. It builds the current controller and all four built-in runtime images, bootstraps Kind plus Vekil and the production ACP topology, and executes Codex, OpenCode, Claude, and Copilot RuntimePools against real model providers. It requires `COPILOT_GITHUB_TOKEN` in the `agent-runtime-smoke` environment.
 - `Release Qualification` verifies the candidate chart, recovery, agent execution, canary publication, and cleanup. The release workflow dispatches it automatically; environment approval permits access to the canary credentials.
-- `Live Copilot Proxy E2E` — exercises native `type: ai` and compatibility API paths through an external proxy used as test infrastructure. The canonical live ACP workflow separately executes the built-in Codex, OpenCode, Claude, and Copilot RuntimePools end to end.
+- `Live Copilot Proxy E2E` — exercises native `type: ai` and compatibility API paths through an external proxy used as test infrastructure. `Agent Runtime E2E` separately executes the built-in Codex, OpenCode, Claude, and Copilot RuntimePools end to end.
 - `Live Agent Sandbox E2E` — installs the pinned upstream `agent-sandbox` release in Kind, builds the PR controller, the immutable Codex ACP runtime image, and fixture/router images, then validates the direct workspace-adapter lifecycle (claim, exec, cleanup, retained reuse, token scrubbing) **and** a workspace-backed ACP Task end to end: a `Task.spec.execution.workspace` agent Task binds a dedicated `acp-ws-*` RuntimePool whose SandboxClaim hosts the real supervisor, executes a real Codex prompt against the local Responses-compatible fixture, reaches `Succeeded`, keeps Task status provider-neutral, and cleans up. It also runs the class-backed suspend/cold-resume conformance: with the workspace provider API enabled, a session-scoped `classRef` Task suspends its workspace on detach (the exact Sandbox is consensually suspended through `operatingMode: Suspended` while its durable workspace PVC stays Bound and no runtime Pod remains), a continuation Task cold-resumes the same Sandbox, and explicit workspace deletion removes the pool, claim, Sandbox, and PVC. A lifecycle/recovery conformance additionally proves Session continuation with a preserved RuntimeSession UID, explicit cancellation of a Running prompt with bounded controller-owned settlement and no replay, a controller restart during a Running prompt with no prompt replay, and physical runtime replacement that recovers the Session from zero. It requires no external model access.
 - `Live GitHub Label Trigger E2E` — builds the PR controller image, deploys it to Kind, configures a generated webhook secret and synthetic runtime Agent, then verifies signed label webhooks create scoped agent Tasks while invalid signatures and duplicate deliveries are handled correctly. This workflow is manual, model-free, and secret-free.
 - `Live GitHub OIDC E2E` — builds the PR controller image, deploys it to Kind, authenticates to Orka with a real GitHub Actions OIDC token, and verifies `spec.requestedBy` stamping plus client provenance-tampering rejection.
 - `Gateway Live E2E` — runs on relevant pushes and pull requests or by manual dispatch. It creates a fresh Kind cluster, generates disposable TLS and bearer credentials, deploys the TLS reference adapter and deterministic echo `AgentRuntime`, and verifies invalid authentication, accepted and duplicate ingress, runtime-backed Task completion, final delivery, idempotency, and correlation metadata. It is model-free and secret-free and does not use repository or provider credentials.
 - `Repository Monitor Smoke` — runs automatically on PRs and pushes touching monitor-relevant Go, CRD/config, worker, or dependency paths. It creates the UI embed stub and runs focused Go tests for monitor store/API/controller behavior, GitHub pull request event queueing, targeted single-PR inventory runs, read-only review task job construction, stdout result forwarding, `create_pr_monitor` repository URL and credential validation, GitHub tool `repo_url` scope enforcement, and PR review marker tooling.
-- `Agent Substrate E2E` builds the PR controller, immutable Codex ACP runtime, and fixture images on a gVisor Kind cluster using the unmodified official provider pin. It checks direct native workspaces, MCP Tools, and fixture-backed ACP Tasks through the atenet-router. The class-backed lane requires DataOnly suspension, an independent Tag, exact worker termination, cold continuation with rotated credentials, and checkpoint export and restore after source deletion. The native protocol does not provide atomic Suspend/Resume/Delete preconditions; ADR 0031 defines the observed identity checks and durable recovery journal. The suite requires no external model access. Clean-room publication remains covered by the live ACP release gate.
+- `Agent Substrate E2E` builds the PR controller, immutable Codex ACP runtime, and fixture images on a gVisor Kind cluster using the unmodified official provider pin. It checks direct native workspaces, MCP Tools, and fixture-backed ACP Tasks through the atenet-router. The class-backed lane requires DataOnly suspension, an independent Tag, exact worker termination, cold continuation with rotated credentials, and checkpoint export and restore after source deletion. The native protocol does not provide atomic Suspend/Resume/Delete preconditions; ADR 0031 defines the observed identity checks and durable recovery journal. The suite requires no external model access. Clean-room publication remains covered by `Release Qualification`.
 
 Validate workflow/script edits locally before pushing:
 
 ```bash
 bash -n scripts/live-copilot-proxy-e2e.sh
-bash -n scripts/live-acp-runtime-e2e.sh scripts/live-acp-runtime-kind-e2e.sh scripts/lib/live-acp-runtime-kind-bootstrap.sh
+bash -n scripts/agent-runtime-e2e.sh scripts/agent-runtime-kind-e2e.sh scripts/lib/agent-runtime-kind-bootstrap.sh
 bash -n scripts/live-agent-sandbox-e2e.sh
 bash -n scripts/live-github-label-trigger-e2e.sh
 bash -n scripts/live-github-oidc-e2e.sh
 bash -n scripts/agent-substrate-e2e.sh
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-copilot-proxy-e2e.yml
-go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-acp-runtime-e2e.yml
+go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/agent-runtime-e2e.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/release-qualification.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-agent-sandbox-e2e.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-github-label-trigger-e2e.yml
@@ -132,7 +132,7 @@ go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/repos
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/agent-substrate-e2e.yml
 ```
 
-The agent-sandbox and Substrate scripts validate workspace-backed ACP v2 Tasks against a local model fixture. Substrate also covers controller restart, DataOnly suspension, cold continuation, checkpoint file recovery, cancellation, timeout, and cleanup. External-provider execution, clean-room publication, pool replacement, and the broader runtime matrix remain covered by the live ACP workflows. Workspace-provider-backed dispatch is still flag-gated behind `--acp-workspace-dispatch-enabled` plus the matching provider flag (`--agent-sandbox-enabled` or `--substrate-enabled`) and fails closed otherwise.
+The agent-sandbox and Substrate scripts validate workspace-backed ACP v2 Tasks against a local model fixture. Substrate also covers controller restart, DataOnly suspension, cold continuation, checkpoint file recovery, cancellation, timeout, and cleanup. External-provider execution, clean-room publication, pool replacement, and the broader runtime matrix remain covered by `Agent Runtime E2E` and `Release Qualification`. Workspace-provider-backed dispatch is still flag-gated behind `--acp-workspace-dispatch-enabled` plus the matching provider flag (`--agent-sandbox-enabled` or `--substrate-enabled`) and fails closed otherwise.
 
 The GitHub OIDC live script requires GitHub Actions `id-token: write` or a manual `ORKA_GITHUB_OIDC_TOKEN`; without either, it fails fast before creating a cluster. Transaction-token provider E2E now lives in the external integration repository.
 
@@ -146,7 +146,7 @@ bash scripts/agent-substrate-e2e.sh
 
 ## Harness wrapper real-world validation
 
-When changing ACP runtime supervision or broker boundaries, validate them against a live cluster, not only unit tests. Use `scripts/live-acp-runtime-e2e.sh` for an already deployed cluster, or `scripts/live-acp-runtime-kind-e2e.sh` to create the same ephemeral Kind/Vekil topology used by CI.
+When changing ACP runtime supervision or broker boundaries, validate them against a live cluster, not only unit tests. Use `scripts/agent-runtime-e2e.sh` for an already deployed cluster, or `scripts/agent-runtime-kind-e2e.sh` to create the same ephemeral Kind/Vekil topology used by CI.
 
 ## OpenTelemetry development
 

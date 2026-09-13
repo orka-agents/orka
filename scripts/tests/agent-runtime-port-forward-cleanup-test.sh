@@ -10,7 +10,7 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
 fi
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-script="${root}/scripts/live-acp-runtime-e2e.sh"
+script="${root}/scripts/agent-runtime-e2e.sh"
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/orka-acp-port-forward-test.XXXXXX")"
 fake_bin="${test_root}/bin"
 fake_pid_file="${test_root}/kubectl.pid"

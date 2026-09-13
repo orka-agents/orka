@@ -3,9 +3,9 @@
 set -Eeuo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-script="${root}/scripts/live-acp-runtime-e2e.sh"
-# shellcheck source=scripts/lib/live-acp-release-report.sh
-. "${root}/scripts/lib/live-acp-release-report.sh"
+script="${root}/scripts/agent-runtime-e2e.sh"
+# shellcheck source=scripts/lib/release-qualification-report.sh
+. "${root}/scripts/lib/release-qualification-report.sh"
 for function in is_sha is_uint lower verify_remote_publication cleanup_remote_effects \
   validate_exact_pull_request ensure_pull_request_closed_unmerged; do
   eval "$(awk -v name="${function}" '$0 == name "() {" {copy=1} copy {print} copy && /^}$/ {exit}' "${script}")"

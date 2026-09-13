@@ -198,7 +198,7 @@ jobs:
           ACP_E2E_WRITE_TARGET_READ_CREDENTIAL_TOKEN: ${{ secrets.ACP_E2E_WRITE_TARGET_READ_CREDENTIAL_TOKEN }}
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.ACP_E2E_WRITE_FORGE_CREDENTIAL_TOKEN }}
-        run: bash scripts/live-acp-runtime-kind-e2e.sh
+        run: bash scripts/agent-runtime-kind-e2e.sh
 
       - name: Upload evidence before cluster teardown
         if: always()
@@ -213,7 +213,7 @@ jobs:
         if: always() && steps.gate.outcome != 'skipped'
         run: |
           set -Eeuo pipefail
-          source scripts/lib/live-acp-runtime-kind-bootstrap.sh
+          source scripts/lib/agent-runtime-kind-bootstrap.sh
           if ! jq -e '.cluster.creationAttempted == true' "${ACP_E2E_REPORT_FILE}" >/dev/null; then
             exit 0
           fi
@@ -232,11 +232,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -Eeuo pipefail
-          if [[ ! -f scripts/lib/live-acp-release-report.sh ]]; then
+          if [[ ! -f scripts/lib/release-qualification-report.sh ]]; then
             echo "Candidate is not qualified: trusted checkout never completed." >&2
             exit 1
           fi
-          source scripts/lib/live-acp-release-report.sh
+          source scripts/lib/release-qualification-report.sh
           base_sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${ACP_E2E_WRITE_PR_BASE}" --jq '.sha')"
           # shellcheck disable=SC2016 # This is a jq program.
           acp_report_update '.observations.baseHeads.completion = $sha' --arg sha "${base_sha}"

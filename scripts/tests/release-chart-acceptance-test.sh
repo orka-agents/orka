@@ -3,9 +3,9 @@ set -Eeuo pipefail
 umask 077
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-# shellcheck source=scripts/lib/live-acp-release-chart.sh
-. "${root}/scripts/lib/live-acp-release-chart.sh"
-test_root="$(mktemp -d "${TMPDIR:-/tmp}/live-acp-release-chart-test.XXXXXX")"
+# shellcheck source=scripts/lib/release-chart-acceptance.sh
+. "${root}/scripts/lib/release-chart-acceptance.sh"
+test_root="$(mktemp -d "${TMPDIR:-/tmp}/release-chart-acceptance-test.XXXXXX")"
 trap 'rm -rf -- "${test_root}"' EXIT
 
 fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -44,9 +44,9 @@ jq -e '
   .controller.mode == "harness-v2" and .controller.watchNamespace == "orka-system"
   and .controller.acpRuntime.namespace == "orka-runtimes"
   and .store.persistence.enabled == true and .providerProxy.enabled == true
-  and .publisher.auth.existingSecret == "live-acp-chart-publisher"
-  and .controller.agentExecutionSnapshot.existingSecret == "live-acp-chart-snapshot"
-  and .webhooks.tls.existingSecret == "live-acp-chart-webhook"
+  and .publisher.auth.existingSecret == "release-chart-publisher"
+  and .controller.agentExecutionSnapshot.existingSecret == "release-chart-snapshot"
+  and .webhooks.tls.existingSecret == "release-chart-webhook"
   and ([.controller.image, .publisher.image, .workers.ai.image, .workers.general.image, .harnessV1.image]
     | all(.[]; .digest | test("^sha256:[a-f0-9]{64}$")))
   and ([.. | objects | keys[] | select(. == "token" or . == "controllerToken" or . == "capabilitySecret" or . == "secret")] | length == 0)

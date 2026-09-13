@@ -4,7 +4,7 @@
 # cluster. The caller verifies candidate provenance before invoking this file.
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-  echo "error: source scripts/lib/live-acp-release-chart.sh; do not execute it directly" >&2
+  echo "error: source scripts/lib/release-chart-acceptance.sh; do not execute it directly" >&2
   exit 2
 fi
 
@@ -42,16 +42,16 @@ values = {
     "controller": {
         "mode": "harness-v2", "watchNamespace": "orka-system",
         "image": image("controller"),
-        "agentExecutionSnapshot": {"existingSecret": "live-acp-chart-snapshot", "key": "key"},
-        "acpArtifact": {"existingSecret": "live-acp-chart-artifact"},
+        "agentExecutionSnapshot": {"existingSecret": "release-chart-snapshot", "key": "key"},
+        "acpArtifact": {"existingSecret": "release-chart-artifact"},
         "acpRuntime": {"namespace": "orka-runtimes"},
     },
     "publisher": {"enabled": True, "image": image("workspace-publisher"),
-                  "auth": {"existingSecret": "live-acp-chart-publisher"}},
-    "providerProxy": {"enabled": True, "auth": {"existingSecret": "live-acp-chart-provider"}},
-    "scmEgressProxy": {"enabled": True, "auth": {"existingSecret": "live-acp-chart-scm"}},
+                  "auth": {"existingSecret": "release-chart-publisher"}},
+    "providerProxy": {"enabled": True, "auth": {"existingSecret": "release-chart-provider"}},
+    "scmEgressProxy": {"enabled": True, "auth": {"existingSecret": "release-chart-scm"}},
     "workers": {"ai": {"image": image("ai-worker")}, "general": {"image": image("general-worker")}},
-    "webhooks": {"tls": {"existingSecret": "live-acp-chart-webhook"},
+    "webhooks": {"tls": {"existingSecret": "release-chart-webhook"},
                  "caBundle": base64.b64encode(ca_file.read_bytes()).decode("ascii")},
     "store": {"persistence": {"enabled": True}},
 }
@@ -63,8 +63,8 @@ for provider in ("codex", "claude", "copilot", "opencode"):
 # identity guard, rather than failing because v1 values were omitted.
 values["harnessV1"] = {
     "image": image("agent-harness-wrapper"),
-    "auth": {"existingSecret": "live-acp-chart-v1-auth"},
-    "tls": {"existingSecret": "live-acp-chart-v1-tls"},
+    "auth": {"existingSecret": "release-chart-v1-auth"},
+    "tls": {"existingSecret": "release-chart-v1-tls"},
 }
 output.write_text(json.dumps(values) + "\n")
 PY
@@ -243,8 +243,8 @@ _live_acp_release_chart_stable_state() {
   live_acp_release_chart_kubectl get namespace orka-system -o json |
     jq '{uid:.metadata.uid, mode:.metadata.labels["orka.ai/controller-mode"]}' >"${chart_work_dir}/namespace-state.json" || return 1
   live_acp_release_chart_kubectl -n orka-system get secret \
-    live-acp-chart-snapshot live-acp-chart-webhook live-acp-chart-publisher \
-    live-acp-chart-provider live-acp-chart-scm live-acp-chart-artifact -o json |
+    release-chart-snapshot release-chart-webhook release-chart-publisher \
+    release-chart-provider release-chart-scm release-chart-artifact -o json |
     jq '[.items[] | {name:.metadata.name, uid:.metadata.uid, resourceVersion:.metadata.resourceVersion}] | sort_by(.name)' \
       >"${chart_work_dir}/secret-identities.json" || return 1
   jq -n --slurpfile release "${chart_work_dir}/release-state.json" \
@@ -277,19 +277,19 @@ _live_acp_release_chart_acceptance() (
   done
   jq -n '{apiVersion:"v1",kind:"Namespace",metadata:{name:"orka-system",labels:{"orka.ai/controller-mode":"harness-v2"}}}' |
     live_acp_release_chart_kubectl create -f - >/dev/null || return 1
-  live_acp_release_chart_kubectl -n orka-system create secret generic live-acp-chart-snapshot \
+  live_acp_release_chart_kubectl -n orka-system create secret generic release-chart-snapshot \
     --from-file="key=${chart_work_dir}/snapshot-key" >/dev/null || return 1
-  live_acp_release_chart_kubectl -n orka-system create secret generic live-acp-chart-webhook --type=kubernetes.io/tls \
+  live_acp_release_chart_kubectl -n orka-system create secret generic release-chart-webhook --type=kubernetes.io/tls \
     --from-file="tls.crt=${chart_work_dir}/tls.crt" --from-file="tls.key=${chart_work_dir}/tls.key" \
     --from-file="ca.crt=${chart_work_dir}/ca.crt" >/dev/null || return 1
-  live_acp_release_chart_kubectl -n orka-system create secret generic live-acp-chart-publisher \
+  live_acp_release_chart_kubectl -n orka-system create secret generic release-chart-publisher \
     --from-file="controller-token=${chart_work_dir}/publisher-token" \
     --from-file="operation-capability-secret=${chart_work_dir}/publisher-capability" >/dev/null || return 1
-  live_acp_release_chart_kubectl -n orka-system create secret generic live-acp-chart-provider \
+  live_acp_release_chart_kubectl -n orka-system create secret generic release-chart-provider \
     --from-file="token=${chart_work_dir}/provider-token" >/dev/null || return 1
-  live_acp_release_chart_kubectl -n orka-system create secret generic live-acp-chart-scm \
+  live_acp_release_chart_kubectl -n orka-system create secret generic release-chart-scm \
     --from-file="token=${chart_work_dir}/scm-token" >/dev/null || return 1
-  live_acp_release_chart_kubectl -n orka-system create secret generic live-acp-chart-artifact \
+  live_acp_release_chart_kubectl -n orka-system create secret generic release-chart-artifact \
     --from-file="capability-secret=${chart_work_dir}/artifact-capability" >/dev/null || return 1
 
   live_acp_kind_log "Installing the candidate chart and its archived CRDs"

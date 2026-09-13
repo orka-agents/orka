@@ -7,12 +7,12 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${script_dir}/lib/e2e-common.sh"
 # shellcheck source=scripts/lib/redact.sh
 . "${script_dir}/lib/redact.sh"
-# shellcheck source=scripts/lib/live-acp-release-report.sh
-. "${script_dir}/lib/live-acp-release-report.sh"
+# shellcheck source=scripts/lib/release-qualification-report.sh
+. "${script_dir}/lib/release-qualification-report.sh"
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/live-acp-runtime-e2e.sh --context CONTEXT [--namespace NAMESPACE]
+Usage: scripts/agent-runtime-e2e.sh --context CONTEXT [--namespace NAMESPACE]
 
 Validates an already deployed ACP v2 Orka installation without printing Secret
 material. The kubectl context is required and is passed to every kubectl call.
@@ -439,7 +439,7 @@ recover_namespace_ownership() {
   fi
   if ! jq -e --arg run "${run_id}" '
       .metadata.labels["orka.ai/acp-e2e-run"] == $run
-      and .metadata.labels["app.kubernetes.io/managed-by"] == "live-acp-runtime-e2e"
+      and .metadata.labels["app.kubernetes.io/managed-by"] == "agent-runtime-e2e"
     ' "${namespace_probe_file}" >/dev/null; then
     warn "namespace/${namespace} exists but is not owned by this release-gate run; refusing deletion"
     return 1
@@ -1040,7 +1040,7 @@ delete_test_namespace_now() {
   if [[ "${namespace_created}" -eq 1 ]] && ! jq -e --arg run "${run_id}" --arg uid "${namespace_uid}" '
       .metadata.uid == $uid
       and .metadata.labels["orka.ai/acp-e2e-run"] == $run
-      and .metadata.labels["app.kubernetes.io/managed-by"] == "live-acp-runtime-e2e"
+      and .metadata.labels["app.kubernetes.io/managed-by"] == "agent-runtime-e2e"
     ' "${namespace_probe_file}" >/dev/null; then
     warn "namespace/${namespace} ownership changed; refusing deletion"
     return 1
@@ -1678,7 +1678,7 @@ apply_agent() {
     '{
       apiVersion:"core.orka.ai/v1alpha1",
       kind:"Agent",
-      metadata:{name:$name,labels:{"orka.ai/acp-e2e-run":$run,"app.kubernetes.io/managed-by":"live-acp-runtime-e2e"}},
+      metadata:{name:$name,labels:{"orka.ai/acp-e2e-run":$run,"app.kubernetes.io/managed-by":"agent-runtime-e2e"}},
       spec:{
         runtime:({
           type:$provider,
@@ -3652,7 +3652,7 @@ else
       labels:{
         "orka.ai/acp-e2e-run":$run,
         "orka.ai/controller-mode":"harness-v2",
-        "app.kubernetes.io/managed-by":"live-acp-runtime-e2e",
+        "app.kubernetes.io/managed-by":"agent-runtime-e2e",
         "pod-security.kubernetes.io/enforce":"restricted"
       }
     }

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2016 # acp_report_update arguments are jq programs.
-# Source-only, allowlisted evidence for the deployed ACP publication gate.
+# Source-only, allowlisted evidence for release qualification.
 # Never persist Task prompts/results, messages, annotations, or Secret data.
 
 acp_report_enabled() {
