@@ -551,7 +551,7 @@ jobs:
           name: release-candidate-${{ github.run_id }}-${{ needs.validate-release.outputs.artifact_attempt }}
           path: ${{ runner.temp }}/release-candidate
 
-      - name: Dispatch and verify live ACP and chart acceptance
+      - name: Dispatch and verify release qualification
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/release_workflow.py qualify "${RUNNER_TEMP}/release-candidate"

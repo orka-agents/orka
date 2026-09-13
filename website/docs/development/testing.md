@@ -119,7 +119,7 @@ End-to-end tests run against a dedicated Kind cluster:
 | `test/e2e/task_lifecycle_test.go` | Timeout/retry/cancel plus session serialization and lock release |
 | `scripts/live-acp-runtime-e2e.sh` | Canonical deployed-cluster ACP smoke/release gate for Codex, OpenCode, Claude, and Copilot RuntimePools, exact Pod/runtime identity, workspace read/write, continuation/fork, cancellation/timeout, restart/replacement, publication/PR verification, drain/scale-to-zero, immutable images, and cleanup |
 | `.github/workflows/live-acp-runtime-e2e.yml` / `scripts/live-acp-runtime-kind-e2e.sh` | Trusted-branch/nightly/manual live ACP smoke that bootstraps an ephemeral Kind cluster, Vekil, and the production ACP topology before invoking the canonical validator |
-| `.github/workflows/live-acp-release-gate.yml` / `scripts/live-acp-runtime-kind-e2e.sh` | Manual, protected-environment release acceptance with destructive publication, independent GitHub verification, PR reconciliation, and cleanup |
+| `.github/workflows/release-qualification.yml` / `scripts/live-acp-runtime-kind-e2e.sh` | Environment-approved release acceptance with destructive publication, independent GitHub verification, PR reconciliation, and cleanup |
 
 The Gateway Live E2E workflow (`.github/workflows/gateway-e2e.yml`) runs on manual dispatch and on pull requests or pushes that touch Gateway-relevant source, configuration, E2E, image, or dependency paths. It creates a dedicated Kind cluster, generates disposable TLS and bearer credentials, deploys the TLS reference adapter and deterministic echo `AgentRuntime`, and verifies invalid bearer rejection, accepted and duplicate ingress, runtime-backed Task completion, final delivery, idempotency, and correlation metadata. The workflow is model-free and secret-free; it does not use repository or provider credentials.
 
@@ -147,9 +147,9 @@ missing or mismatched artifacts staying not ready.
   without mounting provider credentials into RuntimePools. Restrict that
   environment to the default branch; do not require reviewers if scheduled runs
   must proceed unattended.
-- `.github/workflows/live-acp-release-gate.yml` uses `workflow_dispatch` and is
+- `.github/workflows/release-qualification.yml` uses `workflow_dispatch` and is
   serialized. The release workflow dispatches it automatically. Restrict the
-  `live-acp-release-gate` environment to `main` and exact permitted release
+  `release-qualification` environment to `main` and exact permitted release
   branches, require a trusted reviewer, and disable administrator bypass before
   exposing canary credentials. It accepts the configured canary fork and a full
   source SHA that must equal both the dispatched workflow commit and selected branch head.
@@ -161,7 +161,7 @@ missing or mismatched artifacts staying not ready.
   `ACP_E2E_WRITE_FORGE_CREDENTIAL_TOKEN`. Configure the four publication
   credentials as distinct, least-privilege GitHub credentials for source read,
   target read, target write, and forge/verification cleanup respectively.
-  [ACP publication release qualification](acp-release-gate.md) documents the
+  [Release qualification](acp-release-gate.md) documents the
   dedicated fork, exact permissions, trusted dispatch, report verification,
   and recovery from a moved base or preserved canary. Release qualification
   requires that report for the exact candidate; smoke success is insufficient.

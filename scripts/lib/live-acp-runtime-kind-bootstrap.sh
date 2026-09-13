@@ -606,7 +606,7 @@ live_acp_kind_delete_cluster() {
     # A timeout can kill the validator before its EXIT trap records preservation.
     # Once it was launched, require positive evidence of safe remote cleanup.
     if ! jq -e '
-        .schemaVersion == 1 and .gate == "live-acp-release-gate" and .mode == "release"
+        .schemaVersion == 1 and .gate == "release-qualification" and .mode == "release"
         and has("task") and has("preserved") and .preserved == null
         and ((.validatorStarted == false and .task == null) or (.validatorStarted == true
           and (.cleanup.remote == "passed" or (.cleanup.remote == "not_required" and .task == null))))

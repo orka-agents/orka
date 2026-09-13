@@ -455,7 +455,7 @@ LIVE_ACP_KIND_CREATED=1
 LIVE_ACP_REGISTRY_STARTED=0
 cat >"${fake_bin}/cleanup-base.json" <<'JSON'
 {
-  "schemaVersion": 1, "gate": "live-acp-release-gate", "mode": "release",
+  "schemaVersion": 1, "gate": "release-qualification", "mode": "release",
   "validatorStarted": true, "task": {"namespace":"test", "name":"canary"},
   "expectedBranch": "orka/acp-release-gate-test", "preserved": null,
   "cleanup": {"remote":"running"}

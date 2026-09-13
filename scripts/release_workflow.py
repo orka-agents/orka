@@ -112,12 +112,12 @@ def check_environment(name: str, branch: str, approval: bool = False) -> None:
     policies = paginated(f"repos/{REPOSITORY}/environments/{name}/deployment-branch-policies?per_page=100", "branch_policies")
     require(any(p.get("type") == "branch" and p.get("name") == branch for p in policies),
             f"Add the exact {branch} branch to the {name} environment; wildcard rules are insufficient")
-    default = api(f"repos/{REPOSITORY}")["default_branch"] if name == "live-acp-release-gate" else None
+    default = api(f"repos/{REPOSITORY}")["default_branch"] if name == "release-qualification" else None
     require(all(p.get("type") == "branch" and isinstance(p.get("name"), str)
                 and (re.fullmatch(r"release-(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", p["name"])
                      or p["name"] == default) for p in policies),
             f"Remove wildcard, tag, and unrelated branch rules from the {name} environment")
-    if approval or name in {"release", "live-acp-release-gate"}:
+    if approval or name in {"release", "release-qualification"}:
         require(any(rule.get("type") == "required_reviewers" and rule.get("reviewers")
                     for rule in environment.get("protection_rules", [])),
                 f"The {name} environment must have a required reviewer before starting a release")
@@ -213,7 +213,7 @@ def prepare(version: str) -> None:
     check_context(default, trusted)
     require(not command("git", "status", "--porcelain"), "preparation requires a clean checkout")
     check_environment("release", branch, approval=True)
-    check_environment("live-acp-release-gate", branch)
+    check_environment("release-qualification", branch)
     require(tag_ref(version) is None, "version is already tagged; retry failed publication jobs in the original run")
     runs = paginated(f"repos/{REPOSITORY}/actions/workflows/release.yml/runs?branch={branch}&per_page=100", "workflow_runs")
     require(not any(run["status"] != "completed" for run in runs),
@@ -271,7 +271,7 @@ def validate_candidate(version: str, candidate: str) -> None:
     branch = branch_for(version)
     check_context(branch, candidate)
     check_environment("release", branch, approval=True)
-    check_environment("live-acp-release-gate", branch)
+    check_environment("release-qualification", branch)
     require(tag_ref(version) is None, "tag already exists; use Re-run failed jobs to retain the original artifacts")
     output("artifact_attempt", os.environ["GITHUB_RUN_ATTEMPT"])
 
@@ -356,17 +356,17 @@ def qualify(directory: Path) -> None:
     check_context(data["branch"], data["candidateSHA"])
     require(data["buildRunID"] == os.environ.get("GITHUB_RUN_ID"),
             "qualification must use this workflow's own candidate bundle")
-    runs = paginated(f"repos/{REPOSITORY}/actions/workflows/live-acp-release-gate.yml/runs?per_page=100", "workflow_runs")
+    runs = paginated(f"repos/{REPOSITORY}/actions/workflows/release-qualification.yml/runs?per_page=100", "workflow_runs")
     require(not any(run["status"] != "completed" for run in runs),
-            "Another live ACP release gate is active or awaiting approval; finish or cancel it before retrying qualification")
-    run = dispatch("live-acp-release-gate.yml", data["branch"], data["candidateSHA"], {
+            "Another release qualification run is active or awaiting approval; finish or cancel it before retrying qualification")
+    run = dispatch("release-qualification.yml", data["branch"], data["candidateSHA"], {
         "source_repository": f"https://github.com/{REPOSITORY}.git",
         "source_ref": data["candidateSHA"], "pr_base": data["branch"],
         "release_run_id": data["buildRunID"], "release_run_attempt": data["buildRunAttempt"],
         "dispatch_id": f"release-{os.environ['GITHUB_RUN_ID']}-{os.environ['GITHUB_RUN_ATTEMPT']}",
     }, wait=True)
-    command("bash", "scripts/verify-acp-release-qualification.sh", data["candidateSHA"], str(run["id"]), data["branch"])
-    source = ROOT / f"bin/acp-release-qualification-{run['id']}-{run['run_attempt']}/acceptance.json"
+    command("bash", "scripts/verify-release-qualification.sh", data["candidateSHA"], str(run["id"]), data["branch"])
+    source = ROOT / f"bin/release-qualification-{run['id']}-{run['run_attempt']}/acceptance.json"
     report = json.loads(source.read_text())
     verify_report(directory, report)
     shutil.copyfile(source, directory / "acceptance.json")
@@ -375,7 +375,7 @@ def qualify(directory: Path) -> None:
         "acceptanceSHA256": file_hash(source), "candidateSHA256": file_hash(directory / "candidate.json"),
     })
     summary(f"Qualified `{data['candidateSHA']}` with the packaged chart and published image digests.\n\n"
-            f"[ACP acceptance and cleanup evidence]({run['html_url']}).\n\n"
+            f"[Release qualification and cleanup evidence]({run['html_url']}).\n\n"
             "Review the candidate artifact and generated commit before approving the release job.")
 
 
@@ -391,10 +391,10 @@ def verify_publication(directory: Path) -> dict:
             "approved qualification artifacts changed")
     run_id, attempt = proof.get("runID", ""), proof.get("runAttempt", "")
     require(run_id.isdigit() and attempt.isdigit(), "invalid qualification run identity")
-    command("bash", "scripts/verify-acp-release-qualification.sh", data["candidateSHA"], run_id, data["branch"])
+    command("bash", "scripts/verify-release-qualification.sh", data["candidateSHA"], run_id, data["branch"])
     current = api(f"repos/{REPOSITORY}/actions/runs/{run_id}")
     require(str(current["run_attempt"]) == attempt, "qualification was rerun after approval evidence was prepared")
-    report_path = ROOT / f"bin/acp-release-qualification-{run_id}-{attempt}/acceptance.json"
+    report_path = ROOT / f"bin/release-qualification-{run_id}-{attempt}/acceptance.json"
     require(file_hash(report_path) == proof["acceptanceSHA256"], "qualified report changed")
     verify_report(directory, json.loads(report_path.read_text()))
     # Revalidate the original bundle too. A rerun must not replace the images
@@ -567,7 +567,7 @@ def archive_release(data: dict, directory: Path) -> None:
             "draft": True, "prerelease": "-" in data["version"],
             "body": f"Release candidate `{data['candidateSHA']}`.\n\n"
                     f"[Build and approval](https://github.com/{REPOSITORY}/actions/runs/{data['buildRunID']}).\n"
-                    f"[Live ACP and chart acceptance](https://github.com/{REPOSITORY}/actions/runs/{proof['runID']}).\n\n"
+                    f"[Release qualification evidence](https://github.com/{REPOSITORY}/actions/runs/{proof['runID']}).\n\n"
                     "Attached manifests bind the exact chart, images, and qualification evidence.",
         })
     files = [directory / name for name in ("candidate.json", "qualification.json", "acceptance.json", data["chart"]["file"])]

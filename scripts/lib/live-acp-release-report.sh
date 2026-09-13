@@ -43,7 +43,7 @@ acp_report_init() {
         | if test("^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
           then ascii_downcase else null end;
       {
-        schemaVersion: 1, gate: "live-acp-release-gate", mode: "release",
+        schemaVersion: 1, gate: "release-qualification", mode: "release",
         candidateSHA: ($candidate | sha), checkoutSHA: ($checkout | sha),
         sourceRepository: ($source | repo), publicationRepository: ($publication | repo),
         baseBranch: $base, expectedBranch: null, run: $run,
@@ -116,7 +116,7 @@ acp_report_qualified() {
     def hash: type == "string" and test("^[a-f0-9]{64}$");
     def run: type == "string" and test("^[1-9][0-9]*$");
     . as $r
-    | .schemaVersion == 1 and .gate == "live-acp-release-gate" and .mode == "release"
+    | .schemaVersion == 1 and .gate == "release-qualification" and .mode == "release"
       and (.candidateSHA | sha) and .candidateSHA == .checkoutSHA
       and .sourceRepository == "https://github.com/orka-agents/orka"
       and (.publicationRepository | present) and .publicationRepository != .sourceRepository
@@ -200,7 +200,7 @@ acp_report_finish() {
   if acp_report_qualified "${ACP_E2E_REPORT_FILE}"; then
     acp_report_update '.result = "qualified"'
   else
-    printf '%s\n' 'ACP release candidate is not qualified; inspect acceptance.json.' >&2
+    printf '%s\n' 'Release candidate is not qualified; inspect acceptance.json.' >&2
     return 1
   fi
 }

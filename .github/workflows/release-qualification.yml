@@ -1,5 +1,5 @@
-name: Live ACP Release Gate
-run-name: Live ACP Release Gate (${{ inputs.dispatch_id || inputs.source_ref }})
+name: Release Qualification
+run-name: Release Qualification (${{ inputs.dispatch_id || inputs.source_ref }})
 
 on:
   workflow_dispatch:
@@ -40,15 +40,15 @@ permissions:
   contents: read
 
 concurrency:
-  group: live-acp-release-gate
+  group: release-qualification
   cancel-in-progress: false
 
 jobs:
-  live-acp-release-gate:
-    name: ACP destructive release acceptance
+  release-qualification:
+    name: Qualify release candidate
     runs-on: ubuntu-latest
     timeout-minutes: 240
-    environment: live-acp-release-gate
+    environment: release-qualification
     env:
       RELEASE_GATE: "1"
       ACP_E2E_REPO: ${{ inputs.source_repository }}
@@ -67,7 +67,7 @@ jobs:
       # credentials. Do not copy arbitrary dispatch inputs into the artifact.
       - name: Initialize acceptance evidence
         env:
-          ACP_E2E_REPORT_FILE: ${{ runner.temp }}/live-acp-release-gate/acceptance.json
+          ACP_E2E_REPORT_FILE: ${{ runner.temp }}/release-qualification/acceptance.json
         run: |
           set -Eeuo pipefail
           printf 'ACP_E2E_REPORT_FILE=%s\n' "${ACP_E2E_REPORT_FILE}" >>"${GITHUB_ENV}"
@@ -79,7 +79,7 @@ jobs:
           jq -n --arg candidate "${candidate}" --arg sha "${GITHUB_SHA}" \
             --arg repository "${GITHUB_REPOSITORY}" --arg ref "${GITHUB_REF}" \
             --arg run "${GITHUB_RUN_ID}" --arg attempt "${GITHUB_RUN_ATTEMPT}" \
-            '{schemaVersion:1, gate:"live-acp-release-gate", mode:"release",
+            '{schemaVersion:1, gate:"release-qualification", mode:"release",
               candidateSHA:$candidate, checkoutSHA:$sha, result:"not_qualified",
               stage:"trusted_dispatch", workflow:{repository:$repository, ref:$ref,
                 sha:$sha, runID:$run, runAttempt:$attempt, event:"workflow_dispatch"}}' \
@@ -153,7 +153,7 @@ jobs:
           SOURCE_REF: ${{ inputs.source_ref }}
         run: |
           set -Eeuo pipefail
-          python3 scripts/release_workflow.py check-environment live-acp-release-gate "${GITHUB_REF_NAME}"
+          python3 scripts/release_workflow.py check-environment release-qualification "${GITHUB_REF_NAME}"
           if [[ -n "${RELEASE_RUN_ID}" || -n "${RELEASE_RUN_ATTEMPT}" ]]; then
             bundle="${RUNNER_TEMP}/release-candidate"
             python3 scripts/release_workflow.py download "${RELEASE_RUN_ID}" "${RELEASE_RUN_ATTEMPT}" "${GITHUB_REF_NAME}" "${SOURCE_REF,,}" "${bundle}"
@@ -184,7 +184,7 @@ jobs:
           kind version
           kubectl version --client=true
 
-      - name: Run destructive canonical ACP release gate in Kind
+      - name: Run release qualification in Kind
         id: gate
         # Leave time for failure evidence and cleanup before the job deadline.
         timeout-minutes: 210
@@ -203,8 +203,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: live-acp-release-evidence-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/live-acp-release-gate/acceptance.json
+          name: release-qualification-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-qualification/acceptance.json
           if-no-files-found: error
           retention-days: 90
 
@@ -245,7 +245,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: live-acp-release-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/live-acp-release-gate/acceptance.json
+          name: release-qualification-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-qualification/acceptance.json
           if-no-files-found: error
           retention-days: 90

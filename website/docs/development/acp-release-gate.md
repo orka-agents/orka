@@ -1,8 +1,8 @@
 ---
-description: Qualify an ACP release candidate with deployed publication, independent GitHub verification, and safe cleanup.
+description: Qualify a release candidate with chart installation, recovery, agent execution, and verified cleanup.
 ---
 
-# Release automation and ACP qualification
+# Release automation and qualification
 
 Start a release with **Prepare Release**, approve credentialed qualification,
 then approve publication of the qualified candidate. Preparation, workflow
@@ -25,8 +25,8 @@ The flow is:
    builds all nine images for amd64 and arm64, runs Trivy, generates platform
    SBOMs, and signs the images. Trivy findings remain advisory; scanner and
    SARIF-upload failures still fail the run.
-4. Release dispatches **Live ACP Release Gate** with the exact candidate
-   bundle. A `live-acp-release-gate` environment reviewer must approve the
+4. Release dispatches **Release Qualification** with the exact candidate
+   bundle. A `release-qualification` environment reviewer must approve the
    candidate source and workflow before the job can receive canary credentials.
    The gate installs the packaged chart using the built image digests,
    verifies durable results after controller replacement, rejects an
@@ -61,9 +61,9 @@ Create a `release` environment with:
   approve it. Enable it when another reviewer is available and required.
 
 No release environment secret is needed. Add the same exact release branch to
-`live-acp-release-gate`, retaining `main` for standalone qualification. These
+`release-qualification`, retaining `main` for standalone qualification. These
 settings are prerequisites; the workflows check them but do not change them.
-The `live-acp-release-gate` environment also requires a reviewer with
+The `release-qualification` environment also requires a reviewer with
 administrator bypass disabled. Review approval must protect credentials before
 any release-branch workflow runs, including a direct standalone dispatch.
 GitHub documents [environment protection rules](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments).
@@ -85,16 +85,17 @@ gh workflow run release-pr.yml --repo orka-agents/orka --ref main \
 
 Preparation links the source and generated commit diffs and the Release run in
 its job summary. Review the candidate source, workflows, generated changes, and
-build bundle before approving the waiting `live-acp-release-gate` deployment.
+build bundle before approving the waiting `release-qualification` deployment.
 After qualification succeeds, review the acceptance evidence and approve the
 `release` deployment. The per-release human actions are dispatch, approval to
 use the canary credentials, and approval to publish.
 
-Finish or cancel any existing live gate before qualification. The release
-refuses to enqueue behind an active or approval-pending standalone run. Approve
-the new live gate within 90 minutes so its four-hour execution budget fits
-inside the parent workflow's six-hour job limit. If that budget expires, cancel
-the pending gate and retry the failed qualification job.
+Finish or cancel any existing qualification run before starting another. The
+release refuses to enqueue behind an active or approval-pending standalone run.
+Approve the new qualification run within 90 minutes so its four-hour execution
+budget fits inside the parent workflow's six-hour job limit. If that budget
+expires, cancel the pending qualification run and retry the failed qualification
+job.
 
 Before a tag exists, use **Re-run all jobs** if an interrupted build left partial
 artifacts. This makes a new artifact set and requires fresh qualification. If
@@ -122,7 +123,11 @@ attempt creates a unique `orka/acp-release-gate-*` branch and a temporary PR
 against the dispatched source branch. The validator checks the fork relationship
 through GitHub before submitting work.
 
-Configure the `live-acp-release-gate` environment in `orka-agents/orka`:
+If you previously configured `live-acp-release-gate`, set up
+`release-qualification` with the canary settings below before dispatching the
+renamed workflow.
+
+Configure the `release-qualification` environment in `orka-agents/orka`:
 
 - Select deployment branches by name. Allow `main` and explicitly selected
   release lines, such as `release-0.2`. Do not allow tags, PR refs, or arbitrary
@@ -160,7 +165,7 @@ broker and must continue to fail the gate if its ServiceAccount can read these
 Secrets directly. Reports record only Secret names, namespaces, and resource
 versions.
 
-## Standalone ACP qualification
+## Standalone qualification
 
 The release workflow dispatches and verifies the gate automatically. A
 standalone gate run remains useful for diagnosis. It builds local images from
@@ -173,17 +178,17 @@ For example:
 
 ```bash
 candidate="$(gh api repos/orka-agents/orka/commits/main --jq .sha)"
-gh workflow run live-acp-release-gate.yml --repo orka-agents/orka --ref main \
+gh workflow run release-qualification.yml --repo orka-agents/orka --ref main \
   -f source_ref="${candidate}" \
   -f source_repository=https://github.com/orka-agents/orka.git \
   -f pr_base=main
 
-gh run list --repo orka-agents/orka --workflow live-acp-release-gate.yml \
+gh run list --repo orka-agents/orka --workflow release-qualification.yml \
   --commit "${candidate}" --event workflow_dispatch \
   --json databaseId,headSha,status,conclusion,url
 
 gh run watch RUN_ID --repo orka-agents/orka --exit-status
-bash scripts/verify-acp-release-qualification.sh "${candidate}" RUN_ID main
+bash scripts/verify-release-qualification.sh "${candidate}" RUN_ID main
 ```
 
 The verifier's optional third argument is the expected branch and defaults to
@@ -196,8 +201,8 @@ for diagnosis; release qualification requires a trusted workflow run.
 
 ## Evidence and failures
 
-The job uploads `live-acp-release-evidence-RUN_ID-ATTEMPT` before tearing down
-Kind, then `live-acp-release-acceptance-RUN_ID-ATTEMPT` after teardown. Both
+The job uploads `release-qualification-evidence-RUN_ID-ATTEMPT` before tearing down
+Kind, then `release-qualification-acceptance-RUN_ID-ATTEMPT` after teardown. Both
 contain only `acceptance.json` and remain available for 90 days. Successful
 release publication archives the verified report, candidate and qualification
 manifests, and exact chart archive as GitHub Release assets.

@@ -197,9 +197,9 @@ mkdir "${fixture}/bin"
 export QUALIFICATION_FIXTURE="${fixture}"
 jq -n --arg sha "${GITHUB_SHA}" '{status:"completed",conclusion:"success",event:"workflow_dispatch",
   head_sha:$sha,head_branch:"main",repository:{full_name:"orka-agents/orka"},
-  head_repository:{full_name:"orka-agents/orka"},path:".github/workflows/live-acp-release-gate.yml",run_attempt:1}' \
+  head_repository:{full_name:"orka-agents/orka"},path:".github/workflows/release-qualification.yml",run_attempt:1}' \
   >"${fixture}/run-original.json"
-jq -n --arg name "live-acp-release-acceptance-${GITHUB_RUN_ID}-1" \
+jq -n --arg name "release-qualification-acceptance-${GITHUB_RUN_ID}-1" \
   '[{artifacts:[{name:$name,expired:false}]}]' >"${fixture}/artifacts.json"
 cat >"${fixture}/bin/gh" <<'STUB'
 #!/usr/bin/env bash
@@ -227,12 +227,12 @@ fi
 STUB
 chmod +x "${fixture}/bin/gh"
 cp "${fixture}/run-original.json" "${fixture}/run.json"
-PATH="${fixture}/bin:${PATH}" bash "${root}/scripts/verify-acp-release-qualification.sh" \
+PATH="${fixture}/bin:${PATH}" bash "${root}/scripts/verify-release-qualification.sh" \
   "${GITHUB_SHA}" "${GITHUB_RUN_ID}" >/dev/null
-rm -rf "${root}/bin/acp-release-qualification-${GITHUB_RUN_ID}-1"
+rm -rf "${root}/bin/release-qualification-${GITHUB_RUN_ID}-1"
 while IFS= read -r mutation; do
   jq "${mutation}" "${fixture}/run-original.json" >"${fixture}/run.json"
-  if PATH="${fixture}/bin:${PATH}" bash "${root}/scripts/verify-acp-release-qualification.sh" \
+  if PATH="${fixture}/bin:${PATH}" bash "${root}/scripts/verify-release-qualification.sh" \
       "${GITHUB_SHA}" "${GITHUB_RUN_ID}" >/dev/null 2>&1; then
     printf 'untrusted workflow metadata qualified: %s\n' "${mutation}" >&2
     exit 1
@@ -254,9 +254,9 @@ cp "${fixture}/run-original.json" "${fixture}/run.json"
 while IFS= read -r mutation; do
   jq "${mutation}" "${fixture}/run-original.json" >"${fixture}/run-after-download.json"
   rm -f "${fixture}/download-complete"
-  if PATH="${fixture}/bin:${PATH}" bash "${root}/scripts/verify-acp-release-qualification.sh" \
+  if PATH="${fixture}/bin:${PATH}" bash "${root}/scripts/verify-release-qualification.sh" \
       "${GITHUB_SHA}" "${GITHUB_RUN_ID}" >/dev/null 2>&1; then
-    rm -rf "${root}/bin/acp-release-qualification-${GITHUB_RUN_ID}-1"
+    rm -rf "${root}/bin/release-qualification-${GITHUB_RUN_ID}-1"
     printf 'workflow change during artifact download qualified: %s\n' "${mutation}" >&2
     exit 1
   fi
@@ -276,10 +276,10 @@ cp "${fixture}/qualified.json" "${fixture}/qualified-main.json"
 jq '.workflow.ref = "refs/heads/release-0.2" | .baseBranch = "release-0.2"
   | .task.delivery.prReceipt.baseBranch = "release-0.2" | .observations.pullRequest.baseBranch = "release-0.2"' \
   "${fixture}/qualified-main.json" >"${fixture}/qualified.json"
-PATH="${fixture}/bin:${PATH}" bash "${root}/scripts/verify-acp-release-qualification.sh" \
+PATH="${fixture}/bin:${PATH}" bash "${root}/scripts/verify-release-qualification.sh" \
   "${GITHUB_SHA}" "${GITHUB_RUN_ID}" release-0.2 >/dev/null
-rm -rf "${root}/bin/acp-release-qualification-${GITHUB_RUN_ID}-1"
-if PATH="${fixture}/bin:${PATH}" bash "${root}/scripts/verify-acp-release-qualification.sh" \
+rm -rf "${root}/bin/release-qualification-${GITHUB_RUN_ID}-1"
+if PATH="${fixture}/bin:${PATH}" bash "${root}/scripts/verify-release-qualification.sh" \
     "${GITHUB_SHA}" "${GITHUB_RUN_ID}" main >/dev/null 2>&1; then
   echo 'release-branch evidence was accepted as default-branch evidence' >&2
   exit 1
@@ -291,7 +291,7 @@ awk '
   step && $0 == "        run: |" { body=1; next }
   body && /^      - name:/ { exit }
   body { sub(/^          /, ""); print }
-' "${root}/.github/workflows/live-acp-release-gate.yml" >"${fixture}/dispatch.sh"
+' "${root}/.github/workflows/release-qualification.yml" >"${fixture}/dispatch.sh"
 [[ -s "${fixture}/dispatch.sh" ]]
 validate_dispatch() {
   CHECKED_OUT_SHA="${GITHUB_SHA}" DEFAULT_BRANCH=main PR_BASE="${TEST_PR_BASE:-main}" \

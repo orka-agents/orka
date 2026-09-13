@@ -99,7 +99,7 @@ class ReleaseTest(ReleaseFixture):
 
         with patch.object(release, "api", side_effect=api_result(environment)), \
                 patch.object(release, "paginated", return_value=policies):
-            for name in ("release", "live-acp-release-gate"):
+            for name in ("release", "release-qualification"):
                 release.check_environment(name, BRANCH)
         release_lines = policies + [{"type": "branch", "name": "release-1.0"}]
         for default in ("main", "trunk"):
@@ -108,8 +108,8 @@ class ReleaseTest(ReleaseFixture):
                 release.check_environment("release", BRANCH)
             with patch.object(release, "api", side_effect=api_result(environment, default)), \
                     patch.object(release, "paginated", return_value=release_lines + [{"type": "branch", "name": default}]):
-                release.check_environment("live-acp-release-gate", BRANCH)
-                release.check_environment("live-acp-release-gate", default)
+                release.check_environment("release-qualification", BRANCH)
+                release.check_environment("release-qualification", default)
                 with self.assertRaises(RuntimeError):
                     release.check_environment("release", BRANCH)
         mutations = [
@@ -127,7 +127,7 @@ class ReleaseTest(ReleaseFixture):
             {"type": "branch", "name": "feature/unreviewed"},
             {"type": "branch", "name": "release-00.2"},
         )]
-        for name in ("release", "live-acp-release-gate"):
+        for name in ("release", "release-qualification"):
             for env, rules in mutations:
                 with self.subTest(name=name, env=env, rules=rules), patch.object(release, "api", side_effect=api_result(env)), \
                         patch.object(release, "paginated", return_value=rules), self.assertRaises(RuntimeError):
@@ -249,7 +249,7 @@ class ReleaseTest(ReleaseFixture):
             with self.subTest(status=status), patch.object(release, "check_context"), \
                     patch.object(release, "paginated", return_value=[run(status=status)]), \
                     patch.object(release, "dispatch") as dispatch, \
-                    self.assertRaisesRegex(RuntimeError, "Another live ACP release gate"):
+                    self.assertRaisesRegex(RuntimeError, "Another release qualification run"):
                 release.qualify(self.bundle)
             dispatch.assert_not_called()
         self.assertFalse((self.bundle / "qualification.json").exists())
@@ -297,7 +297,7 @@ class ReleaseTest(ReleaseFixture):
 
     def test_publication_requires_the_original_run_and_unchanged_qualified_artifacts(self):
         self.qualification()
-        report_dir = self.root / "bin/acp-release-qualification-456-1"
+        report_dir = self.root / "bin/release-qualification-456-1"
         report_dir.mkdir(parents=True)
         shutil.copyfile(self.bundle / "acceptance.json", report_dir / "acceptance.json")
         def download(*args):
