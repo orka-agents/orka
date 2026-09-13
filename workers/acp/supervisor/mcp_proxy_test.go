@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -142,6 +143,105 @@ func TestMCPProxyToolCallMetadata(t *testing.T) {
 				t.Fatal("tool call did not reach the broker")
 			}
 		})
+	}
+}
+
+func TestMCPProxySessionCapacityPreservesOtherRequests(t *testing.T) {
+	started := make(chan struct{}, defaultMCPMaxSessionCalls)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	var calls, cancelled atomic.Int32
+	broker := MCPBrokerFunc(func(ctx context.Context, request harnessv2.MCPBrokerCallRequest) (harnessv2.MCPBrokerCallResponse, error) {
+		if calls.Add(1) <= defaultMCPMaxSessionCalls {
+			started <- struct{}{}
+		}
+		select {
+		case <-release:
+			return harnessv2.MCPBrokerCallResponse{
+				Protocol: harnessv2.ProtocolVersion, CallID: request.Call.CallID,
+				Result: json.RawMessage(`{"value":"ok"}`),
+			}, nil
+		case <-ctx.Done():
+			cancelled.Add(1)
+			return harnessv2.MCPBrokerCallResponse{}, ctx.Err()
+		}
+	})
+	session, endpoint := newTestMCPProxySession(t, broker, false)
+	now := time.Now().UTC()
+	authorization, lease := testMCPAuthorization(t, session.fence, now, false)
+	if err := session.activate(authorization, lease, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.markRunning(authorization.PromptID, now); err != nil {
+		t.Fatal(err)
+	}
+
+	type callResult struct {
+		response mcpJSONRPCResponse
+		err      error
+	}
+	results := make(chan callResult, defaultMCPMaxSessionCalls)
+	ctx := t.Context()
+	for i := range defaultMCPMaxSessionCalls {
+		go func() {
+			payload := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"lookup","arguments":{}}}`, i)
+			request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(payload))
+			if err != nil {
+				results <- callResult{err: err}
+				return
+			}
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Authorization", "Bearer credential")
+			response, err := (&http.Client{Timeout: 5 * time.Second}).Do(request)
+			if err != nil {
+				results <- callResult{err: err}
+				return
+			}
+			defer response.Body.Close() //nolint:errcheck
+			var decoded mcpJSONRPCResponse
+			err = json.NewDecoder(response.Body).Decode(&decoded)
+			results <- callResult{response: decoded, err: err}
+		}()
+	}
+	for range defaultMCPMaxSessionCalls {
+		select {
+		case <-started:
+		case <-time.After(3 * time.Second):
+			t.Fatal("admitted tool calls did not start")
+		}
+	}
+
+	response := doMCPRequest(t, endpoint, "credential", `{"jsonrpc":"2.0","id":"overflow","method":"tools/call","params":{"name":"lookup","arguments":{}}}`)
+	status := response.StatusCode
+	rejected := decodeMCPResponse(t, response)
+	if status != http.StatusOK || string(rejected.ID) != `"overflow"` || rejected.Error == nil || rejected.Error.Code != -32003 || rejected.Result != nil {
+		t.Fatalf("capacity response = HTTP %d %#v, want a correlated JSON-RPC error", status, rejected)
+	}
+	for _, method := range []string{"ping", "tools/list"} {
+		control := decodeMCPResponse(t, doMCPRequest(t, endpoint, "credential", fmt.Sprintf(`{"jsonrpc":"2.0","id":"control","method":%q}`, method)))
+		if control.Error != nil {
+			t.Fatalf("%s was blocked by active tool calls: %#v", method, control)
+		}
+	}
+	if calls.Load() != defaultMCPMaxSessionCalls || cancelled.Load() != 0 {
+		t.Fatalf("capacity rejection changed admitted calls: calls=%d cancelled=%d", calls.Load(), cancelled.Load())
+	}
+	unblock()
+	for range defaultMCPMaxSessionCalls {
+		select {
+		case result := <-results:
+			if result.err != nil || result.response.Error != nil {
+				t.Fatalf("admitted call failed: %#v error=%v", result.response, result.err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("admitted tool call did not finish")
+		}
+	}
+	recovery := decodeMCPResponse(t, doMCPRequest(t, endpoint, "credential", `{"jsonrpc":"2.0","id":"later","method":"tools/call","params":{"name":"lookup","arguments":{}}}`))
+	if recovery.Error != nil || calls.Load() != defaultMCPMaxSessionCalls+1 || cancelled.Load() != 0 {
+		t.Fatalf("later call = %#v calls=%d cancelled=%d", recovery, calls.Load(), cancelled.Load())
 	}
 }
 

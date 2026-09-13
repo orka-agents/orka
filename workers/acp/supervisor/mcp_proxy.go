@@ -461,11 +461,6 @@ func (p *mcpProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer releaseMCPSlot(p.slots)
-	if !tryAcquireMCPSlot(session.calls) {
-		http.Error(w, "MCP session is at capacity", http.StatusTooManyRequests)
-		return
-	}
-	defer releaseMCPSlot(session.calls)
 	body := http.MaxBytesReader(w, r.Body, int64(harnessv2.MaxMCPArgumentsBytes+(64<<10)))
 	defer body.Close() //nolint:errcheck
 	decoder := json.NewDecoder(body)
@@ -520,6 +515,14 @@ func (s *mcpProxySession) handleToolCall(w http.ResponseWriter, r *http.Request,
 		writeMCPRPCError(w, rpc.ID, -32602, "MCP tool call requires a bounded request ID")
 		return
 	}
+	// Reject this tool request with its own JSON-RPC ID. A transport-level
+	// rejection can close a client's shared MCP stream and strand other calls.
+	// The global HTTP guard still bounds request parsing and control messages.
+	if !tryAcquireMCPSlot(s.calls) {
+		writeMCPRPCError(w, rpc.ID, -32003, "MCP session is at capacity")
+		return
+	}
+	defer releaseMCPSlot(s.calls)
 	now := time.Now().UTC()
 	gate, authorization, lease, approval, err := s.authorizeCall(params.Name, callID, now)
 	if err != nil {
