@@ -128,7 +128,8 @@ def check_environment(name: str, branch: str, approval: bool = False) -> None:
 def check_preparation_automation(trusted: str, candidate: str) -> None:
     """Check release tooling and chart inputs before checking out an existing line."""
     require(SHA.fullmatch(trusted) and SHA.fullmatch(candidate), "invalid preparation source identity")
-    paths = (".github", "scripts", "cmd/build", ".agents/skills/kindctl", "bin", "vendor",
+    paths = (".github", "scripts", "cmd/build", ".agents/skills/kindctl",
+             ".agents/skills/vekil-reverse-proxy-deploy", "bin", "vendor",
              "go.mod", "go.sum", "go.work", "go.work.sum", "Makefile", "GNUmakefile", "makefile")
     raw_paths = command("git", "diff", "--name-only", "-z", "--no-renames", trusted, candidate, "--", *paths,
                         strip_output=False)

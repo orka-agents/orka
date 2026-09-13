@@ -612,6 +612,8 @@ class PreparationTest(unittest.TestCase):
             "go.mod": "module untrusted.invalid/release\n",
             "go.work": "go 1.27\n",
             ".agents/skills/kindctl/bin/kindctl": "#!/bin/sh\ntouch untrusted-command-ran\n",
+            ".agents/skills/vekil-reverse-proxy-deploy/scripts/deploy_vekil_reverse_proxy.sh":
+                "#!/bin/sh\ntouch untrusted-command-ran\n",
         }
         for name, contents in changes.items():
             with self.subTest(name=name):
