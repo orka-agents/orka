@@ -1,6 +1,7 @@
 name: Tests
 
 on:
+  workflow_call:
   workflow_dispatch:
   push:
     paths-ignore:
@@ -23,6 +24,23 @@ permissions:
   contents: read
 
 jobs:
+  release-automation:
+    name: Release automation tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Test candidate provenance, approval evidence, and publication retries
+        run: |
+          set -Eeuo pipefail
+          for suite in release-workflow release-manifest live-acp-release-report live-acp-release-publication live-acp-release-chart live-acp-runtime-kind-e2e; do
+            bash "scripts/tests/${suite}-test.sh"
+          done
+
   test:
     name: Go Tests
     runs-on: ubuntu-latest

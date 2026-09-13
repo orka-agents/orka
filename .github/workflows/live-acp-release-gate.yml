@@ -1,4 +1,5 @@
 name: Live ACP Release Gate
+run-name: Live ACP Release Gate (${{ inputs.dispatch_id || inputs.source_ref }})
 
 on:
   workflow_dispatch:
@@ -17,12 +18,25 @@ on:
         required: true
         type: string
       pr_base:
-        description: Default branch targeted by the temporary canary PR
+        description: Dispatched main or release-X.Y branch targeted by the temporary canary PR
         required: true
         default: main
         type: string
+      release_run_id:
+        description: Optional parent Release workflow run containing the candidate bundle
+        required: false
+        type: string
+      release_run_attempt:
+        description: Candidate artifact attempt in the parent Release workflow
+        required: false
+        type: string
+      dispatch_id:
+        description: Correlation ID supplied by the parent Release workflow
+        required: false
+        type: string
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
@@ -81,12 +95,16 @@ jobs:
           SOURCE_REPOSITORY: ${{ inputs.source_repository }}
         run: |
           set -Eeuo pipefail
-          if [[ "${GITHUB_REF}" != "refs/heads/${DEFAULT_BRANCH}" ]]; then
-            echo "Dispatch this workflow from the default branch (${DEFAULT_BRANCH}) only." >&2
+          if [[ "${GITHUB_REPOSITORY}" != "orka-agents/orka" ]]; then
+            echo "Release qualification must run in orka-agents/orka." >&2
             exit 1
           fi
-          if [[ "${PR_BASE}" != "${DEFAULT_BRANCH}" ]]; then
-            echo "pr_base must equal the default branch (${DEFAULT_BRANCH})." >&2
+          if [[ "${GITHUB_REF}" != "refs/heads/${DEFAULT_BRANCH}" && ! "${GITHUB_REF}" =~ ^refs/heads/release-(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Dispatch from the default branch or an explicitly permitted release-X.Y branch." >&2
+            exit 1
+          fi
+          if [[ "${PR_BASE}" != "${GITHUB_REF#refs/heads/}" ]]; then
+            echo "pr_base must equal the dispatched branch." >&2
             exit 1
           fi
           if [[ ! "${SOURCE_REPOSITORY}" =~ ^https://github\.com/[^/?#]+/[^/?#]+(\.git)?$ ]]; then
@@ -127,6 +145,21 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Verify environment branch policy and candidate bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_RUN_ID: ${{ inputs.release_run_id }}
+          RELEASE_RUN_ATTEMPT: ${{ inputs.release_run_attempt }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/release_workflow.py check-environment live-acp-release-gate "${GITHUB_REF_NAME}"
+          if [[ -n "${RELEASE_RUN_ID}" || -n "${RELEASE_RUN_ATTEMPT}" ]]; then
+            bundle="${RUNNER_TEMP}/release-candidate"
+            python3 scripts/release_workflow.py download "${RELEASE_RUN_ID}" "${RELEASE_RUN_ATTEMPT}" "${GITHUB_REF_NAME}" "${SOURCE_REF,,}" "${bundle}"
+            printf 'ACP_E2E_RELEASE_BUNDLE_DIR=%s\n' "${bundle}" >>"${GITHUB_ENV}"
+          fi
+
       - name: Free disk space for Docker-heavy live E2E
         uses: ./.github/actions/free-disk-space
 
@@ -147,6 +180,7 @@ jobs:
           git --version
           gh --version
           jq --version
+          helm version
           kind version
           kubectl version --client=true
 

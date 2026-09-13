@@ -66,13 +66,19 @@ make release-manifest NEWVERSION=vX.Y.Z[-beta.N|-rc.N]
 make promote-staging-manifest
 ```
 
-The first target updates release inputs and regenerates staging. The second copies the reviewed staging installer and chart into `deploy/` and `charts/orka/`. Normally `.github/workflows/release-pr.yml` runs both and opens the release-preparation PR. A matching `v*` tag packages and publishes those committed root snapshots; tag workflows do not regenerate or promote manifests.
+The first target updates release inputs and regenerates staging. The second
+copies staging into `deploy/` and `charts/orka/`. **Prepare Release** in
+`.github/workflows/release-pr.yml` runs both on `release-X.Y`, commits the
+candidate, and dispatches its checks and publication workflow using
+`GITHUB_TOKEN`. It does not create a release-preparation PR or push to `main`.
 
-Before tagging a release containing the RuntimePool ACP path, require a successful
-[ACP publication release qualification](acp-release-gate.md) report for the exact
-candidate commit. Dispatch the protected gate from the default branch and run
-`scripts/verify-acp-release-qualification.sh FULL_CANDIDATE_SHA WORKFLOW_RUN_ID`.
-Ordinary nightly smoke and component tests do not satisfy this publication check.
+The workflow builds the release images, then waits for approval in
+`live-acp-release-gate` before credentialed qualification of the exact packaged
+chart and image digests. After qualification, a separate `release` environment
+approval permits tagging and publication of the qualified artifacts. See
+[release automation and ACP qualification](acp-release-gate.md)
+for environment setup, dispatch, evidence, and retries. Ordinary nightly smoke
+and component tests do not satisfy the publication gate.
 
 CRDs are generated into `config/crd/bases/`, while `config/crd/kustomization.yaml` selects the production APIs packaged in the installer and chart. The development-only fake workspace CRDs and RBAC are kept in the separate `config/development/fake-workspace-provider` package. Helm makes production CRDs available on fresh install but does not update them during upgrades. Apply the CRDs from the exact target chart before upgrading the controller — see [Upgrading](../operations/upgrading.md).
 

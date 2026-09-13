@@ -147,11 +147,13 @@ missing or mismatched artifacts staying not ready.
   without mounting provider credentials into RuntimePools. Restrict that
   environment to the default branch; do not require reviewers if scheduled runs
   must proceed unattended.
-- `.github/workflows/live-acp-release-gate.yml` is manual-only and serialized.
-  Restrict the `live-acp-release-gate` environment to the default branch. It
-  accepts the configured canary fork, a full
-  source SHA that must equal the dispatched workflow commit and default-branch
-  head, and the default branch as the PR base. It requires these environment
+- `.github/workflows/live-acp-release-gate.yml` uses `workflow_dispatch` and is
+  serialized. The release workflow dispatches it automatically. Restrict the
+  `live-acp-release-gate` environment to `main` and exact permitted release
+  branches, require a trusted reviewer, and disable administrator bypass before
+  exposing canary credentials. It accepts the configured canary fork and a full
+  source SHA that must equal both the dispatched workflow commit and selected branch head.
+  The canary PR base must be that same branch. It requires these environment
   secrets:
   `COPILOT_GITHUB_TOKEN`, `ACP_E2E_WRITE_READ_CREDENTIAL_TOKEN`,
   `ACP_E2E_WRITE_TARGET_READ_CREDENTIAL_TOKEN`,
@@ -166,8 +168,9 @@ missing or mismatched artifacts staying not ready.
 - Neither live ACP workflow runs for `pull_request`, so PR-controlled code never
   receives provider or publication credentials. Both check out with persisted
   credentials disabled and expose secrets only to the final local script step.
-  They intentionally keep `permissions` at `contents: read` and do not request
-  `id-token: write`; GitHub OIDC validation remains isolated in
+  The release gate adds `actions: read` to `contents: read` to verify the
+  environment branch rules and download candidate artifacts using the native
+  token. Neither live ACP workflow requests `id-token: write`; GitHub OIDC validation remains isolated in
   `live-github-oidc-e2e.yml`.
 - The release gate additionally requires digest-pinned controller, Publisher,
   Codex, OpenCode, Claude, and Copilot images; a Ready central provider proxy; the
