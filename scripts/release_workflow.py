@@ -42,12 +42,12 @@ def require(condition: object, message: str) -> None:
         raise RuntimeError(message)
 
 
-def command(*args: str, cwd: Path = ROOT, input_text: str | None = None) -> str:
+def command(*args: str, cwd: Path = ROOT, input_text: str | None = None, strip_output: bool = True) -> str:
     result = subprocess.run(args, cwd=cwd, input=input_text, text=True,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     # Do not echo subprocess output: some commands handle credentialed requests.
     require(result.returncode == 0, f"{args[0]} {args[1] if len(args) > 1 else ''} failed")
-    return result.stdout.strip()
+    return result.stdout.strip() if strip_output else result.stdout
 
 
 def api(path: str, payload: dict | None = None, method: str = "POST") -> object:
@@ -126,27 +126,43 @@ def check_environment(name: str, branch: str, approval: bool = False) -> None:
 
 
 def check_preparation_automation(trusted: str, candidate: str) -> None:
-    """Check executable release tooling before checking out an existing line."""
+    """Check release tooling and chart inputs before checking out an existing line."""
     require(SHA.fullmatch(trusted) and SHA.fullmatch(candidate), "invalid preparation source identity")
     paths = (".github", "scripts", "cmd/build", ".agents/skills/kindctl", "bin", "vendor",
-             "go.mod", "go.sum", "go.work", "go.work.sum", "Makefile", "GNUmakefile", "makefile",
-             ":(exclude)cmd/build/helmify/static")
-    changed = command("git", "diff", "--name-only", "--no-renames", trusted, candidate, "--", *paths).splitlines()
-    if "Makefile" in changed:
-        # A previous preparation changes only this literal version assignment.
-        # Do not normalize arbitrary Make expressions, additions, or file modes.
-        def makefile_identity(commit: str) -> tuple[str, str]:
-            entry = command("git", "ls-tree", commit, "--", "Makefile").split()
-            require(len(entry) == 4 and entry[1] == "blob", "release Makefile is missing")
-            content = command("git", "show", f"{commit}:Makefile")
-            content = re.sub(rf"(?m)^VERSION := {VERSION.pattern}$", "VERSION := RELEASE_VERSION", content)
-            return entry[0], content
+             "go.mod", "go.sum", "go.work", "go.work.sum", "Makefile", "GNUmakefile", "makefile")
+    raw_paths = command("git", "diff", "--name-only", "-z", "--no-renames", trusted, candidate, "--", *paths,
+                        strip_output=False)
+    changed = raw_paths.split("\0")[:-1]
+    # Normalize only literal fields written by update-release-version.py.
+    # All other chart inputs, whitespace, and file modes retain their identity.
+    bare_version = VERSION.pattern.removeprefix("v")
+    version_fields = {
+        "Makefile": [(rf"^VERSION := {VERSION.pattern}$", "VERSION := RELEASE_VERSION")],
+        "cmd/build/helmify/static/Chart.yaml": [
+            (rf"^version: {bare_version}$", "version: RELEASE_VERSION"),
+            (rf'^appVersion: "{VERSION.pattern}"$', 'appVersion: "RELEASE_VERSION"'),
+        ],
+        "cmd/build/helmify/static/values.yaml": [
+            (rf'^([ \t]+repository:[ \t]*{re.escape(image_repository(name))}[ \t]*\n'
+             rf'(?:[ \t]*(?:#.*)?\n)*[ \t]+tag: )"{bare_version}"$', r'\g<1>"RELEASE_VERSION"')
+            for name in ("controller", "workspace-publisher", "agent-harness-wrapper", "ai-worker", "general-worker")
+        ],
+    }
 
-        if makefile_identity(trusted) == makefile_identity(candidate):
-            changed.remove("Makefile")
+    def input_identity(commit: str, path: str) -> tuple[str, str]:
+        entry = command("git", "ls-tree", commit, "--", path).split()
+        require(len(entry) == 4 and entry[1] == "blob", "release input is missing")
+        content = command("git", "show", f"{commit}:{path}", strip_output=False)
+        for pattern, replacement in version_fields[path]:
+            content = re.sub(pattern, replacement, content, flags=re.MULTILINE)
+        return entry[0], content
+
+    for path in version_fields:
+        if path in changed and input_identity(trusted, path) == input_identity(candidate, path):
+            changed.remove(path)
     require(not changed,
             "Release automation differs from the dispatched default-branch commit; "
-            "backport the reviewed workflows, scripts, generator, and toolchain before preparation")
+            "backport the reviewed workflows, scripts, generator, chart inputs, and toolchain before preparation")
 
 
 def check_context(branch: str, candidate: str) -> None:

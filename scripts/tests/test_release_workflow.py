@@ -493,8 +493,12 @@ class PreparationTest(unittest.TestCase):
         self.git("config", "user.name", "Test")
         self.git("config", "user.email", "test@example.invalid")
         files = {
-            "cmd/build/helmify/static/Chart.yaml": "initial\n",
-            "cmd/build/helmify/static/values.yaml": "initial\n",
+            "cmd/build/helmify/static/Chart.yaml":
+                'apiVersion: v2\nname: orka\nversion: 0.1.1\nappVersion: "v0.1.1"\n',
+            "cmd/build/helmify/static/values.yaml": "".join(
+                f'{name}:\n  image:\n    repository: {release.image_repository(name)}\n    tag: "0.1.1"\n'
+                for name in ("controller", "workspace-publisher", "agent-harness-wrapper", "ai-worker", "general-worker")
+            ) + 'other:\n  image:\n    repository: ghcr.io/example/other\n    tag: "2.7.0"\n',
             "config/manager/manager.yaml": "initial\n",
             "config/manager/kustomization.yaml": "initial\n",
             "scripts/release_workflow.py": "# automation is present on this release line\n",
@@ -593,12 +597,16 @@ class PreparationTest(unittest.TestCase):
         self.assertEqual(self.ref(f"refs/heads/{BRANCH}"), self.main)
 
     def test_release_tooling_changes_stop_before_checkout_generation_or_dispatch(self):
+        static = self.checkout / "cmd/build/helmify/static"
         changes = {
             "Makefile": "VERSION := $(shell touch untrusted-command-ran)\n",
             "GNUmakefile": "release-manifest:\n\t@touch untrusted-command-ran\n",
             ".github/workflows/release.yml": "name: altered release workflow\n",
             "scripts/release_workflow.py": "# altered release automation\n",
             "cmd/build/helmify/untrusted.go": "package main\nfunc init() {}\n",
+            "cmd/build/helmify/static/templates/untrusted.yaml": '{{ fail "unreviewed template" }}\n',
+            "cmd/build/helmify/static/Chart.yaml": (static / "Chart.yaml").read_text().replace("name: orka", "name: altered"),
+            "cmd/build/helmify/static/values.yaml": (static / "values.yaml").read_text().replace('"2.7.0"', '"2.8.0"'),
             "bin/controller-gen": "#!/bin/sh\ntouch untrusted-command-ran\n",
             "vendor/modules.txt": "# unreviewed vendored toolchain\n",
             "go.mod": "module untrusted.invalid/release\n",
@@ -627,9 +635,10 @@ class PreparationTest(unittest.TestCase):
 
     def test_previous_release_version_does_not_change_tooling_identity(self):
         self.git("checkout", "-b", BRANCH)
-        makefile = self.checkout / "Makefile"
-        makefile.write_text(makefile.read_text().replace("VERSION := v0.1.1", "VERSION := v0.2.0-rc.1"))
-        self.git("add", "Makefile")
+        for name in ("Makefile", "cmd/build/helmify/static/Chart.yaml", "cmd/build/helmify/static/values.yaml"):
+            path = self.checkout / name
+            path.write_text(path.read_text().replace("0.1.1", "0.2.0-rc.1"))
+            self.git("add", name)
         self.git("commit", "-m", "previous release version")
         base = self.git("rev-parse", "HEAD")
         self.git("push", "origin", BRANCH)
@@ -638,6 +647,49 @@ class PreparationTest(unittest.TestCase):
             release.prepare(VERSION)
         self.assertEqual(self.git("rev-parse", "HEAD^"), base)
         self.assertEqual(self.ref("refs/heads/main"), self.main)
+
+    def test_static_chart_symlinks_stop_before_checkout_or_generation(self):
+        outside = self.root / "outside-chart-fixture.txt"
+        outside.write_text("harmless fixture outside the chart\n")
+        for name in ("cmd/build/helmify/static/Chart.yaml", "cmd/build/helmify/static/values.yaml",
+                     "cmd/build/helmify/static/templates/external.txt",
+                     "cmd/build/helmify/static/Chart.yaml ", "cmd/build/helmify/static/values.yaml "):
+            with self.subTest(path=name):
+                self.git("checkout", "-B", BRANCH, "main")
+                path = self.checkout / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.unlink(missing_ok=True)
+                path.symlink_to(outside)
+                self.git("add", name)
+                self.git("commit", "-m", "untrusted chart symlink")
+                base = self.git("rev-parse", "HEAD")
+                self.git("push", "--force", "origin", BRANCH)
+                self.git("checkout", "main")
+                with patch.object(release, "dispatch") as dispatch, \
+                        self.assertRaisesRegex(RuntimeError, "Release automation differs"):
+                    release.prepare(VERSION)
+                dispatch.assert_not_called()
+                self.assertEqual(self.git("rev-parse", "HEAD"), self.main)
+                self.assertEqual(self.ref(f"refs/heads/{BRANCH}"), base)
+                self.assertEqual((self.checkout / "deploy/generated.txt").read_text(), "initial\n")
+
+    def test_versioned_inputs_preserve_whitespace_and_file_modes(self):
+        for name in ("Makefile", "cmd/build/helmify/static/Chart.yaml", "cmd/build/helmify/static/values.yaml"):
+            for change in ("whitespace", "mode"):
+                with self.subTest(path=name, change=change):
+                    self.git("checkout", "-B", BRANCH, "main")
+                    path = self.checkout / name
+                    if change == "whitespace":
+                        path.write_text("\n" + path.read_text())
+                    else:
+                        path.chmod(0o755)
+                    self.git("add", name)
+                    self.git("commit", "-m", "changed preparation input identity")
+                    base = self.git("rev-parse", "HEAD")
+                    self.git("checkout", "main")
+                    with self.assertRaisesRegex(RuntimeError, "Release automation differs"):
+                        release.check_preparation_automation(self.main, base)
+                    self.assertEqual(self.git("rev-parse", "HEAD"), self.main)
 
     def test_unexpected_untracked_generation_output_stops_before_push(self):
         makefile = self.checkout / "Makefile"

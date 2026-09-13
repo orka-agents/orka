@@ -47,9 +47,12 @@ See GitHub's [workflow trigger rules](https://docs.github.com/en/actions/how-tos
 
 The automation must first be merged into `main`. Backport the current release
 tooling to an existing release line before preparing another version on that
-line. Runtime backports can differ, but executable release tooling must match
-the dispatched `main` commit. Only the literal Makefile version assignment is
-excluded from that comparison.
+line. Runtime backports can differ, but executable release tooling and static
+chart inputs must match the dispatched `main` commit. The comparison allows
+only the literal Makefile version assignment, chart version and appVersion,
+and the five Orka image tags updated by release preparation to differ.
+Template changes, other chart values, and file mode changes require backporting
+the trusted inputs first.
 
 Create a `release` environment with:
 
