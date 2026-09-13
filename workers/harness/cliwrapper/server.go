@@ -939,14 +939,19 @@ func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request, turn *turn
 		writeSafeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	turn.cancel()
-	harness.WriteJSON(w, http.StatusAccepted, harness.CancelTurnResponse{
-		Version:          harness.ProtocolVersion,
+	accepted := turn.requestCancel()
+	status, message := http.StatusAccepted, "cancel accepted"
+	if !accepted {
+		status, message = http.StatusOK, "turn already settled"
+	}
+	harness.WriteJSON(w, status, harness.CancelTurnResponse{
+		Version: harness.ProtocolVersion,
+		// A settled turn already satisfies cancellation; clients must still drain its frames.
 		Accepted:         true,
 		RuntimeSessionID: request.RuntimeSessionID,
 		TurnID:           request.TurnID,
 		CorrelationID:    request.CorrelationID,
-		Message:          "cancel accepted",
+		Message:          message,
 	})
 }
 
@@ -1298,7 +1303,11 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 			}
 			restoreTurnEnv()
 		}
-		if artifactErr := s.uploadTurnArtifacts(turnCtx, turnArtifactsDir); artifactErr != nil {
+		artifactErr := s.uploadTurnArtifacts(ctx, turnCtx, turnArtifactsDir)
+		if s.appendTurnContextTerminalIfDone(ctx, turn) {
+			return
+		}
+		if artifactErr != nil {
 			turn.appendFrame(s.runtimeLogTextFrame(
 				turn,
 				"artifact-upload",
@@ -1374,7 +1383,11 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 			))
 			return
 		}
-		if artifactErr := s.uploadTurnArtifacts(turnCtx, turnArtifactsDir); artifactErr != nil {
+		artifactErr := s.uploadTurnArtifacts(ctx, turnCtx, turnArtifactsDir)
+		if s.appendTurnContextTerminalIfDone(ctx, turn) {
+			return
+		}
+		if artifactErr != nil {
 			retainedArtifactsDir, retainErr := retainFailedTurnArtifacts(turnArtifactsDir)
 			if retainErr != nil {
 				// If the isolated move fails, retain the original workspace rather
@@ -1405,8 +1418,17 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 				))
 			}
 		}
-		if frameErr := s.appendCompletedFrame(turn, parsed); frameErr != nil {
-			turn.appendFrame(s.failedFrame(turn, "result_store_failed", frameErr.Error(), false))
+		if frameErr := s.appendCompletedFrame(ctx, turn, parsed); frameErr != nil {
+			if errors.Is(frameErr, errTurnCanceledBeforeCompletion) ||
+				errors.Is(frameErr, context.Canceled) ||
+				errors.Is(frameErr, context.DeadlineExceeded) {
+				s.appendTurnContextTerminalFrame(turn, frameErr)
+				return
+			}
+			storeFailed := s.failedFrame(turn, "result_store_failed", frameErr.Error(), false)
+			if terminalErr := turn.tryAppendTerminalFrame(ctx, storeFailed); terminalErr != nil {
+				s.appendTurnContextTerminalFrame(turn, terminalErr)
+			}
 			return
 		}
 	}
@@ -1767,13 +1789,38 @@ func (s *Server) outputFrame(turn *turnState, stream, text string) harness.Harne
 	return frame
 }
 
-func (s *Server) appendCompletedFrame(turn *turnState, result TurnResult) error {
+var errTurnCanceledBeforeCompletion = errors.New("turn canceled before completion")
+
+func (s *Server) appendCompletedFrame(ctx context.Context, turn *turnState, result TurnResult) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	completed, err := s.completedFrame(turn, result)
 	if err != nil {
 		return err
 	}
-	turn.appendFrame(completed)
+	if err := turn.tryAppendTerminalFrame(ctx, completed); err != nil {
+		turn.cleanupOutput()
+		return err
+	}
 	return nil
+}
+
+func (s *Server) appendTurnContextTerminalIfDone(ctx context.Context, turn *turnState) bool {
+	err := ctx.Err()
+	if err == nil {
+		return false
+	}
+	s.appendTurnContextTerminalFrame(turn, err)
+	return true
+}
+
+func (s *Server) appendTurnContextTerminalFrame(turn *turnState, err error) {
+	if errors.Is(err, context.DeadlineExceeded) {
+		turn.appendFrame(s.failedFrame(turn, "timeout", "turn deadline exceeded", true))
+		return
+	}
+	turn.appendFrame(s.frame(turn, harness.FrameTurnCancelled, "turn cancelled", nil))
 }
 
 func (s *Server) completedFrame(turn *turnState, result TurnResult) (harness.HarnessEventFrame, error) {
@@ -1954,6 +2001,7 @@ type turnState struct {
 	resultRead           bool
 	resultKeepUntil      time.Time
 	exactRedactionValues []string
+	cancelRequested      bool
 }
 
 func newTurnState(request harness.StartTurnRequest, now func() time.Time) *turnState {
@@ -2158,9 +2206,15 @@ func (t *turnState) markOutputFetched() {
 
 func (t *turnState) cleanupOutput() {
 	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.cleanupOutputLocked()
+}
+
+func (t *turnState) cleanupOutputLocked() {
 	outputPath := t.resultPath
 	t.resultPath = ""
-	t.mu.Unlock()
+	t.resultRead = false
+	t.resultKeepUntil = time.Time{}
 	if outputPath != "" {
 		_ = os.Remove(outputPath)
 	}
@@ -2169,6 +2223,40 @@ func (t *turnState) cleanupOutput() {
 func (t *turnState) appendFrame(frame harness.HarnessEventFrame) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.appendFrameLocked(frame)
+}
+
+func (t *turnState) tryAppendTerminalFrame(
+	ctx context.Context,
+	frame harness.HarnessEventFrame,
+) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.cancelRequested {
+		return errTurnCanceledBeforeCompletion
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	t.appendFrameLocked(frame)
+	return nil
+}
+
+func (t *turnState) appendFrameLocked(frame harness.HarnessEventFrame) {
+	if t.cancelRequested && frame.Type != harness.FrameTurnCancelled && isTerminalFrameType(frame.Type) {
+		t.cleanupOutputLocked()
+		frame.Type = harness.FrameTurnCancelled
+		frame.Severity = events.ExecutionEventSeverityInfo
+		frame.Summary = "turn cancelled"
+		frame.Content = nil
+		frame.ContentText = ""
+		frame.ToolName = ""
+		frame.ToolCallID = ""
+		frame.ApprovalID = ""
+		frame.Completed = nil
+		frame.Failed = nil
+		frame.Error = nil
+	}
 	frame = redactHarnessFrameOutputValues(frame, t.exactRedactionValues)
 	if frame.Seq <= 0 {
 		frame.Seq = int64(len(t.frames) + 1)
@@ -2181,6 +2269,28 @@ func (t *turnState) appendFrame(frame harness.HarnessEventFrame) {
 	case harness.FrameTurnCompleted, harness.FrameTurnFailed, harness.FrameTurnCancelled:
 		t.terminal = true
 	}
+}
+
+func isTerminalFrameType(frameType harness.FrameType) bool {
+	switch frameType {
+	case harness.FrameTurnCompleted, harness.FrameTurnFailed, harness.FrameTurnCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
+func (t *turnState) requestCancel() bool {
+	t.mu.Lock()
+	if t.terminal {
+		t.mu.Unlock()
+		return false
+	}
+	t.cancelRequested = true
+	cancel := t.cancel
+	t.mu.Unlock()
+	cancel()
+	return true
 }
 
 func (t *turnState) exactRedactionValuesSnapshot() []string {

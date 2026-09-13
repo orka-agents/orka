@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -1143,11 +1144,125 @@ func TestExecuteAgentLoop_CompletionError(t *testing.T) {
 	}
 }
 
+func TestFinishAIWorkerRun_SettlesBeforeTerminalPublication(t *testing.T) {
+	for _, canceledBefore := range []bool{false, true} {
+		t.Run(fmt.Sprintf("canceledBefore=%t", canceledBefore), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if canceledBefore {
+				cancel()
+			}
+			recorder := &terminalAIEventRecorder{cancel: cancel}
+			err := finishAIWorkerRun(ctx, recorder, "task", nil)
+			want := "WorkerCompleted"
+			if canceledBefore {
+				want = "WorkerFailed"
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("error = %v, want cancellation", err)
+				}
+			} else if err != nil {
+				t.Fatalf("settled success changed after publication: %v", err)
+			}
+			if len(recorder.types) != 1 || recorder.types[0] != want {
+				t.Fatalf("terminal events = %v, want only %s", recorder.types, want)
+			}
+			if !recorder.bounded || !recorder.activeAfterCancel {
+				t.Fatal("terminal publication needs an independent bounded context")
+			}
+			if !errors.Is(recorder.ctx.Err(), context.Canceled) {
+				t.Fatal("publication context was not released")
+			}
+		})
+	}
+}
+
+type terminalAIEventRecorder struct {
+	cancel            context.CancelFunc
+	types             []string
+	ctx               context.Context
+	bounded           bool
+	activeAfterCancel bool
+}
+
+func (r *terminalAIEventRecorder) Record(ctx context.Context, eventType string, _ ...common.EventOption) {
+	// Model persistence followed by cancellation before the response is read.
+	r.types = append(r.types, eventType)
+	r.cancel()
+	r.ctx = ctx
+	_, r.bounded = ctx.Deadline()
+	r.activeAfterCancel = ctx.Err() == nil
+}
+
+func TestUploadAIArtifacts_ReturnsCancellationDuringFailureEvent(t *testing.T) {
+	artifactDir := filepath.Join(t.TempDir(), "artifacts")
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		t.Fatalf("create artifacts dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(artifactDir, "evidence.txt"), []byte("evidence"), 0o644); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+	t.Setenv("ORKA_ARTIFACTS_DIR", artifactDir)
+	t.Setenv(workerenv.ControllerURL, server.URL)
+	t.Setenv(workerenv.TaskNamespace, "default")
+	t.Setenv(workerenv.TaskName, "artifact-failure-task")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	err := uploadAIArtifacts(ctx, cancelAIEventRecorder{cancel: cancel}, "artifact-failure-task")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("uploadAIArtifacts() error = %v, want context canceled", err)
+	}
+}
+
+type cancelAIEventRecorder struct {
+	cancel context.CancelFunc
+}
+
+func (r cancelAIEventRecorder) Record(context.Context, string, ...common.EventOption) {
+	r.cancel()
+}
+
+func TestWriteResult_CancelsInFlightRequest(t *testing.T) {
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(requestStarted)
+		<-releaseRequest
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	defer close(releaseRequest)
+
+	t.Setenv(workerenv.ResultEndpoint, server.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- writeResult(ctx, "test result") }()
+
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for result request")
+	}
+	cancel()
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("writeResult() error = %v, want context canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("writeResult() did not stop after cancellation")
+	}
+}
+
 func TestWriteResult_NoEndpoint(t *testing.T) {
 	t.Setenv("ORKA_RESULT_ENDPOINT", "")
 	t.Setenv("ORKA_CONTROLLER_URL", "")
 
-	err := writeResult("test result")
+	err := writeResult(context.Background(), "test result")
 	if err == nil {
 		t.Fatal("expected error without result endpoint")
 	}
@@ -1161,7 +1276,7 @@ func TestWriteResult_Success(t *testing.T) {
 
 	t.Setenv("ORKA_RESULT_ENDPOINT", server.URL)
 
-	err := writeResult("test result")
+	err := writeResult(context.Background(), "test result")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

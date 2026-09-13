@@ -846,18 +846,17 @@ func TestLoadPlanContext_RequestPathFormat(t *testing.T) {
 
 // --- writeResult tests ---
 
-func TestWriteResult_PermanentRejection(t *testing.T) {
-	// Retry exhaustion is covered in workers/common with the backoff stubbed.
+func TestWriteResult_PermanentHTTPError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusForbidden)
+		w.WriteHeader(http.StatusUnauthorized)
 	}))
 	defer server.Close()
 
 	t.Setenv("ORKA_RESULT_ENDPOINT", server.URL)
 
-	err := writeResult("test result")
-	if err == nil || !strings.Contains(err.Error(), "HTTP 403") {
-		t.Fatalf("expected forbidden result submission error, got %v", err)
+	err := writeResult(context.Background(), "test result")
+	if err == nil || !strings.Contains(err.Error(), "HTTP 401") {
+		t.Fatalf("writeResult() error = %v, want HTTP 401", err)
 	}
 }
 
