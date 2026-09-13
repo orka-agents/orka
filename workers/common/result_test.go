@@ -181,6 +181,41 @@ func TestDoPostOnceWithClient_DrainsAndClosesSuccessBody(t *testing.T) {
 	}
 }
 
+func TestDoPostOnceWithClient_PreservesSuccessWhenDrainIsCanceled(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusCreated, http.StatusNoContent} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			body := &cancelingDeliveryBody{cancel: cancel}
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: status, Body: body, Header: make(http.Header)}, nil
+			})}
+			err := doPostOnceWithClient(ctx, client, "http://controller.invalid/result", []byte("result"), "", "text/plain")
+			if err != nil {
+				t.Fatalf("accepted delivery returned error: %v", err)
+			}
+			if ctx.Err() == nil || !body.closed {
+				t.Fatal("expected cancellation during drain and response body cleanup")
+			}
+		})
+	}
+}
+
+type cancelingDeliveryBody struct {
+	cancel context.CancelFunc
+	closed bool
+}
+
+func (b *cancelingDeliveryBody) Read([]byte) (int, error) {
+	b.cancel()
+	return 0, context.Canceled
+}
+
+func (b *cancelingDeliveryBody) Close() error {
+	b.closed = true
+	return nil
+}
+
 func TestDoPostOnceWithClient_BoundsErrorBodyDrainAndCloses(t *testing.T) {
 	body := &infiniteTrackingResponseBody{}
 	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {

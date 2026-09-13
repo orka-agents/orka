@@ -106,19 +106,16 @@ func run() (err error) {
 	taskName := workerEnv.TaskName
 	taskNamespace := workerEnv.TaskNamespace
 	eventRecorder := common.NewHTTPEventRecorderFromEnv()
-	defer func() {
-		err = finishAIWorkerRun(ctx, eventRecorder, taskName, err)
-	}()
 	if err := workerEnv.ValidateRequired(); err != nil {
-		return err
+		return finishAIWorkerRun(ctx, eventRecorder, taskName, err)
 	}
 	settings, err := parseModelSettings(workerEnv)
 	if err != nil {
-		return err
+		return finishAIWorkerRun(ctx, eventRecorder, taskName, err)
 	}
 	tracingShutdown, err := tracing.Init("orka-ai-worker", workerEnv.EnableTelemetry)
 	if err != nil {
-		return fmt.Errorf("failed to initialize telemetry: %w", err)
+		return finishAIWorkerRun(ctx, eventRecorder, taskName, fmt.Errorf("failed to initialize telemetry: %w", err))
 	}
 	defer func() {
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -144,6 +141,11 @@ func run() (err error) {
 			taskSpan.SetAttributes(attribute.String(genai.AttrErrorType, errType))
 		}
 		taskSpan.End()
+	}()
+
+	// Settle before span completion and telemetry shutdown can observe cancellation.
+	defer func() {
+		err = finishAIWorkerRun(ctx, eventRecorder, taskName, err)
 	}()
 
 	transactionLogFields := workerenv.TransactionLogFields(

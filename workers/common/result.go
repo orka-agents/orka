@@ -273,11 +273,12 @@ func doPostOnceWithAuthorizedClient(
 	defer resp.Body.Close() //nolint:errcheck
 
 	bodyPreview := readAndDrainDeliveryResponse(resp.Body)
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return ctxErr
-	}
+	// The controller has accepted delivery; cancellation while draining cannot undo it.
 	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
 		return nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
 	}
 
 	statusErr := fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyPreview)))
