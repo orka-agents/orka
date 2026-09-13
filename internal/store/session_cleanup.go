@@ -93,6 +93,7 @@ type SessionCleanupIntent struct {
 	OperationID                    string                      `json:"operationId"`
 	OperationDigest                string                      `json:"operationDigest"`
 	PreparedAt                     time.Time                   `json:"preparedAt"`
+	Gateway                        *GatewaySessionCleanupProof `json:"gateway,omitempty"`
 }
 
 // CompleteSessionCleanupRequest deletes SQLite-owned state only after the

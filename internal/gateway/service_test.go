@@ -1161,6 +1161,7 @@ func TestCleanupRetainedGatewayTasksDeletesOnlyOrphansPastCutoff(t *testing.T) {
 		Spec: corev1alpha1.TaskSpec{RequestedBy: &corev1alpha1.RequestedBy{
 			Issuer: "gateway.orka.ai/default/namespace-uid/chat/gateway-uid",
 		}},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
 	}
 	recentTask := oldTask.DeepCopy()
 	recentTask.Name = "recent-orphan"

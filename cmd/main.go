@@ -490,7 +490,7 @@ func main() {
 	flag.DurationVar(&gatewayPollInterval, "gateway-poll-interval", 500*time.Millisecond,
 		"Gateway dispatcher and delivery poll interval.")
 	flag.IntVar(&gatewayBatchSize, "gateway-batch-size", 25,
-		"Maximum gateway events and deliveries processed per iteration.")
+		"Maximum gateway events, deliveries, Session cleanup candidates, or Task cleanup receipts processed per iteration (capped at 100).")
 	flag.StringVar(&storeBackend, "store-backend", "sqlite", "Storage backend (sqlite)")
 	flag.StringVar(&storePath, "store-path", "/data/orka.db", "Path to SQLite database file")
 	flag.StringVar(&agentExecutionSnapshotKeyFile, "agent-execution-snapshot-key-file", "",
@@ -1393,6 +1393,11 @@ func main() {
 	}
 	gatewayService := gatewayruntime.NewService(mgr.GetClient(), sqliteStore, sqliteStore, sqliteStore, gatewayConfig)
 	gatewayService.APIReader = mgr.GetAPIReader()
+	if kubeControlStore != nil {
+		gatewayService.SessionCleanup = kubeControlStore
+		gatewayService.SessionCleanupCandidates = sqliteStore
+		gatewayService.SessionCleanupEpochs = controllerEpochManager
+	}
 	if gatewayEnabled {
 		if err := mgr.Add(gatewayService); err != nil {
 			setupLog.Error(err, "unable to add gateway service")
