@@ -167,7 +167,8 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		err = applyManifestJSON(runtimeAgentTaskManifest(
 			codexTaskReadName,
 			codexAgentName,
-			fmt.Sprintf("Read README in the repository root and reply with exactly %s and nothing else.", liveRuntimeRepoSentinel),
+			"Use a tool to read README in the repository root. "+
+				"Wait for the read to succeed, then reply with the exact file contents and nothing else.",
 			4,
 			nil,
 			&runtimeWorkspaceConfig{GitRepo: liveRuntimeRepoURL, Ref: liveRuntimeRepoRef},
