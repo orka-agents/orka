@@ -45,13 +45,19 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27'
+          check-latest: true
+
       - name: Validate candidate and approval configuration
         id: candidate
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ inputs.release_version }}
           CANDIDATE_SHA: ${{ inputs.candidate_sha }}
-        run: python3 scripts/release_workflow.py candidate "${RELEASE_VERSION}" "${CANDIDATE_SHA}"
+        run: go run ./cmd/build/release candidate "${RELEASE_VERSION}" "${CANDIDATE_SHA}"
 
       - name: Validate promoted chart
         env:
@@ -496,6 +502,12 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27'
+          check-latest: true
+
       - name: Download packaged chart
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -514,7 +526,7 @@ jobs:
           RELEASE_VERSION: ${{ inputs.release_version }}
           CANDIDATE_SHA: ${{ inputs.candidate_sha }}
           ARTIFACT_ATTEMPT: ${{ needs.validate-release.outputs.artifact_attempt }}
-        run: python3 scripts/release_workflow.py bundle "${RUNNER_TEMP}/release-candidate" "${RELEASE_VERSION}" "${CANDIDATE_SHA}" "${ARTIFACT_ATTEMPT}"
+        run: go run ./cmd/build/release bundle "${RUNNER_TEMP}/release-candidate" "${RELEASE_VERSION}" "${CANDIDATE_SHA}" "${ARTIFACT_ATTEMPT}"
 
       - name: Upload candidate
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -545,6 +557,12 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27'
+          check-latest: true
+
       - name: Download candidate
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -554,7 +572,7 @@ jobs:
       - name: Dispatch and verify release qualification
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/release_workflow.py qualify "${RUNNER_TEMP}/release-candidate"
+        run: go run ./cmd/build/release qualify "${RUNNER_TEMP}/release-candidate"
 
       - name: Name qualified evidence for this attempt
         id: evidence
@@ -587,6 +605,12 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27'
+          check-latest: true
+
       - name: Download approved candidate and evidence
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -608,4 +632,4 @@ jobs:
       - name: Recheck evidence, tag, and publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/release_workflow.py publish "${RUNNER_TEMP}/release-candidate"
+        run: go run ./cmd/build/release publish "${RUNNER_TEMP}/release-candidate"

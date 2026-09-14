@@ -48,4 +48,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ inputs.release_version }}
-        run: python3 scripts/release_workflow.py prepare "${RELEASE_VERSION}"
+        run: go run ./cmd/build/release prepare "${RELEASE_VERSION}"

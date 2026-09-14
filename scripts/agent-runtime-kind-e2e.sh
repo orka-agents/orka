@@ -117,7 +117,7 @@ if live_acp_kind_enabled "${RELEASE_GATE:-0}"; then
   export ACP_E2E_REPORT_FILE="${ACP_E2E_REPORT_FILE:-${repo_root}/bin/acp-release-${image_tag}/acceptance.json}"
   acp_report_init "${repo_root}"
   if [[ -n "${LIVE_ACP_RELEASE_BUNDLE_DIR}" ]]; then
-    python3 "${repo_root}/scripts/release_workflow.py" check-bundle "${LIVE_ACP_RELEASE_BUNDLE_DIR}"
+    go -C "${repo_root}" run ./cmd/build/release check-bundle "${LIVE_ACP_RELEASE_BUNDLE_DIR}"
     bundle_sha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "${LIVE_ACP_RELEASE_BUNDLE_DIR}/candidate.json")"
     acp_report_update '.release = ($candidate[0] | {buildRunID, buildRunAttempt, version}) + {bundleSHA256:$hash}' \
       --slurpfile candidate "${LIVE_ACP_RELEASE_BUNDLE_DIR}/candidate.json" --arg hash "${bundle_sha}"

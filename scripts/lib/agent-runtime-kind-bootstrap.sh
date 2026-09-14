@@ -59,7 +59,7 @@ live_acp_kind_preflight() {
   if [[ -n "${LIVE_ACP_RELEASE_BUNDLE_DIR:-}" ]]; then
     live_acp_kind_require_cmd helm || return 1
     live_acp_kind_enabled "${RELEASE_GATE:-0}" || live_acp_kind_die "a release bundle requires RELEASE_GATE=1" || return 1
-    python3 "${LIVE_ACP_REPO_ROOT}/scripts/release_workflow.py" check-bundle "${LIVE_ACP_RELEASE_BUNDLE_DIR}" || return 1
+    go -C "${LIVE_ACP_REPO_ROOT}" run ./cmd/build/release check-bundle "${LIVE_ACP_RELEASE_BUNDLE_DIR}" || return 1
     jq -e --arg sha "$(git -C "${LIVE_ACP_REPO_ROOT}" rev-parse HEAD)" \
       '.candidateSHA == $sha' "${LIVE_ACP_RELEASE_BUNDLE_DIR}/candidate.json" >/dev/null || return 1
   fi
@@ -177,7 +177,7 @@ live_acp_kind_build_and_publish_images() {
 # qualify different bytes from the images awaiting release approval.
 live_acp_kind_use_release_images() {
   local manifest="${LIVE_ACP_RELEASE_BUNDLE_DIR}/candidate.json"
-  python3 "${LIVE_ACP_REPO_ROOT}/scripts/release_workflow.py" check-bundle "${LIVE_ACP_RELEASE_BUNDLE_DIR}" || return 1
+  go -C "${LIVE_ACP_REPO_ROOT}" run ./cmd/build/release check-bundle "${LIVE_ACP_RELEASE_BUNDLE_DIR}" || return 1
   LIVE_ACP_CONTROLLER_REF="$(jq -er '.images.controller' "${manifest}")"
   LIVE_ACP_CODEX_REF="$(jq -er '.images["acp-codex-runtime"]' "${manifest}")"
   LIVE_ACP_CLAUDE_REF="$(jq -er '.images["acp-claude-runtime"]' "${manifest}")"

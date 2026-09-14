@@ -23,7 +23,7 @@ on:
       - "scripts/lib/ensure-static-mode-namespace.sh"
       - "scripts/tests/release-manifest-test.sh"
       - "scripts/static-mode-crd-validate.sh"
-      - "scripts/update-release-version.py"
+      - "cmd/build/release/**"
       - "scripts/validate-release-manifest.sh"
       - ".github/workflows/release-pr.yml"
       - ".github/workflows/release.yml"
@@ -46,7 +46,7 @@ on:
       - "scripts/lib/ensure-static-mode-namespace.sh"
       - "scripts/tests/release-manifest-test.sh"
       - "scripts/static-mode-crd-validate.sh"
-      - "scripts/update-release-version.py"
+      - "cmd/build/release/**"
       - "scripts/validate-release-manifest.sh"
       - ".github/workflows/release-pr.yml"
       - ".github/workflows/release.yml"
@@ -86,12 +86,6 @@ jobs:
         with:
           go-version: '1.27'
           check-latest: true
-
-      - name: Run chart package comparison unit tests
-        run: |
-          set -euo pipefail
-          python3 -m pip install --quiet pytest
-          python3 -m pytest scripts/test_compare_helm_chart_packages.py -q
 
       - name: Verify generated chart and package
         run: |

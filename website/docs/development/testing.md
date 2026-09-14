@@ -20,6 +20,9 @@ make test
 make test
 go tool cover -func=cover.out | grep total
 
+# Run release automation and workspace cleanup tests without a cluster
+go test ./cmd/build/release ./scripts/tests
+
 # Run frontend tests
 make ui-test                # or: cd ui && bun run test
 make ui-test-coverage       # or: cd ui && bun run test:coverage
@@ -67,6 +70,8 @@ Tests use **Ginkgo + Gomega** (BDD style) for controller/integration tests and s
 
 | Package | Test Files | Coverage Areas |
 |---------|-----------|----------------|
+| `cmd/build/release/` | `workflow_test.go`, `prepare_test.go`, `publish_test.go`, `version_test.go` | Release version edits, trusted tooling, branch races, artifact identity, approval evidence, chart publication, and retries. Uses local Git repositories and Helm; GitHub and registry responses are fixtures. |
+| `scripts/tests/` | `workspace_lifecycle_test.go` | Workspace cancellation, session archival, suspension, and deletion ordering using Bash and jq fixtures. |
 | `internal/api/` | `handlers_test.go`, `internal_handlers_test.go`, `auth_test.go`, `middleware_test.go`, `pagination_test.go`, `server_test.go`, `openai_compat_test.go` | REST API handlers, internal API handlers, memory/session APIs, authentication, middleware, pagination, OpenAI compatibility |
 | `internal/controller/` | `task_controller_test.go`, `agent_controller_test.go`, `tool_controller_test.go`, `session_manager_test.go`, `job_builder_test.go`, `repositoryscan_controller_test.go`, `webhook_test.go` | Reconciliation logic, session management, job building, coordination enforcement, repository scan mapper/finding/patch ingestion |
 | `internal/security/` | `security_test.go`, `contracts_test.go` | Repository security artifact contracts, v2 evidence validation, fingerprinting, bounded context manifests, prompt helpers |

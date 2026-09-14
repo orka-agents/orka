@@ -66,6 +66,11 @@ make release-manifest NEWVERSION=vX.Y.Z[-beta.N|-rc.N]
 make promote-staging-manifest
 ```
 
+The Go command in `cmd/build/release/` handles version updates, candidate
+verification, qualification dispatch, and publication. Workflows invoke it with
+`go run ./cmd/build/release`; `make release-manifest` uses its `update-version`
+subcommand before generating staging manifests.
+
 The first target updates release inputs and regenerates staging. The second
 copies staging into `deploy/` and `charts/orka/`. **Prepare Release** in
 `.github/workflows/release-pr.yml` runs both on `release-X.Y`, commits the

@@ -145,6 +145,13 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27'
+          check-latest: true
+          cache: true
+
       - name: Verify environment branch policy and candidate bundle
         env:
           GH_TOKEN: ${{ github.token }}
@@ -153,22 +160,15 @@ jobs:
           SOURCE_REF: ${{ inputs.source_ref }}
         run: |
           set -Eeuo pipefail
-          python3 scripts/release_workflow.py check-environment release-qualification "${GITHUB_REF_NAME}"
+          go run ./cmd/build/release check-environment release-qualification "${GITHUB_REF_NAME}"
           if [[ -n "${RELEASE_RUN_ID}" || -n "${RELEASE_RUN_ATTEMPT}" ]]; then
             bundle="${RUNNER_TEMP}/release-candidate"
-            python3 scripts/release_workflow.py download "${RELEASE_RUN_ID}" "${RELEASE_RUN_ATTEMPT}" "${GITHUB_REF_NAME}" "${SOURCE_REF,,}" "${bundle}"
+            go run ./cmd/build/release download "${RELEASE_RUN_ID}" "${RELEASE_RUN_ATTEMPT}" "${GITHUB_REF_NAME}" "${SOURCE_REF,,}" "${bundle}"
             printf 'ACP_E2E_RELEASE_BUNDLE_DIR=%s\n' "${bundle}" >>"${GITHUB_ENV}"
           fi
 
       - name: Free disk space for Docker-heavy live E2E
         uses: ./.github/actions/free-disk-space
-
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: '1.27'
-          check-latest: true
-          cache: true
 
       - name: Install kind
         uses: ./.github/actions/setup-kind
