@@ -35,7 +35,7 @@ Common environment:
   ACP_E2E_REPO                       Public GitHub read repository URL
   ACP_E2E_REF                        Immutable read repository commit SHA
   ACP_E2E_CODEX_MODEL                Codex model (default: gpt-5.4)
-  ACP_E2E_CLAUDE_MODEL               Claude model (default: claude-sonnet-4.6)
+  ACP_E2E_CLAUDE_MODEL               Claude model (default: claude-haiku-4.5)
   ACP_E2E_OPENCODE_MODEL             OpenCode model (default: ACP_E2E_CODEX_MODEL)
   ACP_E2E_OPENCODE_CONTEXT_WINDOW    Reviewed OpenCode model context capacity (required)
   ACP_E2E_OPENCODE_MAX_TOKENS        Reviewed OpenCode model output limit (required)
@@ -228,7 +228,7 @@ scm_proxy_container_override="${ORKA_SCM_EGRESS_PROXY_CONTAINER:-}"
 repo_url="${ACP_E2E_REPO:-https://github.com/orka-agents/orka.git}"
 repo_ref="${ACP_E2E_REF:-d03acb995b6014a6e855181c50b922b65ea8e7ff}"
 codex_model="${ACP_E2E_CODEX_MODEL:-gpt-5.4}"
-claude_model="${ACP_E2E_CLAUDE_MODEL:-claude-sonnet-4.6}"
+claude_model="${ACP_E2E_CLAUDE_MODEL:-claude-haiku-4.5}"
 if [[ -n "${ACP_E2E_OPENCODE_MODEL:-}" ]]; then
   opencode_model="${ACP_E2E_OPENCODE_MODEL}"
 else

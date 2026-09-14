@@ -235,7 +235,7 @@ live_acp_kind_require_model_endpoint() {
 live_acp_kind_validate_vekil_catalog() {
   local models_file="$1"
   local codex_model="${ACP_E2E_CODEX_MODEL:-gpt-5.4}"
-  local claude_model="${ACP_E2E_CLAUDE_MODEL:-claude-sonnet-4.6}"
+  local claude_model="${ACP_E2E_CLAUDE_MODEL:-claude-haiku-4.5}"
   local copilot_model="${ACP_E2E_COPILOT_MODEL:-gpt-5.3-codex}"
   local opencode_model="${ACP_E2E_OPENCODE_MODEL:-${ACP_E2E_CODEX_MODEL:-gpt-5.4}}"
   opencode_model="${opencode_model#*/}"
@@ -448,7 +448,7 @@ live_acp_kind_probe_vekil_wire_path() {
 
 live_acp_kind_probe_configured_models() {
   local codex_model="${ACP_E2E_CODEX_MODEL:-gpt-5.4}"
-  local claude_model="${ACP_E2E_CLAUDE_MODEL:-claude-sonnet-4.6}"
+  local claude_model="${ACP_E2E_CLAUDE_MODEL:-claude-haiku-4.5}"
   local copilot_model="${ACP_E2E_COPILOT_MODEL:-gpt-5.3-codex}"
   local opencode_model="${ACP_E2E_OPENCODE_MODEL:-${ACP_E2E_CODEX_MODEL:-gpt-5.4}}"
   opencode_model="${opencode_model#*/}"
