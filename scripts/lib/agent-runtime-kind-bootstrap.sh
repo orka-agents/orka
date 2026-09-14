@@ -65,6 +65,8 @@ live_acp_kind_preflight() {
   fi
   if live_acp_kind_enabled "${RELEASE_GATE:-0}"; then
     live_acp_kind_require_cmd gh || return 1
+  fi
+  if live_acp_kind_enabled "${RELEASE_GATE:-0}" && acp_live_github_enabled; then
     local token_var
     for token_var in \
       ACP_E2E_WRITE_READ_CREDENTIAL_TOKEN \
@@ -521,6 +523,7 @@ live_acp_kind_deploy_orka() {
 
 live_acp_kind_create_release_credentials() {
   live_acp_kind_enabled "${RELEASE_GATE:-0}" || return 0
+  acp_live_github_enabled || return 0
 
   local namespace="orka-system" key="token" role env_name secret_name token_file
   local -a roles=(read target-read write forge)
@@ -612,12 +615,17 @@ live_acp_kind_delete_cluster() {
   local cleanup_status=0
   if acp_report_enabled; then
     # A timeout can kill the validator before its EXIT trap records preservation.
-    # Once it was launched, require positive evidence of safe remote cleanup.
+    # The fixture path never writes to GitHub. The optional live canary still
+    # needs positive evidence of safe remote cleanup after the validator starts.
     if ! jq -e '
-        .schemaVersion == 1 and .gate == "release-qualification" and .mode == "release"
+        .schemaVersion == 2 and .gate == "release-qualification" and .mode == "release"
         and has("task") and has("preserved") and .preserved == null
-        and ((.validatorStarted == false and .task == null) or (.validatorStarted == true
-          and (.cleanup.remote == "passed" or (.cleanup.remote == "not_required" and .task == null))))
+        and (if .coverage.liveGitHub == "not_tested" then
+          .task == null and .publicationRepository == null and .cleanup.remote == "not_required"
+        elif .coverage.liveGitHub == "live" then
+          ((.validatorStarted == false and .task == null) or (.validatorStarted == true
+            and (.cleanup.remote == "passed" or (.cleanup.remote == "not_required" and .task == null))))
+        else false end)
       ' "${ACP_E2E_REPORT_FILE}" >/dev/null; then
       live_acp_kind_log "Preserving Kind resources: remote cleanup is incomplete or unproven"
       acp_report_update '.cleanup.cluster = "preserved" | .cleanup.registry = "preserved"

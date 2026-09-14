@@ -21,11 +21,12 @@ Modes:
   Smoke (default)       Read/status/concurrency/cancel/restart/replacement checks.
                         The final message explicitly reports incomplete release
                         coverage when release-only scenarios are skipped.
-  RELEASE_GATE=1        Destructive release-acceptance mode. In addition to the
-                        smoke checks it requires API result/fork validation,
-                        write publication to a distinct GitHub fork, PR and remote
-                        verification, drain/scale-to-zero/recovery, and immutable
-                        image verification for every ACP workload.
+  RELEASE_GATE=1        In addition to smoke checks, requires API result/fork
+                        validation, drain/scale-to-zero/recovery, candidate-head
+                        checks, and immutable images for every ACP workload.
+                        The Kind wrapper also requires local Git publication
+                        and GitHub API fixture tests from the exact candidate.
+                        Live GitHub publication is an explicit local opt-in.
 
 Common environment:
   ACP_E2E_NAMESPACE                  Unique test namespace
@@ -50,7 +51,10 @@ Common environment:
   ACP_E2E_STATE_WAIT_SECONDS         State transition wait bound (default: 300)
   ACP_E2E_API_LOCAL_PORT             Local controller port-forward port (default: run-scoped)
 
-RELEASE_GATE=1 requires:
+RELEASE_GATE=1 requires ACP_E2E_REPO, ACP_E2E_REF, and read-only GitHub API access.
+  ACP_E2E_BASE_BRANCH                Candidate branch (default: main)
+
+Optional local live GitHub canary (RELEASE_GATE=1 ACP_E2E_WRITE_CREATE_PR=1):
   ACP_E2E_WRITE_SOURCE_REPO          HTTPS github.com source repository
   ACP_E2E_WRITE_PUBLICATION_REPO     Distinct GitHub fork of the source repository
   ACP_E2E_WRITE_SOURCE_REF           Full source SHA; must equal the PR base-branch head
@@ -59,7 +63,7 @@ RELEASE_GATE=1 requires:
   ACP_E2E_WRITE_READ_CREDENTIAL_SECRET and namespace
   ACP_E2E_WRITE_TARGET_READ_CREDENTIAL_SECRET and namespace
   ACP_E2E_WRITE_FORGE_CREDENTIAL_SECRET and namespace
-  ACP_E2E_WRITE_CREATE_PR=1          Mandatory in release-gate mode
+  ACP_E2E_WRITE_CREATE_PR=1          Explicitly enable live publication and PR validation
 
 Release-gate write settings:
   ACP_E2E_WRITE_CREDENTIAL_KEY       Source Secret key (default: token)
@@ -94,8 +98,9 @@ Both modes require curl, controller API access, and permission to create a
 namespaced ServiceAccount, Role, RoleBinding, and token for Session cleanup.
 
 Release-gate local requirements:
-  - gh authenticated to github.com with read access to both repositories and
-    permission to close the created PR and delete the run branch.
+  - gh with read access to the candidate repository. The optional live canary
+    also needs read access to its fork and permission to close its PR and delete
+    its run branch. The release workflow uses only its temporary GITHUB_TOKEN.
   - git, curl, docker buildx, jq, kubectl, and shell tools.
   - Permission to create/delete the test namespace, copy the named credential
     Secret key, delete Tasks, patch Task metadata and RuntimePools, restart the controller,
@@ -1641,6 +1646,7 @@ assert_publisher_brokered_authority() {
   can_list="$(auth_can_i list secrets --as="system:serviceaccount:${orka_namespace}:${service_account}" --all-namespaces)"
   [[ "${can_get}" == "no" && "${can_list}" == "no" ]] || \
     die "Publisher ServiceAccount ${service_account} has direct Kubernetes Secret read authority"
+  acp_report_update '.checks.publisherBrokeredAuthority = true'
 }
 
 assert_publisher_cannot_access_secret() {
@@ -2526,6 +2532,8 @@ run_read_smoke() {
       .metadata.annotations["orka.ai/fork-source-task"] == $source
       and .metadata.annotations["orka.ai/fork-source-seq"] == $seq
     ' < <(task_json "${fork_task}") >/dev/null || die "forked Task/${fork_task} does not bind to the API checkpoint sequence"
+    acp_report_update '.runtime.providers[$provider] = {read:true,continuation:true,result:true,fork:true}' \
+      --arg provider "${provider}"
   fi
 
   read_smoke_pool="${pool}"
@@ -2657,18 +2665,21 @@ assert_unsafe_workspace_rejected() {
   log "Unsafe read workspace URL controls passed"
 
   if [[ "${release_gate}" -eq 1 ]]; then
+    # Admission dry-runs never clone or publish. A syntactically valid fixture
+    # target keeps these positive/negative controls independent of live credentials.
+    local publication_fixture=https://github.com/orka-fixtures/publication.git
     build_write_manifest "$(sanitize_name "acp-safe-write-${run_id}")" "${agent}" \
-      "${write_source_repo}" "${write_publication_repo}" "${safe_write}"
+      "${repo_url}" "${publication_fixture}" "${safe_write}"
     server_dry_run_manifest <"${safe_write}" || die "safe write workspace positive control was rejected"
     log "Safe write workspace URL control passed"
     build_write_manifest "$(sanitize_name "acp-unsafe-publication-query-${run_id}")" "${agent}" \
-      "${write_source_repo}" "${write_publication_repo}?unexpected=query" "${unsafe_file}"
+      "${repo_url}" "${publication_fixture}?unexpected=query" "${unsafe_file}"
     assert_dry_run_rejected "${unsafe_file}" "spec.workspace" "${publication_message}"
     build_write_manifest "$(sanitize_name "acp-unsafe-publication-fragment-${run_id}")" "${agent}" \
-      "${write_source_repo}" "${write_publication_repo}#fragment" "${unsafe_file}"
+      "${repo_url}" "${publication_fixture}#fragment" "${unsafe_file}"
     assert_dry_run_rejected "${unsafe_file}" "spec.workspace" "${publication_message}"
     build_write_manifest "$(sanitize_name "acp-unsafe-publication-user-${run_id}")" "${agent}" \
-      "${write_source_repo}" "https://user@github.com/${write_publication_slug}.git" "${unsafe_file}"
+      "${repo_url}" "https://user@github.com/orka-fixtures/publication.git" "${unsafe_file}"
     assert_dry_run_rejected "${unsafe_file}" "spec.workspace" "${publication_message}"
     log "Unsafe publication workspace URL controls passed"
 
@@ -2963,6 +2974,33 @@ run_scale_to_zero_recovery_check() {
     die "scale-to-zero recovery did not advance RuntimeSession generation"
 }
 
+release_source_slug=""
+release_source_commit=""
+release_base_branch=""
+
+prepare_release_candidate() {
+  [[ "${release_gate}" -eq 1 ]] || return 0
+  [[ "${ACP_E2E_WRITE_CREATE_PR:-0}" == 0 || "${ACP_E2E_WRITE_CREATE_PR:-0}" == 1 ]] || \
+    die "ACP_E2E_WRITE_CREATE_PR must be 0 or 1"
+  release_source_slug="$(github_repo_slug "${repo_url}")" || \
+    die "RELEASE_GATE=1 requires a credential-free HTTPS github.com candidate repository"
+  [[ "${repo_ref}" =~ ^[a-fA-F0-9]{40}$ ]] || die "ACP_E2E_REF must be a full candidate SHA"
+  release_source_commit="$(lower "${repo_ref}")"
+  release_base_branch="${ACP_E2E_BASE_BRANCH:-${ACP_E2E_WRITE_PR_BASE:-main}}"
+  if [[ ! "${release_base_branch}" =~ ^[A-Za-z0-9._/-]+$ ]] || \
+      ! git check-ref-format "refs/heads/${release_base_branch}" >/dev/null; then
+    die "ACP_E2E_BASE_BRANCH must be a URL-safe Git branch"
+  fi
+  local resolved base_sha
+  resolved="$(gh api "repos/${release_source_slug}/commits/${release_source_commit}" --jq '.sha')"
+  [[ "$(lower "${resolved}")" == "${release_source_commit}" ]] || \
+    die "candidate did not resolve to the requested immutable commit"
+  base_sha="$(gh api "repos/${release_source_slug}/branches/${release_base_branch}" --jq '.commit.sha')"
+  acp_report_update '.observations.baseHeads.preflight = $sha' --arg sha "${base_sha}"
+  [[ "${base_sha}" == "${release_source_commit}" ]] || \
+    die "candidate must equal the current ${release_base_branch} branch head"
+}
+
 write_source_repo=""
 write_publication_repo=""
 write_source_slug=""
@@ -2995,6 +3033,7 @@ write_prompt=""
 
 prepare_release_gate_environment() {
   [[ "${release_gate}" -eq 1 ]] || return 0
+  acp_live_github_enabled || return 0
   write_source_repo="${ACP_E2E_WRITE_SOURCE_REPO:-}"
   write_publication_repo="${ACP_E2E_WRITE_PUBLICATION_REPO:-}"
   write_source_commit="${ACP_E2E_WRITE_SOURCE_REF:-}"
@@ -3052,7 +3091,6 @@ prepare_release_gate_environment() {
   [[ "${write_source_slug}" != "${write_publication_slug}" ]] || \
     die "release-gate publication repository must be a distinct fork"
 
-  gh auth status --hostname github.com >/dev/null
   local source_json publication_json resolved base_json base_sha
   source_json="$(gh api "repos/${write_source_slug}")"
   publication_json="$(gh api "repos/${write_publication_slug}")"
@@ -3357,7 +3395,7 @@ run_write_release_gate() {
   [[ "${base_now_sha}" == "${write_source_commit}" ]] || \
     die "PR base branch moved before write Task submission"
 
-  log "Running mandatory Codex clean-room publication and PR reconciliation gate"
+  log "Running optional live Codex publication and GitHub PR validation"
   write_task_name="${task}"
   write_task_started=1
   acp_report_update '.stage = "publication" | .expectedBranch = $branch
@@ -3598,6 +3636,7 @@ preflight_release_workloads() {
   assert_publisher_brokered_authority
 }
 
+prepare_release_candidate
 prepare_release_gate_environment
 acp_report_update '.stage = "validation" | .validation = "running"'
 
@@ -3688,19 +3727,25 @@ run_read_smoke codex "${codex_model}" "${codex_agent}" "${codex_task}" "${codex_
 codex_pool="${read_smoke_pool}"
 
 assert_unsafe_workspace_rejected "${codex_agent}"
+acp_report_update '.runtime.checks.unsafeWorkspace = true'
 run_concurrency_check "${codex_agent}" codex "${codex_model}" "${codex_pool}"
+acp_report_update '.runtime.checks.concurrency = true'
 if runtimepool_mutations_allowed; then
   park_runtimepool "${codex_pool}"
 fi
 codex_tool_agent="$(sanitize_name "acp-codex-tools-${run_id}")"
 apply_agent codex "${codex_model}" "${codex_tool_agent}" 12 true
 run_timeout_check codex "${codex_model}" "${codex_tool_agent}"
+acp_report_update '.runtime.checks.timeout = true'
 run_explicit_cancel_check codex "${codex_model}" "${codex_tool_agent}"
+acp_report_update '.runtime.checks.cancellation = true'
 if runtimepool_mutations_allowed; then
   run_controller_restart_check codex "${codex_model}" "${codex_tool_agent}" "${restart_nonce}"
+  acp_report_update '.runtime.checks.controllerRestart = true'
   park_provider_runtimepools_except codex "${codex_pool}"
   resume_runtimepool "${codex_pool}"
   run_pool_replacement_check codex "${codex_model}" "${codex_agent}" "${codex_pool}" "${codex_session}" "${session_nonce}"
+  acp_report_update '.runtime.checks.poolReplacement = true'
 else
   shared_mutation_checks_skipped=1
   log "Shared watch namespace: skipping controller restart and RuntimePool parking, resume, and replacement checks"
@@ -3708,13 +3753,20 @@ fi
 
 if [[ "${release_gate}" -eq 1 ]]; then
   run_scale_to_zero_recovery_check codex "${codex_model}" "${codex_agent}" "${codex_pool}" "${codex_session}" "${session_nonce}"
+  acp_report_update '.runtime.checks.scaleToZeroRecovery = true'
   park_runtimepool "${codex_pool}"
-  run_write_release_gate "${codex_agent}"
-  assert_all_tasks_validated
-  if ! cleanup_remote_effects; then
-    die "release-gate remote cleanup did not complete safely"
+  if acp_live_github_enabled; then
+    run_write_release_gate "${codex_agent}"
+  else
+    log "Live GitHub publication is not tested; qualification requires local Git and GitHub API fixture evidence"
   fi
-  remote_cleanup_required=0
+  assert_all_tasks_validated
+  if acp_live_github_enabled; then
+    if ! cleanup_remote_effects; then
+      die "live GitHub canary cleanup did not complete safely"
+    fi
+    remote_cleanup_required=0
+  fi
 fi
 
 remove_provider_resources codex "${codex_agent}" "${codex_tool_agent}"
@@ -3733,6 +3785,7 @@ fi
 opencode_policy_agent="$(sanitize_name "acp-opencode-policy-agent-${run_id}")"
 apply_agent opencode "${opencode_model}" "${opencode_policy_agent}" 12 true
 run_opencode_read_policy_check "${opencode_policy_agent}" "${opencode_model}"
+acp_report_update '.runtime.checks.opencodeReadPolicy = true'
 assert_all_tasks_validated
 remove_provider_resources opencode "${opencode_agent}" "${opencode_policy_agent}"
 [[ "${namespace_shared:-0}" -eq 1 ]] || wait_until "OpenCode runtime children removal" 300 runtime_children_absent
@@ -3766,16 +3819,16 @@ if [[ "${release_gate}" -eq 1 ]]; then
   else
     die "ACP_E2E_KEEP_RESOURCES=1 preserves evidence but cannot qualify a release"
   fi
-  completion_base_sha="$(gh api "repos/${write_source_slug}/branches/${write_pr_base}" --jq '.commit.sha')"
+  completion_base_sha="$(gh api "repos/${release_source_slug}/branches/${release_base_branch}" --jq '.commit.sha')"
   acp_report_update '.observations.baseHeads.completion = $sha' --arg sha "${completion_base_sha}"
-  [[ "${completion_base_sha}" == "${write_source_commit}" ]] || \
-    die "PR base branch moved before release-gate completion; candidate is not qualified"
+  [[ "${completion_base_sha}" == "${release_source_commit}" ]] || \
+    die "candidate branch moved before release-gate completion; candidate is not qualified"
   acp_report_update '.checks.baseUnchanged = true | .validation = "passed" | .stage = "cleanup"'
   log "ACP v2 release checks passed on context ${context}; final qualification requires the cleanup report"
 else
   if [[ "${shared_mutation_checks_skipped}" -eq 1 ]]; then
     log "ACP v2 shared-namespace smoke validation passed on context ${context}; controller restart and RuntimePool lifecycle/replacement checks were skipped. Use an isolated namespace for complete smoke acceptance."
   else
-    log "ACP v2 smoke validation passed on context ${context}; release-only publication, remote verification, Task result/fork, and scale-to-zero gates were skipped. Set RELEASE_GATE=1 for release acceptance."
+    log "ACP v2 smoke validation passed on context ${context}; Task result/fork, scale-to-zero, and required publication tests were skipped. Use RELEASE_GATE=1 with the Kind wrapper for release acceptance."
   fi
 fi

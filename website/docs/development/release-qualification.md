@@ -4,7 +4,7 @@ description: Qualify a release candidate with chart installation, recovery, agen
 
 # Release automation and qualification
 
-Start a release with **Prepare Release**, approve credentialed qualification,
+Start a release with **Prepare Release**, approve qualification,
 then approve publication of the qualified candidate. Preparation, workflow
 dispatch, tagging, image promotion, chart publication, and release evidence
 archival use only `GITHUB_TOKEN`. The organization can keep its policy that prohibits Actions
@@ -27,10 +27,11 @@ The flow is:
    SARIF-upload failures still fail the run.
 4. Release dispatches **Release Qualification** with the exact candidate
    bundle. A `release-qualification` environment reviewer must approve the
-   candidate source and workflow before the job can receive canary credentials.
-   The gate installs the packaged chart using the built image digests,
+   candidate source and workflow before the job can receive model-provider credentials.
+   The gate runs Git publication and GitHub API fixture tests from that checkout,
+   then installs the packaged chart using the built image digests,
    verifies durable results after controller replacement, rejects an
-   opposite-mode upgrade, and runs canonical ACP acceptance and canary cleanup.
+   opposite-mode upgrade, and runs agent runtime acceptance and cleanup.
    It does not rebuild the release images.
 5. The **Approve and publish the qualified candidate** job waits for an
    environment reviewer. After approval it rechecks the branch, build,
@@ -91,7 +92,7 @@ its job summary. Review the candidate source, workflows, generated changes, and
 build bundle before approving the waiting `release-qualification` deployment.
 After qualification succeeds, review the acceptance evidence and approve the
 `release` deployment. The per-release human actions are dispatch, approval to
-use the canary credentials, and approval to publish.
+run qualification with model-provider access, and approval to publish.
 
 Finish or cancel any existing qualification run before starting another. The
 release checks for active or approval-pending runs before dispatch. If a
@@ -123,22 +124,26 @@ Prepare and qualify the new head. Only the newest stable release updates
 `latest`; an older release line cannot move it backwards. Beta and RC versions
 never update `latest` or the minor-version alias.
 
-## Canary and environment
+## Coverage and environment
 
-The source is `orka-agents/orka`. The dedicated publication target is
-[`sozercan/orka-acp-release-gate`](https://github.com/sozercan/orka-acp-release-gate),
-an actual fork of that source. Do not use it for development branches. Each
-attempt creates a unique `orka/acp-release-gate-*` branch and a temporary PR
-against the dispatched source branch. The validator checks the fork relationship
-through GitHub before submitting work.
+Release qualification needs no stored GitHub repository token or custom GitHub
+App. GitHub observations use the job's temporary `GITHUB_TOKEN` with read-only
+access. Runtime Tasks clone the public candidate repository without a stored
+Git credential. Qualification creates no GitHub branch or PR.
 
-If you previously configured `live-acp-release-gate`, set up
-`release-qualification` with the canary settings below before dispatching the
-renamed workflow. Re-enter the three required canary credentials in the new
-protected environment; GitHub does not reveal existing secret values for
-copying. The source-read role uses the job's `GITHUB_TOKEN`.
-After the renamed workflow completes qualification and cleanup successfully,
-retire the old environment. Preserve its deployment history.
+| Check | Required coverage |
+| --- | --- |
+| Codex, OpenCode, Claude, and Copilot | Live workspace reads, API results, Session continuation, and Task forks |
+| Runtime lifecycle | Concurrency, cancellation, timeout, controller restart, pool replacement, and scale-to-zero recovery |
+| Isolation and deployment | Unsafe workspace rejection, read policy, publisher broker configuration, and exact deployed image digests |
+| Branch publication | Publisher and service tests against real temporary Git repositories, including exact-head pushes, conflicts, retries, and cleanup |
+| PR reconciliation | Local GitHub API test servers exercise creation, reuse, head changes, ambiguous responses, Session ownership, and credential boundaries |
+| Release artifacts | The exact packaged chart and image digests, durable results after controller replacement, no Task replay, and opposite-mode rejection |
+
+Publication tests execute the publisher code with fixtures. They do not prove
+the complete cluster-to-GitHub publication path, live GitHub authentication,
+organization permissions, or a cross-repository PR round trip. The report
+explicitly records `coverage.liveGitHub: not_tested`.
 
 Configure the `release-qualification` environment in `orka-agents/orka`:
 
@@ -146,47 +151,26 @@ Configure the `release-qualification` environment in `orka-agents/orka`:
   release lines, such as `release-0.2`. Do not allow tags, PR refs, or arbitrary
   branches.
 - Require a trusted reviewer and disable administrator bypass. This approval
-  protects the canary credentials from unreviewed release-branch workflows.
+  protects model-provider credentials from unreviewed release-branch workflows.
   Keep Prevent self-review disabled if the trusted release maintainer also
   dispatches and approves the run. Final publication has a separate approval
   in the `release` environment.
-- Set the environment variable `ACP_E2E_WRITE_PUBLICATION_REPO` to
-  `https://github.com/sozercan/orka-acp-release-gate.git`. An optional dispatch
-  override must identify this same repository.
-- Configure the following secrets. The three stored GitHub credentials must
-  have distinct values. Each Kubernetes copy uses the `token` key.
+- Supply `COPILOT_GITHUB_TOKEN` for model-provider authentication through Vekil.
+  The existing repository secret can supply it. Qualification does not use it
+  for Git publication, and the local publication tests receive no workflow,
+  provider, or canary tokens.
 
-| Secret | Required access and use |
-| --- | --- |
-| `COPILOT_GITHUB_TOKEN` | Provider authentication for the configured Codex, OpenCode, Claude, and Copilot models through Vekil. The repository secret can supply this value. It is not Git publication authority. |
-| `ACP_E2E_WRITE_TARGET_READ_CREDENTIAL_TOKEN` | Canary fork Contents read and metadata read. Used for target preflight and publication verification. |
-| `ACP_E2E_WRITE_CREDENTIAL_TOKEN` | Canary fork Contents write and metadata read. Used by the separate publisher for the branch compare-and-swap push. No source write or PR authority is needed. |
-| `ACP_E2E_WRITE_FORGE_CREDENTIAL_TOKEN` | Source Pull requests write, source and fork Contents read, and fork Contents write for branch cleanup. Used for PR reconciliation and by the independent `gh`/Git observer to verify both repositories, close the exact unmerged PR, and delete its branch with an exact-head lease. |
+GitHub creates a [token for each job](https://docs.github.com/en/actions/concepts/security/github_token)
+and expires it when the job ends. Do not save it as an environment secret.
 
-The workflow supplies `ACP_E2E_WRITE_READ_CREDENTIAL_TOKEN` from its own
-`GITHUB_TOKEN`, with `contents: read` on `orka-agents/orka`. Do not configure a
-GitHub secret for this source-read role. GitHub creates a
-[token for each job](https://docs.github.com/en/actions/concepts/security/github_token),
-and it expires when the job ends. The test still uses a separate temporary
-Kubernetes Secret for source reads and verifies all four credential roles.
-Once this workflow replaces the legacy gate on `main`, remove the old
-`ACP_E2E_WRITE_READ_CREDENTIAL_TOKEN` environment secret. Deleting that secret
-does not revoke the underlying token; revoke it separately once nothing else
-uses it.
-
-These are the existing ACP canary credentials, separate from release
-orchestration. The forge/observer credential must work across the source
-organization and fork owner. None of these credentials is used to prepare,
-tag, or publish an Orka release, and the release automation adds no PAT or
-GitHub App.
-
-Set values through the environment settings or the interactive `gh secret set`
-prompt. Do not put values in dispatch inputs, shell command literals, reports,
-or PR descriptions. Git and forge credentials never enter the ACP child process
-tree. The publisher obtains operation-scoped authority through its existing
-broker and must continue to fail the gate if its ServiceAccount can read these
-Secrets directly. Reports record only Secret names, namespaces, and resource
-versions.
+After both replacement workflows pass, remove the unused
+`ACP_E2E_WRITE_TARGET_READ_CREDENTIAL_TOKEN`, `ACP_E2E_WRITE_CREDENTIAL_TOKEN`, and
+`ACP_E2E_WRITE_FORGE_CREDENTIAL_TOKEN` environment secrets, and the
+`ACP_E2E_WRITE_PUBLICATION_REPO` variable. Remove the old stored source-read
+secret too if it still exists. Deleting a secret does not revoke its token;
+revoke unused tokens separately. Retire `live-acp-release-gate` and
+`live-acp-runtime-smoke` only after replacement validation, preserving deployment
+history.
 
 ## Standalone qualification
 
@@ -196,7 +180,8 @@ the candidate and does not supply the packaged-chart evidence required by the
 release publication job.
 
 Dispatch from `main` or an explicitly permitted `release-X.Y` branch. The
-workflow SHA, source SHA, current branch head, and canary PR base must agree.
+workflow SHA, source SHA, and current branch head must agree. The existing
+`pr_base` input selects that candidate branch; qualification does not create a PR.
 For example:
 
 ```bash
@@ -218,7 +203,7 @@ The verifier's optional third argument is the expected branch and defaults to
 `main`. For a release-line run, pass that exact branch. The verifier requires a
 successful dispatch from this repository at the exact candidate SHA. It
 downloads the current attempt's final report and checks workflow identity,
-publication evidence, observed images, and cleanup. Missing, expired,
+fixture test evidence, runtime checks, observed images, and cleanup. Missing, expired,
 incomplete, or mismatched evidence fails verification. A local run is useful
 for diagnosis; release qualification requires a trusted workflow run.
 
@@ -236,49 +221,43 @@ A bundled release report also records the build run and artifact attempt,
 candidate-manifest hash, chart hash, retained PVC identities, controller Pod
 replacement, completed Task identity, and chart acceptance results.
 
-The report includes the dispatched and checked-out SHAs, built image references,
-actual controller, publisher, and runtime Pod image digests, Task UID and attempt
-fences, publication and PR receipts, independently observed remote head and PR
-identity, frozen credential versions, and separate cleanup outcomes. It omits
+Schema version 2 includes the dispatched and checked-out SHAs, required test
+names and package outcomes from an uncached Go test run, runtime scenario
+results, actual controller, publisher, and runtime Pod image digests, candidate
+branch observations, and separate cleanup outcomes. It omits
 Task prompts/results, free-form messages, Pod environment values, and Secret
 contents. A failure before deployment records the candidate and failed stage;
 unobserved fields remain absent or incomplete.
 
-The report also retains GitHub's independently observed publication commit and
-tree. The final Task receipt must match both; `VerifiedExact` additionally
-requires the remote head to equal that commit. Cleanup cannot replace this
-evidence with a different receipt and retain a qualified result.
+`coverage.publication: local_git` and `coverage.pullRequests: github_api_fixtures`
+describe the required publication coverage. Both publisher packages must pass,
+and every required behavioral test must actually run and pass. A successful Go
+exit with missing or skipped required tests cannot qualify a candidate. Older
+schema-version-1 reports cannot satisfy the new contract.
 
-One Codex Task must create exactly the requested new file. The gate compares its
-bytes at the expected commit and independently observed remote head, verifies
-the commit parent/tree and one-file diff, and reads the open PR from GitHub.
-`checks.publication: true` records successful publication verification;
-`result: qualified` additionally requires the remaining runtime checks and all
-cleanup to succeed. A preserved cluster, failed branch deletion, skipped
-publication, or missing credential cannot produce a qualified report.
-
-The source base must still equal the candidate at preflight, Task submission,
-PR verification, and completion. If the selected branch moves, the report shows the observed
-base SHA and the candidate remains unqualified. Let safe cleanup finish, then
+The source branch must still equal the candidate at preflight and completion,
+including the final check after cluster teardown. If it moves, the report shows
+the observed SHA and the candidate remains unqualified. Let cleanup finish, then
 dispatch the new full head SHA. Do not edit the report or reuse an earlier
 report for the new candidate.
 
-Cleanup first proves that the Task and publisher can no longer write. It closes
-only the exact unmerged canary PR, then deletes the unique branch only if its
-head still equals the independently observed head, using `--force-with-lease`.
-It rereads both effects before removing owned Kubernetes resources and temporary
-credentials. A changed head, ambiguous receipt, merged PR, or failed read fails
-the gate and identifies preserved resources in the report. Inspect those exact
-resources, establish writer quiescence and their current identities, and remove
-only confirmed canary effects. Never replace the lease with unconditional branch
-deletion or force-remove Task finalizers to get a passing result.
+Cleanup settles run-owned Tasks and removes their Kubernetes resources,
+temporary credentials, cluster, and registry. Remote GitHub cleanup is
+`not_required`. An interrupted validator still fails qualification; its
+disposable cluster can be removed because this mode cannot publish to GitHub.
+Missing cleanup evidence, preserved resources, or `--keep-cluster` prevent a
+qualified result. Runner disposal does not count as verified cleanup.
 
-After the validator starts, cluster teardown requires an explicit completed
-remote-cleanup result, or confirmation that no write Task started. A timeout or
-interrupted cleanup with incomplete evidence preserves the cluster and registry
-and fails qualification, even if the validator could not finish its exit trap.
+## Optional local live GitHub diagnostic
 
-Local preserved clusters remain available through the run's `kindctl` tag.
-GitHub-hosted runners are disposable, so download the failure artifact for
-inspection; runner disposal does not count as verified cleanup. After resolving
-a preserved canary, start a new attempt with a new branch.
+The deployed-cluster validator retains its existing live canary behind
+`RELEASE_GATE=1 ACP_E2E_WRITE_CREATE_PR=1`. Its additional credentials and distinct
+fork requirements are listed in `scripts/agent-runtime-e2e.sh --help`. Use only
+separately authorized test infrastructure. The release workflow fixes this flag
+to `0`, exposes no canary credentials, and cannot dispatch this diagnostic.
+
+This opt-in still requires exact publication and PR receipts, four distinct
+credential roles, and independent remote verification. Cleanup settles the
+writer, closes only the exact unmerged PR, and deletes its branch with an
+exact-head lease. Unknown remote effects preserve the cluster for investigation
+and fail the run. Fixture tests cannot substitute for those live receipts.

@@ -124,7 +124,7 @@ End-to-end tests run against a dedicated Kind cluster:
 | `test/e2e/task_lifecycle_test.go` | Timeout/retry/cancel plus session serialization and lock release |
 | `scripts/agent-runtime-e2e.sh` | Canonical deployed-cluster ACP smoke/release gate for Codex, OpenCode, Claude, and Copilot RuntimePools, exact Pod/runtime identity, workspace read/write, continuation/fork, cancellation/timeout, restart/replacement, publication/PR verification, drain/scale-to-zero, immutable images, and cleanup |
 | `.github/workflows/agent-runtime-e2e.yml` / `scripts/agent-runtime-kind-e2e.sh` | Trusted-branch/nightly/manual agent runtime smoke that calls real model providers, requires credentials, and bootstraps an ephemeral Kind cluster, Vekil, and the production ACP topology before invoking the canonical validator |
-| `.github/workflows/release-qualification.yml` / `scripts/agent-runtime-kind-e2e.sh` | Environment-approved release acceptance with destructive publication, independent GitHub verification, PR reconciliation, and cleanup |
+| `.github/workflows/release-qualification.yml` / `scripts/agent-runtime-kind-e2e.sh` | Environment-approved chart and runtime acceptance, real local Git publication tests, GitHub API fixture tests, and cleanup; no stored Git publication credentials |
 
 The Gateway Live E2E workflow (`.github/workflows/gateway-e2e.yml`) runs on manual dispatch and on pull requests or pushes that touch Gateway-relevant source, configuration, E2E, image, or dependency paths. It creates a dedicated Kind cluster, generates disposable TLS and bearer credentials, deploys the TLS reference adapter and deterministic echo `AgentRuntime`, and verifies invalid bearer rejection, accepted and duplicate ingress, runtime-backed Task completion, final delivery, idempotency, and correlation metadata. The workflow is model-free and secret-free; it does not use repository or provider credentials.
 
@@ -139,9 +139,10 @@ missing or mismatched artifacts staying not ready.
 
 - `scripts/agent-runtime-e2e.sh --context <context>` is the canonical ACP
   deployed-cluster validator. Its default mode is a smoke test; set
-  `RELEASE_GATE=1` for destructive release acceptance. A smoke result explicitly
-  reports the publication, remote-verification, Task result/fork, and
-  scale-to-zero scenarios that remain release-only.
+  `RELEASE_GATE=1` for full runtime acceptance, including Task result/fork and
+  scale-to-zero scenarios. The Kind wrapper also requires uncached publication
+  tests. A smoke result cannot qualify a release. Live GitHub publication is
+  available only through an explicit local opt-in.
 - `scripts/agent-runtime-kind-e2e.sh` is the CI/local bootstrap entrypoint. It
   creates an ephemeral Kind cluster, deploys Vekil and the production ACP
   topology with digest-pinned local images, and then calls the canonical script.
@@ -159,24 +160,19 @@ missing or mismatched artifacts staying not ready.
   serialized. The release workflow dispatches it automatically. Restrict the
   `release-qualification` environment to `main` and exact permitted release
   branches, require a trusted reviewer, and disable administrator bypass before
-  exposing canary credentials. It accepts the configured canary fork and a full
-  source SHA that must equal both the dispatched workflow commit and selected branch head.
-  The canary PR base must be that same branch. Source reads use the job's
-  short-lived `GITHUB_TOKEN` with `contents: read`; no source-read environment
-  secret is needed. It requires these configured secrets:
-  `COPILOT_GITHUB_TOKEN`,
-  `ACP_E2E_WRITE_TARGET_READ_CREDENTIAL_TOKEN`,
-  `ACP_E2E_WRITE_CREDENTIAL_TOKEN`, and
-  `ACP_E2E_WRITE_FORGE_CREDENTIAL_TOKEN`. Configure the three stored GitHub
-  credentials as distinct, least-privilege credentials for target read,
-  target write, and forge/verification cleanup respectively. The provider
-  token can come from the existing repository secret.
-  [Release qualification](release-qualification.md) documents the
-  dedicated fork, exact permissions, trusted dispatch, report verification,
-  and recovery from a moved base or preserved canary. Release qualification
-  requires that report for the exact candidate; smoke success is insufficient.
+  exposing model-provider credentials. It accepts a full source SHA that must
+  equal both the dispatched workflow commit and selected branch head. GitHub
+  observations use the job's temporary `GITHUB_TOKEN` with `contents: read`.
+  `COPILOT_GITHUB_TOKEN` supplies model-provider access and can come from the
+  existing repository secret. No stored Git publication token or fork setting
+  is needed. Publication tests use real temporary Git repositories and local
+  GitHub API test servers. They do not prove the complete cluster-to-GitHub
+  publication path or live organization permissions.
+  [Release qualification](release-qualification.md) documents trusted dispatch,
+  required test evidence, report verification, and cleanup. Qualification needs
+  the report for the exact candidate; smoke success is insufficient.
 - Neither `Agent Runtime E2E` nor `Release Qualification` runs for `pull_request`, so PR-controlled code never
-  receives provider or publication credentials. Both check out with persisted
+  receives provider credentials. Both check out with persisted
   credentials disabled and expose secrets only to the final local script step.
   The release gate adds `actions: read` to `contents: read` to verify the
   environment branch rules and download candidate artifacts using the native
@@ -232,40 +228,37 @@ export ACP_E2E_OPENCODE_MAX_TOKENS=4096
 ACP_E2E_KIND_TAG=local bash scripts/agent-runtime-kind-e2e.sh
 ```
 
-The local release gate needs four role-specific credentials, including an
-explicitly supplied source-read credential. GitHub's automatic job token is
-available only inside Actions. If organization policy prevents supplying
-that credential locally, dispatch
-[Release Qualification](release-qualification.md#standalone-qualification) instead.
+For a local qualification diagnostic, use read-only GitHub CLI access and the
+same model-provider configuration as the smoke run. GitHub's automatic job
+token is available only inside Actions. To use that token without configuring
+local GitHub access, dispatch
+[Release Qualification](release-qualification.md#standalone-qualification).
 
-For a local run, set `ACP_E2E_WRITE_SOURCE_REPO`, `ACP_E2E_WRITE_PUBLICATION_REPO`,
-`ACP_E2E_WRITE_SOURCE_REF`, and `ACP_E2E_WRITE_PR_BASE`, then run:
+The local wrapper runs the required Git and PR fixture tests before creating
+the cluster:
 
 ```bash
 export RELEASE_GATE=1
-export ACP_E2E_WRITE_CREATE_PR=1
-export ACP_E2E_WRITE_SOURCE_REPO=https://github.com/orka-agents/orka.git
-export ACP_E2E_WRITE_PUBLICATION_REPO=https://github.com/sozercan/orka-acp-release-gate.git
-export ACP_E2E_WRITE_SOURCE_REF="$(git rev-parse HEAD)"
-export ACP_E2E_WRITE_PR_BASE=main
-read -rsp 'Source-read token: ' ACP_E2E_WRITE_READ_CREDENTIAL_TOKEN && echo
-read -rsp 'Target-read token: ' ACP_E2E_WRITE_TARGET_READ_CREDENTIAL_TOKEN && echo
-read -rsp 'Target-write token: ' ACP_E2E_WRITE_CREDENTIAL_TOKEN && echo
-read -rsp 'Forge token: ' ACP_E2E_WRITE_FORGE_CREDENTIAL_TOKEN && echo
-export ACP_E2E_WRITE_READ_CREDENTIAL_TOKEN ACP_E2E_WRITE_TARGET_READ_CREDENTIAL_TOKEN
-export ACP_E2E_WRITE_CREDENTIAL_TOKEN ACP_E2E_WRITE_FORGE_CREDENTIAL_TOKEN
-export GH_TOKEN="${ACP_E2E_WRITE_FORGE_CREDENTIAL_TOKEN}"
+export ACP_E2E_WRITE_CREATE_PR=0
+export ACP_E2E_REPO=https://github.com/orka-agents/orka.git
+export ACP_E2E_REF="$(git rev-parse HEAD)"
+export ACP_E2E_BASE_BRANCH=main
 bash scripts/agent-runtime-kind-e2e.sh
 ```
 
-In release mode the Kind wrapper binds `ACP_E2E_REPO` and `ACP_E2E_REF` to the
-write source repository and SHA, and rejects explicitly supplied read values
-that differ. The read/runtime phases and publication phase therefore validate
-the same immutable source. The image build requires a clean checkout at that
-commit. Local reports are saved under `bin/acp-release-*/acceptance.json`, or
+The fixture tests, image build, and runtime phases use the same candidate.
+The wrapper requires a clean checkout at that commit, and the candidate must
+equal the selected branch head. Local reports are saved under
+`bin/acp-release-*/acceptance.json`, or
 `ACP_E2E_REPORT_FILE` when set. `--keep-cluster` leaves cleanup pending and cannot
 qualify a release; use the trusted workflow and report verifier above for release
 records.
+
+The existing local live GitHub diagnostic remains available with
+`ACP_E2E_WRITE_CREATE_PR=1` and separately authorized canary credentials. Its
+four-role and distinct-fork requirements are listed in the validator's `--help`.
+The hosted release workflow cannot enable it and explicitly reports live GitHub
+publication as `not_tested`.
 
 Do not enable shell xtrace for either invocation. The scripts create Kubernetes
 Secrets without printing their values and redact provider/GitHub token patterns

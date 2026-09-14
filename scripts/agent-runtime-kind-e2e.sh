@@ -28,6 +28,9 @@ Environment:
   ACP_E2E_OPENCODE_MAX_TOKENS reviewed OpenCode output limit (required)
   ACP_E2E_ROLLOUT_TIMEOUT rollout timeout (default: 10m)
   RELEASE_GATE=1          forwarded to the canonical validator
+  ACP_E2E_REPO / ACP_E2E_REF candidate repository and full commit SHA
+  ACP_E2E_BASE_BRANCH     candidate branch (default: main)
+  ACP_E2E_WRITE_CREATE_PR=1 optional local live GitHub canary; requires publication credentials
   ACP_E2E_REPORT_FILE     redacted acceptance JSON (release mode only)
   ACP_E2E_RELEASE_BUNDLE_DIR verified candidate bundle; install its chart/images
 USAGE
@@ -128,7 +131,7 @@ trap finish_kind_run EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-if live_acp_kind_enabled "${RELEASE_GATE:-0}"; then
+if live_acp_kind_enabled "${RELEASE_GATE:-0}" && acp_live_github_enabled; then
   [[ -n "${ACP_E2E_WRITE_SOURCE_REPO:-}" ]] || \
     live_acp_kind_die "ACP_E2E_WRITE_SOURCE_REPO is required when RELEASE_GATE=1"
   [[ -n "${ACP_E2E_WRITE_PUBLICATION_REPO:-}" ]] || \
@@ -167,6 +170,20 @@ if live_acp_kind_enabled "${RELEASE_GATE:-0}"; then
   export ACP_E2E_REF="${ACP_E2E_WRITE_SOURCE_REF}"
 fi
 
+if live_acp_kind_enabled "${RELEASE_GATE:-0}"; then
+  [[ "${ACP_E2E_WRITE_CREATE_PR:-0}" == 0 || "${ACP_E2E_WRITE_CREATE_PR:-0}" == 1 ]] || \
+    live_acp_kind_die "ACP_E2E_WRITE_CREATE_PR must be 0 or 1"
+  [[ "${ACP_E2E_REPO:-}" =~ ^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || \
+    live_acp_kind_die "ACP_E2E_REPO must be an HTTPS github.com repository URL"
+  [[ "${ACP_E2E_REF:-}" =~ ^[0-9a-fA-F]{40}$ ]] || \
+    live_acp_kind_die "ACP_E2E_REF must be a full 40-character commit SHA"
+  export ACP_E2E_BASE_BRANCH="${ACP_E2E_BASE_BRANCH:-${ACP_E2E_WRITE_PR_BASE:-main}}"
+  if [[ ! "${ACP_E2E_BASE_BRANCH}" =~ ^[A-Za-z0-9._/-]+$ ]] || \
+      ! git check-ref-format "refs/heads/${ACP_E2E_BASE_BRANCH}" >/dev/null; then
+    live_acp_kind_die "ACP_E2E_BASE_BRANCH must be a URL-safe Git branch"
+  fi
+fi
+
 live_acp_kind_preflight
 if (( preflight_only )); then
   live_acp_kind_log "Agent Runtime Kind E2E preflight passed"
@@ -174,10 +191,12 @@ if (( preflight_only )); then
 fi
 
 if live_acp_kind_enabled "${RELEASE_GATE:-0}"; then
-  [[ "$(git -C "${repo_root}" rev-parse HEAD)" == "${write_ref_lower}" ]] || \
+  candidate_ref_lower="$(printf '%s' "${ACP_E2E_REF}" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+  [[ "$(git -C "${repo_root}" rev-parse HEAD)" == "${candidate_ref_lower}" ]] || \
     live_acp_kind_die "release candidate must equal the checkout HEAD"
   [[ -z "$(git -C "${repo_root}" status --porcelain --untracked-files=normal)" ]] || \
     live_acp_kind_die "release qualification requires a clean candidate checkout"
+  bash "${script_dir}/test-release-publication.sh"
 fi
 
 LIVE_ACP_SECRET_DIR="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/agent-runtime-kind-secrets.XXXXXX")"

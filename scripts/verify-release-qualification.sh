@@ -48,6 +48,7 @@ if ! acp_report_qualified "${report}" || ! jq -e \
     --arg sha "${candidate}" --arg run "${run_id}" --arg attempt "${attempt}" \
     --arg repo "${repository}" --arg ref "refs/heads/${expected_branch}" --arg base "${expected_branch}" '
       .result == "qualified" and .candidateSHA == $sha and .checkoutSHA == $sha and .baseBranch == $base
+      and .coverage.liveGitHub == "not_tested"
       and .workflow.sha == $sha and .workflow.repository == $repo and .workflow.ref == $ref
       and .workflow.runID == $run and .workflow.runAttempt == $attempt
       and .workflow.event == "workflow_dispatch"

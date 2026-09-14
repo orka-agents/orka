@@ -400,6 +400,22 @@ if PATH="${fake_bin}:${PATH}" COPILOT_GITHUB_TOKEN='' "${wrapper}" --preflight-o
 fi
 grep -F 'noninteractive and never starts device-code login' "${fake_bin}/missing.out" >/dev/null
 
+(
+  unset ACP_E2E_WRITE_CREATE_PR ACP_E2E_WRITE_PUBLICATION_REPO
+  unset ACP_E2E_WRITE_READ_CREDENTIAL_TOKEN ACP_E2E_WRITE_TARGET_READ_CREDENTIAL_TOKEN
+  unset ACP_E2E_WRITE_CREDENTIAL_TOKEN ACP_E2E_WRITE_FORGE_CREDENTIAL_TOKEN
+  PATH="${fake_bin}:${PATH}" RELEASE_GATE=1 COPILOT_GITHUB_TOKEN="${provider_sentinel}" \
+    ACP_E2E_REPO=https://github.com/orka-agents/orka.git \
+    ACP_E2E_REF=0123456789abcdef0123456789abcdef01234567 \
+    "${wrapper}" --preflight-only >"${fake_bin}/release-fixtures.out" 2>&1
+  grep -F 'preflight passed' "${fake_bin}/release-fixtures.out" >/dev/null
+  jq -e '.coverage.liveGitHub == "not_tested" and .publicationRepository == null
+    and .cleanup.remote == "not_required" and .result == "not_qualified"' "${ACP_E2E_REPORT_FILE}" >/dev/null
+  kubectl() { echo 'fixture mode tried to copy GitHub credentials' >&2; exit 1; }
+  RELEASE_GATE=1 live_acp_kind_create_release_credentials
+)
+printf '%s\n' 'ok - normal release preflight and bootstrap need no stored GitHub publication credentials'
+
 if PATH="${fake_bin}:${PATH}" RELEASE_GATE=1 COPILOT_GITHUB_TOKEN="${provider_sentinel}" \
     ACP_E2E_WRITE_CREATE_PR=1 \
     ACP_E2E_WRITE_PUBLICATION_REPO='https://github.com/example/orka.git' \
@@ -475,7 +491,8 @@ LIVE_ACP_KIND_CREATED=1
 LIVE_ACP_REGISTRY_STARTED=0
 cat >"${fake_bin}/cleanup-base.json" <<'JSON'
 {
-  "schemaVersion": 1, "gate": "release-qualification", "mode": "release",
+  "schemaVersion": 2, "gate": "release-qualification", "mode": "release",
+  "coverage": {"liveGitHub":"live"},
   "validatorStarted": true, "task": {"namespace":"test", "name":"canary"},
   "expectedBranch": "orka/acp-release-gate-test", "preserved": null,
   "cleanup": {"remote":"running"}
@@ -513,3 +530,10 @@ done <<'MUTATIONS'
 .cleanup.remote = "not_required" | .task = null
 MUTATIONS
 printf '%s\n' 'ok - interrupted validators preserve clusters until remote cleanup is explicitly proven safe'
+
+jq '.coverage.liveGitHub = "not_tested" | .task = null | .publicationRepository = null
+  | .cleanup.remote = "not_required"' "${fake_bin}/cleanup-base.json" >"${ACP_E2E_REPORT_FILE}"
+: >"${CLEANUP_CALLS}"
+live_acp_kind_delete_cluster
+grep -Fx 'delete --tag interrupted-report-test' "${CLEANUP_CALLS}" >/dev/null
+printf '%s\n' 'ok - a fixture-only run can remove its cluster after an interrupted validator without claiming qualification'

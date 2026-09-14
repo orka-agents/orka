@@ -7,7 +7,8 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 . "${root}/scripts/lib/release-qualification-report.sh"
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/acp-release-report-test.XXXXXX")"
 trap 'rm -rf "${fixture}"' EXIT
-export RELEASE_GATE=1 ACP_E2E_REPORT_FILE="${fixture}/acceptance.json"
+export RELEASE_GATE=1 ACP_E2E_WRITE_CREATE_PR=1 ACP_E2E_REPORT_FILE="${fixture}/acceptance.json"
+unset ACP_E2E_REPO ACP_E2E_REF ACP_E2E_BASE_BRANCH
 ACP_E2E_WRITE_SOURCE_REF="$(git -C "${root}" rev-parse HEAD)"
 export ACP_E2E_WRITE_SOURCE_REF
 export ACP_E2E_WRITE_SOURCE_REPO=https://github.com/orka-agents/orka.git
@@ -60,6 +61,13 @@ acp_report_update '
   .validation = "passed" | .validatorStarted = true | .validatorExitCode = 0 | .bootstrapExitCode = 0
   | .expectedBranch = .task.delivery.branch
   | .checks |= with_entries(.value = true)
+  | .checks.publication = true | .checks.credentialsFrozen = true | .checks.publisherSecretReadDenied = true
+  | .runtime = {
+      providers: (["codex","opencode","claude","copilot"] | map({key:.,value:{read:true,continuation:true,result:true,fork:true}}) | from_entries),
+      checks: (["unsafeWorkspace","concurrency","timeout","cancellation","controllerRestart","poolReplacement","scaleToZeroRecovery","opencodeReadPolicy"]
+        | map({key:.,value:true}) | from_entries)}
+  | .publicationTests = {candidateSHA:.candidateSHA,status:"passed",exitCode:0,failedEvents:0,
+      suites:($required | with_entries(.value = {passed:true,testCount:(.value | length),passedTests:.value}))}
   | .canary = {path:"canary.txt",expectedCommitBytesMatched:true,remoteBytesMatched:true,singleAddedFile:true}
   | .cleanup |= with_entries(.value = "passed")
   | .credentials = [
@@ -74,7 +82,7 @@ acp_report_update '
     pullRequest:{number:42,state:"open",headSHA:$head,baseSHA:.candidateSHA,
       baseBranch:"main",headBranch:.task.delivery.branch,
       sourceRepository:.sourceRepository,publicationRepository:.publicationRepository}}
-' --arg head "${commit}" --arg tree "${tree}"
+' --arg head "${commit}" --arg tree "${tree}" --argjson required "$(acp_publication_test_requirements)"
 if grep -F "${sentinel}" "${ACP_E2E_REPORT_FILE}" >/dev/null; then
   echo 'acceptance report copied excluded Task or Pod content' >&2
   exit 1
@@ -82,7 +90,7 @@ fi
 acp_report_finish
 jq -e '.result == "qualified" and .finishedAt != null' "${ACP_E2E_REPORT_FILE}" >/dev/null
 cp "${ACP_E2E_REPORT_FILE}" "${fixture}/qualified.json"
-printf '%s\n' 'ok - complete publication evidence qualifies without Task content or credentials'
+printf '%s\n' 'ok - the optional live canary requires its complete receipts in addition to fixture tests'
 
 jq --arg head 3333333333333333333333333333333333333333 '
   .task.delivery.state = "DeliveredSuperseded" | .task.delivery.outcome = "DeliveredSuperseded"
@@ -150,6 +158,73 @@ del(.images.copilot)
 .preserved = {branch:"inspect-me"}
 MUTATIONS
 printf '%s\n' 'ok - skipped publication, moved base, inconsistent receipts, missing images and incomplete cleanup fail qualification'
+
+# The normal release has no live GitHub effects or credential copies. Its
+# evidence must still prove every required runtime scenario and fixture suite.
+cp "${fixture}/qualified.json" "${fixture}/qualified-live.json"
+jq '
+  .coverage.liveGitHub = "not_tested"
+  | .publicationRepository = null | .expectedBranch = null | .task = null | .credentials = []
+  | .cleanup.remote = "not_required"
+  | del(.canary,.checks.publication,.checks.credentialsFrozen,.checks.publisherSecretReadDenied,
+      .observations.expectedCommit,.observations.remoteHead,.observations.pullRequest,
+      .observations.baseHeads.submission,.observations.baseHeads.publication)
+' "${fixture}/qualified-live.json" >"${fixture}/qualified.json"
+cp "${fixture}/qualified.json" "${ACP_E2E_REPORT_FILE}"
+acp_report_finish
+while IFS= read -r mutation; do
+  jq "${mutation}" "${fixture}/qualified.json" >"${ACP_E2E_REPORT_FILE}"
+  if acp_report_finish 2>/dev/null; then
+    printf 'incomplete fixture qualification accepted: %s\n' "${mutation}" >&2
+    exit 1
+  fi
+done <<'MUTATIONS'
+.schemaVersion = 1
+.coverage.publication = "not_tested"
+.coverage.pullRequests = "not_tested"
+.coverage.liveGitHub = "passed"
+.coverage.liveGitHub = "live"
+.publicationTests.status = "not_started"
+.publicationTests.exitCode = 1
+.publicationTests.failedEvents = 1
+.publicationTests.candidateSHA = "0000000000000000000000000000000000000000"
+del(.publicationTests)
+.publicationTests.suites = {}
+.publicationTests.suites["github.com/orka-agents/orka/internal/publisher"].passed = false
+.publicationTests.suites["github.com/orka-agents/orka/internal/publisher"].passedTests |= .[1:]
+.publicationTests.suites["github.com/orka-agents/orka/internal/publisher/service"].passedTests |= .[1:]
+.runtime.checks.scaleToZeroRecovery = false
+.runtime.checks.controllerRestart = false
+.runtime.checks.poolReplacement = false
+.runtime.checks.cancellation = false
+.runtime.checks.timeout = false
+.runtime.checks.concurrency = false
+.runtime.checks.unsafeWorkspace = false
+.runtime.checks.opencodeReadPolicy = false
+.runtime.providers.codex.fork = false
+.runtime.providers.claude.result = false
+.runtime.providers.opencode.continuation = false
+del(.runtime.providers.copilot)
+.checks.publisherBrokeredAuthority = false
+.checks.baseUnchanged = false
+.observations.baseHeads.preflight = "0000000000000000000000000000000000000000"
+del(.images.publisher)
+.cleanup.remote = "passed"
+.task = {uid:"unexpected-publication"}
+.credentials = [{role:"forge"}]
+.cleanup.kubernetes = "failed"
+.cleanup.cluster = "pending"
+.cleanup.registry = "failed"
+.cleanup.bootstrapCredentials = "failed"
+.cleanup.validatorCredentials = "failed"
+MUTATIONS
+printf '%s\n' 'ok - fixture qualification retains runtime, recovery, images, candidate identity and cleanup requirements'
+
+unset ACP_E2E_WRITE_CREATE_PR
+acp_report_init "${root}"
+jq -e '.coverage.liveGitHub == "not_tested" and .publicationRepository == null
+  and .cleanup.remote == "not_required" and .publicationTests.status == "not_started"' \
+  "${ACP_E2E_REPORT_FILE}" >/dev/null
 
 jq --arg hash "${digest#sha256:}" '
   .release = {buildRunID:"123", buildRunAttempt:"1", version:"v0.2.0", bundleSHA256:$hash}
@@ -268,13 +343,11 @@ done <<'MUTATIONS'
 MUTATIONS
 printf '%s\n' 'ok - workflow reruns and status changes during artifact download invalidate qualification'
 
-# Release-line evidence must name that exact branch throughout the workflow
-# and canary receipts; default-branch evidence cannot be relabeled for it.
+# Release-line evidence must name that exact workflow and candidate branch.
 rm -f "${fixture}/run-after-download.json" "${fixture}/download-complete"
 jq '.head_branch = "release-0.2"' "${fixture}/run-original.json" >"${fixture}/run.json"
 cp "${fixture}/qualified.json" "${fixture}/qualified-main.json"
-jq '.workflow.ref = "refs/heads/release-0.2" | .baseBranch = "release-0.2"
-  | .task.delivery.prReceipt.baseBranch = "release-0.2" | .observations.pullRequest.baseBranch = "release-0.2"' \
+jq '.workflow.ref = "refs/heads/release-0.2" | .baseBranch = "release-0.2"' \
   "${fixture}/qualified-main.json" >"${fixture}/qualified.json"
 PATH="${fixture}/bin:${PATH}" bash "${root}/scripts/verify-release-qualification.sh" \
   "${GITHUB_SHA}" "${GITHUB_RUN_ID}" release-0.2 >/dev/null
@@ -295,12 +368,12 @@ awk '
 [[ -s "${fixture}/dispatch.sh" ]]
 validate_dispatch() {
   CHECKED_OUT_SHA="${GITHUB_SHA}" DEFAULT_BRANCH=main PR_BASE="${TEST_PR_BASE:-main}" \
-    CONFIGURED_PUBLICATION_REPOSITORY=https://github.com/sozercan/orka-acp-release-gate.git \
-    SOURCE_REF="${GITHUB_SHA}" SOURCE_REPOSITORY=https://github.com/orka-agents/orka.git \
+    SOURCE_REF="${TEST_SOURCE_REF:-${GITHUB_SHA}}" \
+    SOURCE_REPOSITORY="${TEST_SOURCE_REPOSITORY:-https://github.com/orka-agents/orka.git}" \
     bash "${fixture}/dispatch.sh"
 }
-for publication in https://github.com/sozercan/orka-acp-release-gate.git https://github.com/sozercan/orka-acp-release-gate; do
-  ACP_E2E_WRITE_PUBLICATION_REPO="${publication}" validate_dispatch
+for source in https://github.com/orka-agents/orka.git https://github.com/orka-agents/orka; do
+  TEST_SOURCE_REPOSITORY="${source}" validate_dispatch
 done
 if GITHUB_REF=refs/pull/42/merge validate_dispatch >/dev/null 2>&1; then
   echo 'trusted dispatch accepted a pull-request ref' >&2
@@ -311,8 +384,12 @@ if GITHUB_REF=refs/heads/release-0.2 TEST_PR_BASE=main validate_dispatch >/dev/n
   echo 'trusted dispatch accepted a different PR base' >&2
   exit 1
 fi
-if ACP_E2E_WRITE_PUBLICATION_REPO=https://github.com/other/fork.git validate_dispatch >/dev/null 2>&1; then
-  echo 'trusted dispatch accepted an unconfigured publication target' >&2
+if TEST_SOURCE_REPOSITORY=https://github.com/other/repo.git validate_dispatch >/dev/null 2>&1; then
+  echo 'trusted dispatch accepted another source repository' >&2
   exit 1
 fi
-printf '%s\n' 'ok - actual dispatch guard accepts the documented .git URL and rejects untrusted refs and targets'
+if TEST_SOURCE_REF=0000000000000000000000000000000000000000 validate_dispatch >/dev/null 2>&1; then
+  echo 'trusted dispatch accepted a different candidate SHA' >&2
+  exit 1
+fi
+printf '%s\n' 'ok - dispatch accepts the candidate without a publication target and rejects untrusted refs, repositories and SHAs'

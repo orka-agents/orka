@@ -13,7 +13,7 @@ done
 
 temp_root="$(mktemp -d "${TMPDIR:-/tmp}/acp-publication-test.XXXXXX")"
 trap 'rm -rf "${temp_root}"' EXIT
-export RELEASE_GATE=1 ACP_E2E_REPORT_FILE="${temp_root}/acceptance.json"
+export RELEASE_GATE=1 ACP_E2E_WRITE_CREATE_PR=1 ACP_E2E_REPORT_FILE="${temp_root}/acceptance.json"
 ACP_E2E_WRITE_SOURCE_REF="$(git -C "${root}" rev-parse HEAD)"
 export ACP_E2E_WRITE_SOURCE_REF
 export ACP_E2E_WRITE_SOURCE_REPO=https://github.com/orka-agents/orka.git

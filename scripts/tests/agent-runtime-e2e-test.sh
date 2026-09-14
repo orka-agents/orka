@@ -872,3 +872,60 @@ if task_terminal_projection_ready test-task; then
 fi
 
 printf '%s\n' 'ok - Task terminal waits require execution and phase projection from one observation'
+
+(
+  for function in lower github_repo_slug prepare_release_candidate prepare_release_gate_environment \
+    sanitize_name build_read_manifest build_write_manifest assert_unsafe_workspace_rejected; do
+    eval "$(awk -v name="${function}" '$0 == name "() {" {copy=1} copy {print} copy && /^}$/ {exit}' "${script}")"
+  done
+  export ACP_E2E_WRITE_CREATE_PR=0
+  export ACP_E2E_BASE_BRANCH=main
+  temp_root="$(mktemp -d "${TMPDIR:-/tmp}/release-candidate-controls.XXXXXX")"
+  trap 'rm -rf "${temp_root}"' EXIT
+  release_gate=1
+  run_id=fixture-qualification
+  repo_url=https://github.com/orka-agents/orka.git
+  repo_ref=0123456789abcdef0123456789abcdef01234567
+  namespace=test
+  # No canary settings or credentials are available in the required path.
+  unset write_source_repo write_publication_repo write_publication_slug write_source_commit write_credential_target
+  die() { printf '%s\n' "$*" >&2; exit 1; }
+  log() { :; }
+  acp_report_update() { :; }
+  gh() {
+    case "$*" in
+      "api repos/orka-agents/orka/commits/${repo_ref} --jq .sha") printf '%s\n' "${repo_ref}" ;;
+      'api repos/orka-agents/orka/branches/main --jq .commit.sha') printf '%s\n' "${fixture_head:-${repo_ref}}" ;;
+      *) echo 'candidate preflight used an unexpected GitHub endpoint' >&2; exit 1 ;;
+    esac
+  }
+  prepare_release_candidate
+  if (fixture_head=0000000000000000000000000000000000000000 prepare_release_candidate) >/dev/null 2>&1; then
+    echo 'candidate preflight accepted a moved branch' >&2
+    exit 1
+  fi
+  gh() { echo 'normal qualification entered the live canary preflight' >&2; exit 1; }
+  prepare_release_gate_environment
+
+  positive_controls=0
+  negative_controls=0
+  server_dry_run_manifest() {
+    jq -e --arg source "${repo_url}" --arg sha "${repo_ref}" '
+      .spec.workspace | .gitRepo == $source and .ref == $sha
+      and (if .intent == "write" then
+        (.publicationGitRepo | test("^https://github\\.com/[^/?#@]+/[^/?#@]+$"))
+        and .publicationCredentialRef.name == "dry-run-credential" and .createPR == false
+      else .intent == "read" end)
+    ' >/dev/null
+    positive_controls=$((positive_controls + 1))
+  }
+  assert_dry_run_rejected() {
+    jq -e '.spec.workspace | (.publicationGitRepo // .gitRepo)
+      | test("[?#@]|^ssh:")' "$1" >/dev/null
+    negative_controls=$((negative_controls + 1))
+  }
+  assert_controller_rejected_before_demand() { [[ "$2" == ext::* ]]; }
+  assert_unsafe_workspace_rejected test-agent
+  [[ "${positive_controls}" == 2 && "${negative_controls}" == 7 ]]
+)
+printf '%s\n' 'ok - candidate identity and all workspace URL controls run without live GitHub publication settings'
