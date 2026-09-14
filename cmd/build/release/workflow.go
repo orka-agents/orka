@@ -464,19 +464,31 @@ func (w *workflow) observeDispatch(
 }
 
 func (w *workflow) waitQualification(run workflowRun, name, branch, candidate string) (workflowRun, error) {
-	// Leave approval time within the parent's six-hour runner limit.
+	// Reserve time for evidence within the parent's six-hour runner limit.
 	deadline := w.now().Add(5*time.Hour + 40*time.Minute)
+	var approvalDeadline time.Time
 	for run.Status != runCompleted {
-		// Pending indicates concurrency contention, unlike approval waiting or a queued runner.
-		if run.Status == "pending" {
-			if err := w.api(runPath(run.ID)+"/cancel", http.MethodPost, map[string]any{}, nil); err != nil {
-				return workflowRun{}, err
-			}
-			return workflowRun{}, errors.New("qualification queued behind another run; cancellation requested; " +
-				"finish the active run and retry")
+		now := w.now()
+		if run.Status == "waiting" && approvalDeadline.IsZero() {
+			approvalDeadline = now.Add(90 * time.Minute)
 		}
-		if !w.now().Before(deadline) {
-			return workflowRun{}, errors.New("qualification timed out; publication is blocked")
+		var reason string
+		nextStep := "publication is blocked"
+		// Pending indicates concurrency contention, unlike approval waiting or a queued runner.
+		switch {
+		case run.Status == "pending":
+			reason = "qualification queued behind another run"
+			nextStep = "finish the active run and retry"
+		case !now.Before(deadline):
+			reason = "qualification timed out"
+		case run.Status == "waiting" && !now.Before(approvalDeadline):
+			reason = "qualification approval timed out after 90 minutes"
+		}
+		if reason != "" {
+			if err := w.api(runPath(run.ID)+"/cancel", http.MethodPost, map[string]any{}, nil); err != nil {
+				return workflowRun{}, fmt.Errorf("%s; cancellation request failed: %w", reason, err)
+			}
+			return workflowRun{}, fmt.Errorf("%s; cancellation requested; %s", reason, nextStep)
 		}
 		w.sleep(15 * time.Second)
 		var next workflowRun

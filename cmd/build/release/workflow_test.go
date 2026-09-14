@@ -390,7 +390,15 @@ func TestRacedQualificationCancelsOnlyItsQueuedChildWithoutApprovalEvidence(t *t
 
 func TestQualificationAllowsApprovalWaitingAndRunnerQueues(t *testing.T) {
 	f := newReleaseFixture(t)
-	qualificationSequence(f, []string{"queued", "waiting", "in_progress", "completed"}, "success")
+	qualificationSequence(f, []string{"queued", "waiting", "in_progress", "in_progress", "completed"}, "success")
+	advances := []time.Duration{10 * time.Minute, 89 * time.Minute, 3 * time.Hour, time.Hour}
+	f.w.sleep = func(time.Duration) {
+		if len(advances) == 0 {
+			t.Fatal("continued polling after qualification completed")
+		}
+		f.clock = f.clock.Add(advances[0])
+		advances = advances[1:]
+	}
 	inputs := map[string]string{"dispatch_id": "release-123-1"}
 	run, err := f.w.dispatch(qualificationWorkflow, testBranch, testSHA, inputs, true)
 	must(t, err)
@@ -441,13 +449,73 @@ func TestWorkflowOutputsAndCommandsDoNotExposeResponseContents(t *testing.T) {
 	wantError(t, f.w.output("key", "value\nother=value"), "invalid workflow output")
 }
 
-func TestQualificationTimeoutStopsPublication(t *testing.T) {
-	f := newReleaseFixture(t)
-	f.w.sleep = func(time.Duration) { f.clock = f.clock.Add(6 * time.Hour) }
-	qualificationSequence(f, []string{"waiting", "waiting"}, "")
-	inputs := map[string]string{"dispatch_id": "release-123-1"}
-	_, err := f.w.dispatch(qualificationWorkflow, testBranch, testSHA, inputs, true)
-	wantError(t, err, "qualification timed out")
+func TestQualificationTimeoutCancelsItsChildWithoutApprovalEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		states      []string
+		advances    []time.Duration
+		wantError   string
+		cancelFails bool
+	}{
+		{
+			name:      "approval waiting",
+			states:    []string{"queued", "waiting", "waiting", "waiting"},
+			advances:  []time.Duration{10 * time.Minute, 89 * time.Minute, time.Minute},
+			wantError: "qualification approval timed out after 90 minutes",
+		},
+		{
+			name:      "overall running",
+			states:    []string{"in_progress", "in_progress", "in_progress"},
+			advances:  []time.Duration{5*time.Hour + 39*time.Minute, time.Minute},
+			wantError: "qualification timed out",
+		},
+		{
+			name:      "overall waiting after a long runner queue",
+			states:    []string{"queued", "waiting", "waiting"},
+			advances:  []time.Duration{5 * time.Hour, 40 * time.Minute},
+			wantError: "qualification timed out",
+		},
+		{
+			name:        "cancellation failure",
+			states:      []string{"waiting", "waiting"},
+			advances:    []time.Duration{90 * time.Minute},
+			wantError:   "cancellation request failed",
+			cancelFails: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newReleaseFixture(t)
+			qualificationSequence(f, tc.states, "")
+			api := f.api
+			f.api = func(request apiRequest) (any, error, bool) {
+				if tc.cancelFails && strings.HasSuffix(request.path, "/cancel") {
+					return nil, errors.New("cancellation unavailable"), true
+				}
+				return api(request)
+			}
+			advances := tc.advances
+			f.w.sleep = func(time.Duration) {
+				if len(advances) == 0 {
+					t.Fatal("continued polling after the qualification deadline")
+				}
+				f.clock = f.clock.Add(advances[0])
+				advances = advances[1:]
+			}
+			err := f.w.qualify(f.directory)
+			wantError(t, err, tc.wantError)
+			if len(advances) != 0 {
+				t.Fatal("stopped before the qualification deadline")
+			}
+			requireNoEvidence(t, f)
+			last := f.requests[len(f.requests)-1]
+			if last.path != runPath(456)+"/cancel" || last.method != http.MethodPost {
+				t.Fatalf("wrong cancellation: %+v", last)
+			}
+			if tc.cancelFails && strings.Contains(err.Error(), "cancellation requested") {
+				t.Fatal("reported a rejected cancellation as requested")
+			}
+		})
+	}
 }
 
 func TestMissingRunIdentityStopsBeforeExternalEffects(t *testing.T) {

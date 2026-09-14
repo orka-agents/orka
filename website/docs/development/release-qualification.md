@@ -99,9 +99,10 @@ simultaneous dispatch takes the concurrency slot first, the release requests
 cancellation of its queued child and fails promptly. Finish the active run,
 then retry the failed qualification job.
 Approve the new qualification run within 90 minutes so its four-hour execution
-budget fits inside the parent workflow's six-hour job limit. If that budget
-expires, cancel the pending qualification run and retry the failed qualification
-job.
+budget fits inside the parent workflow's six-hour job limit. The parent requests
+cancellation of its qualification run when the approval or overall wait budget
+expires. Confirm that the child run has stopped, then retry the failed
+qualification job.
 
 Before a tag exists, use **Re-run all jobs** if an interrupted build left partial
 artifacts. This makes a new artifact set and requires fresh qualification. If
