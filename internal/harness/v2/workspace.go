@@ -49,6 +49,7 @@ type CreateWorkspaceDeltaRequest struct {
 	PromptSettlementDigest      string                 `json:"promptSettlementDigest"`
 	Limits                      WorkspaceDeltaLimits   `json:"limits"`
 	ArtifactUploadAuthorization *ArtifactAuthorization `json:"artifactUploadAuthorization,omitempty"`
+	CaptureNativeSession        bool                   `json:"captureNativeSession,omitempty"`
 }
 
 func (r CreateWorkspaceDeltaRequest) ValidateAt(now time.Time) error {
@@ -63,6 +64,9 @@ func (r CreateWorkspaceDeltaRequest) ValidateAt(now time.Time) error {
 	}
 	if err := r.Intent.Validate(); err != nil {
 		return err
+	}
+	if r.CaptureNativeSession && r.Intent != WorkspaceIntentRead {
+		return fmt.Errorf("native session capture requires read workspace intent")
 	}
 	if err := r.VerifiedBaseline.Validate(); err != nil {
 		return fmt.Errorf("verified baseline: %w", err)
@@ -182,9 +186,11 @@ func (d WorkspaceDeltaDescriptor) Validate() error {
 }
 
 type CreateWorkspaceDeltaResponse struct {
-	Protocol       string                   `json:"protocol"`
-	Classification Classification           `json:"classification"`
-	Delta          WorkspaceDeltaDescriptor `json:"delta"`
+	Protocol            string                   `json:"protocol"`
+	Classification      Classification           `json:"classification"`
+	Delta               WorkspaceDeltaDescriptor `json:"delta"`
+	NativeSession       *NativeSessionSnapshot   `json:"nativeSession,omitempty"`
+	NativeSessionReason string                   `json:"nativeSessionReason,omitempty"`
 }
 
 func (r CreateWorkspaceDeltaResponse) ValidateFor(request CreateWorkspaceDeltaRequest) error {
@@ -219,6 +225,21 @@ func (r CreateWorkspaceDeltaResponse) ValidateFor(request CreateWorkspaceDeltaRe
 	}
 	if r.Delta.Artifact != nil && r.Delta.Artifact.SizeBytes > request.Limits.MaxBytes {
 		return fmt.Errorf("workspace delta artifact exceeds request byte limit")
+	}
+	if r.NativeSession != nil {
+		if !request.CaptureNativeSession || r.Delta.State != WorkspaceDeltaNoChange || request.Intent != WorkspaceIntentRead {
+			return fmt.Errorf("native session capture requires an authorized, unchanged read workspace")
+		}
+		if err := r.NativeSession.Validate(); err != nil {
+			return err
+		}
+		if r.NativeSession.SessionUID != request.Metadata.Fence.RuntimeSessionUID ||
+			r.NativeSession.ProfileDigest != request.Metadata.Fence.RuntimeProfileDigest {
+			return fmt.Errorf("native session capture identity mismatch")
+		}
+	}
+	if err := validateBoundedString("native session capture reason", r.NativeSessionReason, false, 128); err != nil {
+		return err
 	}
 	return nil
 }

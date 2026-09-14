@@ -176,6 +176,11 @@ func (c Config) Validate() error {
 			return fmt.Errorf("a stable durable workspace key requires a dedicated single-session pool")
 		}
 	}
+	if c.Capabilities.SupportsNativeSessionRestore &&
+		(c.Provider.Kind != providerKindOpencode || c.Provider.AdapterName != openCodeAdapterName() ||
+			c.Provider.AdapterDigest != openCodeAdapterDigest() || c.DurableWorkspaceDir == "") {
+		return fmt.Errorf("native restoration requires the pinned OpenCode adapter and a durable workspace")
+	}
 	if c.DurableWorkspaceDir != "" {
 		relative, err := filepath.Rel(filepath.Clean(c.DurableWorkspaceDir), filepath.Clean(c.SessionBaseDir))
 		if err != nil {

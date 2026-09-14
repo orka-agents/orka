@@ -47,7 +47,90 @@ the resulting publication identity, generation, version, and terminal receipt di
 duplicate-safe: replaying the same receipt returns the recorded one, and a *different* receipt
 for a session already finalizing is a `digest_conflict`, not an overwrite.
 
-Do not add prompt replay, stream reconnect, provider-session load, transparent recovery, or workspace checkpoint endpoints.
+Provider conversation restoration uses the optional creation extension below.
+Do not add separate provider-session load, prompt replay, stream reconnect,
+transparent recovery or workspace checkpoint endpoints.
+
+### Native conversation creation extension
+
+`supportsNativeSessionRestore` advertises support for an explicit
+`nativeRestore` field on the existing RuntimeSession creation request. It is
+currently used only by Orka's pinned OpenCode 1.18.9 supervisor on a selected
+durable agent-sandbox class. Unsupported and external runtimes receive their
+existing creation request without this field.
+
+`nativeRestore` authorizes one immutable `snapshotID` and a private `snapshot`.
+The snapshot binds the owning Session UID, provider kind/version, native
+conversation ID, runtime-profile digest, absolute working directory and
+workspace content digest. Its compressed data and SHA-256 digest are covered
+by the creation request's existing canonical integrity check and exact-fence
+operation capability. The payload is bounded to 512 KiB before JSON base64
+encoding. Native restoration requires read intent and is mutually exclusive
+with a transcript bootstrap artifact.
+
+The supervisor creates a fresh provider process, imports only selected
+conversation rows, and regenerates credentials, provider settings, MCP
+connections and tool policy. It applies the current model and mode through
+the pinned ACP configuration methods. It prefers an advertised
+`sessionCapabilities.resume` object, then advertised `loadSession` support.
+It never guesses support or probes an unadvertised method.
+
+Load notifications are confined to a restoration phase with a 60-second
+deadline, at most 4,096 notifications, the normal ACP line limit and a 32 MiB
+aggregate limit. The client validates each notification's session identity,
+discards historical output and accounting, and rejects permission requests.
+Restoration cannot invoke the prompt handler or authorize model/tool work.
+
+The creation response reports `nativeRestoration.snapshotID`, `method` and a
+bounded reason. A successful method is `session/resume` or `session/load`, and
+the descriptor must retain the requested native conversation ID. A safe
+fallback reports `reconstructed`; the controller then supplies allowed
+canonical history with the new prompt. A failed restoration permits that
+fallback only after process and descendant cleanup is proven. Unproven
+cleanup poisons the runtime instance. A response cannot claim restoration
+when the request did not authorize it.
+
+Authenticated status includes the creation Task UID/attempt, native
+conversation ID and restoration result. These fields let the controller
+adopt an interrupted create without confusing an empty conversation with a
+previously used one. Public health and capability probes expose none of this
+Session data.
+
+The read workspace-delta request may set `captureNativeSession`. After
+successful prompt settlement and unchanged workspace validation, the response
+may include a private `nativeSession` snapshot or a safe
+`nativeSessionReason`. Capture occurs inside the same proven freeze and
+ownership barrier. The controller stages the copy in its private Session
+store; transcript commit and completion of Session finalization are required
+before it becomes available for another creation request. These bytes are
+never workspace artifacts or public checkpoint data.
+
+Run the real Linux image checks without external provider credentials:
+
+```bash
+scripts/opencode-native-restore-e2e.sh
+```
+
+This runs both methods against the pinned binary with local model and MCP
+fixtures. The load case suppresses only resume's capability advertisement.
+The tests verify unique earlier tool results, fresh credentials and policy,
+no restoration work, no transcript/accounting duplication, and cleanup.
+To exercise normal Task completion, DataOnly suspension and cold Pod
+replacement on the selected class, use the isolated sandbox E2E:
+
+```bash
+ORKA_AGENT_SANDBOX_ACP_TASK_SMOKE=0 \
+ORKA_AGENT_SANDBOX_SUSPEND_RESUME=0 \
+ORKA_AGENT_SANDBOX_LIFECYCLE=0 \
+ORKA_AGENT_SANDBOX_NATIVE_SESSION=1 \
+bash scripts/live-agent-sandbox-e2e.sh
+```
+
+The sandbox fixture checks that the follow-up receives an earlier unique
+native `read` result without canonical reconstruction or another tool call.
+The authenticated observer verifies native conversation identity under a new
+runtime instance, Session generation and credential digest. The script uses
+its own kubeconfig and deletes the cluster when it created it.
 
 ## Request identity and fencing
 

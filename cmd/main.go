@@ -311,6 +311,7 @@ func main() {
 	var harnessV1DispatchInterval time.Duration
 	var harnessV1DispatchWorkers int
 	var acpIdlePoolTTL time.Duration
+	var acpNativeSessionWorkspaceClass string
 	var acpCodexRuntimeImage string
 	var acpClaudeRuntimeImage string
 	var acpCopilotRuntimeImage string
@@ -556,6 +557,8 @@ func main() {
 		"Enable experimental agent sandbox workspace execution for agent Tasks.")
 	flag.BoolVar(&acpWorkspaceDispatchEnabled, "acp-workspace-dispatch-enabled", acpWorkspaceDispatchEnabled,
 		"Admit workspace-provider-backed ACP RuntimeSession dispatch (requires the matching --agent-sandbox-enabled or --substrate-enabled provider flag); when false, Task.spec.execution.workspace agent Tasks fail closed.")
+	flag.StringVar(&acpNativeSessionWorkspaceClass, "acp-native-session-workspace-class", "",
+		"Enable OpenCode native conversation continuity for this session-reused agent-sandbox DataOnly workspace class.")
 	flag.StringVar(&agentSandboxConfig.RouterURL, "agent-sandbox-router-url", agentSandboxConfig.RouterURL,
 		"Agent sandbox router base URL used by worker Jobs for workspace claims.")
 	flag.StringVar(&agentSandboxConfig.DefaultTemplate, "agent-sandbox-default-template",
@@ -1651,6 +1654,7 @@ func main() {
 			EventStore: sqliteStore, PlanStore: sqliteStore,
 			Snapshots: agentExecutionSnapshotStore,
 			Epochs:    controllerEpochManager, Sessions: acpSessionContinuity,
+			NativeSessions: sqliteStore, NativeSessionWorkspaceClass: acpNativeSessionWorkspaceClass,
 			Publisher: publisherClient, ArtifactCapabilitySecret: artifactCapabilitySecret,
 			ArtifactReservations: artifactRetentionWiring.collector,
 			AdmissionGate:        acpAdmissionGate,

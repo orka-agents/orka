@@ -300,6 +300,10 @@ func main() {
 	mux.HandleFunc("/fixture/marker-observations", handleMarkerObservations)
 	mux.HandleFunc("/responses", handleResponses)
 	mux.HandleFunc("/v1/responses", handleResponses)
+	native := &nativeSessionFixture{}
+	mux.HandleFunc("/chat/completions", native.handleChatCompletions)
+	mux.HandleFunc("/v1/chat/completions", native.handleChatCompletions)
+	mux.HandleFunc("/fixture/native-session", native.handleObservation)
 
 	server := &http.Server{
 		Addr:              addr,

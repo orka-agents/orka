@@ -84,27 +84,29 @@ const (
 // Task reconciliation only persists queued demand; this leader-elected runnable
 // reserves capacity and advances the durable attempt state machine.
 type ACPDispatcher struct {
-	Client                   client.Client
-	APIReader                client.Reader
-	Store                    store.DurableControlStore
-	ResultStore              store.ResultStore
-	EventStore               store.ExecutionEventStore
-	PlanStore                store.PlanStore
-	Snapshots                store.AgentExecutionSnapshotStore
-	Epochs                   *ControllerEpochManager
-	Sessions                 *ACPSessionContinuity
-	Publisher                *publisherservice.Client
-	ArtifactCapabilitySecret []byte
-	ArtifactReservations     artifactcap.CapabilityReservationRecorder
-	MCPRegistry              *tools.Registry
-	Interval                 time.Duration
-	MaxConcurrent            int
-	IdlePoolTTL              time.Duration
-	ReservationTTL           time.Duration
-	RateLimitRetryInterval   time.Duration
-	AdmissionGate            *ACPAdmissionGate
-	ACPRuntimeImages         ACPRuntimeImages
-	runtimeContextFactory    func(context.Context, *corev1alpha1.Task) (context.Context, context.CancelFunc)
+	Client                      client.Client
+	APIReader                   client.Reader
+	Store                       store.DurableControlStore
+	ResultStore                 store.ResultStore
+	EventStore                  store.ExecutionEventStore
+	PlanStore                   store.PlanStore
+	Snapshots                   store.AgentExecutionSnapshotStore
+	Epochs                      *ControllerEpochManager
+	Sessions                    *ACPSessionContinuity
+	NativeSessions              store.NativeSessionSnapshotStore
+	NativeSessionWorkspaceClass string
+	Publisher                   *publisherservice.Client
+	ArtifactCapabilitySecret    []byte
+	ArtifactReservations        artifactcap.CapabilityReservationRecorder
+	MCPRegistry                 *tools.Registry
+	Interval                    time.Duration
+	MaxConcurrent               int
+	IdlePoolTTL                 time.Duration
+	ReservationTTL              time.Duration
+	RateLimitRetryInterval      time.Duration
+	AdmissionGate               *ACPAdmissionGate
+	ACPRuntimeImages            ACPRuntimeImages
+	runtimeContextFactory       func(context.Context, *corev1alpha1.Task) (context.Context, context.CancelFunc)
 
 	// SubstrateRouterURL and SubstrateActorDNSSuffix route Substrate-backed
 	// RuntimePool instances through the provider router while preserving the
@@ -1057,6 +1059,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 		return d.requeueReservedTask(ctx, task, acpReservedRetryRuntimeClient, authErr)
 	}
+	var nativeCapabilities harnessv2.CapabilitiesResponse
 	if target.pool != nil {
 		capabilities, capabilityErr := runtimeClient.Capabilities(runtimeCtx)
 		if capabilityErr != nil {
@@ -1065,6 +1068,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		if !capabilities.SupportsAgentSessionConfiguration {
 			return d.requeueReservedTask(ctx, task, acpReservedRetrySessionConfiguration, fmt.Errorf("RuntimePool supervisor is waiting for Agent session configuration support"))
 		}
+		nativeCapabilities = *capabilities
 	}
 	runtimeProfileDigest, digestErr := harnessv2.CanonicalProfileDigest(profile)
 	if digestErr != nil || runtimeFence.RuntimeProfileDigest != bound.plan.Digest || runtimeProfileDigest != bound.plan.Digest {
@@ -1102,6 +1106,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			return d.requeueReservedTask(ctx, task, acpReservedRetryNamespaceLineage, fmt.Errorf("resolve namespace identity for session lineage: %w", err))
 		}
 		lineage.NamespaceUID = string(taskNamespace.UID)
+	}
+	if target.pool != nil {
+		lineage.Native = d.nativeSessionPolicy(task, bound.plan, nativeCapabilities, mcpBindingDigest)
 	}
 	var sessionExecution *acpTaskSession
 	sessionCompleted := false
@@ -1398,6 +1405,10 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		RuntimeSessionID: harnessv2.RuntimeSessionID(runtimeSessionID(runtimeFence)),
 		Profile:          profile, AgentConfiguration: agentConfigurationRef, MCPConfiguration: mcpConfiguration,
 		Workspace: workspace, WorkspaceArtifactAuthorization: workspaceAuthorization,
+		NativeRestore: sessionExecution.nativeRestore(preparedWorkspace.bindingDigest),
+	}
+	if err := d.validateNativeSessionHistory(ctx, sessionExecution, fence); err != nil {
+		return err
 	}
 	if err := sealMutation(&createRequest.Metadata.RequestDigest, createRequest); err != nil {
 		return err
@@ -1646,6 +1657,25 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			status.RuntimeSessionSupervisorBootID = string(runtimeFence.SupervisorBootID)
 			status.LastTransitionTime = nowMeta()
 		}); err != nil {
+			return err
+		}
+	}
+	if sessionExecution != nil && sessionExecution.Native != nil {
+		status, observed, err := runtimeSessionStatusForUID(runtimeCtx, runtimeClient, runtimeFence.RuntimeSessionUID)
+		if err != nil {
+			return err
+		}
+		expected := runtimeFence
+		expected.RuntimeSessionUID, expected.RuntimeSessionGeneration = "", 0
+		if harnessv2.CompareFence(expected, status.Fence, false) != harnessv2.FenceMatch || observed == nil ||
+			observed.RuntimeSessionID != createRequest.RuntimeSessionID || observed.Generation != runtimeFence.RuntimeSessionGeneration ||
+			!observed.State.CanAdmitPrompt() || !sessionExecution.adoptNativeSession(task, *observed) {
+			return store.ConflictErrorf("native continuation runtime restoration could not be proven")
+		}
+		if err := d.validateNativeSessionHistory(ctx, sessionExecution, fence); err != nil {
+			return err
+		}
+		if err := d.reportNativeSession(ctx, task, sessionExecution); err != nil {
 			return err
 		}
 	}
@@ -2092,7 +2122,8 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		Metadata: mutationMetadata(runtimeFence, task, "workspace-delta", true, time.Now().UTC().Add(30*time.Second)),
 		DeltaID:  harnessv2.WorkspaceDeltaID("delta-" + task.Status.Execution.PromptID),
 		Intent:   workspace.Intent, VerifiedBaseline: baseline, PromptSettlementDigest: settlementDigest,
-		Limits: acpWorkspaceDeltaLimits(task),
+		Limits:               acpWorkspaceDeltaLimits(task),
+		CaptureNativeSession: sessionExecution != nil && sessionExecution.Native != nil && sessionExecution.Native.Capture,
 	}
 	if err := sealMutation(&deltaRequest.Metadata.RequestDigest, deltaRequest); err != nil {
 		return err
@@ -2282,6 +2313,12 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	}
 	if err := finalizePreparedRuntimeSession(); err != nil {
 		return err
+	}
+	if err := d.stageNativeSession(ctx, sessionExecution, fence, delta.NativeSession); err != nil {
+		// Saving conversation state is optional. The exact transcript/turn
+		// fences refuse a late or changed capture without failing a read Task.
+		logf.FromContext(ctx).Info("ACP native conversation was not saved", "namespace", task.Namespace,
+			"task", task.Name, "reason", "snapshot_stage_rejected")
 	}
 	if err := d.finalizeTaskSessionResult(
 		ctx, task, fence, sessionExecution, resultText, publicationID, corev1alpha1.TaskPhaseSucceeded, deliveryStatus,
@@ -2858,7 +2895,7 @@ func (d *ACPDispatcher) reconcilePlannedRuntimeSession(
 		return true, nil
 	}
 	if observed.RuntimeSessionID == expectedID && observed.Generation == runtimeFence.RuntimeSessionGeneration {
-		if observed.State.CanAdmitPrompt() {
+		if observed.State.CanAdmitPrompt() && session.adoptNativeSession(task, *observed) {
 			if !session.Reused {
 				session.Reused = true
 				session.Binding.RecreationRequired = false

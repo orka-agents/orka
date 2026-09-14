@@ -389,7 +389,112 @@ spec:
     gitRepo: https://github.com/example/project.git
 ```
 
-A RuntimeSession is ephemeral. If its Pod is replaced, Orka may create a fresh provider session from the verified workspace baseline and canonical transcript. ACP v2 intentionally does not provide prompt replay, stream reconnect, provider-session load, or workspace checkpoint endpoints.
+A RuntimeSession is ephemeral. A compatible live process can continue the same
+conversation. After replacement, Orka normally creates a new provider session
+from the verified workspace and allowed canonical transcript. The optional
+native restore path below can also preserve tool results that the provider
+saved but omitted from its final answer.
+
+### Native OpenCode conversations
+
+Native restoration is disabled by default. To enable it, select one existing
+agent-sandbox workspace class with Session reuse, DataOnly suspension and a
+durable PVC. Set these controller flags alongside the pinned OpenCode image:
+
+```text
+--enable-workspace-provider-api
+--agent-sandbox-enabled
+--acp-workspace-dispatch-enabled
+--acp-native-session-workspace-class=<class-name>
+```
+
+The Task uses that class and saves its exchanges:
+
+```yaml
+spec:
+  sessionRef:
+    name: repository-review-session
+    create: true
+    append: true
+  execution:
+    workspace:
+      classRef:
+        name: <class-name>
+      reusePolicy: session
+  workspace:
+    intent: read
+```
+
+Only the pinned OpenCode 1.18.9 runtime is enabled. A saved conversation is
+eligible after a successful `read` Task with a fully recorded exchange,
+unchanged workspace, and no pending tool calls or background processes.
+The replacement must have the same Session and namespace identities, agent
+configuration, model, tool policy, workspace binding and absolute working
+directory. Failed or interrupted Tasks, write Tasks, other providers and
+external runtimes keep their existing continuation behavior.
+
+Orka prefers advertised ACP `session/resume`. If only `session/load` is
+advertised, it discards the returned old history in a separate bounded phase.
+Neither operation submits a prompt, repeats a tool action, appends history
+again, or charges old usage to the new Task. The new process receives fresh
+credentials and current connection settings before the authorized prompt.
+
+The complete native conversation must fit the Task's `maxMessages` and
+`throughMessageId` restrictions and Orka's transcript bootstrap limits. A
+truncated or older history selection forces reconstruction from allowed
+messages. `promptIncluded` excludes the current user message from the restored
+prefix, so Orka sends it only once.
+
+A Task with `append: false` neither restores nor saves native data. If it runs
+in a reused process, a later `append: true` Task starts a fresh conversation
+from allowed saved messages before native saving becomes eligible again.
+This prevents an unrecorded exchange from entering a later saved copy.
+
+For eligible Tasks, the `NativeSessionContinuity` condition distinguishes
+`Restored`, `Reconstructed` and `Reused`. Its message gives a safe reason, such
+as `history_limit`, `history_cutoff`, `saved_copy_incompatible` or
+`workspace_state_mismatch`. Missing, expired, corrupted or incompatible data
+can lead to reconstruction when the existing Session checks allow it. If a
+restore fails after starting a process, cleanup of that process and all
+descendants must be proven first. An uncertain accepted prompt remains
+`OutcomeUnknown`; restoration never authorizes replay.
+
+### Private storage and limits
+
+Orka saves one private copy per Session in its SQLite store, with a maximum
+compressed size of 512 KiB and a seven-day expiry. Expired copies cannot be
+restored and are deleted on access, startup and the existing one-minute
+maintenance cycle. Deleting the Session removes its copy, and delayed
+finalization cannot recreate deleted data. Protect the controller database
+and its backups as private Session data.
+
+The copy contains selected OpenCode project, session, message and message-part
+rows read in one consistent database transaction, including committed WAL
+writes. It does not copy a HOME directory, credential database or saved
+connection configuration. Conversation text and tool results remain private
+and may contain sensitive user content. Data is limited to 16 MiB after
+decompression, 1,024 native messages, 8,192 parts and 1 MiB per row. Unsupported
+compaction, child sessions, planning state and external file references make
+the copy ineligible.
+
+Capture occurs while workspace validation holds the process freeze and
+ownership barrier. A staged copy becomes usable only after transcript commit,
+Session lease release and the remaining finalization updates. Native data
+stays outside durable workspace volumes, Git publication and public workspace
+checkpoints. Exporting or restoring a workspace into another Session does not
+transfer its conversation.
+
+The real OpenCode 1.18.9 Linux ARM64 image passed fresh-process tests for both
+resume and load, including preserved MCP results, current tool policy, old
+credential rejection, no model or tool calls during restoration, and an
+unchanged repository. The agent-sandbox Task/class E2E also passed DataOnly
+suspension and cold Pod replacement. Its follow-up retained the native
+conversation ID and an earlier unique `read` result with fresh credentials,
+without canonical reconstruction or another tool call.
+
+Codex, Claude and Copilot are not enabled for native
+restoration. See the [adapter contract](../development/agent-runtime-adapter-contract.md#native-conversation-creation-extension)
+for the extension and reproducible checks.
 
 ## Runtime and credential boundaries
 

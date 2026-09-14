@@ -419,6 +419,9 @@ func TestFreezeAndThawIncludeDetachedDescendant(t *testing.T) {
 	if stopped, supported, err := processesStoppedForUID(uid, process.PID()); err != nil || !supported || !stopped {
 		t.Fatalf("UID-scoped freeze proof = stopped:%v supported:%v err:%v", stopped, supported, err)
 	}
+	if err := process.VerifyNoDescendants(); err == nil {
+		t.Fatal("frozen background process was eligible for native conversation capture")
+	}
 	if err := process.Thaw(); err != nil {
 		t.Fatalf("Thaw: %v", err)
 	}

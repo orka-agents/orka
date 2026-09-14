@@ -14,14 +14,6 @@ func Build(baseline *Snapshot, postRoot string, intent Intent) (Result, error) {
 	return BuildWithLimits(baseline, postRoot, intent, BuildLimits{})
 }
 
-// ManifestDigest returns the content digest of the normalized snapshot.
-func (s *Snapshot) ManifestDigest() string {
-	if s == nil {
-		return ""
-	}
-	return s.manifestDigest
-}
-
 func (r Result) Validate() error {
 	switch r.Classification {
 	case ClassificationNoChange:

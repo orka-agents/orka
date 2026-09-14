@@ -235,6 +235,8 @@ func sessionCreationStage(err error) string {
 
 type sessionState struct {
 	id                      harnessv2.RuntimeSessionID
+	creationTaskUID         harnessv2.TaskUID
+	creationTaskAttempt     uint32
 	runtime                 *acp.RuntimeSession
 	promptMutations         promptMutationExecutor
 	descriptor              harnessv2.RuntimeSessionDescriptor
@@ -641,6 +643,10 @@ func (s *Server) status() harnessv2.StatusResponse {
 			ReservedForFinalization: state.descriptor.State == harnessv2.RuntimeSessionStateFinalizing && state.publicationFinalization != nil,
 			LiveDescendantCount:     liveDescendantCount(state.runtime),
 			LastTransitionAt:        state.descriptor.LastTransitionAt,
+			CreationTaskUID:         state.creationTaskUID,
+			CreationTaskAttempt:     state.creationTaskAttempt,
+			ProviderSessionID:       state.descriptor.ProviderSessionID,
+			NativeRestoration:       state.descriptor.NativeRestoration,
 		}
 		if state.descriptor.State == harnessv2.RuntimeSessionStatePromptRunning && state.prompt != nil && state.prompt.settlement == nil {
 			status.ActivePromptID = state.prompt.request.Metadata.PromptID
@@ -726,6 +732,10 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusTooManyRequests, harnessv2.ErrorCodeRateLimited, "runtime is waiting for a controller that supports Agent session configuration", nil, true)
 		return
 	}
+	if request.NativeRestore != nil && !s.supportsNativeSessions() {
+		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, "native session restoration is unsupported", nil, false)
+		return
+	}
 	if string(request.RuntimeSessionID) != r.PathValue("sessionID") {
 		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, "runtime session path does not match request", nil, false)
 		return
@@ -804,8 +814,10 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	state := &sessionState{
-		id:       request.RuntimeSessionID,
-		creating: true,
+		id:                  request.RuntimeSessionID,
+		creating:            true,
+		creationTaskUID:     request.Metadata.TaskUID,
+		creationTaskAttempt: request.Metadata.TaskAttempt,
 		descriptor: harnessv2.RuntimeSessionDescriptor{
 			RuntimeSessionID: request.RuntimeSessionID, RuntimeSessionUID: request.Metadata.Fence.RuntimeSessionUID,
 			Generation: request.Metadata.Fence.RuntimeSessionGeneration, RuntimeInstanceID: s.cfg.Fence.RuntimeInstanceID,
@@ -1161,7 +1173,7 @@ func (s *Server) createSession(
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace pending mark", err)
 		}
 	}
-	runtimeSession, err := acp.NewRuntimeSession(ctx, acp.RuntimeSessionConfig{
+	runtimeConfig := acp.RuntimeSessionConfig{
 		ID:            string(request.RuntimeSessionID),
 		Generation:    int64(request.Metadata.Fence.RuntimeSessionGeneration),
 		ProfileDigest: string(request.Metadata.Fence.RuntimeProfileDigest),
@@ -1183,7 +1195,13 @@ func (s *Server) createSession(
 		CancelGrace:           defaultDuration(s.cfg.CancelGrace, acp.DefaultStopGrace),
 		MaxBufferedEvents:     s.cfg.Capabilities.Limits.MaxBufferedEvents,
 		MaxBufferedEventBytes: supervisorMaxBufferedPromptEventBytes,
-	})
+	}
+	nativeRestore, nativeResult, err := s.prepareNativeRestore(ctx, request, runtimeConfig.Process)
+	if err != nil {
+		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("native conversation preparation", err)
+	}
+	runtimeConfig.Restore = nativeRestore
+	runtimeSession, err := s.startNativeRuntimeSession(ctx, runtimeConfig, nativeResult)
 	if err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider adapter initialization", err)
 	}
@@ -1231,6 +1249,7 @@ func (s *Server) createSession(
 		WorkspaceBaseline:    request.Workspace.Baseline,
 		CreatedAt:            now,
 		LastTransitionAt:     now,
+		NativeRestoration:    nativeResult,
 	}
 	return runtimeSession, descriptor, paths, baseline, providerProxy, mcpProxy, projection.AgentDiagnosticFilter, nil
 }

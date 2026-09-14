@@ -257,6 +257,7 @@ func LoadConfigFromEnv() (Config, error) {
 		RuntimeProfileDigest: profileDigest, ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
 		AdapterDigests: profile.AdapterDigests, Limits: limits, SupportsDrain: true, SupportsPublicationFinalization: true,
 		SupportsAgentSessionConfiguration: providerKind != providerKindAgentKit && providerKind != providerKindFoundry,
+		SupportsNativeSessionRestore:      providerKind == providerKindOpencode && durableWorkspaceDir != "",
 		Provider:                          providerCapabilities(providerKind, model),
 		WorkspaceGovernance:               harnessv2.StrictWorkspaceGovernanceCapabilities(),
 	}
