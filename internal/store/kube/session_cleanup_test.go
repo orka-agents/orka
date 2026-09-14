@@ -59,6 +59,68 @@ func TestReclaimSessionBeforeFirstMutationLease(t *testing.T) {
 	}
 }
 
+func TestReleaseChatTurnPreservesSessionCleanupIdentity(t *testing.T) {
+	ctx := context.Background()
+	kubeStore, kubeClient, sqliteStore, _, fence := newSessionCleanupTestStore(t, nil)
+	const name = "failed-chat-with-control"
+	session := &controlstore.SessionRecord{
+		Namespace: "tenant-a", Name: name, SessionType: controlstore.SessionTypeChat,
+	}
+	expiresAt := time.Now().UTC().Add(time.Minute)
+	created, err := sqliteStore.AcquireChatTurn(ctx, session, "failed-turn", expiresAt)
+	if err != nil || !created {
+		t.Fatalf("AcquireChatTurn(first turn): created=%v, err=%v", created, err)
+	}
+	// Control creation binds the transcript after the chat turn created it.
+	control, err := kubeStore.CreateSessionControl(ctx, &controlstore.SessionControl{
+		Namespace: session.Namespace, SessionName: name, SessionUID: name + "-uid",
+		RequestDigest: testDigest(name), Availability: controlstore.SessionAvailable, CreatedAt: testNow,
+	}, fence)
+	if err != nil {
+		t.Fatalf("CreateSessionControl(): %v", err)
+	}
+	if err := sqliteStore.ReleaseChatTurn(ctx, session.Namespace, name, "failed-turn", created); err != nil {
+		t.Fatalf("ReleaseChatTurn(failed turn): %v", err)
+	}
+	identity, err := sqliteStore.GetSessionCleanupIdentity(ctx, session.Namespace, name)
+	if err != nil || identity != control.SessionUID {
+		t.Fatalf("cleanup identity after failed turn = %q, err=%v, want %q", identity, err, control.SessionUID)
+	}
+	created, err = sqliteStore.AcquireChatTurn(ctx, session, "next-turn", expiresAt)
+	if err != nil || created {
+		t.Fatalf("AcquireChatTurn(next turn): created=%v, err=%v, want the preserved session with a released lease", created, err)
+	}
+	if err := sqliteStore.ReleaseChatTurn(ctx, session.Namespace, name, "next-turn", created); err != nil {
+		t.Fatalf("ReleaseChatTurn(next turn): %v", err)
+	}
+	request := controlstore.ReclaimSessionRequest{
+		Namespace: session.Namespace, SessionName: name, Fence: fence,
+		OperationID: "delete-failed-chat", OperationDigest: testDigest("delete-failed-chat"), RequestedAt: testNow,
+	}
+	if err := kubeStore.ReclaimSession(ctx, request); err != nil {
+		t.Fatalf("ReclaimSession(after failed turn): %v", err)
+	}
+	if _, err := sqliteStore.GetSession(ctx, session.Namespace, name); !errors.Is(err, controlstore.ErrNotFound) {
+		t.Fatalf("transcript survived coordinated deletion: %v", err)
+	}
+	if _, err := kubeStore.GetSessionControl(ctx, session.Namespace, name); !errors.Is(err, controlstore.ErrNotFound) {
+		t.Fatalf("Session control survived coordinated deletion: %v", err)
+	}
+	if err := kubeClient.Get(ctx, client.ObjectKey{Namespace: session.Namespace, Name: runtimeSessionLeaseName(control.SessionUID)}, &coordinationv1.Lease{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("Session Lease survived coordinated deletion: %v", err)
+	}
+	completion, err := sqliteStore.GetSessionCleanupCompletion(ctx, session.Namespace, name)
+	if err != nil {
+		t.Fatalf("GetSessionCleanupCompletion(): %v", err)
+	}
+	if completion.SessionUID != control.SessionUID || completion.OperationID != request.OperationID || completion.OperationDigest != request.OperationDigest {
+		t.Fatalf("completion receipt = %#v", completion)
+	}
+	if _, err := sqliteStore.AcquireChatTurn(ctx, session, "late-turn", expiresAt); !errors.Is(err, controlstore.ErrConflict) {
+		t.Fatalf("AcquireChatTurn(after coordinated deletion) error = %v, want ErrConflict", err)
+	}
+}
+
 func TestReclaimSessionDeletesPublishedCrossStoreStateAndIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	kubeStore, kubeClient, sqliteStore, db, fence := newSessionCleanupTestStore(t, nil)

@@ -39,12 +39,66 @@ import (
 
 // chatMockProvider implements llm.Provider for testing.
 type chatMockProvider struct {
-	name      string
-	responses []*llm.CompletionResponse
-	callCount int
-	err       error
-	streamCh  chan llm.StreamChunk
-	streamErr error
+	name         string
+	responses    []*llm.CompletionResponse
+	callCount    int
+	err          error
+	beforeReturn func()
+	streamCh     chan llm.StreamChunk
+	streamErr    error
+}
+
+type cancellableChatProvider struct {
+	name     string
+	started  chan struct{}
+	stopped  chan error
+	response *llm.CompletionResponse
+}
+
+func (p *cancellableChatProvider) Complete(ctx context.Context, _ *llm.CompletionRequest) (*llm.CompletionResponse, error) {
+	err := p.waitForCancellation(ctx)
+	return p.response, err
+}
+
+func (p *cancellableChatProvider) waitForCancellation(ctx context.Context) error {
+	select {
+	case p.started <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	select {
+	case p.stopped <- ctx.Err():
+	default:
+	}
+	return ctx.Err()
+}
+
+func (p *cancellableChatProvider) Stream(ctx context.Context, _ *llm.CompletionRequest) (<-chan llm.StreamChunk, error) {
+	chunks := make(chan llm.StreamChunk, 1)
+	go func() {
+		defer close(chunks)
+		chunks <- llm.StreamChunk{Error: p.waitForCancellation(ctx)}
+	}()
+	return chunks, nil
+}
+
+func (p *cancellableChatProvider) Name() string { return p.name }
+
+type blockingDeleteSessionStore struct {
+	store.SessionStore
+	store.SessionTurnCommitter
+	deleteStarted chan struct{}
+	allowDelete   chan struct{}
+}
+
+func (s *blockingDeleteSessionStore) DeleteSession(ctx context.Context, namespace, name string) error {
+	close(s.deleteStarted)
+	select {
+	case <-s.allowDelete:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return s.SessionStore.DeleteSession(ctx, namespace, name)
 }
 
 func (m *chatMockProvider) Complete(_ context.Context, _ *llm.CompletionRequest) (*llm.CompletionResponse, error) {
@@ -53,10 +107,14 @@ func (m *chatMockProvider) Complete(_ context.Context, _ *llm.CompletionRequest)
 	}
 	idx := m.callCount
 	m.callCount++
+	resp := &llm.CompletionResponse{Content: "default response"}
 	if idx < len(m.responses) {
-		return m.responses[idx], nil
+		resp = m.responses[idx]
 	}
-	return &llm.CompletionResponse{Content: "default response"}, nil
+	if m.beforeReturn != nil {
+		m.beforeReturn()
+	}
+	return resp, nil
 }
 
 func (m *chatMockProvider) Stream(_ context.Context, _ *llm.CompletionRequest) (<-chan llm.StreamChunk, error) {
@@ -71,6 +129,39 @@ func (m *chatMockProvider) Name() string {
 		return m.name
 	}
 	return "mock-provider"
+}
+
+type observingChatTurnCommitter struct {
+	commit func(
+		context.Context,
+		*store.SessionRecord,
+		string,
+		int,
+		[]store.SessionMessage,
+		int,
+		int,
+	) error
+}
+
+func (*observingChatTurnCommitter) AcquireChatTurn(
+	context.Context, *store.SessionRecord, string, time.Time,
+) (bool, error) {
+	return false, nil
+}
+
+func (*observingChatTurnCommitter) ReleaseChatTurn(context.Context, string, string, string, bool) error {
+	return nil
+}
+
+func (c *observingChatTurnCommitter) CommitSessionTurn(
+	ctx context.Context,
+	session *store.SessionRecord,
+	turnID string,
+	expectedMessageCount int,
+	messages []store.SessionMessage,
+	inputTokens, outputTokens int,
+) error {
+	return c.commit(ctx, session, turnID, expectedMessageCount, messages, inputTokens, outputTokens)
 }
 
 func newTestScheme() *runtime.Scheme {
@@ -132,6 +223,14 @@ func newTestChatHandler(t *testing.T, c client.Client, ss store.SessionStore, rs
 	t.Helper()
 	resolver := NewProviderResolver(c, cfg)
 	return NewChatHandler(c, nil, nil, cfg, "", false, ss, rs, resolver)
+}
+
+func reserveTestChatTurn(t *testing.T, ch *ChatHandler, sessionID string) string {
+	t.Helper()
+	turnID, _, created, err := ch.reserveChatTurn(context.Background(), defaultNamespace, sessionID)
+	require.NoError(t, err)
+	t.Cleanup(func() { ch.releaseChatTurn(defaultNamespace, sessionID, turnID, created) })
+	return turnID
 }
 
 // providerCRD creates a Provider CRD + matching Secret for tests.
@@ -396,6 +495,175 @@ func TestHandleCancelChat(t *testing.T) {
 	})
 }
 
+func TestHandleCancelChatStopsActiveSSETurnBeforeSuccess(t *testing.T) {
+	const (
+		providerType = "cancel-active-sse-provider"
+		sessionID    = "cancel-active-sse"
+	)
+	provider := &cancellableChatProvider{
+		name:    providerType,
+		started: make(chan struct{}, 1),
+		stopped: make(chan error, 1),
+	}
+	llm.RegisterProvider(providerType, func(llm.ProviderConfig) (llm.Provider, error) {
+		return provider, nil
+	})
+	objects := providerCRD(defaultNamespace, defaultNamespace, providerType, "test-model")
+	fakeClient := fake.NewClientBuilder().WithScheme(newTestScheme()).WithRuntimeObjects(objects...).Build()
+	baseSessionStore := newTestSessionStore(t)
+	// A pre-existing Session survives failed-turn release so DELETE must pass
+	// through the durable deletion gate below instead of finding it gone.
+	now := time.Now().UTC()
+	require.NoError(t, baseSessionStore.CreateSession(context.Background(), &store.SessionRecord{
+		Namespace: defaultNamespace, Name: sessionID, SessionType: store.SessionTypeChat,
+		CreatedAt: now, UpdatedAt: now,
+	}))
+	committer, ok := baseSessionStore.(store.SessionTurnCommitter)
+	require.True(t, ok)
+	ss := &blockingDeleteSessionStore{
+		SessionStore:         baseSessionStore,
+		SessionTurnCommitter: committer,
+		deleteStarted:        make(chan struct{}),
+		allowDelete:          make(chan struct{}),
+	}
+	rs := newTestResultStore(t)
+	cfg := DefaultChatConfig()
+	cfg.Provider = defaultNamespace
+	ch := newTestChatHandler(t, fakeClient, ss, rs, cfg)
+
+	app := fiber.New(fiber.Config{ErrorHandler: customErrorHandler})
+	app.Post("/api/v1/chat", ch.HandleChat)
+	app.Delete("/api/v1/chat/:sessionId", ch.HandleCancelChat)
+
+	type postResult struct {
+		resp *http.Response
+		err  error
+	}
+	postDone := make(chan postResult, 1)
+	deleteDone := make(chan postResult, 1)
+	body, err := json.Marshal(ChatRequest{
+		Message: "wait until cancelled", SessionID: sessionID, Namespace: defaultNamespace,
+	})
+	require.NoError(t, err)
+	go func() {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "text/event-stream")
+		resp, testErr := app.Test(req)
+		postDone <- postResult{resp: resp, err: testErr}
+	}()
+	t.Cleanup(func() {
+		select {
+		case <-ss.allowDelete:
+		default:
+			close(ss.allowDelete)
+		}
+		done, active := ch.startSessionCancellation(defaultNamespace, sessionID)
+		defer ch.finishSessionCancellation(defaultNamespace, sessionID)
+		if active {
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+			}
+		}
+	})
+
+	select {
+	case <-provider.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("provider did not start the SSE turn")
+	}
+
+	go func() {
+		resp, testErr := app.Test(httptest.NewRequest(http.MethodDelete, "/api/v1/chat/"+sessionID, nil))
+		deleteDone <- postResult{resp: resp, err: testErr}
+	}()
+
+	select {
+	case stoppedErr := <-provider.stopped:
+		require.ErrorIs(t, stoppedErr, context.Canceled)
+	case <-time.After(5 * time.Second):
+		t.Fatal("DELETE did not cancel the provider context")
+	}
+	select {
+	case <-ss.deleteStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("DELETE did not reach durable session deletion")
+	}
+
+	replacementReq := httptest.NewRequest(http.MethodPost, "/api/v1/chat", bytes.NewReader(body))
+	replacementReq.Header.Set("Content-Type", "application/json")
+	replacementReq.Header.Set("Accept", "application/json")
+	replacementResp, err := app.Test(replacementReq)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusConflict, replacementResp.StatusCode)
+	select {
+	case <-provider.started:
+		t.Fatal("replacement provider work started while session deletion was in progress")
+	default:
+	}
+	close(ss.allowDelete)
+
+	select {
+	case result := <-deleteDone:
+		require.NoError(t, result.err)
+		require.Equal(t, http.StatusNoContent, result.resp.StatusCode)
+	case <-time.After(5 * time.Second):
+		t.Fatal("DELETE did not finish after session deletion was released")
+	}
+
+	select {
+	case result := <-postDone:
+		require.NoError(t, result.err)
+		require.Equal(t, http.StatusOK, result.resp.StatusCode)
+	case <-time.After(5 * time.Second):
+		t.Fatal("SSE request did not stop after session cancellation")
+	}
+	_, err = baseSessionStore.GetSession(context.Background(), defaultNamespace, sessionID)
+	require.ErrorIs(t, err, store.ErrNotFound)
+}
+
+func TestHandleChatRemovesNewEmptySessionAfterProviderFailure(t *testing.T) {
+	const (
+		providerType = "failed-new-session-provider"
+		sessionID    = "failed-new-session"
+	)
+	provider := &chatMockProvider{name: providerType, err: &llm.ProviderError{
+		Provider: providerType, Message: "invalid provider request", StatusCode: http.StatusBadRequest,
+	}}
+	llm.RegisterProvider(providerType, func(llm.ProviderConfig) (llm.Provider, error) {
+		return provider, nil
+	})
+	objects := providerCRD(defaultNamespace, defaultNamespace, providerType, "test-model")
+	fakeClient := fake.NewClientBuilder().WithScheme(newTestScheme()).WithRuntimeObjects(objects...).Build()
+	ss := newTestSessionStore(t)
+	rs := newTestResultStore(t)
+	cfg := DefaultChatConfig()
+	cfg.Provider = defaultNamespace
+	ch := newTestChatHandler(t, fakeClient, ss, rs, cfg)
+	app := fiber.New(fiber.Config{ErrorHandler: customErrorHandler})
+	app.Post("/api/v1/chat", ch.HandleChat)
+
+	body, err := json.Marshal(ChatRequest{
+		Message: "this provider will fail", SessionID: sessionID, Namespace: defaultNamespace,
+	})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+
+	_, err = ss.GetSession(context.Background(), defaultNamespace, sessionID)
+	require.ErrorIs(t, err, store.ErrNotFound)
+	sessions, err := ss.ListSessions(context.Background(), defaultNamespace)
+	require.NoError(t, err)
+	for _, session := range sessions {
+		assert.NotEqual(t, sessionID, session.Name, "failed new turn remained visible in session inventory")
+	}
+}
+
 // --- loadChatSession ---
 
 func TestLoadChatSession(t *testing.T) {
@@ -469,19 +737,46 @@ func TestSaveChatSession(t *testing.T) {
 	ch := newTestChatHandler(t, fakeClient, ss, rs, cfg)
 	ctx := context.Background()
 
+	t.Run("reserves a new session and atomically appends messages and usage", func(t *testing.T) {
+		turnID := reserveTestChatTurn(t, ch, "new-session")
+		messages := []llm.Message{
+			{Role: "user", Content: "hello"},
+			{Role: "assistant", Content: "hi"},
+		}
+		err := ch.saveChatSession(ctx, "default", "new-session", messages, 0, ChatUsage{
+			InputTokens: 10, OutputTokens: 20,
+		}, turnID)
+		require.NoError(t, err)
+
+		// Verify session was created
+		sess, err := ss.GetSession(ctx, "default", "new-session")
+		require.NoError(t, err)
+		assert.Equal(t, "chat", sess.SessionType)
+		assert.Equal(t, 10, sess.InputTokens)
+		assert.Equal(t, 20, sess.OutputTokens)
+
+		// Verify messages were stored
+		stored, err := ss.LoadTranscript(ctx, "default", "new-session", 0)
+		require.NoError(t, err)
+		assert.Len(t, stored, 2)
+		assert.NotEmpty(t, stored[0].ID)
+		assert.NotEmpty(t, stored[1].ID)
+		assert.Equal(t, int64(2), stored[0].Order)
+		assert.Equal(t, int64(4), stored[1].Order)
+	})
+
 	t.Run("rejects a missing locked session instead of recreating it", func(t *testing.T) {
 		messages := []llm.Message{
 			{Role: "user", Content: "hello"},
 			{Role: "assistant", Content: "hi"},
 		}
-		err := ch.saveChatSession(ctx, "default", "new-session", messages, 0, ChatUsage{})
-		require.Error(t, err)
-		assert.ErrorIs(t, err, store.ErrNotFound)
-		_, getErr := ss.GetSession(ctx, "default", "new-session")
+		err := ch.saveChatSession(ctx, "default", "missing-session", messages, 0, ChatUsage{}, "missing-turn")
+		require.ErrorIs(t, err, store.ErrNotFound)
+		_, getErr := ss.GetSession(ctx, "default", "missing-session")
 		assert.ErrorIs(t, getErr, store.ErrNotFound)
 	})
 
-	t.Run("only appends new messages (skips persisted)", func(t *testing.T) {
+	t.Run("appends only turn messages using the persisted count as a revision fence", func(t *testing.T) {
 		// Create a session with 2 messages already persisted
 		now := time.Now()
 		err := ss.CreateSession(ctx, &store.SessionRecord{
@@ -495,59 +790,106 @@ func TestSaveChatSession(t *testing.T) {
 
 		err = ss.AppendMessages(ctx, "default", "partial-session", []store.SessionMessage{
 			{Role: "user", Content: "old message", Timestamp: now},
+			{Role: "assistant", Content: "old response", Timestamp: now},
 		})
 		require.NoError(t, err)
+		turnID := reserveTestChatTurn(t, ch, "partial-session")
 
 		messages := []llm.Message{
-			{Role: "user", Content: "old message"},
 			{Role: "assistant", Content: "new response"},
 		}
-		// persistedCount=1 means skip first message
-		err = ch.saveChatSession(ctx, "default", "partial-session", messages, 1, ChatUsage{})
+		err = ch.saveChatSession(ctx, "default", "partial-session", messages, 2, ChatUsage{}, turnID)
 		require.NoError(t, err)
 
 		stored, err := ss.LoadTranscript(ctx, "default", "partial-session", 0)
 		require.NoError(t, err)
-		assert.Len(t, stored, 2) // 1 old + 1 new
+		require.Len(t, stored, 3) // 2 old + 1 new
+		assert.Equal(t, "new response", stored[2].Content)
 	})
 
 	t.Run("no new messages is a no-op", func(t *testing.T) {
-		now := time.Now()
-		require.NoError(t, ss.CreateSession(ctx, &store.SessionRecord{
-			Namespace: "default", Name: "noop-session", SessionType: "chat", CreatedAt: now, UpdatedAt: now,
-		}))
-		messages := []llm.Message{
-			{Role: "user", Content: "already saved"},
-		}
-		err := ch.saveChatSession(ctx, "default", "noop-session", messages, 1, ChatUsage{})
+		turnID := reserveTestChatTurn(t, ch, "noop-session")
+		err := ch.saveChatSession(ctx, "default", "noop-session", nil, 0, ChatUsage{}, turnID)
 		require.NoError(t, err)
+	})
+
+	t.Run("uses a detached bounded context for the atomic commit", func(t *testing.T) {
+		type durabilityContextKey struct{}
+		const contextValue = "chat-trace-value"
+
+		for _, tt := range []struct {
+			name       string
+			newContext func(context.Context) (context.Context, context.CancelFunc)
+			wantErr    error
+		}{
+			{
+				name: "parent canceled",
+				newContext: func(parent context.Context) (context.Context, context.CancelFunc) {
+					ctx, cancel := context.WithCancel(parent)
+					cancel()
+					return ctx, cancel
+				},
+				wantErr: context.Canceled,
+			},
+			{
+				name: "parent deadline expired",
+				newContext: func(parent context.Context) (context.Context, context.CancelFunc) {
+					return context.WithDeadline(parent, time.Now().Add(-time.Second))
+				},
+				wantErr: context.DeadlineExceeded,
+			},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				parent, parentCancel := tt.newContext(context.WithValue(
+					context.Background(), durabilityContextKey{}, contextValue,
+				))
+				defer parentCancel()
+				require.ErrorIs(t, parent.Err(), tt.wantErr)
+
+				started := time.Now()
+				committer := &observingChatTurnCommitter{
+					commit: func(commitCtx context.Context, _ *store.SessionRecord, _ string, _ int, _ []store.SessionMessage, _, _ int) error {
+						require.NoError(t, commitCtx.Err())
+						require.Equal(t, contextValue, commitCtx.Value(durabilityContextKey{}))
+						deadline, ok := commitCtx.Deadline()
+						require.True(t, ok)
+						assert.WithinDuration(t, started.Add(chatDurabilityTimeout), deadline, time.Second)
+						return nil
+					},
+				}
+				testHandler := &ChatHandler{sessionTurnCommitter: committer}
+				err := testHandler.saveChatSession(
+					parent, "default", "durable-session",
+					[]llm.Message{{Role: "assistant", Content: "completed"}},
+					0, ChatUsage{InputTokens: 3, OutputTokens: 5}, "durable-turn",
+				)
+				require.NoError(t, err)
+			})
+		}
 	})
 }
 
 func TestAcquireChatSessionFencesDeletionUntilRelease(t *testing.T) {
 	ss := newTestSessionStore(t)
-	ch := &ChatHandler{sessionStore: ss}
+	ch := &ChatHandler{sessionStore: ss, config: DefaultChatConfig()}
 	ctx := context.Background()
-	release, created, lockID, err := ch.acquireChatSession(ctx, "default", "locked-chat")
+	active, err := beginTestActiveChat(ch, ctx, "locked-chat")
 	require.NoError(t, err)
-	if !created {
-		t.Fatal("acquireChatSession() did not create the missing chat Session")
-	}
-	if lockID == "" {
-		t.Fatal("acquireChatSession() returned an empty lock identity")
-	}
+	require.NotEmpty(t, active.turnID)
+	_, err = ss.GetSession(ctx, "default", "locked-chat")
+	require.NoError(t, err)
 	if err := ss.DeleteSession(ctx, "default", "locked-chat"); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("DeleteSession(locked chat) error = %v, want ErrConflict", err)
 	}
-	release()
-	release() // idempotent close for overlapping handler/stream cleanup paths.
+	active.finish()
+	active.finish() // idempotent close for overlapping handler/stream cleanup paths.
 	require.NoError(t, ss.DeleteSession(ctx, "default", "locked-chat"))
 	if _, err := ss.GetSession(ctx, "default", "locked-chat"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("GetSession() error = %v, want ErrNotFound", err)
 	}
 }
 
-func TestBeginActiveChatRejectsConcurrentRequestAndRetainsEmptySession(t *testing.T) {
+func TestBeginActiveChatRejectsConcurrentRequestAndRemovesNewEmptySession(t *testing.T) {
 	ss := newTestSessionStore(t)
 	ch := &ChatHandler{sessionStore: ss, config: DefaultChatConfig(), activeChats: make(map[string]*activeChatRequest)}
 	ctx := context.Background()
@@ -557,8 +899,8 @@ func TestBeginActiveChatRejectsConcurrentRequestAndRetainsEmptySession(t *testin
 		t.Fatalf("beginActiveChat(concurrent) error = %v, want ErrConflict", err)
 	}
 	active.finish()
-	if _, err := ss.GetSession(ctx, "default", "concurrent-chat"); err != nil {
-		t.Fatalf("GetSession(empty failed chat) error = %v, want retained Session", err)
+	if _, err := ss.GetSession(ctx, "default", "concurrent-chat"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("GetSession(empty failed chat) error = %v, want ErrNotFound", err)
 	}
 	require.NoError(t, ss.DeleteSession(ctx, "default", "concurrent-chat"))
 }
@@ -953,10 +1295,11 @@ func TestRunToolLoop(t *testing.T) {
 		}
 
 		messages := []llm.Message{{Role: "user", Content: "hello"}}
+		turnID := reserveTestChatTurn(t, ch, "test-sess")
 		content, usage, toolCalls, err := ch.runToolLoop(
 			context.Background(), provider, messages, "system prompt",
 			nil, NewToolExecutor(fakeClient, nil, "default", "test-sess", "", false, 5, 60*time.Second, rs),
-			"test-sess", "default", "test-model", 0.7, 4096, 0, nil,
+			"test-sess", "default", "test-model", 0.7, 4096, 0, nil, turnID,
 		)
 		require.NoError(t, err)
 		assert.Equal(t, "Hello, I'm here to help!", content)
@@ -992,10 +1335,11 @@ func TestRunToolLoop(t *testing.T) {
 
 		messages := []llm.Message{{Role: "user", Content: "list tasks"}}
 		exec := NewToolExecutor(fakeClient, nil, "default", "test-sess2", "", false, 5, 60*time.Second, rs)
+		turnID := reserveTestChatTurn(t, ch, "test-sess2")
 		content, usage, toolCalls, err := ch.runToolLoop(
 			context.Background(), provider, messages, "system prompt",
 			exec.registry.ToLLMTools(chattools.ChatToolNames()), exec,
-			"test-sess2", "default", "test-model", 0.7, 4096, 0, nil,
+			"test-sess2", "default", "test-model", 0.7, 4096, 0, nil, turnID,
 		)
 		require.NoError(t, err)
 		assert.Equal(t, "Done!", content)
@@ -1020,13 +1364,52 @@ func TestRunToolLoop(t *testing.T) {
 		}
 
 		messages := []llm.Message{{Role: "user", Content: "hello"}}
+		turnID := reserveTestChatTurn(t, ch, "test-sess3")
 		content, _, _, err := ch.runToolLoop(
 			ctx, provider, messages, "system prompt",
 			nil, NewToolExecutor(fakeClient, nil, "default", "test-sess3", "", false, 5, 60*time.Second, rs),
-			"test-sess3", "default", "test-model", 0.7, 4096, 0, nil,
+			"test-sess3", "default", "test-model", 0.7, 4096, 0, nil, turnID,
 		)
+		require.ErrorIs(t, err, context.Canceled)
+		assert.Empty(t, content)
+		assert.Zero(t, provider.callCount)
+		stored, loadErr := ss.LoadTranscript(context.Background(), "default", "test-sess3", 0)
+		require.NoError(t, loadErr)
+		assert.Empty(t, stored)
+	})
+
+	t.Run("commits a completed response when cancellation races the final handoff", func(t *testing.T) {
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+		ss := newTestSessionStore(t)
+		rs := newTestResultStore(t)
+		ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
+
+		ctx, cancel := context.WithCancel(context.Background())
+		provider := &chatMockProvider{
+			responses: []*llm.CompletionResponse{
+				{Content: "completed near deadline", InputTokens: 8, OutputTokens: 13},
+			},
+			beforeReturn: cancel,
+		}
+
+		messages := []llm.Message{{Role: "user", Content: "finish this turn"}}
+		turnID := reserveTestChatTurn(t, ch, "durability-handoff-session")
+		content, usage, _, err := ch.runToolLoop(
+			ctx, provider, messages, "system prompt",
+			nil, NewToolExecutor(fakeClient, nil, "default", "durability-handoff-session", "", false, 5, 60*time.Second, rs),
+			"durability-handoff-session", "default", "test-model", 0.7, 4096, 0, nil, turnID,
+		)
+		require.ErrorIs(t, ctx.Err(), context.Canceled)
 		require.NoError(t, err)
-		assert.Contains(t, content, "ran out of time")
+		assert.Equal(t, "completed near deadline", content)
+		assert.Equal(t, 8, usage.InputTokens)
+		assert.Equal(t, 13, usage.OutputTokens)
+
+		stored, loadErr := ss.LoadTranscript(context.Background(), "default", "durability-handoff-session", 0)
+		require.NoError(t, loadErr)
+		require.Len(t, stored, 2)
+		assert.Equal(t, "finish this turn", stored[0].Content)
+		assert.Equal(t, "completed near deadline", stored[1].Content)
 	})
 
 	t.Run("respects max iterations", func(t *testing.T) {
@@ -1051,10 +1434,11 @@ func TestRunToolLoop(t *testing.T) {
 
 		messages := []llm.Message{{Role: "user", Content: "do things"}}
 		exec2 := NewToolExecutor(fakeClient, nil, "default", "max-iter-sess", "", false, 5, 60*time.Second, rs)
+		turnID := reserveTestChatTurn(t, ch, "max-iter-sess")
 		content, usage, _, err := ch.runToolLoop(
 			context.Background(), provider, messages, "system prompt",
 			exec2.registry.ToLLMTools(chattools.ChatToolNames()), exec2,
-			"max-iter-sess", "default", "test-model", 0.7, 4096, 0, nil,
+			"max-iter-sess", "default", "test-model", 0.7, 4096, 0, nil, turnID,
 		)
 		require.NoError(t, err)
 		assert.NotEmpty(t, content)
@@ -1072,10 +1456,11 @@ func TestRunToolLoop(t *testing.T) {
 		}
 
 		messages := []llm.Message{{Role: "user", Content: "hello"}}
+		turnID := reserveTestChatTurn(t, ch, "err-sess")
 		_, _, _, err := ch.runToolLoop(
 			context.Background(), provider, messages, "system prompt",
 			nil, NewToolExecutor(fakeClient, nil, "default", "err-sess", "", false, 5, 60*time.Second, rs),
-			"err-sess", "default", "test-model", 0.7, 4096, 0, nil,
+			"err-sess", "default", "test-model", 0.7, 4096, 0, nil, turnID,
 		)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "LLM completion failed")
@@ -1105,10 +1490,11 @@ func TestRunToolLoop(t *testing.T) {
 
 		messages := []llm.Message{{Role: "user", Content: "do it"}}
 		exec3 := NewToolExecutor(fakeClient, nil, "default", "sse-sess", "", false, 5, 60*time.Second, rs)
+		turnID := reserveTestChatTurn(t, ch, "sse-sess")
 		content, _, _, err := ch.runToolLoop(
 			context.Background(), provider, messages, "system prompt",
 			exec3.registry.ToLLMTools(chattools.ChatToolNames()), exec3,
-			"sse-sess", "default", "test-model", 0.7, 4096, 0, emitSSE,
+			"sse-sess", "default", "test-model", 0.7, 4096, 0, emitSSE, turnID,
 		)
 		require.NoError(t, err)
 		assert.Equal(t, "All done!", content)
@@ -1132,6 +1518,191 @@ func TestRunToolLoop(t *testing.T) {
 		assert.True(t, hasToolResult, "should have tool_result SSE event")
 		assert.True(t, hasMessage, "should have message SSE event")
 	})
+}
+
+func TestRunToolLoopPreservesTranscriptAcrossTruncation(t *testing.T) {
+	for _, truncation := range []string{"configured", "context overflow"} {
+		for _, maxIterations := range []int{3, 2} {
+			for _, historyCount := range []int{4, 8} {
+				t.Run(fmt.Sprintf("%s/limit=%d/history=%d", truncation, maxIterations, historyCount), func(t *testing.T) {
+					ctx := context.Background()
+					const sessionID = "truncated-session"
+					fakeClient := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+					ss := newTestSessionStore(t)
+					rs := newTestResultStore(t)
+					cfg := DefaultChatConfig()
+					cfg.MaxIterations = maxIterations
+					cfg.MaxSessionSize = 0
+					if truncation == "configured" {
+						cfg.MaxSessionSize = 400
+					}
+					ch := newTestChatHandler(t, fakeClient, ss, rs, cfg)
+
+					now := time.Now().UTC()
+					require.NoError(t, ss.CreateSession(ctx, &store.SessionRecord{
+						Namespace: "default", Name: sessionID, SessionType: "chat",
+						CreatedAt: now, UpdatedAt: now, InputTokens: 17, OutputTokens: 19,
+					}))
+					history := []store.SessionMessage{
+						{Role: "user", Content: "old request"},
+						{Role: "assistant", Content: "old tool call", ToolCalls: []llm.ToolCall{
+							{ID: "old-call", Name: "list_tasks", Arguments: json.RawMessage(`{}`)},
+						}},
+						{Role: "tool", ToolCallID: "old-call", Name: "list_tasks", Content: strings.Repeat("old result ", 200)},
+						{Role: "assistant", Content: "old answer"},
+					}
+					for len(history) < historyCount {
+						history = append(history,
+							store.SessionMessage{Role: "user", Content: "another old request"},
+							store.SessionMessage{Role: "assistant", Content: "another old answer"},
+						)
+					}
+					require.NoError(t, ss.AppendMessages(ctx, "default", sessionID, history))
+					original, err := ss.LoadTranscript(ctx, "default", sessionID, 0)
+					require.NoError(t, err)
+					turnID := reserveTestChatTurn(t, ch, sessionID)
+					messages, err := ch.loadChatSession(ctx, "default", sessionID)
+					require.NoError(t, err)
+					messages = append(messages, llm.Message{Role: "user", Content: "new request"})
+
+					firstTool := llm.ToolCall{ID: "new-call-1", Name: "list_tasks", Arguments: json.RawMessage(`{}`)}
+					secondTool := llm.ToolCall{ID: "new-call-2", Name: "list_tasks", Arguments: json.RawMessage(`{}`)}
+					// This intermediate exchange must survive even when it is too big
+					// for configured context or the halved overflow-retry budget.
+					intermediate := strings.Repeat("new intermediate reasoning ", 200)
+					provider := &mockAnthropicProvider{responses: []*llm.CompletionResponse{
+						{Content: intermediate, ToolCalls: []llm.ToolCall{firstTool}, InputTokens: 2, OutputTokens: 3},
+						{Content: "checking again", ToolCalls: []llm.ToolCall{secondTool}, InputTokens: 5, OutputTokens: 7},
+						{Content: "final answer", InputTokens: 11, OutputTokens: 13},
+					}}
+					if truncation == "context overflow" {
+						provider.responses = append(provider.responses[:1], append([]*llm.CompletionResponse{nil}, provider.responses[1:]...)...)
+						provider.errors = []error{nil, &llm.ProviderError{StatusCode: 400, Message: "context length exceeded"}}
+					}
+					exec := NewToolExecutor(fakeClient, nil, "default", sessionID, "", false, 5, time.Minute, rs)
+					content, usage, toolCalls, runErr := ch.runToolLoop(
+						ctx, provider, messages, "system prompt", exec.registry.ToLLMTools(chattools.ChatToolNames()), exec,
+						sessionID, "default", "test-model", 0.7, 4096, historyCount, nil, turnID,
+					)
+
+					// Check provider-facing truncation actually happened, independently
+					// of the durable transcript assertions below.
+					if truncation == "context overflow" {
+						require.Len(t, provider.requests, 4)
+						assert.Less(t, len(provider.requests[2].Messages), len(provider.requests[1].Messages))
+					} else {
+						require.Len(t, provider.requests, 3)
+						assert.Less(t, len(provider.requests[0].Messages), len(messages))
+					}
+					require.NoError(t, runErr)
+					assert.Equal(t, "final answer", content)
+					assert.Equal(t, 3, usage.LLMCalls)
+					assert.Equal(t, 2, usage.ToolCalls)
+					assert.Equal(t, 18, usage.InputTokens)
+					assert.Equal(t, 23, usage.OutputTokens)
+					require.Len(t, toolCalls, 2)
+
+					wantNew := []llm.Message{
+						{Role: "user", Content: "new request"},
+						{Role: "assistant", Content: intermediate, ToolCalls: []llm.ToolCall{firstTool}},
+						{Role: "tool", ToolCallID: "new-call-1", Name: "list_tasks", Content: `{"success":true,"data":[]}`},
+						{Role: "assistant", Content: "checking again", ToolCalls: []llm.ToolCall{secondTool}},
+						{Role: "tool", ToolCallID: "new-call-2", Name: "list_tasks", Content: `{"success":true,"data":[]}`},
+					}
+					if maxIterations == 2 {
+						wantNew = append(wantNew, llm.Message{Role: "user", Content: "[System: You have reached the maximum number of iterations. Please provide a final summary of what you accomplished.]"})
+						assert.Empty(t, provider.requests[len(provider.requests)-1].Tools)
+					}
+					wantNew = append(wantNew, llm.Message{Role: "assistant", Content: "final answer"})
+					stored, err := ss.LoadTranscript(ctx, "default", sessionID, 0)
+					require.NoError(t, err)
+					require.Len(t, stored, historyCount+len(wantNew))
+					assert.Equal(t, original, stored[:historyCount], "old transcript must remain unchanged")
+					loaded, err := ch.loadChatSession(ctx, "default", sessionID)
+					require.NoError(t, err)
+					assert.Equal(t, wantNew, loaded[historyCount:], "persist every new message, not synthetic truncation notes")
+					seenIDs := make(map[string]bool)
+					var lastOrder int64
+					for _, msg := range stored {
+						assert.NotEmpty(t, msg.ID)
+						assert.False(t, seenIDs[msg.ID], "message IDs must be unique")
+						seenIDs[msg.ID] = true
+						assert.Greater(t, msg.Order, lastOrder)
+						lastOrder = msg.Order
+					}
+					session, err := ss.GetSession(ctx, "default", sessionID)
+					require.NoError(t, err)
+					assert.Equal(t, len(stored), session.MessageCount)
+					assert.Equal(t, 35, session.InputTokens)
+					assert.Equal(t, 42, session.OutputTokens)
+				})
+			}
+		}
+	}
+}
+
+func TestRunToolLoopPreservesContinuationAndProgressAcrossTruncation(t *testing.T) {
+	ctx := context.Background()
+	const sessionID = "continuation-session"
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "running-task", Namespace: "default",
+			Labels: map[string]string{labels.LabelChatSession: sessionID},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(task).
+		WithStatusSubresource(task).Build()
+	ss := newTestSessionStore(t)
+	rs := newTestResultStore(t)
+	cfg := DefaultChatConfig()
+	cfg.MaxIterations = 6
+	cfg.MaxSessionSize = 100
+	ch := newTestChatHandler(t, fakeClient, ss, rs, cfg)
+	turnID := reserveTestChatTurn(t, ch, sessionID)
+	provider := &chatMockProvider{}
+	for range 5 {
+		provider.responses = append(provider.responses, &llm.CompletionResponse{
+			Content: "still waiting", InputTokens: 2, OutputTokens: 3,
+		})
+	}
+	provider.responses = append(provider.responses, &llm.CompletionResponse{
+		Content: "finished", InputTokens: 5, OutputTokens: 7,
+	})
+	provider.beforeReturn = func() {
+		if provider.callCount == 6 {
+			task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+			require.NoError(t, fakeClient.Status().Update(ctx, task))
+		}
+	}
+	exec := NewToolExecutor(fakeClient, nil, "default", sessionID, "", false, 5, time.Minute, rs)
+	exec.tasksCreated = 1
+	content, usage, _, err := ch.runToolLoop(
+		ctx, provider, []llm.Message{{Role: "user", Content: "wait for task"}}, "system prompt", nil, exec,
+		sessionID, "default", "test-model", 0.7, 4096, 0, nil, turnID,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "finished", content)
+	assert.Equal(t, 6, usage.LLMCalls)
+	assert.Equal(t, 1, usage.TasksCreated)
+	assert.Equal(t, 15, usage.InputTokens)
+	assert.Equal(t, 22, usage.OutputTokens)
+	want := make([]llm.Message, 1, 13)
+	want[0] = llm.Message{Role: "user", Content: "wait for task"}
+	for range 5 {
+		want = append(want,
+			llm.Message{Role: "assistant", Content: "still waiting"},
+			llm.Message{Role: "user", Content: "[System: You have tasks still running. Do NOT stop. Call wait_for_task again for each running task until it reaches Succeeded or Failed, then call fetch_task_output to get the result.]"},
+		)
+	}
+	want = append(want,
+		llm.Message{Role: "user", Content: "[System: Progress check — summarize what you've done so far and what remains.]"},
+		llm.Message{Role: "assistant", Content: "finished"},
+	)
+	stored, err := ch.loadChatSession(ctx, "default", sessionID)
+	require.NoError(t, err)
+	require.Len(t, stored, len(want))
+	assert.Equal(t, want, stored)
 }
 
 // --- HandleChat ---
@@ -1261,6 +1832,15 @@ func TestHandleChat(t *testing.T) {
 		require.NoError(t, json.NewDecoder(resp.Body).Decode(&chatResp))
 		assert.NotEmpty(t, chatResp.SessionID)
 		assert.NotEmpty(t, chatResp.Message)
+		session, err := ss.GetSession(context.Background(), "default", chatResp.SessionID)
+		require.NoError(t, err)
+		require.Len(t, session.Messages, 2)
+		assert.Equal(t, 10, session.InputTokens)
+		assert.Equal(t, 20, session.OutputTokens)
+		assert.NotEmpty(t, session.Messages[0].ID)
+		assert.NotEmpty(t, session.Messages[1].ID)
+		assert.Equal(t, int64(2), session.Messages[0].Order)
+		assert.Equal(t, int64(4), session.Messages[1].Order)
 	})
 
 	t.Run("SSE mode returns event stream", func(t *testing.T) {
@@ -1336,6 +1916,18 @@ func TestHandleChat(t *testing.T) {
 		var chatResp ChatResponse
 		require.NoError(t, json.NewDecoder(resp.Body).Decode(&chatResp))
 		assert.Equal(t, "my-session-123", chatResp.SessionID)
+
+		secondBody, _ := json.Marshal(ChatRequest{Message: "again", SessionID: "my-session-123"})
+		secondReq := httptest.NewRequest(http.MethodPost, "/api/v1/chat", bytes.NewReader(secondBody))
+		secondReq.Header.Set("Content-Type", "application/json")
+		secondReq.Header.Set("Accept", "application/json")
+		secondResp, err := app.Test(secondReq)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, secondResp.StatusCode)
+		session, err := ss.GetSession(context.Background(), "default", "my-session-123")
+		require.NoError(t, err)
+		require.Len(t, session.Messages, 4)
+		assert.Equal(t, int64(8), session.Messages[3].Order)
 	})
 
 	t.Run("SSE streaming mode", func(t *testing.T) {
@@ -1423,6 +2015,45 @@ func TestHandleChatHidesGatewaySessionBeforeProviderInvocation(t *testing.T) {
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusNotFound, resp.StatusCode)
+	require.Zero(t, mock.callCount)
+}
+
+func TestHandleChatRejectsConcurrentSessionTurnBeforeProviderInvocation(t *testing.T) {
+	const providerType = "chat-turn-reservation-test"
+	mock := &chatMockProvider{name: providerType}
+	llm.RegisterProvider(providerType, func(llm.ProviderConfig) (llm.Provider, error) {
+		return mock, nil
+	})
+	objects := providerCRD(testDefaultNamespace, testDefaultNamespace, providerType, "test-model")
+	fakeClient := fake.NewClientBuilder().WithScheme(newTestScheme()).WithRuntimeObjects(objects...).Build()
+	ss := newTestSessionStore(t)
+	committer, ok := ss.(store.SessionTurnCommitter)
+	require.True(t, ok)
+	now := time.Now().UTC()
+	_, err := committer.AcquireChatTurn(context.Background(), &store.SessionRecord{
+		Namespace: testDefaultNamespace, Name: "busy-chat", SessionType: "chat", CreatedAt: now, UpdatedAt: now,
+	}, "held-turn", now.Add(time.Minute))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = committer.ReleaseChatTurn(context.Background(), testDefaultNamespace, "busy-chat", "held-turn", false)
+	})
+
+	rs := newTestResultStore(t)
+	cfg := DefaultChatConfig()
+	cfg.Provider = testDefaultNamespace
+	ch := newTestChatHandler(t, fakeClient, ss, rs, cfg)
+	app := fiber.New(fiber.Config{ErrorHandler: customErrorHandler})
+	app.Post("/api/v1/chat", ch.HandleChat)
+	body, err := json.Marshal(ChatRequest{
+		Message: "second turn", SessionID: "busy-chat", Namespace: testDefaultNamespace,
+	})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusConflict, resp.StatusCode)
 	require.Zero(t, mock.callCount)
 }
 
@@ -1580,7 +2211,9 @@ func TestChatHandler_ContextTokenAuthorizationRejectsMissingAgentRefWhenTokenReq
 
 func TestPreAcquisitionCancellationPreservesDeletionGate(t *testing.T) {
 	base := newTestSessionStore(t)
-	blocking := &cancelableCreateSessionStore{SessionStore: base, started: make(chan struct{})}
+	blocking := &cancelableChatTurnStore{
+		SessionStore: base, SessionTurnCommitter: base.(store.SessionTurnCommitter), started: make(chan struct{}),
+	}
 	ch := &ChatHandler{sessionStore: blocking, config: DefaultChatConfig(), activeChats: make(map[string]*activeChatRequest)}
 	ctx := context.Background()
 	result := make(chan error, 1)
@@ -1591,7 +2224,7 @@ func TestPreAcquisitionCancellationPreservesDeletionGate(t *testing.T) {
 	select {
 	case <-blocking.started:
 	case <-time.After(5 * time.Second):
-		t.Fatal("chat acquisition did not reach CreateSession")
+		t.Fatal("chat acquisition did not reach AcquireChatTurn")
 	}
 	active, err := ch.cancelAndWaitForActiveChat(ctx, "default", "pre-acquire-cancel")
 	require.NoError(t, err)
@@ -1607,16 +2240,17 @@ func TestPreAcquisitionCancellationPreservesDeletionGate(t *testing.T) {
 	ch.clearChatDeletionGate("default", "pre-acquire-cancel")
 }
 
-type cancelableCreateSessionStore struct {
+type cancelableChatTurnStore struct {
 	store.SessionStore
+	store.SessionTurnCommitter
 	started chan struct{}
 	once    sync.Once
 }
 
-func (s *cancelableCreateSessionStore) CreateSession(ctx context.Context, _ *store.SessionRecord) error {
+func (s *cancelableChatTurnStore) AcquireChatTurn(ctx context.Context, _ *store.SessionRecord, _ string, _ time.Time) (bool, error) {
 	s.once.Do(func() { close(s.started) })
 	<-ctx.Done()
-	return ctx.Err()
+	return false, ctx.Err()
 }
 
 func TestAbandonedCancellationWaiterDoesNotLeakGate(t *testing.T) {
@@ -1637,6 +2271,9 @@ func TestAbandonedCancellationWaiterDoesNotLeakGate(t *testing.T) {
 }
 
 func beginTestActiveChat(ch *ChatHandler, ctx context.Context, sessionID string) (*activeChatHandle, error) {
+	if ch.sessionTurnCommitter == nil {
+		ch.sessionTurnCommitter = ch.sessionStore.(store.SessionTurnCommitter)
+	}
 	reservation, err := ch.reserveActiveChat(defaultNamespace, sessionID)
 	if err != nil {
 		return nil, err

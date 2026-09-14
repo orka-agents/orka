@@ -1006,7 +1006,7 @@ func (h *Handlers) GetSession(c fiber.Ctx) error {
 	if len(session.Messages) > 0 {
 		lines := make([]string, 0, len(session.Messages))
 		for _, msg := range session.Messages {
-			b, err := json.Marshal(msg)
+			b, err := json.Marshal(sessionTranscriptMessage(msg))
 			if err != nil {
 				continue
 			}

@@ -32,12 +32,20 @@ func newTaskArtifactsCmd() *cobra.Command {
 				return err
 			}
 
+			format, err := outputFormat(cmd)
+			if err != nil {
+				return err
+			}
+			if format != outputTable {
+				return printStructured(cmd, artifacts)
+			}
+
 			if len(artifacts) == 0 {
-				fmt.Println("No artifacts found.")
+				fmt.Fprintln(cmd.OutOrStdout(), "No artifacts found.") //nolint:errcheck
 				return nil
 			}
 
-			w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
 			fmt.Fprintln(w, "FILENAME\tTYPE\tSIZE") //nolint:errcheck
 			for _, a := range artifacts {
 				fmt.Fprintf(w, "%s\t%s\t%s\n", a.Filename, a.ContentType, formatSize(a.Size)) //nolint:errcheck
@@ -46,6 +54,8 @@ func newTaskArtifactsCmd() *cobra.Command {
 			return nil
 		},
 	}
+
+	addOutputFlag(cmd, outputTable)
 	return cmd
 }
 

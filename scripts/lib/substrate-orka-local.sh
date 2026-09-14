@@ -151,8 +151,10 @@ deploy_orka() {
   chmod 0700 "${capability_dir}"
   dd if=/dev/urandom bs=32 count=1 2>/dev/null >"${capability_dir}/snapshot-key"
   dd if=/dev/urandom bs=32 count=1 2>/dev/null >"${capability_dir}/artifact-capability"
-  dd if=/dev/urandom bs=32 count=1 2>/dev/null >"${capability_dir}/publisher-token"
-  dd if=/dev/urandom bs=32 count=1 2>/dev/null >"${capability_dir}/publisher-capability"
+  # Publisher credentials must be printable, with identical bytes after both
+  # the controller and Publisher read their mounted files.
+  openssl rand -hex 32 | tr -d '\n' >"${capability_dir}/publisher-token"
+  openssl rand -hex 32 | tr -d '\n' >"${capability_dir}/publisher-capability"
   # The RuntimePool provider token must be printable (it is compared and
   # copied into pool Secrets); raw random bytes are rejected.
   openssl rand -hex 32 >"${capability_dir}/provider-token"

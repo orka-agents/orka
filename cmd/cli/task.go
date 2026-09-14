@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -33,6 +34,31 @@ const (
 	cliTaskTypeAgent = "agent"
 	cliTaskTypeCont  = "container"
 )
+
+// completeTaskType suggests the canonical task types for flag completion,
+// filtered by the typed prefix. The suggestions are static, so completion
+// never contacts an Orka server.
+func completeTaskType(_ *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	return completeWithPrefix(toComplete,
+		string(corev1alpha1.TaskTypeAI),
+		string(corev1alpha1.TaskTypeContainer),
+		string(corev1alpha1.TaskTypeAgent),
+	), cobra.ShellCompDirectiveNoFileComp
+}
+
+// completeTaskStatus suggests the canonical task phases for flag completion,
+// filtered by the typed prefix.
+func completeTaskStatus(_ *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	return completeWithPrefix(toComplete,
+		string(corev1alpha1.TaskPhasePending),
+		string(corev1alpha1.TaskPhaseRunning),
+		string(corev1alpha1.TaskPhaseFinalizing),
+		string(corev1alpha1.TaskPhaseSucceeded),
+		string(corev1alpha1.TaskPhaseFailed),
+		string(corev1alpha1.TaskPhaseScheduled),
+		string(corev1alpha1.TaskPhaseCancelled),
+	), cobra.ShellCompDirectiveNoFileComp
+}
 
 func newTaskCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -256,6 +282,7 @@ func newTaskCreateCmd() *cobra.Command {
 		cliTaskTypeAI,
 		"Task type: "+cliTaskTypeAI+", "+cliTaskTypeCont+", "+cliTaskTypeAgent,
 	)
+	_ = cmd.RegisterFlagCompletionFunc("type", completeTaskType)
 	cmd.Flags().StringVar(&image, "image", "", "Container image")
 	cmd.Flags().StringArrayVar(&commandVals, "command", nil, "Command entry to run (repeat for multiple entries)")
 	cmd.Flags().StringArrayVar(&argVals, "arg", nil, "Command argument (repeat for multiple arguments)")
@@ -346,6 +373,7 @@ func newTaskListCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&status, "status", "", "Filter by status (client-side scan; may page through many tasks)")
+	_ = cmd.RegisterFlagCompletionFunc("status", completeTaskStatus)
 	cmd.Flags().StringVar(&transactionID, "transaction", "", "Filter by transaction ID (client-side scan)")
 	cmd.Flags().IntVar(&limit, "limit", 20, "Maximum number of results")
 	cmd.Flags().StringVar(&continueToken, "continue", "", "Continue token for the next page")
@@ -523,23 +551,24 @@ func newTaskWaitCmd() *cobra.Command {
 		Short: "Wait for a task to complete",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			var deadline <-chan time.Time
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+
 			if timeout != "" {
 				d, err := time.ParseDuration(timeout)
 				if err != nil {
 					return fmt.Errorf("invalid timeout: %w", err)
 				}
-				deadline = time.After(d)
+				// One context deadline stops polling and cancels in-flight requests.
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, d)
+				defer cancel()
 			}
-
-			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-			defer cancel()
 
 			c := newClientFromCmd(cmd)
 			return waitForTaskPhase(
 				ctx,
 				args[0],
-				deadline,
 				2*time.Second,
 				func(ctx context.Context) (string, error) {
 					detail, err := c.GetTask(ctx, args[0], client.GetOptions{Namespace: c.Namespace})
@@ -559,7 +588,6 @@ func newTaskWaitCmd() *cobra.Command {
 func waitForTaskPhase(
 	ctx context.Context,
 	taskName string,
-	deadline <-chan time.Time,
 	pollInterval time.Duration,
 	getPhase func(context.Context) (string, error),
 	out io.Writer,
@@ -569,10 +597,10 @@ func waitForTaskPhase(
 
 	for {
 		phase, err := getPhase(ctx)
+		if ctx.Err() != nil {
+			return waitContextError(ctx, taskName)
+		}
 		if err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
 			return err
 		}
 		switch strings.ToLower(phase) {
@@ -585,12 +613,19 @@ func waitForTaskPhase(
 
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
-		case <-deadline:
-			return fmt.Errorf("timed out waiting for task %s", taskName)
+			return waitContextError(ctx, taskName)
 		case <-ticker.C:
 		}
 	}
+}
+
+// waitContextError maps the polling context's terminal state to the same
+// user-facing errors a deadline without request cancellation would produce.
+func waitContextError(ctx context.Context, taskName string) error {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("timed out waiting for task %s", taskName)
+	}
+	return ctx.Err()
 }
 
 func newTaskDeleteCmd() *cobra.Command {

@@ -626,6 +626,134 @@ func TestExecute_InvalidJSON(t *testing.T) {
 	}
 }
 
+func TestExecute_ChildSessionNamespace(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		namespace    any
+		sessionRef   string
+		schedule     any
+		isolation    bool
+		watchNS      string
+		wantError    string
+		wantTaskNS   string
+		wantSchedule string
+	}{
+		{name: "default namespace rejects active session", sessionRef: "sess-12345678", wantError: "invalid_arguments"},
+		{name: "explicit namespace rejects active session", namespace: "default", sessionRef: "sess-12345678", wantError: "invalid_arguments"},
+		{name: "other namespace permits same name", namespace: "other", sessionRef: "sess-12345678", wantTaskNS: "other"},
+		{name: "stringified namespace permits same name", namespace: 789, sessionRef: "sess-12345678", wantTaskNS: "789"},
+		{name: "same namespace permits other session", sessionRef: "child-session", wantTaskNS: "default"},
+		{name: "empty schedule rejects active session", sessionRef: "sess-12345678", schedule: "", wantError: "invalid_arguments"},
+		{name: "scheduled parent permits active session", sessionRef: "sess-12345678", schedule: "0 */6 * * *", wantTaskNS: "default", wantSchedule: "0 */6 * * *"},
+		{name: "stringified schedule permits active session", sessionRef: "sess-12345678", schedule: 123, wantTaskNS: "default", wantSchedule: "123"},
+		{name: "namespace isolation remains enforced", namespace: "other", sessionRef: "sess-12345678", isolation: true, wantError: "permission_denied"},
+		{name: "watch namespace remains enforced", namespace: "other", sessionRef: "sess-12345678", watchNS: "default", wantError: "permission_denied"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newTestExecutor()
+			e.enforceNamespaceIsolation = tt.isolation
+			e.watchNamespace = tt.watchNS
+			args := map[string]any{"name": "child", "prompt": "hello", "sessionRef": tt.sessionRef}
+			if tt.schedule != nil {
+				args["schedule"] = tt.schedule
+			}
+			if tt.namespace != nil {
+				args["namespace"] = tt.namespace
+			}
+			result, err := e.Execute(context.Background(), llm.ToolCall{
+				ID: "child-call", Name: "create_ai_task", Arguments: mustJSON(args),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var tr ToolResult
+			if err := json.Unmarshal([]byte(result), &tr); err != nil {
+				t.Fatal(err)
+			}
+			if tr.ErrorType != tt.wantError || tr.Success != (tt.wantError == "") {
+				t.Fatalf("unexpected tool result: %s", result)
+			}
+			var tasks corev1alpha1.TaskList
+			if err := e.client.List(context.Background(), &tasks); err != nil {
+				t.Fatal(err)
+			}
+			if tt.wantError != "" {
+				if len(tasks.Items) != 0 {
+					t.Fatal("rejected tool call created a Task")
+				}
+				return
+			}
+			if len(tasks.Items) != 1 {
+				t.Fatalf("created %d Tasks, want 1", len(tasks.Items))
+			}
+			task := tasks.Items[0]
+			if task.Spec.Schedule != tt.wantSchedule {
+				t.Fatalf("child schedule = %q, want %q", task.Spec.Schedule, tt.wantSchedule)
+			}
+			if task.Namespace != tt.wantTaskNS || task.Spec.SessionRef == nil || task.Spec.SessionRef.Name != tt.sessionRef {
+				t.Fatalf("unexpected child session: namespace=%q sessionRef=%+v", task.Namespace, task.Spec.SessionRef)
+			}
+		})
+	}
+}
+
+func TestExecute_FencesStringifiedSessionIdentity(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		field string
+		value any
+	}{
+		{name: "numeric session", field: "sessionRef", value: 123},
+		{name: "numeric namespace", field: "namespace", value: 456},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newTestExecutor()
+			e.sessionID = "123"
+			e.namespace = "456"
+			args := map[string]any{"name": "child", "prompt": "hello", "sessionRef": "123", "namespace": "456"}
+			args[tt.field] = tt.value
+			result, err := e.Execute(context.Background(), llm.ToolCall{
+				ID: "child-call", Name: "create_ai_task", Arguments: mustJSON(args),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var tr ToolResult
+			if err := json.Unmarshal([]byte(result), &tr); err != nil {
+				t.Fatal(err)
+			}
+			if tr.Success || tr.ErrorType != "invalid_arguments" {
+				t.Fatalf("unexpected tool result: %s", result)
+			}
+			var tasks corev1alpha1.TaskList
+			if err := e.client.List(context.Background(), &tasks); err != nil {
+				t.Fatal(err)
+			}
+			if len(tasks.Items) != 0 {
+				t.Fatal("stringified active session identity created a Task")
+			}
+		})
+	}
+}
+
+func TestExecute_NonCreatingToolIgnoresSessionRef(t *testing.T) {
+	e := newTestExecutor()
+	result, err := e.Execute(context.Background(), llm.ToolCall{
+		ID: "list-call", Name: "list_tasks",
+		Arguments: mustJSON(map[string]any{"sessionRef": e.sessionID}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tr ToolResult
+	if err := json.Unmarshal([]byte(result), &tr); err != nil {
+		t.Fatal(err)
+	}
+	if !tr.Success {
+		t.Fatalf("non-creating tool rejected unused sessionRef: %s", result)
+	}
+}
+
 func TestExecute_UnknownTool(t *testing.T) {
 	e := newTestExecutor()
 	tc := llm.ToolCall{

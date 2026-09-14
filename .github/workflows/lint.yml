@@ -1,6 +1,11 @@
 name: Lint
 
 on:
+  workflow_call:
+    inputs:
+      full_check:
+        type: boolean
+        default: false
   workflow_dispatch:
   push:
     # PR branches are linted by the pull_request event. Keep push coverage on
@@ -53,7 +58,7 @@ jobs:
           install-mode: goinstall
           # GitHub refuses REST PR diffs over 20,000 lines. Compare revisions
           # locally so large PRs still filter out pre-existing lint findings.
-          args: --new-from-rev=${{ github.event.pull_request.base.sha || github.event.before || 'HEAD~1' }}
+          args: ${{ !inputs.full_check && format('--new-from-rev={0}', github.event.pull_request.base.sha || github.event.before || 'HEAD~1') || '' }}
 
   ui-lint:
     name: UI Lint

@@ -20,6 +20,9 @@ make test
 make test
 go tool cover -func=cover.out | grep total
 
+# Run release automation and workspace cleanup tests without a cluster
+go test ./cmd/build/release ./scripts/tests
+
 # Run frontend tests
 make ui-test                # or: cd ui && bun run test
 make ui-test-coverage       # or: cd ui && bun run test:coverage
@@ -67,6 +70,8 @@ Tests use **Ginkgo + Gomega** (BDD style) for controller/integration tests and s
 
 | Package | Test Files | Coverage Areas |
 |---------|-----------|----------------|
+| `cmd/build/release/` | `workflow_test.go`, `prepare_test.go`, `publish_test.go`, `version_test.go` | Release version edits, trusted tooling, branch races, artifact identity, approval evidence, chart publication, and retries. Uses local Git repositories and Helm; GitHub and registry responses are fixtures. |
+| `scripts/tests/` | `workspace_lifecycle_test.go` | Workspace cancellation, session archival, suspension, and deletion ordering using Bash and jq fixtures. |
 | `internal/api/` | `handlers_test.go`, `internal_handlers_test.go`, `auth_test.go`, `middleware_test.go`, `pagination_test.go`, `server_test.go`, `openai_compat_test.go` | REST API handlers, internal API handlers, memory/session APIs, authentication, middleware, pagination, OpenAI compatibility |
 | `internal/controller/` | `task_controller_test.go`, `agent_controller_test.go`, `tool_controller_test.go`, `session_manager_test.go`, `job_builder_test.go`, `repositoryscan_controller_test.go`, `webhook_test.go` | Reconciliation logic, session management, job building, coordination enforcement, repository scan mapper/finding/patch ingestion |
 | `internal/security/` | `security_test.go`, `contracts_test.go` | Repository security artifact contracts, v2 evidence validation, fingerprinting, bounded context manifests, prompt helpers |
@@ -117,9 +122,9 @@ End-to-end tests run against a dedicated Kind cluster:
 | `test/e2e/tools_test.go` | Built-in tools (including `web_fetch`, `file_write`) and custom Tool CRD |
 | `test/e2e/scheduled_task_test.go` | Cron scheduling, suspend, `concurrencyPolicy: Forbid`, history-limit cleanup |
 | `test/e2e/task_lifecycle_test.go` | Timeout/retry/cancel plus session serialization and lock release |
-| `scripts/live-acp-runtime-e2e.sh` | Canonical deployed-cluster ACP smoke/release gate for Codex, OpenCode, Claude, and Copilot RuntimePools, exact Pod/runtime identity, workspace read/write, continuation/fork, cancellation/timeout, restart/replacement, publication/PR verification, drain/scale-to-zero, immutable images, and cleanup |
-| `.github/workflows/live-acp-runtime-e2e.yml` / `scripts/live-acp-runtime-kind-e2e.sh` | Trusted-branch/nightly/manual live ACP smoke that bootstraps an ephemeral Kind cluster, Vekil, and the production ACP topology before invoking the canonical validator |
-| `.github/workflows/live-acp-release-gate.yml` / `scripts/live-acp-runtime-kind-e2e.sh` | Manual, protected-environment release acceptance with destructive publication, independent GitHub verification, PR reconciliation, and cleanup |
+| `scripts/agent-runtime-e2e.sh` | Canonical deployed-cluster ACP smoke/release gate for Codex, OpenCode, Claude, and Copilot RuntimePools, exact Pod/runtime identity, workspace read/write, continuation/fork, cancellation/timeout, restart/replacement, publication/PR verification, drain/scale-to-zero, immutable images, and cleanup |
+| `.github/workflows/agent-runtime-e2e.yml` / `scripts/agent-runtime-kind-e2e.sh` | Trusted-branch/nightly/manual agent runtime smoke that calls real model providers, requires credentials, and bootstraps an ephemeral Kind cluster, Vekil, and the production ACP topology before invoking the canonical validator |
+| `.github/workflows/release-qualification.yml` / `scripts/agent-runtime-kind-e2e.sh` | Environment-approved release acceptance with destructive publication, independent GitHub verification, PR reconciliation, and cleanup |
 
 The Gateway Live E2E workflow (`.github/workflows/gateway-e2e.yml`) runs on manual dispatch and on pull requests or pushes that touch Gateway-relevant source, configuration, E2E, image, or dependency paths. It creates a dedicated Kind cluster, generates disposable TLS and bearer credentials, deploys the TLS reference adapter and deterministic echo `AgentRuntime`, and verifies invalid bearer rejection, accepted and duplicate ingress, runtime-backed Task completion, final delivery, idempotency, and correlation metadata. The workflow is model-free and secret-free; it does not use repository or provider credentials.
 
@@ -132,42 +137,50 @@ missing or mismatched artifacts staying not ready.
 
 ### E2E key requirements
 
-- `scripts/live-acp-runtime-e2e.sh --context <context>` is the canonical ACP
+- `scripts/agent-runtime-e2e.sh --context <context>` is the canonical ACP
   deployed-cluster validator. Its default mode is a smoke test; set
   `RELEASE_GATE=1` for destructive release acceptance. A smoke result explicitly
   reports the publication, remote-verification, Task result/fork, and
   scale-to-zero scenarios that remain release-only.
-- `scripts/live-acp-runtime-kind-e2e.sh` is the CI/local bootstrap entrypoint. It
+- `scripts/agent-runtime-kind-e2e.sh` is the CI/local bootstrap entrypoint. It
   creates an ephemeral Kind cluster, deploys Vekil and the production ACP
   topology with digest-pinned local images, and then calls the canonical script.
-- `.github/workflows/live-acp-runtime-e2e.yml` runs on relevant pushes to the
-  default branch, nightly, and manual dispatch. It uses the
-  `live-acp-runtime-smoke` environment and requires its
-  `COPILOT_GITHUB_TOKEN` secret so Vekil can exercise Codex, OpenCode, Claude, and Copilot
-  without mounting provider credentials into RuntimePools. Restrict that
-  environment to the default branch; do not require reviewers if scheduled runs
-  must proceed unattended.
-- `.github/workflows/live-acp-release-gate.yml` is manual-only and serialized.
-  Restrict the `live-acp-release-gate` environment to the default branch. It
-  accepts the configured canary fork, a full
-  source SHA that must equal the dispatched workflow commit and default-branch
-  head, and the default branch as the PR base. It requires these environment
-  secrets:
-  `COPILOT_GITHUB_TOKEN`, `ACP_E2E_WRITE_READ_CREDENTIAL_TOKEN`,
+- `.github/workflows/agent-runtime-e2e.yml` runs on relevant pushes to the
+  default branch, nightly, and manual dispatch. It requires the repository's
+  `COPILOT_GITHUB_TOKEN` secret so Vekil can exercise Codex, OpenCode, Claude, and
+  Copilot against real model providers without mounting provider credentials
+  into RuntimePools. The workflow rejects dispatches from other branches before
+  using the secret. It runs unattended as ordinary CI without a deployment
+  environment.
+  When migrating from `live-acp-runtime-smoke`, ensure the provider secret is
+  available at repository scope. After the renamed workflow succeeds, retire
+  the old environment and preserve its deployment history.
+- `.github/workflows/release-qualification.yml` uses `workflow_dispatch` and is
+  serialized. The release workflow dispatches it automatically. Restrict the
+  `release-qualification` environment to `main` and exact permitted release
+  branches, require a trusted reviewer, and disable administrator bypass before
+  exposing canary credentials. It accepts the configured canary fork and a full
+  source SHA that must equal both the dispatched workflow commit and selected branch head.
+  The canary PR base must be that same branch. Source reads use the job's
+  short-lived `GITHUB_TOKEN` with `contents: read`; no source-read environment
+  secret is needed. It requires these configured secrets:
+  `COPILOT_GITHUB_TOKEN`,
   `ACP_E2E_WRITE_TARGET_READ_CREDENTIAL_TOKEN`,
   `ACP_E2E_WRITE_CREDENTIAL_TOKEN`, and
-  `ACP_E2E_WRITE_FORGE_CREDENTIAL_TOKEN`. Configure the four publication
-  credentials as distinct, least-privilege GitHub credentials for source read,
-  target read, target write, and forge/verification cleanup respectively.
-  [ACP publication release qualification](acp-release-gate.md) documents the
+  `ACP_E2E_WRITE_FORGE_CREDENTIAL_TOKEN`. Configure the three stored GitHub
+  credentials as distinct, least-privilege credentials for target read,
+  target write, and forge/verification cleanup respectively. The provider
+  token can come from the existing repository secret.
+  [Release qualification](release-qualification.md) documents the
   dedicated fork, exact permissions, trusted dispatch, report verification,
   and recovery from a moved base or preserved canary. Release qualification
   requires that report for the exact candidate; smoke success is insufficient.
-- Neither live ACP workflow runs for `pull_request`, so PR-controlled code never
+- Neither `Agent Runtime E2E` nor `Release Qualification` runs for `pull_request`, so PR-controlled code never
   receives provider or publication credentials. Both check out with persisted
   credentials disabled and expose secrets only to the final local script step.
-  They intentionally keep `permissions` at `contents: read` and do not request
-  `id-token: write`; GitHub OIDC validation remains isolated in
+  The release gate adds `actions: read` to `contents: read` to verify the
+  environment branch rules and download candidate artifacts using the native
+  token. Neither workflow requests `id-token: write`; GitHub OIDC validation remains isolated in
   `live-github-oidc-e2e.yml`.
 - The release gate additionally requires digest-pinned controller, Publisher,
   Codex, OpenCode, Claude, and Copilot images; a Ready central provider proxy; the
@@ -187,12 +200,13 @@ missing or mismatched artifacts staying not ready.
   `type: ai` test cases. They are not mounted into built-in ACP RuntimePools.
 - `COPILOT_GITHUB_TOKEN` also remains the credential for
   `live-copilot-proxy-e2e.yml`, which covers the external proxy as native
-  Provider test infrastructure. The canonical live ACP workflow is the
+  Provider test infrastructure. `Agent Runtime E2E` provides the
   provider-execution evidence for the built-in RuntimePool profiles.
 - Structural e2e tests for native worker Jobs run without external model keys.
 - `Live Agent Sandbox E2E` and `Agent Substrate E2E` do run workspace-backed ACP Tasks
   end to end against a local model fixture, but they are not the full release gate:
-  external-provider execution and clean-room publication stay with the live ACP workflows.
+  external-provider execution and clean-room publication stay with `Agent Runtime E2E`
+  and `Release Qualification`.
   Every Substrate run includes DataOnly suspension, cold continuation, and
   checkpoint file recovery against the unmodified upstream provider.
 - Security Scan E2E is secret-free and model-free, but requires Docker plus the
@@ -215,11 +229,16 @@ export COPILOT_GITHUB_TOKEN
 export ACP_E2E_OPENCODE_MODEL=openai/gpt-5.4
 export ACP_E2E_OPENCODE_CONTEXT_WINDOW=32768
 export ACP_E2E_OPENCODE_MAX_TOKENS=4096
-ACP_E2E_KIND_TAG=local bash scripts/live-acp-runtime-kind-e2e.sh
+ACP_E2E_KIND_TAG=local bash scripts/agent-runtime-kind-e2e.sh
 ```
 
-For a manual release gate, also export the four role-specific credential values,
-set `ACP_E2E_WRITE_SOURCE_REPO`, `ACP_E2E_WRITE_PUBLICATION_REPO`,
+The local release gate needs four role-specific credentials, including an
+explicitly supplied source-read credential. GitHub's automatic job token is
+available only inside Actions. If organization policy prevents supplying
+that credential locally, dispatch
+[Release Qualification](release-qualification.md#standalone-qualification) instead.
+
+For a local run, set `ACP_E2E_WRITE_SOURCE_REPO`, `ACP_E2E_WRITE_PUBLICATION_REPO`,
 `ACP_E2E_WRITE_SOURCE_REF`, and `ACP_E2E_WRITE_PR_BASE`, then run:
 
 ```bash
@@ -236,7 +255,7 @@ read -rsp 'Forge token: ' ACP_E2E_WRITE_FORGE_CREDENTIAL_TOKEN && echo
 export ACP_E2E_WRITE_READ_CREDENTIAL_TOKEN ACP_E2E_WRITE_TARGET_READ_CREDENTIAL_TOKEN
 export ACP_E2E_WRITE_CREDENTIAL_TOKEN ACP_E2E_WRITE_FORGE_CREDENTIAL_TOKEN
 export GH_TOKEN="${ACP_E2E_WRITE_FORGE_CREDENTIAL_TOKEN}"
-bash scripts/live-acp-runtime-kind-e2e.sh
+bash scripts/agent-runtime-kind-e2e.sh
 ```
 
 In release mode the Kind wrapper binds `ACP_E2E_REPO` and `ACP_E2E_REF` to the
@@ -257,8 +276,8 @@ The live agent-sandbox workflow validates both the direct workspace-adapter
 lifecycle and the initial workspace-backed ACP v2 happy path. It builds the
 real Codex supervisor, routes a prompt through a local Responses-compatible
 fixture, waits for the Task to succeed, verifies provider-neutral status, and
-cleans up the dedicated RuntimePool. It does not replace the broader live ACP
-release gate or provide publication evidence. Its direct-adapter assertions
+cleans up the dedicated RuntimePool. It does not replace release qualification
+or provide publication evidence. Its direct-adapter assertions
 also include:
 
 - the adapter creates a v1beta1 `SandboxClaim` with the expected `warmPoolRef` and executes a command with caller-supplied env inside the sandbox

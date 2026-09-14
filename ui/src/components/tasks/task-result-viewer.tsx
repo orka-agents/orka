@@ -7,6 +7,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { GitBranch } from 'lucide-react'
 import { DiffViewer } from './diff-viewer'
 import { TaskFilesChanged } from './task-files-changed'
+import { isNotFoundError } from '@/lib/api-client'
 
 interface StructuredResult {
   summary?: string
@@ -80,13 +81,45 @@ function StructuredResultView({ result }: { result: StructuredResult }) {
 }
 
 export function TaskResultViewer({ taskId }: { taskId: string }) {
-  const { data, isLoading, refetch, isFetched } = useTaskResult(taskId)
+  const { data, isLoading, isFetched, error, refetch } = useTaskResult(taskId)
 
   const resultText = data?.result
   const structured = useMemo(() => {
     if (!resultText) return null
     return tryParseStructuredResult(resultText)
   }, [resultText])
+
+  if (isLoading) {
+    return (
+      <Card>
+        <CardHeader><CardTitle>Result</CardTitle></CardHeader>
+        <CardContent>
+          <div data-testid="result-loading" className="h-32 w-full">
+            <Skeleton className="h-32 w-full" />
+          </div>
+        </CardContent>
+      </Card>
+    )
+  }
+
+  if (error) {
+    const unavailable = isNotFoundError(error)
+    return (
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between">
+          <CardTitle>Result</CardTitle>
+          <Button variant="outline" size="sm" onClick={() => refetch()}>
+            {unavailable ? 'Load Result' : 'Retry'}
+          </Button>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm text-muted-foreground" data-testid="result-error">
+            {unavailable ? 'No result available for this task yet.' : error.message}
+          </p>
+        </CardContent>
+      </Card>
+    )
+  }
 
   if (!isFetched) {
     return (
@@ -95,15 +128,6 @@ export function TaskResultViewer({ taskId }: { taskId: string }) {
           <CardTitle>Result</CardTitle>
           <Button variant="outline" size="sm" onClick={() => refetch()}>Load Result</Button>
         </CardHeader>
-      </Card>
-    )
-  }
-
-  if (isLoading) {
-    return (
-      <Card>
-        <CardHeader><CardTitle>Result</CardTitle></CardHeader>
-        <CardContent><Skeleton className="h-32 w-full" /></CardContent>
       </Card>
     )
   }

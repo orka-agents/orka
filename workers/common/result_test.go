@@ -7,8 +7,12 @@ MIT License - see LICENSE file for details.
 package common
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -20,6 +24,262 @@ import (
 
 	"github.com/orka-agents/orka/internal/workerenv"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type trackingResponseBody struct {
+	reader io.Reader
+	read   int
+	closed bool
+}
+
+func (b *trackingResponseBody) Read(p []byte) (int, error) {
+	n, err := b.reader.Read(p)
+	b.read += n
+	return n, err
+}
+
+func (b *trackingResponseBody) Close() error {
+	b.closed = true
+	return nil
+}
+
+type infiniteTrackingResponseBody struct {
+	read   int
+	closed bool
+}
+
+func (b *infiniteTrackingResponseBody) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 'x'
+	}
+	b.read += len(p)
+	return len(p), nil
+}
+
+func (b *infiniteTrackingResponseBody) Close() error {
+	b.closed = true
+	return nil
+}
+
+func TestSubmitResultContext_CanceledBeforeDelivery(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	t.Setenv(workerenv.ResultEndpoint, srv.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := SubmitResultContext(ctx, []byte("late result")); !errors.Is(err, context.Canceled) {
+		t.Fatalf("SubmitResultContext() error = %v, want context canceled", err)
+	}
+	if got := attempts.Load(); got != 0 {
+		t.Fatalf("result requests = %d, want 0", got)
+	}
+}
+
+func TestSubmitResultContext_CancelsBlockedTransport(t *testing.T) {
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(requestStarted)
+		<-releaseRequest
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	defer close(releaseRequest)
+	t.Setenv(workerenv.ResultEndpoint, srv.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- SubmitResultContext(ctx, []byte("late result"))
+	}()
+
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for result request")
+	}
+	cancel()
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("SubmitResultContext() error = %v, want context canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SubmitResultContext() did not stop after cancellation")
+	}
+}
+
+func TestDoPostWithRetry_CancelsDuringBackoff(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	backoffStarted := make(chan struct{})
+	wait := func(ctx context.Context, _ time.Duration) error {
+		close(backoffStarted)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- doPostWithRetry(
+			ctx, "result submission", srv.URL, []byte("cancel backoff"), "",
+			"application/octet-stream", time.Second, wait,
+		)
+	}()
+
+	select {
+	case <-backoffStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for retry backoff")
+	}
+	cancel()
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("doPostWithRetry() error = %v, want context canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("doPostWithRetry() did not interrupt retry backoff")
+	}
+	if got := attempts.Load(); got != 1 {
+		t.Fatalf("attempts = %d, want 1 before cancellation", got)
+	}
+}
+
+func TestDoPostOnceWithClient_DrainsAndClosesSuccessBody(t *testing.T) {
+	payload := strings.Repeat("ok", 1024)
+	body := &trackingResponseBody{reader: strings.NewReader(payload)}
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusNoContent, Body: body, Header: make(http.Header)}, nil
+	})}
+
+	if err := doPostOnceWithClient(
+		context.Background(), client, "http://controller.invalid/result", []byte("result"), "", "application/octet-stream",
+	); err != nil {
+		t.Fatalf("doPostOnceWithClient() error = %v", err)
+	}
+	if body.read != len(payload) {
+		t.Fatalf("response body bytes read = %d, want %d", body.read, len(payload))
+	}
+	if !body.closed {
+		t.Fatal("response body was not closed")
+	}
+}
+
+func TestDoPostOnceWithClient_PreservesSuccessWhenDrainIsCanceled(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusCreated, http.StatusNoContent} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			body := &cancelingDeliveryBody{cancel: cancel}
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: status, Body: body, Header: make(http.Header)}, nil
+			})}
+			err := doPostOnceWithClient(ctx, client, "http://controller.invalid/result", []byte("result"), "", "text/plain")
+			if err != nil {
+				t.Fatalf("accepted delivery returned error: %v", err)
+			}
+			if ctx.Err() == nil || !body.closed {
+				t.Fatal("expected cancellation during drain and response body cleanup")
+			}
+		})
+	}
+}
+
+type cancelingDeliveryBody struct {
+	cancel context.CancelFunc
+	closed bool
+}
+
+func (b *cancelingDeliveryBody) Read([]byte) (int, error) {
+	b.cancel()
+	return 0, context.Canceled
+}
+
+func (b *cancelingDeliveryBody) Close() error {
+	b.closed = true
+	return nil
+}
+
+func TestDoPostOnceWithClient_BoundsErrorBodyDrainAndCloses(t *testing.T) {
+	body := &infiniteTrackingResponseBody{}
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: body, Header: make(http.Header)}, nil
+	})}
+
+	err := doPostOnceWithClient(
+		context.Background(), client, "http://controller.invalid/result", []byte("result"), "", "application/octet-stream",
+	)
+	if err == nil || !strings.Contains(err.Error(), "HTTP 503") {
+		t.Fatalf("doPostOnceWithClient() error = %v, want HTTP 503", err)
+	}
+	if body.read != deliveryResponseDrainLimit {
+		t.Fatalf("response body bytes read = %d, want bounded drain %d", body.read, deliveryResponseDrainLimit)
+	}
+	if !body.closed {
+		t.Fatal("response body was not closed")
+	}
+}
+
+func TestSubmitResultContext_DoesNotRetryPermanentClientErrors(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusRequestEntityTooLarge} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var attempts atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				attempts.Add(1)
+				w.WriteHeader(status)
+			}))
+			defer srv.Close()
+			t.Setenv(workerenv.ResultEndpoint, srv.URL)
+
+			err := SubmitResultContext(context.Background(), []byte("permanent failure"))
+			if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("HTTP %d", status)) {
+				t.Fatalf("SubmitResultContext() error = %v, want HTTP %d", err, status)
+			}
+			if got := attempts.Load(); got != 1 {
+				t.Fatalf("attempts = %d, want 1 for HTTP %d", got, status)
+			}
+		})
+	}
+}
+
+func TestRetryableHTTPStatusPolicy(t *testing.T) {
+	tests := []struct {
+		status    int
+		retryable bool
+	}{
+		{status: http.StatusRequestTimeout, retryable: true},
+		{status: http.StatusTooManyRequests, retryable: true},
+		{status: http.StatusInternalServerError, retryable: true},
+		{status: http.StatusBadGateway, retryable: true},
+		{status: http.StatusServiceUnavailable, retryable: true},
+		{status: http.StatusGatewayTimeout, retryable: true},
+		{status: http.StatusBadRequest, retryable: false},
+		{status: http.StatusUnauthorized, retryable: false},
+		{status: http.StatusRequestEntityTooLarge, retryable: false},
+		{status: http.StatusNotImplemented, retryable: false},
+	}
+	for _, tt := range tests {
+		if got := isRetryableHTTPStatus(tt.status); got != tt.retryable {
+			t.Errorf("isRetryableHTTPStatus(%d) = %v, want %v", tt.status, got, tt.retryable)
+		}
+	}
+}
 
 func TestSubmitResult_Success(t *testing.T) {
 	var received []byte
@@ -98,60 +358,93 @@ func TestSubmitResult_ResultStdoutWritesMarkerFile(t *testing.T) {
 	}
 }
 
-func TestSubmitResult_RetryOnFailure(t *testing.T) {
+func TestSubmitResultContext_PreservesPublishedStdoutMarkerAfterCancellation(t *testing.T) {
+	markerPath := filepath.Join(t.TempDir(), "orka-result-marker")
+	originalMarkerPath := resultStdoutMarkerPath
+	resultStdoutMarkerPath = markerPath
+	t.Cleanup(func() { resultStdoutMarkerPath = originalMarkerPath })
+	t.Setenv(workerenv.ResultStdout, "true")
+	t.Setenv(workerenv.ResultStdoutToken, "")
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close() //nolint:errcheck
+	defer writer.Close() //nolint:errcheck
+	originalStdout := os.Stdout
+	os.Stdout = writer
+	defer func() { os.Stdout = originalStdout }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Exceed the pipe buffer so cancellation lands during marker publication.
+	result := []byte(strings.Repeat("x", 1<<20))
+	done := make(chan error, 1)
+	go func() {
+		done <- SubmitResultContext(ctx, result)
+		_ = writer.Close()
+	}()
+	first := make([]byte, 1)
+	if _, err := io.ReadFull(reader, first); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	rest, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("published stdout result returned error: %v", err)
+	}
+	wantMarker := workerenv.ResultStdoutPrefix + base64.StdEncoding.EncodeToString(result) + "\n"
+	if string(first)+string(rest) != wantMarker {
+		t.Fatal("stdout marker was not fully published")
+	}
+	data, err := os.ReadFile(markerPath)
+	if err != nil || string(data) != wantMarker {
+		t.Fatalf("marker file was not fully published: %v", err)
+	}
+}
+
+func TestDoPostWithRetry_Retries500ThenSucceeds(t *testing.T) {
 	var attempts atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		n := attempts.Add(1)
-		if n < 3 {
+		if attempts.Add(1) < 3 {
 			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte("temporary error")) //nolint:errcheck
+			_, _ = w.Write([]byte("temporary error"))
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer srv.Close()
 
-	t.Setenv("ORKA_RESULT_ENDPOINT", srv.URL)
-
-	err := SubmitResult([]byte("retry result"))
+	wait := func(context.Context, time.Duration) error { return nil }
+	err := doPostWithRetry(
+		context.Background(), "result submission", srv.URL, []byte("retry result"), "",
+		"application/octet-stream", time.Second, wait,
+	)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("doPostWithRetry() error = %v", err)
 	}
 	if got := attempts.Load(); got != 3 {
-		t.Errorf("attempts = %d, want 3", got)
+		t.Fatalf("attempts = %d, want 3", got)
 	}
 }
 
-func TestSubmitResult_AllRetriesFail(t *testing.T) {
-	var slept []time.Duration
-	retrySleep = func(d time.Duration) { slept = append(slept, d) }
-	t.Cleanup(func() { retrySleep = time.Sleep })
-
+func TestSubmitResultContext_RetryableFailureStopsAtContextDeadline(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("always fails")) //nolint:errcheck
+		_, _ = w.Write([]byte("always fails"))
 	}))
 	defer srv.Close()
+	t.Setenv(workerenv.ResultEndpoint, srv.URL)
 
-	t.Setenv("ORKA_RESULT_ENDPOINT", srv.URL)
-	defer func() {
-		// The backoff schedule must outlast a routine controller restart:
-		// exponential up to the 60s cap, ~4 minutes in total.
-		var total time.Duration
-		for _, d := range slept {
-			if d > maxBackoff {
-				t.Fatalf("backoff %v exceeds cap %v", d, maxBackoff)
-			}
-			total += d
-		}
-		if total < 3*time.Minute {
-			t.Fatalf("total backoff %v is shorter than a controller restart window", total)
-		}
-	}()
-
-	err := SubmitResult([]byte("failing result"))
-	if err == nil {
-		t.Fatal("expected error after all retries exhausted")
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	err := SubmitResultContext(ctx, []byte("failing result"))
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("SubmitResultContext() error = %v, want context deadline exceeded", err)
 	}
 }
 
@@ -338,8 +631,8 @@ func TestParseStructuredResult_MissingVersion(t *testing.T) {
 
 func TestSubmitResult_PermanentRejectionDoesNotRetry(t *testing.T) {
 	var slept []time.Duration
-	retrySleep = func(d time.Duration) { slept = append(slept, d) }
-	t.Cleanup(func() { retrySleep = time.Sleep })
+	retryWait = func(_ context.Context, d time.Duration) error { slept = append(slept, d); return nil }
+	t.Cleanup(func() { retryWait = waitForRetry })
 
 	permanent := []int{
 		http.StatusRequestEntityTooLarge, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotImplemented,
@@ -368,8 +661,8 @@ func TestSubmitResult_PermanentRejectionDoesNotRetry(t *testing.T) {
 }
 
 func TestSubmitResult_ThrottlingIsRetried(t *testing.T) {
-	retrySleep = func(time.Duration) {}
-	t.Cleanup(func() { retrySleep = time.Sleep })
+	retryWait = func(context.Context, time.Duration) error { return nil }
+	t.Cleanup(func() { retryWait = waitForRetry })
 	var attempts atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		if attempts.Add(1) < 3 {
@@ -385,5 +678,38 @@ func TestSubmitResult_ThrottlingIsRetried(t *testing.T) {
 	}
 	if got := attempts.Load(); got != 3 {
 		t.Fatalf("attempts = %d, want 3", got)
+	}
+}
+
+func TestSubmitResult_AllRetriesFail(t *testing.T) {
+	var slept []time.Duration
+	retryWait = func(_ context.Context, d time.Duration) error { slept = append(slept, d); return nil }
+	t.Cleanup(func() { retryWait = waitForRetry })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("always fails")) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	t.Setenv("ORKA_RESULT_ENDPOINT", srv.URL)
+	defer func() {
+		// The backoff schedule must outlast a routine controller restart:
+		// exponential up to the 60s cap, ~4 minutes in total.
+		var total time.Duration
+		for _, d := range slept {
+			if d > maxBackoff {
+				t.Fatalf("backoff %v exceeds cap %v", d, maxBackoff)
+			}
+			total += d
+		}
+		if total < 3*time.Minute {
+			t.Fatalf("total backoff %v is shorter than a controller restart window", total)
+		}
+	}()
+
+	err := SubmitResult([]byte("failing result"))
+	if err == nil {
+		t.Fatal("expected error after all retries exhausted")
 	}
 }

@@ -113,6 +113,7 @@ func TestPrepareTaskSessionCompositeStoreEstablishesGatewayLineage(t *testing.T)
 		expectedPrompt:               gatewayPrompt,
 		expectedTranscriptMessageIDs: []string{throughMessageID},
 		expectSkipTranscriptAppend:   true,
+		finalizeGatewayEventID:       eventID,
 		seedTranscript: func(ctx context.Context, transcripts *sqlite.Store) {
 			now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
 			if _, created, err := transcripts.AdmitGatewayEvent(ctx, store.GatewayEventAdmission{
@@ -187,6 +188,7 @@ type sessionCompositeTestOptions struct {
 	expectedPrompt               string
 	expectedTranscriptMessageIDs []string
 	expectSkipTranscriptAppend   bool
+	finalizeGatewayEventID       string
 	seedTranscript               func(context.Context, *sqlite.Store)
 }
 
@@ -323,5 +325,74 @@ func testPrepareTaskSessionCompositeStoreOpensTurn(
 				t.Fatalf("transcript message %d ID = %q, want %q", i, record.Messages[i].ID, wantID)
 			}
 		}
+	}
+	if options.finalizeGatewayEventID != "" {
+		testFinalizeGatewaySessionComposite(t, ctx, dispatcher, sqliteStore, session.Turn, fence, options.finalizeGatewayEventID)
+	}
+}
+
+func testFinalizeGatewaySessionComposite(
+	t sessionCompositeTestTB, ctx context.Context, dispatcher *ACPDispatcher, transcripts *sqlite.Store,
+	turn *ACPSessionTurn, fence store.ControllerEpochFence, eventID string,
+) {
+	t.Helper()
+	event, err := transcripts.GetGatewayEvent(ctx, turn.Lease.Session.Namespace, eventID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	from := store.PromptExecutionSessionStarting
+	for _, to := range []store.PromptExecutionState{
+		store.PromptExecutionPlanned, store.PromptExecutionSubmitting, store.PromptExecutionAccepted,
+		store.PromptExecutionRunning, store.PromptExecutionSettling, store.PromptExecutionSucceeded,
+	} {
+		if err := dispatcher.transitionAttempt(ctx, turn.Turn.PromptAttemptID, fence, from, to, "complete-"+string(to), nil); err != nil {
+			t.Fatal(err)
+		}
+		from = to
+	}
+	request := ACPFinalizeAssistantRequest{
+		SessionTurn: *turn, Fence: fence, AssistantResult: "gateway answer",
+		Projection: acpSessionProjectionForTest("gateway-composite", "Succeeded"), FinalizedAt: time.Now().UTC(),
+	}
+	for range 2 {
+		if _, err := dispatcher.Sessions.FinalizeAssistantResult(ctx, request); err != nil {
+			t.Fatal(err)
+		}
+		session, err := transcripts.GetSession(ctx, event.Namespace, event.SessionName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if session.ActiveTask != event.TaskName || session.ActiveTaskUID != event.TaskUID {
+			t.Fatalf("ACP finalization released Gateway ownership before projection: name=%q UID=%q", session.ActiveTask, session.ActiveTaskUID)
+		}
+		if len(session.Messages) != 1 || session.Messages[0].ID != store.GatewayUserMessageID(event.ID) {
+			t.Fatalf("ACP finalization changed the Gateway transcript: %#v", session.Messages)
+		}
+	}
+	projection := store.GatewayTerminalProjection{
+		EventID: event.ID, CompletedAt: request.FinalizedAt,
+		Message: store.SessionMessage{ID: store.GatewayAssistantMessageID(event.ID), Role: "assistant", Content: request.AssistantResult},
+		Delivery: store.GatewayDelivery{
+			ID: "gateway-composite-delivery", IdempotencyID: "gateway-composite-delivery",
+			Namespace: event.Namespace, NamespaceUID: event.NamespaceUID,
+			GatewayUID: event.GatewayUID, GatewayGeneration: event.GatewayGeneration, GatewayName: event.GatewayName,
+			EventID: event.ID, TaskName: event.TaskName, SessionName: event.SessionName,
+			Kind: "final", AccountID: event.AccountID, ContextID: event.ContextID, ReplyTarget: event.ContextID,
+			Text: request.AssistantResult, MaxAttempts: 3, NextAttemptAt: request.FinalizedAt,
+			ExpiresAt: request.FinalizedAt.Add(time.Hour), CreatedAt: request.FinalizedAt, UpdatedAt: request.FinalizedAt,
+		},
+	}
+	for i := range 2 {
+		if _, created, err := transcripts.ProjectGatewayTerminal(ctx, projection); err != nil || created != (i == 0) {
+			t.Fatalf("Gateway projection %d: created=%v err=%v", i, created, err)
+		}
+	}
+	session, err := transcripts.GetSession(ctx, event.Namespace, event.SessionName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.ActiveTask != "" || session.ActiveTaskUID != "" || len(session.Messages) != 2 ||
+		session.Messages[1].ID != store.GatewayAssistantMessageID(event.ID) {
+		t.Fatalf("Gateway projection did not atomically release ownership and append one reply: %#v", session)
 	}
 }

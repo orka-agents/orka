@@ -107,6 +107,22 @@ type SessionStore interface {
 	UpdateTokenCounts(ctx context.Context, namespace, name string, inputTokens, outputTokens int) error
 }
 
+// SessionTurnCommitter reserves chat turns and atomically commits their
+// transcript messages with token usage. The expected message count fences the
+// session revision observed after acquiring the turn lease.
+type SessionTurnCommitter interface {
+	AcquireChatTurn(ctx context.Context, session *SessionRecord, turnID string, expiresAt time.Time) (created bool, err error)
+	ReleaseChatTurn(ctx context.Context, namespace, name, turnID string, deleteEmptyCreatedSession bool) error
+	CommitSessionTurn(
+		ctx context.Context,
+		session *SessionRecord,
+		turnID string,
+		expectedMessageCount int,
+		messages []SessionMessage,
+		inputTokens, outputTokens int,
+	) error
+}
+
 // ExpiringSessionLockStore supports crash-recoverable transient locks. Durable
 // Task locks continue to use SessionStore.AcquireLock without an expiry.
 type ExpiringSessionLockStore interface {
@@ -114,7 +130,7 @@ type ExpiringSessionLockStore interface {
 }
 
 // FencedSessionWriteStore binds transcript and token writes to the exact active
-// transient lock owner so an expired request cannot write after takeover.
+// Task or transient lock owner so a stale owner cannot write after takeover.
 type FencedSessionWriteStore interface {
 	AppendMessagesWithLock(ctx context.Context, namespace, name, ownerName, ownerUID string, messages []SessionMessage) error
 	UpdateTokenCountsWithLock(ctx context.Context, namespace, name, ownerName, ownerUID string, inputTokens, outputTokens int) error

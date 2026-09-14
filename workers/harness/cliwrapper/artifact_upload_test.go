@@ -1,6 +1,7 @@
 package cliwrapper
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -52,7 +53,7 @@ func TestUploadTurnArtifactsSendsCurrentTurnCapability(t *testing.T) {
 	artifactDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(artifactDir, upload.Filename), upload.Data, 0o600))
 	server := &Server{config: Config{AuthValue: bearer}}
-	require.NoError(t, server.uploadTurnArtifacts(TurnContext{
+	require.NoError(t, server.uploadTurnArtifacts(context.Background(), TurnContext{
 		Namespace: request.Namespace, TaskName: request.TaskName, TurnID: string(request.TurnID), Metadata: request.Metadata,
 	}, artifactDir))
 	select {

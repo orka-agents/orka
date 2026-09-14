@@ -458,12 +458,14 @@ workers:
     image:
       repository: ghcr.io/orka-agents/orka/ai-worker
       tag: "0.1.1"
+      digest: ""
       pullPolicy: IfNotPresent
 
   general:
     image:
       repository: ghcr.io/orka-agents/orka/general-worker
       tag: "0.1.1"
+      digest: ""
 
 # GitHub webhook and label-trigger configuration.
 # Configure a repository webhook to POST to /webhooks/github with the secret below.

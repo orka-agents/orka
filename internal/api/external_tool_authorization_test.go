@@ -665,7 +665,12 @@ func TestExternalToolChatRunningTaskCheckUsesCallerPermissions(t *testing.T) {
 				cfg.MaxIterations = 1
 				handler := newTestChatHandler(t, backend, newTestSessionStore(t), results, cfg)
 				provider := &chatMockProvider{}
-				_, _, _, err := handler.runToolLoop(context.Background(), provider, []llm.Message{{Role: "user", Content: "continue"}}, "", nil, executor, "chat-session", externalToolNamespace, "test-model", 0, 100, 0, nil)
+				turnID, _, created, err := handler.reserveChatTurn(context.Background(), externalToolNamespace, "chat-session")
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { handler.releaseChatTurn(externalToolNamespace, "chat-session", turnID, created) })
+				_, _, _, err = handler.runToolLoop(context.Background(), provider, []llm.Message{{Role: "user", Content: "continue"}}, "", nil, executor, "chat-session", externalToolNamespace, "test-model", 0, 100, 0, nil, turnID)
 				if err != nil {
 					t.Fatal(err)
 				}

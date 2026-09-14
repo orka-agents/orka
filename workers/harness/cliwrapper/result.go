@@ -130,7 +130,7 @@ func wrapperArtifactsDir() string {
 	return "/tmp/artifacts"
 }
 
-func (s *Server) uploadTurnArtifacts(turn TurnContext, artifactDir string) error {
+func (s *Server) uploadTurnArtifacts(ctx context.Context, turn TurnContext, artifactDir string) error {
 	resolvedArtifactDir := firstNonEmpty(artifactDir, wrapperArtifactsDir())
 	if err := prepareArtifactsForWrapper(resolvedArtifactDir); err != nil {
 		return fmt.Errorf("prepare artifacts for wrapper upload: %w", err)
@@ -143,7 +143,7 @@ func (s *Server) uploadTurnArtifacts(turn TurnContext, artifactDir string) error
 	defer restoreTaskName()
 	restoreTaskNamespace := setTemporaryEnv(workerenv.TaskNamespace, turn.Namespace)
 	defer restoreTaskNamespace()
-	return common.UploadArtifactsWithRequestAuthorization(func(request *http.Request, data []byte) error {
+	return common.UploadArtifactsWithRequestAuthorizationContext(ctx, func(request *http.Request, data []byte) error {
 		bearer, err := s.currentAuthValue()
 		if err != nil {
 			return fmt.Errorf("harness artifact authority unavailable")

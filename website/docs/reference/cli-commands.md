@@ -4399,7 +4399,8 @@ Usage:
   orka task artifacts <task-name> [flags]
 
 Flags:
-  -h, --help   help for artifacts
+  -h, --help            help for artifacts
+  -o, --output string   Output format: table, json, yaml (default "table")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file

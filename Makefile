@@ -96,7 +96,7 @@ manifests: controller-gen kustomize ## Generate canonical and staged manifests.
 .PHONY: release-manifest
 release-manifest: ## Prepare staging manifests for NEWVERSION=vX.Y.Z[-beta.N|-rc.N].
 	@test -n "$(NEWVERSION)" || { echo "NEWVERSION is required" >&2; exit 2; }
-	python3 scripts/update-release-version.py "$(NEWVERSION)"
+	go run ./cmd/build/release update-version "$(NEWVERSION)"
 	$(MAKE) manifests
 
 .PHONY: promote-staging-manifest

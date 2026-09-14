@@ -531,6 +531,7 @@ func TestGatewayMaintenanceCompactsSessionHistoryIntoBoundedTombstone(t *testing
 	now := time.Now().UTC().Truncate(time.Second)
 	completedAt := now.Add(-31 * 24 * time.Hour)
 	event := testGatewayEvent(completedAt.Add(-time.Hour), "compacted")
+	event.BindingUID = testGatewayBindingUID
 	event.ExpiresAt = completedAt
 	if _, _, err := s.AdmitGatewayEvent(ctx, store.GatewayEventAdmission{
 		Event: event, AppendUserMessage: true, PendingLimit: 100,

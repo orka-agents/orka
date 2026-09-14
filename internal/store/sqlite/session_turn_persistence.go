@@ -138,15 +138,8 @@ func (s *Store) CommitSessionTurnFinalization(ctx context.Context, request store
 			return nil, err
 		}
 	}
-	sessionResult, err := tx.ExecContext(ctx,
-		`UPDATE sessions SET message_count = message_count + ?, active_task = '', updated_at = ?
-		 WHERE namespace = ? AND name = ?`,
-		messageCountDelta, normalized.FinalizedAt, normalized.Namespace, normalized.SessionName,
-	)
-	if err != nil {
-		return nil, err
-	}
-	if err := rowsAffectedExactlyOne(sessionResult, "session transcript finalization"); err != nil {
+	if err := finalizeSessionTranscriptTx(ctx, tx, normalized.Namespace, normalized.SessionName,
+		normalized.Key.TaskUID, messageCountDelta, normalized.FinalizedAt); err != nil {
 		return nil, err
 	}
 	turnResult, err := tx.ExecContext(ctx,
@@ -190,6 +183,30 @@ func (s *Store) CommitSessionTurnFinalization(ctx context.Context, request store
 		return nil, err
 	}
 	return &turn, nil
+}
+
+func finalizeSessionTranscriptTx(ctx context.Context, tx *sql.Tx, namespace, name, taskUID string, messageCountDelta int, finalizedAt time.Time) error {
+	result, err := tx.ExecContext(ctx,
+		`UPDATE sessions SET message_count = message_count + ?, updated_at = ?
+		 WHERE namespace = ? AND name = ?`,
+		messageCountDelta, finalizedAt, namespace, name,
+	)
+	if err != nil {
+		return err
+	}
+	if err := rowsAffectedExactlyOne(result, "session transcript finalization"); err != nil {
+		return err
+	}
+	// Gateway projection owns the canonical transcript and releases its Task
+	// lock atomically with the terminal message. Ordinary finalization releases
+	// only this Task UID, including the legacy UID-in-active_task representation.
+	_, err = tx.ExecContext(ctx,
+		`UPDATE sessions SET active_task = '', active_task_uid = '', active_task_expires_at = NULL
+		 WHERE namespace = ? AND name = ? AND session_type <> ? AND owner_type <> ?
+		   AND (active_task_uid = ? OR (active_task_uid = '' AND active_task = ?))`,
+		namespace, name, store.SessionTypeGateway, gatewaySessionOwnerType, taskUID, taskUID,
+	)
+	return err
 }
 
 // ActivateSessionTurnProjection makes the deferred terminal projection

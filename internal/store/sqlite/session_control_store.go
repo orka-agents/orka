@@ -793,16 +793,8 @@ func (s *Store) FinalizeSessionTurn(ctx context.Context, request store.FinalizeS
 			return nil, err
 		}
 	}
-	legacyResult, err := tx.ExecContext(ctx,
-		`UPDATE sessions
-		 SET message_count = message_count + ?, active_task = '', updated_at = ?
-		 WHERE namespace = ? AND name = ? AND active_task = ?`,
-		messageCountDelta, request.FinalizedAt, control.Namespace, control.SessionName, request.Key.TaskUID,
-	)
-	if err != nil {
-		return nil, err
-	}
-	if err := rowsAffectedExactlyOne(legacyResult, "session transcript finalization"); err != nil {
+	if err := finalizeSessionTranscriptTx(ctx, tx, control.Namespace, control.SessionName,
+		request.Key.TaskUID, messageCountDelta, request.FinalizedAt); err != nil {
 		return nil, err
 	}
 

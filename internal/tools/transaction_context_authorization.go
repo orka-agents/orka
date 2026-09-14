@@ -10,7 +10,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/acp"
-	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/aitools"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -604,63 +604,12 @@ func childTransactionRuntimeToolsUnrestricted(tools []string) bool {
 }
 
 func childTransactionEffectiveAITools(child *corev1alpha1.Task, agent *corev1alpha1.Agent) []string {
-	tools := []string{}
-	if agent != nil {
-		for _, tool := range agent.Spec.Tools {
-			if tool.Enabled != nil && !*tool.Enabled {
-				continue
-			}
-			if strings.TrimSpace(tool.Name) != "" {
-				tools = append(tools, tool.Name)
-			}
-		}
-		if !childTransactionRuntimeRefAgent(agent) && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled &&
-			child.Annotations[labels.AnnotationDisableCoordinationToolInject] != trueStr {
-			for _, tool := range transactionCoordinationToolNames() {
-				if !slices.Contains(tools, tool) {
-					tools = append(tools, tool)
-				}
-			}
-		}
-	}
-	if child.Spec.AI != nil {
-		for _, tool := range child.Spec.AI.Tools {
-			if strings.TrimSpace(tool) != "" {
-				tools = append(tools, tool)
-			}
-		}
-	}
-	if child.Spec.Type == corev1alpha1.TaskTypeAI {
-		for _, tool := range transactionMemoryToolNames() {
-			if !slices.Contains(tools, tool) {
-				tools = append(tools, tool)
-			}
-		}
-	}
-	messagingCapable := child.Spec.Type == corev1alpha1.TaskTypeAI || child.Spec.Type == corev1alpha1.TaskTypeAgent
-	if _, delegatedChild := child.Labels[labels.LabelParentTask]; messagingCapable && delegatedChild &&
-		!childTransactionRuntimeRefAgent(agent) && child.Annotations[labels.AnnotationDisableCoordinationToolInject] != trueStr {
-		for _, tool := range []string{sendMessageToolName, checkMessagesToolName} {
-			if !slices.Contains(tools, tool) {
-				tools = append(tools, tool)
-			}
-		}
-	}
-	return tools
+	return aitools.Resolve(child, agent)
 }
 
 func childTransactionRuntimeRefAgent(agent *corev1alpha1.Agent) bool {
 	return agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.RuntimeRef != nil &&
 		strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != ""
-}
-
-func transactionMemoryToolNames() []string {
-	return []string{
-		"recall_memory",
-		"remember",
-		"propose_memory",
-		"search_transcript",
-	}
 }
 
 func childTransactionAgentRuntimeAllowedTools(agent *corev1alpha1.Agent) []string {
@@ -722,32 +671,6 @@ func childTransactionEffectiveRuntimePolicy(child *corev1alpha1.Task, agent *cor
 	allowedTools, disallowedTools, allowBash = acp.NormalizeOpenCodeToolPolicy(readIntent, allowedTools, disallowedTools, allowBash)
 	allowedTools = acp.OpenCodeEffectiveAllowedTools(allowedTools, disallowedTools, allowBash)
 	return allowedTools, allowBash && slices.Contains(allowedTools, "bash")
-}
-
-func transactionCoordinationToolNames() []string {
-	return []string{
-		"delegate_task",
-		"wait_for_tasks",
-		"create_container_task",
-		"cancel_task",
-		"send_message",
-		"check_messages",
-		"recall_memory",
-		"remember",
-		"propose_memory",
-		"search_transcript",
-		"create_pull_request",
-		"list_pull_requests",
-		"check_pr_review_marker",
-		"check_pull_request_ci",
-		"merge_pull_request",
-		"auto_merge_pull_request",
-		"review_pull_request",
-		"post_review_comment",
-		"create_agent",
-		"delete_agent",
-		"update_plan",
-	}
 }
 
 func transactionContextStringList(value string) ([]string, bool) {

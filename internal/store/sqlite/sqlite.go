@@ -113,8 +113,10 @@ func currentSchemaStatements() []string {
 			active_task            TEXT NOT NULL DEFAULT '',
 			active_task_uid        TEXT NOT NULL DEFAULT '',
 			active_task_expires_at TIMESTAMP,
+			chat_turn_id           TEXT NOT NULL DEFAULT '',
+			chat_turn_expires_at   TIMESTAMP,
 			control_session_uid    TEXT NOT NULL DEFAULT '',
-			message_count   INTEGER NOT NULL DEFAULT 0,
+			message_count         INTEGER NOT NULL DEFAULT 0,
 			input_tokens  INTEGER NOT NULL DEFAULT 0,
 			output_tokens INTEGER NOT NULL DEFAULT 0,
 			cancelled     BOOLEAN NOT NULL DEFAULT FALSE,
@@ -953,6 +955,7 @@ func currentSchemaStatements() []string {
 	}
 
 	statements = append(statements, controlSchemaStatements()...)
+	statements = append(statements, gatewayTaskCleanupSchemaStatements()...)
 	return append(statements, agentExecutionSchemaStatements()...)
 }
 

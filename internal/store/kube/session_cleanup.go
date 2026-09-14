@@ -27,6 +27,23 @@ var ErrSessionCleanupStoreNotConfigured = errors.New("session cleanup persistenc
 // Runtime I/O holds only the per-Session lock. Reclamation reacquires the same
 // controller epoch and revalidates the entire intent before removing authority.
 func (s *Store) ReclaimSession(ctx context.Context, request store.ReclaimSessionRequest) error {
+	return s.reclaimSession(ctx, request, nil)
+}
+
+// ReclaimGatewaySession is the retention-only entry point. The generic Session
+// API cannot opt into Gateway cleanup or replay its durable intents.
+func (s *Store) ReclaimGatewaySession(ctx context.Context, request store.ReclaimGatewaySessionRequest) error {
+	candidate := request.Session
+	operationID, operationDigest := store.GatewaySessionCleanupOperation(
+		candidate.Namespace, candidate.SessionName, candidate.SessionUID, candidate.Proof.GatewayUID, candidate.Proof.BindingUID,
+	)
+	return s.reclaimSession(ctx, store.ReclaimSessionRequest{
+		Namespace: candidate.Namespace, SessionName: candidate.SessionName, Fence: request.Fence,
+		OperationID: operationID, OperationDigest: operationDigest, RequestedAt: request.RequestedAt,
+	}, &candidate)
+}
+
+func (s *Store) reclaimSession(ctx context.Context, request store.ReclaimSessionRequest, gateway *store.GatewaySessionCleanupCandidate) error {
 	if err := s.requireClient(); err != nil {
 		return err
 	}
@@ -45,7 +62,7 @@ func (s *Store) ReclaimSession(ctx context.Context, request store.ReclaimSession
 	var intent *store.SessionCleanupIntent
 	if err := s.WithControllerEpochMutation(ctx, request.Fence, func(writeCtx context.Context) error {
 		var loadErr error
-		intent, loadErr = s.loadOrPrepareSessionCleanupIntent(writeCtx, request)
+		intent, loadErr = s.loadOrPrepareSessionCleanupIntent(writeCtx, request, gateway)
 		return loadErr
 	}); err != nil {
 		return err
@@ -98,11 +115,14 @@ func (s *Store) ReclaimSession(ctx context.Context, request store.ReclaimSession
 	})
 }
 
-func (s *Store) loadOrPrepareSessionCleanupIntent(ctx context.Context, request store.ReclaimSessionRequest) (*store.SessionCleanupIntent, error) {
+func (s *Store) loadOrPrepareSessionCleanupIntent(ctx context.Context, request store.ReclaimSessionRequest, gateway *store.GatewaySessionCleanupCandidate) (*store.SessionCleanupIntent, error) {
 	intent, err := s.sessionCleanup.GetSessionCleanupIntent(ctx, request.Namespace, request.SessionName)
 	if errors.Is(err, store.ErrNotFound) {
 		completion, completionErr := s.sessionCleanup.GetSessionCleanupCompletion(ctx, request.Namespace, request.SessionName)
 		if completionErr == nil {
+			if gateway == nil && strings.HasPrefix(completion.OperationID, store.GatewaySessionCleanupOperationPrefix) {
+				return nil, store.ErrGatewayOwnedSession
+			}
 			if completion.OperationID != request.OperationID || completion.OperationDigest != request.OperationDigest {
 				return nil, store.ConflictErrorf("session cleanup for %s/%s completed under a different operation", request.Namespace, request.SessionName)
 			}
@@ -111,10 +131,18 @@ func (s *Store) loadOrPrepareSessionCleanupIntent(ctx context.Context, request s
 		if !errors.Is(completionErr, store.ErrNotFound) {
 			return nil, completionErr
 		}
-		intent, err = s.prepareSessionCleanupIntent(ctx, request)
+		intent, err = s.prepareSessionCleanupIntent(ctx, request, gateway)
 	}
 	if err != nil {
 		return nil, err
+	}
+	if gateway == nil && intent.Gateway != nil {
+		return nil, store.ErrGatewayOwnedSession
+	}
+	if gateway != nil && (intent.Gateway == nil || intent.SessionUID != gateway.SessionUID ||
+		intent.Gateway.GatewayUID != gateway.Proof.GatewayUID || intent.Gateway.BindingUID != gateway.Proof.BindingUID ||
+		!intent.Gateway.CreatedAt.Equal(gateway.Proof.CreatedAt) || intent.Gateway.TerminalCutoff.After(gateway.Proof.TerminalCutoff)) {
+		return nil, store.ConflictErrorf("Gateway session cleanup identity changed")
 	}
 	if intent.OperationID != request.OperationID || intent.OperationDigest != request.OperationDigest {
 		return nil, store.ConflictErrorf("session cleanup for %s/%s belongs to a different operation", request.Namespace, request.SessionName)
@@ -168,10 +196,17 @@ func (s *Store) ResumeSessionCleanups(ctx context.Context, fence store.Controlle
 	}
 	var result error
 	for _, intent := range intents {
-		reclaimErr := s.ReclaimSession(ctx, store.ReclaimSessionRequest{
+		request := store.ReclaimSessionRequest{
 			Namespace: intent.Namespace, SessionName: intent.SessionName, Fence: fence,
 			OperationID: intent.OperationID, OperationDigest: intent.OperationDigest, RequestedAt: intent.PreparedAt,
-		})
+		}
+		var gateway *store.GatewaySessionCleanupCandidate
+		if intent.Gateway != nil {
+			gateway = &store.GatewaySessionCleanupCandidate{
+				Namespace: intent.Namespace, SessionName: intent.SessionName, SessionUID: intent.SessionUID, Proof: *intent.Gateway,
+			}
+		}
+		reclaimErr := s.reclaimSession(ctx, request, gateway)
 		if reclaimErr != nil {
 			result = errors.Join(result, fmt.Errorf("resume Session cleanup %s/%s: %w", intent.Namespace, intent.SessionName, reclaimErr))
 		}
@@ -179,17 +214,32 @@ func (s *Store) ResumeSessionCleanups(ctx context.Context, fence store.Controlle
 	return result
 }
 
-func (s *Store) prepareSessionCleanupIntent(ctx context.Context, request store.ReclaimSessionRequest) (*store.SessionCleanupIntent, error) {
+func (s *Store) prepareSessionCleanupIntent(ctx context.Context, request store.ReclaimSessionRequest, gateway *store.GatewaySessionCleanupCandidate) (*store.SessionCleanupIntent, error) {
 	intent := store.SessionCleanupIntent{
 		Namespace: request.Namespace, SessionName: request.SessionName,
 		OperationID: request.OperationID, OperationDigest: request.OperationDigest,
 		PreparedAt: request.RequestedAt,
+	}
+	if gateway != nil {
+		proof := gateway.Proof
+		intent.Gateway = &proof
+	}
+	persist := func() (*store.SessionCleanupIntent, error) {
+		if gateway != nil && intent.SessionUID != gateway.SessionUID {
+			return nil, store.ConflictErrorf("Gateway session cleanup control identity changed")
+		}
+		return s.sessionCleanup.PrepareSessionCleanup(ctx, intent)
 	}
 	object, err := s.getSessionControlObject(ctx, request.Namespace, request.SessionName)
 	if errors.Is(err, store.ErrNotFound) {
 		sessionUID, identityErr := s.sessionCleanup.GetSessionCleanupIdentity(ctx, request.Namespace, request.SessionName)
 		if identityErr != nil && !errors.Is(identityErr, store.ErrNotFound) {
 			return nil, identityErr
+		}
+		if sessionUID == "" && gateway != nil {
+			// Legacy Gateway rows may predate the transcript UID binding. The
+			// SQLite transaction requires every stored turn to prove this UID.
+			sessionUID = gateway.SessionUID
 		}
 		if strings.TrimSpace(sessionUID) != "" {
 			claims, claimErr := s.sessionBranchClaimCleanupPlan(ctx, sessionUID)
@@ -214,9 +264,9 @@ func (s *Store) prepareSessionCleanupIntent(ctx context.Context, request store.R
 			} else if !apierrors.IsNotFound(leaseErr) {
 				return nil, mapKubernetesError("get orphan Session cleanup Lease", leaseErr)
 			}
-			return s.sessionCleanup.PrepareSessionCleanup(ctx, intent)
+			return persist()
 		}
-		return s.sessionCleanup.PrepareSessionCleanup(ctx, intent)
+		return persist()
 	}
 	if err != nil {
 		return nil, err
@@ -251,7 +301,7 @@ func (s *Store) prepareSessionCleanupIntent(ctx context.Context, request store.R
 	intent.LeaseName = lease.Name
 	intent.LeaseObjectUID = string(lease.UID)
 	intent.BranchClaims = claims
-	return s.sessionCleanup.PrepareSessionCleanup(ctx, intent)
+	return persist()
 }
 
 func (s *Store) sessionBranchClaimCleanupPlan(

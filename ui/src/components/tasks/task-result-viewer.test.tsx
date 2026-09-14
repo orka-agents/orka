@@ -67,6 +67,80 @@ describe('TaskResultViewer', () => {
     })
   })
 
+  it('holds the loading state while the first request is unresolved', async () => {
+    let release: (value: unknown) => void = () => {}
+    const gate = new Promise((resolve) => { release = resolve })
+    server.use(
+      http.get('/api/v1/tasks/:id/result', async () => {
+        await gate
+        return HttpResponse.json({ result: 'held result' })
+      }),
+    )
+    const user = userEvent.setup()
+    render(<TaskResultViewer taskId="task-held" />)
+    await user.click(screen.getByText('Load Result'))
+    await waitFor(() => {
+      expect(screen.getByTestId('result-loading')).toBeInTheDocument()
+    })
+    expect(screen.queryByText('held result')).not.toBeInTheDocument()
+    release('')
+    await waitFor(() => {
+      expect(screen.getByText('held result')).toBeInTheDocument()
+    })
+  })
+
+  it('shows a server error with Retry and recovers on retry', async () => {
+    server.use(
+      http.get('/api/v1/tasks/:id/result', () =>
+        HttpResponse.json({ error: { code: 500, message: 'result store failed' } }, { status: 500 }),
+      ),
+    )
+    const user = userEvent.setup()
+    render(<TaskResultViewer taskId="task-err" />)
+    await user.click(screen.getByText('Load Result'))
+    await waitFor(() => {
+      expect(screen.getByTestId('result-error')).toHaveTextContent('result store failed')
+    })
+    expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument()
+    expect(screen.queryByText('No result available', { exact: false })).not.toBeInTheDocument()
+
+    server.use(
+      http.get('/api/v1/tasks/:id/result', () => HttpResponse.json({ result: 'recovered' })),
+    )
+    await user.click(screen.getByRole('button', { name: /retry/i }))
+    await waitFor(() => {
+      expect(screen.getByText('recovered')).toBeInTheDocument()
+    })
+  })
+
+  it('shows a distinct unavailable state on 404', async () => {
+    server.use(
+      http.get('/api/v1/tasks/:id/result', () =>
+        HttpResponse.json({ message: 'not found' }, { status: 404 }),
+      ),
+    )
+    const user = userEvent.setup()
+    render(<TaskResultViewer taskId="task-missing" />)
+    await user.click(screen.getByText('Load Result'))
+    await waitFor(() => {
+      expect(screen.getByTestId('result-error')).toHaveTextContent('No result available for this task yet.')
+    })
+    expect(screen.getByRole('button', { name: /load result/i })).toBeInTheDocument()
+  })
+
+  it('shows a network failure with Retry', async () => {
+    server.use(
+      http.get('/api/v1/tasks/:id/result', () => HttpResponse.error()),
+    )
+    const user = userEvent.setup()
+    render(<TaskResultViewer taskId="task-net" />)
+    await user.click(screen.getByText('Load Result'))
+    await waitFor(() => {
+      expect(screen.getByTestId('result-error')).toBeInTheDocument()
+    })
+    expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument()
+  })
+
   it('renders structured result with verdict badge', async () => {
     const structured = JSON.stringify({
       summary: 'All tests pass',

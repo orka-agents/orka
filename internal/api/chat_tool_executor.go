@@ -29,7 +29,11 @@ import (
 	"github.com/orka-agents/orka/internal/tools"
 )
 
-const taskCreatedMsg = "Task created"
+const (
+	taskCreatedMsg       = "Task created"
+	toolNamespaceArg     = "namespace"
+	chatCreateAITaskTool = "create_ai_task"
+)
 
 // ToolExecutor executes orchestrator LLM tool calls by creating and managing
 // Kubernetes resources (Tasks, Agents, Tools, Sessions).
@@ -167,6 +171,29 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 		resultStr, marshalErr := marshalResult(result)
 		recordRejectedToolCall(ctx, toolCall, resultStr)
 		return resultStr, marshalErr
+	}
+	// Match the effective string values used by the tools when constructing Tasks.
+	targetNamespace := e.namespace
+	if value, present := args[toolNamespaceArg]; present && fmt.Sprint(value) != "" {
+		targetNamespace = fmt.Sprint(value)
+	}
+	var sessionRef string
+	if value, present := args["sessionRef"]; present {
+		sessionRef = fmt.Sprint(value)
+	}
+	// Scheduled parents do not acquire the session lock, and their future runs
+	// are not part of this chat turn's wait set.
+	var schedule string
+	if value, present := args["schedule"]; present {
+		schedule = fmt.Sprint(value)
+	}
+	if toolCall.Name == chatCreateAITaskTool && schedule == "" &&
+		strings.TrimSpace(sessionRef) != "" && targetNamespace == e.namespace &&
+		strings.TrimSpace(sessionRef) == strings.TrimSpace(e.sessionID) {
+		result := toolError("invalid_arguments", "child task sessionRef cannot reuse the active chat session", "Use a different session name or omit sessionRef")
+		resultStr, err := marshalResult(result)
+		recordRejectedToolCall(ctx, toolCall, resultStr)
+		return resultStr, err
 	}
 
 	toolCtx, cancel := context.WithTimeout(ctx, e.toolTimeout)

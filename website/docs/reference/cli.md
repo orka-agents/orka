@@ -55,9 +55,10 @@ Many read/list commands support `-o table`, `-o json`, and/or `-o yaml`. Prefer 
 orka task list -o json
 orka provider list -o yaml
 orka session get SESSION_ID -o json
+orka task artifacts example-task -o json
 ```
 
-Do not rely on full table layouts in automation; table output is optimized for people.
+Do not rely on full table layouts in automation; table output is optimized for people. `orka task artifacts` keeps the table as its default and accepts `-o json` or `-o yaml` when a script needs artifact metadata (filename, content type, byte size, and creation time).
 
 ## Task workflows
 
@@ -356,6 +357,16 @@ orka completion fish > ~/.config/fish/completions/orka.fish
 ```
 
 Regenerate completions after upgrading `orka` if commands or flags change.
+
+Several flags offer value completion, so Tab suggests the valid choices without consulting the server:
+
+```bash
+orka task list --output <TAB>   # table, json, yaml
+orka task create --type <TAB>   # ai, container, agent
+orka task list --status <TAB>   # Pending, Running, Finalizing, ...
+```
+
+`task download --output` is left out on purpose: there the flag names a destination file, so completion keeps suggesting files.
 
 ## Other utility commands
 

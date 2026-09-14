@@ -134,7 +134,6 @@ func TestWaitForTaskPhaseContextCancellation(t *testing.T) {
 	err := waitForTaskPhase(
 		ctx,
 		"my-task",
-		nil,
 		time.Millisecond,
 		func(context.Context) (string, error) {
 			return "Running", nil

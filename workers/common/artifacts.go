@@ -7,7 +7,7 @@ MIT License - see LICENSE file for details.
 package common
 
 import (
-	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"io/fs"
@@ -35,6 +35,12 @@ const (
 	maxFileSize               = 10 << 20 // 10 MB
 	artifactPath              = "internal/v1/artifacts"
 )
+
+type pendingArtifact struct {
+	filename    string
+	data        []byte
+	contentType string
+}
 
 func artifactsDir() string {
 	if dir := strings.TrimSpace(os.Getenv(artifactsDirEnv)); dir != "" {
@@ -161,16 +167,34 @@ func artifactFilename(filename string) (string, error) {
 }
 
 // UploadArtifacts scans /tmp/artifacts and uploads each file to the controller.
-// It is called after SubmitResult to persist any files the agent wrote.
-// Returns nil if the artifacts directory does not exist or is empty.
+// It preserves the legacy background-context behavior for callers without a
+// worker lifecycle context.
 func UploadArtifacts() error {
-	return UploadArtifactsWithRequestAuthorization(nil)
+	return UploadArtifactsContext(context.Background())
 }
 
-// UploadArtifactsWithRequestAuthorization applies wrapper-only authorization
-// to each request after the artifact bytes are fixed, including on retries.
-// The callback runs in the uploader and is never passed to an agent process.
+// UploadArtifactsContext scans the artifacts directory and uploads each file
+// using the worker lifecycle context. It returns nil when the directory does
+// not exist or is empty.
+func UploadArtifactsContext(ctx context.Context) error {
+	return UploadArtifactsWithRequestAuthorizationContext(ctx, nil)
+}
+
+// UploadArtifactsWithRequestAuthorization applies wrapper-only authorization to every request.
 func UploadArtifactsWithRequestAuthorization(authorize func(*http.Request, []byte) error) error {
+	return UploadArtifactsWithRequestAuthorizationContext(context.Background(), authorize)
+}
+
+// UploadArtifactsWithRequestAuthorizationContext signs each request, including retries,
+// and stops uploads when the worker lifecycle ends. The callback stays in the wrapper.
+func UploadArtifactsWithRequestAuthorizationContext(
+	ctx context.Context,
+	authorize func(*http.Request, []byte) error,
+) error {
+	ctx = contextOrBackground(ctx)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	artifactRoot := artifactsDir()
 	info, err := os.Lstat(artifactRoot)
 	if os.IsNotExist(err) {
@@ -214,15 +238,12 @@ func UploadArtifactsWithRequestAuthorization(authorize func(*http.Request, []byt
 
 	saToken := workerServiceAccountToken()
 
-	type pendingArtifact struct {
-		filename    string
-		data        []byte
-		contentType string
-	}
-
 	pending := make([]pendingArtifact, 0, len(entries))
 	var uploadErrors []string
 	for _, e := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if e.IsDir() {
 			continue
 		}
@@ -298,20 +319,41 @@ func UploadArtifactsWithRequestAuthorization(authorize func(*http.Request, []byt
 		})
 	}
 
+	return uploadPendingArtifacts(ctx, baseEndpoint, saToken, pending, uploadErrors, authorize)
+}
+
+func uploadPendingArtifacts(
+	ctx context.Context,
+	baseEndpoint, saToken string,
+	pending []pendingArtifact,
+	uploadErrors []string,
+	authorize func(*http.Request, []byte) error,
+) error {
 	for _, artifact := range pending {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		endpoint := fmt.Sprintf("%s/%s", baseEndpoint, url.PathEscape(artifact.filename))
-		err := postArtifactWithAuthorization(endpoint, artifact.data, saToken, artifact.contentType, authorize)
-		if err != nil {
+		if err := doPostWithRetryAuthorization(
+			ctx, "artifact upload", endpoint, artifact.data, saToken, artifact.contentType,
+			30*time.Second, retryWait, artifactMaxRetries, authorize,
+		); err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return fmt.Errorf("artifact upload canceled: %w", ctxErr)
+			}
 			fmt.Fprintf(os.Stderr, "artifact: failed to upload %s: %v\n", artifact.filename, err)
 			uploadErrors = append(uploadErrors, fmt.Sprintf("%s: %v", artifact.filename, err))
-		} else {
-			fmt.Printf("artifact: uploaded %s (%d bytes, %s)\n", artifact.filename, len(artifact.data), artifact.contentType)
+			continue
 		}
+		fmt.Printf(
+			"artifact: uploaded %s (%d bytes, %s)\n",
+			artifact.filename, len(artifact.data), artifact.contentType,
+		)
 	}
-
 	if len(uploadErrors) > 0 {
 		return fmt.Errorf("some artifacts failed to upload: %s", strings.Join(uploadErrors, "; "))
 	}
+	// Every upload succeeded; later cancellation cannot undo the completed batch.
 	return nil
 }
 
@@ -377,62 +419,6 @@ func detectContentType(filename string, data []byte) string {
 }
 
 func doPostWithContentType(endpoint string, data []byte, saToken, contentType string) error {
-	return postArtifactWithAuthorization(endpoint, data, saToken, contentType, nil)
-}
-
-func postArtifactWithAuthorization(
-	endpoint string,
-	data []byte,
-	saToken, contentType string,
-	authorize func(*http.Request, []byte) error,
-) error {
-	var lastErr error
-	for attempt := range artifactMaxRetries {
-		if attempt > 0 {
-			backoff := min(time.Duration(1<<uint(attempt))*time.Second, maxBackoff)
-			time.Sleep(backoff)
-		}
-
-		req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(data))
-		if err != nil {
-			return fmt.Errorf("failed to create request: %w", err)
-		}
-		req.Header.Set("Content-Type", contentType)
-		if saToken != "" {
-			req.Header.Set("Authorization", "Bearer "+saToken)
-		}
-		if authorize != nil {
-			if err := authorize(req, data); err != nil {
-				return fmt.Errorf("artifact request authorization failed: %w", err)
-			}
-		}
-
-		client := &http.Client{Timeout: 30 * time.Second}
-		if authorize != nil {
-			client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			lastErr = fmt.Errorf("HTTP request failed: %w", err)
-			fmt.Fprintf(os.Stderr, "artifact upload attempt %d/%d failed: %v\n", attempt+1, artifactMaxRetries, lastErr)
-			continue
-		}
-
-		_, _ = io.Copy(io.Discard, resp.Body)
-		resp.Body.Close() //nolint:errcheck
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			return nil
-		}
-
-		lastErr = &httpStatusError{Status: resp.StatusCode}
-		if permanentSubmissionError(lastErr) {
-			// The same classification as result submission: an oversized
-			// artifact, rejected credentials, or disabled storage does not
-			// change on retry.
-			return fmt.Errorf("artifact upload rejected permanently: %w", lastErr)
-		}
-		fmt.Fprintf(os.Stderr, "artifact upload attempt %d/%d failed: %v\n", attempt+1, artifactMaxRetries, lastErr)
-	}
-
-	return fmt.Errorf("all %d artifact upload attempts failed: %w", artifactMaxRetries, lastErr)
+	return doPostWithRetryAuthorization(context.Background(), "artifact upload", endpoint, data,
+		saToken, contentType, 30*time.Second, retryWait, artifactMaxRetries, nil)
 }

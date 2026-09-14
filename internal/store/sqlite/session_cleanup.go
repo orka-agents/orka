@@ -217,6 +217,9 @@ func (s *Store) PrepareSessionCleanup(ctx context.Context, intent store.SessionC
 	defer func() { _ = tx.Rollback() }()
 
 	if existing, getErr := getSessionCleanupIntentTx(ctx, tx, intent.Namespace, intent.SessionName); getErr == nil {
+		if existing.Gateway != nil && intent.Gateway == nil {
+			return nil, store.ErrGatewayOwnedSession
+		}
 		if existing.OperationID != intent.OperationID || existing.OperationDigest != intent.OperationDigest {
 			return nil, store.ConflictErrorf("session cleanup intent for %s/%s belongs to a different operation", intent.Namespace, intent.SessionName)
 		}
@@ -246,8 +249,6 @@ func (s *Store) PrepareSessionCleanup(ctx context.Context, intent store.SessionC
 
 // CompleteSessionCleanup removes SQLite-owned turn/outbox/transcript state only
 // after the caller has reclaimed the exact Kubernetes plan in the intent.
-//
-//nolint:gocyclo // Receipt, transcript, projection, cursor, and intent deletion must remain one auditable transaction.
 func (s *Store) CompleteSessionCleanup(ctx context.Context, request store.CompleteSessionCleanupRequest) error {
 	namespace := strings.TrimSpace(request.Namespace)
 	if request.Namespace != namespace {
@@ -278,6 +279,14 @@ func (s *Store) CompleteSessionCleanup(ctx context.Context, request store.Comple
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := completeSessionCleanupTx(ctx, tx, request); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+//nolint:gocyclo // Receipt, transcript, projection, cursor, and intent deletion must remain one auditable transaction.
+func completeSessionCleanupTx(ctx context.Context, tx *sql.Tx, request store.CompleteSessionCleanupRequest) error {
 	intent, err := getSessionCleanupIntentTx(ctx, tx, request.Namespace, request.SessionName)
 	if errors.Is(err, store.ErrNotFound) {
 		completion, completionErr := getSessionCleanupCompletionTx(ctx, tx, request.Namespace, request.SessionName)
@@ -312,6 +321,14 @@ func (s *Store) CompleteSessionCleanup(ctx context.Context, request store.Comple
 	}
 	if err := archiveSessionTurnCleanupReceipts(ctx, tx, *intent); err != nil {
 		return err
+	}
+	if intent.Gateway != nil {
+		// Live legacy runtime records were refused by Gateway eligibility.
+		// Only already-retired mirrors can be pruned with the transcript.
+		if _, err := tx.ExecContext(ctx, `DELETE FROM runtime_sessions WHERE namespace = ? AND session_name = ?`,
+			request.Namespace, request.SessionName); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM outbox_projections
@@ -357,8 +374,8 @@ func (s *Store) CompleteSessionCleanup(ctx context.Context, request store.Comple
 		return err
 	}
 	result, err := tx.ExecContext(ctx,
-		`DELETE FROM sessions WHERE namespace = ? AND name = ? AND session_type <> ?`,
-		request.Namespace, request.SessionName, store.SessionTypeGateway,
+		`DELETE FROM sessions WHERE namespace = ? AND name = ?`,
+		request.Namespace, request.SessionName,
 	)
 	if err != nil {
 		return err
@@ -395,7 +412,7 @@ func (s *Store) CompleteSessionCleanup(ctx context.Context, request store.Comple
 	} else if rows != 1 {
 		return store.ConflictErrorf("session cleanup intent changed before completion")
 	}
-	return tx.Commit()
+	return nil
 }
 
 //nolint:gocyclo // The durable cross-store plan validates each independent exact fence in one place.
@@ -432,6 +449,9 @@ func normalizeSessionCleanupIntent(intent *store.SessionCleanupIntent) error {
 		return store.ValidationErrorf("session cleanup preparation time is required")
 	}
 	intent.PreparedAt = intent.PreparedAt.UTC()
+	if err := validateGatewayCleanupProof(*intent); err != nil {
+		return err
+	}
 	if intent.SessionUID == "" {
 		if intent.ControlObjectUID != "" || intent.ControlRequestDigest != "" || intent.ExpectedControlVersion != 0 ||
 			intent.ExpectedLeaseGeneration != 0 || intent.LeaseName != "" || intent.LeaseObjectUID != "" ||
@@ -522,7 +542,7 @@ func validateSessionCleanupEligibilityTx(ctx context.Context, tx *sql.Tx, intent
 		 FROM sessions WHERE namespace = ? AND name = ?`,
 		intent.Namespace, intent.SessionName,
 	).Scan(&sessionType, &activeTask, &activeTaskUID, &activeTaskExpiresAt, &controlSessionUID); errors.Is(err, sql.ErrNoRows) {
-		if intent.SessionUID != "" {
+		if intent.SessionUID != "" && intent.Gateway == nil {
 			return nil
 		}
 		return store.ErrNotFound
@@ -540,7 +560,11 @@ func validateSessionCleanupEligibilityTx(ctx context.Context, tx *sql.Tx, intent
 		return store.ConflictErrorf("session %s/%s has Kubernetes cleanup identity %q but no control plan", intent.Namespace, intent.SessionName, controlSessionUID)
 	}
 	if sessionType == store.SessionTypeGateway {
-		return store.ErrGatewayOwnedSession
+		if err := validateGatewayCleanupEligibilityTx(ctx, tx, intent); err != nil {
+			return err
+		}
+	} else if intent.Gateway != nil {
+		return store.ConflictErrorf("Gateway cleanup cannot reclaim a different Session type")
 	}
 	if err := ensureSessionLockQuiescentTx(
 		ctx, tx, intent.Namespace, intent.SessionName, activeTask, activeTaskUID, activeTaskExpiresAt,

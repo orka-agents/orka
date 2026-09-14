@@ -25,6 +25,29 @@ const (
 
 func addOutputFlag(cmd *cobra.Command, defaultValue string) {
 	cmd.Flags().StringP("output", "o", defaultValue, "Output format: table, json, yaml")
+	_ = cmd.RegisterFlagCompletionFunc("output", completeOutputFormat)
+}
+
+// completeOutputFormat suggests the shared output formats for flag
+// completion, filtered by the typed prefix. Commands that treat --output as
+// a destination path (such as task download) register their own flag and
+// never reach this function.
+func completeOutputFormat(_ *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	return completeWithPrefix(toComplete, outputTable, outputJSON, outputYAML), cobra.ShellCompDirectiveNoFileComp
+}
+
+// completeWithPrefix keeps only the values that start with the typed prefix.
+func completeWithPrefix(prefix string, values ...string) []string {
+	if prefix == "" {
+		return values
+	}
+	filtered := make([]string, 0, len(values))
+	for _, value := range values {
+		if strings.HasPrefix(value, prefix) {
+			filtered = append(filtered, value)
+		}
+	}
+	return filtered
 }
 
 func outputFormat(cmd *cobra.Command) (string, error) {

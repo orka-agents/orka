@@ -2079,7 +2079,7 @@ assert_lc_task_success_tuple() {
 }
 
 # assert_lc_task_success_fence applies the complete canonical execution fence
-# (mirroring assert_task_fence in live-acp-runtime-e2e) to a successful turn:
+# (mirroring assert_task_fence in agent-runtime-e2e) to a successful turn:
 # the Task's projected pool label and identity must match the RuntimePool's
 # OWN name/UID/instance/epoch exactly, with a complete prompt identity and
 # exactly one attempt - a self-consistent but incomplete or mis-projected
@@ -2866,7 +2866,7 @@ YAML
   kubectl -n "${acp_task_namespace}" delete task orka-ws-lc-cancel --wait=false
   wait_for_jsonpath task "${acp_task_namespace}" orka-ws-lc-cancel '{.status.phase}' "Cancelled" 240
   wait_for_jsonpath task "${acp_task_namespace}" orka-ws-lc-cancel '{.status.execution.state}' "Cancelled" 120
-  # The canonical cancellation contract (live-acp-runtime-e2e) requires the
+  # The canonical cancellation contract (agent-runtime-e2e) requires the
   # full controller-owned settlement tuple, not just phase and state.
   wait_for_jsonpath task "${acp_task_namespace}" orka-ws-lc-cancel '{.status.execution.outcome}' "Cancelled" 120
   wait_for_jsonpath task "${acp_task_namespace}" orka-ws-lc-cancel '{.status.execution.reason}' "Cancelled" 120
@@ -3039,7 +3039,7 @@ YAML
   # The Task-side fence alone would let an incorrectly projected identity
   # self-compare into a pass: snapshot the RuntimePool's own identity as the
   # independent source (mirroring assert_restart_task_fence in
-  # live-acp-runtime-e2e) and require the Task fence to match it BEFORE the
+  # agent-runtime-e2e) and require the Task fence to match it BEFORE the
   # restart; the settled Task is then compared against this snapshot too.
   local restart_pool_snapshot="${work_dir}/orka-ws-lc-restart-pool.json"
   local restart_fence_pool
@@ -3084,7 +3084,7 @@ YAML
   cleanup_one_port_forward "${api_pf_pid}"
   api_pf_pid="$(start_port_forward "${orka_namespace}" "svc/${orka_api_service}" "${orka_api_local_port}" "${orka_api_service_port}" "${api_pf_log}")"
   wait_for_http "http://127.0.0.1:${orka_api_local_port}/readyz" "Orka API /readyz after controller restart"
-  # The canonical restart contract (live-acp-runtime-e2e) accepts an adopted
+  # The canonical restart contract (agent-runtime-e2e) accepts an adopted
   # completion, a clean cancellation, or a conservative Failed/OutcomeUnknown
   # settlement; the invariant is bounded settlement without replay, not
   # guaranteed completion. This provider lane additionally proves a cancelled
@@ -3164,7 +3164,7 @@ YAML
   elif [[ "${restart_phase}" == "Cancelled" && "${restart_state}" == "Cancelled" && "${restart_outcome}" == "Cancelled" ]] &&
     [[ "${restart_reason}" == "Cancelled" || "${restart_reason}" == "TaskTimeout" ]]; then
     # The canonical restart contract (assert_restart_task_settled in
-    # live-acp-runtime-e2e) accepts a clean cancellation of the interrupted
+    # agent-runtime-e2e) accepts a clean cancellation of the interrupted
     # prompt as a safe settlement - but only a terminated one: the surviving
     # runtime's held provider stream must have observed the client
     # disconnect, or the interrupted prompt merely continued to completion
@@ -3194,7 +3194,7 @@ YAML
   # Operation fencing must actually advance across the forced restart: read
   # the RuntimePool AFTER the replacement manager took over and require its
   # controller epoch to be strictly greater than the pre-restart snapshot
-  # (canonical live-acp-runtime-e2e restart check). A regressed epoch
+  # (canonical agent-runtime-e2e restart check). A regressed epoch
   # rotation would otherwise pass every >= comparison above.
   local epoch_advance_started epoch_advance_now takeover_pool_json takeover_epoch
   epoch_advance_started="$(date +%s)"
@@ -3229,7 +3229,7 @@ YAML
   log "Replacing the physical runtime and recovering the Session from zero"
   # The session generation is part of the authorization fence and must
   # advance monotonically across a pool replacement (canonical
-  # live-acp-runtime-e2e replacement check).
+  # agent-runtime-e2e replacement check).
   local pre_replacement_generation
   pre_replacement_generation="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-drained \
     -o jsonpath='{.status.execution.runtimeSessionGeneration}')"
