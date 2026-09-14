@@ -12,7 +12,7 @@ from creating or approving PRs. Release preparation does not create a PR.
 
 The flow is:
 
-1. Dispatch `release-pr.yml` from `main` with `release_version`, such as `v0.2.0`.
+1. Dispatch `release-prepare.yml` from `main` with `release_version`, such as `v0.2.0`.
 2. Preparation updates the version, generates staging, promotes the release
    snapshots, and commits them on `release-0.2`. A new release line starts from
    the dispatched `main` commit. An existing line starts from its own head.
@@ -82,7 +82,7 @@ Use **Actions → Prepare Release → Run workflow**, choose `main`, and enter t
 version, or run:
 
 ```bash
-gh workflow run release-pr.yml --repo orka-agents/orka --ref main \
+gh workflow run release-prepare.yml --repo orka-agents/orka --ref main \
   -f release_version=v0.2.0
 ```
 
@@ -133,7 +133,11 @@ through GitHub before submitting work.
 
 If you previously configured `live-acp-release-gate`, set up
 `release-qualification` with the canary settings below before dispatching the
-renamed workflow.
+renamed workflow. Re-enter the three required canary credentials in the new
+protected environment; GitHub does not reveal existing secret values for
+copying. The source-read role uses the job's `GITHUB_TOKEN`.
+After the renamed workflow completes qualification and cleanup successfully,
+retire the old environment. Preserve its deployment history.
 
 Configure the `release-qualification` environment in `orka-agents/orka`:
 

@@ -146,15 +146,15 @@ missing or mismatched artifacts staying not ready.
   creates an ephemeral Kind cluster, deploys Vekil and the production ACP
   topology with digest-pinned local images, and then calls the canonical script.
 - `.github/workflows/agent-runtime-e2e.yml` runs on relevant pushes to the
-  default branch, nightly, and manual dispatch. It uses the
-  `agent-runtime-smoke` environment and requires its
-  `COPILOT_GITHUB_TOKEN` secret so Vekil can exercise Codex, OpenCode, Claude, and Copilot
-  against real model providers without mounting provider credentials into RuntimePools. Restrict that
-  environment to the default branch; do not require reviewers if scheduled runs
-  must proceed unattended.
-  If migrating from `live-acp-runtime-smoke`, copy any environment-scoped secrets
-  and variables to `agent-runtime-smoke`, retain existing protection rules, and
-  restrict it to the default branch before enabling the renamed workflow.
+  default branch, nightly, and manual dispatch. It requires the repository's
+  `COPILOT_GITHUB_TOKEN` secret so Vekil can exercise Codex, OpenCode, Claude, and
+  Copilot against real model providers without mounting provider credentials
+  into RuntimePools. The workflow rejects dispatches from other branches before
+  using the secret. It runs unattended as ordinary CI without a deployment
+  environment.
+  When migrating from `live-acp-runtime-smoke`, ensure the provider secret is
+  available at repository scope. After the renamed workflow succeeds, retire
+  the old environment and preserve its deployment history.
 - `.github/workflows/release-qualification.yml` uses `workflow_dispatch` and is
   serialized. The release workflow dispatches it automatically. Restrict the
   `release-qualification` environment to `main` and exact permitted release
@@ -171,7 +171,7 @@ missing or mismatched artifacts staying not ready.
   credentials as distinct, least-privilege credentials for target read,
   target write, and forge/verification cleanup respectively. The provider
   token can come from the existing repository secret.
-  [Release qualification](acp-release-gate.md) documents the
+  [Release qualification](release-qualification.md) documents the
   dedicated fork, exact permissions, trusted dispatch, report verification,
   and recovery from a moved base or preserved canary. Release qualification
   requires that report for the exact candidate; smoke success is insufficient.
@@ -236,7 +236,7 @@ The local release gate needs four role-specific credentials, including an
 explicitly supplied source-read credential. GitHub's automatic job token is
 available only inside Actions. If organization policy prevents supplying
 that credential locally, dispatch
-[Release Qualification](acp-release-gate.md#standalone-qualification) instead.
+[Release Qualification](release-qualification.md#standalone-qualification) instead.
 
 For a local run, set `ACP_E2E_WRITE_SOURCE_REPO`, `ACP_E2E_WRITE_PUBLICATION_REPO`,
 `ACP_E2E_WRITE_SOURCE_REF`, and `ACP_E2E_WRITE_PR_BASE`, then run:

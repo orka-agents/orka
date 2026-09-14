@@ -25,7 +25,7 @@ on:
       - "scripts/static-mode-crd-validate.sh"
       - "cmd/build/release/**"
       - "scripts/validate-release-manifest.sh"
-      - ".github/workflows/release-pr.yml"
+      - ".github/workflows/release-prepare.yml"
       - ".github/workflows/release.yml"
       - ".github/workflows/helm-chart.yml"
   pull_request:
@@ -48,7 +48,7 @@ on:
       - "scripts/static-mode-crd-validate.sh"
       - "cmd/build/release/**"
       - "scripts/validate-release-manifest.sh"
-      - ".github/workflows/release-pr.yml"
+      - ".github/workflows/release-prepare.yml"
       - ".github/workflows/release.yml"
       - ".github/workflows/helm-chart.yml"
   workflow_dispatch:

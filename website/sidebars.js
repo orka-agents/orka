@@ -78,7 +78,7 @@ const sidebars = {
       items: [
         'development/development',
         'development/testing',
-        'development/acp-release-gate',
+        'development/release-qualification',
         'development/security-scanning-design',
         'development/agent-runtime-adapter-contract',
       ],

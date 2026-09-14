@@ -116,7 +116,7 @@ fi
 grep -Fq 'run: scripts/validate-release-manifest.sh "${RELEASE_VERSION}"' \
   "${root}/.github/workflows/release.yml"
 grep -Fq 'run: go run ./cmd/build/release prepare "${RELEASE_VERSION}"' \
-  "${root}/.github/workflows/release-pr.yml"
+  "${root}/.github/workflows/release-prepare.yml"
 build_job="$(workflow_job build-and-push)"
 scan_job="$(workflow_job scan)"
 sign_job="$(workflow_job sign-and-attest)"

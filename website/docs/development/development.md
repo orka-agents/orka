@@ -73,7 +73,7 @@ subcommand before generating staging manifests.
 
 The first target updates release inputs and regenerates staging. The second
 copies staging into `deploy/` and `charts/orka/`. **Prepare Release** in
-`.github/workflows/release-pr.yml` runs both on `release-X.Y`, commits the
+`.github/workflows/release-prepare.yml` runs both on `release-X.Y`, commits the
 candidate, and dispatches its checks and publication workflow using
 `GITHUB_TOKEN`. It does not create a release-preparation PR or push to `main`.
 
@@ -81,7 +81,7 @@ The workflow builds the release images, then waits for approval in
 `release-qualification` before credentialed qualification of the exact packaged
 chart and image digests. After qualification, a separate `release` environment
 approval permits tagging and publication of the qualified artifacts. See
-[release automation and qualification](acp-release-gate.md)
+[release automation and qualification](release-qualification.md)
 for environment setup, dispatch, evidence, and retries. Ordinary nightly smoke
 and component tests do not satisfy the publication gate.
 
@@ -107,7 +107,7 @@ See [Testing](testing.md) for full test structure and patterns.
 
 The repository has additional GitHub Actions workflows in addition to the normal test matrix:
 
-- `Agent Runtime E2E` runs on trusted default-branch changes, nightly, or by manual dispatch. It builds the current controller and all four built-in runtime images, bootstraps Kind plus Vekil and the production ACP topology, and executes Codex, OpenCode, Claude, and Copilot RuntimePools against real model providers. It requires `COPILOT_GITHUB_TOKEN` in the `agent-runtime-smoke` environment.
+- `Agent Runtime E2E` runs on trusted default-branch changes, nightly, or by manual dispatch. It builds the current controller and all four built-in runtime images, bootstraps Kind plus Vekil and the production ACP topology, and executes Codex, OpenCode, Claude, and Copilot RuntimePools against real model providers. It uses the repository's `COPILOT_GITHUB_TOKEN` secret and runs as ordinary CI without a deployment environment.
 - `Release Qualification` verifies the candidate chart, recovery, agent execution, canary publication, and cleanup. The release workflow dispatches it automatically; environment approval permits access to the canary credentials.
 - `Live Copilot Proxy E2E` — exercises native `type: ai` and compatibility API paths through an external proxy used as test infrastructure. `Agent Runtime E2E` separately executes the built-in Codex, OpenCode, Claude, and Copilot RuntimePools end to end.
 - `Live Agent Sandbox E2E` — installs the pinned upstream `agent-sandbox` release in Kind, builds the PR controller, the immutable Codex ACP runtime image, and fixture/router images, then validates the direct workspace-adapter lifecycle (claim, exec, cleanup, retained reuse, token scrubbing) **and** a workspace-backed ACP Task end to end: a `Task.spec.execution.workspace` agent Task binds a dedicated `acp-ws-*` RuntimePool whose SandboxClaim hosts the real supervisor, executes a real Codex prompt against the local Responses-compatible fixture, reaches `Succeeded`, keeps Task status provider-neutral, and cleans up. It also runs the class-backed suspend/cold-resume conformance: with the workspace provider API enabled, a session-scoped `classRef` Task suspends its workspace on detach (the exact Sandbox is consensually suspended through `operatingMode: Suspended` while its durable workspace PVC stays Bound and no runtime Pod remains), a continuation Task cold-resumes the same Sandbox, and explicit workspace deletion removes the pool, claim, Sandbox, and PVC. A lifecycle/recovery conformance additionally proves Session continuation with a preserved RuntimeSession UID, explicit cancellation of a Running prompt with bounded controller-owned settlement and no replay, a controller restart during a Running prompt with no prompt replay, and physical runtime replacement that recovers the Session from zero. It requires no external model access.

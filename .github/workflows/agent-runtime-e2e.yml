@@ -45,7 +45,6 @@ jobs:
     name: Agent runtime smoke with real providers
     runs-on: ubuntu-latest
     timeout-minutes: 180
-    environment: agent-runtime-smoke
     env:
       ACP_E2E_OPENCODE_CONTEXT_WINDOW: "32768"
       ACP_E2E_OPENCODE_MAX_TOKENS: "4096"
@@ -97,7 +96,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           if [[ -z "${COPILOT_GITHUB_TOKEN}" ]]; then
-            echo "COPILOT_GITHUB_TOKEN must be configured in the agent-runtime-smoke environment to call real model providers." >&2
+            echo "COPILOT_GITHUB_TOKEN must be configured as a repository secret to call real model providers." >&2
             exit 1
           fi
           bash scripts/agent-runtime-kind-e2e.sh
