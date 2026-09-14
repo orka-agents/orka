@@ -152,7 +152,8 @@ func TestCancellationEvidencePrecedesArchivalAndFinalizerWait(t *testing.T) {
 
 func TestFinalCleanupIncludesUnknownSessionsBeforeTaskAbsence(t *testing.T) {
 	source := workspaceScript(t, "live-agent-sandbox-e2e.sh")
-	body := sourceSection(t, source, "  # Session archival retains", `delete runtimepool "${pool_name}" --ignore-not-found=true`)
+	body := sourceSection(t, source,
+		"  # Session archival retains", `delete runtimepool "${pool_name}" --ignore-not-found=true`)
 	body = strings.ReplaceAll(withoutLastLine(t, body), "-n orka-system", "-n fixture")
 	for _, scenario := range []string{"success", "archive-conflict"} {
 		t.Run(scenario, func(t *testing.T) {
@@ -202,7 +203,9 @@ func TestInterruptedRunCancelsThenArchivesBeforeWaiting(t *testing.T) {
 func TestNativeCancellationSettlesAndDisconnectsBeforeArchival(t *testing.T) {
 	source := workspaceScript(t, "agent-substrate-e2e.sh")
 	body := sourceSection(t, source, "  submit_task native-cancel", "  cleanup_acp_workspaces")
-	for _, scenario := range []string{"success", "unsettled", "no-disconnect", "not-suspended", "active-actor", "archive-conflict"} {
+	for _, scenario := range []string{
+		"success", "unsettled", "no-disconnect", "not-suspended", "active-actor", "archive-conflict",
+	} {
 		t.Run(scenario, func(t *testing.T) {
 			result := executeCleanup(t, body, scenario, substrateFixture)
 			requireOutcome(t, result, scenario == "success")

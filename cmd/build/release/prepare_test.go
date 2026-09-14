@@ -210,6 +210,7 @@ func TestReleaseToolingChangesStopBeforeCheckoutGenerationOrDispatch(t *testing.
 	static := filepath.Join(p.checkout, "cmd/build/helmify/static")
 	chart := strings.ReplaceAll(readTestFile(t, filepath.Join(static, "Chart.yaml")), "name: orka", "name: altered")
 	values := strings.ReplaceAll(readTestFile(t, filepath.Join(static, "values.yaml")), "\"2.7.0\"", "\"2.8.0\"")
+	const untrustedScript = "#!/bin/sh\ntouch untrusted-command-ran\n"
 	changes := map[string]string{
 		"Makefile":                                          "VERSION := $(shell touch untrusted-command-ran)\n",
 		"GNUmakefile":                                       "release-manifest:\n\t@touch untrusted-command-ran\n",
@@ -221,12 +222,12 @@ func TestReleaseToolingChangesStopBeforeCheckoutGenerationOrDispatch(t *testing.
 		"cmd/build/helmify/static/templates/untrusted.yaml": "{{ fail \"unreviewed template\" }}\n",
 		"cmd/build/helmify/static/Chart.yaml":               chart,
 		"cmd/build/helmify/static/values.yaml":              values,
-		"bin/controller-gen":                                "#!/bin/sh\ntouch untrusted-command-ran\n",
+		"bin/controller-gen":                                untrustedScript,
 		"vendor/modules.txt":                                "# unreviewed vendored toolchain\n",
 		"go.mod":                                            "module untrusted.invalid/release\n", "go.work": "go 1.27\n",
 
-		".agents/skills/kindctl/bin/kindctl":                                              "#!/bin/sh\ntouch untrusted-command-ran\n",
-		".agents/skills/vekil-reverse-proxy-deploy/scripts/deploy_vekil_reverse_proxy.sh": "#!/bin/sh\ntouch untrusted-command-ran\n",
+		".agents/skills/kindctl/bin/kindctl":                                              untrustedScript,
+		".agents/skills/vekil-reverse-proxy-deploy/scripts/deploy_vekil_reverse_proxy.sh": untrustedScript,
 	}
 	for path, contents := range changes {
 		t.Run(path, func(t *testing.T) { p.requirePreparationStopped(t, p.publishUntrustedFixture(t, path, contents)) })
