@@ -247,7 +247,15 @@ live_acp_kind_validate_vekil_catalog() {
       "Vekil model ${opencode_model} for OpenCode does not advertise required endpoint /chat/completions or compatible /responses"
     return 1
   fi
-  live_acp_kind_require_model_endpoint "${models_file}" Claude "${claude_model}" /v1/messages || return 1
+  # The catalog advertises native endpoints. Vekil can also translate Anthropic
+  # messages through Chat or Responses; the live streaming probe checks that path.
+  if ! live_acp_kind_catalog_model_supports_endpoint "${models_file}" "${claude_model}" /v1/messages && \
+      ! live_acp_kind_catalog_model_supports_endpoint "${models_file}" "${claude_model}" /chat/completions && \
+      ! live_acp_kind_catalog_model_supports_endpoint "${models_file}" "${claude_model}" /responses; then
+    live_acp_kind_die \
+      "Vekil model ${claude_model} for Claude does not advertise /v1/messages or compatible /chat/completions or /responses"
+    return 1
+  fi
   live_acp_kind_require_model_endpoint "${models_file}" Copilot "${copilot_model}" /responses || return 1
 }
 

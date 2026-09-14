@@ -100,6 +100,26 @@ export ACP_E2E_CLAUDE_MODEL='claude-test'
 export ACP_E2E_COPILOT_MODEL='gpt-copilot-test'
 live_acp_kind_validate_vekil_catalog "${catalog_file}"
 
+# Vekil advertises native upstream endpoints even when its Anthropic API
+# translates requests through Chat or Responses.
+for claude_endpoint in /chat/completions /responses; do
+  jq --arg endpoint "${claude_endpoint}" \
+    '(.data[] | select(.id == "claude-test") | .supported_endpoints) = [$endpoint]' \
+    "${catalog_file}" >"${catalog_root}/compatible-claude-endpoint.json"
+  live_acp_kind_validate_vekil_catalog "${catalog_root}/compatible-claude-endpoint.json"
+done
+
+for claude_endpoints in '["/embeddings"]' '[]' 'null'; do
+  jq --argjson endpoints "${claude_endpoints}" \
+    '(.data[] | select(.id == "claude-test") | .supported_endpoints) = $endpoints' \
+    "${catalog_file}" >"${catalog_root}/wrong-claude-endpoint.json"
+  if catalog_error="$(live_acp_kind_validate_vekil_catalog "${catalog_root}/wrong-claude-endpoint.json" 2>&1)"; then
+    echo 'catalog validation accepted a Claude model without Messages, Chat, or Responses compatibility' >&2
+    exit 1
+  fi
+  grep -F 'Vekil model claude-test for Claude does not advertise' <<<"${catalog_error}" >/dev/null
+done
+
 jq '(.models[] | select(.id == "gpt-copilot-test") | .supported_endpoints) = ["/chat/completions"]' \
   "${catalog_file}" >"${catalog_root}/wrong-endpoint.json"
 if catalog_error="$(live_acp_kind_validate_vekil_catalog "${catalog_root}/wrong-endpoint.json" 2>&1)"; then
