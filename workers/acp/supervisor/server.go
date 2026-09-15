@@ -690,6 +690,8 @@ func (s *Server) handleDrain(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeMutation(w, r, request.Metadata, false) {
 		return
 	}
+	_, span := s.traceOperation(r, request.Metadata, "drain")
+	defer span.End()
 	s.mu.Lock()
 	classification, err := harnessv2.ClassifyOperation(s.cfg.Fence, request.Metadata, operationPtr(s.poolOps, request.Metadata.OperationID), false, now)
 	if err != nil {
@@ -733,6 +735,8 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeMutation(w, r, request.Metadata, true) {
 		return
 	}
+	r, span := s.traceOperation(r, request.Metadata, "session.create")
+	defer span.End()
 	profileDigest, err := harnessv2.CanonicalProfileDigest(request.Profile)
 	if err != nil || profileDigest != s.cfg.Fence.RuntimeProfileDigest || request.Metadata.Fence.RuntimeProfileDigest != profileDigest {
 		writeError(w, http.StatusGone, harnessv2.ErrorCodeStaleFence, "runtime profile does not match this supervisor instance", nil, false)

@@ -1487,6 +1487,7 @@ func main() {
 		}
 		runtimePoolReconciler.Epochs = controllerEpochManager
 		runtimePoolReconciler.EnablePDB = true
+		runtimePoolReconciler.EnableTelemetry = enableTracing
 		runtimePoolReconciler.E2EPromptWriteAmbiguityMarker = acpE2EPromptWriteAmbiguityMarker
 		runtimePoolReconciler.AgentSandboxEnabled = agentSandboxEnabled
 		runtimePoolReconciler.SubstrateEnabled = substrateEnabled

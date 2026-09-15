@@ -333,6 +333,8 @@ type RuntimePoolReconciler struct {
 	Epochs *ControllerEpochManager
 	// EnablePDB protects a serving singleton from voluntary disruption.
 	EnablePDB bool
+	// EnableTelemetry projects non-secret trace exporter settings into supervisors.
+	EnableTelemetry bool
 	// AllowedImages is the controller-configured immutable image allowlist for
 	// built-in pools. RuntimePool is controller-owned; its public spec cannot be
 	// used to select an arbitrary privileged supervisor image.
@@ -2700,6 +2702,7 @@ func (r *RuntimePoolReconciler) runtimePoolPodTemplate(
 			},
 		},
 	}
+	template.Spec.Containers[0].Env = append(template.Spec.Containers[0].Env, runtimePoolTelemetryEnv(r.EnableTelemetry, os.Getenv)...)
 	if marker := strings.TrimSpace(r.E2EPromptWriteAmbiguityMarker); marker != "" {
 		template.Spec.Containers[0].Env = append(template.Spec.Containers[0].Env, corev1.EnvVar{
 			Name: runtimePoolE2EPromptWriteAmbiguity, Value: marker,

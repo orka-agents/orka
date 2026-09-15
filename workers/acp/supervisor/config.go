@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/orka-agents/orka/internal/acp"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/workspacedelta"
@@ -77,6 +79,9 @@ func (f WorkspaceMaterializerFunc) Materialize(ctx context.Context, request harn
 }
 
 type Config struct {
+	// Tracer belongs to this supervisor. Nil disables instrumentation. It never
+	// enters the provider process configuration or environment.
+	Tracer        trace.Tracer
 	ListenAddress string
 	Fence         harnessv2.Fence
 	Capabilities  harnessv2.CapabilitiesResponse

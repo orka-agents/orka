@@ -50,9 +50,15 @@ func main() {
 		logger.Error("invalid ACP supervisor configuration", "error", err)
 		os.Exit(1)
 	}
+	tracer, shutdownTelemetry, telemetryErr := supervisor.NewTelemetryFromEnv()
+	if telemetryErr != nil {
+		logger.Warn("supervisor telemetry unavailable")
+	}
+	cfg.Tracer = tracer
 	runtimeServer, err := supervisor.New(cfg)
 	cfg.ProviderProxy.UpstreamBearerToken = ""
 	if err != nil {
+		_ = shutdownTelemetry(context.Background())
 		logger.Error("create ACP supervisor", "error", err)
 		os.Exit(1)
 	}
@@ -100,6 +106,9 @@ func main() {
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	cleanupErr := runtimeServer.Close(cleanupCtx)
+	if err := shutdownTelemetry(context.Background()); err != nil {
+		logger.Warn("supervisor telemetry shutdown incomplete")
+	}
 	if err := errors.Join(serveErr, shutdownErr, cleanupErr); err != nil {
 		logger.Error("ACP supervisor stopped with incomplete cleanup", "error", err)
 		os.Exit(1)
