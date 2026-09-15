@@ -666,8 +666,13 @@ choose its upstream gateway and explicitly allow the required network access.
 {{- if not (regexMatch `^https?://[^/?#@[:space:]]+(/[^?#[:space:]]*)?$` $upstream) -}}
 {{- fail "providerProxy.upstreamBaseURL must be an HTTP(S) URL without credentials, a query, or a fragment when providerProxy.enabled=true" -}}
 {{- end -}}
+{{- $upstreamURL := urlParse $upstream -}}
+{{- $port := trimPrefix ":" (regexFind `:[0-9]+$` $upstreamURL.host) -}}
+{{- if and $port (or (lt (atoi $port) 1) (gt (atoi $port) 65535)) -}}
+{{- fail "providerProxy.upstreamBaseURL port must be between 1 and 65535" -}}
+{{- end -}}
 {{/* Match the proxy's url.Parse followed by HasUnsafePathSegment, including its second path decode. */}}
-{{- $path := (urlParse $upstream).path -}}
+{{- $path := $upstreamURL.path -}}
 {{- range $pass := until 2 -}}
 {{- if regexMatch `(^|/)\.{1,2}(/|$)|\\|\x00` $path -}}
 {{- fail "providerProxy.upstreamBaseURL path must not contain dot segments, backslashes, or null bytes, including encoded forms" -}}

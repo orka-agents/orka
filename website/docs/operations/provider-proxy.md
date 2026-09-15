@@ -59,18 +59,39 @@ Service port. DNS access is already included. The chart does not create resource
 in your gateway's namespace or change its ingress policy.
 
 Allow gateway ingress from Orka's release namespace and Pods labeled
-`orka.ai/network-role: provider-auth-proxy`. Then add these settings to your
-installation, retaining the values used for its Secrets:
+`orka.ai/network-role: provider-auth-proxy`.
+
+Use the Kubernetes context, release name, and namespace from your installation.
+For a released chart, read its installed chart version:
 
 ```bash
-helm upgrade orka orka/orka --namespace orka-system \
+ORKA_CONTEXT='<your-kubeconfig-context>'
+helm get metadata orka --kube-context "$ORKA_CONTEXT" --namespace orka-system
+```
+
+Use that chart version below. `--reuse-values` keeps your existing Secret and image
+settings:
+
+```bash
+helm upgrade orka orka/orka --version '<installed-chart-version>' \
+  --kube-context "$ORKA_CONTEXT" --namespace orka-system \
+  --reuse-values --values model-access.yaml --wait
+```
+
+For a source installation, keep `ORKA_CONTEXT` from the source instructions and
+run from the same checkout, using its generated chart:
+
+```bash
+helm upgrade orka ./manifest_staging/charts/orka \
+  --kube-context "$ORKA_CONTEXT" --namespace orka-system \
   --reuse-values --values model-access.yaml --wait
 ```
 
 Check that the proxy is ready before [running a coding agent](../getting-started.md#running-a-coding-agent):
 
 ```bash
-kubectl -n orka-system get deploy -l app.kubernetes.io/component=provider-auth-proxy
+kubectl --context "$ORKA_CONTEXT" -n orka-system get deploy \
+  -l app.kubernetes.io/component=provider-auth-proxy
 ```
 
 Built-in coding agents cannot start without this authenticated connection. Creating
