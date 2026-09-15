@@ -44,6 +44,14 @@ jq -e '
   .controller.mode == "harness-v2" and .controller.watchNamespace == "orka-system"
   and .controller.acpRuntime.namespace == "orka-runtimes"
   and .store.persistence.enabled == true and .providerProxy.enabled == true
+  and .providerProxy.upstreamBaseURL == "http://vekil.vekil-system.svc:1337"
+  and .providerProxy.egress == [{
+    to: [{
+      namespaceSelector: {matchLabels: {"kubernetes.io/metadata.name": "vekil-system"}},
+      podSelector: {matchLabels: {"app.kubernetes.io/name": "vekil"}}
+    }],
+    ports: [{protocol: "TCP", port: 1337}]
+  }]
   and .publisher.auth.existingSecret == "release-chart-publisher"
   and .controller.agentExecutionSnapshot.existingSecret == "release-chart-snapshot"
   and .webhooks.tls.existingSecret == "release-chart-webhook"

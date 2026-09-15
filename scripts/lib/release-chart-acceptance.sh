@@ -48,7 +48,19 @@ values = {
     },
     "publisher": {"enabled": True, "image": image("workspace-publisher"),
                   "auth": {"existingSecret": "release-chart-publisher"}},
-    "providerProxy": {"enabled": True, "auth": {"existingSecret": "release-chart-provider"}},
+    # This test topology explicitly chooses Vekil; release chart defaults do not.
+    "providerProxy": {
+        "enabled": True,
+        "upstreamBaseURL": "http://vekil.vekil-system.svc:1337",
+        "egress": [{
+            "to": [{
+                "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "vekil-system"}},
+                "podSelector": {"matchLabels": {"app.kubernetes.io/name": "vekil"}},
+            }],
+            "ports": [{"protocol": "TCP", "port": 1337}],
+        }],
+        "auth": {"existingSecret": "release-chart-provider"},
+    },
     "scmEgressProxy": {"enabled": True, "auth": {"existingSecret": "release-chart-scm"}},
     "workers": {"ai": {"image": image("ai-worker")}, "general": {"image": image("general-worker")}},
     "webhooks": {"tls": {"existingSecret": "release-chart-webhook"},

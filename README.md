@@ -98,91 +98,29 @@ credential broker. Artifact access is separately operation-scoped.
 
 ### Install
 
-Two versions of Orka exist and they are not the same product yet.
+Follow [Install Orka](website/docs/operations/installation.md) to set up Orka on
+Kubernetes and run a test task. The guide covers the required tools, model
+connection, certificates, and encryption key.
 
-| | Latest release (v0.1.3) | `main` |
-| --- | --- | --- |
-| Install | Published images, no clone | Build the images yourself |
-| `type: ai` and `type: container` Tasks | Yes | Yes |
-| Chat, gateways, monitors, security scanning | Yes | Yes |
-| `type: agent` coding agents | Yes, via the legacy Job path | Yes, via RuntimePools |
-| RuntimePools, harness modes, workspace providers | **No** | Yes |
-
-This README and the docs describe `main`. See
-[Release status](website/docs/reference/release-status.md) for the full difference.
-
-**Latest release** — no clone needed:
-
-```bash
-# The manifest mounts a harness-wrapper-auth Secret but does not create it,
-# so make the namespace and that Secret first or the Pods never start.
-kubectl create namespace orka-system
-kubectl -n orka-system create secret generic harness-wrapper-auth \
-  --from-literal=token="$(openssl rand -hex 32)"
-
-kubectl apply -f https://raw.githubusercontent.com/orka-agents/orka/v0.1.3/deploy/orka.yaml
-```
-
-or with Helm:
-
-```bash
-helm repo add orka https://orka-agents.github.io/orka/charts
-helm install orka orka/orka --namespace orka-system --create-namespace
-```
-
-**Current `main`** — images are published only for release tags, so build them and make
-them available to your cluster. Follow [Installing from source](website/docs/getting-started.md#option-b-current-main-from-source)
-for the matching build, push, and Helm commands, including both native worker images and
-the required controller, publisher, and runtime digests.
-
-The guide also covers the namespace label, authenticated
-[provider proxy](website/docs/operations/provider-proxy.md), webhook TLS certificate, and
-snapshot key required by the chart. If something fails,
-[troubleshooting](website/docs/operations/troubleshooting.md) lists the exact error strings.
-
-> [!WARNING]
-> Do not install from `charts/orka/` or `deploy/orka.yaml` at the repo root. Those are
-> promoted release snapshots, refreshed only during release preparation, and on `main`
-> they are behind the source. Use `manifest_staging/charts/orka/`, which `make manifests`
-> regenerates from current source.
-
-New installations default to `harness-v2`. Controller mode is an immutable installation
-identity and cannot be changed by an upgrade.
-
-For Kustomize instead of Helm, follow the
-[`make deploy` prerequisites and image settings](website/docs/operations/provider-proxy.md#enable-it-in-orka).
-This guarded path checks the shared CRDs and image pins, provisions the system Secrets,
-and applies `config/acp-production`. The overlay carries the cross-namespace ingress policy
-that permits model traffic only through Orka's authenticated provider proxy. Its checked-in
-image references are placeholders, so applying it directly is not a runnable installation.
-
-> [!IMPORTANT]
-> Helm creates a chart's CRDs on install and **never updates them on upgrade**. Apply the
-> CRDs from the exact target chart before every controller upgrade, and designate one
-> owner for cluster-scoped CRDs. See [Upgrading](website/docs/operations/upgrading.md).
-
-Harness v1 and v2 can share a cluster only as separate static-mode releases with disjoint
-namespaces, endpoints, RBAC, Leases, stores, and data planes. Tasks and Sessions never move
-between them. See [harness modes](website/docs/operations/harness-modes.md).
+For development, [build from source](website/docs/getting-started.md#option-b-current-main-from-source).
 
 ### Create an API client
 
-Raw-manifest and Kustomize installs need the
-[client ServiceAccount and RBAC setup](website/docs/operations/troubleshooting.md#i-get-403-from-the-api)
-before using the dashboard or API. A Helm release named `orka` creates `orka-client`
-automatically. Once the account exists, create a client token:
+The Helm install creates an `orka-client` ServiceAccount. Use the same cluster
+connection name as your installation to create a client token:
 
 ```bash
-export ORKA_TOKEN="$(kubectl -n orka-system create token orka-client)"
+export ORKA_CONTEXT='<your-kubeconfig-context>'
+export ORKA_TOKEN="$(kubectl --context "${ORKA_CONTEXT}" -n orka-system create token orka-client)"
 ```
 
 ### Set up a provider
 
 ```bash
-kubectl -n orka-system create secret generic anthropic-secret \
+kubectl --context "${ORKA_CONTEXT}" -n orka-system create secret generic anthropic-secret \
   --from-literal=api-key=your-api-key
 
-kubectl apply -f - <<EOF
+kubectl --context "${ORKA_CONTEXT}" apply -f - <<EOF
 apiVersion: core.orka.ai/v1alpha1
 kind: Provider
 metadata:
@@ -197,24 +135,15 @@ spec:
 EOF
 ```
 
-That `Provider` Secret is used by native `type: ai` Tasks and the compatible
-chat APIs. Built-in ACP Agents do **not** reference provider Secrets. Codex,
-Claude, Copilot, and OpenCode RuntimeSessions reach Vekil only through the central authenticated
-provider proxy. Source-read, target-read, target-write, and forge credentials
-are brokered separately to the clean-room Workspace/Publisher.
+This Provider supplies native AI tasks and chat. Coding agents use the
+[Vekil connection](website/docs/operations/provider-proxy.md) from the installation guide.
 
 ### Start chatting
 
-Forward the API port for the installation you chose. For the release manifest:
+Forward the API port and leave this command running:
 
 ```bash
-kubectl port-forward -n orka-system svc/orka-api 8080:8080
-```
-
-For a Helm release named `orka`, use this instead:
-
-```bash
-kubectl port-forward -n orka-system svc/orka 8080:8080
+kubectl --context "${ORKA_CONTEXT}" -n orka-system port-forward svc/orka 8080:8080
 ```
 
 Open <http://localhost:8080> and sign in with the client token created above.
@@ -228,9 +157,9 @@ The built-in orchestrator creates agents, runs tasks, monitors progress, and ret
 | ------------------------------------------------------------ | ----------------------------------------------------- |
 | [Getting started](website/docs/getting-started.md)                   | Installation, first task, CLI setup                   |
 | [Glossary](website/docs/reference/glossary.md)                       | Every term these docs use, defined once               |
-| [Release status](website/docs/reference/release-status.md)           | What is in v0.1.3 versus `main`                       |
+| [Release status](website/docs/reference/release-status.md)           | Release files, checks, and installation details       |
 | [Troubleshooting](website/docs/operations/troubleshooting.md)        | Error strings, causes, and fixes                      |
-| [Upgrading](website/docs/operations/upgrading.md)                    | The CRD step Helm will not do for you                 |
+| [Upgrading](website/docs/operations/upgrading.md)                    | Upgrade support and CRD requirements                 |
 | [Architecture](website/docs/concepts/architecture.md)                         | System design, components, and data flow              |
 | [Configuration](website/docs/reference/configuration.md)                       | CRD reference, Helm values, controller flags, metrics |
 | [Observability](website/docs/guides/observability.md)                        | OpenTelemetry traces, GenAI metrics, and task trace guidance |
@@ -247,7 +176,7 @@ The built-in orchestrator creates agents, runs tasks, monitors progress, and ret
 | [OpenAI Compatibility](website/docs/reference/openai-compat.md)                | OpenAI-compatible chat completions API                |
 | [Anthropic Compatibility](website/docs/reference/anthropic-compat.md)          | Anthropic-compatible Messages API                     |
 | [Gateway API](website/docs/reference/gateway-api.md)                           | Generic Gateway resources, ingress, delivery, and operator APIs |
-| [Harness Modes](website/docs/operations/harness-modes.md)                      | Isolated v1/v2 releases, rollout, rollback, and retirement |
+| [Controller modes](website/docs/operations/harness-modes.md)                   | Advanced setup for running both execution modes |
 | [Operating Gateways](website/docs/operations/gateways.md)                      | Gateway readiness, TLS, recovery, upgrades, and operations |
 | [Web Dashboard](website/docs/guides/ui.md)                                  | Frontend architecture and pages                       |
 | [Security](website/docs/concepts/security.md)                                 | Security model and hardening                          |

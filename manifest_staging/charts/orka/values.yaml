@@ -10,7 +10,7 @@ controller:
   # Number of controller replicas
   replicas: 1
 
-  # Controller image
+  # Release image tag. Set digest to override the tag with a SHA256 digest.
   image:
     repository: ghcr.io/orka-agents/orka
     tag: "0.1.1"
@@ -29,7 +29,7 @@ controller:
       cpu: 250m
       memory: 256Mi
 
-  # Required exclusive tenant namespace. Label it with
+  # Defaults to the Helm release namespace. Label that namespace with
   # orka.ai/controller-mode matching controller.mode before startup.
   watchNamespace: ""
 
@@ -79,13 +79,13 @@ controller:
     # The chart-managed provider proxy always runs in the Helm release namespace.
     # Leave empty or set exactly to .Release.Namespace; other values are rejected.
     providerProxyNamespace: ""
-    # Configure each provider that should be available with an immutable
-    # repository@sha256:<digest> reference. Empty providers remain unavailable
-    # and Tasks selecting them fail closed.
-    codexImage: ""
-    claudeImage: ""
-    copilotImage: ""
-    opencodeImage: ""
+    # Release image tags. The controller resolves tags to digests at startup.
+    # Override with repository@sha256:<digest> to skip registry resolution.
+    # An empty image disables that provider.
+    codexImage: ghcr.io/orka-agents/orka/acp-codex-runtime:0.1.1
+    claudeImage: ghcr.io/orka-agents/orka/acp-claude-runtime:0.1.1
+    copilotImage: ghcr.io/orka-agents/orka/acp-copilot-runtime:0.1.1
+    opencodeImage: ghcr.io/orka-agents/orka/acp-opencode-runtime:0.1.1
     # Planned controller upgrades use a same-binary preStop child to call a
     # loopback-only coordinator. Keep terminationGracePeriodSeconds greater
     # than timeout and triggerTimeout so SIGTERM shutdown still has headroom.
@@ -344,13 +344,16 @@ scmEgressProxy:
       memory: 256Mi
       ephemeral-storage: 128Mi
 
-# Authenticated boundary in front of the otherwise unauthenticated Vekil
-# service. ACP RuntimePods can reach only this Service, never Vekil directly.
+# Optional authenticated boundary for built-in coding agents. Configure your
+# model gateway before enabling it; no gateway, provider, or model is installed.
 providerProxy:
   enabled: false
-  # Only this chart-supported Vekil Service endpoint is accepted. One trailing
-  # slash is normalized; alternate hosts, namespaces, and ports are rejected.
-  upstreamBaseURL: http://vekil.vekil-system.svc:1337
+  # HTTP(S) endpoint of your credential-injecting model gateway.
+  upstreamBaseURL: ""
+  # Kubernetes NetworkPolicy egress rules allowing access to that gateway.
+  # Required when enabled. DNS access is added by the chart. Gateway ingress
+  # and provider credentials remain under your control.
+  egress: []
   # Mounted Secret files are reloaded atomically; no proxy Pod restart is
   # required for token changes. Reload failures make readiness fail and disable
   # all authenticated forwarding until both files are valid again.

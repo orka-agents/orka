@@ -461,8 +461,8 @@ spec:
 ### Agent (with runtime)
 
 Agent configuration for the supported built-in ACP runtime profiles: Claude,
-Codex, Copilot, and OpenCode. Built-in ACP Agents do not reference provider Secrets; RuntimePools reach
-Vekil through the central authenticated provider proxy.
+Codex, Copilot, and OpenCode. Built-in ACP Agents do not reference provider Secrets;
+RuntimePools reach your configured model gateway through Orka's authenticated provider proxy.
 
 ```yaml
 apiVersion: core.orka.ai/v1alpha1
@@ -697,8 +697,10 @@ Key configuration values for the Helm chart:
 |-----------|---------|-------------|
 | `controller.replicas` | `1` | Controller replicas |
 | `controller.image.repository` | `ghcr.io/orka-agents/orka` | Controller image |
+| `controller.image.tag` | release version | Controller image tag. |
+| `controller.image.digest` | `""` | Optional SHA256 digest; takes precedence over `tag`. |
 | `controller.mode` | `harness-v2` | Static agent execution mode: `harness-v1` or `harness-v2`. Select v1 explicitly for a compatibility release; a release never serves both or changes mode in place. |
-| `controller.watchNamespace` | required | One non-empty namespace labeled `orka.ai/controller-mode` with the matching mode. Cluster-wide watch is rejected. |
+| `controller.watchNamespace` | Helm release namespace | Must match the release namespace, labeled `orka.ai/controller-mode` with the matching mode. |
 | `controller.enforceNamespaceIsolation` | `true` | Restrict namespace-bound API callers and default Helm RBAC to their namespace |
 | `service.port` | `8080` | Controller Service port used by controller and Publisher in-cluster URLs. |
 | `controller.apiPort` | `8080` | Controller container listener and Service target port. |
@@ -707,19 +709,22 @@ Key configuration values for the Helm chart:
 | `controller.logLevel` | `info` | Log level (debug/info/warn/error) |
 | `controller.acpRuntime.namespace` | `orka-runtimes` | Namespace for controller-owned RuntimePool workloads. |
 | `controller.acpRuntime.providerProxyNamespace` | `""` | Compatibility guard for the chart-managed provider proxy. Leave empty or set exactly to the Helm release namespace; any other nonempty value is rejected when the proxy is enabled. |
-| `controller.acpRuntime.codexImage` | `""` | Digest-pinned Codex ACP image; Tasks fail closed when empty. |
-| `controller.acpRuntime.claudeImage` | `""` | Digest-pinned Claude ACP image; Tasks fail closed when empty. |
-| `controller.acpRuntime.copilotImage` | `""` | Digest-pinned GitHub Copilot ACP image; Tasks fail closed when empty. |
-| `controller.acpRuntime.opencodeImage` | `""` | Digest-pinned OpenCode ACP image; Tasks fail closed when empty. |
+| `controller.acpRuntime.codexImage` | release image tag | Codex ACP image tag or digest; an empty string disables it. |
+| `controller.acpRuntime.claudeImage` | release image tag | Claude ACP image tag or digest; an empty string disables it. |
+| `controller.acpRuntime.copilotImage` | release image tag | GitHub Copilot ACP image tag or digest; an empty string disables it. |
+| `controller.acpRuntime.opencodeImage` | release image tag | OpenCode ACP image tag or digest; an empty string disables it. |
 | `controller.acpRuntime.upgradeDrain.*` | enabled | Two-phase planned-upgrade admission closure and RuntimePool drain settings. |
 | `harnessV1.image.digest` | `""` | Required immutable wrapper image digest for a `harness-v1` release. |
-| `harnessV1.auth.existingSecret` | `""` | Dedicated v1 wrapper bearer/TLS Secret. Never share it with v2. |
-| `providerProxy.enabled` | `false` | Deploy the authenticated provider boundary in front of Vekil. Required for built-in ACP profiles. |
-| `providerProxy.upstreamBaseURL` | `http://vekil.vekil-system.svc:1337` | Exact supported Vekil upstream. An optional trailing slash is normalized; alternate hosts, namespaces, and ports are rejected to preserve the fixed NetworkPolicies. |
+| `harnessV1.auth.existingSecret` | `""` | Dedicated v1 wrapper bearer Secret, separate from its TLS Secret. Never share it with v2. |
+| `harnessV1.tls.existingSecret` | `""` | Dedicated v1 wrapper Secret containing `tls.crt`, `tls.key`, and `ca.crt`. |
+| `harnessV1.tls.rolloutNonce` | `""` | Non-secret revision marker for certificate renewal without changing the TLS Secret name. |
+| `providerProxy.enabled` | `false` | Enable the authenticated proxy when connecting built-in coding agents to your model gateway. Installation and AI-worker tasks do not require it. |
+| `providerProxy.upstreamBaseURL` | `""` | Your gateway's HTTP(S) endpoint. Required when the proxy is enabled. Credentials, queries, and fragments are forbidden in the URL. |
+| `providerProxy.egress` | `[]` | Kubernetes NetworkPolicy egress rules allowing access to your gateway. Required when enabled; the chart adds DNS access. Gateway ingress remains operator-managed. |
 | `providerProxy.auth.existingSecret` | `""` | Existing current/optional-overlap proxy bearer Secret. RuntimePool copies are controller-managed. |
 | `providerProxy.tokenReloadInterval` | `5s` | Atomic projected-Secret reload interval. Invalid generations fail readiness and forwarding closed. |
 | `publisher.enabled` | `true` | Deploy the separate clean-room Workspace/Publisher service. |
-| `publisher.image.repository` / `publisher.image.tag` | workspace publisher image / `latest` | Publisher image; production deployments should pin an immutable digest. |
+| `publisher.image.repository` / `publisher.image.tag` | workspace publisher image / release version | Publisher image. Set `publisher.image.digest` to override the tag. |
 | `publisher.allowedSCMHosts` | `github.com` | Exact lower-case SCM hosts accepted by both Publisher validation and the SCM egress proxy. |
 | `publisher.auth.existingSecret` | `""` | Existing controller-auth/capability Secret for publisher operations. |
 | `publisher.auth.rolloutNonce` | `""` | Non-secret revision marker that restarts controller and Publisher during coordinated publisher-auth Secret rotation. |
@@ -746,11 +751,79 @@ Key configuration values for the Helm chart:
 | `service.type` | `ClusterIP` | Service type |
 | `client.create` | `true` | Create client ServiceAccount for API access |
 | `client.name` | `orka-client` | Client ServiceAccount name |
-| `client.namespace` | `""` | Client ServiceAccount namespace override. Empty defaults to `controller.watchNamespace` when namespace isolation is enforced and `watchNamespace` is set, otherwise the release namespace. |
+| `client.namespace` | Helm release namespace | Client ServiceAccount namespace; must match `controller.watchNamespace`. |
+
+### Image overrides
+
+Released charts include matching version tags for the controller, workers,
+Publisher, and coding-agent runtimes. For controller, worker, and Publisher
+images, set `image.tag` to choose another version or `image.digest` to pin a
+SHA256 digest. A digest takes precedence over the tag.
+
+Runtime fields such as `controller.acpRuntime.codexImage` accept a full image
+reference with a tag or digest. The controller resolves tags to digests once at
+startup, so running sessions use fixed images. If resolution fails, startup
+stops. An explicit digest skips this lookup.
+
+Tag resolution requires controller HTTPS access to a registry that allows
+anonymous pulls. Use digest references for private registries or installations
+without registry access from the controller. Cluster nodes still need access to
+pull the configured images. Set an individual runtime image to an empty string
+to disable that provider.
+
+### Webhook certificate
+
+The Helm chart requires a TLS Secret for its Kubernetes admission webhooks.
+For the [installation guide](../operations/installation.md), create
+`orka-webhook-tls` in the `orka-system` namespace after creating that namespace.
+These commands use your current Kubernetes context.
+
+Use your certificate issuer to provide `tls.crt`, `tls.key`, and `ca.crt`.
+The serving certificate must be valid for `orka-webhook.orka-system.svc`.
+For a test cluster, this example creates a self-signed certificate valid for 30 days:
+
+```bash
+(
+  umask 077
+  openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 30 \
+    -keyout tls.key -out tls.crt \
+    -subj '/CN=orka-webhook.orka-system.svc' \
+    -addext 'subjectAltName=DNS:orka-webhook.orka-system.svc,DNS:orka-webhook.orka-system.svc.cluster.local' &&
+  cp tls.crt ca.crt
+)
+```
+
+The restricted file permissions protect the private key. Save the certificate
+and key in Kubernetes:
+
+```bash
+kubectl -n orka-system create secret generic orka-webhook-tls \
+  --type=kubernetes.io/tls \
+  --from-file=tls.crt=tls.crt --from-file=tls.key=tls.key --from-file=ca.crt=ca.crt
+```
+
+The installation commands read the public CA certificate from this Secret.
+Keep private keys out of Git and Helm values, and remove local private key files
+after backing them up securely. Then return to [Install with Helm](../operations/installation.md#2-install-with-helm).
 
 ### Helm authentication Secret rotation
 
 The Publisher, SCM proxy, and controller clients load these credentials at process startup. Update the Secret and bump its corresponding nonce in the same Helm upgrade: use `publisher.auth.rolloutNonce` for the publisher-auth Secret, and `scmEgressProxy.auth.rolloutNonce` for the SCM proxy-auth Secret. The publisher nonce is applied only to controller and Publisher Pod templates; the SCM nonce is applied only to Publisher and SCM proxy Pod templates. Nonces are safe revision strings, not Secret values. Coordinated rotation can briefly fail closed while Pods roll but prevents stale or split credential generations from persisting.
+
+### Harness v1 certificate rotation
+
+The harness-v1 wrapper keeps bearer and TLS credentials in separate Secrets.
+`harnessV1.auth.existingSecret` contains only the bearer token and is immutable
+while the wrapper Deployment exists. `harnessV1.tls.existingSecret` contains
+`tls.crt`, `tls.key`, and `ca.crt`.
+
+Changing the TLS Secret name triggers a drained wrapper restart. For certificate
+renewal under the same name, update the TLS Secret and bump
+`harnessV1.tls.rolloutNonce` in the same Helm upgrade. The hook drains the live
+wrapper before restarting the wrapper and controller.
+
+Keep the updated `ca.crt` able to verify the certificate served during the drain.
+Alternatively, use a new TLS Secret name so the hook can mount the prior CA.
 
 ### Canonical Kustomize overlay
 
@@ -941,14 +1014,14 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--task-provenance-admission-trusted-service-accounts` | `ORKA_TASK_PROVENANCE_ADMISSION_TRUSTED_SERVICE_ACCOUNTS` env or configured AI/vendor worker ServiceAccounts | Comma-separated ServiceAccount names trusted in the target Task namespace to set Orka-managed Task provenance fields for child Task creation. Explicit values override the worker ServiceAccount defaults. |
 | `--ai-worker-image` | `ghcr.io/orka-agents/orka/ai-worker:latest` | Native AI worker container image |
 | `--acp-runtime-namespace` / `ORKA_ACP_RUNTIME_NAMESPACE` | `orka-runtimes` | Namespace for managed runtime Deployments, Services, Secrets, and policies. |
-| `--acp-provider-proxy-namespace` / `ORKA_ACP_PROVIDER_PROXY_NAMESPACE` | `vekil-system` | Approved provider-proxy namespace selector. |
+| `--acp-provider-proxy-namespace` / `ORKA_ACP_PROVIDER_PROXY_NAMESPACE` | `""` | Approved provider-proxy namespace selector. The Helm chart uses its release namespace when the proxy is enabled. |
 | `--acp-provider-proxy-base-url` / `ORKA_ACP_PROVIDER_PROXY_BASE_URL` | unset | Authenticated provider-proxy URL injected into built-in RuntimePools. |
 | `--acp-provider-proxy-pod-labels` / `ORKA_ACP_PROVIDER_PROXY_POD_LABELS` | `orka.ai/network-role=provider-auth-proxy` | Exact Pod labels selected by RuntimePool egress policy. |
 | `--acp-provider-proxy-token-file` / `ORKA_ACP_PROVIDER_PROXY_TOKEN_FILE` | unset | Controller-mounted bearer file copied into generation-scoped immutable RuntimePool Secrets. |
-| `--acp-codex-runtime-image` / `ORKA_ACP_CODEX_RUNTIME_IMAGE` | unset | Required digest-pinned Codex runtime image when Codex Tasks are used. |
-| `--acp-claude-runtime-image` / `ORKA_ACP_CLAUDE_RUNTIME_IMAGE` | unset | Required digest-pinned Claude runtime image when Claude Tasks are used. |
-| `--acp-copilot-runtime-image` / `ORKA_ACP_COPILOT_RUNTIME_IMAGE` | unset | Required digest-pinned GitHub Copilot runtime image when Copilot Tasks are used. |
-| `--acp-opencode-runtime-image` / `ORKA_ACP_OPENCODE_RUNTIME_IMAGE` | unset | Required digest-pinned OpenCode runtime image when OpenCode Tasks are used. |
+| `--acp-codex-runtime-image` / `ORKA_ACP_CODEX_RUNTIME_IMAGE` | unset | Codex runtime image with an explicit tag or SHA256 digest. Tags are resolved at startup. |
+| `--acp-claude-runtime-image` / `ORKA_ACP_CLAUDE_RUNTIME_IMAGE` | unset | Claude runtime image with an explicit tag or SHA256 digest. Tags are resolved at startup. |
+| `--acp-copilot-runtime-image` / `ORKA_ACP_COPILOT_RUNTIME_IMAGE` | unset | GitHub Copilot runtime image with an explicit tag or SHA256 digest. Tags are resolved at startup. |
+| `--acp-opencode-runtime-image` / `ORKA_ACP_OPENCODE_RUNTIME_IMAGE` | unset | OpenCode runtime image with an explicit tag or SHA256 digest. Tags are resolved at startup. |
 | `--general-worker-image` | `ghcr.io/orka-agents/orka/general-worker:latest` | General worker container image |
 | `--store-backend` | `sqlite` | Payload/read-model backend. ACP control authority remains Kubernetes CRDs and Leases. |
 | `--store-path` | `/data/orka.db` | Path to the SQLite transcript/outbox/artifact database file. |

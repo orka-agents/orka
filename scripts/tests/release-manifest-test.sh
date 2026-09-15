@@ -63,6 +63,11 @@ controller:
   image:
     repository: ghcr.io/orka-agents/orka
     tag: "0.0.1"
+  acpRuntime:
+    codexImage: ghcr.io/orka-agents/orka/acp-codex-runtime:0.0.1
+    claudeImage: ghcr.io/orka-agents/orka/acp-claude-runtime:0.0.1
+    copilotImage: ghcr.io/orka-agents/orka/acp-copilot-runtime:0.0.1
+    opencodeImage: ghcr.io/orka-agents/orka/acp-opencode-runtime:0.0.1
 publisher:
   image:
     repository: ghcr.io/orka-agents/orka/workspace-publisher
@@ -92,9 +97,8 @@ EOF_MANAGER
 
 cat >"${test_root}/config/manager/kustomization.yaml" <<'EOF_KUSTOMIZATION'
 images:
-  - name: ghcr.io/orka-agents/orka
-    newTag: 0.0.1
   - name: controller
+    newName: ghcr.io/orka-agents/orka
     newTag: 0.0.1
 EOF_KUSTOMIZATION
 
@@ -104,9 +108,13 @@ grep -Fx 'VERSION := v9.8.7-rc.3' "${test_root}/Makefile" >/dev/null
 grep -Fx 'version: 9.8.7-rc.3' "${test_root}/cmd/build/helmify/static/Chart.yaml" >/dev/null
 grep -Fx 'appVersion: "v9.8.7-rc.3"' "${test_root}/cmd/build/helmify/static/Chart.yaml" >/dev/null
 test "$(grep -Fc 'tag: "9.8.7-rc.3"' "${test_root}/cmd/build/helmify/static/values.yaml")" -eq 5
+for provider in codex claude copilot opencode; do
+  grep -Fx "    ${provider}Image: ghcr.io/orka-agents/orka/acp-${provider}-runtime:9.8.7-rc.3" \
+    "${test_root}/cmd/build/helmify/static/values.yaml" >/dev/null
+done
 grep -Fq 'ghcr.io/orka-agents/orka/ai-worker:9.8.7-rc.3' "${test_root}/config/manager/manager.yaml"
 grep -Fq 'ghcr.io/orka-agents/orka/general-worker:9.8.7-rc.3' "${test_root}/config/manager/manager.yaml"
-test "$(grep -Fc 'newTag: 9.8.7-rc.3' "${test_root}/config/manager/kustomization.yaml")" -eq 2
+test "$(grep -Fc 'newTag: 9.8.7-rc.3' "${test_root}/config/manager/kustomization.yaml")" -eq 1
 
 if (cd "${test_root}" && ./release update-version 9.8.7) >/dev/null 2>&1; then
   echo 'release updater accepted a tag without the required v prefix' >&2

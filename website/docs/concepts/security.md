@@ -123,6 +123,21 @@ Command-based Publisher startup is production-safe by default: artifact authoriz
 
 The runtime child's `.git` directory, remotes, hooks, filters, refs, and history are untrusted for publication.
 
+#### SCM proxy NetworkPolicy limits
+
+The SCM proxy NetworkPolicy excludes RFC 1918 and reserved address ranges, but
+Kubernetes does not define whether Service destination NAT runs before or
+after `ipBlock` evaluation. Some CNI and cloud combinations can therefore
+reach the `kubernetes.default` transport through its ClusterIP despite those
+exclusions. This does not grant API authorization: the SCM proxy Pod and
+ServiceAccount do not mount a service-account token, service links are disabled,
+Orka grants that identity no API RBAC, and the proxy refuses to start if the
+conventional Kubernetes service-account token path exists. The proxy itself
+accepts only exact configured SCM hostnames and rejects non-public DNS answers
+and connected peers. Clusters requiring TCP-level API denial must add and
+validate a CNI- or cloud-native pre-DNAT or Service-aware egress control;
+standard NetworkPolicy cannot guarantee this portably.
+
 ### Provider and prompt brokers
 
 Built-in RuntimePools reach Vekil through the central authenticated provider proxy.

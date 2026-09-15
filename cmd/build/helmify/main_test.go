@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"sigs.k8s.io/yaml"
 )
@@ -116,6 +117,7 @@ func helmTemplateStaticChartForRelease(
 func staticChartDefaultArgs() []string {
 	digest := "sha256:" + strings.Repeat("0", 64)
 	return []string{
+		"--values", "testdata/provider-proxy-values.yaml",
 		"--set-string", "controller.watchNamespace=orka-test",
 		"--set-string", "controller.image.digest=" + digest,
 		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
@@ -644,7 +646,7 @@ func TestStaticChartUsesServicePortForInClusterControllerURLs(t *testing.T) {
 	}
 }
 
-func TestStaticChartProviderProxyConfigurationIsFixedToSupportedBoundary(t *testing.T) {
+func TestStaticChartProviderProxyUsesOperatorGateway(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("0", 64)
 	args := []string{
 		"--set", "providerProxy.enabled=true",
@@ -655,20 +657,20 @@ func TestStaticChartProviderProxyConfigurationIsFixedToSupportedBoundary(t *test
 		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
 		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
 		"--set-string", "controller.acpRuntime.providerProxyNamespace=orka-test",
-		"--set-string", "providerProxy.upstreamBaseURL=http://vekil.vekil-system.svc:1337/",
+		"--set-string", "providerProxy.upstreamBaseURL=http://model-gateway.models.svc:8080/",
 	}
 	rendered := requireHelmRender(t, args...)
 
 	for _, marker := range []string{
 		"--acp-provider-proxy-base-url=http://test-orka-provider-auth-proxy.orka-test.svc:8080",
 		"--acp-provider-proxy-namespace=orka-test",
-		"--upstream-base-url=http://vekil.vekil-system.svc:1337",
+		"--upstream-base-url=http://model-gateway.models.svc:8080",
 	} {
 		if !strings.Contains(rendered, marker) {
 			t.Fatalf("rendered provider proxy configuration is missing %q", marker)
 		}
 	}
-	if strings.Contains(rendered, "--upstream-base-url=http://vekil.vekil-system.svc:1337/") {
+	if strings.Contains(rendered, "--upstream-base-url=http://model-gateway.models.svc:8080/") {
 		t.Fatalf("provider upstream trailing slash was not normalized")
 	}
 
@@ -676,28 +678,47 @@ func TestStaticChartProviderProxyConfigurationIsFixedToSupportedBoundary(t *test
 		"--set", "providerProxy.enabled=true",
 		"--show-only", "templates/provider-proxy-networkpolicy.yaml",
 	)
-	for _, marker := range []string{
-		"kubernetes.io/metadata.name: vekil-system",
-		"app.kubernetes.io/name: vekil",
-		"ports: [{protocol: TCP, port: 1337}]",
-	} {
-		if !strings.Contains(providerPolicy, marker) {
-			t.Fatalf("provider proxy NetworkPolicy lost fixed Vekil boundary %q:\n%s", marker, providerPolicy)
+	var policy networkingv1.NetworkPolicy
+	if err := yaml.Unmarshal([]byte(providerPolicy), &policy); err != nil {
+		t.Fatal(err)
+	}
+	if len(policy.Spec.Egress) != 2 || len(policy.Spec.Egress[1].To) != 1 || len(policy.Spec.Egress[1].Ports) != 1 {
+		t.Fatal("provider egress must contain only DNS and the configured gateway rule")
+	}
+	gateway := policy.Spec.Egress[1]
+	peer := gateway.To[0]
+	if peer.NamespaceSelector == nil || peer.NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] != "models" ||
+		peer.PodSelector == nil || peer.PodSelector.MatchLabels["app.kubernetes.io/name"] != "model-gateway" ||
+		gateway.Ports[0].Port == nil || gateway.Ports[0].Port.IntVal != 8080 {
+		t.Fatalf("provider egress does not select the configured gateway: %#v", gateway)
+	}
+	if len(policy.Spec.Ingress) != 1 || len(policy.Spec.Ingress[0].From) != 1 {
+		t.Fatal("provider ingress must stay restricted to runtime Pods")
+	}
+	runtimePeer := policy.Spec.Ingress[0].From[0]
+	if runtimePeer.NamespaceSelector == nil ||
+		runtimePeer.NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] != "orka-runtimes" ||
+		runtimePeer.PodSelector == nil || runtimePeer.PodSelector.MatchLabels["orka.ai/network-role"] != "provider-client" {
+		t.Fatalf("provider ingress lost runtime isolation: %#v", runtimePeer)
+	}
+	if strings.Contains(rendered, "namespace: models") || strings.Contains(rendered, "vekil") {
+		t.Fatal("chart must not manage the operator's gateway namespace or select Vekil")
+	}
+}
+
+func TestStaticChartProviderProxyCanRemainDisabled(t *testing.T) {
+	rendered := requireHelmRender(t,
+		"--set", "providerProxy.enabled=false",
+		"--set-string", "providerProxy.upstreamBaseURL=",
+		"--set-json", "providerProxy.egress=[]",
+	)
+	for _, forbidden := range []string{"provider-auth-proxy", "--acp-provider-proxy-", "name: provider-auth", "vekil"} {
+		if strings.Contains(rendered, forbidden) {
+			t.Errorf("disabled provider proxy still rendered %q", forbidden)
 		}
 	}
-
-	vekilPolicy := requireHelmRender(t,
-		"--set", "providerProxy.enabled=true",
-		"--show-only", "templates/vekil-ingress-networkpolicy.yaml",
-	)
-	for _, marker := range []string{
-		"namespace: vekil-system",
-		"kubernetes.io/metadata.name: orka-test",
-		"ports: [{protocol: TCP, port: 1337}]",
-	} {
-		if !strings.Contains(vekilPolicy, marker) {
-			t.Fatalf("Vekil ingress NetworkPolicy lost fixed boundary %q:\n%s", marker, vekilPolicy)
-		}
+	if !strings.Contains(rendered, "--controller-mode=harness-v2") {
+		t.Fatal("installing without a gateway disabled the default controller mode")
 	}
 }
 
@@ -1673,7 +1694,7 @@ func TestStaticChartHarnessV1EnabledRenderIsIsolatedAndDurable(t *testing.T) {
 	harnessV1RenderedGeneration(t, deployment)
 }
 
-func TestStaticChartRejectsUnsupportedProviderProxyOverrides(t *testing.T) {
+func TestStaticChartRejectsIncompleteProviderProxyConfiguration(t *testing.T) {
 	tests := []struct {
 		name      string
 		args      []string
@@ -1688,20 +1709,18 @@ func TestStaticChartRejectsUnsupportedProviderProxyOverrides(t *testing.T) {
 			wantError: "controller.acpRuntime.providerProxyNamespace must be empty or match the Helm release namespace",
 		},
 		{
-			name: "different upstream host",
+			name: "missing upstream",
 			args: []string{
-				"--set", "providerProxy.enabled=true",
-				"--set-string", "providerProxy.upstreamBaseURL=http://other.vekil-system.svc:1337",
+				"--set-string", "providerProxy.upstreamBaseURL=",
 			},
-			wantError: "providerProxy.upstreamBaseURL must be http://vekil.vekil-system.svc:1337",
+			wantError: "providerProxy.upstreamBaseURL must be an HTTP(S) URL",
 		},
 		{
-			name: "different upstream port",
+			name: "missing egress policy",
 			args: []string{
-				"--set", "providerProxy.enabled=true",
-				"--set-string", "providerProxy.upstreamBaseURL=http://vekil.vekil-system.svc:8080",
+				"--set-json", "providerProxy.egress=[]",
 			},
-			wantError: "providerProxy.upstreamBaseURL must be http://vekil.vekil-system.svc:1337",
+			wantError: "providerProxy.egress must contain NetworkPolicy rules",
 		},
 	}
 
@@ -1713,6 +1732,27 @@ func TestStaticChartRejectsUnsupportedProviderProxyOverrides(t *testing.T) {
 			}
 			if !strings.Contains(output, tt.wantError) {
 				t.Fatalf("helm template error does not contain %q:\n%s", tt.wantError, output)
+			}
+		})
+	}
+}
+
+func TestStaticChartProviderProxyURLValidation(t *testing.T) {
+	for _, test := range []struct {
+		url   string
+		valid bool
+	}{
+		{url: "http://agentgateway.gateway-system.svc:3000", valid: true},
+		{url: "https://gateway.example.test:8443/models/", valid: true},
+		{url: "ftp://gateway.example.test"},
+		{url: "http://user@gateway.example.test"},
+		{url: "http://gateway.example.test?route=model"},
+		{url: "http://gateway.example.test#model"},
+	} {
+		t.Run(test.url, func(t *testing.T) {
+			_, err := helmTemplateStaticChart(t, "--set-string", "providerProxy.upstreamBaseURL="+test.url)
+			if (err == nil) != test.valid {
+				t.Fatalf("gateway URL accepted = %v, want %v", err == nil, test.valid)
 			}
 		})
 	}

@@ -8,15 +8,9 @@
 {{- include "orka.validatePublisherAuth" . }}
 {{- include "orka.validateSubstrateCredentials" . }}
 {{- $substrateCredentials := .Values.controller.substrate.apiCredentials | default dict -}}
-{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" (.Values.controller.image.digest | default "")) }}
-{{- fail "controller.image.digest must be a sha256 digest" }}
-{{- end }}
 {{- if $harnessV2 }}
-{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" (.Values.controller.image.digest | default "")) }}
-{{- fail "controller.image.digest must be a sha256 digest when controller.mode=harness-v2" }}
-{{- end }}
-{{- if or (not .Values.publisher.enabled) (not (regexMatch "^sha256:[0-9a-f]{64}$" (.Values.publisher.image.digest | default ""))) }}
-{{- fail "publisher must be enabled with publisher.image.digest set when controller.mode=harness-v2" }}
+{{- if not .Values.publisher.enabled }}
+{{- fail "publisher must be enabled when controller.mode=harness-v2" }}
 {{- end }}
 {{- if not .Values.store.persistence.enabled }}
 {{- fail "store.persistence.enabled must be true when controller.mode=harness-v2" }}
@@ -25,9 +19,6 @@
 {{- include "orka.validateACPRuntimeImage" (dict "name" "controller.acpRuntime.claudeImage" "ref" .Values.controller.acpRuntime.claudeImage) }}
 {{- include "orka.validateACPRuntimeImage" (dict "name" "controller.acpRuntime.copilotImage" "ref" .Values.controller.acpRuntime.copilotImage) }}
 {{- include "orka.validateACPRuntimeImage" (dict "name" "controller.acpRuntime.opencodeImage" "ref" .Values.controller.acpRuntime.opencodeImage) }}
-{{- if not .Values.providerProxy.enabled }}
-{{- fail "providerProxy.enabled must be true when controller.mode=harness-v2" }}
-{{- end }}
 {{- end }}
 {{- $gatewayCRDsReady := false -}}
 {{- if and $harnessV2 .Values.controller.gateway.enabled (not .Values.controller.gateway.crdsReadyOverride) -}}
@@ -97,7 +88,7 @@ spec:
             - --metrics-bind-address=:{{ .Values.controller.metricsPort }}
             - --health-probe-bind-address=:{{ .Values.controller.healthPort }}
             - --metrics-secure=false
-            - --watch-namespace={{ .Values.controller.watchNamespace }}
+            - --watch-namespace={{ include "orka.watchNamespace" . }}
             - --leader-elect={{ .Values.controller.leaderElect }}
             - --controller-mode={{ .Values.controller.mode }}
             - {{ printf "--execution-mode-controller-usernames=%s" (include "orka.controllerUsername" .) | quote }}
