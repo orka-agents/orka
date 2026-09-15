@@ -70,6 +70,7 @@ Do NOT delete `// +kubebuilder:scaffold:*` comments.
 
 ## Code Style
 
+- Use `orka.ai` and its subdomains for Orka domains, Kubernetes API groups, and label/annotation prefixes. Use `ai.orka.*` for reverse-domain identifiers such as Docker labels.
 - Structured logging: `log := log.FromContext(ctx); log.Info("msg", "key", val)`
 - LLM tool args for nested objects arrive as `map[string]any`, not strings — always type-switch
 - Put model-readable tool constraints in JSON Schema (`maximum`, `minimum`, `enum`, `default`), then validate and enforce them again in `Execute`; schema is guidance, not a runtime trust boundary
