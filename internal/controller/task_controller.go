@@ -88,6 +88,15 @@ const (
 	// ConditionTypeWaitingForApproval indicates a running task is parked on a human approval.
 	ConditionTypeWaitingForApproval = "WaitingForApproval"
 
+	// approvalConditionReasonPending marks WaitingForApproval true while at least one
+	// derived approval for the task is still undecided.
+	approvalConditionReasonPending = "ApprovalPending"
+
+	// approvalConditionReasonResolved marks WaitingForApproval false once a previously
+	// parked task has no undecided approvals left and execution can resume. Terminal
+	// paths set the same condition false with their own outcome-specific reasons.
+	approvalConditionReasonResolved = "ApprovalResolved"
+
 	// jobCreationVisibilityGracePeriod avoids failing a task when the controller cache
 	// has not observed the Job immediately after create.
 	jobCreationVisibilityGracePeriod = 30 * time.Second
@@ -4386,6 +4395,9 @@ func (r *TaskReconciler) parkOnPendingApproval(ctx context.Context, task *corev1
 		return ctrl.Result{}, false, err
 	}
 	if len(pending) == 0 {
+		if err := r.clearWaitingForApprovalCondition(ctx, task); err != nil {
+			return ctrl.Result{}, false, err
+		}
 		return ctrl.Result{}, false, nil
 	}
 	approval := pending[0]
@@ -4408,13 +4420,48 @@ func (r *TaskReconciler) parkOnPendingApproval(ctx context.Context, task *corev1
 		target,
 		task.Status.Iteration,
 	)
-	if task.Status.Message != waitingMessage {
+	// The condition mirrors the status message so external consumers can watch a typed
+	// signal instead of parsing free-form text. The message format is load-bearing for
+	// resumingAfterApprovalDecision and must keep its existing prefix and layout.
+	conditionChanged := meta.SetStatusCondition(&task.Status.Conditions, metav1.Condition{
+		Type:               ConditionTypeWaitingForApproval,
+		Status:             metav1.ConditionTrue,
+		LastTransitionTime: metav1.Now(),
+		Reason:             approvalConditionReasonPending,
+		Message:            waitingMessage,
+	})
+	messageChanged := task.Status.Message != waitingMessage
+	if messageChanged {
 		task.Status.Message = waitingMessage
+	}
+	// Parking requeues every 30s. Writing status only on an observed change keeps the
+	// park loop from generating a watch event per requeue.
+	if messageChanged || conditionChanged {
 		if err := r.Status().Update(ctx, task); err != nil {
 			return ctrl.Result{}, false, err
 		}
 	}
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, true, nil
+}
+
+// clearWaitingForApprovalCondition marks a previously parked task as no longer waiting
+// once its approvals are decided. Terminal paths already set this condition false with
+// outcome-specific reasons; this covers the resume path, which is not terminal and would
+// otherwise leave a stale WaitingForApproval=True on a task that is running again.
+func (r *TaskReconciler) clearWaitingForApprovalCondition(ctx context.Context, task *corev1alpha1.Task) error {
+	if task == nil || !meta.IsStatusConditionTrue(task.Status.Conditions, ConditionTypeWaitingForApproval) {
+		return nil
+	}
+	if !meta.SetStatusCondition(&task.Status.Conditions, metav1.Condition{
+		Type:               ConditionTypeWaitingForApproval,
+		Status:             metav1.ConditionFalse,
+		LastTransitionTime: metav1.Now(),
+		Reason:             approvalConditionReasonResolved,
+		Message:            "no pending approvals",
+	}) {
+		return nil
+	}
+	return r.Status().Update(ctx, task)
 }
 
 func (r *TaskReconciler) handleAutonomousApprovalState(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, bool, error) {
