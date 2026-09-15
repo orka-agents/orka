@@ -12,6 +12,8 @@ import (
 
 var versionedImages = []string{controllerImage, publisherImage, "agent-harness-wrapper", "ai-worker", "general-worker"}
 
+var versionedRuntimeProviders = []string{"codex", "claude", "copilot", "opencode"}
+
 func updateVersion(root, tag string) error {
 	if !regexp.MustCompile(`^v\d+\.\d+\.\d+(?:-(?:beta|rc)\.\d+)?$`).MatchString(tag) {
 		return errors.New("usage: release update-version vX.Y.Z[-beta.N|-rc.N]")
@@ -27,13 +29,20 @@ func updateVersion(root, tag string) error {
 			{pattern: `(ghcr\.io/orka-agents/orka/ai-worker:)[^\s]+`, value: "${1}" + version, count: 1},
 			{pattern: `(ghcr\.io/orka-agents/orka/general-worker:)[^\s]+`, value: "${1}" + version, count: 1},
 		},
-		"config/manager/kustomization.yaml": {{pattern: `^(\s*newTag:)\s*.*$`, value: "${1} " + version, count: 2}},
+		"config/manager/kustomization.yaml": {{pattern: `^(\s*newTag:)\s*.*$`, value: "${1} " + version, count: 1}},
 	}
 	for _, name := range versionedImages {
 		edits[valuesInputPath] = append(edits[valuesInputPath], replacement{
 			pattern: `^([ \t]+repository:[ \t]*` + regexp.QuoteMeta(imageRepository(name)) + `[ \t]*\n` +
 				`(?:[ \t]*(?:#.*)?\n)*[ \t]+tag:)[ \t]*.*$`,
 			value: `${1} "` + version + `"`, count: 1,
+		})
+	}
+	for _, provider := range versionedRuntimeProviders {
+		edits[valuesInputPath] = append(edits[valuesInputPath], replacement{
+			pattern: `^([ \t]+` + provider + `Image:)[ \t]*.*$`,
+			value:   `${1} ` + imageRepository("acp-"+provider+"-runtime") + ":" + version,
+			count:   1,
 		})
 	}
 	// Check every expected field before writing any file. Preserve surrounding

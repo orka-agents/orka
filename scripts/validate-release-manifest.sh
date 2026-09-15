@@ -85,18 +85,12 @@ for repository in \
     die "${repository} tag must be ${expected_version}; got ${tag:-<empty>}"
 done
 
-validation_digest="sha256:$(printf '0%.0s' {1..64})"
 render_args=(
   --namespace "${release_namespace}"
-  --set-string controller.mode=harness-v2
-  --set-string "controller.watchNamespace=${release_namespace}"
-  --set-string "controller.image.digest=${validation_digest}"
   --set-string controller.agentExecutionSnapshot.existingSecret=release-validation-snapshot
   --set-string controller.agentExecutionSnapshot.key=key
   --set-string webhooks.tls.existingSecret=release-validation-webhook-tls
   --set-string webhooks.caBundle=Y2E=
-  --set-string "publisher.image.digest=${validation_digest}"
-  --set providerProxy.enabled=true
 )
 
 for chart in "${static_chart}" "${staging_chart}" "${promoted_chart}"; do
@@ -119,17 +113,24 @@ grep -E '^[[:space:]]+image:[[:space:]]+' "${rendered_chart}" |
 
 image_count="$(wc -l <"${rendered_images}" | tr -d ' ')"
 [[ "${image_count}" == "2" ]] || \
-  die "expected exactly two unique digest-pinned controller/publisher images; found ${image_count}"
-grep -Fxq "ghcr.io/orka-agents/orka@${validation_digest}" "${rendered_images}" || \
-  die "rendered controller image is not digest-pinned"
-grep -Fxq "ghcr.io/orka-agents/orka/workspace-publisher@${validation_digest}" "${rendered_images}" || \
-  die "rendered publisher image is not digest-pinned"
+  die "expected exactly two unique controller/publisher images; found ${image_count}"
+grep -Fxq "ghcr.io/orka-agents/orka:${expected_version}" "${rendered_images}" || \
+  die "rendered controller image must use the release tag"
+grep -Fxq "ghcr.io/orka-agents/orka/workspace-publisher:${expected_version}" "${rendered_images}" || \
+  die "rendered publisher image must use the release tag"
 
 for worker in ai general; do
   expected_ref="ghcr.io/orka-agents/orka/${worker}-worker:${expected_version}"
   count="$(grep -Fc -- "--${worker}-worker-image=${expected_ref}" "${rendered_chart}" || true)"
   [[ "${count}" == "1" ]] || \
     die "expected exactly one rendered ${worker} worker image using ${expected_version}; found ${count}"
+done
+
+for provider in codex claude copilot opencode; do
+  expected_ref="ghcr.io/orka-agents/orka/acp-${provider}-runtime:${expected_version}"
+  count="$(grep -Fc -- "--acp-${provider}-runtime-image=${expected_ref}\"" "${rendered_chart}" || true)"
+  [[ "${count}" == "1" ]] || \
+    die "expected exactly one rendered ${provider} runtime image using ${expected_version}; found ${count}"
 done
 
 if grep -Fq 'agent-harness-wrapper' "${rendered_chart}"; then

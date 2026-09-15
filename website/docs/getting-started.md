@@ -203,9 +203,9 @@ helm install orka ./manifest_staging/charts/orka \
   --set providerProxy.enabled=true
 ```
 
-You can leave out the four `acpRuntime` image lines. Any runtime you do not configure is
-simply unavailable, and Tasks that ask for it fail with a clear error rather than falling
-back to something else.
+To disable an unused runtime, set its image to an empty string, for example
+`--set-string controller.acpRuntime.codexImage=`. Otherwise, the chart uses its
+release image tag for any runtime you do not override.
 
 If Helm refuses to render, that is deliberate — the chart checks its inputs up front
 rather than installing something broken. [Troubleshooting](operations/troubleshooting.md)

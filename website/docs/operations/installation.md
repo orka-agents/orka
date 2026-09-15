@@ -12,11 +12,11 @@ For development, [build from source](../getting-started.md#option-b-current-main
 
 ## Before you start
 
-- Bash, Helm, kubectl, OpenSSL, curl, and jq.
+- Bash, Helm, kubectl, and OpenSSL.
 - A Kubernetes cluster with no existing Orka installation or Orka CRDs,
   and permission to install cluster-wide resources.
-- NetworkPolicy enforcement, a default StorageClass, and access to pull images
-  from `ghcr.io`.
+- NetworkPolicy enforcement, a default StorageClass, and HTTPS access to
+  `ghcr.io` from the cluster nodes and controller.
 - [Vekil](provider-proxy.md) running with access to your model provider.
   Orka expects it at `http://vekil.vekil-system.svc:1337`.
 
@@ -41,64 +41,22 @@ The chart currently requires this Secret for Kubernetes to validate Orka resourc
 
 ## 2. Install with Helm
 
-Expand the block below and run it to create `release-values.json`, the Helm
-settings file. It downloads the latest release's image settings automatically.
-You do not need to edit the block.
-
-<details>
-<summary>Generate the Helm settings file</summary>
-
-```bash
-curl --fail --location --output candidate.json \
-  https://github.com/orka-agents/orka/releases/latest/download/candidate.json &&
-jq -e --arg ca "$(kubectl -n orka-system get secret orka-webhook-tls -o jsonpath='{.data.ca\.crt}')" '
-  def image: split("@") | {repository: .[0], digest: .[1]};
-  if .schemaVersion != 1 or .repository != "orka-agents/orka"
-    or (.version | test("^v[0-9]+[.][0-9]+[.][0-9]+$") | not)
-  then error("invalid release metadata")
-  elif $ca == "" then error("complete the webhook certificate setup first")
-  else .images end |
-  {
-    controller: {
-      mode: "harness-v2",
-      watchNamespace: "orka-system",
-      image: (.controller | image),
-      agentExecutionSnapshot: {existingSecret: "orka-agent-snapshot-key", key: "key"},
-      acpRuntime: {
-        namespace: "orka-runtimes",
-        codexImage: .["acp-codex-runtime"],
-        claudeImage: .["acp-claude-runtime"],
-        copilotImage: .["acp-copilot-runtime"],
-        opencodeImage: .["acp-opencode-runtime"]
-      }
-    },
-    workers: {
-      ai: {image: (.["ai-worker"] | image)},
-      general: {image: (.["general-worker"] | image)}
-    },
-    publisher: {enabled: true, image: (.["workspace-publisher"] | image)},
-    providerProxy: {enabled: true},
-    store: {persistence: {enabled: true}},
-    webhooks: {tls: {existingSecret: "orka-webhook-tls"}, caBundle: $ca}
-  }
-' candidate.json > release-values.json
-```
-
-</details>
-
-Install the chart from Orka's Helm repository:
+Install the latest chart from Orka's Helm repository. It includes the matching
+image tags; the settings below connect it to the Secrets you created.
 
 ```bash
 helm repo add orka https://orka-agents.github.io/orka/charts
 helm repo update orka
 helm install orka orka/orka --namespace orka-system \
-  --version "$(jq -er '.version | ltrimstr("v")' candidate.json)" \
-  --values release-values.json --wait --timeout 10m
+  --set-string controller.agentExecutionSnapshot.existingSecret=orka-agent-snapshot-key \
+  --set-string controller.agentExecutionSnapshot.key=key \
+  --set-string webhooks.tls.existingSecret=orka-webhook-tls \
+  --set-string webhooks.caBundle="$(kubectl -n orka-system get secret orka-webhook-tls -o jsonpath='{.data.ca\.crt}')" \
+  --wait --timeout 10m
 ```
 
-The chart version is read automatically to match the downloaded image settings.
-Keep `release-values.json` with your installation records. See
-[Release files](../reference/release-status.md#release-files) for details.
+To choose different image tags or pin digests, see
+[Image overrides](../reference/configuration.md#image-overrides).
 
 ## 3. Check the installation
 

@@ -18,20 +18,26 @@ Helm with `--values <file>`.
 | Setting | Chart requirement |
 | --- | --- |
 | `controller.mode` | Use `harness-v2` for new installations. It cannot change after installation. |
-| `controller.watchNamespace` | Must equal the Helm namespace. That namespace needs a matching `orka.ai/controller-mode` label. |
-| `controller.image.digest`, `publisher.image.digest` | Pin the controller and Publisher images by digest. |
+| `controller.watchNamespace` | Defaults to the Helm namespace. That namespace needs a matching `orka.ai/controller-mode` label. |
+| `controller.image`, `publisher.image`, `workers.*.image` | Use the release tag by default. Set `tag` to choose another tag, or `digest` to pin an image. A digest takes precedence over the tag. |
+| `controller.acpRuntime.*Image` | Use release tags by default. Override with a full tagged or digest reference; set an empty string to disable a runtime. |
 | `controller.agentExecutionSnapshot.existingSecret`, `.key` | Reference an existing encryption-key Secret. |
 | `webhooks.tls.existingSecret` | Reference an existing webhook TLS Secret. Set `webhooks.caBundle` or configure `webhooks.caInjectionAnnotations` for CA injection. |
-| `providerProxy.enabled` | Must be `true` for `harness-v2`. |
+| `providerProxy.enabled` | Defaults to `true`, as required for `harness-v2`. |
 | `providerProxy.upstreamBaseURL` | Use `http://vekil.vekil-system.svc:1337`. The chart's network policies require this endpoint. |
 
 Use a distinct Helm release name and namespace for each installation in a cluster.
+Each `harness-v2` installation also needs its own `controller.acpRuntime.namespace`.
 `service.port` sets the controller Service port; `controller.apiPort` sets its
 container listener and Service target port.
 
 See the [Helm values reference](https://orka-agents.github.io/orka/docs/configuration#helm-chart)
 for further settings and Secret rotation, and [Security](https://orka-agents.github.io/orka/docs/security#scm-proxy-networkpolicy-limits)
 for NetworkPolicy limits.
+
+Runtime tags are resolved to digests at controller startup. This requires HTTPS
+access to a registry that allows anonymous pulls. Use digest references for
+private registries or installations without registry access from the controller.
 
 ## CRDs and Helm lifecycle
 

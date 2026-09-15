@@ -618,15 +618,18 @@ Create the name of the workspace publisher ServiceAccount to use.
 {{- end }}
 
 {{/*
-Reject mutable ACP runtime image references when a provider image is configured.
+Require an explicit tag or SHA256 digest for configured ACP runtime images.
+The controller resolves tags before admitting runtime workloads.
 An empty provider image leaves that provider unavailable; Tasks still fail closed
 because the ACP runtime remains enabled and has no legacy fallback.
 */}}
 {{- define "orka.validateACPRuntimeImage" -}}
 {{- $name := .name -}}
 {{- $ref := default "" .ref -}}
-{{- if and $ref (not (regexMatch "^.+@sha256:[0-9a-f]{64}$" $ref)) -}}
-{{- fail (printf "%s must be an immutable image reference ending in @sha256:<64 lowercase hex characters>; got %q" $name $ref) -}}
+{{- $digest := regexMatch "^[a-zA-Z0-9._:/-]+@sha256:[0-9a-f]{64}$" $ref -}}
+{{- $tag := regexMatch "^[a-zA-Z0-9._:/-]+:[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$" $ref -}}
+{{- if and $ref (not (or $digest $tag)) -}}
+{{- fail (printf "%s must be an image reference with an explicit tag or SHA256 digest" $name) -}}
 {{- end -}}
 {{- end }}
 
@@ -661,17 +664,22 @@ must have exactly one elected writer and must not overlap Pods during rollout.
 {{- end }}
 
 {{/*
+Default the tenant namespace to the Helm release namespace.
+*/}}
+{{- define "orka.watchNamespace" -}}
+{{- default .Release.Namespace .Values.controller.watchNamespace -}}
+{{- end }}
+
+{{/*
 Every release owns exactly one immutable execution contract and one tenant
 namespace. There is no dual, automatic, or drain controller mode.
 */}}
 {{- define "orka.validateControllerMode" -}}
+{{- $watchNamespace := include "orka.watchNamespace" . -}}
 {{- if not (has .Values.controller.mode (list "harness-v1" "harness-v2")) -}}
 {{- fail "controller.mode must be harness-v1 or harness-v2" -}}
 {{- end -}}
-{{- if not (trim (default "" .Values.controller.watchNamespace)) -}}
-{{- fail "controller.watchNamespace is required for an isolated controller installation" -}}
-{{- end -}}
-{{- if ne .Values.controller.watchNamespace .Release.Namespace -}}
+{{- if ne $watchNamespace .Release.Namespace -}}
 {{- fail (printf "controller.watchNamespace must equal the Helm release namespace %q" .Release.Namespace) -}}
 {{- end -}}
 {{- if not .Values.controller.leaderElect -}}
@@ -704,8 +712,8 @@ namespace. There is no dual, automatic, or drain controller mode.
 {{- end -}}
 {{- if $existingController -}}
 {{- $existingWatchNamespace := include "orka.existingControllerWatchNamespace" $existingController | trim -}}
-{{- if ne $existingWatchNamespace .Values.controller.watchNamespace -}}
-{{- fail (printf "controller.watchNamespace is immutable; the existing controller must already watch namespace %q; install cluster-wide or differently scoped controllers as a new release and namespace" .Values.controller.watchNamespace) -}}
+{{- if ne $existingWatchNamespace $watchNamespace -}}
+{{- fail (printf "controller.watchNamespace is immutable; the existing controller must already watch namespace %q; install cluster-wide or differently scoped controllers as a new release and namespace" $watchNamespace) -}}
 {{- end -}}
 {{- $existingMode := include "orka.existingControllerMode" $existingController | trim -}}
 {{- $existingState := include "orka.harnessV1ExistingControllerState" $existingController | trim -}}
@@ -754,7 +762,7 @@ namespace. There is no dual, automatic, or drain controller mode.
 {{- end -}}
 {{- end -}}
 {{- $clientNamespace := trim (default "" .Values.client.namespace) -}}
-{{- if and $clientNamespace (ne $clientNamespace .Values.controller.watchNamespace) -}}
+{{- if and $clientNamespace (ne $clientNamespace $watchNamespace) -}}
 {{- fail "client.namespace must be empty or match controller.watchNamespace" -}}
 {{- end -}}
 {{- if eq .Values.controller.mode "harness-v2" -}}
@@ -881,7 +889,7 @@ installations always place the client in the watched namespace.
 {{- if .Values.client.namespace }}
 {{- .Values.client.namespace }}
 {{- else }}
-{{- .Values.controller.watchNamespace }}
+{{- include "orka.watchNamespace" . }}
 {{- end }}
 {{- end }}
 
@@ -915,11 +923,19 @@ Create release-scoped static worker RoleBinding names.
 {{- printf "%s-container-worker-rolebinding" (include "orka.fullname" .) | trunc 253 | trimSuffix "-" }}
 {{- end }}
 
-{{/* Render repository@digest when an immutable digest is configured. */}}
+{{/* Use the release tag unless a SHA256 digest override is configured. */}}
 {{- define "orka.imageRef" -}}
+{{- $repository := required "image.repository is required" .repository -}}
 {{- if .digest -}}
-{{ printf "%s@%s" .repository .digest }}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .digest) -}}
+{{- fail "image.digest must be a sha256 digest" -}}
+{{- end -}}
+{{ printf "%s@%s" $repository .digest }}
 {{- else -}}
-{{ printf "%s:%s" .repository .tag }}
+{{- $tag := required "image.tag is required when image.digest is unset" .tag | toString -}}
+{{- if not (regexMatch "^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$" $tag) -}}
+{{- fail "image.tag must be a valid container image tag" -}}
+{{- end -}}
+{{ printf "%s:%s" $repository $tag }}
 {{- end -}}
 {{- end }}
