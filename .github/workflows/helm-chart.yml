@@ -474,6 +474,7 @@ jobs:
             done <<< "${expected_crds}"
           }
 
+          pause_tag=${PAUSE_IMAGE_TAG%%@*}
           pause_digest=${PAUSE_IMAGE_TAG#*@}
           helm install orka "${chart_package}" \
             --namespace "${NAMESPACE}" \
@@ -484,13 +485,14 @@ jobs:
             --set-string "controller.agentExecutionSnapshot.existingSecret=${SNAPSHOT_SECRET}" \
             --set-string "controller.agentExecutionSnapshot.key=${SNAPSHOT_KEY}" \
             --set-string controller.image.repository="${PAUSE_IMAGE_REPOSITORY}" \
-            --set-string controller.image.tag="${PAUSE_IMAGE_TAG}" \
+            --set-string controller.image.tag="${pause_tag}" \
             --set-string controller.image.digest="${pause_digest}" \
             --set controller.image.pullPolicy=IfNotPresent \
             --set-string webhooks.tls.existingSecret=controller-webhook-tls \
             --set-string webhooks.caBundle=Y2E= \
             --set-string workers.ai.image.repository="${PAUSE_IMAGE_REPOSITORY}" \
-            --set-string workers.ai.image.tag="${PAUSE_IMAGE_TAG}" \
+            --set-string workers.ai.image.tag="${pause_tag}" \
+            --set-string workers.ai.image.digest="${pause_digest}" \
             --set-string publisher.image.repository="${PAUSE_IMAGE_REPOSITORY}" \
             --set-string publisher.image.digest="${pause_digest}" \
             --set publisher.enabled=true \
@@ -514,7 +516,7 @@ jobs:
             --set-string "controller.agentExecutionSnapshot.existingSecret=${SNAPSHOT_SECRET}"
             --set-string "controller.agentExecutionSnapshot.key=${SNAPSHOT_KEY}"
             --set-string controller.image.repository="${PAUSE_IMAGE_REPOSITORY}"
-            --set-string controller.image.tag="${PAUSE_IMAGE_TAG}"
+            --set-string controller.image.tag="${pause_tag}"
             --set-string controller.image.digest="${pause_digest}"
             --set controller.image.pullPolicy=IfNotPresent
             --set-string webhooks.tls.existingSecret=controller-webhook-tls
