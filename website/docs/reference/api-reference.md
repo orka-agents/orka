@@ -775,7 +775,7 @@ The following tools are **auto-injected** when coordination is enabled:
 | `auto_merge_pull_request` | Poll CI checks and merge a PR when all pass | `task_name`, `pr_number` (required); `merge_method`, `commit_title`, `commit_message`, `timeout` |
 | `review_pull_request` | Fetch PR diff for review | `pr_number` (required); `task_name`, `repo_url` |
 | `post_review_comment` | Post a review on a PR | `pr_number`, `body`, `event` (required); `task_name`, `repo_url`, `comments` |
-| `create_agent` | Create an Agent CRD at runtime | `name`, `provider`, `model` (required); `systemPrompt` (required except OpenCode; omit for OpenCode), `tools`, `coordination` |
+| `create_agent` | Create an Agent CRD at runtime | `name`, `provider`, `model` (required); `systemPrompt` (required except OpenCode; optional bounded literal for OpenCode), `tools`, `coordination` |
 | `delete_agent` | Delete an Agent CRD | `name` (required), `namespace` |
 | `update_plan` | Update the autonomous execution plan | `summary`, `plan_document` (required); `progress_pct`, `goal_complete` |
 

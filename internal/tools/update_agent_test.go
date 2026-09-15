@@ -57,8 +57,8 @@ func TestUpdateAgentTool_Parameters(t *testing.T) {
 	}
 	systemPrompt, ok := props[systemPromptField].(map[string]any)
 	description, _ := systemPrompt[jsonSchemaDescriptionField].(string)
-	if !ok || !strings.Contains(description, "OpenCode runtime Agents do not support") {
-		t.Fatalf("systemPrompt schema = %#v, want OpenCode restriction guidance", systemPrompt)
+	if !ok || !strings.Contains(description, "bounded literal prompts") {
+		t.Fatalf("systemPrompt schema = %#v, want OpenCode literal-prompt guidance", systemPrompt)
 	}
 	model, ok := props[modelField].(map[string]any)
 	if !ok {
@@ -559,7 +559,7 @@ func TestUpdateAgentTool_Execute_RejectsUnusableResultingOpenCodeAgent(t *testin
 	}
 }
 
-func TestUpdateAgentTool_Execute_RejectsOpenCodeSystemPrompt(t *testing.T) {
+func TestUpdateAgentTool_Execute_RejectsOpenCodePromptSubstitution(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: testMyAgentName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.AgentSpec{
@@ -568,7 +568,7 @@ func TestUpdateAgentTool_Execute_RejectsOpenCodeSystemPrompt(t *testing.T) {
 	}
 	fc := newFakeClient(agent)
 	ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace})
-	result, err := (&UpdateAgentTool{}).Execute(ctx, json.RawMessage(`{"name":"my-agent","systemPrompt":"You write code"}`))
+	result, err := (&UpdateAgentTool{}).Execute(ctx, json.RawMessage(`{"name":"my-agent","systemPrompt":"{env:PRIVATE_TEST_SENTINEL}"}`))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -576,8 +576,8 @@ func TestUpdateAgentTool_Execute_RejectsOpenCodeSystemPrompt(t *testing.T) {
 	if err := json.Unmarshal([]byte(result), &response); err != nil {
 		t.Fatalf("failed to parse result: %v", err)
 	}
-	if response.Success || response.ErrorType != errTypeInvalidArgs || !strings.Contains(response.Error, "does not support systemPrompt") {
-		t.Fatalf("response = %#v, want OpenCode systemPrompt rejection", response)
+	if response.Success || response.ErrorType != errTypeInvalidArgs || !strings.Contains(response.Error, "configuration substitutions") {
+		t.Fatalf("response = %#v, want OpenCode substitution rejection", response)
 	}
 	var updated corev1alpha1.Agent
 	if err := fc.Get(context.Background(), apitypes.NamespacedName{Name: testMyAgentName, Namespace: defaultNamespace}, &updated); err != nil {

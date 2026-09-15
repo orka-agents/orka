@@ -619,8 +619,8 @@ func openCodeSessionProjection(
 		request.Profile.Model != model || request.AgentConfiguration.Model != model {
 		return ProviderSessionProjection{}, fmt.Errorf("provider session configuration does not match runtime profile")
 	}
-	if request.AgentConfiguration.SystemPrompt != "" {
-		return ProviderSessionProjection{}, fmt.Errorf("opencode ACP runtime cannot exactly enforce Agent systemPrompt")
+	if err := acp.ValidateOpenCodeSystemPrompt(request.AgentConfiguration.SystemPrompt); err != nil {
+		return ProviderSessionProjection{}, fmt.Errorf("opencode Agent systemPrompt: %w", err)
 	}
 	if request.AgentConfiguration.ReasoningEffort != "" {
 		return ProviderSessionProjection{}, fmt.Errorf("opencode ACP runtime cannot enforce reasoning effort")
@@ -803,6 +803,15 @@ func openCodeSessionConfig(
 	paths acp.SessionPaths,
 	proxy ProviderProxyBinding,
 ) ([]byte, error) {
+	systemPrompt := ""
+	if request.AgentConfiguration != nil {
+		systemPrompt = request.AgentConfiguration.SystemPrompt
+	}
+	// Environment generation is also a boundary: callers need not have run
+	// ProjectSession, and OpenCode expands config substitutions before parsing.
+	if err := acp.ValidateOpenCodeSystemPrompt(systemPrompt); err != nil {
+		return nil, fmt.Errorf("opencode Agent systemPrompt: %w", err)
+	}
 	if modelLimits == nil {
 		return nil, fmt.Errorf("OpenCode model token limits are required")
 	}
@@ -868,7 +877,7 @@ func openCodeSessionConfig(
 		permissions["grep"] = openCodePermissionDeny
 		permissions["write"] = openCodePermissionDeny
 	}
-	return json.Marshal(map[string]any{
+	config := map[string]any{
 		// Native ACP returns before background title inference settles. Titles
 		// must not consume prompt quota or outlive the governed prompt.
 		"agent":             map[string]any{"title": map[string]bool{"disable": true}},
@@ -906,7 +915,24 @@ func openCodeSessionConfig(
 				},
 			},
 		},
-	})
+	}
+	if systemPrompt != "" {
+		// Both primary modes must retain the literal Agent instructions. Do not
+		// override their native permissions or add any config-substitution layer.
+		agents := config["agent"].(map[string]any)
+		for _, name := range []string{"build", "plan"} {
+			agents[name] = map[string]any{"mode": "primary", "prompt": systemPrompt}
+		}
+		config["default_agent"] = "build"
+	}
+	encoded, err := json.Marshal(config)
+	if err != nil {
+		return nil, err
+	}
+	if systemPrompt != "" && len(encoded) > acp.MaxOpenCodeConfigEnvironmentBytes {
+		return nil, fmt.Errorf("OpenCode config with systemPrompt exceeds the safe environment limit of %d bytes", acp.MaxOpenCodeConfigEnvironmentBytes)
+	}
+	return encoded, nil
 }
 
 func openCodeBrokeredPermissions(policy harnessv2.MCPToolPolicy) (map[string]bool, error) {

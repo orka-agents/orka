@@ -269,7 +269,7 @@ func validateACPProviderSystemPrompt(provider string, configuration harnessv2.Ag
 	case string(corev1alpha1.AgentRuntimeCopilot):
 		return fmt.Errorf("copilot ACP runtime cannot enforce Agent systemPrompt")
 	case string(corev1alpha1.AgentRuntimeOpencode):
-		return fmt.Errorf("opencode ACP runtime cannot enforce Agent systemPrompt")
+		return acp.ValidateOpenCodeSystemPrompt(configuration.SystemPrompt)
 	}
 	return nil
 }

@@ -1585,11 +1585,6 @@ spec:
             x-kubernetes-validations:
             - message: execution.workspace.classRef is only supported on Task specs
               rule: '!has(self.execution) || !has(self.execution.workspace) || !has(self.execution.workspace.classRef)'
-            - message: opencode orka.harness.v2 runtime does not support spec.systemPrompt
-              rule: '!(has(self.runtime) && has(self.runtime.type) && self.runtime.type
-                == ''opencode'' && has(self.runtime.contractVersion) && self.runtime.contractVersion
-                == ''orka.harness.v2'' && has(self.systemPrompt) && ((has(self.systemPrompt.inline)
-                && self.systemPrompt.inline.size() > 0) || has(self.systemPrompt.configMapRef)))'
           status:
             description: AgentStatus defines the observed state of Agent
             properties:

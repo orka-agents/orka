@@ -116,7 +116,8 @@ func TestValidateAgent_OpenCodeRequirements(t *testing.T) {
 		wantErr       string
 	}{
 		{name: "valid", model: "openai/gpt-5.4", contextWindow: new(int32(32768)), maxTokens: new(int32(4096))},
-		{name: "system prompt", model: "openai/gpt-5.4", contextWindow: new(int32(32768)), maxTokens: new(int32(4096)), systemPrompt: "ignored", wantErr: "does not support spec.systemPrompt"},
+		{name: "literal system prompt", model: "openai/gpt-5.4", contextWindow: new(int32(32768)), maxTokens: new(int32(4096)), systemPrompt: "Cite retrieved sources."},
+		{name: "system prompt substitution", model: "openai/gpt-5.4", contextWindow: new(int32(32768)), maxTokens: new(int32(4096)), systemPrompt: "{env:PRIVATE_TEST_SENTINEL}", wantErr: "configuration substitutions"},
 		{name: "missing model", wantErr: "requires spec.model.name"},
 		{name: "missing context window", model: "openai/gpt-5.4", maxTokens: new(int32(4096)), wantErr: "requires a positive spec.model.contextWindow"},
 		{name: "missing max tokens", model: "openai/gpt-5.4", contextWindow: new(int32(32768)), wantErr: "requires a positive spec.model.maxTokens"},

@@ -486,10 +486,26 @@ spec:
       - Bash
 ```
 
-OpenCode Agents must omit `spec.systemPrompt` because the runtime cannot enforce
-Agent-level prompts; put instructions in each Task's `spec.prompt` instead. OpenCode
-model IDs use provider/model form, for example `openai/gpt-5.4`, and require reviewed
-`contextWindow` and `maxTokens` values.
+OpenCode Agents support an optional literal `spec.systemPrompt` (inline or a
+namespace-local ConfigMap reference). It is applied to both primary build and plan
+modes without changing Orka's tool, workspace, or provider-proxy permissions.
+OpenCode configuration substitutions (environment/file references) are rejected,
+and the prompt's JSON encoding must fit within 32 KiB. Prompts are part of the
+immutable session profile; changing them can require a new conversation. No
+prompt is synthesized when the field is omitted.
+
+OpenCode model IDs use provider/model form, for example `openai/gpt-5.4`, and still
+require reviewed `contextWindow` and `maxTokens` values.
+
+For research Agents, grant the existing brokered `web_search` and `web_fetch`
+tools explicitly. With `raw: false`, `web_fetch` also extracts RSS/Atom feeds
+into readable, source-linked entries. The extracted text distinguishes the
+actual UTC retrieval time, feed build/update time, and each entry's publication
+and update dates. Entry descriptions are labelled **Feed summary**, not full
+article text. Missing publication dates remain missing; no current date is
+invented. The 100-item and character limits are reflected by omission text and
+`truncated: true`; a feed is not every article on a publisher's site. `raw: true`
+preserves the existing raw-response behavior.
 
 Operator-owned runtimes outside the built-in set can use `orka.harness.v2`
 `AgentRuntime` registration and conformance. A current-generation ready,

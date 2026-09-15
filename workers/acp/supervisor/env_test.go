@@ -1,7 +1,9 @@
 package supervisor
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
@@ -854,5 +856,351 @@ func TestPrepareCodexHomeDisablesResponsesWebSockets(t *testing.T) {
 	config := string(data)
 	if !strings.Contains(config, "check_for_update_on_startup = false") {
 		t.Fatalf("config.toml lacks the update opt-out:\n%s", config)
+	}
+}
+
+// This digest pins the pre-systemPrompt configuration bytes for a synthetic
+// session, so absent/empty prompts cannot silently change the default profile.
+func TestOpenCodeSystemPromptEmptyConfigurationStable(t *testing.T) {
+	paths := acp.SessionPaths{Config: "/sessions/private/xdg/config", Home: "/sessions/private/home", Workspace: "/sessions/private/workspace"}
+	proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session/v1", Credential: "synthetic-prompt-test-capability"}
+	profile, err := providerProfile(providerKindOpencode, "openai/gpt-test", harnessv2.WorkspaceIntentRead, testOpenCodeModelLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := testProviderProjectionRequest(t, providerKindOpencode, "openai/gpt-test", "", "", []string{providerToolRead, providerToolGlob, "send_message"}, nil, false)
+	var baseline map[string]string
+	for _, tt := range []struct {
+		name          string
+		configuration *harnessv2.AgentSessionConfiguration
+	}{
+		{name: "nil"},
+		{name: "empty", configuration: &harnessv2.AgentSessionConfiguration{}},
+		{name: "configured without prompt", configuration: request.AgentConfiguration},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			request.AgentConfiguration = tt.configuration
+			environment, err := profile.EnvironmentForSession(request, paths, proxy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := fmt.Sprintf("%x", sha256.Sum256([]byte(environment["OPENCODE_CONFIG_CONTENT"])))
+			if got != "2bf597d8d310b94159e1653f0c6c4250e1140e9c93fe5ac5941dea1994a89f63" {
+				t.Fatalf("prompt-free config digest = %s, want original configuration bytes", got)
+			}
+			if baseline == nil {
+				baseline = environment
+			} else if !maps.Equal(baseline, environment) {
+				t.Fatal("empty AgentConfiguration changed the session environment")
+			}
+		})
+	}
+}
+
+func TestOpenCodeSystemPromptLiteralPrimaryAgents(t *testing.T) {
+	paths := acp.SessionPaths{Config: "/sessions/private/xdg/config", Home: "/sessions/private/home", Workspace: "/sessions/private/workspace"}
+	proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session/v1", Credential: "synthetic-prompt-test-capability"}
+	profile, err := providerProfile(providerKindOpencode, "openai/gpt-test", harnessv2.WorkspaceIntentRead, testOpenCodeModelLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowed := []string{providerToolRead, providerToolGlob, "send_message"}
+	request := testProviderProjectionRequest(t, providerKindOpencode, "openai/gpt-test", "", "", allowed, nil, false)
+	baseline, err := profile.EnvironmentForSession(request, paths, proxy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ORKA_SYNTHETIC_PROMPT_VAR", "must-not-expand")
+	for _, tt := range []struct {
+		name   string
+		prompt string
+	}{
+		{
+			name: "JSON newlines Unicode and literal escapes",
+			prompt: "  Follow these instructions literally.\n{\"message\": \"你好 🌍\", \"items\": [1, 2]}\n" +
+				"Keep <>&, tabs\tand CRLF\r\n" + `C:\synthetic\notes $ORKA_SYNTHETIC_PROMPT_VAR ${ORKA_SYNTHETIC_PROMPT_VAR} \u007benv:ORKA_SYNTHETIC_PROMPT_VAR}` + "\n  ",
+		},
+		{name: "whitespace is nonempty", prompt: " \n\t "},
+		{name: "maximum JSON encoded prompt", prompt: strings.Repeat("x", acp.MaxOpenCodeSystemPromptEncodedBytes-2)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			request := testProviderProjectionRequest(t, providerKindOpencode, "openai/gpt-test", tt.prompt, "", allowed, nil, false)
+			request.Profile.ModelLimits = testOpenCodeModelLimits()
+			projection, err := profile.ProjectSession(request, paths, proxy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(projection.AdditionalArgs) != 0 || len(projection.Environment) != 0 || len(projection.NewSessionMeta) != 0 {
+				t.Fatal("OpenCode system prompt escaped its isolated config projection")
+			}
+			environment, err := profile.EnvironmentForSession(request, paths, proxy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			config := decodeOpenCodeSystemPromptConfig(t, environment)
+			if config["default_agent"] != "build" {
+				t.Fatal("OpenCode system prompt does not select the build agent by default")
+			}
+			agents := config["agent"].(map[string]any)
+			if len(agents) != 3 || agents["title"].(map[string]any)["disable"] != true {
+				t.Fatal("OpenCode prompt changed the agent set or enabled title inference")
+			}
+			for _, name := range []string{"build", "plan"} {
+				agent, ok := agents[name].(map[string]any)
+				if !ok || len(agent) != 2 || agent["mode"] != "primary" || agent["prompt"] != tt.prompt {
+					t.Fatalf("OpenCode %s agent did not receive the exact literal primary prompt", name)
+				}
+				delete(agents, name)
+			}
+			delete(config, "default_agent")
+			withoutPrompt, err := json.Marshal(config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Every permission, provider, model limit, MCP and instruction setting
+			// must remain byte-identical after removing only the prompt additions.
+			environment["OPENCODE_CONFIG_CONTENT"] = string(withoutPrompt)
+			if !maps.Equal(baseline, environment) {
+				t.Fatal("adding a literal prompt changed unrelated configuration or environment")
+			}
+		})
+	}
+}
+
+func TestOpenCodeSystemPromptRejectedAtBothBoundaries(t *testing.T) {
+	paths := acp.SessionPaths{Workspace: "/sessions/private/workspace"}
+	proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session/v1", Credential: "synthetic-prompt-test-capability"}
+	profile, err := providerProfile(providerKindOpencode, "openai/gpt-test", harnessv2.WorkspaceIntentRead, testOpenCodeModelLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name    string
+		prompt  string
+		wantErr string
+	}{
+		{name: "env", prompt: "Never expand {env:ORKA_OPENCODE_PROVIDER_TOKEN}", wantErr: "configuration substitutions"},
+		{name: "file", prompt: "Never read {file:/synthetic/private/config}", wantErr: "configuration substitutions"},
+		{name: "env case and spacing", prompt: "Nested { EnV : SYNTHETIC_TOKEN }", wantErr: "configuration substitutions"},
+		{name: "file newlines", prompt: "Nested {\nFiLe\t:/synthetic/private/config}", wantErr: "configuration substitutions"},
+		{name: "JSON quoted substitution", prompt: `{"note":"{env:SYNTHETIC_TOKEN}"}`, wantErr: "configuration substitutions"},
+		{name: "oversized plain text", prompt: strings.Repeat("x", acp.MaxOpenCodeSystemPromptEncodedBytes-1), wantErr: "encoded limit"},
+		{name: "oversized escaped text", prompt: strings.Repeat("\n", acp.MaxOpenCodeSystemPromptEncodedBytes/2), wantErr: "encoded limit"},
+		{name: "oversized HTML escaped text", prompt: strings.Repeat("<", acp.MaxOpenCodeSystemPromptEncodedBytes/6+1), wantErr: "encoded limit"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			// Bind the forbidden text into a valid digest: rejection must not rely
+			// on a stale AgentConfiguration digest masking the unsafe prompt.
+			request := testProviderProjectionRequest(t, providerKindOpencode, "openai/gpt-test", tt.prompt, "", nil, nil, false)
+			request.Profile.ModelLimits = testOpenCodeModelLimits()
+			t.Run("projection", func(t *testing.T) {
+				_, err := profile.ProjectSession(request, paths, proxy)
+				assertOpenCodeSystemPromptError(t, err, tt.wantErr, tt.prompt, proxy.Credential)
+			})
+			t.Run("environment without projection", func(t *testing.T) {
+				environment, err := profile.EnvironmentForSession(request, paths, proxy)
+				assertOpenCodeSystemPromptError(t, err, tt.wantErr, tt.prompt, proxy.Credential)
+				if environment != nil {
+					t.Fatal("rejected system prompt returned a partial session environment")
+				}
+			})
+		})
+	}
+}
+
+func TestOpenCodeSystemPromptFinalConfigByteLimit(t *testing.T) {
+	paths := acp.SessionPaths{Workspace: "/sessions/private/workspace"}
+	proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session/v1", Credential: "synthetic-prompt-test-capability"}
+	profile, err := providerProfile(providerKindOpencode, "openai/gpt-test", harnessv2.WorkspaceIntentRead, testOpenCodeModelLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := strings.Repeat("x", acp.MaxOpenCodeSystemPromptEncodedBytes-2)
+	request := testProviderProjectionRequest(t, providerKindOpencode, "openai/gpt-test", prompt, "", nil, nil, false)
+	environment, err := profile.EnvironmentForSession(request, paths, proxy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Exercise the final serialized size, including both prompt copies and
+	// unrelated config overhead, without creating files or enormous credentials.
+	padding := acp.MaxOpenCodeConfigEnvironmentBytes - len(environment["OPENCODE_CONFIG_CONTENT"])
+	if padding < 0 {
+		t.Fatal("ordinary maximum prompt already exceeds the environment limit")
+	}
+	paths.Workspace += strings.Repeat("w", padding)
+	environment, err = profile.EnvironmentForSession(request, paths, proxy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(environment["OPENCODE_CONFIG_CONTENT"]) != acp.MaxOpenCodeConfigEnvironmentBytes {
+		t.Fatal("boundary fixture did not reach the exact configuration byte limit")
+	}
+	paths.Workspace += "w"
+	environment, err = profile.EnvironmentForSession(request, paths, proxy)
+	assertOpenCodeSystemPromptError(t, err, "safe environment limit", prompt, proxy.Credential)
+	if environment != nil {
+		t.Fatal("oversized configuration returned a partial session environment")
+	}
+
+	// Do not introduce a new limit for legacy prompt-free configurations.
+	paths.Workspace += strings.Repeat("w", acp.MaxOpenCodeConfigEnvironmentBytes)
+	request.AgentConfiguration.SystemPrompt = ""
+	environment, err = profile.EnvironmentForSession(request, paths, proxy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(environment["OPENCODE_CONFIG_CONTENT"]) <= acp.MaxOpenCodeConfigEnvironmentBytes {
+		t.Fatal("prompt-free fixture did not exercise the legacy unbounded behavior")
+	}
+}
+
+func decodeOpenCodeSystemPromptConfig(t *testing.T, environment map[string]string) map[string]any {
+	t.Helper()
+	var config map[string]any
+	if err := json.Unmarshal([]byte(environment["OPENCODE_CONFIG_CONTENT"]), &config); err != nil {
+		t.Fatal("OpenCode system prompt configuration is not valid JSON")
+	}
+	return config
+}
+
+func assertOpenCodeSystemPromptError(t *testing.T, err error, want, prompt, credential string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("unsafe system prompt accepted; want %s rejection", want)
+	}
+	if strings.Contains(err.Error(), prompt) || strings.Contains(err.Error(), credential) {
+		t.Fatal("system prompt error disclosed input text or proxy capability")
+	}
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("system prompt failed for an unrelated reason; want %s rejection", want)
+	}
+}
+
+func TestOpenCodeSystemPromptPreservesRestrictions(t *testing.T) {
+	paths := acp.SessionPaths{Config: "/sessions/private/xdg/config", Workspace: "/sessions/private/workspace"}
+	proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session/v1", Credential: "synthetic-prompt-test-capability"}
+	nativeAndBrokered := []string{providerToolBash, providerToolRead, providerToolGrep, providerToolEdit, providerToolWrite, "send_message", "check_messages"}
+	for _, tt := range []struct {
+		name         string
+		intent       harnessv2.WorkspaceIntent
+		allowed      []string
+		disallowed   []string
+		allowBash    bool
+		wantRead     bool
+		wantGrep     string
+		wantMutation string
+	}{
+		{name: "read intent", intent: harnessv2.WorkspaceIntentRead, allowed: nativeAndBrokered, allowBash: true, wantRead: true, wantGrep: openCodePermissionDeny, wantMutation: openCodePermissionDeny},
+		{name: "write without Bash", intent: harnessv2.WorkspaceIntentWrite, allowed: nativeAndBrokered, wantRead: true, wantGrep: openCodePermissionAllow, wantMutation: openCodePermissionAllow},
+		{name: "denied mutation alias", intent: harnessv2.WorkspaceIntentWrite, allowed: nativeAndBrokered, disallowed: []string{providerToolWrite}, wantRead: true, wantGrep: openCodePermissionAllow, wantMutation: openCodePermissionDeny},
+		{name: "broker only", intent: harnessv2.WorkspaceIntentWrite, allowed: []string{"send_message", "check_messages"}, allowBash: true, wantGrep: openCodePermissionDeny, wantMutation: openCodePermissionDeny},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			profile, err := providerProfile(providerKindOpencode, "openai/gpt-test", tt.intent, testOpenCodeModelLimits())
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := testProviderProjectionRequest(t, providerKindOpencode, "openai/gpt-test", "Literal instructions do not grant tools or access to secrets.", "", tt.allowed, tt.disallowed, tt.allowBash)
+			request.Profile.ModelLimits = testOpenCodeModelLimits()
+			request.Profile.WorkspaceIntent = tt.intent
+			if _, err := profile.ProjectSession(request, paths, proxy); err != nil {
+				t.Fatal(err)
+			}
+			environment, err := profile.EnvironmentForSession(request, paths, proxy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertOpenCodeSystemPromptIsolation(t, profile.Args, environment, proxy.Credential)
+			config := decodeOpenCodeSystemPromptConfig(t, environment)
+			permissions := config["permission"].(map[string]any)
+			for _, name := range []string{"*", "bash", "external_directory", "task", "skill", "question", "webfetch", "websearch", "lsp", "list", "doom_loop", "todowrite"} {
+				if permissions[name] != openCodePermissionDeny {
+					t.Fatalf("system prompt relaxed %s permission", name)
+				}
+			}
+			for _, name := range []string{"apply_patch", "edit", "write"} {
+				if permissions[name] != tt.wantMutation {
+					t.Fatalf("system prompt changed %s mutation permission", name)
+				}
+			}
+			if permissions["grep"] != tt.wantGrep {
+				t.Fatal("system prompt changed grep content-access restrictions")
+			}
+			if tt.wantRead {
+				read, ok := permissions["read"].(map[string]any)
+				if !ok || read["*"] != openCodePermissionAllow || read["*.env"] != openCodePermissionDeny || read["*.env.*"] != openCodePermissionDeny || read["*.env.example"] != openCodePermissionAllow {
+					t.Fatal("system prompt changed secret-file read restrictions")
+				}
+			} else if permissions["read"] != openCodePermissionDeny || permissions["glob"] != openCodePermissionDeny {
+				t.Fatal("broker-only system prompt acquired native file tools")
+			}
+			for _, name := range []string{"send_message", "check_messages"} {
+				if permissions["orka_"+name] != openCodePermissionAllow || permissions[name] != nil {
+					t.Fatal("system prompt changed broker-only tool namespacing")
+				}
+			}
+			if containsOpenCodePermissionAction(permissions, "ask") || len(config["mcp"].(map[string]any)) != 0 {
+				t.Fatal("system prompt introduced unsupported approvals or ungoverned MCP servers")
+			}
+			assertOpenCodeSystemPromptProviderRestrictions(t, config, proxy.BaseURL)
+		})
+	}
+}
+
+func assertOpenCodeSystemPromptIsolation(t *testing.T, args []string, environment map[string]string, credential string) {
+	t.Helper()
+	if !slices.Contains(args, "--pure") || environment["OPENCODE_PURE"] != "1" || environment["OPENCODE_DISABLE_PROJECT_CONFIG"] != "1" || environment["OPENCODE_AUTH_CONTENT"] != "{}" {
+		t.Fatal("system prompt weakened native config isolation")
+	}
+	if strings.Contains(environment["OPENCODE_CONFIG_CONTENT"], credential) {
+		t.Fatal("system prompt configuration embeds the proxy capability")
+	}
+}
+
+func assertOpenCodeSystemPromptProviderRestrictions(t *testing.T, config map[string]any, baseURL string) {
+	t.Helper()
+	provider := config["provider"].(map[string]any)[openCodeProviderID].(map[string]any)
+	model := provider["models"].(map[string]any)["openai/gpt-test"].(map[string]any)
+	limits := model["limit"].(map[string]any)
+	if limits["context"] != float64(32768) || limits["output"] != float64(4096) || config["model"] != "orka/openai/gpt-test" || config["small_model"] != "orka/openai/gpt-test" {
+		t.Fatal("system prompt changed immutable model selection or token limits")
+	}
+	options := provider["options"].(map[string]any)
+	if options["apiKey"] != "{env:"+openCodeProviderEnvName+"}" || options["baseURL"] != baseURL {
+		t.Fatal("system prompt changed the isolated provider proxy settings")
+	}
+}
+
+func TestOpenCodeSystemPromptDoesNotAuthorizeUnsupportedControls(t *testing.T) {
+	paths := acp.SessionPaths{Workspace: "/sessions/private/workspace"}
+	proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session/v1", Credential: "synthetic-prompt-test-capability"}
+	profile, err := providerProfile(providerKindOpencode, "openai/gpt-test", harnessv2.WorkspaceIntentRead, testOpenCodeModelLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range []string{providerToolWebFetch, providerToolWebSearch} {
+		t.Run(tool, func(t *testing.T) {
+			request := testProviderProjectionRequest(t, providerKindOpencode, "openai/gpt-test", "A literal synthetic prompt.", "", []string{tool}, nil, false)
+			request.Profile.ModelLimits = testOpenCodeModelLimits()
+			if _, err := profile.ProjectSession(request, paths, proxy); err == nil || !strings.Contains(err.Error(), "provider-native tool") {
+				t.Fatal("system prompt bypassed unsupported native tool rejection")
+			}
+		})
+	}
+	request := testProviderProjectionRequest(t, providerKindOpencode, "openai/gpt-test", "A literal synthetic prompt.", "", nil, nil, false)
+	request.Profile.ModelLimits = testOpenCodeModelLimits()
+	request.AgentConfiguration.ReasoningEffort = "high"
+	if _, err := profile.ProjectSession(request, paths, proxy); err == nil || !strings.Contains(err.Error(), "reasoning effort") {
+		t.Fatal("system prompt bypassed reasoning effort rejection")
+	}
+	request.AgentConfiguration.ReasoningEffort = ""
+	request.AgentConfiguration.SystemPrompt += " Unbound changes."
+	if _, err := profile.ProjectSession(request, paths, proxy); err == nil || !strings.Contains(err.Error(), "digest mismatch") {
+		t.Fatal("system prompt bypassed immutable Agent configuration validation")
+	}
+	for _, limits := range []*harnessv2.ModelTokenLimits{nil, {Context: 32768, Output: 0}} {
+		if _, err := openCodeSessionConfig("openai/gpt-test", limits, harnessv2.WorkspaceIntentRead, request, paths, proxy); err == nil || !strings.Contains(err.Error(), "model token limits") {
+			t.Fatal("system prompt bypassed required model-token limit validation")
+		}
 	}
 }
