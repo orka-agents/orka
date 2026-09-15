@@ -1534,6 +1534,44 @@ spec:
                       type: string
                   type: object
                 type: array
+              soul:
+                description: |-
+                  Soul supplies persistent persona and communication defaults, separate from the role prompt.
+                  Supported by AI workers and built-in harness v2 runtimes, not runtimeRef runtimes.
+                properties:
+                  configMapRef:
+                    description: ConfigMapRef selects non-secret text in the Agent's
+                      namespace.
+                    properties:
+                      key:
+                        description: Key is the key within the ConfigMap
+                        type: string
+                      name:
+                        description: Name is the name of the ConfigMap
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                  digest:
+                    description: |-
+                      Digest is the expected SHA-256 digest of the exact UTF-8 source bytes.
+                      Required for ConfigMap sources; optional for inline text.
+                    maxLength: 71
+                    pattern: ^sha256:[0-9a-f]{64}$
+                    type: string
+                  inline:
+                    description: Inline is UTF-8 Markdown, limited to 8192 bytes by
+                      the controller.
+                    maxLength: 8192
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: soul must use exactly one of inline or configMapRef
+                  rule: (has(self.inline) && self.inline.size() > 0) != has(self.configMapRef)
+                - message: ConfigMap-backed souls require an expected digest
+                  rule: '!has(self.configMapRef) || (has(self.digest) && self.digest.size()
+                    > 0)'
               systemPrompt:
                 description: SystemPrompt defines the system prompt configuration
                 properties:
@@ -1585,11 +1623,6 @@ spec:
             x-kubernetes-validations:
             - message: execution.workspace.classRef is only supported on Task specs
               rule: '!has(self.execution) || !has(self.execution.workspace) || !has(self.execution.workspace.classRef)'
-            - message: opencode orka.harness.v2 runtime does not support spec.systemPrompt
-              rule: '!(has(self.runtime) && has(self.runtime.type) && self.runtime.type
-                == ''opencode'' && has(self.runtime.contractVersion) && self.runtime.contractVersion
-                == ''orka.harness.v2'' && has(self.systemPrompt) && ((has(self.systemPrompt.inline)
-                && self.systemPrompt.inline.size() > 0) || has(self.systemPrompt.configMapRef)))'
           status:
             description: AgentStatus defines the observed state of Agent
             properties:

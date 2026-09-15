@@ -260,6 +260,12 @@ func (v *TaskExecutionAuthorityValidator) Handle(ctx context.Context, req ctrlad
 		}
 	}
 
+	if oldObject.Status.SoulBinding != nil && !reflect.DeepEqual(oldObject.Status.SoulBinding, object.Status.SoulBinding) {
+		return ctrladmission.Denied("AI soul binding is write-once and immutable")
+	}
+	if binding := object.Status.SoulBinding; binding != nil && (object.Spec.Type != corev1alpha1.TaskTypeAI || binding.TaskGeneration != object.Generation || !object.DeletionTimestamp.IsZero() && oldObject.Status.SoulBinding == nil) {
+		return ctrladmission.Denied("AI soul binding does not match the Task identity")
+	}
 	oldBinding, newBinding := oldObject.Status.AgentExecutionBinding, object.Status.AgentExecutionBinding
 	if response, handled := taskStatusWriteResponse(v.config, req.UserInfo.Username, oldObject, object); handled {
 		return response
@@ -349,7 +355,7 @@ func agentUsesBuiltInRuntime(agent *corev1alpha1.Agent) bool {
 }
 
 func taskHasExecutionAuthority(task *corev1alpha1.Task) bool {
-	return task != nil && task.Status.AgentExecutionBinding != nil
+	return task != nil && (task.Status.AgentExecutionBinding != nil || task.Status.SoulBinding != nil)
 }
 
 func admissionReadError(operation string, err error) ctrladmission.Response {

@@ -322,8 +322,8 @@ your bug — read this section before calling create_agent):
     OpenCode is a built-in ACP RuntimePool profile. It requires model.name in literal
     provider/model form (for example openai/gpt-5.4) plus positive, reviewed
     model.contextWindow and model.maxTokens limits, with contextWindow greater than
-    maxTokens. OMIT systemPrompt and runtime.secretRef/secretRef because OpenCode
-    instructions belong in initialPrompt or Task prompts and credentials come from
+    maxTokens. Agent systemPrompt supplies role instructions; soul supplies persistent
+    persona defaults. OMIT runtime.secretRef/secretRef because credentials come from
     the controller proxy.
     For credential-backed compatibility runtimes, set runtime.secretRef when required.
     For codex, claude, and copilot, model.name is REQUIRED: the ACP runtime session has

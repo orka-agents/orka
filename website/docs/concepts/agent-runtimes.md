@@ -456,3 +456,12 @@ cross-namespace Vekil ingress boundary.
 - **Write Task is blocked**: verify all required source-read, target-read, target-write, and forge credential references, the publication repository/branch, and the Workspace/Publisher broker configuration. Require a terminal verified delivery receipt before claiming success.
 - **`runtimeRef` Task is rejected**: inspect `AgentRuntime.status` for current-generation conformance, exact profile and instance identity, strict workspace governance, and valid authentication Secret bindings. Remove unsupported Task overrides such as `maxTurns`, `disallowedTools`, or `allowBash`.
 - **`spec.execution.workspace` Task is rejected**: workspace-provider-backed RuntimeSession dispatch is fail-closed unless `--acp-workspace-dispatch-enabled` is set together with the matching provider flag: `--agent-sandbox-enabled` for `provider: agent-sandbox` (which must omit `templateRef`), or `--substrate-enabled` for `provider: substrate` (which requires an infrastructure `templateRef`). Other options (`retain`, boot/pool/snapshot/hibernation, `onDetach`) stay fail-closed. The rejection reason is projected to `Task.status.executionWorkspace`. Repository access always uses top-level `spec.workspace`; see [Agent Sandbox](agent-sandbox.md) and [Substrate](substrate.md).
+
+## Agent persona
+
+Built-in harness v2 runtimes support an optional [`Agent.spec.soul`](./soul.md)
+source, independent of the role system prompt. The controller resolves and pins
+its content before dispatch. Codex and Claude use native instruction settings;
+Copilot and OpenCode use protected per-session instruction files. These files are
+not repository content and are not published or restored from a repository
+workspace checkpoint. External `runtimeRef` registrations do not accept souls.

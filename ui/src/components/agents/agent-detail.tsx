@@ -133,6 +133,18 @@ export function AgentDetail({ agentId }: { agentId: string }) {
           </Card>
         )}
 
+        {agent.spec.soul && (
+          <Card className="md:col-span-2">
+            <CardHeader><CardTitle>Soul</CardTitle></CardHeader>
+            <CardContent>
+              <pre className="max-h-64 overflow-auto rounded-md bg-muted p-4 text-sm whitespace-pre-wrap">
+                {agent.spec.soul.inline || `ConfigMap: ${agent.spec.soul.configMapRef?.name}/${agent.spec.soul.configMapRef?.key}`}
+              </pre>
+              {agent.spec.soul.digest && <p className="mt-2 break-all text-xs text-muted-foreground">Expected digest: {agent.spec.soul.digest}</p>}
+            </CardContent>
+          </Card>
+        )}
+
         {agent.spec.coordination && (
           <Card>
             <CardHeader><CardTitle>Coordination</CardTitle></CardHeader>

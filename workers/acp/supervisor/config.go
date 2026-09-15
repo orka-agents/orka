@@ -33,6 +33,7 @@ type ProviderProfile struct {
 }
 
 type ProviderSessionProjection struct {
+	Instructions   *acp.InstructionProjection
 	AdditionalArgs []string
 	Environment    map[string]string
 	NewSessionMeta acp.Meta

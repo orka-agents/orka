@@ -25,6 +25,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/orka-agents/orka/internal/agentcontext"
+
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -1401,6 +1403,9 @@ func (s *Service) projectTerminal(
 	messageMetadata := map[string]string{
 		"gateway": event.GatewayName, "binding": event.BindingName,
 		"eventId": event.ID, "taskName": task.Name, "deliveryId": deliveryID,
+	}
+	if digest := agentcontext.SessionDigest(task.Status.SoulBinding); digest != "" {
+		messageMetadata[store.SessionSoulDigestMetadata] = digest
 	}
 	deliveryTrace := orkatracing.InjectContext(ctx)
 	deliveryExpiresAt := gatewayDeliveryExpiresAt(event.ExpiresAt, now, s.Config)

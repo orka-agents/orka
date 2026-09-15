@@ -1136,7 +1136,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			}
 			return nil
 		}
-		return d.requeueReservedTask(ctx, task, acpReservedRetrySessionPreparation, err)
+		return d.handleSessionPreparationError(ctx, task, attemptID, fence, err)
 	}
 	sessionTrace.setSessionReused(sessionExecution != nil && sessionExecution.Reused)
 	if sessionExecution != nil && sessionExecution.Turn != nil {
@@ -6911,4 +6911,18 @@ func (d *ACPDispatcher) requeueReservedTask(
 func nowMeta() *metav1.Time {
 	now := metav1.Now()
 	return &now
+}
+
+// handleSessionPreparationError distinguishes an immutable lineage mismatch from
+// lease contention and records a durable failure before projecting Task status.
+func (d *ACPDispatcher) handleSessionPreparationError(ctx context.Context, task *corev1alpha1.Task, attemptID string, fence store.ControllerEpochFence, cause error) error {
+	if errors.Is(cause, errSessionAdmissionRollback) || !errors.Is(cause, store.ErrSessionConfigurationMismatch) {
+		return d.requeueReservedTask(ctx, task, acpReservedRetrySessionPreparation, cause)
+	}
+	reason := corev1alpha1.TaskExecutionReason("SessionConfigurationMismatch")
+	const message = "Session configuration changed; start a new Session or use its original Agent revision"
+	if err := d.transitionAttemptToFailed(ctx, attemptID, fence, "session-configuration-mismatch", reason, message); err != nil {
+		return err
+	}
+	return d.failTaskBeforeSessionBinding(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, reason, message)
 }

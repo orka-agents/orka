@@ -1494,9 +1494,18 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		}
 	}
 
+	aiSoul, err := r.prepareAISoul(ctx, jobTask, agent)
+	if err != nil {
+		if isPermanentAISoulConfigurationError(err) {
+			return r.failTask(ctx, task, fmt.Sprintf("AI soul configuration: %v", err))
+		}
+		return ctrl.Result{}, err
+	}
+
 	// Create the Job
 	job, err := r.JobBuilder.BuildWithOptions(ctx, jobTask, agent, provider, JobBuildOptions{
 		ResolvedApprovalsJSON:       resolvedApprovalsJSON,
+		AISoul:                      aiSoul,
 		RepositoryMonitorValidation: validationTask,
 	})
 	if err != nil {
@@ -3138,6 +3147,9 @@ func validatePlannedRuntimeRefAgentTaskRestrictions(
 	agent *corev1alpha1.Agent,
 	plan agentExecutionPlan,
 ) error {
+	if agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.RuntimeRef != nil && agent.Spec.Soul != nil {
+		return fmt.Errorf("runtimeRef runtimes do not support Agent.spec.soul")
+	}
 	// planAgentExecution resolves runtimeRef before selecting the external path,
 	// so these v2-only checks cannot change harness v1 compatibility.
 	if plan.path != agentExecutionPathExternal {

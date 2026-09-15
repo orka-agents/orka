@@ -272,3 +272,27 @@ func TestAgentContractValidatorRequiresModelForHarnessV2Agents(t *testing.T) {
 	allowed := validator.Handle(context.Background(), request(agent("gpt-5.6-sol")))
 	require.True(t, allowed.Allowed, allowed.Result.Message)
 }
+
+func TestTaskSoulBindingAuthority(t *testing.T) {
+	validator := newTestTaskExecutionAuthorityValidator(t)
+	original := newAdmissionTestTask()
+	original.Spec.Type = corev1alpha1.TaskTypeAI
+	original.Generation = 1
+	bound := original.DeepCopy()
+	const digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	bound.Status.SoulBinding = &corev1alpha1.TaskSoulBinding{TaskGeneration: 1, AgentUID: "agent-uid", AgentGeneration: 1, SoulDigest: digest, PromptDigest: digest}
+	response := validator.Handle(context.Background(), admissionRequest(t, admissionv1.Create, trustedControllerUser, bound, nil, ""))
+	require.False(t, response.Allowed)
+	response = validator.Handle(context.Background(), admissionRequest(t, admissionv1.Update, untrustedUsername, bound, original, statusSubresource))
+	require.False(t, response.Allowed)
+	response = validator.Handle(context.Background(), admissionRequest(t, admissionv1.Update, trustedControllerUser, bound, original, statusSubresource))
+	require.True(t, response.Allowed)
+	cleared := bound.DeepCopy()
+	cleared.Status.SoulBinding = nil
+	response = validator.Handle(context.Background(), admissionRequest(t, admissionv1.Update, trustedControllerUser, cleared, bound, statusSubresource))
+	require.False(t, response.Allowed)
+	changed := bound.DeepCopy()
+	changed.Spec.Prompt = "another task"
+	response = validator.Handle(context.Background(), admissionRequest(t, admissionv1.Update, trustedControllerUser, changed, bound, ""))
+	require.False(t, response.Allowed)
+}

@@ -9,8 +9,12 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
+
+	"github.com/orka-agents/orka/internal/acp"
+	"github.com/orka-agents/orka/internal/agentcontext"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -35,6 +39,8 @@ type AgentReconciler struct {
 }
 
 const (
+	agentSoulConfigMapDependenciesField = "agent.soulConfigMapDependencies"
+
 	agentReasoningEffortLow    = "low"
 	agentReasoningEffortMedium = "medium"
 	agentReasoningEffortHigh   = "high"
@@ -48,7 +54,7 @@ const (
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tasks,verbs=list
 // +kubebuilder:rbac:groups=core.orka.ai,resources=providers,verbs=get
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tools,verbs=get
-// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get
 
 // Reconcile validates the Agent configuration and updates its status.
@@ -135,6 +141,24 @@ func (r *AgentReconciler) validateAgent(ctx context.Context, agent *corev1alpha1
 	}
 	if err := r.validateSystemPromptConfigMap(ctx, agent); err != nil {
 		return err
+	}
+	if agent.Spec.Soul != nil {
+		if err := validateSoulRuntime(agent); err != nil {
+			return err
+		}
+		soul, err := agentcontext.ResolveSoul(ctx, r.Client, agent)
+		if err != nil {
+			return err
+		}
+		if agentUsesCopilotSoulInstructions(agent) {
+			role, err := resolveACPSystemPrompt(ctx, r.Client, agent)
+			if err != nil {
+				return err
+			}
+			if err := acp.ValidateCopilotInstructions(agentcontext.Compose(role, soul)); err != nil {
+				return err
+			}
+		}
 	}
 	return r.validateCoordination(ctx, agent)
 }
@@ -434,10 +458,63 @@ func (r *AgentReconciler) checkTTLExpiry(ctx context.Context, agent *corev1alpha
 	return ctrl.Result{}, true
 }
 
+// agentUsesCopilotSoulInstructions scopes native prompt readiness validation and
+// its role-source dependencies without changing no-soul or other-runtime behavior.
+func agentUsesCopilotSoulInstructions(agent *corev1alpha1.Agent) bool {
+	return agent != nil && agent.Spec.Soul != nil && agent.Spec.Runtime != nil &&
+		agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeCopilot && agent.Spec.Runtime.RuntimeRef == nil &&
+		agent.BuiltInContractVersion() == corev1alpha1.AgentRuntimeContractHarnessV2
+}
+
+// agentSoulConfigMapDependencyIndex is a cache-only dependency index. In addition
+// to soul sources, v2 Copilot Agents with a soul depend on their composed role.
+func agentSoulConfigMapDependencyIndex(object client.Object) []string {
+	agent, ok := object.(*corev1alpha1.Agent)
+	if !ok || agent == nil || agent.Spec.Soul == nil {
+		return nil
+	}
+	names := make([]string, 0, 2)
+	if ref := agent.Spec.Soul.ConfigMapRef; ref != nil && ref.Name != "" {
+		names = append(names, ref.Name)
+	}
+	if agentUsesCopilotSoulInstructions(agent) && agent.Spec.SystemPrompt != nil {
+		if ref := agent.Spec.SystemPrompt.ConfigMapRef; ref != nil && ref.Name != "" && !slices.Contains(names, ref.Name) {
+			names = append(names, ref.Name)
+		}
+	}
+	return names
+}
+
+// agentsForSoulConfigMap works for creation and deletion too: it maps declared
+// references without fetching the ConfigMap or depending on its current contents.
+func (r *AgentReconciler) agentsForSoulConfigMap(ctx context.Context, object client.Object) []reconcile.Request {
+	configMap, ok := object.(*corev1.ConfigMap)
+	if !ok || configMap == nil || configMap.Namespace == "" || configMap.Name == "" {
+		return nil
+	}
+	var agents corev1alpha1.AgentList
+	if err := r.List(ctx, &agents, client.InNamespace(configMap.Namespace), client.MatchingFields{
+		agentSoulConfigMapDependenciesField: configMap.Name,
+	}); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to list Agents referencing soul ConfigMap",
+			"namespace", configMap.Namespace, "configMap", configMap.Name)
+		return nil
+	}
+	requests := make([]reconcile.Request, 0, len(agents.Items))
+	for i := range agents.Items {
+		requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&agents.Items[i])})
+	}
+	return requests
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *AgentReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &corev1alpha1.Agent{}, agentSoulConfigMapDependenciesField, agentSoulConfigMapDependencyIndex); err != nil {
+		return fmt.Errorf("index agent soul ConfigMap references: %w", err)
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.Agent{}).
+		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.agentsForSoulConfigMap)).
 		// Watch Tasks so that when a task completes, the referenced agent
 		// gets reconciled for TTL checking.
 		Watches(&corev1alpha1.Task{}, handler.EnqueueRequestsFromMapFunc(

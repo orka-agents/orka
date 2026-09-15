@@ -15,7 +15,6 @@ import (
 
 // AgentSpec defines the desired state of Agent
 // +kubebuilder:validation:XValidation:rule="!has(self.execution) || !has(self.execution.workspace) || !has(self.execution.workspace.classRef)",message="execution.workspace.classRef is only supported on Task specs"
-// +kubebuilder:validation:XValidation:rule="!(has(self.runtime) && has(self.runtime.type) && self.runtime.type == 'opencode' && has(self.runtime.contractVersion) && self.runtime.contractVersion == 'orka.harness.v2' && has(self.systemPrompt) && ((has(self.systemPrompt.inline) && self.systemPrompt.inline.size() > 0) || has(self.systemPrompt.configMapRef)))",message="opencode orka.harness.v2 runtime does not support spec.systemPrompt"
 type AgentSpec struct {
 	// ProviderRef references a Provider CRD for LLM configuration
 	// If set, model.provider is optional (inherited from Provider)
@@ -30,6 +29,11 @@ type AgentSpec struct {
 	// SystemPrompt defines the system prompt configuration
 	// +optional
 	SystemPrompt *PromptSource `json:"systemPrompt,omitempty"`
+
+	// Soul supplies persistent persona and communication defaults, separate from the role prompt.
+	// Supported by AI workers and built-in harness v2 runtimes, not runtimeRef runtimes.
+	// +optional
+	Soul *SoulSource `json:"soul,omitempty"`
 
 	// Tools lists the default tools available to this agent
 	// +optional
@@ -212,6 +216,28 @@ type PromptSource struct {
 	// ConfigMapRef references a ConfigMap containing the prompt
 	// +optional
 	ConfigMapRef *ConfigMapKeySelector `json:"configMapRef,omitempty"`
+}
+
+// SoulSource is non-secret, versioned persona text. ConfigMap sources require an
+// expected content digest so replacing a named ConfigMap cannot publish a new soul.
+// +kubebuilder:validation:XValidation:rule="(has(self.inline) && self.inline.size() > 0) != has(self.configMapRef)",message="soul must use exactly one of inline or configMapRef"
+// +kubebuilder:validation:XValidation:rule="!has(self.configMapRef) || (has(self.digest) && self.digest.size() > 0)",message="ConfigMap-backed souls require an expected digest"
+type SoulSource struct {
+	// Inline is UTF-8 Markdown, limited to 8192 bytes by the controller.
+	// +kubebuilder:validation:MaxLength=8192
+	// +optional
+	Inline string `json:"inline,omitempty"`
+
+	// ConfigMapRef selects non-secret text in the Agent's namespace.
+	// +optional
+	ConfigMapRef *ConfigMapKeySelector `json:"configMapRef,omitempty"`
+
+	// Digest is the expected SHA-256 digest of the exact UTF-8 source bytes.
+	// Required for ConfigMap sources; optional for inline text.
+	// +kubebuilder:validation:Pattern=`^sha256:[0-9a-f]{64}$`
+	// +kubebuilder:validation:MaxLength=71
+	// +optional
+	Digest string `json:"digest,omitempty"`
 }
 
 // ConfigMapKeySelector selects a key from a ConfigMap

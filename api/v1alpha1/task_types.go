@@ -428,6 +428,7 @@ type SkillReference struct {
 // TaskStatus defines the observed state of Task
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.executionOutcome) || self.executionOutcome == oldSelf.executionOutcome",message="executionOutcome is immutable once recorded"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.agentExecutionBinding) || (has(self.agentExecutionBinding) && self.agentExecutionBinding == oldSelf.agentExecutionBinding)",message="agentExecutionBinding is write-once and immutable"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.soulBinding) || (has(self.soulBinding) && self.soulBinding == oldSelf.soulBinding)",message="soulBinding is write-once and immutable"
 // +kubebuilder:validation:XValidation:rule="!has(self.agentExecutionBinding) || self.agentExecutionBinding.contractVersion != 'orka.harness.v1' || ((!has(self.execution) || (has(oldSelf.execution) && self.execution == oldSelf.execution)) && (!has(self.delivery) || (has(oldSelf.delivery) && self.delivery == oldSelf.delivery)))",message="a v1-bound Task cannot acquire new v2 execution or delivery state"
 // +kubebuilder:validation:XValidation:rule="!has(self.agentExecutionBinding) || self.agentExecutionBinding.contractVersion != 'orka.harness.v2' || !has(self.harnessRuntime) || (has(oldSelf.harnessRuntime) && self.harnessRuntime == oldSelf.harnessRuntime)",message="a v2-bound Task cannot acquire new v1 harness state"
 type TaskStatus struct {
@@ -486,6 +487,11 @@ type TaskStatus struct {
 	// +optional
 	AgentExecutionBinding *AgentExecutionBinding `json:"agentExecutionBinding,omitempty"`
 
+	// SoulBinding pins an AI Task's resolved persona and role prompt. It contains
+	// digests only, never prompt text. Retries reject configuration drift.
+	// +optional
+	SoulBinding *TaskSoulBinding `json:"soulBinding,omitempty"`
+
 	// ExecutionOutcome records the immutable outcome of a non-ACP workload before
 	// provider-neutral execution-workspace finalization completes.
 	// +optional
@@ -526,6 +532,27 @@ type TaskStatus struct {
 	// NextScheduleTime is the next time a child task will be created.
 	// +optional
 	NextScheduleTime *metav1.Time `json:"nextScheduleTime,omitempty"`
+}
+
+// TaskSoulBinding is the non-secret, write-once identity of AI prompt configuration.
+type TaskSoulBinding struct {
+	// TaskGeneration is the Task spec generation whose prompt was resolved.
+	// +kubebuilder:validation:Minimum=1
+	TaskGeneration int64 `json:"taskGeneration"`
+	// AgentUID and AgentGeneration identify the exact Agent revision.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	AgentUID string `json:"agentUID"`
+	// +kubebuilder:validation:Minimum=1
+	AgentGeneration int64 `json:"agentGeneration"`
+	// SoulDigest identifies the exact persona source bytes.
+	// +kubebuilder:validation:Pattern=`^sha256:[0-9a-f]{64}$`
+	// +kubebuilder:validation:MaxLength=71
+	SoulDigest string `json:"soulDigest"`
+	// PromptDigest identifies the composed role and persona prompt.
+	// +kubebuilder:validation:Pattern=`^sha256:[0-9a-f]{64}$`
+	// +kubebuilder:validation:MaxLength=71
+	PromptDigest string `json:"promptDigest"`
 }
 
 // TaskWorkloadExecutionOutcome records the immutable result of non-ACP workload
@@ -704,7 +731,7 @@ type ChildTaskStatus struct {
 // +kubebuilder:printcolumn:name="Priority",type=integer,JSONPath=`.spec.priority`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:selectablefield:JSONPath=.spec.sessionRef.name
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || (!has(oldSelf.status.agentExecutionBinding) || self.spec == oldSelf.spec)",message="Task spec is immutable after execution authority is recorded"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || ((!has(oldSelf.status.agentExecutionBinding) && !has(oldSelf.status.soulBinding)) || self.spec == oldSelf.spec)",message="Task spec is immutable after execution authority is recorded"
 
 // Task is the Schema for the tasks API
 type Task struct {

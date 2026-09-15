@@ -13,6 +13,9 @@ var ErrNotFound = errors.New("not found")
 // ErrConflict is returned when a resource cannot be updated because it changed concurrently.
 var ErrConflict = errors.New("conflict")
 
+// ErrSessionConfigurationMismatch marks an immutable conflict, not lease contention.
+var ErrSessionConfigurationMismatch = errors.New("session configuration mismatch")
+
 // ErrNotReady is returned when a durable prerequisite is expected to become ready shortly.
 var ErrNotReady = errors.New("not ready")
 
