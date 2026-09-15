@@ -256,19 +256,7 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 
 	// Resolve provider and model from the request model field.
 	// Supports "provider/model" format (e.g., "anthropic/claude-sonnet-4") or plain model name.
-	provider, model, providerInfo, err := h.resolver.ResolveWithInfo(ctx, ResolveOpts{
-		ModelStr:  req.Model,
-		Namespace: namespace,
-		AuthorizeProviderReference: func(provider ProviderResolutionInfo) error {
-			return authorizeContextTokenProviderReference(c, h.contextTokenAuthorization, "openAIChatCompletionsProviderReference", namespace, provider)
-		},
-		AuthorizeProviderUse: func(provider ProviderResolutionInfo, model string) error {
-			return authorizeContextTokenProviderUse(c, h.contextTokenAuthorization, "openAIChatCompletions", namespace, provider, model)
-		},
-		RequireModel: true,
-		// Enforced scoped context tokens get no implicit Provider selection.
-		RequireExplicitProvider: requestRequiresExplicitProvider(c, h.contextTokenAuthorization),
-	})
+	provider, model, providerInfo, err := h.resolveCompatProvider(c, ctx, req.Model, namespace)
 	if err != nil {
 		if ferr, ok := err.(*fiber.Error); ok && ferr.Code == fiber.StatusForbidden {
 			return openAIContextTokenAuthorizationError(c, err)
@@ -1131,4 +1119,22 @@ func writeStreamDone(w *bufio.Writer) error {
 		return err
 	}
 	return w.Flush()
+}
+
+// resolveCompatProvider keeps provider selection and authorization identical for
+// both OpenAI wire protocols.
+func (h *OpenAICompatHandler) resolveCompatProvider(c fiber.Ctx, ctx context.Context, modelStr, namespace string) (llm.Provider, string, ProviderResolutionInfo, error) {
+	return h.resolver.ResolveWithInfo(ctx, ResolveOpts{
+		ModelStr:  modelStr,
+		Namespace: namespace,
+		AuthorizeProviderReference: func(provider ProviderResolutionInfo) error {
+			return authorizeContextTokenProviderReference(c, h.contextTokenAuthorization, "openAIChatCompletionsProviderReference", namespace, provider)
+		},
+		AuthorizeProviderUse: func(provider ProviderResolutionInfo, model string) error {
+			return authorizeContextTokenProviderUse(c, h.contextTokenAuthorization, "openAIChatCompletions", namespace, provider, model)
+		},
+		RequireModel: true,
+		// Enforced scoped context tokens get no implicit Provider selection.
+		RequireExplicitProvider: requestRequiresExplicitProvider(c, h.contextTokenAuthorization),
+	})
 }

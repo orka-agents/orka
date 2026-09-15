@@ -165,6 +165,9 @@ func buildToolParams(tools []llm.Tool) []anthropic.ToolUnionParam {
 				Required:   required,
 			},
 		}
+		if tool.Strict != nil {
+			toolParam.Strict = anthropic.Bool(*tool.Strict)
+		}
 		params = append(params, anthropic.ToolUnionParam{OfTool: &toolParam})
 	}
 	return params

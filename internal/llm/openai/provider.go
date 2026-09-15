@@ -348,12 +348,16 @@ func convertResponsesTools(tools []llm.Tool) []responses.ToolUnionParam {
 		var params map[string]any
 		_ = json.Unmarshal(tool.Parameters, &params)
 
+		strict := false
+		if tool.Strict != nil {
+			strict = *tool.Strict
+		}
 		rTools = append(rTools, responses.ToolUnionParam{
 			OfFunction: &responses.FunctionToolParam{
 				Name:        tool.Name,
 				Description: openai.String(tool.Description),
 				Parameters:  params,
-				Strict:      openai.Bool(false),
+				Strict:      openai.Bool(strict),
 			},
 		})
 	}
@@ -459,6 +463,9 @@ func buildResponsesParams(req *llm.CompletionRequest) responses.ResponseNewParam
 		Input: responses.ResponseNewParamsInputUnion{
 			OfInputItemList: convertInputItems(req.Messages),
 		},
+	}
+	if req.Store != nil {
+		params.Store = openai.Bool(*req.Store)
 	}
 	if req.SystemPrompt != "" {
 		params.Instructions = openai.String(req.SystemPrompt)
@@ -862,11 +869,15 @@ func convertChatTools(tools []llm.Tool) []openai.ChatCompletionToolUnionParam {
 	for _, tool := range tools {
 		var params map[string]any
 		_ = json.Unmarshal(tool.Parameters, &params)
+		strict := false
+		if tool.Strict != nil {
+			strict = *tool.Strict
+		}
 		cTools = append(cTools, openai.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
 			Name:        tool.Name,
 			Description: openai.String(tool.Description),
 			Parameters:  params,
-			Strict:      openai.Bool(false),
+			Strict:      openai.Bool(strict),
 		}))
 	}
 	return cTools
@@ -933,6 +944,9 @@ func (p *Provider) completeChatCompletions(ctx context.Context, req *llm.Complet
 	params := openai.ChatCompletionNewParams{
 		Model:    req.Model,
 		Messages: convertMessages(req.Messages, req.SystemPrompt),
+	}
+	if req.Store != nil {
+		params.Store = openai.Bool(*req.Store)
 	}
 	if req.MaxTokens > 0 {
 		params.MaxCompletionTokens = openai.Int(int64(req.MaxTokens))
@@ -1004,6 +1018,9 @@ func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.
 		params := openai.ChatCompletionNewParams{
 			Model:    req.Model,
 			Messages: convertMessages(req.Messages, req.SystemPrompt),
+		}
+		if req.Store != nil {
+			params.Store = openai.Bool(*req.Store)
 		}
 		if includeUsage {
 			params.StreamOptions = openai.ChatCompletionStreamOptionsParam{
@@ -1265,6 +1282,7 @@ func (p *Provider) Stream(ctx context.Context, req *llm.CompletionRequest) (<-ch
 		Model:     req.Model,
 		Messages:  []llm.Message{{Role: "user", Content: "hi"}},
 		MaxTokens: 1,
+		Store:     req.Store,
 	}
 	_, err := p.completeResponses(ctx, probeReq)
 	if err == nil {

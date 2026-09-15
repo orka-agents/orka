@@ -36,6 +36,9 @@ type CompletionRequest struct {
 	Tools          []Tool          `json:"tools,omitempty"`
 	StopSequences  []string        `json:"stop_sequences,omitempty"`
 	ResponseFormat *ResponseFormat `json:"response_format,omitempty"`
+	// Store preserves explicit stateless requests through provider translation.
+	// Nil retains the provider default for existing callers.
+	Store *bool `json:"store,omitempty"`
 }
 
 // HasTemperature reports explicit presence or a legacy positive scalar value.
@@ -131,7 +134,8 @@ type Message struct {
 type Tool struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
-	Parameters  json.RawMessage `json:"parameters"` // JSON Schema
+	Parameters  json.RawMessage `json:"parameters"`
+	Strict      *bool           `json:"strict,omitempty"` // JSON Schema
 }
 
 // ToolCall represents a tool call from the model

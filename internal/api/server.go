@@ -458,6 +458,7 @@ func (s *Server) setupRoutes() {
 	// This allows OpenAI-compatible clients to use Orka as a custom provider.
 	oai := s.externalAPIGroup("/openai/v1", externalAuth)
 	oai.Post("/chat/completions", s.openaiHandler.HandleChatCompletions)
+	oai.Post("/responses", s.openaiHandler.HandleResponses)
 	oai.Get("/models", s.openaiHandler.HandleListModels)
 
 	// Anthropic-compatible API
@@ -649,7 +650,7 @@ func customErrorHandler(c fiber.Ctx, err error) error {
 // Saying so costs a client one line in its log rather than a parse failure
 // several frames from the cause.
 var unsupportedCompatRoutes = map[string]string{
-	"/openai/v1/responses": "the OpenAI Responses API is not supported by this endpoint; use /openai/v1/chat/completions",
+	"/openai/v1/conversations": "saved conversations are not supported; use /openai/v1/responses with store:false and client-owned history",
 }
 
 // compatRouteNotFound answers an unrouted compatibility-API path in the error

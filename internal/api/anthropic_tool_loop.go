@@ -651,6 +651,13 @@ func executeExposedToolCall(ctx context.Context, tc llm.ToolCall, timeout time.D
 	return executeToolCall(ctx, tc, timeout, toolCtxOpt)
 }
 
+// toolLoopOptions selects transport-specific terminal outcome requirements.
+// Existing compatibility clients retain their iteration-limit fallback; Responses
+// must not label a failed final provider call as a completed response.
+type toolLoopOptions struct {
+	requireFinalCompletion bool
+}
+
 // runNonStreamingToolLoop runs the agentic tool loop using non-streaming Complete() calls.
 // It loops until the LLM produces a response with no tool calls, or limits are reached.
 // Returns the final CompletionResponse and all intermediate content blocks.
@@ -661,8 +668,9 @@ func runNonStreamingToolLoop(
 	model string,
 	config ChatConfig,
 	toolCtx *tools.ToolContext,
+	options ...toolLoopOptions,
 ) (*llm.CompletionResponse, error) {
-	return runToolLoopWithObserver(ctx, provider, req, model, config, toolCtx, nil)
+	return runToolLoopWithObserver(ctx, provider, req, model, config, toolCtx, nil, options...)
 }
 
 func runToolLoopWithObserver(
@@ -673,7 +681,9 @@ func runToolLoopWithObserver(
 	config ChatConfig,
 	toolCtx *tools.ToolContext,
 	observer *toolLoopObserver,
+	options ...toolLoopOptions,
 ) (*llm.CompletionResponse, error) {
+	requireFinalCompletion := len(options) > 0 && options[0].requireFinalCompletion
 	repetitionTracker := make(map[string]int)
 	exposedToolNames := completionToolNameSet(req.Tools)
 	messages := make([]llm.Message, len(req.Messages))
@@ -699,14 +709,15 @@ func runToolLoopWithObserver(
 				Role:    "user",
 				Content: "[System: You have reached the maximum number of iterations. Please provide a final summary of what you accomplished.]",
 			})
-			resp, err := provider.Complete(ctx, &llm.CompletionRequest{
-				Model:        model,
-				Messages:     messages,
-				SystemPrompt: req.SystemPrompt,
-				MaxTokens:    req.MaxTokens,
-				Temperature:  req.Temperature,
-			})
+			finalReq := *req
+			finalReq.Model = model
+			finalReq.Messages = messages
+			finalReq.Tools = nil
+			resp, err := provider.Complete(ctx, &finalReq)
 			if err != nil {
+				if requireFinalCompletion {
+					return nil, fmt.Errorf("final LLM completion failed: %w", err)
+				}
 				resp := &llm.CompletionResponse{
 					Content:    "Reached iteration limit.",
 					StopReason: "end_turn",
@@ -728,14 +739,10 @@ func runToolLoopWithObserver(
 		}
 
 		// Call LLM with tools
-		compReq := &llm.CompletionRequest{
-			Model:        model,
-			Messages:     messages,
-			SystemPrompt: req.SystemPrompt,
-			Tools:        req.Tools,
-			MaxTokens:    req.MaxTokens,
-			Temperature:  req.Temperature,
-		}
+		compReqCopy := *req
+		compReq := &compReqCopy
+		compReq.Model = model
+		compReq.Messages = messages
 
 		resp, err := provider.Complete(ctx, compReq)
 		if err != nil && isStreamingRequiredErr(err) {
