@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -108,7 +109,10 @@ func newGatewayServiceFixture(t *testing.T) (*Service, *sqlite.Store, *reference
 		},
 		Status: gatewayv1alpha1.GatewayBindingStatus{Ready: true, Programmed: true, Accepted: true, ResolvedRefs: true, ObservedGeneration: 1},
 	}
-	agent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "assistant", Namespace: "default", UID: "agent-uid"}}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "assistant", Namespace: "default", UID: "agent-uid"},
+		Spec:       corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex}},
+	}
 	inbound := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "inbound", Namespace: "default", ResourceVersion: "1", Labels: map[string]string{
 			GatewayInboundAuthLabel: GatewayAuthEnabledValue, GatewayAuthNameLabel: "chat",
@@ -282,6 +286,173 @@ func TestServiceEndToEndAndDuplicateSafety(t *testing.T) {
 	}
 }
 
+func setGatewayAgentNativeAI(t *testing.T, service *Service, native bool) {
+	t.Helper()
+	agent := &corev1alpha1.Agent{}
+	require.NoError(t, service.Client.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "assistant"}, agent))
+	agent.Generation++
+	if native {
+		agent.Spec.Runtime = nil
+		agent.Spec.Model = &corev1alpha1.ModelConfig{Provider: "openai", Name: "test-model"}
+	} else {
+		agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex}
+	}
+	require.NoError(t, service.Client.Update(context.Background(), agent))
+}
+
+func TestGatewayNativeAIAdmissionFIFOAndTerminalDelivery(t *testing.T) {
+	service, ss, adapter := newGatewayServiceFixture(t)
+	setGatewayAgentNativeAI(t, service, true)
+	ctx := context.Background()
+	first, err := service.AdmitEvent(ctx, "default", "chat", "Bearer inbound-token", gatewayEventBody(t, "native-first", "user-1"))
+	require.NoError(t, err)
+	require.Equal(t, ingressStatusAccepted, first.Status)
+	second, err := service.AdmitEvent(ctx, "default", "chat", "Bearer inbound-token", gatewayEventBody(t, "native-second", "user-1"))
+	require.NoError(t, err)
+	require.NoError(t, service.DispatchOnce(ctx))
+	firstEvent, err := ss.GetGatewayEvent(ctx, "default", first.EventID)
+	require.NoError(t, err)
+	require.Equal(t, store.GatewayEventTaskCreated, firstEvent.State)
+	task := &corev1alpha1.Task{}
+	require.NoError(t, service.Client.Get(ctx, client.ObjectKey{Namespace: "default", Name: firstEvent.TaskName}, task))
+	require.Equal(t, corev1alpha1.TaskTypeAI, task.Spec.Type)
+	require.Nil(t, task.Spec.AgentRuntime)
+	require.Nil(t, task.Spec.AI, "AgentRef supplies native model/provider; no inline AI override is needed")
+	require.Equal(t, "assistant", task.Spec.AgentRef.Name)
+	require.Empty(t, task.Spec.Prompt)
+	require.True(t, task.Spec.SessionRef.PromptIncluded)
+	require.False(t, task.Spec.SessionRef.Append)
+	require.Equal(t, "gateway:"+first.EventID+":user", task.Spec.SessionRef.ThroughMessageID)
+	require.EqualValues(t, store.GatewayTranscriptMessageLimit, task.Spec.SessionRef.MaxMessages)
+	require.ErrorIs(t, service.DispatchOnce(ctx), store.ErrNotFound)
+	duplicate, err := service.AdmitEvent(ctx, "default", "chat", "Bearer inbound-token", gatewayEventBody(t, "native-first", "user-1"))
+	require.NoError(t, err)
+	require.Equal(t, ingressStatusDuplicate, duplicate.Status)
+	require.Equal(t, first.EventID, duplicate.EventID)
+	var tasks corev1alpha1.TaskList
+	require.NoError(t, service.Client.List(ctx, &tasks))
+	require.Len(t, tasks.Items, 1)
+	secondEvent, err := ss.GetGatewayEvent(ctx, "default", second.EventID)
+	require.NoError(t, err)
+	require.Equal(t, store.GatewayEventQueued, secondEvent.State)
+	session, err := ss.GetSession(ctx, "default", firstEvent.SessionName)
+	require.NoError(t, err)
+	require.Equal(t, task.Name, session.ActiveTask)
+	require.Equal(t, string(task.UID), session.ActiveTaskUID)
+	require.NoError(t, ss.SaveResult(ctx, "default", task.Name, []byte("native answer")))
+	task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	task.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}
+	require.NoError(t, service.Client.Status().Update(ctx, task))
+	require.NoError(t, service.ProjectTerminals(ctx))
+	require.NoError(t, service.ProjectTerminals(ctx))
+	session, err = ss.GetSession(ctx, "default", firstEvent.SessionName)
+	require.NoError(t, err)
+	require.Empty(t, session.ActiveTask)
+	assistantMessages := 0
+	for _, message := range session.Messages {
+		if message.Role == "assistant" {
+			assistantMessages++
+			require.Equal(t, "native answer", message.Content)
+		}
+	}
+	require.Equal(t, 1, assistantMessages)
+	require.NoError(t, service.DeliverOnce(ctx))
+	require.Len(t, adapter.Deliveries(), 1)
+	require.Equal(t, protocol.DeliveryKindFinal, adapter.Deliveries()[0].Kind)
+	require.ErrorIs(t, service.DeliverOnce(ctx), store.ErrNotFound)
+	require.NoError(t, service.DispatchOnce(ctx))
+	secondEvent, err = ss.GetGatewayEvent(ctx, "default", second.EventID)
+	require.NoError(t, err)
+	require.Equal(t, store.GatewayEventTaskCreated, secondEvent.State)
+	require.NoError(t, service.Client.Get(ctx, client.ObjectKey{Namespace: "default", Name: secondEvent.TaskName}, task))
+	require.Equal(t, corev1alpha1.TaskTypeAI, task.Spec.Type)
+	require.Equal(t, "gateway:"+second.EventID+":user", task.Spec.SessionRef.ThroughMessageID)
+}
+
+func TestGatewayDispatchSelectsKindAtCreationAndPreservesItOnRecovery(t *testing.T) {
+	for _, nativeAtAdmission := range []bool{false, true} {
+		for _, editBeforeCreation := range []bool{false, true} {
+			t.Run(fmt.Sprintf("native=%t/editBeforeCreation=%t", nativeAtAdmission, editBeforeCreation), func(t *testing.T) {
+				service, ss, _ := newGatewayServiceFixture(t)
+				setGatewayAgentNativeAI(t, service, nativeAtAdmission)
+				ctx := context.Background()
+				accepted, err := service.AdmitEvent(ctx, "default", "chat", "Bearer inbound-token", gatewayEventBody(t, "kind-recovery", "user-1"))
+				require.NoError(t, err)
+				nativeAtCreation := nativeAtAdmission
+				if editBeforeCreation {
+					nativeAtCreation = !nativeAtAdmission
+					setGatewayAgentNativeAI(t, service, nativeAtCreation)
+				}
+				service.Config.ClaimLease = time.Second
+				service.EventStore = conflictMarkGatewayEventStore{GatewayEventStore: ss}
+				require.ErrorIs(t, service.DispatchOnce(ctx), store.ErrConflict)
+				event, err := ss.GetGatewayEvent(ctx, "default", accepted.EventID)
+				require.NoError(t, err)
+				require.Equal(t, store.GatewayEventDispatching, event.State)
+				existing := &corev1alpha1.Task{}
+				require.NoError(t, service.Client.Get(ctx, client.ObjectKey{Namespace: "default", Name: event.TaskName}, existing))
+				wantType := corev1alpha1.TaskTypeAgent
+				if nativeAtCreation {
+					wantType = corev1alpha1.TaskTypeAI
+				}
+				require.Equal(t, wantType, existing.Spec.Type)
+				setGatewayAgentNativeAI(t, service, !nativeAtCreation)
+				service.EventStore = ss
+				time.Sleep(service.Config.ClaimLease + 10*time.Millisecond)
+				require.NoError(t, service.DispatchOnce(ctx))
+				recovered, err := ss.GetGatewayEvent(ctx, "default", accepted.EventID)
+				require.NoError(t, err)
+				require.Equal(t, store.GatewayEventTaskCreated, recovered.State)
+				require.Equal(t, string(existing.UID), recovered.TaskUID)
+				var tasks corev1alpha1.TaskList
+				require.NoError(t, service.Client.List(ctx, &tasks))
+				require.Len(t, tasks.Items, 1)
+				require.Equal(t, existing.Spec, tasks.Items[0].Spec)
+			})
+		}
+	}
+}
+
+func TestGatewayNativeAICannotDropFrozenRuntimePolicy(t *testing.T) {
+	service, ss, _ := newGatewayServiceFixture(t)
+	ctx := context.Background()
+	accepted, err := service.AdmitEvent(ctx, "default", "chat", "Bearer inbound-token", gatewayEventBody(t, "frozen-runtime-policy", "user-1"))
+	require.NoError(t, err)
+	event, err := ss.ClaimNextGatewayEvent(ctx, "default", service.Owner, time.Now().UTC(), time.Minute)
+	require.NoError(t, err)
+	require.Equal(t, accepted.EventID, event.ID)
+	event, err = ss.FreezeGatewayEventTaskRuntimeAllowedTools(ctx, "default", event.ID, service.Owner, []string{}, time.Now().UTC())
+	require.NoError(t, err)
+	binding := &gatewayv1alpha1.GatewayBinding{}
+	require.NoError(t, service.Client.Get(ctx, client.ObjectKey{Namespace: "default", Name: "room"}, binding))
+	setGatewayAgentNativeAI(t, service, true)
+	agent := &corev1alpha1.Agent{}
+	require.NoError(t, service.Client.Get(ctx, client.ObjectKey{Namespace: "default", Name: "assistant"}, agent))
+	_, _, _, err = service.createOrFindGatewayTask(ctx, event, binding, agent, time.Now().UTC())
+	require.ErrorContains(t, err, "frozen runtime policy")
+	var tasks corev1alpha1.TaskList
+	require.NoError(t, service.Client.List(ctx, &tasks))
+	require.Empty(t, tasks.Items)
+}
+
+func TestGatewayNativeAIRejectsRuntimeOnlyDefaultsAtDispatch(t *testing.T) {
+	service, _, _ := newGatewayServiceFixture(t)
+	ctx := context.Background()
+	binding := &gatewayv1alpha1.GatewayBinding{}
+	require.NoError(t, service.Client.Get(ctx, client.ObjectKey{Namespace: "default", Name: "room"}, binding))
+	maxTurns := int32(12)
+	binding.Spec.TaskDefaults.AgentRuntimeMaxTurns = &maxTurns
+	require.NoError(t, service.Client.Update(ctx, binding))
+	_, err := service.AdmitEvent(ctx, "default", "chat", "Bearer inbound-token", gatewayEventBody(t, "native-defaults", "user-1"))
+	require.NoError(t, err)
+	// Readiness can lag an Agent edit after admission. Dispatch must not drop the runtime-only default.
+	setGatewayAgentNativeAI(t, service, true)
+	require.ErrorContains(t, service.DispatchOnce(ctx), "agentRuntimeMaxTurns")
+	var tasks corev1alpha1.TaskList
+	require.NoError(t, service.Client.List(ctx, &tasks))
+	require.Empty(t, tasks.Items)
+}
+
 func TestGatewayDispatchMaterializesExternalRuntimeAllowedTools(t *testing.T) {
 	for _, test := range []struct {
 		name         string
@@ -321,12 +492,14 @@ func TestGatewayDispatchMaterializesExternalRuntimeAllowedTools(t *testing.T) {
 
 func TestGatewayDispatchRecoveryMatchesMaterializedExternalRuntimePolicy(t *testing.T) {
 	for _, test := range []struct {
-		name         string
-		allowedTools []string
-		nextTools    []string
+		name             string
+		allowedTools     []string
+		nextTools        []string
+		nativeOnRecovery bool
 	}{
 		{name: "registered tools", allowedTools: []string{"read_evidence"}, nextTools: []string{"search_evidence"}},
 		{name: "explicit deny all", allowedTools: []string{}, nextTools: []string{"search_evidence"}},
+		{name: "Agent changed to native AI", allowedTools: []string{"read_evidence"}, nextTools: []string{"search_evidence"}, nativeOnRecovery: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			const recoveryClaimLease = time.Second
@@ -364,6 +537,9 @@ func TestGatewayDispatchRecoveryMatchesMaterializedExternalRuntimePolicy(t *test
 			runtimeObject.Spec.Capabilities.MCPPolicy.AllowedTools = append([]string{}, test.nextTools...)
 			if err := service.Client.Update(ctx, runtimeObject); err != nil {
 				t.Fatal(err)
+			}
+			if test.nativeOnRecovery {
+				setGatewayAgentNativeAI(t, service, true)
 			}
 			service.EventStore = sqliteStore
 			time.Sleep(recoveryClaimLease + 10*time.Millisecond)

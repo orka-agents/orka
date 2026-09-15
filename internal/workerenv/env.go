@@ -538,14 +538,15 @@ func ParseAIWorkerEnv(getenv func(string) string) AIWorkerEnv {
 }
 
 // ValidateRequired returns an error when required AI worker fields are missing.
-func (e AIWorkerEnv) ValidateRequired() error {
+// hasSessionPrompt must only be true after the worker validates its transcript input.
+func (e AIWorkerEnv) ValidateRequired(hasSessionPrompt bool) error {
 	if e.Provider == "" {
 		return fmt.Errorf("%s is required", AIProvider)
 	}
 	if e.Model == "" {
 		return fmt.Errorf("%s is required", AIModel)
 	}
-	if e.Prompt == "" {
+	if e.Prompt == "" && !hasSessionPrompt {
 		return fmt.Errorf("%s is required", AIPrompt)
 	}
 	return nil

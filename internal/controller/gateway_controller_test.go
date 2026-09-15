@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -274,6 +275,41 @@ func TestGatewayBindingReconcilerAgentChangeEnqueuesOverlappingPeers(t *testing.
 	}
 	if len(got) != 2 || !got[direct.Name] || !got[overlap.Name] {
 		t.Fatalf("bindingsForAgent() = %v, want direct and overlapping peer", got)
+	}
+}
+
+func TestGatewayBindingReconcilerNativeAI(t *testing.T) {
+	for _, withRuntimeDefault := range []bool{false, true} {
+		t.Run(fmt.Sprintf("runtimeDefault=%t", withRuntimeDefault), func(t *testing.T) {
+			scheme := newGatewayBindingTestScheme(t)
+			binding := gatewayBindingTestObject("binding", "assistant")
+			if withRuntimeDefault {
+				maxTurns := int32(12)
+				binding.Spec.TaskDefaults.AgentRuntimeMaxTurns = &maxTurns
+			}
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "assistant", Namespace: "default"},
+				Spec:       corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{Provider: "openai", Name: "test-model"}},
+			}
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+				WithStatusSubresource(&gatewayv1alpha1.GatewayBinding{}).
+				WithObjects(gatewayBindingTestGateway(), agent, binding).Build()
+			reconciler := &GatewayBindingReconciler{Client: fakeClient, Scheme: scheme}
+			request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(binding)}
+			if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+				t.Fatal(err)
+			}
+			updated := &gatewayv1alpha1.GatewayBinding{}
+			if err := fakeClient.Get(context.Background(), request.NamespacedName, updated); err != nil {
+				t.Fatal(err)
+			}
+			if updated.Status.Ready == withRuntimeDefault || updated.Status.Programmed == withRuntimeDefault {
+				t.Fatalf("status = %+v, want native readiness=%t", updated.Status, !withRuntimeDefault)
+			}
+			if withRuntimeDefault && !strings.Contains(updated.Status.Message, "agentRuntimeMaxTurns") {
+				t.Fatalf("status message = %q, want incompatible runtime-only default", updated.Status.Message)
+			}
+		})
 	}
 }
 
