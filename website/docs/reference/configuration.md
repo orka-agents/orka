@@ -773,38 +773,27 @@ to disable that provider.
 
 ### Webhook certificate
 
-The Helm chart requires a TLS Secret for its Kubernetes admission webhooks.
-For the [installation guide](../operations/installation.md), create
-`orka-webhook-tls` in the `orka-system` namespace after creating that namespace.
-These commands use your current Kubernetes context.
+The Helm chart requires a TLS Secret for its Kubernetes admission webhooks and
+never generates one itself. The Secret holds `tls.crt`, `tls.key`, and `ca.crt`,
+and the serving certificate must be valid for
+`<release>-webhook.<namespace>.svc`, which is `orka-webhook.orka-system.svc`
+for the default installation. The chart reads `ca.crt` for `webhooks.caBundle`.
 
-Use your certificate issuer to provide `tls.crt`, `tls.key`, and `ca.crt`.
-The serving certificate must be valid for `orka-webhook.orka-system.svc`.
-For a test cluster, this example creates a self-signed certificate valid for 30 days:
+The [installation guide](../operations/installation.md#1-prepare-the-namespace)
+creates a self-signed certificate for a test cluster. For a real cluster, issue
+the certificate from your own CA, or let [cert-manager](https://cert-manager.io/)
+manage it and set `webhooks.caInjectionAnnotations` instead of `webhooks.caBundle`:
 
-```bash
-(
-  umask 077
-  openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 30 \
-    -keyout tls.key -out tls.crt \
-    -subj '/CN=orka-webhook.orka-system.svc' \
-    -addext 'subjectAltName=DNS:orka-webhook.orka-system.svc,DNS:orka-webhook.orka-system.svc.cluster.local' &&
-  cp tls.crt ca.crt
-)
+```yaml
+webhooks:
+  tls:
+    existingSecret: orka-webhook-tls
+  caInjectionAnnotations:
+    cert-manager.io/inject-ca-from-secret: orka-system/orka-webhook-tls
 ```
 
-The restricted file permissions protect the private key. Save the certificate
-and key in Kubernetes:
-
-```bash
-kubectl -n orka-system create secret generic orka-webhook-tls \
-  --type=kubernetes.io/tls \
-  --from-file=tls.crt=tls.crt --from-file=tls.key=tls.key --from-file=ca.crt=ca.crt
-```
-
-The installation commands read the public CA certificate from this Secret.
-Keep private keys out of Git and Helm values, and remove local private key files
-after backing them up securely. Then return to [Install with Helm](../operations/installation.md#2-install-with-helm).
+Keep private keys out of Git and Helm values. A certificate for any other name
+is rejected by the API server at admission time, not at install time.
 
 ### Helm authentication Secret rotation
 

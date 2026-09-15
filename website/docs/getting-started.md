@@ -53,13 +53,10 @@ The [Glossary](reference/glossary.md) defines all of them in one place.
 
 ## Prerequisites
 
-- A Kubernetes cluster and a `kubectl` that can reach it. For a laptop,
-  [kind](https://kind.sigs.k8s.io/) or [minikube](https://minikube.sigs.k8s.io/) is fine.
-- OpenSSL for generating the installation credentials and certificates.
-- An API key for at least one LLM provider (Anthropic, OpenAI, or Azure OpenAI).
-
 The [installation guide](operations/installation.md#before-you-start) lists the
-required tools and storage. Providers and models are configured after installation.
+tools and cluster requirements. For a laptop, [kind](https://kind.sigs.k8s.io/) or
+[minikube](https://minikube.sigs.k8s.io/) is enough. To run your first AI task you
+also need an API key for one LLM provider: Anthropic, OpenAI, or Azure OpenAI.
 
 ## Install
 
@@ -227,19 +224,19 @@ The REST API authenticates with Kubernetes ServiceAccount tokens. A Helm release
 or Kustomize install, first [create the client ServiceAccount and its RBAC roles](operations/troubleshooting.md#i-get-403-from-the-api),
 then continue here.
 
-For a Helm release named `orka`, use the same cluster connection name as your
-installation and forward the API port:
+The commands from here on use your current kubectl context. If you built from source
+against a different context, select it first with `kubectl config use-context`.
+
+Forward the API port:
 
 ```bash
-export ORKA_CONTEXT='<your-kubeconfig-context>'
-kubectl --context "${ORKA_CONTEXT}" -n orka-system port-forward svc/orka 8080:8080
+kubectl -n orka-system port-forward svc/orka 8080:8080
 ```
 
-In another terminal, set the same context and create a client token:
+In another terminal, create a client token:
 
 ```bash
-export ORKA_CONTEXT='<your-kubeconfig-context>'
-export ORKA_TOKEN="$(kubectl --context "${ORKA_CONTEXT}" -n orka-system create token orka-client)"
+export ORKA_TOKEN="$(kubectl -n orka-system create token orka-client)"
 ```
 
 :::warning[Namespace matters]
@@ -253,10 +250,10 @@ never run. `kubectl create token orka-client` fails the same way without it.
 ### 1. Create a Provider
 
 ```bash
-kubectl --context "${ORKA_CONTEXT}" -n orka-system create secret generic anthropic-secret \
+kubectl -n orka-system create secret generic anthropic-secret \
   --from-literal=api-key=your-api-key
 
-kubectl --context "${ORKA_CONTEXT}" apply -f - <<'EOF'
+kubectl apply -f - <<'EOF'
 apiVersion: core.orka.ai/v1alpha1
 kind: Provider
 metadata:
@@ -274,7 +271,7 @@ EOF
 ### 2. Create an Agent
 
 ```bash
-kubectl --context "${ORKA_CONTEXT}" apply -f - <<'EOF'
+kubectl apply -f - <<'EOF'
 apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
@@ -293,7 +290,7 @@ EOF
 ### 3. Run a Task
 
 ```bash
-kubectl --context "${ORKA_CONTEXT}" apply -f - <<'EOF'
+kubectl apply -f - <<'EOF'
 apiVersion: core.orka.ai/v1alpha1
 kind: Task
 metadata:
@@ -310,7 +307,7 @@ EOF
 ### 4. Read the result
 
 ```bash
-kubectl --context "${ORKA_CONTEXT}" -n orka-system get task hello-task
+kubectl -n orka-system get task hello-task
 
 curl -H "Authorization: Bearer ${ORKA_TOKEN}" \
   http://localhost:8080/api/v1/tasks/hello-task/result
@@ -355,18 +352,23 @@ fenced RuntimeSessions in controller-owned RuntimePools. Operators own external
 and passes strict governance checks, an Agent can select it through `runtimeRef` and
 use the same durable Task and RuntimeSession lifecycle.
 
-### 1. Check the provider proxy is up
+### 1. Connect a model gateway
 
-Configure your gateway's providers and models, then
-[connect it to Orka](operations/provider-proxy.md). Vekil and agentgateway are optional
-choices. Built-in coding agents receive a session token and a specific allowed model;
-provider credentials stay in your gateway. Confirm the `provider-auth-proxy`
-Deployment is Ready before submitting agent Tasks.
+Coding agents do not use the Provider resource from the previous section. They reach
+models through a gateway you run, so provider credentials never enter the agent
+process. Follow [Provider proxy](operations/provider-proxy.md) once to install a
+gateway and connect it. Then confirm the proxy is ready:
+
+```bash
+kubectl -n orka-system get deploy -l app.kubernetes.io/component=provider-auth-proxy
+```
+
+The `model.name` in the Agent below must be a model ID your gateway lists.
 
 ### 2. Create an Agent with a runtime
 
 ```bash
-kubectl --context "${ORKA_CONTEXT}" apply -f - <<'EOF'
+kubectl apply -f - <<'EOF'
 apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
@@ -395,7 +397,7 @@ Two runtime-specific notes:
 ### 3. Run it
 
 ```bash
-kubectl --context "${ORKA_CONTEXT}" apply -f - <<'EOF'
+kubectl apply -f - <<'EOF'
 apiVersion: core.orka.ai/v1alpha1
 kind: Task
 metadata:
@@ -422,8 +424,8 @@ EOF
 ### 4. Watch it
 
 ```bash
-kubectl --context "${ORKA_CONTEXT}" -n orka-system get task code-review
-kubectl --context "${ORKA_CONTEXT}" -n orka-system get runtimepools
+kubectl -n orka-system get task code-review
+kubectl -n orka-system get runtimepools
 ```
 
 You can also check the Task with the [optional CLI](#the-cli):

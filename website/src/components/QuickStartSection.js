@@ -10,10 +10,10 @@ export default function QuickStartSection() {
       </p>
       <div className="quickstart-grid">
         <div className="quickstart-card">
-          <h3>1. Install Orka</h3>
+          <h3>1. Install with Helm</h3>
           <p>
-            Follow the Helm guide to set up a new installation and check it
-            with a test task.
+            One namespace, two Secrets, and one Helm command. Works on kind or
+            minikube. No model API key needed yet.
           </p>
           <p>
             <Link to="/docs/installation">Open the installation guide</Link>
@@ -22,7 +22,8 @@ export default function QuickStartSection() {
         <div className="quickstart-card">
           <h3>2. Run your first AI task</h3>
           <p>
-            Connect to Orka's API, add a model provider, and submit a task.
+            Connect to the API, add your Anthropic, OpenAI, or Azure OpenAI key
+            as a Provider, and submit a Task.
           </p>
           <p>
             <Link to="/docs/getting-started#give-yourself-an-api-client">

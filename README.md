@@ -99,28 +99,26 @@ credential broker. Artifact access is separately operation-scoped.
 ### Install
 
 Follow [Install Orka](website/docs/operations/installation.md) to set up Orka on
-Kubernetes and run a test task. The guide covers the required tools, model
-connection, certificates, and encryption key.
+Kubernetes and run a test task. It takes one namespace, two Secrets, and one Helm
+command.
 
 For development, [build from source](website/docs/getting-started.md#option-b-current-main-from-source).
 
 ### Create an API client
 
-The Helm install creates an `orka-client` ServiceAccount. Use the same cluster
-connection name as your installation to create a client token:
+The Helm install creates an `orka-client` ServiceAccount. Create a client token from it:
 
 ```bash
-export ORKA_CONTEXT='<your-kubeconfig-context>'
-export ORKA_TOKEN="$(kubectl --context "${ORKA_CONTEXT}" -n orka-system create token orka-client)"
+export ORKA_TOKEN="$(kubectl -n orka-system create token orka-client)"
 ```
 
 ### Set up a provider
 
 ```bash
-kubectl --context "${ORKA_CONTEXT}" -n orka-system create secret generic anthropic-secret \
+kubectl -n orka-system create secret generic anthropic-secret \
   --from-literal=api-key=your-api-key
 
-kubectl --context "${ORKA_CONTEXT}" apply -f - <<EOF
+kubectl apply -f - <<EOF
 apiVersion: core.orka.ai/v1alpha1
 kind: Provider
 metadata:
@@ -143,7 +141,7 @@ This Provider supplies native AI tasks and chat. For coding agents,
 Forward the API port and leave this command running:
 
 ```bash
-kubectl --context "${ORKA_CONTEXT}" -n orka-system port-forward svc/orka 8080:8080
+kubectl -n orka-system port-forward svc/orka 8080:8080
 ```
 
 Open <http://localhost:8080> and sign in with the client token created above.

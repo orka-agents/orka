@@ -13,18 +13,26 @@ See [Build from source](https://orka-agents.github.io/orka/docs/getting-started#
 ## Values
 
 [values.yaml](values.yaml) contains the chart defaults. Pass your settings to
-Helm with `--values <file>`.
+Helm with `--values <file>` or `--set-string`.
 
-| Setting | Chart requirement |
+A new installation needs only these values:
+
+| Setting | What to set |
 | --- | --- |
-| `controller.mode` | Use `harness-v2` for new installations. It cannot change after installation. |
-| `controller.watchNamespace` | Defaults to the Helm namespace. That namespace needs a matching `orka.ai/controller-mode` label. |
+| `controller.agentExecutionSnapshot.existingSecret`, `.key` | The Secret and key holding the 32-byte snapshot encryption key. |
+| `webhooks.tls.existingSecret` | The TLS Secret for the admission webhooks. |
+| `webhooks.caBundle` | The base64 CA certificate that signed it, or configure `webhooks.caInjectionAnnotations` for cert-manager. |
+
+Everything else has a working default. The settings you are most likely to
+change later:
+
+| Setting | Notes |
+| --- | --- |
 | `controller.image`, `publisher.image`, `workers.*.image` | Use the release tag by default. Set `tag` to choose another tag, or `digest` to pin an image. A digest takes precedence over the tag. |
 | `controller.acpRuntime.*Image` | Use release tags by default. Override with a full tagged or digest reference; set an empty string to disable a runtime. |
-| `controller.agentExecutionSnapshot.existingSecret`, `.key` | Reference an existing encryption-key Secret. |
-| `webhooks.tls.existingSecret` | Reference an existing webhook TLS Secret. Set `webhooks.caBundle` or configure `webhooks.caInjectionAnnotations` for CA injection. |
-| `providerProxy.enabled` | Defaults to `false`. Enable when connecting built-in coding agents to your model gateway. |
-| `providerProxy.upstreamBaseURL`, `.egress` | Your gateway endpoint and the NetworkPolicy rules allowing the proxy to reach it. Required when the proxy is enabled. |
+| `providerProxy.enabled`, `.upstreamBaseURL`, `.egress` | Off by default. Enable to connect built-in coding agents to your model gateway. See [Provider proxy](https://orka-agents.github.io/orka/docs/provider-proxy). |
+| `controller.mode` | `harness-v2` for new installations. It cannot change after installation. |
+| `controller.watchNamespace` | Defaults to the Helm namespace, which needs a matching `orka.ai/controller-mode` label. |
 
 Use a distinct Helm release name and namespace for each installation in a cluster.
 Each `harness-v2` installation also needs its own `controller.acpRuntime.namespace`.
@@ -32,12 +40,12 @@ Each `harness-v2` installation also needs its own `controller.acpRuntime.namespa
 container listener and Service target port.
 
 See the [Helm values reference](https://orka-agents.github.io/orka/docs/configuration#helm-chart)
-for further settings and Secret rotation, and [Security](https://orka-agents.github.io/orka/docs/security#scm-proxy-networkpolicy-limits)
+for all settings and Secret rotation, and [Security](https://orka-agents.github.io/orka/docs/security#scm-proxy-networkpolicy-limits)
 for NetworkPolicy limits.
 
-Create your own providers and models after installation. The chart does not
-install or choose a model gateway. See [Provider proxy](https://orka-agents.github.io/orka/docs/provider-proxy)
-to connect built-in coding agents to one you manage.
+The chart does not install or choose a model gateway. AI-worker tasks use
+Provider resources you create after installation. Built-in coding agents need
+the provider proxy connected to a gateway you manage.
 
 Runtime tags are resolved to digests at controller startup. This requires HTTPS
 access to a registry that allows anonymous pulls. Use digest references for
