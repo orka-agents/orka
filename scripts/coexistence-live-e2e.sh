@@ -612,8 +612,6 @@ main() {
   log "Claiming mode-labeled namespaces before any workload write"
   run bash "${script_dir}/lib/ensure-static-mode-namespace.sh" kubectl "${v1_namespace}" harness-v1
   run bash "${script_dir}/lib/ensure-static-mode-namespace.sh" kubectl "${v2_namespace}" harness-v2
-  # Stub namespace required by the v2 release's pinned Vekil ingress policy.
-  kubectl create namespace vekil-system --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
   log "Provisioning per-release test-only secrets"
   create_namespace_secrets "${v1_namespace}" "${v1_release}-webhook.${v1_namespace}.svc"
@@ -651,9 +649,11 @@ main() {
 
   log "Installing the harness-v2 release ${v2_release}"
   # This test runs the v1 wrapper's fake agent; it does not use built-in v2 runtimes.
+  # Enable the optional proxy explicitly to retain its network isolation checks.
   run helm install "${v2_release}" "${chart_dir}" \
     --namespace "${v2_namespace}" \
     --skip-crds \
+    --values "${repo_root}/cmd/build/helmify/testdata/provider-proxy-values.yaml" \
     --set controller.mode=harness-v2 \
     --set "controller.watchNamespace=${v2_namespace}" \
     --set "controller.acpRuntime.namespace=${v2_runtime_namespace}" \
@@ -668,8 +668,7 @@ main() {
     --set webhooks.tls.existingSecret=orka-webhook-tls \
     --set "webhooks.caBundle=$(base64_no_wrap "${work_dir}/${v2_namespace}-webhook-tls/ca.crt")" \
     --set "publisher.image.repository=$(split_image_repository "${publisher_ref}")" \
-    --set "publisher.image.digest=$(split_image_digest "${publisher_ref}")" \
-    --set providerProxy.enabled=false
+    --set "publisher.image.digest=$(split_image_digest "${publisher_ref}")"
 
   log "Wiring the deterministic fake agent CLI into the wrapper (test-only)"
   kubectl -n "${v1_namespace}" create configmap coexistence-fake-agent \
