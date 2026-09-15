@@ -344,13 +344,16 @@ scmEgressProxy:
       memory: 256Mi
       ephemeral-storage: 128Mi
 
-# Authenticated boundary in front of the otherwise unauthenticated Vekil
-# service. ACP RuntimePods can reach only this Service, never Vekil directly.
+# Optional authenticated boundary for built-in coding agents. Configure your
+# model gateway before enabling it; no gateway, provider, or model is installed.
 providerProxy:
-  enabled: true
-  # Only this chart-supported Vekil Service endpoint is accepted. One trailing
-  # slash is normalized; alternate hosts, namespaces, and ports are rejected.
-  upstreamBaseURL: http://vekil.vekil-system.svc:1337
+  enabled: false
+  # HTTP(S) endpoint of your credential-injecting model gateway.
+  upstreamBaseURL: ""
+  # Kubernetes NetworkPolicy egress rules allowing access to that gateway.
+  # Required when enabled. DNS access is added by the chart. Gateway ingress
+  # and provider credentials remain under your control.
+  egress: []
   # Mounted Secret files are reloaded atomically; no proxy Pod restart is
   # required for token changes. Reload failures make readiness fail and disable
   # all authenticated forwarding until both files are valid again.

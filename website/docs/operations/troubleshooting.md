@@ -36,9 +36,9 @@ The chart validates its inputs before producing any manifests, so a bad install 
 | --- | --- |
 | `agentExecutionSnapshot.existingSecret` | A Secret holding a 32-byte key. See [below](#the-snapshot-key). |
 | `watchNamespace` | Must be set, and must equal the release namespace. |
-| `providerProxy` | `providerProxy.enabled=true` is required for `harness-v2`. See [Provider proxy](provider-proxy.md). |
-| `upstreamBaseURL` | Must be exactly `http://vekil.vekil-system.svc:1337`. |
-| `@sha256:` | Runtime and controller images must be digest references, not tags. |
+| `providerProxy` | When enabled, provide your gateway endpoint and egress rules. It can stay disabled during installation. See [Provider proxy](provider-proxy.md). |
+| `upstreamBaseURL` | Your gateway's HTTP(S) URL, without credentials, a query, or a fragment. |
+| `image` | Use a valid tag or SHA256 digest. Runtime overrides need a full registry/repository reference. |
 | `replicas` / `leaderElect` | Must be `1` and `true`. The controller is a single writer. |
 | `webhooks.tls.existingSecret` | A TLS Secret for the admission webhooks. |
 | `mode` | Only `harness-v1` or `harness-v2`, and it cannot change on upgrade. |
@@ -138,11 +138,11 @@ In order of likelihood:
 unavailable and Tasks asking for it fail rather than falling back to another. This is
 intentional.
 
-**The provider proxy is not reachable or not ready.** Check Vekil first — it fails
-independently of Orka:
+**The provider proxy is not reachable or not ready.** Built-in coding agents need
+the optional provider proxy enabled and connected to your gateway. Check that
+gateway's readiness and network access, then check Orka's proxy:
 
 ```bash
-kubectl -n vekil-system get deploy
 kubectl -n orka-system get deploy -l app.kubernetes.io/component=provider-auth-proxy
 ```
 

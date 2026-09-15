@@ -1,0 +1,15 @@
+# Rendering fixture. The operator owns this gateway and its ingress policy.
+providerProxy:
+  enabled: true
+  upstreamBaseURL: http://model-gateway.models.svc:8080
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: models
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: model-gateway
+      ports:
+        - protocol: TCP
+          port: 8080

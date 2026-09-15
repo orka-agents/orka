@@ -602,10 +602,6 @@ let a bearer holder mint valid operation capabilities.
 {{- printf "%s-store" (include "orka.fullname" . | trunc 57 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
-{{- define "orka.vekilIngressPolicyName" -}}
-{{- printf "%s-vekil-ingress" (include "orka.fullname" . | trunc 49 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
-{{- end }}
-
 {{/*
 Create the name of the workspace publisher ServiceAccount to use.
 */}}
@@ -657,8 +653,8 @@ because the ACP runtime remains enabled and has no legacy fallback.
 {{- end }}
 
 {{/*
-The chart-managed provider proxy is release-namespaced and its NetworkPolicies
-are intentionally pinned to the chart-supported Vekil Service.
+The chart-managed provider proxy stays in the release namespace. Operators
+choose its upstream gateway and explicitly allow the required network access.
 */}}
 {{- define "orka.validateProviderProxyConfig" -}}
 {{- if and (eq .Values.controller.mode "harness-v2") .Values.providerProxy.enabled -}}
@@ -667,8 +663,11 @@ are intentionally pinned to the chart-supported Vekil Service.
 {{- fail (printf "controller.acpRuntime.providerProxyNamespace must be empty or match the Helm release namespace %q when providerProxy.enabled=true" .Release.Namespace) -}}
 {{- end -}}
 {{- $upstream := trimSuffix "/" (trim (default "" .Values.providerProxy.upstreamBaseURL)) -}}
-{{- if ne $upstream "http://vekil.vekil-system.svc:1337" -}}
-{{- fail "providerProxy.upstreamBaseURL must be http://vekil.vekil-system.svc:1337 (an optional trailing slash is accepted)" -}}
+{{- if not (regexMatch `^https?://[^/?#@[:space:]]+(/[^?#[:space:]]*)?$` $upstream) -}}
+{{- fail "providerProxy.upstreamBaseURL must be an HTTP(S) URL without credentials, a query, or a fragment when providerProxy.enabled=true" -}}
+{{- end -}}
+{{- if or (not (kindIs "slice" .Values.providerProxy.egress)) (empty .Values.providerProxy.egress) -}}
+{{- fail "providerProxy.egress must contain NetworkPolicy rules allowing access to your model gateway when providerProxy.enabled=true" -}}
 {{- end -}}
 {{- end -}}
 {{- end }}

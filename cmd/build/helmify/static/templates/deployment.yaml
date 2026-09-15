@@ -19,9 +19,6 @@
 {{- include "orka.validateACPRuntimeImage" (dict "name" "controller.acpRuntime.claudeImage" "ref" .Values.controller.acpRuntime.claudeImage) }}
 {{- include "orka.validateACPRuntimeImage" (dict "name" "controller.acpRuntime.copilotImage" "ref" .Values.controller.acpRuntime.copilotImage) }}
 {{- include "orka.validateACPRuntimeImage" (dict "name" "controller.acpRuntime.opencodeImage" "ref" .Values.controller.acpRuntime.opencodeImage) }}
-{{- if not .Values.providerProxy.enabled }}
-{{- fail "providerProxy.enabled must be true when controller.mode=harness-v2" }}
-{{- end }}
 {{- end }}
 {{- $gatewayCRDsReady := false -}}
 {{- if and $harnessV2 .Values.controller.gateway.enabled (not .Values.controller.gateway.crdsReadyOverride) -}}

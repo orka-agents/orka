@@ -17,8 +17,6 @@ For development, [build from source](../getting-started.md#option-b-current-main
   and permission to install cluster-wide resources.
 - NetworkPolicy enforcement, a default StorageClass, and HTTPS access to
   `ghcr.io` from the cluster nodes and controller.
-- [Vekil](provider-proxy.md) running with access to your model provider.
-  Orka expects it at `http://vekil.vekil-system.svc:1337`.
 
 ## 1. Prepare the namespace
 
@@ -84,5 +82,6 @@ kubectl -n orka-system wait \
 ```
 
 When the command reports `condition met`, Orka has completed its first task.
-Next, [run a coding agent](../getting-started.md#running-a-coding-agent)
-or [connect to the API](../getting-started.md#give-yourself-an-api-client).
+Next, [connect to the API](../getting-started.md#give-yourself-an-api-client) and
+[create your providers and models](../getting-started.md#your-first-task).
+For built-in coding agents, [connect your model gateway](provider-proxy.md).

@@ -174,6 +174,50 @@ func TestRuntimePoolReconcilerScalesZeroToOneWithHardenedResources(t *testing.T)
 	}
 }
 
+func TestRuntimePoolReconcilerWaitsForProviderProxy(t *testing.T) {
+	pool := runtimePoolTestObject(1)
+	r := runtimePoolTestReconciler(t, runtimePoolTestScheme(t), nil, pool)
+	configuredProxy := r.ProviderProxy
+	r.ProviderProxy = RuntimePoolProviderProxyConfig{}
+
+	runtimePoolReconcile(t, r, pool)
+	gotPool := runtimePoolTestGetPool(t, r, pool)
+	if gotPool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded || gotPool.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed {
+		t.Fatalf("unconfigured gateway status = %s/%s, want Degraded/Closed", gotPool.Status.Lifecycle, gotPool.Status.AdmissionState)
+	}
+	if !strings.Contains(gotPool.Status.Message, "authenticated provider proxy base URL is required") {
+		t.Fatalf("missing gateway was not reported: %s", gotPool.Status.Message)
+	}
+	for _, list := range []client.ObjectList{
+		&appsv1.DeploymentList{}, &corev1.PodList{}, &corev1.SecretList{},
+		&corev1.ServiceList{}, &networkingv1.NetworkPolicyList{},
+	} {
+		if err := r.List(context.Background(), list); err != nil {
+			t.Fatal(err)
+		}
+		items, err := meta.ExtractList(list)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(items) != 0 {
+			t.Fatalf("unconfigured gateway created %T resources", list)
+		}
+	}
+
+	// Configuring the gateway later lets the existing pool start.
+	r.ProviderProxy = configuredProxy
+	runtimePoolReconcile(t, r, pool)
+	gotPool = runtimePoolTestGetPool(t, r, pool)
+	if gotPool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStarting {
+		t.Fatalf("configured gateway status = %s, want Starting", gotPool.Status.Lifecycle)
+	}
+	var deployment appsv1.Deployment
+	key := types.NamespacedName{Namespace: pool.Namespace, Name: runtimePoolResourceName(pool.Namespace, pool.Name)}
+	if err := r.Get(context.Background(), key, &deployment); err != nil {
+		t.Fatalf("configured gateway did not start the runtime Deployment: %v", err)
+	}
+}
+
 func TestRuntimePoolNamespaceRejectsArbitraryOverride(t *testing.T) {
 	reconciler := &RuntimePoolReconciler{RuntimeNamespace: acpTestRuntimeNamespace}
 	pool := &corev1alpha1.RuntimePool{ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "pool"}}

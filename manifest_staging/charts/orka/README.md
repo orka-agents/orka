@@ -23,8 +23,8 @@ Helm with `--values <file>`.
 | `controller.acpRuntime.*Image` | Use release tags by default. Override with a full tagged or digest reference; set an empty string to disable a runtime. |
 | `controller.agentExecutionSnapshot.existingSecret`, `.key` | Reference an existing encryption-key Secret. |
 | `webhooks.tls.existingSecret` | Reference an existing webhook TLS Secret. Set `webhooks.caBundle` or configure `webhooks.caInjectionAnnotations` for CA injection. |
-| `providerProxy.enabled` | Defaults to `true`, as required for `harness-v2`. |
-| `providerProxy.upstreamBaseURL` | Use `http://vekil.vekil-system.svc:1337`. The chart's network policies require this endpoint. |
+| `providerProxy.enabled` | Defaults to `false`. Enable when connecting built-in coding agents to your model gateway. |
+| `providerProxy.upstreamBaseURL`, `.egress` | Your gateway endpoint and the NetworkPolicy rules allowing the proxy to reach it. Required when the proxy is enabled. |
 
 Use a distinct Helm release name and namespace for each installation in a cluster.
 Each `harness-v2` installation also needs its own `controller.acpRuntime.namespace`.
@@ -34,6 +34,10 @@ container listener and Service target port.
 See the [Helm values reference](https://orka-agents.github.io/orka/docs/configuration#helm-chart)
 for further settings and Secret rotation, and [Security](https://orka-agents.github.io/orka/docs/security#scm-proxy-networkpolicy-limits)
 for NetworkPolicy limits.
+
+Create your own providers and models after installation. The chart does not
+install or choose a model gateway. See [Provider proxy](https://orka-agents.github.io/orka/docs/provider-proxy)
+to connect built-in coding agents to one you manage.
 
 Runtime tags are resolved to digests at controller startup. This requires HTTPS
 access to a registry that allows anonymous pulls. Use digest references for

@@ -669,7 +669,7 @@ main() {
     --set "webhooks.caBundle=$(base64_no_wrap "${work_dir}/${v2_namespace}-webhook-tls/ca.crt")" \
     --set "publisher.image.repository=$(split_image_repository "${publisher_ref}")" \
     --set "publisher.image.digest=$(split_image_digest "${publisher_ref}")" \
-    --set providerProxy.enabled=true
+    --set providerProxy.enabled=false
 
   log "Wiring the deterministic fake agent CLI into the wrapper (test-only)"
   kubectl -n "${v1_namespace}" create configmap coexistence-fake-agent \

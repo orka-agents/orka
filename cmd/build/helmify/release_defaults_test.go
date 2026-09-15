@@ -64,10 +64,14 @@ func TestStaticChartUsesReleaseTagsByDefault(t *testing.T) {
 		"namespace: orka-install-test",
 		"gateway.orka.ai/orka-install-test/",
 		"--controller-mode=harness-v2",
-		"--acp-provider-proxy-base-url=http://orka-provider-auth-proxy.orka-install-test.svc:8080",
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Errorf("installation defaults are missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{"--acp-provider-proxy-", "vekil"} {
+		if strings.Contains(rendered, forbidden) {
+			t.Errorf("installation preconfigured a model gateway: %q", forbidden)
 		}
 	}
 }

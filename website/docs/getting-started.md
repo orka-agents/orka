@@ -59,7 +59,7 @@ The [Glossary](reference/glossary.md) defines all of them in one place.
 - An API key for at least one LLM provider (Anthropic, OpenAI, or Azure OpenAI).
 
 The [installation guide](operations/installation.md#before-you-start) lists the
-required tools, storage, and model connection setup.
+required tools and storage. Providers and models are configured after installation.
 
 ## Install
 
@@ -79,10 +79,6 @@ You will need, in addition to the prerequisites above:
 
 - Go, Bun, and Docker — see [Development](development/development.md#prerequisites) for versions
 - [Helm](https://helm.sh/docs/intro/install/) for the chart install below
-- A **provider proxy**. Built-in coding agents never receive an LLM API key directly;
-  all their model traffic goes through an authenticated proxy in front of
-  [Vekil](operations/provider-proxy.md). Set that up first — the chart refuses to
-  install without it.
 - A TLS certificate for the admission webhooks, and a 32-byte encryption key for
   execution snapshots.
 
@@ -199,8 +195,7 @@ helm install orka ./manifest_staging/charts/orka \
   --set-string controller.agentExecutionSnapshot.existingSecret=orka-agent-snapshot-key \
   --set-string controller.agentExecutionSnapshot.key=key \
   --set-string webhooks.tls.existingSecret=orka-webhook-tls \
-  --set-string webhooks.caBundle="${WEBHOOK_CA_BUNDLE}" \
-  --set providerProxy.enabled=true
+  --set-string webhooks.caBundle="${WEBHOOK_CA_BUNDLE}"
 ```
 
 To disable an unused runtime, set its image to an empty string, for example
@@ -362,10 +357,11 @@ use the same durable Task and RuntimeSession lifecycle.
 
 ### 1. Check the provider proxy is up
 
-Built-in agent runtimes never see a provider Secret. They get a token for Orka's proxy and
-a specific model they are allowed to use; the real API key stays with
-[Vekil](operations/provider-proxy.md). Confirm the `provider-auth-proxy` Deployment is
-Ready before submitting agent Tasks.
+Configure your gateway's providers and models, then
+[connect it to Orka](operations/provider-proxy.md). Vekil and agentgateway are optional
+choices. Built-in coding agents receive a session token and a specific allowed model;
+provider credentials stay in your gateway. Confirm the `provider-auth-proxy`
+Deployment is Ready before submitting agent Tasks.
 
 ### 2. Create an Agent with a runtime
 
