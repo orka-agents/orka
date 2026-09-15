@@ -863,7 +863,7 @@ func validateArchivedSessionTask(task *corev1alpha1.Task, attempt *store.PromptA
 	if receipt.Key != key || receipt.PromptAttemptID != attempt.ID || receipt.ProjectionState != store.OutboxProjectionDelivered {
 		return fmt.Errorf("%w: archived Session proof is not the delivered terminal projection for this attempt", store.ErrConflict)
 	}
-	projection, err := taskterminal.ValidateFinalizedSessionProjection(receipt.Payload, task, string(task.UID), attempt, receipt.SessionTurn())
+	projection, err := taskterminal.ValidateSessionCleanupProjection(receipt.Payload, task, string(task.UID), attempt, receipt.SessionTurn())
 	if err != nil {
 		return err
 	}
@@ -2299,9 +2299,13 @@ func (d *ACPDispatcher) finalizeRecoveredTerminalSession(ctx context.Context, ta
 		}
 		finalizeErr = d.finalizeTaskSessionMarker(ctx, task, fence, session, "Failed", message, corev1alpha1.TaskPhaseFailed, execution)
 	case store.PromptExecutionSucceeded:
-		delivery := task.Status.Delivery
-		if delivery == nil {
-			delivery = deliveryStatusFromPromptState(attempt.DeliveryState)
+		delivery, deliveryErr := d.recoveredTerminalDeliveryStatus(ctx, task, attempt)
+		if deliveryErr != nil {
+			return deliveryErr
+		}
+		if delivery == nil || store.PromptDeliveryState(delivery.State) != attempt.DeliveryState ||
+			string(delivery.Outcome) != string(attempt.DeliveryState) {
+			return fmt.Errorf("%w: recovered Session delivery does not match the authoritative terminal attempt", store.ErrConflict)
 		}
 		phase := corev1alpha1.TaskPhaseFailed
 		switch attempt.DeliveryState {

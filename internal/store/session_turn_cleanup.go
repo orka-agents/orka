@@ -10,25 +10,27 @@ import (
 // Payload is bytes rather than RawMessage so encoding preserves the exact
 // immutable projection bytes, including any whitespace.
 type SessionTurnCleanupReceipt struct {
-	Namespace        string                  `json:"namespace"`
-	SessionName      string                  `json:"sessionName"`
-	OperationID      string                  `json:"operationId"`
-	OperationDigest  string                  `json:"operationDigest"`
-	TurnID           string                  `json:"turnId"`
-	Key              SessionTurnKey          `json:"key"`
-	PromptAttemptID  string                  `json:"promptAttemptId"`
-	TerminalKind     SessionTurnTerminalKind `json:"terminalKind"`
-	FinalizedAt      time.Time               `json:"finalizedAt"`
-	ProjectionID     string                  `json:"projectionId"`
-	ProjectionKind   string                  `json:"projectionKind"`
-	ProjectionDigest string                  `json:"projectionDigest"`
-	AggregateKind    string                  `json:"aggregateKind"`
-	AggregateID      string                  `json:"aggregateId"`
-	Payload          []byte                  `json:"payload"`
-	PayloadDigest    string                  `json:"payloadDigest"`
-	ProjectionState  OutboxProjectionState   `json:"projectionState"`
-	DeliveryDigest   string                  `json:"deliveryDigest,omitempty"`
-	DeliveredAt      *time.Time              `json:"deliveredAt,omitempty"`
+	Namespace          string                  `json:"namespace"`
+	SessionName        string                  `json:"sessionName"`
+	OperationID        string                  `json:"operationId"`
+	OperationDigest    string                  `json:"operationDigest"`
+	TurnID             string                  `json:"turnId"`
+	Key                SessionTurnKey          `json:"key"`
+	PromptAttemptID    string                  `json:"promptAttemptId"`
+	TerminalKind       SessionTurnTerminalKind `json:"terminalKind"`
+	FinalizedAt        time.Time               `json:"finalizedAt"`
+	PublicationID      string                  `json:"publicationId,omitempty"`
+	PublicationReceipt *PublicationReceipt     `json:"publicationReceipt,omitempty"`
+	ProjectionID       string                  `json:"projectionId"`
+	ProjectionKind     string                  `json:"projectionKind"`
+	ProjectionDigest   string                  `json:"projectionDigest"`
+	AggregateKind      string                  `json:"aggregateKind"`
+	AggregateID        string                  `json:"aggregateId"`
+	Payload            []byte                  `json:"payload"`
+	PayloadDigest      string                  `json:"payloadDigest"`
+	ProjectionState    OutboxProjectionState   `json:"projectionState"`
+	DeliveryDigest     string                  `json:"deliveryDigest,omitempty"`
+	DeliveredAt        *time.Time              `json:"deliveredAt,omitempty"`
 }
 
 // Validate proves the archived metadata still pins one exact terminal
@@ -48,6 +50,19 @@ func (r *SessionTurnCleanupReceipt) Validate(namespace, sessionName, turnID stri
 	}
 	if err := ValidateCanonicalDigest("cleanup operation digest", r.OperationDigest); err != nil {
 		return err
+	}
+	if r.PublicationID != "" {
+		if err := ValidateControlIdentifier("cleanup publication ID", r.PublicationID); err != nil {
+			return err
+		}
+	}
+	// Older turns may name a publication without retaining its receipt. Keep
+	// that archival shape readable; it cannot authorize delivery compatibility.
+	if r.PublicationReceipt != nil {
+		if r.PublicationID == "" || r.PublicationReceipt.PublicationID != r.PublicationID ||
+			r.PublicationReceipt.Generation < 1 || !IsTerminalPublicationState(r.PublicationReceipt.State) {
+			return ConflictErrorf("Session cleanup receipt has inconsistent publication evidence")
+		}
 	}
 	canonicalID, err := r.Key.CanonicalID()
 	if err != nil || canonicalID != r.TurnID || r.FinalizedAt.IsZero() ||
@@ -80,6 +95,7 @@ func (r *SessionTurnCleanupReceipt) SessionTurn() *SessionTurn {
 	return &SessionTurn{
 		ID: r.TurnID, Key: r.Key, PromptAttemptID: r.PromptAttemptID,
 		State: SessionTurnFinalized, TerminalKind: r.TerminalKind, FinalizedAt: &r.FinalizedAt,
+		PublicationID: r.PublicationID, PublicationReceipt: r.PublicationReceipt,
 		ProjectionID: r.ProjectionID, ProjectionKind: r.ProjectionKind, ProjectionDigest: r.ProjectionDigest,
 	}
 }

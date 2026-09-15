@@ -401,7 +401,10 @@ func TestSessionRuntimeCleanupKeepsDurableStateWhenAuthorityIsUnavailable(t *tes
 
 func newContinuedSessionCleanupFixture(t *testing.T) (*externalACPDispatchFixture, []*corev1alpha1.Task) {
 	t.Helper()
-	fixture := newExternalACPDispatchFixture(t)
+	// Both prompt dispatches include event redaction, which needs more setup
+	// time under the race detector than the single-dispatch fixture default.
+	fixture := newExternalACPDispatchFixtureWithOptions(t, "external-v2", testAgentRuntimeMCPPolicy(),
+		externalACPDispatchFixtureOptions{contextTimeout: time.Minute})
 	tasks := make([]*corev1alpha1.Task, 0, 2)
 	for i := range 2 {
 		name := fmt.Sprintf("cleanup-turn-%d", i+1)

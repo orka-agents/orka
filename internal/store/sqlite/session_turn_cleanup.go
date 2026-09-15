@@ -136,6 +136,7 @@ func archiveSessionTurnCleanupReceipts(ctx context.Context, tx *sql.Tx, intent s
 			OperationID: intent.OperationID, OperationDigest: intent.OperationDigest,
 			TurnID: turn.ID, Key: turn.Key, PromptAttemptID: turn.PromptAttemptID,
 			TerminalKind: turn.TerminalKind, FinalizedAt: *turn.FinalizedAt,
+			PublicationID: turn.PublicationID, PublicationReceipt: turn.PublicationReceipt,
 			ProjectionID: turn.ProjectionID, ProjectionKind: turn.ProjectionKind, ProjectionDigest: turn.ProjectionDigest,
 			AggregateKind: projection.AggregateKind, AggregateID: projection.AggregateID,
 			Payload: []byte(projection.Payload), PayloadDigest: projection.PayloadDigest,

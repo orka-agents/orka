@@ -226,7 +226,7 @@ func (d *ACPDispatcher) sessionRuntimeCleanupTarget(
 		frozen.Status.Delivery = payload.Delivery.DeepCopy()
 		frozen.Status.Phase = payload.Phase
 	}
-	validated, err := taskterminal.ValidateFinalizedSessionProjection(projection.Payload, frozen, turn.Key.TaskUID, attempt, turn)
+	validated, err := taskterminal.ValidateSessionCleanupProjection(projection.Payload, frozen, turn.Key.TaskUID, attempt, turn)
 	if err != nil {
 		return nil, err
 	}

@@ -1138,7 +1138,7 @@ func (s *Store) verifyPromptAttemptTerminalProjectionMarkerKube(ctx context.Cont
 	if !attemptMissing {
 		var validationErr error
 		if finalTurn != nil {
-			_, validationErr = taskterminal.ValidateFinalizedSessionProjection(
+			_, validationErr = taskterminal.ValidateSessionCleanupProjection(
 				projection.Payload, task, marker.TaskUID, attempt, finalTurn,
 			)
 		} else {
