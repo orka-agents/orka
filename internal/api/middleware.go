@@ -9,6 +9,7 @@ package api
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -90,7 +91,8 @@ func NewTracingMiddleware() fiber.Handler {
 		c.SetContext(ctx)
 
 		if reqID := requestid.FromContext(c); reqID != "" {
-			span.SetAttributes(attribute.String("http.request_id", reqID))
+			// Incoming request IDs borrow Fiber's buffer, but export can be delayed.
+			span.SetAttributes(attribute.String("http.request_id", strings.Clone(reqID)))
 		}
 
 		err := c.Next()
@@ -146,7 +148,8 @@ func (c fiberHeaderCarrier) Get(key string) string {
 	if c.c == nil {
 		return ""
 	}
-	return c.c.Get(key)
+	// Propagators may retain substrings after Fiber reuses the request buffer.
+	return strings.Clone(c.c.Get(key))
 }
 
 func (c fiberHeaderCarrier) Set(string, string) {}
@@ -158,7 +161,7 @@ func (c fiberHeaderCarrier) Keys() []string {
 	headers := c.c.GetReqHeaders()
 	keys := make([]string, 0, len(headers))
 	for key := range headers {
-		keys = append(keys, key)
+		keys = append(keys, strings.Clone(key))
 	}
 	return keys
 }

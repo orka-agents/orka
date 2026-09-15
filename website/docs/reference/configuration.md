@@ -1290,7 +1290,7 @@ args:
   - --enable-telemetry
 env:
   - name: OTEL_EXPORTER_OTLP_ENDPOINT
-    value: "jaeger-collector.observability.svc:4317"
+    value: "http://jaeger-collector.observability.svc:4317"
   - name: OTEL_EXPORTER_OTLP_INSECURE
     value: "true"
 ```
@@ -1313,11 +1313,14 @@ copies non-secret OTLP endpoint/protocol/insecure/timeout/compression settings
 to AI worker Pods and intentionally does not copy OTLP headers, certificate or
 client-key env vars, `OTEL_RESOURCE_ATTRIBUTES`, or baggage.
 
-ACP attempt, RuntimeSession, and publication spans are controller-side and use the
-controller exporter. Managed RuntimePool workloads do not currently receive the
-controller OTLP configuration, and there is no supported supervisor telemetry
-opt-in surface. Do not inject credential-bearing OTLP headers into provider
-children.
+ACP attempt, RuntimeSession, and publication spans use the controller exporter.
+With controller telemetry enabled and a reachable trace endpoint, managed
+RuntimePool supervisors receive non-secret endpoint, protocol, insecure and
+compression settings. Supervisor endpoints require `http://` or `https://` URLs;
+unsupported SDK settings disable export. Authenticated v2 operations continue the
+current request's W3C trace context. Provider children receive no tracing settings.
+Collector routing is operator-owned; enabling telemetry does not change runtime
+network policies. See [supervisor configuration and routing](../guides/observability.md#enable-telemetry).
 
 ### Instrumented components
 
@@ -1327,6 +1330,7 @@ children.
 | `orka.chat` | `chat.request`, `chat.tool_loop.iteration` | session metadata; `chat.iteration`, `orka.tenant`, requested model, tool-call count |
 | `orka.worker` | `task.run` | `orka.task.id`, namespace, and agent name when known |
 | `orka.acp` | `acp.prompt`, `acp.session.create`, `acp.session.continue`, `acp.publication.reconcile` | `orka.task.id`, namespace, attempt/prompt identity, RuntimePool/RuntimeSession identity, prompt/session outcome, publication identity, and agent name when known |
+| `orka.acp.supervisor` | `acp.supervisor.*` authenticated runtime operations | Task UID/attempt, prompt/operation IDs and runtime pool/session identity; no request content |
 | `orka.agent` | `agent.step` | iteration, requested model/provider, tool-call count, Orka task metadata |
 | `orka.gen_ai` | `chat {model}` | `gen_ai.*` provider/model/token metadata and `error.type` |
 | `orka.gen_ai` | `execute_tool {tool.name}` | `gen_ai.tool.*`, `orka.tool.name`, `orka.tool.kind`, `orka.tool.result.size_bytes`, parent/child task fields for delegation |
@@ -1351,7 +1355,7 @@ kubectl apply -n observability -f https://raw.githubusercontent.com/jaegertracin
 
 # Configure the controller
 kubectl -n orka-system set env deployment/orka-controller \
-  OTEL_EXPORTER_OTLP_ENDPOINT=jaeger-collector.observability.svc:4317
+  OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger-collector.observability.svc:4317
 ```
 
 ## Context engineering best practices

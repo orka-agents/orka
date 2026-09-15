@@ -387,6 +387,7 @@ func prepareBoundACPDispatcherTaskWithStoresForTest(
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
 	images ACPRuntimeImages,
+	epochs ...*ControllerEpochManager,
 ) *corev1alpha1.Task {
 	t.Helper()
 	cipher, err := sqlite.NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{0x61}, sqlite.AgentExecutionSnapshotKeyBytes))
@@ -404,6 +405,9 @@ func prepareBoundACPDispatcherTaskWithStoresForTest(
 		AgentExecutionSnapshots: persistence,
 		ACPRuntimeEnabled:       true,
 		ACPRuntimeImages:        images,
+	}
+	if len(epochs) > 0 {
+		binder.ControllerEpochManager = epochs[0]
 	}
 	bound := bindACPQueueTaskForTest(t, ctx, binder, task, agent)
 	verified, err := binder.loadVerifiedBoundExecution(ctx, bound, bound.Status.AgentExecutionBinding)

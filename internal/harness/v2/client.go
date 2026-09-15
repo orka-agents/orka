@@ -17,6 +17,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"go.opentelemetry.io/otel/propagation"
 )
 
 const (
@@ -1015,6 +1017,9 @@ func newTrackedRequest(ctx context.Context, method, endpoint string, payload []b
 	// PUT/DELETE after a connection failure. Replay classification belongs to the
 	// durable controller state machine, never the transport.
 	request.GetBody = nil
+	// Trace context is transport metadata, never canonical JSON or capability claims.
+	// Deliberately exclude baggage.
+	propagation.TraceContext{}.Inject(ctx, propagation.HeaderCarrier(request.Header))
 	return request, nil
 }
 

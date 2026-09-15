@@ -46,6 +46,8 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeMutation(w, r, request.Metadata, true) {
 		return
 	}
+	r, span := s.traceOperation(r, request.Metadata, "prompt")
+	defer span.End()
 	sessionID := harnessv2.RuntimeSessionID(r.PathValue("sessionID"))
 	slotHeld := false
 	defer func() {
@@ -160,7 +162,7 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 		)
 		return
 	}
-	if mcpProxy == nil || mcpProxy.activate(request.MCPAuthorization, request.Lease, now) != nil {
+	if mcpProxy == nil || mcpProxy.activate(r.Context(), request.MCPAuthorization, request.Lease, now) != nil {
 		deactivatePromptCapabilities(state, request.Metadata.PromptID, harnessv2.RuntimeSessionStateCancelling)
 		state.prompt = nil
 		delete(state.operations, request.Metadata.OperationID)
@@ -603,6 +605,8 @@ func (s *Server) handleRenewLease(w http.ResponseWriter, r *http.Request) {
 	if !pathMatchesPrompt(r, request.Metadata) || !s.authorizeMutation(w, r, request.Metadata, true) {
 		return
 	}
+	r, span := s.traceOperation(r, request.Metadata, "prompt.lease")
+	defer span.End()
 	s.mu.Lock()
 	state := s.sessions[harnessv2.RuntimeSessionID(r.PathValue("sessionID"))]
 	if state == nil {
@@ -853,6 +857,8 @@ func (s *Server) handleResolvePermission(w http.ResponseWriter, r *http.Request)
 	if !pathMatchesPermission(r, request) || !s.authorizeMutation(w, r, request.Metadata, true) {
 		return
 	}
+	r, span := s.traceOperation(r, request.Metadata, "prompt.permission")
+	defer span.End()
 	s.mu.Lock()
 	state := s.sessions[harnessv2.RuntimeSessionID(r.PathValue("sessionID"))]
 	if state == nil || state.prompt == nil || state.prompt.settlement != nil {
@@ -972,6 +978,8 @@ func (s *Server) handleCancelPrompt(w http.ResponseWriter, r *http.Request) {
 	if !pathMatchesPrompt(r, request.Metadata) || !s.authorizeMutation(w, r, request.Metadata, true) {
 		return
 	}
+	r, span := s.traceOperation(r, request.Metadata, "prompt.cancel")
+	defer span.End()
 	s.mu.Lock()
 	state := s.sessions[harnessv2.RuntimeSessionID(r.PathValue("sessionID"))]
 	if state == nil {
@@ -1168,6 +1176,8 @@ func (s *Server) handleFinalizeSessionPublication(w http.ResponseWriter, r *http
 	if !s.authorizeMutation(w, r, request.Metadata, true) {
 		return
 	}
+	r, span := s.traceOperation(r, request.Metadata, "session.finalize")
+	defer span.End()
 	sessionID := harnessv2.RuntimeSessionID(r.PathValue("sessionID"))
 	s.mu.Lock()
 	state := s.sessions[sessionID]
@@ -1299,6 +1309,8 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeMutation(w, r, request.Metadata, true) {
 		return
 	}
+	r, span := s.traceOperation(r, request.Metadata, "session.delete")
+	defer span.End()
 	sessionID := harnessv2.RuntimeSessionID(r.PathValue("sessionID"))
 	s.mu.Lock()
 	state := s.sessions[sessionID]
@@ -1820,6 +1832,8 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeMutation(w, r, request.Metadata, true) {
 		return
 	}
+	r, span := s.traceOperation(r, request.Metadata, "workspace.delta")
+	defer span.End()
 	sessionID := harnessv2.RuntimeSessionID(r.PathValue("sessionID"))
 	s.mu.Lock()
 	state := s.sessions[sessionID]
