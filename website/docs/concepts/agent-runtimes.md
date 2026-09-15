@@ -243,11 +243,86 @@ OpenCode model IDs use provider/model form, for example `openai/gpt-5.4`.
 OpenCode selects `apply_patch` for GPT-family models and `edit`/`write` for
 others; Orka normalizes those aliases into one governed mutation capability, so
 allowing one exposes the group and disallowing one closes the group. For
-read-intent workspaces, Orka also disables Bash and OpenCode Grep because Grep
-cannot carry the secret-file exclusions applied to OpenCode Read; Read and Glob
-remain available when allowed by policy.
+read-intent workspaces, the legacy policy removes Bash, mutations, and OpenCode
+Grep because Grep cannot carry the secret-file exclusions applied to OpenCode
+Read. An explicit `restricted` policy rejects those grants instead. Read and
+Glob remain available when allowed by policy.
 
 For built-in RuntimePools, Task-level `spec.agentRuntime` contains runtime overrides such as `maxTurns`, `allowedTools`, `disallowedTools`, and `allowBash`. For `runtimeRef`, the registered external profile owns provider, model, prompt, skill, tool, and runtime defaults. Its `capabilities.mcpPolicy` stores the exact tool and approval policy represented by the profile digests, and Orka uses that same policy for conformance and dispatch. The Agent must omit `spec.model`, `spec.systemPrompt`, `spec.skills`, enabled `spec.tools`, `defaultMaxTurns`, `defaultAllowedTools`, `defaultAllowBash`, and `defaultReasoningEffort`. Disabled Agent tool entries are inert and accepted. Task-level `allowedTools` must equal the registered allowlist when brokered tools are exposed. Orka rejects `maxTurns`, `disallowedTools`, and `allowBash` because those values are fixed by the registration. Repository configuration belongs at top-level `spec.workspace`.
+
+## Native tool policy
+
+Operators select native tool access with `Agent.spec.runtime.toolPolicy` on a
+built-in `orka.harness.v2` Agent. A Task, prompt, repository configuration, or
+agent-facing create/update tool cannot select this mode. External `runtimeRef`
+Agents continue to use their registered policy.
+
+| Setting | Behavior |
+| --- | --- |
+| Omitted | Preserves the existing runner-specific policy. The Agent example above uses this legacy behavior. |
+| `full` | Preserves the approved runner's native catalog, with unsupported helpers, scheduling, extensions, and interactive questions disabled. Requires a writable workspace and a Task-owned Session. |
+| `restricted` | Requires an explicit Agent or Task allowlist, including `[]` to deny all tools. Rejects restrictions that the pinned runner cannot enforce. |
+
+For example, this Agent enables OpenCode's supported native tools and grants no
+Orka brokered tools:
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: opencode-builder
+spec:
+  runtime:
+    type: opencode
+    contractVersion: orka.harness.v2
+    toolPolicy: full
+    defaultAllowedTools: []
+  model:
+    name: openai/gpt-5.4
+```
+
+Tasks using this Agent must set `spec.workspace.intent: write` and omit
+`spec.sessionRef` and session workspace reuse. The existing write-workspace
+requirements still apply: `spec.workspace.gitRepo` and
+`spec.workspace.publicationCredentialRef` must be configured before execution.
+Full mode rejects
+`defaultAllowBash: false`, Task `allowBash: false`, and any Task `allowedTools`
+list. In full mode, `defaultAllowedTools` grants only Orka tools, such as
+`delegate_task` and `wait_for_tasks`. Native names in allowlists or denylists
+are rejected. Task `disallowedTools` can deny explicitly granted Orka tools.
+
+Restricted mode rejects Bash when the same policy denies file access,
+mutation, or web tools that Bash could bypass. Read-intent Tasks must omit
+mutation tools and Bash. Codex does not support explicit restricted mode in
+the pinned runner. Copilot restricted mode cannot grant `WebSearch`. See the
+[runner matrix and examples](../development/native-runner-tools.md).
+
+The mode and tool lists are part of the immutable policy digest. Changing them
+requires a new Session and selects a distinct RuntimePool profile. Explicit
+policies that permit commands cannot reuse a Session across Tasks because
+background processes could resume with the next prompt.
+
+Full mode does not add network destinations or credentials. RuntimePool egress
+remains default-deny, and the UID, workspace, publication, approval, and Task
+budget checks still apply. Native helper agents are disabled; delegation uses
+explicitly authorized Orka child-Task tools.
+
+Inspect the frozen policy and capability diagnostics with:
+
+```bash
+kubectl -n '<namespace>' get task '<task-name>' -o json \
+  | jq '.status.execution.toolPolicy'
+```
+
+The status records `mode`, `runner`, `runnerVersion`, `digest`, and `features`.
+Each feature identifies its `source` as `runner` or `orka`, its state, and a
+reason. Enabled web tools report `unverified` until their external setup is
+tested. This admission snapshot does not update after a successful call;
+inspect the actual tool events and results to verify execution. The
+[diagnostic states](../development/native-runner-tools.md#diagnostics) separate
+policy denial, unavailable setup, unsupported integration, and unverified
+network access. Admission can fail before this snapshot exists, including for
+configurations that require unavailable Orka approval review.
 
 ## Read-only workspace Task
 
@@ -390,6 +465,10 @@ spec:
 ```
 
 A RuntimeSession is ephemeral. If its Pod is replaced, Orka may create a fresh provider session from the verified workspace baseline and canonical transcript. ACP v2 intentionally does not provide prompt replay, stream reconnect, provider-session load, or workspace checkpoint endpoints.
+
+Explicit native tool policies support Session continuity only when commands
+are disabled. Full mode requires a Task-owned Session and rejects
+`spec.sessionRef` and `spec.execution.workspace.reusePolicy: session`.
 
 ## Runtime and credential boundaries
 

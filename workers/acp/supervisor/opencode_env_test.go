@@ -235,6 +235,98 @@ func TestOpenCodeProviderSessionProjectionValidatesImmutableAgentConfiguration(t
 	}
 }
 
+func TestOpenCodeFullNativeToolsKeepMCPAndLifecycleGrantsSeparate(t *testing.T) {
+	request := testProviderProjectionRequest(t, providerKindOpencode, "openai/gpt-test", "", "", []string{"send_message"}, nil, true, harnessv2.NativeToolPolicyFull)
+	request.Profile.WorkspaceIntent = harnessv2.WorkspaceIntentWrite
+	request.Profile.ModelLimits = testOpenCodeModelLimits()
+	profile, err := providerProfile(providerKindOpencode, request.Profile.Model, request.Profile.WorkspaceIntent, request.Profile.ModelLimits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := acp.SessionPaths{Workspace: "/sessions/private/workspace"}
+	if _, err := profile.ProjectSession(request, paths, ProviderProxyBinding{}); err != nil {
+		t.Fatal(err)
+	}
+	environment, err := profile.EnvironmentForSession(request, paths, ProviderProxyBinding{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal([]byte(environment["OPENCODE_CONFIG_CONTENT"]), &config); err != nil {
+		t.Fatal(err)
+	}
+	permissions := config["permission"].(map[string]any)
+	if permissions["*"] != openCodePermissionAllow || permissions["orka_*"] != openCodePermissionDeny || permissions["orka_send_message"] != openCodePermissionAllow {
+		t.Fatalf("full native defaults changed brokered grants: %#v", permissions)
+	}
+	for _, tool := range []string{"bash", "edit", "glob", "grep", "todowrite", "webfetch", "websearch"} {
+		if _, overridden := permissions[tool]; overridden {
+			t.Fatalf("full native tool %s did not inherit the runner default", tool)
+		}
+	}
+	for _, tool := range []string{"doom_loop", "external_directory", "lsp", "question", "skill", "task"} {
+		if permissions[tool] != openCodePermissionDeny {
+			t.Fatalf("unsupported native operation %s was not denied", tool)
+		}
+	}
+	if config["subagent_depth"] != float64(0) || config["agent"].(map[string]any)["title"].(map[string]any)["disable"] != true || environment["OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS"] != "false" {
+		t.Fatal("full native tools enabled helpers outside Orka Task ownership")
+	}
+	if environment["OPENCODE_ENABLE_EXA"] != "true" || environment["OPENCODE_WEBSEARCH_PROVIDER"] != "exa" {
+		t.Fatal("full native search lacks the required custom-provider search configuration")
+	}
+	read := permissions["read"].(map[string]any)
+	if read["*.env"] != openCodePermissionDeny || read["*"] != openCodePermissionAllow {
+		t.Fatalf("full native Read lost its file-specific rules: %#v", read)
+	}
+}
+
+func TestOpenCodeRestrictedNativeWebToolsRequireExplicitGrants(t *testing.T) {
+	for _, granted := range []string{"", "webfetch", "websearch", "todowrite"} {
+		name := granted
+		if name == "" {
+			name = "read only"
+		}
+		t.Run(name, func(t *testing.T) {
+			allowed := []string{"read"}
+			if granted != "" {
+				allowed = append(allowed, granted)
+			}
+			request := testProviderProjectionRequest(t, providerKindOpencode, "openai/gpt-test", "", "", allowed, nil, false, harnessv2.NativeToolPolicyRestricted)
+			request.Profile.ModelLimits = testOpenCodeModelLimits()
+			profile, err := providerProfile(providerKindOpencode, request.Profile.Model, request.Profile.WorkspaceIntent, request.Profile.ModelLimits)
+			if err != nil {
+				t.Fatal(err)
+			}
+			paths := acp.SessionPaths{Workspace: "/sessions/private/workspace"}
+			if _, err := profile.ProjectSession(request, paths, ProviderProxyBinding{}); err != nil {
+				t.Fatal(err)
+			}
+			environment, err := profile.EnvironmentForSession(request, paths, ProviderProxyBinding{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var config map[string]any
+			if err := json.Unmarshal([]byte(environment["OPENCODE_CONFIG_CONTENT"]), &config); err != nil {
+				t.Fatal(err)
+			}
+			permissions := config["permission"].(map[string]any)
+			for _, tool := range []string{"*", "bash", "apply_patch", "edit", "write", "webfetch", "websearch", "todowrite"} {
+				want := openCodePermissionDeny
+				if tool == granted {
+					want = openCodePermissionAllow
+				}
+				if permissions[tool] != want {
+					t.Fatalf("permission %s = %v, want %s", tool, permissions[tool], want)
+				}
+			}
+			if (environment["OPENCODE_ENABLE_EXA"] == "true") != (granted == "websearch") {
+				t.Fatal("native search setup did not follow its explicit grant")
+			}
+		})
+	}
+}
+
 func TestOpenCodeProviderProfileRejectsConfigSubstitutionModel(t *testing.T) {
 	for _, model := range []string{"{env:ORKA_OPENCODE_PROVIDER_TOKEN}", "{file:/proc/self/environ}"} {
 		if _, err := providerProfile(providerKindOpencode, model, harnessv2.WorkspaceIntentWrite, testOpenCodeModelLimits()); err == nil ||

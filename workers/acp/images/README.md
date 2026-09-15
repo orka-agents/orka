@@ -77,8 +77,8 @@ Codex inputs:
 | --- | --- |
 | Codex ACP source | commit `307d81018f7cc0c3141ddf71c7532d38310e2cfb`; codeload archive SHA-256 `4d3cc46a901bdd4abf112e703e734078e09a172ecd535aa3e556318a051a7c39` |
 | Codex ACP release | `1.1.7`; npm tar SHA-256 `642920240baa0b6b1951fb2c56b9ff11689648019499615f941000d95d127301` |
-| Orka Codex ACP external-sandbox patch | `workers/acp/images/codex/patch-agent-mode.mjs`; SHA-256 `4b1fc39dc7ac0d6aa404030a3433f46c8b9c67e8e8223efca490a6ab8bf4287a` |
-| Patched Codex ACP `dist/index.js` | SHA-256 `bcfb6a2772a7de2d027e977d9bc9db5fa210a462de1af7ab061361be4410cc75` |
+| Orka Codex ACP sandbox and project-config patch | `workers/acp/images/codex/patch-agent-mode.mjs`; SHA-256 `f2720a8c39a3e9b021f04500823c5cce90537ef51893b114343e2e5358aa5750` |
+| Patched Codex ACP `dist/index.js` | SHA-256 `32db9b63db8af2ea7dd136121234ae9051cb45ab5ec32f2b77af5153e6446283` |
 | Codex CLI | `0.145.0`; source commit `25af12f7e61572b0bc18ddb1008be543b91519b0` |
 | Codex CLI `linux/amd64` | npm tar SHA-256 `11239480f8e3efd1430f23bbe91c1a397856b8bbe6185ccbaee2382d25e03df2` |
 | Codex CLI `linux/arm64` | npm tar SHA-256 `b78c57e172b2f18e5969ae26183253cd3cdd9abb3b424a8f7334f4b5530c2b27` |
@@ -125,10 +125,16 @@ Codex and Claude adapters are compiled from exact GitHub source archives after
 frozen `package-lock.json` installs with `npm ci --ignore-scripts`. Their
 unmodified adapter outputs must first byte-match separately checksum-verified
 published npm releases. The Codex build then applies the checksum-pinned Orka
-mode patch, rebuilds, and verifies the exact patched bundle digest. That mode
+patch, tests both legacy and explicit session configuration, rebuilds, and
+verifies the exact patched bundle digest. The Orka mode
 selects Codex's `externalSandbox` policy with restricted network so the
 RuntimeSession and Pod security boundary is authoritative without nested
-namespaces.
+namespaces. For an explicit native tool policy, the patched adapter marks
+repository configuration untrusted and the supervisor disables the adapter's
+MCP-name conflict filter so ignored repository entries cannot suppress the
+Orka broker. The supervisor also disables native helper agents, hooks,
+plugins, automatic skill presentation, and skill-triggered MCP installation.
+Omitted policies retain the prior configuration behavior.
 
 The Copilot image instead installs the unmodified official per-architecture
 release executable. Its tar asset is checksum-verified, must contain exactly one

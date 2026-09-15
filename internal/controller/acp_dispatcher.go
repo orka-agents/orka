@@ -1194,6 +1194,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	}
 	if err := d.patchExecution(ctx, task, func(status *corev1alpha1.TaskExecutionStatus) {
 		status.State = corev1alpha1.TaskExecutionStateSessionStarting
+		if target.pool != nil {
+			status.ToolPolicy = acpTaskToolPolicyStatus(profile.ProviderKind, mcpConfiguration)
+		}
 		status.LastTransitionTime = nowMeta()
 	}); err != nil {
 		return err
@@ -5755,7 +5758,9 @@ func frozenMCPPermissionDecision(
 	}
 	toolPolicy := configuration.ToolPolicy
 	_, allowed := toolPolicy.Descriptor(permission.ToolName)
-	if toolPolicy.AllowedToolNames == nil && len(toolPolicy.DisallowedToolNames) == 0 && toolPolicy.AllowBash {
+	if toolPolicy.NativeToolPolicy == harnessv2.NativeToolPolicyFull {
+		allowed = allowed || (!slices.Contains(toolPolicy.DisallowedToolNames, permission.ToolName) && acp.FullNativeToolPermissionAllowed(provider, permission.ToolName))
+	} else if toolPolicy.NativeToolPolicy == "" && toolPolicy.AllowedToolNames == nil && len(toolPolicy.DisallowedToolNames) == 0 && toolPolicy.AllowBash {
 		allowed = acp.IsBuiltInRuntimeNativeTool(provider, permission.ToolName)
 	}
 	// A provider asking to invoke an already-granted MCP tool does not grant

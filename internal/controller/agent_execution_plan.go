@@ -308,6 +308,11 @@ func agentACPRuntimeUnsupportedReason(task *corev1alpha1.Task, agent *corev1alph
 	if task != nil && task.Spec.Transaction != nil {
 		return "ACP core runtime tasks do not support transaction token delegation"
 	}
+	if agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.ToolPolicy != "" {
+		if _, err := effectiveACPNativeToolPolicy(task, agent); err != nil {
+			return err.Error()
+		}
+	}
 	return agentV2RuntimeUnsupportedReason(task, agent)
 }
 
@@ -316,6 +321,8 @@ func agentV2RuntimeUnsupportedReason(task *corev1alpha1.Task, agent *corev1alpha
 		return ""
 	}
 	switch {
+	case agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.RuntimeRef != nil && agent.Spec.Runtime.ToolPolicy != "":
+		return "runtime.toolPolicy is supported only by built-in orka.harness.v2 runtimes"
 	case agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Autonomous:
 		return "ACP core runtime tasks do not support Agent.spec.coordination.autonomous; disable autonomous coordination"
 	case task.Spec.RetryPolicy != nil && task.Spec.RetryPolicy.MaxRetries > 0:
@@ -338,6 +345,8 @@ func effectiveAgentResources(task *corev1alpha1.Task, agent *corev1alpha1.Agent)
 
 func agentHarnessV1InheritedAuthorityUnsupportedReason(agent *corev1alpha1.Agent) string {
 	switch {
+	case agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.ToolPolicy != "":
+		return "runtime.toolPolicy is supported only by built-in orka.harness.v2 runtimes"
 	case effectiveAgentResources(nil, agent):
 		return "harness v1 built-in runtimes do not support inherited Agent.spec.resources"
 	case resolveExecution(nil, agent) != nil:

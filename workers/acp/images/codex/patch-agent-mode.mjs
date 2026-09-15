@@ -1,8 +1,10 @@
 import {readFileSync, writeFileSync} from "node:fs";
 
 const path = process.argv[2];
-if (!path) throw new Error("AgentMode.ts path is required");
+const clientPath = process.argv[3];
+if (!path || !clientPath) throw new Error("AgentMode.ts and CodexAcpClient.ts paths are required");
 let source = readFileSync(path, "utf8");
+let clientSource = readFileSync(clientPath, "utf8");
 
 const modeAnchor = `    static readonly AgentFullAccess = new AgentMode(
         "agent-full-access",
@@ -30,4 +32,17 @@ const allReplacement = `        return [AgentMode.ReadOnly, AgentMode.Agent, Age
 if (!source.includes(allAnchor)) throw new Error("AgentMode.all anchor not found");
 source = source.replace(allAnchor, allReplacement);
 
+// Explicit tool policies accept only the controller's session configuration.
+// Codex skips untrusted project config layers while retaining the separately
+// selected Orka external sandbox. Omitted policies keep upstream trust behavior.
+const trustAnchor = `            projects: Object.fromEntries(sessionRoots.map(root => [root, {
+                trust_level: "trusted",
+            }])),`;
+const trustReplacement = `            projects: Object.fromEntries(sessionRoots.map(root => [root, {
+                trust_level: process.env["ORKA_CODEX_DISABLE_PROJECT_CONFIG"] === "1" ? "untrusted" : "trusted",
+            }])),`;
+if (!clientSource.includes(trustAnchor)) throw new Error("CodexAcpClient project trust anchor not found");
+clientSource = clientSource.replace(trustAnchor, trustReplacement);
+
 writeFileSync(path, source);
+writeFileSync(clientPath, clientSource);

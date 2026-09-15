@@ -52,6 +52,7 @@ COPY --from=upstream-artifacts /usr/local/bin/artifact-tool /usr/local/bin/artif
 COPY --from=upstream-artifacts /artifacts/codex-acp-source.tgz /tmp/source.tgz
 COPY --from=upstream-artifacts /artifacts/codex-acp-release.tgz /tmp/release.tgz
 COPY workers/acp/images/codex/patch-agent-mode.mjs /tmp/patch-agent-mode.mjs
+COPY workers/acp/images/codex/test-session-config.mjs /tmp/test-session-config.mjs
 RUN set -eu; \
     mkdir -p /src /published; \
     tar -xzf /tmp/source.tgz -C /src --strip-components=1; \
@@ -61,10 +62,11 @@ RUN npm ci --ignore-scripts --no-audit --no-fund --registry=https://registry.npm
 RUN npm run build
 RUN artifact-tool compare /src/dist /published/package/dist
 RUN set -eu; \
-    printf '%s  %s\n' '4b1fc39dc7ac0d6aa404030a3433f46c8b9c67e8e8223efca490a6ab8bf4287a' /tmp/patch-agent-mode.mjs | sha256sum -c -; \
-    node /tmp/patch-agent-mode.mjs /src/src/AgentMode.ts; \
+    printf '%s  %s\n' 'f2720a8c39a3e9b021f04500823c5cce90537ef51893b114343e2e5358aa5750' /tmp/patch-agent-mode.mjs | sha256sum -c -; \
+    node /tmp/patch-agent-mode.mjs /src/src/AgentMode.ts /src/src/CodexAcpClient.ts; \
+    node --import tsx /tmp/test-session-config.mjs /src; \
     npm run build; \
-    printf '%s  %s\n' 'bcfb6a2772a7de2d027e977d9bc9db5fa210a462de1af7ab061361be4410cc75' /src/dist/index.js | sha256sum -c -
+    printf '%s  %s\n' '32db9b63db8af2ea7dd136121234ae9051cb45ab5ec32f2b77af5153e6446283' /src/dist/index.js | sha256sum -c -
 
 FROM --platform=$BUILDPLATFORM docker.io/library/node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94 AS codex-layout
 ARG TARGETARCH
@@ -110,8 +112,8 @@ LABEL org.opencontainers.image.title="Orka ACP Codex runtime" \
       io.orka.acp.adapter.version="1.1.7" \
       io.orka.acp.adapter.revision="307d81018f7cc0c3141ddf71c7532d38310e2cfb" \
       io.orka.acp.adapter.digest="sha256:642920240baa0b6b1951fb2c56b9ff11689648019499615f941000d95d127301" \
-      io.orka.acp.adapter.patch.digest="sha256:4b1fc39dc7ac0d6aa404030a3433f46c8b9c67e8e8223efca490a6ab8bf4287a" \
-      io.orka.acp.adapter.dist.digest="sha256:bcfb6a2772a7de2d027e977d9bc9db5fa210a462de1af7ab061361be4410cc75" \
+      io.orka.acp.adapter.patch.digest="sha256:f2720a8c39a3e9b021f04500823c5cce90537ef51893b114343e2e5358aa5750" \
+      io.orka.acp.adapter.dist.digest="sha256:32db9b63db8af2ea7dd136121234ae9051cb45ab5ec32f2b77af5153e6446283" \
       io.orka.acp.provider.version="0.145.0" \
       io.orka.acp.provider.revision="25af12f7e61572b0bc18ddb1008be543b91519b0" \
       io.orka.acp.provider.digest.amd64="sha256:11239480f8e3efd1430f23bbe91c1a397856b8bbe6185ccbaee2382d25e03df2" \

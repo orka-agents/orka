@@ -97,15 +97,31 @@ func (d MCPToolDescriptor) Validate() error {
 	return nil
 }
 
+// NativeToolPolicyMode governs runner-owned tools separately from MCP grants.
+// An empty mode preserves the original v2 policy and its digest.
+type NativeToolPolicyMode string
+
+const (
+	NativeToolPolicyFull       NativeToolPolicyMode = "full"
+	NativeToolPolicyRestricted NativeToolPolicyMode = "restricted"
+)
+
 type MCPToolPolicy struct {
-	AllowedToolNames    []string            `json:"allowedToolNames"`
-	DisallowedToolNames []string            `json:"disallowedToolNames"`
-	AllowBash           bool                `json:"allowBash"`
-	Tools               []MCPToolDescriptor `json:"tools"`
-	DescriptorDigest    string              `json:"descriptorDigest"`
+	NativeToolPolicy    NativeToolPolicyMode `json:"nativeToolPolicy,omitempty"`
+	AllowedToolNames    []string             `json:"allowedToolNames"`
+	DisallowedToolNames []string             `json:"disallowedToolNames"`
+	AllowBash           bool                 `json:"allowBash"`
+	Tools               []MCPToolDescriptor  `json:"tools"`
+	DescriptorDigest    string               `json:"descriptorDigest"`
 }
 
 func (p MCPToolPolicy) Validate() error {
+	if err := validateNativeToolPolicyMode(p.NativeToolPolicy); err != nil {
+		return err
+	}
+	if p.NativeToolPolicy == NativeToolPolicyFull && !p.AllowBash {
+		return fmt.Errorf("full native tool policy cannot disable Bash")
+	}
 	if len(p.AllowedToolNames) > MaxMCPTools || len(p.DisallowedToolNames) > MaxMCPTools || len(p.Tools) > MaxMCPTools {
 		return fmt.Errorf("MCP tool policy exceeds %d tools", MaxMCPTools)
 	}
@@ -224,7 +240,7 @@ type MCPPolicyConfiguration struct {
 // that path only when approval is required; provider-native tools always need
 // it so the supervisor can govern calls that bypass the MCP broker.
 func MCPPolicyRequiresPermissionCapability(toolPolicy MCPToolPolicy, approvalPolicy MCPApprovalPolicy) bool {
-	if len(approvalPolicy.RequiredTools) > 0 {
+	if toolPolicy.NativeToolPolicy == NativeToolPolicyFull || len(approvalPolicy.RequiredTools) > 0 {
 		return true
 	}
 	return slices.ContainsFunc(toolPolicy.Tools, func(tool MCPToolDescriptor) bool {
@@ -248,7 +264,7 @@ func (c MCPPolicyConfiguration) validate() error {
 	if err := c.ApprovalPolicy.Validate(c.ToolPolicy); err != nil {
 		return fmt.Errorf("MCP approval policy: %w", err)
 	}
-	toolDigest, err := CanonicalRuntimeToolPolicyDigest(c.ToolPolicy.AllowedToolNames, c.ToolPolicy.DisallowedToolNames, c.ToolPolicy.AllowBash)
+	toolDigest, err := CanonicalRuntimeToolPolicyDigest(c.ToolPolicy.AllowedToolNames, c.ToolPolicy.DisallowedToolNames, c.ToolPolicy.AllowBash, c.ToolPolicy.NativeToolPolicy)
 	if err != nil || toolDigest != c.ToolPolicyDigest {
 		return fmt.Errorf("tool policy digest does not match embedded canonical policy")
 	}
@@ -320,10 +336,29 @@ func (e MCPApprovalEvidence) ValidateFor(toolName string, now time.Time) error {
 	return nil
 }
 
-func CanonicalRuntimeToolPolicyDigest(allowed, disallowed []string, allowBash bool) (string, error) {
-	return canonicalACPDomainDigest("tool-policy", map[string]any{
+func CanonicalRuntimeToolPolicyDigest(allowed, disallowed []string, allowBash bool, modes ...NativeToolPolicyMode) (string, error) {
+	if len(modes) > 1 {
+		return "", fmt.Errorf("only one native tool policy mode is supported")
+	}
+	value := map[string]any{
 		"allowed": allowed, "disallowed": disallowed, "allowBash": allowBash,
-	})
+	}
+	if len(modes) == 1 && modes[0] != "" {
+		if err := validateNativeToolPolicyMode(modes[0]); err != nil {
+			return "", err
+		}
+		value["nativeToolPolicy"] = modes[0]
+	}
+	return canonicalACPDomainDigest("tool-policy", value)
+}
+
+func validateNativeToolPolicyMode(mode NativeToolPolicyMode) error {
+	switch mode {
+	case "", NativeToolPolicyFull, NativeToolPolicyRestricted:
+		return nil
+	default:
+		return fmt.Errorf("unsupported native tool policy %q", mode)
+	}
 }
 
 func CanonicalMCPApprovalPolicyDigest(policy MCPApprovalPolicy) (string, error) {

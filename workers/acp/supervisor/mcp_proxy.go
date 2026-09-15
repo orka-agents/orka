@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -334,7 +335,10 @@ func (s *mcpProxySession) permissionRequiresApproval(provider string, promptID h
 	}
 	policy := s.authorization.ToolPolicy
 	_, allowed := policy.Descriptor(name)
-	if policy.AllowedToolNames == nil && len(policy.DisallowedToolNames) == 0 && policy.AllowBash {
+	if policy.NativeToolPolicy == harnessv2.NativeToolPolicyFull && !allowed {
+		allowed = acp.FullNativeToolPermissionAllowed(provider, name) &&
+			!slices.ContainsFunc(policy.DisallowedToolNames, func(denied string) bool { return strings.EqualFold(name, denied) })
+	} else if policy.NativeToolPolicy == "" && policy.AllowedToolNames == nil && len(policy.DisallowedToolNames) == 0 && policy.AllowBash {
 		allowed = acp.IsBuiltInRuntimeNativeTool(provider, name)
 	}
 	if !allowed {

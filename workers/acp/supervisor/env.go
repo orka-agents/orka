@@ -21,6 +21,7 @@ const (
 	providerKindClaude           = "claude"
 	providerKindCopilot          = "copilot"
 	providerKindOpencode         = "opencode"
+	providerEnvTrue              = "true"
 	providerToolBash             = "Bash"
 	providerToolEdit             = "Edit"
 	providerToolGlob             = "Glob"
@@ -76,6 +77,9 @@ const (
 	openCodeProviderEnvName     = "ORKA_OPENCODE_PROVIDER_TOKEN"
 	openCodePermissionAllow     = "allow"
 	openCodePermissionDeny      = "deny"
+	openCodeToolTodoWrite       = "todowrite"
+	openCodeToolWebFetch        = "webfetch"
+	openCodeToolWebSearch       = "websearch"
 	openCodeRootInstructionPath = "/opt/opencode/AGENTS.md"
 
 	// Built-in ACP runtimes flush buffered token/tool updates in short bursts
@@ -326,6 +330,7 @@ var providerNativeToolNames = []string{
 
 type providerNativePolicy struct {
 	unrestricted bool
+	mode         harnessv2.NativeToolPolicyMode
 	allowed      map[string]struct{}
 }
 
@@ -353,11 +358,20 @@ func providerSessionPolicy(
 		return providerNativePolicy{}, fmt.Errorf("provider session configuration does not match runtime profile")
 	}
 	toolPolicy := request.MCPConfiguration.ToolPolicy
+	if err := validateSessionNativeToolPolicy(provider, request.Profile.WorkspaceIntent, toolPolicy); err != nil {
+		return providerNativePolicy{}, err
+	}
 	unrestricted := toolPolicy.AllowedToolNames == nil && len(toolPolicy.DisallowedToolNames) == 0 && toolPolicy.AllowBash
 	if provider == providerKindCodex || provider == providerKindCopilot {
 		unrestricted = acp.BuiltInRuntimeNativePolicyUnrestricted(provider, toolPolicy.AllowedToolNames, toolPolicy.DisallowedToolNames, toolPolicy.AllowBash)
 	}
-	policy := providerNativePolicy{unrestricted: unrestricted, allowed: make(map[string]struct{}, len(providerNativeToolNames))}
+	if toolPolicy.NativeToolPolicy != "" {
+		unrestricted = toolPolicy.NativeToolPolicy == harnessv2.NativeToolPolicyFull
+	}
+	policy := providerNativePolicy{
+		unrestricted: unrestricted, mode: toolPolicy.NativeToolPolicy,
+		allowed: make(map[string]struct{}, len(providerNativeToolNames)),
+	}
 	for _, descriptor := range toolPolicy.Tools {
 		if descriptor.Source != harnessv2.MCPToolSourceProviderNative {
 			continue
@@ -372,6 +386,30 @@ func providerSessionPolicy(
 		policy.allowed[name] = struct{}{}
 	}
 	return policy, nil
+}
+
+func validateSessionNativeToolPolicy(provider string, intent harnessv2.WorkspaceIntent, policy harnessv2.MCPToolPolicy) error {
+	if err := acp.ValidateNativeToolPolicy(
+		string(policy.NativeToolPolicy), provider, intent == harnessv2.WorkspaceIntentRead,
+		policy.AllowedToolNames, policy.DisallowedToolNames, policy.AllowBash,
+	); err != nil {
+		return fmt.Errorf("native tool policy: %w", err)
+	}
+	if policy.NativeToolPolicy == harnessv2.NativeToolPolicyRestricted {
+		for _, names := range [][]string{policy.AllowedToolNames, policy.DisallowedToolNames} {
+			if err := acp.ValidateExplicitNativeToolNames(provider, names); err != nil {
+				return fmt.Errorf("native tool policy: %w", err)
+			}
+		}
+		for _, descriptor := range policy.Tools {
+			if descriptor.Source == harnessv2.MCPToolSourceProviderNative {
+				if err := acp.ValidateExplicitNativeToolNames(provider, []string{descriptor.Name}); err != nil {
+					return fmt.Errorf("native tool policy: %w", err)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func canonicalProviderNativeToolName(value string) (string, bool) {
@@ -410,6 +448,16 @@ func codexSessionProjection(
 		return ProviderSessionProjection{}, fmt.Errorf("codex ACP runtime cannot exactly enforce provider-native tool restrictions")
 	}
 	config := codexBaseConfig(model, proxy.BaseURL)
+	if policy.mode != "" {
+		// Both Codex multi-agent backends must be disabled: agents.enabled does
+		// not override the V2 feature. Native helpers are not Orka child Tasks.
+		config["agents"] = map[string]bool{"enabled": false}
+		config["features"] = map[string]bool{
+			"multi_agent": false, "multi_agent_v2": false, "hooks": false,
+			"plugins": false, "skill_mcp_dependency_install": false, "skill_search": false,
+		}
+		config["skills"] = map[string]bool{"include_instructions": false}
+	}
 	if systemPrompt := request.AgentConfiguration.SystemPrompt; systemPrompt != "" {
 		config["developer_instructions"] = systemPrompt
 	}
@@ -431,7 +479,15 @@ func codexSessionProjection(
 	// unconditionally by the controller, file writes are mediated by the
 	// supervisor, and the read-intent workspace delta classification fails
 	// any turn that modifies the workspace.
-	return ProviderSessionProjection{Environment: map[string]string{"CODEX_CONFIG": string(encoded)}}, nil
+	environment := map[string]string{"CODEX_CONFIG": string(encoded)}
+	if policy.mode != "" {
+		// The patched adapter makes project layers untrusted. Its upstream MCP
+		// conflict filter also reads disabled layers, so bypass it to prevent
+		// ignored repository servers from suppressing the Orka broker.
+		environment["ORKA_CODEX_DISABLE_PROJECT_CONFIG"] = "1"
+		environment["DISABLE_MCP_CONFIG_FILTERING"] = providerEnvTrue
+	}
+	return ProviderSessionProjection{Environment: environment}, nil
 }
 
 // codexBaseConfig is the Codex configuration every session starts from. The
@@ -509,11 +565,32 @@ func claudeSessionProjection(
 		options["tools"] = allowed
 		options["disallowedTools"] = disallowed
 	}
+	if policy.mode != "" {
+		// Operator-selected policies cannot inherit project settings or extra
+		// MCP servers. Background agents, schedules, and publication have no
+		// matching Orka ownership contract in this adapter.
+		options["settingSources"] = []string{}
+		options["strictMcpConfig"] = true
+		if policy.mode == harnessv2.NativeToolPolicyFull {
+			options["disallowedTools"] = append([]string(nil), claudeUnsupportedNativeTools...)
+		}
+		if environment == nil {
+			environment = make(map[string]string)
+		}
+		environment["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] = "1"
+	}
 	meta := acp.Meta{"claudeCode": map[string]any{"options": options}}
 	if systemPrompt := request.AgentConfiguration.SystemPrompt; systemPrompt != "" {
 		meta["systemPrompt"] = systemPrompt
 	}
 	return ProviderSessionProjection{Environment: environment, NewSessionMeta: meta}, nil
+}
+
+var claudeUnsupportedNativeTools = []string{
+	"Agent", "Task", "TaskOutput", "TaskStop", "Workflow", "Monitor",
+	"CronCreate", "CronDelete", "CronList", "ScheduleWakeup", "RemoteTrigger",
+	"PushNotification", "Artifact", "EnterWorktree", "ExitWorktree", "Skill",
+	"AskUserQuestion", "EnterPlanMode", "ExitPlanMode",
 }
 
 var copilotToolIDs = map[string][]string{
@@ -579,6 +656,13 @@ func copilotSessionProjection(
 	if policy.unrestricted || policy.allows(providerToolEdit) || policy.allows(providerToolWrite) {
 		args = append(args, "--allow-tool=write")
 	}
+	if policy.mode == harnessv2.NativeToolPolicyFull ||
+		(policy.mode == harnessv2.NativeToolPolicyRestricted && policy.allows(providerToolWebFetch)) {
+		// Copilot sends display titles for URL permissions. Its native URL
+		// rule grants fetch inside the existing Pod network boundary without
+		// interpreting a display title as tool authority.
+		args = append(args, "--allow-tool=url")
+	}
 	for _, descriptor := range request.MCPConfiguration.ToolPolicy.Tools {
 		if descriptor.Source.Brokered() {
 			// This grants access only to the configured Orka MCP server. The
@@ -619,6 +703,9 @@ func openCodeSessionProjection(
 		request.Profile.Model != model || request.AgentConfiguration.Model != model {
 		return ProviderSessionProjection{}, fmt.Errorf("provider session configuration does not match runtime profile")
 	}
+	if err := validateSessionNativeToolPolicy(providerKindOpencode, request.Profile.WorkspaceIntent, request.MCPConfiguration.ToolPolicy); err != nil {
+		return ProviderSessionProjection{}, err
+	}
 	if request.AgentConfiguration.SystemPrompt != "" {
 		return ProviderSessionProjection{}, fmt.Errorf("opencode ACP runtime cannot exactly enforce Agent systemPrompt")
 	}
@@ -631,6 +718,10 @@ func openCodeSessionProjection(
 		}
 		switch strings.ToLower(strings.TrimSpace(descriptor.Name)) {
 		case "apply_patch", "bash", "edit", "glob", "grep", "read", "write":
+		case openCodeToolTodoWrite, openCodeToolWebFetch, openCodeToolWebSearch:
+			if request.MCPConfiguration.ToolPolicy.NativeToolPolicy != harnessv2.NativeToolPolicyRestricted {
+				return ProviderSessionProjection{}, fmt.Errorf("provider-native tool %q requires an explicit native tool policy", descriptor.Name)
+			}
 		default:
 			return ProviderSessionProjection{}, fmt.Errorf(
 				"provider-native tool %q is not supported by the opencode projection",
@@ -740,7 +831,7 @@ func providerProfile(
 				if err != nil {
 					return nil, err
 				}
-				return map[string]string{
+				environment := map[string]string{
 					"CI":                                        "true",
 					"NO_BROWSER":                                "1",
 					"OPENCODE_AUTH_CONTENT":                     "{}",
@@ -759,7 +850,20 @@ func providerProfile(
 					"OPENCODE_SERVER_PASSWORD":                  openCodeServerPassword(proxy.Credential),
 					"OPENCODE_SERVER_USERNAME":                  "orka",
 					openCodeProviderEnvName:                     proxy.Credential,
-				}, nil
+				}
+				policy := request.MCPConfiguration.ToolPolicy
+				if policy.NativeToolPolicy == harnessv2.NativeToolPolicyFull ||
+					(policy.NativeToolPolicy == harnessv2.NativeToolPolicyRestricted && openCodeToolPolicyAllows(policy, openCodeToolWebSearch)) {
+					// Custom providers do not expose native search by default in
+					// OpenCode 1.18.9. Enable the bundled Exa client, not extensions
+					// or the unrelated experimental feature group.
+					environment["OPENCODE_ENABLE_EXA"] = "true"
+					environment["OPENCODE_WEBSEARCH_PROVIDER"] = "exa"
+				}
+				if policy.NativeToolPolicy != "" {
+					environment["OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS"] = "false"
+				}
+				return environment, nil
 			},
 			PrepareSession: prepareOpenCodeConfig,
 		}, nil
@@ -815,33 +919,10 @@ func openCodeSessionConfig(
 	}
 	model = providerID + "/" + modelID
 	toolPolicy := request.MCPConfiguration.ToolPolicy
-	permissions := map[string]any{
-		"*":                  openCodePermissionDeny,
-		"doom_loop":          openCodePermissionDeny,
-		"external_directory": openCodePermissionDeny,
-		"list":               openCodePermissionDeny,
-		"lsp":                openCodePermissionDeny,
-		"question":           openCodePermissionDeny,
-		"skill":              openCodePermissionDeny,
-		"task":               openCodePermissionDeny,
-		"todowrite":          openCodePermissionDeny,
-		"webfetch":           openCodePermissionDeny,
-		"websearch":          openCodePermissionDeny,
+	if err := validateSessionNativeToolPolicy(providerKindOpencode, intent, toolPolicy); err != nil {
+		return nil, err
 	}
-	for _, permission := range []string{"bash", "glob", "grep", "read"} {
-		if openCodeToolPolicyAllows(toolPolicy, permission) {
-			permissions[permission] = openCodePermissionAllow
-		} else {
-			permissions[permission] = openCodePermissionDeny
-		}
-	}
-	mutationAction := openCodePermissionDeny
-	if openCodeMutationPolicyAllows(toolPolicy) {
-		mutationAction = openCodePermissionAllow
-	}
-	for _, permission := range []string{"apply_patch", "edit", "write"} {
-		permissions[permission] = mutationAction
-	}
+	permissions := openCodeNativePermissions(toolPolicy)
 	brokeredPermissions, err := openCodeBrokeredPermissions(toolPolicy)
 	if err != nil {
 		return nil, err
@@ -854,6 +935,8 @@ func openCodeSessionConfig(
 		}
 	}
 	if permissions["read"] == openCodePermissionAllow {
+		// These are native Read rules. They do not protect files from an
+		// allowed shell; OS identity and secret mounts enforce that boundary.
 		permissions["read"] = map[string]string{
 			"*":             openCodePermissionAllow,
 			"*.env":         openCodePermissionDeny,
@@ -907,6 +990,51 @@ func openCodeSessionConfig(
 			},
 		},
 	})
+}
+
+func openCodeNativePermissions(policy harnessv2.MCPToolPolicy) map[string]any {
+	permissions := map[string]any{
+		"*":                  openCodePermissionDeny,
+		"doom_loop":          openCodePermissionDeny,
+		"external_directory": openCodePermissionDeny,
+		"lsp":                openCodePermissionDeny,
+		"question":           openCodePermissionDeny,
+		"skill":              openCodePermissionDeny,
+		"task":               openCodePermissionDeny,
+	}
+	if policy.NativeToolPolicy == harnessv2.NativeToolPolicyFull {
+		// Preserve the pinned runner's native catalog, including future tools
+		// in an approved image. Broker grants and unsupported lifecycle or
+		// extension operations remain separate from that default.
+		permissions["*"] = openCodePermissionAllow
+		permissions["orka_*"] = openCodePermissionDeny
+		permissions["read"] = openCodePermissionAllow
+		return permissions
+	}
+	for _, permission := range []string{"list", openCodeToolTodoWrite, openCodeToolWebFetch, openCodeToolWebSearch} {
+		permissions[permission] = openCodePermissionDeny
+	}
+	for _, permission := range []string{"bash", "glob", "grep", "read"} {
+		permissions[permission] = openCodePermissionDeny
+		if openCodeToolPolicyAllows(policy, permission) {
+			permissions[permission] = openCodePermissionAllow
+		}
+	}
+	if policy.NativeToolPolicy == harnessv2.NativeToolPolicyRestricted {
+		for _, permission := range []string{openCodeToolTodoWrite, openCodeToolWebFetch, openCodeToolWebSearch} {
+			if openCodeToolPolicyAllows(policy, permission) {
+				permissions[permission] = openCodePermissionAllow
+			}
+		}
+	}
+	mutationAction := openCodePermissionDeny
+	if openCodeMutationPolicyAllows(policy) {
+		mutationAction = openCodePermissionAllow
+	}
+	for _, permission := range []string{"apply_patch", "edit", "write"} {
+		permissions[permission] = mutationAction
+	}
+	return permissions
 }
 
 func openCodeBrokeredPermissions(policy harnessv2.MCPToolPolicy) (map[string]bool, error) {

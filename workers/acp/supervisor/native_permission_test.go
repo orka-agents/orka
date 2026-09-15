@@ -14,7 +14,9 @@ func TestResolvePermissionEnforcesNativeToolPolicy(t *testing.T) {
 	for _, test := range []struct {
 		name            string
 		toolName        string
+		provider        string
 		kind            harnessv2.PermissionOptionKind
+		full            bool
 		disallowed      bool
 		bashDisabled    bool
 		brokered        bool
@@ -39,6 +41,27 @@ func TestResolvePermissionEnforcesNativeToolPolicy(t *testing.T) {
 		{name: "different prompt", toolName: providerToolBash, inactive: "prompt"},
 		{name: "revoked prompt", toolName: providerToolBash, inactive: "revoked"},
 		{name: "missing proxy", toolName: providerToolBash, inactive: "missing"},
+		{name: "full native web search", toolName: providerToolWebSearch, full: true, wantAllowed: true},
+		{name: "full Claude native notebook", toolName: "NotebookEdit", provider: providerKindClaude, full: true, wantAllowed: true},
+		{name: "full Claude native task list", toolName: "TaskCreate", provider: providerKindClaude, full: true, wantAllowed: true},
+		{name: "full native reusable permission denied", toolName: providerToolWebSearch, full: true, kind: harnessv2.PermissionOptionAllowAlways},
+		{name: "full missing structured identity", full: true},
+		{name: "full unknown permission", toolName: "unknown", full: true},
+		{name: "full Claude unknown PascalCase permission", toolName: "DeleteEverything", provider: providerKindClaude, full: true},
+		{name: "full explicit native denial", toolName: providerToolWebSearch, full: true, disallowed: true},
+		{name: "full Claude helper denied", toolName: "Agent", provider: providerKindClaude, full: true},
+		{name: "full Claude background schedule denied", toolName: "CronCreate", provider: providerKindClaude, full: true},
+		{name: "full Claude elevation denied", toolName: "RequestPermissions", provider: providerKindClaude, full: true},
+		{name: "full ungranted MCP alias denied", toolName: "mcp__orka__send_message", provider: providerKindClaude, full: true},
+		{name: "full other MCP server denied", toolName: "mcp__other__NotebookEdit", provider: providerKindClaude, full: true},
+		{name: "full brokered grant preserved", toolName: "send_message", full: true, brokered: true, wantAllowed: true},
+		{name: "full brokered approval preserved", toolName: "send_message", full: true, brokered: true, requireApproval: true, wantAllowed: true},
+		{name: "full brokered reusable approval preserved", toolName: "send_message", full: true, brokered: true, requireApproval: true, kind: harnessv2.PermissionOptionAllowAlways, wantAllowed: true},
+		{name: "full ungranted brokered tool denied", toolName: "mutate", full: true, brokered: true},
+		{name: "full expired prompt", toolName: providerToolWebSearch, full: true, inactive: "authorization"},
+		{name: "full expired lease", toolName: providerToolWebSearch, full: true, inactive: "lease"},
+		{name: "full expired permission", toolName: providerToolWebSearch, full: true, inactive: "permission"},
+		{name: "full revoked prompt", toolName: providerToolWebSearch, full: true, inactive: "revoked"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			server, cfg, profile := newTestServer(t, "immediate")
@@ -49,14 +72,25 @@ func TestResolvePermissionEnforcesNativeToolPolicy(t *testing.T) {
 			}
 			prompt := testStartPromptRequest(t, cfg, create.Metadata.Fence)
 			now := time.Now().UTC()
-			authorization, lease := buildTestMCPAuthorization(t, create.Metadata.Fence, now, providerToolBash, harnessv2.MCPToolEffectConsequential, test.requireApproval)
+			grantName := providerToolBash
+			if test.full && test.brokered {
+				grantName = "send_message"
+			}
+			authorization, lease := buildTestMCPAuthorization(t, create.Metadata.Fence, now, grantName, harnessv2.MCPToolEffectConsequential, test.requireApproval)
 			policy := &authorization.ToolPolicy
 			if !test.brokered {
 				policy.Tools[0].Source = harnessv2.MCPToolSourceProviderNative
 				policy.Tools[0].InputSchema = nil
 			}
+			if test.full {
+				policy.NativeToolPolicy = harnessv2.NativeToolPolicyFull
+				if !test.brokered {
+					policy.AllowedToolNames = []string{}
+					policy.Tools = nil
+				}
+			}
 			if test.disallowed {
-				policy.DisallowedToolNames = []string{providerToolBash}
+				policy.DisallowedToolNames = []string{test.toolName}
 				policy.Tools = nil
 			}
 			if test.bashDisabled {
@@ -68,12 +102,19 @@ func TestResolvePermissionEnforcesNativeToolPolicy(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			authorization.ToolPolicyDigest, err = harnessv2.CanonicalRuntimeToolPolicyDigest(policy.AllowedToolNames, policy.DisallowedToolNames, policy.AllowBash)
+			authorization.ToolPolicyDigest, err = harnessv2.CanonicalRuntimeToolPolicyDigest(policy.AllowedToolNames, policy.DisallowedToolNames, policy.AllowBash, policy.NativeToolPolicy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			authorization.MCPConfigurationDigest, err = harnessv2.CanonicalMCPConfigurationDigest(policy.AllowedToolNames)
 			if err != nil {
 				t.Fatal(err)
 			}
 			server.mu.Lock()
 			state := server.sessions[create.RuntimeSessionID]
+			if test.provider != "" {
+				state.profile.ProviderKind = test.provider
+			}
 			proxy := state.mcpProxy
 			server.mu.Unlock()
 			proxy.mu.Lock()
@@ -141,7 +182,7 @@ func TestResolvePermissionEnforcesNativeToolPolicy(t *testing.T) {
 				t.Fatalf("resolution status=%d calls=%d, want status=%d calls=%d; body=%s", response.Code, mutations.resolveCalls.Load(), wantStatus, wantCalls, response.Body.String())
 			}
 			proxy.mu.Lock()
-			grants := proxy.approvals[providerToolBash]
+			grants := proxy.approvals[grantName]
 			proxy.mu.Unlock()
 			if !test.requireApproval && len(grants) != 0 {
 				t.Fatal("permission created unrequested brokered MCP approval evidence")

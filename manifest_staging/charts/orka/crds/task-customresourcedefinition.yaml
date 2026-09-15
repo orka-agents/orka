@@ -2792,6 +2792,82 @@ spec:
                     - Cancelled
                     - OutcomeUnknown
                     type: string
+                  toolPolicy:
+                    description: |-
+                      ToolPolicy describes the frozen built-in runner policy and its effective
+                      features. It is diagnostic only and never grants tool or network access.
+                    properties:
+                      digest:
+                        description: Digest binds this diagnostic to the immutable
+                          Session tool policy.
+                        pattern: ^sha256:[a-f0-9]{64}$
+                        type: string
+                      features:
+                        description: Features separates runner features from explicitly
+                          authorized Orka tools.
+                        items:
+                          description: TaskToolFeatureStatus distinguishes configuration
+                            from observed availability.
+                          properties:
+                            name:
+                              description: Name identifies the feature or brokered
+                                tool.
+                              maxLength: 253
+                              type: string
+                            reason:
+                              description: Reason explains the policy decision, missing
+                                setup, or support limitation.
+                              maxLength: 2048
+                              type: string
+                            source:
+                              description: Source distinguishes the runner from Orka's
+                                prompt-scoped tool broker.
+                              enum:
+                              - runner
+                              - orka
+                              type: string
+                            state:
+                              description: State is unverified when external setup
+                                or a real call has not been checked.
+                              enum:
+                              - ready
+                              - disabled
+                              - unavailable
+                              - unsupported
+                              - unverified
+                              type: string
+                          required:
+                          - name
+                          - reason
+                          - source
+                          - state
+                          type: object
+                        maxItems: 160
+                        type: array
+                      mode:
+                        description: Mode is legacy when the Agent did not select
+                          an explicit tool policy.
+                        enum:
+                        - legacy
+                        - full
+                        - restricted
+                        type: string
+                      runner:
+                        description: Runner is the built-in runner family.
+                        maxLength: 64
+                        type: string
+                      runnerVersion:
+                        description: RunnerVersion is the approved version built into
+                          the selected image.
+                        maxLength: 64
+                        type: string
+                    required:
+                    - digest
+                    - features
+                    - mode
+                    - runner
+                    - runnerVersion
+                    type: object
                 type: object
                 x-kubernetes-validations:
                 - message: execution outcome requires the matching terminal state

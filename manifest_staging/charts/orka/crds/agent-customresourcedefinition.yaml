@@ -1465,6 +1465,20 @@ spec:
                     required:
                     - name
                     type: object
+                  toolPolicy:
+                    description: |-
+                      ToolPolicy selects how the approved runner's built-in tools are exposed.
+                      Omission preserves the existing runner-specific behavior. Full preserves
+                      supported native tools and uses defaultAllowedTools only for Orka tools;
+                      native restrictions and read-only workspaces are incompatible with full.
+                      Restricted requires an explicit defaultAllowedTools or Task allowlist and
+                      rejects restrictions the runner cannot enforce. Only operators may select
+                      this Agent setting; Task overrides cannot enable full access. A changed
+                      policy requires a new Session.
+                    enum:
+                    - full
+                    - restricted
+                    type: string
                   type:
                     description: Type specifies which built-in CLI runtime to use.
                       Use runtimeRef for admin-registered custom runtimes.
@@ -1484,6 +1498,10 @@ spec:
                 - message: runtime.contractVersion applies only to built-in runtime
                     types; runtimeRef derives the protocol from the referenced AgentRuntime
                   rule: '!has(self.contractVersion) || has(self.type)'
+                - message: runtime.toolPolicy requires a built-in orka.harness.v2
+                    runtime
+                  rule: '!has(self.toolPolicy) || (has(self.type) && has(self.contractVersion)
+                    && self.contractVersion == ''orka.harness.v2'')'
               secretRef:
                 description: SecretRef references a Secret containing LLM API keys
                 properties:

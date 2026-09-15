@@ -221,7 +221,7 @@ func normalizeOpenCodeToolNames(values []string) []string {
 		switch normalized := strings.ToLower(trimmed); normalized {
 		case "apply_patch", "edit", "write":
 			mutation = true
-		case "bash", "glob", "grep", openCodeToolRead:
+		case "bash", "glob", "grep", openCodeToolRead, "webfetch", "websearch", "todowrite":
 			result = append(result, normalized)
 		default:
 			result = append(result, trimmed)

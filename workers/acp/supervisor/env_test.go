@@ -117,6 +117,16 @@ func TestCodexProviderSessionProjection(t *testing.T) {
 		t.Fatalf("Codex config = %#v", config)
 	}
 	assertCodexWebSocketTransportsDisabled(t, config)
+	for _, key := range []string{"ORKA_CODEX_DISABLE_PROJECT_CONFIG", "DISABLE_MCP_CONFIG_FILTERING"} {
+		if _, exists := environment[key]; exists {
+			t.Fatalf("legacy Codex environment unexpectedly changed project config policy: %s", key)
+		}
+	}
+	for _, key := range []string{"agents", "features", "skills"} {
+		if _, exists := config[key]; exists {
+			t.Fatalf("legacy Codex config unexpectedly changed extension policy: %s", key)
+		}
+	}
 	if strings.Contains(strings.Join(codex.Args, " "), "npx") {
 		t.Fatalf("Codex runtime uses a download-on-start command: %v", codex.Args)
 	}
@@ -189,6 +199,38 @@ func TestCodexProviderSessionProjectionWithBrokeredMessaging(t *testing.T) {
 	}
 }
 
+func TestCodexFullNativePolicyPreservesCatalogAndDisablesHelpers(t *testing.T) {
+	request := testProviderProjectionRequest(t, providerKindCodex, "gpt-test", "", "", []string{"send_message"}, nil, true, harnessv2.NativeToolPolicyFull)
+	request.Profile.WorkspaceIntent = harnessv2.WorkspaceIntentWrite
+	projection, err := codexSessionProjection(request, acp.SessionPaths{}, ProviderProxyBinding{BaseURL: "http://127.0.0.1/v1"}, "gpt-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal([]byte(projection.Environment["CODEX_CONFIG"]), &config); err != nil {
+		t.Fatal(err)
+	}
+	if config["agents"].(map[string]any)["enabled"] != false {
+		t.Fatal("full native tools enabled Codex helpers without Orka Task ownership")
+	}
+	features := config["features"].(map[string]any)
+	for _, key := range []string{"multi_agent", "multi_agent_v2", "hooks", "plugins", "skill_mcp_dependency_install", "skill_search"} {
+		if features[key] != false {
+			t.Fatalf("full native tools must disable Codex extension %s", key)
+		}
+	}
+	if config["skills"].(map[string]any)["include_instructions"] != false {
+		t.Fatal("full native tools enabled automatic skill instructions")
+	}
+	if projection.Environment["ORKA_CODEX_DISABLE_PROJECT_CONFIG"] != "1" || projection.Environment["DISABLE_MCP_CONFIG_FILTERING"] != providerEnvTrue {
+		t.Fatal("full native tools must disable repository config and ignore its MCP conflicts")
+	}
+	if _, exists := config["tools"]; exists {
+		t.Fatal("full native catalog was replaced by an Orka tool list")
+	}
+	assertCodexWebSocketTransportsDisabled(t, config)
+}
+
 func TestClaudeProviderSessionProjection(t *testing.T) {
 	paths := acp.SessionPaths{Home: "/sessions/private/home"}
 	proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session", Credential: "test-auth-token"}
@@ -223,6 +265,36 @@ func TestClaudeProviderSessionProjection(t *testing.T) {
 	if options["maxTurns"] != int32(7) || options["effort"] != "max" || !slices.Equal(options["tools"].([]string), []string{providerToolRead, providerToolWebFetch}) ||
 		!slices.Contains(options["disallowedTools"].([]string), providerToolBash) {
 		t.Fatalf("Claude options = %#v", options)
+	}
+}
+
+func TestClaudeFullNativePolicyPreservesPresetAndOrkaOwnership(t *testing.T) {
+	request := testProviderProjectionRequest(t, providerKindClaude, "claude-test", "", "", []string{"send_message"}, nil, true, harnessv2.NativeToolPolicyFull)
+	request.Profile.WorkspaceIntent = harnessv2.WorkspaceIntentWrite
+	projection, err := claudeSessionProjection(request, acp.SessionPaths{}, ProviderProxyBinding{}, "claude-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := projection.NewSessionMeta["claudeCode"].(map[string]any)["options"].(map[string]any)
+	if _, exists := options["tools"]; exists {
+		t.Fatal("full native tools replaced the Claude Code preset with a shared list")
+	}
+	if options["strictMcpConfig"] != true || len(options["settingSources"].([]string)) != 0 {
+		t.Fatal("explicit policy can inherit unapproved MCP servers or project settings")
+	}
+	if projection.Environment["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] != "1" {
+		t.Fatal("full native tools enabled unsupported background work")
+	}
+	excluded := options["disallowedTools"].([]string)
+	for _, tool := range []string{"Agent", "Workflow", "Monitor", "CronCreate", "EnterWorktree", "Artifact", "AskUserQuestion"} {
+		if !slices.Contains(excluded, tool) {
+			t.Fatalf("unsupported native tool %s was not excluded", tool)
+		}
+	}
+	for _, tool := range []string{"Bash", "Read", "Write", "NotebookEdit", "WebSearch", "WebFetch", "TodoWrite", "TaskCreate"} {
+		if slices.Contains(excluded, tool) {
+			t.Fatalf("supported native tool %s was excluded from the full preset", tool)
+		}
 	}
 }
 
@@ -346,6 +418,95 @@ func TestCopilotUnrestrictedProjectionKeepsPermanentExclusions(t *testing.T) {
 	for _, excludedID := range copilotAlwaysExcludedToolIDs {
 		if !slices.Contains(excluded, excludedID) {
 			t.Fatalf("Copilot unrestricted projection omitted permanent exclusion %q: %v", excludedID, excluded)
+		}
+	}
+}
+
+func TestCopilotFullNativePolicyPermitsFetchWithoutGrantingMCP(t *testing.T) {
+	for _, brokered := range []bool{false, true} {
+		allowed := []string{}
+		if brokered {
+			allowed = append(allowed, "send_message")
+		}
+		request := testProviderProjectionRequest(t, providerKindCopilot, "copilot-test", "", "", allowed, nil, true, harnessv2.NativeToolPolicyFull)
+		request.Profile.WorkspaceIntent = harnessv2.WorkspaceIntentWrite
+		projection, err := copilotSessionProjection(request, acp.SessionPaths{}, ProviderProxyBinding{}, "copilot-test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Contains(projection.AdditionalArgs, "--allow-tool=url") {
+			t.Fatal("full native fetch lacks an enforceable Copilot URL permission")
+		}
+		if slices.Contains(projection.AdditionalArgs, "--allow-tool=orka") != brokered {
+			t.Fatal("full native tools changed the independent Orka MCP grant")
+		}
+		if projection.AdditionalArgs[0] != "--excluded-tools="+strings.Join(copilotAlwaysExcludedToolIDs, ",") {
+			t.Fatalf("full native tools removed additional Copilot tools: %v", projection.AdditionalArgs)
+		}
+	}
+}
+
+func TestExplicitNativePolicyRejectsUnsupportedProviderCombinations(t *testing.T) {
+	for _, test := range []struct {
+		name, provider string
+		mode           harnessv2.NativeToolPolicyMode
+		allowed        []string
+		allowBash      bool
+		intent         harnessv2.WorkspaceIntent
+		want           string
+	}{
+		{name: "full read intent", provider: providerKindClaude, mode: harnessv2.NativeToolPolicyFull, allowBash: true, intent: harnessv2.WorkspaceIntentRead, want: "read"},
+		{name: "full disabled shell", provider: providerKindClaude, mode: harnessv2.NativeToolPolicyFull, allowed: []string{}, intent: harnessv2.WorkspaceIntentWrite, want: "Bash"},
+		{name: "full native allowlist", provider: providerKindClaude, mode: harnessv2.NativeToolPolicyFull, allowed: []string{providerToolRead}, allowBash: true, intent: harnessv2.WorkspaceIntentWrite, want: "native"},
+		{name: "codex exact restrictions", provider: providerKindCodex, mode: harnessv2.NativeToolPolicyRestricted, allowed: []string{providerToolRead, providerToolGlob, providerToolGrep}, intent: harnessv2.WorkspaceIntentRead, want: "cannot exactly"},
+		{name: "shell bypasses denied read", provider: providerKindClaude, mode: harnessv2.NativeToolPolicyRestricted, allowed: []string{providerToolBash}, allowBash: true, intent: harnessv2.WorkspaceIntentWrite, want: "bypass"},
+		{name: "copilot exact web search", provider: providerKindCopilot, mode: harnessv2.NativeToolPolicyRestricted, allowed: []string{providerToolWebSearch}, intent: harnessv2.WorkspaceIntentWrite, want: "WebSearch"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := testProviderProjectionRequest(t, test.provider, "test-model", "", "", test.allowed, nil, test.allowBash, test.mode)
+			request.Profile.WorkspaceIntent = test.intent
+			provider, err := providerProfile(test.provider, "test-model", test.intent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := provider.ProjectSession(request, acp.SessionPaths{}, ProviderProxyBinding{}); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("projection error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestExplicitNativePolicyRejectsNonCanonicalNames(t *testing.T) {
+	for _, provider := range []string{providerKindClaude, providerKindCopilot, providerKindOpencode} {
+		for _, denyAlias := range []bool{false, true} {
+			name := provider + "/allowed alias"
+			if denyAlias {
+				name = provider + "/denied alias"
+			}
+			t.Run(name, func(t *testing.T) {
+				model, canonical, alias := "test-model", "Read", "read"
+				if provider == providerKindOpencode {
+					model, canonical, alias = "openai/test-model", "read", "READ"
+				}
+				allowed, disallowed := []string{alias}, []string(nil)
+				if denyAlias {
+					allowed, disallowed = []string{canonical}, []string{alias}
+				}
+				request := testProviderProjectionRequest(t, provider, model, "", "", allowed, disallowed, false, harnessv2.NativeToolPolicyRestricted)
+				request.Profile.ModelLimits = testOpenCodeModelLimits()
+				profile, err := providerProfile(provider, model, request.Profile.WorkspaceIntent, request.Profile.ModelLimits)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := profile.ProjectSession(request, acp.SessionPaths{}, ProviderProxyBinding{}); err == nil || !strings.Contains(err.Error(), "canonical name") {
+					t.Fatalf("noncanonical %s policy error = %v", provider, err)
+				}
+				if provider == providerKindOpencode {
+					if _, err := profile.EnvironmentForSession(request, acp.SessionPaths{}, ProviderProxyBinding{}); err == nil || !strings.Contains(err.Error(), "canonical name") {
+						t.Fatalf("noncanonical OpenCode environment policy error = %v", err)
+					}
+				}
+			})
 		}
 	}
 }
@@ -748,6 +909,7 @@ func testProviderProjectionRequest(
 	allowed []string,
 	disallowed []string,
 	allowBash bool,
+	modes ...harnessv2.NativeToolPolicyMode,
 ) harnessv2.CreateRuntimeSessionRequest {
 	t.Helper()
 	allowed = slices.Clone(allowed)
@@ -756,6 +918,9 @@ func testProviderProjectionRequest(
 	slices.Sort(disallowed)
 	toolPolicy := harnessv2.MCPToolPolicy{
 		AllowedToolNames: allowed, DisallowedToolNames: disallowed, AllowBash: allowBash,
+	}
+	if len(modes) > 0 {
+		toolPolicy.NativeToolPolicy = modes[0]
 	}
 	for _, name := range allowed {
 		if !toolPolicy.Allows(name) {
@@ -767,6 +932,10 @@ func testProviderProjectionRequest(
 		}
 		if _, ok := canonicalProviderNativeToolName(name); !ok {
 			switch name {
+			case "apply_patch", "bash", "edit", "glob", "grep", "read", "write", "todowrite", "webfetch", "websearch":
+				if provider != providerKindOpencode {
+					t.Fatalf("unsupported native test tool %q for %s", name, provider)
+				}
 			case "send_message", "check_messages":
 				descriptor.Source = harnessv2.MCPToolSourceBrokeredBuiltin
 				descriptor.InputSchema = json.RawMessage(`{"type":"object"}`)
@@ -791,7 +960,7 @@ func testProviderProjectionRequest(
 	if err != nil {
 		t.Fatal(err)
 	}
-	toolDigest, err := harnessv2.CanonicalRuntimeToolPolicyDigest(allowed, disallowed, allowBash)
+	toolDigest, err := harnessv2.CanonicalRuntimeToolPolicyDigest(allowed, disallowed, allowBash, toolPolicy.NativeToolPolicy)
 	if err != nil {
 		t.Fatal(err)
 	}

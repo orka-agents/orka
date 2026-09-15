@@ -78,6 +78,7 @@ const sidebars = {
       items: [
         'development/development',
         'development/testing',
+        'development/native-runner-tools',
         'development/release-qualification',
         'development/security-scanning-design',
         'development/agent-runtime-adapter-contract',

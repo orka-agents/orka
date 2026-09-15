@@ -348,8 +348,13 @@ func validateChildToolConstraints(txCtx map[string]string, childCtx childTransac
 	if !ok {
 		return nil
 	}
-	if childCtx.agent != nil && childCtx.agent.Spec.Runtime != nil && childCtx.agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeOpencode {
-		allowed = acp.NormalizeOpenCodeAuthorizationTools(allowed)
+	if childCtx.agent != nil && childCtx.agent.Spec.Runtime != nil {
+		runtime := childCtx.agent.Spec.Runtime
+		if runtime.ToolPolicy == corev1alpha1.AgentToolPolicyRestricted {
+			allowed = acp.NormalizeExplicitNativeToolNames(string(runtime.Type), allowed)
+		} else if runtime.Type == corev1alpha1.AgentRuntimeOpencode {
+			allowed = acp.NormalizeOpenCodeAuthorizationTools(allowed)
+		}
 	}
 	if childCtx.childType == corev1alpha1.TaskTypeAgent && childTransactionRuntimeToolsUnrestricted(childCtx.runtimeTools) {
 		return fmt.Errorf("child task agent runtime tools are unrestricted by task or agent while transaction context restricts allowedTools")
@@ -617,7 +622,7 @@ func childTransactionAgentRuntimeAllowedTools(agent *corev1alpha1.Agent) []strin
 		return nil
 	}
 	runtime := agent.Spec.Runtime
-	if runtime.Type == corev1alpha1.AgentRuntimeOpencode && runtime.DefaultAllowedTools == nil {
+	if runtime.Type == corev1alpha1.AgentRuntimeOpencode && runtime.ToolPolicy == "" && runtime.DefaultAllowedTools == nil {
 		return acp.OpenCodeDefaultAllowedTools()
 	}
 	if runtime.DefaultAllowedTools != nil {
@@ -635,6 +640,9 @@ func childTransactionAgentRuntimeAllowBash(agent *corev1alpha1.Agent) bool {
 }
 
 func childTransactionEffectiveRuntimePolicy(child *corev1alpha1.Task, agent *corev1alpha1.Agent) ([]string, bool) {
+	if agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.ToolPolicy == corev1alpha1.AgentToolPolicyFull {
+		return nil, true
+	}
 	allowedTools := childTransactionAgentRuntimeAllowedTools(agent)
 	if child.Spec.AgentRuntime != nil && child.Spec.AgentRuntime.AllowedTools != nil {
 		allowedTools = append([]string{}, child.Spec.AgentRuntime.AllowedTools...)
@@ -649,6 +657,10 @@ func childTransactionEffectiveRuntimePolicy(child *corev1alpha1.Task, agent *cor
 	}
 	if agent == nil || agent.Spec.Runtime == nil {
 		return allowedTools, allowBash
+	}
+	if agent.Spec.Runtime.ToolPolicy == corev1alpha1.AgentToolPolicyRestricted {
+		allowedTools = acp.NormalizeExplicitNativeToolNames(string(agent.Spec.Runtime.Type), allowedTools)
+		disallowedTools = acp.NormalizeExplicitNativeToolNames(string(agent.Spec.Runtime.Type), disallowedTools)
 	}
 	if agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeOpencode {
 		switch agent.Spec.Runtime.Type {

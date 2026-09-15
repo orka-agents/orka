@@ -1132,8 +1132,13 @@ func contextTokenAgentSpecToolFailures(token *ContextToken, authzCtx contextToke
 	if !ok {
 		return nil
 	}
-	if authzCtx.Agent != nil && authzCtx.Agent.Spec.Runtime != nil && authzCtx.Agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeOpencode {
-		allowed = acp.NormalizeOpenCodeAuthorizationTools(allowed)
+	if authzCtx.Agent != nil && authzCtx.Agent.Spec.Runtime != nil {
+		runtime := authzCtx.Agent.Spec.Runtime
+		if runtime.ToolPolicy == corev1alpha1.AgentToolPolicyRestricted {
+			allowed = acp.NormalizeExplicitNativeToolNames(string(runtime.Type), allowed)
+		} else if runtime.Type == corev1alpha1.AgentRuntimeOpencode {
+			allowed = acp.NormalizeOpenCodeAuthorizationTools(allowed)
+		}
 	}
 	failures := []string{}
 	if authzCtx.Agent != nil && authzCtx.Agent.Spec.Runtime != nil && contextTokenRuntimeToolsUnrestricted(authzCtx.RuntimeAllowedTools) {
@@ -1439,7 +1444,7 @@ func contextTokenAgentRuntimeAllowedTools(agent *corev1alpha1.Agent) []string {
 		return nil
 	}
 	runtime := agent.Spec.Runtime
-	if runtime.Type == corev1alpha1.AgentRuntimeOpencode && runtime.DefaultAllowedTools == nil {
+	if runtime.Type == corev1alpha1.AgentRuntimeOpencode && runtime.ToolPolicy == "" && runtime.DefaultAllowedTools == nil {
 		return acp.OpenCodeDefaultAllowedTools()
 	}
 	if runtime.DefaultAllowedTools != nil {
@@ -1457,10 +1462,17 @@ func contextTokenAgentRuntimeAllowBash(agent *corev1alpha1.Agent) bool {
 }
 
 func contextTokenAgentRuntimeAuthorizationPolicy(agent *corev1alpha1.Agent) ([]string, bool) {
+	if agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.ToolPolicy == corev1alpha1.AgentToolPolicyFull {
+		// A finite transaction allowlist cannot authorize an open native catalog.
+		return nil, true
+	}
 	allowedTools := contextTokenAgentRuntimeAllowedTools(agent)
 	allowBash := contextTokenAgentRuntimeAllowBash(agent)
 	if agent == nil || agent.Spec.Runtime == nil {
 		return allowedTools, allowBash
+	}
+	if agent.Spec.Runtime.ToolPolicy == corev1alpha1.AgentToolPolicyRestricted {
+		allowedTools = acp.NormalizeExplicitNativeToolNames(string(agent.Spec.Runtime.Type), allowedTools)
 	}
 	if agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeOpencode {
 		if len(allowedTools) > 0 && !hasNonEmptyToolNames(allowedTools) {
@@ -1479,6 +1491,9 @@ func contextTokenAgentRuntimeAuthorizationPolicy(agent *corev1alpha1.Agent) ([]s
 }
 
 func contextTokenTaskCreateEffectiveRuntimePolicy(req CreateTaskRequest, agent *corev1alpha1.Agent) ([]string, bool) {
+	if agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.ToolPolicy == corev1alpha1.AgentToolPolicyFull {
+		return nil, true
+	}
 	allowedTools := contextTokenAgentRuntimeAllowedTools(agent)
 	if req.AgentRuntime != nil && req.AgentRuntime.AllowedTools != nil {
 		allowedTools = append([]string{}, req.AgentRuntime.AllowedTools...)
@@ -1493,6 +1508,10 @@ func contextTokenTaskCreateEffectiveRuntimePolicy(req CreateTaskRequest, agent *
 	}
 	if agent == nil || agent.Spec.Runtime == nil {
 		return allowedTools, allowBash
+	}
+	if agent.Spec.Runtime.ToolPolicy == corev1alpha1.AgentToolPolicyRestricted {
+		allowedTools = acp.NormalizeExplicitNativeToolNames(string(agent.Spec.Runtime.Type), allowedTools)
+		disallowedTools = acp.NormalizeExplicitNativeToolNames(string(agent.Spec.Runtime.Type), disallowedTools)
 	}
 	if agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeOpencode {
 		if len(allowedTools) > 0 && !hasNonEmptyToolNames(allowedTools) {
@@ -1842,8 +1861,13 @@ func contextTokenTaskToolFailures(token *ContextToken, authzCtx contextTokenTask
 	if !ok {
 		return nil
 	}
-	if authzCtx.Agent != nil && authzCtx.Agent.Spec.Runtime != nil && authzCtx.Agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeOpencode {
-		allowed = acp.NormalizeOpenCodeAuthorizationTools(allowed)
+	if authzCtx.Agent != nil && authzCtx.Agent.Spec.Runtime != nil {
+		runtime := authzCtx.Agent.Spec.Runtime
+		if runtime.ToolPolicy == corev1alpha1.AgentToolPolicyRestricted {
+			allowed = acp.NormalizeExplicitNativeToolNames(string(runtime.Type), allowed)
+		} else if runtime.Type == corev1alpha1.AgentRuntimeOpencode {
+			allowed = acp.NormalizeOpenCodeAuthorizationTools(allowed)
+		}
 	}
 	failures := []string{}
 	if authzCtx.Request.Type == corev1alpha1.TaskTypeAgent && contextTokenRuntimeToolsUnrestricted(authzCtx.RuntimeAllowedTools) {

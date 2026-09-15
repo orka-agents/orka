@@ -94,15 +94,15 @@ func PlanACPRuntimeWithConfiguration(
 	if !ACPRuntimeImageAvailable(image) {
 		return ACPRuntimePlan{}, fmt.Errorf("ACP runtime image for %s must be a configured digest-pinned image", provider)
 	}
-	allowed := effectiveACPAllowedTools(task, agent)
-	disallowed := []string(nil)
-	if task.Spec.AgentRuntime != nil {
-		disallowed = sortedUnique(task.Spec.AgentRuntime.DisallowedTools)
-	}
-	allowBash := effectiveACPAllowBash(task, agent)
-	allowed, disallowed, allowBash = normalizeACPRuntimeToolPolicy(provider, intent, allowed, disallowed, allowBash)
-	if err := validateACPProviderNativePolicy(provider, intent, allowed, disallowed, allowBash); err != nil {
+	policy, err := effectiveACPNativeToolPolicy(task, agent)
+	if err != nil {
 		return ACPRuntimePlan{}, err
+	}
+	allowed, disallowed, allowBash := policy.AllowedToolNames, policy.DisallowedToolNames, policy.AllowBash
+	if policy.NativeToolPolicy == "" {
+		if err := validateACPProviderNativePolicy(provider, intent, allowed, disallowed, allowBash); err != nil {
+			return ACPRuntimePlan{}, err
+		}
 	}
 	if err := validateACPProviderSystemPrompt(provider, configuration); err != nil {
 		return ACPRuntimePlan{}, err
@@ -123,7 +123,7 @@ func PlanACPRuntimeWithConfiguration(
 	if err != nil {
 		return ACPRuntimePlan{}, err
 	}
-	toolDigest, err := harnessv2.CanonicalRuntimeToolPolicyDigest(allowed, disallowed, allowBash)
+	toolDigest, err := harnessv2.CanonicalRuntimeToolPolicyDigest(allowed, disallowed, allowBash, policy.NativeToolPolicy)
 	if err != nil {
 		return ACPRuntimePlan{}, err
 	}
@@ -338,7 +338,7 @@ func effectiveACPAllowedTools(task *corev1alpha1.Task, agent *corev1alpha1.Agent
 	var values []string
 	if agent != nil && agent.Spec.Runtime != nil {
 		runtime := agent.Spec.Runtime
-		if runtime.Type == corev1alpha1.AgentRuntimeOpencode && runtime.DefaultAllowedTools == nil {
+		if runtime.Type == corev1alpha1.AgentRuntimeOpencode && runtime.ToolPolicy == "" && runtime.DefaultAllowedTools == nil {
 			values = acp.OpenCodeDefaultAllowedTools()
 		} else if runtime.DefaultAllowedTools != nil {
 			values = append([]string{}, runtime.DefaultAllowedTools...)
@@ -381,7 +381,7 @@ func effectiveACPAllowedTools(task *corev1alpha1.Task, agent *corev1alpha1.Agent
 			// Materialize the implicit native grant before adding brokered tools.
 			// Appending to nil would otherwise replace native defaults with an
 			// allowlist containing only the injected messaging tools.
-			if values == nil && agent != nil && agent.Spec.Runtime != nil {
+			if values == nil && agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.ToolPolicy == "" {
 				values = acp.BuiltInRuntimeNativeToolNames(string(agent.Spec.Runtime.Type))
 			}
 			values = append(values, "send_message", "check_messages")

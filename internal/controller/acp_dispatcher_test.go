@@ -5553,6 +5553,22 @@ func TestFrozenMCPPermissionDecisionAllowsGrantedToolsOnce(t *testing.T) {
 			want: harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: "allow-once"},
 		},
 		{
+			name:   "full Claude native notebook",
+			policy: harnessv2.MCPToolPolicy{NativeToolPolicy: harnessv2.NativeToolPolicyFull, AllowBash: true},
+			permission: &harnessv2.PermissionRequestedEvent{
+				ToolName: "NotebookEdit", Options: options,
+			},
+			want: harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: "allow-once"},
+		},
+		{
+			name:   "full Claude unknown PascalCase permission",
+			policy: harnessv2.MCPToolPolicy{NativeToolPolicy: harnessv2.NativeToolPolicyFull, AllowBash: true},
+			permission: &harnessv2.PermissionRequestedEvent{
+				ToolName: "DeleteEverything", Options: options,
+			},
+			want: harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: "reject-once"},
+		},
+		{
 			name:   "explicit native deny all",
 			policy: harnessv2.MCPToolPolicy{AllowedToolNames: []string{}, AllowBash: true},
 			permission: &harnessv2.PermissionRequestedEvent{

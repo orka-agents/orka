@@ -94,27 +94,16 @@ func buildRuntimeSessionMCPConfigurationWithRegistry(
 	if task == nil || agent == nil {
 		return harnessv2.MCPPolicyConfiguration{}, fmt.Errorf("task and Agent are required for MCP policy")
 	}
-	allowed := effectiveACPAllowedTools(task, agent)
-	disallowed := []string(nil)
-	if task.Spec.AgentRuntime != nil {
-		disallowed = sortedUnique(task.Spec.AgentRuntime.DisallowedTools)
+	policy, err := effectiveACPNativeToolPolicy(task, agent)
+	if err != nil {
+		return harnessv2.MCPPolicyConfiguration{}, permanentACPAgentConfiguration(err)
 	}
-	allowBash := true
-	if agent.Spec.Runtime != nil && agent.Spec.Runtime.DefaultAllowBash != nil {
-		allowBash = *agent.Spec.Runtime.DefaultAllowBash
-	}
-	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.AllowBash != nil {
-		allowBash = *task.Spec.AgentRuntime.AllowBash
-	}
-	allowed, disallowed, allowBash = normalizeACPRuntimeToolPolicy(
-		profile.ProviderKind, corev1alpha1.WorkspaceIntent(profile.WorkspaceIntent), allowed, disallowed, allowBash,
-	)
 	approval := harnessv2.MCPApprovalPolicy{}
 	if agent.Spec.Coordination != nil {
 		approval.RequiredTools = sortedUnique(agent.Spec.Coordination.ApprovalRequiredTools)
 	}
 	return buildMCPPolicyConfigurationWithRegistry(
-		ctx, reader, task.Namespace, profile, allowed, disallowed, allowBash, approval, registry,
+		ctx, reader, task.Namespace, profile, policy.AllowedToolNames, policy.DisallowedToolNames, policy.AllowBash, approval, registry, policy.NativeToolPolicy,
 	)
 }
 
@@ -231,18 +220,23 @@ func buildMCPPolicyConfigurationWithRegistry(
 	allowBash bool,
 	approval harnessv2.MCPApprovalPolicy,
 	registry *tools.Registry,
+	modes ...harnessv2.NativeToolPolicyMode,
 ) (harnessv2.MCPPolicyConfiguration, error) {
 	if len(approval.RequiredTools) > 0 {
 		return harnessv2.MCPPolicyConfiguration{}, permanentACPAgentConfiguration(
 			fmt.Errorf("approval-required ACP MCP tools are unavailable until controller-owned permission review is implemented"),
 		)
 	}
-	toolDigest, err := harnessv2.CanonicalRuntimeToolPolicyDigest(allowed, disallowed, allowBash)
+	mode := harnessv2.NativeToolPolicyMode("")
+	if len(modes) > 0 {
+		mode = modes[0]
+	}
+	toolDigest, err := harnessv2.CanonicalRuntimeToolPolicyDigest(allowed, disallowed, allowBash, mode)
 	if err != nil || toolDigest != profile.ToolPolicyDigest {
 		return harnessv2.MCPPolicyConfiguration{}, fmt.Errorf("effective MCP tool policy does not match runtime profile")
 	}
 	descriptors, err := buildCanonicalMCPToolDescriptors(
-		ctx, reader, namespace, profile.ProviderKind, allowed, disallowed, allowBash, registry,
+		ctx, reader, namespace, profile.ProviderKind, allowed, disallowed, allowBash, registry, mode,
 	)
 	if err != nil {
 		return harnessv2.MCPPolicyConfiguration{}, err
@@ -262,6 +256,7 @@ func buildMCPPolicyConfigurationWithRegistry(
 	configuration := harnessv2.MCPPolicyConfiguration{
 		ToolPolicyDigest: toolDigest, ApprovalPolicyDigest: approvalDigest, MCPConfigurationDigest: mcpDigest,
 		ToolPolicy: harnessv2.MCPToolPolicy{
+			NativeToolPolicy: mode,
 			AllowedToolNames: allowed, DisallowedToolNames: disallowed, AllowBash: allowBash,
 			Tools: descriptors, DescriptorDigest: descriptorDigest,
 		},
@@ -309,8 +304,13 @@ func buildCanonicalMCPToolDescriptors(
 	allowed, disallowed []string,
 	allowBash bool,
 	registry *tools.Registry,
+	modes ...harnessv2.NativeToolPolicyMode,
 ) ([]harnessv2.MCPToolDescriptor, error) {
 	policy := harnessv2.MCPToolPolicy{AllowedToolNames: allowed, DisallowedToolNames: disallowed, AllowBash: allowBash}
+	native := providerNativeTools[strings.ToLower(provider)]
+	if len(modes) > 0 && modes[0] != "" {
+		native = canonicalToolSet(acp.BuiltInRuntimePolicyToolNames(provider)...)
+	}
 	descriptors := make([]harnessv2.MCPToolDescriptor, 0, len(allowed))
 	for _, name := range allowed {
 		if !policy.Allows(name) {
@@ -328,7 +328,7 @@ func buildCanonicalMCPToolDescriptors(
 				continue
 			}
 		}
-		if native := providerNativeTools[strings.ToLower(provider)]; native != nil {
+		if native != nil {
 			if _, ok := native[strings.ToLower(name)]; ok {
 				descriptors = append(descriptors, harnessv2.MCPToolDescriptor{
 					Name: name, Description: "Provider-native tool; not exposed by the Orka MCP broker.",

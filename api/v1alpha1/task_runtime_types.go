@@ -113,6 +113,11 @@ const (
 // +kubebuilder:validation:XValidation:rule="!has(self.outcome) || (has(self.state) && self.state == self.outcome)",message="execution outcome requires the matching terminal state"
 // +kubebuilder:validation:XValidation:rule="!has(self.state) || !(self.state in ['Succeeded', 'Failed', 'Cancelled', 'OutcomeUnknown']) || has(self.outcome)",message="terminal execution state requires an outcome"
 type TaskExecutionStatus struct {
+	// ToolPolicy describes the frozen built-in runner policy and its effective
+	// features. It is diagnostic only and never grants tool or network access.
+	// +optional
+	ToolPolicy *TaskToolPolicyStatus `json:"toolPolicy,omitempty"`
+
 	// State is the current durable execution state.
 	// +optional
 	State TaskExecutionState `json:"state,omitempty"`

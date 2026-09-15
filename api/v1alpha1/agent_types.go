@@ -75,6 +75,7 @@ type AgentSpec struct {
 // +kubebuilder:validation:XValidation:rule="has(self.type) != has(self.runtimeRef)",message="exactly one of type or runtimeRef is required"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.contractVersion) || (has(self.contractVersion) && self.contractVersion == oldSelf.contractVersion)",message="runtime.contractVersion is immutable once set"
 // +kubebuilder:validation:XValidation:rule="!has(self.contractVersion) || has(self.type)",message="runtime.contractVersion applies only to built-in runtime types; runtimeRef derives the protocol from the referenced AgentRuntime"
+// +kubebuilder:validation:XValidation:rule="!has(self.toolPolicy) || (has(self.type) && has(self.contractVersion) && self.contractVersion == 'orka.harness.v2')",message="runtime.toolPolicy requires a built-in orka.harness.v2 runtime"
 type AgentCLIRuntime struct {
 	// Type specifies which built-in CLI runtime to use. Use runtimeRef for admin-registered custom runtimes.
 	// +optional
@@ -91,6 +92,17 @@ type AgentCLIRuntime struct {
 	// RuntimeRef selects an admin-governed AgentRuntime for custom/BYO harness runtimes.
 	// +optional
 	RuntimeRef *AgentRuntimeReference `json:"runtimeRef,omitempty"`
+
+	// ToolPolicy selects how the approved runner's built-in tools are exposed.
+	// Omission preserves the existing runner-specific behavior. Full preserves
+	// supported native tools and uses defaultAllowedTools only for Orka tools;
+	// native restrictions and read-only workspaces are incompatible with full.
+	// Restricted requires an explicit defaultAllowedTools or Task allowlist and
+	// rejects restrictions the runner cannot enforce. Only operators may select
+	// this Agent setting; Task overrides cannot enable full access. A changed
+	// policy requires a new Session.
+	// +optional
+	ToolPolicy AgentToolPolicyMode `json:"toolPolicy,omitempty"`
 
 	// DefaultMaxTurns is the default maximum agent loop iterations for tasks using this Agent
 	// +kubebuilder:validation:Minimum=1
@@ -114,6 +126,15 @@ type AgentCLIRuntime struct {
 	DefaultReasoningEffort string `json:"defaultReasoningEffort,omitempty"`
 }
 
+// AgentToolPolicyMode is an operator-selected built-in runner tool policy.
+// +kubebuilder:validation:Enum=full;restricted
+type AgentToolPolicyMode string
+
+const (
+	AgentToolPolicyFull       AgentToolPolicyMode = "full"
+	AgentToolPolicyRestricted AgentToolPolicyMode = "restricted"
+)
+
 // MarshalJSON preserves the distinction between an omitted tool allowlist and
 // an explicitly empty deny-all allowlist. The standard omitempty handling for
 // slices would otherwise serialize both states as omission.
@@ -122,6 +143,7 @@ func (in AgentCLIRuntime) MarshalJSON() ([]byte, error) {
 		Type                   AgentRuntimeType             `json:"type,omitempty"`
 		ContractVersion        *AgentRuntimeContractVersion `json:"contractVersion,omitempty"`
 		RuntimeRef             *AgentRuntimeReference       `json:"runtimeRef,omitempty"`
+		ToolPolicy             AgentToolPolicyMode          `json:"toolPolicy,omitempty"`
 		DefaultMaxTurns        *int32                       `json:"defaultMaxTurns,omitempty"`
 		DefaultAllowedTools    *[]string                    `json:"defaultAllowedTools,omitempty"`
 		DefaultAllowBash       *bool                        `json:"defaultAllowBash,omitempty"`
@@ -136,6 +158,7 @@ func (in AgentCLIRuntime) MarshalJSON() ([]byte, error) {
 		Type:                   in.Type,
 		ContractVersion:        in.ContractVersion,
 		RuntimeRef:             in.RuntimeRef,
+		ToolPolicy:             in.ToolPolicy,
 		DefaultMaxTurns:        in.DefaultMaxTurns,
 		DefaultAllowedTools:    defaultAllowedTools,
 		DefaultAllowBash:       in.DefaultAllowBash,
