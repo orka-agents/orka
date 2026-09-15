@@ -12,7 +12,7 @@ export default function QuickStartSection() {
         <div className="quickstart-card">
           <h3>1. Install with Helm</h3>
           <p>
-            One namespace, two Secrets, and one Helm command. Works on kind or
+            One namespace, one certificate, and one Helm command. Works on kind or
             minikube. No model API key needed yet.
           </p>
           <p>

@@ -99,7 +99,7 @@ credential broker. Artifact access is separately operation-scoped.
 ### Install
 
 Follow [Install Orka](website/docs/operations/installation.md) to set up Orka on
-Kubernetes and run a test task. It takes one namespace, two Secrets, and one Helm
+Kubernetes and run a test task. It takes one namespace, one certificate, and one Helm
 command.
 
 For development, [build from source](website/docs/getting-started.md#option-b-current-main-from-source).

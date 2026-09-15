@@ -769,7 +769,7 @@ namespace. There is no dual, automatic, or drain controller mode.
 {{- if not $existingSnapshotSecret -}}
 {{- fail "cannot determine the existing agent execution snapshot Secret name from the live controller; restore its exact agent-execution-snapshot-key volume before upgrading" -}}
 {{- end -}}
-{{- $desiredSnapshotSecret := trim (default "" .Values.controller.agentExecutionSnapshot.existingSecret) -}}
+{{- $desiredSnapshotSecret := include "orka.agentExecutionSnapshotSecretName" . -}}
 {{- if ne $existingSnapshotSecret $desiredSnapshotSecret -}}
 {{- fail (printf "controller.agentExecutionSnapshot.existingSecret is immutable for in-place upgrades; preserve %q so retained encrypted execution snapshots remain decryptable" $existingSnapshotSecret) -}}
 {{- end -}}
@@ -777,7 +777,7 @@ namespace. There is no dual, automatic, or drain controller mode.
 {{- if not $existingSnapshotKey -}}
 {{- fail "cannot determine the existing agent execution snapshot Secret key from the live controller; restore its exact item mounted at path key before upgrading" -}}
 {{- end -}}
-{{- $desiredSnapshotKey := trim (default "" .Values.controller.agentExecutionSnapshot.key) -}}
+{{- $desiredSnapshotKey := include "orka.agentExecutionSnapshotSecretKey" . -}}
 {{- if ne $existingSnapshotKey $desiredSnapshotKey -}}
 {{- fail (printf "controller.agentExecutionSnapshot.key is immutable for in-place upgrades; preserve %q so retained encrypted execution snapshots remain decryptable" $existingSnapshotKey) -}}
 {{- end -}}
@@ -815,17 +815,25 @@ namespace. There is no dual, automatic, or drain controller mode.
 {{- end }}
 
 {{/*
-Agent execution snapshots contain sensitive resolved inputs. When either
-agent protocol is enabled, require an operator-managed Secret for their
-encryption key rather than generating or storing the key in Helm values.
+Agent execution snapshots contain sensitive resolved inputs and are encrypted
+with an AES-256 key mounted from a Secret. Operators may supply that Secret
+through controller.agentExecutionSnapshot.existingSecret. When it is empty the
+chart generates a release-owned Secret once and reuses its bytes on every
+later render (see agent-execution-snapshot-secret.yaml). Both paths resolve
+through these helpers so the Deployment mount and the upgrade identity guard
+agree on one name and one item key.
 */}}
-{{- define "orka.validateAgentExecutionSnapshot" -}}
-{{- if not (trim (default "" .Values.controller.agentExecutionSnapshot.existingSecret)) -}}
-{{- fail "controller.agentExecutionSnapshot.existingSecret is required when agent execution is enabled" -}}
+{{- define "orka.agentExecutionSnapshotSecretName" -}}
+{{- $existing := trim (default "" .Values.controller.agentExecutionSnapshot.existingSecret) -}}
+{{- if $existing -}}
+{{- $existing -}}
+{{- else -}}
+{{- printf "%s-agent-execution-snapshot" (include "orka.fullname" . | trunc 38 | trimSuffix "-") | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
-{{- if not (trim (default "" .Values.controller.agentExecutionSnapshot.key)) -}}
-{{- fail "controller.agentExecutionSnapshot.key is required when agent execution is enabled" -}}
-{{- end -}}
+{{- end }}
+
+{{- define "orka.agentExecutionSnapshotSecretKey" -}}
+{{- default "key" (trim (default "" .Values.controller.agentExecutionSnapshot.key)) -}}
 {{- end }}
 
 {{/*

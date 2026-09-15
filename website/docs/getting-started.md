@@ -76,8 +76,7 @@ You will need, in addition to the prerequisites above:
 
 - Go, Bun, and Docker — see [Development](development/development.md#prerequisites) for versions
 - [Helm](https://helm.sh/docs/intro/install/) for the chart install below
-- A TLS certificate for the admission webhooks, and a 32-byte encryption key for
-  execution snapshots.
+- A TLS certificate for the admission webhooks.
 
 ```bash
 export ORKA_CONTEXT='<your-kubeconfig-context>'
@@ -132,15 +131,7 @@ metadata:
 EOF
 ```
 
-Create the two required Secrets. The snapshot key encrypts stored agent execution records;
-keep it somewhere safe, because rotating it makes existing snapshots unreadable:
-
-```bash
-kubectl --context "${ORKA_CONTEXT}" -n orka-system create secret generic orka-agent-snapshot-key \
-  --from-literal=key="$(openssl rand -base64 32)"
-```
-
-Now the webhook certificate. The chart serves admission on the Service
+Create the webhook certificate. The chart serves admission on the Service
 `orka-webhook.orka-system.svc`, so the certificate has to name exactly that — a
 certificate for any other name is rejected by the API server at admission time, not at
 install time. For local evaluation a self-signed certificate is fine; use your own CA or
@@ -189,8 +180,6 @@ helm install orka ./manifest_staging/charts/orka \
   --set controller.acpRuntime.claudeImage="${ORKA_IMAGE_PREFIX}/acp-claude-runtime@sha256:<claude-digest>" \
   --set controller.acpRuntime.copilotImage="${ORKA_IMAGE_PREFIX}/acp-copilot-runtime@sha256:<copilot-digest>" \
   --set controller.acpRuntime.opencodeImage="${ORKA_IMAGE_PREFIX}/acp-opencode-runtime@sha256:<opencode-digest>" \
-  --set-string controller.agentExecutionSnapshot.existingSecret=orka-agent-snapshot-key \
-  --set-string controller.agentExecutionSnapshot.key=key \
   --set-string webhooks.tls.existingSecret=orka-webhook-tls \
   --set-string webhooks.caBundle="${WEBHOOK_CA_BUNDLE}"
 ```

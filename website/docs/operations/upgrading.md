@@ -167,7 +167,7 @@ existing tasks and data depend on them:
 | --- | --- |
 | `controller.mode` | Determines how this installation runs coding agents. |
 | `controller.watchNamespace` | Existing Tasks live there. |
-| `controller.agentExecutionSnapshot.existingSecret` and `.key` | Saved agent configuration needs the original encryption key. |
+| `controller.agentExecutionSnapshot.existingSecret` and `.key` | Saved agent configuration needs the original encryption key. A generated key cannot be swapped for your own later, or the reverse. |
 | `controller.acpRuntime.namespace` | Running pools live there. |
 | The release fullname | Every owned resource is named from it. |
 
@@ -192,8 +192,9 @@ and verify your recovery plan before uninstalling.
 helm uninstall orka --kube-context "$TARGET_CONTEXT" --namespace orka-system
 ```
 
-The CRDs and their custom resources stay in the cluster. Keeping them does not
-preserve the data stored in volumes.
+The CRDs and their custom resources stay in the cluster, and so does the generated
+snapshot key Secret, `orka-agent-execution-snapshot`, so a restored data volume stays
+readable. Keeping them does not preserve the data stored in volumes.
 
 :::danger[Deleting a CRD deletes its data]
 Deleting a CRD also deletes every resource of that type across the cluster.

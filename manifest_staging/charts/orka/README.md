@@ -19,7 +19,6 @@ A new installation needs only these values:
 
 | Setting | What to set |
 | --- | --- |
-| `controller.agentExecutionSnapshot.existingSecret`, `.key` | The Secret and key holding the 32-byte snapshot encryption key. |
 | `webhooks.tls.existingSecret` | The TLS Secret for the admission webhooks. |
 | `webhooks.caBundle` | The base64 CA certificate that signed it, or configure `webhooks.caInjectionAnnotations` for cert-manager. |
 
@@ -30,6 +29,7 @@ change later:
 | --- | --- |
 | `controller.image`, `publisher.image`, `workers.*.image` | Use the release tag by default. Set `tag` to choose another tag, or `digest` to pin an image. A digest takes precedence over the tag. |
 | `controller.acpRuntime.*Image` | Use release tags by default. Override with a full tagged or digest reference; set an empty string to disable a runtime. |
+| `controller.agentExecutionSnapshot.existingSecret` | Empty by default; the chart generates the snapshot encryption Secret once and keeps it on uninstall. Set only to bring your own key. Immutable after install. |
 | `providerProxy.enabled`, `.upstreamBaseURL`, `.egress` | Off by default. Enable to connect built-in coding agents to your model gateway. See [Provider proxy](https://orka-agents.github.io/orka/docs/provider-proxy). |
 | `controller.mode` | `harness-v2` for new installations. It cannot change after installation. |
 | `controller.watchNamespace` | Defaults to the Helm namespace, which needs a matching `orka.ai/controller-mode` label. |

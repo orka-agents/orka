@@ -3,7 +3,6 @@
 {{- include "orka.validateControllerMode" . }}
 {{- include "orka.validateProviderProxyConfig" . }}
 {{- include "orka.validateSQLiteController" . }}
-{{- include "orka.validateAgentExecutionSnapshot" . }}
 {{- include "orka.validateWebhooks" . }}
 {{- include "orka.validatePublisherAuth" . }}
 {{- include "orka.validateSubstrateCredentials" . }}
@@ -587,10 +586,10 @@ spec:
         {{- end }}
         - name: agent-execution-snapshot-key
           secret:
-            secretName: {{ .Values.controller.agentExecutionSnapshot.existingSecret | quote }}
+            secretName: {{ include "orka.agentExecutionSnapshotSecretName" . | quote }}
             defaultMode: 0400
             items:
-              - key: {{ .Values.controller.agentExecutionSnapshot.key | quote }}
+              - key: {{ include "orka.agentExecutionSnapshotSecretKey" . | quote }}
                 path: key
         - name: webhook-tls
           secret:

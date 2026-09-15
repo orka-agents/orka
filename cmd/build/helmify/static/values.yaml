@@ -58,15 +58,18 @@ controller:
     secret: ""
     maxBytes: 536870912
 
-  # Encryption key for immutable agent execution snapshots. When either agent
-  # execution protocol is enabled, both fields must reference an existing
-  # Secret. The selected value must contain exactly 32 raw bytes or its base64
-  # encoding. The Secret name, item key, and selected key material must remain
-  # unchanged for the lifetime of the release so retained snapshots stay
-  # decryptable.
+  # AES-256 key that encrypts immutable agent execution snapshots at rest.
+  # Leave existingSecret empty and the chart generates a release-owned Secret
+  # named <fullname>-agent-execution-snapshot on first install, keeps it on
+  # uninstall, and reuses its bytes on every upgrade. To bring your own key,
+  # set existingSecret to a Secret whose item holds exactly 32 raw bytes or
+  # their base64 encoding. Either way the Secret name, item key, and key
+  # material must never change for the lifetime of the release; retained
+  # snapshots become unreadable otherwise. Back the Secret up with the
+  # controller's data volume.
   agentExecutionSnapshot:
     existingSecret: ""
-    key: ""
+    key: key
     # A snapshot must remain unreferenced for this full period before GC.
     retention: 720h
     # Reference-aware GC scan cadence.

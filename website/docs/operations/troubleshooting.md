@@ -34,19 +34,23 @@ The chart validates its inputs before producing any manifests, so a bad install 
 
 | Message mentions | What it wants |
 | --- | --- |
-| `agentExecutionSnapshot.existingSecret` | A Secret holding a 32-byte key. See [below](#the-snapshot-key). |
+| `agentExecutionSnapshot.existingSecret` | Immutable once installed. Keep the name the live controller mounts. See [below](#the-snapshot-key). |
 | `watchNamespace` | Must be set, and must equal the release namespace. |
 | `providerProxy` | When enabled, provide your gateway endpoint and egress rules. It can stay disabled during installation. See [Provider proxy](provider-proxy.md). |
 | `upstreamBaseURL` | Your gateway's HTTP(S) URL, without credentials, a query, or a fragment. |
 | `image` | Use a valid tag or SHA256 digest. Runtime overrides need a full registry/repository reference. |
 | `replicas` / `leaderElect` | Must be `1` and `true`. The controller is a single writer. |
 | `webhooks.tls.existingSecret` | A TLS Secret for the admission webhooks. |
+| `generated snapshot Secret ... has no "key" item` | An upgrade cannot find the key Secret the chart generated. Restore it from backup. For a preview, use `--dry-run=server`; client-side renders cannot read Secrets. |
 | `mode` | Only `harness-v1` or `harness-v2`, and it cannot change on upgrade. |
 
 ### The snapshot key
 
-`controller.agentExecutionSnapshot` encrypts stored agent execution records. It needs a
-Secret containing either 32 raw bytes or their base64 encoding:
+`controller.agentExecutionSnapshot` encrypts stored agent execution records. A
+fresh install generates the key into a Secret named `<release>-agent-execution-snapshot`
+and reuses it on every upgrade, so you normally never touch it. To bring your own,
+create a Secret containing either 32 raw bytes or their base64 encoding before
+installing, and pass its name as `existingSecret`:
 
 ```bash
 kubectl -n orka-system create secret generic orka-agent-snapshot-key \
@@ -58,10 +62,12 @@ The Secret name, the item key, and the key material must stay the same for the l
 release. Changing any of them makes every retained snapshot permanently unreadable.
 
 The chart guards only two of those three. On upgrade it compares the Secret **name** and
-**item key** against the live Deployment and fails if either changed. It cannot see the
-key material, so replacing the bytes under the same name and key passes the guard
-silently — and the controller then restarts unable to read any snapshot it wrote before.
-Treat the material as immutable yourself; nothing in the chart will stop you.
+**item key** against the live Deployment and fails if either changed. That includes
+switching between a generated Secret and your own. It cannot see the key material, so
+replacing the bytes under the same name and key passes the guard silently — and the
+controller then restarts unable to read any snapshot it wrote before. The generated
+Secret is kept on `helm uninstall` and reused by a reinstall under the same release name
+for the same reason. Treat the material as immutable yourself.
 :::
 
 ### The controller crashes immediately

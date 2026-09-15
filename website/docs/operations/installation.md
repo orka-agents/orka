@@ -6,7 +6,7 @@ description: "Install Orka on Kubernetes and run a test task."
 # Install Orka
 
 Install the latest Orka release with Helm, then run a small test task.
-The whole install is one namespace, two Secrets, and one Helm command.
+The whole install is one namespace, one certificate Secret, and one Helm command.
 These commands use your current Kubernetes context, name the installation `orka`,
 and use the namespace `orka-system`.
 For development, [build from source](../getting-started.md#option-b-current-main-from-source).
@@ -18,7 +18,7 @@ You need these tools on your machine:
 - `kubectl` connected to your cluster. For a laptop,
   [kind](https://kind.sigs.k8s.io/) or [minikube](https://minikube.sigs.k8s.io/) is fine.
 - [Helm](https://helm.sh/docs/intro/install/) 3 or newer.
-- OpenSSL, for the encryption key and a test certificate.
+- OpenSSL, for a test certificate.
 
 Your cluster needs:
 
@@ -45,16 +45,6 @@ Create Orka's namespace. The label selects the default agent execution mode,
 kubectl create namespace orka-system
 kubectl label namespace orka-system orka.ai/controller-mode=harness-v2
 ```
-
-Create the encryption key. Orka uses it to encrypt saved agent execution records.
-
-```bash
-openssl rand 32 | kubectl -n orka-system create secret generic orka-agent-snapshot-key \
-  --from-file=key=/dev/stdin
-```
-
-Back up this Secret with your data. Without the same key, Orka cannot read
-saved agent records after a restore, and there is no way to recover them.
 
 Create the webhook certificate. Orka validates its resources through Kubernetes
 admission webhooks, and the chart needs a TLS Secret for them. It never generates
@@ -87,14 +77,12 @@ For a real cluster, use your own CA or
 ## 2. Install with Helm
 
 Install the latest chart from Orka's Helm repository. It already includes the
-matching image tags. The settings below point it at the two Secrets you created.
+matching image tags. The settings below point it at the certificate Secret you created.
 
 ```bash
 helm repo add orka https://orka-agents.github.io/orka/charts
 helm repo update orka
 helm install orka orka/orka --namespace orka-system \
-  --set-string controller.agentExecutionSnapshot.existingSecret=orka-agent-snapshot-key \
-  --set-string controller.agentExecutionSnapshot.key=key \
   --set-string webhooks.tls.existingSecret=orka-webhook-tls \
   --set-string webhooks.caBundle="$(kubectl -n orka-system get secret orka-webhook-tls -o jsonpath='{.data.ca\.crt}')" \
   --wait --timeout 10m
@@ -112,6 +100,12 @@ Check that the Deployments are ready and the data volumes show `Bound`:
 ```bash
 kubectl -n orka-system get deployments,pvc
 ```
+
+The install also created a Secret named `orka-agent-execution-snapshot`. It holds
+the key that encrypts saved agent execution records. Back it up together with the
+data volume. Without it, Orka cannot read those records after a restore. To
+supply your own key instead, see
+[Snapshot encryption key](../reference/configuration.md#snapshot-encryption-key).
 
 Then run a container task. This test does not call a model.
 
