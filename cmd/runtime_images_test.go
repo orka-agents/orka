@@ -9,14 +9,68 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/orka-agents/orka/internal/api"
 	"github.com/orka-agents/orka/internal/controller"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
+
+func TestConfiguredACPRuntimeAvailabilityRequiresModelConnection(t *testing.T) {
+	image := "ghcr.io/orka-agents/runtime@sha256:" + strings.Repeat("a", 64)
+	images := controller.ACPRuntimeImages{Codex: image, Claude: image, Copilot: image, Opencode: image}
+	tokenPath := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenPath, []byte(strings.Repeat("a", 32)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	proxy := controller.RuntimePoolProviderProxyConfig{
+		BaseURL: "http://provider-auth-proxy.orka-system.svc:8080", Namespace: "orka-system",
+		PodLabels:       map[string]string{"orka.ai/network-role": "provider-auth-proxy"},
+		BearerTokenFile: tokenPath,
+	}
+	missingToken := proxy
+	missingToken.BearerTokenFile = ""
+	unreadableToken := proxy
+	unreadableToken.BearerTokenFile = filepath.Join(t.TempDir(), "missing")
+	wrongNamespace := proxy
+	wrongNamespace.Namespace = "other"
+	for _, test := range []struct {
+		name   string
+		images controller.ACPRuntimeImages
+		proxy  controller.RuntimePoolProviderProxyConfig
+		want   string
+	}{
+		{name: "no gateway", images: images, want: "none"},
+		{name: "no credentials", images: images, proxy: missingToken, want: "none"},
+		{name: "unreadable credentials", images: images, proxy: unreadableToken, want: "none"},
+		{name: "invalid connection", images: images, proxy: wrongNamespace, want: "none"},
+		{name: "configured", images: images, proxy: proxy, want: "codex, copilot, claude, opencode"},
+		{name: "only configured images", images: controller.ACPRuntimeImages{Codex: image}, proxy: proxy, want: "codex"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			availability := configuredACPRuntimeAvailability(test.images, test.proxy)
+			builder := api.NewSystemPromptBuilder(
+				fake.NewClientBuilder().WithScheme(scheme).Build(), "orka-system", availability,
+			)
+			prompt, err := builder.BuildSystemPrompt(t.Context(), "", api.PromptModeMinimal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(prompt, "agent_runtimes=["+test.want+"]") {
+				t.Fatalf("chat did not advertise the expected runtimes: %s", test.want)
+			}
+			if !strings.Contains(prompt, "container=yes") {
+				t.Fatal("model connection configuration disabled container tasks")
+			}
+		})
+	}
+}
 
 func TestResolveACPRuntimeImagesPreservesIndexDigestWithAnonymousAuth(t *testing.T) {
 	index := `{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[` +

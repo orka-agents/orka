@@ -666,6 +666,18 @@ choose its upstream gateway and explicitly allow the required network access.
 {{- if not (regexMatch `^https?://[^/?#@[:space:]]+(/[^?#[:space:]]*)?$` $upstream) -}}
 {{- fail "providerProxy.upstreamBaseURL must be an HTTP(S) URL without credentials, a query, or a fragment when providerProxy.enabled=true" -}}
 {{- end -}}
+{{/* Match the proxy's url.Parse followed by HasUnsafePathSegment, including its second path decode. */}}
+{{- $path := (urlParse $upstream).path -}}
+{{- range $pass := until 2 -}}
+{{- if regexMatch `(^|/)\.{1,2}(/|$)|\\|\x00` $path -}}
+{{- fail "providerProxy.upstreamBaseURL path must not contain dot segments, backslashes, or null bytes, including encoded forms" -}}
+{{- end -}}
+{{- if eq $pass 0 -}}
+{{/* Escape delimiters and controls, but retain percent escapes for one more path decode. */}}
+{{- $decodeURL := printf "/%s" ($path | urlquery | replace "+" "%20" | replace "%25" "%") -}}
+{{- $path = (urlParse $decodeURL).path -}}
+{{- end -}}
+{{- end -}}
 {{- if or (not (kindIs "slice" .Values.providerProxy.egress)) (empty .Values.providerProxy.egress) -}}
 {{- fail "providerProxy.egress must contain NetworkPolicy rules allowing access to your model gateway when providerProxy.enabled=true" -}}
 {{- end -}}

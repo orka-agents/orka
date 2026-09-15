@@ -1744,13 +1744,39 @@ func TestStaticChartProviderProxyURLValidation(t *testing.T) {
 	}{
 		{url: "http://agentgateway.gateway-system.svc:3000", valid: true},
 		{url: "https://gateway.example.test:8443/models/", valid: true},
+		{url: "http://gateway.example.test/v1/.models/model..name", valid: true},
+		{url: "http://gateway.example.test/models%20test/%3F%23route", valid: true},
 		{url: "ftp://gateway.example.test"},
 		{url: "http://user@gateway.example.test"},
 		{url: "http://gateway.example.test?route=model"},
 		{url: "http://gateway.example.test#model"},
+		{url: "http://gateway.example.test/v1/../admin"},
+		{url: "http://gateway.example.test/v1/./models"},
+		{url: "http://gateway.example.test/v1/%2e%2E/admin"},
+		{url: "http://gateway.example.test/v1%2f..%2fadmin"},
+		{url: "http://gateway.example.test/v1%252f%252e%252e%252fadmin"},
+		{url: `http://gateway.example.test/v1\admin`},
+		{url: "http://gateway.example.test/v1%5cadmin"},
+		{url: "http://gateway.example.test/v1%255Cadmin"},
+		{url: "http://gateway.example.test/v1%00admin"},
+		{url: "http://gateway.example.test/v1%2500admin"},
+		{url: "http://gateway.example.test/%3F%23route/%252e%252e/admin"},
+		{url: "http://gateway.example.test/%invalid"},
+		{url: "http://gateway.example.test/%25invalid"},
 	} {
 		t.Run(test.url, func(t *testing.T) {
-			_, err := helmTemplateStaticChart(t, "--set-string", "providerProxy.upstreamBaseURL="+test.url)
+			// A values file preserves backslashes that Helm's --set parser would consume.
+			values, err := yaml.Marshal(map[string]any{
+				"providerProxy": map[string]string{"upstreamBaseURL": test.url},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			valuesPath := filepath.Join(t.TempDir(), "gateway.yaml")
+			if err := os.WriteFile(valuesPath, values, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err = helmTemplateStaticChart(t, "--values", valuesPath)
 			if (err == nil) != test.valid {
 				t.Fatalf("gateway URL accepted = %v, want %v", err == nil, test.valid)
 			}

@@ -1477,6 +1477,7 @@ func main() {
 	}
 
 	substrateCheckpointsEnabled := false
+	var runtimeAvailability api.ACPRuntimeAvailability
 	if acpRuntimeEnabled {
 		runtimePoolReconciler := &controller.RuntimePoolReconciler{
 			Client:           mgr.GetClient(),
@@ -1512,6 +1513,9 @@ func main() {
 			Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
 			Opencode: acpOpencodeRuntimeImage,
 		}
+		runtimeAvailability = configuredACPRuntimeAvailability(
+			runtimePoolReconciler.AllowedImages, runtimePoolReconciler.ProviderProxy,
+		)
 		if err := runtimePoolReconciler.SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "RuntimePool")
 			os.Exit(1)
@@ -2019,12 +2023,7 @@ func main() {
 			MaxTasksPerTurn:        chatMaxTasksPerTurn,
 			MaxSessionSize:         chatMaxSessionSize,
 			MaxPrematureEndRetries: chatMaxPrematureEndRetries,
-			RuntimeAvailability: api.ACPRuntimeAvailability{
-				Codex:    acpRuntimeEnabled && controller.ACPRuntimeImageAvailable(acpCodexRuntimeImage),
-				Claude:   acpRuntimeEnabled && controller.ACPRuntimeImageAvailable(acpClaudeRuntimeImage),
-				Copilot:  acpRuntimeEnabled && controller.ACPRuntimeImageAvailable(acpCopilotRuntimeImage),
-				OpenCode: acpRuntimeEnabled && controller.ACPRuntimeImageAvailable(acpOpencodeRuntimeImage),
-			},
+			RuntimeAvailability:    runtimeAvailability,
 		},
 	})
 	if acpRuntimeEnabled {

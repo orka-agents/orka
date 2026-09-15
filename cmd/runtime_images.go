@@ -16,6 +16,7 @@ import (
 	"oras.land/oras-go/v2/registry/remote/auth"
 	"oras.land/oras-go/v2/registry/remote/errcode"
 
+	"github.com/orka-agents/orka/internal/api"
 	"github.com/orka-agents/orka/internal/controller"
 )
 
@@ -23,6 +24,22 @@ const (
 	acpRuntimeImageResolveTimeout = 30 * time.Second
 	acpRuntimeImageRequestTimeout = 15 * time.Second
 )
+
+// Advertise coding runtimes only when their image and model connection are configured.
+func configuredACPRuntimeAvailability(
+	images controller.ACPRuntimeImages,
+	proxy controller.RuntimePoolProviderProxyConfig,
+) api.ACPRuntimeAvailability {
+	if proxy.Validate() != nil {
+		return api.ACPRuntimeAvailability{}
+	}
+	return api.ACPRuntimeAvailability{
+		Codex:    controller.ACPRuntimeImageAvailable(images.Codex),
+		Claude:   controller.ACPRuntimeImageAvailable(images.Claude),
+		Copilot:  controller.ACPRuntimeImageAvailable(images.Copilot),
+		OpenCode: controller.ACPRuntimeImageAvailable(images.Opencode),
+	}
+}
 
 // resolveACPRuntimeImages pins configured tags once per controller process.
 // Consumers still receive only digest references or disabled providers, and a
