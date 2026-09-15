@@ -135,8 +135,8 @@ spec:
 EOF
 ```
 
-This Provider supplies native AI tasks and chat. Coding agents use the
-[Vekil connection](website/docs/operations/provider-proxy.md) from the installation guide.
+This Provider supplies native AI tasks and chat. For coding agents,
+[connect your model gateway](website/docs/operations/provider-proxy.md).
 
 ### Start chatting
 
@@ -168,7 +168,7 @@ The built-in orchestrator creates agents, runs tasks, monitors progress, and ret
 | [Agent Sandbox](website/docs/concepts/agent-sandbox.md)                       | Execution-workspace integration behind the ACP v2 lifecycle |
 | [Interactive Chat](website/docs/guides/chat.md)                             | Chat endpoint, tools, and SSE streaming               |
 | [Container tasks](website/docs/guides/container-tasks.md)                   | Writable paths, cache directories, and shell gotchas  |
-| [Provider proxy](website/docs/operations/provider-proxy.md)                 | Installing Vekil, the proxy every coding agent uses   |
+| [Provider proxy](website/docs/operations/provider-proxy.md)                 | Connect coding agents to your model gateway          |
 | [Multi-agent coordination](website/docs/reference/multi-agent-coordination.md) | Coordinator agents and task delegation               |
 | [Autonomous Tasks](website/docs/guides/autonomous-tasks.md)                 | Long-running coordinator loops with persisted plan state |
 | [Memory](website/docs/concepts/memory.md)                                   | Durable memory, proposals, transcript search, and validation |
