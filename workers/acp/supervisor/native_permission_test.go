@@ -79,7 +79,7 @@ func TestResolvePermissionEnforcesNativeToolPolicy(t *testing.T) {
 			proxy.mu.Lock()
 			proxy.configuration = authorization.Configuration()
 			proxy.mu.Unlock()
-			if err := proxy.activate(authorization, lease, now); err != nil {
+			if err := proxy.activate(t.Context(), authorization, lease, now); err != nil {
 				t.Fatal(err)
 			}
 			if err := proxy.markRunning(authorization.PromptID, now); err != nil {

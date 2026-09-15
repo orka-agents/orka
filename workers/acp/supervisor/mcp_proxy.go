@@ -20,6 +20,8 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/orka-agents/orka/internal/acp"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
@@ -185,7 +187,7 @@ func randomMCPSecret(size int) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(data), nil
 }
 
-func (s *mcpProxySession) activate(auth harnessv2.PromptMCPAuthorization, lease harnessv2.PromptLease, now time.Time) error {
+func (s *mcpProxySession) activate(ctx context.Context, auth harnessv2.PromptMCPAuthorization, lease harnessv2.PromptLease, now time.Time) error {
 	metadata := harnessv2.MutationMetadata{
 		Fence: s.fence, TaskUID: auth.TaskUID, TaskAttempt: auth.TaskAttempt, PromptID: auth.PromptID,
 		OperationID: "mcp-activate", RequestDigestSchemaVersion: harnessv2.RequestDigestSchemaVersion,
@@ -206,7 +208,10 @@ func (s *mcpProxySession) activate(auth harnessv2.PromptMCPAuthorization, lease 
 	s.authorization = &cloned
 	s.lease = lease
 	s.state = harnessv2.RuntimeSessionStateIdle
-	s.gateContext, s.gateCancel = context.WithCancel(context.Background())
+	// Keep only the admitted prompt's trace identity. The gate retains its own
+	// lifetime and never carries request values or baggage into broker calls.
+	parent := trace.ContextWithSpanContext(context.Background(), trace.SpanContextFromContext(ctx))
+	s.gateContext, s.gateCancel = context.WithCancel(parent)
 	s.approvals = make(map[string][]mcpApprovalGrant)
 	s.resetLeaseTimerLocked(now)
 	return nil
@@ -550,7 +555,10 @@ func (s *mcpProxySession) handleToolCall(w http.ResponseWriter, r *http.Request,
 		Protocol: harnessv2.ProtocolVersion, SessionState: harnessv2.RuntimeSessionStatePromptRunning,
 		Metadata: metadata, Lease: lease, Authorization: authorization, Call: call,
 	}
-	ctx, cancel := context.WithCancel(r.Context())
+	// Provider requests cannot choose the parent of a controller-side tool call.
+	// An empty trusted parent also clears any ambient request span.
+	ctx := trace.ContextWithSpanContext(r.Context(), trace.SpanContextFromContext(gate))
+	ctx, cancel := context.WithCancel(ctx)
 	stop := context.AfterFunc(gate, cancel)
 	defer func() {
 		stop()

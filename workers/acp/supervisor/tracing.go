@@ -15,13 +15,14 @@ import (
 // belong to individual HTTP operations, never to the reusable runtime session.
 // No request content, capability, header, URL or raw error is exported.
 func (s *Server) traceOperation(r *http.Request, metadata harnessv2.MutationMetadata, operation string) (*http.Request, trace.Span) {
-	if s.cfg.Tracer == nil {
-		return r, noop.Span{}
-	}
 	// Clear any server ambient parent so missing/invalid headers cannot inherit
 	// another request's context. Use W3C TraceContext only, excluding baggage.
 	ctx := trace.ContextWithSpanContext(r.Context(), trace.SpanContext{})
 	ctx = propagation.TraceContext{}.Extract(ctx, propagation.HeaderCarrier(r.Header))
+	if s.cfg.Tracer == nil {
+		// Disabled exporting must not break propagation to delegated Tasks.
+		return r.WithContext(ctx), noop.Span{}
+	}
 	ctx, span := s.cfg.Tracer.Start(ctx, "acp.supervisor."+operation,
 		trace.WithSpanKind(trace.SpanKindServer),
 		trace.WithAttributes(

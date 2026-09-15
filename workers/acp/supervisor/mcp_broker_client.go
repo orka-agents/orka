@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/propagation"
+
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
@@ -104,6 +106,8 @@ func (c *controllerMCPBrokerClient) Call(ctx context.Context, request harnessv2.
 	// before reading the body.
 	httpRequest.Header.Set(harnessv2.MCPBrokerPoolNamespaceHeader, request.Namespace)
 	httpRequest.Header.Set(harnessv2.MCPBrokerPoolUIDHeader, string(request.Metadata.Fence.RuntimePoolUID))
+	// Trace context is transport metadata, outside the sealed call and capability.
+	propagation.TraceContext{}.Inject(ctx, propagation.HeaderCarrier(httpRequest.Header))
 	response, err := c.client.Do(httpRequest)
 	if err != nil {
 		return harnessv2.MCPBrokerCallResponse{}, fmt.Errorf("MCP broker transport failed")

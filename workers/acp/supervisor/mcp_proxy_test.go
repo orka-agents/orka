@@ -46,7 +46,7 @@ func TestMCPProxyIsPromptScopedAndForwardsExactAuthorization(t *testing.T) {
 
 	now := time.Now().UTC()
 	authorization, lease := testMCPAuthorization(t, session.fence, now, false)
-	if err := session.activate(authorization, lease, now); err != nil {
+	if err := session.activate(t.Context(), authorization, lease, now); err != nil {
 		t.Fatal(err)
 	}
 	pendingCall := decodeMCPResponse(t, doMCPRequest(t, server, "credential", `{"jsonrpc":"2.0","id":"call-2","method":"tools/call","params":{"name":"lookup","arguments":{},"_meta":{"progressToken":2}}}`))
@@ -112,7 +112,7 @@ func TestMCPProxyToolCallMetadata(t *testing.T) {
 			}), false)
 			now := time.Now().UTC()
 			authorization, lease := testMCPAuthorization(t, session.fence, now, false)
-			if err := session.activate(authorization, lease, now); err != nil {
+			if err := session.activate(t.Context(), authorization, lease, now); err != nil {
 				t.Fatal(err)
 			}
 			if err := session.markRunning(authorization.PromptID, now); err != nil {
@@ -171,7 +171,7 @@ func TestMCPProxySessionCapacityPreservesOtherRequests(t *testing.T) {
 	session, endpoint := newTestMCPProxySession(t, broker, false)
 	now := time.Now().UTC()
 	authorization, lease := testMCPAuthorization(t, session.fence, now, false)
-	if err := session.activate(authorization, lease, now); err != nil {
+	if err := session.activate(t.Context(), authorization, lease, now); err != nil {
 		t.Fatal(err)
 	}
 	if err := session.markRunning(authorization.PromptID, now); err != nil {
@@ -258,7 +258,7 @@ func TestMCPProxySettlementRevokesAndCancelsInflightCall(t *testing.T) {
 	session, server := newTestMCPProxySession(t, broker, false)
 	now := time.Now().UTC()
 	authorization, lease := testMCPAuthorization(t, session.fence, now, false)
-	if err := session.activate(authorization, lease, now); err != nil {
+	if err := session.activate(t.Context(), authorization, lease, now); err != nil {
 		t.Fatal(err)
 	}
 	if err := session.markRunning(authorization.PromptID, now.Add(time.Millisecond)); err != nil {
@@ -308,7 +308,7 @@ func TestMCPProxyApprovalPolicyIsFailClosedAndOnceBound(t *testing.T) {
 	session, server := newTestMCPProxySession(t, broker, true)
 	now := time.Now().UTC()
 	authorization, lease := testMCPAuthorization(t, session.fence, now, true)
-	if err := session.activate(authorization, lease, now); err != nil {
+	if err := session.activate(t.Context(), authorization, lease, now); err != nil {
 		t.Fatal(err)
 	}
 	if err := session.markRunning(authorization.PromptID, now.Add(time.Millisecond)); err != nil {
@@ -386,7 +386,7 @@ func TestMCPProxyReadOnlyAllowOnceGrantIsConsumed(t *testing.T) {
 	session.credential = []byte("credential")
 	session.mu.Unlock()
 	server := binding.URL
-	if err := session.activate(authorization, lease, now); err != nil {
+	if err := session.activate(t.Context(), authorization, lease, now); err != nil {
 		t.Fatal(err)
 	}
 	if err := session.markRunning(authorization.PromptID, now.Add(time.Millisecond)); err != nil {

@@ -162,7 +162,7 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 		)
 		return
 	}
-	if mcpProxy == nil || mcpProxy.activate(request.MCPAuthorization, request.Lease, now) != nil {
+	if mcpProxy == nil || mcpProxy.activate(r.Context(), request.MCPAuthorization, request.Lease, now) != nil {
 		deactivatePromptCapabilities(state, request.Metadata.PromptID, harnessv2.RuntimeSessionStateCancelling)
 		state.prompt = nil
 		delete(state.operations, request.Metadata.OperationID)

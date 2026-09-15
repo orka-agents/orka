@@ -41,7 +41,7 @@ func TestMCPProxyPreservesToolErrorsWithoutHidingBrokerFailures(t *testing.T) {
 			session, endpoint := newTestMCPProxySession(t, broker, false)
 			now := time.Now().UTC()
 			authorization, lease := testMCPAuthorization(t, session.fence, now, false)
-			if err := session.activate(authorization, lease, now); err != nil {
+			if err := session.activate(t.Context(), authorization, lease, now); err != nil {
 				t.Fatal(err)
 			}
 			if err := session.markRunning(authorization.PromptID, now); err != nil {
