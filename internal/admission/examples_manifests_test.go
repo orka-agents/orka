@@ -167,7 +167,7 @@ func TestStrictDecodeOrkaDocument_APIIdentity(t *testing.T) {
 		wantErr    bool
 	}{
 		{"Orka Task", "core.orka.ai/v1alpha1", "Task", true, false},
-		{"misspelled Orka group", "core.orka.io/v1alpha1", "Task", false, true},
+		{"misspelled Orka group", "cor.orka.ai/v1alpha1", "Task", false, true},
 		{"Task in core v1", "v1", "Task", false, true},
 		{"Kubernetes Namespace", "v1", "Namespace", false, false},
 		{"Kubernetes Deployment", "apps/v1", "Deployment", false, false},

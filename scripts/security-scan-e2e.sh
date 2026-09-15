@@ -607,7 +607,7 @@ RUN set -eu; \
 
 FROM --platform=$TARGETPLATFORM docker.io/library/debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd
 LABEL org.opencontainers.image.title="Orka SecurityScan deterministic ACP fixture" \
-      io.orka.test.fixture="security-scan-harness-v2"
+      ai.orka.test.fixture="security-scan-harness-v2"
 ENV HOME=/root \
     ORKA_ACP_PROVIDER=codex \
     PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin

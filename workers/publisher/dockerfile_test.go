@@ -24,9 +24,9 @@ func TestDockerfilePinsCleanRoomProfile(t *testing.T) {
 		"ADD --checksum=sha256:",
 		"NO_RUST=YesPlease",
 		"USER 65532:65532",
-		"io.orka.network.identity=\"workspace-publisher\"",
-		"io.orka.provider-access=\"false\"",
-		"io.orka.mcp-access=\"false\"",
+		"ai.orka.network.identity=\"workspace-publisher\"",
+		"ai.orka.provider-access=\"false\"",
+		"ai.orka.mcp-access=\"false\"",
 		"COPY --from=git-builder /src/COPYING /usr/share/licenses/git/COPYING",
 		"ENTRYPOINT [\"/usr/local/bin/orka-workspace-publisher\"]",
 	}

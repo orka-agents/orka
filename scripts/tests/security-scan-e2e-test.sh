@@ -415,7 +415,7 @@ docker() {
       local owner=""
       while (( $# > 0 )); do
         if [[ "$1" == "--label" ]]; then
-          owner="${2#io.orka.test.owner=}"
+          owner="${2#ai.orka.test.owner=}"
           shift 2
         else
           shift

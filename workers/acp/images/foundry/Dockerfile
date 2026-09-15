@@ -44,8 +44,8 @@ ARG FOUNDRY_ADAPTER_DIGEST
 LABEL org.opencontainers.image.title="Orka ACP Foundry runtime" \
       org.opencontainers.image.description="Orka harness v2 supervisor with a Foundry ACP child" \
       org.opencontainers.image.source="https://github.com/orka-agents/orka" \
-      io.orka.acp.provider="foundry" \
-      io.orka.acp.adapter.name="foundry-serve-acp"
+      ai.orka.acp.provider="foundry" \
+      ai.orka.acp.adapter.name="foundry-serve-acp"
 ENV ORKA_ACP_PROVIDER=foundry \
     ORKA_ACP_FOUNDRY_ADAPTER_DIGEST=${FOUNDRY_ADAPTER_DIGEST}
 COPY --from=supervisor-builder --chown=0:0 /out/orka-acp-runtime /usr/local/bin/orka-acp-runtime

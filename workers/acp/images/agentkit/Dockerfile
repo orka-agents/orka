@@ -29,8 +29,8 @@ ARG AGENTKIT_ADAPTER_DIGEST
 LABEL org.opencontainers.image.title="Orka ACP AgentKit runtime" \
       org.opencontainers.image.description="Orka harness v2 ACP supervisor layered onto a frozen AgentKit agent" \
       org.opencontainers.image.source="https://github.com/orka-agents/orka" \
-      io.orka.acp.provider="agentkit" \
-      io.orka.acp.adapter.name="agentkit-serve-acp"
+      ai.orka.acp.provider="agentkit" \
+      ai.orka.acp.adapter.name="agentkit-serve-acp"
 ENV ORKA_ACP_PROVIDER=agentkit \
     ORKA_ACP_AGENTKIT_ADAPTER_DIGEST=${AGENTKIT_ADAPTER_DIGEST}
 USER 0:0
