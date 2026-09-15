@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	distributionref "github.com/distribution/reference"
 	"sigs.k8s.io/yaml"
 )
 
@@ -111,6 +112,39 @@ func TestStaticChartRejectsInvalidImageOverrides(t *testing.T) {
 		t.Run(override, func(t *testing.T) {
 			if _, err := renderInstallationDefaults(t, "--set-string", override); err == nil {
 				t.Error("chart accepted an invalid image override")
+			}
+		})
+	}
+}
+
+func TestStaticChartRuntimeImagesMatchCanonicalParser(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("1", 64)
+	fallbackRegistry := "registry_internal.example.com/"
+	for _, ref := range []string{
+		"ghcr.io/orka-agents/runtime:v0.2.0",
+		"registry.example:5000/orka/runtime:v1",
+		"registry:5000/runtime:v1", "localhost/runtime:v1",
+		"[2001:db8::1]:5000/orka/runtime:v1",
+		"docker.io/library/runtime:v1", "GHCR.IO/orka/runtime:Tag_1",
+		"registry.example/orka__agents/runtime-name:v1",
+		"ghcr.io/orka/runtime@" + digest, "ghcr.io/orka/runtime:v1@" + digest,
+		fallbackRegistry + "orka/runtime:v1", fallbackRegistry + "orka/runtime@" + digest,
+		fallbackRegistry + strings.Repeat("a", 255-len(fallbackRegistry)) + ":v1",
+		fallbackRegistry + strings.Repeat("a", 256-len(fallbackRegistry)) + ":v1",
+		"acme/runtime:v1", "runtime:v1", "acme/runtime@" + digest,
+		"localhost:v1", "localhost@" + digest, "ghcr.io:v1", "registry_internal.example.com:v1",
+		"ghcr.io/orka-agents/Runtime:v1", "ghcr.io/orka//runtime:v1",
+		"ghcr.io/orka/.runtime:v1", "ghcr.io/orka/runtime..name:v1",
+		"docker.io/runtime:v1", "index.docker.io/library/runtime:v1",
+		"ghcr.io/orka/runtime:v1@sha256:broken",
+		"ghcr.io/" + strings.Repeat("a", 255) + ":v1",
+		"ghcr.io/" + strings.Repeat("a", 256) + ":v1",
+	} {
+		t.Run(ref, func(t *testing.T) {
+			_, parseErr := distributionref.ParseNamed(ref)
+			_, renderErr := renderInstallationDefaults(t, "--set-string", "controller.acpRuntime.codexImage="+ref)
+			if (parseErr == nil) != (renderErr == nil) {
+				t.Fatalf("runtime image validation differs: controller parser = %v; Helm = %v", parseErr, renderErr)
 			}
 		})
 	}

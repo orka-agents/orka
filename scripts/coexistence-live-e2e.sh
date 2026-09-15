@@ -650,12 +650,17 @@ main() {
     --set harnessV1.tls.existingSecret=orka-wrapper-tls
 
   log "Installing the harness-v2 release ${v2_release}"
+  # This test runs the v1 wrapper's fake agent; it does not use built-in v2 runtimes.
   run helm install "${v2_release}" "${chart_dir}" \
     --namespace "${v2_namespace}" \
     --skip-crds \
     --set controller.mode=harness-v2 \
     --set "controller.watchNamespace=${v2_namespace}" \
     --set "controller.acpRuntime.namespace=${v2_runtime_namespace}" \
+    --set-string controller.acpRuntime.codexImage= \
+    --set-string controller.acpRuntime.claudeImage= \
+    --set-string controller.acpRuntime.copilotImage= \
+    --set-string controller.acpRuntime.opencodeImage= \
     --set "controller.image.repository=$(split_image_repository "${manager_ref}")" \
     --set "controller.image.digest=$(split_image_digest "${manager_ref}")" \
     --set controller.agentExecutionSnapshot.existingSecret=orka-agent-snapshot-key \

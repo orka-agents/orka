@@ -626,10 +626,33 @@ because the ACP runtime remains enabled and has no legacy fallback.
 {{- define "orka.validateACPRuntimeImage" -}}
 {{- $name := .name -}}
 {{- $ref := default "" .ref -}}
-{{- $digest := regexMatch "^[a-zA-Z0-9._:/-]+@sha256:[0-9a-f]{64}$" $ref -}}
-{{- $tag := regexMatch "^[a-zA-Z0-9._:/-]+:[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$" $ref -}}
-{{- if and $ref (not (or $digest $tag)) -}}
-{{- fail (printf "%s must be an image reference with an explicit tag or SHA256 digest" $name) -}}
+{{- if $ref -}}
+{{/* Match the canonical names accepted by the controller's distribution/reference parser. */}}
+{{- $domainComponent := `[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?` -}}
+{{- $domain := printf `(?:%s(?:\.%s)*|\[[a-fA-F0-9:]+\])(?::[0-9]+)?` $domainComponent $domainComponent -}}
+{{- $pathComponent := `[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*` -}}
+{{- $path := printf `%s(?:/%s)*` $pathComponent $pathComponent -}}
+{{- $tag := `[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}` -}}
+{{- $suffix := printf `(?::%s(?:@sha256:[0-9a-f]{64})?|@sha256:[0-9a-f]{64})` $tag -}}
+{{- $error := printf "%s must use a full registry/repository name with an explicit tag or SHA256 digest" $name -}}
+{{- if not (regexMatch (printf `^(?:%s/)?%s%s$` $domain $path $suffix) $ref) -}}
+{{- fail $error -}}
+{{- end -}}
+{{- $imageName := regexReplaceAll (printf `%s$` $suffix) $ref "" -}}
+{{- $parts := splitList "/" $imageName -}}
+{{- if lt (len $parts) 2 -}}
+{{- fail $error -}}
+{{- end -}}
+{{- $registry := first $parts -}}
+{{- $repository := join "/" (rest $parts) -}}
+{{/* The parser treats a prefix outside its domain grammar as part of the repository path. */}}
+{{- if not (regexMatch (printf `^%s$` $domain) $registry) -}}
+{{- $repository = $imageName -}}
+{{- end -}}
+{{- $qualified := or (eq $registry "localhost") (contains "." $registry) (contains ":" $registry) (ne (lower $registry) $registry) -}}
+{{- if or (not $qualified) (eq $registry "index.docker.io") (and (eq $registry "docker.io") (not (contains "/" $repository))) (gt (len $repository) 255) -}}
+{{- fail $error -}}
+{{- end -}}
 {{- end -}}
 {{- end }}
 
