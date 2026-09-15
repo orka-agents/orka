@@ -362,6 +362,9 @@ func customACPMCPToolDescriptor(tool *corev1alpha1.Tool) (harnessv2.MCPToolDescr
 	if tool == nil || strings.TrimSpace(tool.Name) == "" {
 		return harnessv2.MCPToolDescriptor{}, fmt.Errorf("custom tool identity is required")
 	}
+	if tool.Spec.MCP != nil && tool.Spec.MCP.Remote != nil {
+		return harnessv2.MCPToolDescriptor{}, fmt.Errorf("remote MCP tools are supported only by native AI Tasks")
+	}
 	if tool.Spec.BrokeredToolClass == "" {
 		return harnessv2.MCPToolDescriptor{}, fmt.Errorf("tool %q does not declare brokeredToolClass and cannot be exposed to ACP", tool.Name)
 	}

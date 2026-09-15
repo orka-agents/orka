@@ -141,15 +141,37 @@ spec:
                     type: string
                 type: object
               mcp:
-                description: |-
-                  MCP defines a durable MCP server backend for this tool. MCP tools must set
-                  substrateActor.
+                description: MCP defines a managed or remote MCP server backend for
+                  this tool.
                 properties:
                   path:
                     description: |-
                       Path is the HTTP path exposed by the MCP server inside the actor.
                       Defaults to /mcp.
                     type: string
+                  remote:
+                    description: |-
+                      Remote selects one reviewed callable on an independently operated server.
+                      Only native AI Tasks with an explicitly selecting Agent are supported.
+                    properties:
+                      toolName:
+                        description: ToolName is the exact tools/list name, independent
+                          of the Kubernetes alias.
+                        maxLength: 128
+                        minLength: 1
+                        pattern: ^[A-Za-z0-9_.-]+$
+                        type: string
+                      url:
+                        description: URL is the fixed endpoint. Credentials belong
+                          in http.authSecretRef.
+                        maxLength: 2048
+                        minLength: 1
+                        pattern: ^https?://[^{}#]+$
+                        type: string
+                    required:
+                    - toolName
+                    - url
+                    type: object
                   substrateActor:
                     description: SubstrateActor configures the legacy durable Substrate
                       actor backend.
@@ -212,23 +234,54 @@ spec:
                     type: object
                 type: object
                 x-kubernetes-validations:
-                - message: exactly one of substrateActor or workspace is required
-                  rule: has(self.substrateActor) != has(self.workspace)
+                - message: exactly one of substrateActor, workspace or remote is required
+                  rule: '(has(self.substrateActor) ? 1 : 0) + (has(self.workspace)
+                    ? 1 : 0) + (has(self.remote) ? 1 : 0) == 1'
+                - message: remote MCP uses remote.url, not mcp.path
+                  rule: '!has(self.remote) || !has(self.path) || self.path.size()
+                    == 0'
               parameters:
-                description: Parameters is the JSON Schema for tool parameters (OpenAI
-                  function calling format)
+                description: |-
+                  Parameters is the JSON Schema for tool parameters (OpenAI function calling format).
+                  Remote MCP requires a reviewed object schema, checked by the controller and
+                  native worker before discovery/execution. It stays schemaless at admission
+                  to preserve compatibility with existing Tool parameter schemas.
                 x-kubernetes-preserve-unknown-fields: true
             required:
             - description
             type: object
             x-kubernetes-validations:
-            - message: http or an MCP workspace backend is required
-              rule: has(self.http) || (has(self.mcp) && (has(self.mcp.substrateActor)
-                || has(self.mcp.workspace)))
-            - message: http.url is required unless an MCP workspace backend is set
-              rule: '!has(self.http) || (has(self.mcp) && (has(self.mcp.substrateActor)
-                || has(self.mcp.workspace))) || (has(self.http.url) && self.http.url.size()
+            - message: http or an MCP backend is required
+              rule: has(self.http) || has(self.mcp)
+            - message: http.url is required unless an MCP backend is set
+              rule: '!has(self.http) || has(self.mcp) || (has(self.http.url) && self.http.url.size()
                 > 0)'
+            - message: remote MCP requires a named auth Secret key and outbound access
+                policy
+              rule: '!has(self.mcp) || !has(self.mcp.remote) || (has(self.http) &&
+                has(self.http.authSecretRef) && self.http.authSecretRef.name.size()
+                > 0 && self.http.authSecretRef.key.size() > 0 && has(self.http.outboundAccessPolicyRef))'
+            - message: remote MCP forbids http.url, body auth and method overrides
+              rule: '!has(self.mcp) || !has(self.mcp.remote) || !has(self.http) ||
+                ((!has(self.http.url) || self.http.url.size() == 0) && (!has(self.http.authInject)
+                || self.http.authInject == ''header'') && (!has(self.http.authBodyKey)
+                || self.http.authBodyKey.size() == 0) && (!has(self.http.method) ||
+                self.http.method == ''POST''))'
+            - message: remote MCP forbids authority and credential header overrides
+              rule: '!has(self.mcp) || !has(self.mcp.remote) || !has(self.http) ||
+                !has(self.http.headers) || self.http.headers.all(k, !(k.lowerAscii()
+                in [''host'',''authorization'',''cookie'',''txn-token'',''accept'',''content-type'']))'
+            - message: remote MCP forbids protocol header overrides
+              rule: '!has(self.mcp) || !has(self.mcp.remote) || !has(self.http) ||
+                !has(self.http.headers) || self.http.headers.all(k, !(k.lowerAscii()
+                in [''content-length'',''connection'',''transfer-encoding'',''upgrade'',''idempotency-key'',''last-event-id'']))'
+            - message: remote MCP forbids MCP session and proxy header overrides
+              rule: '!has(self.mcp) || !has(self.mcp.remote) || !has(self.http) ||
+                !has(self.http.headers) || self.http.headers.all(k, !k.lowerAscii().startsWith(''mcp-'')
+                && !k.lowerAscii().startsWith(''proxy-''))'
+            - message: remote MCP credentials must use authSecretRef, not custom headers
+              rule: '!has(self.mcp) || !has(self.mcp.remote) || !has(self.http) ||
+                !has(self.http.headers) || self.http.headers.all(k, !k.lowerAscii().matches(''token|secret|password|credential|authorization|api[-_]?key''))'
           status:
             description: ToolStatus defines the observed state of Tool
             properties:

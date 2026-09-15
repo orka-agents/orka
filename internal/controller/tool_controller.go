@@ -36,12 +36,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/workspace"
 )
 
 const (
+	toolConditionAvailable = "Available"
+
 	// toolHealthCheckInterval is how often tools are re-checked.
 	toolHealthCheckInterval = 5 * time.Minute
 
@@ -116,13 +119,27 @@ func (r *ToolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return r.finalizeSubstrateMCPTool(ctx, tool)
 	}
 
+	// Accepted is remote-only, including while a new actor backend is still being provisioned.
+	if !aitools.IsRemoteMCP(tool) && meta.RemoveStatusCondition(&tool.Status.Conditions, "Accepted") {
+		if err := r.Status().Update(ctx, tool); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
 	// Validate the tool configuration
 	if err := r.validateTool(ctx, tool); err != nil {
 		logger.Error(err, "Tool validation failed")
+		if aitools.IsRemoteMCP(tool) {
+			return r.updateRemoteMCPStatus(ctx, tool, err)
+		}
 		return r.updateStatus(ctx, tool, false, err.Error())
 	}
 	if tool.Spec.MCP != nil && tool.Spec.MCP.SubstrateActor != nil {
 		return r.reconcileSubstrateMCPTool(ctx, tool)
+	}
+
+	if aitools.IsRemoteMCP(tool) {
+		return r.updateRemoteMCPStatus(ctx, tool, nil)
 	}
 
 	// Perform health check on the HTTP endpoint
@@ -135,17 +152,58 @@ func (r *ToolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	return r.updateStatus(ctx, tool, true, "")
 }
 
+func (r *ToolReconciler) updateRemoteMCPStatus(ctx context.Context, tool *corev1alpha1.Tool, validationErr error) (ctrl.Result, error) {
+	// A controller-wide HEAD request cannot establish Task-authorized MCP readiness.
+	previous := tool.Status.DeepCopy()
+	tool.Status.Available = false
+	tool.Status.LastCheck = nil
+	tool.Status.Error = ""
+	tool.Status.Endpoint = ""
+	tool.Status.Actor = nil
+	tool.Status.Workspace = nil
+	accepted := metav1.Condition{
+		Type: "Accepted", Status: metav1.ConditionTrue, Reason: "RemoteConfigurationAccepted",
+		Message: "Remote configuration accepted; discovery is verified under Task authority", ObservedGeneration: tool.Generation,
+	}
+	available := metav1.Condition{
+		Type: toolConditionAvailable, Status: metav1.ConditionUnknown, Reason: "TaskVerificationRequired",
+		Message: "Authenticated MCP readiness is verified by the native worker", ObservedGeneration: tool.Generation,
+	}
+	if validationErr != nil {
+		tool.Status.Error = validationErr.Error()
+		accepted.Status, accepted.Reason, accepted.Message = metav1.ConditionFalse, "InvalidConfiguration", validationErr.Error()
+		available.Status, available.Reason, available.Message = metav1.ConditionFalse, "InvalidConfiguration", validationErr.Error()
+	}
+	meta.SetStatusCondition(&tool.Status.Conditions, accepted)
+	meta.SetStatusCondition(&tool.Status.Conditions, available)
+	if reflect.DeepEqual(*previous, tool.Status) {
+		return ctrl.Result{RequeueAfter: toolHealthCheckInterval}, nil
+	}
+	return ctrl.Result{RequeueAfter: toolHealthCheckInterval}, r.Status().Update(ctx, tool)
+}
+
 // validateTool validates the Tool spec.
 func (r *ToolReconciler) validateTool(ctx context.Context, tool *corev1alpha1.Tool) error {
 	// Validate description
 	if tool.Spec.Description == "" {
 		return fmt.Errorf("description is required")
 	}
+	if aitools.IsRemoteMCP(tool) {
+		if err := aitools.ValidateRemoteMCPConfiguration(tool); err != nil {
+			return err
+		}
+		if err := r.validateToolHTTPURL(tool.Spec.MCP.Remote.URL); err != nil {
+			return err
+		}
+	}
 	if err := r.validateToolHTTPAuth(ctx, tool); err != nil {
 		return err
 	}
 	if tool.Spec.MCP != nil && tool.Spec.MCP.SubstrateActor != nil {
 		return r.validateSubstrateMCPTool(ctx, tool)
+	}
+	if aitools.IsRemoteMCP(tool) {
+		return nil
 	}
 	if tool.Spec.MCP != nil && tool.Spec.MCP.Workspace != nil {
 		if !r.WorkspaceProviderAPIEnabled {
@@ -245,6 +303,9 @@ func (r *ToolReconciler) validateToolHTTPAuth(ctx context.Context, tool *corev1a
 				return fmt.Errorf("outbound access policy %q is not accepted with resolved references", ref.Name)
 			}
 		}
+		if aitools.IsRemoteMCP(tool) && (policy.Spec.Gateway == nil || policy.Spec.Direct != nil) {
+			return fmt.Errorf("remote MCP requires a gateway outbound access policy")
+		}
 		if policy.Spec.Direct != nil {
 			if tool.Spec.HTTP.AuthSecretRef != nil {
 				return fmt.Errorf("direct outbound access policy %q cannot coexist with authSecretRef", ref.Name)
@@ -270,6 +331,9 @@ func (r *ToolReconciler) validateToolHTTPAuth(ctx context.Context, tool *corev1a
 				return fmt.Errorf("referenced auth secret %q not found", tool.Spec.HTTP.AuthSecretRef.Name)
 			}
 			return fmt.Errorf("failed to get auth secret %q: %w", tool.Spec.HTTP.AuthSecretRef.Name, err)
+		}
+		if aitools.IsRemoteMCP(tool) && strings.TrimSpace(string(secret.Data[tool.Spec.HTTP.AuthSecretRef.Key])) == "" {
+			return fmt.Errorf("remote MCP auth Secret key is empty or missing")
 		}
 		if _, ok := secret.Data[tool.Spec.HTTP.AuthSecretRef.Key]; !ok {
 			return fmt.Errorf("key %q not found in auth secret %q", tool.Spec.HTTP.AuthSecretRef.Key, tool.Spec.HTTP.AuthSecretRef.Name)
@@ -1664,7 +1728,7 @@ func (r *ToolReconciler) updateStatusWithActor(
 	tool.Status.Actor = actor
 
 	condition := metav1.Condition{
-		Type:               "Available",
+		Type:               toolConditionAvailable,
 		LastTransitionTime: now,
 		ObservedGeneration: tool.Generation,
 	}
