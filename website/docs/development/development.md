@@ -161,8 +161,11 @@ controller flag is enabled and a worker-reachable OTLP endpoint is configured,
 AI worker Jobs receive `ORKA_ENABLE_TELEMETRY=true`, `ORKA_TRACEPARENT`, and the
 non-secret standard OTLP environment. ACP attempt, RuntimeSession, and
 publication spans run in the controller and use its exporter. Managed
-RuntimePool workloads do not currently inherit controller OTLP configuration or
-expose a supervisor telemetry opt-in. Delegated child Tasks continue the active
+RuntimePool supervisors receive non-secret trace exporter settings and continue
+W3C context carried in authenticated v2 request headers. Provider children remain
+outside this instrumentation. Collector routing is operator-owned; see the
+[observability guide](../guides/observability.md#enable-telemetry) for supported
+settings and network prerequisites. Delegated child Tasks continue the active
 parent trace through Task annotations.
 
 GenAI semantic-convention constants live in `internal/tracing/genai` rather than

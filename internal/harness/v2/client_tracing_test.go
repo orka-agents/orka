@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/baggage"
-	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -20,6 +19,7 @@ func TestClientTraceContextIsTransportOnly(t *testing.T) {
 	var firstBody []byte
 	var firstCapability string
 	var wantParent string
+	var wantState string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -33,6 +33,9 @@ func TestClientTraceContextIsTransportOnly(t *testing.T) {
 		}
 		if r.Header.Get("traceparent") != wantParent {
 			t.Error("HTTP request did not carry the current operation's W3C parent")
+		}
+		if r.Header.Get("tracestate") != wantState {
+			t.Error("HTTP request did not carry the current operation's W3C state")
 		}
 		if r.Header.Get("baggage") != "" {
 			t.Error("v2 transport propagated baggage")
@@ -52,16 +55,32 @@ func TestClientTraceContextIsTransportOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, n := range []byte{1, 2, 0} {
+	for _, tc := range []struct {
+		id      byte
+		parent  string
+		state   string
+		sampled bool
+	}{
+		{1, "00-01000000000000000000000000000000-0100000000000000-01", "vendor=first", true},
+		{2, "00-02000000000000000000000000000000-0200000000000000-01", "vendor=second", true},
+		{3, "00-03000000000000000000000000000000-0300000000000000-00", "vendor=unsampled", false},
+		{},
+	} {
 		ctx := baggage.ContextWithBaggage(context.Background(), bag)
-		if n != 0 {
+		if tc.id != 0 {
+			state, err := trace.ParseTraceState(tc.state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var flags trace.TraceFlags
+			if tc.sampled {
+				flags = trace.FlagsSampled
+			}
 			ctx = trace.ContextWithSpanContext(ctx, trace.NewSpanContext(trace.SpanContextConfig{
-				TraceID: trace.TraceID{n}, SpanID: trace.SpanID{n}, TraceFlags: trace.FlagsSampled,
+				TraceID: trace.TraceID{tc.id}, SpanID: trace.SpanID{tc.id}, TraceFlags: flags, TraceState: state,
 			}))
 		}
-		carrier := propagation.MapCarrier{}
-		propagation.TraceContext{}.Inject(ctx, carrier)
-		wantParent = carrier.Get("traceparent")
+		wantParent, wantState = tc.parent, tc.state
 		if _, err := client.CreateRuntimeSession(ctx, request); err != nil {
 			t.Fatal(err)
 		}

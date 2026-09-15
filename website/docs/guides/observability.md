@@ -21,7 +21,7 @@ Start the controller with telemetry enabled and point it at an OTLP endpoint.
 gRPC is the default exporter protocol:
 
 ```bash
-OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector.otel.svc:4317 \
+OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector.otel.svc:4317 \
   orka-controller --enable-telemetry
 ```
 
@@ -43,7 +43,7 @@ That makes the Deployment `orka-controller`. If you installed with
 ```bash
 kubectl patch deployment orka-controller -n orka-system --type=json -p='[
   {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--enable-telemetry"},
-  {"op":"add","path":"/spec/template/spec/containers/0/env/-","value":{"name":"OTEL_EXPORTER_OTLP_ENDPOINT","value":"otel-collector.otel.svc:4317"}},
+  {"op":"add","path":"/spec/template/spec/containers/0/env/-","value":{"name":"OTEL_EXPORTER_OTLP_ENDPOINT","value":"http://otel-collector.otel.svc:4317"}},
   {"op":"add","path":"/spec/template/spec/containers/0/env/-","value":{"name":"OTEL_EXPORTER_OTLP_INSECURE","value":"true"}}
 ]'
 ```
@@ -179,9 +179,11 @@ model client span.
 Task creation stamps the current W3C trace context into Task annotations. The
 controller extracts that context for `task.reconcile` and controller-side ACP
 spans. Supported native worker Tasks also receive `ORKA_TRACEPARENT` in their
-Jobs. ACP runtime requests and provider children do not currently carry that
-trace context. Delegation stamps the active `execute_tool delegate_task` span
-context onto the child Task so child controller/native spans remain linked.
+Jobs. ACP v2 runtime requests carry `traceparent` and `tracestate` headers to
+authenticated supervisor operations; provider CLI children remain outside this
+instrumentation. Delegation stamps the active `execute_tool delegate_task` span
+context onto the child Task so child controller, supervisor and native-worker
+spans remain linked.
 
 Outbound HTTP and MCP Tool CRD requests receive W3C `traceparent` headers. If a
 Tool config supplies its own `traceparent` header, the active Orka trace context
@@ -287,7 +289,7 @@ For local Jaeger all-in-one, expose its OTLP gRPC endpoint and set:
 
 ```bash
 kubectl -n orka-system set env deployment/orka-controller \
-  OTEL_EXPORTER_OTLP_ENDPOINT=jaeger-collector.observability.svc:4317
+  OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger-collector.observability.svc:4317
 ```
 
 ## Content capture and privacy

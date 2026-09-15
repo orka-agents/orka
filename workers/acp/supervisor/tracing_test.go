@@ -43,7 +43,7 @@ func TestSupervisorTraceHeadersPreserveAuthorizationAndReplay(t *testing.T) {
 	}
 	parentA := "00-01000000000000000000000000000000-0100000000000000-01"
 	parentB := "00-02000000000000000000000000000000-0200000000000000-01"
-	send := func(body []byte, header, auth string, want int) {
+	send := func(body []byte, header, state, auth string, want int) {
 		t.Helper()
 		r, err := http.NewRequest(http.MethodPut, httpServer.URL+"/v2/runtime-sessions/session-1", bytes.NewReader(body))
 		if err != nil {
@@ -53,6 +53,7 @@ func TestSupervisorTraceHeadersPreserveAuthorizationAndReplay(t *testing.T) {
 		r.Header.Set("Content-Type", "application/json")
 		r.Header.Set(OperationCapabilityHeader, auth)
 		r.Header.Set("traceparent", header)
+		r.Header.Set("tracestate", state)
 		r.Header.Set("baggage", "private=PRIVATE_BAGGAGE_CANARY")
 		response, err := httpServer.Client().Do(r)
 		if err != nil {
@@ -65,15 +66,21 @@ func TestSupervisorTraceHeadersPreserveAuthorizationAndReplay(t *testing.T) {
 			t.Fatalf("operation HTTP status = %d, want %d", response.StatusCode, want)
 		}
 	}
-	for i, header := range []string{parentA, parentB, "", "invalid-PRIVATE_HEADER_CANARY"} {
+	for i, tc := range []struct{ parent, state string }{
+		{parentA, "vendor=first"},
+		{parentB, "vendor=second"},
+		{parentB, "invalid-PRIVATE_STATE_CANARY"},
+		{"", "vendor=orphan"},
+		{"invalid-PRIVATE_HEADER_CANARY", "vendor=orphan"},
+	} {
 		want := http.StatusOK
 		if i == 0 {
 			want = http.StatusCreated
 		}
-		send(payload, header, capability, want)
+		send(payload, tc.parent, tc.state, capability, want)
 		ended := recorder.Ended()
 		s := ended[len(ended)-1]
-		carrier := propagation.MapCarrier{"traceparent": header}
+		carrier := propagation.MapCarrier{"traceparent": tc.parent, "tracestate": tc.state}
 		parent := trace.SpanContextFromContext(propagation.TraceContext{}.Extract(context.Background(), carrier))
 		if !s.Parent().Equal(parent) {
 			t.Fatal("missing/invalid/current trace context inherited a stale parent")
@@ -84,7 +91,7 @@ func TestSupervisorTraceHeadersPreserveAuthorizationAndReplay(t *testing.T) {
 			}
 		}
 		count := len(ended)
-		send(payload, header, "invalid-capability", http.StatusForbidden)
+		send(payload, tc.parent, tc.state, "invalid-capability", http.StatusForbidden)
 		if len(recorder.Ended()) != count {
 			t.Fatal("unauthorized request generated an operation span")
 		}
@@ -95,7 +102,7 @@ func TestSupervisorTraceHeadersPreserveAuthorizationAndReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	send(changedPayload, parentA, capability, http.StatusBadRequest)
+	send(changedPayload, parentA, "vendor=first", capability, http.StatusBadRequest)
 	changed = create
 	changed.Metadata.Fence.SupervisorBootID = "stale-boot"
 	changed.Metadata.RequestDigest = ""
@@ -108,10 +115,10 @@ func TestSupervisorTraceHeadersPreserveAuthorizationAndReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	send(changedPayload, parentB, staleCapability, http.StatusGone)
+	send(changedPayload, parentB, "vendor=second", staleCapability, http.StatusGone)
 	count := len(recorder.Ended())
 	server.cfg.Tracer = nil
-	send(payload, parentB, capability, http.StatusOK)
+	send(payload, parentB, "vendor=second", capability, http.StatusOK)
 	if len(recorder.Ended()) != count {
 		t.Fatal("disabled supervisor exported a span")
 	}
