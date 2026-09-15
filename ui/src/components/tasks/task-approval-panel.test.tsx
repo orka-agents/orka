@@ -43,6 +43,26 @@ describe('TaskApprovalPanel', () => {
     expect(screen.getByRole('button', { name: 'Decline' })).toBeInTheDocument()
   })
 
+  it('shows the wrapped operation, safe inputs, and an unknown execution outcome', async () => {
+    server.use(
+      http.get(`${API}/tasks/:id/approvals`, () => HttpResponse.json(listResponse([approval({
+        action: 'Execute create_work_order via call-tool',
+        targetTool: 'call-tool',
+        targetArgsPreview: { name: 'create_work_order', inputs: { machine: 'simulated-1', token: '[REDACTED]' } },
+        status: 'approved',
+        executionOutcome: 'unknown',
+        executionReason: 'The action may have run. Do not repeat it automatically.',
+      })]))),
+    )
+    render(<TaskApprovalPanel taskId="tk" taskPhase="Running" />)
+    await waitFor(() => expect(screen.getByText('Execute create_work_order via call-tool')).toBeInTheDocument())
+    expect(screen.getByText('Proposed inputs for call-tool')).toBeInTheDocument()
+    expect(screen.getByText(/simulated-1/)).toHaveTextContent('[REDACTED]')
+    expect(screen.getByText('Execution: unknown')).toBeInTheDocument()
+    expect(screen.getByText('The action may have run. Check its outcome before trying again.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
+  })
+
   it('approve sends the correct request and updates the UI', async () => {
     let capturedBody: unknown = null
     let capturedPath = ''

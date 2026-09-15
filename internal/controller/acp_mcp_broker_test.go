@@ -1158,17 +1158,9 @@ func TestDurableACPMCPPromptAuthorizerRequiresAcceptanceForConsequentialCalls(t 
 	}
 }
 
-func TestDurableACPMCPPromptAuthorizerRejectsApprovalRequiredCalls(t *testing.T) {
-	now := time.Now().UTC().Truncate(time.Second)
+func TestDurableACPMCPPromptAuthorizerAllowsApprovalWaitForAcceptedCall(t *testing.T) {
 	request, _ := testMCPBrokerRequest(t, harnessv2.MCPToolEffectConsequential)
 	request.Authorization.ApprovalPolicy = harnessv2.MCPApprovalPolicy{RequiredTools: []string{request.Call.ToolName}}
-	request.Call.Approval = &harnessv2.MCPApprovalEvidence{
-		PermissionRequestID: "permission-1",
-		ToolCallID:          request.Call.CallID,
-		ToolName:            request.Call.ToolName,
-		GrantedAt:           now.Add(-time.Minute),
-		ExpiresAt:           now.Add(time.Minute),
-	}
 	attempt := &store.PromptAttempt{
 		Key: store.PromptAttemptKey{
 			Namespace: request.Namespace, TaskUID: string(request.Metadata.TaskUID),
@@ -1178,9 +1170,17 @@ func TestDurableACPMCPPromptAuthorizerRejectsApprovalRequiredCalls(t *testing.T)
 		ControllerEpoch: int64(request.Metadata.Fence.ControllerEpoch), ExecutionState: store.PromptExecutionRunning,
 	}
 	attempt.ID, _ = attempt.Key.CanonicalID()
-	authorizer := DurableACPMCPPromptAuthorizer{Attempts: staticPromptAttemptStore{attempt: attempt}}
-	err := authorizer.AuthorizeACPMCPPrompt(context.Background(), request)
-	if err == nil || !strings.Contains(err.Error(), "controller-owned permission review") {
+	leases := &ACPMCPPromptLeaseRegistry{}
+	lease, err := leases.register(t.Context(), request.Namespace, harnessv2.StartPromptRequest{
+		Metadata: request.Metadata, Lease: request.Lease, MCPAuthorization: request.Authorization,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(lease.release)
+	authorizer := DurableACPMCPPromptAuthorizer{Attempts: staticPromptAttemptStore{attempt: attempt}, PromptLeases: leases}
+	err = authorizer.AuthorizeACPMCPPrompt(context.Background(), request)
+	if err != nil {
 		t.Fatalf("approval-required call error = %v", err)
 	}
 }

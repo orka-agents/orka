@@ -316,6 +316,26 @@ func (s *FakeExecutionEventStore) GetLatestExecutionEventSeq(ctx context.Context
 	return s.latest[key], nil
 }
 
+// GetLatestExecutionEventSeqs reads all requested stream heads under one lock.
+func (s *FakeExecutionEventStore) GetLatestExecutionEventSeqs(ctx context.Context, namespace, streamType string, streamIDs []string) (map[string]int64, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	filter := store.ExecutionEventFilter{Namespace: namespace, StreamType: streamType}.Normalized()
+	if err := filter.Validate(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sequences := make(map[string]int64, len(streamIDs))
+	for _, streamID := range streamIDs {
+		streamID = strings.TrimSpace(streamID)
+		key := executionEventStreamKey{namespace: filter.Namespace, streamType: filter.StreamType, streamID: streamID}
+		sequences[streamID] = s.latest[key]
+	}
+	return sequences, nil
+}
+
 // DeleteExecutionEvents removes all events for a stream.
 func (s *FakeExecutionEventStore) DeleteExecutionEvents(ctx context.Context, namespace, streamType, streamID string) error {
 	if err := ctx.Err(); err != nil {

@@ -106,11 +106,68 @@ RuntimeSession creation carries the canonical MCP tool and approval policy.
 The provider child may discover that policy while idle, but every execution
 must traverse a credential-protected loopback proxy and the Orka controller
 broker. Each call binds the RuntimeSession, Task UID/attempt, prompt ID, lease
-generation/expiry, runtime fences, tool descriptor, arguments digest, and
-approval evidence. Prompt settlement, cancellation, lease expiry, poisoning,
+generation/expiry, runtime fences, tool descriptor, and arguments digest.
+The controller owns approval decisions; adapters must not supply approval
+evidence. Prompt settlement, cancellation, lease expiry, poisoning,
 and deletion revoke the authority and cancel in-flight calls. Consequential
 calls reserve a durable `ExternalEffect` identity and may replay only a
 committed matching response.
+
+## Brokered tool approvals
+
+Qualified AgentKit and Foundry adapters advertise
+`provider.supportsBrokeredToolApprovals`. This capability is separate from
+`supportsPermissions`, which describes native ACP permission requests.
+Registration conformance and RuntimeSession admission reject a nonempty
+approval policy when the runtime lacks brokered approval support.
+The supervisor defaults this capability off. An operator enables it only for
+an independently qualified profile by setting
+`ORKA_ACP_BROKERED_TOOL_APPROVAL_PROFILE_DIGEST` to that exact profile digest.
+This binds qualification to the adapter image and baked configuration,
+including a Foundry hosted target. Invalid or mismatched opt-ins fail startup.
+
+The supervisor keeps the original MCP `tools/call` open while Orka saves and
+reviews the proposed action. It returns only the final tool result. There is
+no pending tool result, second approval service, prompt replay, or new
+continuation endpoint. The controller polls the existing task approval events
+and claims the stored action only after an authorized decision.
+
+The shared bounds are 600 seconds for review, 240 seconds for execution after
+approval, and 900 seconds for the enclosing MCP call. The Task deadline may
+shorten these bounds. The normal rolling prompt lease must continue renewing
+throughout the wait; extending the MCP timeout does not extend Task or Session
+authority. The supervisor cancels calls when that authority ends.
+
+Final tool errors use `isError: true` and an allowlisted `code` in the MCP
+`structuredContent` object:
+
+| Code | Meaning |
+| --- | --- |
+| `approval_declined` | The reviewer declined; execution did not start. |
+| `approval_expired` | Review or Task time ran out before execution. |
+| `approval_cancelled` | The review or Task was cancelled before execution. |
+| `approval_stale` | The original run, policy, tool definition, or ownership changed. |
+| `tool_execution_failed` | The approved tool returned a recorded execution error. |
+| `tool_outcome_unknown` | Execution may have occurred, but a reliable result is unavailable. |
+
+Adapters preserve these codes with fixed safe messages. On
+`tool_outcome_unknown`, they must stop automatic tool/model continuation and
+must not repeat the action. An exact broker redelivery can return a committed
+receipt; it cannot reclaim an unreceipted started action, even after its
+execution lease expires.
+
+Orka injects `AGENTKIT_MCP_TIMEOUT=900` for approval-enabled direct AgentKit
+sessions. Foundry reserves 900 seconds for MCP `tools/call` while discovery
+and model requests retain their separate 120-second limit. For hosted
+AgentKit, configure a persistent `AGENTKIT_FOUNDRY_RESPONSE_STATE_FILE`, set
+`AGENTKIT_FOUNDRY_RESPONSE_STATE_TTL_SECONDS=1800`, and pin a Foundry hosted
+agent version with `session_configuration.idle_timeout_seconds` of at least 1800. The
+[Foundry session documentation](https://learn.microsoft.com/azure/foundry/agents/how-to/manage-hosted-sessions)
+describes that version-level setting. These bounds follow MCP's
+[per-request timeout guidance](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle#timeouts).
+
+See [human approval for v2 tools](../guides/human-approval-v2.md) for review,
+recovery, and the counted simulator setup.
 
 Git/forge operations are outside this broker. The Workspace/Publisher obtains
 frozen source-read, target-read, target-write, and forge credentials from the

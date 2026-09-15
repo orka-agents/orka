@@ -110,6 +110,24 @@ function ApprovalCard({
           <p className="break-words text-sm text-muted-foreground">{approval.riskSummary}</p>
         )}
 
+        {approval.targetArgsPreview !== undefined && (
+          <div className="space-y-1 text-xs">
+            <p className="font-medium">Proposed inputs{approval.targetTool ? ` for ${approval.targetTool}` : ''}</p>
+            <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted p-3 font-mono">
+              {JSON.stringify(approval.targetArgsPreview, null, 2)}
+            </pre>
+            <p className="text-muted-foreground">Sensitive values are hidden. Approval applies to this exact call.</p>
+          </div>
+        )}
+
+        {approval.executionOutcome && (
+          <div className={`rounded-md px-3 py-2 text-xs ${approval.executionOutcome === 'unknown' ? 'bg-status-pending-bg text-status-pending' : 'bg-muted'}`}>
+            <p>Execution: {approval.executionOutcome.replace(/_/g, ' ')}</p>
+            {approval.executionReason && <p className="mt-1 break-words">{approval.executionReason}</p>}
+            {approval.executionOutcome === 'unknown' && <p className="mt-1">The action may have run. Check its outcome before trying again.</p>}
+          </div>
+        )}
+
         <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
           {approval.createdAt && (
             <span>Requested <span className="tabular-nums">{formatTimestamp(approval.createdAt, { empty: '', hour12: false })}</span></span>

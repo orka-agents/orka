@@ -107,6 +107,11 @@ const (
 	defaultWorkspaceDeltaUploadBytes      int64 = 100 << 20
 )
 
+// EnvBrokeredToolApprovalProfileDigest opts an operator-qualified, immutable
+// runtime profile into brokered approvals. Provider identity alone is not proof
+// that the composed adapter and hosted configuration preserve delayed outcomes.
+const EnvBrokeredToolApprovalProfileDigest = "ORKA_ACP_BROKERED_TOOL_APPROVAL_PROFILE_DIGEST"
+
 func LoadConfigFromEnv() (Config, error) {
 	providerKind := requiredEnv(EnvProvider)
 	model := requiredEnv(EnvModel)
@@ -145,6 +150,19 @@ func LoadConfigFromEnv() (Config, error) {
 	profileDigest, err := harnessv2.CanonicalProfileDigest(profile)
 	if err != nil {
 		return Config{}, err
+	}
+	providerCaps := providerCapabilities(providerKind, model)
+	if qualifiedDigest := strings.TrimSpace(os.Getenv(EnvBrokeredToolApprovalProfileDigest)); qualifiedDigest != "" {
+		if providerKind != providerKindAgentKit && providerKind != providerKindFoundry {
+			return Config{}, fmt.Errorf("%s is unsupported for provider %q", EnvBrokeredToolApprovalProfileDigest, providerKind)
+		}
+		if err := harnessv2.ValidateProfileDigest(harnessv2.ProfileDigest(qualifiedDigest)); err != nil {
+			return Config{}, fmt.Errorf("%s: %w", EnvBrokeredToolApprovalProfileDigest, err)
+		}
+		if qualifiedDigest != string(profileDigest) {
+			return Config{}, fmt.Errorf("%s does not match runtime profile digest", EnvBrokeredToolApprovalProfileDigest)
+		}
+		providerCaps.SupportsBrokeredToolApprovals = true
 	}
 	limits := defaultProtocolLimits(providerKind)
 	durableWorkspaceKey := strings.TrimSpace(os.Getenv(EnvDurableWorkspaceKey))
@@ -257,7 +275,7 @@ func LoadConfigFromEnv() (Config, error) {
 		RuntimeProfileDigest: profileDigest, ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
 		AdapterDigests: profile.AdapterDigests, Limits: limits, SupportsDrain: true, SupportsPublicationFinalization: true,
 		SupportsAgentSessionConfiguration: providerKind != providerKindAgentKit && providerKind != providerKindFoundry,
-		Provider:                          providerCapabilities(providerKind, model),
+		Provider:                          providerCaps,
 		WorkspaceGovernance:               harnessv2.StrictWorkspaceGovernanceCapabilities(),
 	}
 	cfg := Config{

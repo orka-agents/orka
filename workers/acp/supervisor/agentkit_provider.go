@@ -4,7 +4,9 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/orka-agents/orka/internal/acp"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -19,6 +21,7 @@ const (
 	agentKitProviderTokenEnv   = "AGENTKIT_ACP_PROVIDER_TOKEN"
 	agentKitModelEnv           = "AGENTKIT_ACP_MODEL"
 	agentKitConfigDigestEnv    = "AGENTKIT_ACP_AGENT_CONFIGURATION_DIGEST"
+	agentKitMCPTimeoutEnv      = "AGENTKIT_MCP_TIMEOUT"
 )
 
 func agentKitProviderProfile(model string) (ProviderProfile, error) {
@@ -41,16 +44,20 @@ func agentKitProviderProfile(model string) (ProviderProfile, error) {
 			return agentKitSessionProjection(request, model)
 		},
 		EnvironmentForSession: func(
-			_ harnessv2.CreateRuntimeSessionRequest,
+			request harnessv2.CreateRuntimeSessionRequest,
 			_ acp.SessionPaths,
 			proxy ProviderProxyBinding,
 		) (map[string]string, error) {
-			return map[string]string{
+			environment := map[string]string{
 				agentKitProviderBaseURLEnv: proxy.BaseURL,
 				agentKitProviderTokenEnv:   proxy.Credential,
 				agentKitModelEnv:           model,
 				agentKitConfigDigestEnv:    requiredEnv(EnvAgentConfigurationDigest),
-			}, nil
+			}
+			if len(request.MCPConfiguration.ApprovalPolicy.RequiredTools) > 0 {
+				environment[agentKitMCPTimeoutEnv] = strconv.Itoa(int(harnessv2.MCPApprovalCallTimeout / time.Second))
+			}
+			return environment, nil
 		},
 	}, nil
 }
@@ -67,9 +74,6 @@ func agentKitSessionProjection(
 	}
 	if err := request.MCPConfiguration.ValidateProfile(request.Profile); err != nil {
 		return ProviderSessionProjection{}, fmt.Errorf("AgentKit MCP policy configuration: %w", err)
-	}
-	if len(request.MCPConfiguration.ApprovalPolicy.RequiredTools) > 0 {
-		return ProviderSessionProjection{}, fmt.Errorf("AgentKit ACP runtime does not support approval-required MCP tools")
 	}
 	for _, descriptor := range request.MCPConfiguration.ToolPolicy.Tools {
 		if !descriptor.Source.Brokered() {

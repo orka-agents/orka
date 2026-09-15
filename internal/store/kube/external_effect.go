@@ -33,6 +33,13 @@ func (s *Store) ReserveExternalEffect(ctx context.Context, request store.Reserve
 	if err := store.ValidateCanonicalDigest("external effect request digest", request.RequestDigest); err != nil {
 		return nil, err
 	}
+	labels := controlLabels(id)
+	if request.ApprovalTaskUID != "" {
+		labelIfValid(labels, corev1alpha1.ControlRecordTaskUIDLabel, request.ApprovalTaskUID)
+		if labels[corev1alpha1.ControlRecordTaskUIDLabel] != request.ApprovalTaskUID {
+			return nil, store.ValidationErrorf("external effect Task UID must be a valid discovery label")
+		}
+	}
 	fence, snapshot, err := s.requireControllerEpoch(ctx, request.Fence)
 	if err != nil {
 		return nil, err
@@ -51,7 +58,7 @@ func (s *Store) ReserveExternalEffect(ctx context.Context, request store.Reserve
 		return nil, mapKubernetesError("get external effect", err)
 	}
 	object = &corev1alpha1.ExternalEffect{
-		ObjectMeta: metav1.ObjectMeta{Namespace: request.Identity.Namespace, Name: key.Name, Labels: controlLabels(id)},
+		ObjectMeta: metav1.ObjectMeta{Namespace: request.Identity.Namespace, Name: key.Name, Labels: labels},
 		Spec: corev1alpha1.ExternalEffectSpec{
 			ID:                id,
 			Kind:              request.Identity.Kind,
@@ -177,6 +184,11 @@ func (s *Store) completeExternalEffectCreation(ctx context.Context, object *core
 	if !sameExternalEffectSpec(object, request, id) {
 		return nil, store.ConflictErrorf("external effect %q was reused with a different identity or request digest", id)
 	}
+	if request.ApprovalTaskUID != "" {
+		if err := s.labelApprovalExternalEffect(ctx, object, request.ApprovalTaskUID); err != nil {
+			return nil, err
+		}
+	}
 	if object.Status.Version > 0 {
 		existing := externalEffectFromObject(object)
 		return &existing, nil
@@ -197,6 +209,28 @@ func (s *Store) completeExternalEffectCreation(ctx context.Context, object *core
 	}
 	result := externalEffectFromObject(updated)
 	return &result, nil
+}
+
+// Called only after checking the immutable request binding, with the reserve
+// operation's controller epoch guard held. The hint locates candidates; it is
+// never a substitute for validating their approval binding and saved receipt.
+func (s *Store) labelApprovalExternalEffect(ctx context.Context, object *corev1alpha1.ExternalEffect, taskUID string) error {
+	existing := object.Labels[corev1alpha1.ControlRecordTaskUIDLabel]
+	if existing == taskUID {
+		return nil
+	}
+	if existing != "" {
+		return store.ConflictErrorf("external effect approval Task discovery hint conflicts")
+	}
+	before := object.DeepCopy()
+	if object.Labels == nil {
+		object.Labels = make(map[string]string)
+	}
+	object.Labels[corev1alpha1.ControlRecordTaskUIDLabel] = taskUID
+	if err := s.client.Patch(ctx, object, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
+		return mapKubernetesError("label approval external effect", err)
+	}
+	return nil
 }
 
 func (s *Store) findExternalEffectByID(ctx context.Context, id string) (*corev1alpha1.ExternalEffect, error) {

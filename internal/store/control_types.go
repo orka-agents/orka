@@ -1046,6 +1046,10 @@ type ReserveExternalEffectRequest struct {
 	RequestDigest string                 `json:"requestDigest"`
 	Fence         ControllerEpochFence   `json:"fence"`
 	CreatedAt     time.Time              `json:"createdAt"`
+	// ApprovalTaskUID is a Kubernetes discovery hint for approval recovery.
+	// Other backends may ignore it. It does not change the canonical identity,
+	// grant authority, or make the record Task-owned for garbage collection.
+	ApprovalTaskUID string `json:"approvalTaskUid,omitempty"`
 }
 
 // ExternalEffectTransition performs a version/state CAS.

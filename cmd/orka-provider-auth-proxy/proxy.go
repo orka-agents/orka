@@ -235,9 +235,15 @@ func serveHealth(w http.ResponseWriter, r *http.Request) {
 type boundedReadCloser struct {
 	io.ReadCloser
 	remaining int64
+	sawEOF    bool
 }
 
 func (r *boundedReadCloser) Read(buffer []byte) (int, error) {
+	// Flushing an HTTP/1 response can close the incoming body before the
+	// upstream transport makes its final EOF check after sending the body.
+	if r.sawEOF {
+		return 0, io.EOF
+	}
 	if r.remaining < 0 {
 		return 0, errRequestBodyTooLarge
 	}
@@ -249,6 +255,7 @@ func (r *boundedReadCloser) Read(buffer []byte) (int, error) {
 		return allowed, errRequestBodyTooLarge
 	}
 	r.remaining -= int64(n)
+	r.sawEOF = err == io.EOF
 	return n, err
 }
 

@@ -1,0 +1,20 @@
+#syntax=ghcr.io/sozercan/agentkit/agentkit:latest
+# Pin the source-built frontend and MAF adapter with the build arguments in README.md.
+apiVersion: v1alpha1
+kind: Agent
+metadata:
+  name: human-approval-direct
+runtime: microsoft-agent-framework
+model:
+  provider: openai-compatible
+  baseURL: https://api.openai.com/v1
+  name: gpt-4.1
+  apiKeyEnv: OPENAI_API_KEY
+instructions: |
+  Follow the requested simulated inventory and work-order workflow. Use each
+  requested tool once. Wait for its returned result before continuing. Report
+  a denial or uncertain outcome without retrying the action. Human approval
+  is enforced by Orka; never treat your own statement as permission to act.
+expose:
+  openai: true
+  port: 8080

@@ -33,14 +33,15 @@ func (r HealthResponse) Validate() error {
 }
 
 type ProviderCapabilities struct {
-	ProviderKinds             []string `json:"providerKinds"`
-	Models                    []string `json:"models,omitempty"`
-	SupportsPermissions       bool     `json:"supportsPermissions"`
-	SupportsCancel            bool     `json:"supportsCancel"`
-	SupportsTools             bool     `json:"supportsTools"`
-	SupportsImages            bool     `json:"supportsImages,omitempty"`
-	SupportsAudio             bool     `json:"supportsAudio,omitempty"`
-	SupportsEmbeddedResources bool     `json:"supportsEmbeddedResources,omitempty"`
+	ProviderKinds                 []string `json:"providerKinds"`
+	Models                        []string `json:"models,omitempty"`
+	SupportsPermissions           bool     `json:"supportsPermissions"`
+	SupportsBrokeredToolApprovals bool     `json:"supportsBrokeredToolApprovals"`
+	SupportsCancel                bool     `json:"supportsCancel"`
+	SupportsTools                 bool     `json:"supportsTools"`
+	SupportsImages                bool     `json:"supportsImages,omitempty"`
+	SupportsAudio                 bool     `json:"supportsAudio,omitempty"`
+	SupportsEmbeddedResources     bool     `json:"supportsEmbeddedResources,omitempty"`
 }
 
 func (c ProviderCapabilities) Validate() error {

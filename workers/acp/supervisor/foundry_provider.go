@@ -55,9 +55,6 @@ func foundrySessionProjection(request harnessv2.CreateRuntimeSessionRequest, mod
 	if err := request.MCPConfiguration.ValidateProfile(request.Profile); err != nil {
 		return ProviderSessionProjection{}, fmt.Errorf("external Foundry MCP policy configuration: %w", err)
 	}
-	if len(request.MCPConfiguration.ApprovalPolicy.RequiredTools) != 0 {
-		return ProviderSessionProjection{}, fmt.Errorf("external Foundry ACP runtime does not support approval-required MCP tools")
-	}
 	for _, descriptor := range request.MCPConfiguration.ToolPolicy.Tools {
 		if !descriptor.Source.Brokered() {
 			return ProviderSessionProjection{}, fmt.Errorf("external Foundry ACP runtime forbids provider-native tool %q; tools must use the Orka session MCP server", descriptor.Name)

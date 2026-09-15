@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -69,7 +70,11 @@ func (h *Handlers) ListTaskApprovals(c fiber.Ctx) error {
 // DecideTaskApproval handles POST /api/v1/tasks/{id}/approvals/{approvalID}/decision.
 func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 	taskName := c.Params("id")
-	approvalID := strings.TrimSpace(c.Params("approvalID"))
+	approvalID, err := url.PathUnescape(c.Params("approvalID"))
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "approvalID is invalid")
+	}
+	approvalID = strings.TrimSpace(approvalID)
 	if approvalID == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "approvalID is required")
 	}
@@ -116,6 +121,11 @@ func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 	current, found := findApproval(deriveTaskApprovalState(listed), approvalID)
 	if !found {
 		return fiber.NewError(fiber.StatusNotFound, "approval not found")
+	}
+	if current.Binding != nil {
+		if err := validateV2ApprovalTask(current, task); err != nil {
+			return err
+		}
 	}
 	if current.Status != approvals.StatusPending {
 		if (current.Status == approvals.StatusApproved && decision == approvalDecisionApprove) || (current.Status == approvals.StatusDeclined && decision == approvalDecisionDecline) {
@@ -200,10 +210,30 @@ func filterTaskApprovalEvents(input []store.ExecutionEvent, task *corev1alpha1.T
 }
 
 func deriveTaskApprovalState(input []store.ExecutionEvent) []approvals.Approval {
-	// V1 does not passively expire approvals. Until an expiry producer appends
-	// explicit ApprovalExpired events, pending approvals must remain human-
-	// decidable and must match controller parking semantics.
-	return approvals.Derive(input, time.Time{})
+	// Preserve AI-worker parking semantics. Only broker-owned v2 reviews have
+	// an enforced wait deadline, including when their original runtime is lost.
+	values := approvals.Derive(input, time.Time{})
+	now := time.Now().UTC()
+	for i := range values {
+		if values[i].Binding != nil && values[i].Status == approvals.StatusPending && values[i].ExpiresAt != nil && !now.Before(*values[i].ExpiresAt) {
+			values[i].Status = approvals.StatusExpired
+		}
+	}
+	return values
+}
+
+func validateV2ApprovalTask(approval approvals.Approval, task *corev1alpha1.Task) error {
+	binding := approval.Binding
+	execution := task.Status.Execution
+	if approval.TaskUID == "" || approval.TaskUID != string(task.UID) || execution == nil ||
+		execution.Attempt != int32(binding.TaskAttempt) || execution.PromptID != binding.PromptID ||
+		execution.RuntimeSessionUID != binding.RuntimeSessionUID || execution.RuntimeSessionGeneration != int64(binding.RuntimeSessionGeneration) ||
+		execution.RuntimeInstanceID != binding.RuntimeInstanceID || execution.RuntimeSessionSupervisorBootID != binding.SupervisorBootID ||
+		execution.ControllerEpoch != int64(binding.ControllerEpoch) ||
+		(execution.State != corev1alpha1.TaskExecutionStateAccepted && execution.State != corev1alpha1.TaskExecutionStateRunning) {
+		return fiber.NewError(fiber.StatusConflict, "approval belongs to a task run that is no longer active")
+	}
+	return nil
 }
 
 func (h *Handlers) patchTaskApprovalDecisionAnnotation(ctx context.Context, namespace, taskName string, approval approvals.Approval) error {
@@ -214,6 +244,9 @@ func (h *Handlers) patchTaskApprovalDecisionAnnotation(ctx context.Context, name
 		current := &corev1alpha1.Task{}
 		if err := h.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: taskName}, current); err != nil {
 			return err
+		}
+		if approval.TaskUID != "" && approval.TaskUID != string(current.UID) {
+			return errors.New("task identity changed after approval decision")
 		}
 		base := current.DeepCopy()
 		if current.Annotations == nil {

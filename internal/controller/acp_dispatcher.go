@@ -97,6 +97,7 @@ type ACPDispatcher struct {
 	ArtifactCapabilitySecret []byte
 	ArtifactReservations     artifactcap.CapabilityReservationRecorder
 	MCPRegistry              *tools.Registry
+	PromptLeases             *ACPMCPPromptLeaseRegistry
 	Interval                 time.Duration
 	MaxConcurrent            int
 	IdlePoolTTL              time.Duration
@@ -118,6 +119,9 @@ type ACPDispatcher struct {
 	runtimeSessions map[string]ACPRuntimeSessionBinding
 	finalizedTurns  map[types.UID]string
 	staleRecoveryMu sync.Mutex
+
+	approvalRecoveryMu sync.Mutex
+	approvalRecovery   map[acpMCPApprovalTaskKey]acpMCPApprovalRecoveryProgress
 
 	substrateRouteOnce  sync.Once
 	substrateRouteHTTP  *http.Client
@@ -212,11 +216,11 @@ func (d *ACPDispatcher) Start(ctx context.Context) error {
 }
 
 func (d *ACPDispatcher) dispatchOnce(ctx context.Context) error {
-	if err := d.reconcileExpiredExternalEffects(ctx); err != nil {
-		return err
-	}
 	var tasks corev1alpha1.TaskList
 	if err := d.Client.List(ctx, &tasks); err != nil {
+		return err
+	}
+	if err := d.reconcileExpiredExternalEffects(ctx, tasks.Items); err != nil {
 		return err
 	}
 	d.pruneFinalizedSessionTurns(tasks.Items)
@@ -1795,11 +1799,17 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			return err
 		}
 		leaseCtx, stopLease := context.WithCancel(runtimeCtx)
+		promptLease, err := d.PromptLeases.register(leaseCtx, task.Namespace, promptRequest)
+		if err != nil {
+			stopLease()
+			return err
+		}
 		admitted := make(chan struct{})
 		var admitOnce sync.Once
 		go d.renewPromptLeaseLoop(
 			leaseCtx, admitted, cancelRuntime, runtimeClient, createRequest.RuntimeSessionID, task, runtimeFence,
 			promptRequest.Lease, promptRequest.MCPAuthorization, promptLimits,
+			promptLease,
 		)
 		summary, streamErr := runtimeClient.StreamPrompt(runtimeCtx, createRequest.RuntimeSessionID, promptRequest, func(event harnessv2.Event) error {
 			switch event.Type {
@@ -1885,6 +1895,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			return nil
 		})
 		stopLease()
+		promptLease.release()
 		runtimeContextErr := runtimeContextError(runtimeCtx)
 		if retryableUnsentPromptCanRequeue(accepted, summary, runtimeContextErr, streamErr) {
 			var runtimeBinding *ACPRuntimeSessionBinding
@@ -2097,9 +2108,14 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	if err := sealMutation(&deltaRequest.Metadata.RequestDigest, deltaRequest); err != nil {
 		return err
 	}
+	// A completed prompt still needs workspace validation when cancellation
+	// ends its execution context. Retain the frozen cleanup authority and the
+	// operation's own deadline; publication below remains cancellable.
+	validationCtx, cancelValidation := context.WithDeadline(context.WithoutCancel(ctx), deltaRequest.Metadata.ExpiresAt)
 	delta, err := createWorkspaceDeltaWithRetry(
-		runtimeCtx, runtimeClient, createRequest.RuntimeSessionID, deltaRequest,
+		validationCtx, runtimeClient, createRequest.RuntimeSessionID, deltaRequest,
 	)
+	cancelValidation()
 	if err != nil {
 		httpStatus, code, kind := 0, harnessv2.ErrorCode(""), harnessv2.ClientErrorKind("")
 		if clientErr, ok := errors.AsType[*harnessv2.ClientError](err); ok {
@@ -5029,6 +5045,10 @@ func validateExternalRuntimeCapabilities(
 		(requiresPermissions && !capabilities.Provider.SupportsPermissions) {
 		return harnessv2.RuntimeProfile{}, harnessv2.ProtocolLimits{}, errors.New("external AgentRuntime provider capability drifted after conformance")
 	}
+	if registered.MCPPolicy != nil && len(registered.MCPPolicy.ApprovalRequiredTools) > 0 &&
+		!capabilities.Provider.SupportsBrokeredToolApprovals {
+		return harnessv2.RuntimeProfile{}, harnessv2.ProtocolLimits{}, errors.New("external AgentRuntime brokered tool approval capability drifted after conformance")
+	}
 	if profile.WorkspaceIntent == harnessv2.WorkspaceIntentWrite && !capabilities.SupportsPublicationFinalization {
 		return harnessv2.RuntimeProfile{}, harnessv2.ProtocolLimits{}, errors.New("external AgentRuntime does not support controller-owned RuntimeSession publication finalization required for write workspaces")
 	}
@@ -5506,6 +5526,7 @@ func (d *ACPDispatcher) renewPromptLeaseLoop(
 	lease harnessv2.PromptLease,
 	authorization harnessv2.PromptMCPAuthorization,
 	limits harnessv2.ProtocolLimits,
+	promptLease *acpMCPPromptLease,
 ) {
 	log := logf.FromContext(ctx).WithValues("namespace", task.Namespace, "task", task.Name)
 	select {
@@ -5521,6 +5542,9 @@ func (d *ACPDispatcher) renewPromptLeaseLoop(
 	// digest_conflict on a rebuilt request with fresh timestamps.
 	var pending *harnessv2.RenewPromptLeaseRequest
 	for {
+		if ctx.Err() != nil {
+			return
+		}
 		now := time.Now().UTC()
 		remaining := lease.ExpiresAt.Sub(now)
 		if remaining <= 0 {
@@ -5588,7 +5612,16 @@ func (d *ACPDispatcher) renewPromptLeaseLoop(
 		}
 		proposed := request.Lease
 		response, err := runtimeClient.RenewPromptLease(ctx, sessionID, request)
+		if ctx.Err() != nil {
+			return
+		}
 		if err == nil && response.Lease.Generation == proposed.Generation {
+			if err := promptLease.renew(request); err != nil {
+				if ctx.Err() == nil {
+					cancelRuntime()
+				}
+				return
+			}
 			pending = nil
 			lease = response.Lease
 			continue
@@ -5754,14 +5787,14 @@ func frozenMCPPermissionDecision(
 		return cancelled
 	}
 	toolPolicy := configuration.ToolPolicy
-	_, allowed := toolPolicy.Descriptor(permission.ToolName)
+	descriptor, allowed := toolPolicy.Descriptor(permission.ToolName)
 	if toolPolicy.AllowedToolNames == nil && len(toolPolicy.DisallowedToolNames) == 0 && toolPolicy.AllowBash {
-		allowed = acp.IsBuiltInRuntimeNativeTool(provider, permission.ToolName)
+		allowed = allowed || acp.IsBuiltInRuntimeNativeTool(provider, permission.ToolName)
 	}
-	// A provider asking to invoke an already-granted MCP tool does not grant
-	// an Orka approval. Approval-required tools stay closed until review is
-	// available; every brokered invocation still crosses the MCP authority gate.
-	if allowed && !configuration.ApprovalPolicy.Requires(permission.ToolName) {
+	// A local permission callback may let the provider reach an allowed brokered
+	// tool. The broker still requires the controller's exact-call approval before
+	// executing it; this allow-once response grants no approval authority.
+	if allowed && (!configuration.ApprovalPolicy.Requires(permission.ToolName) || descriptor.Source.Brokered()) {
 		for _, option := range permission.Options {
 			if option.Kind == harnessv2.PermissionOptionAllowOnce {
 				return harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: option.OptionID}
