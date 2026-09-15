@@ -94,6 +94,11 @@ spec:
             - --webhook-cert-path=/var/run/orka/webhook/tls
             - {{ printf "--webhook-cert-name=%s" .Values.webhooks.tls.certKey | quote }}
             - {{ printf "--webhook-cert-key=%s" .Values.webhooks.tls.privateKeyKey | quote }}
+            {{- if include "orka.webhookTLSGenerated" . }}
+            - {{ printf "--webhook-cert-rotation-secret=%s" (include "orka.webhookTLSSecretName" .) | quote }}
+            - {{ printf "--webhook-cert-rotation-webhook=%s" (include "orka.controllerWebhookName" .) | quote }}
+            - {{ printf "--webhook-cert-rotation-dns-name=%s.%s.svc" (include "orka.controllerWebhookServiceName" .) .Release.Namespace | quote }}
+            {{- end }}
             - --task-provenance-admission-enabled=true
             - {{ printf "--task-provenance-admission-trusted-users=%s" (include "orka.controllerUsername" .) | quote }}
             - --workspace-class-use-admission-enabled={{ $harnessV2 }}
@@ -518,7 +523,7 @@ spec:
               readOnly: true
             - name: webhook-tls
               mountPath: /var/run/orka/webhook/tls
-              readOnly: true
+              readOnly: {{ not (include "orka.webhookTLSGenerated" .) }}
             {{- if $harnessV1 }}
             - name: harness-v1-tls
               mountPath: /var/run/orka/harness-v1-tls
@@ -592,6 +597,11 @@ spec:
               - key: {{ include "orka.agentExecutionSnapshotSecretKey" . | quote }}
                 path: key
         - name: webhook-tls
+          {{- if include "orka.webhookTLSGenerated" . }}
+          # The controller writes its generated serving certificate here.
+          emptyDir:
+            medium: Memory
+          {{- else }}
           secret:
             secretName: {{ .Values.webhooks.tls.existingSecret | quote }}
             defaultMode: 0400
@@ -600,6 +610,7 @@ spec:
                 path: {{ .Values.webhooks.tls.certKey | quote }}
               - key: {{ .Values.webhooks.tls.privateKeyKey | quote }}
                 path: {{ .Values.webhooks.tls.privateKeyKey | quote }}
+          {{- end }}
         {{- if $harnessV1 }}
         - name: harness-v1-tls
           secret:

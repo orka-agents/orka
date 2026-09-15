@@ -663,12 +663,12 @@ main() {
     --set-string controller.acpRuntime.opencodeImage= \
     --set "controller.image.repository=$(split_image_repository "${manager_ref}")" \
     --set "controller.image.digest=$(split_image_digest "${manager_ref}")" \
-    --set controller.agentExecutionSnapshot.existingSecret=orka-agent-snapshot-key \
-    --set controller.agentExecutionSnapshot.key=key \
-    --set webhooks.tls.existingSecret=orka-webhook-tls \
-    --set "webhooks.caBundle=$(base64_no_wrap "${work_dir}/${v2_namespace}-webhook-tls/ca.crt")" \
     --set "publisher.image.repository=$(split_image_repository "${publisher_ref}")" \
     --set "publisher.image.digest=$(split_image_digest "${publisher_ref}")"
+  # The v2 release deliberately omits webhooks.tls.* and
+  # controller.agentExecutionSnapshot.*: it proves the chart's generated
+  # snapshot key and controller-issued webhook certificate end to end, while
+  # the v1 release above keeps the operator-supplied path covered.
 
   log "Wiring the deterministic fake agent CLI into the wrapper (test-only)"
   kubectl -n "${v1_namespace}" create configmap coexistence-fake-agent \
@@ -682,6 +682,27 @@ main() {
   run kubectl -n "${v1_namespace}" rollout status "deployment/${v1_controller_deployment}" --timeout="${rollout_timeout}"
   run kubectl -n "${v1_namespace}" rollout status "deployment/${wrapper_deployment}" --timeout="${rollout_timeout}"
   run kubectl -n "${v2_namespace}" rollout status "deployment/${v2_controller_deployment}" --timeout="${rollout_timeout}"
+
+  log "Asserting the v2 controller issued its own webhook certificate and injected the CA"
+  local v2_webhook_tls_secret="${v2_release}-webhook-tls"
+  local v2_snapshot_secret="${v2_release}-agent-execution-snapshot"
+  wait_until "generated webhook TLS Secret population" 120 bash -c \
+    "kubectl -n '${v2_namespace}' get secret '${v2_webhook_tls_secret}' -o json | jq -e '.data[\"tls.crt\"] and .data[\"tls.key\"] and .data[\"ca.crt\"]' >/dev/null"
+  local generated_ca injected_bundles
+  generated_ca="$(kubectl -n "${v2_namespace}" get secret "${v2_webhook_tls_secret}" -o jsonpath='{.data.ca\.crt}')"
+  [[ -n "${generated_ca}" ]] || die "generated webhook TLS Secret has an empty ca.crt"
+  wait_until "generated CA injected into every v2 webhook" 120 bash -c \
+    "kubectl get validatingwebhookconfiguration '${v2_controller_deployment}' -o json | jq -e --arg ca '${generated_ca}' '[.webhooks[].clientConfig.caBundle] | length > 0 and all(. == \$ca)' >/dev/null"
+  injected_bundles="$(kubectl get validatingwebhookconfiguration "${v2_controller_deployment}" -o json | jq -r '[.webhooks[].clientConfig.caBundle] | unique | length')"
+  [[ "${injected_bundles}" == "1" ]] || die "v2 webhooks carry ${injected_bundles} distinct caBundles, want exactly the generated CA"
+  kubectl -n "${v2_namespace}" get deployment "${v2_controller_deployment}" -o json | jq -e \
+    '.spec.template.spec.containers[0].args | index("--webhook-cert-rotation-secret='"${v2_webhook_tls_secret}"'") != null' >/dev/null || \
+    die "v2 controller does not run controller-managed webhook certificate rotation"
+  local snapshot_key_bytes
+  snapshot_key_bytes="$(kubectl -n "${v2_namespace}" get secret "${v2_snapshot_secret}" -o jsonpath='{.data.key}' | \
+    base64 -d | base64 -d | wc -c | tr -d ' ')"
+  [[ "${snapshot_key_bytes}" == "32" ]] || \
+    die "generated snapshot key Secret ${v2_snapshot_secret} decodes to ${snapshot_key_bytes} bytes, want 32"
 
   log "Asserting each controller declares its static mode and watch namespace"
   kubectl -n "${v1_namespace}" get deployment "${v1_controller_deployment}" -o json | jq -e \

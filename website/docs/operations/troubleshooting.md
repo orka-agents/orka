@@ -40,7 +40,7 @@ The chart validates its inputs before producing any manifests, so a bad install 
 | `upstreamBaseURL` | Your gateway's HTTP(S) URL, without credentials, a query, or a fragment. |
 | `image` | Use a valid tag or SHA256 digest. Runtime overrides need a full registry/repository reference. |
 | `replicas` / `leaderElect` | Must be `1` and `true`. The controller is a single writer. |
-| `webhooks.tls.existingSecret` | A TLS Secret for the admission webhooks. |
+| `caBundle or caInjectionAnnotations` | You set `webhooks.tls.existingSecret`, so the chart needs the CA that signed it. Leave both empty to let the controller issue its own certificate. |
 | `generated snapshot Secret ... has no "key" item` | An upgrade cannot find the key Secret the chart generated. Restore it from backup. For a preview, use `--dry-run=server`; client-side renders cannot read Secrets. |
 | `mode` | Only `harness-v1` or `harness-v2`, and it cannot change on upgrade. |
 

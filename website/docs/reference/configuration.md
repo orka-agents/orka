@@ -735,7 +735,7 @@ Key configuration values for the Helm chart:
 | `scmEgressProxy.auth.rolloutNonce` | `""` | Non-secret revision marker that restarts Publisher and SCM proxy during coordinated proxy-auth Secret rotation. |
 | `scmEgressProxy.maxTunnelBytes` | `1073741824` | Maximum bytes allowed in each CONNECT tunnel direction. |
 | `scmEgressProxy.maxConcurrent` | `8` | Maximum concurrent forward requests and CONNECT tunnels. |
-| `webhooks.tls.existingSecret` | `""` | Required existing TLS Secret for the controller-served admission webhooks; the chart never generates webhook certificates. |
+| `webhooks.tls.existingSecret` | `""` | Your own TLS Secret for the admission webhooks. Empty lets the controller issue and renew a self-signed certificate in `<release>-webhook-tls`. See [Webhook certificate](#webhook-certificate). |
 | `webhooks.tls.certKey` / `webhooks.tls.privateKeyKey` | `tls.crt` / `tls.key` | Certificate and private-key keys inside the webhook TLS Secret. |
 | `webhooks.caBundle` | `""` | Base64-encoded PEM CA bundle for the chart ValidatingWebhookConfiguration. Leave empty when `webhooks.caInjectionAnnotations` configures an injector. |
 | `webhooks.caInjectionAnnotations` | `{}` | CA-injection annotations (for example cert-manager) placed on the chart ValidatingWebhookConfiguration. Rendering fails unless this or `webhooks.caBundle` is set. |
@@ -807,16 +807,28 @@ detect changed bytes under the same name, so never rotate the material in place.
 
 ### Webhook certificate
 
-The Helm chart requires a TLS Secret for its Kubernetes admission webhooks and
-never generates one itself. The Secret holds `tls.crt`, `tls.key`, and `ca.crt`,
-and the serving certificate must be valid for
-`<release>-webhook.<namespace>.svc`, which is `orka-webhook.orka-system.svc`
-for the default installation. The chart reads `ca.crt` for `webhooks.caBundle`.
+Orka validates its resources through fail-closed Kubernetes admission webhooks
+served by the controller. Those webhooks need a serving certificate that the API
+server trusts. The chart supports two ways to provide it.
 
-The [installation guide](../operations/installation.md#1-prepare-the-namespace)
-creates a self-signed certificate for a test cluster. For a real cluster, issue
-the certificate from your own CA, or let [cert-manager](https://cert-manager.io/)
-manage it and set `webhooks.caInjectionAnnotations` instead of `webhooks.caBundle`:
+**Controller-managed, the default.** With `webhooks.tls.existingSecret` empty,
+the chart renders an empty Secret named `<release>-webhook-tls` and the
+controller fills it using
+[cert-controller](https://github.com/open-policy-agent/cert-controller), the
+library Gatekeeper uses for the same job. It mints a ten-year self-signed CA and
+a one-year serving certificate, renews the serving certificate before expiry,
+and writes the CA into the `caBundle` of the release's
+ValidatingWebhookConfiguration. The Secret is the source of truth and is kept on
+`helm uninstall`, so a reinstall under the same release name reuses the CA. The
+controller Pod reports ready only after the certificate exists. This grants the
+controller `list` and `watch` on all ValidatingWebhookConfigurations, which
+cannot be name-scoped, plus `update` on its own.
+
+**Operator-supplied.** Set `webhooks.tls.existingSecret` to a Secret holding
+`tls.crt` and `tls.key` valid for `<release>-webhook.<namespace>.svc`, and
+supply the CA either as `webhooks.caBundle` or through
+`webhooks.caInjectionAnnotations`. The controller then only reads the mounted
+files and never touches the webhook configuration.
 
 ```yaml
 webhooks:
@@ -826,8 +838,33 @@ webhooks:
     cert-manager.io/inject-ca-from-secret: orka-system/orka-webhook-tls
 ```
 
-Keep private keys out of Git and Helm values. A certificate for any other name
-is rejected by the API server at admission time, not at install time.
+For a one-off self-signed certificate without cert-manager:
+
+```bash
+(
+  umask 077
+  openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 365 \
+    -keyout tls.key -out tls.crt \
+    -subj '/CN=orka-webhook.orka-system.svc' \
+    -addext 'subjectAltName=DNS:orka-webhook.orka-system.svc,DNS:orka-webhook.orka-system.svc.cluster.local' &&
+  cp tls.crt ca.crt
+)
+kubectl -n orka-system create secret generic orka-webhook-tls \
+  --type=kubernetes.io/tls \
+  --from-file=tls.crt=tls.crt --from-file=tls.key=tls.key --from-file=ca.crt=ca.crt
+rm -f tls.key tls.crt ca.crt
+```
+
+```bash
+helm install orka orka/orka --namespace orka-system \
+  --set-string webhooks.tls.existingSecret=orka-webhook-tls \
+  --set-string webhooks.caBundle="$(kubectl -n orka-system get secret orka-webhook-tls -o jsonpath='{.data.ca\.crt}')" \
+  ...
+```
+
+Switching between the two modes is an ordinary `helm upgrade`. A certificate for
+any other name is rejected by the API server at admission time, not at install
+time.
 
 ### Helm authentication Secret rotation
 

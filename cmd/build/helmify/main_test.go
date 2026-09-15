@@ -107,8 +107,10 @@ func helmTemplateStaticChartForRelease(
 		t.Skip("helm is required for static chart render tests")
 	}
 
-	commandArgs := []string{"template", releaseName, "static", "--namespace", namespace}
-	commandArgs = append(commandArgs, staticChartDefaultArgs()...)
+	defaults := staticChartDefaultArgs()
+	commandArgs := make([]string, 0, 5+len(defaults)+2+len(args))
+	commandArgs = append(commandArgs, "template", releaseName, "static", "--namespace", namespace)
+	commandArgs = append(commandArgs, defaults...)
 	commandArgs = append(commandArgs, "--set-string", "controller.watchNamespace="+namespace)
 	commandArgs = append(commandArgs, args...)
 	output, err := exec.Command(helm, commandArgs...).CombinedOutput()
@@ -390,8 +392,10 @@ func helmTemplateStaticChartWithExistingControllerAndSnapshotSecret(
 		t.Fatalf("force existing controller lookup in copied chart: %v", err)
 	}
 
-	commandArgs := []string{"template", "test", chartDir, "--namespace", "orka-test", "--is-upgrade"}
-	commandArgs = append(commandArgs, staticChartDefaultArgs()...)
+	defaults := staticChartDefaultArgs()
+	commandArgs := make([]string, 0, 6+len(defaults)+len(args))
+	commandArgs = append(commandArgs, "template", "test", chartDir, "--namespace", "orka-test", "--is-upgrade")
+	commandArgs = append(commandArgs, defaults...)
 	commandArgs = append(commandArgs, args...)
 	output, err := exec.Command(helm, commandArgs...).CombinedOutput()
 	return string(output), err
@@ -506,8 +510,10 @@ func helmTemplateHarnessV1UpgradeDrainHook(
 		t.Fatalf("force existing wrapper lookup in copied chart: %v", err)
 	}
 
-	commandArgs := []string{"template", "test", chartDir, "--namespace", "orka-test", "--is-upgrade"}
-	commandArgs = append(commandArgs, staticChartDefaultArgs()...)
+	defaults := staticChartDefaultArgs()
+	commandArgs := make([]string, 0, 6+len(defaults)+len(args))
+	commandArgs = append(commandArgs, "template", "test", chartDir, "--namespace", "orka-test", "--is-upgrade")
+	commandArgs = append(commandArgs, defaults...)
 	commandArgs = append(commandArgs, args...)
 	output, err := exec.Command(helm, commandArgs...).CombinedOutput()
 	return string(output), err
@@ -862,8 +868,10 @@ func requireHelmRenderWithExistingSnapshotSecret(t *testing.T, value string, arg
 		t.Fatalf("copy static chart: %v", err)
 	}
 	forceGeneratedSnapshotSecretLookup(t, chartDir, value)
-	commandArgs := []string{"template", "test", chartDir, "--namespace", "orka-test"}
-	commandArgs = append(commandArgs, staticChartDefaultArgs()...)
+	defaults := staticChartDefaultArgs()
+	commandArgs := make([]string, 0, 5+len(defaults)+len(args))
+	commandArgs = append(commandArgs, "template", "test", chartDir, "--namespace", "orka-test")
+	commandArgs = append(commandArgs, defaults...)
 	commandArgs = append(commandArgs, args...)
 	output, err := exec.Command(helm, commandArgs...).CombinedOutput()
 	if err != nil {
@@ -904,6 +912,128 @@ func renderedSecretDataValue(t *testing.T, secret, key string) string {
 	}
 	t.Fatalf("rendered Secret has no data item %q:\n%s", key, secret)
 	return ""
+}
+
+func TestStaticChartGeneratesWebhookTLSSecret(t *testing.T) {
+	args := []string{
+		"--set-string", "webhooks.tls.existingSecret=",
+		"--set-string", "webhooks.caBundle=",
+	}
+	rendered := requireHelmRender(t, args...)
+
+	secret := requireRenderedDocument(t, rendered, "kind: Secret\n", "\n  name: test-orka-webhook-tls\n")
+	for _, marker := range []string{"helm.sh/resource-policy: keep", "type: Opaque"} {
+		if !strings.Contains(secret, marker) {
+			t.Fatalf("generated webhook TLS Secret is missing %q:\n%s", marker, secret)
+		}
+	}
+	if strings.Contains(secret, "\ndata:") {
+		t.Fatalf("a fresh generated webhook TLS Secret must be empty so the controller can populate it:\n%s", secret)
+	}
+
+	deployment := requireRenderedDocument(t, rendered, "kind: Deployment\n", "\n  name: test-orka-controller\n")
+	for _, marker := range []string{
+		`--webhook-cert-rotation-secret=test-orka-webhook-tls`,
+		`--webhook-cert-rotation-webhook=test-orka-controller`,
+		`--webhook-cert-rotation-dns-name=test-orka-webhook.orka-test.svc`,
+		"--webhook-cert-path=/var/run/orka/webhook/tls",
+	} {
+		if !strings.Contains(deployment, marker) {
+			t.Fatalf("controller deployment is missing rotation marker %q:\n%s", marker, deployment)
+		}
+	}
+	volume := deployment[strings.Index(deployment, "- name: webhook-tls\n          "):]
+	if !strings.Contains(volume, "emptyDir:") || strings.Contains(volume[:200], "secretName") {
+		t.Fatalf("generated webhook TLS must be a writable emptyDir, not a Secret mount:\n%s", volume[:300])
+	}
+	if !strings.Contains(deployment, "mountPath: /var/run/orka/webhook/tls\n              readOnly: false") {
+		t.Fatalf("generated webhook TLS mount must be writable:\n%s", deployment)
+	}
+
+	webhook := requireRenderedDocument(t, rendered,
+		"kind: ValidatingWebhookConfiguration\n", "\n  name: test-orka-controller\n")
+	if strings.Contains(webhook, "caBundle:") {
+		t.Fatalf("generated mode must leave caBundle to the controller:\n%s", webhook)
+	}
+
+	clusterRole := requireRenderedDocument(t, rendered, "kind: ClusterRole\n", "\n  name: test-orka-controller-cluster\n")
+	for _, marker := range []string{
+		`resources: ["validatingwebhookconfigurations"]`,
+		`resourceNames: ["test-orka-controller"]`,
+	} {
+		if !strings.Contains(clusterRole, marker) {
+			t.Fatalf("controller ClusterRole is missing rotation permission %q:\n%s", marker, clusterRole)
+		}
+	}
+}
+
+func TestStaticChartKeepsOperatorWebhookTLS(t *testing.T) {
+	rendered := requireHelmRender(t)
+	if strings.Contains(rendered, "name: test-orka-webhook-tls\n") {
+		t.Fatalf("chart generated a webhook TLS Secret although existingSecret was supplied:\n%s", rendered)
+	}
+	deployment := requireRenderedDocument(t, rendered, "kind: Deployment\n", "\n  name: test-orka-controller\n")
+	if strings.Contains(deployment, "--webhook-cert-rotation-secret") {
+		t.Fatalf("operator-supplied webhook TLS must not enable rotation:\n%s", deployment)
+	}
+	if !strings.Contains(deployment, `secretName: "controller-webhook-tls"`) {
+		t.Fatalf("operator-supplied webhook TLS Secret is not mounted:\n%s", deployment)
+	}
+	clusterRole := requireRenderedDocument(t, rendered, "kind: ClusterRole\n", "\n  name: test-orka-controller-cluster\n")
+	if strings.Contains(clusterRole, "validatingwebhookconfigurations") {
+		t.Fatalf("operator-supplied webhook TLS must not grant webhook configuration writes:\n%s", clusterRole)
+	}
+
+	output, err := helmTemplateStaticChart(t, "--set-string", "webhooks.caBundle=")
+	wantError := "caBundle or caInjectionAnnotations when webhooks.tls.existingSecret is set"
+	if err == nil || !strings.Contains(output, wantError) {
+		t.Fatalf("operator-supplied webhook TLS without CA trust was accepted: %v\n%s", err, output)
+	}
+}
+
+func TestStaticChartPreservesGeneratedWebhookTLSData(t *testing.T) {
+	helm, err := exec.LookPath("helm")
+	if err != nil {
+		t.Skip("helm is required for static chart render tests")
+	}
+	chartDir := filepath.Join(t.TempDir(), "static")
+	if err := os.CopyFS(chartDir, os.DirFS("static")); err != nil {
+		t.Fatalf("copy static chart: %v", err)
+	}
+	templatePath := filepath.Join(chartDir, "templates", "controller-webhook-tls-secret.yaml")
+	template, err := os.ReadFile(templatePath)
+	if err != nil {
+		t.Fatalf("read webhook TLS Secret template: %v", err)
+	}
+	lookup := `{{- $existing := lookup "v1" "Secret" .Release.Namespace $name }}`
+	liveData := map[string]string{"tls.crt": "Y2VydA==", "tls.key": "a2V5", "ca.crt": "Y2E=", "ca.key": "Y2FrZXk="}
+	forced := `{{- $existing := dict "data" (dict ` +
+		`"tls.crt" "Y2VydA==" "tls.key" "a2V5" "ca.crt" "Y2E=" "ca.key" "Y2FrZXk=") }}`
+	withSecret := strings.Replace(string(template), lookup, forced, 1)
+	if withSecret == string(template) {
+		t.Fatalf("webhook TLS Secret generation is not gated by the release-namespace Secret lookup")
+	}
+	if err := os.WriteFile(templatePath, []byte(withSecret), 0o600); err != nil {
+		t.Fatalf("force webhook TLS Secret lookup in copied chart: %v", err)
+	}
+	defaults := staticChartDefaultArgs()
+	commandArgs := make([]string, 0, 5+len(defaults)+4)
+	commandArgs = append(commandArgs, "template", "test", chartDir, "--namespace", "orka-test")
+	commandArgs = append(commandArgs, defaults...)
+	commandArgs = append(commandArgs,
+		"--set-string", "webhooks.tls.existingSecret=",
+		"--set-string", "webhooks.caBundle=",
+	)
+	output, err := exec.Command(helm, commandArgs...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template with forced webhook TLS Secret failed: %v\n%s", err, output)
+	}
+	secret := requireRenderedDocument(t, string(output), "kind: Secret\n", "\n  name: test-orka-webhook-tls\n")
+	for key, value := range liveData {
+		if got := renderedSecretDataValue(t, secret, key); got != value {
+			t.Fatalf("upgrade did not carry forward %s: got %q, want %q:\n%s", key, got, value, secret)
+		}
+	}
 }
 
 func TestStaticChartMountsAgentExecutionSnapshotKey(t *testing.T) {

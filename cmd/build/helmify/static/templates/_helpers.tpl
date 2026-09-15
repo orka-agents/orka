@@ -841,20 +841,37 @@ The release-local controller serves its own fail-closed webhooks. Its
 certificate and CA trust are always operator-managed.
 */}}
 {{- define "orka.validateWebhooks" -}}
-{{- if not (trim (default "" .Values.webhooks.tls.existingSecret)) -}}
-{{- fail "webhooks.tls.existingSecret is required" -}}
-{{- end -}}
 {{- if not (trim (default "" .Values.webhooks.tls.certKey)) -}}
 {{- fail "webhooks.tls.certKey is required" -}}
 {{- end -}}
 {{- if not (trim (default "" .Values.webhooks.tls.privateKeyKey)) -}}
 {{- fail "webhooks.tls.privateKeyKey is required" -}}
 {{- end -}}
-{{- if and (not (trim (default "" .Values.webhooks.caBundle))) (empty .Values.webhooks.caInjectionAnnotations) -}}
-{{- fail "webhooks requires a nonempty caBundle or caInjectionAnnotations" -}}
+{{- if and (not (include "orka.webhookTLSGenerated" .)) (not (trim (default "" .Values.webhooks.caBundle))) (empty .Values.webhooks.caInjectionAnnotations) -}}
+{{- fail "webhooks requires a nonempty caBundle or caInjectionAnnotations when webhooks.tls.existingSecret is set" -}}
 {{- end -}}
 {{- if or (lt (int .Values.webhooks.timeoutSeconds) 1) (gt (int .Values.webhooks.timeoutSeconds) 30) -}}
 {{- fail "webhooks.timeoutSeconds must be between 1 and 30" -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Webhook serving TLS. With webhooks.tls.existingSecret the operator owns the
+certificate and its CA trust. Without it the chart renders an empty
+release-owned Secret and the controller fills it with a self-signed CA and
+serving certificate, then injects that CA into the release's
+ValidatingWebhookConfiguration (see controller-webhook-tls-secret.yaml).
+*/}}
+{{- define "orka.webhookTLSGenerated" -}}
+{{- if not (trim (default "" .Values.webhooks.tls.existingSecret)) -}}true{{- end -}}
+{{- end }}
+
+{{- define "orka.webhookTLSSecretName" -}}
+{{- $existing := trim (default "" .Values.webhooks.tls.existingSecret) -}}
+{{- if $existing -}}
+{{- $existing -}}
+{{- else -}}
+{{- printf "%s-webhook-tls" (include "orka.fullname" . | trunc 51 | trimSuffix "-") | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 {{- end }}
 

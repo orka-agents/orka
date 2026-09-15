@@ -76,7 +76,6 @@ You will need, in addition to the prerequisites above:
 
 - Go, Bun, and Docker — see [Development](development/development.md#prerequisites) for versions
 - [Helm](https://helm.sh/docs/intro/install/) for the chart install below
-- A TLS certificate for the admission webhooks.
 
 ```bash
 export ORKA_CONTEXT='<your-kubeconfig-context>'
@@ -131,38 +130,11 @@ metadata:
 EOF
 ```
 
-Create the webhook certificate. The chart serves admission on the Service
-`orka-webhook.orka-system.svc`, so the certificate has to name exactly that — a
-certificate for any other name is rejected by the API server at admission time, not at
-install time. For local evaluation a self-signed certificate is fine; use your own CA or
-[cert-manager](https://cert-manager.io/) for anything real.
-
-```bash
-openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
-  -keyout /tmp/webhook.key -out /tmp/webhook.crt \
-  -subj "/CN=orka-webhook.orka-system.svc" \
-  -addext "subjectAltName=DNS:orka-webhook.orka-system.svc,DNS:orka-webhook.orka-system.svc.cluster.local"
-
-kubectl --context "${ORKA_CONTEXT}" -n orka-system create secret generic orka-webhook-tls \
-  --type=kubernetes.io/tls \
-  --from-file=tls.crt=/tmp/webhook.crt \
-  --from-file=tls.key=/tmp/webhook.key \
-  --from-file=ca.crt=/tmp/webhook.crt
-```
-
-:::note[Why `ca.crt` is the certificate again]
-The certificate is self-signed, so it is its own issuer. The chart reads `ca.crt` to build
-the `caBundle` the API server uses to trust the webhook. With a real CA, `ca.crt` is that
-CA's certificate instead.
-:::
-
 Install the development chart from `manifest_staging/charts/orka`. It matches
 the source checkout. The root `charts/orka` directory holds files prepared for
 release and may not match your code:
 
 ```bash
-WEBHOOK_CA_BUNDLE="$(kubectl --context "${ORKA_CONTEXT}" -n orka-system get secret orka-webhook-tls -o jsonpath='{.data.ca\.crt}')"
-
 helm install orka ./manifest_staging/charts/orka \
   --kube-context "${ORKA_CONTEXT}" \
   --namespace orka-system \
@@ -180,9 +152,11 @@ helm install orka ./manifest_staging/charts/orka \
   --set controller.acpRuntime.claudeImage="${ORKA_IMAGE_PREFIX}/acp-claude-runtime@sha256:<claude-digest>" \
   --set controller.acpRuntime.copilotImage="${ORKA_IMAGE_PREFIX}/acp-copilot-runtime@sha256:<copilot-digest>" \
   --set controller.acpRuntime.opencodeImage="${ORKA_IMAGE_PREFIX}/acp-opencode-runtime@sha256:<opencode-digest>" \
-  --set-string webhooks.tls.existingSecret=orka-webhook-tls \
-  --set-string webhooks.caBundle="${WEBHOOK_CA_BUNDLE}"
+  --wait --timeout 10m
 ```
+
+The controller issues its own webhook certificate. To bring your own, see
+[Webhook certificate](reference/configuration.md#webhook-certificate).
 
 To disable an unused runtime, set its image to an empty string, for example
 `--set-string controller.acpRuntime.codexImage=`. Otherwise, the chart uses its

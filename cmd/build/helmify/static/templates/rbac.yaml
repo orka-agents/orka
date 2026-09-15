@@ -194,6 +194,17 @@ rules:
       - {{ .Values.controller.acpRuntime.namespace }}
       {{- end }}
     verbs: ["get"]
+  {{- if include "orka.webhookTLSGenerated" . }}
+  # The certificate rotator watches webhook configurations cluster-wide and
+  # rewrites only this release's caBundle. list/watch cannot be name-scoped.
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingwebhookconfigurations"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingwebhookconfigurations"]
+    resourceNames: [{{ include "orka.controllerWebhookName" . | quote }}]
+    verbs: ["update", "patch"]
+  {{- end }}
   - apiGroups: ["authentication.k8s.io"]
     resources: ["tokenreviews"]
     verbs: ["create"]

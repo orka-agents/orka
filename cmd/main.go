@@ -252,6 +252,7 @@ func main() {
 	var metricsAddr string
 	var metricsCertPath, metricsCertName, metricsCertKey string
 	var webhookCertPath, webhookCertName, webhookCertKey string
+	var webhookCertRotationSecret, webhookCertRotationWebhook, webhookCertRotationDNSName string
 	var taskProvenanceAdmissionEnabled bool
 	var taskProvenanceAdmissionExternal bool
 	var workspaceClassUseAdmissionEnabled bool
@@ -403,6 +404,15 @@ func main() {
 	flag.StringVar(&webhookCertPath, "webhook-cert-path", "", "The directory that contains the webhook certificate.")
 	flag.StringVar(&webhookCertName, "webhook-cert-name", "tls.crt", "The name of the webhook certificate file.")
 	flag.StringVar(&webhookCertKey, "webhook-cert-key", "tls.key", "The name of the webhook key file.")
+	flag.StringVar(&webhookCertRotationSecret, "webhook-cert-rotation-secret", "",
+		"Name of a Secret in the controller Pod namespace that the controller fills with a self-signed CA and "+
+			"webhook serving certificate, writing the files into --webhook-cert-path and injecting the CA into "+
+			"--webhook-cert-rotation-webhook. Empty means the operator supplies the mounted certificate.")
+	flag.StringVar(&webhookCertRotationWebhook, "webhook-cert-rotation-webhook", "",
+		"Name of the ValidatingWebhookConfiguration whose caBundle the controller keeps in sync when "+
+			"--webhook-cert-rotation-secret is set.")
+	flag.StringVar(&webhookCertRotationDNSName, "webhook-cert-rotation-dns-name", "",
+		"Service DNS name, such as orka-webhook.orka-system.svc, that the generated serving certificate must authenticate.")
 	flag.BoolVar(&taskProvenanceAdmissionEnabled, "task-provenance-admission-enabled",
 		envBool("ORKA_TASK_PROVENANCE_ADMISSION_ENABLED"),
 		"Enable validating admission that rejects untrusted direct Task writes to Orka-managed "+
@@ -829,6 +839,18 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	webhookCertRotation := webhookCertRotationOptions{
+		SecretName:  webhookCertRotationSecret,
+		WebhookName: webhookCertRotationWebhook,
+		DNSName:     webhookCertRotationDNSName,
+		CertDir:     webhookCertPath,
+		CertName:    webhookCertName,
+		KeyName:     webhookCertKey,
+	}
+	if err := validateWebhookCertRotationOptions(webhookCertRotation); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	if harnessV1Enabled {
 		missing := make([]string, 0, 5)
 		for name, value := range map[string]string{
@@ -1110,6 +1132,17 @@ func main() {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
+	webhookCertsReady, err := setupWebhookCertRotation(mgr, currentPodNamespace(), webhookCertRotation)
+	if err != nil {
+		setupLog.Error(err, "unable to set up webhook certificate rotation")
+		os.Exit(1)
+	}
+	if webhookCertRotation.enabled() {
+		setupLog.Info("controller-managed webhook certificate rotation enabled",
+			"secret", webhookCertRotation.SecretName,
+			"webhook", webhookCertRotation.WebhookName,
+			"dnsName", webhookCertRotation.DNSName)
+	}
 	kubeClient, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
 		setupLog.Error(err, "unable to create Kubernetes clientset")
@@ -1159,39 +1192,53 @@ func main() {
 		}
 	}
 
-	if workspaceClassUseAdmissionEnabled {
-		orkaadmission.RegisterWorkspaceClassUseWebhooks(
-			mgr.GetWebhookServer(),
-			mgr.GetScheme(),
-			controller.WorkspaceClassAuthorizer{Client: mgr.GetClient()},
-		)
-		setupLog.Info("registered Task and Tool workspace class use admission")
-	}
+	// Registering a handler also adds the webhook server to the manager, and
+	// the server needs its certificate files when it starts. With
+	// controller-managed rotation those files appear only after the manager is
+	// running, so registration waits for the rotator; otherwise it happens now.
+	registerAdmissionWebhooks := func() {
+		if workspaceClassUseAdmissionEnabled {
+			orkaadmission.RegisterWorkspaceClassUseWebhooks(
+				mgr.GetWebhookServer(),
+				mgr.GetScheme(),
+				controller.WorkspaceClassAuthorizer{Client: mgr.GetClient()},
+			)
+			setupLog.Info("registered Task and Tool workspace class use admission")
+		}
 
-	if taskProvenanceAdmissionEnabled {
-		admissionConfig := orkaadmission.NewTaskProvenanceConfig(
-			true,
-			executionModeControllerUsernames,
-			taskProvenanceAdmissionTrustedUsers,
-			taskProvenanceAdmissionTrustedServiceAccounts,
-			currentPodNamespace(),
-		)
-		orkaadmission.RegisterTaskProvenanceWebhook(mgr.GetWebhookServer(), mgr.GetScheme(), admissionConfig, mgr.GetAPIReader())
-		setupLog.Info("enabled Task provenance validating admission",
-			"trustedUsers", strings.Join(admissionConfig.TrustedUsernames, ","),
-			"trustedServiceAccounts", strings.Join(admissionConfig.TrustedServiceAccountNames, ","),
-		)
+		if taskProvenanceAdmissionEnabled {
+			admissionConfig := orkaadmission.NewTaskProvenanceConfig(
+				true,
+				executionModeControllerUsernames,
+				taskProvenanceAdmissionTrustedUsers,
+				taskProvenanceAdmissionTrustedServiceAccounts,
+				currentPodNamespace(),
+			)
+			orkaadmission.RegisterTaskProvenanceWebhook(mgr.GetWebhookServer(), mgr.GetScheme(), admissionConfig, mgr.GetAPIReader())
+			setupLog.Info("enabled Task provenance validating admission",
+				"trustedUsers", strings.Join(admissionConfig.TrustedUsernames, ","),
+				"trustedServiceAccounts", strings.Join(admissionConfig.TrustedServiceAccountNames, ","),
+			)
+		}
+		if managerAdmissionEnabled {
+			orkaadmission.RegisterExecutionModeWebhooks(
+				mgr.GetWebhookServer(),
+				mgr.GetScheme(),
+				mgr.GetAPIReader(),
+				orkaadmission.ExecutionModeConfig{
+					ControllerUsernames: splitCommaList(executionModeControllerUsernames),
+				},
+			)
+			setupLog.Info("registered immutable namespace mode and execution-authority admission")
+		}
 	}
-	if managerAdmissionEnabled {
-		orkaadmission.RegisterExecutionModeWebhooks(
-			mgr.GetWebhookServer(),
-			mgr.GetScheme(),
-			mgr.GetAPIReader(),
-			orkaadmission.ExecutionModeConfig{
-				ControllerUsernames: splitCommaList(executionModeControllerUsernames),
-			},
-		)
-		setupLog.Info("registered immutable namespace mode and execution-authority admission")
+	if webhookCertRotation.enabled() {
+		go func() {
+			<-webhookCertsReady
+			registerAdmissionWebhooks()
+		}()
+	} else {
+		registerAdmissionWebhooks()
 	}
 
 	// The clientset is reused for pod log and broker operations.
@@ -1959,7 +2006,7 @@ func main() {
 		os.Exit(1)
 	}
 	if managerAdmissionEnabled {
-		if err := mgr.AddReadyzCheck("webhook", mgr.GetWebhookServer().StartedChecker()); err != nil {
+		if err := mgr.AddReadyzCheck("webhook", webhookReadyChecker(webhookCertsReady, webhookServer.StartedChecker())); err != nil {
 			setupLog.Error(err, "unable to set up webhook ready check")
 			os.Exit(1)
 		}

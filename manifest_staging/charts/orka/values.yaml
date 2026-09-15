@@ -259,12 +259,18 @@ controller:
 # certificate must authenticate <release>-orka-webhook.<namespace>.svc.
 webhooks:
   tls:
-    # Required. The chart never generates webhook certificates.
+    # Leave empty and the controller manages the certificate: the chart renders
+    # an empty Secret named <fullname>-webhook-tls, the controller fills it with
+    # a self-signed CA and serving certificate, renews it before expiry, and
+    # keeps the webhook configuration's caBundle in sync. Set an existing
+    # kubernetes.io/tls Secret to bring your own certificate instead; then
+    # caBundle or caInjectionAnnotations below is required.
     existingSecret: ""
     certKey: tls.crt
     privateKeyKey: tls.key
-  # Base64-encoded PEM CA bundle. Leave empty when an injector annotation is
-  # configured below.
+  # Base64-encoded PEM CA bundle for an operator-supplied certificate. Leave
+  # empty when an injector annotation is configured below or the controller
+  # manages the certificate.
   caBundle: ""
   # For example: cert-manager.io/inject-ca-from-secret: orka-v2/orka-webhook-tls
   caInjectionAnnotations: {}
