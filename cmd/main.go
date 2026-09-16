@@ -406,8 +406,9 @@ func main() {
 	flag.StringVar(&webhookCertKey, "webhook-cert-key", "tls.key", "The name of the webhook key file.")
 	flag.StringVar(&webhookCertRotationSecret, "webhook-cert-rotation-secret", "",
 		"Name of a Secret in the controller Pod namespace that the controller fills with a self-signed CA and "+
-			"webhook serving certificate, writing the files into --webhook-cert-path and injecting the CA into "+
-			"--webhook-cert-rotation-webhook. Empty means the operator supplies the mounted certificate.")
+			"webhook serving certificate. The Secret must be mounted at --webhook-cert-path; the controller waits "+
+			"for the kubelet to project it there and injects the CA into --webhook-cert-rotation-webhook. "+
+			"Empty means the operator supplies the mounted certificate.")
 	flag.StringVar(&webhookCertRotationWebhook, "webhook-cert-rotation-webhook", "",
 		"Name of the ValidatingWebhookConfiguration whose caBundle the controller keeps in sync when "+
 			"--webhook-cert-rotation-secret is set.")

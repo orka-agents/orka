@@ -942,12 +942,18 @@ func TestStaticChartGeneratesWebhookTLSSecret(t *testing.T) {
 			t.Fatalf("controller deployment is missing rotation marker %q:\n%s", marker, deployment)
 		}
 	}
-	volume := deployment[strings.Index(deployment, "- name: webhook-tls\n          "):]
-	if !strings.Contains(volume, "emptyDir:") || strings.Contains(volume[:200], "secretName") {
-		t.Fatalf("generated webhook TLS must be a writable emptyDir, not a Secret mount:\n%s", volume[:300])
+	// cert-controller writes only the Secret; the kubelet must project it into
+	// the cert directory, so generated mode mounts the whole generated Secret.
+	volumeStart := strings.Index(deployment, "\n        - name: webhook-tls\n")
+	if volumeStart < 0 {
+		t.Fatalf("controller deployment has no webhook-tls volume:\n%s", deployment)
 	}
-	if !strings.Contains(deployment, "mountPath: /var/run/orka/webhook/tls\n              readOnly: false") {
-		t.Fatalf("generated webhook TLS mount must be writable:\n%s", deployment)
+	volume := deployment[volumeStart+1:]
+	if next := strings.Index(volume[1:], "\n        - name: "); next >= 0 {
+		volume = volume[:next+1]
+	}
+	if !strings.Contains(volume, `secretName: "test-orka-webhook-tls"`) || strings.Contains(volume, "items:") {
+		t.Fatalf("generated webhook TLS must mount the whole generated Secret:\n%s", volume)
 	}
 
 	webhook := requireRenderedDocument(t, rendered,

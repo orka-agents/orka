@@ -820,7 +820,9 @@ a one-year serving certificate, renews the serving certificate before expiry,
 and writes the CA into the `caBundle` of the release's
 ValidatingWebhookConfiguration. The Secret is the source of truth and is kept on
 `helm uninstall`, so a reinstall under the same release name reuses the CA. The
-controller Pod reports ready only after the certificate exists. This grants the
+Secret is mounted into the controller Pod, and the Pod reports ready only after
+the kubelet has projected the certificate and the CA is injected, which can take
+about a minute on a fresh install. This grants the
 controller `list` and `watch` on all ValidatingWebhookConfigurations, which
 cannot be name-scoped, plus `update` on its own.
 

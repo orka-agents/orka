@@ -523,7 +523,7 @@ spec:
               readOnly: true
             - name: webhook-tls
               mountPath: /var/run/orka/webhook/tls
-              readOnly: {{ not (include "orka.webhookTLSGenerated" .) }}
+              readOnly: true
             {{- if $harnessV1 }}
             - name: harness-v1-tls
               mountPath: /var/run/orka/harness-v1-tls
@@ -598,9 +598,11 @@ spec:
                 path: key
         - name: webhook-tls
           {{- if include "orka.webhookTLSGenerated" . }}
-          # The controller writes its generated serving certificate here.
-          emptyDir:
-            medium: Memory
+          # The controller writes the generated certificate into this Secret
+          # and the kubelet projects it here; the rotator waits for the files.
+          secret:
+            secretName: {{ include "orka.webhookTLSSecretName" . | quote }}
+            defaultMode: 0400
           {{- else }}
           secret:
             secretName: {{ .Values.webhooks.tls.existingSecret | quote }}

@@ -73,9 +73,11 @@ func validateWebhookCertRotationOptions(o webhookCertRotationOptions) error {
 }
 
 // setupWebhookCertRotation registers the certificate rotator with the manager
-// and returns a channel that closes once a serving certificate is on disk.
-// Without rotation the channel is already closed so callers can wait on it
-// unconditionally.
+// and returns a channel that closes once the serving certificate has been
+// written to the Secret, projected by the kubelet into CertDir, and its CA
+// injected into the webhook configuration. The rotator never writes files
+// itself, so CertDir must be a mount of SecretName. Without rotation the
+// channel is already closed so callers can wait on it unconditionally.
 func setupWebhookCertRotation(
 	mgr manager.Manager,
 	namespace string,
