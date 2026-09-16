@@ -74,6 +74,16 @@ func Bool(name string) (bool, error) {
 	return value, nil
 }
 
+// MustInt is Int for process startup: a malformed value exits the
+// process with "invalid NAME".
+func MustInt(name string, fallback int) int {
+	value, err := Int(name, fallback)
+	if err != nil {
+		log.Fatalf("invalid %s", name)
+	}
+	return value
+}
+
 // MustPositiveInt is Int for process startup: a malformed or non-positive
 // value exits the process with "invalid NAME".
 func MustPositiveInt(name string, fallback int) int {

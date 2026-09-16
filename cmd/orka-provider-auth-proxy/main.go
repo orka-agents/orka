@@ -32,7 +32,7 @@ func main() {
 	maxRequestBytes := flag.Int64("max-request-bytes", envutil.MustInt64("ORKA_PROVIDER_AUTH_PROXY_MAX_REQUEST_BYTES", defaultMaxRequestBytes), "Maximum streamed request body size")
 	maxResponseBytes := flag.Int64("max-response-bytes", envutil.MustInt64("ORKA_PROVIDER_AUTH_PROXY_MAX_RESPONSE_BYTES", defaultMaxResponseBytes), "Maximum streamed response body size")
 	responseHeaderTimeout := flag.Duration("response-header-timeout", envutil.MustDuration("ORKA_PROVIDER_AUTH_PROXY_RESPONSE_HEADER_TIMEOUT", defaultResponseHeaderTimeout), "Upstream response header timeout")
-	maxConcurrentRequests := flag.Int("max-concurrent-requests", envutil.MustPositiveInt("ORKA_PROVIDER_AUTH_PROXY_MAX_CONCURRENT_REQUESTS", defaultMaxConcurrentRequests), "Maximum concurrent upstream requests")
+	maxConcurrentRequests := flag.Int("max-concurrent-requests", envutil.MustInt("ORKA_PROVIDER_AUTH_PROXY_MAX_CONCURRENT_REQUESTS", defaultMaxConcurrentRequests), "Maximum concurrent upstream requests")
 	flag.Parse()
 
 	tokens := newBearerTokenStore(time.Now)
