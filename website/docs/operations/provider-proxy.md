@@ -9,6 +9,15 @@ This step is optional. You only need it to run built-in coding agents, which
 are `type: agent` Tasks running Codex, Claude Code, GitHub Copilot CLI, or
 OpenCode. Install Orka first, then come back here.
 
+:::tip[Fastest path]
+Have an OpenAI API key? Jump to [With provider API keys](#with-provider-api-keys),
+then [Connect the gateway](#connect-the-gateway). Have an OpenAI Codex or
+GitHub Copilot subscription instead? Use
+[With a Codex subscription](#with-an-openai-codex-subscription) or
+[With a GitHub Copilot subscription](#with-a-github-copilot-subscription).
+Either way it is one deploy script, one values file, and one `helm upgrade`.
+:::
+
 AI-worker tasks, `type: ai`, do not use a gateway. They read your
 [Provider resources](../reference/configuration.md#provider) and their API-key
 Secrets directly, and they work as soon as Orka is installed.
@@ -103,6 +112,30 @@ environment variable named in `api_key_env` to a Secret and key:
   --providers-config ./providers.yaml \
   --env-secret OPENAI_API_KEY=openai-api-key:key
 ```
+
+### With an OpenAI Codex subscription
+
+Vekil can use the ChatGPT login that the Codex CLI stores after `codex login`.
+Copy that file into a Secret and mount it:
+
+```bash
+codex login
+kubectl -n vekil-system create secret generic codex-auth \
+  --from-file=auth.json="$HOME/.codex/auth.json"
+
+cat > providers.yaml <<'YAML'
+providers:
+  - id: openai-codex
+    type: openai-codex
+    default: true
+YAML
+
+.agents/skills/vekil-reverse-proxy-deploy/scripts/deploy_vekil_reverse_proxy.sh \
+  --providers-config ./providers.yaml \
+  --codex-auth-secret codex-auth:auth.json
+```
+
+When the stored login expires, run `codex login` again and recreate the Secret.
 
 ### With a GitHub Copilot subscription
 

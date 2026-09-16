@@ -102,7 +102,7 @@ Follow [Install Orka](website/docs/operations/installation.md) to set up Orka on
 Kubernetes and run a test task. It is one Helm command with `--create-namespace`. The chart creates
 `orka-system` for Orka and `orka-runtimes` for the Pods that run coding agents.
 
-For development, [build from source](website/docs/getting-started.md#option-b-current-main-from-source).
+For development, [build from source](website/docs/development/build-from-source.md).
 
 ### Create an API client
 

@@ -8,7 +8,7 @@ complete Helm installation. Published charts are available from
 repository at `https://orka-agents.github.io/orka/charts`.
 
 For development, use `manifest_staging/charts/orka` from a source checkout.
-See [Build from source](https://orka-agents.github.io/orka/docs/getting-started#option-b-current-main-from-source).
+See [Build from source](https://orka-agents.github.io/orka/docs/build-from-source).
 
 ## Values
 

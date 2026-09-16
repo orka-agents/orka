@@ -44,7 +44,7 @@ image too.
 
 ## Build from source {#installing-main}
 
-Follow [Build from source](../getting-started.md#option-b-current-main-from-source)
+Follow [Build from source](../development/build-from-source.md)
 for development. This builds your own images; ordinary pushes to `main` do not
 publish release images.
 

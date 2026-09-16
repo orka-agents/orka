@@ -35,7 +35,7 @@ export default function QuickStartSection() {
       </div>
       <p className="section-subtitle">
         For development,{' '}
-        <Link to="/docs/getting-started#option-b-current-main-from-source">
+        <Link to="/docs/build-from-source">
           build from source
         </Link>.
       </p>

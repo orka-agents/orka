@@ -11,7 +11,7 @@ for Orka itself and a second namespace, `orka-runtimes`, for the Pods that run
 coding agents.
 These commands use your current Kubernetes context, name the installation `orka`,
 and use the namespace `orka-system`.
-For development, [build from source](../getting-started.md#option-b-current-main-from-source).
+For development, [build from source](../development/build-from-source.md).
 
 ## Before you start
 

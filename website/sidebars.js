@@ -78,6 +78,7 @@ const sidebars = {
       collapsed: false,
       items: [
         'development/development',
+        'development/build-from-source',
         'development/testing',
         'development/release-qualification',
         'development/security-scanning-design',
