@@ -640,7 +640,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 				if errors.Is(err, errWorkspaceDurableLineageLost) &&
 					strings.TrimSpace(pool.Annotations[runtimePoolWorkspaceResumeLostAnnotation]) == "" {
 					if annotationErr := r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolWorkspaceResumeLostAnnotation,
-						sanitizeRuntimePoolMessage(err.Error())); annotationErr != nil {
+						sanitizeStatusMessage(err.Error())); annotationErr != nil {
 						return ctrl.Result{}, annotationErr
 					}
 				}
@@ -652,7 +652,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 				status.ActiveInstance = nil
 				status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 				status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-				status.Message = sanitizeRuntimePoolMessage("resumed provider workspace failed attestation; retaining the preserved claim: " + err.Error())
+				status.Message = sanitizeStatusMessage("resumed provider workspace failed attestation; retaining the preserved claim: " + err.Error())
 				r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
 				r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 				return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
@@ -663,7 +663,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 			status.ActiveInstance = nil
 			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-			status.Message = sanitizeRuntimePoolMessage("provider workspace materialization does not match the validated controller template: " + err.Error())
+			status.Message = sanitizeStatusMessage("provider workspace materialization does not match the validated controller template: " + err.Error())
 			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
 			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
@@ -724,7 +724,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceBackedRuntimePool(
 			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 		}
 		if seedErr != nil {
-			r.applyProviderRuntimePoolColdStartStatus(pool, &status, sanitizeRuntimePoolMessage("credential bootstrap is not complete: "+seedErr.Error()))
+			r.applyProviderRuntimePoolColdStartStatus(pool, &status, sanitizeStatusMessage("credential bootstrap is not complete: "+seedErr.Error()))
 			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 		}
 		if alreadyComplete {
@@ -1207,7 +1207,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolScaleDown(
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 		status.ActiveInstance = nil
-		status.Message = sanitizeRuntimePoolMessage("deployed runtime identity is invalid during scale-down: " + err.Error())
+		status.Message = sanitizeStatusMessage("deployed runtime identity is invalid during scale-down: " + err.Error())
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
@@ -1216,7 +1216,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolScaleDown(
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 		status.ActiveInstance = nil
-		status.Message = sanitizeRuntimePoolMessage("resolve deployed runtime credentials during scale-down: " + err.Error())
+		status.Message = sanitizeStatusMessage("resolve deployed runtime credentials during scale-down: " + err.Error())
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
@@ -1225,7 +1225,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolScaleDown(
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 		status.ActiveInstance = nil
-		status.Message = sanitizeRuntimePoolMessage("authenticated drain status probe failed: " + err.Error())
+		status.Message = sanitizeStatusMessage("authenticated drain status probe failed: " + err.Error())
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
@@ -1234,7 +1234,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolScaleDown(
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 		status.ActiveInstance = nil
-		status.Message = sanitizeRuntimePoolMessage(err.Error())
+		status.Message = sanitizeStatusMessage(err.Error())
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
@@ -1262,7 +1262,7 @@ func (r *RuntimePoolReconciler) reconcileWorkspaceRuntimePoolScaleDown(
 		); err != nil {
 			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-			status.Message = sanitizeRuntimePoolMessage("authenticated drain request failed: " + err.Error())
+			status.Message = sanitizeStatusMessage("authenticated drain request failed: " + err.Error())
 			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 		}
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining
@@ -2058,7 +2058,7 @@ func (r *RuntimePoolReconciler) applySandboxClaimFailureConditions(
 			// being hidden behind the suspend record.
 			continue
 		}
-		message := sanitizeRuntimePoolMessage("provider workspace claim is not ready: " + condition.Message)
+		message := sanitizeStatusMessage("provider workspace claim is not ready: " + condition.Message)
 		preserveSuspendFence := sandboxWorkspaceSuspendRequested(pool)
 		if !preserveSuspendFence && pool.DeletionTimestamp.IsZero() && pool.Status.ActiveInstance != nil {
 			pending, err := r.linkedWorkspaceSuspendIntentPending(ctx, pool)
@@ -2092,10 +2092,7 @@ func (r *RuntimePoolReconciler) pruneStaleWorkspaceRuntimePoolSecrets(
 	sandboxTemplate *sandboxextv1beta1.SandboxTemplate,
 	currentNames ...string,
 ) error {
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	keep := make(map[string]struct{}, len(currentNames)+2)
 	for _, name := range currentNames {
 		addRuntimeSecretName(keep, name)
@@ -2432,7 +2429,7 @@ func (r *RuntimePoolReconciler) finishWorkspacePoolFailureWithPreservedDurableSt
 	status.ActiveInstance = pool.Status.ActiveInstance
 	status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining
 	status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-	status.Message = sanitizeRuntimePoolMessage(failureContext + " while a suspension or durable lineage stands; retrying with the admitted identity preserved: " + failureErr.Error())
+	status.Message = sanitizeStatusMessage(failureContext + " while a suspension or durable lineage stands; retrying with the admitted identity preserved: " + failureErr.Error())
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
 	return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 }

@@ -68,13 +68,6 @@ func setSubstrateMCPPoolActorLeaseHolder(lease *coordinationv1.Lease, tool *core
 	setSubstrateMCPToolLeaseHolder(lease, tool, actorID, substratePoolActorLeasePurpose)
 }
 
-func substrateMCPToolActorLeaseName(actorID string) string {
-	// The deterministic Tool Actor name already hashes its template Atespace.
-	// Preserve the pre-native lease key when its routable ID becomes qualified.
-	name, _, _ := strings.Cut(strings.TrimSpace(actorID), ".")
-	return name
-}
-
 func newSubstrateMCPToolActorLease(
 	tool *corev1alpha1.Tool,
 	namespace string,
@@ -83,7 +76,7 @@ func newSubstrateMCPToolActorLease(
 	lease := &coordinationv1.Lease{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: namespace,
-			Name:      substrateMCPToolActorLeaseName(actorID),
+			Name:      substratePoolActorLeaseName(actorID),
 		},
 	}
 	setSubstrateMCPToolActorLeaseHolder(lease, tool, actorID)
@@ -131,18 +124,6 @@ func substratePoolActorLeaseHeldByTool(lease *coordinationv1.Lease, tool *corev1
 	return leaseUID == "" || string(tool.UID) == "" || leaseUID == string(tool.UID)
 }
 
-func substrateMCPToolActorLeaseHeldByTool(lease *coordinationv1.Lease, tool *corev1alpha1.Tool) bool {
-	if lease == nil || tool == nil || lease.Annotations == nil {
-		return false
-	}
-	if lease.Annotations[substratePoolActorLeaseToolNSAnno] != tool.Namespace ||
-		lease.Annotations[substratePoolActorLeaseToolNameAnno] != tool.Name {
-		return false
-	}
-	leaseUID := lease.Annotations[substratePoolActorLeaseToolUIDAnno]
-	return leaseUID == "" || string(tool.UID) == "" || leaseUID == string(tool.UID)
-}
-
 func substratePoolActorLeaseActorID(lease *coordinationv1.Lease) string {
 	if lease != nil && lease.Annotations["orka.ai/substrate-actor-ref"] != "" {
 		return lease.Annotations["orka.ai/substrate-actor-ref"]
@@ -158,21 +139,9 @@ func substratePoolActorLeaseActorID(lease *coordinationv1.Lease) string {
 	return strings.TrimSpace(lease.Name)
 }
 
-func substrateMCPToolActorLeaseActorID(lease *coordinationv1.Lease) string {
-	if lease != nil && lease.Annotations["orka.ai/substrate-actor-ref"] != "" {
-		return lease.Annotations["orka.ai/substrate-actor-ref"]
-	}
-	if lease == nil {
-		return ""
-	}
-	if lease.Labels != nil {
-		if actorID := strings.TrimSpace(lease.Labels[substratePoolActorLeaseActorIDLabel]); actorID != "" {
-			return actorID
-		}
-	}
-	return strings.TrimSpace(lease.Name)
-}
-
+// substratePoolActorLeaseName derives the Lease key from an Actor ID. The
+// deterministic Actor name already hashes its template Atespace, so the
+// pre-native lease key is preserved when the routable ID becomes qualified.
 func substratePoolActorLeaseName(actorID string) string {
 	actorID, _, _ = strings.Cut(strings.TrimSpace(actorID), ".")
 	return strings.TrimSpace(actorID)
@@ -185,7 +154,7 @@ func substratePoolActorLeaseHasActiveHolder(ctx context.Context, reader client.R
 	toolNamespace := strings.TrimSpace(lease.Annotations[substratePoolActorLeaseToolNSAnno])
 	toolName := strings.TrimSpace(lease.Annotations[substratePoolActorLeaseToolNameAnno])
 	if toolNamespace != "" && toolName != "" {
-		return substratePoolActorLeaseHasActiveToolHolder(ctx, reader, toolNamespace, toolName, lease.Annotations[substratePoolActorLeaseToolUIDAnno])
+		return substratePoolActorLeaseHasActiveToolHolder(ctx, reader, toolNamespace, toolName)
 	}
 	taskNamespace := strings.TrimSpace(lease.Annotations[legacySubstratePoolActorLeaseTaskNSAnno])
 	taskName := strings.TrimSpace(lease.Annotations[legacySubstratePoolActorLeaseTaskNameAnno])
@@ -225,23 +194,19 @@ func legacySubstratePoolActorLeaseHasActiveTaskHolder(
 	}
 }
 
+// substratePoolActorLeaseHasActiveToolHolder treats every Tool-held lease as
+// busy: a Tool lease is released only by the Tool controller deleting it, so
+// the holder's presence, absence, or replacement never proves the actor is safe
+// to reuse. The Get is kept so transient reader failures surface to the caller.
 func substratePoolActorLeaseHasActiveToolHolder(
 	ctx context.Context,
 	reader client.Reader,
 	toolNamespace string,
 	toolName string,
-	toolUID string,
 ) (bool, error) {
 	tool := &corev1alpha1.Tool{}
-	if err := reader.Get(ctx, types.NamespacedName{Namespace: toolNamespace, Name: toolName}, tool); err != nil {
-		if apierrors.IsNotFound(err) {
-			return true, nil
-		}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: toolNamespace, Name: toolName}, tool); err != nil && !apierrors.IsNotFound(err) {
 		return true, err
-	}
-	toolUID = strings.TrimSpace(toolUID)
-	if toolUID != "" && string(tool.UID) != toolUID {
-		return true, nil
 	}
 	return true, nil
 }

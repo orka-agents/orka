@@ -329,10 +329,7 @@ func (m WorkspaceAttachmentManager) renewAttachmentLeaseFence(
 	}
 	lease := &coordinationv1.Lease{}
 	key := types.NamespacedName{Namespace: workspace.Namespace, Name: attachmentLeaseName(workspace.Name)}
-	reader := m.APIReader
-	if reader == nil {
-		reader = m.Client
-	}
+	reader := uncachedReader(m.APIReader, m.Client)
 	if err := reader.Get(ctx, key, lease); err != nil {
 		if apierrors.IsNotFound(err) {
 			return fmt.Errorf("%w: attachment Lease %s disappeared before intent publication", ErrWorkspaceAttachmentLocked, key)
@@ -367,10 +364,7 @@ func (m WorkspaceAttachmentManager) renewAttachmentLeaseFence(
 }
 
 func (m WorkspaceAttachmentManager) now() time.Time {
-	if m.Now != nil {
-		return m.Now().UTC()
-	}
-	return time.Now().UTC()
+	return clockNow(m.Now)
 }
 
 func (m WorkspaceAttachmentManager) recoverOrphanedAttachmentSecret(

@@ -433,10 +433,7 @@ func (d *HarnessV1Dispatcher) protocolClientAndRequest(
 		return nil, harness.StartTurnRequest{}, errors.New("verified harness v1 snapshot is required")
 	}
 	target := verified.body.HarnessV1
-	reader := d.APIReader
-	if reader == nil {
-		reader = d.Client
-	}
+	reader := uncachedReader(d.APIReader, d.Client)
 	if reader == nil {
 		return nil, harness.StartTurnRequest{}, errors.New("kubernetes reader is required for harness v1 protocol client")
 	}
@@ -464,10 +461,7 @@ func (d *HarnessV1Dispatcher) protocolClientForHarnessV1Execution(
 		return nil, errors.New("verified harness v1 snapshot is required")
 	}
 	target := verified.body.HarnessV1
-	reader := d.APIReader
-	if reader == nil {
-		reader = d.Client
-	}
+	reader := uncachedReader(d.APIReader, d.Client)
 	if reader == nil {
 		return nil, errors.New("kubernetes reader is required for harness v1 protocol client")
 	}

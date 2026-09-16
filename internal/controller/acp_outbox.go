@@ -3,8 +3,6 @@ package controller
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -92,7 +90,6 @@ func enqueueDurableTaskTerminalProjectionForUID(
 	if err != nil {
 		return err
 	}
-	sum := sha256.Sum256(encoded)
 	projectionTime := task.CreationTimestamp.UTC()
 	if payload.Execution.LastTransitionTime != nil && !payload.Execution.LastTransitionTime.IsZero() {
 		projectionTime = payload.Execution.LastTransitionTime.UTC()
@@ -105,7 +102,7 @@ func enqueueDurableTaskTerminalProjectionForUID(
 	projection := &store.OutboxProjection{
 		ID:            standaloneTaskTerminalProjectionIDForUID(task.Namespace, projectionTaskUID, payload.Attempt),
 		AggregateKind: "Task", AggregateID: string(projectionTaskUID), ProjectionKind: "TaskTerminalStatus",
-		PayloadDigest: "sha256:" + hex.EncodeToString(sum[:]), Payload: encoded,
+		PayloadDigest: store.CanonicalBytesDigest(encoded), Payload: encoded,
 		AvailableAt: projectionTime, CreatedAt: time.Now().UTC(),
 	}
 	if existing, getErr := projectionStore.GetOutboxProjection(ctx, projection.ID); getErr == nil {

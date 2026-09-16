@@ -656,10 +656,7 @@ func (d *ACPDispatcher) readRecoverableTask(
 	if candidate == nil {
 		return nil, false, nil
 	}
-	reader := d.APIReader
-	if reader == nil {
-		reader = d.Client
-	}
+	reader := uncachedReader(d.APIReader, d.Client)
 	if reader == nil {
 		return nil, false, fmt.Errorf("ACP recovery requires a Kubernetes reader")
 	}
@@ -822,10 +819,7 @@ func (d *ACPDispatcher) recoverArchivedTerminalSession(
 	key := client.ObjectKeyFromObject(task)
 	return true, retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		latest := &corev1alpha1.Task{}
-		reader := d.APIReader
-		if reader == nil {
-			reader = d.Client
-		}
+		reader := uncachedReader(d.APIReader, d.Client)
 		if err := reader.Get(ctx, key, latest); err != nil {
 			return client.IgnoreNotFound(err)
 		}
@@ -1602,10 +1596,7 @@ func (d *ACPDispatcher) revalidateExternalRuntimeRotatedEndpointCleanupMutation(
 	if authority == nil || authority.frozenRuntime == nil {
 		return errors.New("external AgentRuntime rotated-endpoint cleanup authority is incomplete")
 	}
-	reader := d.APIReader
-	if reader == nil {
-		reader = d.Client
-	}
+	reader := uncachedReader(d.APIReader, d.Client)
 	current := &corev1alpha1.AgentRuntime{}
 	if err := reader.Get(ctx, authority.runtimeKey, current); err != nil {
 		return markExternalRuntimeMutationReadRetryable(fmt.Errorf("re-read external AgentRuntime before rotated-endpoint cleanup mutation: %w", err))

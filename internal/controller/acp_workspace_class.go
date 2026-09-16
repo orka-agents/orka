@@ -393,10 +393,7 @@ func (r *TaskReconciler) resolveACPWorkspaceClassWithSessionUID(
 	if className == "" {
 		return nil, fmt.Errorf("execution workspace classRef.name is required")
 	}
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 
 	class := &workspacev1alpha1.ExecutionWorkspaceClass{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: className}, class); err != nil {

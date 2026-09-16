@@ -97,10 +97,7 @@ func (r *TaskReconciler) resolveHarnessV1ExecutionCandidate(
 	if err := validateNewHarnessV1Workload(task, agent); err != nil {
 		return nil, permanentHarnessV1Candidate(err)
 	}
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	if reader == nil {
 		return nil, errors.New("API reader is required for harness v1 binding")
 	}
@@ -926,10 +923,7 @@ func (r *TaskReconciler) loadHarnessV1ExecutionWithOptions(
 	if r.AgentExecutionSnapshots == nil || task == nil || binding == nil {
 		return nil, errors.New("task, v1 binding, and encrypted snapshot store are required")
 	}
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	current := &corev1alpha1.Task{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, current); err != nil {
 		return nil, fmt.Errorf("uncached Task read before harness v1 dispatch: %w", err)
@@ -1006,10 +1000,7 @@ func (r *TaskReconciler) ensureHarnessV1ExecutionBinding(
 	if task == nil {
 		return ctrl.Result{}, errors.New("task is required for harness v1 execution binding"), true
 	}
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	if task.Status.AgentExecutionBinding == nil {
 		current := &corev1alpha1.Task{}
 		if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, current); err != nil {
@@ -1126,10 +1117,7 @@ func (r *TaskReconciler) queueHarnessV1Task(
 		State:                     store.HarnessV1AttemptPrepared, DuplicateSafe: verified.body.HarnessV1.DuplicateSafe,
 		RetryClass: retryClass, ControllerEpochName: fence.Name, ControllerEpoch: fence.Epoch,
 	}
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	env, err := resolveFrozenHarnessV1Env(ctx, reader, verified.body.HarnessV1.CredentialRefs)
 	if err != nil {
 		return ctrl.Result{}, err

@@ -54,10 +54,16 @@ func substratePublicCheckpointOwner(checkpoint *workspacev1alpha1.ExecutionWorks
 }
 
 func (r *RuntimePoolReconciler) nativeSubstrateReader() client.Reader {
-	if r.APIReader != nil {
-		return r.APIReader
+	return uncachedReader(r.APIReader, r.Client)
+}
+
+// uncachedReader prefers the direct API reader and falls back to the cached
+// client when no API reader is configured.
+func uncachedReader(api client.Reader, c client.Client) client.Reader {
+	if api != nil {
+		return api
 	}
-	return r.Client
+	return c
 }
 
 func (r *RuntimePoolReconciler) readSubstrateCheckpointArtifact(ctx context.Context, digest string) (*corev1.ConfigMap, *substrateCheckpointArtifact, error) {

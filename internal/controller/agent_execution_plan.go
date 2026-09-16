@@ -78,10 +78,7 @@ func (r *TaskReconciler) planAgentExecution(
 	agent = withEffectiveBuiltInContract(agent, r.Mode)
 	if agent.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != "" {
 		name := strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name)
-		reader := r.APIReader
-		if reader == nil {
-			reader = r.Client
-		}
+		reader := uncachedReader(r.APIReader, r.Client)
 		runtime := &corev1alpha1.AgentRuntime{}
 		if err := reader.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: name}, runtime); err != nil {
 			if !apierrors.IsNotFound(err) {

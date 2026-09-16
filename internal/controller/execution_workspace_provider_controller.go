@@ -195,10 +195,7 @@ func (r *ExecutionWorkspaceProviderReconciler) providerHasReferences(
 	ctx context.Context,
 	provider *workspacev1alpha1.ExecutionWorkspaceProvider,
 ) (bool, error) {
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	var pools workspacev1alpha1.ExecutionWorkspacePoolList
 	if err := reader.List(ctx, &pools); err != nil {
 		return false, fmt.Errorf("list workspace pools: %w", err)

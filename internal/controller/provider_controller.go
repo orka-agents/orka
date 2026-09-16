@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -72,7 +73,7 @@ func (r *ProviderReconciler) validateProvider(ctx context.Context, provider *cor
 
 	if err := r.Get(ctx, secretKey, secret); err != nil {
 		if errors.IsNotFound(err) {
-			return &ValidationError{Message: "referenced secret not found: " + provider.Spec.SecretRef.Name}
+			return fmt.Errorf("referenced secret not found: %s", provider.Spec.SecretRef.Name)
 		}
 		return err
 	}
@@ -84,29 +85,20 @@ func (r *ProviderReconciler) validateProvider(ctx context.Context, provider *cor
 	}
 
 	if _, ok := secret.Data[key]; !ok {
-		return &ValidationError{Message: "key '" + key + "' not found in secret"}
+		return fmt.Errorf("key '%s' not found in secret", key)
 	}
 
 	// Validate Azure-specific configuration
 	if provider.Spec.Type == corev1alpha1.ProviderTypeAzureOpenAI {
 		if provider.Spec.Azure == nil || provider.Spec.Azure.DeploymentName == "" {
-			return &ValidationError{Message: "azure.deploymentName is required for azure-openai provider"}
+			return fmt.Errorf("azure.deploymentName is required for azure-openai provider")
 		}
 		if provider.Spec.BaseURL == "" {
-			return &ValidationError{Message: "baseURL is required for azure-openai provider"}
+			return fmt.Errorf("baseURL is required for azure-openai provider")
 		}
 	}
 
 	return nil
-}
-
-// ValidationError represents a validation error
-type ValidationError struct {
-	Message string
-}
-
-func (e *ValidationError) Error() string {
-	return e.Message
 }
 
 // updateStatus updates the provider status

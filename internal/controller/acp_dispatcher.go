@@ -3,8 +3,6 @@ package controller
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"maps"
@@ -164,9 +162,6 @@ func (d *ACPDispatcher) Start(ctx context.Context) error {
 	}
 	if d.IdlePoolTTL <= 0 {
 		d.IdlePoolTTL = DefaultACPIdlePoolTTL
-	}
-	if d.ReservationTTL <= 0 {
-		d.ReservationTTL = DefaultACPRuntimePoolReservationTTL
 	}
 	if d.RateLimitRetryInterval <= 0 {
 		d.RateLimitRetryInterval = DefaultACPRateLimitReconcileInterval
@@ -526,10 +521,7 @@ func (d *ACPDispatcher) workspaceResumeTransitionPending(
 	if name == "" {
 		return false, nil
 	}
-	reader := d.APIReader
-	if reader == nil {
-		reader = d.Client
-	}
+	reader := uncachedReader(d.APIReader, d.Client)
 	workspace := &workspacev1alpha1.ExecutionWorkspace{}
 	if err := reader.Get(ctx, client.ObjectKey{Namespace: pool.Namespace, Name: name}, workspace); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -574,10 +566,7 @@ func (d *ACPDispatcher) runtimePoolIdlePolicy(
 	if workspaceName == "" {
 		return d.IdlePoolTTL, false, nil
 	}
-	reader := d.APIReader
-	if reader == nil {
-		reader = d.Client
-	}
+	reader := uncachedReader(d.APIReader, d.Client)
 	workspace := &workspacev1alpha1.ExecutionWorkspace{}
 	if err := reader.Get(ctx, client.ObjectKey{Namespace: pool.Namespace, Name: workspaceName}, workspace); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -628,10 +617,7 @@ func (d *ACPDispatcher) reapStoppedWorkspacePool(
 	// pool with no linked workspace left is deleted directly.
 	if workspaceName := strings.TrimSpace(pool.Labels[acpExecutionWorkspaceLinkLabel]); workspaceName != "" {
 		workspace := &workspacev1alpha1.ExecutionWorkspace{}
-		reader := d.APIReader
-		if reader == nil {
-			reader = d.Client
-		}
+		reader := uncachedReader(d.APIReader, d.Client)
 		getErr := reader.Get(ctx, client.ObjectKey{Namespace: pool.Namespace, Name: workspaceName}, workspace)
 		if getErr == nil {
 			if workspace.Annotations[acpExecutionWorkspacePoolAnnotation] != pool.Name {
@@ -3645,10 +3631,7 @@ func (d *ACPDispatcher) settleQueuedTaskBeforeAdmission(ctx context.Context, que
 	if queued == nil {
 		return false, nil
 	}
-	reader := d.APIReader
-	if reader == nil {
-		reader = d.Client
-	}
+	reader := uncachedReader(d.APIReader, d.Client)
 	task := &corev1alpha1.Task{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: queued.Namespace, Name: queued.Name}, task); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -3765,10 +3748,7 @@ func (d *ACPDispatcher) settleTaskBeforeRuntimeAdmission(ctx context.Context, ta
 
 func (d *ACPDispatcher) reserveTask(ctx context.Context, queued *corev1alpha1.Task) (*corev1alpha1.Task, acpDispatchTarget, error) {
 	task := &corev1alpha1.Task{}
-	reader := d.APIReader
-	if reader == nil {
-		reader = d.Client
-	}
+	reader := uncachedReader(d.APIReader, d.Client)
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: queued.Namespace, Name: queued.Name}, task); err != nil {
 		return nil, acpDispatchTarget{}, client.IgnoreNotFound(err)
 	}
@@ -4035,10 +4015,7 @@ func (d *ACPDispatcher) refreshTaskRuntimePoolBinding(
 	if task == nil || pool == nil {
 		return false, nil
 	}
-	reader := d.APIReader
-	if reader == nil {
-		reader = d.Client
-	}
+	reader := uncachedReader(d.APIReader, d.Client)
 	current := &corev1alpha1.Task{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, current); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -4214,8 +4191,7 @@ func (d *ACPDispatcher) transitionAttempt(ctx context.Context, id string, fence 
 }
 
 func acpPromptResultDigest(result []byte) string {
-	sum := sha256.Sum256(result)
-	return "sha256:" + hex.EncodeToString(sum[:])
+	return store.CanonicalBytesDigest(result)
 }
 
 func acpSettlingTransitionDigest(id string, version int64, result []byte) (string, error) {
@@ -4820,10 +4796,7 @@ func (d *ACPDispatcher) revalidateExternalRuntimeCleanupMutation(
 	if authority == nil || authority.frozenRuntime == nil {
 		return errors.New("external AgentRuntime frozen cleanup authority is incomplete")
 	}
-	reader := d.APIReader
-	if reader == nil {
-		reader = d.Client
-	}
+	reader := uncachedReader(d.APIReader, d.Client)
 	current := &corev1alpha1.AgentRuntime{}
 	if err := reader.Get(ctx, authority.runtimeKey, current); err != nil {
 		return markExternalRuntimeMutationReadRetryable(fmt.Errorf("re-read external AgentRuntime before cleanup mutation: %w", err))
@@ -5119,10 +5092,7 @@ func (d *ACPDispatcher) revalidateExternalRuntimeMutation(
 	if expectedRuntime == nil || runtimeClient == nil {
 		return errors.New("external AgentRuntime mutation authority is incomplete")
 	}
-	reader := d.APIReader
-	if reader == nil {
-		reader = d.Client
-	}
+	reader := uncachedReader(d.APIReader, d.Client)
 	current := &corev1alpha1.AgentRuntime{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: expectedRuntime.Namespace, Name: expectedRuntime.Name}, current); err != nil {
 		return markExternalRuntimeMutationReadRetryable(fmt.Errorf("re-read external AgentRuntime before mutation: %w", err))
@@ -6160,10 +6130,7 @@ func (d *ACPDispatcher) markTaskRuntimePoolWorkspaceResumeLost(ctx context.Conte
 		return fmt.Errorf("task RuntimePool name and UID are required to mark workspace resume loss")
 	}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		reader := d.APIReader
-		if reader == nil {
-			reader = d.Client
-		}
+		reader := uncachedReader(d.APIReader, d.Client)
 		pool := &corev1alpha1.RuntimePool{}
 		if err := reader.Get(ctx, key, pool); err != nil {
 			return client.IgnoreNotFound(err)

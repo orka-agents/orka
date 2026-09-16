@@ -53,9 +53,9 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
-	"github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	orkametrics "github.com/orka-agents/orka/internal/metrics"
+	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/workspace"
 )
@@ -446,7 +446,7 @@ func (r *RuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 		status.ActiveInstance = nil
-		status.Message = sanitizeRuntimePoolMessage(err.Error())
+		status.Message = sanitizeStatusMessage(err.Error())
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
@@ -636,10 +636,7 @@ func (r *RuntimePoolReconciler) backfillHistoricalWorkspaceRuntimePoolImageProve
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
 ) (bool, error) {
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	tasks := &corev1alpha1.TaskList{}
 	if err := reader.List(ctx, tasks, client.InNamespace(pool.Namespace)); err != nil {
 		return false, fmt.Errorf("list Tasks for historical workspace RuntimePool image provenance: %w", err)
@@ -1099,7 +1096,7 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServingWithPostProbeFence(
 		}
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-		status.Message = sanitizeRuntimePoolMessage("authenticated runtime status probe failed: " + err.Error())
+		status.Message = sanitizeStatusMessage("authenticated runtime status probe failed: " + err.Error())
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
@@ -1111,7 +1108,7 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServingWithPostProbeFence(
 		}
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-		status.Message = sanitizeRuntimePoolMessage(err.Error())
+		status.Message = sanitizeStatusMessage(err.Error())
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
@@ -1143,7 +1140,7 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServingWithPostProbeFence(
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 		status.Message = "runtime supervisor reported unhealthy; recycling exact instance"
 		if err := r.recycleRuntimePoolInstance(ctx, pool, &readyPods[0]); err != nil {
-			status.Message = sanitizeRuntimePoolMessage("runtime supervisor reported unhealthy; exact instance recycling failed: " + err.Error())
+			status.Message = sanitizeStatusMessage("runtime supervisor reported unhealthy; exact instance recycling failed: " + err.Error())
 			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
 			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
@@ -1285,7 +1282,7 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolIdentityCapacityRotation(
 		); err != nil {
 			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-			status.Message = sanitizeRuntimePoolMessage("authenticated identity-capacity drain request failed: " + err.Error())
+			status.Message = sanitizeStatusMessage("authenticated identity-capacity drain request failed: " + err.Error())
 			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, runtimePoolIdentityCapacityReasonDraining, status.Message)
 			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 		}
@@ -1526,7 +1523,7 @@ func (r *RuntimePoolReconciler) finishRuntimePoolRolloutFailure(
 ) (ctrl.Result, error) {
 	status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 	status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-	status.Message = sanitizeRuntimePoolMessage(err.Error())
+	status.Message = sanitizeStatusMessage(err.Error())
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 	return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 }
@@ -1713,7 +1710,7 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolScaleDown(
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 		status.ActiveInstance = nil
-		status.Message = sanitizeRuntimePoolMessage("authenticated drain status probe failed: " + err.Error())
+		status.Message = sanitizeStatusMessage("authenticated drain status probe failed: " + err.Error())
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
@@ -1722,7 +1719,7 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolScaleDown(
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 		status.ActiveInstance = nil
-		status.Message = sanitizeRuntimePoolMessage(err.Error())
+		status.Message = sanitizeStatusMessage(err.Error())
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
@@ -1742,7 +1739,7 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolScaleDown(
 		); err != nil {
 			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-			status.Message = sanitizeRuntimePoolMessage("authenticated drain request failed: " + err.Error())
+			status.Message = sanitizeStatusMessage("authenticated drain request failed: " + err.Error())
 			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 		}
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining
@@ -1778,10 +1775,7 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolScaleDown(
 }
 
 func (r *RuntimePoolReconciler) ensureRuntimePoolNamespace(ctx context.Context, cfg runtimePoolConfig) error {
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	namespace := &corev1.Namespace{}
 	err := reader.Get(ctx, types.NamespacedName{Name: cfg.namespace}, namespace)
 	if err == nil {
@@ -1851,10 +1845,7 @@ func (r *RuntimePoolReconciler) ensurePrivateWorkspaceRuntimePoolSecrets(
 	pool *corev1alpha1.RuntimePool,
 	cfg runtimePoolConfig,
 ) (*corev1.Secret, *corev1.Secret, error) {
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	epoch := strconv.FormatInt(cfg.controllerEpoch, 10)
 
 	auth, err := r.ensurePrivateWorkspaceRuntimePoolAuthSecret(ctx, pool, cfg, epoch)
@@ -1902,10 +1893,7 @@ func (r *RuntimePoolReconciler) ensurePrivateWorkspaceRuntimePoolAuthSecret(
 	cfg runtimePoolConfig,
 	epoch string,
 ) (*corev1.Secret, error) {
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	bindingKey := runtimePoolPrivateAuthSecretBindingAnnotation(cfg.controllerEpoch)
 	authKeys := map[string]int{
 		runtimePoolControllerTokenKey:      32,
@@ -1981,10 +1969,7 @@ func (r *RuntimePoolReconciler) boundPrivateWorkspaceRuntimePoolAuthSecret(
 	if err != nil {
 		return nil, err
 	}
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	secret := &corev1.Secret{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: cfg.namespace, Name: name}, secret); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -2167,10 +2152,7 @@ func (r *RuntimePoolReconciler) pruneStaleRuntimePoolSecrets(
 	if deployment == nil {
 		return nil
 	}
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	liveDeployment := &appsv1.Deployment{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: deployment.Namespace, Name: deployment.Name}, liveDeployment); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -2411,10 +2393,7 @@ func (r *RuntimePoolReconciler) ensureRuntimePoolProviderSecret(
 	name string,
 	extraLabels map[string]string,
 ) (*corev1.Secret, error) {
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	secret := &corev1.Secret{}
 	// Uncached read: see ensureRuntimePoolSecret.
 	err := reader.Get(ctx, types.NamespacedName{Namespace: cfg.namespace, Name: name}, secret)
@@ -2461,10 +2440,7 @@ func (r *RuntimePoolReconciler) ensureRuntimePoolSecret(
 	keys map[string]int,
 	extraLabels map[string]string,
 ) (*corev1.Secret, error) {
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	secret := &corev1.Secret{}
 	// Uncached read: pool Secrets always live in the runtime namespace, but the
 	// namespace-scoped manager cache is configured independently, so a direct
@@ -2717,8 +2693,7 @@ func runtimePoolJSONRevision(payload any) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("marshal RuntimePool template revision: %w", err)
 	}
-	digest := sha256.Sum256(data)
-	return "sha256:" + hex.EncodeToString(digest[:]), nil
+	return store.CanonicalBytesDigest(data), nil
 }
 
 func runtimePoolPodTemplateRevision(template corev1.PodTemplateSpec) string {
@@ -2728,8 +2703,7 @@ func runtimePoolPodTemplateRevision(template corev1.PodTemplateSpec) string {
 	if err != nil {
 		panic(fmt.Sprintf("marshal RuntimePool Pod template revision: %v", err))
 	}
-	digest := sha256.Sum256(payload)
-	return "sha256:" + hex.EncodeToString(digest[:])
+	return store.CanonicalBytesDigest(payload)
 }
 
 func runtimePoolResourceRequirements(resourceClass string) corev1.ResourceRequirements {
@@ -2965,7 +2939,7 @@ func runtimePoolSchedulingFailure(pods []corev1.Pod) (string, string, bool) {
 	for i := range pods {
 		condition := findRuntimePoolPodCondition(pods[i].Status.Conditions, corev1.PodScheduled)
 		if condition != nil && condition.Status == corev1.ConditionFalse {
-			message := sanitizeRuntimePoolMessage(condition.Message)
+			message := sanitizeStatusMessage(condition.Message)
 			if message == "" {
 				message = "runtime Pod is unschedulable"
 			}
@@ -2990,7 +2964,7 @@ func runtimePoolPodFailure(pods []corev1.Pod) (string, string, bool) {
 			}
 			switch waiting.Reason {
 			case "ErrImagePull", "ImagePullBackOff", "InvalidImageName", "CreateContainerConfigError", "RunContainerError", "CrashLoopBackOff":
-				message := sanitizeRuntimePoolMessage(waiting.Message)
+				message := sanitizeStatusMessage(waiting.Message)
 				if message == "" {
 					message = "runtime container failed: " + waiting.Reason
 				}
@@ -3010,7 +2984,7 @@ func (r *RuntimePoolReconciler) applyDeploymentFailureConditions(pool *corev1alp
 		if condition.Type != appsv1.DeploymentReplicaFailure || condition.Status != corev1.ConditionTrue {
 			continue
 		}
-		message := sanitizeRuntimePoolMessage(condition.Message)
+		message := sanitizeStatusMessage(condition.Message)
 		lower := strings.ToLower(message)
 		switch {
 		case strings.Contains(lower, "podsecurity"), strings.Contains(lower, "pod security"), strings.Contains(lower, "restricted:"):
@@ -3383,7 +3357,7 @@ func (r *RuntimePoolReconciler) finishRuntimePoolResourceFailure(
 	status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 	status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 	status.ActiveInstance = nil
-	status.Message = sanitizeRuntimePoolMessage(err.Error())
+	status.Message = sanitizeStatusMessage(err.Error())
 	reason := corev1alpha1.RuntimePoolReasonRolloutFailed
 	lower := strings.ToLower(status.Message)
 	switch {
@@ -3411,7 +3385,7 @@ func (r *RuntimePoolReconciler) finishRuntimePoolStatus(
 	requeueAfter time.Duration,
 ) (ctrl.Result, error) {
 	clearRuntimePoolUnfencedProbePressure(&status)
-	status.Message = sanitizeRuntimePoolMessage(status.Message)
+	status.Message = sanitizeStatusMessage(status.Message)
 	if reflect.DeepEqual(pool.Status, status) {
 		recordRuntimePoolMetrics(pool, status)
 		return ctrl.Result{RequeueAfter: requeueAfter}, nil
@@ -3501,7 +3475,7 @@ func (r *RuntimePoolReconciler) setRuntimePoolCondition(
 		ObservedGeneration: pool.Generation,
 		LastTransitionTime: metav1.NewTime(r.now()),
 		Reason:             sanitizeRuntimePoolReason(reason),
-		Message:            sanitizeRuntimePoolMessage(message),
+		Message:            sanitizeStatusMessage(message),
 	})
 }
 
@@ -3843,10 +3817,7 @@ func (r *RuntimePoolReconciler) randomHex(size int) (string, error) {
 }
 
 func (r *RuntimePoolReconciler) now() time.Time {
-	if r.Now != nil {
-		return r.Now().UTC()
-	}
-	return time.Now().UTC()
+	return clockNow(r.Now)
 }
 
 func runtimePoolResourceName(namespace, name string) string {
@@ -3941,11 +3912,6 @@ func validSHA256Digest(value string) bool {
 	}
 	_, err := hex.DecodeString(strings.TrimPrefix(value, "sha256:"))
 	return err == nil
-}
-
-func sanitizeRuntimePoolMessage(message string) string {
-	message = events.RedactExecutionEventText(strings.TrimSpace(message))
-	return truncateUTF8(strings.ToValidUTF8(message, "�"), 1024)
 }
 
 func sanitizeRuntimePoolReason(reason string) string {

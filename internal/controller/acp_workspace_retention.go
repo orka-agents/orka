@@ -101,10 +101,7 @@ func (r *ACPWorkspaceRetentionReconciler) quotaReader() client.Reader {
 }
 
 func (r *ACPWorkspaceRetentionReconciler) now() time.Time {
-	if r.Now != nil {
-		return r.Now().UTC()
-	}
-	return time.Now().UTC()
+	return clockNow(r.Now)
 }
 
 //nolint:gocyclo // The retention decision table stays auditable in one place.

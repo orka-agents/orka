@@ -614,7 +614,7 @@ func (c *ACPUpgradeDrainCoordinator) runDrain(parent context.Context) error {
 		lastErr = observeErr
 		lastErrorText := ""
 		if observeErr != nil {
-			lastErrorText = sanitizeRuntimePoolMessage(observeErr.Error())
+			lastErrorText = sanitizeStatusMessage(observeErr.Error())
 		}
 		c.setDrainingStatus(fence, marker.StartedAt, deadline, snapshot, lastErrorText)
 		if observeErr == nil && snapshot.Quiescent() {
@@ -1021,7 +1021,7 @@ func (c *ACPUpgradeDrainCoordinator) finishTimedOut(
 ) error {
 	reason := "ACP planned-upgrade barriers did not settle before the configured deadline"
 	if lastErr != nil {
-		reason += ": " + sanitizeRuntimePoolMessage(lastErr.Error())
+		reason += ": " + sanitizeStatusMessage(lastErr.Error())
 	}
 	now := c.now()
 	markerErr := error(nil)
@@ -1031,7 +1031,7 @@ func (c *ACPUpgradeDrainCoordinator) finishTimedOut(
 		markerErr = c.persistTerminalMarker(markerCtx, marker, ACPUpgradeDrainMarkerTimedOut, snapshot, now, reason)
 	}
 	if markerErr != nil {
-		reason += "; failed to persist timeout marker: " + sanitizeRuntimePoolMessage(markerErr.Error())
+		reason += "; failed to persist timeout marker: " + sanitizeStatusMessage(markerErr.Error())
 	}
 	c.setTerminalStatus(ACPUpgradeDrainTimedOut, fence, snapshot, nil, reason)
 	return fmt.Errorf("%w: %s", ErrACPUpgradeDrainTimedOut, reason)
@@ -1127,7 +1127,7 @@ func (c *ACPUpgradeDrainCoordinator) persistTerminalMarker(
 		}
 		existing.State = state
 		existing.Snapshot = snapshot
-		existing.LastError = sanitizeRuntimePoolMessage(reason)
+		existing.LastError = sanitizeStatusMessage(reason)
 		at = at.UTC()
 		if state == ACPUpgradeDrainMarkerCompleted {
 			existing.CompletedAt = &at
@@ -1341,10 +1341,7 @@ func (c *ACPUpgradeDrainCoordinator) currentLifecycleContext() context.Context {
 }
 
 func (c *ACPUpgradeDrainCoordinator) now() time.Time {
-	if c.Now != nil {
-		return c.Now().UTC()
-	}
-	return time.Now().UTC()
+	return clockNow(c.Now)
 }
 
 func (c *ACPUpgradeDrainCoordinator) setDrainingStatus(
@@ -1397,7 +1394,7 @@ func (c *ACPUpgradeDrainCoordinator) setTerminalStatus(
 func (c *ACPUpgradeDrainCoordinator) failStatus(err error) {
 	message := ""
 	if err != nil {
-		message = sanitizeRuntimePoolMessage(err.Error())
+		message = sanitizeStatusMessage(err.Error())
 	}
 	c.statusMu.Lock()
 	defer c.statusMu.Unlock()

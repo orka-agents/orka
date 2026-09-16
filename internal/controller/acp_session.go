@@ -3,7 +3,6 @@ package controller
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -880,8 +879,7 @@ func buildACPSessionTurnProjection(turnID string, input ACPFinalizationProjectio
 }
 
 func canonicalACPPayloadDigest(payload []byte) string {
-	sum := sha256.Sum256(payload)
-	return "sha256:" + hex.EncodeToString(sum[:])
+	return store.CanonicalBytesDigest(payload)
 }
 
 type acpOutcomeUnknownMarker struct {
