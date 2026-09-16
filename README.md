@@ -4,7 +4,7 @@
 
 # Orka
 
-**Run AI agents and coding agents on your cluster. Model keys never leave it.**
+**Run AI agents on your Kubernetes cluster. The keys stay in the cluster.**
 
 [![Tests](https://github.com/orka-agents/orka/actions/workflows/test.yml/badge.svg)](https://github.com/orka-agents/orka/actions/workflows/test.yml)
 [![Release](https://img.shields.io/github/v/release/orka-agents/orka?include_prereleases)](https://github.com/orka-agents/orka/releases)
@@ -16,14 +16,22 @@
 
 ---
 
-Orka turns a Kubernetes cluster into a place to run AI agents. You describe work as a
-**Task**; Orka runs it in a Pod, keeps a durable record of what happened, and hands you
-the result over a REST API, a CLI, or the built-in dashboard. Tasks can be Orka's own AI
-worker, a real coding-agent CLI such as Codex, Claude Code, GitHub Copilot CLI, or
-OpenCode, or any container command.
+Orka lets you hand a piece of work to an AI agent and get the result back, with
+Kubernetes doing what it is good at: running the work somewhere isolated, keeping a
+record of what happened, and cleaning up afterwards. You write a small YAML **Task**,
+Orka runs it in a Pod, and you read the answer from a REST API, a CLI, or the dashboard
+that comes built in.
 
-Model credentials stay in the cluster. Developers get a ServiceAccount token, not an API
-key, and the platform team decides which models and providers are allowed.
+Three kinds of work fit in a Task:
+
+- **Ask a model.** Orka's own AI worker talks to Anthropic, OpenAI, Azure OpenAI, or any
+  compatible endpoint, with built-in tools such as web search and code execution.
+- **Run a coding agent.** Codex, Claude Code, GitHub Copilot CLI, or OpenCode, working on
+  a real git repository and opening the pull request when it is done.
+- **Run a command.** Any container image, for the build and test steps agents ask for.
+
+Model keys never leave the cluster. People and CI get a token; the platform team decides
+which models and providers are allowed.
 
 > [!IMPORTANT]
 > **Orka is experimental and under active development.** APIs, CRDs, and behavior may change without notice between releases, and it is not yet recommended for production use. Feedback, bug reports, and feature ideas are very welcome — please [open an issue](https://github.com/orka-agents/orka/issues).
@@ -31,7 +39,10 @@ key, and the platform team decides which models and providers are allowed.
 > [!NOTE]
 > The organization and repositories are intended to be donated to a community-governed foundation at the appropriate time. Until then, the project is governed by Microsoft policy, and external contributors are required to sign the Microsoft Contributor License Agreement (CLA).
 
-## Quick start
+## Try it in five minutes
+
+You need a cluster, `kubectl`, and Helm. A local [kind](https://kind.sigs.k8s.io/) cluster
+is fine. No model API key yet.
 
 ```bash
 helm repo add orka https://orka-agents.github.io/orka/charts
@@ -39,8 +50,7 @@ helm repo update orka
 helm install orka orka/orka --namespace orka-system --create-namespace --wait --timeout 10m
 ```
 
-That is the whole install. The chart creates its namespaces, its encryption key, and its
-webhook certificate. Run something, no model key needed:
+That is the whole install. Now run something:
 
 ```bash
 kubectl -n orka-system apply -f - <<'EOF'
@@ -55,10 +65,26 @@ EOF
 kubectl -n orka-system get task hello --watch
 ```
 
-Then follow [Getting started](https://orka-agents.github.io/orka/docs/getting-started)
-to connect to the API, add a model provider, and run your first AI Task.
+When the phase reads `Succeeded`, Orka has run its first Task for you. From here,
+[Getting started](https://orka-agents.github.io/orka/docs/getting-started) walks through
+connecting to the API, adding a model, and running your first AI Task and your first
+coding agent.
 
-## Why Kubernetes
+## What people build with it
+
+- **[Pull request review on every PR.](https://orka-agents.github.io/orka/docs/repository-monitors)**
+  A repository monitor queues review Tasks as PRs arrive and posts the findings back.
+- **["Just do it" chat.](https://orka-agents.github.io/orka/docs/chat)** Describe what
+  you want in plain language and an orchestrator creates and runs the Tasks, in the
+  dashboard or over the API.
+- **[Agents on a schedule.](https://orka-agents.github.io/orka/docs/scheduled-tasks)**
+  Nightly dependency audits, security scans, or reports, with retries and notifications
+  handled for you.
+- **[Your existing tools, safer.](https://orka-agents.github.io/orka/docs/openai-compat)**
+  Point Cursor, Continue, or Claude Code at Orka's OpenAI- and Anthropic-compatible
+  endpoints and stop handing out provider keys.
+
+## Why on Kubernetes
 
 - **No keys on laptops.** Provider credentials live in Secrets; people and CI get scoped tokens.
 - **One place to govern.** Models, providers, tools, and limits are set per Agent and per namespace.
@@ -68,13 +94,19 @@ to connect to the API, add a model provider, and run your first AI Task.
 ## Learn more
 
 - [Architecture](https://orka-agents.github.io/orka/docs/architecture) — how a Task becomes a Pod
-- [Interactive chat](https://orka-agents.github.io/orka/docs/chat) — describe what you want and let an orchestrator create the Tasks
+- [Interactive chat](https://orka-agents.github.io/orka/docs/chat) — the orchestrator and its tools
 - [Coding agents](https://orka-agents.github.io/orka/docs/agent-runtimes) — Codex, Claude Code, Copilot, and OpenCode as pooled runtimes
-- [Compatibility APIs](https://orka-agents.github.io/orka/docs/openai-compat) — point Cursor, Continue, or Claude Code at Orka
+- [Compatibility APIs](https://orka-agents.github.io/orka/docs/openai-compat) — using Orka from your editor
 - [Security](https://orka-agents.github.io/orka/docs/security) — the trust model and hardening
 - [Troubleshooting](https://orka-agents.github.io/orka/docs/troubleshooting) — error strings, causes, fixes
-- [Development](https://orka-agents.github.io/orka/docs/development) — building, testing, and contributing
-- [Security policy](SECURITY.md) — how to report a vulnerability
+- [Development](https://orka-agents.github.io/orka/docs/development) — building and testing Orka itself
+
+## Join in
+
+Questions, bug reports, and ideas are welcome in
+[issues](https://github.com/orka-agents/orka/issues). If you want to contribute code,
+[CONTRIBUTING.md](CONTRIBUTING.md) has the setup and the review process, and
+[SECURITY.md](SECURITY.md) explains how to report a vulnerability privately.
 
 ## License
 
