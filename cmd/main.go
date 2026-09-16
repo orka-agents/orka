@@ -1206,14 +1206,18 @@ func main() {
 		}
 	}
 
-	// Registering a handler also adds the webhook server to the manager, and
-	// the server needs its certificate files when it starts. With
-	// controller-managed rotation those files appear only after the manager is
-	// running, so registration waits for the rotator; otherwise it happens now.
+	// Handlers are registered on the local server object first, so the mux is
+	// complete before the server is ever added to the manager and started.
+	// Only mgr.GetWebhookServer() adds the runnable, and the server needs its
+	// certificate files when it starts. With controller-managed rotation those
+	// files appear only after the manager is running, so the whole sequence
+	// waits for the rotator; otherwise it happens now, before mgr.Start.
 	registerAdmissionWebhooks := func() {
+		registered := false
 		if workspaceClassUseAdmissionEnabled {
+			registered = true
 			orkaadmission.RegisterWorkspaceClassUseWebhooks(
-				mgr.GetWebhookServer(),
+				webhookServer,
 				mgr.GetScheme(),
 				controller.WorkspaceClassAuthorizer{Client: mgr.GetClient()},
 			)
@@ -1221,6 +1225,7 @@ func main() {
 		}
 
 		if taskProvenanceAdmissionEnabled {
+			registered = true
 			admissionConfig := orkaadmission.NewTaskProvenanceConfig(
 				true,
 				executionModeControllerUsernames,
@@ -1228,15 +1233,16 @@ func main() {
 				taskProvenanceAdmissionTrustedServiceAccounts,
 				currentPodNamespace(),
 			)
-			orkaadmission.RegisterTaskProvenanceWebhook(mgr.GetWebhookServer(), mgr.GetScheme(), admissionConfig, mgr.GetAPIReader())
+			orkaadmission.RegisterTaskProvenanceWebhook(webhookServer, mgr.GetScheme(), admissionConfig, mgr.GetAPIReader())
 			setupLog.Info("enabled Task provenance validating admission",
 				"trustedUsers", strings.Join(admissionConfig.TrustedUsernames, ","),
 				"trustedServiceAccounts", strings.Join(admissionConfig.TrustedServiceAccountNames, ","),
 			)
 		}
 		if managerAdmissionEnabled {
+			registered = true
 			orkaadmission.RegisterExecutionModeWebhooks(
-				mgr.GetWebhookServer(),
+				webhookServer,
 				mgr.GetScheme(),
 				mgr.GetAPIReader(),
 				orkaadmission.ExecutionModeConfig{
@@ -1244,6 +1250,11 @@ func main() {
 				},
 			)
 			setupLog.Info("registered immutable namespace mode and execution-authority admission")
+		}
+		if registered {
+			// Adds the fully populated server as a manager runnable; when the
+			// manager is already running it starts immediately.
+			mgr.GetWebhookServer()
 		}
 	}
 	if webhookCertRotation.enabled() {
