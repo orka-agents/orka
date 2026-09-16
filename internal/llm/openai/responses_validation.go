@@ -14,6 +14,22 @@ import (
 	"github.com/orka-agents/orka/internal/llm"
 )
 
+func responsesHaveRefusal(output []responses.ResponseOutputItemUnion) bool {
+	for _, item := range output {
+		for _, part := range item.Content {
+			if part.Type == stopReasonRefusal {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func responsesEventHasRefusal(evt responses.ResponseStreamEventUnion) bool {
+	return evt.Type == "response.refusal.delta" || evt.Type == "response.refusal.done" ||
+		evt.Part.Type == stopReasonRefusal || responsesHaveRefusal([]responses.ResponseOutputItemUnion{evt.Item}) || responsesHaveRefusal(evt.Response.Output)
+}
+
 // This validation belongs only to callers of Orka's Responses endpoint.
 // Other provider consumers retain their existing normalization policy.
 func validateResponsesItemType(item responses.ResponseOutputItemUnion) error {
@@ -116,7 +132,7 @@ func (t *responseFuncCallTracker) validateEvent(evt responses.ResponseStreamEven
 	switch evt.Type {
 	case eventTypeResponseOutputItemAdded, eventTypeResponseOutputItemDone:
 		return validateResponsesItemType(evt.Item)
-	case "response.content_part.added", "response.content_part.done":
+	case "response.content_part.added", eventTypeResponseContentPartDone:
 		if evt.Part.Type != responseContentTypeOutputText && evt.Part.Type != stopReasonRefusal {
 			return fmt.Errorf("provider message content is outside the Responses subset")
 		}

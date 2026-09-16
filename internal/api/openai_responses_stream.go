@@ -314,6 +314,10 @@ func produceResponsesFallback(ctx context.Context, provider llm.Provider, req *l
 		send(llm.StreamChunk{Error: responsesCompletionError(completeErr)})
 		return
 	}
+	if llm.NormalizeCompletionOutcome(completion) == llm.CompletionOutcomeRefused {
+		send(llm.StreamChunk{Error: errCompletionRefused})
+		return
+	}
 	items := responsesCompletionItems(completion)
 	for i, item := range items {
 		if !send(llm.StreamChunk{Content: item.Content, ToolCall: item.ToolCall}) {
@@ -337,7 +341,7 @@ func responsesStreamUnsupported(err error, requireHTTP bool) bool {
 	}
 	if providerErr, ok := errors.AsType[*llm.ProviderError](err); ok {
 		switch providerErr.StatusCode {
-		case fiber.StatusMethodNotAllowed, fiber.StatusNotImplemented:
+		case fiber.StatusNotFound, fiber.StatusMethodNotAllowed, fiber.StatusNotImplemented:
 			return true
 		case fiber.StatusBadRequest:
 		default:

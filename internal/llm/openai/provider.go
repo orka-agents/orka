@@ -35,6 +35,8 @@ const (
 )
 
 const (
+	eventTypeResponseOutputTextDelta = "response.output_text.delta"
+	eventTypeResponseContentPartDone = "response.content_part.done"
 	responseFunctionArgumentsChanged = "response function arguments changed after completion"
 	responseContentTypeOutputText    = "output_text"
 	eventTypeResponseOutputItemAdded = "response.output_item.added"
@@ -425,6 +427,9 @@ func (p *Provider) completeResponses(ctx context.Context, req *llm.CompletionReq
 	}
 	result.StopReason = normalizeResponsesStopReason(result.StopReason, resp.Output, false)
 	result.StopReason = normalizeResponsesIncompleteStopReason(result.StopReason, resp.IncompleteDetails.Reason)
+	if req.ResponsesInput && responsesHaveRefusal(resp.Output) {
+		result.StopReason = stopReasonRefusal
+	}
 	return result, nil
 }
 
@@ -762,6 +767,10 @@ func streamResponsesEvents(stream responseStream, providerName string, send stre
 func handleResponsesStreamEvent(evt responses.ResponseStreamEventUnion, tracker *responseFuncCallTracker, providerName string, send streamSender) bool {
 	var outputIndex *int64
 	if tracker.ordered {
+		if responsesEventHasRefusal(evt) {
+			send(llm.StreamChunk{Done: true, StopReason: stopReasonRefusal})
+			return false
+		}
 		if err := tracker.validateEvent(evt); err != nil {
 			return failResponsesStream(send, err)
 		}
@@ -771,12 +780,12 @@ func handleResponsesStreamEvent(evt responses.ResponseStreamEventUnion, tracker 
 			send(llm.StreamChunk{Error: err, Done: true})
 			return false
 		}
+		if isResponseTextEvent(evt) {
+			return tracker.outputOrder.textEvent(evt, outputIndex, send)
+		}
 	}
 	switch evt.Type {
-	case "response.output_text.delta":
-		if tracker.ordered {
-			tracker.outputOrder.recordText(outputIndex, evt.Delta)
-		}
+	case eventTypeResponseOutputTextDelta:
 		return handleResponseTextDelta(evt, send, outputIndex)
 	case "response.function_call_arguments.delta":
 		return handleResponseFunctionCallArgumentsDelta(evt, tracker, send)
@@ -895,7 +904,7 @@ func handleResponseCompleted(evt responses.ResponseStreamEventUnion, tracker *re
 	stopReason := normalizeResponsesStopReason(
 		string(evt.Response.Status),
 		evt.Response.Output,
-		strings.TrimSpace(evt.Response.OutputText()) == "",
+		strings.TrimSpace(evt.Response.OutputText()) == "" && (!tracker.ordered || !tracker.outputOrder.hasText()),
 	)
 	if stopReason == stopReasonToolCalls {
 		for i, item := range evt.Response.Output {

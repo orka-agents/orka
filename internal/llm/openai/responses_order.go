@@ -9,7 +9,6 @@ package openai
 import (
 	"fmt"
 	"slices"
-	"strings"
 
 	"github.com/openai/openai-go/v3/responses"
 
@@ -25,9 +24,36 @@ type orderedResponseSender struct {
 	pending map[int64][]llm.StreamChunk
 	next    int64
 	open    bool
+	// Freeze statuses at queue entry, including items awaiting predecessors.
+	statuses map[int64]string
 }
 
 func (s *orderedResponseSender) chunk(chunk llm.StreamChunk) bool {
+	// A failed/refused outcome must not recover queued output or be replaced
+	// by a secondary ordering error while flushing it.
+	if chunk.Error != nil || (chunk.Done && chunk.StopReason == stopReasonRefusal) {
+		return s.send(chunk)
+	}
+	if chunk.OutputItemDone {
+		key := responseTextKey(chunk.OutputIndex)
+		if known, ok := s.statuses[key]; ok {
+			if chunk.OutputItemStatus != "" && chunk.OutputItemStatus != known {
+				return failResponsesStream(s.send, fmt.Errorf("response item changed completion status"))
+			}
+			return true
+		}
+		status := chunk.OutputItemStatus
+		if status == "" {
+			status = stopReasonCompleted
+		}
+		if status != stopReasonCompleted && status != stopReasonIncomplete {
+			return failResponsesStream(s.send, fmt.Errorf("response item has an invalid completion status"))
+		}
+		if s.statuses == nil {
+			s.statuses = map[int64]string{}
+		}
+		s.statuses[key] = status
+	}
 	if chunk.OutputIndex == nil {
 		if chunk.Done || chunk.Error != nil {
 			if !s.flush() {
@@ -38,9 +64,6 @@ func (s *orderedResponseSender) chunk(chunk llm.StreamChunk) bool {
 	}
 	index := *chunk.OutputIndex
 	if index < s.next {
-		if chunk.OutputItemDone {
-			return true // Duplicate item-done notifications carry no new output.
-		}
 		s.send(llm.StreamChunk{Error: fmt.Errorf("response output changed after its item completed"), Done: true})
 		return false
 	}
@@ -57,9 +80,6 @@ func (s *orderedResponseSender) drain() bool {
 		delete(s.pending, s.next)
 		for _, chunk := range chunks {
 			if *chunk.OutputIndex < s.next {
-				if chunk.OutputItemDone {
-					continue
-				}
 				s.send(llm.StreamChunk{Error: fmt.Errorf("response output changed after its item completed"), Done: true})
 				return false
 			}
@@ -117,9 +137,7 @@ type responseOutputOrder struct {
 	indexed       bool
 	unindexedText bool
 	unindexedID   string
-	unindexedDone bool
-	text          map[int64]string
-	legacyText    string
+	text          map[int64]*responseTextItem
 }
 
 func (o *responseOutputOrder) bind(id string, index int64) error {
@@ -173,55 +191,16 @@ func (o *responseOutputOrder) eventIndex(evt responses.ResponseStreamEventUnion)
 	if index, ok := o.byID[id]; id != "" && ok {
 		return &index, nil
 	}
-	if evt.Type == "response.output_text.delta" && evt.Delta != "" {
-		if o.indexed || o.unindexedDone || (o.unindexedText && o.unindexedID != id) {
+	if isResponseTextEvent(evt) {
+		if o.indexed || (o.unindexedText && o.unindexedID != "" && id != "" && o.unindexedID != id) {
 			return nil, fmt.Errorf("response text has no unambiguous output index")
 		}
-		o.unindexedText, o.unindexedID = true, id
-	}
-	return nil, nil
-}
-
-// recordText remembers what was already emitted so item/terminal snapshots can
-// provide missing text without duplicating deltas or accepting contradictions.
-func (o *responseOutputOrder) recordText(index *int64, delta string) {
-	if index == nil {
-		o.legacyText += delta
-		return
-	}
-	if o.text == nil {
-		o.text = map[int64]string{}
-	}
-	o.text[*index] += delta
-}
-
-func (o *responseOutputOrder) completeText(item responses.ResponseOutputItemUnion, index *int64, send streamSender) bool {
-	var text strings.Builder
-	for _, part := range item.Content {
-		if part.Type == responseContentTypeOutputText {
-			text.WriteString(part.Text)
+		o.unindexedText = true
+		if id != "" {
+			o.unindexedID = id
 		}
 	}
-	observed := o.legacyText
-	if index != nil {
-		observed = o.text[*index]
-	}
-	final := text.String()
-	if !strings.HasPrefix(final, observed) || (index == nil && (!o.unindexedText || (o.unindexedDone && final != observed))) {
-		send(llm.StreamChunk{Error: fmt.Errorf("response text contradicts streamed output"), Done: true})
-		return false
-	}
-	// Unindexed text bypasses the ordered queue, so retain its closed state
-	// here to reject later deltas or snapshots that try to reopen the item.
-	if index == nil {
-		o.unindexedDone = true
-	}
-	missing := strings.TrimPrefix(final, observed)
-	if missing == "" {
-		return true
-	}
-	o.recordText(index, missing)
-	return send(llm.StreamChunk{Content: missing, OutputIndex: index})
+	return nil, nil
 }
 
 func (o *responseOutputOrder) completeMessages(evt responses.ResponseStreamEventUnion, send streamSender) bool {
@@ -234,16 +213,16 @@ func (o *responseOutputOrder) completeMessages(evt responses.ResponseStreamEvent
 		if o.unindexedText {
 			outputIndex = nil
 		}
+		status := item.Status
+		if status == "" && !o.textItem(outputIndex).closed && evt.Type == eventTypeResponseIncomplete && i == len(evt.Response.Output)-1 {
+			status = stopReasonIncomplete
+		}
 		if !o.completeText(item, outputIndex, send) {
 			return false
-		}
-		status := item.Status
-		if status == "" && evt.Type == eventTypeResponseIncomplete && i == len(evt.Response.Output)-1 {
-			status = stopReasonIncomplete
 		}
 		if !send(llm.StreamChunk{OutputIndex: outputIndex, OutputItemDone: true, OutputItemStatus: status}) {
 			return false
 		}
 	}
-	return true
+	return o.validateTextCompletion(send)
 }
