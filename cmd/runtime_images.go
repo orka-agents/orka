@@ -110,7 +110,10 @@ func resolveACPRuntimeImage(ctx context.Context, image string, client *auth.Clie
 		if digested.Digest().Algorithm() != "sha256" {
 			return "", errors.New("digest references must use SHA256")
 		}
-		return image, nil
+		// A tag alongside the digest is informational; pools and admission
+		// accept only the canonical repository@digest form. Explicit digests
+		// are trusted as given and never contact a registry.
+		return distributionref.TrimNamed(ref).Name() + "@" + digested.Digest().String(), nil
 	}
 	tagged, ok := ref.(distributionref.Tagged)
 	if !ok {

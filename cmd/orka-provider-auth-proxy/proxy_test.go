@@ -39,6 +39,16 @@ func TestProviderAuthProxyDefaultResponseHeaderTimeout(t *testing.T) {
 	}
 }
 
+func TestNormalizeProxyConfigRejectsUpstreamWithoutHostname(t *testing.T) {
+	for _, upstream := range []string{"http://:8080", "http://:8080/v1", "https://"} {
+		t.Run(upstream, func(t *testing.T) {
+			if _, _, err := normalizeProxyConfig(proxyConfig{UpstreamBaseURL: upstream}); err == nil {
+				t.Fatalf("upstream %q without a hostname was accepted", upstream)
+			}
+		})
+	}
+}
+
 func TestProviderAuthProxyRejectsMissingAndWrongBearerTokens(t *testing.T) {
 	upstreamCalls := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

@@ -140,11 +140,16 @@ func TestResolveACPRuntimeImagesPreservesIndexDigestWithAnonymousAuth(t *testing
 }
 
 func TestResolveACPRuntimeImagesBypassesDisabledAndDigestReferences(t *testing.T) {
-	for _, image := range []string{
-		"", "  ",
-		"ghcr.io/orka-agents/runtime@sha256:" + strings.Repeat("a", 64),
-		"ghcr.io/orka-agents/runtime:v0.2.0@sha256:" + strings.Repeat("b", 64),
-		"ghcr.io/orka-agents/runtime@sha256:" + strings.Repeat("0", 64),
+	digestA := "ghcr.io/orka-agents/runtime@sha256:" + strings.Repeat("a", 64)
+	digestB := "ghcr.io/orka-agents/runtime@sha256:" + strings.Repeat("b", 64)
+	digestZero := "ghcr.io/orka-agents/runtime@sha256:" + strings.Repeat("0", 64)
+	for image, want := range map[string]string{
+		"":         "",
+		"  ":       "",
+		digestA:    digestA,
+		digestZero: digestZero,
+		// A tag beside the digest is dropped so the result is admissible.
+		"ghcr.io/orka-agents/runtime:v0.2.0@sha256:" + strings.Repeat("b", 64): digestB,
 	} {
 		t.Run(image, func(t *testing.T) {
 			var requests atomic.Int32
@@ -153,11 +158,31 @@ func TestResolveACPRuntimeImagesBypassesDisabledAndDigestReferences(t *testing.T
 				return nil, errors.New("unexpected registry request")
 			})}
 			resolved, err := resolveACPRuntimeImages(t.Context(), controller.ACPRuntimeImages{Codex: image}, client)
-			if err != nil || resolved.Codex != strings.TrimSpace(image) || requests.Load() != 0 {
+			if err != nil || resolved.Codex != want || requests.Load() != 0 {
 				t.Fatalf("digest/disabled configuration changed or contacted a registry: images=%#v err=%v requests=%d",
 					resolved, err, requests.Load())
 			}
 		})
+	}
+}
+
+func TestResolveACPRuntimeImagesCanonicalizesTaggedDigestReferences(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	var requests atomic.Int32
+	client := &http.Client{Transport: runtimeImageRoundTripperFunc(func(*http.Request) (*http.Response, error) {
+		requests.Add(1)
+		return nil, errors.New("unexpected registry request")
+	})}
+	resolved, err := resolveACPRuntimeImages(t.Context(),
+		controller.ACPRuntimeImages{Codex: "ghcr.io/orka-agents/runtime:v0.2.0@" + digest}, client)
+	if err != nil || requests.Load() != 0 {
+		t.Fatalf("tag+digest reference rejected or contacted a registry: err=%v requests=%d", err, requests.Load())
+	}
+	if want := "ghcr.io/orka-agents/runtime@" + digest; resolved.Codex != want {
+		t.Fatalf("resolved = %q, want canonical %q", resolved.Codex, want)
+	}
+	if !controller.ACPRuntimeImageAvailable(resolved.Codex) {
+		t.Fatalf("canonical reference %q is not admissible", resolved.Codex)
 	}
 }
 

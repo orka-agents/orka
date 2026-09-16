@@ -663,7 +663,7 @@ choose its upstream gateway and explicitly allow the required network access.
 {{- fail (printf "controller.acpRuntime.providerProxyNamespace must be empty or match the Helm release namespace %q when providerProxy.enabled=true" .Release.Namespace) -}}
 {{- end -}}
 {{- $upstream := trimSuffix "/" (trim (default "" .Values.providerProxy.upstreamBaseURL)) -}}
-{{- if not (regexMatch `^https?://[^/?#@[:space:]]+(/[^?#[:space:]]*)?$` $upstream) -}}
+{{- if not (regexMatch `^https?://[A-Za-z0-9\[][^/?#@[:space:]]*(/[^?#[:space:]]*)?$` $upstream) -}}
 {{- fail "providerProxy.upstreamBaseURL must be an HTTP(S) URL without credentials, a query, or a fragment when providerProxy.enabled=true" -}}
 {{- end -}}
 {{- $upstreamURL := urlParse $upstream -}}
@@ -818,8 +818,8 @@ namespace. There is no dual, automatic, or drain controller mode.
 Agent execution snapshots contain sensitive resolved inputs and are encrypted
 with an AES-256 key mounted from a Secret. Operators may supply that Secret
 through controller.agentExecutionSnapshot.existingSecret. When it is empty the
-chart generates a release-owned Secret once and reuses its bytes on every
-later render (see agent-execution-snapshot-secret.yaml). Both paths resolve
+chart renders an empty release-owned Secret and the controller mints the key
+into it on first start (see agent-execution-snapshot-secret.yaml). Both paths resolve
 through these helpers so the Deployment mount and the upgrade identity guard
 agree on one name and one item key.
 */}}
@@ -830,6 +830,10 @@ agree on one name and one item key.
 {{- else -}}
 {{- printf "%s-agent-execution-snapshot" (include "orka.fullname" . | trunc 38 | trimSuffix "-") | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
+{{- end }}
+
+{{- define "orka.agentExecutionSnapshotGenerated" -}}
+{{- if not (trim (default "" .Values.controller.agentExecutionSnapshot.existingSecret)) -}}true{{- end -}}
 {{- end }}
 
 {{- define "orka.agentExecutionSnapshotSecretKey" -}}

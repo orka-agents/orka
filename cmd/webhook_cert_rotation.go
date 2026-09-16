@@ -16,10 +16,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
-// The rotator watches its own ValidatingWebhookConfiguration cluster-wide and
-// rewrites its caBundle whenever the serving CA changes.
-// +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=validatingwebhookconfigurations,verbs=get;list;watch
-// +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=validatingwebhookconfigurations,verbs=update;patch
+// The rotator watches ValidatingWebhookConfigurations cluster-wide and rewrites
+// its own caBundle whenever the serving CA changes. The RBAC for that is
+// deliberately not a kubebuilder marker: only the Helm chart's generated
+// certificate mode grants it, name-scoped for writes, so raw-manifest and
+// Kustomize installs that mount an operator certificate never receive it.
 
 const (
 	webhookCertRotationCAName       = "orka-webhook-ca"

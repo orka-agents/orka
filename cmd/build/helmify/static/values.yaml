@@ -59,9 +59,10 @@ controller:
     maxBytes: 536870912
 
   # AES-256 key that encrypts immutable agent execution snapshots at rest.
-  # Leave existingSecret empty and the chart generates a release-owned Secret
-  # named <fullname>-agent-execution-snapshot on first install, keeps it on
-  # uninstall, and reuses its bytes on every upgrade. To bring your own key,
+  # Leave existingSecret empty and the chart renders an empty release-owned
+  # Secret named <fullname>-agent-execution-snapshot; the controller mints the
+  # key into it on first start, reuses it afterwards, and the chart keeps the
+  # Secret on uninstall. No key material is ever rendered. To bring your own key,
   # set existingSecret to a Secret whose item holds exactly 32 raw bytes or
   # their base64 encoding. Either way the Secret name, item key, and key
   # material must never change for the lifetime of the release; retained

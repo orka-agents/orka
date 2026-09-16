@@ -7,10 +7,8 @@ MIT License - see LICENSE file for details.
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
-	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
@@ -297,6 +295,7 @@ func main() {
 	var storeBackend string
 	var storePath string
 	var agentExecutionSnapshotKeyFile string
+	var agentExecutionSnapshotSecret, agentExecutionSnapshotSecretKey string
 	var agentExecutionSnapshotRetention time.Duration
 	var agentExecutionSnapshotRetentionInterval time.Duration
 	var controllerURL string
@@ -507,6 +506,12 @@ func main() {
 	flag.StringVar(&agentExecutionSnapshotKeyFile, "agent-execution-snapshot-key-file", "",
 		"Path to the 32-byte (raw or base64) AES-256 key encrypting immutable agent execution snapshots. "+
 			"When set, executable agent Tasks freeze a write-once binding and encrypted snapshot before dispatch.")
+	flag.StringVar(&agentExecutionSnapshotSecret, "agent-execution-snapshot-secret", "",
+		"Name of a chart-created Secret in the controller Pod namespace that holds the snapshot key. When set, "+
+			"the controller mints a 32-byte key into it on first start and reuses it afterwards; the key file is "+
+			"then the kubelet's projection of that Secret. Empty means the operator supplies the mounted key file.")
+	flag.StringVar(&agentExecutionSnapshotSecretKey, "agent-execution-snapshot-secret-key", "key",
+		"Item inside --agent-execution-snapshot-secret that holds the key.")
 	flag.DurationVar(&agentExecutionSnapshotRetention, "agent-execution-snapshot-retention",
 		envDurationDefault("ORKA_AGENT_EXECUTION_SNAPSHOT_RETENTION", controller.DefaultAgentExecutionSnapshotRetention),
 		"Minimum audit/backup retention period for encrypted execution snapshots after all references disappear.")
@@ -837,6 +842,14 @@ func main() {
 		agentExecutionSnapshotRetention,
 		agentExecutionSnapshotRetentionInterval,
 	); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	agentExecutionSnapshotSecretOpts := agentExecutionSnapshotSecretOptions{
+		Name: agentExecutionSnapshotSecret,
+		Key:  agentExecutionSnapshotSecretKey,
+	}
+	if err := validateAgentExecutionSnapshotSecretOptions(agentExecutionSnapshotSecretOpts); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
@@ -1298,6 +1311,36 @@ func main() {
 		os.Exit(1)
 	}
 
+	// The snapshot key is settled before the database file exists. A database
+	// without a key can then only mean the key was lost, never an interrupted
+	// first start, so the bootstrap can fail closed on that condition.
+	_, storeStatErr := os.Stat(storePath)
+	storePreexisted := storeStatErr == nil
+	var snapshotCipher *sqlite.AgentExecutionSnapshotCipher
+	if agentExecutionSnapshotSecretOpts.enabled() {
+		key, keyErr := ensureAgentExecutionSnapshotKey(context.Background(), mgr.GetAPIReader(), mgr.GetClient(),
+			currentPodNamespace(), agentExecutionSnapshotSecretOpts, storePreexisted)
+		if keyErr != nil {
+			setupLog.Error(keyErr, "unable to bootstrap the agent execution snapshot key; snapshot encryption fails closed",
+				"secret", agentExecutionSnapshotSecretOpts.Name)
+			os.Exit(1)
+		}
+		cipher, cipherErr := sqlite.NewAgentExecutionSnapshotCipher(key)
+		if cipherErr != nil {
+			setupLog.Error(cipherErr, "unable to load agent execution snapshot key; snapshot encryption fails closed",
+				"secret", agentExecutionSnapshotSecretOpts.Name)
+			os.Exit(1)
+		}
+		snapshotCipher = cipher
+	} else {
+		cipher, cipherErr := loadAgentExecutionSnapshotCipher(agentExecutionSnapshotKeyFile)
+		if cipherErr != nil {
+			setupLog.Error(cipherErr, "unable to load agent execution snapshot key; snapshot encryption fails closed",
+				"path", agentExecutionSnapshotKeyFile)
+			os.Exit(1)
+		}
+		snapshotCipher = cipher
+	}
 	sqliteStore, err := sqlite.OpenLockedStore(storePath)
 	if err != nil {
 		setupLog.Error(err, "unable to acquire and initialize the exclusive SQLite store", "path", storePath)
@@ -1305,12 +1348,6 @@ func main() {
 	}
 	if err := mgr.Add(sqliteStore); err != nil {
 		setupLog.Error(err, "unable to add SQLite store as runnable")
-		os.Exit(1)
-	}
-	snapshotCipher, cipherErr := loadAgentExecutionSnapshotCipher(agentExecutionSnapshotKeyFile)
-	if cipherErr != nil {
-		setupLog.Error(cipherErr, "unable to load agent execution snapshot key; snapshot encryption fails closed",
-			"path", agentExecutionSnapshotKeyFile)
 		os.Exit(1)
 	}
 	if cipherErr := sqliteStore.SetAgentExecutionSnapshotCipher(snapshotCipher); cipherErr != nil {
@@ -2428,13 +2465,9 @@ func loadAgentExecutionSnapshotCipher(path string) (*sqlite.AgentExecutionSnapsh
 	if err != nil {
 		return nil, err
 	}
-	key := raw
-	if len(key) != sqlite.AgentExecutionSnapshotKeyBytes {
-		decoded, decodeErr := base64.StdEncoding.DecodeString(string(bytes.TrimSpace(raw)))
-		if decodeErr != nil || len(decoded) != sqlite.AgentExecutionSnapshotKeyBytes {
-			return nil, fmt.Errorf("snapshot key must be %d raw bytes or their base64 encoding", sqlite.AgentExecutionSnapshotKeyBytes)
-		}
-		key = decoded
+	key, err := decodeAgentExecutionSnapshotKey(raw)
+	if err != nil {
+		return nil, err
 	}
 	return sqlite.NewAgentExecutionSnapshotCipher(key)
 }

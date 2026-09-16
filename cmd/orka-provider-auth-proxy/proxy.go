@@ -90,7 +90,7 @@ func newProviderAuthProxyWithTokenStore(cfg proxyConfig, tokens *bearerTokenStor
 
 func normalizeProxyConfig(cfg proxyConfig) (proxyConfig, *url.URL, error) {
 	parsed, err := url.Parse(strings.TrimSpace(cfg.UpstreamBaseURL))
-	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" ||
+	if err != nil || parsed.Hostname() == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" ||
 		(parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return proxyConfig{}, nil, fmt.Errorf("provider upstream base URL is invalid")
 	}

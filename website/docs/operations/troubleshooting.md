@@ -41,7 +41,6 @@ The chart validates its inputs before producing any manifests, so a bad install 
 | `image` | Use a valid tag or SHA256 digest. Runtime overrides need a full registry/repository reference. |
 | `replicas` / `leaderElect` | Must be `1` and `true`. The controller is a single writer. |
 | `caBundle or caInjectionAnnotations` | You set `webhooks.tls.existingSecret`, so the chart needs the CA that signed it. Leave both empty to let the controller issue its own certificate. |
-| `generated snapshot Secret ... has no "key" item` | An upgrade cannot find the key Secret the chart generated. Restore it from backup. For a preview, use `--dry-run=server`; client-side renders cannot read Secrets. |
 | `mode` | Only `harness-v1` or `harness-v2`, and it cannot change on upgrade. |
 
 ### The snapshot key
@@ -67,8 +66,16 @@ switching between a generated Secret and your own. It cannot see the key materia
 replacing the bytes under the same name and key passes the guard silently — and the
 controller then restarts unable to read any snapshot it wrote before. The generated
 Secret is kept on `helm uninstall` and reused by a reinstall under the same release name
-for the same reason. Treat the material as immutable yourself.
+for the same reason. Treat the material as immutable yourself, and never use
+`helm upgrade --force`.
 :::
+
+### `the SQLite store already exists but snapshot key Secret ... has no "key" item`
+
+The controller-generated snapshot key is gone but the database that it encrypted
+is still there, so the controller refuses to mint a new key that could not read
+existing records. Restore the Secret from backup. If the data is expendable,
+delete the data volume and restart the controller to start over.
 
 ### The controller crashes immediately
 

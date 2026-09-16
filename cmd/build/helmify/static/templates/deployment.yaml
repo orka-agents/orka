@@ -112,6 +112,10 @@ spec:
             - --harness-v1-dispatch-workers={{ .Values.harnessV1.dispatch.workers }}
             {{- end }}
             - --agent-execution-snapshot-key-file=/var/run/orka/agent-execution-snapshot/key
+            {{- if include "orka.agentExecutionSnapshotGenerated" . }}
+            - {{ printf "--agent-execution-snapshot-secret=%s" (include "orka.agentExecutionSnapshotSecretName" .) | quote }}
+            - {{ printf "--agent-execution-snapshot-secret-key=%s" (include "orka.agentExecutionSnapshotSecretKey" .) | quote }}
+            {{- end }}
             - --agent-execution-snapshot-retention={{ .Values.controller.agentExecutionSnapshot.retention }}
             - --agent-execution-snapshot-retention-interval={{ .Values.controller.agentExecutionSnapshot.retentionInterval }}
             {{- if $harnessV2 }}
@@ -593,6 +597,11 @@ spec:
           secret:
             secretName: {{ include "orka.agentExecutionSnapshotSecretName" . | quote }}
             defaultMode: 0400
+            {{- if include "orka.agentExecutionSnapshotGenerated" . }}
+            # Empty until the controller mints the key on first start; the Pod
+            # must be able to start with the item absent.
+            optional: true
+            {{- end }}
             items:
               - key: {{ include "orka.agentExecutionSnapshotSecretKey" . | quote }}
                 path: key

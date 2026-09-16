@@ -6,7 +6,8 @@ description: "Install Orka on Kubernetes and run a test task."
 # Install Orka
 
 Install the latest Orka release with Helm, then run a small test task.
-The whole install is one namespace and one Helm command.
+You create one namespace and run one Helm command. The chart creates a second
+namespace, `orka-runtimes`, for the Pods that run coding agents.
 These commands use your current Kubernetes context, name the installation `orka`,
 and use the namespace `orka-system`.
 For development, [build from source](../getting-started.md#option-b-current-main-from-source).
@@ -73,13 +74,15 @@ Check that the Deployments are ready and the data volumes show `Bound`:
 kubectl -n orka-system get deployments,pvc
 ```
 
-The install also created two Secrets. `orka-agent-execution-snapshot` holds the
-key that encrypts saved agent execution records. Back it up together with the
-data volume. Without it, Orka cannot read those records after a restore. To
-supply your own key instead, see
+The install also created two Secrets that the controller filled in on its first
+start. `orka-agent-execution-snapshot` holds the key that encrypts saved agent
+execution records. Back it up together with the data volume. Without it, Orka
+cannot read those records after a restore. To supply your own key instead, see
 [Snapshot encryption key](../reference/configuration.md#snapshot-encryption-key).
 `orka-webhook-tls` holds the self-signed CA and serving certificate for Orka's
-admission webhooks. The controller renews it on its own.
+admission webhooks. The controller renews it on its own. Never run
+`helm upgrade --force` on this release, because it replaces both Secrets with
+the chart's empty versions.
 
 Then run a container task. This test does not call a model.
 

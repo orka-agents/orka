@@ -1066,16 +1066,6 @@ rules:
   - list
   - watch
 - apiGroups:
-  - admissionregistration.k8s.io
-  resources:
-  - validatingwebhookconfigurations
-  verbs:
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
   - agents.x-k8s.io
   resources:
   - sandboxes

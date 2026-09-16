@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/base64"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -332,22 +331,6 @@ func helmTemplateStaticChartWithExistingControllerSnapshot(
 	args ...string,
 ) (string, error) {
 	t.Helper()
-	return helmTemplateStaticChartWithExistingControllerAndSnapshotSecret(
-		t, existingControllerArgs, existingSnapshotSecret, existingSnapshotKey, "", args...)
-}
-
-// helmTemplateStaticChartWithExistingControllerAndSnapshotSecret renders an
-// upgrade against a forced live controller. A non-empty liveSnapshotValue also
-// forces the generated snapshot Secret lookup to return that data item.
-func helmTemplateStaticChartWithExistingControllerAndSnapshotSecret(
-	t *testing.T,
-	existingControllerArgs []string,
-	existingSnapshotSecret string,
-	existingSnapshotKey string,
-	liveSnapshotValue string,
-	args ...string,
-) (string, error) {
-	t.Helper()
 	helm, err := exec.LookPath("helm")
 	if err != nil {
 		t.Skip("helm is required for static chart render tests")
@@ -358,9 +341,6 @@ func helmTemplateStaticChartWithExistingControllerAndSnapshotSecret(
 		t.Fatalf("copy static chart: %v", err)
 	}
 	forceStaticChartNamespaceMode(t, chartDir, "harness-v2")
-	if liveSnapshotValue != "" {
-		forceGeneratedSnapshotSecretLookup(t, chartDir, liveSnapshotValue)
-	}
 	helpersPath := filepath.Join(chartDir, "templates", "_helpers.tpl")
 	helpers, err := os.ReadFile(helpersPath)
 	if err != nil {
@@ -812,106 +792,55 @@ func TestStaticChartGeneratesAgentExecutionSnapshotSecret(t *testing.T) {
 			t.Fatalf("generated snapshot Secret is missing %q:\n%s", marker, secret)
 		}
 	}
-	value := renderedSecretDataValue(t, secret, "key")
-	encodedKey, err := base64.StdEncoding.DecodeString(value)
-	if err != nil {
-		t.Fatalf("generated snapshot Secret data is not base64: %v\n%s", err, secret)
-	}
-	rawKey, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(encodedKey)))
-	if err != nil {
-		t.Fatalf("generated snapshot key item is not base64 text: %v\n%s", err, secret)
-	}
-	if len(rawKey) != 32 {
-		t.Fatalf("generated snapshot key decodes to %d bytes, want 32:\n%s", len(rawKey), secret)
+	// The chart must never render key material: Helm keeps rendered
+	// manifests in release history. The controller mints the key at runtime.
+	if strings.Contains(secret, "\ndata:") || strings.Contains(secret, "\nstringData:") {
+		t.Fatalf("generated snapshot Secret must be rendered empty:\n%s", secret)
 	}
 
 	deployment := requireRenderedDocument(t, rendered, "kind: Deployment\n", "\n  name: test-orka-controller\n")
 	for _, marker := range []string{
+		`--agent-execution-snapshot-secret=test-orka-agent-execution-snapshot`,
+		`--agent-execution-snapshot-secret-key=key`,
+		"--agent-execution-snapshot-key-file=/var/run/orka/agent-execution-snapshot/key",
 		"secretName: \"test-orka-agent-execution-snapshot\"",
 		"key: \"key\"",
 		"path: key",
 	} {
 		if !strings.Contains(deployment, marker) {
-			t.Fatalf("controller deployment does not mount the generated snapshot Secret %q:\n%s", marker, deployment)
+			t.Fatalf("controller deployment does not bootstrap the generated snapshot Secret %q:\n%s", marker, deployment)
 		}
+	}
+	volume := renderedVolume(t, deployment, "agent-execution-snapshot-key")
+	if !strings.Contains(volume, "optional: true") {
+		t.Fatalf("generated snapshot key mount must be optional so the Pod can start before the key exists:\n%s", volume)
 	}
 
 	explicit := requireHelmRender(t)
 	if strings.Contains(explicit, "name: test-orka-agent-execution-snapshot") {
 		t.Fatalf("chart generated a snapshot Secret although existingSecret was supplied:\n%s", explicit)
 	}
-}
-
-func TestStaticChartReusesExistingGeneratedAgentExecutionSnapshotKey(t *testing.T) {
-	const existingValue = "ZXhpc3Rpbmctc25hcHNob3Qta2V5LWJ5dGVz"
-	rendered := requireHelmRenderWithExistingSnapshotSecret(t, existingValue,
-		"--set-string", "controller.agentExecutionSnapshot.existingSecret=",
-		"--set-string", "controller.agentExecutionSnapshot.key=",
-	)
-	secret := requireRenderedDocument(t, rendered, "kind: Secret\n", "\n  name: test-orka-agent-execution-snapshot\n")
-	if got := renderedSecretDataValue(t, secret, "key"); got != existingValue {
-		t.Fatalf("generated snapshot Secret replaced the live key material: got %q, want %q:\n%s", got, existingValue, secret)
+	explicitDeployment := requireRenderedDocument(t, explicit, "kind: Deployment\n", "\n  name: test-orka-controller\n")
+	if strings.Contains(explicitDeployment, "--agent-execution-snapshot-secret=") {
+		t.Fatalf("operator-supplied snapshot key must not enable controller bootstrap:\n%s", explicitDeployment)
+	}
+	if strings.Contains(renderedVolume(t, explicitDeployment, "agent-execution-snapshot-key"), "optional: true") {
+		t.Fatalf("operator-supplied snapshot key mount must stay required:\n%s", explicitDeployment)
 	}
 }
 
-// requireHelmRenderWithExistingSnapshotSecret renders the static chart with
-// the generated snapshot Secret lookup forced to return a live Secret whose
-// key item holds value.
-func requireHelmRenderWithExistingSnapshotSecret(t *testing.T, value string, args ...string) string {
+// renderedVolume returns the named volume block of a rendered Deployment.
+func renderedVolume(t *testing.T, deployment, name string) string {
 	t.Helper()
-	helm, err := exec.LookPath("helm")
-	if err != nil {
-		t.Skip("helm is required for static chart render tests")
+	start := strings.Index(deployment, "\n        - name: "+name+"\n")
+	if start < 0 {
+		t.Fatalf("controller deployment has no %s volume:\n%s", name, deployment)
 	}
-	chartDir := filepath.Join(t.TempDir(), "static")
-	if err := os.CopyFS(chartDir, os.DirFS("static")); err != nil {
-		t.Fatalf("copy static chart: %v", err)
+	volume := deployment[start+1:]
+	if next := strings.Index(volume[1:], "\n        - name: "); next >= 0 {
+		volume = volume[:next+1]
 	}
-	forceGeneratedSnapshotSecretLookup(t, chartDir, value)
-	defaults := staticChartDefaultArgs()
-	commandArgs := make([]string, 0, 5+len(defaults)+len(args))
-	commandArgs = append(commandArgs, "template", "test", chartDir, "--namespace", "orka-test")
-	commandArgs = append(commandArgs, defaults...)
-	commandArgs = append(commandArgs, args...)
-	output, err := exec.Command(helm, commandArgs...).CombinedOutput()
-	if err != nil {
-		t.Fatalf("helm template with forced snapshot Secret failed: %v\n%s", err, output)
-	}
-	return string(output)
-}
-
-// forceGeneratedSnapshotSecretLookup rewrites the copied chart so the generated
-// snapshot Secret's release-namespace lookup returns a Secret whose key item
-// holds value.
-func forceGeneratedSnapshotSecretLookup(t *testing.T, chartDir, value string) {
-	t.Helper()
-	templatePath := filepath.Join(chartDir, "templates", "agent-execution-snapshot-secret.yaml")
-	template, err := os.ReadFile(templatePath)
-	if err != nil {
-		t.Fatalf("read snapshot Secret template: %v", err)
-	}
-	lookup := `{{- $existing := lookup "v1" "Secret" .Release.Namespace $name }}`
-	forced := `{{- $existing := dict "data" (dict "key" ` + strconv.Quote(value) + `) }}`
-	withSecret := strings.Replace(string(template), lookup, forced, 1)
-	if withSecret == string(template) {
-		t.Fatalf("snapshot Secret generation is not gated by the release-namespace Secret lookup")
-	}
-	if err := os.WriteFile(templatePath, []byte(withSecret), 0o600); err != nil {
-		t.Fatalf("force snapshot Secret lookup in copied chart: %v", err)
-	}
-}
-
-// renderedSecretDataValue returns the raw data value stored under key in a
-// rendered Secret document.
-func renderedSecretDataValue(t *testing.T, secret, key string) string {
-	t.Helper()
-	for line := range strings.SplitSeq(secret, "\n") {
-		if value, ok := strings.CutPrefix(line, "  "+key+": "); ok {
-			return strings.TrimSpace(value)
-		}
-	}
-	t.Fatalf("rendered Secret has no data item %q:\n%s", key, secret)
-	return ""
+	return volume
 }
 
 func TestStaticChartGeneratesWebhookTLSSecret(t *testing.T) {
@@ -927,8 +856,8 @@ func TestStaticChartGeneratesWebhookTLSSecret(t *testing.T) {
 			t.Fatalf("generated webhook TLS Secret is missing %q:\n%s", marker, secret)
 		}
 	}
-	if strings.Contains(secret, "\ndata:") {
-		t.Fatalf("a fresh generated webhook TLS Secret must be empty so the controller can populate it:\n%s", secret)
+	if strings.Contains(secret, "\ndata:") || strings.Contains(secret, "\nstringData:") {
+		t.Fatalf("generated webhook TLS Secret must be rendered empty so the controller populates it:\n%s", secret)
 	}
 
 	deployment := requireRenderedDocument(t, rendered, "kind: Deployment\n", "\n  name: test-orka-controller\n")
@@ -944,14 +873,7 @@ func TestStaticChartGeneratesWebhookTLSSecret(t *testing.T) {
 	}
 	// cert-controller writes only the Secret; the kubelet must project it into
 	// the cert directory, so generated mode mounts the whole generated Secret.
-	volumeStart := strings.Index(deployment, "\n        - name: webhook-tls\n")
-	if volumeStart < 0 {
-		t.Fatalf("controller deployment has no webhook-tls volume:\n%s", deployment)
-	}
-	volume := deployment[volumeStart+1:]
-	if next := strings.Index(volume[1:], "\n        - name: "); next >= 0 {
-		volume = volume[:next+1]
-	}
+	volume := renderedVolume(t, deployment, "webhook-tls")
 	if !strings.Contains(volume, `secretName: "test-orka-webhook-tls"`) || strings.Contains(volume, "items:") {
 		t.Fatalf("generated webhook TLS must mount the whole generated Secret:\n%s", volume)
 	}
@@ -994,51 +916,6 @@ func TestStaticChartKeepsOperatorWebhookTLS(t *testing.T) {
 	wantError := "caBundle or caInjectionAnnotations when webhooks.tls.existingSecret is set"
 	if err == nil || !strings.Contains(output, wantError) {
 		t.Fatalf("operator-supplied webhook TLS without CA trust was accepted: %v\n%s", err, output)
-	}
-}
-
-func TestStaticChartPreservesGeneratedWebhookTLSData(t *testing.T) {
-	helm, err := exec.LookPath("helm")
-	if err != nil {
-		t.Skip("helm is required for static chart render tests")
-	}
-	chartDir := filepath.Join(t.TempDir(), "static")
-	if err := os.CopyFS(chartDir, os.DirFS("static")); err != nil {
-		t.Fatalf("copy static chart: %v", err)
-	}
-	templatePath := filepath.Join(chartDir, "templates", "controller-webhook-tls-secret.yaml")
-	template, err := os.ReadFile(templatePath)
-	if err != nil {
-		t.Fatalf("read webhook TLS Secret template: %v", err)
-	}
-	lookup := `{{- $existing := lookup "v1" "Secret" .Release.Namespace $name }}`
-	liveData := map[string]string{"tls.crt": "Y2VydA==", "tls.key": "a2V5", "ca.crt": "Y2E=", "ca.key": "Y2FrZXk="}
-	forced := `{{- $existing := dict "data" (dict ` +
-		`"tls.crt" "Y2VydA==" "tls.key" "a2V5" "ca.crt" "Y2E=" "ca.key" "Y2FrZXk=") }}`
-	withSecret := strings.Replace(string(template), lookup, forced, 1)
-	if withSecret == string(template) {
-		t.Fatalf("webhook TLS Secret generation is not gated by the release-namespace Secret lookup")
-	}
-	if err := os.WriteFile(templatePath, []byte(withSecret), 0o600); err != nil {
-		t.Fatalf("force webhook TLS Secret lookup in copied chart: %v", err)
-	}
-	defaults := staticChartDefaultArgs()
-	commandArgs := make([]string, 0, 5+len(defaults)+4)
-	commandArgs = append(commandArgs, "template", "test", chartDir, "--namespace", "orka-test")
-	commandArgs = append(commandArgs, defaults...)
-	commandArgs = append(commandArgs,
-		"--set-string", "webhooks.tls.existingSecret=",
-		"--set-string", "webhooks.caBundle=",
-	)
-	output, err := exec.Command(helm, commandArgs...).CombinedOutput()
-	if err != nil {
-		t.Fatalf("helm template with forced webhook TLS Secret failed: %v\n%s", err, output)
-	}
-	secret := requireRenderedDocument(t, string(output), "kind: Secret\n", "\n  name: test-orka-webhook-tls\n")
-	for key, value := range liveData {
-		if got := renderedSecretDataValue(t, secret, key); got != value {
-			t.Fatalf("upgrade did not carry forward %s: got %q, want %q:\n%s", key, got, value, secret)
-		}
 	}
 }
 
@@ -1286,26 +1163,6 @@ func TestStaticChartRejectsAgentExecutionSnapshotIdentityChangesOnUpgrade(t *tes
 }
 
 func TestStaticChartAcceptsGeneratedAgentExecutionSnapshotIdentityOnUpgrade(t *testing.T) {
-	const liveValue = "ZXhpc3Rpbmctc25hcHNob3Qta2V5LWJ5dGVz"
-	output, err := helmTemplateStaticChartWithExistingControllerAndSnapshotSecret(
-		t,
-		generatedSnapshotUpgradeControllerArgs(),
-		"test-orka-agent-execution-snapshot",
-		"key",
-		liveValue,
-		"--set-string", "controller.agentExecutionSnapshot.existingSecret=",
-		"--set-string", "controller.agentExecutionSnapshot.key=",
-	)
-	if err != nil {
-		t.Fatalf("upgrade with the generated snapshot identity was rejected: %v\n%s", err, output)
-	}
-	secret := requireRenderedDocument(t, output, "kind: Secret\n", "\n  name: test-orka-agent-execution-snapshot\n")
-	if got := renderedSecretDataValue(t, secret, "key"); got != liveValue {
-		t.Fatalf("upgrade replaced the live generated snapshot key: got %q, want %q:\n%s", got, liveValue, secret)
-	}
-}
-
-func TestStaticChartRejectsUpgradeWhenGeneratedAgentExecutionSnapshotSecretIsMissing(t *testing.T) {
 	output, err := helmTemplateStaticChartWithExistingControllerSnapshot(
 		t,
 		generatedSnapshotUpgradeControllerArgs(),
@@ -1314,9 +1171,12 @@ func TestStaticChartRejectsUpgradeWhenGeneratedAgentExecutionSnapshotSecretIsMis
 		"--set-string", "controller.agentExecutionSnapshot.existingSecret=",
 		"--set-string", "controller.agentExecutionSnapshot.key=",
 	)
-	wantError := `generated snapshot Secret orka-test/test-orka-agent-execution-snapshot has no "key" item`
-	if err == nil || !strings.Contains(output, wantError) {
-		t.Fatalf("helm render error = %v, want missing generated snapshot Secret rejection %q:\n%s", err, wantError, output)
+	if err != nil {
+		t.Fatalf("upgrade with the generated snapshot identity was rejected: %v\n%s", err, output)
+	}
+	secret := requireRenderedDocument(t, output, "kind: Secret\n", "\n  name: test-orka-agent-execution-snapshot\n")
+	if strings.Contains(secret, "\ndata:") {
+		t.Fatalf("upgrade must not render snapshot key material:\n%s", secret)
 	}
 }
 
@@ -2067,6 +1927,8 @@ func TestStaticChartProviderProxyURLValidation(t *testing.T) {
 		{url: "http://gateway.example.test/v1%2500admin"},
 		{url: "http://gateway.example.test/%3F%23route/%252e%252e/admin"},
 		{url: "http://gateway.example.test/%invalid"},
+		{url: "http://:8080"},
+		{url: "http://:8080/v1"},
 		{url: "http://gateway.example.test/%25invalid"},
 	} {
 		t.Run(test.url, func(t *testing.T) {

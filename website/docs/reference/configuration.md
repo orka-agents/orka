@@ -701,7 +701,7 @@ Key configuration values for the Helm chart:
 | `controller.image.digest` | `""` | Optional SHA256 digest; takes precedence over `tag`. |
 | `controller.mode` | `harness-v2` | Static agent execution mode: `harness-v1` or `harness-v2`. Select v1 explicitly for a compatibility release; a release never serves both or changes mode in place. |
 | `controller.watchNamespace` | Helm release namespace | Must match the release namespace, labeled `orka.ai/controller-mode` with the matching mode. |
-| `controller.agentExecutionSnapshot.existingSecret` | `""` | Your own snapshot encryption Secret. Empty generates `<release>-agent-execution-snapshot` once and reuses it. Immutable after install. See [Snapshot encryption key](#snapshot-encryption-key). |
+| `controller.agentExecutionSnapshot.existingSecret` | `""` | Your own snapshot encryption Secret. Empty renders an empty `<release>-agent-execution-snapshot` that the controller fills on first start. Immutable after install. See [Snapshot encryption key](#snapshot-encryption-key). |
 | `controller.agentExecutionSnapshot.key` | `key` | Item inside that Secret holding 32 raw bytes or their base64 encoding. Immutable after install. |
 | `controller.enforceNamespaceIsolation` | `true` | Restrict namespace-bound API callers and default Helm RBAC to their namespace |
 | `service.port` | `8080` | Controller Service port used by controller and Publisher in-cluster URLs. |
@@ -737,8 +737,8 @@ Key configuration values for the Helm chart:
 | `scmEgressProxy.maxConcurrent` | `8` | Maximum concurrent forward requests and CONNECT tunnels. |
 | `webhooks.tls.existingSecret` | `""` | Your own TLS Secret for the admission webhooks. Empty lets the controller issue and renew a self-signed certificate in `<release>-webhook-tls`. See [Webhook certificate](#webhook-certificate). |
 | `webhooks.tls.certKey` / `webhooks.tls.privateKeyKey` | `tls.crt` / `tls.key` | Certificate and private-key keys inside the webhook TLS Secret. |
-| `webhooks.caBundle` | `""` | Base64-encoded PEM CA bundle for the chart ValidatingWebhookConfiguration. Leave empty when `webhooks.caInjectionAnnotations` configures an injector. |
-| `webhooks.caInjectionAnnotations` | `{}` | CA-injection annotations (for example cert-manager) placed on the chart ValidatingWebhookConfiguration. Rendering fails unless this or `webhooks.caBundle` is set. |
+| `webhooks.caBundle` | `""` | Base64-encoded PEM CA bundle for an operator-supplied certificate. Leave empty with controller-issued TLS, which injects its own CA, or when `webhooks.caInjectionAnnotations` configures an injector. |
+| `webhooks.caInjectionAnnotations` | `{}` | CA-injection annotations (for example cert-manager) placed on the chart ValidatingWebhookConfiguration. With `webhooks.tls.existingSecret` set, rendering fails unless this or `webhooks.caBundle` is set. |
 | `webhooks.timeoutSeconds` | `10` | Admission webhook timeout. |
 | `controller.agentSandbox.enabled` | `false` | Enable experimental workspace-backed execution for agent Tasks that set `execution.workspace` |
 | `controller.agentSandbox.routerUrl` | `""` | Optional upstream agent-sandbox router base URL used for workspace claims |
@@ -776,10 +776,18 @@ to disable that provider.
 ### Snapshot encryption key
 
 The controller encrypts agent execution snapshots at rest with an AES-256 key
-mounted from a Secret. By default the chart generates that Secret on the first
-install as `<release>-agent-execution-snapshot`, reuses its bytes on every
-upgrade, and keeps it on `helm uninstall` so a restored data volume can still be
+mounted from a Secret. By default the chart renders an empty Secret named
+`<release>-agent-execution-snapshot` and the controller mints 32 random bytes
+into it on its first start, then reuses them on every later start. The chart
+never renders key material, so Helm release history and dry-run output contain
+no secrets, and Helm leaves the controller-written data alone on upgrade. The
+Secret is kept on `helm uninstall` so a restored data volume can still be
 decrypted. Back it up with the data volume.
+
+If the controller finds its SQLite store already present but the Secret empty,
+the key was lost. It refuses to start rather than mint a new key that could not
+read the existing records. Restore the Secret from backup, or delete the data
+volume to start over.
 
 To bring your own key, create the Secret before installing and set
 `controller.agentExecutionSnapshot.existingSecret`. The item must hold exactly
@@ -799,11 +807,10 @@ helm install orka orka/orka --namespace orka-system \
 
 The Secret name, item key, and key material are immutable for the life of the
 release. Helm rejects an upgrade that changes the name or item, including a
-switch between the generated Secret and your own. It also rejects an upgrade
-when the generated Secret is missing, rather than minting a new key that could
-not read existing records. Offline renders such as `--dry-run=client` cannot
-see the Secret, so use `--dry-run=server` to preview an upgrade. It cannot
-detect changed bytes under the same name, so never rotate the material in place.
+switch between the generated Secret and your own. It cannot detect changed
+bytes under the same name, so never rotate the material in place, and never
+run `helm upgrade --force`, which replaces the Secret with the chart's empty
+version.
 
 ### Webhook certificate
 
@@ -819,10 +826,11 @@ library Gatekeeper uses for the same job. It mints a ten-year self-signed CA and
 a one-year serving certificate, renews the serving certificate before expiry,
 and writes the CA into the `caBundle` of the release's
 ValidatingWebhookConfiguration. The Secret is the source of truth and is kept on
-`helm uninstall`, so a reinstall under the same release name reuses the CA. The
+`helm uninstall`, so a reinstall under the same release name reuses the CA. The chart never renders certificate material. The
 Secret is mounted into the controller Pod, and the Pod reports ready only after
 the kubelet has projected the certificate and the CA is injected, which can take
-about a minute on a fresh install. This grants the
+about a minute on a fresh install. Never run `helm upgrade --force`, which
+replaces the Secret with the chart's empty version. This grants the
 controller `list` and `watch` on all ValidatingWebhookConfigurations, which
 cannot be name-scoped, plus `update` on its own.
 

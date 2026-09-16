@@ -12,8 +12,9 @@ export default function QuickStartSection() {
         <div className="quickstart-card">
           <h3>1. Install with Helm</h3>
           <p>
-            One namespace and one Helm command. Works on kind or
-            minikube. No model API key needed yet.
+            Create one namespace, run one Helm command. The chart adds a
+            runtime namespace for agent Pods. Works on kind or minikube. No
+            model API key needed yet.
           </p>
           <p>
             <Link to="/docs/installation">Open the installation guide</Link>
