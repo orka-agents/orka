@@ -28,8 +28,14 @@ Each controller accepts exactly one required mode:
 There is no `dual`, `auto`, or `harness-v1-drain` mode. An installation never changes
 mode in place.
 
-The controller also requires a non-empty watched namespace labeled with the
-same mode:
+The controller also requires a non-empty watched namespace that carries the
+same mode as the `orka.ai/controller-mode` label. On first start the controller
+labels an unlabeled namespace itself, so a Helm install with `--create-namespace`
+needs no preparation. A namespace already labeled with the other mode fails
+startup. To require an operator-applied label instead, run the controller with
+`--claim-namespace-mode=false`.
+
+You can still create the namespaces up front with the label in place:
 
 ```bash
 export ORKA_CONTEXT='<your-kubeconfig-context>'
@@ -50,10 +56,12 @@ metadata:
 EOF
 ```
 
-:::warning[The label must exist before the controller starts]
-A missing or mismatched `orka.ai/controller-mode` label fails startup. Set it when you create
-the namespace. Do not adopt an unlabeled namespace, and do not relabel one to move it between
-modes — the two harnesses own different resources in it.
+:::warning[The claim is immutable]
+Each release installs a ValidatingAdmissionPolicy for its namespace. Once the
+label exists it can never change or be removed, and only that release's
+controller ServiceAccount may add it to an existing namespace. Do not relabel a
+namespace to move it between modes: the two harnesses own different resources
+in it. Recreate the installation in a new namespace instead.
 :::
 
 ## Isolation checklist

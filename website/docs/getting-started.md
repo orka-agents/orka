@@ -116,20 +116,6 @@ docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' \
   "$ACP_COPILOT_RUNTIME_IMG" "$ACP_OPENCODE_RUNTIME_IMG"
 ```
 
-Claim a namespace for the install. The label is not optional — the controller checks it at
-startup and exits if it is missing or does not match:
-
-```bash
-kubectl --context "${ORKA_CONTEXT}" create -f - <<'EOF'
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: orka-system
-  labels:
-    orka.ai/controller-mode: harness-v2
-EOF
-```
-
 Install the development chart from `manifest_staging/charts/orka`. It matches
 the source checkout. The root `charts/orka` directory holds files prepared for
 release and may not match your code:
@@ -137,7 +123,7 @@ release and may not match your code:
 ```bash
 helm install orka ./manifest_staging/charts/orka \
   --kube-context "${ORKA_CONTEXT}" \
-  --namespace orka-system \
+  --namespace orka-system --create-namespace \
   --set controller.mode=harness-v2 \
   --set controller.watchNamespace=orka-system \
   --set controller.image.repository="${ORKA_IMAGE_PREFIX}" \
@@ -155,7 +141,8 @@ helm install orka ./manifest_staging/charts/orka \
   --wait --timeout 10m
 ```
 
-The controller issues its own webhook certificate. To bring your own, see
+The controller labels the namespace with its execution mode on first start and
+issues its own webhook certificate. To bring your own certificate, see
 [Webhook certificate](reference/configuration.md#webhook-certificate).
 
 To disable an unused runtime, set its image to an empty string, for example

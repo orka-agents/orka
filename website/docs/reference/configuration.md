@@ -832,7 +832,11 @@ the kubelet has projected the certificate and the CA is injected, which can take
 about a minute on a fresh install. Never run `helm upgrade --force`, which
 replaces the Secret with the chart's empty version. This grants the
 controller `list` and `watch` on all ValidatingWebhookConfigurations, which
-cannot be name-scoped, plus `update` on its own.
+cannot be name-scoped, plus `update` on its own. Because that update is
+whole-object, a ValidatingAdmissionPolicy installed with the release lets the
+controller's ServiceAccount change nothing on that configuration except each
+webhook's `caBundle`, so a compromised controller cannot repoint or widen its
+own admission webhooks.
 
 **Operator-supplied.** Set `webhooks.tls.existingSecret` to a Secret holding
 `tls.crt` and `tls.key` valid for `<release>-webhook.<namespace>.svc`, and
@@ -1019,7 +1023,8 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--gateway-poll-interval` | `500ms` | Dispatcher and delivery poll interval |
 | `--gateway-batch-size` | `25` | Maximum gateway records processed per iteration |
 | `--controller-mode` / `ORKA_CONTROLLER_MODE` | required | Static controller mode: `harness-v1` or `harness-v2`. `dual`, `auto`, and drain modes are rejected. |
-| `--watch-namespace` | required | One non-empty watched namespace carrying the matching `orka.ai/controller-mode` label. |
+| `--watch-namespace` | required | One non-empty watched namespace. Its `orka.ai/controller-mode` label must match; the controller adds it when absent. |
+| `--claim-namespace-mode` | `true` | Label an unlabeled watched namespace with the controller's mode on first start. Set `false` to require an operator-applied label. |
 | `--enforce-namespace-isolation` | `false` | Restrict users to their ServiceAccount's namespace |
 | `--max-tasks-per-namespace` | `0` | Max active tasks per namespace (0 = unlimited) |
 | `--agent-sandbox-enabled` | `ORKA_AGENT_SANDBOX_ENABLED` env or `false` | Admit the agent-sandbox execution-workspace provider for agent Tasks that set `execution.workspace` |

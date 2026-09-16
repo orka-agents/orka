@@ -6,8 +6,9 @@ description: "Install Orka on Kubernetes and run a test task."
 # Install Orka
 
 Install the latest Orka release with Helm, then run a small test task.
-You create one namespace and run one Helm command. The chart creates a second
-namespace, `orka-runtimes`, for the Pods that run coding agents.
+The whole install is one Helm command. It creates the `orka-system` namespace
+for Orka itself and a second namespace, `orka-runtimes`, for the Pods that run
+coding agents.
 These commands use your current Kubernetes context, name the installation `orka`,
 and use the namespace `orka-system`.
 For development, [build from source](../getting-started.md#option-b-current-main-from-source).
@@ -36,17 +37,7 @@ required for a test install. kind and minikube work without it.
 You do not need a model API key to install Orka. You add providers and models
 after the install.
 
-## 1. Prepare the namespace
-
-Create Orka's namespace. The label selects the default agent execution mode,
-`harness-v2`, and the controller refuses to start without it.
-
-```bash
-kubectl create namespace orka-system
-kubectl label namespace orka-system orka.ai/controller-mode=harness-v2
-```
-
-## 2. Install with Helm
+## 1. Install with Helm
 
 Install the latest chart from Orka's Helm repository. It already includes the
 matching image tags, generates its own encryption key, and issues its own
@@ -55,8 +46,14 @@ webhook certificate.
 ```bash
 helm repo add orka https://orka-agents.github.io/orka/charts
 helm repo update orka
-helm install orka orka/orka --namespace orka-system --wait --timeout 10m
+helm install orka orka/orka --namespace orka-system --create-namespace \
+  --wait --timeout 10m
 ```
+
+On its first start the controller labels the namespace
+`orka.ai/controller-mode=harness-v2`. That label is the namespace's execution
+mode, it is immutable, and it is how two Orka installations on one cluster stay
+apart. See [Controller modes](harness-modes.md).
 
 To bring your own certificate or use cert-manager, see
 [Webhook certificate](../reference/configuration.md#webhook-certificate).
@@ -66,7 +63,7 @@ If Helm refuses to render, the message names the value it wants.
 To choose different image tags or pin digests, see
 [Image overrides](../reference/configuration.md#image-overrides).
 
-## 3. Check the installation
+## 2. Check the installation
 
 Check that the Deployments are ready and the data volumes show `Bound`:
 

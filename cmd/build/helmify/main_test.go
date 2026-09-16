@@ -843,6 +843,46 @@ func renderedVolume(t *testing.T, deployment, name string) string {
 	return volume
 }
 
+func TestStaticChartEnforcesNamespaceModeWithAdmissionPolicy(t *testing.T) {
+	rendered := requireHelmRender(t)
+
+	policy := requireRenderedDocument(t, rendered,
+		"kind: ValidatingAdmissionPolicy\n", "\n  name: test-orka-namespace-mode\n")
+	for _, marker := range []string{
+		`expression: "object.metadata.name == 'orka-test'"`,
+		`expression: "'harness-v2'"`,
+		`expression: "'system:serviceaccount:orka-test:test-orka'"`,
+		"claim is immutable",
+		"only the release's controller may claim an existing namespace",
+	} {
+		if !strings.Contains(policy, marker) {
+			t.Fatalf("namespace-mode policy is missing %q:\n%s", marker, policy)
+		}
+	}
+	requireRenderedDocument(t, rendered,
+		"kind: ValidatingAdmissionPolicyBinding\n", "\n  name: test-orka-namespace-mode\n")
+
+	// The claim is no longer a controller-served webhook: the controller must
+	// be able to claim its namespace before its own webhook server is up.
+	webhook := requireRenderedDocument(t, rendered,
+		"kind: ValidatingWebhookConfiguration\n", "\n  name: test-orka-controller\n")
+	for _, marker := range []string{"namespace-mode.", "/validate-v1-namespace-execution-mode"} {
+		if strings.Contains(webhook, marker) {
+			t.Fatalf("namespace-mode webhook must not be rendered any more:\n%s", webhook)
+		}
+	}
+
+	clusterRole := requireRenderedDocument(t, rendered, "kind: ClusterRole\n", "\n  name: test-orka-controller-cluster\n")
+	if !strings.Contains(clusterRole, `resourceNames: ["orka-test"]
+    verbs: ["get", "update"]`) {
+		t.Fatalf("controller ClusterRole must allow updating only its own namespace:\n%s", clusterRole)
+	}
+	if strings.Contains(clusterRole, `resourceNames: ["orka-runtimes"]
+    verbs: ["get", "update"]`) {
+		t.Fatalf("controller ClusterRole must not allow updating the runtime namespace:\n%s", clusterRole)
+	}
+}
+
 func TestStaticChartGeneratesWebhookTLSSecret(t *testing.T) {
 	args := []string{
 		"--set-string", "webhooks.tls.existingSecret=",
@@ -893,6 +933,23 @@ func TestStaticChartGeneratesWebhookTLSSecret(t *testing.T) {
 			t.Fatalf("controller ClusterRole is missing rotation permission %q:\n%s", marker, clusterRole)
 		}
 	}
+
+	// Update on a webhook configuration is whole-object, so a policy bounds
+	// the controller to caBundle changes on its own configuration.
+	guard := requireRenderedDocument(t, rendered,
+		"kind: ValidatingAdmissionPolicy\n", "\n  name: test-orka-webhook-configuration\n")
+	for _, marker := range []string{
+		`expression: "object.metadata.name == 'test-orka-controller'"`,
+		`expression: "request.userInfo.username == 'system:serviceaccount:orka-test:test-orka'"`,
+		"only clientConfig.caBundle may change",
+		"w.clientConfig.?url.orValue('') == o.clientConfig.?url.orValue('')",
+	} {
+		if !strings.Contains(guard, marker) {
+			t.Fatalf("webhook configuration guard policy is missing %q:\n%s", marker, guard)
+		}
+	}
+	requireRenderedDocument(t, rendered,
+		"kind: ValidatingAdmissionPolicyBinding\n", "\n  name: test-orka-webhook-configuration\n")
 }
 
 func TestStaticChartKeepsOperatorWebhookTLS(t *testing.T) {
@@ -910,6 +967,9 @@ func TestStaticChartKeepsOperatorWebhookTLS(t *testing.T) {
 	clusterRole := requireRenderedDocument(t, rendered, "kind: ClusterRole\n", "\n  name: test-orka-controller-cluster\n")
 	if strings.Contains(clusterRole, "validatingwebhookconfigurations") {
 		t.Fatalf("operator-supplied webhook TLS must not grant webhook configuration writes:\n%s", clusterRole)
+	}
+	if strings.Contains(rendered, "name: test-orka-webhook-configuration\n") {
+		t.Fatalf("operator-supplied webhook TLS needs no webhook configuration guard policy:\n%s", rendered)
 	}
 
 	output, err := helmTemplateStaticChart(t, "--set-string", "webhooks.caBundle=")

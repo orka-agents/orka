@@ -105,17 +105,20 @@ Orka watches exactly one namespace. Set `controller.watchNamespace` to the relea
 namespace.
 
 **`controller-mode namespace claim failed`** or `namespace "..." is claimed by execution
-mode "..."`
+mode "harness-v1", not "harness-v2"`
 
-The namespace must carry a label matching the controller's mode:
+The namespace already carries an `orka.ai/controller-mode` label for the other
+mode. The controller claims an unlabeled namespace on its own, but it never
+takes over a namespace that belongs to the other harness, and the label cannot
+be changed once set. Install into a new namespace. If you run the controller
+with `--claim-namespace-mode=false`, label the namespace yourself before
+starting it:
 
 ```bash
 kubectl label namespace orka-system orka.ai/controller-mode=harness-v2
 ```
 
-This is how two installs on one cluster avoid fighting over the same Tasks. If the label
-says `harness-v1` and you are installing `harness-v2`, use a different namespace — do not
-relabel a namespace that another install is using.
+This is how two installs on one cluster avoid fighting over the same Tasks.
 
 **`unable to read controller-mode namespace`**
 

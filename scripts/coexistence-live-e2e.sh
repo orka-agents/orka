@@ -611,7 +611,10 @@ main() {
 
   log "Claiming mode-labeled namespaces before any workload write"
   run bash "${script_dir}/lib/ensure-static-mode-namespace.sh" kubectl "${v1_namespace}" harness-v1
-  run bash "${script_dir}/lib/ensure-static-mode-namespace.sh" kubectl "${v2_namespace}" harness-v2
+  # The v2 namespace is deliberately created without the mode label: the v2
+  # controller must claim it on first start, which also proves the
+  # namespace-mode admission policy admits the controller's own claim.
+  kubectl create namespace "${v2_namespace}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
   log "Provisioning per-release test-only secrets"
   create_namespace_secrets "${v1_namespace}" "${v1_release}-webhook.${v1_namespace}.svc"
@@ -682,6 +685,19 @@ main() {
   run kubectl -n "${v1_namespace}" rollout status "deployment/${v1_controller_deployment}" --timeout="${rollout_timeout}"
   run kubectl -n "${v1_namespace}" rollout status "deployment/${wrapper_deployment}" --timeout="${rollout_timeout}"
   run kubectl -n "${v2_namespace}" rollout status "deployment/${v2_controller_deployment}" --timeout="${rollout_timeout}"
+
+  log "Asserting the v2 controller claimed its unlabeled namespace"
+  local claimed_mode
+  claimed_mode="$(kubectl get namespace "${v2_namespace}" -o jsonpath='{.metadata.labels.orka\.ai/controller-mode}')"
+  [[ "${claimed_mode}" == "harness-v2" ]] || \
+    die "v2 controller did not claim its namespace: orka.ai/controller-mode=${claimed_mode:-<unset>}"
+  # The claim is immutable and only the controller may set it: relabeling as
+  # an operator must be denied by the namespace-mode admission policy.
+  if kubectl label namespace "${v2_namespace}" orka.ai/controller-mode=harness-v1 --overwrite >/dev/null 2>"${work_dir}/relabel.err"; then
+    die "namespace-mode admission policy allowed relabeling ${v2_namespace} to harness-v1"
+  fi
+  grep -Eq 'claim is immutable|cannot name another mode' "${work_dir}/relabel.err" || \
+    die "unexpected relabel denial message: $(cat "${work_dir}/relabel.err")"
 
   log "Asserting the v2 controller issued its own webhook certificate and injected the CA"
   local v2_webhook_tls_secret="${v2_release}-webhook-tls"

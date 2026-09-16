@@ -32,7 +32,6 @@ import (
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -302,6 +301,7 @@ func main() {
 	var enforceNamespaceIsolation bool
 	var maxTasksPerNamespace int
 	var controllerModeValue string
+	var claimNamespaceModeEnabled bool
 	var executionModeControllerUsernames string
 	var harnessV1Endpoint string
 	var harnessV1CAFile string
@@ -395,6 +395,10 @@ func main() {
 			"Enabling this will ensure there is only one active controller manager.")
 	flag.StringVar(&controllerModeValue, "controller-mode", os.Getenv("ORKA_CONTROLLER_MODE"),
 		"Required controller mode: harness-v1 or harness-v2. An installation never serves both modes.")
+	flag.BoolVar(&claimNamespaceModeEnabled, "claim-namespace-mode", true,
+		"Label an unlabeled watched namespace with orka.ai/controller-mode=<controller-mode> at startup. "+
+			"A namespace already claimed by the other mode still fails startup. Set false to require an "+
+			"operator-applied label.")
 	flag.StringVar(&executionModeControllerUsernames, "execution-mode-controller-usernames",
 		os.Getenv("ORKA_EXECUTION_MODE_CONTROLLER_USERNAMES"),
 		"Comma-separated exact Kubernetes usernames authorized for controller-owned admission writes.")
@@ -1162,15 +1166,10 @@ func main() {
 		setupLog.Error(err, "unable to create Kubernetes clientset")
 		os.Exit(1)
 	}
-	modeNamespace, err := kubeClient.CoreV1().Namespaces().Get(
-		context.Background(), watchNamespace, metav1.GetOptions{},
-	)
-	if err != nil {
-		setupLog.Error(err, "unable to read controller-mode namespace", "namespace", watchNamespace)
-		os.Exit(1)
-	}
-	if err := executionmode.ValidateNamespace(modeNamespace, mode); err != nil {
-		setupLog.Error(err, "controller-mode namespace claim failed")
+	if err := claimNamespaceMode(
+		context.Background(), kubeClient.CoreV1().Namespaces(), watchNamespace, mode, claimNamespaceModeEnabled,
+	); err != nil {
+		setupLog.Error(err, "controller-mode namespace claim failed", "namespace", watchNamespace, "mode", mode)
 		os.Exit(1)
 	}
 	// Actor-pool cleanup remains registered even when ACP execution is disabled.
