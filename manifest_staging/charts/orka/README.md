@@ -25,11 +25,10 @@ and webhook certificate. The settings you are most likely to change later:
 | `controller.agentExecutionSnapshot.existingSecret` | Empty by default; the chart generates the snapshot encryption Secret once and keeps it on uninstall. Set only to bring your own key. Immutable after install. |
 | `webhooks.tls.existingSecret`, `.caBundle`, `.caInjectionAnnotations` | Empty by default; the controller issues and renews a self-signed webhook certificate. Set to bring your own certificate or use cert-manager. |
 | `providerProxy.enabled`, `.upstreamBaseURL`, `.egress` | Off by default. Enable to connect built-in coding agents to your model gateway. See [Provider proxy](https://orka-agents.github.io/orka/docs/provider-proxy). |
-| `controller.mode` | `harness-v2` for new installations. It cannot change after installation. |
-| `controller.watchNamespace` | Defaults to the Helm namespace, which needs a matching `orka.ai/controller-mode` label. |
+| `controller.watchNamespace` | The one namespace Orka watches. Defaults to the Helm namespace and cannot change after installation. |
 
 Use a distinct Helm release name and namespace for each installation in a cluster.
-Each `harness-v2` installation also needs its own `controller.acpRuntime.namespace`.
+Each installation also needs its own `controller.acpRuntime.namespace`.
 `service.port` sets the controller Service port; `controller.apiPort` sets its
 container listener and Service target port.
 

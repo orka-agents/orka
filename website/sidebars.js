@@ -44,13 +44,13 @@ const sidebars = {
       label: 'Operations',
       collapsed: false,
       items: [
-        'operations/harness-modes',
         'operations/provider-proxy',
         'operations/agent-runtime-security',
         'operations/gateways',
         'operations/upgrading',
         'operations/troubleshooting',
         'operations/runbook',
+        'operations/harness-modes',
       ],
     },
     {

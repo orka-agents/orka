@@ -50,18 +50,8 @@ helm install orka orka/orka --namespace orka-system --create-namespace \
   --wait --timeout 10m
 ```
 
-On its first start the controller labels the namespace
-`orka.ai/controller-mode=harness-v2`. That label is the namespace's execution
-mode, it is immutable, and it is how two Orka installations on one cluster stay
-apart. See [Controller modes](harness-modes.md).
-
-To bring your own certificate or use cert-manager, see
+To bring your own webhook certificate or use cert-manager, see
 [Webhook certificate](../reference/configuration.md#webhook-certificate).
-
-If Helm refuses to render, the message names the value it wants.
-[Troubleshooting](troubleshooting.md#helm-refuses-to-render) lists the common ones.
-To choose different image tags or pin digests, see
-[Image overrides](../reference/configuration.md#image-overrides).
 
 ## 2. Check the installation
 

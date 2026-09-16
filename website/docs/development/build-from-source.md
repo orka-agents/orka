@@ -67,8 +67,6 @@ release and may not match your code:
 helm install orka ./manifest_staging/charts/orka \
   --kube-context "${ORKA_CONTEXT}" \
   --namespace orka-system --create-namespace \
-  --set controller.mode=harness-v2 \
-  --set controller.watchNamespace=orka-system \
   --set controller.image.repository="${ORKA_IMAGE_PREFIX}" \
   --set controller.image.digest="sha256:<controller-digest>" \
   --set workers.ai.image.repository="${ORKA_IMAGE_PREFIX}/ai-worker" \
@@ -84,8 +82,7 @@ helm install orka ./manifest_staging/charts/orka \
   --wait --timeout 10m
 ```
 
-The controller labels the namespace with its execution mode on first start and
-issues its own webhook certificate. To bring your own certificate, see
+The controller issues its own webhook certificate. To bring your own, see
 [Webhook certificate](../reference/configuration.md#webhook-certificate).
 
 To disable an unused runtime, set its image to an empty string, for example

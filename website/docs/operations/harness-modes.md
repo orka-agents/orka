@@ -1,8 +1,14 @@
 ---
-description: "Advanced setup for running both Orka controller modes on one cluster."
+description: "Legacy: running the harness-v1 compatibility mode next to a normal installation."
 ---
 
 # Running both controller modes
+
+:::caution[Legacy]
+`harness-v1` is the previous execution path. It is kept for one more release so
+existing wrapper-based installations can be retired on their own schedule, and
+it will be removed after that. New installations never need this page.
+:::
 
 For a new installation, follow [Install Orka](installation.md). It uses the
 default `harness-v2` mode.
