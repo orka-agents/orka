@@ -24,6 +24,7 @@ type acpTaskSession struct {
 	VerifiedBaseline *store.VerifiedBranchBaseline
 	Reused           bool
 	LeaseGeneration  int64
+	Native           *acpNativeSession
 	finalized        bool
 	requeued         bool
 }
@@ -232,6 +233,7 @@ type acpSessionLineageIdentity struct {
 	// WorkspaceSessionUID is the immutable SessionControl identity frozen into
 	// a session-reused execution-workspace binding.
 	WorkspaceSessionUID string
+	Native              *acpNativeSessionPolicy
 }
 
 func acpSessionLineageConfigDigest(plan ACPRuntimePlan) (string, error) {
@@ -304,6 +306,10 @@ func (d *ACPDispatcher) prepareTaskSession(
 	if err != nil {
 		return nil, err
 	}
+	native, err := d.planNativeSession(ctx, task, preparation, lineage)
+	if err != nil {
+		return nil, err
+	}
 	lease, turn, err := d.bindAndOpenTaskSessionTurn(
 		ctx, task, fence, runtimeInstanceID, preparation.control, preparation.userPrompt,
 		acpSessionTranscriptAppendPolicyForTask(task), lineage,
@@ -355,6 +361,7 @@ func (d *ACPDispatcher) prepareTaskSession(
 		UserPrompt:       preparation.userPrompt,
 		VerifiedBaseline: preparation.verifiedBaseline, Reused: !preparation.plan.Recreate,
 		LeaseGeneration: lease.Key.LeaseGeneration,
+		Native:          native,
 	}, nil
 }
 

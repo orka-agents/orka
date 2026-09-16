@@ -373,6 +373,7 @@ type CreateRuntimeSessionRequest struct {
 	WorkspaceArtifactAuthorization *ArtifactAuthorization     `json:"workspaceArtifactAuthorization,omitempty"`
 	Bootstrap                      *SessionBootstrap          `json:"bootstrap,omitempty"`
 	BootstrapArtifactAuthorization *ArtifactAuthorization     `json:"bootstrapArtifactAuthorization,omitempty"`
+	NativeRestore                  *NativeSessionRestore      `json:"nativeRestore,omitempty"`
 }
 
 func (r CreateRuntimeSessionRequest) ValidateAt(now time.Time) error {
@@ -434,21 +435,27 @@ func (r CreateRuntimeSessionRequest) ValidateAt(now time.Time) error {
 	} else if r.BootstrapArtifactAuthorization != nil {
 		return fmt.Errorf("bootstrap artifact authorization requires a transcript artifact")
 	}
+	if r.NativeRestore != nil {
+		if err := r.NativeRestore.validateFor(r); err != nil {
+			return fmt.Errorf("native restore: %w", err)
+		}
+	}
 	return r.Metadata.ValidateDigest(r)
 }
 
 type RuntimeSessionDescriptor struct {
-	RuntimeSessionID     RuntimeSessionID    `json:"runtimeSessionID"`
-	RuntimeSessionUID    RuntimeSessionUID   `json:"runtimeSessionUID"`
-	Generation           uint64              `json:"generation"`
-	RuntimeInstanceID    RuntimeInstanceID   `json:"runtimeInstanceID"`
-	SupervisorBootID     SupervisorBootID    `json:"supervisorBootID"`
-	RuntimeProfileDigest ProfileDigest       `json:"runtimeProfileDigest"`
-	State                RuntimeSessionState `json:"state"`
-	ProviderSessionID    string              `json:"providerSessionID"`
-	WorkspaceBaseline    WorkspaceBaseline   `json:"workspaceBaseline"`
-	CreatedAt            time.Time           `json:"createdAt"`
-	LastTransitionAt     time.Time           `json:"lastTransitionAt"`
+	RuntimeSessionID     RuntimeSessionID          `json:"runtimeSessionID"`
+	RuntimeSessionUID    RuntimeSessionUID         `json:"runtimeSessionUID"`
+	Generation           uint64                    `json:"generation"`
+	RuntimeInstanceID    RuntimeInstanceID         `json:"runtimeInstanceID"`
+	SupervisorBootID     SupervisorBootID          `json:"supervisorBootID"`
+	RuntimeProfileDigest ProfileDigest             `json:"runtimeProfileDigest"`
+	State                RuntimeSessionState       `json:"state"`
+	ProviderSessionID    string                    `json:"providerSessionID"`
+	WorkspaceBaseline    WorkspaceBaseline         `json:"workspaceBaseline"`
+	CreatedAt            time.Time                 `json:"createdAt"`
+	LastTransitionAt     time.Time                 `json:"lastTransitionAt"`
+	NativeRestoration    *NativeSessionRestoration `json:"nativeRestoration,omitempty"`
 }
 
 func (d RuntimeSessionDescriptor) Validate() error {
@@ -488,6 +495,11 @@ func (d RuntimeSessionDescriptor) Validate() error {
 	if d.LastTransitionAt.Before(d.CreatedAt) {
 		return fmt.Errorf("last transition timestamp precedes creation")
 	}
+	if d.NativeRestoration != nil {
+		if err := d.NativeRestoration.Validate(); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -520,6 +532,17 @@ func (r CreateRuntimeSessionResponse) ValidateFor(request CreateRuntimeSessionRe
 		r.Session.Generation != request.Metadata.Fence.RuntimeSessionGeneration ||
 		r.Session.RuntimeProfileDigest != request.Metadata.Fence.RuntimeProfileDigest {
 		return fmt.Errorf("session create response identity does not match request")
+	}
+	if request.NativeRestore != nil {
+		result := r.Session.NativeRestoration
+		if result == nil || result.SnapshotID != request.NativeRestore.SnapshotID {
+			return fmt.Errorf("session create omitted the requested native restoration result")
+		}
+		if result.Method != "reconstructed" && r.Session.ProviderSessionID != request.NativeRestore.Snapshot.ProviderSessionID {
+			return fmt.Errorf("session create restored a different native conversation")
+		}
+	} else if r.Session.NativeRestoration != nil {
+		return fmt.Errorf("session create reported an unauthorized native restoration")
 	}
 	return nil
 }

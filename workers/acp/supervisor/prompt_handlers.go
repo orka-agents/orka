@@ -1928,6 +1928,11 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	result, buildErr := buildWorkspaceDeltaContext(r.Context(), baseline, paths.Workspace, intent, request.Limits)
+	var nativeSession *harnessv2.NativeSessionSnapshot
+	nativeSessionReason := ""
+	if request.CaptureNativeSession && buildErr == nil && result.Classification == workspacedelta.ClassificationNoChange {
+		nativeSession, nativeSessionReason = s.captureNativeSession(r.Context(), state)
+	}
 	for _, root := range ownershipRoots {
 		if err := acp.FinalizeSessionOwnership(root, uid, gid); err != nil {
 			slog.Error("ACP workspace validation failed", "stage", "ownership restore")
@@ -2040,7 +2045,10 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "unsupported workspace delta classification", nil, false)
 		return
 	}
-	response := harnessv2.CreateWorkspaceDeltaResponse{Protocol: harnessv2.ProtocolVersion, Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh}, Delta: descriptor}
+	response := harnessv2.CreateWorkspaceDeltaResponse{
+		Protocol: harnessv2.ProtocolVersion, Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh}, Delta: descriptor,
+		NativeSession: nativeSession, NativeSessionReason: nativeSessionReason,
+	}
 	if err := response.ValidateFor(request); err != nil {
 		s.poisonSession(state, "workspace delta response invariant failed")
 		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "workspace delta response invariant failed", nil, false)

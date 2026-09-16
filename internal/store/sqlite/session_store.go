@@ -263,6 +263,9 @@ func (s *Store) DeleteSession(ctx context.Context, namespace, name string) error
 	); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM native_session_snapshots WHERE namespace = ? AND session_name = ?`, namespace, name); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM session_turns WHERE namespace = ? AND session_name = ?`, namespace, name); err != nil {
 		return err
 	}

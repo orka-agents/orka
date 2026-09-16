@@ -599,6 +599,31 @@ func TestLoadConfigFromEnv(t *testing.T) {
 			t.Fatal("stable durable workspace did not load as a dedicated single-session runtime")
 		}
 	})
+	t.Run("agent-sandbox native conversation", func(t *testing.T) {
+		t.Setenv(EnvProvider, providerKindOpencode)
+		t.Setenv(EnvModel, "openai/gpt-4.1")
+		t.Setenv(EnvModelContextLimit, "32768")
+		t.Setenv(EnvModelOutputLimit, "4096")
+		t.Setenv(EnvDurableWorkspaceDir, filepath.Join(dir, "sandbox-durable"))
+		// The agent-sandbox template supplies only the durable root; its
+		// directory per Session UID is stable across runtime generations.
+		t.Setenv(EnvDurableWorkspaceKey, "")
+		durable, err := LoadConfigFromEnv()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !durable.Capabilities.SupportsNativeSessionRestore || !(&Server{cfg: durable}).supportsNativeSessions() {
+			t.Fatal("OpenCode on an agent-sandbox durable volume did not support native continuity")
+		}
+		t.Setenv(EnvDurableWorkspaceDir, "")
+		ephemeral, err := LoadConfigFromEnv()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ephemeral.Capabilities.SupportsNativeSessionRestore || (&Server{cfg: ephemeral}).supportsNativeSessions() {
+			t.Fatal("OpenCode without a stable durable directory advertised native continuity")
+		}
+	})
 
 	t.Setenv(EnvProvider, providerKindCopilot)
 	copilotCfg, err := LoadConfigFromEnv()

@@ -331,6 +331,20 @@ func (b *boundedBuffer) ReadFrom(reader io.Reader) (int64, error) {
 	}
 }
 
+// VerifyNoDescendants is used after Freeze when capturing an idle native
+// conversation. A frozen background process is still unfinished work and must
+// not be silently omitted from the saved conversation.
+func (p *Process) VerifyNoDescendants() error {
+	if p == nil || p.PID() <= 0 {
+		return fmt.Errorf("ACP adapter process is not running")
+	}
+	pids, supported := processesForUID(p.uid)
+	if !supported || len(pids) != 1 || pids[0] != p.PID() {
+		return fmt.Errorf("ACP adapter has descendants or process inspection is unavailable")
+	}
+	return nil
+}
+
 func (p *Process) Freeze(ctx context.Context) error {
 	if p == nil || p.PID() <= 0 {
 		return fmt.Errorf("ACP adapter process is not running")

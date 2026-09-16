@@ -187,6 +187,7 @@ type CapabilitiesResponse struct {
 	SupportsDrain                     bool                            `json:"supportsDrain"`
 	SupportsPublicationFinalization   bool                            `json:"supportsPublicationFinalization"`
 	SupportsAgentSessionConfiguration bool                            `json:"supportsAgentSessionConfiguration,omitempty"`
+	SupportsNativeSessionRestore      bool                            `json:"supportsNativeSessionRestore,omitempty"`
 }
 
 func (r CapabilitiesResponse) Validate() error {
@@ -257,6 +258,12 @@ type RuntimeSessionStatus struct {
 	ReservedForFinalization bool                `json:"reservedForFinalization"`
 	LiveDescendantCount     uint32              `json:"liveDescendantCount"`
 	LastTransitionAt        time.Time           `json:"lastTransitionAt"`
+	// Creation identity lets a controller adopt an interrupted create without
+	// confusing an empty conversation with a previously used live session.
+	CreationTaskUID     TaskUID                   `json:"creationTaskUID,omitempty"`
+	CreationTaskAttempt uint32                    `json:"creationTaskAttempt,omitempty"`
+	ProviderSessionID   string                    `json:"providerSessionID,omitempty"`
+	NativeRestoration   *NativeSessionRestoration `json:"nativeRestoration,omitempty"`
 }
 
 func (s RuntimeSessionStatus) Validate() error {
@@ -268,6 +275,22 @@ func (s RuntimeSessionStatus) Validate() error {
 	}
 	if s.Generation == 0 {
 		return fmt.Errorf("runtime session generation must be positive")
+	}
+	if s.CreationTaskUID != "" || s.CreationTaskAttempt != 0 {
+		if err := requireIdentifier("creation task UID", string(s.CreationTaskUID)); err != nil {
+			return err
+		}
+		if s.CreationTaskAttempt == 0 {
+			return fmt.Errorf("creation task attempt must be positive")
+		}
+	}
+	if err := validateBoundedString("provider session ID", s.ProviderSessionID, false, 1024); err != nil {
+		return err
+	}
+	if s.NativeRestoration != nil {
+		if err := s.NativeRestoration.Validate(); err != nil {
+			return err
+		}
 	}
 	if !IsKnownRuntimeSessionState(s.State) {
 		return fmt.Errorf("unsupported runtime session state %q", s.State)

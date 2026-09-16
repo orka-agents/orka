@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const DefaultMaxMessageBytes = 8 << 20
@@ -46,6 +48,9 @@ type IncomingRequest struct {
 	ID     json.RawMessage
 	Method string
 	Params json.RawMessage
+	// ReceivedAt is assigned before asynchronous request dispatch, so requests
+	// received while restoring history cannot become live permission requests.
+	ReceivedAt time.Time
 }
 
 type IncomingNotification struct {
@@ -292,6 +297,56 @@ func (c *Client) NewSession(ctx context.Context, request NewSessionRequest) (New
 	return response, nil
 }
 
+func (c *Client) ResumeSession(ctx context.Context, request ResumeSessionRequest) (ResumeSessionResponse, error) {
+	if strings.TrimSpace(request.SessionID) == "" {
+		return ResumeSessionResponse{}, fmt.Errorf("ACP session ID is required")
+	}
+	var response ResumeSessionResponse
+	if err := c.callObject(ctx, MethodSessionResume, request, &response); err != nil {
+		return ResumeSessionResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) LoadSession(ctx context.Context, request LoadSessionRequest) (LoadSessionResponse, error) {
+	if strings.TrimSpace(request.SessionID) == "" {
+		return LoadSessionResponse{}, fmt.Errorf("ACP session ID is required")
+	}
+	var response LoadSessionResponse
+	if err := c.callObject(ctx, MethodSessionLoad, request, &response); err != nil {
+		return LoadSessionResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) SetSessionConfigOption(ctx context.Context, request SetSessionConfigOptionRequest) (SetSessionConfigOptionResponse, error) {
+	if strings.TrimSpace(request.SessionID) == "" || strings.TrimSpace(request.ConfigID) == "" || strings.TrimSpace(request.Value) == "" {
+		return SetSessionConfigOptionResponse{}, fmt.Errorf("ACP session ID, configuration ID, and value are required")
+	}
+	var response SetSessionConfigOptionResponse
+	if err := c.callObject(ctx, MethodSessionSetConfigOption, request, &response); err != nil {
+		return SetSessionConfigOptionResponse{}, err
+	}
+	if response.ConfigOptions == nil {
+		return SetSessionConfigOptionResponse{}, fmt.Errorf("ACP session/set_config_option response omitted configOptions")
+	}
+	return response, nil
+}
+
+func (c *Client) callObject(ctx context.Context, method string, request, response any) error {
+	var raw json.RawMessage
+	if err := c.Call(ctx, method, request, &raw); err != nil {
+		return err
+	}
+	if raw = bytes.TrimSpace(raw); len(raw) == 0 || raw[0] != '{' {
+		return fmt.Errorf("ACP %s response must be an object", method)
+	}
+	if err := json.Unmarshal(raw, response); err != nil {
+		return fmt.Errorf("decode ACP %s response: %w", method, err)
+	}
+	return nil
+}
+
 func (c *Client) Prompt(ctx context.Context, request PromptRequest) (PromptResponse, error) {
 	return c.PromptWithWritten(ctx, request, nil)
 }
@@ -379,11 +434,12 @@ func (c *Client) deliverResponse(message rpcMessage) {
 // rejection lane is saturated the request is dropped, because a peer flooding
 // both lanes is not reading responses anyway.
 func (c *Client) dispatchRequest(message rpcMessage) {
+	receivedAt := time.Now()
 	select {
 	case c.requestGate <- struct{}{}:
 		go func() {
 			defer func() { <-c.requestGate }()
-			c.handleRequest(message)
+			c.handleRequest(message, receivedAt)
 		}()
 		return
 	default:
@@ -402,8 +458,8 @@ func (c *Client) dispatchRequest(message rpcMessage) {
 	}
 }
 
-func (c *Client) handleRequest(message rpcMessage) {
-	request := IncomingRequest{ID: cloneRaw(message.ID), Method: message.Method, Params: cloneRaw(message.Params)}
+func (c *Client) handleRequest(message rpcMessage, receivedAt time.Time) {
+	request := IncomingRequest{ID: cloneRaw(message.ID), Method: message.Method, Params: cloneRaw(message.Params), ReceivedAt: receivedAt}
 	var result any
 	var rpcErr *RPCError
 	if handler := c.opts.RequestHandler; handler != nil {

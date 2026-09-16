@@ -10,14 +10,17 @@ const (
 	// ProtocolVersion is the stable ACP wire protocol negotiated during initialize.
 	ProtocolVersion = 1
 
-	MethodInitialize        = "initialize"
-	MethodAuthenticate      = "authenticate"
-	MethodSessionNew        = "session/new"
-	MethodSessionPrompt     = "session/prompt"
-	MethodSessionCancel     = "session/cancel"
-	MethodSessionUpdate     = "session/update"
-	MethodRequestPermission = "session/request_permission"
-	MethodCancelRequest     = "$/cancel_request"
+	MethodInitialize             = "initialize"
+	MethodAuthenticate           = "authenticate"
+	MethodSessionNew             = "session/new"
+	MethodSessionResume          = "session/resume"
+	MethodSessionLoad            = "session/load"
+	MethodSessionSetConfigOption = "session/set_config_option"
+	MethodSessionPrompt          = "session/prompt"
+	MethodSessionCancel          = "session/cancel"
+	MethodSessionUpdate          = "session/update"
+	MethodRequestPermission      = "session/request_permission"
+	MethodCancelRequest          = "$/cancel_request"
 )
 
 type Meta map[string]any
@@ -153,6 +156,42 @@ type NewSessionResponse struct {
 	SessionID     string            `json:"sessionId"`
 	Modes         json.RawMessage   `json:"modes,omitempty"`
 	ConfigOptions []json.RawMessage `json:"configOptions,omitempty"`
+	Meta          Meta              `json:"_meta,omitempty"`
+}
+
+// ResumeSessionRequest reopens a saved conversation using the pinned ACP v1
+// protocol. The adapter must advertise sessionCapabilities.resume as an object.
+type ResumeSessionRequest struct {
+	SessionID             string      `json:"sessionId"`
+	CWD                   string      `json:"cwd"`
+	AdditionalDirectories []string    `json:"additionalDirectories,omitempty"`
+	MCPServers            []MCPServer `json:"mcpServers"`
+	Meta                  Meta        `json:"_meta,omitempty"`
+}
+
+type ResumeSessionResponse struct {
+	Modes         json.RawMessage   `json:"modes,omitempty"`
+	ConfigOptions []json.RawMessage `json:"configOptions,omitempty"`
+	Meta          Meta              `json:"_meta,omitempty"`
+}
+
+// LoadSessionRequest has the same fields as resume, but requires loadSession
+// support and replays the old conversation before returning its response.
+type LoadSessionRequest ResumeSessionRequest
+
+type LoadSessionResponse ResumeSessionResponse
+
+// SetSessionConfigOptionRequest selects an advertised string-valued option.
+// ACP v1 uses an absent type discriminator for string selections.
+type SetSessionConfigOptionRequest struct {
+	SessionID string `json:"sessionId"`
+	ConfigID  string `json:"configId"`
+	Value     string `json:"value"`
+	Meta      Meta   `json:"_meta,omitempty"`
+}
+
+type SetSessionConfigOptionResponse struct {
+	ConfigOptions []json.RawMessage `json:"configOptions"`
 	Meta          Meta              `json:"_meta,omitempty"`
 }
 

@@ -1,23 +1,58 @@
 package acp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
 const (
-	DefaultPromptLease        = 2 * time.Minute
-	DefaultPermissionTimeout  = 5 * time.Minute
-	DefaultBufferedEvents     = 256
-	DefaultBufferedEventBytes = 32 << 20
-	DefaultInitializeTimeout  = 60 * time.Second
+	DefaultPromptLease            = 2 * time.Minute
+	DefaultPermissionTimeout      = 5 * time.Minute
+	DefaultBufferedEvents         = 256
+	DefaultBufferedEventBytes     = 32 << 20
+	DefaultInitializeTimeout      = 60 * time.Second
+	DefaultRestoreTimeout         = 60 * time.Second
+	DefaultRestoreHistoryMessages = 4096
+	DefaultRestoreHistoryBytes    = 32 << 20
 )
+
+// SessionRestore requests a saved provider conversation in a fresh process.
+// The caller supplies only the authorized conversation data before startup.
+type SessionRestore struct {
+	SessionID string
+	// When provided, these current policy settings must be advertised as
+	// model/mode select options and acknowledged before restoration succeeds.
+	ModelID string
+	ModeID  string
+}
+
+// SessionRestoreError includes cleanup evidence for the failed fresh process.
+// Callers must not retry or reconstruct unless Cleanup.Proven is true and
+// CleanupErr is nil. Provider errors are available through Unwrap, but omitted
+// from Error because an adapter may include private conversation data in them.
+type SessionRestoreError struct {
+	Method     string
+	Cause      error
+	Cleanup    CleanupStatus
+	CleanupErr error
+}
+
+func (e *SessionRestoreError) Error() string {
+	if !e.Cleanup.Proven || e.CleanupErr != nil {
+		return "ACP session restoration failed; process cleanup is unproven"
+	}
+	return "ACP session restoration failed; process cleanup is proven"
+}
+
+func (e *SessionRestoreError) Unwrap() error { return e.Cause }
 
 type RuntimeSessionConfig struct {
 	ID             string
@@ -28,12 +63,18 @@ type RuntimeSessionConfig struct {
 	NewSessionMeta Meta
 	AuthMethodID   string
 	ClientInfo     Implementation
+	Restore        *SessionRestore
 
 	InitializeTimeout time.Duration
-	PromptLease       time.Duration
-	PermissionTimeout time.Duration
-	CancelGrace       time.Duration
-	MaxBufferedEvents int
+	RestoreTimeout    time.Duration
+	// Restore history is validated and discarded without buffering prompt
+	// events. Both counters include every history notification received.
+	MaxRestoreHistoryMessages int
+	MaxRestoreHistoryBytes    int
+	PromptLease               time.Duration
+	PermissionTimeout         time.Duration
+	CancelGrace               time.Duration
+	MaxBufferedEvents         int
 	// MaxBufferedEventBytes bounds the aggregate size of buffered, not yet
 	// consumed prompt events (measured as the raw notification payload) so a
 	// burst of large valid events cannot exhaust the runtime's memory before
@@ -47,16 +88,26 @@ type RuntimeSession struct {
 	generation        int64
 	profileDigest     string
 	providerSessionID string
+	restoreMethod     string
 	process           *Process
 	config            RuntimeSessionConfig
 
 	mu           sync.Mutex
+	restore      *sessionRestorePhase
 	active       *activePrompt
 	tombstones   map[string]PromptTombstone
 	deleted      bool
 	deleteDone   chan struct{}
 	deleteStatus CleanupStatus
 	deleteErr    error
+}
+
+type sessionRestorePhase struct {
+	finishedAt time.Time
+	cancel     context.CancelFunc
+	err        error
+	messages   int
+	bytes      int
 }
 
 type PromptEventType string
@@ -169,7 +220,27 @@ type pendingPermission struct {
 	result  chan RequestPermissionOutcome
 }
 
-func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (*RuntimeSession, error) {
+func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (_ *RuntimeSession, returnedErr error) {
+	cfg = runtimeSessionDefaults(cfg)
+	var restoreProcess *Process
+	var restoreMethod string
+	if cfg.Restore != nil {
+		restore := *cfg.Restore
+		cfg.Restore = &restore
+		defer func() {
+			if returnedErr == nil {
+				return
+			}
+			grace := cfg.CancelGrace
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), grace+cleanupKillSettleTimeout+time.Second)
+			defer cancel()
+			status, cleanupErr := restoreProcess.Stop(cleanupCtx, grace)
+			returnedErr = &SessionRestoreError{Method: restoreMethod, Cause: returnedErr, Cleanup: status, CleanupErr: cleanupErr}
+		}()
+		if strings.TrimSpace(cfg.Restore.SessionID) == "" {
+			return nil, fmt.Errorf("saved ACP session ID is required")
+		}
+	}
 	cfg.ID = strings.TrimSpace(cfg.ID)
 	cfg.ProfileDigest = strings.TrimSpace(cfg.ProfileDigest)
 	if cfg.ID == "" || cfg.Generation <= 0 || cfg.ProfileDigest == "" {
@@ -183,30 +254,16 @@ func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (*RuntimeS
 	if err != nil {
 		return nil, err
 	}
-	if cfg.InitializeTimeout <= 0 {
-		cfg.InitializeTimeout = DefaultInitializeTimeout
-	}
-	if cfg.PromptLease <= 0 {
-		cfg.PromptLease = DefaultPromptLease
-	}
-	if cfg.PermissionTimeout <= 0 {
-		cfg.PermissionTimeout = DefaultPermissionTimeout
-	}
-	if cfg.CancelGrace <= 0 {
-		cfg.CancelGrace = DefaultStopGrace
-	}
-	if cfg.MaxBufferedEvents <= 0 {
-		cfg.MaxBufferedEvents = DefaultBufferedEvents
-	}
-	if cfg.MaxBufferedEventBytes <= 0 {
-		cfg.MaxBufferedEventBytes = DefaultBufferedEventBytes
-	}
 	session := &RuntimeSession{
 		id:            cfg.ID,
 		generation:    cfg.Generation,
 		profileDigest: cfg.ProfileDigest,
 		config:        cfg,
 		tombstones:    make(map[string]PromptTombstone),
+	}
+	if cfg.Restore != nil {
+		session.providerSessionID = cfg.Restore.SessionID
+		session.restore = &sessionRestorePhase{}
 	}
 	cfg.Process.ClientOptions.RequestHandler = session.handleRequest
 	cfg.Process.ClientOptions.NotificationHandler = session.handleNotification
@@ -215,6 +272,7 @@ func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (*RuntimeS
 		return nil, err
 	}
 	session.process = process
+	restoreProcess = process
 
 	initCtx, cancel := context.WithTimeout(ctx, cfg.InitializeTimeout)
 	defer cancel()
@@ -231,22 +289,41 @@ func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (*RuntimeS
 		},
 	})
 	if err != nil {
-		_ = stopProcessBestEffort(process, cfg.CancelGrace)
+		if cfg.Restore == nil {
+			_ = stopProcessBestEffort(process, cfg.CancelGrace)
+		}
 		return nil, fmt.Errorf("initialize ACP adapter: %w", err)
 	}
 	if len(cfg.MCPServers) > 0 && !acpMCPCapabilityEnabled(initialized.AgentCapabilities.MCPCapabilities, "http") {
-		_ = stopProcessBestEffort(process, cfg.CancelGrace)
+		if cfg.Restore == nil {
+			_ = stopProcessBestEffort(process, cfg.CancelGrace)
+		}
 		return nil, fmt.Errorf("ACP adapter did not advertise HTTP MCP server support")
 	}
 	if cfg.AuthMethodID != "" {
 		if !containsAuthMethod(initialized.AuthMethods, cfg.AuthMethodID) {
-			_ = stopProcessBestEffort(process, cfg.CancelGrace)
+			if cfg.Restore == nil {
+				_ = stopProcessBestEffort(process, cfg.CancelGrace)
+			}
 			return nil, fmt.Errorf("ACP adapter did not advertise authentication method %q", cfg.AuthMethodID)
 		}
 		if err := process.Client().Authenticate(initCtx, cfg.AuthMethodID); err != nil {
-			_ = stopProcessBestEffort(process, cfg.CancelGrace)
+			if cfg.Restore == nil {
+				_ = stopProcessBestEffort(process, cfg.CancelGrace)
+			}
 			return nil, fmt.Errorf("authenticate ACP adapter: %w", err)
 		}
+	}
+	if cfg.Restore != nil {
+		restoreMethod, err = advertisedSessionRestoreMethod(initialized.AgentCapabilities)
+		if err != nil {
+			return nil, err
+		}
+		if err := session.restoreSession(ctx, restoreMethod, newSessionMeta); err != nil {
+			return nil, err
+		}
+		session.restoreMethod = restoreMethod
+		return session, nil
 	}
 	newSession, err := process.Client().NewSession(initCtx, NewSessionRequest{
 		CWD:        cfg.Process.Paths.Workspace,
@@ -261,10 +338,357 @@ func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (*RuntimeS
 	return session, nil
 }
 
+func runtimeSessionDefaults(cfg RuntimeSessionConfig) RuntimeSessionConfig {
+	if cfg.InitializeTimeout <= 0 {
+		cfg.InitializeTimeout = DefaultInitializeTimeout
+	}
+	if cfg.RestoreTimeout <= 0 {
+		cfg.RestoreTimeout = DefaultRestoreTimeout
+	}
+	if cfg.MaxRestoreHistoryMessages <= 0 {
+		cfg.MaxRestoreHistoryMessages = DefaultRestoreHistoryMessages
+	}
+	if cfg.MaxRestoreHistoryBytes <= 0 {
+		cfg.MaxRestoreHistoryBytes = DefaultRestoreHistoryBytes
+	}
+	if cfg.PromptLease <= 0 {
+		cfg.PromptLease = DefaultPromptLease
+	}
+	if cfg.PermissionTimeout <= 0 {
+		cfg.PermissionTimeout = DefaultPermissionTimeout
+	}
+	if cfg.CancelGrace <= 0 {
+		cfg.CancelGrace = DefaultStopGrace
+	}
+	if cfg.MaxBufferedEvents <= 0 {
+		cfg.MaxBufferedEvents = DefaultBufferedEvents
+	}
+	if cfg.MaxBufferedEventBytes <= 0 {
+		cfg.MaxBufferedEventBytes = DefaultBufferedEventBytes
+	}
+	return cfg
+}
+
 func (s *RuntimeSession) ID() string                { return s.id }
 func (s *RuntimeSession) Generation() int64         { return s.generation }
 func (s *RuntimeSession) ProviderSessionID() string { return s.providerSessionID }
+func (s *RuntimeSession) RestoreMethod() string     { return s.restoreMethod }
 func (s *RuntimeSession) Process() *Process         { return s.process }
+
+func advertisedSessionRestoreMethod(capabilities AgentCapabilities) (string, error) {
+	// ACP v1 advertises resume using an object, including an empty object.
+	// Omitted, null, and malformed boolean/string values do not advertise it.
+	if resume, ok := capabilities.SessionCapabilities["resume"].(map[string]any); ok && resume != nil {
+		return MethodSessionResume, nil
+	}
+	if capabilities.LoadSession {
+		return MethodSessionLoad, nil
+	}
+	return "", fmt.Errorf("ACP adapter did not advertise a session restoration method")
+}
+
+func (s *RuntimeSession) restoreSession(ctx context.Context, method string, meta Meta) error {
+	restoreCtx, cancel := context.WithTimeout(ctx, s.config.RestoreTimeout)
+	defer cancel()
+	s.mu.Lock()
+	s.restore.cancel = cancel
+	phaseErr := s.restore.err
+	s.mu.Unlock()
+	if phaseErr != nil {
+		return phaseErr
+	}
+	request := ResumeSessionRequest{
+		SessionID:  s.providerSessionID,
+		CWD:        s.config.Process.Paths.Workspace,
+		MCPServers: append([]MCPServer{}, s.config.MCPServers...),
+		Meta:       meta,
+	}
+	var err error
+	var response ResumeSessionResponse
+	switch method {
+	case MethodSessionResume:
+		response, err = s.process.Client().ResumeSession(restoreCtx, request)
+	case MethodSessionLoad:
+		var loaded LoadSessionResponse
+		loaded, err = s.process.Client().LoadSession(restoreCtx, LoadSessionRequest(request))
+		response = ResumeSessionResponse(loaded)
+	default:
+		err = fmt.Errorf("unsupported ACP restoration method")
+	}
+	if err == nil {
+		err = s.restoreCurrentSettings(restoreCtx, response.ConfigOptions)
+	}
+	if err == nil {
+		err = restoreCtx.Err()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.restore.err != nil {
+		err = s.restore.err
+	}
+	if err == nil {
+		// Notification callbacks run on the ordered transport reader. Every
+		// history notification before the response has now been consumed.
+		// Request handlers may still be queued; their receipt time keeps them
+		// in this phase even after the caller starts an authorized prompt.
+		s.restore.finishedAt = time.Now()
+		s.restore.cancel = nil
+	}
+	return err
+}
+
+func (s *RuntimeSession) restoreCurrentSettings(ctx context.Context, options []json.RawMessage) error {
+	settings := []struct{ id, value string }{{"model", s.config.Restore.ModelID}, {"mode", s.config.Restore.ModeID}}
+	for _, setting := range settings {
+		if setting.value == "" {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if _, ok := restoreSelectOption(options, setting.id, setting.value); !ok {
+			return fmt.Errorf("ACP restoration did not advertise the required %s setting", setting.id)
+		}
+		response, err := s.process.Client().SetSessionConfigOption(ctx, SetSessionConfigOptionRequest{
+			SessionID: s.providerSessionID,
+			ConfigID:  setting.id,
+			Value:     setting.value,
+		})
+		if err != nil {
+			return err
+		}
+		options = response.ConfigOptions
+	}
+	// A later configuration change must not silently revert an earlier one.
+	for _, setting := range settings {
+		if setting.value != "" {
+			current, ok := restoreSelectOption(options, setting.id, setting.value)
+			if !ok || current != setting.value {
+				return fmt.Errorf("ACP restoration did not apply the required %s setting", setting.id)
+			}
+		}
+	}
+	return nil
+}
+
+func restoreSelectOption(options []json.RawMessage, id, value string) (string, bool) {
+	var selected map[string]any
+	for _, raw := range options {
+		var option map[string]any
+		if err := json.Unmarshal(raw, &option); err != nil || !validRestoreConfigOption(option) {
+			return "", false
+		}
+		if option["id"] == id {
+			if selected != nil || option["type"] != "select" {
+				return "", false
+			}
+			selected = option
+		}
+	}
+	if selected == nil {
+		return "", false
+	}
+	choices, _ := selected["options"].([]any)
+	for _, item := range choices {
+		choice := item.(map[string]any) // Validated above.
+		if choice["value"] == value {
+			return selected["currentValue"].(string), true
+		}
+		group, _ := choice["options"].([]any)
+		for _, child := range group {
+			if child.(map[string]any)["value"] == value {
+				return selected["currentValue"].(string), true
+			}
+		}
+	}
+	return "", false
+}
+
+func (s *RuntimeSession) countRestoreMessageLocked(size int) bool {
+	phase := s.restore
+	if phase.err != nil {
+		return false
+	}
+	if phase.messages >= s.config.MaxRestoreHistoryMessages || size > s.config.MaxRestoreHistoryBytes-phase.bytes {
+		s.failRestoreLocked(fmt.Errorf("ACP restoration history limit exceeded"))
+		return false
+	}
+	phase.messages++
+	phase.bytes += size
+	return true
+}
+
+func (s *RuntimeSession) failRestoreLocked(err error) {
+	if s.restore.err == nil {
+		s.restore.err = err
+		if s.restore.cancel != nil {
+			s.restore.cancel()
+		}
+	}
+}
+
+func (s *RuntimeSession) consumeRestoreNotificationLocked(notification IncomingNotification) {
+	if !s.countRestoreMessageLocked(len(notification.Params)) {
+		return
+	}
+	if notification.Method != MethodSessionUpdate {
+		s.failRestoreLocked(fmt.Errorf("unexpected ACP notification during restoration"))
+		return
+	}
+	var update SessionNotification
+	if err := json.Unmarshal(notification.Params, &update); err != nil || update.SessionID != s.providerSessionID {
+		s.failRestoreLocked(fmt.Errorf("invalid ACP restoration history session"))
+		return
+	}
+	if err := validateRestoreHistoryUpdate(update.Update); err != nil {
+		s.failRestoreLocked(err)
+	}
+	// History and usage notifications are deliberately discarded here. They
+	// must never create prompt events, permissions, or transcript entries.
+}
+
+// validateRestoreHistoryUpdate checks the required fields of the pinned ACP v1
+// SessionUpdate union. Optional metadata is never interpreted, and no content
+// is retained after validation. Unknown update kinds fail restoration closed.
+func validateRestoreHistoryUpdate(raw json.RawMessage) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var update map[string]any
+	if err := decoder.Decode(&update); err != nil || update == nil || !validRestoreUpdate(update) {
+		return fmt.Errorf("invalid ACP restoration history update")
+	}
+	return nil
+}
+
+func validRestoreUpdate(update map[string]any) bool {
+	switch update["sessionUpdate"] {
+	case "user_message_chunk", "agent_message_chunk", "agent_thought_chunk":
+		return validRestoreContent(update["content"])
+	case "tool_call", "tool_call_update":
+		if !restoreStringFields(update, "toolCallId") || (update["sessionUpdate"] == "tool_call" && !restoreStringFields(update, "title")) {
+			return false
+		}
+		if status := update["status"]; status != nil && status != "pending" && status != "in_progress" && status != "completed" && status != "failed" {
+			return false
+		}
+		if content := update["content"]; content != nil && !restoreObjectArray(content, validRestoreToolContent) {
+			return false
+		}
+		if locations := update["locations"]; locations != nil && !restoreObjectArray(locations, func(location map[string]any) bool {
+			return restoreStringFields(location, "path")
+		}) {
+			return false
+		}
+		return true
+	case "plan":
+		return restoreObjectArray(update["entries"], func(entry map[string]any) bool {
+			return restoreStringFields(entry, "content") &&
+				(entry["priority"] == "high" || entry["priority"] == "medium" || entry["priority"] == "low") &&
+				(entry["status"] == "pending" || entry["status"] == "in_progress" || entry["status"] == "completed")
+		})
+	case "available_commands_update":
+		return restoreObjectArray(update["availableCommands"], func(command map[string]any) bool {
+			return restoreStringFields(command, "name", "description")
+		})
+	case "current_mode_update":
+		return restoreStringFields(update, "currentModeId")
+	case "config_option_update":
+		return restoreObjectArray(update["configOptions"], validRestoreConfigOption)
+	case "session_info_update":
+		return true
+	case "usage_update":
+		for _, field := range []string{"used", "size"} {
+			number, ok := update[field].(json.Number)
+			if !ok {
+				return false
+			}
+			if _, err := strconv.ParseUint(string(number), 10, 64); err != nil {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+func validRestoreContent(value any) bool {
+	content, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	switch content["type"] {
+	case "text":
+		return restoreStringFields(content, "text")
+	case "image", "audio":
+		return restoreStringFields(content, "data", "mimeType")
+	case "resource_link":
+		return restoreStringFields(content, "name", "uri")
+	case "resource":
+		resource, ok := content["resource"].(map[string]any)
+		return ok && restoreStringFields(resource, "uri") && (restoreStringFields(resource, "text") || restoreStringFields(resource, "blob"))
+	default:
+		return false
+	}
+}
+
+func validRestoreToolContent(content map[string]any) bool {
+	switch content["type"] {
+	case "content":
+		return validRestoreContent(content["content"])
+	case "diff":
+		return restoreStringFields(content, "path", "newText")
+	case "terminal":
+		return restoreStringFields(content, "terminalId")
+	default:
+		return false
+	}
+}
+
+func validRestoreConfigOption(option map[string]any) bool {
+	if !restoreStringFields(option, "id", "name") {
+		return false
+	}
+	switch option["type"] {
+	case "boolean":
+		_, ok := option["currentValue"].(bool)
+		return ok
+	case "select":
+		return restoreStringFields(option, "currentValue") && restoreObjectArray(option["options"], func(choice map[string]any) bool {
+			if restoreStringFields(choice, "value", "name") {
+				return true
+			}
+			return restoreStringFields(choice, "group", "name") && restoreObjectArray(choice["options"], func(value map[string]any) bool {
+				return restoreStringFields(value, "value", "name")
+			})
+		})
+	default:
+		return false
+	}
+}
+
+func restoreStringFields(object map[string]any, fields ...string) bool {
+	for _, field := range fields {
+		if _, ok := object[field].(string); !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func restoreObjectArray(value any, valid func(map[string]any) bool) bool {
+	items, ok := value.([]any)
+	if !ok {
+		return false
+	}
+	for _, item := range items {
+		object, ok := item.(map[string]any)
+		if !ok || !valid(object) {
+			return false
+		}
+	}
+	return true
+}
 
 func (s *RuntimeSession) StartPrompt(ctx context.Context, promptID, requestDigest string, prompt []ContentBlock) (PromptRun, error) {
 	return s.StartPromptWithLease(ctx, promptID, requestDigest, prompt, s.config.PromptLease)
@@ -572,6 +996,13 @@ func (s *RuntimeSession) finishPrompt(active *activePrompt, result PromptResult)
 }
 
 func (s *RuntimeSession) handleNotification(_ context.Context, notification IncomingNotification) {
+	s.mu.Lock()
+	if s.restore != nil && s.restore.finishedAt.IsZero() {
+		s.consumeRestoreNotificationLocked(notification)
+		s.mu.Unlock()
+		return
+	}
+	s.mu.Unlock()
 	if notification.Method != MethodSessionUpdate {
 		return
 	}
@@ -589,6 +1020,18 @@ func (s *RuntimeSession) handleNotification(_ context.Context, notification Inco
 }
 
 func (s *RuntimeSession) handleRequest(ctx context.Context, request IncomingRequest) (any, *RPCError) {
+	s.mu.Lock()
+	if phase := s.restore; phase != nil && (phase.finishedAt.IsZero() || !request.ReceivedAt.After(phase.finishedAt)) {
+		if phase.finishedAt.IsZero() {
+			s.countRestoreMessageLocked(len(request.Params))
+		}
+		s.mu.Unlock()
+		if request.Method == MethodRequestPermission {
+			return RequestPermissionResponse{Outcome: CancelledPermissionOutcome()}, nil
+		}
+		return nil, &RPCError{Code: -32601, Message: "client requests are not supported during restoration"}
+	}
+	s.mu.Unlock()
 	if request.Method != MethodRequestPermission {
 		return nil, &RPCError{Code: -32601, Message: "client method is not supported"}
 	}

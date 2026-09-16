@@ -44,6 +44,8 @@ acp_task_smoke_enabled="${ORKA_AGENT_SANDBOX_ACP_TASK_SMOKE:-1}"
 # proves PVC-backed data-only suspension plus exact-Sandbox cold resume live.
 # It reuses the Codex runtime image and Responses fixture from the smoke.
 suspend_resume_enabled="${ORKA_AGENT_SANDBOX_SUSPEND_RESUME:-1}"
+native_session_enabled="${ORKA_AGENT_SANDBOX_NATIVE_SESSION:-0}"
+acp_opencode_runtime_image="${ORKA_ACP_OPENCODE_RUNTIME_IMAGE:-orka-acp-opencode-runtime:native-session-${e2e_run_id}}"
 # The lifecycle/recovery conformance (issue #411) proves Session continuation,
 # explicit cancellation, controller restart, and physical replacement through
 # a workspace-provider-backed RuntimePool, using the fixture's hold markers
@@ -132,7 +134,7 @@ dump_diagnostics() {
     # credentials or other sensitive user input that must never land in logs.
     kubectl -n "${acp_task_namespace}" get tasks -o wide 2>/dev/null || true
     local diag_task
-    for diag_task in "${acp_task_name}" orka-ws-suspend-first orka-ws-suspend-second; do
+    for diag_task in "${acp_task_name}" orka-ws-suspend-first orka-ws-suspend-second orka-native-first orka-native-second; do
       echo "--- task/${diag_task} (prompt and result redacted) ---"
       kubectl -n "${acp_task_namespace}" get task "${diag_task}" -o json 2>/dev/null |
         jq 'del(.spec.prompt) | del(.status.result) | del(.status.execution.result)' 2>/dev/null || true
@@ -851,7 +853,7 @@ patch_controller_for_agent_sandbox() {
   rollout_id="${e2e_run_id}"
 
   local workspace_api="false"
-  if [[ "${suspend_resume_enabled}" == "1" ]]; then
+  if [[ "${suspend_resume_enabled}" == "1" || "${native_session_enabled}" == "1" ]]; then
     workspace_api="true"
     # The dedicated admission runtime below is the API server boundary. These
     # controller flags also register equivalent local handlers, so give the
@@ -867,12 +869,17 @@ patch_controller_for_agent_sandbox() {
     rm -rf "${webhook_cert_dir}"
   fi
 
+  local native_class=""
+  if [[ "${native_session_enabled}" == "1" ]]; then
+    native_class="${acp_suspend_class_name}"
+  fi
   log "Configuring Orka controller for agent-sandbox"
   kubectl -n "${orka_namespace}" get deployment "${orka_controller_deployment}" -o json |
     jq \
       --arg routerURL "${router_url}" \
       --arg rolloutID "${rollout_id}" \
       --arg workspaceAPI "${workspace_api}" \
+      --arg nativeClass "${native_class}" \
       --arg ambiguityMarker "${lifecycle_ambiguity_marker}" \
       --arg template "${sandbox_template_name}" '
       def upsert_arg($name; $value):
@@ -898,6 +905,7 @@ patch_controller_for_agent_sandbox() {
           | .args = ((.args // []) | upsert_arg("--agent-sandbox-command-timeout"; "5m"))
           | .args = ((.args // []) | upsert_arg("--agent-sandbox-cleanup-policy"; "delete"))
           | .args = ((.args // []) | upsert_arg("--acp-workspace-dispatch-enabled"; "true"))
+          | .args = ((.args // []) | upsert_arg("--acp-native-session-workspace-class"; $nativeClass))
           | .args = ((.args // []) | upsert_arg("--acp-e2e-prompt-write-ambiguity-marker"; $ambiguityMarker))
           | (if $workspaceAPI == "true" then
               .args = ((.args // [])
@@ -1540,9 +1548,7 @@ YAML
 # workspace PVC stays Bound), a continuation Task cold-resumes the same
 # Sandbox, and explicit deletion removes the workspace, pool, claim, Sandbox,
 # and PVC.
-run_workspace_suspend_resume_acp_task() {
-  log "Running class-backed suspend/cold-resume conformance (agent-sandbox)"
-
+prepare_workspace_suspend_class() {
   bash "${repo_root}/scripts/lib/ensure-static-mode-namespace.sh" \
     kubectl "${acp_task_namespace}" harness-v2
 
@@ -1610,6 +1616,11 @@ YAML
 
   wait_for_jsonpath executionworkspaceclass "${acp_task_namespace}" "${acp_suspend_class_name}" \
     '{.status.conditions[?(@.type=="Ready")].status}' "True" 180
+}
+
+run_workspace_suspend_resume_acp_task() {
+  log "Running class-backed suspend/cold-resume conformance (agent-sandbox)"
+  prepare_workspace_suspend_class
 
   kubectl apply -f - <<YAML
 apiVersion: core.orka.ai/v1alpha1
@@ -3408,6 +3419,11 @@ main() {
   if [[ "${acp_task_smoke_enabled}" == "1" || "${suspend_resume_enabled}" == "1" || "${lifecycle_enabled}" == "1" ]]; then
     log "Building immutable Codex ACP runtime image ${acp_codex_runtime_image} for the workspace-backed Task smoke"
     run make docker-build-acp-codex-runtime ACP_CODEX_RUNTIME_IMG="${acp_codex_runtime_image}"
+  fi
+  if [[ "${native_session_enabled}" == "1" ]]; then
+    run make docker-build-acp-opencode-runtime ACP_OPENCODE_RUNTIME_IMG="${acp_opencode_runtime_image}"
+  fi
+  if [[ "${acp_task_smoke_enabled}" == "1" || "${suspend_resume_enabled}" == "1" || "${lifecycle_enabled}" == "1" || "${native_session_enabled}" == "1" ]]; then
     log "Building local Responses-compatible provider fixture image ${responses_fixture_image}"
     run docker build -t "${responses_fixture_image}" -f scripts/fixtures/openai-responses/Dockerfile .
   fi
@@ -3421,16 +3437,20 @@ main() {
   run kind load docker-image "${manager_image}" --name "${kind_cluster}"
   run kind load docker-image "${sandbox_fixture_image}" --name "${kind_cluster}"
   run kind load docker-image "${sandbox_router_image}" --name "${kind_cluster}"
-  if [[ "${acp_task_smoke_enabled}" == "1" || "${suspend_resume_enabled}" == "1" || "${lifecycle_enabled}" == "1" ]]; then
+  if [[ "${acp_task_smoke_enabled}" == "1" || "${suspend_resume_enabled}" == "1" || "${lifecycle_enabled}" == "1" || "${native_session_enabled}" == "1" ]]; then
     run kind load docker-image "${responses_fixture_image}" --name "${kind_cluster}"
   fi
 
   local manager_ref publisher_ref
   manager_ref="$(orka_kind_registry_push "${manager_image}" "orka/controller")"
   publisher_ref="$(orka_kind_registry_push "${publisher_image}" "orka/workspace-publisher")"
-  local placeholder_digest codex_runtime_ref
+  local placeholder_digest codex_runtime_ref opencode_runtime_ref
   placeholder_digest="sha256:$(printf '0%.0s' {1..64})"
   codex_runtime_ref="example.invalid/orka/acp-codex@${placeholder_digest}"
+  opencode_runtime_ref="example.invalid/orka/acp-opencode@${placeholder_digest}"
+  if [[ "${native_session_enabled}" == "1" ]]; then
+    opencode_runtime_ref="$(orka_kind_registry_push "${acp_opencode_runtime_image}" "orka/acp-opencode-runtime")"
+  fi
   if [[ "${acp_task_smoke_enabled}" == "1" || "${suspend_resume_enabled}" == "1" || "${lifecycle_enabled}" == "1" ]]; then
     codex_runtime_ref="$(orka_kind_registry_push "${acp_codex_runtime_image}" "orka/acp-codex-runtime")"
   fi
@@ -3439,18 +3459,18 @@ main() {
   orka_e2e_remove_admission_webhooks
   orka_e2e_bootstrap_admission_tls kubectl "${orka_namespace}"
 
-  if [[ "${acp_task_smoke_enabled}" == "1" || "${suspend_resume_enabled}" == "1" || "${lifecycle_enabled}" == "1" ]]; then
+  if [[ "${acp_task_smoke_enabled}" == "1" || "${suspend_resume_enabled}" == "1" || "${lifecycle_enabled}" == "1" || "${native_session_enabled}" == "1" ]]; then
     deploy_responses_fixture
   fi
 
-  log "Deploying Orka manager (Codex runtime image real when the workspace-backed Task smoke is enabled; other runtimes inert)"
+  log "Deploying Orka manager with the ACP runtime images selected for this test"
   run make deploy \
     IMG="${manager_ref}" \
     WORKSPACE_PUBLISHER_IMG="${publisher_ref}" \
     ACP_CODEX_RUNTIME_IMG="${codex_runtime_ref}" \
     ACP_CLAUDE_RUNTIME_IMG="example.invalid/orka/acp-claude@${placeholder_digest}" \
     ACP_COPILOT_RUNTIME_IMG="example.invalid/orka/acp-copilot@${placeholder_digest}" \
-    ACP_OPENCODE_RUNTIME_IMG="example.invalid/orka/acp-opencode@${placeholder_digest}"
+    ACP_OPENCODE_RUNTIME_IMG="${opencode_runtime_ref}"
   run kubectl wait --for=condition=Established crd/tasks.core.orka.ai --timeout=60s
   log "Deploying fail-closed Orka admission with the controller image under test"
   orka_e2e_deploy_admission "${manager_ref}" kubectl "${orka_namespace}"
@@ -3489,6 +3509,11 @@ main() {
     run_workspace_lifecycle_acp_task
   else
     log "Skipping workspace-backed lifecycle/recovery conformance (ORKA_AGENT_SANDBOX_LIFECYCLE=0)"
+  fi
+  if [[ "${native_session_enabled}" == "1" ]]; then
+    # shellcheck source=scripts/lib/agent-sandbox-native-session.sh
+    . "${script_dir}/lib/agent-sandbox-native-session.sh"
+    run_workspace_native_session
   fi
   log "Live agent-sandbox installation/configuration/workspace-adapter e2e passed"
 }

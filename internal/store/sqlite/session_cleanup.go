@@ -339,6 +339,11 @@ func completeSessionCleanupTx(ctx context.Context, tx *sql.Tx, request store.Com
 		return err
 	}
 	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM native_session_snapshots WHERE namespace = ? AND session_name = ?`, request.Namespace, request.SessionName,
+	); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM session_turns WHERE namespace = ? AND session_name = ?`, request.Namespace, request.SessionName,
 	); err != nil {
 		return err

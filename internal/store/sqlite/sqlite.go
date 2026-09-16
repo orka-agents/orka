@@ -956,6 +956,7 @@ func currentSchemaStatements() []string {
 
 	statements = append(statements, controlSchemaStatements()...)
 	statements = append(statements, gatewayTaskCleanupSchemaStatements()...)
+	statements = append(statements, nativeSessionSchemaStatements()...)
 	return append(statements, agentExecutionSchemaStatements()...)
 }
 
@@ -1011,19 +1012,27 @@ func (s *Store) Start(ctx context.Context) error {
 
 	logger.Info("SQLite store is configured — ensure a PersistentVolume is mounted at the store path for data durability", "path", s.dbPath)
 
-	// Update DB size metric periodically
+	// Run maintenance on startup and periodically while leadership is held.
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 
-	// Record initial size
-	s.updateDBSizeMetric()
+	maintain := func() {
+		if ctx.Err() != nil {
+			return
+		}
+		s.updateDBSizeMetric()
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM native_session_snapshots WHERE expires_at <= ?`, time.Now().UTC()); err != nil && ctx.Err() == nil {
+			logger.Error(err, "Failed to delete expired native Session snapshots")
+		}
+	}
+	maintain()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return s.close()
 		case <-ticker.C:
-			s.updateDBSizeMetric()
+			maintain()
 		}
 	}
 }

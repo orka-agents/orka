@@ -124,6 +124,10 @@ func (s *Store) CommitSessionTurnFinalization(ctx context.Context, request store
 	if err != nil {
 		return nil, err
 	}
+	nativeSnapshot, err := prepareNativeSessionFinalizationTx(ctx, tx, turn, normalized)
+	if err != nil {
+		return nil, err
+	}
 	messageCountDelta := 0
 	if !normalized.SkipTranscriptAppend {
 		terminalRole := sessionTurnRoleAssistant
@@ -140,6 +144,9 @@ func (s *Store) CommitSessionTurnFinalization(ctx context.Context, request store
 	}
 	if err := finalizeSessionTranscriptTx(ctx, tx, normalized.Namespace, normalized.SessionName,
 		normalized.Key.TaskUID, messageCountDelta, normalized.FinalizedAt); err != nil {
+		return nil, err
+	}
+	if err := finalizeNativeSessionSnapshotTx(ctx, tx, nativeSnapshot); err != nil {
 		return nil, err
 	}
 	turnResult, err := tx.ExecContext(ctx,
@@ -273,6 +280,9 @@ func (s *Store) ActivateSessionTurnProjection(ctx context.Context, request store
 	projection.ControllerEpoch = normalized.Fence.Epoch
 	projection.Version++
 	projection.UpdatedAt = normalized.UpdatedAt
+	if err := activateNativeSessionSnapshotTx(ctx, tx, turn); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}

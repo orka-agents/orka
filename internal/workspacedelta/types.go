@@ -121,6 +121,14 @@ type Snapshot struct {
 	totalBytes     int64
 }
 
+// ManifestDigest binds the normalized file tree and its capture policy.
+func (s *Snapshot) ManifestDigest() string {
+	if s == nil {
+		return ""
+	}
+	return s.manifestDigest
+}
+
 type entry struct {
 	path       string
 	kind       EntryKind
