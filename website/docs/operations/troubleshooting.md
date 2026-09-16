@@ -99,6 +99,24 @@ kubectl -n orka-system logs "deploy/$CONTROLLER" --previous
 That is `orka-controller` for a Helm release named `orka`, and `orka-controller-manager`
 for the release manifest, as the table above shows.
 
+**`unable to resolve ACP runtime images`**
+
+At startup the controller resolves the coding-agent runtime image tags to digests by
+asking the registry, `ghcr.io` for the default images, over HTTPS. If the controller
+Pod cannot reach it, through a proxy or an egress policy, startup fails. Either allow
+that access, or pin the runtime images to digests so no lookup is needed, or set the
+images to empty strings to run without coding agents:
+
+```bash
+helm upgrade orka orka/orka --namespace orka-system --reuse-values \
+  --set-string controller.acpRuntime.codexImage= \
+  --set-string controller.acpRuntime.claudeImage= \
+  --set-string controller.acpRuntime.copilotImage= \
+  --set-string controller.acpRuntime.opencodeImage=
+```
+
+See [Image overrides](../reference/configuration.md#image-overrides).
+
 **`--watch-namespace is required; controller modes cannot use a cluster-wide watch`**
 
 Orka watches exactly one namespace. Set `controller.watchNamespace` to the release

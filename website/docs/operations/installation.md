@@ -50,7 +50,8 @@ helm install orka orka/orka --namespace orka-system --create-namespace \
   --wait --timeout 10m
 ```
 
-To bring your own webhook certificate or use cert-manager, see
+The command returns when Orka is ready, which takes a minute or two on a laptop while
+the images pull. To bring your own webhook certificate or use cert-manager, see
 [Webhook certificate](../reference/configuration.md#webhook-certificate).
 
 ## 2. Check the installation
@@ -60,16 +61,6 @@ Check that the Deployments are ready and the data volumes show `Bound`:
 ```bash
 kubectl -n orka-system get deployments,pvc
 ```
-
-The install also created two Secrets that the controller filled in on its first
-start. `orka-agent-execution-snapshot` holds the key that encrypts saved agent
-execution records. Back it up together with the data volume. Without it, Orka
-cannot read those records after a restore. To supply your own key instead, see
-[Snapshot encryption key](../reference/configuration.md#snapshot-encryption-key).
-`orka-webhook-tls` holds the self-signed CA and serving certificate for Orka's
-admission webhooks. The controller renews it on its own. Never run
-`helm upgrade --force` on this release, because it replaces both Secrets with
-the chart's empty versions.
 
 Then run a container task. This test does not call a model.
 
@@ -93,12 +84,45 @@ kubectl -n orka-system wait \
 
 When the command reports `condition met`, Orka has completed its first task.
 
+:::note[Back these up]
+The install created two Secrets that the controller filled in on its first start.
+`orka-agent-execution-snapshot` is the key that encrypts saved agent execution
+records; without it, Orka cannot read those records after a restore, so back it up
+with the data volume. `orka-webhook-tls` is the self-signed certificate for Orka's
+admission webhooks, which the controller renews on its own. Never run
+`helm upgrade --force` on this release, because it would replace both with the
+chart's empty versions. To supply your own key or certificate, see
+[Snapshot encryption key](../reference/configuration.md#snapshot-encryption-key)
+and [Webhook certificate](../reference/configuration.md#webhook-certificate).
+:::
+
 ## Next steps
 
 1. [Connect to the API](../getting-started.md#connect-to-the-api) with a
    port-forward and a client token.
 2. [Add a provider and run your first AI task](../getting-started.md#your-first-task)
-   with an Anthropic, OpenAI, or Azure OpenAI API key.
+   with an API key or a model server your cluster can reach.
 3. To run coding agents such as Codex or Claude Code,
    [connect a model gateway](provider-proxy.md). This step is optional and can
    come later.
+
+## Clean up
+
+On a throwaway kind or minikube cluster, deleting the cluster removes everything.
+On a cluster you keep:
+
+```bash
+helm uninstall orka --namespace orka-system
+```
+
+Helm removes the Deployments and volumes. It leaves the CRDs, the two generated
+Secrets, and the `orka-system` namespace in place, so a later reinstall under the
+same name recovers its records. To remove those too:
+
+```bash
+kubectl delete namespace orka-system orka-runtimes
+kubectl get crd -o name | grep '\.orka\.ai$' | xargs kubectl delete
+```
+
+Deleting the CRDs deletes every Orka resource in the cluster. See
+[Upgrading](upgrading.md#uninstall) for the details.
