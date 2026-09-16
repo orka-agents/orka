@@ -764,8 +764,11 @@ SHA256 digest. A digest takes precedence over the tag.
 
 Runtime fields such as `controller.acpRuntime.codexImage` accept a full image
 reference with a tag or digest. The controller resolves tags to digests once at
-startup, so running sessions use fixed images. If resolution fails, startup
-stops. An explicit digest skips this lookup.
+startup, so running sessions use fixed images. If any resolution fails, the
+controller logs the error, disables every coding-agent runtime for that process,
+and keeps running: AI and container Tasks work, agent Tasks fail closed as
+unavailable. Fix registry access or pin digests, then restart the controller.
+An explicit digest skips this lookup.
 
 Tag resolution requires controller HTTPS access to a registry that allows
 anonymous pulls. Use digest references for private registries or installations

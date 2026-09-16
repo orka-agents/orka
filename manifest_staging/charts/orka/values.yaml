@@ -29,8 +29,9 @@ controller:
       cpu: 250m
       memory: 256Mi
 
-  # Defaults to the Helm release namespace. Label that namespace with
-  # orka.ai/controller-mode matching controller.mode before startup.
+  # Defaults to the Helm release namespace. On first start the controller
+  # labels it orka.ai/controller-mode=<controller.mode>; a namespace already
+  # labeled for the other mode fails startup, and the label never changes.
   watchNamespace: ""
 
   # API server port

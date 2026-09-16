@@ -109,15 +109,23 @@ and [Webhook certificate](../reference/configuration.md#webhook-certificate).
 ## Clean up
 
 On a throwaway kind or minikube cluster, deleting the cluster removes everything.
+
+:::danger[Uninstall deletes Orka's data]
+`helm uninstall` removes the persistent volume claims that hold the task database
+and workspace data. Unless your StorageClass retains released volumes, that data is
+gone. A later reinstall starts empty; recovering records means restoring both the
+volumes and the snapshot key Secret from a backup. Take that backup first if you
+care about what is stored.
+:::
+
 On a cluster you keep:
 
 ```bash
 helm uninstall orka --namespace orka-system
 ```
 
-Helm removes the Deployments and volumes. It leaves the CRDs, the two generated
-Secrets, and the `orka-system` namespace in place, so a later reinstall under the
-same name recovers its records. To remove those too:
+Helm leaves the CRDs, the two generated Secrets, and the `orka-system` namespace in
+place. To remove those too:
 
 ```bash
 kubectl delete namespace orka-system orka-runtimes

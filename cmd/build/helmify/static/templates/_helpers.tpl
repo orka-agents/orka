@@ -663,7 +663,7 @@ choose its upstream gateway and explicitly allow the required network access.
 {{- fail (printf "controller.acpRuntime.providerProxyNamespace must be empty or match the Helm release namespace %q when providerProxy.enabled=true" .Release.Namespace) -}}
 {{- end -}}
 {{- $upstream := trimSuffix "/" (trim (default "" .Values.providerProxy.upstreamBaseURL)) -}}
-{{- if not (regexMatch `^https?://[A-Za-z0-9\[][^/?#@[:space:]]*(/[^?#[:space:]]*)?$` $upstream) -}}
+{{- if not (regexMatch `^https?://(\[[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*\]|[A-Za-z0-9][^/?#@\[\]:[:space:]]*)(:[0-9]+)?(/[^?#[:space:]]*)?$` $upstream) -}}
 {{- fail "providerProxy.upstreamBaseURL must be an HTTP(S) URL without credentials, a query, or a fragment when providerProxy.enabled=true" -}}
 {{- end -}}
 {{- $upstreamURL := urlParse $upstream -}}
@@ -859,6 +859,9 @@ certificate and CA trust are always operator-managed.
 {{- end -}}
 {{- if and (not (include "orka.webhookTLSGenerated" .)) (not (trim (default "" .Values.webhooks.caBundle))) (empty .Values.webhooks.caInjectionAnnotations) -}}
 {{- fail "webhooks requires a nonempty caBundle or caInjectionAnnotations when webhooks.tls.existingSecret is set" -}}
+{{- end -}}
+{{- if and (include "orka.webhookTLSGenerated" .) (or (trim (default "" .Values.webhooks.caBundle)) (not (empty .Values.webhooks.caInjectionAnnotations))) -}}
+{{- fail "webhooks.caBundle and webhooks.caInjectionAnnotations require webhooks.tls.existingSecret; with controller-managed certificates the controller owns caBundle and an external injector would fight it" -}}
 {{- end -}}
 {{- if or (lt (int .Values.webhooks.timeoutSeconds) 1) (gt (int .Values.webhooks.timeoutSeconds) 30) -}}
 {{- fail "webhooks.timeoutSeconds must be between 1 and 30" -}}

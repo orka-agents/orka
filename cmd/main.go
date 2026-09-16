@@ -1329,6 +1329,12 @@ func main() {
 	// without a key can then only mean the key was lost, never an interrupted
 	// first start, so the bootstrap can fail closed on that condition.
 	_, storeStatErr := os.Stat(storePath)
+	if storeStatErr != nil && !os.IsNotExist(storeStatErr) {
+		// Anything but a clean "absent" must not be mistaken for a first
+		// start, or a fresh key could be minted over an unreadable database.
+		setupLog.Error(storeStatErr, "unable to check for an existing SQLite store", "path", storePath)
+		os.Exit(1)
+	}
 	storePreexisted := storeStatErr == nil
 	var snapshotCipher *sqlite.AgentExecutionSnapshotCipher
 	if agentExecutionSnapshotSecretOpts.enabled() {
@@ -1659,6 +1665,7 @@ func main() {
 		RepositoryValidationBindings: sqliteStore,
 		MCPRegistry:                  acpMCPRegistry,
 		HarnessV1Enabled:             harnessV1Enabled,
+		Mode:                         mode,
 		HarnessV1Endpoint:            harnessV1Endpoint,
 		HarnessV1AuthSecretNamespace: harnessV1AuthSecretNamespace,
 		HarnessV1AuthSecretName:      harnessV1AuthSecretName,
@@ -1963,6 +1970,7 @@ func main() {
 	if err := (&controller.AgentReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
+		Mode:   mode,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Agent")
 		os.Exit(1)

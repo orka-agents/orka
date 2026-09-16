@@ -25,10 +25,6 @@ func renderInstallationDefaults(t *testing.T, overrides ...string) (string, erro
 		"--show-only", "templates/publisher-deployment.yaml",
 		"--show-only", "templates/serviceaccount.yaml",
 		"--show-only", "templates/gateway-task-admission-policy.yaml",
-		"--set-string", "controller.agentExecutionSnapshot.existingSecret=orka-agent-snapshot-key",
-		"--set-string", "controller.agentExecutionSnapshot.key=key",
-		"--set-string", "webhooks.tls.existingSecret=orka-webhook-tls",
-		"--set-string", "webhooks.caBundle=Y2E=",
 	}
 	output, err := exec.Command(helm, append(args, overrides...)...).CombinedOutput()
 	return string(output), err

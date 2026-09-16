@@ -104,6 +104,16 @@ replacements:
     options:
       delimiter: "'"
       index: 1
+  - select:
+      group: admissionregistration.k8s.io
+      version: v1
+      kind: ValidatingAdmissionPolicy
+      name: namespace-mode-protection
+    fieldPaths:
+    - spec.variables.[name=controllerNamespace].expression
+    options:
+      delimiter: "'"
+      index: 1
 - source:
     group: ""
     version: v1
@@ -116,6 +126,16 @@ replacements:
       version: v1
       kind: ValidatingAdmissionPolicy
       name: gateway-task-protection
+    fieldPaths:
+    - spec.variables.[name=controllerServiceAccount].expression
+    options:
+      delimiter: "'"
+      index: 1
+  - select:
+      group: admissionregistration.k8s.io
+      version: v1
+      kind: ValidatingAdmissionPolicy
+      name: namespace-mode-protection
     fieldPaths:
     - spec.variables.[name=controllerServiceAccount].expression
     options:

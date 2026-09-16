@@ -94,6 +94,11 @@ func normalizeProxyConfig(cfg proxyConfig) (proxyConfig, *url.URL, error) {
 		(parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return proxyConfig{}, nil, fmt.Errorf("provider upstream base URL is invalid")
 	}
+	if strings.HasPrefix(parsed.Host, "[") && net.ParseIP(parsed.Hostname()) == nil {
+		// url.Parse accepts any bracketed authority; only a real IPv6 literal
+		// can be dialed, so anything else must fail here rather than at runtime.
+		return proxyConfig{}, nil, fmt.Errorf("provider upstream base URL is invalid")
+	}
 	if parsed.Path == "" {
 		parsed.Path = "/"
 	}

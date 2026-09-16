@@ -103,9 +103,11 @@ for the release manifest, as the table above shows.
 
 At startup the controller resolves the coding-agent runtime image tags to digests by
 asking the registry, `ghcr.io` for the default images, over HTTPS. If the controller
-Pod cannot reach it, through a proxy or an egress policy, startup fails. Either allow
-that access, or pin the runtime images to digests so no lookup is needed, or set the
-images to empty strings to run without coding agents:
+Pod cannot reach it, through a proxy or an egress policy, the controller stays up but
+every coding-agent runtime is unavailable until it restarts: AI and container Tasks
+work, agent Tasks fail with an unavailable runtime. Either allow that access, or pin
+the runtime images to digests so no lookup is needed, or set the images to empty
+strings to run without coding agents, then restart the controller:
 
 ```bash
 helm upgrade orka orka/orka --namespace orka-system --reuse-values \

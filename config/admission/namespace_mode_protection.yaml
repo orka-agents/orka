@@ -22,8 +22,12 @@ spec:
   variables:
   - name: label
     expression: "'orka.ai/controller-mode'"
+  - name: controllerNamespace
+    expression: "'ORKA_NAMESPACE'"
+  - name: controllerServiceAccount
+    expression: "'CONTROLLER_SA'"
   - name: controllerUser
-    expression: "'system:serviceaccount:ORKA_NAMESPACE:CONTROLLER_SA'"
+    expression: "'system:serviceaccount:' + variables.controllerNamespace + ':' + variables.controllerServiceAccount"
   - name: newClaim
     expression: "object.metadata.?labels[variables.label].orValue('')"
   - name: oldClaim

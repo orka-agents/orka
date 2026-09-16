@@ -53,8 +53,10 @@ spec:
       message: the controller may change only clientConfig.caBundle on its webhook configuration
     - expression: >-
         object.metadata.?labels.orValue({}) == oldObject.metadata.?labels.orValue({}) &&
-        object.metadata.?annotations.orValue({}) == oldObject.metadata.?annotations.orValue({})
-      message: the controller may not change webhook configuration metadata
+        object.metadata.?annotations.orValue({}) == oldObject.metadata.?annotations.orValue({}) &&
+        object.metadata.?ownerReferences.orValue([]) == oldObject.metadata.?ownerReferences.orValue([]) &&
+        object.metadata.?finalizers.orValue([]) == oldObject.metadata.?finalizers.orValue([])
+      message: the controller may not change webhook configuration metadata, owner references, or finalizers
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
