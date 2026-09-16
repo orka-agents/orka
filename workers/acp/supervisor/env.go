@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/orka-agents/orka/internal/acp"
 	"github.com/orka-agents/orka/internal/artifactcap"
+	"github.com/orka-agents/orka/internal/envutil"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
@@ -127,9 +128,9 @@ func LoadConfigFromEnv() (Config, error) {
 		WorkspaceIntent:          intent,
 		ProxyCredentialRole:      requiredEnv(EnvProxyCredentialRole),
 		ProxyCredentialScope:     requiredEnv(EnvProxyCredentialScope),
-		ResourceClass:            envDefault(EnvResourceClass, "standard"),
+		ResourceClass:            envutil.String(EnvResourceClass, "standard"),
 	}
-	providerBaseURL := envDefault(EnvProviderProxyBaseURL, defaultProxyBaseURL())
+	providerBaseURL := envutil.String(EnvProviderProxyBaseURL, defaultProxyBaseURL())
 	modelOutputLimit := int64(0)
 	if modelLimits != nil {
 		modelOutputLimit = modelLimits.Output
@@ -162,15 +163,15 @@ func LoadConfigFromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	firstUID, err := parsePositiveInt(EnvFirstSessionUID, envDefault(EnvFirstSessionUID, "20000"))
+	firstUID, err := parsePositiveInt(EnvFirstSessionUID, envutil.String(EnvFirstSessionUID, "20000"))
 	if err != nil {
 		return Config{}, err
 	}
-	lastUID, err := parsePositiveInt(EnvLastSessionUID, envDefault(EnvLastSessionUID, "29999"))
+	lastUID, err := parsePositiveInt(EnvLastSessionUID, envutil.String(EnvLastSessionUID, "29999"))
 	if err != nil {
 		return Config{}, err
 	}
-	firstGID, err := parsePositiveInt(EnvSessionGID, envDefault(EnvSessionGID, "20000"))
+	firstGID, err := parsePositiveInt(EnvSessionGID, envutil.String(EnvSessionGID, "20000"))
 	if err != nil {
 		return Config{}, err
 	}
@@ -261,7 +262,7 @@ func LoadConfigFromEnv() (Config, error) {
 		WorkspaceGovernance:               harnessv2.StrictWorkspaceGovernanceCapabilities(),
 	}
 	cfg := Config{
-		ListenAddress: envDefault(EnvListenAddress, ":8080"),
+		ListenAddress: envutil.String(EnvListenAddress, ":8080"),
 		Fence: harnessv2.Fence{
 			RuntimeInstanceID: harnessv2.RuntimeInstanceID(runtimeInstanceID),
 			SupervisorBootID:  harnessv2.SupervisorBootID(bootID), ControllerEpoch: controllerEpoch,
@@ -270,7 +271,7 @@ func LoadConfigFromEnv() (Config, error) {
 		},
 		Capabilities: capabilities, Provider: provider,
 		ControllerBearerToken: controllerToken, CapabilitySecret: []byte(capabilitySecret), RequireCapabilities: true,
-		SessionBaseDir:      envDefault(EnvSessionBaseDir, "/sessions"),
+		SessionBaseDir:      envutil.String(EnvSessionBaseDir, "/sessions"),
 		DurableWorkspaceDir: durableWorkspaceDir,
 		DurableWorkspaceKey: durableWorkspaceKey,
 		UIDAllocator:        allocator,
@@ -1052,12 +1053,6 @@ func workspaceArtifactDownloadLimitFromEnv() (int64, error) {
 }
 
 func requiredEnv(name string) string { return strings.TrimSpace(os.Getenv(name)) }
-func envDefault(name, fallback string) string {
-	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
-		return value
-	}
-	return fallback
-}
 
 func modelTokenLimitsFromEnv() (*harnessv2.ModelTokenLimits, error) {
 	contextValue := strings.TrimSpace(os.Getenv(EnvModelContextLimit))
