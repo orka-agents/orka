@@ -9,6 +9,7 @@ package openai
 import (
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/openai/openai-go/v3/responses"
 
@@ -112,6 +113,9 @@ type responseOutputOrder struct {
 	indexed       bool
 	unindexedText bool
 	unindexedID   string
+	unindexedDone bool
+	text          map[int64]string
+	legacyText    string
 }
 
 func (o *responseOutputOrder) bind(id string, index int64) error {
@@ -166,10 +170,76 @@ func (o *responseOutputOrder) eventIndex(evt responses.ResponseStreamEventUnion)
 		return &index, nil
 	}
 	if evt.Type == "response.output_text.delta" && evt.Delta != "" {
-		if o.indexed || (o.unindexedText && o.unindexedID != id) {
+		if o.indexed || o.unindexedDone || (o.unindexedText && o.unindexedID != id) {
 			return nil, fmt.Errorf("response text has no unambiguous output index")
 		}
 		o.unindexedText, o.unindexedID = true, id
 	}
 	return nil, nil
+}
+
+// recordText remembers what was already emitted so item/terminal snapshots can
+// provide missing text without duplicating deltas or accepting contradictions.
+func (o *responseOutputOrder) recordText(index *int64, delta string) {
+	if index == nil {
+		o.legacyText += delta
+		return
+	}
+	if o.text == nil {
+		o.text = map[int64]string{}
+	}
+	o.text[*index] += delta
+}
+
+func (o *responseOutputOrder) completeText(item responses.ResponseOutputItemUnion, index *int64, send streamSender) bool {
+	var text strings.Builder
+	for _, part := range item.Content {
+		if part.Type == "output_text" {
+			text.WriteString(part.Text)
+		}
+	}
+	observed := o.legacyText
+	if index != nil {
+		observed = o.text[*index]
+	}
+	final := text.String()
+	if !strings.HasPrefix(final, observed) || (index == nil && (!o.unindexedText || (o.unindexedDone && final != observed))) {
+		send(llm.StreamChunk{Error: fmt.Errorf("response text contradicts streamed output"), Done: true})
+		return false
+	}
+	// Unindexed text bypasses the ordered queue, so retain its closed state
+	// here to reject later deltas or snapshots that try to reopen the item.
+	if index == nil {
+		o.unindexedDone = true
+	}
+	missing := strings.TrimPrefix(final, observed)
+	if missing == "" {
+		return true
+	}
+	o.recordText(index, missing)
+	return send(llm.StreamChunk{Content: missing, OutputIndex: index})
+}
+
+func (o *responseOutputOrder) completeMessages(evt responses.ResponseStreamEventUnion, send streamSender) bool {
+	for i, item := range evt.Response.Output {
+		if item.Type != responseOutputTypeMessage {
+			continue
+		}
+		index := int64(i)
+		outputIndex := &index
+		if o.unindexedText {
+			outputIndex = nil
+		}
+		if !o.completeText(item, outputIndex, send) {
+			return false
+		}
+		status := item.Status
+		if status == "" && evt.Type == eventTypeResponseIncomplete && i == len(evt.Response.Output)-1 {
+			status = stopReasonIncomplete
+		}
+		if !send(llm.StreamChunk{OutputIndex: outputIndex, OutputItemDone: true, OutputItemStatus: status}) {
+			return false
+		}
+	}
+	return true
 }

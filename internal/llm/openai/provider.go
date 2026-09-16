@@ -756,6 +756,9 @@ func handleResponsesStreamEvent(evt responses.ResponseStreamEventUnion, tracker 
 	}
 	switch evt.Type {
 	case "response.output_text.delta":
+		if tracker.ordered {
+			tracker.outputOrder.recordText(outputIndex, evt.Delta)
+		}
 		return handleResponseTextDelta(evt, send, outputIndex)
 	case "response.function_call_arguments.delta":
 		return handleResponseFunctionCallArgumentsDelta(evt, tracker, send)
@@ -772,6 +775,9 @@ func handleResponsesStreamEvent(evt responses.ResponseStreamEventUnion, tracker 
 		send(llm.StreamChunk{Done: true, StopReason: stopReason})
 		return false
 	case eventTypeResponseIncomplete:
+		if tracker.ordered && !tracker.outputOrder.completeMessages(evt, send) {
+			return false
+		}
 		stopReason := normalizeResponsesIncompleteStopReason(evt.Type, evt.Response.IncompleteDetails.Reason)
 		if tracker.hasUnemittedFunctionCall(evt.Response.Output) {
 			stopReason = eventTypeResponseIncomplete
@@ -825,13 +831,21 @@ func handleResponseOutputItem(evt responses.ResponseStreamEventUnion, tracker *r
 			return false
 		}
 	}
-	if argumentsDone && outputIndex != nil {
+	if argumentsDone && tracker.ordered && evt.Item.Type == responseOutputTypeMessage {
+		if !tracker.outputOrder.completeText(evt.Item, outputIndex, send) {
+			return false
+		}
+	}
+	if argumentsDone && (outputIndex != nil || (tracker.ordered && evt.Item.Type == responseOutputTypeMessage)) {
 		return send(llm.StreamChunk{OutputIndex: outputIndex, OutputItemDone: true, OutputItemStatus: evt.Item.Status})
 	}
 	return true
 }
 
 func handleResponseCompleted(evt responses.ResponseStreamEventUnion, tracker *responseFuncCallTracker, providerName string, send streamSender) bool {
+	if tracker.ordered && !tracker.outputOrder.completeMessages(evt, send) {
+		return false
+	}
 	stopReason := normalizeResponsesStopReason(
 		string(evt.Response.Status),
 		evt.Response.Output,

@@ -28,6 +28,7 @@ import (
 const goalStateSentinel = "<ORKA_GOAL_STATE_REACHED>"
 
 var errStreamUnavailable = errors.New("stream unavailable before output")
+var errCompletionRefused = errors.New("LLM returned refused completion outcome")
 
 // truncateForLog returns s clipped to max runes, appending "…" if clipped.
 // Used so log lines stay scannable when the model dumps a long progress
@@ -137,6 +138,8 @@ func validateToolLoopCompletion(resp *llm.CompletionResponse, options ...toolLoo
 	switch outcome {
 	case llm.CompletionOutcomeCompleted, llm.CompletionOutcomeToolCalls:
 		return nil
+	case llm.CompletionOutcomeRefused:
+		return fmt.Errorf("%w with stop reason %q", errCompletionRefused, strings.TrimSpace(resp.StopReason))
 	case llm.CompletionOutcomeIncomplete:
 		// A text response truncated by the caller's max_tokens budget is a
 		// valid terminal outcome for the compatibility APIs: Anthropic and

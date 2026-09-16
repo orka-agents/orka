@@ -11,6 +11,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -115,12 +116,19 @@ func (s *responsesStreamWriter) function(call llm.ToolCall) error {
 	return s.event("response.output_item.done", map[string]any{"output_index": index, "item": item})
 }
 
-func (s *responsesStreamWriter) fail() {
+func (s *responsesStreamWriter) fail(causes ...error) {
 	_ = s.finishText(responsesStatusIncomplete)
 	detail := &responsesError{Code: responsesServerError, Message: "provider failed to produce a valid Responses completion"}
+	code := detail.Code
+	if len(causes) > 0 && errors.Is(causes[0], errCompletionRefused) {
+		code = responsesUnsupportedOutcome
+		detail.Message = responsesUnsupportedRefusalMessage
+	}
+	// The top-level error event permits extension codes. The nested Response
+	// error uses the SDK's closed code vocabulary with the same explicit message.
 	s.response.Status = "failed"
 	s.response.Error = detail
-	_ = s.event("error", map[string]any{"code": responsesServerError, responsesMessage: detail.Message, "param": nil})
+	_ = s.event("error", map[string]any{"code": code, responsesMessage: detail.Message, "param": nil})
 	_ = s.event("response.failed", map[string]any{responsesObject: s.response})
 }
 
@@ -158,7 +166,7 @@ func (h *OpenAICompatHandler) streamResponses(c fiber.Ctx, ctx context.Context, 
 				}
 			case chunk, ok := <-chunks:
 				if !ok || chunk.Error != nil {
-					writer.fail()
+					writer.fail(chunk.Error)
 					return
 				}
 				if err := writer.text(chunk.Content); err != nil {
@@ -188,7 +196,11 @@ func (h *OpenAICompatHandler) streamResponses(c fiber.Ctx, ctx context.Context, 
 						completion.ToolCalls = append(completion.ToolCalls, llm.ToolCall{ID: item.CallID})
 					}
 				}
-				if response.setOutcome(completion) != nil || (len(response.Output) == 0 && response.Status != responsesStatusIncomplete) {
+				if err := response.setOutcome(completion); err != nil {
+					writer.fail(err)
+					return
+				}
+				if len(response.Output) == 0 && response.Status != responsesStatusIncomplete {
 					writer.fail()
 					return
 				}
@@ -229,7 +241,7 @@ func (h *OpenAICompatHandler) produceResponsesChunks(ctx context.Context, provid
 		}
 		completion, err := runToolLoopWithObserver(ctx, provider, req, req.Model, h.responsesLoopConfig(req), toolCtx, observer, toolLoopOptions{requireFinalCompletion: true, allowEmptyTokenBudget: true})
 		if err != nil || ctx.Err() != nil {
-			send(llm.StreamChunk{Error: fmt.Errorf("coordinator completion failed")})
+			send(llm.StreamChunk{Error: responsesCompletionError(err)})
 			return
 		}
 		if completion == nil {
@@ -243,7 +255,7 @@ func (h *OpenAICompatHandler) produceResponsesChunks(ctx context.Context, provid
 		// Preserve providers that only support non-streaming completions.
 		completion, completeErr := provider.Complete(ctx, req)
 		if completeErr != nil || completion == nil {
-			send(llm.StreamChunk{Error: fmt.Errorf("completion failed")})
+			send(llm.StreamChunk{Error: responsesCompletionError(completeErr)})
 			return
 		}
 		items := responsesCompletionItems(completion)

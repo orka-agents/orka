@@ -9,6 +9,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -19,15 +20,17 @@ import (
 )
 
 const (
-	responsesStatusInProgress = "in_progress"
-	responsesStatusIncomplete = "incomplete"
-	responsesRoleAssistant    = "assistant"
-	responsesRoleTool         = "tool"
-	responsesFunctionToolType = "function"
-	responsesServerError      = "server_error"
-	responsesJSONNull         = "null"
-	responsesMessage          = "message"
-	responsesObject           = "response"
+	responsesStatusInProgress          = "in_progress"
+	responsesStatusIncomplete          = "incomplete"
+	responsesRoleAssistant             = "assistant"
+	responsesRoleTool                  = "tool"
+	responsesFunctionToolType          = "function"
+	responsesServerError               = "server_error"
+	responsesUnsupportedOutcome        = "unsupported_provider_outcome"
+	responsesUnsupportedRefusalMessage = "provider refusals are not supported by this Responses endpoint"
+	responsesJSONNull                  = "null"
+	responsesMessage                   = "message"
+	responsesObject                    = "response"
 )
 
 // ResponsesResponse contains a transient response, never a saved server object.
@@ -157,10 +160,10 @@ func (h *OpenAICompatHandler) HandleResponses(c fiber.Ctx) error {
 		completion, err = provider.Complete(ctx, comp)
 	}
 	if err != nil || ctx.Err() != nil {
-		return responsesProviderError(c)
+		return responsesProviderError(c, err)
 	}
 	if err := response.setCompletion(completion); err != nil {
-		return responsesProviderError(c)
+		return responsesProviderError(c, err)
 	}
 	return c.JSON(response)
 }
@@ -182,7 +185,11 @@ func (h *OpenAICompatHandler) responsesToolContext(c fiber.Ctx, namespace string
 	})
 }
 
-func responsesProviderError(c fiber.Ctx) error {
+func responsesProviderError(c fiber.Ctx, err error) error {
+	if errors.Is(err, errCompletionRefused) {
+		code := responsesUnsupportedOutcome
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(OAIError{Error: OAIErrorDetail{Type: OAIErrorTypeInvalidRequest, Code: &code, Message: responsesUnsupportedRefusalMessage}})
+	}
 	// Provider errors may contain upstream request details; expose a stable message.
 	return c.Status(fiber.StatusBadGateway).JSON(OAIError{Error: OAIErrorDetail{Type: responsesServerError, Message: "provider failed to produce a valid Responses completion"}})
 }
@@ -191,6 +198,8 @@ func (r *ResponsesResponse) setOutcome(completion *llm.CompletionResponse) error
 	switch llm.NormalizeCompletionOutcome(completion) {
 	case llm.CompletionOutcomeCompleted, llm.CompletionOutcomeToolCalls:
 		r.Status = completionStatusCompleted
+	case llm.CompletionOutcomeRefused:
+		return errCompletionRefused
 	case llm.CompletionOutcomeIncomplete:
 		if len(completion.ToolCalls) != 0 {
 			return fmt.Errorf("incomplete function call")
@@ -258,4 +267,13 @@ func responsesCompletionItems(completion *llm.CompletionResponse) []llm.Assistan
 func validJSONObject(data []byte) bool {
 	var obj map[string]any
 	return json.Unmarshal(data, &obj) == nil && obj != nil
+}
+
+// Retain only the classification needed by the Responses transport; raw
+// provider/coordinator diagnostics must not enter the public stream.
+func responsesCompletionError(err error) error {
+	if errors.Is(err, errCompletionRefused) {
+		return errCompletionRefused
+	}
+	return fmt.Errorf("completion failed")
 }

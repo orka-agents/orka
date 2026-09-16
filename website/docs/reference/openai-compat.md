@@ -54,6 +54,12 @@ curl https://orka.example.com/openai/v1/responses \
   -d '{"model":"openai/gpt-4.1","store":false,"input":"Hello!","stream":true}'
 ```
 
+Provider refusal items are not supported in this first version. They return HTTP
+422 with error code `unsupported_provider_outcome`, or a streaming `error` event
+with that code followed by `response.failed`. The nested response error retains
+the schema-defined `server_error` code and an explicit unsupported-refusal
+message; upstream refusal details are not forwarded.
+
 The first version supports:
 
 - String input, text message arrays, `instructions`, and system/developer messages.
