@@ -81,7 +81,7 @@ stringData:
 
 3. **ServiceAccount token and RBAC** for authentication and coordinator tools:
 
-Follow the [API-client setup](../getting-started.md#give-yourself-an-api-client) to
+Follow the [API-client setup](../getting-started.md#connect-to-the-api) to
 configure `orka-client` and its Task permissions. Coordinator Task creation requires
 `tasks/create`. Agent creation currently does not check a ServiceAccount caller's
 `agents/create` permission; see the [API authorization limitation](../operations/troubleshooting.md#i-get-403-from-the-api).

@@ -27,7 +27,7 @@ export default function QuickStartSection() {
             as a Provider, and submit a Task.
           </p>
           <p>
-            <Link to="/docs/getting-started#give-yourself-an-api-client">
+            <Link to="/docs/getting-started#connect-to-the-api">
               Continue with Getting started
             </Link>
           </p>

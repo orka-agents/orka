@@ -105,7 +105,7 @@ When the command reports `condition met`, Orka has completed its first task.
 
 ## Next steps
 
-1. [Connect to the API](../getting-started.md#give-yourself-an-api-client) with a
+1. [Connect to the API](../getting-started.md#connect-to-the-api) with a
    port-forward and a client token.
 2. [Add a provider and run your first AI task](../getting-started.md#your-first-task)
    with an Anthropic, OpenAI, or Azure OpenAI API key.

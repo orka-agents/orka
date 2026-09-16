@@ -112,6 +112,6 @@ Orka currently supports new installations only. Read
 
 ## Next
 
-Continue with [Connect to the API](../getting-started.md#give-yourself-an-api-client)
+Continue with [Connect to the API](../getting-started.md#connect-to-the-api)
 in Getting started. Those commands use your current kubectl context, so select
 `ORKA_CONTEXT` first with `kubectl config use-context` if it is not already current.

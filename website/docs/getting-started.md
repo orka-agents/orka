@@ -50,7 +50,7 @@ To run your first AI task you also need an API key for one LLM provider.
 Building Orka yourself instead? See [Build from source](development/build-from-source.md),
 then continue here.
 
-## Connect to the API {#give-yourself-an-api-client}
+## Connect to the API
 
 The REST API authenticates with Kubernetes ServiceAccount tokens. The Helm install
 created an `orka-client` ServiceAccount with the right permissions.
@@ -296,7 +296,7 @@ the result the same way as before, at `/api/v1/tasks/code-review/result`.
 
 ## The dashboard
 
-With the [API port forwarded](#give-yourself-an-api-client), open
+With the [API port forwarded](#connect-to-the-api), open
 [http://localhost:8080](http://localhost:8080) and sign in with your client token.
 The dashboard is included in Orka. See [Web dashboard](guides/ui.md).
 
