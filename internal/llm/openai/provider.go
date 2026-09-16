@@ -596,7 +596,10 @@ func (t *responseFuncCallTracker) merge(dst, src *responseFuncCallState) {
 	if !dst.argumentsDone {
 		dst.argumentsDone = src.argumentsDone
 	}
-	if dst.args.Len() == 0 && src.args.Len() > 0 {
+	if src.args.Len() > 0 && (dst.args.Len() == 0 || (t.ordered && src.args.Len() > dst.args.Len())) {
+		// In ordered mode, getChecked verified compatible prefixes. Retain
+		// the longest observed prefix, including when item metadata is late.
+		dst.args.Reset()
 		dst.args.WriteString(src.args.String())
 	}
 	dst.emitted = dst.emitted || src.emitted

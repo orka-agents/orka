@@ -16,7 +16,7 @@ import (
 )
 
 func TestResponsesProductionPerMessageStatus(t *testing.T) {
-	for _, statuses := range [][2]string{{"completed", "incomplete"}, {"incomplete", "completed"}, {"completed", "completed"}, {"completed", ""}, {"completed", "in_progress"}} {
+	for _, statuses := range [][2]string{{"completed", "incomplete"}, {"incomplete", "completed"}, {"completed", "completed"}, {"completed", ""}, {"", ""}, {"", "completed"}, {"", "incomplete"}, {"completed", "in_progress"}} {
 		for _, mode := range []string{"json", "sse", "coordinator-json", "stream-required", "stream-unsupported"} {
 			t.Run(fmt.Sprintf("%s/%s/%s", mode, statuses[0], statuses[1]), func(t *testing.T) {
 				server, token := setupProductionResponses(t, func(w http.ResponseWriter, r *http.Request) {
@@ -37,7 +37,11 @@ func TestResponsesProductionPerMessageStatus(t *testing.T) {
 					response["status"] = "incomplete"
 					response["incomplete_details"] = map[string]any{"reason": "max_output_tokens"}
 					for i, item := range response["output"].([]any) {
-						item.(map[string]any)["status"] = statuses[i]
+						if statuses[i] == "" {
+							delete(item.(map[string]any), "status")
+						} else {
+							item.(map[string]any)["status"] = statuses[i]
+						}
 					}
 					if request["stream"] == true {
 						upstreamSSE(w, []map[string]any{{"type": "response.incomplete", "response": response}})
@@ -55,6 +59,9 @@ func TestResponsesProductionPerMessageStatus(t *testing.T) {
 					return
 				}
 				want := statuses
+				if want[0] == "" {
+					want[0] = "completed"
+				}
 				if want[1] == "" {
 					want[1] = "incomplete"
 				}

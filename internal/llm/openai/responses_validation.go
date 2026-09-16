@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/openai/openai-go/v3/responses"
 	"github.com/orka-agents/orka/internal/llm"
@@ -59,6 +60,9 @@ func validateResponsesOutput(output []responses.ResponseOutputItemUnion) error {
 			return err
 		}
 		if item.Type == eventTypeFunctionCall {
+			if item.Status != "" && item.Status != stopReasonCompleted {
+				return fmt.Errorf("provider returned an unfinished Responses function call")
+			}
 			var arguments map[string]any
 			if item.CallID == "" || item.Name == "" || calls[item.CallID] ||
 				json.Unmarshal([]byte(responseOutputArguments(item.Arguments)), &arguments) != nil || arguments == nil {
@@ -107,6 +111,14 @@ func validateResponseFunctionMerge(a, b *responseFuncCallState) error {
 	if a.name != "" && b.name != "" && a.name != b.name {
 		return fmt.Errorf("response function call changed name")
 	}
+	aPrefix, bPrefix := a.args.String(), b.args.String()
+	if !strings.HasPrefix(aPrefix, bPrefix) && !strings.HasPrefix(bPrefix, aPrefix) {
+		return errors.New(responseFunctionArgumentsChanged)
+	}
+	if (a.argumentsDone && !strings.HasPrefix(a.arguments, bPrefix)) ||
+		(b.argumentsDone && !strings.HasPrefix(b.arguments, aPrefix)) {
+		return errors.New(responseFunctionArgumentsChanged)
+	}
 	if a.argumentsDone && b.argumentsDone && a.arguments != b.arguments {
 		return errors.New(responseFunctionArgumentsChanged)
 	}
@@ -119,6 +131,9 @@ func (t *responseFuncCallTracker) validateSnapshot(fc *responseFuncCallState, na
 	}
 	if name != "" && fc.name != "" && name != fc.name {
 		return fmt.Errorf("response function call changed name")
+	}
+	if arguments != "" && !strings.HasPrefix(arguments, fc.args.String()) {
+		return errors.New(responseFunctionArgumentsChanged)
 	}
 	if fc.argumentsDone && arguments != "" && arguments != fc.arguments {
 		return errors.New(responseFunctionArgumentsChanged)

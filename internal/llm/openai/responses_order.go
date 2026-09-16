@@ -53,6 +53,7 @@ func (s *orderedResponseSender) chunk(chunk llm.StreamChunk) bool {
 			s.statuses = map[int64]string{}
 		}
 		s.statuses[key] = status
+		chunk.OutputItemStatus = status
 	}
 	if chunk.OutputIndex == nil {
 		if chunk.Done || chunk.Error != nil {

@@ -224,13 +224,17 @@ func (r *ResponsesResponse) setCompletion(completion *llm.CompletionResponse) er
 		return err
 	}
 	seen := map[string]bool{}
-	for _, output := range responsesCompletionItems(completion) {
+	items := responsesCompletionItems(completion)
+	for index, output := range items {
 		if output.ToolCall == nil {
 			if output.Content != "" {
 				item := newResponsesMessage()
 				item.Status = output.Status
 				if item.Status == "" {
-					item.Status = r.Status
+					item.Status = completionStatusCompleted
+					if index == len(items)-1 {
+						item.Status = r.Status
+					}
 				}
 				if item.Status != completionStatusCompleted && item.Status != responsesStatusIncomplete {
 					return fmt.Errorf("invalid response message status")
