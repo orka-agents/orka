@@ -5,9 +5,9 @@ description: "Legacy: running the harness-v1 compatibility mode next to a normal
 # Running both controller modes
 
 :::caution[Legacy]
-`harness-v1` is the previous execution path. It is kept for one more release so
-existing wrapper-based installations can be retired on their own schedule, and
-it will be removed after that. New installations never need this page.
+`harness-v1` is the previous execution path. It is kept so existing
+wrapper-based installations can be retired on their own schedule, and it will be
+removed in a future release. New installations never need this page.
 :::
 
 For a new installation, follow [Install Orka](installation.md). It uses the
