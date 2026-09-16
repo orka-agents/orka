@@ -1,0 +1,74 @@
+name: Go coverage PR comment
+
+on:
+  workflow_run:
+    workflows:
+      - Tests
+    types:
+      - completed
+
+permissions:
+  actions: read
+  pull-requests: write
+
+jobs:
+  comment:
+    name: Publish Go coverage results
+    if: ${{ github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.pull_requests[0].number != null }}
+    runs-on: ubuntu-latest
+    concurrency:
+      group: go-coverage-pr-${{ github.event.workflow_run.pull_requests[0].number }}
+      cancel-in-progress: true
+    steps:
+      # This privileged workflow must never check out or execute pull request code.
+      - name: Download coverage summary
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -Eeuo pipefail
+          report_dir="${RUNNER_TEMP}/go-coverage-report"
+          mkdir -p "${report_dir}"
+
+          artifact_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts?per_page=100" \
+            --jq '([.artifacts[] | select(.name == "go-coverage-evidence" and (.expired | not))] | first | .id) // empty')"
+          if [[ -z "${artifact_id}" ]]; then
+            echo "No Go coverage evidence artifact was produced by run ${RUN_ID}." >&2
+            exit 0
+          fi
+
+          archive="${report_dir}/artifact.zip"
+          if gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > "${archive}" && \
+            unzip -p "${archive}" coverage-summary.md > "${report_dir}/coverage-summary.md" && \
+            [[ -s "${report_dir}/coverage-summary.md" ]]; then
+            exit 0
+          fi
+
+          rm -f "${report_dir}/coverage-summary.md"
+          echo "The Go coverage evidence artifact did not contain a readable summary." >&2
+
+      - name: Update pull request comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          set -Eeuo pipefail
+          marker='<!-- orka-go-coverage-report -->'
+          report_path="${RUNNER_TEMP}/go-coverage-report/coverage-summary.md"
+          if [[ -s "${report_path}" && "$(wc -c < "${report_path}")" -le 50000 ]]; then
+            report="$(cat "${report_path}")"
+          else
+            report=$'## Results for Go Tests\n\nThis report shows whether the Go tests passed and how much Go code they covered.\n\nWe could not retrieve the Go test summary for this run. Follow the workflow link below for details.'
+          fi
+          body="$(printf '%s\n%s\n\n[View workflow run](%s)' "${marker}" "${report}" "${RUN_URL}")"
+
+          comment_id="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100" \
+            --jq '([.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- orka-go-coverage-report -->")))] | first | .id) // empty')"
+          if [[ -n "${comment_id}" ]]; then
+            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" \
+              --raw-field body="${body}" >/dev/null
+          else
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+              --raw-field body="${body}" >/dev/null
+          fi
