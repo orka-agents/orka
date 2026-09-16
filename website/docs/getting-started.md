@@ -45,7 +45,8 @@ Follow [Install Orka](operations/installation.md). It is one Helm command, and i
 with a test container task so you know the cluster side works. Come back here when that
 task reports `Succeeded`.
 
-To run your first AI task you also need an API key for one LLM provider.
+To run your first AI task you also need either an API key for an LLM provider or a
+model server your cluster can reach.
 
 Building Orka yourself instead? See [Build from source](development/build-from-source.md),
 then continue here.
@@ -66,6 +67,9 @@ In a second terminal, create a client token. Every command below runs in this te
 ```bash
 export ORKA_TOKEN="$(kubectl -n orka-system create token orka-client)"
 ```
+
+The token lasts one hour. If the API starts answering `401`, run that command again,
+or ask for a longer one with `--duration=8h`.
 
 :::warning[Namespace matters]
 Almost every command on this page needs `-n orka-system`. Orka watches exactly one
@@ -238,24 +242,27 @@ kubectl -n orka-system get deploy -l app.kubernetes.io/component=provider-auth-p
 
 The `model.name` must be a model your gateway lists.
 
+This uses the Codex runtime with the model the [gateway examples](operations/provider-proxy.md)
+expose. For Claude Code use `type: claude` with a Claude model your gateway lists.
+
 ```bash
 kubectl apply -f - <<'EOF'
 apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
-  name: claude-agent
+  name: codex-agent
   namespace: orka-system
 spec:
   model:
-    name: claude-opus-5
+    name: gpt-6-astra
   runtime:
-    type: claude
+    type: codex
 EOF
 ```
 
 That is the whole Agent. The defaults give it its runtime's full tool set, a shell,
-and 50 turns per Task. For `type: opencode`, use `provider/model` names such as `openai/gpt-6-astra` and set
-`model.contextWindow` and `model.maxTokens`.
+and 50 turns per Task. For `type: opencode`, use `provider/model` names such as
+`openai/gpt-6-astra` and set `model.contextWindow` and `model.maxTokens`.
 [Agent runtimes](concepts/agent-runtimes.md) has every option, including how to
 restrict tools.
 
@@ -273,7 +280,7 @@ metadata:
 spec:
   type: agent
   agentRef:
-    name: claude-agent
+    name: codex-agent
   prompt: "Review this repo for security issues. Do not modify files."
   workspace:
     intent: read
