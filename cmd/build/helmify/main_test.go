@@ -883,6 +883,132 @@ func TestStaticChartEnforcesNamespaceModeWithAdmissionPolicy(t *testing.T) {
 	}
 }
 
+// requireHelmRenderWithUpstreamService renders the static chart with the
+// provider proxy's upstream Service lookup forced to return service.
+func requireHelmRenderWithUpstreamService(t *testing.T, service string, args ...string) (string, error) {
+	t.Helper()
+	helm, err := exec.LookPath("helm")
+	if err != nil {
+		t.Skip("helm is required for static chart render tests")
+	}
+	chartDir := filepath.Join(t.TempDir(), "static")
+	if err := os.CopyFS(chartDir, os.DirFS("static")); err != nil {
+		t.Fatalf("copy static chart: %v", err)
+	}
+	templatePath := filepath.Join(chartDir, "templates", "provider-proxy-networkpolicy.yaml")
+	template, err := os.ReadFile(templatePath)
+	if err != nil {
+		t.Fatalf("read provider proxy NetworkPolicy template: %v", err)
+	}
+	lookup := `{{- $service := lookup "v1" "Service" $upstream.namespace $upstream.name -}}`
+	forced := `{{- $service := ` + service + ` -}}`
+	withService := strings.Replace(string(template), lookup, forced, 1)
+	if withService == string(template) {
+		t.Fatalf("provider proxy egress derivation is not gated by the upstream Service lookup")
+	}
+	if err := os.WriteFile(templatePath, []byte(withService), 0o600); err != nil {
+		t.Fatalf("force upstream Service lookup in copied chart: %v", err)
+	}
+	defaults := staticChartDefaultArgs()
+	commandArgs := make([]string, 0, 5+len(defaults)+len(args))
+	commandArgs = append(commandArgs, "template", "test", chartDir, "--namespace", "orka-test")
+	commandArgs = append(commandArgs, defaults...)
+	commandArgs = append(commandArgs, args...)
+	output, err := exec.Command(helm, commandArgs...).CombinedOutput()
+	return string(output), err
+}
+
+func TestStaticChartDerivesProviderProxyEgressFromUpstreamService(t *testing.T) {
+	service := `dict "spec" (dict ` +
+		`"selector" (dict "app.kubernetes.io/name" "vekil" "app.kubernetes.io/instance" "vekil") ` +
+		`"ports" (list (dict "port" 1337 "targetPort" 8080)))`
+	output, err := requireHelmRenderWithUpstreamService(t, service,
+		"--set-json", "providerProxy.egress=[]",
+		"--set-string", "providerProxy.upstreamBaseURL=http://vekil.vekil-system.svc:1337",
+		"--show-only", "templates/provider-proxy-networkpolicy.yaml",
+	)
+	if err != nil {
+		t.Fatalf("helm template with a derivable upstream Service failed: %v\n%s", err, output)
+	}
+	var policy networkingv1.NetworkPolicy
+	if err := yaml.Unmarshal([]byte(output), &policy); err != nil {
+		t.Fatal(err)
+	}
+	if len(policy.Spec.Egress) != 2 || len(policy.Spec.Egress[1].To) != 1 || len(policy.Spec.Egress[1].Ports) != 1 {
+		t.Fatalf("derived egress must be exactly DNS plus the gateway rule:\n%s", output)
+	}
+	gateway := policy.Spec.Egress[1]
+	peer := gateway.To[0]
+	namespaceLabels := map[string]string{}
+	if peer.NamespaceSelector != nil {
+		namespaceLabels = peer.NamespaceSelector.MatchLabels
+	}
+	if namespaceLabels["kubernetes.io/metadata.name"] != "vekil-system" ||
+		peer.PodSelector == nil || peer.PodSelector.MatchLabels["app.kubernetes.io/name"] != "vekil" ||
+		peer.PodSelector.MatchLabels["app.kubernetes.io/instance"] != "vekil" ||
+		gateway.Ports[0].Port == nil || gateway.Ports[0].Port.IntVal != 8080 {
+		t.Fatalf("derived egress does not select the Service's Pods on its target port: %#v", gateway)
+	}
+
+	// A UDP entry sharing the port number must not win over the TCP one.
+	output, err = requireHelmRenderWithUpstreamService(t,
+		`dict "spec" (dict "selector" (dict "app" "gw") "ports" (list `+
+			`(dict "port" 1337 "protocol" "TCP" "targetPort" 8443) `+
+			`(dict "port" 1337 "protocol" "UDP" "targetPort" 9443)))`,
+		"--set-json", "providerProxy.egress=[]",
+		"--set-string", "providerProxy.upstreamBaseURL=http://vekil.vekil-system.svc:1337",
+		"--show-only", "templates/provider-proxy-networkpolicy.yaml",
+	)
+	if err != nil || !strings.Contains(output, "port: 8443\n") || strings.Contains(output, "9443") {
+		t.Fatalf("derivation must take the TCP target port, not the UDP one: %v\n%s", err, output)
+	}
+
+	// Without a target port the Service port is the Pod port; a cluster.local
+	// suffix and the scheme's default port are accepted too.
+	output, err = requireHelmRenderWithUpstreamService(t,
+		`dict "spec" (dict "selector" (dict "app" "gw") "ports" (list (dict "port" 80)))`,
+		"--set-json", "providerProxy.egress=[]",
+		"--set-string", "providerProxy.upstreamBaseURL=http://gw.models.svc.cluster.local",
+		"--show-only", "templates/provider-proxy-networkpolicy.yaml",
+	)
+	if err != nil || !strings.Contains(output, "port: 80\n") ||
+		!strings.Contains(output, "kubernetes.io/metadata.name: \"models\"") {
+		t.Fatalf("default-port derivation failed: %v\n%s", err, output)
+	}
+
+	for name, tt := range map[string]struct {
+		service   string
+		wantError string
+	}{
+		"named target port": {
+			service:   `dict "spec" (dict "selector" (dict "app" "gw") "ports" (list (dict "port" 1337 "targetPort" "http")))`,
+			wantError: "maps to the named target port",
+		},
+		"no matching port": {
+			service:   `dict "spec" (dict "selector" (dict "app" "gw") "ports" (list (dict "port" 9999)))`,
+			wantError: "has no port 1337",
+		},
+		"only a UDP entry for the port": {
+			service:   `dict "spec" (dict "selector" (dict "app" "gw") "ports" (list (dict "port" 1337 "protocol" "UDP")))`,
+			wantError: "has no port 1337",
+		},
+		"no selector": {
+			service:   `dict "spec" (dict "ports" (list (dict "port" 1337)))`,
+			wantError: "has no selector",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			output, err := requireHelmRenderWithUpstreamService(t, tt.service,
+				"--set-json", "providerProxy.egress=[]",
+				"--set-string", "providerProxy.upstreamBaseURL=http://vekil.vekil-system.svc:1337",
+			)
+			if err == nil || !strings.Contains(output, tt.wantError) {
+				t.Fatalf("render error = %v, want %q:\n%s", err, tt.wantError, output)
+			}
+		})
+	}
+}
+
 func TestStaticChartGeneratesWebhookTLSSecret(t *testing.T) {
 	args := []string{
 		"--set-string", "webhooks.tls.existingSecret=",
@@ -1929,11 +2055,19 @@ func TestStaticChartRejectsIncompleteProviderProxyConfiguration(t *testing.T) {
 			wantError: "providerProxy.upstreamBaseURL must be an HTTP(S) URL",
 		},
 		{
-			name: "missing egress policy",
+			name: "no egress and no in-cluster Service to derive it from",
+			args: []string{
+				"--set-json", "providerProxy.egress=[]",
+				"--set-string", "providerProxy.upstreamBaseURL=https://gateway.example.test:8443",
+			},
+			wantError: "providerProxy.egress is required unless providerProxy.upstreamBaseURL names an in-cluster Service",
+		},
+		{
+			name: "no egress and the named Service is missing",
 			args: []string{
 				"--set-json", "providerProxy.egress=[]",
 			},
-			wantError: "providerProxy.egress must contain NetworkPolicy rules",
+			wantError: "names Service models/model-gateway, which was not found",
 		},
 	}
 

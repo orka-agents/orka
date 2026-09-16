@@ -214,6 +214,26 @@ func TestResolveACPRuntimeImagesRejectsMalformedReferencesWithoutRegistryAccess(
 	}
 }
 
+func TestResolveACPRuntimeImagesOrDisableDisablesEveryRuntimeOnFailure(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	client := &http.Client{Transport: runtimeImageRoundTripperFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("registry unreachable")
+	})}
+	images, err := resolveACPRuntimeImagesOrDisable(t.Context(), controller.ACPRuntimeImages{
+		Codex:  "ghcr.io/orka-agents/runtime@" + digest, // already pinned, needs no lookup
+		Claude: "ghcr.io/orka-agents/runtime:v0.2.0",    // needs the unreachable registry
+	}, client)
+	if err == nil {
+		t.Fatal("an unreachable registry must be reported")
+	}
+	if images != (controller.ACPRuntimeImages{}) {
+		t.Fatalf("a failed resolution must disable every runtime, not keep a partial set: %#v", images)
+	}
+	if controller.ACPRuntimeImageAvailable(images.Codex) || controller.ACPRuntimeImageAvailable(images.Claude) {
+		t.Fatalf("disabled runtimes must be unavailable to pools and admission: %#v", images)
+	}
+}
+
 func TestResolveACPRuntimeImagesFailsWithoutPartialOrMutableFallback(t *testing.T) {
 	for _, tt := range []struct {
 		name   string

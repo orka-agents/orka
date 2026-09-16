@@ -24,7 +24,7 @@ and webhook certificate. The settings you are most likely to change later:
 | `controller.acpRuntime.*Image` | Use release tags by default. Override with a full tagged or digest reference; set an empty string to disable a runtime. |
 | `controller.agentExecutionSnapshot.existingSecret` | Empty by default; the chart generates the snapshot encryption Secret once and keeps it on uninstall. Set only to bring your own key. Immutable after install. |
 | `webhooks.tls.existingSecret`, `.caBundle`, `.caInjectionAnnotations` | Empty by default; the controller issues and renews a self-signed webhook certificate. Set to bring your own certificate or use cert-manager. |
-| `providerProxy.enabled`, `.upstreamBaseURL`, `.egress` | Off by default. Enable to connect built-in coding agents to your model gateway. See [Provider proxy](https://orka-agents.github.io/orka/docs/provider-proxy). |
+| `providerProxy.enabled`, `.upstreamBaseURL` | Off by default. Enable and name your model gateway's in-cluster Service to connect built-in coding agents; the chart derives the egress rule from that Service. Set `.egress` yourself for anything else. See [Provider proxy](https://orka-agents.github.io/orka/docs/provider-proxy). |
 | `controller.watchNamespace` | The one namespace Orka watches. Defaults to the Helm namespace and cannot change after installation. |
 
 Use a distinct Helm release name and namespace for each installation in a cluster.

@@ -159,11 +159,12 @@ one, use its name in `providerRef` below. An Anthropic-compatible endpoint works
 way with `type: anthropic` and a `baseURL`.
 
 :::tip[No API key yet?]
-Any OpenAI-compatible server works. Point a `type: openai` Provider's `baseURL` at a
-model server running in your cluster, such as [Ollama](https://ollama.com/) at
-`http://ollama.<namespace>.svc:11434/v1`, and create the Secret with any placeholder
-value, since the Provider requires one. A GitHub Copilot subscription also works
-through a gateway; see [Provider proxy](operations/provider-proxy.md).
+A GitHub Copilot subscription is enough. Install the Vekil gateway with your Copilot
+login as described in [Provider proxy](operations/provider-proxy.md), then point a
+`type: openai` Provider's `baseURL` at it, `http://vekil.vekil-system.svc:1337/v1`, with
+any placeholder value in the Secret, since the Provider requires one. The same
+`baseURL` trick works for any OpenAI-compatible server in your cluster, such as
+[Ollama](https://ollama.com/).
 :::
 
 ### 2. Create an Agent

@@ -173,16 +173,30 @@ spec:
 YAML
 ```
 
-Then continue to [Connect the gateway](#connect-the-gateway) with the values
-file shown there. It already contains Vekil's namespace, labels, and port.
+Then continue to [Connect the gateway](#connect-the-gateway).
 
 ## Connect the gateway
 
-The Helm chart leaves `providerProxy.enabled=false` until you configure it.
-Save your connection settings in a values file, for example `model-access.yaml`.
-These values match the Vekil example above:
+The Helm chart leaves `providerProxy.enabled=false` until you configure it. Save
+your connection settings in a values file, for example `model-access.yaml`:
 
 ```yaml title="model-access.yaml"
+providerProxy:
+  enabled: true
+  upstreamBaseURL: http://vekil.vekil-system.svc:1337
+```
+
+That is all the chart needs when the gateway is a Service in your cluster. At
+install time it reads the Service named in the URL and writes the NetworkPolicy
+rule that lets Orka's proxy reach that Service's Pods on their listening port,
+and nothing else. DNS access is included.
+
+For a gateway outside the cluster, a Service whose target port is a name rather
+than a number, or an offline render such as `helm template`, spell the rule out
+instead. The egress port is the gateway Pod's listening port, which can differ
+from its Service port:
+
+```yaml
 providerProxy:
   enabled: true
   upstreamBaseURL: http://vekil.vekil-system.svc:1337
@@ -199,11 +213,8 @@ providerProxy:
           port: 1337
 ```
 
-For another gateway, replace the endpoint, namespace, Pod labels, and port with
-its settings. The egress port is the gateway Pod's listening port, which can
-differ from its Service port. DNS access is already included. The chart does not
-create resources in the gateway's namespace or change its ingress policy, so
-allow ingress from Orka's namespace and Pods labeled
+The chart does not create resources in the gateway's namespace or change its
+ingress policy, so allow ingress from Orka's namespace and Pods labeled
 `orka.ai/network-role: provider-auth-proxy` yourself, as shown for Vekil above.
 
 Apply the values to your release. The installed chart version keeps the upgrade
@@ -256,7 +267,8 @@ until the files are valid again.
 | Symptom | Check |
 | --- | --- |
 | Chart rejects `upstreamBaseURL` | Use an HTTP(S) URL without credentials, a query, or a fragment. |
-| Chart rejects `egress` | Supply NetworkPolicy rules allowing the proxy to reach your gateway. |
+| Chart says the upstream Service was not found | Install the gateway before enabling the proxy, or set `providerProxy.egress` explicitly; offline renders cannot look Services up. |
+| Chart asks for `providerProxy.egress` | The upstream is not an in-cluster `<service>.<namespace>.svc` address, or its Service uses a named target port. Write the egress rule by hand. |
 | Agent Task fails with an authentication error | Check the gateway's readiness endpoint and provider credentials first. It fails independently of Orka. |
 | Model calls time out | Check gateway readiness, egress rules, and gateway ingress policy. |
 | Model calls return 404 | Check that the model ID is listed by the gateway and that the upstream URL has no extra path. |

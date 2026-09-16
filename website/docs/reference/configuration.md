@@ -722,7 +722,7 @@ Key configuration values for the Helm chart:
 | `harnessV1.tls.rolloutNonce` | `""` | Non-secret revision marker for certificate renewal without changing the TLS Secret name. |
 | `providerProxy.enabled` | `false` | Enable the authenticated proxy when connecting built-in coding agents to your model gateway. Installation and AI-worker tasks do not require it. |
 | `providerProxy.upstreamBaseURL` | `""` | Your gateway's HTTP(S) endpoint. Required when the proxy is enabled. Credentials, queries, and fragments are forbidden in the URL. |
-| `providerProxy.egress` | `[]` | Kubernetes NetworkPolicy egress rules allowing access to your gateway. Required when enabled; the chart adds DNS access. Gateway ingress remains operator-managed. |
+| `providerProxy.egress` | `[]` | NetworkPolicy egress rules allowing the proxy to reach your gateway. Leave empty when `upstreamBaseURL` names an in-cluster Service; the chart then derives the rule from that Service at install time. Required for external gateways, named target ports, or offline renders. DNS access is always added. |
 | `providerProxy.auth.existingSecret` | `""` | Existing current/optional-overlap proxy bearer Secret. RuntimePool copies are controller-managed. |
 | `providerProxy.tokenReloadInterval` | `5s` | Atomic projected-Secret reload interval. Invalid generations fail readiness and forwarding closed. |
 | `publisher.enabled` | `true` | Deploy the separate clean-room Workspace/Publisher service. |

@@ -683,8 +683,14 @@ choose its upstream gateway and explicitly allow the required network access.
 {{- $path = (urlParse $decodeURL).path -}}
 {{- end -}}
 {{- end -}}
-{{- if or (not (kindIs "slice" .Values.providerProxy.egress)) (empty .Values.providerProxy.egress) -}}
-{{- fail "providerProxy.egress must contain NetworkPolicy rules allowing access to your model gateway when providerProxy.enabled=true" -}}
+{{- if not (kindIs "slice" .Values.providerProxy.egress) -}}
+{{- fail "providerProxy.egress must be a list of NetworkPolicy egress rules" -}}
+{{- end -}}
+{{- if empty .Values.providerProxy.egress -}}
+{{- $service := include "orka.providerProxyUpstreamService" . | fromJson -}}
+{{- if not $service.name -}}
+{{- fail "providerProxy.egress is required unless providerProxy.upstreamBaseURL names an in-cluster Service as http(s)://<service>.<namespace>.svc[:port]; the chart then derives the egress rule from that Service" -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- end }}
@@ -946,6 +952,27 @@ remain outside rendered Helm manifests.
 
 {{- define "orka.providerProxyUpstreamBaseURL" -}}
 {{- trimSuffix "/" (trim (default "" .Values.providerProxy.upstreamBaseURL)) -}}
+{{- end }}
+
+{{/*
+Split providerProxy.upstreamBaseURL into the in-cluster Service it names, as
+JSON {name, namespace, port}. Empty name when the host is not of the form
+<service>.<namespace>.svc or <service>.<namespace>.svc.cluster.local.
+*/}}
+{{- define "orka.providerProxyUpstreamService" -}}
+{{- $url := urlParse (include "orka.providerProxyUpstreamBaseURL" .) -}}
+{{- $hostport := default "" $url.host -}}
+{{- $host := regexReplaceAll `:[0-9]+$` $hostport "" -}}
+{{- $port := trimPrefix ":" (regexFind `:[0-9]+$` $hostport) -}}
+{{- if not $port -}}{{- $port = ternary "443" "80" (eq $url.scheme "https") -}}{{- end -}}
+{{- $parts := splitList "." $host -}}
+{{- $name := "" -}}
+{{- $namespace := "" -}}
+{{- if and (ge (len $parts) 3) (eq (index $parts 2) "svc") (or (eq (len $parts) 3) (and (eq (len $parts) 5) (eq (index $parts 3) "cluster") (eq (index $parts 4) "local"))) -}}
+{{- $name = index $parts 0 -}}
+{{- $namespace = index $parts 1 -}}
+{{- end -}}
+{{- dict "name" $name "namespace" $namespace "port" $port | toJson -}}
 {{- end }}
 
 

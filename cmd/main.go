@@ -1106,13 +1106,17 @@ func main() {
 	processCtx, stopProcess := context.WithCancel(ctrl.SetupSignalHandler())
 	defer stopProcess()
 	if acpRuntimeEnabled {
-		images, err := resolveACPRuntimeImages(processCtx, controller.ACPRuntimeImages{
+		images, err := resolveACPRuntimeImagesOrDisable(processCtx, controller.ACPRuntimeImages{
 			Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
 			Opencode: acpOpencodeRuntimeImage,
 		}, nil)
 		if err != nil {
-			setupLog.Error(err, "unable to resolve ACP runtime images")
-			os.Exit(1)
+			// Not fatal: AI and container Tasks do not need these images.
+			// Agent Tasks fail closed until the controller restarts with
+			// registry access or digest-pinned runtime images.
+			setupLog.Error(err, "unable to resolve ACP runtime images; coding-agent runtimes are unavailable "+
+				"for this controller process. Allow HTTPS access to the registry, pin the runtime images to "+
+				"digests, or set them to empty strings to run without coding agents")
 		}
 		acpCodexRuntimeImage = images.Codex
 		acpClaudeRuntimeImage = images.Claude

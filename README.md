@@ -4,9 +4,13 @@
 
 # Orka
 
-**Kubernetes-native AI agent orchestration.**
+**Run AI agents and coding agents on your cluster. Model keys never leave it.**
 
-[Getting started](https://orka-agents.github.io/orka/docs/getting-started) · [Install](https://orka-agents.github.io/orka/docs/installation) · [Docs](https://orka-agents.github.io/orka/docs/getting-started) · [Contributing](CONTRIBUTING.md)
+[![Tests](https://github.com/orka-agents/orka/actions/workflows/test.yml/badge.svg)](https://github.com/orka-agents/orka/actions/workflows/test.yml)
+[![Release](https://img.shields.io/github/v/release/orka-agents/orka?include_prereleases)](https://github.com/orka-agents/orka/releases)
+[![License](https://img.shields.io/github/license/orka-agents/orka)](LICENSE)
+
+[Getting started](https://orka-agents.github.io/orka/docs/getting-started) · [Install](https://orka-agents.github.io/orka/docs/installation) · [Docs](https://orka-agents.github.io/orka/) · [Contributing](CONTRIBUTING.md)
 
 </div>
 
@@ -36,14 +40,29 @@ helm install orka orka/orka --namespace orka-system --create-namespace --wait --
 ```
 
 That is the whole install. The chart creates its namespaces, its encryption key, and its
-webhook certificate. Then follow [Getting started](https://orka-agents.github.io/orka/docs/getting-started)
-to connect to the API, add a model provider, and run your first Task.
+webhook certificate. Run something, no model key needed:
+
+```bash
+kubectl -n orka-system apply -f - <<'EOF'
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: hello
+spec:
+  type: container
+  command: ["sh", "-c", "echo hello from orka"]
+EOF
+kubectl -n orka-system get task hello --watch
+```
+
+Then follow [Getting started](https://orka-agents.github.io/orka/docs/getting-started)
+to connect to the API, add a model provider, and run your first AI Task.
 
 ## Why Kubernetes
 
 - **No keys on laptops.** Provider credentials live in Secrets; people and CI get scoped tokens.
 - **One place to govern.** Models, providers, tools, and limits are set per Agent and per namespace.
-- **Everything is a record.** Tasks, sessions, artifacts, and coding-agent publications are durable and auditable.
+- **Everything is a record.** Tasks, sessions, artifacts, and the pull requests agents open are durable and auditable.
 - **Scale with the cluster.** Scheduling, retries, concurrency, and cron come from the control plane you already run.
 
 ## Learn more
@@ -55,6 +74,7 @@ to connect to the API, add a model provider, and run your first Task.
 - [Security](https://orka-agents.github.io/orka/docs/security) — the trust model and hardening
 - [Troubleshooting](https://orka-agents.github.io/orka/docs/troubleshooting) — error strings, causes, fixes
 - [Development](https://orka-agents.github.io/orka/docs/development) — building, testing, and contributing
+- [Security policy](SECURITY.md) — how to report a vulnerability
 
 ## License
 

@@ -858,7 +858,9 @@ EOF_DEFAULT_AGENT
       -p '[{"op":"remove","path":"/spec/runtime/contractVersion"}]' >/dev/null 2>"${unset_err}"; then
       die "admission allowed removing a written Agent contractVersion"
     fi
-    grep -q 'Agent contractVersion is immutable' "${unset_err}" && break
+    # The CRD's own CEL rule and the admission webhook both enforce this;
+    # whichever runs first produces the denial.
+    grep -Eq 'Agent contractVersion is immutable|contractVersion is immutable once set' "${unset_err}" && break
     grep -Eq 'failed calling webhook|no endpoints available' "${unset_err}" && (( --unset_attempts > 0 )) || \
       die "unexpected denial while removing Agent contractVersion: $(cat "${unset_err}")"
     sleep 3

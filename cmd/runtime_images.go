@@ -41,6 +41,24 @@ func configuredACPRuntimeAvailability(
 	}
 }
 
+// resolveACPRuntimeImagesOrDisable pins configured tags once per controller
+// process. When any resolution fails, every coding-agent runtime is disabled
+// for this process and the error is returned for logging: agent Tasks then
+// fail closed with an unavailable runtime, while AI and container Tasks, which
+// never needed these images, keep running. A partially resolved set is never
+// used, so a tag can never silently fall back to a mutable reference.
+func resolveACPRuntimeImagesOrDisable(
+	ctx context.Context,
+	configured controller.ACPRuntimeImages,
+	httpClient *http.Client,
+) (controller.ACPRuntimeImages, error) {
+	resolved, err := resolveACPRuntimeImages(ctx, configured, httpClient)
+	if err != nil {
+		return controller.ACPRuntimeImages{}, err
+	}
+	return resolved, nil
+}
+
 // resolveACPRuntimeImages pins configured tags once per controller process.
 // Consumers still receive only digest references or disabled providers, and a
 // failed resolution returns no partial configuration.

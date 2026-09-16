@@ -360,9 +360,13 @@ providerProxy:
   enabled: false
   # HTTP(S) endpoint of your credential-injecting model gateway.
   upstreamBaseURL: ""
-  # Kubernetes NetworkPolicy egress rules allowing access to that gateway.
-  # Required when enabled. DNS access is added by the chart. Gateway ingress
-  # and provider credentials remain under your control.
+  # Kubernetes NetworkPolicy egress rules allowing the proxy to reach that
+  # gateway. Leave empty when upstreamBaseURL names an in-cluster Service as
+  # http(s)://<service>.<namespace>.svc[:port]: at install time the chart reads
+  # that Service and derives the rule from its selector and target port.
+  # Set explicit rules for gateways outside the cluster, Services with named
+  # target ports, or offline renders. DNS access is always added. Gateway
+  # ingress and provider credentials remain under your control.
   egress: []
   # Mounted Secret files are reloaded atomically; no proxy Pod restart is
   # required for token changes. Reload failures make readiness fail and disable
