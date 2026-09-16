@@ -27,9 +27,14 @@ func TestResponsesPinnedSDKSchema(t *testing.T) {
 		t.Skip("set ORKA_RESPONSES_INTEROP_PYTHON to validate HTTP output with pinned SDK schemas")
 	}
 	var payloads []any
-	for _, mode := range []string{"text", "tool", "failure"} {
+	for _, mode := range []string{"text", "tool", "failure", "incomplete"} {
 		_, app := setupResponsesHTTP(t, func(w http.ResponseWriter, _ *http.Request) {
 			switch mode {
+			case "incomplete":
+				response := responsesFixtureResponse("")
+				response["status"] = "incomplete"
+				response["incomplete_details"] = map[string]any{"reason": "max_output_tokens"}
+				upstreamSSE(w, []map[string]any{{"type": "response.incomplete", "response": response}})
 			case "failure":
 				upstreamSSE(w, []map[string]any{{"type": "response.output_text.delta", "delta": "partial"}, {"type": "response.failed", "response": map[string]any{"status": "failed"}}})
 			case "text":

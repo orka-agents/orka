@@ -735,7 +735,7 @@ func handleResponsesStreamEvent(evt responses.ResponseStreamEventUnion, tracker 
 		if tracker.hasUnemittedFunctionCall(evt.Response.Output) {
 			stopReason = eventTypeResponseIncomplete
 		}
-		send(llm.StreamChunk{Done: true, StopReason: stopReason})
+		send(llm.StreamChunk{Done: true, StopReason: stopReason, InputTokens: int(evt.Response.Usage.InputTokens), OutputTokens: int(evt.Response.Usage.OutputTokens), Model: evt.Response.Model, Provider: providerName})
 		return false
 	case "error":
 		send(llm.StreamChunk{Error: &llm.ProviderError{Provider: "openai", Message: evt.Message}, Done: true})
@@ -827,6 +827,32 @@ func (p *Provider) streamResponses(ctx context.Context, req *llm.CompletionReque
 // -------------------------------------------------------------------------
 // Chat Completions API helpers (fallback)
 // -------------------------------------------------------------------------
+
+// groupAssistantTurns adapts ordered Responses history to Chat Completions,
+// which represents assistant text and function calls together in one turn.
+// Copy call slices so normalization never mutates the caller's history.
+func groupAssistantTurns(messages []llm.Message) []llm.Message {
+	grouped := make([]llm.Message, 0, len(messages))
+	for _, msg := range messages {
+		if msg.Role == "assistant" && len(grouped) > 0 && grouped[len(grouped)-1].Role == "assistant" {
+			last := &grouped[len(grouped)-1]
+			last.Content += msg.Content
+			last.ToolCalls = append(last.ToolCalls, msg.ToolCalls...)
+			continue
+		}
+		msg.ToolCalls = append([]llm.ToolCall(nil), msg.ToolCalls...)
+		grouped = append(grouped, msg)
+	}
+	return grouped
+}
+
+func convertChatRequestMessages(req *llm.CompletionRequest) []openai.ChatCompletionMessageParamUnion {
+	messages := req.Messages
+	if req.ResponsesInput {
+		messages = groupAssistantTurns(messages)
+	}
+	return convertMessages(messages, req.SystemPrompt)
+}
 
 func convertMessages(messages []llm.Message, systemPrompt string) []openai.ChatCompletionMessageParamUnion {
 	msgs := make([]openai.ChatCompletionMessageParamUnion, 0, len(messages)+1)
@@ -943,7 +969,7 @@ func convertChatResponseFormat(rf *llm.ResponseFormat) openai.ChatCompletionNewP
 func (p *Provider) completeChatCompletions(ctx context.Context, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
 	params := openai.ChatCompletionNewParams{
 		Model:    req.Model,
-		Messages: convertMessages(req.Messages, req.SystemPrompt),
+		Messages: convertChatRequestMessages(req),
 	}
 	if req.Store != nil {
 		params.Store = openai.Bool(*req.Store)
@@ -1017,7 +1043,7 @@ func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.
 
 		params := openai.ChatCompletionNewParams{
 			Model:    req.Model,
-			Messages: convertMessages(req.Messages, req.SystemPrompt),
+			Messages: convertChatRequestMessages(req),
 		}
 		if req.Store != nil {
 			params.Store = openai.Bool(*req.Store)

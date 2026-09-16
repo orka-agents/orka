@@ -60,6 +60,9 @@ The first version supports:
 - `function` tools and `function_call` / `function_call_output` history. In client
   tool mode, append the returned output items and a result with the same `call_id`
   to your next request's `input`. Include the preceding history on every request.
+  Responses upstreams receive text and function items in their supplied order.
+  Chat Completions fallback represents consecutive assistant items as one turn,
+  combining their text and function calls in that API's format.
 - `text.format` with `text`, `json_object`, or `json_schema` (including schema name
   and strictness). Structured output requires an OpenAI-compatible upstream;
   Anthropic structured output returns an explicit error in this version.
@@ -67,7 +70,8 @@ The first version supports:
   default allowance for multiple function calls.
 - Responses SSE events: creation/progress, output items, text and function
   argument deltas, item completion, and response completion. Token-budget
-  truncation returns `response.incomplete`; provider failures emit `error` and
+  truncation returns `response.incomplete`, including an empty `output` when no
+  text was produced; provider failures emit `error` and
   `response.failed`. Disconnects and the configured duration limit cancel work.
   A client that stops reading is disconnected after the duration limit plus a
   one-second grace period for terminal events.
@@ -197,7 +201,7 @@ spec:
 
 3. **ServiceAccount token and RBAC** for authentication and coordinator tools:
 
-Follow the [API-client setup](../getting-started.md#give-yourself-an-api-client) to
+Follow the [API-client setup](../getting-started.md#connect-to-the-api) to
 configure `orka-client` and its Task permissions. Coordinator Task creation requires
 `tasks/create`. Agent creation currently does not check a ServiceAccount caller's
 `agents/create` permission; see the [API authorization limitation](../operations/troubleshooting.md#i-get-403-from-the-api).

@@ -539,16 +539,17 @@ func TestResponsesHTTPContextTokenAuthorization(t *testing.T) {
 }
 
 func TestResponsesHTTPInterleavedAssistantToolHistory(t *testing.T) {
-	_, app := setupResponsesHTTP(t, func(w http.ResponseWriter, r *http.Request) {
+	captured := make(chan map[string]any, 1)
+	server, token := setupProductionResponses(t, func(w http.ResponseWriter, r *http.Request) {
 		var request map[string]any
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
-		data, _ := json.Marshal(request["input"])
-		require.Contains(t, string(data), "before after")
-		require.Contains(t, string(data), "call-one")
-		require.Contains(t, string(data), "call-two")
+		captured <- request
 		upstreamResponse(w, "continued")
 	})
-	status, body := requestResponses(t, app, `{"model":"fixture/test-model","store":false,"input":[
+	// Client-owned history must stay intact even with a tiny coordinator budget.
+	server.openaiHandler.config.MaxSessionSize = 64
+	url := listenResponsesApp(t, server.app)
+	status, _, body := productionResponsesRequest(t, url, token, `{"model":"fixture/test-model","store":false,"input":[
  {"role":"user","content":"use tools"},
  {"type":"message","role":"assistant","content":[{"type":"output_text","text":"before ","annotations":[]}]},
  {"type":"function_call","call_id":"call-one","name":"first","arguments":"{}"},
@@ -558,6 +559,17 @@ func TestResponsesHTTPInterleavedAssistantToolHistory(t *testing.T) {
  {"type":"function_call_output","call_id":"call-one","output":"one"},
  {"role":"user","content":"continue"}]}`, true)
 	require.Equal(t, 200, status, string(body))
+	data, err := json.Marshal((<-captured)["input"])
+	require.NoError(t, err)
+	require.JSONEq(t, `[
+ {"role":"user","content":"use tools"},
+ {"role":"assistant","content":"before "},
+ {"type":"function_call","call_id":"call-one","name":"first","arguments":"{}"},
+ {"role":"assistant","content":"after"},
+ {"type":"function_call","call_id":"call-two","name":"second","arguments":"{}"},
+ {"type":"function_call_output","call_id":"call-two","output":"two"},
+ {"type":"function_call_output","call_id":"call-one","output":"one"},
+ {"role":"user","content":"continue"}]`, string(data), "upstream must receive the client-supplied item order")
 }
 
 func TestResponsesHTTPInvalidProviderOutcomes(t *testing.T) {

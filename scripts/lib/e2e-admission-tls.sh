@@ -279,7 +279,6 @@ orka_e2e_deploy_admission() (
   trap _orka_e2e_cleanup_admission_deploy EXIT
 
   cat >"${admission_handlers}" <<'EOF_ADMISSION_HANDLERS'
-/validate-v1-namespace-execution-mode||v1|Namespace|namespaces
 /validate-v1-secret-workspace-attachment||v1|Secret|secrets
 /validate-coordination-k8s-io-v1-acp-suspend-quota-lease|coordination.k8s.io|v1|Lease|leases
 /validate-core-orka-ai-v1alpha1-task-provenance|core.orka.ai|v1alpha1|Task|tasks

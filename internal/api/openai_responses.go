@@ -20,6 +20,7 @@ import (
 
 const (
 	responsesStatusInProgress = "in_progress"
+	responsesStatusIncomplete = "incomplete"
 	responsesRoleAssistant    = "assistant"
 	responsesRoleTool         = "tool"
 	responsesFunctionToolType = "function"
@@ -150,7 +151,7 @@ func (h *OpenAICompatHandler) HandleResponses(c fiber.Ctx) error {
 	}
 	var completion *llm.CompletionResponse
 	if coordinator {
-		completion, err = runNonStreamingToolLoop(ctx, provider, comp, model, h.responsesLoopConfig(comp), toolCtx, toolLoopOptions{requireFinalCompletion: true})
+		completion, err = runNonStreamingToolLoop(ctx, provider, comp, model, h.responsesLoopConfig(comp), toolCtx, toolLoopOptions{requireFinalCompletion: true, allowEmptyTokenBudget: true})
 		completion = stripGoalStateSentinelFromResponse(completion)
 	} else {
 		completion, err = provider.Complete(ctx, comp)
@@ -198,7 +199,7 @@ func (r *ResponsesResponse) setOutcome(completion *llm.CompletionResponse) error
 		if completion.StopReason != "max_tokens" && completion.StopReason != "length" {
 			return fmt.Errorf("unsupported incomplete outcome")
 		}
-		r.Status = "incomplete"
+		r.Status = responsesStatusIncomplete
 		r.IncompleteDetails = &responsesIncomplete{Reason: reason}
 	default:
 		return fmt.Errorf("invalid completion outcome")
@@ -229,7 +230,7 @@ func (r *ResponsesResponse) setCompletion(completion *llm.CompletionResponse) er
 		seen[call.ID] = true
 		r.Output = append(r.Output, item)
 	}
-	if len(r.Output) == 0 && strings.TrimSpace(completion.Content) == "" {
+	if r.Status != responsesStatusIncomplete && len(r.Output) == 0 && strings.TrimSpace(completion.Content) == "" {
 		return fmt.Errorf("empty completion")
 	}
 	return nil

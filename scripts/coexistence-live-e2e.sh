@@ -611,9 +611,10 @@ main() {
 
   log "Claiming mode-labeled namespaces before any workload write"
   run bash "${script_dir}/lib/ensure-static-mode-namespace.sh" kubectl "${v1_namespace}" harness-v1
-  run bash "${script_dir}/lib/ensure-static-mode-namespace.sh" kubectl "${v2_namespace}" harness-v2
-  # Stub namespace required by the v2 release's pinned Vekil ingress policy.
-  kubectl create namespace vekil-system --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  # The v2 namespace is deliberately created without the mode label: the v2
+  # controller must claim it on first start, which also proves the
+  # namespace-mode admission policy admits the controller's own claim.
+  kubectl create namespace "${v2_namespace}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
   log "Provisioning per-release test-only secrets"
   create_namespace_secrets "${v1_namespace}" "${v1_release}-webhook.${v1_namespace}.svc"
@@ -650,21 +651,27 @@ main() {
     --set harnessV1.tls.existingSecret=orka-wrapper-tls
 
   log "Installing the harness-v2 release ${v2_release}"
+  # This test runs the v1 wrapper's fake agent; it does not use built-in v2 runtimes.
+  # Enable the optional proxy explicitly to retain its network isolation checks.
   run helm install "${v2_release}" "${chart_dir}" \
     --namespace "${v2_namespace}" \
     --skip-crds \
+    --values "${repo_root}/cmd/build/helmify/testdata/provider-proxy-values.yaml" \
     --set controller.mode=harness-v2 \
     --set "controller.watchNamespace=${v2_namespace}" \
     --set "controller.acpRuntime.namespace=${v2_runtime_namespace}" \
+    --set-string controller.acpRuntime.codexImage= \
+    --set-string controller.acpRuntime.claudeImage= \
+    --set-string controller.acpRuntime.copilotImage= \
+    --set-string controller.acpRuntime.opencodeImage= \
     --set "controller.image.repository=$(split_image_repository "${manager_ref}")" \
     --set "controller.image.digest=$(split_image_digest "${manager_ref}")" \
-    --set controller.agentExecutionSnapshot.existingSecret=orka-agent-snapshot-key \
-    --set controller.agentExecutionSnapshot.key=key \
-    --set webhooks.tls.existingSecret=orka-webhook-tls \
-    --set "webhooks.caBundle=$(base64_no_wrap "${work_dir}/${v2_namespace}-webhook-tls/ca.crt")" \
     --set "publisher.image.repository=$(split_image_repository "${publisher_ref}")" \
-    --set "publisher.image.digest=$(split_image_digest "${publisher_ref}")" \
-    --set providerProxy.enabled=true
+    --set "publisher.image.digest=$(split_image_digest "${publisher_ref}")"
+  # The v2 release deliberately omits webhooks.tls.* and
+  # controller.agentExecutionSnapshot.*: it proves the chart's generated
+  # snapshot key and controller-issued webhook certificate end to end, while
+  # the v1 release above keeps the operator-supplied path covered.
 
   log "Wiring the deterministic fake agent CLI into the wrapper (test-only)"
   kubectl -n "${v1_namespace}" create configmap coexistence-fake-agent \
@@ -678,6 +685,40 @@ main() {
   run kubectl -n "${v1_namespace}" rollout status "deployment/${v1_controller_deployment}" --timeout="${rollout_timeout}"
   run kubectl -n "${v1_namespace}" rollout status "deployment/${wrapper_deployment}" --timeout="${rollout_timeout}"
   run kubectl -n "${v2_namespace}" rollout status "deployment/${v2_controller_deployment}" --timeout="${rollout_timeout}"
+
+  log "Asserting the v2 controller claimed its unlabeled namespace"
+  local claimed_mode
+  claimed_mode="$(kubectl get namespace "${v2_namespace}" -o jsonpath='{.metadata.labels.orka\.ai/controller-mode}')"
+  [[ "${claimed_mode}" == "harness-v2" ]] || \
+    die "v2 controller did not claim its namespace: orka.ai/controller-mode=${claimed_mode:-<unset>}"
+  # The claim is immutable and only the controller may set it: relabeling as
+  # an operator must be denied by the namespace-mode admission policy.
+  if kubectl label namespace "${v2_namespace}" orka.ai/controller-mode=harness-v1 --overwrite >/dev/null 2>"${work_dir}/relabel.err"; then
+    die "namespace-mode admission policy allowed relabeling ${v2_namespace} to harness-v1"
+  fi
+  grep -Eq 'claim is immutable|cannot name another mode' "${work_dir}/relabel.err" || \
+    die "unexpected relabel denial message: $(cat "${work_dir}/relabel.err")"
+
+  log "Asserting the v2 controller issued its own webhook certificate and injected the CA"
+  local v2_webhook_tls_secret="${v2_release}-webhook-tls"
+  local v2_snapshot_secret="${v2_release}-agent-execution-snapshot"
+  wait_until "generated webhook TLS Secret population" 120 bash -c \
+    "kubectl -n '${v2_namespace}' get secret '${v2_webhook_tls_secret}' -o json | jq -e '.data[\"tls.crt\"] and .data[\"tls.key\"] and .data[\"ca.crt\"]' >/dev/null"
+  local generated_ca injected_bundles
+  generated_ca="$(kubectl -n "${v2_namespace}" get secret "${v2_webhook_tls_secret}" -o jsonpath='{.data.ca\.crt}')"
+  [[ -n "${generated_ca}" ]] || die "generated webhook TLS Secret has an empty ca.crt"
+  wait_until "generated CA injected into every v2 webhook" 120 bash -c \
+    "kubectl get validatingwebhookconfiguration '${v2_controller_deployment}' -o json | jq -e --arg ca '${generated_ca}' '[.webhooks[].clientConfig.caBundle] | length > 0 and all(. == \$ca)' >/dev/null"
+  injected_bundles="$(kubectl get validatingwebhookconfiguration "${v2_controller_deployment}" -o json | jq -r '[.webhooks[].clientConfig.caBundle] | unique | length')"
+  [[ "${injected_bundles}" == "1" ]] || die "v2 webhooks carry ${injected_bundles} distinct caBundles, want exactly the generated CA"
+  kubectl -n "${v2_namespace}" get deployment "${v2_controller_deployment}" -o json | jq -e \
+    '.spec.template.spec.containers[0].args | index("--webhook-cert-rotation-secret='"${v2_webhook_tls_secret}"'") != null' >/dev/null || \
+    die "v2 controller does not run controller-managed webhook certificate rotation"
+  local snapshot_key_bytes
+  snapshot_key_bytes="$(kubectl -n "${v2_namespace}" get secret "${v2_snapshot_secret}" -o jsonpath='{.data.key}' | \
+    base64 -d | base64 -d | wc -c | tr -d ' ')"
+  [[ "${snapshot_key_bytes}" == "32" ]] || \
+    die "generated snapshot key Secret ${v2_snapshot_secret} decodes to ${snapshot_key_bytes} bytes, want 32"
 
   log "Asserting each controller declares its static mode and watch namespace"
   kubectl -n "${v1_namespace}" get deployment "${v1_controller_deployment}" -o json | jq -e \
@@ -793,6 +834,38 @@ EOF_V1_AGENT
   expect_admission_denied "orka.harness.v1 Agent in the harness-v2 namespace" \
     'Agent contractVersion must match namespace execution mode "harness-v2"' \
     "${work_dir}/v1-agent-in-v2.yaml"
+
+  log "Proving an Agent may omit contractVersion: the namespace mode is the contract"
+  cat <<EOF_DEFAULT_AGENT | kubectl apply -f -
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: coexistence-v2-agent-defaulted
+  namespace: ${v2_namespace}
+spec:
+  runtime: {type: codex}
+  model: {name: gpt-5.2-codex}
+EOF_DEFAULT_AGENT
+  # Writing the matching contract later is fine; the other contract is not,
+  # and once written the selector can no longer be removed.
+  run kubectl -n "${v2_namespace}" patch agent coexistence-v2-agent-defaulted --type=merge \
+    -p '{"spec":{"runtime":{"type":"codex","contractVersion":"orka.harness.v2"}}}'
+  # A JSON patch removes the field outright; a client-side apply would leave a
+  # field it never wrote alone and never reach admission with the removal.
+  local unset_err="${work_dir}/unset-contract.err" unset_attempts=10
+  while :; do
+    if kubectl -n "${v2_namespace}" patch agent coexistence-v2-agent-defaulted --type=json \
+      -p '[{"op":"remove","path":"/spec/runtime/contractVersion"}]' >/dev/null 2>"${unset_err}"; then
+      die "admission allowed removing a written Agent contractVersion"
+    fi
+    # The CRD's own CEL rule and the admission webhook both enforce this;
+    # whichever runs first produces the denial.
+    grep -Eq 'Agent contractVersion is immutable|contractVersion is immutable once set' "${unset_err}" && break
+    grep -Eq 'failed calling webhook|no endpoints available' "${unset_err}" && (( --unset_attempts > 0 )) || \
+      die "unexpected denial while removing Agent contractVersion: $(cat "${unset_err}")"
+    sleep 3
+  done
+  run kubectl -n "${v2_namespace}" delete agent coexistence-v2-agent-defaulted --ignore-not-found
 
   log "Executing a real harness v1 wrapper Task end to end (model-free)"
   cat <<EOF_AGENT | kubectl apply -f -

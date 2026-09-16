@@ -21,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/executionmode"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
@@ -38,6 +39,7 @@ func TestPlanAgentExecutionMatrix(t *testing.T) {
 		acpRuntimeEnabled           bool
 		acpWorkspaceDispatchEnabled bool
 		harnessV1Enabled            bool
+		mode                        executionmode.Mode
 		wantPath                    agentExecutionPath
 		wantReason                  string
 		wantWorkspaceStatusErr      string
@@ -46,6 +48,24 @@ func TestPlanAgentExecutionMatrix(t *testing.T) {
 			name:              "built-in agent task uses ACP RuntimePool",
 			acpRuntimeEnabled: true,
 			wantPath:          agentExecutionPathACP,
+		},
+		{
+			name: "built-in agent without contractVersion is classified by the controller mode",
+			mutateAgent: func(agent *corev1alpha1.Agent) {
+				agent.Spec.Runtime.ContractVersion = nil
+			},
+			acpRuntimeEnabled: true,
+			mode:              executionmode.HarnessV2,
+			wantPath:          agentExecutionPathACP,
+		},
+		{
+			name: "built-in agent without contractVersion fails closed without a controller mode",
+			mutateAgent: func(agent *corev1alpha1.Agent) {
+				agent.Spec.Runtime.ContractVersion = nil
+			},
+			acpRuntimeEnabled: true,
+			wantPath:          agentExecutionPathRejected,
+			wantReason:        "unclassified",
 		},
 		{
 			name: "built-in Copilot task uses ACP RuntimePool",
@@ -318,6 +338,7 @@ func TestPlanAgentExecutionMatrix(t *testing.T) {
 			r.ACPRuntimeEnabled = tt.acpRuntimeEnabled
 			r.ACPWorkspaceDispatchEnabled = tt.acpWorkspaceDispatchEnabled
 			r.HarnessV1Enabled = tt.harnessV1Enabled
+			r.Mode = tt.mode
 
 			plan := r.planAgentExecution(context.Background(), task, agent)
 			if plan.path != tt.wantPath {

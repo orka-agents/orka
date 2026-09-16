@@ -39,6 +39,9 @@ type CompletionRequest struct {
 	// Store preserves explicit stateless requests through provider translation.
 	// Nil retains the provider default for existing callers.
 	Store *bool `json:"store,omitempty"`
+	// ResponsesInput marks Messages as ordered input items rather than chat
+	// turns. Only turn-based provider adapters may group adjacent items.
+	ResponsesInput bool `json:"-"`
 }
 
 // HasTemperature reports explicit presence or a legacy positive scalar value.

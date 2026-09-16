@@ -27,10 +27,49 @@ spec:
           podSelector:
             matchLabels: {k8s-app: kube-dns}
       ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+    {{- if .Values.providerProxy.egress }}
+    {{- toYaml .Values.providerProxy.egress | nindent 4 }}
+    {{- else }}
+    {{- /*
+    No explicit rule: derive one from the in-cluster Service the upstream URL
+    names. The rule targets that Service's Pods on its target port, which is
+    exactly what an operator would write by hand. Offline renders cannot look
+    the Service up and must set providerProxy.egress instead.
+    */ -}}
+    {{- $upstream := include "orka.providerProxyUpstreamService" . | fromJson -}}
+    {{- if not $upstream.name -}}
+    {{- fail "providerProxy.egress is required unless providerProxy.upstreamBaseURL names an in-cluster Service as http(s)://<service>.<namespace>.svc[:port]; the chart then derives the egress rule from that Service" -}}
+    {{- end -}}
+    {{- $service := lookup "v1" "Service" $upstream.namespace $upstream.name -}}
+    {{- if not $service -}}
+    {{- fail (printf "providerProxy.upstreamBaseURL names Service %s/%s, which was not found; install the gateway first, or set providerProxy.egress explicitly (offline renders such as helm template cannot look Services up)" $upstream.namespace $upstream.name) -}}
+    {{- end -}}
+    {{- $selector := dig "spec" "selector" (dict) $service -}}
+    {{- if empty $selector -}}
+    {{- fail (printf "Service %s/%s has no selector, so no egress rule can be derived; set providerProxy.egress explicitly" $upstream.namespace $upstream.name) -}}
+    {{- end -}}
+    {{- $target := "" -}}
+    {{- range (dig "spec" "ports" (list) $service) -}}
+    {{- /* The proxy speaks HTTP(S), so only the TCP entry for the port counts. */ -}}
+    {{- if and (eq (toString .port) $upstream.port) (eq (default "TCP" .protocol) "TCP") -}}
+    {{- $target = toString (default .port .targetPort) -}}
+    {{- end -}}
+    {{- end -}}
+    {{- if not $target -}}
+    {{- fail (printf "Service %s/%s has no port %s; use the Service port in providerProxy.upstreamBaseURL or set providerProxy.egress explicitly" $upstream.namespace $upstream.name $upstream.port) -}}
+    {{- end -}}
+    {{- if not (regexMatch `^[0-9]+$` $target) -}}
+    {{- fail (printf "Service %s/%s port %s maps to the named target port %q, which a NetworkPolicy cannot express; set providerProxy.egress explicitly with the Pod's numeric port" $upstream.namespace $upstream.name $upstream.port $target) -}}
+    {{- end }}
     - to:
         - namespaceSelector:
-            matchLabels: {kubernetes.io/metadata.name: vekil-system}
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $upstream.namespace | quote }}
           podSelector:
-            matchLabels: {app.kubernetes.io/name: vekil}
-      ports: [{protocol: TCP, port: 1337}]
+            matchLabels:
+              {{- toYaml $selector | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ $target }}
+    {{- end }}
 {{- end }}

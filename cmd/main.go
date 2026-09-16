@@ -7,10 +7,8 @@ MIT License - see LICENSE file for details.
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
-	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
@@ -34,7 +32,6 @@ import (
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -252,6 +249,7 @@ func main() {
 	var metricsAddr string
 	var metricsCertPath, metricsCertName, metricsCertKey string
 	var webhookCertPath, webhookCertName, webhookCertKey string
+	var webhookCertRotationSecret, webhookCertRotationWebhook, webhookCertRotationDNSName string
 	var taskProvenanceAdmissionEnabled bool
 	var taskProvenanceAdmissionExternal bool
 	var workspaceClassUseAdmissionEnabled bool
@@ -296,12 +294,14 @@ func main() {
 	var storeBackend string
 	var storePath string
 	var agentExecutionSnapshotKeyFile string
+	var agentExecutionSnapshotSecret, agentExecutionSnapshotSecretKey string
 	var agentExecutionSnapshotRetention time.Duration
 	var agentExecutionSnapshotRetentionInterval time.Duration
 	var controllerURL string
 	var enforceNamespaceIsolation bool
 	var maxTasksPerNamespace int
 	var controllerModeValue string
+	var claimNamespaceModeEnabled bool
 	var executionModeControllerUsernames string
 	var harnessV1Endpoint string
 	var harnessV1CAFile string
@@ -395,6 +395,10 @@ func main() {
 			"Enabling this will ensure there is only one active controller manager.")
 	flag.StringVar(&controllerModeValue, "controller-mode", os.Getenv("ORKA_CONTROLLER_MODE"),
 		"Required controller mode: harness-v1 or harness-v2. An installation never serves both modes.")
+	flag.BoolVar(&claimNamespaceModeEnabled, "claim-namespace-mode", true,
+		"Label an unlabeled watched namespace with orka.ai/controller-mode=<controller-mode> at startup. "+
+			"A namespace already claimed by the other mode still fails startup. Set false to require an "+
+			"operator-applied label.")
 	flag.StringVar(&executionModeControllerUsernames, "execution-mode-controller-usernames",
 		os.Getenv("ORKA_EXECUTION_MODE_CONTROLLER_USERNAMES"),
 		"Comma-separated exact Kubernetes usernames authorized for controller-owned admission writes.")
@@ -403,6 +407,16 @@ func main() {
 	flag.StringVar(&webhookCertPath, "webhook-cert-path", "", "The directory that contains the webhook certificate.")
 	flag.StringVar(&webhookCertName, "webhook-cert-name", "tls.crt", "The name of the webhook certificate file.")
 	flag.StringVar(&webhookCertKey, "webhook-cert-key", "tls.key", "The name of the webhook key file.")
+	flag.StringVar(&webhookCertRotationSecret, "webhook-cert-rotation-secret", "",
+		"Name of a Secret in the controller Pod namespace that the controller fills with a self-signed CA and "+
+			"webhook serving certificate. The Secret must be mounted at --webhook-cert-path; the controller waits "+
+			"for the kubelet to project it there and injects the CA into --webhook-cert-rotation-webhook. "+
+			"Empty means the operator supplies the mounted certificate.")
+	flag.StringVar(&webhookCertRotationWebhook, "webhook-cert-rotation-webhook", "",
+		"Name of the ValidatingWebhookConfiguration whose caBundle the controller keeps in sync when "+
+			"--webhook-cert-rotation-secret is set.")
+	flag.StringVar(&webhookCertRotationDNSName, "webhook-cert-rotation-dns-name", "",
+		"Service DNS name, such as orka-webhook.orka-system.svc, that the generated serving certificate must authenticate.")
 	flag.BoolVar(&taskProvenanceAdmissionEnabled, "task-provenance-admission-enabled",
 		envBool("ORKA_TASK_PROVENANCE_ADMISSION_ENABLED"),
 		"Enable validating admission that rejects untrusted direct Task writes to Orka-managed "+
@@ -496,6 +510,12 @@ func main() {
 	flag.StringVar(&agentExecutionSnapshotKeyFile, "agent-execution-snapshot-key-file", "",
 		"Path to the 32-byte (raw or base64) AES-256 key encrypting immutable agent execution snapshots. "+
 			"When set, executable agent Tasks freeze a write-once binding and encrypted snapshot before dispatch.")
+	flag.StringVar(&agentExecutionSnapshotSecret, "agent-execution-snapshot-secret", "",
+		"Name of a chart-created Secret in the controller Pod namespace that holds the snapshot key. When set, "+
+			"the controller mints a 32-byte key into it on first start and reuses it afterwards; the key file is "+
+			"then the kubelet's projection of that Secret. Empty means the operator supplies the mounted key file.")
+	flag.StringVar(&agentExecutionSnapshotSecretKey, "agent-execution-snapshot-secret-key", "key",
+		"Item inside --agent-execution-snapshot-secret that holds the key.")
 	flag.DurationVar(&agentExecutionSnapshotRetention, "agent-execution-snapshot-retention",
 		envDurationDefault("ORKA_AGENT_EXECUTION_SNAPSHOT_RETENTION", controller.DefaultAgentExecutionSnapshotRetention),
 		"Minimum audit/backup retention period for encrypted execution snapshots after all references disappear.")
@@ -530,16 +550,16 @@ func main() {
 	flag.DurationVar(&acpIdlePoolTTL, "acp-idle-pool-ttl", envDurationDefault("ORKA_ACP_IDLE_POOL_TTL", controller.DefaultACPIdlePoolTTL),
 		"Scale an idle ACP RuntimePool to zero after this duration.")
 	flag.StringVar(&acpCodexRuntimeImage, "acp-codex-runtime-image", os.Getenv("ORKA_ACP_CODEX_RUNTIME_IMAGE"),
-		"Digest-pinned Codex ACP runtime image.")
+		"Codex ACP runtime image with a tag or SHA256 digest. Tags resolve to digests at startup.")
 	flag.StringVar(&acpClaudeRuntimeImage, "acp-claude-runtime-image", os.Getenv("ORKA_ACP_CLAUDE_RUNTIME_IMAGE"),
-		"Digest-pinned Claude ACP runtime image.")
+		"Claude ACP runtime image with a tag or SHA256 digest. Tags resolve to digests at startup.")
 	flag.StringVar(&acpCopilotRuntimeImage, "acp-copilot-runtime-image", os.Getenv("ORKA_ACP_COPILOT_RUNTIME_IMAGE"),
-		"Digest-pinned Copilot ACP runtime image.")
+		"Copilot ACP runtime image with a tag or SHA256 digest. Tags resolve to digests at startup.")
 	flag.StringVar(&acpOpencodeRuntimeImage, "acp-opencode-runtime-image", os.Getenv("ORKA_ACP_OPENCODE_RUNTIME_IMAGE"),
-		"Digest-pinned OpenCode ACP runtime image.")
+		"OpenCode ACP runtime image with a tag or SHA256 digest. Tags resolve to digests at startup.")
 	flag.StringVar(&acpRuntimeNamespace, "acp-runtime-namespace", envStringDefault("ORKA_ACP_RUNTIME_NAMESPACE", "orka-runtimes"),
 		"Physical namespace for managed ACP runtime Pods.")
-	flag.StringVar(&acpProviderProxyNamespace, "acp-provider-proxy-namespace", envStringDefault("ORKA_ACP_PROVIDER_PROXY_NAMESPACE", "vekil-system"),
+	flag.StringVar(&acpProviderProxyNamespace, "acp-provider-proxy-namespace", os.Getenv("ORKA_ACP_PROVIDER_PROXY_NAMESPACE"),
 		"Namespace containing the approved credential-injecting provider proxy.")
 	flag.StringVar(&acpProviderProxyBaseURL, "acp-provider-proxy-base-url", os.Getenv("ORKA_ACP_PROVIDER_PROXY_BASE_URL"),
 		"Cluster-local base URL of the authenticated provider proxy boundary.")
@@ -829,6 +849,26 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	agentExecutionSnapshotSecretOpts := agentExecutionSnapshotSecretOptions{
+		Name: agentExecutionSnapshotSecret,
+		Key:  agentExecutionSnapshotSecretKey,
+	}
+	if err := validateAgentExecutionSnapshotSecretOptions(agentExecutionSnapshotSecretOpts); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	webhookCertRotation := webhookCertRotationOptions{
+		SecretName:  webhookCertRotationSecret,
+		WebhookName: webhookCertRotationWebhook,
+		DNSName:     webhookCertRotationDNSName,
+		CertDir:     webhookCertPath,
+		CertName:    webhookCertName,
+		KeyName:     webhookCertKey,
+	}
+	if err := validateWebhookCertRotationOptions(webhookCertRotation); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	if harnessV1Enabled {
 		missing := make([]string, 0, 5)
 		for name, value := range map[string]string{
@@ -1065,6 +1105,24 @@ func main() {
 
 	processCtx, stopProcess := context.WithCancel(ctrl.SetupSignalHandler())
 	defer stopProcess()
+	if acpRuntimeEnabled {
+		images, err := resolveACPRuntimeImagesOrDisable(processCtx, controller.ACPRuntimeImages{
+			Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
+			Opencode: acpOpencodeRuntimeImage,
+		}, nil)
+		if err != nil {
+			// Not fatal: AI and container Tasks do not need these images.
+			// Agent Tasks fail closed until the controller restarts with
+			// registry access or digest-pinned runtime images.
+			setupLog.Error(err, "unable to resolve ACP runtime images; coding-agent runtimes are unavailable "+
+				"for this controller process. Allow HTTPS access to the registry, pin the runtime images to "+
+				"digests, or set them to empty strings to run without coding agents")
+		}
+		acpCodexRuntimeImage = images.Codex
+		acpClaudeRuntimeImage = images.Claude
+		acpCopilotRuntimeImage = images.Copilot
+		acpOpencodeRuntimeImage = images.Opencode
+	}
 	restConfig := ctrl.GetConfigOrDie()
 	mgrOptions := ctrl.Options{
 		Scheme:                        scheme,
@@ -1096,20 +1154,26 @@ func main() {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
+	webhookCertsReady, err := setupWebhookCertRotation(mgr, currentPodNamespace(), webhookCertRotation)
+	if err != nil {
+		setupLog.Error(err, "unable to set up webhook certificate rotation")
+		os.Exit(1)
+	}
+	if webhookCertRotation.enabled() {
+		setupLog.Info("controller-managed webhook certificate rotation enabled",
+			"secret", webhookCertRotation.SecretName,
+			"webhook", webhookCertRotation.WebhookName,
+			"dnsName", webhookCertRotation.DNSName)
+	}
 	kubeClient, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
 		setupLog.Error(err, "unable to create Kubernetes clientset")
 		os.Exit(1)
 	}
-	modeNamespace, err := kubeClient.CoreV1().Namespaces().Get(
-		context.Background(), watchNamespace, metav1.GetOptions{},
-	)
-	if err != nil {
-		setupLog.Error(err, "unable to read controller-mode namespace", "namespace", watchNamespace)
-		os.Exit(1)
-	}
-	if err := executionmode.ValidateNamespace(modeNamespace, mode); err != nil {
-		setupLog.Error(err, "controller-mode namespace claim failed")
+	if err := claimNamespaceMode(
+		context.Background(), kubeClient.CoreV1().Namespaces(), watchNamespace, mode, claimNamespaceModeEnabled,
+	); err != nil {
+		setupLog.Error(err, "controller-mode namespace claim failed", "namespace", watchNamespace, "mode", mode)
 		os.Exit(1)
 	}
 	// Actor-pool cleanup remains registered even when ACP execution is disabled.
@@ -1145,39 +1209,64 @@ func main() {
 		}
 	}
 
-	if workspaceClassUseAdmissionEnabled {
-		orkaadmission.RegisterWorkspaceClassUseWebhooks(
-			mgr.GetWebhookServer(),
-			mgr.GetScheme(),
-			controller.WorkspaceClassAuthorizer{Client: mgr.GetClient()},
-		)
-		setupLog.Info("registered Task and Tool workspace class use admission")
-	}
+	// Handlers are registered on the local server object first, so the mux is
+	// complete before the server is ever added to the manager and started.
+	// Only mgr.GetWebhookServer() adds the runnable, and the server needs its
+	// certificate files when it starts. With controller-managed rotation those
+	// files appear only after the manager is running, so the whole sequence
+	// waits for the rotator; otherwise it happens now, before mgr.Start.
+	registerAdmissionWebhooks := func() {
+		registered := false
+		if workspaceClassUseAdmissionEnabled {
+			registered = true
+			orkaadmission.RegisterWorkspaceClassUseWebhooks(
+				webhookServer,
+				mgr.GetScheme(),
+				controller.WorkspaceClassAuthorizer{Client: mgr.GetClient()},
+			)
+			setupLog.Info("registered Task and Tool workspace class use admission")
+		}
 
-	if taskProvenanceAdmissionEnabled {
-		admissionConfig := orkaadmission.NewTaskProvenanceConfig(
-			true,
-			executionModeControllerUsernames,
-			taskProvenanceAdmissionTrustedUsers,
-			taskProvenanceAdmissionTrustedServiceAccounts,
-			currentPodNamespace(),
-		)
-		orkaadmission.RegisterTaskProvenanceWebhook(mgr.GetWebhookServer(), mgr.GetScheme(), admissionConfig, mgr.GetAPIReader())
-		setupLog.Info("enabled Task provenance validating admission",
-			"trustedUsers", strings.Join(admissionConfig.TrustedUsernames, ","),
-			"trustedServiceAccounts", strings.Join(admissionConfig.TrustedServiceAccountNames, ","),
-		)
+		if taskProvenanceAdmissionEnabled {
+			registered = true
+			admissionConfig := orkaadmission.NewTaskProvenanceConfig(
+				true,
+				executionModeControllerUsernames,
+				taskProvenanceAdmissionTrustedUsers,
+				taskProvenanceAdmissionTrustedServiceAccounts,
+				currentPodNamespace(),
+			)
+			orkaadmission.RegisterTaskProvenanceWebhook(webhookServer, mgr.GetScheme(), admissionConfig, mgr.GetAPIReader())
+			setupLog.Info("enabled Task provenance validating admission",
+				"trustedUsers", strings.Join(admissionConfig.TrustedUsernames, ","),
+				"trustedServiceAccounts", strings.Join(admissionConfig.TrustedServiceAccountNames, ","),
+			)
+		}
+		if managerAdmissionEnabled {
+			registered = true
+			orkaadmission.RegisterExecutionModeWebhooks(
+				webhookServer,
+				mgr.GetScheme(),
+				mgr.GetAPIReader(),
+				orkaadmission.ExecutionModeConfig{
+					ControllerUsernames: splitCommaList(executionModeControllerUsernames),
+				},
+			)
+			setupLog.Info("registered immutable namespace mode and execution-authority admission")
+		}
+		if registered {
+			// Adds the fully populated server as a manager runnable; when the
+			// manager is already running it starts immediately.
+			mgr.GetWebhookServer()
+		}
 	}
-	if managerAdmissionEnabled {
-		orkaadmission.RegisterExecutionModeWebhooks(
-			mgr.GetWebhookServer(),
-			mgr.GetScheme(),
-			mgr.GetAPIReader(),
-			orkaadmission.ExecutionModeConfig{
-				ControllerUsernames: splitCommaList(executionModeControllerUsernames),
-			},
-		)
-		setupLog.Info("registered immutable namespace mode and execution-authority admission")
+	if webhookCertRotation.enabled() {
+		go func() {
+			<-webhookCertsReady
+			registerAdmissionWebhooks()
+		}()
+	} else {
+		registerAdmissionWebhooks()
 	}
 
 	// The clientset is reused for pod log and broker operations.
@@ -1236,6 +1325,42 @@ func main() {
 		os.Exit(1)
 	}
 
+	// The snapshot key is settled before the database file exists. A database
+	// without a key can then only mean the key was lost, never an interrupted
+	// first start, so the bootstrap can fail closed on that condition.
+	_, storeStatErr := os.Stat(storePath)
+	if storeStatErr != nil && !os.IsNotExist(storeStatErr) {
+		// Anything but a clean "absent" must not be mistaken for a first
+		// start, or a fresh key could be minted over an unreadable database.
+		setupLog.Error(storeStatErr, "unable to check for an existing SQLite store", "path", storePath)
+		os.Exit(1)
+	}
+	storePreexisted := storeStatErr == nil
+	var snapshotCipher *sqlite.AgentExecutionSnapshotCipher
+	if agentExecutionSnapshotSecretOpts.enabled() {
+		key, keyErr := ensureAgentExecutionSnapshotKey(context.Background(), mgr.GetAPIReader(), mgr.GetClient(),
+			currentPodNamespace(), agentExecutionSnapshotSecretOpts, storePreexisted)
+		if keyErr != nil {
+			setupLog.Error(keyErr, "unable to bootstrap the agent execution snapshot key; snapshot encryption fails closed",
+				"secret", agentExecutionSnapshotSecretOpts.Name)
+			os.Exit(1)
+		}
+		cipher, cipherErr := sqlite.NewAgentExecutionSnapshotCipher(key)
+		if cipherErr != nil {
+			setupLog.Error(cipherErr, "unable to load agent execution snapshot key; snapshot encryption fails closed",
+				"secret", agentExecutionSnapshotSecretOpts.Name)
+			os.Exit(1)
+		}
+		snapshotCipher = cipher
+	} else {
+		cipher, cipherErr := loadAgentExecutionSnapshotCipher(agentExecutionSnapshotKeyFile)
+		if cipherErr != nil {
+			setupLog.Error(cipherErr, "unable to load agent execution snapshot key; snapshot encryption fails closed",
+				"path", agentExecutionSnapshotKeyFile)
+			os.Exit(1)
+		}
+		snapshotCipher = cipher
+	}
 	sqliteStore, err := sqlite.OpenLockedStore(storePath)
 	if err != nil {
 		setupLog.Error(err, "unable to acquire and initialize the exclusive SQLite store", "path", storePath)
@@ -1243,12 +1368,6 @@ func main() {
 	}
 	if err := mgr.Add(sqliteStore); err != nil {
 		setupLog.Error(err, "unable to add SQLite store as runnable")
-		os.Exit(1)
-	}
-	snapshotCipher, cipherErr := loadAgentExecutionSnapshotCipher(agentExecutionSnapshotKeyFile)
-	if cipherErr != nil {
-		setupLog.Error(cipherErr, "unable to load agent execution snapshot key; snapshot encryption fails closed",
-			"path", agentExecutionSnapshotKeyFile)
 		os.Exit(1)
 	}
 	if cipherErr := sqliteStore.SetAgentExecutionSnapshotCipher(snapshotCipher); cipherErr != nil {
@@ -1463,6 +1582,7 @@ func main() {
 	}
 
 	substrateCheckpointsEnabled := false
+	var runtimeAvailability api.ACPRuntimeAvailability
 	if acpRuntimeEnabled {
 		runtimePoolReconciler := &controller.RuntimePoolReconciler{
 			Client:           mgr.GetClient(),
@@ -1499,6 +1619,9 @@ func main() {
 			Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
 			Opencode: acpOpencodeRuntimeImage,
 		}
+		runtimeAvailability = configuredACPRuntimeAvailability(
+			runtimePoolReconciler.AllowedImages, runtimePoolReconciler.ProviderProxy,
+		)
 		if err := runtimePoolReconciler.SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "RuntimePool")
 			os.Exit(1)
@@ -1543,6 +1666,7 @@ func main() {
 		RepositoryValidationBindings: sqliteStore,
 		MCPRegistry:                  acpMCPRegistry,
 		HarnessV1Enabled:             harnessV1Enabled,
+		Mode:                         mode,
 		HarnessV1Endpoint:            harnessV1Endpoint,
 		HarnessV1AuthSecretNamespace: harnessV1AuthSecretNamespace,
 		HarnessV1AuthSecretName:      harnessV1AuthSecretName,
@@ -1847,6 +1971,7 @@ func main() {
 	if err := (&controller.AgentReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
+		Mode:   mode,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Agent")
 		os.Exit(1)
@@ -1942,7 +2067,7 @@ func main() {
 		os.Exit(1)
 	}
 	if managerAdmissionEnabled {
-		if err := mgr.AddReadyzCheck("webhook", mgr.GetWebhookServer().StartedChecker()); err != nil {
+		if err := mgr.AddReadyzCheck("webhook", webhookReadyChecker(webhookCertsReady, webhookServer.StartedChecker())); err != nil {
 			setupLog.Error(err, "unable to set up webhook ready check")
 			os.Exit(1)
 		}
@@ -2006,12 +2131,7 @@ func main() {
 			MaxTasksPerTurn:        chatMaxTasksPerTurn,
 			MaxSessionSize:         chatMaxSessionSize,
 			MaxPrematureEndRetries: chatMaxPrematureEndRetries,
-			RuntimeAvailability: api.ACPRuntimeAvailability{
-				Codex:    acpRuntimeEnabled && controller.ACPRuntimeImageAvailable(acpCodexRuntimeImage),
-				Claude:   acpRuntimeEnabled && controller.ACPRuntimeImageAvailable(acpClaudeRuntimeImage),
-				Copilot:  acpRuntimeEnabled && controller.ACPRuntimeImageAvailable(acpCopilotRuntimeImage),
-				OpenCode: acpRuntimeEnabled && controller.ACPRuntimeImageAvailable(acpOpencodeRuntimeImage),
-			},
+			RuntimeAvailability:    runtimeAvailability,
 		},
 	})
 	if acpRuntimeEnabled {
@@ -2368,13 +2488,9 @@ func loadAgentExecutionSnapshotCipher(path string) (*sqlite.AgentExecutionSnapsh
 	if err != nil {
 		return nil, err
 	}
-	key := raw
-	if len(key) != sqlite.AgentExecutionSnapshotKeyBytes {
-		decoded, decodeErr := base64.StdEncoding.DecodeString(string(bytes.TrimSpace(raw)))
-		if decodeErr != nil || len(decoded) != sqlite.AgentExecutionSnapshotKeyBytes {
-			return nil, fmt.Errorf("snapshot key must be %d raw bytes or their base64 encoding", sqlite.AgentExecutionSnapshotKeyBytes)
-		}
-		key = decoded
+	key, err := decodeAgentExecutionSnapshotKey(raw)
+	if err != nil {
+		return nil, err
 	}
 	return sqlite.NewAgentExecutionSnapshotCipher(key)
 }

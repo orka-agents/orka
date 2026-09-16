@@ -57,7 +57,7 @@ directly.
 it was delivered, so a controller restart never sends the same prompt twice.
 
 **Harness** — the contract between the controller and the thing executing agent work.
-`harness-v1` is the older sidecar-wrapper design; `harness-v2` is the current ACP pool
+`harness-v1` is the deprecated sidecar-wrapper design, to be removed in a future release; `harness-v2` is the current ACP pool
 design. An installation picks one at install time and cannot switch.
 See [Harness modes](../operations/harness-modes.md).
 

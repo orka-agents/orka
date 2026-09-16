@@ -4,22 +4,7 @@
 const sidebars = {
   tutorialSidebar: [
     'getting-started',
-    'reference/glossary',
-    {
-      type: 'category',
-      label: 'Core concepts',
-      collapsed: false,
-      items: [
-        'concepts/architecture',
-        'concepts/agent-runtimes',
-        'concepts/agent-sandbox',
-        'concepts/substrate',
-        'concepts/memory',
-        'concepts/transaction-tokens',
-        'concepts/outbound-access',
-        'concepts/security',
-      ],
-    },
+    'operations/installation',
     {
       type: 'category',
       label: 'Guides',
@@ -41,16 +26,31 @@ const sidebars = {
     },
     {
       type: 'category',
+      label: 'Core concepts',
+      collapsed: false,
+      items: [
+        'concepts/architecture',
+        'concepts/agent-runtimes',
+        'concepts/agent-sandbox',
+        'concepts/substrate',
+        'concepts/memory',
+        'concepts/transaction-tokens',
+        'concepts/outbound-access',
+        'concepts/security',
+      ],
+    },
+    {
+      type: 'category',
       label: 'Operations',
       collapsed: false,
       items: [
-        'operations/harness-modes',
         'operations/provider-proxy',
         'operations/agent-runtime-security',
         'operations/gateways',
         'operations/upgrading',
         'operations/troubleshooting',
         'operations/runbook',
+        'operations/harness-modes',
       ],
     },
     {
@@ -58,6 +58,7 @@ const sidebars = {
       label: 'Reference',
       collapsed: false,
       items: [
+        'reference/glossary',
         'reference/configuration',
         'reference/api-reference',
         'reference/api-authorization',
@@ -77,6 +78,7 @@ const sidebars = {
       collapsed: false,
       items: [
         'development/development',
+        'development/build-from-source',
         'development/testing',
         'development/release-qualification',
         'development/security-scanning-design',

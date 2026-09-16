@@ -112,3 +112,21 @@ The controller does not acquire a third drain mode.
   isolation tests must prove cross-plane reads and writes are forbidden.
 - Historical v1 objects may outlive the v1 data plane and keep the shared
   schema broad until retention and archival requirements are complete.
+
+## Amendment (2026-09-16): controller-claimed namespaces
+
+The namespace claim remains the immutable execution-mode identity, but the
+operator no longer has to apply it. On first start a controller labels an
+unlabeled watched namespace with its own mode; a namespace already claimed by
+the other mode still fails startup, and a racing claim is resolved by the
+namespace's resourceVersion so at most one mode ever wins. Claim immutability
+moved from a controller-served webhook to a ValidatingAdmissionPolicy: the
+label can never change or be removed, only the release's controller
+ServiceAccount may add it to an existing namespace, and namespace edits no
+longer depend on the controller being up. Orka is pre-1.0 and no released chart
+enforced the operator claim, so no supported upgrade path changes.
+
+For the same reason, a built-in Agent may omit `runtime.contractVersion`: the
+namespace it lives in has exactly one mode, so admission treats an omitted
+selector as that mode. An explicit value must still match the mode and never
+changes once written.

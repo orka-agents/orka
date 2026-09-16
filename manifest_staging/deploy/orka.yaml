@@ -3430,6 +3430,54 @@ spec:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
+  name: orka-namespace-mode-protection
+spec:
+  failurePolicy: Fail
+  matchConditions:
+  - expression: object.metadata.?labels.orValue({}).exists(k, k == 'orka.ai/controller-mode')
+      || (request.operation == 'UPDATE' && oldObject.metadata.?labels.orValue({}).exists(k,
+      k == 'orka.ai/controller-mode'))
+    name: execution-mode-claim-present
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - ""
+      apiVersions:
+      - v1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - namespaces
+  validations:
+  - expression: variables.newClaim == '' || variables.newClaim in ['harness-v1', 'harness-v2']
+    message: orka.ai/controller-mode must be harness-v1 or harness-v2
+  - expression: variables.oldClaim == '' || variables.newClaim == variables.oldClaim
+    message: namespace execution-mode claim is immutable; recreate the installation
+      in a different namespace
+  - expression: variables.oldClaim != '' || variables.newClaim == '' || request.operation
+      == 'CREATE' || request.userInfo.username == variables.controllerUser
+    message: only the Orka controller may claim an existing namespace for an execution
+      mode; create a new namespace for another installation
+  variables:
+  - expression: '''orka.ai/controller-mode'''
+    name: label
+  - expression: '''orka-system'''
+    name: controllerNamespace
+  - expression: '''orka-controller-manager'''
+    name: controllerServiceAccount
+  - expression: '''system:serviceaccount:'' + variables.controllerNamespace + '':''
+      + variables.controllerServiceAccount'
+    name: controllerUser
+  - expression: object.metadata.?labels[variables.label].orValue('')
+    name: newClaim
+  - expression: 'request.operation == ''UPDATE'' ? oldObject.metadata.?labels[variables.label].orValue('''')
+      : '''''
+    name: oldClaim
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
   name: orka-task-workspace-class-use.orka.ai
 spec:
   failurePolicy: Fail
@@ -3516,6 +3564,15 @@ metadata:
   name: orka-gateway-task-protection
 spec:
   policyName: orka-gateway-task-protection
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: orka-namespace-mode-protection
+spec:
+  policyName: orka-namespace-mode-protection
   validationActions:
   - Deny
 ---

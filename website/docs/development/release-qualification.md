@@ -10,12 +10,17 @@ dispatch, tagging, image promotion, chart publication, and release evidence
 archival use only `GITHUB_TOKEN`. The organization can keep its policy that prohibits Actions
 from creating or approving PRs. Release preparation does not create a PR.
 
+For setup, follow [Install Orka](../operations/installation.md).
+This page is for maintainers running release checks. See
+[what release checks cover](../operations/upgrading.md#release-checks) when writing release notes.
+
 The flow is:
 
-1. Dispatch `release-prepare.yml` from `main` with `release_version`, such as `v0.2.0`.
+1. Dispatch `release-prepare.yml` from `main` with the desired tag in `release_version`.
 2. Preparation updates the version, generates staging, promotes the release
-   snapshots, and commits them on `release-0.2`. A new release line starts from
-   the dispatched `main` commit. An existing line starts from its own head.
+   snapshots, and commits them on the matching `release-X.Y` branch. A new
+   release line starts from the dispatched `main` commit. An existing line
+   starts from its own head.
    Before running that line's commands, preparation verifies its workflows,
    scripts, generator code, and toolchain against the dispatched `main` commit.
    Beta and RC versions use the same `release-X.Y` branch. Preparation never
@@ -58,9 +63,9 @@ the trusted inputs first.
 Create a `release` environment with:
 
 - A required reviewer and administrator bypass disabled.
-- Selected deployment branches, with an exact branch rule for each release
-  line, such as `release-0.2`. Wildcard, tag, and unrelated branch rules are
-  rejected even when an exact release-branch rule is also present.
+- Selected deployment branches, with an exact branch rule for each approved
+  release line. Wildcard, tag, and unrelated branch rules are rejected even
+  when an exact release-branch rule is also present.
 - Prevent self-review disabled if the person dispatching the release will also
   approve it. Enable it when another reviewer is available and required.
 
@@ -80,11 +85,11 @@ root, as configured for this repository.
 ## Start and approve a release
 
 Use **Actions → Prepare Release → Run workflow**, choose `main`, and enter the
-version, or run:
+version, including its leading `v`. From a terminal, replace `<release-tag>` and run:
 
 ```bash
 gh workflow run release-prepare.yml --repo orka-agents/orka --ref main \
-  -f release_version=v0.2.0
+  -f release_version='<release-tag>'
 ```
 
 Preparation links the source and generated commit diffs and the Release run in
@@ -147,9 +152,8 @@ explicitly records `coverage.liveGitHub: not_tested`.
 
 Configure the `release-qualification` environment in `orka-agents/orka`:
 
-- Select deployment branches by name. Allow `main` and explicitly selected
-  release lines, such as `release-0.2`. Do not allow tags, PR refs, or arbitrary
-  branches.
+- Select deployment branches by name. Allow `main` and each approved release
+  branch by its exact name. Do not allow tags, PR refs, or arbitrary branches.
 - Require a trusted reviewer and disable administrator bypass. This approval
   protects model-provider credentials from unreviewed release-branch workflows.
   Keep Prevent self-review disabled if the trusted release maintainer also

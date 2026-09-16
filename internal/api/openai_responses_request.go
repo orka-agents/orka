@@ -121,7 +121,7 @@ func parseResponsesRequest(body []byte) (*ResponsesRequest, *llm.CompletionReque
 	if req.ParallelToolCalls != nil && !*req.ParallelToolCalls {
 		return nil, nil, responsesInvalid("parallel_tool_calls", "parallel_tool_calls:false is not supported")
 	}
-	comp := &llm.CompletionRequest{Model: req.Model, SystemPrompt: req.Instructions, Store: req.Store}
+	comp := &llm.CompletionRequest{Model: req.Model, SystemPrompt: req.Instructions, Store: req.Store, ResponsesInput: true}
 	if req.Temperature != nil {
 		if *req.Temperature < 0 || *req.Temperature > 2 {
 			return nil, nil, responsesInvalid("temperature", "temperature must be between 0 and 2")
@@ -224,7 +224,7 @@ func convertResponsesInput(input json.RawMessage) ([]llm.Message, error) {
 			calls[item.CallID] = item.Name
 			pending[item.CallID] = true
 			call := llm.ToolCall{ID: item.CallID, Name: item.Name, Arguments: json.RawMessage(item.Arguments)}
-			if len(messages) > 0 && messages[len(messages)-1].Role == responsesRoleAssistant {
+			if len(messages) > 0 && messages[len(messages)-1].Role == responsesRoleAssistant && len(messages[len(messages)-1].ToolCalls) > 0 {
 				messages[len(messages)-1].ToolCalls = append(messages[len(messages)-1].ToolCalls, call)
 			} else {
 				messages = append(messages, llm.Message{Role: responsesRoleAssistant, ToolCalls: []llm.ToolCall{call}})
@@ -294,13 +294,9 @@ func appendResponsesMessage(messages []llm.Message, item responsesInputItem, has
 	if err != nil {
 		return nil, err
 	}
-	if role == responsesRoleAssistant && hasPending && len(messages) > 0 && messages[len(messages)-1].Role == responsesRoleAssistant {
-		// Responses may interleave assistant text and function items. Keep one
-		// assistant turn for providers that use Chat Completions tool messages.
-		messages[len(messages)-1].Content += content
-	} else {
-		messages = append(messages, llm.Message{Role: role, Content: content})
-	}
+	// Keep text and function items distinct so Responses providers preserve
+	// the input order. Providers with turn-based formats normalize at their edge.
+	messages = append(messages, llm.Message{Role: role, Content: content})
 
 	return messages, nil
 }

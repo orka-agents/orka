@@ -34,19 +34,22 @@ The chart validates its inputs before producing any manifests, so a bad install 
 
 | Message mentions | What it wants |
 | --- | --- |
-| `agentExecutionSnapshot.existingSecret` | A Secret holding a 32-byte key. See [below](#the-snapshot-key). |
+| `agentExecutionSnapshot.existingSecret` | Immutable once installed. Keep the name the live controller mounts. See [below](#the-snapshot-key). |
 | `watchNamespace` | Must be set, and must equal the release namespace. |
-| `providerProxy` | `providerProxy.enabled=true` is required for `harness-v2`. See [Provider proxy](provider-proxy.md). |
-| `upstreamBaseURL` | Must be exactly `http://vekil.vekil-system.svc:1337`. |
-| `@sha256:` | Runtime and controller images must be digest references, not tags. |
+| `providerProxy` | When enabled, provide your gateway endpoint and egress rules. It can stay disabled during installation. See [Provider proxy](provider-proxy.md). |
+| `upstreamBaseURL` | Your gateway's HTTP(S) URL, without credentials, a query, or a fragment. |
+| `image` | Use a valid tag or SHA256 digest. Runtime overrides need a full registry/repository reference. |
 | `replicas` / `leaderElect` | Must be `1` and `true`. The controller is a single writer. |
-| `webhooks.tls.existingSecret` | A TLS Secret for the admission webhooks. |
+| `caBundle or caInjectionAnnotations` | You set `webhooks.tls.existingSecret`, so the chart needs the CA that signed it. Leave both empty to let the controller issue its own certificate. |
 | `mode` | Only `harness-v1` or `harness-v2`, and it cannot change on upgrade. |
 
 ### The snapshot key
 
-`controller.agentExecutionSnapshot` encrypts stored agent execution records. It needs a
-Secret containing either 32 raw bytes or their base64 encoding:
+`controller.agentExecutionSnapshot` encrypts stored agent execution records. A
+fresh install generates the key into a Secret named `<release>-agent-execution-snapshot`
+and reuses it on every upgrade, so you normally never touch it. To bring your own,
+create a Secret containing either 32 raw bytes or their base64 encoding before
+installing, and pass its name as `existingSecret`:
 
 ```bash
 kubectl -n orka-system create secret generic orka-agent-snapshot-key \
@@ -58,11 +61,21 @@ The Secret name, the item key, and the key material must stay the same for the l
 release. Changing any of them makes every retained snapshot permanently unreadable.
 
 The chart guards only two of those three. On upgrade it compares the Secret **name** and
-**item key** against the live Deployment and fails if either changed. It cannot see the
-key material, so replacing the bytes under the same name and key passes the guard
-silently — and the controller then restarts unable to read any snapshot it wrote before.
-Treat the material as immutable yourself; nothing in the chart will stop you.
+**item key** against the live Deployment and fails if either changed. That includes
+switching between a generated Secret and your own. It cannot see the key material, so
+replacing the bytes under the same name and key passes the guard silently — and the
+controller then restarts unable to read any snapshot it wrote before. The generated
+Secret is kept on `helm uninstall` and reused by a reinstall under the same release name
+for the same reason. Treat the material as immutable yourself, and never use
+`helm upgrade --force`.
 :::
+
+### `the SQLite store already exists but snapshot key Secret ... has no "key" item`
+
+The controller-generated snapshot key is gone but the database that it encrypted
+is still there, so the controller refuses to mint a new key that could not read
+existing records. Restore the Secret from backup. If the data is expendable,
+delete the data volume and restart the controller to start over.
 
 ### The controller crashes immediately
 
@@ -86,23 +99,46 @@ kubectl -n orka-system logs "deploy/$CONTROLLER" --previous
 That is `orka-controller` for a Helm release named `orka`, and `orka-controller-manager`
 for the release manifest, as the table above shows.
 
+**`unable to resolve ACP runtime images`**
+
+At startup the controller resolves the coding-agent runtime image tags to digests by
+asking the registry, `ghcr.io` for the default images, over HTTPS. If the controller
+Pod cannot reach it, through a proxy or an egress policy, the controller stays up but
+every coding-agent runtime is unavailable until it restarts: AI and container Tasks
+work, agent Tasks fail with an unavailable runtime. Either allow that access, or pin
+the runtime images to digests so no lookup is needed, or set the images to empty
+strings to run without coding agents, then restart the controller:
+
+```bash
+helm upgrade orka orka/orka --namespace orka-system --reuse-values \
+  --set-string controller.acpRuntime.codexImage= \
+  --set-string controller.acpRuntime.claudeImage= \
+  --set-string controller.acpRuntime.copilotImage= \
+  --set-string controller.acpRuntime.opencodeImage=
+```
+
+See [Image overrides](../reference/configuration.md#image-overrides).
+
 **`--watch-namespace is required; controller modes cannot use a cluster-wide watch`**
 
 Orka watches exactly one namespace. Set `controller.watchNamespace` to the release
 namespace.
 
 **`controller-mode namespace claim failed`** or `namespace "..." is claimed by execution
-mode "..."`
+mode "harness-v1", not "harness-v2"`
 
-The namespace must carry a label matching the controller's mode:
+The namespace already carries an `orka.ai/controller-mode` label for the other
+mode. The controller claims an unlabeled namespace on its own, but it never
+takes over a namespace that belongs to the other harness, and the label cannot
+be changed once set. Install into a new namespace. If you run the controller
+with `--claim-namespace-mode=false`, label the namespace yourself before
+starting it:
 
 ```bash
 kubectl label namespace orka-system orka.ai/controller-mode=harness-v2
 ```
 
-This is how two installs on one cluster avoid fighting over the same Tasks. If the label
-says `harness-v1` and you are installing `harness-v2`, use a different namespace — do not
-relabel a namespace that another install is using.
+This is how two installs on one cluster avoid fighting over the same Tasks.
 
 **`unable to read controller-mode namespace`**
 
@@ -138,11 +174,11 @@ In order of likelihood:
 unavailable and Tasks asking for it fail rather than falling back to another. This is
 intentional.
 
-**The provider proxy is not reachable or not ready.** Check Vekil first — it fails
-independently of Orka:
+**The provider proxy is not reachable or not ready.** Built-in coding agents need
+the optional provider proxy enabled and connected to your gateway. Check that
+gateway's readiness and network access, then check Orka's proxy:
 
 ```bash
-kubectl -n vekil-system get deploy
 kubectl -n orka-system get deploy -l app.kubernetes.io/component=provider-auth-proxy
 ```
 

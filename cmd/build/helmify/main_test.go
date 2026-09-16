@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"sigs.k8s.io/yaml"
 )
@@ -105,8 +106,10 @@ func helmTemplateStaticChartForRelease(
 		t.Skip("helm is required for static chart render tests")
 	}
 
-	commandArgs := []string{"template", releaseName, "static", "--namespace", namespace}
-	commandArgs = append(commandArgs, staticChartDefaultArgs()...)
+	defaults := staticChartDefaultArgs()
+	commandArgs := make([]string, 0, 5+len(defaults)+2+len(args))
+	commandArgs = append(commandArgs, "template", releaseName, "static", "--namespace", namespace)
+	commandArgs = append(commandArgs, defaults...)
 	commandArgs = append(commandArgs, "--set-string", "controller.watchNamespace="+namespace)
 	commandArgs = append(commandArgs, args...)
 	output, err := exec.Command(helm, commandArgs...).CombinedOutput()
@@ -116,6 +119,7 @@ func helmTemplateStaticChartForRelease(
 func staticChartDefaultArgs() []string {
 	digest := "sha256:" + strings.Repeat("0", 64)
 	return []string{
+		"--values", "testdata/provider-proxy-values.yaml",
 		"--set-string", "controller.watchNamespace=orka-test",
 		"--set-string", "controller.image.digest=" + digest,
 		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
@@ -368,8 +372,10 @@ func helmTemplateStaticChartWithExistingControllerSnapshot(
 		t.Fatalf("force existing controller lookup in copied chart: %v", err)
 	}
 
-	commandArgs := []string{"template", "test", chartDir, "--namespace", "orka-test", "--is-upgrade"}
-	commandArgs = append(commandArgs, staticChartDefaultArgs()...)
+	defaults := staticChartDefaultArgs()
+	commandArgs := make([]string, 0, 6+len(defaults)+len(args))
+	commandArgs = append(commandArgs, "template", "test", chartDir, "--namespace", "orka-test", "--is-upgrade")
+	commandArgs = append(commandArgs, defaults...)
 	commandArgs = append(commandArgs, args...)
 	output, err := exec.Command(helm, commandArgs...).CombinedOutput()
 	return string(output), err
@@ -484,8 +490,10 @@ func helmTemplateHarnessV1UpgradeDrainHook(
 		t.Fatalf("force existing wrapper lookup in copied chart: %v", err)
 	}
 
-	commandArgs := []string{"template", "test", chartDir, "--namespace", "orka-test", "--is-upgrade"}
-	commandArgs = append(commandArgs, staticChartDefaultArgs()...)
+	defaults := staticChartDefaultArgs()
+	commandArgs := make([]string, 0, 6+len(defaults)+len(args))
+	commandArgs = append(commandArgs, "template", "test", chartDir, "--namespace", "orka-test", "--is-upgrade")
+	commandArgs = append(commandArgs, defaults...)
 	commandArgs = append(commandArgs, args...)
 	output, err := exec.Command(helm, commandArgs...).CombinedOutput()
 	return string(output), err
@@ -644,7 +652,7 @@ func TestStaticChartUsesServicePortForInClusterControllerURLs(t *testing.T) {
 	}
 }
 
-func TestStaticChartProviderProxyConfigurationIsFixedToSupportedBoundary(t *testing.T) {
+func TestStaticChartProviderProxyUsesOperatorGateway(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("0", 64)
 	args := []string{
 		"--set", "providerProxy.enabled=true",
@@ -655,20 +663,20 @@ func TestStaticChartProviderProxyConfigurationIsFixedToSupportedBoundary(t *test
 		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
 		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
 		"--set-string", "controller.acpRuntime.providerProxyNamespace=orka-test",
-		"--set-string", "providerProxy.upstreamBaseURL=http://vekil.vekil-system.svc:1337/",
+		"--set-string", "providerProxy.upstreamBaseURL=http://model-gateway.models.svc:8080/",
 	}
 	rendered := requireHelmRender(t, args...)
 
 	for _, marker := range []string{
 		"--acp-provider-proxy-base-url=http://test-orka-provider-auth-proxy.orka-test.svc:8080",
 		"--acp-provider-proxy-namespace=orka-test",
-		"--upstream-base-url=http://vekil.vekil-system.svc:1337",
+		"--upstream-base-url=http://model-gateway.models.svc:8080",
 	} {
 		if !strings.Contains(rendered, marker) {
 			t.Fatalf("rendered provider proxy configuration is missing %q", marker)
 		}
 	}
-	if strings.Contains(rendered, "--upstream-base-url=http://vekil.vekil-system.svc:1337/") {
+	if strings.Contains(rendered, "--upstream-base-url=http://model-gateway.models.svc:8080/") {
 		t.Fatalf("provider upstream trailing slash was not normalized")
 	}
 
@@ -676,28 +684,47 @@ func TestStaticChartProviderProxyConfigurationIsFixedToSupportedBoundary(t *test
 		"--set", "providerProxy.enabled=true",
 		"--show-only", "templates/provider-proxy-networkpolicy.yaml",
 	)
-	for _, marker := range []string{
-		"kubernetes.io/metadata.name: vekil-system",
-		"app.kubernetes.io/name: vekil",
-		"ports: [{protocol: TCP, port: 1337}]",
-	} {
-		if !strings.Contains(providerPolicy, marker) {
-			t.Fatalf("provider proxy NetworkPolicy lost fixed Vekil boundary %q:\n%s", marker, providerPolicy)
+	var policy networkingv1.NetworkPolicy
+	if err := yaml.Unmarshal([]byte(providerPolicy), &policy); err != nil {
+		t.Fatal(err)
+	}
+	if len(policy.Spec.Egress) != 2 || len(policy.Spec.Egress[1].To) != 1 || len(policy.Spec.Egress[1].Ports) != 1 {
+		t.Fatal("provider egress must contain only DNS and the configured gateway rule")
+	}
+	gateway := policy.Spec.Egress[1]
+	peer := gateway.To[0]
+	if peer.NamespaceSelector == nil || peer.NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] != "models" ||
+		peer.PodSelector == nil || peer.PodSelector.MatchLabels["app.kubernetes.io/name"] != "model-gateway" ||
+		gateway.Ports[0].Port == nil || gateway.Ports[0].Port.IntVal != 8080 {
+		t.Fatalf("provider egress does not select the configured gateway: %#v", gateway)
+	}
+	if len(policy.Spec.Ingress) != 1 || len(policy.Spec.Ingress[0].From) != 1 {
+		t.Fatal("provider ingress must stay restricted to runtime Pods")
+	}
+	runtimePeer := policy.Spec.Ingress[0].From[0]
+	if runtimePeer.NamespaceSelector == nil ||
+		runtimePeer.NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] != "orka-runtimes" ||
+		runtimePeer.PodSelector == nil || runtimePeer.PodSelector.MatchLabels["orka.ai/network-role"] != "provider-client" {
+		t.Fatalf("provider ingress lost runtime isolation: %#v", runtimePeer)
+	}
+	if strings.Contains(rendered, "namespace: models") || strings.Contains(rendered, "vekil") {
+		t.Fatal("chart must not manage the operator's gateway namespace or select Vekil")
+	}
+}
+
+func TestStaticChartProviderProxyCanRemainDisabled(t *testing.T) {
+	rendered := requireHelmRender(t,
+		"--set", "providerProxy.enabled=false",
+		"--set-string", "providerProxy.upstreamBaseURL=",
+		"--set-json", "providerProxy.egress=[]",
+	)
+	for _, forbidden := range []string{"provider-auth-proxy", "--acp-provider-proxy-", "name: provider-auth", "vekil"} {
+		if strings.Contains(rendered, forbidden) {
+			t.Errorf("disabled provider proxy still rendered %q", forbidden)
 		}
 	}
-
-	vekilPolicy := requireHelmRender(t,
-		"--set", "providerProxy.enabled=true",
-		"--show-only", "templates/vekil-ingress-networkpolicy.yaml",
-	)
-	for _, marker := range []string{
-		"namespace: vekil-system",
-		"kubernetes.io/metadata.name: orka-test",
-		"ports: [{protocol: TCP, port: 1337}]",
-	} {
-		if !strings.Contains(vekilPolicy, marker) {
-			t.Fatalf("Vekil ingress NetworkPolicy lost fixed boundary %q:\n%s", marker, vekilPolicy)
-		}
+	if !strings.Contains(rendered, "--controller-mode=harness-v2") {
+		t.Fatal("installing without a gateway disabled the default controller mode")
 	}
 }
 
@@ -748,38 +775,333 @@ func TestStaticChartEnforcesSQLiteControllerSafety(t *testing.T) {
 	}
 }
 
-func TestStaticChartRequiresAgentExecutionSnapshotSecret(t *testing.T) {
-	tests := []struct {
-		name      string
-		args      []string
-		wantError string
-	}{
-		{
-			name: "missing Secret name",
-			args: []string{
-				"--set-string", "controller.agentExecutionSnapshot.existingSecret=",
-			},
-			wantError: "controller.agentExecutionSnapshot.existingSecret is required when agent execution is enabled",
-		},
-		{
-			name: "missing Secret key",
-			args: []string{
-				"--set-string", "controller.agentExecutionSnapshot.key=",
-			},
-			wantError: "controller.agentExecutionSnapshot.key is required when agent execution is enabled",
-		},
+func TestStaticChartGeneratesAgentExecutionSnapshotSecret(t *testing.T) {
+	args := []string{
+		"--set-string", "controller.agentExecutionSnapshot.existingSecret=",
+		"--set-string", "controller.agentExecutionSnapshot.key=",
+	}
+	rendered := requireHelmRender(t, args...)
+
+	secret := requireRenderedDocument(t, rendered, "kind: Secret\n", "\n  name: test-orka-agent-execution-snapshot\n")
+	for _, marker := range []string{
+		"helm.sh/resource-policy: keep",
+		"app.kubernetes.io/component: controller",
+		"type: Opaque",
+	} {
+		if !strings.Contains(secret, marker) {
+			t.Fatalf("generated snapshot Secret is missing %q:\n%s", marker, secret)
+		}
+	}
+	// The chart must never render key material: Helm keeps rendered
+	// manifests in release history. The controller mints the key at runtime.
+	if strings.Contains(secret, "\ndata:") || strings.Contains(secret, "\nstringData:") {
+		t.Fatalf("generated snapshot Secret must be rendered empty:\n%s", secret)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			output, err := helmTemplateStaticChart(t, tt.args...)
-			if err == nil {
-				t.Fatalf("helm template unexpectedly accepted incomplete snapshot key configuration:\n%s", output)
-			}
-			if !strings.Contains(output, tt.wantError) {
-				t.Fatalf("helm template error does not contain %q:\n%s", tt.wantError, output)
+	deployment := requireRenderedDocument(t, rendered, "kind: Deployment\n", "\n  name: test-orka-controller\n")
+	for _, marker := range []string{
+		`--agent-execution-snapshot-secret=test-orka-agent-execution-snapshot`,
+		`--agent-execution-snapshot-secret-key=key`,
+		"--agent-execution-snapshot-key-file=/var/run/orka/agent-execution-snapshot/key",
+		"secretName: \"test-orka-agent-execution-snapshot\"",
+		"key: \"key\"",
+		"path: key",
+	} {
+		if !strings.Contains(deployment, marker) {
+			t.Fatalf("controller deployment does not bootstrap the generated snapshot Secret %q:\n%s", marker, deployment)
+		}
+	}
+	volume := renderedVolume(t, deployment, "agent-execution-snapshot-key")
+	if !strings.Contains(volume, "optional: true") {
+		t.Fatalf("generated snapshot key mount must be optional so the Pod can start before the key exists:\n%s", volume)
+	}
+
+	explicit := requireHelmRender(t)
+	if strings.Contains(explicit, "name: test-orka-agent-execution-snapshot") {
+		t.Fatalf("chart generated a snapshot Secret although existingSecret was supplied:\n%s", explicit)
+	}
+	explicitDeployment := requireRenderedDocument(t, explicit, "kind: Deployment\n", "\n  name: test-orka-controller\n")
+	if strings.Contains(explicitDeployment, "--agent-execution-snapshot-secret=") {
+		t.Fatalf("operator-supplied snapshot key must not enable controller bootstrap:\n%s", explicitDeployment)
+	}
+	if strings.Contains(renderedVolume(t, explicitDeployment, "agent-execution-snapshot-key"), "optional: true") {
+		t.Fatalf("operator-supplied snapshot key mount must stay required:\n%s", explicitDeployment)
+	}
+}
+
+// renderedVolume returns the named volume block of a rendered Deployment.
+func renderedVolume(t *testing.T, deployment, name string) string {
+	t.Helper()
+	start := strings.Index(deployment, "\n        - name: "+name+"\n")
+	if start < 0 {
+		t.Fatalf("controller deployment has no %s volume:\n%s", name, deployment)
+	}
+	volume := deployment[start+1:]
+	if next := strings.Index(volume[1:], "\n        - name: "); next >= 0 {
+		volume = volume[:next+1]
+	}
+	return volume
+}
+
+func TestStaticChartEnforcesNamespaceModeWithAdmissionPolicy(t *testing.T) {
+	rendered := requireHelmRender(t)
+
+	policy := requireRenderedDocument(t, rendered,
+		"kind: ValidatingAdmissionPolicy\n", "\n  name: test-orka-namespace-mode\n")
+	for _, marker := range []string{
+		`expression: "object.metadata.name == 'orka-test'"`,
+		`expression: "'harness-v2'"`,
+		`expression: "'system:serviceaccount:orka-test:test-orka'"`,
+		"claim is immutable",
+		"only the release's controller may claim an existing namespace",
+	} {
+		if !strings.Contains(policy, marker) {
+			t.Fatalf("namespace-mode policy is missing %q:\n%s", marker, policy)
+		}
+	}
+	requireRenderedDocument(t, rendered,
+		"kind: ValidatingAdmissionPolicyBinding\n", "\n  name: test-orka-namespace-mode\n")
+
+	// The claim is no longer a controller-served webhook: the controller must
+	// be able to claim its namespace before its own webhook server is up.
+	webhook := requireRenderedDocument(t, rendered,
+		"kind: ValidatingWebhookConfiguration\n", "\n  name: test-orka-controller\n")
+	for _, marker := range []string{"namespace-mode.", "/validate-v1-namespace-execution-mode"} {
+		if strings.Contains(webhook, marker) {
+			t.Fatalf("namespace-mode webhook must not be rendered any more:\n%s", webhook)
+		}
+	}
+
+	clusterRole := requireRenderedDocument(t, rendered, "kind: ClusterRole\n", "\n  name: test-orka-controller-cluster\n")
+	if !strings.Contains(clusterRole, `resourceNames: ["orka-test"]
+    verbs: ["get", "update"]`) {
+		t.Fatalf("controller ClusterRole must allow updating only its own namespace:\n%s", clusterRole)
+	}
+	if strings.Contains(clusterRole, `resourceNames: ["orka-runtimes"]
+    verbs: ["get", "update"]`) {
+		t.Fatalf("controller ClusterRole must not allow updating the runtime namespace:\n%s", clusterRole)
+	}
+}
+
+// requireHelmRenderWithUpstreamService renders the static chart with the
+// provider proxy's upstream Service lookup forced to return service.
+func requireHelmRenderWithUpstreamService(t *testing.T, service string, args ...string) (string, error) {
+	t.Helper()
+	helm, err := exec.LookPath("helm")
+	if err != nil {
+		t.Skip("helm is required for static chart render tests")
+	}
+	chartDir := filepath.Join(t.TempDir(), "static")
+	if err := os.CopyFS(chartDir, os.DirFS("static")); err != nil {
+		t.Fatalf("copy static chart: %v", err)
+	}
+	templatePath := filepath.Join(chartDir, "templates", "provider-proxy-networkpolicy.yaml")
+	template, err := os.ReadFile(templatePath)
+	if err != nil {
+		t.Fatalf("read provider proxy NetworkPolicy template: %v", err)
+	}
+	lookup := `{{- $service := lookup "v1" "Service" $upstream.namespace $upstream.name -}}`
+	forced := `{{- $service := ` + service + ` -}}`
+	withService := strings.Replace(string(template), lookup, forced, 1)
+	if withService == string(template) {
+		t.Fatalf("provider proxy egress derivation is not gated by the upstream Service lookup")
+	}
+	if err := os.WriteFile(templatePath, []byte(withService), 0o600); err != nil {
+		t.Fatalf("force upstream Service lookup in copied chart: %v", err)
+	}
+	defaults := staticChartDefaultArgs()
+	commandArgs := make([]string, 0, 5+len(defaults)+len(args))
+	commandArgs = append(commandArgs, "template", "test", chartDir, "--namespace", "orka-test")
+	commandArgs = append(commandArgs, defaults...)
+	commandArgs = append(commandArgs, args...)
+	output, err := exec.Command(helm, commandArgs...).CombinedOutput()
+	return string(output), err
+}
+
+func TestStaticChartDerivesProviderProxyEgressFromUpstreamService(t *testing.T) {
+	service := `dict "spec" (dict ` +
+		`"selector" (dict "app.kubernetes.io/name" "vekil" "app.kubernetes.io/instance" "vekil") ` +
+		`"ports" (list (dict "port" 1337 "targetPort" 8080)))`
+	output, err := requireHelmRenderWithUpstreamService(t, service,
+		"--set-json", "providerProxy.egress=[]",
+		"--set-string", "providerProxy.upstreamBaseURL=http://vekil.vekil-system.svc:1337",
+		"--show-only", "templates/provider-proxy-networkpolicy.yaml",
+	)
+	if err != nil {
+		t.Fatalf("helm template with a derivable upstream Service failed: %v\n%s", err, output)
+	}
+	var policy networkingv1.NetworkPolicy
+	if err := yaml.Unmarshal([]byte(output), &policy); err != nil {
+		t.Fatal(err)
+	}
+	if len(policy.Spec.Egress) != 2 || len(policy.Spec.Egress[1].To) != 1 || len(policy.Spec.Egress[1].Ports) != 1 {
+		t.Fatalf("derived egress must be exactly DNS plus the gateway rule:\n%s", output)
+	}
+	gateway := policy.Spec.Egress[1]
+	peer := gateway.To[0]
+	namespaceLabels := map[string]string{}
+	if peer.NamespaceSelector != nil {
+		namespaceLabels = peer.NamespaceSelector.MatchLabels
+	}
+	if namespaceLabels["kubernetes.io/metadata.name"] != "vekil-system" ||
+		peer.PodSelector == nil || peer.PodSelector.MatchLabels["app.kubernetes.io/name"] != "vekil" ||
+		peer.PodSelector.MatchLabels["app.kubernetes.io/instance"] != "vekil" ||
+		gateway.Ports[0].Port == nil || gateway.Ports[0].Port.IntVal != 8080 {
+		t.Fatalf("derived egress does not select the Service's Pods on its target port: %#v", gateway)
+	}
+
+	// A UDP entry sharing the port number must not win over the TCP one.
+	output, err = requireHelmRenderWithUpstreamService(t,
+		`dict "spec" (dict "selector" (dict "app" "gw") "ports" (list `+
+			`(dict "port" 1337 "protocol" "TCP" "targetPort" 8443) `+
+			`(dict "port" 1337 "protocol" "UDP" "targetPort" 9443)))`,
+		"--set-json", "providerProxy.egress=[]",
+		"--set-string", "providerProxy.upstreamBaseURL=http://vekil.vekil-system.svc:1337",
+		"--show-only", "templates/provider-proxy-networkpolicy.yaml",
+	)
+	if err != nil || !strings.Contains(output, "port: 8443\n") || strings.Contains(output, "9443") {
+		t.Fatalf("derivation must take the TCP target port, not the UDP one: %v\n%s", err, output)
+	}
+
+	// Without a target port the Service port is the Pod port; a cluster.local
+	// suffix and the scheme's default port are accepted too.
+	output, err = requireHelmRenderWithUpstreamService(t,
+		`dict "spec" (dict "selector" (dict "app" "gw") "ports" (list (dict "port" 80)))`,
+		"--set-json", "providerProxy.egress=[]",
+		"--set-string", "providerProxy.upstreamBaseURL=http://gw.models.svc.cluster.local",
+		"--show-only", "templates/provider-proxy-networkpolicy.yaml",
+	)
+	if err != nil || !strings.Contains(output, "port: 80\n") ||
+		!strings.Contains(output, "kubernetes.io/metadata.name: \"models\"") {
+		t.Fatalf("default-port derivation failed: %v\n%s", err, output)
+	}
+
+	for name, tt := range map[string]struct {
+		service   string
+		wantError string
+	}{
+		"named target port": {
+			service:   `dict "spec" (dict "selector" (dict "app" "gw") "ports" (list (dict "port" 1337 "targetPort" "http")))`,
+			wantError: "maps to the named target port",
+		},
+		"no matching port": {
+			service:   `dict "spec" (dict "selector" (dict "app" "gw") "ports" (list (dict "port" 9999)))`,
+			wantError: "has no port 1337",
+		},
+		"only a UDP entry for the port": {
+			service:   `dict "spec" (dict "selector" (dict "app" "gw") "ports" (list (dict "port" 1337 "protocol" "UDP")))`,
+			wantError: "has no port 1337",
+		},
+		"no selector": {
+			service:   `dict "spec" (dict "ports" (list (dict "port" 1337)))`,
+			wantError: "has no selector",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			output, err := requireHelmRenderWithUpstreamService(t, tt.service,
+				"--set-json", "providerProxy.egress=[]",
+				"--set-string", "providerProxy.upstreamBaseURL=http://vekil.vekil-system.svc:1337",
+			)
+			if err == nil || !strings.Contains(output, tt.wantError) {
+				t.Fatalf("render error = %v, want %q:\n%s", err, tt.wantError, output)
 			}
 		})
+	}
+}
+
+func TestStaticChartGeneratesWebhookTLSSecret(t *testing.T) {
+	args := []string{
+		"--set-string", "webhooks.tls.existingSecret=",
+		"--set-string", "webhooks.caBundle=",
+	}
+	rendered := requireHelmRender(t, args...)
+
+	secret := requireRenderedDocument(t, rendered, "kind: Secret\n", "\n  name: test-orka-webhook-tls\n")
+	for _, marker := range []string{"helm.sh/resource-policy: keep", "type: Opaque"} {
+		if !strings.Contains(secret, marker) {
+			t.Fatalf("generated webhook TLS Secret is missing %q:\n%s", marker, secret)
+		}
+	}
+	if strings.Contains(secret, "\ndata:") || strings.Contains(secret, "\nstringData:") {
+		t.Fatalf("generated webhook TLS Secret must be rendered empty so the controller populates it:\n%s", secret)
+	}
+
+	deployment := requireRenderedDocument(t, rendered, "kind: Deployment\n", "\n  name: test-orka-controller\n")
+	for _, marker := range []string{
+		`--webhook-cert-rotation-secret=test-orka-webhook-tls`,
+		`--webhook-cert-rotation-webhook=test-orka-controller`,
+		`--webhook-cert-rotation-dns-name=test-orka-webhook.orka-test.svc`,
+		"--webhook-cert-path=/var/run/orka/webhook/tls",
+	} {
+		if !strings.Contains(deployment, marker) {
+			t.Fatalf("controller deployment is missing rotation marker %q:\n%s", marker, deployment)
+		}
+	}
+	// cert-controller writes only the Secret; the kubelet must project it into
+	// the cert directory, so generated mode mounts the whole generated Secret.
+	volume := renderedVolume(t, deployment, "webhook-tls")
+	if !strings.Contains(volume, `secretName: "test-orka-webhook-tls"`) || strings.Contains(volume, "items:") {
+		t.Fatalf("generated webhook TLS must mount the whole generated Secret:\n%s", volume)
+	}
+
+	webhook := requireRenderedDocument(t, rendered,
+		"kind: ValidatingWebhookConfiguration\n", "\n  name: test-orka-controller\n")
+	if strings.Contains(webhook, "caBundle:") {
+		t.Fatalf("generated mode must leave caBundle to the controller:\n%s", webhook)
+	}
+
+	clusterRole := requireRenderedDocument(t, rendered, "kind: ClusterRole\n", "\n  name: test-orka-controller-cluster\n")
+	for _, marker := range []string{
+		`resources: ["validatingwebhookconfigurations"]`,
+		`resourceNames: ["test-orka-controller"]`,
+	} {
+		if !strings.Contains(clusterRole, marker) {
+			t.Fatalf("controller ClusterRole is missing rotation permission %q:\n%s", marker, clusterRole)
+		}
+	}
+
+	// Update on a webhook configuration is whole-object, so a policy bounds
+	// the controller to caBundle changes on its own configuration.
+	guard := requireRenderedDocument(t, rendered,
+		"kind: ValidatingAdmissionPolicy\n", "\n  name: test-orka-webhook-configuration\n")
+	for _, marker := range []string{
+		`expression: "object.metadata.name == 'test-orka-controller'"`,
+		`expression: "request.userInfo.username == 'system:serviceaccount:orka-test:test-orka'"`,
+		"only clientConfig.caBundle may change",
+		"w.clientConfig.?url.orValue('') == o.clientConfig.?url.orValue('')",
+	} {
+		if !strings.Contains(guard, marker) {
+			t.Fatalf("webhook configuration guard policy is missing %q:\n%s", marker, guard)
+		}
+	}
+	requireRenderedDocument(t, rendered,
+		"kind: ValidatingAdmissionPolicyBinding\n", "\n  name: test-orka-webhook-configuration\n")
+}
+
+func TestStaticChartKeepsOperatorWebhookTLS(t *testing.T) {
+	rendered := requireHelmRender(t)
+	if strings.Contains(rendered, "name: test-orka-webhook-tls\n") {
+		t.Fatalf("chart generated a webhook TLS Secret although existingSecret was supplied:\n%s", rendered)
+	}
+	deployment := requireRenderedDocument(t, rendered, "kind: Deployment\n", "\n  name: test-orka-controller\n")
+	if strings.Contains(deployment, "--webhook-cert-rotation-secret") {
+		t.Fatalf("operator-supplied webhook TLS must not enable rotation:\n%s", deployment)
+	}
+	if !strings.Contains(deployment, `secretName: "controller-webhook-tls"`) {
+		t.Fatalf("operator-supplied webhook TLS Secret is not mounted:\n%s", deployment)
+	}
+	clusterRole := requireRenderedDocument(t, rendered, "kind: ClusterRole\n", "\n  name: test-orka-controller-cluster\n")
+	if strings.Contains(clusterRole, "validatingwebhookconfigurations") {
+		t.Fatalf("operator-supplied webhook TLS must not grant webhook configuration writes:\n%s", clusterRole)
+	}
+	if strings.Contains(rendered, "name: test-orka-webhook-configuration\n") {
+		t.Fatalf("operator-supplied webhook TLS needs no webhook configuration guard policy:\n%s", rendered)
+	}
+
+	output, err := helmTemplateStaticChart(t, "--set-string", "webhooks.caBundle=")
+	wantError := "caBundle or caInjectionAnnotations when webhooks.tls.existingSecret is set"
+	if err == nil || !strings.Contains(output, wantError) {
+		t.Fatalf("operator-supplied webhook TLS without CA trust was accepted: %v\n%s", err, output)
 	}
 }
 
@@ -986,6 +1308,17 @@ func TestStaticChartRejectsAgentExecutionSnapshotIdentityChangesOnUpgrade(t *tes
 			wantError:      "controller.agentExecutionSnapshot.key is immutable for in-place upgrades",
 		},
 		{
+			name:           "explicit Secret replaced by the generated one",
+			existingSecret: "snapshot-key",
+			existingKey:    "encryption-key",
+			args: []string{
+				"--set-string", "controller.agentExecutionSnapshot.existingSecret=",
+				"--set-string", "controller.agentExecutionSnapshot.key=",
+			},
+			wantError: "controller.agentExecutionSnapshot.existingSecret is immutable for in-place upgrades; " +
+				"preserve \"snapshot-key\"",
+		},
+		{
 			name:           "live Secret name missing",
 			existingSecret: "",
 			existingKey:    "encryption-key",
@@ -1012,6 +1345,33 @@ func TestStaticChartRejectsAgentExecutionSnapshotIdentityChangesOnUpgrade(t *tes
 				t.Fatalf("helm render error = %v, want snapshot identity rejection %q:\n%s", err, tt.wantError, output)
 			}
 		})
+	}
+}
+
+func TestStaticChartAcceptsGeneratedAgentExecutionSnapshotIdentityOnUpgrade(t *testing.T) {
+	output, err := helmTemplateStaticChartWithExistingControllerSnapshot(
+		t,
+		generatedSnapshotUpgradeControllerArgs(),
+		"test-orka-agent-execution-snapshot",
+		"key",
+		"--set-string", "controller.agentExecutionSnapshot.existingSecret=",
+		"--set-string", "controller.agentExecutionSnapshot.key=",
+	)
+	if err != nil {
+		t.Fatalf("upgrade with the generated snapshot identity was rejected: %v\n%s", err, output)
+	}
+	secret := requireRenderedDocument(t, output, "kind: Secret\n", "\n  name: test-orka-agent-execution-snapshot\n")
+	if strings.Contains(secret, "\ndata:") {
+		t.Fatalf("upgrade must not render snapshot key material:\n%s", secret)
+	}
+}
+
+func generatedSnapshotUpgradeControllerArgs() []string {
+	return []string{
+		"--controller-mode=harness-v2",
+		"--watch-namespace=orka-test",
+		"--controller-url=http://test-orka.orka-test.svc:8080",
+		"--acp-runtime-namespace=orka-runtimes",
 	}
 }
 
@@ -1673,7 +2033,7 @@ func TestStaticChartHarnessV1EnabledRenderIsIsolatedAndDurable(t *testing.T) {
 	harnessV1RenderedGeneration(t, deployment)
 }
 
-func TestStaticChartRejectsUnsupportedProviderProxyOverrides(t *testing.T) {
+func TestStaticChartRejectsIncompleteProviderProxyConfiguration(t *testing.T) {
 	tests := []struct {
 		name      string
 		args      []string
@@ -1688,20 +2048,26 @@ func TestStaticChartRejectsUnsupportedProviderProxyOverrides(t *testing.T) {
 			wantError: "controller.acpRuntime.providerProxyNamespace must be empty or match the Helm release namespace",
 		},
 		{
-			name: "different upstream host",
+			name: "missing upstream",
 			args: []string{
-				"--set", "providerProxy.enabled=true",
-				"--set-string", "providerProxy.upstreamBaseURL=http://other.vekil-system.svc:1337",
+				"--set-string", "providerProxy.upstreamBaseURL=",
 			},
-			wantError: "providerProxy.upstreamBaseURL must be http://vekil.vekil-system.svc:1337",
+			wantError: "providerProxy.upstreamBaseURL must be an HTTP(S) URL",
 		},
 		{
-			name: "different upstream port",
+			name: "no egress and no in-cluster Service to derive it from",
 			args: []string{
-				"--set", "providerProxy.enabled=true",
-				"--set-string", "providerProxy.upstreamBaseURL=http://vekil.vekil-system.svc:8080",
+				"--set-json", "providerProxy.egress=[]",
+				"--set-string", "providerProxy.upstreamBaseURL=https://gateway.example.test:8443",
 			},
-			wantError: "providerProxy.upstreamBaseURL must be http://vekil.vekil-system.svc:1337",
+			wantError: "providerProxy.egress is required unless providerProxy.upstreamBaseURL names an in-cluster Service",
+		},
+		{
+			name: "no egress and the named Service is missing",
+			args: []string{
+				"--set-json", "providerProxy.egress=[]",
+			},
+			wantError: "names Service models/model-gateway, which was not found",
 		},
 	}
 
@@ -1713,6 +2079,67 @@ func TestStaticChartRejectsUnsupportedProviderProxyOverrides(t *testing.T) {
 			}
 			if !strings.Contains(output, tt.wantError) {
 				t.Fatalf("helm template error does not contain %q:\n%s", tt.wantError, output)
+			}
+		})
+	}
+}
+
+func TestStaticChartProviderProxyURLValidation(t *testing.T) {
+	for _, test := range []struct {
+		url   string
+		valid bool
+	}{
+		{url: "http://agentgateway.gateway-system.svc:3000", valid: true},
+		{url: "https://gateway.example.test:8443/models/", valid: true},
+		{url: "http://gateway.example.test:1", valid: true},
+		{url: "https://gateway.example.test:65535", valid: true},
+		{url: "http://gateway.example.test:080", valid: true},
+		{url: "http://[2001:db8::1]", valid: true},
+		{url: "http://[2001:db8::1]:8080", valid: true},
+		{url: "http://gateway.example.test/v1/.models/model..name", valid: true},
+		{url: "http://gateway.example.test/models%20test/%3F%23route", valid: true},
+		{url: "http://gateway.example.test:0"},
+		{url: "http://gateway.example.test:0000"},
+		{url: "http://gateway.example.test:65536"},
+		{url: "http://gateway.example.test:99999"},
+		{url: "http://gateway.example.test:99999999999999999999999999999999"},
+		{url: "http://[2001:db8::1]:0"},
+		{url: "http://[2001:db8::1]:65536"},
+		{url: "ftp://gateway.example.test"},
+		{url: "http://user@gateway.example.test"},
+		{url: "http://gateway.example.test?route=model"},
+		{url: "http://gateway.example.test#model"},
+		{url: "http://gateway.example.test/v1/../admin"},
+		{url: "http://gateway.example.test/v1/./models"},
+		{url: "http://gateway.example.test/v1/%2e%2E/admin"},
+		{url: "http://gateway.example.test/v1%2f..%2fadmin"},
+		{url: "http://gateway.example.test/v1%252f%252e%252e%252fadmin"},
+		{url: `http://gateway.example.test/v1\admin`},
+		{url: "http://gateway.example.test/v1%5cadmin"},
+		{url: "http://gateway.example.test/v1%255Cadmin"},
+		{url: "http://gateway.example.test/v1%00admin"},
+		{url: "http://gateway.example.test/v1%2500admin"},
+		{url: "http://gateway.example.test/%3F%23route/%252e%252e/admin"},
+		{url: "http://gateway.example.test/%invalid"},
+		{url: "http://:8080"},
+		{url: "http://:8080/v1"},
+		{url: "http://gateway.example.test/%25invalid"},
+	} {
+		t.Run(test.url, func(t *testing.T) {
+			// A values file preserves backslashes that Helm's --set parser would consume.
+			values, err := yaml.Marshal(map[string]any{
+				"providerProxy": map[string]string{"upstreamBaseURL": test.url},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			valuesPath := filepath.Join(t.TempDir(), "gateway.yaml")
+			if err := os.WriteFile(valuesPath, values, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err = helmTemplateStaticChart(t, "--values", valuesPath)
+			if (err == nil) != test.valid {
+				t.Fatalf("gateway URL accepted = %v, want %v", err == nil, test.valid)
 			}
 		})
 	}

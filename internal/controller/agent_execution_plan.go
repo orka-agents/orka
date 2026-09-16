@@ -75,6 +75,7 @@ func (r *TaskReconciler) planAgentExecution(
 	if agent == nil || agent.Spec.Runtime == nil {
 		return rejectAgentExecutionPlan("agent runtime configuration is required")
 	}
+	agent = withEffectiveBuiltInContract(agent, r.Mode)
 	if agent.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != "" {
 		name := strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name)
 		reader := r.APIReader

@@ -186,14 +186,29 @@ metadata:
   labels:
     {{- include "orka.labels" . | nindent 4 }}
 rules:
+  # The controller reads its own namespace's execution-mode claim and writes
+  # it on first start; the namespace-mode admission policy keeps it immutable.
   - apiGroups: [""]
     resources: ["namespaces"]
-    resourceNames:
-      - {{ .Release.Namespace }}
-      {{- if $harnessV2 }}
-      - {{ .Values.controller.acpRuntime.namespace }}
-      {{- end }}
+    resourceNames: [{{ .Release.Namespace | quote }}]
+    verbs: ["get", "update"]
+  {{- if $harnessV2 }}
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    resourceNames: [{{ .Values.controller.acpRuntime.namespace | quote }}]
     verbs: ["get"]
+  {{- end }}
+  {{- if include "orka.webhookTLSGenerated" . }}
+  # The certificate rotator watches webhook configurations cluster-wide and
+  # rewrites only this release's caBundle. list/watch cannot be name-scoped.
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingwebhookconfigurations"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingwebhookconfigurations"]
+    resourceNames: [{{ include "orka.controllerWebhookName" . | quote }}]
+    verbs: ["update", "patch"]
+  {{- end }}
   - apiGroups: ["authentication.k8s.io"]
     resources: ["tokenreviews"]
     verbs: ["create"]

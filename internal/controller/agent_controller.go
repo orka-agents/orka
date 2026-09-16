@@ -26,12 +26,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/executionmode"
 )
 
 // AgentReconciler reconciles a Agent object
 type AgentReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// Mode is the controller's static execution mode. A built-in Agent that
+	// omitted contractVersion is stamped with it on first reconcile so the
+	// stored object carries its classification.
+	Mode executionmode.Mode
 }
 
 const (
@@ -65,6 +70,18 @@ func (r *AgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	}
 
 	logger.Info("Reconciling Agent", "agent", agent.Name)
+
+	if r.Mode != "" && agentOmitsBuiltInContract(agent) {
+		if err := executionmode.DefaultBuiltInAgentContract(agent, r.Mode); err != nil {
+			return ctrl.Result{}, err
+		}
+		if err := r.Update(ctx, agent); err != nil {
+			// A conflict just means the object moved; returning the error
+			// requeues with backoff and the next pass reads the fresh copy.
+			return ctrl.Result{}, fmt.Errorf("persist built-in Agent contract: %w", err)
+		}
+		logger.Info("Stamped built-in Agent with the namespace execution mode", "agent", agent.Name, "contract", *agent.Spec.Runtime.ContractVersion)
+	}
 
 	// Validate the agent configuration
 	validationErr := r.validateAgent(ctx, agent)

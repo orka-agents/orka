@@ -116,7 +116,7 @@ func (s *responsesStreamWriter) function(call llm.ToolCall) error {
 }
 
 func (s *responsesStreamWriter) fail() {
-	_ = s.finishText("incomplete")
+	_ = s.finishText(responsesStatusIncomplete)
 	detail := &responsesError{Code: responsesServerError, Message: "provider failed to produce a valid Responses completion"}
 	s.response.Status = "failed"
 	s.response.Error = detail
@@ -179,7 +179,7 @@ func (h *OpenAICompatHandler) streamResponses(c fiber.Ctx, ctx context.Context, 
 						completion.ToolCalls = append(completion.ToolCalls, llm.ToolCall{ID: item.CallID})
 					}
 				}
-				if len(response.Output) == 0 || response.setOutcome(completion) != nil {
+				if response.setOutcome(completion) != nil || (len(response.Output) == 0 && response.Status != responsesStatusIncomplete) {
 					writer.fail()
 					return
 				}
@@ -218,7 +218,7 @@ func (h *OpenAICompatHandler) produceResponsesChunks(ctx context.Context, provid
 				}
 			},
 		}
-		completion, err := runToolLoopWithObserver(ctx, provider, req, req.Model, h.responsesLoopConfig(req), toolCtx, observer, toolLoopOptions{requireFinalCompletion: true})
+		completion, err := runToolLoopWithObserver(ctx, provider, req, req.Model, h.responsesLoopConfig(req), toolCtx, observer, toolLoopOptions{requireFinalCompletion: true, allowEmptyTokenBudget: true})
 		if err != nil || ctx.Err() != nil {
 			send(llm.StreamChunk{Error: fmt.Errorf("coordinator completion failed")})
 			return

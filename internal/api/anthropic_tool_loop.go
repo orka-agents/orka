@@ -65,7 +65,7 @@ func isStreamingRequiredErr(err error) bool {
 // The aggregation is intentionally simple: concatenate text content and append
 // each tool call exactly once. A terminal chunk with an explicit stop reason
 // is required so truncated streams cannot be mistaken for completion.
-func completeViaStream(ctx context.Context, provider llm.Provider, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
+func completeViaStream(ctx context.Context, provider llm.Provider, req *llm.CompletionRequest, options ...toolLoopOptions) (*llm.CompletionResponse, error) {
 	streamCh, err := provider.Stream(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("%w: open: %w", errStreamUnavailable, err)
@@ -107,13 +107,13 @@ func completeViaStream(ctx context.Context, provider llm.Provider, req *llm.Comp
 	if !terminalSeen {
 		return nil, fmt.Errorf("stream closed without a terminal chunk")
 	}
-	if err := validateToolLoopCompletion(resp); err != nil {
+	if err := validateToolLoopCompletion(resp, options...); err != nil {
 		return nil, err
 	}
 	return resp, nil
 }
 
-func validateToolLoopCompletion(resp *llm.CompletionResponse) error {
+func validateToolLoopCompletion(resp *llm.CompletionResponse, options ...toolLoopOptions) error {
 	outcome := llm.NormalizeCompletionOutcome(resp)
 	switch outcome {
 	case llm.CompletionOutcomeCompleted, llm.CompletionOutcomeToolCalls:
@@ -124,10 +124,11 @@ func validateToolLoopCompletion(resp *llm.CompletionResponse) error {
 		// OpenAI clients expect the partial text with stop_reason "max_tokens"
 		// / finish_reason "length" (and typically raise the budget and retry).
 		// Every other incomplete reason (pause_turn, response.incomplete, a
-		// bare "incomplete", or no reason at all), an empty truncated body,
+		// bare "incomplete", or no reason at all), an empty truncated body
+		// (unless the Responses transport explicitly permits it),
 		// and a truncated tool call (its arguments are unusable and must not
 		// be executed) keep failing.
-		if isTokenBudgetTruncatedText(resp) {
+		if isTokenBudgetTruncatedText(resp, options...) {
 			return nil
 		}
 		reason := strings.TrimSpace(resp.StopReason)
@@ -154,8 +155,9 @@ func validateToolLoopCompletion(resp *llm.CompletionResponse) error {
 // off by the caller's output token budget ("max_tokens" / "length"). Such a
 // response is returned to the client as-is: the loop must not discard the
 // partial text and keep calling the model.
-func isTokenBudgetTruncatedText(resp *llm.CompletionResponse) bool {
-	if resp == nil || len(resp.ToolCalls) > 0 || strings.TrimSpace(resp.Content) == "" {
+func isTokenBudgetTruncatedText(resp *llm.CompletionResponse, options ...toolLoopOptions) bool {
+	allowEmpty := len(options) > 0 && options[0].allowEmptyTokenBudget
+	if resp == nil || len(resp.ToolCalls) > 0 || (!allowEmpty && strings.TrimSpace(resp.Content) == "") {
 		return false
 	}
 	switch strings.ToLower(strings.TrimSpace(resp.StopReason)) {
@@ -656,6 +658,8 @@ func executeExposedToolCall(ctx context.Context, tc llm.ToolCall, timeout time.D
 // must not label a failed final provider call as a completed response.
 type toolLoopOptions struct {
 	requireFinalCompletion bool
+	// Responses permits output:[] when the output token budget is exhausted.
+	allowEmptyTokenBudget bool
 }
 
 // runNonStreamingToolLoop runs the agentic tool loop using non-streaming Complete() calls.
@@ -725,7 +729,7 @@ func runToolLoopWithObserver(
 				observer.finalContent(resp.Content)
 				return resp, nil
 			}
-			if err := validateToolLoopCompletion(resp); err != nil {
+			if err := validateToolLoopCompletion(resp, options...); err != nil {
 				return nil, err
 			}
 			observer.finalContent(resp.Content)
@@ -751,7 +755,7 @@ func runToolLoopWithObserver(
 			// aggregate the chunks into a synthesized CompletionResponse so
 			// our tool loop can continue as if Complete had worked.
 			anthropicLog.Info("upstream refused non-streaming, retrying via Stream and aggregating")
-			resp, err = completeViaStream(ctx, provider, compReq)
+			resp, err = completeViaStream(ctx, provider, compReq, options...)
 		}
 		if err != nil && llm.IsContextTooLongErr(err) {
 			tokenEstimate := 0
@@ -762,13 +766,13 @@ func runToolLoopWithObserver(
 			compReq.Messages = messages
 			resp, err = provider.Complete(ctx, compReq)
 			if err != nil && isStreamingRequiredErr(err) {
-				resp, err = completeViaStream(ctx, provider, compReq)
+				resp, err = completeViaStream(ctx, provider, compReq, options...)
 			}
 		}
 		if err != nil {
 			return nil, fmt.Errorf("LLM completion failed: %w", err)
 		}
-		if err := validateToolLoopCompletion(resp); err != nil {
+		if err := validateToolLoopCompletion(resp, options...); err != nil {
 			return nil, err
 		}
 
@@ -776,7 +780,7 @@ func runToolLoopWithObserver(
 		// return the partial text with its max_tokens/length stop reason
 		// instead of treating it as a premature end of turn, which would
 		// discard the text and issue more model calls.
-		if isTokenBudgetTruncatedText(resp) {
+		if isTokenBudgetTruncatedText(resp, options...) {
 			anthropicLog.Info("response truncated by output token budget — returning partial text",
 				"iteration", iteration,
 				"stop_reason", resp.StopReason,

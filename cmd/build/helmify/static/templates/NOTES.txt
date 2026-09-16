@@ -1,15 +1,29 @@
-Orka has been installed.
+Orka is installed.
 
 Controller: {{ include "orka.controllerName" . }}
 Namespace:  {{ .Release.Namespace }}
 
-CRD lifecycle:
-  - A fresh install creates Orka's 26 cluster-scoped CRDs unless --skip-crds is used.
-  - Helm does not update CRDs during helm upgrade. Apply the CRDs from the exact
-    target chart before upgrading the release.
-  - helm uninstall retains the CRDs and all Orka custom resources.
+Next steps:
 
-Upgrade guidance: helm show readme <the same chart reference or archive>
+  1. Forward the API port and leave it running:
+       kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "orka.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+  2. In another terminal, create a client token:
+       export ORKA_TOKEN="$(kubectl -n {{ .Release.Namespace }} create token {{ .Values.client.name }})"
+  3. Open http://localhost:{{ .Values.service.port }} and paste the token, or continue with
+       https://orka-agents.github.io/orka/docs/getting-started#connect-to-the-api
+
+Webhook certificate: Secret {{ include "orka.webhookTLSSecretName" . }}
+{{- if include "orka.webhookTLSGenerated" . }}
+  Managed by the controller. It mints a self-signed CA, renews the serving
+  certificate before expiry, and injects the CA into the webhook configuration.
+{{- end }}
+
+Snapshot encryption key: Secret {{ include "orka.agentExecutionSnapshotSecretName" . }}
+{{- if not (trim (default "" .Values.controller.agentExecutionSnapshot.existingSecret)) }}
+  Minted by the controller on first start and kept on uninstall. Back it up
+  together with the controller's data volume; without it, saved agent records
+  cannot be read.
+{{- end }}
 
 {{- if not .Values.store.persistence.enabled }}
 
@@ -30,16 +44,26 @@ Upgrade guidance: helm show readme <the same chart reference or archive>
 
 {{- end }}
 
-Generic Gateway CRD upgrade:
-  Helm installs CRDs on first install but does not upgrade them automatically.
-  If CRDs are managed separately, pass --skip-crds to helm install/upgrade.
-  Before enabling gateways on an existing release, apply the CRDs from the published chart version, then upgrade again:
+For operators:
 
-    helm repo add orka https://orka-agents.github.io/orka/charts
-    helm repo update orka
-    helm show readme orka/orka --version {{ .Chart.Version }}
+  CRD lifecycle:
+    - A fresh install creates Orka's cluster-scoped CRDs unless --skip-crds is used.
+    - Helm does not update CRDs during helm upgrade. Apply the CRDs from the exact
+      target chart before upgrading the release.
+    - helm uninstall retains the CRDs and all Orka custom resources.
 
-  Follow the README's guarded exact-spec replacement procedure (or the matching
-  source checkout's scripts/apply-helm-crds.sh) before upgrading. The controller
-  remains gateway-disabled until all three Gateway CRDs and the Task
-  session-cutoff schema are observed.
+  Upgrade guidance: helm show readme <the same chart reference or archive>
+
+  Generic Gateway CRD upgrade:
+    Helm installs CRDs on first install but does not upgrade them automatically.
+    If CRDs are managed separately, pass --skip-crds to helm install/upgrade.
+    Before enabling gateways on an existing release, apply the CRDs from the published chart version, then upgrade again:
+
+      helm repo add orka https://orka-agents.github.io/orka/charts
+      helm repo update orka
+      helm show readme orka/orka --version {{ .Chart.Version }}
+
+    Follow the README's guarded exact-spec replacement procedure (or the matching
+    source checkout's scripts/apply-helm-crds.sh) before upgrading. The controller
+    remains gateway-disabled until all three Gateway CRDs and the Task
+    session-cutoff schema are observed.

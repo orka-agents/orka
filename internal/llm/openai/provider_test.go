@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -2083,6 +2084,9 @@ func TestStream_ResponsesAPI_MaxOutputTokens(t *testing.T) {
 		content += chunk.Content
 		if chunk.Done {
 			stopReason = chunk.StopReason
+			if chunk.InputTokens != 5 || chunk.OutputTokens != 3 || chunk.Model != "gpt-4" || chunk.Provider != "openai" {
+				t.Fatalf("incomplete terminal lost usage/model/provider: %#v", chunk)
+			}
 		}
 	}
 	if content != "partial" || stopReason != stopReasonLength {
@@ -2626,5 +2630,76 @@ func TestProviderTelemetryProviderNameNormalizesAzure(t *testing.T) {
 	p := &Provider{providerType: "azure-openai"}
 	if got := p.TelemetryProviderName(); got != "azure.ai.openai" {
 		t.Fatalf("TelemetryProviderName() = %q, want azure.ai.openai", got)
+	}
+}
+
+func TestProviderChatHistoryOrigins(t *testing.T) {
+	for _, fromResponses := range []bool{false, true} {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("responses=%t/stream=%t", fromResponses, stream), func(t *testing.T) {
+				captured := make(chan []any, 1)
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					var request map[string]any
+					if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+						t.Error(err)
+						w.WriteHeader(400)
+						return
+					}
+					captured <- request["messages"].([]any)
+					if stream {
+						w.Header().Set("Content-Type", "text/event-stream")
+						fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n") //nolint:errcheck
+					} else {
+						w.Header().Set("Content-Type", "application/json")
+						fmt.Fprint(w, `{"id":"chat-result","model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`) //nolint:errcheck
+					}
+				}))
+				defer server.Close()
+				provider, err := NewProvider(llm.ProviderConfig{APIKey: "test-key", BaseURL: server.URL})
+				if err != nil {
+					t.Fatal(err)
+				}
+				provider.mode.Store(int32(apiModeChatCompletions))
+				req := &llm.CompletionRequest{Model: "test-model", ResponsesInput: fromResponses, Messages: []llm.Message{
+					{Role: "user", Content: "hello"}, {Role: "assistant", Content: "before "}, {Role: "assistant", Content: "after"}, {Role: "user", Content: "continue"},
+				}}
+				expected := `[{"role":"user","content":"hello"},{"role":"assistant","content":"before "},{"role":"assistant","content":"after"},{"role":"user","content":"continue"}]`
+				// Extra capacity exposes accidental mutation when a second call is grouped.
+				backing := []llm.ToolCall{{ID: "call-one", Name: "first", Arguments: json.RawMessage(`{}`)}, {ID: "guard", Name: "guard", Arguments: json.RawMessage(`{}`)}}
+				if fromResponses {
+					req.Messages = []llm.Message{
+						{Role: "user", Content: "hello"}, {Role: "assistant", Content: "before "}, {Role: "assistant", ToolCalls: backing[:1]},
+						{Role: "assistant", Content: "after"}, {Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "call-two", Name: "second", Arguments: json.RawMessage(`{}`)}}},
+						{Role: "tool", ToolCallID: "call-two", Content: "two"}, {Role: "tool", ToolCallID: "call-one", Content: "one"}, {Role: "user", Content: "continue"},
+					}
+					expected = `[{"role":"user","content":"hello"},{"role":"assistant","content":"before after","tool_calls":[{"type":"function","id":"call-one","function":{"name":"first","arguments":"{}"}},{"type":"function","id":"call-two","function":{"name":"second","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call-two","content":"two"},{"role":"tool","tool_call_id":"call-one","content":"one"},{"role":"user","content":"continue"}]`
+				}
+				before, _ := json.Marshal(req.Messages)
+				if stream {
+					chunks, err := provider.Stream(t.Context(), req)
+					if err != nil {
+						t.Fatal(err)
+					}
+					for chunk := range chunks {
+						if chunk.Error != nil {
+							t.Fatal(chunk.Error)
+						}
+					}
+				} else if _, err := provider.Complete(t.Context(), req); err != nil {
+					t.Fatal(err)
+				}
+				var want []any
+				if err := json.Unmarshal([]byte(expected), &want); err != nil {
+					t.Fatal(err)
+				}
+				if got := <-captured; !reflect.DeepEqual(want, got) {
+					t.Errorf("outgoing history changed: got %#v, want %#v", got, want)
+				}
+				after, _ := json.Marshal(req.Messages)
+				if string(before) != string(after) || backing[1].ID != "guard" {
+					t.Fatal("provider modified caller-owned history")
+				}
+			})
+		}
 	}
 }
