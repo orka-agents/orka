@@ -32,7 +32,6 @@ const (
 	EnvSubstrateSessionIdentitySecretName = "ORKA_SUBSTRATE_SESSION_IDENTITY_TOKEN_SECRET_NAME"
 	EnvSubstrateSessionIdentitySecretKey  = "ORKA_SUBSTRATE_SESSION_IDENTITY_TOKEN_SECRET_KEY"
 	EnvSubstrateSessionIdentityRequired   = "ORKA_SUBSTRATE_SESSION_IDENTITY_REQUIRED"
-	EnvSubstrateSessionIdentityMintCert   = "ORKA_SUBSTRATE_SESSION_IDENTITY_MINT_CERT"
 	EnvSubstrateSessionIdentityAudience   = "ORKA_SUBSTRATE_SESSION_IDENTITY_AUDIENCE"
 	EnvSubstrateSessionIdentityAppID      = "ORKA_SUBSTRATE_SESSION_IDENTITY_APP_ID"
 	EnvSubstrateSessionIdentityUserID     = "ORKA_SUBSTRATE_SESSION_IDENTITY_USER_ID"
@@ -74,7 +73,6 @@ type SubstrateConfig struct {
 	SessionIdentitySecretName string
 	SessionIdentitySecretKey  string
 	SessionIdentityRequired   bool
-	SessionIdentityMintCert   bool
 	SessionIdentityAudience   string
 	SessionIdentityAppID      string
 	SessionIdentityUserID     string
@@ -147,9 +145,6 @@ func SubstrateConfigFromEnv(getenv func(string) string) (SubstrateConfig, error)
 	}
 	if value := strings.TrimSpace(getenv(EnvSubstrateSessionIdentityRequired)); value != "" {
 		cfg.SessionIdentityRequired = strings.EqualFold(value, "true")
-	}
-	if value := strings.TrimSpace(getenv(EnvSubstrateSessionIdentityMintCert)); value != "" {
-		cfg.SessionIdentityMintCert = strings.EqualFold(value, "true")
 	}
 	if value := strings.TrimSpace(getenv(EnvSubstrateSessionIdentityAudience)); value != "" {
 		cfg.SessionIdentityAudience = value
@@ -260,9 +255,6 @@ func (c SubstrateConfig) Validate() error {
 	}
 	if cfg.SessionIdentityRequired && strings.TrimSpace(cfg.SessionIdentitySecretName) == "" {
 		return fmt.Errorf("substrate SessionIdentity requires --substrate-session-identity-token-secret-name")
-	}
-	if cfg.SessionIdentityMintCert {
-		return fmt.Errorf("substrate SessionIdentity certificate minting is not supported yet")
 	}
 	if cfg.CommandTimeout <= 0 {
 		return fmt.Errorf("substrate command timeout must be greater than zero")

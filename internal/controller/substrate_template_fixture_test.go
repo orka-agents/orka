@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -16,9 +17,29 @@ import (
 // the native template store and authenticated gRPC tests.
 type substrateTemplateFixtureStore struct{ r *RuntimePoolReconciler }
 
+// substrateFixtureTemplateValidator stands in for native template validation
+// in reconciler tests: the referenced ActorTemplate must exist, carry the
+// execution-workspace approval label, and report a Ready phase.
 func substrateFixtureTemplateValidator(reader client.Reader) func(context.Context, *ExecutionWorkspaceRequest) error {
 	return func(ctx context.Context, request *ExecutionWorkspaceRequest) error {
-		return validateSubstrateRoutableActorTemplateResource(ctx, reader, request)
+		if request == nil || request.TemplateName == "" {
+			return nil
+		}
+		template := &unstructured.Unstructured{}
+		template.SetGroupVersionKind(substrateActorTemplateGVK)
+		if err := reader.Get(ctx, types.NamespacedName{Namespace: request.TemplateNamespace, Name: request.TemplateName}, template); err != nil {
+			if apierrors.IsNotFound(err) {
+				return fmt.Errorf("substrate execution workspace ActorTemplate %q not found in namespace %q", request.TemplateName, request.TemplateNamespace)
+			}
+			return err
+		}
+		if template.GetLabels()["orka.ai/execution-workspace"] != "true" {
+			return fmt.Errorf("substrate ActorTemplate %q in namespace %q missing label orka.ai/execution-workspace=true", request.TemplateName, request.TemplateNamespace)
+		}
+		if phase, _, _ := unstructured.NestedString(template.Object, "status", "phase"); phase != "Ready" {
+			return fmt.Errorf("substrate ActorTemplate %q in namespace %q is not Ready: phase=%q", request.TemplateName, request.TemplateNamespace, phase)
+		}
+		return nil
 	}
 }
 
