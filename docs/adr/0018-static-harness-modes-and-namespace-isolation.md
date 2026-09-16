@@ -125,3 +125,8 @@ label can never change or be removed, only the release's controller
 ServiceAccount may add it to an existing namespace, and namespace edits no
 longer depend on the controller being up. Orka is pre-1.0 and no released chart
 enforced the operator claim, so no supported upgrade path changes.
+
+For the same reason, a built-in Agent may omit `runtime.contractVersion`: the
+namespace it lives in has exactly one mode, so admission treats an omitted
+selector as that mode. An explicit value must still match the mode and never
+changes once written.

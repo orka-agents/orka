@@ -15,7 +15,7 @@ then [Connect the gateway](#connect-the-gateway). Have an OpenAI Codex or
 GitHub Copilot subscription instead? Use
 [With a Codex subscription](#with-an-openai-codex-subscription) or
 [With a GitHub Copilot subscription](#with-a-github-copilot-subscription).
-Either way it is one deploy script, one values file, and one `helm upgrade`.
+Either way it is one gateway install, one values file, and one `helm upgrade`.
 :::
 
 AI-worker tasks, `type: ai`, do not use a gateway. They read your
@@ -47,25 +47,23 @@ request succeeds through it before connecting Orka.
 
 ## Example: Vekil on the same cluster
 
-Vekil is a small reverse proxy that fronts GitHub Copilot, OpenAI, Azure
-OpenAI, Anthropic, and other providers behind one endpoint. Orka ships a deploy
-script for it. Run the commands below from an Orka source checkout.
+[Vekil](https://github.com/sozercan/vekil) is a small reverse proxy that fronts
+GitHub Copilot, OpenAI, Azure OpenAI, Anthropic, and other providers behind one
+endpoint. It ships as a container image, `ghcr.io/sozercan/vekil`, listening on
+port 1337. Run it as a Deployment and Service named `vekil` in a `vekil-system`
+namespace, following its [getting started](https://github.com/sozercan/vekil/blob/main/docs/getting-started.md)
+and [configuration](https://github.com/sozercan/vekil/blob/main/docs/configuration.md)
+docs, and give it credentials in one of the ways below. Each is a Vekil configuration;
+Vekil's [provider routing](https://github.com/sozercan/vekil/blob/main/docs/provider-routing.md)
+and [provider API keys](https://github.com/sozercan/vekil/blob/main/docs/provider-api-keys.md)
+pages have the details and more providers.
 
 ### With provider API keys
 
 Vekil reads provider keys from environment variables that you back with
-Kubernetes Secrets. Create a Secret for each key you want to use:
-
-```bash
-kubectl create namespace vekil-system
-
-kubectl -n vekil-system create secret generic openai-api-key \
-  --from-literal=key='<your-openai-api-key>'
-```
-
-Write a providers file. This example exposes OpenAI. Keep the model IDs you
-plan to use in Orka and remove the rest. Use `api_key_env`, never an inline
-key, because the file is stored in a ConfigMap.
+Kubernetes Secrets, referenced from a providers file with `api_key_env`. Never
+put a key in the file itself. This example exposes one OpenAI model; keep the
+model IDs you plan to use in Orka.
 
 ```yaml title="providers.yaml"
 providers:
@@ -99,58 +97,36 @@ providers:
           - /responses
 ```
 
-Vekil's [provider routing](https://github.com/sozercan/vekil/blob/main/docs/provider-routing.md)
-and [provider API keys](https://github.com/sozercan/vekil/blob/main/docs/provider-api-keys.md)
-docs cover Anthropic, OpenAI-compatible, and local providers, and mixing
-several providers in one file.
-
-Deploy Vekil with the file and the Secret. Each `--env-secret` maps an
-environment variable named in `api_key_env` to a Secret and key:
-
-```bash
-.agents/skills/vekil-reverse-proxy-deploy/scripts/deploy_vekil_reverse_proxy.sh \
-  --providers-config ./providers.yaml \
-  --env-secret OPENAI_API_KEY=openai-api-key:key
-```
+Mount the file as Vekil's `--providers-config` and set `OPENAI_API_KEY` (or the
+name you chose) from a Secret in the Vekil Deployment.
 
 ### With an OpenAI Codex subscription
 
 Vekil can use the ChatGPT login that the Codex CLI stores after `codex login`.
-Copy that file into a Secret and mount it:
+Copy that file into a Secret and mount it into the Vekil Deployment at the
+Codex home path Vekil documents:
 
 ```bash
 codex login
 kubectl -n vekil-system create secret generic codex-auth \
   --from-file=auth.json="$HOME/.codex/auth.json"
+```
 
-cat > providers.yaml <<'YAML'
+```yaml title="providers.yaml"
 providers:
   - id: openai-codex
     type: openai-codex
     default: true
-YAML
-
-.agents/skills/vekil-reverse-proxy-deploy/scripts/deploy_vekil_reverse_proxy.sh \
-  --providers-config ./providers.yaml \
-  --codex-auth-secret codex-auth:auth.json
 ```
 
 When the stored login expires, run `codex login` again and recreate the Secret.
 
 ### With a GitHub Copilot subscription
 
-Without a providers file, Vekil uses GitHub Copilot as its only upstream. Give
-it a GitHub token from a user with Copilot access:
-
-```bash
-export COPILOT_GITHUB_TOKEN='<your-github-token>'
-.agents/skills/vekil-reverse-proxy-deploy/scripts/deploy_vekil_reverse_proxy.sh \
-  --create-copilot-token-secret copilot-github-token:token
-unset COPILOT_GITHUB_TOKEN
-```
-
-Without a token, Vekil starts a device-code login and prints the code and URL
-in its Pod logs. Deploy with `--skip-wait`, then complete the login:
+Without a providers file, Vekil uses GitHub Copilot as its only upstream. Set
+`COPILOT_GITHUB_TOKEN` in the Vekil Deployment from a Secret holding a GitHub
+token for a user with Copilot access. Without a token, Vekil starts a
+device-code login and prints the code and URL in its Pod logs:
 
 ```bash
 kubectl -n vekil-system logs deploy/vekil

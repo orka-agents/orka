@@ -242,12 +242,11 @@ spec:
     name: claude-sonnet-4-20250514
   runtime:
     type: claude
-    contractVersion: orka.harness.v2
 EOF
 ```
 
-The defaults give the agent its runtime's full tool set, a shell, and 50 turns per
-Task. For `type: opencode`, use `provider/model` names such as `openai/gpt-5.4` and set
+That is the whole Agent. The defaults give it its runtime's full tool set, a shell,
+and 50 turns per Task. For `type: opencode`, use `provider/model` names such as `openai/gpt-5.4` and set
 `model.contextWindow` and `model.maxTokens`.
 [Agent runtimes](concepts/agent-runtimes.md) has every option, including how to
 restrict tools.

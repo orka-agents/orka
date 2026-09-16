@@ -835,6 +835,36 @@ EOF_V1_AGENT
     'Agent contractVersion must match namespace execution mode "harness-v2"' \
     "${work_dir}/v1-agent-in-v2.yaml"
 
+  log "Proving an Agent may omit contractVersion: the namespace mode is the contract"
+  cat <<EOF_DEFAULT_AGENT | kubectl apply -f -
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: coexistence-v2-agent-defaulted
+  namespace: ${v2_namespace}
+spec:
+  runtime: {type: codex}
+  model: {name: gpt-5.2-codex}
+EOF_DEFAULT_AGENT
+  # Writing the matching contract later is fine; the other contract is not,
+  # and once written the selector can no longer be removed.
+  run kubectl -n "${v2_namespace}" patch agent coexistence-v2-agent-defaulted --type=merge \
+    -p '{"spec":{"runtime":{"type":"codex","contractVersion":"orka.harness.v2"}}}'
+  # A JSON patch removes the field outright; a client-side apply would leave a
+  # field it never wrote alone and never reach admission with the removal.
+  local unset_err="${work_dir}/unset-contract.err" unset_attempts=10
+  while :; do
+    if kubectl -n "${v2_namespace}" patch agent coexistence-v2-agent-defaulted --type=json \
+      -p '[{"op":"remove","path":"/spec/runtime/contractVersion"}]' >/dev/null 2>"${unset_err}"; then
+      die "admission allowed removing a written Agent contractVersion"
+    fi
+    grep -q 'Agent contractVersion is immutable' "${unset_err}" && break
+    grep -Eq 'failed calling webhook|no endpoints available' "${unset_err}" && (( --unset_attempts > 0 )) || \
+      die "unexpected denial while removing Agent contractVersion: $(cat "${unset_err}")"
+    sleep 3
+  done
+  run kubectl -n "${v2_namespace}" delete agent coexistence-v2-agent-defaulted --ignore-not-found
+
   log "Executing a real harness v1 wrapper Task end to end (model-free)"
   cat <<EOF_AGENT | kubectl apply -f -
 apiVersion: core.orka.ai/v1alpha1
