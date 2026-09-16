@@ -1489,7 +1489,7 @@ func (ch *ChatHandler) abandonChatDeletionWaiter(namespace, sessionID string, re
 // wrapWithRetryAndFallback wraps a provider with retry logic and adds fallback
 // providers if the agent has them configured.
 func (ch *ChatHandler) wrapWithRetryAndFallback(ctx context.Context, c fiber.Ctx, provider llm.Provider, req ChatRequest, namespace string) (llm.Provider, error) {
-	var resultProvider llm.Provider = llm.NewRetryProvider(provider, 0)
+	var resultProvider llm.Provider = llm.NewRetryProvider(provider)
 
 	if req.AgentRef == "" {
 		return resultProvider, nil
@@ -1542,7 +1542,7 @@ func (ch *ChatHandler) wrapWithRetryAndFallback(ctx context.Context, c fiber.Ctx
 		}
 
 		fallbacks = append(fallbacks, llm.FallbackEntry{
-			Provider: llm.NewRetryProvider(fbProvider, 0),
+			Provider: llm.NewRetryProvider(fbProvider),
 			Model:    fbModel,
 		})
 	}

@@ -13,16 +13,6 @@ import (
 
 const maxErrorBodyBytes = 1024
 
-type Client interface {
-	Health(ctx context.Context, req ActorRequest) error
-	Exec(ctx context.Context, req ActorRequest, body ExecRequest) (*ExecResponse, error)
-	ExecStatus(ctx context.Context, req ActorRequest, execID string) (*ExecResponse, error)
-	Upload(ctx context.Context, req ActorRequest, body UploadRequest) (*UploadResponse, error)
-	UploadNoResponse(ctx context.Context, req ActorRequest, body UploadRequest) error
-	Download(ctx context.Context, req ActorRequest, body DownloadRequest) (*DownloadResponse, error)
-	Scrub(ctx context.Context, req ActorRequest, body ScrubRequest) error
-}
-
 type HTTPDoer interface {
 	Do(*http.Request) (*http.Response, error)
 }
@@ -32,8 +22,6 @@ type HTTPClient struct {
 	ActorDNSSuffix string
 	HTTPClient     HTTPDoer
 }
-
-var _ Client = HTTPClient{}
 
 type ActorRequest struct {
 	ActorID   string

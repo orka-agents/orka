@@ -166,23 +166,11 @@ func artifactFilename(filename string) (string, error) {
 	return localName, nil
 }
 
-// UploadArtifacts scans /tmp/artifacts and uploads each file to the controller.
-// It preserves the legacy background-context behavior for callers without a
-// worker lifecycle context.
-func UploadArtifacts() error {
-	return UploadArtifactsContext(context.Background())
-}
-
 // UploadArtifactsContext scans the artifacts directory and uploads each file
 // using the worker lifecycle context. It returns nil when the directory does
 // not exist or is empty.
 func UploadArtifactsContext(ctx context.Context) error {
 	return UploadArtifactsWithRequestAuthorizationContext(ctx, nil)
-}
-
-// UploadArtifactsWithRequestAuthorization applies wrapper-only authorization to every request.
-func UploadArtifactsWithRequestAuthorization(authorize func(*http.Request, []byte) error) error {
-	return UploadArtifactsWithRequestAuthorizationContext(context.Background(), authorize)
 }
 
 // UploadArtifactsWithRequestAuthorizationContext signs each request, including retries,
@@ -334,7 +322,7 @@ func uploadPendingArtifacts(
 			return err
 		}
 		endpoint := fmt.Sprintf("%s/%s", baseEndpoint, url.PathEscape(artifact.filename))
-		if err := doPostWithRetryAuthorization(
+		if err := doPostWithRetry(
 			ctx, "artifact upload", endpoint, artifact.data, saToken, artifact.contentType,
 			30*time.Second, retryWait, artifactMaxRetries, authorize,
 		); err != nil {
@@ -416,9 +404,4 @@ func detectContentType(filename string, data []byte) string {
 	}
 
 	return http.DetectContentType(data)
-}
-
-func doPostWithContentType(endpoint string, data []byte, saToken, contentType string) error {
-	return doPostWithRetryAuthorization(context.Background(), "artifact upload", endpoint, data,
-		saToken, contentType, 30*time.Second, retryWait, artifactMaxRetries, nil)
 }

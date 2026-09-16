@@ -266,15 +266,12 @@ func (s *RuntimeSession) Generation() int64         { return s.generation }
 func (s *RuntimeSession) ProviderSessionID() string { return s.providerSessionID }
 func (s *RuntimeSession) Process() *Process         { return s.process }
 
+// StartPrompt starts a prompt bounded by the configured default lease.
 func (s *RuntimeSession) StartPrompt(ctx context.Context, promptID, requestDigest string, prompt []ContentBlock) (PromptRun, error) {
-	return s.StartPromptWithLease(ctx, promptID, requestDigest, prompt, s.config.PromptLease)
-}
-
-func (s *RuntimeSession) StartPromptWithLease(ctx context.Context, promptID, requestDigest string, prompt []ContentBlock, leaseDuration time.Duration) (PromptRun, error) {
-	if leaseDuration <= 0 {
+	if s.config.PromptLease <= 0 {
 		return PromptRun{}, fmt.Errorf("prompt lease duration must be positive")
 	}
-	return s.StartPromptWithLeaseDeadline(ctx, promptID, requestDigest, prompt, time.Now().Add(leaseDuration))
+	return s.StartPromptWithLeaseDeadline(ctx, promptID, requestDigest, prompt, time.Now().Add(s.config.PromptLease))
 }
 
 // StartPromptWithLeaseDeadline preserves the controller's absolute lease bound
@@ -342,15 +339,12 @@ func (s *RuntimeSession) StartPromptWithLeaseDeadline(ctx context.Context, promp
 	return PromptRun{Events: active.events, Result: active.result, Release: func(event PromptEvent) { s.releaseBufferedEvent(active, event) }}, nil
 }
 
+// RenewPromptLease extends a still-live prompt lease by the configured default.
 func (s *RuntimeSession) RenewPromptLease(promptID string) error {
-	return s.RenewPromptLeaseFor(promptID, s.config.PromptLease)
-}
-
-func (s *RuntimeSession) RenewPromptLeaseFor(promptID string, leaseDuration time.Duration) error {
-	if leaseDuration <= 0 {
+	if s.config.PromptLease <= 0 {
 		return fmt.Errorf("prompt lease duration must be positive")
 	}
-	return s.RenewPromptLeaseUntil(promptID, time.Now().Add(leaseDuration))
+	return s.RenewPromptLeaseUntil(promptID, time.Now().Add(s.config.PromptLease))
 }
 
 // RenewPromptLeaseUntil extends a still-live prompt lease to an absolute bound.

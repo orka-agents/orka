@@ -17,7 +17,7 @@ import (
 func TestRuntimeSessionLeaseExpiryWinsDelayedWatchdog(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		session, peer := newLeaseTestRuntimeSession(t)
-		run, err := session.StartPromptWithLease(t.Context(), "prompt-expiry", "sha256:expiry", []ContentBlock{Text("wait")}, time.Second)
+		run, err := session.StartPromptWithLeaseDeadline(t.Context(), "prompt-expiry", "sha256:expiry", []ContentBlock{Text("wait")}, time.Now().Add(time.Second))
 		if err != nil {
 			t.Fatal(err)
 		}

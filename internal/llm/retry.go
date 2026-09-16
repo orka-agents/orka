@@ -25,14 +25,12 @@ type RetryProvider struct {
 	jitter     float64
 }
 
-// NewRetryProvider creates a RetryProvider wrapping inner. If maxRetries is 0, defaults to 3.
-func NewRetryProvider(inner Provider, maxRetries int) *RetryProvider {
-	if maxRetries <= 0 {
-		maxRetries = defaultMaxRetries
-	}
+// NewRetryProvider creates a RetryProvider wrapping inner with the default
+// retry budget (3 retries, 1s base delay, 30s cap, 10% jitter).
+func NewRetryProvider(inner Provider) *RetryProvider {
 	return &RetryProvider{
 		inner:      inner,
-		maxRetries: maxRetries,
+		maxRetries: defaultMaxRetries,
 		baseDelay:  defaultBaseDelay,
 		maxDelay:   defaultMaxDelay,
 		jitter:     defaultJitter,

@@ -187,7 +187,7 @@ func LoadConfigFromEnv() (Config, error) {
 		return Config{}, err
 	}
 	workspaceMaterializer := EmptyWorkspaceMaterializer()
-	var artifactUploader ArtifactUploader
+	var artifactUploader *RemoteArtifactUploader
 	artifactAPIURL := strings.TrimSpace(os.Getenv(EnvArtifactAPIURL))
 	if artifactAPIURL != "" {
 		authorizationProvider, providerErr := NewBrokerArtifactAuthorizationProvider(
@@ -209,7 +209,7 @@ func LoadConfigFromEnv() (Config, error) {
 		if clientErr != nil {
 			return Config{}, clientErr
 		}
-		workspaceMaterializer, clientErr = NewRemoteWorkspaceMaterializer(artifactClient, WorkspaceMaterializerLimits{})
+		workspaceMaterializer, clientErr = NewRemoteWorkspaceMaterializer(artifactClient)
 		if clientErr != nil {
 			return Config{}, clientErr
 		}
@@ -256,7 +256,7 @@ func LoadConfigFromEnv() (Config, error) {
 		Protocol: harnessv2.ProtocolVersion, Transport: "http+ndjson", ACPVersion: harnessv2.ACPProfileV1,
 		RuntimeProfileDigest: profileDigest, ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
 		AdapterDigests: profile.AdapterDigests, Limits: limits, SupportsDrain: true, SupportsPublicationFinalization: true,
-		SupportsAgentSessionConfiguration: providerKind != providerKindAgentKit && providerKind != providerKindFoundry,
+		SupportsAgentSessionConfiguration: !isExternalACPProvider(providerKind),
 		Provider:                          providerCapabilities(providerKind, model),
 		WorkspaceGovernance:               harnessv2.StrictWorkspaceGovernanceCapabilities(),
 	}
@@ -298,19 +298,8 @@ func LoadConfigFromEnv() (Config, error) {
 // providerAdapterDigests keeps the supervisor's default-nil unknown-provider
 // behavior while sourcing the shared built-in adapter digest table.
 func providerAdapterDigests(provider string) map[string]string {
-	if provider == providerKindFoundry {
-		digest, err := foundryAdapterDigestFromEnv()
-		if err != nil {
-			return nil
-		}
-		return map[string]string{foundryAdapterName: digest}
-	}
-	if provider == providerKindAgentKit {
-		digest, err := agentKitAdapterDigestFromEnv()
-		if err != nil {
-			return nil
-		}
-		return agentKitAdapterDigests(digest)
+	if adapter, ok := externalACPAdapterFor(provider); ok {
+		return adapter.adapterDigests()
 	}
 	return acp.BuiltInRuntimeAdapterDigests(provider)
 }
@@ -763,10 +752,9 @@ func providerProfile(
 			},
 			PrepareSession: prepareOpenCodeConfig,
 		}, nil
-	case providerKindAgentKit:
-		return agentKitProviderProfile(model)
-	case providerKindFoundry:
-		return foundryProviderProfile(model)
+	case providerKindAgentKit, providerKindFoundry:
+		adapter, _ := externalACPAdapterFor(kind)
+		return adapter.profile(model)
 	default:
 		return ProviderProfile{}, fmt.Errorf("unsupported ACP provider %q", kind)
 	}

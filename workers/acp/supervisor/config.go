@@ -64,10 +64,6 @@ type AgentDiagnosticFilter struct {
 	Startup func(text string) (summary string, ok bool)
 }
 
-type ArtifactUploader interface {
-	UploadWorkspaceDelta(context.Context, harnessv2.CreateWorkspaceDeltaRequest, []byte, string) (harnessv2.ArtifactReference, error)
-}
-
 type WorkspaceMaterializer interface {
 	Materialize(context.Context, harnessv2.CreateRuntimeSessionRequest, string) error
 }
@@ -109,7 +105,7 @@ type Config struct {
 	ProviderProxy         ProviderProxyConfig
 	MCPBroker             MCPBroker
 	WorkspaceMaterializer WorkspaceMaterializer
-	ArtifactUploader      ArtifactUploader
+	ArtifactUploader      *RemoteArtifactUploader
 	DeltaOptions          workspacedelta.Options
 	// E2EPromptWriteFaultRecorder persists direct-pool fault consumption
 	// outside the runtime Pod so replacement cannot re-arm the test fault.
