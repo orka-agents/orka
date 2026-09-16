@@ -318,6 +318,13 @@ func produceResponsesFallback(ctx context.Context, provider llm.Provider, req *l
 		send(llm.StreamChunk{Error: errCompletionRefused})
 		return
 	}
+	// The complete fallback result is available before any output is sent.
+	// Reject an unfinished/invalid outcome before exposing executable calls.
+	var outcome ResponsesResponse
+	if err := outcome.setOutcome(completion); err != nil {
+		send(llm.StreamChunk{Error: responsesCompletionError(err)})
+		return
+	}
 	items := responsesCompletionItems(completion)
 	for i, item := range items {
 		if !send(llm.StreamChunk{Content: item.Content, ToolCall: item.ToolCall}) {

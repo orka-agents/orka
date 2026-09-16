@@ -192,7 +192,7 @@ func (o *responseOutputOrder) eventIndex(evt responses.ResponseStreamEventUnion)
 	if index, ok := o.byID[id]; id != "" && ok {
 		return &index, nil
 	}
-	if isResponseTextEvent(evt) {
+	if isResponseTextEvent(evt) || (evt.Type == eventTypeResponseOutputItemDone && evt.Item.Type == responseOutputTypeMessage) {
 		if o.indexed || (o.unindexedText && o.unindexedID != "" && id != "" && o.unindexedID != id) {
 			return nil, fmt.Errorf("response text has no unambiguous output index")
 		}

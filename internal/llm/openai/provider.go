@@ -660,7 +660,15 @@ func (t *responseFuncCallTracker) mergeItem(fc *responseFuncCallState, item resp
 	if fc == nil {
 		return nil
 	}
-	if err := t.validateSnapshot(fc, item.Name, responseOutputArguments(item.Arguments)); err != nil {
+	arguments := responseOutputArguments(item.Arguments)
+	prefixOnly := t.ordered && !argumentsDone && item.Status != stopReasonCompleted
+	if prefixOnly {
+		partial := &responseFuncCallState{name: item.Name}
+		partial.args.WriteString(arguments)
+		if err := validateResponseFunctionMerge(fc, partial); err != nil {
+			return err
+		}
+	} else if err := t.validateSnapshot(fc, item.Name, arguments); err != nil {
 		return err
 	}
 	if item.ID != "" {
@@ -672,9 +680,16 @@ func (t *responseFuncCallTracker) mergeItem(fc *responseFuncCallState, item resp
 	if item.Name != "" {
 		fc.name = item.Name
 	}
-	if arguments := responseOutputArguments(item.Arguments); arguments != "" {
-		fc.arguments = arguments
-		fc.argumentsDone = true
+	if arguments != "" {
+		if prefixOnly {
+			if len(arguments) > fc.args.Len() {
+				fc.args.Reset()
+				fc.args.WriteString(arguments)
+			}
+		} else {
+			fc.arguments = arguments
+			fc.argumentsDone = true
+		}
 	} else if argumentsDone {
 		if fc.arguments == "" {
 			fc.arguments = fc.args.String()
@@ -907,7 +922,7 @@ func handleResponseCompleted(evt responses.ResponseStreamEventUnion, tracker *re
 	stopReason := normalizeResponsesStopReason(
 		string(evt.Response.Status),
 		evt.Response.Output,
-		strings.TrimSpace(evt.Response.OutputText()) == "" && (!tracker.ordered || !tracker.outputOrder.hasText()),
+		!tracker.ordered && strings.TrimSpace(evt.Response.OutputText()) == "",
 	)
 	if stopReason == stopReasonToolCalls {
 		for i, item := range evt.Response.Output {

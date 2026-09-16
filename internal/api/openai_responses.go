@@ -156,7 +156,7 @@ func (h *OpenAICompatHandler) HandleResponses(c fiber.Ctx) error {
 	if coordinator {
 		completion, err = runNonStreamingToolLoop(ctx, provider, comp, model, h.responsesLoopConfig(comp), toolCtx, toolLoopOptions{requireFinalCompletion: true, allowEmptyTokenBudget: true})
 		if comp.ResponseFormat == nil || comp.ResponseFormat.Type == oaiContentTypeText {
-			completion = stripGoalStateSentinelFromResponse(completion)
+			completion = stripResponsesGoalStateSentinel(completion)
 		}
 	} else {
 		completion, err = provider.Complete(ctx, comp)
@@ -227,18 +227,19 @@ func (r *ResponsesResponse) setCompletion(completion *llm.CompletionResponse) er
 	items := responsesCompletionItems(completion)
 	for index, output := range items {
 		if output.ToolCall == nil {
+			status := output.Status
+			if status == "" {
+				status = completionStatusCompleted
+				if index == len(items)-1 {
+					status = r.Status
+				}
+			}
+			if status != completionStatusCompleted && status != responsesStatusIncomplete {
+				return fmt.Errorf("invalid response message status")
+			}
 			if output.Content != "" {
 				item := newResponsesMessage()
-				item.Status = output.Status
-				if item.Status == "" {
-					item.Status = completionStatusCompleted
-					if index == len(items)-1 {
-						item.Status = r.Status
-					}
-				}
-				if item.Status != completionStatusCompleted && item.Status != responsesStatusIncomplete {
-					return fmt.Errorf("invalid response message status")
-				}
+				item.Status = status
 				item.Content[0].Text = output.Content
 				r.Output = append(r.Output, item)
 			}

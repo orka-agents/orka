@@ -157,17 +157,6 @@ func (o *responseOutputOrder) completeText(snapshot responses.ResponseOutputItem
 	return item.drain(index, send)
 }
 
-func (o *responseOutputOrder) hasText() bool {
-	for _, item := range o.text {
-		for _, part := range item.parts {
-			if part.sent != 0 && strings.TrimSpace(part.text[:part.sent]) != "" {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // A terminal response may omit snapshots, but cannot silently drop a part
 // whose predecessor never arrived or completed.
 func (o *responseOutputOrder) validateTextCompletion(send streamSender) bool {
