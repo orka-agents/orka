@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -165,7 +166,7 @@ func (h *OpenAICompatHandler) streamResponses(c fiber.Ctx, ctx context.Context, 
 					return
 				}
 			case chunk, ok := <-chunks:
-				if !ok || chunk.Error != nil {
+				if !ok || chunk.Error != nil || streamCtx.Err() != nil {
 					writer.fail(chunk.Error)
 					return
 				}
@@ -190,6 +191,10 @@ func (h *OpenAICompatHandler) streamResponses(c fiber.Ctx, ctx context.Context, 
 				if !chunk.Done {
 					continue
 				}
+				if streamCtx.Err() != nil {
+					writer.fail()
+					return
+				}
 				completion := &llm.CompletionResponse{StopReason: chunk.StopReason, InputTokens: chunk.InputTokens, OutputTokens: chunk.OutputTokens}
 				for _, item := range response.Output {
 					if item.Type == finishReasonFunctionCall {
@@ -205,6 +210,10 @@ func (h *OpenAICompatHandler) streamResponses(c fiber.Ctx, ctx context.Context, 
 					return
 				}
 				if err := writer.finishText(response.Status); err != nil {
+					return
+				}
+				if streamCtx.Err() != nil {
+					writer.fail()
 					return
 				}
 				_ = writer.event("response."+response.Status, map[string]any{responsesObject: response})
@@ -232,7 +241,12 @@ func (h *OpenAICompatHandler) produceResponsesChunks(ctx context.Context, provid
 					send(llm.StreamChunk{Content: stripGoalStateSentinel(content)})
 				}
 			},
-			OnFinalContent: func(content string) { send(llm.StreamChunk{Content: stripGoalStateSentinel(content)}) },
+			OnFinalContent: func(content string) {
+				if !structured {
+					content = stripGoalStateSentinel(content)
+				}
+				send(llm.StreamChunk{Content: content})
+			},
 			OnToolResult: func(call llm.ToolCall, result string) {
 				if !structured {
 					send(llm.StreamChunk{Content: formatToolProgress(call, result)})
@@ -252,26 +266,14 @@ func (h *OpenAICompatHandler) produceResponsesChunks(ctx context.Context, provid
 	}
 	upstream, err := provider.Stream(ctx, req)
 	if err != nil {
-		// Preserve providers that only support non-streaming completions.
-		completion, completeErr := provider.Complete(ctx, req)
-		if completeErr != nil || completion == nil {
-			send(llm.StreamChunk{Error: responsesCompletionError(completeErr)})
-			return
+		if ctx.Err() == nil && responsesStreamUnsupported(err, false) {
+			produceResponsesFallback(ctx, provider, req, send)
+		} else {
+			send(llm.StreamChunk{Error: responsesCompletionError(err)})
 		}
-		items := responsesCompletionItems(completion)
-		for i, item := range items {
-			if !send(llm.StreamChunk{Content: item.Content, ToolCall: item.ToolCall}) {
-				return
-			}
-			// Leave the final text open: the terminal outcome determines whether
-			// a token-budget-truncated message is incomplete.
-			if i < len(items)-1 && !send(llm.StreamChunk{OutputItemDone: true}) {
-				return
-			}
-		}
-		send(llm.StreamChunk{Done: true, StopReason: completion.StopReason, InputTokens: completion.InputTokens, OutputTokens: completion.OutputTokens})
 		return
 	}
+	receivedOutput := false
 	for {
 		select {
 		case <-ctx.Done():
@@ -279,6 +281,13 @@ func (h *OpenAICompatHandler) produceResponsesChunks(ctx context.Context, provid
 		case chunk, ok := <-upstream:
 			if !ok {
 				return
+			}
+			if chunk.Error != nil && !receivedOutput && ctx.Err() == nil && responsesStreamUnsupported(chunk.Error, true) {
+				produceResponsesFallback(ctx, provider, req, send)
+				return
+			}
+			if chunk.Content != "" || chunk.ToolCall != nil || chunk.OutputItemDone {
+				receivedOutput = true
 			}
 			if !send(chunk) || chunk.Done || chunk.Error != nil {
 				return
@@ -293,4 +302,53 @@ func (h *OpenAICompatHandler) responsesLoopConfig(req *llm.CompletionRequest) Ch
 		config.MaxPrematureEndRetries = 0
 	}
 	return config
+}
+
+func produceResponsesFallback(ctx context.Context, provider llm.Provider, req *llm.CompletionRequest, send func(llm.StreamChunk) bool) {
+	completion, completeErr := provider.Complete(ctx, req)
+	if completeErr != nil || completion == nil {
+		send(llm.StreamChunk{Error: responsesCompletionError(completeErr)})
+		return
+	}
+	items := responsesCompletionItems(completion)
+	for i, item := range items {
+		if !send(llm.StreamChunk{Content: item.Content, ToolCall: item.ToolCall}) {
+			return
+		}
+		// Leave the final text open: the terminal outcome determines whether
+		// a token-budget-truncated message is incomplete.
+		if i < len(items)-1 && !send(llm.StreamChunk{OutputItemDone: true}) {
+			return
+		}
+	}
+	send(llm.StreamChunk{Done: true, StopReason: completion.StopReason, InputTokens: completion.InputTokens, OutputTokens: completion.OutputTokens})
+}
+
+// Only an explicit unsupported-stream capability error permits retry. Channel
+// errors additionally need an HTTP status: protocol/event failures are not
+// evidence that a provider lacks streaming, even before content is emitted.
+func responsesStreamUnsupported(err error, requireHTTP bool) bool {
+	if err == nil {
+		return false
+	}
+	if providerErr, ok := errors.AsType[*llm.ProviderError](err); ok {
+		switch providerErr.StatusCode {
+		case fiber.StatusMethodNotAllowed, fiber.StatusNotImplemented:
+			return true
+		case fiber.StatusBadRequest:
+		default:
+			return false
+		}
+	} else if requireHTTP {
+		return false
+	}
+	words := strings.FieldsFunc(strings.ToLower(err.Error()), func(r rune) bool { return r < 'a' || r > 'z' })
+	mentionsStream := false
+	for _, word := range words {
+		if word == "stream" || word == "streaming" {
+			mentionsStream = true
+		}
+	}
+	message := strings.Join(words, " ")
+	return mentionsStream && (strings.Contains(message, "unsupported") || strings.Contains(message, "not supported") || strings.Contains(message, "not implemented") || strings.Contains(message, "does not support"))
 }

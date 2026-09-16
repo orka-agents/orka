@@ -89,7 +89,11 @@ func (s *orderedResponseSender) flush() bool {
 		if _, ok := s.pending[index]; !ok {
 			continue
 		}
-		if index > s.next && s.open {
+		if index > s.next {
+			if !s.open || index != s.next+1 {
+				s.send(llm.StreamChunk{Error: fmt.Errorf("response output has a missing predecessor"), Done: true})
+				return false
+			}
 			previous := s.next
 			if !s.send(llm.StreamChunk{OutputIndex: &previous, OutputItemDone: true}) {
 				return false
@@ -140,7 +144,7 @@ func (o *responseOutputOrder) bind(id string, index int64) error {
 }
 
 func (o *responseOutputOrder) eventIndex(evt responses.ResponseStreamEventUnion) (*int64, error) {
-	if evt.Type == "response.completed" || evt.Type == eventTypeResponseIncomplete {
+	if evt.Type == eventTypeResponseCompleted || evt.Type == eventTypeResponseIncomplete {
 		if o.unindexedText {
 			output := evt.Response.Output
 			if len(output) > 1 || (len(output) == 1 && (output[0].Type != responseOutputTypeMessage || (o.unindexedID != "" && output[0].ID != o.unindexedID))) {
@@ -156,7 +160,7 @@ func (o *responseOutputOrder) eventIndex(evt responses.ResponseStreamEventUnion)
 		return nil, nil
 	}
 	id := evt.ItemID
-	if evt.Type == "response.output_item.added" || evt.Type == "response.output_item.done" {
+	if evt.Type == eventTypeResponseOutputItemAdded || evt.Type == eventTypeResponseOutputItemDone {
 		id = evt.Item.ID
 	}
 	if evt.JSON.OutputIndex.Valid() {
@@ -194,7 +198,7 @@ func (o *responseOutputOrder) recordText(index *int64, delta string) {
 func (o *responseOutputOrder) completeText(item responses.ResponseOutputItemUnion, index *int64, send streamSender) bool {
 	var text strings.Builder
 	for _, part := range item.Content {
-		if part.Type == "output_text" {
+		if part.Type == responseContentTypeOutputText {
 			text.WriteString(part.Text)
 		}
 	}

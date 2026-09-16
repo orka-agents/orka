@@ -754,6 +754,9 @@ func runToolLoopWithObserver(
 			if err := validateToolLoopCompletion(resp, options...); err != nil {
 				return nil, err
 			}
+			if requireFinalCompletion && len(resp.ToolCalls) != 0 {
+				return nil, fmt.Errorf("tools-free final completion returned tool calls")
+			}
 			observer.finalContent(resp.Content)
 			return resp, nil
 		}

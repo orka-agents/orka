@@ -35,19 +35,24 @@ const (
 )
 
 const (
-	eventTypeFunctionCall           = "function_call"
-	responseOutputTypeMessage       = "message"
-	providerTypeOpenAI              = "openai"
-	providerTypeAzureOpenAI         = "azure-openai"
-	eventTypeResponseIncomplete     = "response.incomplete"
-	incompleteReasonMaxOutputTokens = "max_output_tokens"
-	stopReasonCompleted             = "completed"
-	stopReasonFunctionCall          = "function_call"
-	stopReasonIncomplete            = "incomplete"
-	stopReasonLength                = "length"
-	stopReasonRefusal               = "refusal"
-	stopReasonStop                  = "stop"
-	stopReasonToolCalls             = "tool_calls"
+	responseFunctionArgumentsChanged = "response function arguments changed after completion"
+	responseContentTypeOutputText    = "output_text"
+	eventTypeResponseOutputItemAdded = "response.output_item.added"
+	eventTypeResponseOutputItemDone  = "response.output_item.done"
+	eventTypeResponseCompleted       = "response.completed"
+	eventTypeFunctionCall            = "function_call"
+	responseOutputTypeMessage        = "message"
+	providerTypeOpenAI               = "openai"
+	providerTypeAzureOpenAI          = "azure-openai"
+	eventTypeResponseIncomplete      = "response.incomplete"
+	incompleteReasonMaxOutputTokens  = "max_output_tokens"
+	stopReasonCompleted              = "completed"
+	stopReasonFunctionCall           = "function_call"
+	stopReasonIncomplete             = "incomplete"
+	stopReasonLength                 = "length"
+	stopReasonRefusal                = "refusal"
+	stopReasonStop                   = "stop"
+	stopReasonToolCalls              = "tool_calls"
 )
 
 func init() {
@@ -383,6 +388,12 @@ func (p *Provider) completeResponses(ctx context.Context, req *llm.CompletionReq
 		return nil, toProviderError(err)
 	}
 
+	if req.ResponsesInput {
+		if err := validateResponsesOutput(resp.Output); err != nil {
+			return nil, err
+		}
+	}
+
 	result := &llm.CompletionResponse{
 		Provider:     p.TelemetryProviderName(),
 		ID:           resp.ID,
@@ -405,7 +416,7 @@ func (p *Provider) completeResponses(ctx context.Context, req *llm.CompletionReq
 		} else if req.ResponsesInput && item.Type == responseOutputTypeMessage {
 			var content strings.Builder
 			for _, part := range item.Content {
-				if part.Type == "output_text" {
+				if part.Type == responseContentTypeOutputText {
 					content.WriteString(part.Text)
 				}
 			}
@@ -637,9 +648,12 @@ func responseOutputArguments(arguments responses.ResponseOutputItemUnionArgument
 	return ""
 }
 
-func (t *responseFuncCallTracker) mergeItem(fc *responseFuncCallState, item responses.ResponseOutputItemUnion, argumentsDone bool) {
+func (t *responseFuncCallTracker) mergeItem(fc *responseFuncCallState, item responses.ResponseOutputItemUnion, argumentsDone bool) error {
 	if fc == nil {
-		return
+		return nil
+	}
+	if err := t.validateSnapshot(fc, item.Name, responseOutputArguments(item.Arguments)); err != nil {
+		return err
 	}
 	if item.ID != "" {
 		fc.itemID = item.ID
@@ -660,10 +674,11 @@ func (t *responseFuncCallTracker) mergeItem(fc *responseFuncCallState, item resp
 		fc.argumentsDone = true
 	}
 	t.register(fc)
+	return nil
 }
 
 func (t *responseFuncCallTracker) emit(fc *responseFuncCallState, send streamSender) bool {
-	if fc == nil || fc.emitted || fc.name == "" || !fc.argumentsDone || (t.ordered && !fc.hasOutputIndex) {
+	if fc == nil || fc.emitted || fc.name == "" || !fc.argumentsDone || (t.ordered && (!fc.hasOutputIndex || fc.callID == "")) {
 		return true
 	}
 	args := fc.arguments
@@ -747,6 +762,9 @@ func streamResponsesEvents(stream responseStream, providerName string, send stre
 func handleResponsesStreamEvent(evt responses.ResponseStreamEventUnion, tracker *responseFuncCallTracker, providerName string, send streamSender) bool {
 	var outputIndex *int64
 	if tracker.ordered {
+		if err := tracker.validateEvent(evt); err != nil {
+			return failResponsesStream(send, err)
+		}
 		var err error
 		outputIndex, err = tracker.outputOrder.eventIndex(evt)
 		if err != nil {
@@ -764,11 +782,11 @@ func handleResponsesStreamEvent(evt responses.ResponseStreamEventUnion, tracker 
 		return handleResponseFunctionCallArgumentsDelta(evt, tracker, send)
 	case "response.function_call_arguments.done":
 		return handleResponseFunctionCallArgumentsDone(evt, tracker, send)
-	case "response.output_item.added":
+	case eventTypeResponseOutputItemAdded:
 		return handleResponseOutputItem(evt, tracker, send, false, outputIndex)
-	case "response.output_item.done":
+	case eventTypeResponseOutputItemDone:
 		return handleResponseOutputItem(evt, tracker, send, true, outputIndex)
-	case "response.completed":
+	case eventTypeResponseCompleted:
 		return handleResponseCompleted(evt, tracker, providerName, send)
 	case "response.failed":
 		stopReason := normalizeResponsesIncompleteStopReason(evt.Type, evt.Response.IncompleteDetails.Reason)
@@ -801,7 +819,16 @@ func handleResponseTextDelta(evt responses.ResponseStreamEventUnion, send stream
 }
 
 func handleResponseFunctionCallArgumentsDelta(evt responses.ResponseStreamEventUnion, tracker *responseFuncCallTracker, send streamSender) bool {
-	fc := tracker.get(evt.ItemID, evt.OutputIndex, evt.JSON.OutputIndex.Valid(), "")
+	fc, err := tracker.getChecked(evt.ItemID, evt.OutputIndex, evt.JSON.OutputIndex.Valid(), "")
+	if err != nil {
+		return failResponsesStream(send, err)
+	}
+	if err := tracker.validateSnapshot(fc, evt.Name, ""); err != nil {
+		return failResponsesStream(send, err)
+	}
+	if tracker.ordered && fc.argumentsDone && evt.Delta != "" {
+		return failResponsesStream(send, errors.New(responseFunctionArgumentsChanged))
+	}
 	if evt.Name != "" {
 		fc.name = evt.Name
 	}
@@ -810,25 +837,44 @@ func handleResponseFunctionCallArgumentsDelta(evt responses.ResponseStreamEventU
 }
 
 func handleResponseFunctionCallArgumentsDone(evt responses.ResponseStreamEventUnion, tracker *responseFuncCallTracker, send streamSender) bool {
-	fc := tracker.get(evt.ItemID, evt.OutputIndex, evt.JSON.OutputIndex.Valid(), "")
+	fc, err := tracker.getChecked(evt.ItemID, evt.OutputIndex, evt.JSON.OutputIndex.Valid(), "")
+	if err != nil {
+		return failResponsesStream(send, err)
+	}
+	arguments := evt.Arguments
+	if arguments == "" {
+		arguments = fc.args.String()
+		if arguments == "" && tracker.ordered && fc.argumentsDone {
+			arguments = fc.arguments
+		}
+	}
+	if err := tracker.validateSnapshot(fc, evt.Name, arguments); err != nil {
+		return failResponsesStream(send, err)
+	}
 	if evt.Name != "" {
 		fc.name = evt.Name
 	}
-	if evt.Arguments != "" {
-		fc.arguments = evt.Arguments
-	} else {
-		fc.arguments = fc.args.String()
-	}
+	fc.arguments = arguments
 	fc.argumentsDone = true
 	return tracker.emit(fc, send)
 }
 
 func handleResponseOutputItem(evt responses.ResponseStreamEventUnion, tracker *responseFuncCallTracker, send streamSender, argumentsDone bool, outputIndex *int64) bool {
 	if evt.Item.Type == eventTypeFunctionCall {
-		fc := tracker.get(evt.Item.ID, evt.OutputIndex, evt.JSON.OutputIndex.Valid(), evt.Item.CallID)
-		tracker.mergeItem(fc, evt.Item, argumentsDone)
+		fc, err := tracker.getChecked(evt.Item.ID, evt.OutputIndex, evt.JSON.OutputIndex.Valid(), evt.Item.CallID)
+		if err != nil {
+			return failResponsesStream(send, err)
+		}
+		if err := tracker.mergeItem(fc, evt.Item, argumentsDone); err != nil {
+			return failResponsesStream(send, err)
+		}
 		if !tracker.emit(fc, send) {
 			return false
+		}
+		// A compatible upstream may supply the call ID or name only in its
+		// terminal snapshot. Keep this position open until the call is ready.
+		if tracker.ordered && !fc.emitted {
+			return true
 		}
 	}
 	if argumentsDone && tracker.ordered && evt.Item.Type == responseOutputTypeMessage {
@@ -856,8 +902,13 @@ func handleResponseCompleted(evt responses.ResponseStreamEventUnion, tracker *re
 			if item.Type != eventTypeFunctionCall {
 				continue
 			}
-			fc := tracker.get(item.ID, int64(i), true, item.CallID)
-			tracker.mergeItem(fc, item, true)
+			fc, err := tracker.getChecked(item.ID, int64(i), true, item.CallID)
+			if err != nil {
+				return failResponsesStream(send, err)
+			}
+			if err := tracker.mergeItem(fc, item, true); err != nil {
+				return failResponsesStream(send, err)
+			}
 			if !tracker.emit(fc, send) {
 				return false
 			}

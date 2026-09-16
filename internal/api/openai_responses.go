@@ -155,7 +155,9 @@ func (h *OpenAICompatHandler) HandleResponses(c fiber.Ctx) error {
 	var completion *llm.CompletionResponse
 	if coordinator {
 		completion, err = runNonStreamingToolLoop(ctx, provider, comp, model, h.responsesLoopConfig(comp), toolCtx, toolLoopOptions{requireFinalCompletion: true, allowEmptyTokenBudget: true})
-		completion = stripGoalStateSentinelFromResponse(completion)
+		if comp.ResponseFormat == nil || comp.ResponseFormat.Type == oaiContentTypeText {
+			completion = stripGoalStateSentinelFromResponse(completion)
+		}
 	} else {
 		completion, err = provider.Complete(ctx, comp)
 	}
