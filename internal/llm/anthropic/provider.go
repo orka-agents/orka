@@ -145,25 +145,19 @@ func buildMessages(msgs []llm.Message) []anthropic.MessageParam {
 func buildToolParams(tools []llm.Tool) []anthropic.ToolUnionParam {
 	params := make([]anthropic.ToolUnionParam, 0, len(tools))
 	for _, tool := range tools {
-		var schema map[string]any
+		var schema map[string]json.RawMessage
 		_ = json.Unmarshal(tool.Parameters, &schema)
-
-		var required []string
-		if reqField, ok := schema["required"].([]any); ok {
-			for _, r := range reqField {
-				if s, ok := r.(string); ok {
-					required = append(required, s)
-				}
-			}
+		// The SDK's typed fields omit root constraints such as $defs and
+		// additionalProperties. Preserve every field and its raw numeric values.
+		fields := make(map[string]any, len(schema))
+		for name, value := range schema {
+			fields[name] = value
 		}
 
 		toolParam := anthropic.ToolParam{
 			Name:        tool.Name,
 			Description: anthropic.String(tool.Description),
-			InputSchema: anthropic.ToolInputSchemaParam{
-				Properties: schema["properties"],
-				Required:   required,
-			},
+			InputSchema: anthropic.ToolInputSchemaParam{ExtraFields: fields},
 		}
 		params = append(params, anthropic.ToolUnionParam{OfTool: &toolParam})
 	}
