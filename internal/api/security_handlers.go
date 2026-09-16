@@ -46,13 +46,6 @@ const (
 	securityScanRunPhaseRunning = "running"
 )
 
-func (h *Handlers) securityAgentRuntimePolicyReader() client.Reader {
-	if h.apiReader != nil {
-		return h.apiReader
-	}
-	return h.client
-}
-
 func (h *Handlers) normalizeRepositoryScanSpec(spec *corev1alpha1.RepositoryScanSpec) {
 	if spec.Provider == "" {
 		spec.Provider = sourceProviderGitHub
@@ -344,7 +337,7 @@ func (h *Handlers) createSecurityScanRun(ctx context.Context, ui *UserInfo, scan
 			Workspace: repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead),
 		},
 	}
-	if err := agentruntimepolicy.ResolveAndMaterializeTaskRuntimeRefAllowedTools(ctx, h.securityAgentRuntimePolicyReader(), task); err != nil {
+	if err := agentruntimepolicy.ResolveAndMaterializeTaskRuntimeRefAllowedTools(ctx, h.uncachedReader(), task); err != nil {
 		return nil, fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid analysis AgentRuntime policy: %v", err))
 	}
 	if err := authorizeContextTokenRepositoryScanCredentialRefsForUser(
@@ -356,7 +349,7 @@ func (h *Handlers) createSecurityScanRun(ctx context.Context, ui *UserInfo, scan
 	); err != nil {
 		return nil, err
 	}
-	if err := authorizeAndStampTaskContext(ctx, h.contextTokenAuthorizationReader(), h.clientset, contextTokenFromUserInfo(ui), h.contextTokenAuthorization, "createSecurityScanTask", ui, task); err != nil {
+	if err := authorizeAndStampTaskContext(ctx, h.uncachedReader(), h.clientset, contextTokenFromUserInfo(ui), h.contextTokenAuthorization, "createSecurityScanTask", ui, task); err != nil {
 		return nil, err
 	}
 	if err := security.EnsureRepositoryScanRunFinalizer(ctx, h.client, h.apiReader, scan); err != nil {
@@ -473,7 +466,7 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInf
 			Workspace: repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead),
 		},
 	}
-	if err := agentruntimepolicy.ResolveAndMaterializeTaskRuntimeRefAllowedTools(ctx, h.securityAgentRuntimePolicyReader(), task); err != nil {
+	if err := agentruntimepolicy.ResolveAndMaterializeTaskRuntimeRefAllowedTools(ctx, h.uncachedReader(), task); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid validation AgentRuntime policy: %v", err))
 	}
 	if err := authorizeContextTokenRepositoryScanCredentialRefsForUser(
@@ -485,7 +478,7 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInf
 	); err != nil {
 		return err
 	}
-	if err := authorizeAndStampTaskContext(ctx, h.contextTokenAuthorizationReader(), h.clientset, contextTokenFromUserInfo(ui), h.contextTokenAuthorization, "createSecurityValidationTask", ui, task); err != nil {
+	if err := authorizeAndStampTaskContext(ctx, h.uncachedReader(), h.clientset, contextTokenFromUserInfo(ui), h.contextTokenAuthorization, "createSecurityValidationTask", ui, task); err != nil {
 		return err
 	}
 	if err := h.client.Create(ctx, task); err != nil {
@@ -547,7 +540,7 @@ func (h *Handlers) createSecurityPatchTask(ctx context.Context, ui *UserInfo, sc
 			Workspace: repositoryScanPatchTaskWorkspace(scan, branch),
 		},
 	}
-	if err := agentruntimepolicy.ResolveAndMaterializeTaskRuntimeRefAllowedTools(ctx, h.securityAgentRuntimePolicyReader(), task); err != nil {
+	if err := agentruntimepolicy.ResolveAndMaterializeTaskRuntimeRefAllowedTools(ctx, h.uncachedReader(), task); err != nil {
 		return nil, fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid patch AgentRuntime policy: %v", err))
 	}
 	if err := authorizeContextTokenRepositoryScanCredentialRefsForUser(
@@ -559,7 +552,7 @@ func (h *Handlers) createSecurityPatchTask(ctx context.Context, ui *UserInfo, sc
 	); err != nil {
 		return nil, err
 	}
-	if err := authorizeAndStampTaskContext(ctx, h.contextTokenAuthorizationReader(), h.clientset, contextTokenFromUserInfo(ui), h.contextTokenAuthorization, "createSecurityPatchTask", ui, task); err != nil {
+	if err := authorizeAndStampTaskContext(ctx, h.uncachedReader(), h.clientset, contextTokenFromUserInfo(ui), h.contextTokenAuthorization, "createSecurityPatchTask", ui, task); err != nil {
 		return nil, err
 	}
 	if err := h.client.Create(ctx, task); err != nil {

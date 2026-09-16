@@ -2549,10 +2549,11 @@ func TestSessionTurnDelegationIsExplicit(t *testing.T) {
 		t.Fatalf("GetSessionTurn error = %v", err)
 	}
 	delegate := &recordingSessionTurnStore{}
-	withDelegate, err := New(kubeStore.client, testControlNamespace, WithSessionTurnPersistence(delegate))
+	withDelegate, err := New(kubeStore.client, testControlNamespace)
 	if err != nil {
 		t.Fatalf("New with turn delegate: %v", err)
 	}
+	withDelegate.sessionTurns = delegate
 	if _, err := withDelegate.GetSessionTurn(context.Background(), "turn-1"); err != nil || delegate.gotID != "turn-1" {
 		t.Fatalf("delegated GetSessionTurn: id=%q err=%v", delegate.gotID, err)
 	}

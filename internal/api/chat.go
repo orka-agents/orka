@@ -242,10 +242,7 @@ func NewChatHandler(c client.Client, apiReader client.Reader, sm *controller.Ses
 }
 
 func (ch *ChatHandler) contextTokenAuthorizationReader() client.Reader {
-	if ch.apiReader != nil {
-		return ch.apiReader
-	}
-	return ch.client
+	return uncachedReaderOr(ch.apiReader, ch.client)
 }
 
 // blockedNamespaces that cannot be targeted by chat requests.
@@ -388,7 +385,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	// Build system prompt
 	discoveryClient := newExternalToolClient(ch.client, ch.kubeClient, userInfo, namespace, ch.watchNamespace, ch.enforceNamespaceIsolation, ch.gatewayEventStore)
 	promptBuilder := NewSystemPromptBuilder(externalToolDiscoveryClient{Client: discoveryClient}, namespace, ch.config.RuntimeAvailability)
-	systemPrompt, err := promptBuilder.BuildSystemPrompt(ctx, req.SystemPrompt, PromptModeFull)
+	systemPrompt, err := promptBuilder.BuildSystemPrompt(ctx, req.SystemPrompt)
 	if err != nil {
 		chatLog.Error(err, "failed to build system prompt")
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to build system prompt")

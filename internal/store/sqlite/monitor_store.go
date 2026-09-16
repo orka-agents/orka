@@ -22,6 +22,70 @@ func defaultMonitorLimit(limit int) int {
 	return limit
 }
 
+// monitorQuery accumulates one namespace-scoped monitor SELECT and its bound
+// arguments so every paged list shares the same cursor, limit, and row loop.
+type monitorQuery struct {
+	sql  strings.Builder
+	args []any
+}
+
+func newMonitorQuery(selectSQL, namespace string) *monitorQuery {
+	q := &monitorQuery{args: []any{namespace}}
+	q.sql.WriteString(selectSQL)
+	q.sql.WriteString(" WHERE monitor_namespace = ?")
+	return q
+}
+
+// monitorFilter appends an equality predicate unless value is its zero value.
+func monitorFilter[T comparable](q *monitorQuery, column string, value T) {
+	var zero T
+	if value == zero {
+		return
+	}
+	q.sql.WriteString(" AND " + column + " = ?")
+	q.args = append(q.args, value)
+}
+
+// queryOne scans exactly one row and maps sql.ErrNoRows to store.ErrNotFound.
+func queryOne[T any](ctx context.Context, db *sql.DB, scan func(rowScanner) (T, error), query string, args ...any) (*T, error) {
+	value, err := scan(db.QueryRowContext(ctx, query, args...))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, store.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
+}
+
+// queryPage runs one offset-paged monitor query and returns the next cursor.
+func queryPage[T any](ctx context.Context, db *sql.DB, q *monitorQuery, orderBy, cursor string, limit int, scan func(rowScanner) (T, error)) ([]T, string, error) {
+	offset, err := parseOffsetCursor(cursor)
+	if err != nil {
+		return nil, "", err
+	}
+	limit = defaultMonitorLimit(limit)
+	q.sql.WriteString(" ORDER BY " + orderBy + " LIMIT ? OFFSET ?")
+	args := append(q.args, limit, offset)
+	rows, err := db.QueryContext(ctx, q.sql.String(), args...)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close() //nolint:errcheck
+	var results []T
+	for rows.Next() {
+		value, err := scan(rows)
+		if err != nil {
+			return nil, "", err
+		}
+		results = append(results, value)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	return results, nextOffsetCursor(offset, len(results), limit), nil
+}
+
 // UpsertRepositoryMonitor inserts or updates normalized monitor metadata.
 func (s *Store) UpsertRepositoryMonitor(ctx context.Context, monitor *store.RepositoryMonitorRecord) error {
 	if monitor == nil {
@@ -224,100 +288,45 @@ func (s *Store) UpdateMonitorRun(ctx context.Context, run *store.MonitorRun) err
 
 // GetMonitorRun fetches a monitor run by ID.
 func (s *Store) GetMonitorRun(ctx context.Context, namespace, id string) (*store.MonitorRun, error) {
+	return queryOne(ctx, s.db, scanMonitorRun, monitorRunSelectSQL()+` WHERE monitor_namespace = ? AND id = ?`, namespace, id)
+}
+
+func monitorRunSelectSQL() string {
+	return `SELECT id, monitor_namespace, monitor_name, trigger, target_kind, target_number, target_sha, command_event_id,
+	        phase, started_at, completed_at, selected_count, created_task_count, skipped_count, error
+	        FROM monitor_runs`
+}
+
+func scanMonitorRun(r rowScanner) (store.MonitorRun, error) {
 	var run store.MonitorRun
 	var completedAt sql.NullTime
-	err := s.db.QueryRowContext(ctx,
-		`SELECT id, monitor_namespace, monitor_name, trigger, target_kind, target_number, target_sha, command_event_id,
-		        phase, started_at, completed_at, selected_count, created_task_count, skipped_count, error
-		 FROM monitor_runs
-		 WHERE monitor_namespace = ? AND id = ?`,
-		namespace, id,
-	).Scan(
+	if err := r.Scan(
 		&run.ID, &run.MonitorNamespace, &run.MonitorName, &run.Trigger, &run.TargetKind, &run.TargetNumber,
 		&run.TargetSHA, &run.CommandEventID, &run.Phase, &run.StartedAt, &completedAt, &run.SelectedCount,
 		&run.CreatedTaskCount, &run.SkippedCount, &run.Error,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, store.ErrNotFound
-	}
-	if err != nil {
-		return nil, err
+	); err != nil {
+		return store.MonitorRun{}, err
 	}
 	if completedAt.Valid {
 		run.CompletedAt = &completedAt.Time
 	}
-	return &run, nil
+	return run, nil
 }
 
 // ListMonitorRuns lists monitor runs ordered newest first unless OldestFirst is set.
 func (s *Store) ListMonitorRuns(ctx context.Context, filter store.MonitorRunFilter) ([]store.MonitorRun, string, error) {
-	offset, err := parseOffsetCursor(filter.Cursor)
-	if err != nil {
-		return nil, "", err
-	}
-	limit := defaultMonitorLimit(filter.Limit)
-	query := strings.Builder{}
-	query.WriteString(`SELECT id, monitor_namespace, monitor_name, trigger, target_kind, target_number, target_sha, command_event_id,
-	        phase, started_at, completed_at, selected_count, created_task_count, skipped_count, error
-		 FROM monitor_runs WHERE monitor_namespace = ?`)
-	args := []any{filter.Namespace}
-	if filter.MonitorName != "" {
-		query.WriteString(" AND monitor_name = ?")
-		args = append(args, filter.MonitorName)
-	}
-	if filter.Trigger != "" {
-		query.WriteString(" AND trigger = ?")
-		args = append(args, filter.Trigger)
-	}
-	if filter.TargetKind != "" {
-		query.WriteString(" AND target_kind = ?")
-		args = append(args, filter.TargetKind)
-	}
-	if filter.TargetNumber != 0 {
-		query.WriteString(" AND target_number = ?")
-		args = append(args, filter.TargetNumber)
-	}
-	if filter.TargetSHA != "" {
-		query.WriteString(" AND target_sha = ?")
-		args = append(args, filter.TargetSHA)
-	}
-	if filter.Phase != "" {
-		query.WriteString(" AND phase = ?")
-		args = append(args, filter.Phase)
-	}
+	q := newMonitorQuery(monitorRunSelectSQL(), filter.Namespace)
+	monitorFilter(q, "monitor_name", filter.MonitorName)
+	monitorFilter(q, "trigger", filter.Trigger)
+	monitorFilter(q, "target_kind", filter.TargetKind)
+	monitorFilter(q, "target_number", filter.TargetNumber)
+	monitorFilter(q, "target_sha", filter.TargetSHA)
+	monitorFilter(q, "phase", filter.Phase)
+	orderBy := "started_at DESC, id DESC"
 	if filter.OldestFirst {
-		query.WriteString(" ORDER BY started_at ASC, id ASC LIMIT ? OFFSET ?")
-	} else {
-		query.WriteString(" ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?")
+		orderBy = "started_at ASC, id ASC"
 	}
-	args = append(args, limit, offset)
-
-	rows, err := s.db.QueryContext(ctx, query.String(), args...)
-	if err != nil {
-		return nil, "", err
-	}
-	defer rows.Close() //nolint:errcheck
-
-	var runs []store.MonitorRun
-	for rows.Next() {
-		var run store.MonitorRun
-		var completedAt sql.NullTime
-		if err := rows.Scan(
-			&run.ID, &run.MonitorNamespace, &run.MonitorName, &run.Trigger, &run.TargetKind, &run.TargetNumber,
-			&run.TargetSHA, &run.CommandEventID, &run.Phase, &run.StartedAt, &completedAt, &run.SelectedCount,
-			&run.CreatedTaskCount, &run.SkippedCount, &run.Error,
-		); err != nil {
-			return nil, "", err
-		}
-		if completedAt.Valid {
-			run.CompletedAt = &completedAt.Time
-		}
-		runs = append(runs, run)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, "", err
-	}
-	return runs, nextOffsetCursor(offset, len(runs), limit), nil
+	return queryPage(ctx, s.db, q, orderBy, filter.Cursor, filter.Limit, scanMonitorRun)
 }
 
 func monitorItemKey(item *store.MonitorItem) string {
@@ -412,20 +421,11 @@ func (s *Store) UpsertMonitorItem(ctx context.Context, item *store.MonitorItem) 
 	return err
 }
 
-// GetMonitorItem fetches one monitor item by key.
+// GetMonitorItem fetches one monitor item by its durable key.
 func (s *Store) GetMonitorItem(ctx context.Context, namespace, monitorName, kind, itemKey string) (*store.MonitorItem, error) {
-	var item store.MonitorItem
-	err := s.db.QueryRowContext(ctx, monitorItemSelectSQL()+`
+	return queryOne(ctx, s.db, scanMonitorItem, monitorItemSelectSQL()+`
 		 WHERE monitor_namespace = ? AND monitor_name = ? AND kind = ? AND item_key = ?`,
-		namespace, monitorName, kind, itemKey,
-	).Scan(monitorItemScanDest(&item)...)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, store.ErrNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &item, nil
+		namespace, monitorName, kind, itemKey)
 }
 
 func monitorItemSelectSQL() string {
@@ -437,8 +437,9 @@ func monitorItemSelectSQL() string {
 	        updated_at, last_seen_at FROM monitor_items`
 }
 
-func monitorItemScanDest(item *store.MonitorItem) []any {
-	return []any{
+func scanMonitorItem(r rowScanner) (store.MonitorItem, error) {
+	var item store.MonitorItem
+	err := r.Scan(
 		&item.MonitorNamespace, &item.MonitorName, &item.Kind, &item.ItemKey, &item.Number, &item.SHA,
 		&item.Title, &item.Body, &item.HTMLURL, &item.Author, &item.State, &item.LabelsJSON, &item.SnapshotDigest, &item.GitHubUpdatedAt,
 		&item.WorkflowPhase, &item.LinkedPRNumber, &item.LastCommandID, &item.LastCommandIntent,
@@ -447,69 +448,21 @@ func monitorItemScanDest(item *store.MonitorItem) []any {
 		&item.LastReviewID, &item.LastReviewedHeadSHA, &item.LastVerdict, &item.RepairState, &item.AutomergeState,
 		&item.StatusCommentID, &item.StatusCommentURL, &item.LastPublishID, &item.LastPublishPhase, &item.LastPublishReason,
 		&item.LastPublishURL, &item.UpdatedAt, &item.LastSeenAt,
-	}
+	)
+	return item, err
 }
 
 // ListMonitorItems lists current monitor items.
 func (s *Store) ListMonitorItems(ctx context.Context, filter store.MonitorItemFilter) ([]store.MonitorItem, string, error) {
-	offset, err := parseOffsetCursor(filter.Cursor)
-	if err != nil {
-		return nil, "", err
-	}
-	limit := defaultMonitorLimit(filter.Limit)
-	query := strings.Builder{}
-	query.WriteString(monitorItemSelectSQL())
-	query.WriteString(" WHERE monitor_namespace = ?")
-	args := []any{filter.Namespace}
-	if filter.MonitorName != "" {
-		query.WriteString(" AND monitor_name = ?")
-		args = append(args, filter.MonitorName)
-	}
-	if filter.Kind != "" {
-		query.WriteString(" AND kind = ?")
-		args = append(args, filter.Kind)
-	}
-	if filter.Number != 0 {
-		query.WriteString(" AND number = ?")
-		args = append(args, filter.Number)
-	}
-	if filter.State != "" {
-		query.WriteString(" AND state = ?")
-		args = append(args, filter.State)
-	}
-	if filter.ReviewVerdict != "" {
-		query.WriteString(" AND last_verdict = ?")
-		args = append(args, filter.ReviewVerdict)
-	}
-	if filter.RepairState != "" {
-		query.WriteString(" AND repair_state = ?")
-		args = append(args, filter.RepairState)
-	}
-	if filter.AutomergeState != "" {
-		query.WriteString(" AND automerge_state = ?")
-		args = append(args, filter.AutomergeState)
-	}
-	query.WriteString(" ORDER BY updated_at DESC, item_key ASC LIMIT ? OFFSET ?")
-	args = append(args, limit, offset)
-
-	rows, err := s.db.QueryContext(ctx, query.String(), args...)
-	if err != nil {
-		return nil, "", err
-	}
-	defer rows.Close() //nolint:errcheck
-
-	var items []store.MonitorItem
-	for rows.Next() {
-		var item store.MonitorItem
-		if err := rows.Scan(monitorItemScanDest(&item)...); err != nil {
-			return nil, "", err
-		}
-		items = append(items, item)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, "", err
-	}
-	return items, nextOffsetCursor(offset, len(items), limit), nil
+	q := newMonitorQuery(monitorItemSelectSQL(), filter.Namespace)
+	monitorFilter(q, "monitor_name", filter.MonitorName)
+	monitorFilter(q, "kind", filter.Kind)
+	monitorFilter(q, "number", filter.Number)
+	monitorFilter(q, "state", filter.State)
+	monitorFilter(q, "last_verdict", filter.ReviewVerdict)
+	monitorFilter(q, "repair_state", filter.RepairState)
+	monitorFilter(q, "automerge_state", filter.AutomergeState)
+	return queryPage(ctx, s.db, q, "updated_at DESC, item_key ASC", filter.Cursor, filter.Limit, scanMonitorItem)
 }
 
 // CreateActionRecord inserts a durable action record.
@@ -569,15 +522,7 @@ func (s *Store) UpdateActionRecord(ctx context.Context, record *store.ActionReco
 
 // GetActionRecord fetches an action record by ID.
 func (s *Store) GetActionRecord(ctx context.Context, namespace, id string) (*store.ActionRecord, error) {
-	var record store.ActionRecord
-	err := s.db.QueryRowContext(ctx, actionRecordSelectSQL()+` WHERE monitor_namespace = ? AND id = ?`, namespace, id).Scan(actionRecordScanDest(&record)...)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, store.ErrNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &record, nil
+	return queryOne(ctx, s.db, scanActionRecord, actionRecordSelectSQL()+` WHERE monitor_namespace = ? AND id = ?`, namespace, id)
 }
 
 func actionRecordSelectSQL() string {
@@ -586,65 +531,26 @@ func actionRecordSelectSQL() string {
 	        payload_json, payload_digest, created_at FROM action_records`
 }
 
-func actionRecordScanDest(record *store.ActionRecord) []any {
-	return []any{
+func scanActionRecord(r rowScanner) (store.ActionRecord, error) {
+	var record store.ActionRecord
+	err := r.Scan(
 		&record.ID, &record.MonitorNamespace, &record.MonitorName, &record.Kind, &record.Number,
 		&record.ActionKind, &record.SnapshotDigest, &record.HeadSHA, &record.TaskName, &record.CommandEventID,
 		&record.WorkActionID, &record.MonitorGeneration, &record.Verdict, &record.Confidence, &record.Summary,
 		&record.PayloadJSON, &record.PayloadDigest, &record.CreatedAt,
-	}
+	)
+	return record, err
 }
 
 // ListActionRecords lists action records ordered newest first.
 func (s *Store) ListActionRecords(ctx context.Context, filter store.ActionRecordFilter) ([]store.ActionRecord, string, error) {
-	offset, err := parseOffsetCursor(filter.Cursor)
-	if err != nil {
-		return nil, "", err
-	}
-	limit := defaultMonitorLimit(filter.Limit)
-	query := strings.Builder{}
-	query.WriteString(actionRecordSelectSQL())
-	query.WriteString(" WHERE monitor_namespace = ?")
-	args := []any{filter.Namespace}
-	if filter.MonitorName != "" {
-		query.WriteString(" AND monitor_name = ?")
-		args = append(args, filter.MonitorName)
-	}
-	if filter.Kind != "" {
-		query.WriteString(" AND kind = ?")
-		args = append(args, filter.Kind)
-	}
-	if filter.Number != 0 {
-		query.WriteString(" AND number = ?")
-		args = append(args, filter.Number)
-	}
-	if filter.ActionKind != "" {
-		query.WriteString(" AND action_kind = ?")
-		args = append(args, filter.ActionKind)
-	}
-	if filter.TaskName != "" {
-		query.WriteString(" AND task_name = ?")
-		args = append(args, filter.TaskName)
-	}
-	query.WriteString(" ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?")
-	args = append(args, limit, offset)
-	rows, err := s.db.QueryContext(ctx, query.String(), args...)
-	if err != nil {
-		return nil, "", err
-	}
-	defer rows.Close() //nolint:errcheck
-	var records []store.ActionRecord
-	for rows.Next() {
-		var record store.ActionRecord
-		if err := rows.Scan(actionRecordScanDest(&record)...); err != nil {
-			return nil, "", err
-		}
-		records = append(records, record)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, "", err
-	}
-	return records, nextOffsetCursor(offset, len(records), limit), nil
+	q := newMonitorQuery(actionRecordSelectSQL(), filter.Namespace)
+	monitorFilter(q, "monitor_name", filter.MonitorName)
+	monitorFilter(q, "kind", filter.Kind)
+	monitorFilter(q, "number", filter.Number)
+	monitorFilter(q, "action_kind", filter.ActionKind)
+	monitorFilter(q, "task_name", filter.TaskName)
+	return queryPage(ctx, s.db, q, "created_at DESC, id DESC", filter.Cursor, filter.Limit, scanActionRecord)
 }
 
 // CreateReviewRecord inserts an immutable review record.
@@ -672,16 +578,7 @@ func (s *Store) CreateReviewRecord(ctx context.Context, record *store.ReviewReco
 
 // GetReviewRecord fetches a review record by ID.
 func (s *Store) GetReviewRecord(ctx context.Context, namespace, id string) (*store.ReviewRecord, error) {
-	var record store.ReviewRecord
-	err := s.db.QueryRowContext(ctx, reviewRecordSelectSQL()+" WHERE monitor_namespace = ? AND id = ?", namespace, id).
-		Scan(reviewRecordScanDest(&record)...)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, store.ErrNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &record, nil
+	return queryOne(ctx, s.db, scanReviewRecord, reviewRecordSelectSQL()+" WHERE monitor_namespace = ? AND id = ?", namespace, id)
 }
 
 func reviewRecordSelectSQL() string {
@@ -692,8 +589,9 @@ func reviewRecordSelectSQL() string {
 	        FROM review_records`
 }
 
-func reviewRecordScanDest(record *store.ReviewRecord) []any {
-	return []any{
+func scanReviewRecord(r rowScanner) (store.ReviewRecord, error) {
+	var record store.ReviewRecord
+	err := r.Scan(
 		&record.ID, &record.MonitorNamespace, &record.MonitorName, &record.Kind, &record.Number,
 		&record.HeadSHA, &record.TaskName, &record.TaskNamespace, &record.Verdict, &record.Confidence,
 		&record.Repairable, &record.SecurityStatus, &record.FindingsJSON, &record.Summary,
@@ -701,61 +599,19 @@ func reviewRecordScanDest(record *store.ReviewRecord) []any {
 		&record.ValidationCommandDigest, &record.ValidationStatus, &record.ValidationEvidence,
 		&record.RenderedComment, &record.Marker, &record.GitHubReviewID,
 		&record.GitHubCommentID, &record.GitHubCommentURL, &record.CreatedAt,
-	}
+	)
+	return record, err
 }
 
 // ListReviewRecords lists review records ordered newest first.
 func (s *Store) ListReviewRecords(ctx context.Context, filter store.ReviewRecordFilter) ([]store.ReviewRecord, string, error) {
-	offset, err := parseOffsetCursor(filter.Cursor)
-	if err != nil {
-		return nil, "", err
-	}
-	limit := defaultMonitorLimit(filter.Limit)
-	query := strings.Builder{}
-	query.WriteString(reviewRecordSelectSQL())
-	query.WriteString(" WHERE monitor_namespace = ?")
-	args := []any{filter.Namespace}
-	if filter.MonitorName != "" {
-		query.WriteString(" AND monitor_name = ?")
-		args = append(args, filter.MonitorName)
-	}
-	if filter.Kind != "" {
-		query.WriteString(" AND kind = ?")
-		args = append(args, filter.Kind)
-	}
-	if filter.Number != 0 {
-		query.WriteString(" AND number = ?")
-		args = append(args, filter.Number)
-	}
-	if filter.HeadSHA != "" {
-		query.WriteString(" AND head_sha = ?")
-		args = append(args, filter.HeadSHA)
-	}
-	if filter.Verdict != "" {
-		query.WriteString(" AND verdict = ?")
-		args = append(args, filter.Verdict)
-	}
-	query.WriteString(" ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?")
-	args = append(args, limit, offset)
-
-	rows, err := s.db.QueryContext(ctx, query.String(), args...)
-	if err != nil {
-		return nil, "", err
-	}
-	defer rows.Close() //nolint:errcheck
-
-	var records []store.ReviewRecord
-	for rows.Next() {
-		var record store.ReviewRecord
-		if err := rows.Scan(reviewRecordScanDest(&record)...); err != nil {
-			return nil, "", err
-		}
-		records = append(records, record)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, "", err
-	}
-	return records, nextOffsetCursor(offset, len(records), limit), nil
+	q := newMonitorQuery(reviewRecordSelectSQL(), filter.Namespace)
+	monitorFilter(q, "monitor_name", filter.MonitorName)
+	monitorFilter(q, "kind", filter.Kind)
+	monitorFilter(q, "number", filter.Number)
+	monitorFilter(q, "head_sha", filter.HeadSHA)
+	monitorFilter(q, "verdict", filter.Verdict)
+	return queryPage(ctx, s.db, q, "created_at DESC, id DESC", filter.Cursor, filter.Limit, scanReviewRecord)
 }
 
 // CreateReviewPublishRecord inserts a review publish attempt/outcome record.
@@ -822,16 +678,7 @@ func (s *Store) UpdateReviewPublishRecord(ctx context.Context, record *store.Rev
 
 // GetReviewPublishRecord fetches a review publish record by ID.
 func (s *Store) GetReviewPublishRecord(ctx context.Context, namespace, id string) (*store.ReviewPublishRecord, error) {
-	var record store.ReviewPublishRecord
-	err := s.db.QueryRowContext(ctx, reviewPublishRecordSelectSQL()+" WHERE monitor_namespace = ? AND id = ?", namespace, id).
-		Scan(reviewPublishRecordScanDest(&record)...)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, store.ErrNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &record, nil
+	return queryOne(ctx, s.db, scanReviewPublishRecord, reviewPublishRecordSelectSQL()+" WHERE monitor_namespace = ? AND id = ?", namespace, id)
 }
 
 func reviewPublishRecordSelectSQL() string {
@@ -841,71 +688,27 @@ func reviewPublishRecordSelectSQL() string {
 	        FROM review_publish_records`
 }
 
-func reviewPublishRecordScanDest(record *store.ReviewPublishRecord) []any {
-	return []any{
+func scanReviewPublishRecord(r rowScanner) (store.ReviewPublishRecord, error) {
+	var record store.ReviewPublishRecord
+	err := r.Scan(
 		&record.ID, &record.MonitorNamespace, &record.MonitorName, &record.ItemKind, &record.ItemNumber,
 		&record.HeadSHA, &record.RunID, &record.ReviewTaskName, &record.ReviewRecordID, &record.Phase,
 		&record.Event, &record.GitHubReviewID, &record.GitHubReviewURL, &record.BodyDigest,
 		&record.InlineCommentCount, &record.SkipReason, &record.Error, &record.CreatedAt, &record.UpdatedAt,
-	}
+	)
+	return record, err
 }
 
 // ListReviewPublishRecords lists review publish records ordered newest first.
 func (s *Store) ListReviewPublishRecords(ctx context.Context, filter store.ReviewPublishRecordFilter) ([]store.ReviewPublishRecord, string, error) {
-	offset, err := parseOffsetCursor(filter.Cursor)
-	if err != nil {
-		return nil, "", err
-	}
-	limit := defaultMonitorLimit(filter.Limit)
-	query := strings.Builder{}
-	query.WriteString(reviewPublishRecordSelectSQL())
-	query.WriteString(" WHERE monitor_namespace = ?")
-	args := []any{filter.Namespace}
-	if filter.MonitorName != "" {
-		query.WriteString(" AND monitor_name = ?")
-		args = append(args, filter.MonitorName)
-	}
-	if filter.ItemKind != "" {
-		query.WriteString(" AND item_kind = ?")
-		args = append(args, filter.ItemKind)
-	}
-	if filter.ItemNumber != 0 {
-		query.WriteString(" AND item_number = ?")
-		args = append(args, filter.ItemNumber)
-	}
-	if filter.HeadSHA != "" {
-		query.WriteString(" AND head_sha = ?")
-		args = append(args, filter.HeadSHA)
-	}
-	if filter.ReviewRecordID != "" {
-		query.WriteString(" AND review_record_id = ?")
-		args = append(args, filter.ReviewRecordID)
-	}
-	if filter.Phase != "" {
-		query.WriteString(" AND phase = ?")
-		args = append(args, filter.Phase)
-	}
-	query.WriteString(" ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?")
-	args = append(args, limit, offset)
-
-	rows, err := s.db.QueryContext(ctx, query.String(), args...)
-	if err != nil {
-		return nil, "", err
-	}
-	defer rows.Close() //nolint:errcheck
-
-	var records []store.ReviewPublishRecord
-	for rows.Next() {
-		var record store.ReviewPublishRecord
-		if err := rows.Scan(reviewPublishRecordScanDest(&record)...); err != nil {
-			return nil, "", err
-		}
-		records = append(records, record)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, "", err
-	}
-	return records, nextOffsetCursor(offset, len(records), limit), nil
+	q := newMonitorQuery(reviewPublishRecordSelectSQL(), filter.Namespace)
+	monitorFilter(q, "monitor_name", filter.MonitorName)
+	monitorFilter(q, "item_kind", filter.ItemKind)
+	monitorFilter(q, "item_number", filter.ItemNumber)
+	monitorFilter(q, "head_sha", filter.HeadSHA)
+	monitorFilter(q, "review_record_id", filter.ReviewRecordID)
+	monitorFilter(q, "phase", filter.Phase)
+	return queryPage(ctx, s.db, q, "updated_at DESC, id DESC", filter.Cursor, filter.Limit, scanReviewPublishRecord)
 }
 
 // CreateCommandEvent inserts a maintainer command event.
@@ -949,19 +752,7 @@ func (s *Store) UpdateCommandEvent(ctx context.Context, event *store.CommandEven
 
 // GetCommandEvent fetches a command event by ID.
 func (s *Store) GetCommandEvent(ctx context.Context, namespace, id string) (*store.CommandEvent, error) {
-	var event store.CommandEvent
-	var processedAt sql.NullTime
-	err := s.db.QueryRowContext(ctx, commandEventSelectSQL()+` WHERE monitor_namespace = ? AND id = ?`, namespace, id).Scan(commandEventScanDest(&event, &processedAt)...)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, store.ErrNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	if processedAt.Valid {
-		event.ProcessedAt = &processedAt.Time
-	}
-	return &event, nil
+	return queryOne(ctx, s.db, scanCommandEvent, commandEventSelectSQL()+` WHERE monitor_namespace = ? AND id = ?`, namespace, id)
 }
 
 func commandEventSelectSQL() string {
@@ -971,70 +762,33 @@ func commandEventSelectSQL() string {
 	        created_at, processed_at, error FROM command_events`
 }
 
-func commandEventScanDest(event *store.CommandEvent, processedAt *sql.NullTime) []any {
-	return []any{
+func scanCommandEvent(r rowScanner) (store.CommandEvent, error) {
+	var event store.CommandEvent
+	var processedAt sql.NullTime
+	if err := r.Scan(
 		&event.ID, &event.MonitorNamespace, &event.MonitorName, &event.Repo, &event.Kind, &event.Number,
 		&event.Source, &event.DeliveryID, &event.Label, &event.MonitorGeneration, &event.DedupeKey, &event.IdempotencyKey,
 		&event.CommentID, &event.CommentURL, &event.Author, &event.AuthorAssociation, &event.Permission,
 		&event.Command, &event.Intent, &event.HeadSHA, &event.IssueSnapshotDigest, &event.Status, &event.StatusCommentID,
-		&event.CreatedRepairJobID, &event.CreatedAt, processedAt, &event.Error,
+		&event.CreatedRepairJobID, &event.CreatedAt, &processedAt, &event.Error,
+	); err != nil {
+		return store.CommandEvent{}, err
 	}
+	if processedAt.Valid {
+		event.ProcessedAt = &processedAt.Time
+	}
+	return event, nil
 }
 
 // ListCommandEvents lists command intake events.
 func (s *Store) ListCommandEvents(ctx context.Context, filter store.CommandEventFilter) ([]store.CommandEvent, string, error) {
-	offset, err := parseOffsetCursor(filter.Cursor)
-	if err != nil {
-		return nil, "", err
-	}
-	limit := defaultMonitorLimit(filter.Limit)
-	query := strings.Builder{}
-	query.WriteString(commandEventSelectSQL())
-	query.WriteString(" WHERE monitor_namespace = ?")
-	args := []any{filter.Namespace}
-	if filter.MonitorName != "" {
-		query.WriteString(" AND monitor_name = ?")
-		args = append(args, filter.MonitorName)
-	}
-	if filter.Kind != "" {
-		query.WriteString(" AND kind = ?")
-		args = append(args, filter.Kind)
-	}
-	if filter.Number != 0 {
-		query.WriteString(" AND number = ?")
-		args = append(args, filter.Number)
-	}
-	if filter.Intent != "" {
-		query.WriteString(" AND intent = ?")
-		args = append(args, filter.Intent)
-	}
-	if filter.Status != "" {
-		query.WriteString(" AND status = ?")
-		args = append(args, filter.Status)
-	}
-	query.WriteString(" ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?")
-	args = append(args, limit, offset)
-	rows, err := s.db.QueryContext(ctx, query.String(), args...)
-	if err != nil {
-		return nil, "", err
-	}
-	defer rows.Close() //nolint:errcheck
-	var events []store.CommandEvent
-	for rows.Next() {
-		var event store.CommandEvent
-		var processedAt sql.NullTime
-		if err := rows.Scan(commandEventScanDest(&event, &processedAt)...); err != nil {
-			return nil, "", err
-		}
-		if processedAt.Valid {
-			event.ProcessedAt = &processedAt.Time
-		}
-		events = append(events, event)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, "", err
-	}
-	return events, nextOffsetCursor(offset, len(events), limit), nil
+	q := newMonitorQuery(commandEventSelectSQL(), filter.Namespace)
+	monitorFilter(q, "monitor_name", filter.MonitorName)
+	monitorFilter(q, "kind", filter.Kind)
+	monitorFilter(q, "number", filter.Number)
+	monitorFilter(q, "intent", filter.Intent)
+	monitorFilter(q, "status", filter.Status)
+	return queryPage(ctx, s.db, q, "created_at DESC, id DESC", filter.Cursor, filter.Limit, scanCommandEvent)
 }
 
 // CreateRepairJob inserts a repair job.
@@ -1077,20 +831,7 @@ func (s *Store) UpdateRepairJob(ctx context.Context, job *store.RepairJob) error
 
 // GetRepairJob fetches a repair job by ID.
 func (s *Store) GetRepairJob(ctx context.Context, namespace, id string) (*store.RepairJob, error) {
-	var job store.RepairJob
-	var completedAt sql.NullTime
-	err := s.db.QueryRowContext(ctx, repairJobSelectSQL()+" WHERE monitor_namespace = ? AND id = ?", namespace, id).
-		Scan(repairJobScanDest(&job, &completedAt)...)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, store.ErrNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	if completedAt.Valid {
-		job.CompletedAt = &completedAt.Time
-	}
-	return &job, nil
+	return queryOne(ctx, s.db, scanRepairJob, repairJobSelectSQL()+" WHERE monitor_namespace = ? AND id = ?", namespace, id)
 }
 
 func repairJobSelectSQL() string {
@@ -1099,71 +840,32 @@ func repairJobSelectSQL() string {
 	        task_name, branch, pushed_sha, last_error, created_at, updated_at, completed_at FROM repair_jobs`
 }
 
-func repairJobScanDest(job *store.RepairJob, completedAt *sql.NullTime) []any {
-	return []any{
+func scanRepairJob(r rowScanner) (store.RepairJob, error) {
+	var job store.RepairJob
+	var completedAt sql.NullTime
+	if err := r.Scan(
 		&job.ID, &job.MonitorNamespace, &job.MonitorName, &job.Repo, &job.PRNumber, &job.Intent,
 		&job.Source, &job.HeadSHA, &job.BaseSHA, &job.BaseBranch, &job.Phase, &job.RepairCountPR, &job.RepairCountHead,
 		&job.ValidationAttempts, &job.ReviewFixAttempts, &job.TaskName, &job.Branch, &job.PushedSHA,
-		&job.LastError, &job.CreatedAt, &job.UpdatedAt, completedAt,
+		&job.LastError, &job.CreatedAt, &job.UpdatedAt, &completedAt,
+	); err != nil {
+		return store.RepairJob{}, err
 	}
+	if completedAt.Valid {
+		job.CompletedAt = &completedAt.Time
+	}
+	return job, nil
 }
 
 // ListRepairJobs lists repair jobs ordered by update time.
 func (s *Store) ListRepairJobs(ctx context.Context, filter store.RepairJobFilter) ([]store.RepairJob, string, error) {
-	offset, err := parseOffsetCursor(filter.Cursor)
-	if err != nil {
-		return nil, "", err
-	}
-	limit := defaultMonitorLimit(filter.Limit)
-	query := strings.Builder{}
-	query.WriteString(repairJobSelectSQL())
-	query.WriteString(" WHERE monitor_namespace = ?")
-	args := []any{filter.Namespace}
-	if filter.MonitorName != "" {
-		query.WriteString(" AND monitor_name = ?")
-		args = append(args, filter.MonitorName)
-	}
-	if filter.Repo != "" {
-		query.WriteString(" AND repo = ?")
-		args = append(args, filter.Repo)
-	}
-	if filter.PRNumber != 0 {
-		query.WriteString(" AND pr_number = ?")
-		args = append(args, filter.PRNumber)
-	}
-	if filter.Intent != "" {
-		query.WriteString(" AND intent = ?")
-		args = append(args, filter.Intent)
-	}
-	if filter.Phase != "" {
-		query.WriteString(" AND phase = ?")
-		args = append(args, filter.Phase)
-	}
-	query.WriteString(" ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?")
-	args = append(args, limit, offset)
-
-	rows, err := s.db.QueryContext(ctx, query.String(), args...)
-	if err != nil {
-		return nil, "", err
-	}
-	defer rows.Close() //nolint:errcheck
-
-	var jobs []store.RepairJob
-	for rows.Next() {
-		var job store.RepairJob
-		var completedAt sql.NullTime
-		if err := rows.Scan(repairJobScanDest(&job, &completedAt)...); err != nil {
-			return nil, "", err
-		}
-		if completedAt.Valid {
-			job.CompletedAt = &completedAt.Time
-		}
-		jobs = append(jobs, job)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, "", err
-	}
-	return jobs, nextOffsetCursor(offset, len(jobs), limit), nil
+	q := newMonitorQuery(repairJobSelectSQL(), filter.Namespace)
+	monitorFilter(q, "monitor_name", filter.MonitorName)
+	monitorFilter(q, "repo", filter.Repo)
+	monitorFilter(q, "pr_number", filter.PRNumber)
+	monitorFilter(q, "intent", filter.Intent)
+	monitorFilter(q, "phase", filter.Phase)
+	return queryPage(ctx, s.db, q, "updated_at DESC, id DESC", filter.Cursor, filter.Limit, scanRepairJob)
 }
 
 // CreateMonitorEvent inserts an audit event.
@@ -1188,65 +890,29 @@ func (s *Store) CreateMonitorEvent(ctx context.Context, event *store.MonitorEven
 
 // ListMonitorEvents lists audit events ordered newest first.
 func (s *Store) ListMonitorEvents(ctx context.Context, filter store.MonitorEventFilter) ([]store.MonitorEvent, string, error) {
-	offset, err := parseOffsetCursor(filter.Cursor)
-	if err != nil {
-		return nil, "", err
-	}
-	limit := defaultMonitorLimit(filter.Limit)
-	query := strings.Builder{}
-	query.WriteString(`SELECT id, monitor_namespace, monitor_name, run_id, item_kind, item_number, item_sha,
-	        event_type, actor, summary, metadata_json, created_at FROM monitor_events
-		 WHERE monitor_namespace = ?`)
-	args := []any{filter.Namespace}
-	if filter.ID != "" {
-		query.WriteString(" AND id = ?")
-		args = append(args, filter.ID)
-	}
-	if filter.MonitorName != "" {
-		query.WriteString(" AND monitor_name = ?")
-		args = append(args, filter.MonitorName)
-	}
-	if filter.RunID != "" {
-		query.WriteString(" AND run_id = ?")
-		args = append(args, filter.RunID)
-	}
-	if filter.ItemKind != "" {
-		query.WriteString(" AND item_kind = ?")
-		args = append(args, filter.ItemKind)
-	}
-	if filter.ItemNumber != 0 {
-		query.WriteString(" AND item_number = ?")
-		args = append(args, filter.ItemNumber)
-	}
-	if filter.EventType != "" {
-		query.WriteString(" AND event_type = ?")
-		args = append(args, filter.EventType)
-	}
-	query.WriteString(" ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?")
-	args = append(args, limit, offset)
+	q := newMonitorQuery(monitorEventSelectSQL(), filter.Namespace)
+	monitorFilter(q, "id", filter.ID)
+	monitorFilter(q, "monitor_name", filter.MonitorName)
+	monitorFilter(q, "run_id", filter.RunID)
+	monitorFilter(q, "item_kind", filter.ItemKind)
+	monitorFilter(q, "item_number", filter.ItemNumber)
+	monitorFilter(q, "event_type", filter.EventType)
+	return queryPage(ctx, s.db, q, "created_at DESC, id DESC", filter.Cursor, filter.Limit, scanMonitorEvent)
+}
 
-	rows, err := s.db.QueryContext(ctx, query.String(), args...)
-	if err != nil {
-		return nil, "", err
-	}
-	defer rows.Close() //nolint:errcheck
+func monitorEventSelectSQL() string {
+	return `SELECT id, monitor_namespace, monitor_name, run_id, item_kind, item_number, item_sha,
+	        event_type, actor, summary, metadata_json, created_at FROM monitor_events`
+}
 
-	var events []store.MonitorEvent
-	for rows.Next() {
-		var event store.MonitorEvent
-		if err := rows.Scan(
-			&event.ID, &event.MonitorNamespace, &event.MonitorName, &event.RunID, &event.ItemKind,
-			&event.ItemNumber, &event.ItemSHA, &event.EventType, &event.Actor, &event.Summary,
-			&event.MetadataJSON, &event.CreatedAt,
-		); err != nil {
-			return nil, "", err
-		}
-		events = append(events, event)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, "", err
-	}
-	return events, nextOffsetCursor(offset, len(events), limit), nil
+func scanMonitorEvent(r rowScanner) (store.MonitorEvent, error) {
+	var event store.MonitorEvent
+	err := r.Scan(
+		&event.ID, &event.MonitorNamespace, &event.MonitorName, &event.RunID, &event.ItemKind,
+		&event.ItemNumber, &event.ItemSHA, &event.EventType, &event.Actor, &event.Summary,
+		&event.MetadataJSON, &event.CreatedAt,
+	)
+	return event, err
 }
 
 // CreateWorkAction inserts a durable workflow action.
@@ -1324,123 +990,49 @@ func workActionSelectSQL() string {
 	        metadata_json, created_at, updated_at, completed_at FROM work_actions`
 }
 
-func workActionScanDest(action *store.WorkAction, leaseExpiresAt, completedAt *sql.NullTime) []any {
-	return []any{
+func scanWorkAction(r rowScanner) (store.WorkAction, error) {
+	var action store.WorkAction
+	var leaseExpiresAt, completedAt sql.NullTime
+	if err := r.Scan(
 		&action.ID, &action.MonitorNamespace, &action.MonitorName, &action.RunID, &action.CommandEventID,
 		&action.MonitorGeneration, &action.TargetKind, &action.TargetNumber, &action.TargetSHA,
 		&action.TargetSnapshotDigest, &action.Intent, &action.DesiredAction, &action.DependsOnActionID,
 		&action.DedupeKey, &action.IdempotencyKey, &action.Status, &action.Phase, &action.Attempt,
-		&action.LeaseOwner, leaseExpiresAt, &action.TaskName, &action.BlockedReason, &action.Error,
+		&action.LeaseOwner, &leaseExpiresAt, &action.TaskName, &action.BlockedReason, &action.Error,
 		&action.ArtifactIDs, &action.PayloadDigest, &action.MetadataJSON, &action.CreatedAt,
-		&action.UpdatedAt, completedAt,
+		&action.UpdatedAt, &completedAt,
+	); err != nil {
+		return store.WorkAction{}, err
 	}
-}
-
-func applyWorkActionNullableTimes(action *store.WorkAction, leaseExpiresAt, completedAt sql.NullTime) {
 	if leaseExpiresAt.Valid {
 		action.LeaseExpiresAt = &leaseExpiresAt.Time
 	}
 	if completedAt.Valid {
 		action.CompletedAt = &completedAt.Time
 	}
+	return action, nil
 }
 
 // GetWorkAction fetches one workflow action by ID.
 func (s *Store) GetWorkAction(ctx context.Context, namespace, id string) (*store.WorkAction, error) {
-	var action store.WorkAction
-	var leaseExpiresAt, completedAt sql.NullTime
-	err := s.db.QueryRowContext(ctx, workActionSelectSQL()+` WHERE monitor_namespace = ? AND id = ?`, namespace, id).
-		Scan(workActionScanDest(&action, &leaseExpiresAt, &completedAt)...)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, store.ErrNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	applyWorkActionNullableTimes(&action, leaseExpiresAt, completedAt)
-	return &action, nil
+	return queryOne(ctx, s.db, scanWorkAction, workActionSelectSQL()+` WHERE monitor_namespace = ? AND id = ?`, namespace, id)
 }
 
 // ListWorkActions lists workflow actions ordered by update time.
 func (s *Store) ListWorkActions(ctx context.Context, filter store.WorkActionFilter) ([]store.WorkAction, string, error) {
-	offset, err := parseOffsetCursor(filter.Cursor)
-	if err != nil {
-		return nil, "", err
-	}
-	limit := defaultMonitorLimit(filter.Limit)
-	query := strings.Builder{}
-	query.WriteString(workActionSelectSQL())
-	query.WriteString(" WHERE monitor_namespace = ?")
-	args := []any{filter.Namespace}
-	appendWorkActionFilters(&query, &args, filter)
-	query.WriteString(" ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?")
-	args = append(args, limit, offset)
-	rows, err := s.db.QueryContext(ctx, query.String(), args...)
-	if err != nil {
-		return nil, "", err
-	}
-	defer rows.Close() //nolint:errcheck
-	var actions []store.WorkAction
-	for rows.Next() {
-		var action store.WorkAction
-		var leaseExpiresAt, completedAt sql.NullTime
-		if err := rows.Scan(workActionScanDest(&action, &leaseExpiresAt, &completedAt)...); err != nil {
-			return nil, "", err
-		}
-		applyWorkActionNullableTimes(&action, leaseExpiresAt, completedAt)
-		actions = append(actions, action)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, "", err
-	}
-	return actions, nextOffsetCursor(offset, len(actions), limit), nil
-}
-
-func appendWorkActionFilters(query *strings.Builder, args *[]any, filter store.WorkActionFilter) {
-	if filter.MonitorName != "" {
-		query.WriteString(" AND monitor_name = ?")
-		*args = append(*args, filter.MonitorName)
-	}
-	if filter.TargetKind != "" {
-		query.WriteString(" AND target_kind = ?")
-		*args = append(*args, filter.TargetKind)
-	}
-	if filter.TargetNumber != 0 {
-		query.WriteString(" AND target_number = ?")
-		*args = append(*args, filter.TargetNumber)
-	}
-	if filter.TargetSHA != "" {
-		query.WriteString(" AND target_sha = ?")
-		*args = append(*args, filter.TargetSHA)
-	}
-	if filter.Intent != "" {
-		query.WriteString(" AND intent = ?")
-		*args = append(*args, filter.Intent)
-	}
-	if filter.DesiredAction != "" {
-		query.WriteString(" AND desired_action = ?")
-		*args = append(*args, filter.DesiredAction)
-	}
-	if filter.Status != "" {
-		query.WriteString(" AND status = ?")
-		*args = append(*args, filter.Status)
-	}
-	if filter.RunID != "" {
-		query.WriteString(" AND run_id = ?")
-		*args = append(*args, filter.RunID)
-	}
-	if filter.CommandEventID != "" {
-		query.WriteString(" AND command_event_id = ?")
-		*args = append(*args, filter.CommandEventID)
-	}
-	if filter.TaskName != "" {
-		query.WriteString(" AND task_name = ?")
-		*args = append(*args, filter.TaskName)
-	}
-	if filter.DedupeKey != "" {
-		query.WriteString(" AND dedupe_key = ?")
-		*args = append(*args, filter.DedupeKey)
-	}
+	q := newMonitorQuery(workActionSelectSQL(), filter.Namespace)
+	monitorFilter(q, "monitor_name", filter.MonitorName)
+	monitorFilter(q, "target_kind", filter.TargetKind)
+	monitorFilter(q, "target_number", filter.TargetNumber)
+	monitorFilter(q, "target_sha", filter.TargetSHA)
+	monitorFilter(q, "intent", filter.Intent)
+	monitorFilter(q, "desired_action", filter.DesiredAction)
+	monitorFilter(q, "status", filter.Status)
+	monitorFilter(q, "run_id", filter.RunID)
+	monitorFilter(q, "command_event_id", filter.CommandEventID)
+	monitorFilter(q, "task_name", filter.TaskName)
+	monitorFilter(q, "dedupe_key", filter.DedupeKey)
+	return queryPage(ctx, s.db, q, "updated_at DESC, id DESC", filter.Cursor, filter.Limit, scanWorkAction)
 }
 
 // CancelWorkActions cancels non-terminal workflow actions for a target.
@@ -1516,84 +1108,36 @@ func implementationJobSelectSQL() string {
 	        created_at, updated_at, completed_at FROM implementation_jobs`
 }
 
-func implementationJobScanDest(job *store.ImplementationJob, completedAt *sql.NullTime) []any {
-	return []any{&job.ID, &job.MonitorNamespace, &job.MonitorName, &job.Repo, &job.IssueNumber,
-		&job.PlanID, &job.SnapshotDigest, &job.Phase, &job.Attempt, &job.Branch, &job.PatchArtifactID,
-		&job.PRNumber, &job.ValidationState, &job.TaskName, &job.MutationTaskName, &job.CommandEventID,
-		&job.WorkActionID, &job.MonitorGeneration, &job.Error, &job.CreatedAt, &job.UpdatedAt, completedAt}
-}
-
-// GetImplementationJob fetches one implementation job.
-func (s *Store) GetImplementationJob(ctx context.Context, namespace, id string) (*store.ImplementationJob, error) {
+func scanImplementationJob(r rowScanner) (store.ImplementationJob, error) {
 	var job store.ImplementationJob
 	var completedAt sql.NullTime
-	err := s.db.QueryRowContext(ctx, implementationJobSelectSQL()+` WHERE monitor_namespace = ? AND id = ?`, namespace, id).Scan(implementationJobScanDest(&job, &completedAt)...)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, store.ErrNotFound
-	}
-	if err != nil {
-		return nil, err
+	if err := r.Scan(&job.ID, &job.MonitorNamespace, &job.MonitorName, &job.Repo, &job.IssueNumber,
+		&job.PlanID, &job.SnapshotDigest, &job.Phase, &job.Attempt, &job.Branch, &job.PatchArtifactID,
+		&job.PRNumber, &job.ValidationState, &job.TaskName, &job.MutationTaskName, &job.CommandEventID,
+		&job.WorkActionID, &job.MonitorGeneration, &job.Error, &job.CreatedAt, &job.UpdatedAt, &completedAt,
+	); err != nil {
+		return store.ImplementationJob{}, err
 	}
 	if completedAt.Valid {
 		job.CompletedAt = &completedAt.Time
 	}
-	return &job, nil
+	return job, nil
+}
+
+// GetImplementationJob fetches one implementation job.
+func (s *Store) GetImplementationJob(ctx context.Context, namespace, id string) (*store.ImplementationJob, error) {
+	return queryOne(ctx, s.db, scanImplementationJob, implementationJobSelectSQL()+` WHERE monitor_namespace = ? AND id = ?`, namespace, id)
 }
 
 // ListImplementationJobs lists implementation jobs ordered by update time.
 func (s *Store) ListImplementationJobs(ctx context.Context, filter store.ImplementationJobFilter) ([]store.ImplementationJob, string, error) {
-	offset, err := parseOffsetCursor(filter.Cursor)
-	if err != nil {
-		return nil, "", err
-	}
-	limit := defaultMonitorLimit(filter.Limit)
-	query := strings.Builder{}
-	query.WriteString(implementationJobSelectSQL())
-	query.WriteString(" WHERE monitor_namespace = ?")
-	args := []any{filter.Namespace}
-	if filter.MonitorName != "" {
-		query.WriteString(" AND monitor_name = ?")
-		args = append(args, filter.MonitorName)
-	}
-	if filter.Repo != "" {
-		query.WriteString(" AND repo = ?")
-		args = append(args, filter.Repo)
-	}
-	if filter.IssueNumber != 0 {
-		query.WriteString(" AND issue_number = ?")
-		args = append(args, filter.IssueNumber)
-	}
-	if filter.Phase != "" {
-		query.WriteString(" AND phase = ?")
-		args = append(args, filter.Phase)
-	}
-	if filter.TaskName != "" {
-		query.WriteString(" AND task_name = ?")
-		args = append(args, filter.TaskName)
-	}
-	query.WriteString(" ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?")
-	args = append(args, limit, offset)
-	rows, err := s.db.QueryContext(ctx, query.String(), args...)
-	if err != nil {
-		return nil, "", err
-	}
-	defer rows.Close() //nolint:errcheck
-	var jobs []store.ImplementationJob
-	for rows.Next() {
-		var job store.ImplementationJob
-		var completedAt sql.NullTime
-		if err := rows.Scan(implementationJobScanDest(&job, &completedAt)...); err != nil {
-			return nil, "", err
-		}
-		if completedAt.Valid {
-			job.CompletedAt = &completedAt.Time
-		}
-		jobs = append(jobs, job)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, "", err
-	}
-	return jobs, nextOffsetCursor(offset, len(jobs), limit), nil
+	q := newMonitorQuery(implementationJobSelectSQL(), filter.Namespace)
+	monitorFilter(q, "monitor_name", filter.MonitorName)
+	monitorFilter(q, "repo", filter.Repo)
+	monitorFilter(q, "issue_number", filter.IssueNumber)
+	monitorFilter(q, "phase", filter.Phase)
+	monitorFilter(q, "task_name", filter.TaskName)
+	return queryPage(ctx, s.db, q, "updated_at DESC, id DESC", filter.Cursor, filter.Limit, scanImplementationJob)
 }
 
 // CountImplementationJobs counts jobs matching durable workflow filters without
@@ -1714,86 +1258,36 @@ func githubMutationRecordSelectSQL() string {
 	        FROM github_mutation_records`
 }
 
-func githubMutationRecordScanDest(record *store.GitHubMutationRecord, pendingAt *sql.NullTime) []any {
-	return []any{&record.ID, &record.MonitorNamespace, &record.MonitorName, &record.RunID,
+func scanGitHubMutationRecord(r rowScanner) (store.GitHubMutationRecord, error) {
+	var record store.GitHubMutationRecord
+	var pendingAt sql.NullTime
+	if err := r.Scan(&record.ID, &record.MonitorNamespace, &record.MonitorName, &record.RunID,
 		&record.CommandEventID, &record.WorkActionID, &record.MonitorGeneration, &record.Operation,
 		&record.TargetKind, &record.TargetNumber, &record.TargetSHA, &record.Actor, &record.Reason,
 		&record.RequestDigest, &record.GitHubURL, &record.GitHubRequestID, &record.ExternalID,
-		&record.Status, &record.Error, pendingAt, &record.CreatedAt}
-}
-
-func applyGitHubMutationRecordPendingAt(record *store.GitHubMutationRecord, pendingAt sql.NullTime) {
+		&record.Status, &record.Error, &pendingAt, &record.CreatedAt,
+	); err != nil {
+		return store.GitHubMutationRecord{}, err
+	}
 	if pendingAt.Valid {
 		value := pendingAt.Time
 		record.PendingAt = &value
 	}
+	return record, nil
 }
 
 // GetGitHubMutationRecord fetches one mutation record.
 func (s *Store) GetGitHubMutationRecord(ctx context.Context, namespace, id string) (*store.GitHubMutationRecord, error) {
-	var record store.GitHubMutationRecord
-	var pendingAt sql.NullTime
-	err := s.db.QueryRowContext(ctx, githubMutationRecordSelectSQL()+` WHERE monitor_namespace = ? AND id = ?`, namespace, id).Scan(githubMutationRecordScanDest(&record, &pendingAt)...)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, store.ErrNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	applyGitHubMutationRecordPendingAt(&record, pendingAt)
-	return &record, nil
+	return queryOne(ctx, s.db, scanGitHubMutationRecord, githubMutationRecordSelectSQL()+` WHERE monitor_namespace = ? AND id = ?`, namespace, id)
 }
 
 // ListGitHubMutationRecords lists mutation records ordered newest first.
 func (s *Store) ListGitHubMutationRecords(ctx context.Context, filter store.GitHubMutationRecordFilter) ([]store.GitHubMutationRecord, string, error) {
-	offset, err := parseOffsetCursor(filter.Cursor)
-	if err != nil {
-		return nil, "", err
-	}
-	limit := defaultMonitorLimit(filter.Limit)
-	query := strings.Builder{}
-	query.WriteString(githubMutationRecordSelectSQL())
-	query.WriteString(" WHERE monitor_namespace = ?")
-	args := []any{filter.Namespace}
-	if filter.MonitorName != "" {
-		query.WriteString(" AND monitor_name = ?")
-		args = append(args, filter.MonitorName)
-	}
-	if filter.Operation != "" {
-		query.WriteString(" AND operation = ?")
-		args = append(args, filter.Operation)
-	}
-	if filter.TargetKind != "" {
-		query.WriteString(" AND target_kind = ?")
-		args = append(args, filter.TargetKind)
-	}
-	if filter.TargetNumber != 0 {
-		query.WriteString(" AND target_number = ?")
-		args = append(args, filter.TargetNumber)
-	}
-	if filter.Status != "" {
-		query.WriteString(" AND status = ?")
-		args = append(args, filter.Status)
-	}
-	query.WriteString(" ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?")
-	args = append(args, limit, offset)
-	rows, err := s.db.QueryContext(ctx, query.String(), args...)
-	if err != nil {
-		return nil, "", err
-	}
-	defer rows.Close() //nolint:errcheck
-	var records []store.GitHubMutationRecord
-	for rows.Next() {
-		var record store.GitHubMutationRecord
-		var pendingAt sql.NullTime
-		if err := rows.Scan(githubMutationRecordScanDest(&record, &pendingAt)...); err != nil {
-			return nil, "", err
-		}
-		applyGitHubMutationRecordPendingAt(&record, pendingAt)
-		records = append(records, record)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, "", err
-	}
-	return records, nextOffsetCursor(offset, len(records), limit), nil
+	q := newMonitorQuery(githubMutationRecordSelectSQL(), filter.Namespace)
+	monitorFilter(q, "monitor_name", filter.MonitorName)
+	monitorFilter(q, "operation", filter.Operation)
+	monitorFilter(q, "target_kind", filter.TargetKind)
+	monitorFilter(q, "target_number", filter.TargetNumber)
+	monitorFilter(q, "status", filter.Status)
+	return queryPage(ctx, s.db, q, "created_at DESC, id DESC", filter.Cursor, filter.Limit, scanGitHubMutationRecord)
 }

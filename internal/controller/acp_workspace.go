@@ -358,19 +358,7 @@ func externalEffectSucceededAt(
 	if effects == nil {
 		return time.Time{}, fmt.Errorf("external-effect store is required")
 	}
-	var (
-		effect *store.ExternalEffect
-		err    error
-	)
-	if reader, ok := effects.(store.ExternalEffectIdentityReader); ok {
-		effect, err = reader.GetExternalEffectByIdentity(ctx, identity)
-	} else {
-		id, idErr := identity.CanonicalID()
-		if idErr != nil {
-			return time.Time{}, idErr
-		}
-		effect, err = effects.GetExternalEffect(ctx, id)
-	}
+	effect, err := effects.GetExternalEffectByIdentity(ctx, identity)
 	if err != nil {
 		return time.Time{}, err
 	}

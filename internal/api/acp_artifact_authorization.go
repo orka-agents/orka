@@ -185,10 +185,7 @@ const (
 )
 
 func (s *Server) authorizationReader() client.Reader {
-	if s.config.APIReader != nil {
-		return s.config.APIReader
-	}
-	return s.client
+	return uncachedReaderOr(s.config.APIReader, s.client)
 }
 
 func (s *Server) resolveArtifactRuntimeProviderByIdentity(

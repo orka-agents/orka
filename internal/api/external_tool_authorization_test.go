@@ -702,8 +702,8 @@ func TestExternalToolChatDiscoveryOmitsForbiddenMetadata(t *testing.T) {
 				&corev1alpha1.Skill{ObjectMeta: metav1.ObjectMeta{Name: "private-skill", Namespace: externalToolNamespace}},
 			)
 			requestClient := newExternalToolClient(backend, clientset, externalToolUser(), externalToolNamespace, "", false, nil)
-			builder := NewSystemPromptBuilder(externalToolDiscoveryClient{Client: requestClient}, externalToolNamespace)
-			prompt, err := builder.BuildSystemPrompt(context.Background(), "", PromptModeFull)
+			builder := NewSystemPromptBuilder(externalToolDiscoveryClient{Client: requestClient}, externalToolNamespace, ACPRuntimeAvailability{})
+			prompt, err := builder.BuildSystemPrompt(context.Background(), "")
 			if err != nil {
 				t.Fatal(err)
 			}

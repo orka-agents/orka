@@ -12,6 +12,7 @@ import (
 	"strconv"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/gofiber/fiber/v3"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -121,6 +122,37 @@ func (h *Handlers) listPage(ctx context.Context, list client.ObjectList, opts *c
 	// continue token; the optional count is never forwarded.
 	list.SetRemainingItemCount(nil)
 	return nil
+}
+
+// listNamespaced parses the request's limit/continue query parameters and
+// serves one page of the namespaced list through listPage.
+func (h *Handlers) listNamespaced(c fiber.Ctx, list client.ObjectList, namespace, what string) error {
+	pagination, err := ParsePagination(c.Query("limit", "100"), c.Query("continue", ""))
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+	}
+	return h.listPage(c.Context(), list, &client.ListOptions{
+		Namespace: namespace,
+		Limit:     pagination.Limit,
+		Continue:  pagination.Continue,
+	}, what)
+}
+
+// fetchNamespaced reads one namespaced object by name from the request's
+// resolved namespace, mapping NotFound to a 404 named after what.
+func fetchNamespaced[T client.Object](h *Handlers, c fiber.Ctx, obj T, name, what string) (T, error) {
+	var zero T
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	if err != nil {
+		return zero, err
+	}
+	if err := h.client.Get(c.Context(), types.NamespacedName{Namespace: namespace, Name: name}, obj); err != nil {
+		if apierrors.IsNotFound(err) {
+			return zero, fiber.NewError(fiber.StatusNotFound, what+" not found")
+		}
+		return zero, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get %s: %v", what, err))
+	}
+	return obj, nil
 }
 
 func listPageError(what string, err error) error {

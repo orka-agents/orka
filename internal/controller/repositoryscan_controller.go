@@ -3286,12 +3286,7 @@ func (r *RepositoryScanReconciler) ingestReviewTask(ctx context.Context, scan *c
 	if err := r.ensureActiveScanRunPolicyCurrent(ctx, scan, run); err != nil {
 		return err
 	}
-	filterResult := security.FilterFindings(partition.Accepted, security.FindingFilterOptions{
-		RepositoryScan: scan.Name,
-		ScanRunID:      run.ID,
-		TaskName:       task.Name,
-		SliceID:        sliceID,
-	})
+	filterResult := security.FilterFindings(partition.Accepted)
 	partition.Accepted = filterResult.Kept
 	partition.Dropped = append(partition.Dropped, filterResult.Dropped...)
 	return r.applyScanTaskIngestion(ctx, scan, task, run, func(tx *RepositoryScanReconciler, current *store.ScanRun, ingestion *store.ScanTaskIngestion) error {

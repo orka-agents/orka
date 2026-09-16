@@ -11,7 +11,6 @@ import (
 )
 
 var _ store.BranchClaimStore = (*Store)(nil)
-var _ store.BranchClaimCreationStore = (*Store)(nil)
 
 // CreateBranchClaim creates a canonical repository+full-ref ownership record.
 // The same immutable identity and digest is idempotent; any mismatch conflicts.

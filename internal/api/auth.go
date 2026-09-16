@@ -117,11 +117,6 @@ type AuthConfig struct {
 	// the normalized audience set so a token authenticated on an unscoped
 	// listener cannot be replayed against an audience-bound listener.
 	TokenReviewAudiences []string
-
-	// TokenSources optionally overrides the ordered request headers used to
-	// extract authentication tokens. When empty, Authorization: Bearer is used
-	// first and x-api-key remains the fallback.
-	TokenSources []AuthTokenSource
 }
 
 // parseServiceAccountNamespace extracts the namespace from a ServiceAccount username.
@@ -146,8 +141,6 @@ func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
 		cfg = configs[0]
 	}
 
-	tokenExtractor := AuthTokenExtractor{Sources: cfg.TokenSources}
-
 	return func(ctx fiber.Ctx) error {
 		contextToken, profile, ok, err := extractContextTokenCandidate(ctx, cfg.ContextTokens)
 		if err != nil {
@@ -170,7 +163,7 @@ func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
 			}
 
 			var token string
-			token, err = tokenExtractor.Extract(ctx)
+			token, err = extractAuthToken(ctx)
 			if err != nil {
 				if errors.Is(err, errInvalidAuthHeaderFormat) {
 					log.Info("authentication failed: invalid authorization header format", "ip", ctx.IP())

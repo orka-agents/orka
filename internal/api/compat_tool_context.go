@@ -66,10 +66,7 @@ type compatProxyToolContextConfig struct {
 
 func newCompatProxyToolContext(cfg compatProxyToolContextConfig) *tools.ToolContext {
 	tasksCreated := 0
-	authorizationReader := cfg.AuthorizationReader
-	if authorizationReader == nil {
-		authorizationReader = cfg.Client
-	}
+	authorizationReader := uncachedReaderOr(cfg.AuthorizationReader, cfg.Client)
 	toolCtx := &tools.ToolContext{
 		Client:                    cfg.Client,
 		PolicyReader:              authorizationReader,
