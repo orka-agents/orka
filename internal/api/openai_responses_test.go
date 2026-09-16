@@ -295,13 +295,14 @@ func TestResponsesHTTPStreamingTextAndToolIDs(t *testing.T) {
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
 		require.Equal(t, true, req["stream"])
 		require.Equal(t, false, req["store"])
+		message := map[string]any{"type": "message", "id": "upstream-text", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": "Hello world", "annotations": []any{}}}}
 		upstreamSSE(w, []map[string]any{
-			{"type": "response.output_text.delta", "delta": "Hello "},
-			{"type": "response.output_text.delta", "delta": "world"},
+			{"type": "response.output_text.delta", "output_index": 0, "item_id": "upstream-text", "delta": "Hello "},
+			{"type": "response.output_text.delta", "output_index": 0, "item_id": "upstream-text", "delta": "world"},
 			{"type": "response.output_item.added", "output_index": 1, "item": map[string]any{"type": "function_call", "id": "upstream-item", "call_id": "stable-call", "name": "client_tool", "arguments": ""}},
 			{"type": "response.function_call_arguments.delta", "output_index": 1, "item_id": "upstream-item", "delta": "{\"value\":"},
 			{"type": "response.function_call_arguments.done", "output_index": 1, "item_id": "upstream-item", "arguments": "{\"value\":42}"},
-			{"type": "response.completed", "response": map[string]any{"status": "completed", "model": "test-model", "output": []any{map[string]any{"type": "function_call", "id": "upstream-item", "call_id": "stable-call", "name": "client_tool", "arguments": "{\"value\":42}", "status": "completed"}}, "usage": map[string]any{"input_tokens": 4, "output_tokens": 2}}},
+			{"type": "response.completed", "response": map[string]any{"status": "completed", "model": "test-model", "output": []any{message, map[string]any{"type": "function_call", "id": "upstream-item", "call_id": "stable-call", "name": "client_tool", "arguments": "{\"value\":42}", "status": "completed"}}, "usage": map[string]any{"input_tokens": 4, "output_tokens": 2}}},
 		})
 	})
 	status, body := requestResponses(t, app, `{"model":"fixture/test-model","store":false,"stream":true,"input":"hi","tools":[{"type":"function","name":"client_tool"}]}`, true)

@@ -39,8 +39,8 @@ type CompletionRequest struct {
 	// Store preserves explicit stateless requests through provider translation.
 	// Nil retains the provider default for existing callers.
 	Store *bool `json:"store,omitempty"`
-	// ResponsesInput marks Messages as ordered input items rather than chat
-	// turns. Only turn-based provider adapters may group adjacent items.
+	// ResponsesInput identifies compat Responses requests, preserving native
+	// input/output item order. Turn-based adapters may group adjacent input items.
 	ResponsesInput bool `json:"-"`
 }
 
@@ -63,16 +63,25 @@ type JSONSchemaFormat struct {
 	Description string         `json:"description,omitempty"`
 }
 
+// AssistantOutputItem retains a provider's ordered text/function output.
+// Existing consumers continue to use the aggregate Content and ToolCalls fields.
+type AssistantOutputItem struct {
+	Content  string
+	ToolCall *ToolCall
+}
+
 // CompletionResponse represents a completion response
 type CompletionResponse struct {
-	Content      string     `json:"content"`
-	ToolCalls    []ToolCall `json:"tool_calls,omitempty"`
-	StopReason   string     `json:"stop_reason"`
-	InputTokens  int        `json:"input_tokens"`
-	OutputTokens int        `json:"output_tokens"`
-	Model        string     `json:"model"`
-	Provider     string     `json:"provider,omitempty"`
-	ID           string     `json:"id,omitempty"`
+	// OutputItems is optional in-memory ordering metadata for Responses requests.
+	OutputItems  []AssistantOutputItem `json:"-"`
+	Content      string                `json:"content"`
+	ToolCalls    []ToolCall            `json:"tool_calls,omitempty"`
+	StopReason   string                `json:"stop_reason"`
+	InputTokens  int                   `json:"input_tokens"`
+	OutputTokens int                   `json:"output_tokens"`
+	Model        string                `json:"model"`
+	Provider     string                `json:"provider,omitempty"`
+	ID           string                `json:"id,omitempty"`
 }
 
 // CompletionOutcome describes the provider-neutral result of a completion.
@@ -126,11 +135,14 @@ func completionOutcomeForStopReason(reason string) CompletionOutcome {
 
 // Message represents a chat message
 type Message struct {
-	Role       string     `json:"role"` // user, assistant, system, tool
-	Content    string     `json:"content,omitempty"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
-	Name       string     `json:"name,omitempty"` // For tool results
+	// Keep an ordered assistant turn in one message so truncation retains its
+	// tool calls and adjacent results atomically. It is never persisted.
+	OutputItems []AssistantOutputItem `json:"-"`
+	Role        string                `json:"role"` // user, assistant, system, tool
+	Content     string                `json:"content,omitempty"`
+	ToolCalls   []ToolCall            `json:"tool_calls,omitempty"`
+	ToolCallID  string                `json:"tool_call_id,omitempty"`
+	Name        string                `json:"name,omitempty"` // For tool results
 }
 
 // Tool represents a tool definition
@@ -150,15 +162,19 @@ type ToolCall struct {
 
 // StreamChunk represents a chunk of a streaming response
 type StreamChunk struct {
-	Content      string    `json:"content,omitempty"`
-	ToolCall     *ToolCall `json:"tool_call,omitempty"`
-	Done         bool      `json:"done"`
-	StopReason   string    `json:"stop_reason,omitempty"`
-	Provider     string    `json:"provider,omitempty"`
-	Model        string    `json:"model,omitempty"`
-	InputTokens  int       `json:"input_tokens,omitempty"`
-	OutputTokens int       `json:"output_tokens,omitempty"`
-	Error        error     `json:"error,omitempty"`
+	// Native Responses item metadata is consumed before exposing compat SSE.
+	OutputIndex      *int64    `json:"-"`
+	OutputItemDone   bool      `json:"-"`
+	OutputItemStatus string    `json:"-"`
+	Content          string    `json:"content,omitempty"`
+	ToolCall         *ToolCall `json:"tool_call,omitempty"`
+	Done             bool      `json:"done"`
+	StopReason       string    `json:"stop_reason,omitempty"`
+	Provider         string    `json:"provider,omitempty"`
+	Model            string    `json:"model,omitempty"`
+	InputTokens      int       `json:"input_tokens,omitempty"`
+	OutputTokens     int       `json:"output_tokens,omitempty"`
+	Error            error     `json:"error,omitempty"`
 }
 
 // ProviderConfig holds configuration for creating a provider

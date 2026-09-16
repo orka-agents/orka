@@ -72,6 +72,10 @@ func completeViaStream(ctx context.Context, provider llm.Provider, req *llm.Comp
 	}
 
 	resp := &llm.CompletionResponse{}
+	if req.ResponsesInput {
+		resp.OutputItems = []llm.AssistantOutputItem{}
+	}
+	textItemOpen := false
 	terminalSeen := false
 	for chunk := range streamCh {
 		if chunk.Error != nil {
@@ -82,9 +86,24 @@ func completeViaStream(ctx context.Context, provider llm.Provider, req *llm.Comp
 		}
 		if chunk.Content != "" {
 			resp.Content += chunk.Content
+			if req.ResponsesInput {
+				if !textItemOpen {
+					resp.OutputItems = append(resp.OutputItems, llm.AssistantOutputItem{})
+				}
+				resp.OutputItems[len(resp.OutputItems)-1].Content += chunk.Content
+				textItemOpen = true
+			}
 		}
 		if chunk.ToolCall != nil {
 			resp.ToolCalls = append(resp.ToolCalls, *chunk.ToolCall)
+			if req.ResponsesInput {
+				call := *chunk.ToolCall
+				resp.OutputItems = append(resp.OutputItems, llm.AssistantOutputItem{ToolCall: &call})
+				textItemOpen = false
+			}
+		}
+		if chunk.OutputItemDone {
+			textItemOpen = false
 		}
 		if chunk.InputTokens > 0 {
 			resp.InputTokens = chunk.InputTokens
@@ -819,8 +838,9 @@ func runToolLoopWithObserver(
 			)
 			observer.prematureEndRetry()
 			messages = append(messages, llm.Message{
-				Role:    "assistant",
-				Content: resp.Content,
+				Role:        responsesRoleAssistant,
+				Content:     resp.Content,
+				OutputItems: resp.OutputItems,
 			})
 			messages = append(messages, llm.Message{
 				Role: "user",
@@ -840,9 +860,10 @@ func runToolLoopWithObserver(
 
 		// Append assistant message with tool calls
 		messages = append(messages, llm.Message{
-			Role:      "assistant",
-			Content:   resp.Content,
-			ToolCalls: resp.ToolCalls,
+			Role:        responsesRoleAssistant,
+			Content:     resp.Content,
+			ToolCalls:   resp.ToolCalls,
+			OutputItems: resp.OutputItems,
 		})
 
 		// Execute each tool and append results

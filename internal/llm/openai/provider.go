@@ -36,6 +36,7 @@ const (
 
 const (
 	eventTypeFunctionCall           = "function_call"
+	responseOutputTypeMessage       = "message"
 	providerTypeOpenAI              = "openai"
 	providerTypeAzureOpenAI         = "azure-openai"
 	eventTypeResponseIncomplete     = "response.incomplete"
@@ -302,24 +303,21 @@ func convertInputItems(messages []llm.Message) responses.ResponseInputParam {
 				},
 			})
 		case "assistant":
-			if len(msg.ToolCalls) > 0 {
-				for _, tc := range msg.ToolCalls {
-					items = append(items, responses.ResponseInputItemUnionParam{
-						OfFunctionCall: &responses.ResponseFunctionToolCallParam{
-							CallID:    tc.ID,
-							Name:      tc.Name,
-							Arguments: string(tc.Arguments),
-						},
-					})
+			if msg.OutputItems != nil {
+				for _, item := range msg.OutputItems {
+					if item.ToolCall != nil {
+						items = appendResponsesInputCall(items, *item.ToolCall)
+					} else if item.Content != "" {
+						items = appendResponsesInputText(items, item.Content)
+					}
 				}
+				continue
+			}
+			for _, tc := range msg.ToolCalls {
+				items = appendResponsesInputCall(items, tc)
 			}
 			if msg.Content != "" {
-				items = append(items, responses.ResponseInputItemUnionParam{
-					OfMessage: &responses.EasyInputMessageParam{
-						Role:    responses.EasyInputMessageRoleAssistant,
-						Content: responses.EasyInputMessageContentUnionParam{OfString: openai.String(msg.Content)},
-					},
-				})
+				items = appendResponsesInputText(items, msg.Content)
 			}
 		case "tool":
 			items = append(items, responses.ResponseInputItemUnionParam{
@@ -340,6 +338,19 @@ func convertInputItems(messages []llm.Message) responses.ResponseInputParam {
 		}
 	}
 	return items
+}
+
+func appendResponsesInputCall(items responses.ResponseInputParam, call llm.ToolCall) responses.ResponseInputParam {
+	return append(items, responses.ResponseInputItemUnionParam{OfFunctionCall: &responses.ResponseFunctionToolCallParam{
+		CallID: call.ID, Name: call.Name, Arguments: string(call.Arguments),
+	}})
+}
+
+func appendResponsesInputText(items responses.ResponseInputParam, content string) responses.ResponseInputParam {
+	return append(items, responses.ResponseInputItemUnionParam{OfMessage: &responses.EasyInputMessageParam{
+		Role:    responses.EasyInputMessageRoleAssistant,
+		Content: responses.EasyInputMessageContentUnionParam{OfString: openai.String(content)},
+	}})
 }
 
 func convertResponsesTools(tools []llm.Tool) []responses.ToolUnionParam {
@@ -381,13 +392,24 @@ func (p *Provider) completeResponses(ctx context.Context, req *llm.CompletionReq
 		OutputTokens: int(resp.Usage.OutputTokens),
 		Model:        resp.Model,
 	}
+	if req.ResponsesInput {
+		result.OutputItems = make([]llm.AssistantOutputItem, 0, len(resp.Output))
+	}
 	for _, item := range resp.Output {
 		if item.Type == eventTypeFunctionCall {
-			result.ToolCalls = append(result.ToolCalls, llm.ToolCall{
-				ID:        item.CallID,
-				Name:      item.Name,
-				Arguments: json.RawMessage(responseOutputArguments(item.Arguments)),
-			})
+			call := llm.ToolCall{ID: item.CallID, Name: item.Name, Arguments: json.RawMessage(responseOutputArguments(item.Arguments))}
+			result.ToolCalls = append(result.ToolCalls, call)
+			if req.ResponsesInput {
+				result.OutputItems = append(result.OutputItems, llm.AssistantOutputItem{ToolCall: &call})
+			}
+		} else if req.ResponsesInput && item.Type == responseOutputTypeMessage {
+			var content strings.Builder
+			for _, part := range item.Content {
+				if part.Type == "output_text" {
+					content.WriteString(part.Text)
+				}
+			}
+			result.OutputItems = append(result.OutputItems, llm.AssistantOutputItem{Content: content.String()})
 		}
 	}
 	result.StopReason = normalizeResponsesStopReason(result.StopReason, resp.Output, false)
@@ -420,7 +442,7 @@ func normalizeResponsesStopReason(
 		if item.Status != "" && item.Status != stopReasonCompleted {
 			return item.Status
 		}
-		if item.Type == "message" {
+		if item.Type == responseOutputTypeMessage {
 			for _, content := range item.Content {
 				if content.Type == stopReasonRefusal {
 					return stopReasonRefusal
@@ -505,6 +527,8 @@ type responseFuncCallState struct {
 }
 
 type responseFuncCallTracker struct {
+	ordered       bool
+	outputOrder   responseOutputOrder
 	byItemID      map[string]*responseFuncCallState
 	byOutputIndex map[int64]*responseFuncCallState
 	byCallID      map[string]*responseFuncCallState
@@ -639,7 +663,7 @@ func (t *responseFuncCallTracker) mergeItem(fc *responseFuncCallState, item resp
 }
 
 func (t *responseFuncCallTracker) emit(fc *responseFuncCallState, send streamSender) bool {
-	if fc == nil || fc.emitted || fc.name == "" || !fc.argumentsDone {
+	if fc == nil || fc.emitted || fc.name == "" || !fc.argumentsDone || (t.ordered && !fc.hasOutputIndex) {
 		return true
 	}
 	args := fc.arguments
@@ -650,9 +674,12 @@ func (t *responseFuncCallTracker) emit(fc *responseFuncCallState, send streamSen
 	if callID == "" {
 		callID = fc.itemID
 	}
-	if !send(llm.StreamChunk{
-		ToolCall: &llm.ToolCall{ID: callID, Name: fc.name, Arguments: json.RawMessage(args)},
-	}) {
+	chunk := llm.StreamChunk{ToolCall: &llm.ToolCall{ID: callID, Name: fc.name, Arguments: json.RawMessage(args)}}
+	if t.ordered {
+		index := fc.outputIndex
+		chunk.OutputIndex = &index
+	}
+	if !send(chunk) {
 		return false
 	}
 	fc.emitted = true
@@ -698,8 +725,13 @@ func (t *responseFuncCallTracker) hasUnemittedFunctionCall(output []responses.Re
 	return false
 }
 
-func streamResponsesEvents(stream responseStream, providerName string, send streamSender) {
+func streamResponsesEvents(stream responseStream, providerName string, send streamSender, ordered ...bool) {
 	tracker := newResponseFuncCallTracker()
+	tracker.ordered = len(ordered) > 0 && ordered[0]
+	if tracker.ordered {
+		queue := &orderedResponseSender{send: send, pending: map[int64][]llm.StreamChunk{}}
+		send = queue.chunk
+	}
 	for stream.Next() {
 		if !handleResponsesStreamEvent(stream.Current(), tracker, providerName, send) {
 			return
@@ -713,17 +745,26 @@ func streamResponsesEvents(stream responseStream, providerName string, send stre
 }
 
 func handleResponsesStreamEvent(evt responses.ResponseStreamEventUnion, tracker *responseFuncCallTracker, providerName string, send streamSender) bool {
+	var outputIndex *int64
+	if tracker.ordered {
+		var err error
+		outputIndex, err = tracker.outputOrder.eventIndex(evt)
+		if err != nil {
+			send(llm.StreamChunk{Error: err, Done: true})
+			return false
+		}
+	}
 	switch evt.Type {
 	case "response.output_text.delta":
-		return handleResponseTextDelta(evt, send)
+		return handleResponseTextDelta(evt, send, outputIndex)
 	case "response.function_call_arguments.delta":
 		return handleResponseFunctionCallArgumentsDelta(evt, tracker, send)
 	case "response.function_call_arguments.done":
 		return handleResponseFunctionCallArgumentsDone(evt, tracker, send)
 	case "response.output_item.added":
-		return handleResponseOutputItem(evt, tracker, send, false)
+		return handleResponseOutputItem(evt, tracker, send, false, outputIndex)
 	case "response.output_item.done":
-		return handleResponseOutputItem(evt, tracker, send, true)
+		return handleResponseOutputItem(evt, tracker, send, true, outputIndex)
 	case "response.completed":
 		return handleResponseCompleted(evt, tracker, providerName, send)
 	case "response.failed":
@@ -745,11 +786,12 @@ func handleResponsesStreamEvent(evt responses.ResponseStreamEventUnion, tracker 
 	}
 }
 
-func handleResponseTextDelta(evt responses.ResponseStreamEventUnion, send streamSender) bool {
+func handleResponseTextDelta(evt responses.ResponseStreamEventUnion, send streamSender, outputIndex *int64) bool {
 	if evt.Delta == "" {
 		return true
 	}
-	return send(llm.StreamChunk{Content: evt.Delta})
+	chunk := llm.StreamChunk{Content: evt.Delta, OutputIndex: outputIndex}
+	return send(chunk)
 }
 
 func handleResponseFunctionCallArgumentsDelta(evt responses.ResponseStreamEventUnion, tracker *responseFuncCallTracker, send streamSender) bool {
@@ -775,13 +817,18 @@ func handleResponseFunctionCallArgumentsDone(evt responses.ResponseStreamEventUn
 	return tracker.emit(fc, send)
 }
 
-func handleResponseOutputItem(evt responses.ResponseStreamEventUnion, tracker *responseFuncCallTracker, send streamSender, argumentsDone bool) bool {
-	if evt.Item.Type != eventTypeFunctionCall {
-		return true
+func handleResponseOutputItem(evt responses.ResponseStreamEventUnion, tracker *responseFuncCallTracker, send streamSender, argumentsDone bool, outputIndex *int64) bool {
+	if evt.Item.Type == eventTypeFunctionCall {
+		fc := tracker.get(evt.Item.ID, evt.OutputIndex, evt.JSON.OutputIndex.Valid(), evt.Item.CallID)
+		tracker.mergeItem(fc, evt.Item, argumentsDone)
+		if !tracker.emit(fc, send) {
+			return false
+		}
 	}
-	fc := tracker.get(evt.Item.ID, evt.OutputIndex, evt.JSON.OutputIndex.Valid(), evt.Item.CallID)
-	tracker.mergeItem(fc, evt.Item, argumentsDone)
-	return tracker.emit(fc, send)
+	if argumentsDone && outputIndex != nil {
+		return send(llm.StreamChunk{OutputIndex: outputIndex, OutputItemDone: true, OutputItemStatus: evt.Item.Status})
+	}
+	return true
 }
 
 func handleResponseCompleted(evt responses.ResponseStreamEventUnion, tracker *responseFuncCallTracker, providerName string, send streamSender) bool {
@@ -819,7 +866,7 @@ func (p *Provider) streamResponses(ctx context.Context, req *llm.CompletionReque
 		defer close(ch)
 
 		send := newStreamSender(ctx, ch)
-		streamResponsesEvents(p.client.Responses.NewStreaming(ctx, buildResponsesParams(req)), p.TelemetryProviderName(), send)
+		streamResponsesEvents(p.client.Responses.NewStreaming(ctx, buildResponsesParams(req)), p.TelemetryProviderName(), send, req.ResponsesInput)
 	}()
 	return ch
 }

@@ -212,14 +212,18 @@ func (r *ResponsesResponse) setCompletion(completion *llm.CompletionResponse) er
 	if err := r.setOutcome(completion); err != nil {
 		return err
 	}
-	if completion.Content != "" {
-		item := newResponsesMessage()
-		item.Status = r.Status
-		item.Content[0].Text = completion.Content
-		r.Output = append(r.Output, item)
-	}
 	seen := map[string]bool{}
-	for _, call := range completion.ToolCalls {
+	for _, output := range responsesCompletionItems(completion) {
+		if output.ToolCall == nil {
+			if output.Content != "" {
+				item := newResponsesMessage()
+				item.Status = r.Status
+				item.Content[0].Text = output.Content
+				r.Output = append(r.Output, item)
+			}
+			continue
+		}
+		call := *output.ToolCall
 		item, err := newResponsesFunction(call)
 		if err != nil {
 			return err
@@ -234,6 +238,21 @@ func (r *ResponsesResponse) setCompletion(completion *llm.CompletionResponse) er
 		return fmt.Errorf("empty completion")
 	}
 	return nil
+}
+
+// Providers without ordered output retain the compat text-then-calls shape.
+func responsesCompletionItems(completion *llm.CompletionResponse) []llm.AssistantOutputItem {
+	if completion.OutputItems != nil {
+		return completion.OutputItems
+	}
+	items := make([]llm.AssistantOutputItem, 0, len(completion.ToolCalls)+1)
+	if completion.Content != "" {
+		items = append(items, llm.AssistantOutputItem{Content: completion.Content})
+	}
+	for _, call := range completion.ToolCalls {
+		items = append(items, llm.AssistantOutputItem{ToolCall: &call})
+	}
+	return items
 }
 
 func validJSONObject(data []byte) bool {

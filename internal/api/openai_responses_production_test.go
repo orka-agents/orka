@@ -67,7 +67,11 @@ func productionResponsesRequest(t *testing.T, url, token, body string, disabled 
 	if disabled {
 		req.Header.Set("X-Orka-Tools", "disabled")
 	}
-	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	// Own the pool so concurrent fixtures do not leave speculative or idle
+	// connections on the default transport when the test server shuts down.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	defer transport.CloseIdleConnections()
+	resp, err := (&http.Client{Timeout: 15 * time.Second, Transport: transport}).Do(req)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, resp.Body.Close()) }()
 	data, err := io.ReadAll(resp.Body)

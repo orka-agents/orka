@@ -573,6 +573,9 @@ func stripGoalStateSentinelFromResponse(resp *llm.CompletionResponse) *llm.Compl
 	}
 	respCopy := *resp
 	respCopy.Content = strippedContent
+	// The coordinator rewrote the final text; discard the provider snapshot
+	// rather than exposing stale, unstripped text through another serializer.
+	respCopy.OutputItems = nil
 	return &respCopy
 }
 

@@ -170,6 +170,15 @@ func (h *OpenAICompatHandler) streamResponses(c fiber.Ctx, ctx context.Context, 
 						return
 					}
 				}
+				if chunk.OutputItemDone {
+					status := completionStatusCompleted
+					if chunk.OutputItemStatus == responsesStatusIncomplete {
+						status = responsesStatusIncomplete
+					}
+					if err := writer.finishText(status); err != nil {
+						return
+					}
+				}
 				if !chunk.Done {
 					continue
 				}
@@ -237,11 +246,14 @@ func (h *OpenAICompatHandler) produceResponsesChunks(ctx context.Context, provid
 			send(llm.StreamChunk{Error: fmt.Errorf("completion failed")})
 			return
 		}
-		if !send(llm.StreamChunk{Content: completion.Content}) {
-			return
-		}
-		for _, call := range completion.ToolCalls {
-			if !send(llm.StreamChunk{ToolCall: &call}) {
+		items := responsesCompletionItems(completion)
+		for i, item := range items {
+			if !send(llm.StreamChunk{Content: item.Content, ToolCall: item.ToolCall}) {
+				return
+			}
+			// Leave the final text open: the terminal outcome determines whether
+			// a token-budget-truncated message is incomplete.
+			if i < len(items)-1 && !send(llm.StreamChunk{OutputItemDone: true}) {
 				return
 			}
 		}

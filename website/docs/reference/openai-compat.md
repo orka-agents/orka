@@ -61,6 +61,12 @@ The first version supports:
   tool mode, append the returned output items and a result with the same `call_id`
   to your next request's `input`. Include the preceding history on every request.
   Responses upstreams receive text and function items in their supplied order.
+  Native Responses output retains message boundaries and text/function order,
+  including SSE calls that finish out of order. Missing stream indices are
+  recovered from known item IDs; ambiguous or contradictory ordering metadata
+  fails explicitly. Entirely unindexed text-only streams remain supported.
+  Coordinator continuation keeps
+  those items together as one turn for context truncation.
   Chat Completions fallback represents consecutive assistant items as one turn,
   combining their text and function calls in that API's format.
 - `text.format` with `text`, `json_object`, or `json_schema` (including schema name
