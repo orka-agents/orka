@@ -156,11 +156,12 @@ subjects:
 ```
 
 Repeat in `team-b`. To create Tasks and retrieve their results through tools,
-also grant `create`, `get` and `list` on `tasks.core.orka.ai` in the same
-namespace. Grant other tool permissions only for the operations the caller
-needs; see [API authorization](../reference/api-authorization.md). Chat
-permission alone never permits Task creation. Kubernetes grants to other
-namespaces do not widen this endpoint's namespace restriction.
+also grant `create` and `get` on `tasks.core.orka.ai` in the same namespace.
+Grant `list` only to callers that use `list_tasks`. Grant other tool permissions
+only for the operations the caller needs; see
+[API authorization](../reference/api-authorization.md). Chat permission alone
+never permits Task creation. Kubernetes grants to other namespaces do not widen
+this endpoint's namespace restriction.
 
 An operator with permission to issue ServiceAccount tokens can obtain a
 short-lived token without printing or saving it:
