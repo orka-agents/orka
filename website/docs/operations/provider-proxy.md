@@ -73,8 +73,8 @@ providers:
     base_url: https://api.openai.com/v1
     api_key_env: OPENAI_API_KEY
     models:
-      - public_id: gpt-5.4
-        deployment: gpt-5.4
+      - public_id: gpt-6-astra
+        deployment: gpt-6-astra
         endpoints:
           - /responses
           - /chat/completions
@@ -91,7 +91,7 @@ providers:
     base_url: https://<resource>.cognitiveservices.azure.com/openai/v1
     api_key_env: AZURE_OPENAI_API_KEY
     models:
-      - public_id: gpt-5.4
+      - public_id: gpt-6-astra
         deployment: <your-deployment-name>
         endpoints:
           - /responses

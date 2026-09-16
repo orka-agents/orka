@@ -36,8 +36,8 @@ There are three kinds of Task, and the difference matters because they run in di
   [Container tasks](guides/container-tasks.md) for the filesystem rules, which trip
   most people up the first time.
 
-[Architecture](concepts/architecture.md) has the full component picture, and the
-[Glossary](reference/glossary.md) defines every term these docs use.
+[Architecture](concepts/architecture.md) has the full component picture. When a term
+is new to you, the [Glossary](reference/glossary.md) has it.
 
 ## Install
 
@@ -100,7 +100,7 @@ spec:
   secretRef:
     name: anthropic-secret
     key: api-key
-  defaultModel: claude-sonnet-4-20250514
+  defaultModel: claude-opus-5
 EOF
 ```
 
@@ -121,7 +121,7 @@ spec:
   secretRef:
     name: openai-secret
     key: api-key
-  defaultModel: gpt-4o
+  defaultModel: gpt-6-astra
   # For a compatible endpoint such as a local model server or a gateway:
   # baseURL: http://my-gateway.models.svc:8080/v1
 EOF
@@ -153,6 +153,14 @@ EOF
 The rest of this page uses the Provider named `anthropic`. If you created a different
 one, use its name in `providerRef` below. An Anthropic-compatible endpoint works the same
 way with `type: anthropic` and a `baseURL`.
+
+:::tip[No API key yet?]
+Any OpenAI-compatible server works. Point a `type: openai` Provider's `baseURL` at a
+model server running in your cluster, such as [Ollama](https://ollama.com/) at
+`http://ollama.<namespace>.svc:11434/v1`, and create the Secret with any placeholder
+value, since the Provider requires one. A GitHub Copilot subscription also works
+through a gateway; see [Provider proxy](operations/provider-proxy.md).
+:::
 
 ### 2. Create an Agent
 
@@ -239,14 +247,14 @@ metadata:
   namespace: orka-system
 spec:
   model:
-    name: claude-sonnet-4-20250514
+    name: claude-opus-5
   runtime:
     type: claude
 EOF
 ```
 
 That is the whole Agent. The defaults give it its runtime's full tool set, a shell,
-and 50 turns per Task. For `type: opencode`, use `provider/model` names such as `openai/gpt-5.4` and set
+and 50 turns per Task. For `type: opencode`, use `provider/model` names such as `openai/gpt-6-astra` and set
 `model.contextWindow` and `model.maxTokens`.
 [Agent runtimes](concepts/agent-runtimes.md) has every option, including how to
 restrict tools.
@@ -327,7 +335,7 @@ Full command list: [CLI reference](reference/cli.md).
 
 **Learn the pieces**
 
-- [Glossary](reference/glossary.md) — every term these docs assume
+- [Glossary](reference/glossary.md) — the terms these docs use, defined once
 - [Architecture](concepts/architecture.md) — how a Task becomes a Pod
 - [Configuration](reference/configuration.md) — Helm values and controller flags
 - [Security](concepts/security.md) — hardening, auth, and tenancy, including

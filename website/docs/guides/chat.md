@@ -67,7 +67,7 @@ User ──POST /api/v1/chat──▶ API Server ──▶ Concurrency Semaphore
     "message": "Create an AI task that summarizes Kubernetes best practices",
     "sessionId": "my-session",
     "provider": "anthropic",
-    "model": "claude-sonnet-4-20250514",
+    "model": "claude-opus-5",
     "namespace": "default",
     "temperature": 0.7,
     "maxTokens": 4096,
