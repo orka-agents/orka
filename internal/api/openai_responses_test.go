@@ -76,8 +76,7 @@ func requestResponses(t *testing.T, app *fiber.App, body string, disabled bool) 
 }
 
 func upstreamResponse(w http.ResponseWriter, content string, calls ...llm.ToolCall) {
-	response := newResponsesResponse(&ResponsesRequest{}, "test-model")
-	_ = response.setCompletion(&llm.CompletionResponse{Content: content, ToolCalls: calls, StopReason: "completed", InputTokens: 7, OutputTokens: 3})
+	response := responsesFixtureResponse(content, calls...)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(response)
 }
@@ -517,9 +516,8 @@ func TestResponsesHTTPContextTokenAuthorization(t *testing.T) {
 			authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: ContextTokenAuthorizationModeEnforce})
 			require.NoError(t, err)
 			h.contextTokenAuthorization = authz
-			app := fiber.New()
-			app.Use(NewAuthMiddleware(h.client, AuthConfig{ContextTokens: tokenConfig}))
-			app.Post(responsesPath, h.HandleResponses)
+			server := NewServer(h.client, nil, ServerConfig{WatchNamespace: "default", Chat: h.config, ContextTokens: tokenConfig, ContextTokenAuthorization: authz})
+			app := server.app
 			token := issueTestContextToken(t, issuer, nil, map[string]any{"scope": test.scope, "tctx": map[string]any{"allowedProviders": []string{"openai"}, "allowedTools": []string{"file_read"}}})
 			request := httptest.NewRequest(http.MethodPost, responsesPath, strings.NewReader(fmt.Sprintf(`{"model":%q,"store":false,"input":"hi"}`, test.model)))
 			request.Header.Set("Content-Type", "application/json")

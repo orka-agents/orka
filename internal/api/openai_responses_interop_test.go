@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
@@ -39,14 +40,14 @@ func TestAgentFrameworkResponsesInterop(t *testing.T) {
 				file := filepath.Join(responsesToolTempDir(t), "fixture.txt")
 				require.NoError(t, os.WriteFile(file, []byte("server fixture value"), 0600))
 				var calls atomic.Int32
-				_, app := setupResponsesHTTP(t, func(w http.ResponseWriter, r *http.Request) {
+				server, token := setupProductionResponses(t, func(w http.ResponseWriter, r *http.Request) {
 					var request map[string]any
 					require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
 					require.Equal(t, false, request["store"])
 					require.NotContains(t, request, "previous_response_id")
 					require.NotContains(t, request, "conversation")
 					round := calls.Add(1)
-					response := newResponsesResponse(&ResponsesRequest{}, "test-model")
+
 					completion := &llm.CompletionResponse{StopReason: "completed", InputTokens: 10, OutputTokens: 4}
 					switch round {
 					case 1:
@@ -97,7 +98,7 @@ func TestAgentFrameworkResponsesInterop(t *testing.T) {
 					if mode == "coordinator" && completion.Content != "" {
 						completion.Content = goalStateSentinel + "\n" + completion.Content
 					}
-					require.NoError(t, response.setCompletion(completion))
+					response := responsesFixtureResponse(completion.Content, completion.ToolCalls...)
 					if request["stream"] != true {
 						w.Header().Set("Content-Type", "application/json")
 						_ = json.NewEncoder(w).Encode(response)
@@ -105,21 +106,21 @@ func TestAgentFrameworkResponsesInterop(t *testing.T) {
 					}
 					// Emit real upstream Responses SSE, including call item identity and chunks.
 					events := []map[string]any{{"type": "response.created", "response": map[string]any{"id": "upstream-response", "status": "in_progress", "output": []any{}}}}
-					for index, item := range response.Output {
-						if item.Type == "message" {
-							events = append(events, map[string]any{"type": "response.output_text.delta", "delta": item.Content[0].Text})
+					for index, raw := range response["output"].([]any) {
+						item := raw.(map[string]any)
+						if item["type"] == "message" {
+							events = append(events, map[string]any{"type": "response.output_text.delta", "delta": item["content"].([]any)[0].(map[string]any)["text"]})
 							continue
 						}
-						added := item
-						empty := ""
-						added.Arguments = &empty
-						added.Status = "in_progress"
-						events = append(events, map[string]any{"type": "response.output_item.added", "output_index": index, "item": added}, map[string]any{"type": "response.function_call_arguments.done", "output_index": index, "item_id": item.ID, "arguments": *item.Arguments})
+						added := maps.Clone(item)
+						added["arguments"] = ""
+						added["status"] = "in_progress"
+						events = append(events, map[string]any{"type": "response.output_item.added", "output_index": index, "item": added}, map[string]any{"type": "response.function_call_arguments.done", "output_index": index, "item_id": item["id"], "arguments": item["arguments"]})
 					}
 					events = append(events, map[string]any{"type": "response.completed", "response": response})
 					upstreamSSE(w, events)
 				})
-				url := listenResponsesApp(t, app)
+				url := listenResponsesApp(t, server.app)
 				args := []string{clientScript, "--base-url", url + "/openai/v1", "--mode", mode}
 				if stream {
 					args = append(args, "--stream")
@@ -128,7 +129,7 @@ func TestAgentFrameworkResponsesInterop(t *testing.T) {
 				defer cancel()
 				command := exec.CommandContext(ctx, python, args...)
 				// Do not forward ambient cloud/provider credentials to this deterministic test.
-				command.Env = []string{"PATH=" + os.Getenv("PATH"), "PYTHONUNBUFFERED=1", "NO_PROXY=127.0.0.1,localhost"}
+				command.Env = []string{"PATH=" + os.Getenv("PATH"), "PYTHONUNBUFFERED=1", "NO_PROXY=127.0.0.1,localhost", "ORKA_API_KEY=" + token}
 				output, err := command.CombinedOutput()
 				require.NoError(t, err, string(output))
 				require.Contains(t, string(output), "PASS mode="+mode)

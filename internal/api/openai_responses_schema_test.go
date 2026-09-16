@@ -35,8 +35,7 @@ func TestResponsesPinnedSDKSchema(t *testing.T) {
 			case "text":
 				upstreamSSE(w, []map[string]any{{"type": "response.output_text.delta", "delta": "hello"}, {"type": "response.completed", "response": map[string]any{"status": "completed"}}})
 			case "tool":
-				response := newResponsesResponse(&ResponsesRequest{}, "test-model")
-				require.NoError(t, response.setCompletion(&llm.CompletionResponse{ToolCalls: []llm.ToolCall{{ID: "client-call", Name: "client_tool", Arguments: json.RawMessage(`{}`)}}, StopReason: "completed"}))
+				response := responsesFixtureResponse("", llm.ToolCall{ID: "client-call", Name: "client_tool", Arguments: json.RawMessage(`{}`)})
 				upstreamSSE(w, []map[string]any{{"type": "response.completed", "response": response}})
 			}
 		})

@@ -128,7 +128,6 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		StreamRequestBody: true,
 		ErrorHandler:      customErrorHandler,
 	})
-	app.Server().HeaderReceived = requestBodyConfig
 
 	server := &Server{
 		app:                 app,
@@ -176,6 +175,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 	server.openaiHandler = NewOpenAICompatHandler(c, config.APIReader, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat, resolver, config.ResultStore, config.Clientset)
 	server.openaiHandler.contextTokenAuthorization = config.ContextTokenAuthorization
 	server.openaiHandler.gatewayEventStore = config.GatewayEventStore
+	app.Server().HeaderReceived = server.requestConfig
 	server.anthropicHandler = NewAnthropicCompatHandler(c, config.APIReader, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat, resolver, config.ResultStore, config.Clientset)
 	server.anthropicHandler.contextTokenAuthorization = config.ContextTokenAuthorization
 	server.anthropicHandler.gatewayEventStore = config.GatewayEventStore
@@ -206,6 +206,22 @@ func requestBodyConfig(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
 		return fasthttp.RequestConfig{MaxRequestBodySize: 1 << 20, ReadTimeout: 30 * time.Second}
 	}
 	return fasthttp.RequestConfig{}
+}
+
+// requestConfig bounds writes on the Responses route as well as provider work.
+// A context deadline cannot interrupt a socket blocked by a client that stops
+// reading. fasthttp applies and clears this deadline for each keep-alive request.
+func (s *Server) requestConfig(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
+	config := requestBodyConfig(header)
+	// Fiber routes on fasthttp PathOriginal, including its fragment handling.
+	// net/url's request-target parsing differs for a literal '#' character.
+	var uri fasthttp.URI
+	if header.IsPost() && uri.Parse(header.Host(), header.RequestURI()) == nil &&
+		strings.EqualFold(strings.TrimRight(string(uri.PathOriginal()), "/"), "/openai/v1/responses") {
+		// Allow a bounded grace period to deliver the terminal timeout event.
+		config.WriteTimeout = s.openaiHandler.config.MaxDuration + time.Second
+	}
+	return config
 }
 
 // isGatewayIngressPath matches /api/v1/gateways/{gateway}/{channel}/events,

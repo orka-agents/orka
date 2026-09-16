@@ -31,8 +31,8 @@ async def main() -> None:
     headers = {"X-Orka-Tools": "disabled"} if args.mode == "client" else {}
     client = OpenAIChatClient(
         model="fixture/test-model",
-        # The local fixture does not authenticate. For a deployed Orka endpoint,
-        # supply its bearer credential through ORKA_API_KEY.
+        # The production-server test passes an ephemeral signed OIDC credential.
+        # For a deployed Orka endpoint, supply its credential through ORKA_API_KEY.
         api_key=os.environ.get("ORKA_API_KEY", "local-fixture-only"),
         base_url=args.base_url,
         default_headers=headers,

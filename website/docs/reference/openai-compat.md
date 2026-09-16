@@ -69,6 +69,8 @@ The first version supports:
   argument deltas, item completion, and response completion. Token-budget
   truncation returns `response.incomplete`; provider failures emit `error` and
   `response.failed`. Disconnects and the configured duration limit cancel work.
+  A client that stops reading is disconnected after the duration limit plus a
+  one-second grace period for terminal events.
 
 Coordinator mode is the default here too. Orka replaces client tools and executes
 its own tools on the server. Streaming emits text progress between coordinator
@@ -113,7 +115,8 @@ followup = await agent.run("Summarize our exchange.", session=session)
 ```
 
 Omit the disabled header for coordinator mode. Run the deterministic test from
-a checkout to exercise the real client against a running Orka HTTP handler,
+a checkout to exercise the real client against Orka's production server routes
+and JWT authentication,
 including an actual tool and follow-up in both modes, with and without streaming:
 
 ```bash
@@ -124,7 +127,10 @@ ORKA_RESPONSES_INTEROP_PYTHON="$PWD/bin/responses-client/bin/python" \
   go test ./internal/api -run 'TestAgentFrameworkResponsesInterop|TestResponsesPinnedSDKSchema' -count=1 -timeout=120s -v
 ```
 
-This CPU fixture uses local HTTP servers and no model credentials or cluster.
+This CPU fixture uses local HTTP servers and ephemeral OIDC credentials. Model
+output and Kubernetes object storage are fixtures; it does not test live model
+inference or a deployed controller. These Python checks are opt-in and are
+skipped by ordinary Go test runs unless the environment variable above is set.
 The executable client lives in `scripts/fixtures/agent-framework-responses/client.py`.
 It verifies client tool execution, coordinator tool execution, and client-owned
 follow-up history; it does not establish behavior of a particular hosted model.
