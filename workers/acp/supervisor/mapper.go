@@ -312,12 +312,32 @@ func canonicalACPToolCallID(value string) (string, error) {
 	return canonicalACPToolCallIDPrefix + hex.EncodeToString(digest[:]), nil
 }
 
+// losslessACPToolCallID rejects Unicode repair before IDs enter the correlation
+// cache. Distinct unpaired surrogates must never collapse to the same native call.
+func losslessACPToolCallID(raw json.RawMessage) (string, error) {
+	var envelope struct {
+		ID json.RawMessage `json:"toolCallId"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return "", fmt.Errorf("invalid ACP tool call identity envelope")
+	}
+	if len(envelope.ID) == 0 {
+		return "", nil
+	}
+	var id string
+	if err := json.Unmarshal(envelope.ID, &id); err != nil || !wellFormedIdentityUnicode(envelope.ID) {
+		return "", fmt.Errorf("invalid ACP tool call identity Unicode")
+	}
+	return id, nil
+}
+
 type acpToolCallIdentity struct {
 	ToolCallID string `json:"toolCallId"`
 	ToolName   string `json:"name"`
 	Title      string `json:"title"`
 	Meta       struct {
-		ClaudeCode struct {
+		IsMCPToolCall json.RawMessage `json:"is_mcp_tool_call"`
+		ClaudeCode    struct {
 			ToolName string `json:"toolName"`
 		} `json:"claudeCode"`
 	} `json:"_meta"`
@@ -338,15 +358,16 @@ func (identity acpToolCallIdentity) name() (string, error) {
 }
 
 // rememberToolCallName retains structured identities only for this prompt.
-// Claude emits its tool name in a preceding update, while the corresponding
-// permission request can contain only a toolCallId and a display title.
-func (prompt *promptState) rememberToolCallName(notification *acp.SessionNotification) error {
+// Claude and Codex emit structured identity in a preceding update, while the
+// corresponding permission request may contain only a toolCallId.
+func (prompt *promptState) rememberToolCallName(notification *acp.SessionNotification, provider string, policy *harnessv2.MCPToolPolicy) error {
 	if notification == nil {
 		return nil
 	}
 	var call struct {
 		acpToolCallIdentity
-		SessionUpdate string `json:"sessionUpdate"`
+		SessionUpdate string          `json:"sessionUpdate"`
+		RawInput      json.RawMessage `json:"rawInput"`
 	}
 	if err := json.Unmarshal(notification.Update, &call); err != nil {
 		return fmt.Errorf("decode ACP tool identity: %w", err)
@@ -355,12 +376,36 @@ func (prompt *promptState) rememberToolCallName(notification *acp.SessionNotific
 		return nil
 	}
 	name, err := call.name()
-	if err != nil || name == "" {
-		return err
-	}
-	id, err := canonicalACPToolCallID(call.ToolCallID)
 	if err != nil {
 		return err
+	}
+	nativeID, err := losslessACPToolCallID(notification.Update)
+	if err != nil {
+		return err
+	}
+	id, err := canonicalACPToolCallID(nativeID)
+	if err != nil {
+		return err
+	}
+	// Codex's native start and completion envelopes have distinct proof rules.
+	if provider == providerKindCodex {
+		var markedMCPCall bool
+		if len(call.Meta.IsMCPToolCall) > 0 {
+			if err := json.Unmarshal(call.Meta.IsMCPToolCall, &markedMCPCall); err != nil {
+				return fmt.Errorf("invalid codex MCP tool identity marker")
+			}
+		}
+		if markedMCPCall {
+			name, err = prompt.codexMarkedToolName(id, name, call.RawInput, policy)
+		} else {
+			err = prompt.validateCodexUnmarkedToolIdentity(id, name, call.RawInput, policy)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if name == "" {
+		return nil
 	}
 	if previous, ok := prompt.toolCallNames[id]; ok {
 		if previous != name {
@@ -376,6 +421,90 @@ func (prompt *promptState) rememberToolCallName(notification *acp.SessionNotific
 	}
 	prompt.toolCallNames[id] = name
 	return nil
+}
+
+// codexMarkedToolName establishes identity only from a verified tuple; a
+// marker-only partial update can retain only an already-verified mapping.
+func (prompt *promptState) codexMarkedToolName(id, name string, raw json.RawMessage, policy *harnessv2.MCPToolPolicy) (string, error) {
+	brokeredName, err := codexMCPToolIdentity(raw, policy)
+	if err != nil {
+		return "", err
+	}
+	if brokeredName == "" {
+		previous, known := prompt.toolCallNames[id]
+		if !known || policy == nil {
+			return "", fmt.Errorf("codex MCP partial update has no verified tool identity")
+		}
+		descriptor, allowed := policy.Descriptor(previous)
+		if !allowed || !descriptor.Source.Brokered() {
+			return "", fmt.Errorf("codex MCP partial update has no verified brokered identity")
+		}
+		brokeredName = previous
+	}
+	if brokeredName != "" {
+		if name != "" && name != brokeredName {
+			return "", fmt.Errorf("ACP tool call has conflicting tool identities")
+		}
+		name = brokeredName
+	}
+	return name, nil
+}
+
+func (prompt *promptState) validateCodexUnmarkedToolIdentity(id, name string, raw json.RawMessage, policy *harnessv2.MCPToolPolicy) error {
+	if policy == nil {
+		return nil
+	}
+	if name != "" {
+		if descriptor, allowed := policy.Descriptor(name); allowed && descriptor.Source.Brokered() {
+			if previous, known := prompt.toolCallNames[id]; !known || previous != name {
+				return fmt.Errorf("codex MCP name alone cannot establish tool identity")
+			}
+		}
+	}
+	if len(raw) > 0 {
+		if previous, known := prompt.toolCallNames[id]; known {
+			if descriptor, allowed := policy.Descriptor(previous); allowed && descriptor.Source.Brokered() {
+				// Pinned completions omit the marker but must repeat the verified tuple.
+				confirmed, err := codexMCPToolIdentity(raw, policy)
+				if err != nil || confirmed != previous {
+					return fmt.Errorf("codex MCP tool identity changed on an unmarked update")
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// codexMCPToolIdentity accepts only the configured Orka server and a brokered
+// descriptor in the immutable session policy. Returning the descriptor's name
+// preserves the server/tool boundary (concatenated aliases can collide when a
+// foreign server contains dots) and cannot borrow a provider-native grant.
+func codexMCPToolIdentity(raw json.RawMessage, policy *harnessv2.MCPToolPolicy) (string, error) {
+	if len(raw) == 0 { // Partial progress updates retain the earlier identity.
+		return "", nil
+	}
+	var input struct {
+		Server json.RawMessage `json:"server"`
+		Tool   json.RawMessage `json:"tool"`
+	}
+	if err := json.Unmarshal(raw, &input); err != nil {
+		return "", fmt.Errorf("invalid Codex MCP tool identity envelope")
+	}
+	var server, tool string
+	if len(input.Server) == 0 || len(input.Tool) == 0 ||
+		json.Unmarshal(input.Server, &server) != nil || json.Unmarshal(input.Tool, &tool) != nil ||
+		!wellFormedIdentityUnicode(input.Server) || !wellFormedIdentityUnicode(input.Tool) ||
+		tool == "" || strings.TrimSpace(tool) != tool || len(tool) > 253 {
+		return "", fmt.Errorf("invalid Codex MCP tool identity")
+	}
+	if server != orkaMCPServerName || policy == nil {
+		return "", fmt.Errorf("codex MCP tool call does not identify the configured Orka server")
+	}
+	descriptor, allowed := policy.Descriptor(tool)
+	if !allowed || !descriptor.Source.Brokered() {
+		return "", fmt.Errorf("codex MCP tool call is outside the frozen brokered tool policy")
+	}
+	return descriptor.Name, nil
 }
 
 func canonicalPermissionToolName(provider string, policy harnessv2.MCPToolPolicy, name string) string {
@@ -427,10 +556,14 @@ func mapPermission(event *acp.PermissionRequestEvent, at time.Time, ttl time.Dur
 			toolName = providerToolBash
 		}
 	}
+	nativeID, err := losslessACPToolCallID(event.Request.ToolCall)
+	if err != nil {
+		return nil, err
+	}
 	toolCallID := ""
-	if strings.TrimSpace(toolCall.ToolCallID) != "" {
+	if strings.TrimSpace(nativeID) != "" {
 		var err error
-		toolCallID, err = canonicalACPToolCallID(toolCall.ToolCallID)
+		toolCallID, err = canonicalACPToolCallID(nativeID)
 		if err != nil {
 			return nil, err
 		}

@@ -11,21 +11,26 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
-const assistantMessageCoalesceWindow = 25 * time.Millisecond
+const (
+	assistantMessageCoalesceWindow = 25 * time.Millisecond
+	acpUpdateAgentMessageChunk     = "agent_message_chunk"
+	acpUpdateAgentThoughtChunk     = "agent_thought_chunk"
+)
 
 // assistantMessageCompactor batches only adjacent ACP assistant text deltas.
 // It runs before harness identity assignment so emitted sequences remain
 // contiguous while the protocol rate limiter still sees every meaningful
 // lifecycle update.
 type assistantMessageCompactor struct {
-	maxBytes      int
-	flushInterval time.Duration
-	pending       acp.PromptEvent
-	text          strings.Builder
-	messageID     string
-	meta          json.RawMessage
-	deadline      time.Time
-	timer         *time.Timer
+	validateAssistantIdentity bool
+	maxBytes                  int
+	flushInterval             time.Duration
+	pending                   acp.PromptEvent
+	text                      strings.Builder
+	messageID                 string
+	meta                      json.RawMessage
+	deadline                  time.Time
+	timer                     *time.Timer
 }
 
 func newAssistantMessageCompactor() *assistantMessageCompactor {
@@ -49,6 +54,14 @@ func (c *assistantMessageCompactor) push(event acp.PromptEvent, arrivedAt time.T
 	}
 
 	chunk, isAssistantText := decodeAssistantMessageChunk(event)
+	if isAssistantText && c.validateAssistantIdentity {
+		// Do not let JSON decoding/coalescing repair a malformed identity.
+		// Forward the original event so the provider-specific consumer records
+		// its authoritative, replay-stable failure before any final result.
+		if _, _, err := nativeAssistantMessageIdentity(event.Update); err != nil {
+			isAssistantText = false
+		}
+	}
 	if !isAssistantText {
 		if c.text.Len() > 0 {
 			ready = append(ready, c.flush())
@@ -57,7 +70,13 @@ func (c *assistantMessageCompactor) push(event acp.PromptEvent, arrivedAt time.T
 	}
 	text := chunk.Content.Text
 	if text == "" {
-		return ready
+		// Empty text still carries message identity. Preserve its place in the
+		// stream so an empty first/last message cannot disappear before the
+		// provider-specific final-result selector observes it.
+		if c.text.Len() > 0 {
+			ready = append(ready, c.flush())
+		}
+		return append(ready, event)
 	}
 	if c.text.Len() > 0 && (event.Update.SessionID != c.pending.Update.SessionID ||
 		chunk.MessageID != c.messageID || !bytes.Equal(chunk.Meta, c.meta)) {
@@ -105,8 +124,6 @@ func (c *assistantMessageCompactor) arm(now time.Time) {
 }
 
 func (c *assistantMessageCompactor) flush() acp.PromptEvent {
-	const acpUpdateAgentMessageChunk = "agent_message_chunk"
-
 	event := c.pending
 	encoded, err := json.Marshal(struct {
 		SessionUpdate string `json:"sessionUpdate"`
@@ -167,8 +184,6 @@ type assistantMessageChunk struct {
 }
 
 func decodeAssistantMessageChunk(event acp.PromptEvent) (assistantMessageChunk, bool) {
-	const acpUpdateAgentMessageChunk = "agent_message_chunk"
-
 	var envelope assistantMessageChunk
 	if event.Type != acp.PromptEventUpdate || event.Update == nil {
 		return envelope, false

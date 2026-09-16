@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/acp"
 )
 
 // AgentReconciler reconciles a Agent object
@@ -41,6 +42,10 @@ const (
 	agentReasoningEffortXHigh  = "xhigh"
 	agentReasoningEffortMax    = "max"
 )
+
+// Revisit both ready and invalid ConfigMap-backed OpenCode Agents without
+// requiring an unrelated Agent/Task event or broader ConfigMap watch access.
+const openCodeConfigMapPromptRefreshInterval = 30 * time.Second
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agents,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agents/status,verbs=get;update;patch
@@ -81,8 +86,18 @@ func (r *AgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		return result, nil
 	}
 
-	// Update status
-	return r.updateStatus(ctx, agent, activeTasks, validationErr)
+	// Update status and retain any earlier TTL deadline.
+	result, err := r.updateStatus(ctx, agent, activeTasks, validationErr)
+	if err != nil {
+		return result, err
+	}
+	if agent.Spec.Runtime != nil && agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeOpencode &&
+		agent.BuiltInContractVersion() == corev1alpha1.AgentRuntimeContractHarnessV2 &&
+		agent.Spec.SystemPrompt != nil && agent.Spec.SystemPrompt.ConfigMapRef != nil &&
+		(result.RequeueAfter == 0 || result.RequeueAfter > openCodeConfigMapPromptRefreshInterval) {
+		result.RequeueAfter = openCodeConfigMapPromptRefreshInterval
+	}
+	return result, nil
 }
 
 // validateAgent validates the Agent's referenced resources exist and config is coherent.
@@ -295,8 +310,15 @@ func (r *AgentReconciler) validateSystemPromptConfigMap(ctx context.Context, age
 		}
 		return fmt.Errorf("failed to get systemPrompt ConfigMap %q: %w", agent.Spec.SystemPrompt.ConfigMapRef.Name, err)
 	}
-	if _, ok := cm.Data[agent.Spec.SystemPrompt.ConfigMapRef.Key]; !ok {
+	prompt, ok := cm.Data[agent.Spec.SystemPrompt.ConfigMapRef.Key]
+	if !ok {
 		return fmt.Errorf("key %q not found in systemPrompt ConfigMap %q", agent.Spec.SystemPrompt.ConfigMapRef.Key, agent.Spec.SystemPrompt.ConfigMapRef.Name)
+	}
+	if agent.Spec.Runtime != nil && agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeOpencode &&
+		agent.BuiltInContractVersion() == corev1alpha1.AgentRuntimeContractHarnessV2 {
+		if err := acp.ValidateOpenCodeSystemPrompt(prompt); err != nil {
+			return fmt.Errorf("systemPrompt ConfigMap %q key %q: %w", agent.Spec.SystemPrompt.ConfigMapRef.Name, agent.Spec.SystemPrompt.ConfigMapRef.Key, err)
+		}
 	}
 	return nil
 }

@@ -140,11 +140,12 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	prompt := &promptState{
-		request:              request,
-		operation:            operationRecord(request.Metadata, harnessv2.OperationPhaseRecorded, "", now),
-		lease:                request.Lease,
-		startedAt:            now,
-		permissionRequestIDs: make(map[harnessv2.PermissionRequestID]struct{}),
+		request:                request,
+		operation:              operationRecord(request.Metadata, harnessv2.OperationPhaseRecorded, "", now),
+		lease:                  request.Lease,
+		startedAt:              now,
+		permissionRequestIDs:   make(map[harnessv2.PermissionRequestID]struct{}),
+		terminalValidationDone: make(chan struct{}),
 	}
 	state.prompt = prompt
 	recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseRecorded, "", now)
@@ -199,7 +200,10 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		result := providerTurnLimitResult(state, prompt, <-run.Result)
 		result = s.settleRemoteProvider(state, prompt, result)
-		s.finishPrompt(state, prompt, result, time.Now().UTC())
+		// The event channel is drained even on this early exit. Only this
+		// owner may validate and publish a native successful result.
+		terminal, validated, _ := s.terminalEvent(state, prompt, result)
+		s.finishPrompt(state, prompt, validated, terminal.Identity.Timestamp)
 		if result.Accepted {
 			writeError(
 				w, http.StatusInternalServerError, harnessv2.ErrorCodeOutcomeUnknown,
@@ -227,6 +231,14 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 	flusher, _ := w.(http.Flusher)
 	streamBroken := false
 	markStreamBroken := func(stage, eventType, updateKind string, sequence int64, err error) {
+		if stage == "event-map" || stage == "first-event" ||
+			(stage == "event-encode" && harnessv2.IsPoisoningStreamError(err)) {
+			// Keep validation failure even if transport failed earlier. A native
+			// Completed tombstone is not proof of a valid harness event stream.
+			s.mu.Lock()
+			prompt.eventValidationFailed = true
+			s.mu.Unlock()
+		}
 		if streamBroken {
 			return
 		}
@@ -284,6 +296,7 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 	}
 	mapAndEncode(first)
 	compactor := newAssistantMessageCompactor()
+	compactor.validateAssistantIdentity = usesNativeAssistantMessageIdentity(state.profile.ProviderKind)
 	defer compactor.close()
 	events := run.Events
 	for events != nil {
@@ -1045,6 +1058,20 @@ func (s *Server) handleCancelPrompt(w http.ResponseWriter, r *http.Request) {
 		result = acp.PromptResult{Outcome: acp.PromptOutcomeOutcomeUnknown, Accepted: true, Err: cancelErr, SettledAt: time.Now().UTC()}
 	}
 	result = s.settleRemoteProviderWithContext(cancelCtx, state, prompt, result)
+	// Gate the settlement we would publish, not only the native outcome tag.
+	if settlementFromResult(result, result.SettledAt).Outcome == harnessv2.PromptOutcomeSucceeded {
+		validated, validationErr := s.awaitPromptTerminalValidation(cancelCtx, prompt)
+		if validationErr != nil {
+			failure := operationFailure{
+				status: http.StatusConflict, code: harnessv2.ErrorCodeAlreadyAccepted,
+				message: "prompt terminal validation is pending; retry after settlement", retryable: true,
+			}
+			s.completeOperationFailure(replay, failure)
+			writeError(w, failure.status, failure.code, failure.message, nil, failure.retryable)
+			return
+		}
+		result = promptResultFromSettlement(validated)
+	}
 	if cancelErr != nil || result.Outcome == acp.PromptOutcomeOutcomeUnknown {
 		slog.Warn("ACP prompt cancellation did not settle cleanly",
 			"promptID", request.Metadata.PromptID, "reason", request.Reason, "outcome", result.Outcome,
@@ -2118,7 +2145,11 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 		state.descriptor.LastTransitionAt = event.Timestamp
 		return &harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventAccepted, Identity: identity, Accepted: &harnessv2.AcceptedEvent{AcceptedAt: event.Timestamp, Lease: prompt.lease, ACPVersion: harnessv2.ACPProfileV1}}, nil
 	case acp.PromptEventUpdate:
-		if err := prompt.rememberToolCallName(event.Update); err != nil {
+		var toolPolicy *harnessv2.MCPToolPolicy
+		if state.mcpProxy != nil {
+			toolPolicy = &state.mcpProxy.configuration.ToolPolicy
+		}
+		if err := prompt.rememberToolCallName(event.Update, state.profile.ProviderKind, toolPolicy); err != nil {
 			return nil, err
 		}
 		update, text, ok, err := mapACPUpdate(event.Update)
@@ -2126,8 +2157,27 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 			prompt.sequence--
 			return nil, err
 		}
+		limit := s.cfg.Capabilities.Limits.MaxTerminalResultBytes
+		if usesNativeAssistantMessageIdentity(state.profile.ProviderKind) {
+			messageID, assistant, identityErr := nativeAssistantMessageIdentity(event.Update)
+			if identityErr != nil {
+				prompt.sequence--
+				return nil, prompt.namedAssistantResult.invalidate(identityErr)
+			}
+			if assistant && state.profile.ProviderKind == providerKindClaude && messageID == "" {
+				// Claude's SDK also emits anonymous status/hook notices. Without
+				// structured identity, retain the complete legacy text rather than
+				// hide a notice or guess its meaning from wording.
+				prompt.assistantIdentityFallback = true
+			} else if assistant {
+				if err := prompt.namedAssistantResult.append(messageID, text, limit); err != nil {
+					prompt.sequence--
+					return nil, err
+				}
+			}
+		}
 		if text != "" {
-			prompt.appendAssistantText(text, acpAssistantMessagePhase(event.Update), s.cfg.Capabilities.Limits.MaxTerminalResultBytes)
+			prompt.appendAssistantText(text, acpAssistantMessagePhase(event.Update), limit)
 		}
 		if !ok {
 			prompt.sequence--
@@ -2146,14 +2196,29 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 		if err != nil {
 			return nil, err
 		}
-		if name, known := prompt.toolCallNames[permission.ToolCallID]; known {
+		name, known := prompt.toolCallNames[permission.ToolCallID]
+		if known {
 			if permission.ToolName != "" && permission.ToolName != name {
 				return nil, fmt.Errorf("ACP permission does not match the recorded tool identity")
 			}
 			permission.ToolName = name
 		}
 		if state.mcpProxy != nil {
-			permission.ToolName = canonicalPermissionToolName(state.profile.ProviderKind, state.mcpProxy.configuration.ToolPolicy, permission.ToolName)
+			toolPolicy := state.mcpProxy.configuration.ToolPolicy
+			permission.ToolName = canonicalPermissionToolName(state.profile.ProviderKind, toolPolicy, permission.ToolName)
+			if state.profile.ProviderKind == providerKindCodex {
+				descriptor, allowed := toolPolicy.Descriptor(permission.ToolName)
+				brokered := allowed && descriptor.Source.Brokered()
+				mcpApproval, _ := event.Permission.Request.Meta["is_mcp_tool_approval"].(bool)
+				// A command/file/network elevation cannot borrow an earlier MCP
+				// call ID. Conversely, MCP approval cannot authorize a native tool.
+				if brokered && (!known || !mcpApproval) {
+					return nil, fmt.Errorf("codex MCP permission lacks correlated tool approval identity")
+				}
+				if mcpApproval && !brokered {
+					permission.ToolName = ""
+				}
+			}
 		}
 		if prompt.permissionRequestIDs == nil {
 			prompt.permissionRequestIDs = make(map[harnessv2.PermissionRequestID]struct{})
@@ -2186,11 +2251,16 @@ func (s *Server) terminalEvent(
 	state *sessionState,
 	prompt *promptState,
 	result acp.PromptResult,
-) (harnessv2.Event, acp.PromptResult, error) {
+) (event harnessv2.Event, effective acp.PromptResult, terminalErr error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Publish validation and settlement atomically, before a terminal HTTP
+	// write can block or cancellation can observe an unchecked native result.
+	defer func() {
+		recordPromptSettlementLocked(state, prompt, settlementFromResult(effective, event.Identity.Timestamp))
+	}()
 	prompt.sequence++
-	effective := result
+	effective = result
 	if prompt.settlement != nil {
 		effective = promptResultFromSettlement(*prompt.settlement)
 	} else {
@@ -2215,7 +2285,26 @@ func (s *Server) terminalEvent(
 		now = time.Now().UTC()
 		effective.SettledAt = now
 	}
-	event := s.buildTerminalEventLocked(state, prompt, effective, now)
+	if prompt.settlement != nil {
+		// A prior non-successful cancellation, or already-validated terminal
+		// result, is immutable. Never emit a contradictory terminal outcome.
+		event = s.buildTerminalEventLocked(state, prompt, effective, now)
+		if !serializedEventWithinLimit(event, s.cfg.Capabilities.Limits.MaxTerminalResultBytes) {
+			return event, effective, fmt.Errorf("settled terminal event exceeds configured size limit")
+		}
+		return event, effective, nil
+	}
+	validationFailure := prompt.namedAssistantResult.failure
+	if validationFailure == nil && prompt.eventValidationFailed {
+		validationFailure = errors.New("ACP prompt event validation failed")
+	}
+	if effective.Outcome == acp.PromptOutcomeCompleted && validationFailure != nil {
+		effective.Outcome = acp.PromptOutcomeFailed
+		effective.StopReason = acp.StopReasonRefusal
+		effective.Accepted = true
+		effective.Err = validationFailure
+	}
+	event = s.buildTerminalEventLocked(state, prompt, effective, now)
 	limit := s.cfg.Capabilities.Limits.MaxTerminalResultBytes
 	_, overflow := prompt.terminalResultText()
 	if (!overflow || effective.Outcome != acp.PromptOutcomeCompleted) && serializedEventWithinLimit(event, limit) {
@@ -2311,6 +2400,9 @@ func (p *promptState) appendAssistantText(text, phase string, limit int) {
 }
 
 func (p *promptState) terminalResultText() (string, bool) {
+	if p.namedAssistantResult.messageID != "" && !p.assistantIdentityFallback {
+		return p.namedAssistantResult.text.String(), p.namedAssistantResult.overflow
+	}
 	if p.finalAnswerSeen {
 		return p.finalAnswer.String(), p.finalAnswerOverflow
 	}
@@ -2478,6 +2570,12 @@ func promptResultFromSettlement(settlement harnessv2.PromptSettlement) acp.Promp
 func (s *Server) finishPrompt(state *sessionState, prompt *promptState, result acp.PromptResult, settledAt time.Time) {
 	settlement := settlementFromResult(result, settledAt)
 	s.mu.Lock()
+	if settlement.Outcome == harnessv2.PromptOutcomeSucceeded && prompt.settlement == nil {
+		// Compensation can observe a native Completed tombstone before the
+		// stream owner drains and validates it. Leave success to that owner.
+		s.mu.Unlock()
+		return
+	}
 	settlement = recordPromptSettlementLocked(state, prompt, settlement)
 	next := state.descriptor.State
 	sessionCleanup := state.prompt == prompt && settlement.TerminalEvent != harnessv2.EventCompleted && !state.drainCleanupScheduled
@@ -2550,6 +2648,9 @@ func settlePromptLocked(prompt *promptState, settlement harnessv2.PromptSettleme
 		return *prompt.settlement
 	}
 	prompt.settlement = &settlement
+	if prompt.terminalValidationDone != nil {
+		close(prompt.terminalValidationDone)
+	}
 	digest, err := harnessv2.CanonicalPromptSettlementDigest(settlement)
 	if err == nil {
 		prompt.settlementDigest = digest
@@ -2628,6 +2729,12 @@ func deactivatePromptCapabilities(state *sessionState, promptID harnessv2.Prompt
 }
 
 func settlementFromResult(result acp.PromptResult, at time.Time) harnessv2.PromptSettlement {
+	// Native event loss can mark an outcome Failed while retaining the
+	// provider's end_turn/cancelled stop reason. Match terminal validation:
+	// such a failure must never become successful or cancelled settlement.
+	if result.Outcome == acp.PromptOutcomeFailed {
+		result.StopReason = acp.StopReason(failedEventStopReason(result.StopReason))
+	}
 	if at.IsZero() {
 		at = time.Now().UTC()
 	}

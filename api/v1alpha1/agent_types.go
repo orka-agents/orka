@@ -15,7 +15,6 @@ import (
 
 // AgentSpec defines the desired state of Agent
 // +kubebuilder:validation:XValidation:rule="!has(self.execution) || !has(self.execution.workspace) || !has(self.execution.workspace.classRef)",message="execution.workspace.classRef is only supported on Task specs"
-// +kubebuilder:validation:XValidation:rule="!(has(self.runtime) && has(self.runtime.type) && self.runtime.type == 'opencode' && has(self.runtime.contractVersion) && self.runtime.contractVersion == 'orka.harness.v2' && has(self.systemPrompt) && ((has(self.systemPrompt.inline) && self.systemPrompt.inline.size() > 0) || has(self.systemPrompt.configMapRef)))",message="opencode orka.harness.v2 runtime does not support spec.systemPrompt"
 type AgentSpec struct {
 	// ProviderRef references a Provider CRD for LLM configuration
 	// If set, model.provider is optional (inherited from Provider)

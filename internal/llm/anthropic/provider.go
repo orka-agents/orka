@@ -157,12 +157,20 @@ func buildToolParams(tools []llm.Tool) []anthropic.ToolUnionParam {
 			}
 		}
 
+		properties := schema["properties"]
+		// The SDK models only the common schema fields. Preserve the remaining
+		// JSON Schema keywords (conditions, definitions, and object constraints)
+		// rather than silently weakening the registered tool's input contract.
+		delete(schema, "type") // Keep the SDK's existing object-type default.
+		delete(schema, "properties")
+		delete(schema, "required")
 		toolParam := anthropic.ToolParam{
 			Name:        tool.Name,
 			Description: anthropic.String(tool.Description),
 			InputSchema: anthropic.ToolInputSchemaParam{
-				Properties: schema["properties"],
-				Required:   required,
+				Properties:  properties,
+				Required:    required,
+				ExtraFields: schema,
 			},
 		}
 		params = append(params, anthropic.ToolUnionParam{OfTool: &toolParam})

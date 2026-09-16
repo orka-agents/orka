@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/acp"
 )
 
 // ValidateOpenCodeAgentSpec validates the reviewed managed OpenCode v2
@@ -29,9 +30,12 @@ func ValidateOpenCodeAgentSpec(agent *corev1alpha1.Agent) error {
 	if strings.TrimSpace(agent.Spec.Runtime.DefaultReasoningEffort) != "" {
 		return fmt.Errorf("agent %q opencode runtime does not support spec.runtime.defaultReasoningEffort", agent.Name)
 	}
-	if agent.Spec.SystemPrompt != nil &&
-		(strings.TrimSpace(agent.Spec.SystemPrompt.Inline) != "" || agent.Spec.SystemPrompt.ConfigMapRef != nil) {
-		return fmt.Errorf("agent %q opencode runtime does not support spec.systemPrompt", agent.Name)
+	if agent.Spec.SystemPrompt != nil {
+		if err := acp.ValidateOpenCodeSystemPrompt(agent.Spec.SystemPrompt.Inline); err != nil {
+			return fmt.Errorf("agent %q OpenCode system prompt: %w", agent.Name, err)
+		}
+		// ConfigMap text is resolved namespace-locally and validated again while
+		// constructing the immutable Agent session configuration.
 	}
 	if agent.Spec.ProviderRef != nil {
 		return fmt.Errorf("agent %q opencode runtime does not accept spec.providerRef; provider identity is derived from spec.model.name", agent.Name)

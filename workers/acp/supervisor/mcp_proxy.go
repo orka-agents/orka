@@ -26,6 +26,8 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
+const orkaMCPServerName = "orka"
+
 const (
 	mcpProxyPathPrefix        = "/_orka/mcp/"
 	mcpProtocolVersion        = "2025-06-18"
@@ -169,7 +171,7 @@ func (p *mcpProxy) newSession(
 		p.sessions[route] = session
 		p.mu.Unlock()
 		return session, acp.MCPServer{
-			Type: "http", Name: "orka", URL: endpoint,
+			Type: providerProxyScheme, Name: orkaMCPServerName, URL: endpoint,
 			Headers: []acp.HTTPHeader{{Name: "Authorization", Value: "Bearer " + credential}},
 		}, nil
 	}

@@ -646,17 +646,17 @@ func TestCreateAgentTool_Execute_PreservesExplicitEmptyOpenCodeTools(t *testing.
 	}
 }
 
-func TestCreateAgentTool_Execute_RejectsOpenCodeSystemPrompt(t *testing.T) {
+func TestCreateAgentTool_Execute_RejectsOpenCodePromptSubstitution(t *testing.T) {
 	t.Setenv(envOrkaTaskName, parentTaskName)
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 	_, err := NewCreateAgentTool(newFakeClient(parentTask()), executionmode.HarnessV2).Execute(context.Background(), json.RawMessage(`{
 		"role":"coder",
-		"systemPrompt":"You write code",
+		"systemPrompt":"{env:PRIVATE_TEST_SENTINEL}",
 		"model":{"name":"openai/gpt-5.4","contextWindow":32768,"maxTokens":4096},
 		"runtime":{"type":"opencode"}
 	}`))
-	if err == nil || !strings.Contains(err.Error(), "does not support systemPrompt") {
-		t.Fatalf("Execute() error = %v, want OpenCode systemPrompt rejection", err)
+	if err == nil || !strings.Contains(err.Error(), "configuration substitutions") {
+		t.Fatalf("Execute() error = %v, want OpenCode substitution rejection", err)
 	}
 }
 

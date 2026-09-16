@@ -29,6 +29,7 @@ func TestCancellationPublishesSettledStatusBeforePromptStreamFinishes(t *testing
 			state := server.sessions[create.RuntimeSessionID]
 			state.prompt = &promptState{
 				request: request, lease: request.Lease, acceptedAt: time.Now().UTC(), startedAt: time.Now().UTC(),
+				terminalValidationDone: make(chan struct{}),
 			}
 			state.descriptor.State = harnessv2.RuntimeSessionStatePromptRunning
 			state.promptMutations = mutations
@@ -41,6 +42,14 @@ func TestCancellationPublishesSettledStatusBeforePromptStreamFinishes(t *testing
 			before := readPromptTestStatus(t, server, cfg)
 			if len(before.ActivePrompts) != 1 {
 				t.Fatal("unsettled prompt lost its active status")
+			}
+			if outcome == acp.PromptOutcomeCompleted {
+				// Model the stream owner validating success before its HTTP
+				// writer finishes. A native completion tombstone alone must
+				// remain pending; the HTTP validation tests cover that case.
+				server.mu.Lock()
+				recordPromptSettlementLocked(state, state.prompt, settlementFromResult(mutations.cancelResult, time.Now().UTC()))
+				server.mu.Unlock()
 			}
 			close(mutations.cancelRelease)
 			response := awaitRecorder(t, done, "cancellation did not settle")

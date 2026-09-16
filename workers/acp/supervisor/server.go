@@ -259,19 +259,27 @@ type sessionState struct {
 }
 
 type promptState struct {
-	request             harnessv2.StartPromptRequest
-	operation           harnessv2.OperationRecord
-	lease               harnessv2.PromptLease
-	startedAt           time.Time
-	acceptedAt          time.Time
-	sequence            uint64
-	assistant           strings.Builder
-	assistantOverflow   bool
-	finalAnswer         strings.Builder
-	finalAnswerSeen     bool
-	finalAnswerOverflow bool
-	settlement          *harnessv2.PromptSettlement
-	settlementDigest    string
+	request                   harnessv2.StartPromptRequest
+	operation                 harnessv2.OperationRecord
+	lease                     harnessv2.PromptLease
+	startedAt                 time.Time
+	acceptedAt                time.Time
+	sequence                  uint64
+	assistant                 strings.Builder
+	assistantOverflow         bool
+	finalAnswer               strings.Builder
+	finalAnswerSeen           bool
+	finalAnswerOverflow       bool
+	namedAssistantResult      assistantMessageResult
+	assistantIdentityFallback bool
+	// Mapping/protocol failures are authoritative even when the native turn
+	// already completed. Transport write failures do not set this flag.
+	eventValidationFailed bool
+	settlement            *harnessv2.PromptSettlement
+	settlementDigest      string
+	// Closed when the prompt owner publishes its validated terminal settlement,
+	// or active-work cancellation publishes a non-successful settlement.
+	terminalValidationDone chan struct{}
 	// providerDrainTimedOut records that an admitted inference request was
 	// still in flight when the child settled and did not finish within the
 	// cancel grace, so the prompt's inference accounting is incomplete.

@@ -225,8 +225,8 @@ func TestOpenCodeProviderSessionProjectionValidatesImmutableAgentConfiguration(t
 		true,
 	)
 	request.Profile.ModelLimits = testOpenCodeModelLimits()
-	if _, err := profile.ProjectSession(request, paths, proxy); err == nil || !strings.Contains(err.Error(), "systemPrompt") {
-		t.Fatalf("OpenCode systemPrompt projection error = %v, want rejection", err)
+	if _, err := profile.ProjectSession(request, paths, proxy); err != nil {
+		t.Fatalf("literal OpenCode systemPrompt projection failed: %v", err)
 	}
 
 	request.AgentConfiguration = nil

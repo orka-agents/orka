@@ -249,6 +249,14 @@ remain available when allowed by policy.
 
 For built-in RuntimePools, Task-level `spec.agentRuntime` contains runtime overrides such as `maxTurns`, `allowedTools`, `disallowedTools`, and `allowBash`. For `runtimeRef`, the registered external profile owns provider, model, prompt, skill, tool, and runtime defaults. Its `capabilities.mcpPolicy` stores the exact tool and approval policy represented by the profile digests, and Orka uses that same policy for conformance and dispatch. The Agent must omit `spec.model`, `spec.systemPrompt`, `spec.skills`, enabled `spec.tools`, `defaultMaxTurns`, `defaultAllowedTools`, `defaultAllowBash`, and `defaultReasoningEffort`. Disabled Agent tool entries are inert and accepted. Task-level `allowedTools` must equal the registered allowlist when brokered tools are exposed. Orka rejects `maxTurns`, `disallowedTools`, and `allowBash` because those values are fixed by the registration. Repository configuration belongs at top-level `spec.workspace`.
 
+## Research tools and final replies
+
+Brokered `web_search` and `web_fetch` are Orka tools, distinct from a runtime's native browsing tools. Add them explicitly to the Agent's tool allowlist. RSS/Atom fetches provide item source links, publication timestamps, and feed summaries—not full article text or an exhaustive list of a site's articles. Research instructions should require a link for each summarized item, use the requested timezone for publication-date checks, and disclose feed-only or inaccessible sources.
+
+Codex's restricted read-only profile disables its native hosted web tool. Its permitted Orka MCP calls are identified by the pinned adapter's structured server/tool metadata and correlated call ID, not display titles. Confirming such a call does not grant an Orka approval: undeclared tools and approval-required operations remain fail-closed.
+
+OpenCode and Claude expose stable assistant message IDs. Orka selects the latest distinct named assistant message as the final result, while preserving earlier updates in the execution stream. Claude can also emit anonymous SDK status or hook notices; when those appear, Orka conservatively preserves the full text rather than hiding notices or guessing their meaning. Codex retains its `final_answer` phase handling, and Copilot's existing result projection is unchanged. These transport guarantees do not guarantee a model's factual accuracy or instruction adherence.
+
 ## Read-only workspace Task
 
 Agent Tasks default to `intent: read` when `workspace.intent` is omitted, but setting it explicitly makes review intent clear.

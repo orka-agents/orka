@@ -30,6 +30,7 @@ type WebFetchTool struct {
 	allowPrivateForTests bool
 	maxChars             int
 	maxURLBytes          int
+	now                  func() time.Time // Private test seam; nil uses the server clock.
 }
 
 // WebFetchArgs are the arguments for the web fetch tool
@@ -110,7 +111,7 @@ func (t *WebFetchTool) Name() string {
 
 // Description returns the tool description
 func (t *WebFetchTool) Description() string {
-	return "Fetch and extract content from a URL. Returns extracted text from HTML pages, pretty-printed JSON, or raw content."
+	return "Fetch and extract content from a URL: readable HTML, JSON, or RSS/Atom feed entries with publication dates and source links. Feed entries are summaries, not full articles. When summarizing them, include each item’s source link. For date-specific requests compare each item’s Published timestamp in the requested timezone; feed-level and retrieval dates do not establish an item’s publication date."
 }
 
 // Parameters returns the JSON Schema for parameters
@@ -187,29 +188,54 @@ func (t *WebFetchTool) Execute(ctx context.Context, args json.RawMessage) (strin
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize+1))
 	if err != nil {
 		return "", fmt.Errorf("failed to read response: %w", err)
 	}
+	// The extra byte distinguishes an exact-limit EOF from a clipped response.
+	bodyLimitExceeded := len(body) > maxBodySize
+
+	// Record completion of this retrieval using the server clock, never a
+	// response Date header, feed field, or caller-supplied argument.
+	now := time.Now
+	if t.now != nil {
+		now = t.now
+	}
+	retrievedAt := now()
 
 	contentType := resp.Header.Get("Content-Type")
 	var content string
 	var extractor string
+	var feedOmitted bool
 
-	switch {
-	case strings.Contains(contentType, "application/json"):
-		content, extractor = t.extractJSON(body)
-	case strings.Contains(contentType, "text/html"):
-		if fetchArgs.Raw {
-			content = string(body)
-			extractor = extractorRaw
-		} else {
+	if !fetchArgs.Raw {
+		// Detect the document root before MIME dispatch: feeds are sometimes
+		// served as HTML. Non-feed roots retain the existing MIME-specific path.
+		// Resolve links against the final URL after the guarded redirect path,
+		// without making any additional requests.
+		feedBase := parsed
+		if resp.Request != nil && resp.Request.URL != nil {
+			feedBase = resp.Request.URL
+		}
+		content, extractor, feedOmitted, err = extractWebFeed(body, contentType, feedBase, t.allowPrivateForTests, retrievedAt)
+		if err != nil {
+			return "", err
+		}
+	}
+	if extractor == "" {
+		if bodyLimitExceeded {
+			body = body[:maxBodySize] // Retain the existing non-feed/raw byte cap.
+		}
+		switch {
+		case strings.Contains(contentType, "application/json"):
+			content, extractor = t.extractJSON(body)
+		case strings.Contains(contentType, "text/html") && !fetchArgs.Raw:
 			content = extractText(body)
 			extractor = "html_text"
+		default:
+			content = string(body)
+			extractor = extractorRaw
 		}
-	default:
-		content = string(body)
-		extractor = extractorRaw
 	}
 
 	content, contentLength, truncated := truncateByRuneCount(content, fetchArgs.MaxChars)
@@ -219,7 +245,7 @@ func (t *WebFetchTool) Execute(ctx context.Context, args json.RawMessage) (strin
 		Status:    resp.StatusCode,
 		Content:   content,
 		Length:    contentLength,
-		Truncated: truncated,
+		Truncated: truncated || feedOmitted || bodyLimitExceeded,
 		Extractor: extractor,
 	}
 
