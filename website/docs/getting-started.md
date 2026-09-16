@@ -243,16 +243,14 @@ spec:
   runtime:
     type: claude
     contractVersion: orka.harness.v2
-    defaultMaxTurns: 50
-    defaultAllowBash: true
-    defaultAllowedTools: [Read, Write, Edit, Bash]
 EOF
 ```
 
-For `type: codex`, keep `defaultAllowBash: true`; the Codex CLI cannot run without its
-shell. For `type: opencode`, use `provider/model` names such as `openai/gpt-5.4` and set
+The defaults give the agent its runtime's full tool set, a shell, and 50 turns per
+Task. For `type: opencode`, use `provider/model` names such as `openai/gpt-5.4` and set
 `model.contextWindow` and `model.maxTokens`.
-[Agent runtimes](concepts/agent-runtimes.md) has every option.
+[Agent runtimes](concepts/agent-runtimes.md) has every option, including how to
+restrict tools.
 
 ### 3. Run it
 
