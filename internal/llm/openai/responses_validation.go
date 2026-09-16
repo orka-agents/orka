@@ -72,6 +72,9 @@ func validateResponsesOutput(output []responses.ResponseOutputItemUnion) error {
 
 func (t *responseFuncCallTracker) getChecked(itemID string, index int64, hasIndex bool, callID string) (*responseFuncCallState, error) {
 	if t.ordered {
+		if itemID == "" && !hasIndex && callID == "" {
+			return nil, fmt.Errorf("response function call has no identity or output index")
+		}
 		states := []*responseFuncCallState{
 			{itemID: itemID, outputIndex: index, hasOutputIndex: hasIndex, callID: callID},
 			t.byItemID[itemID], t.byCallID[callID],
@@ -131,7 +134,16 @@ func failResponsesStream(send streamSender, err error) bool {
 func (t *responseFuncCallTracker) validateEvent(evt responses.ResponseStreamEventUnion) error {
 	switch evt.Type {
 	case eventTypeResponseOutputItemAdded, eventTypeResponseOutputItemDone:
-		return validateResponsesItemType(evt.Item)
+		if err := validateResponsesItemType(evt.Item); err != nil {
+			return err
+		}
+		// Function output is exposed as completed once its arguments arrive.
+		// A later item-done status cannot retroactively make it unfinished,
+		// even if the terminal snapshot omits that status.
+		if evt.Type == eventTypeResponseOutputItemDone && evt.Item.Type == eventTypeFunctionCall &&
+			evt.Item.Status != "" && evt.Item.Status != stopReasonCompleted {
+			return fmt.Errorf("provider returned an unfinished Responses function call")
+		}
 	case "response.content_part.added", eventTypeResponseContentPartDone:
 		if evt.Part.Type != responseContentTypeOutputText && evt.Part.Type != stopReasonRefusal {
 			return fmt.Errorf("provider message content is outside the Responses subset")

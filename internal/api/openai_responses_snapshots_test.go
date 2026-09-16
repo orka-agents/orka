@@ -275,3 +275,44 @@ func TestResponsesProductionCachedStreamNotFound(t *testing.T) {
 	require.EqualValues(t, 1, streams.Load())
 	require.EqualValues(t, 2, completions.Load(), "cached probe followed by exactly one completion retry")
 }
+
+// The terminal snapshot may omit status metadata, but cannot erase an
+// explicitly unfinished function item that arrived earlier in the stream.
+func TestResponsesProductionFunctionItemStatus(t *testing.T) {
+	for _, status := range []string{"", "completed", "incomplete", "in_progress"} {
+		for _, terminalStatus := range []string{"", "completed"} {
+			t.Run(status+"/terminal="+terminalStatus, func(t *testing.T) {
+				server, token := setupProductionResponses(t, func(w http.ResponseWriter, r *http.Request) {
+					var request map[string]any
+					require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+					require.Equal(t, false, request["store"])
+					response, events := orderedResponsesWire([]string{"call-one"}, "client_tool", "{}")
+					for _, event := range events {
+						if event["type"] == "response.output_item.done" {
+							item := maps.Clone(event["item"].(map[string]any))
+							item["status"] = status
+							event["item"] = item
+						}
+					}
+					item := response["output"].([]any)[0].(map[string]any)
+					if terminalStatus == "" {
+						delete(item, "status")
+					} else {
+						item["status"] = terminalStatus
+					}
+					upstreamSSE(w, events)
+				})
+				code, _, body := productionResponsesRequest(t, listenResponsesApp(t, server.app), token, `{"model":"fixture/test-model","store":false,"stream":true,"input":"hello"}`, true)
+				if status == "incomplete" || status == "in_progress" {
+					requireResponsesIntegrityFailure(t, code, body, true)
+					return
+				}
+				require.Equal(t, http.StatusOK, code)
+				events := parseResponsesSSE(t, body)
+				terminal := events[len(events)-1]
+				require.Equal(t, "response.completed", terminal["type"])
+				require.Equal(t, []string{"call-one"}, responsesItemOrder(t, terminal["response"].(map[string]any)["output"].([]any)))
+			})
+		}
+	}
+}
