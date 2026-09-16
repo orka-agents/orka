@@ -68,6 +68,8 @@ type JSONSchemaFormat struct {
 type AssistantOutputItem struct {
 	Content  string
 	ToolCall *ToolCall
+	// Status retains an optional native message status for Responses output.
+	Status string
 }
 
 // CompletionResponse represents a completion response

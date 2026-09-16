@@ -228,7 +228,13 @@ func (r *ResponsesResponse) setCompletion(completion *llm.CompletionResponse) er
 		if output.ToolCall == nil {
 			if output.Content != "" {
 				item := newResponsesMessage()
-				item.Status = r.Status
+				item.Status = output.Status
+				if item.Status == "" {
+					item.Status = r.Status
+				}
+				if item.Status != completionStatusCompleted && item.Status != responsesStatusIncomplete {
+					return fmt.Errorf("invalid response message status")
+				}
 				item.Content[0].Text = output.Content
 				r.Output = append(r.Output, item)
 			}

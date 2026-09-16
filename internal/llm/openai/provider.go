@@ -420,7 +420,7 @@ func (p *Provider) completeResponses(ctx context.Context, req *llm.CompletionReq
 					content.WriteString(part.Text)
 				}
 			}
-			result.OutputItems = append(result.OutputItems, llm.AssistantOutputItem{Content: content.String()})
+			result.OutputItems = append(result.OutputItems, llm.AssistantOutputItem{Content: content.String(), Status: item.Status})
 		}
 	}
 	result.StopReason = normalizeResponsesStopReason(result.StopReason, resp.Output, false)

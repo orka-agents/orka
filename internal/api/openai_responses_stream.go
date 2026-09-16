@@ -180,9 +180,13 @@ func (h *OpenAICompatHandler) streamResponses(c fiber.Ctx, ctx context.Context, 
 					}
 				}
 				if chunk.OutputItemDone {
-					status := completionStatusCompleted
-					if chunk.OutputItemStatus == responsesStatusIncomplete {
-						status = responsesStatusIncomplete
+					status := chunk.OutputItemStatus
+					if status == "" {
+						status = completionStatusCompleted
+					}
+					if status != completionStatusCompleted && status != responsesStatusIncomplete {
+						writer.fail()
+						return
 					}
 					if err := writer.finishText(status); err != nil {
 						return
@@ -315,9 +319,9 @@ func produceResponsesFallback(ctx context.Context, provider llm.Provider, req *l
 		if !send(llm.StreamChunk{Content: item.Content, ToolCall: item.ToolCall}) {
 			return
 		}
-		// Leave the final text open: the terminal outcome determines whether
-		// a token-budget-truncated message is incomplete.
-		if i < len(items)-1 && !send(llm.StreamChunk{OutputItemDone: true}) {
+		// An explicit provider status owns the item even when the overall
+		// response is incomplete. Without it, retain the terminal fallback.
+		if (i < len(items)-1 || item.Status != "") && !send(llm.StreamChunk{OutputItemDone: true, OutputItemStatus: item.Status}) {
 			return
 		}
 	}

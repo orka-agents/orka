@@ -495,6 +495,9 @@ func TestResponsesProductionRequestBufferLifetime(t *testing.T) {
 		require.Contains(t, string(encoded), "original-instructions")
 		require.NotContains(t, string(encoded), "recycled")
 		require.Equal(t, false, request["store"])
+		if strings.Contains(string(encoded), "schema_tool") {
+			require.Contains(t, string(encoded), "original-schema")
+		}
 		if request["stream"] == true {
 			upstreamSSE(w, []map[string]any{{"type": "response.output_text.delta", "delta": "owned input"}, {"type": "response.completed", "response": responsesFixtureResponse("owned input")}})
 		} else {
@@ -505,7 +508,7 @@ func TestResponsesProductionRequestBufferLifetime(t *testing.T) {
 		t.Run(fmt.Sprint(disabled), func(t *testing.T) {
 			var requestCtx fasthttp.RequestCtx
 			requestCtx.Init(&fasthttp.Request{}, nil, nil)
-			body := `{"model":"fixture/test-model","store":false,"stream":true,"input":"original-input","instructions":"original-instructions"}`
+			body := `{"model":"fixture/test-model","store":false,"stream":true,"input":"original-input","instructions":"original-instructions","tools":[{"type":"function","name":"schema_tool","parameters":{"type":"object","description":"original-schema","properties":{}}}]}`
 			requestCtx.Request.Header.SetMethod(http.MethodPost)
 			requestCtx.Request.SetRequestURI(responsesPath)
 			requestCtx.Request.Header.SetContentType("application/json")
@@ -519,14 +522,19 @@ func TestResponsesProductionRequestBufferLifetime(t *testing.T) {
 			require.Equal(t, 200, requestCtx.Response.StatusCode())
 			require.True(t, requestCtx.Response.IsBodyStream())
 			// Mutate the original backing array, not a replacement allocation.
-			copy(borrowed, strings.ReplaceAll(strings.ReplaceAll(body, "original-input", "recycled-input"), "original-instructions", "recycled-instructions"))
+			copy(borrowed, strings.ReplaceAll(body, "original-", "recycled-"))
 			require.Contains(t, string(requestCtx.Request.Body()), "recycled-input")
+			require.Contains(t, string(requestCtx.Request.Body()), "recycled-schema")
 			data, err := io.ReadAll(requestCtx.Response.BodyStream())
 			require.NoError(t, err)
 			require.NoError(t, requestCtx.Response.CloseBodyStream())
 			events := parseResponsesSSE(t, data)
 			require.Equal(t, "response.completed", events[len(events)-1]["type"])
 			require.Contains(t, string(data), "owned input")
+			require.NotContains(t, string(data), "recycled-schema")
+			if disabled {
+				require.Contains(t, string(data), "original-schema")
+			}
 			requestCtx.Request.Reset()
 			requestCtx.Response.Reset()
 		})

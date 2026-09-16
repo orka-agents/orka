@@ -104,6 +104,9 @@ func completeViaStream(ctx context.Context, provider llm.Provider, req *llm.Comp
 			}
 		}
 		if chunk.OutputItemDone {
+			if req.ResponsesInput && textItemOpen {
+				resp.OutputItems[len(resp.OutputItems)-1].Status = chunk.OutputItemStatus
+			}
 			textItemOpen = false
 		}
 		if chunk.InputTokens > 0 {
