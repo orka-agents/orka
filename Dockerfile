@@ -35,7 +35,8 @@ COPY --from=ui-builder /app/dist/ internal/uiembed/dist/
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o manager ./cmd \
     && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o orka-admission ./cmd/orka-admission \
     && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o provider-auth-proxy ./cmd/orka-provider-auth-proxy \
-    && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o scm-egress-proxy ./cmd/orka-scm-egress-proxy
+    && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o scm-egress-proxy ./cmd/orka-scm-egress-proxy \
+    && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o compat-router ./cmd/orka-compat-router
 
 # Use distroless as minimal base image to package the manager binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
@@ -45,6 +46,7 @@ COPY --from=builder /workspace/manager .
 COPY --from=builder /workspace/orka-admission .
 COPY --from=builder /workspace/provider-auth-proxy .
 COPY --from=builder /workspace/scm-egress-proxy .
+COPY --from=builder /workspace/compat-router .
 USER 65532:65532
 
 ENTRYPOINT ["/manager"]

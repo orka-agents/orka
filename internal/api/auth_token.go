@@ -45,13 +45,19 @@ func defaultAuthTokenSources() []AuthTokenSource {
 // empty source list preserves the default API behavior: Authorization bearer
 // tokens are preferred, then x-api-key is used as a fallback.
 func (e AuthTokenExtractor) Extract(ctx fiber.Ctx) (string, error) {
+	return e.extract(func(header string) string { return ctx.Get(header) })
+}
+
+// extract shares header precedence between the installation API and the
+// net/http compatibility router.
+func (e AuthTokenExtractor) extract(header func(string) string) (string, error) {
 	sources := e.Sources
 	if len(sources) == 0 {
 		sources = defaultAuthTokenSources()
 	}
 
 	for _, source := range sources {
-		token, found, err := source.Extract(ctx)
+		token, found, err := source.extract(header(source.Header))
 		if err != nil {
 			return "", err
 		}
@@ -67,11 +73,14 @@ func (e AuthTokenExtractor) Extract(ctx fiber.Ctx) (string, error) {
 // was found. A header with a configured but missing prefix is considered an
 // authentication format error instead of falling through to later sources.
 func (s AuthTokenSource) Extract(ctx fiber.Ctx) (string, bool, error) {
+	return s.extract(ctx.Get(s.Header))
+}
+
+func (s AuthTokenSource) extract(value string) (string, bool, error) {
 	if s.Header == "" {
 		return "", false, nil
 	}
 
-	value := ctx.Get(s.Header)
 	if value == "" {
 		return "", false, nil
 	}
