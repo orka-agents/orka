@@ -2645,7 +2645,13 @@ func TestProviderChatHistoryOrigins(t *testing.T) {
 						w.WriteHeader(400)
 						return
 					}
-					captured <- request["messages"].([]any)
+					messages, ok := request["messages"].([]any)
+					if !ok {
+						t.Errorf("messages has type %T, want []any", request["messages"])
+						w.WriteHeader(http.StatusBadRequest)
+						return
+					}
+					captured <- messages
 					if stream {
 						w.Header().Set("Content-Type", "text/event-stream")
 						fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n") //nolint:errcheck

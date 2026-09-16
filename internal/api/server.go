@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io/fs"
@@ -217,7 +218,7 @@ func (s *Server) requestConfig(header *fasthttp.RequestHeader) fasthttp.RequestC
 	// net/url's request-target parsing differs for a literal '#' character.
 	var uri fasthttp.URI
 	if header.IsPost() && uri.Parse(header.Host(), header.RequestURI()) == nil &&
-		strings.EqualFold(strings.TrimRight(string(uri.PathOriginal()), "/"), "/openai/v1/responses") {
+		bytes.EqualFold(bytes.TrimRight(uri.PathOriginal(), "/"), []byte("/openai/v1/responses")) {
 		// Allow a bounded grace period to deliver the terminal timeout event.
 		config.WriteTimeout = s.openaiHandler.config.MaxDuration + time.Second
 	}

@@ -8,6 +8,7 @@ package api
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -251,7 +252,9 @@ func TestResponsesHTTPCoordinatorToolRoundTrip(t *testing.T) {
 func parseResponsesSSE(t *testing.T, data []byte) []map[string]any {
 	t.Helper()
 	events := []map[string]any{}
-	scanner := bufio.NewScanner(strings.NewReader(string(data)))
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	// The complete captured response bounds even its largest event line.
+	scanner.Buffer(nil, len(data)+1)
 	var eventType string
 	for scanner.Scan() {
 		line := scanner.Text()
