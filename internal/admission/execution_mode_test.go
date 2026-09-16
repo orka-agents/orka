@@ -23,74 +23,6 @@ import (
 	"github.com/orka-agents/orka/internal/executionmode"
 )
 
-func TestNamespaceExecutionModeValidatorOnlyAcquiresClaimOnCreate(t *testing.T) {
-	validator := newTestNamespaceExecutionModeValidator(t)
-
-	tests := []struct {
-		name        string
-		operation   admissionv1.Operation
-		oldMode     string
-		newMode     string
-		allowed     bool
-		messagePart string
-	}{
-		{
-			name:      "create claimed namespace",
-			operation: admissionv1.Create,
-			newMode:   string(executionmode.HarnessV1),
-			allowed:   true,
-		},
-		{
-			name:      "preserve absent claim",
-			operation: admissionv1.Update,
-			allowed:   true,
-		},
-		{
-			name:        "reject claim on existing namespace",
-			operation:   admissionv1.Update,
-			newMode:     string(executionmode.HarnessV2),
-			messagePart: "existing namespace cannot acquire",
-		},
-		{
-			name:      "preserve existing claim",
-			operation: admissionv1.Update,
-			oldMode:   string(executionmode.HarnessV1),
-			newMode:   string(executionmode.HarnessV1),
-			allowed:   true,
-		},
-		{
-			name:        "reject changed claim",
-			operation:   admissionv1.Update,
-			oldMode:     string(executionmode.HarnessV1),
-			newMode:     string(executionmode.HarnessV2),
-			messagePart: "claim is immutable",
-		},
-		{
-			name:        "reject removed claim",
-			operation:   admissionv1.Update,
-			oldMode:     string(executionmode.HarnessV1),
-			messagePart: "claim is immutable",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			object := admissionNamespace(tt.newMode)
-			var oldObject *corev1.Namespace
-			if tt.operation == admissionv1.Update {
-				oldObject = admissionNamespace(tt.oldMode)
-			}
-			response := validator.Handle(context.Background(), namespaceAdmissionRequest(
-				t, tt.operation, object, oldObject,
-			))
-			require.Equal(t, tt.allowed, response.Allowed, response.Result.Message)
-			if tt.messagePart != "" {
-				require.Contains(t, response.Result.Message, tt.messagePart)
-			}
-		})
-	}
-}
-
 func TestTaskExecutionAuthorityValidatorRestrictsStatusWriters(t *testing.T) {
 	validator := newTestTaskExecutionAuthorityValidator(t)
 
@@ -189,13 +121,6 @@ func newTestTaskExecutionAuthorityValidator(t *testing.T) *TaskExecutionAuthorit
 	}
 }
 
-func newTestNamespaceExecutionModeValidator(t *testing.T) *NamespaceExecutionModeValidator {
-	t.Helper()
-	scheme := runtime.NewScheme()
-	require.NoError(t, corev1.AddToScheme(scheme))
-	return &NamespaceExecutionModeValidator{decoder: ctrladmission.NewDecoder(scheme)}
-}
-
 func admissionNamespace(mode string) *corev1.Namespace {
 	labels := map[string]string{}
 	if mode != "" {
@@ -210,28 +135,68 @@ func admissionNamespace(mode string) *corev1.Namespace {
 	}
 }
 
-func namespaceAdmissionRequest(
-	t *testing.T,
-	operation admissionv1.Operation,
-	object *corev1.Namespace,
-	oldObject *corev1.Namespace,
-) ctrladmission.Request {
-	t.Helper()
-	request := ctrladmission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
-		Operation: operation,
-		Object:    runtime.RawExtension{Raw: mustMarshalNamespace(t, object)},
-	}}
-	if oldObject != nil {
-		request.OldObject = runtime.RawExtension{Raw: mustMarshalNamespace(t, oldObject)}
+func TestAgentContractValidatorDefaultsContractFromNamespaceMode(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	namespace := admissionNamespace(string(executionmode.HarnessV2))
+	validator := &AgentContractValidator{
+		decoder: ctrladmission.NewDecoder(scheme),
+		reader:  fake.NewClientBuilder().WithScheme(scheme).WithObjects(namespace).Build(),
 	}
-	return request
-}
+	v2 := executionmode.HarnessV2.ContractVersion()
+	v1 := executionmode.HarnessV1.ContractVersion()
+	agent := func(contract *corev1alpha1.AgentRuntimeContractVersion) *corev1alpha1.Agent {
+		return &corev1alpha1.Agent{
+			TypeMeta:   metav1.TypeMeta{APIVersion: "core.orka.ai/v1alpha1", Kind: "Agent"},
+			ObjectMeta: metav1.ObjectMeta{Name: "implementer", Namespace: namespace.Name},
+			Spec: corev1alpha1.AgentSpec{
+				Model:   &corev1alpha1.ModelConfig{Name: "claude-sonnet-4-20250514"},
+				Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeClaude, ContractVersion: contract},
+			},
+		}
+	}
+	request := func(operation admissionv1.Operation, object, old *corev1alpha1.Agent) ctrladmission.Request {
+		raw, err := json.Marshal(object)
+		require.NoError(t, err)
+		req := ctrladmission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
+			Operation: operation,
+			Namespace: namespace.Name,
+			Object:    runtime.RawExtension{Raw: raw},
+		}}
+		if old != nil {
+			oldRaw, err := json.Marshal(old)
+			require.NoError(t, err)
+			req.OldObject = runtime.RawExtension{Raw: oldRaw}
+		}
+		return req
+	}
 
-func mustMarshalNamespace(t *testing.T, namespace *corev1.Namespace) []byte {
-	t.Helper()
-	data, err := json.Marshal(namespace)
-	require.NoError(t, err)
-	return data
+	tests := []struct {
+		name        string
+		operation   admissionv1.Operation
+		object      *corev1alpha1.Agent
+		old         *corev1alpha1.Agent
+		allowed     bool
+		messagePart string
+	}{
+		{name: "create without contract takes the namespace mode", operation: admissionv1.Create, object: agent(nil), allowed: true},
+		{name: "create with the namespace contract", operation: admissionv1.Create, object: agent(&v2), allowed: true},
+		{name: "create with the other contract", operation: admissionv1.Create, object: agent(&v1), messagePart: "must match namespace execution mode"},
+		{name: "update keeps an omitted contract omitted", operation: admissionv1.Update, object: agent(nil), old: agent(nil), allowed: true},
+		{name: "update may write the namespace contract", operation: admissionv1.Update, object: agent(&v2), old: agent(nil), allowed: true},
+		{name: "update may not write the other contract", operation: admissionv1.Update, object: agent(&v1), old: agent(nil), messagePart: "must match namespace execution mode"},
+		{name: "update may not remove a written contract", operation: admissionv1.Update, object: agent(nil), old: agent(&v2), messagePart: "immutable"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			response := validator.Handle(context.Background(), request(tt.operation, tt.object, tt.old))
+			require.Equal(t, tt.allowed, response.Allowed, response.Result.Message)
+			if tt.messagePart != "" {
+				require.Contains(t, response.Result.Message, tt.messagePart)
+			}
+		})
+	}
 }
 
 func TestAgentContractValidatorRequiresModelForHarnessV2Agents(t *testing.T) {

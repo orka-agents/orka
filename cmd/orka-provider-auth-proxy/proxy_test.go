@@ -39,6 +39,22 @@ func TestProviderAuthProxyDefaultResponseHeaderTimeout(t *testing.T) {
 	}
 }
 
+func TestNormalizeProxyConfigAcceptsIPv6Upstream(t *testing.T) {
+	if _, _, err := normalizeProxyConfig(proxyConfig{UpstreamBaseURL: "http://[::1]:1337"}); err != nil {
+		t.Fatalf("a bracketed IPv6 literal must be accepted: %v", err)
+	}
+}
+
+func TestNormalizeProxyConfigRejectsUpstreamWithoutHostname(t *testing.T) {
+	for _, upstream := range []string{"http://:8080", "http://:8080/v1", "https://", "http://[123]", "http://[::::]:1337"} {
+		t.Run(upstream, func(t *testing.T) {
+			if _, _, err := normalizeProxyConfig(proxyConfig{UpstreamBaseURL: upstream}); err == nil {
+				t.Fatalf("upstream %q without a hostname was accepted", upstream)
+			}
+		})
+	}
+}
+
 func TestProviderAuthProxyRejectsMissingAndWrongBearerTokens(t *testing.T) {
 	upstreamCalls := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

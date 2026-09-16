@@ -29,7 +29,6 @@ import (
 const (
 	statusSubresource = "status"
 
-	NamespaceExecutionModeWebhookPath = "/validate-v1-namespace-execution-mode"
 	AgentContractWebhookPath          = "/validate-core-orka-ai-v1alpha1-agent-contract"
 	AgentRuntimeContractWebhookPath   = "/validate-core-orka-ai-v1alpha1-agentruntime-contract"
 	TaskExecutionAuthorityWebhookPath = "/validate-core-orka-ai-v1alpha1-task-execution-authority"
@@ -58,7 +57,8 @@ func (c ExecutionModeConfig) controller(username string) bool {
 	return slices.Contains(c.ControllerUsernames, strings.TrimSpace(username))
 }
 
-// RegisterExecutionModeWebhooks registers the static namespace-mode boundary.
+// RegisterExecutionModeWebhooks registers the static execution-mode boundary
+// for Orka resources. Namespace claim immutability is a ValidatingAdmissionPolicy.
 func RegisterExecutionModeWebhooks(
 	server webhook.Server,
 	scheme *runtime.Scheme,
@@ -67,9 +67,6 @@ func RegisterExecutionModeWebhooks(
 ) {
 	config = config.normalized()
 	decoder := ctrladmission.NewDecoder(scheme)
-	server.Register(NamespaceExecutionModeWebhookPath, &ctrladmission.Webhook{Handler: &NamespaceExecutionModeValidator{
-		decoder: decoder,
-	}})
 	server.Register(AgentContractWebhookPath, &ctrladmission.Webhook{Handler: &AgentContractValidator{
 		decoder: decoder, reader: reader,
 	}})
@@ -85,51 +82,6 @@ func RegisterExecutionModeWebhooks(
 	server.Register(ACPSuspendQuotaLeaseWebhookPath, &ctrladmission.Webhook{Handler: &ACPSuspendQuotaLeaseValidator{
 		config: config,
 	}})
-}
-
-// NamespaceExecutionModeValidator permits a namespace to be created with one
-// valid execution-mode label and then makes that claim immutable.
-type NamespaceExecutionModeValidator struct {
-	decoder ctrladmission.Decoder
-}
-
-func (v *NamespaceExecutionModeValidator) Handle(_ context.Context, req ctrladmission.Request) ctrladmission.Response {
-	if req.Operation != admissionv1.Create && req.Operation != admissionv1.Update {
-		return ctrladmission.Allowed("not a namespace execution-mode write")
-	}
-	object := &corev1.Namespace{}
-	if err := v.decoder.Decode(req, object); err != nil {
-		return ctrladmission.Errored(http.StatusBadRequest, fmt.Errorf("decode namespace: %w", err))
-	}
-	newValue := strings.TrimSpace(object.Labels[executionmode.NamespaceLabel])
-	if req.Operation == admissionv1.Create {
-		if newValue == "" {
-			return ctrladmission.Allowed("namespace has no Orka execution-mode claim")
-		}
-		if _, err := executionmode.Parse(newValue); err != nil {
-			return ctrladmission.Denied(err.Error())
-		}
-		return ctrladmission.Allowed("namespace acquired an immutable execution-mode claim")
-	}
-
-	oldObject := &corev1.Namespace{}
-	if err := v.decoder.DecodeRaw(req.OldObject, oldObject); err != nil {
-		return ctrladmission.Errored(http.StatusBadRequest, fmt.Errorf("decode old namespace: %w", err))
-	}
-	oldValue := strings.TrimSpace(oldObject.Labels[executionmode.NamespaceLabel])
-	if oldValue == "" {
-		if newValue == "" {
-			return ctrladmission.Allowed("namespace has no Orka execution-mode claim")
-		}
-		return ctrladmission.Denied("an existing namespace cannot acquire an execution-mode claim; create a new namespace for the installation")
-	}
-	if newValue != oldValue {
-		return ctrladmission.Denied("namespace execution-mode claim is immutable; recreate the installation in a different namespace")
-	}
-	if _, err := executionmode.Parse(newValue); err != nil {
-		return ctrladmission.Denied(err.Error())
-	}
-	return ctrladmission.Allowed("namespace execution-mode claim is unchanged")
 }
 
 type AgentContractValidator struct {
@@ -166,10 +118,9 @@ func (v *AgentContractValidator) Handle(ctx context.Context, req ctrladmission.R
 	if !agentUsesBuiltInRuntime(object) {
 		return ctrladmission.Allowed("Agent derives its contract from AgentRuntime")
 	}
-	if object.Spec.Runtime.ContractVersion == nil {
-		return ctrladmission.Denied("built-in Agent runtime requires an explicit contractVersion")
-	}
-	if *object.Spec.Runtime.ContractVersion != mode.ContractVersion() {
+	// The namespace is immutably bound to one mode, so an omitted contract
+	// can only mean that mode. An explicit value must still agree with it.
+	if object.Spec.Runtime.ContractVersion != nil && *object.Spec.Runtime.ContractVersion != mode.ContractVersion() {
 		return ctrladmission.Denied(fmt.Sprintf("Agent contractVersion must match namespace execution mode %q", mode))
 	}
 	if mode == executionmode.HarnessV2 && (object.Spec.Model == nil || strings.TrimSpace(object.Spec.Model.Name) == "") {
@@ -177,11 +128,11 @@ func (v *AgentContractValidator) Handle(ctx context.Context, req ctrladmission.R
 		// turns a run-time Task failure into an immediate, actionable error.
 		return ctrladmission.Denied("built-in Agent runtime requires spec.model.name (the ACP runtime session has no default model)")
 	}
-	if oldObject != nil {
-		if oldObject.Spec.Runtime == nil || oldObject.Spec.Runtime.ContractVersion == nil {
-			return ctrladmission.Denied("stored unclassified Agent cannot be adopted; recreate it in the mode namespace")
-		}
-		if *oldObject.Spec.Runtime.ContractVersion != *object.Spec.Runtime.ContractVersion {
+	if oldObject != nil && oldObject.Spec.Runtime != nil && oldObject.Spec.Runtime.ContractVersion != nil {
+		// Once written, the selector never changes or disappears. Adding a
+		// matching value to an Agent that omitted it is allowed above.
+		if object.Spec.Runtime.ContractVersion == nil ||
+			*oldObject.Spec.Runtime.ContractVersion != *object.Spec.Runtime.ContractVersion {
 			return ctrladmission.Denied("Agent contractVersion is immutable")
 		}
 	}

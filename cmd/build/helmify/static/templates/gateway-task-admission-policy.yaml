@@ -1,8 +1,5 @@
 {{- if eq .Values.controller.mode "harness-v2" }}
-{{- $issuerPrefix := "gateway.orka.ai/" -}}
-{{- if .Values.controller.watchNamespace -}}
-{{- $issuerPrefix = printf "gateway.orka.ai/%s/" .Values.controller.watchNamespace -}}
-{{- end -}}
+{{- $issuerPrefix := printf "gateway.orka.ai/%s/" (include "orka.watchNamespace" .) -}}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:

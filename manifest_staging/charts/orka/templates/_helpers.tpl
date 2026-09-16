@@ -602,10 +602,6 @@ let a bearer holder mint valid operation capabilities.
 {{- printf "%s-store" (include "orka.fullname" . | trunc 57 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
-{{- define "orka.vekilIngressPolicyName" -}}
-{{- printf "%s-vekil-ingress" (include "orka.fullname" . | trunc 49 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
-{{- end }}
-
 {{/*
 Create the name of the workspace publisher ServiceAccount to use.
 */}}
@@ -618,21 +614,47 @@ Create the name of the workspace publisher ServiceAccount to use.
 {{- end }}
 
 {{/*
-Reject mutable ACP runtime image references when a provider image is configured.
+Require an explicit tag or SHA256 digest for configured ACP runtime images.
+The controller resolves tags before admitting runtime workloads.
 An empty provider image leaves that provider unavailable; Tasks still fail closed
 because the ACP runtime remains enabled and has no legacy fallback.
 */}}
 {{- define "orka.validateACPRuntimeImage" -}}
 {{- $name := .name -}}
 {{- $ref := default "" .ref -}}
-{{- if and $ref (not (regexMatch "^.+@sha256:[0-9a-f]{64}$" $ref)) -}}
-{{- fail (printf "%s must be an immutable image reference ending in @sha256:<64 lowercase hex characters>; got %q" $name $ref) -}}
+{{- if $ref -}}
+{{/* Match the canonical names accepted by the controller's distribution/reference parser. */}}
+{{- $domainComponent := `[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?` -}}
+{{- $domain := printf `(?:%s(?:\.%s)*|\[[a-fA-F0-9:]+\])(?::[0-9]+)?` $domainComponent $domainComponent -}}
+{{- $pathComponent := `[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*` -}}
+{{- $path := printf `%s(?:/%s)*` $pathComponent $pathComponent -}}
+{{- $tag := `[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}` -}}
+{{- $suffix := printf `(?::%s(?:@sha256:[0-9a-f]{64})?|@sha256:[0-9a-f]{64})` $tag -}}
+{{- $error := printf "%s must use a full registry/repository name with an explicit tag or SHA256 digest" $name -}}
+{{- if not (regexMatch (printf `^(?:%s/)?%s%s$` $domain $path $suffix) $ref) -}}
+{{- fail $error -}}
+{{- end -}}
+{{- $imageName := regexReplaceAll (printf `%s$` $suffix) $ref "" -}}
+{{- $parts := splitList "/" $imageName -}}
+{{- if lt (len $parts) 2 -}}
+{{- fail $error -}}
+{{- end -}}
+{{- $registry := first $parts -}}
+{{- $repository := join "/" (rest $parts) -}}
+{{/* The parser treats a prefix outside its domain grammar as part of the repository path. */}}
+{{- if not (regexMatch (printf `^%s$` $domain) $registry) -}}
+{{- $repository = $imageName -}}
+{{- end -}}
+{{- $qualified := or (eq $registry "localhost") (contains "." $registry) (contains ":" $registry) (ne (lower $registry) $registry) -}}
+{{- if or (not $qualified) (eq $registry "index.docker.io") (and (eq $registry "docker.io") (not (contains "/" $repository))) (gt (len $repository) 255) -}}
+{{- fail $error -}}
+{{- end -}}
 {{- end -}}
 {{- end }}
 
 {{/*
-The chart-managed provider proxy is release-namespaced and its NetworkPolicies
-are intentionally pinned to the chart-supported Vekil Service.
+The chart-managed provider proxy stays in the release namespace. Operators
+choose its upstream gateway and explicitly allow the required network access.
 */}}
 {{- define "orka.validateProviderProxyConfig" -}}
 {{- if and (eq .Values.controller.mode "harness-v2") .Values.providerProxy.enabled -}}
@@ -641,8 +663,34 @@ are intentionally pinned to the chart-supported Vekil Service.
 {{- fail (printf "controller.acpRuntime.providerProxyNamespace must be empty or match the Helm release namespace %q when providerProxy.enabled=true" .Release.Namespace) -}}
 {{- end -}}
 {{- $upstream := trimSuffix "/" (trim (default "" .Values.providerProxy.upstreamBaseURL)) -}}
-{{- if ne $upstream "http://vekil.vekil-system.svc:1337" -}}
-{{- fail "providerProxy.upstreamBaseURL must be http://vekil.vekil-system.svc:1337 (an optional trailing slash is accepted)" -}}
+{{- if not (regexMatch `^https?://(\[[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*\]|[A-Za-z0-9][^/?#@\[\]:[:space:]]*)(:[0-9]+)?(/[^?#[:space:]]*)?$` $upstream) -}}
+{{- fail "providerProxy.upstreamBaseURL must be an HTTP(S) URL without credentials, a query, or a fragment when providerProxy.enabled=true" -}}
+{{- end -}}
+{{- $upstreamURL := urlParse $upstream -}}
+{{- $port := trimPrefix ":" (regexFind `:[0-9]+$` $upstreamURL.host) -}}
+{{- if and $port (or (lt (atoi $port) 1) (gt (atoi $port) 65535)) -}}
+{{- fail "providerProxy.upstreamBaseURL port must be between 1 and 65535" -}}
+{{- end -}}
+{{/* Match the proxy's url.Parse followed by HasUnsafePathSegment, including its second path decode. */}}
+{{- $path := $upstreamURL.path -}}
+{{- range $pass := until 2 -}}
+{{- if regexMatch `(^|/)\.{1,2}(/|$)|\\|\x00` $path -}}
+{{- fail "providerProxy.upstreamBaseURL path must not contain dot segments, backslashes, or null bytes, including encoded forms" -}}
+{{- end -}}
+{{- if eq $pass 0 -}}
+{{/* Escape delimiters and controls, but retain percent escapes for one more path decode. */}}
+{{- $decodeURL := printf "/%s" ($path | urlquery | replace "+" "%20" | replace "%25" "%") -}}
+{{- $path = (urlParse $decodeURL).path -}}
+{{- end -}}
+{{- end -}}
+{{- if not (kindIs "slice" .Values.providerProxy.egress) -}}
+{{- fail "providerProxy.egress must be a list of NetworkPolicy egress rules" -}}
+{{- end -}}
+{{- if empty .Values.providerProxy.egress -}}
+{{- $service := include "orka.providerProxyUpstreamService" . | fromJson -}}
+{{- if not $service.name -}}
+{{- fail "providerProxy.egress is required unless providerProxy.upstreamBaseURL names an in-cluster Service as http(s)://<service>.<namespace>.svc[:port]; the chart then derives the egress rule from that Service" -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- end }}
@@ -661,17 +709,22 @@ must have exactly one elected writer and must not overlap Pods during rollout.
 {{- end }}
 
 {{/*
+Default the tenant namespace to the Helm release namespace.
+*/}}
+{{- define "orka.watchNamespace" -}}
+{{- default .Release.Namespace .Values.controller.watchNamespace -}}
+{{- end }}
+
+{{/*
 Every release owns exactly one immutable execution contract and one tenant
 namespace. There is no dual, automatic, or drain controller mode.
 */}}
 {{- define "orka.validateControllerMode" -}}
+{{- $watchNamespace := include "orka.watchNamespace" . -}}
 {{- if not (has .Values.controller.mode (list "harness-v1" "harness-v2")) -}}
 {{- fail "controller.mode must be harness-v1 or harness-v2" -}}
 {{- end -}}
-{{- if not (trim (default "" .Values.controller.watchNamespace)) -}}
-{{- fail "controller.watchNamespace is required for an isolated controller installation" -}}
-{{- end -}}
-{{- if ne .Values.controller.watchNamespace .Release.Namespace -}}
+{{- if ne $watchNamespace .Release.Namespace -}}
 {{- fail (printf "controller.watchNamespace must equal the Helm release namespace %q" .Release.Namespace) -}}
 {{- end -}}
 {{- if not .Values.controller.leaderElect -}}
@@ -704,8 +757,8 @@ namespace. There is no dual, automatic, or drain controller mode.
 {{- end -}}
 {{- if $existingController -}}
 {{- $existingWatchNamespace := include "orka.existingControllerWatchNamespace" $existingController | trim -}}
-{{- if ne $existingWatchNamespace .Values.controller.watchNamespace -}}
-{{- fail (printf "controller.watchNamespace is immutable; the existing controller must already watch namespace %q; install cluster-wide or differently scoped controllers as a new release and namespace" .Values.controller.watchNamespace) -}}
+{{- if ne $existingWatchNamespace $watchNamespace -}}
+{{- fail (printf "controller.watchNamespace is immutable; the existing controller must already watch namespace %q; install cluster-wide or differently scoped controllers as a new release and namespace" $watchNamespace) -}}
 {{- end -}}
 {{- $existingMode := include "orka.existingControllerMode" $existingController | trim -}}
 {{- $existingState := include "orka.harnessV1ExistingControllerState" $existingController | trim -}}
@@ -722,7 +775,7 @@ namespace. There is no dual, automatic, or drain controller mode.
 {{- if not $existingSnapshotSecret -}}
 {{- fail "cannot determine the existing agent execution snapshot Secret name from the live controller; restore its exact agent-execution-snapshot-key volume before upgrading" -}}
 {{- end -}}
-{{- $desiredSnapshotSecret := trim (default "" .Values.controller.agentExecutionSnapshot.existingSecret) -}}
+{{- $desiredSnapshotSecret := include "orka.agentExecutionSnapshotSecretName" . -}}
 {{- if ne $existingSnapshotSecret $desiredSnapshotSecret -}}
 {{- fail (printf "controller.agentExecutionSnapshot.existingSecret is immutable for in-place upgrades; preserve %q so retained encrypted execution snapshots remain decryptable" $existingSnapshotSecret) -}}
 {{- end -}}
@@ -730,7 +783,7 @@ namespace. There is no dual, automatic, or drain controller mode.
 {{- if not $existingSnapshotKey -}}
 {{- fail "cannot determine the existing agent execution snapshot Secret key from the live controller; restore its exact item mounted at path key before upgrading" -}}
 {{- end -}}
-{{- $desiredSnapshotKey := trim (default "" .Values.controller.agentExecutionSnapshot.key) -}}
+{{- $desiredSnapshotKey := include "orka.agentExecutionSnapshotSecretKey" . -}}
 {{- if ne $existingSnapshotKey $desiredSnapshotKey -}}
 {{- fail (printf "controller.agentExecutionSnapshot.key is immutable for in-place upgrades; preserve %q so retained encrypted execution snapshots remain decryptable" $existingSnapshotKey) -}}
 {{- end -}}
@@ -754,7 +807,7 @@ namespace. There is no dual, automatic, or drain controller mode.
 {{- end -}}
 {{- end -}}
 {{- $clientNamespace := trim (default "" .Values.client.namespace) -}}
-{{- if and $clientNamespace (ne $clientNamespace .Values.controller.watchNamespace) -}}
+{{- if and $clientNamespace (ne $clientNamespace $watchNamespace) -}}
 {{- fail "client.namespace must be empty or match controller.watchNamespace" -}}
 {{- end -}}
 {{- if eq .Values.controller.mode "harness-v2" -}}
@@ -768,17 +821,29 @@ namespace. There is no dual, automatic, or drain controller mode.
 {{- end }}
 
 {{/*
-Agent execution snapshots contain sensitive resolved inputs. When either
-agent protocol is enabled, require an operator-managed Secret for their
-encryption key rather than generating or storing the key in Helm values.
+Agent execution snapshots contain sensitive resolved inputs and are encrypted
+with an AES-256 key mounted from a Secret. Operators may supply that Secret
+through controller.agentExecutionSnapshot.existingSecret. When it is empty the
+chart renders an empty release-owned Secret and the controller mints the key
+into it on first start (see agent-execution-snapshot-secret.yaml). Both paths resolve
+through these helpers so the Deployment mount and the upgrade identity guard
+agree on one name and one item key.
 */}}
-{{- define "orka.validateAgentExecutionSnapshot" -}}
-{{- if not (trim (default "" .Values.controller.agentExecutionSnapshot.existingSecret)) -}}
-{{- fail "controller.agentExecutionSnapshot.existingSecret is required when agent execution is enabled" -}}
+{{- define "orka.agentExecutionSnapshotSecretName" -}}
+{{- $existing := trim (default "" .Values.controller.agentExecutionSnapshot.existingSecret) -}}
+{{- if $existing -}}
+{{- $existing -}}
+{{- else -}}
+{{- printf "%s-agent-execution-snapshot" (include "orka.fullname" . | trunc 38 | trimSuffix "-") | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
-{{- if not (trim (default "" .Values.controller.agentExecutionSnapshot.key)) -}}
-{{- fail "controller.agentExecutionSnapshot.key is required when agent execution is enabled" -}}
-{{- end -}}
+{{- end }}
+
+{{- define "orka.agentExecutionSnapshotGenerated" -}}
+{{- if not (trim (default "" .Values.controller.agentExecutionSnapshot.existingSecret)) -}}true{{- end -}}
+{{- end }}
+
+{{- define "orka.agentExecutionSnapshotSecretKey" -}}
+{{- default "key" (trim (default "" .Values.controller.agentExecutionSnapshot.key)) -}}
 {{- end }}
 
 {{/*
@@ -786,20 +851,40 @@ The release-local controller serves its own fail-closed webhooks. Its
 certificate and CA trust are always operator-managed.
 */}}
 {{- define "orka.validateWebhooks" -}}
-{{- if not (trim (default "" .Values.webhooks.tls.existingSecret)) -}}
-{{- fail "webhooks.tls.existingSecret is required" -}}
-{{- end -}}
 {{- if not (trim (default "" .Values.webhooks.tls.certKey)) -}}
 {{- fail "webhooks.tls.certKey is required" -}}
 {{- end -}}
 {{- if not (trim (default "" .Values.webhooks.tls.privateKeyKey)) -}}
 {{- fail "webhooks.tls.privateKeyKey is required" -}}
 {{- end -}}
-{{- if and (not (trim (default "" .Values.webhooks.caBundle))) (empty .Values.webhooks.caInjectionAnnotations) -}}
-{{- fail "webhooks requires a nonempty caBundle or caInjectionAnnotations" -}}
+{{- if and (not (include "orka.webhookTLSGenerated" .)) (not (trim (default "" .Values.webhooks.caBundle))) (empty .Values.webhooks.caInjectionAnnotations) -}}
+{{- fail "webhooks requires a nonempty caBundle or caInjectionAnnotations when webhooks.tls.existingSecret is set" -}}
+{{- end -}}
+{{- if and (include "orka.webhookTLSGenerated" .) (or (trim (default "" .Values.webhooks.caBundle)) (not (empty .Values.webhooks.caInjectionAnnotations))) -}}
+{{- fail "webhooks.caBundle and webhooks.caInjectionAnnotations require webhooks.tls.existingSecret; with controller-managed certificates the controller owns caBundle and an external injector would fight it" -}}
 {{- end -}}
 {{- if or (lt (int .Values.webhooks.timeoutSeconds) 1) (gt (int .Values.webhooks.timeoutSeconds) 30) -}}
 {{- fail "webhooks.timeoutSeconds must be between 1 and 30" -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Webhook serving TLS. With webhooks.tls.existingSecret the operator owns the
+certificate and its CA trust. Without it the chart renders an empty
+release-owned Secret and the controller fills it with a self-signed CA and
+serving certificate, then injects that CA into the release's
+ValidatingWebhookConfiguration (see controller-webhook-tls-secret.yaml).
+*/}}
+{{- define "orka.webhookTLSGenerated" -}}
+{{- if not (trim (default "" .Values.webhooks.tls.existingSecret)) -}}true{{- end -}}
+{{- end }}
+
+{{- define "orka.webhookTLSSecretName" -}}
+{{- $existing := trim (default "" .Values.webhooks.tls.existingSecret) -}}
+{{- if $existing -}}
+{{- $existing -}}
+{{- else -}}
+{{- printf "%s-webhook-tls" (include "orka.fullname" . | trunc 51 | trimSuffix "-") | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 {{- end }}
 
@@ -872,6 +957,27 @@ remain outside rendered Helm manifests.
 {{- trimSuffix "/" (trim (default "" .Values.providerProxy.upstreamBaseURL)) -}}
 {{- end }}
 
+{{/*
+Split providerProxy.upstreamBaseURL into the in-cluster Service it names, as
+JSON {name, namespace, port}. Empty name when the host is not of the form
+<service>.<namespace>.svc or <service>.<namespace>.svc.cluster.local.
+*/}}
+{{- define "orka.providerProxyUpstreamService" -}}
+{{- $url := urlParse (include "orka.providerProxyUpstreamBaseURL" .) -}}
+{{- $hostport := default "" $url.host -}}
+{{- $host := regexReplaceAll `:[0-9]+$` $hostport "" -}}
+{{- $port := trimPrefix ":" (regexFind `:[0-9]+$` $hostport) -}}
+{{- if not $port -}}{{- $port = ternary "443" "80" (eq $url.scheme "https") -}}{{- end -}}
+{{- $parts := splitList "." $host -}}
+{{- $name := "" -}}
+{{- $namespace := "" -}}
+{{- if and (ge (len $parts) 3) (eq (index $parts 2) "svc") (or (eq (len $parts) 3) (and (eq (len $parts) 5) (eq (index $parts 3) "cluster") (eq (index $parts 4) "local"))) -}}
+{{- $name = index $parts 0 -}}
+{{- $namespace = index $parts 1 -}}
+{{- end -}}
+{{- dict "name" $name "namespace" $namespace "port" $port | toJson -}}
+{{- end }}
+
 
 {{/*
 Create the namespace for the chart-managed client ServiceAccount. Static
@@ -881,7 +987,7 @@ installations always place the client in the watched namespace.
 {{- if .Values.client.namespace }}
 {{- .Values.client.namespace }}
 {{- else }}
-{{- .Values.controller.watchNamespace }}
+{{- include "orka.watchNamespace" . }}
 {{- end }}
 {{- end }}
 
@@ -915,11 +1021,19 @@ Create release-scoped static worker RoleBinding names.
 {{- printf "%s-container-worker-rolebinding" (include "orka.fullname" .) | trunc 253 | trimSuffix "-" }}
 {{- end }}
 
-{{/* Render repository@digest when an immutable digest is configured. */}}
+{{/* Use the release tag unless a SHA256 digest override is configured. */}}
 {{- define "orka.imageRef" -}}
+{{- $repository := required "image.repository is required" .repository -}}
 {{- if .digest -}}
-{{ printf "%s@%s" .repository .digest }}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .digest) -}}
+{{- fail "image.digest must be a sha256 digest" -}}
+{{- end -}}
+{{ printf "%s@%s" $repository .digest }}
 {{- else -}}
-{{ printf "%s:%s" .repository .tag }}
+{{- $tag := required "image.tag is required when image.digest is unset" .tag | toString -}}
+{{- if not (regexMatch "^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$" $tag) -}}
+{{- fail "image.tag must be a valid container image tag" -}}
+{{- end -}}
+{{ printf "%s:%s" $repository $tag }}
 {{- end -}}
 {{- end }}

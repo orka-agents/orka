@@ -96,6 +96,13 @@ func versionFields() map[string][]replacement {
 			value: `${1}"RELEASE_VERSION"`,
 		})
 	}
+	for _, provider := range versionedRuntimeProviders {
+		fields[valuesInputPath] = append(fields[valuesInputPath], replacement{
+			pattern: `^([ \t]+` + provider + `Image:[ \t]*` +
+				regexp.QuoteMeta(imageRepository("acp-"+provider+"-runtime")) + `:)` + bare + `$`,
+			value: `${1}RELEASE_VERSION`,
+		})
+	}
 	return fields
 }
 

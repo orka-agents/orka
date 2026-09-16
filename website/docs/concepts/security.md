@@ -123,6 +123,21 @@ Command-based Publisher startup is production-safe by default: artifact authoriz
 
 The runtime child's `.git` directory, remotes, hooks, filters, refs, and history are untrusted for publication.
 
+#### SCM proxy NetworkPolicy limits
+
+The SCM proxy NetworkPolicy excludes RFC 1918 and reserved address ranges, but
+Kubernetes does not define whether Service destination NAT runs before or
+after `ipBlock` evaluation. Some CNI and cloud combinations can therefore
+reach the `kubernetes.default` transport through its ClusterIP despite those
+exclusions. This does not grant API authorization: the SCM proxy Pod and
+ServiceAccount do not mount a service-account token, service links are disabled,
+Orka grants that identity no API RBAC, and the proxy refuses to start if the
+conventional Kubernetes service-account token path exists. The proxy itself
+accepts only exact configured SCM hostnames and rejects non-public DNS answers
+and connected peers. Clusters requiring TCP-level API denial must add and
+validate a CNI- or cloud-native pre-DNAT or Service-aware egress control;
+standard NetworkPolicy cannot guarantee this portably.
+
 ### Provider and prompt brokers
 
 Built-in RuntimePools reach Vekil through the central authenticated provider proxy.
@@ -202,8 +217,10 @@ for every route's permissions, namespace precedence, and grant examples.
 
 - Every controller requires one non-empty `--watch-namespace` and one static
   `--controller-mode` (`harness-v1` or `harness-v2`)
-- The watched namespace must carry the matching
-  `orka.ai/controller-mode` label; missing or mismatched claims fail startup
+- The watched namespace carries the matching `orka.ai/controller-mode`
+  label. The controller claims an unlabeled namespace on first start; a
+  mismatched claim fails startup, and a per-release ValidatingAdmissionPolicy
+  keeps the claim immutable and lets only that controller add it
 - Same-cluster v1/v2 installations use distinct namespaces, ServiceAccounts,
   RBAC, Leases, stores, Services, Secrets, and execution data planes
 - Chat endpoint blocks operations in `kube-system` and `kube-public` namespaces

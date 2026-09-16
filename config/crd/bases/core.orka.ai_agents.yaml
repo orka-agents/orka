@@ -1415,11 +1415,12 @@ spec:
                 properties:
                   contractVersion:
                     description: |-
-                      ContractVersion is the immutable harness protocol selector for built-in
-                      runtime types. There is no default: a missing selector is never
-                      interpreted as either protocol, and fail-closed admission requires an
-                      explicit value on new built-in Agents. runtime.type alone (including
-                      opencode, which exists in both protocols) is never protocol evidence.
+                      ContractVersion is the harness protocol selector for built-in runtime
+                      types. It may be omitted: the namespace is bound to exactly one
+                      execution mode, so an omitted selector means that mode. An explicit
+                      value must match the namespace mode and, once written, never changes.
+                      runtime.type alone (including opencode, which exists in both protocols)
+                      is never protocol evidence.
                     enum:
                     - orka.harness.v1
                     - orka.harness.v2

@@ -1,0 +1,49 @@
+# Execution-mode claims on namespaces are immutable once set. Only the listed
+# controller identities may add the claim to an existing namespace; anyone may
+# create a namespace with it. Patch the identity to match the controller
+# ServiceAccount, exactly as for gateway_task_protection.yaml.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: namespace-mode-protection
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: [""]
+      apiVersions: ["v1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["namespaces"]
+  matchConditions:
+  - name: execution-mode-claim-present
+    expression: >-
+      object.metadata.?labels.orValue({}).exists(k, k == 'orka.ai/controller-mode') ||
+      (request.operation == 'UPDATE' && oldObject.metadata.?labels.orValue({}).exists(k, k == 'orka.ai/controller-mode'))
+  variables:
+  - name: label
+    expression: "'orka.ai/controller-mode'"
+  - name: controllerNamespace
+    expression: "'ORKA_NAMESPACE'"
+  - name: controllerServiceAccount
+    expression: "'CONTROLLER_SA'"
+  - name: controllerUser
+    expression: "'system:serviceaccount:' + variables.controllerNamespace + ':' + variables.controllerServiceAccount"
+  - name: newClaim
+    expression: "object.metadata.?labels[variables.label].orValue('')"
+  - name: oldClaim
+    expression: "request.operation == 'UPDATE' ? oldObject.metadata.?labels[variables.label].orValue('') : ''"
+  validations:
+  - expression: "variables.newClaim == '' || variables.newClaim in ['harness-v1', 'harness-v2']"
+    message: orka.ai/controller-mode must be harness-v1 or harness-v2
+  - expression: "variables.oldClaim == '' || variables.newClaim == variables.oldClaim"
+    message: namespace execution-mode claim is immutable; recreate the installation in a different namespace
+  - expression: "variables.oldClaim != '' || variables.newClaim == '' || request.operation == 'CREATE' || request.userInfo.username == variables.controllerUser"
+    message: only the Orka controller may claim an existing namespace for an execution mode; create a new namespace for another installation
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: namespace-mode-protection
+spec:
+  policyName: namespace-mode-protection
+  validationActions: [Deny]

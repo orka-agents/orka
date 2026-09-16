@@ -50,6 +50,7 @@ import (
 	"github.com/orka-agents/orka/internal/approvals"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	execevents "github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
@@ -105,30 +106,33 @@ const (
 // TaskReconciler reconciles a Task object
 type TaskReconciler struct {
 	client.Client
-	APIReader                         client.Reader
-	Scheme                            *runtime.Scheme
-	JobBuilder                        *JobBuilder
-	SessionManager                    *SessionManager
-	WebhookNotifier                   *WebhookNotifier
-	Recorder                          record.EventRecorder
-	KubeClient                        kubernetes.Interface
-	OutboundAccessResolver            outboundaccess.Resolver
-	BrokeredTransactionExchange       *workerpkg.TransactionExchangeConfig
-	ResultStore                       store.ResultStore
-	PlanStore                         store.PlanStore
-	MessageStore                      store.MessageStore
-	ArtifactStore                     store.ArtifactStore
-	ExecutionEventStore               store.ExecutionEventStore
-	DurableControlStore               store.DurableControlStore
-	AgentExecutionSnapshots           store.AgentExecutionSnapshotStore
-	RepositoryValidationBindings      tools.RepositoryValidationBindingStore
-	MCPRegistry                       *tools.Registry
-	ACPArtifactRetirer                artifactcap.IdentityRetirer
-	ACPPublicationReclaimer           ACPPublicationReclaimer
-	ControllerEpochManager            *ControllerEpochManager
-	ControllerNamespace               string
-	ACPAdmissionGate                  *ACPAdmissionGate
-	HarnessV1Enabled                  bool
+	APIReader                    client.Reader
+	Scheme                       *runtime.Scheme
+	JobBuilder                   *JobBuilder
+	SessionManager               *SessionManager
+	WebhookNotifier              *WebhookNotifier
+	Recorder                     record.EventRecorder
+	KubeClient                   kubernetes.Interface
+	OutboundAccessResolver       outboundaccess.Resolver
+	BrokeredTransactionExchange  *workerpkg.TransactionExchangeConfig
+	ResultStore                  store.ResultStore
+	PlanStore                    store.PlanStore
+	MessageStore                 store.MessageStore
+	ArtifactStore                store.ArtifactStore
+	ExecutionEventStore          store.ExecutionEventStore
+	DurableControlStore          store.DurableControlStore
+	AgentExecutionSnapshots      store.AgentExecutionSnapshotStore
+	RepositoryValidationBindings tools.RepositoryValidationBindingStore
+	MCPRegistry                  *tools.Registry
+	ACPArtifactRetirer           artifactcap.IdentityRetirer
+	ACPPublicationReclaimer      ACPPublicationReclaimer
+	ControllerEpochManager       *ControllerEpochManager
+	ControllerNamespace          string
+	ACPAdmissionGate             *ACPAdmissionGate
+	HarnessV1Enabled             bool
+	// Mode is the controller's static execution mode; it classifies built-in
+	// Agents that omitted contractVersion.
+	Mode                              executionmode.Mode
 	HarnessV1Endpoint                 string
 	HarnessV1AuthSecretNamespace      string
 	HarnessV1AuthSecretName           string

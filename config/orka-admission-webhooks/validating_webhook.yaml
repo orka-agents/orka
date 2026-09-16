@@ -13,21 +13,6 @@ metadata:
 # runtime and webhook configuration atomically when using noncanonical release
 # namespaces or ServiceAccount names.
 webhooks:
-  - name: namespaceexecutionmode.core.orka.ai
-    admissionReviewVersions: [v1]
-    sideEffects: None
-    failurePolicy: Fail
-    matchPolicy: Equivalent
-    timeoutSeconds: 10
-    clientConfig:
-      service: {name: orka-admission, namespace: orka-system, path: /validate-v1-namespace-execution-mode, port: 443}
-    rules:
-      - {operations: [CREATE, UPDATE], apiGroups: [""], apiVersions: [v1], resources: [namespaces], scope: Cluster}
-    matchConditions:
-      - name: execution-mode-claim-present
-        expression: >-
-          object.metadata.?labels.orValue({}).exists(k, k == 'orka.ai/controller-mode') ||
-          oldObject.?metadata.?labels.orValue({}).exists(k, k == 'orka.ai/controller-mode')
   - name: workspaceattachmentsecret.core.orka.ai
     admissionReviewVersions: [v1]
     sideEffects: None

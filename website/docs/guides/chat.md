@@ -7,6 +7,24 @@ description: "The chat endpoint: describe what you want in plain language and le
 
 The chat endpoint provides an agentic conversational interface where an LLM orchestrator can create and manage Kubernetes resources on the user's behalf. It accepts natural language, reasons about what tasks to create, and autonomously executes them using the platform.
 
+## Try it
+
+With the API [port-forwarded and a client token in `ORKA_TOKEN`](../getting-started.md#connect-to-the-api)
+and at least one [Provider](../getting-started.md#your-first-task) created, send one
+message. The orchestrator decides what to do, creates the Tasks it needs, and streams
+its progress back:
+
+```bash
+curl -N -H "Authorization: Bearer ${ORKA_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{"message": "Run a container task that prints the date, then tell me what it printed.", "namespace": "orka-system"}' \
+  http://localhost:8080/api/v1/chat
+```
+
+Swap `Accept: text/event-stream` for `Accept: application/json` to get one JSON
+reply instead of a stream. The [dashboard](ui.md) has the same chat with a UI.
+
 ## Endpoint
 
 ```
@@ -49,7 +67,7 @@ User ──POST /api/v1/chat──▶ API Server ──▶ Concurrency Semaphore
     "message": "Create an AI task that summarizes Kubernetes best practices",
     "sessionId": "my-session",
     "provider": "anthropic",
-    "model": "claude-sonnet-4-20250514",
+    "model": "claude-opus-5",
     "namespace": "default",
     "temperature": 0.7,
     "maxTokens": 4096,

@@ -135,8 +135,8 @@ jobs:
             /^  namespace: / { namespace = $2; next }
             END {
               finish_resource()
-              if (count != 10) {
-                printf "Expected 10 admission policies and bindings, found %d\n", count > "/dev/stderr"
+              if (count != 12) {
+                printf "Expected 12 admission policies and bindings, found %d\n", count > "/dev/stderr"
                 invalid = 1
               }
               exit invalid
@@ -252,6 +252,7 @@ jobs:
           }
           controller_digest="sha256:$(printf '0%.0s' {1..64})"
           snapshot_args=(
+            --values cmd/build/helmify/testdata/provider-proxy-values.yaml
             --set-string controller.mode=harness-v2
             --set-string "controller.watchNamespace=${NAMESPACE}"
             --set-string "controller.image.digest=${controller_digest}"
@@ -306,8 +307,9 @@ jobs:
           grep -Fq -- "--controller-url=http://orka.${NAMESPACE}.svc:8080" "${default_render}"
           grep -Fq -- "--controller-url=http://secondary-orka.${NAMESPACE}.svc:8080" "${secondary_render}"
           grep -Fq -- "--ai-worker-service-account-name=orka-ai-worker" "${default_render}"
-          if ! grep -Fq -- "namespace: vekil-system" "${default_render}"; then
-            echo "Harness v2 must render the fixed Vekil ingress boundary for its required provider proxy." >&2
+          grep -Fq -- "--upstream-base-url=http://model-gateway.models.svc:8080" "${default_render}"
+          if grep -Eq -- 'namespace: (models|vekil-system)$' "${default_render}"; then
+            echo "The chart must not manage resources in the operator's model gateway namespace." >&2
             exit 1
           fi
           if grep -Fq -- "agent-harness-wrapper" "${default_render}"; then
@@ -417,7 +419,6 @@ jobs:
             --name "${KIND_CLUSTER}" \
             --image "${KIND_IMAGE}" \
             --wait 90s
-          kubectl create namespace vekil-system
 
           shopt -s nullglob
           chart_packages=(cr-release-packages/orka-*.tgz)
@@ -474,8 +475,10 @@ jobs:
             done <<< "${expected_crds}"
           }
 
+          pause_tag=${PAUSE_IMAGE_TAG%%@*}
           pause_digest=${PAUSE_IMAGE_TAG#*@}
           helm install orka "${chart_package}" \
+            --values cmd/build/helmify/testdata/provider-proxy-values.yaml \
             --namespace "${NAMESPACE}" \
             --create-namespace \
             --set-string controller.mode=harness-v2 \
@@ -484,13 +487,14 @@ jobs:
             --set-string "controller.agentExecutionSnapshot.existingSecret=${SNAPSHOT_SECRET}" \
             --set-string "controller.agentExecutionSnapshot.key=${SNAPSHOT_KEY}" \
             --set-string controller.image.repository="${PAUSE_IMAGE_REPOSITORY}" \
-            --set-string controller.image.tag="${PAUSE_IMAGE_TAG}" \
+            --set-string controller.image.tag="${pause_tag}" \
             --set-string controller.image.digest="${pause_digest}" \
             --set controller.image.pullPolicy=IfNotPresent \
             --set-string webhooks.tls.existingSecret=controller-webhook-tls \
             --set-string webhooks.caBundle=Y2E= \
             --set-string workers.ai.image.repository="${PAUSE_IMAGE_REPOSITORY}" \
-            --set-string workers.ai.image.tag="${PAUSE_IMAGE_TAG}" \
+            --set-string workers.ai.image.tag="${pause_tag}" \
+            --set-string workers.ai.image.digest="${pause_digest}" \
             --set-string publisher.image.repository="${PAUSE_IMAGE_REPOSITORY}" \
             --set-string publisher.image.digest="${pause_digest}" \
             --set publisher.enabled=true \
@@ -514,7 +518,7 @@ jobs:
             --set-string "controller.agentExecutionSnapshot.existingSecret=${SNAPSHOT_SECRET}"
             --set-string "controller.agentExecutionSnapshot.key=${SNAPSHOT_KEY}"
             --set-string controller.image.repository="${PAUSE_IMAGE_REPOSITORY}"
-            --set-string controller.image.tag="${PAUSE_IMAGE_TAG}"
+            --set-string controller.image.tag="${pause_tag}"
             --set-string controller.image.digest="${pause_digest}"
             --set controller.image.pullPolicy=IfNotPresent
             --set-string webhooks.tls.existingSecret=controller-webhook-tls

@@ -1,15 +1,28 @@
 ---
-description: "Running harness v1 and harness v2 side by side on one cluster without letting them collide."
+description: "Legacy: running the harness-v1 compatibility mode next to a normal installation."
 ---
 
-# Operating harness v1 and v2 on one cluster
+# Running both controller modes
 
-Orka can run harness v1 and harness v2 on one Kubernetes cluster as two
-independent installations. They share the Kubernetes API server and one
-platform-owned CRD schema bundle, but they do not share Tasks, Sessions,
-controller state, or execution data planes.
+:::caution[Legacy]
+`harness-v1` is the previous execution path. It is kept so existing
+wrapper-based installations can be retired on their own schedule, and it will be
+removed in a future release. New installations never need this page.
+:::
 
-## Static mode contract
+For a new installation, follow [Install Orka](installation.md). It uses the
+default `harness-v2` mode.
+
+This advanced guide is for clusters that also need a separate `harness-v1`
+compatibility installation. The two installations share the Kubernetes API
+server and CRDs. Each has its own Tasks, Sessions, controller state, and agent
+execution resources.
+
+The examples name the default installation `orka` and the compatibility
+installation `orka-compat`. These are Helm installation names. They do not
+select an Orka version or controller mode.
+
+## Controller modes
 
 Each controller accepts exactly one required mode:
 
@@ -18,34 +31,43 @@ Each controller accepts exactly one required mode:
 | `harness-v1` | Legacy turn-oriented harness wrapper |
 | `harness-v2` | ACP RuntimePools and RuntimeSessions |
 
-There is no `dual`, `auto`, or `harness-v1-drain` mode. A release never changes
+There is no `dual`, `auto`, or `harness-v1-drain` mode. An installation never changes
 mode in place.
 
-The controller also requires a non-empty watched namespace labeled with the
-same mode:
+The controller also requires a non-empty watched namespace that carries the
+same mode as the `orka.ai/controller-mode` label. On first start the controller
+labels an unlabeled namespace itself, so a Helm install with `--create-namespace`
+needs no preparation. A namespace already labeled with the other mode fails
+startup. To require an operator-applied label instead, run the controller with
+`--claim-namespace-mode=false`.
+
+You can still create the namespaces up front with the label in place:
 
 ```bash
-kubectl create -f - <<'EOF'
+export ORKA_CONTEXT='<your-kubeconfig-context>'
+kubectl --context "${ORKA_CONTEXT}" create -f - <<'EOF'
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: orka-v1-system
+  name: orka-compat-system
   labels:
     orka.ai/controller-mode: harness-v1
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: orka-v2-system
+  name: orka-system
   labels:
     orka.ai/controller-mode: harness-v2
 EOF
 ```
 
-:::warning[The label must exist before the controller starts]
-A missing or mismatched `orka.ai/controller-mode` label fails startup. Set it when you create
-the namespace. Do not adopt an unlabeled namespace, and do not relabel one to move it between
-modes — the two harnesses own different resources in it.
+:::warning[The claim is immutable]
+Each release installs a ValidatingAdmissionPolicy for its namespace. Once the
+label exists it can never change or be removed, and only that release's
+controller ServiceAccount may add it to an existing namespace. Do not relabel a
+namespace to move it between modes: the two harnesses own different resources
+in it. Recreate the installation in a new namespace instead.
 :::
 
 ## Isolation checklist
@@ -55,11 +77,11 @@ bundle. Everything else is duplicated.
 
 ```mermaid
 flowchart TB
-    subgraph shared["Shared — cluster-scoped, one owner"]
+    subgraph shared["Shared CRDs, one owner"]
         CRDs["CRD schema bundle<br/><i>applied once, by a platform or GitOps owner</i>"]
     end
 
-    subgraph v1["Release orka-v1 — namespace orka-v1-system"]
+    subgraph v1["Installation orka-compat<br/>namespace orka-compat-system"]
         direction TB
         C1["controller<br/><code>mode=harness-v1</code>"]
         L1["Lease 03b49a10.orka.ai"]
@@ -67,12 +89,12 @@ flowchart TB
         D1["wrapper Service + ledger"]
     end
 
-    subgraph v2["Release orka-v2 — namespace orka-v2-system"]
+    subgraph v2["Installation orka<br/>namespace orka-system"]
         direction TB
         C2["controller<br/><code>mode=harness-v2</code>"]
         L2["Lease 03b49a10.orka.ai"]
         S2[("v2 SQLite / PVC")]
-        R2["ACP runtimes<br/><i>namespace orka-v2-runtimes</i>"]
+        R2["ACP runtimes<br/><i>namespace orka-runtimes</i>"]
     end
 
     CRDs -.->|schema only| v1
@@ -93,13 +115,16 @@ Use different values for every release-owned resource:
 
 | Boundary | Harness v1 | Harness v2 |
 | --- | --- | --- |
-| Helm release | `orka-v1` | `orka-v2` |
-| Release/watch namespace | `orka-v1-system` | `orka-v2-system` |
+| Helm installation name | `orka-compat` | `orka` |
+| `controller.mode` | `harness-v1` | `harness-v2` |
+| Namespace and `controller.watchNamespace` | `orka-compat-system` | `orka-system` |
 | Controller API | v1-specific Service/endpoint | v2-specific Service/endpoint |
-| Leader election | Lease in `orka-v1-system` | Lease in `orka-v2-system` |
+| Leader election | Lease in `orka-compat-system` | Lease in `orka-system` |
 | State | v1-only SQLite/PVC/backups | v2-only SQLite/PVC/backups |
 | Data plane | Wrapper Service and ledger | Dedicated ACP runtime namespace |
 | Identity | v1 ServiceAccounts and Secrets | v2 ServiceAccounts and Secrets |
+
+Set `controller.acpRuntime.namespace=orka-runtimes` for the default installation.
 
 NetworkPolicies and namespace-scoped RBAC must prevent either controller from
 reading or writing the other watched namespace. A namespace-scoped controller
@@ -119,40 +144,24 @@ resources once.
 
 CRDs are cluster-scoped, so both installations use one schema bundle capable of
 storing the supported v1 and v2 shapes. Designate a platform or GitOps owner,
-apply the target CRDs before either controller upgrade, and install both Helm
-releases with `--skip-crds`:
+and have that owner apply the CRDs from the selected chart. From a source checkout
+matching the chart, the owner can run:
 
 ```bash
-scripts/apply-helm-crds.sh /absolute/path/to/orka-chart.tgz my-context
-
-helm install orka-v1 /absolute/path/to/orka-chart.tgz \
-  --namespace orka-v1-system \
-  --skip-crds \
-  --set controller.mode=harness-v1 \
-  --set controller.watchNamespace=orka-v1-system
-
-helm install orka-v2 /absolute/path/to/orka-chart.tgz \
-  --namespace orka-v2-system \
-  --skip-crds \
-  --set controller.mode=harness-v2 \
-  --set controller.watchNamespace=orka-v2-system \
-  --set controller.acpRuntime.namespace=orka-v2-runtimes
+export ORKA_CHART='<path-to-chart.tgz>'
+scripts/apply-helm-crds.sh "${ORKA_CHART}" "${ORKA_CONTEXT}"
 ```
 
-Add the required digest-pinned images, Secrets, proxy, Publisher, storage, and
-wrapper values for each selected mode. Do not let both releases install or
-upgrade the CRDs independently. Helm does not update `crds/` during
+Use `--skip-crds` for both Helm installations. Each still needs complete settings
+for its images, Secrets, proxy, Publisher, storage, and selected mode.
+The table above covers the settings that keep the installations separate.
+Do not let both installations manage CRDs independently. Helm does not update `crds/` during
 `helm upgrade`.
 
-An existing release is eligible for an in-place controller upgrade only when
-its namespace already carries the exact static mode claim and any live
-controller declares that mode and watch namespace. A deleted controller may be
-recreated only under that retained same-mode claim. A pre-static controller
-that implicitly enabled ACP is not a supported static-v2 upgrade source:
-accepted work may lack the immutable execution authority needed for safe
-recovery. Settle or retire it, preserve its existing state, and install
-`harness-v2` as a new release and namespace. The canonical Helm and
-direct-Kustomize paths enforce this before changing workloads.
+Keep each installation's mode and watched namespace unchanged, including when
+recreating a deleted controller. Changing modes requires a separate installation.
+Orka currently supports new installations only. See [Upgrading](upgrading.md)
+for support limits.
 
 ## Route new work explicitly
 

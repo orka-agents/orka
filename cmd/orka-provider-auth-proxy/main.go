@@ -22,7 +22,7 @@ import (
 
 func main() {
 	listenAddress := flag.String("listen-address", envDefault("ORKA_PROVIDER_AUTH_PROXY_LISTEN_ADDRESS", ":8080"), "HTTP listen address")
-	upstreamBaseURL := flag.String("upstream-base-url", os.Getenv("ORKA_PROVIDER_AUTH_PROXY_UPSTREAM_BASE_URL"), "Unauthenticated Vekil upstream base URL")
+	upstreamBaseURL := flag.String("upstream-base-url", os.Getenv("ORKA_PROVIDER_AUTH_PROXY_UPSTREAM_BASE_URL"), "Credential-injecting model gateway base URL")
 	tokenFile := flag.String("token-file", envDefault("ORKA_PROVIDER_AUTH_PROXY_TOKEN_FILE", "/var/run/secrets/orka/provider-auth/token"), "Mounted current bearer token file")
 	previousTokenFile := flag.String("previous-token-file", os.Getenv("ORKA_PROVIDER_AUTH_PROXY_PREVIOUS_TOKEN_FILE"), "Optional mounted previous/overlap bearer token file")
 	previousTokenValidUntilFile := flag.String("previous-token-valid-until-file", os.Getenv("ORKA_PROVIDER_AUTH_PROXY_PREVIOUS_TOKEN_VALID_UNTIL_FILE"), "Optional mounted RFC3339 expiry file for the previous/overlap token")

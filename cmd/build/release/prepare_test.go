@@ -41,6 +41,10 @@ func newPreparationFixture(t *testing.T) *preparationFixture {
 	for _, name := range versionedImages {
 		values.WriteString(name + ":\n  image:\n    repository: " + imageRepository(name) + "\n    tag: \"0.1.1\"\n")
 	}
+	values.WriteString("controllerRuntime:\n")
+	for _, provider := range versionedRuntimeProviders {
+		values.WriteString("  " + provider + "Image: " + imageRepository("acp-"+provider+"-runtime") + ":0.1.1\n")
+	}
 	values.WriteString("other:\n  image:\n    repository: ghcr.io/example/other\n    tag: \"2.7.0\"\n")
 	files := map[string]string{
 		"cmd/build/helmify/static/Chart.yaml":  "apiVersion: v2\nname: orka\nversion: 0.1.1\nappVersion: \"v0.1.1\"\n",
@@ -235,20 +239,40 @@ func TestReleaseToolingChangesStopBeforeCheckoutGenerationOrDispatch(t *testing.
 }
 
 func TestPreviousReleaseVersionDoesNotChangeToolingIdentity(t *testing.T) {
-	p := newPreparationFixture(t)
-	p.git(t, "checkout", "-b", testBranch)
-	for _, name := range []string{makefilePath, chartInputPath, valuesInputPath} {
-		path := filepath.Join(p.checkout, name)
-		writeTestFile(t, path, strings.ReplaceAll(readTestFile(t, path), "0.1.1", "0.2.0-rc.1"))
-		p.git(t, "add", name)
+	for _, versions := range []struct{ previous, next string }{
+		{"0.2.0", "v0.2.1"},
+		{"0.2.0-rc.1", "v0.2.0-rc.2"},
+		{"0.2.0-rc.2", "v0.2.0"},
+	} {
+		t.Run(versions.next, func(t *testing.T) {
+			p := newPreparationFixture(t)
+			p.git(t, "checkout", "-b", testBranch)
+			for _, name := range []string{makefilePath, chartInputPath, valuesInputPath} {
+				path := filepath.Join(p.checkout, name)
+				writeTestFile(t, path, strings.ReplaceAll(readTestFile(t, path), "0.1.1", versions.previous))
+				p.git(t, "add", name)
+			}
+			p.git(t, "commit", "-m", "previous release version")
+			base := p.git(t, "rev-parse", "HEAD")
+			p.git(t, "push", "origin", testBranch)
+			p.git(t, "checkout", "main")
+			must(t, p.w.prepare(versions.next))
+			if p.git(t, "rev-parse", "HEAD^") != base || p.ref(t, "refs/heads/main") != p.main {
+				t.Fatal("version-only change was not preserved")
+			}
+		})
 	}
-	p.git(t, "commit", "-m", "previous release version")
-	base := p.git(t, "rev-parse", "HEAD")
-	p.git(t, "push", "origin", testBranch)
-	p.git(t, "checkout", "main")
-	must(t, p.w.prepare(testVersion))
-	if p.git(t, "rev-parse", "HEAD^") != base || p.ref(t, "refs/heads/main") != p.main {
-		t.Fatal("version-only change was not preserved")
+}
+
+func TestRuntimeRepositoryChangesStopBeforeCheckoutOrGeneration(t *testing.T) {
+	p := newPreparationFixture(t)
+	values := readTestFile(t, filepath.Join(p.checkout, valuesInputPath))
+	for _, provider := range versionedRuntimeProviders {
+		t.Run(provider, func(t *testing.T) {
+			changed := strings.ReplaceAll(values,
+				imageRepository("acp-"+provider+"-runtime"), "registry.example/changed-runtime")
+			p.requirePreparationStopped(t, p.publishUntrustedFixture(t, valuesInputPath, changed))
+		})
 	}
 }
 

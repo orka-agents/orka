@@ -3,20 +3,13 @@
 {{- include "orka.validateControllerMode" . }}
 {{- include "orka.validateProviderProxyConfig" . }}
 {{- include "orka.validateSQLiteController" . }}
-{{- include "orka.validateAgentExecutionSnapshot" . }}
 {{- include "orka.validateWebhooks" . }}
 {{- include "orka.validatePublisherAuth" . }}
 {{- include "orka.validateSubstrateCredentials" . }}
 {{- $substrateCredentials := .Values.controller.substrate.apiCredentials | default dict -}}
-{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" (.Values.controller.image.digest | default "")) }}
-{{- fail "controller.image.digest must be a sha256 digest" }}
-{{- end }}
 {{- if $harnessV2 }}
-{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" (.Values.controller.image.digest | default "")) }}
-{{- fail "controller.image.digest must be a sha256 digest when controller.mode=harness-v2" }}
-{{- end }}
-{{- if or (not .Values.publisher.enabled) (not (regexMatch "^sha256:[0-9a-f]{64}$" (.Values.publisher.image.digest | default ""))) }}
-{{- fail "publisher must be enabled with publisher.image.digest set when controller.mode=harness-v2" }}
+{{- if not .Values.publisher.enabled }}
+{{- fail "publisher must be enabled when controller.mode=harness-v2" }}
 {{- end }}
 {{- if not .Values.store.persistence.enabled }}
 {{- fail "store.persistence.enabled must be true when controller.mode=harness-v2" }}
@@ -25,9 +18,6 @@
 {{- include "orka.validateACPRuntimeImage" (dict "name" "controller.acpRuntime.claudeImage" "ref" .Values.controller.acpRuntime.claudeImage) }}
 {{- include "orka.validateACPRuntimeImage" (dict "name" "controller.acpRuntime.copilotImage" "ref" .Values.controller.acpRuntime.copilotImage) }}
 {{- include "orka.validateACPRuntimeImage" (dict "name" "controller.acpRuntime.opencodeImage" "ref" .Values.controller.acpRuntime.opencodeImage) }}
-{{- if not .Values.providerProxy.enabled }}
-{{- fail "providerProxy.enabled must be true when controller.mode=harness-v2" }}
-{{- end }}
 {{- end }}
 {{- $gatewayCRDsReady := false -}}
 {{- if and $harnessV2 .Values.controller.gateway.enabled (not .Values.controller.gateway.crdsReadyOverride) -}}
@@ -97,13 +87,18 @@ spec:
             - --metrics-bind-address=:{{ .Values.controller.metricsPort }}
             - --health-probe-bind-address=:{{ .Values.controller.healthPort }}
             - --metrics-secure=false
-            - --watch-namespace={{ .Values.controller.watchNamespace }}
+            - --watch-namespace={{ include "orka.watchNamespace" . }}
             - --leader-elect={{ .Values.controller.leaderElect }}
             - --controller-mode={{ .Values.controller.mode }}
             - {{ printf "--execution-mode-controller-usernames=%s" (include "orka.controllerUsername" .) | quote }}
             - --webhook-cert-path=/var/run/orka/webhook/tls
             - {{ printf "--webhook-cert-name=%s" .Values.webhooks.tls.certKey | quote }}
             - {{ printf "--webhook-cert-key=%s" .Values.webhooks.tls.privateKeyKey | quote }}
+            {{- if include "orka.webhookTLSGenerated" . }}
+            - {{ printf "--webhook-cert-rotation-secret=%s" (include "orka.webhookTLSSecretName" .) | quote }}
+            - {{ printf "--webhook-cert-rotation-webhook=%s" (include "orka.controllerWebhookName" .) | quote }}
+            - {{ printf "--webhook-cert-rotation-dns-name=%s.%s.svc" (include "orka.controllerWebhookServiceName" .) .Release.Namespace | quote }}
+            {{- end }}
             - --task-provenance-admission-enabled=true
             - {{ printf "--task-provenance-admission-trusted-users=%s" (include "orka.controllerUsername" .) | quote }}
             - --workspace-class-use-admission-enabled={{ $harnessV2 }}
@@ -117,6 +112,10 @@ spec:
             - --harness-v1-dispatch-workers={{ .Values.harnessV1.dispatch.workers }}
             {{- end }}
             - --agent-execution-snapshot-key-file=/var/run/orka/agent-execution-snapshot/key
+            {{- if include "orka.agentExecutionSnapshotGenerated" . }}
+            - {{ printf "--agent-execution-snapshot-secret=%s" (include "orka.agentExecutionSnapshotSecretName" .) | quote }}
+            - {{ printf "--agent-execution-snapshot-secret-key=%s" (include "orka.agentExecutionSnapshotSecretKey" .) | quote }}
+            {{- end }}
             - --agent-execution-snapshot-retention={{ .Values.controller.agentExecutionSnapshot.retention }}
             - --agent-execution-snapshot-retention-interval={{ .Values.controller.agentExecutionSnapshot.retentionInterval }}
             {{- if $harnessV2 }}
@@ -596,12 +595,24 @@ spec:
         {{- end }}
         - name: agent-execution-snapshot-key
           secret:
-            secretName: {{ .Values.controller.agentExecutionSnapshot.existingSecret | quote }}
+            secretName: {{ include "orka.agentExecutionSnapshotSecretName" . | quote }}
             defaultMode: 0400
+            {{- if include "orka.agentExecutionSnapshotGenerated" . }}
+            # Empty until the controller mints the key on first start; the Pod
+            # must be able to start with the item absent.
+            optional: true
+            {{- end }}
             items:
-              - key: {{ .Values.controller.agentExecutionSnapshot.key | quote }}
+              - key: {{ include "orka.agentExecutionSnapshotSecretKey" . | quote }}
                 path: key
         - name: webhook-tls
+          {{- if include "orka.webhookTLSGenerated" . }}
+          # The controller writes the generated certificate into this Secret
+          # and the kubelet projects it here; the rotator waits for the files.
+          secret:
+            secretName: {{ include "orka.webhookTLSSecretName" . | quote }}
+            defaultMode: 0400
+          {{- else }}
           secret:
             secretName: {{ .Values.webhooks.tls.existingSecret | quote }}
             defaultMode: 0400
@@ -610,6 +621,7 @@ spec:
                 path: {{ .Values.webhooks.tls.certKey | quote }}
               - key: {{ .Values.webhooks.tls.privateKeyKey | quote }}
                 path: {{ .Values.webhooks.tls.privateKeyKey | quote }}
+          {{- end }}
         {{- if $harnessV1 }}
         - name: harness-v1-tls
           secret:

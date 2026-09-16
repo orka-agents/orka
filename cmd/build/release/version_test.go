@@ -15,6 +15,10 @@ func versionFixture(t *testing.T) (string, map[string]string) {
 		values += name + ":\n  image:\n    repository: " + imageRepository(name) +
 			"\n    # image comment\n    tag: \"0.1.1\"\n"
 	}
+	values += "controllerRuntime:\n"
+	for _, provider := range versionedRuntimeProviders {
+		values += "  " + provider + "Image: " + imageRepository("acp-"+provider+"-runtime") + ":0.1.1\n"
+	}
 	values += "other:\n  image:\n    repository: ghcr.io/example/other\n    tag: \"2.7.0\"\n"
 	files := map[string]string{
 		"Makefile":                             "VERSION := v0.1.1\n# preserved\nother:\n\t@echo 'unchanged'\n",
@@ -22,8 +26,8 @@ func versionFixture(t *testing.T) (string, map[string]string) {
 		"cmd/build/helmify/static/values.yaml": values,
 		"config/manager/manager.yaml": "args:\n  - --ai-worker-image=ghcr.io/orka-agents/orka/ai-worker:0.1.1\n" +
 			"  - --general-worker-image=ghcr.io/orka-agents/orka/general-worker:0.1.1\n",
-		"config/manager/kustomization.yaml": "images:\n  - name: ghcr.io/orka-agents/orka\n    newTag: 0.1.1\n" +
-			"  - name: controller\n    newTag: 0.1.1\n",
+		"config/manager/kustomization.yaml": "images:\n  - name: controller\n" +
+			"    newName: ghcr.io/orka-agents/orka\n    newTag: 0.1.1\n",
 	}
 	for name, content := range files {
 		writeTestFile(t, filepath.Join(root, name), content)
@@ -47,6 +51,19 @@ func TestUpdateVersionPreservesFormattingAndUpdatesEveryReleaseImage(t *testing.
 	}
 	// Repeating the same update is safe and preserves the complete file contents.
 	must(t, updateVersion(root, "v9.8.7-rc.3"))
+}
+
+func TestUpdateVersionAcceptsCurrentRepositoryInputs(t *testing.T) {
+	root := t.TempDir()
+	for _, path := range []string{
+		makefilePath, chartInputPath, valuesInputPath,
+		"config/manager/manager.yaml", "config/manager/kustomization.yaml",
+	} {
+		content, err := os.ReadFile(filepath.Join("..", "..", "..", path))
+		must(t, err)
+		writeTestFile(t, filepath.Join(root, path), string(content))
+	}
+	must(t, newWorkflow(root).execute([]string{"update-version", "v9.8.7-rc.3"}))
 }
 
 func TestUpdateVersionRejectsMissingOrDuplicateFieldsBeforeWriting(t *testing.T) {
