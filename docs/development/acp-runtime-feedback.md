@@ -126,7 +126,7 @@ A suitable instruction is:
 > Make network calls sequentially. If a native network operation fails, call
 > `runtime_feedback` with `{}`. Describe only what its evidence supports. Use an
 > alternative destination or method only when the task already authorizes it.
-> Produce the useful research result and state any remaining uncertainty.
+> Complete the Task and state any remaining uncertainty.
 
 The tool accepts exactly an empty JSON object. Agent-supplied Task IDs,
 container selectors, run IDs, timestamps, and URLs are rejected. The existing
@@ -162,12 +162,11 @@ Orka completes the exact registration when native dispatch exits. GKR's
 its own bounded retention governs later reads. A report never authorizes
 capture extension, policy relaxation, launch, or retry.
 
-For a live demonstration, first observe the agent's actual native website
-request under its existing policy. Then enforce the matching GKR destination
-restriction and run a fresh Task. Record the native failure, the agent's
-`runtime_feedback` call, its already-authorized fallback, and its final research
-answer. Controller-brokered `web_fetch`/`web_search` execute outside the worker
-container and cannot demonstrate worker-container enforcement.
+Validate the integration with an authorized native network request from a
+fresh Task. Check that `runtime_feedback` returns evidence for the exact
+worker container and that recovery uses only already-authorized destinations
+or methods. Controller-brokered `web_fetch`/`web_search` execute outside the
+worker container and cannot validate worker-container enforcement.
 
 ## Verification
 
@@ -179,6 +178,6 @@ Two mTLS backends verify exact node routing for registration, report, and
 completion; an instrumented transport verifies that unmapped nodes issue no
 requests. Configuration tests cover ambiguous modes, malformed/duplicate
 mappings, invalid origins, file and entry bounds, and startup-frozen routing.
-They use real broker/status HTTP and Kubernetes/store fixtures; they do not
-claim live GKR enforcement or successful model execution. A real terminal run
-supplies that separate integration evidence.
+They use real broker/status HTTP and Kubernetes/store fixtures. Live
+integration validation requires an actual native runtime request, matching
+GKR evidence, and recovery within the Task's existing authority.
