@@ -79,6 +79,27 @@ and imposes no additional whole-response timeout. Connection and TLS handshake
 attempts time out after five seconds. The installation retains its chat and
 tool deadlines.
 
+The router bounds request uploads with `--read-timeout` (default `30s`) but
+leaves response writes unrestricted, so this limit does not cut off long chats.
+On shutdown, `--shutdown-timeout` allows active requests to finish (default
+`30m`, matching the installation's default chat limit). The example Deployment
+sets `terminationGracePeriodSeconds: 1810`. If an installation permits longer
+chats, increase the router's shutdown timeout and keep the Pod grace period at
+least ten seconds longer. Keep the Deployment progress deadline above that
+window too (the example allows `2100` seconds). New connections stop being
+accepted during shutdown.
+
+Browser clients can make unauthenticated CORS preflight requests for the four
+compatibility routes. Actual API requests still require authentication. Set
+`ORKA_CORS_ALLOWED_ORIGINS` on the router to a comma-separated list of exact UI
+origins, such as `https://chat.example.com`; the default is `*`, as on the
+installation API. Cookie-based browser credentials are not enabled. The router
+controls this policy instead of forwarding an installation's CORS headers.
+
+Do not configure ingress or CDN caching for these API responses. The router
+sets `Cache-Control: private, no-store`, including when authentication uses
+`x-api-key`, and overrides less restrictive installation cache headers.
+
 Allow traffic from the router to each installation's API port. If the existing
 controller NetworkPolicy restricts ingress, apply this additional policy in
 each enabled namespace:

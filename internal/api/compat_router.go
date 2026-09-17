@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -31,9 +32,10 @@ const anthropicErrorEnvelopeType = "error"
 // the receiving installation reauthenticates the same token and authorizes the
 // route and each tool operation. It has no access to tenant resources or stores.
 type CompatRouter struct {
-	client    client.Client
-	routes    map[string]*url.URL
-	transport *http.Transport
+	client      client.Client
+	routes      map[string]*url.URL
+	transport   *http.Transport
+	corsOrigins []string
 }
 
 // NewCompatRouter freezes the operator's namespace-to-installation allowlist.
@@ -64,7 +66,11 @@ func NewCompatRouter(c client.Client, namespaces map[string]string) (*CompatRout
 	transport.DialContext = (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext
 	transport.TLSHandshakeTimeout = 5 * time.Second
 	transport.DisableCompression = true
-	return &CompatRouter{client: c, routes: routes, transport: transport}, nil
+	origins := os.Getenv("ORKA_CORS_ALLOWED_ORIGINS")
+	if origins == "" {
+		origins = "*"
+	}
+	return &CompatRouter{client: c, routes: routes, transport: transport, corsOrigins: strings.Split(origins, ",")}, nil
 }
 
 // Close releases idle connections when the router shuts down.
@@ -74,8 +80,14 @@ func (r *CompatRouter) Close() {
 
 func (r *CompatRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	path := routeLookupPath(req.URL.Path)
+	// Credential-selected responses must never enter a shared cache, including
+	// when clients use x-api-key rather than Authorization.
+	w.Header().Set("Cache-Control", "private, no-store")
 	if req.Method == http.MethodGet && (path == "/healthz" || path == "/readyz") {
 		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.handleCORS(w, req, path) {
 		return
 	}
 	if !compatRouterRoute(req.Method, path) {
@@ -150,6 +162,16 @@ func (r *CompatRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			p.Out.Trailer = nil
 		},
 		ModifyResponse: func(response *http.Response) error {
+			response.Header.Set("Cache-Control", "private, no-store")
+			response.Header.Del("Expires")
+			// This listener owns its CORS policy; an installation must not widen
+			// it through headers copied by the reverse proxy.
+			for name := range response.Header {
+				if strings.HasPrefix(strings.ToLower(name), "access-control-") {
+					response.Header.Del(name)
+				}
+			}
+
 			if response.StatusCode >= 300 && response.StatusCode < 400 {
 				return fmt.Errorf("installation redirects are not supported")
 			}

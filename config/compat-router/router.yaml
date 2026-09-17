@@ -49,6 +49,7 @@ metadata:
   namespace: orka-router-system
 spec:
   replicas: 1
+  progressDeadlineSeconds: 2100
   selector:
     matchLabels:
       app.kubernetes.io/component: compat-router
@@ -58,6 +59,8 @@ spec:
         app.kubernetes.io/name: orka
         app.kubernetes.io/component: compat-router
     spec:
+      # Allow the default 30-minute chat drain plus process shutdown overhead.
+      terminationGracePeriodSeconds: 1810
       serviceAccountName: orka-compat-router
       enableServiceLinks: false
       securityContext:
