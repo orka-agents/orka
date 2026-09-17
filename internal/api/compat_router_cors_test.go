@@ -72,6 +72,7 @@ func TestCompatRouterCORSRejectsUnsupportedPreflight(t *testing.T) {
 		{"missing method", "https://chat.example.test", "", "/anthropic/v1/models", "authorization", http.StatusNotFound},
 		{"impersonation", "https://chat.example.test", http.MethodGet, "/anthropic/v1/models", "Impersonate-User", http.StatusForbidden},
 		{"transaction token", "https://chat.example.test", http.MethodGet, "/anthropic/v1/models", TransactionTokenHeaderName, http.StatusForbidden},
+		{"unknown SDK header", "https://chat.example.test", http.MethodGet, "/anthropic/v1/models", "X-Stainless-Unknown", http.StatusForbidden},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodOptions, tc.path, nil)
@@ -189,4 +190,59 @@ func TestCompatRouterModelResponsesNeverEnterSharedCache(t *testing.T) {
 	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/anthropic/v1/models", nil))
 	require.Equal(t, http.StatusUnauthorized, response.Code)
 	require.Equal(t, "private, no-store", response.Header().Get("Cache-Control"))
+}
+
+func TestCompatRouterBrowserSDKHeaders(t *testing.T) {
+	t.Setenv("ORKA_CORS_ALLOWED_ORIGINS", "https://chat.example.test")
+	// These are the TypeScript SDK's browser/platform/retry headers, including
+	// the streaming helper marker, not a copy of the production allowlist.
+	sdkHeaders := []string{
+		"anthropic-dangerous-direct-browser-access",
+		"x-stainless-lang", "x-stainless-package-version", "x-stainless-os",
+		"x-stainless-arch", "x-stainless-runtime", "x-stainless-runtime-version",
+		"x-stainless-retry-count", "x-stainless-timeout", "x-stainless-helper-method",
+	}
+	var forwarded atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		forwarded.Add(1)
+		for _, header := range sdkHeaders {
+			if r.Header.Get(header) != "" {
+				t.Errorf("SDK-only header %s crossed the forwarding boundary", header)
+			}
+		}
+		_, _ = io.WriteString(w, "complete")
+	}))
+	t.Cleanup(upstream.Close)
+	token := t.Name()
+	router, err := NewCompatRouter(compatRouterTokenClient(t, map[string]string{token: "system:serviceaccount:team-a:client"}), map[string]string{"team-a": upstream.URL})
+	require.NoError(t, err)
+	t.Cleanup(router.Close)
+	for _, path := range []string{"/anthropic/v1/messages", "/openai/v1/chat/completions"} {
+		t.Run(path, func(t *testing.T) {
+			preflight := httptest.NewRequest(http.MethodOptions, path, nil)
+			preflight.Header.Set("Origin", "https://chat.example.test")
+			preflight.Header.Set("Access-Control-Request-Method", http.MethodPost)
+			requested := append([]string{"content-type", "authorization", "x-api-key", "anthropic-version"}, sdkHeaders...)
+			preflight.Header.Set("Access-Control-Request-Headers", strings.Join(requested, ", "))
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, preflight)
+			require.Equal(t, http.StatusNoContent, response.Code)
+			allowed := strings.ToLower(response.Header().Get("Access-Control-Allow-Headers"))
+			for _, header := range requested {
+				require.Contains(t, allowed, header)
+			}
+			req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{}`))
+			req.Header.Set("Origin", "https://chat.example.test")
+			req.Header.Set(XAPIKeyHeader, token)
+			for _, header := range sdkHeaders {
+				req.Header.Set(header, "fixture")
+			}
+			response = httptest.NewRecorder()
+			router.ServeHTTP(response, req)
+			require.Equal(t, http.StatusOK, response.Code)
+			require.Equal(t, "complete", response.Body.String())
+			require.Equal(t, "https://chat.example.test", response.Header().Get("Access-Control-Allow-Origin"))
+		})
+	}
+	require.Equal(t, int32(2), forwarded.Load(), "only authenticated messages, not preflights, may reach an installation")
 }

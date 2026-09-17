@@ -46,6 +46,7 @@ func (r *CompatRouter) handleCORS(w http.ResponseWriter, req *http.Request, path
 		return true
 	}
 	headers := append(allowedCORSHeaders(ContextTokenConfig{}), compatRouterRequestHeaders...)
+	headers = append(headers, compatRouterSDKHeaders...)
 	for requested := range strings.SplitSeq(req.Header.Get("Access-Control-Request-Headers"), ",") {
 		requested = strings.TrimSpace(requested)
 		if requested == "" {
@@ -67,4 +68,14 @@ func (r *CompatRouter) handleCORS(w http.ResponseWriter, req *http.Request, path
 	w.Header().Set("Access-Control-Allow-Headers", strings.Join(headers, ", "))
 	w.WriteHeader(http.StatusNoContent)
 	return true
+}
+
+// SDK metadata is allowed in browser preflight but is not forwarded to an
+// installation. Keep this separate from the protocol/credential forwarding list.
+var compatRouterSDKHeaders = []string{
+	"Anthropic-Dangerous-Direct-Browser-Access",
+	"X-Stainless-Lang", "X-Stainless-Package-Version",
+	"X-Stainless-OS", "X-Stainless-Arch",
+	"X-Stainless-Runtime", "X-Stainless-Runtime-Version",
+	"X-Stainless-Retry-Count", "X-Stainless-Timeout", "X-Stainless-Helper-Method",
 }

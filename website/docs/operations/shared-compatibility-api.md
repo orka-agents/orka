@@ -93,7 +93,9 @@ Browser clients can make unauthenticated CORS preflight requests for the four
 compatibility routes. Actual API requests still require authentication. Set
 `ORKA_CORS_ALLOWED_ORIGINS` on the router to a comma-separated list of exact UI
 origins, such as `https://chat.example.com`; the default is `*`, as on the
-installation API. Cookie-based browser credentials are not enabled. The router
+installation API. Known Anthropic/Stainless browser SDK metadata headers are allowed during
+preflight but are not forwarded to installations. Cookie-based browser
+credentials are not enabled. The router
 controls this policy instead of forwarding an installation's CORS headers.
 
 Do not configure ingress or CDN caching for these API responses. The router
