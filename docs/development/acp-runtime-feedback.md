@@ -12,7 +12,7 @@ Task attempt may read it.
 
 ## Enable the controller client
 
-Configure all four controller flags:
+For a single-node deployment, configure a fixed origin and the three mTLS flags:
 
 ```text
 --acp-runtime-feedback-url=https://gkr-feedback.example.internal:9444
@@ -20,6 +20,39 @@ Configure all four controller flags:
 --acp-runtime-feedback-cert-file=/var/run/secrets/gkr-feedback/tls.crt
 --acp-runtime-feedback-key-file=/var/run/secrets/gkr-feedback/tls.key
 ```
+
+For a multi-node deployment, replace `--acp-runtime-feedback-url` with:
+
+```text
+--acp-runtime-feedback-node-urls-file=/var/run/secrets/gkr-feedback/node-urls.json
+```
+
+The operator-owned file is a JSON object mapping exact Kubernetes node names
+to node-specific HTTPS origins:
+
+```json
+{
+  "node-a": "https://gkr-feedback-node-a.example.internal:9444",
+  "node-b": "https://gkr-feedback-node-b.example.internal:9444"
+}
+```
+
+Each origin must reach only the GKR agent on its named node and match that
+server's certificate. All mappings use the same configured CA and controller
+client certificate/key. The fixed URL and file flags are mutually exclusive;
+exactly one is required when feedback is enabled. The file is limited to
+64 KiB and 256 entries. Empty, duplicate, malformed, or invalid node/origin
+entries fail controller startup. Every origin uses the same HTTPS restrictions
+as the fixed URL: no user information, path beyond `/`, query, or fragment.
+
+The map is loaded once at controller startup. Registration, report, and
+completion select only the exact node from the live Pod binding. An unmapped
+node produces unavailable diagnostics before any transport; there is no
+fallback origin or load balancing. A Task scheduled onto a newly autoscaled,
+unmapped node can still run under its existing authority, with unavailable
+diagnostics. Add the node's dedicated endpoint and restart the controller to
+load a changed mapping. Merely updating the mounted file does not reroute a
+live capture.
 
 Mount the certificate material from an operator-owned Secret into the
 controller only. The GKR service must allow the controller certificate's exact
@@ -142,6 +175,10 @@ The focused tests cover Task-specific pool materialization and snapshot
 validation, existing broker HTTP credentials/capabilities and epoch interlock,
 read-only tool arguments, exact Pod/container/runtime/session fences,
 cancellation during diagnosis, GKR mTLS, response bounds, and capture windows.
+Two mTLS backends verify exact node routing for registration, report, and
+completion; an instrumented transport verifies that unmapped nodes issue no
+requests. Configuration tests cover ambiguous modes, malformed/duplicate
+mappings, invalid origins, file and entry bounds, and startup-frozen routing.
 They use real broker/status HTTP and Kubernetes/store fixtures; they do not
 claim live GKR enforcement or successful model execution. A real terminal run
 supplies that separate integration evidence.

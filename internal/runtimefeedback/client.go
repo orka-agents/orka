@@ -13,9 +13,7 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
-	"strings"
 	"time"
 )
 
@@ -108,22 +106,23 @@ type Service interface {
 }
 
 type Config struct {
-	URL      string
-	CAFile   string
-	CertFile string
-	KeyFile  string
+	URL          string
+	NodeURLsFile string
+	CAFile       string
+	CertFile     string
+	KeyFile      string
 }
 
 type Client struct {
-	endpoint string
-	http     *http.Client
+	endpoint      string
+	nodeEndpoints map[string]string
+	http          *http.Client
 }
 
 func NewClient(config Config) (*Client, error) {
-	endpoint, err := url.Parse(config.URL)
-	if err != nil || endpoint.Scheme != "https" || endpoint.Host == "" || endpoint.User != nil ||
-		endpoint.RawQuery != "" || endpoint.ForceQuery || endpoint.RawPath != "" || endpoint.Fragment != "" || (endpoint.Path != "" && endpoint.Path != "/") {
-		return nil, errors.New("runtime feedback requires an HTTPS service origin without user information, path, query, or fragment")
+	endpoint, nodeEndpoints, err := config.endpoints()
+	if err != nil {
+		return nil, err
 	}
 	if config.CAFile == "" || config.CertFile == "" || config.KeyFile == "" {
 		return nil, errors.New("runtime feedback requires CA, client certificate, and client key files")
@@ -147,7 +146,7 @@ func NewClient(config Config) (*Client, error) {
 		TLSHandshakeTimeout: 5 * time.Second, ResponseHeaderTimeout: 10 * time.Second,
 		MaxResponseHeaderBytes: 32 << 10, IdleConnTimeout: 30 * time.Second,
 	}
-	return &Client{endpoint: strings.TrimRight(endpoint.String(), "/"), http: &http.Client{
+	return &Client{endpoint: endpoint, nodeEndpoints: nodeEndpoints, http: &http.Client{
 		Transport: transport, Timeout: 15 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}}, nil
@@ -177,11 +176,19 @@ func (c *Client) Complete(ctx context.Context, query Query, reason string) error
 }
 
 func (c *Client) call(ctx context.Context, method string, input any, query Query) (Report, error) {
+	endpoint := c.endpoint
+	if c.nodeEndpoints != nil {
+		var ok bool
+		endpoint, ok = c.nodeEndpoints[query.Workload.Node]
+		if !ok {
+			return Report{}, errors.New("runtime feedback is unavailable for the execution node")
+		}
+	}
 	body, err := json.Marshal(input)
 	if err != nil {
 		return Report{}, errors.New("encode runtime feedback request")
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint+apiPath+method, bytes.NewReader(body))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint+apiPath+method, bytes.NewReader(body))
 	if err != nil {
 		return Report{}, errors.New("construct runtime feedback request")
 	}

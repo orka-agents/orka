@@ -561,6 +561,7 @@ func main() {
 	flag.StringVar(&acpOpencodeRuntimeImage, "acp-opencode-runtime-image", os.Getenv("ORKA_ACP_OPENCODE_RUNTIME_IMAGE"),
 		"OpenCode ACP runtime image with a tag or SHA256 digest. Tags resolve to digests at startup.")
 	flag.StringVar(&runtimeFeedbackConfig.URL, "acp-runtime-feedback-url", "", "Optional trusted GKR HTTPS diagnostic service origin; enables explicitly allowed runtime_feedback for isolated native Codex and OpenCode Tasks.")
+	flag.StringVar(&runtimeFeedbackConfig.NodeURLsFile, "acp-runtime-feedback-node-urls-file", "", "Optional JSON map of exact Kubernetes node names to GKR HTTPS origins; mutually exclusive with --acp-runtime-feedback-url.")
 	flag.StringVar(&runtimeFeedbackConfig.CAFile, "acp-runtime-feedback-ca-file", "", "CA file for the GKR diagnostic service.")
 	flag.StringVar(&runtimeFeedbackConfig.CertFile, "acp-runtime-feedback-cert-file", "", "Controller client certificate file for GKR diagnostic mTLS.")
 	flag.StringVar(&runtimeFeedbackConfig.KeyFile, "acp-runtime-feedback-key-file", "", "Controller client private-key file for GKR diagnostic mTLS.")
@@ -1297,7 +1298,7 @@ func main() {
 		}
 	}
 	var runtimeFeedbackService runtimefeedback.Service
-	if runtimeFeedbackConfig.URL != "" || runtimeFeedbackConfig.CAFile != "" || runtimeFeedbackConfig.CertFile != "" || runtimeFeedbackConfig.KeyFile != "" {
+	if runtimeFeedbackConfig.URL != "" || runtimeFeedbackConfig.NodeURLsFile != "" || runtimeFeedbackConfig.CAFile != "" || runtimeFeedbackConfig.CertFile != "" || runtimeFeedbackConfig.KeyFile != "" {
 		if !acpRuntimeEnabled {
 			setupLog.Error(fmt.Errorf("ACP runtime must be enabled"), "runtime feedback configuration is invalid")
 			os.Exit(1)

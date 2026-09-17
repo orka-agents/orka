@@ -182,8 +182,14 @@ func testClientCertificate(t *testing.T) (Config, *x509.CertPool) {
 }
 
 func TestClientRequiresConfiguredHTTPSOrigin(t *testing.T) {
+	config, _ := testClientCertificate(t)
+	config.URL = "https://gkr.invalid"
+	if _, err := NewClient(config); err != nil {
+		t.Fatalf("valid fixed origin rejected: %v", err)
+	}
 	for _, endpoint := range []string{"http://gkr.invalid", "https://gkr.invalid/report", "https://user:pass@gkr.invalid", "https://gkr.invalid?key=value", "https://gkr.invalid#fragment"} {
-		if _, err := NewClient(Config{URL: endpoint}); err == nil {
+		config.URL = endpoint
+		if _, err := NewClient(config); err == nil {
 			t.Fatalf("unsafe endpoint accepted: %q", endpoint)
 		}
 	}
