@@ -245,12 +245,6 @@ func (h *OpenAICompatHandler) produceResponsesChunks(ctx context.Context, provid
 					send(llm.StreamChunk{Content: stripGoalStateSentinel(content)})
 				}
 			},
-			OnFinalContent: func(content string) {
-				if !structured {
-					content = stripGoalStateSentinel(content)
-				}
-				send(llm.StreamChunk{Content: content})
-			},
 			OnToolResult: func(call llm.ToolCall, result string) {
 				if !structured {
 					send(llm.StreamChunk{Content: formatToolProgress(call, result)})
@@ -265,7 +259,15 @@ func (h *OpenAICompatHandler) produceResponsesChunks(ctx context.Context, provid
 		if completion == nil {
 			return
 		}
-		send(llm.StreamChunk{Done: true, StopReason: completion.StopReason, InputTokens: completion.InputTokens, OutputTokens: completion.OutputTokens})
+		if !structured {
+			completion = stripResponsesGoalStateSentinel(completion)
+		}
+		// Close any coordinator progress before emitting the final messages
+		// with the same boundaries and statuses as the non-streaming result.
+		if !send(llm.StreamChunk{OutputItemDone: true}) {
+			return
+		}
+		sendResponsesCompletion(completion, send)
 		return
 	}
 	upstream, err := provider.Stream(ctx, req)
@@ -318,10 +320,14 @@ func produceResponsesFallback(ctx context.Context, provider llm.Provider, req *l
 		send(llm.StreamChunk{Error: errCompletionRefused})
 		return
 	}
-	// The complete fallback result is available before any output is sent.
-	// Reject an unfinished/invalid outcome before exposing executable calls.
-	var outcome ResponsesResponse
-	if err := outcome.setOutcome(completion); err != nil {
+	sendResponsesCompletion(completion, send)
+}
+
+func sendResponsesCompletion(completion *llm.CompletionResponse, send func(llm.StreamChunk) bool) {
+	// Apply the non-streaming contract to this final result. Earlier streamed
+	// coordinator progress must not turn an empty final answer into success.
+	var final ResponsesResponse
+	if err := final.setCompletion(completion); err != nil {
 		send(llm.StreamChunk{Error: responsesCompletionError(err)})
 		return
 	}

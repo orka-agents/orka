@@ -147,6 +147,14 @@ func TestResponsesHTTPRejectsUnsupportedStateAndMalformedInput(t *testing.T) {
 		`[{"type":"function_call_output","call_id":"missing","output":"result"}]`,
 		`[{"type":"function_call","call_id":"c","name":"tool","arguments":"{}"}]`,
 		`[{"type":"function_call","call_id":"c","name":"tool","arguments":"bad"},{"type":"function_call_output","call_id":"c","output":"ok"}]`,
+		`[{"type":"function_call","status":"incomplete","call_id":"c","name":"tool","arguments":"{}"},{"type":"function_call_output","call_id":"c","output":"ok"}]`,
+		`[{"type":"function_call","status":"in_progress","call_id":"c","name":"tool","arguments":"{}"},{"type":"function_call_output","call_id":"c","output":"ok"}]`,
+		`[{"type":"function_call","call_id":"c","name":"tool","arguments":"{}"},{"type":"function_call_output","status":"incomplete","call_id":"c","output":"ok"}]`,
+		`[{"role":"assistant","status":"in_progress","content":"pending text"}]`,
+		`[{"role":"assistant","status":"unknown","content":"pending text"}]`,
+		`[{"role":"user","status":"incomplete","content":"pending text"}]`,
+		`[{"role":"system","status":"incomplete","content":"pending text"}]`,
+		`[{"role":"developer","status":"incomplete","content":"pending text"}]`,
 	} {
 		cases = append(cases, `{"model":"fixture/test-model","store":false,"input":`+input+`}`)
 	}

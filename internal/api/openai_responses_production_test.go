@@ -366,13 +366,13 @@ func TestResponsesProductionFragmentedMultipleToolContinuation(t *testing.T) {
 			upstreamResponse(w, "continued both calls")
 			return
 		}
-		call := func(id, name, args string) map[string]any {
-			return map[string]any{"id": "item-" + id, "type": "function_call", "call_id": "call-" + id, "name": name, "arguments": args, "status": "completed"}
+		call := func(id, name, args, status string) map[string]any {
+			return map[string]any{"id": "item-" + id, "type": "function_call", "call_id": "call-" + id, "name": name, "arguments": args, "status": status}
 		}
-		first, second := call("first", "client_first", `{"text":"你好"}`), call("second", "client_second", `{"n":2}`)
+		first, second := call("first", "client_first", `{"text":"你好"}`, "completed"), call("second", "client_second", `{"n":2}`, "completed")
 		events := []map[string]any{
-			{"type": "response.output_item.added", "output_index": 0, "item": call("first", "client_first", "")},
-			{"type": "response.output_item.added", "output_index": 1, "item": call("second", "client_second", "")},
+			{"type": "response.output_item.added", "output_index": 0, "item": call("first", "client_first", "", "in_progress")},
+			{"type": "response.output_item.added", "output_index": 1, "item": call("second", "client_second", "", "in_progress")},
 			{"type": "response.function_call_arguments.delta", "item_id": "item-first", "output_index": 0, "delta": "{\"text\":\"你"},
 			{"type": "response.function_call_arguments.delta", "item_id": "item-second", "output_index": 1, "delta": "{\"n\":"},
 			{"type": "response.function_call_arguments.delta", "item_id": "item-first", "output_index": 0, "delta": "好\"}"},

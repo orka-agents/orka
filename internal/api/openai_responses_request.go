@@ -187,6 +187,13 @@ func responsesInputText(content json.RawMessage, output bool) (string, error) {
 	return result.String(), nil
 }
 
+func validResponsesInputStatus(item responsesInputItem) bool {
+	if item.Status == "" || item.Status == completionStatusCompleted {
+		return true
+	}
+	return item.Status == responsesStatusIncomplete && item.Role == responsesRoleAssistant && (item.Type == "" || item.Type == responsesMessage)
+}
+
 func convertResponsesInput(input json.RawMessage) ([]llm.Message, error) {
 	var text string
 	if err := json.Unmarshal(input, &text); err == nil && string(input) != responsesJSONNull {
@@ -200,8 +207,8 @@ func convertResponsesInput(input json.RawMessage) ([]llm.Message, error) {
 	calls := map[string]string{}
 	pending := map[string]bool{}
 	for _, item := range items {
-		if item.Status != "" && item.Status != completionStatusCompleted {
-			return nil, fmt.Errorf("only completed history items are supported")
+		if !validResponsesInputStatus(item) {
+			return nil, fmt.Errorf("history items must be completed or incomplete assistant messages")
 		}
 		switch item.Type {
 		case "", responsesMessage:

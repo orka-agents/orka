@@ -97,8 +97,12 @@ func newResponsesMessage() responsesOutputItem {
 	return responsesOutputItem{ID: "msg_" + generateChatID(), Type: responsesMessage, Status: responsesStatusInProgress, Role: responsesRoleAssistant, Content: []responsesOutputText{{Type: "output_text", Annotations: []any{}, Logprobs: []any{}}}}
 }
 
+func validResponsesFunction(call llm.ToolCall) bool {
+	return call.ID != "" && call.Name != "" && validJSONObject(call.Arguments)
+}
+
 func newResponsesFunction(call llm.ToolCall) (responsesOutputItem, error) {
-	if call.ID == "" || call.Name == "" || !validJSONObject(call.Arguments) {
+	if !validResponsesFunction(call) {
 		return responsesOutputItem{}, fmt.Errorf("provider returned an invalid function call")
 	}
 	args := string(call.Arguments)
@@ -160,6 +164,9 @@ func (h *OpenAICompatHandler) HandleResponses(c fiber.Ctx) error {
 		}
 	} else {
 		completion, err = provider.Complete(ctx, comp)
+		if err != nil && isStreamingRequiredErr(err) {
+			completion, err = completeViaStream(ctx, provider, comp, toolLoopOptions{allowEmptyTokenBudget: true})
+		}
 	}
 	if err != nil || ctx.Err() != nil {
 		return responsesProviderError(c, err)

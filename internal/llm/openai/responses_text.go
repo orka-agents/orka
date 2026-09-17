@@ -52,7 +52,7 @@ func isResponseTextEvent(evt responses.ResponseStreamEventUnion) bool {
 	switch evt.Type {
 	case eventTypeResponseOutputTextDelta, "response.output_text.done":
 		return true
-	case "response.content_part.added", eventTypeResponseContentPartDone:
+	case eventTypeResponseContentPartAdded, eventTypeResponseContentPartDone:
 		return evt.Part.Type == responseContentTypeOutputText
 	}
 	return false
@@ -79,6 +79,10 @@ func (o *responseOutputOrder) textEvent(evt responses.ResponseStreamEventUnion, 
 		item.parts[partIndex] = part
 	}
 	switch evt.Type {
+	case eventTypeResponseContentPartAdded:
+		if !part.prefix(evt.Part.Text) {
+			return failResponsesStream(send, errors.New(responseTextContradiction))
+		}
 	case eventTypeResponseOutputTextDelta:
 		if evt.Delta != "" && (part.done || item.closed) {
 			return failResponsesStream(send, errors.New(responseTextContradiction))
@@ -94,6 +98,19 @@ func (o *responseOutputOrder) textEvent(evt responses.ResponseStreamEventUnion, 
 		}
 	}
 	return item.drain(index, send)
+}
+
+// Added snapshots may repeat an earlier prefix or extend the current text,
+// but they do not complete the part or change text that already completed.
+func (p *responseTextPart) prefix(text string) bool {
+	if strings.HasPrefix(p.text, text) {
+		return true
+	}
+	if p.done || !strings.HasPrefix(text, p.text) {
+		return false
+	}
+	p.text = text
+	return true
 }
 
 func (p *responseTextPart) snapshot(text string) bool {
@@ -123,15 +140,18 @@ func (item *responseTextItem) drain(index *int64, send streamSender) bool {
 	}
 }
 
-func (o *responseOutputOrder) completeText(snapshot responses.ResponseOutputItemUnion, index *int64, send streamSender) bool {
+func (o *responseOutputOrder) messageSnapshot(snapshot responses.ResponseOutputItemUnion, index *int64, done bool, send streamSender) bool {
 	item := o.textItem(index)
 	if index == nil && !o.unindexedText {
 		return failResponsesStream(send, errors.New(responseTextContradiction))
 	}
-	// Reject removed/repartitioned parts before emitting recovered text.
-	for i := range item.parts {
-		if i >= int64(len(snapshot.Content)) {
-			return failResponsesStream(send, errors.New(responseTextContradiction))
+	// Final snapshots cannot remove parts. Added snapshots may still show
+	// an earlier prefix of the message, including fewer content parts.
+	if done {
+		for i := range item.parts {
+			if i >= int64(len(snapshot.Content)) {
+				return failResponsesStream(send, errors.New(responseTextContradiction))
+			}
 		}
 	}
 	if item.implicit && len(snapshot.Content) > 1 {
@@ -149,11 +169,11 @@ func (o *responseOutputOrder) completeText(snapshot responses.ResponseOutputItem
 			part = &responseTextPart{}
 			item.parts[int64(i)] = part
 		}
-		if !part.snapshot(content.Text) {
+		if (done && !part.snapshot(content.Text)) || (!done && !part.prefix(content.Text)) {
 			return failResponsesStream(send, errors.New(responseTextContradiction))
 		}
 	}
-	item.closed = true
+	item.closed = item.closed || done
 	return item.drain(index, send)
 }
 

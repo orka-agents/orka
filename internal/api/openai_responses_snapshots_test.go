@@ -34,6 +34,68 @@ func snapshotTextEvent(kind, text string, part int, indexed bool) map[string]any
 	return event
 }
 
+func TestResponsesProductionInitialTextSnapshots(t *testing.T) {
+	for _, source := range []string{"part", "item"} {
+		for _, indexed := range []bool{false, true} {
+			for _, mode := range []string{"prefix", "repeat-prefix", "snapshot-extension", "done", "terminal", "late-prefix", "conflict", "late-extension"} {
+				t.Run(fmt.Sprintf("%s/indexed=%t/%s", source, indexed, mode), func(t *testing.T) {
+					const want = "Hello world"
+					server, token := setupProductionResponses(t, func(w http.ResponseWriter, _ *http.Request) {
+						response, _ := orderedResponsesWire([]string{want}, "", "")
+						added := func(text string) map[string]any {
+							part := snapshotTextEvent("response.content_part.added", text, 0, indexed)
+							if source == "part" {
+								return part
+							}
+							event := map[string]any{"type": "response.output_item.added", "item": map[string]any{"id": "ordered-item-0", "type": "message", "role": "assistant", "status": "in_progress", "content": []any{part["part"]}}}
+							if indexed {
+								event["output_index"] = 0
+							}
+							return event
+						}
+						event := func(kind, text string) map[string]any { return snapshotTextEvent(kind, text, 0, indexed) }
+						events := []map[string]any{added("Hello")}
+						switch mode {
+						case "prefix":
+							events = append(events, event("response.output_text.delta", " world"))
+						case "repeat-prefix":
+							events = append(events, event("response.output_text.delta", " wo"), added("He"), event("response.output_text.delta", "rld"))
+						case "snapshot-extension":
+							events = []map[string]any{added("He"), added("Hello"), event("response.output_text.delta", " world")}
+						case "done":
+							events = append(events, event("response.content_part.done", want))
+						case "late-prefix":
+							events = []map[string]any{event("response.content_part.done", want), added("He")}
+						case "conflict":
+							events = append(events, added("Wrong"))
+						case "late-extension":
+							events = []map[string]any{event("response.content_part.done", "Hello"), added(want)}
+						}
+						upstreamSSE(w, append(events, map[string]any{"type": "response.completed", "response": response}))
+					})
+					status, _, body := productionResponsesRequest(t, listenResponsesApp(t, server.app), token, `{"model":"fixture/test-model","store":false,"stream":true,"input":"hello"}`, true)
+					if mode == "conflict" || mode == "late-extension" {
+						requireResponsesIntegrityFailure(t, status, body, true)
+						return
+					}
+					require.Equal(t, http.StatusOK, status)
+					events := parseResponsesSSE(t, body)
+					terminal := events[len(events)-1]
+					require.Equal(t, "response.completed", terminal["type"])
+					require.Equal(t, []string{want}, responsesItemOrder(t, terminal["response"].(map[string]any)["output"].([]any)))
+					var emitted strings.Builder
+					for _, event := range events {
+						if event["type"] == "response.output_text.delta" {
+							emitted.WriteString(event["delta"].(string))
+						}
+					}
+					require.Equal(t, want, emitted.String(), "initial snapshots and deltas must form one continuous text")
+				})
+			}
+		}
+	}
+}
+
 func TestResponsesProductionPartSnapshots(t *testing.T) {
 	for _, indexed := range []bool{false, true} {
 		for _, kind := range []string{"response.output_text.done", "response.content_part.done"} {
@@ -305,6 +367,11 @@ func TestResponsesProductionFunctionItemStatus(t *testing.T) {
 				code, _, body := productionResponsesRequest(t, listenResponsesApp(t, server.app), token, `{"model":"fixture/test-model","store":false,"stream":true,"input":"hello"}`, true)
 				if status == "incomplete" || status == "in_progress" {
 					requireResponsesIntegrityFailure(t, code, body, true)
+					for _, event := range parseResponsesSSE(t, body) {
+						if event["type"] == "response.output_item.done" {
+							require.NotEqual(t, "function_call", event["item"].(map[string]any)["type"], "unfinished calls must not become executable")
+						}
+					}
 					return
 				}
 				require.Equal(t, http.StatusOK, code)

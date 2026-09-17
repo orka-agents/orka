@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/openai/openai-go/v3/packages/respjson"
 	"github.com/openai/openai-go/v3/responses"
 	"github.com/orka-agents/orka/internal/llm"
 )
@@ -56,10 +57,13 @@ func validateResponsesOutput(output []responses.ResponseOutputItemUnion) error {
 		if err := validateResponsesItemType(item); err != nil {
 			return err
 		}
-		if err := order.bind(item.ID, int64(i)); err != nil {
+		if err := order.bind(item.ID, int64(i), item.Type, item.Status); err != nil {
 			return err
 		}
 		if item.Type == eventTypeFunctionCall {
+			if err := validateResponseFunctionMetadata(item); err != nil {
+				return err
+			}
 			if item.Status != "" && item.Status != stopReasonCompleted {
 				return fmt.Errorf("provider returned an unfinished Responses function call")
 			}
@@ -72,6 +76,42 @@ func validateResponsesOutput(output []responses.ResponseOutputItemUnion) error {
 		}
 	}
 	return nil
+}
+
+// Compatible snapshots may omit required identities for recovery.
+// Explicitly cleared or mistyped values cannot restore an earlier identity.
+func invalidResponseMetadataString(value string, field respjson.Field) bool {
+	return field.Raw() != "" && (!field.Valid() || value == "")
+}
+
+func validateResponseFunctionMetadata(item responses.ResponseOutputItemUnion) error {
+	if invalidResponseMetadataString(item.CallID, item.JSON.CallID) || invalidResponseMetadataString(item.Name, item.JSON.Name) {
+		return fmt.Errorf("response function call has invalid metadata")
+	}
+	if item.JSON.Arguments.Raw() != "" && !item.JSON.Arguments.Valid() {
+		return fmt.Errorf("response function call has invalid arguments")
+	}
+	return nil
+}
+
+func validateResponseFunctionEventMetadata(evt responses.ResponseStreamEventUnion) error {
+	if evt.JSON.OutputIndex.Raw() != "" && (!evt.JSON.OutputIndex.Valid() || evt.OutputIndex < 0) {
+		return fmt.Errorf("response function call has an invalid output index")
+	}
+	if evt.Type == eventTypeResponseFunctionCallArgumentsDelta || evt.Type == eventTypeResponseFunctionCallArgumentsDone {
+		if invalidResponseMetadataString(evt.ItemID, evt.JSON.ItemID) || invalidResponseMetadataString(evt.Name, evt.JSON.Name) {
+			return fmt.Errorf("response function call has invalid metadata")
+		}
+		arguments := evt.JSON.Arguments
+		if evt.Type == eventTypeResponseFunctionCallArgumentsDelta {
+			arguments = evt.JSON.Delta
+		}
+		if arguments.Raw() != "" && !arguments.Valid() {
+			return fmt.Errorf("response function call has invalid arguments")
+		}
+		return nil
+	}
+	return validateResponseFunctionMetadata(evt.Item)
 }
 
 func (t *responseFuncCallTracker) getChecked(itemID string, index int64, hasIndex bool, callID string) (*responseFuncCallState, error) {
@@ -125,17 +165,17 @@ func validateResponseFunctionMerge(a, b *responseFuncCallState) error {
 	return nil
 }
 
-func (t *responseFuncCallTracker) validateSnapshot(fc *responseFuncCallState, name, arguments string) error {
+func (t *responseFuncCallTracker) validateSnapshot(fc *responseFuncCallState, name, arguments string, hasArguments bool) error {
 	if !t.ordered || fc == nil {
 		return nil
 	}
 	if name != "" && fc.name != "" && name != fc.name {
 		return fmt.Errorf("response function call changed name")
 	}
-	if arguments != "" && !strings.HasPrefix(arguments, fc.args.String()) {
+	if hasArguments && !strings.HasPrefix(arguments, fc.args.String()) {
 		return errors.New(responseFunctionArgumentsChanged)
 	}
-	if fc.argumentsDone && arguments != "" && arguments != fc.arguments {
+	if fc.argumentsDone && hasArguments && arguments != fc.arguments {
 		return errors.New(responseFunctionArgumentsChanged)
 	}
 	return nil
@@ -146,34 +186,62 @@ func failResponsesStream(send streamSender, err error) bool {
 	return false
 }
 
-func (t *responseFuncCallTracker) validateEvent(evt responses.ResponseStreamEventUnion) error {
+func (t *responseFuncCallTracker) prepareEvent(evt *responses.ResponseStreamEventUnion) error {
 	switch evt.Type {
 	case eventTypeResponseOutputItemAdded, eventTypeResponseOutputItemDone:
 		if err := validateResponsesItemType(evt.Item); err != nil {
 			return err
 		}
-		// Function output is exposed as completed once its arguments arrive.
-		// A later item-done status cannot retroactively make it unfinished,
-		// even if the terminal snapshot omits that status.
+		if evt.Item.Type == eventTypeFunctionCall {
+			if err := validateResponseFunctionEventMetadata(*evt); err != nil {
+				return err
+			}
+		}
+		// Reject an unfinished item before exposing an executable call, even
+		// if the terminal snapshot later omits that status.
 		if evt.Type == eventTypeResponseOutputItemDone && evt.Item.Type == eventTypeFunctionCall &&
 			evt.Item.Status != "" && evt.Item.Status != stopReasonCompleted {
 			return fmt.Errorf("provider returned an unfinished Responses function call")
 		}
-	case "response.content_part.added", eventTypeResponseContentPartDone:
+	case eventTypeResponseFunctionCallArgumentsDelta, eventTypeResponseFunctionCallArgumentsDone:
+		return validateResponseFunctionEventMetadata(*evt)
+	case eventTypeResponseContentPartAdded, eventTypeResponseContentPartDone:
 		if evt.Part.Type != responseContentTypeOutputText && evt.Part.Type != stopReasonRefusal {
 			return fmt.Errorf("provider message content is outside the Responses subset")
 		}
 	case eventTypeResponseCompleted, eventTypeResponseIncomplete:
-		if err := validateResponsesOutput(evt.Response.Output); err != nil {
-			return err
+		if (evt.Type == eventTypeResponseCompleted && evt.Response.Status != stopReasonCompleted) ||
+			(evt.Type == eventTypeResponseIncomplete && evt.Response.Status != stopReasonIncomplete) {
+			return fmt.Errorf("response terminal status does not match its event type")
 		}
+		// A terminal may omit fields already supplied by the same call.
+		// Recover only absent fields, then validate the complete output.
 		for i, item := range evt.Response.Output {
-			if item.Type == eventTypeFunctionCall {
-				if _, err := t.getChecked(item.ID, int64(i), true, item.CallID); err != nil {
-					return err
-				}
+			if item.Type != eventTypeFunctionCall {
+				continue
 			}
+			if err := validateResponseFunctionMetadata(item); err != nil {
+				return err
+			}
+			fc, err := t.getChecked(item.ID, int64(i), true, item.CallID)
+			if err != nil {
+				return err
+			}
+			if err := t.mergeItem(fc, item, true); err != nil {
+				return err
+			}
+			if item.Name == "" {
+				item.Name = fc.name
+			}
+			if item.CallID == "" {
+				item.CallID = fc.callID
+			}
+			if responseOutputArguments(item.Arguments) == "" && item.JSON.Arguments.Raw() == "" {
+				item.Arguments.OfString = fc.arguments
+			}
+			evt.Response.Output[i] = item
 		}
+		return validateResponsesOutput(evt.Response.Output)
 	}
 	return nil
 }

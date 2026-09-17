@@ -27,54 +27,58 @@ func TestResponsesProductionSentinelMessageBoundaries(t *testing.T) {
 		{[]string{"界" + goalStateSentinel[:10], goalStateSentinel[10:] + "\n雪"}, []string{"界", "\n雪"}},
 	}
 	for index, layout := range layouts {
-		for _, aggregate := range []bool{false, true} {
-			for _, disabled := range []bool{false, true} {
-				if aggregate && disabled {
-					continue
-				}
-				t.Run(fmt.Sprintf("%d/aggregate=%t/disabled=%t", index, aggregate, disabled), func(t *testing.T) {
-					server, token := setupProductionResponses(t, func(w http.ResponseWriter, r *http.Request) {
-						var req map[string]any
-						require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
-						require.Equal(t, false, req["store"])
-						if aggregate && req["stream"] != true {
-							w.Header().Set("Content-Type", "application/json")
-							w.WriteHeader(http.StatusBadRequest)
-							_, _ = fmt.Fprint(w, `{"error":{"message":"streaming is required"}}`)
-							return
-						}
-						response, _ := orderedResponsesWire(layout.input, "", "")
-						response["status"] = "incomplete"
-						response["incomplete_details"] = map[string]any{"reason": "max_output_tokens"}
-						items := response["output"].([]any)
-						items[len(items)-1].(map[string]any)["status"] = "incomplete"
-						if req["stream"] == true {
-							upstreamSSE(w, []map[string]any{{"type": "response.incomplete", "response": response}})
-						} else {
-							w.Header().Set("Content-Type", "application/json")
-							require.NoError(t, json.NewEncoder(w).Encode(response))
-						}
-					})
-					code, _, body := productionResponsesRequest(t, listenResponsesApp(t, server.app), token, `{"model":"fixture/test-model","store":false,"input":"hello"}`, disabled)
-					require.Equal(t, http.StatusOK, code)
-					var response map[string]any
-					require.NoError(t, json.Unmarshal(body, &response))
-					require.Equal(t, "incomplete", response["status"])
-					items := response["output"].([]any)
-					want := layout.want
-					if disabled {
-						want = layout.input
+		for _, mode := range []struct{ aggregate, disabled, stream bool }{
+			{}, {stream: true}, {aggregate: true}, {aggregate: true, stream: true}, {disabled: true}, {disabled: true, stream: true},
+		} {
+			aggregate, disabled, stream := mode.aggregate, mode.disabled, mode.stream
+			t.Run(fmt.Sprintf("%d/aggregate=%t/disabled=%t/stream=%t", index, aggregate, disabled, stream), func(t *testing.T) {
+				server, token := setupProductionResponses(t, func(w http.ResponseWriter, r *http.Request) {
+					var req map[string]any
+					require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+					require.Equal(t, false, req["store"])
+					if aggregate && req["stream"] != true {
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusBadRequest)
+						_, _ = fmt.Fprint(w, `{"error":{"message":"streaming is required"}}`)
+						return
 					}
-					require.Equal(t, want, responsesItemOrder(t, items))
-					for i, item := range items {
-						wantStatus := "completed"
-						if i == len(items)-1 {
-							wantStatus = "incomplete"
-						}
-						require.Equal(t, wantStatus, item.(map[string]any)["status"])
+					response, _ := orderedResponsesWire(layout.input, "", "")
+					response["status"] = "incomplete"
+					response["incomplete_details"] = map[string]any{"reason": "max_output_tokens"}
+					items := response["output"].([]any)
+					items[len(items)-1].(map[string]any)["status"] = "incomplete"
+					if req["stream"] == true {
+						upstreamSSE(w, []map[string]any{{"type": "response.incomplete", "response": response}})
+					} else {
+						w.Header().Set("Content-Type", "application/json")
+						require.NoError(t, json.NewEncoder(w).Encode(response))
 					}
 				})
-			}
+				code, _, body := productionResponsesRequest(t, listenResponsesApp(t, server.app), token, fmt.Sprintf(`{"model":"fixture/test-model","store":false,"stream":%t,"input":"hello"}`, stream), disabled)
+				require.Equal(t, http.StatusOK, code)
+				var response map[string]any
+				if stream {
+					events := parseResponsesSSE(t, body)
+					require.Equal(t, "response.incomplete", events[len(events)-1]["type"])
+					response = events[len(events)-1]["response"].(map[string]any)
+				} else {
+					require.NoError(t, json.Unmarshal(body, &response))
+				}
+				require.Equal(t, "incomplete", response["status"])
+				items := response["output"].([]any)
+				want := layout.want
+				if disabled {
+					want = layout.input
+				}
+				require.Equal(t, want, responsesItemOrder(t, items))
+				for i, item := range items {
+					wantStatus := "completed"
+					if i == len(items)-1 {
+						wantStatus = "incomplete"
+					}
+					require.Equal(t, wantStatus, item.(map[string]any)["status"])
+				}
+			})
 		}
 	}
 }

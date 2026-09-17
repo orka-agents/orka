@@ -743,6 +743,9 @@ func runToolLoopWithObserver(
 			finalReq.Messages = messages
 			finalReq.Tools = nil
 			resp, err := provider.Complete(ctx, &finalReq)
+			if err != nil && isStreamingRequiredErr(err) {
+				resp, err = completeViaStream(ctx, provider, &finalReq, options...)
+			}
 			if err != nil {
 				if requireFinalCompletion {
 					return nil, fmt.Errorf("final LLM completion failed: %w", err)
@@ -802,6 +805,17 @@ func runToolLoopWithObserver(
 		}
 		if err := validateToolLoopCompletion(resp, options...); err != nil {
 			return nil, err
+		}
+		if req.ResponsesInput {
+			// Enforce the Responses function contract after any provider
+			// translation, including the Chat Completions fallback.
+			seenCalls := make(map[string]bool, len(resp.ToolCalls))
+			for _, call := range resp.ToolCalls {
+				if !validResponsesFunction(call) || seenCalls[call.ID] {
+					return nil, fmt.Errorf("provider returned an invalid function call")
+				}
+				seenCalls[call.ID] = true
+			}
 		}
 
 		// A text response cut off by the output token budget is terminal:
