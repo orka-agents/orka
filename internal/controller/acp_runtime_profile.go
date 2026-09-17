@@ -152,7 +152,8 @@ func PlanACPRuntimeWithConfiguration(
 		return ACPRuntimePlan{}, err
 	}
 	feedbackTaskUID := ""
-	if slices.Contains(allowed, RuntimeFeedbackToolName) {
+	toolPolicy := harnessv2.MCPToolPolicy{AllowedToolNames: allowed, DisallowedToolNames: disallowed, AllowBash: allowBash}
+	if toolPolicy.Allows(RuntimeFeedbackToolName) {
 		if !runtimeFeedbackProviderSupported(provider) || task.UID == "" || task.Spec.SessionRef != nil ||
 			(task.Spec.Execution != nil && task.Spec.Execution.Workspace != nil) {
 			return ACPRuntimePlan{}, fmt.Errorf("runtime_feedback requires a fresh native Codex or OpenCode Task without sessionRef or execution.workspace")

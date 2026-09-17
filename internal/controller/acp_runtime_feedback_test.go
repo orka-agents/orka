@@ -434,6 +434,90 @@ func TestRuntimeFeedbackSnapshotAndMaterializedPoolPreserveTaskIsolation(t *test
 	}
 }
 
+func TestRuntimeFeedbackOptOutPreservesExecutionModesAndSnapshot(t *testing.T) {
+	for _, provider := range []corev1alpha1.AgentRuntimeType{
+		corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeOpencode,
+		corev1alpha1.AgentRuntimeClaude, corev1alpha1.AgentRuntimeCopilot,
+	} {
+		for _, mode := range []string{"fresh", "session", "workspace"} {
+			t.Run(string(provider)+"/"+mode, func(t *testing.T) {
+				task := bindingTestTask()
+				switch mode {
+				case "session":
+					task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "continued-session"}
+				case "workspace":
+					task = workspaceBindingTestTask(nil)
+				}
+				task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{DisallowedTools: []string{RuntimeFeedbackToolName}}
+				agent := bindingTestAgent()
+				agent.Spec.Runtime.Type = provider
+				agent.Spec.SystemPrompt = nil
+				agent.Spec.Runtime.DefaultAllowBash = new(false)
+				agent.Spec.Runtime.DefaultAllowedTools = []string{"Glob", "Grep", "Read", RuntimeFeedbackToolName}
+				if provider == corev1alpha1.AgentRuntimeOpencode {
+					agent.Spec.Model = testOpenCodeModelConfig()
+				}
+				reconciler, _ := newBindingTestReconciler(t, task, bindingTestNamespace())
+				image := "example.test/runtime@sha256:" + strings.Repeat("a", 64)
+				reconciler.ACPRuntimeImages = ACPRuntimeImages{Codex: image, Opencode: image, Claude: image, Copilot: image}
+				// An explicitly denied tool must not need the feedback service configured.
+				reconciler.MCPRegistry = tools.NewRegistry()
+				candidate, err := reconciler.resolveAgentExecutionCandidate(context.Background(), task, agent)
+				if err != nil {
+					t.Fatalf("resolve candidate with feedback denied: %v", err)
+				}
+				body, err := decodeAgentExecutionSnapshot(candidate.snapshotBody)
+				if err != nil {
+					t.Fatal(err)
+				}
+				snapshot := &store.AgentExecutionSnapshot{TaskUID: string(task.UID), Digest: candidate.binding.Snapshot.Digest, SchemaVersion: candidate.binding.Snapshot.SchemaVersion, Body: candidate.snapshotBody}
+				plan, _, policy, err := validateAgentExecutionSnapshot(&candidate.binding, snapshot, body)
+				if err != nil {
+					t.Fatalf("restore snapshot with feedback denied: %v", err)
+				}
+				if plan.RuntimeFeedbackTaskUID != "" || policy.ToolPolicy.Allows(RuntimeFeedbackToolName) {
+					t.Fatal("explicit denial enabled runtime feedback")
+				}
+				for _, descriptor := range policy.ToolPolicy.Tools {
+					if descriptor.Name == RuntimeFeedbackToolName {
+						t.Fatal("explicitly denied feedback was exposed as an MCP tool")
+					}
+				}
+				if (plan.Workspace != nil) != (mode == "workspace") {
+					t.Fatal("feedback denial changed the execution workspace binding")
+				}
+				pool, _, err := reconciler.ensureACPRuntimePool(context.Background(), task.Namespace, plan, "", "", "")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if pool.Labels[runtimeFeedbackTaskLabel] != "" {
+					t.Fatal("feedback denial added a dedicated feedback pool label")
+				}
+				if mode != "workspace" {
+					if pool.Spec.Capacity.MaxResidentSessions != corev1alpha1.DefaultRuntimePoolMaxResidentSessions ||
+						pool.Spec.Capacity.MaxRunningPrompts != corev1alpha1.DefaultRuntimePoolMaxRunningPrompts {
+						t.Fatal("feedback denial changed ordinary pool capacity")
+					}
+					other := task.DeepCopy()
+					other.UID = "other-task"
+					otherPlan, err := PlanACPRuntime(other, agent, reconciler.ACPRuntimeImages)
+					if err != nil || otherPlan.PoolName != plan.PoolName {
+						t.Fatalf("feedback denial made the pool Task-specific: %v", err)
+					}
+				}
+				// Removing the denial must still apply feedback's supported-mode restrictions.
+				enabled := task.DeepCopy()
+				enabled.Spec.AgentRuntime.DisallowedTools = nil
+				_, err = PlanACPRuntime(enabled, agent, reconciler.ACPRuntimeImages)
+				wantRejection := mode != "fresh" || (provider != corev1alpha1.AgentRuntimeCodex && provider != corev1alpha1.AgentRuntimeOpencode)
+				if (err != nil) != wantRejection {
+					t.Fatalf("enabled feedback planning error = %v, want rejection = %v", err, wantRejection)
+				}
+			})
+		}
+	}
+}
+
 func TestRuntimeFeedbackCodexKeepsExistingNativeReadPolicy(t *testing.T) {
 	task := bindingTestTask()
 	agent := bindingTestAgent()
