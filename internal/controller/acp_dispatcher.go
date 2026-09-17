@@ -36,6 +36,7 @@ import (
 	v2eventjournal "github.com/orka-agents/orka/internal/harness/v2/eventjournal"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/redact"
+	"github.com/orka-agents/orka/internal/runtimefeedback"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
 )
@@ -95,6 +96,7 @@ type ACPDispatcher struct {
 	ArtifactCapabilitySecret []byte
 	ArtifactReservations     artifactcap.CapabilityReservationRecorder
 	MCPRegistry              *tools.Registry
+	RuntimeFeedback          runtimefeedback.Service
 	Interval                 time.Duration
 	MaxConcurrent            int
 	IdlePoolTTL              time.Duration
@@ -1768,6 +1770,17 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			flushCtx, assistantEvent, assistantOrderSequence, persistableAssistant, assistantContentOmitted,
 		)
 	}
+	completeFeedback, err := d.startRuntimeFeedback(runtimeCtx, task, runtimeFence, runtimeClient, mcpConfiguration)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		reason := runtimefeedback.Completed
+		if terminal == nil || runtimeCtx.Err() != nil {
+			reason = runtimefeedback.Cancelled
+		}
+		completeFeedback(reason)
+	}()
 	accepted := false
 	admissionRetry := 0
 	for {

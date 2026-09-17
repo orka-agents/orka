@@ -390,6 +390,7 @@ func (b *ACPMCPBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	promptCtx := withACPMCPAuthenticatedTask(r.Context(), credentials.Task)
+	promptCtx = context.WithValue(promptCtx, acpMCPExecutionContextKey{}, request)
 	if err := b.Prompts.AuthorizeACPMCPPrompt(promptCtx, request); err != nil {
 		writeACPMCPError(w, http.StatusForbidden, "MCP prompt is not active")
 		return

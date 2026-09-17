@@ -1,0 +1,147 @@
+# Runtime feedback for native ACP Tasks
+
+The optional `runtime_feedback` MCP tool lets a native Codex or OpenCode agent
+read Gatekeeper Runtime (GKR) network evidence after an operation fails. The
+controller registers the exact worker container before submitting the prompt.
+The tool reads that existing registration; it cannot start capture, change
+policy, approve a destination, or retry an operation.
+
+This feature requires GKR's `runtime.gatekeeper.sh/v1alpha1` runtime-feedback
+service. GKR interprets enforcement evidence. Orka establishes which current
+Task attempt may read it.
+
+## Enable the controller client
+
+Configure all four controller flags:
+
+```text
+--acp-runtime-feedback-url=https://gkr-feedback.example.internal:9444
+--acp-runtime-feedback-ca-file=/var/run/secrets/gkr-feedback/ca.crt
+--acp-runtime-feedback-cert-file=/var/run/secrets/gkr-feedback/tls.crt
+--acp-runtime-feedback-key-file=/var/run/secrets/gkr-feedback/tls.key
+```
+
+Mount the certificate material from an operator-owned Secret into the
+controller only. The GKR service must allow the controller certificate's exact
+URI SAN, for example `spiffe://orka.ai/controller`. Its server certificate must
+match the configured HTTPS hostname and CA. Environment proxies and redirects
+are disabled. Requests have a 15-second deadline and responses are capped at
+128 KiB and 128 events. No service address or credential is supplied to an ACP
+child.
+
+The endpoint must select the GKR agent on the worker's actual node. A Service
+that load-balances multiple node agents is unsuitable. GKR validates the node,
+Pod UID, full CRI container ID, container name, and restart count against its
+live Kubernetes/CRI view. A wrong-node or unavailable registration produces
+unavailable diagnostics; it never borrows another node's evidence. Orka does
+not deploy GKR or alter NetworkPolicies as part of tool registration. GKR
+permits one active capture per node; concurrent opted-in Tasks on the same node
+can receive unavailable diagnostics until that capture ends.
+
+## Opt a Task into feedback
+
+Add `runtime_feedback` to the existing explicit native Agent
+`runtime.defaultAllowedTools` or Task `agentRuntime.allowedTools` list. Keep the
+runtime's existing native tool policy intact. This is additive configuration
+on an Agent with `runtime.contractVersion: orka.harness.v2`; it is not a custom
+HTTP Tool resource.
+
+For example, an existing Codex Agent that uses the complete native tool surface
+can retain it while adding feedback:
+
+```yaml
+spec:
+  runtime:
+    type: codex
+    contractVersion: orka.harness.v2
+    defaultAllowBash: true
+    defaultAllowedTools:
+      - Read
+      - Write
+      - Edit
+      - Bash
+      - Glob
+      - Grep
+      - WebSearch
+      - WebFetch
+      - runtime_feedback
+```
+
+This excerpt does not replace the Agent's required model/provider settings.
+Existing workspace, command, and approval enforcement still applies. In
+particular, a read-intent workspace remains read-only. OpenCode's read-intent
+policy disables Bash, so its native command path requires its existing
+write-workspace authorization and publication configuration. Do not change
+those permissions solely to make a diagnosis work. Codex's existing native
+read command path can exercise a network request without publication
+credentials, subject to its native approval and command checks.
+
+Opted-in Tasks receive a controller-derived, Task-specific RuntimePool with
+capacity for one resident RuntimeSession and one prompt. A fresh Task UID
+selects a different pool even when its Agent profile is identical. The frozen
+execution snapshot verifies this identity across retries and runtime image
+rotation. `sessionRef` and `execution.workspace` are unsupported for this
+initial integration, which uses native Deployment-backed pools. Claude,
+Copilot, external AgentRuntimes, and harness v1 are unsupported. Without the
+configured client the name is unavailable; it cannot fall back to a custom
+Tool resource.
+
+## Agent flow and result boundaries
+
+A suitable instruction is:
+
+> Make network calls sequentially. If a native network operation fails, call
+> `runtime_feedback` with `{}`. Describe only what its evidence supports. Use an
+> alternative destination or method only when the task already authorizes it.
+> Produce the useful research result and state any remaining uncertainty.
+
+The tool accepts exactly an empty JSON object. Agent-supplied Task IDs,
+container selectors, run IDs, timestamps, and URLs are rejected. The existing
+session-local MCP route, controller bearer, operation capability, active
+PromptAttempt, and runtime fences govern access. No additional agent auth
+protocol or AuthZEN decision is introduced.
+
+Before registration and reading, Orka verifies the live dedicated pool, exact
+Pod UID, a single running `runtime` application container, and the authenticated
+supervisor's sole RuntimeSession. Tool reads also require that supervisor's
+active prompt to match the current Task UID, attempt, and session generation.
+Orka repeats these checks before releasing a report and uses the broker's
+existing epoch/prompt interlock. Cancellation, pool replacement, container
+restart, and session changes cannot release a report under the old binding.
+
+The result identifies the Task attempt, runtime fence, and container. GKR's
+capture status, source instance, window, completeness, losses, and individual
+network events retain their original meaning. `Collecting` reports must be
+recent. `Finalized` and `Expired` reports describe their explicitly bounded
+historical capture; they do not establish current coverage. Stale or missing
+identity, mismatched responses, oversized responses, and unavailable services
+never yield borrowed evidence. A failed registration does not itself prevent
+the authorized Task from running, but no capture is claimed.
+
+Evidence is **container-scoped**. Supervisor traffic and other descendants can
+appear alongside the agent's command. Sequential tool calls aid interpretation
+but do not prove per-tool causality. A monitor warning is not a kernel block.
+No events does not mean success, permission, or absence of enforcement. Loss
+counters can be node-wide and do not become Task-specific counts.
+
+Orka completes the exact registration when native dispatch exits. GKR's
+10-minute capture deadline bounds controller-loss and transport-failure cases;
+its own bounded retention governs later reads. A report never authorizes
+capture extension, policy relaxation, launch, or retry.
+
+For a live demonstration, first observe the agent's actual native website
+request under its existing policy. Then enforce the matching GKR destination
+restriction and run a fresh Task. Record the native failure, the agent's
+`runtime_feedback` call, its already-authorized fallback, and its final research
+answer. Controller-brokered `web_fetch`/`web_search` execute outside the worker
+container and cannot demonstrate worker-container enforcement.
+
+## Verification
+
+The focused tests cover Task-specific pool materialization and snapshot
+validation, existing broker HTTP credentials/capabilities and epoch interlock,
+read-only tool arguments, exact Pod/container/runtime/session fences,
+cancellation during diagnosis, GKR mTLS, response bounds, and capture windows.
+They use real broker/status HTTP and Kubernetes/store fixtures; they do not
+claim live GKR enforcement or successful model execution. A real terminal run
+supplies that separate integration evidence.

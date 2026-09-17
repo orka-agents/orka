@@ -905,9 +905,14 @@ func validateAgentExecutionSnapshot(
 	if !ACPRuntimeImageAvailable(body.RuntimeImage) {
 		return ACPRuntimePlan{}, harnessv2.AgentSessionConfiguration{}, harnessv2.MCPPolicyConfiguration{}, errors.New("frozen runtime image is not digest pinned")
 	}
-	poolIdentityDigest, err := acpDomainDigest("runtime-pool-identity", map[string]string{
-		acpRuntimePoolIdentityProfileDigestKey: body.ProfileDigest, acpRuntimePoolIdentityRuntimeImageKey: body.RuntimeImage,
-	})
+	feedbackTaskUID := ""
+	if mcpConfiguration.ToolPolicy.Allows(RuntimeFeedbackToolName) {
+		if !runtimeFeedbackProviderSupported(body.RuntimeType) || body.ExecutionWorkspace != nil {
+			return ACPRuntimePlan{}, harnessv2.AgentSessionConfiguration{}, harnessv2.MCPPolicyConfiguration{}, errors.New("runtime feedback snapshot requires an isolated native Codex or OpenCode pool")
+		}
+		feedbackTaskUID = string(binding.Task.UID)
+	}
+	poolIdentityDigest, err := runtimePoolIdentityDigest(body.ProfileDigest, body.RuntimeImage, feedbackTaskUID)
 	if err != nil {
 		return ACPRuntimePlan{}, harnessv2.AgentSessionConfiguration{}, harnessv2.MCPPolicyConfiguration{}, err
 	}
@@ -930,7 +935,7 @@ func validateAgentExecutionSnapshot(
 	}
 	return ACPRuntimePlan{
 		PoolName: body.PoolName, Image: body.RuntimeImage, Profile: body.RuntimeProfile, Digest: profileDigest,
-		Workspace: workspaceBinding,
+		Workspace: workspaceBinding, RuntimeFeedbackTaskUID: feedbackTaskUID,
 	}, configuration, mcpConfiguration, nil
 }
 
