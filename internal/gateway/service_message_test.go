@@ -248,6 +248,48 @@ func TestGatewayTaskMessageContentAndControllerLimit(t *testing.T) {
 	}
 }
 
+func TestGatewayTaskMessageIdempotencyUsesSanitizedContent(t *testing.T) {
+	s, db, adapter, _, task := newGatewayMessageFixture(t)
+	s.Config.InterimMessagesPerTask = 2
+	receipt, err := s.EnqueueTaskMessage(t.Context(), task.Namespace, task.Name, string(task.UID), "request", "  update\x00  ")
+	require.NoError(t, err)
+	require.True(t, receipt.Created)
+	replay, err := s.EnqueueTaskMessage(t.Context(), task.Namespace, task.Name, string(task.UID), "request", "update\x01")
+	require.NoError(t, err)
+	require.False(t, replay.Created)
+	require.Equal(t, receipt.DeliveryID, replay.DeliveryID)
+	require.Equal(t, receipt.Status, replay.Status)
+
+	_, err = s.EnqueueTaskMessage(t.Context(), task.Namespace, task.Name, string(task.UID), "request", "changed update")
+	var httpErr *HTTPError
+	require.ErrorAs(t, err, &httpErr)
+	require.Equal(t, http.StatusConflict, httpErr.Code)
+	row, err := db.GetGatewayDelivery(t.Context(), task.Namespace, receipt.DeliveryID)
+	require.NoError(t, err)
+	require.Equal(t, "update", row.Text, "only sanitized content is retained")
+
+	second, err := s.EnqueueTaskMessage(t.Context(), task.Namespace, task.Name, string(task.UID), "second", "second update")
+	require.NoError(t, err, "normalization-equivalent replay must leave the second quota slot available")
+	require.True(t, second.Created)
+	_, err = s.EnqueueTaskMessage(t.Context(), task.Namespace, task.Name, string(task.UID), "third", "third update")
+	require.ErrorAs(t, err, &httpErr)
+	require.Equal(t, http.StatusTooManyRequests, httpErr.Code)
+	rows, err := db.ListGatewayDeliveries(t.Context(), store.GatewayDeliveryFilter{Namespace: task.Namespace})
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+
+	require.NoError(t, s.DeliverOnce(t.Context()))
+	replay, err = s.EnqueueTaskMessage(t.Context(), task.Namespace, task.Name, string(task.UID), "request", "update\x01")
+	require.NoError(t, err, "normalization-equivalent replay must still succeed at quota")
+	require.False(t, replay.Created)
+	require.Equal(t, receipt.DeliveryID, replay.DeliveryID)
+	require.Equal(t, store.GatewayDeliveryDelivered, replay.Status)
+	sends := adapter.Deliveries()
+	require.Len(t, sends, 1)
+	require.Equal(t, receipt.DeliveryID, sends[0].DeliveryID)
+	require.Equal(t, "update", sends[0].Text)
+}
+
 func TestGatewayTaskMessageRechecksCapabilityImmediatelyBeforePOST(t *testing.T) {
 	s, db, adapter, _, task := newGatewayMessageFixture(t)
 	receipt, err := s.EnqueueTaskMessage(t.Context(), task.Namespace, task.Name, string(task.UID), "request", "update")

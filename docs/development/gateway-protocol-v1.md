@@ -151,9 +151,9 @@ Content-Type: application/json
 {"content":"A bounded intermediate update","requestID":"stable-internal-call-id"}
 ```
 
-Only the authentic current native worker Pod/Job for the exact gateway-created Task UID is authorized. No target/routing arguments are accepted. The Task must be Running and the admitted event still eligible. The endpoint sanitizes text after checking the raw UTF-8/size bound. The stable request ID is at most 256 bytes; reuse it for a retry, not for different content.
+Only the authentic current native worker Pod/Job for the exact gateway-created Task UID is authorized. No target/routing arguments are accepted. The Task must be Running and the admitted event still eligible. The endpoint sanitizes text after checking the raw UTF-8/size bound. The stable request ID is at most 256 bytes; reuse it for a retry, not for different content. Here, “different content” means different **sanitized delivery text**, not different raw request bytes. Distinct raw values that sanitize to the same text are a replay with no additional enqueue or quota charge. Only sanitized text is retained; no raw-content digest or additional persisted identity is stored.
 
-A newly enqueued message returns **HTTP 202**; an exact replay returns **HTTP 200** with the same ID, current durable status, and `created: false`:
+A newly enqueued message returns **HTTP 202**; a replay with the same sanitized content returns **HTTP 200** with the same ID, current durable status, and `created: false`:
 
 ```json
 {"deliveryID":"stable-controller-delivery-id","status":"Pending","created":true}
@@ -165,7 +165,7 @@ This acknowledges admission, not provider delivery. Missing/false capability on 
 {"error":{"code":"interim_delivery_unsupported","message":"gateway adapter does not advertise interimDelivery capability"}}
 ```
 
-Errors produced by the message handler use the same `error.code`/`error.message` shape with string codes: `invalid_request` (400), `unauthorized` (401), `forbidden` (403), `not_found` (404), `conflict` (409, including changed content or lifecycle conflict), `too_large` (413), `limit_reached` (429), `unavailable` (503), or `internal_error` (500). Authentication can fail before the message handler runs: the shared auth middleware uses the common error envelope with a numeric HTTP status in `error.code` (for example, `{"error":{"code":401,"message":"missing authorization header"}}`), not the handler's string `unauthorized` code. A terminal worker loses authorization; do not rely on replay to authorize a completed Task. Transient unready/stale observations return `unavailable` (503), not a current adapter's unsupported-capability error.
+Errors produced by the message handler use the same `error.code`/`error.message` shape with string codes: `invalid_request` (400), `unauthorized` (401), `forbidden` (403), `not_found` (404), `conflict` (409, including changed sanitized content or lifecycle conflict), `too_large` (413), `limit_reached` (429), `unavailable` (503), or `internal_error` (500). Authentication can fail before the message handler runs: the shared auth middleware uses the common error envelope with a numeric HTTP status in `error.code` (for example, `{"error":{"code":401,"message":"missing authorization header"}}`), not the handler's string `unauthorized` code. A terminal worker loses authorization; do not rely on replay to authorize a completed Task. Transient unready/stale observations return `unavailable` (503), not a current adapter's unsupported-capability error.
 
 ## Bounds
 

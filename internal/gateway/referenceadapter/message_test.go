@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/orka-agents/orka/internal/gateway/protocol"
 )
@@ -79,6 +81,108 @@ func TestInterimAdvertisementAndOptOut(t *testing.T) {
 		if (response.Status == protocol.DeliveryStatusDelivered) != enabled {
 			t.Fatalf("capability gate: %+v", response)
 		}
+	}
+}
+
+func TestMessageFixturesRespectCapabilityAndTerminalGate(t *testing.T) {
+	for _, gate := range []string{"capability disabled", protocol.DeliveryKindFinal, protocol.DeliveryKindError} {
+		for _, fixture := range []string{"retryable", "retryable-once", "delay"} {
+			t.Run(gate+"/"+fixture, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					adapter := New("test-token", WithInterimDelivery(gate != "capability disabled"))
+					if gate != "capability disabled" {
+						if got := postDelivery(t, adapter, messageDelivery("terminal", gate)); got.Status != protocol.DeliveryStatusDelivered {
+							t.Fatalf("terminal delivery rejected: %+v", got)
+						}
+					}
+					sendsBefore := len(adapter.Deliveries())
+					delivery := messageDelivery("message", protocol.DeliveryKindMessage)
+					delivery.Metadata = map[string]string{"fixture": fixture}
+					start := time.Now()
+					for range 2 {
+						if got := postDelivery(t, adapter, delivery); got.Status != protocol.DeliveryStatusNonRetryableError {
+							t.Errorf("fixture bypassed message gate: %+v", got)
+						}
+					}
+					if elapsed := time.Since(start); elapsed != 0 {
+						t.Errorf("rejected message ran fixture delay: %s", elapsed)
+					}
+					if got := len(adapter.Deliveries()); got != sendsBefore {
+						t.Fatalf("rejected message recorded a provider send: got %d, want %d", got, sendsBefore)
+					}
+				})
+			})
+		}
+	}
+}
+
+func TestMessageRetryFixturesRemainEnabled(t *testing.T) {
+	for _, tt := range []struct {
+		fixture       string
+		first, second string
+	}{
+		{"retryable", protocol.DeliveryStatusRetryableError, protocol.DeliveryStatusRetryableError},
+		{"retryable-once", protocol.DeliveryStatusRetryableError, protocol.DeliveryStatusDelivered},
+		{"delay", protocol.DeliveryStatusDelivered, protocol.DeliveryStatusDelivered},
+	} {
+		t.Run(tt.fixture, func(t *testing.T) {
+			adapter := New("test-token")
+			delivery := messageDelivery("message", protocol.DeliveryKindMessage)
+			delivery.Metadata = map[string]string{"fixture": tt.fixture, "fixtureDelayMs": "0"}
+			if got := postDelivery(t, adapter, delivery); got.Status != tt.first {
+				t.Fatalf("first fixture response: %+v, want %s", got, tt.first)
+			}
+			receipt := postDelivery(t, adapter, delivery)
+			if receipt.Status != tt.second {
+				t.Fatalf("second fixture response: %+v, want %s", receipt, tt.second)
+			}
+			if tt.second == protocol.DeliveryStatusRetryableError {
+				if got := len(adapter.Deliveries()); got != 0 {
+					t.Fatalf("retryable fixture recorded %d provider sends", got)
+				}
+				return
+			}
+			if got := len(adapter.Deliveries()); got != 1 {
+				t.Fatalf("successful fixture recorded %d provider sends, want 1", got)
+			}
+			if got := postDelivery(t, adapter, messageDelivery("terminal", protocol.DeliveryKindFinal)); got.Status != protocol.DeliveryStatusDelivered {
+				t.Fatalf("terminal delivery rejected: %+v", got)
+			}
+			if got := postDelivery(t, adapter, delivery); got != receipt {
+				t.Fatalf("fixture replay after terminal changed receipt: %+v, want %+v", got, receipt)
+			}
+			if got := len(adapter.Deliveries()); got != 2 {
+				t.Fatalf("fixture replay recorded another provider send: got %d, want 2", got)
+			}
+		})
+	}
+}
+
+func TestDelayedMessageRechecksTerminalBeforeSend(t *testing.T) {
+	for _, terminal := range []string{protocol.DeliveryKindFinal, protocol.DeliveryKindError} {
+		t.Run(terminal, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				adapter := New("test-token")
+				delivery := messageDelivery("delayed", protocol.DeliveryKindMessage)
+				delivery.Metadata = map[string]string{"fixture": "delay"}
+				response := make(chan protocol.DeliveryResponse, 1)
+				go func() { response <- postDelivery(t, adapter, delivery) }()
+				synctest.Wait() // The message has passed the early gate and is sleeping.
+				if got := adapter.Attempts(delivery.DeliveryID); got != 1 {
+					t.Fatalf("delayed message attempts = %d, want 1", got)
+				}
+				if got := postDelivery(t, adapter, messageDelivery("terminal", terminal)); got.Status != protocol.DeliveryStatusDelivered {
+					t.Fatalf("terminal delivery rejected: %+v", got)
+				}
+				if got := <-response; got.Status != protocol.DeliveryStatusNonRetryableError {
+					t.Fatalf("delayed message bypassed terminal recheck: %+v", got)
+				}
+				sends := adapter.Deliveries()
+				if len(sends) != 1 || sends[0].DeliveryID != "terminal" {
+					t.Fatalf("delayed message recorded a provider send after terminal: %+v", sends)
+				}
+			})
+		})
 	}
 }
 

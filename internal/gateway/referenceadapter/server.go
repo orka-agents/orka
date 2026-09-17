@@ -146,6 +146,12 @@ func (s *Server) handleDelivery(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, response)
 		return
 	}
+	route := eventRoute{delivery.OriginatingEvent, delivery.AccountID, delivery.ContextID, delivery.ThreadID, delivery.ReplyTarget}
+	if delivery.Kind == protocol.DeliveryKindMessage && (!s.interimDelivery || s.terminalEvents[route]) {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusOK, protocol.DeliveryResponse{Status: protocol.DeliveryStatusNonRetryableError, Message: "interim delivery unsupported or event already terminal"})
+		return
+	}
 	s.mu.Unlock()
 
 	fixture := strings.TrimSpace(delivery.Metadata["fixture"])
@@ -176,7 +182,6 @@ func (s *Server) handleDelivery(w http.ResponseWriter, r *http.Request) {
 		ProviderMessageID: "reference:" + delivery.DeliveryID,
 	}
 	s.mu.Lock()
-	route := eventRoute{delivery.OriginatingEvent, delivery.AccountID, delivery.ContextID, delivery.ThreadID, delivery.ReplyTarget}
 	if existing, ok := s.responses[delivery.DeliveryID]; ok {
 		response = existing
 	} else if delivery.Kind == protocol.DeliveryKindMessage && (!s.interimDelivery || s.terminalEvents[route]) {

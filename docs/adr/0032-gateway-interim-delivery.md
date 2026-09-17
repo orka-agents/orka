@@ -42,9 +42,12 @@ the writer atomically checks event eligibility, deduplicates, and enforces quota
 This is not a transaction spanning Kubernetes and SQLite. Dispatch rechecks
 identity and capability before sending.
 
-An exact replay returns the same delivery ID and its current status without a
-second enqueue or quota charge. Reusing the request ID for different content is
-a conflict. The HTTP receipt acknowledges durable admission, not provider send.
+Idempotency compares sanitized delivery content, not raw request bytes. Reusing
+the request ID with content that sanitizes to the same text returns the same
+delivery ID and its current status without a second enqueue or quota charge.
+“Different content” means different sanitized text and is a conflict. Only the
+sanitized text is retained, with no raw-content digest or additional persisted
+identity. The HTTP receipt acknowledges durable admission, not provider send.
 
 ### Bound storage and preserve terminal ownership
 
