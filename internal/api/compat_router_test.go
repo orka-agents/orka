@@ -69,12 +69,22 @@ func TestCompatRouterConfiguration(t *testing.T) {
 		{"query", map[string]string{"team-a": "http://orka-api?namespace=team-b"}},
 		{"fragment", map[string]string{"team-a": "http://orka-api#fragment"}},
 		{"invalid url", map[string]string{"team-a": "http://%"}},
+		{"zero port", map[string]string{"team-a": "http://orka-api:0"}},
+		{"out-of-range port", map[string]string{"team-a": "http://orka-api:65536"}},
+		{"large port", map[string]string{"team-a": "http://orka-api:99999"}},
+		{"overflowing port", map[string]string{"team-a": "http://orka-api:9999999999999999999999999999"}},
+		{"IPv6 out-of-range port", map[string]string{"team-a": "http://[::1]:65536"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := NewCompatRouter(kube, tc.routes)
 			require.Error(t, err)
 			require.False(t, strings.Contains(err.Error(), password), "configuration errors must not include URL credentials")
 		})
+	}
+	for _, origin := range []string{"http://orka-api", "https://orka-api", "http://orka-api:1", "http://orka-api:65535", "http://[::1]", "http://[::1]:65535"} {
+		router, err := NewCompatRouter(kube, map[string]string{"team-a": origin})
+		require.NoError(t, err)
+		router.Close()
 	}
 	_, err := NewCompatRouter(nil, map[string]string{"team-a": "http://orka-api"})
 	require.Error(t, err)

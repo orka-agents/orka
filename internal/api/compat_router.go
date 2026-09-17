@@ -18,6 +18,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -55,6 +56,12 @@ func NewCompatRouter(c client.Client, namespaces map[string]string) (*CompatRout
 			target.RawQuery != "" || target.ForceQuery || target.Fragment != "" || target.Opaque != "" {
 			// Do not echo URLs: a rejected configuration may contain credentials.
 			return nil, fmt.Errorf("route for namespace %s must be an http(s) origin without credentials, path, query or fragment", namespace)
+		}
+		if port := target.Port(); port != "" {
+			value, err := strconv.ParseUint(port, 10, 16)
+			if err != nil || value == 0 {
+				return nil, fmt.Errorf("route for namespace %s must use a port between 1 and 65535", namespace)
+			}
 		}
 		routes[namespace] = target
 	}
