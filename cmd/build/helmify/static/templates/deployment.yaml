@@ -6,7 +6,9 @@
 {{- include "orka.validateWebhooks" . }}
 {{- include "orka.validatePublisherAuth" . }}
 {{- include "orka.validateSubstrateCredentials" . }}
+{{- include "orka.validateRuntimeFeedback" . }}
 {{- $substrateCredentials := .Values.controller.substrate.apiCredentials | default dict -}}
+{{- $runtimeFeedback := .Values.controller.runtimeFeedback | default dict -}}
 {{- if $harnessV2 }}
 {{- if not .Values.publisher.enabled }}
 {{- fail "publisher must be enabled when controller.mode=harness-v2" }}
@@ -145,6 +147,16 @@ spec:
             {{- end }}
             {{- if .Values.controller.acpRuntime.opencodeImage }}
             - {{ printf "--acp-opencode-runtime-image=%s" .Values.controller.acpRuntime.opencodeImage | quote }}
+            {{- end }}
+            {{- if $runtimeFeedback.enabled }}
+            {{- if $runtimeFeedback.url }}
+            - {{ printf "--acp-runtime-feedback-url=%s" $runtimeFeedback.url | quote }}
+            {{- else }}
+            - --acp-runtime-feedback-node-urls-file=/var/run/secrets/gkr-feedback/node-urls.json
+            {{- end }}
+            - --acp-runtime-feedback-ca-file=/var/run/secrets/gkr-feedback/ca.crt
+            - --acp-runtime-feedback-cert-file=/var/run/secrets/gkr-feedback/tls.crt
+            - --acp-runtime-feedback-key-file=/var/run/secrets/gkr-feedback/tls.key
             {{- end }}
             - --zap-log-level={{ .Values.controller.logLevel }}
             - --gateway-enabled={{ $gatewayRuntimeEnabled }}
@@ -500,6 +512,11 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            {{- if $runtimeFeedback.enabled }}
+            - name: runtime-feedback-credentials
+              mountPath: /var/run/secrets/gkr-feedback
+              readOnly: true
+            {{- end }}
             {{- if $substrateCredentials.existingSecret }}
             - name: substrate-api-credentials
               mountPath: /var/run/orka/substrate-api
@@ -536,6 +553,23 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
+        {{- if $runtimeFeedback.enabled }}
+        - name: runtime-feedback-credentials
+          secret:
+            secretName: {{ $runtimeFeedback.existingSecret | quote }}
+            defaultMode: 0400
+            items:
+              - key: {{ $runtimeFeedback.caKey | quote }}
+                path: ca.crt
+              - key: {{ $runtimeFeedback.certKey | quote }}
+                path: tls.crt
+              - key: {{ $runtimeFeedback.privateKeyKey | quote }}
+                path: tls.key
+              {{- if $runtimeFeedback.nodeURLsKey }}
+              - key: {{ $runtimeFeedback.nodeURLsKey | quote }}
+                path: node-urls.json
+              {{- end }}
+        {{- end }}
         {{- if $substrateCredentials.existingSecret }}
         - name: substrate-api-credentials
           secret:

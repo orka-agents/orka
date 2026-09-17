@@ -71,6 +71,49 @@ not deploy GKR or alter NetworkPolicies as part of tool registration. GKR
 permits one active capture per node; concurrent opted-in Tasks on the same node
 can receive unavailable diagnostics until that capture ends.
 
+## Configure a Helm installation
+
+The chart keeps feedback disabled by default. For `controller.mode: harness-v2`,
+create an operator-owned Secret in the Helm release namespace containing the
+GKR CA (`ca.crt`), controller client certificate (`tls.crt`) and private key
+(`tls.key`). Keep those contents out of Helm values. Reference the existing
+Secret for a single-node deployment:
+
+```yaml
+controller:
+  runtimeFeedback:
+    enabled: true
+    url: https://gkr-feedback.example.internal:9444
+    existingSecret: gkr-feedback-client
+```
+
+For multiple nodes, add the exact node-name-to-origin JSON map described above
+as another item in the same Secret, and select it instead of `url`:
+
+```yaml
+controller:
+  runtimeFeedback:
+    enabled: true
+    nodeURLsKey: node-urls.json
+    existingSecret: gkr-feedback-client
+```
+
+Leave `url` empty in node-map mode. Exactly one route and all three mTLS item
+selectors are required when enabled. Use `caKey`, `certKey` and `privateKeyKey`
+if the Secret uses different item names. Helm passes the existing flags and
+projects only the selected items into the controller at fixed paths under
+`/var/run/secrets/gkr-feedback`; it does not create the Secret, install GKR,
+change network policy, or opt any Task into the tool.
+
+The mount is read-only without `subPath`, with requested mode `0400`. The
+chart's existing non-root UID 65532 and Pod `fsGroup: 65532` are unchanged;
+Kubernetes assigns the volume's group and adds group-read permission so that
+the controller can read the files. Preserve equivalent group access if
+customizing the Pod security context. Restart the controller after changing
+routing or TLS material: both are loaded at startup, so projected Secret
+updates alone do not reload them. Existing startup validation still rejects
+invalid origins, node maps and TLS material.
+
 ## Opt a Task into feedback
 
 Add `runtime_feedback` to the existing explicit native Agent
