@@ -41,6 +41,7 @@ var (
 	acpOpencodeRuntimeImage      = "ghcr.io/orka-agents/orka/acp-opencode-runtime:e2e"
 	workspacePublisherImage      = "ghcr.io/orka-agents/orka/workspace-publisher:e2e"
 	gatewayReferenceAdapterImage = "ghcr.io/orka-agents/orka/gateway-reference-adapter:e2e"
+	gatewayNativeWorkerImage     = "ghcr.io/orka-agents/orka/gateway-e2e-worker:e2e"
 	harnessV2FixtureImage        = "ghcr.io/orka-agents/orka/harness-v2-e2e-fixture:e2e"
 	gatewayE2EEnvVar             = "E2E_GATEWAY"
 	e2eEphemeralClusterEnvVar    = "E2E_EPHEMERAL_CLUSTER"
@@ -102,6 +103,11 @@ var _ = BeforeSuite(func() {
 			"-f", "cmd/orka-gateway-reference-adapter/Dockerfile", ".")
 		_, err = utils.Run(cmd)
 		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build Gateway reference adapter image")
+		By("building the test-only Gateway native worker image")
+		cmd = exec.Command("docker", "build", "-t", gatewayNativeWorkerImage,
+			"-f", "cmd/orka-gateway-e2e-worker/Dockerfile", ".")
+		_, err = utils.Run(cmd)
+		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build Gateway native worker fixture image")
 	}
 
 	By("loading all images into Kind cluster")
@@ -113,7 +119,7 @@ var _ = BeforeSuite(func() {
 		harnessV2FixtureImage,
 	}
 	if gatewayE2EEnabled() {
-		images = append(images, gatewayReferenceAdapterImage)
+		images = append(images, gatewayReferenceAdapterImage, gatewayNativeWorkerImage)
 	}
 	for _, img := range images {
 		err = utils.LoadImageToKindClusterWithName(img)

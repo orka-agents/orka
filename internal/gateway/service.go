@@ -87,6 +87,7 @@ type Config struct {
 	TerminalRetention            time.Duration
 	DeliveryTimeout              time.Duration
 	DeliveryMaxAttempts          int
+	InterimMessagesPerTask       int
 	ClaimLease                   time.Duration
 	PollInterval                 time.Duration
 	BatchSize                    int
@@ -99,7 +100,7 @@ func DefaultConfig() Config {
 		Enabled: true, PendingPerSession: 100, MaxRecordsPerGateway: 1_000, MaxRejectedRecordsPerGateway: 250, EventExpiry: 24 * time.Hour,
 		TerminalRetention: 30 * 24 * time.Hour, DeliveryTimeout: 15 * time.Second,
 		DeliveryMaxAttempts: 10, ClaimLease: time.Minute, PollInterval: 500 * time.Millisecond,
-		BatchSize: 25,
+		BatchSize: 25, InterimMessagesPerTask: 10,
 	}
 }
 
@@ -1536,6 +1537,16 @@ func (s *Service) DeliverOnce(ctx context.Context) error {
 	if err != nil {
 		return s.retryOrDeadLetterDelivery(ctx, delivery, "adapter HTTP client is unsafe", time.Now().UTC())
 	}
+	if delivery.Kind == protocol.DeliveryKindMessage {
+		if err := s.validateMessageDelivery(ctx, delivery); err != nil {
+			var httpErr *HTTPError
+			if errors.As(err, &httpErr) && httpErr.Code != http.StatusServiceUnavailable {
+				return s.DeliveryStore.MarkGatewayDeliveryTerminal(ctx, delivery.Namespace, delivery.ID, s.Owner,
+					store.GatewayDeliveryDeadLettered, httpErr.Message, time.Now().UTC())
+			}
+			return s.retryOrDeadLetterDelivery(ctx, delivery, "gateway message eligibility is unavailable", time.Now().UTC())
+		}
+	}
 	response, err := httpClient.Do(httpRequest)
 	if err != nil {
 		gatewayDeliveryTotal.WithLabelValues("retryable_error").Inc()
@@ -1587,8 +1598,10 @@ func (s *Service) completeGatewayDelivery(
 	// Correlate the Task before committing the delivery as terminal. If the patch fails,
 	// the Sending lease expires and the same idempotent delivery is replayed, allowing
 	// correlation to converge without creating a second provider-side send.
-	if err := s.markTaskDeliveryCorrelation(ctx, delivery, providerMessageID); err != nil {
-		return err
+	if delivery.Kind != protocol.DeliveryKindMessage {
+		if err := s.markTaskDeliveryCorrelation(ctx, delivery, providerMessageID); err != nil {
+			return err
+		}
 	}
 	if err := s.DeliveryStore.MarkGatewayDeliveryDelivered(
 		ctx, delivery.Namespace, delivery.ID, s.Owner, providerMessageID, outcomeAt,
@@ -2116,6 +2129,9 @@ func normalizeConfig(config Config) Config {
 	}
 	if config.DeliveryMaxAttempts <= 0 {
 		config.DeliveryMaxAttempts = defaults.DeliveryMaxAttempts
+	}
+	if config.InterimMessagesPerTask <= 0 {
+		config.InterimMessagesPerTask = defaults.InterimMessagesPerTask
 	}
 	if config.ClaimLease <= 0 {
 		config.ClaimLease = defaults.ClaimLease

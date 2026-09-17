@@ -71,6 +71,10 @@ var _ = Describe("Gateway live E2E", Ordered, func() {
 		apiPortForwardCmd     *exec.Cmd
 		eventID               string
 		taskName              string
+		taskNames             []string
+		inboundBearer         string
+		originalManagerArgs   []string
+		workerImageConfigured bool
 	)
 
 	BeforeAll(func() {
@@ -91,7 +95,10 @@ var _ = Describe("Gateway live E2E", Ordered, func() {
 			return
 		}
 
-		if taskName != "" && apiBaseURL != "" && apiToken != "" {
+		for _, taskName := range taskNames {
+			if apiBaseURL == "" || apiToken == "" {
+				break
+			}
 			By("deleting the Gateway-owned Task through the controller API")
 			if err := gatewayE2EDeleteTaskViaAPI(apiBaseURL, apiToken, taskName); err != nil {
 				_, _ = fmt.Fprintf(GinkgoWriter, "failed to delete Gateway E2E Task through the controller API: %v\n", err)
@@ -108,6 +115,8 @@ var _ = Describe("Gateway live E2E", Ordered, func() {
 			{"gatewaybinding", gatewayE2EBindingName},
 			{"gateway", gatewayE2EName},
 			{"agent", gatewayE2EAgentName},
+			{"agent", "gateway-e2e-native"},
+			{"agent", "gateway-e2e-native-legacy"},
 			{"agentruntime", gatewayE2ERuntimeName},
 			{"service", gatewayE2ERuntimeServiceName},
 			{"deployment", gatewayE2ERuntimeDeploymentName},
@@ -122,6 +131,14 @@ var _ = Describe("Gateway live E2E", Ordered, func() {
 		}
 		gatewayE2EDelete("gatewayclass", gatewayE2EClassName)
 
+		var workerImageRestoreErr error
+		if workerImageConfigured {
+			By("restoring the manager's original worker image arguments")
+			workerImageRestoreErr = gatewayE2ESetManagerArgs(managerDeploymentName, originalManagerArgs)
+			if workerImageRestoreErr != nil {
+				_, _ = fmt.Fprintf(GinkgoWriter, "failed to restore Gateway E2E worker image arguments: %v\n", workerImageRestoreErr)
+			}
+		}
 		if managerCAConfigured && managerDeploymentName != "" {
 			By("removing Gateway E2E CA trust from the manager")
 			if err := gatewayE2ERemoveManagerCATrust(managerDeploymentName); err != nil {
@@ -135,13 +152,16 @@ var _ = Describe("Gateway live E2E", Ordered, func() {
 		if !managerCAConfigured {
 			gatewayE2EDelete("configmap", gatewayE2ECAConfigMapName)
 		}
+		// Fail only after the remaining cleanup has had a chance to run.
+		Expect(workerImageRestoreErr).NotTo(HaveOccurred(), "restore Gateway E2E worker image arguments")
 	})
 
 	It("runs authenticated ingress through an external v2 runtime and delivers the result", func() {
 		adapterDNSName := fmt.Sprintf("%s.%s.svc", gatewayE2EAdapterName, namespace)
 		adapterEndpoint := fmt.Sprintf("https://%s:%d", adapterDNSName, gatewayE2EAdapterPort)
 		By("generating ephemeral Gateway authentication and TLS material")
-		inboundBearer, err := gatewayE2ERandomBearer()
+		var err error
+		inboundBearer, err = gatewayE2ERandomBearer()
 		Expect(err).NotTo(HaveOccurred())
 		outboundBearer, err := gatewayE2ERandomBearer()
 		Expect(err).NotTo(HaveOccurred())
@@ -270,6 +290,7 @@ var _ = Describe("Gateway live E2E", Ordered, func() {
 		tasks := waitForGatewayE2ETasks(eventID, 1, 3*time.Minute)
 		task := tasks[0]
 		taskName = task.Name
+		taskNames = append(taskNames, taskName)
 		Expect(task.Spec.Type).To(Equal(corev1alpha1.TaskTypeAgent))
 		Expect(task.Spec.AgentRef).NotTo(BeNil())
 		Expect(task.Spec.AgentRef.Name).To(Equal(gatewayE2EAgentName))
@@ -336,6 +357,52 @@ var _ = Describe("Gateway live E2E", Ordered, func() {
 			g.Expect(binding.Status.LastOutboundActivity).NotTo(BeNil())
 		}, time.Minute, time.Second).Should(Succeed())
 	})
+
+	for _, capable := range []bool{true, false} {
+		name := "delivers an authenticated native interim message before final"
+		if !capable {
+			name = "rejects unsupported native interim delivery without enqueueing or sending a message"
+		}
+		It(name, func() {
+			if !workerImageConfigured {
+				By("selecting the deterministic test-only native worker image")
+				var err error
+				originalManagerArgs, err = gatewayE2EManagerArgs(managerDeploymentName)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(gatewayE2ESetManagerArgs(managerDeploymentName, gatewayE2EWorkerArgs(originalManagerArgs))).To(Succeed())
+				workerImageConfigured = true
+				Expect(gatewayE2EWaitForDeployment(managerDeploymentName, 5*time.Minute)).To(Succeed())
+				stopPortForward(cancelAPIPortForward, apiPortForwardCmd)
+				apiBaseURL, cancelAPIPortForward, apiPortForwardCmd, err = startControllerAPIPortForward(gatewayE2EAPIPort)
+				Expect(err).NotTo(HaveOccurred())
+			}
+			agentName := "gateway-e2e-native"
+			if !capable {
+				agentName += "-legacy"
+				By("rolling the adapter with capability advertising explicitly disabled")
+				Expect(gatewayE2EPatchDeployment(gatewayE2EAdapterName, map[string]any{
+					"spec": map[string]any{"template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{
+						"name": "adapter", "args": []string{
+							fmt.Sprintf("--listen=:%d", gatewayE2EAdapterPort),
+							"--tls-cert-file=/var/run/orka/gateway/tls/tls.crt", "--tls-key-file=/var/run/orka/gateway/tls/tls.key", "--interim-delivery=false",
+						},
+					}}}}},
+				})).To(Succeed())
+				Expect(gatewayE2EWaitForDeployment(gatewayE2EAdapterName, 2*time.Minute)).To(Succeed())
+			}
+			waitForGatewayE2ECapability(capable)
+			Expect(applyManifestJSON(gatewayE2ENativeAgentManifest(agentName))).To(Succeed())
+			binding := gatewayE2EBindingManifest()
+			binding["spec"].(map[string]any)["agentRef"] = map[string]any{"name": agentName}
+			Expect(applyManifestJSON(binding)).To(Succeed())
+			waitForGatewayE2EReadiness(fmt.Sprintf("https://%s.%s.svc:%d", gatewayE2EAdapterName, namespace, gatewayE2EAdapterPort))
+			eventID = gatewayE2EAdmitNativeEvent(apiBaseURL, inboundBearer, agentName)
+			task := waitForGatewayE2ETasks(eventID, 1, 3*time.Minute)[0]
+			taskName = task.Name
+			taskNames = append(taskNames, taskName)
+			gatewayE2EVerifyNativeMessage(apiBaseURL, apiToken, eventID, taskName, capable)
+		})
+	}
 })
 
 func gatewayE2ERandomBearer() (string, error) {

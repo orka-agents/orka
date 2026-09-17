@@ -153,6 +153,7 @@ type GatewayEventStore interface {
 
 // GatewayDeliveryStore handles durable adapter outbox records.
 type GatewayDeliveryStore interface {
+	EnqueueGatewayMessage(ctx context.Context, request GatewayMessageEnqueue) (*GatewayDelivery, bool, error)
 	CreateGatewayDelivery(ctx context.Context, delivery *GatewayDelivery) (*GatewayDelivery, bool, error)
 	GetGatewayDelivery(ctx context.Context, namespace, id string) (*GatewayDelivery, error)
 	ListGatewayDeliveries(ctx context.Context, filter GatewayDeliveryFilter) ([]GatewayDelivery, error)

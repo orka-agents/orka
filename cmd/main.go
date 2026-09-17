@@ -288,6 +288,7 @@ func main() {
 	var gatewayTerminalRetention time.Duration
 	var gatewayDeliveryTimeout time.Duration
 	var gatewayDeliveryMaxAttempts int
+	var gatewayInterimMessagesPerTask int
 	var gatewayClaimLease time.Duration
 	var gatewayPollInterval time.Duration
 	var gatewayBatchSize int
@@ -498,6 +499,8 @@ func main() {
 		"Retention for terminal gateway events and deliveries.")
 	flag.DurationVar(&gatewayDeliveryTimeout, "gateway-delivery-timeout", 15*time.Second,
 		"Timeout for one synchronous adapter delivery call.")
+	flag.IntVar(&gatewayInterimMessagesPerTask, "gateway-interim-messages-per-task", 10,
+		"Maximum distinct accepted interim gateway messages per Task.")
 	flag.IntVar(&gatewayDeliveryMaxAttempts, "gateway-delivery-max-attempts", 10,
 		"Maximum adapter delivery attempts before dead-lettering.")
 	flag.DurationVar(&gatewayClaimLease, "gateway-claim-lease", time.Minute,
@@ -1506,7 +1509,8 @@ func main() {
 		EventExpiry:                  gatewayEventExpiry,
 		TerminalRetention:            gatewayTerminalRetention, DeliveryTimeout: gatewayDeliveryTimeout,
 		DeliveryMaxAttempts: gatewayDeliveryMaxAttempts, ClaimLease: gatewayClaimLease,
-		PollInterval: gatewayPollInterval, BatchSize: gatewayBatchSize,
+		InterimMessagesPerTask: gatewayInterimMessagesPerTask,
+		PollInterval:           gatewayPollInterval, BatchSize: gatewayBatchSize,
 	}
 	gatewayService := gatewayruntime.NewService(mgr.GetClient(), sqliteStore, sqliteStore, sqliteStore, gatewayConfig)
 	gatewayService.APIReader = mgr.GetAPIReader()

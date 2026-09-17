@@ -1262,6 +1262,17 @@ func (s *Store) ClaimNextGatewayDelivery(ctx context.Context, namespace, owner s
 	); err != nil {
 		return nil, err
 	}
+	// An expired interim is abandoned before evaluating FIFO, without waiting
+	// for maintenance. An active send lease blocks abandonment; after lease
+	// expiry, the send outcome can still be unknown.
+	if _, err := tx.ExecContext(ctx, `UPDATE gateway_deliveries SET state = ?, last_error = 'delivery expired',
+		claim_owner = '', claim_until = NULL, updated_at = ?
+		WHERE (? = '' OR namespace = ?) AND kind = ? AND expires_at <= ? AND (state IN (?, ?) OR
+		  (state = ? AND (claim_until IS NULL OR claim_until <= ?)))`,
+		store.GatewayDeliveryExpired, now, namespace, namespace, gatewayDeliveryKindMessage, now,
+		store.GatewayDeliveryPending, store.GatewayDeliveryRetryScheduled, store.GatewayDeliverySending, now); err != nil {
+		return nil, err
+	}
 	row := tx.QueryRowContext(ctx, `SELECT `+prefixedColumns("delivery", gatewayDeliveryColumns)+` FROM gateway_deliveries delivery
 		LEFT JOIN gateway_events delivery_event
 		  ON delivery_event.namespace = delivery.namespace AND delivery_event.id = delivery.event_id
@@ -1375,6 +1386,11 @@ func (s *Store) MarkGatewayDeliveryDelivered(ctx context.Context, namespace, id,
 	}
 	if rows == 0 {
 		return store.ErrConflict
+	}
+	if delivery.Kind == gatewayDeliveryKindMessage {
+		// Interim receipts belong only to their outbox row, never the terminal
+		// event correlation, Session transcript or Task completion event stream.
+		return tx.Commit()
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE gateway_events SET delivery_id = ?, provider_message_id = ?, updated_at = ?
 		WHERE namespace = ? AND id = ?`, delivery.ID, providerMessageID, now, namespace, delivery.EventID); err != nil {
@@ -1500,12 +1516,22 @@ func (s *Store) MarkGatewayDeliveryTerminal(ctx context.Context, namespace, id, 
 
 // RetryGatewayDelivery manually requeues one dead-lettered or failed delivery.
 func (s *Store) RetryGatewayDelivery(ctx context.Context, namespace, id string, now, expiresAt time.Time) (*store.GatewayDelivery, error) {
-	result, err := s.db.ExecContext(ctx, `UPDATE gateway_deliveries SET state = ?, attempt_count = 0,
+	// Starting any successor closes the interim retry window permanently.
+	// A terminal abandoned without a send also closes it: subsequent Session
+	// turns can then proceed and their rows may be retained independently.
+	result, err := s.db.ExecContext(ctx, `UPDATE gateway_deliveries AS delivery SET state = ?, attempt_count = 0,
 		manual_retry_count = manual_retry_count + 1, next_attempt_at = ?, expires_at = ?, last_error = '',
 		claim_owner = '', claim_until = NULL, updated_at = ?
-		WHERE namespace = ? AND id = ? AND state IN (?, ?)`,
+		WHERE namespace = ? AND id = ? AND state IN (?, ?)
+		AND (kind <> ? OR NOT EXISTS (
+			SELECT 1 FROM gateway_deliveries later
+			WHERE later.namespace = delivery.namespace AND later.event_id = delivery.event_id
+			  AND (later.created_at > delivery.created_at OR (later.created_at = delivery.created_at AND later.id > delivery.id))
+			  AND (later.attempt_count > 0 OR later.manual_retry_count > 0 OR
+			    (later.kind IN ('final', 'error') AND later.state IN ('Delivered', 'Failed', 'DeadLettered', 'Expired')))
+		))`,
 		store.GatewayDeliveryPending, now.UTC(), expiresAt.UTC(), now.UTC(), namespace, id,
-		store.GatewayDeliveryDeadLettered, store.GatewayDeliveryFailed,
+		store.GatewayDeliveryDeadLettered, store.GatewayDeliveryFailed, gatewayDeliveryKindMessage,
 	)
 	if err != nil {
 		return nil, err
@@ -1582,14 +1608,38 @@ func (s *Store) MaintainGatewayRecords(ctx context.Context, namespace string, no
 		result.ExpiredDeliveries = int(count)
 	}
 
-	deliveryDelete, err := tx.ExecContext(ctx, `DELETE FROM gateway_deliveries WHERE (? = '' OR namespace = ?)
-		AND updated_at < ? AND state IN (?, ?, ?, ?)`, namespace, namespace, terminalCutoff,
-		store.GatewayDeliveryDelivered, store.GatewayDeliveryFailed, store.GatewayDeliveryDeadLettered, store.GatewayDeliveryExpired)
+	// Keep every row of an event with messages until the whole event can be
+	// removed. This preserves lifetime quota, replay identity, admission order
+	// and evidence of later sends (even after attempt_count is manually reset).
+	deliveryDelete, err := tx.ExecContext(ctx, `DELETE FROM gateway_deliveries AS delivery WHERE (? = '' OR namespace = ?)
+		AND updated_at < ? AND state IN (?, ?, ?, ?)
+		AND NOT EXISTS (SELECT 1 FROM gateway_deliveries message
+			WHERE message.namespace = delivery.namespace AND message.event_id = delivery.event_id AND message.kind = ?)`, namespace, namespace, terminalCutoff,
+		store.GatewayDeliveryDelivered, store.GatewayDeliveryFailed, store.GatewayDeliveryDeadLettered, store.GatewayDeliveryExpired,
+		gatewayDeliveryKindMessage)
 	if err != nil {
 		return result, err
 	}
 	if count, rowsErr := deliveryDelete.RowsAffected(); rowsErr == nil {
 		result.DeletedDeliveries = int(count)
+	}
+
+	messageDelete, err := tx.ExecContext(ctx, `DELETE FROM gateway_deliveries WHERE (namespace, event_id) IN (
+		SELECT event.namespace, event.id FROM gateway_events event
+		WHERE (? = '' OR event.namespace = ?) AND event.updated_at < ?
+		  AND event.state IN (?, ?, ?, ?) AND (event.state <> ? OR event.delivery_id <> '')
+		  AND NOT EXISTS (SELECT 1 FROM gateway_deliveries live
+			WHERE live.namespace = event.namespace AND live.event_id = event.id
+			  AND (live.updated_at >= ? OR live.state NOT IN (?, ?, ?, ?)))
+	)`, namespace, namespace, terminalCutoff,
+		store.GatewayEventCompleted, store.GatewayEventRejected, store.GatewayEventDeadLettered, store.GatewayEventExpired,
+		store.GatewayEventExpired, terminalCutoff,
+		store.GatewayDeliveryDelivered, store.GatewayDeliveryFailed, store.GatewayDeliveryDeadLettered, store.GatewayDeliveryExpired)
+	if err != nil {
+		return result, err
+	}
+	if count, rowsErr := messageDelete.RowsAffected(); rowsErr == nil {
+		result.DeletedDeliveries += int(count)
 	}
 
 	terminalEvents, err := listGatewayEventsForMaintenance(ctx, tx, namespace, terminalCutoff)
@@ -1716,6 +1766,9 @@ func createGatewayDeliveryTx(ctx context.Context, tx *sql.Tx, delivery *store.Ga
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return nil, false, err
 	}
+	if err := advanceGatewayDeliveryOrderTx(ctx, tx, delivery); err != nil {
+		return nil, false, err
+	}
 	metadataJSON, err := marshalStringMap(delivery.Metadata)
 	if err != nil {
 		return nil, false, err
@@ -1750,9 +1803,11 @@ func createGatewayDeliveryTx(ctx context.Context, tx *sql.Tx, delivery *store.Ga
 		}
 		return existing, false, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE gateway_events SET delivery_id = ?, updated_at = ?
-		WHERE namespace = ? AND id = ?`, delivery.ID, delivery.UpdatedAt.UTC(), delivery.Namespace, delivery.EventID); err != nil {
-		return nil, false, err
+	if delivery.Kind != gatewayDeliveryKindMessage {
+		if _, err := tx.ExecContext(ctx, `UPDATE gateway_events SET delivery_id = ?, updated_at = ?
+			WHERE namespace = ? AND id = ?`, delivery.ID, delivery.UpdatedAt.UTC(), delivery.Namespace, delivery.EventID); err != nil {
+			return nil, false, err
+		}
 	}
 	copy := *delivery
 	return &copy, true, nil
@@ -1840,7 +1895,8 @@ func getGatewayDeliveryByIdempotencyQuery(
 
 func getGatewayDeliveryByEventQuery(ctx context.Context, q queryRower, namespace, eventID string) (*store.GatewayDelivery, error) {
 	row := q.QueryRowContext(ctx, `SELECT `+gatewayDeliveryColumns+` FROM gateway_deliveries
-		WHERE namespace = ? AND event_id = ? ORDER BY created_at, id LIMIT 1`, namespace, eventID)
+		WHERE namespace = ? AND event_id = ? AND kind IN (?, ?) ORDER BY created_at, id LIMIT 1`,
+		namespace, eventID, gatewayDeliveryKindFinal, gatewayDeliveryKindError)
 	delivery, err := scanGatewayDelivery(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
@@ -1973,6 +2029,8 @@ func validateGatewayDelivery(delivery *store.GatewayDelivery) error {
 	if !store.IsValidGatewayDeliveryState(delivery.State) {
 		return store.ValidationErrorf("unsupported gateway delivery state %q", delivery.State)
 	}
+	// Generic creation, terminal projection and expiry must never admit a
+	// message: only EnqueueGatewayMessage owns its quota and lifecycle checks.
 	if delivery.Kind != gatewayDeliveryKindFinal && delivery.Kind != gatewayDeliveryKindError {
 		return store.ValidationErrorf("unsupported gateway delivery kind %q", delivery.Kind)
 	}

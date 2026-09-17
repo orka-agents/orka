@@ -26,6 +26,9 @@ Defaults:
 | Event/delivery expiry | 24h |
 | Delivery timeout | 15s |
 | Delivery attempts | 10 |
+| Distinct accepted interim messages per Task | 10 (`--gateway-interim-messages-per-task`) |
+| Interim message text | 16 KiB UTF-8 |
+| Ingress and terminal text | 64 KiB |
 | Terminal retention | 720h (30 days) |
 | Claim lease | 1m |
 | Default persistent volume request | 1Gi |
@@ -66,6 +69,16 @@ Admission pins the Agent UID, not its generation or execution kind. Agent edits 
 
 Both paths consume the canonical Session transcript through the admitted user message, without copying external text into the Task CR or adding the current prompt twice. Native AI startup fails closed when a required transcript has no non-empty final user turn. Gateway terminal projection—not generic Task finalization—appends the canonical assistant message, creates the delivery, and releases the Session lock.
 
+## Interim messages
+
+An adapter may advertise optional `interimDelivery: true` under `orka.gateway.v1`. Only then can a Running gateway Task enqueue a bounded `kind: message` delivery. Absent/false capability means final/error-only operation; no message is enqueued or sent. This adds a **kind**, not delivery statuses: existing `final`/`error` meaning and `delivered`/`retryableError`/`nonRetryableError` receipts are unchanged.
+
+Interim text is kept in delivery records, not in the Task CR, final result, or canonical Session transcript. It does not complete the event, annotate the Task as delivered, or unlock the Session. Use the gateway delivery view for progress; normal terminal projection still owns completion and history.
+
+The controller limit is `--gateway-interim-messages-per-task=10`. Supply a positive value to change it; the setting is not a per-worker routing option. Every distinct accepted message counts for that Task's lifetime, including failed/expired messages. An exact request replay returns the retained receipt without another enqueue or quota charge. Text is limited to 16 KiB before sanitization, without silent truncation; terminal text remains bounded at 64 KiB.
+
+PR1 supplies `POST /internal/v1/tasks/{namespace}/{taskName}/gateway-messages`, accepting JSON `content` and stable `requestID`, with authentic current native Pod/Job/Task UID authorization. New admission returns HTTP 202; exact replay returns HTTP 200. Both contain `deliveryID`, current durable `status`, and `created`. Unsupported capability returns HTTP 409 with `error.code: interim_delivery_unsupported` and no enqueue. This is not an operator/admin send endpoint. Production native/ACP agent-facing tools remain PR2 work after PR1 merges; approvals are excluded and need a separate ADR.
+
 ## Task and Session access
 
 Gateway-created Tasks remain ordinary Orka Task objects for controller execution, but their CRs contain no external message text; the prompt is loaded from the bounded, task-owned Session transcript. Public Task list/get/log/result/event/trace/fork surfaces require both the ordinary Task permission and gateway-read authorization for the owning Gateway. Destructive Task actions and approval decisions additionally require gateway-operate authorization. The default Helm and Kustomize installs also create a fail-closed `ValidatingAdmissionPolicy` that permits direct Kubernetes create/update/delete of gateway-owned Tasks only from the owning Orka controller or trusted worker ServiceAccounts. Namespace-isolated Helm releases scope the policy by the immutable Gateway namespace encoded in `requestedBy.issuer`, so multiple releases do not deny one another and coordinated workers can create inherited child Tasks. Canonical gateway Sessions are hidden from generic Session, Session-event, transcript-search, and chat-loading surfaces; gateway event/delivery APIs are the supported operator view.
@@ -92,6 +105,8 @@ orka gateway deliveries retry '<delivery-id>'
 ```
 
 Manual retry preserves the stable delivery/idempotency ID, resets the bounded attempt window, extends expiry by 24 hours, and increments `manualRetryCount`. Expired ingress events are not automatically replayed because their original sender/context authorization may no longer be valid.
+
+Within an event, live interim predecessors drain in order before later messages and final/error. Permanent failure, exhausted attempts, or expiry abandons a message so terminal delivery can proceed. Capability withdrawal is rechecked before sending and prevents a queued interim post. **An earlier message cannot be manually revived once any later delivery has started**, including Sending, uncertain, or subsequently expired/abandoned attempts. Do not regenerate IDs to work around this fence. Terminal manual retry is unchanged. Replaying an old delivered message ID after terminal must return its original provider correlation without sending again.
 
 ## Backup and restore
 
@@ -141,6 +156,10 @@ ID turns a safe duplicate into a second real side effect.
 
 The adapter wire contract is exact-versioned. The current controller accepts only `orka.gateway.v1`; `adapterVersion` is informational and capabilities are readiness inputs, not a version-negotiation mechanism. Unknown JSON fields are rejected. There is no implied N-1 or N+1 adapter compatibility: a controller and adapter may be rolled independently only while both continue to speak exactly `orka.gateway.v1` and the adapter still advertises every capability required by its GatewayClass.
 
+The interim-delivery extension requires **controller-first rollout**. New controllers accept old adapters without the capability. Older strict controllers reject the `interimDelivery` field: an unchanged `orka.gateway.v1` discriminator does not imply reverse-skew compatibility. The reference adapter now advertises true by default; use `--interim-delivery=false` to omit the field for legacy controllers.
+
+Before an older-controller rollback, pause ingress/new interim work, drain or abandon outstanding message deliveries with the new controller, and disable adapter advertisement. Verify observed capabilities reflect the opt-out before replacing the controller. Disabling the flag alone does not make retained pending message rows safe for an old dispatcher. No schema change accompanies this feature, but normal behavioral, CRD, and database rollback checks still apply.
+
 Use this rollout order:
 
 1. Take the consistency backup above and export the currently installed Gateway CRDs.
@@ -170,11 +189,11 @@ For an adapter that requires real routing identities, opt in with `--delivery-fi
 }
 ```
 
-Populate the placeholders only from retained delivery routing values you are authorized to inspect and reuse, for an explicitly approved test destination. Do not fabricate identities or use this flag to bypass adapter authorization. If you cannot obtain the retained values through authorized access, stop rather than switching identities or relaxing access controls. **This check sends a real message**, `[Orka conformance check] No action required.`, followed by a byte-identical duplicate to verify idempotency. Each invocation uses fresh delivery/idempotency IDs; running it again can produce another visible message. The authentication and oversized-text/body rejection probes use the same routing identities. They should not deliver messages on a conforming adapter, but a broken adapter may deliver them. There are no automatic retries.
+Populate the placeholders only from retained delivery routing values you are authorized to inspect and reuse, for an explicitly approved test destination. Do not fabricate identities or use this flag to bypass adapter authorization. If you cannot obtain the retained values through authorized access, stop rather than switching identities or relaxing access controls. **This check sends real messages**, with fixed text `[Orka conformance check] No action required.` Without interim capability it sends one final plus its byte-identical duplicate. With capability it sends two distinct interim messages before final, duplicates the first interim and final, and replays the first interim after final to check stable receipts: **three visible sends** on a conforming adapter. It also adds an oversized-interim rejection probe only when capable; a non-capable adapter receives no message probes at all. Use an originating event that has not yet received terminal delivery for the interim check. Each invocation uses fresh delivery/idempotency IDs; running again can produce more visible messages or be rejected for an already-closed event. Do not fabricate a replacement event identity to bypass that constraint. The authentication and oversized-text/body rejection probes use the same routing identities. They should not deliver messages on a conforming adapter, but a broken adapter may deliver them. There are no automatic retries.
 
 The fixture cannot supply text, credentials, delivery/idempotency IDs, or metadata. Unknown fields, malformed/trailing JSON, oversized files, and invalid routing identities fail before network requests. Fixture identities are redacted from checker results, and loader diagnostics do not include file paths or contents. Keep the fixture private; it is not a support-bundle artifact. Continue to supply the bearer token through the configured environment variable and keep TLS verification enabled. `--delivery-fixture` cannot be combined with `--reference-fixtures`, which sends reference-adapter fault deliveries. Without the new flag, the CLI retains its synthetic routing and fixed IDs; non-mutating readiness probes are unchanged.
 
-The **Gateway Live E2E** GitHub Actions workflow deploys the TLS reference adapter and a deterministic external AgentRuntime in Kind. It validates private-CA trust, GatewayClass/Gateway/GatewayBinding readiness, invalid bearer rejection, accepted and duplicate ingress, runtime-backed Task execution, completed event state, delivered final output, provider correlation, and duplicate safety. It does not run the conformance CLI and does not replace conformance testing against each adapter build before rollout.
+The **Gateway Live E2E** GitHub Actions workflow deploys the TLS reference adapter, a deterministic external AgentRuntime, and a test-only native worker image in Kind. It preserves private-CA trust, readiness, ingress deduplication, and external-v2 final-only/no-Job coverage. Native coverage creates real gateway Tasks and controller Jobs/Pods, submits through the authenticated internal endpoint, verifies admission/replay, observes a delivered interim receipt while the Task is still Running, and only then releases final completion. A rolled adapter with `--interim-delivery=false` must reject the native message with no enqueue and still deliver final. Local start/release fences are driven through Kubernetes exec; no production authorization exception or agent-facing tool is added. CI requires all three specs, retaining the zero-spec guard. It does not run the conformance CLI and does not replace conformance testing against each adapter build before rollout.
 
 If a future release introduces another wire version, controller and adapter release notes must define an explicit dual-version overlap. Do not infer compatibility from similar payloads or from the adapter's product version.
 
@@ -203,7 +222,7 @@ resources. This release provides no SQLite schema conversion in either direction
 
 ## Cleanup
 
-The maintenance loop marks pending work expired at its deadline, releases Session reservations, removes terminal deliveries older than retention, and compacts eligible terminal events into small deduplication tombstones before deleting their full ledger rows. It prunes the corresponding Gateway transcript messages once their event and reply records have expired. Active work, queued events, unsettled replies, and newer history keep the Session from being reclaimed.
+The maintenance loop marks pending work expired at its deadline, releases Session reservations, removes terminal deliveries older than retention (interim rows and their event ordering evidence remain until the owning event can be reclaimed), and compacts eligible terminal events into small deduplication tombstones before deleting their full ledger rows. It prunes the corresponding Gateway transcript messages once their event and reply records have expired. Active work, queued events, unsettled replies, and newer history keep the Session from being reclaimed.
 
 For Sessions with ACP turns, retention records a durable cleanup intent, retires the exact Session runtime, and archives the turn receipts before removing the Session. Controller restart or a storage failure leaves the intent available for retry. Completed Tasks, including Tasks already waiting for deletion, can then finish their normal cleanup. Shared runtime pools remain available. The Kubernetes garbage collector may remove its own `foregroundDeletion` finalizer from an already-deleting Task; it cannot use that permission to change the Task or remove Orka's finalizer.
 
