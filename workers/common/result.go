@@ -49,13 +49,6 @@ var resultStdoutMarkerPath = resultStdoutMarkerFile
 // retryWait is stubbed by tests to avoid the multi-minute backoff window.
 var retryWait retryWaitFunc = waitForRetry
 
-// SubmitResult sends the task result to the controller via HTTP POST.
-// It preserves the legacy background-context behavior for callers without a
-// worker lifecycle context.
-func SubmitResult(result []byte) error {
-	return SubmitResultContext(context.Background(), result)
-}
-
 // SubmitResultContext sends the task result to the controller via HTTP POST.
 // It reads ORKA_RESULT_ENDPOINT or constructs the URL from ORKA_CONTROLLER_URL.
 // Retryable failures use bounded exponential backoff and stop when ctx is canceled.
@@ -87,45 +80,17 @@ func SubmitResultContext(ctx context.Context, result []byte) error {
 		return err
 	}
 
-	return doPostWithRetryContext(
-		ctx,
-		"result submission",
-		endpoint,
-		result,
-		workerServiceAccountToken(),
-		"application/octet-stream",
-		30*time.Second,
+	return doPostWithRetry(
+		ctx, "result submission", endpoint, result, workerServiceAccountToken(),
+		"application/octet-stream", 30*time.Second, retryWait, resultMaxRetries, nil,
 	)
 }
 
 type retryWaitFunc func(context.Context, time.Duration) error
 
-func doPostWithRetryContext(
-	ctx context.Context,
-	operation string,
-	endpoint string,
-	data []byte,
-	saToken, contentType string,
-	timeout time.Duration,
-) error {
-	return doPostWithRetry(ctx, operation, endpoint, data, saToken, contentType, timeout, retryWait)
-}
-
+// doPostWithRetry posts data with bounded exponential backoff. A nil wait uses
+// the real timer; authorize, when set, signs each attempt (including retries).
 func doPostWithRetry(
-	ctx context.Context,
-	operation string,
-	endpoint string,
-	data []byte,
-	saToken, contentType string,
-	timeout time.Duration,
-	wait retryWaitFunc,
-) error {
-	return doPostWithRetryAuthorization(
-		ctx, operation, endpoint, data, saToken, contentType, timeout, wait, resultMaxRetries, nil,
-	)
-}
-
-func doPostWithRetryAuthorization(
 	ctx context.Context,
 	operation, endpoint string,
 	data []byte,
@@ -156,7 +121,7 @@ func doPostWithRetryAuthorization(
 		if authorize != nil {
 			client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 		}
-		lastErr = doPostOnceWithAuthorizedClient(ctx, client, endpoint, data, saToken, contentType, authorize)
+		lastErr = doPostOnce(ctx, client, endpoint, data, saToken, contentType, authorize)
 		if lastErr == nil {
 			return nil
 		}
@@ -228,17 +193,7 @@ func workerServiceAccountToken() string {
 	return strings.TrimSpace(os.Getenv(workerenv.ServiceAccountToken))
 }
 
-func doPostOnceWithClient(
-	ctx context.Context,
-	client *http.Client,
-	endpoint string,
-	data []byte,
-	saToken, contentType string,
-) error {
-	return doPostOnceWithAuthorizedClient(ctx, client, endpoint, data, saToken, contentType, nil)
-}
-
-func doPostOnceWithAuthorizedClient(
+func doPostOnce(
 	ctx context.Context,
 	client *http.Client,
 	endpoint string,
@@ -394,10 +349,16 @@ func ParseStructuredResult(raw string) *StructuredResult {
 // TruncateStructuredSummary bounds human-readable result summaries while making
 // truncation explicit to downstream coordinators.
 func TruncateStructuredSummary(summary string) string {
-	if len(summary) <= MaxStructuredSummaryChars {
+	return TruncateSummary(summary, MaxStructuredSummaryChars)
+}
+
+// TruncateSummary cuts summary to limit bytes and appends an explicit marker
+// carrying the original length so coordinators can tell truncation happened.
+func TruncateSummary(summary string, limit int) string {
+	if len(summary) <= limit {
 		return summary
 	}
-	return summary[:MaxStructuredSummaryChars] + fmt.Sprintf(
+	return summary[:limit] + fmt.Sprintf(
 		"\n[summary truncated, full summary: %d chars]",
 		len(summary),
 	)

@@ -175,14 +175,14 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorCompletedAutomer
 	if mutation.Status != repositoryMonitorRunPhaseSucceeded && !pr.Merged {
 		return false, nil
 	}
-	targetSHA := firstNonEmptyIssueAction(strings.TrimSpace(run.TargetSHA), strings.TrimSpace(mutation.TargetSHA))
+	targetSHA := firstNonEmptyString(strings.TrimSpace(run.TargetSHA), strings.TrimSpace(mutation.TargetSHA))
 	if targetSHA == "" || pr.HeadSHA != targetSHA || (strings.TrimSpace(mutation.TargetSHA) != "" && pr.HeadSHA != strings.TrimSpace(mutation.TargetSHA)) {
 		return false, nil
 	}
 	if mutation.Status != repositoryMonitorRunPhaseSucceeded {
 		mutation.Status = repositoryMonitorRunPhaseSucceeded
 		mutation.Error = ""
-		mutation.ExternalID = firstNonEmptyIssueAction(pr.MergeCommitSHA, mutation.ExternalID)
+		mutation.ExternalID = firstNonEmptyString(pr.MergeCommitSHA, mutation.ExternalID)
 		if err := r.updateRepositoryMonitorGitHubMutation(ctx, monitor, mutation); err != nil {
 			return false, err
 		}

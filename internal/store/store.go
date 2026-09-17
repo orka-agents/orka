@@ -123,12 +123,6 @@ type SessionTurnCommitter interface {
 	) error
 }
 
-// ExpiringSessionLockStore supports crash-recoverable transient locks. Durable
-// Task locks continue to use SessionStore.AcquireLock without an expiry.
-type ExpiringSessionLockStore interface {
-	AcquireLockUntil(ctx context.Context, namespace, name, ownerName, ownerUID string, expiresAt time.Time) error
-}
-
 // FencedSessionWriteStore binds transcript and token writes to the exact active
 // Task or transient lock owner so a stale owner cannot write after takeover.
 type FencedSessionWriteStore interface {

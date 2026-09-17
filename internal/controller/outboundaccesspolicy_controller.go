@@ -292,16 +292,22 @@ func outboundTokenRequestControlledBy(policy *corev1alpha1.OutboundAccessPolicy,
 	return policy != nil && object != nil && metav1.IsControlledBy(object, policy)
 }
 
+// outboundTokenRequestMetadataEqual reports whether current is controlled by
+// policy and carries the desired labels, annotations, and owner references.
+func outboundTokenRequestMetadataEqual(policy *corev1alpha1.OutboundAccessPolicy, current, desired metav1.Object) bool {
+	return current != nil && desired != nil && outboundTokenRequestControlledBy(policy, current) &&
+		reflect.DeepEqual(current.GetLabels(), desired.GetLabels()) &&
+		reflect.DeepEqual(current.GetAnnotations(), desired.GetAnnotations()) &&
+		reflect.DeepEqual(current.GetOwnerReferences(), desired.GetOwnerReferences())
+}
+
 func outboundTokenRequestRoleEqual(
 	policy *corev1alpha1.OutboundAccessPolicy,
 	current *rbacv1.Role,
 	desired *rbacv1.Role,
 ) bool {
-	return current != nil && desired != nil && outboundTokenRequestControlledBy(policy, current) &&
-		reflect.DeepEqual(current.Rules, desired.Rules) &&
-		reflect.DeepEqual(current.Labels, desired.Labels) &&
-		reflect.DeepEqual(current.Annotations, desired.Annotations) &&
-		reflect.DeepEqual(current.OwnerReferences, desired.OwnerReferences)
+	return current != nil && desired != nil && outboundTokenRequestMetadataEqual(policy, current, desired) &&
+		reflect.DeepEqual(current.Rules, desired.Rules)
 }
 
 func outboundTokenRequestRoleBindingEqual(
@@ -309,12 +315,9 @@ func outboundTokenRequestRoleBindingEqual(
 	current *rbacv1.RoleBinding,
 	desired *rbacv1.RoleBinding,
 ) bool {
-	return current != nil && desired != nil && outboundTokenRequestControlledBy(policy, current) &&
+	return current != nil && desired != nil && outboundTokenRequestMetadataEqual(policy, current, desired) &&
 		current.RoleRef == desired.RoleRef &&
-		reflect.DeepEqual(current.Subjects, desired.Subjects) &&
-		reflect.DeepEqual(current.Labels, desired.Labels) &&
-		reflect.DeepEqual(current.Annotations, desired.Annotations) &&
-		reflect.DeepEqual(current.OwnerReferences, desired.OwnerReferences)
+		reflect.DeepEqual(current.Subjects, desired.Subjects)
 }
 
 func (r *OutboundAccessPolicyReconciler) desiredOutboundTokenRequestGrant(
@@ -502,21 +505,7 @@ func (r *OutboundAccessPolicyReconciler) revokeStaleOutboundTokenRequestBindings
 	desired *rbacv1.RoleBinding,
 	desiredReady bool,
 ) (bool, error) {
-	deleted := false
-	for i := range bindings {
-		binding := &bindings[i]
-		if !outboundTokenRequestControlledBy(policy, binding) {
-			continue
-		}
-		if desired != nil && binding.Name == desired.Name && desiredReady {
-			continue
-		}
-		if err := r.Delete(ctx, binding); err != nil && !apierrors.IsNotFound(err) {
-			return false, fmt.Errorf("revoke TokenRequest RoleBinding %s/%s: %w", binding.Namespace, binding.Name, err)
-		}
-		deleted = true
-	}
-	return deleted, nil
+	return revokeStaleOutboundTokenRequestObjects[rbacv1.RoleBinding](ctx, r.Client, policy, bindings, desired, desiredReady, "revoke TokenRequest RoleBinding")
 }
 
 func (r *OutboundAccessPolicyReconciler) revokeStaleOutboundTokenRequestRoles(
@@ -526,17 +515,35 @@ func (r *OutboundAccessPolicyReconciler) revokeStaleOutboundTokenRequestRoles(
 	desired *rbacv1.Role,
 	desiredReady bool,
 ) (bool, error) {
+	return revokeStaleOutboundTokenRequestObjects[rbacv1.Role](ctx, r.Client, policy, roles, desired, desiredReady, "delete TokenRequest Role")
+}
+
+// revokeStaleOutboundTokenRequestObjects deletes every policy-controlled object
+// except the desired one once it is ready. Objects the policy does not control
+// are never touched.
+func revokeStaleOutboundTokenRequestObjects[T any, PT interface {
+	*T
+	client.Object
+}](
+	ctx context.Context,
+	writer client.Writer,
+	policy *corev1alpha1.OutboundAccessPolicy,
+	objects []T,
+	desired PT,
+	desiredReady bool,
+	errPrefix string,
+) (bool, error) {
 	deleted := false
-	for i := range roles {
-		role := &roles[i]
-		if !outboundTokenRequestControlledBy(policy, role) {
+	for i := range objects {
+		object := PT(&objects[i])
+		if !outboundTokenRequestControlledBy(policy, object) {
 			continue
 		}
-		if desired != nil && role.Name == desired.Name && desiredReady {
+		if desired != nil && object.GetName() == desired.GetName() && desiredReady {
 			continue
 		}
-		if err := r.Delete(ctx, role); err != nil && !apierrors.IsNotFound(err) {
-			return false, fmt.Errorf("delete TokenRequest Role %s/%s: %w", role.Namespace, role.Name, err)
+		if err := writer.Delete(ctx, object); err != nil && !apierrors.IsNotFound(err) {
+			return false, fmt.Errorf("%s %s/%s: %w", errPrefix, object.GetNamespace(), object.GetName(), err)
 		}
 		deleted = true
 	}

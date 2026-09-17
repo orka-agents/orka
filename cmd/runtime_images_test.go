@@ -58,7 +58,7 @@ func TestConfiguredACPRuntimeAvailabilityRequiresModelConnection(t *testing.T) {
 			builder := api.NewSystemPromptBuilder(
 				fake.NewClientBuilder().WithScheme(scheme).Build(), "orka-system", availability,
 			)
-			prompt, err := builder.BuildSystemPrompt(t.Context(), "", api.PromptModeMinimal)
+			prompt, err := builder.BuildSystemPrompt(t.Context(), "")
 			if err != nil {
 				t.Fatal(err)
 			}

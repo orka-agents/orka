@@ -57,7 +57,7 @@ func TestRetryProvider_Complete_RetriesOn429(t *testing.T) {
 			{&CompletionResponse{Content: "success"}, nil},
 		},
 	}
-	rp := NewRetryProvider(mock, 3)
+	rp := NewRetryProvider(mock)
 	rp.baseDelay = time.Millisecond
 	resp, err := rp.Complete(context.Background(), &CompletionRequest{})
 	if err != nil {
@@ -79,7 +79,7 @@ func TestRetryProvider_Complete_RetriesOn503(t *testing.T) {
 			{&CompletionResponse{Content: "ok"}, nil},
 		},
 	}
-	rp := NewRetryProvider(mock, 3)
+	rp := NewRetryProvider(mock)
 	rp.baseDelay = time.Millisecond
 	resp, err := rp.Complete(context.Background(), &CompletionRequest{})
 	if err != nil {
@@ -100,7 +100,7 @@ func TestRetryProvider_Complete_NoRetryOn401(t *testing.T) {
 			{nil, &ProviderError{StatusCode: 401, Message: "unauthorized"}},
 		},
 	}
-	rp := NewRetryProvider(mock, 3)
+	rp := NewRetryProvider(mock)
 	rp.baseDelay = time.Millisecond
 	_, err := rp.Complete(context.Background(), &CompletionRequest{})
 	if err == nil {
@@ -118,7 +118,7 @@ func TestRetryProvider_Complete_NoRetryOn400(t *testing.T) {
 			{nil, &ProviderError{StatusCode: 400, Message: "bad request"}},
 		},
 	}
-	rp := NewRetryProvider(mock, 3)
+	rp := NewRetryProvider(mock)
 	rp.baseDelay = time.Millisecond
 	_, err := rp.Complete(context.Background(), &CompletionRequest{})
 	if err == nil {
@@ -139,7 +139,7 @@ func TestRetryProvider_Complete_ExceedsMaxRetries(t *testing.T) {
 			{nil, &ProviderError{StatusCode: 429, Message: "rate limited"}},
 		},
 	}
-	rp := NewRetryProvider(mock, 3)
+	rp := NewRetryProvider(mock)
 	rp.baseDelay = time.Millisecond
 	_, err := rp.Complete(context.Background(), &CompletionRequest{})
 	if err == nil {
@@ -159,7 +159,7 @@ func TestRetryProvider_Complete_ContextCancelled(t *testing.T) {
 		},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	rp := NewRetryProvider(mock, 3)
+	rp := NewRetryProvider(mock)
 	rp.baseDelay = 5 * time.Second // long enough to cancel during sleep
 	go func() {
 		time.Sleep(50 * time.Millisecond)
@@ -179,7 +179,7 @@ func TestRetryProvider_Stream_PeekRetry(t *testing.T) {
 			{{Content: "hello"}, {Content: " world"}, {Done: true}},
 		},
 	}
-	rp := NewRetryProvider(mock, 3)
+	rp := NewRetryProvider(mock)
 	rp.baseDelay = time.Millisecond
 	ch, err := rp.Stream(context.Background(), &CompletionRequest{})
 	if err != nil {
@@ -207,7 +207,7 @@ func TestRetryProvider_Stream_PeekPassthrough(t *testing.T) {
 			{{Content: "chunk1"}, {Content: "chunk2"}, {Done: true}},
 		},
 	}
-	rp := NewRetryProvider(mock, 3)
+	rp := NewRetryProvider(mock)
 	ch, err := rp.Stream(context.Background(), &CompletionRequest{})
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
@@ -233,7 +233,7 @@ func TestRetryProvider_Stream_AllRetriesExhausted(t *testing.T) {
 			{{Error: &ProviderError{StatusCode: 503, Message: "unavailable"}, Done: true}},
 		},
 	}
-	rp := NewRetryProvider(mock, 3)
+	rp := NewRetryProvider(mock)
 	rp.baseDelay = time.Millisecond
 	ch, err := rp.Stream(context.Background(), &CompletionRequest{})
 	if err != nil {
@@ -251,21 +251,21 @@ func TestRetryProvider_Stream_AllRetriesExhausted(t *testing.T) {
 }
 
 func TestRetryProvider_DefaultMaxRetries(t *testing.T) {
-	rp := NewRetryProvider(&retryMockProvider{name: "test"}, 0)
+	rp := NewRetryProvider(&retryMockProvider{name: "test"})
 	if rp.maxRetries != 3 {
 		t.Errorf("expected default maxRetries=3, got %d", rp.maxRetries)
 	}
 }
 
 func TestRetryProvider_Name(t *testing.T) {
-	rp := NewRetryProvider(&retryMockProvider{name: "myname"}, 0)
+	rp := NewRetryProvider(&retryMockProvider{name: "myname"})
 	if rp.Name() != "myname" {
 		t.Errorf("expected 'myname', got %q", rp.Name())
 	}
 }
 
 func TestRetryProvider_Backoff(t *testing.T) {
-	rp := NewRetryProvider(&retryMockProvider{name: "test"}, 3)
+	rp := NewRetryProvider(&retryMockProvider{name: "test"})
 
 	// Attempt 0: ~1s base
 	d0 := rp.backoff(0)
@@ -287,7 +287,7 @@ func TestRetryProvider_Backoff(t *testing.T) {
 }
 
 func TestRetryProvider_Backoff_CappedAtMaxDelay(t *testing.T) {
-	rp := NewRetryProvider(&retryMockProvider{name: "test"}, 3)
+	rp := NewRetryProvider(&retryMockProvider{name: "test"})
 	rp.maxDelay = 5 * time.Second
 
 	// High attempt should be capped
@@ -302,7 +302,8 @@ func TestRetryProvider_Stream_EmptyChannel(t *testing.T) {
 		name:          "test",
 		streamResults: [][]StreamChunk{{}}, // empty stream
 	}
-	rp := NewRetryProvider(mock, 1)
+	rp := NewRetryProvider(mock)
+	rp.maxRetries = 1
 	ch, err := rp.Stream(context.Background(), &CompletionRequest{})
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
@@ -323,7 +324,7 @@ func TestRetryProvider_Stream_NonRetryableFirstChunk(t *testing.T) {
 			{{Error: &ProviderError{StatusCode: 400, Message: "bad request"}, Done: true}},
 		},
 	}
-	rp := NewRetryProvider(mock, 3)
+	rp := NewRetryProvider(mock)
 	rp.baseDelay = time.Millisecond
 	ch, err := rp.Stream(context.Background(), &CompletionRequest{})
 	if err != nil {

@@ -1053,7 +1053,7 @@ func TestNewAuthMiddleware_InvalidAuthorizationPreventsXAPIKeyFallback(t *testin
 	}
 }
 
-func TestNewAuthMiddleware_CustomTokenSource(t *testing.T) {
+func TestNewAuthMiddleware_XAPIKeyTokenReachesTokenReview(t *testing.T) {
 	tokenCache.Range(func(key, _ any) bool {
 		tokenCache.Delete(key)
 		return true
@@ -1083,15 +1083,13 @@ func TestNewAuthMiddleware_CustomTokenSource(t *testing.T) {
 		Build()
 
 	app := fiber.New()
-	app.Use(NewAuthMiddleware(fakeClient, AuthConfig{
-		TokenSources: []AuthTokenSource{{Header: "X-Custom-Token"}},
-	}))
+	app.Use(NewAuthMiddleware(fakeClient, AuthConfig{}))
 	app.Get("/test", func(ctx fiber.Ctx) error {
 		return ctx.SendString("OK")
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/test", nil)
-	req.Header.Set("X-Custom-Token", "custom-source-token")
+	req.Header.Set(XAPIKeyHeader, "custom-source-token")
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("Test request failed: %v", err)

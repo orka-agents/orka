@@ -242,10 +242,7 @@ func NewChatHandler(c client.Client, apiReader client.Reader, sm *controller.Ses
 }
 
 func (ch *ChatHandler) contextTokenAuthorizationReader() client.Reader {
-	if ch.apiReader != nil {
-		return ch.apiReader
-	}
-	return ch.client
+	return uncachedReaderOr(ch.apiReader, ch.client)
 }
 
 // blockedNamespaces that cannot be targeted by chat requests.
@@ -388,7 +385,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	// Build system prompt
 	discoveryClient := newExternalToolClient(ch.client, ch.kubeClient, userInfo, namespace, ch.watchNamespace, ch.enforceNamespaceIsolation, ch.gatewayEventStore)
 	promptBuilder := NewSystemPromptBuilder(externalToolDiscoveryClient{Client: discoveryClient}, namespace, ch.config.RuntimeAvailability)
-	systemPrompt, err := promptBuilder.BuildSystemPrompt(ctx, req.SystemPrompt, PromptModeFull)
+	systemPrompt, err := promptBuilder.BuildSystemPrompt(ctx, req.SystemPrompt)
 	if err != nil {
 		chatLog.Error(err, "failed to build system prompt")
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to build system prompt")
@@ -1489,7 +1486,7 @@ func (ch *ChatHandler) abandonChatDeletionWaiter(namespace, sessionID string, re
 // wrapWithRetryAndFallback wraps a provider with retry logic and adds fallback
 // providers if the agent has them configured.
 func (ch *ChatHandler) wrapWithRetryAndFallback(ctx context.Context, c fiber.Ctx, provider llm.Provider, req ChatRequest, namespace string) (llm.Provider, error) {
-	var resultProvider llm.Provider = llm.NewRetryProvider(provider, 0)
+	var resultProvider llm.Provider = llm.NewRetryProvider(provider)
 
 	if req.AgentRef == "" {
 		return resultProvider, nil
@@ -1542,7 +1539,7 @@ func (ch *ChatHandler) wrapWithRetryAndFallback(ctx context.Context, c fiber.Ctx
 		}
 
 		fallbacks = append(fallbacks, llm.FallbackEntry{
-			Provider: llm.NewRetryProvider(fbProvider, 0),
+			Provider: llm.NewRetryProvider(fbProvider),
 			Model:    fbModel,
 		})
 	}

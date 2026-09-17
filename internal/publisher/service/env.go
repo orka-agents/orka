@@ -3,10 +3,9 @@ package service
 import (
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
-	"time"
 
+	"github.com/orka-agents/orka/internal/envutil"
 	"github.com/orka-agents/orka/internal/publisher"
 )
 
@@ -60,7 +59,7 @@ func LoadConfigFromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	allowDevelopmentFallbacks, err := parseBoolEnv(EnvAllowDevelopmentFallbacks)
+	allowDevelopmentFallbacks, err := envutil.Bool(EnvAllowDevelopmentFallbacks)
 	if err != nil {
 		return Config{}, err
 	}
@@ -73,19 +72,19 @@ func LoadConfigFromEnv() (Config, error) {
 		return Config{}, err
 	}
 	config := Config{
-		ListenAddress:                  envDefault(EnvListenAddress, defaultListenAddress),
+		ListenAddress:                  envutil.String(EnvListenAddress, defaultListenAddress),
 		ControllerBearerToken:          controllerToken,
 		OperationCapabilitySecret:      operationSecret,
 		ArtifactCapabilitySecret:       artifactSecret,
 		ArtifactAuthorizationBrokerURL: artifactBrokerURL,
 		ArtifactAPIURL:                 os.Getenv(EnvArtifactAPIURL),
-		ArtifactRoot:                   envDefault(EnvArtifactRoot, "/data/publications"),
-		JournalRoot:                    envDefault(EnvJournalRoot, "/data/service"),
-		TempRoot:                       envDefault(EnvTempRoot, "/tmp/orka-workspace-publisher"),
+		ArtifactRoot:                   envutil.String(EnvArtifactRoot, "/data/publications"),
+		JournalRoot:                    envutil.String(EnvJournalRoot, "/data/service"),
+		TempRoot:                       envutil.String(EnvTempRoot, "/tmp/orka-workspace-publisher"),
 		CredentialRoot:                 credentialRoot,
 		CredentialBrokerURL:            credentialBrokerURL,
-		GitBinary:                      envDefault(EnvGitBinary, "/usr/local/bin/git"),
-		RequiredGitVersion:             envDefault(EnvRequiredGitVersion, "2.55.0"),
+		GitBinary:                      envutil.String(EnvGitBinary, "/usr/local/bin/git"),
+		RequiredGitVersion:             envutil.String(EnvRequiredGitVersion, "2.55.0"),
 		AllowedSCMHosts:                splitCSV(os.Getenv(EnvAllowedSCMHosts)),
 	}
 	if config.ArtifactAPIURL == "" {
@@ -94,73 +93,73 @@ func LoadConfigFromEnv() (Config, error) {
 	if name := os.Getenv(EnvDefaultGitCredentialName); name != "" {
 		config.DefaultGitCredential = &CredentialReference{Name: name, Kind: CredentialHTTPExtraHeader}
 	}
-	if config.AllowFileRepositories, err = parseBoolEnv(EnvAllowFileRepositories); err != nil {
+	if config.AllowFileRepositories, err = envutil.Bool(EnvAllowFileRepositories); err != nil {
 		return Config{}, err
 	}
 	if config.ProxyEnvironment, err = loadSCMEgressProxyFromEnv(allowDevelopmentFallbacks); err != nil {
 		return Config{}, err
 	}
-	if config.MaxConcurrentOperations, err = parseIntEnv(EnvMaxConcurrentOperations, defaultMaxConcurrentOperations); err != nil {
+	if config.MaxConcurrentOperations, err = envutil.Int(EnvMaxConcurrentOperations, defaultMaxConcurrentOperations); err != nil {
 		return Config{}, err
 	}
-	if config.MaxRequestBytes, err = parseInt64Env(EnvMaxRequestBytes, defaultMaxRequestBytes); err != nil {
+	if config.MaxRequestBytes, err = envutil.Int64(EnvMaxRequestBytes, defaultMaxRequestBytes); err != nil {
 		return Config{}, err
 	}
-	if config.MaxResponseBytes, err = parseInt64Env(EnvMaxResponseBytes, defaultMaxResponseBytes); err != nil {
+	if config.MaxResponseBytes, err = envutil.Int64(EnvMaxResponseBytes, defaultMaxResponseBytes); err != nil {
 		return Config{}, err
 	}
-	if config.MaxJournalBytes, err = parseInt64Env(EnvMaxJournalBytes, defaultMaxJournalBytes); err != nil {
+	if config.MaxJournalBytes, err = envutil.Int64(EnvMaxJournalBytes, defaultMaxJournalBytes); err != nil {
 		return Config{}, err
 	}
-	if config.MaxDeltaBytes, err = parseInt64Env(EnvMaxDeltaBytes, defaultMaxDeltaBytes); err != nil {
+	if config.MaxDeltaBytes, err = envutil.Int64(EnvMaxDeltaBytes, defaultMaxDeltaBytes); err != nil {
 		return Config{}, err
 	}
-	if config.MaxBundleBytes, err = parseInt64Env(EnvMaxBundleBytes, defaultMaxBundleBytes); err != nil {
+	if config.MaxBundleBytes, err = envutil.Int64(EnvMaxBundleBytes, defaultMaxBundleBytes); err != nil {
 		return Config{}, err
 	}
-	if config.MaxCommandOutput, err = parseInt64Env(EnvMaxCommandOutput, defaultMaxCommandOutput); err != nil {
+	if config.MaxCommandOutput, err = envutil.Int64(EnvMaxCommandOutput, defaultMaxCommandOutput); err != nil {
 		return Config{}, err
 	}
-	if config.PublishTimeout, err = parseDurationEnv(EnvPublishTimeout, defaultPublishTimeout); err != nil {
+	if config.PublishTimeout, err = envutil.Duration(EnvPublishTimeout, defaultPublishTimeout); err != nil {
 		return Config{}, err
 	}
-	if config.ArtifactTimeout, err = parseDurationEnv(EnvArtifactTimeout, defaultArtifactTimeout); err != nil {
+	if config.ArtifactTimeout, err = envutil.Duration(EnvArtifactTimeout, defaultArtifactTimeout); err != nil {
 		return Config{}, err
 	}
-	if config.CapabilityTTL, err = parseDurationEnv(EnvCapabilityTTL, defaultCapabilityTTL); err != nil {
+	if config.CapabilityTTL, err = envutil.Duration(EnvCapabilityTTL, defaultCapabilityTTL); err != nil {
 		return Config{}, err
 	}
 	defaults := defaultWorkspaceLimits()
-	if config.WorkspaceLimits.MaxEntries, err = parseIntEnv(EnvWorkspaceMaxEntries, defaults.MaxEntries); err != nil {
+	if config.WorkspaceLimits.MaxEntries, err = envutil.Int(EnvWorkspaceMaxEntries, defaults.MaxEntries); err != nil {
 		return Config{}, err
 	}
-	if config.WorkspaceLimits.MaxFileBytes, err = parseInt64Env(EnvWorkspaceMaxFileBytes, defaults.MaxFileBytes); err != nil {
+	if config.WorkspaceLimits.MaxFileBytes, err = envutil.Int64(EnvWorkspaceMaxFileBytes, defaults.MaxFileBytes); err != nil {
 		return Config{}, err
 	}
-	if config.WorkspaceLimits.MaxExpandedBytes, err = parseInt64Env(EnvWorkspaceMaxBytes, defaults.MaxExpandedBytes); err != nil {
+	if config.WorkspaceLimits.MaxExpandedBytes, err = envutil.Int64(EnvWorkspaceMaxBytes, defaults.MaxExpandedBytes); err != nil {
 		return Config{}, err
 	}
-	if config.WorkspaceLimits.MaxArtifactBytes, err = parseInt64Env(EnvWorkspaceMaxArtifactBytes, defaults.MaxArtifactBytes); err != nil {
+	if config.WorkspaceLimits.MaxArtifactBytes, err = envutil.Int64(EnvWorkspaceMaxArtifactBytes, defaults.MaxArtifactBytes); err != nil {
 		return Config{}, err
 	}
-	if config.WorkspaceLimits.MaxPathBytes, err = parseIntEnv(EnvWorkspaceMaxPathBytes, defaults.MaxPathBytes); err != nil {
+	if config.WorkspaceLimits.MaxPathBytes, err = envutil.Int(EnvWorkspaceMaxPathBytes, defaults.MaxPathBytes); err != nil {
 		return Config{}, err
 	}
-	githubEnabled, err := parseBoolEnv(EnvGitHubPREnabled)
+	githubEnabled, err := envutil.Bool(EnvGitHubPREnabled)
 	if err != nil {
 		return Config{}, err
 	}
 	if githubEnabled {
-		requestTimeout, timeoutErr := parseDurationEnv(EnvGitHubRequestTimeout, defaultGitHubRequestTimeout)
+		requestTimeout, timeoutErr := envutil.Duration(EnvGitHubRequestTimeout, defaultGitHubRequestTimeout)
 		if timeoutErr != nil {
 			return Config{}, timeoutErr
 		}
-		maxResponseBytes, limitErr := parseInt64Env(EnvGitHubMaxResponseBytes, defaultGitHubMaxResponseBytes)
+		maxResponseBytes, limitErr := envutil.Int64(EnvGitHubMaxResponseBytes, defaultGitHubMaxResponseBytes)
 		if limitErr != nil {
 			return Config{}, limitErr
 		}
 		factory, factoryErr := NewGitHubPRReconcilerFactory(GitHubPRReconcilerFactoryConfig{
-			APIBaseURL: envDefault(EnvGitHubAPIBaseURL, defaultGitHubAPIBaseURL), RequestTimeout: requestTimeout, MaxResponseBytes: maxResponseBytes,
+			APIBaseURL: envutil.String(EnvGitHubAPIBaseURL, defaultGitHubAPIBaseURL), RequestTimeout: requestTimeout, MaxResponseBytes: maxResponseBytes,
 		})
 		if factoryErr != nil {
 			return Config{}, fmt.Errorf("GitHub pull request reconciliation configuration is invalid: %w", factoryErr)
@@ -177,7 +176,7 @@ func LoadConfigFromEnv() (Config, error) {
 }
 
 func loadSCMEgressProxyFromEnv(allowDevelopmentFallbacks bool) (publisher.ProxyEnvironment, error) {
-	required, err := parseBoolEnv(EnvSCMEgressProxyRequired)
+	required, err := envutil.Bool(EnvSCMEgressProxyRequired)
 	if err != nil {
 		return publisher.ProxyEnvironment{}, err
 	}
@@ -238,7 +237,7 @@ func loadCredentialDeliveryFromEnv(allowDevelopmentFallbacks bool) (string, stri
 			EnvAllowDevelopmentFallbacks,
 		)
 	}
-	return envDefault(EnvCredentialRoot, "/var/run/secrets/orka-publisher/credentials"), "", nil
+	return envutil.String(EnvCredentialRoot, "/var/run/secrets/orka-publisher/credentials"), "", nil
 }
 
 func readRequiredSecretEnv(name string, minimum int) ([]byte, error) {
@@ -249,61 +248,6 @@ func readRequiredSecretEnv(name string, minimum int) ([]byte, error) {
 	value, err := readSecretFile(path, minimum)
 	if err != nil {
 		return nil, fmt.Errorf("%s is invalid: %w", name, err)
-	}
-	return value, nil
-}
-
-func envDefault(name, fallback string) string {
-	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
-		return value
-	}
-	return fallback
-}
-
-func parseIntEnv(name string, fallback int) (int, error) {
-	raw := strings.TrimSpace(os.Getenv(name))
-	if raw == "" {
-		return fallback, nil
-	}
-	value, err := strconv.Atoi(raw)
-	if err != nil || strconv.Itoa(value) != raw {
-		return 0, fmt.Errorf("%s must be a canonical platform-sized integer", name)
-	}
-	return value, nil
-}
-
-func parseInt64Env(name string, fallback int64) (int64, error) {
-	raw := strings.TrimSpace(os.Getenv(name))
-	if raw == "" {
-		return fallback, nil
-	}
-	value, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil || strconv.FormatInt(value, 10) != raw {
-		return 0, fmt.Errorf("%s must be a canonical integer", name)
-	}
-	return value, nil
-}
-
-func parseBoolEnv(name string) (bool, error) {
-	raw := strings.TrimSpace(os.Getenv(name))
-	if raw == "" {
-		return false, nil
-	}
-	value, err := strconv.ParseBool(raw)
-	if err != nil {
-		return false, fmt.Errorf("%s must be a boolean", name)
-	}
-	return value, nil
-}
-
-func parseDurationEnv(name string, fallback time.Duration) (time.Duration, error) {
-	raw := strings.TrimSpace(os.Getenv(name))
-	if raw == "" {
-		return fallback, nil
-	}
-	value, err := time.ParseDuration(raw)
-	if err != nil {
-		return 0, fmt.Errorf("%s must be a duration", name)
 	}
 	return value, nil
 }

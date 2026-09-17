@@ -417,10 +417,7 @@ func (r *RuntimePoolReconciler) stopNativeSubstrateRuntime(ctx context.Context, 
 
 func (r *RuntimePoolReconciler) nativeSubstrateWorkerPodAbsent(ctx context.Context, fence *substrateNativeWorkerFence) (bool, error) {
 	pod := &corev1.Pod{}
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	err := reader.Get(ctx, types.NamespacedName{Namespace: fence.Namespace, Name: fence.Pod}, pod)
 	if apierrors.IsNotFound(err) {
 		return true, nil

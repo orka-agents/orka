@@ -52,10 +52,7 @@ func (r *RuntimePoolReconciler) recordFailedNativeSubstrateTaskCleanup(ctx conte
 	if err := r.verifyNativeSubstrateFailedRetirement(ctx, pool); err != nil {
 		return err
 	}
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	var tasks corev1alpha1.TaskList
 	if err := reader.List(ctx, &tasks, client.InNamespace(pool.Namespace)); err != nil {
 		return fmt.Errorf("list Tasks after failed native RuntimePool retirement: %w", err)

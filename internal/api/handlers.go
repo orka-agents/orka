@@ -904,7 +904,7 @@ func (h *Handlers) ListSessions(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenAction(c, "listSessions", h.contextTokenAuthorization.SessionReadScopes); err != nil {
 		return err
 	}
-	if err := h.authorizeSessionResourceAction(c, "list", namespace, ""); err != nil {
+	if err := h.authorizeCoreResourceAction(c, "list", "sessions", namespace, ""); err != nil {
 		return err
 	}
 
@@ -970,7 +970,7 @@ func (h *Handlers) GetSession(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenAction(c, "getSession", h.contextTokenAuthorization.SessionReadScopes); err != nil {
 		return err
 	}
-	if err := h.authorizeSessionResourceAction(c, "get", namespace, id); err != nil {
+	if err := h.authorizeCoreResourceAction(c, "get", "sessions", namespace, id); err != nil {
 		return err
 	}
 
@@ -1101,7 +1101,7 @@ func (h *Handlers) DeleteSession(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenAction(c, "deleteSession", h.contextTokenAuthorization.SessionWriteScopes); err != nil {
 		return err
 	}
-	if err := h.authorizeSessionResourceAction(c, "delete", namespace, id); err != nil {
+	if err := h.authorizeCoreResourceAction(c, "delete", "sessions", namespace, id); err != nil {
 		return err
 	}
 
@@ -1121,12 +1121,6 @@ func (h *Handlers) DeleteSession(c fiber.Ctx) error {
 	}
 
 	return c.SendStatus(fiber.StatusNoContent)
-}
-
-func (h *Handlers) authorizeSessionResourceAction(c fiber.Ctx, verb, namespace, name string) error {
-	return authorizeKubernetesResourceAction(
-		c.Context(), h.clientset, GetUserInfo(c), namespace, verb, corev1alpha1.GroupVersion.Group, "sessions", name,
-	)
 }
 
 // ListTools lists available tools
@@ -1394,7 +1388,7 @@ func (h *Handlers) CreateAgent(c fiber.Ctx) error {
 	if err := authorizeContextTokenAgentContext(c, h.contextTokenAuthorization, "createAgent", agent.Namespace, agent.Name); err != nil {
 		return err
 	}
-	if err := authorizeContextTokenAgentSpec(c.Context(), h.contextTokenAuthorizationReader(), contextTokenFromUserInfo(GetUserInfo(c)), h.contextTokenAuthorization, "createAgent", agent); err != nil {
+	if err := authorizeContextTokenAgentSpec(c.Context(), h.uncachedReader(), contextTokenFromUserInfo(GetUserInfo(c)), h.contextTokenAuthorization, "createAgent", agent); err != nil {
 		return err
 	}
 
@@ -1442,7 +1436,7 @@ func (h *Handlers) UpdateAgent(c fiber.Ctx) error {
 
 		patchBase := current.DeepCopy()
 		current.Spec = req.Spec
-		if err := authorizeContextTokenAgentSpec(ctx, h.contextTokenAuthorizationReader(), token, h.contextTokenAuthorization, "updateAgent", current); err != nil {
+		if err := authorizeContextTokenAgentSpec(ctx, h.uncachedReader(), token, h.contextTokenAuthorization, "updateAgent", current); err != nil {
 			return err
 		}
 		if err := h.client.Patch(ctx, current, client.MergeFromWithOptions(patchBase, client.MergeFromWithOptimisticLock{})); err != nil {

@@ -53,7 +53,7 @@ var failedArtifactRetentionMu sync.Mutex
 type Server struct {
 	config                         Config
 	adapter                        RuntimeAdapter
-	runner                         commandRunner
+	runner                         func(context.Context, *CommandSpec) (CommandResult, error)
 	now                            func() time.Time
 	configuredExactRedactionValues []string
 
@@ -70,14 +70,6 @@ type Server struct {
 	childCredentialProcessErr   error
 }
 
-type commandRunner interface {
-	Run(context.Context, *CommandSpec) (CommandResult, error)
-}
-
-type RuntimeSupportProvider interface {
-	SupportedRuntimes() []string
-}
-
 func NewServer(cfg Config, adapter RuntimeAdapter) (*Server, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -92,7 +84,7 @@ func NewServer(cfg Config, adapter RuntimeAdapter) (*Server, error) {
 	s := &Server{
 		config:                         cfg,
 		adapter:                        adapter,
-		runner:                         NewCommandRunner(cfg),
+		runner:                         NewCommandRunner(cfg).Run,
 		now:                            time.Now,
 		configuredExactRedactionValues: exactConfiguredEnvValues(cfg.CommandEnv),
 		turnRegistry:                   newTurnRegistry(),
@@ -508,8 +500,8 @@ func (s *Server) capabilitiesMetadata() map[string]string {
 		"wrapper": "cli",
 		"mode":    "observed",
 	}
-	if provider, ok := s.adapter.(RuntimeSupportProvider); ok {
-		if runtimes := provider.SupportedRuntimes(); len(runtimes) > 0 {
+	if multi, ok := s.adapter.(*MultiAdapter); ok {
+		if runtimes := multi.SupportedRuntimes(); len(runtimes) > 0 {
 			metadata["supportedRuntimes"] = strings.Join(runtimes, ",")
 		}
 	}
@@ -1250,7 +1242,7 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 		"runtime": s.adapter.Name(),
 		"command": path.Base(spec.Path),
 	}))
-	run, runErr := s.runner.Run(ctx, spec)
+	run, runErr := s.runner(ctx, spec)
 	if s.latchChildCredentialProcessCleanupFailure(runErr) {
 		return
 	}
@@ -1498,7 +1490,7 @@ func (s *Server) securityArtifactFollowUp(turn *turnState, base TurnContext) com
 			"runtime": s.adapter.Name(),
 			"command": path.Base(spec.Path),
 		}))
-		run, runErr := s.runner.Run(ctx, spec)
+		run, runErr := s.runner(ctx, spec)
 		if s.latchChildCredentialProcessCleanupFailure(runErr) {
 			return "", runErr
 		}

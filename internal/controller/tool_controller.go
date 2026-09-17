@@ -883,10 +883,10 @@ func (r *ToolReconciler) substrateMCPToolActorLeaseDeleteRefs(
 	refs := make([]substrateMCPActorDeleteRef, 0, len(leases.Items))
 	for i := range leases.Items {
 		lease := &leases.Items[i]
-		if !substrateMCPToolActorLeaseHeldByTool(lease, tool) {
+		if !substratePoolActorLeaseHeldByTool(lease, tool) {
 			continue
 		}
-		actorID := substrateMCPToolActorLeaseActorID(lease)
+		actorID := substratePoolActorLeaseActorID(lease)
 		if actorID == "" {
 			continue
 		}
@@ -907,7 +907,7 @@ func (r *ToolReconciler) substrateMCPToolActorLeaseHeldByTool(
 		return nil, false, nil
 	}
 	var selected *coordinationv1.Lease
-	names := []string{substrateMCPToolActorLeaseName(actorID)}
+	names := []string{substratePoolActorLeaseName(actorID)}
 	if names[0] != actorID {
 		// Early native controllers wrote the qualified ID as the lease name.
 		// Read both forms without creating a second ownership claim.
@@ -921,7 +921,7 @@ func (r *ToolReconciler) substrateMCPToolActorLeaseHeldByTool(
 			}
 			return nil, false, err
 		}
-		if lease.Labels[labels.LabelPurpose] != substrateMCPToolActorLeasePurpose || !substrateMCPToolActorLeaseHeldByTool(lease, tool) {
+		if lease.Labels[labels.LabelPurpose] != substrateMCPToolActorLeasePurpose || !substratePoolActorLeaseHeldByTool(lease, tool) {
 			return lease, false, nil
 		}
 		if selected == nil {
@@ -950,7 +950,7 @@ func (r *ToolReconciler) deleteSubstrateMCPToolActorLease(
 		if err := r.Delete(ctx, lease, deleteCurrentObjectPreconditions(lease)...); err != nil && !errors.IsNotFound(err) {
 			if errors.IsConflict(err) {
 				stillHeld, verifyErr := substrateLeaseStillMatchesAfterDeleteConflict(ctx, r.Client, lease, func(latest *coordinationv1.Lease) bool {
-					return substrateMCPToolActorLeaseHeldByTool(latest, tool)
+					return substratePoolActorLeaseHeldByTool(latest, tool)
 				})
 				if verifyErr != nil {
 					return verifyErr

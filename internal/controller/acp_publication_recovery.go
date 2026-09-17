@@ -472,12 +472,7 @@ func (d *ACPDispatcher) persistedPullRequestRequest(
 	if err != nil {
 		return request, err
 	}
-	var effect *store.ExternalEffect
-	if reader, ok := d.Store.(store.ExternalEffectIdentityReader); ok {
-		effect, err = reader.GetExternalEffectByIdentity(ctx, identity)
-	} else {
-		effect, err = d.Store.GetExternalEffect(ctx, id)
-	}
+	effect, err := d.Store.GetExternalEffectByIdentity(ctx, identity)
 	if errors.Is(err, store.ErrNotFound) {
 		return request, nil
 	}

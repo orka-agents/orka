@@ -236,7 +236,7 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 				return true, 0, err
 			}
 			if !ci.passed {
-				item.CIState = firstNonEmptyIssueAction(ci.reason, "ci_not_green")
+				item.CIState = firstNonEmptyString(ci.reason, "ci_not_green")
 				item.LastVerdict = repositoryMonitorVerdictSkipped
 				item.SkipReason = item.CIState
 				if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "", "pr_review", repositoryMonitorWorkActionStatusBlocked, "review_blocked", "", item.CIState); err != nil {

@@ -1435,10 +1435,7 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	log := logf.FromContext(ctx)
 
 	latest := &corev1alpha1.Task{}
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	if err := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -1701,10 +1698,7 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 			if r.isAutonomousTask(ctx, task) {
 				oldJob := task.Status.JobName
 				latest := &corev1alpha1.Task{}
-				reader := r.APIReader
-				if reader == nil {
-					reader = r.Client
-				}
+				reader := uncachedReader(r.APIReader, r.Client)
 				if latestErr := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); latestErr != nil {
 					return ctrl.Result{}, latestErr
 				}

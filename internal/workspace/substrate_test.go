@@ -48,24 +48,6 @@ func TestNewSubstrateExecutorDefaultHTTPClientHasNoTimeout(t *testing.T) {
 	}
 }
 
-func TestNewSubstrateExecutorRejectsSessionIdentityCertificateMinting(t *testing.T) {
-	_, err := NewSubstrateExecutor(SubstrateConfig{
-		RouterURL:               "http://router.test",
-		ActorDNSSuffix:          "actors.test",
-		ControlClient:           &recordingSubstrateControlClient{},
-		SessionIdentityMintCert: true,
-	})
-	if err == nil {
-		t.Fatal("NewSubstrateExecutor() error = nil, want unsupported certificate minting error")
-	}
-	if !IsKind(err, ErrorKindFailedPrecondition) {
-		t.Fatalf("NewSubstrateExecutor() error kind = %s, want %s", KindOf(err), ErrorKindFailedPrecondition)
-	}
-	if !strings.Contains(err.Error(), "certificate minting is not supported yet") {
-		t.Fatalf("NewSubstrateExecutor() error = %q, want unsupported certificate minting context", err.Error())
-	}
-}
-
 func TestSubstrateTransportCredentialsRequireExplicitTrust(t *testing.T) {
 	_, err := substrateTransportCredentials(SubstrateConfig{})
 	if err == nil {

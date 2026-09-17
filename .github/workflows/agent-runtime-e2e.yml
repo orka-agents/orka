@@ -48,7 +48,7 @@ jobs:
     env:
       ACP_E2E_OPENCODE_CONTEXT_WINDOW: "32768"
       ACP_E2E_OPENCODE_MAX_TOKENS: "4096"
-      ACP_E2E_OPENCODE_MODEL: "openai/gpt-5.4"
+      ACP_E2E_OPENCODE_MODEL: "openai/gpt-5.4-mini"
       ACP_E2E_REQUIRE_PARALLEL: "1"
       ACP_E2E_KIND_TAG: agent-runtime-${{ github.run_id }}-${{ github.run_attempt }}
     steps:

@@ -65,6 +65,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/workspace"
 )
 
@@ -1289,7 +1290,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 			status.ActiveInstance = nil
 			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-			status.Message = sanitizeRuntimePoolMessage(
+			status.Message = sanitizeStatusMessage(
 				"the Substrate provider pruned the data-only snapshot policy; the suspended checkpoint is preserved and the pool fails closed: " + policyErr.Error())
 			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
 			r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
@@ -1753,7 +1754,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 						"provider actor physical worker changed; recycling it before credential bootstrap rotation",
 					)
 				}
-				r.applyProviderRuntimePoolColdStartStatus(pool, &status, sanitizeRuntimePoolMessage("provider actor placement is not ready: "+err.Error()))
+				r.applyProviderRuntimePoolColdStartStatus(pool, &status, sanitizeStatusMessage("provider actor placement is not ready: "+err.Error()))
 				return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 			}
 			if err := r.setSubstrateActorBootedAnnotation(ctx, pool, actorID); err != nil {
@@ -1979,7 +1980,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 					"provider actor physical worker changed; recycling it before credential bootstrap rotation",
 				)
 			}
-			r.applyProviderRuntimePoolColdStartStatus(pool, &status, sanitizeRuntimePoolMessage("provider actor placement is not ready: "+err.Error()))
+			r.applyProviderRuntimePoolColdStartStatus(pool, &status, sanitizeStatusMessage("provider actor placement is not ready: "+err.Error()))
 			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 		}
 		// A consensual suspension is consumed by exactly one resume: with the
@@ -2019,7 +2020,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 				"provider actor physical worker changed; recycling it before credential bootstrap rotation",
 			)
 		}
-		r.applyProviderRuntimePoolColdStartStatus(pool, &status, sanitizeRuntimePoolMessage("provider actor placement is not ready: "+err.Error()))
+		r.applyProviderRuntimePoolColdStartStatus(pool, &status, sanitizeStatusMessage("provider actor placement is not ready: "+err.Error()))
 		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 	}
 	if err := r.verifySubstrateRuntimeTemplateFence(
@@ -2092,7 +2093,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateBackedRuntimePool(
 			r.applyProviderRuntimePoolColdStartStatus(
 				pool,
 				&status,
-				sanitizeRuntimePoolMessage("credential bootstrap is not complete: "+err.Error()),
+				sanitizeStatusMessage("credential bootstrap is not complete: "+err.Error()),
 			)
 			return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 		}
@@ -2912,7 +2913,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolScaleDown(
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 		status.ActiveInstance = pool.Status.ActiveInstance
-		status.Message = sanitizeRuntimePoolMessage("authenticated drain status probe failed: " + err.Error())
+		status.Message = sanitizeStatusMessage("authenticated drain status probe failed: " + err.Error())
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
@@ -2921,7 +2922,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolScaleDown(
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 		status.ActiveInstance = nil
-		status.Message = sanitizeRuntimePoolMessage(err.Error())
+		status.Message = sanitizeStatusMessage(err.Error())
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
@@ -2941,7 +2942,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolScaleDown(
 		); err != nil {
 			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-			status.Message = sanitizeRuntimePoolMessage("authenticated drain request failed: " + err.Error())
+			status.Message = sanitizeStatusMessage("authenticated drain request failed: " + err.Error())
 			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 		}
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining
@@ -3205,7 +3206,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolSuspend(
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 		status.ActiveInstance = nil
-		status.Message = sanitizeRuntimePoolMessage("authenticated pre-suspension probe failed: " + err.Error())
+		status.Message = sanitizeStatusMessage("authenticated pre-suspension probe failed: " + err.Error())
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
@@ -3214,7 +3215,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolSuspend(
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 		status.ActiveInstance = nil
-		status.Message = sanitizeRuntimePoolMessage(err.Error())
+		status.Message = sanitizeStatusMessage(err.Error())
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
@@ -3232,7 +3233,7 @@ func (r *RuntimePoolReconciler) reconcileSubstrateRuntimePoolSuspend(
 		); err != nil {
 			status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDegraded
 			status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-			status.Message = sanitizeRuntimePoolMessage("authenticated pre-suspension drain request failed: " + err.Error())
+			status.Message = sanitizeStatusMessage("authenticated pre-suspension drain request failed: " + err.Error())
 			return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 		}
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining
@@ -3367,14 +3368,12 @@ func substrateActorSuspendSourceIdentityDigest(actorID, actorUID string, actorVe
 		return "", fmt.Errorf("source Actor identity is incomplete")
 	}
 	payload := []byte("orka.substrate-suspend-source.v1\x00" + actorID + "\x00" + actorUID + "\x00" + strconv.FormatInt(actorVersion, 10))
-	digest := sha256.Sum256(payload)
-	return "sha256:" + hex.EncodeToString(digest[:]), nil
+	return store.CanonicalBytesDigest(payload), nil
 }
 
 func substrateActorDataOperationDigest(operationID string) string {
 	payload := []byte("orka.substrate-data-operation.v1\x00" + strings.TrimSpace(operationID))
-	digest := sha256.Sum256(payload)
-	return "sha256:" + hex.EncodeToString(digest[:])
+	return store.CanonicalBytesDigest(payload)
 }
 
 func newSubstrateDataCheckpointOperationID() (string, error) {
@@ -4527,10 +4526,7 @@ func (r *RuntimePoolReconciler) ensureSubstrateRuntimePoolNetworkPolicies(
 		}
 	}
 	changed := false
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	for _, desired := range r.substrateRuntimePoolNetworkPolicies(cfg, workerNamespace, workerPool) {
 		current := &networkingv1.NetworkPolicy{}
 		key := types.NamespacedName{Namespace: desired.Namespace, Name: desired.Name}
@@ -4684,10 +4680,7 @@ func (r *RuntimePoolReconciler) deleteSubstrateRuntimePoolNetworkPolicies(
 	if len(namespaces) == 0 {
 		return false, nil
 	}
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	expectedNames := []string{
 		runtimePoolChildName(cfg.baseName, runtimePoolSubstrateDenyEgressSuffix),
 		runtimePoolChildName(cfg.baseName, runtimePoolSubstrateDNSEgressSuffix),
@@ -4736,10 +4729,7 @@ func (r *RuntimePoolReconciler) deleteSubstrateRuntimePoolNetworkPoliciesForTemp
 	if err != nil {
 		return false, err
 	}
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	remaining := false
 	for _, desired := range r.substrateRuntimePoolNetworkPolicies(cfg, workerNamespace, workerPool) {
 		current := &networkingv1.NetworkPolicy{}
@@ -5512,10 +5502,7 @@ func (r *RuntimePoolReconciler) pruneStaleSubstrateRuntimePoolSecrets(
 	cfg runtimePoolConfig,
 	currentNames ...string,
 ) error {
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	keep := make(map[string]struct{}, len(currentNames))
 	for _, name := range currentNames {
 		addRuntimeSecretName(keep, name)

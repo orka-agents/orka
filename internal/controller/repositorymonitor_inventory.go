@@ -208,7 +208,7 @@ func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context
 				item.CIState = repositoryMonitorCIStatePassed
 			} else {
 				skipped++
-				item.CIState = firstNonEmptyIssueAction(ci.reason, "ci_not_green")
+				item.CIState = firstNonEmptyString(ci.reason, "ci_not_green")
 				item.LastVerdict = repositoryMonitorVerdictSkipped
 				item.SkipReason = item.CIState
 				if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
@@ -280,7 +280,7 @@ func (r *RepositoryMonitorReconciler) processTargetedPullRequestControlCommand(c
 		return false, 0, getErr
 	}
 	item := existing
-	pr := repositoryMonitorPullRequest{Number: run.TargetNumber, State: item.State, BaseBranch: item.BaseBranch, HeadBranch: item.HeadBranch, HeadRepo: owner + "/" + repository, BaseSHA: item.BaseSHA, HeadSHA: firstNonEmptyIssueAction(item.HeadSHA, run.TargetSHA)}
+	pr := repositoryMonitorPullRequest{Number: run.TargetNumber, State: item.State, BaseBranch: item.BaseBranch, HeadBranch: item.HeadBranch, HeadRepo: owner + "/" + repository, BaseSHA: item.BaseSHA, HeadSHA: firstNonEmptyString(item.HeadSHA, run.TargetSHA)}
 	return r.tryProcessPullRequestCommandRun(ctx, monitor, run, owner, repository, pr, item)
 }
 

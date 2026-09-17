@@ -18,6 +18,11 @@ func ConflictErrorf(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", ErrConflict, fmt.Sprintf(format, args...))
 }
 
+// NotReadyErrorf returns an error wrapping ErrNotReady with a formatted detail.
+func NotReadyErrorf(format string, args ...any) error {
+	return fmt.Errorf("%w: %s", ErrNotReady, fmt.Sprintf(format, args...))
+}
+
 // CanonicalBytesDigest returns the canonical "sha256:<hex>" digest of value.
 func CanonicalBytesDigest(value []byte) string {
 	sum := sha256.Sum256(value)
@@ -512,4 +517,82 @@ func NormalizeSessionControlForCreate(control *SessionControl, fence ControllerE
 	normalized.ControllerEpoch = fence.Epoch
 	normalized.Version = 1
 	return normalized, fence, nil
+}
+
+// NormalizeControlIdentifierSet trims, drops empty values, deduplicates, and
+// sorts a set of control identifiers so backends persist one canonical order.
+func NormalizeControlIdentifierSet(values []string) []string {
+	set := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			set[value] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(set))
+	for value := range set {
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
+}
+
+// NormalizeSessionTurnForCreate validates a new open SessionTurn, binds it to
+// the normalized controller epoch fence, and stamps version one.
+func NormalizeSessionTurnForCreate(turn SessionTurn, fence ControllerEpochFence) (SessionTurn, ControllerEpochFence, error) {
+	turn.Key.SessionUID = strings.TrimSpace(turn.Key.SessionUID)
+	turn.Key.TaskUID = strings.TrimSpace(turn.Key.TaskUID)
+	turn.Key.PromptID = strings.TrimSpace(turn.Key.PromptID)
+	if err := turn.Key.Validate(); err != nil {
+		return SessionTurn{}, ControllerEpochFence{}, err
+	}
+	canonicalID, err := turn.Key.CanonicalID()
+	if err != nil {
+		return SessionTurn{}, ControllerEpochFence{}, err
+	}
+	turn.ID = strings.TrimSpace(turn.ID)
+	if turn.ID == "" {
+		turn.ID = canonicalID
+	}
+	if turn.ID != canonicalID {
+		return SessionTurn{}, ControllerEpochFence{}, ValidationErrorf("session turn ID must equal canonical ID %q", canonicalID)
+	}
+	turn.PromptAttemptID = strings.TrimSpace(turn.PromptAttemptID)
+	if err := ValidateControlIdentifier("prompt attempt ID", turn.PromptAttemptID); err != nil {
+		return SessionTurn{}, ControllerEpochFence{}, err
+	}
+	if err := ValidateCanonicalDigest("session turn request digest", turn.RequestDigest); err != nil {
+		return SessionTurn{}, ControllerEpochFence{}, err
+	}
+	if strings.TrimSpace(turn.UserPrompt) == "" {
+		return SessionTurn{}, ControllerEpochFence{}, ValidationErrorf("session turn user prompt is required")
+	}
+	if err := ValidateControlText("session turn user prompt", turn.UserPrompt); err != nil {
+		return SessionTurn{}, ControllerEpochFence{}, err
+	}
+	if turn.State == "" {
+		turn.State = SessionTurnOpen
+	}
+	if turn.State != SessionTurnOpen || turn.TerminalKind != "" || turn.TerminalContent != "" ||
+		turn.FinalizationDigest != "" || turn.PublicationID != "" || turn.PublicationReceipt != nil || turn.FinalizedAt != nil {
+		return SessionTurn{}, ControllerEpochFence{}, ValidationErrorf("new session turn must be open and must not contain finalization data")
+	}
+	fence, err = NormalizeEpochFence(fence)
+	if err != nil {
+		return SessionTurn{}, ControllerEpochFence{}, err
+	}
+	if turn.Version != 0 && turn.Version != 1 {
+		return SessionTurn{}, ControllerEpochFence{}, ValidationErrorf("new session turn version must be zero or one")
+	}
+	now := NormalizeControlTime(turn.CreatedAt)
+	turn.CreatedAt = now
+	if turn.UpdatedAt.IsZero() {
+		turn.UpdatedAt = now
+	} else {
+		turn.UpdatedAt = turn.UpdatedAt.UTC()
+	}
+	turn.ControllerEpochName = fence.Name
+	turn.ControllerEpoch = fence.Epoch
+	turn.Version = 1
+	return turn, fence, nil
 }

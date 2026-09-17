@@ -8,6 +8,7 @@ package common
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -699,7 +700,7 @@ func resetReservedWorkspacePaths(workDir string) {
 
 // execGit runs a git command in the given directory and returns combined output.
 func execGit(dir string, args ...string) (string, error) {
-	cmd, err := newWorkspaceGitCommand(dir, args...)
+	cmd, err := newGitCommand(context.Background(), dir, args...)
 	if err != nil {
 		return "", err
 	}
@@ -708,7 +709,7 @@ func execGit(dir string, args ...string) (string, error) {
 }
 
 func execGitInput(dir, input string, args ...string) (string, error) {
-	cmd, err := newWorkspaceGitCommand(dir, args...)
+	cmd, err := newGitCommand(context.Background(), dir, args...)
 	if err != nil {
 		return "", err
 	}
@@ -722,7 +723,7 @@ func execGitLimited(dir string, limit int64, args ...string) (string, bool, erro
 	stdout.limit = limit
 	var stderr limitedOutputBuffer
 	stderr.limit = 64 * 1024
-	cmd, err := newWorkspaceGitCommand(dir, args...)
+	cmd, err := newGitCommand(context.Background(), dir, args...)
 	if err != nil {
 		return "", false, err
 	}
@@ -734,12 +735,14 @@ func execGitLimited(dir string, limit int64, args ...string) (string, bool, erro
 	return stdout.String(), stdout.truncated, nil
 }
 
-func newWorkspaceGitCommand(dir string, args ...string) (*exec.Cmd, error) {
+// newGitCommand is the single constructor for worker git invocations: it
+// validates the argument list, pins safe.directory and disables hooks, and
+// applies the platform process attributes. All exec helpers route through it.
+func newGitCommand(ctx context.Context, dir string, args ...string) (*exec.Cmd, error) {
 	if err := validateGitInvocation(args); err != nil {
 		return nil, err
 	}
-	cmd := exec.Command("git")
-	cmd.Args = append([]string{"git"}, gitSafeDirectoryArgs(dir, args...)...)
+	cmd := exec.CommandContext(ctx, "git", gitSafeDirectoryArgs(dir, args...)...)
 	cmd.Dir = dir
 	cmd.SysProcAttr = gitCommandSysProcAttr()
 	return cmd, nil

@@ -32,7 +32,6 @@ import (
 	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/agentruntimepolicy"
-	"github.com/orka-agents/orka/internal/events"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	gatewayconformance "github.com/orka-agents/orka/internal/gateway/conformance"
 	"github.com/orka-agents/orka/internal/gateway/protocol"
@@ -73,7 +72,7 @@ func (r *GatewayClassReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	now := metav1.Now()
 	object.Status.Accepted = accepted
 	object.Status.ObservedGeneration = object.Generation
-	object.Status.Message = sanitizeGatewayStatusMessage(message)
+	object.Status.Message = sanitizeStatusMessage(message)
 	setGatewayCondition(&object.Status.Conditions, "Accepted", accepted, "ValidationSucceeded", "ValidationFailed", object.Generation, object.Status.Message, now)
 	if err := r.Status().Update(ctx, object); err != nil {
 		return ctrl.Result{}, err
@@ -192,7 +191,7 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	object.Status.ObservedCapabilities = observed
 	object.Status.ObservedInboundAuthRefVersion = inboundVersion
 	object.Status.ObservedOutboundAuthRefVersion = outboundVersion
-	object.Status.Message = sanitizeGatewayStatusMessage(message)
+	object.Status.Message = sanitizeStatusMessage(message)
 	if ready {
 		object.Status.LastSuccessfulProbe = &now
 	}
@@ -222,18 +221,9 @@ func (r *GatewayReconciler) gatewaysForSecret(ctx context.Context, object client
 	if !ok {
 		return nil
 	}
-	list := &gatewayv1alpha1.GatewayList{}
-	if err := r.List(ctx, list, client.InNamespace(secret.Namespace)); err != nil {
-		return nil
-	}
-	requests := make([]reconcile.Request, 0)
-	for i := range list.Items {
-		item := &list.Items[i]
-		if item.Spec.InboundAuthRef.Name == secret.Name || item.Spec.OutboundAuthRef.Name == secret.Name {
-			requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(item)})
-		}
-	}
-	return requests
+	return r.gatewaysMatching(ctx, secret.Namespace, func(item *gatewayv1alpha1.Gateway) bool {
+		return item.Spec.InboundAuthRef.Name == secret.Name || item.Spec.OutboundAuthRef.Name == secret.Name
+	})
 }
 
 func (r *GatewayReconciler) gatewaysForService(ctx context.Context, object client.Object) []reconcile.Request {
@@ -241,18 +231,9 @@ func (r *GatewayReconciler) gatewaysForService(ctx context.Context, object clien
 	if !ok {
 		return nil
 	}
-	list := &gatewayv1alpha1.GatewayList{}
-	if err := r.List(ctx, list, client.InNamespace(service.Namespace)); err != nil {
-		return nil
-	}
-	requests := make([]reconcile.Request, 0)
-	for i := range list.Items {
-		item := &list.Items[i]
-		if item.Spec.Adapter.ServiceRef != nil && item.Spec.Adapter.ServiceRef.Name == service.Name {
-			requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(item)})
-		}
-	}
-	return requests
+	return r.gatewaysMatching(ctx, service.Namespace, func(item *gatewayv1alpha1.Gateway) bool {
+		return item.Spec.Adapter.ServiceRef != nil && item.Spec.Adapter.ServiceRef.Name == service.Name
+	})
 }
 
 func (r *GatewayReconciler) gatewaysForClass(ctx context.Context, object client.Object) []reconcile.Request {
@@ -260,14 +241,22 @@ func (r *GatewayReconciler) gatewaysForClass(ctx context.Context, object client.
 	if !ok {
 		return nil
 	}
+	return r.gatewaysMatching(ctx, "", func(item *gatewayv1alpha1.Gateway) bool {
+		return item.Spec.GatewayClassName == class.Name
+	})
+}
+
+// gatewaysMatching lists Gateways in namespace ("" for all namespaces) and
+// enqueues those accepted by matches.
+func (r *GatewayReconciler) gatewaysMatching(ctx context.Context, namespace string, matches func(*gatewayv1alpha1.Gateway) bool) []reconcile.Request {
 	list := &gatewayv1alpha1.GatewayList{}
-	if err := r.List(ctx, list); err != nil {
+	if err := r.List(ctx, list, client.InNamespace(namespace)); err != nil {
 		return nil
 	}
 	requests := make([]reconcile.Request, 0)
 	for i := range list.Items {
 		item := &list.Items[i]
-		if item.Spec.GatewayClassName == class.Name {
+		if matches(item) {
 			requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(item)})
 		}
 	}
@@ -351,7 +340,7 @@ func (r *GatewayBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	object.Status.Ready = ready
 	object.Status.ObservedGeneration = object.Generation
 	object.Status.ResolvedCapabilities = capabilities
-	object.Status.Message = sanitizeGatewayStatusMessage(message)
+	object.Status.Message = sanitizeStatusMessage(message)
 	setGatewayCondition(&object.Status.Conditions, "Accepted", accepted, "ValidationSucceeded", "ValidationFailed", object.Generation, object.Status.Message, now)
 	setGatewayCondition(&object.Status.Conditions, "ResolvedRefs", resolved, "ReferencesResolved", "ReferencesNotResolved", object.Generation, object.Status.Message, now)
 	setGatewayCondition(&object.Status.Conditions, "Programmed", programmed, "Programmed", "AmbiguousOrUnsupported", object.Generation, object.Status.Message, now)
@@ -811,9 +800,9 @@ func observedGatewayCapabilities(response *protocol.CapabilitiesResponse) *gatew
 		return nil
 	}
 	return &gatewayv1alpha1.GatewayObservedCapabilities{
-		ContractVersion: sanitizeGatewayCapability(response.ProtocolVersion),
-		AdapterName:     sanitizeGatewayCapability(response.AdapterName),
-		AdapterVersion:  sanitizeGatewayCapability(response.AdapterVersion),
+		ContractVersion: sanitizeStatusValue(response.ProtocolVersion, protocol.MaxIdentityBytes),
+		AdapterName:     sanitizeStatusValue(response.AdapterName, protocol.MaxIdentityBytes),
+		AdapterVersion:  sanitizeStatusValue(response.AdapterVersion, protocol.MaxIdentityBytes),
 		Capabilities: gatewayv1alpha1.GatewayCapabilities{
 			InboundText: response.Capabilities.InboundText, OutboundText: response.Capabilities.OutboundText,
 			Threads: response.Capabilities.Threads, SenderIdentity: response.Capabilities.SenderIdentity,
@@ -879,14 +868,4 @@ func setGatewayCondition(conditions *[]metav1.Condition, conditionType string, v
 		condition.Reason = falseReason
 	}
 	meta.SetStatusCondition(conditions, condition)
-}
-
-func sanitizeGatewayStatusMessage(message string) string {
-	message = events.RedactExecutionEventText(strings.TrimSpace(message))
-	return truncateUTF8(strings.ToValidUTF8(message, "�"), 1024)
-}
-
-func sanitizeGatewayCapability(value string) string {
-	value = events.RedactExecutionEventText(strings.TrimSpace(value))
-	return truncateUTF8(strings.ToValidUTF8(value, "�"), protocol.MaxIdentityBytes)
 }

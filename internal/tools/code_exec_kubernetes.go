@@ -85,8 +85,6 @@ type KubernetesJobCodeExecutor struct {
 	cleanupState   kubernetesCodeExecStoredResultCleanupState
 }
 
-var _ SandboxClient = (*KubernetesJobCodeExecutor)(nil)
-
 type kubernetesCodeExecStoredResultCleanupState struct {
 	sync.Mutex
 	lastByNamespace map[string]time.Time
@@ -170,11 +168,6 @@ type kubeClientPodLogStreamer struct {
 
 func (s kubeClientPodLogStreamer) Stream(ctx context.Context, namespace, podName string, opts *corev1.PodLogOptions) (io.ReadCloser, error) {
 	return s.client.CoreV1().Pods(namespace).GetLogs(podName, opts).Stream(ctx)
-}
-
-// Run executes a sandbox request with the Kubernetes Job backend.
-func (e *KubernetesJobCodeExecutor) Run(ctx context.Context, req SandboxRunRequest) SandboxRunResult {
-	return sandboxRunResultFromCodeExecResult(e.Execute(ctx, codeExecutionRequestFromSandboxRunRequest(req)))
 }
 
 // Execute runs the request in Kubernetes.

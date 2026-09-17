@@ -157,7 +157,7 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 		Spec: spec,
 	}
 	if err := agentruntimepolicy.ResolveAndReplaceTaskRuntimeRefAllowedTools(
-		c.Context(), h.contextTokenAuthorizationReader(), forked,
+		c.Context(), h.uncachedReader(), forked,
 	); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid fork AgentRuntime policy: %v", err))
 	}

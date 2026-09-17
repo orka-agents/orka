@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"path"
 	"strconv"
 	"strings"
@@ -1188,11 +1189,7 @@ func CanonicalControlID(kind string, components ...string) string {
 	return kind + ":sha256:" + hex.EncodeToString(h.Sum(nil))
 }
 
-type canonicalWriter interface {
-	Write([]byte) (int, error)
-}
-
-func writeCanonicalComponent(w canonicalWriter, value string) {
+func writeCanonicalComponent(w io.Writer, value string) {
 	_, _ = fmt.Fprintf(w, "%d:", len(value))
 	_, _ = w.Write([]byte(value))
 }

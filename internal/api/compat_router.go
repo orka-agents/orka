@@ -88,7 +88,7 @@ func (r *CompatRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		writeCompatRouterError(w, path, http.StatusUnauthorized, "use the installation endpoint for transaction tokens")
 		return
 	}
-	token, err := (AuthTokenExtractor{}).extract(req.Header.Get)
+	token, err := extractAuthTokenFromHeaders(req.Header.Get)
 	if err != nil {
 		writeCompatRouterError(w, path, http.StatusUnauthorized, "missing or invalid authentication header")
 		return
