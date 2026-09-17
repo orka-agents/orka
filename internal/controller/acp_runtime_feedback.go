@@ -212,6 +212,15 @@ func (d *ACPDispatcher) startRuntimeFeedback(ctx context.Context, task *corev1al
 	}, nil
 }
 
+// A runtime can cancel a prompt without cancelling the controller's context.
+// Capture completion must retain that terminal outcome as well as local aborts.
+func runtimeFeedbackCompletionReason(ctx context.Context, terminal *harnessv2.Event) string {
+	if terminal == nil || terminal.Type == harnessv2.EventCancelled || ctx.Err() != nil {
+		return runtimefeedback.Cancelled
+	}
+	return runtimefeedback.Completed
+}
+
 type runtimeFeedbackResult struct {
 	Status      string                   `json:"status,omitempty"`
 	Execution   runtimeFeedbackExecution `json:"execution"`

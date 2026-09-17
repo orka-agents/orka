@@ -1775,11 +1775,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		return err
 	}
 	defer func() {
-		reason := runtimefeedback.Completed
-		if terminal == nil || runtimeCtx.Err() != nil {
-			reason = runtimefeedback.Cancelled
-		}
-		completeFeedback(reason)
+		completeFeedback(runtimeFeedbackCompletionReason(runtimeCtx, terminal))
 	}()
 	accepted := false
 	admissionRetry := 0

@@ -553,3 +553,51 @@ func TestRuntimeFeedbackCannotFallbackToCustomToolWhenDisabled(t *testing.T) {
 		t.Fatal("disabled feedback fell back to custom Tool")
 	}
 }
+
+func TestRuntimeFeedbackCodexPermissionUsesFrozenDescriptor(t *testing.T) {
+	f := newFeedbackFixture(t)
+	registry := tools.NewRegistry()
+	if err := RegisterRuntimeFeedbackTool(registry, f.reader, &feedbackTestService{}); err != nil {
+		t.Fatal(err)
+	}
+	descriptors, err := buildCanonicalMCPToolDescriptors(t.Context(), f.reader, "default", "codex", []string{RuntimeFeedbackToolName}, nil, false, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(descriptors) != 1 || descriptors[0].Source != harnessv2.MCPToolSourceBrokeredBuiltin || descriptors[0].Effect != harnessv2.MCPToolEffectReadOnly {
+		t.Fatal("runtime_feedback descriptor is not frozen read-only")
+	}
+	for _, tt := range []struct {
+		name, tool           string
+		required, disallowed bool
+		want                 string
+	}{
+		{name: "correlated granted feedback", tool: RuntimeFeedbackToolName, want: "allow_once"},
+		{name: "missing identity", want: "decline"},
+		{name: "display name is not canonical identity", tool: "mcp.orka.runtime_feedback", want: "decline"},
+		{name: "ungranted mutating tool", tool: "mutate", want: "decline"},
+		{name: "disallowed feedback", tool: RuntimeFeedbackToolName, disallowed: true, want: "decline"},
+		{name: "human-required feedback", tool: RuntimeFeedbackToolName, required: true, want: "decline"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			configuration := harnessv2.MCPPolicyConfiguration{ToolPolicy: harnessv2.MCPToolPolicy{AllowedToolNames: []string{RuntimeFeedbackToolName}, Tools: descriptors}}
+			if tt.required {
+				configuration.ApprovalPolicy.RequiredTools = []string{RuntimeFeedbackToolName}
+			}
+			if tt.disallowed {
+				configuration.ToolPolicy.DisallowedToolNames = []string{RuntimeFeedbackToolName}
+			}
+			permission := &harnessv2.PermissionRequestedEvent{
+				ToolName: tt.tool, ToolCallID: "tool-call-v1-sha256-fixture", Title: "mcp.orka.runtime_feedback",
+				Options: []harnessv2.PermissionOption{
+					{OptionID: "allow_once", Kind: harnessv2.PermissionOptionAllowOnce},
+					{OptionID: "decline", Kind: harnessv2.PermissionOptionRejectOnce},
+				},
+			}
+			got := frozenMCPPermissionDecision(configuration, "codex", permission)
+			if got.Outcome != harnessv2.PermissionDecisionSelected || got.OptionID != tt.want {
+				t.Fatalf("frozen Codex permission = %#v", got)
+			}
+		})
+	}
+}

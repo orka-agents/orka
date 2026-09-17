@@ -605,9 +605,16 @@ func (s *mcpProxySession) listTools(_ time.Time) []map[string]any {
 		if err := json.Unmarshal(descriptor.InputSchema, &schema); err != nil {
 			continue
 		}
-		result = append(result, map[string]any{
+		tool := map[string]any{
 			"name": descriptor.Name, "description": descriptor.Description, "inputSchema": schema,
-		})
+		}
+		// Read-only hints come only from the immutable Orka descriptor. Omit
+		// them for human-required tools so a client's automatic approval mode
+		// remains conservative; actual calls still cross the prompt/approval gate.
+		if descriptor.Effect == harnessv2.MCPToolEffectReadOnly && !s.configuration.ApprovalPolicy.Requires(descriptor.Name) {
+			tool["annotations"] = map[string]any{"readOnlyHint": true}
+		}
+		result = append(result, tool)
 	}
 	return result
 }

@@ -1,0 +1,49 @@
+{
+  "provenance": {
+    "adapterRevision": "307d81018f7cc0c3141ddf71c7532d38310e2cfb",
+    "sources": [
+      "src/CodexToolCallMapper.ts:createMcpToolCallUpdate/createExecuteToolCallUpdate",
+      "src/CodexElicitationHandler.ts:buildPermissionRequest (correlatedCallId form branch)",
+      "src/__tests__/CodexACPAgent/data/elicitation-tool-approval-no-persist.json",
+      "src/CodexElicitationHandler.ts:post-permission correlated notification",
+      "src/CodexEventHandler.ts:completeItemEvent (mcpToolCall branch)",
+      "src/__tests__/CodexACPAgent/data/mcp-tool-completed-with-logs.json"
+    ],
+    "substitutions": "Orka server/tool and stable synthetic session/call IDs; correlated permission omits rawInput/content as emitted by the pinned adapter."
+  },
+  "notification": {
+    "sessionId": "test-session-id",
+    "update": {
+      "sessionUpdate": "tool_call",
+      "toolCallId": "feedback-call-1",
+      "kind": "execute",
+      "title": "mcp.orka.runtime_feedback",
+      "status": "in_progress",
+      "rawInput": {"server": "orka", "tool": "runtime_feedback", "arguments": {}},
+      "_meta": {"is_mcp_tool_call": true}
+    }
+  },
+  "permission": {
+    "sessionId": "test-session-id",
+    "toolCall": {"toolCallId": "feedback-call-1", "kind": "execute", "status": "pending"},
+    "_meta": {"is_mcp_tool_approval": true},
+    "options": [
+      {"optionId": "allow_once", "name": "Allow", "kind": "allow_once"},
+      {"optionId": "decline", "name": "Decline", "kind": "reject_once"}
+    ]
+  },
+  "postPermission": {
+    "sessionId": "test-session-id",
+    "update": {"sessionUpdate": "tool_call_update", "toolCallId": "feedback-call-1", "status": "in_progress"}
+  },
+  "completion": {
+    "sessionId": "test-session-id",
+    "update": {
+      "sessionUpdate": "tool_call_update",
+      "toolCallId": "feedback-call-1",
+      "status": "completed",
+      "rawInput": {"server": "orka", "tool": "runtime_feedback", "arguments": {}},
+      "rawOutput": {"result": {"content": [{"type": "text", "text": "Available"}]}, "error": null}
+    }
+  }
+}
