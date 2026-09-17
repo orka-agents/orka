@@ -62,10 +62,7 @@ func revokeTaskJobAuthority(ctx context.Context, resultStore store.ResultStore, 
 // be adopted or automatically replaced. Names and owner references alone are
 // forgeable by namespace Job creators.
 func (r *TaskReconciler) recoverTaskJob(ctx context.Context, task *corev1alpha1.Task, expected *batchv1.Job, validationTask bool) (*batchv1.Job, error) {
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	existing := &batchv1.Job{}
 	if err := reader.Get(ctx, client.ObjectKeyFromObject(expected), existing); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -124,10 +121,7 @@ func (r *TaskReconciler) recordTaskJobIdentityRejection(ctx context.Context, tas
 }
 
 func (r *TaskReconciler) retireRejectedTaskJob(ctx context.Context, task *corev1alpha1.Task) error {
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	job := &batchv1.Job{}
 	if err := reader.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: task.Status.JobName}, job); err != nil {
 		return client.IgnoreNotFound(err)

@@ -1052,10 +1052,7 @@ func (r *ACPExecutionWorkspaceAdapterReconciler) ensureLinkedRuntimePoolDeleted(
 	// before workspace deletion can be invisible to the informer cache, and a
 	// cached miss must never let core finalize the workspace while the pool
 	// and its physical workspace remain live.
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	if poolName := strings.TrimSpace(workspace.Annotations[acpExecutionWorkspacePoolAnnotation]); poolName != "" {
 		pool := &corev1alpha1.RuntimePool{}
 		err := reader.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: poolName}, pool)

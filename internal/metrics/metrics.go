@@ -514,5 +514,6 @@ func normalizeMetricLabel(value string) string {
 	if value == "" {
 		return "unknown"
 	}
-	return value
+	// Prometheus retains labels; callers may supply borrowed HTTP request strings.
+	return strings.Clone(value)
 }

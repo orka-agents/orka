@@ -512,10 +512,7 @@ func (d *HarnessV1Dispatcher) continueHarnessV1BrokeredToolCall(
 	if err != nil {
 		return fmt.Errorf("%w: %v", errHarnessV1FrameAuthorityViolation, err)
 	}
-	reader := d.APIReader
-	if reader == nil {
-		reader = d.Client
-	}
+	reader := uncachedReader(d.APIReader, d.Client)
 	if reader == nil {
 		return errors.New("harness v1 brokered tool execution requires a Kubernetes reader")
 	}

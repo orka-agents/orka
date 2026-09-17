@@ -55,11 +55,11 @@ func (s *Store) sessionTurnForPromptAttemptReclamation(
 		return nil, nil, mapKubernetesError("load Task for Session cleanup receipt", err)
 	}
 	if task.Spec.SessionRef == nil {
-		return nil, nil, promptAttemptReclaimNotReady("missing SessionTurn %q has no Task Session binding", turnID)
+		return nil, nil, store.NotReadyErrorf("missing SessionTurn %q has no Task Session binding", turnID)
 	}
 	receipt, err := s.GetSessionTurnCleanupReceipt(ctx, marker.Namespace, task.Spec.SessionRef.Name, promptAttemptID)
 	if errors.Is(err, store.ErrNotFound) {
-		return nil, nil, promptAttemptReclaimNotReady("SessionTurn %q has no durable finalization or cleanup receipt", turnID)
+		return nil, nil, store.NotReadyErrorf("SessionTurn %q has no durable finalization or cleanup receipt", turnID)
 	}
 	if err != nil {
 		return nil, nil, err
@@ -68,7 +68,7 @@ func (s *Store) sessionTurnForPromptAttemptReclamation(
 		return nil, nil, store.ConflictErrorf("Session cleanup receipt does not belong to the reclaiming Task")
 	}
 	if receipt.ProjectionState != store.OutboxProjectionDelivered {
-		return nil, nil, promptAttemptReclaimNotReady("SessionTurn %q cleanup receipt projection was not delivered", turnID)
+		return nil, nil, store.NotReadyErrorf("SessionTurn %q cleanup receipt projection was not delivered", turnID)
 	}
 	return receipt.SessionTurn(), receipt, nil
 }
@@ -102,7 +102,7 @@ func (s *Store) verifySessionCleanupBeforePromptAttemptDeletion(
 			return err
 		}
 		if receipt == nil {
-			return promptAttemptReclaimNotReady("Session cleanup has not archived prompt attempt %q", attempt.ID)
+			return store.NotReadyErrorf("Session cleanup has not archived prompt attempt %q", attempt.ID)
 		}
 	}
 	return nil

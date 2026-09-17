@@ -37,12 +37,6 @@ type ArtifactAuthorizationProvider interface {
 	AuthorizeArtifact(context.Context, ArtifactAuthorizationRequest) (artifactcap.Authorization, error)
 }
 
-type ArtifactAuthorizationProviderFunc func(context.Context, ArtifactAuthorizationRequest) (artifactcap.Authorization, error)
-
-func (f ArtifactAuthorizationProviderFunc) AuthorizeArtifact(ctx context.Context, request ArtifactAuthorizationRequest) (artifactcap.Authorization, error) {
-	return f(ctx, request)
-}
-
 type ArtifactClient struct {
 	baseURL          *url.URL
 	httpClient       *http.Client

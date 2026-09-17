@@ -185,7 +185,7 @@ func run(transcriptPath string) (err error) {
 	}
 
 	// Wrap with retry logic for transient errors
-	llmProvider = llm.NewRetryProvider(llmProvider, 0)
+	llmProvider = llm.NewRetryProvider(llmProvider)
 
 	// Set up fallback providers if configured
 	if len(workerEnv.Fallbacks) > 0 {
@@ -208,7 +208,7 @@ func run(transcriptPath string) (err error) {
 			}
 
 			fallbacks = append(fallbacks, llm.FallbackEntry{
-				Provider: llm.NewRetryProvider(fbProvider, 0),
+				Provider: llm.NewRetryProvider(fbProvider),
 				Model:    fallbackEnv.Model,
 			})
 		}
@@ -1300,8 +1300,8 @@ func executeAgentLoopWithEvents(
 			common.WithEventSummary("model request completed"),
 			common.WithEventContent(eventContent(map[string]any{
 				"iteration":    iteration + 1,
-				"model":        firstNonBlankOriginal(resp.Model, model),
-				"provider":     firstNonBlankOriginal(resp.Provider, llm.ProviderTelemetryName(provider)),
+				"model":        common.FirstNonBlank(resp.Model, model),
+				"provider":     common.FirstNonBlank(resp.Provider, llm.ProviderTelemetryName(provider)),
 				"inputTokens":  resp.InputTokens,
 				"outputTokens": resp.OutputTokens,
 				"stopReason":   resp.StopReason,
@@ -1609,18 +1609,6 @@ func eventContent(values map[string]any) json.RawMessage {
 		return nil
 	}
 	return json.RawMessage(data)
-}
-
-// firstNonBlankOriginal returns the original value for the first non-blank string.
-// Event metadata should preserve provider-supplied model IDs exactly while
-// still treating whitespace-only values as empty.
-func firstNonBlankOriginal(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
 }
 
 func evaluateCompletionResponse(

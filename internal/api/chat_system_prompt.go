@@ -8,7 +8,6 @@ package api
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"strings"
 
@@ -28,51 +27,22 @@ type SystemPromptBuilder struct {
 	client              client.Client
 	namespace           string
 	runtimeAvailability ACPRuntimeAvailability
-
-	// Cache fields
-	cachedPrompt string
-	cachedHash   string
 }
 
 // NewSystemPromptBuilder creates a new SystemPromptBuilder.
-func NewSystemPromptBuilder(c client.Client, namespace string, availability ...ACPRuntimeAvailability) *SystemPromptBuilder {
-	configured := ACPRuntimeAvailability{}
-	if len(availability) > 0 {
-		configured = availability[0]
-	}
+func NewSystemPromptBuilder(c client.Client, namespace string, availability ACPRuntimeAvailability) *SystemPromptBuilder {
 	return &SystemPromptBuilder{
 		client:              c,
 		namespace:           namespace,
-		runtimeAvailability: configured,
+		runtimeAvailability: availability,
 	}
 }
 
-// PromptMode controls how much of the system prompt is included.
-type PromptMode string
-
-const (
-	// PromptModeFull includes all sections (default for top-level chat).
-	PromptModeFull PromptMode = "full"
-	// PromptModeMinimal omits scheduling, examples, image catalog, and coordination (for sub-agents).
-	PromptModeMinimal PromptMode = "minimal"
-)
-
 // BuildSystemPrompt assembles the full system prompt with dynamic context.
-// mode is optional; defaults to PromptModeFull.
-func (b *SystemPromptBuilder) BuildSystemPrompt(ctx context.Context, userSystemPrompt string, mode ...PromptMode) (string, error) {
-	m := PromptModeFull
-	if len(mode) > 0 {
-		m = mode[0]
-	}
-
+func (b *SystemPromptBuilder) BuildSystemPrompt(ctx context.Context, userSystemPrompt string) (string, error) {
 	agentsSection, toolsSection, providersSection, skillsSection, err := b.buildDynamicContext(ctx)
 	if err != nil {
 		return "", fmt.Errorf("building dynamic context: %w", err)
-	}
-
-	hash := b.computeHash(agentsSection, toolsSection, providersSection, skillsSection)
-	if hash == b.cachedHash && userSystemPrompt == "" && b.cachedPrompt != "" {
-		return b.cachedPrompt, nil
 	}
 
 	var sb strings.Builder
@@ -81,10 +51,10 @@ func (b *SystemPromptBuilder) BuildSystemPrompt(ctx context.Context, userSystemP
 	sb.WriteString(buildCapabilitiesSection())
 	sb.WriteString(buildBehaviorSection())
 	sb.WriteString(buildToolCallStyleSection())
-	sb.WriteString(buildTaskTypesSection(m))
+	sb.WriteString(buildTaskTypesSection())
 	sb.WriteString(buildValidationSection())
-	sb.WriteString(buildCoordinationSection(m))
-	sb.WriteString(buildSchedulingSection(m))
+	sb.WriteString(buildCoordinationSection())
+	sb.WriteString(buildSchedulingSection())
 
 	// Dynamic context
 	sb.WriteString("<available_agents>\n")
@@ -105,7 +75,7 @@ func (b *SystemPromptBuilder) BuildSystemPrompt(ctx context.Context, userSystemP
 	}
 
 	sb.WriteString(buildRulesSection())
-	sb.WriteString(buildExamplesSection(m))
+	sb.WriteString(buildExamplesSection())
 
 	if userSystemPrompt != "" {
 		sb.WriteString("\n<user_instructions>\n")
@@ -113,11 +83,7 @@ func (b *SystemPromptBuilder) BuildSystemPrompt(ctx context.Context, userSystemP
 		sb.WriteString("\n</user_instructions>\n")
 	}
 
-	prompt := sb.String()
-	b.cachedPrompt = prompt
-	b.cachedHash = hash
-
-	return prompt, nil
+	return sb.String(), nil
 }
 
 func buildIdentitySection() string {
@@ -169,14 +135,13 @@ Keep narration brief and value-dense; avoid repeating obvious steps.
 `
 }
 
-func buildTaskTypesSection(mode PromptMode) string {
+func buildTaskTypesSection() string {
 	var sb strings.Builder
 	sb.WriteString(`<task_types>
 - container: Run a command in a container. Use create_container_task.
   PREFERRED for: shell commands, CLI tools, scripts, data processing.
 `)
-	if mode == PromptModeFull {
-		sb.WriteString(`  Common images (Chainguard, hardened, non-root):
+	sb.WriteString(`  Common images (Chainguard, hardened, non-root):
     • bash/shell: "cgr.dev/chainguard/bash:latest"
     • python: "cgr.dev/chainguard/python:latest-dev" (includes pip)
     • node: "cgr.dev/chainguard/node:latest-dev" (includes npm)
@@ -184,7 +149,6 @@ func buildTaskTypesSection(mode PromptMode) string {
     • curl: "cgr.dev/chainguard/curl:latest"
     • git: "cgr.dev/chainguard/git:latest-dev"
 `)
-	}
 	sb.WriteString(`  All containers run as non-root with read-only root filesystem.
   Writable paths: /tmp, /home/nonroot. Do NOT assume root access.
 - ai: Run an LLM-powered task. Use create_ai_task with a providerRef.
@@ -235,10 +199,7 @@ Report the selected validation image, command, workspace ref/branch, and evidenc
 `
 }
 
-func buildCoordinationSection(mode PromptMode) string {
-	if mode == PromptModeMinimal {
-		return ""
-	}
+func buildCoordinationSection() string {
 	return `<coordination>
 For complex multi-step tasks, use the self-bootstrapping coordinator pattern:
 
@@ -286,10 +247,7 @@ When no agents exist and the user needs complex work done:
 `
 }
 
-func buildSchedulingSection(mode PromptMode) string {
-	if mode == PromptModeMinimal {
-		return ""
-	}
+func buildSchedulingSection() string {
 	return `<scheduling>
 Any task type can be made recurring by setting the schedule parameter with a cron expression.
 Common patterns:
@@ -352,10 +310,7 @@ func buildRulesSection() string {
 `
 }
 
-func buildExamplesSection(mode PromptMode) string {
-	if mode == PromptModeMinimal {
-		return ""
-	}
+func buildExamplesSection() string {
 	return `<examples>
 Example 1: "list all pods in the cluster"
 → create_container_task (image: "cgr.dev/chainguard/kubectl:latest", command: ["kubectl","get","pods","-A","-o","wide"])
@@ -533,14 +488,4 @@ func formatAgent(agent *corev1alpha1.Agent) string {
 		return fmt.Sprintf("%s - %s", agent.Name, detail)
 	}
 	return agent.Name
-}
-
-// computeHash returns a truncated SHA-256 hash of the dynamic sections.
-func (b *SystemPromptBuilder) computeHash(agents, tools, providers, skills string) string {
-	h := sha256.New()
-	h.Write([]byte(agents))
-	h.Write([]byte(tools))
-	h.Write([]byte(providers))
-	h.Write([]byte(skills))
-	return fmt.Sprintf("%x", h.Sum(nil))[:16]
 }

@@ -26,7 +26,7 @@ func (s *Store) CreateSessionTurnRecord(ctx context.Context, request store.Creat
 	if err := store.ValidateControlIdentifier("session name", request.SessionName); err != nil {
 		return nil, err
 	}
-	normalized, _, err := normalizeSessionTurnForCreate(request.Turn, request.Fence)
+	normalized, _, err := store.NormalizeSessionTurnForCreate(request.Turn, request.Fence)
 	if err != nil {
 		return nil, err
 	}
@@ -37,7 +37,7 @@ func (s *Store) CreateSessionTurnRecord(ctx context.Context, request store.Creat
 	}
 	defer func() { _ = tx.Rollback() }()
 	if existing, getErr := getSessionTurn(ctx, tx, normalized.ID); getErr == nil {
-		if !sameSessionTurnCreation(existing, normalized) {
+		if !store.SameSessionTurnCreation(existing, normalized) {
 			return nil, store.ConflictErrorf("session turn %q was reused with different prompt input or request digest", normalized.ID)
 		}
 		if err := requireSessionTurnBinding(ctx, tx, normalized.ID, request.Namespace, request.SessionName); err != nil {

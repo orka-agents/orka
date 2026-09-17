@@ -27,7 +27,7 @@ func TestNewSystemPromptBuilder(t *testing.T) {
 	_ = corev1alpha1.AddToScheme(scheme)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	b := NewSystemPromptBuilder(c, "test-ns")
+	b := NewSystemPromptBuilder(c, "test-ns", ACPRuntimeAvailability{})
 	if b == nil {
 		t.Fatal("expected non-nil builder")
 	}
@@ -36,12 +36,6 @@ func TestNewSystemPromptBuilder(t *testing.T) {
 	}
 	if b.client == nil {
 		t.Error("expected non-nil client")
-	}
-	if b.cachedPrompt != "" {
-		t.Error("expected empty cachedPrompt")
-	}
-	if b.cachedHash != "" {
-		t.Error("expected empty cachedHash")
 	}
 }
 
@@ -97,27 +91,19 @@ func TestBuildToolCallStyleSection(t *testing.T) {
 func TestBuildTaskTypesSection(t *testing.T) {
 	tests := []struct {
 		name          string
-		mode          PromptMode
 		wantImages    bool
 		wantContainer bool
 	}{
 		{
-			name:          "full mode includes images",
-			mode:          PromptModeFull,
+			name:          "includes images",
 			wantImages:    true,
-			wantContainer: true,
-		},
-		{
-			name:          "minimal mode omits images",
-			mode:          PromptModeMinimal,
-			wantImages:    false,
 			wantContainer: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := buildTaskTypesSection(tt.mode)
+			s := buildTaskTypesSection()
 			if !strings.Contains(s, "<task_types>") {
 				t.Error("missing <task_types> tag")
 			}
@@ -178,26 +164,19 @@ func TestBuildValidationSection(t *testing.T) {
 func TestBuildCoordinationSection(t *testing.T) {
 	tests := []struct {
 		name     string
-		mode     PromptMode
 		wantLen  bool
 		wantText string
 	}{
 		{
-			name:     "full mode includes coordination",
-			mode:     PromptModeFull,
+			name:     "includes coordination",
 			wantLen:  true,
 			wantText: "<coordination>",
-		},
-		{
-			name:    "minimal mode returns empty",
-			mode:    PromptModeMinimal,
-			wantLen: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := buildCoordinationSection(tt.mode)
+			s := buildCoordinationSection()
 			if tt.wantLen {
 				if !strings.Contains(s, tt.wantText) {
 					t.Errorf("missing %q", tt.wantText)
@@ -226,16 +205,14 @@ func TestBuildCoordinationSection(t *testing.T) {
 func TestBuildSchedulingSection(t *testing.T) {
 	tests := []struct {
 		name    string
-		mode    PromptMode
 		wantLen bool
 	}{
-		{"full mode includes scheduling", PromptModeFull, true},
-		{"minimal mode returns empty", PromptModeMinimal, false},
+		{"includes scheduling", true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := buildSchedulingSection(tt.mode)
+			s := buildSchedulingSection()
 			if tt.wantLen {
 				if !strings.Contains(s, "<scheduling>") {
 					t.Error("missing <scheduling> tag")
@@ -284,16 +261,14 @@ func TestBuildRulesSection(t *testing.T) {
 func TestBuildExamplesSection(t *testing.T) {
 	tests := []struct {
 		name    string
-		mode    PromptMode
 		wantLen bool
 	}{
-		{"full mode includes examples", PromptModeFull, true},
-		{"minimal mode returns empty", PromptModeMinimal, false},
+		{"includes examples", true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := buildExamplesSection(tt.mode)
+			s := buildExamplesSection()
 			if tt.wantLen {
 				if !strings.Contains(s, "<examples>") {
 					t.Error("missing <examples> tag")
@@ -453,48 +428,6 @@ func TestFormatAgent(t *testing.T) {
 	}
 }
 
-func TestComputeHash(t *testing.T) {
-	scheme := runtime.NewScheme()
-	_ = corev1alpha1.AddToScheme(scheme)
-	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	b := NewSystemPromptBuilder(c, "default")
-
-	t.Run("consistent for same inputs", func(t *testing.T) {
-		h1 := b.computeHash("agents", "tools", "providers", "skills")
-		h2 := b.computeHash("agents", "tools", "providers", "skills")
-		if h1 != h2 {
-			t.Errorf("hash mismatch: %q != %q", h1, h2)
-		}
-	})
-
-	t.Run("different for different inputs", func(t *testing.T) {
-		h1 := b.computeHash("agents1", "tools", "providers", "skills")
-		h2 := b.computeHash("agents2", "tools", "providers", "skills")
-		if h1 == h2 {
-			t.Error("expected different hashes for different inputs")
-		}
-	})
-
-	t.Run("returns 16-char hex string", func(t *testing.T) {
-		h := b.computeHash("a", "b", "c", "d")
-		if len(h) != 16 {
-			t.Errorf("hash length = %d, want 16", len(h))
-		}
-		for _, c := range h {
-			if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-				t.Errorf("hash %q contains non-hex char %q", h, string(c))
-			}
-		}
-	})
-
-	t.Run("empty inputs produce valid hash", func(t *testing.T) {
-		h := b.computeHash("", "", "", "")
-		if len(h) != 16 {
-			t.Errorf("hash length = %d, want 16", len(h))
-		}
-	})
-}
-
 //nolint:gocyclo // Table-driven subtests cover the complete dynamic prompt inventory.
 func TestBuildDynamicContext(t *testing.T) {
 	scheme := runtime.NewScheme()
@@ -503,7 +436,7 @@ func TestBuildDynamicContext(t *testing.T) {
 
 	t.Run("no resources returns defaults", func(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(scheme).Build()
-		b := NewSystemPromptBuilder(c, "default")
+		b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
 
 		agents, tools, providers, skills, err := b.buildDynamicContext(context.Background())
 		if err != nil {
@@ -558,7 +491,7 @@ func TestBuildDynamicContext(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(scheme).
 			WithObjects(agent, tool, provider, skill).
 			Build()
-		b := NewSystemPromptBuilder(c, "default")
+		b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
 
 		agents, tools, providers, skills, err := b.buildDynamicContext(context.Background())
 		if err != nil {
@@ -644,7 +577,7 @@ func TestBuildDynamicContext(t *testing.T) {
 
 	t.Run("unconfigured opencode runtime is omitted", func(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(scheme).Build()
-		b := NewSystemPromptBuilder(c, "default")
+		b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
 
 		_, _, providers, _, err := b.buildDynamicContext(context.Background())
 		if err != nil {
@@ -660,7 +593,7 @@ func TestBuildDynamicContext(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "other-ns-agent", Namespace: "other"},
 		}
 		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent).Build()
-		b := NewSystemPromptBuilder(c, "default")
+		b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
 
 		agents, _, _, _, err := b.buildDynamicContext(context.Background())
 		if err != nil {
@@ -679,7 +612,7 @@ func TestBuildSystemPrompt(t *testing.T) {
 
 	t.Run("full mode includes all sections", func(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(scheme).Build()
-		b := NewSystemPromptBuilder(c, "default")
+		b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
 
 		prompt, err := b.BuildSystemPrompt(context.Background(), "")
 		if err != nil {
@@ -697,32 +630,9 @@ func TestBuildSystemPrompt(t *testing.T) {
 		}
 	})
 
-	t.Run("minimal mode omits optional sections", func(t *testing.T) {
-		c := fake.NewClientBuilder().WithScheme(scheme).Build()
-		b := NewSystemPromptBuilder(c, "default")
-
-		prompt, err := b.BuildSystemPrompt(context.Background(), "", PromptModeMinimal)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if strings.Contains(prompt, "<coordination>") {
-			t.Error("minimal mode should not include <coordination>")
-		}
-		if strings.Contains(prompt, "<scheduling>") {
-			t.Error("minimal mode should not include <scheduling>")
-		}
-		if strings.Contains(prompt, "<examples>") {
-			t.Error("minimal mode should not include <examples>")
-		}
-		// Core sections should still be present
-		if !strings.Contains(prompt, "<identity>") {
-			t.Error("minimal mode should include <identity>")
-		}
-	})
-
 	t.Run("user system prompt appended", func(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(scheme).Build()
-		b := NewSystemPromptBuilder(c, "default")
+		b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
 
 		prompt, err := b.BuildSystemPrompt(context.Background(), "Be helpful and concise.")
 		if err != nil {
@@ -738,7 +648,7 @@ func TestBuildSystemPrompt(t *testing.T) {
 
 	t.Run("empty user prompt omits user_instructions", func(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(scheme).Build()
-		b := NewSystemPromptBuilder(c, "default")
+		b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
 
 		prompt, err := b.BuildSystemPrompt(context.Background(), "")
 		if err != nil {
@@ -749,9 +659,9 @@ func TestBuildSystemPrompt(t *testing.T) {
 		}
 	})
 
-	t.Run("caching returns same prompt for unchanged context", func(t *testing.T) {
+	t.Run("same prompt for unchanged context", func(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(scheme).Build()
-		b := NewSystemPromptBuilder(c, "default")
+		b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
 
 		p1, err := b.BuildSystemPrompt(context.Background(), "")
 		if err != nil {
@@ -762,13 +672,13 @@ func TestBuildSystemPrompt(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if p1 != p2 {
-			t.Error("expected cached prompt to be identical")
+			t.Error("expected prompt to be identical")
 		}
 	})
 
-	t.Run("skill changes invalidate cache", func(t *testing.T) {
+	t.Run("skill changes update prompt", func(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(scheme).Build()
-		b := NewSystemPromptBuilder(c, "default")
+		b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
 
 		p1, err := b.BuildSystemPrompt(context.Background(), "")
 		if err != nil {
@@ -799,9 +709,9 @@ func TestBuildSystemPrompt(t *testing.T) {
 		}
 	})
 
-	t.Run("user prompt bypasses cache", func(t *testing.T) {
+	t.Run("user prompt changes prompt", func(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(scheme).Build()
-		b := NewSystemPromptBuilder(c, "default")
+		b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
 
 		p1, err := b.BuildSystemPrompt(context.Background(), "")
 		if err != nil {
@@ -812,7 +722,7 @@ func TestBuildSystemPrompt(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if p1 == p2 {
-			t.Error("prompt with user instructions should differ from cached")
+			t.Error("prompt with user instructions should differ")
 		}
 		if !strings.Contains(p2, "Custom instructions") {
 			t.Error("missing custom instructions in prompt")
@@ -835,7 +745,7 @@ func TestBuildDynamicContextSkillListError(t *testing.T) {
 			},
 		}).
 		Build()
-	b := NewSystemPromptBuilder(c, "default")
+	b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
 
 	_, _, _, _, err := b.buildDynamicContext(context.Background())
 	if err == nil {

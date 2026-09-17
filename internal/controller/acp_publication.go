@@ -740,11 +740,7 @@ func (d *ACPDispatcher) ensureBranchClaim(
 		Generation: 1, LastVerified: expected, Availability: store.BranchClaimAvailable,
 		RequestDigest: digest, CreatedAt: time.Now().UTC(),
 	}
-	if creator, ok := d.Store.(store.BranchClaimCreationStore); ok {
-		return creator.CreateBranchClaimWithResult(ctx, request, fence)
-	}
-	claim, err := d.Store.CreateBranchClaim(ctx, request, fence)
-	return claim, false, err
+	return d.Store.CreateBranchClaimWithResult(ctx, request, fence)
 }
 
 func (d *ACPDispatcher) persistedPublicationOwnsLegacyClaim(

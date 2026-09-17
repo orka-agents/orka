@@ -146,10 +146,7 @@ func (r *RuntimePoolReconciler) readNativeSubstrateState(ctx context.Context, po
 		return nil, nil, fmt.Errorf("native Substrate journal requires an exact RuntimePool and infrastructure binding")
 	}
 	cm := r.substrateNativeStateObject(pool)
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	if err := reader.Get(ctx, client.ObjectKeyFromObject(cm), cm); err != nil {
 		if apierrors.IsNotFound(err) {
 			if err := validateAbsentNativeSubstrateJournal(ctx, reader, pool); err != nil {
@@ -311,10 +308,7 @@ func (r *RuntimePoolReconciler) nativeSubstrateWorker(ctx context.Context, api a
 		return nil, fmt.Errorf("native Substrate requires an exact worker with capacity for one Actor in the admitted WorkerPool")
 	}
 	pod := &corev1.Pod{}
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: worker.GetWorkerPod()}, pod); err != nil {
 		return nil, err
 	}
@@ -385,10 +379,7 @@ func (r *RuntimePoolReconciler) terminateNativeSubstrateWorker(ctx context.Conte
 	}
 	f := a.Worker
 	pod := &corev1.Pod{}
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	err := reader.Get(ctx, types.NamespacedName{Namespace: f.Namespace, Name: f.Pod}, pod)
 	if apierrors.IsNotFound(err) {
 		return true, nil

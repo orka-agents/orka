@@ -105,14 +105,14 @@ test -x "$kindctl"
 
 2. **Deploy the Orka controller** into the cluster with `$orka-kind-deploy`
    (build + load controller and worker images, install CRDs, roll out
-   `orka-controller-manager`). Run the deploy under the kindctl-scoped kubeconfig
-   so its `kubectl` discovery sees the repo-scoped cluster:
+   `orka-controller-manager`). Pass the kindctl context explicitly and run the
+   deploy under its scoped kubeconfig:
 
    ```bash
    orka_kind_deploy="${ORKA_KIND_DEPLOY_BIN:-.agents/skills/orka-kind-deploy/scripts/deploy_orka_kind.sh}"
    test -x "$orka_kind_deploy"
-   eval "$("$kindctl" env)"
-   "$orka_kind_deploy"
+   "$kindctl" exec -- "$orka_kind_deploy" \
+     --context "$("$kindctl" kubectl config current-context)"
    ```
 
    The digest-pinned ACP runtime images must be present for the separate plain-agent

@@ -181,14 +181,7 @@ func (r *RepositoryScanReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	if scan.Status.Phase == "" {
 		if err := r.updateStatusWithRetry(ctx, scan, func(s *corev1alpha1.RepositoryScan) {
 			s.Status.Phase = repositoryScanPhasePending
-			meta.SetStatusCondition(&s.Status.Conditions, metav1.Condition{
-				Type:               "Ready",
-				Status:             metav1.ConditionFalse,
-				Reason:             "Pending",
-				Message:            "Waiting for the first scan run",
-				LastTransitionTime: metav1.Now(),
-				ObservedGeneration: s.Generation,
-			})
+			meta.SetStatusCondition(&s.Status.Conditions, readyCondition(s.Generation, metav1.ConditionFalse, "Pending", "Waiting for the first scan run"))
 		}); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -201,10 +194,7 @@ func (r *RepositoryScanReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 	// Ingestion can publish a new run binding or completion. Read live status
 	// because those writes may not have reached the informer cache yet.
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	current := &corev1alpha1.RepositoryScan{}
 	if err := reader.Get(ctx, req.NamespacedName, current); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -218,14 +208,7 @@ func (r *RepositoryScanReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		if scan.Status.Phase != repositoryScanPhaseSuspended {
 			if err := r.updateStatusWithRetry(ctx, scan, func(s *corev1alpha1.RepositoryScan) {
 				s.Status.Phase = repositoryScanPhaseSuspended
-				meta.SetStatusCondition(&s.Status.Conditions, metav1.Condition{
-					Type:               "Ready",
-					Status:             metav1.ConditionFalse,
-					Reason:             "Suspended",
-					Message:            "Scheduled scans are suspended",
-					LastTransitionTime: metav1.Now(),
-					ObservedGeneration: s.Generation,
-				})
+				meta.SetStatusCondition(&s.Status.Conditions, readyCondition(s.Generation, metav1.ConditionFalse, "Suspended", "Scheduled scans are suspended"))
 			}); err != nil {
 				return ctrl.Result{}, err
 			}
@@ -264,14 +247,7 @@ func (r *RepositoryScanReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	if err != nil {
 		if updateErr := r.updateStatusWithRetry(ctx, scan, func(s *corev1alpha1.RepositoryScan) {
 			s.Status.Phase = repositoryScanPhaseError
-			meta.SetStatusCondition(&s.Status.Conditions, metav1.Condition{
-				Type:               "Ready",
-				Status:             metav1.ConditionFalse,
-				Reason:             "InvalidSchedule",
-				Message:            repositoryScanConditionMessage(err.Error(), "invalid scan schedule"),
-				LastTransitionTime: metav1.Now(),
-				ObservedGeneration: s.Generation,
-			})
+			meta.SetStatusCondition(&s.Status.Conditions, readyCondition(s.Generation, metav1.ConditionFalse, "InvalidSchedule", repositoryScanConditionMessage(err.Error(), "invalid scan schedule")))
 		}); updateErr != nil {
 			return ctrl.Result{}, updateErr
 		}
@@ -497,14 +473,7 @@ func (r *RepositoryScanReconciler) createScanRun(ctx context.Context, scan *core
 		s.Status.Phase = repositoryScanPhaseScanning
 		s.Status.LastScanID = scanID
 		s.Status.LastScanTaskName = taskName
-		meta.SetStatusCondition(&s.Status.Conditions, metav1.Condition{
-			Type:               "Ready",
-			Status:             metav1.ConditionFalse,
-			Reason:             "Scanning",
-			Message:            fmt.Sprintf("%s scan is running", titleCaseMode(mode)),
-			LastTransitionTime: metav1.Now(),
-			ObservedGeneration: s.Generation,
-		})
+		meta.SetStatusCondition(&s.Status.Conditions, readyCondition(s.Generation, metav1.ConditionFalse, "Scanning", fmt.Sprintf("%s scan is running", titleCaseMode(mode))))
 	})
 	if errors.Is(err, store.ErrConflict) || apierrors.IsConflict(err) {
 		if rollbackErr := security.RollbackScanRunAdmission(ctx, r.SecurityStore, r.Client, r.APIReader, scan, run); rollbackErr != nil {
@@ -631,14 +600,7 @@ func (r *RepositoryScanReconciler) updateRepositoryScanPolicyError(ctx context.C
 	message := failure.Error()
 	return r.updateStatusWithRetry(ctx, scan, func(s *corev1alpha1.RepositoryScan) {
 		s.Status.Phase = repositoryScanPhaseError
-		meta.SetStatusCondition(&s.Status.Conditions, metav1.Condition{
-			Type:               "Ready",
-			Status:             metav1.ConditionFalse,
-			Reason:             "ScanFailed",
-			Message:            repositoryScanConditionMessage(message, "scanner policy could not be loaded"),
-			LastTransitionTime: metav1.Now(),
-			ObservedGeneration: s.Generation,
-		})
+		meta.SetStatusCondition(&s.Status.Conditions, readyCondition(s.Generation, metav1.ConditionFalse, "ScanFailed", repositoryScanConditionMessage(message, "scanner policy could not be loaded")))
 	})
 }
 
@@ -1354,14 +1316,7 @@ func (r *RepositoryScanReconciler) updateNoopScanStatus(ctx context.Context, sca
 			s.Status.LastScanAt = completedAt
 			s.Status.LastSuccessfulScanAt = completedAt
 		}
-		meta.SetStatusCondition(&s.Status.Conditions, metav1.Condition{
-			Type:               "Ready",
-			Status:             metav1.ConditionTrue,
-			Reason:             "ScanSucceeded",
-			Message:            repositoryScanConditionMessage(run.Summary, "scan completed successfully"),
-			LastTransitionTime: metav1.Now(),
-			ObservedGeneration: s.Generation,
-		})
+		meta.SetStatusCondition(&s.Status.Conditions, readyCondition(s.Generation, metav1.ConditionTrue, "ScanSucceeded", repositoryScanConditionMessage(run.Summary, "scan completed successfully")))
 	})
 }
 
@@ -1937,14 +1892,7 @@ func (r *RepositoryScanReconciler) publishScanRunStatus(ctx context.Context, sca
 		switch run.Phase {
 		case scanRunPhaseRunning, scanRunPhasePending:
 			s.Status.Phase = repositoryScanPhaseScanning
-			meta.SetStatusCondition(&s.Status.Conditions, metav1.Condition{
-				Type:               "Ready",
-				Status:             metav1.ConditionFalse,
-				Reason:             "Scanning",
-				Message:            repositoryScanConditionMessage(run.Summary, scanSummaryRunning),
-				LastTransitionTime: metav1.Now(),
-				ObservedGeneration: s.Generation,
-			})
+			meta.SetStatusCondition(&s.Status.Conditions, readyCondition(s.Generation, metav1.ConditionFalse, "Scanning", repositoryScanConditionMessage(run.Summary, scanSummaryRunning)))
 		case scanRunPhaseSucceeded:
 			s.Status.Phase = repositoryScanPhaseReady
 			s.Status.LastProcessedCommit = run.HeadCommit
@@ -1953,27 +1901,13 @@ func (r *RepositoryScanReconciler) publishScanRunStatus(ctx context.Context, sca
 				s.Status.LastScanAt = t
 				s.Status.LastSuccessfulScanAt = t
 			}
-			meta.SetStatusCondition(&s.Status.Conditions, metav1.Condition{
-				Type:               "Ready",
-				Status:             metav1.ConditionTrue,
-				Reason:             "ScanSucceeded",
-				Message:            repositoryScanConditionMessage(run.Summary, "scan completed successfully"),
-				LastTransitionTime: metav1.Now(),
-				ObservedGeneration: s.Generation,
-			})
+			meta.SetStatusCondition(&s.Status.Conditions, readyCondition(s.Generation, metav1.ConditionTrue, "ScanSucceeded", repositoryScanConditionMessage(run.Summary, "scan completed successfully")))
 		default:
 			s.Status.Phase = repositoryScanPhaseError
 			if run.CompletedAt != nil {
 				s.Status.LastScanAt = &metav1.Time{Time: *run.CompletedAt}
 			}
-			meta.SetStatusCondition(&s.Status.Conditions, metav1.Condition{
-				Type:               "Ready",
-				Status:             metav1.ConditionFalse,
-				Reason:             "ScanFailed",
-				Message:            repositoryScanConditionMessage(run.Summary, "scan failed"),
-				LastTransitionTime: metav1.Now(),
-				ObservedGeneration: s.Generation,
-			})
+			meta.SetStatusCondition(&s.Status.Conditions, readyCondition(s.Generation, metav1.ConditionFalse, "ScanFailed", repositoryScanConditionMessage(run.Summary, "scan failed")))
 		}
 	})
 }
@@ -3286,12 +3220,7 @@ func (r *RepositoryScanReconciler) ingestReviewTask(ctx context.Context, scan *c
 	if err := r.ensureActiveScanRunPolicyCurrent(ctx, scan, run); err != nil {
 		return err
 	}
-	filterResult := security.FilterFindings(partition.Accepted, security.FindingFilterOptions{
-		RepositoryScan: scan.Name,
-		ScanRunID:      run.ID,
-		TaskName:       task.Name,
-		SliceID:        sliceID,
-	})
+	filterResult := security.FilterFindings(partition.Accepted)
 	partition.Accepted = filterResult.Kept
 	partition.Dropped = append(partition.Dropped, filterResult.Dropped...)
 	return r.applyScanTaskIngestion(ctx, scan, task, run, func(tx *RepositoryScanReconciler, current *store.ScanRun, ingestion *store.ScanTaskIngestion) error {
@@ -4513,10 +4442,7 @@ func patchTaskMatchesCurrentFindingOccurrence(task *corev1alpha1.Task, proposal 
 }
 
 func (r *RepositoryScanReconciler) updateStatusWithRetry(ctx context.Context, scan *corev1alpha1.RepositoryScan, mutate func(*corev1alpha1.RepositoryScan)) error {
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		current := &corev1alpha1.RepositoryScan{}
 		if err := reader.Get(ctx, types.NamespacedName{Name: scan.Name, Namespace: scan.Namespace}, current); err != nil {

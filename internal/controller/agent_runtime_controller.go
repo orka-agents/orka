@@ -1225,7 +1225,7 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 	}
 	if !probe.Passed {
 		return observed, false, auth.controllerResourceVersion, auth.capabilityResourceVersion, "",
-			sanitizeAgentRuntimeStatusMessage(probe.Message)
+			sanitizeStatusMessage(probe.Message)
 	}
 	if err := r.requireCurrentAgentRuntimeAuthMaterial(ctx, runtime, auth); err != nil {
 		return observed, false, auth.controllerResourceVersion, auth.capabilityResourceVersion, "", err.Error()
@@ -1383,7 +1383,7 @@ func (r *AgentRuntimeReconciler) probeHarnessV1AgentRuntime(
 	}
 	observed := observedHarnessV1CapabilitiesFromConformance(probe.ObservedCapabilities)
 	if !probe.Passed {
-		return observed, false, auth.secretResourceVersion, "", sanitizeAgentRuntimeStatusMessage(probe.Message)
+		return observed, false, auth.secretResourceVersion, "", sanitizeStatusMessage(probe.Message)
 	}
 	if err := validateHarnessV1AgentRuntimeRequiredCapabilities(runtime, probe.ObservedCapabilities); err != nil {
 		return observed, false, auth.secretResourceVersion, "", err.Error()
@@ -1444,7 +1444,7 @@ func validateHarnessV1AgentRuntimeExecutableCapabilities(capabilities *harness.C
 	if capabilities == nil {
 		return fmt.Errorf("observed harness v1 capabilities are missing")
 	}
-	if capabilities.RuntimeName != sanitizeAgentRuntimeCapabilityValue(capabilities.RuntimeName) {
+	if capabilities.RuntimeName != sanitizeStatusValue(capabilities.RuntimeName, 512) {
 		return fmt.Errorf("runtimeName contains unsafe text or exceeds status length limits")
 	}
 	for _, mode := range capabilities.ToolExecutionModes {
@@ -1512,11 +1512,11 @@ func observedHarnessV1CapabilitiesFromConformance(
 		classes = append(classes, converted)
 	}
 	return &corev1alpha1.AgentRuntimeObservedCapabilities{
-		ProtocolVersion:           sanitizeAgentRuntimeCapabilityValue(capabilities.ProtocolVersion),
-		Transport:                 sanitizeAgentRuntimeCapabilityValue(capabilities.Transport),
-		RuntimeName:               sanitizeAgentRuntimeCapabilityValue(capabilities.RuntimeName),
-		RuntimeVersion:            sanitizeAgentRuntimeCapabilityValue(capabilities.RuntimeVersion),
-		ProviderKind:              sanitizeAgentRuntimeCapabilityValue(string(capabilities.ProviderKind)),
+		ProtocolVersion:           sanitizeStatusValue(capabilities.ProtocolVersion, 512),
+		Transport:                 sanitizeStatusValue(capabilities.Transport, 512),
+		RuntimeName:               sanitizeStatusValue(capabilities.RuntimeName, 512),
+		RuntimeVersion:            sanitizeStatusValue(capabilities.RuntimeVersion, 512),
+		ProviderKind:              sanitizeStatusValue(string(capabilities.ProviderKind), 512),
 		ToolExecutionModes:        modes,
 		BrokeredToolClasses:       classes,
 		SupportsCancel:            capabilities.SupportsCancel,
@@ -2580,10 +2580,10 @@ func observedCapabilitiesFromConformance(
 	observed := &corev1alpha1.AgentRuntimeObservedCapabilities{}
 	if capabilities := probe.ObservedCapabilities; capabilities != nil {
 		base := capabilities.CapabilitiesResponse
-		observed.ProtocolVersion = sanitizeAgentRuntimeCapabilityValue(base.Protocol)
-		observed.Transport = sanitizeAgentRuntimeCapabilityValue(base.Transport)
-		observed.ACPVersion = sanitizeAgentRuntimeCapabilityValue(base.ACPVersion)
-		observed.RuntimeProfileDigest = sanitizeAgentRuntimeCapabilityValue(string(base.RuntimeProfileDigest))
+		observed.ProtocolVersion = sanitizeStatusValue(base.Protocol, 512)
+		observed.Transport = sanitizeStatusValue(base.Transport, 512)
+		observed.ACPVersion = sanitizeStatusValue(base.ACPVersion, 512)
+		observed.RuntimeProfileDigest = sanitizeStatusValue(string(base.RuntimeProfileDigest), 512)
 		observed.ProfileDigestSchemaVersion = int32(base.ProfileDigestSchemaVersion)
 		limits := agentRuntimeObservedProtocolLimits(base.Limits)
 		observed.Limits = &limits
@@ -2602,23 +2602,23 @@ func observedCapabilitiesFromConformance(
 		}
 		if len(base.AdapterDigests) == 1 {
 			for name, digest := range base.AdapterDigests {
-				observed.AdapterName = sanitizeAgentRuntimeCapabilityValue(name)
-				observed.AdapterDigest = sanitizeAgentRuntimeCapabilityValue(digest)
+				observed.AdapterName = sanitizeStatusValue(name, 512)
+				observed.AdapterDigest = sanitizeStatusValue(digest, 512)
 			}
 		}
 		// Conformance already proved that the registered provider and model are
 		// members of the advertised capability sets. Persist that exact selected
 		// identity even when the runtime advertises additional supported values.
-		observed.ProviderKind = sanitizeAgentRuntimeCapabilityValue(registeredProfile.ProviderKind)
-		observed.Model = sanitizeAgentRuntimeCapabilityValue(registeredProfile.Model)
+		observed.ProviderKind = sanitizeStatusValue(registeredProfile.ProviderKind, 512)
+		observed.Model = sanitizeStatusValue(registeredProfile.Model, 512)
 	}
 	if status := probe.ObservedStatus; status != nil {
-		observed.RuntimeInstanceID = sanitizeAgentRuntimeCapabilityValue(string(status.Fence.RuntimeInstanceID))
-		observed.SupervisorBootID = sanitizeAgentRuntimeCapabilityValue(string(status.Fence.SupervisorBootID))
+		observed.RuntimeInstanceID = sanitizeStatusValue(string(status.Fence.RuntimeInstanceID), 512)
+		observed.SupervisorBootID = sanitizeStatusValue(string(status.Fence.SupervisorBootID), 512)
 		observed.ControllerEpoch = int64(status.Fence.ControllerEpoch)
-		observed.RuntimePoolUID = sanitizeAgentRuntimeCapabilityValue(string(status.Fence.RuntimePoolUID))
+		observed.RuntimePoolUID = sanitizeStatusValue(string(status.Fence.RuntimePoolUID), 512)
 		observed.RuntimePoolGeneration = int64(status.Fence.RuntimePoolGeneration)
-		observed.Lifecycle = sanitizeAgentRuntimeCapabilityValue(string(status.Lifecycle))
+		observed.Lifecycle = sanitizeStatusValue(string(status.Lifecycle), 512)
 	}
 	return observed
 }
@@ -2690,7 +2690,7 @@ func (r *AgentRuntimeReconciler) writeAgentRuntimeStatus(
 		runtime.Status.ObservedAuthRefResourceVersion = controllerAuthResourceVersion
 	}
 	runtime.Status.LastValidated = &now
-	runtime.Status.Message = sanitizeAgentRuntimeStatusMessage(message)
+	runtime.Status.Message = sanitizeStatusMessage(message)
 	condition := metav1.Condition{
 		Type:               agentRuntimeReadyCondition,
 		ObservedGeneration: runtime.Generation,
@@ -2717,16 +2717,6 @@ func sanitizeAgentRuntimeEndpointForStatus(endpoint string) string {
 		return events.RedactExecutionEventText(strings.TrimSpace(endpoint))
 	}
 	return parsed.Scheme + "://" + parsed.Host
-}
-
-func sanitizeAgentRuntimeStatusMessage(message string) string {
-	message = events.RedactExecutionEventText(strings.TrimSpace(message))
-	return truncateUTF8(strings.ToValidUTF8(message, "�"), 1024)
-}
-
-func sanitizeAgentRuntimeCapabilityValue(value string) string {
-	value = events.RedactExecutionEventText(strings.TrimSpace(value))
-	return truncateUTF8(strings.ToValidUTF8(value, "�"), 512)
 }
 
 // SetupWithManager sets up the controller with the Manager.

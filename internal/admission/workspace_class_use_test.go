@@ -43,6 +43,32 @@ func (a *capturedClassUse) Authorize(
 	return a.err
 }
 
+func (a *capturedClassUse) AuthorizeCheckpoint(
+	_ context.Context,
+	namespace string,
+	name string,
+	caller authenticationv1.UserInfo,
+) error {
+	a.namespace = namespace
+	a.className = name
+	a.caller = caller
+	a.calls++
+	return a.err
+}
+
+func (a *capturedClassUse) AuthorizeCheckpointSource(
+	_ context.Context,
+	namespace string,
+	name string,
+	caller authenticationv1.UserInfo,
+) error {
+	a.namespace = namespace
+	a.className = name
+	a.caller = caller
+	a.calls++
+	return a.err
+}
+
 func TestWorkspaceClassUseValidatorTaskSelection(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))

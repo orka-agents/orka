@@ -34,7 +34,7 @@ grep -F 'orka/acp-opencode-runtime' "${bootstrap}" >/dev/null
 grep -F 'orka/general-worker' "${bootstrap}" >/dev/null
 grep -F 'ACP_OPENCODE_RUNTIME_IMG="${LIVE_ACP_OPENCODE_REF}"' "${bootstrap}" >/dev/null
 grep -F 'GENERAL_WORKER_IMG="${LIVE_ACP_GENERAL_WORKER_REF}"' "${bootstrap}" >/dev/null
-grep -F 'opencode_model="${ACP_E2E_OPENCODE_MODEL:-${ACP_E2E_CODEX_MODEL:-gpt-5.4}}"' "${bootstrap}" >/dev/null
+grep -F 'opencode_model="${ACP_E2E_OPENCODE_MODEL:-${ACP_E2E_CODEX_MODEL:-gpt-5.4-mini}}"' "${bootstrap}" >/dev/null
 grep -F 'opencode_model="${opencode_model#*/}"' "${bootstrap}" >/dev/null
 grep -F 'ACP_E2E_OPENCODE_CONTEXT_WINDOW must be a positive integer' "${bootstrap}" >/dev/null
 grep -F 'ACP_E2E_OPENCODE_MAX_TOKENS must be a positive integer' "${bootstrap}" >/dev/null

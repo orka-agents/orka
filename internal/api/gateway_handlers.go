@@ -486,15 +486,8 @@ func (h *Handlers) listGatewayPage(ctx context.Context, list client.ObjectList, 
 	return nil
 }
 
-func (h *Handlers) gatewayIdentityReader() client.Reader {
-	if h.apiReader != nil {
-		return h.apiReader
-	}
-	return h.client
-}
-
 func (h *Handlers) currentNamespaceUID(c fiber.Ctx, namespace string) (string, error) {
-	reader := h.gatewayIdentityReader()
+	reader := h.uncachedReader()
 	if reader == nil {
 		return "", fiber.NewError(fiber.StatusServiceUnavailable, "gateway identity lookup is unavailable")
 	}
@@ -513,7 +506,7 @@ func (h *Handlers) currentGatewayIdentity(c fiber.Ctx, namespace, name string) (
 	if err != nil {
 		return gatewayCurrentIdentity{}, err
 	}
-	reader := h.gatewayIdentityReader()
+	reader := h.uncachedReader()
 	object := &gatewayv1alpha1.Gateway{}
 	if err := reader.Get(c.Context(), client.ObjectKey{Namespace: namespace, Name: name}, object); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -525,7 +518,7 @@ func (h *Handlers) currentGatewayIdentity(c fiber.Ctx, namespace, name string) (
 }
 
 func (h *Handlers) currentGatewayUIDs(c fiber.Ctx, namespace string) ([]string, error) {
-	reader := h.gatewayIdentityReader()
+	reader := h.uncachedReader()
 	if reader == nil {
 		return nil, fiber.NewError(fiber.StatusServiceUnavailable, "gateway identity lookup is unavailable")
 	}
@@ -602,27 +595,28 @@ func gatewayStoreListLimit(pageLimit int) int {
 }
 
 func paginateGatewayEvents(events []store.GatewayEvent, limit int) ([]store.GatewayEvent, string) {
-	if limit <= 0 || limit > MaxLimit {
-		limit = MaxLimit
-	}
-	if len(events) <= limit {
-		return events, ""
-	}
-	page := events[:limit]
-	last := page[len(page)-1]
-	return page, encodeGatewayListCursor(last.CreatedAt, last.ID)
+	return paginateGatewayList(events, limit, func(event store.GatewayEvent) string {
+		return encodeGatewayListCursor(event.CreatedAt, event.ID)
+	})
 }
 
 func paginateGatewayDeliveries(deliveries []store.GatewayDelivery, limit int) ([]store.GatewayDelivery, string) {
+	return paginateGatewayList(deliveries, limit, func(delivery store.GatewayDelivery) string {
+		return encodeGatewayListCursor(delivery.CreatedAt, delivery.ID)
+	})
+}
+
+// paginateGatewayList truncates items to limit and returns the cursor of the
+// last returned item when more remain.
+func paginateGatewayList[T any](items []T, limit int, cursorOf func(T) string) ([]T, string) {
 	if limit <= 0 || limit > MaxLimit {
 		limit = MaxLimit
 	}
-	if len(deliveries) <= limit {
-		return deliveries, ""
+	if len(items) <= limit {
+		return items, ""
 	}
-	page := deliveries[:limit]
-	last := page[len(page)-1]
-	return page, encodeGatewayListCursor(last.CreatedAt, last.ID)
+	page := items[:limit]
+	return page, cursorOf(page[len(page)-1])
 }
 
 func (h *Handlers) authorizeGatewayKubernetes(

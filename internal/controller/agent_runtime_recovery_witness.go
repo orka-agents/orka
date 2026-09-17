@@ -85,17 +85,7 @@ func readAgentRuntimeRecoveryEffect(ctx context.Context, effects store.ExternalE
 	if effects == nil {
 		return nil, errors.New("AgentRuntime recovery requires the durable control store")
 	}
-	var effect *store.ExternalEffect
-	var err error
-	if reader, ok := effects.(store.ExternalEffectIdentityReader); ok {
-		effect, err = reader.GetExternalEffectByIdentity(ctx, identity)
-	} else {
-		id, idErr := identity.CanonicalID()
-		if idErr != nil {
-			return nil, idErr
-		}
-		effect, err = effects.GetExternalEffect(ctx, id)
-	}
+	effect, err := effects.GetExternalEffectByIdentity(ctx, identity)
 	if err != nil {
 		return nil, err
 	}

@@ -1119,7 +1119,7 @@ func repositoryMonitorActionRecordFromTask(monitor *corev1alpha1.RepositoryMonit
 	if summary == "" {
 		summary = sr.Summary
 	}
-	verdict := firstNonEmptyIssueAction(stringField(body, "verdict"), stringField(body, "status"), sr.Verdict)
+	verdict := firstNonEmptyString(stringField(body, "verdict"), stringField(body, "status"), sr.Verdict)
 	if verdict == "" && boolField(payload, "needsHuman") {
 		verdict = repositoryMonitorReviewVerdictNeedsHuman
 	}
@@ -1132,7 +1132,7 @@ func repositoryMonitorActionRecordFromTask(monitor *corev1alpha1.RepositoryMonit
 	}
 	if repositoryMonitorIssueActionMissingRequiredResult(actionKind, body) {
 		verdict = repositoryMonitorReviewVerdictFailed
-		summary = firstNonEmptyIssueAction(summary, "issue action result missing required fields")
+		summary = firstNonEmptyString(summary, "issue action result missing required fields")
 	}
 	if actionKind != repositoryMonitorIssueActionMutateToPR {
 		if reason := repositoryMonitorIssueActionResultMismatch(item, body); reason != "" {
@@ -1209,7 +1209,7 @@ func (r *RepositoryMonitorReconciler) applyIssueActionRecord(ctx context.Context
 			_ = r.updateImplementationJobForTask(ctx, monitor, record.TaskName, func(job *store.ImplementationJob) {
 				job.Phase = repositoryMonitorIssuePhaseBlocked
 				job.ValidationState = repositoryMonitorReviewVerdictFailed
-				job.Error = firstNonEmptyIssueAction(record.Verdict, "implementation_not_ready")
+				job.Error = firstNonEmptyString(record.Verdict, "implementation_not_ready")
 				now := time.Now()
 				job.CompletedAt = &now
 			})
@@ -1223,7 +1223,7 @@ func (r *RepositoryMonitorReconciler) applyIssueActionRecord(ctx context.Context
 		case repositoryMonitorIssueActionPlan:
 			if !repositoryMonitorPlanApprovableVerdict(record.Verdict) {
 				item.WorkflowPhase = repositoryMonitorIssuePhaseBlocked
-				item.SkipReason = firstNonEmptyIssueAction(record.Verdict, "invalid_plan_result")
+				item.SkipReason = firstNonEmptyString(record.Verdict, "invalid_plan_result")
 				break
 			}
 			if planNeedsHumanApproval || boolField(record.PayloadJSON, "requiresHumanApproval") || repositoryMonitorPlanRiskRequiresApproval(monitor, record.PayloadJSON) {
@@ -1236,11 +1236,11 @@ func (r *RepositoryMonitorReconciler) applyIssueActionRecord(ctx context.Context
 		case repositoryMonitorIssueActionImplementation:
 			if !repositoryMonitorImplementationReadyVerdict(record.Verdict) {
 				item.WorkflowPhase = repositoryMonitorIssuePhaseBlocked
-				item.SkipReason = firstNonEmptyIssueAction(record.Verdict, "implementation_not_ready")
+				item.SkipReason = firstNonEmptyString(record.Verdict, "implementation_not_ready")
 				_ = r.updateImplementationJobForTask(ctx, monitor, record.TaskName, func(job *store.ImplementationJob) {
 					job.Phase = repositoryMonitorIssuePhaseBlocked
 					job.ValidationState = repositoryMonitorReviewVerdictFailed
-					job.Error = firstNonEmptyIssueAction(record.Verdict, "implementation_not_ready")
+					job.Error = firstNonEmptyString(record.Verdict, "implementation_not_ready")
 					now := time.Now()
 					job.CompletedAt = &now
 				})
@@ -1629,7 +1629,7 @@ func (r *RepositoryMonitorReconciler) finishIssueImplementation(ctx context.Cont
 			} else {
 				job.Phase = repositoryMonitorIssuePhaseBlocked
 				job.ValidationState = repositoryMonitorReviewVerdictFailed
-				job.Error = firstNonEmptyIssueAction(reason, "implementation_delivery_failed")
+				job.Error = firstNonEmptyString(reason, "implementation_delivery_failed")
 			}
 		}); updateErr != nil {
 			return "", "", "", updateErr
@@ -2627,7 +2627,7 @@ func renderRepositoryMonitorIssueStatusComment(item *store.MonitorItem, record *
 	}
 	var payload map[string]any
 	_ = json.Unmarshal([]byte(record.PayloadJSON), &payload)
-	planSummary := sanitizeRepositoryMonitorPublicCommentText(firstNonEmptyIssueAction(stringField(payload, "summary"), stringField(payload, "problemStatement"), record.Summary))
+	planSummary := sanitizeRepositoryMonitorPublicCommentText(firstNonEmptyString(stringField(payload, "summary"), stringField(payload, "problemStatement"), record.Summary))
 	if planSummary == "" {
 		planSummary = "No summary provided."
 	}
@@ -2797,13 +2797,4 @@ func boolField(payload, key string) bool {
 	}
 	v, _ := body[key].(bool)
 	return v
-}
-
-func firstNonEmptyIssueAction(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
 }

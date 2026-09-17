@@ -9,7 +9,6 @@ package outboundaccess
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -276,13 +275,13 @@ func (r *KubernetesResolver) resolveTokenSource(ctx context.Context, namespace s
 		if tokenType == "" {
 			tokenType = transactiontoken.SubjectTokenTypeTransactionToken
 		}
-		return resolvedToken{value: transactionToken, tokenType: tokenType, expiresAt: unverifiedJWTExpiry(transactionToken)}, nil
+		return resolvedToken{value: transactionToken, tokenType: tokenType, expiresAt: tokenexchange.UnverifiedJWTExpiry(transactionToken)}, nil
 	case corev1alpha1.OutboundTokenSourceSecretRef:
 		value, err := r.readSecret(ctx, namespace, *source.SecretRef)
 		if err != nil {
 			return resolvedToken{}, err
 		}
-		return resolvedToken{value: value, tokenType: strings.TrimSpace(source.TokenType), expiresAt: unverifiedJWTExpiry(value)}, nil
+		return resolvedToken{value: value, tokenType: strings.TrimSpace(source.TokenType), expiresAt: tokenexchange.UnverifiedJWTExpiry(value)}, nil
 	case corev1alpha1.OutboundTokenSourceServiceAccount:
 		if r.KubeClient == nil {
 			return resolvedToken{}, errors.New("ServiceAccount token source requires a Kubernetes client")
@@ -577,30 +576,6 @@ func policyCacheNamespace(policy *corev1alpha1.OutboundAccessPolicy) string {
 	data, _ := json.Marshal(shape)
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
-}
-
-func unverifiedJWTExpiry(token string) time.Time {
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		return time.Time{}
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return time.Time{}
-	}
-	var claims struct {
-		Expiration json.Number `json:"exp"`
-	}
-	decoder := json.NewDecoder(strings.NewReader(string(payload)))
-	decoder.UseNumber()
-	if decoder.Decode(&claims) != nil || claims.Expiration == "" {
-		return time.Time{}
-	}
-	seconds, err := claims.Expiration.Int64()
-	if err != nil || seconds <= 0 {
-		return time.Time{}
-	}
-	return time.Unix(seconds, 0)
 }
 
 func cloneStringMap(values map[string]string) map[string]string {

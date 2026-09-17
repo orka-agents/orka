@@ -201,8 +201,7 @@ func runExternalEffectWithReplayCallTimeout[T any](
 	if err != nil {
 		return zero, false, err
 	}
-	sum := sha256.Sum256(encoded)
-	responseDigest := "sha256:" + hex.EncodeToString(sum[:])
+	responseDigest := store.CanonicalBytesDigest(encoded)
 	completed, err := effects.TransitionExternalEffect(ctx, store.ExternalEffectTransition{
 		ID: claimed.ID, Fence: fence, ExpectedVersion: claimed.Version, ExpectedState: store.ExternalEffectInFlight,
 		NewState: store.ExternalEffectSucceeded, RequestDigest: requestDigest,
@@ -347,8 +346,7 @@ func settleExternalEffectStore(
 			return marshalErr
 		}
 		encoded = value
-		sum := sha256.Sum256(value)
-		responseDigest = "sha256:" + hex.EncodeToString(sum[:])
+		responseDigest = store.CanonicalBytesDigest(value)
 	}
 	_, err = effects.TransitionExternalEffect(ctx, store.ExternalEffectTransition{
 		ID: effect.ID, Fence: fence, ExpectedVersion: effect.Version, ExpectedState: effect.State,

@@ -47,17 +47,14 @@ type SessionControlStore interface {
 }
 
 // BranchClaimStore persists exact branch ownership and verified baselines.
+// CreateBranchClaimWithResult reports whether this exact call inserted the
+// claim, allowing callers to safely clean up only creation they actually won.
 type BranchClaimStore interface {
 	CreateBranchClaim(ctx context.Context, claim *BranchClaim, fence ControllerEpochFence) (*BranchClaim, error)
+	CreateBranchClaimWithResult(ctx context.Context, claim *BranchClaim, fence ControllerEpochFence) (*BranchClaim, bool, error)
 	GetBranchClaim(ctx context.Context, id string) (*BranchClaim, error)
 	CompareAndSwapBranchClaim(ctx context.Context, change BranchClaimCAS) (*BranchClaim, error)
 	ReclaimBranchClaim(ctx context.Context, request ReclaimBranchClaimRequest) error
-}
-
-// BranchClaimCreationStore reports whether this exact call inserted the claim,
-// allowing callers to safely clean up only creation they actually won.
-type BranchClaimCreationStore interface {
-	CreateBranchClaimWithResult(ctx context.Context, claim *BranchClaim, fence ControllerEpochFence) (*BranchClaim, bool, error)
 }
 
 // PublicationStore persists clean-room prepare, publish, and independent verification receipts.
@@ -69,18 +66,19 @@ type PublicationStore interface {
 	TransitionPublication(ctx context.Context, transition PublicationTransition) (*Publication, error)
 }
 
-// ExternalEffectStore persists canonical idempotency identities for operations outside SQLite.
-type ExternalEffectStore interface {
-	ReserveExternalEffect(ctx context.Context, request ReserveExternalEffectRequest) (*ExternalEffect, error)
-	GetExternalEffect(ctx context.Context, id string) (*ExternalEffect, error)
-	TransitionExternalEffect(ctx context.Context, transition ExternalEffectTransition) (*ExternalEffect, error)
-}
-
 // ExternalEffectIdentityReader resolves one exact external-effect identity.
 // Kubernetes-backed authorization paths use this instead of broad LIST reads
 // so a just-committed in-flight lease is observed without cache/list races.
 type ExternalEffectIdentityReader interface {
 	GetExternalEffectByIdentity(ctx context.Context, identity ExternalEffectIdentity) (*ExternalEffect, error)
+}
+
+// ExternalEffectStore persists canonical idempotency identities for operations outside SQLite.
+type ExternalEffectStore interface {
+	ExternalEffectIdentityReader
+	ReserveExternalEffect(ctx context.Context, request ReserveExternalEffectRequest) (*ExternalEffect, error)
+	GetExternalEffect(ctx context.Context, id string) (*ExternalEffect, error)
+	TransitionExternalEffect(ctx context.Context, transition ExternalEffectTransition) (*ExternalEffect, error)
 }
 
 // OutboxProjectionStore persists restart-safe task/status projection records.

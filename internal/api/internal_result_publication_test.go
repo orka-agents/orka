@@ -69,7 +69,7 @@ func TestSubmitResultWaitsForJobIdentityPublication(t *testing.T) {
 	t.Setenv(workerenv.ResultEndpoint, server.URL+"/internal/v1/results/default/task-a")
 
 	result := []byte("completed before Job identity publication")
-	submitErr := common.SubmitResult(result)
+	submitErr := common.SubmitResultContext(t.Context(), result)
 	observation := <-first
 	require.NoError(t, observation.publicationErr)
 	require.ErrorIs(t, observation.resultErr, store.ErrNotFound, "result must not be stored before Job identity publication")
