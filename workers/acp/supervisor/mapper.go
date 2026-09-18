@@ -357,17 +357,7 @@ func pinnedCodexACPProvider(provider ProviderProfile) bool {
 // title. Only retain the configured Orka server's frozen read-only descriptor;
 // arguments and other provider fields are neither authority nor retained state.
 func codexMCPToolName(raw json.RawMessage, policy harnessv2.MCPToolPolicy) string {
-	if len(raw) > harnessv2.MaxMCPArgumentsBytes+(1<<10) {
-		return ""
-	}
-	var input struct {
-		Server string `json:"server"`
-		Tool   string `json:"tool"`
-	}
-	if json.Unmarshal(raw, &input) != nil || input.Server != acpMCPServerName || len(input.Tool) > 253 {
-		return ""
-	}
-	descriptor, allowed := policy.Descriptor(input.Tool)
+	descriptor, allowed := policy.Descriptor(codexMCPInputToolName(raw))
 	if !allowed || !descriptor.Source.Brokered() || descriptor.Effect != harnessv2.MCPToolEffectReadOnly {
 		return ""
 	}
@@ -398,7 +388,10 @@ func (prompt *promptState) rememberToolCallName(notification *acp.SessionNotific
 	}
 	identity := rememberedACPToolCall{name: name}
 	if codex && call.Meta.IsMCPToolCall {
-		identity = rememberedACPToolCall{name: codexMCPToolName(call.RawInput, policy), codexMCP: true}
+		identity = rememberedACPToolCall{codexMCP: true}
+		if codexMCPStartMarkerMatches(notification.Update) {
+			identity.name = codexMCPToolName(call.RawInput, policy)
+		}
 		if name != "" && name != identity.name {
 			return fmt.Errorf("ACP tool call has conflicting tool identities")
 		}
@@ -426,11 +419,18 @@ func (prompt *promptState) rememberToolCallName(notification *acp.SessionNotific
 	return nil
 }
 
-func (prompt *promptState) correlatePermissionToolName(event *acp.PermissionRequestEvent, permission *harnessv2.PermissionRequestedEvent, codex bool) error {
+func (prompt *promptState) correlatePermissionToolName(event *acp.PermissionRequestEvent, permission *harnessv2.PermissionRequestedEvent, codex bool, policy harnessv2.MCPToolPolicy) error {
 	identity, known := prompt.toolCallNames[permission.ToolCallID]
 	if codex {
 		mcpApproval, _ := event.Request.Meta["is_mcp_tool_approval"].(bool)
-		if mcpApproval || (known && identity.codexMCP) {
+		name := permission.ToolName
+		if known {
+			name = identity.name
+		}
+		descriptor, allowed := policy.Descriptor(name)
+		// A direct brokered name cannot borrow authority without both the
+		// remembered MCP call identity and the pinned approval marker.
+		if mcpApproval || (known && identity.codexMCP) || (allowed && descriptor.Source.Brokered()) {
 			if !mcpApproval || !known || !identity.codexMCP {
 				permission.ToolName = ""
 				return nil

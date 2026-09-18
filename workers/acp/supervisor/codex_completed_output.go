@@ -187,7 +187,7 @@ func codexCommandStartKind(envelope codexCommandOutputEnvelope) codexCommandOutp
 		var terminal struct {
 			TerminalID string `json:"terminal_id"`
 		}
-		if json.Unmarshal(envelope.Content, &content) == nil && len(content) == 1 &&
+		if len(envelope.Meta) == 1 && json.Unmarshal(envelope.Content, &content) == nil && len(content) == 1 &&
 			content[0].Type == "terminal" && content[0].TerminalID == envelope.ToolCallID &&
 			json.Unmarshal(envelope.Meta["terminal_info"], &terminal) == nil && terminal.TerminalID == envelope.ToolCallID {
 			return codexCommandOutputTerminal
@@ -197,6 +197,11 @@ func codexCommandStartKind(envelope codexCommandOutputEnvelope) codexCommandOutp
 }
 
 func codexCompletedCommandText(envelope codexCommandOutputEnvelope, kind codexCommandOutputKind) (string, bool) {
+	// Reject duplicate keys before decoding, preserving the original fields
+	// below so number normalization cannot broaden the pinned exit-code shape.
+	if _, err := harnessv2.CanonicalJSON(envelope.RawOutput); err != nil {
+		return "", false
+	}
 	var output map[string]json.RawMessage
 	if json.Unmarshal(envelope.RawOutput, &output) != nil {
 		return "", false

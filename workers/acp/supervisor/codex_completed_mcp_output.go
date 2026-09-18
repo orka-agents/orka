@@ -15,14 +15,44 @@ func codexMCPOutputStart(envelope codexCommandOutputEnvelope) bool {
 }
 
 func codexMCPOutputInputMatches(raw json.RawMessage, name string) bool {
-	if name == "" || len(raw) > harnessv2.MaxMCPArgumentsBytes+(1<<10) {
+	return name != "" && codexMCPInputToolName(raw) == name
+}
+
+// Read exact keys after duplicate rejection: struct decoding also accepts case
+// and Unicode aliases, which must not override the pinned server/tool fields.
+func codexMCPInputToolName(raw json.RawMessage) string {
+	if len(raw) > harnessv2.MaxMCPArgumentsBytes+(1<<10) {
+		return ""
+	}
+	raw, err := harnessv2.CanonicalJSON(raw)
+	if err != nil {
+		return ""
+	}
+	var input map[string]json.RawMessage
+	var server, tool string
+	if json.Unmarshal(raw, &input) != nil || json.Unmarshal(input["server"], &server) != nil || server != acpMCPServerName ||
+		json.Unmarshal(input["tool"], &tool) != nil || len(tool) > 253 {
+		return ""
+	}
+	return tool
+}
+
+// Generic ACP identity decoding can fold marker keys or retain true across a
+// later null. Reject duplicate envelope/metadata keys before freezing a name.
+func codexMCPStartMarkerMatches(raw json.RawMessage) bool {
+	raw, err := harnessv2.CanonicalJSON(raw)
+	if err != nil {
 		return false
 	}
-	var input struct {
-		Server string `json:"server"`
-		Tool   string `json:"tool"`
+	var envelope map[string]json.RawMessage
+	if json.Unmarshal(raw, &envelope) != nil {
+		return false
 	}
-	return json.Unmarshal(raw, &input) == nil && input.Server == acpMCPServerName && input.Tool == name
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(envelope["_meta"], &fields) != nil {
+		return false
+	}
+	return codexMCPOutputStart(codexCommandOutputEnvelope{Meta: fields})
 }
 
 // codexCompletedMCPText accepts the terminal shape of the pinned adapter's

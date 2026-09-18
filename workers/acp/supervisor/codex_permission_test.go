@@ -46,6 +46,10 @@ func TestCodexMCPPermissionUsesFrozenStructuredIdentity(t *testing.T) {
 		{name: "display title is irrelevant", updateFrom: "mcp.orka.runtime_feedback", updateTo: "Write everything", wantName: "runtime_feedback"},
 		{name: "missing structured tool", updateFrom: `"tool": "runtime_feedback"`, updateTo: `"ignored": "runtime_feedback"`},
 		{name: "other MCP server", updateFrom: `"server": "orka"`, updateTo: `"server": "other"`},
+		{name: "duplicate MCP server", updateFrom: `"server": "orka"`, updateTo: `"server": "other", "server": "orka"`},
+		{name: "duplicate MCP tool", updateFrom: `"tool": "runtime_feedback"`, updateTo: `"tool": "mutate", "tool": "runtime_feedback"`},
+		{name: "repeated MCP server", updateFrom: `"server": "orka"`, updateTo: `"server": "orka", "server": "orka"`},
+		{name: "nested duplicate arguments", updateFrom: `"arguments": {}`, updateTo: `"arguments": {"scope": {"id": 1, "id": 2}}`},
 		{name: "noncanonical server", updateFrom: `"server": "orka"`, updateTo: `"server": "orka "`},
 		{name: "missing MCP marker", updateFrom: `"is_mcp_tool_call": true`, updateTo: `"is_mcp_tool_call": false`},
 		{name: "unknown tool", updateFrom: `"tool": "runtime_feedback"`, updateTo: `"tool": "unknown"`},
@@ -58,6 +62,8 @@ func TestCodexMCPPermissionUsesFrozenStructuredIdentity(t *testing.T) {
 		{name: "missing permission call ID", permissionCall: `{"kind":"execute","status":"pending"}`},
 		{name: "different call ID", permissionCall: `{"toolCallId":"other-call","kind":"execute","status":"pending"}`},
 		{name: "different call cannot claim frozen name", permissionCall: `{"toolCallId":"other-call","name":"runtime_feedback"}`},
+		{name: "markerless different call cannot claim frozen name", missingApprovalMarker: true, permissionCall: `{"toolCallId":"other-call","name":"runtime_feedback"}`},
+		{name: "markerless native permission retains direct identity", missingApprovalMarker: true, permissionCall: `{"toolCallId":"other-call","name":"read","kind":"read","status":"pending"}`, wantName: "Read"},
 		{name: "permission cannot spoof a different name", permissionCall: `{"toolCallId":"feedback-call-1","name":"Read"}`, wantError: true},
 		{name: "permission cannot spoof another server", permissionCall: `{"toolCallId":"feedback-call-1","kind":"execute","status":"pending","rawInput":{"server":"other","tool":"runtime_feedback"}}`, wantError: true},
 		{name: "human input kind cannot borrow approval marker", permissionCall: `{"toolCallId":"feedback-call-1","kind":"other","status":"pending"}`, wantError: true},
@@ -319,6 +325,139 @@ func TestMCPProxyReadOnlyAnnotationsPreserveFrozenApprovalPolicy(t *testing.T) {
 				if denied.Error == nil || calls.Load() != 0 {
 					t.Fatal("tool annotations bypassed human approval")
 				}
+			}
+		})
+	}
+}
+
+func TestCodexMCPPermissionResolutionRequiresCorrelatedApproval(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		start      string
+		marker     any
+		markerKey  string
+		idOnly     bool
+		rawInput   string
+		rawMeta    string
+		rawUpdate  string
+		wantStatus int
+	}{
+		{name: "unknown markerless call", wantStatus: http.StatusForbidden},
+		{name: "unmarked remembered name", start: "direct", wantStatus: http.StatusForbidden},
+		{name: "ID-only unmarked remembered name", start: "direct", idOnly: true, wantStatus: http.StatusForbidden},
+		{name: "unmarked remembered name with approval marker", start: "direct", marker: true, wantStatus: http.StatusForbidden},
+		{name: "unknown call with approval marker", marker: true, wantStatus: http.StatusForbidden},
+		{name: "known MCP call without approval marker", start: "mcp", wantStatus: http.StatusForbidden},
+		{name: "case-variant approval marker", start: "mcp", marker: true, markerKey: "IS_MCP_TOOL_APPROVAL", wantStatus: http.StatusForbidden},
+		{name: "string approval marker", start: "mcp", marker: "true", wantStatus: http.StatusForbidden},
+		{name: "false approval marker", start: "mcp", marker: false, wantStatus: http.StatusForbidden},
+		{name: "uppercase start marker", start: "mcp", marker: true, idOnly: true, rawMeta: `{"IS_MCP_TOOL_CALL":true}`, wantStatus: http.StatusForbidden},
+		{name: "false start marker with true case alias", start: "mcp", marker: true, idOnly: true, rawMeta: `{"is_mcp_tool_call":false,"IS_MCP_TOOL_CALL":true}`, wantStatus: http.StatusForbidden},
+		{name: "true start marker followed by null", start: "mcp", marker: true, idOnly: true, rawMeta: `{"is_mcp_tool_call":true,"is_mcp_tool_call":null}`, wantStatus: http.StatusForbidden},
+		{name: "false start marker followed by true", start: "mcp", marker: true, idOnly: true, rawMeta: `{"is_mcp_tool_call":false,"is_mcp_tool_call":true}`, wantStatus: http.StatusForbidden},
+		{name: "duplicate outer start metadata", start: "mcp", marker: true, idOnly: true, rawUpdate: `{"sessionUpdate":"tool_call","toolCallId":"feedback-call-1","kind":"execute","status":"in_progress","rawInput":{"server":"orka","tool":"runtime_feedback","arguments":{}},"_meta":{"is_mcp_tool_call":false},"_meta":{"is_mcp_tool_call":true}}`, wantStatus: http.StatusForbidden},
+		{name: "uppercase input keys", start: "mcp", marker: true, idOnly: true, rawInput: `{"SERVER":"orka","TOOL":"runtime_feedback","arguments":{}}`, wantStatus: http.StatusForbidden},
+		{name: "Unicode server alias", start: "mcp", marker: true, idOnly: true, rawInput: `{"server":"other","\u017ferver":"orka","tool":"runtime_feedback","arguments":{}}`, wantStatus: http.StatusForbidden},
+		{name: "server alias with exact null", start: "mcp", marker: true, idOnly: true, rawInput: `{"Server":"orka","server":null,"tool":"runtime_feedback","arguments":{}}`, wantStatus: http.StatusForbidden},
+		{name: "tool alias with exact null", start: "mcp", marker: true, idOnly: true, rawInput: `{"server":"orka","Tool":"runtime_feedback","tool":null,"arguments":{}}`, wantStatus: http.StatusForbidden},
+		{name: "matching MCP call and approval marker", start: "mcp", marker: true, wantStatus: http.StatusOK},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			// Supply session state directly: the real mapper, authentication,
+			// frozen MCP gate and HTTP resolver need no native ACP process.
+			cfg := Config{
+				Provider: ProviderProfile{Kind: providerKindCodex, AdapterName: "codex-acp-orka-dist", AdapterDigest: "sha256:" + acp.CodexACPOrkaDistSHA256},
+				Fence: harnessv2.Fence{
+					RuntimeInstanceID: "runtime-instance", SupervisorBootID: "boot-id", ControllerEpoch: 1,
+					RuntimePoolUID: "pool-uid", RuntimePoolGeneration: 1,
+					RuntimeProfileDigest: harnessv2.ProfileDigest(testDigest("profile")), ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
+					RuntimeSessionUID: "session-uid-1", RuntimeSessionGeneration: 1,
+				},
+				Capabilities:          harnessv2.CapabilitiesResponse{Limits: harnessv2.DefaultProtocolLimits()},
+				ControllerBearerToken: strings.Repeat("t", 32), CapabilitySecret: []byte(strings.Repeat("s", 32)), RequireCapabilities: true,
+			}
+			state := &sessionState{
+				descriptor:  harnessv2.RuntimeSessionDescriptor{RuntimeSessionUID: cfg.Fence.RuntimeSessionUID, Generation: 1},
+				profile:     harnessv2.RuntimeProfile{ProviderKind: providerKindCodex},
+				permissions: make(map[harnessv2.PermissionRequestID]permissionState),
+				mcpProxy:    &mcpProxySession{fence: cfg.Fence, state: harnessv2.RuntimeSessionStateIdle},
+			}
+			server := &Server{cfg: cfg, mux: http.NewServeMux(), sessions: map[harnessv2.RuntimeSessionID]*sessionState{"session-1": state}}
+			server.registerRoutes()
+			now := time.Now().UTC()
+			authorization, lease := buildTestMCPAuthorization(t, cfg.Fence, now, "runtime_feedback", harnessv2.MCPToolEffectReadOnly, false)
+			proxy := state.mcpProxy
+			proxy.configuration = authorization.Configuration()
+			if err := proxy.activate(t.Context(), authorization, lease, now); err != nil {
+				t.Fatal(err)
+			}
+			if err := proxy.markRunning(authorization.PromptID, now); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { proxy.revoke(harnessv2.RuntimeSessionStateIdle) })
+			mutations := newBlockingPromptMutator()
+			close(mutations.resolveRelease)
+			state.prompt = &promptState{request: testStartPromptRequest(t, cfg, cfg.Fence)}
+			state.promptMutations = mutations
+			state.descriptor.State = harnessv2.RuntimeSessionStatePromptRunning
+			update, permission := codexMCPPermissionFixture(t)
+			if tt.rawInput != "" || tt.rawMeta != "" {
+				var wire map[string]json.RawMessage
+				if err := json.Unmarshal(update.Update, &wire); err != nil {
+					t.Fatal(err)
+				}
+				if tt.rawInput != "" {
+					wire["rawInput"] = json.RawMessage(tt.rawInput)
+				}
+				if tt.rawMeta != "" {
+					wire["_meta"] = json.RawMessage(tt.rawMeta)
+				}
+				var err error
+				update.Update, err = json.Marshal(wire)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.start == "direct" {
+				update.Update = json.RawMessage(`{"sessionUpdate":"tool_call","toolCallId":"feedback-call-1","name":"runtime_feedback","kind":"execute","status":"in_progress"}`)
+			}
+			if tt.rawUpdate != "" {
+				update.Update = json.RawMessage(tt.rawUpdate)
+			}
+			if tt.start != "" {
+				if _, err := server.mapRuntimeEvent(state, state.prompt, acp.PromptEvent{Type: acp.PromptEventUpdate, Timestamp: now, Update: &update}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			permission.Request.Meta = nil
+			if tt.marker != nil {
+				key := tt.markerKey
+				if key == "" {
+					key = "is_mcp_tool_approval"
+				}
+				permission.Request.Meta = acp.Meta{key: tt.marker}
+			}
+			// Unknown IDs and remembered direct names must not borrow the
+			// brokered descriptor merely by claiming its name on a permission.
+			permission.Request.ToolCall = json.RawMessage(`{"toolCallId":"feedback-call-1","name":"runtime_feedback","kind":"execute","status":"pending"}`)
+			if tt.idOnly {
+				permission.Request.ToolCall = json.RawMessage(`{"toolCallId":"feedback-call-1","kind":"execute","status":"pending"}`)
+			}
+			if _, err := server.mapRuntimeEvent(state, state.prompt, acp.PromptEvent{Type: acp.PromptEventPermissionRequested, Timestamp: now, Permission: permission}); err != nil {
+				t.Fatal(err)
+			}
+			request := harnessv2.ResolvePermissionRequest{
+				Protocol: harnessv2.ProtocolVersion, Metadata: testMetadata(cfg.Fence, "permission-operation-1", true),
+				RequestID: "permission-1", Decision: harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: "allow_once"},
+			}
+			sealRequest(t, &request.Metadata.RequestDigest, request)
+			response := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1/prompts/prompt-1/permissions/permission-1", request, cfg)
+			wantForwarded := int32(0)
+			if tt.wantStatus == http.StatusOK {
+				wantForwarded = 1
+			}
+			if response.Code != tt.wantStatus || mutations.resolveCalls.Load() != wantForwarded || len(proxy.approvals) != 0 {
+				t.Fatalf("permission status=%d want=%d forwarded=%d want=%d approvals=%d", response.Code, tt.wantStatus, mutations.resolveCalls.Load(), wantForwarded, len(proxy.approvals))
 			}
 		})
 	}

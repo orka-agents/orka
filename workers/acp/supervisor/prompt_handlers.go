@@ -2157,12 +2157,16 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 		if err != nil {
 			return nil, err
 		}
+		var policy harnessv2.MCPToolPolicy
+		if state.mcpProxy != nil {
+			policy = state.mcpProxy.configuration.ToolPolicy
+		}
 		codex := state.profile.ProviderKind == providerKindCodex && pinnedCodexACPProvider(s.cfg.Provider)
-		if err := prompt.correlatePermissionToolName(event.Permission, permission, codex); err != nil {
+		if err := prompt.correlatePermissionToolName(event.Permission, permission, codex, policy); err != nil {
 			return nil, err
 		}
 		if state.mcpProxy != nil {
-			permission.ToolName = canonicalPermissionToolName(state.profile.ProviderKind, state.mcpProxy.configuration.ToolPolicy, permission.ToolName)
+			permission.ToolName = canonicalPermissionToolName(state.profile.ProviderKind, policy, permission.ToolName)
 		}
 		if prompt.permissionRequestIDs == nil {
 			prompt.permissionRequestIDs = make(map[harnessv2.PermissionRequestID]struct{})
