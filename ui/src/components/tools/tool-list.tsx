@@ -2,11 +2,13 @@ import { Link } from '@tanstack/react-router'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
+import { ListAccessError } from '@/components/ui/list-access-error'
 import { PageHeader } from '@/components/layout/page-header'
 import { useToolList } from '@/hooks/use-tools'
 
 export function ToolList() {
-  const { data, isLoading } = useToolList()
+  const { data, isLoading, error } = useToolList()
+  const tools = error ? [] : (data?.items ?? [])
 
   return (
     <div className="space-y-4">
@@ -31,14 +33,20 @@ export function ToolList() {
                   ))}
                 </TableRow>
               ))
-            ) : (data?.items ?? []).length === 0 ? (
+            ) : error ? (
+              <TableRow>
+                <TableCell colSpan={5} className="p-0">
+                  <ListAccessError error={error} resource="tools" />
+                </TableCell>
+              </TableRow>
+            ) : tools.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={5} className="text-center text-muted-foreground py-8">
                   No tools found.
                 </TableCell>
               </TableRow>
             ) : (
-              (data?.items ?? []).map((tool) => (
+              tools.map((tool) => (
                 <TableRow key={tool.name}>
                   <TableCell>
                     <Link to="/tools/$toolName" params={{ toolName: tool.name }} className="font-medium hover:underline">
