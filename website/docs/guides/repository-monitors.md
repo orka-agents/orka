@@ -239,6 +239,8 @@ For status summaries, open PRs with `needs_changes`, `needs_human`, `security_se
 
 If a review task fails, is cancelled, returns malformed JSON, or returns a stale head SHA, the controller records a rejected review result and leaves an audit event explaining why. If GitHub publishing is enabled, the controller performs publish-time safety checks immediately after ingestion: it refetches the PR, requires the PR to remain open on the monitor base branch and exact reviewed head SHA, rejects draft or protected-label PRs, skips duplicate same-head publications using Orka publish records and hidden GitHub markers, neutralizes mentions in rendered text, and never posts `security_sensitive` results unless explicitly configured.
 
+If GitHub returns HTTP 401 during publication, the controller records `github_authentication_failed` and retries after the existing five-minute publish cooldown. Each attempt reloads `spec.forgeCredentialRef`, so refreshing an expired GitHub App installation token lets the controller publish the completed review without running the reviewer again. Every retry repeats the PR safety and duplicate checks. Orka does not refresh the token itself; an invalid or revoked credential continues to fail until replaced. Non-rate-limited HTTP 403 and HTTP 404 responses remain terminal permission failures. Older attempts already recorded as `github_permission_denied` are not automatically reclassified.
+
 ## API and authorization
 
 Repository monitor endpoints live under `/api/v1/monitors/*` and require normal Orka API authentication. When context-token authorization is enabled, monitor reads require `orka:monitors:read`, monitor CRUD requires `orka:monitors:write`, and manual run creation requires `orka:monitors:operate`.
