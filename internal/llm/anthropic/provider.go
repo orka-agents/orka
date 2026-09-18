@@ -72,8 +72,7 @@ func (p *Provider) TelemetryProviderName() string {
 
 // Complete sends a completion request
 func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
-	messages := buildMessages(req.Messages)
-	params := buildRequestParams(req, messages)
+	params := buildRequestParams(req)
 
 	// Make the request
 	message, err := p.client.Messages.New(ctx, params)
@@ -165,13 +164,16 @@ func buildToolParams(tools []llm.Tool) []anthropic.ToolUnionParam {
 				Required:   required,
 			},
 		}
+		if tool.Strict != nil {
+			toolParam.Strict = anthropic.Bool(*tool.Strict)
+		}
 		params = append(params, anthropic.ToolUnionParam{OfTool: &toolParam})
 	}
 	return params
 }
 
 // buildRequestParams creates Anthropic MessageNewParams from a completion request.
-func buildRequestParams(req *llm.CompletionRequest, messages []anthropic.MessageParam) anthropic.MessageNewParams {
+func buildRequestParams(req *llm.CompletionRequest) anthropic.MessageNewParams {
 	maxTokens := int64(4096)
 	if req.MaxTokens > 0 {
 		maxTokens = int64(req.MaxTokens)
@@ -179,7 +181,6 @@ func buildRequestParams(req *llm.CompletionRequest, messages []anthropic.Message
 
 	params := anthropic.MessageNewParams{
 		Model:     req.Model,
-		Messages:  messages,
 		MaxTokens: maxTokens,
 	}
 
@@ -188,6 +189,22 @@ func buildRequestParams(req *llm.CompletionRequest, messages []anthropic.Message
 			{Text: req.SystemPrompt},
 		}
 	}
+	messages := req.Messages
+	if req.ResponsesInput {
+		// Responses retains system/developer messages in history. Anthropic
+		// accepts instructions only in its top-level system field.
+		messages = make([]llm.Message, 0, len(req.Messages))
+		for _, message := range req.Messages {
+			if message.Role == "system" {
+				if message.Content != "" {
+					params.System = append(params.System, anthropic.TextBlockParam{Text: message.Content})
+				}
+				continue
+			}
+			messages = append(messages, message)
+		}
+	}
+	params.Messages = buildMessages(messages)
 
 	if req.HasTemperature() {
 		params.Temperature = anthropic.Float(req.Temperature)
@@ -300,8 +317,7 @@ func (p *Provider) Stream(ctx context.Context, req *llm.CompletionRequest) (<-ch
 			}
 		}
 
-		messages := buildMessages(req.Messages)
-		params := buildRequestParams(req, messages)
+		params := buildRequestParams(req)
 		stream := p.client.Messages.NewStreaming(ctx, params)
 
 		var currentToolCall *llm.ToolCall

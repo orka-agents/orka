@@ -213,6 +213,7 @@ var externalAPIPolicies = map[string]apiRoutePolicy{
 	"POST /api/v1/chat":                          coreAPIPolicy("create", "chats", "").inNamespace(apiBodyNamespace),
 	"GET /api/v1/chat/config":                    coreAPIPolicy("get", "chats/config", ""),
 	"DELETE /api/v1/chat/:sessionId":             coreAPIPolicy("delete", "sessions", "sessionId"),
+	"POST /openai/v1/responses":                  coreAPIPolicy("create", "chats", ""),
 	"POST /openai/v1/chat/completions":           coreAPIPolicy("create", "chats", ""),
 	"GET /openai/v1/models":                      coreAPIPolicy("list", "providers", ""),
 	"POST /anthropic/v1/messages":                coreAPIPolicy("create", "chats", ""),
