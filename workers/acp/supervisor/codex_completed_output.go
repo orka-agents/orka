@@ -249,7 +249,7 @@ func codexCompletedCommandText(envelope codexCommandOutputEnvelope, kind codexCo
 	if kind == codexCommandOutputTerminal {
 		terminal, valid := codexExactFields(envelope.Meta["terminal_exit"], "terminal_id", "exit_code", "signal")
 		var terminalID string
-		if len(envelope.Meta) != 1 || !valid || json.Unmarshal(terminal["terminal_id"], &terminalID) != nil || terminalID != envelope.ToolCallID ||
+		if len(envelope.Meta) != 1 || !valid || len(terminal) != 3 || json.Unmarshal(terminal["terminal_id"], &terminalID) != nil || terminalID != envelope.ToolCallID ||
 			string(terminal["signal"]) != acpJSONNull {
 			return "", false
 		}

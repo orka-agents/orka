@@ -140,6 +140,21 @@ func TestCodexOutputLifecycleRejectsTerminalFieldAliases(t *testing.T) {
 	}
 }
 
+func TestCodexOutputLifecycleRejectsExtraTerminalExitFields(t *testing.T) {
+	for _, field := range []string{"truncated", "partial", "unknown"} {
+		t.Run(field, func(t *testing.T) {
+			pipeline, start, complete := codexLifecycleFixture(t, "terminal")
+			terminal := complete["_meta"].(map[string]any)["terminal_exit"].(map[string]any)
+			terminal[field] = true
+			pipeline.update(t, start)
+			assertCodexLifecycleOutputOmitted(t, pipeline, pipeline.update(t, complete))
+			// A later pinned replay cannot restore authoritative output.
+			delete(terminal, field)
+			assertCodexLifecycleOutputOmitted(t, pipeline, pipeline.update(t, complete))
+		})
+	}
+}
+
 func TestCodexOutputLifecycleRemembersPreStartFrames(t *testing.T) {
 	for _, kind := range []string{"terminal", "read", "mcp"} {
 		for _, tt := range []struct {

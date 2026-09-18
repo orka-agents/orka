@@ -205,6 +205,11 @@ func (c *Client) call(ctx context.Context, method string, input any, query Query
 	if err != nil || len(data) > MaxResponseBytes {
 		return Report{}, errors.New("runtime feedback response exceeds bounds")
 	}
+	// Reject duplicates and aliases before decoding can collapse conflicting
+	// bindings or evidence. Decode the original bytes to retain numeric checks.
+	if !validReportJSON(data) {
+		return Report{}, errors.New("runtime feedback response is invalid")
+	}
 	var report Report
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()

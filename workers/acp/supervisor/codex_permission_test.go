@@ -420,24 +420,7 @@ func TestCodexMCPPermissionResolutionRequiresCorrelatedApproval(t *testing.T) {
 			state.promptMutations = mutations
 			state.descriptor.State = harnessv2.RuntimeSessionStatePromptRunning
 			update, permission := codexMCPPermissionFixture(t)
-			if tt.rawInput != "" || tt.rawMeta != "" || len(tt.startFields) != 0 {
-				var wire map[string]json.RawMessage
-				if err := json.Unmarshal(update.Update, &wire); err != nil {
-					t.Fatal(err)
-				}
-				if tt.rawInput != "" {
-					wire["rawInput"] = json.RawMessage(tt.rawInput)
-				}
-				if tt.rawMeta != "" {
-					wire["_meta"] = json.RawMessage(tt.rawMeta)
-				}
-				maps.Copy(wire, tt.startFields)
-				var err error
-				update.Update, err = json.Marshal(wire)
-				if err != nil {
-					t.Fatal(err)
-				}
-			}
+			overrideCodexMCPPermissionStart(t, &update, tt.rawInput, tt.rawMeta, tt.startFields)
 			if tt.start == "direct" {
 				update.Update = json.RawMessage(`{"sessionUpdate":"tool_call","toolCallId":"feedback-call-1","name":"runtime_feedback","kind":"execute","status":"in_progress"}`)
 			}
@@ -500,5 +483,28 @@ func TestCodexMCPPermissionResolutionRequiresCorrelatedApproval(t *testing.T) {
 				t.Fatalf("permission status=%d want=%d forwarded=%d want=%d approvals=%d", response.Code, tt.wantStatus, mutations.resolveCalls.Load(), wantForwarded, len(proxy.approvals))
 			}
 		})
+	}
+}
+
+func overrideCodexMCPPermissionStart(t *testing.T, update *acp.SessionNotification, rawInput, rawMeta string, fields map[string]json.RawMessage) {
+	t.Helper()
+	if rawInput == "" && rawMeta == "" && len(fields) == 0 {
+		return
+	}
+	var wire map[string]json.RawMessage
+	if err := json.Unmarshal(update.Update, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if rawInput != "" {
+		wire["rawInput"] = json.RawMessage(rawInput)
+	}
+	if rawMeta != "" {
+		wire["_meta"] = json.RawMessage(rawMeta)
+	}
+	maps.Copy(wire, fields)
+	var err error
+	update.Update, err = json.Marshal(wire)
+	if err != nil {
+		t.Fatal(err)
 	}
 }

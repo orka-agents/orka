@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -172,6 +173,70 @@ func TestClientUsesMutualTLSAndBoundedExactRead(t *testing.T) {
 	}
 	if requests.Load() != 5 {
 		t.Fatal("unexpected implicit retry or redirect")
+	}
+}
+
+func TestClientRejectsAmbiguousResponseJSON(t *testing.T) {
+	query := testQuery()
+	report := testReport(query)
+	report.Losses = map[string]uint64{"event_buffer_full": 2, "EVENT_BUFFER_FULL": 3}
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name, from, to string
+		wantValid      bool
+	}{
+		{name: "valid report", wantValid: true},
+		{name: "duplicate run binding", from: `"runID":`, to: `"runID":"other-run","runID":`},
+		{name: "duplicate status", from: `"status":`, to: `"status":"Unavailable","status":`},
+		{name: "duplicate workload object", from: `"workload":`, to: `"workload":{"containerID":"other-container"},"workload":`},
+		{name: "duplicate nested container binding", from: `"containerID":`, to: `"containerID":"other-container","containerID":`},
+		{name: "duplicate nested restart count", from: `"restartCount":`, to: `"restartCount":1,"restartCount":`},
+		{name: "escaped duplicate nested binding", from: `"podUID":`, to: `"pod\u0055ID":"other-pod","podUID":`},
+		{name: "duplicate capture field", from: `"startedAt":`, to: `"startedAt":"1970-01-01T00:00:00Z","startedAt":`},
+		{name: "duplicate source field", from: `"instanceID":`, to: `"instanceID":"other-instance","instanceID":`},
+		{name: "duplicate event array field", from: `"kernelEnforced":`, to: `"kernelEnforced":false,"kernelEnforced":`},
+		{name: "duplicate loss map field", from: `"event_buffer_full":`, to: `"event_buffer_full":99,"event_buffer_full":`},
+		{name: "run binding case alias", from: `"runID":`, to: `"RunID":"other-run","runID":`},
+		{name: "run binding alias after exact", from: `"runID":`, to: `"runID":"other-run","RunID":`},
+		{name: "standalone run binding alias", from: `"runID":`, to: `"RunID":`},
+		{name: "workload object case alias", from: `"workload":`, to: `"Workload":{"containerID":"other-container"},"workload":`},
+		{name: "nested container case alias", from: `"containerID":`, to: `"ContainerID":"other-container","containerID":`},
+		{name: "nested restart case alias", from: `"restartCount":`, to: `"RestartCount":1,"restartCount":`},
+		{name: "status Unicode alias", from: `"status":`, to: `"ſtatus":"Unavailable","status":`},
+		{name: "capture field case alias", from: `"startedAt":`, to: `"StartedAt":"1970-01-01T00:00:00Z","startedAt":`},
+		{name: "source field case alias", from: `"instanceID":`, to: `"InstanceID":"other-instance","instanceID":`},
+		{name: "event array field Unicode alias", from: `"kernelEnforced":`, to: `"KernelEnforced":false,"kernelEnforced":`},
+		{name: "unknown field", from: `"status":`, to: `"unknown":true,"status":`},
+		{name: "non-integer binding spelling", from: `"restartCount":0`, to: `"restartCount":0e0`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if !strings.Contains(string(encoded), tt.from) {
+				t.Fatal("response fixture is missing the field to mutate")
+			}
+			wire := strings.Replace(string(encoded), tt.from, tt.to, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != apiPath+"report" {
+					t.Error("unexpected report transport")
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(wire))
+			}))
+			defer server.Close()
+			client := &Client{endpoint: server.URL, http: server.Client()}
+			got, err := client.Report(t.Context(), query)
+			if tt.wantValid {
+				if err != nil || !reflect.DeepEqual(got, report) {
+					t.Fatalf("valid report changed or rejected: %v", err)
+				}
+				return
+			}
+			if err == nil || !reflect.DeepEqual(got, Report{}) {
+				t.Fatal("ambiguous or invalid response returned evidence")
+			}
+		})
 	}
 }
 
