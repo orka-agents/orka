@@ -168,6 +168,9 @@ instruction to narrow the filters. Records include work, Task, measurement,
 PR-link, and PR-observation history, including required cumulative baselines.
 This limit applies even when retention is unlimited. The API never returns
 truncated totals as a complete report.
+Token counts and totals must also fit the exact JSON integer range through
+9,007,199,254,740,991. A selection whose usage exceeds that range returns HTTP 422
+instead of rounded or wrapped accounting values.
 
 For example, request
 `/api/v1/usage?namespace=payments&from=2026-09-01&until=2026-10-01&asOf=2026-10-15T12:00:00Z`

@@ -57,7 +57,14 @@ func usageReport(t *testing.T, s *Store, teams []string, from, until, asOf time.
 	filter := store.UsageFilter{Namespaces: teams, From: from, Until: until, AsOf: asOf}
 	data, err := s.LoadUsage(context.Background(), filter)
 	require.NoError(t, err)
-	return usage.Build(data, filter)
+	return buildUsageReport(t, data, filter)
+}
+
+func buildUsageReport(t *testing.T, data store.UsageData, filter store.UsageFilter) usage.Report {
+	t.Helper()
+	report, err := usage.Build(data, filter)
+	require.NoError(t, err)
+	return report
 }
 
 func TestUsagePaymentsCohortIncludesUnsuccessfulWork(t *testing.T) {
@@ -131,7 +138,8 @@ func TestUsageSharedWorkAndCombinedTeamsDeduplicatePRs(t *testing.T) {
 	require.NoError(t, err)
 	seen := map[string]bool{}
 	for offset := range 3 {
-		page := usage.BuildPage(data, filter, usage.Page{Limit: 1, Offset: offset}, "")
+		page, err := usage.BuildPage(data, filter, usage.Page{Limit: 1, Offset: offset}, "")
+		require.NoError(t, err)
 		require.Equal(t, report.Summary, page.Summary)
 		require.Equal(t, report.Teams, page.Teams)
 		require.Equal(t, 3, page.Page.Total)
@@ -600,7 +608,7 @@ func TestUsageAsOfPhaseHistoryAndWorkTypeFilter(t *testing.T) {
 	filter := store.UsageFilter{Namespaces: []string{"a"}, From: start.Add(-time.Second), Until: start.Add(time.Hour), AsOf: time.Now().UTC(), Kind: "pull_request"}
 	data, err := s.LoadUsage(t.Context(), filter)
 	require.NoError(t, err)
-	report := usage.Build(data, filter)
+	report := buildUsageReport(t, data, filter)
 	require.Zero(t, report.Summary.WorkRequests)
 	require.EqualValues(t, 200, report.OtherWork[0].Totals.TotalTokens)
 	require.Empty(t, report.OtherWork[1].Tasks)

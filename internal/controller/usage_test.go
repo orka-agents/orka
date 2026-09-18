@@ -44,12 +44,15 @@ func TestUsageDeletedTaskStopsPinningRetention(t *testing.T) {
 			filter := store.UsageFilter{Namespaces: []string{"default"}, From: start, Until: start.Add(time.Hour), AsOf: time.Now().UTC()}
 			data, err := backend.LoadUsage(t.Context(), filter)
 			require.NoError(t, err)
-			report := usage.Build(data, filter)
+			report, err := usage.Build(data, filter)
+			require.NoError(t, err)
 			require.Len(t, report.Works, 1)
 			require.Equal(t, "Cancelled", report.Works[0].Tasks[0].Phase)
 			require.EqualValues(t, 100, report.Summary.TotalTokens)
 			filter.AsOf = beforeDeletion
-			require.Equal(t, string(phase), usage.Build(data, filter).Works[0].Tasks[0].Phase)
+			historical, err := usage.Build(data, filter)
+			require.NoError(t, err)
+			require.Equal(t, string(phase), historical.Works[0].Tasks[0].Phase)
 			// Retain the cancellation for the configured window, then expire
 			// the abandoned cohort and its counts after that window elapses.
 			require.NoError(t, backend.PruneUsage(t.Context(), time.Now().Add(-90*24*time.Hour)))

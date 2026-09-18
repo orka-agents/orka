@@ -258,7 +258,9 @@ func TestUsageOutcomeTimerOnlyWhileLinksNeedRefresh(t *testing.T) {
 				filter := store.UsageFilter{Namespaces: []string{monitor.Namespace}, From: time.Now().Add(-time.Hour), Until: time.Now().Add(time.Hour), AsOf: time.Now().UTC()}
 				data, err := backend.LoadUsage(t.Context(), filter)
 				require.NoError(t, err)
-				require.Equal(t, 45, usage.Build(data, filter).Summary.PRsReady)
+				report, err := usage.Build(data, filter)
+				require.NoError(t, err)
+				require.Equal(t, 45, report.Summary.PRsReady)
 			}
 		})
 	}

@@ -12,6 +12,9 @@ import (
 
 var ErrUsageSelectionTooLarge = errors.New("usage report selection is too large")
 
+// MaxUsageTokenCount is the largest exactly representable JSON integer for UI clients.
+const MaxUsageTokenCount int64 = 1<<53 - 1
+
 const (
 	UsageSourceProvider  = "provider"
 	UsageSourceAgent     = "agent"

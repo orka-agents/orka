@@ -40,7 +40,9 @@ func usageFixture(t *testing.T) (context.Context, func() usage.Report) {
 		filter := store.UsageFilter{Namespaces: []string{"team"}, From: start, Until: start.Add(time.Hour), AsOf: time.Now().UTC()}
 		data, err := backend.LoadUsage(t.Context(), filter)
 		require.NoError(t, err)
-		return usage.Build(data, filter)
+		report, err := usage.Build(data, filter)
+		require.NoError(t, err)
+		return report
 	}
 }
 

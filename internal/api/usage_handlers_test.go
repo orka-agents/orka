@@ -151,6 +151,32 @@ func TestUsageAPIRejectsOversizedReportsAndLoadsRequestedWork(t *testing.T) {
 	require.Len(t, detail.Work.Tasks, 1)
 }
 
+func TestUsageAPIRejectsOutOfRangeTotals(t *testing.T) {
+	f := newExternalAuthorizationFixture(t)
+	work := seedUsageAPIWork(t, f.store, "default", store.MaxUsageTokenCount)
+	f.allowRoute(t, "GET /api/v1/usage")
+	status, body := f.request(t, http.MethodGet, "/api/v1/usage?from=2000-01-01", "")
+	require.Equal(t, http.StatusOK, status, body)
+	var report usage.Report
+	require.NoError(t, json.Unmarshal([]byte(body), &report))
+	require.Equal(t, store.MaxUsageTokenCount, report.Summary.TotalTokens)
+	require.Contains(t, body, `"totalTokens":9007199254740991`)
+	// Both observations are individually valid, but the selected total is not.
+	require.NoError(t, f.store.RecordUsage(t.Context(), store.UsageObservation{Namespace: "default", TaskUID: "task", ID: "extra",
+		CounterID: "extra", Scope: store.UsageScopeCall, Source: store.UsageSourceProvider, InputTokens: new(int64(1)), OutputTokens: new(int64(0)),
+		Complete: true, Status: store.UsageStatusCompleted, ObservedAt: time.Now().UTC().Add(-time.Minute)}))
+	for _, route := range []struct{ pattern, path string }{
+		{"GET /api/v1/usage", "/api/v1/usage?from=2000-01-01"},
+		{"GET /api/v1/usage/work/:id", "/api/v1/usage/work/" + work},
+	} {
+		f.allowRoute(t, route.pattern)
+		status, body = f.request(t, http.MethodGet, route.path, "")
+		require.Equal(t, http.StatusUnprocessableEntity, status, body)
+		require.Contains(t, body, "usage totals exceed the reporting limit")
+		require.NotContains(t, body, `"summary"`)
+	}
+}
+
 func TestUsageAPICombinedTeamsRequireEveryNamespaceGrant(t *testing.T) {
 	f := newExternalAuthorizationFixture(t)
 	f.server.handlers.watchNamespace = ""

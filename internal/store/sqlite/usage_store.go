@@ -179,7 +179,7 @@ func recordUsage(ctx context.Context, db taskDataExecutor, observation store.Usa
 		return store.ValidationErrorf("unsupported usage source")
 	}
 	for _, count := range []*int64{observation.InputTokens, observation.OutputTokens, observation.CachedInputTokens, observation.CacheWriteInputTokens} {
-		if count != nil && (*count < 0 || *count > 1<<53-1) {
+		if count != nil && (*count < 0 || *count > store.MaxUsageTokenCount) {
 			return store.ValidationErrorf("invalid usage count")
 		}
 	}

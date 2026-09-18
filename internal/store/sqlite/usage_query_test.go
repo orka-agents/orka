@@ -9,7 +9,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/orka-agents/orka/internal/store"
-	"github.com/orka-agents/orka/internal/usage"
 )
 
 func TestUsageLoadSelectsCohortAndPreservesCounterHistory(t *testing.T) {
@@ -96,10 +95,10 @@ func TestUsageLoadSelectsCohortAndPreservesCounterHistory(t *testing.T) {
 			data, err := s.LoadUsage(t.Context(), selected)
 			require.NoError(t, err)
 			require.LessOrEqual(t, len(data.Observations), 8)
-			require.Equal(t, usage.Build(all, selected), usage.Build(data, selected))
+			require.Equal(t, buildUsageReport(t, all, selected), buildUsageReport(t, data, selected))
 			if tc.name == "date" {
 				require.Len(t, data.Observations, 8)
-				report := usage.Build(data, selected)
+				report := buildUsageReport(t, data, selected)
 				require.EqualValues(t, 130, report.Summary.TotalTokens)
 				require.Equal(t, 1, report.Summary.PRsMerged)
 				require.EqualValues(t, 25, report.OtherWork[0].Totals.TotalTokens)
@@ -120,7 +119,7 @@ func TestUsageLoadRejectsOversizedSelectionAcrossNamespaces(t *testing.T) {
 	filter := store.UsageFilter{Namespaces: []string{"a", "b"}, From: start, Until: start.Add(time.Second), AsOf: time.Now().UTC(), MaxRecords: 6}
 	data, err := s.LoadUsage(t.Context(), filter)
 	require.NoError(t, err)
-	require.EqualValues(t, 200, usage.Build(data, filter).Summary.TotalTokens)
+	require.EqualValues(t, 200, buildUsageReport(t, data, filter).Summary.TotalTokens)
 	filter.MaxRecords = 5
 	data, err = s.LoadUsage(t.Context(), filter)
 	require.ErrorIs(t, err, store.ErrUsageSelectionTooLarge)
@@ -178,7 +177,7 @@ func TestUsageNamespaceFilterPreservesOnlyOwnedCounterHistory(t *testing.T) {
 	for _, observation := range data.Observations {
 		require.Equal(t, "current-namespace", observation.NamespaceUID)
 	}
-	report := usage.Build(data, filter)
+	report := buildUsageReport(t, data, filter)
 	require.EqualValues(t, 120, report.Summary.TotalTokens)
 	filter.NamespaceUIDs = map[string]string{}
 	_, err = s.LoadUsage(t.Context(), filter)

@@ -2,6 +2,7 @@
 package usage
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -12,6 +13,8 @@ import (
 )
 
 const ReadinessMaxAge = 10 * time.Minute
+
+var ErrTotalsOutOfRange = errors.New("usage totals exceed the supported exact integer range")
 
 const (
 	unknownTaskPhase = "Unknown"
@@ -143,14 +146,17 @@ func prKey(repository string, number int64) string {
 
 // Build selects requests by start date. Model filtering selects whole requests
 // that used a model; it never removes their other models from the numerator.
-func Build(data store.UsageData, filter store.UsageFilter) Report {
+func Build(data store.UsageData, filter store.UsageFilter) (Report, error) {
 	return build(data, filter, true, "*")
 }
 
 // BuildPage computes totals across the entire selection, then pages compact
 // work rows. Only a requested other-usage category includes Task details.
-func BuildPage(data store.UsageData, filter store.UsageFilter, page Page, otherCategory string) Report {
-	report := build(data, filter, false, otherCategory)
+func BuildPage(data store.UsageData, filter store.UsageFilter, page Page, otherCategory string) (Report, error) {
+	report, err := build(data, filter, false, otherCategory)
+	if err != nil {
+		return Report{}, err
+	}
 	page.Total = len(report.Works)
 	start, end := page.bounds(page.Total)
 	report.Works = slices.Clone(report.Works[start:end])
@@ -167,10 +173,10 @@ func BuildPage(data store.UsageData, filter store.UsageFilter, page Page, otherC
 			group.Page = &otherPage
 		}
 	}
-	return report
+	return report, nil
 }
 
-func build(data store.UsageData, filter store.UsageFilter, workDetails bool, otherCategory string) Report {
+func build(data store.UsageData, filter store.UsageFilter, workDetails bool, otherCategory string) (Report, error) {
 	report := Report{Selection: filter, RetainedSince: data.RetainedSince, Teams: []Team{}, Works: []Work{}, OtherWork: []OtherWork{}}
 	tasks := measuredTasks(data, filter.AsOf)
 	prs := pullRequestsAsOf(data.PullRequests, filter.AsOf)
@@ -214,7 +220,10 @@ func build(data store.UsageData, filter store.UsageFilter, workDetails bool, oth
 		if filter.Model != "" && !tasksUseModel(members, filter.Model) {
 			continue
 		}
-		work := buildWork(request, members, links[request.ID], prs, workDetails)
+		work, err := buildWork(request, members, links[request.ID], prs, workDetails)
+		if err != nil {
+			return Report{}, err
+		}
 		for key, task := range members {
 			selectedTasks[key] = task
 			if teamTasks[request.Namespace] == nil {
@@ -231,17 +240,28 @@ func build(data store.UsageData, filter store.UsageFilter, workDetails bool, oth
 		}
 		return report.Works[i].StartedAt.Before(report.Works[j].StartedAt)
 	})
-	report.Summary = summarize(report.Works, selectedTasks)
+	var err error
+	report.Summary, err = summarize(report.Works, selectedTasks)
+	if err != nil {
+		return Report{}, err
+	}
 	for _, namespace := range filter.Namespaces {
-		report.Teams = append(report.Teams, Team{Namespace: namespace, Summary: summarize(teamWorks[namespace], teamTasks[namespace])})
+		summary, err := summarize(teamWorks[namespace], teamTasks[namespace])
+		if err != nil {
+			return Report{}, err
+		}
+		report.Teams = append(report.Teams, Team{Namespace: namespace, Summary: summary})
 	}
 	if filter.WorkID == "" {
-		report.OtherWork = otherWork(tasks, selectedTasks, data.Works, filter, otherCategory)
+		report.OtherWork, err = otherWork(tasks, selectedTasks, data.Works, filter, otherCategory)
+		if err != nil {
+			return Report{}, err
+		}
 	}
-	return report
+	return report, nil
 }
 
-func buildWork(request store.UsageWorkRequest, members map[string]Task, links []store.UsagePRLink, prs map[string]store.UsagePullRequest, details bool) Work {
+func buildWork(request store.UsageWorkRequest, members map[string]Task, links []store.UsagePRLink, prs map[string]store.UsagePullRequest, details bool) (Work, error) {
 	work := Work{UsageWorkRequest: request, PullRequests: []PullRequest{}, unfinished: len(members) == 0}
 	for _, link := range links {
 		pr, ok := prs[taskKey(request.Namespace, prKey(link.Repository, link.Number))]
@@ -261,6 +281,11 @@ func buildWork(request store.UsageWorkRequest, members map[string]Task, links []
 		if !details {
 			continue
 		}
+		var err error
+		task.Totals, err = totalMeasurements(task.Measurements)
+		if err != nil {
+			return Work{}, err
+		}
 		task.Shared = task.WorkID != request.ID
 		work.Tasks = append(work.Tasks, task)
 		for _, measurement := range task.Measurements {
@@ -277,8 +302,12 @@ func buildWork(request store.UsageWorkRequest, members map[string]Task, links []
 	})
 	sort.Slice(work.PullRequests, func(i, j int) bool { return work.PullRequests[i].Number < work.PullRequests[j].Number })
 	slices.Sort(work.Models)
-	work.Summary = summarize([]Work{work}, members)
-	return work
+	var err error
+	work.Summary, err = summarize([]Work{work}, members)
+	if err != nil {
+		return Work{}, err
+	}
+	return work, nil
 }
 
 func measuredTasks(data store.UsageData, asOf time.Time) map[string]Task {
@@ -427,7 +456,6 @@ func finishTaskMeasurements(task Task, key string) Task {
 		}
 		return task.Measurements[i].ObservedAt.Before(task.Measurements[j].ObservedAt)
 	})
-	task.Totals = totalMeasurements(task.Measurements)
 	return task
 }
 
@@ -488,7 +516,15 @@ func terminalUsageStatus(status string) bool {
 	return status == store.UsageStatusCompleted || status == store.UsageStatusFailed || status == store.UsageStatusCancelled
 }
 
-func totalMeasurements(measurements []Measurement) Totals {
+func addUsageTokens(total *int64, value int64) error {
+	if value < 0 || value > store.MaxUsageTokenCount-*total {
+		return ErrTotalsOutOfRange
+	}
+	*total += value
+	return nil
+}
+
+func totalMeasurements(measurements []Measurement) (Totals, error) {
 	total := Totals{ModelCost: "Price unavailable"}
 	for _, m := range measurements {
 		total.Measurements++
@@ -506,45 +542,47 @@ func totalMeasurements(measurements []Measurement) Totals {
 		default:
 			total.MissingMeasurements++
 		}
-		if m.InputTokens != nil {
-			total.InputTokens += *m.InputTokens
-		}
-		if m.OutputTokens != nil {
-			total.OutputTokens += *m.OutputTokens
-		}
-		if m.CachedInputTokens != nil {
-			total.CachedUsageReported = true
-			total.CachedInputTokens += *m.CachedInputTokens
-		}
-		if m.CacheWriteInputTokens != nil {
-			total.CacheWriteUsageReported = true
-			total.CacheWriteInputTokens += *m.CacheWriteInputTokens
-		}
-		if m.Source == store.UsageSourceEstimate {
-			if m.InputTokens != nil {
-				total.EstimatedTokens += *m.InputTokens
+		counts := [4]*int64{m.InputTokens, m.OutputTokens, m.CachedInputTokens, m.CacheWriteInputTokens}
+		targets := [4]*int64{&total.InputTokens, &total.OutputTokens, &total.CachedInputTokens, &total.CacheWriteInputTokens}
+		for i, count := range counts {
+			if count == nil {
+				continue
 			}
-			if m.OutputTokens != nil {
-				total.EstimatedTokens += *m.OutputTokens
+			if err := addUsageTokens(targets[i], *count); err != nil {
+				return Totals{}, err
+			}
+			if i < 2 && m.Source == store.UsageSourceEstimate {
+				if err := addUsageTokens(&total.EstimatedTokens, *count); err != nil {
+					return Totals{}, err
+				}
 			}
 		}
+		total.CachedUsageReported = total.CachedUsageReported || m.CachedInputTokens != nil
+		total.CacheWriteUsageReported = total.CacheWriteUsageReported || m.CacheWriteInputTokens != nil
 	}
-	total.TotalTokens = total.InputTokens + total.OutputTokens
+	total.TotalTokens = total.InputTokens
+	if err := addUsageTokens(&total.TotalTokens, total.OutputTokens); err != nil {
+		return Totals{}, err
+	}
 	total.Completeness = usageComplete
 	if total.ReportedMeasurements == 0 {
 		total.Completeness = usageUnavailable
 	} else if total.MissingMeasurements > 0 || total.PartialMeasurements > 0 {
 		total.Completeness = usagePartial
 	}
-	return total
+	return total, nil
 }
 
-func summarize(works []Work, tasks map[string]Task) Summary {
+func summarize(works []Work, tasks map[string]Task) (Summary, error) {
 	measurements := []Measurement{}
 	for _, task := range tasks {
 		measurements = append(measurements, task.Measurements...)
 	}
-	summary := Summary{Totals: totalMeasurements(measurements), WorkRequests: len(works)}
+	totals, err := totalMeasurements(measurements)
+	if err != nil {
+		return Summary{}, err
+	}
+	summary := Summary{Totals: totals, WorkRequests: len(works)}
 	prs := map[string]PullRequest{}
 	for _, work := range works {
 		for _, pr := range work.PullRequests {
@@ -602,7 +640,7 @@ func summarize(works []Work, tasks map[string]Task) Summary {
 		v := float64(summary.TotalTokens) / float64(summary.PRsMerged)
 		summary.TokensPerPRMerged = &v
 	}
-	return summary
+	return summary, nil
 }
 
 func pullRequestsAsOf(observations []store.UsagePullRequest, asOf time.Time) map[string]store.UsagePullRequest {
@@ -653,7 +691,7 @@ func tasksUseModel(tasks map[string]Task, model string) bool {
 	return false
 }
 
-func otherWork(tasks, selected map[string]Task, works []store.UsageWorkRequest, filter store.UsageFilter, detailCategory string) []OtherWork {
+func otherWork(tasks, selected map[string]Task, works []store.UsageWorkRequest, filter store.UsageFilter, detailCategory string) ([]OtherWork, error) {
 	workKinds := map[string]string{}
 	for _, work := range works {
 		workKinds[work.ID] = work.Kind
@@ -700,11 +738,23 @@ func otherWork(tasks, selected map[string]Task, works []store.UsageWorkRequest, 
 		for _, task := range categories[i].Tasks {
 			measurements = append(measurements, task.Measurements...)
 		}
-		categories[i].Totals = totalMeasurements(measurements)
+		var err error
+		categories[i].Totals, err = totalMeasurements(measurements)
+		if err != nil {
+			return nil, err
+		}
 		categories[i].TaskCount = len(categories[i].Tasks)
 		if detailCategory != "*" && detailCategory != categories[i].Category {
 			categories[i].Tasks = nil
+			continue
+		}
+		for j := range categories[i].Tasks {
+			task := &categories[i].Tasks[j]
+			task.Totals, err = totalMeasurements(task.Measurements)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
-	return categories
+	return categories, nil
 }

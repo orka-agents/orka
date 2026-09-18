@@ -106,10 +106,16 @@ func (h *Handlers) usageReport(c fiber.Ctx, detail bool) (usage.Report, error) {
 			return empty, fiber.NewError(fiber.StatusServiceUnavailable, "usage namespace identity changed")
 		}
 	}
+	var report usage.Report
 	if detail {
-		return usage.Build(data, filter), nil
+		report, err = usage.Build(data, filter)
+	} else {
+		report, err = usage.BuildPage(data, filter, page, c.Params("category"))
 	}
-	return usage.BuildPage(data, filter, page, c.Params("category")), nil
+	if errors.Is(err, usage.ErrTotalsOutOfRange) {
+		return empty, fiber.NewError(fiber.StatusUnprocessableEntity, "usage totals exceed the reporting limit; narrow the selection")
+	}
+	return report, err
 }
 
 func usageReportPage(c fiber.Ctx) (usage.Page, error) {
