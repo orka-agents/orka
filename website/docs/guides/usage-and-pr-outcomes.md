@@ -5,15 +5,61 @@ description: "Report model token usage and verified pull request outcomes for ea
 
 # Usage and PR outcomes
 
-Open **Usage** in the dashboard to see how much recorded model usage went into
-issue-to-PR work. Teams are Kubernetes namespaces. The report follows each original
-issue through planning, implementation, retries, delegated Tasks, and reviews or
-repairs of its linked PRs. Failed and cancelled work stays in the calculation.
+Run `orka usage summary` or open **Usage** in the dashboard to see how much recorded
+model usage went into issue-to-PR work. Teams are Kubernetes namespaces. The report
+follows each original issue through planning, implementation, retries, delegated
+Tasks, and reviews or repairs of its linked PRs. Failed and cancelled work stays in
+the calculation.
 
 The main measure is **tokens per merged PR**. Tokens are the pieces of text a model
 reads or generates. This measure describes observed model usage. It does not
 measure developer productivity, hours saved, infrastructure spending, or human
 review time.
+
+## Use the CLI
+
+The CLI reads the existing reporting API using your configured server,
+authentication, and namespace. Reporting does not require a CRD.
+
+```bash
+orka usage summary -n payments
+orka usage work WORK_ID -n payments
+orka usage other unassociated -n payments -o json
+```
+
+Copy a work ID from the summary to inspect its Tasks, sessions, attempts,
+measurements, PRs, and gaps. The other-usage categories are `review_only`,
+`other_requests`, and `unassociated`.
+
+All three commands accept `--from`, `--until`, `--as-of`, `--teams`,
+`--repository`, `--model`, and `--kind`. For example:
+
+```bash
+orka usage summary --teams payments,platform \
+  --from 2026-09-01 --until 2026-10-01 \
+  --repository example/project --model example-model -o yaml
+```
+
+The summary and other-usage commands default to requests started in the current
+UTC month. Work details default to all retained history for that work. Pass the
+same date filters when inspecting a summary's work request.
+
+Summary and other-usage results page with `--limit` and `--offset`. The default
+page size is 25, capped at 100 by the API. Totals cover the full selection, even
+when only one page is shown. Reuse the timestamp printed after **Usage and
+outcomes through**, along with the same filters, for later pages and work details:
+
+```bash
+orka usage summary -n payments --as-of 2026-09-18T10:00:00Z --limit 25
+orka usage summary -n payments --as-of 2026-09-18T10:00:00Z --limit 25 --offset 25
+orka usage work WORK_ID -n payments --as-of 2026-09-18T10:00:00Z --from 2026-09-01
+```
+
+Table output distinguishes `Unavailable` measurements from reported `0` counts
+and `No model calls`. It includes coverage, cache availability, estimates, and
+model-call versus agent-attempt counts. Use `-o json` or `-o yaml` for the full API
+response, including null values and fields omitted from the table. Rejected
+requests exit nonzero without printing a partial report.
 
 ## Read the report
 
