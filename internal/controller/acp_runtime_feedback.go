@@ -142,35 +142,38 @@ func feedbackRuntimeClient(ctx context.Context, reader client.Reader, pool *core
 		}))
 }
 
-func verifyFeedbackRuntime(ctx context.Context, runtimeClient *harnessv2.Client, execution runtimeFeedbackExecution, running bool) error {
+func verifyFeedbackRuntime(ctx context.Context, runtimeClient *harnessv2.Client, execution runtimeFeedbackExecution, running bool) (time.Time, error) {
 	statusCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	status, err := runtimeClient.Status(statusCtx)
 	if err != nil {
-		return errors.New("runtime feedback supervisor status is unavailable")
+		return time.Time{}, errors.New("runtime feedback supervisor status is unavailable")
 	}
 	if harnessv2.CompareFence(execution.Fence, status.Fence, false) != harnessv2.FenceMatch || len(status.Sessions) != 1 {
-		return errors.New("runtime feedback supervisor is stale or shared")
+		return time.Time{}, errors.New("runtime feedback supervisor is stale or shared")
 	}
 	session := status.Sessions[0]
 	if session.RuntimeSessionUID != execution.Fence.RuntimeSessionUID || session.Generation != execution.Fence.RuntimeSessionGeneration {
-		return errors.New("runtime feedback session is stale")
+		return time.Time{}, errors.New("runtime feedback session is stale")
 	}
 	if !running {
 		if len(status.ActivePrompts) != 0 || !session.State.CanAdmitPrompt() {
-			return errors.New("runtime feedback session is not idle")
+			return time.Time{}, errors.New("runtime feedback session is not idle")
 		}
-		return nil
+		return time.Time{}, nil
 	}
 	if len(status.ActivePrompts) != 1 || session.State != harnessv2.RuntimeSessionStatePromptRunning || session.ActivePromptID != execution.PromptID {
-		return errors.New("runtime feedback prompt is not active")
+		return time.Time{}, errors.New("runtime feedback prompt is not active")
 	}
 	prompt := status.ActivePrompts[0]
 	if string(prompt.TaskUID) != execution.TaskUID || prompt.TaskAttempt != execution.TaskAttempt || prompt.PromptID != execution.PromptID ||
 		prompt.RuntimeSessionUID != execution.Fence.RuntimeSessionUID || prompt.SessionGeneration != execution.Fence.RuntimeSessionGeneration {
-		return errors.New("runtime feedback active prompt belongs to another execution")
+		return time.Time{}, errors.New("runtime feedback active prompt belongs to another execution")
 	}
-	return nil
+	if prompt.StartedAt.IsZero() {
+		return time.Time{}, errors.New("runtime feedback prompt start is unavailable")
+	}
+	return prompt.StartedAt, nil
 }
 
 // startRuntimeFeedback is called after the native RuntimeSession exists and
@@ -191,7 +194,7 @@ func (d *ACPDispatcher) startRuntimeFeedback(ctx context.Context, task *corev1al
 	if err != nil {
 		return nil, err
 	}
-	if err := verifyFeedbackRuntime(ctx, runtimeClient, execution, false); err != nil {
+	if _, err := verifyFeedbackRuntime(ctx, runtimeClient, execution, false); err != nil {
 		return nil, err
 	}
 	query, err := execution.query()
@@ -290,7 +293,8 @@ func (t *runtimeFeedbackTool) Execute(ctx context.Context, args json.RawMessage)
 	if err != nil {
 		return "", err
 	}
-	if err := verifyFeedbackRuntime(ctx, runtimeClient, execution, true); err != nil {
+	startedAt, err := verifyFeedbackRuntime(ctx, runtimeClient, execution, true)
+	if err != nil {
 		return "", err
 	}
 	query, err := execution.query()
@@ -301,8 +305,21 @@ func (t *runtimeFeedbackTool) Execute(ctx context.Context, args json.RawMessage)
 	if reportErr == nil {
 		reportErr = report.Validate(query, time.Now().UTC())
 	}
-	if err := verifyFeedbackRuntime(ctx, runtimeClient, execution, true); err != nil {
+	// Admission retries do not renew GKR's frozen capture. A run that ended
+	// before this prompt started cannot diagnose it, including a registration
+	// finalized by a previous proven-unsent dispatch. Historical partial
+	// evidence remains useful when capture overlapped the admitted prompt.
+	if reportErr == nil && report.Capture != nil &&
+		(!report.Capture.ExpiresAt.After(startedAt) ||
+			(report.Capture.EndedAt != nil && !report.Capture.EndedAt.After(startedAt))) {
+		reportErr = errors.New("runtime feedback capture ended before prompt admission")
+	}
+	currentStartedAt, err := verifyFeedbackRuntime(ctx, runtimeClient, execution, true)
+	if err != nil {
 		return "", err
+	}
+	if !currentStartedAt.Equal(startedAt) {
+		return "", errors.New("runtime feedback prompt changed during diagnosis")
 	}
 	current, _, err := resolve()
 	if err != nil || current != execution {

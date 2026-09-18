@@ -259,7 +259,8 @@ func (r Report) validateCapture() error {
 	if r.Status == Collecting && (r.Capture.EndedAt != nil || r.Capture.ExpiresAt.Before(r.SampledAt)) {
 		return errors.New("runtime feedback collecting window is invalid")
 	}
-	if r.Status != Collecting && (r.Capture.EndedAt == nil || r.Capture.EndedAt.Before(r.Capture.StartedAt) || r.Capture.EndedAt.After(r.SampledAt)) {
+	if r.Status != Collecting && (r.Capture.EndedAt == nil || r.Capture.EndedAt.Before(r.Capture.StartedAt) ||
+		r.Capture.EndedAt.After(r.Capture.ExpiresAt) || r.Capture.EndedAt.After(r.SampledAt)) {
 		return errors.New("runtime feedback ended window is invalid")
 	}
 	for _, event := range r.Events {

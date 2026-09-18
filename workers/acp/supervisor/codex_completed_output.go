@@ -57,6 +57,14 @@ func (n *codexCompletedOutputNormalizer) normalize(notification *acp.SessionNoti
 	if json.Unmarshal(notification.Update, &envelope) != nil {
 		return
 	}
+	// The generic mapper does not project rawOutput. Preserve that omission
+	// even for an unsupported or untracked call; only an exact completion below
+	// may replace it with an authoritative snapshot.
+	if len(envelope.RawOutput) > 0 {
+		mapped.ToolCall.Content = nil
+		mapped.ToolCall.ContentOmitted = true
+		mapped.ToolCall.ContentReplace = false
+	}
 	id, err := canonicalACPToolCallID(envelope.ToolCallID)
 	if err != nil || id != mapped.ToolCall.ToolCallID {
 		return
@@ -215,7 +223,7 @@ func codexCompletedCommandText(envelope codexCommandOutputEnvelope, kind codexCo
 			ExitCode   json.RawMessage `json:"exit_code"`
 			Signal     json.RawMessage `json:"signal"`
 		}
-		if json.Unmarshal(envelope.Meta["terminal_exit"], &terminal) != nil || terminal.TerminalID != envelope.ToolCallID ||
+		if len(envelope.Meta) != 1 || json.Unmarshal(envelope.Meta["terminal_exit"], &terminal) != nil || terminal.TerminalID != envelope.ToolCallID ||
 			string(terminal.Signal) != acpJSONNull {
 			return "", false
 		}
@@ -237,7 +245,10 @@ func codexCompletedCommandText(envelope codexCommandOutputEnvelope, kind codexCo
 }
 
 func codexCommandExitCode(raw json.RawMessage) (string, bool) {
-	if len(raw) == 0 || strings.TrimSpace(string(raw)) == acpJSONNull {
+	if len(raw) == 0 {
+		return "", false
+	}
+	if strings.TrimSpace(string(raw)) == acpJSONNull {
 		return "unknown", true
 	}
 	var exit int32

@@ -342,9 +342,18 @@ func TestRuntimeFeedbackBrokerUsesAuthenticatedAttemptAndEpochGuard(t *testing.T
 	epoch := store.ControllerEpochFence{Name: owner.Name, Epoch: owner.Epoch, HolderID: owner.HolderID}
 	registry := tools.NewRegistry()
 	var reports atomic.Int32
+	var preAdmissionStatus string
 	service := &feedbackTestService{report: func(_ context.Context, q runtimefeedback.Query) (runtimefeedback.Report, error) {
 		reports.Add(1)
-		return feedbackReport(q), nil
+		report := feedbackReport(q)
+		if preAdmissionStatus != "" {
+			endedAt := f.status.Load().ActivePrompts[0].StartedAt.Add(-time.Second)
+			report.Status = preAdmissionStatus
+			report.Capture.EndedAt = &endedAt
+			report.Capture.ExpiresAt = endedAt
+			report.Events[0].Timestamp = endedAt.Add(-time.Second)
+		}
+		return report, nil
 	}}
 	if err := RegisterRuntimeFeedbackTool(registry, f.reader, service); err != nil {
 		t.Fatal(err)
@@ -359,13 +368,18 @@ func TestRuntimeFeedbackBrokerUsesAuthenticatedAttemptAndEpochGuard(t *testing.T
 		}
 		return ACPMCPBrokerCredentials{ControllerBearerToken: strings.Repeat("b", 32), CapabilitySecret: []byte(strings.Repeat("c", 32)), ExpectedFence: f.request.Metadata.Fence, RuntimeProfile: f.profile, ControllerFence: epoch, Task: ACPMCPAuthenticatedTask{Name: f.task.Name, Namespace: f.task.Namespace, UID: string(f.task.UID)}}, nil
 	}), Prompts: DurableACPMCPPromptAuthorizer{Attempts: attempts}, Executor: RegistryACPMCPToolExecutor{Registry: registry}, Effects: controls, EpochMutations: controls}
-	for _, scenario := range []string{"valid", "wrong bearer", "wrong capability", "wrong attempt", "ended prompt"} {
+	for _, scenario := range []string{"valid", "expired before admission", "finalized before admission", "wrong bearer", "wrong capability", "wrong attempt", "ended prompt"} {
 		t.Run(scenario, func(t *testing.T) {
+			preAdmissionStatus = ""
 			request := f.request
 			bearer := strings.Repeat("b", 32)
 			capability := []byte(strings.Repeat("c", 32))
 			before := reports.Load()
 			switch scenario {
+			case "expired before admission":
+				preAdmissionStatus = runtimefeedback.Expired
+			case "finalized before admission":
+				preAdmissionStatus = runtimefeedback.Finalized
 			case "wrong bearer":
 				bearer = strings.Repeat("z", 32)
 			case "wrong capability":
@@ -382,6 +396,11 @@ func TestRuntimeFeedbackBrokerUsesAuthenticatedAttemptAndEpochGuard(t *testing.T
 			if scenario == "valid" {
 				if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "203.0.113.9") || reports.Load() != before+1 {
 					t.Fatalf("valid authenticated diagnosis failed: status %d", response.Code)
+				}
+			} else if preAdmissionStatus != "" {
+				if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "Unavailable") ||
+					strings.Contains(response.Body.String(), "203.0.113.9") || reports.Load() != before+1 {
+					t.Fatal("authenticated broker released pre-admission evidence instead of unavailable diagnostics")
 				}
 			} else if response.Code == http.StatusOK || reports.Load() != before {
 				t.Fatal("unauthorized or ended execution reached feedback service")

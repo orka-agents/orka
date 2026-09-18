@@ -205,6 +205,14 @@ Orka completes the exact registration when native dispatch exits. GKR's
 its own bounded retention governs later reads. A report never authorizes
 capture extension, policy relaxation, launch, or retry.
 
+Admission retries do not restart or extend that capture. If admission waits
+past its deadline, or a proven-unsent dispatch finalizes it before the same
+prompt is retried, the tool returns `Unavailable` without releasing the old
+evidence. The authorized prompt can still run. A capture that remains active
+through admission, or ends during the current prompt, retains its original
+bounded, partial meaning. Orka verifies the prompt's start time before and
+after each report read; a changed or unavailable start time releases no report.
+
 Validate the integration with an authorized native network request from a
 fresh Task. Check that `runtime_feedback` returns evidence for the exact
 worker container and that recovery uses only already-authorized destinations

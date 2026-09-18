@@ -90,6 +90,30 @@ func TestReportRetainsBoundedHistoricalCapture(t *testing.T) {
 	}
 }
 
+func TestReportTerminalWindowCannotExceedExpiry(t *testing.T) {
+	q := testQuery()
+	now := time.Now().UTC()
+	for _, status := range []string{Finalized, Expired} {
+		for _, offset := range []time.Duration{-time.Second, 0, time.Nanosecond} {
+			t.Run(status+"/"+offset.String(), func(t *testing.T) {
+				r := testReport(q)
+				r.Status = status
+				r.SampledAt = now
+				expiresAt := now.Add(-time.Minute)
+				endedAt := expiresAt.Add(offset)
+				r.Capture = &Capture{StartedAt: expiresAt.Add(-CaptureSeconds * time.Second), EndedAt: &endedAt, ExpiresAt: expiresAt}
+				// All events remain inside the capture; metadata alone must not
+				// extend the frozen deadline returned to the agent.
+				r.Events[0].Timestamp = expiresAt.Add(-2 * time.Second)
+				err := r.Validate(q, now)
+				if (err != nil) != (offset > 0) {
+					t.Fatalf("terminal end relative to expiry %s: validation error = %v", offset, err)
+				}
+			})
+		}
+	}
+}
+
 func TestClientUsesMutualTLSAndBoundedExactRead(t *testing.T) {
 	q := testQuery()
 	var mode atomic.Int32
