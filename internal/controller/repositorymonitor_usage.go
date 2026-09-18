@@ -65,13 +65,14 @@ func (r *RepositoryMonitorReconciler) refreshMonitorUsageOutcomes(ctx context.Co
 			continue
 		}
 		seen[key] = true
-		observation := store.UsagePullRequest{Namespace: monitor.Namespace, Repository: link.Repository, Number: link.Number,
+		observation := store.UsagePullRequest{Namespace: monitor.Namespace, NamespaceUID: link.NamespaceUID, Repository: link.Repository, Number: link.Number,
 			URL: fmt.Sprintf("https://github.com/%s/pull/%d", link.Repository, link.Number), State: repositoryMonitorIssueUnknownValue,
 			ReadinessReason: "GitHub state unavailable", ObservedAt: time.Now().UTC()}
 		if tokenErr == nil {
 			if current, err := r.fetchUsagePullRequest(refreshCtx, link.Repository, link.Number, token); err == nil {
 				observation = current
 				observation.Namespace = monitor.Namespace
+				observation.NamespaceUID = link.NamespaceUID
 			}
 		}
 		if err := usageStore.RecordUsagePullRequest(ctx, observation); err != nil {

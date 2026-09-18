@@ -81,9 +81,12 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 		if _, ok := eventContent["harnessV2"]; ok {
 			return fiber.NewError(fiber.StatusForbidden, "harness events must use the controller journal")
 		}
-	}
-	if writerTask != nil {
-		event.Internal = map[string]any{"usageTaskUID": string(writerTask.UID)}
+		if _, ok := eventContent["usage"]; ok {
+			if err := authorizer.verifyUsageWriter(c.Context(), GetUserInfo(c), writerTask); err != nil {
+				return err
+			}
+			event.Internal = map[string]any{"usageTaskUID": string(writerTask.UID)}
+		}
 	}
 	if event.StreamType == events.ExecutionEventStreamTypeTask {
 		event.TaskName = streamID
@@ -112,6 +115,9 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 		}
 		if current.UID != writerTask.UID {
 			return fiber.NewError(fiber.StatusForbidden, "task identity changed")
+		}
+		if event.Internal["usageTaskUID"] != nil {
+			return authorizer.verifyUsageWriter(c.Context(), GetUserInfo(c), current)
 		}
 		return nil
 	}, func(ctx context.Context) error {

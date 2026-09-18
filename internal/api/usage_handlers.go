@@ -57,12 +57,27 @@ func (h *Handlers) usageReport(c fiber.Ctx, detail bool) (usage.Report, error) {
 	if err != nil {
 		return empty, err
 	}
+	reader := h.uncachedReader()
+	filter.NamespaceUIDs = make(map[string]string, len(teams))
+	for _, team := range teams {
+		uid, err := usage.NamespaceUID(c.Context(), reader, team)
+		if err != nil {
+			return empty, fiber.NewError(fiber.StatusServiceUnavailable, "failed to verify usage namespace identity")
+		}
+		filter.NamespaceUIDs[team] = uid
+	}
 	data, err := backend.LoadUsage(c.Context(), filter)
 	if err != nil {
 		return empty, fiber.NewError(fiber.StatusInternalServerError, "failed to load usage report")
 	}
 	if err := h.filterUsageTaskAccess(c, &data); err != nil {
 		return empty, err
+	}
+	for _, team := range teams {
+		uid, err := usage.NamespaceUID(c.Context(), reader, team)
+		if err != nil || uid != filter.NamespaceUIDs[team] {
+			return empty, fiber.NewError(fiber.StatusServiceUnavailable, "usage namespace identity changed")
+		}
 	}
 	return usage.Build(data, filter), nil
 }

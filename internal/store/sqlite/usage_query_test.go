@@ -99,3 +99,61 @@ func TestUsageLoadSelectsCohortAndPreservesCounterHistory(t *testing.T) {
 		})
 	}
 }
+
+func TestUsageNamespaceFilterPreservesOnlyOwnedCounterHistory(t *testing.T) {
+	s := setupTestStore(t)
+	old := time.Now().UTC().Add(-60 * 24 * time.Hour)
+	start := old.Add(30 * 24 * time.Hour)
+	for _, uid := range []string{"previous-namespace", "current-namespace", ""} {
+		for number := int64(1); number <= 2; number++ {
+			at := old
+			if number == 2 {
+				at = start
+			}
+			work := store.UsageWorkID("team", "monitor-"+uid, "org/repo", "issue", number)
+			require.NoError(t, s.RegisterUsageWork(t.Context(), store.UsageWorkRequest{Namespace: "team", NamespaceUID: uid,
+				MonitorName: "monitor", MonitorUID: "monitor-" + uid, Repository: "org/repo", Kind: "issue", Number: number, StartedAt: at}))
+			task := fmt.Sprintf("%s-task-%d", uid, number)
+			usageTask(t, s, "team", work, task, "Succeeded", at)
+			// The same runtime counter name exists in each namespace generation.
+			for i, count := range []int64{100 * (number - 1), 100 * number} {
+				status := store.UsageStatusStarted
+				if i == 1 {
+					status = store.UsageStatusCompleted
+				}
+				require.NoError(t, s.RecordUsage(t.Context(), store.UsageObservation{Namespace: "team", TaskUID: task,
+					ID: fmt.Sprintf("%s-%d", task, i), CounterID: "conversation", Scope: store.UsageScopeSession, Source: store.UsageSourceAgent,
+					InputTokens: new(count), OutputTokens: new(int64(0)), Model: "session-model", Status: status,
+					Complete: i == 1, ObservedAt: at.Add(time.Duration(i) * time.Minute)}))
+			}
+			if number == 2 {
+				require.NoError(t, s.LinkUsagePullRequest(t.Context(), store.UsagePRLink{Namespace: "team", WorkID: work, Repository: "org/repo",
+					Number: 12, Origin: store.UsagePRCreated, EvidenceID: "publication", LinkedAt: start}))
+				require.NoError(t, s.RecordUsagePullRequest(t.Context(), store.UsagePullRequest{Namespace: "team", NamespaceUID: uid,
+					Repository: "org/repo", Number: 12, State: "open", ObservedAt: start}))
+			}
+		}
+		require.NoError(t, s.RegisterUsageTask(t.Context(), store.UsageTask{Namespace: "team", NamespaceUID: uid,
+			TaskUID: uid + "-review", TaskName: "review", Repository: "org/repo", PRNumber: 12, Phase: "Succeeded", StartedAt: start.Add(4 * time.Hour)}))
+		usageSample(t, s, "team", uid+"-review", uid+"-review-call", 20, start.Add(5*time.Hour))
+	}
+	filter := store.UsageFilter{Namespaces: []string{"team"}, NamespaceUIDs: map[string]string{"team": "current-namespace"},
+		From: start, Until: start.Add(time.Hour), AsOf: start.Add(24 * time.Hour), Model: "session-model"}
+	data, err := s.LoadUsage(t.Context(), filter)
+	require.NoError(t, err)
+	// The earlier Task is retained as a baseline; the shared review remains in
+	// the cohort even though it uses another model and starts outside the range.
+	require.Len(t, data.Works, 2)
+	require.Len(t, data.Tasks, 3)
+	require.Len(t, data.Observations, 5)
+	require.Len(t, data.Links, 1)
+	require.Len(t, data.PullRequests, 1)
+	for _, observation := range data.Observations {
+		require.Equal(t, "current-namespace", observation.NamespaceUID)
+	}
+	report := usage.Build(data, filter)
+	require.EqualValues(t, 120, report.Summary.TotalTokens)
+	filter.NamespaceUIDs = map[string]string{}
+	_, err = s.LoadUsage(t.Context(), filter)
+	require.ErrorIs(t, err, store.ErrValidation)
+}

@@ -9,6 +9,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/usage"
 )
 
 func usageTaskSnapshot(task *corev1alpha1.Task) store.UsageTask {
@@ -46,7 +47,13 @@ func (r *TaskReconciler) retainUsageTask(ctx context.Context, task *corev1alpha1
 	if !ok || task.UID == "" || task.Spec.Schedule != "" {
 		return nil
 	}
-	return usageStore.RegisterUsageTask(ctx, usageTaskSnapshot(task))
+	uid, err := usage.NamespaceUIDForObject(ctx, uncachedReader(r.APIReader, r.Client), task)
+	if err != nil {
+		return err
+	}
+	snapshot := usageTaskSnapshot(task)
+	snapshot.NamespaceUID = uid
+	return usageStore.RegisterUsageTask(ctx, snapshot)
 }
 
 func (r *RepositoryMonitorReconciler) prepareMonitorUsageWork(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, repository, kind string, number int64) (string, error) {
@@ -55,7 +62,11 @@ func (r *RepositoryMonitorReconciler) prepareMonitorUsageWork(ctx context.Contex
 		return "", nil
 	}
 	id := store.UsageWorkID(monitor.Namespace, string(monitor.UID), repository, kind, number)
-	err := usageStore.RegisterUsageWork(ctx, store.UsageWorkRequest{ID: id, Namespace: monitor.Namespace, MonitorName: monitor.Name,
+	uid, err := usage.NamespaceUIDForObject(ctx, uncachedReader(r.APIReader, r.Client), monitor)
+	if err != nil {
+		return "", err
+	}
+	err = usageStore.RegisterUsageWork(ctx, store.UsageWorkRequest{ID: id, Namespace: monitor.Namespace, NamespaceUID: uid, MonitorName: monitor.Name,
 		MonitorUID: string(monitor.UID), Repository: repository, Kind: kind, Number: number, StartedAt: time.Now().UTC()})
 	return id, err
 }

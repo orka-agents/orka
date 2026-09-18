@@ -311,7 +311,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 
 	// Resolve or create session ID
 	sessionID := resolveChatSessionID(req.SessionID)
-	ctx = usageRequestContext(ctx, ch.resultStore, namespace, sessionID)
+	ctx = usageRequestContext(ctx, ch.resultStore, uncachedReaderOr(ch.apiReader, ch.client), namespace, sessionID)
 	if req.SessionID != "" {
 		for _, verb := range []string{"get", "update"} {
 			if err := authorizeKubernetesResourceAction(ctx, ch.kubeClient, userInfo, namespace, verb, corev1alpha1.GroupVersion.Group, "sessions", sessionID); err != nil {

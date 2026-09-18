@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -53,11 +54,33 @@ func projectUsageEvent(ctx context.Context, db taskDataExecutor, event store.Exe
 			return nil
 		}
 		observation = *content.Usage
+		observation.NamespaceUID = ""
 		observation.TaskUID = uid
 		observation.ID = uid + "/" + observation.ID
 		observation.CounterID = uid + "/" + observation.CounterID
 		// A worker cannot choose another Task/session's accounting counter.
 		observation.Scope = store.UsageScopeCall
+		observation.Source = store.UsageSourceProvider
+		observation.AttemptID = ""
+		switch observation.Status {
+		case store.UsageStatusStarted:
+			observation.InputTokens, observation.OutputTokens = nil, nil
+			observation.CachedInputTokens, observation.CacheWriteInputTokens = nil, nil
+		case "running", store.UsageStatusCompleted, store.UsageStatusFailed, store.UsageStatusCancelled:
+		default:
+			return store.ValidationErrorf("unsupported worker usage status")
+		}
+		observation.Complete = observation.Complete && observation.Status == store.UsageStatusCompleted
+		// Use first receipt time, not a worker-selected accounting date. Replays
+		// retain that time so transport retries remain idempotent after cleanup.
+		observation.ObservedAt = event.CreatedAt
+		var existing store.UsageObservation
+		err := readUsageJSON(ctx, db, &existing, `SELECT data FROM usage_observations WHERE namespace = ? AND id = ?`, event.Namespace, observation.ID)
+		if err == nil {
+			observation.ObservedAt = existing.ObservedAt
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
 	} else if content.Harness != nil {
 		h := content.Harness
 		if h.TaskUID == "" || h.PromptID == "" || h.Sequence == 0 {

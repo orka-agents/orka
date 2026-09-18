@@ -91,6 +91,7 @@ func TestUsageCreatedPullRequestValidatesCanonicalRepositoryIdentity(t *testing.
 			backend := setupControllerSQLiteStore(t)
 			scheme := runtime.NewScheme()
 			require.NoError(t, corev1.AddToScheme(scheme))
+			require.NoError(t, corev1alpha1.AddToScheme(scheme))
 			monitor, secret := repositoryMonitorInventoryTestObjects("monitor")
 			monitor.UID = "monitor-uid"
 			monitor.Spec.RepoURL = "https://github.com/ORG/REPO.git"
@@ -103,7 +104,8 @@ func TestUsageCreatedPullRequestValidatesCanonicalRepositoryIdentity(t *testing.
 				_ = json.NewEncoder(w).Encode(map[string]any{"number": 7, "html_url": tc.url})
 			}))
 			t.Cleanup(server.Close)
-			r := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(),
+			namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: monitor.Namespace, UID: "namespace-uid"}}
+			r := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(namespace, monitor, secret).Build(),
 				Store: backend, GitHubAPIBaseURL: server.URL, HTTPClient: server.Client()}
 			prURL, number, err := r.createIssueImplementationPullRequest(t.Context(), monitor,
 				&store.MonitorItem{Number: 1, Title: "Implement issue"},
@@ -148,7 +150,8 @@ func TestUsageGitHubRefreshIsBoundedAndContinuesAfterTasks(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"repository": map[string]any{"nameWithOwner": "org/repo", "pullRequest": pr}}})
 	}))
 	t.Cleanup(server.Close)
-	r := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, secret).Build(), Store: backend, GitHubAPIBaseURL: server.URL, HTTPClient: server.Client()}
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: monitor.Namespace, UID: "namespace-uid"}}
+	r := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(namespace, monitor, secret).Build(), Store: backend, GitHubAPIBaseURL: server.URL, HTTPClient: server.Client()}
 	work, err := r.prepareMonitorUsageWork(t.Context(), monitor, "org/repo", "issue", 1)
 	require.NoError(t, err)
 	// No Task needs to survive for the retained publication links to refresh.
@@ -165,6 +168,7 @@ func TestUsageGitHubRefreshIsBoundedAndContinuesAfterTasks(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, data.PullRequests, 25)
 	for _, pr := range data.PullRequests {
+		require.Equal(t, "namespace-uid", pr.NamespaceUID)
 		require.Equal(t, "merged", pr.State)
 		require.NotNil(t, pr.MergedAt)
 		require.False(t, pr.Ready)
@@ -174,7 +178,12 @@ func TestUsageGitHubRefreshIsBoundedAndContinuesAfterTasks(t *testing.T) {
 func TestUsageDelegationInheritsVerifiedWorkAndSession(t *testing.T) {
 	backend := setupControllerSQLiteStore(t)
 	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "monitor", Namespace: "team", UID: "monitor-uid"}}
-	r := &RepositoryMonitorReconciler{Store: backend}
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor,
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "team", UID: "namespace-uid"}}).Build()
+	r := &RepositoryMonitorReconciler{Client: kube, Store: backend}
 	work, err := r.prepareMonitorUsageWork(t.Context(), monitor, "org/repo", "issue", 1)
 	require.NoError(t, err)
 	again, err := r.prepareMonitorUsageWork(t.Context(), monitor, "ORG/REPO", "issue", 1)
@@ -182,20 +191,56 @@ func TestUsageDelegationInheritsVerifiedWorkAndSession(t *testing.T) {
 	require.Equal(t, work, again)
 	parent := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: "team", UID: "parent-uid", CreationTimestamp: metav1.Now()},
 		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, SessionRef: &corev1alpha1.SessionReference{Name: "conversation"}}}
+	require.NoError(t, kube.Create(t.Context(), parent))
 	require.NoError(t, r.retainMonitorUsageTask(t.Context(), parent, work, "planning", 0))
-	tasks := &TaskReconciler{ExecutionEventStore: backend}
+	tasks := &TaskReconciler{Client: kube, ExecutionEventStore: backend}
 	require.NoError(t, tasks.retainUsageTask(t.Context(), parent))
 	controller := true
 	child := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "child", Namespace: "team", UID: "child-uid", CreationTimestamp: metav1.Now(),
 		OwnerReferences: []metav1.OwnerReference{{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: parent.Name, UID: parent.UID, Controller: &controller}}},
 		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, SessionRef: &corev1alpha1.SessionReference{Name: "conversation"}}}
+	require.NoError(t, kube.Create(t.Context(), child))
 	require.NoError(t, tasks.retainUsageTask(t.Context(), child))
 	data, err := backend.LoadUsage(t.Context(), store.UsageFilter{Namespaces: []string{"team"}, AsOf: time.Now().UTC()})
 	require.NoError(t, err)
 	require.Len(t, data.Works, 1)
 	require.Len(t, data.Tasks, 2)
 	for _, task := range data.Tasks {
+		require.Equal(t, "namespace-uid", task.NamespaceUID)
 		require.Equal(t, work, task.WorkID)
 		require.Equal(t, "conversation", task.SessionName)
 	}
+}
+
+func TestUsageRetentionRejectsStaleObjectsAfterNamespaceRecreation(t *testing.T) {
+	backend := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "team", UID: "old-namespace"}}
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "monitor", Namespace: "team", UID: "old-monitor"}}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "task", Namespace: "team", UID: "old-task"}}
+	cached := fake.NewClientBuilder().WithScheme(scheme).WithObjects(namespace, monitor, task).Build()
+	currentNamespace, currentMonitor, currentTask := namespace.DeepCopy(), monitor.DeepCopy(), task.DeepCopy()
+	currentNamespace.UID, currentMonitor.UID, currentTask.UID = "new-namespace", "new-monitor", "new-task"
+	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(currentNamespace, currentMonitor, currentTask).Build()
+	monitors := &RepositoryMonitorReconciler{Client: cached, APIReader: reader, Store: backend}
+	tasks := &TaskReconciler{Client: cached, APIReader: reader, ExecutionEventStore: backend}
+	_, err := monitors.prepareMonitorUsageWork(t.Context(), monitor, "org/repo", "issue", 1)
+	require.ErrorContains(t, err, "usage source identity changed")
+	require.ErrorContains(t, tasks.retainUsageTask(t.Context(), task), "usage source identity changed")
+	data, err := backend.LoadUsage(t.Context(), store.UsageFilter{Namespaces: []string{"team"}})
+	require.NoError(t, err)
+	require.Empty(t, data.Works)
+	require.Empty(t, data.Tasks)
+
+	_, err = monitors.prepareMonitorUsageWork(t.Context(), currentMonitor, "org/repo", "issue", 1)
+	require.NoError(t, err)
+	require.NoError(t, tasks.retainUsageTask(t.Context(), currentTask))
+	data, err = backend.LoadUsage(t.Context(), store.UsageFilter{Namespaces: []string{"team"}, NamespaceUIDs: map[string]string{"team": "new-namespace"}})
+	require.NoError(t, err)
+	require.Len(t, data.Works, 1)
+	require.Len(t, data.Tasks, 1)
+	require.Equal(t, "new-namespace", data.Works[0].NamespaceUID)
+	require.Equal(t, "new-namespace", data.Tasks[0].NamespaceUID)
 }

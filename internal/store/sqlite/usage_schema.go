@@ -30,9 +30,9 @@ func usageSchema() []string {
 			PRIMARY KEY (namespace, work_id, repository, number)
 		)`,
 		`CREATE TABLE IF NOT EXISTS usage_pull_requests (
-			namespace TEXT NOT NULL, repository TEXT NOT NULL, number INTEGER NOT NULL,
+			namespace TEXT NOT NULL, namespace_uid TEXT NOT NULL, repository TEXT NOT NULL, number INTEGER NOT NULL,
 			observed_at INTEGER NOT NULL, data TEXT NOT NULL,
-			PRIMARY KEY (namespace, repository, number, observed_at)
+			PRIMARY KEY (namespace, namespace_uid, repository, number, observed_at)
 		)`,
 		`CREATE TABLE IF NOT EXISTS usage_retention (
 			id INTEGER PRIMARY KEY CHECK (id = 1), retained_since INTEGER NOT NULL

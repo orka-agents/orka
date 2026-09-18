@@ -14,6 +14,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -27,13 +28,17 @@ import (
 func seedUsageAPIWork(t *testing.T, backend *sqlite.Store, namespace string, tokens int64) string {
 	t.Helper()
 	at := time.Now().UTC().Add(-time.Hour)
+	namespaceUID := "namespace-uid"
+	if namespace != "default" {
+		namespaceUID = namespace + "-namespace-uid"
+	}
 	work := store.UsageWorkID(namespace, "monitor", "org/repo", "issue", 1)
-	require.NoError(t, backend.RegisterUsageWork(t.Context(), store.UsageWorkRequest{ID: work, Namespace: namespace, MonitorName: "monitor", MonitorUID: "monitor", Repository: "org/repo", Kind: "issue", Number: 1, StartedAt: at}))
+	require.NoError(t, backend.RegisterUsageWork(t.Context(), store.UsageWorkRequest{ID: work, Namespace: namespace, NamespaceUID: namespaceUID, MonitorName: "monitor", MonitorUID: "monitor", Repository: "org/repo", Kind: "issue", Number: 1, StartedAt: at}))
 	require.NoError(t, backend.RegisterUsageTask(t.Context(), store.UsageTask{Namespace: namespace, WorkID: work, TaskUID: "task", TaskName: "task", Phase: "Succeeded", StartedAt: at, PhaseObservedAt: at}))
 	zero := int64(0)
 	require.NoError(t, backend.RecordUsage(t.Context(), store.UsageObservation{Namespace: namespace, TaskUID: "task", ID: "call", CounterID: "call", Scope: store.UsageScopeCall, Source: store.UsageSourceProvider, Model: "model", InputTokens: &tokens, OutputTokens: &zero, Complete: true, Status: store.UsageStatusCompleted, ObservedAt: at}))
 	require.NoError(t, backend.LinkUsagePullRequest(t.Context(), store.UsagePRLink{Namespace: namespace, WorkID: work, Repository: "org/repo", Number: 2, Origin: store.UsagePRCreated, EvidenceID: "publication", LinkedAt: at}))
-	require.NoError(t, backend.RecordUsagePullRequest(t.Context(), store.UsagePullRequest{Namespace: namespace, Repository: "org/repo", Number: 2, URL: "https://github.com/org/repo/pull/2", GitHubID: "PR_2", State: "merged", MergedAt: &at, ObservedAt: at}))
+	require.NoError(t, backend.RecordUsagePullRequest(t.Context(), store.UsagePullRequest{Namespace: namespace, NamespaceUID: namespaceUID, Repository: "org/repo", Number: 2, URL: "https://github.com/org/repo/pull/2", GitHubID: "PR_2", State: "merged", MergedAt: &at, ObservedAt: at}))
 	return work
 }
 
@@ -95,17 +100,102 @@ func TestUsageAPICombinedTeamsRequireEveryNamespaceGrant(t *testing.T) {
 	}
 }
 
+func TestUsageAPIHidesHistoryAfterNamespaceRecreation(t *testing.T) {
+	f := newExternalAuthorizationFixture(t)
+	oldWork := seedUsageAPIWork(t, f.store, "default", 7654)
+	f.allowRoute(t, "GET /api/v1/usage")
+	status, body := f.request(t, http.MethodGet, "/api/v1/usage?from=2000-01-01", "")
+	require.Equal(t, http.StatusOK, status, body)
+	require.Contains(t, body, "7654")
+	require.NoError(t, f.kube.Delete(t.Context(), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default"}}))
+	require.NoError(t, f.kube.Create(t.Context(), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default", UID: "replacement-uid"}}))
+
+	at := time.Now().UTC().Add(-time.Minute)
+	work := store.UsageWorkID("default", "replacement-monitor", "org/repo", "issue", 1)
+	require.NoError(t, f.store.RegisterUsageWork(t.Context(), store.UsageWorkRequest{Namespace: "default", NamespaceUID: "replacement-uid",
+		MonitorName: "monitor", MonitorUID: "replacement-monitor", Repository: "org/repo", Kind: "issue", Number: 1, StartedAt: at}))
+	require.NoError(t, f.store.RegisterUsageTask(t.Context(), store.UsageTask{Namespace: "default", WorkID: work, TaskUID: "replacement-task",
+		TaskName: "task", Phase: "Succeeded", StartedAt: at, PhaseObservedAt: at}))
+	require.NoError(t, f.store.RecordUsage(t.Context(), store.UsageObservation{Namespace: "default", TaskUID: "replacement-task",
+		ID: "replacement-call", CounterID: "call", Scope: store.UsageScopeCall, Source: store.UsageSourceProvider, Model: "model",
+		InputTokens: new(int64(100)), OutputTokens: new(int64(0)), Complete: true, Status: store.UsageStatusCompleted, ObservedAt: at}))
+	// Reusing the same repository and PR number must not import the prior
+	// namespace's verified merge, even when the current link has no observation.
+	require.NoError(t, f.store.LinkUsagePullRequest(t.Context(), store.UsagePRLink{Namespace: "default", WorkID: work,
+		Repository: "org/repo", Number: 2, Origin: store.UsagePRCreated, EvidenceID: "replacement-publication", LinkedAt: at}))
+	// Unowned accounting and old native chat records must also remain hidden.
+	for _, uid := range []string{"", "namespace-uid"} {
+		require.NoError(t, f.store.RecordUsage(t.Context(), store.UsageObservation{Namespace: "default", NamespaceUID: uid,
+			ID: "chat-" + uid, CounterID: "chat-" + uid, Scope: store.UsageScopeCall, Source: store.UsageSourceProvider,
+			InputTokens: new(int64(9999)), OutputTokens: new(int64(0)), Complete: true, Status: store.UsageStatusCompleted, ObservedAt: at}))
+	}
+	status, body = f.request(t, http.MethodGet, "/api/v1/usage?from=2000-01-01", "")
+	require.Equal(t, http.StatusOK, status, body)
+	var report usage.Report
+	require.NoError(t, json.Unmarshal([]byte(body), &report))
+	require.EqualValues(t, 100, report.Summary.TotalTokens)
+	require.Zero(t, report.Summary.PRsMerged)
+	require.Len(t, report.Works, 1)
+	require.Equal(t, work, report.Works[0].ID)
+	require.NotContains(t, body, oldWork)
+	require.NotContains(t, body, "7654")
+	require.NotContains(t, body, "9999")
+	f.allowRoute(t, "GET /api/v1/usage/work/:id")
+	status, _ = f.request(t, http.MethodGet, "/api/v1/usage/work/"+oldWork, "")
+	require.Equal(t, http.StatusNotFound, status)
+	status, body = f.request(t, http.MethodGet, "/api/v1/usage/work/"+work, "")
+	require.Equal(t, http.StatusOK, status, body)
+	var detail struct {
+		Work usage.Work `json:"work"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(body), &detail))
+	require.Equal(t, report.Summary, detail.Work.Summary)
+}
+
+func TestUsageAPIFailsClosedWithoutStableNamespaceIdentity(t *testing.T) {
+	for _, tc := range []string{"missing namespace", "missing UID", "recreated during report"} {
+		t.Run(tc, func(t *testing.T) {
+			f := newExternalAuthorizationFixture(t)
+			work := seedUsageAPIWork(t, f.store, "default", 7654)
+			reads := 0
+			f.server.handlers.apiReader = interceptor.NewClient(f.kube.(client.WithWatch), interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+					if err := c.Get(ctx, key, object, opts...); err != nil {
+						return err
+					}
+					if namespace, ok := object.(*corev1.Namespace); ok {
+						reads++
+						if tc == "missing UID" {
+							namespace.UID = ""
+						} else if tc == "recreated during report" && reads%2 == 0 {
+							namespace.UID = "replacement-uid"
+						}
+					}
+					return nil
+				},
+			})
+			if tc == "missing namespace" {
+				require.NoError(t, f.kube.Delete(t.Context(), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default"}}))
+			}
+			for _, route := range []struct{ key, path string }{
+				{"GET /api/v1/usage", "/api/v1/usage?from=2000-01-01"},
+				{"GET /api/v1/usage/work/:id", "/api/v1/usage/work/" + work},
+			} {
+				f.allowRoute(t, route.key)
+				status, body := f.request(t, http.MethodGet, route.path, "")
+				require.Equal(t, http.StatusServiceUnavailable, status, body)
+				require.NotContains(t, body, "7654")
+			}
+		})
+	}
+}
+
 func TestUsageAPIGatewayAccessSurvivesTaskCleanup(t *testing.T) {
 	f := newExternalAuthorizationFixture(t)
 	seedUsageAPIWork(t, f.store, "default", 100)
-	for _, object := range []client.Object{
-		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default", UID: "namespace-uid"}},
-		&gatewayv1alpha1.Gateway{ObjectMeta: metav1.ObjectMeta{Name: "private", Namespace: "default", UID: "gateway-uid"}},
-	} {
-		require.NoError(t, f.kube.Create(t.Context(), object))
-	}
+	require.NoError(t, f.kube.Create(t.Context(), &gatewayv1alpha1.Gateway{ObjectMeta: metav1.ObjectMeta{Name: "private", Namespace: "default", UID: "gateway-uid"}}))
 	at := time.Now().UTC().Add(-time.Minute)
-	require.NoError(t, f.store.RegisterUsageTask(t.Context(), store.UsageTask{Namespace: "default", TaskUID: "private-task", TaskName: "private-task", Phase: "Succeeded", StartedAt: at,
+	require.NoError(t, f.store.RegisterUsageTask(t.Context(), store.UsageTask{Namespace: "default", NamespaceUID: "namespace-uid", TaskUID: "private-task", TaskName: "private-task", Phase: "Succeeded", StartedAt: at,
 		GatewayOwner: &store.UsageGatewayOwner{Namespace: "default", NamespaceUID: "namespace-uid", Name: "private", UID: "gateway-uid"}}))
 	input, output := int64(7654), int64(0)
 	require.NoError(t, f.store.RecordUsage(t.Context(), store.UsageObservation{Namespace: "default", TaskUID: "private-task", ID: "private-call", CounterID: "private-call", Scope: store.UsageScopeCall, Source: store.UsageSourceProvider, InputTokens: &input, OutputTokens: &output, Complete: true, ObservedAt: at}))
@@ -135,6 +225,7 @@ func TestUsageAPIContextTokensRequireReadScopesAndTeamContext(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h, app := setupTestHandlers()
 			h.executionEventStore = newInternalExecutionEventStore(t)
+			h.apiReader = testInternalExecutionEventClient(t, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default", UID: "namespace-uid"}})
 			var err error
 			h.contextTokenAuthorization, err = NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: ContextTokenAuthorizationModeEnforce})
 			require.NoError(t, err)
@@ -154,10 +245,14 @@ func TestUsageAPIContextTokensRequireReadScopesAndTeamContext(t *testing.T) {
 func TestUsageWorkerRecordsUseAuthenticatedTaskIdentity(t *testing.T) {
 	backend := newInternalExecutionEventStore(t)
 	task, job, pod := testInternalExecutionEventOwnedWorkerObjects("owned-task")
+	task.Spec.Type = corev1alpha1.TaskTypeAI
+	pod.Spec.Containers = []corev1.Container{{Name: "worker", Command: []string{"/worker"}, Args: []string{"--mode=ai"}}}
+	require.NoError(t, backend.RegisterUsageTask(t.Context(), store.UsageTask{Namespace: task.Namespace, NamespaceUID: "namespace-uid", TaskUID: string(task.UID), TaskName: task.Name, Phase: "Running"}))
 	app := setupInternalExecutionEventAppWithClient(backend, testInternalExecutionEventClient(t, task, job, pod), testInternalExecutionEventWorkerUser("owned-task-pod"))
 	input, output := int64(100), int64(20)
-	observation := store.UsageObservation{Namespace: "other", TaskUID: "other-task", ID: "call", CounterID: "call", Scope: store.UsageScopeSession, Source: store.UsageSourceProvider,
-		InputTokens: &input, OutputTokens: &output, Complete: true, ObservedAt: time.Now().UTC()}
+	before := time.Now().UTC()
+	observation := store.UsageObservation{Namespace: "other", NamespaceUID: "other-namespace-uid", TaskUID: "other-task", ID: "call", CounterID: "call", Scope: store.UsageScopeSession, Source: store.UsageSourceEstimate,
+		AttemptID: "other-attempt", Status: store.UsageStatusCompleted, InputTokens: &input, OutputTokens: &output, Complete: true, ObservedAt: before.Add(24 * time.Hour)}
 	body := map[string]any{"type": events.ExecutionEventTypeModelUsageUpdated, "content": map[string]any{"usage": observation}}
 	for range 2 {
 		response := doJSONRequest(t, app, "/internal/v1/events/default/task/owned-task", body)
@@ -168,23 +263,68 @@ func TestUsageWorkerRecordsUseAuthenticatedTaskIdentity(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, data.Observations, 1)
 	require.Equal(t, "default", data.Observations[0].Namespace)
+	require.Equal(t, "namespace-uid", data.Observations[0].NamespaceUID)
 	require.Equal(t, string(task.UID), data.Observations[0].TaskUID)
 	require.Equal(t, store.UsageScopeCall, data.Observations[0].Scope)
+	require.Equal(t, store.UsageSourceProvider, data.Observations[0].Source)
+	require.Empty(t, data.Observations[0].AttemptID)
+	require.False(t, data.Observations[0].ObservedAt.Before(before))
+	require.False(t, data.Observations[0].ObservedAt.After(time.Now().UTC()))
 	body["content"] = map[string]any{"harnessV2": map[string]any{"taskUID": "other-task"}}
 	response := doJSONRequest(t, app, "/internal/v1/events/default/task/owned-task", body)
 	require.Equal(t, http.StatusForbidden, response.StatusCode)
 	require.NoError(t, response.Body.Close())
 }
 
+func TestUsageWorkerAuthorityRejectsUntrustedExecution(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		kind corev1alpha1.TaskType
+		args []string
+	}{
+		{"managed container", corev1alpha1.TaskTypeContainer, []string{"--mode=ai"}},
+		{"ACP runtime", corev1alpha1.TaskTypeAgent, []string{"--mode=ai"}},
+		{"changed task type", corev1alpha1.TaskTypeAI, []string{"sh", "-c", "true"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := newInternalExecutionEventStore(t)
+			task, job, pod := testInternalExecutionEventOwnedWorkerObjects("owned-task")
+			task.Spec.Type = tc.kind
+			pod.Spec.Containers = []corev1.Container{{Name: "worker", Command: []string{"/worker"}, Args: tc.args}}
+			app := setupInternalExecutionEventAppWithClient(backend, testInternalExecutionEventClient(t, task, job, pod), testInternalExecutionEventWorkerUser(pod.Name))
+			body := map[string]any{"type": events.ExecutionEventTypeModelUsageUpdated, "content": map[string]any{"usage": store.UsageObservation{
+				ID: "call", CounterID: "call", Scope: store.UsageScopeCall, Source: store.UsageSourceProvider, Status: store.UsageStatusCompleted,
+				InputTokens: new(int64(100)), OutputTokens: new(int64(0)), ObservedAt: time.Now().UTC()}}}
+			response := doJSONRequest(t, app, "/internal/v1/events/default/task/owned-task", body)
+			require.Equal(t, http.StatusForbidden, response.StatusCode)
+			require.NoError(t, response.Body.Close())
+			data, err := backend.LoadUsage(t.Context(), store.UsageFilter{Namespaces: []string{"default"}, AsOf: time.Now().UTC()})
+			require.NoError(t, err)
+			require.Empty(t, data.Observations)
+		})
+	}
+}
+
 func TestUsageDetachedStreamingContextRetainsRecorder(t *testing.T) {
 	backend := newInternalExecutionEventStore(t)
-	ctx, cancel := context.WithCancel(usageRequestContext(t.Context(), backend, "default", "session"))
+	kube := testInternalExecutionEventClient(t, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default", UID: "namespace-uid"}})
+	reader := interceptor.NewClient(kube.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return c.Get(ctx, key, object, opts...)
+		},
+	})
+	ctx, cancel := context.WithCancel(usageRequestContext(t.Context(), backend, reader, "default", "session"))
 	detached := detachedSpanContext(ctx)
 	cancel()
 	require.NoError(t, detached.Err())
 	// A real provider call exercises the copied recorder after cancellation of
 	// the request context, as happens with SendStreamWriter.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		require.NoError(t, kube.Delete(t.Context(), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default"}}))
+		require.NoError(t, kube.Create(t.Context(), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default", UID: "replacement-uid"}}))
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"id":"response","object":"response","model":"model","status":"completed","output":[],"usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}`))
 	}))
@@ -197,4 +337,10 @@ func TestUsageDetachedStreamingContextRetainsRecorder(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, data.Observations, 2)
 	require.Equal(t, "session", data.Observations[0].SessionName)
+	for _, observation := range data.Observations {
+		require.Equal(t, "namespace-uid", observation.NamespaceUID)
+	}
+	current, err := backend.LoadUsage(t.Context(), store.UsageFilter{Namespaces: []string{"default"}, NamespaceUIDs: map[string]string{"default": "replacement-uid"}})
+	require.NoError(t, err)
+	require.Empty(t, current.Observations)
 }

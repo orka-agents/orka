@@ -390,6 +390,59 @@ func TestUsageOwnershipAndImmutableRecords(t *testing.T) {
 	require.Equal(t, int64(0), report.Summary.TotalTokens)
 }
 
+func TestUsageNamespaceOwnershipCannotBeReassigned(t *testing.T) {
+	s := setupTestStore(t)
+	work := store.UsageWorkID("team", "monitor", "org/repo", "issue", 1)
+	require.NoError(t, s.RegisterUsageWork(t.Context(), store.UsageWorkRequest{Namespace: "team", NamespaceUID: "previous-namespace",
+		MonitorName: "monitor", MonitorUID: "monitor", Repository: "org/repo", Kind: "issue", Number: 1}))
+	parent := store.UsageTask{Namespace: "team", TaskUID: "parent", TaskName: "parent", WorkID: work}
+	require.NoError(t, s.RegisterUsageTask(t.Context(), parent))
+	parent.NamespaceUID = "current-namespace"
+	require.ErrorIs(t, s.RegisterUsageTask(t.Context(), parent), store.ErrConflict)
+	require.ErrorIs(t, s.RegisterUsageTask(t.Context(), store.UsageTask{Namespace: "team", NamespaceUID: "current-namespace",
+		TaskUID: "child", TaskName: "child", ParentTaskUID: "parent"}), store.ErrConflict)
+	require.ErrorIs(t, s.RegisterUsageTask(t.Context(), store.UsageTask{Namespace: "team", NamespaceUID: "current-namespace",
+		TaskUID: "other", TaskName: "other", WorkID: work}), store.ErrConflict)
+	require.ErrorIs(t, s.RecordUsage(t.Context(), store.UsageObservation{Namespace: "team", NamespaceUID: "current-namespace",
+		TaskUID: "parent", ID: "call", CounterID: "call", Scope: store.UsageScopeCall, Source: store.UsageSourceProvider, ObservedAt: time.Now().UTC()}), store.ErrConflict)
+}
+
+func TestUsageRetentionSeparatesNamespaceGenerations(t *testing.T) {
+	s := setupTestStore(t)
+	old := time.Now().UTC().Add(-180 * 24 * time.Hour)
+	for _, uid := range []string{"previous-namespace", "current-namespace"} {
+		work := store.UsageWorkID("team", "monitor-"+uid, "org/repo", "issue", 1)
+		require.NoError(t, s.RegisterUsageWork(t.Context(), store.UsageWorkRequest{Namespace: "team", NamespaceUID: uid,
+			MonitorName: "monitor", MonitorUID: "monitor-" + uid, Repository: "org/repo", Kind: "issue", Number: 1, StartedAt: old}))
+		usageTask(t, s, "team", work, uid+"-task", "Succeeded", old)
+		usageSample(t, s, "team", uid+"-task", uid+"-call", 100, old)
+		require.NoError(t, s.LinkUsagePullRequest(t.Context(), store.UsagePRLink{Namespace: "team", WorkID: work,
+			Repository: "org/repo", Number: 12, Origin: store.UsagePRCreated, EvidenceID: "publication", LinkedAt: old}))
+		pr := store.UsagePullRequest{Namespace: "team", NamespaceUID: uid, Repository: "org/repo", Number: 12, State: "open", ObservedAt: old}
+		if uid == "previous-namespace" {
+			pr.State, pr.GitHubID, pr.MergedAt = "merged", "PR_12", &old
+		}
+		require.NoError(t, s.RecordUsagePullRequest(t.Context(), pr))
+	}
+	// A new namespace's active review and open PR cannot keep old work alive,
+	// nor can its PR history inherit the predecessor's terminal merge.
+	require.NoError(t, s.RegisterUsageTask(t.Context(), store.UsageTask{Namespace: "team", NamespaceUID: "current-namespace",
+		TaskUID: "review", TaskName: "review", Repository: "org/repo", PRNumber: 12, Phase: "Running", StartedAt: old}))
+	links, err := s.ListUsagePullRequestLinks(t.Context(), "team", "monitor-current-namespace", time.Now().UTC(), 20)
+	require.NoError(t, err)
+	require.Len(t, links, 1)
+	require.NoError(t, s.PruneUsage(t.Context(), time.Now().UTC().Add(-90*24*time.Hour)))
+	data, err := s.LoadUsage(t.Context(), store.UsageFilter{Namespaces: []string{"team"}})
+	require.NoError(t, err)
+	require.Len(t, data.Works, 1)
+	require.Len(t, data.Tasks, 2)
+	require.Len(t, data.Observations, 1)
+	require.Len(t, data.PullRequests, 1)
+	require.Equal(t, "current-namespace", data.Works[0].NamespaceUID)
+	require.Equal(t, "current-namespace", data.PullRequests[0].NamespaceUID)
+	require.Equal(t, "open", data.PullRequests[0].State)
+}
+
 func TestUsageRetentionExpiresStaleUnknownPRs(t *testing.T) {
 	for _, tc := range []struct {
 		name, state                         string

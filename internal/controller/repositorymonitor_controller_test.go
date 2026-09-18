@@ -4778,6 +4778,7 @@ func TestRepositoryMonitorReconcileUnsuspendSetsReady(t *testing.T) {
 
 func repositoryMonitorControllerObjects(objects ...crclient.Object) []crclient.Object {
 	defaults := []crclient.Object{
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default", UID: "namespace-uid"}},
 		repositoryMonitorControllerTestAgent("reviewer", corev1alpha1.AgentRuntimeClaude, ""),
 		repositoryMonitorControllerTestAgent("triager", corev1alpha1.AgentRuntimeClaude, ""),
 		repositoryMonitorControllerTestAgent("researcher", corev1alpha1.AgentRuntimeClaude, ""),
@@ -6049,7 +6050,7 @@ func TestRepositoryMonitorRepairTaskCreationRetryRestoresQueuedJob(t *testing.T)
 	failTaskCreate := true
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(monitor).
+		WithObjects(monitor, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: monitor.Namespace, UID: "namespace-uid"}}).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Create: func(ctx context.Context, c crclient.WithWatch, obj crclient.Object, opts ...crclient.CreateOption) error {
 				if _, ok := obj.(*corev1alpha1.Task); ok && failTaskCreate {

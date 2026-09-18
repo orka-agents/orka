@@ -29,14 +29,15 @@ const (
 // Namespace is the team boundary. It is supplied by the controller, never by
 // model output or caller-supplied billing metadata.
 type UsageWorkRequest struct {
-	ID          string    `json:"id"`
-	Namespace   string    `json:"namespace"`
-	MonitorName string    `json:"monitorName"`
-	MonitorUID  string    `json:"monitorUID"`
-	Repository  string    `json:"repository"`
-	Kind        string    `json:"kind"`
-	Number      int64     `json:"number"`
-	StartedAt   time.Time `json:"startedAt"`
+	ID           string    `json:"id"`
+	Namespace    string    `json:"namespace"`
+	NamespaceUID string    `json:"namespaceUID,omitempty"`
+	MonitorName  string    `json:"monitorName"`
+	MonitorUID   string    `json:"monitorUID"`
+	Repository   string    `json:"repository"`
+	Kind         string    `json:"kind"`
+	Number       int64     `json:"number"`
+	StartedAt    time.Time `json:"startedAt"`
 }
 
 // UsageWorkID keeps retries and follow-up commands for one issue together.
@@ -51,6 +52,7 @@ func UsageWorkID(namespace, monitorUID, repository, kind string, number int64) s
 // WorkID is set by monitor task creation or inherited from a verified parent.
 type UsageTask struct {
 	Namespace       string             `json:"namespace"`
+	NamespaceUID    string             `json:"namespaceUID,omitempty"`
 	TaskUID         string             `json:"taskUID"`
 	TaskName        string             `json:"taskName"`
 	SessionName     string             `json:"sessionName,omitempty"`
@@ -88,6 +90,7 @@ type UsageTaskPhase struct {
 type UsageObservation struct {
 	ID                    string    `json:"id"`
 	Namespace             string    `json:"namespace"`
+	NamespaceUID          string    `json:"namespaceUID,omitempty"`
 	TaskUID               string    `json:"taskUID,omitempty"`
 	TaskName              string    `json:"taskName,omitempty"`
 	SessionName           string    `json:"sessionName,omitempty"`
@@ -108,19 +111,21 @@ type UsageObservation struct {
 
 // UsagePRLink is written only after a controller-owned GitHub publication.
 type UsagePRLink struct {
-	Namespace  string    `json:"namespace"`
-	WorkID     string    `json:"workID"`
-	Repository string    `json:"repository"`
-	Number     int64     `json:"number"`
-	Origin     string    `json:"origin"`
-	EvidenceID string    `json:"evidenceID"`
-	LinkedAt   time.Time `json:"linkedAt"`
+	Namespace    string    `json:"namespace"`
+	NamespaceUID string    `json:"namespaceUID,omitempty"`
+	WorkID       string    `json:"workID"`
+	Repository   string    `json:"repository"`
+	Number       int64     `json:"number"`
+	Origin       string    `json:"origin"`
+	EvidenceID   string    `json:"evidenceID"`
+	LinkedAt     time.Time `json:"linkedAt"`
 }
 
 // UsagePullRequest is an authenticated GitHub observation, including readiness
 // of exactly HeadSHA. Observations are retained so an as-of report is repeatable.
 type UsagePullRequest struct {
 	Namespace       string     `json:"namespace"`
+	NamespaceUID    string     `json:"namespaceUID,omitempty"`
 	Repository      string     `json:"repository"`
 	Number          int64      `json:"number"`
 	GitHubID        string     `json:"githubID,omitempty"`
@@ -136,13 +141,15 @@ type UsagePullRequest struct {
 }
 
 type UsageFilter struct {
-	Namespaces []string  `json:"teams"`
-	Repository string    `json:"repository,omitempty"`
-	Kind       string    `json:"kind,omitempty"`
-	Model      string    `json:"model,omitempty"`
-	From       time.Time `json:"from"`
-	Until      time.Time `json:"until"`
-	AsOf       time.Time `json:"asOf"`
+	Namespaces []string `json:"teams"`
+	// NamespaceUIDs is supplied by the server after live namespace lookup.
+	NamespaceUIDs map[string]string `json:"-"`
+	Repository    string            `json:"repository,omitempty"`
+	Kind          string            `json:"kind,omitempty"`
+	Model         string            `json:"model,omitempty"`
+	From          time.Time         `json:"from"`
+	Until         time.Time         `json:"until"`
+	AsOf          time.Time         `json:"asOf"`
 }
 
 type UsageData struct {

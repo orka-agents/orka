@@ -68,6 +68,10 @@ func (s *Store) RegisterUsageTask(ctx context.Context, task store.UsageTask) err
 			}
 			if err == nil {
 				task.WorkID, task.Repository, task.PRNumber = parent.WorkID, parent.Repository, parent.PRNumber
+				if task.NamespaceUID != "" && task.NamespaceUID != parent.NamespaceUID {
+					return store.ConflictErrorf("usage task namespace identity differs from parent")
+				}
+				task.NamespaceUID = parent.NamespaceUID
 				task.Role = "delegated"
 				if parent.GatewayOwner != nil {
 					task.GatewayOwner = parent.GatewayOwner
@@ -82,6 +86,10 @@ func (s *Store) RegisterUsageTask(ctx context.Context, task store.UsageTask) err
 			if task.Repository != "" && !strings.EqualFold(task.Repository, work.Repository) {
 				return store.ConflictErrorf("usage task repository differs from work request")
 			}
+			if task.NamespaceUID != "" && task.NamespaceUID != work.NamespaceUID {
+				return store.ConflictErrorf("usage task namespace identity differs from work")
+			}
+			task.NamespaceUID = work.NamespaceUID
 			task.Repository = work.Repository
 		}
 		if task.StartedAt.IsZero() {
@@ -108,6 +116,10 @@ func mergeUsageTaskSnapshot(task *store.UsageTask, existing store.UsageTask) err
 	if existing.TaskName != task.TaskName || (task.WorkID != "" && existing.WorkID != "" && task.WorkID != existing.WorkID) {
 		return store.ConflictErrorf("usage task identity or work ownership changed")
 	}
+	if task.NamespaceUID != "" && task.NamespaceUID != existing.NamespaceUID {
+		return store.ConflictErrorf("usage task namespace identity changed")
+	}
+	task.NamespaceUID = existing.NamespaceUID
 	task.PhaseHistory = existing.PhaseHistory
 	if existing.GatewayOwner != nil {
 		task.GatewayOwner = existing.GatewayOwner
@@ -141,6 +153,20 @@ func (s *Store) RecordUsage(ctx context.Context, observation store.UsageObservat
 func recordUsage(ctx context.Context, db taskDataExecutor, observation store.UsageObservation) error {
 	if observation.ID == "" || observation.Namespace == "" || observation.CounterID == "" || observation.ObservedAt.IsZero() {
 		return store.ValidationErrorf("usage observation requires identity, namespace, counter and timestamp")
+	}
+	if observation.TaskUID != "" {
+		var namespaceUID string
+		err := db.QueryRowContext(ctx, `SELECT COALESCE(json_extract(data, '$.namespaceUID'), '') FROM usage_tasks WHERE namespace = ? AND task_uid = ?`,
+			observation.Namespace, observation.TaskUID).Scan(&namespaceUID)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if err == nil {
+			if observation.NamespaceUID != "" && observation.NamespaceUID != namespaceUID {
+				return store.ConflictErrorf("usage observation namespace identity differs from Task")
+			}
+			observation.NamespaceUID = namespaceUID
+		}
 	}
 	switch observation.Scope {
 	case store.UsageScopeCall, store.UsageScopeAttempt, store.UsageScopeSession:
@@ -205,6 +231,7 @@ func (s *Store) LinkUsagePullRequest(ctx context.Context, link store.UsagePRLink
 		if work.Repository != link.Repository {
 			return store.ConflictErrorf("PR and work repository differ")
 		}
+		link.NamespaceUID = work.NamespaceUID
 		var existing store.UsagePRLink
 		err := readUsageJSON(ctx, db, &existing, `SELECT data FROM usage_pr_links WHERE namespace = ? AND work_id = ? AND repository = ? AND number = ?`, link.Namespace, link.WorkID, link.Repository, link.Number)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -241,8 +268,8 @@ func (s *Store) RecordUsagePullRequest(ctx context.Context, pr store.UsagePullRe
 	if err != nil {
 		return err
 	}
-	_, err = s.taskDataExecutor(ctx).ExecContext(ctx, `INSERT INTO usage_pull_requests(namespace, repository, number, observed_at, data)
-	 VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`, pr.Namespace, pr.Repository, pr.Number, pr.ObservedAt.UnixNano(), string(data))
+	_, err = s.taskDataExecutor(ctx).ExecContext(ctx, `INSERT INTO usage_pull_requests(namespace, namespace_uid, repository, number, observed_at, data)
+	 VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`, pr.Namespace, pr.NamespaceUID, pr.Repository, pr.Number, pr.ObservedAt.UnixNano(), string(data))
 	return err
 }
 
@@ -252,12 +279,15 @@ func (s *Store) ListUsagePullRequestLinks(ctx context.Context, namespace, monito
 	}
 	return readUsageRows[store.UsagePRLink](ctx, s.taskDataExecutor(ctx), `SELECT l.data FROM usage_pr_links l
 	 JOIN usage_work_requests w ON w.namespace = l.namespace AND w.id = l.work_id
-	 LEFT JOIN usage_pull_requests p ON p.namespace = l.namespace AND p.repository = l.repository AND p.number = l.number
+	   AND COALESCE(json_extract(w.data, '$.namespaceUID'), '') = COALESCE(json_extract(l.data, '$.namespaceUID'), '')
+	 LEFT JOIN usage_pull_requests p ON p.namespace = l.namespace AND p.namespace_uid = COALESCE(json_extract(l.data, '$.namespaceUID'), '')
+	   AND p.repository = l.repository AND p.number = l.number
 	 WHERE l.namespace = ? AND json_extract(w.data, '$.monitorUID') = ?
 	 AND NOT EXISTS (SELECT 1 FROM usage_pull_requests merged
-	   WHERE merged.namespace = l.namespace AND merged.repository = l.repository AND merged.number = l.number
+	   WHERE merged.namespace = l.namespace AND merged.namespace_uid = COALESCE(json_extract(l.data, '$.namespaceUID'), '')
+	     AND merged.repository = l.repository AND merged.number = l.number
 	     AND json_extract(merged.data, '$.state') = 'merged')
-	 GROUP BY l.namespace, l.repository, l.number
+	 GROUP BY l.namespace, COALESCE(json_extract(l.data, '$.namespaceUID'), ''), l.repository, l.number
 	 HAVING COALESCE(MAX(p.observed_at), 0) < ?
 	 ORDER BY COALESCE(MAX(p.observed_at), 0), l.repository, l.number LIMIT ?`, namespace, monitorUID, before.UnixNano(), limit)
 }
@@ -283,6 +313,9 @@ func loadUsage(ctx context.Context, db taskDataExecutor, filter store.UsageFilte
 	for _, namespace := range filter.Namespaces {
 		if namespace == "" {
 			return result, store.ValidationErrorf("usage report namespace must not be empty")
+		}
+		if filter.NamespaceUIDs != nil && filter.NamespaceUIDs[namespace] == "" {
+			return result, store.ValidationErrorf("usage report requires a verified namespace UID")
 		}
 		if err := loadUsageNamespace(ctx, db, namespace, filter, &result); err != nil {
 			return result, err
@@ -338,15 +371,18 @@ func (s *Store) PruneUsage(ctx context.Context, before time.Time) error {
 		// A work remains active while any Task is nonterminal, a linked PR is
 		// open, or a recent model observation belongs to it.
 		_, err := db.ExecContext(ctx, `DELETE FROM usage_work_requests AS w WHERE started_at < ?
-		 AND NOT EXISTS (SELECT 1 FROM usage_tasks t WHERE t.namespace = w.namespace AND
+		 AND NOT EXISTS (SELECT 1 FROM usage_tasks t WHERE t.namespace = w.namespace
+		   AND COALESCE(json_extract(t.data, '$.namespaceUID'), '') = COALESCE(json_extract(w.data, '$.namespaceUID'), '') AND
 		   (json_extract(t.data, '$.workID') = w.id OR EXISTS
 		     (SELECT 1 FROM usage_pr_links l WHERE l.namespace = w.namespace AND l.work_id = w.id
 		       AND l.repository = json_extract(t.data, '$.repository') AND l.number = json_extract(t.data, '$.prNumber')))
 		   AND (json_extract(t.data, '$.phase') NOT IN ('Succeeded', 'Failed', 'Cancelled') OR t.started_at >= ?
 		     OR unixepoch(json_extract(t.data, '$.phaseHistory[#-1].observedAt')) >= ? OR EXISTS
-		     (SELECT 1 FROM usage_observations o WHERE o.namespace = t.namespace AND o.task_uid = t.task_uid AND o.observed_at >= ?)))
-		 AND NOT EXISTS (SELECT 1 FROM usage_pr_links l LEFT JOIN usage_pull_requests p ON p.namespace = l.namespace AND p.repository = l.repository AND p.number = l.number AND p.observed_at =
-		     (SELECT MAX(p2.observed_at) FROM usage_pull_requests p2 WHERE p2.namespace = p.namespace AND p2.repository = p.repository AND p2.number = p.number)
+		     (SELECT 1 FROM usage_observations o WHERE o.namespace = t.namespace AND o.task_uid = t.task_uid AND o.observed_at >= ?
+		       AND COALESCE(json_extract(o.data, '$.namespaceUID'), '') = COALESCE(json_extract(t.data, '$.namespaceUID'), ''))))
+		 AND NOT EXISTS (SELECT 1 FROM usage_pr_links l LEFT JOIN usage_pull_requests p ON p.namespace = l.namespace
+		   AND p.namespace_uid = COALESCE(json_extract(l.data, '$.namespaceUID'), '') AND p.repository = l.repository AND p.number = l.number AND p.observed_at =
+		     (SELECT MAX(p2.observed_at) FROM usage_pull_requests p2 WHERE p2.namespace = p.namespace AND p2.namespace_uid = p.namespace_uid AND p2.repository = p.repository AND p2.number = p.number)
 		   WHERE l.namespace = w.namespace AND l.work_id = w.id
 		   AND (json_extract(p.data, '$.state') = 'open'
 		     OR unixepoch(COALESCE(json_extract(p.data, '$.mergedAt'), json_extract(p.data, '$.closedAt'))) >= ?
@@ -358,26 +394,34 @@ func (s *Store) PruneUsage(ctx context.Context, before time.Time) error {
 		}
 		_, err = db.ExecContext(ctx, `DELETE FROM usage_tasks AS t WHERE started_at < ? AND json_extract(data, '$.phase') IN ('Succeeded', 'Failed', 'Cancelled')
 		 AND COALESCE(unixepoch(json_extract(data, '$.phaseHistory[#-1].observedAt')), 0) < ?
-		 AND NOT EXISTS (SELECT 1 FROM usage_work_requests w WHERE w.namespace = t.namespace AND w.id = json_extract(t.data, '$.workID'))
+		 AND NOT EXISTS (SELECT 1 FROM usage_work_requests w WHERE w.namespace = t.namespace AND w.id = json_extract(t.data, '$.workID')
+		   AND COALESCE(json_extract(w.data, '$.namespaceUID'), '') = COALESCE(json_extract(t.data, '$.namespaceUID'), ''))
 		 AND NOT EXISTS (SELECT 1 FROM usage_pr_links l JOIN usage_work_requests w ON w.namespace = l.namespace AND w.id = l.work_id
-		   WHERE l.namespace = t.namespace AND l.repository = json_extract(t.data, '$.repository') AND l.number = json_extract(t.data, '$.prNumber'))
-		 AND NOT EXISTS (SELECT 1 FROM usage_observations o WHERE o.namespace = t.namespace AND o.task_uid = t.task_uid AND o.observed_at >= ?)`, before.UnixNano(), before.Unix(), before.UnixNano())
+		   WHERE l.namespace = t.namespace AND l.repository = json_extract(t.data, '$.repository') AND l.number = json_extract(t.data, '$.prNumber')
+		     AND COALESCE(json_extract(l.data, '$.namespaceUID'), '') = COALESCE(json_extract(t.data, '$.namespaceUID'), ''))
+		 AND NOT EXISTS (SELECT 1 FROM usage_observations o WHERE o.namespace = t.namespace AND o.task_uid = t.task_uid AND o.observed_at >= ?
+		   AND COALESCE(json_extract(o.data, '$.namespaceUID'), '') = COALESCE(json_extract(t.data, '$.namespaceUID'), ''))`, before.UnixNano(), before.Unix(), before.UnixNano())
 		if err != nil {
 			return err
 		}
 		for _, query := range []string{
-			`DELETE FROM usage_pr_links AS l WHERE NOT EXISTS (SELECT 1 FROM usage_work_requests w WHERE w.namespace = l.namespace AND w.id = l.work_id)`,
-			`DELETE FROM usage_pull_requests AS p WHERE NOT EXISTS (SELECT 1 FROM usage_pr_links l WHERE l.namespace = p.namespace AND l.repository = p.repository AND l.number = p.number)`,
+			`DELETE FROM usage_pr_links AS l WHERE NOT EXISTS (SELECT 1 FROM usage_work_requests w WHERE w.namespace = l.namespace AND w.id = l.work_id
+			  AND COALESCE(json_extract(w.data, '$.namespaceUID'), '') = COALESCE(json_extract(l.data, '$.namespaceUID'), ''))`,
+			`DELETE FROM usage_pull_requests AS p WHERE NOT EXISTS (SELECT 1 FROM usage_pr_links l WHERE l.namespace = p.namespace AND l.repository = p.repository AND l.number = p.number
+			  AND COALESCE(json_extract(l.data, '$.namespaceUID'), '') = p.namespace_uid)`,
 		} {
 			if _, err := db.ExecContext(ctx, query); err != nil {
 				return err
 			}
 		}
 		_, err = db.ExecContext(ctx, `DELETE FROM usage_observations AS o WHERE observed_at < ?
-		 AND NOT EXISTS (SELECT 1 FROM usage_tasks t WHERE t.namespace = o.namespace AND t.task_uid = o.task_uid)
+		 AND NOT EXISTS (SELECT 1 FROM usage_tasks t WHERE t.namespace = o.namespace AND t.task_uid = o.task_uid
+		   AND COALESCE(json_extract(t.data, '$.namespaceUID'), '') = COALESCE(json_extract(o.data, '$.namespaceUID'), ''))
 		 AND NOT EXISTS (SELECT 1 FROM usage_observations kept JOIN usage_tasks t ON t.namespace = kept.namespace AND t.task_uid = kept.task_uid
-		   WHERE kept.namespace = o.namespace AND kept.counter_id = o.counter_id)
-		 AND NOT EXISTS (SELECT 1 FROM usage_observations newer WHERE newer.namespace = o.namespace AND newer.counter_id = o.counter_id AND newer.observed_at >= ?)`, before.UnixNano(), before.UnixNano())
+		   WHERE kept.namespace = o.namespace AND kept.counter_id = o.counter_id
+		     AND COALESCE(json_extract(kept.data, '$.namespaceUID'), '') = COALESCE(json_extract(o.data, '$.namespaceUID'), ''))
+		 AND NOT EXISTS (SELECT 1 FROM usage_observations newer WHERE newer.namespace = o.namespace AND newer.counter_id = o.counter_id AND newer.observed_at >= ?
+		   AND COALESCE(json_extract(newer.data, '$.namespaceUID'), '') = COALESCE(json_extract(o.data, '$.namespaceUID'), ''))`, before.UnixNano(), before.UnixNano())
 		if err != nil {
 			return err
 		}
