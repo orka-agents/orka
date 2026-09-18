@@ -27,7 +27,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	execevents "github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
@@ -579,6 +581,87 @@ var _ = Describe("Task Controller", func() {
 			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseFailed))
 			Expect(task.Status.Message).To(ContainSubstring("exit"))
 			Expect(task.Status.Message).To(ContainSubstring("2"))
+		})
+
+		It("should surface the worker-reported provider failure in Status.Message when Job fails", func() {
+			ctx := context.Background()
+			r := newReconciler()
+			db, err := sqlite.NewDB(":memory:")
+			Expect(err).NotTo(HaveOccurred())
+			eventStore := sqlite.NewStore(db, ":memory:")
+			r.ExecutionEventStore = eventStore
+
+			taskName := "test-running-provider-down"
+			ns := defaultNS
+			nn := types.NamespacedName{Name: taskName, Namespace: ns}
+			defer cleanupTask(ctx, nn)
+
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      taskName,
+					Namespace: ns,
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:    corev1alpha1.TaskTypeContainer,
+					Image:   "alpine:latest",
+					Command: []string{"false"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+
+			// The worker reports the upstream cause before exiting non-zero.
+			_, err = eventStore.AppendExecutionEvent(ctx, &store.ExecutionEvent{
+				Namespace:  ns,
+				StreamType: store.ExecutionEventStreamTypeTask,
+				StreamID:   taskName,
+				TaskName:   taskName,
+				Type:       execevents.ExecutionEventTypeWorkerFailed,
+				Severity:   execevents.ExecutionEventSeverityError,
+				Summary:    "provider_upstream_error: completion failed: 429 Too Many Requests rate limited by upstream",
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      taskName + "-pod",
+					Namespace: ns,
+					Labels: map[string]string{
+						labels.LabelTask: labels.SelectorValue(taskName),
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "worker", Image: "alpine:latest"}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+			pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+				Name: "worker",
+				State: corev1.ContainerState{
+					Terminated: &corev1.ContainerStateTerminated{
+						Reason:   "Error",
+						ExitCode: 1,
+					},
+				},
+			}}
+			Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: task.Status.JobName, Namespace: ns}, job)).To(Succeed())
+			job.Status.Failed = 1
+			Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
+
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
+			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseFailed))
+			Expect(task.Status.Message).To(Equal(
+				"job failed: provider_upstream_error: completion failed: 429 Too Many Requests rate limited by upstream"))
+			Expect(task.Status.Message).NotTo(ContainSubstring("exited with code"))
 		})
 
 		It("should wait when a freshly-created Job is not visible yet", func() {

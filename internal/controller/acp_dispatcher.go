@@ -16,7 +16,6 @@ import (
 	"sync"
 	"time"
 	"unicode"
-	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -6690,14 +6689,7 @@ func acpPromptFailureMessage(terminal harnessv2.Event) string {
 // acpPromptFailureMessageLimit bytes on a rune boundary so the persisted
 // message stays valid UTF-8 for the control store.
 func boundACPStatusMessage(message string) string {
-	if len(message) <= acpPromptFailureMessageLimit {
-		return message
-	}
-	limit := acpPromptFailureMessageLimit
-	for limit > 0 && !utf8.RuneStart(message[limit]) {
-		limit--
-	}
-	return message[:limit]
+	return boundStatusMessage(message, acpPromptFailureMessageLimit)
 }
 
 // transitionAttemptToFailed mirrors transitionAttemptToCancelled for the

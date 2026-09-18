@@ -1518,6 +1518,40 @@ func aiWorkerErrorType(err error) string {
 	return fmt.Sprintf("%T", err)
 }
 
+// providerUpstreamErrorCode mirrors the ACP runtime's terminal failure code so
+// a provider outage classifies identically on the native worker and ACP paths.
+const providerUpstreamErrorCode = "provider_upstream_error"
+
+// isProviderUpstreamError reports whether err came from an upstream provider
+// request rather than from worker configuration. The unknown-provider and
+// missing-API-key sentinels are ProviderErrors too, but they carry neither an
+// upstream status nor a provider name and never reached the network.
+func isProviderUpstreamError(err error) bool {
+	var providerErr *llm.ProviderError
+	if !errors.As(err, &providerErr) || providerErr == nil {
+		return false
+	}
+	return providerErr.StatusCode > 0 || strings.TrimSpace(providerErr.Provider) != ""
+}
+
+// aiWorkerFailureSummary renders a terminal worker error for the WorkerFailed
+// execution event. The controller projects that summary into Task status, so a
+// provider outage or quota error stays readable after the worker Pod is gone
+// instead of collapsing into the container exit code.
+func aiWorkerFailureSummary(err error) string {
+	if err == nil {
+		return ""
+	}
+	detail := strings.TrimSpace(err.Error())
+	if !isProviderUpstreamError(err) {
+		return detail
+	}
+	if detail == "" {
+		return providerUpstreamErrorCode
+	}
+	return providerUpstreamErrorCode + ": " + detail
+}
+
 func startAgentStepSpan(
 	ctx context.Context,
 	iteration int,
@@ -1573,7 +1607,7 @@ func finishAIWorkerRun(
 		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeWorkerFailed, 0,
 			common.WithEventSeverity(events.ExecutionEventSeverityError),
 			common.WithEventTaskName(taskName),
-			common.WithEventSummary(runErr.Error()),
+			common.WithEventSummary(aiWorkerFailureSummary(runErr)),
 		)
 		return runErr
 	}
