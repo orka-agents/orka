@@ -280,6 +280,7 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 		}})
 	}
 
+	ctx = usageRequestContext(ctx, h.resultStore, namespace, "")
 	provider = llm.NewTracingProvider(provider)
 
 	compReq, errDetail := buildOpenAICompletionRequest(req, model)

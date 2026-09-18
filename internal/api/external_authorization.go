@@ -65,6 +65,12 @@ func (p apiRoutePolicy) withStoreID() apiRoutePolicy {
 //
 //nolint:goconst // Literal permission tuples keep the route inventory auditable.
 var externalAPIPolicies = map[string]apiRoutePolicy{
+	"GET /api/v1/usage": coreAPIPolicy("list", "tasks", "",
+		apiResourcePermission{corev1alpha1.GroupVersion.Group, "repositorymonitors", "list", ""},
+		apiResourcePermission{corev1alpha1.GroupVersion.Group, "sessions", "list", ""}),
+	"GET /api/v1/usage/work/:id": coreAPIPolicy("list", "tasks", "",
+		apiResourcePermission{corev1alpha1.GroupVersion.Group, "repositorymonitors", "list", ""},
+		apiResourcePermission{corev1alpha1.GroupVersion.Group, "sessions", "list", ""}),
 	"POST /api/v1/tasks":              coreAPIPolicy("create", "tasks", "").inNamespace(apiCreateNamespace),
 	"GET /api/v1/tasks":               coreAPIPolicy("list", "tasks", ""),
 	"GET /api/v1/tasks/:id":           coreAPIPolicy("get", "tasks", "id"),

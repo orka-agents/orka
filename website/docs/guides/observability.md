@@ -15,6 +15,10 @@ collector/backend and are separate from the Orka React UI.
 Telemetry is disabled by default. Disabled mode keeps the hot path on the global
 OpenTelemetry no-op providers and does not configure OTLP exporters.
 
+For retained team usage and tokens per merged PR in the dashboard, see
+[Usage and PR outcomes](usage-and-pr-outcomes.md). That report records counts
+independently of telemetry and includes measurement gaps.
+
 ## Enable telemetry
 
 Start the controller with telemetry enabled and point it at an OTLP endpoint.

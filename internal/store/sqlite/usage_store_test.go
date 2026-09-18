@@ -1,0 +1,341 @@
+package sqlite
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/usage"
+)
+
+func usageWork(t *testing.T, s *Store, namespace string, number int64, at time.Time) string {
+	t.Helper()
+	id := store.UsageWorkID(namespace, "monitor-uid", "org/repo", "issue", number)
+	require.NoError(t, s.RegisterUsageWork(context.Background(), store.UsageWorkRequest{ID: id, Namespace: namespace,
+		MonitorName: "monitor", MonitorUID: "monitor-uid", Repository: "org/repo", Kind: "issue", Number: number, StartedAt: at}))
+	return id
+}
+
+func usageTask(t *testing.T, s *Store, namespace, work, uid, phase string, at time.Time) {
+	t.Helper()
+	require.NoError(t, s.RegisterUsageTask(context.Background(), store.UsageTask{Namespace: namespace, TaskUID: uid,
+		TaskName: uid, WorkID: work, Phase: phase, Runtime: "agent", StartedAt: at, PhaseObservedAt: at}))
+}
+
+func usageSample(t *testing.T, s *Store, namespace, task, id string, tokens int64, at time.Time) {
+	t.Helper()
+	require.NoError(t, s.RecordUsage(context.Background(), store.UsageObservation{Namespace: namespace, TaskUID: task, TaskName: task,
+		ID: id, CounterID: id, Scope: store.UsageScopeCall, Source: store.UsageSourceProvider,
+		Provider: "provider", Model: "served-model", InputTokens: new(tokens), OutputTokens: new(int64(0)),
+		Status: store.UsageStatusCompleted, Complete: true, ObservedAt: at}))
+}
+
+func usagePR(t *testing.T, s *Store, namespace, work string, number int64, merged bool, at time.Time) {
+	t.Helper()
+	require.NoError(t, s.LinkUsagePullRequest(context.Background(), store.UsagePRLink{Namespace: namespace, WorkID: work,
+		Repository: "org/repo", Number: number, Origin: store.UsagePRCreated, EvidenceID: "publication", LinkedAt: at}))
+	pr := store.UsagePullRequest{Namespace: namespace, Repository: "org/repo", Number: number, GitHubID: fmt.Sprint(number),
+		URL: fmt.Sprintf("https://github.com/org/repo/pull/%d", number), State: "open", HeadSHA: "head", ObservedAt: at}
+	if merged {
+		pr.State = "merged"
+		pr.MergedAt = &at
+	}
+	require.NoError(t, s.RecordUsagePullRequest(context.Background(), pr))
+}
+
+func usageReport(t *testing.T, s *Store, teams []string, from, until, asOf time.Time) usage.Report {
+	t.Helper()
+	filter := store.UsageFilter{Namespaces: teams, From: from, Until: until, AsOf: asOf}
+	data, err := s.LoadUsage(context.Background(), filter)
+	require.NoError(t, err)
+	return usage.Build(data, filter)
+}
+
+func TestUsagePaymentsCohortIncludesUnsuccessfulWork(t *testing.T) {
+	s := setupTestStore(t)
+	start := time.Now().UTC().Add(-60 * 24 * time.Hour)
+	for i := int64(1); i <= 20; i++ {
+		work := usageWork(t, s, "payments", i, start)
+		phase := "Succeeded"
+		if i > 15 {
+			phase = "Failed"
+		}
+		if i == 20 {
+			phase = "Cancelled"
+		}
+		task := fmt.Sprintf("task-%d", i)
+		usageTask(t, s, "payments", work, task, phase, start)
+		// Follow-up usage can be later than the selected request-start month.
+		usageSample(t, s, "payments", task, task+"/call", 600000, start.Add(40*24*time.Hour))
+		if i <= 15 {
+			usagePR(t, s, "payments", work, i+100, i <= 10, start.Add(41*24*time.Hour))
+		}
+	}
+	report := usageReport(t, s, []string{"payments"}, start.Add(-time.Hour), start.Add(24*time.Hour), time.Now().UTC())
+	require.Equal(t, 20, report.Summary.WorkRequests)
+	require.Equal(t, int64(12000000), report.Summary.TotalTokens)
+	require.Equal(t, 15, report.Summary.PRsOpened)
+	require.Equal(t, 10, report.Summary.PRsMerged)
+	require.Equal(t, 800000.0, *report.Summary.TokensPerPROpened)
+	require.Equal(t, 1200000.0, *report.Summary.TokensPerPRMerged)
+	require.Equal(t, "Price unavailable", report.Summary.ModelCost)
+}
+
+func TestUsageSharedWorkAndCombinedTeamsDeduplicatePRs(t *testing.T) {
+	s := setupTestStore(t)
+	start := time.Now().UTC().Add(-time.Hour)
+	one := usageWork(t, s, "a", 1, start)
+	two := usageWork(t, s, "a", 2, start)
+	usageTask(t, s, "a", one, "task-one", "Failed", start)
+	usageTask(t, s, "a", two, "task-two", "Succeeded", start)
+	usageSample(t, s, "a", "task-one", "call-one", 100, start)
+	usageSample(t, s, "a", "task-two", "call-two", 200, start)
+	usagePR(t, s, "a", one, 10, true, start)
+	usagePR(t, s, "a", two, 10, true, start)
+	// A review after publication contributes once to the team and is shared
+	// in the work details, rather than copied onto each produced PR.
+	require.NoError(t, s.RegisterUsageTask(context.Background(), store.UsageTask{Namespace: "a", TaskUID: "review", TaskName: "review",
+		Repository: "org/repo", PRNumber: 10, Phase: "Succeeded", StartedAt: start}))
+	usageSample(t, s, "a", "review", "review-call", 300, start)
+	three := usageWork(t, s, "b", 3, start)
+	usageTask(t, s, "b", three, "task-three", "Succeeded", start)
+	usageSample(t, s, "b", "task-three", "third-call", 100, start)
+	usagePR(t, s, "b", three, 10, true, start)
+	report := usageReport(t, s, []string{"a", "b"}, start.Add(-time.Second), start.Add(time.Second), time.Now().UTC())
+	require.Equal(t, int64(700), report.Summary.TotalTokens)
+	require.Equal(t, 1, report.Summary.PRsOpened)
+	require.Equal(t, 1, report.Summary.PRsMerged)
+	require.Equal(t, int64(600), report.Teams[0].Summary.TotalTokens)
+	require.Equal(t, int64(100), report.Teams[1].Summary.TotalTokens)
+	for _, work := range report.Works {
+		if work.Namespace != "a" {
+			continue
+		}
+		for _, task := range work.Tasks {
+			if task.TaskUID == "review" {
+				require.True(t, task.Shared)
+			}
+		}
+	}
+}
+
+func TestUsageJournalReplayCleanupAndRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.db")
+	db, err := NewDB(path)
+	require.NoError(t, err)
+	s := NewStore(db, path)
+	start := time.Now().UTC().Add(-time.Hour)
+	work := usageWork(t, s, "a", 1, start)
+	usageTask(t, s, "a", work, "task", "Cancelled", start)
+	appendEvent := func(sequence int, input int64, typ, journal string) *store.ExecutionEvent {
+		content, err := json.Marshal(map[string]any{
+			"harnessV2":   map[string]any{"taskUID": "task", "promptID": "prompt", "taskAttempt": 1, "sequence": sequence},
+			"inputTokens": input, "outputTokens": 0, "cachedInputTokens": 100, "model": "model", "journalKind": journal,
+		})
+		require.NoError(t, err)
+		event := &store.ExecutionEvent{Namespace: "a", TaskName: "task", StreamType: "task", StreamID: "task", Type: typ,
+			Severity: "info", Content: content, CreatedAt: start.Add(time.Duration(sequence) * time.Second)}
+		_, _, err = s.AppendExecutionEventIfAbsent(context.Background(), event, fmt.Sprintf("%d/%s", sequence, journal))
+		require.NoError(t, err)
+		return event
+	}
+	appendEvent(1, 0, events.ExecutionEventTypeModelRequestStarted, "prompt_accepted")
+	appendEvent(2, 1000, events.ExecutionEventTypeModelUsageUpdated, "")
+	appendEvent(3, 1500, events.ExecutionEventTypeModelUsageUpdated, "")
+	final := appendEvent(4, 1500, events.ExecutionEventTypeModelUsageUpdated, "terminal_usage")
+	appendEvent(4, 0, events.ExecutionEventTypeModelRequestFailed, "prompt_terminal")
+	get := func() usage.Report {
+		return usageReport(t, s, []string{"a"}, start.Add(-time.Second), start.Add(time.Second), time.Now().UTC())
+	}
+	require.Equal(t, int64(1500), get().Summary.TotalTokens)
+	require.Equal(t, int64(100), get().Summary.CachedInputTokens)
+	require.Nil(t, get().Summary.TokensPerPRMerged)
+	require.NoError(t, s.DeleteExecutionEvents(context.Background(), "a", "task", "task"))
+	require.NoError(t, db.Close())
+	db, err = NewDB(path)
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	s = NewStore(db, path)
+	// The event journal itself was cleaned up. The accounting identity still
+	// prevents replay of its final summary from charging the team twice.
+	_, _, err = s.AppendExecutionEventIfAbsent(context.Background(), final, "4/terminal_usage")
+	require.NoError(t, err)
+	require.Equal(t, int64(1500), get().Summary.TotalTokens)
+	require.Equal(t, "partial", get().Summary.Completeness)
+}
+
+func TestUsageMissingCountsAndReviewOnlyAreVisible(t *testing.T) {
+	s := setupTestStore(t)
+	start := time.Now().UTC().Add(-time.Hour)
+	work := usageWork(t, s, "a", 1, start)
+	usageTask(t, s, "a", work, "missing", "Failed", start)
+	require.NoError(t, s.RegisterUsageTask(context.Background(), store.UsageTask{Namespace: "a", TaskUID: "review", TaskName: "review",
+		Repository: "org/repo", PRNumber: 50, Phase: "Succeeded", StartedAt: start}))
+	usageSample(t, s, "a", "review", "review-call", 10, start)
+	usageSample(t, s, "a", "", "chat-call", 20, start)
+	report := usageReport(t, s, []string{"a"}, start.Add(-time.Second), start.Add(time.Second), time.Now().UTC())
+	require.Equal(t, 1, report.Summary.MissingMeasurements)
+	require.Equal(t, "unavailable", report.Summary.Completeness)
+	require.Nil(t, report.Summary.TokensPerPROpened)
+	require.Nil(t, report.Works[0].Tasks[0].Measurements[0].InputTokens)
+	require.Equal(t, 0, report.Summary.PRsOpened)
+	require.Equal(t, int64(10), report.OtherWork[0].Totals.TotalTokens)
+	require.Equal(t, int64(20), report.OtherWork[2].Totals.TotalTokens)
+}
+
+func TestUsageLaterMergeAndReadinessUseReportDate(t *testing.T) {
+	s := setupTestStore(t)
+	start := time.Now().UTC().Add(-time.Hour)
+	work := usageWork(t, s, "a", 1, start)
+	usageTask(t, s, "a", work, "task", "Succeeded", start)
+	usageSample(t, s, "a", "task", "call", 30, start)
+	usagePR(t, s, "a", work, 5, false, start)
+	ready := store.UsagePullRequest{Namespace: "a", Repository: "org/repo", Number: 5, GitHubID: "5", HeadSHA: "head-a", State: "open", Ready: true, ObservedAt: start.Add(time.Minute)}
+	require.NoError(t, s.RecordUsagePullRequest(context.Background(), ready))
+	get := func(at time.Time) usage.Report {
+		return usageReport(t, s, []string{"a"}, start.Add(-time.Second), start.Add(time.Second), at)
+	}
+	require.Equal(t, 1, get(start.Add(2*time.Minute)).Summary.PRsReady)
+	require.Equal(t, 0, get(start.Add(20*time.Minute)).Summary.PRsReady)
+	usagePR(t, s, "a", work, 5, true, start.Add(30*time.Minute))
+	usagePR(t, s, "a", work, 5, true, start.Add(30*time.Minute))
+	require.Equal(t, 0, get(start.Add(20*time.Minute)).Summary.PRsMerged)
+	require.Equal(t, 1, get(time.Now().UTC()).Summary.PRsMerged)
+	require.Equal(t, 30.0, *get(time.Now().UTC()).Summary.TokensPerPRMerged)
+}
+
+func TestUsageRetentionKeepsWholeActiveCohort(t *testing.T) {
+	s := setupTestStore(t)
+	start := time.Now().UTC().Add(-120 * 24 * time.Hour)
+	oldWork := usageWork(t, s, "a", 1, start)
+	activeWork := usageWork(t, s, "a", 2, start)
+	usageTask(t, s, "a", oldWork, "expired", "Failed", start)
+	usageTask(t, s, "a", activeWork, "active", "Succeeded", start)
+	usageSample(t, s, "a", "expired", "old-call", 20, start)
+	usageSample(t, s, "a", "active", "early-call", 10, start)
+	usageSample(t, s, "a", "active", "late-call", 30, time.Now().UTC().Add(-time.Hour))
+	require.NoError(t, s.PruneUsage(context.Background(), time.Now().UTC().Add(-90*24*time.Hour)))
+	report := usageReport(t, s, []string{"a"}, start.Add(-time.Second), start.Add(time.Second), time.Now().UTC())
+	require.Equal(t, 1, report.Summary.WorkRequests)
+	require.Equal(t, int64(40), report.Summary.TotalTokens)
+	require.NotNil(t, report.RetainedSince)
+}
+
+func TestUsageOwnershipAndImmutableRecords(t *testing.T) {
+	s := setupTestStore(t)
+	start := time.Now().UTC().Add(-time.Hour)
+	work := usageWork(t, s, "a", 1, start)
+	err := s.RegisterUsageTask(context.Background(), store.UsageTask{Namespace: "b", TaskUID: "task", TaskName: "task", WorkID: work})
+	require.Error(t, err)
+	usageTask(t, s, "a", work, "task", "Succeeded", start)
+	usageSample(t, s, "a", "task", "one", 10, start)
+	usageSample(t, s, "a", "task", "one", 10, start)
+	require.ErrorIs(t, s.RecordUsage(context.Background(), store.UsageObservation{Namespace: "a", ID: "one", TaskUID: "task",
+		CounterID: "one", Scope: "call", Source: "provider", InputTokens: new(int64(50)), Status: "completed", ObservedAt: start}), store.ErrConflict)
+	report := usageReport(t, s, []string{"b"}, start.Add(-time.Second), start.Add(time.Second), time.Now().UTC())
+	require.Equal(t, 0, report.Summary.WorkRequests)
+	require.Equal(t, int64(0), report.Summary.TotalTokens)
+}
+
+func TestUsageSessionDeltasSurviveRetentionOfEarlierTasks(t *testing.T) {
+	s := setupTestStore(t)
+	start := time.Now().UTC().Add(-120 * 24 * time.Hour)
+	oldWork := usageWork(t, s, "a", 1, start)
+	activeWork := usageWork(t, s, "a", 2, start)
+	usageTask(t, s, "a", oldWork, "old", "Succeeded", start)
+	usageTask(t, s, "a", activeWork, "active", "Cancelled", start)
+	usagePR(t, s, "a", activeWork, 10, false, start)
+	for i, sample := range []struct {
+		task, attempt, status string
+		input                 int64
+		complete              bool
+	}{
+		{"old", "a1", store.UsageStatusStarted, 0, false},
+		{"old", "a1", store.UsageStatusCompleted, 1000, true},
+		{"active", "a2", store.UsageStatusStarted, 1000, false},
+		{"active", "a2", store.UsageStatusCancelled, 1500, false},
+	} {
+		require.NoError(t, s.RecordUsage(t.Context(), store.UsageObservation{Namespace: "a", TaskUID: sample.task, TaskName: sample.task, SessionName: "conversation", AttemptID: sample.attempt,
+			ID: fmt.Sprint(i), CounterID: "conversation", Scope: store.UsageScopeSession, Source: store.UsageSourceAgent, InputTokens: new(sample.input), OutputTokens: new(int64(0)),
+			Status: sample.status, Complete: sample.complete, ObservedAt: start.Add(time.Duration(i) * time.Second)}))
+	}
+	// Empty ACP lifecycle measurements must not double the number of attempts.
+	require.NoError(t, s.RecordUsage(t.Context(), store.UsageObservation{Namespace: "a", TaskUID: "active", ID: "lifecycle", CounterID: "prompt", AttemptID: "a2", Scope: store.UsageScopeAttempt,
+		Source: store.UsageSourceAgent, Status: store.UsageStatusCancelled, ObservedAt: start.Add(5 * time.Second)}))
+	get := func() usage.Report {
+		return usageReport(t, s, []string{"a"}, start.Add(-time.Second), start.Add(time.Hour), time.Now().UTC())
+	}
+	require.EqualValues(t, 1500, get().Summary.TotalTokens)
+	require.Equal(t, 2, get().Summary.Attempts)
+	require.Equal(t, 1, get().Summary.PartialMeasurements)
+	require.NoError(t, s.PruneUsage(t.Context(), time.Now().UTC().Add(-90*24*time.Hour)))
+	report := get()
+	require.Equal(t, 1, report.Summary.WorkRequests)
+	require.EqualValues(t, 500, report.Summary.TotalTokens)
+	require.Equal(t, 1, report.Summary.Attempts)
+	require.Equal(t, store.UsageStatusCancelled, report.Works[0].Tasks[0].Measurements[0].Status)
+}
+
+func TestUsageRetentionKeepsIssueCohortWithRecentSharedReview(t *testing.T) {
+	s := setupTestStore(t)
+	start := time.Now().UTC().Add(-120 * 24 * time.Hour)
+	work := usageWork(t, s, "a", 1, start)
+	usageTask(t, s, "a", work, "implementation", "Succeeded", start)
+	usageSample(t, s, "a", "implementation", "implementation-call", 1000, start)
+	usagePR(t, s, "a", work, 10, true, start)
+	recent := time.Now().UTC().Add(-time.Hour)
+	require.NoError(t, s.RegisterUsageTask(t.Context(), store.UsageTask{Namespace: "a", TaskUID: "review", TaskName: "review", Repository: "org/repo", PRNumber: 10, Phase: "Succeeded", StartedAt: recent, PhaseObservedAt: recent}))
+	usageSample(t, s, "a", "review", "review-call", 500, recent)
+	require.NoError(t, s.PruneUsage(t.Context(), time.Now().UTC().Add(-90*24*time.Hour)))
+	report := usageReport(t, s, []string{"a"}, start.Add(-time.Second), start.Add(time.Hour), time.Now().UTC())
+	require.Equal(t, 1, report.Summary.WorkRequests)
+	require.EqualValues(t, 1500, report.Summary.TotalTokens)
+}
+
+func TestUsageUnknownSessionBaselineRemainsVisibleSeparately(t *testing.T) {
+	s := setupTestStore(t)
+	start := time.Now().UTC().Add(-time.Hour)
+	work := usageWork(t, s, "a", 1, start)
+	usageTask(t, s, "a", work, "task", "Succeeded", start)
+	for i, input := range []int64{1000, 1500, 1500} {
+		require.NoError(t, s.RecordUsage(t.Context(), store.UsageObservation{Namespace: "a", TaskUID: "task", ID: fmt.Sprint(i), CounterID: "session", Scope: store.UsageScopeSession,
+			Source: store.UsageSourceAgent, InputTokens: new(input), OutputTokens: new(int64(0)), Complete: true, Status: store.UsageStatusCompleted, ObservedAt: start.Add(time.Duration(i) * time.Second)}))
+	}
+	report := usageReport(t, s, []string{"a"}, start.Add(-time.Second), start.Add(time.Hour), time.Now().UTC())
+	require.EqualValues(t, 500, report.Summary.TotalTokens)
+	require.EqualValues(t, 1000, report.OtherWork[2].Totals.TotalTokens)
+	require.Equal(t, "partial", report.Summary.Completeness)
+	require.Contains(t, report.Works[0].Tasks[0].Measurements[0].Gap, "baseline")
+}
+
+func TestUsageAsOfPhaseHistoryAndWorkTypeFilter(t *testing.T) {
+	s := setupTestStore(t)
+	start := time.Now().UTC().Add(-2 * time.Hour)
+	work := usageWork(t, s, "a", 1, start)
+	usageTask(t, s, "a", work, "task", "Running", start)
+	require.NoError(t, s.RegisterUsageTask(t.Context(), store.UsageTask{Namespace: "a", TaskUID: "task", TaskName: "task", Phase: "Succeeded", PhaseObservedAt: start.Add(time.Hour)}))
+	early := usageReport(t, s, []string{"a"}, start.Add(-time.Second), start.Add(time.Hour), start.Add(time.Minute))
+	require.Equal(t, 1, early.Summary.UnfinishedWork)
+	require.Equal(t, "Running", early.Works[0].Tasks[0].Phase)
+	late := usageReport(t, s, []string{"a"}, start.Add(-time.Second), start.Add(time.Hour), time.Now().UTC())
+	require.Zero(t, late.Summary.UnfinishedWork)
+	require.Equal(t, "Succeeded", late.Works[0].Tasks[0].Phase)
+	require.NoError(t, s.RegisterUsageTask(t.Context(), store.UsageTask{Namespace: "a", TaskUID: "review", TaskName: "review", Repository: "org/repo", PRNumber: 10, Phase: "Succeeded", StartedAt: start}))
+	usageSample(t, s, "a", "review", "review-call", 200, start)
+	usageSample(t, s, "a", "", "chat-call", 300, start)
+	filter := store.UsageFilter{Namespaces: []string{"a"}, From: start.Add(-time.Second), Until: start.Add(time.Hour), AsOf: time.Now().UTC(), Kind: "pull_request"}
+	data, err := s.LoadUsage(t.Context(), filter)
+	require.NoError(t, err)
+	report := usage.Build(data, filter)
+	require.Zero(t, report.Summary.WorkRequests)
+	require.EqualValues(t, 200, report.OtherWork[0].Totals.TotalTokens)
+	require.Empty(t, report.OtherWork[1].Tasks)
+	require.Empty(t, report.OtherWork[2].Tasks)
+}

@@ -688,10 +688,13 @@ func TestHandleStreamEvent_MessageStartUsageCarriesToDone(t *testing.T) {
 	handleStreamEvent(startEvent, send, &tc, &toolCallArgs, &hasToolCalls, &usage)
 	handleStreamEvent(deltaEvent, send, &tc, &toolCallArgs, &hasToolCalls, &usage)
 
-	if len(chunks) != 1 {
-		t.Fatalf("expected only terminal chunk, got %d", len(chunks))
+	if len(chunks) != 2 {
+		t.Fatalf("expected initial usage and terminal chunks, got %d", len(chunks))
 	}
-	chunk := chunks[0]
+	if chunks[0].Done || !chunks[0].UsageReported || chunks[0].InputTokens != 12 || chunks[0].OutputTokens != 1 {
+		t.Fatalf("initial usage = %+v", chunks[0])
+	}
+	chunk := chunks[1]
 	if chunk.InputTokens != 12 || chunk.OutputTokens != 10 {
 		t.Fatalf("usage = input:%d output:%d, want input:12 output:10", chunk.InputTokens, chunk.OutputTokens)
 	}

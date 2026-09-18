@@ -606,6 +606,10 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorIssueActionTask(ctx
 	if err := controllerutil.SetControllerReference(monitor, task, r.Scheme); err != nil {
 		return "", false, err
 	}
+	usageWorkID, err := r.prepareMonitorUsageWork(ctx, monitor, owner+"/"+repository, repositoryMonitorIssueKind, item.Number)
+	if err != nil {
+		return "", false, err
+	}
 	if err := r.Create(ctx, task); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			var existing corev1alpha1.Task
@@ -615,7 +619,7 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorIssueActionTask(ctx
 			if validationErr := validateRepositoryMonitorRecoveredIssueActionTask(monitor, task, &existing); validationErr != nil {
 				return "", false, validationErr
 			}
-			return taskName, false, nil
+			return taskName, false, r.retainMonitorUsageTask(ctx, &existing, usageWorkID, actionKind, 0)
 		}
 		var persisted corev1alpha1.Task
 		getErr := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, &persisted)
@@ -623,14 +627,14 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorIssueActionTask(ctx
 			if validationErr := validateRepositoryMonitorRecoveredIssueActionTask(monitor, task, &persisted); validationErr != nil {
 				return "", false, validationErr
 			}
-			return taskName, false, nil
+			return taskName, false, r.retainMonitorUsageTask(ctx, &persisted, usageWorkID, actionKind, 0)
 		}
 		if !apierrors.IsNotFound(getErr) {
 			return "", false, fmt.Errorf("create issue action Task: %w; additionally failed to verify persistence: %v", err, getErr)
 		}
 		return "", false, err
 	}
-	return taskName, true, nil
+	return taskName, true, r.retainMonitorUsageTask(ctx, task, usageWorkID, actionKind, 0)
 }
 
 func validateRepositoryMonitorRecoveredIssueActionTask(monitor *corev1alpha1.RepositoryMonitor, expected, actual *corev1alpha1.Task) error {
@@ -2404,7 +2408,8 @@ func (r *RepositoryMonitorReconciler) createIssueImplementationPullRequest(ctx c
 	if prURL, prNumber, err := r.findIssueImplementationPullRequest(ctx, token, baseURL, owner, repository, headBranch); err != nil {
 		return "", 0, err
 	} else if prNumber > 0 {
-		return prURL, prNumber, nil
+		err := r.recordMonitorUsagePRLink(ctx, monitor, item.Number, task, owner+"/"+repository, int64(prNumber), store.UsagePRAssisted)
+		return prURL, prNumber, err
 	}
 	body := map[string]any{
 		"title": repositoryMonitorImplementationPullRequestTitle(proposedPullRequestTitle, item.Title, item.Number),
@@ -2444,7 +2449,11 @@ func (r *RepositoryMonitorReconciler) createIssueImplementationPullRequest(ctx c
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
 		return "", 0, err
 	}
-	return parsed.HTMLURL, parsed.Number, nil
+	if parsed.Number <= 0 || parsed.HTMLURL != fmt.Sprintf("https://github.com/%s/%s/pull/%d", owner, repository, parsed.Number) {
+		return "", 0, fmt.Errorf("GitHub returned an invalid pull request identity")
+	}
+	err = r.recordMonitorUsagePRLink(ctx, monitor, item.Number, task, owner+"/"+repository, int64(parsed.Number), store.UsagePRCreated)
+	return parsed.HTMLURL, parsed.Number, err
 }
 
 func (r *RepositoryMonitorReconciler) findIssueImplementationPullRequest(ctx context.Context, token, baseURL, owner, repository, headBranch string) (string, int, error) {

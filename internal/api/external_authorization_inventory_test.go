@@ -37,6 +37,8 @@ import (
 // actual HTTP request and its expected resource authorization, including every
 // write in compound operations. An omitted route fails the inventory check.
 const externalAuthorizationInventory = `
+GET /api/v1/usage | list core.orka.ai:tasks; list core.orka.ai:repositorymonitors; list core.orka.ai:sessions
+GET /api/v1/usage/work/:id | list core.orka.ai:tasks; list core.orka.ai:repositorymonitors; list core.orka.ai:sessions
 POST /api/v1/tasks | create core.orka.ai:tasks
 GET /api/v1/tasks | list core.orka.ai:tasks
 GET /api/v1/tasks/:id | get core.orka.ai:tasks protected

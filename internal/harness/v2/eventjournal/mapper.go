@@ -775,7 +775,7 @@ func mapUsageUpdate(
 	mapped *store.ExecutionEvent,
 	content map[string]any,
 ) {
-	hasTokenUsage := usage.InputTokens > 0 || usage.OutputTokens > 0 || usage.CachedInputTokens > 0
+	hasTokenUsage := usage.Reported || usage.InputTokens > 0 || usage.OutputTokens > 0 || usage.CachedInputTokens > 0 || usage.CacheWriteInputTokens > 0
 	hasContextWindow := usage.ContextWindowUsed != nil
 	if hasTokenUsage || !hasContextWindow {
 		mapped.Type = executionevents.ExecutionEventTypeModelUsageUpdated
@@ -786,6 +786,10 @@ func mapUsageUpdate(
 		content["inputTokens"] = usage.InputTokens
 		content["outputTokens"] = usage.OutputTokens
 		content["cachedInputTokens"] = usage.CachedInputTokens
+		content["cacheWriteInputTokens"] = usage.CacheWriteInputTokens
+		content["usageScope"] = usage.Scope
+		content["usageReported"] = usage.Reported
+		content["usageComplete"] = usage.Complete
 	} else {
 		mapped.Type = executionevents.ExecutionEventTypeModelContextUpdated
 		mapped.Summary = fmt.Sprintf(
@@ -806,7 +810,7 @@ func mapUsageUpdate(
 }
 
 func hasUsageTelemetry(usage harnessv2.UsageUpdate) bool {
-	return usage.InputTokens > 0 || usage.OutputTokens > 0 || usage.CachedInputTokens > 0 ||
+	return usage.Reported || usage.InputTokens > 0 || usage.OutputTokens > 0 || usage.CachedInputTokens > 0 || usage.CacheWriteInputTokens > 0 ||
 		usage.ContextWindowUsed != nil || usage.ContextWindowSize != nil
 }
 

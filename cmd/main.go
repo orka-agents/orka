@@ -76,6 +76,7 @@ import (
 	"github.com/orka-agents/orka/internal/tokenexchange"
 	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/tracing"
+	"github.com/orka-agents/orka/internal/usage"
 	"github.com/orka-agents/orka/internal/worker"
 	"github.com/orka-agents/orka/internal/workerenv"
 	// +kubebuilder:scaffold:imports
@@ -294,6 +295,7 @@ func main() {
 	var aiWorkerImage string
 	var storeBackend string
 	var storePath string
+	var usageRetention time.Duration
 	var agentExecutionSnapshotKeyFile string
 	var agentExecutionSnapshotSecret, agentExecutionSnapshotSecretKey string
 	var agentExecutionSnapshotRetention time.Duration
@@ -496,6 +498,8 @@ func main() {
 		"Maximum age for queued events and delivery retries.")
 	flag.DurationVar(&gatewayTerminalRetention, "gateway-terminal-retention", 30*24*time.Hour,
 		"Retention for terminal gateway events and deliveries.")
+	flag.DurationVar(&usageRetention, "usage-retention", 90*24*time.Hour,
+		"Retention for inactive usage reporting cohorts; 0 retains records indefinitely.")
 	flag.DurationVar(&gatewayDeliveryTimeout, "gateway-delivery-timeout", 15*time.Second,
 		"Timeout for one synchronous adapter delivery call.")
 	flag.IntVar(&gatewayDeliveryMaxAttempts, "gateway-delivery-max-attempts", 10,
@@ -1366,6 +1370,14 @@ func main() {
 	}
 	if err := mgr.Add(sqliteStore); err != nil {
 		setupLog.Error(err, "unable to add SQLite store as runnable")
+		os.Exit(1)
+	}
+	if usageRetention < 0 {
+		setupLog.Error(fmt.Errorf("usage retention must not be negative"), "invalid usage retention")
+		os.Exit(1)
+	}
+	if err := mgr.Add(&usage.Retention{Store: sqliteStore, Period: usageRetention}); err != nil {
+		setupLog.Error(err, "unable to add usage retention")
 		os.Exit(1)
 	}
 	if cipherErr := sqliteStore.SetAgentExecutionSnapshotCipher(snapshotCipher); cipherErr != nil {

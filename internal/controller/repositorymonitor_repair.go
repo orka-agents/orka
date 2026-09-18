@@ -976,6 +976,10 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTask(ctx cont
 		return 0, err
 	}
 	created := 1
+	usageWorkID, err := r.prepareMonitorUsageWork(ctx, monitor, monitoredRepo, repositoryMonitorPullRequestKind, pr.Number)
+	if err != nil {
+		return 0, err
+	}
 	if err := r.Create(ctx, task); err != nil {
 		if !apierrors.IsAlreadyExists(err) {
 			job.Phase = repositoryMonitorRepairPhaseQueued
@@ -985,6 +989,17 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTask(ctx cont
 			return 0, err
 		}
 		created = 0
+		var existing corev1alpha1.Task
+		if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, &existing); err != nil {
+			return 0, err
+		}
+		if err := validateRepositoryMonitorRecoveredIssueActionTask(monitor, task, &existing); err != nil {
+			return 0, err
+		}
+		task = &existing
+	}
+	if err := r.retainMonitorUsageTask(ctx, task, usageWorkID, "repair", pr.Number); err != nil {
+		return created, err
 	}
 	if job.LastError == repositoryMonitorRepairTaskCreateError {
 		job.Phase = repositoryMonitorRepairPhaseQueued

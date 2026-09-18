@@ -253,14 +253,25 @@ func (u PlanUpdate) Validate() error {
 }
 
 type UsageUpdate struct {
-	InputTokens       uint64  `json:"inputTokens,omitempty"`
-	OutputTokens      uint64  `json:"outputTokens,omitempty"`
-	CachedInputTokens uint64  `json:"cachedInputTokens,omitempty"`
+	// Counts are cumulative for the prompt by default. Input includes cache
+	// reads and writes; cached counts are a breakdown, never added again.
+	InputTokens           uint64 `json:"inputTokens,omitempty"`
+	OutputTokens          uint64 `json:"outputTokens,omitempty"`
+	CachedInputTokens     uint64 `json:"cachedInputTokens,omitempty"`
+	CacheWriteInputTokens uint64 `json:"cacheWriteInputTokens,omitempty"`
+	// Scope may be "session" for a running conversation total. Such counters
+	// need a baseline before the first prompt to attribute their first delta.
+	Scope             string  `json:"scope,omitempty"`
+	Reported          bool    `json:"reported,omitempty"`
+	Complete          bool    `json:"complete,omitempty"`
 	ContextWindowUsed *uint64 `json:"contextWindowUsed,omitempty"`
 	ContextWindowSize *uint64 `json:"contextWindowSize,omitempty"`
 }
 
 func (u UsageUpdate) Validate() error {
+	if u.Scope != "" && u.Scope != "attempt" && u.Scope != "session" {
+		return fmt.Errorf("unsupported usage scope")
+	}
 	if (u.ContextWindowUsed == nil) != (u.ContextWindowSize == nil) {
 		return fmt.Errorf("context window usage requires both used and size")
 	}

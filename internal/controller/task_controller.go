@@ -327,6 +327,9 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		log.Error(err, "unable to fetch Task")
 		return ctrl.Result{}, err
 	}
+	if err := r.retainUsageTask(ctx, task); err != nil {
+		return ctrl.Result{}, err
+	}
 	if tx := task.Spec.Transaction; tx != nil {
 		values := []any{}
 		if tx.ID != "" {

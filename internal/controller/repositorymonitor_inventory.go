@@ -418,6 +418,10 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorReviewTask(ctx cont
 			return "", false, bindingErr
 		}
 	}
+	usageWorkID, err := r.prepareMonitorUsageWork(ctx, monitor, owner+"/"+repository, repositoryMonitorPullRequestKind, pr.Number)
+	if err != nil {
+		return "", false, err
+	}
 	if err := r.Create(ctx, task); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			var existing corev1alpha1.Task
@@ -427,11 +431,11 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorReviewTask(ctx cont
 			if bindingErr := validateRepositoryMonitorReviewTaskMatchesExpected(&existing, task, monitor, run, owner, repository, pr); bindingErr != nil {
 				return "", false, bindingErr
 			}
-			return taskName, false, nil
+			return taskName, false, r.retainMonitorUsageTask(ctx, &existing, usageWorkID, "review", pr.Number)
 		}
 		return "", false, err
 	}
-	return taskName, true, nil
+	return taskName, true, r.retainMonitorUsageTask(ctx, task, usageWorkID, "review", pr.Number)
 }
 
 // validateRepositoryMonitorReviewTaskMatchesExpected decides whether an

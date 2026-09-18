@@ -118,7 +118,14 @@ func (r *RepositoryMonitorReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, err
 	}
 
-	return r.reconcileRepositoryMonitorRuns(ctx, monitor, state)
+	if err := r.refreshMonitorUsageOutcomes(ctx, monitor); err != nil {
+		return ctrl.Result{}, err
+	}
+	result, err = r.reconcileRepositoryMonitorRuns(ctx, monitor, state)
+	if _, enabled := r.Store.(store.UsageStore); enabled && (result.RequeueAfter == 0 || result.RequeueAfter > usageOutcomeRefreshInterval) {
+		result.RequeueAfter = usageOutcomeRefreshInterval
+	}
+	return result, err
 }
 
 type repositoryMonitorReconcileState struct {
