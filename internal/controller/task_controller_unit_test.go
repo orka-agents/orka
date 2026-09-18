@@ -8814,3 +8814,200 @@ func TestHandleDeletionWaitsForHarnessV1AttemptReclamation(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+const (
+	approvalParkTaskName      = "approval-task"
+	approvalParkTaskNamespace = "default"
+	approvalParkTargetTool    = "dispatch_work_order"
+)
+
+// approvalParkEvent builds a minimal approval execution event for the parking tests.
+func approvalParkEvent(t *testing.T, eventType, approvalID, taskUID string) store.ExecutionEvent {
+	t.Helper()
+	content, err := json.Marshal(map[string]string{
+		"approvalID": approvalID,
+		"targetTool": approvalParkTargetTool,
+		"taskUID":    taskUID,
+	})
+	if err != nil {
+		t.Fatalf("marshal approval content: %v", err)
+	}
+	return store.ExecutionEvent{
+		Namespace:  approvalParkTaskNamespace,
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   approvalParkTaskName,
+		TaskName:   approvalParkTaskName,
+		Type:       eventType,
+		Severity:   events.ExecutionEventSeverityInfo,
+		ToolCallID: approvalID,
+		Content:    content,
+	}
+}
+
+// newApprovalParkFixture builds a reconciler whose task stream already contains evts.
+func newApprovalParkFixture(
+	t *testing.T,
+	taskUID string,
+	seed []metav1.Condition,
+	evts ...store.ExecutionEvent,
+) (*TaskReconciler, *corev1alpha1.Task) {
+	t.Helper()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      approvalParkTaskName,
+			Namespace: approvalParkTaskNamespace,
+			UID:       types.UID(taskUID),
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status: corev1alpha1.TaskStatus{
+			Phase:      corev1alpha1.TaskPhaseRunning,
+			Conditions: seed,
+		},
+	}
+	r := newUnitReconciler(newTestScheme(), task)
+	for i := range evts {
+		if _, err := r.ExecutionEventStore.AppendExecutionEvent(context.Background(), &evts[i]); err != nil {
+			t.Fatalf("AppendExecutionEvent() error = %v", err)
+		}
+	}
+	return r, task
+}
+
+func TestParkOnPendingApproval_SetsWaitingForApprovalCondition(t *testing.T) {
+	const taskUID, approvalID = "task-uid-1", "approval-1"
+	ctx := context.Background()
+	r, task := newApprovalParkFixture(t, taskUID, nil,
+		approvalParkEvent(t, events.ExecutionEventTypeApprovalRequested, approvalID, taskUID))
+
+	result, parked, err := r.parkOnPendingApproval(ctx, task)
+	if err != nil {
+		t.Fatalf("parkOnPendingApproval() error = %v", err)
+	}
+	if !parked {
+		t.Fatal("parkOnPendingApproval() parked = false, want true")
+	}
+	if result.RequeueAfter != 30*time.Second {
+		t.Fatalf("parkOnPendingApproval() RequeueAfter = %v, want 30s", result.RequeueAfter)
+	}
+
+	stored := &corev1alpha1.Task{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(task), stored); err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	condition := meta.FindStatusCondition(stored.Status.Conditions, ConditionTypeWaitingForApproval)
+	if condition == nil {
+		t.Fatal("WaitingForApproval condition missing, want it set on a parked task")
+	}
+	if condition.Status != metav1.ConditionTrue {
+		t.Fatalf("WaitingForApproval status = %v, want True", condition.Status)
+	}
+	if condition.Reason != approvalConditionReasonPending {
+		t.Fatalf("WaitingForApproval reason = %q, want %q", condition.Reason, approvalConditionReasonPending)
+	}
+	if !strings.Contains(condition.Message, approvalID) {
+		t.Fatalf("WaitingForApproval message = %q, want it to carry approval ID %q", condition.Message, approvalID)
+	}
+
+	// resumingAfterApprovalDecision and test/e2e/approval_gate_test.go both parse this
+	// message. The condition is additive and must not change the existing format.
+	wantMessage := fmt.Sprintf("waiting for approval %s for %s at iteration 0", approvalID, approvalParkTargetTool)
+	if stored.Status.Message != wantMessage {
+		t.Fatalf("status.message = %q, want %q", stored.Status.Message, wantMessage)
+	}
+}
+
+func TestParkOnPendingApproval_ClearsConditionAfterDecision(t *testing.T) {
+	const taskUID, approvalID = "task-uid-2", "approval-2"
+	ctx := context.Background()
+	r, task := newApprovalParkFixture(t, taskUID,
+		[]metav1.Condition{{
+			Type:               ConditionTypeWaitingForApproval,
+			Status:             metav1.ConditionTrue,
+			LastTransitionTime: metav1.Now(),
+			Reason:             approvalConditionReasonPending,
+			Message:            "waiting for approval " + approvalID,
+		}},
+		approvalParkEvent(t, events.ExecutionEventTypeApprovalRequested, approvalID, taskUID),
+		approvalParkEvent(t, events.ExecutionEventTypeApprovalApproved, approvalID, taskUID))
+
+	_, parked, err := r.parkOnPendingApproval(ctx, task)
+	if err != nil {
+		t.Fatalf("parkOnPendingApproval() error = %v", err)
+	}
+	if parked {
+		t.Fatal("parkOnPendingApproval() parked = true, want false once the approval is decided")
+	}
+
+	stored := &corev1alpha1.Task{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(task), stored); err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	condition := meta.FindStatusCondition(stored.Status.Conditions, ConditionTypeWaitingForApproval)
+	if condition == nil {
+		t.Fatal("WaitingForApproval condition missing after resume")
+	}
+	if condition.Status != metav1.ConditionFalse {
+		t.Fatalf("WaitingForApproval status = %v, want False after the approval is decided", condition.Status)
+	}
+	if condition.Reason != approvalConditionReasonResolved {
+		t.Fatalf("WaitingForApproval reason = %q, want %q", condition.Reason, approvalConditionReasonResolved)
+	}
+}
+
+func TestParkOnPendingApproval_SkipsStatusWriteWhenUnchanged(t *testing.T) {
+	const taskUID, approvalID = "task-uid-3", "approval-3"
+	ctx := context.Background()
+	r, task := newApprovalParkFixture(t, taskUID, nil,
+		approvalParkEvent(t, events.ExecutionEventTypeApprovalRequested, approvalID, taskUID))
+
+	if _, _, err := r.parkOnPendingApproval(ctx, task); err != nil {
+		t.Fatalf("first parkOnPendingApproval() error = %v", err)
+	}
+	first := &corev1alpha1.Task{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(task), first); err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+
+	// Parking requeues every 30s; a steady-state park must not write status again.
+	if _, _, err := r.parkOnPendingApproval(ctx, task); err != nil {
+		t.Fatalf("second parkOnPendingApproval() error = %v", err)
+	}
+	second := &corev1alpha1.Task{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(task), second); err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if first.ResourceVersion != second.ResourceVersion {
+		t.Fatalf("resourceVersion changed on a steady-state park: %s -> %s",
+			first.ResourceVersion, second.ResourceVersion)
+	}
+}
+
+func TestParkOnPendingApproval_NoConditionWhenNeverParked(t *testing.T) {
+	ctx := context.Background()
+	r, task := newApprovalParkFixture(t, "task-uid-4", nil)
+
+	before := &corev1alpha1.Task{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(task), before); err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+
+	_, parked, err := r.parkOnPendingApproval(ctx, task)
+	if err != nil {
+		t.Fatalf("parkOnPendingApproval() error = %v", err)
+	}
+	if parked {
+		t.Fatal("parkOnPendingApproval() parked = true, want false without approvals")
+	}
+
+	stored := &corev1alpha1.Task{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(task), stored); err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if condition := meta.FindStatusCondition(stored.Status.Conditions, ConditionTypeWaitingForApproval); condition != nil {
+		t.Fatalf("WaitingForApproval condition = %#v, want none on a task that never parked", condition)
+	}
+	if before.ResourceVersion != stored.ResourceVersion {
+		t.Fatalf("resourceVersion changed without approvals: %s -> %s",
+			before.ResourceVersion, stored.ResourceVersion)
+	}
+}
