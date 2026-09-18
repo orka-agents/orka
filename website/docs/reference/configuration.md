@@ -1016,6 +1016,7 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--api-port` | `8080` | REST API server port |
 | `--gateway-enabled` | `true` | Enable generic gateway reconciliation and ingress |
 | `--gateway-pending-per-session` | `100` | Maximum pending gateway events per Session |
+| `--gateway-interim-messages-per-task` | `10` | Lifetime cap for distinct accepted interim messages per Task; failed/expired messages count, retries do not. Helm: `controller.gateway.interimMessagesPerTask` |
 | `--gateway-max-records-per-gateway` | `1000` | Maximum retained accepted/dead-letter event records per Gateway before ingress is throttled |
 | `--gateway-max-rejected-records-per-gateway` | `250` | Separate audit budget for rejected events so unauthorized traffic cannot consume operational capacity |
 | `--gateway-event-expiry` | `24h` | Queue and delivery retry expiry |

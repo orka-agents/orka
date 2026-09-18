@@ -75,7 +75,7 @@ jobs:
       - name: Verify kind installation
         run: kind version
 
-      - name: Run Gateway live E2E
+      - name: Run Gateway external-v2 and native interim live E2E
         run: |
           set -Eeuo pipefail
           trap 'kind delete cluster --name "${KIND_CLUSTER}" || true' EXIT
@@ -93,5 +93,11 @@ jobs:
           # would go green without validating anything. Fail that shape.
           if grep -Eq 'Ran 0 of [0-9]+ Specs' gateway-e2e.log; then
             echo "::error::Gateway live E2E ran zero specs; the suite skipped itself instead of running (check E2E_GATEWAY and the ginkgo focus)."
+            exit 1
+          fi
+          # Require all three paths, not just the existing external-v2 spec.
+          # Ordered containers skip later specs after an earlier failure.
+          if ! grep -Eq 'Ran 3 of [0-9]+ Specs' gateway-e2e.log; then
+            echo "::error::Gateway live E2E must run external-v2, native interim, and no-capability specs."
             exit 1
           fi

@@ -19,6 +19,10 @@ var ErrNotReady = errors.New("not ready")
 // ErrDuplicateMismatch is returned when a stable external identifier is reused with a different payload.
 var ErrDuplicateMismatch = errors.New("duplicate payload mismatch")
 
+// ErrGatewayMessageReplayOnly is returned when receipt-only admission finds no
+// existing message. The caller must return its original live admission gate error.
+var ErrGatewayMessageReplayOnly = errors.New("gateway message receipt not found for replay-only admission")
+
 // ErrCapacity is returned when a bounded durable store quota is full.
 var ErrCapacity = errors.New("capacity exceeded")
 
@@ -153,6 +157,7 @@ type GatewayEventStore interface {
 
 // GatewayDeliveryStore handles durable adapter outbox records.
 type GatewayDeliveryStore interface {
+	EnqueueGatewayMessage(ctx context.Context, request GatewayMessageEnqueue) (*GatewayDelivery, bool, error)
 	CreateGatewayDelivery(ctx context.Context, delivery *GatewayDelivery) (*GatewayDelivery, bool, error)
 	GetGatewayDelivery(ctx context.Context, namespace, id string) (*GatewayDelivery, error)
 	ListGatewayDeliveries(ctx context.Context, filter GatewayDeliveryFilter) ([]GatewayDelivery, error)

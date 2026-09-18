@@ -481,12 +481,14 @@ func (s *Server) setupRoutes() {
 				MemoryProposalStore:     s.MemoryProposalStore,
 				ExecutionEventStore:     s.ExecutionEventStore,
 				GatewayEventStore:       s.GatewayEventStore,
+				GatewayService:          s.config.GatewayService,
 				TaskProvenanceProtected: s.config.TaskProvenanceProtected,
 			},
 		)
 		internal := s.app.Group("/internal/v1")
 		internal.Use(NewAuthMiddleware(s.client))
 		internal.Post("/results/:namespace/:taskName", s.internalHandlers.SubmitResult)
+		internal.Post("/tasks/:namespace/:taskName/gateway-messages", s.internalHandlers.SubmitGatewayMessage)
 		internal.Post("/tasks/:namespace/:taskName/execution-workspace/status", s.internalHandlers.UpdateExecutionWorkspaceStatus)
 		internal.Get("/sessions/:namespace/search", s.internalHandlers.SearchTranscript)
 		internal.Get("/sessions/:namespace/:name/transcript", s.internalHandlers.GetSessionTranscript)
@@ -520,7 +522,8 @@ func (s *Server) hasInternalStores() bool {
 		s.ArtifactStore != nil ||
 		s.MemoryStore != nil ||
 		s.MemoryProposalStore != nil ||
-		s.ExecutionEventStore != nil
+		s.ExecutionEventStore != nil ||
+		s.config.GatewayService != nil
 }
 
 // Start starts the API server

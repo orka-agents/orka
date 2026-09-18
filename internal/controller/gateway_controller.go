@@ -757,6 +757,7 @@ func validateRequiredGatewayCapabilities(required, observed gatewayv1alpha1.Gate
 	}{
 		{"inboundText", required.InboundText, observed.InboundText},
 		{"outboundText", required.OutboundText, observed.OutboundText},
+		{"interimDelivery", required.InterimDelivery, observed.InterimDelivery},
 		{"threads", required.Threads, observed.Threads},
 		{"senderIdentity", required.SenderIdentity, observed.SenderIdentity},
 		{"explicitSessions", required.ExplicitSessions, observed.ExplicitSessions},
@@ -807,6 +808,7 @@ func observedGatewayCapabilities(response *protocol.CapabilitiesResponse) *gatew
 			InboundText: response.Capabilities.InboundText, OutboundText: response.Capabilities.OutboundText,
 			Threads: response.Capabilities.Threads, SenderIdentity: response.Capabilities.SenderIdentity,
 			ExplicitSessions: response.Capabilities.ExplicitSessions, IdempotentDelivery: response.Capabilities.IdempotentDelivery,
+			InterimDelivery: response.Capabilities.InterimDelivery,
 		},
 	}
 }

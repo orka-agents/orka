@@ -23,6 +23,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/artifactcap"
+	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/workspace/statusrules"
@@ -45,6 +46,7 @@ type InternalHandlers struct {
 	artifactStore           store.ArtifactStore
 	executionEventStore     store.ExecutionEventStore
 	gatewayEventStore       store.GatewayEventStore
+	gatewayService          *gatewayruntime.Service
 	memoryStore             store.MemoryStore
 	memoryProposalStore     store.MemoryProposalStore
 	taskProvenanceProtected bool
@@ -58,6 +60,7 @@ type InternalHandlersConfig struct {
 	MemoryProposalStore store.MemoryProposalStore
 	ExecutionEventStore store.ExecutionEventStore
 	GatewayEventStore   store.GatewayEventStore
+	GatewayService      *gatewayruntime.Service
 	// TaskProvenanceProtected permits cross-task coordination only when the
 	// Task provenance admission webhook protects coordination ancestry.
 	TaskProvenanceProtected bool
@@ -79,6 +82,7 @@ func NewInternalHandlers(rs store.ResultStore, ss store.SessionStore, ps store.P
 		h.memoryProposalStore = configs[0].MemoryProposalStore
 		h.executionEventStore = configs[0].ExecutionEventStore
 		h.gatewayEventStore = configs[0].GatewayEventStore
+		h.gatewayService = configs[0].GatewayService
 		h.taskProvenanceProtected = configs[0].TaskProvenanceProtected
 	}
 	return h
