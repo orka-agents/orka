@@ -101,8 +101,10 @@ uses only recorded tokens and can understate usage. An estimate retains the
 ## PR state and retention
 
 Orka refreshes retained PR links while their RepositoryMonitor is active, even
-after the execution Tasks finish or are deleted. Each reconcile checks up to 20
-PRs that have not been checked in five minutes. Larger backlogs take longer.
+after the execution Tasks finish or are deleted. A confirmed merge ends polling
+for that PR. Closed, unmerged PRs remain eligible because they can reopen.
+Each reconcile checks up to 20 PRs that have not been checked in five minutes.
+Larger backlogs take longer.
 Closed PRs are queried directly, so they need not appear in the open-PR inventory.
 An unavailable GitHub response clears current readiness without inventing a merge
 or removing a previously confirmed merge.
@@ -120,6 +122,8 @@ store. Set the controller's `--usage-retention` duration to control reporting
 history. The default is `2160h`, or 90 days; `0` keeps it indefinitely. Cleanup runs
 hourly and expires whole inactive cohorts. A running Task, recent usage or state
 transition, or an open linked PR keeps the cohort and its earlier attempts.
+An unknown PR state keeps a cohort only while its link or latest observation
+falls within the retention period.
 Shared reviews and cumulative-counter baselines are retained with the work that
 needs them. The report marks the oldest period that may have expired.
 

@@ -254,6 +254,9 @@ func (s *Store) ListUsagePullRequestLinks(ctx context.Context, namespace, monito
 	 JOIN usage_work_requests w ON w.namespace = l.namespace AND w.id = l.work_id
 	 LEFT JOIN usage_pull_requests p ON p.namespace = l.namespace AND p.repository = l.repository AND p.number = l.number
 	 WHERE l.namespace = ? AND json_extract(w.data, '$.monitorUID') = ?
+	 AND NOT EXISTS (SELECT 1 FROM usage_pull_requests merged
+	   WHERE merged.namespace = l.namespace AND merged.repository = l.repository AND merged.number = l.number
+	     AND json_extract(merged.data, '$.state') = 'merged')
 	 GROUP BY l.namespace, l.repository, l.number
 	 HAVING COALESCE(MAX(p.observed_at), 0) < ?
 	 ORDER BY COALESCE(MAX(p.observed_at), 0), l.repository, l.number LIMIT ?`, namespace, monitorUID, before.UnixNano(), limit)
@@ -281,31 +284,9 @@ func loadUsage(ctx context.Context, db taskDataExecutor, filter store.UsageFilte
 		if namespace == "" {
 			return result, store.ValidationErrorf("usage report namespace must not be empty")
 		}
-		works, err := readUsageRows[store.UsageWorkRequest](ctx, db, `SELECT data FROM usage_work_requests WHERE namespace = ? AND started_at <= ?`, namespace, filter.AsOf.UnixNano())
-		if err != nil {
+		if err := loadUsageNamespace(ctx, db, namespace, filter, &result); err != nil {
 			return result, err
 		}
-		result.Works = append(result.Works, works...)
-		tasks, err := readUsageRows[store.UsageTask](ctx, db, `SELECT data FROM usage_tasks WHERE namespace = ? AND started_at <= ?`, namespace, filter.AsOf.UnixNano())
-		if err != nil {
-			return result, err
-		}
-		result.Tasks = append(result.Tasks, tasks...)
-		observations, err := readUsageRows[store.UsageObservation](ctx, db, `SELECT data FROM usage_observations WHERE namespace = ? AND observed_at <= ? ORDER BY observed_at, id`, namespace, filter.AsOf.UnixNano())
-		if err != nil {
-			return result, err
-		}
-		result.Observations = append(result.Observations, observations...)
-		links, err := readUsageRows[store.UsagePRLink](ctx, db, `SELECT data FROM usage_pr_links WHERE namespace = ?`, namespace)
-		if err != nil {
-			return result, err
-		}
-		result.Links = append(result.Links, links...)
-		prs, err := readUsageRows[store.UsagePullRequest](ctx, db, `SELECT data FROM usage_pull_requests WHERE namespace = ? AND observed_at <= ? ORDER BY observed_at`, namespace, filter.AsOf.UnixNano())
-		if err != nil {
-			return result, err
-		}
-		result.PullRequests = append(result.PullRequests, prs...)
 	}
 	var since int64
 	err := db.QueryRowContext(ctx, `SELECT retained_since FROM usage_retention WHERE id = 1`).Scan(&since)
@@ -367,9 +348,11 @@ func (s *Store) PruneUsage(ctx context.Context, before time.Time) error {
 		 AND NOT EXISTS (SELECT 1 FROM usage_pr_links l LEFT JOIN usage_pull_requests p ON p.namespace = l.namespace AND p.repository = l.repository AND p.number = l.number AND p.observed_at =
 		     (SELECT MAX(p2.observed_at) FROM usage_pull_requests p2 WHERE p2.namespace = p.namespace AND p2.repository = p.repository AND p2.number = p.number)
 		   WHERE l.namespace = w.namespace AND l.work_id = w.id
-		   AND (p.observed_at IS NULL OR json_extract(p.data, '$.state') NOT IN ('merged', 'closed')
-		     OR unixepoch(COALESCE(json_extract(p.data, '$.mergedAt'), json_extract(p.data, '$.closedAt'))) >= ?))`,
-			before.UnixNano(), before.UnixNano(), before.Unix(), before.UnixNano(), before.Unix())
+		   AND (json_extract(p.data, '$.state') = 'open'
+		     OR unixepoch(COALESCE(json_extract(p.data, '$.mergedAt'), json_extract(p.data, '$.closedAt'))) >= ?
+		     OR (COALESCE(json_extract(p.data, '$.state'), 'unknown') NOT IN ('merged', 'closed', 'open')
+		       AND (p.observed_at >= ? OR unixepoch(json_extract(l.data, '$.linkedAt')) >= ?))))`,
+			before.UnixNano(), before.UnixNano(), before.Unix(), before.UnixNano(), before.Unix(), before.UnixNano(), before.Unix())
 		if err != nil {
 			return err
 		}

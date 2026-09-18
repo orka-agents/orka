@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -14,6 +15,17 @@ import (
 )
 
 const usageOutcomeRefreshInterval = 5 * time.Minute
+
+func validUsagePullRequestURL(rawURL, repository string, number int64) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || number <= 0 || parsed.Scheme != urlSchemeHTTPS || !strings.EqualFold(parsed.Host, "github.com") ||
+		parsed.User != nil || parsed.RawPath != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		return false
+	}
+	parts := strings.Split(parsed.Path, "/")
+	return len(parts) == 5 && parts[0] == "" && parts[2] != "" && parts[3] == "pull" && parts[4] == fmt.Sprint(number) &&
+		strings.EqualFold(parts[1]+"/"+parts[2], repository)
+}
 
 func (r *RepositoryMonitorReconciler) recordMonitorUsagePRLink(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, issue int64, task *corev1alpha1.Task, repository string, number int64, origin string) error {
 	usageStore, ok := r.Store.(store.UsageStore)
@@ -144,7 +156,7 @@ func (r *RepositoryMonitorReconciler) fetchUsagePullRequest(ctx context.Context,
 		return result, fmt.Errorf("GitHub did not confirm the requested repository and PR")
 	}
 	pr := repo.PullRequest
-	if pr.ID == "" || pr.Number != number || pr.URL != fmt.Sprintf("https://github.com/%s/pull/%d", repo.NameWithOwner, number) {
+	if pr.ID == "" || pr.Number != number || !validUsagePullRequestURL(pr.URL, repository, number) {
 		return result, fmt.Errorf("GitHub PR identity mismatch")
 	}
 	ready := pr.State == "OPEN" && !pr.Draft && pr.HeadSHA != "" && pr.Mergeable == "MERGEABLE" && pr.MergeState == "CLEAN" &&

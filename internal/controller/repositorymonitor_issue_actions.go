@@ -2449,7 +2449,7 @@ func (r *RepositoryMonitorReconciler) createIssueImplementationPullRequest(ctx c
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
 		return "", 0, err
 	}
-	if parsed.Number <= 0 || parsed.HTMLURL != fmt.Sprintf("https://github.com/%s/%s/pull/%d", owner, repository, parsed.Number) {
+	if !validUsagePullRequestURL(parsed.HTMLURL, owner+"/"+repository, int64(parsed.Number)) {
 		return "", 0, fmt.Errorf("GitHub returned an invalid pull request identity")
 	}
 	err = r.recordMonitorUsagePRLink(ctx, monitor, item.Number, task, owner+"/"+repository, int64(parsed.Number), store.UsagePRCreated)

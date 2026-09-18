@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -202,6 +203,66 @@ func TestUsageStreamFailureAndCancellationPreserveInput(t *testing.T) {
 				wantStatus = store.UsageStatusCancelled
 			}
 			require.Equal(t, wantStatus, got.Works[0].Tasks[0].Measurements[0].Status)
+		})
+	}
+}
+
+func TestUsageStreamFallbackAfterEarlyInput(t *testing.T) {
+	for _, outputBeforeFailure := range []bool{false, true} {
+		t.Run(fmt.Sprint(outputBeforeFailure), func(t *testing.T) {
+			ctx, report := usageFixture(t)
+			var fallbackRequests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fallback := strings.HasPrefix(r.URL.Path, "/fallback/")
+				model, input, cached := "primary-model", 100, 10
+				if fallback {
+					fallbackRequests.Add(1)
+					model, input, cached = "fallback-model", 200, 20
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"message\",\"type\":\"message\",\"role\":\"assistant\",\"model\":%q,\"usage\":{\"input_tokens\":%d,\"output_tokens\":0,\"cache_read_input_tokens\":%d}}}\n\n", model, input, cached)
+				if fallback || outputBeforeFailure {
+					_, _ = fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":%q}}\n\n", model)
+				}
+				if fallback {
+					_, _ = fmt.Fprint(w, "event: message_delta\ndata: "+`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":10}}`+"\n\n")
+				} else {
+					_, _ = fmt.Fprint(w, "event: error\ndata: "+`{"type":"error","error":{"type":"overloaded_error","message":"fixture failure"}}`+"\n\n")
+				}
+			}))
+			t.Cleanup(server.Close)
+			primary, err := llm.NewProvider("anthropic", llm.ProviderConfig{APIKey: "fixture", BaseURL: server.URL + "/primary/"})
+			require.NoError(t, err)
+			fallback, err := llm.NewProvider("anthropic", llm.ProviderConfig{APIKey: "fixture", BaseURL: server.URL + "/fallback/"})
+			require.NoError(t, err)
+			provider := llm.NewFallbackProvider(primary, []llm.FallbackEntry{{Provider: fallback, Model: "fallback-model"}})
+			stream, err := provider.Stream(ctx, usageRequest())
+			require.NoError(t, err)
+			var output strings.Builder
+			var streamErr error
+			for chunk := range stream {
+				output.WriteString(chunk.Content)
+				if chunk.Error != nil {
+					streamErr = chunk.Error
+				}
+			}
+			got := report()
+			require.Equal(t, store.UsageStatusFailed, got.Works[0].Tasks[0].Measurements[0].Status)
+			require.Equal(t, 1, got.Summary.PartialMeasurements)
+			if outputBeforeFailure {
+				require.Error(t, streamErr)
+				require.Equal(t, "primary-model", output.String())
+				require.Zero(t, fallbackRequests.Load())
+				require.EqualValues(t, 110, got.Summary.TotalTokens)
+				require.Equal(t, 1, got.Summary.Calls)
+			} else {
+				require.NoError(t, streamErr)
+				require.Equal(t, "fallback-model", output.String())
+				require.EqualValues(t, 1, fallbackRequests.Load())
+				require.EqualValues(t, 340, got.Summary.TotalTokens)
+				require.Equal(t, 2, got.Summary.Calls)
+				require.Equal(t, 2, got.Summary.ReportedMeasurements)
+			}
 		})
 	}
 }

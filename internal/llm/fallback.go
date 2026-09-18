@@ -156,8 +156,9 @@ func (f *FallbackProvider) Stream(ctx context.Context, req *CompletionRequest) (
 			continue
 		}
 
-		// Peek at first chunk
-		firstChunk, ok := <-innerCh
+		// Usage can arrive before output or an initial stream error. The
+		// provider's recorder retains it independently of fallback selection.
+		firstChunk, ok := firstStreamResult(innerCh)
 		if !ok {
 			ch := make(chan StreamChunk)
 			close(ch)
@@ -206,6 +207,15 @@ func (f *FallbackProvider) Stream(ctx context.Context, req *CompletionRequest) (
 	}
 	close(ch)
 	return ch, nil
+}
+
+func firstStreamResult(ch <-chan StreamChunk) (StreamChunk, bool) {
+	for chunk := range ch {
+		if chunk.Content != "" || chunk.ToolCall != nil || chunk.Done || chunk.Error != nil {
+			return chunk, true
+		}
+	}
+	return StreamChunk{}, false
 }
 
 func withStreamTelemetry(chunk StreamChunk, providerName, modelName string) StreamChunk {

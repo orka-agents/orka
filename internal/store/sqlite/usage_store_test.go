@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"path/filepath"
 	"testing"
 	"time"
@@ -190,6 +191,58 @@ func TestUsageMissingCountsAndReviewOnlyAreVisible(t *testing.T) {
 	require.Equal(t, int64(20), report.OtherWork[2].Totals.TotalTokens)
 }
 
+func TestUsageInvalidACPCountsDoNotAbortJournal(t *testing.T) {
+	for _, field := range []string{"inputTokens", "outputTokens", "cachedInputTokens", "cacheWriteInputTokens"} {
+		for _, tc := range []struct {
+			name  string
+			count any
+			valid bool
+		}{
+			{name: "maximum safe count", count: int64(1<<53 - 1), valid: true},
+			{name: "outside safe range", count: int64(1 << 53)},
+			{name: "maximum signed count", count: int64(math.MaxInt64)},
+			{name: "maximum unsigned count", count: uint64(math.MaxUint64)},
+			{name: "negative count", count: int64(-1)},
+		} {
+			t.Run(field+"/"+tc.name, func(t *testing.T) {
+				s := setupTestStore(t)
+				start := time.Now().UTC().Add(-time.Hour)
+				work := usageWork(t, s, "a", 1, start)
+				usageTask(t, s, "a", work, "task", "Succeeded", start)
+				for i, typ := range []string{events.ExecutionEventTypeModelRequestStarted, events.ExecutionEventTypeModelUsageUpdated, events.ExecutionEventTypeModelRequestCompleted} {
+					content := map[string]any{"harnessV2": map[string]any{"taskUID": "task", "promptID": "prompt", "taskAttempt": 1, "sequence": i + 1}}
+					if typ == events.ExecutionEventTypeModelUsageUpdated {
+						content[field], content["usageReported"] = tc.count, true
+					}
+					encoded, err := json.Marshal(content)
+					require.NoError(t, err)
+					event := &store.ExecutionEvent{Namespace: "a", TaskName: "task", StreamType: "task", StreamID: "task", Type: typ,
+						Severity: "info", Content: encoded, CreatedAt: start.Add(time.Duration(i+1) * time.Second)}
+					_, added, err := s.AppendExecutionEventIfAbsent(t.Context(), event, typ)
+					require.NoError(t, err)
+					require.True(t, added)
+					_, added, err = s.AppendExecutionEventIfAbsent(t.Context(), event, typ)
+					require.NoError(t, err)
+					require.False(t, added)
+				}
+				journal, err := s.ListExecutionEvents(t.Context(), store.ExecutionEventFilter{Namespace: "a", StreamType: "task", StreamID: "task"})
+				require.NoError(t, err)
+				require.Len(t, journal, 3)
+				data, err := s.LoadUsage(t.Context(), store.UsageFilter{Namespaces: []string{"a"}, AsOf: time.Now().UTC()})
+				require.NoError(t, err)
+				if tc.valid {
+					require.Len(t, data.Observations, 3)
+				} else {
+					require.Len(t, data.Observations, 2)
+					report := usageReport(t, s, []string{"a"}, start.Add(-time.Second), start.Add(time.Hour), time.Now().UTC())
+					require.Equal(t, "unavailable", report.Summary.Completeness)
+					require.Zero(t, report.Summary.TotalTokens)
+				}
+			})
+		}
+	}
+}
+
 func TestUsageLaterMergeAndReadinessUseReportDate(t *testing.T) {
 	s := setupTestStore(t)
 	start := time.Now().UTC().Add(-time.Hour)
@@ -209,6 +262,35 @@ func TestUsageLaterMergeAndReadinessUseReportDate(t *testing.T) {
 	require.Equal(t, 0, get(start.Add(20*time.Minute)).Summary.PRsMerged)
 	require.Equal(t, 1, get(time.Now().UTC()).Summary.PRsMerged)
 	require.Equal(t, 30.0, *get(time.Now().UTC()).Summary.TokensPerPRMerged)
+}
+
+func TestUsagePRRefreshStopsAfterConfirmedMerge(t *testing.T) {
+	s := setupTestStore(t)
+	start := time.Now().UTC().Add(-time.Hour)
+	work := usageWork(t, s, "a", 1, start)
+	usagePR(t, s, "a", work, 1, true, start)
+	usagePR(t, s, "a", work, 2, false, start)
+	usagePR(t, s, "a", work, 3, false, start)
+	// A newer failed observation does not erase the earlier confirmed merge.
+	require.NoError(t, s.RecordUsagePullRequest(t.Context(), store.UsagePullRequest{Namespace: "a", Repository: "org/repo",
+		Number: 1, State: "unknown", ObservedAt: start.Add(time.Minute)}))
+	// Closed PRs can reopen, so they still need refreshes.
+	require.NoError(t, s.RecordUsagePullRequest(t.Context(), store.UsagePullRequest{Namespace: "a", Repository: "org/repo",
+		Number: 3, GitHubID: "3", State: "closed", ClosedAt: &start, ObservedAt: start.Add(time.Minute)}))
+	links, err := s.ListUsagePullRequestLinks(t.Context(), "a", "monitor-uid", start.Add(10*time.Minute), 20)
+	require.NoError(t, err)
+	numbers := make([]int64, 0, len(links))
+	for _, link := range links {
+		numbers = append(numbers, link.Number)
+	}
+	require.ElementsMatch(t, []int64{2, 3}, numbers)
+	// Another team's observation does not establish this team's merge evidence.
+	other := usageWork(t, s, "b", 1, start)
+	usagePR(t, s, "b", other, 1, false, start)
+	links, err = s.ListUsagePullRequestLinks(t.Context(), "b", "monitor-uid", start.Add(10*time.Minute), 20)
+	require.NoError(t, err)
+	require.Len(t, links, 1)
+	require.EqualValues(t, 1, links[0].Number)
 }
 
 func TestUsageRetentionKeepsWholeActiveCohort(t *testing.T) {
@@ -242,6 +324,58 @@ func TestUsageOwnershipAndImmutableRecords(t *testing.T) {
 	report := usageReport(t, s, []string{"b"}, start.Add(-time.Second), start.Add(time.Second), time.Now().UTC())
 	require.Equal(t, 0, report.Summary.WorkRequests)
 	require.Equal(t, int64(0), report.Summary.TotalTokens)
+}
+
+func TestUsageRetentionExpiresStaleUnknownPRs(t *testing.T) {
+	for _, tc := range []struct {
+		name, state                         string
+		recentLink, recentObservation, keep bool
+	}{
+		{name: "unobserved expired link"},
+		{name: "stale unknown", state: "unknown"},
+		{name: "unobserved recent link", recentLink: true, keep: true},
+		{name: "unknown recent link", state: "unknown", recentLink: true, keep: true},
+		{name: "recent unknown", state: "unknown", recentObservation: true, keep: true},
+		{name: "known open", state: "open", keep: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := setupTestStore(t)
+			now := time.Now().UTC()
+			start := now.Add(-120 * 24 * time.Hour)
+			work := usageWork(t, s, "a", 1, start)
+			usageTask(t, s, "a", work, "task", "Failed", start)
+			usageSample(t, s, "a", "task", "call", 10, start)
+			linkedAt := start
+			if tc.recentLink {
+				linkedAt = now.Add(-time.Hour)
+			}
+			require.NoError(t, s.LinkUsagePullRequest(t.Context(), store.UsagePRLink{Namespace: "a", WorkID: work,
+				Repository: "org/repo", Number: 1, Origin: store.UsagePRCreated, EvidenceID: "publication", LinkedAt: linkedAt}))
+			if tc.state != "" {
+				observedAt := start
+				if tc.recentObservation {
+					observedAt = now.Add(-time.Hour)
+				}
+				require.NoError(t, s.RecordUsagePullRequest(t.Context(), store.UsagePullRequest{Namespace: "a", Repository: "org/repo",
+					Number: 1, State: tc.state, ObservedAt: observedAt}))
+			}
+			require.NoError(t, s.PruneUsage(t.Context(), now.Add(-90*24*time.Hour)))
+			data, err := s.LoadUsage(t.Context(), store.UsageFilter{Namespaces: []string{"a"}, AsOf: now})
+			require.NoError(t, err)
+			if tc.keep {
+				require.Len(t, data.Works, 1)
+				require.Len(t, data.Tasks, 1)
+				require.Len(t, data.Links, 1)
+				require.Len(t, data.Observations, 1)
+			} else {
+				require.Empty(t, data.Works)
+				require.Empty(t, data.Tasks)
+				require.Empty(t, data.Links)
+				require.Empty(t, data.PullRequests)
+				require.Empty(t, data.Observations)
+			}
+		})
+	}
 }
 
 func TestUsageSessionDeltasSurviveRetentionOfEarlierTasks(t *testing.T) {

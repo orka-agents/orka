@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/orka-agents/orka/internal/events"
@@ -99,7 +100,14 @@ func projectUsageEvent(ctx context.Context, db taskDataExecutor, event store.Exe
 	if observation.ObservedAt.IsZero() {
 		observation.ObservedAt = event.CreatedAt
 	}
-	return recordUsage(ctx, db, observation)
+	err := recordUsage(ctx, db, observation)
+	// Invalid runtime accounting must not abort the execution journal. Counts
+	// outside the reporting range are unavailable; provider worker events still
+	// receive validation errors, and persistence failures still propagate.
+	if content.Usage == nil && content.Harness != nil && errors.Is(err, store.ErrValidation) {
+		return nil
+	}
+	return err
 }
 
 func nonzeroUsage(counts ...*int64) bool {

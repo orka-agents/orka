@@ -43,6 +43,7 @@ func TestUsageGitHubReadinessAndVerifiedIdentity(t *testing.T) {
 		{name: "missing head", key: "headRefOid", value: ""},
 		{name: "closed", key: "state", value: "CLOSED"},
 		{name: "different number", key: "number", value: 99, invalid: true},
+		{name: "canonical repository casing", key: "url", value: "https://github.com/Org/Repo/pull/1", ready: true},
 		{name: "different URL", key: "url", value: "https://github.com/other/repo/pull/1", invalid: true},
 		{name: "missing identity", key: "id", value: "", invalid: true},
 	} {
@@ -69,6 +70,60 @@ func TestUsageGitHubReadinessAndVerifiedIdentity(t *testing.T) {
 			require.Equal(t, tc.ready, got.Ready)
 			require.Equal(t, "PR_1", got.GitHubID)
 			require.Equal(t, pr["headRefOid"], got.HeadSHA)
+		})
+	}
+}
+
+func TestUsageCreatedPullRequestValidatesCanonicalRepositoryIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name, url string
+		valid     bool
+	}{
+		{name: "canonical casing", url: "https://github.com/Org/Repo/pull/7", valid: true},
+		{name: "different repository", url: "https://github.com/Other/Repo/pull/7"},
+		{name: "different number", url: "https://github.com/Org/Repo/pull/8"},
+		{name: "different host", url: "https://example.com/Org/Repo/pull/7"},
+		{name: "different path", url: "https://github.com/Org/Repo/issues/7"},
+		{name: "query", url: "https://github.com/Org/Repo/pull/7?extra=1"},
+		{name: "userinfo", url: "https://user@github.com/Org/Repo/pull/7"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := setupControllerSQLiteStore(t)
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1.AddToScheme(scheme))
+			monitor, secret := repositoryMonitorInventoryTestObjects("monitor")
+			monitor.UID = "monitor-uid"
+			monitor.Spec.RepoURL = "https://github.com/ORG/REPO.git"
+			monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: secret.Name}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet {
+					_, _ = fmt.Fprint(w, "[]")
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"number": 7, "html_url": tc.url})
+			}))
+			t.Cleanup(server.Close)
+			r := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(),
+				Store: backend, GitHubAPIBaseURL: server.URL, HTTPClient: server.Client()}
+			prURL, number, err := r.createIssueImplementationPullRequest(t.Context(), monitor,
+				&store.MonitorItem{Number: 1, Title: "Implement issue"},
+				&corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "task", UID: "task-uid"}}, "issue-1", "")
+			if tc.valid {
+				require.NoError(t, err)
+				require.Equal(t, tc.url, prURL)
+				require.Equal(t, 7, number)
+			} else {
+				require.Error(t, err)
+			}
+			data, err := backend.LoadUsage(t.Context(), store.UsageFilter{Namespaces: []string{monitor.Namespace}, AsOf: time.Now().UTC()})
+			require.NoError(t, err)
+			if tc.valid {
+				require.Len(t, data.Links, 1)
+				require.Equal(t, store.UsagePRCreated, data.Links[0].Origin)
+				require.Equal(t, "org/repo", data.Links[0].Repository)
+			} else {
+				require.Empty(t, data.Links)
+			}
 		})
 	}
 }
