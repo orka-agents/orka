@@ -57,6 +57,7 @@ const (
 	repositoryMonitorPublishSkipValidationPolicyChanged    = "validation_policy_changed"
 	repositoryMonitorPublishSkipValidationUnavailable      = "validation_unavailable"
 
+	repositoryMonitorPublishFailureGitHubAuthentication   = "github_authentication_failed"
 	repositoryMonitorPublishFailureGitHubPermissionDenied = "github_permission_denied"
 	repositoryMonitorPublishFailureGitHubPermanent        = "github_permanent_error"
 	repositoryMonitorPublishFailureGitHubAPI              = "github_api_error"
@@ -432,7 +433,8 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewRecordNeedsPublishR
 				activeReservation = true
 			}
 		case repositoryMonitorPublishPhaseFailed:
-			if publishRecord.SkipReason != repositoryMonitorPublishFailureGitHubAPI {
+			if publishRecord.SkipReason != repositoryMonitorPublishFailureGitHubAPI &&
+				publishRecord.SkipReason != repositoryMonitorPublishFailureGitHubAuthentication {
 				needsPublish = false
 				continue
 			}
@@ -1005,7 +1007,12 @@ func repositoryMonitorGitHubPublishFailureReason(err error) string {
 			return repositoryMonitorPublishFailureGitHubAPI
 		}
 		return repositoryMonitorPublishFailureGitHubPermissionDenied
-	case http.StatusUnauthorized, http.StatusNotFound:
+	case http.StatusUnauthorized:
+		// Installation tokens can expire between review completion and publication.
+		// Retry with the current forge Secret after the normal publish cooldown;
+		// the full PR safety and duplicate checks still run before another POST.
+		return repositoryMonitorPublishFailureGitHubAuthentication
+	case http.StatusNotFound:
 		return repositoryMonitorPublishFailureGitHubPermissionDenied
 	case http.StatusBadRequest, http.StatusUnprocessableEntity:
 		return repositoryMonitorPublishFailureGitHubPermanent
