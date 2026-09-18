@@ -71,17 +71,17 @@ const usageCohortQuery = `WITH
    CROSS JOIN usage_tasks t ON t.namespace = f.namespace AND t.task_uid = ids.task_uid
    WHERE t.started_at <= f.as_of
  )
- SELECT 'work' AS kind, w.data, w.started_at AS observed_at, w.id AS row_id FROM usage_work_requests w, selection f
+ SELECT 'work' AS kind, w.data, w.started_at AS observed_at, w.id AS row_order FROM usage_work_requests w, selection f
  WHERE w.namespace = f.namespace AND w.started_at <= f.as_of AND
    (w.id IN (SELECT id FROM selected_works) OR w.id IN (SELECT json_extract(data, '$.workID') FROM retained_tasks))
  UNION ALL SELECT 'task', data, started_at, task_uid FROM retained_tasks
- UNION ALL SELECT 'observation', data, observed_at, id FROM selected_observations
+ UNION ALL SELECT 'observation', data, observed_at, recorded_seq FROM selected_observations
  UNION ALL SELECT 'link', l.data, 0, l.work_id FROM usage_pr_links l, selection f
  WHERE l.namespace = f.namespace AND l.work_id IN (SELECT id FROM selected_works)
  UNION ALL SELECT 'pr', p.data, p.observed_at, CAST(p.number AS TEXT) FROM usage_pull_requests p, selection f
  WHERE p.namespace = f.namespace AND p.observed_at <= f.as_of AND (p.repository, p.number) IN
    (SELECT l.repository, l.number FROM usage_pr_links l WHERE l.namespace = f.namespace AND l.work_id IN (SELECT id FROM selected_works))
- ORDER BY kind, observed_at, row_id`
+ ORDER BY kind, observed_at, row_order`
 
 func loadUsageNamespace(ctx context.Context, db taskDataExecutor, namespace string, filter store.UsageFilter, result *store.UsageData) error {
 	var from, until any
@@ -97,9 +97,9 @@ func loadUsageNamespace(ctx context.Context, db taskDataExecutor, namespace stri
 	}
 	defer func() { _ = rows.Close() }()
 	for rows.Next() {
-		var kind, data, rowID string
+		var kind, data, rowOrder string
 		var observedAt int64
-		if err := rows.Scan(&kind, &data, &observedAt, &rowID); err != nil {
+		if err := rows.Scan(&kind, &data, &observedAt, &rowOrder); err != nil {
 			return err
 		}
 		switch kind {

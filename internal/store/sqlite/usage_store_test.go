@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -170,6 +171,69 @@ func TestUsageJournalReplayCleanupAndRestart(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(1500), get().Summary.TotalTokens)
 	require.Equal(t, "partial", get().Summary.Completeness)
+}
+
+func TestUsageEqualTimestampsPreserveJournalOrderAcrossTasks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage-order.db")
+	db, err := NewDB(path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	s := NewStore(db, path)
+	start := time.Now().UTC().Add(-time.Hour)
+	first := usageWork(t, s, "a", 1, start)
+	second := usageWork(t, s, "a", 2, start.Add(time.Minute))
+	usageTask(t, s, "a", first, "z-first", "Succeeded", start)
+	usageTask(t, s, "a", second, "a-second", "Succeeded", start.Add(time.Minute))
+	at := start.Add(2 * time.Minute)
+	var journal []*store.ExecutionEvent
+	for _, task := range []struct {
+		uid    string
+		counts []int64
+	}{
+		{"z-first", []int64{0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100}},
+		{"a-second", []int64{100, 150}},
+	} {
+		for i, count := range task.counts {
+			// Runtime sequence numbers restart for each prompt. Task IDs and
+			// decimal sequence strings do not encode the cross-prompt order.
+			content, err := json.Marshal(map[string]any{
+				"harnessV2": map[string]any{"taskUID": task.uid, "taskAttempt": 1, "promptID": "prompt-" + task.uid,
+					"runtimeSessionUID": "runtime-session", "runtimeSessionGeneration": 1, "sequence": i + 1},
+				"usageScope": store.UsageScopeSession, "usageReported": true, "usageComplete": i == len(task.counts)-1,
+				"inputTokens": count, "outputTokens": 0,
+			})
+			require.NoError(t, err)
+			event := &store.ExecutionEvent{Namespace: "a", TaskName: task.uid, StreamType: "task", StreamID: task.uid,
+				SessionName: "conversation", Type: events.ExecutionEventTypeModelUsageUpdated, Severity: "info", Content: content, CreatedAt: at}
+			_, err = s.AppendExecutionEvent(t.Context(), event)
+			require.NoError(t, err)
+			journal = append(journal, event)
+		}
+	}
+	check := func() {
+		t.Helper()
+		report := usageReport(t, s, []string{"a"}, start.Add(-time.Second), start.Add(time.Hour), at.Add(time.Minute))
+		require.EqualValues(t, 150, report.Summary.TotalTokens)
+		require.Equal(t, "complete", report.Summary.Completeness)
+		require.Len(t, report.Works, 2)
+		require.EqualValues(t, 100, report.Works[0].Summary.TotalTokens)
+		require.EqualValues(t, 50, report.Works[1].Summary.TotalTokens)
+		require.Zero(t, report.OtherWork[2].Totals.TotalTokens)
+	}
+	check()
+	require.NoError(t, db.Close())
+	db, err = NewDB(path)
+	require.NoError(t, err)
+	s = NewStore(db, path)
+	check()
+	for _, task := range []string{"z-first", "a-second"} {
+		require.NoError(t, s.DeleteExecutionEvents(t.Context(), "a", "task", task))
+	}
+	for _, j := range slices.Backward(journal) {
+		_, err := s.AppendExecutionEvent(t.Context(), j)
+		require.NoError(t, err)
+	}
+	check()
 }
 
 func TestUsageMissingCountsAndReviewOnlyAreVisible(t *testing.T) {

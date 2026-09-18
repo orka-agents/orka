@@ -146,8 +146,9 @@ type UsageFilter struct {
 }
 
 type UsageData struct {
-	Works         []UsageWorkRequest
-	Tasks         []UsageTask
+	Works []UsageWorkRequest
+	Tasks []UsageTask
+	// Observations with equal timestamps are in durable accounting order.
 	Observations  []UsageObservation
 	Links         []UsagePRLink
 	PullRequests  []UsagePullRequest

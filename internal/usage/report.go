@@ -235,6 +235,8 @@ func measuredTasks(data store.UsageData, asOf time.Time) map[string]Task {
 		}
 	}
 	observations := slices.Clone(data.Observations)
+	// The store supplies durable accounting order for equal timestamps. Keep
+	// it when combining namespaces; runtime sequences restart per prompt.
 	sort.SliceStable(observations, func(i, j int) bool { return observations[i].ObservedAt.Before(observations[j].ObservedAt) })
 	counters := map[string]*counter{}
 	seen := map[string]bool{}

@@ -16,9 +16,10 @@ func usageSchema() []string {
 		`CREATE INDEX IF NOT EXISTS idx_usage_tasks_pr ON usage_tasks(namespace, json_extract(data, '$.repository'), json_extract(data, '$.prNumber'))`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_tasks_name ON usage_tasks(namespace, task_name)`,
 		`CREATE TABLE IF NOT EXISTS usage_observations (
+			recorded_seq INTEGER PRIMARY KEY AUTOINCREMENT,
 			namespace TEXT NOT NULL, id TEXT NOT NULL, task_uid TEXT NOT NULL,
 			counter_id TEXT NOT NULL, observed_at INTEGER NOT NULL, data TEXT NOT NULL,
-			PRIMARY KEY (namespace, id)
+			UNIQUE (namespace, id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_observations_time ON usage_observations(namespace, observed_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_observations_task ON usage_observations(namespace, task_uid)`,
