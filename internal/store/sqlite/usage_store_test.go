@@ -126,6 +126,22 @@ func TestUsageSharedWorkAndCombinedTeamsDeduplicatePRs(t *testing.T) {
 			}
 		}
 	}
+	filter := store.UsageFilter{Namespaces: []string{"a", "b"}, From: start.Add(-time.Second), Until: start.Add(time.Second), AsOf: report.Selection.AsOf}
+	data, err := s.LoadUsage(t.Context(), filter)
+	require.NoError(t, err)
+	seen := map[string]bool{}
+	for offset := range 3 {
+		page := usage.BuildPage(data, filter, usage.Page{Limit: 1, Offset: offset}, "")
+		require.Equal(t, report.Summary, page.Summary)
+		require.Equal(t, report.Teams, page.Teams)
+		require.Equal(t, 3, page.Page.Total)
+		require.Len(t, page.Works, 1)
+		require.Equal(t, report.Works[offset].Summary, page.Works[0].Summary)
+		require.False(t, seen[page.Works[0].ID])
+		seen[page.Works[0].ID] = true
+		require.Empty(t, page.Works[0].Tasks)
+		require.Empty(t, page.Works[0].PullRequests)
+	}
 }
 
 func TestUsageJournalReplayCleanupAndRestart(t *testing.T) {

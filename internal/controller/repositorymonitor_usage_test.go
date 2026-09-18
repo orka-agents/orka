@@ -13,10 +13,13 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/usage"
 )
 
 func usageGitHubPR(number int64) map[string]any {
@@ -172,6 +175,92 @@ func TestUsageGitHubRefreshIsBoundedAndContinuesAfterTasks(t *testing.T) {
 		require.Equal(t, "merged", pr.State)
 		require.NotNil(t, pr.MergedAt)
 		require.False(t, pr.Ready)
+	}
+}
+
+func TestUsageOutcomeTimerOnlyWhileLinksNeedRefresh(t *testing.T) {
+	for _, tc := range []struct {
+		name, state string
+		refresh     bool
+		links       int
+		want        time.Duration
+	}{
+		{name: "no links"},
+		{name: "confirmed merge", state: "merged"},
+		{name: "recent open observation", state: "open", want: usageOutcomeRefreshInterval},
+		{name: "closed can reopen", state: "closed", want: usageOutcomeRefreshInterval},
+		{name: "last pending link merges during reconcile", state: "open", refresh: true},
+		{name: "refresh backlog", state: "open", refresh: true, links: 45, want: usageOutcomeBacklogInterval},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := setupControllerSQLiteStore(t)
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1alpha1.AddToScheme(scheme))
+			require.NoError(t, corev1.AddToScheme(scheme))
+			monitor, secret := repositoryMonitorInventoryTestObjects("monitor")
+			monitor.Spec.RepoURL = "https://github.com/org/repo"
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				requests.Add(1)
+				var query struct {
+					Variables struct {
+						Number int64 `json:"number"`
+					} `json:"variables"`
+				}
+				_ = json.NewDecoder(request.Body).Decode(&query)
+				pr := usageGitHubPR(query.Variables.Number)
+				if tc.links == 0 {
+					pr["state"], pr["mergedAt"] = "MERGED", "2026-01-02T00:00:00Z"
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"repository": map[string]any{"nameWithOwner": "org/repo", "pullRequest": pr}}})
+			}))
+			t.Cleanup(server.Close)
+			r := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).
+				WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+				WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).Build(),
+				Store: backend, GitHubAPIBaseURL: server.URL, HTTPClient: server.Client()}
+			if tc.state != "" {
+				work, err := r.prepareMonitorUsageWork(t.Context(), monitor, "org/repo", "issue", 1)
+				require.NoError(t, err)
+				at := time.Now().UTC()
+				if tc.refresh {
+					at = at.Add(-2 * usageOutcomeRefreshInterval)
+				}
+				for i := range max(1, tc.links) {
+					number := int64(12 + i)
+					require.NoError(t, backend.LinkUsagePullRequest(t.Context(), store.UsagePRLink{Namespace: monitor.Namespace, WorkID: work,
+						Repository: "org/repo", Number: number, Origin: store.UsagePRCreated, EvidenceID: "publication"}))
+					observation := store.UsagePullRequest{Namespace: monitor.Namespace, NamespaceUID: "namespace-uid", Repository: "org/repo",
+						Number: number, GitHubID: fmt.Sprint("PR_", number), State: tc.state, ObservedAt: at}
+					if tc.state == "merged" {
+						observation.MergedAt = &at
+					}
+					require.NoError(t, backend.RecordUsagePullRequest(t.Context(), observation))
+				}
+			}
+			result, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: monitor.Namespace, Name: monitor.Name}})
+			require.NoError(t, err)
+			require.Equal(t, tc.want, result.RequeueAfter)
+			if tc.refresh {
+				require.EqualValues(t, min(20, max(1, tc.links)), requests.Load())
+			} else {
+				require.Zero(t, requests.Load())
+			}
+			if tc.links > 20 {
+				result, err = r.Reconcile(t.Context(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: monitor.Namespace, Name: monitor.Name}})
+				require.NoError(t, err)
+				require.Equal(t, usageOutcomeBacklogInterval, result.RequeueAfter)
+				require.EqualValues(t, 40, requests.Load())
+				result, err = r.Reconcile(t.Context(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: monitor.Namespace, Name: monitor.Name}})
+				require.NoError(t, err)
+				require.Equal(t, usageOutcomeRefreshInterval, result.RequeueAfter)
+				require.EqualValues(t, 45, requests.Load())
+				filter := store.UsageFilter{Namespaces: []string{monitor.Namespace}, From: time.Now().Add(-time.Hour), Until: time.Now().Add(time.Hour), AsOf: time.Now().UTC()}
+				data, err := backend.LoadUsage(t.Context(), filter)
+				require.NoError(t, err)
+				require.Equal(t, 45, usage.Build(data, filter).Summary.PRsReady)
+			}
+		})
 	}
 }
 

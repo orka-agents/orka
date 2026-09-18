@@ -318,7 +318,7 @@ func loadUsage(ctx context.Context, db taskDataExecutor, filter store.UsageFilte
 			return result, store.ValidationErrorf("usage report requires a verified namespace UID")
 		}
 		if err := loadUsageNamespace(ctx, db, namespace, filter, &result); err != nil {
-			return result, err
+			return store.UsageData{}, err
 		}
 	}
 	var since int64

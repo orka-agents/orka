@@ -5,7 +5,7 @@ import { render, screen, waitFor, within } from '@/test/test-utils'
 import { server } from '@/test/mocks/server'
 import { useUIStore } from '@/stores/ui'
 import { useAuthStore } from '@/stores/auth'
-import { recordedTokens, type UsageReport, type UsageSummary } from '@/lib/usage'
+import { recordedTokens, type UsageReport, type UsageSummary, type UsageWork } from '@/lib/usage'
 import { UsagePage } from './usage-page'
 
 vi.mock('zustand/middleware', () => ({ persist: (fn: unknown) => fn }))
@@ -13,7 +13,7 @@ vi.mock('@tanstack/react-router', () => ({
   Link: ({ children, to, onClick }: { children: React.ReactNode; to: string; onClick?: () => void }) => <a href={to} onClick={onClick}>{children}</a>,
 }))
 
-function reportFixture(): UsageReport {
+function reportFixture(): UsageReport & { works: UsageWork[] } {
   const summary: UsageSummary = {
     inputTokens: 10000000, outputTokens: 2000000, totalTokens: 12000000,
     cachedInputTokens: 1000000, cacheWriteInputTokens: 0, cachedUsageReported: true, cacheWriteUsageReported: false,
@@ -25,6 +25,7 @@ function reportFixture(): UsageReport {
   return {
     selection: { teams: ['payments'], from: '2026-09-01T00:00:00Z', until: '2026-10-01T00:00:00Z', asOf: '2026-10-15T12:00:00Z' },
     summary, teams: [{ namespace: 'payments', summary }], otherWork: [],
+    page: { limit: 25, offset: 0, total: 20 },
     works: Array.from({ length: 20 }, (_, i) => {
       const usage = { ...summary, inputTokens: 500000, outputTokens: 100000, totalTokens: 600000, measurements: 1, reportedMeasurements: 1, calls: 1 }
       return {
@@ -48,7 +49,15 @@ describe('UsagePage', () => {
   })
 
   it('shows the Payments ratios and the linked request evidence', async () => {
-    server.use(http.get('/api/v1/usage', () => HttpResponse.json(reportFixture())))
+    const report = reportFixture()
+    const requests: URL[] = []
+    server.use(
+      http.get('/api/v1/usage', () => HttpResponse.json(report)),
+      http.get('/api/v1/usage/work/:id', ({ request, params }) => {
+        requests.push(new URL(request.url))
+        return HttpResponse.json({ work: report.works.find((work) => work.id === params.id) })
+      }),
+    )
     const user = userEvent.setup()
     render(<UsagePage />)
     const heading = await screen.findByText('Tokens per merged PR')
@@ -57,11 +66,97 @@ describe('UsagePage', () => {
     expect(within(card).getByText('800,000')).toBeInTheDocument()
     expect(within(card).getByText('Price unavailable')).toBeInTheDocument()
     expect(screen.getByText(/including unsuccessful work/)).toBeInTheDocument()
+    expect(requests).toHaveLength(0)
+    expect(screen.queryByText('Models: served-model')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Attempt call-0/)).not.toBeInTheDocument()
     await user.click(screen.getByText('org/repo #1'))
-    expect(screen.getByRole('link', { name: 'PR #101' })).toHaveAttribute('href', 'https://github.com/org/repo/pull/101')
+    expect(await screen.findByRole('link', { name: 'PR #101' })).toHaveAttribute('href', 'https://github.com/org/repo/pull/101')
+    expect(requests).toHaveLength(1)
+    expect(requests[0].searchParams.get('asOf')).toBe(report.selection.asOf)
+    expect(screen.queryByText(/Attempt call-0/)).not.toBeInTheDocument()
     await user.click(screen.getByText('task-0', { exact: false, selector: 'summary' }))
-    const task = screen.getByRole('link', { name: 'Open Task task-0' }).closest('details') as HTMLElement
+    const task = (await screen.findByRole('link', { name: 'Open Task task-0' })).closest('details') as HTMLElement
     expect(within(task).getByText('Input 500,000 · Output 100,000 · Cached reads 50,000 · Cached writes Unavailable')).toBeInTheDocument()
+  })
+
+  it('pins the report time when paging work summaries', async () => {
+    const report = reportFixture()
+    const requests: URL[] = []
+    server.use(http.get('/api/v1/usage', ({ request }) => {
+      const url = new URL(request.url)
+      requests.push(url)
+      const offset = Number(url.searchParams.get('offset'))
+      return HttpResponse.json({ ...report, page: { limit: 25, offset, total: 26 },
+        works: [{ ...report.works[0], id: `work-${offset}`, number: offset + 1 }] })
+    }))
+    const user = userEvent.setup()
+    render(<UsagePage />)
+    await screen.findByText('org/repo #1')
+    await user.click(screen.getByRole('button', { name: 'Next Work requests' }))
+    await screen.findByText('org/repo #26')
+    expect(screen.queryByText('org/repo #1')).not.toBeInTheDocument()
+    expect(screen.getAllByText('1,200,000')).toHaveLength(2)
+    expect(requests[1].searchParams.get('offset')).toBe('25')
+    expect(requests[1].searchParams.get('asOf')).toBe(report.selection.asOf)
+    await user.click(screen.getByRole('button', { name: 'Apply filters' }))
+    await screen.findByText('org/repo #1')
+    await waitFor(() => expect(requests).toHaveLength(3))
+    expect(requests.at(-1)?.searchParams.get('asOf')).toBeNull()
+  })
+
+  it('fetches other usage only on expansion and pages its Tasks', async () => {
+    const report = reportFixture()
+    const group = { category: 'unassociated', explanation: 'Usage without a work reference', usage: report.summary, taskCount: 26 }
+    report.otherWork = [group]
+    const requests: URL[] = []
+    server.use(
+      http.get('/api/v1/usage', () => HttpResponse.json(report)),
+      http.get('/api/v1/usage/other/unassociated', ({ request }) => {
+        const url = new URL(request.url)
+        requests.push(url)
+        const offset = Number(url.searchParams.get('offset'))
+        return HttpResponse.json({ otherWork: { ...group, page: { offset, limit: 25, total: 26 },
+          tasks: [{ ...report.works[0].tasks![0], taskUID: `chat-${offset}`, taskName: `chat-${offset}` }] } })
+      }),
+    )
+    const user = userEvent.setup()
+    render(<UsagePage />)
+    await screen.findByText('Tokens per merged PR')
+    expect(requests).toHaveLength(0)
+    await user.click(screen.getByText('Chat and usage without a work reference'))
+    await screen.findByText('chat-0', { exact: false, selector: 'summary' })
+    expect(requests[0].searchParams.get('asOf')).toBe(report.selection.asOf)
+    expect(requests[0].searchParams.get('teams')).toBe('payments')
+    await user.click(screen.getByRole('button', { name: 'Next Chat and usage without a work reference Tasks' }))
+    await screen.findByText('chat-25', { exact: false, selector: 'summary' })
+    expect(screen.queryByText('chat-0', { exact: false, selector: 'summary' })).not.toBeInTheDocument()
+    expect(requests[1].searchParams.get('offset')).toBe('25')
+  })
+
+  it('bounds mounted Tasks and measurements within a large work request', async () => {
+    const report = reportFixture()
+    const task = report.works[0].tasks![0]
+    const work = { ...report.works[0], tasks: Array.from({ length: 26 }, (_, i) => ({ ...task, taskUID: `task-${i}`, taskName: `task-${i}`,
+      measurements: Array.from({ length: 26 }, (_, j) => ({ ...task.measurements[0], id: `call-${i}-${j}` })) })) }
+    server.use(
+      http.get('/api/v1/usage', () => HttpResponse.json(report)),
+      http.get('/api/v1/usage/work/work-0', () => HttpResponse.json({ work })),
+    )
+    const user = userEvent.setup()
+    render(<UsagePage />)
+    await user.click(await screen.findByText('org/repo #1'))
+    await screen.findByText('task-0', { exact: false, selector: 'summary' })
+    expect(screen.queryByText('task-25', { exact: false, selector: 'summary' })).not.toBeInTheDocument()
+    expect(screen.queryByText('Attempt call-0-0')).not.toBeInTheDocument()
+    await user.click(screen.getByText('task-0', { exact: false, selector: 'summary' }))
+    await screen.findByText('Attempt call-0-0')
+    expect(screen.queryByText('Attempt call-0-25')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Next Measurements' }))
+    expect(await screen.findByText('Attempt call-0-25')).toBeInTheDocument()
+    expect(screen.queryByText('Attempt call-0-0')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Next Tasks' }))
+    await screen.findByText('task-25', { exact: false, selector: 'summary' })
+    expect(screen.queryByText('task-0', { exact: false, selector: 'summary' })).not.toBeInTheDocument()
   })
 
   it('explains zero merges and missing usage without showing a free call', async () => {

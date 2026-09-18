@@ -74,7 +74,7 @@ export interface UsagePR {
   observedAt: string
 }
 
-export interface UsageWork {
+export interface UsageWorkSummary {
   id: string
   namespace: string
   monitorName: string
@@ -83,18 +83,50 @@ export interface UsageWork {
   number: number
   startedAt: string
   summary: UsageSummary
-  tasks: UsageTask[]
-  pullRequests: UsagePR[]
-  models: string[]
+}
+
+export interface UsageWork extends UsageWorkSummary {
+  tasks?: UsageTask[]
+  pullRequests?: UsagePR[]
+  models?: string[]
+}
+
+export interface UsagePage {
+  limit: number
+  offset: number
+  total: number
+}
+
+export interface UsageSelection {
+  teams: string[]
+  from: string
+  until: string
+  asOf: string
+  repository?: string
+  model?: string
+  kind?: string
+}
+
+export interface UsageOtherSummary {
+  category: string
+  explanation: string
+  usage: UsageTotals
+  taskCount: number
+}
+
+export interface UsageOther extends UsageOtherSummary {
+  tasks?: UsageTask[]
+  page: UsagePage
 }
 
 export interface UsageReport {
-  selection: { teams: string[]; from: string; until: string; asOf: string }
+  selection: UsageSelection
   retainedSince?: string
   summary: UsageSummary
   teams: { namespace: string; summary: UsageSummary }[]
-  works: UsageWork[]
-  otherWork: { category: string; explanation: string; usage: UsageTotals; tasks: UsageTask[] }[]
+  works: UsageWorkSummary[]
+  otherWork: UsageOtherSummary[]
+  page: UsagePage
 }
 
 export function usageNumber(value: number | null | undefined) {
@@ -102,6 +134,6 @@ export function usageNumber(value: number | null | undefined) {
 }
 
 export function recordedTokens(usage: UsageTotals) {
-	if (usage.measurements === 0) return 'No model calls'
+  if (usage.measurements === 0) return 'No model calls'
   return usage.completeness === 'unavailable' ? 'Usage unavailable' : usageNumber(usage.totalTokens)
 }

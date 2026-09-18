@@ -5,9 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"strings"
 	"time"
 )
+
+var ErrUsageSelectionTooLarge = errors.New("usage report selection is too large")
 
 const (
 	UsageSourceProvider  = "provider"
@@ -144,6 +147,8 @@ type UsageFilter struct {
 	Namespaces []string `json:"teams"`
 	// NamespaceUIDs is supplied by the server after live namespace lookup.
 	NamespaceUIDs map[string]string `json:"-"`
+	WorkID        string            `json:"-"`
+	MaxRecords    int               `json:"-"`
 	Repository    string            `json:"repository,omitempty"`
 	Kind          string            `json:"kind,omitempty"`
 	Model         string            `json:"model,omitempty"`

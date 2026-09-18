@@ -43,8 +43,10 @@ Opened and merged are historical counts. Readiness is current. These counts
 overlap, so do not add the columns together. With no merges, the report shows
 **No PRs merged yet** and the usage spent; the merged-PR ratio is unavailable.
 
-Expand a request to inspect its Tasks, sessions, measurements, PR links, current
-head, and measurement gaps. Shared review usage appears in every related request
+Work requests appear in pages of 25. Expand a request to load its Tasks, sessions,
+measurements, PR links, current head, and measurement gaps. Detail lists also page
+their contents. Paging preserves the report time and full cohort totals; apply
+the filters again to refresh them. Shared review usage appears in every related request
 with a shared-work label, but counts once in the team and combined-team totals.
 One request can produce several PRs without copying its usage onto each PR.
 Several requests or teams can contribute to one PR without increasing the
@@ -102,9 +104,11 @@ uses only recorded tokens and can understate usage. An estimate retains the
 
 Orka refreshes retained PR links while their RepositoryMonitor is active, even
 after the execution Tasks finish or are deleted. A confirmed merge ends polling
-for that PR. Closed, unmerged PRs remain eligible because they can reopen.
+for that PR. Monitors without refreshable links keep their normal schedule.
+Closed, unmerged PRs remain eligible because they can reopen.
 Each reconcile checks up to 20 PRs that have not been checked in five minutes.
-Larger backlogs take longer.
+While eligible links remain, the monitor schedules another batch after 15 seconds.
+Once the backlog is drained, it returns to the five-minute refresh interval.
 Closed PRs are queried directly, so they need not appear in the open-PR inventory.
 An unavailable GitHub response clears current readiness without inventing a merge
 or removing a previously confirmed merge.
@@ -122,6 +126,9 @@ store. Set the controller's `--usage-retention` duration to control reporting
 history. The default is `2160h`, or 90 days; `0` keeps it indefinitely. Cleanup runs
 hourly and expires whole inactive cohorts. A running Task, recent usage or state
 transition, or an open linked PR keeps the cohort and its earlier attempts.
+Deleting an unfinished Task records cancellation for retention, while preserving
+an execution outcome that was already recorded. This keeps abandoned work from
+remaining active forever after Task deletion.
 An unknown PR state keeps a cohort only while its link or latest observation
 falls within the retention period.
 Shared reviews and cumulative-counter baselines are retained with the work that
@@ -136,9 +143,12 @@ database and plan the upgrade according to the
 
 ## API and access
 
-`GET /api/v1/usage` returns the summary, team rows, work details, and other usage.
-`GET /api/v1/usage/work/:id` returns one work request using the same calculations.
-The summary response contains each work ID.
+`GET /api/v1/usage` returns full cohort totals, team rows, a page of work summaries,
+and other-usage totals. It omits Task and measurement details.
+`GET /api/v1/usage/work/:id` loads one work request and its details using the same
+calculations. The summary response contains each work ID.
+`GET /api/v1/usage/other/:category` returns a page of Tasks and their measurements
+for `review_only`, `other_requests`, or `unassociated` usage.
 
 | Query | Meaning |
 | --- | --- |
@@ -149,6 +159,15 @@ The summary response contains each work ID.
 | `model` | Select whole requests that used the given model. |
 | `from`, `until` | Request-start period, accepting UTC dates or RFC3339 timestamps. `until` is exclusive. The summary defaults to the current UTC month through the report time. Work details default to all retained history. |
 | `asOf` | Include observations through this timestamp; defaults to now. Future report times are rejected. |
+| `limit`, `offset` | Work-summary or other-usage Task page size and offset. The default limit is 25, capped at 100; offset defaults to 0. Pagination never changes aggregate totals. |
+
+Paged responses include `page.limit`, `page.offset`, and `page.total`. Pass the
+summary's `asOf` on later page and detail requests to preserve the report time.
+Selections requiring more than 20,000 retained records return HTTP 422 with an
+instruction to narrow the filters. Records include work, Task, measurement,
+PR-link, and PR-observation history, including required cumulative baselines.
+This limit applies even when retention is unlimited. The API never returns
+truncated totals as a complete report.
 
 For example, request
 `/api/v1/usage?namespace=payments&from=2026-09-01&until=2026-10-01&asOf=2026-10-15T12:00:00Z`

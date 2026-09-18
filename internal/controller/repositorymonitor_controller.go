@@ -123,8 +123,14 @@ func (r *RepositoryMonitorReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, err
 	}
 	result, err = r.reconcileRepositoryMonitorRuns(ctx, monitor, state)
-	if _, enabled := r.Store.(store.UsageStore); enabled && (result.RequeueAfter == 0 || result.RequeueAfter > usageOutcomeRefreshInterval) {
-		result.RequeueAfter = usageOutcomeRefreshInterval
+	if err == nil && (result.RequeueAfter == 0 || result.RequeueAfter > usageOutcomeBacklogInterval) {
+		next, pollErr := r.usageOutcomeRequeueAfter(ctx, monitor)
+		if pollErr != nil {
+			return result, pollErr
+		}
+		if next > 0 && (result.RequeueAfter == 0 || next < result.RequeueAfter) {
+			result.RequeueAfter = next
+		}
 	}
 	return result, err
 }

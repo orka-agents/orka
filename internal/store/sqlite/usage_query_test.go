@@ -70,7 +70,7 @@ func TestUsageLoadSelectsCohortAndPreservesCounterHistory(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, all.Observations, 2008)
 	for _, tc := range []struct {
-		name, repository, kind, model string
+		name, repository, kind, model, workID string
 	}{
 		{name: "date"},
 		{name: "repository", repository: "ORG/REPO"},
@@ -80,10 +80,19 @@ func TestUsageLoadSelectsCohortAndPreservesCounterHistory(t *testing.T) {
 		{name: "delegated model", model: "served-model"},
 		{name: "absent model", model: "missing-model"},
 		{name: "absent repository", repository: "other/repo"},
+		{name: "requested work", workID: work},
+		{name: "missing work", workID: "missing"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			selected := filter
 			selected.Repository, selected.Kind, selected.Model = tc.repository, tc.kind, tc.model
+			selected.WorkID = tc.workID
+			if selected.WorkID != "" {
+				// Detail requests default to all retained history. Earlier work
+				// metadata is needed for baselines, but is not itself selected.
+				selected.From = time.Unix(0, 0).UTC()
+				selected.MaxRecords = 32
+			}
 			data, err := s.LoadUsage(t.Context(), selected)
 			require.NoError(t, err)
 			require.LessOrEqual(t, len(data.Observations), 8)
@@ -98,6 +107,24 @@ func TestUsageLoadSelectsCohortAndPreservesCounterHistory(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestUsageLoadRejectsOversizedSelectionAcrossNamespaces(t *testing.T) {
+	s := setupTestStore(t)
+	start := time.Now().UTC().Add(-time.Hour)
+	for _, team := range []string{"a", "b"} {
+		work := usageWork(t, s, team, 1, start)
+		usageTask(t, s, team, work, "task", "Succeeded", start)
+		usageSample(t, s, team, "task", "call", 100, start)
+	}
+	filter := store.UsageFilter{Namespaces: []string{"a", "b"}, From: start, Until: start.Add(time.Second), AsOf: time.Now().UTC(), MaxRecords: 6}
+	data, err := s.LoadUsage(t.Context(), filter)
+	require.NoError(t, err)
+	require.EqualValues(t, 200, usage.Build(data, filter).Summary.TotalTokens)
+	filter.MaxRecords = 5
+	data, err = s.LoadUsage(t.Context(), filter)
+	require.ErrorIs(t, err, store.ErrUsageSelectionTooLarge)
+	require.Empty(t, data, "an oversized selection must not return partial data")
 }
 
 func TestUsageNamespaceFilterPreservesOnlyOwnedCounterHistory(t *testing.T) {

@@ -14,7 +14,32 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-const usageOutcomeRefreshInterval = 5 * time.Minute
+const (
+	usageOutcomeRefreshInterval = 5 * time.Minute
+	usageOutcomeBacklogInterval = 15 * time.Second
+)
+
+func (r *RepositoryMonitorReconciler) usageOutcomeRequeueAfter(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (time.Duration, error) {
+	usageStore, ok := r.Store.(store.UsageStore)
+	if !ok || monitor.UID == "" {
+		return 0, nil
+	}
+	now := time.Now().UTC()
+	links, err := usageStore.ListUsagePullRequestLinks(ctx, monitor.Namespace, string(monitor.UID), now.Add(-usageOutcomeRefreshInterval), 1)
+	if err != nil {
+		return 0, err
+	}
+	if len(links) > 0 {
+		return usageOutcomeBacklogInterval, nil
+	}
+	// Include recently observed links: they still need a timer for their next
+	// refresh. Confirmed merges are excluded by the store.
+	links, err = usageStore.ListUsagePullRequestLinks(ctx, monitor.Namespace, string(monitor.UID), now, 1)
+	if len(links) > 0 {
+		return usageOutcomeRefreshInterval, err
+	}
+	return 0, err
+}
 
 func validUsagePullRequestURL(rawURL, repository string, number int64) bool {
 	parsed, err := url.Parse(rawURL)

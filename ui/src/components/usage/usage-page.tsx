@@ -1,8 +1,8 @@
-import { useState, type FormEvent } from 'react'
+import { useState, type FormEvent, type ReactNode } from 'react'
 import { Link } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '@/lib/api-client'
-import { recordedTokens, usageNumber, type UsageReport, type UsageSummary, type UsageTask, type UsageTotals, type UsageWork } from '@/lib/usage'
+import { recordedTokens, usageNumber, type UsageOther, type UsageOtherSummary, type UsagePage as UsagePagination, type UsageReport, type UsageSelection, type UsageSummary, type UsageTask, type UsageTotals, type UsageWork, type UsageWorkSummary } from '@/lib/usage'
 import { useUIStore } from '@/stores/ui'
 import { PageHeader } from '@/components/layout/page-header'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -28,14 +28,16 @@ export function UsagePage() {
 function UsagePageContent({ namespace }: { namespace: string }) {
   const [filters, setFilters] = useState(initialFilters)
   const [draft, setDraft] = useState(filters)
+  const [page, setPage] = useState({ offset: 0, asOf: '' })
   const { data, error, isPending, isFetching } = useQuery({
-    queryKey: ['usage', namespace, filters],
-    queryFn: () => api.get<UsageReport>('/usage', { namespace, ...filters }),
-    refetchInterval: 60000,
+    queryKey: ['usage', namespace, filters, page],
+    queryFn: () => api.get<UsageReport>('/usage', { namespace, ...filters, offset: String(page.offset), asOf: page.asOf, limit: '25' }),
+    refetchInterval: page.asOf ? false : 60000,
   })
   function apply(event: FormEvent) {
     event.preventDefault()
     setFilters({ ...draft })
+    setPage({ offset: 0, asOf: '' })
   }
   return (
     <div className="space-y-6">
@@ -91,17 +93,13 @@ function UsagePageContent({ namespace }: { namespace: string }) {
           <h2 className="text-lg font-semibold">Work requests</h2>
           <p className="text-sm text-muted-foreground">Expand a request to inspect attempts and measurement gaps. Shared review usage appears in each linked request and counts once in team totals.</p>
           {data.works.length === 0 && <p>No issue-delivery requests in this cohort. Change the filters or run an issue-to-PR workflow to begin recording.</p>}
-          {data.works.map((work) => <WorkDetails key={work.id} work={work} />)}
+          {data.works.map((work) => <WorkDetails key={work.id} work={work} selection={data.selection} />)}
+          <PageControls label="Work requests" page={data.page} disabled={isFetching} onChange={(offset) => setPage({ offset, asOf: data.selection.asOf })} />
         </section>
         <section className="space-y-3" aria-label="Other team usage">
           <h2 className="text-lg font-semibold">Other team usage</h2>
           <p className="text-sm text-muted-foreground">Activity started in the selected period that is excluded from this delivery cohort.</p>
-          {data.otherWork.map((group) => <details key={group.category} className="rounded-lg border bg-card p-4">
-            <summary className="cursor-pointer text-sm font-medium">{otherTitle(group.category)} <span className="ml-2 font-mono text-muted-foreground">{group.tasks.length ? recordedTokens(group.usage) : 'No recorded activity'}</span></summary>
-            <div className="mt-3 space-y-3"><p className="text-sm text-muted-foreground">{group.explanation}</p>
-              {group.tasks.map((task) => <TaskDetails key={`${task.namespace}/${task.taskUID}`} task={task} />)}
-            </div>
-          </details>)}
+          {data.otherWork.map((group) => <OtherDetails key={`${group.category}/${JSON.stringify(filters)}`} group={group} namespace={namespace} selection={data.selection} />)}
         </section>
         {data.retainedSince && <p className="text-xs text-muted-foreground">Inactive cohorts may expire before {new Date(data.retainedSince).toLocaleDateString()}. Retained requests keep their earlier attempts.</p>}
       </>}
@@ -156,48 +154,113 @@ function MeasurementCoverage({ usage }: { usage: UsageTotals }) {
   </p>
 }
 
-function WorkDetails({ work }: { work: UsageWork }) {
-  return <details className="rounded-lg border bg-card p-4">
+function selectionParams(selection: UsageSelection): Record<string, string> {
+  return { from: selection.from, until: selection.until, asOf: selection.asOf,
+    repository: selection.repository || '', model: selection.model || '', kind: selection.kind || '' }
+}
+
+function PageControls({ label, page, onChange, disabled = false }: { label: string; page: UsagePagination; onChange: (offset: number) => void; disabled?: boolean }) {
+  if (page.total <= page.limit) return null
+  return <nav aria-label={`${label} pages`} className="flex flex-wrap items-center gap-3 text-sm">
+    <Button variant="outline" size="sm" aria-label={`Previous ${label}`} disabled={disabled || page.offset === 0} onClick={() => onChange(Math.max(0, page.offset - page.limit))}>Previous</Button>
+    <span>{Math.min(page.offset + 1, page.total)} to {Math.min(page.offset + page.limit, page.total)} of {page.total}</span>
+    <Button variant="outline" size="sm" aria-label={`Next ${label}`} disabled={disabled || page.offset + page.limit >= page.total} onClick={() => onChange(page.offset + page.limit)}>Next</Button>
+  </nav>
+}
+
+function PagedItems<T>({ label, items, renderItem }: { label: string; items: T[]; renderItem: (item: T) => ReactNode }) {
+  const [offset, setOffset] = useState(0)
+  const start = Math.min(offset, Math.max(0, Math.ceil(items.length / 25) - 1) * 25)
+  return <>
+    {items.slice(start, start + 25).map(renderItem)}
+    <PageControls label={label} page={{ offset: start, limit: 25, total: items.length }} onChange={setOffset} />
+  </>
+}
+
+function WorkDetails({ work, selection }: { work: UsageWorkSummary; selection: UsageSelection }) {
+  const [open, setOpen] = useState(false)
+  return <details className="rounded-lg border bg-card p-4" onToggle={(event) => setOpen(event.currentTarget.open)}>
     <summary className="cursor-pointer text-sm font-medium">
       {work.repository} #{work.number}<span className="ml-3 text-muted-foreground">{work.namespace}</span>
       <span className="ml-3 font-mono">{recordedTokens(work.summary)}</span>
     </summary>
-    <div className="mt-4 space-y-4">
+    {open && <WorkContent work={work} selection={selection} />}
+  </details>
+}
+
+function WorkContent({ work: summary, selection }: { work: UsageWorkSummary; selection: UsageSelection }) {
+  const params = { namespace: summary.namespace, ...selectionParams(selection) }
+  const { data, error, isPending } = useQuery({
+    queryKey: ['usage-work', summary.id, params],
+    queryFn: () => api.get<{ work: UsageWork }>(`/usage/work/${encodeURIComponent(summary.id)}`, params),
+    staleTime: Infinity,
+  })
+  if (error) return <p role="alert" className="mt-3 text-destructive">Work details unavailable. {error.message}</p>
+  if (isPending) return <p role="status" className="mt-3">Loading work details...</p>
+  const work = data.work
+  return <div className="mt-4 space-y-4">
       <div className="flex flex-wrap gap-3 text-sm">
         <a className="text-primary underline" href={`https://github.com/${work.repository}/issues/${work.number}`} target="_blank" rel="noreferrer">Open issue #{work.number}</a>
         <span>Started {new Date(work.startedAt).toLocaleString()}</span>
-        <span>Models: {work.models.join(', ') || 'Unavailable'}</span>
+        <span>Models: {work.models?.join(', ') || 'Unavailable'}</span>
       </div>
       <MeasurementCoverage usage={work.summary} />
-      {work.pullRequests.map((pr) => <div key={`${pr.repository}#${pr.number}`} className="space-y-1 border-l-2 border-primary/40 pl-3 text-sm">
+      <PagedItems label="Pull requests" items={work.pullRequests || []} renderItem={(pr) => <div key={`${pr.repository}#${pr.number}`} className="space-y-1 border-l-2 border-primary/40 pl-3 text-sm">
         <a href={pr.url} target="_blank" rel="noreferrer" className="text-primary underline">PR #{pr.number}</a>
         <span className="ml-2">{pr.origin === 'created' ? 'Created through Orka' : pr.origin === 'assisted' ? 'Linked assistance' : 'Review only'}</span>
         <Badge variant="outline" className="ml-2">{pr.ready ? 'Ready for merge' : pr.state}</Badge>
         {pr.headSHA && <p className="font-mono text-xs">Head {pr.headSHA}</p>}
         {pr.readinessReason && <p className="text-muted-foreground">{pr.readinessReason}</p>}
         {pr.observedAt && !pr.observedAt.startsWith('0001') && <p className="text-xs text-muted-foreground">Checked {new Date(pr.observedAt).toLocaleString()}</p>}
-      </div>)}
-      {work.tasks.map((task) => <TaskDetails key={`${task.namespace}/${task.taskUID}`} task={task} />)}
+      </div>} />
+      <PagedItems label="Tasks" items={work.tasks || []} renderItem={(task) => <TaskDetails key={`${task.namespace}/${task.taskUID}`} task={task} />} />
     </div>
+}
+
+function OtherDetails({ group, namespace, selection }: { group: UsageOtherSummary; namespace: string; selection: UsageSelection }) {
+  const [open, setOpen] = useState(false)
+  return <details className="rounded-lg border bg-card p-4" onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <summary className="cursor-pointer text-sm font-medium">{otherTitle(group.category)} <span className="ml-2 font-mono text-muted-foreground">{group.taskCount ? recordedTokens(group.usage) : 'No recorded activity'}</span></summary>
+    {open && <div className="mt-3 space-y-3">
+      <p className="text-sm text-muted-foreground">{group.explanation}</p>
+      {group.taskCount > 0 && <OtherContent group={group} namespace={namespace} selection={selection} />}
+    </div>}
   </details>
 }
 
+function OtherContent({ group, namespace, selection }: { group: UsageOtherSummary; namespace: string; selection: UsageSelection }) {
+  const [offset, setOffset] = useState(0)
+  const params = { namespace, ...selectionParams(selection), teams: selection.teams.join(','), offset: String(offset), limit: '25' }
+  const { data, error, isPending, isFetching } = useQuery({
+    queryKey: ['usage-other', group.category, params],
+    queryFn: () => api.get<{ otherWork: UsageOther }>(`/usage/other/${encodeURIComponent(group.category)}`, params),
+    staleTime: Infinity,
+  })
+  if (error) return <p role="alert" className="text-destructive">Usage details unavailable. {error.message}</p>
+  if (isPending) return <p role="status">Loading usage details...</p>
+  return <>
+    {data.otherWork.tasks?.map((task) => <TaskDetails key={`${task.namespace}/${task.taskUID}`} task={task} />)}
+    <PageControls label={`${otherTitle(group.category)} Tasks`} page={data.otherWork.page} disabled={isFetching} onChange={setOffset} />
+  </>
+}
+
 function TaskDetails({ task }: { task: UsageTask }) {
+  const [open, setOpen] = useState(false)
   const setNamespace = useUIStore((s) => s.setNamespace)
-  return <details className="rounded-md border p-3 text-sm">
+  return <details className="rounded-md border p-3 text-sm" onToggle={(event) => setOpen(event.currentTarget.open)}>
     <summary className="cursor-pointer">{task.taskName || 'Model call'} <span className="text-muted-foreground">{task.role} · {task.phase}</span>
       <span className="ml-3 font-mono">{recordedTokens(task.usage)}</span>{task.shared && <Badge variant="outline" className="ml-2">Shared work</Badge>}
     </summary>
-    <div className="mt-3 space-y-3">
+    {open && <div className="mt-3 space-y-3">
       {task.taskName && <Link to="/tasks/$taskId" params={{ taskId: task.taskName }} onClick={() => setNamespace(task.namespace)} className="text-primary underline">Open Task {task.taskName}</Link>}
       {task.sessionName && <Link to="/sessions/$sessionId" params={{ sessionId: task.sessionName }} onClick={() => setNamespace(task.namespace)} className="ml-3 text-primary underline">Session {task.sessionName}</Link>}
-      {task.measurements.map((m) => <div key={m.id} className="space-y-1 border-t pt-3">
+      <PagedItems label="Measurements" items={task.measurements} renderItem={(m) => <div key={m.id} className="space-y-1 border-t pt-3">
         <p>{m.provider || 'Provider unavailable'} / {m.model || 'Model unavailable'} · {m.source} · {m.scope} · {m.status}</p>
         <p className="break-all font-mono text-xs">Attempt {m.attemptID || m.id}</p>
         <p>Input {usageNumber(m.inputTokens)} · Output {usageNumber(m.outputTokens)} · Cached reads {usageNumber(m.cachedInputTokens)} · Cached writes {usageNumber(m.cacheWriteInputTokens)}</p>
         <p>Measurement {m.completeness}. {m.gap}</p>
         <p className="text-xs text-muted-foreground">Recorded {new Date(m.observedAt).toLocaleString()}</p>
-      </div>)}
-    </div>
+      </div>} />
+    </div>}
   </details>
 }

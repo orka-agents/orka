@@ -87,9 +87,10 @@ type PullRequest struct {
 type Work struct {
 	store.UsageWorkRequest
 	Summary      Summary       `json:"summary"`
-	Tasks        []Task        `json:"tasks"`
-	PullRequests []PullRequest `json:"pullRequests"`
-	Models       []string      `json:"models"`
+	Tasks        []Task        `json:"tasks,omitempty"`
+	PullRequests []PullRequest `json:"pullRequests,omitempty"`
+	Models       []string      `json:"models,omitempty"`
+	unfinished   bool
 }
 
 type Team struct {
@@ -101,7 +102,20 @@ type OtherWork struct {
 	Category    string `json:"category"`
 	Explanation string `json:"explanation"`
 	Totals      Totals `json:"usage"`
-	Tasks       []Task `json:"tasks"`
+	TaskCount   int    `json:"taskCount"`
+	Tasks       []Task `json:"tasks,omitempty"`
+	Page        *Page  `json:"page,omitempty"`
+}
+
+type Page struct {
+	Limit  int `json:"limit"`
+	Offset int `json:"offset"`
+	Total  int `json:"total"`
+}
+
+func (p Page) bounds(total int) (int, int) {
+	start := min(max(p.Offset, 0), total)
+	return start, min(start+max(p.Limit, 0), total)
 }
 
 type Report struct {
@@ -111,6 +125,7 @@ type Report struct {
 	Teams         []Team            `json:"teams"`
 	Works         []Work            `json:"works"`
 	OtherWork     []OtherWork       `json:"otherWork"`
+	Page          *Page             `json:"page,omitempty"`
 }
 
 type counter struct {
@@ -129,6 +144,33 @@ func prKey(repository string, number int64) string {
 // Build selects requests by start date. Model filtering selects whole requests
 // that used a model; it never removes their other models from the numerator.
 func Build(data store.UsageData, filter store.UsageFilter) Report {
+	return build(data, filter, true, "*")
+}
+
+// BuildPage computes totals across the entire selection, then pages compact
+// work rows. Only a requested other-usage category includes Task details.
+func BuildPage(data store.UsageData, filter store.UsageFilter, page Page, otherCategory string) Report {
+	report := build(data, filter, false, otherCategory)
+	page.Total = len(report.Works)
+	start, end := page.bounds(page.Total)
+	report.Works = slices.Clone(report.Works[start:end])
+	report.Page = &page
+	for i := range report.Works {
+		report.Works[i].PullRequests = nil
+	}
+	for i := range report.OtherWork {
+		group := &report.OtherWork[i]
+		if group.Category == otherCategory {
+			otherPage := Page{Limit: page.Limit, Offset: page.Offset, Total: group.TaskCount}
+			start, end := otherPage.bounds(group.TaskCount)
+			group.Tasks = slices.Clone(group.Tasks[start:end])
+			group.Page = &otherPage
+		}
+	}
+	return report
+}
+
+func build(data store.UsageData, filter store.UsageFilter, workDetails bool, otherCategory string) Report {
 	report := Report{Selection: filter, RetainedSince: data.RetainedSince, Teams: []Team{}, Works: []Work{}, OtherWork: []OtherWork{}}
 	tasks := measuredTasks(data, filter.AsOf)
 	prs := pullRequestsAsOf(data.PullRequests, filter.AsOf)
@@ -140,67 +182,46 @@ func Build(data store.UsageData, filter store.UsageFilter) Report {
 	}
 	// PR-targeted review/repair belongs to the original request when a trusted
 	// publication links it. Multiple requests can share the same Task.
-	workTasks := map[string]map[string]Task{}
-	for _, work := range data.Works {
-		members := map[string]Task{}
-		for key, task := range tasks {
-			if task.Namespace != work.Namespace {
-				continue
-			}
-			if task.WorkID == work.ID {
-				members[key] = task
-				continue
-			}
-			for _, link := range links[work.ID] {
-				if task.PRNumber > 0 && task.PRNumber == link.Number && task.Repository == link.Repository {
-					members[key] = task
-				}
-			}
+	byWork, byPR := map[string][]string{}, map[string][]string{}
+	for key, task := range tasks {
+		if task.WorkID != "" {
+			byWork[taskKey(task.Namespace, task.WorkID)] = append(byWork[taskKey(task.Namespace, task.WorkID)], key)
 		}
-		workTasks[work.ID] = members
+		if task.PRNumber > 0 {
+			pr := taskKey(task.Namespace, prKey(task.Repository, task.PRNumber))
+			byPR[pr] = append(byPR[pr], key)
+		}
 	}
 	selectedTasks := map[string]Task{}
 	teamTasks := map[string]map[string]Task{}
 	teamWorks := map[string][]Work{}
 	for _, request := range data.Works {
 		if request.Kind != "issue" || !inPeriod(request.StartedAt, filter) ||
+			(filter.WorkID != "" && filter.WorkID != request.ID) ||
 			(filter.Repository != "" && !strings.EqualFold(request.Repository, filter.Repository)) ||
 			(filter.Kind != "" && filter.Kind != "issue") {
 			continue
 		}
-		members := workTasks[request.ID]
+		members := map[string]Task{}
+		for _, key := range byWork[taskKey(request.Namespace, request.ID)] {
+			members[key] = tasks[key]
+		}
+		for _, link := range links[request.ID] {
+			for _, key := range byPR[taskKey(request.Namespace, prKey(link.Repository, link.Number))] {
+				members[key] = tasks[key]
+			}
+		}
 		if filter.Model != "" && !tasksUseModel(members, filter.Model) {
 			continue
 		}
-		work := Work{UsageWorkRequest: request, Tasks: []Task{}, PullRequests: []PullRequest{}, Models: []string{}}
-		for _, link := range links[request.ID] {
-			pr, ok := prs[taskKey(request.Namespace, prKey(link.Repository, link.Number))]
-			if !ok {
-				pr = store.UsagePullRequest{Namespace: request.Namespace, Repository: link.Repository, Number: link.Number,
-					URL: fmt.Sprintf("https://github.com/%s/pull/%d", link.Repository, link.Number), State: "unknown", ReadinessReason: "GitHub state has not been observed"}
-			}
-			work.PullRequests = append(work.PullRequests, PullRequest{UsagePullRequest: pr, Origin: link.Origin, EvidenceID: link.EvidenceID})
-		}
+		work := buildWork(request, members, links[request.ID], prs, workDetails)
 		for key, task := range members {
-			if task.WorkID != request.ID {
-				task.Shared = true
-			}
-			work.Tasks = append(work.Tasks, task)
 			selectedTasks[key] = task
 			if teamTasks[request.Namespace] == nil {
 				teamTasks[request.Namespace] = map[string]Task{}
 			}
 			teamTasks[request.Namespace][key] = task
-			for _, measurement := range task.Measurements {
-				if measurement.Model != "" && !slices.Contains(work.Models, measurement.Model) {
-					work.Models = append(work.Models, measurement.Model)
-				}
-			}
 		}
-		sort.Slice(work.Tasks, func(i, j int) bool { return work.Tasks[i].StartedAt.Before(work.Tasks[j].StartedAt) })
-		sort.Slice(work.PullRequests, func(i, j int) bool { return work.PullRequests[i].Number < work.PullRequests[j].Number })
-		slices.Sort(work.Models)
-		work.Summary = summarize([]Work{work}, members)
 		report.Works = append(report.Works, work)
 		teamWorks[request.Namespace] = append(teamWorks[request.Namespace], work)
 	}
@@ -214,8 +235,50 @@ func Build(data store.UsageData, filter store.UsageFilter) Report {
 	for _, namespace := range filter.Namespaces {
 		report.Teams = append(report.Teams, Team{Namespace: namespace, Summary: summarize(teamWorks[namespace], teamTasks[namespace])})
 	}
-	report.OtherWork = otherWork(tasks, selectedTasks, data.Works, filter)
+	if filter.WorkID == "" {
+		report.OtherWork = otherWork(tasks, selectedTasks, data.Works, filter, otherCategory)
+	}
 	return report
+}
+
+func buildWork(request store.UsageWorkRequest, members map[string]Task, links []store.UsagePRLink, prs map[string]store.UsagePullRequest, details bool) Work {
+	work := Work{UsageWorkRequest: request, PullRequests: []PullRequest{}, unfinished: len(members) == 0}
+	for _, link := range links {
+		pr, ok := prs[taskKey(request.Namespace, prKey(link.Repository, link.Number))]
+		if !ok {
+			pr = store.UsagePullRequest{Namespace: request.Namespace, Repository: link.Repository, Number: link.Number,
+				URL: fmt.Sprintf("https://github.com/%s/pull/%d", link.Repository, link.Number), State: "unknown", ReadinessReason: "GitHub state has not been observed"}
+		}
+		work.PullRequests = append(work.PullRequests, PullRequest{UsagePullRequest: pr, Origin: link.Origin, EvidenceID: link.EvidenceID})
+		if pr.State == "open" || pr.State == "unknown" {
+			work.unfinished = true
+		}
+	}
+	for _, task := range members {
+		if task.Phase != "Succeeded" && task.Phase != "Failed" && task.Phase != "Cancelled" {
+			work.unfinished = true
+		}
+		if !details {
+			continue
+		}
+		task.Shared = task.WorkID != request.ID
+		work.Tasks = append(work.Tasks, task)
+		for _, measurement := range task.Measurements {
+			if measurement.Model != "" && !slices.Contains(work.Models, measurement.Model) {
+				work.Models = append(work.Models, measurement.Model)
+			}
+		}
+	}
+	sort.Slice(work.Tasks, func(i, j int) bool {
+		if work.Tasks[i].StartedAt.Equal(work.Tasks[j].StartedAt) {
+			return work.Tasks[i].TaskUID < work.Tasks[j].TaskUID
+		}
+		return work.Tasks[i].StartedAt.Before(work.Tasks[j].StartedAt)
+	})
+	sort.Slice(work.PullRequests, func(i, j int) bool { return work.PullRequests[i].Number < work.PullRequests[j].Number })
+	slices.Sort(work.Models)
+	work.Summary = summarize([]Work{work}, members)
+	return work
 }
 
 func measuredTasks(data store.UsageData, asOf time.Time) map[string]Task {
@@ -484,16 +547,7 @@ func summarize(works []Work, tasks map[string]Task) Summary {
 	summary := Summary{Totals: totalMeasurements(measurements), WorkRequests: len(works)}
 	prs := map[string]PullRequest{}
 	for _, work := range works {
-		unfinished := len(work.Tasks) == 0
-		for _, task := range work.Tasks {
-			if task.Phase != "Succeeded" && task.Phase != "Failed" && task.Phase != "Cancelled" {
-				unfinished = true
-			}
-		}
 		for _, pr := range work.PullRequests {
-			if pr.State == "open" || pr.State == "unknown" {
-				unfinished = true
-			}
 			key := prKey(pr.Repository, pr.Number)
 			previous, ok := prs[key]
 			if !ok {
@@ -518,7 +572,7 @@ func summarize(works []Work, tasks map[string]Task) Summary {
 			}
 			prs[key] = pr
 		}
-		if unfinished {
+		if work.unfinished {
 			summary.UnfinishedWork++
 		}
 	}
@@ -599,7 +653,7 @@ func tasksUseModel(tasks map[string]Task, model string) bool {
 	return false
 }
 
-func otherWork(tasks, selected map[string]Task, works []store.UsageWorkRequest, filter store.UsageFilter) []OtherWork {
+func otherWork(tasks, selected map[string]Task, works []store.UsageWorkRequest, filter store.UsageFilter, detailCategory string) []OtherWork {
 	workKinds := map[string]string{}
 	for _, work := range works {
 		workKinds[work.ID] = work.Kind
@@ -639,11 +693,18 @@ func otherWork(tasks, selected map[string]Task, works []store.UsageWorkRequest, 
 	}
 	for i := range categories {
 		measurements := []Measurement{}
-		sort.Slice(categories[i].Tasks, func(a, b int) bool { return categories[i].Tasks[a].TaskUID < categories[i].Tasks[b].TaskUID })
+		sort.Slice(categories[i].Tasks, func(a, b int) bool {
+			x, y := categories[i].Tasks[a], categories[i].Tasks[b]
+			return taskKey(x.Namespace, x.TaskUID) < taskKey(y.Namespace, y.TaskUID)
+		})
 		for _, task := range categories[i].Tasks {
 			measurements = append(measurements, task.Measurements...)
 		}
 		categories[i].Totals = totalMeasurements(measurements)
+		categories[i].TaskCount = len(categories[i].Tasks)
+		if detailCategory != "*" && detailCategory != categories[i].Category {
+			categories[i].Tasks = nil
+		}
 	}
 	return categories
 }

@@ -13,21 +13,33 @@ import (
 )
 
 func usageTaskSnapshot(task *corev1alpha1.Task) store.UsageTask {
-	phase := string(task.Status.Phase)
+	phase := task.Status.Phase
 	if phase == "" {
-		phase = "Pending"
+		phase = corev1alpha1.TaskPhasePending
 	}
 	result := store.UsageTask{Namespace: task.Namespace, TaskUID: string(task.UID), TaskName: task.Name,
-		Phase: phase, Runtime: string(task.Spec.Type), StartedAt: task.CreationTimestamp.Time}
+		Phase: string(phase), Runtime: string(task.Spec.Type), StartedAt: task.CreationTimestamp.Time}
 	result.PhaseObservedAt = time.Now().UTC()
-	if phase == "Pending" {
+	if phase == corev1alpha1.TaskPhasePending {
 		result.PhaseObservedAt = task.CreationTimestamp.Time
 	}
-	if phase == "Running" && task.Status.StartTime != nil {
+	if phase == corev1alpha1.TaskPhaseRunning && task.Status.StartTime != nil {
 		result.PhaseObservedAt = task.Status.StartTime.Time
 	}
 	if task.Status.CompletionTime != nil {
 		result.PhaseObservedAt = task.Status.CompletionTime.Time
+	}
+	// Deleting an unfinished Task cancels its retained accounting lifecycle.
+	// Otherwise a snapshot can pin its cohort forever after the Task disappears.
+	if !task.DeletionTimestamp.IsZero() && phase != corev1alpha1.TaskPhaseSucceeded && phase != corev1alpha1.TaskPhaseFailed && phase != corev1alpha1.TaskPhaseCancelled {
+		result.Phase = string(corev1alpha1.TaskPhaseCancelled)
+		result.PhaseObservedAt = task.DeletionTimestamp.Time
+		if outcome := task.Status.ExecutionOutcome; outcome != nil {
+			result.Phase = string(outcome.Phase)
+			if !outcome.RecordedAt.IsZero() {
+				result.PhaseObservedAt = outcome.RecordedAt.Time
+			}
+		}
 	}
 	if task.Spec.SessionRef != nil {
 		result.SessionName = task.Spec.SessionRef.Name

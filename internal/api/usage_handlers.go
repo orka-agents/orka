@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 const (
 	usageMonitorResource = "repositorymonitors"
 	usageSessionResource = "sessions"
+	usageMaxRecords      = 20000
 )
 
 func (h *Handlers) GetUsageReport(c fiber.Ctx) error {
@@ -40,6 +42,24 @@ func (h *Handlers) GetUsageWork(c fiber.Ctx) error {
 	return fiber.NewError(fiber.StatusNotFound, "work request not found")
 }
 
+func (h *Handlers) GetUsageOther(c fiber.Ctx) error {
+	switch c.Params("category") {
+	case "review_only", "other_requests", "unassociated":
+	default:
+		return fiber.NewError(fiber.StatusNotFound, "usage category not found")
+	}
+	report, err := h.usageReport(c, false)
+	if err != nil {
+		return err
+	}
+	for _, group := range report.OtherWork {
+		if group.Category == c.Params("category") {
+			return c.JSON(fiber.Map{"selection": report.Selection, "otherWork": group})
+		}
+	}
+	return fiber.NewError(fiber.StatusNotFound, "usage category not found")
+}
+
 func (h *Handlers) usageReport(c fiber.Ctx, detail bool) (usage.Report, error) {
 	var empty usage.Report
 	if err := h.authorizeUsageContextToken(c); err != nil {
@@ -57,6 +77,10 @@ func (h *Handlers) usageReport(c fiber.Ctx, detail bool) (usage.Report, error) {
 	if err != nil {
 		return empty, err
 	}
+	page, err := usageReportPage(c)
+	if err != nil {
+		return empty, err
+	}
 	reader := h.uncachedReader()
 	filter.NamespaceUIDs = make(map[string]string, len(teams))
 	for _, team := range teams {
@@ -68,6 +92,9 @@ func (h *Handlers) usageReport(c fiber.Ctx, detail bool) (usage.Report, error) {
 	}
 	data, err := backend.LoadUsage(c.Context(), filter)
 	if err != nil {
+		if errors.Is(err, store.ErrUsageSelectionTooLarge) {
+			return empty, fiber.NewError(fiber.StatusUnprocessableEntity, "usage selection exceeds 20000 retained records; narrow the date, team, repository, model, or asOf filters")
+		}
 		return empty, fiber.NewError(fiber.StatusInternalServerError, "failed to load usage report")
 	}
 	if err := h.filterUsageTaskAccess(c, &data); err != nil {
@@ -79,7 +106,32 @@ func (h *Handlers) usageReport(c fiber.Ctx, detail bool) (usage.Report, error) {
 			return empty, fiber.NewError(fiber.StatusServiceUnavailable, "usage namespace identity changed")
 		}
 	}
-	return usage.Build(data, filter), nil
+	if detail {
+		return usage.Build(data, filter), nil
+	}
+	return usage.BuildPage(data, filter, page, c.Params("category")), nil
+}
+
+func usageReportPage(c fiber.Ctx) (usage.Page, error) {
+	page := usage.Page{Limit: 25}
+	for _, param := range []struct {
+		name    string
+		value   *int
+		minimum int
+	}{
+		{"limit", &page.Limit, 1},
+		{"offset", &page.Offset, 0},
+	} {
+		if raw := c.Query(param.name); raw != "" {
+			value, err := strconv.Atoi(raw)
+			if err != nil || value < param.minimum {
+				return page, fiber.NewError(fiber.StatusBadRequest, "invalid usage "+param.name)
+			}
+			*param.value = value
+		}
+	}
+	page.Limit = min(page.Limit, 100)
+	return page, nil
 }
 
 func (h *Handlers) authorizeUsageContextToken(c fiber.Ctx) error {
@@ -175,8 +227,12 @@ func usageReportFilter(c fiber.Ctx, teams []string, detail bool) (store.UsageFil
 	if kind != "" && kind != "issue" && kind != githubEventPullRequest {
 		return empty, fiber.NewError(fiber.StatusBadRequest, "kind must be issue or pull_request")
 	}
-	return store.UsageFilter{Namespaces: teams, Repository: strings.TrimSpace(c.Query("repository")), Model: strings.TrimSpace(c.Query("model")),
-		Kind: kind, From: from, Until: until, AsOf: asOf}, nil
+	filter := store.UsageFilter{Namespaces: teams, Repository: strings.TrimSpace(c.Query("repository")), Model: strings.TrimSpace(c.Query("model")),
+		Kind: kind, From: from, Until: until, AsOf: asOf, MaxRecords: usageMaxRecords}
+	if detail {
+		filter.WorkID = c.Params("id")
+	}
+	return filter, nil
 }
 
 func (h *Handlers) filterUsageTaskAccess(c fiber.Ctx, data *store.UsageData) error {

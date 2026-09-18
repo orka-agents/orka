@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -57,6 +58,10 @@ func TestUsageAPIReportAndDetailUseSameCohort(t *testing.T) {
 	require.Equal(t, 1200.0, *report.Summary.TokensPerPRMerged)
 	require.Len(t, report.Works, 1)
 	require.Equal(t, "default", report.Works[0].Namespace)
+	require.Equal(t, &usage.Page{Limit: 25, Total: 1}, report.Page)
+	require.NotContains(t, body, `"tasks"`)
+	require.NotContains(t, body, `"measurements":[`)
+	require.NotContains(t, body, `"pullRequests"`)
 	f.allowRoute(t, "GET /api/v1/usage/work/:id")
 	status, body = f.request(t, http.MethodGet, "/api/v1/usage/work/"+work+query, "")
 	require.Equal(t, http.StatusOK, status, body)
@@ -65,10 +70,85 @@ func TestUsageAPIReportAndDetailUseSameCohort(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal([]byte(body), &detail))
 	require.Equal(t, report.Summary, detail.Work.Summary)
+	require.Len(t, detail.Work.Tasks, 1)
+	require.Len(t, detail.Work.Tasks[0].Measurements, 1)
 	status, _ = f.request(t, http.MethodGet, "/api/v1/usage?namespace=other", "")
 	require.Equal(t, http.StatusForbidden, status)
 	status, _ = f.request(t, http.MethodGet, "/api/v1/usage?from=invalid", "")
 	require.Equal(t, http.StatusBadRequest, status)
+}
+
+func TestUsageAPIPaginatesSummariesAndOtherDetails(t *testing.T) {
+	f := newExternalAuthorizationFixture(t)
+	seedUsageAPIWork(t, f.store, "default", 100)
+	at := time.Now().UTC().Add(-time.Minute)
+	for i := range 27 {
+		id := fmt.Sprintf("chat-%02d", i)
+		require.NoError(t, f.store.RecordUsage(t.Context(), store.UsageObservation{Namespace: "default", NamespaceUID: "namespace-uid",
+			ID: id, CounterID: id, Scope: store.UsageScopeCall, Source: store.UsageSourceProvider, Model: "model",
+			InputTokens: new(int64(10)), OutputTokens: new(int64(0)), Complete: true, Status: store.UsageStatusCompleted, ObservedAt: at}))
+	}
+	f.allowRoute(t, "GET /api/v1/usage")
+	status, body := f.request(t, http.MethodGet, "/api/v1/usage?from=2000-01-01&limit=1&offset=1", "")
+	require.Equal(t, http.StatusOK, status, body)
+	var report usage.Report
+	require.NoError(t, json.Unmarshal([]byte(body), &report))
+	require.Empty(t, report.Works)
+	require.EqualValues(t, 100, report.Summary.TotalTokens)
+	require.Equal(t, &usage.Page{Limit: 1, Offset: 1, Total: 1}, report.Page)
+	require.EqualValues(t, 270, report.OtherWork[2].Totals.TotalTokens)
+	require.Equal(t, 27, report.OtherWork[2].TaskCount)
+	require.NotContains(t, body, `"tasks"`)
+	f.allowRoute(t, "GET /api/v1/usage/other/:category")
+	status, body = f.request(t, http.MethodGet, "/api/v1/usage/other/unassociated?from=2000-01-01&limit=25&offset=25&asOf="+report.Selection.AsOf.Format(time.RFC3339Nano), "")
+	require.Equal(t, http.StatusOK, status, body)
+	var detail struct {
+		OtherWork usage.OtherWork `json:"otherWork"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(body), &detail))
+	require.Equal(t, report.OtherWork[2].Totals, detail.OtherWork.Totals)
+	require.Equal(t, &usage.Page{Limit: 25, Offset: 25, Total: 27}, detail.OtherWork.Page)
+	require.Len(t, detail.OtherWork.Tasks, 2)
+	require.Equal(t, "call-chat-25", detail.OtherWork.Tasks[0].TaskUID)
+	require.Len(t, detail.OtherWork.Tasks[0].Measurements, 1)
+	for _, query := range []string{"limit=0", "offset=-1", "limit=invalid"} {
+		status, _ = f.request(t, http.MethodGet, "/api/v1/usage?"+query, "")
+		require.Equal(t, http.StatusBadRequest, status)
+	}
+	status, body = f.request(t, http.MethodGet, "/api/v1/usage?limit=1000", "")
+	require.Equal(t, http.StatusOK, status, body)
+	require.NoError(t, json.Unmarshal([]byte(body), &report))
+	require.Equal(t, 100, report.Page.Limit)
+}
+
+func TestUsageAPIRejectsOversizedReportsAndLoadsRequestedWork(t *testing.T) {
+	f := newExternalAuthorizationFixture(t)
+	work := seedUsageAPIWork(t, f.store, "default", 100)
+	at := time.Now().UTC().Add(-time.Minute)
+	require.NoError(t, f.store.WithTaskDataTransaction(t.Context(), func(ctx context.Context) error {
+		for i := range usageMaxRecords {
+			id := fmt.Sprint("chat-", i)
+			if err := f.store.RecordUsage(ctx, store.UsageObservation{Namespace: "default", NamespaceUID: "namespace-uid", ID: id,
+				CounterID: id, Scope: store.UsageScopeCall, Source: store.UsageSourceProvider, ObservedAt: at}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	f.allowRoute(t, "GET /api/v1/usage")
+	status, body := f.request(t, http.MethodGet, "/api/v1/usage?from=2000-01-01&limit=1", "")
+	require.Equal(t, http.StatusUnprocessableEntity, status, body)
+	require.Contains(t, body, "narrow")
+	require.NotContains(t, body, `"summary"`)
+	f.allowRoute(t, "GET /api/v1/usage/work/:id")
+	status, body = f.request(t, http.MethodGet, "/api/v1/usage/work/"+work, "")
+	require.Equal(t, http.StatusOK, status, body)
+	var detail struct {
+		Work usage.Work `json:"work"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(body), &detail))
+	require.EqualValues(t, 100, detail.Work.Summary.TotalTokens)
+	require.Len(t, detail.Work.Tasks, 1)
 }
 
 func TestUsageAPICombinedTeamsRequireEveryNamespaceGrant(t *testing.T) {
