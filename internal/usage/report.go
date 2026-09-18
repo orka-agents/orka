@@ -525,7 +525,8 @@ func addUsageTokens(total *int64, value int64) error {
 }
 
 func totalMeasurements(measurements []Measurement) (Totals, error) {
-	total := Totals{ModelCost: "Price unavailable"}
+	total := Totals{ModelCost: "Price unavailable", CachedUsageReported: len(measurements) > 0,
+		CacheWriteUsageReported: len(measurements) > 0}
 	for _, m := range measurements {
 		total.Measurements++
 		if m.Scope == store.UsageScopeCall {
@@ -557,8 +558,10 @@ func totalMeasurements(measurements []Measurement) (Totals, error) {
 				}
 			}
 		}
-		total.CachedUsageReported = total.CachedUsageReported || m.CachedInputTokens != nil
-		total.CacheWriteUsageReported = total.CacheWriteUsageReported || m.CacheWriteInputTokens != nil
+		// A known subtotal is not an available aggregate breakdown when another
+		// measurement omits that field. Keep the known counts for drill-down.
+		total.CachedUsageReported = total.CachedUsageReported && m.CachedInputTokens != nil
+		total.CacheWriteUsageReported = total.CacheWriteUsageReported && m.CacheWriteInputTokens != nil
 	}
 	total.TotalTokens = total.InputTokens
 	if err := addUsageTokens(&total.TotalTokens, total.OutputTokens); err != nil {

@@ -133,3 +133,39 @@ func TestUsageLargeCounterHistoryDoesNotRejectSmallSelectedDeltas(t *testing.T) 
 	require.EqualValues(t, 2, report.Summary.TotalTokens)
 	require.Len(t, report.Works, 1)
 }
+
+func TestUsageAggregateCacheAvailabilityRequiresEveryMeasurement(t *testing.T) {
+	zero, one, two := int64(0), int64(1), int64(2)
+	for _, tc := range []struct {
+		name                          string
+		first, second                 [2]*int64
+		readReported, writtenReported bool
+		read, written                 int64
+	}{
+		{name: "none"},
+		{name: "reported zero", first: [2]*int64{&zero, &zero}, second: [2]*int64{&zero, &zero}, readReported: true, writtenReported: true},
+		{name: "all reported", first: [2]*int64{&one, &two}, second: [2]*int64{&two, &one}, readReported: true, writtenReported: true, read: 3, written: 3},
+		{name: "partial reads", first: [2]*int64{&one, &two}, second: [2]*int64{nil, &one}, writtenReported: true, read: 1, written: 3},
+		{name: "partial writes", first: [2]*int64{&one, nil}, second: [2]*int64{&two, &one}, readReported: true, read: 3, written: 1},
+		{name: "only later report", second: [2]*int64{&one, &two}, read: 1, written: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data, filter := reportFixture()
+			data.Tasks = append(data.Tasks, store.UsageTask{Namespace: "team", TaskUID: "second", WorkID: "work", Phase: "Succeeded", StartedAt: filter.From})
+			for i, counts := range [][2]*int64{tc.first, tc.second} {
+				id := fmt.Sprint("call-", i)
+				data.Observations = append(data.Observations, store.UsageObservation{Namespace: "team", TaskUID: data.Tasks[i].TaskUID,
+					ID: id, CounterID: id, Scope: store.UsageScopeCall, Source: store.UsageSourceProvider,
+					InputTokens: new(int64(100)), OutputTokens: new(int64(0)), CachedInputTokens: counts[0], CacheWriteInputTokens: counts[1],
+					Complete: true, ObservedAt: filter.From})
+			}
+			report, err := usage.Build(data, filter)
+			require.NoError(t, err)
+			require.Equal(t, "complete", report.Summary.Completeness, "input/output coverage is independent of optional cache breakdowns")
+			require.Equal(t, tc.readReported, report.Summary.CachedUsageReported)
+			require.Equal(t, tc.writtenReported, report.Summary.CacheWriteUsageReported)
+			require.Equal(t, tc.read, report.Summary.CachedInputTokens, "retain the known subtotal even when aggregate coverage is unavailable")
+			require.Equal(t, tc.written, report.Summary.CacheWriteInputTokens)
+		})
+	}
+}

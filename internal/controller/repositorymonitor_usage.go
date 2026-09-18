@@ -15,8 +15,10 @@ import (
 )
 
 const (
-	usageOutcomeRefreshInterval = 5 * time.Minute
-	usageOutcomeBacklogInterval = 15 * time.Second
+	usageOutcomeRefreshInterval   = 5 * time.Minute
+	usageOutcomeBacklogInterval   = 15 * time.Second
+	usagePRCreatedMutationReason  = "issue_implementation_pr_created"
+	usagePRAssistedMutationReason = "issue_implementation_pr_assisted"
 )
 
 func (r *RepositoryMonitorReconciler) usageOutcomeRequeueAfter(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (time.Duration, error) {

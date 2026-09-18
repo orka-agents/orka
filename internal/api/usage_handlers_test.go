@@ -78,6 +78,30 @@ func TestUsageAPIReportAndDetailUseSameCohort(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, status)
 }
 
+func TestUsageAPIRejectsDatesOutsideStoredTimestampRange(t *testing.T) {
+	f := newExternalAuthorizationFixture(t)
+	seedUsageAPIWork(t, f.store, "default", 100)
+	f.allowRoute(t, "GET /api/v1/usage")
+	for _, query := range []string{
+		"from=0001-01-01", "from=1677-09-21T00:12:43.145224191Z",
+		"until=2262-04-11T23:47:16.854775808Z", "until=9999-12-31",
+		"asOf=1000-01-01", "from=0001-01-01&asOf=1000-01-01",
+	} {
+		t.Run(query, func(t *testing.T) {
+			status, body := f.request(t, http.MethodGet, "/api/v1/usage?"+query, "")
+			require.Equal(t, http.StatusBadRequest, status, body)
+			require.Contains(t, body, "supported timestamp range")
+			require.NotContains(t, body, `"summary"`)
+		})
+	}
+	status, body := f.request(t, http.MethodGet,
+		"/api/v1/usage?from=1677-09-21T00:12:43.145224192Z&until=2262-04-11T23:47:16.854775807Z", "")
+	require.Equal(t, http.StatusOK, status, body)
+	var report usage.Report
+	require.NoError(t, json.Unmarshal([]byte(body), &report))
+	require.EqualValues(t, 100, report.Summary.TotalTokens)
+}
+
 func TestUsageAPIPaginatesSummariesAndOtherDetails(t *testing.T) {
 	f := newExternalAuthorizationFixture(t)
 	seedUsageAPIWork(t, f.store, "default", 100)
@@ -314,6 +338,60 @@ func TestUsageAPIGatewayAccessSurvivesTaskCleanup(t *testing.T) {
 	status, body = f.request(t, http.MethodGet, "/api/v1/usage?from=2000-01-01", "")
 	require.Equal(t, http.StatusOK, status, body)
 	require.Contains(t, body, "7654")
+}
+
+func TestUsageAPIHidesEveryWorkSharingAnInaccessiblePRTask(t *testing.T) {
+	f := newExternalAuthorizationFixture(t)
+	first := seedUsageAPIWork(t, f.store, "default", 100)
+	at := time.Now().UTC().Add(-30 * time.Minute)
+	works := map[int64]string{1: first}
+	for _, number := range []int64{3, 4} {
+		work := store.UsageWorkID("default", "monitor", "org/repo", "issue", number)
+		works[number] = work
+		require.NoError(t, f.store.RegisterUsageWork(t.Context(), store.UsageWorkRequest{Namespace: "default", NamespaceUID: "namespace-uid",
+			MonitorName: "monitor", MonitorUID: "monitor", Repository: "org/repo", Kind: "issue", Number: number, StartedAt: at}))
+		task := fmt.Sprint("task-", number)
+		require.NoError(t, f.store.RegisterUsageTask(t.Context(), store.UsageTask{Namespace: "default", TaskUID: task, TaskName: task,
+			WorkID: work, Phase: "Succeeded", StartedAt: at}))
+		require.NoError(t, f.store.RecordUsage(t.Context(), store.UsageObservation{Namespace: "default", TaskUID: task, ID: task, CounterID: task,
+			Scope: store.UsageScopeCall, Source: store.UsageSourceProvider, InputTokens: new(int64(100)), OutputTokens: new(int64(0)), Complete: true, ObservedAt: at}))
+		prNumber := int64(2)
+		if number == 4 {
+			prNumber = 4
+		}
+		require.NoError(t, f.store.LinkUsagePullRequest(t.Context(), store.UsagePRLink{Namespace: "default", WorkID: work, Repository: "org/repo",
+			Number: prNumber, Origin: store.UsagePRCreated, EvidenceID: "publication", LinkedAt: at}))
+	}
+	require.NoError(t, f.kube.Create(t.Context(), &gatewayv1alpha1.Gateway{ObjectMeta: metav1.ObjectMeta{Name: "private", Namespace: "default", UID: "gateway-uid"}}))
+	reviewWork := store.UsageWorkID("default", "monitor", "org/repo", "pull_request", 2)
+	require.NoError(t, f.store.RegisterUsageWork(t.Context(), store.UsageWorkRequest{Namespace: "default", NamespaceUID: "namespace-uid",
+		MonitorName: "monitor", MonitorUID: "monitor", Repository: "org/repo", Kind: "pull_request", Number: 2, StartedAt: at}))
+	require.NoError(t, f.store.RegisterUsageTask(t.Context(), store.UsageTask{Namespace: "default", TaskUID: "private-review", TaskName: "private-review",
+		WorkID: reviewWork, Repository: "org/repo", PRNumber: 2, Phase: "Succeeded", StartedAt: at,
+		GatewayOwner: &store.UsageGatewayOwner{Namespace: "default", NamespaceUID: "namespace-uid", Name: "private", UID: "gateway-uid"}}))
+	require.NoError(t, f.store.RecordUsage(t.Context(), store.UsageObservation{Namespace: "default", TaskUID: "private-review", ID: "private", CounterID: "private",
+		Scope: store.UsageScopeCall, Source: store.UsageSourceProvider, InputTokens: new(int64(7654)), OutputTokens: new(int64(0)), Complete: true, ObservedAt: at}))
+	f.allowRoute(t, "GET /api/v1/usage")
+	status, body := f.request(t, http.MethodGet, "/api/v1/usage?from=2000-01-01", "")
+	require.Equal(t, http.StatusOK, status, body)
+	var report usage.Report
+	require.NoError(t, json.Unmarshal([]byte(body), &report))
+	require.Len(t, report.Works, 1)
+	require.Equal(t, works[4], report.Works[0].ID)
+	require.EqualValues(t, 100, report.Summary.TotalTokens)
+	require.NotContains(t, body, "7654")
+	f.allowRoute(t, "GET /api/v1/usage/work/:id")
+	for _, work := range []string{first, works[3]} {
+		status, body = f.request(t, http.MethodGet, "/api/v1/usage/work/"+work, "")
+		require.Equal(t, http.StatusNotFound, status, body)
+	}
+	f.allowRoute(t, "GET /api/v1/usage", authorizationv1.ResourceAttributes{Namespace: "default", Group: gatewayv1alpha1.GroupVersion.Group,
+		Resource: "gateways", Verb: "get", Name: "private"})
+	status, body = f.request(t, http.MethodGet, "/api/v1/usage?from=2000-01-01", "")
+	require.Equal(t, http.StatusOK, status, body)
+	require.NoError(t, json.Unmarshal([]byte(body), &report))
+	require.Len(t, report.Works, 3)
+	require.EqualValues(t, 7954, report.Summary.TotalTokens, "shared review usage is counted once after authorization")
 }
 
 func TestUsageAPIContextTokensRequireReadScopesAndTeamContext(t *testing.T) {

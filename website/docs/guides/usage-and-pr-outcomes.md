@@ -85,6 +85,10 @@ one model's tokens by outcomes that required other models too.
 | Tokens per merged PR | Recorded tokens divided by distinct merged PRs produced by the requests. |
 | Model cost | **Price unavailable** in this version. A subscription or missing price does not mean a free call. Pricing is tracked in [#541](https://github.com/orka-agents/orka/issues/541). |
 
+An aggregate cache breakdown is available only when every contributing
+measurement reports it. Individual reported cache counts remain visible in work
+details, and structured output retains known subtotals alongside availability flags.
+
 Opened and merged are historical counts. Readiness is current. These counts
 overlap, so do not add the columns together. With no merges, the report shows
 **No PRs merged yet** and the usage spent; the merged-PR ratio is unavailable.
@@ -209,9 +213,12 @@ for `review_only`, `other_requests`, or `unassociated` usage.
 
 Paged responses include `page.limit`, `page.offset`, and `page.total`. Pass the
 summary's `asOf` on later page and detail requests to preserve the report time.
+Dates must fit signed 64-bit Unix nanoseconds; out-of-range values return HTTP 400.
 Selections requiring more than 20,000 retained records return HTTP 422 with an
 instruction to narrow the filters. Records include work, Task, measurement,
-PR-link, and PR-observation history, including required cumulative baselines.
+PR-link, and selected PR-state evidence, including required cumulative baselines.
+Routine PR refresh history does not consume this budget; reports load the latest
+state at `asOf` and retained merge evidence.
 This limit applies even when retention is unlimited. The API never returns
 truncated totals as a complete report.
 Token counts and totals must also fit the exact JSON integer range through
@@ -225,8 +232,10 @@ to inspect September requests with usage and outcomes known by October 15.
 TokenReview callers need namespace-wide `list` grants for `tasks`,
 `repositorymonitors`, and `sessions`. Gateway-owned Task usage also requires
 access to that exact current Gateway and namespace identity, including after
-Task cleanup. An object-constrained transaction token cannot authorize an archive
-report; in enforce mode, use the Task-list, monitor-read, and session-read scopes
+Task cleanup. A delivery work request is omitted if any contributing Task is
+inaccessible, including shared PR reviews. An object-constrained transaction token
+cannot authorize an archive report; in enforce mode, use the Task-list,
+monitor-read, and session-read scopes
 with an optional namespace constraint. Existing OIDC and namespace-isolation
 policies still apply. See [API authorization](../reference/api-authorization.md).
 

@@ -11,7 +11,9 @@ import (
 // Select whole work cohorts and the separate activity-period Tasks before
 // reading observations. Counter history, including earlier Tasks, must remain
 // available for cumulative deltas and Gateway access checks. Model matching is
-// conservative here; the report applies it to the final measurements.
+// conservative here; the report applies it to the final measurements. PR state
+// needs only the latest observation at asOf plus historical merge evidence;
+// routine readiness refreshes must not consume the report's record budget.
 const usageCohortQuery = `WITH
  selection(namespace, namespace_uid, as_of, from_at, until_at, repository, kind, model, work_id, record_limit) AS (VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)),
  candidate_works AS (
@@ -97,6 +99,10 @@ const usageCohortQuery = `WITH
    AND (f.namespace_uid IS NULL OR json_extract(l.data, '$.namespaceUID') = f.namespace_uid)
  UNION ALL SELECT 'pr', p.data, p.observed_at, CAST(p.number AS TEXT) FROM usage_pull_requests p, selection f
  WHERE p.namespace = f.namespace AND p.observed_at <= f.as_of AND (f.namespace_uid IS NULL OR p.namespace_uid = f.namespace_uid)
+   AND (json_extract(p.data, '$.mergedAt') IS NOT NULL OR p.observed_at =
+     (SELECT MAX(latest.observed_at) FROM usage_pull_requests latest
+      WHERE latest.namespace = p.namespace AND latest.namespace_uid = p.namespace_uid
+        AND latest.repository = p.repository AND latest.number = p.number AND latest.observed_at <= f.as_of))
    AND (p.repository, p.number) IN
    (SELECT l.repository, l.number FROM usage_pr_links l WHERE l.namespace = f.namespace AND l.work_id IN (SELECT id FROM selected_works)
      AND COALESCE(json_extract(l.data, '$.namespaceUID'), '') = p.namespace_uid)

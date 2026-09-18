@@ -97,7 +97,7 @@ func (h *Handlers) usageReport(c fiber.Ctx, detail bool) (usage.Report, error) {
 		}
 		return empty, fiber.NewError(fiber.StatusInternalServerError, "failed to load usage report")
 	}
-	if err := h.filterUsageTaskAccess(c, &data); err != nil {
+	if err := h.filterUsageTaskAccess(c, &data, filter.AsOf); err != nil {
 		return empty, err
 	}
 	for _, team := range teams {
@@ -241,7 +241,7 @@ func usageReportFilter(c fiber.Ctx, teams []string, detail bool) (store.UsageFil
 	return filter, nil
 }
 
-func (h *Handlers) filterUsageTaskAccess(c fiber.Ctx, data *store.UsageData) error {
+func (h *Handlers) filterUsageTaskAccess(c fiber.Ctx, data *store.UsageData, asOf time.Time) error {
 	data.HiddenTasks = map[string]bool{}
 	known := map[string]bool{}
 	cache := map[gatewayTaskAuthorizationKey]bool{}
@@ -270,6 +270,12 @@ func (h *Handlers) filterUsageTaskAccess(c fiber.Ctx, data *store.UsageData) err
 			if task.WorkID != "" {
 				hiddenWorks[task.WorkID] = true
 			}
+			for _, link := range data.Links {
+				if task.PRNumber > 0 && link.Namespace == task.Namespace && link.NamespaceUID == task.NamespaceUID &&
+					link.Number == task.PRNumber && strings.EqualFold(link.Repository, task.Repository) && !link.LinkedAt.After(asOf) {
+					hiddenWorks[link.WorkID] = true
+				}
+			}
 		}
 	}
 	// The controller registers Tasks before dispatch. An observation with no
@@ -290,6 +296,9 @@ func usageDate(raw string, fallback time.Time) (time.Time, error) {
 	}
 	for _, layout := range []string{time.RFC3339Nano, time.DateOnly} {
 		if value, err := time.Parse(layout, raw); err == nil {
+			if !time.Unix(0, value.UnixNano()).Equal(value) {
+				return time.Time{}, fiber.NewError(fiber.StatusBadRequest, "report date is outside the supported timestamp range")
+			}
 			return value.UTC(), nil
 		}
 	}

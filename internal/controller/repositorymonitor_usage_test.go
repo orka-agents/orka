@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/internal/usage"
 )
 
@@ -110,24 +112,100 @@ func TestUsageCreatedPullRequestValidatesCanonicalRepositoryIdentity(t *testing.
 			namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: monitor.Namespace, UID: "namespace-uid"}}
 			r := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(namespace, monitor, secret).Build(),
 				Store: backend, GitHubAPIBaseURL: server.URL, HTTPClient: server.Client()}
-			prURL, number, err := r.createIssueImplementationPullRequest(t.Context(), monitor,
+			prURL, number, origin, err := r.createIssueImplementationPullRequest(t.Context(), monitor,
 				&store.MonitorItem{Number: 1, Title: "Implement issue"},
 				&corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "task", UID: "task-uid"}}, "issue-1", "")
 			if tc.valid {
 				require.NoError(t, err)
 				require.Equal(t, tc.url, prURL)
 				require.Equal(t, 7, number)
+				require.Equal(t, store.UsagePRCreated, origin)
 			} else {
 				require.Error(t, err)
 			}
-			data, err := backend.LoadUsage(t.Context(), store.UsageFilter{Namespaces: []string{monitor.Namespace}, AsOf: time.Now().UTC()})
+		})
+	}
+}
+
+type failUsagePRLinkStore struct {
+	*sqlite.Store
+	fail bool
+}
+
+func (s *failUsagePRLinkStore) LinkUsagePullRequest(ctx context.Context, link store.UsagePRLink) error {
+	if s.fail {
+		s.fail = false
+		return fmt.Errorf("usage link unavailable")
+	}
+	return s.Store.LinkUsagePullRequest(ctx, link)
+}
+
+func TestUsagePullRequestOriginSurvivesLinkWriteFailure(t *testing.T) {
+	for _, existing := range []bool{false, true} {
+		t.Run(fmt.Sprint("existing=", existing), func(t *testing.T) {
+			backend := setupControllerSQLiteStore(t)
+			linkStore := &failUsagePRLinkStore{Store: backend, fail: true}
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1.AddToScheme(scheme))
+			require.NoError(t, corev1alpha1.AddToScheme(scheme))
+			monitor, secret := repositoryMonitorInventoryTestObjects("usage-retry")
+			monitor.UID = "monitor-uid"
+			monitor.Spec.RepoURL = "https://github.com/ORG/REPO.git"
+			monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: secret.Name}
+			var requests, creates atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				pr := map[string]any{"number": 7, "html_url": "https://github.com/Org/Repo/pull/7"}
+				if r.Method == http.MethodGet {
+					if existing || creates.Load() > 0 {
+						_ = json.NewEncoder(w).Encode([]any{pr})
+					} else {
+						_, _ = fmt.Fprint(w, "[]")
+					}
+					return
+				}
+				creates.Add(1)
+				w.WriteHeader(http.StatusCreated)
+				_ = json.NewEncoder(w).Encode(pr)
+			}))
+			t.Cleanup(server.Close)
+			namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: monitor.Namespace, UID: "namespace-uid"}}
+			r := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(namespace, monitor, secret).Build(),
+				Store: linkStore, GitHubAPIBaseURL: server.URL, HTTPClient: server.Client()}
+			item := &store.MonitorItem{Number: 1, Title: "Implement issue", SnapshotDigest: "snapshot"}
+			action := &store.ActionRecord{ID: "action", CommandEventID: "command"}
+			task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "task", Namespace: monitor.Namespace, UID: "task-uid"},
+				Spec: corev1alpha1.TaskSpec{Workspace: &corev1alpha1.WorkspaceConfig{PushBranch: "issue-1"}}}
+			_, _, _, err := r.finishIssueMutation(t.Context(), monitor, item, action, task, "")
+			require.ErrorContains(t, err, "usage link unavailable")
+			mutation, err := backend.GetGitHubMutationRecord(t.Context(), monitor.Namespace,
+				"ghmut-"+repositoryMonitorShortHash(action.ID+"-create-pr"))
 			require.NoError(t, err)
-			if tc.valid {
-				require.Len(t, data.Links, 1)
-				require.Equal(t, store.UsagePRCreated, data.Links[0].Origin)
-				require.Equal(t, "org/repo", data.Links[0].Repository)
+			require.Equal(t, repositoryMonitorRunPhaseSucceeded, mutation.Status)
+			require.Equal(t, "7", mutation.ExternalID)
+			requestCount := requests.Load()
+			phase, number, reason, err := r.finishIssueMutation(t.Context(), monitor, item, action, task, "")
+			require.NoError(t, err)
+			require.Equal(t, repositoryMonitorIssuePhasePROpened, phase)
+			require.Equal(t, 7, number)
+			require.Empty(t, reason)
+			require.Equal(t, requestCount, requests.Load(), "retry must reuse the durable creation receipt")
+			now := time.Now().UTC()
+			filter := store.UsageFilter{Namespaces: []string{monitor.Namespace}, From: now.Add(-time.Minute), Until: now.Add(time.Second), AsOf: now}
+			data, err := backend.LoadUsage(t.Context(), filter)
+			require.NoError(t, err)
+			require.Len(t, data.Links, 1)
+			require.Equal(t, "org/repo", data.Links[0].Repository)
+			report, err := usage.Build(data, filter)
+			require.NoError(t, err)
+			if existing {
+				require.Equal(t, store.UsagePRAssisted, data.Links[0].Origin)
+				require.Zero(t, creates.Load())
+				require.Zero(t, report.Summary.PRsOpened)
 			} else {
-				require.Empty(t, data.Links)
+				require.Equal(t, store.UsagePRCreated, data.Links[0].Origin)
+				require.EqualValues(t, 1, creates.Load())
+				require.Equal(t, 1, report.Summary.PRsOpened)
 			}
 		})
 	}

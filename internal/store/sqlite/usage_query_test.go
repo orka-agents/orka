@@ -183,3 +183,64 @@ func TestUsageNamespaceFilterPreservesOnlyOwnedCounterHistory(t *testing.T) {
 	_, err = s.LoadUsage(t.Context(), filter)
 	require.ErrorIs(t, err, store.ErrValidation)
 }
+
+func TestUsageLoadBoundsPRRefreshHistoryWithoutChangingOutcomes(t *testing.T) {
+	s := setupTestStore(t)
+	start := time.Now().UTC().Add(-100 * 24 * time.Hour)
+	work := store.UsageWorkID("team", "monitor", "org/repo", "issue", 1)
+	require.NoError(t, s.RegisterUsageWork(t.Context(), store.UsageWorkRequest{ID: work, Namespace: "team", NamespaceUID: "current-namespace",
+		MonitorName: "monitor", MonitorUID: "monitor", Repository: "org/repo", Kind: "issue", Number: 1, StartedAt: start}))
+	usageTask(t, s, "team", work, "task", "Succeeded", start)
+	usageSample(t, s, "team", "task", "call", 100, start)
+	require.NoError(t, s.LinkUsagePullRequest(t.Context(), store.UsagePRLink{Namespace: "team", WorkID: work, Repository: "org/repo",
+		Number: 42, Origin: store.UsagePRCreated, EvidenceID: "publication", LinkedAt: start}))
+	pr := store.UsagePullRequest{Namespace: "team", NamespaceUID: "current-namespace", Repository: "org/repo", Number: 42,
+		GitHubID: "42", State: "open", Ready: true, HeadSHA: "head"}
+	const observations = 26000 // A PR open for roughly 90 days at five-minute refresh intervals.
+	require.NoError(t, s.WithTaskDataTransaction(t.Context(), func(ctx context.Context) error {
+		for i := range observations {
+			pr.ObservedAt = start.Add(time.Duration(i) * 5 * time.Minute)
+			if err := s.RecordUsagePullRequest(ctx, pr); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	lastOpen := pr.ObservedAt
+	mergedAt := lastOpen.Add(19 * time.Minute)
+	pr.State, pr.Ready, pr.MergedAt, pr.ObservedAt = "merged", false, &mergedAt, lastOpen.Add(20*time.Minute)
+	require.NoError(t, s.RecordUsagePullRequest(t.Context(), pr))
+	pr.State, pr.MergedAt, pr.ObservedAt = "unknown", nil, lastOpen.Add(25*time.Minute)
+	require.NoError(t, s.RecordUsagePullRequest(t.Context(), pr))
+	// A newer observation from a replaced namespace must not hide this
+	// namespace's latest state or its confirmed merge.
+	pr.NamespaceUID, pr.State, pr.Ready, pr.ObservedAt = "old-namespace", "open", true, lastOpen.Add(26*time.Minute)
+	require.NoError(t, s.RecordUsagePullRequest(t.Context(), pr))
+	for _, tc := range []struct {
+		name                string
+		asOf                time.Time
+		rows, ready, merged int
+	}{
+		{"early", start.Add(time.Minute), 1, 1, 0},
+		{"recent", lastOpen.Add(time.Minute), 1, 1, 0},
+		{"stale", lastOpen.Add(11 * time.Minute), 1, 0, 0},
+		{"merged", lastOpen.Add(20 * time.Minute), 1, 0, 1},
+		{"unknown after merge", lastOpen.Add(30 * time.Minute), 2, 0, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			filter := store.UsageFilter{Namespaces: []string{"team"}, NamespaceUIDs: map[string]string{"team": "current-namespace"},
+				From: start, Until: start.Add(time.Hour), AsOf: tc.asOf, MaxRecords: 6}
+			data, err := s.LoadUsage(t.Context(), filter)
+			require.NoError(t, err, "routine refresh history must not exhaust the selected-record budget")
+			require.Len(t, data.PullRequests, tc.rows)
+			for _, observation := range data.PullRequests {
+				require.Equal(t, "current-namespace", observation.NamespaceUID)
+			}
+			report := buildUsageReport(t, data, filter)
+			require.EqualValues(t, 100, report.Summary.TotalTokens)
+			require.Equal(t, 1, report.Summary.PRsOpened)
+			require.Equal(t, tc.ready, report.Summary.PRsReady)
+			require.Equal(t, tc.merged, report.Summary.PRsMerged)
+		})
+	}
+}

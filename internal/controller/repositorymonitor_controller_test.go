@@ -5073,7 +5073,7 @@ func TestCreateIssueImplementationPullRequestReusesExistingPullRequest(t *testin
 	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: "github-token"}
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, GitHubAPIBaseURL: server.URL}
-	prURL, prNumber, err := reconciler.createIssueImplementationPullRequest(
+	prURL, prNumber, origin, err := reconciler.createIssueImplementationPullRequest(
 		context.Background(),
 		monitor,
 		&store.MonitorItem{Number: 77, Title: "Add health endpoint"},
@@ -5086,6 +5086,9 @@ func TestCreateIssueImplementationPullRequestReusesExistingPullRequest(t *testin
 	}
 	if prURL != "https://github.com/orka-agents/orka/pull/177" || prNumber != 177 {
 		t.Fatalf("pull request = (%q, %d), want existing pull request", prURL, prNumber)
+	}
+	if origin != store.UsagePRAssisted {
+		t.Fatalf("existing pull request origin = %q, want assisted", origin)
 	}
 	if requests != 1 {
 		t.Fatalf("GitHub request count = %d, want 1 discovery request", requests)
