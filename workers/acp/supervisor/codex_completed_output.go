@@ -53,17 +53,18 @@ func (n *codexCompletedOutputNormalizer) normalize(notification *acp.SessionNoti
 	if notification == nil || mapped == nil || mapped.ToolCall == nil {
 		return
 	}
-	var envelope codexCommandOutputEnvelope
-	if json.Unmarshal(notification.Update, &envelope) != nil {
+	envelope, validEnvelope := decodeCodexOutputEnvelope(notification.Update)
+	if !validEnvelope {
+		n.invalidateEnvelopeIDs(notification.Update)
+		n.invalidate(mapped.ToolCall.ToolCallID)
+		omitCodexOutput(mapped.ToolCall)
 		return
 	}
 	// The generic mapper does not project rawOutput. Preserve that omission
 	// even for an unsupported or untracked call; only an exact completion below
 	// may replace it with an authoritative snapshot.
 	if len(envelope.RawOutput) > 0 {
-		mapped.ToolCall.Content = nil
-		mapped.ToolCall.ContentOmitted = true
-		mapped.ToolCall.ContentReplace = false
+		omitCodexOutput(mapped.ToolCall)
 	}
 	id, err := canonicalACPToolCallID(envelope.ToolCallID)
 	if err != nil || id != mapped.ToolCall.ToolCallID {
@@ -73,6 +74,7 @@ func (n *codexCompletedOutputNormalizer) normalize(notification *acp.SessionNoti
 		if previous, exists := n.calls[id]; exists {
 			previous.invalid = true
 			n.calls[id] = previous
+			omitCodexOutput(mapped.ToolCall)
 			return
 		}
 		if len(n.calls) >= harnessv2.MaxRuntimeSessionTombstoneOperations {
@@ -88,7 +90,13 @@ func (n *codexCompletedOutputNormalizer) normalize(notification *acp.SessionNoti
 		return
 	}
 	call, exists := n.calls[id]
+	if !exists {
+		n.invalidate(id)
+	}
 	if !exists || call.kind == codexCommandOutputUnknown {
+		if !mapped.ToolCall.ContentReplace && len(mapped.ToolCall.Content) == 0 {
+			omitCodexOutput(mapped.ToolCall)
+		}
 		return
 	}
 	if envelope.Status != harnessv2.ToolCallStatusCompleted && envelope.Status != harnessv2.ToolCallStatusFailed {
@@ -115,9 +123,7 @@ func (n *codexCompletedOutputNormalizer) normalize(notification *acp.SessionNoti
 		}
 	}
 	if !ok {
-		mapped.ToolCall.Content = nil
-		mapped.ToolCall.ContentReplace = false
-		mapped.ToolCall.ContentOmitted = true
+		omitCodexOutput(mapped.ToolCall)
 		return
 	}
 	// Do not redact or truncate fragments here. The controller journal must
@@ -132,26 +138,45 @@ func (n *codexCompletedOutputNormalizer) normalize(notification *acp.SessionNoti
 	mapped.ToolCall.ContentOmitted = false
 }
 
-// invalidateUnmappedOutput retains omission state for a known call when the
-// generic mapper suppresses an otherwise invisible provider-specific output.
-// It cannot create call identity, authorize content, or emit a public event.
+func omitCodexOutput(call *harnessv2.ToolCallUpdate) {
+	call.Content = nil
+	call.ContentReplace = false
+	call.ContentOmitted = true
+}
+
+func (n *codexCompletedOutputNormalizer) invalidate(id string) {
+	call, exists := n.calls[id]
+	if !exists && len(n.calls) >= harnessv2.MaxRuntimeSessionTombstoneOperations {
+		return
+	}
+	if n.calls == nil {
+		n.calls = make(map[string]codexCommandOutputCall)
+	}
+	call.invalid = true
+	n.calls[id] = call
+}
+
+// Suppression must not discard a pre-start lifecycle observation. Known calls
+// may still stream the pinned metadata-only progress; only unexpected standard
+// content/rawOutput invalidates their later authoritative completion.
 func (n *codexCompletedOutputNormalizer) invalidateUnmappedOutput(notification *acp.SessionNotification) {
 	if notification == nil {
 		return
 	}
-	var envelope codexCommandOutputEnvelope
-	if json.Unmarshal(notification.Update, &envelope) != nil ||
-		envelope.SessionUpdate != acpUpdateToolCallUpdate ||
-		(len(envelope.Content) == 0 && len(envelope.RawOutput) == 0) {
+	envelope, valid := decodeCodexOutputEnvelope(notification.Update)
+	if !valid {
+		n.invalidateEnvelopeIDs(notification.Update)
+		return
+	}
+	if envelope.SessionUpdate != acpUpdateToolCallUpdate {
 		return
 	}
 	id, err := canonicalACPToolCallID(envelope.ToolCallID)
 	if err != nil {
 		return
 	}
-	if call, exists := n.calls[id]; exists {
-		call.invalid = true
-		n.calls[id] = call
+	if _, exists := n.calls[id]; !exists || len(envelope.Content) > 0 || len(envelope.RawOutput) > 0 {
+		n.invalidate(id)
 	}
 }
 
@@ -162,8 +187,7 @@ func newCodexOutputCall(envelope codexCommandOutputEnvelope, identity remembered
 		call.mcpName = identity.name
 		call.invalid = !identity.codexMCP || identity.name == "" ||
 			!codexMCPOutputInputMatches(envelope.RawInput, identity.name) ||
-			envelope.Status != harnessv2.ToolCallStatusInProgress || envelope.Kind != acpToolKindExecute ||
-			len(envelope.Content) != 0 || len(envelope.RawOutput) != 0 || len(envelope.Meta) != 1
+			!codexMCPStartMatches(envelope)
 	}
 	return call
 }
@@ -180,16 +204,16 @@ func codexCommandStartKind(envelope codexCommandOutputEnvelope) codexCommandOutp
 			return codexCommandOutputAction
 		}
 	case acpToolKindExecute:
-		var content []struct {
-			Type       string `json:"type"`
-			TerminalID string `json:"terminalId"`
+		var content []json.RawMessage
+		if len(envelope.Meta) != 1 || json.Unmarshal(envelope.Content, &content) != nil || len(content) != 1 {
+			return codexCommandOutputUnknown
 		}
-		var terminal struct {
-			TerminalID string `json:"terminal_id"`
-		}
-		if len(envelope.Meta) == 1 && json.Unmarshal(envelope.Content, &content) == nil && len(content) == 1 &&
-			content[0].Type == "terminal" && content[0].TerminalID == envelope.ToolCallID &&
-			json.Unmarshal(envelope.Meta["terminal_info"], &terminal) == nil && terminal.TerminalID == envelope.ToolCallID {
+		reference, referenceOK := codexExactFields(content[0], "type", "terminalId")
+		terminal, terminalOK := codexExactFields(envelope.Meta["terminal_info"], "terminal_id")
+		var contentType, referenceID, terminalID string
+		if referenceOK && terminalOK && json.Unmarshal(reference["type"], &contentType) == nil && contentType == "terminal" &&
+			json.Unmarshal(reference["terminalId"], &referenceID) == nil && referenceID == envelope.ToolCallID &&
+			json.Unmarshal(terminal["terminal_id"], &terminalID) == nil && terminalID == envelope.ToolCallID {
 			return codexCommandOutputTerminal
 		}
 	}
@@ -223,16 +247,13 @@ func codexCompletedCommandText(envelope codexCommandOutputEnvelope, kind codexCo
 		return "", false
 	}
 	if kind == codexCommandOutputTerminal {
-		var terminal struct {
-			TerminalID string          `json:"terminal_id"`
-			ExitCode   json.RawMessage `json:"exit_code"`
-			Signal     json.RawMessage `json:"signal"`
-		}
-		if len(envelope.Meta) != 1 || json.Unmarshal(envelope.Meta["terminal_exit"], &terminal) != nil || terminal.TerminalID != envelope.ToolCallID ||
-			string(terminal.Signal) != acpJSONNull {
+		terminal, valid := codexExactFields(envelope.Meta["terminal_exit"], "terminal_id", "exit_code", "signal")
+		var terminalID string
+		if len(envelope.Meta) != 1 || !valid || json.Unmarshal(terminal["terminal_id"], &terminalID) != nil || terminalID != envelope.ToolCallID ||
+			string(terminal["signal"]) != acpJSONNull {
 			return "", false
 		}
-		terminalExit, valid := codexCommandExitCode(terminal.ExitCode)
+		terminalExit, valid := codexCommandExitCode(terminal["exit_code"])
 		if !valid || terminalExit != exit {
 			return "", false
 		}

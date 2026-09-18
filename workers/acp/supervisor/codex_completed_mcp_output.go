@@ -37,22 +37,12 @@ func codexMCPInputToolName(raw json.RawMessage) string {
 	return tool
 }
 
-// Generic ACP identity decoding can fold marker keys or retain true across a
-// later null. Reject duplicate envelope/metadata keys before freezing a name.
-func codexMCPStartMarkerMatches(raw json.RawMessage) bool {
-	raw, err := harnessv2.CanonicalJSON(raw)
-	if err != nil {
-		return false
-	}
-	var envelope map[string]json.RawMessage
-	if json.Unmarshal(raw, &envelope) != nil {
-		return false
-	}
-	var fields map[string]json.RawMessage
-	if json.Unmarshal(envelope["_meta"], &fields) != nil {
-		return false
-	}
-	return codexMCPOutputStart(codexCommandOutputEnvelope{Meta: fields})
+// MCP identity originates only at the exact pinned start, never at an update or
+// a completed/wrong-kind frame carrying the same provider marker.
+func codexMCPStartMatches(envelope codexCommandOutputEnvelope) bool {
+	return envelope.SessionUpdate == acpUpdateToolCall && envelope.Kind == acpToolKindExecute &&
+		envelope.Status == harnessv2.ToolCallStatusInProgress && codexMCPOutputStart(envelope) &&
+		len(envelope.Content) == 0 && len(envelope.RawOutput) == 0 && len(envelope.Meta) == 1
 }
 
 // codexCompletedMCPText accepts the terminal shape of the pinned adapter's

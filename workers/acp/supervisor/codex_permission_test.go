@@ -3,6 +3,7 @@ package supervisor
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"net/http"
 	"os"
 	"strings"
@@ -332,17 +333,35 @@ func TestMCPProxyReadOnlyAnnotationsPreserveFrozenApprovalPolicy(t *testing.T) {
 
 func TestCodexMCPPermissionResolutionRequiresCorrelatedApproval(t *testing.T) {
 	for _, tt := range []struct {
-		name       string
-		start      string
-		marker     any
-		markerKey  string
-		idOnly     bool
-		rawInput   string
-		rawMeta    string
-		rawUpdate  string
-		wantStatus int
+		name           string
+		start          string
+		marker         any
+		markerKey      string
+		idOnly         bool
+		rawInput       string
+		rawMeta        string
+		rawUpdate      string
+		startFields    map[string]json.RawMessage
+		beforeStart    string
+		afterStart     string
+		permissionWire string
+		wantStatus     int
 	}{
 		{name: "unknown markerless call", wantStatus: http.StatusForbidden},
+		{name: "marked update cannot seed identity", start: "mcp", marker: true, idOnly: true, startFields: map[string]json.RawMessage{"sessionUpdate": json.RawMessage(`"tool_call_update"`)}, wantStatus: http.StatusForbidden},
+		{name: "marked completion cannot seed identity", start: "mcp", marker: true, idOnly: true, startFields: map[string]json.RawMessage{"status": json.RawMessage(`"completed"`)}, wantStatus: http.StatusForbidden},
+		{name: "marked wrong kind cannot seed identity", start: "mcp", marker: true, idOnly: true, startFields: map[string]json.RawMessage{"kind": json.RawMessage(`"read"`)}, wantStatus: http.StatusForbidden},
+		{name: "kind alias cannot override actual start", start: "mcp", marker: true, idOnly: true, startFields: map[string]json.RawMessage{"kind": json.RawMessage(`"read"`), "KIND": json.RawMessage(`"execute"`)}, wantStatus: http.StatusForbidden},
+		{name: "Unicode status alias cannot seed identity", start: "mcp", marker: true, idOnly: true, startFields: map[string]json.RawMessage{"status": json.RawMessage(`null`), "ſtatus": json.RawMessage(`"in_progress"`)}, wantStatus: http.StatusForbidden},
+		{name: "rawInput alias cannot seed identity", start: "mcp", marker: true, idOnly: true, startFields: map[string]json.RawMessage{"rawInput": json.RawMessage(`null`), "RAWINPUT": json.RawMessage(`{"server":"orka","tool":"runtime_feedback","arguments":{}}`)}, wantStatus: http.StatusForbidden},
+		{name: "pre-start mapped completion cannot seed identity", start: "mcp", marker: true, idOnly: true, beforeStart: `{"sessionUpdate":"tool_call_update","toolCallId":"feedback-call-1","status":"completed"}`, wantStatus: http.StatusForbidden},
+		{name: "pre-start suppressed output cannot seed identity", start: "mcp", marker: true, idOnly: true, beforeStart: `{"sessionUpdate":"tool_call_update","toolCallId":"feedback-call-1","rawOutput":{"unexpected":"earlier"}}`, wantStatus: http.StatusForbidden},
+		{name: "malformed terminal cannot preserve permission identity", start: "mcp", marker: true, idOnly: true, afterStart: `{"sessionUpdate":"tool_call_update","toolCallId":"feedback-call-1","status":"in_progress","status":"completed"}`, wantStatus: http.StatusForbidden},
+		{name: "ambiguous suppressed routing cannot preserve permission identity", start: "mcp", marker: true, idOnly: true, afterStart: `{"sessionUpdate":"tool_call_update","toolCallId":"feedback-call-1","sessionUpdate":"session_info_update"}`, wantStatus: http.StatusForbidden},
+		{name: "duplicated call ID cannot preserve permission identity", start: "mcp", marker: true, idOnly: true, afterStart: `{"sessionUpdate":"tool_call_update","toolCallId":"feedback-call-1","toolCallId":"other-call","status":"in_progress"}`, wantStatus: http.StatusForbidden},
+		{name: "finished call cannot authorize permission", start: "mcp", marker: true, idOnly: true, afterStart: `{"sessionUpdate":"tool_call_update","toolCallId":"feedback-call-1","status":"completed"}`, wantStatus: http.StatusForbidden},
+		{name: "permission envelope aliases cannot borrow identity", start: "mcp", marker: true, idOnly: true, permissionWire: `{"toolCallId":"feedback-call-1","Kind":"execute","Status":"pending"}`, wantStatus: http.StatusGone},
+		{name: "permission duplicate status cannot borrow identity", start: "mcp", marker: true, idOnly: true, permissionWire: `{"toolCallId":"feedback-call-1","kind":"execute","status":"completed","status":"pending"}`, wantStatus: http.StatusGone},
 		{name: "unmarked remembered name", start: "direct", wantStatus: http.StatusForbidden},
 		{name: "ID-only unmarked remembered name", start: "direct", idOnly: true, wantStatus: http.StatusForbidden},
 		{name: "unmarked remembered name with approval marker", start: "direct", marker: true, wantStatus: http.StatusForbidden},
@@ -401,7 +420,7 @@ func TestCodexMCPPermissionResolutionRequiresCorrelatedApproval(t *testing.T) {
 			state.promptMutations = mutations
 			state.descriptor.State = harnessv2.RuntimeSessionStatePromptRunning
 			update, permission := codexMCPPermissionFixture(t)
-			if tt.rawInput != "" || tt.rawMeta != "" {
+			if tt.rawInput != "" || tt.rawMeta != "" || len(tt.startFields) != 0 {
 				var wire map[string]json.RawMessage
 				if err := json.Unmarshal(update.Update, &wire); err != nil {
 					t.Fatal(err)
@@ -412,6 +431,7 @@ func TestCodexMCPPermissionResolutionRequiresCorrelatedApproval(t *testing.T) {
 				if tt.rawMeta != "" {
 					wire["_meta"] = json.RawMessage(tt.rawMeta)
 				}
+				maps.Copy(wire, tt.startFields)
 				var err error
 				update.Update, err = json.Marshal(wire)
 				if err != nil {
@@ -424,8 +444,20 @@ func TestCodexMCPPermissionResolutionRequiresCorrelatedApproval(t *testing.T) {
 			if tt.rawUpdate != "" {
 				update.Update = json.RawMessage(tt.rawUpdate)
 			}
+			if tt.beforeStart != "" {
+				before := acp.SessionNotification{SessionID: update.SessionID, Update: json.RawMessage(tt.beforeStart)}
+				if _, err := server.mapRuntimeEvent(state, state.prompt, acp.PromptEvent{Type: acp.PromptEventUpdate, Timestamp: now, Update: &before}); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if tt.start != "" {
 				if _, err := server.mapRuntimeEvent(state, state.prompt, acp.PromptEvent{Type: acp.PromptEventUpdate, Timestamp: now, Update: &update}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.afterStart != "" {
+				after := acp.SessionNotification{SessionID: update.SessionID, Update: json.RawMessage(tt.afterStart)}
+				if _, err := server.mapRuntimeEvent(state, state.prompt, acp.PromptEvent{Type: acp.PromptEventUpdate, Timestamp: now, Update: &after}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -443,8 +475,16 @@ func TestCodexMCPPermissionResolutionRequiresCorrelatedApproval(t *testing.T) {
 			if tt.idOnly {
 				permission.Request.ToolCall = json.RawMessage(`{"toolCallId":"feedback-call-1","kind":"execute","status":"pending"}`)
 			}
-			if _, err := server.mapRuntimeEvent(state, state.prompt, acp.PromptEvent{Type: acp.PromptEventPermissionRequested, Timestamp: now, Permission: permission}); err != nil {
-				t.Fatal(err)
+			if tt.permissionWire != "" {
+				permission.Request.ToolCall = json.RawMessage(tt.permissionWire)
+			}
+			_, mapErr := server.mapRuntimeEvent(state, state.prompt, acp.PromptEvent{Type: acp.PromptEventPermissionRequested, Timestamp: now, Permission: permission})
+			if tt.wantStatus == http.StatusGone {
+				if mapErr == nil || len(state.permissions) != 0 {
+					t.Fatal("ambiguous permission envelope was registered")
+				}
+			} else if mapErr != nil {
+				t.Fatal(mapErr)
 			}
 			request := harnessv2.ResolvePermissionRequest{
 				Protocol: harnessv2.ProtocolVersion, Metadata: testMetadata(cfg.Fence, "permission-operation-1", true),

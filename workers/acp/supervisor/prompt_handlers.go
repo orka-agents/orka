@@ -2141,8 +2141,12 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 			prompt.sequence--
 			return nil, nil
 		}
-		if codex && update.ToolCall != nil {
-			prompt.codexCompletedOutput.normalize(event.Update, update, prompt.toolCallNames[update.ToolCall.ToolCallID])
+		if codex {
+			if update.ToolCall != nil {
+				prompt.codexCompletedOutput.normalize(event.Update, update, prompt.toolCallNames[update.ToolCall.ToolCallID])
+			} else {
+				prompt.codexCompletedOutput.invalidateUnmappedOutput(event.Update)
+			}
 		}
 		mapped := &harnessv2.Event{
 			Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventUpdate, Identity: identity, Update: update,

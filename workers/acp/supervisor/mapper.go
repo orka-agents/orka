@@ -389,8 +389,8 @@ func (prompt *promptState) rememberToolCallName(notification *acp.SessionNotific
 	identity := rememberedACPToolCall{name: name}
 	if codex && call.Meta.IsMCPToolCall {
 		identity = rememberedACPToolCall{codexMCP: true}
-		if codexMCPStartMarkerMatches(notification.Update) {
-			identity.name = codexMCPToolName(call.RawInput, policy)
+		if envelope, valid := decodeCodexOutputEnvelope(notification.Update); valid && codexMCPStartMatches(envelope) {
+			identity.name = codexMCPToolName(envelope.RawInput, policy)
 		}
 		if name != "" && name != identity.name {
 			return fmt.Errorf("ACP tool call has conflicting tool identities")
@@ -431,16 +431,13 @@ func (prompt *promptState) correlatePermissionToolName(event *acp.PermissionRequ
 		// A direct brokered name cannot borrow authority without both the
 		// remembered MCP call identity and the pinned approval marker.
 		if mcpApproval || (known && identity.codexMCP) || (allowed && descriptor.Source.Brokered()) {
-			if !mcpApproval || !known || !identity.codexMCP {
+			call, tracked := prompt.codexCompletedOutput.calls[permission.ToolCallID]
+			if !mcpApproval || !known || !identity.codexMCP || !tracked || call.kind != codexCommandOutputMCP || call.invalid || call.finished {
 				permission.ToolName = ""
 				return nil
 			}
-			var call struct {
-				Kind     string          `json:"kind"`
-				Status   string          `json:"status"`
-				RawInput json.RawMessage `json:"rawInput"`
-			}
-			if json.Unmarshal(event.Request.ToolCall, &call) != nil || call.Kind != acpToolKindExecute || call.Status != "pending" || len(call.RawInput) != 0 {
+			envelope, valid := decodeCodexOutputEnvelope(event.Request.ToolCall)
+			if !valid || envelope.Kind != acpToolKindExecute || envelope.Status != harnessv2.ToolCallStatusPending || len(envelope.RawInput) != 0 {
 				return fmt.Errorf("codex MCP permission does not match the pinned approval envelope")
 			}
 		}

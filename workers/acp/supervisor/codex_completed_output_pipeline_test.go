@@ -88,6 +88,11 @@ func (p *codexOutputTestPipeline) update(t *testing.T, wire map[string]any) *har
 	if err != nil {
 		t.Fatal(err)
 	}
+	return p.rawUpdate(t, raw)
+}
+
+func (p *codexOutputTestPipeline) rawUpdate(t *testing.T, raw json.RawMessage) *harnessv2.Event {
+	t.Helper()
 	mapped, err := p.server.mapRuntimeEvent(p.session, p.prompt, acp.PromptEvent{
 		Type: acp.PromptEventUpdate, Timestamp: time.Now().UTC(),
 		Update: &acp.SessionNotification{SessionID: "codex-session", Update: raw},
