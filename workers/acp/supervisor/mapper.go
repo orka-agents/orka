@@ -18,6 +18,10 @@ const (
 	acpUpdateToolCall       = "tool_call"
 	acpUpdateToolCallUpdate = "tool_call_update"
 	acpContentTypeText      = "text"
+	acpToolKindExecute      = "execute"
+	acpToolKindRead         = "read"
+	acpMCPServerName        = "orka"
+	acpJSONNull             = "null"
 )
 
 const (
@@ -145,7 +149,7 @@ func mapACPUpdate(notification *acp.SessionNotification) (*harnessv2.UpdateEvent
 }
 
 func mapACPToolCallContent(raw json.RawMessage) ([]harnessv2.ContentBlock, bool, error) {
-	if len(raw) == 0 || string(raw) == "null" {
+	if len(raw) == 0 || string(raw) == acpJSONNull {
 		return nil, false, nil
 	}
 	var items []struct {
@@ -313,11 +317,13 @@ func canonicalACPToolCallID(value string) (string, error) {
 }
 
 type acpToolCallIdentity struct {
-	ToolCallID string `json:"toolCallId"`
-	ToolName   string `json:"name"`
-	Title      string `json:"title"`
+	ToolCallID string          `json:"toolCallId"`
+	ToolName   string          `json:"name"`
+	Title      string          `json:"title"`
+	RawInput   json.RawMessage `json:"rawInput"`
 	Meta       struct {
-		ClaudeCode struct {
+		IsMCPToolCall bool `json:"is_mcp_tool_call"`
+		ClaudeCode    struct {
 			ToolName string `json:"toolName"`
 		} `json:"claudeCode"`
 	} `json:"_meta"`
@@ -337,10 +343,32 @@ func (identity acpToolCallIdentity) name() (string, error) {
 	return name, nil
 }
 
+type rememberedACPToolCall struct {
+	name     string
+	codexMCP bool
+}
+
+func pinnedCodexACPProvider(provider ProviderProfile) bool {
+	return provider.Kind == providerKindCodex && provider.AdapterName == "codex-acp-orka-dist" &&
+		provider.AdapterDigest == "sha256:"+acp.CodexACPOrkaDistSHA256
+}
+
+// Codex's pinned adapter identifies MCP calls in rawInput, never in the display
+// title. Only retain the configured Orka server's frozen read-only descriptor;
+// arguments and other provider fields are neither authority nor retained state.
+func codexMCPToolName(raw json.RawMessage, policy harnessv2.MCPToolPolicy) string {
+	descriptor, allowed := policy.Descriptor(codexMCPInputToolName(raw))
+	if !allowed || !descriptor.Source.Brokered() || descriptor.Effect != harnessv2.MCPToolEffectReadOnly {
+		return ""
+	}
+	return descriptor.Name
+}
+
 // rememberToolCallName retains structured identities only for this prompt.
-// Claude emits its tool name in a preceding update, while the corresponding
-// permission request can contain only a toolCallId and a display title.
-func (prompt *promptState) rememberToolCallName(notification *acp.SessionNotification) error {
+// Claude and Codex emit structured names in preceding updates; their permission
+// requests can contain only a toolCallId. Codex MCP correlation also retains the
+// source marker so an unrelated human-input request cannot borrow that identity.
+func (prompt *promptState) rememberToolCallName(notification *acp.SessionNotification, codex bool, policy harnessv2.MCPToolPolicy) error {
 	if notification == nil {
 		return nil
 	}
@@ -355,15 +383,28 @@ func (prompt *promptState) rememberToolCallName(notification *acp.SessionNotific
 		return nil
 	}
 	name, err := call.name()
-	if err != nil || name == "" {
+	if err != nil {
 		return err
+	}
+	identity := rememberedACPToolCall{name: name}
+	if codex && call.Meta.IsMCPToolCall {
+		identity = rememberedACPToolCall{codexMCP: true}
+		if envelope, valid := decodeCodexOutputEnvelope(notification.Update); valid && codexMCPStartMatches(envelope) {
+			identity.name = codexMCPToolName(envelope.RawInput, policy)
+		}
+		if name != "" && name != identity.name {
+			return fmt.Errorf("ACP tool call has conflicting tool identities")
+		}
+	}
+	if identity.name == "" && !identity.codexMCP {
+		return nil
 	}
 	id, err := canonicalACPToolCallID(call.ToolCallID)
 	if err != nil {
 		return err
 	}
 	if previous, ok := prompt.toolCallNames[id]; ok {
-		if previous != name {
+		if previous != identity {
 			return fmt.Errorf("ACP tool call identity changed during the prompt")
 		}
 		return nil
@@ -372,9 +413,41 @@ func (prompt *promptState) rememberToolCallName(notification *acp.SessionNotific
 		return fmt.Errorf("ACP tool call identity limit exceeded")
 	}
 	if prompt.toolCallNames == nil {
-		prompt.toolCallNames = make(map[string]string)
+		prompt.toolCallNames = make(map[string]rememberedACPToolCall)
 	}
-	prompt.toolCallNames[id] = name
+	prompt.toolCallNames[id] = identity
+	return nil
+}
+
+func (prompt *promptState) correlatePermissionToolName(event *acp.PermissionRequestEvent, permission *harnessv2.PermissionRequestedEvent, codex bool, policy harnessv2.MCPToolPolicy) error {
+	identity, known := prompt.toolCallNames[permission.ToolCallID]
+	if codex {
+		mcpApproval, _ := event.Request.Meta["is_mcp_tool_approval"].(bool)
+		name := permission.ToolName
+		if known {
+			name = identity.name
+		}
+		descriptor, allowed := policy.Descriptor(name)
+		// A direct brokered name cannot borrow authority without both the
+		// remembered MCP call identity and the pinned approval marker.
+		if mcpApproval || (known && identity.codexMCP) || (allowed && descriptor.Source.Brokered()) {
+			call, tracked := prompt.codexCompletedOutput.calls[permission.ToolCallID]
+			if !mcpApproval || !known || !identity.codexMCP || !tracked || call.kind != codexCommandOutputMCP || call.invalid || call.finished {
+				permission.ToolName = ""
+				return nil
+			}
+			envelope, valid := decodeCodexOutputEnvelope(event.Request.ToolCall)
+			if !valid || envelope.Kind != acpToolKindExecute || envelope.Status != harnessv2.ToolCallStatusPending || len(envelope.RawInput) != 0 {
+				return fmt.Errorf("codex MCP permission does not match the pinned approval envelope")
+			}
+		}
+	}
+	if known {
+		if permission.ToolName != "" && permission.ToolName != identity.name {
+			return fmt.Errorf("ACP permission does not match the recorded tool identity")
+		}
+		permission.ToolName = identity.name
+	}
 	return nil
 }
 
@@ -403,8 +476,7 @@ func mapPermission(event *acp.PermissionRequestEvent, at time.Time, ttl time.Dur
 	}
 	var toolCall struct {
 		acpToolCallIdentity
-		Kind     string          `json:"kind"`
-		RawInput json.RawMessage `json:"rawInput"`
+		Kind string `json:"kind"`
 	}
 	if err := json.Unmarshal(event.Request.ToolCall, &toolCall); err != nil {
 		return nil, fmt.Errorf("decode ACP permission tool call: %w", err)
@@ -417,7 +489,7 @@ func mapPermission(event *acp.PermissionRequestEvent, at time.Time, ttl time.Dur
 	// Recognize its command envelope only for this provider; titles and the
 	// generic execute kind alone cannot identify an authorized tool. The
 	// controller and supervisor still require Bash in the frozen tool policy.
-	if provider == providerKindCopilot && toolName == "" && toolCall.Kind == "execute" {
+	if provider == providerKindCopilot && toolName == "" && toolCall.Kind == acpToolKindExecute {
 		var input struct {
 			Command  string   `json:"command"`
 			Commands []string `json:"commands"`

@@ -2118,7 +2118,12 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 		state.descriptor.LastTransitionAt = event.Timestamp
 		return &harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventAccepted, Identity: identity, Accepted: &harnessv2.AcceptedEvent{AcceptedAt: event.Timestamp, Lease: prompt.lease, ACPVersion: harnessv2.ACPProfileV1}}, nil
 	case acp.PromptEventUpdate:
-		if err := prompt.rememberToolCallName(event.Update); err != nil {
+		var policy harnessv2.MCPToolPolicy
+		if state.mcpProxy != nil {
+			policy = state.mcpProxy.configuration.ToolPolicy
+		}
+		codex := state.profile.ProviderKind == providerKindCodex && pinnedCodexACPProvider(s.cfg.Provider)
+		if err := prompt.rememberToolCallName(event.Update, codex, policy); err != nil {
 			return nil, err
 		}
 		update, text, ok, err := mapACPUpdate(event.Update)
@@ -2130,8 +2135,18 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 			prompt.appendAssistantText(text, acpAssistantMessagePhase(event.Update), s.cfg.Capabilities.Limits.MaxTerminalResultBytes)
 		}
 		if !ok {
+			if codex {
+				prompt.codexCompletedOutput.invalidateUnmappedOutput(event.Update)
+			}
 			prompt.sequence--
 			return nil, nil
+		}
+		if codex {
+			if update.ToolCall != nil {
+				prompt.codexCompletedOutput.normalize(event.Update, update, prompt.toolCallNames[update.ToolCall.ToolCallID])
+			} else {
+				prompt.codexCompletedOutput.invalidateUnmappedOutput(event.Update)
+			}
 		}
 		mapped := &harnessv2.Event{
 			Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventUpdate, Identity: identity, Update: update,
@@ -2146,14 +2161,16 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 		if err != nil {
 			return nil, err
 		}
-		if name, known := prompt.toolCallNames[permission.ToolCallID]; known {
-			if permission.ToolName != "" && permission.ToolName != name {
-				return nil, fmt.Errorf("ACP permission does not match the recorded tool identity")
-			}
-			permission.ToolName = name
+		var policy harnessv2.MCPToolPolicy
+		if state.mcpProxy != nil {
+			policy = state.mcpProxy.configuration.ToolPolicy
+		}
+		codex := state.profile.ProviderKind == providerKindCodex && pinnedCodexACPProvider(s.cfg.Provider)
+		if err := prompt.correlatePermissionToolName(event.Permission, permission, codex, policy); err != nil {
+			return nil, err
 		}
 		if state.mcpProxy != nil {
-			permission.ToolName = canonicalPermissionToolName(state.profile.ProviderKind, state.mcpProxy.configuration.ToolPolicy, permission.ToolName)
+			permission.ToolName = canonicalPermissionToolName(state.profile.ProviderKind, policy, permission.ToolName)
 		}
 		if prompt.permissionRequestIDs == nil {
 			prompt.permissionRequestIDs = make(map[harnessv2.PermissionRequestID]struct{})
