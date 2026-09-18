@@ -9,6 +9,7 @@ interface ObjectMeta {
 interface GatewayCapabilities {
   inboundText?: boolean
   outboundText?: boolean
+  interimDelivery?: boolean
   threads?: boolean
   senderIdentity?: boolean
   explicitSessions?: boolean
@@ -122,7 +123,7 @@ export interface GatewayDelivery {
   eventId: string
   taskName?: string
   sessionName?: string
-  kind: 'final' | 'error'
+  kind: 'final' | 'error' | 'message'
   state: GatewayDeliveryState
   replyTarget: string
   text: string
