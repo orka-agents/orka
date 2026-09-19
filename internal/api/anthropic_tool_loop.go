@@ -51,7 +51,7 @@ func hasGoalStateSentinelPrefix(s string) bool {
 // timeout (typically 10 minutes for Copilot/Anthropic). The error string is
 // the only reliable signal — upstream returns 400 without a typed error code.
 func isStreamingRequiredErr(err error) bool {
-	if err == nil {
+	if err == nil || llm.IsUsagePersistenceError(err) {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
@@ -68,6 +68,9 @@ func isStreamingRequiredErr(err error) bool {
 func completeViaStream(ctx context.Context, provider llm.Provider, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
 	streamCh, err := provider.Stream(ctx, req)
 	if err != nil {
+		if llm.IsUsagePersistenceError(err) {
+			return nil, fmt.Errorf("open stream: %w", err)
+		}
 		return nil, fmt.Errorf("%w: open: %w", errStreamUnavailable, err)
 	}
 
@@ -75,7 +78,7 @@ func completeViaStream(ctx context.Context, provider llm.Provider, req *llm.Comp
 	terminalSeen := false
 	for chunk := range streamCh {
 		if chunk.Error != nil {
-			if resp.Content == "" && len(resp.ToolCalls) == 0 {
+			if !llm.IsUsagePersistenceError(chunk.Error) && resp.Content == "" && len(resp.ToolCalls) == 0 {
 				return nil, fmt.Errorf("%w: chunk: %w", errStreamUnavailable, chunk.Error)
 			}
 			return nil, fmt.Errorf("stream chunk: %w", chunk.Error)
@@ -86,12 +89,7 @@ func completeViaStream(ctx context.Context, provider llm.Provider, req *llm.Comp
 		if chunk.ToolCall != nil {
 			resp.ToolCalls = append(resp.ToolCalls, *chunk.ToolCall)
 		}
-		if chunk.InputTokens > 0 {
-			resp.InputTokens = chunk.InputTokens
-		}
-		if chunk.OutputTokens > 0 {
-			resp.OutputTokens = chunk.OutputTokens
-		}
+		retainStreamUsage(resp, chunk)
 		if chunk.Model != "" {
 			resp.Model = chunk.Model
 		}
@@ -707,6 +705,9 @@ func runToolLoopWithObserver(
 				Temperature:  req.Temperature,
 			})
 			if err != nil {
+				if llm.IsUsagePersistenceError(err) {
+					return nil, fmt.Errorf("final LLM completion after iteration limit failed: %w", err)
+				}
 				resp := &llm.CompletionResponse{
 					Content:    "Reached iteration limit.",
 					StopReason: "end_turn",

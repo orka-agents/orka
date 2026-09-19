@@ -17,6 +17,18 @@ type usageRecorderKey struct{}
 type usageHTTPAttemptKey struct{}
 type UsageRecorder func(context.Context, store.UsageObservation) error
 
+type usagePersistenceError struct{ cause error }
+
+func (e *usagePersistenceError) Error() string { return e.cause.Error() }
+func (e *usagePersistenceError) Unwrap() error { return e.cause }
+
+// IsUsagePersistenceError identifies accounting failures that must not trigger
+// another model call, even if a joined provider error normally permits retry.
+func IsUsagePersistenceError(err error) bool {
+	_, ok := errors.AsType[*usagePersistenceError](err)
+	return ok
+}
+
 type usageCall struct {
 	mu          sync.Mutex
 	record      UsageRecorder
@@ -65,7 +77,7 @@ func (c *usageCall) beforeHTTP(ctx context.Context) error {
 		Provider: previous.Provider, Model: previous.Model, Status: store.UsageStatusStarted}
 	next.ID, next.ObservedAt = next.CounterID+"/start", time.Now().UTC()
 	if err := c.record(ctx, next); err != nil {
-		c.err = fmt.Errorf("persist model retry start: %w", err)
+		c.err = &usagePersistenceError{cause: fmt.Errorf("persist model retry start: %w", err)}
 		return c.err
 	}
 	c.observation = next
@@ -76,6 +88,12 @@ func (c *usageCall) snapshot() store.UsageObservation {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.observation
+}
+
+func (c *usageCall) persistenceError() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.err
 }
 
 // RecordIntermediateUsage preserves a successful SDK probe whose response is
@@ -99,7 +117,8 @@ func RecordIntermediateUsage(ctx context.Context, response *CompletionResponse) 
 		observation.Provider = response.Provider
 	}
 	if err := finishUsage(ctx, call.record, observation); err != nil {
-		return fmt.Errorf("persist model probe usage: %w", err)
+		call.err = fmt.Errorf("persist model probe usage: %w", err)
+		return call.err
 	}
 	call.observation = observation
 	return nil
@@ -143,7 +162,7 @@ func (p *usageProvider) begin(ctx context.Context, req *CompletionRequest) (cont
 	observation := store.UsageObservation{ID: id + "/start", CounterID: id, Scope: store.UsageScopeCall, Source: store.UsageSourceProvider,
 		Provider: ProviderTelemetryName(p.Provider), Model: req.Model, Status: store.UsageStatusStarted, ObservedAt: time.Now().UTC()}
 	if err := record(ctx, observation); err != nil {
-		return ctx, nil, fmt.Errorf("persist model call start: %w", err)
+		return ctx, nil, &usagePersistenceError{cause: fmt.Errorf("persist model call start: %w", err)}
 	}
 	call := &usageCall{record: record, observation: observation}
 	return context.WithValue(ctx, usageHTTPAttemptKey{}, call), call, nil
@@ -152,7 +171,10 @@ func (p *usageProvider) begin(ctx context.Context, req *CompletionRequest) (cont
 func finishUsage(ctx context.Context, record UsageRecorder, observation store.UsageObservation) error {
 	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	return record(writeCtx, observation)
+	if err := record(writeCtx, observation); err != nil {
+		return &usagePersistenceError{cause: err}
+	}
+	return nil
 }
 
 func (p *usageProvider) Complete(ctx context.Context, req *CompletionRequest) (*CompletionResponse, error) {
@@ -164,6 +186,8 @@ func (p *usageProvider) Complete(ctx context.Context, req *CompletionRequest) (*
 	if call == nil {
 		return response, callErr
 	}
+	// SDK error conversion can discard the middleware error's type.
+	callErr = errors.Join(callErr, call.persistenceError())
 	observation := call.snapshot()
 	observation.ID = observation.CounterID + "/finish"
 	observation.ObservedAt = time.Now().UTC()
@@ -193,6 +217,7 @@ func (p *usageProvider) Stream(ctx context.Context, req *CompletionRequest) (<-c
 	if call == nil {
 		return upstream, err
 	}
+	err = errors.Join(err, call.persistenceError())
 	if err != nil {
 		observation := call.snapshot()
 		observation.ID = observation.CounterID + "/finish"
@@ -232,6 +257,7 @@ func (p *usageProvider) Stream(ctx context.Context, req *CompletionRequest) (<-c
 				observation = latest
 				sequence = 0
 			}
+			chunk.Error = errors.Join(chunk.Error, call.persistenceError())
 			if chunk.Model != "" {
 				observation.Model = chunk.Model
 			}

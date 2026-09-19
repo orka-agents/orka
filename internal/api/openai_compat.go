@@ -683,6 +683,11 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 
 		streamCh, err := capturedProvider.Stream(streamCtx, capturedReq)
 		if err != nil {
+			if llm.IsUsagePersistenceError(err) {
+				oaiLog.Error(err, "stream usage persistence failed")
+				_ = writeStreamError(w, "provider_error")
+				return
+			}
 			// Try non-streaming fallback via Complete
 			resp, completeErr := capturedProvider.Complete(streamCtx, capturedReq)
 			if completeErr != nil {

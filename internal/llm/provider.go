@@ -233,7 +233,7 @@ func (e *ProviderError) IsContextTooLong() bool {
 
 // ShouldRetry reports whether the operation that produced err should be retried.
 func ShouldRetry(err error) bool {
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+	if IsUsagePersistenceError(err) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return false
 	}
 	if pe, ok := errors.AsType[*ProviderError](err); ok {
@@ -244,7 +244,7 @@ func ShouldRetry(err error) bool {
 
 // ShouldFallback reports whether a different provider should be tried.
 func ShouldFallback(err error) bool {
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+	if IsUsagePersistenceError(err) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return false
 	}
 	if pe, ok := errors.AsType[*ProviderError](err); ok {
@@ -255,6 +255,9 @@ func ShouldFallback(err error) bool {
 
 // IsContextTooLongErr reports whether err indicates the context/token limit was exceeded.
 func IsContextTooLongErr(err error) bool {
+	if IsUsagePersistenceError(err) {
+		return false
+	}
 	if pe, ok := errors.AsType[*ProviderError](err); ok {
 		return pe.IsContextTooLong()
 	}

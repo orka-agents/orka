@@ -23,6 +23,10 @@ import (
 )
 
 func usageFixture(t *testing.T) (context.Context, func() usage.Report) {
+	return usageFixtureWithRecorder(t, nil)
+}
+
+func usageFixtureWithRecorder(t *testing.T, beforeRecord func(store.UsageObservation) error) (context.Context, func() usage.Report) {
 	t.Helper()
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
@@ -33,6 +37,11 @@ func usageFixture(t *testing.T) (context.Context, func() usage.Report) {
 	require.NoError(t, backend.RegisterUsageWork(t.Context(), store.UsageWorkRequest{Namespace: "team", ID: work, MonitorName: "monitor", MonitorUID: "monitor", Repository: "org/repo", Kind: "issue", Number: 1, StartedAt: start}))
 	require.NoError(t, backend.RegisterUsageTask(t.Context(), store.UsageTask{Namespace: "team", TaskUID: "task", TaskName: "task", WorkID: work, Phase: "Running", StartedAt: start}))
 	ctx := llm.WithUsageRecorder(t.Context(), func(ctx context.Context, observation store.UsageObservation) error {
+		if beforeRecord != nil {
+			if err := beforeRecord(observation); err != nil {
+				return err
+			}
+		}
 		observation.Namespace, observation.TaskUID = "team", "task"
 		return backend.RecordUsage(ctx, observation)
 	})
@@ -307,4 +316,129 @@ func TestUsageStartMustPersistBeforeProviderCall(t *testing.T) {
 	_, err = provider.Complete(ctx, usageRequest())
 	require.ErrorContains(t, err, "persist model call start")
 	require.Zero(t, requests.Load())
+}
+
+func TestUsagePersistenceFailureDoesNotRepeatProviderCall(t *testing.T) {
+	for _, strategy := range []string{"retry", "fallback", "retry and fallback"} {
+		for _, streaming := range []bool{false, true} {
+			for _, failureStatus := range []string{store.UsageStatusStarted, store.UsageStatusCompleted} {
+				t.Run(fmt.Sprintf("%s/stream=%v/%s", strategy, streaming, failureStatus), func(t *testing.T) {
+					recorderErr := errors.New("usage store unavailable")
+					var failed atomic.Bool
+					ctx, report := usageFixtureWithRecorder(t, func(observation store.UsageObservation) error {
+						if observation.Status == failureStatus && failed.CompareAndSwap(false, true) {
+							return recorderErr
+						}
+						return nil
+					})
+					var primaryCalls, fallbackCalls atomic.Int32
+					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						if strings.HasPrefix(r.URL.Path, "/fallback/") {
+							fallbackCalls.Add(1)
+						} else {
+							primaryCalls.Add(1)
+						}
+						if streaming {
+							w.Header().Set("Content-Type", "text/event-stream")
+							_, _ = fmt.Fprint(w, "event: message_start\ndata: "+`{"type":"message_start","message":{"id":"message","type":"message","role":"assistant","model":"served-model","usage":{"input_tokens":100,"output_tokens":0}}}`+"\n\n")
+							_, _ = fmt.Fprint(w, "event: message_delta\ndata: "+`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":20}}`+"\n\n")
+							return
+						}
+						w.Header().Set("Content-Type", "application/json")
+						_, _ = fmt.Fprint(w, `{"id":"message","type":"message","role":"assistant","model":"served-model","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":20}}`)
+					}))
+					t.Cleanup(server.Close)
+					provider, err := llm.NewProvider("anthropic", llm.ProviderConfig{APIKey: "fixture", BaseURL: server.URL + "/primary/"})
+					require.NoError(t, err)
+					if strings.Contains(strategy, "retry") {
+						provider = llm.NewRetryProvider(provider)
+					}
+					if strings.Contains(strategy, "fallback") {
+						fallback, err := llm.NewProvider("anthropic", llm.ProviderConfig{APIKey: "fixture", BaseURL: server.URL + "/fallback/"})
+						require.NoError(t, err)
+						provider = llm.NewFallbackProvider(provider, []llm.FallbackEntry{{Provider: fallback}})
+					}
+					if streaming {
+						var stream <-chan llm.StreamChunk
+						stream, err = provider.Stream(ctx, usageRequest())
+						if err == nil {
+							for chunk := range stream {
+								err = errors.Join(err, chunk.Error)
+							}
+						}
+					} else {
+						_, err = provider.Complete(ctx, usageRequest())
+					}
+					require.ErrorIs(t, err, recorderErr)
+					require.False(t, llm.ShouldRetry(err))
+					require.False(t, llm.ShouldFallback(err))
+					require.Zero(t, fallbackCalls.Load())
+					got := report()
+					if failureStatus == store.UsageStatusStarted {
+						require.Zero(t, primaryCalls.Load())
+						require.Zero(t, got.Summary.Calls)
+						return
+					}
+					require.EqualValues(t, 1, primaryCalls.Load())
+					require.Equal(t, 1, got.Summary.Calls)
+					require.NotEqual(t, "complete", got.Summary.Completeness)
+					if !streaming {
+						require.Equal(t, "unavailable", got.Summary.Completeness)
+						require.Equal(t, 1, got.Summary.MissingMeasurements)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestUsagePersistenceFailureStopsSDKRetry(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		t.Run(fmt.Sprint(streaming), func(t *testing.T) {
+			writeErr := errors.New("usage store unavailable during SDK retry")
+			var failed atomic.Bool
+			ctx, report := usageFixtureWithRecorder(t, func(observation store.UsageObservation) error {
+				if strings.HasSuffix(observation.ID, "/http-finish") && failed.CompareAndSwap(false, true) {
+					return writeErr
+				}
+				return nil
+			})
+			var primaryCalls, fallbackCalls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasPrefix(r.URL.Path, "/fallback/") {
+					fallbackCalls.Add(1)
+				} else {
+					primaryCalls.Add(1)
+				}
+				w.Header().Set("retry-after-ms", "1")
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = fmt.Fprint(w, `{"type":"error","error":{"type":"api_error","message":"fixture failure"}}`)
+			}))
+			t.Cleanup(server.Close)
+			primary, err := llm.NewProvider("anthropic", llm.ProviderConfig{APIKey: "fixture", BaseURL: server.URL + "/primary/"})
+			require.NoError(t, err)
+			fallback, err := llm.NewProvider("anthropic", llm.ProviderConfig{APIKey: "fixture", BaseURL: server.URL + "/fallback/"})
+			require.NoError(t, err)
+			provider := llm.NewFallbackProvider(llm.NewRetryProvider(primary), []llm.FallbackEntry{{Provider: fallback}})
+			if streaming {
+				var stream <-chan llm.StreamChunk
+				stream, err = provider.Stream(ctx, usageRequest())
+				if err == nil {
+					for chunk := range stream {
+						err = errors.Join(err, chunk.Error)
+					}
+				}
+			} else {
+				_, err = provider.Complete(ctx, usageRequest())
+			}
+			require.ErrorIs(t, err, writeErr)
+			require.True(t, llm.IsUsagePersistenceError(err), "SDK conversion must preserve the accounting error")
+			require.EqualValues(t, 1, primaryCalls.Load())
+			require.Zero(t, fallbackCalls.Load())
+			got := report()
+			require.Equal(t, 1, got.Summary.Calls)
+			require.Equal(t, 1, got.Summary.MissingMeasurements)
+		})
+	}
 }

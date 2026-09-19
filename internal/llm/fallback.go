@@ -150,6 +150,9 @@ func (f *FallbackProvider) Stream(ctx context.Context, req *CompletionRequest) (
 
 		innerCh, err := c.provider.Stream(ctx, callReq)
 		if err != nil {
+			if IsUsagePersistenceError(err) {
+				return nil, err
+			}
 			lastErr = err
 			logger.Info("provider stream failed, trying fallback",
 				"provider", c.provider.Name(), "error", err)
@@ -169,6 +172,12 @@ func (f *FallbackProvider) Stream(ctx context.Context, req *CompletionRequest) (
 			lastErr = firstChunk.Error
 			// Drain remaining
 			for range innerCh {
+			}
+			if IsUsagePersistenceError(firstChunk.Error) {
+				ch := make(chan StreamChunk, 1)
+				ch <- firstChunk
+				close(ch)
+				return ch, nil
 			}
 
 			if f.tracker != nil {
