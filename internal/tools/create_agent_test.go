@@ -63,7 +63,7 @@ func TestCreateAgentTool_Parameters(t *testing.T) {
 	}
 	systemPrompt, ok := properties["systemPrompt"].(map[string]any)
 	description, _ := systemPrompt[jsonSchemaDescriptionField].(string)
-	if !ok || !strings.Contains(description, "Required unless runtime.type is opencode") {
+	if !ok || !strings.Contains(description, "Role instructions") {
 		t.Fatalf("systemPrompt schema = %#v, want OpenCode omission guidance", systemPrompt)
 	}
 }
@@ -646,7 +646,7 @@ func TestCreateAgentTool_Execute_PreservesExplicitEmptyOpenCodeTools(t *testing.
 	}
 }
 
-func TestCreateAgentTool_Execute_RejectsOpenCodeSystemPrompt(t *testing.T) {
+func TestCreateAgentTool_Execute_AcceptsOpenCodeSystemPrompt(t *testing.T) {
 	t.Setenv(envOrkaTaskName, parentTaskName)
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 	_, err := NewCreateAgentTool(newFakeClient(parentTask()), executionmode.HarnessV2).Execute(context.Background(), json.RawMessage(`{
@@ -655,8 +655,8 @@ func TestCreateAgentTool_Execute_RejectsOpenCodeSystemPrompt(t *testing.T) {
 		"model":{"name":"openai/gpt-5.4","contextWindow":32768,"maxTokens":4096},
 		"runtime":{"type":"opencode"}
 	}`))
-	if err == nil || !strings.Contains(err.Error(), "does not support systemPrompt") {
-		t.Fatalf("Execute() error = %v, want OpenCode systemPrompt rejection", err)
+	if err != nil {
+		t.Fatalf("native OpenCode prompt: %v", err)
 	}
 }
 

@@ -29,10 +29,6 @@ func ValidateOpenCodeAgentSpec(agent *corev1alpha1.Agent) error {
 	if strings.TrimSpace(agent.Spec.Runtime.DefaultReasoningEffort) != "" {
 		return fmt.Errorf("agent %q opencode runtime does not support spec.runtime.defaultReasoningEffort", agent.Name)
 	}
-	if agent.Spec.SystemPrompt != nil &&
-		(strings.TrimSpace(agent.Spec.SystemPrompt.Inline) != "" || agent.Spec.SystemPrompt.ConfigMapRef != nil) {
-		return fmt.Errorf("agent %q opencode runtime does not support spec.systemPrompt", agent.Name)
-	}
 	if agent.Spec.ProviderRef != nil {
 		return fmt.Errorf("agent %q opencode runtime does not accept spec.providerRef; provider identity is derived from spec.model.name", agent.Name)
 	}

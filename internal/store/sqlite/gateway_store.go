@@ -1623,6 +1623,13 @@ func (s *Store) MaintainGatewayRecords(ctx context.Context, namespace string, no
 		if event.SessionName == "" {
 			continue
 		}
+		retained, retainErr := retainGatewaySoulAnchorTx(ctx, tx, event)
+		if retainErr != nil {
+			return result, retainErr
+		}
+		if retained {
+			result.DeletedSessionMessages++
+		} // The original message content was removed.
 		messageDelete, deleteErr := tx.ExecContext(ctx, `DELETE FROM session_messages
 			WHERE namespace = ? AND session_name = ?
 			  AND (message_id IN (?, ?, ?) OR (source_type = 'gateway-event' AND source_ref = ?))`,
@@ -1655,7 +1662,7 @@ func (s *Store) MaintainGatewayRecords(ctx context.Context, namespace string, no
 
 	for session := range affectedSessions {
 		if _, err := tx.ExecContext(ctx, `UPDATE sessions SET message_count = (
-			SELECT COUNT(*) FROM session_messages WHERE namespace = ? AND session_name = ?
+			SELECT COUNT(*) FROM session_messages WHERE namespace = ? AND session_name = ? AND source_type <> 'soul-context'
 		) WHERE namespace = ? AND name = ? AND session_type = ?`,
 			session.Namespace, session.Name, session.Namespace, session.Name, store.SessionTypeGateway); err != nil {
 			return result, err

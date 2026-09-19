@@ -16,6 +16,8 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
+var errSessionAdmissionRollback = errors.New("session admission rollback failed")
+
 type acpTaskSession struct {
 	Turn             *ACPSessionTurn
 	Binding          ACPRuntimeSessionBinding
@@ -614,8 +616,7 @@ func (d *ACPDispatcher) bindAndOpenTaskSessionTurn(
 	// failed after the Kubernetes-authoritative status CAS.
 	lease, err := d.acquireTaskSessionLease(ctx, task, fence, control, lineage)
 	if err != nil {
-		requeueErr := d.requeuePreSubmissionTask(ctx, task, attemptID, fence, err)
-		return nil, nil, errors.Join(err, requeueErr)
+		return nil, nil, d.requeueSessionLeaseFailure(ctx, task, attemptID, fence, err)
 	}
 	if lease.Key.LeaseGeneration != leaseGeneration {
 		err := fmt.Errorf("%w: acquired ACP Session lease generation changed after PromptAttempt binding", store.ErrConflict)
@@ -1058,4 +1059,13 @@ func bootstrapPromptText(bootstrap *ACPBootstrapTranscript) string {
 		return ""
 	}
 	return "Orka canonical session transcript (JSONL; provider-native history is non-authoritative):\n" + string(bootstrap.Artifact)
+}
+
+func (d *ACPDispatcher) requeueSessionLeaseFailure(ctx context.Context, task *corev1alpha1.Task, attemptID string, fence store.ControllerEpochFence, cause error) error {
+	rollbackErr := d.requeuePreSubmissionTask(ctx, task, attemptID, fence, cause)
+	if rollbackErr != nil && errors.Is(cause, store.ErrSessionConfigurationMismatch) {
+		// Candidate Session authority must be cleared before terminal settlement.
+		return errors.Join(errSessionAdmissionRollback, rollbackErr)
+	}
+	return errors.Join(cause, rollbackErr)
 }

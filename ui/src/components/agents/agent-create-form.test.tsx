@@ -69,6 +69,8 @@ describe('AgentCreateForm', () => {
     expect(screen.getByText('Temperature')).toBeInTheDocument()
     expect(screen.getByText('Max Tokens')).toBeInTheDocument()
     expect(screen.getByText('Secret Reference')).toBeInTheDocument()
+    expect(screen.getByLabelText('System Prompt')).not.toBeRequired()
+    expect(screen.getByLabelText('Soul (optional)')).toBeInTheDocument()
   })
 
   it('shows all built-in ACP runtime options without legacy loop controls', async () => {
@@ -111,6 +113,107 @@ describe('AgentCreateForm', () => {
     expect(submitted.spec.model).toEqual({ name: 'claude-sonnet-4-20250514' })
     expect(submitted.spec.runtime.defaultMaxTurns).toBeUndefined()
     expect(submitted.spec.secretRef).toBeUndefined()
+    expect(submitted.spec.systemPrompt).toBeUndefined()
+    expect(submitted.spec.soul).toBeUndefined()
+  })
+
+  it.each([
+    ['claude', 'Claude ACP'],
+    ['codex', 'OpenAI Codex ACP'],
+    ['copilot', 'GitHub Copilot ACP'],
+    ['opencode', 'OpenCode ACP'],
+  ])('submits separate role and soul for the built-in %s runtime', async (runtimeType, profileLabel) => {
+    useStateModeOverride = 'runtime'
+    let submitted: any
+    server.use(http.post('/api/v1/agents', async ({ request }) => {
+      submitted = await request.json()
+      return HttpResponse.json({ metadata: { name: submitted.name }, spec: submitted.spec })
+    }))
+
+    const user = userEvent.setup()
+    render(<AgentCreateForm />)
+    await user.type(screen.getByPlaceholderText('my-agent'), 'runtime-agent')
+    const profileTrigger = screen.getByText('Runtime profile').closest('.space-y-2')!.querySelector('[role="combobox"]')!
+    await act(async () => {
+      fireEvent.pointerDown(profileTrigger, { button: 0, pointerId: 1, pointerType: 'mouse' })
+    })
+    fireEvent.click(await screen.findByRole('option', { name: profileLabel }))
+    await waitFor(() => expect(profileTrigger).toHaveTextContent(profileLabel))
+    await user.type(screen.getByLabelText('Model'), runtimeType === 'opencode' ? 'openai/gpt-5.4' : 'runtime-model')
+    if (runtimeType === 'opencode') {
+      await user.type(screen.getByLabelText('Context Window'), '32768')
+      await user.type(screen.getByLabelText('Max Output Tokens'), '4096')
+    }
+    expect(screen.getByLabelText('System Prompt')).not.toBeRequired()
+    const roleText = runtimeType === 'copilot' ? 'Review code for correctness.' : 'Discuss @mentions literally.'
+    const soulText = runtimeType === 'copilot' ? 'Be concise and respectful.' : 'Sign off as @owl.'
+    await user.type(screen.getByLabelText('System Prompt'), roleText)
+    await user.type(screen.getByLabelText('Soul (optional)'), soulText)
+    await user.click(screen.getByRole('button', { name: 'Create Agent' }))
+
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Agent created'))
+    expect(submitted.spec.runtime.type).toBe(runtimeType)
+    expect(submitted.spec.systemPrompt).toEqual({ inline: roleText })
+    expect(submitted.spec.soul).toEqual({ inline: soulText })
+  })
+
+  it('keeps the AI role visible and editable when switching to a built-in runtime', async () => {
+    let submitted: any
+    server.use(http.post('/api/v1/agents', async ({ request }) => {
+      submitted = await request.json()
+      return HttpResponse.json({ metadata: { name: submitted.name }, spec: submitted.spec })
+    }))
+
+    const user = userEvent.setup()
+    render(<AgentCreateForm />)
+    await user.type(screen.getByPlaceholderText('my-agent'), 'runtime-agent')
+    await user.type(screen.getByLabelText('Model'), 'runtime-model')
+    await user.type(screen.getByLabelText('System Prompt'), 'Original AI role')
+    await user.type(screen.getByLabelText('Soul (optional)'), 'Shared persona')
+    const modeTrigger = screen.getByText('Mode').closest('.space-y-2')!.querySelector('[role="combobox"]')!
+    await act(async () => {
+      fireEvent.pointerDown(modeTrigger, { button: 0, pointerId: 1, pointerType: 'mouse' })
+    })
+    fireEvent.click(await screen.findByRole('option', { name: 'ACP agent runtime' }))
+
+    const roleInput = screen.getByLabelText('System Prompt')
+    expect(roleInput).toHaveValue('Original AI role')
+    await user.clear(roleInput)
+    await user.type(roleInput, 'Updated runtime role')
+    expect(screen.getByLabelText('Soul (optional)')).toHaveValue('Shared persona')
+    await user.click(screen.getByRole('button', { name: 'Create Agent' }))
+
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Agent created'))
+    expect(submitted.spec.runtime).toEqual({ type: 'claude' })
+    expect(submitted.spec.systemPrompt).toEqual({ inline: 'Updated runtime role' })
+    expect(submitted.spec.soul).toEqual({ inline: 'Shared persona' })
+  })
+
+  it.each(['System Prompt', 'Soul (optional)'])('rejects Copilot import markers in %s before posting', async (fieldLabel) => {
+    useStateModeOverride = 'runtime'
+    let postCount = 0
+    server.use(http.post('/api/v1/agents', () => {
+      postCount += 1
+      return HttpResponse.json({})
+    }))
+
+    const user = userEvent.setup()
+    render(<AgentCreateForm />)
+    await user.type(screen.getByPlaceholderText('my-agent'), 'copilot-agent')
+    const profileTrigger = screen.getByText('Runtime profile').closest('.space-y-2')!.querySelector('[role="combobox"]')!
+    await act(async () => {
+      fireEvent.pointerDown(profileTrigger, { button: 0, pointerId: 1, pointerType: 'mouse' })
+    })
+    fireEvent.click(await screen.findByRole('option', { name: 'GitHub Copilot ACP' }))
+    await waitFor(() => expect(profileTrigger).toHaveTextContent('GitHub Copilot ACP'))
+    await user.type(screen.getByLabelText('Model'), 'runtime-model')
+    await user.type(screen.getByLabelText(fieldLabel), 'Follow @instructions.md')
+    await user.click(screen.getByRole('button', { name: 'Create Agent' }))
+
+    expect(toast.error).toHaveBeenCalledWith('Copilot instructions must not contain @ references; inline the referenced text')
+    expect(postCount).toBe(0)
+    expect(toast.success).not.toHaveBeenCalled()
+    expect(mockNavigate).not.toHaveBeenCalled()
   })
 
   it('submits a built-in Copilot ACP runtime profile', async () => {
@@ -262,7 +365,15 @@ describe('AgentCreateForm', () => {
     const user = userEvent.setup()
     render(<AgentCreateForm />)
     await user.type(screen.getByPlaceholderText('my-agent'), 'external-agent')
+    const profileTrigger = screen.getByText('Runtime profile').closest('.space-y-2')!.querySelector('[role="combobox"]')!
+    await act(async () => {
+      fireEvent.pointerDown(profileTrigger, { button: 0, pointerId: 1, pointerType: 'mouse' })
+    })
+    fireEvent.click(await screen.findByRole('option', { name: 'GitHub Copilot ACP' }))
+    await waitFor(() => expect(profileTrigger).toHaveTextContent('GitHub Copilot ACP'))
     await user.type(screen.getByLabelText('Model'), 'stale-built-in-model')
+    await user.type(screen.getByLabelText('System Prompt'), 'Stale built-in @role')
+    await user.type(screen.getByLabelText('Soul (optional)'), 'Stale built-in @persona')
     const sourceTrigger = screen.getByText('Runtime source').closest('.space-y-2')!.querySelector('[role="combobox"]')!
     await act(async () => {
       fireEvent.pointerDown(sourceTrigger, { button: 0, pointerId: 1, pointerType: 'mouse' })
@@ -274,14 +385,18 @@ describe('AgentCreateForm', () => {
     await waitFor(() => expect(sourceTrigger).toHaveTextContent('External v2 AgentRuntime'))
     await user.type(screen.getByPlaceholderText('external-codex'), 'external-codex')
     expect(screen.queryByLabelText('Model')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('System Prompt')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Soul (optional)')).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Create Agent' }))
 
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Agent created'))
     expect(submitted.spec.runtime).toEqual({ runtimeRef: { name: 'external-codex' } })
     expect(submitted.spec.model).toBeUndefined()
+    expect(submitted.spec.systemPrompt).toBeUndefined()
+    expect(submitted.spec.soul).toBeUndefined()
   })
 
-  it('submits native AI agents unchanged', async () => {
+  it.each([false, true])('submits native AI agents unchanged with role/soul configured: %s', async (withPrompts) => {
     let submitted: any
     server.use(http.post('/api/v1/agents', async ({ request }) => {
       submitted = await request.json()
@@ -291,11 +406,17 @@ describe('AgentCreateForm', () => {
     render(<AgentCreateForm />)
     await user.type(screen.getByPlaceholderText('my-agent'), 'native-agent')
     await user.type(screen.getByPlaceholderText('claude-sonnet-4-20250514'), 'native-model')
+    if (withPrompts) {
+      await user.type(screen.getByLabelText('System Prompt'), 'Native AI @role')
+      await user.type(screen.getByLabelText('Soul (optional)'), 'Native AI @persona')
+    }
     await user.click(screen.getByRole('button', { name: 'Create Agent' }))
 
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Agent created'))
     expect(submitted.spec.runtime).toBeUndefined()
     expect(submitted.spec.model.name).toBe('native-model')
+    expect(submitted.spec.systemPrompt).toEqual(withPrompts ? { inline: 'Native AI @role' } : undefined)
+    expect(submitted.spec.soul).toEqual(withPrompts ? { inline: 'Native AI @persona' } : undefined)
     expect(mockNavigate).toHaveBeenCalledWith({ to: '/agents' })
   })
 })
