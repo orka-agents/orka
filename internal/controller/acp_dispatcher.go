@@ -1780,11 +1780,11 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		if err := sealMutation(&promptRequest.Metadata.RequestDigest, promptRequest); err != nil {
 			return err
 		}
-		leaseCtx, stopLease := context.WithCancel(runtimeCtx)
+		leaseCtx, stopLease, cancelOnLeaseFailure := newPromptLeaseContext(runtimeCtx, cancelRuntime)
 		admitted := make(chan struct{})
 		var admitOnce sync.Once
 		go d.renewPromptLeaseLoop(
-			leaseCtx, admitted, cancelRuntime, runtimeClient, createRequest.RuntimeSessionID, task, runtimeFence,
+			leaseCtx, admitted, cancelOnLeaseFailure, runtimeClient, createRequest.RuntimeSessionID, task, runtimeFence,
 			promptRequest.Lease, promptRequest.MCPAuthorization, promptLimits,
 		)
 		summary, streamErr := runtimeClient.StreamPrompt(runtimeCtx, createRequest.RuntimeSessionID, promptRequest, func(event harnessv2.Event) error {
@@ -5465,6 +5465,28 @@ func (d *ACPDispatcher) publishTaskResultReference(ctx context.Context, task *co
 	})
 }
 
+// newPromptLeaseContext serializes renewal shutdown with failure cancellation.
+// The runtime context is still needed for delivery after the prompt stream ends:
+// once stopLease returns, even a renewal past its ctx.Err check cannot cancel it.
+// A failure that wins the lock first still cancels the active runtime normally.
+func newPromptLeaseContext(parent context.Context, cancelRuntime context.CancelFunc) (leaseCtx context.Context, stopLease, cancelOnFailure context.CancelFunc) {
+	leaseCtx, cancelLease := context.WithCancel(parent)
+	var mu sync.Mutex
+	stopLease = func() {
+		mu.Lock()
+		defer mu.Unlock()
+		cancelLease()
+	}
+	cancelOnFailure = func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if leaseCtx.Err() == nil {
+			cancelRuntime()
+		}
+	}
+	return leaseCtx, stopLease, cancelOnFailure
+}
+
 func (d *ACPDispatcher) renewPromptLeaseLoop(
 	ctx context.Context,
 	admitted <-chan struct{},
@@ -5491,6 +5513,9 @@ func (d *ACPDispatcher) renewPromptLeaseLoop(
 	// digest_conflict on a rebuilt request with fresh timestamps.
 	var pending *harnessv2.RenewPromptLeaseRequest
 	for {
+		if ctx.Err() != nil {
+			return
+		}
 		now := time.Now().UTC()
 		remaining := lease.ExpiresAt.Sub(now)
 		if remaining <= 0 {
@@ -5558,6 +5583,11 @@ func (d *ACPDispatcher) renewPromptLeaseLoop(
 		}
 		proposed := request.Lease
 		response, err := runtimeClient.RenewPromptLease(ctx, sessionID, request)
+		// Stream completion stops renewal while the runtime context remains
+		// live for delivery. A cancelled in-flight renewal must not abort it.
+		if ctx.Err() != nil {
+			return
+		}
 		if err == nil && response.Lease.Generation == proposed.Generation {
 			pending = nil
 			lease = response.Lease
@@ -6632,7 +6662,7 @@ func (d *ACPDispatcher) finishNonSuccessWithCancellationReason(
 		}
 		return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateOutcomeUnknown, corev1alpha1.TaskExecutionOutcomeOutcomeUnknown, "RuntimeLost", "prompt outcome is unknown")
 	default:
-		message := acpPromptFailureMessage(terminal)
+		message := acpPromptFailedMessage
 		if err := d.transitionAttemptToFailed(ctx, attemptID, fence, "failed", acpPromptFailedReason, message); err != nil {
 			return err
 		}
@@ -6648,43 +6678,17 @@ func (d *ACPDispatcher) finishNonSuccessWithCancellationReason(
 	}
 }
 
-// acpPromptFailedReason classifies a prompt that the runtime settled as
-// failed; the message carries the runtime's bounded failure code and detail.
+// acpPromptFailedReason classifies a prompt that the runtime settled as failed.
 const acpPromptFailedReason corev1alpha1.TaskExecutionReason = "PromptFailed"
 
-// acpPromptFailureMessageLimit bounds the projected Task failure message so a
-// runtime-supplied detail can never bloat Task status.
-const acpPromptFailureMessageLimit = 512
+// Runtime diagnostics stay in the journal, whose redaction accounts for prior
+// prompt fields. Repeating them in status, Session outcomes, or TaskFailed
+// events would bypass that redaction and introduce additional public copies.
+const acpPromptFailedMessage = "prompt failed"
 
-// acpPromptFailureMessage projects the runtime's terminal Failed event into a
-// human-readable Task message. The generic "prompt failed" text is kept when
-// the runtime reported no code or detail; otherwise the runtime's bounded
-// failure code and message are appended so operators can distinguish provider
-// upstream errors, turn limits, and refusals without reading runtime logs.
-func acpPromptFailureMessage(terminal harnessv2.Event) string {
-	const generic = "prompt failed"
-	if terminal.Failed == nil {
-		return generic
-	}
-	// Both fields are runtime-controlled (only bounded by the harness).
-	// Controls are stripped before redaction so a control byte cannot split a
-	// credential-shaped value past the redactor, and the composed logical
-	// value is redacted as one string: a credential assignment split across
-	// the code and the message ("password" / "hunter2") is only recognizable
-	// once they are joined, so redacting the fields separately would persist
-	// the raw value in Task status, the PromptAttempt, and the Session turn.
-	detail := strings.TrimSpace(stripACPControlRunes(terminal.Failed.Message))
-	code := strings.TrimSpace(stripACPControlRunes(terminal.Failed.Code))
-	switch {
-	case detail == "" && code == "":
-		return generic
-	case detail == "":
-		detail = code
-	case code != "" && code != "acp_prompt_failed" && !strings.HasPrefix(detail, code):
-		detail = code + ": " + detail
-	}
-	return boundACPStatusMessage(generic + ": " + redact.SensitiveText(detail))
-}
+// acpPromptFailureMessageLimit bounds runtime-derived status messages so a
+// supervisor-supplied detail can never bloat Task status.
+const acpPromptFailureMessageLimit = 512
 
 // boundACPStatusMessage truncates a runtime-derived status message to
 // acpPromptFailureMessageLimit bytes on a rune boundary so the persisted
@@ -6854,6 +6858,7 @@ func (d *ACPDispatcher) failTaskWithProjection(
 		latest.Status.Execution.Message = message
 		latest.Status.Execution.LastTransitionTime = &now
 		latest.Status.Phase = phase
+		latest.Status.Message = message
 		return d.Client.Status().Patch(ctx, latest, client.MergeFrom(base))
 	})
 }

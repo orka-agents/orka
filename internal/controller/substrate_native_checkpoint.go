@@ -97,6 +97,22 @@ func (r *RuntimePoolReconciler) drainNativeSubstrateRuntime(ctx context.Context,
 	if !probeQuiescent {
 		return wait(runtimePoolMessageDrainSettling)
 	}
+	if !checkpoint && !pool.DeletionTimestamp.IsZero() {
+		if record.Attempt.SettlementWaitStartedAt == nil {
+			startedAt := metav1.NewTime(r.now())
+			record.Attempt.SettlementWaitStartedAt = &startedAt
+			if err := r.saveNativeSubstrateState(ctx, cm, record); err != nil {
+				return false, ctrl.Result{}, err
+			}
+		}
+		settled, err := r.nativeSubstrateDeletionTasksSettled(ctx, pool, active, record.Attempt.SettlementWaitStartedAt.Time)
+		if err != nil {
+			return false, ctrl.Result{}, err
+		}
+		if !settled {
+			return wait("waiting for controller Task settlement before deleting the quiescent native runtime")
+		}
+	}
 	if err := r.recordDrainedRuntimePoolTaskCleanup(ctx, validationPool, active, probe.Status); err != nil {
 		return false, ctrl.Result{}, err
 	}

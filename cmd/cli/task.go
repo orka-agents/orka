@@ -655,7 +655,7 @@ func formatAge(timestamp string) string {
 	if err != nil {
 		return timestamp
 	}
-	d := time.Since(t)
+	d := max(time.Since(t), 0)
 	switch {
 	case d < time.Minute:
 		return fmt.Sprintf("%ds", int(d.Seconds()))

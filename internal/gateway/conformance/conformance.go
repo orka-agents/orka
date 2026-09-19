@@ -35,6 +35,7 @@ type Target struct {
 	Timeout            time.Duration
 	DisableProxy       bool
 	ReferenceFixtures  bool
+	DeliveryFixture    *DeliveryFixture
 }
 
 // ProbeResult is the non-mutating health and capability result used by reconciliation.
@@ -54,6 +55,9 @@ type CheckResult struct {
 // Probe performs authenticated health and capability checks without sending a delivery.
 func Probe(ctx context.Context, target Target) (result ProbeResult) {
 	defer func() {
+		if target.DeliveryFixture != nil {
+			result.Message, result.Capabilities = target.DeliveryFixture.maskResultFields(result.Message, result.Capabilities)
+		}
 		result = sanitizeProbeResult(result, target.AuthorizationValue)
 	}()
 
@@ -63,7 +67,7 @@ func Probe(ctx context.Context, target Target) (result ProbeResult) {
 	}
 	healthBody, status, err := request(ctx, client, http.MethodGet, baseURL+"/v1/health", target.AuthorizationValue, nil)
 	if err != nil {
-		return ProbeResult{Message: safeError("health probe failed", err)}
+		return ProbeResult{Message: target.safeError("health probe failed", err)}
 	}
 	if status != http.StatusOK {
 		return ProbeResult{Message: fmt.Sprintf("health probe returned HTTP %d", status)}
@@ -75,7 +79,7 @@ func Probe(ctx context.Context, target Target) (result ProbeResult) {
 
 	capsBody, status, err := request(ctx, client, http.MethodGet, baseURL+"/v1/capabilities", target.AuthorizationValue, nil)
 	if err != nil {
-		return ProbeResult{Message: safeError("capability probe failed", err)}
+		return ProbeResult{Message: target.safeError("capability probe failed", err)}
 	}
 	if status != http.StatusOK {
 		return ProbeResult{Message: fmt.Sprintf("capability probe returned HTTP %d", status)}
@@ -115,8 +119,29 @@ func verifyProbeAuthentication(ctx context.Context, client *http.Client, baseURL
 // redaction safety, and idempotent delivery.
 func Check(ctx context.Context, target Target) (result CheckResult) {
 	defer func() {
+		if target.DeliveryFixture != nil {
+			result.Message, result.Capabilities = target.DeliveryFixture.maskResultFields(result.Message, result.Capabilities)
+		}
 		result = SanitizeCheckResult(result, target.AuthorizationValue)
 	}()
+
+	const defaultRoute = "conformance"
+	unauthorizedRequest := protocol.DeliveryRequest{
+		ProtocolVersion: protocol.Version,
+		DeliveryID:      "conformance-auth", IdempotencyID: "conformance-auth", OriginatingEvent: "conformance-event",
+		Kind: protocol.DeliveryKindFinal, AccountID: defaultRoute, ContextID: defaultRoute,
+		ReplyTarget: defaultRoute, Text: "conformance authentication probe",
+	}
+	if target.DeliveryFixture != nil {
+		if target.ReferenceFixtures {
+			return CheckResult{Message: "delivery fixture cannot be combined with reference fixtures"}
+		}
+		var err error
+		unauthorizedRequest, err = target.DeliveryFixture.deliveryRequest()
+		if err != nil {
+			return CheckResult{Message: err.Error()}
+		}
+	}
 
 	probe := Probe(ctx, target)
 	if !probe.Passed {
@@ -127,16 +152,10 @@ func Check(ctx context.Context, target Target) (result CheckResult) {
 		return CheckResult{Message: err.Error()}
 	}
 
-	unauthorizedRequest := protocol.DeliveryRequest{
-		ProtocolVersion: protocol.Version,
-		DeliveryID:      "conformance-auth", IdempotencyID: "conformance-auth", OriginatingEvent: "conformance-event",
-		Kind: protocol.DeliveryKindFinal, AccountID: "conformance", ContextID: "conformance",
-		ReplyTarget: "conformance", Text: "conformance authentication probe",
-	}
 	body, _ := json.Marshal(unauthorizedRequest)
 	unauthorizedBody, status, err := request(ctx, client, http.MethodPost, baseURL+"/v1/deliveries", "", body)
 	if err != nil {
-		return CheckResult{Message: safeError("unauthenticated delivery probe failed", err), Capabilities: probe.Capabilities}
+		return CheckResult{Message: target.safeError("unauthenticated delivery probe failed", err), Capabilities: probe.Capabilities}
 	}
 	if containsCredential(unauthorizedBody, target.AuthorizationValue) {
 		return CheckResult{Message: "unauthenticated delivery response contained sensitive data", Capabilities: probe.Capabilities}
@@ -148,7 +167,7 @@ func Check(ctx context.Context, target Target) (result CheckResult) {
 		ctx, client, http.MethodPost, baseURL+"/v1/deliveries", target.AuthorizationValue+"-invalid", body,
 	)
 	if err != nil {
-		return CheckResult{Message: safeError("bad-auth delivery probe failed", err), Capabilities: probe.Capabilities}
+		return CheckResult{Message: target.safeError("bad-auth delivery probe failed", err), Capabilities: probe.Capabilities}
 	}
 	if containsCredential(badAuthBody, target.AuthorizationValue) {
 		return CheckResult{Message: "bad-auth delivery response contained sensitive data", Capabilities: probe.Capabilities}
@@ -161,12 +180,12 @@ func Check(ctx context.Context, target Target) (result CheckResult) {
 	}
 
 	delivery := unauthorizedRequest
-	delivery.DeliveryID = "conformance-idempotency"
+	delivery.DeliveryID = strings.TrimSuffix(unauthorizedRequest.DeliveryID, "-auth") + "-idempotency"
 	delivery.IdempotencyID = delivery.DeliveryID
 	body, _ = json.Marshal(delivery)
 	firstBody, status, err := request(ctx, client, http.MethodPost, baseURL+"/v1/deliveries", target.AuthorizationValue, body)
 	if err != nil || status != http.StatusOK {
-		return CheckResult{Message: deliveryFailureMessage("delivery probe", status, err), Capabilities: probe.Capabilities}
+		return CheckResult{Message: target.deliveryFailureMessage("delivery probe", status, err), Capabilities: probe.Capabilities}
 	}
 	if containsCredential(firstBody, target.AuthorizationValue) {
 		return CheckResult{Message: "delivery response contained sensitive data", Capabilities: probe.Capabilities}
@@ -177,7 +196,7 @@ func Check(ctx context.Context, target Target) (result CheckResult) {
 	}
 	secondBody, status, err := request(ctx, client, http.MethodPost, baseURL+"/v1/deliveries", target.AuthorizationValue, body)
 	if err != nil || status != http.StatusOK {
-		return CheckResult{Message: deliveryFailureMessage("duplicate delivery probe", status, err), Capabilities: probe.Capabilities}
+		return CheckResult{Message: target.deliveryFailureMessage("duplicate delivery probe", status, err), Capabilities: probe.Capabilities}
 	}
 	if containsCredential(secondBody, target.AuthorizationValue) {
 		return CheckResult{Message: "duplicate delivery response contained sensitive data", Capabilities: probe.Capabilities}
@@ -201,7 +220,7 @@ func Check(ctx context.Context, target Target) (result CheckResult) {
 			)
 			if fixtureErr != nil || fixtureStatus != http.StatusOK {
 				return CheckResult{
-					Message:      deliveryFailureMessage(fixture+" classification probe", fixtureStatus, fixtureErr),
+					Message:      target.deliveryFailureMessage(fixture+" classification probe", fixtureStatus, fixtureErr),
 					Capabilities: probe.Capabilities,
 				}
 			}
@@ -224,7 +243,7 @@ func verifyDeliverySizeBounds(
 	base protocol.DeliveryRequest,
 ) error {
 	oversizedText := base
-	oversizedText.DeliveryID = "conformance-size-text"
+	oversizedText.DeliveryID = strings.TrimSuffix(base.DeliveryID, "-auth") + "-size-text"
 	oversizedText.IdempotencyID = oversizedText.DeliveryID
 	oversizedText.Text = strings.Repeat("x", protocol.MaxTextBytes+1)
 	oversizedTextBody, err := json.Marshal(oversizedText)
@@ -236,7 +255,7 @@ func verifyDeliverySizeBounds(
 	}
 
 	oversizedBodyRequest := base
-	oversizedBodyRequest.DeliveryID = "conformance-size-body"
+	oversizedBodyRequest.DeliveryID = strings.TrimSuffix(base.DeliveryID, "-auth") + "-size-body"
 	oversizedBodyRequest.IdempotencyID = oversizedBodyRequest.DeliveryID
 	oversizedBody, err := json.Marshal(oversizedBodyRequest)
 	if err != nil {
@@ -305,6 +324,13 @@ func normalizedTarget(target Target) (*http.Client, string, error) {
 			return nil, "", err
 		}
 		client.Transport = transport
+	}
+	if target.DeliveryFixture != nil {
+		transport := client.Transport
+		if transport == nil {
+			transport = http.DefaultTransport
+		}
+		client.Transport = fixtureTransport{transport}
 	}
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	return client, strings.TrimRight(parsed.String(), "/"), nil
@@ -415,16 +441,22 @@ func sanitizeOutputText(value, authorizationValue string, limit int) string {
 	return protocol.SanitizeMessage(value, limit)
 }
 
-func safeError(prefix string, err error) string {
+func (target Target) safeError(prefix string, err error) string {
 	if err == nil {
 		return prefix
 	}
-	return protocol.SanitizeMessage(prefix+": "+err.Error(), conformanceMessageLimit)
+	message := prefix + ": " + err.Error()
+	if target.DeliveryFixture != nil {
+		// Mask the original diagnostic before truncation can leave an unmatched identity prefix.
+		message, _ = target.DeliveryFixture.maskResultFields(message, nil)
+		return sanitizeOutputText(message, target.AuthorizationValue, conformanceMessageLimit)
+	}
+	return protocol.SanitizeMessage(message, conformanceMessageLimit)
 }
 
-func deliveryFailureMessage(prefix string, status int, err error) string {
+func (target Target) deliveryFailureMessage(prefix string, status int, err error) string {
 	if err != nil {
-		return safeError(prefix+" failed", err)
+		return target.safeError(prefix+" failed", err)
 	}
 	return fmt.Sprintf("%s returned HTTP %d", prefix, status)
 }

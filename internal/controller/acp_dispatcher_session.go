@@ -859,9 +859,19 @@ func (d *ACPDispatcher) finalizeTaskSessionResult(
 	if err != nil {
 		return err
 	}
+	// The outbox may publish the terminal phase before or after live
+	// settlement. Include a fixed message so either ordering can record a
+	// meaningful lifecycle event without copying assistant or runtime text.
+	message := "ACP task completed"
+	switch phase {
+	case corev1alpha1.TaskPhaseFailed:
+		message = "ACP delivery failed"
+	case corev1alpha1.TaskPhaseCancelled:
+		message = "publication cancelled before push"
+	}
 	payload, err := json.Marshal(taskTerminalProjection{
 		Namespace: task.Namespace, Task: task.Name, TaskUID: string(task.UID), Attempt: task.Status.Execution.Attempt,
-		Phase: phase, Execution: execution, Delivery: &delivery,
+		Phase: phase, Message: message, Execution: execution, Delivery: &delivery,
 	})
 	if err != nil {
 		return err

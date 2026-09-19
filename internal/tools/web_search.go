@@ -152,14 +152,16 @@ func (t *WebSearchTool) Execute(ctx context.Context, args json.RawMessage) (stri
 		return t.duckDuckGoSearch(ctx, searchArgs)
 	}
 
-	// Build request URL
-	reqURL := fmt.Sprintf("%s?q=%s&limit=%d",
-		t.baseURL,
-		url.QueryEscape(searchArgs.Query),
-		searchArgs.Limit,
-	)
+	reqURL, err := url.Parse(t.baseURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse search API URL: %w", err)
+	}
+	query := reqURL.Query()
+	query.Set("q", searchArgs.Query)
+	query.Set("limit", fmt.Sprintf("%d", searchArgs.Limit))
+	reqURL.RawQuery = query.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL.String(), nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}

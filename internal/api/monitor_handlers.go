@@ -1118,6 +1118,7 @@ func (h *Handlers) CreateRepositoryMonitorCommandEvent(c fiber.Ctx) error {
 		MonitorGeneration:   monitor.Generation,
 		DedupeKey:           id,
 		IdempotencyKey:      id,
+		CommentID:           id, // Keep the legacy comment-based uniqueness key distinct for each API request.
 		Author:              "orka-api",
 		Permission:          repositoryMonitorAPICommandPermission(req),
 		Command:             req.Intent,

@@ -158,6 +158,22 @@ ORKA_GATEWAY_BEARER_TOKEN='<outbound bearer token>' \
   --endpoint https://gateway-adapter.example.com:8443
 ```
 
+For an adapter that requires real routing identities, opt in with `--delivery-fixture /path/to/delivery-fixture.json`. The file must contain exactly one JSON object, at most 256 KiB, with only these fields (`threadId` is optional):
+
+```json
+{
+  "accountId": "<test-account>",
+  "contextId": "<test-context>",
+  "threadId": "<test-thread>",
+  "replyTarget": "<test-reply-target>",
+  "originatingEventId": "<test-originating-event>"
+}
+```
+
+Populate the placeholders only from retained delivery routing values you are authorized to inspect and reuse, for an explicitly approved test destination. Do not fabricate identities or use this flag to bypass adapter authorization. If you cannot obtain the retained values through authorized access, stop rather than switching identities or relaxing access controls. **This check sends a real message**, `[Orka conformance check] No action required.`, followed by a byte-identical duplicate to verify idempotency. Each invocation uses fresh delivery/idempotency IDs; running it again can produce another visible message. The authentication and oversized-text/body rejection probes use the same routing identities. They should not deliver messages on a conforming adapter, but a broken adapter may deliver them. There are no automatic retries.
+
+The fixture cannot supply text, credentials, delivery/idempotency IDs, or metadata. Unknown fields, malformed/trailing JSON, oversized files, and invalid routing identities fail before network requests. Fixture identities are redacted from checker results, and loader diagnostics do not include file paths or contents. Keep the fixture private; it is not a support-bundle artifact. Continue to supply the bearer token through the configured environment variable and keep TLS verification enabled. `--delivery-fixture` cannot be combined with `--reference-fixtures`, which sends reference-adapter fault deliveries. Without the new flag, the CLI retains its synthetic routing and fixed IDs; non-mutating readiness probes are unchanged.
+
 The **Gateway Live E2E** GitHub Actions workflow deploys the TLS reference adapter and a deterministic external AgentRuntime in Kind. It validates private-CA trust, GatewayClass/Gateway/GatewayBinding readiness, invalid bearer rejection, accepted and duplicate ingress, runtime-backed Task execution, completed event state, delivered final output, provider correlation, and duplicate safety. It does not run the conformance CLI and does not replace conformance testing against each adapter build before rollout.
 
 If a future release introduces another wire version, controller and adapter release notes must define an explicit dual-version overlap. Do not infer compatibility from similar payloads or from the adapter's product version.
