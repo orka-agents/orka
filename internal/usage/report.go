@@ -316,7 +316,7 @@ func measuredTasks(data store.UsageData, asOf time.Time) map[string]Task {
 		if len(task.PhaseHistory) > 0 {
 			task.Phase = unknownTaskPhase
 			for _, state := range task.PhaseHistory {
-				if !state.ObservedAt.After(asOf) {
+				if !state.ObservedAt.After(asOf) && !state.RecordedAt.After(asOf) {
 					task.Phase = state.Phase
 				}
 			}

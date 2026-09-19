@@ -36,7 +36,7 @@ func TestUsageDeletedTaskStopsPinningRetention(t *testing.T) {
 			require.NoError(t, backend.RecordUsage(t.Context(), store.UsageObservation{Namespace: "default", TaskUID: string(task.UID),
 				ID: "call", CounterID: "call", Scope: store.UsageScopeCall, Source: store.UsageSourceProvider,
 				InputTokens: new(int64(100)), OutputTokens: new(int64(0)), Complete: true, ObservedAt: start}))
-			beforeDeletion := time.Now().UTC().Add(-time.Minute)
+			beforeDeletion := time.Now().UTC()
 			require.NoError(t, r.Delete(t.Context(), task))
 			_, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(task)})
 			require.NoError(t, err)
@@ -92,22 +92,26 @@ func TestUsageDelayedFinalizingSnapshotPreservesCompletedWork(t *testing.T) {
 	completed := finalizing.DeepCopy()
 	completed.Status.Phase = corev1alpha1.TaskPhaseSucceeded
 	completed.Status.CompletionTime = new(metav1.NewTime(start.Add(2 * time.Minute)))
+	recorded := make([]time.Time, 0, 3)
 	for _, task := range []*corev1alpha1.Task{completed, finalizing, completed} {
 		snapshot := usageTaskSnapshot(task)
 		snapshot.WorkID = workID
 		require.NoError(t, backend.RegisterUsageTask(t.Context(), snapshot))
+		recorded = append(recorded, time.Now().UTC())
 	}
 	filter := store.UsageFilter{Namespaces: []string{"default"}, From: start, Until: start.Add(time.Hour), AsOf: start.Add(90 * time.Second)}
 	data, err := backend.LoadUsage(t.Context(), filter)
 	require.NoError(t, err)
 	report, err := usage.Build(data, filter)
 	require.NoError(t, err)
-	require.Equal(t, "Finalizing", report.Works[0].Tasks[0].Phase)
-	filter.AsOf = time.Now().UTC()
-	report, err = usage.Build(data, filter)
-	require.NoError(t, err)
-	require.Equal(t, "Succeeded", report.Works[0].Tasks[0].Phase)
-	require.Zero(t, report.Summary.UnfinishedWork)
+	require.Equal(t, "Unknown", report.Works[0].Tasks[0].Phase, "the controller had not recorded a phase at this historical time")
+	for _, at := range recorded {
+		filter.AsOf = at
+		report, err = usage.Build(data, filter)
+		require.NoError(t, err)
+		require.Equal(t, "Succeeded", report.Works[0].Tasks[0].Phase)
+		require.Zero(t, report.Summary.UnfinishedWork)
+	}
 	require.NoError(t, backend.PruneUsage(t.Context(), time.Now().Add(-90*24*time.Hour)))
 	data, err = backend.LoadUsage(t.Context(), filter)
 	require.NoError(t, err)
@@ -129,10 +133,12 @@ func TestUsageRetryPreservesPendingInterval(t *testing.T) {
 		MonitorUID: "monitor", MonitorName: "monitor", Repository: "org/repo", Kind: "issue", Number: 1, StartedAt: start}))
 	initial := task.DeepCopy()
 	initial.Status = corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending}
+	recorded := make([]time.Time, 0, 2)
 	for _, snapshotTask := range []*corev1alpha1.Task{initial, task} {
 		snapshot := usageTaskSnapshot(snapshotTask)
 		snapshot.WorkID = workID
 		require.NoError(t, backend.RegisterUsageTask(t.Context(), snapshot))
+		recorded = append(recorded, time.Now().UTC())
 	}
 	_, err := r.retryTask(t.Context(), task)
 	require.NoError(t, err)
@@ -150,7 +156,7 @@ func TestUsageRetryPreservesPendingInterval(t *testing.T) {
 	for _, check := range []struct {
 		at    time.Time
 		phase string
-	}{{start.Add(time.Second), "Pending"}, {start.Add(2 * time.Minute), "Running"}, {filter.AsOf, "Pending"}} {
+	}{{recorded[0], "Pending"}, {recorded[1], "Running"}, {filter.AsOf, "Pending"}} {
 		filter.AsOf = check.at
 		report, err := usage.Build(data, filter)
 		require.NoError(t, err)

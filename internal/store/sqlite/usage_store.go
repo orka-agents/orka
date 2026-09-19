@@ -109,11 +109,14 @@ func (s *Store) RegisterUsageTask(ctx context.Context, task store.UsageTask) err
 }
 
 func recordUsageTaskPhase(task *store.UsageTask) {
+	// Capture visibility while holding the same transaction lock as report
+	// reads. Kubernetes lifecycle timestamps may be rounded or arrive late.
+	recordedAt := time.Now().UTC()
 	at := task.PhaseObservedAt
 	if at.IsZero() {
-		at = time.Now().UTC()
+		at = recordedAt
 	}
-	state := store.UsageTaskPhase{Phase: task.Phase, ObservedAt: at.UTC(), Attempt: task.PhaseAttempt}
+	state := store.UsageTaskPhase{Phase: task.Phase, ObservedAt: at.UTC(), RecordedAt: recordedAt, Attempt: task.PhaseAttempt}
 	if !slices.ContainsFunc(task.PhaseHistory, func(existing store.UsageTaskPhase) bool {
 		return existing.Phase == state.Phase && existing.Attempt == state.Attempt && existing.ObservedAt.Equal(state.ObservedAt)
 	}) {

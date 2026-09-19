@@ -84,9 +84,13 @@ type UsageGatewayOwner struct {
 	UID          string `json:"uid"`
 }
 
+// UsageTaskPhase retains the lifecycle timestamp in ObservedAt for ordering
+// and retention. RecordedAt is when the store first learned this state. Legacy
+// entries without RecordedAt remain visible at their original ObservedAt.
 type UsageTaskPhase struct {
 	Phase      string    `json:"phase"`
 	ObservedAt time.Time `json:"observedAt"`
+	RecordedAt time.Time `json:"recordedAt,omitzero"`
 	Attempt    int32     `json:"attempt,omitempty"`
 }
 

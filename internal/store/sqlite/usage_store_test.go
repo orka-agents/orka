@@ -595,8 +595,9 @@ func TestUsageAsOfPhaseHistoryAndWorkTypeFilter(t *testing.T) {
 	start := time.Now().UTC().Add(-2 * time.Hour)
 	work := usageWork(t, s, "a", 1, start)
 	usageTask(t, s, "a", work, "task", "Running", start)
+	earlyAsOf := time.Now().UTC()
 	require.NoError(t, s.RegisterUsageTask(t.Context(), store.UsageTask{Namespace: "a", TaskUID: "task", TaskName: "task", Phase: "Succeeded", PhaseObservedAt: start.Add(time.Hour)}))
-	early := usageReport(t, s, []string{"a"}, start.Add(-time.Second), start.Add(time.Hour), start.Add(time.Minute))
+	early := usageReport(t, s, []string{"a"}, start.Add(-time.Second), start.Add(time.Hour), earlyAsOf)
 	require.Equal(t, 1, early.Summary.UnfinishedWork)
 	require.Equal(t, "Running", early.Works[0].Tasks[0].Phase)
 	late := usageReport(t, s, []string{"a"}, start.Add(-time.Second), start.Add(time.Hour), time.Now().UTC())
@@ -622,6 +623,12 @@ func TestUsageTaskSnapshotsFollowObservationTime(t *testing.T) {
 			start := time.Now().UTC().Add(-120 * 24 * time.Hour)
 			work := usageWork(t, s, "a", 1, start)
 			phases := []string{"Pending", "Running", "Succeeded"}
+			unobservedAt := time.Now().UTC()
+			checks := make([]struct {
+				at    time.Time
+				phase string
+			}, 0, len(order))
+			latest := 0
 			for _, i := range order {
 				snapshot := store.UsageTask{
 					Namespace: "a", TaskUID: "task", TaskName: "task",
@@ -632,14 +639,20 @@ func TestUsageTaskSnapshotsFollowObservationTime(t *testing.T) {
 					snapshot.WorkID = work
 				}
 				require.NoError(t, s.RegisterUsageTask(t.Context(), snapshot))
+				latest = max(latest, i)
+				checks = append(checks, struct {
+					at    time.Time
+					phase string
+				}{time.Now().UTC(), phases[latest]})
 			}
-			for i, phase := range phases {
-				asOf := start.Add(time.Duration(i)*time.Minute + time.Second)
-				report := usageReport(t, s, []string{"a"}, start.Add(-time.Second), start.Add(time.Hour), asOf)
+			unobserved := usageReport(t, s, []string{"a"}, start.Add(-time.Second), start.Add(time.Hour), unobservedAt)
+			require.Equal(t, "Unknown", unobserved.Works[0].Tasks[0].Phase)
+			for _, check := range checks {
+				report := usageReport(t, s, []string{"a"}, start.Add(-time.Second), start.Add(time.Hour), check.at)
 				require.Len(t, report.Works, 1)
 				require.Len(t, report.Works[0].Tasks, 1)
-				require.Equal(t, phase, report.Works[0].Tasks[0].Phase)
-				if phase == "Succeeded" {
+				require.Equal(t, check.phase, report.Works[0].Tasks[0].Phase)
+				if check.phase == "Succeeded" {
 					require.Zero(t, report.Summary.UnfinishedWork)
 				} else {
 					require.Equal(t, 1, report.Summary.UnfinishedWork)
@@ -657,6 +670,7 @@ func TestUsageLateSnapshotBetweenRepeatedPhaseObservations(t *testing.T) {
 	s := setupTestStore(t)
 	start := time.Now().UTC().Add(-time.Hour)
 	work := usageWork(t, s, "a", 1, start)
+	reports := make([]usage.Report, 0, 4)
 	for _, state := range []struct {
 		phase  string
 		minute int
@@ -665,10 +679,12 @@ func TestUsageLateSnapshotBetweenRepeatedPhaseObservations(t *testing.T) {
 			Namespace: "a", WorkID: work, TaskUID: "task", TaskName: "task", Phase: state.phase,
 			StartedAt: start, PhaseObservedAt: start.Add(time.Duration(state.minute) * time.Minute),
 		}))
+		reports = append(reports, usageReport(t, s, []string{"a"}, start.Add(-time.Second), start.Add(time.Hour), time.Now().UTC()))
 	}
-	for i, phase := range []string{"Pending", "Running", "Finalizing", "Running"} {
-		report := usageReport(t, s, []string{"a"}, start.Add(-time.Second), start.Add(time.Hour), start.Add(time.Duration(i)*time.Minute+time.Second))
+	for i, phase := range []string{"Pending", "Running", "Running", "Running"} {
+		report := usageReport(t, s, []string{"a"}, start.Add(-time.Second), start.Add(time.Hour), reports[i].Selection.AsOf)
 		require.Equal(t, phase, report.Works[0].Tasks[0].Phase)
+		require.Equal(t, reports[i], report)
 	}
 }
 
@@ -690,7 +706,7 @@ func TestUsageTaskPhaseTimestampTiesRetainTerminalState(t *testing.T) {
 							StartedAt: start, PhaseObservedAt: observedAt,
 						}))
 					}
-					report := usageReport(t, s, []string{"a"}, start.Add(-time.Second), start.Add(time.Hour), start.Add(time.Second))
+					report := usageReport(t, s, []string{"a"}, start.Add(-time.Second), start.Add(time.Hour), time.Now().UTC())
 					require.Equal(t, terminal, report.Works[0].Tasks[0].Phase)
 					require.Zero(t, report.Summary.UnfinishedWork)
 					require.NoError(t, s.PruneUsage(t.Context(), time.Now().UTC().Add(-90*24*time.Hour)))
@@ -722,8 +738,89 @@ func TestUsageRetriesWithinTheSameSecond(t *testing.T) {
 					StartedAt: start, PhaseObservedAt: start.Add(time.Minute), PhaseAttempt: state.Attempt,
 				}))
 			}
-			report := usageReport(t, s, []string{"a"}, start, start.Add(time.Hour), start.Add(2*time.Minute))
+			report := usageReport(t, s, []string{"a"}, start, start.Add(time.Hour), time.Now().UTC())
 			require.Equal(t, tc.phase, report.Works[0].Tasks[0].Phase)
 		})
 	}
+}
+
+func TestUsageLatePhaseDoesNotChangeEarlierReport(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		before, after store.UsageTaskPhase
+	}{
+		{"initial running", store.UsageTaskPhase{Phase: "Pending"}, store.UsageTaskPhase{Phase: "Running", Attempt: 1}},
+		{"retry pending", store.UsageTaskPhase{Phase: "Running", Attempt: 1}, store.UsageTaskPhase{Phase: "Pending", Attempt: 1}},
+		{"retry running", store.UsageTaskPhase{Phase: "Pending", Attempt: 1}, store.UsageTaskPhase{Phase: "Running", Attempt: 2}},
+		{"finalizing", store.UsageTaskPhase{Phase: "Running", Attempt: 2}, store.UsageTaskPhase{Phase: "Finalizing", Attempt: 2}},
+		{"succeeded", store.UsageTaskPhase{Phase: "Finalizing", Attempt: 2}, store.UsageTaskPhase{Phase: "Succeeded", Attempt: 2}},
+		{"failed", store.UsageTaskPhase{Phase: "Running", Attempt: 2}, store.UsageTaskPhase{Phase: "Failed", Attempt: 2}},
+		{"cancelled", store.UsageTaskPhase{Phase: "Running", Attempt: 2}, store.UsageTaskPhase{Phase: "Cancelled", Attempt: 2}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := setupTestStore(t)
+			start := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+			work := usageWork(t, s, "a", 1, start)
+			register := func(state store.UsageTaskPhase) {
+				t.Helper()
+				require.NoError(t, s.RegisterUsageTask(t.Context(), store.UsageTask{
+					Namespace: "a", WorkID: work, TaskUID: "task", TaskName: "task", Phase: state.Phase,
+					StartedAt: start, PhaseObservedAt: start.Add(time.Minute), PhaseAttempt: state.Attempt,
+				}))
+			}
+			register(tc.before)
+			asOf := time.Now().UTC()
+			original := usageReport(t, s, []string{"a"}, start, start.Add(time.Hour), asOf)
+			require.Equal(t, tc.before.Phase, original.Works[0].Tasks[0].Phase)
+			// The next watch snapshot carries a rounded Kubernetes timestamp
+			// before asOf, although it reaches the store after this report.
+			register(tc.after)
+			replay := usageReport(t, s, []string{"a"}, start, start.Add(time.Hour), asOf)
+			require.Equal(t, original, replay)
+			data, err := s.LoadUsage(t.Context(), original.Selection)
+			require.NoError(t, err)
+			require.Len(t, data.Tasks[0].PhaseHistory, 2)
+			recordedAt := data.Tasks[0].PhaseHistory[1].RecordedAt
+			require.True(t, recordedAt.After(asOf))
+			require.Equal(t, tc.before.Phase, usageReport(t, s, []string{"a"}, start, start.Add(time.Hour), recordedAt.Add(-time.Nanosecond)).Works[0].Tasks[0].Phase)
+			require.Equal(t, tc.after.Phase, usageReport(t, s, []string{"a"}, start, start.Add(time.Hour), recordedAt).Works[0].Tasks[0].Phase)
+			currentAt := time.Now().UTC()
+			current := usageReport(t, s, []string{"a"}, start, start.Add(time.Hour), currentAt)
+			require.Equal(t, tc.after.Phase, current.Works[0].Tasks[0].Phase)
+			// Repeated observations preserve the first recorded time, and a
+			// late stale snapshot cannot regress either report.
+			register(tc.after)
+			register(tc.before)
+			require.Equal(t, original, usageReport(t, s, []string{"a"}, start, start.Add(time.Hour), asOf))
+			require.Equal(t, current, usageReport(t, s, []string{"a"}, start, start.Add(time.Hour), currentAt))
+			require.Equal(t, tc.after.Phase, usageReport(t, s, []string{"a"}, start, start.Add(time.Hour), time.Now().UTC()).Works[0].Tasks[0].Phase)
+		})
+	}
+}
+
+func TestUsageLegacyPhaseHistoryKeepsItsOriginalVisibility(t *testing.T) {
+	s := setupTestStore(t)
+	start := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	work := usageWork(t, s, "a", 1, start)
+	legacy := store.UsageTask{Namespace: "a", WorkID: work, Repository: "org/repo", TaskUID: "task", TaskName: "task", Phase: "Running", StartedAt: start,
+		PhaseHistory: []store.UsageTaskPhase{{Phase: "Running", ObservedAt: start, Attempt: 1}}}
+	encoded, err := json.Marshal(legacy)
+	require.NoError(t, err)
+	require.NotContains(t, string(encoded), "recordedAt")
+	_, err = s.db.ExecContext(t.Context(), `INSERT INTO usage_tasks(namespace, task_uid, task_name, started_at, data) VALUES (?, ?, ?, ?, ?)`,
+		legacy.Namespace, legacy.TaskUID, legacy.TaskName, start.UnixNano(), string(encoded))
+	require.NoError(t, err)
+	asOf := start.Add(time.Minute)
+	original := usageReport(t, s, []string{"a"}, start, start.Add(time.Hour), asOf)
+	require.Equal(t, "Running", original.Works[0].Tasks[0].Phase)
+	// Refreshing a row created before RecordedAt was introduced must not
+	// move its existing phase's visibility forward to the upgrade time.
+	legacy.PhaseObservedAt, legacy.PhaseAttempt = start, 1
+	require.NoError(t, s.RegisterUsageTask(t.Context(), legacy))
+	require.Equal(t, original, usageReport(t, s, []string{"a"}, start, start.Add(time.Hour), asOf))
+	// New transitions on the same legacy Task follow the new visibility rule.
+	legacy.Phase, legacy.PhaseObservedAt = "Succeeded", start.Add(30*time.Second)
+	require.NoError(t, s.RegisterUsageTask(t.Context(), legacy))
+	require.Equal(t, original, usageReport(t, s, []string{"a"}, start, start.Add(time.Hour), asOf))
+	require.Equal(t, "Succeeded", usageReport(t, s, []string{"a"}, start, start.Add(time.Hour), time.Now().UTC()).Works[0].Tasks[0].Phase)
 }
