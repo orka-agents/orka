@@ -460,6 +460,31 @@ func TestUsageWorkerRecordsUseAuthenticatedTaskIdentity(t *testing.T) {
 	require.NoError(t, response.Body.Close())
 }
 
+func TestUsageWorkerRejectsCacheBreakdownsExceedingInput(t *testing.T) {
+	for _, counts := range [][3]int64{{0, 100, 0}, {0, 0, 100}, {100, 60, 50}} {
+		t.Run(fmt.Sprint(counts), func(t *testing.T) {
+			backend := newInternalExecutionEventStore(t)
+			task, job, pod := testInternalExecutionEventOwnedWorkerObjects("owned-task")
+			task.Spec.Type = corev1alpha1.TaskTypeAI
+			pod.Spec.Containers = []corev1.Container{{Name: "worker", Command: []string{"/worker"}, Args: []string{"--mode=ai"}}}
+			app := setupInternalExecutionEventAppWithClient(backend, testInternalExecutionEventClient(t, task, job, pod), testInternalExecutionEventWorkerUser(pod.Name))
+			observation := store.UsageObservation{ID: "call", CounterID: "call", Status: store.UsageStatusCompleted,
+				InputTokens: &counts[0], OutputTokens: new(int64(0)), CachedInputTokens: &counts[1], CacheWriteInputTokens: &counts[2],
+				Complete: true, ObservedAt: time.Now().UTC()}
+			body := map[string]any{"type": events.ExecutionEventTypeModelUsageUpdated, "content": map[string]any{"usage": observation}}
+			response := doJSONRequest(t, app, "/internal/v1/events/default/task/owned-task", body)
+			require.Equal(t, http.StatusBadRequest, response.StatusCode)
+			require.NoError(t, response.Body.Close())
+			data, err := backend.LoadUsage(t.Context(), store.UsageFilter{Namespaces: []string{"default"}, AsOf: time.Now().UTC()})
+			require.NoError(t, err)
+			require.Empty(t, data.Observations)
+			journal, err := backend.ListExecutionEvents(t.Context(), store.ExecutionEventFilter{Namespace: "default", StreamType: "task", StreamID: "owned-task"})
+			require.NoError(t, err)
+			require.Empty(t, journal, "invalid worker usage must not commit its execution event")
+		})
+	}
+}
+
 func TestUsageWorkerAuthorityRejectsUntrustedExecution(t *testing.T) {
 	for _, tc := range []struct {
 		name string

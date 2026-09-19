@@ -240,6 +240,18 @@ func recordUsage(ctx context.Context, db taskDataExecutor, observation store.Usa
 			return store.ValidationErrorf("invalid usage count")
 		}
 	}
+	if observation.InputTokens != nil {
+		remainingInput := *observation.InputTokens
+		for _, count := range []*int64{observation.CachedInputTokens, observation.CacheWriteInputTokens} {
+			if count == nil {
+				continue
+			}
+			if *count > remainingInput {
+				return store.ValidationErrorf("cache usage exceeds inclusive input count")
+			}
+			remainingInput -= *count
+		}
+	}
 	observation.Provider, _, _ = events.RedactAndTruncateExecutionEventText(observation.Provider, 256)
 	observation.Model, _, _ = events.RedactAndTruncateExecutionEventText(observation.Model, 256)
 	observation.ObservedAt = observation.ObservedAt.UTC()

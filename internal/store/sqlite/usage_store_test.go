@@ -39,6 +39,48 @@ func usageSample(t *testing.T, s *Store, namespace, task, id string, tokens int6
 		Status: store.UsageStatusCompleted, Complete: true, ObservedAt: at}))
 }
 
+func TestUsageRecordCacheBreakdownsRespectInclusiveInput(t *testing.T) {
+	for _, tc := range []struct {
+		name                 string
+		input, cached, write *int64
+		valid                bool
+	}{
+		{name: "read exceeds zero", input: new(int64(0)), cached: new(int64(100))},
+		{name: "write exceeds zero", input: new(int64(0)), write: new(int64(100))},
+		{name: "read exceeds input", input: new(int64(100)), cached: new(int64(101))},
+		{name: "write exceeds input", input: new(int64(100)), write: new(int64(101))},
+		{name: "combined exceeds input", input: new(int64(100)), cached: new(int64(60)), write: new(int64(50))},
+		{name: "combined exceeds maximum", input: new(store.MaxUsageTokenCount), cached: new(store.MaxUsageTokenCount), write: new(int64(1))},
+		{name: "exact boundary", input: new(int64(100)), cached: new(int64(60)), write: new(int64(40)), valid: true},
+		{name: "maximum boundary", input: new(store.MaxUsageTokenCount), cached: new(store.MaxUsageTokenCount - 1), write: new(int64(1)), valid: true},
+		{name: "reported zero", input: new(int64(0)), cached: new(int64(0)), write: new(int64(0)), valid: true},
+		{name: "unknown input", cached: new(int64(100)), write: new(int64(50)), valid: true},
+		{name: "unknown breakdowns", input: new(int64(100)), valid: true},
+		{name: "unknown write", input: new(int64(100)), cached: new(int64(100)), valid: true},
+		{name: "unknown read", input: new(int64(100)), write: new(int64(100)), valid: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := setupTestStore(t)
+			observation := store.UsageObservation{Namespace: "a", ID: "call", CounterID: "call", Scope: store.UsageScopeCall,
+				Source: store.UsageSourceProvider, Status: store.UsageStatusCompleted, ObservedAt: time.Now().UTC(),
+				InputTokens: tc.input, OutputTokens: new(int64(0)), CachedInputTokens: tc.cached, CacheWriteInputTokens: tc.write}
+			err := s.RecordUsage(t.Context(), observation)
+			if tc.valid {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, store.ErrValidation)
+			}
+			data, err := s.LoadUsage(t.Context(), store.UsageFilter{Namespaces: []string{"a"}, AsOf: time.Now().UTC()})
+			require.NoError(t, err)
+			if tc.valid {
+				require.Equal(t, []store.UsageObservation{observation}, data.Observations)
+			} else {
+				require.Empty(t, data.Observations, "invalid counts must not enter retained usage")
+			}
+		})
+	}
+}
+
 func usagePR(t *testing.T, s *Store, namespace, work string, number int64, merged bool, at time.Time) {
 	t.Helper()
 	require.NoError(t, s.LinkUsagePullRequest(context.Background(), store.UsagePRLink{Namespace: namespace, WorkID: work,

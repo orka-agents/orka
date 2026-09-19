@@ -178,6 +178,96 @@ func TestUsageOpenAIChatCacheSemantics(t *testing.T) {
 	}
 }
 
+func TestUsageOpenAIRejectsCacheBreakdownsExceedingInput(t *testing.T) {
+	for _, chat := range []bool{false, true} {
+		for _, streaming := range []bool{false, true} {
+			t.Run(fmt.Sprintf("chat=%v/stream=%v", chat, streaming), func(t *testing.T) {
+				ctx, report := usageFixture(t)
+				var requests atomic.Int32
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					requests.Add(1)
+					w.Header().Set("Content-Type", "application/json")
+					if chat && r.URL.Path == "/responses" {
+						w.WriteHeader(http.StatusNotFound)
+						_, _ = fmt.Fprint(w, `{"error":{"message":"unsupported_api"}}`)
+						return
+					}
+					var body struct {
+						Stream bool `json:"stream"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Error(err)
+						http.Error(w, "invalid fixture request", http.StatusBadRequest)
+						return
+					}
+					if body.Stream {
+						w.Header().Set("Content-Type", "text/event-stream")
+					}
+					if chat {
+						const counts = `"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0,"prompt_tokens_details":{"cached_tokens":100}}`
+						if body.Stream {
+							_, _ = fmt.Fprintf(w, "data: {\"id\":\"chat\",\"object\":\"chat.completion.chunk\",\"model\":\"served-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}],%s}\n\ndata: [DONE]\n\n", counts)
+						} else {
+							_, _ = fmt.Fprintf(w, `{"id":"chat","object":"chat.completion","model":"served-model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],%s}`, counts)
+						}
+						return
+					}
+					response := map[string]any{"id": "response", "object": "response", "status": "completed", "model": "served-model",
+						"output": []any{map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "ok"}}}}}
+					// The Responses stream first probes support with a unary call.
+					// Keep the probe unavailable so only the stream supplies bad counts.
+					if !streaming || body.Stream {
+						response["usage"] = map[string]any{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "input_tokens_details": map[string]any{"cached_tokens": 100}}
+					}
+					if body.Stream {
+						encoded, err := json.Marshal(response)
+						if err != nil {
+							t.Error(err)
+							return
+						}
+						_, _ = fmt.Fprintf(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":%s}\n\n", encoded)
+					} else {
+						if err := json.NewEncoder(w).Encode(response); err != nil {
+							t.Error(err)
+						}
+					}
+				}))
+				t.Cleanup(server.Close)
+				provider, err := llm.NewProvider("openai", llm.ProviderConfig{APIKey: "fixture", BaseURL: server.URL})
+				require.NoError(t, err)
+				provider = llm.NewRetryProvider(provider)
+				if streaming {
+					var stream <-chan llm.StreamChunk
+					stream, err = provider.Stream(ctx, usageRequest())
+					if err == nil {
+						for chunk := range stream {
+							err = errors.Join(err, chunk.Error)
+						}
+					}
+				} else {
+					_, err = provider.Complete(ctx, usageRequest())
+				}
+				require.ErrorIs(t, err, store.ErrValidation)
+				require.True(t, llm.IsUsagePersistenceError(err))
+				require.False(t, llm.ShouldRetry(err))
+				require.False(t, llm.ShouldFallback(err))
+				wantCalls := 1
+				if chat || streaming {
+					wantCalls = 2
+				}
+				require.EqualValues(t, wantCalls, requests.Load())
+				got := report()
+				require.Equal(t, wantCalls, got.Summary.Calls)
+				require.Equal(t, wantCalls, got.Summary.MissingMeasurements)
+				require.Equal(t, "unavailable", got.Summary.Completeness)
+				require.Zero(t, got.Summary.TotalTokens)
+				require.Zero(t, got.Summary.CachedInputTokens)
+				require.Zero(t, got.Summary.CacheWriteInputTokens)
+			})
+		}
+	}
+}
+
 func TestUsageStreamFailureAndCancellationPreserveInput(t *testing.T) {
 	for _, cancelStream := range []bool{false, true} {
 		t.Run(fmt.Sprint(cancelStream), func(t *testing.T) {
