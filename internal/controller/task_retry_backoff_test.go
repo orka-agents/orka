@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -38,7 +39,7 @@ func TestRetryTaskBackoffSurvivesReconcileEventsAndRestart(t *testing.T) {
 	require.NotNil(t, condition)
 	require.Equal(t, taskRetryPendingReason, condition.Reason)
 	retryAt := condition.LastTransitionTime
-	deadline := retryAt.Add(30 * time.Second)
+	deadline := retryAt.Time.Truncate(time.Second).Add(31 * time.Second)
 	require.True(t, apierrors.IsNotFound(r.Get(t.Context(), client.ObjectKeyFromObject(oldJob), &batchv1.Job{})))
 	require.ErrorIs(t, r.ResultStore.(store.TaskJobAuthorityStore).CheckTaskJobAuthority(t.Context(), store.TaskJobIdentity{
 		Namespace: task.Namespace, TaskUID: string(task.UID), JobUID: string(oldJob.UID),
@@ -161,13 +162,41 @@ func TestRetryTaskBackoffDeadlineBoundary(t *testing.T) {
 	task.Spec.Type = corev1alpha1.TaskTypeAI
 	task.Spec.RetryPolicy.BackoffMultiplier = 3
 	task.Status.Attempts = 2
-	deadline := at.Add(90 * time.Second)
+	deadline := at.Add(91 * time.Second)
 	require.Equal(t, time.Nanosecond, r.remainingRetryDelay(task, deadline.Add(-time.Nanosecond)))
 	require.Zero(t, r.remainingRetryDelay(task, deadline))
 	require.Zero(t, r.remainingRetryDelay(task, deadline.Add(time.Nanosecond)))
 	// ACP and harness-v1 attempts own their retry/admission lifecycle.
 	task.Spec.Type = corev1alpha1.TaskTypeAgent
 	require.Zero(t, r.remainingRetryDelay(task, at))
+}
+
+func TestRetryTaskBackoffSurvivesTimestampSerialization(t *testing.T) {
+	r := &TaskReconciler{}
+	for _, offset := range []time.Duration{0, 817197 * time.Microsecond, time.Second - time.Nanosecond} {
+		for _, delay := range []time.Duration{0, time.Nanosecond, 100 * time.Millisecond, 30 * time.Second} {
+			t.Run(offset.String()+"/"+delay.String(), func(t *testing.T) {
+				at := time.Date(2026, time.September, 19, 4, 24, 33, 0, time.UTC).Add(offset)
+				task := retryPendingTaskFixture(at)
+				task.Spec.Type = corev1alpha1.TaskTypeAI
+				task.Spec.RetryPolicy.InitialDelay = &metav1.Duration{Duration: delay}
+				raw, err := json.Marshal(task)
+				require.NoError(t, err)
+				var persisted corev1alpha1.Task
+				require.NoError(t, json.Unmarshal(raw, &persisted))
+				require.Equal(t, delay, persisted.Spec.RetryPolicy.InitialDelay.Duration)
+				remaining := r.remainingRetryDelay(&persisted, at)
+				if delay == 0 {
+					require.Zero(t, remaining, "an explicitly immediate retry must remain immediate")
+					return
+				}
+				require.GreaterOrEqual(t, remaining, delay, "persistence must not shorten the requested delay")
+				require.LessOrEqual(t, remaining, delay+time.Second, "rounding must add at most one second")
+				require.Positive(t, r.remainingRetryDelay(&persisted, at.Add(delay-time.Nanosecond)))
+				require.Zero(t, r.remainingRetryDelay(&persisted, at.Add(delay+time.Second)))
+			})
+		}
+	}
 }
 
 func retryPendingTaskFixture(at time.Time) *corev1alpha1.Task {

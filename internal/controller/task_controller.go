@@ -2755,7 +2755,15 @@ func (r *TaskReconciler) remainingRetryDelay(task *corev1alpha1.Task, now time.T
 	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != taskRetryPendingReason || condition.LastTransitionTime.IsZero() {
 		return 0
 	}
-	return max(condition.LastTransitionTime.Add(r.calculateRetryDelay(task)).Sub(now), 0)
+	delay := r.calculateRetryDelay(task)
+	if delay <= 0 {
+		return 0
+	}
+	// metav1.Time JSON drops fractional seconds. Start at the next second so
+	// persistence cannot shorten a positive delay, including subsecond delays.
+	// This conservatively adds at most one second to the requested backoff.
+	retryAt := condition.LastTransitionTime.Time.Truncate(time.Second).Add(time.Second).Add(delay)
+	return max(retryAt.Sub(now), 0)
 }
 
 // calculateRetryDelay calculates the delay before retry using exponential backoff
