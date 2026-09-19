@@ -251,11 +251,12 @@ Manual run/action commands such as `orka security scan run`, `orka monitor run`,
 ## Usage and PR outcomes
 
 Usage commands read retained model measurements and verified PR outcomes through
-the controller API. Teams are Kubernetes namespaces; reporting requires no CRD.
+the controller API. Each installation reports only its own Kubernetes namespace;
+reporting requires no CRD.
 
 ```bash
 orka usage summary -n payments
-orka usage summary --teams payments,platform --repository example/project -o json
+orka usage summary --teams payments --repository example/project -o json
 orka usage work WORK_ID -n payments
 orka usage other review_only -n payments -o yaml
 ```
