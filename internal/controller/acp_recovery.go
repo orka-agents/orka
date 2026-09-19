@@ -1007,32 +1007,15 @@ func (d *ACPDispatcher) reconcileRestoredJournaledPromptTerminal(
 			return nil, err
 		}
 	default:
-		// Recover with the same durable classification the live path writes:
-		// the journaled (already redacted) failure code/message become the
-		// PromptAttempt's TerminalReason/OutcomeMarker instead of the generic
-		// "prompt failed" default.
-		failureMessage := acpPromptFailureMessage(harnessv2.Event{
-			Type:   harnessv2.EventFailed,
-			Failed: &harnessv2.FailedEvent{Code: evidence.FailureCode, Message: evidence.FailureMessage},
-		})
+		// Keep the same fixed status classification as the live path. Runtime
+		// diagnostics remain in their canonical journal event.
 		if err := d.transitionAttemptToFailed(
-			ctx, attempt.ID, fence, "recover-restored-journal-terminal-failed", acpPromptFailedReason, failureMessage,
+			ctx, attempt.ID, fence, "recover-restored-journal-terminal-failed", acpPromptFailedReason, acpPromptFailedMessage,
 		); err != nil {
 			return nil, err
 		}
 	}
 	return d.Store.GetPromptAttempt(ctx, attempt.ID)
-}
-
-// recoveredTerminalEvent rebuilds the terminal event from journaled evidence
-// so a recovered failure keeps the (already redacted) code/message the live
-// path would have projected instead of the generic "prompt failed".
-func recoveredTerminalEvent(evidence *v2eventjournal.PromptTerminalEvidence) harnessv2.Event {
-	event := harnessv2.Event{Type: evidence.TerminalEvent}
-	if evidence.TerminalEvent == harnessv2.EventFailed && (evidence.FailureCode != "" || evidence.FailureMessage != "") {
-		event.Failed = &harnessv2.FailedEvent{Code: evidence.FailureCode, Message: evidence.FailureMessage}
-	}
-	return event
 }
 
 func mappedPromptRecoveryContext(task *corev1alpha1.Task) v2eventjournal.MapContext {
@@ -1074,7 +1057,7 @@ func (d *ACPDispatcher) recoverJournaledPromptTerminal(
 			return true, err
 		}
 		return true, d.finishNonSuccessWithCancellationReason(
-			ctx, task, attempt.ID, fence, session, recoveredTerminalEvent(evidence), evidence.CancellationReason,
+			ctx, task, attempt.ID, fence, session, harnessv2.Event{Type: evidence.TerminalEvent}, evidence.CancellationReason,
 		)
 	}
 	if _, err := d.ResultStore.GetResult(ctx, task.Namespace, task.Name); err != nil {

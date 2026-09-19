@@ -5,9 +5,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	executionevents "github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -343,10 +345,32 @@ func redactPlanEntries(
 ) ([]harnessv2.PlanEntry, []logicalFieldBoundaries) {
 	redacted := append([]harnessv2.PlanEntry(nil), entries...)
 	values := make([]string, 0, len(entries)*2)
+	copyKinds := make([]logicalFieldCopyKind, 0, len(entries)*2)
+	summaryCopies := make([][]string, len(entries)*2)
+	completed := 0
 	for _, entry := range entries {
-		values = append(values, entry.Content, entry.Priority)
+		if entry.Status == harnessv2.PlanEntryCompleted {
+			completed++
+		}
 	}
-	values, publishedFields := redactLogicalFieldsWithHistory(history, historySaturated, values...)
+	summaryPrefix := fmt.Sprintf("Plan in progress (%d/%d complete): ", completed, len(entries))
+	summaryAssigned := false
+	for _, entry := range entries {
+		content := strings.TrimSpace(executionevents.RedactExecutionEventText(strings.TrimSpace(entry.Content)))
+		if !summaryAssigned && entry.Status == harnessv2.PlanEntryInProgress && content != "" {
+			// The entry is exposed inside both summaries, but only up to the
+			// final cutoff after the progress prefix and formatter redaction.
+			summaryAssigned = true
+			summary, _, _ := executionevents.RedactAndTruncateExecutionEventText(
+				summaryPrefix+compactSummary(content), executionevents.MaxExecutionEventSummaryChars,
+			)
+			published := strings.TrimPrefix(summary, summaryPrefix)
+			summaryCopies[len(values)] = []string{published, published}
+		}
+		values = append(values, content, strings.TrimSpace(entry.Priority))
+		copyKinds = append(copyKinds, logicalFieldTrimmedCopies, logicalFieldTrimmedCopies)
+	}
+	values, publishedFields := redactLogicalFieldsWithSummaryCopies(history, historySaturated, copyKinds, summaryCopies, values...)
 	for index := range redacted {
 		redacted[index].Content = values[index*2]
 		redacted[index].Priority = values[index*2+1]
@@ -370,10 +394,30 @@ func projectDiagnosticUpdate(
 	history []logicalFieldBoundaries,
 	historySaturated bool,
 ) (diagnosticProjection, []logicalFieldBoundaries) {
-	values, publishedFields := redactLogicalFieldsWithHistory(
-		history, historySaturated, update.Code, update.Message,
-	)
+	values, publishedFields := redactDiagnosticFields(update.Code, update.Message, logicalFieldContentTextCopy, history, historySaturated)
 	return diagnosticProjection{code: values[0], message: values[1]}, publishedFields
+}
+
+// Diagnostic messages publish contentText; failures publish raw JSON instead.
+// Their summary is shared: derive its contributions after formatting the whole
+// code/message pair, retaining the generated colon and the actual cutoff.
+func redactDiagnosticFields(
+	code, message string,
+	messageKind logicalFieldCopyKind,
+	history []logicalFieldBoundaries,
+	historySaturated bool,
+) ([]string, []logicalFieldBoundaries) {
+	code = executionevents.RedactExecutionEventText(code)
+	message = executionevents.RedactExecutionEventText(message)
+	summary := compactSummary(code + ": " + message)
+	codeSummary := compactSummary(code + ": ")
+	summaryCopies := [][]string{{summary}, nil}
+	if after, ok := strings.CutPrefix(summary, codeSummary); ok {
+		summaryCopies = [][]string{{codeSummary}, {strings.TrimSpace(after)}}
+	}
+	return redactLogicalFieldsWithSummaryCopies(
+		history, historySaturated, []logicalFieldCopyKind{logicalFieldSingleCopy, messageKind}, summaryCopies, code, message,
+	)
 }
 
 func projectToolUpdate(
@@ -381,12 +425,29 @@ func projectToolUpdate(
 	history []logicalFieldBoundaries,
 	historySaturated bool,
 	contentText *string,
+	contentTruncated bool,
 ) (toolProjection, []logicalFieldBoundaries) {
-	values := []string{tool.Title, tool.Kind}
+	title := executionevents.RedactExecutionEventText(tool.Title)
+	contentOmitted := contentTruncated || tool.ContentOmitted
+	if contentOmitted && strings.TrimSpace(title) != "" {
+		// A titled tool has no output summary, and mapUpdate drops its text.
+		contentText = nil
+	}
+	values := []string{title, tool.Kind}
+	copyKinds := []logicalFieldCopyKind{logicalFieldSummaryCopies, logicalFieldToolNameCopies}
 	if contentText != nil {
 		values = append(values, *contentText)
+		kind := logicalFieldContentTextCopy
+		if strings.TrimSpace(title) == "" {
+			kind = logicalFieldContentSummaryCopies
+			if contentOmitted {
+				// mapUpdate retains the summary before clearing contentText.
+				kind = logicalFieldCompactSummaryCopy
+			}
+		}
+		copyKinds = append(copyKinds, kind)
 	}
-	values, publishedFields := redactLogicalFieldsWithHistory(history, historySaturated, values...)
+	values, publishedFields := redactLogicalFieldsWithPublicCopies(history, historySaturated, copyKinds, values...)
 	projection := toolProjection{title: values[0], kind: values[1]}
 	if contentText != nil {
 		projection.contentText = values[2]
@@ -399,17 +460,122 @@ func redactLogicalFieldsWithHistory(
 	historySaturated bool,
 	values ...string,
 ) ([]string, []logicalFieldBoundaries) {
+	return redactLogicalFieldsWithPublicCopies(history, historySaturated, nil, values...)
+}
+
+// Each model-bearing event publishes its provider and effective model, including
+// configured fallbacks. Check them together against history and fields already
+// projected for this event, then return all fields actually published.
+func redactModelWithHistory(
+	provider, model string,
+	history []logicalFieldBoundaries,
+	historySaturated bool,
+	published []logicalFieldBoundaries,
+) (string, string, []logicalFieldBoundaries) {
+	if provider == "" && model == "" {
+		return provider, model, published
+	}
+	combined := make([]logicalFieldBoundaries, 0, len(history)+len(published))
+	combined = append(combined, history...)
+	combined = append(combined, published...)
+	values, fields := redactLogicalFieldsWithPublicCopies(
+		combined, historySaturated, []logicalFieldCopyKind{logicalFieldTrimmedCopies, logicalFieldTrimmedCopies}, provider, model,
+	)
+	return values[0], values[1], append(published, fields...)
+}
+
+type logicalFieldCopyKind uint8
+
+const (
+	logicalFieldSingleCopy logicalFieldCopyKind = iota
+	logicalFieldTrimmedCopies
+	logicalFieldSummaryCopies
+	logicalFieldContentTextCopy
+	logicalFieldContentSummaryCopies
+	logicalFieldToolNameCopies
+	logicalFieldCompactSummaryCopy
+)
+
+// Count the actual field locations of a public record. Providers and models each
+// have two raw DTO locations; text-only fields have bounded content/summary copies.
+// Replays of the same event identity do not introduce another logical field.
+func logicalFieldPublicCopies(value string, kind logicalFieldCopyKind) []string {
+	switch kind {
+	case logicalFieldTrimmedCopies:
+		return []string{value, value}
+	case logicalFieldSummaryCopies:
+		return []string{value, compactWhitespace(value)}
+	case logicalFieldContentTextCopy, logicalFieldContentSummaryCopies:
+		// Text-only fields have no raw JSON copy; remember only published text.
+		contentText, _, _ := executionevents.RedactAndTruncateExecutionEventText(value, executionevents.MaxExecutionEventContentTextChars)
+		if kind == logicalFieldContentTextCopy {
+			return []string{contentText}
+		}
+		return []string{contentText, compactSummary(value)}
+	case logicalFieldCompactSummaryCopy:
+		return []string{compactSummary(value)}
+	case logicalFieldToolNameCopies:
+		name, _, _ := executionevents.RedactAndTruncateExecutionEventText(strings.TrimSpace(value), 128)
+		return []string{value, name}
+	default:
+		return []string{value}
+	}
+}
+
+func redactLogicalFieldsWithPublicCopies(
+	history []logicalFieldBoundaries,
+	historySaturated bool,
+	copyKinds []logicalFieldCopyKind,
+	values ...string,
+) ([]string, []logicalFieldBoundaries) {
+	return redactLogicalFieldsWithSummaryCopies(history, historySaturated, copyKinds, nil, values...)
+}
+
+func redactLogicalFieldsWithSummaryCopies(
+	history []logicalFieldBoundaries,
+	historySaturated bool,
+	copyKinds []logicalFieldCopyKind,
+	summaryCopies [][]string,
+	values ...string,
+) ([]string, []logicalFieldBoundaries) {
 	redacted := make([]string, len(values))
+	publicText := make([]bool, len(values))
 	current := make([]logicalFieldBoundaries, 0, len(values))
 	for index, value := range values {
+		kind := logicalFieldSingleCopy
+		if index < len(copyKinds) {
+			kind = copyKinds[index]
+		}
+		trimmed := kind == logicalFieldTrimmedCopies
+		if trimmed {
+			value = strings.TrimSpace(value)
+		}
 		redacted[index] = executionevents.RedactExecutionEventText(value)
-		if historySaturated {
-			if redacted[index] != "" {
+		if trimmed {
+			// URL removal can expose trailing whitespace. Match the final
+			// model/plan value before a downstream projection trims it again.
+			redacted[index] = strings.TrimSpace(redacted[index])
+		}
+		copies := logicalFieldPublicCopies(redacted[index], kind)
+		if index < len(summaryCopies) {
+			copies = append(copies, summaryCopies[index]...)
+		}
+		sensitiveCopy := false
+		for _, copy := range copies {
+			publicText[index] = publicText[index] || copy != ""
+			if copy != redacted[index] && executionevents.RedactExecutionEventText(copy) != copy {
+				sensitiveCopy = true
+			}
+		}
+		if historySaturated || sensitiveCopy {
+			if publicText[index] {
 				redacted[index] = executionevents.ExecutionEventRedactedValue
 			}
 			continue
 		}
-		current = appendLogicalFieldBoundary(current, redacted[index])
+		if redacted[index] != executionevents.ExecutionEventRedactedValue {
+			current = appendLogicalFieldCopies(current, copies...)
+		}
 	}
 	if historySaturated {
 		return redacted, nil
@@ -417,9 +583,9 @@ func redactLogicalFieldsWithHistory(
 	fields := make([]logicalFieldBoundaries, 0, len(history)+len(current))
 	fields = append(fields, history...)
 	fields = append(fields, current...)
-	if len(fields) >= 2 && permutedLogicalFieldSubsetsSensitive(fields) {
-		for index, value := range redacted {
-			if value != "" {
+	if permutedLogicalFieldSubsetsSensitive(fields) {
+		for index := range redacted {
+			if publicText[index] {
 				redacted[index] = executionevents.ExecutionEventRedactedValue
 			}
 		}
@@ -432,13 +598,20 @@ const (
 	maxLogicalFieldBoundaryRunes       = 256
 	maxLogicalFieldSubsetCandidates    = 4096
 	maxLogicalFieldPermutationFields   = 256
-	maxLogicalFieldPermutationBitWords = maxLogicalFieldPermutationFields / 64
+	maxLogicalFieldPermutationBitWords = 4 * maxLogicalFieldPermutationFields / 64
 )
 
-type logicalFieldBoundaries struct {
-	prefix string
-	suffix string
-	whole  bool
+// Public copies share one logical field's history slot, but each needs its own
+// permutation bit because the record exposes them together.
+type logicalFieldBoundaries []logicalFieldBoundary
+
+type logicalFieldBoundary struct {
+	prefix                 string
+	suffix                 string
+	whole                  bool
+	assignmentTruncated    bool
+	assignmentContinuation bool
+	assignmentDelimiter    bool
 }
 
 type logicalFieldPermutationCandidate struct {
@@ -449,6 +622,24 @@ type logicalFieldPermutationCandidate struct {
 type logicalFieldSensitiveMarkerState struct {
 	marker  int
 	matched int
+	// Each consumed copy advances the marker by at least one byte. The
+	// longest current marker is 18 bytes; leave room for future additions.
+	used [32]int
+}
+
+func (state logicalFieldSensitiveMarkerState) consume(index int) (logicalFieldSensitiveMarkerState, bool) {
+	identity := index + 1
+	for slot, used := range state.used {
+		if used == identity {
+			return state, false
+		}
+		if used == 0 || used > identity {
+			copy(state.used[slot+1:], state.used[slot:len(state.used)-1])
+			state.used[slot] = identity
+			return state, true
+		}
+	}
+	return state, false
 }
 
 var logicalFieldSensitiveMarkers = []string{
@@ -462,6 +653,7 @@ var logicalFieldSensitiveMarkers = []string{
 	"apikey",
 	"api key",
 	"token",
+	"token is",
 	"secret",
 	"password",
 	"passwd",
@@ -469,6 +661,7 @@ var logicalFieldSensitiveMarkers = []string{
 	"credential",
 	"private-key",
 	"private_key",
+	"privatekey",
 	"private key",
 	"sk-",
 	"ghp_",
@@ -487,59 +680,181 @@ var logicalFieldSensitiveMarkers = []string{
 	"//",
 	"?",
 	"#",
+	// Signed query parameters can occur without a preceding question mark.
+	"&sig=",
+	"&signature=",
+	"&sas=",
+	"&x-amz-signature=",
+	"&x-goog-signature=",
 }
 
-func appendLogicalFieldBoundary(fields []logicalFieldBoundaries, value string) []logicalFieldBoundaries {
-	if value == "" || value == executionevents.ExecutionEventRedactedValue {
-		return fields
-	}
-	runes := []rune(value)
-	if len(runes) <= maxLogicalFieldBoundaryRunes {
-		return append(fields, logicalFieldBoundaries{prefix: value, suffix: value, whole: true})
-	}
-	return append(fields, logicalFieldBoundaries{
-		prefix: string(runes[:maxLogicalFieldBoundaryRunes]),
-		suffix: string(runes[len(runes)-maxLogicalFieldBoundaryRunes:]),
+// A complete pwd marker is sensitive only while it can still form an
+// assignment key (internal/redact.sensitiveAssignmentRe). A fixed delimiter
+// such as the ampersand in `pwd && ls` cannot become an assignment by joining
+// more fields. Keep open keys conservative, including quoted/whitespace tails.
+var logicalFieldPWDAssignmentRe = regexp.MustCompile(`(?i)pwd[a-z0-9_.-]*["']?\s*(?:[:=]|\z)`)
+var logicalFieldTokenAssignmentRe = regexp.MustCompile(`(?i)token[a-z0-9_.-]*["']?\s*(?:[:=]|\z)`)
+
+// Only a delimiter reachable from the beginning of another public copy can
+// complete an open assignment key. A colon after fixed words in a generated
+// usage summary cannot do so.
+var logicalFieldAssignmentDelimiterRe = regexp.MustCompile(`(?i)\A[a-z0-9_.-]*["']?\s*[:=]`)
+
+// Assignment keys and quoted values have no fixed length in the text redactor.
+// Remember when clipping would discard an unfinished assignment, including
+// aliases and Unicode case folds accepted by internal/redact.sensitiveAssignmentRe.
+// The capture group identifies an unfinished quoted value.
+var logicalFieldOpenAssignmentRe = regexp.MustCompile(`(?i)(?:api[-_]?key|token|secret|password|passwd|pwd|credential|private[-_]?key|client[-_]?secret|access[-_]?token|refresh[-_]?token)[a-z0-9_.-]*["']?\s*(?:\z|[:=]\s*("[^"\r\n]*|'[^'\r\n]*)?\z)`)
+
+// A long field can finish a marker begun in another field. Its omitted middle
+// must continue the key to a delimiter or its end, not through a fixed separator
+// such as the ampersand in a shell command.
+var logicalFieldAssignmentContinuationRe = regexp.MustCompile(`(?i)\A[a-z0-9_.-]*["']?\s*(?:[:=]|\z)`)
+
+var logicalFieldWhitespaceRunRe = regexp.MustCompile(`[\t\n\f\r ]{2,}`)
+
+// The text redactors accept arbitrary ASCII whitespace between header and
+// natural-language credential parts. Keep that whitespace from clipping away
+// an unfinished marker. This changes only the bounded matcher representation,
+// retains line-break barriers, and leaves Unicode whitespace untouched.
+func compactLogicalFieldWhitespace(value string) string {
+	return logicalFieldWhitespaceRunRe.ReplaceAllStringFunc(value, func(run string) string {
+		if !strings.ContainsAny(run, "\r\n") {
+			return " "
+		}
+		var result strings.Builder
+		if run[0] != '\r' && run[0] != '\n' {
+			result.WriteByte(' ')
+		}
+		result.WriteByte('\n')
+		if last := run[len(run)-1]; last != '\r' && last != '\n' {
+			result.WriteByte(' ')
+		}
+		return result.String()
 	})
 }
 
-func logicalFieldsMayReconstructSensitiveMarker(fields []logicalFieldBoundaries) bool {
-	states := make([]logicalFieldSensitiveMarkerState, 0)
-	seen := make(map[logicalFieldSensitiveMarkerState]struct{})
-	for markerIndex, marker := range logicalFieldSensitiveMarkers {
-		for _, field := range fields {
-			text := strings.ToLower(field.suffix)
-			if strings.Contains(text, marker) {
-				return true
-			}
-			for matched := 1; matched < len(marker) && matched <= len(text); matched++ {
-				if !strings.HasSuffix(text, marker[:matched]) {
-					continue
-				}
-				state := logicalFieldSensitiveMarkerState{marker: markerIndex, matched: matched}
-				if _, exists := seen[state]; exists {
-					continue
-				}
-				seen[state] = struct{}{}
-				states = append(states, state)
-			}
+func appendLogicalFieldBoundary(fields []logicalFieldBoundaries, value string) []logicalFieldBoundaries {
+	return appendLogicalFieldCopies(fields, value, compactWhitespace(value))
+}
+
+func appendLogicalFieldCopies(fields []logicalFieldBoundaries, values ...string) []logicalFieldBoundaries {
+	var boundaries logicalFieldBoundaries
+	for _, value := range values {
+		if value != "" && value != executionevents.ExecutionEventRedactedValue {
+			boundaries = append(boundaries, boundLogicalFieldText(value))
 		}
+	}
+	if len(boundaries) > 0 {
+		fields = append(fields, boundaries)
+	}
+	return fields
+}
+
+func boundLogicalFieldText(value string) logicalFieldBoundary {
+	value = compactLogicalFieldWhitespace(value)
+	runes := []rune(value)
+	if len(runes) <= maxLogicalFieldBoundaryRunes {
+		return logicalFieldBoundary{prefix: value, suffix: value, whole: true}
+	}
+	suffix := string(runes[len(runes)-maxLogicalFieldBoundaryRunes:])
+	return logicalFieldBoundary{
+		prefix:                 string(runes[:maxLogicalFieldBoundaryRunes]),
+		suffix:                 suffix,
+		assignmentTruncated:    logicalFieldTruncatesAssignment(value, suffix),
+		assignmentContinuation: logicalFieldAssignmentContinuationRe.MatchString(value),
+		assignmentDelimiter:    logicalFieldAssignmentDelimiterRe.MatchString(value),
+	}
+}
+
+func logicalFieldTruncatesAssignment(value, suffix string) bool {
+	clippedBytes := len(value) - len(suffix)
+	if clippedBytes <= 0 {
+		return false
+	}
+	// Another marker inside a quoted value does not preserve the assignment
+	// whose key was clipped. Check the original match's position instead.
+	match := logicalFieldOpenAssignmentRe.FindStringIndex(value)
+	return match != nil && match[0] < clippedBytes
+}
+
+func logicalFieldsMayReconstructSensitiveMarker(fields []logicalFieldBoundaries) bool {
+	// First reject unreachable markers without tracking copies. Otherwise a
+	// bounded copy-aware search could exhaust its work budget on benign text
+	// whose fragments cannot form any marker, even with unlimited reuse.
+	return logicalFieldsHaveSensitiveMarker(fields, false) && logicalFieldsHaveSensitiveMarker(fields, true)
+}
+
+func logicalFieldsHaveSensitiveMarker(fields []logicalFieldBoundaries, countCopies bool) bool {
+	var boundaries []logicalFieldBoundary
+	for _, field := range fields {
+		boundaries = append(boundaries, field...)
+	}
+	prefixes := make([]string, len(boundaries))
+	suffixes := make([]string, len(boundaries))
+	delimiters := make([]int, 0)
+	for index, boundary := range boundaries {
+		if boundary.assignmentTruncated {
+			return true
+		}
+		prefixes[index] = foldLogicalFieldMarkerText(boundary.prefix)
+		suffixes[index] = foldLogicalFieldMarkerText(boundary.suffix)
+		if boundary.assignmentDelimiter || logicalFieldAssignmentDelimiterRe.MatchString(boundary.prefix) {
+			delimiters = append(delimiters, index)
+		}
+	}
+	seen := make(map[logicalFieldSensitiveMarkerState]struct{})
+	states, sensitive := initialLogicalFieldMarkerStates(suffixes, delimiters, countCopies, seen)
+	if sensitive {
+		return true
 	}
 	for cursor := 0; cursor < len(states); cursor++ {
 		state := states[cursor]
 		marker := logicalFieldSensitiveMarkers[state.marker]
 		remaining := marker[state.matched:]
-		for _, field := range fields {
-			text := strings.ToLower(field.prefix)
-			if strings.HasPrefix(text, remaining) {
-				return true
+		for index, boundary := range boundaries {
+			next := state
+			if countCopies {
+				var unused bool
+				next, unused = state.consume(index)
+				if !unused {
+					continue
+				}
 			}
-			if !field.whole || !strings.HasPrefix(remaining, text) {
+			text := prefixes[index]
+			if marker[state.matched-1] == ' ' {
+				// A marker's whitespace can span several source fields.
+				text = strings.TrimLeft(text, " ")
+			}
+			if text == "" {
 				continue
 			}
-			next := logicalFieldSensitiveMarkerState{marker: state.marker, matched: state.matched + len(text)}
+			if strings.HasPrefix(text, remaining) {
+				if !countCopies || (marker != "pwd" && marker != "token") {
+					return true
+				}
+				tail := text[len(remaining):]
+				if logicalFieldAssignmentDelimiterRe.MatchString(tail) || boundary.assignmentDelimiter {
+					return true
+				}
+				// Fixed text after the marker cannot be removed by appending
+				// another copy. Clipped fields must also have a feasible tail
+				// in the original text, beyond the retained prefix.
+				if logicalFieldAssignmentContinuationRe.MatchString(tail) &&
+					(boundary.whole || boundary.assignmentContinuation) && logicalFieldAssignmentPossible(next, delimiters, countCopies) {
+					return true
+				}
+				continue
+			}
+			if !boundary.whole || !strings.HasPrefix(remaining, text) {
+				continue
+			}
+			next.matched += len(text)
 			if _, exists := seen[next]; exists {
 				continue
+			}
+			if len(seen) >= maxLogicalFieldSubsetCandidates {
+				return true
 			}
 			seen[next] = struct{}{}
 			states = append(states, next)
@@ -548,18 +863,136 @@ func logicalFieldsMayReconstructSensitiveMarker(fields []logicalFieldBoundaries)
 	return false
 }
 
+func logicalFieldAssignmentPossible(state logicalFieldSensitiveMarkerState, delimiters []int, countCopies bool) bool {
+	for _, index := range delimiters {
+		if !countCopies {
+			return true
+		}
+		if _, unused := state.consume(index); unused {
+			return true
+		}
+	}
+	return false
+}
+
+func initialLogicalFieldMarkerStates(
+	suffixes []string,
+	delimiters []int,
+	countCopies bool,
+	seen map[logicalFieldSensitiveMarkerState]struct{},
+) ([]logicalFieldSensitiveMarkerState, bool) {
+	states := make([]logicalFieldSensitiveMarkerState, 0)
+	for markerIndex, marker := range logicalFieldSensitiveMarkers {
+		if len(marker) > len(logicalFieldSensitiveMarkerState{}.used) {
+			return nil, true
+		}
+		var assignmentMarker *regexp.Regexp
+		switch marker {
+		case "pwd":
+			assignmentMarker = logicalFieldPWDAssignmentRe
+		case "token":
+			assignmentMarker = logicalFieldTokenAssignmentRe
+		}
+		for index := range suffixes {
+			initial := logicalFieldSensitiveMarkerState{marker: markerIndex}
+			if countCopies {
+				initial, _ = initial.consume(index)
+			}
+			text := suffixes[index]
+			if strings.Contains(text, marker) {
+				if assignmentMarker == nil {
+					return nil, true
+				}
+				match := assignmentMarker.FindString(text)
+				if match != "" && (strings.ContainsAny(match, ":=") || logicalFieldAssignmentPossible(initial, delimiters, countCopies)) {
+					return nil, true
+				}
+			}
+			if assignmentMarker != nil && len(delimiters) == 0 {
+				continue
+			}
+			for matched := 1; matched < len(marker) && matched <= len(text); matched++ {
+				if !strings.HasSuffix(text, marker[:matched]) {
+					continue
+				}
+				state := initial
+				state.matched = matched
+				if _, exists := seen[state]; exists {
+					continue
+				}
+				if len(seen) >= maxLogicalFieldSubsetCandidates {
+					return nil, true
+				}
+				seen[state] = struct{}{}
+				states = append(states, state)
+			}
+		}
+	}
+	return states, false
+}
+
+func foldLogicalFieldMarkerText(value string) string {
+	// Match the redactor's case-insensitive regular expressions, including
+	// Unicode folds and ASCII whitespace in natural-language API key text.
+	// Only the conservative fallback folds line breaks into spaces.
+	value = strings.Map(func(r rune) rune {
+		switch r {
+		case '\t', '\n', '\f', '\r':
+			return ' '
+		}
+		lowest := r
+		for folded := unicode.SimpleFold(r); folded != r; folded = unicode.SimpleFold(folded) {
+			if folded < lowest {
+				lowest = folded
+			}
+		}
+		return unicode.ToLower(lowest)
+	}, value)
+	return logicalFieldWhitespaceRunRe.ReplaceAllString(value, " ")
+}
+
 func permutedLogicalFieldSubsetsSensitive(fields []logicalFieldBoundaries) bool {
 	// Exact permutation tracking is bounded. Histories can contain one full
-	// 128-entry plan plus a later update, so exceeding the bitset width is not
+	// 128-entry plan plus a later update, so exceeding this logical-field limit is not
 	// itself evidence of sensitive content. Fall back to the conservative marker
 	// reachability check used when the candidate work cap is exhausted.
 	if len(fields) > maxLogicalFieldPermutationFields {
 		return logicalFieldsMayReconstructSensitiveMarker(fields)
 	}
-	candidates := make([]logicalFieldPermutationCandidate, 0, min(len(fields), maxLogicalFieldSubsetCandidates))
-	seen := make(map[logicalFieldPermutationCandidate]struct{}, min(len(fields), maxLogicalFieldSubsetCandidates))
-	for index, field := range fields {
-		candidate := logicalFieldPermutationCandidate{suffix: field.suffix}
+	// Fields have one to four public copies. An in-progress plan entry has
+	// raw and normalized text in both the plan record and its journal event.
+	// Flatten only for exact search; history accounting still uses fields.
+	boundaries := make([]logicalFieldBoundary, 0, 4*len(fields))
+	for _, field := range fields {
+		boundaries = append(boundaries, field...)
+	}
+	if len(boundaries) < 2 {
+		return false
+	}
+	// Equal complete copies are interchangeable. Consume them in index order
+	// so the search counts distinct text sequences instead of copy identities.
+	previousEqualWhole := make([]int, len(boundaries))
+	lastEqualWhole := make(map[logicalFieldBoundary]int, len(boundaries))
+	for index, boundary := range boundaries {
+		previousEqualWhole[index] = -1
+		if !boundary.whole {
+			continue
+		}
+		if previous, ok := lastEqualWhole[boundary]; ok {
+			previousEqualWhole[index] = previous
+		}
+		lastEqualWhole[boundary] = index
+	}
+	candidates := make([]logicalFieldPermutationCandidate, 0, min(len(boundaries), maxLogicalFieldSubsetCandidates))
+	seen := make(map[logicalFieldPermutationCandidate]struct{}, min(len(boundaries), maxLogicalFieldSubsetCandidates))
+	for index, boundary := range boundaries {
+		if previousEqualWhole[index] >= 0 {
+			continue
+		}
+		if boundary.assignmentTruncated {
+			return true
+		}
+		candidate := logicalFieldPermutationCandidate{suffix: boundary.suffix}
 		candidate.used[index/64] = uint64(1) << uint(index%64)
 		if _, exists := seen[candidate]; exists {
 			continue
@@ -569,22 +1002,38 @@ func permutedLogicalFieldSubsetsSensitive(fields []logicalFieldBoundaries) bool 
 	}
 	for cursor := 0; cursor < len(candidates); cursor++ {
 		candidate := candidates[cursor]
-		for index, field := range fields {
+		for index, boundary := range boundaries {
 			word := index / 64
 			bit := uint64(1) << uint(index%64)
 			if candidate.used[word]&bit != 0 {
 				continue
 			}
-			joined := candidate.suffix + field.prefix
+			if previous := previousEqualWhole[index]; previous >= 0 &&
+				candidate.used[previous/64]&(uint64(1)<<uint(previous%64)) == 0 {
+				continue
+			}
+			joined := candidate.suffix + boundary.prefix
 			if executionevents.RedactExecutionEventText(joined) != joined {
 				return true
 			}
 			next := candidate
 			next.used[word] |= bit
-			if field.whole {
+			if boundary.whole {
+				// Measure clipping against the same normalized text as the
+				// suffix, not against whitespace removed by compression.
+				joined = compactLogicalFieldWhitespace(joined)
 				next.suffix = logicalFieldSuffix(joined)
+				if logicalFieldTruncatesAssignment(joined, next.suffix) {
+					return true
+				}
 			} else {
-				next.suffix = field.suffix
+				// Punctuation can end a key, but still belongs to an open quoted
+				// value whose assignment would be lost with this prefix.
+				assignment := logicalFieldOpenAssignmentRe.FindStringSubmatchIndex(joined)
+				if assignment != nil && (boundary.assignmentContinuation || assignment[2] >= 0) {
+					return true
+				}
+				next.suffix = boundary.suffix
 			}
 			if _, exists := seen[next]; exists {
 				continue
@@ -683,7 +1132,7 @@ func mapUpdate(event harnessv2.Event, mapCtx MapContext, options mapUpdateOption
 			mapped.Summary = toolCallSummary(metadataFree)
 			content["metadataOmitted"] = "streamed_metadata_pending_completion_redaction"
 		} else {
-			projection, _ := projectToolUpdate(*tool, nil, false, options.toolContentText)
+			projection, _ := projectToolUpdate(*tool, nil, false, options.toolContentText, options.toolContentTruncated)
 			if options.toolProjection != nil {
 				projection = *options.toolProjection
 			}
@@ -775,23 +1224,16 @@ func mapUsageUpdate(
 	mapped *store.ExecutionEvent,
 	content map[string]any,
 ) {
+	mapped.Summary = usageSummary(usage)
 	hasTokenUsage := usage.InputTokens > 0 || usage.OutputTokens > 0 || usage.CachedInputTokens > 0
 	hasContextWindow := usage.ContextWindowUsed != nil
 	if hasTokenUsage || !hasContextWindow {
 		mapped.Type = executionevents.ExecutionEventTypeModelUsageUpdated
-		mapped.Summary = fmt.Sprintf(
-			"Model usage updated: %d input, %d output, %d cached input tokens",
-			usage.InputTokens, usage.OutputTokens, usage.CachedInputTokens,
-		)
 		content["inputTokens"] = usage.InputTokens
 		content["outputTokens"] = usage.OutputTokens
 		content["cachedInputTokens"] = usage.CachedInputTokens
 	} else {
 		mapped.Type = executionevents.ExecutionEventTypeModelContextUpdated
-		mapped.Summary = fmt.Sprintf(
-			"Model context updated: %d of %d tokens used",
-			*usage.ContextWindowUsed, *usage.ContextWindowSize,
-		)
 	}
 	if usage.ContextWindowUsed != nil {
 		content["contextWindowUsed"] = *usage.ContextWindowUsed
@@ -803,6 +1245,56 @@ func mapUsageUpdate(
 	if mapCtx.Model != "" {
 		content["model"] = mapCtx.Model
 	}
+}
+
+func usageSummary(usage *harnessv2.UsageUpdate) string {
+	if usage.InputTokens > 0 || usage.OutputTokens > 0 || usage.CachedInputTokens > 0 || usage.ContextWindowUsed == nil {
+		return fmt.Sprintf(
+			"Model usage updated: %d input, %d output, %d cached input tokens",
+			usage.InputTokens, usage.OutputTokens, usage.CachedInputTokens,
+		)
+	}
+	return fmt.Sprintf(
+		"Model context updated: %d of %d tokens used",
+		*usage.ContextWindowUsed, *usage.ContextWindowSize,
+	)
+}
+
+func mapUsageUpdateWithHistory(
+	event harnessv2.Event,
+	mapCtx MapContext,
+	journalKind string,
+	history []logicalFieldBoundaries,
+	historySaturated bool,
+) (*store.ExecutionEvent, []logicalFieldBoundaries, error) {
+	if event.Update == nil || event.Update.Usage == nil {
+		return nil, nil, fmt.Errorf("harness v2 usage update is required")
+	}
+	if err := event.Update.Usage.Validate(); err != nil {
+		return nil, nil, fmt.Errorf("invalid usage: %w", err)
+	}
+	mapCtx = mapCtx.normalized()
+	// Preserve metadata that is safe against history before checking the new
+	// summary. Its trailing "tokens" may complete an assignment, or exhaust
+	// the conservative search budget; masking the summary must not needlessly
+	// discard independently safe provider/model values.
+	provider, model, publishedFields := redactModelWithHistory(
+		mapCtx.Provider, mapCtx.Model, history, historySaturated, nil,
+	)
+	mapCtx.Provider, mapCtx.Model = provider, model
+	combined := make([]logicalFieldBoundaries, 0, len(history)+len(publishedFields))
+	combined = append(combined, history...)
+	combined = append(combined, publishedFields...)
+	values, summaryFields := redactLogicalFieldsWithPublicCopies(
+		combined, historySaturated, []logicalFieldCopyKind{logicalFieldSingleCopy}, usageSummary(event.Update.Usage),
+	)
+	publishedFields = append(publishedFields, summaryFields...)
+	mapped, err := mapUpdate(event, mapCtx, mapUpdateOptions{journalKind: journalKind})
+	if err != nil {
+		return nil, nil, err
+	}
+	mapped.Summary = values[0]
+	return mapped, publishedFields, nil
 }
 
 func hasUsageTelemetry(usage harnessv2.UsageUpdate) bool {
@@ -824,7 +1316,7 @@ func mapToolUpdateWithHistory(
 		return nil, nil, fmt.Errorf("harness v2 tool update is required")
 	}
 	projection, publishedFields := projectToolUpdate(
-		*event.Update.ToolCall, history, historySaturated, contentText,
+		*event.Update.ToolCall, history, historySaturated, contentText, contentTruncated,
 	)
 	mapped, err := mapUpdate(event, mapCtx, mapUpdateOptions{
 		toolContentText:                  contentText,
@@ -912,20 +1404,14 @@ func mapTerminalUsageWithHistory(
 	if err := usage.Validate(); err != nil {
 		return nil, nil, fmt.Errorf("invalid completed usage: %w", err)
 	}
-	var publishedFields []logicalFieldBoundaries
 	if event.Completed.Result.Model != "" {
-		fields, published := redactLogicalFieldsWithHistory(
-			history, historySaturated, event.Completed.Result.Model,
-		)
-		mapCtx.Model = fields[0]
-		publishedFields = published
+		mapCtx.Model = event.Completed.Result.Model
 	}
 	update := event
 	update.Type = harnessv2.EventUpdate
 	update.Completed = nil
 	update.Update = &harnessv2.UpdateEvent{Kind: harnessv2.UpdateUsage, Usage: &usage}
-	mapped, err := mapUpdate(update, mapCtx, mapUpdateOptions{journalKind: mappedTerminalUsageKind})
-	return mapped, publishedFields, err
+	return mapUsageUpdateWithHistory(update, mapCtx, mappedTerminalUsageKind, history, historySaturated)
 }
 
 // MapPromptLifecycle maps prompt acceptance and settlement into the existing
@@ -978,13 +1464,6 @@ func mapPromptLifecycleWithHistory(
 		if err := event.Accepted.Validate(); err != nil {
 			return nil, nil, fmt.Errorf("invalid accepted payload: %w", err)
 		}
-		if model != "" {
-			fields, published := redactLogicalFieldsWithHistory(
-				history, historySaturated, model,
-			)
-			model = fields[0]
-			publishedFields = published
-		}
 		content[mappedJournalKindContentKey] = mappedPromptAcceptedKind
 		content["acceptedAt"] = event.Accepted.AcceptedAt.UTC()
 		content["acpVersion"] = event.Accepted.ACPVersion
@@ -998,11 +1477,7 @@ func mapPromptLifecycleWithHistory(
 			return nil, nil, fmt.Errorf("invalid completed payload: %w", err)
 		}
 		if event.Completed.Result.Model != "" {
-			fields, published := redactLogicalFieldsWithHistory(
-				history, historySaturated, event.Completed.Result.Model,
-			)
-			model = fields[0]
-			publishedFields = published
+			model = event.Completed.Result.Model
 		}
 		content[mappedJournalKindContentKey] = mappedPromptTerminalKind
 		content["terminalEvent"] = event.Type
@@ -1034,8 +1509,8 @@ func mapPromptLifecycleWithHistory(
 		if err := event.Failed.Validate(); err != nil {
 			return nil, nil, fmt.Errorf("invalid failed payload: %w", err)
 		}
-		fields, published := redactLogicalFieldsWithHistory(
-			history, historySaturated, event.Failed.Code, event.Failed.Message,
+		fields, published := redactDiagnosticFields(
+			event.Failed.Code, event.Failed.Message, logicalFieldSingleCopy, history, historySaturated,
 		)
 		publishedFields = published
 		content[mappedJournalKindContentKey] = mappedPromptTerminalKind
@@ -1053,8 +1528,8 @@ func mapPromptLifecycleWithHistory(
 		if err := event.OutcomeUnknown.Validate(); err != nil {
 			return nil, nil, fmt.Errorf("invalid outcome_unknown payload: %w", err)
 		}
-		fields, published := redactLogicalFieldsWithHistory(
-			history, historySaturated, event.OutcomeUnknown.Code, event.OutcomeUnknown.Message,
+		fields, published := redactDiagnosticFields(
+			event.OutcomeUnknown.Code, event.OutcomeUnknown.Message, logicalFieldSingleCopy, history, historySaturated,
 		)
 		publishedFields = published
 		content[mappedJournalKindContentKey] = mappedPromptTerminalKind
@@ -1069,6 +1544,7 @@ func mapPromptLifecycleWithHistory(
 	default:
 		return nil, nil, fmt.Errorf("accepted or terminal harness v2 event is required")
 	}
+	mapCtx.Provider, model, publishedFields = redactModelWithHistory(mapCtx.Provider, model, history, historySaturated, publishedFields)
 	if mapCtx.Provider != "" {
 		content["provider"] = mapCtx.Provider
 	}
@@ -1108,8 +1584,8 @@ func mapPromptStreamFailure(
 	if at.IsZero() {
 		return nil, nil, fmt.Errorf("prompt stream failure timestamp is required")
 	}
-	fields, publishedFields := redactLogicalFieldsWithHistory(
-		history, historySaturated, mappedPromptStreamFailureCode, diagnostic,
+	fields, publishedFields := redactDiagnosticFields(
+		mappedPromptStreamFailureCode, diagnostic, logicalFieldSingleCopy, history, historySaturated,
 	)
 	content := map[string]any{
 		mappedHarnessV2ContentKey:      identity,
@@ -1120,11 +1596,12 @@ func mapPromptStreamFailure(
 		"code":                         fields[0],
 		"message":                      fields[1],
 	}
-	if mapCtx.Provider != "" {
-		content["provider"] = mapCtx.Provider
+	provider, model, publishedFields := redactModelWithHistory(mapCtx.Provider, mapCtx.Model, history, historySaturated, publishedFields)
+	if provider != "" {
+		content["provider"] = provider
 	}
-	if mapCtx.Model != "" {
-		content["model"] = mapCtx.Model
+	if model != "" {
+		content["model"] = model
 	}
 	encoded, err := json.Marshal(content)
 	if err != nil {
@@ -1156,19 +1633,21 @@ func mapPromptSettlement(
 	settlement harnessv2.PromptSettlement,
 	cancellationReason harnessv2.CancelReason,
 	mapCtx MapContext,
-) (*store.ExecutionEvent, error) {
+	history []logicalFieldBoundaries,
+	historySaturated bool,
+) (*store.ExecutionEvent, []logicalFieldBoundaries, error) {
 	if err := mapCtx.validate(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	mapCtx = mapCtx.normalized()
 	if !identity.valid() {
-		return nil, fmt.Errorf("valid harness v2 prompt identity is required")
+		return nil, nil, fmt.Errorf("valid harness v2 prompt identity is required")
 	}
 	if err := settlement.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid prompt settlement: %w", err)
+		return nil, nil, fmt.Errorf("invalid prompt settlement: %w", err)
 	}
 	if cancellationReason != "" && !validPromptCancellationReason(cancellationReason) {
-		return nil, fmt.Errorf("invalid prompt cancellation reason %q", cancellationReason)
+		return nil, nil, fmt.Errorf("invalid prompt cancellation reason %q", cancellationReason)
 	}
 	content := map[string]any{
 		mappedHarnessV2ContentKey:      identity,
@@ -1216,23 +1695,24 @@ func mapPromptSettlement(
 		mapped.Severity = executionevents.ExecutionEventSeverityError
 		mapped.Summary = "Model request outcome unknown"
 	default:
-		return nil, fmt.Errorf("unsupported prompt settlement terminal event %q", settlement.TerminalEvent)
+		return nil, nil, fmt.Errorf("unsupported prompt settlement terminal event %q", settlement.TerminalEvent)
 	}
-	if mapCtx.Provider != "" {
-		content["provider"] = mapCtx.Provider
+	provider, model, publishedFields := redactModelWithHistory(mapCtx.Provider, mapCtx.Model, history, historySaturated, nil)
+	if provider != "" {
+		content["provider"] = provider
 	}
-	if mapCtx.Model != "" {
-		content["model"] = mapCtx.Model
+	if model != "" {
+		content["model"] = model
 	}
 	encoded, err := json.Marshal(content)
 	if err != nil {
-		return nil, fmt.Errorf("marshal mapped harness v2 prompt settlement: %w", err)
+		return nil, nil, fmt.Errorf("marshal mapped harness v2 prompt settlement: %w", err)
 	}
 	mapped.Content = encoded
 	if err := store.SanitizeExecutionEventPayloadFields(mapped); err != nil {
-		return nil, fmt.Errorf("sanitize mapped harness v2 prompt settlement: %w", err)
+		return nil, nil, fmt.Errorf("sanitize mapped harness v2 prompt settlement: %w", err)
 	}
-	return mapped, nil
+	return mapped, publishedFields, nil
 }
 
 func validPromptCancellationReason(reason harnessv2.CancelReason) bool {
@@ -1337,7 +1817,11 @@ func toolCallSummary(tool harnessv2.ToolCallUpdate) string {
 }
 
 func compactSummary(value string) string {
-	value = strings.Join(strings.Fields(value), " ")
+	value = compactWhitespace(value)
 	value, _, _ = executionevents.RedactAndTruncateExecutionEventText(value, executionevents.MaxExecutionEventSummaryChars)
 	return value
+}
+
+func compactWhitespace(value string) string {
+	return strings.Join(strings.Fields(value), " ")
 }

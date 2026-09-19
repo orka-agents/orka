@@ -810,13 +810,13 @@ func TestACPDispatcherRecoversJournaledFailureClassification(t *testing.T) {
 	if attempt.ExecutionState != store.PromptExecutionFailed {
 		t.Fatalf("recovered attempt state = %s, want %s", attempt.ExecutionState, store.PromptExecutionFailed)
 	}
-	// The journaled failure classification must survive the restart instead
-	// of degrading to the generic default the recovery projection falls back to.
+	// Recovery retains the failure classification without copying journal
+	// diagnostics into another durable or public message.
 	if attempt.TerminalReason != string(acpPromptFailedReason) {
 		t.Fatalf("recovered terminal reason = %q, want %q", attempt.TerminalReason, acpPromptFailedReason)
 	}
-	if !strings.Contains(attempt.OutcomeMarker, "prompt_failed") || !strings.Contains(attempt.OutcomeMarker, acpRecoveryPromptFailedMessage) {
-		t.Fatalf("recovered outcome marker = %q, want the journaled code and message", attempt.OutcomeMarker)
+	if attempt.OutcomeMarker != acpRecoveryPromptFailedMessage {
+		t.Fatalf("recovered outcome marker = %q, want the fixed safe failure message", attempt.OutcomeMarker)
 	}
 }
 
