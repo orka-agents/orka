@@ -92,6 +92,12 @@ func projectUsageEvent(ctx context.Context, db taskDataExecutor, event store.Exe
 			CounterID: h.TaskUID + "/" + h.PromptID, Scope: store.UsageScopeAttempt,
 			Source: store.UsageSourceAgent, Provider: content.Provider, Model: content.Model,
 		}
+		// The controller journal supplies the frozen profile model privately.
+		// Public event fields remain redacted; recordUsage still sanitizes this
+		// identifier before retaining it independently of the event stream.
+		if model, ok := event.Internal["harnessV2UsageModel"].(string); ok && model != "" {
+			observation.Model = model
+		}
 		if content.Scope == store.UsageScopeSession {
 			observation.Scope = store.UsageScopeSession
 			observation.CounterID = fmt.Sprintf("acp-session/%s/%d", h.SessionUID, h.SessionGeneration)
