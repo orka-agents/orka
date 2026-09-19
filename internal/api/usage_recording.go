@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"sync"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -16,15 +15,10 @@ func usageRequestContext(ctx context.Context, backend any, reader client.Reader,
 	if !ok {
 		return ctx
 	}
-	var identity sync.Once
-	var namespaceUID string
-	var identityErr error
+	// Freeze ownership before streaming can detach and outlive the namespace.
+	// Keep lookup failures too, so a later namespace cannot claim this request.
+	namespaceUID, identityErr := usage.NamespaceUID(ctx, reader, namespace)
 	return llm.WithUsageRecorder(ctx, func(ctx context.Context, observation store.UsageObservation) error {
-		// Freeze ownership for the whole request, including detached streaming
-		// and finish records written after namespace deletion or recreation.
-		identity.Do(func() {
-			namespaceUID, identityErr = usage.NamespaceUID(ctx, reader, namespace)
-		})
 		if identityErr != nil {
 			return identityErr
 		}

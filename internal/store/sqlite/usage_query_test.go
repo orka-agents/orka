@@ -126,6 +126,188 @@ func TestUsageLoadRejectsOversizedSelectionAcrossNamespaces(t *testing.T) {
 	require.Empty(t, data, "an oversized selection must not return partial data")
 }
 
+func TestUsageLoadExcludesFuturePRLinksBeforeRecordLimit(t *testing.T) {
+	asOf := time.Date(2026, time.September, 18, 12, 0, 0, 123456789, time.UTC)
+	for _, tc := range []struct {
+		name       string
+		sharedTask bool
+		prState    bool
+		model      string
+	}{
+		{name: "link row"},
+		{name: "shared Task and usage", sharedTask: true},
+		{name: "PR state", prState: true},
+		{name: "model selection through shared Task", sharedTask: true, model: "served-model"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := setupTestStore(t)
+			start := asOf.Add(-time.Hour)
+			work := usageWork(t, s, "team", 1, start)
+			if tc.sharedTask {
+				require.NoError(t, s.RegisterUsageTask(t.Context(), store.UsageTask{Namespace: "team", TaskUID: "review", TaskName: "review",
+					Repository: "org/repo", PRNumber: 42, Phase: "Succeeded", StartedAt: start}))
+				usageSample(t, s, "team", "review", "review-call", 100, start)
+			}
+			if tc.prState {
+				require.NoError(t, s.RecordUsagePullRequest(t.Context(), store.UsagePullRequest{Namespace: "team", Repository: "org/repo",
+					Number: 42, State: "open", ObservedAt: start}))
+			}
+			// A detail selection keeps the shared Task out of the separate
+			// activity-period arm, so only the publication link can select it.
+			filter := store.UsageFilter{Namespaces: []string{"team"}, WorkID: work, Model: tc.model, AsOf: asOf, MaxRecords: 1}
+			before, err := s.LoadUsage(t.Context(), filter)
+			require.NoError(t, err)
+			linkedAt := asOf.Add(time.Nanosecond)
+			require.NoError(t, s.LinkUsagePullRequest(t.Context(), store.UsagePRLink{Namespace: "team", WorkID: work, Repository: "org/repo",
+				Number: 42, Origin: store.UsagePRCreated, EvidenceID: "publication", LinkedAt: linkedAt}))
+			after, err := s.LoadUsage(t.Context(), filter)
+			require.NoError(t, err, "future links and their related records must not consume a frozen selection's budget")
+			require.Equal(t, before, after)
+
+			filter.AsOf, filter.MaxRecords = linkedAt, 5
+			included, err := s.LoadUsage(t.Context(), filter)
+			require.NoError(t, err)
+			require.Len(t, included.Works, 1)
+			require.Len(t, included.Links, 1)
+			if tc.sharedTask {
+				require.Len(t, included.Tasks, 1)
+				require.Len(t, included.Observations, 1)
+			} else {
+				require.Empty(t, included.Tasks)
+				require.Empty(t, included.Observations)
+			}
+			if tc.prState {
+				require.Len(t, included.PullRequests, 1)
+			} else {
+				require.Empty(t, included.PullRequests)
+			}
+			filter.MaxRecords = 1
+			oversized, err := s.LoadUsage(t.Context(), filter)
+			require.ErrorIs(t, err, store.ErrUsageSelectionTooLarge, "the same link must count once its timestamp is reached")
+			require.Empty(t, oversized)
+		})
+	}
+}
+
+func TestUsageLoadPRLinkTimestampBoundaries(t *testing.T) {
+	for _, timestamp := range []string{
+		"2026-09-18T12:00:00Z",
+		"2026-09-18T12:00:00.1Z",
+		"2026-09-18T12:00:00.123456789Z",
+		"2026-09-18T12:00:00.999999999Z",
+		"2026-09-18T18:30:00.123456789+06:30",
+		"2026-09-18T04:00:00.123456789-08:00",
+	} {
+		t.Run(timestamp, func(t *testing.T) {
+			s := setupTestStore(t)
+			linkedAt, err := time.Parse(time.RFC3339Nano, timestamp)
+			require.NoError(t, err)
+			work := usageWork(t, s, "team", 1, linkedAt.Add(-time.Hour))
+			require.NoError(t, s.LinkUsagePullRequest(t.Context(), store.UsagePRLink{Namespace: "team", WorkID: work, Repository: "org/repo",
+				Number: 42, Origin: store.UsagePRCreated, EvidenceID: "publication", LinkedAt: linkedAt}))
+			for _, offset := range []time.Duration{-time.Nanosecond, 0, time.Nanosecond} {
+				t.Run(offset.String(), func(t *testing.T) {
+					filter := store.UsageFilter{Namespaces: []string{"team"}, WorkID: work, AsOf: linkedAt.UTC().Add(offset), MaxRecords: 1}
+					data, err := s.LoadUsage(t.Context(), filter)
+					if offset < 0 {
+						require.NoError(t, err)
+						require.Len(t, data.Works, 1)
+						require.Empty(t, data.Links)
+						return
+					}
+					require.ErrorIs(t, err, store.ErrUsageSelectionTooLarge)
+					require.Empty(t, data)
+					filter.MaxRecords = 2
+					data, err = s.LoadUsage(t.Context(), filter)
+					require.NoError(t, err)
+					require.Len(t, data.Links, 1)
+					require.True(t, linkedAt.Equal(data.Links[0].LinkedAt))
+				})
+			}
+		})
+	}
+}
+
+func TestUsageLoadPRLinkLegacyTimestamps(t *testing.T) {
+	asOf := time.Date(2026, time.September, 18, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name, timestamp string
+		included        bool
+		invalid         bool
+	}{
+		{name: "missing", included: true},
+		{name: "null", timestamp: "null", included: true},
+		{name: "zero", timestamp: `"0001-01-01T00:00:00Z"`, included: true},
+		{name: "before UnixNano range", timestamp: `"1600-01-01T00:00:00Z"`, included: true},
+		{name: "after UnixNano range", timestamp: `"9999-12-31T23:59:59.999999999Z"`},
+		{name: "malformed", timestamp: `"not-a-timestamp"`, invalid: true},
+		{name: "empty", timestamp: `""`, invalid: true},
+		{name: "non-string", timestamp: `42`, invalid: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := setupTestStore(t)
+			work := usageWork(t, s, "team", 1, asOf.Add(-time.Hour))
+			require.NoError(t, s.LinkUsagePullRequest(t.Context(), store.UsagePRLink{Namespace: "team", WorkID: work, Repository: "org/repo",
+				Number: 42, Origin: store.UsagePRCreated, EvidenceID: "publication", LinkedAt: asOf}))
+			// Recreate JSON from older databases, including missing fields that
+			// the current writer always supplies.
+			if tc.timestamp == "" {
+				_, err := s.db.ExecContext(t.Context(), `UPDATE usage_pr_links SET data = json_remove(data, '$.linkedAt')`)
+				require.NoError(t, err)
+			} else {
+				_, err := s.db.ExecContext(t.Context(), `UPDATE usage_pr_links SET data = json_set(data, '$.linkedAt', json(?))`, tc.timestamp)
+				require.NoError(t, err)
+			}
+			filter := store.UsageFilter{Namespaces: []string{"team"}, WorkID: work, AsOf: asOf, MaxRecords: 2}
+			data, err := s.LoadUsage(t.Context(), filter)
+			if tc.invalid {
+				require.Error(t, err, "invalid stored timestamps must fail the selection, not silently disappear")
+				require.Empty(t, data)
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, data.Works, 1)
+			if tc.included {
+				require.Len(t, data.Links, 1)
+			} else {
+				require.Empty(t, data.Links)
+			}
+			filter.MaxRecords = 1
+			data, err = s.LoadUsage(t.Context(), filter)
+			if tc.included {
+				require.ErrorIs(t, err, store.ErrUsageSelectionTooLarge)
+				require.Empty(t, data)
+			} else {
+				require.NoError(t, err)
+				require.Len(t, data.Works, 1)
+			}
+		})
+	}
+}
+
+func TestUsageLinkTimestampPredicateRejectsInvalidArguments(t *testing.T) {
+	s := setupTestStore(t)
+	timestamp := "2026-09-18T12:00:00Z"
+	asOf := time.Date(2026, time.September, 18, 12, 0, 0, 0, time.UTC).UnixNano()
+	for _, tc := range []struct {
+		name, query string
+		args        []any
+	}{
+		{"missing argument", `SELECT orka_usage_link_at_or_before(?)`, []any{timestamp}},
+		{"extra argument", `SELECT orka_usage_link_at_or_before(?, ?, ?)`, []any{timestamp, asOf, asOf}},
+		{"null asOf", `SELECT orka_usage_link_at_or_before(?, ?)`, []any{timestamp, nil}},
+		{"text asOf", `SELECT orka_usage_link_at_or_before(?, ?)`, []any{timestamp, timestamp}},
+		{"floating asOf", `SELECT orka_usage_link_at_or_before(?, ?)`, []any{timestamp, 1.5}},
+		{"numeric timestamp", `SELECT orka_usage_link_at_or_before(?, ?)`, []any{int64(1), asOf}},
+		{"blob timestamp", `SELECT orka_usage_link_at_or_before(?, ?)`, []any{[]byte(timestamp), asOf}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var included int64
+			require.Error(t, s.db.QueryRowContext(t.Context(), tc.query, tc.args...).Scan(&included))
+		})
+	}
+}
+
 func TestUsageNamespaceFilterPreservesOnlyOwnedCounterHistory(t *testing.T) {
 	s := setupTestStore(t)
 	old := time.Now().UTC().Add(-60 * 24 * time.Hour)

@@ -16,6 +16,88 @@ import (
 	"github.com/orka-agents/orka/internal/usage"
 )
 
+func TestJournalRejectsCacheCountsExceedingInput(t *testing.T) {
+	for _, terminalUsage := range []bool{false, true} {
+		name := "update"
+		if terminalUsage {
+			name = "terminal"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "usage.db"))
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = db.Close() })
+			eventStore := sqlite.NewStore(db, "usage")
+			mapCtx := testMapContext()
+			state, err := (Journal{EventStore: eventStore, MapContext: mapCtx}).Open(ctx)
+			require.NoError(t, err)
+			now := time.Now().UTC()
+			accepted := testUpdateEvent(1, now, harnessv2.UpdateEvent{})
+			accepted.Type, accepted.Update = harnessv2.EventAccepted, nil
+			accepted.Accepted = &harnessv2.AcceptedEvent{
+				AcceptedAt: now, ACPVersion: harnessv2.ACPProfileV1,
+				Lease: harnessv2.PromptLease{Generation: 1, IssuedAt: now, ExpiresAt: now.Add(time.Minute)},
+			}
+			work := store.UsageWorkRequest{
+				Namespace: mapCtx.Namespace, MonitorName: "monitor-1", MonitorUID: "monitor-uid-1",
+				Repository: "org/repo", Kind: "issue", Number: 1, StartedAt: now,
+			}
+			require.NoError(t, eventStore.RegisterUsageWork(ctx, work))
+			work.ID = store.UsageWorkID(work.Namespace, work.MonitorUID, work.Repository, work.Kind, work.Number)
+			require.NoError(t, eventStore.RegisterUsageTask(ctx, store.UsageTask{
+				Namespace: mapCtx.Namespace, TaskUID: string(accepted.Identity.TaskUID), TaskName: mapCtx.TaskName,
+				WorkID: work.ID, Runtime: "agent", Phase: "Running", StartedAt: now,
+			}))
+			_, added, err := state.AppendPromptLifecycleIfNew(ctx, accepted)
+			require.NoError(t, err)
+			require.True(t, added)
+			appendSnapshot := func(snapshot harnessv2.UsageUpdate) (*store.ExecutionEvent, bool, error) {
+				if terminalUsage {
+					event := testTerminalEvent(2, now.Add(time.Second))
+					event.Completed = &harnessv2.CompletedEvent{StopReason: harnessv2.ACPStopReasonEndTurn,
+						Result: harnessv2.PromptResult{Usage: snapshot,
+							Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: testJournalDone}}}}
+					return state.AppendTerminalUsageIfNew(ctx, event)
+				}
+				return state.AppendUpdateIfNew(ctx, testUpdateEvent(2, now.Add(time.Second), harnessv2.UpdateEvent{
+					Kind: harnessv2.UpdateUsage, Usage: &snapshot,
+				}))
+			}
+			filter := store.UsageFilter{Namespaces: []string{mapCtx.Namespace}, From: now, Until: now.Add(time.Minute), AsOf: now.Add(time.Minute)}
+			loadReport := func() usage.Report {
+				t.Helper()
+				data, err := eventStore.LoadUsage(ctx, filter)
+				require.NoError(t, err)
+				report, err := usage.Build(data, filter)
+				require.NoError(t, err)
+				return report
+			}
+			snapshot := harnessv2.UsageUpdate{CachedInputTokens: new(uint64(100)), Reported: true, Complete: true}
+			mapped, added, err := appendSnapshot(snapshot)
+			if err == nil || added || mapped != nil {
+				t.Errorf("invalid cache snapshot appended: added=%t, mapped=%t, err=%v", added, mapped != nil, err)
+			}
+			report := loadReport()
+			require.Equal(t, 1, report.Summary.Measurements)
+			require.Equal(t, "unavailable", report.Summary.Completeness)
+			require.Equal(t, int64(0), report.Summary.TotalTokens)
+			require.False(t, report.Summary.CachedUsageReported)
+
+			// Rejecting invalid telemetry must leave its identity available for a valid replay.
+			snapshot.InputTokens = 100
+			_, added, err = appendSnapshot(snapshot)
+			require.NoError(t, err)
+			require.True(t, added)
+			report = loadReport()
+			require.Equal(t, 1, report.Summary.Measurements)
+			require.Equal(t, "complete", report.Summary.Completeness)
+			require.Equal(t, int64(100), report.Summary.TotalTokens)
+			require.Equal(t, int64(100), report.Summary.CachedInputTokens)
+			require.True(t, report.Summary.CachedUsageReported)
+		})
+	}
+}
+
 func TestJournalContinuationRetainsProfileModelForUsage(t *testing.T) {
 	for _, test := range []struct {
 		name          string

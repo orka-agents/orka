@@ -2,11 +2,50 @@ package sqlite
 
 import (
 	"context"
+	"database/sql/driver"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
+	"time"
+
+	sqlitedriver "modernc.org/sqlite"
 
 	"github.com/orka-agents/orka/internal/store"
 )
+
+func init() {
+	sqlitedriver.MustRegisterDeterministicScalarFunction("orka_usage_link_at_or_before", 2, usageLinkAtOrBefore)
+}
+
+// PR link timestamps live in JSON. Compare them as Go times to preserve
+// nanoseconds, timezone offsets, and dates outside the UnixNano range.
+func usageLinkAtOrBefore(_ *sqlitedriver.FunctionContext, args []driver.Value) (driver.Value, error) {
+	if len(args) != 2 {
+		return nil, errors.New("usage PR link predicate requires two arguments")
+	}
+	asOf, ok := args[1].(int64)
+	if !ok {
+		return nil, errors.New("usage PR link predicate requires an integer asOf")
+	}
+	// Missing or null legacy timestamps decode to Go's zero time.
+	var linkedAt time.Time
+	if args[0] != nil {
+		timestamp, ok := args[0].(string)
+		if !ok {
+			return nil, errors.New("usage PR link timestamp must be text or null")
+		}
+		var err error
+		linkedAt, err = time.Parse(time.RFC3339Nano, timestamp)
+		if err != nil {
+			return nil, fmt.Errorf("invalid usage PR link timestamp: %w", err)
+		}
+	}
+	if linkedAt.After(time.Unix(0, asOf)) {
+		return int64(0), nil
+	}
+	return int64(1), nil
+}
 
 // Select whole work cohorts and the separate activity-period Tasks before
 // reading observations. Counter history, including earlier Tasks, must remain
@@ -36,6 +75,7 @@ const usageCohortQuery = `WITH
      AND json_extract(t.data, '$.prNumber') = l.number
      AND COALESCE(json_extract(t.data, '$.namespaceUID'), '') = COALESCE(json_extract(l.data, '$.namespaceUID'), '')
    WHERE t.started_at <= f.as_of
+     AND orka_usage_link_at_or_before(json_extract(l.data, '$.linkedAt'), f.as_of)
      AND (f.namespace_uid IS NULL OR json_extract(l.data, '$.namespaceUID') = f.namespace_uid)
  ),
  selected_works AS (
@@ -96,6 +136,7 @@ const usageCohortQuery = `WITH
  UNION ALL SELECT 'observation', data, observed_at, recorded_seq FROM selected_observations
  UNION ALL SELECT 'link', l.data, 0, l.work_id FROM usage_pr_links l, selection f
  WHERE l.namespace = f.namespace AND l.work_id IN (SELECT id FROM selected_works)
+   AND orka_usage_link_at_or_before(json_extract(l.data, '$.linkedAt'), f.as_of)
    AND (f.namespace_uid IS NULL OR json_extract(l.data, '$.namespaceUID') = f.namespace_uid)
  UNION ALL SELECT 'pr', p.data, p.observed_at, CAST(p.number AS TEXT) FROM usage_pull_requests p, selection f
  WHERE p.namespace = f.namespace AND p.observed_at <= f.as_of AND (f.namespace_uid IS NULL OR p.namespace_uid = f.namespace_uid)
@@ -105,6 +146,7 @@ const usageCohortQuery = `WITH
         AND latest.repository = p.repository AND latest.number = p.number AND latest.observed_at <= f.as_of))
    AND (p.repository, p.number) IN
    (SELECT l.repository, l.number FROM usage_pr_links l WHERE l.namespace = f.namespace AND l.work_id IN (SELECT id FROM selected_works)
+     AND orka_usage_link_at_or_before(json_extract(l.data, '$.linkedAt'), f.as_of)
      AND COALESCE(json_extract(l.data, '$.namespaceUID'), '') = p.namespace_uid)
  ORDER BY kind, observed_at, row_order LIMIT (SELECT record_limit FROM selection)`
 

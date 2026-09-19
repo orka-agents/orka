@@ -54,8 +54,9 @@ function UsagePageContent({ namespace }: { namespace: string }) {
         <label className="space-y-1 text-sm">Started before, exclusive
           <Input aria-label="Started before, exclusive" type="date" required value={draft.until} onChange={(e) => setDraft({ ...draft, until: e.target.value })} />
         </label>
-        <label className="space-y-1 text-sm">Teams
-          <Input aria-label="Teams" placeholder={namespace || 'Current namespace'} value={draft.teams} onChange={(e) => setDraft({ ...draft, teams: e.target.value })} />
+        <label className="space-y-1 text-sm">Team namespace
+          <Input aria-label="Team namespace" aria-describedby="usage-team-scope" placeholder={namespace || 'Current namespace'} value={draft.teams} onChange={(e) => setDraft({ ...draft, teams: e.target.value })} />
+          <span id="usage-team-scope" className="block text-xs text-muted-foreground">Use this server's team namespace.</span>
         </label>
         <label className="space-y-1 text-sm">Repository
           <Input aria-label="Repository" placeholder="owner/repository" value={draft.repository} onChange={(e) => setDraft({ ...draft, repository: e.target.value })} />

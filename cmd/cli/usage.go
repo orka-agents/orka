@@ -32,6 +32,7 @@ func newUsageCmd() *cobra.Command {
 		Use:   "usage",
 		Short: "Inspect recorded model usage and verified PR outcomes",
 		Long: "Inspect retained usage through the Orka API. Teams are Kubernetes namespaces. " +
+			"Each server reports only its installation's team namespace; combined-team reports are not supported. " +
 			"Issue delivery totals include failed attempts, retries, and linked follow-up work. " +
 			"Missing measurements remain unavailable; model prices are not configured.",
 	}
@@ -88,7 +89,7 @@ func (o *usageOptions) bindFlags(cmd *cobra.Command, paged bool) {
 	cmd.Flags().StringVar(&o.from, "from", "", "Request-start date or RFC3339 timestamp (UTC; default: current month, all retained history for work)")
 	cmd.Flags().StringVar(&o.until, "until", "", "Exclusive request-start end date or RFC3339 timestamp (default: report time)")
 	cmd.Flags().StringVar(&o.asOf, "as-of", "", "Include usage and outcomes through this UTC date or RFC3339 timestamp (default: now)")
-	cmd.Flags().StringVar(&o.teams, "teams", "", "Comma-separated team namespaces; requires access to every team (default: --namespace)")
+	cmd.Flags().StringVar(&o.teams, "teams", "", "Explicit team namespace; must match this installation (overrides --namespace)")
 	cmd.Flags().StringVar(&o.repository, "repository", "", "Filter by owner/repository")
 	cmd.Flags().StringVar(&o.model, "model", "", "Select whole requests that used this model, including their other models")
 	cmd.Flags().StringVar(&o.kind, "kind", "", "Filter by issue or pull_request")

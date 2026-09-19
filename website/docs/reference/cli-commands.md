@@ -4942,7 +4942,7 @@ Global Flags:
 ## `orka usage`
 
 ```text
-Inspect retained usage through the Orka API. Teams are Kubernetes namespaces. Issue delivery totals include failed attempts, retries, and linked follow-up work. Missing measurements remain unavailable; model prices are not configured.
+Inspect retained usage through the Orka API. Teams are Kubernetes namespaces. Each server reports only its installation's team namespace; combined-team reports are not supported. Issue delivery totals include failed attempts, retries, and linked follow-up work. Missing measurements remain unavailable; model prices are not configured.
 
 Usage:
   orka usage [command]
@@ -4984,7 +4984,7 @@ Flags:
       --offset int          Page offset; reuse --as-of and filters to keep the same report time
   -o, --output string       Output format: table, json, yaml (default "table")
       --repository string   Filter by owner/repository
-      --teams string        Comma-separated team namespaces; requires access to every team (default: --namespace)
+      --teams string        Explicit team namespace; must match this installation (overrides --namespace)
       --until string        Exclusive request-start end date or RFC3339 timestamp (default: report time)
 
 Global Flags:
@@ -5014,7 +5014,7 @@ Flags:
       --offset int          Page offset; reuse --as-of and filters to keep the same report time
   -o, --output string       Output format: table, json, yaml (default "table")
       --repository string   Filter by owner/repository
-      --teams string        Comma-separated team namespaces; requires access to every team (default: --namespace)
+      --teams string        Explicit team namespace; must match this installation (overrides --namespace)
       --until string        Exclusive request-start end date or RFC3339 timestamp (default: report time)
 
 Global Flags:
@@ -5042,7 +5042,7 @@ Flags:
       --model string        Select whole requests that used this model, including their other models
   -o, --output string       Output format: table, json, yaml (default "table")
       --repository string   Filter by owner/repository
-      --teams string        Comma-separated team namespaces; requires access to every team (default: --namespace)
+      --teams string        Explicit team namespace; must match this installation (overrides --namespace)
       --until string        Exclusive request-start end date or RFC3339 timestamp (default: report time)
 
 Global Flags:

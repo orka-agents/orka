@@ -279,7 +279,7 @@ describe('UsagePage', () => {
     const user = userEvent.setup()
     render(<UsagePage />)
     await screen.findByText('Tokens per merged PR')
-    await user.type(screen.getByLabelText('Teams'), 'payments,inventory')
+    await user.type(screen.getByLabelText('Team namespace'), 'payments')
     await user.type(screen.getByLabelText('Repository'), 'org/repo')
     await user.type(screen.getByLabelText('Model used by the request'), 'served-model')
     await user.selectOptions(screen.getByLabelText('Work type'), 'pull_request')
@@ -287,7 +287,7 @@ describe('UsagePage', () => {
     await waitFor(() => expect(requests).toHaveLength(2))
     const params = requests[1].searchParams
     expect(params.get('namespace')).toBe('payments')
-    expect(params.get('teams')).toBe('payments,inventory')
+    expect(params.get('teams')).toBe('payments')
     expect(params.get('repository')).toBe('org/repo')
     expect(params.get('model')).toBe('served-model')
     expect(params.get('kind')).toBe('pull_request')

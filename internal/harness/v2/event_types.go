@@ -273,6 +273,16 @@ func (u UsageUpdate) Validate() error {
 	if u.Scope != "" && u.Scope != "attempt" && u.Scope != "session" {
 		return fmt.Errorf("unsupported usage scope")
 	}
+	remainingInput := u.InputTokens
+	for _, cached := range []*uint64{u.CachedInputTokens, u.CacheWriteInputTokens} {
+		if cached == nil {
+			continue
+		}
+		if *cached > remainingInput {
+			return fmt.Errorf("cache token counts must not exceed input tokens")
+		}
+		remainingInput -= *cached
+	}
 	if (u.ContextWindowUsed == nil) != (u.ContextWindowSize == nil) {
 		return fmt.Errorf("context window usage requires both used and size")
 	}

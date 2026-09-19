@@ -11,6 +11,10 @@ follows each original issue through planning, implementation, retries, delegated
 Tasks, and reviews or repairs of its linked PRs. Failed and cancelled work stays in
 the calculation.
 
+Each Orka installation reports only its own team namespace. Connect to that
+team's server to view its report. Combined reports across installations are not
+available.
+
 The main measure is **tokens per merged PR**. Tokens are the pieces of text a model
 reads or generates. This measure describes observed model usage. It does not
 measure developer productivity, hours saved, infrastructure spending, or human
@@ -35,10 +39,14 @@ All three commands accept `--from`, `--until`, `--as-of`, `--teams`,
 `--repository`, `--model`, and `--kind`. For example:
 
 ```bash
-orka usage summary --teams payments,platform \
+orka usage summary --teams payments \
   --from 2026-09-01 --until 2026-10-01 \
   --repository example/project --model example-model -o yaml
 ```
+
+The explicit `--teams` selector overrides `--namespace`, but must still select
+this installation's namespace. Broader Kubernetes permissions do not allow
+reports for other namespaces on that server.
 
 The summary and other-usage commands default to requests started in the current
 UTC month. Work details default to all retained history for that work. Pass the
@@ -97,10 +105,10 @@ Work requests appear in pages of 25. Expand a request to load its Tasks, session
 measurements, PR links, current head, and measurement gaps. Detail lists also page
 their contents. Paging preserves the report time and full cohort totals; apply
 the filters again to refresh them. Shared review usage appears in every related request
-with a shared-work label, but counts once in the team and combined-team totals.
+with a shared-work label, but counts once in the team totals.
 One request can produce several PRs without copying its usage onto each PR.
-Several requests or teams can contribute to one PR without increasing the
-combined report's distinct PR count.
+Several requests can contribute to one PR without increasing the team's distinct
+PR count.
 
 Existing developer-created PRs with a verified assistance link appear separately
 from produced PRs. A recovered existing PR without a retained creation receipt is
@@ -202,8 +210,8 @@ for `review_only`, `other_requests`, or `unassociated` usage.
 
 | Query | Meaning |
 | --- | --- |
-| `namespace` | One team; defaults to the caller's effective namespace. |
-| `teams` | Up to 20 comma-separated namespaces for a combined report. Every namespace must be authorized. |
+| `namespace` | The installation's team namespace; defaults to the watched namespace. |
+| `teams` | Explicit team selector that overrides `namespace`. Must select the installation's namespace; combined-team reports are not supported. |
 | `repository` | Exact `owner/repository`, case-insensitive. |
 | `kind` | `issue` or `pull_request`; omit for all work. PR review and repair remain outside delivery totals. |
 | `model` | Select whole requests that used the given model. |
