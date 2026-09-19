@@ -724,14 +724,14 @@ func handleResponsesStreamEvent(evt responses.ResponseStreamEventUnion, tracker 
 		return handleResponseCompleted(evt, tracker, providerName, send)
 	case "response.failed":
 		stopReason := normalizeResponsesIncompleteStopReason(evt.Type, evt.Response.IncompleteDetails.Reason)
-		send(llm.StreamChunk{Done: true, StopReason: stopReason})
+		send(responseTerminalChunk(evt, stopReason, providerName))
 		return false
 	case eventTypeResponseIncomplete:
 		stopReason := normalizeResponsesIncompleteStopReason(evt.Type, evt.Response.IncompleteDetails.Reason)
 		if tracker.hasUnemittedFunctionCall(evt.Response.Output) {
 			stopReason = eventTypeResponseIncomplete
 		}
-		send(llm.StreamChunk{Done: true, StopReason: stopReason})
+		send(responseTerminalChunk(evt, stopReason, providerName))
 		return false
 	case "error":
 		send(llm.StreamChunk{Error: &llm.ProviderError{Provider: "openai", Message: evt.Message}, Done: true})
@@ -798,7 +798,12 @@ func handleResponseCompleted(evt responses.ResponseStreamEventUnion, tracker *re
 			}
 		}
 	}
-	send(llm.StreamChunk{
+	send(responseTerminalChunk(evt, stopReason, providerName))
+	return false
+}
+
+func responseTerminalChunk(evt responses.ResponseStreamEventUnion, stopReason, providerName string) llm.StreamChunk {
+	return llm.StreamChunk{
 		Done:                  true,
 		StopReason:            stopReason,
 		InputTokens:           int(evt.Response.Usage.InputTokens),
@@ -808,8 +813,7 @@ func handleResponseCompleted(evt responses.ResponseStreamEventUnion, tracker *re
 		CacheWriteInputTokens: llm.ReportedTokenCount(evt.Response.Usage.InputTokensDetails.CacheWriteTokens, evt.Response.Usage.InputTokensDetails.JSON.CacheWriteTokens.Valid()),
 		Model:                 evt.Response.Model,
 		Provider:              providerName,
-	})
-	return false
+	}
 }
 
 func (p *Provider) streamResponses(ctx context.Context, req *llm.CompletionRequest) <-chan llm.StreamChunk {

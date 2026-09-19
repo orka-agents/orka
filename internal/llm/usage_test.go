@@ -178,6 +178,118 @@ func TestUsageOpenAIChatCacheSemantics(t *testing.T) {
 	}
 }
 
+func TestUsageOpenAIResponsesTerminalAccounting(t *testing.T) {
+	count := func(value int64) *int64 { return &value }
+	cases := []struct {
+		name         string
+		usage        string
+		input        *int64
+		output       *int64
+		cached       *int64
+		cacheWrite   *int64
+		completeness string
+		invalid      bool
+	}{
+		{name: "reported", usage: `{"input_tokens":5,"output_tokens":3,"input_tokens_details":{"cached_tokens":2,"cache_write_tokens":1}}`, input: count(5), output: count(3), cached: count(2), cacheWrite: count(1), completeness: "complete"},
+		{name: "zero", usage: `{"input_tokens":0,"output_tokens":0,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0}}`, input: count(0), output: count(0), cached: count(0), cacheWrite: count(0), completeness: "complete"},
+		{name: "partial", usage: `{"output_tokens":3,"input_tokens_details":{"cached_tokens":2,"cache_write_tokens":1}}`, output: count(3), cached: count(2), cacheWrite: count(1), completeness: "partial"},
+		{name: "missing", completeness: "unavailable"},
+		{name: "invalid cache", usage: `{"input_tokens":0,"output_tokens":0,"input_tokens_details":{"cached_tokens":1}}`, completeness: "unavailable", invalid: true},
+	}
+	for _, status := range []string{"incomplete", "failed"} {
+		for _, tt := range cases {
+			t.Run(status+"/"+tt.name, func(t *testing.T) {
+				ctx, report := usageFixture(t)
+				var requests atomic.Int32
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					requests.Add(1)
+					var body struct {
+						Stream bool `json:"stream"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Error(err)
+						http.Error(w, "invalid fixture request", http.StatusBadRequest)
+						return
+					}
+					if !body.Stream {
+						// Discovery must succeed so the terminal event reaches the SDK stream.
+						w.Header().Set("Content-Type", "application/json")
+						_, _ = fmt.Fprint(w, `{"id":"probe","object":"response","status":"completed","model":"requested-model","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"probe"}]}]}`)
+						return
+					}
+					response := map[string]any{"id": "terminal", "object": "response", "status": status, "model": "served-model", "output": []any{}}
+					if status == "incomplete" {
+						response["incomplete_details"] = map[string]any{"reason": "max_output_tokens"}
+					}
+					if tt.usage != "" {
+						response["usage"] = json.RawMessage(tt.usage)
+					}
+					encoded, err := json.Marshal(response)
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = fmt.Fprint(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n")
+					_, _ = fmt.Fprintf(w, "event: response.%s\ndata: {\"type\":\"response.%s\",\"response\":%s}\n\ndata: [DONE]\n\n", status, status, encoded)
+				}))
+				t.Cleanup(server.Close)
+				provider, err := llm.NewProvider("openai", llm.ProviderConfig{APIKey: "fixture", BaseURL: server.URL})
+				require.NoError(t, err)
+				provider = llm.NewRetryProvider(provider)
+				stream, err := provider.Stream(ctx, usageRequest())
+				require.NoError(t, err)
+				var terminal llm.StreamChunk
+				var terminalCount int
+				var content string
+				for chunk := range stream {
+					content += chunk.Content
+					err = errors.Join(err, chunk.Error)
+					require.Nil(t, chunk.ToolCall)
+					if chunk.Done {
+						terminal, terminalCount = chunk, terminalCount+1
+					}
+				}
+				require.Equal(t, "partial", content)
+				require.Equal(t, 1, terminalCount)
+				if tt.invalid {
+					require.ErrorIs(t, err, store.ErrValidation)
+					require.True(t, llm.IsUsagePersistenceError(err))
+					require.False(t, llm.ShouldRetry(err))
+				} else {
+					require.NoError(t, err)
+					wantStop := "response.failed"
+					if status == "incomplete" {
+						wantStop = "length"
+					}
+					require.Equal(t, wantStop, terminal.StopReason)
+					require.Equal(t, "served-model", terminal.Model)
+					require.Equal(t, "openai", terminal.Provider)
+					require.Equal(t, tt.completeness == "complete", terminal.UsageReported)
+				}
+				// One discovery call and one stream, including invalid accounting.
+				require.EqualValues(t, 2, requests.Load())
+				got := report()
+				require.Equal(t, 2, got.Summary.Calls)
+				require.Len(t, got.Works, 1)
+				require.Len(t, got.Works[0].Tasks, 1)
+				measurements := got.Works[0].Tasks[0].Measurements
+				require.Len(t, measurements, 2)
+				measurement := measurements[1]
+				require.Equal(t, tt.input, measurement.InputTokens)
+				require.Equal(t, tt.output, measurement.OutputTokens)
+				require.Equal(t, tt.cached, measurement.CachedInputTokens)
+				require.Equal(t, tt.cacheWrite, measurement.CacheWriteInputTokens)
+				require.Equal(t, tt.completeness, measurement.Completeness)
+				if !tt.invalid {
+					require.Equal(t, "served-model", measurement.Model)
+					require.Equal(t, "openai", measurement.Provider)
+				}
+			})
+		}
+	}
+}
+
 func TestUsageOpenAIRejectsCacheBreakdownsExceedingInput(t *testing.T) {
 	for _, chat := range []bool{false, true} {
 		for _, streaming := range []bool{false, true} {
