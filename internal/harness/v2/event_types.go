@@ -255,10 +255,11 @@ func (u PlanUpdate) Validate() error {
 type UsageUpdate struct {
 	// Counts are cumulative for the prompt by default. Input includes cache
 	// reads and writes; cached counts are a breakdown, never added again.
-	InputTokens           uint64 `json:"inputTokens,omitempty"`
-	OutputTokens          uint64 `json:"outputTokens,omitempty"`
-	CachedInputTokens     uint64 `json:"cachedInputTokens,omitempty"`
-	CacheWriteInputTokens uint64 `json:"cacheWriteInputTokens,omitempty"`
+	InputTokens  uint64 `json:"inputTokens,omitempty"`
+	OutputTokens uint64 `json:"outputTokens,omitempty"`
+	// Nil cache counts are unavailable; a pointer to zero is a reported zero.
+	CachedInputTokens     *uint64 `json:"cachedInputTokens,omitempty"`
+	CacheWriteInputTokens *uint64 `json:"cacheWriteInputTokens,omitempty"`
 	// Scope may be "session" for a running conversation total. Such counters
 	// need a baseline before the first prompt to attribute their first delta.
 	Scope             string  `json:"scope,omitempty"`

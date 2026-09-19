@@ -3923,7 +3923,7 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 				Result: harnessv2.PromptResult{
 					Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "from runtime"}},
 					Model:   "served-model",
-					Usage:   harnessv2.UsageUpdate{InputTokens: 100, OutputTokens: 25, CachedInputTokens: 40},
+					Usage:   harnessv2.UsageUpdate{InputTokens: 100, OutputTokens: 25, CachedInputTokens: new(uint64(40))},
 				},
 			}
 		case harnessv2.EventCancelled:

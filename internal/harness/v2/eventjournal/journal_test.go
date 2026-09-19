@@ -17,6 +17,7 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/internal/store/storetest"
+	"github.com/orka-agents/orka/internal/usage"
 )
 
 const (
@@ -1237,7 +1238,7 @@ func TestJournalPersistsTerminalUsageSeparatelyFromAssistantTranscript(t *testin
 		Result: harnessv2.PromptResult{
 			Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: testJournalDone}},
 			Model:   testJournalServedModel,
-			Usage:   harnessv2.UsageUpdate{InputTokens: 100, OutputTokens: 25, CachedInputTokens: 40},
+			Usage:   harnessv2.UsageUpdate{InputTokens: 100, OutputTokens: 25, CachedInputTokens: new(uint64(40))},
 		},
 	}
 	if appended, isNew, err := state.AppendTerminalUsageIfNew(ctx, terminal); err != nil || !isNew || appended == nil {
@@ -1275,6 +1276,81 @@ func TestJournalPersistsTerminalUsageSeparatelyFromAssistantTranscript(t *testin
 	}
 	if duplicate, isNew, err := recovered.AppendAssistantTranscriptIfNew(ctx, terminal, testJournalDone, false); err != nil || isNew || duplicate != nil {
 		t.Fatalf("recovered assistant transcript = %#v new=%t err=%v", duplicate, isNew, err)
+	}
+}
+
+func TestJournalRetainsCacheAvailabilityInUsageReport(t *testing.T) {
+	for _, test := range []struct {
+		name               string
+		wire               string
+		cached, cacheWrite *uint64
+		tokens             int64
+		completeness       string
+	}{
+		{name: "unreported", wire: `{"inputTokens":100,"outputTokens":25,"reported":true,"complete":true}`, tokens: 125, completeness: "complete"},
+		{name: "zero reads", wire: `{"inputTokens":100,"outputTokens":25,"cachedInputTokens":0,"reported":true,"complete":true}`, cached: new(uint64(0)), tokens: 125, completeness: "complete"},
+		{name: "zero writes", wire: `{"inputTokens":100,"outputTokens":25,"cacheWriteInputTokens":0,"reported":true,"complete":true}`, cacheWrite: new(uint64(0)), tokens: 125, completeness: "complete"},
+		{name: "legacy positive counts", wire: `{"inputTokens":100,"outputTokens":25,"cachedInputTokens":40,"cacheWriteInputTokens":10}`, cached: new(uint64(40)), cacheWrite: new(uint64(10)), tokens: 125, completeness: "partial"},
+		{name: "reported zero consumption", wire: `{"cachedInputTokens":0,"cacheWriteInputTokens":0,"reported":true,"complete":true}`, cached: new(uint64(0)), cacheWrite: new(uint64(0)), completeness: "complete"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := t.Context()
+			db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "usage.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			eventStore := sqlite.NewStore(db, "usage")
+			var snapshot harnessv2.UsageUpdate
+			if err := json.Unmarshal([]byte(test.wire), &snapshot); err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC()
+			event := testUpdateEvent(2, now, harnessv2.UpdateEvent{Kind: harnessv2.UpdateUsage, Usage: &snapshot})
+			work := store.UsageWorkRequest{Namespace: testJournalNamespace, MonitorName: "monitor-1", MonitorUID: "monitor-uid-1",
+				Repository: "org/repo", Kind: "issue", Number: 1, StartedAt: now.Add(-time.Hour)}
+			if err := eventStore.RegisterUsageWork(ctx, work); err != nil {
+				t.Fatal(err)
+			}
+			work.ID = store.UsageWorkID(work.Namespace, work.MonitorUID, work.Repository, work.Kind, work.Number)
+			if err := eventStore.RegisterUsageTask(ctx, store.UsageTask{Namespace: work.Namespace, TaskUID: string(event.Identity.TaskUID),
+				TaskName: testJournalTaskName, WorkID: work.ID, Runtime: "agent", Phase: "Succeeded", StartedAt: work.StartedAt}); err != nil {
+				t.Fatal(err)
+			}
+			state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, added, err := state.AppendUpdateIfNew(ctx, event); err != nil || !added {
+				t.Fatalf("append usage update: added=%t, err=%v", added, err)
+			}
+			terminal := testTerminalEvent(3, now.Add(time.Second))
+			terminal.Completed = &harnessv2.CompletedEvent{StopReason: harnessv2.ACPStopReasonEndTurn,
+				Result: harnessv2.PromptResult{Usage: snapshot}}
+			if _, added, err := state.AppendTerminalUsageIfNew(ctx, terminal); err != nil || !added {
+				t.Fatalf("append terminal usage: added=%t, err=%v", added, err)
+			}
+			filter := store.UsageFilter{Namespaces: []string{work.Namespace}, From: work.StartedAt, Until: now.Add(time.Minute), AsOf: now.Add(time.Minute)}
+			data, err := eventStore.LoadUsage(ctx, filter)
+			if err != nil {
+				t.Fatal(err)
+			}
+			report, err := usage.Build(data, filter)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := report.Summary
+			if got.TotalTokens != test.tokens || got.Measurements != 1 || got.Completeness != test.completeness {
+				t.Fatalf("usage totals = %#v", got)
+			}
+			if got.CachedUsageReported != (test.cached != nil) || got.CacheWriteUsageReported != (test.cacheWrite != nil) {
+				t.Fatalf("cache availability reads=%t writes=%t for %s", got.CachedUsageReported, got.CacheWriteUsageReported, test.wire)
+			}
+			if test.cached != nil && got.CachedInputTokens != int64(*test.cached) ||
+				test.cacheWrite != nil && got.CacheWriteInputTokens != int64(*test.cacheWrite) {
+				t.Fatalf("cache counts reads=%d writes=%d for %s", got.CachedInputTokens, got.CacheWriteInputTokens, test.wire)
+			}
+		})
 	}
 }
 
