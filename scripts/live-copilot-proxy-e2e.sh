@@ -21,7 +21,7 @@ copilot_proxy_service_port="${COPILOT_PROXY_SERVICE_PORT:-1337}"
 provider_proxy_namespace="${ACP_PROVIDER_PROXY_NAMESPACE:-vekil-system}"
 provider_proxy_service="${ACP_PROVIDER_PROXY_SERVICE:-vekil}"
 provider_proxy_service_port="${ACP_PROVIDER_PROXY_SERVICE_PORT:-1337}"
-copilot_proxy_image="${COPILOT_PROXY_IMAGE:-ghcr.io/sozercan/vekil:v0.14.1@sha256:2fa0558f6304cc6ed1fb5b0135f62f12f28f1cdd0a8c057c4283414bceac1362}"
+copilot_proxy_image="${COPILOT_PROXY_IMAGE:-ghcr.io/sozercan/vekil:v0.14.6@sha256:4b3a8cceab30e7bda275a93d151bea145d64a47abb0ea497aa3f188f09ec21b8}"
 proxy_token_secret_name="${COPILOT_PROXY_TOKEN_SECRET_NAME:-live-copilot-proxy-token}"
 token_value="${COPILOT_GITHUB_TOKEN:-}"
 [[ "${provider_proxy_namespace}" == "vekil-system" && "${provider_proxy_service}" == "vekil" && "${provider_proxy_service_port}" == "1337" ]] ||

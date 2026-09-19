@@ -26,7 +26,7 @@ jobs:
     env:
       COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
       KIND_CLUSTER: orka-live-copilot-proxy-e2e
-      COPILOT_PROXY_IMAGE: ghcr.io/sozercan/vekil:v0.14.1@sha256:2fa0558f6304cc6ed1fb5b0135f62f12f28f1cdd0a8c057c4283414bceac1362
+      COPILOT_PROXY_IMAGE: ghcr.io/sozercan/vekil:v0.14.6@sha256:4b3a8cceab30e7bda275a93d151bea145d64a47abb0ea497aa3f188f09ec21b8
     steps:
       - name: Decide whether live e2e can run
         id: gate
