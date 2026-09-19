@@ -614,3 +614,116 @@ func TestUsageAsOfPhaseHistoryAndWorkTypeFilter(t *testing.T) {
 	require.Empty(t, report.OtherWork[1].Tasks)
 	require.Empty(t, report.OtherWork[2].Tasks)
 }
+
+func TestUsageTaskSnapshotsFollowObservationTime(t *testing.T) {
+	for _, order := range [][]int{{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}} {
+		t.Run(fmt.Sprint(order), func(t *testing.T) {
+			s := setupTestStore(t)
+			start := time.Now().UTC().Add(-120 * 24 * time.Hour)
+			work := usageWork(t, s, "a", 1, start)
+			phases := []string{"Pending", "Running", "Succeeded"}
+			for _, i := range order {
+				snapshot := store.UsageTask{
+					Namespace: "a", TaskUID: "task", TaskName: "task",
+					Phase: phases[i], StartedAt: start, PhaseObservedAt: start.Add(time.Duration(i) * time.Minute),
+				}
+				if i == 0 {
+					// The monitor's post-create snapshot supplies the work link.
+					snapshot.WorkID = work
+				}
+				require.NoError(t, s.RegisterUsageTask(t.Context(), snapshot))
+			}
+			for i, phase := range phases {
+				asOf := start.Add(time.Duration(i)*time.Minute + time.Second)
+				report := usageReport(t, s, []string{"a"}, start.Add(-time.Second), start.Add(time.Hour), asOf)
+				require.Len(t, report.Works, 1)
+				require.Len(t, report.Works[0].Tasks, 1)
+				require.Equal(t, phase, report.Works[0].Tasks[0].Phase)
+				if phase == "Succeeded" {
+					require.Zero(t, report.Summary.UnfinishedWork)
+				} else {
+					require.Equal(t, 1, report.Summary.UnfinishedWork)
+				}
+			}
+			// A stale nonterminal snapshot must not pin the completed cohort.
+			require.NoError(t, s.PruneUsage(t.Context(), time.Now().UTC().Add(-90*24*time.Hour)))
+			report := usageReport(t, s, []string{"a"}, start.Add(-time.Second), start.Add(time.Hour), time.Now().UTC())
+			require.Zero(t, report.Summary.WorkRequests)
+		})
+	}
+}
+
+func TestUsageLateSnapshotBetweenRepeatedPhaseObservations(t *testing.T) {
+	s := setupTestStore(t)
+	start := time.Now().UTC().Add(-time.Hour)
+	work := usageWork(t, s, "a", 1, start)
+	for _, state := range []struct {
+		phase  string
+		minute int
+	}{{"Pending", 0}, {"Running", 1}, {"Running", 3}, {"Finalizing", 2}} {
+		require.NoError(t, s.RegisterUsageTask(t.Context(), store.UsageTask{
+			Namespace: "a", WorkID: work, TaskUID: "task", TaskName: "task", Phase: state.phase,
+			StartedAt: start, PhaseObservedAt: start.Add(time.Duration(state.minute) * time.Minute),
+		}))
+	}
+	for i, phase := range []string{"Pending", "Running", "Finalizing", "Running"} {
+		report := usageReport(t, s, []string{"a"}, start.Add(-time.Second), start.Add(time.Hour), start.Add(time.Duration(i)*time.Minute+time.Second))
+		require.Equal(t, phase, report.Works[0].Tasks[0].Phase)
+	}
+}
+
+func TestUsageTaskPhaseTimestampTiesRetainTerminalState(t *testing.T) {
+	for _, terminal := range []string{"Succeeded", "Failed", "Cancelled"} {
+		for _, phases := range [][]string{{"Pending", "Running", "Finalizing", terminal}, {terminal, "Finalizing", "Running", "Pending"}} {
+			for _, fractional := range []time.Duration{0, 800 * time.Millisecond} {
+				t.Run(fmt.Sprint(phases)+"/"+fractional.String(), func(t *testing.T) {
+					s := setupTestStore(t)
+					start := time.Now().UTC().Add(-120 * 24 * time.Hour).Truncate(time.Second)
+					work := usageWork(t, s, "a", 1, start)
+					for _, phase := range phases {
+						observedAt := start
+						if phase != terminal {
+							observedAt = observedAt.Add(fractional)
+						}
+						require.NoError(t, s.RegisterUsageTask(t.Context(), store.UsageTask{
+							Namespace: "a", WorkID: work, TaskUID: "task", TaskName: "task", Phase: phase,
+							StartedAt: start, PhaseObservedAt: observedAt,
+						}))
+					}
+					report := usageReport(t, s, []string{"a"}, start.Add(-time.Second), start.Add(time.Hour), start.Add(time.Second))
+					require.Equal(t, terminal, report.Works[0].Tasks[0].Phase)
+					require.Zero(t, report.Summary.UnfinishedWork)
+					require.NoError(t, s.PruneUsage(t.Context(), time.Now().UTC().Add(-90*24*time.Hour)))
+					report = usageReport(t, s, []string{"a"}, start.Add(-time.Second), start.Add(time.Hour), time.Now().UTC())
+					require.Zero(t, report.Summary.WorkRequests)
+				})
+			}
+		}
+	}
+}
+
+func TestUsageRetriesWithinTheSameSecond(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		states []store.UsageTaskPhase
+		phase  string
+	}{
+		{"first retry pending", []store.UsageTaskPhase{{Phase: "Running", Attempt: 1}, {Phase: "Pending", Attempt: 1}, {Phase: "Running", Attempt: 1}}, "Pending"},
+		{"retry started", []store.UsageTaskPhase{{Phase: "Pending", Attempt: 1}, {Phase: "Running", Attempt: 2}, {Phase: "Pending", Attempt: 1}}, "Running"},
+		{"second retry pending", []store.UsageTaskPhase{{Phase: "Pending", Attempt: 2}, {Phase: "Running", Attempt: 2}, {Phase: "Pending", Attempt: 1}}, "Pending"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := setupTestStore(t)
+			start := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+			work := usageWork(t, s, "a", 1, start)
+			for _, state := range tc.states {
+				require.NoError(t, s.RegisterUsageTask(t.Context(), store.UsageTask{
+					Namespace: "a", WorkID: work, TaskUID: "task", TaskName: "task", Phase: state.Phase,
+					StartedAt: start, PhaseObservedAt: start.Add(time.Minute), PhaseAttempt: state.Attempt,
+				}))
+			}
+			report := usageReport(t, s, []string{"a"}, start, start.Add(time.Hour), start.Add(2*time.Minute))
+			require.Equal(t, tc.phase, report.Works[0].Tasks[0].Phase)
+		})
+	}
+}

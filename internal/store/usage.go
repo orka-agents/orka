@@ -72,6 +72,7 @@ type UsageTask struct {
 	StartedAt       time.Time          `json:"startedAt"`
 	PhaseHistory    []UsageTaskPhase   `json:"phaseHistory,omitempty"`
 	PhaseObservedAt time.Time          `json:"-"`
+	PhaseAttempt    int32              `json:"-"`
 	GatewayOwner    *UsageGatewayOwner `json:"gatewayOwner,omitempty"`
 }
 
@@ -86,6 +87,7 @@ type UsageGatewayOwner struct {
 type UsageTaskPhase struct {
 	Phase      string    `json:"phase"`
 	ObservedAt time.Time `json:"observedAt"`
+	Attempt    int32     `json:"attempt,omitempty"`
 }
 
 // UsageObservation is a counts-only snapshot. CounterID identifies a cumulative

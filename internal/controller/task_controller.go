@@ -101,6 +101,7 @@ const (
 	managedLabelValue      = scheduledRunLabelValue
 
 	workerRBACReconcileFailedReason = "WorkerRBACReconcileFailed"
+	taskRetryPendingReason          = "RetryPending"
 )
 
 // TaskReconciler reconciles a Task object
@@ -2696,6 +2697,7 @@ func (r *TaskReconciler) retryTask(ctx context.Context, task *corev1alpha1.Task)
 	// Calculate backoff delay
 	delay := r.calculateRetryDelay(task)
 	oldJobName := task.Status.JobName
+	now := metav1.Now()
 
 	// Reset to pending for retry before deleting the old Job so a transient
 	// NotFound from asynchronous Job deletion does not fail the task.
@@ -2706,6 +2708,10 @@ func (r *TaskReconciler) retryTask(ctx context.Context, task *corev1alpha1.Task)
 		t.Status.Message = ""
 		t.Status.CompletionTime = nil
 		t.Status.ResultRef = nil
+		meta.SetStatusCondition(&t.Status.Conditions, metav1.Condition{
+			Type: ConditionTypeJobCreated, Status: metav1.ConditionFalse, LastTransitionTime: now,
+			Reason: taskRetryPendingReason, Message: "waiting for the next retry attempt",
+		})
 	}); err != nil {
 		log.Error(err, "failed to update status for retry")
 		return ctrl.Result{}, err

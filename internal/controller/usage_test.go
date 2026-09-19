@@ -79,3 +79,81 @@ func TestUsageDeletionPreservesRecordedOutcome(t *testing.T) {
 	require.Equal(t, "Succeeded", snapshot.Phase)
 	require.Equal(t, completed.Time, snapshot.PhaseObservedAt)
 }
+
+func TestUsageDelayedFinalizingSnapshotPreservesCompletedWork(t *testing.T) {
+	backend := setupControllerSQLiteStore(t)
+	start := time.Now().UTC().Add(-120 * 24 * time.Hour).Truncate(time.Second)
+	workID := store.UsageWorkID("default", "monitor", "org/repo", "issue", 1)
+	require.NoError(t, backend.RegisterUsageWork(t.Context(), store.UsageWorkRequest{Namespace: "default", NamespaceUID: "namespace-uid",
+		MonitorUID: "monitor", MonitorName: "monitor", Repository: "org/repo", Kind: "issue", Number: 1, StartedAt: start}))
+	finalizing := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "task", Namespace: "default", UID: "task-uid", CreationTimestamp: metav1.NewTime(start)},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseFinalizing, ExecutionOutcome: &corev1alpha1.TaskWorkloadExecutionOutcome{
+			Phase: corev1alpha1.TaskPhaseSucceeded, RecordedAt: metav1.NewTime(start.Add(time.Minute))}}}
+	completed := finalizing.DeepCopy()
+	completed.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	completed.Status.CompletionTime = new(metav1.NewTime(start.Add(2 * time.Minute)))
+	for _, task := range []*corev1alpha1.Task{completed, finalizing, completed} {
+		snapshot := usageTaskSnapshot(task)
+		snapshot.WorkID = workID
+		require.NoError(t, backend.RegisterUsageTask(t.Context(), snapshot))
+	}
+	filter := store.UsageFilter{Namespaces: []string{"default"}, From: start, Until: start.Add(time.Hour), AsOf: start.Add(90 * time.Second)}
+	data, err := backend.LoadUsage(t.Context(), filter)
+	require.NoError(t, err)
+	report, err := usage.Build(data, filter)
+	require.NoError(t, err)
+	require.Equal(t, "Finalizing", report.Works[0].Tasks[0].Phase)
+	filter.AsOf = time.Now().UTC()
+	report, err = usage.Build(data, filter)
+	require.NoError(t, err)
+	require.Equal(t, "Succeeded", report.Works[0].Tasks[0].Phase)
+	require.Zero(t, report.Summary.UnfinishedWork)
+	require.NoError(t, backend.PruneUsage(t.Context(), time.Now().Add(-90*24*time.Hour)))
+	data, err = backend.LoadUsage(t.Context(), filter)
+	require.NoError(t, err)
+	require.Empty(t, data.Works)
+	require.Empty(t, data.Tasks)
+}
+
+func TestUsageRetryPreservesPendingInterval(t *testing.T) {
+	backend := setupControllerSQLiteStore(t)
+	start := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "retry", Namespace: "default", UID: "retry-uid", CreationTimestamp: metav1.NewTime(start)},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 1}},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning, Attempts: 1, StartTime: new(metav1.NewTime(start.Add(time.Minute))),
+			Conditions: []metav1.Condition{{Type: ConditionTypeJobCreated, Status: metav1.ConditionTrue, Reason: "JobCreated", LastTransitionTime: metav1.NewTime(start.Add(time.Minute))}}}}
+	r := newUnitReconciler(newTestScheme(), task, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default", UID: "namespace-uid"}})
+	r.ExecutionEventStore = backend
+	workID := store.UsageWorkID("default", "monitor", "org/repo", "issue", 1)
+	require.NoError(t, backend.RegisterUsageWork(t.Context(), store.UsageWorkRequest{Namespace: "default", NamespaceUID: "namespace-uid",
+		MonitorUID: "monitor", MonitorName: "monitor", Repository: "org/repo", Kind: "issue", Number: 1, StartedAt: start}))
+	initial := task.DeepCopy()
+	initial.Status = corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending}
+	for _, snapshotTask := range []*corev1alpha1.Task{initial, task} {
+		snapshot := usageTaskSnapshot(snapshotTask)
+		snapshot.WorkID = workID
+		require.NoError(t, backend.RegisterUsageTask(t.Context(), snapshot))
+	}
+	_, err := r.retryTask(t.Context(), task)
+	require.NoError(t, err)
+	reloaded := &corev1alpha1.Task{}
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(task), reloaded))
+	require.Equal(t, corev1alpha1.TaskPhasePending, reloaded.Status.Phase)
+	require.NoError(t, r.retainUsageTask(t.Context(), reloaded))
+	// A late monitor create snapshot must not erase the retry interval.
+	snapshot := usageTaskSnapshot(initial)
+	snapshot.WorkID = workID
+	require.NoError(t, backend.RegisterUsageTask(t.Context(), snapshot))
+	filter := store.UsageFilter{Namespaces: []string{"default"}, From: start, Until: time.Now().Add(time.Hour), AsOf: time.Now().UTC()}
+	data, err := backend.LoadUsage(t.Context(), filter)
+	require.NoError(t, err)
+	for _, check := range []struct {
+		at    time.Time
+		phase string
+	}{{start.Add(time.Second), "Pending"}, {start.Add(2 * time.Minute), "Running"}, {filter.AsOf, "Pending"}} {
+		filter.AsOf = check.at
+		report, err := usage.Build(data, filter)
+		require.NoError(t, err)
+		require.Equal(t, check.phase, report.Works[0].Tasks[0].Phase)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -18,13 +19,22 @@ func usageTaskSnapshot(task *corev1alpha1.Task) store.UsageTask {
 		phase = corev1alpha1.TaskPhasePending
 	}
 	result := store.UsageTask{Namespace: task.Namespace, TaskUID: string(task.UID), TaskName: task.Name,
-		Phase: string(phase), Runtime: string(task.Spec.Type), StartedAt: task.CreationTimestamp.Time}
+		Phase: string(phase), PhaseAttempt: task.Status.Attempts, Runtime: string(task.Spec.Type), StartedAt: task.CreationTimestamp.Time}
 	result.PhaseObservedAt = time.Now().UTC()
 	if phase == corev1alpha1.TaskPhasePending {
 		result.PhaseObservedAt = task.CreationTimestamp.Time
+		if retry := meta.FindStatusCondition(task.Status.Conditions, ConditionTypeJobCreated); retry != nil &&
+			retry.Status == metav1.ConditionFalse && retry.Reason == taskRetryPendingReason && !retry.LastTransitionTime.IsZero() {
+			result.PhaseObservedAt = retry.LastTransitionTime.Time
+		}
 	}
 	if phase == corev1alpha1.TaskPhaseRunning && task.Status.StartTime != nil {
 		result.PhaseObservedAt = task.Status.StartTime.Time
+	}
+	// A delayed Finalizing snapshot must retain its transition time rather
+	// than appear newer than an already-recorded terminal snapshot.
+	if outcome := task.Status.ExecutionOutcome; phase == corev1alpha1.TaskPhaseFinalizing && outcome != nil && !outcome.RecordedAt.IsZero() {
+		result.PhaseObservedAt = outcome.RecordedAt.Time
 	}
 	if task.Status.CompletionTime != nil {
 		result.PhaseObservedAt = task.Status.CompletionTime.Time

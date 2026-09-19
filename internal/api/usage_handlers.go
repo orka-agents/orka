@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/gofiber/fiber/v3"
 
@@ -163,32 +164,9 @@ func (h *Handlers) authorizeUsageContextToken(c fiber.Ctx) error {
 }
 
 func (h *Handlers) usageTeams(c fiber.Ctx) ([]string, error) {
-	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg))
+	teams, err := h.usageTeamNamespaces(c)
 	if err != nil {
 		return nil, err
-	}
-	teams := []string{namespace}
-	if raw := strings.TrimSpace(c.Query("teams")); raw != "" {
-		teams = strings.Split(raw, ",")
-		if len(teams) > 20 {
-			return nil, fiber.NewError(fiber.StatusBadRequest, "at most 20 teams may be selected")
-		}
-		for i := range teams {
-			teams[i] = strings.TrimSpace(teams[i])
-			if teams[i] == "" {
-				return nil, fiber.NewError(fiber.StatusBadRequest, "team namespace must not be empty")
-			}
-			if _, err := h.resolveNamespace(c, teams[i]); err != nil {
-				return nil, err
-			}
-			for _, resource := range []string{externalToolTaskResource, usageMonitorResource, usageSessionResource} {
-				if err := authorizeKubernetesResourceAction(c.Context(), h.clientset, GetUserInfo(c), teams[i], "list", corev1alpha1.GroupVersion.Group, resource, ""); err != nil {
-					return nil, err
-				}
-			}
-		}
-		slices.Sort(teams)
-		teams = slices.Compact(teams)
 	}
 	if ui := GetUserInfo(c); h.contextTokenAuthorization.Enabled() && ui != nil && ui.AuthType == AuthTypeContextToken && ui.ContextToken != nil {
 		if required, ok := contextString(ui.ContextToken.TransactionContext, toolNamespaceArg); ok {
@@ -246,6 +224,18 @@ func (h *Handlers) filterUsageTaskAccess(c fiber.Ctx, data *store.UsageData, asO
 	known := map[string]bool{}
 	cache := map[gatewayTaskAuthorizationKey]bool{}
 	hiddenWorks := map[string]bool{}
+	type prKey struct {
+		namespace, namespaceUID, repository string
+		number                              int64
+	}
+	linkedWorks := map[prKey][]string{}
+	for _, link := range data.Links {
+		if link.Number <= 0 || link.LinkedAt.After(asOf) {
+			continue
+		}
+		key := prKey{link.Namespace, link.NamespaceUID, usageRepositoryFoldKey(link.Repository), link.Number}
+		linkedWorks[key] = append(linkedWorks[key], link.WorkID)
+	}
 	for _, task := range data.Tasks {
 		key := task.Namespace + "/" + task.TaskUID
 		known[key] = true
@@ -270,12 +260,15 @@ func (h *Handlers) filterUsageTaskAccess(c fiber.Ctx, data *store.UsageData, asO
 			if task.WorkID != "" {
 				hiddenWorks[task.WorkID] = true
 			}
-			for _, link := range data.Links {
-				if task.PRNumber > 0 && link.Namespace == task.Namespace && link.NamespaceUID == task.NamespaceUID &&
-					link.Number == task.PRNumber && strings.EqualFold(link.Repository, task.Repository) && !link.LinkedAt.After(asOf) {
-					hiddenWorks[link.WorkID] = true
-				}
+			if task.PRNumber <= 0 {
+				continue
 			}
+			pr := prKey{task.Namespace, task.NamespaceUID, usageRepositoryFoldKey(task.Repository), task.PRNumber}
+			for _, workID := range linkedWorks[pr] {
+				hiddenWorks[workID] = true
+			}
+			// Shared PRs need only one pass, even when many denied Tasks target them.
+			delete(linkedWorks, pr)
 		}
 	}
 	// The controller registers Tasks before dispatch. An observation with no
@@ -288,6 +281,17 @@ func (h *Handlers) filterUsageTaskAccess(c fiber.Ctx, data *store.UsageData, asO
 	}
 	data.Works = slices.DeleteFunc(data.Works, func(work store.UsageWorkRequest) bool { return hiddenWorks[work.ID] })
 	return nil
+}
+
+// usageRepositoryFoldKey preserves strings.EqualFold matching in the PR index.
+func usageRepositoryFoldKey(repository string) string {
+	return strings.Map(func(r rune) rune {
+		key := r
+		for folded := unicode.SimpleFold(r); folded != r; folded = unicode.SimpleFold(folded) {
+			key = min(key, folded)
+		}
+		return key
+	}, repository)
 }
 
 func usageDate(raw string, fallback time.Time) (time.Time, error) {

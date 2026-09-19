@@ -90,13 +90,7 @@ func projectUsageEvent(ctx context.Context, db taskDataExecutor, event store.Exe
 			ID:      fmt.Sprintf("acp/%s/%s/%d/%s", h.TaskUID, h.PromptID, h.Sequence, content.JournalKind),
 			TaskUID: h.TaskUID, AttemptID: fmt.Sprintf("%d/%s", h.TaskAttempt, h.PromptID),
 			CounterID: h.TaskUID + "/" + h.PromptID, Scope: store.UsageScopeAttempt,
-			Source: store.UsageSourceAgent, Provider: content.Provider, Model: content.Model,
-		}
-		// The controller journal supplies the frozen profile model privately.
-		// Public event fields remain redacted; recordUsage still sanitizes this
-		// identifier before retaining it independently of the event stream.
-		if model, ok := event.Internal["harnessV2UsageModel"].(string); ok && model != "" {
-			observation.Model = model
+			Source: store.UsageSourceAgent, Provider: content.Provider, Model: harnessUsageModel(event, content.Model),
 		}
 		if content.Scope == store.UsageScopeSession {
 			observation.Scope = store.UsageScopeSession
@@ -137,6 +131,16 @@ func projectUsageEvent(ctx context.Context, db taskDataExecutor, event store.Exe
 		return nil
 	}
 	return err
+}
+
+func harnessUsageModel(event store.ExecutionEvent, publicModel string) string {
+	// The controller journal supplies the frozen profile model privately.
+	// Public event fields remain redacted; recordUsage still sanitizes this
+	// identifier before retaining it independently of the event stream.
+	if model, ok := event.Internal["harnessV2UsageModel"].(string); ok && model != "" {
+		return model
+	}
+	return publicModel
 }
 
 func nonzeroUsage(counts ...*int64) bool {

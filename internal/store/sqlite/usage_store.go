@@ -1,12 +1,14 @@
 package sqlite
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -95,13 +97,7 @@ func (s *Store) RegisterUsageTask(ctx context.Context, task store.UsageTask) err
 		if task.StartedAt.IsZero() {
 			task.StartedAt = time.Now().UTC()
 		}
-		if len(task.PhaseHistory) == 0 || task.PhaseHistory[len(task.PhaseHistory)-1].Phase != task.Phase {
-			at := task.PhaseObservedAt
-			if at.IsZero() {
-				at = time.Now().UTC()
-			}
-			task.PhaseHistory = append(task.PhaseHistory, store.UsageTaskPhase{Phase: task.Phase, ObservedAt: at.UTC()})
-		}
+		recordUsageTaskPhase(&task)
 		data, err := json.Marshal(task)
 		if err != nil {
 			return err
@@ -110,6 +106,64 @@ func (s *Store) RegisterUsageTask(ctx context.Context, task store.UsageTask) err
 		 ON CONFLICT(namespace, task_uid) DO UPDATE SET data = excluded.data`, task.Namespace, task.TaskUID, task.TaskName, task.StartedAt.UnixNano(), string(data))
 		return err
 	})
+}
+
+func recordUsageTaskPhase(task *store.UsageTask) {
+	at := task.PhaseObservedAt
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	state := store.UsageTaskPhase{Phase: task.Phase, ObservedAt: at.UTC(), Attempt: task.PhaseAttempt}
+	if !slices.ContainsFunc(task.PhaseHistory, func(existing store.UsageTaskPhase) bool {
+		return existing.Phase == state.Phase && existing.Attempt == state.Attempt && existing.ObservedAt.Equal(state.ObservedAt)
+	}) {
+		task.PhaseHistory = append(task.PhaseHistory, state)
+	}
+	// Monitor and Task-controller writes can arrive in either order. Retain
+	// distinct observations even for repeated phases, so a late observation
+	// between them cannot replace the newer state or corrupt an asOf report.
+	slices.SortStableFunc(task.PhaseHistory, func(a, b store.UsageTaskPhase) int {
+		if order := cmp.Compare(a.ObservedAt.Unix(), b.ObservedAt.Unix()); order != 0 {
+			return order
+		}
+		// Kubernetes timestamps have second precision. Within a second, use
+		// attempts and lifecycle order, with terminal states always last.
+		aOrder, bOrder := usageTaskPhaseOrder(a), usageTaskPhaseOrder(b)
+		if aOrder == usageTerminalPhaseOrder || bOrder == usageTerminalPhaseOrder {
+			if order := cmp.Compare(aOrder, bOrder); order != 0 {
+				return order
+			}
+		}
+		if order := cmp.Compare(a.Attempt, b.Attempt); order != 0 {
+			return order
+		}
+		if order := cmp.Compare(aOrder, bOrder); order != 0 {
+			return order
+		}
+		return a.ObservedAt.Compare(b.ObservedAt)
+	})
+	task.Phase = task.PhaseHistory[len(task.PhaseHistory)-1].Phase
+}
+
+const usageTerminalPhaseOrder = 4
+
+func usageTaskPhaseOrder(state store.UsageTaskPhase) int {
+	switch state.Phase {
+	case "Pending":
+		if state.Attempt > 0 {
+			// Retrying Pending follows the attempt that just failed.
+			return 3
+		}
+		return 0
+	case "Running":
+		return 1
+	case "Finalizing":
+		return 2
+	case "Succeeded", "Failed", "Cancelled":
+		return usageTerminalPhaseOrder
+	default:
+		return 0
+	}
 }
 
 func mergeUsageTaskSnapshot(task *store.UsageTask, existing store.UsageTask) error {
