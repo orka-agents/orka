@@ -236,11 +236,14 @@ func TestUsageAPIHidesHistoryAfterNamespaceRecreation(t *testing.T) {
 	f.allowRoute(t, "GET /api/v1/usage")
 	status, body := f.request(t, http.MethodGet, "/api/v1/usage?from=2000-01-01", "")
 	require.Equal(t, http.StatusOK, status, body)
-	require.Contains(t, body, "7654")
+	var before usage.Report
+	require.NoError(t, json.Unmarshal([]byte(body), &before))
+	require.EqualValues(t, 7654, before.Summary.TotalTokens)
 	require.NoError(t, f.kube.Delete(t.Context(), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default"}}))
 	require.NoError(t, f.kube.Create(t.Context(), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default", UID: "replacement-uid"}}))
 
-	at := time.Now().UTC().Add(-time.Minute)
+	// Token-count digits in a timestamp must not be mistaken for leaked usage.
+	at := time.Now().UTC().Add(-time.Minute).Truncate(time.Second).Add(9999 * time.Nanosecond)
 	work := store.UsageWorkID("default", "replacement-monitor", "org/repo", "issue", 1)
 	require.NoError(t, f.store.RegisterUsageWork(t.Context(), store.UsageWorkRequest{Namespace: "default", NamespaceUID: "replacement-uid",
 		MonitorName: "monitor", MonitorUID: "replacement-monitor", Repository: "org/repo", Kind: "issue", Number: 1, StartedAt: at}))
@@ -267,9 +270,15 @@ func TestUsageAPIHidesHistoryAfterNamespaceRecreation(t *testing.T) {
 	require.Zero(t, report.Summary.PRsMerged)
 	require.Len(t, report.Works, 1)
 	require.Equal(t, work, report.Works[0].ID)
+	require.Equal(t, "replacement-uid", report.Works[0].NamespaceUID)
+	require.EqualValues(t, 100, report.Works[0].Summary.TotalTokens)
+	require.Len(t, report.Teams, 1)
+	require.EqualValues(t, 100, report.Teams[0].Summary.TotalTokens)
+	for _, other := range report.OtherWork {
+		require.Zero(t, other.Totals.TotalTokens, other.Category)
+		require.Zero(t, other.TaskCount, other.Category)
+	}
 	require.NotContains(t, body, oldWork)
-	require.NotContains(t, body, "7654")
-	require.NotContains(t, body, "9999")
 	f.allowRoute(t, "GET /api/v1/usage/work/:id")
 	status, _ = f.request(t, http.MethodGet, "/api/v1/usage/work/"+oldWork, "")
 	require.Equal(t, http.StatusNotFound, status)
