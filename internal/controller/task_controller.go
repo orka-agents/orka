@@ -743,6 +743,9 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 			return r.cancelACPTaskBeforeDurableAttempt(ctx, task, "task deadline exceeded before runtime admission")
 		}
 	}
+	if delay := r.remainingRetryDelay(task, time.Now()); delay > 0 {
+		return ctrl.Result{RequeueAfter: delay}, nil
+	}
 
 	// Non-agent workers retain the legacy Session lock lifecycle. Agent Tasks
 	// claim protocol lineage and a fenced SessionTurn in their dispatcher only
@@ -1453,6 +1456,11 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 			return ctrl.Result{}, err
 		}
 		return r.failTask(ctx, task, meta.FindStatusCondition(latest.Status.Conditions, ConditionTypeJobCreated).Message)
+	}
+	// Recheck the persisted deadline after the uncached read so an older
+	// Pending snapshot cannot admit a Job before its retry delay has elapsed.
+	if delay := r.remainingRetryDelay(latest, time.Now()); delay > 0 {
+		return ctrl.Result{RequeueAfter: delay}, nil
 	}
 	validationTask, err := r.repositoryMonitorValidationTask(ctx, latest)
 	if err != nil {
@@ -2735,6 +2743,19 @@ func (r *TaskReconciler) retryTask(ctx context.Context, task *corev1alpha1.Task)
 	}
 
 	return ctrl.Result{RequeueAfter: delay}, nil
+}
+
+// RequeueAfter does not prevent Task or owned Job events from reconciling
+// sooner. Enforce the same retry deadline on every attempt to start a Job.
+func (r *TaskReconciler) remainingRetryDelay(task *corev1alpha1.Task, now time.Time) time.Duration {
+	if task.Spec.Type == corev1alpha1.TaskTypeAgent || task.Status.Phase != corev1alpha1.TaskPhasePending {
+		return 0
+	}
+	condition := meta.FindStatusCondition(task.Status.Conditions, ConditionTypeJobCreated)
+	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != taskRetryPendingReason || condition.LastTransitionTime.IsZero() {
+		return 0
+	}
+	return max(condition.LastTransitionTime.Add(r.calculateRetryDelay(task)).Sub(now), 0)
 }
 
 // calculateRetryDelay calculates the delay before retry using exponential backoff
