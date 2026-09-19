@@ -80,7 +80,7 @@ func TestACPJournalEventsFeedPublicTaskConsumers(t *testing.T) {
 		{
 			Kind: harnessv2.UpdateUsage,
 			Usage: &harnessv2.UsageUpdate{
-				InputTokens: 120, OutputTokens: 30, CachedInputTokens: 40,
+				InputTokens: 120, OutputTokens: 30, CachedInputTokens: new(uint64(40)),
 			},
 		},
 		{

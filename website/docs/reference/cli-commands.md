@@ -45,6 +45,7 @@ Available Commands:
   substrate     Inspect and manage substrate resources
   task          Manage tasks
   tool          Manage tools
+  usage         Inspect recorded model usage and verified PR outcomes
   workspace     Inspect task workspace status
 
 Flags:
@@ -4928,6 +4929,121 @@ Usage:
 Flags:
   -f, --file string   Path to YAML/JSON manifest (use - for stdin)
   -h, --help          help for update
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka usage`
+
+```text
+Inspect retained usage through the Orka API. Teams are Kubernetes namespaces. Each server reports only its installation's team namespace; combined-team reports are not supported. Issue delivery totals include failed attempts, retries, and linked follow-up work. Missing measurements remain unavailable; model prices are not configured.
+
+Usage:
+  orka usage [command]
+
+Available Commands:
+  other       Inspect review_only, other_requests, or unassociated usage
+  summary     Show cohort totals, team usage, and a page of work requests
+  work        Inspect a work request's Tasks, measurements, and PR outcomes
+
+Flags:
+  -h, --help   help for usage
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka usage [command] --help" for more information about a command.
+```
+
+## `orka usage other`
+
+```text
+Inspect review_only, other_requests, or unassociated usage
+
+Usage:
+  orka usage other <category> [flags]
+
+Flags:
+      --as-of string        Include usage and outcomes through this UTC date or RFC3339 timestamp (default: now)
+      --from string         Request-start date or RFC3339 timestamp (UTC; default: current month, all retained history for work)
+  -h, --help                help for other
+      --kind string         Filter by issue or pull_request
+      --limit int           Page size, capped at 100 by the API; totals always cover the full selection (default 25)
+      --model string        Select whole requests that used this model, including their other models
+      --offset int          Page offset; reuse --as-of and filters to keep the same report time
+  -o, --output string       Output format: table, json, yaml (default "table")
+      --repository string   Filter by owner/repository
+      --teams string        Explicit team namespace; must match this installation (overrides --namespace)
+      --until string        Exclusive request-start end date or RFC3339 timestamp (default: report time)
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka usage summary`
+
+```text
+Show cohort totals, team usage, and a page of work requests
+
+Usage:
+  orka usage summary [flags]
+
+Flags:
+      --as-of string        Include usage and outcomes through this UTC date or RFC3339 timestamp (default: now)
+      --from string         Request-start date or RFC3339 timestamp (UTC; default: current month, all retained history for work)
+  -h, --help                help for summary
+      --kind string         Filter by issue or pull_request
+      --limit int           Page size, capped at 100 by the API; totals always cover the full selection (default 25)
+      --model string        Select whole requests that used this model, including their other models
+      --offset int          Page offset; reuse --as-of and filters to keep the same report time
+  -o, --output string       Output format: table, json, yaml (default "table")
+      --repository string   Filter by owner/repository
+      --teams string        Explicit team namespace; must match this installation (overrides --namespace)
+      --until string        Exclusive request-start end date or RFC3339 timestamp (default: report time)
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka usage work`
+
+```text
+Inspect a work ID returned by usage summary. Without date filters, includes all retained history for that work. Pass the summary's --as-of value to inspect the same report time.
+
+Usage:
+  orka usage work <work-id> [flags]
+
+Flags:
+      --as-of string        Include usage and outcomes through this UTC date or RFC3339 timestamp (default: now)
+      --from string         Request-start date or RFC3339 timestamp (UTC; default: current month, all retained history for work)
+  -h, --help                help for work
+      --kind string         Filter by issue or pull_request
+      --model string        Select whole requests that used this model, including their other models
+  -o, --output string       Output format: table, json, yaml (default "table")
+      --repository string   Filter by owner/repository
+      --teams string        Explicit team namespace; must match this installation (overrides --namespace)
+      --until string        Exclusive request-start end date or RFC3339 timestamp (default: report time)
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file

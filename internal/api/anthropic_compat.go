@@ -277,6 +277,7 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 		return anthropicError(c, 400, "invalid_request_error", "failed to resolve provider: "+err.Error())
 	}
 
+	ctx = usageRequestContext(ctx, h.resultStore, uncachedReaderOr(h.apiReader, h.client), namespace, "")
 	provider = llm.NewTracingProvider(provider)
 
 	messages, err := convertAnthropicMessages(req.Messages)

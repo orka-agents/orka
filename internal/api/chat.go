@@ -311,6 +311,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 
 	// Resolve or create session ID
 	sessionID := resolveChatSessionID(req.SessionID)
+	ctx = usageRequestContext(ctx, ch.resultStore, uncachedReaderOr(ch.apiReader, ch.client), namespace, sessionID)
 	if req.SessionID != "" {
 		for _, verb := range []string{"get", "update"} {
 			if err := authorizeKubernetesResourceAction(ctx, ch.kubeClient, userInfo, namespace, verb, corev1alpha1.GroupVersion.Group, "sessions", sessionID); err != nil {
@@ -547,6 +548,7 @@ func (ch *ChatHandler) sendChatStream(c fiber.Ctx, req chatStreamRequest) error 
 		trace.ContextWithSpanContext(context.Background(), req.span.SpanContext()),
 		baggage.FromContext(req.parentCtx),
 	)
+	sseParentCtx = llm.CopyUsageRecorder(sseParentCtx, req.parentCtx)
 	var streamOwnership atomic.Uint32
 	finalizeStream := sync.OnceFunc(func() {
 		req.finalizeTurn()

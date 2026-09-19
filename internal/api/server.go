@@ -351,6 +351,10 @@ func (s *Server) setupRoutes() {
 	api.Post("/memory-proposals/:id/archive", s.handlers.ArchiveMemoryProposal)
 
 	// Provider endpoints
+	api.Get("/usage", s.handlers.GetUsageReport)
+	api.Get("/usage/work/:id", s.handlers.GetUsageWork)
+	api.Get("/usage/other/:category", s.handlers.GetUsageOther)
+
 	api.Get("/providers", s.handlers.ListProviders)
 	api.Post("/providers", s.handlers.CreateProvider)
 	api.Get("/providers/:name", s.handlers.GetProvider)

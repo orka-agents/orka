@@ -476,6 +476,11 @@ func TestExternalAPIAuthorizedChatProviderInvocation(t *testing.T) {
 			require.Contains(t, body, "Done.")
 			require.Equal(t, int64(1), f.externalCalls.Load())
 			require.Equal(t, 1, f.tokenReviews)
+			usage, err := f.store.LoadUsage(t.Context(), store.UsageFilter{Namespaces: []string{"default"}, AsOf: time.Now().UTC()})
+			require.NoError(t, err)
+			require.Len(t, usage.Observations, 2)
+			require.Equal(t, store.UsageStatusStarted, usage.Observations[0].Status)
+			require.Equal(t, store.UsageStatusCompleted, usage.Observations[1].Status)
 			if path == "/api/v1/chat" {
 				var response ChatResponse
 				require.NoError(t, json.Unmarshal([]byte(body), &response))
@@ -484,7 +489,7 @@ func TestExternalAPIAuthorizedChatProviderInvocation(t *testing.T) {
 				require.Len(t, messages, 2)
 				require.Equal(t, "hello", messages[0].Content)
 			} else {
-				require.Equal(t, before, f.changes(t))
+				require.Equal(t, before+2, f.changes(t), "only usage start and completion should be retained")
 			}
 		})
 	}

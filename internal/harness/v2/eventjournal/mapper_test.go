@@ -79,7 +79,7 @@ func TestMapUpdateMapsACPUpdateKinds(t *testing.T) {
 		{
 			name: "usage",
 			update: harnessv2.UpdateEvent{Kind: harnessv2.UpdateUsage,
-				Usage: &harnessv2.UsageUpdate{InputTokens: 120, OutputTokens: 30, CachedInputTokens: 40}},
+				Usage: &harnessv2.UsageUpdate{InputTokens: 120, OutputTokens: 30, CachedInputTokens: new(uint64(40))}},
 			wantType: executionevents.ExecutionEventTypeModelUsageUpdated, wantSeverity: executionevents.ExecutionEventSeverityInfo,
 		},
 		{
@@ -120,7 +120,7 @@ func TestMapUpdateMapsACPUpdateKinds(t *testing.T) {
 func TestMapUsagePreservesPromotedTelemetryContent(t *testing.T) {
 	event := testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
 		Kind:  harnessv2.UpdateUsage,
-		Usage: &harnessv2.UsageUpdate{InputTokens: 100, OutputTokens: 25, CachedInputTokens: 60},
+		Usage: &harnessv2.UsageUpdate{InputTokens: 100, OutputTokens: 25, CachedInputTokens: new(uint64(60))},
 	})
 	mapped, err := mapUpdate(event, testMapContext(), mapUpdateOptions{})
 	if err != nil {
@@ -135,6 +135,59 @@ func TestMapUsagePreservesPromotedTelemetryContent(t *testing.T) {
 	}
 	if content["provider"] != mapperTestProvider || content["model"] != "gpt-test" {
 		t.Fatalf("model content = %#v", content)
+	}
+}
+
+func TestMapUsagePreservesCacheFieldPresence(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		fields     string
+		cached     *uint64
+		cacheWrite *uint64
+	}{
+		{name: "unreported cache"},
+		{name: "reported zero reads", fields: `,"cachedInputTokens":0`, cached: new(uint64(0))},
+		{name: "reported zero writes", fields: `,"cacheWriteInputTokens":0`, cacheWrite: new(uint64(0))},
+		{name: "reported counts", fields: `,"cachedInputTokens":40,"cacheWriteInputTokens":10`, cached: new(uint64(40)), cacheWrite: new(uint64(10))},
+		{name: "null cache", fields: `,"cachedInputTokens":null,"cacheWriteInputTokens":null`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var usage harnessv2.UsageUpdate
+			wire := []byte(`{"inputTokens":100,"outputTokens":25,"reported":true,"complete":true` + test.fields + `}`)
+			if err := json.Unmarshal(wire, &usage); err != nil {
+				t.Fatal(err)
+			}
+			// Runtime and journal persistence may re-encode the protocol payload.
+			encoded, err := json.Marshal(usage)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(encoded, &usage); err != nil {
+				t.Fatal(err)
+			}
+			event := testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{Kind: harnessv2.UpdateUsage, Usage: &usage})
+			mapped, err := mapUpdate(event, testMapContext(), mapUpdateOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var content map[string]json.RawMessage
+			if err := json.Unmarshal(mapped.Content, &content); err != nil {
+				t.Fatal(err)
+			}
+			for field, want := range map[string]*uint64{"cachedInputTokens": test.cached, "cacheWriteInputTokens": test.cacheWrite} {
+				got, present := content[field]
+				if want == nil {
+					if present {
+						t.Errorf("unreported %s became %s; wire=%s mapped=%s", field, got, wire, mapped.Content)
+					}
+					continue
+				}
+				var count uint64
+				if !present || json.Unmarshal(got, &count) != nil || count != *want {
+					t.Errorf("%s = %s, want %d", field, got, *want)
+				}
+			}
+		})
 	}
 }
 

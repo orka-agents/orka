@@ -66,6 +66,7 @@ const (
 // RepositoryMonitorReconciler reconciles RepositoryMonitor resources.
 type RepositoryMonitorReconciler struct {
 	client.Client
+	APIReader                 client.Reader
 	Scheme                    *runtime.Scheme
 	Store                     store.RepositoryMonitorStore
 	ResultStore               store.ResultStore
@@ -118,7 +119,20 @@ func (r *RepositoryMonitorReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, err
 	}
 
-	return r.reconcileRepositoryMonitorRuns(ctx, monitor, state)
+	if err := r.refreshMonitorUsageOutcomes(ctx, monitor); err != nil {
+		return ctrl.Result{}, err
+	}
+	result, err = r.reconcileRepositoryMonitorRuns(ctx, monitor, state)
+	if err == nil && (result.RequeueAfter == 0 || result.RequeueAfter > usageOutcomeBacklogInterval) {
+		next, pollErr := r.usageOutcomeRequeueAfter(ctx, monitor)
+		if pollErr != nil {
+			return result, pollErr
+		}
+		if next > 0 && (result.RequeueAfter == 0 || next < result.RequeueAfter) {
+			result.RequeueAfter = next
+		}
+	}
+	return result, err
 }
 
 type repositoryMonitorReconcileState struct {
@@ -1028,6 +1042,9 @@ func (r *RepositoryMonitorReconciler) updateStatusWithRetry(ctx context.Context,
 
 // SetupWithManager sets up the controller with the manager.
 func (r *RepositoryMonitorReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.RepositoryMonitor{}).
 		Owns(&corev1alpha1.Task{}).

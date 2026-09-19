@@ -2076,6 +2076,7 @@ func TestStream_ResponsesAPI_MaxOutputTokens(t *testing.T) {
 	}
 
 	var content, stopReason string
+	var terminal llm.StreamChunk
 	for chunk := range ch {
 		if chunk.Error != nil {
 			t.Fatalf("unexpected error: %v", chunk.Error)
@@ -2083,10 +2084,14 @@ func TestStream_ResponsesAPI_MaxOutputTokens(t *testing.T) {
 		content += chunk.Content
 		if chunk.Done {
 			stopReason = chunk.StopReason
+			terminal = chunk
 		}
 	}
 	if content != "partial" || stopReason != stopReasonLength {
 		t.Fatalf("stream = content %q, stop reason %q; want partial content with %q", content, stopReason, stopReasonLength)
+	}
+	if !terminal.UsageReported || terminal.InputTokens != 5 || terminal.OutputTokens != 3 || terminal.Model != "gpt-4" || terminal.Provider != testProviderOpenAI {
+		t.Fatalf("terminal usage = %+v; want reported 5 input and 3 output tokens from gpt-4/openai", terminal)
 	}
 }
 
@@ -2137,6 +2142,7 @@ func TestStream_ResponsesAPI_MaxOutputTokensPreservesUnfinishedToolCall(t *testi
 			}
 
 			var content, stopReason string
+			var terminal llm.StreamChunk
 			var toolCalls int
 			for chunk := range ch {
 				if chunk.Error != nil {
@@ -2148,10 +2154,14 @@ func TestStream_ResponsesAPI_MaxOutputTokensPreservesUnfinishedToolCall(t *testi
 				}
 				if chunk.Done {
 					stopReason = chunk.StopReason
+					terminal = chunk
 				}
 			}
 			if content != "partial" || stopReason != eventTypeResponseIncomplete || toolCalls != 0 {
 				t.Fatalf("stream = content %q, stop reason %q, tool calls %d; want partial content with an incomplete terminal and no emitted call", content, stopReason, toolCalls)
+			}
+			if !terminal.UsageReported || terminal.InputTokens != 5 || terminal.OutputTokens != 3 {
+				t.Fatalf("terminal usage = %+v; want reported 5 input and 3 output tokens", terminal)
 			}
 		})
 	}

@@ -37,6 +37,9 @@ import (
 // actual HTTP request and its expected resource authorization, including every
 // write in compound operations. An omitted route fails the inventory check.
 const externalAuthorizationInventory = `
+GET /api/v1/usage | list core.orka.ai:tasks; list core.orka.ai:repositorymonitors; list core.orka.ai:sessions
+GET /api/v1/usage/work/:id | list core.orka.ai:tasks; list core.orka.ai:repositorymonitors; list core.orka.ai:sessions
+GET /api/v1/usage/other/:category | list core.orka.ai:tasks; list core.orka.ai:repositorymonitors; list core.orka.ai:sessions
 POST /api/v1/tasks | create core.orka.ai:tasks
 GET /api/v1/tasks | list core.orka.ai:tasks
 GET /api/v1/tasks/:id | get core.orka.ai:tasks protected
@@ -243,6 +246,8 @@ func newExternalAuthorizationFixture(t *testing.T) *externalAuthorizationFixture
 	}
 	meta := metav1.ObjectMeta{Name: "protected", Namespace: "default"}
 	f.kube = fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default", UID: "namespace-uid"}},
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "other", UID: "other-namespace-uid"}},
 		&corev1alpha1.Task{ObjectMeta: meta, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer}, Status: corev1alpha1.TaskStatus{Phase: "Succeeded"}},
 		&corev1alpha1.Tool{ObjectMeta: meta, Spec: corev1alpha1.ToolSpec{Description: "protected-content"}},
 		&corev1alpha1.Skill{ObjectMeta: meta},

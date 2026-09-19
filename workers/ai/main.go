@@ -106,6 +106,7 @@ func run(transcriptPath string) (err error) {
 	taskName := workerEnv.TaskName
 	taskNamespace := workerEnv.TaskNamespace
 	eventRecorder := common.NewHTTPEventRecorderFromEnv()
+	ctx = withWorkerUsage(ctx, eventRecorder)
 	// Gateway Tasks carry their current user turn only in the canonical transcript.
 	// Never substitute a direct prompt when that required input is missing.
 	promptIncluded := strings.EqualFold(strings.TrimSpace(os.Getenv(workerenv.SessionPromptIncluded)), "true")

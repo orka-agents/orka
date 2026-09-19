@@ -248,6 +248,40 @@ orka monitor delete my-monitor
 
 Manual run/action commands such as `orka security scan run`, `orka monitor run`, and finding patch/PR actions can create downstream Tasks and may require live GitHub, provider, and agent configuration.
 
+## Usage and PR outcomes
+
+Usage commands read retained model measurements and verified PR outcomes through
+the controller API. Each installation reports only its own Kubernetes namespace;
+reporting requires no CRD.
+
+```bash
+orka usage summary -n payments
+orka usage summary --teams payments --repository example/project -o json
+orka usage work WORK_ID -n payments
+orka usage other review_only -n payments -o yaml
+```
+
+`summary` shows full-selection totals and a page of work IDs. `work` loads one
+work request's Tasks, sessions, measurements, and PR outcomes. `other` inspects
+`review_only`, `other_requests`, or `unassociated` usage.
+
+All three commands support `--from`, `--until`, `--as-of`, `--teams`,
+`--repository`, `--model`, `--kind issue|pull_request`, and `-o table|json|yaml`.
+Dates accept UTC dates or RFC3339 timestamps, and `--until` is exclusive. Summary
+and other-usage commands default to the current UTC month; work details default
+to all retained history. A model filter selects whole requests, including their
+other models' usage.
+
+Summary and other-usage commands support `--limit` and `--offset`, with a default
+page size of 25 and an API cap of 100. Copy the report's `--as-of` timestamp and
+reuse the same filters for later pages and work details. Paging does not change
+aggregate totals.
+
+Tables distinguish missing measurements from reported zero and include coverage
+and cache availability. JSON and YAML preserve the full response, including
+nulls. See [Usage and PR outcomes](../guides/usage-and-pr-outcomes.md) for examples,
+retention, and access requirements.
+
 ## Live-gated workflows
 
 Some commands intentionally create downstream work or require external services. Keep these behind explicit operator intent in automation and e2e tests.
@@ -402,6 +436,7 @@ Normal binary e2e tests build and invoke `bin/orka` directly with isolated confi
 | `memory` | Covered | Create/list/get/disable/enable/update/delete and proposal-list smoke. |
 | `security` | Partially covered | Repository scan create/get/list/delete, threat model update/get, scan/finding/slice/dropped-finding list; repository scan update is not covered. |
 | `monitor` | Partially covered | Repository monitor create/get/list/delete plus runs/items/events list; monitor update is not covered. |
+| `usage` | Compiled-binary fixture coverage | Summary table, work JSON, other-usage YAML, configured authentication, and nonzero exit for a missing work request. |
 | `substrate` | Covered | Pool create/get/list/update/delete. |
 | `run` | Negative covered; positive live-gated | Unreachable-server error path is safe for normal e2e; positive chat/SSE flow needs provider fixtures. |
 | `login` | Safe mode covered | `--no-open --redact-token` is covered; full browser-open token URL remains unsuitable for normal e2e logs. |

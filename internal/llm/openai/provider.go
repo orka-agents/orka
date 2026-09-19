@@ -75,7 +75,7 @@ func NewProvider(config llm.ProviderConfig) (*Provider, error) {
 		return nil, llm.ErrAPIKeyRequired
 	}
 
-	var opts []option.RequestOption
+	opts := []option.RequestOption{option.WithMiddleware(llm.UsageHTTPMiddleware)}
 	if config.ProviderType == providerTypeAzureOpenAI {
 		apiVersion := config.AzureAPIVersion
 		if apiVersion == "" {
@@ -369,13 +369,16 @@ func (p *Provider) completeResponses(ctx context.Context, req *llm.CompletionReq
 	}
 
 	result := &llm.CompletionResponse{
-		Provider:     p.TelemetryProviderName(),
-		ID:           resp.ID,
-		Content:      resp.OutputText(),
-		StopReason:   string(resp.Status),
-		InputTokens:  int(resp.Usage.InputTokens),
-		OutputTokens: int(resp.Usage.OutputTokens),
-		Model:        resp.Model,
+		Provider:              p.TelemetryProviderName(),
+		ID:                    resp.ID,
+		Content:               resp.OutputText(),
+		StopReason:            string(resp.Status),
+		InputTokens:           int(resp.Usage.InputTokens),
+		OutputTokens:          int(resp.Usage.OutputTokens),
+		UsageReported:         resp.Usage.JSON.InputTokens.Valid() && resp.Usage.JSON.OutputTokens.Valid(),
+		CachedInputTokens:     llm.ReportedTokenCount(resp.Usage.InputTokensDetails.CachedTokens, resp.Usage.InputTokensDetails.JSON.CachedTokens.Valid()),
+		CacheWriteInputTokens: llm.ReportedTokenCount(resp.Usage.InputTokensDetails.CacheWriteTokens, resp.Usage.InputTokensDetails.JSON.CacheWriteTokens.Valid()),
+		Model:                 resp.Model,
 	}
 	for _, item := range resp.Output {
 		if item.Type == eventTypeFunctionCall {
@@ -721,14 +724,14 @@ func handleResponsesStreamEvent(evt responses.ResponseStreamEventUnion, tracker 
 		return handleResponseCompleted(evt, tracker, providerName, send)
 	case "response.failed":
 		stopReason := normalizeResponsesIncompleteStopReason(evt.Type, evt.Response.IncompleteDetails.Reason)
-		send(llm.StreamChunk{Done: true, StopReason: stopReason})
+		send(responseTerminalChunk(evt, stopReason, providerName))
 		return false
 	case eventTypeResponseIncomplete:
 		stopReason := normalizeResponsesIncompleteStopReason(evt.Type, evt.Response.IncompleteDetails.Reason)
 		if tracker.hasUnemittedFunctionCall(evt.Response.Output) {
 			stopReason = eventTypeResponseIncomplete
 		}
-		send(llm.StreamChunk{Done: true, StopReason: stopReason})
+		send(responseTerminalChunk(evt, stopReason, providerName))
 		return false
 	case "error":
 		send(llm.StreamChunk{Error: &llm.ProviderError{Provider: "openai", Message: evt.Message}, Done: true})
@@ -795,15 +798,22 @@ func handleResponseCompleted(evt responses.ResponseStreamEventUnion, tracker *re
 			}
 		}
 	}
-	send(llm.StreamChunk{
-		Done:         true,
-		StopReason:   stopReason,
-		InputTokens:  int(evt.Response.Usage.InputTokens),
-		OutputTokens: int(evt.Response.Usage.OutputTokens),
-		Model:        evt.Response.Model,
-		Provider:     providerName,
-	})
+	send(responseTerminalChunk(evt, stopReason, providerName))
 	return false
+}
+
+func responseTerminalChunk(evt responses.ResponseStreamEventUnion, stopReason, providerName string) llm.StreamChunk {
+	return llm.StreamChunk{
+		Done:                  true,
+		StopReason:            stopReason,
+		InputTokens:           int(evt.Response.Usage.InputTokens),
+		OutputTokens:          int(evt.Response.Usage.OutputTokens),
+		UsageReported:         evt.Response.Usage.JSON.InputTokens.Valid() && evt.Response.Usage.JSON.OutputTokens.Valid(),
+		CachedInputTokens:     llm.ReportedTokenCount(evt.Response.Usage.InputTokensDetails.CachedTokens, evt.Response.Usage.InputTokensDetails.JSON.CachedTokens.Valid()),
+		CacheWriteInputTokens: llm.ReportedTokenCount(evt.Response.Usage.InputTokensDetails.CacheWriteTokens, evt.Response.Usage.InputTokensDetails.JSON.CacheWriteTokens.Valid()),
+		Model:                 evt.Response.Model,
+		Provider:              providerName,
+	}
 }
 
 func (p *Provider) streamResponses(ctx context.Context, req *llm.CompletionRequest) <-chan llm.StreamChunk {
@@ -955,6 +965,9 @@ func (p *Provider) completeChatCompletions(ctx context.Context, req *llm.Complet
 	result := &llm.CompletionResponse{Model: resp.Model, Provider: p.TelemetryProviderName(), ID: resp.ID}
 	result.InputTokens = int(resp.Usage.PromptTokens)
 	result.OutputTokens = int(resp.Usage.CompletionTokens)
+	result.UsageReported = resp.Usage.JSON.PromptTokens.Valid() && resp.Usage.JSON.CompletionTokens.Valid()
+	result.CachedInputTokens = llm.ReportedTokenCount(resp.Usage.PromptTokensDetails.CachedTokens, resp.Usage.PromptTokensDetails.JSON.CachedTokens.Valid())
+	result.CacheWriteInputTokens = llm.ReportedTokenCount(resp.Usage.PromptTokensDetails.CacheWriteTokens, resp.Usage.PromptTokensDetails.JSON.CacheWriteTokens.Valid())
 	if len(resp.Choices) > 0 {
 		choice := resp.Choices[0]
 		result.Content = choice.Message.Content
@@ -1034,6 +1047,8 @@ func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.
 		var legacyFunctionCallName strings.Builder
 		var legacyFunctionCallArgs strings.Builder
 		var inputTokens, outputTokens int
+		var cachedInputTokens, cacheWriteInputTokens *int64
+		var usageReported bool
 		streamModel := req.Model
 
 		for stream.Next() {
@@ -1082,9 +1097,16 @@ func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.
 			if strings.TrimSpace(chunk.ID) != "" {
 				legacyFunctionCallIDValue = chunk.ID
 			}
-			if chunk.JSON.Usage.Valid() && (chunk.Usage.PromptTokens > 0 || chunk.Usage.CompletionTokens > 0) {
+			if chunk.JSON.Usage.Valid() {
 				inputTokens = int(chunk.Usage.PromptTokens)
 				outputTokens = int(chunk.Usage.CompletionTokens)
+				usageReported = chunk.Usage.JSON.PromptTokens.Valid() && chunk.Usage.JSON.CompletionTokens.Valid()
+				cachedInputTokens = llm.ReportedTokenCount(chunk.Usage.PromptTokensDetails.CachedTokens, chunk.Usage.PromptTokensDetails.JSON.CachedTokens.Valid())
+				cacheWriteInputTokens = llm.ReportedTokenCount(chunk.Usage.PromptTokensDetails.CacheWriteTokens, chunk.Usage.PromptTokensDetails.JSON.CacheWriteTokens.Valid())
+				if !send(llm.StreamChunk{InputTokens: inputTokens, OutputTokens: outputTokens, CachedInputTokens: cachedInputTokens,
+					CacheWriteInputTokens: cacheWriteInputTokens, UsageReported: usageReported, Model: streamModel, Provider: p.TelemetryProviderName()}) {
+					return
+				}
 			}
 
 			if len(chunk.Choices) > 0 && chunk.Choices[0].FinishReason != "" {
@@ -1118,12 +1140,15 @@ func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.
 		}
 		finishReason = normalizeChatStreamStopReason(finishReason, hasContent, hasRefusal, hasToolCalls)
 		send(llm.StreamChunk{
-			Done:         true,
-			StopReason:   finishReason,
-			InputTokens:  inputTokens,
-			OutputTokens: outputTokens,
-			Model:        streamModel,
-			Provider:     p.TelemetryProviderName(),
+			Done:                  true,
+			StopReason:            finishReason,
+			InputTokens:           inputTokens,
+			OutputTokens:          outputTokens,
+			CachedInputTokens:     cachedInputTokens,
+			CacheWriteInputTokens: cacheWriteInputTokens,
+			UsageReported:         usageReported,
+			Model:                 streamModel,
+			Provider:              p.TelemetryProviderName(),
 		})
 	}()
 	return ch
@@ -1266,8 +1291,11 @@ func (p *Provider) Stream(ctx context.Context, req *llm.CompletionRequest) (<-ch
 		Messages:  []llm.Message{{Role: "user", Content: "hi"}},
 		MaxTokens: 1,
 	}
-	_, err := p.completeResponses(ctx, probeReq)
+	probe, err := p.completeResponses(ctx, probeReq)
 	if err == nil {
+		if err := llm.RecordIntermediateUsage(ctx, probe); err != nil {
+			return nil, err
+		}
 		p.mode.Store(int32(apiModeResponses))
 		return p.streamResponses(ctx, req), nil
 	}

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
@@ -19,6 +20,7 @@ const (
 	apiQueryThenBodyNamespace
 	apiBodyThenQueryNamespace
 	apiClusterScoped
+	apiUsageTeamNamespaces
 )
 
 // apiResourcePermission names the Kubernetes resource or documented virtual
@@ -65,6 +67,15 @@ func (p apiRoutePolicy) withStoreID() apiRoutePolicy {
 //
 //nolint:goconst // Literal permission tuples keep the route inventory auditable.
 var externalAPIPolicies = map[string]apiRoutePolicy{
+	"GET /api/v1/usage": coreAPIPolicy("list", "tasks", "",
+		apiResourcePermission{corev1alpha1.GroupVersion.Group, "repositorymonitors", "list", ""},
+		apiResourcePermission{corev1alpha1.GroupVersion.Group, "sessions", "list", ""}).inNamespace(apiUsageTeamNamespaces),
+	"GET /api/v1/usage/work/:id": coreAPIPolicy("list", "tasks", "",
+		apiResourcePermission{corev1alpha1.GroupVersion.Group, "repositorymonitors", "list", ""},
+		apiResourcePermission{corev1alpha1.GroupVersion.Group, "sessions", "list", ""}).inNamespace(apiUsageTeamNamespaces),
+	"GET /api/v1/usage/other/:category": coreAPIPolicy("list", "tasks", "",
+		apiResourcePermission{corev1alpha1.GroupVersion.Group, "repositorymonitors", "list", ""},
+		apiResourcePermission{corev1alpha1.GroupVersion.Group, "sessions", "list", ""}).inNamespace(apiUsageTeamNamespaces),
 	"POST /api/v1/tasks":              coreAPIPolicy("create", "tasks", "").inNamespace(apiCreateNamespace),
 	"GET /api/v1/tasks":               coreAPIPolicy("list", "tasks", ""),
 	"GET /api/v1/tasks/:id":           coreAPIPolicy("get", "tasks", "id"),
@@ -278,24 +289,65 @@ func (h *Handlers) checkExternalRoute(c fiber.Ctx, route string) error {
 	if policy.identityOnly || ui.AuthType != AuthTypeTokenReview {
 		return nil
 	}
-	namespace, err := h.externalRequestNamespace(c, policy)
+	namespaces, err := h.externalRequestNamespaces(c, policy)
 	if err != nil {
 		return err
 	}
-	for _, permission := range policy.permissions {
-		name := ""
-		if permission.nameParam != "" {
-			name = c.Params(permission.nameParam)
-		}
-		if policy.trimStoreID {
-			name = strings.TrimSpace(name)
-		}
-		if err := authorizeKubernetesResourceAction(c.Context(), h.clientset, ui,
-			namespace, permission.verb, permission.group, permission.resource, name); err != nil {
-			return err
+	for _, namespace := range namespaces {
+		for _, permission := range policy.permissions {
+			name := ""
+			if permission.nameParam != "" {
+				name = c.Params(permission.nameParam)
+			}
+			if policy.trimStoreID {
+				name = strings.TrimSpace(name)
+			}
+			if err := authorizeKubernetesResourceAction(c.Context(), h.clientset, ui,
+				namespace, permission.verb, permission.group, permission.resource, name); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
+}
+
+func (h *Handlers) externalRequestNamespaces(c fiber.Ctx, policy apiRoutePolicy) ([]string, error) {
+	if policy.namespace == apiUsageTeamNamespaces {
+		return h.usageTeamNamespaces(c)
+	}
+	namespace, err := h.externalRequestNamespace(c, policy)
+	if err != nil {
+		return nil, err
+	}
+	return []string{namespace}, nil
+}
+
+// usageTeamNamespaces keeps authorization and report selection on the same
+// namespace set. Explicit teams replace the namespace query/default.
+func (h *Handlers) usageTeamNamespaces(c fiber.Ctx) ([]string, error) {
+	raw := strings.TrimSpace(c.Query("teams"))
+	if raw == "" {
+		namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg))
+		if err != nil {
+			return nil, err
+		}
+		return []string{namespace}, nil
+	}
+	teams := strings.Split(raw, ",")
+	if len(teams) > 20 {
+		return nil, fiber.NewError(fiber.StatusBadRequest, "at most 20 teams may be selected")
+	}
+	for i := range teams {
+		teams[i] = strings.TrimSpace(teams[i])
+		if teams[i] == "" {
+			return nil, fiber.NewError(fiber.StatusBadRequest, "team namespace must not be empty")
+		}
+		if _, err := h.resolveNamespace(c, teams[i]); err != nil {
+			return nil, err
+		}
+	}
+	slices.Sort(teams)
+	return slices.Compact(teams), nil
 }
 
 func (h *Handlers) externalRequestNamespace(c fiber.Ctx, policy apiRoutePolicy) (string, error) {
