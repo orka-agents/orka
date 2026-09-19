@@ -33,11 +33,16 @@ function UsagePageContent({ namespace }: { namespace: string }) {
     queryKey: ['usage', namespace, filters, page],
     queryFn: () => api.get<UsageReport>('/usage', { namespace, ...filters, offset: String(page.offset), asOf: page.asOf, limit: '25' }),
     refetchInterval: page.asOf ? false : 60000,
+    // Keep expanded details mounted while pinning the report they already display.
+    placeholderData: (previous) => page.asOf && previous?.selection.asOf === page.asOf && previous.page.offset === page.offset ? previous : undefined,
   })
   function apply(event: FormEvent) {
     event.preventDefault()
     setFilters({ ...draft })
     setPage({ offset: 0, asOf: '' })
+  }
+  function pinReport() {
+    if (data) setPage((current) => ({ ...current, asOf: data.selection.asOf }))
   }
   return (
     <div className="space-y-6">
@@ -93,13 +98,13 @@ function UsagePageContent({ namespace }: { namespace: string }) {
           <h2 className="text-lg font-semibold">Work requests</h2>
           <p className="text-sm text-muted-foreground">Expand a request to inspect attempts and measurement gaps. Shared review usage appears in each linked request and counts once in team totals.</p>
           {data.works.length === 0 && <p>No issue-delivery requests in this cohort. Change the filters or run an issue-to-PR workflow to begin recording.</p>}
-          {data.works.map((work) => <WorkDetails key={work.id} work={work} selection={data.selection} />)}
+          {data.works.map((work) => <WorkDetails key={work.id} work={work} selection={data.selection} onPaginate={pinReport} />)}
           <PageControls label="Work requests" page={data.page} disabled={isFetching} onChange={(offset) => setPage({ offset, asOf: data.selection.asOf })} />
         </section>
         <section className="space-y-3" aria-label="Other team usage">
           <h2 className="text-lg font-semibold">Other team usage</h2>
           <p className="text-sm text-muted-foreground">Activity started in the selected period that is excluded from this delivery cohort.</p>
-          {data.otherWork.map((group) => <OtherDetails key={`${group.category}/${JSON.stringify(filters)}`} group={group} namespace={namespace} selection={data.selection} />)}
+          {data.otherWork.map((group) => <OtherDetails key={`${group.category}/${JSON.stringify(filters)}`} group={group} namespace={namespace} selection={data.selection} onPaginate={pinReport} />)}
         </section>
         {data.retainedSince && <p className="text-xs text-muted-foreground">Inactive cohorts may expire before {new Date(data.retainedSince).toLocaleDateString()}. Retained requests keep their earlier attempts.</p>}
       </>}
@@ -168,27 +173,27 @@ function PageControls({ label, page, onChange, disabled = false }: { label: stri
   </nav>
 }
 
-function PagedItems<T>({ label, items, renderItem }: { label: string; items: T[]; renderItem: (item: T) => ReactNode }) {
+function PagedItems<T>({ label, items, renderItem, onPaginate }: { label: string; items: T[]; renderItem: (item: T) => ReactNode; onPaginate: () => void }) {
   const [offset, setOffset] = useState(0)
   const start = Math.min(offset, Math.max(0, Math.ceil(items.length / 25) - 1) * 25)
   return <>
     {items.slice(start, start + 25).map(renderItem)}
-    <PageControls label={label} page={{ offset: start, limit: 25, total: items.length }} onChange={setOffset} />
+    <PageControls label={label} page={{ offset: start, limit: 25, total: items.length }} onChange={(nextOffset) => { onPaginate(); setOffset(nextOffset) }} />
   </>
 }
 
-function WorkDetails({ work, selection }: { work: UsageWorkSummary; selection: UsageSelection }) {
+function WorkDetails({ work, selection, onPaginate }: { work: UsageWorkSummary; selection: UsageSelection; onPaginate: () => void }) {
   const [open, setOpen] = useState(false)
   return <details className="rounded-lg border bg-card p-4" onToggle={(event) => setOpen(event.currentTarget.open)}>
     <summary className="cursor-pointer text-sm font-medium">
       {work.repository} #{work.number}<span className="ml-3 text-muted-foreground">{work.namespace}</span>
       <span className="ml-3 font-mono">{recordedTokens(work.summary)}</span>
     </summary>
-    {open && <WorkContent work={work} selection={selection} />}
+    {open && <WorkContent work={work} selection={selection} onPaginate={onPaginate} />}
   </details>
 }
 
-function WorkContent({ work: summary, selection }: { work: UsageWorkSummary; selection: UsageSelection }) {
+function WorkContent({ work: summary, selection, onPaginate }: { work: UsageWorkSummary; selection: UsageSelection; onPaginate: () => void }) {
   const params = { namespace: summary.namespace, ...selectionParams(selection) }
   const { data, error, isPending } = useQuery({
     queryKey: ['usage-work', summary.id, params],
@@ -205,7 +210,7 @@ function WorkContent({ work: summary, selection }: { work: UsageWorkSummary; sel
         <span>Models: {work.models?.join(', ') || 'Unavailable'}</span>
       </div>
       <MeasurementCoverage usage={work.summary} />
-      <PagedItems label="Pull requests" items={work.pullRequests || []} renderItem={(pr) => <div key={`${pr.repository}#${pr.number}`} className="space-y-1 border-l-2 border-primary/40 pl-3 text-sm">
+      <PagedItems label="Pull requests" items={work.pullRequests || []} onPaginate={onPaginate} renderItem={(pr) => <div key={`${pr.repository}#${pr.number}`} className="space-y-1 border-l-2 border-primary/40 pl-3 text-sm">
         <a href={pr.url} target="_blank" rel="noreferrer" className="text-primary underline">PR #{pr.number}</a>
         <span className="ml-2">{pr.origin === 'created' ? 'Created through Orka' : pr.origin === 'assisted' ? 'Linked assistance' : 'Review only'}</span>
         <Badge variant="outline" className="ml-2">{pr.ready ? 'Ready for merge' : pr.state}</Badge>
@@ -213,22 +218,22 @@ function WorkContent({ work: summary, selection }: { work: UsageWorkSummary; sel
         {pr.readinessReason && <p className="text-muted-foreground">{pr.readinessReason}</p>}
         {pr.observedAt && !pr.observedAt.startsWith('0001') && <p className="text-xs text-muted-foreground">Checked {new Date(pr.observedAt).toLocaleString()}</p>}
       </div>} />
-      <PagedItems label="Tasks" items={work.tasks || []} renderItem={(task) => <TaskDetails key={`${task.namespace}/${task.taskUID}`} task={task} />} />
+      <PagedItems label="Tasks" items={work.tasks || []} onPaginate={onPaginate} renderItem={(task) => <TaskDetails key={`${task.namespace}/${task.taskUID}`} task={task} onPaginate={onPaginate} />} />
     </div>
 }
 
-function OtherDetails({ group, namespace, selection }: { group: UsageOtherSummary; namespace: string; selection: UsageSelection }) {
+function OtherDetails({ group, namespace, selection, onPaginate }: { group: UsageOtherSummary; namespace: string; selection: UsageSelection; onPaginate: () => void }) {
   const [open, setOpen] = useState(false)
   return <details className="rounded-lg border bg-card p-4" onToggle={(event) => setOpen(event.currentTarget.open)}>
     <summary className="cursor-pointer text-sm font-medium">{otherTitle(group.category)} <span className="ml-2 font-mono text-muted-foreground">{group.taskCount ? recordedTokens(group.usage) : 'No recorded activity'}</span></summary>
     {open && <div className="mt-3 space-y-3">
       <p className="text-sm text-muted-foreground">{group.explanation}</p>
-      {group.taskCount > 0 && <OtherContent group={group} namespace={namespace} selection={selection} />}
+      {group.taskCount > 0 && <OtherContent group={group} namespace={namespace} selection={selection} onPaginate={onPaginate} />}
     </div>}
   </details>
 }
 
-function OtherContent({ group, namespace, selection }: { group: UsageOtherSummary; namespace: string; selection: UsageSelection }) {
+function OtherContent({ group, namespace, selection, onPaginate }: { group: UsageOtherSummary; namespace: string; selection: UsageSelection; onPaginate: () => void }) {
   const [offset, setOffset] = useState(0)
   const params = { namespace, ...selectionParams(selection), teams: selection.teams.join(','), offset: String(offset), limit: '25' }
   const { data, error, isPending, isFetching } = useQuery({
@@ -239,12 +244,12 @@ function OtherContent({ group, namespace, selection }: { group: UsageOtherSummar
   if (error) return <p role="alert" className="text-destructive">Usage details unavailable. {error.message}</p>
   if (isPending) return <p role="status">Loading usage details...</p>
   return <>
-    {data.otherWork.tasks?.map((task) => <TaskDetails key={`${task.namespace}/${task.taskUID}`} task={task} />)}
-    <PageControls label={`${otherTitle(group.category)} Tasks`} page={data.otherWork.page} disabled={isFetching} onChange={setOffset} />
+    {data.otherWork.tasks?.map((task) => <TaskDetails key={`${task.namespace}/${task.taskUID}`} task={task} onPaginate={onPaginate} />)}
+    <PageControls label={`${otherTitle(group.category)} Tasks`} page={data.otherWork.page} disabled={isFetching} onChange={(nextOffset) => { onPaginate(); setOffset(nextOffset) }} />
   </>
 }
 
-function TaskDetails({ task }: { task: UsageTask }) {
+function TaskDetails({ task, onPaginate }: { task: UsageTask; onPaginate: () => void }) {
   const [open, setOpen] = useState(false)
   const setNamespace = useUIStore((s) => s.setNamespace)
   return <details className="rounded-md border p-3 text-sm" onToggle={(event) => setOpen(event.currentTarget.open)}>
@@ -254,7 +259,7 @@ function TaskDetails({ task }: { task: UsageTask }) {
     {open && <div className="mt-3 space-y-3">
       {task.taskName && <Link to="/tasks/$taskId" params={{ taskId: task.taskName }} onClick={() => setNamespace(task.namespace)} className="text-primary underline">Open Task {task.taskName}</Link>}
       {task.sessionName && <Link to="/sessions/$sessionId" params={{ sessionId: task.sessionName }} onClick={() => setNamespace(task.namespace)} className="ml-3 text-primary underline">Session {task.sessionName}</Link>}
-      <PagedItems label="Measurements" items={task.measurements} renderItem={(m) => <div key={m.id} className="space-y-1 border-t pt-3">
+      <PagedItems label="Measurements" items={task.measurements} onPaginate={onPaginate} renderItem={(m) => <div key={m.id} className="space-y-1 border-t pt-3">
         <p>{m.provider || 'Provider unavailable'} / {m.model || 'Model unavailable'} · {m.source} · {m.scope} · {m.status}</p>
         <p className="break-all font-mono text-xs">Attempt {m.attemptID || m.id}</p>
         <p>Input {usageNumber(m.inputTokens)} · Output {usageNumber(m.outputTokens)} · Cached reads {usageNumber(m.cachedInputTokens)} · Cached writes {usageNumber(m.cacheWriteInputTokens)}</p>

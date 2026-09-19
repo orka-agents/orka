@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { http, HttpResponse } from 'msw'
 import userEvent from '@testing-library/user-event'
-import { render, screen, waitFor, within } from '@/test/test-utils'
+import { act, render, screen, waitFor, within } from '@/test/test-utils'
 import { server } from '@/test/mocks/server'
 import { useUIStore } from '@/stores/ui'
 import { useAuthStore } from '@/stores/auth'
@@ -131,6 +131,106 @@ describe('UsagePage', () => {
     await screen.findByText('chat-25', { exact: false, selector: 'summary' })
     expect(screen.queryByText('chat-0', { exact: false, selector: 'summary' })).not.toBeInTheDocument()
     expect(requests[1].searchParams.get('offset')).toBe('25')
+  })
+
+  it('keeps other usage pagination on one report snapshot until filters change', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    try {
+      const report = reportFixture()
+      const group = { category: 'unassociated', explanation: 'Usage without a work reference', usage: report.summary, taskCount: 51 }
+      report.otherWork = [group]
+      const summaryRequests: URL[] = []
+      const detailRequests: URL[] = []
+      server.use(
+        http.get('/api/v1/usage', ({ request }) => {
+          const url = new URL(request.url)
+          summaryRequests.push(url)
+          return HttpResponse.json(report)
+        }),
+        http.get('/api/v1/usage/other/unassociated', ({ request }) => {
+          const url = new URL(request.url)
+          detailRequests.push(url)
+          const offset = Number(url.searchParams.get('offset'))
+          return HttpResponse.json({ otherWork: { ...group, page: { offset, limit: 25, total: 51 },
+            tasks: [{ ...report.works[0].tasks![0], taskUID: `chat-${offset}`, taskName: `chat-${offset}` }] } })
+        }),
+      )
+      const user = userEvent.setup()
+      render(<UsagePage />)
+      await user.click(await screen.findByText('Chat and usage without a work reference'))
+      await screen.findByText('chat-0', { exact: false, selector: 'summary' })
+      await user.click(screen.getByRole('button', { name: 'Next Chat and usage without a work reference Tasks' }))
+      await screen.findByText('chat-25', { exact: false, selector: 'summary' })
+      await waitFor(() => expect(summaryRequests).toHaveLength(2))
+      expect(summaryRequests[1].searchParams.get('asOf')).toBe(report.selection.asOf)
+      expect(summaryRequests[1].searchParams.get('offset')).toBe('0')
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(60000) })
+      expect(summaryRequests).toHaveLength(2)
+      expect(screen.getByText('chat-25', { exact: false, selector: 'summary' })).toBeInTheDocument()
+      await user.click(screen.getByRole('button', { name: 'Next Chat and usage without a work reference Tasks' }))
+      await screen.findByText('chat-50', { exact: false, selector: 'summary' })
+      expect(detailRequests.map((request) => request.searchParams.get('offset'))).toEqual(['0', '25', '50'])
+      expect(detailRequests.every((request) => request.searchParams.get('asOf') === report.selection.asOf)).toBe(true)
+
+      await user.type(screen.getByLabelText('Model used by the request'), 'served-model')
+      await user.click(screen.getByRole('button', { name: 'Apply filters' }))
+      await waitFor(() => expect(summaryRequests).toHaveLength(3))
+      expect(summaryRequests.at(-1)?.searchParams.get('asOf')).toBeNull()
+      expect(screen.queryByText('chat-50', { exact: false, selector: 'summary' })).not.toBeInTheDocument()
+      await act(async () => { await vi.advanceTimersByTimeAsync(60000) })
+      await waitFor(() => expect(summaryRequests).toHaveLength(4))
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it.each([
+    { group: 'work', page: 'Pull requests', item: 'PR #126' },
+    { group: 'work', page: 'Tasks', item: 'task-25' },
+    { group: 'work', page: 'Measurements', item: 'Attempt call-25' },
+    { group: 'other', page: 'Measurements', item: 'Attempt call-25' },
+  ])('pins the report when paging $group $page', async ({ group, page, item }) => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    try {
+      const report = reportFixture()
+      const task = { ...report.works[0].tasks![0], measurements: Array.from({ length: 26 }, (_, i) => ({
+        ...report.works[0].tasks![0].measurements[0], id: `call-${i}`,
+      })) }
+      const work = { ...report.works[0],
+        pullRequests: Array.from({ length: 26 }, (_, i) => ({ ...report.works[0].pullRequests![0], number: 101 + i })),
+        tasks: Array.from({ length: 26 }, (_, i) => ({ ...task, taskUID: `task-${i}`, taskName: `task-${i}` })),
+      }
+      report.otherWork = [{ category: 'unassociated', explanation: 'Usage without a work reference', usage: report.summary, taskCount: 1 }]
+      const requests: URL[] = []
+      server.use(
+        http.get('/api/v1/usage', ({ request }) => {
+          requests.push(new URL(request.url))
+          return HttpResponse.json(report)
+        }),
+        http.get('/api/v1/usage/work/work-0', () => HttpResponse.json({ work })),
+        http.get('/api/v1/usage/other/unassociated', () => HttpResponse.json({ otherWork: {
+          ...report.otherWork[0], page: { limit: 25, offset: 0, total: 1 }, tasks: [task],
+        } })),
+      )
+      const user = userEvent.setup()
+      render(<UsagePage />)
+      await user.click(await screen.findByText(group === 'work' ? 'org/repo #1' : 'Chat and usage without a work reference'))
+      await screen.findByText('task-0', { exact: false, selector: 'summary' })
+      if (page === 'Measurements') {
+        await user.click(screen.getByText('task-0', { exact: false, selector: 'summary' }))
+        await screen.findByText('Attempt call-0')
+      }
+      await user.click(screen.getByRole('button', { name: `Next ${page}` }))
+      await screen.findByText(item, { exact: page !== 'Tasks', ...(page === 'Tasks' ? { selector: 'summary' } : {}) })
+      await waitFor(() => expect(requests).toHaveLength(2))
+      expect(requests[1].searchParams.get('asOf')).toBe(report.selection.asOf)
+      await act(async () => { await vi.advanceTimersByTimeAsync(60000) })
+      expect(requests).toHaveLength(2)
+      expect(screen.getByText(item, { exact: page !== 'Tasks', ...(page === 'Tasks' ? { selector: 'summary' } : {}) })).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('bounds mounted Tasks and measurements within a large work request', async () => {
