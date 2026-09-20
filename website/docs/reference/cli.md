@@ -29,7 +29,16 @@ Most commands accept these global flags:
 | `--txn-token-file` | Read a transaction token from a file, or `-` for stdin. |
 | `--kubeconfig` | Kubeconfig path used for local discovery/token extraction fallback. |
 
-The CLI reads persistent config from `~/.orka/config.yaml`:
+The CLI reads persistent config from `~/.orka/config.yaml`. Set `ORKA_CONFIG_FILE`
+to read and write another config file. If that file is missing, the config
+starts empty, without falling back to the home config. Kubeconfig discovery
+and the port-forward cache keep their existing locations.
+
+```bash
+export ORKA_CONFIG_FILE="$HOME/.config/orka-work/config.yaml"
+```
+
+Configure the selected file with:
 
 ```bash
 orka config set-server http://127.0.0.1:8080

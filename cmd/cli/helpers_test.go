@@ -48,11 +48,106 @@ func TestMaskToken(t *testing.T) {
 func TestConfigPath(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
+	t.Setenv("ORKA_CONFIG_FILE", "")
 
 	got := configPath()
 	want := filepath.Join(tmp, ".orka", "config.yaml")
 	if got != want {
 		t.Errorf("configPath() = %q, want %q", got, want)
+	}
+}
+
+func TestConfigFileOverride(t *testing.T) {
+	originalPath := filepath.Join(t.TempDir(), "original-config.yaml")
+	t.Setenv("ORKA_CONFIG_FILE", originalPath)
+	if got := configPath(); got != originalPath {
+		t.Fatalf("configPath() = %q, want %q", got, originalPath)
+	}
+	original := orkaConfig{Server: "http://original.example", Token: "original-test-token"}
+	if err := saveConfig(original); err != nil {
+		t.Fatalf("save original config: %v", err)
+	}
+
+	privateDir := filepath.Join(t.TempDir(), "private")
+	privatePath := filepath.Join(privateDir, "custom-config.yaml")
+	t.Setenv("ORKA_CONFIG_FILE", privatePath)
+	if got := configPath(); got != privatePath {
+		t.Fatalf("configPath() = %q, want %q", got, privatePath)
+	}
+	if cfg := loadConfig(); cfg != (orkaConfig{}) {
+		t.Fatal("a missing private config must not reuse the previous config")
+	}
+	private := orkaConfig{Namespace: "private-namespace"}
+	if err := saveConfig(private); err != nil {
+		t.Fatalf("save private config: %v", err)
+	}
+	if got := loadConfig(); got != private {
+		t.Fatal("private config was not saved and loaded")
+	}
+	for path, want := range map[string]os.FileMode{
+		privateDir:   0o700,
+		configPath(): 0o600,
+	} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Errorf("%s permissions = %o, want %o", path, got, want)
+		}
+	}
+
+	t.Setenv("ORKA_CONFIG_FILE", originalPath)
+	if got := loadConfig(); got != original {
+		t.Fatal("the original config changed")
+	}
+}
+
+func TestPrivateConfigWithKubeconfigTokenFile(t *testing.T) {
+	privateDir := t.TempDir()
+	t.Setenv("ORKA_CONFIG_FILE", filepath.Join(privateDir, configFile))
+	if got, want := configPath(), filepath.Join(privateDir, configFile); got != want {
+		t.Fatalf("configPath() = %q, want %q", got, want)
+	}
+	tokenPath := filepath.Join(privateDir, "credential")
+	if err := os.WriteFile(tokenPath, []byte("token-file-test-value"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	config := clientcmdapi.NewConfig()
+	config.CurrentContext = testCtxName
+	config.Contexts[testCtxName] = &clientcmdapi.Context{
+		Cluster: "test-cluster", AuthInfo: "test-user", Namespace: "private-namespace",
+	}
+	config.Clusters["test-cluster"] = &clientcmdapi.Cluster{Server: "https://k8s.example.com"}
+	config.AuthInfos["test-user"] = &clientcmdapi.AuthInfo{TokenFile: tokenPath}
+	kubePath := filepath.Join(privateDir, "kubeconfig")
+	if err := clientcmd.WriteToFile(*config, kubePath); err != nil {
+		t.Fatalf("write kubeconfig: %v", err)
+	}
+
+	requested := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requested <- struct{}{}
+		if r.URL.Path != "/api/v1/tasks" || r.URL.Query().Get("namespace") != "private-namespace" {
+			t.Errorf("unexpected request: %s", r.URL)
+		}
+		if r.Header.Get("Authorization") != "Bearer token-file-test-value" {
+			t.Error("request did not use the kubeconfig token file")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"items":[]}`))
+	}))
+	defer srv.Close()
+
+	root := newRootCmd()
+	root.SetArgs([]string{"--server", srv.URL, "--kubeconfig", kubePath, "task", "list", "-o", "json"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+	select {
+	case <-requested:
+	default:
+		t.Fatal("the CLI did not make a request")
 	}
 }
 

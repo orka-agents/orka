@@ -393,6 +393,9 @@ func buildRESTConfig(kubeconfigPath string) (*rest.Config, error) {
 
 // configPath returns the full path to the config file.
 func configPath() string {
+	if path := os.Getenv("ORKA_CONFIG_FILE"); path != "" {
+		return path
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
