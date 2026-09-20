@@ -1,0 +1,24 @@
+{
+  "project_name": "Orka Hackathon First Pass",
+  "timeline_name": "Orka First pass",
+  "output_name": "orka-hackathon-first-pass",
+  "fps": 30,
+  "width": 1920,
+  "height": 1080,
+  "scenes": [
+    {"id": "00-intro", "title": "Run agent teams. Stay in control.", "path": "../../../bin/hackathon-first-pass/media/00-intro.mp4", "frames": 300},
+    {"id": "01-schedule", "title": "A scheduled scan starts the work", "path": "../../../bin/hackathon-first-pass/terminal/01-schedule.mp4", "frames": 420},
+    {"id": "02-discovery", "title": "Reliability finds a source-code vulnerability", "path": "../../../bin/hackathon-first-pass/terminal/02-discovery.mp4", "frames": 510},
+    {"id": "03-teams", "title": "A colleague asks Orka Bot what needs attention", "path": "../../../bin/hackathon-first-pass/teams/03-teams.mp4", "frames": 480},
+    {"id": "04-request", "title": "A person chooses the fix", "path": "../../../bin/hackathon-first-pass/teams/04-request.mp4", "frames": 90},
+    {"id": "04-handoff", "title": "A demo bridge hands the finding to Engineering", "path": "../../../bin/hackathon-first-pass/terminal/04-handoff.mp4", "frames": 210},
+    {"id": "05-patch", "title": "Engineering prepares the patch and runs checks", "path": "../../../bin/hackathon-first-pass/terminal/05-patch.mp4", "frames": 390},
+    {"id": "06-delivery", "title": "A pull request with a recorded delivery outcome", "path": "../../../bin/hackathon-first-pass/terminal/06-delivery.mp4", "frames": 420},
+    {"id": "07-usage", "title": "Reported usage and visible measurement gaps", "path": "../../../bin/hackathon-first-pass/terminal/07-usage.mp4", "frames": 210},
+    {"id": "08-gateways", "title": "Connect other channels through gateway adapters", "path": "../../../bin/hackathon-first-pass/media/08-gateways.mp4", "frames": 300},
+    {"id": "09-outro", "title": "Orka", "path": "../../../bin/hackathon-first-pass/media/09-outro.mp4", "frames": 210}
+  ],
+  "audio": [
+    {"path": "../../../bin/hackathon-first-pass/audio/voiceover-timeline.wav", "record_frame": 0, "frames": 3540, "track": 1}
+  ]
+}

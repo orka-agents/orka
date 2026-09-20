@@ -1,0 +1,45 @@
+{
+  "status": "First-pass narration verified against the scheduled scan, recorded Orka Bot conversation, Engineering task, and PR #36. The explicit demo bridge and usage gaps remain visible.",
+  "scenes": [
+    {
+      "id": "00-intro",
+      "text": "Orka is an execution and governance layer for AI agents. It runs specialized agents as teams, on infrastructure you control."
+    },
+    {
+      "id": "01-schedule",
+      "text": "Here, a scheduled scan starts on its own. The reliability team examines a demo application for vulnerabilities in the source code."
+    },
+    {
+      "id": "02-discovery",
+      "text": "Agents map the code, trace user input, and validate suspected issues against the source. Each retained finding includes evidence, so the next team has something concrete to act on."
+    },
+    {
+      "id": "03-teams",
+      "text": "A colleague opens Microsoft Teams and asks what needs attention. Orka explains the finding and its evidence in the same conversation."
+    },
+    {
+      "id": "04-handoff",
+      "text": "A person chooses the fix. A small demo bridge passes the finding to Engineering, under that team's own permissions."
+    },
+    {
+      "id": "05-patch",
+      "text": "Engineering's coding agent prepares the patch and runs checks. Orka handles publication separately, so the coding agent does not need Git credentials."
+    },
+    {
+      "id": "06-delivery",
+      "text": "The result is a real pull request, with a recorded delivery outcome and validation evidence. Reviewers can inspect exactly what changed."
+    },
+    {
+      "id": "07-usage",
+      "text": "Orka records task outcomes and available model usage, making the work measurable."
+    },
+    {
+      "id": "08-gateways",
+      "text": "Teams is one example. Orka's gateway protocol lets adapters connect other channels, including Slack or Telegram."
+    },
+    {
+      "id": "09-outro",
+      "text": "Orka. Run agent teams. Stay in control."
+    }
+  ]
+}

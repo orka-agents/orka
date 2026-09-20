@@ -1,0 +1,17 @@
+{
+  "status": "Suggested first-pass edit. Scene claims still require workflow verification.",
+  "frames_per_second": 30,
+  "voice_lead_in_frames": 12,
+  "scenes": [
+    {"id": "00-intro", "frames": 300},
+    {"id": "01-schedule", "frames": 420},
+    {"id": "02-discovery", "frames": 510},
+    {"id": "03-teams", "frames": 480},
+    {"id": "04-handoff", "frames": 300},
+    {"id": "05-patch", "frames": 390},
+    {"id": "06-delivery", "frames": 420},
+    {"id": "07-usage", "frames": 210},
+    {"id": "08-gateways", "frames": 300},
+    {"id": "09-outro", "frames": 210}
+  ]
+}
