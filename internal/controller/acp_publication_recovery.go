@@ -181,7 +181,7 @@ func (d *ACPDispatcher) recoverPublicationPreparing(
 		},
 	}
 	identity := store.ExternalEffectIdentity{
-		Kind: "publisher.prepare", Namespace: recovery.task.Namespace, AggregateID: publication.ID, OperationID: operation,
+		Kind: publisherPrepareOperation, Namespace: recovery.task.Namespace, AggregateID: publication.ID, OperationID: operation,
 	}
 	response, err := runACPExternalEffect(ctx, d, recovery.fence, identity, request, func(callCtx context.Context) (publisherservice.PublicationPrepareResponse, error) {
 		return d.Publisher.PreparePublication(callCtx, request)
@@ -279,7 +279,7 @@ func (d *ACPDispatcher) recoverPublicationPublishing(
 		Request:       publishRequest,
 	}
 	response, callErr := runACPExternalEffect(ctx, d, recovery.fence, store.ExternalEffectIdentity{
-		Kind: "publisher.publish", Namespace: recovery.task.Namespace, AggregateID: publication.ID, OperationID: operation,
+		Kind: publisherPublishOperation, Namespace: recovery.task.Namespace, AggregateID: publication.ID, OperationID: operation,
 	}, serviceRequest, func(callCtx context.Context) (publisherservice.PublicationPublishResponse, error) {
 		return d.Publisher.Publish(callCtx, serviceRequest)
 	})
@@ -319,7 +319,7 @@ func (d *ACPDispatcher) recoverPublicationVerifying(
 		},
 	}
 	response, callErr := runACPExternalEffect(ctx, d, recovery.fence, store.ExternalEffectIdentity{
-		Kind: "publisher.verify", Namespace: recovery.task.Namespace, AggregateID: publication.ID, OperationID: operation,
+		Kind: publisherVerifyOperation, Namespace: recovery.task.Namespace, AggregateID: publication.ID, OperationID: operation,
 	}, verifyRequest, func(callCtx context.Context) (publisherservice.PublicationVerifyResponse, error) {
 		return d.Publisher.Verify(callCtx, verifyRequest)
 	})
@@ -335,13 +335,13 @@ func (d *ACPDispatcher) recoverPublicationVerifying(
 			reason = ""
 		}
 	} else if err := settleACPExternalEffect(ctx, d, recovery.fence, store.ExternalEffectIdentity{
-		Kind: "publisher.verify", Namespace: recovery.task.Namespace, AggregateID: publication.ID, OperationID: operation,
+		Kind: publisherVerifyOperation, Namespace: recovery.task.Namespace, AggregateID: publication.ID, OperationID: operation,
 	}, store.ExternalEffectOutcomeUnknown, nil); err != nil {
 		return nil, err
 	}
 	if publication.PublishReceipt != nil && publication.PublishReceipt.AcknowledgementUnknown {
 		publishOperation := publicationOperationID("publish", recovery.task)
-		publishIdentity := store.ExternalEffectIdentity{Kind: "publisher.publish", Namespace: recovery.task.Namespace, AggregateID: publication.ID, OperationID: publishOperation}
+		publishIdentity := store.ExternalEffectIdentity{Kind: publisherPublishOperation, Namespace: recovery.task.Namespace, AggregateID: publication.ID, OperationID: publishOperation}
 		if verification.Outcome == store.PublicationVerifiedExact || verification.Outcome == store.PublicationDeliveredSuperseded {
 			reconciled := publisherservice.PublicationPublishResponse{
 				OperationID: publishOperation, RequestDigest: publication.PublishReceipt.RequestDigest,
@@ -371,7 +371,7 @@ func (d *ACPDispatcher) recoverPublicationVerifying(
 			PublicationGeneration: publication.Generation, ExpectedHeadSHA: verification.ObservedRemote.SHA,
 		}
 		intentOperation := publicationOperationID("pr-intent", recovery.task)
-		intentDigest, digestErr := acpDomainDigest("publication-pr-intent", map[string]any{"publicationID": publication.ID, "intent": intent})
+		intentDigest, digestErr := acpDomainDigest("publication-pr-intent", map[string]any{publicationIDField: publication.ID, intentField: intent})
 		if digestErr != nil {
 			return nil, digestErr
 		}
@@ -419,13 +419,13 @@ func (d *ACPDispatcher) recoverPublicationPullRequest(
 		return nil, nil, "", err
 	}
 	prResponse, err := runACPExternalEffect(ctx, d, recovery.fence, store.ExternalEffectIdentity{
-		Kind: "publisher.pull-request", Namespace: recovery.task.Namespace, AggregateID: publication.ID, OperationID: prOperation,
+		Kind: publisherPullRequestOperation, Namespace: recovery.task.Namespace, AggregateID: publication.ID, OperationID: prOperation,
 	}, prRequest, func(callCtx context.Context) (publisherservice.PullRequestReconcileResponse, error) {
 		return d.Publisher.ReconcilePullRequest(callCtx, prRequest)
 	})
 	if err != nil {
 		if settleErr := settleACPExternalEffect(ctx, d, recovery.fence, store.ExternalEffectIdentity{
-			Kind: "publisher.pull-request", Namespace: recovery.task.Namespace, AggregateID: publication.ID, OperationID: prOperation,
+			Kind: publisherPullRequestOperation, Namespace: recovery.task.Namespace, AggregateID: publication.ID, OperationID: prOperation,
 		}, store.ExternalEffectOutcomeUnknown, nil); settleErr != nil {
 			return nil, nil, "", settleErr
 		}
@@ -442,7 +442,7 @@ func (d *ACPDispatcher) recoverPublicationPullRequest(
 		ReconciledAt: time.Now().UTC(),
 	}
 	receiptOp := publicationOperationID("pr-receipt", recovery.task)
-	receiptDigest, err := acpDomainDigest("publication-pr-receipt", map[string]any{"publicationID": publication.ID, "receipt": receipt})
+	receiptDigest, err := acpDomainDigest("publication-pr-receipt", map[string]any{publicationIDField: publication.ID, "receipt": receipt})
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -465,7 +465,7 @@ func (d *ACPDispatcher) persistedPullRequestRequest(
 		return request, fmt.Errorf("external-effect store is required")
 	}
 	identity := store.ExternalEffectIdentity{
-		Kind: "publisher.pull-request", Namespace: request.Metadata.Namespace,
+		Kind: publisherPullRequestOperation, Namespace: request.Metadata.Namespace,
 		AggregateID: request.Metadata.PublicationID, OperationID: request.Metadata.OperationID,
 	}
 	id, err := identity.CanonicalID()

@@ -18,6 +18,20 @@ import (
 )
 
 const (
+	openCodeToolEdit = "edit"
+)
+
+const (
+	openCodeToolBash       = "bash"
+	openCodeToolApplyPatch = "apply_patch"
+	openCodeToolGlob       = "glob"
+	openCodeToolGrep       = "grep"
+	openCodeToolWrite      = "write"
+	noBrowserEnv           = "NO_BROWSER"
+	protocolNameField      = "name"
+)
+
+const (
 	providerKindCodex            = "codex"
 	providerKindClaude           = "claude"
 	providerKindCopilot          = "copilot"
@@ -108,6 +122,7 @@ const (
 	defaultWorkspaceDeltaUploadBytes      int64 = 100 << 20
 )
 
+//nolint:gocyclo // Keep environment defaults, overrides, and derived runtime limits together.
 func LoadConfigFromEnv() (Config, error) {
 	providerKind := requiredEnv(EnvProvider)
 	model := requiredEnv(EnvModel)
@@ -147,7 +162,7 @@ func LoadConfigFromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	limits := defaultProtocolLimits(providerKind)
+	limits := defaultProtocolLimits()
 	durableWorkspaceKey := strings.TrimSpace(os.Getenv(EnvDurableWorkspaceKey))
 	if durableWorkspaceKey != "" {
 		// A stable data key belongs to one dedicated workspace. Enforce its
@@ -507,10 +522,10 @@ func claudeSessionProjection(
 }
 
 var copilotToolIDs = map[string][]string{
-	providerToolBash:      {"bash", "list_bash", "read_bash", "stop_bash", "write_bash"},
-	providerToolEdit:      {"edit", "str_replace_editor", "apply_patch"},
-	providerToolGlob:      {"glob"},
-	providerToolGrep:      {"grep", "rg"},
+	providerToolBash:      {openCodeToolBash, "list_bash", "read_bash", "stop_bash", "write_bash"},
+	providerToolEdit:      {openCodeToolEdit, "str_replace_editor", openCodeToolApplyPatch},
+	providerToolGlob:      {openCodeToolGlob},
+	providerToolGrep:      {openCodeToolGrep, "rg"},
 	providerToolRead:      {"view"},
 	providerToolWebFetch:  {"web_fetch"},
 	providerToolWebSearch: {"web_search"},
@@ -620,7 +635,7 @@ func openCodeSessionProjection(
 			continue
 		}
 		switch strings.ToLower(strings.TrimSpace(descriptor.Name)) {
-		case "apply_patch", "bash", "edit", "glob", "grep", "read", "write":
+		case openCodeToolApplyPatch, openCodeToolBash, openCodeToolEdit, openCodeToolGlob, openCodeToolGrep, "read", openCodeToolWrite:
 		default:
 			return ProviderSessionProjection{}, fmt.Errorf(
 				"provider-native tool %q is not supported by the opencode projection",
@@ -658,7 +673,7 @@ func providerProfile(
 					return nil, err
 				}
 				return map[string]string{
-					"NO_BROWSER": "1", "CODEX_PATH": "/opt/codex/bin/codex", "CODEX_HOME": filepath.Join(paths.Home, ".codex"),
+					noBrowserEnv: "1", "CODEX_PATH": "/opt/codex/bin/codex", "CODEX_HOME": filepath.Join(paths.Home, ".codex"),
 					"CODEX_CONFIG": string(config), "INITIAL_AGENT_MODE": mode, "CODEX_API_KEY": proxy.Credential,
 				}, nil
 			},
@@ -674,7 +689,7 @@ func providerProfile(
 			EnvironmentForSession: func(_ harnessv2.CreateRuntimeSessionRequest, paths acp.SessionPaths, proxy ProviderProxyBinding) (map[string]string, error) {
 				return map[string]string{
 					"CLAUDE_CONFIG_DIR": filepath.Join(paths.Home, ".claude"), "CLAUDE_CODE_EXECUTABLE": "/opt/claude/bin/claude",
-					"NO_BROWSER": "1", "DISABLE_UPDATES": "1", "DISABLE_AUTOUPDATER": "1", "DISABLE_INSTALLATION_CHECKS": "1",
+					noBrowserEnv: "1", "DISABLE_UPDATES": "1", "DISABLE_AUTOUPDATER": "1", "DISABLE_INSTALLATION_CHECKS": "1",
 					"ANTHROPIC_BASE_URL": proxy.BaseURL, "ANTHROPIC_API_KEY": proxy.Credential, "ANTHROPIC_MODEL": model,
 				}, nil
 			},
@@ -732,7 +747,7 @@ func providerProfile(
 				}
 				return map[string]string{
 					"CI":                                        "true",
-					"NO_BROWSER":                                "1",
+					noBrowserEnv:                                "1",
 					"OPENCODE_AUTH_CONTENT":                     "{}",
 					"OPENCODE_CONFIG_CONTENT":                   string(config),
 					"OPENCODE_CONFIG_DIR":                       filepath.Join(paths.Config, "opencode"),
@@ -817,7 +832,7 @@ func openCodeSessionConfig(
 		"webfetch":           openCodePermissionDeny,
 		"websearch":          openCodePermissionDeny,
 	}
-	for _, permission := range []string{"bash", "glob", "grep", "read"} {
+	for _, permission := range []string{openCodeToolBash, openCodeToolGlob, openCodeToolGrep, "read"} {
 		if openCodeToolPolicyAllows(toolPolicy, permission) {
 			permissions[permission] = openCodePermissionAllow
 		} else {
@@ -828,7 +843,7 @@ func openCodeSessionConfig(
 	if openCodeMutationPolicyAllows(toolPolicy) {
 		mutationAction = openCodePermissionAllow
 	}
-	for _, permission := range []string{"apply_patch", "edit", "write"} {
+	for _, permission := range []string{openCodeToolApplyPatch, openCodeToolEdit, openCodeToolWrite} {
 		permissions[permission] = mutationAction
 	}
 	brokeredPermissions, err := openCodeBrokeredPermissions(toolPolicy)
@@ -851,11 +866,11 @@ func openCodeSessionConfig(
 		}
 	}
 	if intent == harnessv2.WorkspaceIntentRead {
-		permissions["apply_patch"] = openCodePermissionDeny
-		permissions["bash"] = openCodePermissionDeny
-		permissions["edit"] = openCodePermissionDeny
-		permissions["grep"] = openCodePermissionDeny
-		permissions["write"] = openCodePermissionDeny
+		permissions[openCodeToolApplyPatch] = openCodePermissionDeny
+		permissions[openCodeToolBash] = openCodePermissionDeny
+		permissions[openCodeToolEdit] = openCodePermissionDeny
+		permissions[openCodeToolGrep] = openCodePermissionDeny
+		permissions[openCodeToolWrite] = openCodePermissionDeny
 	}
 	return json.Marshal(map[string]any{
 		// Native ACP returns before background title inference settles. Titles
@@ -877,10 +892,10 @@ func openCodeSessionConfig(
 		"subagent_depth":    0,
 		"provider": map[string]any{
 			openCodeProviderID: map[string]any{
-				"env":       []string{},
-				"name":      "Orka session proxy",
-				"npm":       "@ai-sdk/openai-compatible",
-				"whitelist": []string{model},
+				"env":             []string{},
+				protocolNameField: "Orka session proxy",
+				"npm":             "@ai-sdk/openai-compatible",
+				"whitelist":       []string{model},
 				"models": map[string]any{
 					model: map[string]any{
 						"limit": map[string]int64{
@@ -926,7 +941,7 @@ func openCodeBrokeredPermissions(policy harnessv2.MCPToolPolicy) (map[string]boo
 // openCodeMutationPolicyAllows consumes the controller-normalized mutation
 // group. Any denied alias closes the entire shared OpenCode edit permission.
 func openCodeMutationPolicyAllows(policy harnessv2.MCPToolPolicy) bool {
-	mutationPermissions := []string{"apply_patch", "edit", "write"}
+	mutationPermissions := []string{openCodeToolApplyPatch, openCodeToolEdit, openCodeToolWrite}
 	for _, denied := range policy.DisallowedToolNames {
 		for _, permission := range mutationPermissions {
 			if strings.EqualFold(denied, permission) {
@@ -1018,7 +1033,7 @@ func copilotAdapterIdentity(goarch string) (string, string, error) {
 	}
 }
 
-func defaultProtocolLimits(provider string) harnessv2.ProtocolLimits {
+func defaultProtocolLimits() harnessv2.ProtocolLimits {
 	maxUpdates := runtimeMaxUpdateEventsPerSecond
 	return harnessv2.ProtocolLimits{
 		MaxResidentSessions: 10, MaxConcurrentPrompts: 4, MaxRequestBytes: 2 << 20,

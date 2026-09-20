@@ -33,6 +33,10 @@ import (
 )
 
 const (
+	credentialRoleSourceRead = "source-read"
+)
+
+const (
 	defaultTaskUpdateScope = "orka:tasks:update"
 
 	// ContextTokenAuthorizationModeOff disables context-token authorization checks.
@@ -1722,7 +1726,7 @@ func contextTokenWorkspaceCredentialFailures(token *ContextToken, cfg ContextTok
 		role string
 		ref  *corev1alpha1.WorkspaceCredentialReference
 	}{
-		{role: "source-read", ref: workspace.ReadCredentialRef},
+		{role: credentialRoleSourceRead, ref: workspace.ReadCredentialRef},
 		{role: "target-read", ref: workspace.PublicationReadCredentialRef},
 		{role: "target-write", ref: workspace.PublicationCredentialRef},
 		{role: "forge", ref: workspace.ForgeCredentialRef},

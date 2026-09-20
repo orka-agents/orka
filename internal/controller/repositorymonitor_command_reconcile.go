@@ -14,6 +14,10 @@ import (
 )
 
 const (
+	commandEventIDField = "commandEventID"
+)
+
+const (
 	repositoryMonitorTriggerLabelCommand = "github_label_command"
 	repositoryMonitorCommandRetryDelay   = 30 * time.Second
 	repositoryMonitorCommandMaxRetries   = 3
@@ -58,7 +62,7 @@ func (r *RepositoryMonitorReconciler) enqueueAcceptedRepositoryMonitorCommands(c
 				return queued, err
 			}
 			queued = true
-			if err := r.createMonitorEvent(ctx, monitor, run.ID, command.Kind, command.Number, command.HeadSHA, "command_run_queued", fmt.Sprintf("Queued monitor run for accepted command %s", command.ID), map[string]any{"commandEventID": command.ID, "intent": command.Intent}); err != nil {
+			if err := r.createMonitorEvent(ctx, monitor, run.ID, command.Kind, command.Number, command.HeadSHA, "command_run_queued", fmt.Sprintf("Queued monitor run for accepted command %s", command.ID), map[string]any{commandEventIDField: command.ID, intentField: command.Intent}); err != nil {
 				return queued, err
 			}
 		}
@@ -69,6 +73,7 @@ func (r *RepositoryMonitorReconciler) enqueueAcceptedRepositoryMonitorCommands(c
 	}
 }
 
+//nolint:gocyclo // Command recovery must settle existing runs before permitting the next queued run.
 func (r *RepositoryMonitorReconciler) ensureNoExistingCommandRunBlocksQueue(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command store.CommandEvent, runID string) (bool, bool, error) {
 	terminal, err := r.repositoryMonitorCommandWorkActionTerminal(ctx, monitor, command)
 	if err != nil || terminal {
@@ -141,7 +146,7 @@ func (r *RepositoryMonitorReconciler) ensureNoExistingCommandRunBlocksQueue(ctx 
 		return true, true, nil
 	}
 	if repositoryMonitorFailedCommandRunRetryable(run.Error) {
-		events, _, err := r.Store.ListMonitorEvents(ctx, store.MonitorEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, RunID: run.ID, EventType: "run_failed", Limit: repositoryMonitorCommandMaxRetries})
+		events, _, err := r.Store.ListMonitorEvents(ctx, store.MonitorEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, RunID: run.ID, EventType: repositoryMonitorRunFailurePermanent, Limit: repositoryMonitorCommandMaxRetries})
 		if err != nil {
 			return false, false, err
 		}
@@ -264,7 +269,7 @@ func (r *RepositoryMonitorReconciler) terminalizeRepositoryMonitorFailedCommand(
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return err
 	}
-	return r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, &command, command.Kind, command.Number, command.HeadSHA, command.IssueSnapshotDigest, actionKind, repositoryMonitorWorkActionStatusFailed, "run_failed", "", reason)
+	return r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, &command, command.Kind, command.Number, command.HeadSHA, command.IssueSnapshotDigest, actionKind, repositoryMonitorWorkActionStatusFailed, repositoryMonitorRunFailurePermanent, "", reason)
 }
 
 func (r *RepositoryMonitorReconciler) terminalizeRepositoryMonitorAutomerge(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command store.CommandEvent, reason string) (bool, error) {

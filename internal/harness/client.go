@@ -19,6 +19,12 @@ import (
 	"github.com/orka-agents/orka/internal/events"
 )
 
+const (
+	traceFieldTurnID           = "turnID"
+	traceFieldVersion          = "version"
+	traceFieldRuntimeSessionID = "runtimeSessionID"
+)
+
 // MaxFetchTurnOutputBytes is the controller client's hard cap for referenced
 // harness output payloads. Runtime readiness must reject a larger advertised
 // maximum so accepted turns cannot become permanently stuck while settling.
@@ -147,12 +153,12 @@ func (c *Client) validateDurableTurnStatus(expectedTurnID HarnessTurnID, status 
 		return fmt.Errorf("wrapper returned incomplete durable turn status")
 	}
 	for name, value := range map[string]string{
-		"turnID":        status.TurnID,
-		"taskUID":       status.TaskUID,
-		"attempt":       strconv.FormatInt(int64(status.Attempt), 10),
-		"requestDigest": status.RequestDigest,
-		"state":         string(status.State),
-		"updatedAt":     status.UpdatedAt.Format(time.RFC3339Nano),
+		traceFieldTurnID: status.TurnID,
+		"taskUID":        status.TaskUID,
+		"attempt":        strconv.FormatInt(int64(status.Attempt), 10),
+		"requestDigest":  status.RequestDigest,
+		"state":          string(status.State),
+		"updatedAt":      status.UpdatedAt.Format(time.RFC3339Nano),
 	} {
 		if c.structuralValueContainsSensitiveData(value) {
 			return fmt.Errorf("wrapper durable turn status field %s contains sensitive data", name)
@@ -201,12 +207,12 @@ func (c *Client) validateDurableTurnStatus(expectedTurnID HarnessTurnID, status 
 
 func (c *Client) validateDurableTerminalReceiptSensitiveData(receipt DurableTurnTerminalReceipt) error {
 	values := map[string]string{
-		"version":          receipt.Version,
-		"kind":             string(receipt.Kind),
-		"runtimeSessionID": string(receipt.RuntimeSessionID),
-		"turnID":           string(receipt.TurnID),
-		"correlationID":    receipt.CorrelationID,
-		"seq":              strconv.FormatInt(receipt.Seq, 10),
+		traceFieldVersion:          receipt.Version,
+		"kind":                     string(receipt.Kind),
+		traceFieldRuntimeSessionID: string(receipt.RuntimeSessionID),
+		traceFieldTurnID:           string(receipt.TurnID),
+		"correlationID":            receipt.CorrelationID,
+		"seq":                      strconv.FormatInt(receipt.Seq, 10),
 	}
 	if receipt.Completed != nil {
 		values["completed.result"] = receipt.Completed.Result
@@ -323,11 +329,11 @@ func (c *Client) AbortDurableRollover(
 
 func (c *Client) sanitizeHealthResponse(response HealthResponse) (HealthResponse, error) {
 	for name, value := range map[string]string{
-		"version":          response.Version,
-		"status":           string(response.Status),
-		"runtimeSessionID": string(response.RuntimeSessionID),
-		"ready":            strconv.FormatBool(response.Ready),
-		"checkedAt":        response.CheckedAt.Format(time.RFC3339Nano),
+		traceFieldVersion:          response.Version,
+		"status":                   string(response.Status),
+		traceFieldRuntimeSessionID: string(response.RuntimeSessionID),
+		"ready":                    strconv.FormatBool(response.Ready),
+		"checkedAt":                response.CheckedAt.Format(time.RFC3339Nano),
 	} {
 		if c.structuralValueContainsSensitiveData(value) {
 			return HealthResponse{}, fmt.Errorf("harness health structural field %s contains sensitive data", name)
@@ -340,7 +346,7 @@ func (c *Client) sanitizeHealthResponse(response HealthResponse) (HealthResponse
 
 func (c *Client) sanitizeCapabilitiesResponse(response CapabilitiesResponse) (CapabilitiesResponse, error) {
 	for name, value := range map[string]string{
-		"version":           response.Version,
+		traceFieldVersion:   response.Version,
 		"protocolVersion":   response.ProtocolVersion,
 		"transport":         response.Transport,
 		"runtimeName":       response.RuntimeName,
@@ -782,14 +788,14 @@ func (c *Client) validateHarnessFrameStructure(frame HarnessEventFrame) error {
 		return nil
 	}
 	for name, value := range map[string]string{
-		"version":          frame.Version,
-		"type":             string(frame.Type),
-		"runtimeSessionID": string(frame.RuntimeSessionID),
-		"turnID":           string(frame.TurnID),
-		"correlationID":    frame.CorrelationID,
-		"toolName":         frame.ToolName,
-		"toolCallID":       frame.ToolCallID,
-		"approvalID":       frame.ApprovalID,
+		traceFieldVersion:          frame.Version,
+		"type":                     string(frame.Type),
+		traceFieldRuntimeSessionID: string(frame.RuntimeSessionID),
+		traceFieldTurnID:           string(frame.TurnID),
+		"correlationID":            frame.CorrelationID,
+		"toolName":                 frame.ToolName,
+		"toolCallID":               frame.ToolCallID,
+		"approvalID":               frame.ApprovalID,
 	} {
 		if err := check(name, value); err != nil {
 			return err

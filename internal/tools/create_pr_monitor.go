@@ -70,7 +70,7 @@ func (t *CreatePRMonitorTool) Parameters() json.RawMessage {
 				jsonSchemaTypeField:        jsonSchemaTypeString,
 				jsonSchemaDescriptionField: "Optional Provider CRD reference name for the scheduled AI task.",
 			},
-			"readCredentialRef": map[string]any{
+			readCredentialRefField: map[string]any{
 				jsonSchemaTypeField:        jsonSchemaTypeString,
 				jsonSchemaDescriptionField: "Optional Secret name containing git/GitHub credentials for private repositories. If omitted, Orka tries common git credential secret names.",
 			},
@@ -184,7 +184,7 @@ func (t *CreatePRMonitorTool) Execute(ctx context.Context, argsJSON json.RawMess
 		Tools: append([]string(nil), prMonitorRequiredTools...),
 	}
 	workspace := &corev1alpha1.WorkspaceConfig{GitRepo: repoURL}
-	requestedReadCredentialRef := chatGetStringArg(args, "readCredentialRef")
+	requestedReadCredentialRef := chatGetStringArg(args, readCredentialRefField)
 	secretRef, secretRefErr := resolveWorkspaceCredentialRef(ctx, tc.Client, namespace, nil, requestedReadCredentialRef)
 	if secretRefErr == nil && secretRef != nil {
 		workspace.ReadCredentialRef = secretRef

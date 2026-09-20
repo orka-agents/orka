@@ -26,6 +26,13 @@ import (
 )
 
 const (
+	eventReasonTaskCancelled = "TaskCancelled"
+	eventReasonTaskFailed    = "TaskFailed"
+	taskUIDField             = "taskUID"
+	snapshotDigestField      = "snapshotDigest"
+)
+
+const (
 	acpRuntimePoolLabel                          = "orka.ai/acp-runtime-pool"
 	acpRuntimeTrustLabel                         = "orka.ai/acp-trust-domain"
 	acpRuntimeProfileLabel                       = "orka.ai/acp-profile"
@@ -631,7 +638,7 @@ func (r *TaskReconciler) refreshReservedACPRuntimeTaskRebind(
 		"rebind-reserved-runtime-pool", attempt.ID, task.Status.Execution.RuntimePoolUID, string(pool.UID),
 	)
 	operationDigest, err := acpDomainDigest("reserved-runtime-pool-rebind", map[string]any{
-		"attemptID": attempt.ID, "requestDigest": attempt.RequestDigest,
+		attemptIDField: attempt.ID, "requestDigest": attempt.RequestDigest,
 		"fromPoolUID": task.Status.Execution.RuntimePoolUID, "toPoolUID": string(pool.UID),
 		"controllerEpoch": fence.Epoch,
 	})
@@ -824,8 +831,8 @@ func (r *TaskReconciler) cancelACPTaskBeforeDurableAttempt(ctx context.Context, 
 				}
 				operationID := "timeout-before-status-" + fmt.Sprint(attempt.Version)
 				digest, digestErr := acpDomainDigest("attempt-transition", map[string]any{
-					"id": attempt.ID, "from": attempt.ExecutionState, "to": store.PromptExecutionCancelled,
-					"operation": operationID, "version": attempt.Version,
+					"id": attempt.ID, transitionFromField: attempt.ExecutionState, "to": store.PromptExecutionCancelled,
+					operationField: operationID, versionField: attempt.Version,
 				})
 				if digestErr != nil {
 					return ctrl.Result{}, digestErr
@@ -885,11 +892,11 @@ func (r *TaskReconciler) cancelACPTaskBeforeDurableAttempt(ctx context.Context, 
 		}
 		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 			Type: ConditionTypeWaitingForApproval, Status: metav1.ConditionFalse, LastTransitionTime: now,
-			Reason: "TaskCancelled", Message: "task is terminal",
+			Reason: eventReasonTaskCancelled, Message: "task is terminal",
 		})
 		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 			Type: ConditionTypeComplete, Status: metav1.ConditionTrue, LastTransitionTime: now,
-			Reason: "TaskCancelled", Message: message,
+			Reason: eventReasonTaskCancelled, Message: message,
 		})
 		return r.Status().Patch(ctx, current, client.MergeFrom(base))
 	}); err != nil {
@@ -1043,11 +1050,11 @@ func (r *TaskReconciler) projectACPPlanningFailureTask(
 		latest.Status.Message = message
 		meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
 			Type: ConditionTypeWaitingForApproval, Status: metav1.ConditionFalse, LastTransitionTime: terminalTime,
-			Reason: "TaskFailed", Message: "task is terminal",
+			Reason: eventReasonTaskFailed, Message: "task is terminal",
 		})
 		meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
 			Type: ConditionTypeComplete, Status: metav1.ConditionFalse, LastTransitionTime: terminalTime,
-			Reason: "TaskFailed", Message: message,
+			Reason: eventReasonTaskFailed, Message: message,
 		})
 		return r.Status().Patch(ctx, latest, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 	}); err != nil {
@@ -1207,8 +1214,8 @@ func (r *TaskReconciler) settleACPPlanningFailureAttempt(
 		}
 		operationID := store.CanonicalControlID("fail-acp-planning", attempt.ID, fmt.Sprint(attempt.Version), string(reason))
 		operationDigest, digestErr := acpDomainDigest("planning-failure-attempt-transition", map[string]any{
-			"attemptID": attempt.ID, "requestDigest": attempt.RequestDigest, "from": attempt.ExecutionState,
-			"to": store.PromptExecutionFailed, "version": attempt.Version, "reason": reason, "message": message,
+			attemptIDField: attempt.ID, "requestDigest": attempt.RequestDigest, transitionFromField: attempt.ExecutionState,
+			"to": store.PromptExecutionFailed, versionField: attempt.Version, eventReasonField: reason, "message": message,
 		})
 		if digestErr != nil {
 			return nil, digestErr
@@ -1350,12 +1357,9 @@ func (r *TaskReconciler) ensureACPRuntimePool(
 	ctx context.Context,
 	namespace string,
 	plan ACPRuntimePlan,
-	workspaceName string,
-	workspaceUID string,
-	workspaceTaskUID string,
 ) (*corev1alpha1.RuntimePool, bool, error) {
 	return r.ensureACPRuntimePoolWithPolicy(
-		ctx, namespace, plan, workspaceName, workspaceUID, workspaceTaskUID, true, "",
+		ctx, namespace, plan, "", "", "", true, "",
 	)
 }
 
@@ -1703,6 +1707,7 @@ func (r *TaskReconciler) deleteExactACPRuntimePool(
 	})
 }
 
+//nolint:gocyclo // Readiness compares the full workspace attachment and recovery state in one decision.
 func acpWorkspacePoolReadinessFailure(
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 	pool *corev1alpha1.RuntimePool,
@@ -1772,12 +1777,12 @@ func acpBoundTaskRequestDigest(bound *verifiedAgentExecution, attempt int32, pro
 		return "", errors.New("verified binding and execution snapshot are required for ACP request identity")
 	}
 	return acpDomainDigest("task-request", map[string]any{
-		"taskUID": bound.binding.Task.UID, "taskGeneration": bound.binding.Task.BoundSpecGeneration,
-		"attempt": attempt, "promptID": promptID, "prompt": bound.body.Prompt,
+		taskUIDField: bound.binding.Task.UID, "taskGeneration": bound.binding.Task.BoundSpecGeneration,
+		attemptField: attempt, "promptID": promptID, "prompt": bound.body.Prompt,
 		"agentUID": bound.body.Agent.UID, "agentGeneration": bound.body.Agent.Generation,
 		"agentConfiguration":   bound.configuration,
-		"runtimeProfileDigest": bound.body.ProfileDigest, "workspace": bound.body.Workspace,
-		"bindingDigest": bound.binding.BindingDigest, "snapshotDigest": bound.snapshot.Digest,
+		"runtimeProfileDigest": bound.body.ProfileDigest, taskWorkspaceVolume: bound.body.Workspace,
+		"bindingDigest": bound.binding.BindingDigest, snapshotDigestField: bound.snapshot.Digest,
 	})
 }
 

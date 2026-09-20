@@ -12,6 +12,10 @@ import (
 )
 
 const (
+	gitTerminalPromptDisabled = "GIT_TERMINAL_PROMPT=0"
+)
+
+const (
 	defaultCodexPath              = "codex"
 	defaultCodexMaxTurns          = 50
 	defaultCodexSandboxMode       = "workspace-write"
@@ -120,10 +124,10 @@ func (a *CodexAdapter) ParseResult(_ context.Context, _ TurnContext, run Command
 			return TurnResult{Result: run.Stdout}, err
 		}
 		if data.contents != "" {
-			return TurnResult{Result: data.contents, Metadata: map[string]string{"adapter": RuntimeCodex}}, nil
+			return TurnResult{Result: data.contents, Metadata: map[string]string{adapterMetadataKey: RuntimeCodex}}, nil
 		}
 	}
-	return TurnResult{Result: run.ExactStdout(), Metadata: map[string]string{"adapter": RuntimeCodex}}, nil
+	return TurnResult{Result: run.ExactStdout(), Metadata: map[string]string{adapterMetadataKey: RuntimeCodex}}, nil
 }
 
 func buildCodexArgs(
@@ -288,7 +292,7 @@ func buildReadOnlyCodexEnv(extra []string, baseURL, home string) []string {
 		"LOGNAME=node",
 		"SHELL=/bin/sh",
 		"TERM=dumb",
-		"GIT_TERMINAL_PROMPT=0",
+		gitTerminalPromptDisabled,
 		"NO_PROXY=127.0.0.1,localhost",
 		"no_proxy=127.0.0.1,localhost",
 	}
@@ -326,7 +330,8 @@ func codexReasoningEffort(metadata map[string]string) (string, error) {
 }
 
 func codexUnsetEnv(readOnly bool) []string {
-	unset := []string{workerenv.Prompt}
+	unset := make([]string, 0, 20)
+	unset = append(unset, workerenv.Prompt)
 	if !readOnly {
 		return unset
 	}

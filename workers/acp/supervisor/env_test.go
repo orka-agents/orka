@@ -532,6 +532,7 @@ func TestCodexProviderProfileUsesExternalRuntimeSandbox(t *testing.T) {
 	}
 }
 
+//nolint:gocyclo // The environment fixture checks one complete derived supervisor configuration.
 func TestLoadConfigFromEnv(t *testing.T) {
 	dir := t.TempDir()
 	controllerToken := filepath.Join(dir, "controller-token")
@@ -704,23 +705,9 @@ func TestLoadConfigFromEnvBootstrapSecrets(t *testing.T) {
 	}
 }
 
-func TestDefaultProtocolLimitsUseProviderSpecificUpdateRates(t *testing.T) {
-	tests := []struct {
-		provider string
-		want     int
-	}{
-		{provider: providerKindCodex, want: runtimeMaxUpdateEventsPerSecond},
-		{provider: providerKindClaude, want: runtimeMaxUpdateEventsPerSecond},
-		{provider: providerKindCopilot, want: runtimeMaxUpdateEventsPerSecond},
-		{provider: providerKindOpencode, want: runtimeMaxUpdateEventsPerSecond},
-		{provider: providerKindAgentKit, want: runtimeMaxUpdateEventsPerSecond},
-	}
-	for _, test := range tests {
-		t.Run(test.provider, func(t *testing.T) {
-			if got := defaultProtocolLimits(test.provider).MaxUpdateEventsPerSecond; got != test.want {
-				t.Fatalf("MaxUpdateEventsPerSecond = %d, want %d", got, test.want)
-			}
-		})
+func TestDefaultProtocolLimitsUpdateRate(t *testing.T) {
+	if got := defaultProtocolLimits().MaxUpdateEventsPerSecond; got != runtimeMaxUpdateEventsPerSecond {
+		t.Fatalf("MaxUpdateEventsPerSecond = %d, want %d", got, runtimeMaxUpdateEventsPerSecond)
 	}
 }
 

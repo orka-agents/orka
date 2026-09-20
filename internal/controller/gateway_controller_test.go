@@ -67,14 +67,14 @@ func TestGatewayReconcilerProbesReferenceAdapter(t *testing.T) {
 		}},
 		Data: map[string][]byte{"token": []byte("outbound-token")},
 	}
-	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&gatewayv1alpha1.Gateway{}).
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&gatewayv1alpha1.Gateway{}).
 		WithObjects(class, object, inbound, outbound).Build()
-	reconciler := &GatewayReconciler{Client: client, Scheme: scheme, HTTPClient: server.Client(), AllowInsecureLoopback: true}
+	reconciler := &GatewayReconciler{Client: k8sClient, Scheme: scheme, HTTPClient: server.Client(), AllowInsecureLoopback: true}
 	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "chat"}}); err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
 	updated := &gatewayv1alpha1.Gateway{}
-	if err := client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "chat"}, updated); err != nil {
+	if err := k8sClient.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "chat"}, updated); err != nil {
 		t.Fatal(err)
 	}
 	if !updated.Status.Ready || !updated.Status.Connected || updated.Status.ObservedCapabilities == nil {

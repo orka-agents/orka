@@ -37,7 +37,7 @@ type controllerMCPBrokerClient struct {
 
 func NewControllerMCPBrokerClient(baseURL, namespace, bearer string, capabilitySecret []byte) (MCPBroker, error) {
 	parsed, err := url.Parse(strings.TrimSpace(baseURL))
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+	if err != nil || (parsed.Scheme != providerProxyScheme && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return nil, fmt.Errorf("MCP broker URL is invalid")
 	}
 	parsed.Path = harnessv2.MCPBrokerCallPath

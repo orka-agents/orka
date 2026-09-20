@@ -267,6 +267,7 @@ func (r *TaskReconciler) resolveAgentExecutionCandidate(
 	return r.resolveAgentExecutionCandidateWithWorkspaceSessionUID(ctx, task, agent, "")
 }
 
+//nolint:gocyclo // Keep workspace routing and its mutually exclusive admission paths together.
 func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	ctx context.Context,
 	task *corev1alpha1.Task,

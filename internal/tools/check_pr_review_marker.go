@@ -73,11 +73,11 @@ func (t *CheckPRReviewMarkerTool) Parameters() json.RawMessage {
 		jsonSchemaPropertiesField: map[string]any{
 			taskNameField: map[string]any{
 				jsonSchemaTypeField:        jsonSchemaTypeString,
-				jsonSchemaDescriptionField: "Optional task whose workspace config has the repo and git credentials",
+				jsonSchemaDescriptionField: optionalWorkspaceTaskDescription,
 			},
 			repoURLField: map[string]any{
 				jsonSchemaTypeField:        jsonSchemaTypeString,
-				jsonSchemaDescriptionField: "Optional GitHub repository URL. Requires task_name or current task context and must match that task's repository scope.",
+				jsonSchemaDescriptionField: scopedRepositoryURLDescription,
 			},
 			githubPRNumberField: map[string]any{
 				jsonSchemaTypeField:        jsonSchemaTypeInteger,

@@ -591,6 +591,7 @@ func promptExecutionDiagnosticIdentifier(value string) string {
 	return value
 }
 
+//nolint:gocyclo // Lease renewal validates every session, operation, and expiry fence before mutation.
 func (s *Server) handleRenewLease(w http.ResponseWriter, r *http.Request) {
 	var request harnessv2.RenewPromptLeaseRequest
 	if !s.decodeAuthenticatedJSON(w, r, &request) {

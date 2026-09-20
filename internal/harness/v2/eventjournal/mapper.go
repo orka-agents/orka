@@ -17,6 +17,11 @@ import (
 )
 
 const (
+	sensitiveTokenWord    = "token"
+	sensitivePasswordWord = "pwd"
+)
+
+const (
 	mappedUpdateIdentityKeySeparator  = "\x00"
 	mappedToolCallIDPrefix            = "event-tool-call-v1-sha256-"
 	mappedToolCallIDDomain            = "orka.harness.v2.execution-event.tool-call-id.v1\x00"
@@ -652,12 +657,12 @@ var logicalFieldSensitiveMarkers = []string{
 	"api_key",
 	"apikey",
 	"api key",
-	"token",
+	sensitiveTokenWord,
 	"token is",
 	"secret",
 	"password",
 	"passwd",
-	"pwd",
+	sensitivePasswordWord,
 	"credential",
 	"private-key",
 	"private_key",
@@ -830,7 +835,7 @@ func logicalFieldsHaveSensitiveMarker(fields []logicalFieldBoundaries, countCopi
 				continue
 			}
 			if strings.HasPrefix(text, remaining) {
-				if !countCopies || (marker != "pwd" && marker != "token") {
+				if !countCopies || (marker != sensitivePasswordWord && marker != sensitiveTokenWord) {
 					return true
 				}
 				tail := text[len(remaining):]
@@ -888,9 +893,9 @@ func initialLogicalFieldMarkerStates(
 		}
 		var assignmentMarker *regexp.Regexp
 		switch marker {
-		case "pwd":
+		case sensitivePasswordWord:
 			assignmentMarker = logicalFieldPWDAssignmentRe
-		case "token":
+		case sensitiveTokenWord:
 			assignmentMarker = logicalFieldTokenAssignmentRe
 		}
 		for index := range suffixes {

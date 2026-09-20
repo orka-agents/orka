@@ -142,6 +142,44 @@ func (c Config) Validate() error {
 	if c.Capabilities.ProfileDigestSchemaVersion != c.Fence.ProfileDigestSchemaVersion {
 		return fmt.Errorf("capabilities and fence profile digest schema versions differ")
 	}
+	if err := c.validateProvider(); err != nil {
+		return err
+	}
+	if len(c.ControllerBearerToken) < 32 {
+		return fmt.Errorf("controller bearer token must be at least 32 bytes")
+	}
+	if c.RequireCapabilities && len(c.CapabilitySecret) < harnessv2.MinCapabilitySecretBytes {
+		return fmt.Errorf("operation capability secret must be at least %d bytes", harnessv2.MinCapabilitySecretBytes)
+	}
+	if err := c.validateWorkspaceDirectories(); err != nil {
+		return err
+	}
+	if c.UIDAllocator == nil {
+		return fmt.Errorf("UID allocator is required")
+	}
+	requiredIdentityCapacity := uint64(c.Capabilities.Limits.MaxResidentSessions) + sessionIdentityExhaustionReserve
+	if uint64(c.UIDAllocator.Capacity()) < requiredIdentityCapacity {
+		return fmt.Errorf("UID allocator capacity must provide at least %d resident identities plus the exhaustion reserve", c.Capabilities.Limits.MaxResidentSessions)
+	}
+	if c.WorkspaceMaterializer == nil {
+		return fmt.Errorf("workspace materializer is required")
+	}
+	if _, _, err := c.ProviderProxy.normalized(); err != nil {
+		return err
+	}
+	if c.MCPBroker == nil {
+		return fmt.Errorf("controller MCP broker is required")
+	}
+	if c.InitializeTimeout < 0 || c.PermissionTimeout < 0 || c.CancelGrace < 0 {
+		return fmt.Errorf("runtime timeouts must be non-negative")
+	}
+	if err := c.validatePromptWriteFault(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c Config) validateProvider() error {
 	if strings.TrimSpace(c.Provider.Kind) == "" || strings.TrimSpace(c.Provider.Model) == "" {
 		return fmt.Errorf("provider kind and model are required")
 	}
@@ -157,12 +195,10 @@ func (c Config) Validate() error {
 	if got := c.Capabilities.AdapterDigests[c.Provider.AdapterName]; got == "" || got != c.Provider.AdapterDigest {
 		return fmt.Errorf("provider adapter digest does not match advertised capability")
 	}
-	if len(c.ControllerBearerToken) < 32 {
-		return fmt.Errorf("controller bearer token must be at least 32 bytes")
-	}
-	if c.RequireCapabilities && len(c.CapabilitySecret) < harnessv2.MinCapabilitySecretBytes {
-		return fmt.Errorf("operation capability secret must be at least %d bytes", harnessv2.MinCapabilitySecretBytes)
-	}
+	return nil
+}
+
+func (c Config) validateWorkspaceDirectories() error {
 	if c.SessionBaseDir == "" || !filepath.IsAbs(c.SessionBaseDir) {
 		return fmt.Errorf("session base directory must be absolute")
 	}
@@ -187,25 +223,10 @@ func (c Config) Validate() error {
 			return fmt.Errorf("session base directory must not equal or be beneath the durable workspace directory")
 		}
 	}
-	if c.UIDAllocator == nil {
-		return fmt.Errorf("UID allocator is required")
-	}
-	requiredIdentityCapacity := uint64(c.Capabilities.Limits.MaxResidentSessions) + sessionIdentityExhaustionReserve
-	if uint64(c.UIDAllocator.Capacity()) < requiredIdentityCapacity {
-		return fmt.Errorf("UID allocator capacity must provide at least %d resident identities plus the exhaustion reserve", c.Capabilities.Limits.MaxResidentSessions)
-	}
-	if c.WorkspaceMaterializer == nil {
-		return fmt.Errorf("workspace materializer is required")
-	}
-	if _, _, err := c.ProviderProxy.normalized(); err != nil {
-		return err
-	}
-	if c.MCPBroker == nil {
-		return fmt.Errorf("controller MCP broker is required")
-	}
-	if c.InitializeTimeout < 0 || c.PermissionTimeout < 0 || c.CancelGrace < 0 {
-		return fmt.Errorf("runtime timeouts must be non-negative")
-	}
+	return nil
+}
+
+func (c Config) validatePromptWriteFault() error {
 	if marker := c.E2EPromptWriteAmbiguityMarker; marker != "" {
 		if strings.TrimSpace(marker) != marker || len(marker) > 128 ||
 			!strings.HasPrefix(marker, "ORKA_E2E_") || !strings.HasSuffix(marker, "_OK") {

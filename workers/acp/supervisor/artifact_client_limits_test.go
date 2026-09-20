@@ -44,7 +44,7 @@ func TestArtifactClientUsesSeparateBoundedDefaults(t *testing.T) {
 	if client.maxDownloadBytes != defaultWorkspaceArtifactDownloadBytes || client.maxDownloadBytes <= 0 {
 		t.Fatalf("artifact download limit = %d, want bounded default %d", client.maxDownloadBytes, defaultWorkspaceArtifactDownloadBytes)
 	}
-	wantUpload := defaultProtocolLimits(providerKindCodex).MaxWorkspaceDeltaBytes
+	wantUpload := defaultProtocolLimits().MaxWorkspaceDeltaBytes
 	if client.maxUploadBytes != wantUpload || client.maxUploadBytes <= 0 {
 		t.Fatalf("artifact upload limit = %d, want outbound capability %d", client.maxUploadBytes, wantUpload)
 	}

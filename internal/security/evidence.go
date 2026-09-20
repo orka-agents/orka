@@ -12,6 +12,11 @@ import (
 )
 
 const (
+	summaryField     = "summary"
+	fileLocationKind = "file"
+)
+
+const (
 	findingSeverityCritical = "critical"
 	findingLevelHigh        = "high"
 	findingLevelMedium      = "medium"
@@ -89,7 +94,7 @@ func validateFindingRequiredFields(finding FindingsV2Finding) string {
 		{name: "category", value: finding.Category},
 		{name: "severity", value: finding.Severity},
 		{name: "confidence", value: finding.Confidence},
-		{name: "summary", value: finding.Summary},
+		{name: summaryField, value: finding.Summary},
 		{name: "remediation", value: finding.Remediation},
 	}
 	for _, field := range required {
@@ -278,7 +283,7 @@ func ToFindingV2(
 	evidence := make([]store.FindingEvidenceRef, 0, len(item.Evidence))
 	for _, ref := range canonicalEvidenceRefs(item.Evidence) {
 		evidence = append(evidence, store.FindingEvidenceRef{
-			Kind:      "file",
+			Kind:      fileLocationKind,
 			TaskName:  taskName,
 			Path:      ref.Path,
 			StartLine: ref.StartLine,

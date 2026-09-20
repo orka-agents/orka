@@ -24,6 +24,11 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
+const (
+	apiBooleanTrue                = "true"
+	repositorySecurityTaskCreator = "repository-security"
+)
+
 type CreateRepositoryScanRequest struct {
 	Name      string                          `json:"name"`
 	Namespace string                          `json:"namespace"`
@@ -272,6 +277,7 @@ func authorizeContextTokenRepositoryScanCredentialRefsForUser(
 	return nil
 }
 
+//nolint:gocyclo // Keep scan policy checks adjacent to the run and Task they authorize.
 func (h *Handlers) createSecurityScanRun(ctx context.Context, ui *UserInfo, scan *corev1alpha1.RepositoryScan, mode, baseCommit, headCommit string) (*store.ScanRun, error) {
 	if err := h.ensureSecurityStore(); err != nil {
 		return nil, err
@@ -319,8 +325,8 @@ func (h *Handlers) createSecurityScanRun(ctx context.Context, ui *UserInfo, scan
 			Name:      taskName,
 			Namespace: scan.Namespace,
 			Labels: map[string]string{
-				labels.LabelManaged:        "true",
-				labels.LabelCreatedBy:      "repository-security",
+				labels.LabelManaged:        apiBooleanTrue,
+				labels.LabelCreatedBy:      repositorySecurityTaskCreator,
 				labels.LabelSecurityTarget: labels.SelectorValue(scan.Name),
 				labels.LabelSecurityScanID: scanID,
 				labels.LabelSecurityMode:   mode,
@@ -345,7 +351,7 @@ func (h *Handlers) createSecurityScanRun(ctx context.Context, ui *UserInfo, scan
 		h.contextTokenAuthorization,
 		"createSecurityScanTaskCredential",
 		scan.Namespace,
-		[]repositoryScanCredentialRef{{field: "source-read", ref: repositoryScanReadCredentialRef(scan)}},
+		[]repositoryScanCredentialRef{{field: credentialRoleSourceRead, ref: repositoryScanReadCredentialRef(scan)}},
 	); err != nil {
 		return nil, err
 	}
@@ -447,8 +453,8 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInf
 			Name:      taskName,
 			Namespace: scan.Namespace,
 			Labels: map[string]string{
-				labels.LabelManaged:           "true",
-				labels.LabelCreatedBy:         "repository-security",
+				labels.LabelManaged:           apiBooleanTrue,
+				labels.LabelCreatedBy:         repositorySecurityTaskCreator,
 				labels.LabelSecurityTarget:    labels.SelectorValue(scan.Name),
 				labels.LabelSecurityScanID:    finding.ScanRunID,
 				labels.LabelSecurityMode:      security.StageValidation,
@@ -474,7 +480,7 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInf
 		h.contextTokenAuthorization,
 		"createSecurityValidationTaskCredential",
 		scan.Namespace,
-		[]repositoryScanCredentialRef{{field: "source-read", ref: repositoryScanReadCredentialRef(scan)}},
+		[]repositoryScanCredentialRef{{field: credentialRoleSourceRead, ref: repositoryScanReadCredentialRef(scan)}},
 	); err != nil {
 		return err
 	}
@@ -521,11 +527,11 @@ func (h *Handlers) createSecurityPatchTask(ctx context.Context, ui *UserInfo, sc
 			Name:      taskName,
 			Namespace: scan.Namespace,
 			Labels: map[string]string{
-				labels.LabelManaged:           "true",
-				labels.LabelCreatedBy:         "repository-security",
+				labels.LabelManaged:           apiBooleanTrue,
+				labels.LabelCreatedBy:         repositorySecurityTaskCreator,
 				labels.LabelSecurityTarget:    labels.SelectorValue(scan.Name),
 				labels.LabelSecurityScanID:    finding.ScanRunID,
-				labels.LabelSecurityMode:      "patch",
+				labels.LabelSecurityMode:      commandIntentPatch,
 				labels.LabelSecurityStage:     security.StagePatch,
 				labels.LabelSecurityFindingID: finding.ID,
 			},
@@ -587,7 +593,7 @@ func (h *Handlers) ListRepositoryScans(c fiber.Ctx) error {
 	}
 
 	limit := c.Query("limit", "100")
-	continueToken := c.Query("continue", "")
+	continueToken := c.Query(commandIntentContinue, "")
 	opts := &client.ListOptions{Namespace: namespace}
 	pagination, err := ParsePagination(limit, continueToken)
 	if err != nil {
@@ -903,7 +909,7 @@ func (h *Handlers) ListSecurityScanRuns(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list scan runs: %v", err))
 	}
-	return c.JSON(fiber.Map{"items": runs, "metadata": fiber.Map{"continue": next}})
+	return c.JSON(fiber.Map{apiFieldItems: runs, apiFieldMetadata: fiber.Map{commandIntentContinue: next}})
 }
 
 // CreateManualSecurityScan creates and starts a manual scan task.
@@ -988,7 +994,7 @@ func (h *Handlers) ListSecurityFindings(c fiber.Ctx) error {
 		}
 	}
 
-	return c.JSON(fiber.Map{"items": findings, "metadata": fiber.Map{"continue": next}})
+	return c.JSON(fiber.Map{apiFieldItems: findings, apiFieldMetadata: fiber.Map{commandIntentContinue: next}})
 }
 
 // ListSecurityReviewSlices lists deterministic review slices for a repository.
@@ -1017,7 +1023,7 @@ func (h *Handlers) ListSecurityReviewSlices(c fiber.Ctx) error {
 	slices, next, err := h.securityStore.ListReviewSlices(c.Context(), store.ReviewSliceFilter{
 		Namespace:      namespace,
 		RepositoryScan: c.Params("name"),
-		Status:         c.Query("status"),
+		Status:         c.Query(apiFieldStatus),
 		Limit:          limit,
 		Cursor:         c.Query("cursor"),
 	})
@@ -1027,7 +1033,7 @@ func (h *Handlers) ListSecurityReviewSlices(c fiber.Ctx) error {
 	if slices == nil {
 		slices = []store.ReviewSlice{}
 	}
-	return c.JSON(fiber.Map{"items": slices, "metadata": fiber.Map{"continue": next}})
+	return c.JSON(fiber.Map{apiFieldItems: slices, apiFieldMetadata: fiber.Map{commandIntentContinue: next}})
 }
 
 // GetSecurityReviewSlice returns one deterministic review slice.
@@ -1105,7 +1111,7 @@ func (h *Handlers) ListSecurityDroppedFindings(c fiber.Ctx) error {
 	if dropped == nil {
 		dropped = []store.DroppedFinding{}
 	}
-	return c.JSON(fiber.Map{"items": dropped, "metadata": fiber.Map{"continue": next}})
+	return c.JSON(fiber.Map{apiFieldItems: dropped, apiFieldMetadata: fiber.Map{commandIntentContinue: next}})
 }
 
 // GetSecurityFinding returns a finding by ID.
@@ -1331,7 +1337,7 @@ func (h *Handlers) ListSecurityPatchProposals(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list patch proposals: %v", err))
 	}
-	return c.JSON(fiber.Map{"items": proposals})
+	return c.JSON(fiber.Map{apiFieldItems: proposals})
 }
 
 func contextTokenSecurityScanFailures(token *ContextToken, scan *corev1alpha1.RepositoryScan, agentRef corev1alpha1.AgentReference) []string {
@@ -1477,8 +1483,8 @@ func (h *Handlers) CreateSecurityPullRequest(c fiber.Ctx) error {
 	}
 
 	return c.JSON(fiber.Map{
-		"prNumber": *proposal.PRNumber,
-		"prURL":    proposal.PRURL,
-		"status":   "Open",
+		"prNumber":     *proposal.PRNumber,
+		"prURL":        proposal.PRURL,
+		apiFieldStatus: "Open",
 	})
 }

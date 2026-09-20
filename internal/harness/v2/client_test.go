@@ -561,10 +561,12 @@ func TestClientTransportWriteEvidence(t *testing.T) {
 
 func clientTestClient(t *testing.T, baseURL string, extra ...ClientOption) *Client {
 	t.Helper()
-	options := []ClientOption{
-		WithControllerBearerToken(clientTestBearer), WithOperationCapabilitySecret(clientTestCapabilitySecret),
+	options := make([]ClientOption, 0, 3+len(extra))
+	options = append(options,
+		WithControllerBearerToken(clientTestBearer),
+		WithOperationCapabilitySecret(clientTestCapabilitySecret),
 		WithStatusCapabilityBinding(StatusCapabilityBinding{RuntimeProfileDigest: testFence(t).RuntimeProfileDigest}),
-	}
+	)
 	options = append(options, extra...)
 	client, err := NewClient(baseURL, options...)
 	if err != nil {

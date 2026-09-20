@@ -62,7 +62,7 @@ func completeTaskStatus(_ *cobra.Command, _ []string, toComplete string) ([]stri
 
 func newTaskCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "task",
+		Use:   cliTaskCommand,
 		Short: "Manage tasks",
 	}
 	cmd.AddCommand(newTaskCreateCmd())
@@ -87,6 +87,7 @@ func newTaskCmd() *cobra.Command {
 	return cmd
 }
 
+//nolint:gocyclo // Keep flag inference and the resulting Task request together.
 func newTaskCreateCmd() *cobra.Command {
 	var taskType, taskName, agent, provider, model, timeout, image, schedule, timezone, file string
 	var commandVals, argVals, envVals []string
@@ -307,7 +308,7 @@ func newTaskListCmd() *cobra.Command {
 	var continueToken string
 
 	cmd := &cobra.Command{
-		Use:     "list",
+		Use:     cliListUse,
 		Aliases: []string{"ls"},
 		Short:   "List tasks",
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -387,7 +388,7 @@ func newTaskGetCmd() *cobra.Command {
 	var showTransaction bool
 
 	cmd := &cobra.Command{
-		Use:   "get <name>",
+		Use:   cliGetByNameUse,
 		Short: "Get task details",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -630,7 +631,7 @@ func waitContextError(ctx context.Context, taskName string) error {
 
 func newTaskDeleteCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:     "delete <name>",
+		Use:     cliDeleteByNameUse,
 		Aliases: []string{"rm"},
 		Short:   "Delete a task",
 		Args:    cobra.ExactArgs(1),

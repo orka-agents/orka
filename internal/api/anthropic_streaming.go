@@ -22,6 +22,10 @@ import (
 	"github.com/orka-agents/orka/internal/tools"
 )
 
+const (
+	anthropicTextDelta = "text_delta"
+)
+
 // handleStreamingMessages handles an Anthropic Messages API request with streaming and tool execution.
 // It runs an agentic tool loop: stream LLM response → execute tools → stream results → repeat.
 // The full Anthropic SSE envelope (message_start → ... → message_stop) spans all iterations.
@@ -67,8 +71,8 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 			select {
 			case <-streamCtx.Done():
 				// Emit timeout message and close
-				if err := writeContentBlockStart(w, blockIndex, AnthropicContentBlock{Type: "text", Text: ""}); err == nil {
-					_ = writeContentBlockDelta(w, blockIndex, AnthropicDelta{Type: "text_delta", Text: "Request timed out during tool execution."})
+				if err := writeContentBlockStart(w, blockIndex, AnthropicContentBlock{Type: oaiContentTypeText, Text: ""}); err == nil {
+					_ = writeContentBlockDelta(w, blockIndex, AnthropicDelta{Type: anthropicTextDelta, Text: "Request timed out during tool execution."})
 					_ = writeContentBlockStop(w, blockIndex)
 				}
 				_ = writeMessageDelta(w, oaiStopReasonEndTurn, totalUsage)
@@ -178,11 +182,11 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 				)
 				writeAnthropicTextProgress(w, &blockIndex, "[Continuing workflow...]\n\n")
 				messages = append(messages, llm.Message{
-					Role:    "assistant",
+					Role:    chatRoleAssistant,
 					Content: textContent,
 				})
 				messages = append(messages, llm.Message{
-					Role:    "user",
+					Role:    chatRoleUser,
 					Content: continueMsg,
 				})
 				continue
@@ -201,7 +205,7 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 
 			// Append assistant message with tool calls
 			messages = append(messages, llm.Message{
-				Role:      "assistant",
+				Role:      chatRoleAssistant,
 				Content:   textContent,
 				ToolCalls: toolCalls,
 			})
@@ -224,7 +228,7 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 				writeAnthropicTextProgress(w, &blockIndex, formatToolProgress(tc, result))
 
 				messages = append(messages, llm.Message{
-					Role:       "tool",
+					Role:       chatRoleTool,
 					ToolCallID: tc.ID,
 					Name:       tc.Name,
 					Content:    result,
@@ -233,7 +237,7 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 
 			if repetitionWarning != "" {
 				messages = append(messages, llm.Message{
-					Role:    "user",
+					Role:    chatRoleUser,
 					Content: repetitionWarning,
 				})
 			}
@@ -252,9 +256,9 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 					}
 
 					// Emit progress
-					if err := writeContentBlockStart(w, blockIndex, AnthropicContentBlock{Type: "text", Text: ""}); err == nil {
+					if err := writeContentBlockStart(w, blockIndex, AnthropicContentBlock{Type: oaiContentTypeText, Text: ""}); err == nil {
 						_ = writeContentBlockDelta(w, blockIndex, AnthropicDelta{
-							Type: "text_delta", Text: "[⏳ Auto-polling tasks...]",
+							Type: anthropicTextDelta, Text: "[⏳ Auto-polling tasks...]",
 						})
 						_ = writeContentBlockStop(w, blockIndex)
 						blockIndex++
@@ -267,7 +271,7 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 					for _, tc := range toolCalls {
 						result := executeExposedToolCall(streamCtx, tc, h.config.ToolTimeout, toolCtx, exposedToolNames)
 						messages = append(messages, llm.Message{
-							Role:       "tool",
+							Role:       chatRoleTool,
 							ToolCallID: tc.ID,
 							Name:       tc.Name,
 							Content:    result,
@@ -354,14 +358,14 @@ func (h *AnthropicCompatHandler) handleStreamingProxy(
 			if chunk.Content != "" {
 				if !inTextBlock {
 					if err := writeContentBlockStart(w, blockIndex, AnthropicContentBlock{
-						Type: "text", Text: "",
+						Type: oaiContentTypeText, Text: "",
 					}); err != nil {
 						break
 					}
 					inTextBlock = true
 				}
 				if err := writeContentBlockDelta(w, blockIndex, AnthropicDelta{
-					Type: "text_delta", Text: chunk.Content,
+					Type: anthropicTextDelta, Text: chunk.Content,
 				}); err != nil {
 					break
 				}
@@ -482,14 +486,14 @@ func (h *AnthropicCompatHandler) handleStreamingFallback(
 	// Emit text content
 	if resp.Content != "" {
 		if err := writeContentBlockStart(w, blockIndex, AnthropicContentBlock{
-			Type: "text",
+			Type: oaiContentTypeText,
 			Text: "",
 		}); err != nil {
 			anthropicLog.Error(err, "fallback: failed to write content_block_start")
 			return
 		}
 		if err := writeContentBlockDelta(w, blockIndex, AnthropicDelta{
-			Type: "text_delta",
+			Type: anthropicTextDelta,
 			Text: resp.Content,
 		}); err != nil {
 			anthropicLog.Error(err, "fallback: failed to write content_block_delta")
@@ -552,8 +556,8 @@ func writeAnthropicStreamError(w *bufio.Writer, reason string) error {
 	if strings.TrimSpace(reason) != "" {
 		message = fmt.Sprintf("provider stream ended with non-success outcome %q", reason)
 	}
-	return writeAnthropicSSE(w, "error", AnthropicError{
-		Type: "error",
+	return writeAnthropicSSE(w, apiFieldError, AnthropicError{
+		Type: apiFieldError,
 		Error: AnthropicErrorDetail{
 			Type:    "api_error",
 			Message: message,
@@ -565,11 +569,11 @@ func writeAnthropicTextProgress(w *bufio.Writer, blockIndex *int, text string) {
 	if text == "" {
 		return
 	}
-	if err := writeContentBlockStart(w, *blockIndex, AnthropicContentBlock{Type: "text", Text: ""}); err != nil {
+	if err := writeContentBlockStart(w, *blockIndex, AnthropicContentBlock{Type: oaiContentTypeText, Text: ""}); err != nil {
 		anthropicLog.Error(err, "failed to write progress content_block_start")
 		return
 	}
-	_ = writeContentBlockDelta(w, *blockIndex, AnthropicDelta{Type: "text_delta", Text: text})
+	_ = writeContentBlockDelta(w, *blockIndex, AnthropicDelta{Type: anthropicTextDelta, Text: text})
 	_ = writeContentBlockStop(w, *blockIndex)
 	(*blockIndex)++
 }
@@ -580,8 +584,8 @@ func writeMessageStart(w *bufio.Writer, id, model string, inputTokens int) error
 		Type: "message_start",
 		Message: &AnthropicResponse{
 			ID:         id,
-			Type:       "message",
-			Role:       "assistant",
+			Type:       apiFieldMessage,
+			Role:       chatRoleAssistant,
 			Content:    []AnthropicContentBlock{},
 			Model:      model,
 			StopReason: nil,
@@ -763,7 +767,7 @@ func isAllWaitingPolls(toolCalls []llm.ToolCall, messages []llm.Message) bool {
 			return false
 		}
 		m := messages[i]
-		if m.Role != "tool" {
+		if m.Role != chatRoleTool {
 			return false
 		}
 		if !isTaskStillRunning(m.Content) {

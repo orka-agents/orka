@@ -75,7 +75,7 @@ func TestResolveACPWorkspaceClassPreservesDormantSubstrateSuspendBindingIdentity
 		Digest:    harnessv2.ProfileDigest("sha256:" + strings.Repeat("b", 64)),
 		Workspace: binding,
 	}
-	pool, _, err := r.ensureACPRuntimePool(ctx, task.Namespace, plan, "", "", "")
+	pool, _, err := r.ensureACPRuntimePool(ctx, task.Namespace, plan)
 	if err != nil {
 		t.Fatalf("create Delete-only RuntimePool: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestResolveACPWorkspaceClassPreservesDormantSubstrateSuspendBindingIdentity
 	if err := r.Update(ctx, legacyPool); err != nil {
 		t.Fatalf("store pre-upgrade Delete-only RuntimePool: %v", err)
 	}
-	reused, preexisting, err := r.ensureACPRuntimePool(ctx, task.Namespace, plan, "", "", "")
+	reused, preexisting, err := r.ensureACPRuntimePool(ctx, task.Namespace, plan)
 	if err != nil {
 		t.Fatalf("reuse pre-upgrade Delete-only RuntimePool: %v", err)
 	}

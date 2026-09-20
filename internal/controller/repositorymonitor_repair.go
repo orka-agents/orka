@@ -23,6 +23,10 @@ import (
 )
 
 const (
+	pushBranchAction = "push_branch"
+)
+
+const (
 	repositoryMonitorRepairPhaseQueued              = "queued"
 	repositoryMonitorRepairPhaseSucceeded           = "succeeded"
 	repositoryMonitorRepairPhaseFailed              = "failed"
@@ -218,7 +222,7 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 		}
 		handled, err := r.tryProcessPullRequestAutomergeCommand(ctx, monitor, run, command, owner, repository, pr, item)
 		return handled, 0, err
-	case "review":
+	case repositoryMonitorCommandIntentReview:
 		if blockedLabel := repositoryMonitorBlockedLabel(monitor.Spec, pr.Labels); blockedLabel != "" {
 			item.LastVerdict = repositoryMonitorVerdictSkipped
 			item.SkipReason = repositoryMonitorSkipReasonBlockedLabel
@@ -227,7 +231,7 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 			}
 			return true, 0, r.Store.UpsertMonitorItem(ctx, item)
 		}
-		if cancelled, err := r.repositoryMonitorWorkActionCancelled(ctx, monitor, command.ID, "review"); err != nil || cancelled {
+		if cancelled, err := r.repositoryMonitorWorkActionCancelled(ctx, monitor, command.ID, repositoryMonitorCommandIntentReview); err != nil || cancelled {
 			return true, 0, err
 		}
 		if monitor.Spec.Review.RequireGreenCI {
@@ -263,7 +267,7 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 		if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
 			return true, 0, err
 		}
-		if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "review_task_created", fmt.Sprintf("Pull request #%d review task queued by command", pr.Number), map[string]any{"taskName": taskName, "created": created}); err != nil {
+		if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "review_task_created", fmt.Sprintf("Pull request #%d review task queued by command", pr.Number), map[string]any{eventTaskNameField: taskName, acpSessionOutcomeCreated: created}); err != nil {
 			return true, 0, err
 		}
 		if created {
@@ -316,7 +320,7 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 			if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
 				return true, 0, err
 			}
-			return true, 0, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "repair_blocked", fmt.Sprintf("Pull request #%d repair blocked: %s", pr.Number, reason), map[string]any{"intent": command.Intent, "reason": reason})
+			return true, 0, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "repair_blocked", fmt.Sprintf("Pull request #%d repair blocked: %s", pr.Number, reason), map[string]any{intentField: command.Intent, eventReasonField: reason})
 		}
 		created, err := r.createRepositoryMonitorRepairTask(ctx, monitor, run, command, owner, repository, pr, item, repairCountPR+1, repairCountHead+1)
 		if err != nil {
@@ -916,7 +920,7 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTask(ctx cont
 		job = existing
 	}
 	pushMutationID := "ghmut-" + repositoryMonitorShortHash(job.ID+"-push")
-	if _, err := r.ensureRepositoryMonitorGitHubMutationStarted(ctx, monitor, &store.GitHubMutationRecord{ID: pushMutationID, CommandEventID: command.ID, Operation: "push_branch", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: pr.Number, TargetSHA: pr.HeadSHA, Reason: command.Intent, GitHubURL: pr.HeadBranch}); err != nil {
+	if _, err := r.ensureRepositoryMonitorGitHubMutationStarted(ctx, monitor, &store.GitHubMutationRecord{ID: pushMutationID, CommandEventID: command.ID, Operation: pushBranchAction, TargetKind: repositoryMonitorPullRequestKind, TargetNumber: pr.Number, TargetSHA: pr.HeadSHA, Reason: command.Intent, GitHubURL: pr.HeadBranch}); err != nil {
 		return 0, err
 	}
 	priority := int32(820)
@@ -941,8 +945,8 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTask(ctx cont
 			Name:      taskName,
 			Namespace: monitor.Namespace,
 			Labels: map[string]string{
-				labels.LabelManaged:           "true",
-				labels.LabelCreatedBy:         "repository-monitor",
+				labels.LabelManaged:           booleanTrueValue,
+				labels.LabelCreatedBy:         repositoryMonitorTaskCreatedBy,
 				labels.LabelRepositoryMonitor: labels.SelectorValue(monitor.Name),
 				labels.LabelMonitorRun:        labels.SelectorValue(run.ID),
 				labels.LabelGitHubRepository:  labels.SelectorValue(monitoredRepo),
@@ -1015,7 +1019,7 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTask(ctx cont
 	if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
 		return created, err
 	}
-	return created, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "repair_task_created", fmt.Sprintf("Pull request #%d %s repair task queued", pr.Number, command.Intent), map[string]any{"taskName": taskName, "intent": command.Intent})
+	return created, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "repair_task_created", fmt.Sprintf("Pull request #%d %s repair task queued", pr.Number, command.Intent), map[string]any{eventTaskNameField: taskName, intentField: command.Intent})
 }
 
 func repositoryMonitorRepairWorkflowActionKind(intent string) string {
@@ -1030,7 +1034,7 @@ func repositoryMonitorRepairTaskName(monitor *corev1alpha1.RepositoryMonitor, pr
 }
 
 func buildRepositoryMonitorRepairPrompt(intent, repo string, pr repositoryMonitorPullRequest, item *store.MonitorItem) string {
-	payload := map[string]any{"schemaVersion": "orka.prRepair.input.v1", "repo": repo, "prNumber": pr.Number, repositoryMonitorFieldHeadSHA: pr.HeadSHA, "intent": intent, "lastVerdict": item.LastVerdict, "skipReason": item.SkipReason} //nolint:goconst // Stable JSON field names mirror the prompt schema.
+	payload := map[string]any{"schemaVersion": "orka.prRepair.input.v1", "repo": repo, "prNumber": pr.Number, repositoryMonitorFieldHeadSHA: pr.HeadSHA, intentField: intent, "lastVerdict": item.LastVerdict, "skipReason": item.SkipReason} //nolint:goconst // Stable JSON field names mirror the prompt schema.
 	payloadJSON, _ := json.MarshalIndent(payload, "", "  ")
 	return fmt.Sprintf("Repair this exact pull request head for intent %q. Keep scope limited, run relevant validation, and leave final changes for Orka to commit and push to the configured push branch. Do not merge or close the PR.\n\nInput:\n%s\n", intent, string(payloadJSON))
 }

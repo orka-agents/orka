@@ -25,6 +25,10 @@ import (
 	"github.com/orka-agents/orka/internal/tracing/genai"
 )
 
+const (
+	messageRoleUser = "user"
+)
+
 // apiMode tracks which API surface to use.
 type apiMode int32
 
@@ -294,7 +298,7 @@ func convertInputItems(messages []llm.Message) responses.ResponseInputParam {
 	items := make(responses.ResponseInputParam, 0, len(messages))
 	for _, msg := range messages {
 		switch msg.Role {
-		case "user":
+		case messageRoleUser:
 			items = append(items, responses.ResponseInputItemUnionParam{
 				OfMessage: &responses.EasyInputMessageParam{
 					Role:    responses.EasyInputMessageRoleUser,
@@ -840,7 +844,7 @@ func convertMessages(messages []llm.Message, systemPrompt string) []openai.ChatC
 		switch msg.Role {
 		case "system":
 			msgs = append(msgs, openai.SystemMessage(msg.Content))
-		case "user":
+		case messageRoleUser:
 			msgs = append(msgs, openai.UserMessage(msg.Content))
 		case "assistant":
 			m := openai.AssistantMessage(msg.Content)
@@ -1288,7 +1292,7 @@ func (p *Provider) Stream(ctx context.Context, req *llm.CompletionRequest) (<-ch
 	// Unknown — probe with a lightweight non-streaming responses.create
 	probeReq := &llm.CompletionRequest{
 		Model:     req.Model,
-		Messages:  []llm.Message{{Role: "user", Content: "hi"}},
+		Messages:  []llm.Message{{Role: messageRoleUser, Content: "hi"}},
 		MaxTokens: 1,
 	}
 	probe, err := p.completeResponses(ctx, probeReq)

@@ -41,6 +41,17 @@ import (
 )
 
 const (
+	terminalStateValue  = "terminal"
+	attemptField        = "attempt"
+	publicationIDField  = "publicationID"
+	versionField        = "version"
+	transitionFromField = "from"
+	operationField      = "operation"
+	terminalReasonField = "terminalReason"
+	attemptIDField      = "attemptID"
+)
+
+const (
 	DefaultACPDispatchInterval               = time.Second
 	DefaultACPDispatchWorkers                = 4
 	DefaultACPIdlePoolTTL                    = 15 * time.Minute
@@ -322,7 +333,7 @@ func (d *ACPDispatcher) scheduleACPDeliveryRecoveries(ctx context.Context, tasks
 			}
 		case store.PromptExecutionFailed, store.PromptExecutionCancelled, store.PromptExecutionOutcomeUnknown:
 			if corev1alpha1.TaskExecutionState(attempt.ExecutionState) != task.Status.Execution.State || task.Status.Execution.Outcome == "" {
-				recoveryKind = "terminal"
+				recoveryKind = terminalStateValue
 			}
 		}
 		if recoveryKind == "" {
@@ -331,7 +342,7 @@ func (d *ACPDispatcher) scheduleACPDeliveryRecoveries(ctx context.Context, tasks
 				return turnErr
 			}
 			if needsTurnRecovery {
-				recoveryKind = "terminal"
+				recoveryKind = terminalStateValue
 			}
 		}
 		cleanupPending := !taskScopedRuntimeSessionCleanupComplete(task)
@@ -594,6 +605,8 @@ func (d *ACPDispatcher) runtimePoolIdlePolicy(
 // stayed idle for another TTL. Recovery treats a missing pool as proof of
 // RuntimeSession cleanup, and fresh demand deterministically recreates the pool
 // by name. Plain pools are never deleted here; they are shared infrastructure.
+//
+//nolint:gocyclo // Reaping checks every retention, resume, attachment, and ownership fence before deletion.
 func (d *ACPDispatcher) reapStoppedWorkspacePool(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
@@ -1156,7 +1169,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			return nil
 		}
 	}
-	leaseGeneration := int64(1)
+	var leaseGeneration int64
 	if sessionExecution != nil {
 		runtimeFence.RuntimeSessionUID = harnessv2.RuntimeSessionUID(sessionExecution.Binding.SessionUID)
 		runtimeFence.RuntimeSessionGeneration = sessionExecution.Binding.Generation
@@ -2486,8 +2499,8 @@ func runtimeSessionDeltaAbandonmentFinalizationForTaskUID(
 	}
 	syntheticPublicationID := publicationIDForTaskUID(task, taskUID)
 	digest, err := acpDomainDigest("runtime-session-delta-abandonment-receipt", map[string]any{
-		"taskUID": taskUID, "attempt": task.Status.Execution.Attempt, "deltaID": deltaID,
-		"publicationID": syntheticPublicationID, "terminal": terminal, "delivery": delivery,
+		taskUIDField: taskUID, attemptField: task.Status.Execution.Attempt, "deltaID": deltaID,
+		publicationIDField: syntheticPublicationID, terminalStateValue: terminal, "delivery": delivery,
 	})
 	if err != nil {
 		return runtimeSessionPublicationFinalization{}, err
@@ -2519,7 +2532,7 @@ func (d *ACPDispatcher) runtimeSessionPublicationFinalization(
 		Verification: publication.VerificationReceipt, PullRequest: publication.PullRequestReceipt,
 	}
 	digest, err := acpDomainDigest("runtime-session-publication-finalization-receipt", map[string]any{
-		"publication": receipt, "version": publication.Version,
+		"publication": receipt, versionField: publication.Version,
 	})
 	if err != nil {
 		return runtimeSessionPublicationFinalization{}, err
@@ -3145,7 +3158,7 @@ func (l *acpRuntimePoolReservationLease) startRenewal(ctx context.Context) {
 			case <-ticker.C:
 				if err := l.renew(renewCtx); err != nil {
 					if !errors.Is(err, context.Canceled) {
-						logf.FromContext(renewCtx).Error(err, "ACP RuntimePool reservation renewal stopped", "namespace", l.identity.PoolKey.Namespace, "pool", l.identity.PoolKey.Name, "taskUID", l.identity.TaskUID, "attempt", l.identity.Attempt)
+						logf.FromContext(renewCtx).Error(err, "ACP RuntimePool reservation renewal stopped", "namespace", l.identity.PoolKey.Namespace, "pool", l.identity.PoolKey.Name, taskUIDField, l.identity.TaskUID, attemptField, l.identity.Attempt)
 					}
 					return
 				}
@@ -3746,6 +3759,7 @@ func (d *ACPDispatcher) settleTaskBeforeRuntimeAdmission(ctx context.Context, ta
 	return true, nil
 }
 
+//nolint:gocyclo // Reservation and its rollback paths form one fenced state transition.
 func (d *ACPDispatcher) reserveTask(ctx context.Context, queued *corev1alpha1.Task) (*corev1alpha1.Task, acpDispatchTarget, error) {
 	task := &corev1alpha1.Task{}
 	reader := uncachedReader(d.APIReader, d.Client)
@@ -3983,9 +3997,9 @@ func (d *ACPDispatcher) settleFrozenWorkspaceCredentialBlocked(
 			return fmt.Errorf("%w: credential-blocked PromptAttempt already has a runtime or session binding", store.ErrConflict)
 		}
 		digest, digestErr := acpDomainDigest("attempt-transition", map[string]any{
-			"id": attemptID, "from": attempt.ExecutionState, "to": store.PromptExecutionFailed,
-			"operation": acpCredentialBlockedOperation, "version": attempt.Version,
-			"terminalReason": acpCredentialBlockedOperation, "credentialRole": blocked.role,
+			"id": attemptID, transitionFromField: attempt.ExecutionState, "to": store.PromptExecutionFailed,
+			operationField: acpCredentialBlockedOperation, versionField: attempt.Version,
+			terminalReasonField: acpCredentialBlockedOperation, "credentialRole": blocked.role,
 		})
 		if digestErr != nil {
 			return digestErr
@@ -4173,7 +4187,7 @@ func (d *ACPDispatcher) transitionAttempt(ctx context.Context, id string, fence 
 	if attempt.ExecutionState != from {
 		return fmt.Errorf("prompt attempt %s state is %s, want %s", id, attempt.ExecutionState, from)
 	}
-	digest, err := acpDomainDigest("attempt-transition", map[string]any{"id": id, "from": from, "to": to, "operation": operation, "version": attempt.Version})
+	digest, err := acpDomainDigest("attempt-transition", map[string]any{"id": id, transitionFromField: from, "to": to, operationField: operation, versionField: attempt.Version})
 	if err != nil {
 		return err
 	}
@@ -4196,8 +4210,8 @@ func acpPromptResultDigest(result []byte) string {
 
 func acpSettlingTransitionDigest(id string, version int64, result []byte) (string, error) {
 	return acpDomainDigest("attempt-transition", map[string]any{
-		"id": id, "from": store.PromptExecutionRunning, "to": store.PromptExecutionSettling,
-		"operation": acpSettlingOperation, "version": version, "resultDigest": acpPromptResultDigest(result),
+		"id": id, transitionFromField: store.PromptExecutionRunning, "to": store.PromptExecutionSettling,
+		operationField: acpSettlingOperation, versionField: version, "resultDigest": acpPromptResultDigest(result),
 	})
 }
 
@@ -4261,7 +4275,7 @@ func (d *ACPDispatcher) transitionDelivery(ctx context.Context, id string, fence
 	if attempt.DeliveryState == to {
 		return nil
 	}
-	digest, err := acpDomainDigest("delivery-transition", map[string]any{"id": id, "from": from, "to": to, "operation": operation, "version": attempt.Version})
+	digest, err := acpDomainDigest("delivery-transition", map[string]any{"id": id, transitionFromField: from, "to": to, operationField: operation, versionField: attempt.Version})
 	if err != nil {
 		return err
 	}
@@ -5268,7 +5282,7 @@ func emptyRuntimeWorkspace(task *corev1alpha1.Task, scope string) (harnessv2.Wor
 	if strings.TrimSpace(scope) == "" {
 		scope = string(task.UID)
 	}
-	digest, err := acpDomainDigest("empty-workspace", map[string]any{"taskUID": scope})
+	digest, err := acpDomainDigest("empty-workspace", map[string]any{taskUIDField: scope})
 	if err != nil {
 		return harnessv2.WorkspaceBaseline{}, harnessv2.WorkspaceSpec{}, err
 	}
@@ -5393,12 +5407,12 @@ func runtimeSessionID(fence harnessv2.Fence) string {
 func exactPodEndpoint(address string) string {
 	address = strings.TrimSpace(address)
 	if parsed := net.ParseIP(address); parsed != nil {
-		return (&url.URL{Scheme: "http", Host: net.JoinHostPort(address, "8080")}).String()
+		return (&url.URL{Scheme: urlSchemeHTTP, Host: net.JoinHostPort(address, "8080")}).String()
 	}
 	if _, _, err := net.SplitHostPort(address); err == nil {
-		return (&url.URL{Scheme: "http", Host: address}).String()
+		return (&url.URL{Scheme: urlSchemeHTTP, Host: address}).String()
 	}
-	return (&url.URL{Scheme: "http", Host: net.JoinHostPort(address, "8080")}).String()
+	return (&url.URL{Scheme: urlSchemeHTTP, Host: net.JoinHostPort(address, "8080")}).String()
 }
 
 func promptAttemptIDFromTask(task *corev1alpha1.Task) (string, error) {
@@ -5821,7 +5835,7 @@ func (d *ACPDispatcher) requeuePreSubmissionTaskWithRuntimeBinding(
 	case store.PromptExecutionReserved:
 	case store.PromptExecutionSessionStarting, store.PromptExecutionPlanned:
 		digest, err := acpDomainDigest("pre-admission-reconciliation", map[string]any{
-			"attemptID": attempt.ID, "state": attempt.ExecutionState, "version": attempt.Version, "epoch": fence.Epoch,
+			attemptIDField: attempt.ID, stateField: attempt.ExecutionState, versionField: attempt.Version, epochField: fence.Epoch,
 		})
 		if err != nil {
 			return err
@@ -5878,7 +5892,7 @@ func (d *ACPDispatcher) requeueProvenNotAcceptedPromptAdmission(
 		message = "runtime prompt submission was not sent and will be retried"
 	}
 	digest, err := acpDomainDigest("proven-unaccepted-prompt-admission-recovery", map[string]any{
-		"attemptID": attempt.ID, "state": attempt.ExecutionState, "version": attempt.Version, "epoch": fence.Epoch,
+		attemptIDField: attempt.ID, stateField: attempt.ExecutionState, versionField: attempt.Version, epochField: fence.Epoch,
 		"statusCode": clientErr.StatusCode, "code": clientErr.Code, acpCancelLogKeyKind: clientErr.Kind,
 		"retryable": clientErr.Retryable, "writeState": clientErr.WriteEvidence.State, "proof": proof,
 	})
@@ -6601,7 +6615,7 @@ func (d *ACPDispatcher) persistOutcomeUnknown(ctx context.Context, attemptID str
 		if err != nil {
 			return err
 		}
-		digest, digestErr := acpDomainDigest("attempt-transition", map[string]any{"id": attemptID, "from": from, "to": store.PromptExecutionOutcomeUnknown, "operation": "outcome-unknown", "version": attempt.Version, "marker": message})
+		digest, digestErr := acpDomainDigest("attempt-transition", map[string]any{"id": attemptID, transitionFromField: from, "to": store.PromptExecutionOutcomeUnknown, operationField: "outcome-unknown", versionField: attempt.Version, "marker": message})
 		if digestErr != nil {
 			return digestErr
 		}
@@ -6734,8 +6748,8 @@ func (d *ACPDispatcher) transitionAttemptToFailed(
 		return err
 	}
 	digest, err := acpDomainDigest("attempt-transition", map[string]any{
-		"id": id, "from": attempt.ExecutionState, "to": target, "operation": operation,
-		"version": attempt.Version, "terminalReason": reason, "outcomeMarker": message,
+		"id": id, transitionFromField: attempt.ExecutionState, "to": target, operationField: operation,
+		versionField: attempt.Version, terminalReasonField: reason, "outcomeMarker": message,
 	})
 	if err != nil {
 		return err
@@ -6788,8 +6802,8 @@ func (d *ACPDispatcher) transitionAttemptToCancelled(
 		return err
 	}
 	digest, err := acpDomainDigest("attempt-transition", map[string]any{
-		"id": id, "from": attempt.ExecutionState, "to": target, "operation": operation,
-		"version": attempt.Version, "terminalReason": reason, "outcomeMarker": message,
+		"id": id, transitionFromField: attempt.ExecutionState, "to": target, operationField: operation,
+		versionField: attempt.Version, terminalReasonField: reason, "outcomeMarker": message,
 	})
 	if err != nil {
 		return err

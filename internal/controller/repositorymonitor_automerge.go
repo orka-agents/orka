@@ -19,6 +19,17 @@ import (
 )
 
 const (
+	mergeMethodField = "mergeMethod"
+)
+
+const (
+	mergeSHAField            = "mergeSHA"
+	githubPermissionAdmin    = "admin"
+	githubPermissionMaintain = "maintain"
+	bearerAuthScheme         = "Bearer"
+)
+
+const (
 	repositoryMonitorActionAutomerge                     = "pr_automerge"
 	repositoryMonitorAutomergeStateMerged                = "merged"
 	repositoryMonitorAutomergeStateMergeReady            = "merge_ready"
@@ -48,7 +59,7 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestAutomergeCommand(ctx 
 			if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
 				return true, err
 			}
-			return true, r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStatePending, "waiting for CI checks", map[string]any{"reason": reason})
+			return true, r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStatePending, "waiting for CI checks", map[string]any{eventReasonField: reason})
 		}
 		preserveSuccess, err := r.terminalizeRepositoryMonitorAutomerge(ctx, monitor, *command, reason)
 		if err != nil {
@@ -62,9 +73,9 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestAutomergeCommand(ctx 
 		if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
 			return true, err
 		}
-		return true, r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStateBlocked, reason, map[string]any{"reason": reason})
+		return true, r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStateBlocked, reason, map[string]any{eventReasonField: reason})
 	}
-	if err := r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStateStarted, "merge attempt started", map[string]any{"headSHA": pr.HeadSHA}); err != nil {
+	if err := r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStateStarted, "merge attempt started", map[string]any{repositoryMonitorFieldHeadSHA: pr.HeadSHA}); err != nil {
 		return true, err
 	}
 	method := repositoryMonitorAutomergeMethod(monitor)
@@ -109,7 +120,7 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestAutomergeCommand(ctx 
 				if updateErr := r.Store.UpsertMonitorItem(ctx, item); updateErr != nil {
 					return true, updateErr
 				}
-				if recordErr := r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStatePending, err.Error(), map[string]any{"mergeMethod": method, "error": err.Error(), "reason": failureState}); recordErr != nil {
+				if recordErr := r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStatePending, err.Error(), map[string]any{mergeMethodField: method, errorField: err.Error(), eventReasonField: failureState}); recordErr != nil {
 					return true, recordErr
 				}
 				return true, err
@@ -119,7 +130,7 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestAutomergeCommand(ctx 
 			if updateErr := r.Store.UpsertMonitorItem(ctx, item); updateErr != nil {
 				return true, updateErr
 			}
-			if recordErr := r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStateFailed, err.Error(), map[string]any{"mergeMethod": method, "error": err.Error()}); recordErr != nil {
+			if recordErr := r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStateFailed, err.Error(), map[string]any{mergeMethodField: method, errorField: err.Error()}); recordErr != nil {
 				return true, recordErr
 			}
 			return true, err
@@ -137,10 +148,10 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestAutomergeCommand(ctx 
 	if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
 		return true, err
 	}
-	if err := r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStateMerged, "pull request merged", map[string]any{"mergeMethod": method, "mergeSHA": sha}); err != nil {
+	if err := r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStateMerged, "pull request merged", map[string]any{mergeMethodField: method, mergeSHAField: sha}); err != nil {
 		return true, err
 	}
-	return true, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "automerge_succeeded", fmt.Sprintf("Pull request #%d automerged", pr.Number), map[string]any{"mergeSHA": sha, "mergeMethod": method})
+	return true, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "automerge_succeeded", fmt.Sprintf("Pull request #%d automerged", pr.Number), map[string]any{mergeSHAField: sha, mergeMethodField: method})
 }
 
 func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorCompletedAutomerge(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, pullRequests []repositoryMonitorPullRequest) (bool, error) {
@@ -198,10 +209,10 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorCompletedAutomer
 	if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
 		return false, err
 	}
-	if err := r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStateMerged, "pull request merged", map[string]any{"mergeSHA": mutation.ExternalID, "recovered": true}); err != nil {
+	if err := r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStateMerged, "pull request merged", map[string]any{mergeSHAField: mutation.ExternalID, "recovered": true}); err != nil {
 		return false, err
 	}
-	if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "automerge_succeeded", fmt.Sprintf("Pull request #%d automerge state recovered", pr.Number), map[string]any{"mergeSHA": mutation.ExternalID, "recovered": true}); err != nil {
+	if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "automerge_succeeded", fmt.Sprintf("Pull request #%d automerge state recovered", pr.Number), map[string]any{mergeSHAField: mutation.ExternalID, "recovered": true}); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -302,12 +313,12 @@ func repositoryMonitorAutomergeActorAllowed(monitor *corev1alpha1.RepositoryMoni
 
 func repositoryMonitorAutomergePermissionsAtLeast(minimum string) []string {
 	switch strings.ToLower(strings.TrimSpace(minimum)) {
-	case "admin":
-		return []string{"admin"}
-	case "maintain":
-		return []string{"maintain", "admin"}
+	case githubPermissionAdmin:
+		return []string{githubPermissionAdmin}
+	case githubPermissionMaintain:
+		return []string{githubPermissionMaintain, githubPermissionAdmin}
 	default:
-		return []string{"write", "maintain", "admin"}
+		return []string{"write", githubPermissionMaintain, githubPermissionAdmin}
 	}
 }
 
@@ -450,7 +461,7 @@ func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorAuthorizedJSON(ctx c
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", strings.Join([]string{"Bearer", token}, " "))
+	req.Header.Set("Authorization", strings.Join([]string{bearerAuthScheme, token}, " "))
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	httpClient := r.HTTPClient
@@ -481,12 +492,12 @@ func (r *RepositoryMonitorReconciler) mergeRepositoryMonitorPullRequest(ctx cont
 	if baseURL == "" {
 		baseURL = repositoryMonitorDefaultGitHubAPIBaseURL
 	}
-	payload, _ := json.Marshal(map[string]any{"merge_method": method, "sha": expectedSHA})
+	payload, _ := json.Marshal(map[string]any{"merge_method": method, shaField: expectedSHA})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, fmt.Sprintf("%s/repos/%s/%s/pulls/%d/merge", baseURL, url.PathEscape(owner), url.PathEscape(repository), number), bytes.NewReader(payload))
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Authorization", strings.Join([]string{"Bearer", token}, " "))
+	req.Header.Set("Authorization", strings.Join([]string{bearerAuthScheme, token}, " "))
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
@@ -520,7 +531,7 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorAutomergeRecord(ctx
 		payload = map[string]any{}
 	}
 	payload["commandEventID"] = command.ID
-	payload["headSHA"] = command.HeadSHA
+	payload[repositoryMonitorFieldHeadSHA] = command.HeadSHA
 	payloadJSON, _ := json.Marshal(payload)
 	record := &store.ActionRecord{
 		ID:                "act-" + repositoryMonitorShortHash(command.ID+"-automerge-"+verdict),

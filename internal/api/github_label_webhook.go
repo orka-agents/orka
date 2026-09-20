@@ -34,6 +34,13 @@ import (
 )
 
 const (
+	apiFieldStatus   = "status"
+	apiFieldTaskName = "taskName"
+	apiFieldAction   = "action"
+	apiFieldLabel    = "label"
+)
+
+const (
 	githubWebhookSecretEnv                     = "ORKA_GITHUB_WEBHOOK_SECRET"
 	githubLabelTriggerAgentEnv                 = "ORKA_GITHUB_LABEL_TRIGGER_AGENT"
 	githubLabelTriggerNamespaceEnv             = "ORKA_GITHUB_LABEL_TRIGGER_NAMESPACE"
@@ -172,8 +179,8 @@ func (h *Handlers) HandleGitHubWebhook(c fiber.Ctx) error {
 	event := c.Get(githubEventHeader)
 	if event == githubEventPing {
 		return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
-			"status":  "ok",
-			"message": "GitHub webhook signature verified",
+			apiFieldStatus:  "ok",
+			apiFieldMessage: "GitHub webhook signature verified",
 		})
 	}
 	if event != githubEventIssues && event != githubEventPullRequest {
@@ -280,22 +287,22 @@ func (h *Handlers) HandleGitHubWebhook(c fiber.Ctx) error {
 	if err := h.client.Create(c.Context(), task); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
-				"status":    "duplicate",
-				"message":   "task already exists for this GitHub webhook payload",
-				"taskName":  task.Name,
-				"namespace": task.Namespace,
-				"action":    action,
+				apiFieldStatus:   "duplicate",
+				apiFieldMessage:  "task already exists for this GitHub webhook payload",
+				apiFieldTaskName: task.Name,
+				toolNamespaceArg: task.Namespace,
+				apiFieldAction:   action,
 			})
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create task: %v", err))
 	}
 
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
-		"status":             "created",
-		"taskName":           task.Name,
-		"namespace":          task.Namespace,
-		"action":             action,
-		"label":              payload.Label.Name,
+		apiFieldStatus:       "created",
+		apiFieldTaskName:     task.Name,
+		toolNamespaceArg:     task.Namespace,
+		apiFieldAction:       action,
+		apiFieldLabel:        payload.Label.Name,
 		"monitorRunsQueued":  monitorResult.Queued,
 		"monitorRunsSkipped": monitorResult.SkippedActive,
 	})
@@ -475,10 +482,10 @@ func githubRepositoryMonitorExactRunID(monitor *corev1alpha1.RepositoryMonitor, 
 func (h *Handlers) createRepositoryMonitorEventRunAudit(c fiber.Ctx, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, payload githubLabelWebhookPayload, target githubLabelTarget, delivery, eventType string) error {
 	eventKey := githubWebhookReplayKey([]byte(eventType + "-" + delivery))
 	metadataJSON, err := json.Marshal(map[string]any{
-		"action":     payload.Action,
-		"delivery":   delivery,
-		"repository": payload.Repository.FullName,
-		"sender":     payload.Sender.Login,
+		apiFieldAction: payload.Action,
+		"delivery":     delivery,
+		"repository":   payload.Repository.FullName,
+		"sender":       payload.Sender.Login,
 	})
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to encode monitor event metadata: %v", err))
@@ -509,7 +516,7 @@ func githubRepositoryMonitorEventResponse(c fiber.Ctx, result githubRepositoryMo
 		responseStatus = "created"
 	}
 	return c.Status(status).JSON(fiber.Map{
-		"status":             responseStatus,
+		apiFieldStatus:       responseStatus,
 		"monitorRunsQueued":  result.Queued,
 		"monitorRunsCached":  result.Duplicate,
 		"monitorRunsSkipped": result.SkippedActive,
@@ -555,8 +562,8 @@ func githubWebhookReplayKey(body []byte) string {
 
 func githubWebhookIgnored(c fiber.Ctx, reason string) error {
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
-		"status": "ignored",
-		"reason": reason,
+		apiFieldStatus: "ignored",
+		"reason":       reason,
 	})
 }
 
@@ -798,7 +805,7 @@ func buildGitHubLabelTask(namespace, agentName, action, replayKey, delivery, eve
 func githubTaskName(action string, number int, replayKey string) string {
 	action = dnsNamePart(action)
 	if action == "" {
-		action = "action"
+		action = apiFieldAction
 	}
 	deliveryHash := hex.EncodeToString(githubHash([]byte(replayKey)))[:12]
 	base := fmt.Sprintf("github-%s-%d", action, number)

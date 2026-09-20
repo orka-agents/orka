@@ -143,6 +143,8 @@ func (t *WaitForTasksTool) Parameters() json.RawMessage {
 }
 
 // Execute waits for the specified tasks to complete and returns their results
+//
+//nolint:gocyclo // Task observation, timeout, cancellation, and result assembly share one wait loop.
 func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var waitArgs WaitForTasksArgs
 	if err := json.Unmarshal(args, &waitArgs); err != nil {

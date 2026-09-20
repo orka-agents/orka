@@ -303,6 +303,8 @@ func configureCreatedAgentRuntime(agent *corev1alpha1.Agent, runtimeArgs *Runtim
 }
 
 // Execute creates an Agent CRD dynamically
+//
+//nolint:gocyclo // Keep Agent construction and coordination-policy validation in one flow.
 func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var a CreateAgentArgs
 	if err := json.Unmarshal(args, &a); err != nil {
