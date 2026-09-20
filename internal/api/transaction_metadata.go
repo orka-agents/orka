@@ -18,21 +18,33 @@ import (
 	"github.com/orka-agents/orka/internal/taskmeta"
 )
 
+const (
+	contextTaskTypeKey         = "taskType"
+	contextAgentKey            = "agent"
+	contextAllowedAgentsKey    = "allowedAgents"
+	contextRepoKey             = "repo"
+	contextBranchKey           = "branch"
+	contextRefKey              = "ref"
+	contextAllowedToolsKey     = "allowedTools"
+	contextAllowedProvidersKey = "allowedProviders"
+	contextAllowedModelsKey    = "allowedModels"
+)
+
 var safeTransactionContextKeys = []string{
 	"purpose",
-	"namespace",
-	"taskType",
-	"agent",
-	"allowedAgents",
-	"repo",
-	"branch",
-	"ref",
+	toolNamespaceArg,
+	contextTaskTypeKey,
+	contextAgentKey,
+	contextAllowedAgentsKey,
+	contextRepoKey,
+	contextBranchKey,
+	contextRefKey,
 	"maxDepth",
-	"allowedTools",
-	"provider",
-	"allowedProviders",
-	"model",
-	"allowedModels",
+	contextAllowedToolsKey,
+	chatProviderKey,
+	contextAllowedProvidersKey,
+	chatModelKey,
+	contextAllowedModelsKey,
 	"e2e",
 	"trace_id",
 	"secret",
@@ -41,26 +53,26 @@ var safeTransactionContextKeys = []string{
 const maxSafeTransactionContextValueLength = 1024
 
 var setValuedContextDigestKeys = map[string]struct{}{
-	"allowedAgents":    {},
-	"allowedModels":    {},
-	"allowedProviders": {},
-	"allowedTools":     {},
+	contextAllowedAgentsKey:    {},
+	contextAllowedModelsKey:    {},
+	contextAllowedProvidersKey: {},
+	contextAllowedToolsKey:     {},
 }
 
 var authorizationTransactionContextKeys = map[string]struct{}{
-	"namespace":        {},
-	"taskType":         {},
-	"agent":            {},
-	"allowedAgents":    {},
-	"repo":             {},
-	"branch":           {},
-	"ref":              {},
-	"maxDepth":         {},
-	"allowedTools":     {},
-	"provider":         {},
-	"allowedProviders": {},
-	"model":            {},
-	"allowedModels":    {},
+	toolNamespaceArg:           {},
+	contextTaskTypeKey:         {},
+	contextAgentKey:            {},
+	contextAllowedAgentsKey:    {},
+	contextRepoKey:             {},
+	contextBranchKey:           {},
+	contextRefKey:              {},
+	"maxDepth":                 {},
+	contextAllowedToolsKey:     {},
+	chatProviderKey:            {},
+	contextAllowedProvidersKey: {},
+	chatModelKey:               {},
+	contextAllowedModelsKey:    {},
 }
 
 func stampTaskRequesterFromUserInfo(task *corev1alpha1.Task, ui *UserInfo) {

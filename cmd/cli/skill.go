@@ -43,7 +43,7 @@ func newSkillCmd() *cobra.Command {
 
 func newSkillListCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "list",
+		Use:   cliListUse,
 		Short: "List skills",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			c := newClientFromCmd(cmd)
@@ -98,7 +98,7 @@ func newSkillListCmd() *cobra.Command {
 
 func newSkillGetCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "get <name>",
+		Use:   cliGetByNameUse,
 		Short: "Get skill details",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -139,7 +139,7 @@ func newSkillContentCmd() *cobra.Command {
 
 func newSkillDeleteCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "delete <name>",
+		Use:   cliDeleteByNameUse,
 		Short: "Delete a skill",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -157,7 +157,7 @@ func newSkillDeleteCmd() *cobra.Command {
 
 func newSkillCreateCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "create -f <file>",
+		Use:   cliCreateFromFileUse,
 		Short: "Create a skill from a YAML manifest",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			file, _ := cmd.Flags().GetString("file")
@@ -177,7 +177,7 @@ func newSkillCreateCmd() *cobra.Command {
 
 			name := ""
 			if m, ok := (*skill)["metadata"].(map[string]any); ok {
-				name, _ = m["name"].(string)
+				name, _ = m[cliNameKey].(string)
 			}
 			fmt.Printf("Skill created: %s\n", name)
 			return nil
@@ -215,11 +215,11 @@ func newSkillImportCmd() *cobra.Command {
 
 			c := newClientFromCmd(cmd)
 			body := map[string]any{
-				"name":      name,
-				"namespace": c.Namespace,
+				cliNameKey:        name,
+				cliNamespaceQuery: c.Namespace,
 				"spec": map[string]any{
 					"description": description,
-					"content": map[string]any{
+					cliContentKey: map[string]any{
 						"inline": string(data),
 					},
 				},
@@ -237,7 +237,7 @@ func newSkillImportCmd() *cobra.Command {
 
 			createdName := name
 			if m, ok := (*skill)["metadata"].(map[string]any); ok {
-				if n, ok := m["name"].(string); ok {
+				if n, ok := m[cliNameKey].(string); ok {
 					createdName = n
 				}
 			}
@@ -245,7 +245,7 @@ func newSkillImportCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&name, "name", "", "Override skill name (default: the SKILL.md H1 heading, then the parent directory of a SKILL.md, then the filename)")
+	cmd.Flags().StringVar(&name, cliNameKey, "", "Override skill name (default: the SKILL.md H1 heading, then the parent directory of a SKILL.md, then the filename)")
 	cmd.Flags().StringVar(&description, "description", "", "Override skill description (default: the SKILL.md \"## Description\" section)")
 	return cmd
 }
@@ -255,7 +255,7 @@ func newSkillImportCmd() *cobra.Command {
 // the file itself is the conventional SKILL.md, otherwise the file name.
 func deriveSkillImportName(filePath string, data []byte) string {
 	frontmatter, body := splitSkillFrontmatter(data)
-	if name := sanitizeSkillName(frontmatter["name"]); name != "" {
+	if name := sanitizeSkillName(frontmatter[cliNameKey]); name != "" {
 		return name
 	}
 	if heading := skillMarkdownHeading(body); heading != "" {
@@ -448,7 +448,7 @@ func newSkillValidateCmd() *cobra.Command {
 				if firstString(spec, "description") == "" {
 					return fmt.Errorf("skill manifest spec.description is required")
 				}
-				content, _ := spec["content"].(map[string]any)
+				content, _ := spec[cliContentKey].(map[string]any)
 				if content == nil || strings.TrimSpace(anyString(content["inline"])) == "" {
 					return fmt.Errorf("skill manifest spec.content.inline is required")
 				}
@@ -525,7 +525,7 @@ func newSkillInitCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&name, "name", "", "Skill name for the template")
+	cmd.Flags().StringVar(&name, cliNameKey, "", "Skill name for the template")
 	cmd.Flags().StringVar(&description, "description", "", "Skill description for the template")
 	cmd.Flags().BoolVar(&force, "force", false, "Overwrite an existing SKILL.md")
 	return cmd

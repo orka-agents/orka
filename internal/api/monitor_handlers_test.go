@@ -171,7 +171,7 @@ func TestRepositoryMonitorHandlers_CRUDAndManualRun(t *testing.T) {
 
 func TestRepositoryMonitorHandlers_ListSubresourcesAcceptContinueToken(t *testing.T) {
 	app, handlers := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff)
-	createRepositoryMonitorForHandlerTest(t, app, "repo-monitor", "demo")
+	createRepositoryMonitorForHandlerTest(t, app)
 
 	now := time.Now().UTC().Truncate(time.Second)
 	for _, run := range []store.MonitorRun{
@@ -253,7 +253,7 @@ func TestRepositoryMonitorHandlersRejectMutableValidationImage(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			app, _ := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff)
 			if tt.setup {
-				createRepositoryMonitorForHandlerTest(t, app, "repo-monitor", "demo")
+				createRepositoryMonitorForHandlerTest(t, app)
 			}
 			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
 			req.Header.Set("Content-Type", "application/json")
@@ -301,7 +301,7 @@ func TestRepositoryMonitorHandlersRejectLegacyValidationCommands(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			app, _ := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff)
 			if tt.setup {
-				createRepositoryMonitorForHandlerTest(t, app, "repo-monitor", "demo")
+				createRepositoryMonitorForHandlerTest(t, app)
 			}
 			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
 			req.Header.Set("Content-Type", "application/json")
@@ -598,16 +598,16 @@ func TestCreateRepositoryMonitor_RejectsBuiltInReviewerSecretRef(t *testing.T) {
 	require.Contains(t, readRespBody(t, resp), "must omit spec.secretRef")
 }
 
-func createRepositoryMonitorForHandlerTest(t *testing.T, app *fiber.App, name, namespace string) {
+func createRepositoryMonitorForHandlerTest(t *testing.T, app *fiber.App) {
 	t.Helper()
 	body := fmt.Sprintf(`{
-		"name":%q,
-		"namespace":%q,
+		"name":"repo-monitor",
+		"namespace":"demo",
 		"spec":{
 			"repoURL":%q,
 			"agents":{"reviewer":{"name":"reviewer"}}
 		}
-	}`, name, namespace, monitorTestRepoURL)
+	}`, monitorTestRepoURL)
 	req := httptest.NewRequest(http.MethodPost, "/monitors/repositories", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := app.Test(req)
@@ -941,7 +941,7 @@ func TestCreateRepositoryMonitorCommandEventAcceptsSameHeadFixCIRequests(t *test
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			app, handlers := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff)
-			createRepositoryMonitorForHandlerTest(t, app, "repo-monitor", "demo")
+			createRepositoryMonitorForHandlerTest(t, app)
 			for _, number := range []int64{12, 13} {
 				require.NoError(t, handlers.repositoryMonitorStore.UpsertMonitorItem(t.Context(), &store.MonitorItem{
 					MonitorNamespace: "demo",

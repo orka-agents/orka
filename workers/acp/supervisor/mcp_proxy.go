@@ -27,6 +27,10 @@ import (
 )
 
 const (
+	jsonRPCVersion = "2.0"
+)
+
+const (
 	mcpProxyPathPrefix        = "/_orka/mcp/"
 	mcpProtocolVersion        = "2025-06-18"
 	defaultMCPMaxConnections  = 16
@@ -169,7 +173,7 @@ func (p *mcpProxy) newSession(
 		p.sessions[route] = session
 		p.mu.Unlock()
 		return session, acp.MCPServer{
-			Type: "http", Name: "orka", URL: endpoint,
+			Type: providerProxyScheme, Name: "orka", URL: endpoint,
 			Headers: []acp.HTTPHeader{{Name: "Authorization", Value: "Bearer " + credential}},
 		}, nil
 	}
@@ -471,7 +475,7 @@ func (p *mcpProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	decoder := json.NewDecoder(body)
 	decoder.DisallowUnknownFields()
 	var request mcpJSONRPCRequest
-	if err := decoder.Decode(&request); err != nil || request.JSONRPC != "2.0" || strings.TrimSpace(request.Method) == "" {
+	if err := decoder.Decode(&request); err != nil || request.JSONRPC != jsonRPCVersion || strings.TrimSpace(request.Method) == "" {
 		writeMCPRPCError(w, request.ID, -32600, "invalid MCP JSON-RPC request")
 		return
 	}
@@ -485,7 +489,7 @@ func (p *mcpProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		writeMCPRPCResult(w, request.ID, map[string]any{
 			"protocolVersion": mcpProtocolVersion,
 			"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
-			"serverInfo":      map[string]any{"name": "orka-prompt-broker", "version": "v2"},
+			"serverInfo":      map[string]any{protocolNameField: "orka-prompt-broker", "version": "v2"},
 		})
 	case "notifications/initialized":
 		w.WriteHeader(http.StatusAccepted)
@@ -606,7 +610,7 @@ func (s *mcpProxySession) listTools(_ time.Time) []map[string]any {
 			continue
 		}
 		result = append(result, map[string]any{
-			"name": descriptor.Name, "description": descriptor.Description, "inputSchema": schema,
+			protocolNameField: descriptor.Name, "description": descriptor.Description, "inputSchema": schema,
 		})
 	}
 	return result
@@ -712,14 +716,14 @@ func writeMCPRPCResult(w http.ResponseWriter, id json.RawMessage, result any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(mcpJSONRPCResponse{JSONRPC: "2.0", ID: id, Result: result})
+	_ = json.NewEncoder(w).Encode(mcpJSONRPCResponse{JSONRPC: jsonRPCVersion, ID: id, Result: result})
 }
 
 func writeMCPRPCError(w http.ResponseWriter, id json.RawMessage, code int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(mcpJSONRPCResponse{JSONRPC: "2.0", ID: id, Error: &mcpJSONRPCError{Code: code, Message: message}})
+	_ = json.NewEncoder(w).Encode(mcpJSONRPCResponse{JSONRPC: jsonRPCVersion, ID: id, Error: &mcpJSONRPCError{Code: code, Message: message}})
 }
 
 func (p *mcpProxy) close(ctx context.Context) error {

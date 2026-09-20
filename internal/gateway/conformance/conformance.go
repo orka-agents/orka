@@ -117,6 +117,8 @@ func verifyProbeAuthentication(ctx context.Context, client *http.Client, baseURL
 
 // Check performs the reusable full contract check, including auth, size bounds,
 // redaction safety, and idempotent delivery.
+//
+//nolint:gocyclo // The conformance probe keeps its ordered protocol checks and cleanup together.
 func Check(ctx context.Context, target Target) (result CheckResult) {
 	defer func() {
 		if target.DeliveryFixture != nil {

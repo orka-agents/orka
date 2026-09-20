@@ -10,6 +10,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const (
+	cliProviderKey = "provider"
+)
+
 type crudResourceSpec struct {
 	Use          string
 	Short        string
@@ -47,7 +51,7 @@ func newCRUDListCmd(spec crudResourceSpec) *cobra.Command {
 	var limit int
 	var cont string
 	cmd := &cobra.Command{
-		Use:   "list",
+		Use:   cliListUse,
 		Short: "List " + spec.Name + " resources",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			c := newClientFromCmd(cmd)
@@ -92,7 +96,7 @@ func newCRUDListCmd(spec crudResourceSpec) *cobra.Command {
 
 func newCRUDGetCmd(spec crudResourceSpec) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "get <name>",
+		Use:   cliGetByNameUse,
 		Short: "Get " + articleFor(spec.Name) + " " + spec.Name + " resource",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -118,7 +122,7 @@ func newCRUDGetCmd(spec crudResourceSpec) *cobra.Command {
 func newCRUDCreateCmd(spec crudResourceSpec) *cobra.Command {
 	var file string
 	cmd := &cobra.Command{
-		Use:   "create -f <file>",
+		Use:   cliCreateFromFileUse,
 		Short: "Create " + articleFor(spec.Name) + " " + spec.Name + " resource from a manifest",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if file == "" {
@@ -174,7 +178,7 @@ func newCRUDUpdateCmd(spec crudResourceSpec) *cobra.Command {
 
 func newCRUDDeleteCmd(spec crudResourceSpec) *cobra.Command {
 	return &cobra.Command{
-		Use:   "delete <name>",
+		Use:   cliDeleteByNameUse,
 		Short: "Delete " + articleFor(spec.Name) + " " + spec.Name + " resource",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -209,10 +213,10 @@ func titleName(s string) string {
 
 func newProviderCmd() *cobra.Command {
 	return newCRUDResourceCmd(crudResourceSpec{
-		Use:      "provider",
+		Use:      cliProviderKey,
 		Short:    "Manage providers",
 		BasePath: "/api/v1/providers",
-		Name:     "provider",
+		Name:     cliProviderKey,
 	})
 }
 
@@ -227,10 +231,10 @@ func newToolCmd() *cobra.Command {
 
 func newSessionCmd() *cobra.Command {
 	cmd := newCRUDResourceCmd(crudResourceSpec{
-		Use:      "session",
+		Use:      cliSessionCommand,
 		Short:    "Manage sessions",
 		BasePath: "/api/v1/sessions",
-		Name:     "session",
+		Name:     cliSessionCommand,
 		NoCreate: true,
 		NoUpdate: true,
 	})

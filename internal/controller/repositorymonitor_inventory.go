@@ -30,6 +30,13 @@ import (
 )
 
 const (
+	schemaVersionField  = "schemaVersion"
+	repoField           = "repo"
+	eventField          = "event"
+	controllerNameValue = "controller"
+)
+
+const (
 	repositoryMonitorDefaultGitHubAPIBaseURL = "https://api.github.com"
 	repositoryMonitorPullRequestKind         = "pull_request"
 	repositoryMonitorTokenKey                = "token"
@@ -191,8 +198,8 @@ func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context
 				return selected, createdTasks, skipped, err
 			}
 			if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "item_skipped", fmt.Sprintf("Pull request #%d skipped: %s", pr.Number, skipReason), map[string]any{
-				"reason": skipReason,
-				"labels": pr.Labels,
+				eventReasonField:           skipReason,
+				substrateObjectLabelsField: pr.Labels,
 			}); err != nil {
 				return selected, createdTasks, skipped, err
 			}
@@ -214,7 +221,7 @@ func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context
 				if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
 					return selected, createdTasks, skipped, err
 				}
-				if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "item_skipped", fmt.Sprintf("Pull request #%d skipped: %s", pr.Number, item.SkipReason), map[string]any{"reason": item.SkipReason, "ciState": item.CIState}); err != nil {
+				if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "item_skipped", fmt.Sprintf("Pull request #%d skipped: %s", pr.Number, item.SkipReason), map[string]any{eventReasonField: item.SkipReason, "ciState": item.CIState}); err != nil {
 					return selected, createdTasks, skipped, err
 				}
 				continue
@@ -236,8 +243,8 @@ func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context
 			return selected, createdTasks, skipped, err
 		}
 		if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "review_task_created", fmt.Sprintf("Pull request #%d review task queued", pr.Number), map[string]any{
-			"taskName": taskName,
-			"created":  created,
+			eventTaskNameField:       taskName,
+			acpSessionOutcomeCreated: created,
 		}); err != nil {
 			return selected, createdTasks, skipped, err
 		}
@@ -324,13 +331,13 @@ func (r *RepositoryMonitorReconciler) blockRepositoryMonitorTargetCommand(ctx co
 			if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorPullRequestKind, run.TargetNumber, run.TargetSHA, "", actionKind, repositoryMonitorWorkActionStatusSucceeded, repositoryMonitorAutomergeStateMerged, "", ""); err != nil {
 				return err
 			}
-			return r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, run.TargetNumber, run.TargetSHA, "command_target_already_completed", fmt.Sprintf("Command %s target already completed", command.ID), map[string]any{"commandEventID": command.ID, "intent": command.Intent})
+			return r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, run.TargetNumber, run.TargetSHA, "command_target_already_completed", fmt.Sprintf("Command %s target already completed", command.ID), map[string]any{commandEventIDField: command.ID, intentField: command.Intent})
 		}
 	}
 	if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorPullRequestKind, run.TargetNumber, run.TargetSHA, "", actionKind, repositoryMonitorWorkActionStatusBlocked, "command_blocked", "", reason); err != nil {
 		return err
 	}
-	return r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, run.TargetNumber, run.TargetSHA, "command_target_blocked", fmt.Sprintf("Command %s blocked: %s", command.ID, reason), map[string]any{"commandEventID": command.ID, "intent": command.Intent, "reason": reason})
+	return r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, run.TargetNumber, run.TargetSHA, "command_target_blocked", fmt.Sprintf("Command %s blocked: %s", command.ID, reason), map[string]any{commandEventIDField: command.ID, intentField: command.Intent, eventReasonField: reason})
 }
 
 func repositoryMonitorPullRequestKeys(pullRequests []repositoryMonitorPullRequest) map[string]struct{} {
@@ -364,8 +371,8 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorReviewTask(ctx cont
 		labels.AnnotationMonitorItemNumber:      prNumber,
 		labels.AnnotationMonitorHeadSHA:         pr.HeadSHA,
 		labels.AnnotationGitHubRepository:       repoFullName,
-		labels.AnnotationAgentReadOnly:          "true",
-		labels.AnnotationWorkspaceInitContainer: "true",
+		labels.AnnotationAgentReadOnly:          booleanTrueValue,
+		labels.AnnotationWorkspaceInitContainer: booleanTrueValue,
 	}
 	if strings.TrimSpace(run.CommandEventID) != "" {
 		annotations[repositoryMonitorIssueAnnotationCommandID] = run.CommandEventID
@@ -379,8 +386,8 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorReviewTask(ctx cont
 			Name:      taskName,
 			Namespace: monitor.Namespace,
 			Labels: map[string]string{
-				labels.LabelManaged:           "true",
-				labels.LabelCreatedBy:         "repository-monitor",
+				labels.LabelManaged:           booleanTrueValue,
+				labels.LabelCreatedBy:         repositoryMonitorTaskCreatedBy,
 				labels.LabelRepositoryMonitor: labels.SelectorValue(monitor.Name),
 				labels.LabelMonitorRun:        labels.SelectorValue(run.ID),
 				labels.LabelGitHubRepository:  labels.SelectorValue(repoFullName),
@@ -431,11 +438,11 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorReviewTask(ctx cont
 			if bindingErr := validateRepositoryMonitorReviewTaskMatchesExpected(&existing, task, monitor, run, owner, repository, pr); bindingErr != nil {
 				return "", false, bindingErr
 			}
-			return taskName, false, r.retainMonitorUsageTask(ctx, &existing, usageWorkID, "review", pr.Number)
+			return taskName, false, r.retainMonitorUsageTask(ctx, &existing, usageWorkID, repositoryMonitorCommandIntentReview, pr.Number)
 		}
 		return "", false, err
 	}
-	return taskName, true, r.retainMonitorUsageTask(ctx, task, usageWorkID, "review", pr.Number)
+	return taskName, true, r.retainMonitorUsageTask(ctx, task, usageWorkID, repositoryMonitorCommandIntentReview, pr.Number)
 }
 
 // validateRepositoryMonitorReviewTaskMatchesExpected decides whether an
@@ -620,23 +627,23 @@ func repositoryMonitorReviewTaskName(monitor *corev1alpha1.RepositoryMonitor, ru
 
 func buildRepositoryMonitorReviewPrompt(monitor *corev1alpha1.RepositoryMonitor, owner, repository string, pr repositoryMonitorPullRequest, reviewContext repositoryMonitorReviewContext) string {
 	payload := map[string]any{
-		"schemaVersion":  "orka.prReview.input.v1",
-		"repoURL":        monitor.Spec.RepoURL,
-		"repo":           owner + "/" + repository,
-		"prNumber":       pr.Number,
-		"title":          pr.Title,
-		"author":         pr.Author,
-		"baseBranch":     pr.BaseBranch,
-		"baseSHA":        pr.BaseSHA,
-		"headBranch":     pr.HeadBranch,
-		"headRepo":       pr.HeadRepo,
-		"headRepoURL":    pr.HeadRepoURL,
-		"headSHA":        pr.HeadSHA,
-		"labels":         pr.Labels,
-		"draft":          pr.Draft,
-		"mergeableState": pr.MergeableState,
-		"review": map[string]any{
-			"event": monitor.Spec.Review.Event,
+		schemaVersionField:                  "orka.prReview.input.v1",
+		"repoURL":                           monitor.Spec.RepoURL,
+		repoField:                           owner + "/" + repository,
+		"prNumber":                          pr.Number,
+		repositoryScanPullRequestTitleField: pr.Title,
+		"author":                            pr.Author,
+		"baseBranch":                        pr.BaseBranch,
+		"baseSHA":                           pr.BaseSHA,
+		"headBranch":                        pr.HeadBranch,
+		"headRepo":                          pr.HeadRepo,
+		"headRepoURL":                       pr.HeadRepoURL,
+		repositoryMonitorFieldHeadSHA:       pr.HeadSHA,
+		substrateObjectLabelsField:          pr.Labels,
+		"draft":                             pr.Draft,
+		"mergeableState":                    pr.MergeableState,
+		repositoryMonitorCommandIntentReview: map[string]any{
+			eventField: monitor.Spec.Review.Event,
 		},
 		"policy": map[string]any{
 			"protectedLabels": monitor.Spec.Policy.ProtectedLabels,
@@ -780,8 +787,8 @@ func (r *RepositoryMonitorReconciler) retireMissingRepositoryMonitorPullRequests
 			return err
 		}
 		if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, item.Number, item.HeadSHA, "item_retired", fmt.Sprintf("Pull request #%d is no longer in the open base-branch inventory", item.Number), map[string]any{
-			"reason": repositoryMonitorSkipReasonMissing,
-			"state":  item.State,
+			eventReasonField: repositoryMonitorSkipReasonMissing,
+			stateField:       item.State,
 		}); err != nil {
 			return err
 		}
@@ -991,7 +998,7 @@ func repositoryMonitorItemFromPullRequest(monitor *corev1alpha1.RepositoryMonito
 		BaseSHA:          pr.BaseSHA,
 		Draft:            pr.Draft,
 		MergeableState:   pr.MergeableState,
-		CIState:          "unknown",
+		CIState:          repositoryMonitorIssueUnknownValue,
 	}
 	if existing != nil {
 		sameHead := strings.TrimSpace(existing.HeadSHA) != "" && existing.HeadSHA == pr.HeadSHA
@@ -1066,7 +1073,7 @@ func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorPullRequestPage(ctx 
 		baseURL = repositoryMonitorDefaultGitHubAPIBaseURL
 	}
 	query := url.Values{}
-	query.Set("state", "open")
+	query.Set(stateField, "open")
 	query.Set("per_page", strconv.Itoa(repositoryMonitorGitHubPerPage))
 	query.Set("page", strconv.Itoa(page))
 	if strings.TrimSpace(baseBranch) != "" {
@@ -1282,7 +1289,7 @@ func (r *RepositoryMonitorReconciler) createMonitorEvent(ctx context.Context, mo
 		ItemNumber:       itemNumber,
 		ItemSHA:          itemSHA,
 		EventType:        eventType,
-		Actor:            "controller",
+		Actor:            controllerNameValue,
 		Summary:          summary,
 		MetadataJSON:     string(metadataJSON),
 	})

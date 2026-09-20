@@ -9,6 +9,10 @@ import (
 	"github.com/orka-agents/orka/internal/cli/client"
 )
 
+const (
+	cliTaskCommand = "task"
+)
+
 func newAuthCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "auth", Short: "Inspect authentication"}
 	validate := &cobra.Command{
@@ -45,7 +49,7 @@ func newModelsCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "models", Short: "List compatible model IDs"}
 	var compat string
 	list := &cobra.Command{
-		Use:   "list",
+		Use:   cliListUse,
 		Short: "List model IDs",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if compat != "openai" && compat != "anthropic" {
@@ -88,8 +92,8 @@ func newWorkspaceCmd() *cobra.Command {
 
 func safeWorkspaceStatus(task client.TaskDetail) map[string]any {
 	out := map[string]any{
-		"task":      client.StringField(task, "metadata", "name"),
-		"namespace": client.StringField(task, "metadata", "namespace"),
+		cliTaskCommand:    client.StringField(task, "metadata", "name"),
+		cliNamespaceQuery: client.StringField(task, "metadata", cliNamespaceQuery),
 	}
 	status := nestedMap(task, "status")
 	out["phase"] = status["phase"]

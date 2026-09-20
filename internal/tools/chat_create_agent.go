@@ -39,9 +39,9 @@ func (t *ChatCreateAgentTool) Parameters() json.RawMessage {
 		"limits":   map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, "additionalProperties": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}},
 	},
 	}, modelField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaDescriptionField: "Model configuration; OpenCode requires a literal provider/model name plus reviewed contextWindow and maxTokens", jsonSchemaPropertiesField: map[string]any{
-		"provider": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Model provider (e.g. anthropic, openai)"}, nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Model name; OpenCode requires a literal provider/model ID"}, "temperature": map[string]any{jsonSchemaTypeField: "number", "minimum": 0, "maximum": 2, jsonSchemaDescriptionField: "Sampling temperature. OpenCode only accepts the legacy default 0.7."},
-		"contextWindow": map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, "minimum": 1, jsonSchemaDescriptionField: "Reviewed model context capacity; required for OpenCode"},
-		"maxTokens":     map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, "minimum": 1, jsonSchemaDescriptionField: "Reviewed maximum output tokens; required for OpenCode"},
+		"provider": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Model provider (e.g. anthropic, openai)"}, nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Model name; OpenCode requires a literal provider/model ID"}, "temperature": map[string]any{jsonSchemaTypeField: "number", jsonSchemaMinimumField: 0, "maximum": 2, jsonSchemaDescriptionField: "Sampling temperature. OpenCode only accepts the legacy default 0.7."},
+		"contextWindow": map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaMinimumField: 1, jsonSchemaDescriptionField: "Reviewed model context capacity; required for OpenCode"},
+		"maxTokens":     map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaMinimumField: 1, jsonSchemaDescriptionField: "Reviewed maximum output tokens; required for OpenCode"},
 	},
 	}, runtimeField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaDescriptionField: "CLI runtime configuration. OpenCode uses the built-in ACP RuntimePool profile and controller provider proxy.", jsonSchemaPropertiesField: map[string]any{jsonSchemaTypeField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Runtime type: copilot, claude, codex, or opencode"}, "defaultMaxTurns": map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Default max agent loop iterations"},
 		"defaultAllowedTools": map[string]any{jsonSchemaTypeField: jsonSchemaTypeArray, itemsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}, jsonSchemaDescriptionField: "Default CLI tools allowed for tasks using this runtime agent. OpenCode defaults to Read, Write, Edit, Bash, Glob, and Grep when omitted."},
@@ -59,6 +59,7 @@ func (t *ChatCreateAgentTool) Parameters() json.RawMessage {
 	})
 }
 
+//nolint:gocyclo // Keep validated chat tool arguments adjacent to the Agent spec they populate.
 func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	tc := GetToolContext(ctx)
 	if tc == nil {

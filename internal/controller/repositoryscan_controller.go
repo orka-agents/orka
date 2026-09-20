@@ -44,6 +44,10 @@ import (
 )
 
 const (
+	repositorySecurityTaskCreator = "repository-security"
+)
+
+const (
 	repositoryScanPhasePending   = "Pending"
 	repositoryScanPhaseScanning  = "Scanning"
 	repositoryScanPhaseReady     = "Ready"
@@ -185,7 +189,7 @@ func (r *RepositoryScanReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
 	if err := r.ingestOwnedTasks(ctx, scan); err != nil {
@@ -420,8 +424,8 @@ func (r *RepositoryScanReconciler) createScanRun(ctx context.Context, scan *core
 			Name:      taskName,
 			Namespace: scan.Namespace,
 			Labels: map[string]string{
-				labels.LabelManaged:        "true",
-				labels.LabelCreatedBy:      "repository-security",
+				labels.LabelManaged:        booleanTrueValue,
+				labels.LabelCreatedBy:      repositorySecurityTaskCreator,
 				labels.LabelSecurityTarget: labels.SelectorValue(scan.Name),
 				labels.LabelSecurityScanID: scanID,
 				labels.LabelSecurityMode:   mode,
@@ -655,8 +659,8 @@ func (r *RepositoryScanReconciler) createMapperTask(ctx context.Context, scan *c
 			Name:      taskName,
 			Namespace: scan.Namespace,
 			Labels: map[string]string{
-				labels.LabelManaged:        "true",
-				labels.LabelCreatedBy:      "repository-security",
+				labels.LabelManaged:        booleanTrueValue,
+				labels.LabelCreatedBy:      repositorySecurityTaskCreator,
 				labels.LabelSecurityTarget: labels.SelectorValue(scan.Name),
 				labels.LabelSecurityScanID: run.ID,
 				labels.LabelSecurityMode:   run.Mode,
@@ -1018,8 +1022,8 @@ func (r *RepositoryScanReconciler) buildReviewTask(
 			Name:      taskName,
 			Namespace: scan.Namespace,
 			Labels: map[string]string{
-				labels.LabelManaged:         "true",
-				labels.LabelCreatedBy:       "repository-security",
+				labels.LabelManaged:         booleanTrueValue,
+				labels.LabelCreatedBy:       repositorySecurityTaskCreator,
 				labels.LabelSecurityTarget:  labels.SelectorValue(scan.Name),
 				labels.LabelSecurityScanID:  run.ID,
 				labels.LabelSecurityMode:    run.Mode,
@@ -1561,7 +1565,7 @@ func (r *RepositoryScanReconciler) pipelineTaskFailureSummary(ctx context.Contex
 	case security.StageMapper:
 		stage = "mapper"
 	case security.StageReview:
-		stage = "review"
+		stage = repositoryMonitorCommandIntentReview
 	}
 	outcome := "failed"
 	if task.Status.Phase == corev1alpha1.TaskPhaseCancelled {
@@ -2042,8 +2046,8 @@ func (r *RepositoryScanReconciler) ensureValidationTask(ctx context.Context, sca
 			Name:      taskName,
 			Namespace: scan.Namespace,
 			Labels: map[string]string{
-				labels.LabelManaged:           "true",
-				labels.LabelCreatedBy:         "repository-security",
+				labels.LabelManaged:           booleanTrueValue,
+				labels.LabelCreatedBy:         repositorySecurityTaskCreator,
 				labels.LabelSecurityTarget:    labels.SelectorValue(scan.Name),
 				labels.LabelSecurityScanID:    finding.ScanRunID,
 				labels.LabelSecurityMode:      security.StageValidation,
@@ -3144,6 +3148,7 @@ func (r *RepositoryScanReconciler) ingestThreatModelTask(ctx context.Context, sc
 	})
 }
 
+//nolint:gocyclo // Review ingestion keeps terminal outcomes and result validation in one state transition.
 func (r *RepositoryScanReconciler) ingestReviewTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task, run *store.ScanRun) error {
 	if terminalScanRunPhase(run.Phase) {
 		return nil
@@ -4335,6 +4340,7 @@ func (r *RepositoryScanReconciler) failPatchProposal(ctx context.Context, task *
 		"namespace", task.Namespace, "task", task.Name, "finding", proposal.FindingID, "proposal", proposal.ID, "reason", proposal.Reason)
 }
 
+//nolint:gocyclo // Patch ingestion keeps terminal outcomes and publication evidence in one state transition.
 func (r *RepositoryScanReconciler) ingestPatchTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task) error {
 	findingID := task.Labels[labels.LabelSecurityFindingID]
 	if findingID == "" {

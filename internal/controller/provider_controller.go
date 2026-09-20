@@ -114,7 +114,7 @@ func (r *ProviderReconciler) updateStatus(ctx context.Context, provider *corev1a
 
 	// Update condition
 	condition := metav1.Condition{
-		Type:               "Ready",
+		Type:               conditionReasonReady,
 		LastTransitionTime: now,
 		ObservedGeneration: provider.Generation,
 	}

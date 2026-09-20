@@ -93,7 +93,7 @@ func validateHarnessV1PublicWorkspaceAuthority(workspace *corev1alpha1.Workspace
 func validateHarnessV1PublicWorkspaceLocation(workspace *corev1alpha1.WorkspaceConfig) error {
 	for label, value := range map[string]string{
 		"branch": workspace.Branch,
-		"ref":    workspace.Ref,
+		refField: workspace.Ref,
 	} {
 		if value != strings.TrimSpace(value) || strings.HasPrefix(value, "-") ||
 			strings.Contains(value, "..") || strings.Contains(value, "@{") ||

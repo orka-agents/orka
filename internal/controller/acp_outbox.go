@@ -21,6 +21,10 @@ import (
 	"github.com/orka-agents/orka/internal/taskterminal"
 )
 
+const (
+	stateField = "state"
+)
+
 func standaloneTaskTerminalProjectionID(task *corev1alpha1.Task, attempt int32) string {
 	if task == nil {
 		return ""
@@ -101,7 +105,7 @@ func enqueueDurableTaskTerminalProjectionForUID(
 	}
 	projection := &store.OutboxProjection{
 		ID:            standaloneTaskTerminalProjectionIDForUID(task.Namespace, projectionTaskUID, payload.Attempt),
-		AggregateKind: "Task", AggregateID: string(projectionTaskUID), ProjectionKind: "TaskTerminalStatus",
+		AggregateKind: "Task", AggregateID: string(projectionTaskUID), ProjectionKind: taskTerminalProjectionKind,
 		PayloadDigest: store.CanonicalBytesDigest(encoded), Payload: encoded,
 		AvailableAt: projectionTime, CreatedAt: time.Now().UTC(),
 	}
@@ -212,7 +216,7 @@ func (p *ACPOutboxProjector) projectOnce(ctx context.Context) error {
 			deliveryDigest = ""
 		}
 		digest, err := acpDomainDigest("outbox-completion", map[string]any{
-			"id": projection.ID, "version": projection.Version, "state": state,
+			"id": projection.ID, versionField: projection.Version, stateField: state,
 			"deliveryDigest": deliveryDigest, "lastError": lastError, "availableAt": availableAt,
 		})
 		if err != nil {
@@ -276,7 +280,7 @@ func mergeTerminalExecutionStatus(existing *corev1alpha1.TaskExecutionStatus, pr
 }
 
 func (p *ACPOutboxProjector) deliver(ctx context.Context, projection store.OutboxProjection) (string, error) {
-	if projection.ProjectionKind != "TaskTerminalStatus" {
+	if projection.ProjectionKind != taskTerminalProjectionKind {
 		return "", permanentOutboxDelivery(fmt.Errorf("unsupported projection kind %q", projection.ProjectionKind))
 	}
 	var payload taskTerminalProjection

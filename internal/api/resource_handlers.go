@@ -183,17 +183,17 @@ func providerReadItem(provider *corev1alpha1.Provider) fiber.Map {
 		return fiber.Map{}
 	}
 	return fiber.Map{
-		"name":         provider.Name,
-		"namespace":    provider.Namespace,
-		"type":         provider.Spec.Type,
-		"defaultModel": provider.Spec.DefaultModel,
-		"ready":        provider.Status.Ready,
+		apiFieldName:     provider.Name,
+		toolNamespaceArg: provider.Namespace,
+		"type":           provider.Spec.Type,
+		"defaultModel":   provider.Spec.DefaultModel,
+		"ready":          provider.Status.Ready,
 	}
 }
 
 // ListProviders lists configured LLM providers.
 func (h *Handlers) ListProviders(c fiber.Ctx) error {
-	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
 	}
@@ -265,17 +265,17 @@ func (h *Handlers) ListProviders(c fiber.Ctx) error {
 
 // GetProvider returns a configured LLM provider.
 func (h *Handlers) GetProvider(c fiber.Ctx) error {
-	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
 	}
 	// Authorize the requested name before any controller-credential read so
 	// an unauthorized caller cannot tell an existing Provider (403) from an
 	// unknown one (404).
-	if err := h.authorizeCoreResourceAction(c, "get", "providers", namespace, c.Params("name")); err != nil {
+	if err := h.authorizeCoreResourceAction(c, "get", "providers", namespace, c.Params(apiFieldName)); err != nil {
 		return err
 	}
-	provider, err := h.fetchProvider(c, c.Params("name"))
+	provider, err := h.fetchProvider(c, c.Params(apiFieldName))
 	if err != nil {
 		return err
 	}
@@ -340,8 +340,8 @@ func (h *Handlers) UpdateProvider(c fiber.Ctx) error {
 	if err := rejectContextTokenResourceMutation(c, "provider"); err != nil {
 		return err
 	}
-	name := c.Params("name")
-	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	name := c.Params(apiFieldName)
+	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
 	}
@@ -414,7 +414,7 @@ func (h *Handlers) DeleteProvider(c fiber.Ctx) error {
 	if err := rejectContextTokenResourceMutation(c, "provider"); err != nil {
 		return err
 	}
-	provider, err := h.fetchProvider(c, c.Params("name"))
+	provider, err := h.fetchProvider(c, c.Params(apiFieldName))
 	if err != nil {
 		return err
 	}
@@ -479,11 +479,11 @@ func (h *Handlers) UpdateTool(c fiber.Ctx) error {
 	if err := rejectContextTokenResourceMutation(c, "tool"); err != nil {
 		return err
 	}
-	name := c.Params("name")
+	name := c.Params(apiFieldName)
 	if _, builtin := builtinToolsMap[name]; builtin {
 		return fiber.NewError(fiber.StatusConflict, "built-in tools cannot be updated")
 	}
-	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
 	}
@@ -561,7 +561,7 @@ func (h *Handlers) DeleteTool(c fiber.Ctx) error {
 	if err := rejectContextTokenResourceMutation(c, "tool"); err != nil {
 		return err
 	}
-	name := c.Params("name")
+	name := c.Params(apiFieldName)
 	if _, builtin := builtinToolsMap[name]; builtin {
 		return fiber.NewError(fiber.StatusConflict, "built-in tools cannot be deleted")
 	}
@@ -581,7 +581,7 @@ func (h *Handlers) fetchToolCRD(c fiber.Ctx, name string) (*corev1alpha1.Tool, e
 
 // ListSubstrateActorPools lists Orka Substrate actor pools.
 func (h *Handlers) ListSubstrateActorPools(c fiber.Ctx) error {
-	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
 	}
@@ -607,7 +607,7 @@ func (h *Handlers) ListSubstrateActorPools(c fiber.Ctx) error {
 
 // GetSubstrateActorPool gets an Orka Substrate actor pool.
 func (h *Handlers) GetSubstrateActorPool(c fiber.Ctx) error {
-	pool, err := h.fetchSubstrateActorPool(c, c.Params("name"))
+	pool, err := h.fetchSubstrateActorPool(c, c.Params(apiFieldName))
 	if err != nil {
 		return err
 	}
@@ -670,7 +670,7 @@ func (h *Handlers) UpdateSubstrateActorPool(c fiber.Ctx) error {
 	var updated *corev1alpha1.SubstrateActorPool
 	var fetchErr error
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		pool, err := h.fetchSubstrateActorPool(c, c.Params("name"))
+		pool, err := h.fetchSubstrateActorPool(c, c.Params(apiFieldName))
 		if err != nil {
 			fetchErr = err
 			return nil
@@ -695,7 +695,7 @@ func (h *Handlers) DeleteSubstrateActorPool(c fiber.Ctx) error {
 	if err := rejectContextTokenResourceMutation(c, "substrate actor pool"); err != nil {
 		return err
 	}
-	pool, err := h.fetchSubstrateActorPool(c, c.Params("name"))
+	pool, err := h.fetchSubstrateActorPool(c, c.Params(apiFieldName))
 	if err != nil {
 		return err
 	}
@@ -716,16 +716,16 @@ func (s *Server) handleAuthWhoAmI(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusUnauthorized, "missing authenticated identity")
 	}
 	identity := fiber.Map{
-		"authenticated": true,
-		"authType":      ui.AuthType,
-		"username":      ui.Username,
-		"uid":           ui.UID,
-		"groups":        ui.Groups,
-		"namespace":     ui.Namespace,
-		"subject":       ui.Subject,
-		"email":         ui.Email,
-		"issuer":        ui.Issuer,
-		"roles":         ui.Roles,
+		"authenticated":  true,
+		"authType":       ui.AuthType,
+		"username":       ui.Username,
+		"uid":            ui.UID,
+		"groups":         ui.Groups,
+		toolNamespaceArg: ui.Namespace,
+		"subject":        ui.Subject,
+		"email":          ui.Email,
+		"issuer":         ui.Issuer,
+		"roles":          ui.Roles,
 	}
 	if ui.ContextToken != nil {
 		identity["transaction"] = fiber.Map{

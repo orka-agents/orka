@@ -415,8 +415,8 @@ func (d *ACPDispatcher) persistRestoredPreSubmissionFailure(
 		return err
 	}
 	digest, err := acpDomainDigest("attempt-transition", map[string]any{
-		"id": attempt.ID, "from": attempt.ExecutionState, "to": store.PromptExecutionFailed,
-		"operation": acpRestoreIdentityChangedOperation, "version": attempt.Version,
+		"id": attempt.ID, transitionFromField: attempt.ExecutionState, "to": store.PromptExecutionFailed,
+		operationField: acpRestoreIdentityChangedOperation, versionField: attempt.Version,
 	})
 	if err != nil {
 		return err
@@ -557,7 +557,7 @@ func (d *ACPDispatcher) settleRestoredTerminalDelivery(
 					}
 					op := publicationOperationID("restore-unknown", nil)
 					digest, digestErr := acpDomainDigest("publication-restore-unknown", map[string]any{
-						"id": publication.ID, "generation": publication.Generation, "version": publication.Version,
+						"id": publication.ID, generationField: publication.Generation, versionField: publication.Version,
 					})
 					if digestErr != nil {
 						return nil, digestErr
@@ -740,7 +740,7 @@ func (d *ACPDispatcher) recoverStaleTask(ctx context.Context, task *corev1alpha1
 		return d.patchRecoveredTaskReserved(ctx, task, fence.Epoch, attempt.ExecutionState == store.PromptExecutionQueued)
 	case store.PromptExecutionSessionStarting, store.PromptExecutionPlanned:
 		digest, err := acpDomainDigest("pre-submission-recovery", map[string]any{
-			"attemptID": attempt.ID, "state": attempt.ExecutionState, "version": attempt.Version, "epoch": fence.Epoch,
+			attemptIDField: attempt.ID, stateField: attempt.ExecutionState, versionField: attempt.Version, epochField: fence.Epoch,
 		})
 		if err != nil {
 			return err
@@ -1199,7 +1199,7 @@ func taskScopedRuntimeSessionCleanupDigest(
 		return "", fmt.Errorf("%w: task-scoped RuntimeSession cleanup identity is incomplete", store.ErrConflict)
 	}
 	return acpDomainDigest("task-runtime-session-cleanup", map[string]any{
-		"taskUID": string(taskUID), "attempt": attempt, "runtimeInstanceID": runtimeInstanceID,
+		taskUIDField: string(taskUID), attemptField: attempt, "runtimeInstanceID": runtimeInstanceID,
 		"runtimeSessionUID": runtimeSessionUID, "runtimeSessionGeneration": runtimeSessionGeneration,
 	})
 }
@@ -1252,7 +1252,7 @@ func agentRuntimeDrainCleanupProofDigest(
 		return "", fmt.Errorf("%w: AgentRuntime drain cleanup proof binding failed canonical integrity verification", store.ErrConflict)
 	}
 	return acpDomainDigest("agent-runtime-drain-cleanup", map[string]any{
-		"taskUID": string(taskUID), agentRuntimeDrainBindingDigestKey: binding.BindingDigest,
+		taskUIDField: string(taskUID), agentRuntimeDrainBindingDigestKey: binding.BindingDigest,
 		"agentRuntimeName": binding.RuntimeRef.Name, "agentRuntimeUID": string(binding.RuntimeRef.UID),
 		"agentRuntimeGeneration": binding.RuntimeRef.Generation,
 	})

@@ -11,6 +11,13 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const (
+	cliSourceCommand = "source"
+	cliGetByIDUse    = "get <id>"
+	cliContentKey    = "content"
+	cliStatusKey     = "status"
+)
+
 func newMemoryCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "memory", Short: "Manage durable memory"}
 	cmd.AddCommand(newMemoryListCmd())
@@ -30,7 +37,7 @@ func addMemoryFilterFlags(
 	includeDisabled, includeDeleted *bool,
 	limit *int,
 ) {
-	for _, key := range []string{"query", "sessionName", "agentName", "taskName", "parentTask", "source", "tags", "ids"} {
+	for _, key := range []string{"query", "sessionName", "agentName", "taskName", "parentTask", cliSourceCommand, "tags", "ids"} {
 		v := ""
 		values[key] = &v
 		cmd.Flags().StringVar(values[key], key, "", "Filter by "+key)
@@ -45,7 +52,7 @@ func newMemoryListCmd() *cobra.Command {
 	var includeDisabled, includeDeleted bool
 	var limit int
 	cmd := &cobra.Command{
-		Use:   "list",
+		Use:   cliListUse,
 		Short: "List memories",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			q := map[string]string{"limit": fmt.Sprintf("%d", limit)}
@@ -85,7 +92,7 @@ func ptrStringMap(in map[string]*string) map[string]string {
 
 func newMemoryGetCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "get <id>",
+		Use:   cliGetByIDUse,
 		Short: "Get a memory",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -120,10 +127,10 @@ func newMemoryCreateCmd() *cobra.Command {
 					source = "cli"
 				}
 				body, err = json.Marshal(map[string]any{
-					"namespace": c.Namespace,
-					"content":   content,
-					"source":    source,
-					"tags":      splitComma(tags),
+					cliNamespaceQuery: c.Namespace,
+					cliContentKey:     content,
+					cliSourceCommand:  source,
+					"tags":            splitComma(tags),
 				})
 			}
 			if err != nil {
@@ -138,8 +145,8 @@ func newMemoryCreateCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&file, "file", "f", "", "Path to memory JSON/YAML body")
-	cmd.Flags().StringVar(&content, "content", "", "Memory content")
-	cmd.Flags().StringVar(&source, "source", "cli", "Memory source")
+	cmd.Flags().StringVar(&content, cliContentKey, "", "Memory content")
+	cmd.Flags().StringVar(&source, cliSourceCommand, "cli", "Memory source")
 	cmd.Flags().StringVar(&tags, "tags", "", "Comma-separated tags")
 	return cmd
 }
@@ -165,16 +172,16 @@ func newMemoryUpdateCmd() *cobra.Command {
 					query, err = namespaceQueryForManifest(cmd, c.Namespace, manifest)
 				}
 				if err == nil && manifestNS != "" {
-					query = map[string]string{"namespace": manifestNS}
+					query = map[string]string{cliNamespaceQuery: manifestNS}
 				}
 				body = manifestBody
 			} else {
 				patch := map[string]any{}
 				if content != "" {
-					patch["content"] = content
+					patch[cliContentKey] = content
 				}
 				if source != "" {
-					patch["source"] = source
+					patch[cliSourceCommand] = source
 				}
 				if tags != "" {
 					patch["tags"] = splitComma(tags)
@@ -202,8 +209,8 @@ func newMemoryUpdateCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&file, "file", "f", "", "Path to memory JSON/YAML body")
-	cmd.Flags().StringVar(&content, "content", "", "Memory content")
-	cmd.Flags().StringVar(&source, "source", "", "Memory source")
+	cmd.Flags().StringVar(&content, cliContentKey, "", "Memory content")
+	cmd.Flags().StringVar(&source, cliSourceCommand, "", "Memory source")
 	cmd.Flags().StringVar(&tags, "tags", "", "Comma-separated tags")
 	return cmd
 }
@@ -256,12 +263,12 @@ func newMemoryProposalListCmd() *cobra.Command {
 	var status, typ, taskName, agentName, query string
 	var limit int
 	cmd := &cobra.Command{
-		Use:   "list",
+		Use:   cliListUse,
 		Short: "List memory proposals",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			q := mergeQuery(
 				map[string]string{},
-				"status", status,
+				cliStatusKey, status,
 				"type", typ,
 				"taskName", taskName,
 				"agentName", agentName,
@@ -277,7 +284,7 @@ func newMemoryProposalListCmd() *cobra.Command {
 		},
 	}
 	addOutputFlag(cmd, outputTable)
-	cmd.Flags().StringVar(&status, "status", "", "Filter by proposal status")
+	cmd.Flags().StringVar(&status, cliStatusKey, "", "Filter by proposal status")
 	cmd.Flags().StringVar(&typ, "type", "", "Filter by proposal type")
 	cmd.Flags().StringVar(&taskName, "task-name", "", "Filter by task name")
 	cmd.Flags().StringVar(&agentName, "agent-name", "", "Filter by agent name")
@@ -288,7 +295,7 @@ func newMemoryProposalListCmd() *cobra.Command {
 
 func newMemoryProposalGetCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "get <id>",
+		Use:   cliGetByIDUse,
 		Short: "Get a memory proposal",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -316,7 +323,7 @@ func newMemoryProposalReviewCmd() *cobra.Command {
 				return fmt.Errorf("--status is required")
 			}
 			body, _ := json.Marshal(map[string]string{
-				"status":     status,
+				cliStatusKey: status,
 				"reviewer":   reviewer,
 				"reviewNote": note,
 			})
@@ -330,7 +337,7 @@ func newMemoryProposalReviewCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&status, "status", "", "Review status (accepted or rejected)")
+	cmd.Flags().StringVar(&status, cliStatusKey, "", "Review status (accepted or rejected)")
 	cmd.Flags().StringVar(&reviewer, "reviewer", "", "Reviewer name")
 	cmd.Flags().StringVar(&note, "note", "", "Review note")
 	return cmd

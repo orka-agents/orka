@@ -53,6 +53,12 @@ import (
 )
 
 const (
+	logFieldProvider  = "provider"
+	logFieldModel     = "model"
+	logFieldIteration = "iteration"
+)
+
+const (
 	defaultMemoryContextLimit      = 5
 	maxMemoryContextLimit          = 8
 	defaultMemoryContextMaxChars   = 6000
@@ -157,8 +163,8 @@ func run(transcriptPath string) (err error) {
 		common.WithEventTaskName(taskName),
 		common.WithEventSummary("AI worker started"),
 		common.WithEventContent(eventContent(map[string]any{
-			"provider": workerEnv.Provider,
-			"model":    workerEnv.Model,
+			logFieldProvider: workerEnv.Provider,
+			logFieldModel:    workerEnv.Model,
 		})),
 	)
 	provider := workerEnv.Provider
@@ -343,7 +349,7 @@ func run(transcriptPath string) (err error) {
 	common.RecordEvent(ctx, eventRecorder, events.ExecutionEventTypeResultSubmitted,
 		common.WithEventTaskName(taskName),
 		common.WithEventSummary("AI worker submitted result"),
-		common.WithEventContent(eventContent(map[string]any{"resultLength": len(result)})),
+		common.WithEventContent(eventContent(map[string]any{logFieldResultLength: len(result)})),
 	)
 
 	// Upload any artifacts the agent wrote.
@@ -1251,11 +1257,11 @@ func executeAgentLoopWithEvents(
 		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeModelRequestStarted, modelLoopEventTimeout,
 			common.WithEventSummary("model request started"),
 			common.WithEventContent(eventContent(map[string]any{
-				"iteration":    iteration + 1,
-				"model":        model,
-				"provider":     llm.ProviderTelemetryName(provider),
-				"messageCount": len(messages),
-				"toolCount":    len(requestTools),
+				logFieldIteration: iteration + 1,
+				logFieldModel:     model,
+				logFieldProvider:  llm.ProviderTelemetryName(provider),
+				"messageCount":    len(messages),
+				"toolCount":       len(requestTools),
 			})),
 		)
 
@@ -1272,7 +1278,7 @@ func executeAgentLoopWithEvents(
 				common.WithEventSeverity(events.ExecutionEventSeverityWarning),
 				common.WithEventSummary("model context truncated after provider context limit error"),
 				common.WithEventContent(eventContent(map[string]any{
-					"iteration":          iteration + 1,
+					logFieldIteration:    iteration + 1,
 					"messageCountBefore": beforeCount,
 					"messageCountAfter":  len(messages),
 				})),
@@ -1288,9 +1294,9 @@ func executeAgentLoopWithEvents(
 				common.WithEventSeverity(events.ExecutionEventSeverityError),
 				common.WithEventSummary(err.Error()),
 				common.WithEventContent(eventContent(map[string]any{
-					"iteration": iteration + 1,
-					"model":     model,
-					"provider":  llm.ProviderTelemetryName(provider),
+					logFieldIteration: iteration + 1,
+					logFieldModel:     model,
+					logFieldProvider:  llm.ProviderTelemetryName(provider),
 				})),
 			)
 			stepSpan.End()
@@ -1300,22 +1306,22 @@ func executeAgentLoopWithEvents(
 		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeModelRequestCompleted, modelLoopEventTimeout,
 			common.WithEventSummary("model request completed"),
 			common.WithEventContent(eventContent(map[string]any{
-				"iteration":    iteration + 1,
-				"model":        common.FirstNonBlank(resp.Model, model),
-				"provider":     common.FirstNonBlank(resp.Provider, llm.ProviderTelemetryName(provider)),
-				"inputTokens":  resp.InputTokens,
-				"outputTokens": resp.OutputTokens,
-				"stopReason":   resp.StopReason,
-				"toolCalls":    len(resp.ToolCalls),
+				logFieldIteration: iteration + 1,
+				logFieldModel:     common.FirstNonBlank(resp.Model, model),
+				logFieldProvider:  common.FirstNonBlank(resp.Provider, llm.ProviderTelemetryName(provider)),
+				"inputTokens":     resp.InputTokens,
+				"outputTokens":    resp.OutputTokens,
+				"stopReason":      resp.StopReason,
+				"toolCalls":       len(resp.ToolCalls),
 			})),
 		)
 		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeModelMessage, modelLoopEventTimeout,
 			common.WithEventSummary("model returned message"),
 			common.WithEventContent(eventContent(map[string]any{
-				"iteration":    iteration + 1,
-				"contentChars": len([]rune(resp.Content)),
-				"toolCalls":    len(resp.ToolCalls),
-				"stopReason":   resp.StopReason,
+				logFieldIteration: iteration + 1,
+				"contentChars":    len([]rune(resp.Content)),
+				"toolCalls":       len(resp.ToolCalls),
+				"stopReason":      resp.StopReason,
 			})),
 			common.WithEventContentText(resp.Content),
 		)
@@ -1393,9 +1399,9 @@ func executeAgentLoopWithEvents(
 				common.WithEventToolCallID(tc.ID),
 				common.WithEventSummary("tool call started"),
 				common.WithEventContent(eventContent(map[string]any{
-					"toolName":      toolName,
-					"toolCallID":    tc.ID,
-					"argumentBytes": len(tc.Arguments),
+					logFieldToolName:   toolName,
+					logFieldToolCallID: tc.ID,
+					"argumentBytes":    len(tc.Arguments),
 				})),
 			)
 
@@ -1462,16 +1468,16 @@ func executeAgentLoopWithEvents(
 					common.WithEventToolCallID(tc.ID),
 					common.WithEventSummary("tool call completed"),
 					common.WithEventContent(eventContent(map[string]any{
-						"toolName":     toolName,
-						"toolCallID":   tc.ID,
-						"resultLength": len(result),
+						logFieldToolName:     toolName,
+						logFieldToolCallID:   tc.ID,
+						logFieldResultLength: len(result),
 					})),
 				)
 			}
 
 			// Add tool result
 			messages = append(messages, llm.Message{
-				Role:       "tool",
+				Role:       logFieldTool,
 				Content:    result,
 				ToolCallID: tc.ID,
 				Name:       tc.Name,

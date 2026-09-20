@@ -640,9 +640,9 @@ func customErrorHandler(c fiber.Ctx, err error) error {
 	}
 
 	return c.Status(code).JSON(fiber.Map{
-		"error": fiber.Map{
-			"code":    code,
-			"message": message,
+		apiFieldError: fiber.Map{
+			"code":          code,
+			apiFieldMessage: message,
 		},
 	})
 }

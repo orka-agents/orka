@@ -18,9 +18,16 @@ import (
 	"github.com/orka-agents/orka/internal/cli/client"
 )
 
+const (
+	cliListUse           = "list"
+	cliGetByNameUse      = "get <name>"
+	cliCreateFromFileUse = "create -f <file>"
+	cliDeleteByNameUse   = "delete <name>"
+)
+
 func newAgentCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "agent",
+		Use:   cliTaskTypeAgent,
 		Short: "Manage agents",
 	}
 	cmd.AddCommand(newAgentListCmd())
@@ -33,7 +40,7 @@ func newAgentCmd() *cobra.Command {
 
 func newAgentListCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "list",
+		Use:   cliListUse,
 		Short: "List agents",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			c := newClientFromCmd(cmd)
@@ -80,7 +87,7 @@ func newAgentListCmd() *cobra.Command {
 
 func newAgentGetCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "get <name>",
+		Use:   cliGetByNameUse,
 		Short: "Get agent details",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -102,7 +109,7 @@ func newAgentGetCmd() *cobra.Command {
 func newAgentCreateCmd() *cobra.Command {
 	var file string
 	cmd := &cobra.Command{
-		Use:   "create -f <file>",
+		Use:   cliCreateFromFileUse,
 		Short: "Create an agent from a manifest",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if file == "" {
@@ -128,13 +135,13 @@ func newAgentCreateCmd() *cobra.Command {
 func newAgentUpdateCmd() *cobra.Command {
 	return newCRUDUpdateCmd(crudResourceSpec{
 		BasePath: "/api/v1/agents",
-		Name:     "agent",
+		Name:     cliTaskTypeAgent,
 	})
 }
 
 func newAgentDeleteCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "delete <name>",
+		Use:   cliDeleteByNameUse,
 		Short: "Delete an agent",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {

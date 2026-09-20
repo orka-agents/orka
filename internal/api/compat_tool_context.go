@@ -132,7 +132,7 @@ func newCompatProxyToolContext(cfg compatProxyToolContextConfig) *tools.ToolCont
 		toolCtx.AuthorizeSecretRead = func(ctx context.Context, namespace, secretName string) *tools.ChatToolError {
 			if err := authorizeContextTokenSecretRead(cfg.AuthContext, cfg.AuthorizationConfig, cfg.Profile.SecretReadAction, namespace, secretName); err != nil {
 				return &tools.ChatToolError{
-					Type:       "authorization_failed",
+					Type:       apiErrorAuthorizationFailed,
 					Message:    err.Error(),
 					Suggestion: "Use a context token authorized to read the git credential secret",
 				}

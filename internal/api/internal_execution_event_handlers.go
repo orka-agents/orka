@@ -25,6 +25,8 @@ const maxSubmitExecutionEventRequestBytes = 256 << 10 // 256 KiB
 
 // SubmitExecutionEvent handles POST /internal/v1/events/{namespace}/{streamType}/{streamID}.
 // Workers call this to append sanitized execution timeline events.
+//
+//nolint:gocyclo // Event authentication, replay checks, and durable acceptance form one boundary.
 func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 	namespace := strings.TrimSpace(c.Params("namespace"))
 	streamType := strings.TrimSpace(c.Params("streamType"))

@@ -27,13 +27,14 @@ func newChildCommand(cfg ProcessConfig) (*exec.Cmd, error) {
 	if !filepath.IsAbs(helperCommand) {
 		return nil, fmt.Errorf("ACP exec helper command must be an absolute path")
 	}
-	helperArgs := []string{
+	helperArgs := make([]string, 0, 5+len(cfg.Args))
+	helperArgs = append(helperArgs,
 		execHelperProtocolVersion,
 		strconv.Itoa(os.Getpid()),
 		strconv.Itoa(cfg.UID),
 		strconv.Itoa(cfg.GID),
 		cfg.Command,
-	}
+	)
 	helperArgs = append(helperArgs, cfg.Args...)
 	cmd := exec.Command(helperCommand, helperArgs...)
 	cmd.SysProcAttr = childSysProcAttr(cfg.UID, cfg.GID)

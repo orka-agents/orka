@@ -54,6 +54,8 @@ type ForkTaskResponse struct {
 }
 
 // ForkTask handles POST /api/v1/tasks/{id}/fork.
+//
+//nolint:gocyclo // Keep fork inheritance, authorization, and the final Task creation in order.
 func (h *Handlers) ForkTask(c fiber.Ctx) error {
 	sourceName := c.Params("id")
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))

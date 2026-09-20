@@ -879,7 +879,7 @@ func (d *ACPDispatcher) finalizeTaskSessionResult(
 	_, err = d.Sessions.FinalizeAssistantResult(ctx, ACPFinalizeAssistantRequest{
 		SessionTurn: *session.Turn, Fence: fence, AssistantResult: result,
 		PublicationID: publicationID,
-		Projection:    ACPFinalizationProjection{ProjectionKind: "TaskTerminalStatus", Payload: payload, AvailableAt: time.Now().UTC()},
+		Projection:    ACPFinalizationProjection{ProjectionKind: taskTerminalProjectionKind, Payload: payload, AvailableAt: time.Now().UTC()},
 		FinalizedAt:   time.Now().UTC(),
 	})
 	if err == nil {
@@ -915,7 +915,7 @@ func (d *ACPDispatcher) finalizeTaskSessionUnknown(ctx context.Context, task *co
 	}
 	_, err = d.Sessions.FinalizeOutcomeUnknown(ctx, ACPFinalizeOutcomeUnknownRequest{
 		SessionTurn: *session.Turn, Fence: fence, Reason: reason,
-		Projection:  ACPFinalizationProjection{ProjectionKind: "TaskTerminalStatus", Payload: payload, AvailableAt: time.Now().UTC()},
+		Projection:  ACPFinalizationProjection{ProjectionKind: taskTerminalProjectionKind, Payload: payload, AvailableAt: time.Now().UTC()},
 		FinalizedAt: time.Now().UTC(),
 	})
 	if err == nil {
@@ -951,7 +951,7 @@ func (d *ACPDispatcher) finalizeTaskSessionMarker(
 	}
 	_, err = d.Sessions.FinalizeOutcomeMarker(ctx, ACPFinalizeOutcomeMarkerRequest{
 		SessionTurn: *session.Turn, Fence: fence, Kind: kind, Reason: reason,
-		Projection:  ACPFinalizationProjection{ProjectionKind: "TaskTerminalStatus", Payload: payload, AvailableAt: time.Now().UTC()},
+		Projection:  ACPFinalizationProjection{ProjectionKind: taskTerminalProjectionKind, Payload: payload, AvailableAt: time.Now().UTC()},
 		FinalizedAt: time.Now().UTC(),
 	})
 	if err == nil {

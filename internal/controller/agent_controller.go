@@ -29,6 +29,10 @@ import (
 	"github.com/orka-agents/orka/internal/executionmode"
 )
 
+const (
+	conditionReasonReady = "Ready"
+)
+
 // AgentReconciler reconciles a Agent object
 type AgentReconciler struct {
 	client.Client
@@ -371,7 +375,7 @@ func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.
 	}
 
 	condition := metav1.Condition{
-		Type:               "Ready",
+		Type:               conditionReasonReady,
 		LastTransitionTime: now,
 		ObservedGeneration: agent.Generation,
 	}

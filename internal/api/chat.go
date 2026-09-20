@@ -44,6 +44,11 @@ import (
 	"github.com/orka-agents/orka/internal/tracing/genai"
 )
 
+const (
+	apiFieldContent = "content"
+	apiFieldName    = "name"
+)
+
 var chatLog = logf.Log.WithName("chat-handler")
 
 const (
@@ -992,11 +997,11 @@ func (ch *ChatHandler) runToolLoop(
 			// If so, re-prompt the LLM to keep waiting instead of ending the session.
 			if executor.tasksCreated > 0 && hasRunningTasks(iterCtx, taskClient, namespace, sessionID) {
 				if emitSSE != nil && resp.Content != "" {
-					msgData, _ := json.Marshal(map[string]string{"content": resp.Content})
+					msgData, _ := json.Marshal(map[string]string{apiFieldContent: resp.Content})
 					emitSSE("message", string(msgData))
 				}
 				appendTurnMessages(
-					llm.Message{Role: "assistant", Content: resp.Content},
+					llm.Message{Role: chatRoleAssistant, Content: resp.Content},
 					llm.Message{Role: chatRoleUser, Content: "[System: You have tasks still running. Do NOT stop. Call wait_for_task again for each running task until it reaches Succeeded or Failed, then call fetch_task_output to get the result.]"},
 				)
 				// Don't increment iteration here — the for loop's post-statement handles it
@@ -1067,7 +1072,7 @@ func (ch *ChatHandler) handleIterationLimit(
 	usage.InputTokens += resp.InputTokens
 	usage.OutputTokens += resp.OutputTokens
 
-	finalMessages := append(turnMessages, llm.Message{Role: "assistant", Content: resp.Content})
+	finalMessages := append(turnMessages, llm.Message{Role: chatRoleAssistant, Content: resp.Content})
 	usage.Duration = time.Since(start).Round(time.Millisecond).String()
 	usage.TasksCreated = executor.tasksCreated
 	if err := ch.saveChatSession(
@@ -1077,7 +1082,7 @@ func (ch *ChatHandler) handleIterationLimit(
 	}
 
 	if emitSSE != nil && resp.Content != "" {
-		msgData, _ := json.Marshal(map[string]string{"content": resp.Content})
+		msgData, _ := json.Marshal(map[string]string{apiFieldContent: resp.Content})
 		emitSSE("message", string(msgData))
 	}
 
@@ -1131,7 +1136,7 @@ func (ch *ChatHandler) executeToolCalls(
 	repetitionTracker map[string]int,
 ) ([]llm.Message, []ToolCallInfo, int) {
 	messages := []llm.Message{{
-		Role:      "assistant",
+		Role:      chatRoleAssistant,
 		Content:   resp.Content,
 		ToolCalls: resp.ToolCalls,
 	}}
@@ -1143,9 +1148,9 @@ func (ch *ChatHandler) executeToolCalls(
 	for _, tc := range resp.ToolCalls {
 		if emitSSE != nil {
 			tcData, _ := json.Marshal(map[string]any{
-				"id":   tc.ID,
-				"name": tc.Name,
-				"args": tc.Arguments,
+				"id":         tc.ID,
+				apiFieldName: tc.Name,
+				"args":       tc.Arguments,
 			})
 			emitSSE("tool_call", string(tcData))
 		}
@@ -1169,15 +1174,15 @@ func (ch *ChatHandler) executeToolCalls(
 
 		if emitSSE != nil {
 			trData, _ := json.Marshal(map[string]any{
-				"id":     tc.ID,
-				"name":   tc.Name,
-				"result": json.RawMessage(result),
+				"id":         tc.ID,
+				apiFieldName: tc.Name,
+				"result":     json.RawMessage(result),
 			})
 			emitSSE("tool_result", string(trData))
 		}
 
 		messages = append(messages, llm.Message{
-			Role:       "tool",
+			Role:       chatRoleTool,
 			ToolCallID: tc.ID,
 			Name:       tc.Name,
 			Content:    result,
@@ -1215,7 +1220,7 @@ func (ch *ChatHandler) handleFinalResponse(
 	turnID string,
 	start time.Time,
 ) (string, error) {
-	finalMessages := append(turnMessages, llm.Message{Role: "assistant", Content: content})
+	finalMessages := append(turnMessages, llm.Message{Role: chatRoleAssistant, Content: content})
 	usage.Duration = time.Since(start).Round(time.Millisecond).String()
 	usage.TasksCreated = executor.tasksCreated
 	if err := ch.saveChatSession(
@@ -1225,7 +1230,7 @@ func (ch *ChatHandler) handleFinalResponse(
 	}
 
 	if emitSSE != nil && content != "" {
-		msgData, _ := json.Marshal(map[string]string{"content": content})
+		msgData, _ := json.Marshal(map[string]string{apiFieldContent: content})
 		emitSSE("message", string(msgData))
 	}
 

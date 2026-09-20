@@ -73,7 +73,7 @@ func (r *ExecutionWorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if err := r.Update(ctx, workspace); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 	if dispositionFailed(workspace.Status.Disposition) {
 		if err := r.quarantineWorkspace(ctx, workspace, "workspace cleanup disposition contains a failed category"); err != nil {
@@ -159,7 +159,7 @@ func (r *ExecutionWorkspaceReconciler) reconcileWorkspaceAdmission(
 		if err := r.projectLatestWorkspaceToOwnerPendingAdmission(ctx, key); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 	reason, denialMessage, err := r.patchWorkspaceCoreAdmission(ctx, workspace, targetGeneration)
 	if err != nil {
@@ -180,7 +180,7 @@ func (r *ExecutionWorkspaceReconciler) reconcileWorkspaceAdmission(
 	if err := r.projectLatestWorkspaceToOwner(ctx, key); err != nil {
 		return ctrl.Result{}, err
 	}
-	return ctrl.Result{Requeue: true}, nil
+	return ctrl.Result{RequeueAfter: time.Second}, nil
 }
 
 func workspaceCapacityAdmissionRetryAfter(
@@ -665,7 +665,7 @@ func (r *ExecutionWorkspaceReconciler) reconcileWorkspaceDeletion(
 		if err := r.Patch(ctx, workspace, client.MergeFrom(before)); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 	if workspace.Status.State != workspacev1alpha1.ExecutionWorkspaceStateDeleted {
 		return ctrl.Result{RequeueAfter: workspaceRequeueInterval}, nil

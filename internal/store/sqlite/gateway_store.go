@@ -22,6 +22,16 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
+const (
+	gatewayEventIDField      = "eventId"
+	gatewayNamespaceField    = "namespace"
+	gatewayNamespaceUIDField = "namespaceUid"
+	gatewayUIDField          = "gatewayUid"
+	gatewayNameField         = "gatewayName"
+	gatewayAccountIDField    = "accountId"
+	gatewayContextIDField    = "contextId"
+)
+
 const gatewaySessionOwnerType = store.SessionTypeGateway
 const gatewayEnvelopeDigestMetadataKey = "gatewayEnvelopeDigest"
 
@@ -350,8 +360,8 @@ func appendGatewayUserMessageTx(
 	messageMetadata["gateway"] = event.GatewayName
 	messageMetadata["binding"] = event.BindingName
 	messageMetadata["externalEventId"] = event.ExternalEventID
-	messageMetadata["accountId"] = event.AccountID
-	messageMetadata["contextId"] = event.ContextID
+	messageMetadata[gatewayAccountIDField] = event.AccountID
+	messageMetadata[gatewayContextIDField] = event.ContextID
 	messageMetadata["senderId"] = event.SenderID
 	messageMetadata[gatewayEnvelopeDigestMetadataKey] = store.GatewayEventEnvelopeDigest(event)
 	if event.ThreadID != "" {
@@ -983,7 +993,7 @@ func expireGatewayEventTx(
 	}
 	if event.SessionName != "" && event.TranscriptOrder > 0 {
 		metadataJSON, err := marshalStringMap(map[string]string{
-			"gateway": event.GatewayName, "binding": event.BindingName, "eventId": event.ID,
+			"gateway": event.GatewayName, "binding": event.BindingName, gatewayEventIDField: event.ID,
 		})
 		if err != nil {
 			return err
@@ -1123,18 +1133,18 @@ func validateGatewayTerminalProjection(event *store.GatewayEvent, projection *st
 	}
 	delivery := &projection.Delivery
 	for name, matched := range map[string]bool{
-		"eventId":           projection.EventID == event.ID && delivery.EventID == event.ID,
-		"namespace":         delivery.Namespace == event.Namespace,
-		"namespaceUid":      delivery.NamespaceUID == event.NamespaceUID,
-		"gatewayUid":        delivery.GatewayUID == event.GatewayUID,
-		"gatewayGeneration": delivery.GatewayGeneration == event.GatewayGeneration,
-		"gatewayName":       delivery.GatewayName == event.GatewayName,
-		"bindingName":       delivery.BindingName == event.BindingName,
-		"taskName":          event.TaskName != "" && delivery.TaskName == event.TaskName,
-		"sessionName":       delivery.SessionName == event.SessionName,
-		"accountId":         delivery.AccountID == event.AccountID,
-		"contextId":         delivery.ContextID == event.ContextID,
-		"threadId":          delivery.ThreadID == event.ThreadID,
+		gatewayEventIDField:      projection.EventID == event.ID && delivery.EventID == event.ID,
+		gatewayNamespaceField:    delivery.Namespace == event.Namespace,
+		gatewayNamespaceUIDField: delivery.NamespaceUID == event.NamespaceUID,
+		gatewayUIDField:          delivery.GatewayUID == event.GatewayUID,
+		"gatewayGeneration":      delivery.GatewayGeneration == event.GatewayGeneration,
+		gatewayNameField:         delivery.GatewayName == event.GatewayName,
+		"bindingName":            delivery.BindingName == event.BindingName,
+		"taskName":               event.TaskName != "" && delivery.TaskName == event.TaskName,
+		"sessionName":            delivery.SessionName == event.SessionName,
+		gatewayAccountIDField:    delivery.AccountID == event.AccountID,
+		gatewayContextIDField:    delivery.ContextID == event.ContextID,
+		"threadId":               delivery.ThreadID == event.ThreadID,
 	} {
 		if !matched {
 			return store.ValidationErrorf("gateway terminal projection %s does not match admitted event", name)
@@ -1918,17 +1928,17 @@ func validateGatewayEvent(event *store.GatewayEvent) error {
 		return store.ValidationErrorf("gateway event is required")
 	}
 	for name, value := range map[string]string{
-		"id":              event.ID,
-		"namespace":       event.Namespace,
-		"namespaceUid":    event.NamespaceUID,
-		"gatewayUid":      event.GatewayUID,
-		"gatewayName":     event.GatewayName,
-		"externalEventId": event.ExternalEventID,
-		"protocolVersion": event.ProtocolVersion,
-		"eventType":       event.EventType,
-		"accountId":       event.AccountID,
-		"contextId":       event.ContextID,
-		"senderId":        event.SenderID,
+		"id":                     event.ID,
+		gatewayNamespaceField:    event.Namespace,
+		gatewayNamespaceUIDField: event.NamespaceUID,
+		gatewayUIDField:          event.GatewayUID,
+		gatewayNameField:         event.GatewayName,
+		"externalEventId":        event.ExternalEventID,
+		"protocolVersion":        event.ProtocolVersion,
+		"eventType":              event.EventType,
+		gatewayAccountIDField:    event.AccountID,
+		gatewayContextIDField:    event.ContextID,
+		"senderId":               event.SenderID,
 	} {
 		if strings.TrimSpace(value) == "" {
 			return store.ValidationErrorf("gateway event %s is required", name)
@@ -1945,18 +1955,18 @@ func validateGatewayDelivery(delivery *store.GatewayDelivery) error {
 		return store.ValidationErrorf("gateway delivery is required")
 	}
 	for name, value := range map[string]string{
-		"id":            delivery.ID,
-		"idempotencyId": delivery.IdempotencyID,
-		"namespace":     delivery.Namespace,
-		"namespaceUid":  delivery.NamespaceUID,
-		"gatewayUid":    delivery.GatewayUID,
-		"gatewayName":   delivery.GatewayName,
-		"eventId":       delivery.EventID,
-		"kind":          delivery.Kind,
-		"accountId":     delivery.AccountID,
-		"contextId":     delivery.ContextID,
-		"replyTarget":   delivery.ReplyTarget,
-		"text":          delivery.Text,
+		"id":                     delivery.ID,
+		"idempotencyId":          delivery.IdempotencyID,
+		gatewayNamespaceField:    delivery.Namespace,
+		gatewayNamespaceUIDField: delivery.NamespaceUID,
+		gatewayUIDField:          delivery.GatewayUID,
+		gatewayNameField:         delivery.GatewayName,
+		gatewayEventIDField:      delivery.EventID,
+		"kind":                   delivery.Kind,
+		gatewayAccountIDField:    delivery.AccountID,
+		gatewayContextIDField:    delivery.ContextID,
+		"replyTarget":            delivery.ReplyTarget,
+		"text":                   delivery.Text,
 	} {
 		if strings.TrimSpace(value) == "" {
 			return store.ValidationErrorf("gateway delivery %s is required", name)

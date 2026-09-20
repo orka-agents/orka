@@ -169,7 +169,7 @@ func (r *RepositoryMonitorReconciler) processIssueInventoryRun(ctx context.Conte
 			if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
 				return selected, createdTasks, skipped, err
 			}
-			if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, issue.Number, item.SnapshotDigest, "item_skipped", fmt.Sprintf("Issue #%d skipped: %s", issue.Number, skipReason), map[string]any{"reason": skipReason, "labels": issue.Labels}); err != nil {
+			if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, issue.Number, item.SnapshotDigest, "item_skipped", fmt.Sprintf("Issue #%d skipped: %s", issue.Number, skipReason), map[string]any{eventReasonField: skipReason, substrateObjectLabelsField: issue.Labels}); err != nil {
 				return selected, createdTasks, skipped, err
 			}
 			continue
@@ -262,7 +262,7 @@ func (r *RepositoryMonitorReconciler) retireMissingRepositoryMonitorIssues(ctx c
 		if err := r.Store.UpsertMonitorItem(ctx, &item); err != nil {
 			return err
 		}
-		if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, item.Number, item.SnapshotDigest, "item_retired", fmt.Sprintf("Issue #%d is no longer in the open issue inventory", item.Number), map[string]any{"reason": repositoryMonitorSkipReasonMissing, "state": item.State}); err != nil {
+		if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, item.Number, item.SnapshotDigest, "item_retired", fmt.Sprintf("Issue #%d is no longer in the open issue inventory", item.Number), map[string]any{eventReasonField: repositoryMonitorSkipReasonMissing, stateField: item.State}); err != nil {
 			return err
 		}
 	}
@@ -509,7 +509,7 @@ func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorIssuePage(ctx contex
 		baseURL = repositoryMonitorDefaultGitHubAPIBaseURL
 	}
 	query := url.Values{}
-	query.Set("state", "open")
+	query.Set(stateField, "open")
 	query.Set("per_page", strconv.Itoa(repositoryMonitorGitHubPerPage))
 	query.Set("page", strconv.Itoa(page))
 	endpoint := fmt.Sprintf("%s/repos/%s/%s/issues?%s", baseURL, url.PathEscape(owner), url.PathEscape(repository), query.Encode())
@@ -540,7 +540,7 @@ func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorGitHubJSON(ctx conte
 		return err
 	}
 	if strings.TrimSpace(token) != "" {
-		req.Header.Set("Authorization", strings.Join([]string{"Bearer", strings.TrimSpace(token)}, " "))
+		req.Header.Set("Authorization", strings.Join([]string{bearerAuthScheme, strings.TrimSpace(token)}, " "))
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")

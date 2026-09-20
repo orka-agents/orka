@@ -83,7 +83,7 @@ func (r *ExecutionWorkspaceProviderReconciler) Reconcile(ctx context.Context, re
 		if err := r.Update(ctx, provider); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
 	now := time.Now().UTC()
@@ -116,22 +116,23 @@ func (r *ExecutionWorkspaceProviderReconciler) Reconcile(ctx context.Context, re
 	ready := heartbeatFresh && adapterObserved && adapterIdentified && contractsCompatible && parametersValid &&
 		provider.Spec.LifecycleState == workspacev1alpha1.ExecutionWorkspaceProviderActive
 
-	conditions := []metav1.Condition{
-		{
+	conditions := make([]metav1.Condition, 0, 3)
+	conditions = append(conditions,
+		metav1.Condition{
 			Type:               string(workspacev1alpha1.ConditionProviderHeartbeat),
 			Status:             conditionStatus(heartbeatFresh),
 			Reason:             conditionReason(heartbeatFresh, string(workspacev1alpha1.ReasonHeartbeatExpired)),
 			Message:            chooseMessage(heartbeatFresh, "provider heartbeat is fresh", "provider heartbeat is missing or expired"),
 			ObservedGeneration: provider.Generation,
 		},
-		{
+		metav1.Condition{
 			Type:               string(workspacev1alpha1.ConditionProviderCompatible),
 			Status:             conditionStatus(contractsCompatible),
 			Reason:             conditionReason(contractsCompatible, string(workspacev1alpha1.ReasonIncompatibleContract)),
 			Message:            chooseMessage(contractsCompatible, "provider supports all required contracts", "provider does not support every required contract"),
 			ObservedGeneration: provider.Generation,
 		},
-	}
+	)
 	readyReason := string(workspacev1alpha1.ReasonReady)
 	readyMessage := "provider accepts new workspaces"
 	if provider.Spec.LifecycleState == workspacev1alpha1.ExecutionWorkspaceProviderDraining {

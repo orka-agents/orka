@@ -21,6 +21,7 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+//nolint:gocyclo // Native drain preserves the order of quiescence, checkpoint, and retirement checks.
 func (r *RuntimePoolReconciler) drainNativeSubstrateRuntime(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig, cm *corev1.ConfigMap, record *substrateNativeState, actor *ateapipb.Actor, checkpoint bool) (bool, ctrl.Result, error) {
 	wait := func(message string) (bool, ctrl.Result, error) {
 		poolStatus := r.baseRuntimePoolStatus(pool, 1)

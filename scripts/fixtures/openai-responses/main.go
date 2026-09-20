@@ -34,6 +34,8 @@ const (
 	responseOutputTextType      = "output_text"
 	responseTextField           = "text"
 	messageRoleUser             = "user"
+	messageRoleAssistant        = "assistant"
+	responseMessageType         = "message"
 )
 
 var responseSequence atomic.Uint64
@@ -170,7 +172,7 @@ func handleMarkerCounts(w http.ResponseWriter, r *http.Request) {
 		}
 		return true
 	})
-	writeJSON(w, http.StatusOK, counts)
+	writeJSON(w, counts)
 }
 
 // handleMarkerObservations reports per-marker request evidence: whether the
@@ -238,7 +240,7 @@ func handleMarkerObservations(w http.ResponseWriter, r *http.Request) {
 		}
 		return true
 	})
-	writeJSON(w, http.StatusOK, observations)
+	writeJSON(w, observations)
 }
 
 // holdBeforeCompletion keeps the connection demonstrably alive for the
@@ -323,7 +325,7 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{responseStatusField: "ok"})
+	writeJSON(w, map[string]string{responseStatusField: "ok"})
 }
 
 func handleModels(w http.ResponseWriter, r *http.Request) {
@@ -331,7 +333,7 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	writeJSON(w, map[string]any{
 		"object": "list",
 		"data": []map[string]any{{
 			"id":       "gpt-5.5",
@@ -375,8 +377,8 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 	itemID := "msg_" + responseID
 	item := map[string]any{
-		responseTypeField:   "message",
-		"role":              "assistant",
+		responseTypeField:   responseMessageType,
+		"role":              messageRoleAssistant,
 		"id":                itemID,
 		responseStatusField: "completed",
 		"content": []map[string]any{{
@@ -400,7 +402,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 
 	if !request.Stream {
 		holdBeforeCompletion(r.Context(), w, text, hold, false)
-		writeJSON(w, http.StatusOK, completed)
+		writeJSON(w, completed)
 		return
 	}
 
@@ -417,7 +419,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		responseSequenceNumberField: 1,
 		responseOutputIndexField:    0,
 		"item": map[string]any{
-			responseTypeField: "message", "role": "assistant", "id": itemID,
+			responseTypeField: responseMessageType, "role": messageRoleAssistant, "id": itemID,
 			responseStatusField: "in_progress", "content": []any{},
 		},
 	})
@@ -533,7 +535,7 @@ func assistantHistoryContent(body []byte) ([]string, bool) {
 	for _, item := range items {
 		role, _ := item["role"].(string)
 		switch role {
-		case "assistant":
+		case messageRoleAssistant:
 			found = true
 			contents = appendTextContent(contents, item["content"])
 		case messageRoleUser:
@@ -547,7 +549,7 @@ func assistantHistoryContent(body []byte) ([]string, bool) {
 						Role    string `json:"role"`
 						Content string `json:"content"`
 					}
-					if err := json.Unmarshal([]byte(line), &message); err != nil || message.Role != "assistant" {
+					if err := json.Unmarshal([]byte(line), &message); err != nil || message.Role != messageRoleAssistant {
 						continue
 					}
 					found = true
@@ -609,8 +611,8 @@ func inputRoles(body []byte) string {
 	// verbatim so a crafted role/type field can never smuggle request
 	// material into fixture diagnostics.
 	known := map[string]bool{
-		messageRoleUser: true, "assistant": true, "system": true, "developer": true,
-		"tool": true, "message": true, "function_call": true,
+		messageRoleUser: true, messageRoleAssistant: true, "system": true, "developer": true,
+		"tool": true, responseMessageType: true, "function_call": true,
 		"function_call_output": true, "reasoning": true,
 	}
 	roles := make([]string, 0, len(items))
@@ -641,8 +643,8 @@ func writeSSE(w http.ResponseWriter, event string, value any) {
 	}
 }
 
-func writeJSON(w http.ResponseWriter, status int, value any) {
+func writeJSON(w http.ResponseWriter, value any) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
+	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(value)
 }

@@ -18,6 +18,10 @@ import (
 	"github.com/orka-agents/orka/internal/cli/client"
 )
 
+const (
+	cliNameKey = "name"
+)
+
 func newTaskEventsCmd() *cobra.Command {
 	return newExecutionEventsCmd("events <task>", "List task execution events", "/api/v1/tasks", true)
 }
@@ -121,7 +125,7 @@ func newTaskForkCmd() *cobra.Command {
 				bodyMap["newTaskName"] = newName
 			}
 			if agent != "" {
-				bodyMap["agentRef"] = map[string]string{"name": agent}
+				bodyMap["agentRef"] = map[string]string{cliNameKey: agent}
 			}
 			if prompt != "" {
 				bodyMap["prompt"] = prompt
@@ -148,7 +152,7 @@ func newTaskForkCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().Int64Var(&after, "after", -1, "Checkpoint sequence (default: latest)")
-	cmd.Flags().StringVar(&newName, "name", "", "Forked task name")
+	cmd.Flags().StringVar(&newName, cliNameKey, "", "Forked task name")
 	cmd.Flags().StringVar(&agent, "agent", "", "Override agent reference")
 	cmd.Flags().StringVar(&prompt, "prompt", "", "Override prompt")
 	addOutputFlag(cmd, outputTable)
@@ -324,7 +328,7 @@ func printTraceSummary(cmd *cobra.Command, value any) error {
 		cmd.OutOrStdout(),
 		"Task: %s/%s phase=%s latestSeq=%s\n",
 		anyString(task["namespace"]),
-		anyString(task["name"]),
+		anyString(task[cliNameKey]),
 		anyString(task["phase"]),
 		numberString(m["latestSeq"]),
 	) //nolint:errcheck

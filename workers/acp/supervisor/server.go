@@ -714,6 +714,7 @@ func (s *Server) handleDrain(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status, response)
 }
 
+//nolint:gocyclo // Session admission keeps authentication, request validation, and replay handling together.
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	var request harnessv2.CreateRuntimeSessionRequest
 	if !s.decodeAuthenticatedJSON(w, r, &request) {
@@ -893,6 +894,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+//nolint:gocyclo // Session creation and its resource cleanup paths form one admission transaction.
 func (s *Server) createSession(
 	ctx context.Context,
 	request harnessv2.CreateRuntimeSessionRequest,

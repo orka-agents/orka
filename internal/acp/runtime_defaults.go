@@ -6,15 +6,34 @@ import (
 	"strings"
 )
 
+const (
+	nativeToolRead  = "Read"
+	nativeToolWrite = "Write"
+	nativeToolGlob  = "Glob"
+	nativeToolGrep  = "Grep"
+)
+
+const (
+	nativeToolEdit      = "Edit"
+	nativeToolWebSearch = "WebSearch"
+)
+
+const (
+	nativeToolBash       = "Bash"
+	nativeToolWebFetch   = "WebFetch"
+	nativeToolApplyPatch = "apply_patch"
+	openCodeToolBash     = "bash"
+)
+
 const openCodeToolRead = "read"
 
-var openCodeDefaultAllowedTools = [...]string{"Read", "Write", "Edit", "Bash", "Glob", "Grep"}
+var openCodeDefaultAllowedTools = [...]string{nativeToolRead, nativeToolWrite, nativeToolEdit, nativeToolBash, nativeToolGlob, nativeToolGrep}
 
 var builtInRuntimeNativeTools = map[string][]string{
-	"codex":    {"Read", "Write", "Edit", "Bash", "Glob", "Grep", "WebSearch", "WebFetch"},
-	"claude":   {"Read", "Write", "Edit", "Bash", "Glob", "Grep", "WebSearch", "WebFetch"},
-	"copilot":  {"Read", "Write", "Edit", "Bash", "Glob", "Grep", "WebSearch", "WebFetch"},
-	"opencode": {"Read", "Write", "Edit", "apply_patch", "Bash", "Glob", "Grep"},
+	"codex":    {nativeToolRead, nativeToolWrite, nativeToolEdit, nativeToolBash, nativeToolGlob, nativeToolGrep, nativeToolWebSearch, nativeToolWebFetch},
+	"claude":   {nativeToolRead, nativeToolWrite, nativeToolEdit, nativeToolBash, nativeToolGlob, nativeToolGrep, nativeToolWebSearch, nativeToolWebFetch},
+	"copilot":  {nativeToolRead, nativeToolWrite, nativeToolEdit, nativeToolBash, nativeToolGlob, nativeToolGrep, nativeToolWebSearch, nativeToolWebFetch},
+	"opencode": {nativeToolRead, nativeToolWrite, nativeToolEdit, nativeToolApplyPatch, nativeToolBash, nativeToolGlob, nativeToolGrep},
 }
 
 // BuiltInRuntimeNativeToolNames returns the provider-native tool names owned by
@@ -83,7 +102,7 @@ func NormalizeBuiltInRuntimeToolPolicy(
 		}
 	}
 	if !allowBash {
-		denied["bash"] = struct{}{}
+		denied[openCodeToolBash] = struct{}{}
 	}
 	normalizedAllowed := make([]string, 0, len(native))
 	for _, name := range native {
@@ -106,13 +125,13 @@ func BuiltInRuntimeEffectiveAllowedTools(allowed, disallowed []string, allowBash
 	result := make([]string, 0, len(allowed))
 	for _, name := range allowed {
 		name = strings.TrimSpace(name)
-		if name == "" || (!allowBash && strings.EqualFold(builtInRuntimeToolBaseName(name), "bash")) {
+		if name == "" || (!allowBash && strings.EqualFold(builtInRuntimeToolBaseName(name), openCodeToolBash)) {
 			continue
 		}
 		blocked := false
 		for _, denied := range disallowed {
 			denied = strings.TrimSpace(denied)
-			if denied == name || (strings.EqualFold(denied, "bash") && strings.EqualFold(builtInRuntimeToolBaseName(name), "bash")) {
+			if denied == name || (strings.EqualFold(denied, openCodeToolBash) && strings.EqualFold(builtInRuntimeToolBaseName(name), openCodeToolBash)) {
 				blocked = true
 				break
 			}
@@ -131,7 +150,7 @@ func BuiltInRuntimeEffectiveAllowBash(allowed, disallowed []string, allowBash bo
 		return false
 	}
 	for _, denied := range disallowed {
-		if strings.EqualFold(strings.TrimSpace(denied), "bash") {
+		if strings.EqualFold(strings.TrimSpace(denied), openCodeToolBash) {
 			return false
 		}
 	}
@@ -139,7 +158,7 @@ func BuiltInRuntimeEffectiveAllowBash(allowed, disallowed []string, allowBash bo
 		return true
 	}
 	return slices.ContainsFunc(allowed, func(name string) bool {
-		return strings.EqualFold(builtInRuntimeToolBaseName(name), "bash")
+		return strings.EqualFold(builtInRuntimeToolBaseName(name), openCodeToolBash)
 	})
 }
 
@@ -172,7 +191,7 @@ func NormalizeOpenCodeToolPolicy(
 	// OpenCode's Grep permission cannot carry the path-specific secret-file
 	// exclusions applied to Read, so read-intent sessions disable it entirely.
 	blocked := map[string]struct{}{
-		"apply_patch": {}, "bash": {}, "edit": {}, "grep": {}, "write": {},
+		nativeToolApplyPatch: {}, openCodeToolBash: {}, "edit": {}, "grep": {}, "write": {},
 	}
 	filtered := allowed[:0]
 	for _, name := range allowed {
@@ -180,7 +199,7 @@ func NormalizeOpenCodeToolPolicy(
 			filtered = append(filtered, name)
 		}
 	}
-	disallowed = append(disallowed, "apply_patch", "bash", "edit", "grep", "write")
+	disallowed = append(disallowed, nativeToolApplyPatch, openCodeToolBash, "edit", "grep", "write")
 	return sortedUniqueToolNames(filtered), sortedUniqueToolNames(disallowed), false
 }
 
@@ -193,7 +212,7 @@ func OpenCodeEffectiveAllowedTools(allowed, disallowed []string, allowBash bool)
 	}
 	result := make([]string, 0, len(allowed))
 	for _, name := range allowed {
-		if _, blocked := denied[name]; blocked || (name == "bash" && !allowBash) {
+		if _, blocked := denied[name]; blocked || (name == openCodeToolBash && !allowBash) {
 			continue
 		}
 		result = append(result, name)
@@ -219,16 +238,16 @@ func normalizeOpenCodeToolNames(values []string) []string {
 	for _, value := range values {
 		trimmed := strings.TrimSpace(value)
 		switch normalized := strings.ToLower(trimmed); normalized {
-		case "apply_patch", "edit", "write":
+		case nativeToolApplyPatch, "edit", "write":
 			mutation = true
-		case "bash", "glob", "grep", openCodeToolRead:
+		case openCodeToolBash, "glob", "grep", openCodeToolRead:
 			result = append(result, normalized)
 		default:
 			result = append(result, trimmed)
 		}
 	}
 	if mutation {
-		result = append(result, "apply_patch", "edit", "write")
+		result = append(result, nativeToolApplyPatch, "edit", "write")
 	}
 	return sortedUniqueToolNames(result)
 }

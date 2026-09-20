@@ -181,7 +181,8 @@ func likelyNonCredentialSensitiveDisclosure(text string) bool {
 }
 
 func normalizedFindingText(finding *store.Finding) string {
-	parts := []string{
+	parts := make([]string, 0, 11+3*len(finding.Evidence))
+	parts = append(parts,
 		finding.Title,
 		finding.Category,
 		finding.Summary,
@@ -193,7 +194,7 @@ func normalizedFindingText(finding *store.Finding) string {
 		finding.WhyTestsDoNotAlreadyCoverThis,
 		finding.SuggestedRegressionTest,
 		finding.MinimumFixScope,
-	}
+	)
 	for _, evidence := range finding.Evidence {
 		parts = append(parts, evidence.Label, evidence.Path, evidence.Symbol)
 	}

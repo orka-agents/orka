@@ -371,7 +371,7 @@ func addRepositoryIdentity(target map[string]any, key, provider, id string) {
 	provider = strings.TrimSpace(provider)
 	id = strings.TrimSpace(id)
 	if provider != "" && id != "" {
-		target[key] = map[string]any{"provider": provider, "id": id}
+		target[key] = map[string]any{cliProviderKey: provider, "id": id}
 	}
 }
 
@@ -380,7 +380,7 @@ func addCredentialRef(target map[string]any, field, name, secretKey string) {
 	if name == "" {
 		return
 	}
-	ref := map[string]any{"name": name}
+	ref := map[string]any{cliNameKey: name}
 	if secretKey = strings.TrimSpace(secretKey); secretKey != "" {
 		ref["key"] = secretKey
 	}
@@ -415,8 +415,8 @@ func newTaskRuntimeStatusCmd() *cobra.Command {
 
 func safeTaskRuntimeStatus(task client.TaskDetail) map[string]any {
 	out := map[string]any{
-		"task":      client.StringField(task, "metadata", "name"),
-		"namespace": client.StringField(task, "metadata", "namespace"),
+		cliTaskCommand:    client.StringField(task, "metadata", cliNameKey),
+		cliNamespaceQuery: client.StringField(task, "metadata", cliNamespaceQuery),
 	}
 	status := nestedMap(task, "status")
 	out["phase"] = status["phase"]
@@ -441,8 +441,8 @@ func printTaskRuntimeStatusTable(cmd *cobra.Command, status map[string]any) erro
 	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
 	fmt.Fprintln(w, "FIELD\tVALUE") //nolint:errcheck
 	rows := [][2]string{
-		{"Task", anyString(status["task"])},
-		{"Namespace", anyString(status["namespace"])},
+		{"Task", anyString(status[cliTaskCommand])},
+		{"Namespace", anyString(status[cliNamespaceQuery])},
 		{"Phase", anyString(status["phase"])},
 		{"Execution", anyString(execution["state"])},
 		{"Execution outcome", anyString(execution["outcome"])},

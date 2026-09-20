@@ -32,7 +32,7 @@ func main() {
 
 func newRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:           "orka",
+		Use:           cliProgramName,
 		Short:         "Orka CLI — Kubernetes-native task execution platform",
 		Version:       version,
 		SilenceUsage:  true,

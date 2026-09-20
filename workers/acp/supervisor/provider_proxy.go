@@ -29,6 +29,10 @@ import (
 )
 
 const (
+	providerResponsesPath = "/responses"
+)
+
+const (
 	providerProxyPathPrefix                     = "/_orka/provider/"
 	providerProxyScheme                         = "http"
 	providerProxyTLSScheme                      = "https"
@@ -1472,7 +1476,7 @@ func providerOutputLimitFields(providerKind, requestPath string) (fields []strin
 	switch providerKind {
 	case providerKindCodex, providerKindCopilot, providerKindAgentKit, providerKindFoundry:
 		switch requestPath {
-		case "/responses", providerOpenAIResponsesV1Path, "/responses/compact", "/v1/responses/compact":
+		case providerResponsesPath, providerOpenAIResponsesV1Path, "/responses/compact", "/v1/responses/compact":
 			return []string{providerMaxOutputTokensField}, providerMaxOutputTokensField
 		case providerOpenAIChatCompletionsPath, providerOpenAIChatCompletionsV1Path:
 			return []string{providerMaxTokensField, providerMaxCompletionTokensField}, providerMaxTokensField
@@ -1564,7 +1568,7 @@ func providerRequestRoute(providerKind, requestPath, method string) (allowed, re
 	switch providerKind {
 	case providerKindCodex, providerKindCopilot:
 		switch requestPath {
-		case "/responses", providerOpenAIResponsesV1Path, "/responses/compact", "/v1/responses/compact", providerOpenAIChatCompletionsPath, providerOpenAIChatCompletionsV1Path:
+		case providerResponsesPath, providerOpenAIResponsesV1Path, "/responses/compact", "/v1/responses/compact", providerOpenAIChatCompletionsPath, providerOpenAIChatCompletionsV1Path:
 			allowed, requiresModel, class = method == http.MethodPost, true, providerRequestInference
 		case "/models", providerModelsV1Path:
 			allowed = method == http.MethodGet
@@ -1575,7 +1579,7 @@ func providerRequestRoute(providerKind, requestPath, method string) (allowed, re
 			allowed, requiresModel, class = method == http.MethodPost, true, providerRequestInference
 		}
 	case providerKindFoundry:
-		if requestPath == "/responses" {
+		if requestPath == providerResponsesPath {
 			allowed, requiresModel, class = method == http.MethodPost, true, providerRequestInference
 		}
 	case providerKindOpencode:

@@ -12,7 +12,6 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"os"
 	"os/exec"
 	"regexp"
@@ -157,15 +156,6 @@ func newCodeExecutorFromBackend(backend string) (CodeExecutor, string) {
 	default:
 		return &unsupportedCodeExecutor{backend: backend}, backend
 	}
-}
-
-func cloneCodeExecResourceAudit(values map[string]string) map[string]string {
-	if len(values) == 0 {
-		return nil
-	}
-	clone := make(map[string]string, len(values))
-	maps.Copy(clone, values)
-	return clone
 }
 
 const codeExecRequestIdentityVersion = "code_exec_request_identity_v1"

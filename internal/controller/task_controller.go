@@ -65,6 +65,10 @@ import (
 )
 
 const (
+	taskTerminalMessage = "task is terminal"
+)
+
+const (
 	taskTransactionTokenPendingTimeout            = 2 * time.Minute
 	failedMountEventStaleAfter                    = 2 * time.Minute
 	podLogLimitBytes                              = int64(5 << 20)
@@ -2028,7 +2032,7 @@ func (r *TaskReconciler) diagnoseFailedJob(ctx context.Context, task *corev1alph
 			if term.Reason == "OOMKilled" || term.ExitCode == 137 {
 				limit := podContainerMemoryLimit(pod, cs.Name)
 				if limit == "" {
-					limit = "unknown"
+					limit = repositoryMonitorIssueUnknownValue
 				}
 				oomMsg = fmt.Sprintf("job failed: container OOMKilled (memory limit %s exceeded). Recreate the agent with higher resources.limits.memory or set spec.resources on the task.", limit)
 				continue
@@ -2105,6 +2109,8 @@ func (r *TaskReconciler) isWithinJobCreationVisibilityGracePeriod(task *corev1al
 }
 
 // handleCompleted handles Tasks that have completed (Succeeded or Failed)
+//
+//nolint:gocyclo // Task finalization keeps publication, Session settlement, and cleanup ordering visible.
 func (r *TaskReconciler) handleFinalizing(
 	ctx context.Context, task *corev1alpha1.Task,
 ) (ctrl.Result, error) {
@@ -2600,10 +2606,10 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 	switch phase {
 	case corev1alpha1.TaskPhaseFailed:
 		conditionStatus = metav1.ConditionFalse
-		reason = "TaskFailed"
+		reason = eventReasonTaskFailed
 	case corev1alpha1.TaskPhaseCancelled:
 		conditionStatus = metav1.ConditionFalse
-		reason = "TaskCancelled"
+		reason = eventReasonTaskCancelled
 	}
 
 	resultRef := task.Status.ResultRef
@@ -2627,7 +2633,7 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 			Status:             metav1.ConditionFalse,
 			LastTransitionTime: now,
 			Reason:             reason,
-			Message:            "task is terminal",
+			Message:            taskTerminalMessage,
 		})
 		meta.SetStatusCondition(&t.Status.Conditions, metav1.Condition{
 			Type:               ConditionTypeComplete,
@@ -3790,7 +3796,7 @@ func (r *TaskReconciler) ensureTrustedServiceReadBindings(ctx context.Context, t
 		}
 		binding := &rbacv1.RoleBinding{
 			ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace, Labels: maps.Clone(objectLabels)},
-			RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: key.Name},
+			RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: rbacRoleKind, Name: key.Name},
 			Subjects: []rbacv1.Subject{{
 				Kind: rbacv1.ServiceAccountKind, Name: r.aiWorkerServiceAccountName(), Namespace: taskNamespace,
 			}},
@@ -4103,7 +4109,7 @@ func trustedServiceReadRoleBindingTaskNamespace(binding *rbacv1.RoleBinding) (st
 
 func legacyTrustedServiceReadRoleBindingTaskNamespace(binding *rbacv1.RoleBinding) (string, bool) {
 	if binding == nil || !legacyTrustedServiceReadName(binding.Name) ||
-		binding.RoleRef != (rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: binding.Name}) ||
+		binding.RoleRef != (rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: rbacRoleKind, Name: binding.Name}) ||
 		len(binding.Subjects) != 1 {
 		return "", false
 	}

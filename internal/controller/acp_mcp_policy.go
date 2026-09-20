@@ -19,6 +19,10 @@ import (
 	"github.com/orka-agents/orka/internal/tools"
 )
 
+const (
+	generationField = "generation"
+)
+
 // Only tools whose every invocation leaves durable state unchanged belong here.
 // check_messages is consequential because mark_read defaults to true.
 var readOnlyBrokeredTools = map[string]struct{}{
@@ -385,7 +389,7 @@ func customACPMCPToolDescriptor(tool *corev1alpha1.Tool) (harnessv2.MCPToolDescr
 		)
 	}
 	definitionDigest, err := acpDomainDigest("mcp-custom-tool-definition", map[string]any{
-		"uid": string(tool.UID), "generation": tool.Generation, "spec": tool.Spec,
+		"uid": string(tool.UID), generationField: tool.Generation, "spec": tool.Spec,
 		"endpoint": tool.Status.Endpoint, "actor": tool.Status.Actor,
 	})
 	if err != nil {

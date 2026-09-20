@@ -4165,6 +4165,7 @@ func assertRepositoryMonitorInventoryEvents(t *testing.T, ctx context.Context, m
 	}
 }
 
+//nolint:gocyclo // Keep the expected review Task fields in one assertion helper.
 func assertRepositoryMonitorReviewTask(t *testing.T, ctx context.Context, cl crclient.Client, monitorStore store.RepositoryMonitorStore) {
 	t.Helper()
 	item, err := monitorStore.GetMonitorItem(ctx, "default", "inventory", repositoryMonitorPullRequestKind, "1")
@@ -4777,7 +4778,8 @@ func TestRepositoryMonitorReconcileUnsuspendSetsReady(t *testing.T) {
 }
 
 func repositoryMonitorControllerObjects(objects ...crclient.Object) []crclient.Object {
-	defaults := []crclient.Object{
+	defaults := make([]crclient.Object, 0, 11+len(objects))
+	defaults = append(defaults,
 		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default", UID: "namespace-uid"}},
 		repositoryMonitorControllerTestAgent("reviewer", corev1alpha1.AgentRuntimeClaude, ""),
 		repositoryMonitorControllerTestAgent("triager", corev1alpha1.AgentRuntimeClaude, ""),
@@ -4789,7 +4791,7 @@ func repositoryMonitorControllerObjects(objects ...crclient.Object) []crclient.O
 		repositoryMonitorControllerTestSecret(repositoryMonitorTestPublicationReadCredential, map[string][]byte{repositoryMonitorTokenKey: []byte("target-read-token")}),
 		repositoryMonitorControllerTestSecret(repositoryMonitorTestPublicationCredential, map[string][]byte{repositoryMonitorTokenKey: []byte("target-write-token")}),
 		repositoryMonitorControllerTestSecret(repositoryMonitorTestForgeCredential, map[string][]byte{repositoryMonitorTokenKey: []byte("forge-token")}),
-	}
+	)
 	return append(defaults, objects...)
 }
 

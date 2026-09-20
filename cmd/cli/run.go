@@ -252,7 +252,7 @@ func streamChat(
 		}
 
 		switch evt.Event {
-		case "status":
+		case cliStatusKey:
 			// Session acknowledged — no action needed
 		case "message":
 			if data.Content != "" {
@@ -325,7 +325,7 @@ func handleToolResultEvent(data client.SSEEventData, verbosity int) {
 				taskName, _ := result["name"].(string)
 				elapsed, _ := result["duration"].(string)
 				if taskName == "" {
-					taskName = "task"
+					taskName = cliTaskCommand
 				}
 				if verbosity < VerbosityVV {
 					fmt.Fprintf(os.Stderr, "  ↻ %s: %s %s\n", taskName, phase, elapsed)

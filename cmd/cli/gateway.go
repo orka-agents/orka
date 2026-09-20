@@ -14,17 +14,23 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const (
+	cliGatewayCommand = "gateway"
+	cliBindingCommand = "binding"
+	cliSessionCommand = "session"
+)
+
 func newGatewayCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "gateway",
+		Use:   cliGatewayCommand,
 		Short: "Inspect generic gateway resources and durable event delivery",
 	}
 
 	gatewaySpec := crudResourceSpec{
-		Use:      "gateway",
+		Use:      cliGatewayCommand,
 		Short:    "Inspect Gateway adapter instances",
 		BasePath: "/api/v1/gateways",
-		Name:     "gateway",
+		Name:     cliGatewayCommand,
 		ReadOnly: true,
 	}
 	cmd.AddCommand(newCRUDListCmd(gatewaySpec), newCRUDGetCmd(gatewaySpec))
@@ -36,7 +42,7 @@ func newGatewayCmd() *cobra.Command {
 		ReadOnly: true,
 	}))
 	cmd.AddCommand(newCRUDResourceCmd(crudResourceSpec{
-		Use:      "binding",
+		Use:      cliBindingCommand,
 		Short:    "Inspect GatewayBinding routes",
 		BasePath: "/api/v1/gatewaybindings",
 		Name:     "gateway binding",
@@ -57,15 +63,15 @@ func newGatewayEventsCmd() *cobra.Command {
 		ReadOnly: true,
 		ListFlags: func(cmd *cobra.Command) {
 			cmd.Flags().StringVar(&state, "state", "", "Filter by comma-separated event state")
-			cmd.Flags().StringVar(&gatewayName, "gateway", "", "Filter by Gateway name")
-			cmd.Flags().StringVar(&binding, "binding", "", "Filter by GatewayBinding name")
-			cmd.Flags().StringVar(&session, "session", "", "Filter by Session name")
+			cmd.Flags().StringVar(&gatewayName, cliGatewayCommand, "", "Filter by Gateway name")
+			cmd.Flags().StringVar(&binding, cliBindingCommand, "", "Filter by GatewayBinding name")
+			cmd.Flags().StringVar(&session, cliSessionCommand, "", "Filter by Session name")
 			cmd.Flags().StringVar(&task, "task", "", "Filter by Task name")
 		},
 		ListQuery: func(*cobra.Command) map[string]string {
 			return map[string]string{
-				"state": state, "gateway": gatewayName, "binding": binding,
-				"session": session, "task": task,
+				"state": state, cliGatewayCommand: gatewayName, cliBindingCommand: binding,
+				cliSessionCommand: session, "task": task,
 			}
 		},
 	}
@@ -82,16 +88,16 @@ func newGatewayDeliveriesCmd() *cobra.Command {
 		ReadOnly: true,
 		ListFlags: func(cmd *cobra.Command) {
 			cmd.Flags().StringVar(&state, "state", "", "Filter by comma-separated delivery state")
-			cmd.Flags().StringVar(&gatewayName, "gateway", "", "Filter by Gateway name")
-			cmd.Flags().StringVar(&binding, "binding", "", "Filter by GatewayBinding name")
+			cmd.Flags().StringVar(&gatewayName, cliGatewayCommand, "", "Filter by Gateway name")
+			cmd.Flags().StringVar(&binding, cliBindingCommand, "", "Filter by GatewayBinding name")
 			cmd.Flags().StringVar(&event, "event", "", "Filter by gateway event ID")
-			cmd.Flags().StringVar(&session, "session", "", "Filter by Session name")
+			cmd.Flags().StringVar(&session, cliSessionCommand, "", "Filter by Session name")
 			cmd.Flags().StringVar(&task, "task", "", "Filter by Task name")
 		},
 		ListQuery: func(*cobra.Command) map[string]string {
 			return map[string]string{
-				"state": state, "gateway": gatewayName, "binding": binding, "event": event,
-				"session": session, "task": task,
+				"state": state, cliGatewayCommand: gatewayName, cliBindingCommand: binding, "event": event,
+				cliSessionCommand: session, "task": task,
 			}
 		},
 	}
@@ -105,7 +111,7 @@ func newGatewayDeliveriesCmd() *cobra.Command {
 			result, err := client.DoJSON(
 				context.Background(), http.MethodPost,
 				"/api/v1/gateway-deliveries/"+url.PathEscape(args[0])+"/retry",
-				map[string]string{"namespace": client.Namespace}, nil,
+				map[string]string{cliNamespaceQuery: client.Namespace}, nil,
 			)
 			if err != nil {
 				return err
