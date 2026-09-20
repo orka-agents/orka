@@ -13,7 +13,7 @@ controller:
   # Release image tag. Set digest to override the tag with a SHA256 digest.
   image:
     repository: ghcr.io/orka-agents/orka
-    tag: "0.1.1"
+    tag: "0.2.0"
     digest: ""
     pullPolicy: IfNotPresent
 
@@ -87,10 +87,10 @@ controller:
     # Release image tags. The controller resolves tags to digests at startup.
     # Override with repository@sha256:<digest> to skip registry resolution.
     # An empty image disables that provider.
-    codexImage: ghcr.io/orka-agents/orka/acp-codex-runtime:0.1.1
-    claudeImage: ghcr.io/orka-agents/orka/acp-claude-runtime:0.1.1
-    copilotImage: ghcr.io/orka-agents/orka/acp-copilot-runtime:0.1.1
-    opencodeImage: ghcr.io/orka-agents/orka/acp-opencode-runtime:0.1.1
+    codexImage: ghcr.io/orka-agents/orka/acp-codex-runtime:0.2.0
+    claudeImage: ghcr.io/orka-agents/orka/acp-claude-runtime:0.2.0
+    copilotImage: ghcr.io/orka-agents/orka/acp-copilot-runtime:0.2.0
+    opencodeImage: ghcr.io/orka-agents/orka/acp-opencode-runtime:0.2.0
     # Planned controller upgrades use a same-binary preStop child to call a
     # loopback-only coordinator. Keep terminationGracePeriodSeconds greater
     # than timeout and triggerTimeout so SIGTERM shutdown still has headroom.
@@ -283,7 +283,7 @@ publisher:
   enabled: true
   image:
     repository: ghcr.io/orka-agents/orka/workspace-publisher
-    tag: "0.1.1"
+    tag: "0.2.0"
     digest: ""
     pullPolicy: IfNotPresent
   allowedSCMHosts: github.com
@@ -430,7 +430,7 @@ harnessV1:
         ephemeral-storage: 64Mi
   image:
     repository: ghcr.io/orka-agents/orka/agent-harness-wrapper
-    tag: "0.1.1"
+    tag: "0.2.0"
     # Required when controller.mode is harness-v1. Tags are never accepted for
     # a running wrapper.
     digest: ""
@@ -475,14 +475,14 @@ workers:
   ai:
     image:
       repository: ghcr.io/orka-agents/orka/ai-worker
-      tag: "0.1.1"
+      tag: "0.2.0"
       digest: ""
       pullPolicy: IfNotPresent
 
   general:
     image:
       repository: ghcr.io/orka-agents/orka/general-worker
-      tag: "0.1.1"
+      tag: "0.2.0"
       digest: ""
 
 # GitHub webhook and label-trigger configuration.

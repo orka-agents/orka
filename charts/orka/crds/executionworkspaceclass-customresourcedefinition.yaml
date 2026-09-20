@@ -1,0 +1,333 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: executionworkspaceclasses.workspace.orka.ai
+spec:
+  group: workspace.orka.ai
+  names:
+    categories:
+    - orka
+    kind: ExecutionWorkspaceClass
+    listKind: ExecutionWorkspaceClassList
+    plural: executionworkspaceclasses
+    shortNames:
+    - ewc
+    singular: executionworkspaceclass
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.mode
+      name: Mode
+      type: string
+    - jsonPath: .status.providerRef.name
+      name: Provider
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: ExecutionWorkspaceClass represents an immutable user-selectable
+          workspace profile and policy.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              ExecutionWorkspaceClassSpec defines a user-selectable environment and policy.
+              Direct provisioning requires both providerRef and parametersRef; pooled provisioning requires poolRef.
+            properties:
+              allowedReuseScopes:
+                description: AllowedReuseScopes lists the reuse scopes Tasks may request.
+                items:
+                  description: WorkspaceReuseScope is a reuse scope a class permits.
+                  enum:
+                  - None
+                  - Session
+                  type: string
+                minItems: 1
+                type: array
+                x-kubernetes-list-type: set
+              lifecycle:
+                description: Lifecycle defines detach, retention, and deletion policy.
+                properties:
+                  allowedOnDetach:
+                    description: AllowedOnDetach lists the actions a Task may request.
+                    items:
+                      description: WorkspaceOnDetach is the lifecycle action taken
+                        after an interactive attachment is revoked.
+                      enum:
+                      - Suspend
+                      - Delete
+                      type: string
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-type: set
+                  defaultOnDetach:
+                    default: Suspend
+                    description: DefaultOnDetach is used when a Task does not request
+                      an allowed override.
+                    enum:
+                    - Suspend
+                    - Delete
+                    type: string
+                  deletionPolicy:
+                    description: DeletionPolicy describes the required disposition
+                      of provider and retained data.
+                    properties:
+                      checkpoints:
+                        description: Checkpoints controls provider checkpoints and
+                          snapshots.
+                        enum:
+                        - Delete
+                        - Retain
+                        type: string
+                      persistentVolumes:
+                        description: PersistentVolumes controls durable volume retention.
+                        enum:
+                        - Delete
+                        - Retain
+                        type: string
+                      providerResources:
+                        description: ProviderResources controls provider-native compute
+                          and control-plane objects.
+                        enum:
+                        - Delete
+                        - Retain
+                        type: string
+                    required:
+                    - checkpoints
+                    - persistentVolumes
+                    - providerResources
+                    type: object
+                  detachTimeout:
+                    default: 2m
+                    description: DetachTimeout bounds how long Task finalization waits
+                      for attachment revocation.
+                    type: string
+                  idleTimeout:
+                    description: IdleTimeout is the maximum idle duration before the
+                      provider may apply the class policy.
+                    type: string
+                  maxLifetime:
+                    description: MaxLifetime is the maximum lifetime of a concrete
+                      workspace.
+                    type: string
+                required:
+                - allowedOnDetach
+                - defaultOnDetach
+                - deletionPolicy
+                - detachTimeout
+                type: object
+                x-kubernetes-validations:
+                - message: defaultOnDetach must be included in allowedOnDetach
+                  rule: self.allowedOnDetach.exists(action, action == self.defaultOnDetach)
+                - message: detachTimeout must be positive
+                  rule: duration(self.detachTimeout) > duration('0s')
+                - message: idleTimeout must be positive when set
+                  rule: '!has(self.idleTimeout) || duration(self.idleTimeout) > duration(''0s'')'
+                - message: maxLifetime must be positive when set
+                  rule: '!has(self.maxLifetime) || duration(self.maxLifetime) > duration(''0s'')'
+                - message: maxLifetime must be greater than or equal to idleTimeout
+                  rule: '!has(self.idleTimeout) || !has(self.maxLifetime) || duration(self.maxLifetime)
+                    >= duration(self.idleTimeout)'
+              mode:
+                default: Interactive
+                description: Mode selects interactive Task attachment or persistent
+                  Service hosting.
+                enum:
+                - Interactive
+                - Service
+                type: string
+              parametersRef:
+                description: ParametersRef points at namespaced adapter-owned workspace
+                  profile parameters.
+                properties:
+                  group:
+                    description: Group is the API group of the referenced object.
+                    minLength: 1
+                    type: string
+                  kind:
+                    description: Kind is the kind of the referenced object.
+                    minLength: 1
+                    type: string
+                  name:
+                    description: Name is the name of the referenced object.
+                    minLength: 1
+                    type: string
+                required:
+                - group
+                - kind
+                - name
+                type: object
+              poolRef:
+                description: PoolRef selects a pool in the same namespace.
+                properties:
+                  name:
+                    default: ""
+                    description: |-
+                      Name of the referent.
+                      This field is effectively required, but due to backwards compatibility is
+                      allowed to be empty. Instances of this type with an empty value here are
+                      almost certainly wrong.
+                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
+              providerRef:
+                description: ProviderRef selects a cluster-scoped provider for direct
+                  provisioning.
+                properties:
+                  name:
+                    description: Name is the name of the referenced cluster-scoped
+                      object.
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+              requiredFeatures:
+                description: RequiredFeatures must be a subset of the selected provider's
+                  advertised features.
+                items:
+                  description: ExecutionWorkspaceFeature names a provider capability
+                    required by a class.
+                  pattern: ^[a-z][a-z0-9.-]{0,62}$
+                  type: string
+                type: array
+                x-kubernetes-list-type: set
+            required:
+            - allowedReuseScopes
+            - lifecycle
+            - mode
+            type: object
+            x-kubernetes-validations:
+            - message: 'exactly one provisioning source is required: providerRef with
+                parametersRef, or poolRef'
+              rule: (has(self.providerRef) && has(self.parametersRef) && !has(self.poolRef))
+                || (!has(self.providerRef) && !has(self.parametersRef) && has(self.poolRef))
+            - message: poolRef.name is required
+              rule: '!has(self.poolRef) || self.poolRef.name.size() > 0'
+            - message: ExecutionWorkspaceClass functional spec is immutable; create
+                a new class
+              rule: self == oldSelf
+            - message: Service classes may only allow the None reuse scope
+              rule: self.mode == 'Interactive' || self.allowedReuseScopes.all(scope,
+                scope == 'None')
+          status:
+            description: ExecutionWorkspaceClassStatus reports resolution and readiness
+              without provider-native details.
+            properties:
+              conditions:
+                description: Conditions represent reference, feature, and policy readiness.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: ObservedGeneration is the most recent generation observed
+                  by core.
+                format: int64
+                type: integer
+              profileHash:
+                description: |-
+                  ProfileHash pins the first successfully resolved functional class profile.
+                  Later referenced-object drift makes the class NotReady instead of changing this hash.
+                pattern: ^sha256:[a-f0-9]{64}$
+                type: string
+              providerRef:
+                description: ProviderRef is the provider resolved directly or through
+                  the selected pool.
+                properties:
+                  name:
+                    description: Name is the name of the referenced cluster-scoped
+                      object.
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

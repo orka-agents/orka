@@ -8,4 +8,4 @@ namespace: system
 images:
 - name: controller
   newName: ghcr.io/orka-agents/orka
-  newTag: 0.1.1
+  newTag: 0.2.0

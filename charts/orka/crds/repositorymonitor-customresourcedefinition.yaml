@@ -59,12 +59,25 @@ spec:
             description: RepositoryMonitorSpec defines the desired state of RepositoryMonitor.
             properties:
               agents:
-                description: Agents configures the agents used by monitor review and
-                  repair tasks.
+                description: Agents configures the agents used by monitor review,
+                  issue, and repair tasks.
                 properties:
                   implementer:
                     description: Implementer is the agent used for guarded issue implementation
                       tasks.
+                    properties:
+                      name:
+                        description: Name is the name of the Agent
+                        type: string
+                      namespace:
+                        description: Namespace is the namespace of the Agent (defaults
+                          to Task namespace)
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  planner:
+                    description: Planner is the agent used for issue planning tasks.
                     properties:
                       name:
                         description: Name is the name of the Agent
@@ -89,9 +102,35 @@ spec:
                     required:
                     - name
                     type: object
+                  researcher:
+                    description: Researcher is the agent used for issue research tasks.
+                    properties:
+                      name:
+                        description: Name is the name of the Agent
+                        type: string
+                      namespace:
+                        description: Namespace is the namespace of the Agent (defaults
+                          to Task namespace)
+                        type: string
+                    required:
+                    - name
+                    type: object
                   reviewer:
                     description: Reviewer is the agent used for pull-request review
                       tasks.
+                    properties:
+                      name:
+                        description: Name is the name of the Agent
+                        type: string
+                      namespace:
+                        description: Namespace is the namespace of the Agent (defaults
+                          to Task namespace)
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  triager:
+                    description: Triager is the agent used for issue triage tasks.
                     properties:
                       name:
                         description: Name is the name of the Agent
@@ -126,20 +165,17 @@ spec:
                     description: RequireGlobalMergeGate requires the controller-wide
                       merge gate.
                     type: boolean
-                  requireMaintainerOptIn:
-                    default: true
-                    description: RequireMaintainerOptIn requires explicit maintainer
-                      opt-in.
-                    type: boolean
                 type: object
               branch:
                 default: main
                 description: Branch is the default base branch for repository-wide
                   monitoring decisions.
                 type: string
-              gitSecretRef:
-                description: GitSecretRef references GitHub credentials for repository
-                  monitor operations.
+              forgeCredentialRef:
+                description: |-
+                  ForgeCredentialRef references the GitHub API credential used only for
+                  controller-owned forge reads and mutations. Write workflows and GitHub label
+                  triggers require this explicit reference.
                 properties:
                   name:
                     default: ""
@@ -152,6 +188,104 @@ spec:
                     type: string
                 type: object
                 x-kubernetes-map-type: atomic
+              gitSecretRef:
+                description: |-
+                  GitSecretRef is the backward-compatible source-read credential reference.
+                  ReadCredentialRef takes precedence when both are set. GitSecretRef is never
+                  used for publication writes or forge mutations.
+                properties:
+                  name:
+                    default: ""
+                    description: |-
+                      Name of the referent.
+                      This field is effectively required, but due to backwards compatibility is
+                      allowed to be empty. Instances of this type with an empty value here are
+                      almost certainly wrong.
+                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
+              issueWorkflow:
+                description: IssueWorkflow controls issue triage, research, planning,
+                  and implementation behavior.
+                properties:
+                  implementation:
+                    description: Implementation controls bounded implementation tasks.
+                    properties:
+                      allowedPaths:
+                        description: |-
+                          AllowedPaths optionally restricts implementation patch files to these path globs/prefixes.
+                          Examples: api/**, internal/**, docs/**.
+                        items:
+                          type: string
+                        type: array
+                        x-kubernetes-list-type: set
+                      branchPrefix:
+                        description: BranchPrefix is the branch prefix for implementation
+                          push branches. Defaults to orka/issue.
+                        type: string
+                      enabled:
+                        description: Enabled enables implementation. Defaults to true
+                          when an implementer agent is configured and a command requests
+                          it.
+                        type: boolean
+                      maxActive:
+                        description: MaxActive bounds concurrently active issue implementation/mutation
+                          jobs per monitor. Defaults to 2.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      maxAttemptsPerIssue:
+                        description: MaxAttemptsPerIssue bounds implementation attempts
+                          for one issue. Defaults to 2.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      maxChangedFiles:
+                        description: MaxChangedFiles bounds changed files in an implementation
+                          patch. Defaults to 12.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      requireApprovedPlan:
+                        description: RequireApprovedPlan blocks implementation unless
+                          the latest plan was approved.
+                        type: boolean
+                    type: object
+                  planning:
+                    description: Planning controls read-only implementation plan generation.
+                    properties:
+                      enabled:
+                        description: Enabled enables planning. Defaults to true when
+                          a planner agent is configured and a command requests it.
+                        type: boolean
+                      requireHumanApprovalFor:
+                        description: RequireHumanApprovalFor names risk levels or
+                          plan categories that require explicit approval.
+                        items:
+                          type: string
+                        type: array
+                        x-kubernetes-list-type: set
+                    type: object
+                  research:
+                    description: Research controls read-only issue research.
+                    properties:
+                      enabled:
+                        description: Enabled enables this phase. Defaults to true
+                          when the corresponding agent is configured and a command
+                          requests it.
+                        type: boolean
+                    type: object
+                  triage:
+                    description: Triage controls read-only issue classification.
+                    properties:
+                      enabled:
+                        description: Enabled enables this phase. Defaults to true
+                          when the corresponding agent is configured and a command
+                          requests it.
+                        type: boolean
+                    type: object
+                type: object
               owner:
                 description: Owner is the repository owner or organization.
                 type: string
@@ -159,13 +293,6 @@ spec:
                 description: Policy contains authorization and safety policy for monitor
                   operations.
                 properties:
-                  advisoryLabels:
-                    description: AdvisoryLabels controls advisory label synchronization.
-                    properties:
-                      enabled:
-                        description: Enabled enables advisory label sync.
-                        type: boolean
-                    type: object
                   allowedRepositoryPermissions:
                     description: AllowedRepositoryPermissions lists GitHub permissions
                       allowed to issue write commands.
@@ -177,17 +304,6 @@ spec:
                       type: string
                     type: array
                     x-kubernetes-list-type: set
-                  optInLabels:
-                    description: OptInLabels names labels that opt a PR into repair
-                      or automerge.
-                    properties:
-                      autofix:
-                        description: Autofix opts a PR into autofix.
-                        type: string
-                      automerge:
-                        description: Automerge opts a PR into automerge.
-                        type: string
-                    type: object
                   pauseLabels:
                     description: PauseLabels block further automation while present.
                     items:
@@ -209,6 +325,57 @@ spec:
                 enum:
                 - github
                 type: string
+              publicationCredentialRef:
+                description: |-
+                  PublicationCredentialRef references the target-repository write credential
+                  used only for exact compare-and-swap publication. Write workflows require
+                  this explicit reference.
+                properties:
+                  name:
+                    default: ""
+                    description: |-
+                      Name of the referent.
+                      This field is effectively required, but due to backwards compatibility is
+                      allowed to be empty. Instances of this type with an empty value here are
+                      almost certainly wrong.
+                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
+              publicationReadCredentialRef:
+                description: |-
+                  PublicationReadCredentialRef references the target-repository read
+                  credential used only for publication preflight and independent verification.
+                  Write workflows require this explicit reference.
+                properties:
+                  name:
+                    default: ""
+                    description: |-
+                      Name of the referent.
+                      This field is effectively required, but due to backwards compatibility is
+                      allowed to be empty. Instances of this type with an empty value here are
+                      almost certainly wrong.
+                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
+              readCredentialRef:
+                description: |-
+                  ReadCredentialRef references the source-repository clone/read credential.
+                  It is resolved only by the clean-room workspace boundary. When omitted,
+                  GitSecretRef remains the backward-compatible read-only fallback.
+                properties:
+                  name:
+                    default: ""
+                    description: |-
+                      Name of the referent.
+                      This field is effectively required, but due to backwards compatibility is
+                      allowed to be empty. Instances of this type with an empty value here are
+                      almost certainly wrong.
+                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
               repair:
                 description: Repair controls bounded repair behavior.
                 properties:
@@ -227,22 +394,12 @@ spec:
                     format: int32
                     minimum: 0
                     type: integer
-                  maxReviewFixRetries:
-                    description: MaxReviewFixRetries bounds review-fix loop retries.
-                    format: int32
-                    minimum: 0
-                    type: integer
                   maxValidationRetries:
                     description: MaxValidationRetries bounds validation retries for
                       one repair job.
                     format: int32
                     minimum: 0
                     type: integer
-                  requireMaintainerOptIn:
-                    default: true
-                    description: RequireMaintainerOptIn requires an explicit maintainer
-                      command or label.
-                    type: boolean
                 type: object
               repoURL:
                 description: RepoURL is the repository URL to monitor.
@@ -310,10 +467,6 @@ spec:
                             - P2
                             - P3
                             type: string
-                          onlyChangedLines:
-                            description: OnlyChangedLines restricts inline comments
-                              to RIGHT-side changed lines. V1 treats this as true.
-                            type: boolean
                         type: object
                       mode:
                         default: summary_only
@@ -389,6 +542,20 @@ spec:
                       enabled:
                         description: Enabled enables issue monitoring.
                         type: boolean
+                      excludeLabels:
+                        description: ExcludeLabels excludes matching issues from actionable
+                          inventory.
+                        items:
+                          type: string
+                        type: array
+                        x-kubernetes-list-type: set
+                      includeLabels:
+                        description: IncludeLabels optionally restricts issue inventory
+                          to issues with any of these labels.
+                        items:
+                          type: string
+                        type: array
+                        x-kubernetes-list-type: set
                       maxPerRun:
                         description: MaxPerRun limits issues selected by one background
                           run.
@@ -421,19 +588,104 @@ spec:
               timeZone:
                 description: TimeZone is the IANA time zone for the schedule.
                 type: string
+              triggers:
+                description: Triggers configures external events that create durable
+                  monitor commands.
+                properties:
+                  github:
+                    description: GitHub configures GitHub webhook triggers.
+                    properties:
+                      labels:
+                        description: Labels maps GitHub labels to durable RepositoryMonitor
+                          commands.
+                        properties:
+                          consumeCommandLabels:
+                            description: ConsumeCommandLabels removes accepted one-shot
+                              command labels after durable intake.
+                            type: boolean
+                          enabled:
+                            description: Enabled enables durable command intake for
+                              configured GitHub labels.
+                            type: boolean
+                          issues:
+                            description: Issues maps issue command intents to label
+                              names. Empty fields use the default orka:* labels.
+                            properties:
+                              approvePlan:
+                                type: string
+                              decompose:
+                                type: string
+                              implement:
+                                type: string
+                              plan:
+                                type: string
+                              research:
+                                type: string
+                              resume:
+                                type: string
+                              stop:
+                                type: string
+                              triage:
+                                type: string
+                            type: object
+                          pullRequests:
+                            description: PullRequests maps pull-request command intents
+                              to label names. Empty fields use the default orka:*
+                              labels.
+                            properties:
+                              automerge:
+                                type: string
+                              fix:
+                                type: string
+                              fixCI:
+                                type: string
+                              resume:
+                                type: string
+                              review:
+                                type: string
+                              stop:
+                                type: string
+                              updateBranch:
+                                type: string
+                            type: object
+                          requireActorPermission:
+                            default: write
+                            description: |-
+                              RequireActorPermission is the minimum GitHub permission for mutating/code-executing commands.
+                              Supported values are write, maintain, and admin. Defaults to write.
+                            enum:
+                            - write
+                            - maintain
+                            - admin
+                            type: string
+                        type: object
+                    type: object
+                type: object
               validation:
-                description: Validation configures deterministic validation commands
-                  for repair.
+                description: Validation configures isolated validation for pull request
+                  reviews.
                 properties:
                   commands:
-                    description: Commands are validation commands repair jobs must
-                      run.
+                    description: |-
+                      Commands is retained only so upgraded clusters can detect and reject legacy
+                      validation policies instead of silently treating them as disabled.
+                      Deprecated: configure a digest-pinned image and let the reviewer select one command.
                     items:
                       type: string
                     type: array
+                  image:
+                    description: |-
+                      Image is the digest-pinned repository-specific container image used for validation.
+                      The reviewer chooses the validation command from the checked-out code.
+                      The image must contain /bin/sh and every tool the repository expects the
+                      reviewer to run.
+                    maxLength: 2048
+                    pattern: ^[^\s@]+@sha256:[a-f0-9]{64}$
+                    type: string
                   mode:
-                    default: changed
-                    description: Mode selects validation scope.
+                    description: |-
+                      Mode is retained only so upgraded clusters preserve the legacy field.
+                      Deprecated: validation scope is selected by the reviewer from repository evidence.
                     enum:
                     - "off"
                     - changed
@@ -448,6 +700,11 @@ spec:
             properties:
               activeRepairs:
                 description: ActiveRepairs is the count of repair jobs currently active.
+                format: int32
+                type: integer
+              blockedIssues:
+                description: BlockedIssues is the count of issues blocked by guard
+                  labels or workflow policy.
                 format: int32
                 type: integer
               blockedItems:
@@ -539,9 +796,19 @@ spec:
                   in status.
                 format: int64
                 type: integer
+              openIssues:
+                description: OpenIssues is the current count of open issues seen by
+                  the monitor.
+                format: int32
+                type: integer
               openPullRequests:
                 description: OpenPullRequests is the current count of open pull requests
                   seen by the monitor.
+                format: int32
+                type: integer
+              pendingIssueActions:
+                description: PendingIssueActions is the count of issues waiting for
+                  a queued workflow action.
                 format: int32
                 type: integer
               pendingReviews:

@@ -1,0 +1,529 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: publications.core.orka.ai
+spec:
+  group: core.orka.ai
+  names:
+    kind: Publication
+    listKind: PublicationList
+    plural: publications
+    shortNames:
+    - pubctl
+    singular: publication
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.state
+      name: State
+      type: string
+    - jsonPath: .spec.generation
+      name: Generation
+      type: integer
+    - jsonPath: .spec.targetRef
+      name: Target
+      type: string
+    - jsonPath: .status.version
+      name: Version
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Publication is the Kubernetes-authoritative clean-room publication
+          record.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              PublicationSpec is the immutable clean-room publication identity and input.
+              Mutable receipts and forge intent live only in status.
+            properties:
+              artifactDigest:
+                pattern: ^sha256:[a-f0-9]{64}$
+                type: string
+              artifactId:
+                description: ArtifactID identifies the durable content-addressed change
+                  artifact.
+                maxLength: 1024
+                minLength: 1
+                type: string
+              artifactMediaType:
+                maxLength: 255
+                minLength: 1
+                type: string
+              artifactSizeBytes:
+                format: int64
+                minimum: 1
+                type: integer
+              attempt:
+                format: int64
+                minimum: 1
+                type: integer
+              baseline:
+                description: |-
+                  ControlRemoteRefState is an exact remote-ref observation. Absent and SHA are
+                  mutually exclusive. The all-zero value is reserved for an explicitly unknown
+                  observation in PublicationOutcomeUnknown receipts.
+                properties:
+                  absent:
+                    type: boolean
+                  sha:
+                    pattern: ^([a-f0-9]{40}|[a-f0-9]{64})$
+                    type: string
+                required:
+                - absent
+                type: object
+                x-kubernetes-validations:
+                - message: absent and sha are mutually exclusive
+                  rule: '!(self.absent && has(self.sha) && size(self.sha) > 0)'
+              branchClaimGeneration:
+                format: int64
+                minimum: 1
+                type: integer
+              branchClaimId:
+                maxLength: 1024
+                minLength: 1
+                type: string
+              commitIdentity:
+                maxLength: 1024
+                minLength: 1
+                type: string
+              commitMessage:
+                maxLength: 16384
+                minLength: 1
+                type: string
+              commitTimestamp:
+                format: date-time
+                type: string
+              generation:
+                format: int64
+                minimum: 1
+                type: integer
+              id:
+                maxLength: 1024
+                minLength: 1
+                type: string
+              promptId:
+                maxLength: 1024
+                minLength: 1
+                type: string
+              publicationCredentialRef:
+                description: |-
+                  PublicationCredentialRef identifies an operation-scoped Secret reference;
+                  it never contains credential material.
+                maxLength: 1024
+                minLength: 1
+                type: string
+              requestDigest:
+                pattern: ^sha256:[a-f0-9]{64}$
+                type: string
+              sessionUid:
+                maxLength: 1024
+                type: string
+              sourceBaselineSha:
+                pattern: ^([a-f0-9]{40}|[a-f0-9]{64})$
+                type: string
+              sourceRef:
+                description: SourceRef is the exact immutable source ref or revision
+                  selector.
+                maxLength: 1024
+                minLength: 1
+                type: string
+              sourceRepositoryId:
+                maxLength: 1024
+                minLength: 1
+                type: string
+              targetRef:
+                maxLength: 1024
+                pattern: ^refs/heads/.+$
+                type: string
+              targetRepositoryId:
+                maxLength: 1024
+                minLength: 1
+                type: string
+              taskUid:
+                maxLength: 1024
+                minLength: 1
+                type: string
+            required:
+            - artifactDigest
+            - artifactId
+            - artifactMediaType
+            - artifactSizeBytes
+            - attempt
+            - baseline
+            - branchClaimGeneration
+            - branchClaimId
+            - commitIdentity
+            - commitMessage
+            - commitTimestamp
+            - generation
+            - id
+            - promptId
+            - publicationCredentialRef
+            - requestDigest
+            - sourceBaselineSha
+            - sourceRef
+            - sourceRepositoryId
+            - targetRef
+            - targetRepositoryId
+            - taskUid
+            type: object
+            x-kubernetes-validations:
+            - message: publication spec is immutable
+              rule: self == oldSelf
+          status:
+            description: PublicationStatus contains mutable state, exact receipts,
+              and epoch fencing.
+            properties:
+              controllerEpoch:
+                description: ControllerEpoch is the exact epoch that performed the
+                  last mutation.
+                format: int64
+                minimum: 1
+                type: integer
+              controllerEpochLeaseResourceVersion:
+                description: |-
+                  ControllerEpochLeaseResourceVersion is the resourceVersion of the
+                  authoritative controller-epoch Lease observed by the mutation.
+                maxLength: 64
+                type: string
+              controllerEpochName:
+                description: |-
+                  ControllerEpochName identifies the controller epoch domain checked before
+                  the mutation.
+                maxLength: 253
+                type: string
+              createdAt:
+                description: CreatedAt is the normalized logical creation time.
+                format: date-time
+                type: string
+              lastOperationDigest:
+                description: LastOperationDigest binds LastOperationID to exact canonical
+                  input.
+                pattern: ^sha256:[a-f0-9]{64}$
+                type: string
+              lastOperationId:
+                description: LastOperationID is the last idempotent mutation identity
+                  applied.
+                maxLength: 1024
+                type: string
+              prIntent:
+                description: |-
+                  PublicationPullRequestIntent is the exact forge tuple persisted before the
+                  first forge API call.
+                properties:
+                  baseRef:
+                    maxLength: 1024
+                    pattern: ^refs/heads/.+$
+                    type: string
+                  baseRepositoryId:
+                    maxLength: 1024
+                    minLength: 1
+                    type: string
+                  expectedHeadSha:
+                    pattern: ^([a-f0-9]{40}|[a-f0-9]{64})$
+                    type: string
+                  headRef:
+                    maxLength: 1024
+                    pattern: ^refs/heads/.+$
+                    type: string
+                  headRepositoryId:
+                    maxLength: 1024
+                    minLength: 1
+                    type: string
+                  publicationGeneration:
+                    format: int64
+                    minimum: 1
+                    type: integer
+                required:
+                - baseRef
+                - baseRepositoryId
+                - expectedHeadSha
+                - headRef
+                - headRepositoryId
+                - publicationGeneration
+                type: object
+              preparedReceipt:
+                description: PreparedPublicationControlReceipt records deterministic
+                  commit preparation.
+                properties:
+                  bundleArtifactId:
+                    maxLength: 1024
+                    minLength: 1
+                    type: string
+                  bundleDigest:
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  bundleMediaType:
+                    maxLength: 255
+                    minLength: 1
+                    type: string
+                  bundleRef:
+                    pattern: ^refs/orka/publications/[a-f0-9]{64}$
+                    type: string
+                  bundleSizeBytes:
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  commitSha:
+                    pattern: ^([a-f0-9]{40}|[a-f0-9]{64})$
+                    type: string
+                  manifestDigest:
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  operationId:
+                    maxLength: 1024
+                    minLength: 1
+                    type: string
+                  preparedAt:
+                    format: date-time
+                    type: string
+                  relativeRoot:
+                    description: |-
+                      RelativeRoot is the canonical repository-relative workspace root applied
+                      to every path in the immutable delta artifact.
+                    maxLength: 1024
+                    type: string
+                  requestDigest:
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  treeSha:
+                    pattern: ^([a-f0-9]{40}|[a-f0-9]{64})$
+                    type: string
+                required:
+                - bundleArtifactId
+                - bundleDigest
+                - bundleMediaType
+                - bundleRef
+                - bundleSizeBytes
+                - commitSha
+                - manifestDigest
+                - operationId
+                - preparedAt
+                - requestDigest
+                - treeSha
+                type: object
+              publishReceipt:
+                description: PublishOperationControlReceipt records the exact server-enforced
+                  ref CAS.
+                properties:
+                  acknowledgementUnknown:
+                    type: boolean
+                  expectedCommitSha:
+                    pattern: ^([a-f0-9]{40}|[a-f0-9]{64})$
+                    type: string
+                  operationId:
+                    maxLength: 1024
+                    minLength: 1
+                    type: string
+                  publishedAt:
+                    format: date-time
+                    type: string
+                  remoteBefore:
+                    description: |-
+                      ControlRemoteRefState is an exact remote-ref observation. Absent and SHA are
+                      mutually exclusive. The all-zero value is reserved for an explicitly unknown
+                      observation in PublicationOutcomeUnknown receipts.
+                    properties:
+                      absent:
+                        type: boolean
+                      sha:
+                        pattern: ^([a-f0-9]{40}|[a-f0-9]{64})$
+                        type: string
+                    required:
+                    - absent
+                    type: object
+                    x-kubernetes-validations:
+                    - message: absent and sha are mutually exclusive
+                      rule: '!(self.absent && has(self.sha) && size(self.sha) > 0)'
+                  requestDigest:
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  targetRef:
+                    maxLength: 1024
+                    pattern: ^refs/heads/.+$
+                    type: string
+                  targetRepositoryId:
+                    maxLength: 1024
+                    minLength: 1
+                    type: string
+                required:
+                - acknowledgementUnknown
+                - expectedCommitSha
+                - operationId
+                - publishedAt
+                - remoteBefore
+                - requestDigest
+                - targetRef
+                - targetRepositoryId
+                type: object
+              pullRequestReceipt:
+                description: PullRequestOperationControlReceipt snapshots exact forge
+                  reconciliation.
+                properties:
+                  forgeId:
+                    maxLength: 1024
+                    minLength: 1
+                    type: string
+                  headSha:
+                    pattern: ^([a-f0-9]{40}|[a-f0-9]{64})$
+                    type: string
+                  intentKey:
+                    maxLength: 1024
+                    minLength: 1
+                    type: string
+                  operationId:
+                    maxLength: 1024
+                    minLength: 1
+                    type: string
+                  reconciledAt:
+                    format: date-time
+                    type: string
+                  requestDigest:
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  state:
+                    maxLength: 128
+                    minLength: 1
+                    type: string
+                  url:
+                    maxLength: 2048
+                    minLength: 1
+                    type: string
+                required:
+                - forgeId
+                - headSha
+                - intentKey
+                - operationId
+                - reconciledAt
+                - requestDigest
+                - state
+                - url
+                type: object
+              state:
+                description: PublicationControlState is the clean-room publication
+                  state machine.
+                enum:
+                - Preparing
+                - Prepared
+                - Publishing
+                - Verifying
+                - VerifiedExact
+                - DeliveredSuperseded
+                - CancelledBeforePublish
+                - DeliveryConflict
+                - CredentialBlocked
+                - PreparationFailed
+                - PublicationOutcomeUnknown
+                type: string
+              terminalReason:
+                maxLength: 16384
+                type: string
+              updatedAt:
+                description: UpdatedAt is the normalized logical mutation time.
+                format: date-time
+                type: string
+              verificationReceipt:
+                description: PublicationVerificationControlReceipt is an independent
+                  remote observation.
+                properties:
+                  descendantProofDigest:
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  expectedCommitSha:
+                    pattern: ^([a-f0-9]{40}|[a-f0-9]{64})$
+                    type: string
+                  observedRemote:
+                    description: |-
+                      ControlRemoteRefState is an exact remote-ref observation. Absent and SHA are
+                      mutually exclusive. The all-zero value is reserved for an explicitly unknown
+                      observation in PublicationOutcomeUnknown receipts.
+                    properties:
+                      absent:
+                        type: boolean
+                      sha:
+                        pattern: ^([a-f0-9]{40}|[a-f0-9]{64})$
+                        type: string
+                    required:
+                    - absent
+                    type: object
+                    x-kubernetes-validations:
+                    - message: absent and sha are mutually exclusive
+                      rule: '!(self.absent && has(self.sha) && size(self.sha) > 0)'
+                  operationId:
+                    maxLength: 1024
+                    minLength: 1
+                    type: string
+                  outcome:
+                    description: PublicationControlState is the clean-room publication
+                      state machine.
+                    enum:
+                    - Preparing
+                    - Prepared
+                    - Publishing
+                    - Verifying
+                    - VerifiedExact
+                    - DeliveredSuperseded
+                    - CancelledBeforePublish
+                    - DeliveryConflict
+                    - CredentialBlocked
+                    - PreparationFailed
+                    - PublicationOutcomeUnknown
+                    type: string
+                  requestDigest:
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  verifiedAt:
+                    format: date-time
+                    type: string
+                required:
+                - expectedCommitSha
+                - observedRemote
+                - operationId
+                - outcome
+                - requestDigest
+                - verifiedAt
+                type: object
+              version:
+                description: |-
+                  Version is the monotonic domain CAS version. It advances once for each
+                  successfully persisted logical mutation.
+                format: int64
+                minimum: 1
+                type: integer
+            type: object
+            x-kubernetes-validations:
+            - message: failure and unknown publication states require a terminal reason
+              rule: '!has(self.state) || !(self.state in [''DeliveryConflict'', ''CredentialBlocked'',
+                ''PreparationFailed'', ''PublicationOutcomeUnknown'']) || (has(self.terminalReason)
+                && size(self.terminalReason) > 0)'
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -2741,8 +2741,8 @@ spec:
         - --acp-provider-proxy-namespace=orka-system
         - --acp-provider-proxy-pod-labels=orka.ai/network-role=provider-auth-proxy
         - --acp-provider-proxy-token-file=/var/run/orka/provider-auth/token
-        - --ai-worker-image=ghcr.io/orka-agents/orka/ai-worker:0.1.1
-        - --general-worker-image=ghcr.io/orka-agents/orka/general-worker:0.1.1
+        - --ai-worker-image=ghcr.io/orka-agents/orka/ai-worker:0.2.0
+        - --general-worker-image=ghcr.io/orka-agents/orka/general-worker:0.2.0
         - --gateway-enabled=true
         - --gateway-pending-per-session=100
         - --gateway-max-records-per-gateway=1000
