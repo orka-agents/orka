@@ -2,6 +2,12 @@
 
 These scripts record live, read-only CLI queries. They reuse `demo/lib/demo.sh` without changing it. Before sourcing the helper, `common.sh` sets `ORKA_DEMO_ENV=/dev/null` and a task-owned config directory. It immediately replaces the helper's `orka()` function with the scoped `demo/06-hackathon/cli.py` wrapper. The presenter's `HOME` and Orka configuration are never changed.
 
+The wrapper expects `bin/hackathon-first-pass/orka` to support `ORKA_CONFIG_FILE`.
+This recording used the CLI from Orka branch `fix/cli-private-config`, commit
+`8a57dadf8367e8d1063a648ca08c8a5573f85f7b`. Its private config lets the scoped
+kubeconfig's `tokenFile` supply authentication without putting a token in process
+arguments.
+
 Record and render the two completed scan scenes:
 
 ```sh
