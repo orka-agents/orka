@@ -313,6 +313,8 @@ type RuntimePoolReconciler struct {
 	client.Client
 	APIReader client.Reader
 	Scheme    *k8sruntime.Scheme
+	// ControlStore preserves native boot witnesses independently of Pod lifetime.
+	ControlStore store.DurableControlStore
 
 	// RuntimeNamespace is used when spec.runtimeNamespace is empty.
 	RuntimeNamespace string
@@ -402,6 +404,9 @@ func (r *RuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			return r.reconcileDeletingWorkspaceRuntimePool(ctx, pool)
 		}
 		return r.finalizeRuntimePool(ctx, pool)
+	}
+	if err := r.reconcileNativeRuntimePoolRetirement(ctx, pool); err != nil {
+		return r.failRuntimePoolBootReconcile(ctx, pool, err)
 	}
 	if r.CleanupOnly {
 		return ctrl.Result{}, nil
@@ -1089,6 +1094,10 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServingWithPostProbeFence(
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 
+	boot, err := r.observeNativeRuntimePoolBoot(ctx, pool, cfg, &readyPods[0])
+	if err != nil {
+		return r.failRuntimePoolBootReconcile(ctx, pool, err)
+	}
 	probe, err := r.supervisorClientForPool(pool).Probe(ctx, runtimePoolInstanceEndpoint(pool, &readyPods[0]), string(authSecret.Data[runtimePoolControllerTokenKey]), authSecret.Data[runtimePoolCapabilitySecretKey])
 	if err != nil {
 		if !runtimePoolActiveInstanceMatchesPod(status.ActiveInstance, &readyPods[0]) {
@@ -1121,6 +1130,21 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServingWithPostProbeFence(
 	}
 	if runtimePoolSupervisorRestartedInPlace(pool.Status.ActiveInstance, active) {
 		return r.reconcileRuntimePoolInPlaceSupervisorRestart(ctx, pool, nil, &readyPods[0], active, status)
+	}
+	if err := r.enrollRuntimePoolBoot(ctx, pool, cfg, &readyPods[0], boot, probe.Status); err != nil {
+		return r.failRuntimePoolBootReconcile(ctx, pool, err)
+	}
+	if boot != nil {
+		// Enrollment patches Pod retention. Exact recycling must use the new
+		// resourceVersion, not the pre-enrollment cached deletion precondition.
+		current := &corev1.Pod{}
+		if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(&readyPods[0]), current); err != nil {
+			return r.failRuntimePoolBootReconcile(ctx, pool, err)
+		}
+		if current.UID != readyPods[0].UID {
+			return r.failRuntimePoolBootReconcile(ctx, pool, fmt.Errorf("%w: enrolled runtime Pod UID changed", store.ErrConflict))
+		}
+		readyPods[0].ResourceVersion = current.ResourceVersion
 	}
 	status.ActiveInstance = active
 	applyRuntimePoolProbeCapacity(&status, cfg, probe)
@@ -1161,13 +1185,13 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServingWithPostProbeFence(
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 		status.Message = "runtime pool is at configured capacity"
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAtCapacity, status.Message)
-		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+		return r.finishEnrolledRuntimePoolServing(ctx, pool, status, boot)
 	default:
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleServing
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionAccepting
 		status.Message = "one exact runtime instance is ready"
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionTrue, "Serving", status.Message)
-		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+		return r.finishEnrolledRuntimePoolServing(ctx, pool, status, boot)
 	}
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
 	return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
@@ -1296,7 +1320,7 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolIdentityCapacityRotation(
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, runtimePoolIdentityCapacityReasonDraining, status.Message)
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
-	if err := r.recordDrainedRuntimePoolTaskCleanup(ctx, pool, active, probe.Status); err != nil {
+	if err := r.recordNativeRuntimePoolDrain(ctx, pool, active, probe.Status); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -1494,7 +1518,7 @@ func (r *RuntimePoolReconciler) reconcileReadyRuntimePoolRollout(
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
 
-	if err := r.recordDrainedRuntimePoolTaskCleanup(ctx, validationPool, active, probe.Status); err != nil {
+	if err := r.recordNativeRuntimePoolDrain(ctx, validationPool, active, probe.Status); err != nil {
 		return ctrl.Result{}, err
 	}
 	if !runtimePoolRolloutQuiescencePersisted(pool) {
@@ -1754,7 +1778,7 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolScaleDown(
 		status.Message = runtimePoolMessageDrainSettling
 		return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
 	}
-	if err := r.recordDrainedRuntimePoolTaskCleanup(ctx, pool, active, probe.Status); err != nil {
+	if err := r.recordNativeRuntimePoolDrain(ctx, pool, active, probe.Status); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -2684,6 +2708,9 @@ func (r *RuntimePoolReconciler) runtimePoolPodTemplate(
 			Name: runtimePoolE2EPromptWriteAmbiguity, Value: marker,
 		})
 	}
+	if pool.Spec.ExecutionWorkspace == nil {
+		template.Annotations[runtimePoolBootEnrollmentAnnotation] = runtimePoolBootEnrollmentVersion
+	}
 	template.Annotations[runtimePoolTemplateRevisionAnnotation] = runtimePoolPodTemplateRevision(template)
 	return template
 }
@@ -3483,6 +3510,9 @@ func (r *RuntimePoolReconciler) finalizeRuntimePool(ctx context.Context, pool *c
 	if !controllerutil.ContainsFinalizer(pool, runtimePoolFinalizer) {
 		return ctrl.Result{}, nil
 	}
+	if err := r.reconcileNativeRuntimePoolRetirement(ctx, pool); err != nil {
+		return r.failRuntimePoolBootReconcile(ctx, pool, err)
+	}
 	cfg, err := r.runtimePoolConfigForDeletion(pool)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -3509,9 +3539,7 @@ func (r *RuntimePoolReconciler) finalizeRuntimePool(ctx context.Context, pool *c
 	if remaining {
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
-	base := pool.DeepCopy()
-	controllerutil.RemoveFinalizer(pool, runtimePoolFinalizer)
-	if err := r.Patch(ctx, pool, client.MergeFrom(base)); err != nil && !apierrors.IsNotFound(err) {
+	if err := r.removeRuntimePoolFinalizer(ctx, pool); err != nil {
 		return ctrl.Result{}, err
 	}
 	orkametrics.DeleteACPRuntimePool(pool.Namespace, pool.Name)

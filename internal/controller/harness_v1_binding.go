@@ -272,6 +272,9 @@ func validateHarnessV1RuntimeAuthOnly(
 }
 
 func validateNewHarnessV1Workload(task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
+	if agent.Spec.Soul != nil {
+		return errors.New("new harness v1 bindings do not support Agent.spec.soul")
+	}
 	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.Workspace != nil {
 		return errors.New("new harness v1 bindings do not accept the legacy agentRuntime.workspace surface")
 	}

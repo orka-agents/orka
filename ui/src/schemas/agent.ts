@@ -46,6 +46,21 @@ export const agentSpecSchema = z.object({
     inline: z.string().optional(),
     configMapRef: z.object({ name: z.string(), key: z.string() }).optional(),
   }).optional(),
+  soul: z.object({
+    inline: z.string().min(1).max(8192).optional(),
+    configMapRef: z.object({ name: z.string().min(1), key: z.string().min(1) }).optional(),
+    digest: z.string().regex(/^sha256:[0-9a-f]{64}$/).optional(),
+  }).superRefine((source, ctx) => {
+    if (!!source.inline === !!source.configMapRef) {
+      ctx.addIssue({ code: 'custom', message: 'Soul requires exactly one of inline or configMapRef' })
+    }
+    if (source.configMapRef && !source.digest) {
+      ctx.addIssue({ code: 'custom', message: 'ConfigMap-backed souls require an expected digest', path: ['digest'] })
+    }
+    if (source.inline && (new TextEncoder().encode(source.inline).length > 8192 || !source.inline.trim() || source.inline.includes('\0'))) {
+      ctx.addIssue({ code: 'custom', message: 'Soul must be nonempty UTF-8 text without NUL, at most 8192 bytes', path: ['inline'] })
+    }
+  }).optional(),
   tools: z.array(toolRefSchema).optional(),
   skills: z.array(z.object({ configMapRef: z.object({ name: z.string(), key: z.string().optional() }) })).optional(),
   resources: z.any().optional(),
@@ -61,14 +76,11 @@ export const agentSpecSchema = z.object({
   }).optional(),
   runtime: agentRuntimeSchema.optional(),
 }).superRefine((spec, ctx) => {
+  if (spec.soul && spec.runtime && 'runtimeRef' in spec.runtime) {
+    ctx.addIssue({ code: 'custom', message: 'Soul is only supported by AI and built-in runtimes', path: ['soul'] })
+  }
   if (spec.runtime && 'type' in spec.runtime && spec.runtime.type === 'opencode') {
-    if (spec.systemPrompt?.inline?.trim() || spec.systemPrompt?.configMapRef) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'OpenCode does not support Agent systemPrompt; use Task prompts instead',
-        path: ['systemPrompt'],
-      })
-    }
+
     if (!spec.model?.name?.trim()) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,

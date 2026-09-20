@@ -1025,7 +1025,7 @@ func resolveSessionLineage(existing *store.SessionLineage, claim store.ClaimSess
 	case existing.RuntimeIdentity != claim.RuntimeIdentity:
 		return nil, store.ConflictErrorf("session %s/%s lineage runtime identity is %q, not %q", claim.Namespace, claim.SessionName, existing.RuntimeIdentity, claim.RuntimeIdentity)
 	case existing.ConfigDigest != claim.ConfigDigest:
-		return nil, store.ConflictErrorf("session %s/%s lineage configuration digest does not match", claim.Namespace, claim.SessionName)
+		return nil, fmt.Errorf("%w: %w", store.ErrConflict, store.ErrSessionConfigurationMismatch)
 	case existing.LineageGeneration != claim.LineageGeneration:
 		return nil, store.ConflictErrorf("session %s/%s lineage generation is %d, not %d", claim.Namespace, claim.SessionName, existing.LineageGeneration, claim.LineageGeneration)
 	default:

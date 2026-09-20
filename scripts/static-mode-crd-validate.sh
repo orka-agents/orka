@@ -259,14 +259,14 @@ spec:
     contractVersion: orka.harness.v2
 EOF
 
-expect_reject "v2 OpenCode Agent with systemPrompt is rejected" "does not support spec.systemPrompt" <<EOF
+expect_accept "v2 OpenCode Agent with systemPrompt is accepted" <<EOF
 apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata: {name: v2-opencode, namespace: ${NAMESPACE}}
 spec:
   runtime: {type: opencode, contractVersion: orka.harness.v2}
   model: {name: engine/gpt-5.2, contextWindow: 128000, maxTokens: 8192}
-  systemPrompt: {inline: "not allowed"}
+  systemPrompt: {inline: "You are a careful engineer."}
 EOF
 
 expect_accept "stored v1 OpenCode Agent with legacy shape survives" <<EOF

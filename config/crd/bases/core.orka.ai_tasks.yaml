@@ -3262,6 +3262,45 @@ spec:
                 required:
                 - available
                 type: object
+              soulBinding:
+                description: |-
+                  SoulBinding pins an AI Task's resolved persona and role prompt. It contains
+                  digests only, never prompt text. Retries reject configuration drift.
+                properties:
+                  agentGeneration:
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  agentUID:
+                    description: AgentUID and AgentGeneration identify the exact Agent
+                      revision.
+                    maxLength: 128
+                    minLength: 1
+                    type: string
+                  promptDigest:
+                    description: PromptDigest identifies the composed role and persona
+                      prompt.
+                    maxLength: 71
+                    pattern: ^sha256:[0-9a-f]{64}$
+                    type: string
+                  soulDigest:
+                    description: SoulDigest identifies the exact persona source bytes.
+                    maxLength: 71
+                    pattern: ^sha256:[0-9a-f]{64}$
+                    type: string
+                  taskGeneration:
+                    description: TaskGeneration is the Task spec generation whose
+                      prompt was resolved.
+                    format: int64
+                    minimum: 1
+                    type: integer
+                required:
+                - agentGeneration
+                - agentUID
+                - promptDigest
+                - soulDigest
+                - taskGeneration
+                type: object
               startTime:
                 description: StartTime is when the task started running
                 format: date-time
@@ -3277,6 +3316,9 @@ spec:
             - message: agentExecutionBinding is write-once and immutable
               rule: '!has(oldSelf.agentExecutionBinding) || (has(self.agentExecutionBinding)
                 && self.agentExecutionBinding == oldSelf.agentExecutionBinding)'
+            - message: soulBinding is write-once and immutable
+              rule: '!has(oldSelf.soulBinding) || (has(self.soulBinding) && self.soulBinding
+                == oldSelf.soulBinding)'
             - message: a v1-bound Task cannot acquire new v2 execution or delivery
                 state
               rule: '!has(self.agentExecutionBinding) || self.agentExecutionBinding.contractVersion
@@ -3290,8 +3332,8 @@ spec:
         type: object
         x-kubernetes-validations:
         - message: Task spec is immutable after execution authority is recorded
-          rule: '!has(oldSelf.status) || (!has(oldSelf.status.agentExecutionBinding)
-            || self.spec == oldSelf.spec)'
+          rule: '!has(oldSelf.status) || ((!has(oldSelf.status.agentExecutionBinding)
+            && !has(oldSelf.status.soulBinding)) || self.spec == oldSelf.spec)'
     selectableFields:
     - jsonPath: .spec.sessionRef.name
     served: true

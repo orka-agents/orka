@@ -57,7 +57,7 @@ func TestUpdateAgentTool_Parameters(t *testing.T) {
 	}
 	systemPrompt, ok := props[systemPromptField].(map[string]any)
 	description, _ := systemPrompt[jsonSchemaDescriptionField].(string)
-	if !ok || !strings.Contains(description, "OpenCode runtime Agents do not support") {
+	if !ok || !strings.Contains(description, "native instruction mechanism") {
 		t.Fatalf("systemPrompt schema = %#v, want OpenCode restriction guidance", systemPrompt)
 	}
 	model, ok := props[modelField].(map[string]any)
@@ -559,11 +559,12 @@ func TestUpdateAgentTool_Execute_RejectsUnusableResultingOpenCodeAgent(t *testin
 	}
 }
 
-func TestUpdateAgentTool_Execute_RejectsOpenCodeSystemPrompt(t *testing.T) {
+func TestUpdateAgentTool_Execute_AcceptsOpenCodeSystemPrompt(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: testMyAgentName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.AgentSpec{
 			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+			Model:   &corev1alpha1.ModelConfig{Name: "openai/gpt-test", ContextWindow: new(int32(32768)), MaxTokens: new(int32(4096))},
 		},
 	}
 	fc := newFakeClient(agent)
@@ -576,14 +577,14 @@ func TestUpdateAgentTool_Execute_RejectsOpenCodeSystemPrompt(t *testing.T) {
 	if err := json.Unmarshal([]byte(result), &response); err != nil {
 		t.Fatalf("failed to parse result: %v", err)
 	}
-	if response.Success || response.ErrorType != errTypeInvalidArgs || !strings.Contains(response.Error, "does not support systemPrompt") {
-		t.Fatalf("response = %#v, want OpenCode systemPrompt rejection", response)
+	if !response.Success {
+		t.Fatalf("native prompt was rejected: %s", response.Error)
 	}
 	var updated corev1alpha1.Agent
 	if err := fc.Get(context.Background(), apitypes.NamespacedName{Name: testMyAgentName, Namespace: defaultNamespace}, &updated); err != nil {
 		t.Fatal(err)
 	}
-	if updated.Spec.SystemPrompt != nil {
+	if updated.Spec.SystemPrompt == nil || updated.Spec.SystemPrompt.Inline != "You write code" {
 		t.Fatalf("systemPrompt = %#v, want unchanged nil value", updated.Spec.SystemPrompt)
 	}
 }

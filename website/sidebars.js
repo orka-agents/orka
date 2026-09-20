@@ -35,6 +35,7 @@ const sidebars = {
         'concepts/agent-sandbox',
         'concepts/substrate',
         'concepts/memory',
+        'concepts/soul',
         'concepts/transaction-tokens',
         'concepts/outbound-access',
         'concepts/security',

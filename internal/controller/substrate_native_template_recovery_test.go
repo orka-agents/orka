@@ -18,6 +18,7 @@ func nativeTemplateRecoveryHarness(t *testing.T) (*nativeSubstrateTemplateStore,
 	t.Helper()
 	r, pool := runtimePoolSubstrateTestReconciler(t, nil, &fakeSubstrateActorControl{})
 	r.Client = fake.NewClientBuilder().WithScheme(r.Scheme).Build()
+	r.APIReader = r.Client
 	r.ControllerNamespace = "orka-system"
 	api := &nativeTemplateTestAPI{templates: map[string]*ateapipb.ActorTemplate{}}
 	r.SubstrateNativeClientFactory = func(SubstrateConfig) (*workspace.SubstrateNativeClient, error) {
