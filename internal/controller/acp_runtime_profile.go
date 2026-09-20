@@ -33,9 +33,11 @@ const (
 
 type ACPRuntimePlan struct {
 	PoolName string
-	Image    string
-	Profile  harnessv2.RuntimeProfile
-	Digest   harnessv2.ProfileDigest
+	// RuntimeFeedbackTaskUID makes opted-in plain pools exclusive to one Task.
+	RuntimeFeedbackTaskUID string
+	Image                  string
+	Profile                harnessv2.RuntimeProfile
+	Digest                 harnessv2.ProfileDigest
 	// Workspace, when set, binds the pool to an execution-workspace provider.
 	// It changes PoolName so workspace-backed sessions never share a plain pool.
 	Workspace *ACPRuntimeWorkspaceBinding
@@ -149,15 +151,23 @@ func PlanACPRuntimeWithConfiguration(
 	if err != nil {
 		return ACPRuntimePlan{}, err
 	}
-	poolIdentityDigest, err := acpDomainDigest("runtime-pool-identity", map[string]string{
-		acpRuntimePoolIdentityProfileDigestKey: string(digest), acpRuntimePoolIdentityRuntimeImageKey: image,
-	})
+	feedbackTaskUID := ""
+	toolPolicy := harnessv2.MCPToolPolicy{AllowedToolNames: allowed, DisallowedToolNames: disallowed, AllowBash: allowBash}
+	if toolPolicy.Allows(RuntimeFeedbackToolName) {
+		if !runtimeFeedbackProviderSupported(provider) || task.UID == "" || task.Spec.SessionRef != nil ||
+			(task.Spec.Execution != nil && task.Spec.Execution.Workspace != nil) {
+			return ACPRuntimePlan{}, fmt.Errorf("runtime_feedback requires a fresh native Codex or OpenCode Task without sessionRef or execution.workspace")
+		}
+		feedbackTaskUID = string(task.UID)
+	}
+	poolIdentityDigest, err := runtimePoolIdentityDigest(string(digest), image, feedbackTaskUID)
 	if err != nil {
 		return ACPRuntimePlan{}, err
 	}
 	return ACPRuntimePlan{
-		PoolName: acpRuntimePoolName(provider, harnessv2.ProfileDigest(poolIdentityDigest)),
-		Image:    image, Profile: profile, Digest: digest,
+		PoolName:               acpRuntimePoolName(provider, harnessv2.ProfileDigest(poolIdentityDigest)),
+		RuntimeFeedbackTaskUID: feedbackTaskUID,
+		Image:                  image, Profile: profile, Digest: digest,
 	}, nil
 }
 
@@ -194,9 +204,7 @@ func currentACPRuntimeDeliveryPlan(plan ACPRuntimePlan, images ACPRuntimeImages)
 	if image == plan.Image {
 		return acpRuntimeDeliverySelection{plan: plan, allowPoolCreation: true}, nil
 	}
-	identity, err := acpDomainDigest("runtime-pool-identity", map[string]string{
-		acpRuntimePoolIdentityProfileDigestKey: string(plan.Digest), acpRuntimePoolIdentityRuntimeImageKey: image,
-	})
+	identity, err := runtimePoolIdentityDigest(string(plan.Digest), image, plan.RuntimeFeedbackTaskUID)
 	if err != nil {
 		return acpRuntimeDeliverySelection{}, err
 	}
@@ -218,10 +226,7 @@ func acpRuntimePoolImageRequiresHistoricalRecovery(pool *corev1alpha1.RuntimePoo
 		return false
 	}
 	if pool.Spec.ExecutionWorkspace == nil {
-		identity, err := acpDomainDigest("runtime-pool-identity", map[string]string{
-			acpRuntimePoolIdentityProfileDigestKey: pool.Spec.Runtime.Profile.Digest,
-			acpRuntimePoolIdentityRuntimeImageKey:  strings.TrimSpace(pool.Spec.Runtime.Image),
-		})
+		identity, err := runtimePoolIdentityDigest(pool.Spec.Runtime.Profile.Digest, strings.TrimSpace(pool.Spec.Runtime.Image), pool.Labels[runtimeFeedbackTaskLabel])
 		if err != nil || pool.Name != acpRuntimePoolName(
 			pool.Spec.Runtime.Profile.ProviderKind,
 			harnessv2.ProfileDigest(identity),

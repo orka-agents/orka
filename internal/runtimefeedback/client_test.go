@@ -1,0 +1,285 @@
+package runtimefeedback
+
+import (
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/json"
+	"encoding/pem"
+	"math/big"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+func testQuery() Query {
+	return Query{RunID: strings.Repeat("d", 64), Workload: Workload{Namespace: "workers", PodName: "runtime", PodUID: "pod-uid", ContainerName: "runtime", ContainerID: "containerd://" + strings.Repeat("a", 64), Node: "node"}}
+}
+
+func testReport(query Query) Report {
+	now := time.Now().UTC()
+	return Report{APIVersion: APIVersion, Kind: ReportKind, RunID: query.RunID, Workload: query.Workload, Status: "Collecting", SampledAt: now, Capture: &Capture{StartedAt: now.Add(-time.Minute), ExpiresAt: now.Add(9 * time.Minute)}, Source: Source{Name: "gkr-runtime-observer", InstanceID: "boot"}, AttributionScope: "Container", Completeness: "Partial", Events: []Event{{Timestamp: now.Add(-time.Second), DestinationAddress: "203.0.113.4", DestinationPort: 443, Decision: "deny", KernelEnforced: true}}}
+}
+
+func TestReportRejectsStaleCrossExecutionOrUnboundedEvidence(t *testing.T) {
+	q := testQuery()
+	for _, test := range []struct {
+		name   string
+		mutate func(*Report)
+	}{
+		{"different run", func(r *Report) { r.RunID = "other" }},
+		{"different container", func(r *Report) { r.Workload.ContainerID = "containerd://" + strings.Repeat("b", 64) }},
+		{"restarted container", func(r *Report) { r.Workload.RestartCount++ }},
+		{"stale sample", func(r *Report) { r.SampledAt = time.Now().Add(-time.Minute) }},
+		{"future sample", func(r *Report) { r.SampledAt = time.Now().Add(time.Minute) }},
+		{"missing capture", func(r *Report) { r.Capture = nil }},
+		{"too many events", func(r *Report) { r.Events = make([]Event, MaxEvents+1) }},
+		{"before capture", func(r *Report) { r.Events[0].Timestamp = r.Capture.StartedAt.Add(-time.Second) }},
+		{"after sample", func(r *Report) { r.Events[0].Timestamp = r.SampledAt.Add(time.Second) }},
+		{"unavailable with events", func(r *Report) { r.Status = "Unavailable" }},
+		{"complete claim", func(r *Report) { r.Completeness = "Complete" }},
+		{"tool attribution", func(r *Report) { r.AttributionScope = "Tool" }},
+		{"path in address", func(r *Report) { r.Events[0].DestinationAddress = "https://secret.invalid/path?token=not-a-real-token" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			r := testReport(q)
+			test.mutate(&r)
+			if err := r.Validate(q, time.Now()); err == nil {
+				t.Fatal("invalid evidence accepted")
+			}
+		})
+	}
+	if err := testReport(q).Validate(q, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReportRetainsBoundedHistoricalCapture(t *testing.T) {
+	q := testQuery()
+	now := time.Now().UTC()
+	for _, status := range []string{Finalized, Expired} {
+		t.Run(status, func(t *testing.T) {
+			r := testReport(q)
+			r.Status = status
+			r.SampledAt = now.Add(-5 * time.Minute)
+			endedAt := r.SampledAt
+			r.Capture = &Capture{StartedAt: endedAt.Add(-10 * time.Minute), EndedAt: &endedAt, ExpiresAt: endedAt}
+			r.Events[0].Timestamp = endedAt.Add(-time.Second)
+			if err := r.Validate(q, now); err != nil {
+				t.Fatalf("bounded historical capture rejected: %v", err)
+			}
+			r.Events[0].Timestamp = endedAt.Add(time.Second)
+			if err := r.Validate(q, now); err == nil {
+				t.Fatal("event after historical capture accepted")
+			}
+			r.Events[0].Timestamp = endedAt.Add(-time.Second)
+			if err := r.Validate(q, now.Add(20*time.Minute)); err == nil {
+				t.Fatal("capture beyond retention bound accepted")
+			}
+		})
+	}
+}
+
+func TestReportTerminalWindowCannotExceedExpiry(t *testing.T) {
+	q := testQuery()
+	now := time.Now().UTC()
+	for _, status := range []string{Finalized, Expired} {
+		for _, offset := range []time.Duration{-time.Second, 0, time.Nanosecond} {
+			t.Run(status+"/"+offset.String(), func(t *testing.T) {
+				r := testReport(q)
+				r.Status = status
+				r.SampledAt = now
+				expiresAt := now.Add(-time.Minute)
+				endedAt := expiresAt.Add(offset)
+				r.Capture = &Capture{StartedAt: expiresAt.Add(-CaptureSeconds * time.Second), EndedAt: &endedAt, ExpiresAt: expiresAt}
+				// All events remain inside the capture; metadata alone must not
+				// extend the frozen deadline returned to the agent.
+				r.Events[0].Timestamp = expiresAt.Add(-2 * time.Second)
+				err := r.Validate(q, now)
+				if (err != nil) != (offset > 0) {
+					t.Fatalf("terminal end relative to expiry %s: validation error = %v", offset, err)
+				}
+			})
+		}
+	}
+}
+
+func TestClientUsesMutualTLSAndBoundedExactRead(t *testing.T) {
+	q := testQuery()
+	var mode atomic.Int32
+	var requests atomic.Int32
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if r.TLS == nil || len(r.TLS.PeerCertificates) != 1 || len(r.TLS.PeerCertificates[0].URIs) != 1 || r.TLS.PeerCertificates[0].URIs[0].String() != "spiffe://orka.ai/controller" {
+			t.Error("missing trusted controller mTLS identity")
+		}
+		if r.Method != http.MethodPost || r.URL.Path != apiPath+"report" || r.Header.Get("Authorization") != "" {
+			t.Error("unexpected report transport")
+		}
+		var got Query
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil || got != q {
+			t.Error("request lost execution binding")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch mode.Load() {
+		case 1:
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte("secret upstream response must not be exposed"))
+		case 2:
+			_, _ = w.Write([]byte(strings.Repeat("x", MaxResponseBytes+1)))
+		case 3:
+			w.Header().Set("Location", "https://untrusted.invalid")
+			w.WriteHeader(http.StatusTemporaryRedirect)
+		case 4:
+			_ = json.NewEncoder(w).Encode(testReport(q))
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			_ = json.NewEncoder(w).Encode(testReport(q))
+		}
+	}))
+	config, roots := testClientCertificate(t)
+	server.TLS = &tls.Config{MinVersion: tls.VersionTLS13, ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: roots}
+	server.StartTLS()
+	defer server.Close()
+	config.URL = server.URL
+	serverCA := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})
+	if err := os.WriteFile(config.CAFile, serverCA, 0600); err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewClient(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Report(context.Background(), q); err != nil {
+		t.Fatal(err)
+	}
+	for i := int32(1); i <= 4; i++ {
+		mode.Store(i)
+		_, err := client.Report(context.Background(), q)
+		if err == nil || strings.Contains(err.Error(), "secret upstream") || strings.Contains(err.Error(), "untrusted.invalid") {
+			t.Fatalf("unsafe response handling for mode %d: %v", i, err)
+		}
+	}
+	if requests.Load() != 5 {
+		t.Fatal("unexpected implicit retry or redirect")
+	}
+}
+
+func TestClientRejectsAmbiguousResponseJSON(t *testing.T) {
+	query := testQuery()
+	report := testReport(query)
+	report.Losses = map[string]uint64{"event_buffer_full": 2, "EVENT_BUFFER_FULL": 3}
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name, from, to string
+		wantValid      bool
+	}{
+		{name: "valid report", wantValid: true},
+		{name: "duplicate run binding", from: `"runID":`, to: `"runID":"other-run","runID":`},
+		{name: "duplicate status", from: `"status":`, to: `"status":"Unavailable","status":`},
+		{name: "duplicate workload object", from: `"workload":`, to: `"workload":{"containerID":"other-container"},"workload":`},
+		{name: "duplicate nested container binding", from: `"containerID":`, to: `"containerID":"other-container","containerID":`},
+		{name: "duplicate nested restart count", from: `"restartCount":`, to: `"restartCount":1,"restartCount":`},
+		{name: "escaped duplicate nested binding", from: `"podUID":`, to: `"pod\u0055ID":"other-pod","podUID":`},
+		{name: "duplicate capture field", from: `"startedAt":`, to: `"startedAt":"1970-01-01T00:00:00Z","startedAt":`},
+		{name: "duplicate source field", from: `"instanceID":`, to: `"instanceID":"other-instance","instanceID":`},
+		{name: "duplicate event array field", from: `"kernelEnforced":`, to: `"kernelEnforced":false,"kernelEnforced":`},
+		{name: "duplicate loss map field", from: `"event_buffer_full":`, to: `"event_buffer_full":99,"event_buffer_full":`},
+		{name: "run binding case alias", from: `"runID":`, to: `"RunID":"other-run","runID":`},
+		{name: "run binding alias after exact", from: `"runID":`, to: `"runID":"other-run","RunID":`},
+		{name: "standalone run binding alias", from: `"runID":`, to: `"RunID":`},
+		{name: "workload object case alias", from: `"workload":`, to: `"Workload":{"containerID":"other-container"},"workload":`},
+		{name: "nested container case alias", from: `"containerID":`, to: `"ContainerID":"other-container","containerID":`},
+		{name: "nested restart case alias", from: `"restartCount":`, to: `"RestartCount":1,"restartCount":`},
+		{name: "status Unicode alias", from: `"status":`, to: `"ſtatus":"Unavailable","status":`},
+		{name: "capture field case alias", from: `"startedAt":`, to: `"StartedAt":"1970-01-01T00:00:00Z","startedAt":`},
+		{name: "source field case alias", from: `"instanceID":`, to: `"InstanceID":"other-instance","instanceID":`},
+		{name: "event array field Unicode alias", from: `"kernelEnforced":`, to: `"KernelEnforced":false,"kernelEnforced":`},
+		{name: "unknown field", from: `"status":`, to: `"unknown":true,"status":`},
+		{name: "non-integer binding spelling", from: `"restartCount":0`, to: `"restartCount":0e0`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if !strings.Contains(string(encoded), tt.from) {
+				t.Fatal("response fixture is missing the field to mutate")
+			}
+			wire := strings.Replace(string(encoded), tt.from, tt.to, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != apiPath+"report" {
+					t.Error("unexpected report transport")
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(wire))
+			}))
+			defer server.Close()
+			client := &Client{endpoint: server.URL, http: server.Client()}
+			got, err := client.Report(t.Context(), query)
+			if tt.wantValid {
+				if err != nil || !reflect.DeepEqual(got, report) {
+					t.Fatalf("valid report changed or rejected: %v", err)
+				}
+				return
+			}
+			if err == nil || !reflect.DeepEqual(got, Report{}) {
+				t.Fatal("ambiguous or invalid response returned evidence")
+			}
+		})
+	}
+}
+
+func testClientCertificate(t *testing.T) (Config, *x509.CertPool) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uri, _ := url.Parse("spiffe://orka.ai/controller")
+	template := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "test-controller"}, NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Hour), KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, BasicConstraintsValid: true, IsCA: true, URIs: []*url.URL{uri}}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	config := Config{CAFile: filepath.Join(dir, "ca.pem"), CertFile: filepath.Join(dir, "client.pem"), KeyFile: filepath.Join(dir, "client.key")}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+	for path, data := range map[string][]byte{config.CAFile: certPEM, config.CertFile: certPEM, config.KeyFile: keyPEM} {
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	roots := x509.NewCertPool()
+	roots.AppendCertsFromPEM(certPEM)
+	return config, roots
+}
+
+func TestClientRequiresConfiguredHTTPSOrigin(t *testing.T) {
+	config, _ := testClientCertificate(t)
+	config.URL = "https://gkr.invalid"
+	if _, err := NewClient(config); err != nil {
+		t.Fatalf("valid fixed origin rejected: %v", err)
+	}
+	for _, endpoint := range []string{"http://gkr.invalid", "https://gkr.invalid/report", "https://user:pass@gkr.invalid", "https://gkr.invalid?key=value", "https://gkr.invalid#fragment"} {
+		config.URL = endpoint
+		if _, err := NewClient(config); err == nil {
+			t.Fatalf("unsafe endpoint accepted: %q", endpoint)
+		}
+	}
+}

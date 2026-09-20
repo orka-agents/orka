@@ -588,6 +588,9 @@ func acpRuntimeDeliveryPlanForSelectedPool(
 	if pool.Spec.Runtime.Profile.Digest != string(plan.Digest) {
 		return ACPRuntimePlan{}, errors.New("selected ACP RuntimePool profile does not match the immutable execution snapshot")
 	}
+	if plan.RuntimeFeedbackTaskUID != "" && !runtimeFeedbackPoolMatches(pool, plan.RuntimeFeedbackTaskUID) {
+		return ACPRuntimePlan{}, fmt.Errorf("RuntimePool %s does not preserve exclusive runtime feedback execution", pool.Name)
+	}
 	if !acpRuntimePoolWorkspaceMatchesPlan(pool, plan) {
 		return ACPRuntimePlan{}, errors.New("selected ACP RuntimePool workspace does not match the immutable execution snapshot")
 	}
@@ -596,10 +599,7 @@ func acpRuntimeDeliveryPlanForSelectedPool(
 			return ACPRuntimePlan{}, errors.New("selected workspace RuntimePool identity or image does not match the immutable execution snapshot")
 		}
 	} else {
-		identity, err := acpDomainDigest("runtime-pool-identity", map[string]string{
-			acpRuntimePoolIdentityProfileDigestKey: string(plan.Digest),
-			acpRuntimePoolIdentityRuntimeImageKey:  strings.TrimSpace(pool.Spec.Runtime.Image),
-		})
+		identity, err := runtimePoolIdentityDigest(string(plan.Digest), strings.TrimSpace(pool.Spec.Runtime.Image), plan.RuntimeFeedbackTaskUID)
 		if err != nil {
 			return ACPRuntimePlan{}, err
 		}
@@ -1416,6 +1416,10 @@ func (r *TaskReconciler) ensureACPRuntimePoolWithPolicy(
 			acpRuntimeProfileLabel: strings.TrimPrefix(string(plan.Digest), "sha256:")[:16],
 		}
 		annotations := map[string]string{acpRuntimeLastDemandAnnotation: time.Now().UTC().Format(time.RFC3339Nano)}
+		if plan.RuntimeFeedbackTaskUID != "" {
+			capacity = &corev1alpha1.RuntimePoolCapacitySpec{MaxResidentSessions: 1, MaxRunningPrompts: 1}
+			labels[runtimeFeedbackTaskLabel] = plan.RuntimeFeedbackTaskUID
+		}
 		var executionWorkspace *corev1alpha1.RuntimePoolExecutionWorkspaceSpec
 		if plan.Workspace != nil {
 			// A workspace-backed pool hosts exactly one logical RuntimeSession
@@ -1513,6 +1517,9 @@ func (r *TaskReconciler) ensureACPRuntimePoolWithPolicy(
 	}
 	if namespaceErr := validateACPRuntimeWorkspaceNamespace(plan, namespace, poolRuntimeNamespace); namespaceErr != nil {
 		return nil, false, namespaceErr
+	}
+	if plan.RuntimeFeedbackTaskUID != "" && !runtimeFeedbackPoolMatches(pool, plan.RuntimeFeedbackTaskUID) {
+		return nil, false, fmt.Errorf("RuntimePool %s does not preserve exclusive runtime feedback execution", pool.Name)
 	}
 	if !acpRuntimePoolWorkspaceMatchesPlan(pool, plan) {
 		if plan.Workspace != nil && plan.Workspace.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession {

@@ -22,6 +22,7 @@ and webhook certificate. The settings you are most likely to change later:
 | --- | --- |
 | `controller.image`, `publisher.image`, `workers.*.image` | Use the release tag by default. Set `tag` to choose another tag, or `digest` to pin an image. A digest takes precedence over the tag. |
 | `controller.acpRuntime.*Image` | Use release tags by default. Override with a full tagged or digest reference; set an empty string to disable a runtime. |
+| `controller.runtimeFeedback` | Disabled by default. For harness-v2, connect explicitly allowed native Codex/OpenCode Tasks to an operator-managed GKR service using an existing Secret. See [Runtime feedback](#runtime-feedback). |
 | `controller.agentExecutionSnapshot.existingSecret` | Empty by default; the chart generates the snapshot encryption Secret once and keeps it on uninstall. Set only to bring your own key. Immutable after install. |
 | `webhooks.tls.existingSecret`, `.caBundle`, `.caInjectionAnnotations` | Empty by default; the controller issues and renews a self-signed webhook certificate. Set to bring your own certificate or use cert-manager. |
 | `providerProxy.enabled`, `.upstreamBaseURL` | Off by default. Enable and name your model gateway's in-cluster Service to connect built-in coding agents; the chart derives the egress rule from that Service. Set `.egress` yourself for anything else. See [Provider proxy](https://orka-agents.github.io/orka/docs/provider-proxy). |
@@ -43,6 +44,42 @@ the provider proxy connected to a gateway you manage.
 Runtime tags are resolved to digests at controller startup. This requires HTTPS
 access to a registry that allows anonymous pulls. Use digest references for
 private registries or installations without registry access from the controller.
+
+## Runtime feedback
+
+Create the GKR client Secret in the Helm release namespace before enabling
+feedback. Reference it in values; do not put certificate or private-key contents
+in values. For a single-node deployment:
+
+```yaml
+controller:
+  runtimeFeedback:
+    enabled: true
+    url: https://gkr-feedback.example.internal:9444
+    existingSecret: gkr-feedback-client
+```
+
+The Secret must contain `ca.crt`, `tls.crt` and `tls.key`. Override `caKey`,
+`certKey` and `privateKeyKey` when its item names differ. For multiple nodes,
+leave `url` empty and set `nodeURLsKey: node-urls.json` to an item in the same
+Secret containing the exact node-name-to-HTTPS-origin JSON map. Exactly one
+route is required. Each endpoint must reach the GKR agent on that worker node;
+a Service that balances traffic across node agents is unsuitable.
+
+Only the controller mounts the selected items, read-only under
+`/var/run/secrets/gkr-feedback`. The chart retains its default non-root UID
+65532 and Pod `fsGroup: 65532`; Kubernetes grants that group read access to the
+projected Secret files even though the requested default mode is `0400`.
+Preserve equivalent group access if overriding the Pod security context.
+Restart the controller after changing Secret contents: TLS material and the
+node map are loaded once at startup. Updating the Secret alone does not reload
+them.
+
+This requires `controller.mode: harness-v2` and explicit `runtime_feedback`
+permission in the native Agent or Task tool list. It does not install GKR,
+create its Secret, alter network policy, or grant any Task new tool permission.
+See the [runtime feedback guide](https://github.com/orka-agents/orka/blob/main/docs/development/acp-runtime-feedback.md)
+for endpoint requirements, Task opt-in and evidence limits.
 
 ## CRDs and Helm lifecycle
 

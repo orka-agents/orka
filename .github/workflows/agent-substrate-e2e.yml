@@ -91,6 +91,9 @@ jobs:
           kubectl version --client=true
           ko version
 
+      - name: Create UI embed stub
+        run: make ensure-ui-embed
+
       - name: Verify durable workspace ownership after cleanup
         run: |
           test_dir="$(mktemp -d /tmp/orka-checkpoint-tests.XXXXXX)"

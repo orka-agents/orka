@@ -101,6 +101,19 @@ controller:
       pollInterval: 1s
       triggerTimeout: 5m15s
       terminationGracePeriodSeconds: 360
+
+  # Optional GKR diagnostics for explicitly allowed native Codex/OpenCode Tasks.
+  # Requires harness-v2 and exactly one URL or node-map item in the existing Secret.
+  # The Secret must already exist in the release namespace; never put its contents here.
+  runtimeFeedback:
+    enabled: false
+    url: ""
+    nodeURLsKey: ""
+    existingSecret: ""
+    caKey: ca.crt
+    certKey: tls.crt
+    privateKeyKey: tls.key
+
   # Provider-neutral external gateway plane.
   gateway:
     enabled: true
