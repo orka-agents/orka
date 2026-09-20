@@ -22,6 +22,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	cron "github.com/robfig/cron/v3"
 	batchv1 "k8s.io/api/batch/v1"
@@ -53,6 +54,7 @@ import (
 	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
+	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/tracing"
@@ -1990,55 +1992,60 @@ func jobFailedDueToActiveDeadline(job *batchv1.Job) bool {
 //  1. Any container terminated with reason=OOMKilled → "job failed: container
 //     OOMKilled (memory limit <X> exceeded). Recreate the agent with higher
 //     resources.limits.memory or set spec.resources on the task."
-//  2. Any container terminated with a non-zero exit code → "job failed:
+//  2. A terminal failure the worker reported before exiting → "job failed:
+//     <worker detail>", e.g. "job failed: provider_upstream_error: ...".
+//  3. Any container terminated with a non-zero exit code → "job failed:
 //     container exited with code <N> (reason=<R>)".
-//  3. No signal available → the generic "job failed".
+//  4. No signal available → the generic "job failed".
 //
-// Pod listing failures are non-fatal — we fall back to the generic message
-// rather than block task completion.
+// An OOM kill outranks the worker's own report because the worker is SIGKILLed
+// before it can describe it, and raising the memory limit is the actionable fix.
+//
+// Pod listing failures are non-fatal — the remaining signals still apply rather
+// than blocking task completion.
 func (r *TaskReconciler) diagnoseFailedJob(ctx context.Context, task *corev1alpha1.Task) string {
 	log := logf.FromContext(ctx)
-	var podList corev1.PodList
-	if err := r.List(ctx, &podList, client.InNamespace(task.Namespace),
-		client.MatchingLabels{labels.LabelTask: labels.SelectorValue(task.Name)}); err != nil {
-		log.V(1).Info("diagnoseFailedJob: pod list failed, using generic message", "error", err.Error())
-		return "job failed"
-	}
 
 	var (
 		oomMsg  string
 		exitMsg string
 	)
-	for i := range podList.Items {
-		pod := &podList.Items[i]
-		if task.Status.JobName != "" && !podBelongsToJob(pod, task.Status.JobName) {
-			continue
-		}
-		// Worker pods only have one container; iterate defensively anyway.
-		for _, cs := range pod.Status.ContainerStatuses {
-			term := cs.State.Terminated
-			if term == nil {
-				// Also check LastTerminationState — pods that crashed and restarted
-				// expose the relevant terminated state there.
-				term = cs.LastTerminationState.Terminated
-			}
-			if term == nil {
+	var podList corev1.PodList
+	if err := r.List(ctx, &podList, client.InNamespace(task.Namespace),
+		client.MatchingLabels{labels.LabelTask: labels.SelectorValue(task.Name)}); err != nil {
+		log.V(1).Info("diagnoseFailedJob: pod list failed, relying on worker-reported detail", "error", err.Error())
+	} else {
+		for i := range podList.Items {
+			pod := &podList.Items[i]
+			if task.Status.JobName != "" && !podBelongsToJob(pod, task.Status.JobName) {
 				continue
 			}
-			if term.Reason == "OOMKilled" || term.ExitCode == 137 {
-				limit := podContainerMemoryLimit(pod, cs.Name)
-				if limit == "" {
-					limit = "unknown"
+			// Worker pods only have one container; iterate defensively anyway.
+			for _, cs := range pod.Status.ContainerStatuses {
+				term := cs.State.Terminated
+				if term == nil {
+					// Also check LastTerminationState — pods that crashed and restarted
+					// expose the relevant terminated state there.
+					term = cs.LastTerminationState.Terminated
 				}
-				oomMsg = fmt.Sprintf("job failed: container OOMKilled (memory limit %s exceeded). Recreate the agent with higher resources.limits.memory or set spec.resources on the task.", limit)
-				continue
-			}
-			if term.ExitCode != 0 && exitMsg == "" {
-				reason := term.Reason
-				if reason == "" {
-					reason = "Error"
+				if term == nil {
+					continue
 				}
-				exitMsg = fmt.Sprintf("job failed: container exited with code %d (reason=%s)", term.ExitCode, reason)
+				if term.Reason == "OOMKilled" || term.ExitCode == 137 {
+					limit := podContainerMemoryLimit(pod, cs.Name)
+					if limit == "" {
+						limit = "unknown"
+					}
+					oomMsg = fmt.Sprintf("job failed: container OOMKilled (memory limit %s exceeded). Recreate the agent with higher resources.limits.memory or set spec.resources on the task.", limit)
+					continue
+				}
+				if term.ExitCode != 0 && exitMsg == "" {
+					reason := term.Reason
+					if reason == "" {
+						reason = "Error"
+					}
+					exitMsg = fmt.Sprintf("job failed: container exited with code %d (reason=%s)", term.ExitCode, reason)
+				}
 			}
 		}
 	}
@@ -2046,10 +2053,101 @@ func (r *TaskReconciler) diagnoseFailedJob(ctx context.Context, task *corev1alph
 	if oomMsg != "" {
 		return oomMsg
 	}
+	if detail := r.workerReportedFailureDetail(ctx, task); detail != "" {
+		return "job failed: " + detail
+	}
 	if exitMsg != "" {
 		return exitMsg
 	}
 	return "job failed"
+}
+
+// workerFailureDetailLimit bounds the worker-reported detail projected into
+// Task status so a provider error body cannot bloat the status message.
+const workerFailureDetailLimit = 512
+
+// workerFailureEventScanLimit bounds the WorkerFailed lookup. A worker records
+// at most one terminal failure per attempt, so the retry ceiling keeps every
+// attempt of a Task inside a single page.
+const workerFailureEventScanLimit = 100
+
+// workerReportedFailureDetail returns the sanitized detail from the terminal
+// failure the worker reported before exiting, or "" when it reported none.
+// Workers publish it as a WorkerFailed execution event; without it the Task
+// would carry only the container exit code and the real cause (a provider
+// outage, quota error, or refusal) would live solely in the Pod log.
+//
+// Lookup failures are non-fatal: the caller falls back to pod state.
+func (r *TaskReconciler) workerReportedFailureDetail(ctx context.Context, task *corev1alpha1.Task) string {
+	if r == nil || r.ExecutionEventStore == nil || task == nil {
+		return ""
+	}
+	if strings.TrimSpace(task.Namespace) == "" || strings.TrimSpace(task.Name) == "" {
+		return ""
+	}
+	listed, err := r.ExecutionEventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
+		Namespace:  task.Namespace,
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   task.Name,
+		EventTypes: []string{execevents.ExecutionEventTypeWorkerFailed},
+		Limit:      workerFailureEventScanLimit,
+	})
+	if err != nil {
+		logf.FromContext(ctx).V(1).Info(
+			"diagnoseFailedJob: worker failure event lookup failed, using pod state",
+			"namespace", task.Namespace, "task", task.Name, "error", err.Error(),
+		)
+		return ""
+	}
+	// Events are listed in ascending sequence order, so the retried Task's
+	// final attempt reports last.
+	for _, event := range slices.Backward(listed) {
+		if !workerFailureEventInCurrentAttempt(task, event) {
+			// Older attempts have their own recorded cause; reporting one of
+			// them for this attempt would misattribute the failure.
+			break
+		}
+		if detail := workerFailureDetail(event.Summary); detail != "" {
+			return detail
+		}
+	}
+	return ""
+}
+
+// workerFailureEventInCurrentAttempt reports whether event was recorded during
+// the Task's current attempt. StartTime is reset every time the controller
+// creates an attempt's Job, and a worker can only report after its Pod starts,
+// so an earlier timestamp belongs to a previous attempt.
+func workerFailureEventInCurrentAttempt(task *corev1alpha1.Task, event store.ExecutionEvent) bool {
+	if task.Status.StartTime == nil || task.Status.StartTime.IsZero() || event.CreatedAt.IsZero() {
+		return true
+	}
+	return !event.CreatedAt.Before(task.Status.StartTime.Time)
+}
+
+// workerFailureDetail sanitizes a worker-supplied failure summary for Task
+// status. Controls are stripped before redaction so a control byte cannot
+// split a credential-shaped value past the redactor, matching how the ACP
+// path projects a runtime-supplied detail.
+func workerFailureDetail(summary string) string {
+	detail := strings.TrimSpace(stripACPControlRunes(summary))
+	if detail == "" {
+		return ""
+	}
+	return boundStatusMessage(redact.SensitiveText(detail), workerFailureDetailLimit)
+}
+
+// boundStatusMessage truncates a worker- or runtime-derived status message to
+// limit bytes on a rune boundary so the persisted message stays valid UTF-8
+// for the control store.
+func boundStatusMessage(message string, limit int) string {
+	if len(message) <= limit {
+		return message
+	}
+	for limit > 0 && !utf8.RuneStart(message[limit]) {
+		limit--
+	}
+	return message[:limit]
 }
 
 func podBelongsToJob(pod *corev1.Pod, jobName string) bool {
