@@ -1,16 +1,16 @@
 {
-  "status": "Revised platform cut: Orka first, the scenario within the two-team workflow, and input gateways leading to native or external agents. Evidence is the retained first-pass workflow.",
+  "status": "Introduction for first-time viewers. The retained workflow supplies the scan, conversation, patch report, and actual pull request. Gateways and agent locations are shown separately.",
   "scenes": [
-    {"id": "00-platform", "text": "Orka is an open-source platform for running and governing AI agents. Bring your own agents and tools, coordinate work across teams, and decide what each agent can do. Reuse skills and reviewed project knowledge, and track task results and reported token usage."},
-    {"id": "00-scope", "text": "A web app needs a security review. Security finds the vulnerabilities. Engineering prepares a fix."},
-    {"id": "01-schedule", "text": "Security's scheduled scan starts without a human prompt. Agents find undiscovered security vulnerabilities in source code."},
-    {"id": "02-discovery", "text": "They trace user input and check suspected flaws against the code. Here, an image URL can become a server command. The finding includes evidence."},
-    {"id": "03-teams", "text": "In Microsoft Teams, a colleague asks what needs attention. The bot explains the recorded finding, and the person chooses the fix."},
-    {"id": "04-handoff", "text": "A custom demo integration hands the finding to Engineering, under that team's permissions."},
-    {"id": "05-patch", "text": "Engineering's coding agent prepares the patch and runs focused tests. Orka publishes separately, keeping Git credentials out of the coding agent."},
-    {"id": "06-delivery", "text": "A real pull request records the proposed fix, ready for a person to review."},
-    {"id": "07-usage", "text": "Orka makes work quantifiable. Organizations can track reported tokens by task, with missing measurements clearly marked."},
-    {"id": "08-gateways", "text": "Use Teams, Telegram, or custom gateways to reach Orka. Run native agents in Kubernetes, optionally with Agent Sandbox and Agent Substrate, or connect compatible local and Foundry agents."},
-    {"id": "09-outro", "text": "You've seen one small example. Explore Orka's agents, tools, skills, and reviewed memory, and build workflows for your team."}
+    {"id": "00-platform", "text": "Orka runs AI agents and coordinates their work across teams, with permissions you control. It's open source."},
+    {"id": "00-scope", "text": "A web app needs a security review. Security agents find vulnerabilities. You request the fix in Teams, and an engineering agent prepares it."},
+    {"id": "01-schedule", "text": "Orka starts the scheduled scan. The agents find undiscovered security vulnerabilities in source code."},
+    {"id": "02-discovery", "text": "Here, an image URL can become a server command. The security agents trace the input through the code and record the evidence."},
+    {"id": "03-teams", "text": "In Microsoft Teams, you ask what needs attention. Orka Bot explains the finding. You decide whether to request a fix."},
+    {"id": "04-handoff", "text": "You request the fix. A custom demo integration sends the finding to Engineering, using that team's permissions."},
+    {"id": "05-patch", "text": "The engineering agent prepares the patch and reports three passing focused tests. Orka publishes separately, keeping Git credentials outside the coding agent."},
+    {"id": "06-delivery", "text": "The result is a pull request, a proposed code change. You can inspect the patch and test report before deciding whether to merge it."},
+    {"id": "07-usage", "text": "Track reported token usage for each task."},
+    {"id": "08-gateways", "text": "Send requests through Microsoft Teams, Microsoft Scout, Telegram, Slack, or your own gateway. Run native agents in Kubernetes, optionally with Agent Sandbox and Agent Substrate. Connect agents on your laptop, for example in Docker, Foundry hosted agents, or your own compatible agent."},
+    {"id": "09-outro", "text": "A vulnerability found. A fix tested. A pull request ready for human review. Explore Orka and build workflows for your team."}
   ]
 }
