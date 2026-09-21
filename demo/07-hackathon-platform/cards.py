@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render the first-time viewer introduction using the retained demo style."""
+"""Render the feature overview and workflow cards using the retained demo style."""
 
 import argparse
 import importlib.util
@@ -8,7 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
-OUTPUT = ROOT / "bin/hackathon-platform-intro/media"
+OUTPUT = ROOT / "bin/hackathon-platform-overview/media"
 SOURCE = ROOT / "demo/06-hackathon/media/render_cards.py"
 spec = importlib.util.spec_from_file_location("first_pass_cards", SOURCE)
 cards = importlib.util.module_from_spec(spec)
@@ -38,21 +38,41 @@ def progress(image, active=None):
 
 def platform(mark):
     main = layer()
-    text(main, (132, 104), "Orka", 120, "pink", "display")
-    text(main, (134, 301), "Your agents, working together.", 79, role="display")
-    text(main, (138, 447), "Run AI agents. Coordinate work across teams.", 48)
-    text(main, (138, 540), "With permissions you control.", 48, "green")
-    cards.paste_mascot(main, mark, 1460, 85, 265)
-    line(main, [(138, 772), (1784, 772)])
-    text(main, (140, 824), "Open source", 33, "blue", "mono")
-    return [(main, 0, 0.3)]
+    text(main, (132, 83), "Orka", 96, "pink", "display")
+    text(main, (134, 218), "Your agents, working together.", 76, role="display")
+    text(main, (137, 324), "Run and govern AI agents across teams.", 38, "muted")
+    cards.paste_mascot(main, mark, 1542, 48, 185)
+    line(main, [(136, 411), (1784, 411)])
+    groups = [
+        (3.8, 474, [
+            ("Bring your agents", "Native and compatible external agents"),
+            ("Coordinate work", "Schedules, events, and team workflows"),
+        ]),
+        (7.4, 644, [
+            ("Choose tools and skills", "Reuse capabilities across workflows"),
+            ("Control access", "Permissions for each team and agent"),
+        ]),
+        (11.2, 814, [
+            ("Share reviewed knowledge", "Project memory with human review"),
+            ("Track results and usage", "Task outcomes and reported tokens"),
+        ]),
+    ]
+    layers = [(main, 0, 0.3)]
+    for start, y, pair in groups:
+        part = layer()
+        for x, (title, description) in zip((138, 1006), pair):
+            cards.dot(part, x, y + 24, 5, "blue")
+            text(part, (x + 27, y), title, 41, role="display")
+            text(part, (x + 27, y + 65), description, 29, "muted")
+        layers.append((part, start, 0.4))
+    return layers
 
 
 def scope(mark):
     main = layer()
     text(main, (136, 102), "ONE EXAMPLE / SECURITY REVIEW", 29, "blue", "mono")
     text(main, (131, 226), "Two teams. One workflow.", 87, role="display")
-    text(main, (137, 354), "A web app needs a security review.", 41, "muted")
+    text(main, (137, 354), "A scheduled source-code scan. A fix requested from Teams.", 41, "muted")
     text(main, (138, 521), "Security agents", 54, "blue", "display")
     text(main, (787, 521), "You in Teams", 49, "pink", "display")
     text(main, (1258, 521), "Engineering agent", 51, "green", "display")
@@ -82,18 +102,22 @@ def gateways(mark):
 
     inputs = layer()
     gateways = [
-        (382, "Microsoft Teams", "Gateway adapter"),
-        (492, "Microsoft Scout", "Adapter for compatible Scout builds"),
-        (602, "Telegram", "Gateway adapter"),
-        (712, "Slack", "Custom gateway"),
-        (822, "Bring-your-own gateway", "Your apps and services"),
+        (366, "Microsoft Teams", "Gateway adapter"),
+        (564, "Microsoft Scout", "Adapter for compatible Scout builds"),
+        (674, "Telegram", "Gateway adapter"),
+        (784, "Slack", "Custom gateway"),
+        (894, "Bring-your-own gateway", "Your apps and services"),
     ]
     for y, name, detail in gateways:
         text(inputs, (140, y), name, 43, role="display")
         text(inputs, (143, y + 57), detail, 26, "muted")
         line(inputs, [(670, y + 25), (738, y + 25)], "blue", 2)
-    line(inputs, [(738, 407), (738, 847)], "blue", 2)
+    line(inputs, [(738, 391), (738, 919)], "blue", 2)
     arrow(inputs, [(738, 590), (778, 590)])
+
+    upcoming = layer()
+    text(upcoming, (143, 466), "Coming soon: multiplayer in Teams", 26, "pink")
+    text(upcoming, (143, 506), "Work with Orka together in shared chats.", 25, "muted")
 
     native = layer()
     arrow(native, [(1050, 590), (1127, 590), (1127, 405), (1159, 405)])
@@ -104,7 +128,7 @@ def gateways(mark):
 
     external = layer()
     agent_rows = [
-        (600, "Local agents", "On your laptop, for example in Docker"),
+        (600, "Local agents", "Running in containers on your laptop"),
         (733, "Foundry-hosted agents", "Running in Microsoft Foundry"),
         (866, "Bring-your-own agent", "Connect a compatible runtime"),
     ]
@@ -113,21 +137,21 @@ def gateways(mark):
         arrow(external, [(1127, y + 25), (1159, y + 25)])
         text(external, (1180, y), name, 43, role="display")
         text(external, (1183, y + 58), detail, 29, "muted")
-    return [(main, 0, 0.3), (inputs, 0.4, 0.3),
-            (native, 6.0, 0.4), (external, 11.5, 0.4)]
+    return [(main, 0, 0.3), (inputs, 0.4, 0.3), (upcoming, 5.5, 0.4),
+            (native, 10.6, 0.4), (external, 14.8, 0.4)]
 
 
 def outro(mark):
     main = layer()
-    text(main, (134, 98), "Orka", 77, "pink", "display")
-    text(main, (134, 282), "A vulnerability found.", 77, role="display")
-    text(main, (134, 404), "A fix tested.", 77, role="display")
-    text(main, (134, 537), "A pull request ready for human review.", 68, role="display")
-    text(main, (140, 686), "Build your team's next workflow.", 39, "muted")
-    cards.paste_mascot(main, mark, 1520, 166, 270)
-    line(main, [(140, 802), (1780, 802)])
-    text(main, (140, 857), "https://orka-agents.github.io/orka/", 42, "blue", "mono")
-    text(main, (141, 939), "Docs, examples, and integrations", 31)
+    text(main, (134, 99), "Orka", 73, "pink", "display")
+    text(main, (134, 243), "One example.", 90, role="display")
+    text(main, (134, 358), "Many ways to work.", 90, role="display")
+    text(main, (140, 541), "Bring your agents. Connect your channels.", 41)
+    text(main, (140, 610), "Build workflows for your organization.", 38, "muted")
+    cards.paste_mascot(main, mark, 1410, 185, 420)
+    line(main, [(140, 777), (1780, 777)])
+    text(main, (140, 840), "https://orka-agents.github.io/orka/", 42, "blue", "mono")
+    text(main, (141, 927), "Docs, examples, and integrations", 31)
     return [(main, 0, 0.3)]
 
 

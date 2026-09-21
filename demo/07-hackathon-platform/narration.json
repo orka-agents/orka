@@ -1,16 +1,16 @@
 {
-  "status": "Introduction for first-time viewers. The retained workflow supplies the scan, conversation, patch report, and actual pull request. Gateways and agent locations are shown separately.",
+  "status": "Feature-led Orka overview with one security workflow example. Retained footage supplies the evidence. Shared Teams chats are explicitly marked as coming soon.",
   "scenes": [
-    {"id": "00-platform", "text": "Orka runs AI agents and coordinates their work across teams, with permissions you control. It's open source."},
-    {"id": "00-scope", "text": "A web app needs a security review. Security agents find vulnerabilities. You request the fix in Teams, and an engineering agent prepares it."},
-    {"id": "01-schedule", "text": "Orka starts the scheduled scan. The agents find undiscovered security vulnerabilities in source code."},
-    {"id": "02-discovery", "text": "Here, an image URL can become a server command. The security agents trace the input through the code and record the evidence."},
-    {"id": "03-teams", "text": "In Microsoft Teams, you ask what needs attention. Orka Bot explains the finding. You decide whether to request a fix."},
+    {"id": "00-platform", "text": "Orka is a platform for running and governing AI agents. Bring your own agents, coordinate work across teams, and choose their tools and skills. Control permissions, reuse reviewed knowledge, and track task results and token usage."},
+    {"id": "00-scope", "text": "Security agents scan source code on a schedule to find undiscovered security vulnerabilities. You review a finding in Teams and ask Engineering to prepare a fix."},
+    {"id": "01-schedule", "text": "Orka starts the scan automatically."},
+    {"id": "02-discovery", "text": "The agents trace an image URL into a server command and record evidence from the code."},
+    {"id": "03-teams", "text": "In Teams, Orka Bot explains the finding. You decide whether to request a fix."},
     {"id": "04-handoff", "text": "You request the fix. A custom demo integration sends the finding to Engineering, using that team's permissions."},
     {"id": "05-patch", "text": "The engineering agent prepares the patch and reports three passing focused tests. Orka publishes separately, keeping Git credentials outside the coding agent."},
-    {"id": "06-delivery", "text": "The result is a pull request, a proposed code change. You can inspect the patch and test report before deciding whether to merge it."},
+    {"id": "06-delivery", "text": "The patch and test results are ready in a pull request for your review."},
     {"id": "07-usage", "text": "Track reported token usage for each task."},
-    {"id": "08-gateways", "text": "Send requests through Microsoft Teams, Microsoft Scout, Telegram, Slack, or your own gateway. Run native agents in Kubernetes, optionally with Agent Sandbox and Agent Substrate. Connect agents on your laptop, for example in Docker, Foundry hosted agents, or your own compatible agent."},
-    {"id": "09-outro", "text": "A vulnerability found. A fix tested. A pull request ready for human review. Explore Orka and build workflows for your team."}
+    {"id": "08-gateways", "text": "Connect through Microsoft Teams, Microsoft Scout, Telegram, Slack, or your own gateway. Orka support for shared Teams chats is coming soon, so teammates can work with agents together. Run native agents in Kubernetes, optionally with Agent Sandbox and Agent Substrate. Connect local agents running in containers on your laptop, Foundry hosted agents, or your own compatible agent."},
+    {"id": "09-outro", "text": "This is one example of how Orka coordinates agents, tools, and teams. Bring your own agents, connect your channels, and build workflows for your organization."}
   ]
 }

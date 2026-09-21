@@ -2,16 +2,16 @@
   "frames_per_second": 30,
   "voice_lead_in_frames": 12,
   "scenes": [
-    {"id":"00-platform","frames":270},
-    {"id":"00-scope","frames":330},
-    {"id":"01-schedule","frames":240},
-    {"id":"02-discovery","frames":300},
-    {"id":"03-teams","frames":330},
-    {"id":"04-handoff","frames":252},
+    {"id":"00-platform","frames":540},
+    {"id":"00-scope","frames":345},
+    {"id":"01-schedule","frames":150},
+    {"id":"02-discovery","frames":240},
+    {"id":"03-teams","frames":255},
+    {"id":"04-handoff","frames":225},
     {"id":"05-patch","frames":360},
-    {"id":"06-delivery","frames":438},
-    {"id":"07-usage","frames":150},
-    {"id":"08-gateways","frames":600},
-    {"id":"09-outro","frames":270}
+    {"id":"06-delivery","frames":210},
+    {"id":"07-usage","frames":210},
+    {"id":"08-gateways","frames":660},
+    {"id":"09-outro","frames":345}
   ]
 }

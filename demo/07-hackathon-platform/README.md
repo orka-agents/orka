@@ -1,25 +1,30 @@
-# Orka introduction
+# Orka platform overview
 
-A 118-second introduction for viewers who have never used Orka. It explains the
-platform in one sentence, then follows a security finding through a human request
-in Microsoft Teams to an engineering agent's proposed fix and a real pull request.
+A 118-second overview for viewers who have never used Orka. The opening walks
+through agents, coordination, tools and skills, permissions, reviewed knowledge,
+and task results and usage. A security workflow illustrates these capabilities:
+a scheduled source-code scan, a human request in Microsoft Teams, and an
+engineering agent's patch and pull request.
 
 Orka opens the video. The security-review example appears on "Two teams. One
 workflow." A progress line follows Scan, Finding, Human request, Fix, and Review.
-The closing diagram shows five gateway inputs and four distinct agent options.
+The closing diagram shows five gateway inputs and four distinct agent options,
+with shared Teams chats clearly marked as coming soon for a multiplayer experience.
+The final card returns to the wider platform: "One example. Many ways to work."
 
 ## Delivered edit
 
-- Video: `bin/hackathon-platform-intro/resolve/orka-hackathon-platform-intro.mp4`
-- Resolve export: `bin/hackathon-platform-intro/resolve/orka-hackathon-platform-intro.drp`
-- Project: `Orka Hackathon Platform Introduction 20260920-205705`
-- Timeline: `From finding to a fix for review`
+- Video: `bin/hackathon-platform-overview/resolve/orka-hackathon-platform-overview.mp4`
+- Resolve export: `bin/hackathon-platform-overview/resolve/orka-hackathon-platform-overview.drp`
+- Project: `Orka Hackathon Platform Overview 20260920-212851`
+- Timeline: `Your agents, working together - Overview`
 
 The delivered project is a separate import of the verified
-`Orka Hackathon Platform Revised 20260920` export. Its new timeline and media use
-independent paths. The original `Orka Hackathon Platform 20260920-162246`, the
-previous revision, and their exports are retained. Preservation hashes accompany
-the new export in `bin/hackathon-platform-intro/preservation.json`.
+`Orka Hackathon Platform Introduction 20260920-205705` export. Its new timeline
+and media use independent paths. The original
+`Orka Hackathon Platform 20260920-162246`, both previous revisions, and their
+exports are retained. Preservation hashes accompany
+the new export in `bin/hackathon-platform-overview/preservation.json`.
 
 The timeline is 3,540 frames at 1920×1080 and 30 fps. Resolve renders the final
 H.264/AAC MP4. The container stays below two minutes, including audio padding.
@@ -27,18 +32,18 @@ All generated media and private evidence stay in gitignored `bin/` directories.
 
 | Time | Picture | What the viewer learns |
 | --- | --- | --- |
-| 00:00–00:09 | Orka opening | Orka runs agents and coordinates work, with permissions you control |
-| 00:09–00:20 | Two teams. One workflow. | Security agents, a person in Teams, and an engineering agent have distinct roles |
-| 00:20–00:28 | Enlarged schedule evidence | Orka starts scheduled work |
-| 00:28–00:38 | Enlarged source finding | An image URL can become a server command |
-| 00:38–00:49 | Actual Teams conversation | A person asks about the finding before choosing the next action |
-| 00:49–00:52 | Actual Teams request | The person requests the fix |
-| 00:52–00:57.4 | Team handoff | A custom demo integration passes work under Engineering's permissions |
-| 00:57.4–01:09.4 | Actual GitHub diff and retained test report | The agent proposes a code change and reports three passing focused tests |
-| 01:09.4–01:24 | Actual GitHub pull request | A proposed code change is available for human review |
-| 01:24–01:29 | Reported usage | One task's token counts, with missing measurements explicit |
-| 01:29–01:49 | Channels and agents | Five inputs feed Orka; four agent options receive work |
-| 01:49–01:58 | Outcome and docs | A vulnerability found, a fix tested, and a pull request ready for review |
+| 00:00–00:18 | Orka feature overview | Agents, coordination, tools and skills, permissions, reviewed knowledge, results and usage |
+| 00:18–00:29.5 | Two teams. One workflow. | A scheduled source-code scan leads to a fix requested from Teams |
+| 00:29.5–00:34.5 | Enlarged schedule evidence | Orka starts scheduled work |
+| 00:34.5–00:42.5 | Enlarged source finding | An image URL can become a server command |
+| 00:42.5–00:51 | Actual Teams conversation | A person reviews the finding and chooses the next action |
+| 00:51–00:54 | Actual Teams request | The person requests the fix |
+| 00:54–00:58.5 | Team handoff | A custom demo integration passes work under Engineering's permissions |
+| 00:58.5–01:10.5 | Actual GitHub diff and retained test report | The agent proposes a code change and reports three passing focused tests |
+| 01:10.5–01:17.5 | Actual GitHub pull request | The patch and test results are ready for human review |
+| 01:17.5–01:24.5 | Usage command and output | The CLI query and one task's reported tokens, with missing measurements explicit |
+| 01:24.5–01:46.5 | Channels and agents | Five gateway inputs, four agent options, and shared Teams chats coming soon |
+| 01:46.5–01:58 | Platform and docs | One example of the workflows teams can build with Orka |
 
 [manifest.json](manifest.json) defines the edit. [narration.json](narration.json)
 contains the spoken text, and [timing.json](timing.json) places the voice clips.
@@ -55,6 +60,10 @@ Gateway inputs appear separately on the left, in this order:
 4. Slack
 5. Bring-your-own gateway
 
+The Teams entry marks planned support for shared chats as "Coming soon" and
+explains the multiplayer experience as working with Orka together in the same
+conversation. The recording uses a one-to-one Orka Bot conversation.
+
 The diagram identifies Slack as a custom gateway. Teams and Telegram have
 [Teams](https://github.com/orka-agents/orka-gateway-teams) and
 [Telegram](https://github.com/orka-agents/orka-gateway-telegram) adapters. The
@@ -69,7 +78,7 @@ Agent options appear separately on the right:
 - Native agents running in Kubernetes, optionally with
   [Agent Sandbox](../../website/docs/concepts/agent-sandbox.md) and
   [Agent Substrate](../../website/docs/concepts/substrate.md).
-- Local agents on your laptop, for example in Docker.
+- Local agents running in containers on your laptop.
 - Foundry-hosted agents running in Microsoft Foundry, through the
   [Hosted Agents adapter](https://github.com/orka-agents/agent-runtime-foundry).
 - Bring-your-own agent through a compatible runtime.
@@ -108,7 +117,9 @@ The actual browser captures show its description and the change in
 and database flows were not tested, and the PR has no attached CI checks.
 Separate publication keeps Git credentials outside the coding agent.
 
-Usage shows one measured Teams request with 2,018 input and 128 output tokens.
+Usage shows the retained `orka usage other unassociated` command and its `jq`
+selection together with the result: one measured Teams request with 2,018 input
+and 128 output tokens.
 The scan's token measurements and model pricing are unavailable. The film does
 not claim complete billing or a total across installations.
 
@@ -124,8 +135,8 @@ crop bounds, selected intervals, and render commands are stored beside each clip
 The following retained inputs must exist locally:
 
 - `bin/hackathon-platform-revised/terminal/` and `teams/`, from the preceding cut.
-- `bin/hackathon-platform-intro/evidence/pr-overview.png`, the actual PR overview.
-- `bin/hackathon-platform-intro/evidence/pr-diff.png`, the actual changed-code view.
+- `bin/hackathon-platform-overview/evidence/pr-overview.png`, the actual PR overview.
+- `bin/hackathon-platform-overview/evidence/pr-diff.png`, the actual changed-code view.
 
 The GitHub crop coordinates are specific to the captured windows. When replacing
 a capture, update the crop in `story.py` and inspect the output. Capture only the
@@ -140,10 +151,10 @@ bin/hackathon-first-pass/media/.venv/bin/python demo/07-hackathon-platform/cards
 bin/hackathon-first-pass/media/.venv/bin/python demo/07-hackathon-platform/story.py
 python3 demo/06-hackathon/audio/generate_voiceover.py \
   --manifest demo/07-hackathon-platform/narration.json \
-  --output-dir bin/hackathon-platform-intro/audio
+  --output-dir bin/hackathon-platform-overview/audio
 python3 demo/06-hackathon/audio/assemble_voiceover.py \
   --timing demo/07-hackathon-platform/timing.json \
-  --audio-dir bin/hackathon-platform-intro/audio
+  --audio-dir bin/hackathon-platform-overview/audio
 ```
 
 The narration stays at its generated speed. The assembler rejects speech that
@@ -162,22 +173,22 @@ python3 demo/07-hackathon-platform/resolve.py \
 
 The helper stages independent media in the App Store edition's container and
 prints a Lua entry point. Its standard assembler creates a new project. For this
-delivery, the guarded `orka-hackathon-platform-intro.copy.lua` driver instead
-imports the existing revised DRP under a new name, verifies the inherited clip
+delivery, the guarded `orka-hackathon-platform-overview.copy.lua` driver instead
+imports the existing introduction DRP under a new name, verifies the inherited clip
 sequence, builds the new timeline, and removes inherited media references from
 the copy. The original project exports remain intact. That driver and its
-preparation script are retained under `bin/hackathon-platform-intro/resolve/`.
+preparation script are retained under `bin/hackathon-platform-overview/resolve/`.
 
-Run the copy driver through **Workspace → Scripts → Orka - Render introduction
-copy**. It clears inherited render destinations in the copy and renders to the
-new output directory. It refuses to overwrite an existing project or final
+Run the copy driver through **Workspace → Scripts → Orka - Render overview copy**.
+It clears inherited render destinations in the copy and renders to the new output
+directory. It refuses to overwrite an existing project or final
 export. For another revision, use a new output name and matching output paths.
 
 After Resolve finishes:
 
 ```sh
 python3 demo/07-hackathon-platform/resolve.py --verify-output \
-  bin/hackathon-platform-intro/resolve/orka-hackathon-platform-intro.prepared.json
+  bin/hackathon-platform-overview/resolve/orka-hackathon-platform-overview.prepared.json
 ```
 
 Keep the staged sandbox media; the DRP references those files. QA includes the

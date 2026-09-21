@@ -13,8 +13,8 @@ import cards
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
-OUTPUT = ROOT / "bin/hackathon-platform-intro/media"
-EVIDENCE = ROOT / "bin/hackathon-platform-intro/evidence"
+OUTPUT = ROOT / "bin/hackathon-platform-overview/media"
+EVIDENCE = ROOT / "bin/hackathon-platform-overview/evidence"
 RETAINED = ROOT / "bin/hackathon-platform-revised"
 WIDTH, HEIGHT, FPS = 1920, 1080, 30
 
@@ -53,10 +53,10 @@ VIEWS = [
      "note": "Tests cover URL handling. Full app and database flows were not tested.", "phase": 3},
     {"id": "06-delivery", "source": EVIDENCE / "pr-overview.png",
      "crop": [56, 195, 803, 310], "placement": [133, 288, 1654],
-     "label": "GITHUB / PULL REQUEST #36", "title": "A real pull request. Ready for your review.",
+     "label": "GITHUB / PULL REQUEST #36", "title": "The patch and test results. Ready for your review.",
      "subtitle": "Review the proposed code change before merging.", "phase": 4},
     {"id": "07-usage", "source": RETAINED / "terminal/07-usage.mp4",
-     "start": 7.0, "crop": [220, 375, 1110, 200], "placement": [312, 420, 1296],
+     "start": 7.0, "crop": [220, 245, 1280, 325], "placement": [136, 362, 1648],
      "label": "ORKA / USAGE", "title": "See reported usage for each task.",
      "subtitle": "Example: one Microsoft Teams request",
      "note": "Missing scan measurements remain visible. Pricing is unavailable.", "phase": 4},
