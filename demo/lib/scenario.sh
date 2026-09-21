@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# Shared preparation and evidence capture for demos 08-10. No recording here.
+# Shared preparation and evidence capture for demos 08-11. No recording here.
 # shellcheck source=demo/lib/demo.sh
 source "$(dirname "${BASH_SOURCE[0]}")/demo.sh"
 

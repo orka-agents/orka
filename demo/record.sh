@@ -45,7 +45,7 @@ for name in "${demos[@]}"; do
   title=$(sed -n '2s/^# //p' "$script")
 
   case $name in
-    08-agent-to-agent|09-governed-tools|10-reviewed-memory)
+    08-agent-to-agent|09-governed-tools|10-reviewed-memory|11-fibey-approval)
       # These scripts use fresh IDs and scope their evidence to the current run.
       # Keep their saved Tasks, Sessions, and reviewed notes for inspection.
       ;;

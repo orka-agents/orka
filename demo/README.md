@@ -15,6 +15,7 @@ terminal: a pull request, an object that survived deletion, a refusal.
 | 8 | [`08-agent-to-agent`](08-agent-to-agent) | An order desk asks the inventory team's agent for help, retries the request, and retrieves the customer reply after the message adapter is replaced. |
 | 9 | [`09-governed-tools`](09-governed-tools) | An assistant checks a supplier's stock, then attempts a purchase. Gateway logs and supplier receipts show which request got through. |
 | 10 | [`10-reviewed-memory`](10-reviewed-memory) | One assistant proposes a return procedure. A person accepts and applies it, then a fresh agent uses the saved note. |
+| 11 | [`11-fibey-approval`](11-fibey-approval) | Fibey investigates a pump alert and proposes an inspection. A person approves the work order, and its receipt returns to the same waiting Task. |
 
 Projects 6 and 7 are edited video projects with their own instructions. The
 standalone recorder discovers only directories containing an executable `demo.sh`.
@@ -26,8 +27,8 @@ after a change keeps the two in sync.
 
 ## Prepare the new walkthroughs
 
-Demos 08 through 10 have scripts and setup instructions. They have not been
-recorded. Each opens with an inventory-team situation and explains new terms
+Demos 08 through 11 have scripts and setup instructions. They have not been
+recorded. Each opens with a business situation and explains new terms
 beside the action that uses them. They target about four minutes with waiting
 compressed; timing still needs a full rehearsal with the prepared model service.
 
@@ -45,6 +46,10 @@ demo/09-governed-tools/demo.sh
 
 demo/setup/reviewed-memory.sh
 demo/10-reviewed-memory/demo.sh
+
+# Prepare a Fibey runtime with human approval first; see demo 11's README.
+demo/setup/fibey-approval.sh
+demo/11-fibey-approval/demo.sh
 ```
 
 The new demos save complete responses in ignored `demo/setup/state/` run
@@ -53,6 +58,11 @@ prior work records. Demo 10 requires an empty active memory list for a meaningfu
 comparison; its README explains how to disable only the note from a previous run.
 Its reader's event history must show no tool calls. The demo checks that behavior;
 the current worker still exposes memory and transcript-search tools.
+
+Demo 09 shows an operation that stays closed. Demo 11 shows an operation that
+can proceed after a person's decision. It uses the human-approval work from
+[#589](https://github.com/orka-agents/orka/pull/589) and a prepared external
+Fibey runtime. Its receipt service creates only simulated work orders.
 
 ## Watching
 
@@ -109,7 +119,7 @@ demo/render.sh 02-agent-sandbox    # one
 
 `record.sh` records at 100x28 with idle time capped at two seconds and converts
 the chapter sentinels into marker events. It runs `demo/reset.sh` before the
-original five demos. Demos 08 through 10 keep their records and check only their
+original five demos. Demos 08 through 11 keep their records and check only their
 own run. Recording remains a separate, explicit command.
 
 The demos open real pull requests against

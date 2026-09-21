@@ -1,0 +1,9 @@
+Quincy North, pump-1
+
+Maintenance ended at 02:00. At 02:15, one pressure sensor fell from 3.1 to
+0.2 bar. The second gauge still reads 3.0 bar. Flow, motor current, and
+vibration remain normal. The pressure transmitter was replaced during
+maintenance; its calibration and wiring have not been checked independently.
+
+Ask Fibey to check inventory and propose an inspection work order.
+The shift lead must approve that work order before it is created.
