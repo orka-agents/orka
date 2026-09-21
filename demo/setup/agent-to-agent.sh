@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Prepare demo 08 on the explicitly selected local kind cluster. Never records.
+# Prepare demo 08 on the explicitly selected demo cluster. Never records.
 # Shared helpers define demo_root and repo_root after loading the selected env file.
 # shellcheck disable=SC2154
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/scenario.sh"
 scenario_require_cluster
-scenario_require_commands go docker kind openssl curl
+scenario_require_commands go openssl curl
 umask 077
 
 here=$demo_root/08-agent-to-agent
@@ -15,14 +15,12 @@ controller=${ORKA_CONTROLLER_DEPLOYMENT:-orka-controller-manager}
 container=${ORKA_CONTROLLER_CONTAINER:-manager}
 api_service=${ORKA_API_SERVICE:-orka-api}
 model=${DEMO_A2A_MODEL:-gpt-5.5}
-runtime_secret=${DEMO_A2A_RUNTIME_SECRET:-copilot-runtime-key}
 port=${DEMO_A2A_PORT:-8443}
 [[ $port =~ ^[0-9]+$ ]] && ((port >= 1024 && port <= 65535)) || {
   printf 'DEMO_A2A_PORT must be a port between 1024 and 65535.\n' >&2; exit 1;
 }
 public_url=https://127.0.0.1:$port
 context=$(kubectl config current-context)
-cluster=${context#kind-}
 git -C "$repo_root" check-ignore --quiet "$state/credential-check" || {
   printf 'The demo setup state directory must be gitignored before preparing credentials.\n' >&2; exit 1;
 }
@@ -33,13 +31,24 @@ git -C "$repo_root" check-ignore --quiet "$state/credential-check" || {
   printf 'Use a clean A2A checkout so the recorded source revision identifies the build.\n' >&2; exit 1;
 }
 revision=$(git -C "$source_repo" rev-parse HEAD)
-image=orka-demo-a2a:${revision:0:12}
-local_nodes=$(kind get nodes --name "$cluster" | sort)
-cluster_nodes=$(kubectl get nodes -o json | jq -r '.items[].metadata.name' | sort)
-[[ -n $local_nodes && $local_nodes == "$cluster_nodes" ]] || {
-  printf 'The kubeconfig and local kind cluster do not identify the same nodes.\n' >&2; exit 1;
-}
-kubectl -n "$ORKA_NAMESPACE" get secret "$runtime_secret" -o name >/dev/null
+if [[ -n ${DEMO_A2A_IMAGE:-} ]]; then
+  image=$DEMO_A2A_IMAGE
+  [[ $image =~ ^[^[:space:]@]+@sha256:[a-f0-9]{64}$ ]] || {
+    printf 'DEMO_A2A_IMAGE must be an image reference pinned with @sha256:<64 lowercase hex characters>.\n' >&2; exit 1;
+  }
+else
+  [[ $context == kind-* ]] || {
+    printf 'Set DEMO_A2A_IMAGE to a pushed, digest-pinned adapter image for a remote cluster.\n' >&2; exit 1;
+  }
+  scenario_require_commands docker kind
+  cluster=${context#kind-}
+  image=orka-demo-a2a:${revision:0:12}
+  local_nodes=$(kind get nodes --name "$cluster" | sort)
+  cluster_nodes=$(kubectl get nodes -o json | jq -r '.items[].metadata.name' | sort)
+  [[ -n $local_nodes && $local_nodes == "$cluster_nodes" ]] || {
+    printf 'The kubeconfig and local kind cluster do not identify the same nodes.\n' >&2; exit 1;
+  }
+fi
 kubectl -n "$ORKA_NAMESPACE" get serviceaccount orka-client -o name >/dev/null
 for crd in gatewayclasses.gateway.orka.ai gateways.gateway.orka.ai gatewaybindings.gateway.orka.ai; do
   kubectl wait --for=condition=Established "crd/$crd" --timeout=10s >/dev/null
@@ -124,18 +133,22 @@ openssl x509 -checkend 86400 -noout -in "$state/tls.crt" >/dev/null || {
 openssl verify -CAfile "$state/ca.crt" "$state/tls.crt" >/dev/null
 python3 "$here/prepare.py" resources --namespace "$ORKA_NAMESPACE" --installation "$installation" \
   --image "$image" --public-url "$public_url" --api-service "$api_service" --model "$model" \
-  --secret "$runtime_secret" --ca "$state/ca.crt" --controller "$state/controller-info.json" >"$state/resources.json"
+  --ca "$state/ca.crt" --controller "$state/controller-info.json" >"$state/resources.json"
 while IFS=$'\t' read -r kind name; do
   assert_owned_or_absent "$kind" "$name"
 done < <(jq -r '.items[] | [(.kind + (if (.apiVersion | contains("/")) then "." + (.apiVersion | split("/")[0]) else "" end)), .metadata.name] | @tsv' "$state/resources.json")
 
 printf 'Preparing A2A on %s, namespace %s.\n' "$context" "$ORKA_NAMESPACE"
 printf 'Setup will add its CA to deployment/%s container %s and wait for that rollout.\n' "$controller" "$container"
-printf 'Building adapter and client from A2A revision %s.\n' "${revision:0:12}"
+printf 'Building client from A2A revision %s.\n' "${revision:0:12}"
 mkdir -p "$repo_root/bin/demo-a2a"
 go -C "$source_repo" build -trimpath -o "$repo_root/bin/demo-a2a/a2a-client" ./cmd/client
-docker build -t "$image" "$source_repo"
-kind load docker-image "$image" --name "$cluster"
+if [[ -n ${DEMO_A2A_IMAGE:-} ]]; then
+  printf 'Using prepared adapter image %s.\n' "$image"
+else
+  docker build -t "$image" "$source_repo"
+  kind load docker-image "$image" --name "$cluster"
+fi
 
 verify_secret() {
   local name=$1

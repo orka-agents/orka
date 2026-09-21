@@ -17,37 +17,47 @@ Use the Orka CLI built from this checkout. Keep this step outside the walkthroug
 
 ```bash
 # demo/setup/env.sh supplies a single explicit KUBECONFIG and ORKA_NAMESPACE.
-# The setup rejects contexts that are not local kind contexts.
+# Setup defaults to a local kind context.
 export DEMO_A2A_REPO=/absolute/path/to/orka-gateway-a2a
 bash demo/setup/agent-to-agent.sh
 ```
 
 The A2A checkout must be clean. Setup builds its real `cmd/client` program into
-`bin/demo-a2a/a2a-client`, builds and loads the adapter image, and records the source
-revision. It requires Go, Docker, kind, kubectl, jq, Python 3, OpenSSL, and curl.
-No published adapter image is assumed.
+`bin/demo-a2a/a2a-client` and records the source revision alongside the adapter image.
+The default local path builds and loads the adapter image with Docker and kind.
+Both paths require Go, kubectl, jq, Python 3, OpenSSL, and curl.
+
+For a prepared remote cluster, select its exact context with `DEMO_KUBE_CONTEXT`
+and a scoped `KUBECONFIG` in your chosen `ORKA_DEMO_ENV` file, as described in the
+[shared setup instructions](../README.md#prepare-the-new-walkthroughs). Build and
+push the adapter from the same clean A2A checkout before running setup. Set
+`DEMO_A2A_IMAGE` to the resulting image reference, including its `@sha256:` digest.
+Setup then uses that image and needs neither Docker nor kind. Mutable image tags
+are rejected. A prebuilt image can also be used on a local kind cluster.
 
 Setup creates only resources named `demo-a2a-*`, plus the `demo-a2a` Gateway, in the
 selected Orka namespace. The GatewayClass is cluster scoped and includes the
 namespace in its name. It prepares the inventory Agent, an adapter Service and
 Deployment, gateway routing, reader permissions, a NetworkPolicy, and credentials.
-The Agent uses the existing Codex runtime with no model tools enabled. The API
-Service must select the specified controller.
+The Agent uses the existing Codex runtime with its supported read-only tool
+policy. Its instructions ask it to answer from the conversation without calling
+tools. The API Service must select the specified controller.
 
 Setup also adds the demo CA ConfigMap mount and its directory to `SSL_CERT_DIR`
 on the selected controller container, preserving an existing literal directory
 list. This rolls that controller during preparation and temporarily affects its
 API availability. The default target is `orka-system/orka-controller-manager`,
 container `manager`. Set `ORKA_NAMESPACE`, `ORKA_CONTROLLER_DEPLOYMENT`, and
-`ORKA_CONTROLLER_CONTAINER` for a different local installation. The script checks
+`ORKA_CONTROLLER_CONTAINER` for a different installation. The script checks
 the watched namespace, persistent database, Service selector, and object identity
 before patching. Its patch includes the deployment UID and resource version.
 
-Optional preparation settings are `DEMO_A2A_MODEL`, default `gpt-5.5`,
-`DEMO_A2A_RUNTIME_SECRET`, default `copilot-runtime-key`, and `DEMO_A2A_PORT`,
-default `8443`. The existing runtime credential must already be valid for the
-chosen model. The adapter talks to `ORKA_API_SERVICE`, default `orka-api`, on port
-8080 in the same namespace.
+Optional preparation settings are `DEMO_A2A_MODEL`, default `gpt-5.5`, and
+`DEMO_A2A_PORT`, default `8443`. Harness v2 supplies model access through the
+controller's provider configuration. Prepare that connection for the chosen
+model before running setup; the Agent must not contain a `secretRef`.
+The adapter talks to `ORKA_API_SERVICE`, default `orka-api`, on port 8080 in the
+same namespace.
 
 The caller, inbound gateway, and outbound gateway credentials are distinct random
 tokens. The adapter's fourth credential is its rotating ServiceAccount token.

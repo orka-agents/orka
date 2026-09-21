@@ -58,9 +58,13 @@ def controller_patch(deployment, service, namespace, container_name):
             "the Orka API Service must select this controller")
     require(any(p.get("port") == 8080 for p in service["spec"].get("ports", [])),
             "the Orka API Service must expose port 8080")
-    volume = {"name": "demo-a2a-ca", "configMap": {"name": "demo-a2a-ca"}}
+    volume = {"name": "demo-a2a-ca", "configMap": {"name": "demo-a2a-ca", "defaultMode": 0o644}}
     mount = {"name": "demo-a2a-ca", "mountPath": CA_PATH, "readOnly": True}
-    require("demo-a2a-ca" not in volumes or volumes["demo-a2a-ca"] == volume,
+    existing_volume = volumes.get("demo-a2a-ca", volume)
+    # Kubernetes fills this field when the volume is first stored. Accept the
+    # same source before or after defaulting so a second setup is unchanged.
+    without_mode = {"name": "demo-a2a-ca", "configMap": {"name": "demo-a2a-ca"}}
+    require(existing_volume in (volume, without_mode),
             "controller already uses the demo CA volume name for another source")
     for existing in mounts:
         if existing["name"] == "demo-a2a-ca" or existing["mountPath"] == CA_PATH:
@@ -89,7 +93,7 @@ def controller_patch(deployment, service, namespace, container_name):
     return patch, info
 
 
-def resources(namespace, installation, image, public_url, api_service, model, secret, ca, controller):
+def resources(namespace, installation, image, public_url, api_service, model, ca, controller):
     require(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", namespace), "invalid namespace")
     labels = {"demo.orka.ai/name": DEMO, "demo.orka.ai/installation": installation}
     pod_labels = {**labels, "app.kubernetes.io/name": ADAPTER}
@@ -124,9 +128,10 @@ def resources(namespace, installation, image, public_url, api_service, model, se
     rbac = "rbac.authorization.k8s.io/v1"
     result = [
         obj("core.orka.ai/v1alpha1", "Agent", AGENT, spec={
-            "model": {"name": model}, "secretRef": {"name": secret},
+            "model": {"name": model},
             "runtime": {"type": "codex", "contractVersion": "orka.harness.v2", "defaultMaxTurns": 8,
-                        "defaultAllowBash": False, "defaultAllowedTools": [], "defaultReasoningEffort": "low"},
+                        "defaultAllowBash": False, "defaultAllowedTools": ["Glob", "Grep", "Read"],
+                        "defaultReasoningEffort": "low"},
             "systemPrompt": {"inline": "You advise the inventory order desk. Use only the facts in the conversation. "
                 "Use digits for quantities. When stock is short, say how many can be supplied today and how many remain. "
                 "Keep answers brief. Do not run tools, look up outside facts, place orders, or claim to have sent a reply. "
@@ -216,7 +221,7 @@ def main():
     patch.add_argument("--service", type=Path, required=True)
     patch.add_argument("--info", type=Path, required=True)
     render = commands.add_parser("resources")
-    for name in ("namespace", "installation", "image", "public-url", "api-service", "model", "secret"):
+    for name in ("namespace", "installation", "image", "public-url", "api-service", "model"):
         render.add_argument("--" + name, required=True)
     render.add_argument("--ca", type=Path, required=True)
     render.add_argument("--controller", type=Path, required=True)
@@ -226,7 +231,7 @@ def main():
         args.info.write_text(json.dumps(info, indent=2) + "\n")
     else:
         output = resources(args.namespace, args.installation, args.image, args.public_url, args.api_service,
-                           args.model, args.secret, args.ca.read_text(), json.loads(args.controller.read_text()))
+                           args.model, args.ca.read_text(), json.loads(args.controller.read_text()))
     json.dump(output, sys.stdout, indent=2)
     print()
 

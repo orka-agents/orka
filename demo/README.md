@@ -52,6 +52,23 @@ demo/setup/fibey-approval.sh
 demo/11-fibey-approval/demo.sh
 ```
 
+Demos 08 through 11 default to a local kind context. For a prepared remote
+cluster, put its exact context name and a single scoped kubeconfig in a separate
+environment file, then select that file with `ORKA_DEMO_ENV` for setup, rehearsal,
+and recording:
+
+```sh
+# Contents of your local AKS demo environment file.
+export KUBECONFIG=/absolute/path/to/sertac-aks.kubeconfig
+export DEMO_KUBE_CONTEXT=sertac-aks
+export ORKA_NAMESPACE=orka-demos-v2
+```
+
+Set the API and controller settings in that file for the prepared installation.
+The scripts reject a context mismatch and never switch contexts. Demo 08 also
+requires a pushed, digest-pinned `DEMO_A2A_IMAGE` on a remote cluster; its README
+describes that path.
+
 The new demos save complete responses in ignored `demo/setup/state/` run
 directories and stop if their checks fail. They use fresh request IDs and keep
 prior work records. Demo 10 requires an empty active memory list for a meaningful
@@ -82,7 +99,7 @@ asciinema play --pause-on-markers demo/casts/01-chat-to-pr.cast
 
 ## Re-recording
 
-The demos run against one kind cluster that carries Orka, Agent Substrate on
+The original five demos run against one kind cluster that carries Orka, Agent Substrate on
 gVisor, kubernetes-sigs Agent Sandbox, and a real model proxy. Build it once:
 
 ```sh

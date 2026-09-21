@@ -20,13 +20,18 @@ scenario_require_commands() {
 scenario_require_cluster() {
   scenario_require_commands kubectl jq python3
   if [[ -z ${KUBECONFIG:-} || $KUBECONFIG == *:* || ! -f $KUBECONFIG ]]; then
-    printf 'Set KUBECONFIG to one local demo cluster file, or configure demo/setup/env.sh.\n' >&2
+    printf 'Set KUBECONFIG to one scoped demo cluster file, or configure the selected demo environment file.\n' >&2
     return 1
   fi
   local context
   context=$(kubectl config current-context)
-  if [[ $context != kind-* ]]; then
-    printf 'These setup scripts require a local kind demo cluster; current context is %s.\n' "$context" >&2
+  if [[ -n ${DEMO_KUBE_CONTEXT:-} ]]; then
+    if [[ $context != "$DEMO_KUBE_CONTEXT" ]]; then
+      printf 'DEMO_KUBE_CONTEXT is %s, but the selected kubeconfig context is %s.\n' "$DEMO_KUBE_CONTEXT" "$context" >&2
+      return 1
+    fi
+  elif [[ $context != kind-* ]]; then
+    printf 'The default requires a local kind demo cluster; explicitly set DEMO_KUBE_CONTEXT to use %s.\n' "$context" >&2
     return 1
   fi
   kubectl get namespace "$ORKA_NAMESPACE" -o name >/dev/null

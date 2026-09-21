@@ -143,6 +143,21 @@ class ControllerPreparation(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "another source"):
             prepare.controller_patch(self.deployment, self.service, "demo", "manager")
 
+    def test_repeat_setup_preserves_the_stored_controller_template(self):
+        patch, _ = prepare.controller_patch(self.deployment, self.service, "demo", "manager")
+        applied = copy.deepcopy(self.deployment)
+        pod = applied["spec"]["template"]["spec"]
+        changes = patch["spec"]["template"]["spec"]
+        pod["volumes"].extend(changes["volumes"])
+        pod["volumes"][-1]["configMap"]["defaultMode"] = 420
+        pod["containers"][0]["volumeMounts"].extend(changes["containers"][0]["volumeMounts"])
+        pod["containers"][0]["env"] = changes["containers"][0]["env"]
+        repeated, _ = prepare.controller_patch(applied, self.service, "demo", "manager")
+        self.assertEqual(repeated, patch)
+        pod["volumes"][-1]["configMap"]["items"] = [{"key": "other", "path": "ca.crt"}]
+        with self.assertRaisesRegex(ValueError, "another source"):
+            prepare.controller_patch(applied, self.service, "demo", "manager")
+
 
 if __name__ == "__main__":
     unittest.main()
