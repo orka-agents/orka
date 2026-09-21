@@ -30,6 +30,7 @@ func TestRepositoryMonitorReviewPublishRecoversAfterTokenRefresh(t *testing.T) {
 		name           string
 		failureStage   string
 		status         int
+		suspended      bool
 		headChanged    bool
 		acceptedReview bool
 		wantPhase      string
@@ -39,6 +40,7 @@ func TestRepositoryMonitorReviewPublishRecoversAfterTokenRefresh(t *testing.T) {
 		{name: "PR fetch unauthorized", failureStage: "pull", status: http.StatusUnauthorized, wantPhase: repositoryMonitorPublishPhaseSucceeded, wantReviews: 1},
 		{name: "review listing unauthorized", failureStage: "list", status: http.StatusUnauthorized, wantPhase: repositoryMonitorPublishPhaseSucceeded, wantReviews: 1},
 		{name: "submission unauthorized", failureStage: "post", status: http.StatusUnauthorized, wantPhase: repositoryMonitorPublishPhaseSucceeded, wantReviews: 1},
+		{name: "suspended monitor retries publication", failureStage: "post", status: http.StatusUnauthorized, suspended: true, wantPhase: repositoryMonitorPublishPhaseSucceeded, wantReviews: 1},
 		{name: "head changes before retry", failureStage: "post", status: http.StatusUnauthorized, headChanged: true, wantPhase: repositoryMonitorPublishPhaseSkipped, wantReason: repositoryMonitorPublishSkipHeadSHAChanged},
 		{name: "permission denied stays terminal", failureStage: "post", status: http.StatusForbidden, wantPhase: repositoryMonitorPublishPhaseFailed, wantReason: repositoryMonitorPublishFailureGitHubPermissionDenied},
 		{name: "missing resource stays terminal", failureStage: "post", status: http.StatusNotFound, wantPhase: repositoryMonitorPublishPhaseFailed, wantReason: repositoryMonitorPublishFailureGitHubPermissionDenied},
@@ -58,6 +60,11 @@ func TestRepositoryMonitorReviewPublishRecoversAfterTokenRefresh(t *testing.T) {
 			const monitorName = "publish-token-refresh"
 			const secretName = "forge-token"
 			monitor := repositoryMonitorReviewIngestTestMonitor(monitorName)
+			if tt.suspended {
+				monitor.Spec.Suspend = &tt.suspended
+				monitor.Spec.Schedule = "* * * * *"
+				monitor.CreationTimestamp = metav1.NewTime(time.Now().Add(-time.Hour))
+			}
 			monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: secretName}
 			monitor.Spec.Review.Publish.Enabled = true
 			task := repositoryMonitorReviewIngestTestTask("completed-review", monitorName, 1, repositoryMonitorTestHeadSHA)
@@ -115,6 +122,9 @@ func TestRepositoryMonitorReviewPublishRecoversAfterTokenRefresh(t *testing.T) {
 			if cooldownRequests != initialRequests {
 				t.Fatal("publication retried during cooldown")
 			}
+			if tt.status == http.StatusUnauthorized && cooldown.RequeueAfter <= 0 {
+				t.Fatal("authentication failure must keep reconciliation scheduled during cooldown")
+			}
 
 			// Advance the persisted attempt time instead of sleeping in the test.
 			failed[0].UpdatedAt = time.Now().Add(-6 * time.Minute)
@@ -122,7 +132,7 @@ func TestRepositoryMonitorReviewPublishRecoversAfterTokenRefresh(t *testing.T) {
 				t.Fatal(err)
 			}
 			reconcile()
-			reconcile()
+			settled := reconcile()
 			item, err := monitorStore.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, "1")
 			if err != nil {
 				t.Fatal(err)
@@ -130,8 +140,17 @@ func TestRepositoryMonitorReviewPublishRecoversAfterTokenRefresh(t *testing.T) {
 			if item.LastPublishPhase != tt.wantPhase || item.LastPublishReason != tt.wantReason {
 				t.Fatalf("publication = %s/%s, want %s/%s", item.LastPublishPhase, item.LastPublishReason, tt.wantPhase, tt.wantReason)
 			}
-			if tt.status == http.StatusUnauthorized && cooldown.RequeueAfter <= 0 {
-				t.Fatal("authentication failure must keep reconciliation scheduled during cooldown")
+			if tt.suspended {
+				if settled.RequeueAfter != 0 {
+					t.Fatal("suspended monitor must stop requeuing after publication completes")
+				}
+				runs, _, err := monitorStore.ListMonitorRuns(ctx, store.MonitorRunFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Limit: 10})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(runs) != 0 {
+					t.Fatal("publication retry must not queue scheduled monitor runs while suspended")
+				}
 			}
 			fixture.mu.Lock()
 			finalPosts, finalReviews, finalFailures := fixture.posts, fixture.reviews, fixture.failures

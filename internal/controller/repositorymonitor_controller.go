@@ -511,7 +511,8 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorRuns(ctx context
 
 	var queuedRun *store.MonitorRun
 	requeueAfter := time.Duration(0)
-	if pendingReviews {
+	// Completed reviews still need publication retries while scheduled runs are suspended.
+	if pendingReviews || publishedReviews {
 		requeueAfter = repositoryMonitorValidationRetry
 	}
 	if state.suspended {
