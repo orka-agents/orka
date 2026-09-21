@@ -1,0 +1,28 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: demo-reviewed-memory
+  labels:
+    demo.orka.ai/name: 10-reviewed-memory
+rules:
+  - apiGroups: [core.orka.ai]
+    resources: [memories]
+    verbs: [get, list, create, update]
+  - apiGroups: [core.orka.ai]
+    resources: [memoryproposals]
+    verbs: [get, list, review, apply]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: demo-reviewed-memory
+  labels:
+    demo.orka.ai/name: 10-reviewed-memory
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: demo-reviewed-memory
+subjects:
+  - kind: ServiceAccount
+    name: orka-client
+    namespace: orka-system

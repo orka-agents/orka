@@ -12,11 +12,47 @@ terminal: a pull request, an object that survived deletion, a refusal.
 | 3 | [`03-agent-substrate`](03-agent-substrate) | A save point for an agent. An audit runs as a gVisor Actor on Agent Substrate; between requests every worker is free, a follow-up boots a fresh Actor from the kept data, and a checkpoint restores after the workspace is deleted. |
 | 4 | [`04-security-scan`](04-security-scan) | Findings that arrive as pull requests. A legacy app is scanned into a threat model and validated findings; a person picks one and Orka opens the fix. |
 | 5 | [`05-two-teams`](05-two-teams) | Two teams, two namespaces, two Orka installations, one shared AI URL. The caller's token picks the team; cross-team requests are refused. Uses the compatibility router from PR #604. |
+| 8 | [`08-agent-to-agent`](08-agent-to-agent) | An order desk asks the inventory team's agent for help, retries the request, and retrieves the customer reply after the message adapter is replaced. |
+| 9 | [`09-governed-tools`](09-governed-tools) | An assistant checks a supplier's stock, then attempts a purchase. Gateway logs and supplier receipts show which request got through. |
+| 10 | [`10-reviewed-memory`](10-reviewed-memory) | One assistant proposes a return procedure. A person accepts and applies it, then a fresh agent uses the saved note. |
+
+Projects 6 and 7 are edited video projects with their own instructions. The
+standalone recorder discovers only directories containing an executable `demo.sh`.
 
 The scripts are plain bash. `demo/lib/demo.sh` types commands the way a
 person would, and every command the viewer sees is the command that ran.
 Narration is in the script next to the command it explains, so re-recording
 after a change keeps the two in sync.
+
+## Prepare the new walkthroughs
+
+Demos 08 through 10 have scripts and setup instructions. They have not been
+recorded. Each opens with an inventory-team situation and explains new terms
+beside the action that uses them. They target about four minutes with waiting
+compressed; timing still needs a full rehearsal with the prepared model service.
+
+Start with the existing demo cluster and build its matching CLI with
+`make build-cli`. Follow each demo's README for its additional setup, then run
+the walkthrough directly to rehearse without recording:
+
+```sh
+demo/setup/agent-to-agent.sh
+demo/08-agent-to-agent/demo.sh
+
+# agentgateway must be installed; the demo 09 README covers its pinned installer.
+demo/setup/governed-tools.sh
+demo/09-governed-tools/demo.sh
+
+demo/setup/reviewed-memory.sh
+demo/10-reviewed-memory/demo.sh
+```
+
+The new demos save complete responses in ignored `demo/setup/state/` run
+directories and stop if their checks fail. They use fresh request IDs and keep
+prior work records. Demo 10 requires an empty active memory list for a meaningful
+comparison; its README explains how to disable only the note from a previous run.
+Its reader's event history must show no tool calls. The demo checks that behavior;
+the current worker still exposes memory and transcript-search tools.
 
 ## Watching
 
@@ -71,8 +107,10 @@ demo/render.sh                     # every cast
 demo/render.sh 02-agent-sandbox    # one
 ```
 
-`record.sh` runs `demo/reset.sh` first, records at 100x28 with idle time
-capped at two seconds, and converts the chapter sentinels into marker events.
+`record.sh` records at 100x28 with idle time capped at two seconds and converts
+the chapter sentinels into marker events. It runs `demo/reset.sh` before the
+original five demos. Demos 08 through 10 keep their records and check only their
+own run. Recording remains a separate, explicit command.
 
 The demos open real pull requests against
 [`sozercan/orka-demo-inventory`](https://github.com/sozercan/orka-demo-inventory),

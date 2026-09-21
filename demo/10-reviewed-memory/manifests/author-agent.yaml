@@ -1,0 +1,23 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: demo-memory-author
+  labels:
+    demo.orka.ai/name: 10-reviewed-memory
+spec:
+  providerRef:
+    name: copilot
+  model:
+    name: claude-opus-4.7
+    temperature: 0
+    maxTokens: 1024
+  tools:
+    - name: remember
+  systemPrompt:
+    inline: |
+      You help a warehouse team document reusable procedures.
+      Read the operations note supplied in the task. Propose its return
+      procedure exactly once with remember, using the tag warehouse-returns.
+      Preserve the exact dock and label code. Do not add facts or other tags.
+      Do not call other tools. A proposal awaits review; it is not shared
+      memory yet. Finish with one sentence describing what you proposed.

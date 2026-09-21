@@ -22,13 +22,20 @@ command -v asciinema >/dev/null 2>&1 || {
 }
 
 if [ $# -gt 0 ]; then
-  demos=$*
+  demos=("$@")
 else
-  demos=$(cd demo && ls -d [0-9][0-9]-*/ | tr -d / | tr '\n' ' ')
+  demos=()
+  # Edited video projects also live under demo/, but have no standalone script.
+  for script in demo/[0-9][0-9]-*/demo.sh; do
+    [[ -x $script ]] || continue
+    name=${script%/demo.sh}
+    demos+=("${name#demo/}")
+  done
 fi
 mkdir -p demo/casts
 
-for name in $demos; do
+for name in "${demos[@]}"; do
+  [[ $name =~ ^[0-9][0-9]-[a-z0-9-]+$ ]] || { echo "invalid demo name: $name" >&2; exit 1; }
   script=demo/$name/demo.sh
   test -x "$script" || {
     echo "no such demo: $name" >&2
@@ -37,10 +44,16 @@ for name in $demos; do
   cast=demo/casts/$name.cast
   title=$(sed -n '2s/^# //p' "$script")
 
-  # Every recording starts from a cluster with no other demo's Tasks in it,
-  # so a plain `orka task list` shows only what this scenario created.
-  echo "==> resetting demo objects"
-  ./demo/reset.sh all
+  case $name in
+    08-agent-to-agent|09-governed-tools|10-reviewed-memory)
+      # These scripts use fresh IDs and scope their evidence to the current run.
+      # Keep their saved Tasks, Sessions, and reviewed notes for inspection.
+      ;;
+    *)
+      echo "==> resetting demo objects"
+      ./demo/reset.sh all
+      ;;
+  esac
 
   echo "==> recording $name"
   # --return propagates the script's exit status. Without it asciinema exits 0

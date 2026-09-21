@@ -1,0 +1,25 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: demo-memory-reader
+  labels:
+    demo.orka.ai/name: 10-reviewed-memory
+spec:
+  providerRef:
+    name: copilot
+  model:
+    name: claude-opus-4.7
+    temperature: 0
+    maxTokens: 1024
+  systemPrompt:
+    inline: |
+      Answer only from reviewed durable memory already supplied with this task.
+      Do not call any tools, search previous work, or create proposals.
+      If no warehouse return procedure is supplied, say it is unavailable.
+      Never invent a dock, label, or procedure.
+      Return only a JSON object with these fields, without markdown:
+      reviewedProcedureAvailable: a boolean;
+      dock: the exact dock name, or null when unavailable;
+      label: the exact return label, or null when unavailable;
+      answer: a reply of at most two sentences, including the dock and label
+      when available, otherwise explaining that the procedure is unavailable.

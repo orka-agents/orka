@@ -1,0 +1,212 @@
+# DEMO_NAMESPACE is filled in by demo/setup/governed-tools.sh.
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: demo-supplier-agentgateway
+  labels:
+    demo.orka.ai/name: 09-governed-tools
+spec:
+  controllerName: agentgateway.dev/agentgateway
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayParameters
+metadata:
+  name: demo-supplier-gateway
+  namespace: DEMO_NAMESPACE
+  labels:
+    demo.orka.ai/name: 09-governed-tools
+spec:
+  logging:
+    format: json
+  service:
+    spec:
+      type: ClusterIP
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: demo-supplier-gateway
+  namespace: DEMO_NAMESPACE
+  labels:
+    demo.orka.ai/name: 09-governed-tools
+spec:
+  gatewayClassName: demo-supplier-agentgateway
+  infrastructure:
+    parametersRef:
+      group: agentgateway.dev
+      kind: AgentgatewayParameters
+      name: demo-supplier-gateway
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 8080
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: demo-supplier-stock
+  namespace: DEMO_NAMESPACE
+  labels:
+    demo.orka.ai/name: 09-governed-tools
+spec:
+  parentRefs:
+    - name: demo-supplier-gateway
+      sectionName: http
+  hostnames: [example.com]
+  rules:
+    - matches:
+        - method: GET
+          path:
+            type: Exact
+            value: /v1/stock
+      filters:
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            remove: [Txn-Token, Authorization]
+      backendRefs:
+        - name: demo-supplier
+          port: 8080
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: demo-supplier-credential
+  namespace: DEMO_NAMESPACE
+  labels:
+    demo.orka.ai/name: 09-governed-tools
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: demo-supplier-stock
+  backend:
+    auth:
+      secretRef:
+        name: demo-supplier-credential
+      location:
+        header:
+          name: Authorization
+          prefix: "Bearer "
+---
+# Only safe request fields are added. Never log headers, bodies, or credentials.
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: demo-supplier-receipts
+  namespace: DEMO_NAMESPACE
+  labels:
+    demo.orka.ai/name: 09-governed-tools
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: demo-supplier-gateway
+  frontend:
+    accessLog:
+      attributes:
+        add:
+          - name: demo_request
+            expression: request.pathAndQuery
+          - name: demo_method
+            expression: request.method
+          - name: demo_status
+            expression: response.code
+---
+apiVersion: core.orka.ai/v1alpha1
+kind: OutboundAccessPolicy
+metadata:
+  name: demo-supplier-gateway
+  namespace: DEMO_NAMESPACE
+  labels:
+    demo.orka.ai/name: 09-governed-tools
+spec:
+  gateway:
+    serviceRef:
+      name: demo-supplier-gateway
+      port: 8080
+    scheme: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-supplier
+  namespace: DEMO_NAMESPACE
+  labels:
+    demo.orka.ai/name: 09-governed-tools
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: demo-supplier
+  template:
+    metadata:
+      annotations:
+        demo.orka.ai/supplier-code: SUPPLIER_CODE_SHA
+      labels:
+        app.kubernetes.io/name: demo-supplier
+        demo.orka.ai/name: 09-governed-tools
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: supplier
+          image: docker.io/library/python:3.14.7-alpine3.24@sha256:c6ead215bfd31f1e433d968853b7a769989117115b728874824e6c0a27cb96fc
+          command: [python, -B, /app/supplier.py, --credential-file, /credential/Authorization]
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+          volumeMounts:
+            - name: code
+              mountPath: /app
+              readOnly: true
+            - name: credential
+              mountPath: /credential
+              readOnly: true
+      volumes:
+        - name: code
+          configMap:
+            name: demo-supplier-code
+        - name: credential
+          secret:
+            secretName: demo-supplier-credential
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-supplier
+  namespace: DEMO_NAMESPACE
+  labels:
+    demo.orka.ai/name: 09-governed-tools
+spec:
+  selector:
+    app.kubernetes.io/name: demo-supplier
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
