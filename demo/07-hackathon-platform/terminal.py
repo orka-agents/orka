@@ -22,7 +22,7 @@ def main():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     module.HERE = HERE / "terminal"
-    module.OUTPUT = ROOT / "bin/hackathon-platform/terminal"
+    module.OUTPUT = ROOT / "bin/hackathon-platform-revised/terminal"
     module.SCENES = SCENES
     sys.argv = [str(source), *(args.scenes or SCENES)]
     module.main()

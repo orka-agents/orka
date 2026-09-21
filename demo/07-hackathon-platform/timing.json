@@ -2,9 +2,8 @@
   "frames_per_second": 30,
   "voice_lead_in_frames": 12,
   "scenes": [
-    {"id":"00-scenario","frames":120},
     {"id":"00-platform","frames":570},
-    {"id":"00-scope","frames":150},
+    {"id":"00-scope","frames":240},
     {"id":"01-schedule","frames":300},
     {"id":"02-discovery","frames":330},
     {"id":"03-teams","frames":360},
@@ -12,7 +11,7 @@
     {"id":"05-patch","frames":300},
     {"id":"06-delivery","frames":210},
     {"id":"07-usage","frames":300},
-    {"id":"08-gateways","frames":300},
+    {"id":"08-gateways","frames":420},
     {"id":"09-outro","frames":300}
   ]
 }

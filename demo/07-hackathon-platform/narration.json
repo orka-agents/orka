@@ -1,17 +1,16 @@
 {
-  "status": "Second cut: platform overview, one explicitly scoped example, and extensibility. Evidence is the retained first-pass workflow.",
+  "status": "Revised platform cut: Orka first, the scenario within the two-team workflow, and input gateways leading to native or external agents. Evidence is the retained first-pass workflow.",
   "scenes": [
-    {"id": "00-scenario", "text": "A web application needs a security review."},
     {"id": "00-platform", "text": "Orka is an open-source platform for running and governing AI agents. Bring your own agents and tools, coordinate work across teams, and decide what each agent can do. Reuse skills and reviewed project knowledge, and track task results and reported token usage."},
-    {"id": "00-scope", "text": "Here's one small example. Security and Engineering, working together."},
-    {"id": "01-schedule", "text": "Security's scheduled scan starts on its own, without a person prompting it. Agents examine the source code for hidden vulnerabilities."},
+    {"id": "00-scope", "text": "A web app needs a security review. Security finds the vulnerabilities. Engineering prepares a fix."},
+    {"id": "01-schedule", "text": "Security's scheduled scan starts without a human prompt. Agents find undiscovered security vulnerabilities in source code."},
     {"id": "02-discovery", "text": "They trace user input and check suspected flaws against the code. Here, an image URL can become a server command. The finding includes evidence."},
     {"id": "03-teams", "text": "In Microsoft Teams, a colleague asks what needs attention. The bot explains the recorded finding, and the person chooses the fix."},
     {"id": "04-handoff", "text": "A custom demo integration hands the finding to Engineering, under that team's permissions."},
     {"id": "05-patch", "text": "Engineering's coding agent prepares the patch and runs focused tests. Orka publishes separately, keeping Git credentials out of the coding agent."},
     {"id": "06-delivery", "text": "A real pull request records the proposed fix, ready for a person to review."},
     {"id": "07-usage", "text": "Orka makes work quantifiable. Organizations can track reported tokens by task, with missing measurements clearly marked."},
-    {"id": "08-gateways", "text": "Bring local or Foundry agents through compatible integrations. Use Teams or Telegram, or build a gateway for Slack or your own application."},
+    {"id": "08-gateways", "text": "Use Teams, Telegram, or custom gateways to reach Orka. Run native agents in Kubernetes, optionally with Agent Sandbox and Agent Substrate, or connect compatible local and Foundry agents."},
     {"id": "09-outro", "text": "You've seen one small example. Explore Orka's agents, tools, skills, and reviewed memory, and build workflows for your team."}
   ]
 }

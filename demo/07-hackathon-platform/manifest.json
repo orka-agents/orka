@@ -1,26 +1,25 @@
 {
-  "project_name": "Orka Hackathon Platform",
-  "timeline_name": "Your agents, working together",
-  "output_name": "orka-hackathon-platform",
+  "project_name": "Orka Hackathon Platform Revised",
+  "timeline_name": "Your agents, working together - Revised",
+  "output_name": "orka-hackathon-platform-revised",
   "fps": 30,
   "width": 1920,
   "height": 1080,
   "scenes": [
-    {"id":"00-scenario","title":"A web app needs a security review","path":"../../bin/hackathon-platform/media/00-scenario.mp4","frames":120},
-    {"id":"00-platform","title":"Execution and governance for AI agents","path":"../../bin/hackathon-platform/media/00-platform.mp4","frames":570},
-    {"id":"00-scope","title":"One small example: Security and Engineering","path":"../../bin/hackathon-platform/media/00-scope.mp4","frames":150},
-    {"id":"01-schedule","title":"A scheduled scan starts the work","path":"../../bin/hackathon-platform/terminal/01-schedule.mp4","frames":300},
-    {"id":"02-discovery","title":"Security finds a source-code vulnerability","path":"../../bin/hackathon-platform/terminal/02-discovery.mp4","frames":330},
-    {"id":"03-teams","title":"Ask Orka Bot what needs attention","path":"../../bin/hackathon-platform/teams/03-teams.mp4","frames":360},
-    {"id":"04-request","title":"A person chooses the fix","path":"../../bin/hackathon-platform/teams/04-request.mp4","frames":90},
-    {"id":"04-handoff","title":"A custom integration hands work to Engineering","path":"../../bin/hackathon-platform/terminal/04-handoff.mp4","frames":120},
-    {"id":"05-patch","title":"Engineering prepares the patch and focused checks","path":"../../bin/hackathon-platform/terminal/05-patch.mp4","frames":300},
-    {"id":"06-delivery","title":"A real pull request, ready for review","path":"../../bin/hackathon-platform/terminal/06-delivery.mp4","frames":210},
-    {"id":"07-usage","title":"Make agent work quantifiable","path":"../../bin/hackathon-platform/terminal/07-usage.mp4","frames":300},
-    {"id":"08-gateways","title":"Compatible agents and extensible gateways","path":"../../bin/hackathon-platform/media/08-gateways.mp4","frames":300},
-    {"id":"09-outro","title":"Explore the wider Orka platform","path":"../../bin/hackathon-platform/media/09-outro.mp4","frames":300}
+    {"id":"00-platform","title":"Execution and governance for AI agents","path":"../../bin/hackathon-platform-revised/media/00-platform.mp4","frames":570},
+    {"id":"00-scope","title":"A web app security review: Security and Engineering","path":"../../bin/hackathon-platform-revised/media/00-scope.mp4","frames":240},
+    {"id":"01-schedule","title":"A scheduled scan starts the work","path":"../../bin/hackathon-platform-revised/terminal/01-schedule.mp4","frames":300},
+    {"id":"02-discovery","title":"Security finds a source-code vulnerability","path":"../../bin/hackathon-platform-revised/terminal/02-discovery.mp4","frames":330},
+    {"id":"03-teams","title":"Ask Orka Bot what needs attention","path":"../../bin/hackathon-platform-revised/teams/03-teams.mp4","frames":360},
+    {"id":"04-request","title":"A person chooses the fix","path":"../../bin/hackathon-platform-revised/teams/04-request.mp4","frames":90},
+    {"id":"04-handoff","title":"A custom integration hands work to Engineering","path":"../../bin/hackathon-platform-revised/terminal/04-handoff.mp4","frames":120},
+    {"id":"05-patch","title":"Engineering prepares the patch and focused checks","path":"../../bin/hackathon-platform-revised/terminal/05-patch.mp4","frames":300},
+    {"id":"06-delivery","title":"A real pull request, ready for review","path":"../../bin/hackathon-platform-revised/terminal/06-delivery.mp4","frames":210},
+    {"id":"07-usage","title":"Make agent work quantifiable","path":"../../bin/hackathon-platform-revised/terminal/07-usage.mp4","frames":300},
+    {"id":"08-gateways","title":"Input gateways and native or external agents","path":"../../bin/hackathon-platform-revised/media/08-gateways.mp4","frames":420},
+    {"id":"09-outro","title":"Explore the wider Orka platform","path":"../../bin/hackathon-platform-revised/media/09-outro.mp4","frames":300}
   ],
   "audio": [
-    {"path":"../../bin/hackathon-platform/audio/voiceover-timeline.wav","record_frame":0,"frames":3450,"track":1}
+    {"path":"../../bin/hackathon-platform-revised/audio/voiceover-timeline.wav","record_frame":0,"frames":3540,"track":1}
   ]
 }
