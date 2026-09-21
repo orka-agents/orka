@@ -72,8 +72,8 @@ end
 local function assemble(manifest)
     require_value(manifest.fps == 30 and manifest.width == 1920 and manifest.height == 1080,
                   'The preflight must use 1920x1080 at 30fps')
-    require_value(manifest.total_frames > 0 and manifest.total_frames <= 3570,
-                  'The video must be no longer than 119 seconds')
+    require_value(manifest.total_frames > 0 and manifest.total_frames <= (manifest.max_frames or 3570),
+                  'The video exceeds the checked duration limit')
     local app = require_value(resolve or bmd.scriptapp('Resolve'), 'Resolve is not available')
     local manager = app:GetProjectManager()
     local previous = manager:GetCurrentProject()

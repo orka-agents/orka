@@ -81,9 +81,9 @@ def nonnegative_frames(value, context):
 def load_manifest(path, check_media=True):
     path = Path(path).expanduser().resolve()
     manifest = json.loads(path.read_text())
-    require(manifest.get("fps", FPS) == FPS, "The first-pass timeline uses 30 fps")
+    require(manifest.get("fps", FPS) == FPS, "The timeline uses 30 fps")
     require(manifest.get("width", WIDTH) == WIDTH and manifest.get("height", HEIGHT) == HEIGHT,
-            "The first-pass timeline uses 1920x1080")
+            "The timeline uses 1920x1080")
     scenes = manifest.get("scenes", [])
     audio = manifest.get("audio", [])
     require(scenes, "The manifest needs at least one video scene")
@@ -114,7 +114,7 @@ def load_manifest(path, check_media=True):
         scene["record_frame"] = total_frames
         total_frames += scene["frames"]
     require(total_frames <= MAX_FRAMES,
-            "Timeline is %.3fs; maximum is 119s" % (total_frames / FPS))
+            "Timeline is %.3fs; maximum is %.3fs" % (total_frames / FPS, MAX_FRAMES / FPS))
 
     intervals = {}
     for index, clip in enumerate(audio):
@@ -161,6 +161,7 @@ def load_manifest(path, check_media=True):
     manifest.update({"fps": FPS, "width": WIDTH, "height": HEIGHT,
                      "output_dir": str(output_dir), "output_name": output_name,
                      "total_frames": total_frames, "duration_seconds": total_frames / FPS,
+                     "max_frames": MAX_FRAMES,
                      "manifest_path": str(path)})
     return manifest
 
@@ -181,7 +182,8 @@ def verify_output(report_path):
     require(abs(rate(video["avg_frame_rate"]) - FPS) < 0.001, "Wrong export frame rate")
     require(int(video["nb_frames"]) == manifest["total_frames"], "Wrong export frame count")
     duration = float(probe["format"]["duration"])
-    require(duration < 120, "The delivered video must be shorter than 120 seconds")
+    require(duration < manifest.get("max_frames", MAX_FRAMES) / FPS + 1,
+            "The delivered video exceeds the duration limit")
     project_export = Path(report["project_export"])
     require(project_export.is_file() and project_export.stat().st_size > 0, "The Resolve project export is missing")
     if report.get("delivery_dir"):

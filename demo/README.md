@@ -17,8 +17,11 @@ terminal: a pull request, an object that survived deletion, a refusal.
 | 10 | [`10-reviewed-memory`](10-reviewed-memory) | One assistant proposes a return procedure. A person accepts and applies it, then a fresh agent uses the saved note. |
 | 11 | [`11-fibey-approval`](11-fibey-approval) | Fibey investigates a pump alert and proposes an inspection. A person approves the work order, and its receipt returns to the same waiting Task. |
 
-Projects 6 and 7 are edited video projects with their own instructions. The
-standalone recorder discovers only directories containing an executable `demo.sh`.
+Projects 6 and 7 are hackathon videos with their own instructions and are
+excluded from the narrated standalone series. See [`narrated/`](narrated/) for
+the scenario-led voiceover and DaVinci Resolve workflow for demos 01–05 and
+08–11. The standalone recorder discovers only directories containing an
+executable `demo.sh`.
 
 The scripts are plain bash. `demo/lib/demo.sh` types commands the way a
 person would, and every command the viewer sees is the command that ran.
@@ -27,10 +30,10 @@ after a change keeps the two in sync.
 
 ## Prepare the new walkthroughs
 
-Demos 08 through 11 have scripts and setup instructions. They have not been
-recorded. Each opens with a business situation and explains new terms
-beside the action that uses them. They target about four minutes with waiting
-compressed; timing still needs a full rehearsal with the prepared model service.
+Demos 08 through 11 have been recorded against the prepared AKS installation.
+Each opens with a business situation and explains new terms beside the action
+that uses them. The terminal captures compress quiet waits; the narrated
+Resolve edits add scenario openings, explanations, and closing links.
 
 Start with the existing demo cluster and build its matching CLI with
 `make build-cli`. Follow each demo's README for its additional setup, then run
