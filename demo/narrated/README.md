@@ -10,10 +10,16 @@ invitations. Each ending displays `https://orka-agents.github.io/orka/`.
 The narration describes the results visible in the recorded run. It does not
 replace or invent command output.
 
-Demo 12 compares the same payments and inventory requests before and after a
-model-routing change. Its narration leaves route choices, correctness results,
-usage, and timings to the recorded evidence. Record it only after the live
-checks succeed. The existing demos and their narration remain unchanged.
+Demo 12 follows a customer charged twice after retrying a frozen checkout.
+A support assistant drafts a factual reply, while payments engineering fixes
+the cause in a sample repository and runs its tests. The terminal shows real
+Orka CLI and `kubectl` commands. Both runs keep their requests, instructions,
+and repository revision fixed, first using hosted GPT-5.5 and then enabling
+Vekil's semantic routing. The native support Agent connects to Vekil through
+the Orka Provider named `semantic-router`. The Codex coding agent's model
+connection uses the platform's model proxy to reach the same Vekil gateway.
+Narration follows observed routes, outcomes, usage, and timings. Record it only
+after the live checks succeed.
 
 ## Prepare the source footage and voice
 

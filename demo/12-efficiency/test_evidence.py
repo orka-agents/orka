@@ -109,6 +109,66 @@ def window(mode="enforce", tier="lightweight"):
 
 
 class GatewayEvidenceTests(unittest.TestCase):
+    def continuation_window(self, mode="enforce"):
+        before, after, logs = window(mode, tier="powerful")
+        fields = {key: value for key, value in logs[1].items()
+                  if key.startswith("policy_") or key in e.GENERATION_FIELDS}
+        logs[0].update(fields)
+        for row in (logs[0], after["stats"]["recent"][0]):
+            row.update(model="team-assistant", route_id="team-assistant", final_target="team-assistant")
+        after["stats"]["recent_attempts"][0].update(route_id="team-assistant", target_id="team-assistant", provider_id="")
+        logs[1].update(policy_decision="replay_binding", policy_classifier_latency_ms=0,
+                       policy_truncated=True)
+        e.profile(after)["totals"]["eligible"] += 1
+        e.profile(after)["totals"]["actual_tiers"]["powerful"] += 1
+        return before, after, logs
+
+    def test_tool_continuations_keep_the_selection_without_another_classifier_call(self):
+        for mode in ("off", "enforce"):
+            with self.subTest(mode=mode):
+                before, after, logs = self.continuation_window(mode)
+                result = e.gateway_window(before, after, logs, mode, allow_tool_continuations=True)
+                self.assertEqual(result["workerRequests"], 2)
+                self.assertEqual(result["classifier"]["sends"], 1 if mode == "enforce" else 0)
+                self.assertEqual(result["operations"][1]["policyDecision"], "replay_binding")
+                with self.assertRaises(e.EvidenceError):
+                    e.gateway_window(before, after, logs, mode)
+
+    def test_tool_continuation_does_not_justify_a_truncated_initial_classification(self):
+        before, after, logs = self.continuation_window()
+        logs[0]["policy_truncated"] = True
+        with self.assertRaisesRegex(e.EvidenceError, "truncated request"):
+            e.gateway_window(before, after, logs, "enforce", allow_tool_continuations=True)
+
+    def test_bounded_context_is_explicit_and_retains_the_reported_flag(self):
+        before, after, logs = self.continuation_window()
+        logs[0]["policy_truncated"] = True
+        result = e.gateway_window(before, after, logs, "enforce", allow_tool_continuations=True,
+                                  allow_bounded_context=True)
+        self.assertTrue(result["operations"][0]["classifierInputTruncated"])
+        self.assertEqual(result["classifier"]["sends"], 1)
+        logs[0]["policy_decision"] = "uncertain_fallback"
+        with self.assertRaisesRegex(e.EvidenceError, "fallback"):
+            e.gateway_window(before, after, logs, "enforce", allow_tool_continuations=True,
+                             allow_bounded_context=True)
+
+    def test_bounded_context_does_not_accept_a_missing_context_flag(self):
+        before, after, logs = self.continuation_window()
+        del logs[0]["policy_truncated"]
+        with self.assertRaisesRegex(e.EvidenceError, "Missing classifier context flag"):
+            e.gateway_window(before, after, logs, "enforce", allow_tool_continuations=True,
+                             allow_bounded_context=True)
+
+    def test_tool_continuation_needs_an_initial_selection_and_the_same_hosted_tier(self):
+        before, after, logs = self.continuation_window()
+        logs[0].update(policy_decision="replay_binding", policy_classifier_latency_ms=0)
+        with self.assertRaisesRegex(e.EvidenceError, "no initial model selection"):
+            e.gateway_window(before, after, logs, "enforce", allow_tool_continuations=True)
+        before, after, logs = self.continuation_window()
+        logs[1]["policy_tier"] = "lightweight"
+        with self.assertRaisesRegex(e.EvidenceError, "did not retain the hosted model"):
+            e.gateway_window(before, after, logs, "enforce", allow_tool_continuations=True)
+
     def test_classified_destination_comes_from_tier_and_installed_route(self):
         before, after, logs = window()
         result = e.gateway_window(before, after, logs, "enforce")
@@ -320,6 +380,43 @@ class OrkaEvidenceTests(unittest.TestCase):
         self.save()
         with self.assertRaisesRegex(e.EvidenceError, "estimated"):
             self.verify()
+
+    def make_usage_unavailable(self):
+        row = self.group["tasks"][0]
+        row["usage"] = {**orka_totals(0, 0), "completeness": "unavailable", "missingMeasurements": 1}
+        row["measurements"] = [{"completeness": "unavailable", "status": "completed", "scope": "attempt",
+                                "provider": "codex", "source": "agent", "model": "team-assistant",
+                                "inputTokens": None, "outputTokens": None,
+                                "gap": "No consumed-token counts reported"}]
+        self.group["usage"] = {**orka_totals(80, 20), "completeness": "partial", "missingMeasurements": 1}
+        self.save()
+
+    def test_missing_coding_usage_remains_unavailable_with_gateway_accounted_separately(self):
+        self.make_usage_unavailable()
+        with self.assertRaisesRegex(e.EvidenceError, "incomplete"):
+            self.verify()
+        result = e.orka_usage(self.path, "payments", self.requests, self.window, self.period,
+                             allow_unreported_tasks=("native-uid",))
+        self.assertEqual(result["reportedWorkerTasks"], 0)
+        self.assertIsNone(result["unavailableTasks"][0]["tokens"])
+        self.assertEqual(result["workers"]["total_tokens"], 0)
+        self.assertEqual(result["coordinator"]["total_tokens"], 100)
+
+    def test_unavailable_coding_usage_cannot_hide_counts_or_a_different_gap(self):
+        for field, value in (("inputTokens", 8), ("estimatedTokens", 4)):
+            with self.subTest(field=field):
+                self.make_usage_unavailable()
+                self.group["tasks"][0]["usage"][field] = value
+                self.save()
+                with self.assertRaisesRegex(e.EvidenceError, "counts or estimates"):
+                    e.orka_usage(self.path, "payments", self.requests, self.window, self.period,
+                                 allow_unreported_tasks=("native-uid",))
+        self.make_usage_unavailable()
+        self.group["tasks"][0]["measurements"][0]["gap"] = "Stream lost"
+        self.save()
+        with self.assertRaisesRegex(e.EvidenceError, "Unexpected gap"):
+            e.orka_usage(self.path, "payments", self.requests, self.window, self.period,
+                         allow_unreported_tasks=("native-uid",))
 
 
 class RequestEvidenceTests(unittest.TestCase):

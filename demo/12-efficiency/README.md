@@ -1,147 +1,163 @@
-# Two teams, one address, more useful work
+# Help the customer. Fix the cause.
 
-Payments must count repeated payment events once and fix a double-charge bug.
-Inventory needs a useful stock answer and a fix for overlapping orders. Both
-teams send requests through one company address. The platform team changes
-the saved worker instructions, then the model-routing policy, and checks what
-those changes actually produce.
+A customer clicked Pay again after checkout froze and saw two charges. Support
+needs a factual acknowledgement and the order reference. Payments engineering
+needs to fix overlapping retries. These two teams use saved Orka Agents in one
+installation on `sertac-aks`.
 
-The walkthrough uses the chapter helpers from `demo/lib/demo.sh`. It introduces
-an Agent as saved worker instructions, a Task as the record of one piece of
-work, and a gateway when the viewer sees it choose a model. The closing link is
-<https://orka-agents.github.io/orka/>.
+The walkthrough starts with the scenario and the instructions that define each
+job. It runs both jobs with hosted GPT-5.5, introduces a local model, enables
+Vekil's semantic router, and repeats the same work. The recording uses real
+`orka`, `kubectl`, Git, and Podman commands. Node runs the payment tests inside
+an isolated container.
 
-## Prepare on sertac-aks
+The support Agent uses the Orka Provider named `semantic-router`. The coding
+Agent uses a Codex runtime under `orka.harness.v2`; its authenticated model proxy
+also forwards to Vekil. These are separate connection mechanisms. An ACP Agent's
+`providerRef` does not select its model proxy.
 
-Use the existing Orka CRDs and shared admission installation, a matching
-`bin/orka` CLI, `kubectl`, Python 3 with PyYAML, and `curl`. All cluster commands
-select `sertac-aks` explicitly. They do not switch the global context.
+Jev classifies new work as lightweight or powerful. Vekil
+maps that choice to Qwen3.5 2B, served by AIKit on cluster CPUs, or hosted
+GPT-5.5. Related tool calls retain the selected model while the agent finishes
+the job. The video describes local capacity as hardware you already pay for and
+operate. Actual routing records establish the destination of each call.
+
+## Preparation
+
+Requirements are the existing Orka CRDs and admission installation, a matching
+`bin/orka`, `kubectl`, Python with PyYAML, a running Podman machine, Git, and `jq`.
+Use the existing demo installation prepared by `prepare.py`. For a new
+installation, see that command's help and safe manifest rendering. Do not
+reapply the original controller template over the persistent runtime setup.
 
 ```sh
-python3 demo/12-efficiency/prepare.py --context sertac-aks \
-  --providers-source /Users/sozercan/projects/copilot-proxy/provider-v4.yaml render-safe
-
-python3 demo/12-efficiency/prepare.py --context sertac-aks \
-  --providers-source /Users/sozercan/projects/copilot-proxy/provider-v4.yaml apply
+python3 demo/12-efficiency/runtime_setup.py render-safe
+python3 demo/12-efficiency/runtime_setup.py --context sertac-aks apply
+python3 demo/12-efficiency/story.py setup
 ```
 
-The first command renders manifests offline with the private classifier address
-removed. The second prepares two namespace-scoped Orka installations, two Vekil
-gateways, the compatibility router, and the AIKit CPU model. Controllers run in
-harness-v2 mode. Setup refuses resources without its ownership label and
-requires capacity on the selected model node. Its safe state record is
-`bin/efficiency-production/setup.json`.
+Runtime setup changes only the owned `team-payments` installation. It prepares
+the coding runtime's authenticated model proxy, repository egress proxy, and
+Publisher. Before replacing the controller, it copies a consistent SQLite
+backup and existing artifacts onto an owned persistent volume and verifies the
+copy. The repository credential stays in Kubernetes Secrets and outside the
+agent process. Setup verifies that existing shared services, the original
+Copilot credential, and the private provider source are unchanged.
 
-Setup copies the existing Copilot credential and the configured Jev credential
-into demo-owned Secrets without printing them. It verifies fingerprints of the
-original provider file, `vekil-system/vekil`, its token-cache PVC, and the original
-Copilot Secret before and after each operation. It does not mount or replace
-the original cache. Gateway state uses a separate writable directory.
+The sample lives on `sozercan/orka-demo-inventory`, branch
+`demos/duplicate-checkout`, at the revision pinned in `story.py`. Its source is
+also under `sample/payments/`. Six regression tests cover overlapping retries,
+completed retries, independent checkouts, and failure recovery. The starting
+implementation deliberately fails two tests. Both runs start at that same
+revision, and each publishes only `payments/charge.mjs` to a fresh demo branch.
+No pull request is created.
 
-The four team and runtime namespaces use a scoped namespace policy because the
-shared admission installation still names a retired webhook path. Setup excludes
-only these namespaces from that webhook, protects their harness-v2 claim with
-the new policy, and adds the two controller identities to shared admission.
-It leaves other namespace and admission rules in place.
+Setup pulls the official Node 24 image pinned in `story.py`. Independent checks
+mount only the payment source directory read-only. The container runs as an
+unprivileged user, with no network, dropped capabilities, a read-only root
+filesystem, resource limits, and a 60-second deadline. Generated code never
+runs with the recording host's credentials or access to its evidence files.
 
-Image references are pinned in `prepare.py`. The production images use
-`docker.io/sozercan`; builds use the `remote-vm` buildx builder. When rebuilding
-Vekil, export a clean commit with `git archive` and build that export. Its
-checkout contains a private provider file and its Dockerfile copies the build
-context, so the working directory must not be the build context. Provisioning,
-image builds, and credential setup stay outside the recorded walkthrough.
+Provisioning, credentials, and builds stay outside the walkthrough. All images
+are pinned. New builds use the `remote-vm` builder and `docker.io/sozercan`.
+Never use the private Vekil working directory as a Docker build context.
 
-## Rehearse and record
-
-Run only one walkthrough at a time. It uses dedicated localhost ports 18090,
-18101, 18102, 18111, 18112, and 18120 for cluster connections. Stop an earlier
-manual `run.py connect` process before starting the standalone script.
+The coding image adds the policy-model settings used by Vekil's Codex launcher.
+Its model catalog names `team-assistant` and uses text and standard function
+tools. Hosted web search, freeform tools, and remote compaction are disabled
+because the semantic policy route does not support them. The original Codex
+binary, ACP adapter, and Orka v2 supervisor remain in the pinned base image.
+The catalog uses short base instructions, and Codex's own subagent feature is
+disabled for this single-worker job. Orka supplies the saved Agent instructions.
+Build this small configuration layer from its isolated, credential-free context:
 
 ```sh
-# Live rehearsal, without recording.
+docker buildx build --builder remote-vm --platform linux/amd64 \
+  --tag docker.io/sozercan/orka-acp-codex-runtime:efficiency-policy-20260922-r3 \
+  --push demo/12-efficiency/runtime
+```
+
+`runtime_setup.py` pins the resulting image digest. Keep it identical for both
+runs. This is preparation for the demo, outside the recorded walkthrough.
+
+## Rehearsal and recording
+
+Stop an earlier manual `run.py connect` process before starting. Run one
+walkthrough at a time. The existing connection helper uses dedicated localhost
+ports 18090, 18101, 18102, 18111, 18112, and 18120.
+
+```sh
 demo/12-efficiency/demo.sh
 
-# A fresh live run, recorded at 100 columns by 28 rows.
 demo/record.sh 12-efficiency
 ```
 
-Every run gets a new private directory under `bin/efficiency-production/`.
-`EFFICIENCY_RUN_DIR` can select a different new directory. Existing directories
-are refused. The script changes only the two demo gateways' routing modes and
-the two demo Agents, creates new Tasks, and retains prior evidence. Its own
-connection and resource-sampling processes stop on exit. A failure stops the
-walkthrough; inspect the saved responses before trying a fresh run.
+The recording is asciicast v3 at 100 columns by 28 rows. Waits are compressed.
+Archive an existing `demo/casts/12-efficiency.cast` before recording because the
+recorder replaces that file. Each run gets a fresh evidence directory under
+`bin/efficiency-production/`. `EFFICIENCY_RUN_DIR` can choose a new directory.
+The script refuses an existing run directory, retains previous Tasks and
+published branches, and stops its own connection and sampling processes on exit.
 
-The short commands shown in the terminal are real helpers:
+`story.py` runs offscreen to prepare manifests, retain raw responses, and check
+the records. It is not a new user CLI. Configuration excerpts and comparison
+files displayed with `cat` are derived from the actual deployment and run.
+The visible `orka` commands call `bin/orka` with prepared server, namespace, and
+short-lived authentication flags. They do not alter the presenter's CLI config,
+`HOME`, or kubeconfig.
 
-- `run ask` submits an authenticated OpenAI-compatible request to the shared
-  router, then collects the actual Orka Task, answer, events, and gateway records.
-- `run agents` updates the saved instructions. `gateway_mode` changes the two
-  demo gateways after their earlier statistics have been captured.
-- `view` shows compact excerpts from installed configuration or verified run
-  records. Full JSON responses remain beside those views.
+## Evidence
 
-The application keeps `platform/coordinator` as its model name. Its hosted
-coordinator creates one native AI Task using the team's Agent and returns that
-Task's answer. The worker uses the stable `team-assistant` model name through
-Vekil's Messages compatibility interface. A public name alone is not evidence
-of which model handled a call.
+The support reply must contain two sentences, acknowledge the reported double
+charge, request an order reference, and avoid claiming a completed refund or
+investigation. The native worker must make zero tool calls. Native workers
+still expose memory tools, so an empty configured tool list alone proves
+nothing about tool use.
 
-## What the comparison proves
+The coding Agent edits the real repository and runs its tests. The recording
+also independently checks the published branch and reruns the unchanged six
+tests. Both runs must change only the payment implementation and start from the
+pinned revision. This is a small in-memory concurrency example, not a payment
+processor or a claim about deduplication across processes.
 
-The initial inventory request produces a short sentence. Updating only its
-Agent instructions adds structured stock, shortage, and customer-next-action
-fields. The business request and application connection remain unchanged.
+Gateway snapshots, operation IDs, attempt records, completion logs, configured
+destinations, and physical counters must reconcile. The routed run requires
+actual classifier decisions and both model destinations. Tool continuations must
+retain the hosted destination selected earlier in the same Task. Their calls
+count toward model usage and do not count as new classifier calls. Vekil bounds
+the context supplied to its classifier. Its aggregate truncation flag covers
+background instructions and older messages as well as the current request.
+The coding route view reports that flag when set. The demo establishes the
+recorded destination and tested outcome, without claiming the classifier saw
+the entire coding context or attributing the tier to one particular signal.
+Fallback, failed model calls, changed instructions, restarts during a measured
+interval, missing history, or failing checks stop the walkthrough.
 
-With those instructions fixed, both measured runs use four identical requests.
-The baseline uses hosted GPT-5.5. In the second run, Jev assesses each worker
-request and Vekil chooses a configured destination, either Qwen3.5 2B served by
-AIKit on cluster CPU or hosted GPT-5.5. Incoming coordination stays hosted.
-Routing is not an answer-quality test or an automatic correction mechanism.
+The comparison includes reported model tokens, classifier requests and usage,
+Task elapsed time, and sampled CPU and memory use. Classifier startup checks are
+reported outside the Task intervals. Missing measurements remain unavailable.
+Orka's usage report must reconcile wherever it reports consumed tokens. The
+current Codex runtime leaves its attempt count unavailable there, with the
+explicit gap `No consumed-token counts reported`. The demo retains that gap as
+unavailable, verifies the native support measurement, and uses the gateway's
+complete physical-call records for both jobs in the token comparison. It never
+substitutes gateway numbers into missing Orka measurements or adds overlapping
+counts together. Standalone Tasks appear under other team usage. Token totals
+include cached input; they do not establish dollar savings. Local computation
+also consumes capacity.
 
-Payments must return two unique events totaling 30. Inventory must return
-18 available and a shortage of 6, with a customer next action. The proposed
-payment and stock fixes run through six and eight checks respectively in real
-Orka container Tasks, including overlapping requests, retries, and failure
-cases. Model-generated code is restricted to the fixture's operations before
-execution. The code, test command, container image, and result are retained.
-
-`evidence.py` checks complete event histories, exactly one new worker Task per
-request, unchanged prompts, identical requests and Agent configurations across
-the measured runs, and zero worker tool calls. Native workers still expose
-built-in memory tools even with an empty configured list; the evidence verifies
-they were not used. The verifier joins gateway operation IDs, attempt records,
-completion logs, installed destinations, and Orka's normalized usage events.
-Counter changes must reconcile with the retained operations. Missing history,
-unexpected traffic, restarts, configuration changes, or failed checks stop the
-comparison. Both model destinations must actually appear in the routed run.
-
-Orka records these standalone requests under Other team usage. Worker and
-coordinator consumption are reconciled with gateway totals and counted once.
-Classifier usage is reported separately, including startup checks outside the
-measured request intervals. Missing classifier usage remains unavailable.
-Reported tokens include cached input, so totals do not represent uncached
-computation or dollar cost. The comparison also retains application elapsed
-time and sampled model CPU time and working memory, including idle time.
-
-This is a controlled example with fixed requests, not a general model benchmark.
-The video makes no preset savings or speed claim. Local CPU work still consumes
-capacity, and coordination can dominate the total model usage.
-
-## Verification and production
+## Verification and video production
 
 ```sh
-bash -n demo/12-efficiency/demo.sh demo/record.sh
+bash -n demo/12-efficiency/demo.sh
 python3 -m unittest discover -s demo/12-efficiency -p 'test_*.py'
-python3 demo/12-efficiency/evidence.py --run-dir <successful-run-directory>
+python3 demo/12-efficiency/story.py --run-dir <successful-run-directory> verify
 
 python3 demo/narrated/prepare.py render 12-efficiency
-python3 demo/narrated/resolve.py --prepare-lua \
-  bin/narrated-demos/12-efficiency/manifest.json --sandbox
 ```
 
-The narrated workflow uses the existing Qwen3 TTS Podman service and reference
-voice, then creates a new DaVinci Resolve project. See
-[`../narrated/README.md`](../narrated/README.md) for assembly, export verification,
-and audio and frame checks. Earlier demo recordings remain separate. Generated
-casts, audio, video, projects, and evidence stay in ignored output directories.
+See [`../narrated/README.md`](../narrated/README.md) for reference-voice synthesis,
+Resolve assembly, and export checks. Give the replacement manifest a new
+`output_name`, such as `12-efficiency-customer-story`, before assembly so the
+previous project's staged media and exports remain available. The final video
+ends with <https://orka-agents.github.io/orka/>.

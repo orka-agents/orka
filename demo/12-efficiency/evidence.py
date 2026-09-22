@@ -224,7 +224,8 @@ def preflight_usage(snapshot, rows):
     return [{**row, "usageComplete": physical["reported_usage_sends"] == physical["sends"]}]
 
 
-def gateway_window(before, after, logs, mode):
+def gateway_window(before, after, logs, mode, *, allow_tool_continuations=False,
+                   allow_bounded_context=False):
     """Return a complete, independently reconciled interval of gateway traffic."""
     require(timestamp(before["at"]) <= timestamp(after["at"]), "Reversed gateway interval")
     require(before["podUID"] and before["podUID"] == after["podUID"], "Gateway Pod was replaced")
@@ -287,11 +288,21 @@ def gateway_window(before, after, logs, mode):
             require(log["policy_id"] == policy["id"] and log["policy_mode"] == mode, "Policy decision does not match the installed policy")
             require(all(log.get(key) == last_profile["generation_hashes"][key] for key in GENERATION_FIELDS),
                     "Decision and snapshot policy generations disagree")
-            require(log["policy_truncated"] is False, "Classifier saw a truncated request")
+            decision = log["policy_decision"]
+            continuation = allow_tool_continuations and decision == "replay_binding"
+            # Vekil's aggregate flag also covers bounded background instructions
+            # and older messages. The coding walkthrough reports this limitation
+            # explicitly; the earlier fixed-answer demo remains strict by default.
+            require(isinstance(log.get("policy_truncated"), bool), "Missing classifier context flag")
+            require(continuation or allow_bounded_context or log["policy_truncated"] is False,
+                    "Classifier saw a truncated request")
             tier = log["policy_tier"]
             require(tier in ("lightweight", "powerful"), "Missing terminal policy tier")
-            require(log["policy_decision"] == ("classified" if mode == "enforce" else "baseline"),
+            require(continuation or decision == ("classified" if mode == "enforce" else "baseline"),
                     "Request used fallback or did not receive the expected policy decision")
+            if continuation:
+                require(tier == "powerful" and not log.get("policy_classifier_latency_ms"),
+                        "Tool continuation did not retain the hosted model without classification")
             require(not log["policy_failure_category"], "Classifier recorded a failure")
             require(mode != "off" or tier == policy["baseline_tier"], "Baseline request used the wrong tier")
             destination, role = destinations[tier], "worker"
@@ -313,6 +324,10 @@ def gateway_window(before, after, logs, mode):
                            "classifierToolCount": log.get("policy_tool_count", 0),
                            "classifierInputBytes": log.get("policy_input_bytes", 0)})
     require(len(attempts) == len(operations), "Unaccounted terminal attempts")
+    if any(row["policyDecision"] == "replay_binding" for row in operations):
+        require(any(row["tier"] == "powerful" and row["policyDecision"] ==
+                    ("classified" if mode == "enforce" else "baseline") for row in operations),
+                "Tool continuation has no initial model selection in this interval")
     usage = add_tokens(row["usage"] for row in operations)
     require(usage == {key: totals[key] for key in TOKEN_FIELDS}, "Request counters and operation usage disagree")
     require(usage == token_delta(a["physical_usage"], b["physical_usage"]), "Physical usage counters disagree")
@@ -331,7 +346,7 @@ def gateway_window(before, after, logs, mode):
                           ("lightweight", "powerful", "unknown"))
     require(tiers == {key: sum(row["tier"] == key for row in operations) for key in tiers}, "Policy tier counters disagree")
     classifier = physical.get("classifier", {**dict.fromkeys(LEDGER_FIELDS, 0), "usage": dict.fromkeys(TOKEN_FIELDS, 0)})
-    expected_classifications = worker_count if mode == "enforce" else 0
+    expected_classifications = sum(row["policyDecision"] == "classified" for row in operations) if mode == "enforce" else 0
     require(classifier["sends"] == policy_delta["physical_classifier_sends"] == expected_classifications,
             "Classifier physical sends do not match classified requests")
     classifier_usage = counter_delta(first_profile["totals"]["classifier_usage"], last_profile["totals"]["classifier_usage"],
@@ -463,7 +478,7 @@ def verify_request(root, phase, workload):
             "gateway": window["gateway"], "agentSpecSHA256": digest(agent["spec"])}
 
 
-def orka_usage(directory, team, requests, window, period):
+def orka_usage(directory, team, requests, window, period, *, allow_unreported_tasks=()):
     summary = read(directory / (team + "-usage.json"))
     rows = []
     for category in ("unassociated", "other_requests"):
@@ -481,18 +496,38 @@ def orka_usage(directory, team, requests, window, period):
     tasks = index(rows, lambda row: row["taskUID"], "Orka usage Tasks")
     worker_ids = {request["taskUID"] for request in requests}
     require(worker_ids <= tasks.keys(), "Native Task is missing from Orka usage")
-    worker_tokens, coordinator_tokens = [], []
+    require(set(allow_unreported_tasks) <= worker_ids, "Unknown Task allowed to omit Orka usage")
+    worker_tokens, coordinator_tokens, unavailable = [], [], []
+    gateway_only_tokens = []
     for uid, row in tasks.items():
         usage = row["usage"]
+        require(row["namespace"] == "team-" + team, "Cross-team Orka usage")
+        require(usage["measurements"] == len(row["measurements"]), "Orka measurement history is missing")
+        if uid in allow_unreported_tasks and usage["completeness"] == "unavailable":
+            request = next(item for item in requests if item["taskUID"] == uid)
+            require(row["taskName"] == request["task"] and row["phase"] == "Succeeded", "Orka Task usage identity mismatch")
+            require(usage["measurements"] > 0 and usage["missingMeasurements"] == usage["measurements"]
+                    and usage["partialMeasurements"] == usage["estimatedTokens"] == 0
+                    and all(usage[key] == 0 for key in ("inputTokens", "outputTokens", "totalTokens", "cachedInputTokens")),
+                    "Unavailable Orka usage contains counts or estimates")
+            for measurement in row["measurements"]:
+                require(measurement["completeness"] == "unavailable" and measurement["status"] == "completed"
+                        and measurement["scope"] == "attempt" and measurement["provider"] == "codex"
+                        and measurement["source"] == "agent" and measurement["model"] == "team-assistant"
+                        and measurement.get("gap") == "No consumed-token counts reported"
+                        and measurement.get("inputTokens") is None and measurement.get("outputTokens") is None,
+                        "Unexpected gap in Orka coding usage")
+            unavailable.append({"taskUID": uid, "task": row["taskName"],
+                                "gap": "No consumed-token counts reported", "tokens": None})
+            gateway_only_tokens.append(request["worker"]["usage"])
+            continue
         require(usage["completeness"] == "complete" and usage["missingMeasurements"] == usage["partialMeasurements"] == 0
                 and usage["estimatedTokens"] == 0, "Orka usage is incomplete or estimated")
-        require(row["namespace"] == "team-" + team, "Cross-team Orka usage")
         value = {"prompt_tokens": count(usage["inputTokens"], "Orka input tokens"),
                  "completion_tokens": count(usage["outputTokens"], "Orka output tokens"),
                  "total_tokens": count(usage["totalTokens"], "Orka total tokens"),
                  "cached_tokens": count(usage["cachedInputTokens"], "Orka cached tokens"), "reasoning_tokens": 0}
         require(value["total_tokens"] == value["prompt_tokens"] + value["completion_tokens"], "Orka token components disagree")
-        require(usage["measurements"] == len(row["measurements"]), "Orka measurement history is missing")
         for measurement in row["measurements"]:
             require(measurement["completeness"] == "complete" and measurement["status"] == "completed"
                     and not measurement.get("gap"), "Orka measurement is incomplete")
@@ -507,11 +542,15 @@ def orka_usage(directory, team, requests, window, period):
                     "Unaccounted Orka model consumption")
             coordinator_tokens.append(value)
     expected = add_tokens(operation["usage"] for operation in window["operations"])
-    total = add_tokens(worker_tokens + coordinator_tokens)
+    # Reconcile the available Orka measurements, and separately account for the
+    # gateway calls belonging to explicitly unavailable attempts. Never insert
+    # gateway numbers into the missing Orka measurement or call that gap zero.
+    total = add_tokens(worker_tokens + coordinator_tokens + gateway_only_tokens)
     require(all(total[key] == expected[key] for key in ("prompt_tokens", "completion_tokens", "total_tokens")),
             "Orka total consumption and gateway inference usage disagree")
     return {"workers": add_tokens(worker_tokens), "coordinator": add_tokens(coordinator_tokens),
             "workerTasks": len(worker_ids), "coordinatorMeasurements": len(coordinator_tokens),
+            "reportedWorkerTasks": len(worker_tokens), "unavailableTasks": unavailable,
             "category": "Standalone requests are in other usage, outside PR delivery totals."}
 
 
