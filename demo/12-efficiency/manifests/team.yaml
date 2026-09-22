@@ -1,0 +1,417 @@
+# One complete namespace-scoped Orka installation per team.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: __TEAM__
+  labels:
+    orka.ai/controller-mode: harness-v2
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: __TEAM__-runtimes
+  labels:
+    orka.ai/controller-mode: harness-v2
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: controller
+  namespace: __TEAM__
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: controller
+  namespace: __TEAM__
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: controller
+  namespace: __TEAM__
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: controller
+subjects:
+  - kind: ServiceAccount
+    name: controller
+    namespace: __TEAM__
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: controller
+  namespace: __TEAM__-runtimes
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: controller
+  namespace: __TEAM__-runtimes
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: controller
+subjects:
+  - kind: ServiceAccount
+    name: controller
+    namespace: __TEAM__
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: orka-efficiency-__TEAM__
+rules:
+  - apiGroups: [authentication.k8s.io]
+    resources: [tokenreviews]
+    verbs: [create]
+  - apiGroups: [authorization.k8s.io]
+    resources: [subjectaccessreviews]
+    verbs: [create]
+  - apiGroups: [""]
+    resources: [namespaces]
+    resourceNames: [__TEAM__, __TEAM__-runtimes]
+    verbs: [get]
+  - apiGroups: [storage.k8s.io]
+    resources: [storageclasses]
+    verbs: [get, list, watch]
+  - apiGroups: [workspace.orka.ai]
+    resources: [executionworkspaceproviders, executionworkspaceclasses]
+    verbs: [get, list, watch]
+  - apiGroups: [acp.workspace.orka.ai]
+    resources: [runtimeproviderconfigs]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: orka-efficiency-__TEAM__
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: orka-efficiency-__TEAM__
+subjects:
+  - kind: ServiceAccount
+    name: controller
+    namespace: __TEAM__
+---
+# Native workers may read their configured tool metadata. The walkthrough does
+# not give them code execution or mutable coordination permissions.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: native-worker
+  namespace: __TEAM__
+rules:
+  - apiGroups: [core.orka.ai]
+    resources: [tools, outboundaccesspolicies]
+    verbs: [get, list]
+  - apiGroups: [core.orka.ai]
+    resources: [agents, agentruntimes]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: native-worker
+  namespace: __TEAM__
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: native-worker
+subjects:
+  - kind: ServiceAccount
+    name: orka-ai-worker
+    namespace: __TEAM__
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orka-controller
+  namespace: __TEAM__
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: orka-controller
+  template:
+    metadata:
+      labels:
+        app: orka-controller
+    spec:
+      serviceAccountName: controller
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: manager
+          image: __CONTROLLER_IMAGE__
+          command: [/manager]
+          args:
+            - --leader-elect
+            - --controller-mode=harness-v2
+            - --watch-namespace=__TEAM__
+            - --claim-namespace-mode=false
+            - --enforce-namespace-isolation=true
+            - --execution-mode-controller-usernames=system:serviceaccount:__TEAM__:controller
+            - --task-provenance-admission-external=true
+            - --store-backend=sqlite
+            - --store-path=/data/orka.db
+            - --agent-execution-snapshot-key-file=/snapshot/key
+            - --controller-url=http://orka-api.__TEAM__.svc:8080
+            - --acp-runtime-namespace=__TEAM__-runtimes
+            - --gateway-enabled=false
+            - --ai-worker-image=__AI_WORKER_IMAGE__
+            - --general-worker-image=__GENERAL_WORKER_IMAGE__
+            - --ai-worker-cluster-role-name=orka-efficiency-worker
+            - --vendor-worker-cluster-role-name=orka-efficiency-worker
+            - --container-worker-cluster-role-name=orka-efficiency-worker
+            - --chat-provider=platform
+            - --chat-model=coordinator
+            - --chat-max-duration=10m
+            - --chat-max-iterations=12
+            - --chat-max-concurrent=1
+          env:
+            - name: POD_NAMESPACE
+              value: __TEAM__
+            - name: ORKA_ACP_ARTIFACT_ROOT
+              value: /data/acp-artifacts
+          ports:
+            - name: api
+              containerPort: 8080
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: snapshot
+              mountPath: /snapshot
+              readOnly: true
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: snapshot
+          secret:
+            secretName: snapshot-key
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orka-api
+  namespace: __TEAM__
+spec:
+  selector:
+    app: orka-controller
+  ports:
+    - name: api
+      port: 8080
+      targetPort: api
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vekil
+  namespace: __TEAM__
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: efficiency-vekil
+  template:
+    metadata:
+      labels:
+        app: efficiency-vekil
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: vekil
+          image: __VEKIL_IMAGE__
+          args: [--providers-config=/config/providers.yaml]
+          env:
+            - name: HOST
+              value: 0.0.0.0
+            - name: XDG_DATA_HOME
+              value: /tmp/vekil-data
+            - name: POLICY_ROUTING_ALLOW_REMOTE_SINGLE_TENANT
+              value: "true"
+            - name: POLICY_ROUTING_MODE
+              value: "off"
+            - name: COPILOT_GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: vekil-auth
+                  key: copilot-token
+            - name: JEV_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: vekil-auth
+                  key: jev-api-key
+          ports:
+            - name: http
+              containerPort: 1337
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 36
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+          volumeMounts:
+            - name: providers
+              mountPath: /config
+              readOnly: true
+            - name: token-cache
+              mountPath: /home/nonroot/.config/vekil
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: providers
+          configMap:
+            name: vekil-providers
+        - name: token-cache
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vekil
+  namespace: __TEAM__
+spec:
+  selector:
+    app: efficiency-vekil
+  ports:
+    - name: http
+      port: 1337
+      targetPort: http
+---
+apiVersion: core.orka.ai/v1alpha1
+kind: Provider
+metadata:
+  name: platform
+  namespace: __TEAM__
+spec:
+  type: anthropic
+  baseURL: http://vekil.__TEAM__.svc.cluster.local:1337
+  secretRef:
+    name: provider-key
+    key: api-key
+  defaultModel: coordinator
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: __DEVELOPER__
+  namespace: __TEAM__
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: developer
+  namespace: __TEAM__
+rules:
+  - apiGroups: [core.orka.ai]
+    resources: [chats]
+    verbs: [create]
+  - apiGroups: [core.orka.ai]
+    resources: [chats/config, providers, agents, tools, skills, tasks, sessions, repositorymonitors]
+    verbs: [get, list]
+  - apiGroups: [core.orka.ai]
+    resources: [tasks, sessions]
+    verbs: [create]
+  - apiGroups: [core.orka.ai]
+    resources: [tasks/results, tasks/events]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: developer
+  namespace: __TEAM__
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: developer
+subjects:
+  - kind: ServiceAccount
+    name: __DEVELOPER__
+    namespace: __TEAM__
+---
+# A gateway accepts only its own team's controller and native AI worker Pods.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: vekil-team-access
+  namespace: __TEAM__
+spec:
+  podSelector:
+    matchLabels:
+      app: efficiency-vekil
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: orka-controller
+        - podSelector:
+            matchLabels:
+              orka.ai/task-type: ai
+      ports:
+        - protocol: TCP
+          port: 1337

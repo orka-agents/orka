@@ -60,7 +60,7 @@ def read_storyboard():
     seen = set()
     for demo in story["demos"]:
         name = demo["id"]
-        require(re.fullmatch(r"(?:0[1-5]|0[89]|1[01])-[a-z-]+", name), "Unexpected demo: " + name)
+        require(re.fullmatch(r"(?:0[1-5]|0[89]|1[012])-[a-z-]+", name), "Unexpected demo: " + name)
         require(name not in seen, "Duplicate demo: " + name)
         seen.add(name)
     return story

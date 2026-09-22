@@ -1,0 +1,24 @@
+# Fixed generation settings for the checked business requests.
+- name: qwen-3.5-2b
+  backend: llama-cpp
+  parameters:
+    model: Qwen3.5-2B-Q4_K_M.gguf
+    batch: 128
+    temperature: 0.0
+    top_p: 1.0
+    top_k: 20
+    min_p: 0.0
+    presence_penalty: 0.0
+    repeat_penalty: 1.0
+  context_size: 4096
+  threads: 1
+  gpu_layers: 0
+  f16: true
+  mmap: true
+  reasoning_effort: none
+  template:
+    use_tokenizer_template: true
+  options: ["use_jinja:true"]
+  function:
+    grammar:
+      disable: true

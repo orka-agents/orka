@@ -1,0 +1,270 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: orka-efficiency
+---
+# The controller binds this read-only role inside each workload namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: orka-efficiency-worker
+rules:
+  - apiGroups: [core.orka.ai]
+    resources: [tasks]
+    verbs: [get]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qwen35-2b
+  namespace: orka-efficiency
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: qwen35-2b
+  template:
+    metadata:
+      labels:
+        app: qwen35-2b
+    spec:
+      terminationGracePeriodSeconds: 15
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      nodeSelector:
+        kubernetes.io/hostname: aks-nodepool1-19390438-vmss000004
+        kubernetes.io/arch: amd64
+        kubernetes.io/os: linux
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: model
+          image: __AIKIT_IMAGE__
+          imagePullPolicy: IfNotPresent
+          args: [--config-file=/runtime-config/config.yaml]
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: LOCALAI_THREADS
+              value: "1"
+            - name: OMP_NUM_THREADS
+              value: "1"
+            - name: OPENBLAS_NUM_THREADS
+              value: "1"
+            - name: LOCALAI_DATA_PATH
+              value: /runtime/data
+            - name: LOCALAI_CONFIG_DIR
+              value: /runtime/configuration
+            - name: LOCALAI_GENERATED_CONTENT_PATH
+              value: /runtime/generated
+            - name: LOCALAI_UPLOAD_PATH
+              value: /runtime/uploads
+            - name: LOCALAI_BACKENDS_SYSTEM_PATH
+              value: /runtime/system-backends
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 150m
+              memory: 2Gi
+              ephemeral-storage: 1Gi
+            limits:
+              cpu: "1"
+              memory: 2560Mi
+              ephemeral-storage: 6Gi
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 120
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - name: runtime
+              mountPath: /runtime
+            - name: artifacts
+              mountPath: /models/.artifacts
+            - name: model-config
+              mountPath: /runtime-config
+              readOnly: true
+      volumes:
+        - name: runtime
+          emptyDir:
+            sizeLimit: 2Gi
+        - name: artifacts
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: model-config
+          configMap:
+            name: qwen35-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qwen35-2b
+  namespace: orka-efficiency
+spec:
+  selector:
+    app: qwen35-2b
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: qwen-gateway-access
+  namespace: orka-efficiency
+spec:
+  podSelector:
+    matchLabels:
+      app: qwen35-2b
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values: [team-payments, team-inventory]
+          podSelector:
+            matchLabels:
+              app: efficiency-vekil
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: orka-compat-router
+  namespace: orka-efficiency
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: orka-efficiency-router
+rules:
+  - apiGroups: [authentication.k8s.io]
+    resources: [tokenreviews]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: orka-efficiency-router
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: orka-efficiency-router
+subjects:
+  - kind: ServiceAccount
+    name: orka-compat-router
+    namespace: orka-efficiency
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orka-compat-router
+  namespace: orka-efficiency
+data:
+  routes.yaml: |
+    namespaces:
+      team-payments: http://orka-api.team-payments.svc:8080
+      team-inventory: http://orka-api.team-inventory.svc:8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orka-compat-router
+  namespace: orka-efficiency
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: efficiency-router
+  template:
+    metadata:
+      labels:
+        app: efficiency-router
+    spec:
+      serviceAccountName: orka-compat-router
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 620
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: router
+          image: __CONTROLLER_IMAGE__
+          command: [/compat-router]
+          args:
+            - --routes-file=/etc/orka-router/routes.yaml
+            - --shutdown-timeout=10m
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          volumeMounts:
+            - name: routes
+              mountPath: /etc/orka-router
+              readOnly: true
+      volumes:
+        - name: routes
+          configMap:
+            name: orka-compat-router
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orka-compat-router
+  namespace: orka-efficiency
+spec:
+  selector:
+    app: efficiency-router
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

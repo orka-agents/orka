@@ -1,0 +1,36 @@
+# This matches the current Orka namespace policy and is scoped to this demo.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: orka-efficiency-namespace-mode
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [namespaces]
+  matchConditions:
+    - name: demo-namespaces
+      expression: "object.metadata.name in ['team-payments', 'team-inventory', 'team-payments-runtimes', 'team-inventory-runtimes']"
+  variables:
+    - name: newClaim
+      expression: "object.metadata.?labels['orka.ai/controller-mode'].orValue('')"
+    - name: oldClaim
+      expression: "request.operation == 'UPDATE' ? oldObject.metadata.?labels['orka.ai/controller-mode'].orValue('') : ''"
+  validations:
+    - expression: "variables.newClaim == 'harness-v2'"
+      message: these demo namespaces require harness-v2
+    - expression: "variables.oldClaim == '' || variables.newClaim == variables.oldClaim"
+      message: namespace execution-mode claim is immutable
+    - expression: "variables.oldClaim != '' || request.operation == 'CREATE' || request.userInfo.username in ['system:serviceaccount:team-payments:controller', 'system:serviceaccount:team-inventory:controller']"
+      message: only the demo controllers may claim an existing demo namespace
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: orka-efficiency-namespace-mode
+spec:
+  policyName: orka-efficiency-namespace-mode
+  validationActions: [Deny]

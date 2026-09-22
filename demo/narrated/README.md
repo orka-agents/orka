@@ -1,6 +1,6 @@
 # Narrated standalone demos
 
-This edit includes demos 01–05 and 08–11. The hackathon videos are excluded.
+This edit includes demos 01–05 and 08–12. The hackathon videos are excluded.
 Each demo gets a new DaVinci Resolve project with a Story video track,
 a separate Narration audio track, and chapter markers. Resolve exports the
 final 1920×1080, 30 fps H.264/AAC video and a `.drp` project.
@@ -9,6 +9,11 @@ final 1920×1080, 30 fps H.264/AAC video and a `.drp` project.
 invitations. Each ending displays `https://orka-agents.github.io/orka/`.
 The narration describes the results visible in the recorded run. It does not
 replace or invent command output.
+
+Demo 12 compares the same payments and inventory requests before and after a
+model-routing change. Its narration leaves route choices, correctness results,
+usage, and timings to the recorded evidence. Record it only after the live
+checks succeed. The existing demos and their narration remain unchanged.
 
 ## Prepare the source footage and voice
 

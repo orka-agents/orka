@@ -1,0 +1,96 @@
+# prepare.py fills the classifier endpoint from the operator's private source.
+# Credentials are loaded through Kubernetes Secret references, never this file.
+schema_version: 2
+providers:
+  - id: copilot
+    type: copilot
+    trust_domain: github-copilot
+  - id: local-aikit
+    type: openai-compatible
+    base_url: http://qwen35-2b.orka-efficiency.svc.cluster.local:8080/v1
+    auth_type: none
+    trust_domain: demo-cluster
+  - id: vercel-jev
+    type: typesafe-compatible
+    base_url: https://classifier.invalid/v1
+    api_key_env: JEV_API_KEY
+    trust_domain: vercel-ai-gateway
+    classifier_no_store_supported: false
+model_routes:
+  - id: local-qwen
+    exposure: internal
+    endpoints: [/chat/completions]
+    context_window: 4096
+    parallel_tool_calls: true
+    drop_sampling_params: true
+    targets:
+      - id: aikit-cpu
+        provider: local-aikit
+        upstream_model: qwen-3.5-2b
+    routing:
+      mode: primary_only
+      max_target_attempts: 1
+      max_upstream_sends: 1
+  - id: hosted-gpt
+    exposure: internal
+    endpoints: [/responses]
+    parallel_tool_calls: true
+    drop_sampling_params: true
+    targets:
+      - id: copilot-gpt
+        provider: copilot
+        upstream_model: gpt-5.5
+    routing:
+      mode: primary_only
+      max_target_attempts: 1
+      max_upstream_sends: 1
+  - id: coordinator-route
+    public_id: coordinator
+    exposure: public
+    name: Team work coordinator
+    endpoints: [/responses]
+    parallel_tool_calls: false
+    drop_sampling_params: true
+    targets:
+      - id: coordinator-copilot
+        provider: copilot
+        upstream_model: gpt-5.5
+    routing:
+      mode: primary_only
+      max_target_attempts: 1
+      max_upstream_sends: 1
+  - id: jev-classifier
+    exposure: internal
+    internal_purpose: policy_classifier
+    endpoints: [/systemone]
+    targets:
+      - id: jev-evaluator
+        provider: vercel-jev
+        upstream_model: typesafe-ai/jev
+    routing:
+      mode: primary_only
+      max_target_attempts: 1
+      max_upstream_sends: 1
+policy_profiles:
+  - id: team-efficiency
+    public_id: team-assistant
+    name: Team assistant
+    mode: enforce
+    lightweight:
+      route: local-qwen
+    powerful:
+      route: hosted-gpt
+    baseline_tier: powerful
+    classifier_unavailable_tier: powerful
+    classifier_uncertain_tier: powerful
+    classifier:
+      route: jev-classifier
+      profile: coding_agent_v1
+      timeout_ms: 10000
+      max_request_bytes: 16000
+      recent_turns: 4
+      max_concurrency: 1
+    data_policy:
+      content_forwarding_acknowledged: true
+      allow_cross_trust_domain: true
+      allow_provider_retention: true

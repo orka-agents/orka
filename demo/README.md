@@ -16,11 +16,12 @@ terminal: a pull request, an object that survived deletion, a refusal.
 | 9 | [`09-governed-tools`](09-governed-tools) | An assistant checks a supplier's stock, then attempts a purchase. Gateway logs and supplier receipts show which request got through. |
 | 10 | [`10-reviewed-memory`](10-reviewed-memory) | One assistant proposes a return procedure. A person accepts and applies it, then a fresh agent uses the saved note. |
 | 11 | [`11-fibey-approval`](11-fibey-approval) | Fibey investigates a pump alert and proposes an inspection. A person approves the work order, and its receipt returns to the same waiting Task. |
+| 12 | [`12-efficiency`](12-efficiency) | Payments and inventory keep one AI address while the platform changes Agent instructions and model routing. Real checks and usage records compare hosted work with Jev routing to a local CPU model or a hosted model. |
 
 Projects 6 and 7 are hackathon videos with their own instructions and are
 excluded from the narrated standalone series. See [`narrated/`](narrated/) for
 the scenario-led voiceover and DaVinci Resolve workflow for demos 01–05 and
-08–11. The standalone recorder discovers only directories containing an
+08–12. The standalone recorder discovers only directories containing an
 executable `demo.sh`.
 
 The scripts are plain bash. `demo/lib/demo.sh` types commands the way a
@@ -78,6 +79,11 @@ prior work records. Demo 10 requires an empty active memory list for a meaningfu
 comparison; its README explains how to disable only the note from a previous run.
 Its reader's event history must show no tool calls. The demo checks that behavior;
 the current worker still exposes memory and transcript-search tools.
+
+Demo 12 has its own `sertac-aks` preparation and saves complete run evidence in
+`bin/efficiency-production/`. Follow its README for the two team installations,
+Vekil and Jev routing, and AIKit's Qwen3.5 2B CPU model. Its script keeps the
+original provider configuration and Copilot credential intact.
 
 Demo 09 shows an operation that stays closed. Demo 11 shows an operation that
 can proceed after a person's decision. It uses the human-approval work from
@@ -139,7 +145,7 @@ demo/render.sh 02-agent-sandbox    # one
 
 `record.sh` records at 100x28 with idle time capped at two seconds and converts
 the chapter sentinels into marker events. It runs `demo/reset.sh` before the
-original five demos. Demos 08 through 11 keep their records and check only their
+original five demos. Demos 08 through 12 keep their records and check only their
 own run. Recording remains a separate, explicit command.
 
 The demos open real pull requests against
