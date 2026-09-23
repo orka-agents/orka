@@ -454,7 +454,7 @@ func gatewayEventDescribeRows(event map[string]any) []describeRow {
 	return []describeRow{
 		{Label: "ID", Value: firstString(event, "id")},
 		{Label: labelState, Value: joinNonEmpty(firstString(event, "state"), firstString(event, "stateMessage"), ": ")},
-		{Label: "Gateway", Value: firstString(event, "gatewayName")},
+		{Label: labelGateway, Value: firstString(event, "gatewayName")},
 		{Label: "Binding", Value: firstString(event, "bindingName")},
 		{Label: labelAgent, Value: firstString(event, "agentName")},
 		{Label: labelSession, Value: firstString(event, "sessionName")},
@@ -470,7 +470,7 @@ func gatewayDeliveryDescribeRows(delivery map[string]any) []describeRow {
 		{Label: "ID", Value: firstString(delivery, "id")},
 		{Label: labelState, Value: joinNonEmpty(firstString(delivery, "state"), firstString(delivery, "stateMessage", "lastError"), ": ")},
 		{Label: "Kind", Value: firstString(delivery, "kind")},
-		{Label: "Gateway", Value: firstString(delivery, "gatewayName")},
+		{Label: labelGateway, Value: firstString(delivery, "gatewayName")},
 		{Label: "Binding", Value: firstString(delivery, "bindingName")},
 		{Label: "Event", Value: firstString(delivery, "eventId")},
 		{Label: labelTask, Value: firstString(delivery, "taskName")},
@@ -519,7 +519,7 @@ func gatewayBindingDescribeRows(binding map[string]any) []describeRow {
 	return []describeRow{
 		{Label: labelName, Value: genericRowName(binding)},
 		{Label: labelNamespace, Value: genericRowNamespace(binding)},
-		{Label: "Gateway", Value: nestedString(spec, "gatewayRef", "name")},
+		{Label: labelGateway, Value: nestedString(spec, "gatewayRef", "name")},
 		{Label: labelAgent, Value: nestedString(spec, "agentRef", "name")},
 		{Label: "Priority", Value: anyString(spec["priority"])},
 		{Label: labelAccepted, Value: readinessString(status["accepted"])},

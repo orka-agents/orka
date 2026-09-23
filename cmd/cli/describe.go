@@ -50,6 +50,7 @@ const (
 	labelTags              = "Tags"
 	labelVersion           = "Version"
 	labelAccepted          = "Accepted"
+	labelGateway           = "Gateway"
 )
 
 // describeRow is one "Label: value" line in a readable single-object view.
