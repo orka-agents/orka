@@ -472,6 +472,7 @@ func appendRepeatedTypes(path string, query map[string]string, eventTypes []stri
 const (
 	eventSummaryMinWidth    = 12
 	columnSeq               = "SEQ"
+	columnType              = "TYPE"
 	eventTaskColumnMinWidth = 8
 	eventTaskColumnMaxWidth = 32
 )
@@ -485,9 +486,9 @@ func printExecutionEventsTable(cmd *cobra.Command, value any, includeTask, wide 
 	}
 	// Reserve the width of the other columns so the summary column is the
 	// only one cut and every event stays on one line.
-	headers := []string{columnSeq, "TYPE", columnSeverity}
+	headers := []string{columnSeq, columnType, columnSeverity}
 	if !includeTask {
-		headers = []string{columnSeq, "TASK", "TASKSEQ", "TYPE", columnSeverity}
+		headers = []string{columnSeq, "TASK", "TASKSEQ", columnType, columnSeverity}
 	}
 	// The task column is capped from the terminal budget too, so one long
 	// Task name cannot push a row past the terminal on its own: whatever the
@@ -500,7 +501,7 @@ func printExecutionEventsTable(cmd *cobra.Command, value any, includeTask, wide 
 			event, _ := raw.(map[string]any)
 			otherRows = append(otherRows, []string{numberString(event["seq"]), numberString(event["taskSeq"]), anyString(event["type"]), anyString(event["severity"])})
 		}
-		others := fixedColumnsWidth([]string{columnSeq, "TASKSEQ", "TYPE", columnSeverity}, otherRows)
+		others := fixedColumnsWidth([]string{columnSeq, "TASKSEQ", columnType, columnSeverity}, otherRows)
 		taskCap = min(eventTaskColumnMaxWidth, max(eventTaskColumnMinWidth, terminalWidth()-others-eventSummaryMinWidth-2))
 	}
 	taskName := func(event map[string]any) string {
