@@ -103,6 +103,35 @@ def conversation(snapshot):
         print(f"{task['metadata']['name'][:15] + '...':22} {task['spec']['sessionRef']['name'][:27] + '...':34} {task['status']['phase']}")
 
 
+def summary(raw):
+    """The closing table without the adapter-replacement chapter."""
+    retry_count = retry_check(raw)
+    first = read(raw / "first-completed-event.json")
+    followup = read(raw / "followup-completed-event.json")
+    require(first["state"] == followup["state"] == "Completed", "the saved requests did not both complete")
+    correlate(read(raw / "first-answer.json"), first, read(raw / "first-task.json"))
+    correlate(read(raw / "followup-answer.json"), followup, read(raw / "followup-task.json"))
+    require(first["sessionName"] == followup["sessionName"], "follow-up did not share the Session")
+    require(first["taskUid"] != followup["taskUid"], "follow-up did not produce a distinct Task")
+    require(first["threadId"] == followup["threadId"], "follow-up changed the conversation ID")
+    reply(read(raw / "first-answer.json"), read(raw / "first-result.json"))
+    final = reply(read(raw / "followup-answer.json"), read(raw / "followup-result.json"))
+    expected = {(e["taskName"], e["taskUid"]) for e in (first, followup)}
+    tasks = read(raw / "tasks-after-followup.json")
+    require(task_set(tasks, first["sessionName"]) == expected, "expected exactly two Tasks in this Session")
+    require(all(task.get("status", {}).get("phase") == "Succeeded" for task in tasks["items"]
+                if task["metadata"]["uid"] in {uid for _, uid in expected}), "a demonstrated Task was not successful")
+    sessions = len({event["sessionName"] for event in (first, followup)})
+    counts = {"tasksAfterRetry": retry_count, "distinctRequests": len(expected), "sessions": sessions}
+    (raw.parent / "evidence.json").write_text(json.dumps(counts, indent=2) + "\n")
+    print("Evidence from this run")
+    print(f"Requests sent               3 (one was a retry)")
+    print(f"Tasks after the retry       {retry_count}, same identity")
+    print(f"Distinct requests           {len(expected)} Tasks in {sessions} Session")
+    print("Answer via A2A and via Orka  identical")
+    print("\nCustomer reply\n" + final)
+
+
 def report(raw):
     retry_count = retry_check(raw)
     first = read(raw / "first-completed-event.json")
@@ -150,7 +179,7 @@ def report(raw):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("event-id", "correlate", "reply", "retry", "conversation", "report"))
+    parser.add_argument("command", choices=("event-id", "correlate", "reply", "retry", "conversation", "summary", "report"))
     parser.add_argument("files", nargs="+")
     args = parser.parse_args()
     if args.command == "event-id":
@@ -164,6 +193,8 @@ def main():
         print(f"Retry returned the same reference. Matching Orka Tasks: {count}, same UID.")
     elif args.command == "conversation":
         conversation(read(args.files[0]))
+    elif args.command == "summary":
+        summary(Path(args.files[0]))
     else:
         report(Path(args.files[0]))
 

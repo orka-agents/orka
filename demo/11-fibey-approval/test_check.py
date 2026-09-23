@@ -177,6 +177,32 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "presenter's approval"):
             check.check("final")
 
+    def test_configured_presenter_is_used_for_the_decision(self):
+        reviewer = "system:serviceaccount:demo:demo-lee"
+        self.change("run.json", ["reviewerActor"], reviewer)
+        self.change("raw/decision.json", ["decisionActor"], reviewer)
+        self.change("raw/approval-final.json", ["approvals", 0, "decisionActor"], reviewer)
+        with contextlib.redirect_stdout(io.StringIO()):
+            check.check("final")
+        self.assertEqual(check.read("evidence.json")["reviewer"], reviewer)
+
+    def test_default_account_cannot_pass_as_configured_presenter(self):
+        self.change("run.json", ["reviewerActor"], "system:serviceaccount:demo:demo-lee")
+        with self.assertRaisesRegex(ValueError, "presenter's approval"):
+            check.check("final")
+
+    def test_receipt_with_pending_approval_claim_is_rejected(self):
+        self.change("raw/result.json", ["result"],
+                    "Created work order simulated-fibey-test-1, pending shift lead review.")
+        with self.assertRaisesRegex(ValueError, "confirm creation"):
+            check.check("final")
+
+    def test_proposal_with_a_receipt_is_not_a_creation_confirmation(self):
+        self.change("raw/result.json", ["result"],
+                    "Work order simulated-fibey-test-1 is proposed for the shift lead.")
+        with self.assertRaisesRegex(ValueError, "confirm creation"):
+            check.check("final")
+
     def test_stale_runtime_observation_is_rejected(self):
         self.change("raw/installation.json", ["items", 1, "status", "observedGeneration"], 0)
         with self.assertRaisesRegex(ValueError, "conformance"):

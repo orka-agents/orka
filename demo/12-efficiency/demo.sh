@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Twenty customers. One checkout problem.
+# Orka — twenty customers, one checkout problem
+# Dana's platform team keeps the same replies and the same fix while routing most of the work to a small local model.
 # shellcheck disable=SC2016
 # shellcheck source=demo/lib/demo.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/demo.sh"
@@ -68,112 +69,145 @@ python3 "$here/run.py" --run-dir "$run_dir" monitor >"$run_dir/monitor.log" 2>&1
 monitor_pid=$!
 cd "$run_dir"
 
-banner 'Twenty customers. One checkout problem.' 'This video introduces the following scenario.'
-say 'Twenty customers report duplicate charges after retrying a frozen checkout.'
-say 'Support needs twenty useful replies. Engineering needs to fix the cause once.'
+# --- on-camera helpers ---------------------------------------------------
+# instructions AGENT — the Agent's saved instructions, folded to the terminal.
+instructions() {
+  orka agent get "$1" -o json | jq -r .spec.systemPrompt.inline | fold -s -w 96
+}
+# run_batch DIR — create and wait for each customer Task, one at a time.
+# story.py's begin/collect hooks fire on the wrapped create and wait calls.
+run_batch() {
+  local request
+  for request in "$1"/*.yaml; do
+    orka task create -f "$request" >/dev/null
+    orka task wait "$(basename "$request" .yaml)" --timeout 10m
+  done
+}
+# check_tests RUN — rerun the six payment tests on the published branch in a
+# sealed container: no network, read-only, unprivileged, resource-limited.
+# The agent reported its own test results; this is the independent check.
+check_tests() {
+  podman run --rm --pull=never --network=none --read-only \
+    --cap-drop=all --security-opt=no-new-privileges --user=65532 \
+    --memory=256m --pids-limit=64 --timeout=60 \
+    -v "$PWD/$1/repository/payments:/checks:ro" "$NODE_TEST_IMAGE" \
+    node --test /checks/payment.test.mjs | tee "$1/engineering/tests.txt" | grep -E '^(✔|✖|ℹ (tests|pass|fail))'
+}
+
+banner 'Orka — twenty customers, one checkout problem' "Same checks, two ways to run the work. Compare the results and estimated cost."
+say "Twenty customers report double charges after a frozen checkout. Support needs"
+say "twenty replies; engineering needs one fix. Dana's platform team runs it twice:"
+say "first on a hosted model, then with a router that prefers a small local model."
+say "The replies and the fix are checked the same way both times. Then the bill."
+helpers_note instructions, run_batch, check_tests
 
 chapter '1. Give each assistant its instructions'
 pe 'cat customers.txt'
-say 'An Agent saves the instructions for an assistant.'
-pe 'orka agent get customer-support -o json | jq -r .spec.systemPrompt.inline'
-pe 'orka agent get payments-engineer -o json | jq -r .spec.systemPrompt.inline'
-say 'Support uses supplied order references and asks only when one is missing.'
-say 'The sample repository includes six checks for payment retries.'
+say 'An Agent holds the instructions for an assistant. Two Agents, two jobs.'
+pe 'instructions customer-support'
+pe 'instructions payments-engineer'
+ok 'Support replies in two factual sentences. Engineering fixes the bug and runs six tests.'
 
-chapter '2. Handle the customer problem'
-say "A Task is Orka's record of one piece of work. Start with hosted GPT-5.5."
+chapter '2. Run everything on the hosted model'
+say "A Task is Orka's record of one piece of work. Twenty support Tasks, then"
+say 'one engineering Task, all on hosted GPT-5.5. Quiet stretches are cut.'
 story phase baseline start
-say 'Run the twenty reports one at a time, with the same limit in both runs.'
-pe 'for request in support-baseline/*.yaml; do
-  orka task create -f "$request"
-  orka task wait "$(basename "$request" .yaml)" --timeout 10m
-done'
+pe 'run_batch support-baseline'
 story batch-summary baseline
-pe 'orka task result "$SUPPORT_01_BASELINE"'
-pe 'orka task result "$SUPPORT_02_BASELINE"'
+pe 'result "$SUPPORT_01_BASELINE"'
+pe 'result "$SUPPORT_02_BASELINE"'
 pe 'cat support-baseline-routes.txt'
 story begin baseline engineering
 pe 'orka task create -f engineering-baseline.yaml'
 pe 'orka task wait "$ENGINEERING_BASELINE" --timeout 10m'
 story collect baseline engineering
-pe 'orka task result "$ENGINEERING_BASELINE"'
+pe 'result "$ENGINEERING_BASELINE"'
 story checkout baseline
-say 'Check the published change with the same tests, in an isolated container.'
+say 'The agent says the tests pass. Check that ourselves, in a sealed container.'
 pe 'git -C baseline/repository diff "$SOURCE_REVISION" --stat'
-pe 'podman run --rm --pull=never --network=none --read-only \
-  --cap-drop=all --security-opt=no-new-privileges --user=65532 \
-  --memory=256m --pids-limit=64 --timeout=60 \
-  -v "$PWD/baseline/repository/payments:/checks:ro" "$NODE_TEST_IMAGE" \
-  node --test /checks/payment.test.mjs | tee baseline/engineering/tests.txt'
+pe 'check_tests baseline'
 story finish-tests baseline
 story phase baseline end
+ok 'Twenty replies checked, six tests passed, on the hosted model. That is the baseline.'
 
-chapter '3. Use hardware we already operate'
-say "AIKit serves Qwen3.5 2B on the cluster's CPUs."
-say 'A lightweight model on hardware you already pay for and operate.'
+chapter '3. Add a small model on our own hardware'
+say "AIKit serves Qwen3.5 2B on the cluster's CPUs: hardware the team already pays for."
 pe 'kubectl -n orka-efficiency get deployment qwen35-2b'
 pe 'kubectl -n orka-efficiency top pod -l app=qwen35-2b'
+ok 'A local model is up and idle, waiting for work.'
 
-chapter '4. Connect Orka to the semantic router'
-say "A Provider is Orka's connection to a model service."
-pe 'orka provider get semantic-router -o json | jq ".spec | {type, baseURL, defaultModel}"'
-say 'Support uses this Provider. The coding runtime also sends model requests to Vekil.'
-say 'Vekil is the gateway between the agents and the available models.'
-
-chapter '5. Let the classifier choose'
+chapter '4. Let a router choose the model'
+say "A Provider is Orka's connection to a model service. Support's Provider"
+say 'points at Vekil, a gateway that decides where each request goes.'
+pe 'orka provider get semantic-router -o json | jq ".spec | {type, baseURL}"'
 pe 'cat routing.yaml'
-say 'Jev assesses a new request and recommends lightweight or powerful.'
-say 'Vekil applies that choice to the destinations configured here.'
-say 'If Jev is unavailable, this configuration uses the powerful model.'
-say 'Related tool calls stay with the selected model while the agent finishes the job.'
+say 'Jev, a classifier, reads each request and recommends lightweight or powerful.'
+say 'If Jev cannot be reached, the request goes to the powerful model.'
 pe 'kubectl -n team-payments set env deployment/vekil POLICY_ROUTING_MODE=enforce'
 pe 'kubectl -n team-payments rollout status deployment/vekil --timeout=180s'
 wait_for 'the replacement gateway connection' 'curl -fsS --max-time 2 http://127.0.0.1:18111/readyz' 60
+classifier_ready() {
+  python3 - "$here" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import evidence, run
+profile = evidence.profile(run.gateway_snapshot("payments"))
+sys.exit(0 if profile["effective_mode"] == "enforce" and profile["preflight_state"] == "ready" else 1)
+PY
+}
+wait_for 'the classifier preflight' classifier_ready 120 || {
+  bad "Jev is not reachable through Vekil; the routed batch would fall back to the hosted model"
+  exit 1
+}
+ok 'Routing is on and the classifier answers. The Agents and requests are unchanged.'
 
-chapter '6. Repeat the same work'
-say 'Same requests and Agent instructions. Same starting repository revision.'
+chapter '5. Run the same work again'
+say 'Same twenty reports, same instructions, same starting code and tests.'
 story phase routed start
-pe 'for request in support-routed/*.yaml; do
-  orka task create -f "$request"
-  orka task wait "$(basename "$request" .yaml)" --timeout 10m
-done'
+pe 'run_batch support-routed'
 story batch-summary routed
-pe 'orka task result "$SUPPORT_01_ROUTED"'
-pe 'orka task result "$SUPPORT_02_ROUTED"'
+pe 'result "$SUPPORT_01_ROUTED"'
+pe 'result "$SUPPORT_02_ROUTED"'
 pe 'cat support-routed-routes.txt'
 story begin routed engineering
 pe 'orka task create -f engineering-routed.yaml'
 pe 'orka task wait "$ENGINEERING_ROUTED" --timeout 10m'
 story collect routed engineering
-pe 'orka task result "$ENGINEERING_ROUTED"'
+pe 'result "$ENGINEERING_ROUTED"'
 story checkout routed
-pe 'podman run --rm --pull=never --network=none --read-only \
-  --cap-drop=all --security-opt=no-new-privileges --user=65532 \
-  --memory=256m --pids-limit=64 --timeout=60 \
-  -v "$PWD/routed/repository/payments:/checks:ro" "$NODE_TEST_IMAGE" \
-  node --test /checks/payment.test.mjs | tee routed/engineering/tests.txt'
+pe 'check_tests routed'
 story finish-tests routed
 pe 'cat engineering-routed-routes.txt'
 story phase routed end
+ok 'Twenty replies checked, six tests passed again. The records show which model answered.'
 
-chapter '7. Check the results and usage'
+chapter '6. Compare the bill'
 story verify >verification.txt
-# These variables are expanded by pe's eval.
-# shellcheck disable=SC2034
-USAGE_FROM=$(jq -r .startedAt baseline/phase.json)
-# shellcheck disable=SC2034
-USAGE_UNTIL=$(jq -r .finishedAt routed/phase.json)
-pe 'orka usage summary --from "$USAGE_FROM" --until "$USAGE_UNTIL"'
-say 'These standalone Tasks appear under other team usage.'
-pe 'cat usage-notes.txt'
+say 'Both runs, side by side: outcomes, elapsed time, and tokens.'
 pe 'cat comparison.txt'
 nap 5
-say 'Tokens are the small pieces of text a model processes. Jev adds work too.'
-say 'Apply published token rates and a stated share of cluster capacity.'
+say 'The local model answers on CPU, and both batches ran one Task at a time.'
+say 'Compare the elapsed time as well as the tokens. Now apply published rates.'
 pe 'cat cost-summary.txt'
 nap 8
 say 'These estimates cover this batch and its elapsed time. They are not an invoice.'
-say 'Orka sets the jobs and keeps their records. Vekil chooses model destinations.'
-say 'AIKit supplies local capacity. The results show what those choices produced.'
-note 'What would you build for your team?'
-say 'https://orka-agents.github.io/orka/'
+say "Orka's own usage report counts the support Tasks; the coding runtime's"
+say 'tokens are unavailable there, so the comparison uses the gateway counts.'
+pe 'cat usage-notes.txt'
+ok 'Both runs passed the same checks. The measured usage gives us the cost comparison.'
+
+local_replies=$(jq -er '[.jobs | to_entries[] | select(.key | startswith("support-")) |
+  .value.routed.gateway.operations | any(.tier == "lightweight")] | map(select(.)) | length' verified-report.json)
+api_change=$(jq -er '.costs.comparison.api.percentChange' verified-report.json)
+support_time=$(jq -er '(.phases.routed.supportElapsedSeconds - .phases.baseline.supportElapsedSeconds)
+  / .phases.baseline.supportElapsedSeconds * 100' verified-report.json)
+printf -v api_change '%+.1f%%' "$api_change"
+printf -v support_time '%+.1f%%' "$support_time"
+evidence \
+  "Customer replies checked" "20 / 20 in both runs" \
+  "Payment tests passed" "6 / 6 in both runs" \
+  "Replies answered by the local model" "$local_replies of 20" \
+  "Estimated model cost change" "$api_change" \
+  "Support batch wall-clock" "$support_time" \
+  "Agents, prompts, and code changed between runs" "none"
+cta

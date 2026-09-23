@@ -50,8 +50,9 @@ delete_sessions() {
 }
 
 reset_01() {
-  kubectl -n "$ns" delete tasks -l orka.ai/source=anthropic-proxy --ignore-not-found --wait=false >/dev/null 2>&1 || true
-  kubectl -n "$ns" delete agents -l orka.ai/created-by=chat --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  # Proxy-created objects can belong to other chat users. Legacy, unlabelled
+  # records remain available; the walkthrough selects only its current run.
+  kubectl -n "$ns" delete tasks,agents -l demo.orka.ai/name=01-chat-to-pr --ignore-not-found --wait=false >/dev/null 2>&1 || true
 }
 reset_02() {
   local ws; ws=$(workspaces_of 02-agent-sandbox)
@@ -73,7 +74,7 @@ reset_04() {
 
 reset_05() {
   for team in team-payments team-inventory; do
-    kubectl -n "$team" delete tasks --all --ignore-not-found --wait=false >/dev/null 2>&1 || true
+    kubectl -n "$team" delete tasks -l demo.orka.ai/name=05-two-teams --ignore-not-found --wait=false >/dev/null 2>&1 || true
   done
 }
 

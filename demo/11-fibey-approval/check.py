@@ -6,6 +6,7 @@ from datetime import datetime
 import hashlib
 import json
 from pathlib import Path
+import re
 import sys
 
 TOOLS = ["create-work-order", "read-inventory"]
@@ -183,8 +184,11 @@ def check(stage):
         return
     decision = read("raw/decision.json")
     same_approval(original, decision)
+    # Older saved runs used the default presenter; new runs record the
+    # ServiceAccount selected before the Task and approval were created.
+    reviewer = config.get("reviewerActor", f"system:serviceaccount:{config['namespace']}:orka-client")
     require(decision["status"] == "approved" and
-            decision.get("decisionActor") == f"system:serviceaccount:{config['namespace']}:orka-client" and
+            decision.get("decisionActor") == reviewer and
             decision.get("decisionTime"),
             "the presenter's approval decision is missing")
     final = read("raw/task-final.json")
@@ -205,8 +209,13 @@ def check(stage):
             "final review does not retain the presenter's decision")
     receipt = read("raw/counts-final.json")
     counts(receipt, config["task"], 1, 1)
-    require(receipt["workOrderIDs"][0] in read("raw/result.json")["result"],
+    answer = read("raw/result.json")["result"]
+    require(receipt["workOrderIDs"][0] in answer,
             "Fibey's answer does not contain the actual work-order receipt")
+    require(re.search(r"\b(created|opened|recorded)\b", answer, re.IGNORECASE) and
+            not re.search(r"\b(pending|awaiting|waiting for)\b[^.!?\n]{0,80}\b(approval|review)\b",
+                          answer, re.IGNORECASE),
+            "Fibey's answer must confirm creation, not describe approval as pending")
     history = read("raw/events.json")
     require(history["namespace"] == config["namespace"] and history["streamID"] == config["task"] and
             history["streamType"] == "task" and

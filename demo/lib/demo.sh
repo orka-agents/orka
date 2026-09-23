@@ -39,9 +39,12 @@ export ORKA_NAMESPACE ORKA_API DEMO_REPO DEMO_REPO_BRANCH DEMO_GIT_SECRET
 
 # --- palette ------------------------------------------------------------
 C_RESET=$'\e[0m'
+# Narration is bright and commands are grey: a first-time viewer reads the
+# narration and skims the command, so the narration carries the contrast.
 C_DIM=$'\e[38;5;245m'
+C_SAY=$'\e[38;5;255m'
 C_PROMPT=$'\e[38;5;75m'
-C_CMD=$'\e[38;5;255m'
+C_CMD=$'\e[38;5;250m'
 C_TITLE=$'\e[1;38;5;213m'
 C_RULE=$'\e[38;5;60m'
 C_OK=$'\e[38;5;114m'
@@ -56,8 +59,11 @@ marker() { printf '\e]1337;OrkaMarker=%s\a' "$1"; }
 
 # --- primitives ---------------------------------------------------------
 _type() {
-  local text=$1 delay i
-  delay=$(awk -v s="$TYPE_SPEED" 'BEGIN{printf "%.3f", 1/s}')
+  local text=$1 delay i speed=$TYPE_SPEED
+  # Anything over 80 characters is plumbing, not a command a person would
+  # type; show it quickly rather than character by character.
+  ((${#text} > 80)) && speed=$((TYPE_SPEED * 4))
+  delay=$(awk -v s="$speed" 'BEGIN{printf "%.3f", 1/s}')
   for ((i = 0; i < ${#text}; i++)); do
     printf '%s' "${text:i:1}"
     sleep "$delay"
@@ -77,8 +83,14 @@ chapter() {
 
 # say "text" — narrative line, no prompt, no command.
 say() {
-  printf '%s%s%s\n' "$C_DIM" "$1" "$C_RESET"
+  printf '%s%s%s\n' "$C_SAY" "$1" "$C_RESET"
   nap 0.9
+}
+
+# aside "text" — a quiet line for plumbing the viewer may ignore.
+aside() {
+  printf '%s%s%s\n' "$C_DIM" "$1" "$C_RESET"
+  nap 0.6
 }
 
 # note "text" — a highlighted aside the audience should remember.
@@ -172,8 +184,13 @@ export -f orka 2>/dev/null || true
 gh() { command gh "$@" | cat; }
 
 # orka_token — a short-lived API token for the demo client ServiceAccount.
+# ORKA_CLIENT_SA names it; a recording that wants a person's name in the
+# reviewer or approver fields creates a ServiceAccount with that name and the
+# same RoleBinding as orka-client, then sets ORKA_CLIENT_SA before recording.
+: "${ORKA_CLIENT_SA:=orka-client}"
+export ORKA_CLIENT_SA
 orka_token() {
-  kubectl -n "$ORKA_NAMESPACE" create token orka-client --duration=4h
+  kubectl -n "$ORKA_NAMESPACE" create token "$ORKA_CLIENT_SA" --duration=4h
 }
 
 # orka_connect — point the CLI at the port-forwarded API and mint a token.
@@ -203,6 +220,50 @@ stop_port_forward() {
   _pf_pid=
 }
 trap stop_port_forward EXIT
+
+# --- on-camera helpers ------------------------------------------------
+# The rule for every demo: the typed command must be shorter than its output,
+# and a first-time viewer should never have to read jq, sed, or cut. These
+# helpers are typed by their plain names; each demo says so once with
+# `helpers_note`.
+helpers_note() {
+  aside "Short names such as $* stand in for long kubectl and jq commands; see demo/lib/demo.sh."
+}
+
+# task_summary NAME — the four rows of `orka task status` a viewer needs.
+task_summary() {
+  orka task status "$1" | awk -F'  +' '
+    $1 == "Task" || $1 == "Phase" || $1 == "Delivery" || $1 == "Publication branch" {
+      printf "%-20s %s\n", $1, $NF }'
+}
+
+# result NAME — the Task's final answer, capped so it fits the terminal.
+result() {
+  orka task result "$1" | sed -n "1,${2:-8}p"
+}
+
+# evidence "Label" "Value" ... — the closing table every demo ends on.
+# Values come from the objects the demo queried, never from narration.
+evidence() {
+  local label value
+  printf '\n%sEvidence from this run%s\n' "$C_TITLE" "$C_RESET"
+  while (($# >= 2)); do
+    label=$1 value=$2; shift 2
+    printf '%s%-28s%s %s\n' "$C_DIM" "$label" "$C_RESET" "$value"
+  done
+  printf '\n'
+  nap 2
+}
+
+# cta — the closing card: how to try Orka, then where to read.
+cta() {
+  printf '%sGet started:%s\n' "$C_NOTE" "$C_RESET"
+  printf '  helm repo add orka https://orka-agents.github.io/orka/charts\n'
+  printf '  helm install orka orka/orka -n orka-system --create-namespace\n'
+  printf '  orka task create -f task.yaml\n'
+  printf '%shttps://orka-agents.github.io/orka/%s\n\n' "$C_NOTE" "$C_RESET"
+  nap 3
+}
 
 # session_gone NAME — true once the Session no longer exists. Session deletion
 # archives asynchronously; a new Task naming the same Session while that runs

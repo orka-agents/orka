@@ -66,6 +66,39 @@ class EvidenceChecks(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "exactly two"):
                 evidence.report(raw)
 
+    def test_summary_requires_two_tasks_in_one_session(self):
+        first, event1, task1, result1 = records()
+        followup, event2, task2, result2 = records(2)
+        with tempfile.TemporaryDirectory() as directory:
+            raw = Path(directory) / "raw"
+            raw.mkdir()
+            files = {"first-admission": first, "retry": first, "first-completed-event": event1,
+                     "retry-event": event1, "retry-task": task1, "tasks-after-first": {"items": [task1]},
+                     "tasks-after-retry": {"items": [task1]}, "followup-completed-event": event2,
+                     "first-answer": first, "followup-answer": followup, "first-task": task1, "followup-task": task2,
+                     "first-result": result1, "followup-result": result2,
+                     "conversation-tasks": {"items": [task1, task2]},
+                     "tasks-after-followup": {"items": [task1, task2]}}
+            for name, value in files.items():
+                (raw / (name + ".json")).write_text(json.dumps(value))
+            with contextlib.redirect_stdout(io.StringIO()):
+                evidence.summary(raw)
+            self.assertEqual(evidence.read(raw.parent / "evidence.json")["distinctRequests"], 2)
+            # The selected two-Task view stays unchanged. The full census must
+            # still catch additional work in their Session.
+            (raw / "tasks-after-followup.json").write_text(json.dumps({"items": [task1, task2, records(3)[2]]}))
+            with self.assertRaisesRegex(ValueError, "exactly two"):
+                evidence.summary(raw)
+            other = records(3)[2]
+            other["spec"]["sessionRef"]["name"] = "another-session"
+            (raw / "tasks-after-followup.json").write_text(json.dumps({"items": [task1, task2, other]}))
+            with contextlib.redirect_stdout(io.StringIO()):
+                evidence.summary(raw)
+            task2["status"]["phase"] = "Failed"
+            (raw / "tasks-after-followup.json").write_text(json.dumps({"items": [task1, task2]}))
+            with self.assertRaisesRegex(ValueError, "not successful"):
+                evidence.summary(raw)
+
     def test_correlates_nanosecond_admission_and_rejects_replaced_task(self):
         a2a, event, task, _ = records()
         evidence.correlate(a2a, event, task)

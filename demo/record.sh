@@ -51,7 +51,7 @@ for name in "${demos[@]}"; do
       ;;
     *)
       echo "==> resetting demo objects"
-      ./demo/reset.sh all
+      ./demo/reset.sh "$name"
       ;;
   esac
 

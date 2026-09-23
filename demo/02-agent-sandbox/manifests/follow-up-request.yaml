@@ -38,5 +38,5 @@ spec:
     createPR: true
   timeout: 20m
   prompt: |
-    Do not change any file. Run: ls; grep -n -i healthz main.go main_test.go
-    README.md. Reply with the exact combined output.
+    Do not change any file. Run: ls; grep -n healthz main.go README.md
+    Reply with the exact combined output and nothing else.

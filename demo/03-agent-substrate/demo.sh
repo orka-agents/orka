@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Orka — a save point for an agent
-# An audit runs in a gVisor sandbox on Agent Substrate. Pause it, resume it, save a copy, restore the copy.
+# Priya starts a security audit. The workspace sleeps when nobody works, and a checkpoint brings the audit back after the workspace is deleted.
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/demo.sh"
 cd "$repo_root"
 
@@ -32,8 +32,6 @@ mkdir -p "$rendered"
 for m in "$here"/manifests/*.yaml; do
   sed "s/SESSION_NAME/$session/" "$m" >"$rendered/$(basename "$m")"
 done
-# The viewer sees short file names, the way a developer keeps a manifest
-# next to the code, not the recorder's state directory.
 cd "$rendered"
 ensure_port_forward
 orka_connect
@@ -48,153 +46,181 @@ workspace_of() {
 actor_count() {
   kubectl ate get actors -a "$atespace" -o json 2>/dev/null | jq '.actors | length'
 }
-actor_uid() {
-  kubectl ate get actors -a "$atespace" -o json 2>/dev/null | jq -r '.actors[0].metadata.uid // empty'
-}
 ws_state() {
   kubectl -n "$ORKA_NAMESPACE" get executionworkspace "$1" -o jsonpath='{.status.state}' 2>/dev/null
 }
-# One line per Actor: name, state, and the worker Pod hosting it. Defined on
-# screen once in the "Actors and workers" chapter, then typed as `actors`.
-actors_def="actors() { kubectl ate get actors -a $atespace -o json | jq -r '.actors[]? | [.metadata.name, (.status.state | ltrimstr(\"ACTOR_STATE_\")), .status.workerAssignment.workerPod // \"-\"] | @tsv' | column -t | grep . || echo 'no Actors'; }"
-actors=actors
+free_workers() {
+  kubectl ate get workers | awk 'NR > 1 && /(^|[[:space:]])FREE([[:space:]]|$)/ {n++} END {print n+0}'
+}
+
+# Read the file from the exact commit Orka verified, not from the agent's
+# description of it. Keep both copies so the restore claim can be checked.
+published_audit() {
+  local task=$1 branch=$2 output=$3 sha
+  kubectl -n "$ORKA_NAMESPACE" get task "$task" -o json >"$rendered/$task.json"
+  jq -e --arg branch "$branch" '
+    .status.phase == "Succeeded" and .status.delivery.state == "VerifiedExact" and
+    .status.delivery.branch == $branch and (.status.delivery.verifiedRemoteSHA | length > 0)
+  ' "$rendered/$task.json" >/dev/null || { bad "$task has no matching verified publication"; return 1; }
+  sha=$(jq -r '.status.delivery.verifiedRemoteSHA' "$rendered/$task.json")
+  gh api -H 'Accept: application/vnd.github.raw+json' \
+    "repos/sozercan/orka-demo-inventory/contents/AUDIT.md?ref=$sha" >"$output"
+  [[ -s $output ]] || { bad "$task published an empty audit"; return 1; }
+}
+
+# --- on-camera helpers ---------------------------------------------------
+# actors — one row per Actor: a short name, its state, and the worker hosting it.
+actors() {
+  local record rows
+  record=$(kubectl ate get actors -a "$atespace" -o json) || return 1
+  rows=$(jq -r '
+    .actors[]? | [(.metadata.name | sub("^acp-ws-session-[0-9a-f]+-actor-"; "actor-") | .[0:14]),
+                  (.status.state | ltrimstr("ACTOR_STATE_")),
+                  (.status.workerAssignment.workerPod // "-")] | @tsv' <<<"$record") || return 1
+  if [[ -n $rows ]]; then printf '%s\n' "$rows" | column -t; else printf 'no Actors\n'; fi
+}
+# workers — the shared worker pool and what each worker is doing.
+workers() {
+  kubectl ate get workers | awk 'NR == 1 || $1 != ""' | cut -c1-96
+}
+# request FILE — the lines of a Task that matter here.
+request() {
+  awk '
+    /^  sessionRef:/ {grab=2} /^      classRef:/ {grab=2} /^      restoreFrom:/ {grab=4} /^  prompt:/ {grab=99}
+    grab > 0 {print; grab--}' "$1"
+}
+# lifecycle CLASS — what the class does when the agent stops.
+lifecycle() {
+  kubectl -n "$ORKA_NAMESPACE" get executionworkspaceclass "$1" -o json |
+    jq -r '"when the agent stops: " + .spec.lifecycle.defaultOnDetach + "   max lifetime: " + .spec.lifecycle.maxLifetime'
+}
+# workspace_state — the Orka workspace's state.
+workspace_state() {
+  printf 'workspace: %s\n' "$(ws_state "$ws")"
+}
+# checkpoint_status — phase and a short digest.
+checkpoint_status() {
+  kubectl -n "$ORKA_NAMESPACE" get executionworkspacecheckpoint audit-checkpoint -o json |
+    jq -r '"phase:  " + (.status.phase // "-"), "digest: " + ((.status.digest // "-") | .[0:26]) + "…"'
+}
 
 banner "Orka — a save point for an agent" \
-  "An audit runs in a gVisor sandbox on Agent Substrate. Pause it, resume it, save a copy, restore the copy."
+  "Priya starts a security audit. The workspace sleeps when nobody works, and a checkpoint brings the audit back after the workspace is deleted."
 
-chapter "The scenario"
+say "Priya, on the security team, is auditing the inventory service. Nothing"
+say "should run while nobody works, and the findings must survive anything."
+helpers_note actors, workers, request, lifecycle, workspace_state, checkpoint_status
 
-say "The security team wants the inventory service audited for input"
-say "validation gaps. An audit is not a single request: someone starts it,"
-say "someone else picks it up later, and the findings need to be kept."
-say ""
-say "That raises three problems. Nothing should keep running, or cost money,"
-say "while nobody is working. The next person needs to find the files where"
-say "the last one left them. And the state should survive even if the"
-say "workspace is deleted. This demo shows all three."
+chapter "Substrate keeps a pool of workers"
 
-chapter "Actors and workers"
+say "This host is Agent Substrate. It keeps a few worker Pods ready all the"
+say "time and runs each agent inside an Actor, an isolated environment with"
+say "its own kernel, hosted by whichever worker is free."
+pe "workers"
+pe "actors"
+say "The platform team's class for this host says: sleep when the agent stops,"
+say "keep the data, and boot a fresh Actor from that data next time."
+pe "lifecycle substrate-session"
+initial_actors=$(actor_count)
+initial_free_workers=$(free_workers)
+((initial_actors == 0)) || { bad "the security workspace host is not idle"; exit 1; }
+ok "$initial_free_workers workers free, $initial_actors Actors. Nothing is running for the security team."
 
-say "Agent Substrate is a different kind of host for an agent. Instead of one"
-say "Pod per agent, it keeps a small pool of worker Pods running all the time."
-pe "kubectl -n $pool_ns get workerpools"
-pe "kubectl ate get workers"
-say "Each agent runs in an Actor: a sandbox with its own kernel, from gVisor,"
-say "that any free worker can host. An Actor can be frozen to storage and"
-say "thawed later on whichever worker is free. The plugin's Actor table is"
-say "wide, so one shell function keeps the three columns that matter."
-pe "$actors_def"
-say "Right now there are no Actors."
-pe "$actors"
-say "Orka's class for this host says: one Actor per Session, suspend when the"
-say "agent stops, and remove everything when the workspace is deleted."
-pe "kubectl -n orka-system get executionworkspaceclass substrate-session -o jsonpath='{.spec.lifecycle}' | jq"
-note "Data, not memory. The next request boots a fresh Actor from the kept files. The Actor's name will change; the files will not."
+chapter "Priya starts the audit"
 
-chapter "The first request"
-
-say "The request is a Task. It opens a Session, asks for the substrate-session"
-say "class, and points at the repository."
-pe "sed -n '13,23p' first-request.yaml"
-pe "sed -n '37,42p' first-request.yaml"
+say "The request is a Task. It opens a Session, names the class, and asks"
+say "for at most six findings written to a file."
+pe "request first-request.yaml"
 pe "orka task create -f first-request.yaml"
-pe "orka session list"
-say "Orka creates an Actor for the Session and Substrate places it on a worker."
+say "Orka creates an Actor for the Session; Substrate places it on a worker."
 wait_for "an Actor to boot" "(( \$(actor_count) >= 1 ))" 600
-pe "$actors"
-pe "kubectl ate get workers"
-first_actor=$(actor_uid)
-say "That Actor is the agent's whole world: a fresh kernel, a durable volume,"
-say "and a network path only to Orka's model proxy. No Git credential rides"
-say "along; the Publisher holds that, outside the sandbox."
+pe "actors"
+say "That Actor is the agent's whole world. No Git credential rides along;"
+say "Orka's Publisher holds it, outside the sandbox."
 wait_task audit-start 1200
-pe "orka task result audit-start"
-say "The Publisher verified the tree and published the audit as a branch."
-say "The receipt is on the Task."
-pe "orka task status audit-start | grep -E 'Delivery|Publication|Verified'"
-pe "git ls-remote $DEMO_REPO refs/heads/$branch"
+pe "result audit-start"
+say "The Publisher verified the files and published the audit as a branch."
+pe "task_summary audit-start"
+pe "git ls-remote $DEMO_REPO refs/heads/$branch | cut -c1-12"
+published_audit audit-start "$branch" "$rendered/original-AUDIT.md"
+ok "Findings written by an agent with no Git token, published by Orka as a branch."
 
-chapter "The workspace sleeps"
+chapter "The workspace goes to sleep"
 
 ws=$(workspace_of audit-start)
-say "The agent is done and the Session is idle. The class said Suspend, so"
-say "Orka has Substrate capture the Actor's data to storage, then removes the"
-say "Actor and retires the worker Pod that hosted it. The pool replaces that"
-say "Pod with a clean one, so the next agent never inherits a used worker."
+say "The agent is done. Substrate captures the Actor's data to storage, then"
+say "removes the Actor and retires the worker that hosted it. The pool gets a"
+say "clean replacement, so the next agent never inherits a used worker."
 wait_for "the workspace to suspend" "[[ \$(ws_state $ws) == Suspended ]]" 600
-pe "kubectl -n orka-system get executionworkspace $ws"
-pe "$actors"
-pe "kubectl ate get workers"
-ok "Zero Actors, three free workers, one of them brand new. The audit's files are kept in storage."
+pe "workspace_state"
+pe "actors"
+pe "workers"
+suspended_actors=$(actor_count)
+suspended_free_workers=$(free_workers)
+((suspended_actors == 0)) || { bad "an Actor remains after the workspace suspended"; exit 1; }
+ok "$suspended_actors Actors, $suspended_free_workers workers free. The audit's files are in storage."
 
-chapter "A follow-up in the same Session"
+chapter "Priya saves a checkpoint"
 
-say "A colleague picks the audit up. Their request names the same Session and"
-say "asks to read what is there."
-pe "sed -n '14,18p;37,39p' follow-up-request.yaml"
-pe "orka task create -f follow-up-request.yaml"
-wait_for "a new Actor to boot" "(( \$(actor_count) >= 1 ))" 600
-pe "$actors"
-second_actor=$(actor_uid)
-[[ -n $second_actor && $second_actor != "$first_actor" ]] ||
-  { bad "expected a new Actor, got ${second_actor:-none}"; exit 1; }
-ok "A different Actor, on whichever worker was free, booted from the kept data."
-wait_task audit-follow-up 1200
-pe "orka task result audit-follow-up"
-say "AUDIT.md was written by an Actor that no longer exists, and the new one"
-say "found it. Nothing was re-cloned: the working tree came from the kept data."
-
-chapter "Save a checkpoint"
-
-wait_for "the workspace to suspend again" "[[ \$(ws_state $ws) == Suspended ]]" 600
 ws_uid=$(kubectl -n "$ORKA_NAMESPACE" get executionworkspace "$ws" -o jsonpath='{.metadata.uid}')
-sed "s/WORKSPACE_NAME/$ws/; s/WORKSPACE_UID/$ws_uid/" "$here/manifests/checkpoint.yaml" >checkpoint.yaml
+sed "s/WORKSPACE_NAME/$ws/; s/WORKSPACE_UID/$ws_uid/" "$here/manifests/checkpoint.yaml" | grep -v '^#' >checkpoint.yaml
 say "A checkpoint is a copy of the workspace's data that Orka keeps as an"
-say "object of its own, with a digest. It points at the exact workspace by"
-say "UID, and it survives that workspace being deleted."
+say "object of its own, with a digest. It survives the workspace being deleted."
 pe "cat checkpoint.yaml"
 pe "kubectl apply -f checkpoint.yaml"
 wait_for "the checkpoint to be Ready" \
   "[[ \$(kubectl -n $ORKA_NAMESPACE get executionworkspacecheckpoint audit-checkpoint -o jsonpath='{.status.phase}') == Ready ]]" 600
-pe "kubectl -n orka-system get executionworkspacecheckpoint audit-checkpoint -o custom-columns=NAME:.metadata.name,PHASE:.status.phase,DIGEST:.status.digest"
+pe "checkpoint_status"
+ok "The audit has a save point with a digest."
 
-chapter "Delete the original, restore the copy"
+chapter "Delete the workspace, restore the copy"
 
-say "Now the worst case: the Session's workspace is deleted, and with it the"
-say "data Substrate kept for it."
+say "Now the worst case: the workspace is deleted, and with it the data"
+say "Substrate kept for it."
 pe "kubectl -n orka-system delete executionworkspace $ws --wait=false"
 wait_for "the workspace to disappear" "! kubectl -n $ORKA_NAMESPACE get executionworkspace $ws >/dev/null 2>&1" 600
 pe "kubectl -n orka-system get executionworkspaces"
 say "A brand-new Task, outside the old Session, restores from the checkpoint."
-say "It names the checkpoint's UID and digest, so a swapped or tampered"
-say "checkpoint is refused."
+say "It names the checkpoint's identity and digest, so a swapped copy is refused."
 cp_uid=$(kubectl -n "$ORKA_NAMESPACE" get executionworkspacecheckpoint audit-checkpoint -o jsonpath='{.metadata.uid}')
 cp_digest=$(kubectl -n "$ORKA_NAMESPACE" get executionworkspacecheckpoint audit-checkpoint -o jsonpath='{.status.digest}')
 sed "s/CHECKPOINT_UID/$cp_uid/; s/CHECKPOINT_DIGEST/$cp_digest/" "$here/manifests/restore-request.yaml" >restore-request.yaml
-pe "sed -n '17,25p' restore-request.yaml"
+pe "request restore-request.yaml"
 pe "orka task create -f restore-request.yaml"
 wait_task audit-restore 1200
-pe "orka task result audit-restore"
-ok "The audit came back byte for byte: from a deleted workspace, written by an Actor that is long gone."
-say "The restored tree is a real workspace again, so Orka verified it and"
-say "published it to its own branch."
-pe "orka task status audit-restore | grep -E 'Delivery|Publication'"
+pe "result audit-restore"
+published_audit audit-restore "$branch-restored" "$rendered/restored-AUDIT.md"
+if ! cmp -s "$rendered/original-AUDIT.md" "$rendered/restored-AUDIT.md"; then
+  bad "the restored audit does not match the original"; exit 1
+fi
+audit_digest=$(shasum -a 256 "$rendered/original-AUDIT.md" | awk '{print $1}')
+match="identical file bytes (SHA-256 ${audit_digest:0:12})"
+ok "The audit came back from a deleted workspace, written by an Actor that is long gone."
+pe "task_summary audit-restore"
 
 chapter "Clean up"
 
+restored_ws=$(workspace_of audit-restore)
+[[ -n $restored_ws ]] || { bad "the restored Task has no workspace identity"; exit 1; }
+say "The restored Task asked Orka to delete its workspace when it finished."
+wait_for "the restored workspace to be collected" \
+  "[[ -z \$(kubectl -n $ORKA_NAMESPACE get executionworkspace $restored_ws --ignore-not-found -o name) ]]" 600
+say "Once that cleanup finishes, Priya removes the saved checkpoint too."
 pe "kubectl -n orka-system delete executionworkspacecheckpoint audit-checkpoint"
 peq "gh api -X DELETE repos/sozercan/orka-demo-inventory/git/refs/heads/$branch"
 peq "gh api -X DELETE repos/sozercan/orka-demo-inventory/git/refs/heads/$branch-restored"
-wait_for "the restored workspace to be collected" \
-  "[[ -z \$(kubectl -n $ORKA_NAMESPACE get executionworkspaces -l demo.orka.ai/name=03-agent-substrate --no-headers 2>/dev/null) ]]" 600 || true
-pe "$actors"
-pe "kubectl ate get workers"
+pe "actors"
+pe "workers"
+end_actors=$(actor_count)
+end_free_workers=$(free_workers)
+((end_actors == 0)) || { bad "an Actor remains after cleanup"; exit 1; }
+ok "$end_actors Actors, $end_free_workers workers free. The Task records stay."
 
-chapter "What you saw"
-
-say "One Session, two requests, two Actors, one set of files. Between the"
-say "requests nothing ran and every worker was free."
-say "A checkpoint outlived the workspace it came from, and a new Task"
-say "restored it. Substrate did the freezing and thawing; Orka decided when,"
-say "and kept the receipts."
-printf '\n'
+evidence \
+  "Actors while asleep" "$suspended_actors" \
+  "Workers free at the end" "$end_free_workers" \
+  "Checkpoint digest" "${cp_digest:0:26}…" \
+  "Original workspace" "deleted" \
+  "Restored audit matches" "$match" \
+  "Branches published" "$branch, $branch-restored"
+cta

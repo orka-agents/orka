@@ -36,7 +36,7 @@ spec:
   timeout: 20m
   prompt: |
     Audit this repository for input validation gaps in the HTTP handlers.
-    Write your findings to AUDIT.md in the repository root, at most twelve
-    lines, one finding per line with the file and function. Do not change any
-    other file, and do not try to build or run anything: this runtime has no
-    Go toolchain. Reply with the exact contents of AUDIT.md.
+    Write your findings to AUDIT.md in the repository root: at most six lines,
+    one finding per line with the file and function. Do not change any other
+    file. Do not run application code, builds, or tests. Reply with the exact
+    contents of AUDIT.md and nothing else.

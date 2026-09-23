@@ -3,215 +3,427 @@
   "demos": [
     {
       "id": "01-chat-to-pr",
-      "title": "From chat to a reviewed change",
-      "scenario": "The inventory service needs a health check.",
-      "payoff": "A reviewed pull request with passing CI",
-      "next": "What could your team hand off next?",
-      "intro": "Our inventory service has no health check. A developer wants to add one, with a test and updated documentation. They will ask through Claude Code. Orka will run the work on the team's infrastructure and keep the records. Let's follow that request all the way to a reviewed pull request.",
+      "title": "From a chat message to a pull request",
+      "scenario": "Maya's service needs a health check.",
+      "payoff": "A reviewed pull request, and no model key on Maya's laptop",
+      "next": "What would your team hand off next?",
+      "intro": "Maya is a developer on the inventory team. Her service has no health check. She will ask for one in Claude Code, the way she would ask a colleague. Orka will run the agents on her team's cluster, keep the records, and end with a pull request. The model key never reaches her laptop.",
       "chapters": [
-        {"marker": "The scenario", "title": "Start with the missing endpoint", "cue": "A small change with a result we can check", "text": "Here is the service's current API. It can list, create, and retrieve inventory items. There is no health endpoint yet. That gives us a concrete change to ask for and a clear result to check at the end."},
-        {"marker": "A cluster that runs agents", "title": "Meet the team Orka can run", "cue": "Agent = a configured worker for a particular role", "text": "The platform team has already installed Orka. A Provider is its connection to a model service. An Agent is a configured worker, with a model, a way to run, and permissions. Here we have a coding agent and a separate reviewer. A Task is Orka's record of one piece of work assigned to an agent."},
-        {"marker": "Connect as a developer", "title": "Connect with a developer identity", "cue": "The developer authenticates to Orka", "text": "The developer connects to Orka with a Kubernetes service account token. Think of this as their identity for this installation. It is separate from the model provider's key. The status command confirms that Orka is ready and the team's agents are available."},
-        {"marker": "Point Claude Code at the cluster", "title": "Use the familiar chat client", "cue": "Claude Code sends its requests to Orka", "text": "Claude Code can use Orka's compatible endpoint. We set the server address and the developer's token, then list the models available to that identity. The developer keeps their familiar client, while the platform team manages the model connection in the cluster."},
-        {"marker": "The request", "title": "Ask for the change", "cue": "Describe the outcome, including tests and documentation", "text": "The request asks for a health endpoint, a unit test, documentation, and a pull request. We send it as an ordinary chat prompt. Orka's coordinator can turn that conversation into work for the configured agents, then bring their results back to the developer."},
-        {"marker": "Orka turns the conversation into Tasks", "title": "Follow the work as it happens", "cue": "Task records show implementation, checks, and review", "text": "Each row is a real Task. The coding agents implement the change, other tasks run checks, and the reviewer inspects the result. Waiting time is compressed here. One validation attempt fails with an older Go image, and later checks succeed. Orka keeps those attempts visible, so we can see how the work reached its result."},
-        {"marker": "Look inside one Task", "title": "Inspect the execution and publication", "cue": "The publication receipt records what reached the remote", "text": "A Task keeps execution events as well as its final answer. We can read what the coder did and inspect the publication receipt. Orka's Publisher is a separate component that publishes the changed files. Verified Exact means the published content matched the content Orka checked."},
-        {"marker": "The pull request", "title": "Check the delivered result", "cue": "Real pull request, changed files, and CI result", "text": "Now we check the result outside the agent's answer. GitHub shows the health endpoint pull request, a passing test check, and the three changed files. The developer's chat request has become a change the team can review. The pull request remains open for the team to decide what happens next."}
+        {
+          "marker": "Maya has no model key",
+          "title": "Connect with a cluster token",
+          "cue": "Provider = the saved connection Orka uses to reach a model",
+          "text": "The model key stays in a cluster Secret. A Provider is the saved connection Orka uses to reach that model. The platform team also defined three Agents: a coder, a reviewer, and an analyst. Maya connects with a token for the cluster. The status check confirms Orka is ready. Short commands such as readme are shell helpers defined in this demo script."
+        },
+        {
+          "marker": "Maya asks in chat",
+          "title": "Ask in the familiar client",
+          "cue": "Claude Code sends its requests to Orka",
+          "text": "Here is the service today, with no health check. Two environment variables point Claude Code at Orka. Maya asks for the endpoint, a test, the docs, and a pull request. She does not choose which agents do the work. She sends it as an ordinary prompt."
+        },
+        {
+          "marker": "Orka turns the chat into Tasks",
+          "title": "Watch the work happen",
+          "cue": "Task = one piece of work, with a record",
+          "text": "Each row is a Task, one piece of work Orka runs and keeps a record of. Orka decides how many to run and in what order, so more than one can run at once. A failed row shows an attempt that did not complete. We check the final result before calling the work complete. Waiting time is cut."
+        },
+        {
+          "marker": "Open the Task that made the pull request",
+          "title": "Read the receipt",
+          "cue": "Publisher = the one component that holds the Git token",
+          "text": "We open the Task whose branch became the pull request and read what the coder said as it worked. The coder never pushed. Orka's Publisher, the one component that holds a Git token, verified the files and published the branch. Verified Exact means what reached GitHub is exactly what Orka checked."
+        },
+        {
+          "marker": "GitHub shows the pull request",
+          "title": "Check it outside Orka",
+          "cue": "Real pull request, passing checks, recorded changes",
+          "text": "Maya's answer arrived in the chat window. Now we check GitHub itself: the pull request, its checks, and the changed files. The closing table comes from the records we queried: the message, the Tasks observed during the run, including failed attempts, and the pull request. Maya used a cluster token to access the model."
+        }
       ],
-      "outro": "One request reached implementation, checks, review, and a real pull request. Orka kept the work records along the way. What would you hand off to your own agent team? Visit the Orka documentation at the address on screen for more examples and the getting started guide."
+      "outro": "One chat message became a reviewed pull request, with records linking the completed work to the code on GitHub. What would you hand off to your own agent team? Visit the Orka documentation at the address on screen for setup steps and more examples."
     },
     {
       "id": "02-agent-sandbox",
-      "title": "A workspace that can wait",
-      "scenario": "Add a health check today. Pick up the work later.",
-      "payoff": "The worker stops. The files survive.",
-      "next": "What work would you return to tomorrow?",
-      "intro": "A developer asks an agent to add a health check to the inventory service. Later, they want to return and inspect the same files. Keeping an idle agent running wastes compute. Orka can stop its worker while keeping the workspace data. Let's see what survives between the two requests.",
+      "title": "A workspace that sleeps",
+      "scenario": "Add a health check today. Look at the same files tomorrow.",
+      "payoff": "Nothing runs in between, and nothing is lost",
+      "next": "What work would you come back to tomorrow?",
+      "intro": "Maya asks an agent to add a health check today and wants to look at the same files tomorrow. Nobody should pay for an idle agent in between, and nothing should be lost. Let's see what survives between the two requests.",
       "chapters": [
-        {"marker": "Three words", "title": "Choose how the workspace waits", "cue": "Session = related requests that share this workspace", "text": "A Session groups related requests. In this setup, those requests share one workspace. Agent Sandbox is the component that hosts the worker and its disk. A workspace class is the platform team's saved choice of host and lifecycle. This class says to suspend when work finishes. Suspension stops the worker and keeps its disk for later."},
-        {"marker": "The first request", "title": "Give the agent a place to work", "cue": "Task = one request, with a recorded outcome", "text": "We create a Task naming the Session, the workspace class, and the repository. Orka starts a worker and attaches a disk. The agent adds the health endpoint and its test. Orka's separate Publisher publishes the changed files. In this run the worker has no Go toolchain, so the pull request's CI runs the tests."},
-        {"marker": "The workspace sleeps", "title": "Stop the idle worker", "cue": "No worker Pod; the stored files remain", "text": "The task has finished, so the workspace follows its suspend policy. Watch the worker Pod disappear while the disk remains. A Pod is the running worker here. With no Pod, this workspace uses no worker compute while it waits. The disk still exists and still has a storage cost."},
-        {"marker": "A follow-up in the same Session", "title": "Return to the same files", "cue": "The follow-up uses the original Session", "text": "The next Task names the same Session and asks to inspect the files already there. Orka starts the worker again using the kept disk. The result shows the health endpoint and test from the first request. Delivery says No Change because this follow-up only read the workspace and had nothing new to publish."},
-        {"marker": "Clean up", "title": "Finish the workspace lifecycle", "cue": "Workspace cleanup leaves the work records and pull request", "text": "When the team is finished, deleting this workspace removes its Sandbox and disk according to the configured policy. We check that those resources are gone. The pull request remains available. The working environment has a lifecycle of its own, separate from the recorded work and its published result."}
+        {
+          "marker": "The platform team chose the lifecycle",
+          "title": "Choose how the workspace waits",
+          "cue": "Workspace class = a lifecycle the platform team saved",
+          "text": "A workspace class is a lifecycle the platform team saved once. Maya asks for it by name. This one says: when the agent stops, put its host to sleep and keep the disk. The host is the Kubernetes Agent Sandbox project. Before Maya's request, it is empty. Short commands such as request are shell helpers defined in this demo script."
+        },
+        {
+          "marker": "Maya makes the first request",
+          "title": "Give the agent a place to work",
+          "cue": "Session = a conversation Orka remembers",
+          "text": "A Task is one request with a recorded outcome. It opens a Session, a conversation Orka remembers, and names the class and the repository. The host starts one Pod for the agent and one small disk. We check for four common model and Git credential variables without displaying any values. The agent adds the endpoint, and Orka's Publisher opens the pull request."
+        },
+        {
+          "marker": "The workspace goes to sleep",
+          "title": "Stop the idle worker",
+          "cue": "No Pod, only a disk",
+          "text": "The agent is done and the Session is idle. The class said sleep, so Orka asks the host to suspend the Sandbox. The Pod goes away and the disk stays. The idle agent no longer reserves CPU or memory. The cluster and the saved disk still have costs."
+        },
+        {
+          "marker": "Maya comes back tomorrow",
+          "title": "Return to the same files",
+          "cue": "Same Sandbox identity, new Pod, kept disk",
+          "text": "The follow-up names the same Session. The host wakes the same Sandbox, with the same identity, and starts a new Pod on the kept disk. The agent finds yesterday's endpoint. The Task records that publication made no change."
+        },
+        {
+          "marker": "Clean up",
+          "title": "Finish the workspace lifecycle",
+          "cue": "The records and the pull request stay",
+          "text": "Deleting the workspace removes the Sandbox and its disk. The Task records and the pull request stay. The closing table shows two requests, one Sandbox identity on both days, zero Pods while asleep, and the open pull request."
+        }
       ],
-      "outro": "Two requests used one set of files, with the worker stopped in between. The platform team chose the lifecycle once, and the developer used it by name. What work would you want to return to tomorrow? Explore workspace options and get started at the Orka documentation address on screen."
+      "outro": "Two requests used one set of files, with the worker stopped in between. The platform team chose the lifecycle once, and Maya used it by name. What work would you come back to tomorrow? Visit the Orka documentation at the address on screen for setup steps and more examples."
     },
     {
       "id": "03-agent-substrate",
-      "title": "Save the work. Resume somewhere new.",
+      "title": "A save point for an agent",
       "scenario": "An audit must survive a pause and a deleted workspace.",
-      "payoff": "The audit returns from a saved checkpoint",
-      "next": "What work needs a reliable handoff?",
-      "intro": "The security team is auditing the inventory service. One person starts the work, and a colleague will pick it up later. They also want a saved copy that survives deletion of the original workspace. Orka can manage that lifecycle and keep the records. We will follow the audit files through both handoffs.",
+      "payoff": "The audit comes back from a checkpoint",
+      "next": "Which work would you want a save point for?",
+      "intro": "Priya, on the security team, starts an audit of the inventory service. Nothing should run while nobody works, and the findings must survive anything, even the workspace being deleted. Orka keeps a save point. Let's follow the audit through a sleep, a deletion, and a restore.",
       "chapters": [
-        {"marker": "Actors and workers", "title": "Meet the workspace host", "cue": "Actor = an isolated environment hosted by a worker", "text": "Agent Substrate is the workspace host in this example. It keeps a shared pool of workers ready. An Actor is the isolated environment where one agent runs, using gVisor for isolation. Orka's workspace class says when to start and suspend it. This demo preserves files. A later request starts a fresh process with those files."},
-        {"marker": "The first request", "title": "Write the audit", "cue": "A Task records the work; a Session connects follow-ups", "text": "A Task is one request to Orka. This one opens a Session, which groups related requests, and asks the agent to write an audit file. An Actor starts on a free worker. The response lists the input validation issues the agent found, and the publication receipt identifies the branch containing its audit."},
-        {"marker": "The workspace sleeps", "title": "Keep the files and release the worker", "cue": "The Actor is gone; all shared workers are available", "text": "After the task finishes, Orka saves the Actor's data and removes that Actor. The worker that hosted it is replaced, leaving the pool ready for other work. We see a suspended workspace, no Actors, and free workers. The shared worker pool and saved storage still exist. The audit is no longer occupying an Actor."},
-        {"marker": "A follow-up in the same Session", "title": "Resume in a fresh Actor", "cue": "A new Actor reads the existing audit file", "text": "A colleague's follow-up uses the same Session. The Actor name changes because Orka starts a fresh environment from the saved data. The result contains the original audit file and its findings. The handoff kept the working files without needing the original agent process to remain alive."},
-        {"marker": "Save a checkpoint", "title": "Keep an independent save point", "cue": "Checkpoint = a saved copy of the workspace data", "text": "A checkpoint is a saved copy of the workspace's data with its own record. We create one and wait until it is ready. The digest is a fingerprint of that saved data. The checkpoint can be named by a later task even after the original workspace is removed."},
-        {"marker": "Delete the original, restore the copy", "title": "Restore after deleting the source", "cue": "A new Task restores the saved checkpoint", "text": "We delete the original workspace and confirm it is gone. Then a new Task, outside the old Session, names the checkpoint and its fingerprint. The restored workspace contains the same audit. Its files can be published again, and the new Task gets its own publication receipt."},
-        {"marker": "Clean up", "title": "Check the resources left behind", "cue": "No active Actors remain after the demonstration", "text": "The final check shows no active Actors and a worker pool ready for more tasks. We also remove the demo's checkpoint once the restore is verified. That makes the retained data an explicit choice the team can manage."}
+        {
+          "marker": "Substrate keeps a pool of workers",
+          "title": "Meet the workspace host",
+          "cue": "Actor = an isolated environment hosted by a shared worker",
+          "text": "This host is Agent Substrate. It keeps a few worker Pods ready all the time and runs each agent inside an Actor, an isolated environment with its own kernel, hosted by whichever worker is free. The platform team's class says: sleep when the agent stops, keep the data, and boot a fresh Actor from it next time. Short commands such as actors are shell helpers defined in this demo script."
+        },
+        {
+          "marker": "Priya starts the audit",
+          "title": "Write the audit",
+          "cue": "Task = the request; Session = the conversation",
+          "text": "The request is a Task. It opens a Session, names the class, and asks for at most six findings written to a file. Orka creates an Actor and Substrate places it on a worker. The agent writes the findings. Orka's Publisher, which alone holds the Git token, publishes them as a branch."
+        },
+        {
+          "marker": "The workspace goes to sleep",
+          "title": "Keep the files, release the worker",
+          "cue": "Zero Actors, every worker free",
+          "text": "The agent is done. Substrate captures the Actor's data to storage, removes the Actor, and retires the worker that hosted it. The pool gets a clean replacement, so the next agent never inherits a used worker. Zero Actors are running and the audit's files are in storage."
+        },
+        {
+          "marker": "Priya saves a checkpoint",
+          "title": "Keep an independent save point",
+          "cue": "Checkpoint = a copy of the data, with a digest",
+          "text": "A checkpoint is a copy of the workspace's data that Orka keeps as an object of its own, with a digest. Priya creates one. It survives the workspace it came from being deleted."
+        },
+        {
+          "marker": "Delete the workspace, restore the copy",
+          "title": "Restore after deleting the source",
+          "cue": "A new Task restores from the checkpoint by identity and digest",
+          "text": "Now the worst case. The workspace is deleted, and with it the data Substrate kept. A brand-new Task, outside the old Session, restores from the checkpoint by its identity and digest, so a swapped copy would be refused. The audit comes back line for line, and Orka publishes it again."
+        },
+        {
+          "marker": "Clean up",
+          "title": "Check what is left",
+          "cue": "Restored workspace and checkpoint removed; records kept",
+          "text": "The restored Task finishes and its workspace is removed. We also delete the checkpoint. The final records show the remaining Actors and free workers, the checkpoint digest, the deleted original workspace, and matching audit files from both published commits."
+        }
       ],
-      "outro": "The audit survived a pause, a fresh agent environment, and deletion of its original workspace. Orka connected the requests and tracked the saved data. Which handoff would you make more reliable? Visit the Orka documentation at the address on screen to explore workspaces and get started."
+      "outro": "The audit survived a pause and the deletion of its workspace, and came back from a save point. Substrate saved the files and started new Actors. Orka chose when, and kept the records. Which work would you want a save point for? Visit the Orka documentation at the address on screen for setup steps and more examples."
     },
     {
       "id": "04-security-scan",
-      "title": "From a checked finding to a fix",
-      "scenario": "A legacy service needs a security review people can act on.",
-      "payoff": "A selected finding becomes a real pull request",
-      "next": "Which repository would you review first?",
-      "intro": "A security team wants to review an old service and help engineers act on the results. For this example, we use a public test application with known vulnerabilities. Orka will coordinate the scan and keep its findings. A person will choose one finding to fix, then inspect the resulting pull request.",
+      "title": "Findings that arrive as pull requests",
+      "scenario": "An old app needs a security review people can act on.",
+      "payoff": "A checked finding becomes a pull request Priya chose",
+      "next": "Which repository would you start with?",
+      "intro": "Priya, on the security team, has an old Node.js app nobody wants to touch. She wants findings that were checked before she reads them, and fixes that arrive as pull requests. For this example we use a public test application with known vulnerabilities.",
       "chapters": [
-        {"marker": "Register the repository", "title": "Tell Orka what to review", "cue": "RepositoryScan = the saved instructions for scanning a repository", "text": "A Repository Scan records which repository to inspect and which agents should analyze and patch it. An agent is a configured worker with a model and permissions. This configuration also names the credential references used for repository operations. Registering it starts the first scan. The team can return to its results through the same record."},
-        {"marker": "Scan", "title": "Watch the review take shape", "cue": "Task records show the scan's progress", "text": "Orka first asks for a threat model, a short description of the application and where an attacker might affect it. It then assigns parts of the code to review tasks. A Task is Orka's record of one piece of work. These rows show the actual progress, with quiet waiting compressed. The scan also tries to validate likely findings."},
-        {"marker": "Findings, with evidence", "title": "Read the evidence for one finding", "cue": "Validated and unvalidated findings remain distinct", "text": "The results distinguish validated findings from findings that still need checking. We inspect a validated archive extraction issue. A crafted archive could write files outside the intended directory. The finding identifies the source file, location, and behavior, giving the team something specific to investigate. This evidence supports the selected finding. It does not prove the whole application is secure."},
-        {"marker": "A person decides to fix it", "title": "Choose a finding and inspect the fix", "cue": "The person selects the work; the pull request remains reviewable", "text": "The presenter selects that finding for a patch. Orka gives it to the coding agent, tracks the task, and publishes the result through its Publisher component. We then check GitHub itself. The pull request is open and lists the changed files. The team can review the proposed fix using its normal process."}
+        {
+          "marker": "Priya registers the repository",
+          "title": "Register once",
+          "cue": "One record: the repository, a reviewing Agent, a patching Agent",
+          "text": "Priya registers the repository once. The record names the repository, the Agent that reviews, and the Agent that patches. Only Orka's Publisher ever holds the Git credentials. The agents that read and patch the code never do. Registering starts the first scan. Short commands such as registration are shell helpers defined in this demo script."
+        },
+        {
+          "marker": "Orka scans the app",
+          "title": "Watch the review take shape",
+          "cue": "Stages, with counts of Tasks by phase",
+          "text": "The reviewing Agent first writes a threat model: what the app does and where an attacker would push. Then it reviews the code slice by slice against that model, and checks the likely findings. Each row is one stage of the scan with a count of its Tasks by phase. Waiting is cut. The scan ends with a threat model and findings on record."
+        },
+        {
+          "marker": "Findings come with evidence",
+          "title": "Read one finding",
+          "cue": "Listed findings passed validation; inspect the evidence",
+          "text": "Every finding cites a file and a line. Orka then checks the likely findings in an isolated worker. The list includes only findings marked validated. We open one to see the affected code, its severity, and the evidence recorded with it."
+        },
+        {
+          "marker": "Priya picks one to fix",
+          "title": "Decide, then check GitHub",
+          "cue": "A person picks; Orka opens the pull request",
+          "text": "Nothing is patched by itself. Priya asks for a fix on this one finding. Orka hands it to the coding Agent in a writable workspace, and the Publisher opens the pull request with credentials the agent never saw. We check GitHub itself: the pull request is open and lists the changed files. The closing table counts the slices reviewed, the findings validated, and the fix Priya requested."
+        }
       ],
-      "outro": "The scan produced a checked finding, a person selected it, and Orka delivered a pull request for review. The evidence and the fix stay connected. Which repository would you start with? Visit the Orka documentation at the address on screen for more examples and the getting started guide."
+      "outro": "The scan produced checked findings, Priya chose one, and a pull request arrived for her team to review. Which repository would you start with? Visit the Orka documentation at the address on screen for setup steps and more examples."
     },
     {
       "id": "05-two-teams",
-      "title": "One URL. Separate teams.",
+      "title": "Two teams, one URL",
       "scenario": "Payments and inventory need different models and separate work.",
-      "payoff": "The caller's identity selects the team",
-      "next": "How would you organize your agent teams?",
-      "intro": "Payments and inventory both want to use AI agents. Each team needs its own model configuration and work records, but developers want one familiar server address. In this setup, each team has its own Orka installation. A small router uses the caller's identity to send requests to the right team.",
+      "payoff": "The caller's token picks the team, and the wrong door stays shut",
+      "next": "How would you organize your teams?",
+      "intro": "Alice is on the payments team and Bob is on inventory. They need different models and different budgets, and they must never see each other's work. The company wants one AI address for every tool. Each team gets its own Orka, and one small router reads the caller's token.",
       "chapters": [
-        {"marker": "Two installations, one router", "title": "Give each team its own installation", "cue": "Namespace = a named area for one team's resources", "text": "Each team has a separate Kubernetes namespace, a named area containing its own Orka resources. Its Provider is the connection to its chosen model service. Payments uses one model, inventory another. The router's configuration maps each team to its installation. The router forwards requests. Each team's Orka performs the work."},
-        {"marker": "Two developers, one URL", "title": "Connect two people to the same address", "cue": "Same endpoint; different authenticated identities", "text": "Alice belongs to payments and Bob belongs to inventory. Both use the same server address. Their service account tokens identify their teams. When we ask which models are available, the answers differ. Each person sees the models configured by their own team's installation."},
-        {"marker": "Same request, different homes", "title": "See where the requests become work", "cue": "Task = the record of work inside the selected team", "text": "Both developers now ask for the same simple container task. A Task is Orka's record of a piece of work. The answers come back through the shared endpoint, and the task lists show where the work ran. Payments tasks are in payments. Inventory tasks are in inventory."},
-        {"marker": "The boundary", "title": "Try the wrong team's resources", "cue": "Both the router path and direct installation enforce identity", "text": "Bob tries to name the payments Provider. His request still reaches inventory, where that Provider does not exist. Then he contacts the payments installation directly and asks to list its tasks. That request receives a forbidden response. The team installation checks identity too, so the boundary does not depend only on the shared router."},
-        {"marker": "What the platform team got", "title": "Check the separate work records", "cue": "One client address, with work kept in each team's installation", "text": "The final list shows completed tasks under both team namespaces. Developers used one address while the platform kept each team's configuration and records separate. The requests we tested stayed within the caller's team, and the cross-team attempts were refused."}
+        {
+          "marker": "Two teams, one door",
+          "title": "Give each team its own installation",
+          "cue": "Namespace = a team's own room in the cluster",
+          "text": "Each team has its own namespace, a room of its own in the cluster, with a complete Orka inside: its own model key, Agents, and Tasks. In front of both sits one small router. It reads the caller's token and forwards to that team. It holds no keys and runs no models. Short commands such as routes are shell helpers defined in this demo script."
+        },
+        {
+          "marker": "Alice and Bob use the same URL",
+          "title": "Connect two people to one address",
+          "cue": "Same URL, different tokens",
+          "text": "The token is the badge. It says who you are and which room you belong to, and it goes where an API key normally goes. Asking the same URL which models it offers gives Alice the payments models and Bob the inventory models. The token chose the team. Nothing in the request did."
+        },
+        {
+          "marker": "The same request lands in different homes",
+          "title": "See where the work runs",
+          "cue": "Task = the record of work, inside the caller's team",
+          "text": "Both ask Claude Code for the same small thing. Each request becomes a Task in its own team's installation, run by that team's Orka on that team's budget, and nowhere else."
+        },
+        {
+          "marker": "Bob knocks on the wrong door",
+          "title": "Try the wrong team's resources",
+          "cue": "Wrong model and wrong namespace refused",
+          "text": "Bob asks for the payments team's model through the shared URL. The request reaches inventory and is refused because that installation does not offer the model. Bob then goes straight to payments with his token. Refused again. Each installation checks identity. The closing table shows one URL, two installations, and both refusals."
+        }
       ],
-      "outro": "One endpoint can serve separate teams without putting their work in the same installation. Each team keeps control of its configured models and task records. How would you organize your agent teams? Explore the options and the getting started guide at the Orka documentation address on screen."
+      "outro": "One address serves separate teams without putting their work in the same installation. Each team keeps its own models, budget, and records. How would you organize your teams? Visit the Orka documentation at the address on screen for setup steps and more examples."
     },
     {
       "id": "08-agent-to-agent",
-      "title": "The order desk asks Orka for help",
+      "title": "The order desk asks for help",
       "scenario": "A customer wants 24 filters. Only 18 are available today.",
-      "payoff": "A saved reply the order desk can retrieve again",
-      "next": "Which application could use your agents?",
-      "intro": "A customer wants twenty four replacement filters today. We have eighteen, and the next delivery arrives tomorrow. The order desk needs advice from the inventory team's agent. That agent runs in Orka. We will ask it from another application, retry the request, and see whether the answer remains available.",
+      "payoff": "A reply Sam's app can retry, continue, and read back",
+      "next": "Which application could ask your agents for help?",
+      "intro": "Sam runs the order desk. A customer wants twenty four replacement filters today, and only eighteen are in stock. Sam's order-desk application asks the inventory team's agent for advice. That agent runs in Orka. We will send the request, retry it, and continue the conversation.",
       "chapters": [
-        {"marker": "The customer's request", "title": "Start with the customer's situation", "cue": "24 requested; 18 available; next delivery tomorrow", "text": "These are the facts the order desk has. The request asks for a recommendation and a short customer reply. It also says not to place an order or promise an exact delivery time. The terminal is standing in for the order-desk application."},
-        {"marker": "Find the inventory agent", "title": "Discover what the agent can do", "cue": "Agent Card = a description of an agent and how to contact it", "text": "The application reads an Agent Card. This describes the agent's purpose and the work it supports. Here, the advertised skill is recommending a customer reply. A two A is the common message format the application and Orka use to communicate, so the application can ask for work through a standard interface."},
-        {"marker": "Send the work", "title": "Submit the request and keep its reference", "cue": "Task = Orka's record of one piece of work", "text": "We send the facts with a stable request identifier and ask for an immediate acknowledgement. The response gives us a reference for checking progress. In Orka, a Task is the record of one piece of work. We can inspect the matching Task without keeping the application's original connection open."},
-        {"marker": "Read the recommendation", "title": "Read the real answer", "cue": "The application answer matches Orka's saved result", "text": "The completed answer offers eighteen filters today and explains that six remain for the next delivery. We retrieve it through the application client, then read Orka's stored result. They match. The response is based on the quantities and timing supplied in the request."},
-        {"marker": "The application retries", "title": "Retry the same request", "cue": "Same request ID and content return the original Task", "text": "Applications retry when they are unsure a request arrived. We repeat the same request identifier, conversation, and text. The returned reference is the same, and the recorded evidence finds just one matching Task with the same identity. This retry created no extra piece of work."},
-        {"marker": "Ask a follow-up", "title": "Continue the conversation", "cue": "Session = the conversation shared by related Tasks", "text": "Now we ask for a two-sentence customer reply. This is new work, so it gets a new request identifier. The conversation identifier stays the same. Orka calls that shared conversation a Session. The saved records show two distinct Tasks in one Session, and the follow-up uses the earlier facts."},
-        {"marker": "Replace the adapter", "title": "Retrieve the answer after replacement", "cue": "The adapter handles messages; Orka retains the work records", "text": "The adapter translates the application's messages. Both tasks have finished before we replace it. Once its replacement is ready, we retrieve the answer again. The evidence shows the same saved reply and no new Tasks. This demonstrates continued access to completed results after replacing the adapter. It does not test interrupting an agent while it is working."}
+        {
+          "marker": "Sam has a customer waiting",
+          "title": "Start with the customer",
+          "cue": "24 requested, 18 available, delivery tomorrow",
+          "text": "Here is the whole request: the stock, the delivery, and what Sam needs. The application supplies those facts and asks for a recommendation. Short commands such as card are shell helpers defined in this demo script."
+        },
+        {
+          "marker": "Find the inventory agent",
+          "title": "Discover what the agent can do",
+          "cue": "Agent Card = what an agent does and how to reach it",
+          "text": "Sam's app and Orka speak A2A, a common format for asking another agent for help. The inventory agent publishes a card with one skill: recommend a customer reply from the stock facts supplied."
+        },
+        {
+          "marker": "Send the work and get a receipt",
+          "title": "Submit and keep the reference",
+          "cue": "Task = Orka's record of one piece of work",
+          "text": "The app gives the request a stable ID and asks for an immediate acknowledgement. It gets a reference and a conversation ID. Behind the reference is a Task, Orka's record of this piece of work. Sam's app can check on it with the reference alone."
+        },
+        {
+          "marker": "Read the recommendation",
+          "title": "Read the answer",
+          "cue": "The same answer through A2A and in Orka's record",
+          "text": "The answer arrives: offer eighteen today and six after tomorrow's delivery, with a short customer reply. It is the same through A2A and in Orka's own record, and it used the facts we supplied."
+        },
+        {
+          "marker": "Sam's app retries",
+          "title": "Retry safely",
+          "cue": "Same ID, same Task, no duplicate work",
+          "text": "Applications retry when they are unsure a request arrived. Sending the same request ID again returns the same reference and the same Task. A retry does not do the work twice."
+        },
+        {
+          "marker": "Sam asks a follow-up",
+          "title": "Continue the conversation",
+          "cue": "Session = the conversation shared by related Tasks",
+          "text": "A new request ID starts new work, and keeping the conversation ID connects it to the earlier exchange. Orka calls that shared conversation a Session. The follow-up knew what the first request said. The closing table shows three requests sent, one Task after the retry, and two Tasks in one Session."
+        }
       ],
-      "outro": "The order desk got a usable reply, retried safely, and continued the conversation. It could still read the answer after the message adapter was replaced. Which application could use your agents this way? Visit the Orka documentation at the address on screen to explore more and get started."
+      "outro": "Sam's app got a usable reply, retried safely, and continued the conversation, with every step on record in Orka. Which application could ask your agents for help? Visit the Orka documentation at the address on screen for setup steps and more examples."
     },
     {
       "id": "09-governed-tools",
-      "title": "Check stock. Keep purchasing closed.",
+      "title": "Check stock, keep purchasing closed",
       "scenario": "The assistant needs supplier information, without buying anything.",
-      "payoff": "Stock received. Zero orders created.",
+      "payoff": "Stock confirmed, zero orders created, both sides on record",
       "next": "Which actions should your platform allow?",
-      "intro": "The inventory team needs twenty more replacement filters. Its supplier can check stock and accept orders. Our assistant should gather information, but purchasing is not enabled. Orka will run the requests through a configured gateway. We will compare the assistant's tool events with the supplier's own receipts.",
+      "intro": "Jordan, on the inventory team, needs twenty more replacement filters. An assistant can ask the supplier. Whether it may also buy is the platform team's decision, not the model's. We will watch one allowed request and one refused one, and check the supplier's own receipts.",
       "chapters": [
-        {"marker": "1. The shortage", "title": "Ask for information first", "cue": "The supplier simulator starts with zero orders", "text": "The request asks whether twenty filters are available. Our supplier is a small HTTP service with synthetic stock and real request receipts. Its order count starts at zero. That gives us a baseline for checking whether anything gets purchased during this run."},
-        {"marker": "2. How the assistant reaches the supplier", "title": "Define the action the model can request", "cue": "Tool = a named action the model can ask Orka to carry out", "text": "A Tool is a named action the model can ask Orka to carry out. This Tool describes an HTTP stock lookup. Its outbound policy tells Orka to send the request through a gateway. Both stock lookup and ordering are available for the model to request here, which lets us test the gateway's independent restriction."},
-        {"marker": "3. What the gateway permits", "title": "Read the route and credential reference", "cue": "The gateway permits the stock route and supplies its credential", "text": "A gateway sits between Orka and the supplier. A route defines which request it can forward. This route permits the stock lookup. The credential reference points to a Kubernetes Secret, where the platform keeps the supplier credential. The gateway supplies that credential. The Tool definition does not contain it."},
-        {"marker": "4. Run the lookup", "title": "Run the allowed lookup", "cue": "Task = the work record, including tool events and the result", "text": "A Task is Orka's record of one piece of work. We create a lookup Task and see its tool call start and complete. The assistant reports thirty two filters available, enough to cover the twenty needed. Next, we check the service's record of that lookup."},
-        {"marker": "5. Check the supplier's receipt", "title": "Check what reached the supplier", "cue": "The receipt confirms the request and accepted credential", "text": "The supplier receipt shows the stock endpoint, the requested item, and thirty two available units. It also says the credential was accepted. This connects the assistant's answer to an authenticated request that actually reached the supplier service."},
-        {"marker": "6. Ask it to place an order", "title": "Attempt the closed operation", "cue": "The gateway refuses the order because no route matches", "text": "We explicitly ask the assistant to use its order Tool. The call reaches the gateway, which returns HTTP four oh four because no order route is configured. Orka records the failed call, and the assistant reports that failure. Being able to request an action did not give the model permission to complete it."},
-        {"marker": "7. Check what happened", "title": "Compare both sides of the request", "cue": "Allowed lookup; no order request received by the supplier", "text": "The summary is calculated from this run's records. The stock lookup reached the supplier with an accepted credential. The gateway refused the order, the supplier received zero order requests, and it created zero orders. These checks apply to the two configured Tools shown in this example."}
+        {
+          "marker": "1. Jordan needs 20 filters",
+          "title": "Ask for information first",
+          "cue": "The supplier starts with zero orders",
+          "text": "Here is the request. The supplier is a small service with made-up stock, and its receipts are the proof. Before we start, it has created zero orders. Short commands such as tool are shell helpers defined in this demo script."
+        },
+        {
+          "marker": "2. The assistant can request two actions",
+          "title": "Define what the model can ask for",
+          "cue": "Tool = an action the model can ask Orka to carry out",
+          "text": "A Tool is an action the model can ask Orka to carry out. This assistant has two: check stock and place an order. Both go through a gateway. Neither Tool contains the supplier credential. A Secret holds it, and the gateway supplies it."
+        },
+        {
+          "marker": "3. The gateway allows one of them",
+          "title": "Read the one route",
+          "cue": "Stock lookups pass; nothing is configured for orders",
+          "text": "The gateway forwards only what its routes allow, and there is one route: the stock lookup. Nothing is configured for orders."
+        },
+        {
+          "marker": "4. Ask for the stock check",
+          "title": "Run the allowed lookup",
+          "cue": "Task = the work record, with tool events and the result",
+          "text": "A Task is Orka's record of one piece of work. The assistant calls the stock Tool, the call completes, and it answers that thirty-two filters are available. The supplier's own record shows the request arrived with the credential the model never saw."
+        },
+        {
+          "marker": "5. Ask it to buy",
+          "title": "Attempt the closed action",
+          "cue": "Refused at the gateway; zero orders at the supplier",
+          "text": "Now we explicitly ask the assistant to place the order. Asking for an action does not grant permission to perform it. The gateway had no route for the order and refused it. The assistant reports that no order was placed, and the supplier still counts zero orders. The closing table shows both requests from both sides."
+        }
       ],
-      "outro": "The assistant gathered useful stock information while purchasing stayed closed. The gateway controlled the route and supplied the supplier credential. Which actions should your platform allow? Visit the Orka documentation at the address on screen to explore tool access and follow the getting started guide."
+      "outro": "The assistant got the stock information it needed while purchasing stayed closed. The platform controlled the route and the credential, and the supplier's receipts agree. Which actions should your platform allow? Visit the Orka documentation at the address on screen for setup steps and more examples."
     },
     {
       "id": "10-reviewed-memory",
       "title": "A procedure the next agent can use",
       "scenario": "Keep a return procedure, with a person deciding what is shared.",
-      "payoff": "A fresh agent uses the reviewed procedure",
+      "payoff": "A fresh agent answers from the reviewed note, with the trail on record",
       "next": "Which team knowledge is worth keeping?",
-      "intro": "An assistant has read a warehouse return procedure. Returned filters go to Dock Three with a particular return label. The next person will need those instructions too. Orka lets an agent propose useful information to keep, while a person decides whether to publish it as shared knowledge. Let's follow that process.",
+      "intro": "Jordan runs the warehouse. An assistant has just read the return procedure for replacement filters, and the next assistant will need it too. Orka lets an agent propose knowledge to keep, but nothing becomes shared until Jordan says so. Let's follow that process.",
       "chapters": [
-        {"marker": "1. Today's procedure", "title": "Start with the source note", "cue": "Memory = saved project information supplied to future work", "text": "The note names Dock Three and the exact return label shown here. In this demo, memory means saved project information that Orka supplies to future tasks. We begin with no shared notes. The first assistant has the procedure only because its task receives this source note."},
-        {"marker": "2. The agent proposes a note", "title": "Let the agent suggest what to keep", "cue": "remember creates a proposal for review", "text": "A Task is the record of one piece of work. We ask an assistant to identify the reusable procedure and propose it. Its remember tool call starts and completes. Despite the tool's name, this step creates a proposal for review. It does not immediately create shared memory."},
-        {"marker": "3. Inspect the proposal", "title": "Read the proposal and its source", "cue": "The proposal records its text, originating Task, and status", "text": "We list proposals from this Task and open the matching record. It contains the procedure, the Task it came from, and a pending status. A reviewer can check the exact text against the original note before deciding what should become available to future work."},
-        {"marker": "4. Ask a fresh agent", "title": "Try the question before publication", "cue": "No shared Session; zero reader tool calls", "text": "A different reader gets only the question in a fresh Task. It shares no Session, so it receives no earlier conversation. We instruct it to use only reviewed notes already supplied and to call no tools. It says the procedure is unavailable. The event record confirms zero tool calls. We verify that behavior rather than claiming its tools were disabled."},
-        {"marker": "5. Review it", "title": "Record the human decision", "cue": "Accepted proposal; still zero shared notes", "text": "The presenter checks the proposal against the source and accepts it. The record now identifies the review decision and reviewer. But the shared note count is still zero, and there is no applied memory identifier. Accepting a proposal records the decision. Publishing the note is a separate action."},
-        {"marker": "6. Apply it", "title": "Publish the reviewed note", "cue": "Apply creates shared memory linked to the proposal", "text": "Now we apply the accepted proposal. Orka creates the shared memory, and the list shows the procedure with a reference to its source proposal. That link lets the team connect the saved knowledge back to the review and the work that produced it."},
-        {"marker": "7. Ask the fresh question again", "title": "Ask a new reader the same question", "cue": "Exact dock and label recalled with zero tool calls", "text": "We start another fresh Task with the same reader and question. We do not attach the source note or the earlier conversation. This time the answer contains Dock Three and the exact return label. Again, the recorded tool count is zero. The reader used the reviewed memory Orka supplied when the task started."},
-        {"marker": "8. Trace the answer back", "title": "Follow the saved links", "cue": "Original Task → proposal → review → memory → later Task", "text": "These identifiers come from the saved records. Together they connect the original Task, proposal, review decision, applied memory, and later answer. Both readers made zero tool calls. The before and after difference is the reviewed note becoming available to the new task."}
+        {
+          "marker": "1. Today's procedure",
+          "title": "Start with the source note",
+          "cue": "Memory = saved team knowledge Orka hands to future work",
+          "text": "Returned filters go to Dock Three with a particular return label. Memory here means saved team knowledge Orka hands to future work. Right now there are no shared notes. Short commands such as notes are shell helpers defined in this demo script."
+        },
+        {
+          "marker": "2. The agent proposes a note",
+          "title": "Let the agent suggest what to keep",
+          "cue": "remember proposes a note; apply publishes it",
+          "text": "A Task is Orka's record of one piece of work. This one asks an assistant to propose the reusable part of the procedure. The remember tool files a proposal for a person, with the text and the Task it came from. Nothing is shared yet."
+        },
+        {
+          "marker": "3. A fresh agent does not know it yet",
+          "title": "Try the question before publication",
+          "cue": "No tools, no shared conversation",
+          "text": "A different assistant gets only the question, in a new Task, with no conversation history. It says the procedure is unavailable. It did not guess, and the records show it called no tools."
+        },
+        {
+          "marker": "4. Jordan reviews and publishes it",
+          "title": "Record the decision, then publish",
+          "cue": "Accept records the decision; apply publishes the note",
+          "text": "Jordan checks the proposal against the operations note and accepts it. Accepting records the decision, and the count of shared notes is still zero. Publishing is a second, explicit step. After it, there is one shared note, and it still names the proposal it came from."
+        },
+        {
+          "marker": "5. A fresh agent knows it now",
+          "title": "Ask a new reader the same question",
+          "cue": "Dock 3 and the label, from the reviewed note alone",
+          "text": "Same reader, same question, another new Task, with no note and no history passed in. It answers Dock Three and the right label, with no tools and no shared conversation. The closing table links the original Task, the proposal, Jordan's review, the shared note, and the later Task."
+        }
       ],
-      "outro": "One agent proposed a useful procedure. A person reviewed and applied it. A later agent could use it, with a record linking the knowledge to its source. Which team knowledge is worth keeping? Explore reviewed memory and get started at the Orka documentation address on screen."
+      "outro": "One agent proposed a procedure, Jordan reviewed and published it, and a later agent used it, with a record linking the knowledge to its source. Which team knowledge is worth keeping? Visit the Orka documentation at the address on screen for setup steps and more examples."
     },
     {
       "id": "11-fibey-approval",
-      "title": "Fibey investigates. A person approves.",
+      "title": "Fibey investigates, a person approves",
       "scenario": "A pressure reading changed after maintenance. Inspect before acting.",
-      "payoff": "One approved inspection, one recorded work order",
-      "next": "Where should your agents wait for a person?",
-      "intro": "One pump pressure reading has fallen after maintenance, while the other readings look normal. Fibey is an AI assistant helping the team investigate. It may check inventory, but a shift lead must approve an inspection work order. Orka will hold that action for a decision. The incident and work-order service in this demo are simulated.",
+      "payoff": "One approved inspection, one work order, one Task",
+      "next": "Where should your agents pause for a decision?",
+      "intro": "A pump's pressure reading dropped after maintenance while the other readings look normal. Fibey, an AI assistant, may investigate. Creating a work order needs the shift lead's approval. Orka holds that action until Lee decides. The incident and the work-order service are simulated.",
       "chapters": [
-        {"marker": "1. An alert after maintenance", "title": "Read the incident before acting", "cue": "Conflicting readings call for investigation", "text": "The pressure transmitter was replaced during maintenance. One reading then fell, while another gauge, flow, current, and vibration stayed normal. The request is to check inventory and propose an inspection. These facts support further investigation. They do not establish a diagnosis or authorize equipment changes."},
-        {"marker": "2. Give Fibey a clear boundary", "title": "Set the approval requirement", "cue": "Inventory is allowed; creating a work order requires approval", "text": "A Tool is an action Fibey can ask Orka to carry out. The saved policy allows an inventory lookup and a work-order request, but marks the work order as requiring approval. We also check the service's starting count. No work orders have been created for this run."},
-        {"marker": "3. Ask Fibey to investigate", "title": "Start one Task for the investigation", "cue": "Task = the request and its continuing work record", "text": "A Task is Orka's record of this request. We create it and wait for an approval request. The same Task will connect the investigation, the pause for a decision, and the result returned to Fibey after the action runs."},
-        {"marker": "4. Inspect the proposed action", "title": "Inspect exactly what is waiting", "cue": "Pending approval; execution has not started", "text": "The approval record names the requested tool and shows the stored action details. It identifies pump one and asks to inspect the pressure transmitter. Status is pending, and execution is not started. This is a concrete proposed action for the shift lead to review."},
-        {"marker": "5. Check that work is still waiting", "title": "Verify the action has not run", "cue": "One inventory read; zero work orders before the decision", "text": "The service has received one inventory lookup and zero work orders. That is evidence from the receiving service, alongside Orka's pending record. Fibey has gathered information and proposed the next action, but the action is still waiting for a person's decision."},
-        {"marker": "6. The shift lead approves", "title": "Approve the stored inspection request", "cue": "The decision records who approved and why", "text": "The presenter acts as the shift lead and approves this inspection request, with a reason that permits inspection and no equipment changes. Orka records the decision and the authenticated reviewer. It can now execute the stored action and return that action's result to the waiting Task."},
-        {"marker": "7. Read the receipt and Fibey's answer", "title": "Check the receipt and continued answer", "cue": "Exactly one simulated work order after approval", "text": "The final evidence shows one completed inventory lookup, zero work orders before approval, and exactly one afterward. The original Task and tool call are retained. Fibey receives the actual work-order receipt and includes it in its answer. Its response also makes clear that the equipment has not been repaired yet."}
+        {
+          "marker": "1. An alert after maintenance",
+          "title": "Read the incident before acting",
+          "cue": "One reading disagrees with the rest",
+          "text": "One pressure sensor fell while the second gauge, flow, and vibration stayed normal. The transmitter was replaced during maintenance and has not been checked. Worth a look before touching anything. Short commands such as policy are shell helpers defined in this demo script."
+        },
+        {
+          "marker": "2. Fibey may look, but not act alone",
+          "title": "Set the boundary",
+          "cue": "Tool = an action Fibey can ask Orka to carry out",
+          "text": "A Tool is an action Fibey can ask Orka to carry out. The platform team's policy lets Fibey read inventory on its own. Creating a work order needs a person. Before we start, the work-order service counts zero orders."
+        },
+        {
+          "marker": "3. Fibey investigates and proposes",
+          "title": "Start one Task",
+          "cue": "Task = the request and its continuing record",
+          "text": "One Task holds the whole thing: the investigation, the wait for a decision, and the result that comes back. Fibey reads the alert, checks inventory, and proposes a work order. Then it pauses inside the same Task."
+        },
+        {
+          "marker": "4. Nothing has happened yet",
+          "title": "Inspect what is waiting",
+          "cue": "One inventory read, zero work orders",
+          "text": "This is the exact action waiting for a decision: the pump, the summary, and a status of pending. The service counts one inventory lookup and zero work orders. Fibey asking did not authorize anything."
+        },
+        {
+          "marker": "5. Lee approves",
+          "title": "Approve, with a reason",
+          "cue": "The decision records who, what, and why",
+          "text": "Lee reads the proposal and approves the inspection, with a reason. The decision is on record: who approved, what, and why. Orka may now run the stored action."
+        },
+        {
+          "marker": "6. The work order comes back to the same Task",
+          "title": "Read the receipt and the answer",
+          "cue": "Exactly one work order after the decision",
+          "text": "The work order is created after the decision, and its receipt returns to Fibey inside the same Task. Fibey's answer names the work order and the next step. The closing table shows one lookup, zero orders before approval, one after, and the original Task retained."
+        }
       ],
-      "outro": "Fibey investigated and prepared an inspection. A person approved the action, and its receipt came back to the same waiting Task. Where should your agents pause for a decision? Visit the Orka documentation at the address on screen to explore human approval and follow the getting started guide."
+      "outro": "Fibey investigated and proposed. Lee approved, and the receipt came back to the same waiting Task. Where should your agents pause for a decision? Visit the Orka documentation at the address on screen for setup steps and more examples."
     },
     {
       "id": "12-efficiency",
-      "title": "Twenty customers. One checkout problem.",
+      "title": "Twenty customers, one checkout problem",
       "scenario": "Twenty customer reports trace to one checkout retry bug.",
-      "payoff": "Compare useful work, elapsed time, and estimated cost",
-      "next": "What would you build for your team?",
-      "intro": "This video introduces the following scenario. Twenty customers report a double charge after our shop's checkout froze. Support needs to answer each customer, while engineering fixes the one payment bug behind these reports. We will run twenty varied sample messages and one engineering job using a hosted model, then repeat that work with model routing. We will compare the replies, the fix, elapsed time, and estimated cost.",
+      "payoff": "Same checked outcomes, measured time and estimated cost",
+      "next": "What would you measure for your team?",
+      "intro": "This video introduces the following scenario. Twenty customers report a double charge after our checkout froze. Support needs twenty replies and engineering needs one fix. Dana's platform team runs the work twice: first on a hosted model, then with a router that can choose a small local model. Both runs face the same checks. Then we compare time and estimated cost.",
       "chapters": [
         {
           "marker": "1. Give each assistant its instructions",
-          "title": "Define a useful reply and a tested fix",
-          "cue": "Agent = saved instructions and available actions",
-          "text": "An Orka Agent stores the instructions and available actions for an assistant. Support must write a factual two-sentence reply for each message. It uses any order reference the customer supplied and asks for one only when it is missing. It must not say that a refund or investigation has happened. Engineering must fix payment retries in the sample repository and pass its six existing tests."
+          "title": "Two Agents, two jobs",
+          "cue": "Agent = saved instructions for an assistant",
+          "text": "An Agent holds the instructions for an assistant. Support must write two factual sentences per customer, using the order reference when it is supplied and asking for it when it is missing. Engineering must fix the payment retry bug in the sample repository and pass its six tests. Short commands such as run batch are shell helpers defined in this demo script."
         },
         {
-          "marker": "2. Handle the customer problem",
+          "marker": "2. Run everything on the hosted model",
+          "title": "Set the baseline",
+          "cue": "Task = one piece of work; twenty replies plus one fix",
           "max_speed": 4,
-          "title": "Run twenty replies and one engineering job",
-          "cue": "Twenty support Tasks and one engineering Task form the baseline",
-          "text": "We submit the first batch with the Orka command line. A Task is Orka's record of one piece of work. This batch has twenty support Tasks and one engineering Task, all using hosted GPT five point five. We check each reply against its customer message, inspect the code change and six test results, and keep the usage and elapsed time as our baseline."
+          "text": "A Task is Orka's record of one piece of work. Twenty support Tasks run one at a time, then one engineering Task, all on the hosted model. Waiting is cut. Every reply is checked against its customer message. The engineering agent reports its tests pass, and we check that ourselves in a sealed container. Twenty replies and six tests: that is the baseline."
         },
         {
-          "marker": "3. Use hardware we already operate",
-          "title": "Make a local model available",
-          "cue": "AIKit serves Qwen3.5 2B using cluster CPU capacity",
-          "text": "AIKit makes a small model available on hardware you already pay for and operate. Here it runs Qwen three point five two B on the cluster's CPUs. We check that the model is ready. Using spare capacity still consumes resources. We will include its allocated CPU and memory in the cost estimate, even when it is waiting between requests."
+          "marker": "3. Add a small model on our own hardware",
+          "title": "Use hardware we already operate",
+          "cue": "A small model on the cluster's CPUs",
+          "text": "AIKit serves Qwen three point five, a small two-billion-parameter model, on the cluster's CPUs. It runs on hardware the team already pays for and operates. Its allocated CPU and memory are included in the estimate, even while it waits."
         },
         {
-          "marker": "4. Connect Orka to the semantic router",
-          "title": "Connect both assistants to Vekil",
-          "cue": "Support uses Provider semantic-router; coding has its own model connection",
-          "text": "An Orka Provider is a connection to a model service. The support Agent uses a Provider named semantic-router to reach Vekil. Vekil is the gateway that receives model requests and sends them to a configured model. The coding agent reaches Vekil through a separate model connection managed by Orka. We can change the gateway's configuration while keeping the customer requests and agent instructions fixed."
+          "marker": "4. Let a router choose the model",
+          "title": "Turn routing on",
+          "cue": "Provider = Orka's connection to a model service",
+          "text": "A Provider is Orka's connection to a model service. Support's Provider, named semantic router, points at Vekil. Vekil has a semantic router: Jev, a classifier model, assesses new work and recommends lightweight or powerful. Our configuration maps that choice to local Qwen or the hosted model. If Jev is unavailable, Vekil uses the powerful model. Related tool calls keep the chosen model while the agent finishes its job. The Agents and requests are unchanged."
         },
         {
-          "marker": "5. Let the classifier choose",
-          "title": "Read the recommendation and chosen model",
-          "cue": "Jev recommends lightweight or powerful; Vekil selects the destination",
-          "text": "Vekil uses semantic routing to consider what a new request asks for. Jev, the classifier, assesses it and recommends lightweight or powerful. Vekil uses that recommendation and our configuration to choose local Qwen or hosted GPT five point five. If Jev is unavailable, our configuration sends the request to the powerful model. The records show the actual choice. When the engineering agent uses tools, its follow-up model requests keep the selected model while it finishes the job."
-        },
-        {
-          "marker": "6. Repeat the same work",
+          "marker": "5. Run the same work again",
+          "title": "Repeat the work",
+          "cue": "Same reports, same instructions, same starting code",
           "max_speed": 4,
-          "title": "Repeat the same twenty messages and code change",
-          "cue": "Same customer messages, instructions, starting code, and six tests",
-          "text": "We repeat the same twenty customer messages and the same engineering request. The instructions, starting code, and six tests stay unchanged. We check all twenty replies again, including which messages already contain an order reference. Then we inspect the engineering change and test results. We also read the routing records for each Task. A local model call does not mean every part of the batch stayed local."
+          "text": "The same twenty reports and engineering request run again, with the same checks. Sixteen replies used the local model. Four fell back to hosted when Jev was unavailable. Engineering used thirteen hosted calls, compared with five before. It took one hundred thirty three seconds instead of seventy seven, seventy two point seven percent longer. All twenty replies passed, and we independently reran the six payment tests."
         },
         {
-          "marker": "7. Check the results and usage",
-          "title": "Compare checked outcomes and measured costs",
-          "cue": "Estimated cost: $0.2305 to $0.1337, down 42.0%; support: 332s to 497s, up 49.7%",
-          "text": "Both runs passed all twenty reply checks and six payment tests. Fourteen routed replies used local Qwen; six used the hosted fallback when Jev was unavailable. Tokens are the small pieces of text models process. Orka marks the coding agent's token count as unavailable, so this comparison uses the gateway's measured counts. At the published rates, the estimated cost of model calls, including Jev, fell from about twenty-three cents to twelve cents. That is forty-five point three percent less. Including a share of the cluster's CPU and memory, the estimate fell from about twenty-three cents to thirteen cents, down forty-two percent. The support batch took three hundred and thirty-two seconds before routing. With routing, it took four hundred and ninety-seven seconds. That is forty-nine point seven percent longer. Engineering took seventy-six seconds before routing, and seventy seconds after. That is seven point nine percent less time. These are estimates, not an invoice."
+          "marker": "6. Compare the bill",
+          "title": "Compare outcomes, time, and cost",
+          "cue": "Recorded estimate +12.7%  |  Support time +77.3%",
+          "text": "Estimated model charges went from about twenty three cents to twenty five cents, up nine point seven percent. Including the stated share of hardware, the estimate rose from about twenty three cents to twenty six cents, up twelve point seven percent. Support took two hundred seventy seven seconds, then four hundred ninety one, seventy seven point three percent longer. Extra hosted coding work outweighed savings on replies. These are estimates, not an invoice. Coding tokens are unavailable in Orka's report, so we use gateway records."
         }
       ],
-      "outro": "Twenty customer replies and one checkout fix gave us work we could check. Orka defined the jobs and kept their records. Vekil controlled the model choices, and AIKit supplied a local option. Managing those layers lets the platform team shape the experience and measure what it consumes. What would you build for your team? Visit the Orka documentation address on screen for more examples and the getting started guide."
+      "outro": "Both runs met the same checks. The run with routing cost more and took longer. Orka defined the jobs and kept the records. Vekil chose the models, and AIKit supplied the local option. Those layers let the platform team change how work runs and measure the result. What would you tune for your team? Visit the Orka documentation at the address on screen for setup steps and more examples."
     }
   ]
 }

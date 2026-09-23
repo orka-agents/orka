@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Orka: check the supplier, keep purchasing closed
+# Orka — check the supplier, keep purchasing closed
+# Jordan's assistant may look up stock but not buy. The gateway and the supplier's own receipts prove which request got through.
 # shellcheck source=demo/lib/scenario.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/scenario.sh"
 scenario_init 09-governed-tools
@@ -53,75 +54,93 @@ capture_task() {
   orka task result "$name" -o json >"raw/$prefix-result.json"
   scenario_collect_events "$name" "raw/$prefix-events.json"
 }
-show_calls() {
-  jq -r '.events[] | select(.type | startswith("ToolCall")) | [.type, .summary] | @tsv' "$1"
+# --- on-camera helpers ---------------------------------------------------
+# orders_created — the supplier's own count of orders for this run.
+orders_created() {
+  jq -r '"orders created: \(.totalOrdersCreated)"' "$1"
+}
+# tool NAME — the action the assistant can request: method, URL, and the
+# policy that routes it through the gateway.
+tool() {
+  jq -r '"method: " + .spec.http.method, "url:    " + .spec.http.url, "policy: " + .spec.http.outboundAccessPolicyRef.name' "$1-tool.json"
+}
+# route — the one request the gateway is configured to forward.
+route() {
+  jq -r '"host:   " + .spec.hostnames[0], (.spec.rules[0].matches[] | "allows: " + .method + " " + .path.value)' raw/stock-route.json
+}
+# calls FILE — what the assistant asked Orka to do, and what came back.
+calls() {
+  jq -r '.events[] | select(.type | startswith("ToolCall")) | [.type, .summary] | @tsv' "$1" | column -t -s $'\t'
+}
+# answer FILE — the assistant's final reply.
+answer() {
+  jq -r '.result' "$1" | fold -s -w 96
+}
+# supplier_saw FILE — the supplier's own record of what reached it.
+supplier_saw() {
+  jq -r '.receipts[] | "\(.method) \(.path)  credential accepted: \(.credentialAccepted)  available: \(.available)"' "$1"
+}
+# summary — both sides of both requests, from gateway logs and supplier receipts.
+summary() {
+  python3 evidence.py summary
 }
 
 supplier_receipts >raw/supplier-before.json
 python3 evidence.py initial
 
-banner 'Check the supplier, keep purchasing closed' \
-  'An assistant can look up stock. The platform controls whether it can buy.'
+banner 'Orka — check the supplier, keep purchasing closed' \
+  "Jordan's assistant may look up stock but not buy. The gateway and the supplier's own receipts prove which request got through."
+say "Jordan, on the inventory team, needs 20 more filters. An assistant can ask"
+say "the supplier. Whether it may also buy is the platform team's decision, not the model's."
+helpers_note orders_created, tool, route, calls, answer, supplier_saw, summary
 
-chapter '1. The shortage'
-say 'Orka runs AI work and keeps a record of what happened.'
-say 'Our inventory team needs 20 more filters. The supplier can check stock'
-say 'and take orders. Purchasing has not been enabled for this assistant.'
+chapter '1. Jordan needs 20 filters'
 pe 'cat request.txt'
-pe "jq '{ordersCreated: .totalOrdersCreated}' raw/supplier-before.json"
-say 'The supplier here is a small HTTP service with made-up stock.'
-say 'Its requests and receipts will come from this run.'
+say 'The supplier here is a small service with made-up stock. Its receipts are the proof.'
+pe 'orders_created raw/supplier-before.json'
+ok 'Zero orders before we start.'
 
-chapter '2. How the assistant reaches the supplier'
-say 'A Tool is a named action the model can ask Orka to carry out.'
-say 'These are selected fields from the stock Tool and its outbound policy.'
-pe "jq '{name: .metadata.name, operation: .spec.http}' stock-tool.json"
-pe "jq '{name: .metadata.name, gateway: .spec.gateway}' raw/outbound-policy.json"
-say 'The policy tells Orka to send this request through agentgateway.'
-say 'The model can request both a stock lookup and an order in this demo.'
+chapter '2. The assistant can request two actions'
+say 'A Tool is an action the model can ask Orka to carry out. This assistant has'
+say 'two: check stock and place an order. Both go through a gateway.'
+pe 'tool stock'
+pe 'tool order'
+ok 'Neither Tool contains the supplier credential. A Secret holds it; the gateway supplies it.'
 
-chapter '3. What the gateway permits'
-say 'A gateway sits between Orka and the supplier. A route says which'
-say 'requests it can forward. This route permits only the stock lookup.'
-pe "jq '{host: .spec.hostnames, match: .spec.rules[0].matches}' raw/stock-route.json"
-pe "jq '{credentialSecret: .spec.backend.auth.secretRef.name}' raw/credential-policy.json"
-say 'A Secret holds the supplier credential. The gateway supplies it.'
-say 'The Tool definition contains the operation, with no supplier credential.'
+chapter '3. The gateway allows one of them'
+say 'The gateway forwards only what its routes allow. There is one route.'
+pe 'route'
+ok 'Stock lookups pass. Nothing is configured for orders.'
 
-chapter '4. Run the lookup'
-say "A Task is Orka's record of one piece of work. Let's create one."
+chapter '4. Ask for the stock check'
+say "A Task is Orka's record of one piece of work."
 pe 'orka task create -f lookup.json'
 capture_task "$lookup_task" lookup
 supplier_receipts >raw/supplier-lookup.json
 gateway_logs raw/gateway-lookup.jsonl
 python3 evidence.py lookup >lookup-evidence.json
-pe 'show_calls raw/lookup-events.json'
-pe "jq -r '.result' raw/lookup-result.json"
+pe 'calls raw/lookup-events.json'
+pe 'answer raw/lookup-result.json'
+say "And the supplier's own record of what arrived:"
+pe 'supplier_saw raw/supplier-lookup.json'
+ok 'The lookup reached the supplier with the credential the model never saw.'
 
-chapter "5. Check the supplier's receipt"
-say "This is the supplier's own record. It shows the stock request arrived"
-say 'and the credential was accepted.'
-pe "jq '.receipts[] | {method, path, credentialAccepted, item, available}' raw/supplier-lookup.json"
-
-chapter '6. Ask it to place an order'
-say 'Now we explicitly ask the assistant to use its order Tool.'
-say 'Requesting an action does not give the model permission to perform it.'
+chapter '5. Ask it to buy'
+say 'Now we explicitly ask the assistant to place the order.'
+say 'Asking for an action does not grant permission to perform it.'
 pe 'orka task create -f order.json'
 capture_task "$order_task" order
 supplier_receipts >raw/supplier-after.json
 gateway_logs raw/gateway-order.jsonl
 # Prove the exact refusal first. pex alone would accept any command failure.
 python3 evidence.py order >order-evidence.json
-pe 'show_calls raw/order-events.json'
-say 'The recorded tool result is a failure. HTTP 404 means this gateway'
-say 'had no matching route for the order request.'
+pe 'calls raw/order-events.json'
+say 'The gateway had no route for the order, so it refused with HTTP 404.'
 pex 'python3 evidence.py order-result'
-pe "jq -r '.result' raw/order-result.json"
+pe 'answer raw/order-result.json'
+pe 'orders_created raw/supplier-after.json'
+ok 'The assistant asked. The platform said no. The supplier never heard about it.'
 
-chapter '7. Check what happened'
-say 'The gateway saw the order attempt, but the supplier did not receive it.'
-pe 'python3 evidence.py summary'
-say 'The assistant checked availability through an authenticated API.'
-say 'Purchasing stayed closed when it requested an order. The platform'
-say 'controlled the route and the supplier credential for these two Tools.'
+pe 'summary'
 note "Full responses and receipts are saved in $run_dir"
+cta

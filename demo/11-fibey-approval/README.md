@@ -97,9 +97,9 @@ volume when investigating a failed run; deleting it would erase the evidence.
 
 ## What the walkthrough checks
 
-The seven chapters introduce the incident, explain the two tool permissions,
-submit the Task, inspect the proposed action, check the zero-order count,
-approve the inspection, and read Fibey's reply. New terms are explained when
+The six chapters introduce the incident, explain the two tool permissions,
+submit the Task, inspect the waiting action and zero-order count, approve the
+inspection, and read Fibey's reply. New terms are explained when
 they first appear. Preparation and image builds stay outside these chapters.
 
 Before approval, the service must have counted one inventory lookup and zero
@@ -109,7 +109,8 @@ same Task attempt and waiting call immediately before the decision.
 
 After approval, Orka must record the presenter's decision and successful tool
 execution. The service must count exactly one work order, and Fibey's answer
-must contain its actual receipt ID. The original Task and call must remain
+must confirm its creation and contain its actual receipt ID. The expected
+presenter comes from `ORKA_CLIENT_SA`, saved before the request. The original Task and call must remain
 the same. Missing event pages, changed configuration or receipt storage, early
 execution, duplicate execution, and a generic answer without the receipt stop
 the script before its closing narration.

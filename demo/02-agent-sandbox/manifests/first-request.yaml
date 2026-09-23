@@ -41,6 +41,6 @@ spec:
   prompt: |
     Add a GET /healthz endpoint that returns HTTP 200 with the JSON body
     {"status":"ok"}. Add a unit test for it in the existing style and add the
-    endpoint to the API table in README.md. This runtime has no Go toolchain,
-    so do not try to build or test; CI runs the tests on the pull request.
-    Reply with a short summary and the list of files you changed.
+    endpoint to the API table in README.md. Do not build or run tests; CI runs
+    them on the pull request. Reply in at most five lines: a one-line summary
+    and the list of files you changed.

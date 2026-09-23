@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# The order desk asks Orka for help
+# Orka — the order desk asks for help
+# Sam's order-desk app asks the inventory team's agent for advice, retries safely, and keeps the conversation going.
 # Shared helpers define the run variables; pe evaluates the quoted commands below.
 # shellcheck disable=SC2034,SC2154
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/scenario.sh"
@@ -88,57 +89,84 @@ snapshot_pods() {
   kubectl -n "$ORKA_NAMESPACE" get pods -l "demo.orka.ai/installation=$installation,app.kubernetes.io/name=demo-a2a-adapter" -o json >"$1"
 }
 
-banner "The order desk asks Orka for help" "One customer request, two applications, a saved answer."
-chapter "The customer's request"
-say "A customer wants 24 replacement filters today. We have 18."
-say "The next delivery arrives tomorrow. The order desk needs a recommendation."
+# --- on-camera helpers ---------------------------------------------------
+# card — what the inventory agent says it can do, from its Agent Card.
+card() {
+  curl --silent --show-error --fail --cacert "$state/ca.crt" "$a2a_url/.well-known/agent-card.json" >raw/card.json
+  jq -r '"name:        " + .name, "description: " + .description, (.skills[] | "skill:       " + .name)' raw/card.json
+}
+# ask ID TEXT — send one message in this conversation and return at once.
+ask() {
+  a2a-client -message-id "$1" -context-id "$conversation" -return-immediately -text "$2"
+}
+# receipt FILE — the acknowledgement: a reference, the conversation, the state.
+receipt() {
+  jq -r '"reference:    " + (.id | .[:24]) + "…", "conversation: " + .contextId, "state:        " + .status.state' "$1"
+}
+# answer REF — the answer text for a reference, from the A2A side.
+answer() {
+  a2a-client -task-id "$1" | jq -r '.artifacts[].parts[].text'
+}
+# summary — the closing table, checked against every saved record.
+summary() {
+  python3 "$evidence" summary raw
+}
+
+banner "Orka — the order desk asks for help" \
+  "Sam's order-desk app asks the inventory team's agent for advice, retries safely, and keeps the conversation going."
+say "Sam runs the order desk. A customer wants 24 filters today and only 18 are"
+say "in stock. Sam's app will ask the inventory team's agent, which runs in Orka."
+helpers_note card, ask, receipt, answer, summary
+
+chapter "Sam has a customer waiting"
 pe 'cat order.txt'
-say "The inventory team runs an agent in Orka. This terminal represents the"
-say "order-desk application asking that agent for help."
+ok "That is the whole request. No prompt engineering, no API key."
 
 chapter "Find the inventory agent"
-pe 'curl --silent --show-error --fail --cacert "$state/ca.crt" "$a2a_url/.well-known/agent-card.json" > raw/card.json'
-pe 'jq "{name, description, skills: [.skills[] | {name, description}]}" raw/card.json'
-say "An Agent Card describes what an agent does and how to contact it."
-say "A2A is the common message format this application and Orka will use."
+say "Sam's app and Orka speak A2A, a common format for asking another agent for"
+say "help. The agent publishes a card saying what it does."
+pe 'card'
+ok "One skill: recommend a customer reply from the stock facts supplied."
 
-chapter "Send the work"
-say "The application gives this request a stable ID and asks for an immediate acknowledgement."
-pe 'a2a-client -message-id "$request_id" -context-id "$conversation" -return-immediately -text "$(cat order.txt)" > raw/first-admission.json'
+chapter "Send the work and get a receipt"
+say "The app gives the request a stable ID and asks for an immediate acknowledgement."
+pe 'ask "$request_id" "$(cat order.txt)" > raw/first-admission.json'
 task_ref=$(jq -er '.id' raw/first-admission.json)
 event_id=$(python3 "$evidence" event-id raw/first-admission.json)
-pe 'jq "{taskReference: .id, conversation: .contextId, state: .status.state}" raw/first-admission.json'
-say "That reference lets the application check progress. A Task is Orka's"
-say "record of one piece of work. Here is the matching Orka Task."
+pe 'receipt raw/first-admission.json'
+say "Behind that reference is a Task: Orka's record of one piece of work."
 wait_event "$event_id" first dispatched
 first_task=$(jq -er '.taskName' raw/first-event.json)
 kubectl -n "$ORKA_NAMESPACE" get task "$first_task" -o json >raw/first-task.json
 python3 "$evidence" correlate raw/first-admission.json raw/first-event.json raw/first-task.json
 pe 'kubectl -n "$ORKA_NAMESPACE" get task "$first_task"'
+ok "Accepted. Sam's app can check on it with the reference alone."
 
 chapter "Read the recommendation"
 pe 'wait_task "$first_task" 600'
 wait_event "$event_id" first-completed completed
-pe 'a2a-client -task-id "$task_ref" | tee raw/first-answer.json | jq -r ".artifacts[].parts[].text"'
-pe 'orka task result "$first_task" -o json | tee raw/first-result.json | jq -r .result'
+pe 'answer "$task_ref" | tee raw/first-answer.txt'
+a2a-client -task-id "$task_ref" >raw/first-answer.json
+pe 'result "$first_task"'
+orka task result "$first_task" -o json >raw/first-result.json
 python3 "$evidence" reply raw/first-answer.json raw/first-result.json
-say "The A2A answer matches Orka's saved result. It uses the stock and delivery facts we supplied."
+ok "Same answer through A2A and in Orka's record. It used the stock and delivery facts we gave it."
 snapshot_tasks raw/tasks-after-first.json
 
-chapter "The application retries"
-say "Applications retry when they are unsure a request arrived."
-say "This repeats the same request ID, conversation, and text."
-pe 'a2a-client -message-id "$request_id" -context-id "$conversation" -return-immediately -text "$(cat order.txt)" > raw/retry.json'
+chapter "Sam's app retries"
+say "Apps retry when they are unsure a request arrived. This sends the same"
+say "request ID, conversation, and text again."
+pe 'ask "$request_id" "$(cat order.txt)" > raw/retry.json'
 orka gateway events get "$event_id" -o json >raw/retry-event.json
 kubectl -n "$ORKA_NAMESPACE" get task "$first_task" -o json >raw/retry-task.json
 snapshot_tasks raw/tasks-after-retry.json
 pe 'python3 "$evidence" retry raw'
-say "Reusing the request ID tells Orka this is the same request."
+ok "Same reference, same Task. A retry does not do the work twice."
 
-chapter "Ask a follow-up"
+chapter "Sam asks a follow-up"
 say "A new request ID starts new work. Keeping the conversation ID connects it"
-say "to the earlier exchange. Orka calls that shared conversation a Session."
-pe 'a2a-client -message-id "$followup_id" -context-id "$conversation" -return-immediately -text "Make that a two-sentence customer reply." > raw/followup-admission.json'
+say "to the earlier exchange; Orka calls that shared conversation a Session."
+pe 'ask "$followup_id" "Make that two sentences." > raw/followup-admission.json'
 followup_ref=$(jq -er '.id' raw/followup-admission.json)
 followup_event=$(python3 "$evidence" event-id raw/followup-admission.json)
 wait_event "$followup_event" followup dispatched
@@ -147,28 +175,15 @@ pe 'wait_task "$followup_task" 600'
 wait_event "$followup_event" followup-completed completed
 kubectl -n "$ORKA_NAMESPACE" get task "$followup_task" -o json >raw/followup-task.json
 python3 "$evidence" correlate raw/followup-admission.json raw/followup-completed-event.json raw/followup-task.json
-pe 'a2a-client -task-id "$followup_ref" > raw/followup-answer.json'
+a2a-client -task-id "$followup_ref" >raw/followup-answer.json
 orka task result "$followup_task" -o json >raw/followup-result.json
 python3 "$evidence" reply raw/followup-answer.json raw/followup-result.json
 jq -e --slurpfile first raw/first-completed-event.json '.sessionName == $first[0].sessionName and .taskUid != $first[0].taskUid' raw/followup-completed-event.json >/dev/null
-pe 'jq -r ".artifacts[].parts[].text" raw/followup-answer.json'
-pe 'kubectl -n "$ORKA_NAMESPACE" get task "$first_task" "$followup_task" -o json > raw/conversation-tasks.json'
+pe 'answer "$followup_ref"'
+snapshot_tasks raw/tasks-after-followup.json
+kubectl -n "$ORKA_NAMESPACE" get task "$first_task" "$followup_task" -o json >raw/conversation-tasks.json
 pe 'python3 "$evidence" conversation raw/conversation-tasks.json'
+ok "Two Tasks, one Session. The follow-up knew what the first request said."
 
-chapter "Replace the adapter"
-say "The adapter translates messages. Both requests have finished."
-say "We will replace just that adapter, then retrieve the customer reply again."
-snapshot_tasks raw/tasks-before-restart.json
-snapshot_pods raw/pods-before-restart.json
-pe 'kubectl -n "$ORKA_NAMESPACE" rollout restart deployment/demo-a2a-adapter'
-pe 'kubectl -n "$ORKA_NAMESPACE" rollout status deployment/demo-a2a-adapter --timeout=180s'
-stop_a2a_forward
-start_a2a_forward
-snapshot_pods raw/pods-after-restart.json
-pe 'a2a-client -task-id "$followup_ref" > raw/after-restart-answer.json'
-orka gateway events get "$followup_event" -o json >raw/after-restart-event.json
-snapshot_tasks raw/tasks-after-restart.json
-pe 'python3 "$evidence" report raw'
-say "The order desk could retry, continue the conversation, and read the saved"
-say "reply after the adapter was replaced. Orka kept the work and its history."
-note "This recovered access to completed results. We did not interrupt an agent's work."
+pe 'summary'
+cta

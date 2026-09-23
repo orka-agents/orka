@@ -3,7 +3,6 @@
 A customer wants 24 replacement filters today. There are 18 in stock, and the next
 delivery arrives tomorrow. The order-desk application asks the inventory team's
 agent for a recommendation, retries its request, and asks for a customer reply.
-It then retrieves that reply after the message adapter has been replaced.
 
 This is a standalone terminal walkthrough, aimed at roughly four minutes with
 waiting compressed by the existing 100 by 28 asciinema recorder. `demo.sh` itself
@@ -75,9 +74,8 @@ bash demo/08-agent-to-agent/demo.sh
 
 The walkthrough introduces the customer request, discovers the public Agent Card,
 sends the work, reads the recommendation, retries the exact request, and sends a
-follow-up with a new request ID in the same conversation. Only after both Tasks
-succeed does it restart `deployment/demo-a2a-adapter` and retrieve the reply again.
-It reopens its own port-forward after the replacement.
+follow-up with a new request ID in the same conversation. The closing evidence
+counts the actual Tasks in that Session and compares the returned answers.
 
 The shell's `a2a-client` function supplies the prepared URL, caller-token file, and
 CA file to the actual A2A client binary. The visible request and task-ID arguments
@@ -85,23 +83,22 @@ go directly to that program. `wait_task` is the existing demo helper. Other loca
 helpers collect real records and verify their relationships.
 
 Each run uses new message and conversation IDs. It saves complete JSON responses,
-all polled gateway events, Task snapshots, and adapter Pod identities under
+all polled gateway events and Task snapshots under
 `demo/setup/state/08-agent-to-agent/runs/<run-id>/raw/`. It writes a calculated
 `evidence.json` alongside them only when all final checks pass. Prior runs remain
 available; this script does not delete their Tasks or Sessions.
 
 The checks require the retry to return the original public reference and Task UID,
-exactly two Tasks in one Session, stock quantities and tomorrow's delivery in the
-actual answers, matching A2A and Orka result text, a different ready adapter Pod,
-and no additional Gateway Tasks after replacement and retrieval. Run one
+exactly two successful Tasks in one Session, stock quantities and tomorrow's
+delivery in the actual answers, and matching A2A and Orka result text. Run one
 walkthrough against this adapter at a time. Any missing evidence stops the story.
 
 ## Scope and verification
 
 The scenario facts in `order.txt` are demonstration data. All answers, public
-references, Tasks, Sessions, and restart evidence come from execution. The demo
-shows recovery of access to retained completed results. It does not show recovery
-of interrupted execution or indefinite result retention.
+references, Tasks, and Sessions come from execution. The demo shows discovery,
+request acknowledgement, result retrieval, retry handling, and conversation
+continuation.
 
 The adapter implements a text-only subset of A2A 1.0. One caller token gives
 access to this adapter's configured caller domain. This is not a demonstration of

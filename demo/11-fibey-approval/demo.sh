@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Fibey investigates; a person approves the work
+# Orka — Fibey investigates, a person approves the work
+# Fibey looks into a pump alert and proposes an inspection. Nothing happens until Lee, the shift lead, approves it.
 # pe expands the visibly typed commands when it executes them.
 # shellcheck disable=SC2016
 # shellcheck source=demo/lib/scenario.sh
@@ -18,7 +19,8 @@ task=fibey-$run_id
 cp "$state/ready.json" ready.json
 cp "$here/incident.txt" incident.txt
 jq -n --arg namespace "$ORKA_NAMESPACE" --arg runtime "$DEMO_FIBEY_RUNTIME" --arg task "$task" \
-  '{namespace:$namespace,runtimeName:$runtime,task:$task}' >run.json
+  --arg reviewer "system:serviceaccount:$ORKA_NAMESPACE:$ORKA_CLIENT_SA" \
+  '{namespace:$namespace,runtimeName:$runtime,task:$task,reviewerActor:$reviewer}' >run.json
 fibey_snapshot raw/installation.json
 scenario_connect
 
@@ -31,7 +33,10 @@ jq -n --arg namespace "$ORKA_NAMESPACE" --arg task "$task" --rawfile incident in
        "Call read-inventory exactly once. If available, call create-work-order exactly once with summary " +
        "\"Inspect the pressure transmitter.\" Wait for the tool result while a person reviews the request. " +
        "Do not retry an action or treat your own words as permission. Report the actual workOrderID on success, " +
-       "or its denial or error. Explain the next investigation briefly. Do not claim the equipment was repaired.")}}
+       "or its denial or error. A successful workOrderID response means the simulated order was created after " +
+       "approval. Confirm that outcome in your final answer; do not describe a completed order as pending review. " +
+       "Explain the next investigation briefly. Do not claim the equipment was repaired. " +
+       "Keep your final answer under 80 words.")}}
 ' >task.json
 
 simulator_pid=
@@ -48,6 +53,25 @@ simulator_pid=$!
 wait_for 'the work-order receipt service' "grep -q 'Forwarding from 127.0.0.1:' raw/simulator-forward.log" 30
 simulator_port=$(sed -n 's/.*127\.0\.0\.1:\([0-9]*\) ->.*/\1/p' raw/simulator-forward.log | head -n 1)
 receipts() { curl -fsS --max-time 10 "http://127.0.0.1:$simulator_port/counts?runID=$task"; }
+
+# --- on-camera helpers ---------------------------------------------------
+# policy — what Fibey may do alone and what needs a person.
+policy() {
+  jq -r '.items[] | select(.kind == "AgentRuntime") | .spec.capabilities.mcpPolicy |
+    "may call:          " + (.allowedTools | join(", ")), "needs approval:    " + (.approvalRequiredTools | join(", "))' raw/installation.json
+}
+# counts FILE — the work-order service's own counters for this run.
+counts() {
+  jq -r '"inventory lookups: \(.inventoryReads // 0)", "work orders:       \(.workOrderExecutions)"' "$1"
+}
+# proposed — the exact action waiting for a decision.
+proposed() {
+  jq -r '.approvals[0] | "action:  " + .targetTool, "asset:   " + .targetArgsPreview.asset, "summary: " + .targetArgsPreview.summary, "status:  " + .status + " (execution " + .executionOutcome + ")"' raw/approval-pending.json
+}
+# decision — who decided, what, and why.
+decision() {
+  jq -r '"status: " + .status, "by:     " + .decisionActor, "reason: " + .decisionReason' raw/decision.json
+}
 receipts >raw/counts-initial.json
 python3 "$here/check.py" initial
 
@@ -76,52 +100,51 @@ wait_for_review() {
   return 1
 }
 
-banner 'Fibey investigates; a person approves the work' \
-  'An equipment alert, an AI assistant, and a work order waiting for a decision.'
+banner 'Orka — Fibey investigates, a person approves the work' \
+  'Fibey looks into a pump alert and proposes an inspection. Nothing happens until Lee, the shift lead, approves it.'
+say 'A pressure reading dropped after maintenance. Fibey, an AI assistant, may'
+say 'investigate. Lee, the shift lead, decides whether it may create a work order.'
+helpers_note policy, counts, proposed, decision
 
 chapter '1. An alert after maintenance'
-say 'One pressure reading has fallen. The other readings look normal.'
-say 'Fibey is an AI assistant that helps the team investigate equipment alerts.'
 pe 'cat incident.txt'
-say 'We use a fictional incident and a service that creates test work orders.'
+say 'The incident is fictional and the work-order service only creates test orders.'
+ok 'One reading disagrees with everything else. Worth a look before touching anything.'
 
-chapter '2. Give Fibey a clear boundary'
-say 'Orka runs the request and keeps its work records.'
-say 'A Tool is an action Fibey can ask Orka to carry out. The saved policy'
-say 'lets it check inventory, but requires a person to approve a work order.'
-pe 'jq ".items[] | select(.kind == \"AgentRuntime\") | .spec.capabilities.mcpPolicy | {allowedTools, approvalRequiredTools}" raw/installation.json'
-pe 'jq "{workOrders: .workOrderExecutions}" raw/counts-initial.json'
+chapter '2. Fibey may look, but not act alone'
+say "A Tool is an action Fibey can ask Orka to carry out. The platform team's"
+say 'policy lets Fibey read inventory. Creating a work order needs a person.'
+pe 'policy'
+pe 'counts raw/counts-initial.json'
+ok 'Zero work orders before we start.'
 
-chapter '3. Ask Fibey to investigate'
-say 'A Task is the record of this request. We will keep the same Task while'
-say 'Fibey checks inventory, waits for review, and receives the result.'
+chapter '3. Fibey investigates and proposes'
+say 'One Task holds the whole thing: the investigation, the wait for a decision,'
+say 'and the result that comes back.'
 pe 'orka task create -f task.json | tee raw/create.txt'
+say 'Fibey reads the alert, checks inventory, and proposes a work order.'
 pe 'wait_for_review'
+ok 'A proposal is waiting. Fibey is paused inside the same Task.'
 
-chapter '4. Inspect the proposed action'
-pe 'jq ".approvals[] | {targetTool, targetArgsPreview, status, executionOutcome}" raw/approval-pending.json'
-say 'This is the exact action waiting for review. It has not run yet.'
-say 'The inspection request identifies the pump and the work to carry out.'
-
-chapter '5. Check that work is still waiting'
+chapter '4. Nothing has happened yet'
+pe 'proposed'
 orka task get "$task" -o json >raw/task-before-decision.json
 orka task approvals "$task" -o json >raw/approval-before-decision.json
 receipts >raw/counts-before-decision.json
 python3 "$here/check.py" before-decision
-pe 'jq "{inventoryReads, workOrders: .workOrderExecutions}" raw/counts-before-decision.json'
-say 'The service received one inventory lookup and zero work orders.'
-say 'Fibey asking for an action did not authorize it.'
+pe 'counts raw/counts-before-decision.json'
+ok 'One inventory lookup, zero work orders. Fibey asking did not authorize anything.'
 
-chapter '6. The shift lead approves'
+chapter '5. Lee approves'
 # Used by the command evaluated in pe below.
 # shellcheck disable=SC2034
 approval=$(jq -er '.approvals[0].id' raw/approval-before-decision.json)
-say 'The presenter acts as the shift lead and approves this inspection request.'
-pe 'orka task approve "$task" "$approval" --reason "Inspect the transmitter; no equipment changes." -o json > raw/decision.json'
-pe 'jq "{status, decisionActor, decisionReason}" raw/decision.json'
-say 'Orka can now run the stored action and return its result to Fibey.'
+say 'Lee reads the proposal and approves this inspection, with a reason.'
+pe 'orka task approve "$task" "$approval" --reason "Inspect the transmitter." -o json > raw/decision.json'
+pe 'decision'
+ok 'The decision is on record: who, what, and why. Orka may now run the stored action.'
 
-chapter "7. Read the receipt and Fibey's answer"
+chapter "6. The work order comes back to the same Task"
 pe 'wait_task "$task" 600'
 orka task get "$task" -o json >raw/task-final.json
 orka task approvals "$task" -o json >raw/approval-final.json
@@ -129,9 +152,10 @@ orka task result "$task" -o json >raw/result.json
 receipts >raw/counts-final.json
 scenario_collect_events "$task" raw/events.json
 fibey_snapshot raw/installation-final.json
+pe 'result "$task" 12'
+pe 'counts raw/counts-final.json'
 pe 'python3 "$here/check.py" final'
-pe 'jq -r .result raw/result.json'
-say 'Fibey checked inventory and prepared the inspection request.'
-say 'A person approved it. One work order was created, and its receipt'
-say 'came back to the same waiting Task. No equipment was changed.'
+ok 'One work order, created after the decision, and its receipt returned to Fibey.'
+
 note "Full responses and receipts are saved in $run_dir"
+cta

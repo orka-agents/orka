@@ -37,5 +37,5 @@ spec:
     pushBranch: orka/security-audit-restored
   timeout: 20m
   prompt: |
-    Do not change any file. Run: pwd; ls; cat AUDIT.md. Reply with the exact
-    combined output and nothing else.
+    Do not change any file. Run: cat AUDIT.md
+    Reply with the exact output and nothing else.

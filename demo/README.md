@@ -7,16 +7,16 @@ terminal: a pull request, an object that survived deletion, a refusal.
 
 | | Demo | Shows |
 |---|---|---|
-| 1 | [`01-chat-to-pr`](01-chat-to-pr) | Claude Code pointed at the cluster instead of a vendor. One prompt becomes Agents, Tasks, a review, and a CI-green pull request. No model key leaves the cluster. |
-| 2 | [`02-agent-sandbox`](02-agent-sandbox) | A workspace that sleeps. One Session, two requests, one kubernetes-sigs Agent Sandbox: it is suspended between the requests (no Pod, only a disk) and wakes with the first request's work still on it. |
-| 3 | [`03-agent-substrate`](03-agent-substrate) | A save point for an agent. An audit runs as a gVisor Actor on Agent Substrate; between requests every worker is free, a follow-up boots a fresh Actor from the kept data, and a checkpoint restores after the workspace is deleted. |
-| 4 | [`04-security-scan`](04-security-scan) | Findings that arrive as pull requests. A legacy app is scanned into a threat model and validated findings; a person picks one and Orka opens the fix. |
-| 5 | [`05-two-teams`](05-two-teams) | Two teams, two namespaces, two Orka installations, one shared AI URL. The caller's token picks the team; cross-team requests are refused. Uses the compatibility router from PR #604. |
-| 8 | [`08-agent-to-agent`](08-agent-to-agent) | An order desk asks the inventory team's agent for help, retries the request, and retrieves the customer reply after the message adapter is replaced. |
-| 9 | [`09-governed-tools`](09-governed-tools) | An assistant checks a supplier's stock, then attempts a purchase. Gateway logs and supplier receipts show which request got through. |
-| 10 | [`10-reviewed-memory`](10-reviewed-memory) | One assistant proposes a return procedure. A person accepts and applies it, then a fresh agent uses the saved note. |
-| 11 | [`11-fibey-approval`](11-fibey-approval) | Fibey investigates a pump alert and proposes an inspection. A person approves the work order, and its receipt returns to the same waiting Task. |
-| 12 | [`12-efficiency`](12-efficiency) | Payments and inventory keep one AI address while the platform changes Agent instructions and model routing. Real checks and usage records compare hosted work with Jev routing to a local CPU model or a hosted model. |
+| 1 | [`01-chat-to-pr`](01-chat-to-pr) | Maya asks for a health check in Claude Code. Orka runs the agents on her team's cluster and ends with a reviewed, CI-green pull request. No model key ever reaches her laptop. |
+| 2 | [`02-agent-sandbox`](02-agent-sandbox) | A workspace that sleeps. Maya's agent works today; the kubernetes-sigs Agent Sandbox is suspended (no Pod, only a disk) and wakes tomorrow with the same identity and her files still on it. |
+| 3 | [`03-agent-substrate`](03-agent-substrate) | A save point for an agent. Priya's audit runs as a gVisor Actor on Agent Substrate, sleeps with every worker free, and comes back from a checkpoint after the workspace is deleted. |
+| 4 | [`04-security-scan`](04-security-scan) | Findings that arrive as pull requests. Priya registers an old app; Orka writes a threat model, reproduces the findings it lists, and opens the fix she picks as a pull request. |
+| 5 | [`05-two-teams`](05-two-teams) | Alice and Bob use one AI URL. Their tokens pick their teams' separate Orka installations, and the wrong door stays shut at the router and at the installation. Uses the compatibility router from PR #604. |
+| 8 | [`08-agent-to-agent`](08-agent-to-agent) | Sam's order-desk app asks the inventory team's agent for advice over A2A, retries without duplicate work, and continues the conversation in one Session. |
+| 9 | [`09-governed-tools`](09-governed-tools) | Jordan's assistant checks a supplier's stock, then tries to buy. Gateway logs and the supplier's own receipts show which request got through. |
+| 10 | [`10-reviewed-memory`](10-reviewed-memory) | One agent proposes a warehouse note. Jordan reviews and publishes it, and a fresh agent answers from it with the trail on record. |
+| 11 | [`11-fibey-approval`](11-fibey-approval) | Fibey investigates a pump alert and proposes an inspection. Lee, the shift lead, approves it, and the work-order receipt returns to the same waiting Task. |
+| 12 | [`12-efficiency`](12-efficiency) | Dana's platform team runs twenty customer replies and one fix twice: on a hosted model, then with Vekil choosing between hosted and local CPU models. Compare checked outcomes, elapsed time, and estimated cost. |
 
 Projects 6 and 7 are hackathon videos with their own instructions and are
 excluded from the narrated standalone series. See [`narrated/`](narrated/) for
@@ -28,6 +28,43 @@ The scripts are plain bash. `demo/lib/demo.sh` types commands the way a
 person would, and every command the viewer sees is the command that ran.
 Narration is in the script next to the command it explains, so re-recording
 after a change keeps the two in sync.
+
+The demos share one company. Maya (developer) and Jordan (warehouse) are on
+the inventory team, Priya is on security, Alice is on payments, Sam runs the
+order desk, Lee is a shift lead, and Dana is on the platform team. Every demo
+follows the same shape: a two-line situation, chapters named for what happens,
+one green check per chapter stating what was just proven, an evidence table
+built from the objects the demo queried, and the install command.
+
+## Rules the scripts follow
+
+These keep the recordings readable for someone who has never seen Orka.
+
+- Five nouns on screen: Provider, Agent, Task, Session, Publisher. Host objects
+  (Sandbox, Actor) are shown but not taught. Tool appears only in 09 and 11.
+- The typed command is shorter than its output. Anything that needs `jq`,
+  `sed`, `awk`, or `column` is a shell function with a plain name, defined at
+  the top of the script and announced once with `helpers_note`.
+- Objects are shown as three or four fields, never a full status dump.
+  `task_summary` prints Task, Phase, Delivery, and Publication branch.
+- Model answers are capped: prompts ask for short output and `result` shows at
+  most eight lines.
+- Prompts contain no apologies for the runtime. They say what to do, not what
+  the sandbox lacks.
+- Narration is the bright text; commands are grey.
+
+## Before recording
+
+- The demo client identity is `ORKA_CLIENT_SA` (default `orka-client`). To
+  show a person's name in reviewer and approver fields (demos 10 and 11),
+  create a ServiceAccount with that name and the same RoleBinding as
+  `orka-client`, then set `ORKA_CLIENT_SA` before recording.
+- Demo 12 refuses to start the routed batch until Vekil reports the Jev
+  classifier preflight ready, so a recording never shows hosted fallback by
+  accident. Make sure the classifier is reachable before recording.
+- Demos 02 and 03 still get pull request and branch names from the Publisher's
+  defaults; a Task-level title arrives with
+  [#632](https://github.com/orka-agents/orka/issues/632).
 
 ## Prepare the new walkthroughs
 
