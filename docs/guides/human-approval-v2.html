@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en" dir="ltr" class="docs-wrapper plugin-docs plugin-id-default docs-version-current docs-doc-page docs-doc-id-guides/human-approval-v2" data-has-hydrated="false">
+<head>
+<meta charset="UTF-8">
+<meta name="generator" content="Docusaurus v3.10.1">
+<title data-rh="true">Human approval for v2 tools | Orka</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orka-agents.github.io/orka/docs/guides/human-approval-v2"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Human approval for v2 tools | Orka"><meta data-rh="true" name="description" content="Review an exact AgentKit or Foundry tool call before Orka executes it."><meta data-rh="true" property="og:description" content="Review an exact AgentKit or Foundry tool call before Orka executes it."><link data-rh="true" rel="canonical" href="https://orka-agents.github.io/orka/docs/guides/human-approval-v2"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/guides/human-approval-v2" hreflang="en"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/guides/human-approval-v2" hreflang="x-default"><link rel="stylesheet" href="/orka/assets/css/styles.57c51b49.css">
+<script src="/orka/assets/js/runtime~main.6f609c10.js" defer="defer"></script>
+<script src="/orka/assets/js/main.9267f4c3.js" defer="defer"></script>
+</head>
+<body>
+<svg style="display: none;"><defs>
+<symbol id="theme-svg-external-link" viewBox="0 0 24 24"><path fill="currentColor" d="M21 13v10h-21v-19h12v2h-10v15h17v-8h2zm3-12h-10.988l4.035 4-6.977 7.07 2.828 2.828 6.977-7.07 4.125 4.172v-11z"/></symbol>
+</defs></svg>
+<script>!function(){var t=function(){try{return new URLSearchParams(window.location.search).get("docusaurus-theme")}catch(t){}}()||function(){try{return window.localStorage.getItem("theme")}catch(t){}}();document.documentElement.setAttribute("data-theme",t||"light"),document.documentElement.setAttribute("data-theme-choice",t||"light")}(),function(){try{const c=new URLSearchParams(window.location.search).entries();for(var[t,e]of c)if(t.startsWith("docusaurus-data-")){var a=t.replace("docusaurus-data-","data-");document.documentElement.setAttribute(a,e)}}catch(t){}}()</script><div id="__docusaurus"><div role="region" aria-label="Skip to main content"><a class="skipToContent_fXgn" href="#__docusaurus_skipToContent_fallback">Skip to main content</a></div><nav aria-label="Main" class="theme-layout-navbar navbar navbar--fixed-top"><div class="navbar__inner"><div class="theme-layout-navbar-left navbar__items"><button aria-label="Toggle navigation bar" aria-expanded="false" class="navbar__toggle clean-btn" type="button"><svg width="30" height="30" viewBox="0 0 30 30" aria-hidden="true"><path stroke="currentColor" stroke-linecap="round" stroke-miterlimit="10" stroke-width="2" d="M4 7h22M4 15h22M4 23h22"></path></svg></button><a class="navbar__brand" href="/orka/"><b class="navbar__title text--truncate">Orka</b></a><a class="navbar__item navbar__link" href="/orka/docs/getting-started">Docs</a></div><div class="theme-layout-navbar-right navbar__items navbar__items--right"><a href="https://github.com/orka-agents/orka" target="_blank" rel="noopener noreferrer" class="navbar__item navbar__link">GitHub<svg width="13.5" height="13.5" aria-label="(opens in new tab)" class="iconExternalLink_nPIU"><use href="#theme-svg-external-link"></use></svg></a><div class="toggle_vylO colorModeToggle_DEke"><button class="clean-btn toggleButton_gllP toggleButtonDisabled_aARS" type="button" disabled="" title="system mode" aria-label="Switch between dark and light mode (currently system mode)"><svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true" class="toggleIcon_g3eP lightToggleIcon_pyhR"><path fill="currentColor" d="M12,9c1.65,0,3,1.35,3,3s-1.35,3-3,3s-3-1.35-3-3S10.35,9,12,9 M12,7c-2.76,0-5,2.24-5,5s2.24,5,5,5s5-2.24,5-5 S14.76,7,12,7L12,7z M2,13l2,0c0.55,0,1-0.45,1-1s-0.45-1-1-1l-2,0c-0.55,0-1,0.45-1,1S1.45,13,2,13z M20,13l2,0c0.55,0,1-0.45,1-1 s-0.45-1-1-1l-2,0c-0.55,0-1,0.45-1,1S19.45,13,20,13z M11,2v2c0,0.55,0.45,1,1,1s1-0.45,1-1V2c0-0.55-0.45-1-1-1S11,1.45,11,2z M11,20v2c0,0.55,0.45,1,1,1s1-0.45,1-1v-2c0-0.55-0.45-1-1-1C11.45,19,11,19.45,11,20z M5.99,4.58c-0.39-0.39-1.03-0.39-1.41,0 c-0.39,0.39-0.39,1.03,0,1.41l1.06,1.06c0.39,0.39,1.03,0.39,1.41,0s0.39-1.03,0-1.41L5.99,4.58z M18.36,16.95 c-0.39-0.39-1.03-0.39-1.41,0c-0.39,0.39-0.39,1.03,0,1.41l1.06,1.06c0.39,0.39,1.03,0.39,1.41,0c0.39-0.39,0.39-1.03,0-1.41 L18.36,16.95z M19.42,5.99c0.39-0.39,0.39-1.03,0-1.41c-0.39-0.39-1.03-0.39-1.41,0l-1.06,1.06c-0.39,0.39-0.39,1.03,0,1.41 s1.03,0.39,1.41,0L19.42,5.99z M7.05,18.36c0.39-0.39,0.39-1.03,0-1.41c-0.39-0.39-1.03-0.39-1.41,0l-1.06,1.06 c-0.39,0.39-0.39,1.03,0,1.41s1.03,0.39,1.41,0L7.05,18.36z"></path></svg><svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true" class="toggleIcon_g3eP darkToggleIcon_wfgR"><path fill="currentColor" d="M9.37,5.51C9.19,6.15,9.1,6.82,9.1,7.5c0,4.08,3.32,7.4,7.4,7.4c0.68,0,1.35-0.09,1.99-0.27C17.45,17.19,14.93,19,12,19 c-3.86,0-7-3.14-7-7C5,9.07,6.81,6.55,9.37,5.51z M12,3c-4.97,0-9,4.03-9,9s4.03,9,9,9s9-4.03,9-9c0-0.46-0.04-0.92-0.1-1.36 c-0.98,1.37-2.58,2.26-4.4,2.26c-2.98,0-5.4-2.42-5.4-5.4c0-1.81,0.89-3.42,2.26-4.4C12.92,3.04,12.46,3,12,3L12,3z"></path></svg><svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true" class="toggleIcon_g3eP systemToggleIcon_QzmC"><path fill="currentColor" d="m12 21c4.971 0 9-4.029 9-9s-4.029-9-9-9-9 4.029-9 9 4.029 9 9 9zm4.95-13.95c1.313 1.313 2.05 3.093 2.05 4.95s-0.738 3.637-2.05 4.95c-1.313 1.313-3.093 2.05-4.95 2.05v-14c1.857 0 3.637 0.737 4.95 2.05z"></path></svg></button></div><div class="navbarSearchContainer_Bca1"></div></div></div><div role="presentation" class="navbar-sidebar__backdrop"></div></nav><div id="__docusaurus_skipToContent_fallback" class="theme-layout-main main-wrapper mainWrapper_z2l0"><div class="docsWrapper_hBAB"><button aria-label="Scroll back to top" class="clean-btn theme-back-to-top-button backToTopButton_sjWU" type="button"></button><div class="docRoot_UBD9"><main class="docMainContainer_TBSr docMainContainerEnhanced_lQrH"><div class="container padding-top--md padding-bottom--lg"><div class="row"><div class="col docItemCol_VOVn"><div class="docItemContainer_Djhp"><article><div class="tocCollapsible_ETCw theme-doc-toc-mobile tocMobile_ITEo"><button type="button" class="clean-btn tocCollapsibleButton_TO0P">On this page</button></div><div class="theme-doc-markdown markdown"><header><h1>Human approval for v2 tools</h1></header>
+<p>Orka can let an agent look up inventory automatically and require a person to
+approve a proposed work order. The controller saves the exact action before
+showing it for review. The tool has not run at that point. Approval lets Orka
+execute that stored action and return its real result to the waiting agent.</p>
+<p>This applies to tools executed by Orka for qualified AgentKit and Foundry
+<code>orka.harness.v2</code> runtimes. Runtime-native shell and file permissions are a
+separate capability. Existing <code>type: ai</code> autonomous approvals keep their
+worker parking behavior; v2 approvals keep the original tool call open.</p>
+<h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="configure-the-policy">Configure the policy<a href="#configure-the-policy" class="hash-link" aria-label="Direct link to Configure the policy" title="Direct link to Configure the policy" translate="no">​</a></h2>
+<p>An external <code>AgentRuntime</code> declares an explicit, sorted MCP policy and a
+runtime profile whose policy digests match it:</p>
+<div class="language-yaml codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#393A34;--prism-background-color:#f6f8fa"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-yaml codeBlock_bY9V thin-scrollbar" style="color:#393A34;background-color:#f6f8fa"><code class="codeBlockLines_e6Vv"><div class="token-line" style="color:#393A34"><span class="token key atrule" style="color:#00a4db">spec</span><span class="token punctuation" style="color:#393A34">:</span><span class="token plain"></span><br></div><div class="token-line" style="color:#393A34"><span class="token plain">  </span><span class="token key atrule" style="color:#00a4db">contractVersion</span><span class="token punctuation" style="color:#393A34">:</span><span class="token plain"> orka.harness.v2</span><br></div><div class="token-line" style="color:#393A34"><span class="token plain">  </span><span class="token key atrule" style="color:#00a4db">capabilities</span><span class="token punctuation" style="color:#393A34">:</span><span class="token plain"></span><br></div><div class="token-line" style="color:#393A34"><span class="token plain">    </span><span class="token key atrule" style="color:#00a4db">mcpPolicy</span><span class="token punctuation" style="color:#393A34">:</span><span class="token plain"></span><br></div><div class="token-line" style="color:#393A34"><span class="token plain">      </span><span class="token key atrule" style="color:#00a4db">allowedTools</span><span class="token punctuation" style="color:#393A34">:</span><span class="token plain"> </span><span class="token punctuation" style="color:#393A34">[</span><span class="token plain">create</span><span class="token punctuation" style="color:#393A34">-</span><span class="token plain">work</span><span class="token punctuation" style="color:#393A34">-</span><span class="token plain">order</span><span class="token punctuation" style="color:#393A34">,</span><span class="token plain"> read</span><span class="token punctuation" style="color:#393A34">-</span><span class="token plain">inventory</span><span class="token punctuation" style="color:#393A34">]</span><span class="token plain"></span><br></div><div class="token-line" style="color:#393A34"><span class="token plain">      </span><span class="token key atrule" style="color:#00a4db">disallowedTools</span><span class="token punctuation" style="color:#393A34">:</span><span class="token plain"> </span><span class="token punctuation" style="color:#393A34">[</span><span class="token punctuation" style="color:#393A34">]</span><span class="token plain"></span><br></div><div class="token-line" style="color:#393A34"><span class="token plain">      </span><span class="token key atrule" style="color:#00a4db">allowBash</span><span class="token punctuation" style="color:#393A34">:</span><span class="token plain"> </span><span class="token boolean important" style="color:#36acaa">false</span><span class="token plain"></span><br></div><div class="token-line" style="color:#393A34"><span class="token plain">      </span><span class="token key atrule" style="color:#00a4db">approvalRequiredTools</span><span class="token punctuation" style="color:#393A34">:</span><span class="token plain"> </span><span class="token punctuation" style="color:#393A34">[</span><span class="token plain">create</span><span class="token punctuation" style="color:#393A34">-</span><span class="token plain">work</span><span class="token punctuation" style="color:#393A34">-</span><span class="token plain">order</span><span class="token punctuation" style="color:#393A34">]</span><br></div></code></pre></div></div>
+<p>The registered adapter must advertise <code>supportsBrokeredToolApprovals</code> and
+pass conformance. Task <code>agentRuntime.allowedTools</code> must exactly match the
+registered policy. Per-Task settings cannot override that frozen profile.
+Brokered approval support is off by default. After qualifying the exact
+adapter and hosted configuration, set the supervisor&#x27;s
+<code>ORKA_ACP_BROKERED_TOOL_APPROVAL_PROFILE_DIGEST</code> to its complete runtime-profile
+digest. A mismatched opt-in fails startup. Requalify after changing that profile.
+Use the profile renderer and manifests in
+<a href="https://github.com/orka-agents/orka/tree/main/examples/human-approval-v2" target="_blank" rel="noopener noreferrer" class=""><code>examples/human-approval-v2</code></a>
+for complete configuration, including immutable adapter and image digests.</p>
+<p>The example tools run against a disposable HTTP counter. One lookup returns
+inventory without review. One simulated action increments the counter only
+after approval. It does not create equipment orders or make purchases.</p>
+<h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="review-the-action">Review the action<a href="#review-the-action" class="hash-link" aria-label="Direct link to Review the action" title="Direct link to Review the action" translate="no">​</a></h2>
+<p>Open the Task&#x27;s Approvals tab. It shows the proposed operation, a sanitized
+input preview, and the review deadline. A <code>call-tool</code> wrapper also names its
+inner operation when that name is present in the inputs. Sensitive values are
+redacted and oversized previews are bounded. The original executable inputs
+remain private; the preview is never used as execution input.</p>
+<p>The same records and decisions are available through the existing API:</p>
+<div class="language-http codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#393A34;--prism-background-color:#f6f8fa"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-http codeBlock_bY9V thin-scrollbar" style="color:#393A34;background-color:#f6f8fa"><code class="codeBlockLines_e6Vv"><div class="token-line" style="color:#393A34"><span class="token plain">GET /api/v1/tasks/:id/approvals?namespace=&lt;ns&gt;</span><br></div><div class="token-line" style="color:#393A34"><span class="token plain" style="display:inline-block"></span><br></div><div class="token-line" style="color:#393A34"><span class="token plain">POST /api/v1/tasks/:id/approvals/:approvalID/decision?namespace=&lt;ns&gt;</span><br></div><div class="token-line" style="color:#393A34"><span class="token plain">Content-Type: application/json</span><br></div><div class="token-line" style="color:#393A34"><span class="token plain" style="display:inline-block"></span><br></div><div class="token-line" style="color:#393A34"><span class="token plain">{&quot;decision&quot;:&quot;approve&quot;,&quot;reason&quot;:&quot;Reviewed the asset and quantity&quot;}</span><br></div></code></pre></div></div>
+<p>Use <code>decline</code> to reject the action. Reviewers need <code>update</code> on
+<code>core.orka.ai/tasks/approvals</code> and <code>patch</code> on the parent Task. Gateway-owned
+Tasks also enforce their existing operate permission. See the
+<a class="" href="/orka/docs/api-authorization#route-permissions">authorization reference</a>.
+The first terminal decision wins. While the bound Task run remains active,
+repeating that decision returns its saved state. A competing decision receives
+a conflict. Once the run settles or its binding becomes stale, even an identical
+decision retry receives HTTP 409.</p>
+<p>The panel separates the review decision from execution. An approved action
+can still fail, become stale before starting, or have an unknown outcome.
+History records the reviewer and decision, then <code>not_started</code>, <code>running</code>,
+<code>succeeded</code>, <code>failed</code>, or <code>unknown</code> as execution evidence becomes available.
+An unknown outcome means the action may have run. Check the target system
+before choosing whether to make a new request.</p>
+<h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="waiting-and-cancellation">Waiting and cancellation<a href="#waiting-and-cancellation" class="hash-link" aria-label="Direct link to Waiting and cancellation" title="Direct link to Waiting and cancellation" translate="no">​</a></h2>
+<p>Review has a maximum of ten minutes. Approved execution has a maximum of
+four minutes. Approval-required HTTP Tool timeouts must be shorter than
+four minutes. The MCP call allows fifteen minutes to cover both phases and
+transport overhead. The Task deadline can shorten either phase and the
+runtime must keep renewing its normal prompt lease. Configure a Task timeout
+that leaves room for initial agent work as well as the review.</p>
+<p>Decline, expiry, and cancellation prevent an unstarted action from running.
+Before execution, Orka rechecks the Task identity and active attempt, runtime
+and controller fences, tool definition, and frozen policy. A late decision
+cannot revive an ended run. Waiting holds no global execution lock, so other
+Tasks in separate RuntimeSessions can progress when capacity is available.</p>
+<p>If the agent receives the cancellation result and finishes before prompt
+cancellation reaches it, Orka retains that completed result. The approval
+stays cancelled and the action does not run.</p>
+<p>Direct AgentKit receives the longer MCP timeout from the supervisor. Hosted
+AgentKit also needs persistent continuation state with a TTL of 1800 seconds
+and a pinned Foundry agent version whose idle timeout is at least 1800 seconds.
+See the <a class="" href="/orka/docs/development/agent-runtime-adapter-contract#brokered-tool-approvals">adapter contract</a>
+for exact settings and final error codes.</p>
+<h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="recovery-and-evidence">Recovery and evidence<a href="#recovery-and-evidence" class="hash-link" aria-label="Direct link to Recovery and evidence" title="Direct link to Recovery and evidence" translate="no">​</a></h2>
+<p>Orka stores the original request in an immutable Secret owned by the Task.
+It binds the review to the Task UID, attempt, prompt, tool call and operation,
+runtime identity, arguments, tool descriptor, and policy. Events expose safe
+metadata and fingerprints. They do not contain the executable request,
+downstream credentials, or raw tool results.</p>
+<p>An interrupted broker connection preserves a pending review. Exact redelivery
+can resume it only while the original authority remains valid. A new
+controller epoch or supervisor boot invalidates the old run. Those cases keep
+their evidence and do not replay the prompt or transfer approval to a new run.
+A pending review whose runtime has disappeared becomes non-actionable when
+the Task ends or its review deadline expires.</p>
+<p>Execution reserves a durable external-effect record before review and claims
+it once after approval. A committed result can be returned again without
+calling the tool. After a controller restart, Orka repairs missing approval
+execution events from those durable records. A committed result restores its
+outcome; a started action without a committed result becomes <code>unknown</code>.
+Orka never takes over an expired execution lease to try the action again.
+Task ownership removes the private request Secret when the Task is deleted;
+retain the Task and its durable stores while investigating an unknown outcome.</p>
+<p>Enroll external Kubernetes runtimes with <code>deployment.kubernetesRecovery</code> before
+submitting Tasks if cleanup must survive supervisor loss. Enrollment binds the
+exact Deployment, Pod, container, and authentication identity. Use a stable
+runtime instance ID and a newly generated boot ID at each supervisor start.
+The supported topology has one AgentKit supervisor, or a Foundry supervisor
+and broker. Init and ephemeral containers invalidate recovery enrollment.</p>
+<p>For Foundry recovery, first upgrade the controller and qualify the broker, then
+set the supervisor&#x27;s <code>ORKA_ACP_FOUNDRY_RECOVERY_PROFILE_DIGEST</code> to the exact
+runtime profile digest. Recovery is default-off and independent of approval
+qualification. It records the broker&#x27;s durable ledger identity before
+admission. After supervisor loss, Orka requires proof that the original
+container terminated and that the same broker permanently sealed and retired
+every remote session under that boot. Keep its ledger intact through recovery.
+Missing historical enrollment cannot be recreated after the original compute
+is gone. Cleanup remains blocked when that evidence is absent.</p>
+<p>Crash validation checks normal Task deletion after those receipts are recorded,
+including product finalizer release, private request reclamation, and eventual
+release of retained boot credentials when the registration is deleted.</p>
+<p>The example acceptance runner uses the real Task and approval APIs. It checks
+the counter before approval, after repeated decisions, after decline and
+cancellation, and after expiry. Run it for both a direct AgentKit registration
+and an AgentKit agent hosted behind the Foundry bridge. Local deterministic
+model or hosted-process runs prove those transports; Azure-hosted acceptance
+also requires the deployed Foundry gateway and the configured hosted version.</p></div><footer class="theme-doc-footer docusaurus-mt-lg"><div class="row margin-top--sm theme-doc-footer-edit-meta-row"><div class="col noPrint_WFHX"><a href="https://github.com/orka-agents/orka/edit/main/website/docs/guides/human-approval-v2.md" target="_blank" rel="noopener noreferrer" class="theme-edit-this-page"><svg fill="currentColor" height="20" width="20" viewBox="0 0 40 40" class="iconEdit_Z9Sw" aria-hidden="true"><g><path d="m34.5 11.7l-3 3.1-6.3-6.3 3.1-3q0.5-0.5 1.2-0.5t1.1 0.5l3.9 3.9q0.5 0.4 0.5 1.1t-0.5 1.2z m-29.5 17.1l18.4-18.5 6.3 6.3-18.4 18.4h-6.3v-6.2z"></path></g></svg>Edit this page</a></div><div class="col lastUpdated_JAkA"></div></div></footer></article><nav class="docusaurus-mt-lg pagination-nav" aria-label="Docs pages"></nav></div></div><div class="col col--3"><div class="tableOfContents_bqdL thin-scrollbar theme-doc-toc-desktop"><ul class="table-of-contents table-of-contents__left-border"><li><a href="#configure-the-policy" class="table-of-contents__link toc-highlight">Configure the policy</a></li><li><a href="#review-the-action" class="table-of-contents__link toc-highlight">Review the action</a></li><li><a href="#waiting-and-cancellation" class="table-of-contents__link toc-highlight">Waiting and cancellation</a></li><li><a href="#recovery-and-evidence" class="table-of-contents__link toc-highlight">Recovery and evidence</a></li></ul></div></div></div></div></main></div></div></div><footer class="theme-layout-footer footer footer--dark"><div class="container container-fluid"><div class="row footer__links"><div class="theme-layout-footer-column col footer__col"><div class="footer__title">Docs</div><ul class="footer__items clean-list"><li class="footer__item"><a class="footer__link-item" href="/orka/docs/getting-started">Getting Started</a></li><li class="footer__item"><a class="footer__link-item" href="/orka/docs/api-reference">API Reference</a></li></ul></div><div class="theme-layout-footer-column col footer__col"><div class="footer__title">Community</div><ul class="footer__items clean-list"><li class="footer__item"><a href="https://github.com/orka-agents/orka" target="_blank" rel="noopener noreferrer" class="footer__link-item">GitHub<svg width="13.5" height="13.5" aria-label="(opens in new tab)" class="iconExternalLink_nPIU"><use href="#theme-svg-external-link"></use></svg></a></li></ul></div></div><div class="footer__bottom text--center"><div class="footer__copyright">Copyright © 2026 Orka contributors.</div></div></div></footer></div>
+</body>
+</html>

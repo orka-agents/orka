@@ -4,8 +4,8 @@
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.10.1">
 <title data-rh="true">Execution events, session timelines, traces, forks, and approvals | Orka</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orka-agents.github.io/orka/docs/execution-events"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Execution events, session timelines, traces, forks, and approvals | Orka"><meta data-rh="true" name="description" content="The event stream behind task timelines, traces, forks, and approvals."><meta data-rh="true" property="og:description" content="The event stream behind task timelines, traces, forks, and approvals."><link data-rh="true" rel="canonical" href="https://orka-agents.github.io/orka/docs/execution-events"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/execution-events" hreflang="en"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/execution-events" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Execution events, session timelines, traces, forks, and approvals","item":"https://orka-agents.github.io/orka/docs/execution-events"}]}</script><link rel="stylesheet" href="/orka/assets/css/styles.57c51b49.css">
-<script src="/orka/assets/js/runtime~main.4bfb6b3e.js" defer="defer"></script>
-<script src="/orka/assets/js/main.0e970d39.js" defer="defer"></script>
+<script src="/orka/assets/js/runtime~main.6f609c10.js" defer="defer"></script>
+<script src="/orka/assets/js/main.9267f4c3.js" defer="defer"></script>
 </head>
 <body>
 <svg style="display: none;"><defs>
@@ -94,28 +94,33 @@ returns <code>409 Conflict</code>, even when an <code>Idempotency-Key</code> is 
 <p>CLI:</p>
 <div class="language-bash codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#393A34;--prism-background-color:#f6f8fa"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-bash codeBlock_bY9V thin-scrollbar" style="color:#393A34;background-color:#f6f8fa"><code class="codeBlockLines_e6Vv"><div class="token-line" style="color:#393A34"><span class="token plain">orka task fork &#x27;&lt;task&gt;&#x27; --after 5 --agent reviewer --prompt &quot;Continue from here&quot;</span><br></div></code></pre></div></div>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="durable-approvals-mvp">Durable approvals MVP<a href="#durable-approvals-mvp" class="hash-link" aria-label="Direct link to Durable approvals MVP" title="Direct link to Durable approvals MVP" translate="no">​</a></h2>
-<p>Workers emit only the <code>ApprovalRequested</code> event. The internal event submission
+<p>Workers and the v2 tool broker emit <code>ApprovalRequested</code>. The internal event submission
 endpoint (<code>SubmitExecutionEvent</code>) rejects worker-submitted terminal approval
 events with <code>403 Forbidden</code> (&quot;terminal task and approval events must use
 controller-owned paths&quot;).</p>
 <p>The approval lifecycle event types carried on the task stream are:</p>
 <ul>
-<li class=""><code>ApprovalRequested</code> — emitted by workers,</li>
+<li class=""><code>ApprovalRequested</code>,</li>
 <li class=""><code>ApprovalApproved</code>,</li>
 <li class=""><code>ApprovalDeclined</code>,</li>
 <li class=""><code>ApprovalExpired</code>,</li>
-<li class=""><code>ApprovalCancelled</code>.</li>
+<li class=""><code>ApprovalCancelled</code>,</li>
+<li class=""><code>ApprovalExecutionUpdated</code>.</li>
 </ul>
 <p>The four terminal types (<code>ApprovalApproved</code>, <code>ApprovalDeclined</code>,
 <code>ApprovalExpired</code>, <code>ApprovalCancelled</code>) are appended only by controller-owned
-paths — for example the decision endpoint below — never by worker submissions.</p>
+paths — for example the decision endpoint below — never by worker submissions.
+The v2 broker also owns <code>ApprovalExecutionUpdated</code>, which records execution
+separately from the reviewer decision. Worker submissions of this event are
+rejected.</p>
 <p>Pending/current approvals are derived from the event stream:</p>
 <div class="language-http codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#393A34;--prism-background-color:#f6f8fa"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-http codeBlock_bY9V thin-scrollbar" style="color:#393A34;background-color:#f6f8fa"><code class="codeBlockLines_e6Vv"><div class="token-line" style="color:#393A34"><span class="token plain">GET /api/v1/tasks/:id/approvals?namespace=&lt;ns&gt;</span><br></div></code></pre></div></div>
 <p>A user can append a decision event:</p>
 <div class="language-http codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#393A34;--prism-background-color:#f6f8fa"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-http codeBlock_bY9V thin-scrollbar" style="color:#393A34;background-color:#f6f8fa"><code class="codeBlockLines_e6Vv"><div class="token-line" style="color:#393A34"><span class="token plain">POST /api/v1/tasks/:id/approvals/:approvalID/decision?namespace=&lt;ns&gt;</span><br></div><div class="token-line" style="color:#393A34"><span class="token plain">Content-Type: application/json</span><br></div><div class="token-line" style="color:#393A34"><span class="token plain" style="display:inline-block"></span><br></div><div class="token-line" style="color:#393A34"><span class="token plain">{&quot;decision&quot;:&quot;approve&quot;,&quot;reason&quot;:&quot;safe to create PR&quot;}</span><br></div></code></pre></div></div>
 <p>CLI:</p>
 <div class="language-bash codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#393A34;--prism-background-color:#f6f8fa"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-bash codeBlock_bY9V thin-scrollbar" style="color:#393A34;background-color:#f6f8fa"><code class="codeBlockLines_e6Vv"><div class="token-line" style="color:#393A34"><span class="token plain">orka task approvals &#x27;&lt;task&gt;&#x27;</span><br></div><div class="token-line" style="color:#393A34"><span class="token plain">orka task approve &#x27;&lt;task&gt;&#x27; &#x27;&lt;approvalID&gt;&#x27; --reason &quot;looks safe&quot;</span><br></div><div class="token-line" style="color:#393A34"><span class="token plain">orka task decline &#x27;&lt;task&gt;&#x27; &#x27;&lt;approvalID&gt;&#x27; --reason &quot;not safe&quot;</span><br></div></code></pre></div></div>
-<p>The first recommended high-risk action to integrate with these events is PR creation/merge. The API/read model is in place before broad worker policy integration.</p>
+<p>See <a class="" href="/orka/docs/guides/human-approval-v2">human approval for v2 tools</a> for the
+AgentKit and Foundry flow, bounded waiting, safe previews, and recovery.</p>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="redaction-and-truncation">Redaction and truncation<a href="#redaction-and-truncation" class="hash-link" aria-label="Direct link to Redaction and truncation" title="Direct link to Redaction and truncation" translate="no">​</a></h2>
 <p>Workers redact before submitting events, and the store sanitizes again before persistence. Public APIs and SSE frames return sanitized payloads only. Fake values matching bearer tokens, JWT-like strings, API keys, cookies, GitHub tokens, Anthropic/OpenAI tokens, and transaction-token headers must be redacted before they appear in SQLite rows or public responses.</p>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="metrics">Metrics<a href="#metrics" class="hash-link" aria-label="Direct link to Metrics" title="Direct link to Metrics" translate="no">​</a></h2>
