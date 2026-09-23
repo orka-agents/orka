@@ -61,36 +61,6 @@ type CallBinding struct {
 	RequestDigest            string `json:"requestDigest"`
 }
 
-// UnmarshalJSON preserves matching for older persisted events while keeping
-// raw runtime identifiers out of the public approval representation. A legacy
-// identifier already altered by sanitization cannot grant fresh authority.
-func (b *CallBinding) UnmarshalJSON(data []byte) error {
-	type binding CallBinding
-	var saved struct {
-		binding
-		OperationID       string `json:"operationID"`
-		RuntimeInstanceID string `json:"runtimeInstanceID"`
-		SupervisorBootID  string `json:"supervisorBootID"`
-	}
-	if err := json.Unmarshal(data, &saved); err != nil {
-		return err
-	}
-	for _, value := range []struct {
-		raw    string
-		digest *string
-	}{
-		{saved.OperationID, &saved.OperationIDDigest},
-		{saved.RuntimeInstanceID, &saved.RuntimeInstanceIDDigest},
-		{saved.SupervisorBootID, &saved.SupervisorBootIDDigest},
-	} {
-		if *value.digest == "" && value.raw != "" {
-			*value.digest = store.CanonicalBytesDigest([]byte(value.raw))
-		}
-	}
-	*b = CallBinding(saved.binding)
-	return nil
-}
-
 // Derive returns current approval state from a task event stream.
 func Derive(input []store.ExecutionEvent, now time.Time) []Approval {
 	eventsCopy := make([]store.ExecutionEvent, 0, len(input))

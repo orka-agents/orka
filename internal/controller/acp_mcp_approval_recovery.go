@@ -8,9 +8,7 @@ import (
 	"maps"
 	"time"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/approvals"
@@ -305,19 +303,11 @@ func mcpApprovalRecoveryBindingKey(task *corev1alpha1.Task, approval approvals.A
 		store.ValidateCanonicalDigest("approval request digest", binding.RequestDigest) != nil {
 		return "", false
 	}
-	var expected string
-	if binding.CallIDDigest == "" {
-		// Legacy events have no safe call-ID digest. Recover them only when the
-		// persisted raw ID still proves the original approval identity.
-		expected = store.CanonicalControlID("acp-tool-approval", task.Namespace, string(task.UID),
-			fmt.Sprint(binding.TaskAttempt), binding.PromptID, approval.ToolCallID)
-	} else {
-		if store.ValidateCanonicalDigest("approval call ID digest", binding.CallIDDigest) != nil {
-			return "", false
-		}
-		expected = acpMCPApprovalIdentityFromCallDigest(task.Namespace, string(task.UID),
-			fmt.Sprint(binding.TaskAttempt), binding.PromptID, binding.CallIDDigest)
+	if store.ValidateCanonicalDigest("approval call ID digest", binding.CallIDDigest) != nil {
+		return "", false
 	}
+	expected := acpMCPApprovalIdentityFromCallDigest(task.Namespace, string(task.UID),
+		fmt.Sprint(binding.TaskAttempt), binding.PromptID, binding.CallIDDigest)
 	return mcpApprovalEffectBindingKey(task.Namespace, binding.RuntimeSessionUID, binding.OperationIDDigest), approval.ID == expected
 }
 
@@ -397,7 +387,7 @@ func (d *ACPDispatcher) reconcileMCPApprovalExecution(
 		effect = updated
 	}
 	outcome, reason, _ := mcpApprovalRecoveredOutcome(effect, approval.ID)
-	if outcome == "" || (approval.ExecutionOutcome == outcome && approval.ExecutionReason == reason && mcpApprovalRecoveryDecisionType(approval, outcome, reason) == "") {
+	if mcpApprovalProjectionCurrent(approval, outcome, reason) {
 		return nil
 	}
 	guard, ok := d.Store.(store.ControllerEpochMutationStore)
@@ -415,19 +405,9 @@ func (d *ACPDispatcher) projectMCPApprovalExecution(
 	expected approvals.Approval,
 	identity store.ExternalEffectIdentity,
 ) error {
-	reader := d.APIReader
-	if reader == nil {
-		reader = d.Client
-	}
-	current := &corev1alpha1.Task{}
-	if err := reader.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil
-		}
+	current, err := d.mcpApprovalCurrentTask(ctx, task)
+	if err != nil || current == nil {
 		return err
-	}
-	if current.UID != task.UID {
-		return nil
 	}
 	effectReader, ok := d.Store.(store.ExternalEffectIdentityReader)
 	if !ok {
@@ -451,12 +431,19 @@ func (d *ACPDispatcher) projectMCPApprovalExecution(
 			continue
 		}
 		outcome, reason, result := mcpApprovalRecoveredOutcome(effect, approval.ID)
-		if outcome == "" || (approval.ExecutionOutcome == outcome && approval.ExecutionReason == reason && mcpApprovalRecoveryDecisionType(approval, outcome, reason) == "") {
+		if mcpApprovalProjectionCurrent(approval, outcome, reason) {
 			return nil
 		}
 		return d.appendMCPApprovalRecoveryOutcome(ctx, task, approval, effect.Version, listed, outcome, reason, result)
 	}
 	return nil
+}
+
+// mcpApprovalProjectionCurrent reports whether the approval's public
+// execution projection already reflects the recovered receipt.
+func mcpApprovalProjectionCurrent(approval approvals.Approval, outcome, reason string) bool {
+	return outcome == "" || (approval.ExecutionOutcome == outcome && approval.ExecutionReason == reason &&
+		mcpApprovalRecoveryDecisionType(approval, outcome, reason) == "")
 }
 
 func mcpApprovalRecoveryDecisionType(approval approvals.Approval, outcome, reason string) string {
@@ -495,17 +482,7 @@ func (d *ACPDispatcher) appendMCPApprovalRecoveryOutcome(
 		}
 		lastSeq = max(lastSeq, event.Seq)
 	}
-	payload := struct {
-		ApprovalID       string `json:"approvalID"`
-		TaskUID          string `json:"taskUID"`
-		ExecutionOutcome string `json:"executionOutcome"`
-		Reason           string `json:"reason"`
-		ResultDigest     string `json:"resultDigest,omitempty"`
-	}{ApprovalID: approval.ID, TaskUID: string(task.UID), ExecutionOutcome: outcome, Reason: reason}
-	if len(result) > 0 {
-		payload.ResultDigest = store.CanonicalBytesDigest(result)
-	}
-	content, err := json.Marshal(payload)
+	content, err := acpMCPApprovalOutcomeContent(approval.ID, string(task.UID), outcome, reason, result)
 	if err != nil {
 		return err
 	}

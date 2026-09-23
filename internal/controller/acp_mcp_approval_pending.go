@@ -60,7 +60,7 @@ func (d *ACPDispatcher) mcpApprovalUnboundPendingAbandoned(ctx context.Context, 
 	if mcpApprovalPendingFromOlderEpoch(effect, fence) {
 		return true, nil
 	}
-	current, err := d.mcpApprovalPendingTask(ctx, task)
+	current, err := d.mcpApprovalCurrentTask(ctx, task)
 	if err != nil || current == nil {
 		return false, err
 	}
@@ -106,7 +106,7 @@ func (d *ACPDispatcher) acpMCPApprovalPendingDenial(
 		return acpApprovalCodeExpired, nil
 	}
 
-	current, err := d.mcpApprovalPendingTask(ctx, task)
+	current, err := d.mcpApprovalCurrentTask(ctx, task)
 	if err != nil || current == nil {
 		return "", err
 	}
@@ -140,7 +140,9 @@ func (d *ACPDispatcher) acpMCPApprovalPendingDenial(
 	return "", nil
 }
 
-func (d *ACPDispatcher) mcpApprovalPendingTask(ctx context.Context, task *corev1alpha1.Task) (*corev1alpha1.Task, error) {
+// mcpApprovalCurrentTask re-reads the Task and returns nil when it is gone or
+// its UID changed, so callers never act on a recreated Task's name.
+func (d *ACPDispatcher) mcpApprovalCurrentTask(ctx context.Context, task *corev1alpha1.Task) (*corev1alpha1.Task, error) {
 	reader := d.APIReader
 	if reader == nil {
 		reader = d.Client

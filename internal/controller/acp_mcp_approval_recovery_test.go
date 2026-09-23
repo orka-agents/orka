@@ -311,11 +311,9 @@ func TestMCPApprovalRecoveryPreservesPrivateCallIdentity(t *testing.T) {
 
 func TestMCPApprovalRecoveryValidatesPersistedCallBinding(t *testing.T) {
 	for _, tc := range []struct {
-		name          string
-		legacy        bool
-		legacyRuntime bool
-		mutate        func(*approvals.CallBinding)
-		recover       bool
+		name    string
+		mutate  func(*approvals.CallBinding)
+		recover bool
 	}{
 		{name: "digest", recover: true},
 		{name: "missing_digest", mutate: func(b *approvals.CallBinding) { b.CallIDDigest = "" }},
@@ -329,25 +327,16 @@ func TestMCPApprovalRecoveryValidatesPersistedCallBinding(t *testing.T) {
 		{name: "different_operation_digest", mutate: func(b *approvals.CallBinding) { b.OperationIDDigest = testControllerMCPDigest("different operation") }},
 		// Runtime digests gate new decisions, not projection of an already
 		// committed receipt matched by exact effect identity and request digest.
-		{name: "legacy_without_runtime_digests", mutate: func(b *approvals.CallBinding) {
+		{name: "without_runtime_digests", mutate: func(b *approvals.CallBinding) {
 			b.RuntimeInstanceIDDigest, b.SupervisorBootIDDigest = "", ""
 		}, recover: true},
-		{name: "legacy_without_digest", legacy: true, recover: true},
-		{name: "legacy_runtime_identifiers", legacyRuntime: true, recover: true},
-		{name: "legacy_call_and_runtime_identifiers", legacy: true, legacyRuntime: true, recover: true},
-		{name: "legacy_malformed_digest", legacy: true, mutate: func(b *approvals.CallBinding) { b.CallIDDigest = "sha256:abc" }},
-		{name: "legacy_with_digest", legacy: true, mutate: func(b *approvals.CallBinding) { b.CallIDDigest = testControllerMCPDigest("another call") }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newMCPApprovalRecoveryFixture(t)
 			call, _ := f.seed(t, store.ExternalEffectSucceeded, "running", true, json.RawMessage(`{"workOrder":"simulated-1"}`))
 			_, listed := f.approval(t)
 			approvalID := call.ID
-			if tc.legacy {
-				approvalID = store.CanonicalControlID("acp-tool-approval", f.task.Namespace, string(f.task.UID),
-					fmt.Sprint(f.request.Metadata.TaskAttempt), string(f.request.Metadata.PromptID), f.request.Call.CallID)
-			}
-			// Rebuild the saved history to model old or damaged event bindings.
+			// Rebuild the saved history to model damaged event bindings.
 			// The completed effect and its immutable request digest stay intact.
 			require.NoError(t, f.events.DeleteExecutionEvents(f.ctx, f.task.Namespace, events.ExecutionEventStreamTypeTask, f.task.Name))
 			for _, event := range listed {
@@ -357,27 +346,10 @@ func TestMCPApprovalRecoveryValidatesPersistedCallBinding(t *testing.T) {
 				if event.Type == events.ExecutionEventTypeApprovalRequested {
 					var binding approvals.CallBinding
 					require.NoError(t, json.Unmarshal(payload["binding"], &binding))
-					if tc.legacy {
-						binding.CallIDDigest = ""
-						payload["toolCallID"], _ = json.Marshal(f.request.Call.CallID)
-					}
 					if tc.mutate != nil {
 						tc.mutate(&binding)
 					}
 					payload["binding"], _ = json.Marshal(binding)
-					if tc.legacyRuntime {
-						var old map[string]any
-						require.NoError(t, json.Unmarshal(payload["binding"], &old))
-						delete(old, "operationIDDigest")
-						delete(old, "runtimeInstanceIDDigest")
-						delete(old, "supervisorBootIDDigest")
-						old["operationID"] = f.request.Metadata.OperationID
-						old["runtimeInstanceID"] = f.request.Metadata.Fence.RuntimeInstanceID
-						old["supervisorBootID"] = f.request.Metadata.Fence.SupervisorBootID
-						legacyContent, marshalErr := json.Marshal(old)
-						require.NoError(t, marshalErr)
-						payload["binding"] = legacyContent
-					}
 				}
 				var err error
 				event.Content, err = json.Marshal(payload)

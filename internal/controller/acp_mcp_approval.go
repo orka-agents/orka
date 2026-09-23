@@ -32,7 +32,42 @@ const (
 	acpApprovalOutcomeFailed  = "failed"
 	acpApprovalOutcomeUnknown = "unknown"
 	acpMCPToolEffectKind      = "acp-mcp-tool"
+
+	// Settlement work must outlive the cancelled request context but stay
+	// bounded; the interrupt check is shorter because it only reads.
+	acpApprovalSettleTimeout         = 10 * time.Second
+	acpApprovalInterruptCheckTimeout = 5 * time.Second
+	acpApprovalDefaultPollInterval   = time.Second
 )
+
+func acpApprovalDetachedContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), timeout)
+}
+
+func (b *ACPMCPBroker) approvalPollInterval() time.Duration {
+	if b.ApprovalPollInterval <= 0 {
+		return acpApprovalDefaultPollInterval
+	}
+	return b.ApprovalPollInterval
+}
+
+// acpMCPApprovalOutcomePayload is the ApprovalExecutionUpdated event content
+// written by the broker and repaired by recovery.
+type acpMCPApprovalOutcomePayload struct {
+	ApprovalID       string `json:"approvalID"`
+	TaskUID          string `json:"taskUID"`
+	ExecutionOutcome string `json:"executionOutcome"`
+	Reason           string `json:"reason"`
+	ResultDigest     string `json:"resultDigest,omitempty"`
+}
+
+func acpMCPApprovalOutcomeContent(approvalID, taskUID, outcome, reason string, result json.RawMessage) ([]byte, error) {
+	payload := acpMCPApprovalOutcomePayload{ApprovalID: approvalID, TaskUID: taskUID, ExecutionOutcome: outcome, Reason: reason}
+	if len(result) > 0 {
+		payload.ResultDigest = store.CanonicalBytesDigest(result)
+	}
+	return json.Marshal(payload)
+}
 
 // acpMCPApprovalCall is private executable input, never an event payload. The
 // immutable, Task-owned Secret keeps the original arguments across redelivery
@@ -268,18 +303,12 @@ func (b *ACPMCPBroker) appendApprovalEvent(ctx context.Context, call *acpMCPAppr
 }
 
 func (b *ACPMCPBroker) approvalOutcome(ctx context.Context, call *acpMCPApprovalCall, outcome, reason string, result json.RawMessage) error {
-	payload := struct {
-		ApprovalID       string `json:"approvalID"`
-		TaskUID          string `json:"taskUID"`
-		ExecutionOutcome string `json:"executionOutcome"`
-		Reason           string `json:"reason"`
-		ResultDigest     string `json:"resultDigest,omitempty"`
-	}{ApprovalID: call.ID, TaskUID: call.Task.UID, ExecutionOutcome: outcome, Reason: reason}
-	if len(result) > 0 {
-		payload.ResultDigest = store.CanonicalBytesDigest(result)
+	content, err := acpMCPApprovalOutcomeContent(call.ID, call.Task.UID, outcome, reason, result)
+	if err != nil {
+		return err
 	}
 	return b.appendApprovalEvent(ctx, call, events.ExecutionEventTypeApprovalExecutionUpdated, "execution:"+outcome,
-		"Approved tool execution "+outcome, payload)
+		"Approved tool execution "+outcome, json.RawMessage(content))
 }
 
 func (b *ACPMCPBroker) approvalDecision(ctx context.Context, call *acpMCPApprovalCall, eventType, reason string) error {
@@ -301,11 +330,7 @@ func (b *ACPMCPBroker) approvalDecision(ctx context.Context, call *acpMCPApprova
 func (b *ACPMCPBroker) readUnstartedApproval(ctx context.Context, call *acpMCPApprovalCall, read func(context.Context) error) error {
 	waitCtx, cancel := context.WithDeadline(ctx, call.ExpiresAt)
 	defer cancel()
-	poll := b.ApprovalPollInterval
-	if poll <= 0 {
-		poll = time.Second
-	}
-	ticker := time.NewTicker(poll)
+	ticker := time.NewTicker(b.approvalPollInterval())
 	defer ticker.Stop()
 	for {
 		err := waitCtx.Err()
@@ -329,11 +354,7 @@ func (b *ACPMCPBroker) readUnstartedApproval(ctx context.Context, call *acpMCPAp
 }
 
 func (b *ACPMCPBroker) waitAndExecuteApproval(ctx context.Context, call *acpMCPApprovalCall, secretUID types.UID, effect *store.ExternalEffect, credentials ACPMCPBrokerCredentials) (json.RawMessage, bool, error) {
-	poll := b.ApprovalPollInterval
-	if poll <= 0 {
-		poll = time.Second
-	}
-	ticker := time.NewTicker(poll)
+	ticker := time.NewTicker(b.approvalPollInterval())
 	defer ticker.Stop()
 	for {
 		if ctx.Err() != nil {
@@ -478,7 +499,7 @@ func (b *ACPMCPBroker) replayApprovalResult(ctx context.Context, call *acpMCPApp
 func (b *ACPMCPBroker) interruptedApproval(ctx context.Context, call *acpMCPApprovalCall, effect *store.ExternalEffect, credentials ACPMCPBrokerCredentials) (json.RawMessage, bool, error) {
 	// A transport interruption alone must not erase a pending review. Exact
 	// redelivery can resume it while the original authority survives.
-	checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	checkCtx, cancel := acpApprovalDetachedContext(ctx, acpApprovalInterruptCheckTimeout)
 	defer cancel()
 	current, err := b.Effects.GetExternalEffect(checkCtx, effect.ID)
 	if err != nil || (current.State != store.ExternalEffectPending && current.State != store.ExternalEffectFailed) {
@@ -498,7 +519,7 @@ func (b *ACPMCPBroker) interruptedApproval(ctx context.Context, call *acpMCPAppr
 func (b *ACPMCPBroker) revokeApproval(ctx context.Context, call *acpMCPApprovalCall, credentials ACPMCPBrokerCredentials, cause error) (json.RawMessage, bool, error) {
 	// Revocation records evidence only. The authority watcher can cancel the
 	// call after revalidation fails, so settlement needs its own bounded context.
-	settleCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	settleCtx, stop := acpApprovalDetachedContext(ctx, acpApprovalSettleTimeout)
 	defer stop()
 	code := acpApprovalCodeStale
 	eventType := events.ExecutionEventTypeApprovalCancelled
@@ -710,7 +731,7 @@ func (b *ACPMCPBroker) executeApprovedCall(ctx context.Context, call *acpMCPAppr
 	}
 	prepared, err := b.prepareApprovedCall(callCtx, call, credentials)
 	if err != nil {
-		settleCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		settleCtx, stop := acpApprovalDetachedContext(ctx, acpApprovalSettleTimeout)
 		defer stop()
 		result := acpApprovalError(call.ID, acpApprovalCodeStale)
 		if errors.Is(err, errACPMCPTaskCancelled) {
@@ -748,7 +769,7 @@ func (b *ACPMCPBroker) executeApprovedCall(ctx context.Context, call *acpMCPAppr
 			Response: result, ResponseDigest: store.CanonicalBytesDigest(result), UpdatedAt: time.Now().UTC(),
 		})
 	}
-	settleCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	settleCtx, stop := acpApprovalDetachedContext(ctx, acpApprovalSettleTimeout)
 	defer stop()
 	if executeErr != nil {
 		_ = settleExternalEffectStore(settleCtx, b.Effects, credentials.ControllerFence, effect.Identity, store.ExternalEffectOutcomeUnknown, nil)
