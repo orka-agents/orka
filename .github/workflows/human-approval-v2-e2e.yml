@@ -5,6 +5,8 @@ on:
   pull_request:
     paths:
       - .github/workflows/human-approval-v2-e2e.yml
+      - .github/actions/free-disk-space/**
+      - .github/actions/setup-kind/**
       - .agents/skills/kindctl/**
       - .dockerignore
       - Dockerfile
@@ -26,6 +28,8 @@ on:
     branches: [main]
     paths:
       - .github/workflows/human-approval-v2-e2e.yml
+      - .github/actions/free-disk-space/**
+      - .github/actions/setup-kind/**
       - .agents/skills/kindctl/**
       - .dockerignore
       - Dockerfile
