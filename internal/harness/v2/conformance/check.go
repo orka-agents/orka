@@ -387,6 +387,9 @@ func validateExactCapabilities(target Target, observed *CapabilitiesResponse) er
 		!base.Provider.SupportsPermissions {
 		return fmt.Errorf("strict-governed runtime policy requires permission support")
 	}
+	if len(target.ApprovalPolicy.RequiredTools) > 0 && !base.Provider.SupportsBrokeredToolApprovals {
+		return fmt.Errorf("runtime approval policy requires brokered tool approval support")
+	}
 	return nil
 }
 

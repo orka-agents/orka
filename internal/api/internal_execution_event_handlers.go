@@ -73,8 +73,9 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
-	if events.IsTerminalTaskEventType(event.Type) || events.IsTerminalApprovalEventType(event.Type) {
-		return fiber.NewError(fiber.StatusForbidden, "terminal task and approval events must use controller-owned paths")
+	if events.IsTerminalTaskEventType(event.Type) || events.IsTerminalApprovalEventType(event.Type) ||
+		event.Type == events.ExecutionEventTypeApprovalExecutionUpdated {
+		return fiber.NewError(fiber.StatusForbidden, "this event must use a controller-owned path")
 	}
 	// The harness identity is controller-owned; workers may submit only their
 	// own call records, bound below to the authenticated Task UID.

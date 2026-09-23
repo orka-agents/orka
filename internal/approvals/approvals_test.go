@@ -22,6 +22,42 @@ func TestDeriveApprovalLifecycle(t *testing.T) {
 	}
 }
 
+func TestDeriveLegacyRuntimeBindingKeepsIdentifiersPrivate(t *testing.T) {
+	raw := map[string]any{
+		"taskAttempt": 1, "promptID": "prompt-1", "runtimeSessionUID": "session-1", "runtimeSessionGeneration": 1,
+		"operationID": "private-operation-marker", "runtimeInstanceID": "https://runtime.example/instance?slot=1",
+		"supervisorBootID": "private-boot-marker", "controllerEpoch": 1,
+	}
+	data, err := json.Marshal(map[string]any{"approvalID": "approval-1", "binding": raw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	derived := Derive([]store.ExecutionEvent{{Seq: 1, Type: events.ExecutionEventTypeApprovalRequested, Content: data}}, time.Time{})
+	if len(derived) != 1 || derived[0].Binding == nil {
+		t.Fatal("legacy binding was lost")
+	}
+	binding := derived[0].Binding
+	if binding.OperationIDDigest != store.CanonicalBytesDigest([]byte(raw["operationID"].(string))) ||
+		binding.RuntimeInstanceIDDigest != store.CanonicalBytesDigest([]byte(raw["runtimeInstanceID"].(string))) ||
+		binding.SupervisorBootIDDigest != store.CanonicalBytesDigest([]byte(raw["supervisorBootID"].(string))) ||
+		binding.PromptID != "prompt-1" || binding.RuntimeSessionGeneration != 1 {
+		t.Fatal("legacy binding was not preserved through its digests")
+	}
+	public, err := json.Marshal(derived)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"operationID", "runtimeInstanceID", "supervisorBootID"} {
+		if strings.Contains(string(public), raw[key].(string)) || strings.Contains(string(public), `"`+key+`":`) {
+			t.Fatalf("public approval exposed legacy %s", key)
+		}
+	}
+	var roundtrip []Approval
+	if err := json.Unmarshal(public, &roundtrip); err != nil || len(roundtrip) != 1 || *roundtrip[0].Binding != *binding {
+		t.Fatalf("modern binding changed during JSON round trip: %v", err)
+	}
+}
+
 func TestDeriveApprovalExpiry(t *testing.T) {
 	expires := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
 	data, _ := json.Marshal(map[string]string{"approvalID": "a1", "expiresAt": expires.Format(time.RFC3339)})

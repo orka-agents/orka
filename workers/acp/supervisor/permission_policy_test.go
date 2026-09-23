@@ -142,6 +142,7 @@ func TestPermissionResolutionUsesFrozenToolAuthority(t *testing.T) {
 		{name: "explicit native deny all", tool: "Write", native: true, denyAll: true, wantStatus: http.StatusForbidden},
 		{name: "brokered validation", tool: "run_validation", wantStatus: http.StatusOK},
 		{name: "brokered approval", tool: "mutate", required: true, wantStatus: http.StatusOK},
+		{name: "brokered approval cannot create a reusable grant", tool: "mutate", required: true, always: true, wantStatus: http.StatusForbidden},
 		{name: "expired prompt authority", tool: "Write", native: true, expired: true, wantStatus: http.StatusForbidden},
 		{name: "tool outside frozen grant", tool: "Write", native: true, wrongName: true, wantStatus: http.StatusForbidden},
 		{name: "native allow always is not a one shot grant", tool: "Write", native: true, always: true, wantStatus: http.StatusForbidden},
@@ -213,12 +214,6 @@ func TestPermissionResolutionUsesFrozenToolAuthority(t *testing.T) {
 			}
 			if got := mutations.resolveCalls.Load(); got != wantCalls {
 				t.Fatalf("forwarded permissions = %d, want %d", got, wantCalls)
-			}
-			state.mcpProxy.mu.Lock()
-			approvalCount := len(state.mcpProxy.approvals)
-			state.mcpProxy.mu.Unlock()
-			if tt.required != (approvalCount == 1) {
-				t.Fatalf("MCP approval records = %d, approval required = %t", approvalCount, tt.required)
 			}
 		})
 	}

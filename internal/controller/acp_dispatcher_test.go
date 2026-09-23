@@ -5546,6 +5546,15 @@ func TestFrozenMCPPermissionDecisionAllowsGrantedToolsOnce(t *testing.T) {
 			permission: &harnessv2.PermissionRequestedEvent{
 				ToolName: "lookup", Options: options,
 			},
+			want: harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: "allow-once"},
+		},
+		{
+			name:     "provider-native tool cannot borrow brokered approval",
+			policy:   providerNativePolicy,
+			approval: harnessv2.MCPApprovalPolicy{RequiredTools: []string{providerNativeToolRead}},
+			permission: &harnessv2.PermissionRequestedEvent{
+				ToolName: providerNativeToolRead, Options: options,
+			},
 			want: harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: "reject-once"},
 		},
 		{
@@ -5725,7 +5734,7 @@ func TestRenewPromptLeaseLoopRetriesTransientFailures(t *testing.T) {
 		defer close(done)
 		(&ACPDispatcher{}).renewPromptLeaseLoop(
 			ctx, admitted, cancelRuntime, runtimeClient, "runtime-session-renew-g1", task, fence, lease, authorization,
-			harnessv2.DefaultProtocolLimits(),
+			harnessv2.DefaultProtocolLimits(), nil,
 		)
 	}()
 	select {
@@ -5826,7 +5835,7 @@ func TestRenewPromptLeaseLoopStopsWithoutCancelWhenPromptSettled(t *testing.T) {
 		defer close(done)
 		(&ACPDispatcher{}).renewPromptLeaseLoop(
 			ctx, admitted, cancelRuntime, runtimeClient, "runtime-session-renew-settled-g1", task, fence, lease, authorization,
-			harnessv2.DefaultProtocolLimits(),
+			harnessv2.DefaultProtocolLimits(), nil,
 		)
 	}()
 	select {
@@ -5853,7 +5862,7 @@ func TestRenewPromptLeaseLoopStopsWhileWaitingForAdmission(t *testing.T) {
 		defer close(done)
 		(&ACPDispatcher{}).renewPromptLeaseLoop(
 			ctx, admitted, func() { cancelled <- struct{}{} }, nil, "", &corev1alpha1.Task{}, harnessv2.Fence{},
-			harnessv2.PromptLease{}, harnessv2.PromptMCPAuthorization{}, harnessv2.ProtocolLimits{},
+			harnessv2.PromptLease{}, harnessv2.PromptMCPAuthorization{}, harnessv2.ProtocolLimits{}, nil,
 		)
 	}()
 	cancel()
