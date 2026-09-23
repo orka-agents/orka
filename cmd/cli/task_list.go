@@ -74,7 +74,7 @@ With --watch the table is reprinted whenever a Task appears or changes phase.`,
 				fmt.Fprint(cmd.OutOrStdout(), renderTaskListTable(tasks)) //nolint:errcheck
 				return nil
 			}
-			return watchLoop(ctx, cmd.OutOrStdout(), opts.interval, format, func(ctx context.Context) (watchFrame, error) {
+			_, err = watchLoop(ctx, cmd.OutOrStdout(), opts.interval, format, func(ctx context.Context) (watchFrame, error) {
 				tasks, err := fetchTaskList(ctx, c, opts, since)
 				if err != nil {
 					return watchFrame{}, err
@@ -91,6 +91,7 @@ With --watch the table is reprinted whenever a Task appears or changes phase.`,
 				frame.Text = renderTaskListTable(tasks)
 				return frame, nil
 			})
+			return err
 		},
 	}
 

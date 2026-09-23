@@ -142,14 +142,14 @@ the list, and exits 0. It exits non-zero if the task finishes first
 
 // watchForApproval polls the task's approvals until one is pending, then
 // prints the list once. A task that finishes first is an error, because no
-// request is coming; a --timeout deadline is an error too. An interrupt is
-// not. The task's phase is checked on every poll, before a pending request
-// is accepted: the server keeps reporting a request as pending after the
-// task finishes, but refuses decisions on it, so it is not actionable.
+// request is coming; a --timeout deadline that elapses before the list is
+// printed is an error too. An interrupt is not. The task's phase is checked
+// on every poll, before a pending request is accepted: the server keeps
+// reporting a request as pending after the task finishes, but refuses
+// decisions on it, so it is not actionable.
 func watchForApproval(ctx context.Context, cmd *cobra.Command, c *client.Client, task, path, format string, wide bool, interval time.Duration) error {
-	found := false
 	waiting := false
-	err := watchLoop(ctx, cmd.OutOrStdout(), interval, format, func(ctx context.Context) (watchFrame, error) {
+	done, err := watchLoop(ctx, cmd.OutOrStdout(), interval, format, func(ctx context.Context) (watchFrame, error) {
 		result, err := c.DoJSON(ctx, http.MethodGet, path, nil, nil)
 		if err != nil {
 			return watchFrame{}, err
@@ -168,7 +168,6 @@ func watchForApproval(ctx context.Context, cmd *cobra.Command, c *client.Client,
 			}
 			return watchFrame{}, nil
 		}
-		found = true
 		var buf bytes.Buffer
 		if format != outputTable {
 			if err := printStructuredTo(&buf, format, result); err != nil {
@@ -182,7 +181,7 @@ func watchForApproval(ctx context.Context, cmd *cobra.Command, c *client.Client,
 	if err != nil {
 		return err
 	}
-	if !found && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+	if !done && errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return fmt.Errorf("timed out waiting for task %s to request approval", task)
 	}
 	return nil

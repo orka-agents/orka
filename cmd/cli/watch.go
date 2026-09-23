@@ -49,11 +49,12 @@ func watchSeparator(format string) func() string {
 
 // watchLoop reprints a view whenever its state key changes, with a
 // format-aware separator between frames, until the view reports it is done
-// or the user interrupts with Ctrl-C. An interrupt is not an error. A frame
-// the view rendered successfully is printed even if the context ended while
-// it was being rendered, so a caller that saw its final frame returned can
-// rely on it having been shown.
-func watchLoop(ctx context.Context, out io.Writer, interval time.Duration, format string, render watchRender) error {
+// or the user interrupts with Ctrl-C. It reports whether the view finished
+// on its own; an interrupt or an ended context is not an error. A frame
+// rendered after the context ended is dropped, the way orka task wait
+// rejects a success that lands after its deadline, so done means the final
+// frame was printed.
+func watchLoop(ctx context.Context, out io.Writer, interval time.Duration, format string, render watchRender) (bool, error) {
 	separator := watchSeparator(format)
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -67,16 +68,16 @@ func watchLoop(ctx context.Context, out io.Writer, interval time.Duration, forma
 	first := true
 	for {
 		frame, err := render(ctx)
+		if ctx.Err() != nil {
+			return false, nil
+		}
 		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			return err
+			return false, err
 		}
 		if frame.Text == "" && !frame.Done {
 			select {
 			case <-ctx.Done():
-				return nil
+				return false, nil
 			case <-ticker.C:
 			}
 			continue
@@ -93,11 +94,11 @@ func watchLoop(ctx context.Context, out io.Writer, interval time.Duration, forma
 			first = false
 		}
 		if frame.Done {
-			return nil
+			return true, nil
 		}
 		select {
 		case <-ctx.Done():
-			return nil
+			return false, nil
 		case <-ticker.C:
 		}
 	}

@@ -71,7 +71,7 @@ exits when the scan finishes: exit code 0 when it succeeded, 1 when it failed.`,
 				return nil
 			}
 			var final map[string]any
-			err = watchLoop(ctx, cmd.OutOrStdout(), interval, format, func(ctx context.Context) (watchFrame, error) {
+			_, err = watchLoop(ctx, cmd.OutOrStdout(), interval, format, func(ctx context.Context) (watchFrame, error) {
 				progress, err := fetch(ctx)
 				if err != nil {
 					return watchFrame{}, err
