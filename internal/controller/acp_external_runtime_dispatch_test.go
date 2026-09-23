@@ -423,7 +423,15 @@ func newExternalRuntimeStatusProxy(
 		response.Header.Del("Content-Length")
 		return nil
 	}
-	server := httptest.NewServer(proxy)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Acceptance can flush before the transport's final request-body EOF
+		// check. Keep HTTP/1 from closing that shared body during the flush.
+		if err := http.NewResponseController(w).EnableFullDuplex(); err != nil {
+			t.Errorf("enable full-duplex status proxy: %v", err)
+			return
+		}
+		proxy.ServeHTTP(w, r)
+	}))
 	t.Cleanup(server.Close)
 	return server
 }
@@ -458,7 +466,15 @@ func newExternalRuntimeCapabilitiesProxy(
 		response.Header.Del("Content-Length")
 		return nil
 	}
-	server := httptest.NewServer(proxy)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// This wrapper also forwards prompt streams; flushing acceptance must
+		// not close the transport's shared request body before its EOF check.
+		if err := http.NewResponseController(w).EnableFullDuplex(); err != nil {
+			t.Errorf("enable full-duplex capabilities proxy: %v", err)
+			return
+		}
+		proxy.ServeHTTP(w, r)
+	}))
 	t.Cleanup(server.Close)
 	return server
 }
@@ -2239,7 +2255,7 @@ func TestACPDispatcherExternalRecoveryFailsClosedWhenAgentRuntimeIsMissing(t *te
 	}
 }
 
-func TestACPDispatcherExternalRecoveryHandlesReplacementWithoutObservedCapabilities(t *testing.T) {
+func TestACPDispatcherExternalRecoveryFailsClosedForReplacementWithoutObservedCapabilities(t *testing.T) {
 	fixture := newExternalACPDispatchFixture(t)
 	task := fixture.queueTask(t, "external-recovery-replacement", types.UID("external-recovery-replacement-uid"), "recover", nil)
 	current := &corev1alpha1.Task{}
@@ -2268,17 +2284,17 @@ func TestACPDispatcherExternalRecoveryHandlesReplacementWithoutObservedCapabilit
 	}
 
 	ready, err := fixture.dispatcher.cleanupRecoveredTaskScopedRuntimeSession(fixture.ctx, current)
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, store.ErrConflict) || ready {
+		t.Fatalf("cleanup with replacement AgentRuntime = ready %t, error %v, want identity conflict", ready, err)
 	}
-	if !ready {
-		t.Fatal("replacement AgentRuntime without observed capabilities did not complete obsolete cleanup")
+	if fixture.deleteCalls.Load() != 0 {
+		t.Fatal("replacement AgentRuntime authorized a runtime session DELETE")
 	}
 	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(current), current); err != nil {
 		t.Fatal(err)
 	}
-	if current.Status.Execution.RuntimeSessionCleanupDigest == "" {
-		t.Fatal("replacement AgentRuntime cleanup did not record its completion receipt")
+	if current.Status.Execution.RuntimeSessionCleanupDigest != "" {
+		t.Fatal("replacement AgentRuntime authorized a cleanup receipt")
 	}
 }
 

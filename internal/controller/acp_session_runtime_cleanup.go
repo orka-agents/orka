@@ -36,11 +36,12 @@ type sessionRuntimeCleanupTarget struct {
 }
 
 // sessionRuntimeCleanupFence separates the current cleanup owner from the
-// immutable terminal turn's resident runtime. Only Session teardown may use
-// this older runtime epoch; it grants no admission or publication authority.
+// immutable terminal execution's resident runtime. Cleanup may use this older
+// runtime epoch; it grants no admission or publication authority.
 type sessionRuntimeCleanupFence struct {
 	controller   store.ControllerEpochFence
 	runtimeEpoch uint64
+	validateTask func(context.Context) error
 }
 
 func (d *ACPDispatcher) externalRuntimeCleanupEpoch(ctx context.Context, cleanup *sessionRuntimeCleanupFence) (uint64, error) {
@@ -68,6 +69,11 @@ func (d *ACPDispatcher) externalRuntimeCleanupEpoch(ctx context.Context, cleanup
 	}
 	if authoritative != cleanup.controller {
 		return 0, fmt.Errorf("%w: Session runtime cleanup controller lost authority", store.ErrConflict)
+	}
+	if cleanup.validateTask != nil {
+		if err := cleanup.validateTask(ctx); err != nil {
+			return 0, err
+		}
 	}
 	return cleanup.runtimeEpoch, nil
 }

@@ -122,6 +122,10 @@ const (
 	defaultWorkspaceDeltaUploadBytes      int64 = 100 << 20
 )
 
+// EnvFoundryRecoveryProfileDigest opts a qualified Foundry broker and controller
+// into the recovery wire contract independently of brokered tool approvals.
+const EnvFoundryRecoveryProfileDigest = "ORKA_ACP_FOUNDRY_RECOVERY_PROFILE_DIGEST"
+
 //nolint:gocyclo // Keep environment defaults, overrides, and derived runtime limits together.
 func LoadConfigFromEnv() (Config, error) {
 	providerKind := requiredEnv(EnvProvider)
@@ -161,6 +165,20 @@ func LoadConfigFromEnv() (Config, error) {
 	profileDigest, err := harnessv2.CanonicalProfileDigest(profile)
 	if err != nil {
 		return Config{}, err
+	}
+	providerCaps := providerCapabilities(providerKind, model)
+	foundryRecovery := false
+	if qualifiedDigest := strings.TrimSpace(os.Getenv(EnvFoundryRecoveryProfileDigest)); qualifiedDigest != "" {
+		if providerKind != providerKindFoundry {
+			return Config{}, fmt.Errorf("%s is unsupported for provider %q", EnvFoundryRecoveryProfileDigest, providerKind)
+		}
+		if err := harnessv2.ValidateProfileDigest(harnessv2.ProfileDigest(qualifiedDigest)); err != nil {
+			return Config{}, fmt.Errorf("%s: %w", EnvFoundryRecoveryProfileDigest, err)
+		}
+		if qualifiedDigest != string(profileDigest) {
+			return Config{}, fmt.Errorf("%s does not match runtime profile digest", EnvFoundryRecoveryProfileDigest)
+		}
+		foundryRecovery = true
 	}
 	limits := defaultProtocolLimits()
 	durableWorkspaceKey := strings.TrimSpace(os.Getenv(EnvDurableWorkspaceKey))
@@ -273,7 +291,8 @@ func LoadConfigFromEnv() (Config, error) {
 		RuntimeProfileDigest: profileDigest, ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
 		AdapterDigests: profile.AdapterDigests, Limits: limits, SupportsDrain: true, SupportsPublicationFinalization: true,
 		SupportsAgentSessionConfiguration: !isExternalACPProvider(providerKind),
-		Provider:                          providerCapabilities(providerKind, model),
+		SupportsFoundryRecovery:           foundryRecovery,
+		Provider:                          providerCaps,
 		WorkspaceGovernance:               harnessv2.StrictWorkspaceGovernanceCapabilities(),
 	}
 	cfg := Config{

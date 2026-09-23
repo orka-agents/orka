@@ -1673,6 +1673,7 @@ func (d *ACPDispatcher) reconcileRecoveredRuntimeSession(
 	sessionCleanup *sessionRuntimeCleanupFence,
 ) (bool, error) {
 	sessionDeletion := sessionCleanup != nil
+	runtimeCleanup := sessionCleanup
 	if runtimeSessionCleanupCompleteForUID(task, taskUID) {
 		return true, nil
 	}
@@ -1762,12 +1763,11 @@ func (d *ACPDispatcher) reconcileRecoveredRuntimeSession(
 				return false, fmt.Errorf("%w: Session AgentRuntime cleanup identity changed", store.ErrConflict)
 			}
 			if !deleteAfterSettlement {
+				// Durable terminal settlement can proceed without contacting the
+				// replacement. Runtime retirement still requires its own proof.
 				return true, nil
 			}
-			if markErr := d.markTaskScopedRuntimeSessionCleanupComplete(ctx, task, taskUID, execution.RuntimeInstanceID, execution.RuntimeSessionUID, execution.RuntimeSessionGeneration); markErr != nil {
-				return false, markErr
-			}
-			return true, nil
+			return false, fmt.Errorf("%w: external AgentRuntime cleanup identity changed", store.ErrConflict)
 		}
 		frozenRuntime, frozenProfile, frozenMCPConfiguration, err := d.verifiedExternalRuntimeRecoveryTarget(ctx, task, taskUID, runtime)
 		if err != nil {
@@ -1798,8 +1798,15 @@ func (d *ACPDispatcher) reconcileRecoveredRuntimeSession(
 			return false, err
 		}
 		expectedRuntimeEpoch := uint64(currentFence.Epoch)
-		if sessionCleanup != nil {
-			expectedRuntimeEpoch, err = d.externalRuntimeCleanupEpoch(ctx, sessionCleanup)
+		if runtimeCleanup == nil && deleteAfterSettlement &&
+			(endpointRotated || observed.ControllerEpoch != currentFence.Epoch) {
+			runtimeCleanup, err = d.standaloneRuntimeCleanupFence(ctx, task, taskUID, currentFence)
+			if err != nil {
+				return false, err
+			}
+		}
+		if runtimeCleanup != nil {
+			expectedRuntimeEpoch, err = d.externalRuntimeCleanupEpoch(ctx, runtimeCleanup)
 			if err != nil {
 				return false, err
 			}
@@ -1819,13 +1826,13 @@ func (d *ACPDispatcher) reconcileRecoveredRuntimeSession(
 			runtimeClient, runtimeFence, err = d.externalRuntimeRotatedEndpointCleanupClient(
 				ctx, runtime, frozenRuntime, profileDigest, frozenRuntime.Limits,
 				harnessv2.RuntimeInstanceID(execution.RuntimeInstanceID),
-				harnessv2.SupervisorBootID(execution.RuntimeSessionSupervisorBootID), sessionCleanup,
+				harnessv2.SupervisorBootID(execution.RuntimeSessionSupervisorBootID), runtimeCleanup,
 			)
 		} else {
 			runtimeClient, runtimeFence, err = d.externalRuntimeCleanupClient(
 				ctx, runtime, frozenRuntime, profileDigest, frozenRuntime.Limits,
 				harnessv2.RuntimeInstanceID(execution.RuntimeInstanceID),
-				harnessv2.SupervisorBootID(execution.RuntimeSessionSupervisorBootID), sessionCleanup,
+				harnessv2.SupervisorBootID(execution.RuntimeSessionSupervisorBootID), runtimeCleanup,
 			)
 		}
 		if err != nil {
@@ -1856,7 +1863,7 @@ func (d *ACPDispatcher) reconcileRecoveredRuntimeSession(
 	if statusErr != nil {
 		return false, statusErr
 	}
-	if sessionDeletion {
+	if runtimeCleanup != nil {
 		if err := validateSessionRuntimeCleanupStatus(runtimeFence, status); err != nil {
 			return false, err
 		}
@@ -1871,9 +1878,7 @@ func (d *ACPDispatcher) reconcileRecoveredRuntimeSession(
 		if !deleteAfterSettlement || sessionDeletion {
 			return true, nil
 		}
-		if markErr := d.markTaskScopedRuntimeSessionCleanupComplete(
-			ctx, task, taskUID, execution.RuntimeInstanceID, execution.RuntimeSessionUID, execution.RuntimeSessionGeneration,
-		); markErr != nil {
+		if markErr := d.markRecoveredRuntimeCleanupComplete(ctx, task, taskUID, runtimeCleanup); markErr != nil {
 			return false, markErr
 		}
 		return true, nil
@@ -1934,9 +1939,7 @@ func (d *ACPDispatcher) reconcileRecoveredRuntimeSession(
 		}
 		return true, nil
 	}
-	if err := d.markTaskScopedRuntimeSessionCleanupComplete(
-		ctx, task, taskUID, execution.RuntimeInstanceID, execution.RuntimeSessionUID, execution.RuntimeSessionGeneration,
-	); err != nil {
+	if err := d.markRecoveredRuntimeCleanupComplete(ctx, task, taskUID, runtimeCleanup); err != nil {
 		return false, err
 	}
 	return true, nil

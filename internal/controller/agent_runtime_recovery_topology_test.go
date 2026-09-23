@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"testing"
 
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/harness/v2/conformance/conformancetest"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -150,7 +151,13 @@ func configureFoundryRuntimeRecoveryFixture(t *testing.T, f *runtimeRecoveryFixt
 	f.rs.Spec.Template = *deployment.Spec.Template.DeepCopy()
 	f.rs.Spec.Template.Labels[appsv1.DefaultDeploymentUniqueLabelKey] = "hash-1"
 	f.pod.Spec = *deployment.Spec.Template.Spec.DeepCopy()
-	f.slice.Ports[0].Port = new(runtimeRecoveryServerPort(t, f.server.URL()))
+	statusProxy := newExternalRuntimeStatusProxy(t, f.server.URL(), func(status *harnessv2.StatusResponse) {
+		status.FoundryBroker = testFoundryRecoveryBrokerIdentity()
+	})
+	capabilitiesProxy := newExternalRuntimeCapabilitiesProxy(t, statusProxy.URL, func(capabilities *harnessv2.CapabilitiesResponse) {
+		capabilities.SupportsFoundryRecovery = true
+	})
+	f.slice.Ports[0].Port = new(runtimeRecoveryServerPort(t, capabilitiesProxy.URL))
 	for _, object := range []client.Object{deployment, f.rs, f.pod, f.slice} {
 		if err := f.r.Update(t.Context(), object); err != nil {
 			t.Fatal(err)
@@ -162,6 +169,13 @@ func configureFoundryRuntimeRecoveryFixture(t *testing.T, f *runtimeRecoveryFixt
 	f.pod.Status.ContainerStatuses = append(f.pod.Status.ContainerStatuses, status)
 	if err := f.r.Status().Update(t.Context(), f.pod); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func testFoundryRecoveryBrokerIdentity() *harnessv2.FoundryBrokerIdentity {
+	return &harnessv2.FoundryBrokerIdentity{
+		Protocol:             harnessv2.FoundryBrokerProtocol,
+		LedgerIdentityDigest: testControllerDigest("foundry-ledger"), AgentConfigurationDigest: testControllerDigest("foundry-agent"),
 	}
 }
 

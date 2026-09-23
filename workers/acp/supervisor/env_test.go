@@ -554,7 +554,8 @@ func TestLoadConfigFromEnv(t *testing.T) {
 		EnvControllerTokenFile: controllerToken, EnvCapabilitySecretFile: capabilitySecret, EnvProviderTokenFile: providerToken,
 		EnvMCPBrokerURL: "http://orka-controller.orka-system.svc:8080", EnvTrustNamespace: "default",
 		EnvSessionBaseDir: filepath.Join(dir, "sessions"), EnvFirstSessionUID: "20000", EnvLastSessionUID: "20010", EnvSessionGID: "20000",
-		EnvE2EPromptWriteAmbiguity: testE2EPromptWriteAmbiguityMarker,
+		EnvE2EPromptWriteAmbiguity:      testE2EPromptWriteAmbiguityMarker,
+		EnvFoundryRecoveryProfileDigest: "",
 	}
 	for name, value := range values {
 		t.Setenv(name, value)
@@ -639,6 +640,69 @@ func TestLoadConfigFromEnv(t *testing.T) {
 		agentKitCfg.Capabilities.Provider.SupportsEmbeddedResources ||
 		agentKitCfg.Capabilities.Provider.SupportsPermissions || !agentKitCfg.Capabilities.Provider.SupportsTools {
 		t.Fatalf("unexpected AgentKit provider capabilities: %#v", agentKitCfg.Capabilities.Provider)
+	}
+
+	t.Run("exact profile Foundry recovery qualification", testLoadConfigFromEnvFoundryRecoveryQualification)
+}
+
+func testLoadConfigFromEnvFoundryRecoveryQualification(t *testing.T) {
+	t.Setenv(EnvProvider, providerKindFoundry)
+	t.Setenv(EnvFoundryAdapterDigest, testDigest("foundry-adapter"))
+	baseline, err := LoadConfigFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baseline.Capabilities.SupportsFoundryRecovery {
+		t.Fatal("Foundry recovery was advertised without qualification")
+	}
+	digest := string(baseline.Fence.RuntimeProfileDigest)
+	t.Run("matching recovery qualification", func(t *testing.T) {
+		t.Setenv(EnvFoundryRecoveryProfileDigest, digest)
+		cfg, err := LoadConfigFromEnv()
+		if err != nil || !cfg.Capabilities.SupportsFoundryRecovery {
+			t.Fatalf("recovery qualification was rejected: %v", err)
+		}
+	})
+	for _, test := range []struct{ name, value string }{
+		{"malformed", "not-a-digest"},
+		{"invalid hex", "sha256:" + strings.Repeat("g", 64)},
+		{"mismatched", testDigest("another-profile")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(EnvFoundryRecoveryProfileDigest, test.value)
+			if _, err := LoadConfigFromEnv(); err == nil || !strings.Contains(err.Error(), EnvFoundryRecoveryProfileDigest) {
+				t.Fatalf("invalid recovery qualification startup error = %v", err)
+			}
+		})
+	}
+	for _, test := range []struct{ name, variable, value string }{
+		{"adapter drift", EnvFoundryAdapterDigest, testDigest("different-adapter")},
+		{"configuration drift", EnvAgentConfigurationDigest, testDigest("different-config")},
+		{"model drift", EnvModel, "different-model"},
+		{"policy drift", EnvApprovalPolicyDigest, testDigest("different-policy")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(EnvFoundryRecoveryProfileDigest, digest)
+			t.Setenv(test.variable, test.value)
+			if _, err := LoadConfigFromEnv(); err == nil || !strings.Contains(err.Error(), "does not match runtime profile digest") {
+				t.Fatalf("changed profile retained recovery qualification: %v", err)
+			}
+		})
+	}
+	for _, provider := range []string{providerKindAgentKit, providerKindCodex, providerKindClaude, providerKindCopilot, providerKindOpencode} {
+		t.Run("unsupported "+provider, func(t *testing.T) {
+			t.Setenv(EnvProvider, provider)
+			t.Setenv(EnvAgentKitAdapterDigest, testAgentKitAdapterDigest)
+			if provider == providerKindOpencode {
+				t.Setenv(EnvModel, "openai/gpt-test")
+				t.Setenv(EnvModelContextLimit, "128000")
+				t.Setenv(EnvModelOutputLimit, "16000")
+			}
+			t.Setenv(EnvFoundryRecoveryProfileDigest, digest)
+			if _, err := LoadConfigFromEnv(); err == nil || !strings.Contains(err.Error(), EnvFoundryRecoveryProfileDigest+" is unsupported for provider") {
+				t.Fatalf("unsupported provider recovery startup error = %v", err)
+			}
+		})
 	}
 }
 
