@@ -452,6 +452,15 @@ func TestTaskApprovalsWatchRejectsAPendingRequestOnADeletingTask(t *testing.T) {
 			}
 		})
 	}
+	t.Run("a finished task names its phase even while deleting", func(t *testing.T) {
+		srv := approvalsWatchServerFull(t, "Succeeded", true, true, func(int) []map[string]any { return pending }, nil)
+		defer srv.Close()
+
+		_, err := runCLI(t, srv.URL, "task", "approvals", "fibey", "--watch", "--interval", "10ms")
+		if err == nil || !strings.Contains(err.Error(), "Succeeded") || strings.Contains(err.Error(), "being deleted") {
+			t.Fatalf("error = %v, want the terminal phase", err)
+		}
+	})
 }
 
 func TestTaskApprovalsWatchHonoursTimeout(t *testing.T) {

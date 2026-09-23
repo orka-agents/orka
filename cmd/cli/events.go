@@ -163,11 +163,11 @@ func watchForApproval(ctx context.Context, cmd *cobra.Command, c *client.Client,
 		if err != nil {
 			return watchFrame{}, err
 		}
-		if state.deleting {
-			return watchFrame{}, fmt.Errorf("task %s is being deleted; no approval request can be decided", task)
-		}
 		if taskPhaseIsTerminal(state.phase) {
 			return watchFrame{}, fmt.Errorf("task %s finished with phase %s; no approval request can be decided", task, state.phase)
+		}
+		if state.deleting {
+			return watchFrame{}, fmt.Errorf("task %s is being deleted; no approval request can be decided", task)
 		}
 		if !hasPendingApproval(result) {
 			if !waiting {
