@@ -283,6 +283,11 @@ func (c *e2eCleanup) tasks(ctx context.Context, taskNames []string, allSessions 
 			return safeCleanupError("read Task", err)
 		}
 		record := &e2eTaskCleanupEvidence{Name: name, Namespace: namespace, UID: task.UID}
+		if task.Status.Execution != nil && task.Status.Execution.RuntimeSessionUID != "" {
+			// An admitted Task must prove runtime cleanup even if it later
+			// loses its execution status; never downgrade it to non-ACP.
+			record.ReceiptRequired = true
+		}
 		c.report.Tasks = append(c.report.Tasks, record)
 		if err := c.observeTask(ctx, task, record); err != nil {
 			return err
