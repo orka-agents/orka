@@ -101,10 +101,10 @@ func newMemoryGetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printStructured(cmd, result)
+			return printDescribed(cmd, result, memoryDescribeRows)
 		},
 	}
-	addOutputFlag(cmd, outputJSON)
+	addOutputFlag(cmd, outputTable)
 	return cmd
 }
 
@@ -305,10 +305,10 @@ func newMemoryProposalGetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printStructured(cmd, result)
+			return printDescribed(cmd, result, memoryProposalDescribeRows)
 		},
 	}
-	addOutputFlag(cmd, outputJSON)
+	addOutputFlag(cmd, outputTable)
 	return cmd
 }
 

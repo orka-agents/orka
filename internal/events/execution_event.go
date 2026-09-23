@@ -147,6 +147,27 @@ func IsTerminalApprovalEventType(value string) bool {
 	return ok
 }
 
+// ExecutionEventTypes returns every known execution event type in
+// declaration order, for help text and completion.
+func ExecutionEventTypes() []string {
+	return append([]string(nil), executionEventTypes...)
+}
+
+// CanonicalExecutionEventType maps a case-insensitive spelling of a known
+// event type to its canonical name. Unknown values return "".
+func CanonicalExecutionEventType(value string) string {
+	value = strings.TrimSpace(value)
+	if IsValidExecutionEventType(value) {
+		return value
+	}
+	for _, known := range executionEventTypes {
+		if strings.EqualFold(known, value) {
+			return known
+		}
+	}
+	return ""
+}
+
 // IsValidExecutionEventType reports whether value is a known execution event type.
 func IsValidExecutionEventType(value string) bool {
 	_, ok := validExecutionEventTypes[strings.TrimSpace(value)]

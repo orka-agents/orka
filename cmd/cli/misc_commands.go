@@ -24,10 +24,10 @@ func newAuthCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printStructured(cmd, result)
+			return printDescribed(cmd, result, flatDescribeRows)
 		},
 	}
-	addOutputFlag(validate, outputJSON)
+	addOutputFlag(validate, outputTable)
 	whoami := &cobra.Command{
 		Use:   "whoami",
 		Short: "Show sanitized authenticated identity",
@@ -37,10 +37,10 @@ func newAuthCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printStructured(cmd, result)
+			return printDescribed(cmd, result, whoamiDescribeRows)
 		},
 	}
-	addOutputFlag(whoami, outputJSON)
+	addOutputFlag(whoami, outputTable)
 	cmd.AddCommand(validate, whoami)
 	return cmd
 }
@@ -82,10 +82,10 @@ func newWorkspaceCmd() *cobra.Command {
 				return err
 			}
 			status := safeWorkspaceStatus(*detail)
-			return printStructured(cmd, status)
+			return printDescribed(cmd, status, workspaceStatusRows)
 		},
 	}
-	addOutputFlag(status, outputJSON)
+	addOutputFlag(status, outputTable)
 	cmd.AddCommand(status)
 	return cmd
 }

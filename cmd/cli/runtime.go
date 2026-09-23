@@ -25,6 +25,7 @@ func newAgentRuntimeCmd() *cobra.Command {
 		BasePath:     "/api/v1/agent-runtimes",
 		Name:         "agent runtime",
 		TablePrinter: printAgentRuntimeTable,
+		DescribeRows: agentRuntimeDescribeRows,
 	})
 }
 

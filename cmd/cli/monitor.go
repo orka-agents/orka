@@ -34,10 +34,11 @@ const (
 
 func newMonitorCmd() *cobra.Command {
 	cmd := newCRUDResourceCmd(crudResourceSpec{
-		Use:      "monitor",
-		Short:    "Manage repository monitors",
-		BasePath: "/api/v1/monitors/repositories",
-		Name:     "repository monitor",
+		Use:          "monitor",
+		Short:        "Manage repository monitors",
+		BasePath:     "/api/v1/monitors/repositories",
+		Name:         "repository monitor",
+		DescribeRows: monitorDescribeRows,
 	})
 	cmd.AddCommand(newMonitorRunCmd())
 	cmd.AddCommand(newMonitorRunsCmd())

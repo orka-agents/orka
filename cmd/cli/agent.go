@@ -99,10 +99,10 @@ func newAgentGetCmd() *cobra.Command {
 				return err
 			}
 
-			return printStructured(cmd, agent)
+			return printDescribed(cmd, agent, agentDescribeRows)
 		},
 	}
-	addOutputFlag(cmd, outputJSON)
+	addOutputFlag(cmd, outputTable)
 	return cmd
 }
 

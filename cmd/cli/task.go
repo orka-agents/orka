@@ -20,7 +20,6 @@ import (
 	"sort"
 	"strings"
 	"syscall"
-	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -301,89 +300,6 @@ func newTaskCreateCmd() *cobra.Command {
 	return cmd
 }
 
-func newTaskListCmd() *cobra.Command {
-	var status string
-	var transactionID string
-	var limit int
-	var continueToken string
-
-	cmd := &cobra.Command{
-		Use:     cliListUse,
-		Aliases: []string{"ls"},
-		Short:   "List tasks",
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			c := newClientFromCmd(cmd)
-			var tasks []client.TaskSummary
-			if status != "" || transactionID != "" {
-				var truncated bool
-				var err error
-				tasks, truncated, err = listFilteredTasks(
-					context.Background(),
-					c,
-					c.Namespace,
-					limit,
-					func(t client.TaskSummary) bool {
-						if status != "" && !strings.EqualFold(t.Phase, status) {
-							return false
-						}
-						if transactionID != "" && t.TransactionID != transactionID {
-							return false
-						}
-						return true
-					},
-				)
-				if err != nil {
-					return err
-				}
-				if truncated {
-					warnFilteredTaskOutputLimited(limit)
-				}
-			} else {
-				var err error
-				tasks, err = c.ListTasks(context.Background(), client.ListTasksOptions{
-					Namespace: c.Namespace,
-					Limit:     limit,
-					Continue:  continueToken,
-				})
-				if err != nil {
-					return err
-				}
-			}
-
-			format, err := outputFormat(cmd)
-			if err != nil {
-				return err
-			}
-			if format != outputTable {
-				return printStructured(cmd, tasks)
-			}
-
-			if len(tasks) == 0 {
-				fmt.Println("No tasks found.")
-				return nil
-			}
-
-			w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-			fmt.Fprintln(w, "NAME\tTYPE\tSTATUS\tAGE") //nolint:errcheck
-			for _, t := range tasks {
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", t.Name, t.Type, t.Phase, formatAge(t.Age)) //nolint:errcheck
-			}
-			w.Flush() //nolint:errcheck
-			return nil
-		},
-	}
-
-	cmd.Flags().StringVar(&status, "status", "", "Filter by status (client-side scan; may page through many tasks)")
-	_ = cmd.RegisterFlagCompletionFunc("status", completeTaskStatus)
-	cmd.Flags().StringVar(&transactionID, "transaction", "", "Filter by transaction ID (client-side scan)")
-	cmd.Flags().IntVar(&limit, "limit", 20, "Maximum number of results")
-	cmd.Flags().StringVar(&continueToken, "continue", "", "Continue token for the next page")
-	cmd.Flags().StringVar(&continueToken, "cursor", "", "Cursor token for the next page")
-	addOutputFlag(cmd, outputTable)
-
-	return cmd
-}
-
 func newTaskGetCmd() *cobra.Command {
 	var showTransaction bool
 
@@ -414,12 +330,28 @@ func newTaskGetCmd() *cobra.Command {
 				return nil
 			}
 
-			return printStructured(cmd, detail)
+			format, err := outputFormat(cmd)
+			if err != nil {
+				return err
+			}
+			if format != outputTable {
+				return printStructured(cmd, detail)
+			}
+			view := toGenericMap(detail)
+			// The readable view shows the first lines of the stored result;
+			// it lives behind a separate endpoint, so fetch it only for this
+			// view and only when the Task reports one.
+			if len(nestedMap(view, "status", "resultRef")) > 0 {
+				if result, err := c.GetTaskResult(context.Background(), args[0], client.GetOptions{Namespace: c.Namespace}); err == nil && result != nil {
+					view["result"] = result.Result
+				}
+			}
+			return printDescribe(cmd, taskDescribeRows(view))
 		},
 	}
 
 	cmd.Flags().BoolVar(&showTransaction, "show-transaction", false, "Show only transaction metadata")
-	addOutputFlag(cmd, outputJSON)
+	addOutputFlag(cmd, outputTable)
 	return cmd
 }
 
@@ -520,10 +452,10 @@ func newTaskPlanCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printStructured(cmd, result)
+			return printDescribed(cmd, result, planDescribeRows)
 		},
 	}
-	addOutputFlag(cmd, outputJSON)
+	addOutputFlag(cmd, outputTable)
 	return cmd
 }
 

@@ -25,6 +25,19 @@ spec:
     - jsonPath: .status.providerRef.name
       name: Provider
       type: string
+    - jsonPath: .spec.lifecycle.defaultOnDetach
+      name: On Detach
+      type: string
+    - jsonPath: .spec.lifecycle.idleTimeout
+      name: Idle Timeout
+      type: string
+    - jsonPath: .spec.lifecycle.maxLifetime
+      name: Max Lifetime
+      type: string
+    - jsonPath: .spec.lifecycle.detachTimeout
+      name: Detach Timeout
+      priority: 1
+      type: string
     - jsonPath: .status.conditions[?(@.type=="Ready")].status
       name: Ready
       type: string

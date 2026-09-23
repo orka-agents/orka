@@ -912,6 +912,63 @@ func (h *Handlers) ListSecurityScanRuns(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{apiFieldItems: runs, apiFieldMetadata: fiber.Map{commandIntentContinue: next}})
 }
 
+// SecurityScanProgressResponse reports a scan run's per-stage Task counts.
+type SecurityScanProgressResponse struct {
+	Scan     store.ScanRun            `json:"scan"`
+	Stages   []security.StageProgress `json:"stages"`
+	Complete bool                     `json:"complete"`
+}
+
+// GetSecurityScanProgress reports how far one scan run has come, stage by
+// stage. The server lists the run's Tasks by the orka.ai/security-scan-id
+// label under its own identity, so a caller with security read permission
+// can watch progress without permission to list every Task in the namespace.
+func (h *Handlers) GetSecurityScanProgress(c fiber.Ctx) error {
+	if err := h.ensureSecurityStore(); err != nil {
+		return err
+	}
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "getSecurityScanProgress", h.contextTokenAuthorization.SecurityReadScopes); err != nil {
+		return err
+	}
+	scan, err := h.fetchRepositoryScan(c.Context(), namespace, c.Params("name"))
+	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenSecurityScanTask(c, "getSecurityScanProgress", scan, scan.Spec.AnalysisAgentRef); err != nil {
+		return err
+	}
+	scanID := strings.TrimSpace(c.Params("scanID"))
+	run, err := h.securityStore.GetScanRun(c.Context(), namespace, scanID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fiber.NewError(fiber.StatusNotFound, "scan run not found")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get scan run: %v", err))
+	}
+	if run.RepositoryScan != scan.Name || run.Namespace != scan.Namespace {
+		return fiber.NewError(fiber.StatusNotFound, "scan run not found")
+	}
+	var tasks corev1alpha1.TaskList
+	if err := h.client.List(c.Context(), &tasks,
+		client.InNamespace(scan.Namespace),
+		client.MatchingLabels(map[string]string{
+			labels.LabelSecurityTarget: labels.SelectorValue(scan.Name),
+			labels.LabelSecurityScanID: run.ID,
+		}),
+	); err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list scan tasks: %v", err))
+	}
+	return c.JSON(SecurityScanProgressResponse{
+		Scan:     *run,
+		Stages:   security.ScanStageProgress(tasks.Items),
+		Complete: !security.IsActiveScanRunPhase(run.Phase),
+	})
+}
+
 // CreateManualSecurityScan creates and starts a manual scan task.
 func (h *Handlers) CreateManualSecurityScan(c fiber.Ctx) error {
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))

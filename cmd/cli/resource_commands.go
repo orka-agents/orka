@@ -27,6 +27,10 @@ type crudResourceSpec struct {
 	ListFlags    func(*cobra.Command)
 	ListQuery    func(*cobra.Command) map[string]string
 	TablePrinter func(*cobra.Command, any) error
+	// DescribeRows lists the fields `get` prints first in its readable view,
+	// in reading order. A resource without one falls back to name,
+	// namespace, status or phase, and age.
+	DescribeRows func(map[string]any) []describeRow
 }
 
 func newCRUDResourceCmd(spec crudResourceSpec) *cobra.Command {
@@ -109,13 +113,19 @@ func newCRUDGetCmd(spec crudResourceSpec) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if format == outputTable && spec.TablePrinter != nil {
+			if format != outputTable {
+				return printStructured(cmd, result)
+			}
+			if spec.DescribeRows != nil {
+				return printDescribe(cmd, spec.DescribeRows(toGenericMap(result)))
+			}
+			if spec.TablePrinter != nil {
 				return spec.TablePrinter(cmd, result)
 			}
-			return printStructured(cmd, result)
+			return printDescribe(cmd, genericDescribeRows(toGenericMap(result)))
 		},
 	}
-	addOutputFlag(cmd, outputJSON)
+	addOutputFlag(cmd, outputTable)
 	return cmd
 }
 
@@ -213,30 +223,33 @@ func titleName(s string) string {
 
 func newProviderCmd() *cobra.Command {
 	return newCRUDResourceCmd(crudResourceSpec{
-		Use:      cliProviderKey,
-		Short:    "Manage providers",
-		BasePath: "/api/v1/providers",
-		Name:     cliProviderKey,
+		Use:          cliProviderKey,
+		Short:        "Manage providers",
+		BasePath:     "/api/v1/providers",
+		Name:         cliProviderKey,
+		DescribeRows: providerDescribeRows,
 	})
 }
 
 func newToolCmd() *cobra.Command {
 	return newCRUDResourceCmd(crudResourceSpec{
-		Use:      "tool",
-		Short:    "Manage tools",
-		BasePath: "/api/v1/tools",
-		Name:     "tool",
+		Use:          "tool",
+		Short:        "Manage tools",
+		BasePath:     "/api/v1/tools",
+		Name:         "tool",
+		DescribeRows: toolDescribeRows,
 	})
 }
 
 func newSessionCmd() *cobra.Command {
 	cmd := newCRUDResourceCmd(crudResourceSpec{
-		Use:      cliSessionCommand,
-		Short:    "Manage sessions",
-		BasePath: "/api/v1/sessions",
-		Name:     cliSessionCommand,
-		NoCreate: true,
-		NoUpdate: true,
+		Use:          cliSessionCommand,
+		Short:        "Manage sessions",
+		BasePath:     "/api/v1/sessions",
+		Name:         cliSessionCommand,
+		NoCreate:     true,
+		NoUpdate:     true,
+		DescribeRows: sessionDescribeRows,
 	})
 	cmd.AddCommand(newSessionEventsCmd())
 	cmd.AddCommand(newSessionFollowCmd())

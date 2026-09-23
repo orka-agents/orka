@@ -110,10 +110,10 @@ func newSkillGetCmd() *cobra.Command {
 				return err
 			}
 
-			return printStructured(cmd, skill)
+			return printDescribed(cmd, skill, skillDescribeRows)
 		},
 	}
-	addOutputFlag(cmd, outputJSON)
+	addOutputFlag(cmd, outputTable)
 	return cmd
 }
 

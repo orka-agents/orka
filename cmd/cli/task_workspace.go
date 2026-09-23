@@ -387,11 +387,18 @@ func addCredentialRef(target map[string]any, field, name, secretKey string) {
 	target[field] = ref
 }
 
+const executionOutcomeUnknown = "OutcomeUnknown"
+
 func newTaskRuntimeStatusCmd() *cobra.Command {
+	var verbose bool
 	cmd := &cobra.Command{
 		Use:   "status <name>",
-		Short: "Show durable execution, delivery, and runtime-pool status",
-		Args:  cobra.ExactArgs(1),
+		Short: "Show whether a task finished and where its change went",
+		Long: `Show a task's phase and, for write-intent workspaces, its delivery state and
+publication branch. A failed task shows its reason. --verbose adds the
+execution and runtime-pool details (attempt, RuntimePool, runtime instance,
+session generation, verified remote commit) for tracing a problem.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := newClientFromCmd(cmd)
 			detail, err := c.GetTask(cmd.Context(), args[0], client.GetOptions{Namespace: c.Namespace})
@@ -406,11 +413,80 @@ func newTaskRuntimeStatusCmd() *cobra.Command {
 			if format != outputTable {
 				return printStructured(cmd, status)
 			}
-			return printTaskRuntimeStatusTable(cmd, status)
+			if verbose {
+				return printTaskRuntimeStatusTable(cmd, status)
+			}
+			writeIntent := strings.EqualFold(nestedString(*detail, "spec", "workspace", "intent"), string(corev1alpha1.WorkspaceIntentWrite))
+			return printTaskRuntimeStatusSummary(cmd, status, writeIntent)
 		},
 	}
+	cmd.Flags().BoolVar(&verbose, "verbose", false, "Show execution and runtime-pool details as well")
 	addOutputFlag(cmd, outputTable)
 	return cmd
+}
+
+// printTaskRuntimeStatusSummary prints the rows a person needs after
+// creating a Task: whether it finished, and where the change went. Delivery
+// rows appear only for write-intent workspaces (or once delivery status
+// exists), and a failed or unknown outcome shows its reason.
+func printTaskRuntimeStatusSummary(cmd *cobra.Command, status map[string]any, writeIntent bool) error {
+	execution := nestedMap(status, "execution")
+	delivery := nestedMap(status, "delivery")
+	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "FIELD\tVALUE") //nolint:errcheck
+	rows := [][2]string{
+		{labelTask, anyString(status[cliTaskCommand])},
+		{labelPhase, anyString(status["phase"])},
+	}
+	if writeIntent || len(delivery) > 0 {
+		rows = append(rows,
+			[2]string{labelDelivery, anyString(delivery["state"])},
+			[2]string{labelPublicationBranch, anyString(delivery["branch"])},
+		)
+		if pr := nestedString(delivery, "prReceipt", "url"); pr != "" {
+			rows = append(rows, [2]string{labelPullRequest, pr})
+		}
+	}
+	if reason := taskFailureReason(status); reason != "" {
+		rows = append(rows, [2]string{labelReason, reason})
+	}
+	for _, row := range rows {
+		fmt.Fprintf(w, "%s\t%s\n", row[0], dash(row[1])) //nolint:errcheck
+	}
+	if execution["state"] == executionOutcomeUnknown || execution["outcome"] == executionOutcomeUnknown {
+		fmt.Fprintln(w, "Replay policy\tTerminal; create a new Task explicitly. No automatic replay.") //nolint:errcheck
+	}
+	return w.Flush()
+}
+
+// taskFailureReason returns a one-line reason for a Task that failed, was
+// cancelled, or ended with an unknown outcome, and nothing otherwise.
+func taskFailureReason(status map[string]any) string {
+	execution := nestedMap(status, "execution")
+	delivery := nestedMap(status, "delivery")
+	phase := anyString(status["phase"])
+	failed := phase == string(corev1alpha1.TaskPhaseFailed) || phase == string(corev1alpha1.TaskPhaseCancelled) ||
+		execution["outcome"] == executionOutcomeUnknown || execution["state"] == executionOutcomeUnknown ||
+		strings.EqualFold(anyString(execution["outcome"]), "Failed") ||
+		strings.EqualFold(anyString(delivery["outcome"]), "Failed")
+	if !failed {
+		return ""
+	}
+	reason := anyString(execution["reason"])
+	message := anyString(execution["message"])
+	if message == "" {
+		message = anyString(delivery["message"])
+	}
+	if message == "" {
+		message = anyString(status["message"])
+	}
+	if reason == "" && message == "" {
+		if outcome := anyString(execution["outcome"]); outcome != "" {
+			return outcome
+		}
+		return phase
+	}
+	return oneLine(joinNonEmpty(reason, message, ": "))
 }
 
 func safeTaskRuntimeStatus(task client.TaskDetail) map[string]any {
@@ -441,26 +517,26 @@ func printTaskRuntimeStatusTable(cmd *cobra.Command, status map[string]any) erro
 	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
 	fmt.Fprintln(w, "FIELD\tVALUE") //nolint:errcheck
 	rows := [][2]string{
-		{"Task", anyString(status[cliTaskCommand])},
-		{"Namespace", anyString(status[cliNamespaceQuery])},
-		{"Phase", anyString(status["phase"])},
-		{"Execution", anyString(execution["state"])},
+		{labelTask, anyString(status[cliTaskCommand])},
+		{labelNamespace, anyString(status[cliNamespaceQuery])},
+		{labelPhase, anyString(status["phase"])},
+		{labelExecution, anyString(execution["state"])},
 		{"Execution outcome", anyString(execution["outcome"])},
 		{"Execution reason", anyString(execution["reason"])},
 		{"Attempt", anyString(execution["attempt"])},
 		{"RuntimePool", anyString(execution["runtimePoolName"])},
 		{"Runtime instance", compactCLIValue(anyString(execution["runtimeInstanceID"]))},
 		{"Runtime session generation", anyString(execution["runtimeSessionGeneration"])},
-		{"Delivery", anyString(delivery["state"])},
+		{labelDelivery, anyString(delivery["state"])},
 		{"Delivery outcome", anyString(delivery["outcome"])},
 		{"Delivery message", anyString(delivery["message"])},
-		{"Publication branch", anyString(delivery["branch"])},
+		{labelPublicationBranch, anyString(delivery["branch"])},
 		{"Verified remote", compactCLIValue(anyString(delivery["verifiedRemoteSHA"]))},
 	}
 	for _, row := range rows {
 		fmt.Fprintf(w, "%s\t%s\n", row[0], dash(row[1])) //nolint:errcheck
 	}
-	if execution["state"] == "OutcomeUnknown" || execution["outcome"] == "OutcomeUnknown" {
+	if execution["state"] == executionOutcomeUnknown || execution["outcome"] == executionOutcomeUnknown {
 		fmt.Fprintln(w, "Replay policy\tTerminal; create a new Task explicitly. No automatic replay.") //nolint:errcheck
 	}
 	return w.Flush()

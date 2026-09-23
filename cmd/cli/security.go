@@ -31,10 +31,11 @@ func newSecurityCmd() *cobra.Command {
 
 func newSecurityRepoCmd() *cobra.Command {
 	return newCRUDResourceCmd(crudResourceSpec{
-		Use:      "repo",
-		Short:    "Manage security repository scan configs",
-		BasePath: "/api/v1/security/repositories",
-		Name:     "repository scan",
+		Use:          "repo",
+		Short:        "Manage security repository scan configs",
+		BasePath:     "/api/v1/security/repositories",
+		Name:         "repository scan",
+		DescribeRows: repositoryScanDescribeRows,
 	})
 }
 
@@ -42,6 +43,7 @@ func newSecurityScanCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "scan", Short: "Run and list security scan runs"}
 	cmd.AddCommand(newSecurityScanRunCmd())
 	cmd.AddCommand(newSecurityScanListCmd())
+	cmd.AddCommand(newSecurityScanStatusCmd())
 	return cmd
 }
 
@@ -82,7 +84,7 @@ func newSecurityScanListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printStructured(cmd, result)
+			return printListWith(cmd, result, printScanRunsTable)
 		},
 	}
 	addOutputFlag(cmd, outputTable)
@@ -111,10 +113,10 @@ func newSecurityThreatModelGetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printStructured(cmd, result)
+			return printListWith(cmd, result, printThreatModel)
 		},
 	}
-	addOutputFlag(cmd, outputJSON)
+	addOutputFlag(cmd, outputTable)
 	return cmd
 }
 
@@ -191,7 +193,7 @@ func newSecurityFindingListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printStructured(cmd, result)
+			return printListWith(cmd, result, printFindingsTable)
 		},
 	}
 	addOutputFlag(cmd, outputTable)
@@ -219,10 +221,10 @@ func newSecurityFindingGetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printStructured(cmd, result)
+			return printDescribed(cmd, result, findingDescribeRows)
 		},
 	}
-	addOutputFlag(cmd, outputJSON)
+	addOutputFlag(cmd, outputTable)
 	return cmd
 }
 
@@ -254,15 +256,20 @@ func newSecurityFindingActionCmd(action string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if method == http.MethodGet || action == cliIntentPatch || action == "pr" {
-				return printStructured(cmd, result)
+			switch action {
+			case cliPatchesCommand:
+				return printListWith(cmd, result, printPatchProposalsTable)
+			case cliIntentPatch:
+				return printDescribed(cmd, result, patchProposalDescribeRows)
+			case "pr":
+				return printListWith(cmd, result, printPullRequestReceipt)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Security finding %s: %s\n", action, args[0]) //nolint:errcheck
 			return nil
 		},
 	}
 	if action == cliPatchesCommand || action == cliIntentPatch || action == "pr" {
-		addOutputFlag(cmd, outputJSON)
+		addOutputFlag(cmd, outputTable)
 	}
 	return cmd
 }
@@ -319,10 +326,10 @@ func newSecuritySliceGetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printStructured(cmd, result)
+			return printDescribed(cmd, result, sliceDescribeRows)
 		},
 	}
-	addOutputFlag(cmd, outputJSON)
+	addOutputFlag(cmd, outputTable)
 	return cmd
 }
 
@@ -351,7 +358,7 @@ func newSecurityDroppedFindingsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printStructured(cmd, result)
+			return printListWith(cmd, result, printDroppedFindingsTable)
 		},
 	}
 	addOutputFlag(list, outputTable)

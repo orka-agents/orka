@@ -69,21 +69,29 @@ func printStructured(cmd *cobra.Command, value any) error {
 	if err != nil {
 		return err
 	}
+	if format == outputTable {
+		return printGenericTable(cmd, value)
+	}
+	return printStructuredTo(cmd.OutOrStdout(), format, value)
+}
+
+// printStructuredTo encodes value as json or yaml onto w.
+func printStructuredTo(w io.Writer, format string, value any) error {
 	switch format {
 	case outputJSON:
 		out, err := json.MarshalIndent(value, "", "  ")
 		if err != nil {
 			return fmt.Errorf("formatting json output: %w", err)
 		}
-		fmt.Fprintln(cmd.OutOrStdout(), string(out)) //nolint:errcheck
+		fmt.Fprintln(w, string(out)) //nolint:errcheck
 	case outputYAML:
 		out, err := sigsyaml.Marshal(value)
 		if err != nil {
 			return fmt.Errorf("formatting yaml output: %w", err)
 		}
-		fmt.Fprint(cmd.OutOrStdout(), string(out)) //nolint:errcheck
+		fmt.Fprint(w, string(out)) //nolint:errcheck
 	default:
-		return printGenericTable(cmd, value)
+		return fmt.Errorf("unsupported output format %q", format)
 	}
 	return nil
 }

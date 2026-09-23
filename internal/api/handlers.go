@@ -20,6 +20,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8slabels "k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
@@ -593,6 +594,17 @@ func (h *Handlers) ListTasks(c fiber.Ctx) error {
 	opts.Namespace = namespace
 	if err := h.authorizeContextTokenAction(c, "listTasks", h.contextTokenAuthorization.TaskListScopes); err != nil {
 		return err
+	}
+	// A label selector narrows the Kubernetes list itself (kubectl -l
+	// syntax). The per-Task authorization below still runs on every result,
+	// so the selector cannot show a caller anything they could not list
+	// without it.
+	if rawSelector := strings.TrimSpace(c.Query("labelSelector", "")); rawSelector != "" {
+		selector, err := k8slabels.Parse(rawSelector)
+		if err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid labelSelector: %v", err))
+		}
+		opts.LabelSelector = selector
 	}
 
 	// Apply pagination. A limit of 0 is an explicit unpaginated list request for

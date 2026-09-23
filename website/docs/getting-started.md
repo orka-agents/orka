@@ -337,6 +337,17 @@ an OIDC provider. With it, checking a Task and downloading its artifacts looks l
   task download '<task-name>' '<artifact-name>'
 ```
 
+`task status` keeps to the rows you need. A Task with a write-intent workspace also
+shows its delivery state and publication branch, and a failed Task shows its reason;
+`--verbose` adds the runtime details.
+
+```console
+$ orka task status code-review
+FIELD  VALUE
+Task   code-review
+Phase  Succeeded
+```
+
 Full command list: [CLI reference](reference/cli.md).
 
 ## Next steps

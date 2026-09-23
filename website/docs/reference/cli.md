@@ -60,6 +60,30 @@ orka task artifacts example-task -o json
 
 Do not rely on full table layouts in automation; table output is optimized for people. `orka task artifacts` keeps the table as its default and accepts `-o json` or `-o yaml` when a script needs artifact metadata (filename, content type, byte size, and creation time).
 
+Commands that show one object (`orka task get`, `orka agent get`, `orka provider get`,
+`orka security finding get`, `orka memory proposal get`, `orka tool get`, and the rest)
+print a short readable view by default: one field per line, the important fields first,
+long text wrapped to the terminal, empty fields omitted. `-o json` and `-o yaml` print the
+full API object for scripts.
+
+```console
+$ orka security finding get fnd_abd4f27383dc
+Title:      Zip-slip via AdmZip.extractAllTo on POST /import
+Severity:   critical
+Validation: validated
+State:      open
+Location:   routes/import.js:42
+Summary:    Archive entries are extracted without checking for path traversal, so a
+            crafted archive can write outside the upload directory.
+Category:   path-traversal
+Confidence: high
+Repository: nodejs-goof
+ID:         fnd_abd4f27383dc
+```
+
+`orka security threat-model get` prints the Markdown document as text under a short
+header, and `orka workspace status` and `orka auth whoami` print one field per line.
+
 ## Task workflows
 
 Create tasks from manifests:
@@ -123,9 +147,12 @@ Common task commands:
 | --- | --- |
 | `orka task create -f FILE` | Create a Task from YAML/JSON. |
 | `orka task create --type container ...` | Create a Task directly from flags. |
-| `orka task list [--status PHASE] [--transaction ID]` | List tasks, optionally client-side filtered. |
-| `orka task get NAME [-o json|-o yaml]` | Read complete Task details. |
-| `orka task status NAME [-o table|-o json|-o yaml]` | Show durable execution, delivery, and selected RuntimePool status. |
+| `orka task list [-l SELECTOR] [--since 10m] [--status PHASE] [--watch]` | List tasks oldest first with an `AGENT` column; filter by label, start time, or phase; `--watch` reprints on change. |
+| `orka task get NAME [-o json|-o yaml]` | Show a Task's phase, agent, delivery, and result; `-o json` for the full object. |
+| `orka task status NAME [--verbose]` | Show whether the Task finished and where the change went; `--verbose` adds runtime-pool details. |
+| `orka task events NAME [--type TYPE] [--tail N] [--wide]` | List execution events; `--tail 1` shows the last one, `--wide` prints full messages. |
+| `orka task approvals NAME [ID] [--wide]` | Show what each approval request asks for; pass an ID to see every argument. |
+| `orka task approve NAME ID --reason TEXT` / `decline` | Decide a request; `ID` may be a unique prefix of the short or full ID. |
 | `orka task wait NAME --timeout DURATION` | Wait for completion; exits nonzero for failed/cancelled tasks. |
 | `orka task result NAME` | Print stored task result. |
 | `orka task logs NAME` | Print completed task logs/result-store output, or live pod logs when available. |
@@ -134,6 +161,70 @@ Common task commands:
 | `orka task artifacts NAME` | List task artifacts. |
 | `orka task download NAME [FILENAME] --output PATH` | Download task artifact content. |
 | `orka task delete NAME` | Delete/cancel a task. |
+
+### Following tasks
+
+`orka task list` shows who is running each Task and reprints the table while Tasks
+progress:
+
+```console
+$ orka task list -l orka.ai/source=anthropic-proxy --since 10m --watch
+NAME            TYPE       AGENT        STATUS     AGE
+proxy-78055b2e  agent      coder        Running    12s
+proxy-df604959  agent      coder        Running    10s
+proxy-9a3b0c88  container  golang:1.27  Pending    2s
+```
+
+`-l` uses `kubectl` label selector syntax (`key=value`, `key!=value`, `key in (a,b)`,
+comma-separated) and is applied by the server. `--since` accepts a duration (`10m`, `2h`)
+or an RFC 3339 timestamp and keeps Tasks created after that point. Both work with
+`--watch`, which exits on Ctrl-C. Orka labels the Tasks it creates for you:
+
+| Label | Set on |
+| --- | --- |
+| `orka.ai/source=anthropic-proxy` | Tasks created through the Anthropic-compatible API, for example from Claude Code |
+| `orka.ai/security-target=<repository>` | Tasks created by a security scan of that repository |
+| `gateway.orka.ai/gateway=<gateway>` | Tasks created from a message that came in through a gateway |
+
+`orka task status` answers "did it finish, and where did the change go?" in a few rows.
+Delivery rows appear for write-intent workspaces, and a failed Task shows its reason:
+
+```console
+$ orka task status proxy-78055b2e
+FIELD               VALUE
+Task                proxy-78055b2e
+Phase               Succeeded
+Delivery            VerifiedExact
+Publication branch  orka/add-healthz-endpoint-a7f2b1e9
+```
+
+`--verbose` prints the full table with the execution state, attempt, RuntimePool, runtime
+instance, session generation, delivery message, and verified remote commit.
+
+To see what an agent said last, filter events by type and keep the last one. Rows are cut
+to the terminal width; `--wide` prints the whole message and `-o json` is never truncated.
+`orka task events --help` lists the event type names `--type` accepts.
+
+```console
+$ orka task events proxy-78055b2e --type ModelMessage --tail 1
+SEQ  TYPE          SEVERITY  SUMMARY
+418  ModelMessage  info      Added GET /healthz returning 200 with the build version, plus a…
+```
+
+Approval requests show the tool and its arguments so a reviewer can see what they are
+approving. IDs are shortened to 12 characters; `approve` and `decline` accept any unique
+prefix and send the full ID to the server:
+
+```console
+$ orka task approvals fibey-0923
+ID            STATUS   TOOL               ARGUMENTS                                                 EXPIRES
+8a8d1a7d418d  pending  create-work-order  asset=pump-1 summary="Inspect the pressure transmitter."  in 9m
+
+$ orka task approvals fibey-0923 8a8d1a7d418d      # every argument on its own line
+$ orka task approve fibey-0923 8a8d1a7d418d --reason "Inspect the transmitter."
+```
+
+`--wide` adds severity, the risk summary, and who decided and why.
 
 ## Chat and dashboard helpers
 
@@ -222,17 +313,34 @@ Repository security scan configuration:
 
 ```bash
 orka security repo create -f repository-scan.yaml
-orka security repo get my-repo -o json
-orka security repo list -o json
+orka security repo get my-repo
+orka security repo list
 orka security threat-model update my-repo --content "Threat model" --source cli
-orka security threat-model get my-repo -o json
-orka security scan list my-repo -o json
-orka security finding list my-repo -o json
+orka security threat-model get my-repo            # prints the Markdown as text
+orka security scan run my-repo
+orka security scan status my-repo --watch         # stage-by-stage progress; exits when the scan ends
+orka security scan list my-repo                   # phase, slices reviewed, findings kept and dropped
+orka security finding list my-repo --recommended  # severity, validation, id, title, file
+orka security finding get FINDING_ID
 orka security slice list my-repo -o json
-orka security dropped-findings list my-repo -o json
-orka security dropped-findings list my-repo --layer filter --reason contains=rate-limit -o json
+orka security dropped-findings list my-repo --layer filter --reason contains=rate-limit
 orka security repo delete my-repo
 ```
+
+The findings table is sorted critical-first, then validated before unvalidated:
+
+```console
+$ orka security finding list nodejs-goof --recommended
+SEVERITY  VALIDATED  ID                TITLE                                                  FILE
+critical  yes        fnd_abd4f27383dc  Zip-slip via AdmZip.extractAllTo on POST /import       routes/import.js:42
+critical  yes        fnd_4ceb0dc790e6  Unauthenticated command injection via exec('identify…  routes/index.js:118
+high      no         fnd_11a364071e0b  Hard-coded express-session secret enables cookie for…  app.js:31
+```
+
+`orka security scan status` shows the latest run (or `--scan ID`) with one row per
+pipeline stage, and lists failed Tasks by name; with `--watch` it exits 0 when the scan
+succeeds and 1 when it fails, so scripts can wait on it. See the
+[security scanning guide](../guides/repository-security-scanning.md#following-a-scan-from-the-cli).
 
 Repository monitor configuration:
 
@@ -408,8 +516,8 @@ orka task list --status <TAB>   # Pending, Running, Finalizing, ...
 | --- | --- |
 | `orka status` | Show health, readiness, task counts, and agent count. |
 | `orka models list --compat openai` / `anthropic` | List model IDs in provider-compatible formats. |
-| `orka workspace status TASK` | Inspect canonical workspace policy and delivery status without credential references. |
-| `orka task status TASK` | Inspect execution outcome, RuntimePool identity, and publication verification. |
+| `orka workspace status TASK` | Inspect canonical workspace policy and delivery status without credential references, one field per line. |
+| `orka task status TASK [--verbose]` | Show whether a Task finished and where the change went; `--verbose` adds RuntimePool identity and publication verification. |
 | `orka audit trace TRANSACTION_ID` | Show tasks correlated by Kontxt transaction ID. |
 
 ## Binary e2e coverage matrix

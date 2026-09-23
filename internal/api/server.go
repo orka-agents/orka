@@ -402,6 +402,7 @@ func (s *Server) setupRoutes() {
 	api.Put("/security/repositories/:name/threat-model", s.handlers.UpdateThreatModel)
 	api.Get("/security/repositories/:name/scans", s.handlers.ListSecurityScanRuns)
 	api.Post("/security/repositories/:name/scans", s.handlers.CreateManualSecurityScan)
+	api.Get("/security/repositories/:name/scans/:scanID/progress", s.handlers.GetSecurityScanProgress)
 	api.Get("/security/repositories/:name/slices", s.handlers.ListSecurityReviewSlices)
 	api.Get("/security/repositories/:name/slices/:sliceID", s.handlers.GetSecurityReviewSlice)
 	api.Get("/security/repositories/:name/dropped-findings", s.handlers.ListSecurityDroppedFindings)

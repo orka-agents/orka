@@ -1188,6 +1188,21 @@ That split is the point: users name a class, and provider identity, backend para
 pool implementation, and provider versions all stay with the operator. The older direct
 agent-sandbox and Substrate settings below still work during migration.
 
+`kubectl get executionworkspaceclass` shows each class's lifecycle rules, so a person
+choosing a class can see whether their workspace is kept asleep (`Suspend`) or deleted
+(`Delete`) when the agent stops, how long it may sit idle, and how long it may exist:
+
+```console
+$ kubectl get executionworkspaceclass
+NAME              MODE         PROVIDER       ON DETACH   IDLE TIMEOUT   MAX LIFETIME   READY   AGE
+sandbox-session   Interactive  agent-sandbox  Suspend     30m            24h            True    2d
+scratch           Interactive  agent-sandbox  Delete                     2h             True    2d
+```
+
+`-o wide` adds the detach timeout. Helm does not update CRDs during an upgrade, so the
+columns appear once the CRDs from the new chart are applied (see
+[Upgrading](../operations/upgrading.md)).
+
 #### Who is allowed to use a class
 
 Selecting a class is an authorization decision, checked with a live Kubernetes
