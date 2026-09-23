@@ -83,6 +83,7 @@ before choosing whether to make a new request.
 ## Waiting and cancellation
 
 Review has a maximum of ten minutes. Approved execution has a maximum of
+four minutes. Approval-required HTTP Tool timeouts must be shorter than
 four minutes. The MCP call allows fifteen minutes to cover both phases and
 transport overhead. The Task deadline can shorten either phase and the
 runtime must keep renewing its normal prompt lease. Configure a Task timeout

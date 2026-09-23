@@ -54,7 +54,7 @@ func configureApprovalRegistryPreparation(t *testing.T, f *mcpApprovalFixture, s
 			BrokeredToolClass: corev1alpha1.AgentRuntimeBrokeredToolClassWrite,
 			HTTP: &corev1alpha1.HTTPExecution{
 				URL: "https://tool.example.test/approved", Method: http.MethodPost,
-				Timeout: &metav1.Duration{Duration: harnessv2.MCPApprovalExecutionTimeout},
+				Timeout: &metav1.Duration{Duration: harnessv2.MCPApprovalExecutionTimeout - time.Second},
 			},
 		},
 	}
@@ -155,9 +155,9 @@ func TestMCPApprovalRegistryPreparationPreservesHTTPExecutionBudget(t *testing.T
 			require.Len(t, prepared, 1, "the real Registry preparation read must be delayed")
 			require.Len(t, executed, 1)
 			preparation, execution := <-prepared, <-executed
-			require.False(t, execution.deadline.Before(preparation.readyAt.Add(harnessv2.MCPApprovalExecutionTimeout)),
+			require.False(t, execution.deadline.Before(preparation.readyAt.Add(harnessv2.MCPApprovalExecutionTimeout-time.Second)),
 				"Registry preparation must not spend the configured HTTP execution budget")
-			require.WithinDuration(t, execution.started.Add(harnessv2.MCPApprovalExecutionTimeout), execution.deadline, 100*time.Millisecond)
+			require.WithinDuration(t, execution.started.Add(harnessv2.MCPApprovalExecutionTimeout-time.Second), execution.deadline, 100*time.Millisecond)
 			require.Equal(t, store.ExternalEffectInFlight, preparation.effect.State)
 			require.Equal(t, preparation.effect.Version, execution.effect.Version)
 			require.Equal(t, preparation.effect.LeaseOwner, execution.effect.LeaseOwner)

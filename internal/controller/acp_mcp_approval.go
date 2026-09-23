@@ -313,7 +313,7 @@ func (b *ACPMCPBroker) approvalOutcome(ctx context.Context, call *acpMCPApproval
 		return err
 	}
 	return b.appendApprovalEvent(ctx, call, events.ExecutionEventTypeApprovalExecutionUpdated, "execution:"+outcome,
-		"Approved tool execution "+outcome, json.RawMessage(content))
+		"Tool execution "+outcome, json.RawMessage(content))
 }
 
 func (b *ACPMCPBroker) approvalDecision(ctx context.Context, call *acpMCPApprovalCall, eventType, reason string) error {

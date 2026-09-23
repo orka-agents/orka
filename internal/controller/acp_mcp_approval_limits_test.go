@@ -89,7 +89,8 @@ func TestBuildAgentRuntimeMCPConfigurationBoundsApprovalReadTimeout(t *testing.T
 			reject   bool
 		}{
 			{name: "default", required: []string{"long_read"}},
-			{name: "at bound", timeout: &metav1.Duration{Duration: harnessv2.MCPApprovalExecutionTimeout}, required: []string{"long_read"}},
+			{name: "below bound", timeout: &metav1.Duration{Duration: harnessv2.MCPApprovalExecutionTimeout - time.Second}, required: []string{"long_read"}},
+			{name: "at bound", timeout: &metav1.Duration{Duration: harnessv2.MCPApprovalExecutionTimeout}, required: []string{"long_read"}, reject: true},
 			{name: "over bound", timeout: &metav1.Duration{Duration: harnessv2.MCPApprovalExecutionTimeout + time.Second}, required: []string{"long_read"}, reject: true},
 			{name: "ungated long read", timeout: &metav1.Duration{Duration: 10 * time.Minute}, required: []string{}},
 			{name: "another tool requires approval", timeout: &metav1.Duration{Duration: 10 * time.Minute}, required: []string{"bounded_read"}},
@@ -124,7 +125,7 @@ func TestBuildAgentRuntimeMCPConfigurationBoundsApprovalReadTimeout(t *testing.T
 				require.NoError(t, err)
 				configuration, err := buildAgentRuntimeMCPConfigurationWithRegistry(t.Context(), reader, external, profile, tools.NewRegistry())
 				if test.reject {
-					require.ErrorContains(t, err, "exceeds the maximum approval-required call duration")
+					require.ErrorContains(t, err, "must be less than the approval-required call duration")
 					require.True(t, isPermanentACPAgentConfigurationError(err))
 					return
 				}
@@ -143,7 +144,7 @@ func TestMCPApprovalReadToolTimeoutDriftNeverExecutes(t *testing.T) {
 	tool := &corev1alpha1.Tool{
 		ObjectMeta: metav1.ObjectMeta{Name: f.request.Call.ToolName, Namespace: f.request.Namespace, UID: "read-tool-uid", Generation: 1},
 		Spec: corev1alpha1.ToolSpec{Description: "Read inventory", BrokeredToolClass: corev1alpha1.AgentRuntimeBrokeredToolClassRead,
-			HTTP: &corev1alpha1.HTTPExecution{URL: "https://tools.example/read", Method: "GET", Timeout: &metav1.Duration{Duration: harnessv2.MCPApprovalExecutionTimeout}}},
+			HTTP: &corev1alpha1.HTTPExecution{URL: "https://tools.example/read", Method: "GET", Timeout: &metav1.Duration{Duration: harnessv2.MCPApprovalExecutionTimeout - time.Second}}},
 	}
 	descriptor, err := customACPMCPToolDescriptor(tool)
 	require.NoError(t, err)

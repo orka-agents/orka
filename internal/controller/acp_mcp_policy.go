@@ -358,11 +358,12 @@ func buildCanonicalMCPToolDescriptors(
 			return nil, descriptorErr
 		}
 		// Approval-bound reads share the same execution and receipt lease as
-		// approved writes. Ungated reads keep their configured timeout.
+		// approved writes. Equal timeouts would let the earlier broker deadline
+		// expire first. Ungated reads keep their configured timeout.
 		if approval.Requires(name) && custom.Spec.HTTP != nil && custom.Spec.HTTP.Timeout != nil &&
-			custom.Spec.HTTP.Timeout.Duration > harnessv2.MCPApprovalExecutionTimeout {
+			custom.Spec.HTTP.Timeout.Duration >= harnessv2.MCPApprovalExecutionTimeout {
 			return nil, permanentACPAgentConfiguration(fmt.Errorf(
-				"tool %q spec.http.timeout %s exceeds the maximum approval-required call duration %s",
+				"tool %q spec.http.timeout %s must be less than the approval-required call duration %s",
 				name, custom.Spec.HTTP.Timeout.Duration, harnessv2.MCPApprovalExecutionTimeout,
 			))
 		}
