@@ -319,7 +319,6 @@ watch_until() {
       bad "the watch command exited before the demo's condition held"
       return 1
     fi
-
     sleep "$interval"
   done
   # The CLI handles the signal and exits cleanly; the subshell that ran the
@@ -330,7 +329,6 @@ watch_until() {
   printf '%s^C%s\n' "$C_DIM" "$C_RESET"
   nap 1.2
 }
-
 
 # pr_url_from TEXT — the first GitHub pull request URL in a blob of text.
 pr_url_from() {

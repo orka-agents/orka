@@ -53,7 +53,6 @@ claude() { command claude --no-session-persistence "$@" 2>&1 | cat; }
 routes() {
   kubectl -n "$router_ns" get configmap orka-compat-router -o jsonpath='{.data.routes\.yaml}'
 }
-
 # team_task_records NAMESPACE — proxy Tasks created during these requests,
 # kept off camera for the closing table.
 team_task_records() {
@@ -96,7 +95,6 @@ pe "BOB=\$(kubectl -n team-inventory create token bob)"
 say "Ask the same URL which models it offers, once as Alice and once as Bob."
 pe "orka models list --compat anthropic -s $router_url -n team-payments -t \$ALICE"
 pe "orka models list --compat anthropic -s $router_url -n team-inventory -t \$BOB"
-
 ok "One URL, two answers. The token chose the team; nothing in the request did."
 
 chapter "The same request lands in different homes"
@@ -131,14 +129,13 @@ export CLAUDE_CONFIG_DIR=$work/bob
 pex "ANTHROPIC_API_KEY=\$BOB claude -p --model approved-models/claude-opus-4.7 'Reply with OK' | tee model-refusal.txt"
 grep -Fq 'provider "approved-models" not found in namespace "team-inventory"' model-refusal.txt ||
   { bad "the model request failed for a different reason"; exit 1; }
-ok "Refused, with no fallback. The inventory installation has no such model."
+ok "Refused, with no fallback. The inventory installation has no Provider called approved-models."
 say "And Bob going straight to the payments installation with his token:"
 pex "orka task list -s $payments_api -n team-payments -t \$BOB 2>&1 | tee team-refusal.txt"
 grep -Fq 'HTTP 403' team-refusal.txt && grep -Fq 'not allowed' team-refusal.txt &&
   grep -Fq 'team-payments' team-refusal.txt && grep -Fq 'team-inventory' team-refusal.txt ||
   { bad "the direct request did not produce the expected team-access refusal"; exit 1; }
 ok "Refused again. Every installation checks identity, not just the router."
-
 
 for team in payments inventory; do
   team_task_records "team-$team" >"$work/$team-tasks-after-refusals.json"

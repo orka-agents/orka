@@ -140,7 +140,6 @@ first_task=$(jq -er '.taskName' raw/first-event.json)
 kubectl -n "$ORKA_NAMESPACE" get task "$first_task" -o json >raw/first-task.json
 python3 "$evidence" correlate raw/first-admission.json raw/first-event.json raw/first-task.json
 pe 'orka task get "$first_task"'
-
 ok "Accepted. Sam's app can check on it with the reference alone."
 
 chapter "Read the recommendation"
@@ -173,7 +172,6 @@ followup_event=$(python3 "$evidence" event-id raw/followup-admission.json)
 wait_event "$followup_event" followup dispatched
 followup_task=$(jq -er '.taskName' raw/followup-event.json)
 pe 'orka task wait "$followup_task" --timeout 10m'
-
 wait_event "$followup_event" followup-completed completed
 kubectl -n "$ORKA_NAMESPACE" get task "$followup_task" -o json >raw/followup-task.json
 python3 "$evidence" correlate raw/followup-admission.json raw/followup-completed-event.json raw/followup-task.json

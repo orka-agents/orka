@@ -121,15 +121,15 @@ pe "orka task create -f first-request.yaml"
 say "Orka creates an Actor for the Session; Substrate places it on a worker."
 wait_for "an Actor to boot" "(( \$(actor_count) >= 1 ))" 600
 pe "actors"
-say "That Actor is the agent's whole world. No Git credential rides along;"
-say "Orka's Publisher holds it, outside the sandbox."
+say "That Actor is the agent's whole world. The Task names a Git credential"
+say "for Orka's Publisher, which runs outside the sandbox, not for the agent."
 wait_task audit-start 1200
 pe "orka task result audit-start"
 say "The Publisher verified the files and published the audit as a branch."
 pe "orka task status audit-start"
 pe "git ls-remote $DEMO_REPO refs/heads/$branch"
 published_audit audit-start "$branch" "$rendered/original-AUDIT.md"
-ok "Findings written by an agent with no Git token, published by Orka as a branch."
+ok "Findings written inside the Actor, published by Orka's Publisher as a branch."
 
 chapter "The workspace goes to sleep"
 
@@ -159,7 +159,6 @@ wait_for "the checkpoint to be Ready" \
 pe "kubectl -n orka-system get executionworkspacecheckpoint audit-checkpoint"
 ok "The audit has a save point with a digest."
 
-
 chapter "Delete the workspace, restore the copy"
 
 say "Now the worst case: the workspace is deleted, and with it the data"
@@ -176,7 +175,8 @@ pe "request restore-request.yaml"
 pe "orka task create -f restore-request.yaml"
 wait_task audit-restore 1200
 pe "orka task result audit-restore"
-
+say "The prompt changed nothing, yet a branch was published: the restored"
+say "AUDIT.md is new next to main, and the branch is how we compare bytes."
 published_audit audit-restore "$branch-restored" "$rendered/restored-AUDIT.md"
 if ! cmp -s "$rendered/original-AUDIT.md" "$rendered/restored-AUDIT.md"; then
   bad "the restored audit does not match the original"; exit 1
@@ -185,7 +185,6 @@ audit_digest=$(shasum -a 256 "$rendered/original-AUDIT.md" | awk '{print $1}')
 match="identical file bytes (SHA-256 ${audit_digest:0:12})"
 ok "The audit came back from a deleted workspace, written by an Actor that is long gone."
 pe "orka task status audit-restore"
-
 
 chapter "Clean up"
 

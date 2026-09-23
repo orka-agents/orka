@@ -154,7 +154,7 @@
           "marker": "Findings come with evidence",
           "title": "Read one finding",
           "cue": "Listed findings passed validation; inspect the evidence",
-          "text": "Every finding cites a file and a line. Orka then checks the likely findings in an isolated worker. The list includes only findings marked validated. We open one to see the affected code, its severity, and the evidence recorded with it."
+          "text": "Every finding cites a file and a line. Orka then checks the two most severe likely findings in an isolated worker. The list includes only findings marked validated. We open one to see the affected code, its severity, and the evidence recorded with it."
         },
         {
           "marker": "Priya picks one to fix",
@@ -342,7 +342,6 @@
           "title": "Read the incident before acting",
           "cue": "One reading disagrees with the rest",
           "text": "One pressure sensor fell while the second gauge, flow, and vibration stayed normal. The transmitter was replaced during maintenance and has not been checked. Worth a look before touching anything. Short commands such as counts are shell helpers defined in this demo script."
-
         },
         {
           "marker": "2. Fibey may look, but not act alone",

@@ -2,4 +2,4 @@ A customer wants 24 replacement filters today.
 We have 18 available. The next delivery arrives tomorrow.
 
 Recommend what the order desk should offer and draft a short customer reply.
-Use digits for quantities. Do not place an order or promise an exact delivery time.
+Do not place an order or promise an exact delivery time.

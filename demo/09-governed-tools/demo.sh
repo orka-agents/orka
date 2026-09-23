@@ -22,7 +22,6 @@ order_task=$(jq -r '.orderTask' run.json)
 stock_tool=$(jq -r '.stockTool' run.json)
 # shellcheck disable=SC2034
 order_tool=$(jq -r '.orderTool' run.json)
-
 kubectl -n "$ORKA_NAMESPACE" get provider "$DEMO_PROVIDER_REF" -o name >/dev/null
 kubectl -n "$ORKA_NAMESPACE" wait --for=condition=Programmed \
   gateway.gateway.networking.k8s.io/demo-supplier-gateway --timeout=120s >/dev/null
@@ -134,8 +133,6 @@ pe 'orka task events "$order_task" --type ToolCallStarted --type ToolCallComplet
 say 'The gateway had no route for the order, so it refused with HTTP 404.'
 pex 'python3 evidence.py order-result'
 pe 'orka task result "$order_task"'
-
-
 pe 'orders_created raw/supplier-after.json'
 ok 'The assistant asked. The platform said no. The supplier never heard about it.'
 

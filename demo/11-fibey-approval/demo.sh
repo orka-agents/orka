@@ -99,7 +99,6 @@ ok 'A proposal is waiting. Fibey is paused inside the same Task.'
 chapter '4. Nothing has happened yet'
 say 'The request names the tool, its arguments, and how long Lee has to decide.'
 pe 'orka task approvals "$task"'
-
 orka task get "$task" -o json >raw/task-before-decision.json
 orka task approvals "$task" -o json >raw/approval-before-decision.json
 receipts >raw/counts-before-decision.json
@@ -113,14 +112,12 @@ chapter '5. Lee approves'
 # Used by the command evaluated in pe below.
 # shellcheck disable=SC2034
 approval=$(jq -er '.approvals[0].id' raw/approval-before-decision.json)
-
 approval=${approval##*:}
 approval=${approval:0:12}
 say 'Lee reads the proposal and approves this inspection, with a reason.'
 pe 'orka task approve "$task" "$approval" --reason "Inspect the transmitter."'
 orka task approvals "$task" "$approval" -o json >raw/decision.json
 ok 'The decision is on record: who, what, and why. Orka may now run the stored action.'
-
 
 chapter "6. The work order comes back to the same Task"
 pe 'orka task wait "$task" --timeout 10m'
@@ -131,7 +128,6 @@ receipts >raw/counts-final.json
 scenario_collect_events "$task" raw/events.json
 fibey_snapshot raw/installation-final.json
 pe 'orka task result "$task"'
-
 pe 'counts raw/counts-final.json'
 pe 'python3 "$here/check.py" final'
 ok 'One work order, created after the decision, and its receipt returned to Fibey.'

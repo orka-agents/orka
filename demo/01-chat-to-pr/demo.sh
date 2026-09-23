@@ -97,7 +97,6 @@ say "Claude Code talks to Orka instead of the vendor. Two variables do that."
 pe "export ANTHROPIC_BASE_URL=$ORKA_API/anthropic"
 pe "export ANTHROPIC_API_KEY=\$(kubectl -n $ORKA_NAMESPACE create token $ORKA_CLIENT_SA)"
 pe "orka models list --compat anthropic | head -n 5"
-
 say "The request names the change, a test, the docs, and a pull request. It"
 say "does not choose which Agents do the work. Its Git credential is named,"
 say "but the credential's value stays in the cluster."
@@ -161,7 +160,6 @@ pe "orka task events $coder --type ModelMessage --tail 1"
 say "The coder never pushed. Orka's Publisher, which alone holds the Git"
 say "token, verified the files and published the branch. The Task has the receipt."
 pe "orka task status $coder"
-
 ok "Delivery VerifiedExact: what reached GitHub is exactly what Orka checked."
 
 chapter "GitHub shows the pull request"

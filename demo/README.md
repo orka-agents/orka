@@ -10,7 +10,7 @@ terminal: a pull request, an object that survived deletion, a refusal.
 | 1 | [`01-chat-to-pr`](01-chat-to-pr) | Maya asks for a health check in Claude Code. Orka runs the agents on her team's cluster and ends with a reviewed, CI-green pull request. No model key ever reaches her laptop. |
 | 2 | [`02-agent-sandbox`](02-agent-sandbox) | A workspace that sleeps. Maya's agent works today; the kubernetes-sigs Agent Sandbox is suspended (no Pod, only a disk) and wakes tomorrow with the same identity and her files still on it. |
 | 3 | [`03-agent-substrate`](03-agent-substrate) | A save point for an agent. Priya's audit runs as a gVisor Actor on Agent Substrate, sleeps with every worker free, and comes back from a checkpoint after the workspace is deleted. |
-| 4 | [`04-security-scan`](04-security-scan) | Findings that arrive as pull requests. Priya registers an old app; Orka writes a threat model, reproduces the findings it lists, and opens the fix she picks as a pull request. |
+| 4 | [`04-security-scan`](04-security-scan) | Findings that arrive as pull requests. Priya registers an old app; Orka writes a threat model, checks its most severe findings, and opens the fix she picks as a pull request. |
 | 5 | [`05-two-teams`](05-two-teams) | Alice and Bob use one AI URL. Their tokens pick their teams' separate Orka installations, and the wrong door stays shut at the router and at the installation. Uses the compatibility router from PR #604. |
 | 8 | [`08-agent-to-agent`](08-agent-to-agent) | Sam's order-desk app asks the inventory team's agent for advice over A2A, retries without duplicate work, and continues the conversation in one Session. |
 | 9 | [`09-governed-tools`](09-governed-tools) | Jordan's assistant checks a supplier's stock, then tries to buy. Gateway logs and the supplier's own receipts show which request got through. |
@@ -50,7 +50,6 @@ These keep the recordings readable for someone who has never seen Orka.
   moment a Task asks a person. Build the CLI from a checkout that includes
   [#672](https://github.com/orka-agents/orka/pull/672) and
   [#677](https://github.com/orka-agents/orka/pull/677) or newer.
-
 - The typed command is shorter than its output. What is left for helpers is
   outside Orka: GitHub, the supplier, the host. Anything that needs `jq`,
   `sed`, `awk`, or `column` is a shell function with a plain name, defined at
@@ -60,8 +59,6 @@ These keep the recordings readable for someone who has never seen Orka.
   status` prints Task, Phase, Delivery, and Publication branch.
 - Model answers are capped by the prompts, so `orka task result` is shown
   whole; `head` or `tail` caps the few that may run long.
-
-
 - Prompts contain no apologies for the runtime. They say what to do, not what
   the sandbox lacks.
 - Narration is the bright text; commands are grey.

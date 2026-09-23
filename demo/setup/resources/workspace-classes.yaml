@@ -59,7 +59,7 @@ spec:
     defaultOnDetach: Suspend
     allowedOnDetach: [Suspend, Delete]
     detachTimeout: 5m
-    maxLifetime: 4h
+    maxLifetime: 48h
     deletionPolicy:
       providerResources: Delete
       persistentVolumes: Delete
@@ -122,7 +122,7 @@ spec:
     defaultOnDetach: Suspend
     allowedOnDetach: [Suspend, Delete]
     detachTimeout: 5m
-    maxLifetime: 4h
+    maxLifetime: 48h
     deletionPolicy:
       providerResources: Delete
       persistentVolumes: Delete

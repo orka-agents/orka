@@ -57,9 +57,9 @@ ok "The scan finished with a threat model and a set of findings on record."
 
 chapter "Findings come with evidence"
 
-say "Every finding cites a file and a line. The validating agent checks the"
-say "code path and tries a safe reproduction when it can. Orka keeps its"
-say "decision on record. These findings passed that check."
+say "Every finding cites a file and a line. A validating agent then checks the"
+say "two most severe likely findings: it reads the code path and tries a safe"
+say "reproduction when it can. Orka keeps its decision on record. These passed."
 wait_for "a validated recommended finding" \
   "orka security finding list $repo --recommended --validation-status validated -o json | jq -e '.items | length > 0'" 1800
 pe "orka security finding list $repo --recommended --validation-status validated"
@@ -85,7 +85,6 @@ if orka security finding patches "$target" -o json | jq -e '[.items[] | select(.
   bad "the patch proposal did not reach pr_opened"; orka security finding patches "$target" -o json | jq '.items[] | {status,reason}' >&2; exit 1
 fi
 pe "orka security finding patches $target"
-
 pr=$(orka security finding pr "$target" -o json | jq -r '.prURL // empty')
 assert_pr "$pr"
 say "Now check it somewhere Orka does not control."

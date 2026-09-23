@@ -136,7 +136,6 @@ chapter '4. Let a router choose the model'
 say "A Provider is Orka's connection to a model service. Support's Provider"
 say 'points at Vekil, a gateway that decides where each request goes.'
 pe 'orka provider get semantic-router'
-
 pe 'cat routing.yaml'
 say 'Jev, a classifier, reads each request and recommends lightweight or powerful.'
 say 'If Jev cannot be reached, the request goes to the powerful model.'
@@ -171,7 +170,6 @@ pe 'orka task create -f engineering-routed.yaml'
 pe 'orka task wait "$ENGINEERING_ROUTED" --timeout 10m'
 story collect routed engineering
 pe 'orka task result "$ENGINEERING_ROUTED" | tail -n 8'
-
 story checkout routed
 pe 'check_tests routed'
 story finish-tests routed

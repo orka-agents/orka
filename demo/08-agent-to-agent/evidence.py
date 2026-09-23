@@ -60,7 +60,9 @@ def reply(a2a, result):
     require(len(parts) == 1 and isinstance(parts[0].get("text"), str), "expected one text answer")
     answer = parts[0]["text"]
     require(answer.strip() and answer.strip() == result["result"].strip(), "A2A and Orka returned different answers")
-    require(all(re.search(pattern, answer, re.IGNORECASE) for pattern in (r"\b18\b", r"\b6\b", r"\btomorrow\b")),
+    # The request no longer asks for digits, so accept the numbers as words too.
+    require(all(re.search(pattern, answer, re.IGNORECASE)
+                for pattern in (r"\b(18|eighteen)\b", r"\b(6|six)\b", r"\btomorrow\b")),
             "the answer did not retain the supplied quantities and delivery timing")
     return answer
 

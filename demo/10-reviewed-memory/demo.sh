@@ -110,7 +110,6 @@ orka memory list --limit 200 -o json >raw/memories-applied.json
 orka memory list --tags warehouse-returns -o json >raw/memories-tagged.json
 check_evidence applied
 pe "orka memory list"
-
 ok "One shared note, and it still names the proposal it came from."
 
 chapter "5. A fresh agent knows it now"
@@ -124,7 +123,6 @@ kubectl -n "$ORKA_NAMESPACE" get agent demo-memory-reader -o json >raw/reader-ag
 check_evidence summary
 pe "orka task events $after --type ToolCallStarted --type ToolCallCompleted --type ToolCallFailed"
 ok "Dock 3 and the right label, from the reviewed note alone."
-
 
 say "Every step above is a record, and the records link to each other."
 pe "cat evidence.txt"

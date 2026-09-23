@@ -132,7 +132,7 @@ pe "orka task status healthz-implement"
 pr=$(gh pr list --repo sozercan/orka-demo-inventory --head "$branch" --json url --jq '.[0].url')
 assert_pr "$pr"
 pe "pr_view $pr"
-ok "The change is on GitHub. The agent that made it never held a Git token."
+ok "The change is on GitHub. None of the checked credential variables was in the agent's host."
 
 chapter "The workspace goes to sleep"
 
@@ -182,9 +182,7 @@ kubectl -n "$ORKA_NAMESPACE" get task healthz-follow-up -o json >"$rendered/foll
 follow_up_delivery=$(jq -r '.status.delivery.state' "$rendered/follow-up-task.json")
 [[ $follow_up_delivery == NoChange ]] || { bad "the follow-up changed the published tree"; exit 1; }
 pe "orka task result healthz-follow-up"
-
 pe "orka task status healthz-follow-up"
-
 ok "The agent found yesterday's endpoint. Delivery NoChange confirms it had no new changes to publish."
 
 chapter "Clean up"
