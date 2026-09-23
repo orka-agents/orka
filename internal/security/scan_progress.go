@@ -11,6 +11,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 // StageProgress counts one scan run's Tasks for a single pipeline stage.
@@ -49,6 +50,13 @@ func ScanStageLabel(stage string) string {
 	default:
 		return stage
 	}
+}
+
+// ScanRunOwnsTask reports whether a Task belongs to this scan run: it must
+// carry the run's ID label and be controlled by the RepositoryScan that
+// admitted the run. Labels alone are mutable and do not prove membership.
+func ScanRunOwnsTask(run *store.ScanRun, scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task) bool {
+	return scanRunOwnsTask(run, scan, task)
 }
 
 // IsActiveScanRunPhase reports whether a scan run is still in progress.

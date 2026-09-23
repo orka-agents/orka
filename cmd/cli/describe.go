@@ -125,13 +125,17 @@ func writeDescribeRows(w io.Writer, rows []describeRow, indent, width int) {
 		}
 		label := labels[i] + ":"
 		valueIndent := indent + labelWidth + 1
-		lines := wrapText(sanitizeTerminalText(row.Value), max(width-valueIndent, 20))
+		lines := wrapText(sanitizeTerminalTextKeepNewlines(row.Value), max(width-valueIndent, 20))
 		for i, line := range lines {
-			if i == 0 {
+			switch {
+			case i == 0:
 				fmt.Fprintf(w, "%s%-*s %s\n", pad, labelWidth, label, line) //nolint:errcheck
-				continue
+			case line == "":
+				// Blank lines in a value stay blank rather than indented.
+				fmt.Fprintln(w) //nolint:errcheck
+			default:
+				fmt.Fprintf(w, "%s%s\n", strings.Repeat(" ", valueIndent), line) //nolint:errcheck
 			}
-			fmt.Fprintf(w, "%s%s\n", strings.Repeat(" ", valueIndent), line) //nolint:errcheck
 		}
 	}
 }
@@ -196,6 +200,20 @@ func fixedColumnsWidth(headers []string, rows [][]string) int {
 		total += width + 2
 	}
 	return total
+}
+
+// sanitizeTerminalTextKeepNewlines strips control runes from a text block
+// while keeping its line and tab structure.
+func sanitizeTerminalTextKeepNewlines(value string) string {
+	var b strings.Builder
+	for _, r := range value {
+		if r == '\n' || r == '\t' {
+			b.WriteRune(r)
+			continue
+		}
+		b.WriteString(sanitizeTerminalText(string(r)))
+	}
+	return b.String()
 }
 
 // truncateToWidth shortens a single-line cell to width runes, ending with an

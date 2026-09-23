@@ -115,6 +115,40 @@ func TestTaskEventsTailKeepsLastMatchingEvents(t *testing.T) {
 	if len(events) != 1 || !strings.HasSuffix(anyString(events[0].(map[string]any)["summary"]), "x") {
 		t.Fatalf("json tail output is truncated or wrong: %s", jsonOut)
 	}
+	// The envelope keeps the caller's cursor, not the last page's.
+	if int64Field(resp, "afterSeq") != 0 || int64Field(resp, "latestSeq") != 1200 {
+		t.Fatalf("tail envelope cursor changed: afterSeq=%v latestSeq=%v", resp["afterSeq"], resp["latestSeq"])
+	}
+}
+
+func TestSessionEventsCapTheTaskColumn(t *testing.T) {
+	t.Setenv("COLUMNS", "100")
+	long := strings.Repeat("very-long-task-name-", 8)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"events": []map[string]any{{ //nolint:errcheck
+			"seq": 1, "taskName": long, "taskSeq": 1, "type": "ModelMessage", "severity": "info", "summary": strings.Repeat("y", 200),
+		}}})
+	}))
+	defer srv.Close()
+	out, err := runCLI(t, srv.URL, "session", "events", "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
+		if len([]rune(line)) > 100 {
+			t.Fatalf("session event row wider than the terminal (%d):\n%s", len([]rune(line)), out)
+		}
+	}
+	if strings.Contains(out, long) {
+		t.Fatalf("task column was not capped:\n%s", out)
+	}
+	wide, err := runCLI(t, srv.URL, "session", "events", "s1", "--wide")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(wide, long) {
+		t.Fatalf("--wide should print the full task name:\n%s", wide)
+	}
 }
 
 func TestTaskEventsTableFitsTerminalUnlessWide(t *testing.T) {

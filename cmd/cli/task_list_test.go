@@ -148,7 +148,7 @@ func TestWatchLoopReprintsOnlyWhenTheFrameChanges(t *testing.T) {
 	frames := []watchFrame{{Key: "a", Text: "A 1s\n"}, {Key: "a", Text: "A 2s\n"}, {Key: "b", Text: "B 3s\n"}, {Key: "b", Text: "B 4s\n"}}
 	var out strings.Builder
 	calls := 0
-	err := watchLoop(context.Background(), &out, time.Millisecond, func(context.Context) (watchFrame, error) {
+	err := watchLoop(context.Background(), &out, time.Millisecond, outputTable, func(context.Context) (watchFrame, error) {
 		frame := frames[calls]
 		calls++
 		frame.Done = calls == len(frames)
@@ -166,11 +166,31 @@ func TestWatchLoopReprintsOnlyWhenTheFrameChanges(t *testing.T) {
 	}
 }
 
+func TestWatchLoopUsesFormatAwareSeparators(t *testing.T) {
+	for format, want := range map[string]string{outputJSON: "{\"a\":1}\n{\"a\":2}\n", outputYAML: "a: 1\n---\na: 2\n"} {
+		var out strings.Builder
+		calls := 0
+		frames := map[string][]string{outputJSON: {"{\"a\":1}\n", "{\"a\":2}\n"}, outputYAML: {"a: 1\n", "a: 2\n"}}[format]
+		err := watchLoop(context.Background(), &out, time.Millisecond, format, func(context.Context) (watchFrame, error) {
+			frame := watchFrame{Key: frames[calls], Text: frames[calls]}
+			calls++
+			frame.Done = calls == len(frames)
+			return frame, nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out.String() != want {
+			t.Fatalf("%s watch output = %q, want %q", format, out.String(), want)
+		}
+	}
+}
+
 func TestWatchLoopStopsOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var out strings.Builder
 	calls := 0
-	err := watchLoop(ctx, &out, time.Millisecond, func(context.Context) (watchFrame, error) {
+	err := watchLoop(ctx, &out, time.Millisecond, outputTable, func(context.Context) (watchFrame, error) {
 		calls++
 		if calls == 2 {
 			cancel()

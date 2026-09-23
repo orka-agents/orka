@@ -962,9 +962,18 @@ func (h *Handlers) GetSecurityScanProgress(c fiber.Ctx) error {
 	); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list scan tasks: %v", err))
 	}
+	// Labels are mutable, so only Tasks controlled by the RepositoryScan that
+	// admitted this run count; an unrelated Task carrying the same labels
+	// cannot add counts or names to another user's scan progress.
+	owned := make([]corev1alpha1.Task, 0, len(tasks.Items))
+	for i := range tasks.Items {
+		if security.ScanRunOwnsTask(run, scan, &tasks.Items[i]) {
+			owned = append(owned, tasks.Items[i])
+		}
+	}
 	return c.JSON(SecurityScanProgressResponse{
 		Scan:     *run,
-		Stages:   security.ScanStageProgress(tasks.Items),
+		Stages:   security.ScanStageProgress(owned),
 		Complete: !security.IsActiveScanRunPhase(run.Phase),
 	})
 }

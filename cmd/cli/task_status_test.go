@@ -124,6 +124,33 @@ func TestTaskStatusFailedTaskShowsReasonByDefault(t *testing.T) {
 	}
 }
 
+func TestTaskStatusFailedContainerTaskShowsControllerMessage(t *testing.T) {
+	srv := taskStatusServer(t, map[string]any{
+		"metadata": map[string]any{"name": "build", "namespace": "default"},
+		"spec":     map[string]any{"type": "container", "image": "golang:1.27"},
+		"status": map[string]any{
+			"phase":            "Failed",
+			"message":          "Job has reached the specified backoff limit",
+			"executionOutcome": map[string]any{"reason": "BackoffLimitExceeded", "message": "container exited with code 1"},
+		},
+	})
+	defer srv.Close()
+	out, err := runCLI(t, srv.URL, "task", "status", "build")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "BackoffLimitExceeded: container exited with code 1") {
+		t.Fatalf("container failure detail missing:\n%s", out)
+	}
+	jsonOut, err := runCLI(t, srv.URL, "task", "status", "build", "-o", "json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(jsonOut, "backoff limit") || strings.Contains(jsonOut, "executionOutcome") {
+		t.Fatalf("-o json projection changed:\n%s", jsonOut)
+	}
+}
+
 func TestTaskStatusUnknownOutcomeKeepsReplayPolicyInDefaultView(t *testing.T) {
 	srv := taskStatusServer(t, map[string]any{
 		"metadata": map[string]any{"name": "uncertain", "namespace": "default"},

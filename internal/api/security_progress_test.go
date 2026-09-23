@@ -28,16 +28,27 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
+const scanProgressScanUID = "scan-1-uid"
+
 func scanProgressTask(name, scanID, stage string, phase corev1alpha1.TaskPhase) *corev1alpha1.Task {
+	controller := true
 	return &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "demo", Labels: map[string]string{
 			labels.LabelSecurityTarget: "scan-1",
 			labels.LabelSecurityScanID: scanID,
 			labels.LabelSecurityStage:  stage,
-		}},
+		}, OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryScan", Name: "scan-1", UID: scanProgressScanUID, Controller: &controller,
+		}}},
 		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
 		Status: corev1alpha1.TaskStatus{Phase: phase},
 	}
+}
+
+func scanProgressScan() *corev1alpha1.RepositoryScan {
+	scan := securityAuthzTestRepositoryScan("scan-1", securityTestRepoURL)
+	scan.UID = scanProgressScanUID
+	return scan
 }
 
 func setupScanProgressHandlers(t *testing.T, objs ...runtime.Object) (*fiber.App, *Handlers) {
@@ -55,9 +66,14 @@ func setupScanProgressHandlers(t *testing.T, objs ...runtime.Object) (*fiber.App
 }
 
 func TestGetSecurityScanProgressGroupsRunTasksByStage(t *testing.T) {
-	scan := securityAuthzTestRepositoryScan("scan-1", securityTestRepoURL)
+	scan := scanProgressScan()
+	// A Task that merely copies the labels but is not controlled by the
+	// RepositoryScan must not be counted or named.
+	impostor := scanProgressTask("impostor-review", "run-1", security.StageReview, corev1alpha1.TaskPhaseFailed)
+	impostor.OwnerReferences = nil
 	app, handlers := setupScanProgressHandlers(t,
 		scan,
+		impostor,
 		scanProgressTask("goof-threat-model", "run-1", security.StageThreatModel, corev1alpha1.TaskPhaseSucceeded),
 		scanProgressTask("goof-mapper", "run-1", security.StageMapper, corev1alpha1.TaskPhaseSucceeded),
 		scanProgressTask("goof-review-1", "run-1", security.StageReview, corev1alpha1.TaskPhaseSucceeded),
@@ -102,7 +118,7 @@ func TestGetSecurityScanProgressGroupsRunTasksByStage(t *testing.T) {
 }
 
 func TestGetSecurityScanProgressReportsCompletion(t *testing.T) {
-	app, handlers := setupScanProgressHandlers(t, securityAuthzTestRepositoryScan("scan-1", securityTestRepoURL))
+	app, handlers := setupScanProgressHandlers(t, scanProgressScan())
 	require.NoError(t, handlers.securityStore.CreateScanRun(context.Background(), &store.ScanRun{
 		ID: "run-1", Namespace: "demo", RepositoryScan: "scan-1", Mode: "manual", Phase: "failed",
 	}))

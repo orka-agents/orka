@@ -71,7 +71,7 @@ exits when the scan finishes: exit code 0 when it succeeded, 1 when it failed.`,
 				return nil
 			}
 			var final map[string]any
-			err = watchLoop(ctx, cmd.OutOrStdout(), interval, func(ctx context.Context) (watchFrame, error) {
+			err = watchLoop(ctx, cmd.OutOrStdout(), interval, format, func(ctx context.Context) (watchFrame, error) {
 				progress, err := fetch(ctx)
 				if err != nil {
 					return watchFrame{}, err
@@ -148,11 +148,11 @@ func scanRunSucceeded(phase string) bool {
 func scanProgressStateKey(progress map[string]any) string {
 	scan := nestedMap(progress, "scan")
 	stages := anySliceToMaps(progress["stages"])
-	parts := make([]string, 0, 4+len(stages))
+	parts := make([]string, 0, len(stages))
 	parts = append(parts,
 		firstString(scan, "phase"),
-		anyString(scan["reviewedSliceCount"]) + "/" + anyString(scan["sliceCount"]),
-		anyString(scan["acceptedFindings"]) + "/" + anyString(scan["droppedFindings"]),
+		anyString(scan["reviewedSliceCount"])+"/"+anyString(scan["sliceCount"]),
+		anyString(scan["acceptedFindings"])+"/"+anyString(scan["droppedFindings"]),
 		firstString(scan, "errorMessage"),
 	)
 	for _, stage := range stages {

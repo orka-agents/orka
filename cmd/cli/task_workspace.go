@@ -417,7 +417,7 @@ session generation, verified remote commit) for tracing a problem.`,
 				return printTaskRuntimeStatusTable(cmd, status)
 			}
 			writeIntent := strings.EqualFold(nestedString(*detail, "spec", "workspace", "intent"), string(corev1alpha1.WorkspaceIntentWrite))
-			return printTaskRuntimeStatusSummary(cmd, status, writeIntent)
+			return printTaskRuntimeStatusSummary(cmd, status, taskFailureReason(status, *detail), writeIntent)
 		},
 	}
 	cmd.Flags().BoolVar(&verbose, "verbose", false, "Show execution and runtime-pool details as well")
@@ -429,7 +429,7 @@ session generation, verified remote commit) for tracing a problem.`,
 // creating a Task: whether it finished, and where the change went. Delivery
 // rows appear only for write-intent workspaces (or once delivery status
 // exists), and a failed or unknown outcome shows its reason.
-func printTaskRuntimeStatusSummary(cmd *cobra.Command, status map[string]any, writeIntent bool) error {
+func printTaskRuntimeStatusSummary(cmd *cobra.Command, status map[string]any, reason string, writeIntent bool) error {
 	execution := nestedMap(status, "execution")
 	delivery := nestedMap(status, "delivery")
 	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
@@ -447,7 +447,7 @@ func printTaskRuntimeStatusSummary(cmd *cobra.Command, status map[string]any, wr
 			rows = append(rows, [2]string{labelPullRequest, pr})
 		}
 	}
-	if reason := taskFailureReason(status); reason != "" {
+	if reason != "" {
 		rows = append(rows, [2]string{labelReason, reason})
 	}
 	for _, row := range rows {
@@ -460,10 +460,16 @@ func printTaskRuntimeStatusSummary(cmd *cobra.Command, status map[string]any, wr
 }
 
 // taskFailureReason returns a one-line reason for a Task that failed, was
-// cancelled, or ended with an unknown outcome, and nothing otherwise.
-func taskFailureReason(status map[string]any) string {
+// cancelled, or ended with an unknown outcome, and nothing otherwise. The
+// safe status projection carries the ACP execution and delivery details;
+// container and native AI Tasks record their failure in the Task's
+// top-level status message or workload execution outcome, which are read
+// from the full Task so the short view shows the controller's error.
+func taskFailureReason(status map[string]any, task map[string]any) string {
 	execution := nestedMap(status, "execution")
 	delivery := nestedMap(status, "delivery")
+	taskStatus := nestedMap(task, "status")
+	workload := nestedMap(taskStatus, "executionOutcome")
 	phase := anyString(status["phase"])
 	failed := phase == string(corev1alpha1.TaskPhaseFailed) || phase == string(corev1alpha1.TaskPhaseCancelled) ||
 		execution["outcome"] == executionOutcomeUnknown || execution["state"] == executionOutcomeUnknown ||
@@ -473,12 +479,18 @@ func taskFailureReason(status map[string]any) string {
 		return ""
 	}
 	reason := anyString(execution["reason"])
+	if reason == "" {
+		reason = anyString(workload["reason"])
+	}
 	message := anyString(execution["message"])
 	if message == "" {
 		message = anyString(delivery["message"])
 	}
 	if message == "" {
-		message = anyString(status["message"])
+		message = anyString(workload["message"])
+	}
+	if message == "" {
+		message = anyString(taskStatus["message"])
 	}
 	if reason == "" && message == "" {
 		if outcome := anyString(execution["outcome"]); outcome != "" {

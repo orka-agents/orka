@@ -70,6 +70,19 @@ func TestPrintDescribeOmitsEmptyWrapsAndIndentsSections(t *testing.T) {
 	}
 }
 
+func TestPrintDescribeKeepsLineBreaksInValues(t *testing.T) {
+	cmd := &cobra.Command{}
+	var out strings.Builder
+	cmd.SetOut(&out)
+	if err := printDescribe(cmd, []describeRow{{Label: "Prompt", Value: "line1\nline2\x1b[31m\n\nline4"}}); err != nil {
+		t.Fatal(err)
+	}
+	want := "Prompt: line1\n        line2[31m\n\n        line4\n"
+	if out.String() != want {
+		t.Fatalf("describe output = %q, want %q", out.String(), want)
+	}
+}
+
 func TestPrintDescribeSanitizesLabels(t *testing.T) {
 	cmd := &cobra.Command{}
 	var out strings.Builder

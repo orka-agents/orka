@@ -30,10 +30,26 @@ type watchFrame struct {
 // watchRender produces one frame of a watched view.
 type watchRender func(ctx context.Context) (watchFrame, error)
 
+// watchSeparator returns what is printed between two frames. Table output
+// gets a timestamp line for people; json frames are concatenated documents
+// a streaming decoder reads one after another, and yaml frames are
+// separated by a bare document marker.
+func watchSeparator(format string) func() string {
+	switch format {
+	case outputJSON:
+		return func() string { return "" }
+	case outputYAML:
+		return func() string { return "---\n" }
+	default:
+		return func() string { return "\n--- " + time.Now().Format(time.RFC3339) + "\n" }
+	}
+}
+
 // watchLoop reprints a view whenever its state key changes, with a
-// timestamp line between frames, until the view reports it is done or the
-// user interrupts with Ctrl-C. An interrupt is not an error.
-func watchLoop(ctx context.Context, out io.Writer, interval time.Duration, render watchRender) error {
+// format-aware separator between frames, until the view reports it is done
+// or the user interrupts with Ctrl-C. An interrupt is not an error.
+func watchLoop(ctx context.Context, out io.Writer, interval time.Duration, format string, render watchRender) error {
+	separator := watchSeparator(format)
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if interval <= 0 {
@@ -54,7 +70,7 @@ func watchLoop(ctx context.Context, out io.Writer, interval time.Duration, rende
 		}
 		if first || frame.Key != last {
 			if !first {
-				fmt.Fprintf(out, "\n--- %s\n", time.Now().Format(time.RFC3339)) //nolint:errcheck
+				fmt.Fprint(out, separator()) //nolint:errcheck
 			}
 			fmt.Fprint(out, frame.Text) //nolint:errcheck
 			if !strings.HasSuffix(frame.Text, "\n") {

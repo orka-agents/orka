@@ -174,6 +174,30 @@ func toAnySlice(items []map[string]any) []any {
 	return out
 }
 
+func TestTaskApproveWithFullIDPostsDirectly(t *testing.T) {
+	var requests []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		if r.Method == http.MethodGet {
+			// A least-privilege approver may not read the task at all.
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"id": approvalFullID, "status": "approved", "decisionActor": "approver"}) //nolint:errcheck
+	}))
+	defer srv.Close()
+	out, err := runCLI(t, srv.URL, "task", "approve", "fibey", approvalFullID)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if len(requests) != 1 || !strings.HasPrefix(requests[0], "POST ") {
+		t.Fatalf("full ID should post directly, requests = %v", requests)
+	}
+	if !strings.Contains(out, "approved") {
+		t.Fatalf("decision output:\n%s", out)
+	}
+}
+
 func TestTaskApproveSendsFullIDForPrefixAndPrintsDecision(t *testing.T) {
 	var decided string
 	srv := approvalsServer(t, approvalFixtures(time.Now().Add(9*time.Minute)), &decided)

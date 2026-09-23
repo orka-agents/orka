@@ -110,14 +110,26 @@ request. The full ID is sent to the server.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := newClientFromCmd(cmd)
-			approvalID, err := resolveApprovalID(context.Background(), c, args[0], args[1])
-			if err != nil {
-				return err
-			}
 			body, _ := json.Marshal(map[string]string{"decision": decision, "reason": reason})
-			path := "/api/v1/tasks/" + url.PathEscape(args[0]) +
-				"/approvals/" + url.PathEscape(approvalID) + "/decision"
-			result, err := c.DoJSON(context.Background(), http.MethodPost, path, nil, body)
+			decide := func(approvalID string) (any, error) {
+				path := "/api/v1/tasks/" + url.PathEscape(args[0]) +
+					"/approvals/" + url.PathEscape(approvalID) + "/decision"
+				return c.DoJSON(context.Background(), http.MethodPost, path, nil, body)
+			}
+			// A full ID goes straight to the decision endpoint, so a caller
+			// whose permissions cover decisions but not reading the task keeps
+			// working. Only an unknown ID is treated as a prefix and resolved
+			// against the task's approval list.
+			result, err := decide(args[1])
+			if err != nil && strings.Contains(err.Error(), "HTTP 404") {
+				approvalID, resolveErr := resolveApprovalID(context.Background(), c, args[0], args[1])
+				if resolveErr != nil {
+					return resolveErr
+				}
+				if approvalID != args[1] {
+					result, err = decide(approvalID)
+				}
+			}
 			if err != nil {
 				return err
 			}
@@ -374,6 +386,8 @@ func fetchEventsTail(ctx context.Context, c *client.Client, path string, after i
 	if kept == nil {
 		kept = []any{}
 	}
+	// The envelope describes the caller's request, not the last page read.
+	last["afterSeq"] = after
 	last["events"] = kept
 	return last, nil
 }
@@ -455,7 +469,10 @@ func appendRepeatedTypes(path string, query map[string]string, eventTypes []stri
 	return path
 }
 
-const eventSummaryMinWidth = 24
+const (
+	eventSummaryMinWidth    = 24
+	eventTaskColumnMaxWidth = 32
+)
 
 func printExecutionEventsTable(cmd *cobra.Command, value any, includeTask, wide bool) error {
 	m, _ := value.(map[string]any)
@@ -470,13 +487,22 @@ func printExecutionEventsTable(cmd *cobra.Command, value any, includeTask, wide 
 	if !includeTask {
 		headers = []string{"SEQ", "TASK", "TASKSEQ", "TYPE", columnSeverity}
 	}
+	// The task column is capped too, so one long Task name cannot push a
+	// row past the terminal on its own.
+	taskName := func(event map[string]any) string {
+		name := anyString(event["taskName"])
+		if wide {
+			return sanitizeTerminalText(name)
+		}
+		return truncateToWidth(name, eventTaskColumnMaxWidth)
+	}
 	fixedRows := make([][]string, 0, len(items))
 	for _, raw := range items {
 		event, _ := raw.(map[string]any)
 		if includeTask {
 			fixedRows = append(fixedRows, []string{numberString(event["seq"]), anyString(event["type"]), anyString(event["severity"])})
 		} else {
-			fixedRows = append(fixedRows, []string{numberString(event["seq"]), anyString(event["taskName"]), numberString(event["taskSeq"]), anyString(event["type"]), anyString(event["severity"])})
+			fixedRows = append(fixedRows, []string{numberString(event["seq"]), taskName(event), numberString(event["taskSeq"]), anyString(event["type"]), anyString(event["severity"])})
 		}
 	}
 	summaryWidth := max(terminalWidth()-fixedColumnsWidth(headers, fixedRows), eventSummaryMinWidth)
@@ -509,7 +535,7 @@ func printExecutionEventsTable(cmd *cobra.Command, value any, includeTask, wide 
 				w,
 				"%s\t%s\t%s\t%s\t%s\t%s\n",
 				numberString(event["seq"]),
-				anyString(event["taskName"]),
+				taskName(event),
 				numberString(event["taskSeq"]),
 				anyString(event["type"]),
 				anyString(event["severity"]),

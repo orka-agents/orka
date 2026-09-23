@@ -9,6 +9,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -100,6 +101,62 @@ func TestTaskGetPrintsReadableViewByDefault(t *testing.T) {
 			"Delivery:", "VerifiedExact", "Publication branch:", "orka/add-healthz-a7f2b1e9", "Result:", "Added the endpoint."},
 		[]string{"resultRef", "creationTimestamp"},
 		"task", "get", "proxy-78055b2e")
+}
+
+func TestTaskGetReportsUnavailableResult(t *testing.T) {
+	task := map[string]any{
+		"metadata": map[string]any{"name": "t1", "namespace": "default"},
+		"spec":     map[string]any{"type": "ai", "ai": map[string]any{"provider": "openai", "model": "gpt-5.6"}},
+		"status":   map[string]any{"phase": "Succeeded", "resultRef": map[string]any{"available": true}},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/result") {
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprint(w, `{"error":"result read denied"}`) //nolint:errcheck
+			return
+		}
+		json.NewEncoder(w).Encode(task) //nolint:errcheck
+	}))
+	defer srv.Close()
+	out, err := runCLI(t, srv.URL, "task", "get", "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "Result:") || !strings.Contains(out, "unavailable") || !strings.Contains(out, "403") {
+		t.Fatalf("result failure not surfaced:\n%s", out)
+	}
+	if !strings.Contains(out, "Provider:") || !strings.Contains(out, "openai") {
+		t.Fatalf("spec.ai.provider not shown:\n%s", out)
+	}
+}
+
+func TestReadinessAbsentRendersFalse(t *testing.T) {
+	agent := map[string]any{
+		"metadata": map[string]any{"name": "new-agent", "namespace": "default"},
+		"spec":     map[string]any{"model": map[string]any{"name": "gpt-5.6"}},
+	}
+	provider := map[string]any{
+		"metadata": map[string]any{"name": "cold", "namespace": "default"},
+		"spec":     map[string]any{"type": "openai"},
+		"status":   map[string]any{"message": "secret missing"},
+	}
+	srv := jsonServer(t, map[string]any{"/api/v1/agents/new-agent": agent, "/api/v1/providers/cold": provider})
+	defer srv.Close()
+	for _, args := range [][]string{{"agent", "get", "new-agent"}, {"provider", "get", "cold"}} {
+		out, err := runCLI(t, srv.URL, args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for line := range strings.SplitSeq(out, "\n") {
+			if strings.HasPrefix(line, "Ready:") && strings.HasSuffix(line, "false") {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("%v should show Ready: false:\n%s", args, out)
+		}
+	}
 }
 
 func TestAgentGetPrintsReadableViewByDefault(t *testing.T) {

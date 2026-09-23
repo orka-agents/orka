@@ -342,7 +342,13 @@ func newTaskGetCmd() *cobra.Command {
 			// it lives behind a separate endpoint, so fetch it only for this
 			// view and only when the Task reports one.
 			if len(nestedMap(view, "status", "resultRef")) > 0 {
-				if result, err := c.GetTaskResult(context.Background(), args[0], client.GetOptions{Namespace: c.Namespace}); err == nil && result != nil {
+				result, err := c.GetTaskResult(context.Background(), args[0], client.GetOptions{Namespace: c.Namespace})
+				switch {
+				case err != nil:
+					// The rest of the view is still useful; say the result
+					// could not be read rather than pretending there is none.
+					view["result"] = "unavailable: " + err.Error()
+				case result != nil:
 					view["result"] = result.Result
 				}
 			}

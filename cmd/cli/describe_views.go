@@ -75,7 +75,7 @@ func taskDescribeRows(task map[string]any) []describeRow {
 		{Label: labelAgent, Value: nestedString(spec, "agentRef", "name")},
 		{Label: "Image", Value: firstString(spec, "image")},
 		{Label: "Model", Value: nestedString(spec, "ai", "model")},
-		{Label: labelProvider, Value: nestedString(spec, "ai", "providerRef", "name")},
+		{Label: labelProvider, Value: firstNonEmpty(nestedString(spec, "ai", "providerRef", "name"), nestedString(spec, "ai", "provider"))},
 		{Label: labelSession, Value: nestedString(spec, "sessionRef", "name")},
 		{Label: labelCreated, Value: formatTimestamp(nestedString(task, "metadata", "creationTimestamp"))},
 		{Label: "Started", Value: formatTimestamp(firstString(status, "startTime"))},
@@ -114,17 +114,13 @@ func agentDescribeRows(agent map[string]any) []describeRow {
 			instructions = "from ConfigMap " + joinNonEmpty(firstString(ref, "name"), firstString(ref, "key"), "/")
 		}
 	}
-	ready := ""
-	if value, ok := status["ready"].(bool); ok {
-		ready = anyString(value)
-	}
 	return []describeRow{
 		{Label: labelName, Value: nestedString(agent, "metadata", "name")},
 		{Label: labelNamespace, Value: nestedString(agent, "metadata", "namespace")},
 		{Label: "Model", Value: nestedString(spec, "model", "name")},
 		{Label: labelProvider, Value: provider},
 		{Label: "Runtime", Value: runtimeLabel},
-		{Label: labelReady, Value: ready},
+		{Label: labelReady, Value: readinessString(status["ready"])},
 		{Label: "Active tasks", Value: anyString(status["activeTasks"])},
 		{Label: "Tools", Value: nameList(spec["tools"])},
 		{Label: "Skills", Value: nameList(spec["skills"])},
@@ -135,11 +131,11 @@ func agentDescribeRows(agent map[string]any) []describeRow {
 func providerDescribeRows(provider map[string]any) []describeRow {
 	spec := nestedMap(provider, "spec")
 	status := nestedMap(provider, "status")
-	ready := ""
-	if value, ok := status["ready"].(bool); ok {
-		ready = anyString(value)
-	} else if value, ok := provider["ready"].(bool); ok {
-		ready = anyString(value)
+	ready := readinessString(status["ready"])
+	if _, flat := provider["ready"]; flat && len(status) == 0 {
+		// The restricted flat projection served to context-token callers
+		// carries readiness at the top level.
+		ready = readinessString(provider["ready"])
 	}
 	return []describeRow{
 		{Label: labelName, Value: genericRowName(provider)},
@@ -320,14 +316,10 @@ func agentRuntimeDescribeRows(runtime map[string]any) []describeRow {
 	capabilities := nestedMap(spec, "capabilities")
 	profile := nestedMap(capabilities, "profile")
 	policy := nestedMap(capabilities, "mcpPolicy")
-	ready := ""
-	if value, ok := status["ready"].(bool); ok {
-		ready = anyString(value)
-	}
 	return []describeRow{
 		{Label: labelName, Value: genericRowName(runtime)},
 		{Label: labelNamespace, Value: genericRowNamespace(runtime)},
-		{Label: labelReady, Value: ready},
+		{Label: labelReady, Value: readinessString(status["ready"])},
 		{Label: "Contract", Value: firstString(spec, "contractVersion")},
 		{Label: labelProvider, Value: joinNonEmpty(firstString(profile, "providerKind"), firstString(profile, "model"), "/")},
 		{Label: "Workspace intent", Value: firstString(profile, "workspaceIntent")},
@@ -557,6 +549,25 @@ func flatDescribeRows(object map[string]any) []describeRow {
 		}
 	}
 	return rows
+}
+
+// readinessString renders a readiness boolean, treating an absent value as
+// false: the API omits `ready` when it is false, and a missing Ready row
+// would hide the one negative state a person checks for.
+func readinessString(value any) string {
+	if b, ok := value.(bool); ok && b {
+		return "true"
+	}
+	return "false"
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func firstNonNil(m map[string]any, keys ...string) any {

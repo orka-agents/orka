@@ -226,17 +226,3 @@ func printThreatModel(cmd *cobra.Command, value any) error {
 	}
 	return nil
 }
-
-// sanitizeTerminalTextKeepNewlines strips control runes from a document
-// while keeping its line and tab structure.
-func sanitizeTerminalTextKeepNewlines(value string) string {
-	var b strings.Builder
-	for _, r := range value {
-		if r == '\n' || r == '\t' {
-			b.WriteRune(r)
-			continue
-		}
-		b.WriteString(sanitizeTerminalText(string(r)))
-	}
-	return b.String()
-}
