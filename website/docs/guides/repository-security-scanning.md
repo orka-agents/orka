@@ -140,7 +140,7 @@ validated before unvalidated, and titles are cut to the terminal width:
 ```console
 $ orka security finding list nodejs-goof --recommended --validation-status validated
 SEVERITY  VALIDATED  ID                TITLE                                                  FILE
-critical  yes        fnd_abd4f27383dc  Zip-slip via AdmZip.extractAllTo on POST /import       routes/import.js:42
+critical  yes        fnd_a9d4f27383dc  Zip-slip via AdmZip.extractAllTo on POST /import       routes/import.js:42
 critical  yes        fnd_4ceb0dc790e6  Unauthenticated command injection via exec('identify…  routes/index.js:118
 high      yes        fnd_11a364071e0b  Hard-coded express-session secret enables cookie for…  app.js:31
 ```

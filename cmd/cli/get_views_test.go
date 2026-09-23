@@ -142,40 +142,40 @@ func TestProviderGetPrintsReadableViewByDefault(t *testing.T) {
 
 func TestSecurityFindingGetAndPatchPrintReadableViews(t *testing.T) {
 	finding := map[string]any{
-		"id": "fnd_abd4f27383dc", "sliceId": "slc_1", "title": "Zip-slip via AdmZip.extractAllTo on POST /import",
+		"id": "fnd_a9d4f27383dc", "sliceId": "slc_1", "title": "Zip-slip via AdmZip.extractAllTo on POST /import",
 		"severity": "critical", "category": "path-traversal", "validationStatus": "validated", "state": "open",
 		"filePath": "routes/import.js", "line": 42, "summary": "Archive entries are extracted without path checks.",
 		"createdAt": "2026-09-23T08:00:00Z", "updatedAt": "2026-09-23T08:05:00Z",
 	}
 	proposal := map[string]any{
-		"id": "pp_1", "findingID": "fnd_abd4f27383dc", "status": "pr_opened", "branch": "orka/security-fix-1",
+		"id": "pp_1", "findingID": "fnd_a9d4f27383dc", "status": "pr_opened", "branch": "orka/security-fix-1",
 		"prURL": "https://github.com/example/app/pull/7", "taskName": "app-patch-1", "createdAt": "2026-09-23T09:00:00Z",
 	}
 	srv := jsonServer(t, map[string]any{
-		"GET /api/v1/security/findings/fnd_abd4f27383dc":         finding,
-		"POST /api/v1/security/findings/fnd_abd4f27383dc/patch":  proposal,
-		"GET /api/v1/security/findings/fnd_abd4f27383dc/patches": map[string]any{"items": []any{proposal}},
-		"POST /api/v1/security/findings/fnd_abd4f27383dc/pull-request": map[string]any{
+		"GET /api/v1/security/findings/fnd_a9d4f27383dc":         finding,
+		"POST /api/v1/security/findings/fnd_a9d4f27383dc/patch":  proposal,
+		"GET /api/v1/security/findings/fnd_a9d4f27383dc/patches": map[string]any{"items": []any{proposal}},
+		"POST /api/v1/security/findings/fnd_a9d4f27383dc/pull-request": map[string]any{
 			"prNumber": 7, "prURL": "https://github.com/example/app/pull/7", "status": "Open",
 		},
 	})
 	defer srv.Close()
 	assertReadableAndJSON(t, srv, finding,
-		[]string{"Title:", "Zip-slip", "Severity:", "critical", "Validation:", "validated", "Location:", "routes/import.js:42", "Summary:", "Archive entries", "Category:", "path-traversal", "ID:", "fnd_abd4f27383dc"},
+		[]string{"Title:", "Zip-slip", "Severity:", "critical", "Validation:", "validated", "Location:", "routes/import.js:42", "Summary:", "Archive entries", "Category:", "path-traversal", "ID:", "fnd_a9d4f27383dc"},
 		[]string{"sliceId", "updatedAt"},
-		"security", "finding", "get", "fnd_abd4f27383dc")
+		"security", "finding", "get", "fnd_a9d4f27383dc")
 	assertReadableAndJSON(t, srv, proposal,
 		[]string{"Status:", "pr_opened", "Branch:", "orka/security-fix-1", "Pull request:", "https://github.com/example/app/pull/7"},
-		nil, "security", "finding", "patch", "fnd_abd4f27383dc")
+		nil, "security", "finding", "patch", "fnd_a9d4f27383dc")
 
-	out, err := runCLI(t, srv.URL, "security", "finding", "patches", "fnd_abd4f27383dc")
+	out, err := runCLI(t, srv.URL, "security", "finding", "patches", "fnd_a9d4f27383dc")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out, "STATUS") || !strings.Contains(out, "BRANCH") || !strings.Contains(out, "PULL REQUEST") || !strings.Contains(out, "CREATED") || !strings.Contains(out, "pr_opened") {
 		t.Fatalf("patches table:\n%s", out)
 	}
-	out, err = runCLI(t, srv.URL, "security", "finding", "pr", "fnd_abd4f27383dc")
+	out, err = runCLI(t, srv.URL, "security", "finding", "pr", "fnd_a9d4f27383dc")
 	if err != nil {
 		t.Fatal(err)
 	}

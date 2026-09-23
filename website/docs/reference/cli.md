@@ -67,7 +67,7 @@ long text wrapped to the terminal, empty fields omitted. `-o json` and `-o yaml`
 full API object for scripts.
 
 ```console
-$ orka security finding get fnd_abd4f27383dc
+$ orka security finding get fnd_a9d4f27383dc
 Title:      Zip-slip via AdmZip.extractAllTo on POST /import
 Severity:   critical
 Validation: validated
@@ -78,7 +78,7 @@ Summary:    Archive entries are extracted without checking for path traversal, s
 Category:   path-traversal
 Confidence: high
 Repository: nodejs-goof
-ID:         fnd_abd4f27383dc
+ID:         fnd_a9d4f27383dc
 ```
 
 `orka security threat-model get` prints the Markdown document as text under a short
@@ -332,7 +332,7 @@ The findings table is sorted critical-first, then validated before unvalidated:
 ```console
 $ orka security finding list nodejs-goof --recommended
 SEVERITY  VALIDATED  ID                TITLE                                                  FILE
-critical  yes        fnd_abd4f27383dc  Zip-slip via AdmZip.extractAllTo on POST /import       routes/import.js:42
+critical  yes        fnd_a9d4f27383dc  Zip-slip via AdmZip.extractAllTo on POST /import       routes/import.js:42
 critical  yes        fnd_4ceb0dc790e6  Unauthenticated command injection via exec('identify…  routes/index.js:118
 high      no         fnd_11a364071e0b  Hard-coded express-session secret enables cookie for…  app.js:31
 ```
