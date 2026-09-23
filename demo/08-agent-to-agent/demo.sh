@@ -139,7 +139,8 @@ wait_event "$event_id" first dispatched
 first_task=$(jq -er '.taskName' raw/first-event.json)
 kubectl -n "$ORKA_NAMESPACE" get task "$first_task" -o json >raw/first-task.json
 python3 "$evidence" correlate raw/first-admission.json raw/first-event.json raw/first-task.json
-pe 'kubectl -n "$ORKA_NAMESPACE" get task "$first_task"'
+pe 'orka task get "$first_task"'
+
 ok "Accepted. Sam's app can check on it with the reference alone."
 
 chapter "Read the recommendation"

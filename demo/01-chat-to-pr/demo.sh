@@ -25,7 +25,7 @@ printf '{"permissions":{"defaultMode":"bypassPermissions"},"env":{"ANTHROPIC_SMA
 readme() {
   curl -fsS https://raw.githubusercontent.com/sozercan/orka-demo-inventory/main/README.md | sed -n '13,19p'
 }
-# tasks — one row per child Task, described by role rather than raw spec fields.
+# task_records — this run's child Tasks, kept off camera for the closing count.
 task_records() {
   local records
   records=$(kubectl -n "$ORKA_NAMESPACE" get tasks -l orka.ai/source=anthropic-proxy \
@@ -35,38 +35,6 @@ task_records() {
   # Retain each observation so the closing count includes what viewers saw.
   printf '%s\n' "$records" >>"$work/task-history.jsonl" || return
   printf '%s\n' "$records"
-}
-tasks() {
-  task_records | jq -r '
-    ["TASK","ROLE","PHASE"],
-    (.items[] | [
-      .metadata.name,
-      (if .spec.type == "container" then
-         "validate in " + (.spec.image // "the worker image")
-       elif .spec.agentRef.name == "codex-coder" then
-         (if .spec.workspace.intent == "write" then "implement (codex-coder)" else "inspect (codex-coder)" end)
-       elif .spec.agentRef.name == "claude-reviewer" then "review (claude-reviewer)"
-       elif .spec.agentRef.name == "analyst" then "analyse (analyst)"
-       else .spec.type + " (" + (.spec.agentRef.name // "-") + ")" end),
-      (.status.phase // "Pending")
-    ]) | @tsv' | column -t -s $'\t'
-}
-watch_tasks_by_role() {
-  local until=$1 interval=${2:-10} last="" now
-  while true; do
-    now=$(tasks 2>/dev/null || true)
-    if [[ $now != "$last" ]]; then
-      printf '%s── %s ──%s\n' "$C_DIM" "$(date -u +%H:%M:%S)" "$C_RESET"
-      printf '%s\n' "$now"
-      last=$now
-    fi
-    if eval "$until" >/dev/null 2>&1; then return 0; fi
-    sleep "$interval"
-  done
-}
-# last_message TASK — the agent's final progress message, one line.
-last_message() {
-  orka task events "$1" | grep ModelMessage | tail -n 1 | cut -c1-240
 }
 # pr_checks URL — title, state, branch, and CI result from GitHub itself.
 pr_checks() {
@@ -105,7 +73,7 @@ banner "Orka — from a chat message to a pull request" \
 
 say "Maya is a developer on the inventory team. Her service has no health check."
 say "She will ask for one in chat and end with a reviewed pull request."
-helpers_note readme, tasks, last_message, pr_checks
+helpers_note readme, pr_checks
 
 chapter "Maya has no model key"
 
@@ -145,12 +113,14 @@ ok "Sent. Claude Code is waiting for an answer; Orka is starting the work."
 chapter "Orka turns the chat into Tasks"
 
 say "Each row is a Task: one piece of work Orka runs and keeps a record of."
+say "AGENT says who did it: an Agent by name, or the image a check ran in."
 say "Orka decides how many to run and in what order. A Failed row needs"
 say "inspection; we will check the completed work before calling it done."
 say "Quiet stretches are cut from the recording."
 wait_for "the coordinator's first Task" \
   "task_records | jq -e '.items | length > 0'" 600
-watch_tasks_by_role "! kill -0 $claude_pid" 12
+watch_until "orka task list -l orka.ai/source=anthropic-proxy --since $started --watch" \
+  "task_records >/dev/null; ! kill -0 $claude_pid" 12
 wait "$claude_pid" || {
   bad "claude exited with an error"
   cat "$work/claude.err" >&2
@@ -186,10 +156,11 @@ review_count=$(jq --arg repo "$DEMO_REPO" --arg branch "$pr_branch" --arg commit
     .status.delivery.startingSHA == $commit)] | length' "$work/tasks.json")
 ((review_count > 0)) || { bad "no successful reviewer Task for this pull request's exact commit"; exit 1; }
 say "The coder worked in a checkout of the repository. Orka kept what it said."
-pe "last_message $coder"
+pe "orka task events $coder --type ModelMessage --tail 1"
 say "The coder never pushed. Orka's Publisher, which alone holds the Git"
 say "token, verified the files and published the branch. The Task has the receipt."
-pe "task_summary $coder"
+pe "orka task status $coder"
+
 ok "Delivery VerifiedExact: what reached GitHub is exactly what Orka checked."
 
 chapter "GitHub shows the pull request"

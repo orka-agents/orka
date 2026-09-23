@@ -28,9 +28,20 @@ if ! curl -fsS -m 2 "$router_url/healthz" >/dev/null 2>&1; then
   kubectl -n "$router_ns" port-forward service/orka-compat-router 8090:8080 >/dev/null 2>&1 &
   _router_pf=$!
 fi
+# Each team's own API, for the Task lists and for the direct-door refusal.
+# The router forwards only the model endpoints, so these go straight in.
+payments_api=http://127.0.0.1:8091
+inventory_api=http://127.0.0.1:8092
 _pay_pf=
-trap 'kill ${_router_pf:+$_router_pf} ${_pay_pf:+$_pay_pf} 2>/dev/null || true; stop_port_forward' EXIT
+_inv_pf=
+trap 'kill ${_router_pf:+$_router_pf} ${_pay_pf:+$_pay_pf} ${_inv_pf:+$_inv_pf} 2>/dev/null || true; stop_port_forward' EXIT
 wait_for "the router port-forward" "curl -fsS -m 2 $router_url/healthz" 60
+kubectl -n team-payments port-forward svc/orka-api 8091:8080 >/dev/null 2>&1 &
+_pay_pf=$!
+kubectl -n team-inventory port-forward svc/orka-api 8092:8080 >/dev/null 2>&1 &
+_inv_pf=$!
+wait_for "the payments API port-forward" "curl -fsS -m 2 $payments_api/healthz" 60
+wait_for "the inventory API port-forward" "curl -fsS -m 2 $inventory_api/healthz" 60
 
 # Claude Code resets terminal modes on exit when it owns a tty; a pipe keeps
 # those escape codes out of the recording without changing its output.
@@ -48,16 +59,11 @@ models_as() {
   case $who in alice) ns=team-payments; token=$ALICE ;; bob) ns=team-inventory; token=$BOB ;; esac
   orka models list --compat anthropic --server "$router_url" --namespace "$ns" --token "$token"
 }
-# team_task_records NAMESPACE — proxy Tasks created during these requests.
+# team_task_records NAMESPACE — proxy Tasks created during these requests,
+# kept off camera for the closing table.
 team_task_records() {
   kubectl get tasks -n "$1" -l orka.ai/source=anthropic-proxy -o json |
     jq --arg started "$started" '.items |= map(select(.metadata.creationTimestamp >= $started))'
-}
-# team_tasks NAMESPACE — this run's Tasks in one team's installation.
-team_tasks() {
-  team_task_records "$1" | jq -r '
-    ["TASK","TYPE","PHASE"],
-    (.items[] | [.metadata.name,.spec.type,(.status.phase // "Pending")]) | @tsv' | column -t -s $'\t'
 }
 
 request="Run a container task that prints today's date and tell me what it printed."
@@ -67,7 +73,7 @@ banner "Orka — two teams, one URL" \
 
 say "Alice is on the payments team, Bob on inventory. Different models, different"
 say "budgets, and they must never see each other's work. Both get one AI URL."
-helpers_note routes, models_as, team_tasks
+helpers_note routes, models_as
 
 chapter "Two teams, one door"
 
@@ -117,8 +123,9 @@ for team in payments inventory; do
     "$work/$team-tasks.json" >/dev/null || { bad "no successful container Task for $team"; exit 1; }
 done
 say "Each request became a Task in its own team's installation, and nowhere else."
-pe "team_tasks team-payments"
-pe "team_tasks team-inventory"
+say "Each team's Orka answers with its own token."
+pe "orka task list -s $payments_api -n team-payments -t \$ALICE --since $started"
+pe "orka task list -s $inventory_api -n team-inventory -t \$BOB --since $started"
 ok "Same words, two homes. Each team's Orka ran its own work on its own budget."
 
 chapter "Bob knocks on the wrong door"
@@ -130,16 +137,12 @@ grep -Fq 'provider "approved-models" not found in namespace "team-inventory"' mo
   { bad "the model request failed for a different reason"; exit 1; }
 ok "Refused, with no fallback. The inventory installation has no such model."
 say "And Bob going straight to the payments installation with his token:"
-kubectl -n team-payments port-forward svc/orka-api 8091:8080 >/dev/null 2>&1 &
-_pay_pf=$!
-wait_for "the payments API port-forward" "curl -fsS -m 2 http://127.0.0.1:8091/healthz" 60
-pex "orka task list --server http://127.0.0.1:8091 --namespace team-payments --token \$BOB 2>&1 | tee team-refusal.txt"
+pex "orka task list -s $payments_api -n team-payments -t \$BOB 2>&1 | tee team-refusal.txt"
 grep -Fq 'HTTP 403' team-refusal.txt && grep -Fq 'not allowed' team-refusal.txt &&
   grep -Fq 'team-payments' team-refusal.txt && grep -Fq 'team-inventory' team-refusal.txt ||
   { bad "the direct request did not produce the expected team-access refusal"; exit 1; }
-kill $_pay_pf 2>/dev/null || true
-_pay_pf=
 ok "Refused again. Every installation checks identity, not just the router."
+
 
 for team in payments inventory; do
   team_task_records "team-$team" >"$work/$team-tasks-after-refusals.json"

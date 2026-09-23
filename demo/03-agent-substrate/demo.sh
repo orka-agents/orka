@@ -89,15 +89,6 @@ request() {
     /^  sessionRef:/ {grab=2} /^      classRef:/ {grab=2} /^      restoreFrom:/ {grab=4} /^  prompt:/ {grab=99}
     grab > 0 {print; grab--}' "$1"
 }
-# lifecycle CLASS — what the class does when the agent stops.
-lifecycle() {
-  kubectl -n "$ORKA_NAMESPACE" get executionworkspaceclass "$1" -o json |
-    jq -r '"when the agent stops: " + .spec.lifecycle.defaultOnDetach + "   max lifetime: " + .spec.lifecycle.maxLifetime'
-}
-# workspace_state — the Orka workspace's state.
-workspace_state() {
-  printf 'workspace: %s\n' "$(ws_state "$ws")"
-}
 # checkpoint_status — phase and a short digest.
 checkpoint_status() {
   kubectl -n "$ORKA_NAMESPACE" get executionworkspacecheckpoint audit-checkpoint -o json |
@@ -109,7 +100,7 @@ banner "Orka — a save point for an agent" \
 
 say "Priya, on the security team, is auditing the inventory service. Nothing"
 say "should run while nobody works, and the findings must survive anything."
-helpers_note actors, workers, request, lifecycle, workspace_state, checkpoint_status
+helpers_note actors, workers, request, checkpoint_status
 
 chapter "Substrate keeps a pool of workers"
 
@@ -120,7 +111,7 @@ pe "workers"
 pe "actors"
 say "The platform team's class for this host says: sleep when the agent stops,"
 say "keep the data, and boot a fresh Actor from that data next time."
-pe "lifecycle substrate-session"
+pe "kubectl -n orka-system get executionworkspaceclass substrate-session"
 initial_actors=$(actor_count)
 initial_free_workers=$(free_workers)
 ((initial_actors == 0)) || { bad "the security workspace host is not idle"; exit 1; }
@@ -140,7 +131,7 @@ say "Orka's Publisher holds it, outside the sandbox."
 wait_task audit-start 1200
 pe "result audit-start"
 say "The Publisher verified the files and published the audit as a branch."
-pe "task_summary audit-start"
+pe "orka task status audit-start"
 pe "git ls-remote $DEMO_REPO refs/heads/$branch | cut -c1-12"
 published_audit audit-start "$branch" "$rendered/original-AUDIT.md"
 ok "Findings written by an agent with no Git token, published by Orka as a branch."
@@ -152,7 +143,7 @@ say "The agent is done. Substrate captures the Actor's data to storage, then"
 say "removes the Actor and retires the worker that hosted it. The pool gets a"
 say "clean replacement, so the next agent never inherits a used worker."
 wait_for "the workspace to suspend" "[[ \$(ws_state $ws) == Suspended ]]" 600
-pe "workspace_state"
+pe "kubectl -n orka-system get executionworkspace $ws"
 pe "actors"
 pe "workers"
 suspended_actors=$(actor_count)
@@ -196,7 +187,8 @@ fi
 audit_digest=$(shasum -a 256 "$rendered/original-AUDIT.md" | awk '{print $1}')
 match="identical file bytes (SHA-256 ${audit_digest:0:12})"
 ok "The audit came back from a deleted workspace, written by an Actor that is long gone."
-pe "task_summary audit-restore"
+pe "orka task status audit-restore"
+
 
 chapter "Clean up"
 

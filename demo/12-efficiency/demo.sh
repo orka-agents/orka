@@ -70,10 +70,6 @@ monitor_pid=$!
 cd "$run_dir"
 
 # --- on-camera helpers ---------------------------------------------------
-# instructions AGENT — the Agent's saved instructions, folded to the terminal.
-instructions() {
-  orka agent get "$1" -o json | jq -r .spec.systemPrompt.inline | fold -s -w 96
-}
 # run_batch DIR — create and wait for each customer Task, one at a time.
 # story.py's begin/collect hooks fire on the wrapped create and wait calls.
 run_batch() {
@@ -99,13 +95,13 @@ say "Twenty customers report double charges after a frozen checkout. Support nee
 say "twenty replies; engineering needs one fix. Dana's platform team runs it twice:"
 say "first on a hosted model, then with a router that prefers a small local model."
 say "The replies and the fix are checked the same way both times. Then the bill."
-helpers_note instructions, run_batch, check_tests
+helpers_note run_batch, check_tests
 
 chapter '1. Give each assistant its instructions'
 pe 'cat customers.txt'
 say 'An Agent holds the instructions for an assistant. Two Agents, two jobs.'
-pe 'instructions customer-support'
-pe 'instructions payments-engineer'
+pe 'orka agent get customer-support'
+pe 'orka agent get payments-engineer'
 ok 'Support replies in two factual sentences. Engineering fixes the bug and runs six tests.'
 
 chapter '2. Run everything on the hosted model'
@@ -139,7 +135,8 @@ ok 'A local model is up and idle, waiting for work.'
 chapter '4. Let a router choose the model'
 say "A Provider is Orka's connection to a model service. Support's Provider"
 say 'points at Vekil, a gateway that decides where each request goes.'
-pe 'orka provider get semantic-router -o json | jq ".spec | {type, baseURL}"'
+pe 'orka provider get semantic-router'
+
 pe 'cat routing.yaml'
 say 'Jev, a classifier, reads each request and recommends lightweight or powerful.'
 say 'If Jev cannot be reached, the request goes to the powerful model.'

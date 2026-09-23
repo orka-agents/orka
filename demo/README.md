@@ -42,13 +42,22 @@ These keep the recordings readable for someone who has never seen Orka.
 
 - Five nouns on screen: Provider, Agent, Task, Session, Publisher. Host objects
   (Sandbox, Actor) are shown but not taught. Tool appears only in 09 and 11.
-- The typed command is shorter than its output. Anything that needs `jq`,
+- Orka objects are shown with the `orka` CLI, not with helpers: `task list
+  --watch` follows the work, `task status` answers "did it finish and where
+  did the change go", `task events --type ... --tail 1` shows what an agent
+  said last, `task approvals` shows what is waiting for a person, and every
+  `get` prints a short field list. Build the CLI from a checkout that includes
+  [#672](https://github.com/orka-agents/orka/pull/672) or newer.
+- The typed command is shorter than its output. What is left for helpers is
+  outside Orka: GitHub, the supplier, the host. Anything that needs `jq`,
   `sed`, `awk`, or `column` is a shell function with a plain name, defined at
-  the top of the script and announced once with `helpers_note`.
-- Objects are shown as three or four fields, never a full status dump.
-  `task_summary` prints Task, Phase, Delivery, and Publication branch.
+  the top of the script and announced once with `helpers_note`. `head` may cap
+  long text on camera.
+- Objects are shown as a few fields, never a full status dump. `orka task
+  status` prints Task, Phase, Delivery, and Publication branch.
 - Model answers are capped: prompts ask for short output and `result` shows at
   most eight lines.
+
 - Prompts contain no apologies for the runtime. They say what to do, not what
   the sandbox lacks.
 - Narration is the bright text; commands are grey.

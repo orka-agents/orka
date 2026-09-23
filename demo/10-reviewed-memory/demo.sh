@@ -37,19 +37,6 @@ done
 jq -r '.spec.systemPrompt.inline' raw/reader-agent.json >reader-rules.txt
 
 # --- on-camera helpers ---------------------------------------------------
-# notes — how many shared notes these agents can see right now.
-notes() {
-  orka memory list --limit 200 -o json | tee "raw/memories-$1.json" | jq -r '"shared notes: \((.items // []) | length)"'
-}
-# tool_calls FILE — the tools an agent called, from its saved events.
-tool_calls() {
-  jq -r '[.events[] | select(.type == "ToolCallCompleted") | .toolName] | if length == 0 then "tool calls: none" else "tool calls: " + join(", ") end' "$1"
-}
-# proposal ID — the proposed note, where it came from, and its status.
-proposal() {
-  orka memory proposal get "$1" -o json | tee "raw/proposal-$2.json" |
-    jq -r '"text:     " + .content, "from:     " + .taskName, "status:   " + .status, "reviewer: " + (.reviewer // "-")' | fold -s -w 96
-}
 # answer FILE — the reader's answer.
 answer() {
   jq -r '.result | fromjson | .answer' "$1"
@@ -79,12 +66,12 @@ banner "Orka — a procedure the next agent can use" \
   "One agent proposes a warehouse note. Jordan reviews and publishes it. A fresh agent then answers from it, with the trail on record."
 say "Jordan runs the warehouse. An assistant just read the return procedure, and"
 say "the next assistant will need it too. Nothing becomes shared until Jordan says so."
-helpers_note notes, tool_calls, proposal, answer, reader_check
+helpers_note answer, reader_check
 
 chapter "1. Today's procedure"
 pe "cat procedure.txt"
 say "Memory here means saved team knowledge Orka hands to future work."
-pe "notes initial"
+pe "orka memory list"
 ok "No shared notes yet."
 
 chapter "2. The agent proposes a note"
@@ -98,9 +85,10 @@ target=$(jq -er '.items | select(length == 1) | .[0].id' raw/proposals.json)
 orka memory proposal get "$target" -o json >raw/proposal-pending.json
 orka memory list --limit 200 -o json >raw/memories-before.json
 check_evidence author
-pe "tool_calls raw/author-events.json"
+say "The Task's events show which tools the agent called."
+pe "orka task events $author --type ToolCallCompleted"
 say "The remember tool files a proposal. A person decides whether to publish it."
-pe "proposal $target pending"
+pe "orka memory proposal get $target"
 check_evidence author
 ok "A pending proposal with its text and the Task it came from. Nothing is shared."
 
@@ -121,14 +109,15 @@ pe "orka memory proposal review $target --status accepted --note 'Matches the op
 orka memory proposal get "$target" -o json >raw/proposal-accepted.json
 orka memory list --limit 200 -o json >raw/memories-accepted.json
 check_evidence accepted
-pe "notes accepted"
+pe "orka memory list"
 say "Accepting records the decision. Publishing is a second, explicit step."
 pe "orka memory proposal apply $target | tee raw/apply-response.txt"
 orka memory proposal get "$target" -o json >raw/proposal-applied.json
 orka memory list --limit 200 -o json >raw/memories-applied.json
 orka memory list --tags warehouse-returns -o json >raw/memories-tagged.json
 check_evidence applied
-pe "notes applied"
+pe "orka memory list"
+
 ok "One shared note, and it still names the proposal it came from."
 
 chapter "5. A fresh agent knows it now"

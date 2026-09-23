@@ -55,22 +55,9 @@ simulator_port=$(sed -n 's/.*127\.0\.0\.1:\([0-9]*\) ->.*/\1/p' raw/simulator-fo
 receipts() { curl -fsS --max-time 10 "http://127.0.0.1:$simulator_port/counts?runID=$task"; }
 
 # --- on-camera helpers ---------------------------------------------------
-# policy — what Fibey may do alone and what needs a person.
-policy() {
-  jq -r '.items[] | select(.kind == "AgentRuntime") | .spec.capabilities.mcpPolicy |
-    "may call:          " + (.allowedTools | join(", ")), "needs approval:    " + (.approvalRequiredTools | join(", "))' raw/installation.json
-}
 # counts FILE — the work-order service's own counters for this run.
 counts() {
   jq -r '"inventory lookups: \(.inventoryReads // 0)", "work orders:       \(.workOrderExecutions)"' "$1"
-}
-# proposed — the exact action waiting for a decision.
-proposed() {
-  jq -r '.approvals[0] | "action:  " + .targetTool, "asset:   " + .targetArgsPreview.asset, "summary: " + .targetArgsPreview.summary, "status:  " + .status + " (execution " + .executionOutcome + ")"' raw/approval-pending.json
-}
-# decision — who decided, what, and why.
-decision() {
-  jq -r '"status: " + .status, "by:     " + .decisionActor, "reason: " + .decisionReason' raw/decision.json
 }
 receipts >raw/counts-initial.json
 python3 "$here/check.py" initial
@@ -104,7 +91,7 @@ banner 'Orka — Fibey investigates, a person approves the work' \
   'Fibey looks into a pump alert and proposes an inspection. Nothing happens until Lee, the shift lead, approves it.'
 say 'A pressure reading dropped after maintenance. Fibey, an AI assistant, may'
 say 'investigate. Lee, the shift lead, decides whether it may create a work order.'
-helpers_note policy, counts, proposed, decision
+helpers_note counts, wait_for_review
 
 chapter '1. An alert after maintenance'
 pe 'cat incident.txt'
@@ -113,8 +100,8 @@ ok 'One reading disagrees with everything else. Worth a look before touching any
 
 chapter '2. Fibey may look, but not act alone'
 say "A Tool is an action Fibey can ask Orka to carry out. The platform team's"
-say 'policy lets Fibey read inventory. Creating a work order needs a person.'
-pe 'policy'
+say 'runtime policy lets Fibey read inventory. Creating a work order needs a person.'
+pe 'orka agent-runtime get "$DEMO_FIBEY_RUNTIME"'
 pe 'counts raw/counts-initial.json'
 ok 'Zero work orders before we start.'
 
@@ -127,7 +114,8 @@ pe 'wait_for_review'
 ok 'A proposal is waiting. Fibey is paused inside the same Task.'
 
 chapter '4. Nothing has happened yet'
-pe 'proposed'
+say 'The Task lists what is waiting: the tool, its arguments, and how long Lee has.'
+pe 'orka task approvals "$task"'
 orka task get "$task" -o json >raw/task-before-decision.json
 orka task approvals "$task" -o json >raw/approval-before-decision.json
 receipts >raw/counts-before-decision.json
@@ -136,13 +124,19 @@ pe 'counts raw/counts-before-decision.json'
 ok 'One inventory lookup, zero work orders. Fibey asking did not authorize anything.'
 
 chapter '5. Lee approves'
+# The short ID is what `orka task approvals` shows: the first twelve
+# characters after the digest prefix. The CLI resolves it to the full ID.
 # Used by the command evaluated in pe below.
 # shellcheck disable=SC2034
 approval=$(jq -er '.approvals[0].id' raw/approval-before-decision.json)
+
+approval=${approval##*:}
+approval=${approval:0:12}
 say 'Lee reads the proposal and approves this inspection, with a reason.'
-pe 'orka task approve "$task" "$approval" --reason "Inspect the transmitter." -o json > raw/decision.json'
-pe 'decision'
+pe 'orka task approve "$task" "$approval" --reason "Inspect the transmitter."'
+orka task approvals "$task" "$approval" -o json >raw/decision.json
 ok 'The decision is on record: who, what, and why. Orka may now run the stored action.'
+
 
 chapter "6. The work order comes back to the same Task"
 pe 'wait_task "$task" 600'

@@ -341,7 +341,8 @@
           "marker": "1. An alert after maintenance",
           "title": "Read the incident before acting",
           "cue": "One reading disagrees with the rest",
-          "text": "One pressure sensor fell while the second gauge, flow, and vibration stayed normal. The transmitter was replaced during maintenance and has not been checked. Worth a look before touching anything. Short commands such as policy are shell helpers defined in this demo script."
+          "text": "One pressure sensor fell while the second gauge, flow, and vibration stayed normal. The transmitter was replaced during maintenance and has not been checked. Worth a look before touching anything. Short commands such as counts are shell helpers defined in this demo script."
+
         },
         {
           "marker": "2. Fibey may look, but not act alone",

@@ -223,21 +223,17 @@ trap stop_port_forward EXIT
 
 # --- on-camera helpers ------------------------------------------------
 # The rule for every demo: the typed command must be shorter than its output,
-# and a first-time viewer should never have to read jq, sed, or cut. These
-# helpers are typed by their plain names; each demo says so once with
-# `helpers_note`.
+# and a first-time viewer should never have to read jq, sed, or cut. Orka
+# objects are shown with the orka CLI itself (`task status`, `task list
+# --watch`, `task events --tail`, `finding get`, and so on); helpers remain
+# only for things outside Orka: GitHub, the supplier, the host. Each demo
+# names its helpers once with `helpers_note`.
 helpers_note() {
   aside "Short names such as $* stand in for long kubectl and jq commands; see demo/lib/demo.sh."
 }
 
-# task_summary NAME — the four rows of `orka task status` a viewer needs.
-task_summary() {
-  orka task status "$1" | awk -F'  +' '
-    $1 == "Task" || $1 == "Phase" || $1 == "Delivery" || $1 == "Publication branch" {
-      printf "%-20s %s\n", $1, $NF }'
-}
-
 # result NAME — the Task's final answer, capped so it fits the terminal.
+
 result() {
   orka task result "$1" | sed -n "1,${2:-8}p"
 }
@@ -311,28 +307,36 @@ wait_task() {
   fi
 }
 
-# watch_tasks "until-command" [interval] [label-selector] [columns]
-# Prints the task table whenever it changes, until the condition holds. The
-# recorder compresses the quiet stretches, so the viewer sees the workflow
-# advance instead of a spinner.
-watch_tasks() {
-  local until=$1 interval=${2:-10} selector=${3:-} last="" now
-  local columns=${4:-NAME:.metadata.name,TYPE:.spec.type,PHASE:.status.phase}
-  local cmd="kubectl -n $ORKA_NAMESPACE get tasks -o custom-columns=$columns --sort-by=.metadata.creationTimestamp"
-  [[ -n $selector ]] && cmd+=" -l $selector"
-  while true; do
-    now=$(eval "$cmd" 2>/dev/null || true)
-    if [[ $now != "$last" ]]; then
-      printf '%s── %s ──%s\n' "$C_DIM" "$(date -u +%H:%M:%S)" "$C_RESET"
-      printf '%s\n' "$now"
-      last=$now
+# watch_until "cmd --watch" "until-command" [interval]
+# Types and runs a watching command such as `orka task list --watch`, which
+# reprints its table on every change and would otherwise run until Ctrl-C.
+# The demo polls the condition instead of a person, then interrupts the
+# command the way a person would. The recorder compresses the quiet
+# stretches, so the viewer sees the workflow advance instead of a spinner.
+watch_until() {
+  local cmd=$1 until=$2 interval=${3:-5} pid
+  p "$cmd"
+  nap 0.4
+  eval "$cmd" &
+  pid=$!
+  until eval "$until" >/dev/null 2>&1; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid" || true
+      bad "the watch command exited before the demo's condition held"
+      return 1
     fi
-    if eval "$until" >/dev/null 2>&1; then
-      return 0
-    fi
+
     sleep "$interval"
   done
+  # The CLI handles the signal and exits cleanly; the subshell that ran the
+  # function follows. Interrupt the child first so its last frame is flushed.
+  pkill -TERM -P "$pid" 2>/dev/null || true
+  kill -TERM "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  printf '%s^C%s\n' "$C_DIM" "$C_RESET"
+  nap 1.2
 }
+
 
 # pr_url_from TEXT — the first GitHub pull request URL in a blob of text.
 pr_url_from() {

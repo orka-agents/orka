@@ -68,11 +68,6 @@ host() {
     end')
   [[ -n $out ]] && printf '%s\n' "$out" || echo "nothing running for this team"
 }
-# lifecycle CLASS — what the class does when the agent stops.
-lifecycle() {
-  kubectl -n "$ORKA_NAMESPACE" get executionworkspaceclass "$1" -o json |
-    jq -r '"when the agent stops: " + .spec.lifecycle.defaultOnDetach + "   max lifetime: " + .spec.lifecycle.maxLifetime'
-}
 # pod_keys POD — check known credential variables without returning values.
 pod_keys() {
   if ! kubectl -n "$runtime_ns" exec "$1" -- sh -c '
@@ -93,15 +88,14 @@ banner "Orka — a workspace that sleeps" \
 
 say "Maya, on the inventory team, wants a health check added today and wants"
 say "to look at the same files tomorrow. Nobody should pay for an idle agent."
-helpers_note request, lifecycle, host, pod_keys, pr_view
+helpers_note request, host, pod_keys, pr_view
 
 chapter "The platform team chose the lifecycle"
 
 say "A workspace class is a lifecycle the platform team saved. Maya asks for"
-say "it by name. This one says: when the agent stops, put its host to sleep"
-say "and keep the disk."
+say "it by name. ON DETACH is what happens when the agent stops: this one"
+say "says sleep, so the host goes away and the disk stays."
 pe "kubectl -n orka-system get executionworkspaceclasses"
-pe "lifecycle sandbox-session"
 say "The host is kubernetes-sigs Agent Sandbox. Here is what it currently runs."
 pe "host"
 
@@ -134,7 +128,7 @@ pe "result healthz-implement"
 say "The agent changed files but never pushed. Orka's Publisher, which alone"
 say "holds a Git token, verified the files, published the branch, and opened"
 say "the pull request. The Task has the receipt."
-pe "task_summary healthz-implement"
+pe "orka task status healthz-implement"
 pr=$(gh pr list --repo sozercan/orka-demo-inventory --head "$branch" --json url --jq '.[0].url')
 assert_pr "$pr"
 pe "pr_view $pr"
@@ -188,7 +182,8 @@ kubectl -n "$ORKA_NAMESPACE" get task healthz-follow-up -o json >"$rendered/foll
 follow_up_delivery=$(jq -r '.status.delivery.state' "$rendered/follow-up-task.json")
 [[ $follow_up_delivery == NoChange ]] || { bad "the follow-up changed the published tree"; exit 1; }
 pe "result healthz-follow-up"
-pe "task_summary healthz-follow-up"
+pe "orka task status healthz-follow-up"
+
 ok "The agent found yesterday's endpoint. Delivery NoChange confirms it had no new changes to publish."
 
 chapter "Clean up"
