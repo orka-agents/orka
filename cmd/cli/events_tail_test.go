@@ -151,6 +151,29 @@ func TestSessionEventsCapTheTaskColumn(t *testing.T) {
 	}
 }
 
+func TestSessionEventsFitAnEightyColumnTerminalWithLongTypes(t *testing.T) {
+	t.Setenv("COLUMNS", "80")
+	long := strings.Repeat("very-long-task-name-", 8)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"events": []map[string]any{{ //nolint:errcheck
+			"seq": 1, "taskName": long, "taskSeq": 1, "type": "WorkspacePreparationCompleted", "severity": "warning", "summary": strings.Repeat("y", 200),
+		}}})
+	}))
+	defer srv.Close()
+	out, err := runCLI(t, srv.URL, "session", "events", "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
+		if len([]rune(line)) > 80 {
+			t.Fatalf("session event row wider than 80 columns (%d):\n%s", len([]rune(line)), out)
+		}
+	}
+	if !strings.Contains(out, "WorkspacePreparationCompleted") {
+		t.Fatalf("event type must not be cut:\n%s", out)
+	}
+}
+
 func TestTaskEventsTableFitsTerminalUnlessWide(t *testing.T) {
 	srv, _ := eventsServer(t, eventFixtures(2))
 	defer srv.Close()
@@ -174,6 +197,31 @@ func TestTaskEventsTableFitsTerminalUnlessWide(t *testing.T) {
 	}
 	if strings.Contains(wide, "…") || !strings.Contains(wide, strings.Repeat("x", 300)) {
 		t.Fatalf("--wide cut the summary:\n%s", wide)
+	}
+}
+
+func TestTaskEventsShowModelMessageContent(t *testing.T) {
+	t.Setenv("COLUMNS", "100")
+	content := "Added GET /healthz returning 200 with the build version. " + strings.Repeat("Also refreshed the README. ", 6)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"events": []map[string]any{{ //nolint:errcheck
+			"seq": 7, "type": "ModelMessage", "severity": "info", "summary": "model returned message", "contentText": content,
+		}}, "latestSeq": 7})
+	}))
+	defer srv.Close()
+	out, err := runCLI(t, srv.URL, "task", "events", "proxy-1", "--type", "ModelMessage", "--tail", "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "model returned message") || !strings.Contains(out, "Added GET /healthz") || !strings.Contains(out, "…") {
+		t.Fatalf("default row should show truncated content:\n%s", out)
+	}
+	wide, err := runCLI(t, srv.URL, "task", "events", "proxy-1", "--wide")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(wide, strings.TrimSpace(content)) {
+		t.Fatalf("--wide should print the full content:\n%s", wide)
 	}
 }
 

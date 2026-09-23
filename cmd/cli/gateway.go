@@ -27,26 +27,29 @@ func newGatewayCmd() *cobra.Command {
 	}
 
 	gatewaySpec := crudResourceSpec{
-		Use:      cliGatewayCommand,
-		Short:    "Inspect Gateway adapter instances",
-		BasePath: "/api/v1/gateways",
-		Name:     cliGatewayCommand,
-		ReadOnly: true,
+		Use:          cliGatewayCommand,
+		Short:        "Inspect Gateway adapter instances",
+		BasePath:     "/api/v1/gateways",
+		Name:         cliGatewayCommand,
+		ReadOnly:     true,
+		DescribeRows: gatewayDescribeRows,
 	}
 	cmd.AddCommand(newCRUDListCmd(gatewaySpec), newCRUDGetCmd(gatewaySpec))
 	cmd.AddCommand(newCRUDResourceCmd(crudResourceSpec{
-		Use:      "class",
-		Short:    "Inspect cluster-scoped GatewayClass profiles",
-		BasePath: "/api/v1/gatewayclasses",
-		Name:     "gateway class",
-		ReadOnly: true,
+		Use:          "class",
+		Short:        "Inspect cluster-scoped GatewayClass profiles",
+		BasePath:     "/api/v1/gatewayclasses",
+		Name:         "gateway class",
+		ReadOnly:     true,
+		DescribeRows: gatewayClassDescribeRows,
 	}))
 	cmd.AddCommand(newCRUDResourceCmd(crudResourceSpec{
-		Use:      cliBindingCommand,
-		Short:    "Inspect GatewayBinding routes",
-		BasePath: "/api/v1/gatewaybindings",
-		Name:     "gateway binding",
-		ReadOnly: true,
+		Use:          cliBindingCommand,
+		Short:        "Inspect GatewayBinding routes",
+		BasePath:     "/api/v1/gatewaybindings",
+		Name:         "gateway binding",
+		ReadOnly:     true,
+		DescribeRows: gatewayBindingDescribeRows,
 	}))
 	cmd.AddCommand(newGatewayEventsCmd())
 	cmd.AddCommand(newGatewayDeliveriesCmd())

@@ -470,7 +470,8 @@ func appendRepeatedTypes(path string, query map[string]string, eventTypes []stri
 }
 
 const (
-	eventSummaryMinWidth    = 24
+	eventSummaryMinWidth    = 12
+	eventTaskColumnMinWidth = 8
 	eventTaskColumnMaxWidth = 32
 )
 
@@ -487,14 +488,26 @@ func printExecutionEventsTable(cmd *cobra.Command, value any, includeTask, wide 
 	if !includeTask {
 		headers = []string{"SEQ", "TASK", "TASKSEQ", "TYPE", columnSeverity}
 	}
-	// The task column is capped too, so one long Task name cannot push a
-	// row past the terminal on its own.
+	// The task column is capped from the terminal budget too, so one long
+	// Task name cannot push a row past the terminal on its own: whatever the
+	// other fixed columns leave, minus the summary minimum, goes to the task
+	// column, within [8, 32] runes.
+	taskCap := eventTaskColumnMaxWidth
+	if !includeTask && !wide {
+		otherRows := make([][]string, 0, len(items))
+		for _, raw := range items {
+			event, _ := raw.(map[string]any)
+			otherRows = append(otherRows, []string{numberString(event["seq"]), numberString(event["taskSeq"]), anyString(event["type"]), anyString(event["severity"])})
+		}
+		others := fixedColumnsWidth([]string{"SEQ", "TASKSEQ", "TYPE", columnSeverity}, otherRows)
+		taskCap = min(eventTaskColumnMaxWidth, max(eventTaskColumnMinWidth, terminalWidth()-others-eventSummaryMinWidth-2))
+	}
 	taskName := func(event map[string]any) string {
 		name := anyString(event["taskName"])
 		if wide {
 			return sanitizeTerminalText(name)
 		}
-		return truncateToWidth(name, eventTaskColumnMaxWidth)
+		return truncateToWidth(name, taskCap)
 	}
 	fixedRows := make([][]string, 0, len(items))
 	for _, raw := range items {
@@ -506,10 +519,13 @@ func printExecutionEventsTable(cmd *cobra.Command, value any, includeTask, wide 
 		}
 	}
 	summaryWidth := max(terminalWidth()-fixedColumnsWidth(headers, fixedRows), eventSummaryMinWidth)
+	// A model message carries what the agent said in contentText; its
+	// summary is often just "model returned message". Show the content when
+	// there is any, cut to the terminal unless --wide.
 	summary := func(event map[string]any) string {
-		text := anyString(event["summary"])
+		text := firstNonEmpty(anyString(event["contentText"]), anyString(event["summary"]))
 		if wide {
-			return sanitizeTerminalText(text)
+			return oneLine(text)
 		}
 		return truncateToWidth(text, summaryWidth)
 	}

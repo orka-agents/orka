@@ -140,9 +140,9 @@ func providerDescribeRows(provider map[string]any) []describeRow {
 	return []describeRow{
 		{Label: labelName, Value: genericRowName(provider)},
 		{Label: labelNamespace, Value: genericRowNamespace(provider)},
-		{Label: labelType, Value: firstString(spec, "type")},
+		{Label: labelType, Value: firstNonEmpty(firstString(spec, "type"), firstString(provider, "type"))},
 		{Label: "Base URL", Value: firstString(spec, "baseURL")},
-		{Label: "Default model", Value: firstString(spec, "defaultModel")},
+		{Label: "Default model", Value: firstNonEmpty(firstString(spec, "defaultModel"), firstString(provider, "defaultModel"))},
 		{Label: labelReady, Value: ready},
 		{Label: labelMessage, Value: firstString(status, "message")},
 		{Label: "Last validated", Value: formatTimestamp(firstString(status, "lastValidated"))},
@@ -475,8 +475,59 @@ func gatewayDeliveryDescribeRows(delivery map[string]any) []describeRow {
 		{Label: "Event", Value: firstString(delivery, "eventId")},
 		{Label: labelTask, Value: firstString(delivery, "taskName")},
 		{Label: labelSession, Value: firstString(delivery, "sessionName")},
-		{Label: "Attempts", Value: anyString(delivery["attempts"])},
+		{Label: "Attempts", Value: joinNonEmpty(anyString(delivery["attemptCount"]), anyString(delivery["maxAttempts"]), " of ")},
+		{Label: "Next attempt", Value: formatTimestamp(firstString(delivery, "nextAttemptAt"))},
 		{Label: labelUpdated, Value: formatTimestamp(firstString(delivery, "updatedAt"))},
+	}
+}
+
+func gatewayDescribeRows(gateway map[string]any) []describeRow {
+	spec := nestedMap(gateway, "spec")
+	status := nestedMap(gateway, "status")
+	observed := nestedMap(status, "observedCapabilities")
+	return []describeRow{
+		{Label: labelName, Value: genericRowName(gateway)},
+		{Label: labelNamespace, Value: genericRowNamespace(gateway)},
+		{Label: "Class", Value: firstString(spec, "gatewayClassName")},
+		{Label: "Adapter", Value: joinNonEmpty(firstString(observed, "adapterName"), firstString(observed, "adapterVersion"), " ")},
+		{Label: "Endpoint", Value: firstString(status, "resolvedEndpoint")},
+		{Label: labelAccepted, Value: readinessString(status["accepted"])},
+		{Label: "Resolved refs", Value: readinessString(status["resolvedRefs"])},
+		{Label: "Connected", Value: readinessString(status["connected"])},
+		{Label: labelReady, Value: readinessString(status["ready"])},
+		{Label: labelMessage, Value: firstString(status, "message")},
+		{Label: labelCreated, Value: formatTimestamp(nestedString(gateway, "metadata", "creationTimestamp"))},
+	}
+}
+
+func gatewayClassDescribeRows(class map[string]any) []describeRow {
+	spec := nestedMap(class, "spec")
+	status := nestedMap(class, "status")
+	return []describeRow{
+		{Label: labelName, Value: genericRowName(class)},
+		{Label: "Contract", Value: firstString(spec, "contractVersion")},
+		{Label: "Category", Value: firstString(spec, "category")},
+		{Label: labelAccepted, Value: readinessString(status["accepted"])},
+		{Label: labelMessage, Value: firstString(status, "message")},
+		{Label: labelCreated, Value: formatTimestamp(nestedString(class, "metadata", "creationTimestamp"))},
+	}
+}
+
+func gatewayBindingDescribeRows(binding map[string]any) []describeRow {
+	spec := nestedMap(binding, "spec")
+	status := nestedMap(binding, "status")
+	return []describeRow{
+		{Label: labelName, Value: genericRowName(binding)},
+		{Label: labelNamespace, Value: genericRowNamespace(binding)},
+		{Label: "Gateway", Value: nestedString(spec, "gatewayRef", "name")},
+		{Label: labelAgent, Value: nestedString(spec, "agentRef", "name")},
+		{Label: "Priority", Value: anyString(spec["priority"])},
+		{Label: labelAccepted, Value: readinessString(status["accepted"])},
+		{Label: "Resolved refs", Value: readinessString(status["resolvedRefs"])},
+		{Label: "Programmed", Value: readinessString(status["programmed"])},
+		{Label: labelReady, Value: readinessString(status["ready"])},
+		{Label: labelMessage, Value: firstString(status, "message")},
+		{Label: labelCreated, Value: formatTimestamp(nestedString(binding, "metadata", "creationTimestamp"))},
 	}
 }
 

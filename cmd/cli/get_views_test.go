@@ -399,13 +399,67 @@ func TestWorkspaceStatusAndWhoamiPrintOneFieldPerLine(t *testing.T) {
 }
 
 func TestCRUDGetFallsBackToGenericFields(t *testing.T) {
-	gateway := map[string]any{
-		"metadata": map[string]any{"name": "slack-main", "namespace": "default", "creationTimestamp": "2026-09-23T08:00:00Z"},
+	pool := map[string]any{
+		"metadata": map[string]any{"name": "actors", "namespace": "default", "creationTimestamp": "2026-09-23T08:00:00Z"},
 		"status":   map[string]any{"phase": "Ready"},
 	}
-	srv := jsonServer(t, map[string]any{"/api/v1/gateways/slack-main": gateway})
+	srv := jsonServer(t, map[string]any{"/api/v1/substrate-actor-pools/actors": pool})
+	defer srv.Close()
+	assertReadableAndJSON(t, srv, pool,
+		[]string{"Name:", "actors", "Namespace:", "default", "Status:", "Ready", "Age:"},
+		nil, "substrate", "pool", "get", "actors")
+}
+
+func TestGatewayGetViewsShowReadinessEvenWhenOmitted(t *testing.T) {
+	gateway := map[string]any{
+		"metadata": map[string]any{"name": "slack-main", "namespace": "default"},
+		"spec":     map[string]any{"gatewayClassName": "slack"},
+		"status":   map[string]any{"accepted": true, "resolvedEndpoint": "http://slack-adapter:8080", "observedCapabilities": map[string]any{"adapterName": "slack", "adapterVersion": "1.2.0"}},
+	}
+	class := map[string]any{
+		"metadata": map[string]any{"name": "slack"},
+		"spec":     map[string]any{"contractVersion": "gateway.orka.ai/v1", "category": "chat"},
+		"status":   map[string]any{"message": "adapter image not pinned"},
+	}
+	binding := map[string]any{
+		"metadata": map[string]any{"name": "support", "namespace": "default"},
+		"spec":     map[string]any{"gatewayRef": map[string]any{"name": "slack-main"}, "agentRef": map[string]any{"name": "support-agent"}, "priority": 10},
+		"status":   map[string]any{"accepted": true, "resolvedRefs": true, "programmed": true, "ready": true},
+	}
+	srv := jsonServer(t, map[string]any{
+		"/api/v1/gateways/slack-main":     gateway,
+		"/api/v1/gatewayclasses/slack":    class,
+		"/api/v1/gatewaybindings/support": binding,
+	})
 	defer srv.Close()
 	assertReadableAndJSON(t, srv, gateway,
-		[]string{"Name:", "slack-main", "Namespace:", "default", "Status:", "Ready", "Age:"},
+		[]string{"Class:", "slack", "Adapter:", "slack 1.2.0", "Endpoint:", "http://slack-adapter:8080", "Accepted:", "true", "Connected:", "false", "Ready:", "false"},
 		nil, "gateway", "get", "slack-main")
+	assertReadableAndJSON(t, srv, class,
+		[]string{"Contract:", "gateway.orka.ai/v1", "Category:", "chat", "Accepted:", "false", "Message:", "adapter image not pinned"},
+		nil, "gateway", "class", "get", "slack")
+	assertReadableAndJSON(t, srv, binding,
+		[]string{"Gateway:", "slack-main", "Agent:", "support-agent", "Priority:", "10", "Programmed:", "true", "Ready:", "true"},
+		nil, "gateway", "binding", "get", "support")
+}
+
+func TestGatewayDeliveryGetReadsAttemptCounter(t *testing.T) {
+	delivery := map[string]any{
+		"id": "dlv-1", "state": "retrying", "kind": "reply", "gatewayName": "slack-main", "eventId": "evt-1",
+		"attemptCount": 2, "maxAttempts": 5, "nextAttemptAt": "2026-09-23T08:10:00Z", "lastError": "upstream 503",
+	}
+	srv := jsonServer(t, map[string]any{"/api/v1/gateway-deliveries/dlv-1": delivery})
+	defer srv.Close()
+	assertReadableAndJSON(t, srv, delivery,
+		[]string{"Attempts:", "2 of 5", "Next attempt:", "State:", "retrying: upstream 503"},
+		nil, "gateway", "deliveries", "get", "dlv-1")
+}
+
+func TestProviderGetReadsFlatProjection(t *testing.T) {
+	flat := map[string]any{"name": "vekil", "namespace": "default", "type": "anthropic", "defaultModel": "claude-sonnet-5", "ready": true}
+	srv := jsonServer(t, map[string]any{"/api/v1/providers/vekil": flat})
+	defer srv.Close()
+	assertReadableAndJSON(t, srv, flat,
+		[]string{"Name:", "vekil", "Type:", "anthropic", "Default model:", "claude-sonnet-5", "Ready:", "true"},
+		nil, "provider", "get", "vekil")
 }
