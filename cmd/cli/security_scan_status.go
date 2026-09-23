@@ -147,13 +147,15 @@ func scanRunSucceeded(phase string) bool {
 // Ages are left out so the passage of time alone never reprints.
 func scanProgressStateKey(progress map[string]any) string {
 	scan := nestedMap(progress, "scan")
-	parts := []string{
+	stages := anySliceToMaps(progress["stages"])
+	parts := make([]string, 0, 4+len(stages))
+	parts = append(parts,
 		firstString(scan, "phase"),
 		anyString(scan["reviewedSliceCount"]) + "/" + anyString(scan["sliceCount"]),
 		anyString(scan["acceptedFindings"]) + "/" + anyString(scan["droppedFindings"]),
 		firstString(scan, "errorMessage"),
-	}
-	for _, stage := range anySliceToMaps(progress["stages"]) {
+	)
+	for _, stage := range stages {
 		parts = append(parts, fmt.Sprintf("%s:%d/%d/%d/%d/%d/%d:%s",
 			firstString(stage, "stage"), intField(stage, "tasks"), intField(stage, "pending"), intField(stage, "running"),
 			intField(stage, "succeeded"), intField(stage, "failed"), intField(stage, "cancelled"),

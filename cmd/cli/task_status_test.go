@@ -22,8 +22,9 @@ func taskStatusServer(t *testing.T, task map[string]any) *httptest.Server {
 }
 
 func statusRows(out string) []string {
-	var rows []string
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n")[1:] {
+	lines := strings.Split(strings.TrimSpace(out), "\n")[1:]
+	rows := make([]string, 0, len(lines))
+	for _, line := range lines {
 		rows = append(rows, strings.Fields(line)[0])
 	}
 	return rows
