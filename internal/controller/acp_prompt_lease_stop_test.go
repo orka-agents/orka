@@ -130,7 +130,7 @@ func TestRenewPromptLeaseLoopSeparatesStopFromRuntimeCancellation(t *testing.T) 
 				defer close(done)
 				(&ACPDispatcher{}).renewPromptLeaseLoop(
 					leaseCtx, admitted, cancelOnLeaseFailure, runtimeClient, "runtime-session-renew-stop-g1",
-					task, fence, lease, authorization, harnessv2.DefaultProtocolLimits(),
+					task, fence, lease, authorization, harnessv2.DefaultProtocolLimits(), nil,
 				)
 			}()
 			if scenario.stopAt == "authority" || scenario.stopAt == "http" || scenario.stopAt == "decision" {

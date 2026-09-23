@@ -1050,7 +1050,7 @@ func (s *Store) verifyPromptAttemptPublicationsAndEffectsKube(ctx context.Contex
 	}
 	for i := range effects.Items {
 		effect := &effects.Items[i]
-		if _, related := relatedEffects[effect.Spec.AggregateID]; !related {
+		if !ExternalEffectReferencesTask(effect, marker.TaskUID, relatedEffects) {
 			continue
 		}
 		switch store.ExternalEffectState(effect.Status.State) {

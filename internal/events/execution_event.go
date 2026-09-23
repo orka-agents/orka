@@ -42,6 +42,7 @@ const (
 	ExecutionEventTypeApprovalDeclined              = "ApprovalDeclined"
 	ExecutionEventTypeApprovalExpired               = "ApprovalExpired"
 	ExecutionEventTypeApprovalCancelled             = "ApprovalCancelled"
+	ExecutionEventTypeApprovalExecutionUpdated      = "ApprovalExecutionUpdated"
 	ExecutionEventTypePlanUpdated                   = "PlanUpdated"
 )
 
@@ -99,6 +100,7 @@ var executionEventTypes = []string{
 	ExecutionEventTypeApprovalDeclined,
 	ExecutionEventTypeApprovalExpired,
 	ExecutionEventTypeApprovalCancelled,
+	ExecutionEventTypeApprovalExecutionUpdated,
 	ExecutionEventTypePlanUpdated,
 }
 

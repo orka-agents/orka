@@ -15,6 +15,7 @@ import (
 	"github.com/orka-agents/orka/internal/publisher"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/store"
+	storekube "github.com/orka-agents/orka/internal/store/kube"
 )
 
 const conditionTypeACPArtifactsRetired = "ACPArtifactsRetired"
@@ -232,7 +233,7 @@ func (r *TaskReconciler) acpTaskHasUnsettledExternalEffects(
 	}
 	for i := range effects.Items {
 		effect := &effects.Items[i]
-		if _, ok := related[effect.Spec.AggregateID]; !ok {
+		if !storekube.ExternalEffectReferencesTask(effect, string(acpTaskControlUID(task)), related) {
 			continue
 		}
 		switch store.ExternalEffectState(effect.Status.State) {
@@ -632,7 +633,7 @@ func (r *TaskReconciler) acpArtifactRetirementIdentities(
 	}
 	for i := range effects.Items {
 		effect := &effects.Items[i]
-		if _, related := relatedEffects[effect.Spec.AggregateID]; !related {
+		if !storekube.ExternalEffectReferencesTask(effect, string(acpTaskControlUID(task)), relatedEffects) {
 			continue
 		}
 		switch store.ExternalEffectState(effect.Status.State) {

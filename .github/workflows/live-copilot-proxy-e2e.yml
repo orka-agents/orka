@@ -26,6 +26,7 @@ jobs:
     env:
       COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
       KIND_CLUSTER: orka-live-copilot-proxy-e2e
+      E2E_CLEANUP_REPORT_DIR: ${{ github.workspace }}/bin/e2e-cleanup/copilot
       COPILOT_PROXY_IMAGE: ghcr.io/sozercan/vekil:v0.14.6@sha256:4b3a8cceab30e7bda275a93d151bea145d64a47abb0ea497aa3f188f09ec21b8
     steps:
       - name: Decide whether live e2e can run
@@ -83,12 +84,27 @@ jobs:
       - name: Run live copilot proxy e2e
         if: steps.gate.outputs.run == 'true'
         # This lane depends on an external upstream proxy, so a transient
-        # upstream failure gets one clean retry (the script tears down its
-        # Kind cluster on exit) before the lane is reported red.
+        # upstream failure gets one retry only after both normal resource
+        # cleanup and Kind teardown have been verified for the first attempt.
         run: |
           set -Eeuo pipefail
           if bash scripts/live-copilot-proxy-e2e.sh; then
             exit 0
+          else
+            status=$?
+          fi
+          if [ "${status}" -eq 90 ]; then
+            echo "::error::cleanup was not proved; refusing to hide it with an upstream retry"
+            exit "${status}"
           fi
           echo "::warning::live copilot proxy e2e failed once; retrying in case the external proxy flaked"
           bash scripts/live-copilot-proxy-e2e.sh
+
+      - name: Upload exact cleanup evidence for every attempt
+        if: always() && steps.gate.outputs.run == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: live-copilot-cleanup-evidence
+          path: ${{ env.E2E_CLEANUP_REPORT_DIR }}/
+          if-no-files-found: error
+          retention-days: 7

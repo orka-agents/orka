@@ -236,9 +236,9 @@ func buildMCPPolicyConfigurationWithRegistry(
 	approval harnessv2.MCPApprovalPolicy,
 	registry *tools.Registry,
 ) (harnessv2.MCPPolicyConfiguration, error) {
-	if len(approval.RequiredTools) > 0 {
+	if len(approval.RequiredTools) > 0 && profile.ProviderKind != "agentkit" && profile.ProviderKind != "foundry" {
 		return harnessv2.MCPPolicyConfiguration{}, permanentACPAgentConfiguration(
-			fmt.Errorf("approval-required ACP MCP tools are unavailable until controller-owned permission review is implemented"),
+			fmt.Errorf("approval-required MCP tools require a qualified AgentKit or Foundry runtime"),
 		)
 	}
 	toolDigest, err := harnessv2.CanonicalRuntimeToolPolicyDigest(allowed, disallowed, allowBash)
@@ -246,7 +246,7 @@ func buildMCPPolicyConfigurationWithRegistry(
 		return harnessv2.MCPPolicyConfiguration{}, fmt.Errorf("effective MCP tool policy does not match runtime profile")
 	}
 	descriptors, err := buildCanonicalMCPToolDescriptors(
-		ctx, reader, namespace, profile.ProviderKind, allowed, disallowed, allowBash, registry,
+		ctx, reader, namespace, profile.ProviderKind, allowed, disallowed, allowBash, approval, registry,
 	)
 	if err != nil {
 		return harnessv2.MCPPolicyConfiguration{}, err
@@ -312,6 +312,7 @@ func buildCanonicalMCPToolDescriptors(
 	namespace, provider string,
 	allowed, disallowed []string,
 	allowBash bool,
+	approval harnessv2.MCPApprovalPolicy,
 	registry *tools.Registry,
 ) ([]harnessv2.MCPToolDescriptor, error) {
 	policy := harnessv2.MCPToolPolicy{AllowedToolNames: allowed, DisallowedToolNames: disallowed, AllowBash: allowBash}
@@ -355,6 +356,16 @@ func buildCanonicalMCPToolDescriptors(
 		descriptor, descriptorErr := customACPMCPToolDescriptor(custom)
 		if descriptorErr != nil {
 			return nil, descriptorErr
+		}
+		// Approval-bound reads share the same execution and receipt lease as
+		// approved writes. Equal timeouts would let the earlier broker deadline
+		// expire first. Ungated reads keep their configured timeout.
+		if approval.Requires(name) && custom.Spec.HTTP != nil && custom.Spec.HTTP.Timeout != nil &&
+			custom.Spec.HTTP.Timeout.Duration >= harnessv2.MCPApprovalExecutionTimeout {
+			return nil, permanentACPAgentConfiguration(fmt.Errorf(
+				"tool %q spec.http.timeout %s must be less than the approval-required call duration %s",
+				name, custom.Spec.HTTP.Timeout.Duration, harnessv2.MCPApprovalExecutionTimeout,
+			))
 		}
 		descriptors = append(descriptors, descriptor)
 	}

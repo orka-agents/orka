@@ -1417,6 +1417,7 @@ func main() {
 	var durableControlStore store.DurableControlStore
 	var controllerEpochManager *controller.ControllerEpochManager
 	var acpSessionContinuity *controller.ACPSessionContinuity
+	acpPromptLeases := &controller.ACPMCPPromptLeaseRegistry{}
 	var kubeControlStore *storekube.Store
 	if controlNamespace != "" {
 		// Session deletion must retain runtime cleanup even when admission is
@@ -1795,6 +1796,7 @@ func main() {
 			AdmissionGate:        acpAdmissionGate,
 			IdlePoolTTL:          acpIdlePoolTTL,
 			MCPRegistry:          acpMCPRegistry,
+			PromptLeases:         acpPromptLeases,
 			ACPRuntimeImages: controller.ACPRuntimeImages{
 				Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
 				Opencode: acpOpencodeRuntimeImage,
@@ -2152,6 +2154,8 @@ func main() {
 		mcpBroker, err := controller.NewProductionACPMCPBroker(controller.ACPMCPBrokerDependencies{
 			Reader: mgr.GetAPIReader(), Epochs: controllerEpochManager, ControlStore: durableControlStore,
 			AgentExecutionSnapshots: agentExecutionSnapshotStore,
+			ExecutionEvents:         sqliteStore,
+			PromptLeases:            acpPromptLeases,
 			KubeClient:              kubeClient, Registry: acpMCPRegistry,
 			OutboundAccess: outboundAccessResolver, TransactionExchange: brokeredTransactionExchange,
 			EnforceTransactionCredentialAuth: contextTokenAuthzConfig.Mode == api.ContextTokenAuthorizationModeEnforce,

@@ -375,7 +375,7 @@ func settleACPExternalEffectError(
 
 const acpExternalEffectReconcileGrace = time.Minute
 
-func (d *ACPDispatcher) reconcileExpiredExternalEffects(ctx context.Context) error {
+func (d *ACPDispatcher) reconcileExpiredExternalEffects(ctx context.Context, tasks []corev1alpha1.Task) error {
 	if d.Client == nil || d.Store == nil || d.Epochs == nil {
 		return nil
 	}
@@ -388,13 +388,20 @@ func (d *ACPDispatcher) reconcileExpiredExternalEffects(ctx context.Context) err
 		return err
 	}
 	now := time.Now().UTC()
+	approvalEffects := make(map[string]acpMCPApprovalEffect)
 	for i := range effects.Items {
 		effect := &effects.Items[i]
+		if effect.Spec.Kind == acpMCPToolEffectKind && mcpApprovalEffectTaskUID(effect) != "" {
+			candidate := mcpApprovalEffectSnapshot(effect)
+			if mcpApprovalEffectNeedsRecovery(&candidate.ExternalEffect, fence, now) {
+				approvalEffects[effect.Spec.ID] = candidate
+			}
+		}
 		if store.ExternalEffectState(effect.Status.State) != store.ExternalEffectInFlight || effect.Status.LeaseExpiresAt == nil ||
 			now.Before(effect.Status.LeaseExpiresAt.Add(acpExternalEffectReconcileGrace)) {
 			continue
 		}
-		_, err := d.Store.TransitionExternalEffect(ctx, store.ExternalEffectTransition{
+		settled, err := d.Store.TransitionExternalEffect(ctx, store.ExternalEffectTransition{
 			ID: effect.Spec.ID, Fence: fence, ExpectedVersion: effect.Status.Version,
 			ExpectedState: store.ExternalEffectInFlight, NewState: store.ExternalEffectOutcomeUnknown,
 			RequestDigest: effect.Spec.RequestDigest, ExpectedLeaseOwner: effect.Status.LeaseOwner, UpdatedAt: now,
@@ -402,6 +409,11 @@ func (d *ACPDispatcher) reconcileExpiredExternalEffects(ctx context.Context) err
 		if err != nil && !errors.Is(err, store.ErrConflict) {
 			return fmt.Errorf("reconcile expired external effect %s/%s: %w", effect.Namespace, effect.Name, err)
 		}
+		if err == nil && effect.Spec.Kind == acpMCPToolEffectKind && mcpApprovalEffectTaskUID(effect) != "" {
+			candidate := mcpApprovalEffectSnapshot(effect)
+			candidate.ExternalEffect = *settled
+			approvalEffects[effect.Spec.ID] = candidate
+		}
 	}
-	return nil
+	return d.reconcileMCPApprovalExecutions(ctx, fence, tasks, approvalEffects)
 }

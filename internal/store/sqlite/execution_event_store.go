@@ -13,7 +13,10 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-const sqliteUnknownMetricLabel = "unknown"
+const (
+	sqliteUnknownMetricLabel         = "unknown"
+	sqliteExecutionEventSeqBatchSize = 256
+)
 
 var _ store.ExecutionEventStore = (*Store)(nil)
 var _ store.DeduplicatingExecutionEventStore = (*Store)(nil)
@@ -552,6 +555,66 @@ func (s *Store) GetLatestExecutionEventSeq(ctx context.Context, namespace, strea
 		filter.Namespace, filter.StreamType, filter.StreamID,
 	).Scan(&seq)
 	return seq, err
+}
+
+// GetLatestExecutionEventSeqs reads stream heads through the existing sequence
+// index, without scanning historical events or issuing one query per stream.
+func (s *Store) GetLatestExecutionEventSeqs(ctx context.Context, namespace, streamType string, streamIDs []string) (map[string]int64, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	filter := store.ExecutionEventFilter{Namespace: namespace, StreamType: streamType}.Normalized()
+	if err := filter.Validate(); err != nil {
+		return nil, err
+	}
+	sequences := make(map[string]int64, len(streamIDs))
+	requested := make([]string, 0, len(streamIDs))
+	for _, streamID := range streamIDs {
+		streamID = strings.TrimSpace(streamID)
+		if _, exists := sequences[streamID]; !exists {
+			sequences[streamID] = 0
+			requested = append(requested, streamID)
+		}
+	}
+	for start := 0; start < len(requested); start += sqliteExecutionEventSeqBatchSize {
+		end := min(start+sqliteExecutionEventSeqBatchSize, len(requested))
+		if err := s.readLatestExecutionEventSeqBatch(ctx, filter.Namespace, filter.StreamType, requested[start:end], sequences); err != nil {
+			return nil, err
+		}
+	}
+	return sequences, nil
+}
+
+func (s *Store) readLatestExecutionEventSeqBatch(ctx context.Context, namespace, streamType string, streamIDs []string, sequences map[string]int64) error {
+	values := make([]string, len(streamIDs))
+	args := make([]any, 0, len(streamIDs)+2)
+	for i, streamID := range streamIDs {
+		values[i] = "(?)"
+		args = append(args, streamID)
+	}
+	args = append(args, namespace, streamType)
+	query := `WITH requested(stream_id) AS (VALUES ` + strings.Join(values, ",") + `)
+		SELECT requested.stream_id, COALESCE((
+			SELECT seq FROM execution_events
+			WHERE namespace = ? AND stream_type = ? AND stream_id = requested.stream_id
+			ORDER BY seq DESC LIMIT 1
+		), 0) FROM requested`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	// Close each bounded batch before returning to recovery, which can append
+	// through this store's single database connection.
+	defer rows.Close() //nolint:errcheck
+	for rows.Next() {
+		var streamID string
+		var seq int64
+		if err := rows.Scan(&streamID, &seq); err != nil {
+			return err
+		}
+		sequences[streamID] = seq
+	}
+	return rows.Err()
 }
 
 // DeleteExecutionEvents removes all execution events for one stream.

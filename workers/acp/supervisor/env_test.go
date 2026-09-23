@@ -554,8 +554,9 @@ func TestLoadConfigFromEnv(t *testing.T) {
 		EnvControllerTokenFile: controllerToken, EnvCapabilitySecretFile: capabilitySecret, EnvProviderTokenFile: providerToken,
 		EnvMCPBrokerURL: "http://orka-controller.orka-system.svc:8080", EnvTrustNamespace: "default",
 		EnvSessionBaseDir: filepath.Join(dir, "sessions"), EnvFirstSessionUID: "20000", EnvLastSessionUID: "20010", EnvSessionGID: "20000",
-		EnvE2EPromptWriteAmbiguity:      testE2EPromptWriteAmbiguityMarker,
-		EnvFoundryRecoveryProfileDigest: "",
+		EnvE2EPromptWriteAmbiguity:           testE2EPromptWriteAmbiguityMarker,
+		EnvBrokeredToolApprovalProfileDigest: "",
+		EnvFoundryRecoveryProfileDigest:      "",
 	}
 	for name, value := range values {
 		t.Setenv(name, value)
@@ -638,10 +639,12 @@ func TestLoadConfigFromEnv(t *testing.T) {
 	if agentKitCfg.Capabilities.SupportsAgentSessionConfiguration ||
 		agentKitCfg.Capabilities.Provider.SupportsImages || agentKitCfg.Capabilities.Provider.SupportsAudio ||
 		agentKitCfg.Capabilities.Provider.SupportsEmbeddedResources ||
-		agentKitCfg.Capabilities.Provider.SupportsPermissions || !agentKitCfg.Capabilities.Provider.SupportsTools {
+		agentKitCfg.Capabilities.Provider.SupportsPermissions || agentKitCfg.Capabilities.Provider.SupportsBrokeredToolApprovals ||
+		!agentKitCfg.Capabilities.Provider.SupportsTools {
 		t.Fatalf("unexpected AgentKit provider capabilities: %#v", agentKitCfg.Capabilities.Provider)
 	}
 
+	t.Run("exact profile brokered approval qualification", testLoadConfigFromEnvBrokeredApprovalQualification)
 	t.Run("exact profile Foundry recovery qualification", testLoadConfigFromEnvFoundryRecoveryQualification)
 }
 
@@ -656,11 +659,18 @@ func testLoadConfigFromEnvFoundryRecoveryQualification(t *testing.T) {
 		t.Fatal("Foundry recovery was advertised without qualification")
 	}
 	digest := string(baseline.Fence.RuntimeProfileDigest)
+	t.Run("approval qualification remains independent", func(t *testing.T) {
+		t.Setenv(EnvBrokeredToolApprovalProfileDigest, digest)
+		cfg, err := LoadConfigFromEnv()
+		if err != nil || !cfg.Capabilities.Provider.SupportsBrokeredToolApprovals || cfg.Capabilities.SupportsFoundryRecovery {
+			t.Fatalf("approval qualification enabled recovery: %v", err)
+		}
+	})
 	t.Run("matching recovery qualification", func(t *testing.T) {
 		t.Setenv(EnvFoundryRecoveryProfileDigest, digest)
 		cfg, err := LoadConfigFromEnv()
-		if err != nil || !cfg.Capabilities.SupportsFoundryRecovery {
-			t.Fatalf("recovery qualification was rejected: %v", err)
+		if err != nil || !cfg.Capabilities.SupportsFoundryRecovery || cfg.Capabilities.Provider.SupportsBrokeredToolApprovals {
+			t.Fatalf("recovery qualification enabled approvals or was rejected: %v", err)
 		}
 	})
 	for _, test := range []struct{ name, value string }{
@@ -701,6 +711,80 @@ func testLoadConfigFromEnvFoundryRecoveryQualification(t *testing.T) {
 			t.Setenv(EnvFoundryRecoveryProfileDigest, digest)
 			if _, err := LoadConfigFromEnv(); err == nil || !strings.Contains(err.Error(), EnvFoundryRecoveryProfileDigest+" is unsupported for provider") {
 				t.Fatalf("unsupported provider recovery startup error = %v", err)
+			}
+		})
+	}
+}
+
+func testLoadConfigFromEnvBrokeredApprovalQualification(t *testing.T) {
+	for _, provider := range []struct{ kind, adapterEnv string }{
+		{providerKindAgentKit, EnvAgentKitAdapterDigest},
+		{providerKindFoundry, EnvFoundryAdapterDigest},
+	} {
+		t.Run(provider.kind, func(t *testing.T) {
+			t.Setenv(EnvProvider, provider.kind)
+			t.Setenv(provider.adapterEnv, testDigest(provider.kind+"-adapter"))
+			unqualified, err := LoadConfigFromEnv()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if unqualified.Capabilities.Provider.SupportsBrokeredToolApprovals {
+				t.Fatal("approval support was advertised without qualification")
+			}
+			profileDigest := string(unqualified.Fence.RuntimeProfileDigest)
+			t.Run("matching", func(t *testing.T) {
+				t.Setenv(EnvBrokeredToolApprovalProfileDigest, profileDigest)
+				qualified, err := LoadConfigFromEnv()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !qualified.Capabilities.Provider.SupportsBrokeredToolApprovals || qualified.Capabilities.Provider.SupportsPermissions {
+					t.Fatal("qualified brokered capability did not remain separate from native permissions")
+				}
+			})
+			for _, test := range []struct{ name, value string }{
+				{"malformed", "not-a-profile-digest"},
+				{"invalid hex", "sha256:" + strings.Repeat("g", 64)},
+				{"mismatched", testDigest("another-qualified-profile")},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					t.Setenv(EnvBrokeredToolApprovalProfileDigest, test.value)
+					if _, err := LoadConfigFromEnv(); err == nil || !strings.Contains(err.Error(), EnvBrokeredToolApprovalProfileDigest) {
+						t.Fatalf("invalid qualification startup error = %v", err)
+					}
+				})
+			}
+			for _, test := range []struct{ name, variable, value string }{
+				{"adapter drift", provider.adapterEnv, testDigest("different-adapter")},
+				{"configuration drift", EnvAgentConfigurationDigest, testDigest("different-config")},
+				{"model drift", EnvModel, "different-model"},
+				{"policy drift", EnvApprovalPolicyDigest, testDigest("different-policy")},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					t.Setenv(EnvBrokeredToolApprovalProfileDigest, profileDigest)
+					t.Setenv(test.variable, test.value)
+					if _, err := LoadConfigFromEnv(); err == nil || !strings.Contains(err.Error(), "does not match runtime profile digest") {
+						t.Fatalf("changed profile retained approval qualification: %v", err)
+					}
+				})
+			}
+		})
+	}
+	for _, provider := range []string{providerKindCodex, providerKindClaude, providerKindCopilot, providerKindOpencode} {
+		t.Run("unsupported "+provider, func(t *testing.T) {
+			t.Setenv(EnvProvider, provider)
+			if provider == providerKindOpencode {
+				t.Setenv(EnvModel, "openai/gpt-test")
+				t.Setenv(EnvModelContextLimit, "128000")
+				t.Setenv(EnvModelOutputLimit, "16000")
+			}
+			baseline, err := LoadConfigFromEnv()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(EnvBrokeredToolApprovalProfileDigest, string(baseline.Fence.RuntimeProfileDigest))
+			if _, err := LoadConfigFromEnv(); err == nil || !strings.Contains(err.Error(), "is unsupported for provider") {
+				t.Fatalf("unsupported provider qualification error = %v", err)
 			}
 		})
 	}
