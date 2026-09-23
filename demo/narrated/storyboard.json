@@ -160,21 +160,58 @@
     },
     {
       "id": "12-efficiency",
-      "title": "Help the customer. Fix the cause.",
-      "scenario": "A customer retried a frozen checkout and was charged twice.",
-      "payoff": "Judge the work by its results and usage",
+      "title": "Twenty customers. One checkout problem.",
+      "scenario": "Twenty customer reports trace to one checkout retry bug.",
+      "payoff": "Compare useful work, elapsed time, and estimated cost",
       "next": "What would you build for your team?",
-      "intro": "A customer clicked Pay again after our online shop's checkout froze, then saw two charges. Support needs a factual reply, and payments engineering needs to fix the cause. We will give each assistant clear instructions and run both jobs with a hosted model. Then we will repeat them with a gateway that chooses a model for each request and compare the results.",
+      "intro": "This video introduces the following scenario. Twenty customers report a double charge after our shop's checkout froze. Support needs to answer each customer, while engineering fixes the one payment bug behind these reports. We will run twenty varied sample messages and one engineering job using a hosted model, then repeat that work with model routing. We will compare the replies, the fix, elapsed time, and estimated cost.",
       "chapters": [
-        {"marker": "1. Give each assistant its instructions", "title": "Define a useful result for each assistant", "cue": "Agent = saved instructions and available actions", "text": "An Orka Agent stores an assistant's instructions and available actions. Support must write two sentences, acknowledge the reported double charge, and ask for the order reference. It must not say a refund has happened. Engineering must fix repeated payment handling in the sample repository and run its tests. These instructions define success before either assistant starts."},
-        {"marker": "2. Handle the customer problem", "title": "Run the jobs and keep a baseline", "cue": "Task = Orka's record of one piece of work", "text": "We submit both jobs with the Orka command line. A Task is Orka's record of one piece of work. This first run uses hosted GPT five point five for model requests. We inspect the support reply, the engineering changes, and the test output. The records give us a baseline for results, usage, and elapsed time."},
-        {"marker": "3. Use hardware we already operate", "title": "Make a local model available", "cue": "AIKit runs Qwen3.5 2B on the cluster's CPUs", "text": "AIKit runs Qwen three point five two B, a small model, on the cluster's CPUs. That makes a lightweight model available on hardware you already pay for and operate. We check that it is ready before using it. Running here consumes capacity, so we will measure its CPU and memory use."},
-        {"marker": "4. Connect Orka to the semantic router", "title": "Connect the assistants to Vekil", "cue": "Provider semantic-router = support's connection to Vekil", "text": "An Orka Provider is a connection to a model service. This Provider, named semantic-router, connects our support assistant to Vekil. Vekil is the gateway that receives model requests and forwards them. The coding agent's model connection goes through Vekil too. We can change the gateway's configuration. Each assistant keeps the same instructions and requests."},
-        {"marker": "5. Let the classifier choose", "title": "Assess the request, then apply the routing policy", "cue": "Jev recommends lightweight or powerful; Vekil selects the destination", "text": "Vekil's semantic routing considers what a new request asks for. Jev, the classifier, assesses it and recommends lightweight or powerful. Vekil applies our configuration to select local Qwen or hosted GPT five point five. As the agent uses tools to finish the job, its follow-up requests keep the selected model. We inspect the recorded recommendation and destination, and include the classifier overhead in our comparison."},
-        {"marker": "6. Repeat the same work", "title": "Keep the jobs fixed and inspect their routes", "cue": "Same requests, instructions, repository revision, and tests", "text": "We repeat both jobs with the same requests, instructions, and repository revision. Support still needs an accurate two-sentence reply. Engineering still needs a fix that passes the same tests. We show each result with its actual routing records. One Task can make several model calls, so a local call does not make the whole job local."},
-        {"marker": "7. Check the results and usage", "title": "Compare completed work with what it consumed", "cue": "Actual outcomes, destinations, usage, time, and local resource use", "text": "Start with the outcomes. Did the reply follow its instructions, and did the code pass its checks? Tokens are the small pieces of text a model processes. Orka reports support usage, but the coding agent's token count is unavailable there. This comparison uses Vekil's recorded counts for both jobs and includes Jev's work. Read those counts alongside elapsed time and local CPU and memory use to judge this workload."}
+        {
+          "marker": "1. Give each assistant its instructions",
+          "title": "Define a useful reply and a tested fix",
+          "cue": "Agent = saved instructions and available actions",
+          "text": "An Orka Agent stores the instructions and available actions for an assistant. Support must write a factual two-sentence reply for each message. It uses any order reference the customer supplied and asks for one only when it is missing. It must not say that a refund or investigation has happened. Engineering must fix payment retries in the sample repository and pass its six existing tests."
+        },
+        {
+          "marker": "2. Handle the customer problem",
+          "max_speed": 4,
+          "title": "Run twenty replies and one engineering job",
+          "cue": "Twenty support Tasks and one engineering Task form the baseline",
+          "text": "We submit the first batch with the Orka command line. A Task is Orka's record of one piece of work. This batch has twenty support Tasks and one engineering Task, all using hosted GPT five point five. We check each reply against its customer message, inspect the code change and six test results, and keep the usage and elapsed time as our baseline."
+        },
+        {
+          "marker": "3. Use hardware we already operate",
+          "title": "Make a local model available",
+          "cue": "AIKit serves Qwen3.5 2B using cluster CPU capacity",
+          "text": "AIKit makes a small model available on hardware you already pay for and operate. Here it runs Qwen three point five two B on the cluster's CPUs. We check that the model is ready. Using spare capacity still consumes resources. We will include its allocated CPU and memory in the cost estimate, even when it is waiting between requests."
+        },
+        {
+          "marker": "4. Connect Orka to the semantic router",
+          "title": "Connect both assistants to Vekil",
+          "cue": "Support uses Provider semantic-router; coding has its own model connection",
+          "text": "An Orka Provider is a connection to a model service. The support Agent uses a Provider named semantic-router to reach Vekil. Vekil is the gateway that receives model requests and sends them to a configured model. The coding agent reaches Vekil through a separate model connection managed by Orka. We can change the gateway's configuration while keeping the customer requests and agent instructions fixed."
+        },
+        {
+          "marker": "5. Let the classifier choose",
+          "title": "Read the recommendation and chosen model",
+          "cue": "Jev recommends lightweight or powerful; Vekil selects the destination",
+          "text": "Vekil uses semantic routing to consider what a new request asks for. Jev, the classifier, assesses it and recommends lightweight or powerful. Vekil uses that recommendation and our configuration to choose local Qwen or hosted GPT five point five. If Jev is unavailable, our configuration sends the request to the powerful model. The records show the actual choice. When the engineering agent uses tools, its follow-up model requests keep the selected model while it finishes the job."
+        },
+        {
+          "marker": "6. Repeat the same work",
+          "max_speed": 4,
+          "title": "Repeat the same twenty messages and code change",
+          "cue": "Same customer messages, instructions, starting code, and six tests",
+          "text": "We repeat the same twenty customer messages and the same engineering request. The instructions, starting code, and six tests stay unchanged. We check all twenty replies again, including which messages already contain an order reference. Then we inspect the engineering change and test results. We also read the routing records for each Task. A local model call does not mean every part of the batch stayed local."
+        },
+        {
+          "marker": "7. Check the results and usage",
+          "title": "Compare checked outcomes and measured costs",
+          "cue": "Estimated cost: $0.2305 to $0.1337, down 42.0%; support: 332s to 497s, up 49.7%",
+          "text": "Both runs passed all twenty reply checks and six payment tests. Fourteen routed replies used local Qwen; six used the hosted fallback when Jev was unavailable. Tokens are the small pieces of text models process. Orka marks the coding agent's token count as unavailable, so this comparison uses the gateway's measured counts. At the published rates, the estimated cost of model calls, including Jev, fell from about twenty-three cents to twelve cents. That is forty-five point three percent less. Including a share of the cluster's CPU and memory, the estimate fell from about twenty-three cents to thirteen cents, down forty-two percent. The support batch took three hundred and thirty-two seconds before routing. With routing, it took four hundred and ninety-seven seconds. That is forty-nine point seven percent longer. Engineering took seventy-six seconds before routing, and seventy seconds after. That is seven point nine percent less time. These are estimates, not an invoice."
+        }
       ],
-      "outro": "Orka gave each assistant its job and kept the work records. Vekil controlled which model handled each request, with local capacity supplied by AIKit. Those choices let the platform team shape the experience and measure the result. What would you build for your team? Explore more examples and get started at the Orka documentation address on screen."
+      "outro": "Twenty customer replies and one checkout fix gave us work we could check. Orka defined the jobs and kept their records. Vekil controlled the model choices, and AIKit supplied a local option. Managing those layers lets the platform team shape the experience and measure what it consumes. What would you build for your team? Visit the Orka documentation address on screen for more examples and the getting started guide."
     }
   ]
 }

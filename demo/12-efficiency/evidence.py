@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 import sys
 
+import classifier_billing
 from check import check_data, check_stock_prose
 from fixtures import WORKLOADS
 
@@ -118,7 +119,7 @@ def ledger(value):
     return rows
 
 
-def ledger_delta(before, after):
+def ledger_delta(before, after, *, allow_classifier_errors=False):
     first, last = ledger(before), ledger(after)
     zero = {**dict.fromkeys(LEDGER_FIELDS, 0), "usage": dict.fromkeys(TOKEN_FIELDS, 0)}
     result = {}
@@ -127,7 +128,9 @@ def ledger_delta(before, after):
         row = counter_delta(a, b, LEDGER_FIELDS)
         row["usage"] = token_delta(a["usage"], b["usage"])
         require(row["sends"] == row["completed"], "Physical sends are still running")
-        require(row["errors"] == row["throttled"] == 0, "Physical send failed or was throttled")
+        require(row["throttled"] == 0 and (row["errors"] == 0 or
+                (allow_classifier_errors and kind == "classifier" and row["errors"] <= row["sends"])),
+                "Physical send failed or was throttled")
         require(row["reported_usage_sends"] <= row["sends"], "Invalid reported-usage count")
         if row["sends"]:
             result[kind] = row
@@ -199,7 +202,31 @@ def completed_logs(logs):
     return index(result, lambda row: row.get("operation_id"), "completion logs")
 
 
-def preflight_usage(snapshot, rows):
+def classifier_response_logs(logs, policy_id):
+    """Read prompt-free receipts emitted by the classifier response boundary."""
+    result = []
+    for record in logs:
+        row = {**record, **record.get("fields", {})}
+        if row.get("msg") != "policy classifier request completed":
+            continue
+        require(row.get("policy_id") == policy_id and row.get("model") == "typesafe-ai/jev",
+                "Classifier receipt names an unexpected policy or model")
+        require(row.get("traffic_bucket") in ("request", "preflight"), "Unexpected classifier traffic bucket")
+        require(row["traffic_bucket"] == "preflight" or bool(row.get("operation_id")),
+                "Classifier response has no parent operation")
+        require(type(row.get("status_code")) is int and 100 <= row["status_code"] <= 599
+                and type(row.get("reported_usage")) is bool, "Incomplete classifier response receipt")
+        identity = row.get("generation_id")
+        require(isinstance(identity, str) and classifier_billing.GENERATION.fullmatch(identity),
+                "Classifier response has no safe billing reference")
+        result.append({"operationID": row.get("operation_id"), "trafficBucket": row["traffic_bucket"],
+                       "policyID": row["policy_id"], "model": row["model"], "statusCode": row["status_code"],
+                       "generationID": identity, "reportedUsage": row["reported_usage"]})
+    require(len({row["generationID"] for row in result}) == len(result), "Duplicate classifier response receipt")
+    return result
+
+
+def preflight_usage(snapshot, rows, receipts=None):
     """A bucket has no availability flag; use the physical ledger conservatively."""
     if not rows:
         require(snapshot["configuration"]["mode"] == "off", "Missing classifier startup preflight")
@@ -219,13 +246,19 @@ def preflight_usage(snapshot, rows):
             "Classifier startup preflight usage exceeds its physical ledger")
     if sends == physical["sends"]:
         require(usage == physical["usage"], "Classifier startup preflight and physical usage disagree")
-    # If some earlier classification omitted usage, the cumulative ledger
-    # cannot identify which bucket it belonged to. Do not infer availability.
-    return [{**row, "usageComplete": physical["reported_usage_sends"] == physical["sends"]}]
+    if receipts is not None:
+        startup = [entry for entry in receipts if entry["trafficBucket"] == "preflight"]
+        require(len(startup) == sends, "Classifier startup receipts and physical sends disagree")
+        complete = all(entry["reportedUsage"] and 200 <= entry["statusCode"] <= 299 for entry in startup)
+    else:
+        # Without per-response receipts, the cumulative ledger cannot identify
+        # whether earlier missing usage belonged to startup or ordinary work.
+        complete = physical["reported_usage_sends"] == physical["sends"]
+    return [{**row, "usageComplete": complete}]
 
 
 def gateway_window(before, after, logs, mode, *, allow_tool_continuations=False,
-                   allow_bounded_context=False):
+                   allow_bounded_context=False, allow_classifier_fallback=False):
     """Return a complete, independently reconciled interval of gateway traffic."""
     require(timestamp(before["at"]) <= timestamp(after["at"]), "Reversed gateway interval")
     require(before["podUID"] and before["podUID"] == after["podUID"], "Gateway Pod was replaced")
@@ -252,6 +285,7 @@ def gateway_window(before, after, logs, mode, *, allow_tool_continuations=False,
     a, b = before["stats"], after["stats"]
     require(b["uptime_seconds"] >= a["uptime_seconds"], "Gateway uptime reset")
     policy, destinations = terminal_map(after)
+    classifier_receipts = classifier_response_logs(logs, policy["id"]) if allow_classifier_fallback else None
     previous = index(a["recent"], lambda row: row.get("operation_id"), "previous requests")
     current = index(b["recent"], lambda row: row.get("operation_id"), "recent requests")
     requests = {key: row for key, row in current.items() if key not in previous}
@@ -290,6 +324,11 @@ def gateway_window(before, after, logs, mode, *, allow_tool_continuations=False,
                     "Decision and snapshot policy generations disagree")
             decision = log["policy_decision"]
             continuation = allow_tool_continuations and decision == "replay_binding"
+            fallback = (allow_classifier_fallback and mode == "enforce" and decision == "unavailable_fallback"
+                        and log.get("policy_failure_category") in ("upstream_5xx", "breaker_open"))
+            if fallback and log["policy_failure_category"] == "breaker_open":
+                require(log.get("policy_classifier_latency_ms") == 0,
+                        "Open circuit breaker unexpectedly reports classifier latency")
             # Vekil's aggregate flag also covers bounded background instructions
             # and older messages. The coding walkthrough reports this limitation
             # explicitly; the earlier fixed-answer demo remains strict by default.
@@ -298,12 +337,13 @@ def gateway_window(before, after, logs, mode, *, allow_tool_continuations=False,
                     "Classifier saw a truncated request")
             tier = log["policy_tier"]
             require(tier in ("lightweight", "powerful"), "Missing terminal policy tier")
-            require(continuation or decision == ("classified" if mode == "enforce" else "baseline"),
+            require(continuation or fallback or decision == ("classified" if mode == "enforce" else "baseline"),
                     "Request used fallback or did not receive the expected policy decision")
             if continuation:
                 require(tier == "powerful" and not log.get("policy_classifier_latency_ms"),
                         "Tool continuation did not retain the hosted model without classification")
-            require(not log["policy_failure_category"], "Classifier recorded a failure")
+            require(fallback or not log["policy_failure_category"], "Classifier recorded a failure")
+            require(not fallback or tier == policy["classifier_unavailable_tier"], "Fallback used the wrong destination")
             require(mode != "off" or tier == policy["baseline_tier"], "Baseline request used the wrong tier")
             destination, role = destinations[tier], "worker"
         else:
@@ -319,20 +359,23 @@ def gateway_window(before, after, logs, mode, *, allow_tool_continuations=False,
         operations.append({"operationID": operation_id, "role": role, "tier": tier,
                            "destination": destination, "usage": usage,
                            "policyMode": log.get("policy_mode"), "policyDecision": log.get("policy_decision"),
+                           "classifierFailureCategory": log.get("policy_failure_category", ""),
                            "classifierInputTruncated": log.get("policy_truncated"),
                            "classifierLatencyMs": log.get("policy_classifier_latency_ms", 0),
                            "classifierToolCount": log.get("policy_tool_count", 0),
                            "classifierInputBytes": log.get("policy_input_bytes", 0)})
     require(len(attempts) == len(operations), "Unaccounted terminal attempts")
     if any(row["policyDecision"] == "replay_binding" for row in operations):
-        require(any(row["tier"] == "powerful" and row["policyDecision"] ==
-                    ("classified" if mode == "enforce" else "baseline") for row in operations),
+        selections = {"classified" if mode == "enforce" else "baseline"}
+        if allow_classifier_fallback and mode == "enforce":
+            selections.add("unavailable_fallback")
+        require(any(row["tier"] == "powerful" and row["policyDecision"] in selections for row in operations),
                 "Tool continuation has no initial model selection in this interval")
     usage = add_tokens(row["usage"] for row in operations)
     require(usage == {key: totals[key] for key in TOKEN_FIELDS}, "Request counters and operation usage disagree")
     require(usage == token_delta(a["physical_usage"], b["physical_usage"]), "Physical usage counters disagree")
     require(not any(token_delta(a["wasted_usage"], b["wasted_usage"]).values()), "Gateway recorded wasted usage")
-    physical = ledger_delta(a["task_usage"], b["task_usage"])
+    physical = ledger_delta(a["task_usage"], b["task_usage"], allow_classifier_errors=allow_classifier_fallback)
     inference = physical.get("inference")
     require(bool(inference) == bool(operations), "Missing inference ledger")
     if inference:
@@ -346,9 +389,32 @@ def gateway_window(before, after, logs, mode, *, allow_tool_continuations=False,
                           ("lightweight", "powerful", "unknown"))
     require(tiers == {key: sum(row["tier"] == key for row in operations) for key in tiers}, "Policy tier counters disagree")
     classifier = physical.get("classifier", {**dict.fromkeys(LEDGER_FIELDS, 0), "usage": dict.fromkeys(TOKEN_FIELDS, 0)})
-    expected_classifications = sum(row["policyDecision"] == "classified" for row in operations) if mode == "enforce" else 0
+    expected = {row["operationID"]: row for row in operations
+                if row["policyDecision"] == "classified" or
+                (row["policyDecision"] == "unavailable_fallback"
+                 and row["classifierFailureCategory"] == "upstream_5xx")}
+    expected_classifications = len(expected) if mode == "enforce" else 0
     require(classifier["sends"] == policy_delta["physical_classifier_sends"] == expected_classifications,
             "Classifier physical sends do not match classified requests")
+    if classifier_receipts is not None:
+        operation_ids = {row["operationID"] for row in operations}
+        own = [row for row in classifier_receipts if row["operationID"] in operation_ids]
+        require(len(own) == len(expected) and {row["operationID"] for row in own} == set(expected),
+                "Classifier responses do not match classified or fallback operations")
+        failures = []
+        for row in own:
+            require(row["trafficBucket"] == "request", "Classifier request was mislabeled as startup")
+            if expected[row["operationID"]]["policyDecision"] == "unavailable_fallback":
+                require(500 <= row["statusCode"] <= 599 and row["reportedUsage"] is False,
+                        "Fallback is not an unmetered upstream failure")
+                failures.append(row)
+            else:
+                require(200 <= row["statusCode"] <= 299 and row["reportedUsage"] is True,
+                        "Successful classification has no reported usage")
+        require(classifier["errors"] == len(failures)
+                and classifier["reported_usage_sends"] + len(failures) == classifier["sends"],
+                "Classifier failure receipts and physical counters disagree")
+        classifier["unmeteredFailures"] = failures
     classifier_usage = counter_delta(first_profile["totals"]["classifier_usage"], last_profile["totals"]["classifier_usage"],
                                      ("input_tokens", "output_tokens", "total_tokens", "cached_input_tokens", "reasoning_tokens"))
     require(classifier_usage == {
@@ -364,7 +430,7 @@ def gateway_window(before, after, logs, mode, *, allow_tool_continuations=False,
     classifier["usageComplete"] = classifier["reported_usage_sends"] == classifier["sends"]
     return {"operations": operations, "roles": role_totals(operations),
             "workerRequests": worker_count, "classifier": classifier,
-            "preflightBeforeInterval": preflight_usage(before, preflights[0]), "destinations": destinations,
+            "preflightBeforeInterval": preflight_usage(before, preflights[0], classifier_receipts), "destinations": destinations,
             "gateway": {"podUID": before["podUID"], "container": before["container"],
                         "configurationSHA256": before["configuration"]["sha256"],
                         "configurationDigest": before["configuration"]["digest"],

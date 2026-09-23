@@ -147,7 +147,7 @@ def gateway_logs(team, pod):
         except json.JSONDecodeError:
             continue
         fields = value.get("fields", value)
-        if fields.get("operation_id"):
+        if fields.get("operation_id") or value.get("msg", fields.get("msg")) == "policy classifier request completed":
             # Operation records are prompt-free. Authentication startup logs
             # are not needed to establish route identity and are not retained.
             records.append(value)

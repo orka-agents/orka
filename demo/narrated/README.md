@@ -10,16 +10,17 @@ invitations. Each ending displays `https://orka-agents.github.io/orka/`.
 The narration describes the results visible in the recorded run. It does not
 replace or invent command output.
 
-Demo 12 follows a customer charged twice after retrying a frozen checkout.
-A support assistant drafts a factual reply, while payments engineering fixes
+Demo 12 follows twenty customers reporting duplicate charges after retrying a
+frozen checkout. A support assistant drafts individual factual replies, while payments engineering fixes
 the cause in a sample repository and runs its tests. The terminal shows real
 Orka CLI and `kubectl` commands. Both runs keep their requests, instructions,
 and repository revision fixed, first using hosted GPT-5.5 and then enabling
 Vekil's semantic routing. The native support Agent connects to Vekil through
 the Orka Provider named `semantic-router`. The Codex coding agent's model
 connection uses the platform's model proxy to reach the same Vekil gateway.
-Narration follows observed routes, outcomes, usage, and timings. Record it only
-after the live checks succeed.
+Narration follows observed routes, outcomes, usage, timings, and dated cost
+estimates. It calls out raw amounts and percentage changes, and omits the
+cluster name. Record it only after the live checks succeed.
 
 ## Prepare the source footage and voice
 
@@ -28,8 +29,10 @@ The inputs are the successful asciicast v3 recordings in `demo/casts/`.
 selected chapters into presentation copies. Each copy starts with a clean
 terminal screen and preserves the chapter's recorded output bytes. The original
 captures are left unchanged. Quiet waits are capped at two seconds; long
-chapters may play up to twice as fast. Shorter chapters hold their final frame
-until narration finishes.
+chapters normally play up to twice as fast. Demo 12's two repeated customer
+batches allow up to four times playback speed. The storyboard's `max_speed`
+setting controls that limit per chapter. Shorter chapters hold their final
+frame until narration finishes.
 
 Use the requested Podman image, `localhost/aikit-qwen3-tts:applesilicon`, with
 the reference WAV mounted read-only at `/models/reference.wav`. The existing

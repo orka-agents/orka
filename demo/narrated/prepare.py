@@ -247,7 +247,10 @@ def render_demo(demo, docs_url):
                      "--line-height", "1.1", "--theme", "monokai", "--idle-time-limit", "2",
                      "--last-frame-duration", "1.2", "--fps-cap", "30", "--no-loop", "--quiet"])
                 duration = float(probe(terminal)["format"]["duration"])
-                seconds = max(audio_frames / FPS + 2.4, min(duration + 1.2, 40), duration / 2 + 1.2)
+                max_speed = chapter.get("max_speed", 2)
+                require(isinstance(max_speed, (int, float)) and not isinstance(max_speed, bool)
+                        and 1 <= max_speed <= 4, "Chapter playback speed must be between one and four")
+                seconds = max(audio_frames / FPS + 2.4, min(duration + 1.2, 40), duration / max_speed + 1.2)
                 frames = math.ceil(seconds * FPS)
                 factor = min(1.0, (frames / FPS - 1.2) / duration)
                 chrome(demo, chapter, index, len(demo["chapters"]), picture)

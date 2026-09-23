@@ -109,6 +109,92 @@ def window(mode="enforce", tier="lightweight"):
 
 
 class GatewayEvidenceTests(unittest.TestCase):
+    def fallback_window(self):
+        before, after, logs = window(tier="powerful")
+        logs[1].update(policy_decision="unavailable_fallback", policy_failure_category="upstream_5xx")
+        stats = after["stats"]
+        classifier = next(row for row in stats["task_usage"]["by_kind"] if row["kind"] == "classifier")
+        classifier.update(errors=1, reported_usage_sends=1, usage=usage(5, 2))
+        stats["task_usage"]["totals"].update(errors=1, reported_usage_sends=3, usage=usage(95, 27))
+        e.profile(after)["totals"]["classifier_usage"] = policy_usage(usage(5, 2))
+        for identity, bucket, operation, status, reported in (
+                ("A", "preflight", None, 200, True), ("B", "request", "worker-1", 503, False)):
+            logs.append({"msg": "policy classifier request completed", "policy_id": "team-efficiency",
+                         "model": "typesafe-ai/jev", "traffic_bucket": bucket, "operation_id": operation,
+                         "status_code": status, "reported_usage": reported, "generation_id": "gen_" + identity * 26})
+        return before, after, logs
+
+    def test_recorded_fallback_retains_unknown_tokens_and_exact_failure_identity(self):
+        args = self.fallback_window()
+        result = e.gateway_window(*args, "enforce", allow_classifier_fallback=True)
+        classifier = result["classifier"]
+        self.assertIs(classifier["usageComplete"], False)
+        self.assertEqual(classifier["reported_usage_sends"], 0)
+        self.assertEqual(classifier["errors"], 1)
+        self.assertEqual(classifier["unmeteredFailures"][0]["generationID"], "gen_" + "B" * 26)
+        self.assertTrue(result["preflightBeforeInterval"][0]["usageComplete"])
+        self.assertEqual(result["operations"][1]["destination"]["model"], "gpt-5.5")
+        with self.assertRaises(e.EvidenceError):
+            e.gateway_window(*args, "enforce")
+
+    def test_fallback_requires_exact_response_receipt_and_failure_counters(self):
+        changes = (
+            lambda a, b, logs: logs.pop(),
+            lambda a, b, logs: logs[-1].update(operation_id="other"),
+            lambda a, b, logs: logs[-1].update(generation_id="missing"),
+            lambda a, b, logs: logs[-1].update(status_code=200),
+            lambda a, b, logs: logs[-1].update(reported_usage=True),
+            lambda a, b, logs: logs[-1].update(traffic_bucket="preflight"),
+            lambda a, b, logs: logs.append(copy.deepcopy(logs[-1])),
+            lambda a, b, logs: logs[1].update(policy_tier="lightweight"),
+            lambda a, b, logs: logs[1].update(policy_failure_category="timeout"),
+        )
+        for change in changes:
+            args = self.fallback_window()
+            change(*args)
+            with self.subTest(change=change), self.assertRaises(e.EvidenceError):
+                e.gateway_window(*args, "enforce", allow_classifier_fallback=True)
+
+    def breaker_window(self):
+        before, after, logs = self.fallback_window()
+        logs[1].update(policy_failure_category="breaker_open", policy_classifier_latency_ms=0)
+        logs.pop()  # No HTTP response exists when the circuit breaker skips Jev.
+        stats = after["stats"]
+        classifier = next(row for row in stats["task_usage"]["by_kind"] if row["kind"] == "classifier")
+        classifier.update(physical_row(1, usage(5, 2)))
+        stats["task_usage"]["totals"] = physical_row(3, usage(95, 27))
+        e.profile(after)["totals"]["physical_classifier_sends"] = 1
+        return before, after, logs
+
+    def test_open_circuit_breaker_proves_no_classifier_request_was_sent(self):
+        args = self.breaker_window()
+        result = e.gateway_window(*args, "enforce", allow_classifier_fallback=True)
+        self.assertEqual(result["classifier"]["sends"], 0)
+        self.assertTrue(result["classifier"]["usageComplete"])
+        self.assertEqual(result["classifier"]["unmeteredFailures"], [])
+        self.assertEqual(result["operations"][1]["classifierFailureCategory"], "breaker_open")
+        self.assertEqual(result["operations"][1]["destination"]["model"], "gpt-5.5")
+        with self.assertRaises(e.EvidenceError):
+            e.gateway_window(*args, "enforce")
+
+    def test_open_circuit_breaker_cannot_hide_an_actual_classifier_call(self):
+        before, after, logs = self.breaker_window()
+        logs.append(self.fallback_window()[2][-1])
+        with self.assertRaisesRegex(e.EvidenceError, "responses do not match"):
+            e.gateway_window(before, after, logs, "enforce", allow_classifier_fallback=True)
+        before, after, logs = self.breaker_window()
+        stats = after["stats"]["task_usage"]
+        classifier = next(row for row in stats["by_kind"] if row["kind"] == "classifier")
+        classifier.update(physical_row(2, usage(5, 2), reported=1))
+        stats["totals"] = physical_row(4, usage(95, 27), reported=3)
+        e.profile(after)["totals"]["physical_classifier_sends"] = 2
+        with self.assertRaisesRegex(e.EvidenceError, "physical sends"):
+            e.gateway_window(before, after, logs, "enforce", allow_classifier_fallback=True)
+        before, after, logs = self.breaker_window()
+        logs[1]["policy_classifier_latency_ms"] = 100
+        with self.assertRaisesRegex(e.EvidenceError, "unexpectedly reports classifier latency"):
+            e.gateway_window(before, after, logs, "enforce", allow_classifier_fallback=True)
+
     def continuation_window(self, mode="enforce"):
         before, after, logs = window(mode, tier="powerful")
         fields = {key: value for key, value in logs[1].items()

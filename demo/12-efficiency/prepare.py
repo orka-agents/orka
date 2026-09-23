@@ -41,7 +41,7 @@ IMAGES = {
     "CONTROLLER_IMAGE": "docker.io/sozercan/orka@sha256:9cfb6bfe463f68f99b5212a73110b4dbeafc1c12635d1f15ab76e0d24b4bcf60",
     "AI_WORKER_IMAGE": "docker.io/sozercan/orka-ai-worker@sha256:54ac3827593f0671e01c0f68ed00617e6852f748fb4e1a7d0eb63e48eb33b4ff",
     "GENERAL_WORKER_IMAGE": "docker.io/sozercan/orka-general-worker@sha256:ebebb9088c52c5a3d6ef192ea26c0173c84ff8bacf81d13ae1ebb33a3acf9be4",
-    "VEKIL_IMAGE": "docker.io/sozercan/vekil@sha256:2955680bd51834aa60173faf5e571f8966b6a71ea1759d50a41ca4e90d21eca3",
+    "VEKIL_IMAGE": "docker.io/sozercan/vekil@sha256:fb9390bae2bb891635e7c7b3750eeaa653416e5a450c85033aa4e7d5ba991afe",
     "AIKIT_IMAGE": "docker.io/sozercan/aikit-qwen35-2b@sha256:0d8d8b0838bcaa808532d3a690d19f9e9095145e29bcb23369133b26078ed234",
 }
 PROTECTED = (

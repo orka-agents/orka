@@ -1,12 +1,13 @@
-# Help the customer. Fix the cause.
+# Twenty customers. One checkout problem.
 
-A customer clicked Pay again after checkout froze and saw two charges. Support
-needs a factual acknowledgement and the order reference. Payments engineering
-needs to fix overlapping retries. These two teams use saved Orka Agents in one
-installation on `sertac-aks`.
+Twenty customers retried a frozen checkout and report duplicate charges.
+Support needs twenty individual, factual replies. Payments engineering needs
+to fix overlapping retries once. These teams use saved Orka Agents in one
+installation. The video opens with "This video introduces the following
+scenario." Its visible commands and output omit the cluster name.
 
 The walkthrough starts with the scenario and the instructions that define each
-job. It runs both jobs with hosted GPT-5.5, introduces a local model, enables
+job. It runs the batch and engineering fix with hosted GPT-5.5, introduces a local model, enables
 Vekil's semantic router, and repeats the same work. The recording uses real
 `orka`, `kubectl`, Git, and Podman commands. Node runs the payment tests inside
 an isolated container.
@@ -108,9 +109,13 @@ short-lived authentication flags. They do not alter the presenter's CLI config,
 
 ## Evidence
 
-The support reply must contain two sentences, acknowledge the reported double
-charge, request an order reference, and avoid claiming a completed refund or
-investigation. The native worker must make zero tool calls. Native workers
+[`customers.json`](customers.json) fixes the twenty synthetic reports before
+execution. Ten contain an order reference; ten do not. Both modes receive the
+same reports and run support Tasks one at a time. Every reply must contain two
+sentences, acknowledge the reported duplicate charge, use the supplied order
+reference or request the missing one, and avoid claiming or promising a refund
+or investigation. All twenty replies are retained together for inspection.
+Each native worker must make zero tool calls. Native workers
 still expose memory tools, so an empty configured tool list alone proves
 nothing about tool use.
 
@@ -130,12 +135,32 @@ background instructions and older messages as well as the current request.
 The coding route view reports that flag when set. The demo establishes the
 recorded destination and tested outcome, without claiming the classifier saw
 the entire coding context or attributing the tier to one particular signal.
-Fallback, failed model calls, changed instructions, restarts during a measured
-interval, missing history, or failing checks stop the walkthrough.
+If Jev returns an upstream service error, Vekil's existing policy sends the work
+to the powerful model. The recording reports those fallbacks separately from
+successful classifications. Its usage includes the hosted calls they caused.
+After repeated errors, Vekil's circuit breaker can send work directly to the
+powerful model without calling Jev. These fallbacks remain visible, and the
+physical counters and response receipts must confirm that no classifier call
+was sent for them.
+A small observability change logs each TypeSafe response's safe generation ID
+and parent operation, without recording prompts, headers, or credentials. It
+does not change retries, classification, or the selected model.
+
+`classifier_billing.py` uses an exact generation ID to retrieve Vercel's
+read-only billing record for an unmetered classifier failure. The comparison
+requires a matching failed Jev record with explicit zero market cost, zero
+gateway cost, and zero billed token counts. Zero promotional debit alone is
+insufficient. Gateway token usage for those failures remains unavailable; the
+separate receipt establishes their zero charge. Missing or inconsistent
+receipts stop the comparison. Failed terminal model calls, changed
+instructions, restarts during a measured interval, missing history, or failing
+reply and code checks also stop the walkthrough.
 
 The comparison includes reported model tokens, classifier requests and usage,
-Task elapsed time, and sampled CPU and memory use. Classifier startup checks are
-reported outside the Task intervals. Missing measurements remain unavailable.
+batch and engineering elapsed time, and sampled CPU and memory use. Raw amounts
+and percentage changes are shown together. Classifier startup checks occur
+outside the Task intervals and are included separately in the cost estimate.
+Missing measurements remain unavailable.
 Orka's usage report must reconcile wherever it reports consumed tokens. The
 current Codex runtime leaves its attempt count unavailable there, with the
 explicit gap `No consumed-token counts reported`. The demo retains that gap as
@@ -143,8 +168,35 @@ unavailable, verifies the native support measurement, and uses the gateway's
 complete physical-call records for both jobs in the token comparison. It never
 substitutes gateway numbers into missing Orka measurements or adds overlapping
 counts together. Standalone Tasks appear under other team usage. Token totals
-include cached input; they do not establish dollar savings. Local computation
-also consumes capacity.
+include cached input, which is priced separately from uncached input.
+
+`costs.py` applies a dated public rate card to the gateway's input, cached input,
+and output counts. It includes Jev classification and startup checks, using
+Jev's published market rate rather than its temporary free promotion. These are
+usage estimates, not an account invoice; included credits, billing plans, and
+contracted rates can change the amount billed.
+
+`infrastructure.py` retains safe Pod and node sizing records. It allocates node
+compute prices by an explicit 50% CPU and 50% RAM reservation weighting over
+each measured workflow interval, including idle time in that interval. The
+hosted-only service estimate excludes the local model it does not need; the
+actual test allocation, which includes the model left running during baseline,
+is also retained. Storage, network charges, and operation outside those
+intervals are outside this estimate. This is an allocation of capacity already
+operated, not a claim about additional Azure spending or all-day savings.
+
+Run a rehearsal in reversed order before recording the baseline-then-routed
+walkthrough. Keep all attempts and compare their outcomes and costs. Do not
+choose a recording based on the largest saving. Unaccounted calls or failed
+checks stop a run, and their raw evidence remains in its directory. Accounted
+classifier service errors stay in the comparison with their real fallback
+behavior and exact billing receipts.
+
+```sh
+python3 demo/12-efficiency/rehearse.py \
+  --run-dir bin/efficiency-production/twenty-customers-rehearsal-01 \
+  --order routed baseline
+```
 
 ## Verification and video production
 
@@ -158,6 +210,6 @@ python3 demo/narrated/prepare.py render 12-efficiency
 
 See [`../narrated/README.md`](../narrated/README.md) for reference-voice synthesis,
 Resolve assembly, and export checks. Give the replacement manifest a new
-`output_name`, such as `12-efficiency-customer-story`, before assembly so the
+`output_name`, such as `12-efficiency-twenty-customers`, before assembly so the
 previous project's staged media and exports remain available. The final video
 ends with <https://orka-agents.github.io/orka/>.

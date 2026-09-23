@@ -1,0 +1,22 @@
+[
+  {"id": "support-01", "report": "Checkout froze, so I clicked Pay again. Now I see two charges.", "orderReference": null},
+  {"id": "support-02", "report": "The payment page stopped responding. I tried again and my card shows two charges for order ORD-4102.", "orderReference": "ORD-4102"},
+  {"id": "support-03", "report": "I pressed Pay a second time after the spinner got stuck. It looks like I was charged twice.", "orderReference": null},
+  {"id": "support-04", "report": "Order ORD-4104 has two charges on my statement. Checkout froze before I retried the payment.", "orderReference": "ORD-4104"},
+  {"id": "support-05", "report": "My checkout would not finish, so I retried. There are now two matching charges on my card.", "orderReference": null},
+  {"id": "support-06", "report": "For order ORD-4106, I clicked Pay twice because the page froze. My bank lists two charges.", "orderReference": "ORD-4106"},
+  {"id": "support-07", "report": "The checkout screen got stuck after I paid. I tried once more and now see a duplicate charge.", "orderReference": null},
+  {"id": "support-08", "report": "I think order ORD-4108 was charged twice. The page stopped loading and I retried the payment.", "orderReference": "ORD-4108"},
+  {"id": "support-09", "report": "Payment appeared to hang. After I pressed Pay again, two charges appeared for my purchase.", "orderReference": null},
+  {"id": "support-10", "report": "Checkout froze for order ORD-4110. I submitted payment again and my account shows two charges.", "orderReference": "ORD-4110"},
+  {"id": "support-11", "report": "I retried when checkout stopped responding. My statement now shows that I was charged twice.", "orderReference": null},
+  {"id": "support-12", "report": "There is a duplicate charge for order ORD-4112 after I clicked Pay again on a frozen checkout page.", "orderReference": "ORD-4112"},
+  {"id": "support-13", "report": "I saw no response to my payment, tried again, and then found two charges on my card.", "orderReference": null},
+  {"id": "support-14", "report": "My order is ORD-4114. Checkout stalled, I retried, and two payments are showing for this one order.", "orderReference": "ORD-4114"},
+  {"id": "support-15", "report": "The Pay button seemed stuck. I clicked again and noticed that the same purchase was charged twice.", "orderReference": null},
+  {"id": "support-16", "report": "I need help with order ORD-4116. A frozen checkout led me to retry, and I see duplicate charges.", "orderReference": "ORD-4116"},
+  {"id": "support-17", "report": "Checkout hung during payment. After retrying, I can see two charges instead of one.", "orderReference": null},
+  {"id": "support-18", "report": "My card was charged twice for order ORD-4118 after I retried on a checkout page that had stopped responding.", "orderReference": "ORD-4118"},
+  {"id": "support-19", "report": "The payment screen froze and I tried the button again. Now my card shows a duplicate payment.", "orderReference": null},
+  {"id": "support-20", "report": "For order ORD-4120, I retried payment after checkout froze. Two charges are now visible on my account.", "orderReference": "ORD-4120"}
+]
