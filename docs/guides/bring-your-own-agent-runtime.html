@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.10.1">
 <title data-rh="true">Bring your own AgentRuntime | Orka</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orka-agents.github.io/orka/docs/guides/bring-your-own-agent-runtime"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Bring your own AgentRuntime | Orka"><meta data-rh="true" name="description" content="Registering your own external agent runtime with Orka using the AgentRuntime resource."><meta data-rh="true" property="og:description" content="Registering your own external agent runtime with Orka using the AgentRuntime resource."><link data-rh="true" rel="canonical" href="https://orka-agents.github.io/orka/docs/guides/bring-your-own-agent-runtime"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/guides/bring-your-own-agent-runtime" hreflang="en"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/guides/bring-your-own-agent-runtime" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Bring your own AgentRuntime","item":"https://orka-agents.github.io/orka/docs/guides/bring-your-own-agent-runtime"}]}</script><link rel="stylesheet" href="/orka/assets/css/styles.57c51b49.css">
-<script src="/orka/assets/js/runtime~main.fe799abb.js" defer="defer"></script>
+<script src="/orka/assets/js/runtime~main.a598bd3a.js" defer="defer"></script>
 <script src="/orka/assets/js/main.0e970d39.js" defer="defer"></script>
 </head>
 <body>
@@ -111,11 +111,14 @@ proof. Orka retains a Pod finalizer while retirement remains unresolved and
 never replays an uncertain prompt. Tasks created before boot enrollment do
 not acquire recovery evidence retroactively.</p>
 <p>Foundry may use a supervisor plus a broker sidecar with broker-only durable
-storage and Azure identity. Only authenticated drain can prove its remote
-cleanup. Container death cannot retire Foundry execution, and the current
-protocol cannot import broker proof after losing the supervisor. Those cases
-remain unresolved until remote ownership can be established; do not remove
-finalizers or discard the broker ledger to bypass them.</p>
+storage and Azure identity. Orka records the authenticated broker identity
+before admitting work. After the exact witnessed supervisor container
+terminates, a replacement supervisor can relay a retirement request to that
+same broker ledger. Cleanup requires proof that the broker sealed the old
+boot and retired every owner recorded under it. Container death alone cannot
+prove remote cleanup, and missing historical enrollment evidence cannot be
+recreated. Unproven cases remain unresolved; do not remove finalizers or
+discard the broker ledger to bypass them.</p>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="implement-the-protocol">Implement the protocol<a href="#implement-the-protocol" class="hash-link" aria-label="Direct link to Implement the protocol" title="Direct link to Implement the protocol" translate="no">​</a></h2>
 <p>Implement the endpoints and semantics in the <a class="" href="/orka/docs/development/agent-runtime-adapter-contract">AgentRuntime adapter contract</a>:</p>
 <ul>
