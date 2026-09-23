@@ -2620,11 +2620,18 @@ func deactivatePromptCapabilities(state *sessionState, promptID harnessv2.Prompt
 	if state == nil {
 		return
 	}
+	var cause *promptGateCancellation
+	if next == harnessv2.RuntimeSessionStateCancelling && state.runtime != nil {
+		runtime := state.runtime
+		cause = &promptGateCancellation{wait: func(ctx context.Context) {
+			_ = runtime.WaitPromptSettlement(ctx, string(promptID))
+		}}
+	}
 	if state.providerProxy != nil {
-		state.providerProxy.deactivate(string(promptID))
+		state.providerProxy.deactivateWithCause(string(promptID), cause)
 	}
 	if state.mcpProxy != nil {
-		state.mcpProxy.deactivate(promptID, next)
+		state.mcpProxy.deactivateWithCause(promptID, next, cause)
 	}
 }
 

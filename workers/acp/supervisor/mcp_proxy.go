@@ -61,7 +61,8 @@ type mcpProxySession struct {
 	authorization *harnessv2.PromptMCPAuthorization
 	lease         harnessv2.PromptLease
 	gateContext   context.Context
-	gateCancel    context.CancelFunc
+	gateCancel    context.CancelCauseFunc
+	revokedGate   context.Context
 	leaseTimer    *time.Timer
 	leaseVersion  uint64
 	approvals     map[string][]mcpApprovalGrant
@@ -215,8 +216,9 @@ func (s *mcpProxySession) activate(ctx context.Context, auth harnessv2.PromptMCP
 	// Keep only the admitted prompt's trace identity. The gate retains its own
 	// lifetime and never carries request values or baggage into broker calls.
 	parent := trace.ContextWithSpanContext(context.Background(), trace.SpanContextFromContext(ctx))
-	s.gateContext, s.gateCancel = context.WithCancel(parent)
+	s.gateContext, s.gateCancel = context.WithCancelCause(parent)
 	s.approvals = make(map[string][]mcpApprovalGrant)
+	s.revokedGate = nil
 	s.resetLeaseTimerLocked(now)
 	return nil
 }
@@ -297,6 +299,10 @@ func (s *mcpProxySession) expire(promptID harnessv2.PromptID, version uint64) {
 }
 
 func (s *mcpProxySession) deactivate(promptID harnessv2.PromptID, next harnessv2.RuntimeSessionState) {
+	s.deactivateWithCause(promptID, next, nil)
+}
+
+func (s *mcpProxySession) deactivateWithCause(promptID harnessv2.PromptID, next harnessv2.RuntimeSessionState, cause *promptGateCancellation) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.authorization == nil {
@@ -307,6 +313,10 @@ func (s *mcpProxySession) deactivate(promptID harnessv2.PromptID, next harnessv2
 	}
 	if s.authorization.PromptID != promptID {
 		return
+	}
+	if cause != nil && s.gateCancel != nil {
+		s.revokedGate = s.gateContext
+		s.gateCancel(cause)
 	}
 	s.revokeLocked(next)
 }
@@ -323,7 +333,7 @@ func (s *mcpProxySession) revokeLocked(next harnessv2.RuntimeSessionState) {
 		s.leaseTimer = nil
 	}
 	if s.gateCancel != nil {
-		s.gateCancel()
+		s.gateCancel(nil)
 		s.gateCancel = nil
 	}
 	s.gateContext = nil
@@ -386,7 +396,7 @@ func (s *mcpProxySession) authorizeCall(toolName, callID string, now time.Time) 
 	if s.closed || s.authorization == nil || s.gateContext == nil || s.gateCancel == nil ||
 		s.state != harnessv2.RuntimeSessionStatePromptRunning ||
 		!s.authorization.AuthorizedAt(s.state, s.lease, now) {
-		return nil, harnessv2.PromptMCPAuthorization{}, harnessv2.PromptLease{}, nil, fmt.Errorf("prompt-scoped MCP authority is inactive")
+		return s.revokedGate, harnessv2.PromptMCPAuthorization{}, harnessv2.PromptLease{}, nil, fmt.Errorf("prompt-scoped MCP authority is inactive")
 	}
 	descriptor, ok := s.authorization.ToolPolicy.Descriptor(toolName)
 	if !ok || !descriptor.Source.Brokered() {
@@ -535,6 +545,7 @@ func (s *mcpProxySession) handleToolCall(w http.ResponseWriter, r *http.Request,
 	now := time.Now().UTC()
 	gate, authorization, lease, approval, err := s.authorizeCall(params.Name, callID, now)
 	if err != nil {
+		waitForPromptGateCancellation(r.Context(), gate)
 		writeMCPRPCError(w, rpc.ID, -32001, "MCP tool call is not authorized")
 		return
 	}
@@ -569,10 +580,13 @@ func (s *mcpProxySession) handleToolCall(w http.ResponseWriter, r *http.Request,
 		cancel()
 	}()
 	response, err := s.proxy.broker.Call(ctx, request)
-	if err == nil {
-		err = ctx.Err()
-	}
 	if err != nil {
+		// Only a locally cancelled call waits for courtesy cancellation. A
+		// broker failure or a definitive response must keep its own meaning,
+		// even if gate revocation races its delivery.
+		if errors.Is(err, context.Canceled) {
+			waitForPromptGateCancellation(r.Context(), gate)
+		}
 		writeMCPRPCError(w, rpc.ID, -32002, "MCP broker call failed")
 		return
 	}

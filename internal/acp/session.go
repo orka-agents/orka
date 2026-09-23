@@ -434,6 +434,38 @@ func (s *RuntimeSession) CancelPrompt(ctx context.Context, promptID string) (Pro
 	}
 }
 
+// WaitPromptSettlement joins the exact local prompt without requesting another
+// cancellation. Proxies use it after revoking authority to avoid delivering the
+// resulting request error before the adapter consumes its courtesy cancel. The
+// wait is bounded even if the caller's cancellation never reaches the child;
+// neither this wait nor its timeout supplies remote settlement or cleanup proof.
+func (s *RuntimeSession) WaitPromptSettlement(ctx context.Context, promptID string) error {
+	s.mu.Lock()
+	active := s.active
+	if active == nil || active.id != promptID || active.settled {
+		_, settled := s.tombstones[promptID]
+		s.mu.Unlock()
+		if settled {
+			return nil
+		}
+		return &StalePromptError{PromptID: promptID}
+	}
+	done := active.done
+	grace := s.config.CancelGrace
+	s.mu.Unlock()
+	if grace <= 0 {
+		grace = DefaultStopGrace
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, 2*grace)
+	defer cancel()
+	select {
+	case <-done:
+		return nil
+	case <-waitCtx.Done():
+		return waitCtx.Err()
+	}
+}
+
 func (s *RuntimeSession) Delete(ctx context.Context) (CleanupStatus, error) {
 	s.mu.Lock()
 	deletion := s.deletion

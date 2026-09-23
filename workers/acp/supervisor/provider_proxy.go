@@ -128,7 +128,8 @@ type providerProxySession struct {
 	leaseVersion      uint64
 	leaseTimer        *time.Timer
 	gateContext       context.Context
-	gateCancel        context.CancelFunc
+	gateCancel        context.CancelCauseFunc
+	revokedGate       context.Context
 	turnPromptID      string
 	maxTurns          int32
 	inferenceRequests int32
@@ -386,7 +387,8 @@ func (s *providerProxySession) activateWithMaxTurns(promptID string, maxTurns in
 	s.lastUpstreamDetail = ""
 	s.leaseVersion++
 	version := s.leaseVersion
-	s.gateContext, s.gateCancel = context.WithCancel(context.Background())
+	s.gateContext, s.gateCancel = context.WithCancelCause(context.Background())
+	s.revokedGate = nil
 	s.leaseTimer = time.AfterFunc(time.Until(expiresAt), func() {
 		s.expire(promptID, version)
 	})
@@ -429,10 +431,21 @@ func (s *providerProxySession) closeAdmission(promptID string) {
 }
 
 func (s *providerProxySession) deactivate(promptID string) {
+	s.deactivateWithCause(promptID, nil)
+}
+
+func (s *providerProxySession) deactivateWithCause(promptID string, cause *promptGateCancellation) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.activePromptID != promptID {
 		return
+	}
+	if cause != nil && s.gateCancel != nil {
+		// Install the local cause before Foundry settlement can reject an
+		// in-flight request. New authenticated requests keep this exact gate
+		// until the next prompt activates.
+		s.revokedGate = s.gateContext
+		s.gateCancel(cause)
 	}
 	s.revokeLocked()
 }
@@ -452,7 +465,7 @@ func (s *providerProxySession) revokeLocked() {
 		s.leaseTimer = nil
 	}
 	if s.gateCancel != nil {
-		s.gateCancel()
+		s.gateCancel(nil)
 		s.gateCancel = nil
 	}
 	s.gateContext = nil
@@ -531,16 +544,16 @@ func (s *providerProxySession) wait(ctx context.Context) error {
 func (s *providerProxySession) authorize(r *http.Request, class providerRequestClass, now time.Time) (providerProxyAuthorization, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed || s.activePromptID == "" || s.gateContext == nil || !now.Before(s.leaseExpiresAt) {
+	if s.closed || !requestHasCredential(r, s.credential) {
+		return providerProxyAuthorization{}, false
+	}
+	if s.activePromptID == "" || s.gateContext == nil || !now.Before(s.leaseExpiresAt) {
 		if s.activePromptID != "" && !now.Before(s.leaseExpiresAt) {
 			s.revokeLocked()
 		}
-		return providerProxyAuthorization{}, false
+		return providerProxyAuthorization{gateContext: s.revokedGate}, false
 	}
 	if s.admissionClosed {
-		return providerProxyAuthorization{}, false
-	}
-	if !requestHasCredential(r, s.credential) {
 		return providerProxyAuthorization{}, false
 	}
 	if s.inflight == 0 {
@@ -954,7 +967,7 @@ func (p *providerProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _, routeClass := providerRequestRoute(p.providerKind, suffix, r.Method)
 	authorization, ok := session.authorize(r, routeClass, time.Now().UTC())
 	if !ok {
-		providerproxy.WriteError(w, http.StatusForbidden, "provider access is not active")
+		p.rejectInactiveRequest(w, r, session, authorization.gateContext)
 		return
 	}
 	defer authorization.release()
@@ -989,27 +1002,8 @@ func (p *providerProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	requestContext, cancel := context.WithCancel(r.Context())
-	stopGate := context.AfterFunc(authorization.gateContext, cancel)
-	stopBody := context.AfterFunc(authorization.gateContext, func() { _ = r.Body.Close() })
-	var connectionMu sync.Mutex
-	var upstreamConnection net.Conn
-	connectionRevoked := false
-	closeUpstreamConnection := func() {
-		connectionMu.Lock()
-		connectionRevoked = true
-		if upstreamConnection != nil {
-			_ = upstreamConnection.Close()
-		}
-		connectionMu.Unlock()
-	}
-	stopConnection := context.AfterFunc(authorization.gateContext, closeUpstreamConnection)
-	defer func() {
-		stopGate()
-		stopBody()
-		stopConnection()
-		cancel()
-	}()
+	requestContext, finishRequest, waitForCancellation := newProviderProxyRequestContext(r, authorization.gateContext)
+	defer finishRequest()
 	body, err := readBoundedProviderBody(requestContext, r.Body, p.maxRequestBytes)
 	if err != nil {
 		switch {
@@ -1020,6 +1014,7 @@ func (p *providerProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			// not provider evidence and must not outrank an earlier success.
 			providerproxy.WriteError(w, http.StatusForbidden, "provider request is no longer active")
 		default:
+			waitForCancellation(err)
 			reject(http.StatusForbidden, "provider request is no longer active")
 		}
 		return
@@ -1036,6 +1031,7 @@ func (p *providerProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	select {
 	case <-authorization.gateContext.Done():
+		waitForPromptGateCancellation(r.Context(), authorization.gateContext)
 		reject(http.StatusForbidden, "provider request is no longer active")
 		return
 	default:
@@ -1046,19 +1042,12 @@ func (p *providerProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			session.recordRejectedInferenceRequest(authorization.promptID, requestClass, inferenceSeq, http.StatusTooManyRequests, "maximum provider inference requests reached for active prompt")
 			writeProviderTurnLimitError(w, p.providerKind)
 		} else {
+			waitForPromptGateCancellation(r.Context(), authorization.gateContext)
 			reject(http.StatusForbidden, "provider request is no longer active")
 		}
 		return
 	}
 
-	requestContext = httptrace.WithClientTrace(requestContext, &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) {
-		connectionMu.Lock()
-		upstreamConnection = info.Conn
-		if connectionRevoked {
-			_ = info.Conn.Close()
-		}
-		connectionMu.Unlock()
-	}})
 	target := providerproxy.Target(authorization.upstreamBase, suffix, r.URL.RawQuery)
 	upstreamRequest, err := http.NewRequestWithContext(requestContext, r.Method, target.String(), bytes.NewReader(body))
 	if err != nil {
@@ -1071,6 +1060,7 @@ func (p *providerProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	if session.foundry != nil {
 		trustedContext, contextErr := session.foundry.inferenceContext(authorization.promptID, inferenceSeq, body)
 		if contextErr != nil {
+			waitForPromptGateCancellation(r.Context(), authorization.gateContext)
 			reject(http.StatusForbidden, "Foundry inference ownership is no longer active")
 			return
 		}
@@ -1089,17 +1079,86 @@ func (p *providerProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		if requestContext.Err() == nil {
 			session.recordInferenceOutcome(authorization.promptID, requestClass, inferenceSeq, http.StatusBadGateway, providerUpstreamTransportFailure)
 		}
+		waitForCancellation(err)
 		providerproxy.WriteError(w, http.StatusBadGateway, providerUpstreamTransportFailure)
 		return
 	}
 	defer response.Body.Close() //nolint:errcheck
-	p.relayUpstreamResponse(requestContext, w, session, authorization.promptID, requestClass, inferenceSeq, response)
+	p.relayUpstreamResponseWithCancellation(requestContext, w, session, authorization.promptID, requestClass, inferenceSeq, response, waitForCancellation)
+}
+
+// newProviderProxyRequestContext revokes the upstream transport immediately.
+// Its separate wait holds only resulting local cancellation errors, using the
+// original downstream context and the exact gate captured at authorization.
+func newProviderProxyRequestContext(r *http.Request, gate context.Context) (context.Context, func(), func(error)) {
+	requestContext, cancel := context.WithCancel(r.Context())
+	stopGate := context.AfterFunc(gate, cancel)
+	stopBody := context.AfterFunc(gate, func() { _ = r.Body.Close() })
+	var connectionMu sync.Mutex
+	var upstreamConnection net.Conn
+	connectionRevoked, connectionClosedByGate := false, false
+	closeUpstreamConnection := func() {
+		// Cancel first so net/http attributes the read failure to this
+		// request rather than only to the closed underlying connection.
+		cancel()
+		connectionMu.Lock()
+		connectionRevoked = true
+		if upstreamConnection != nil && upstreamConnection.Close() == nil {
+			connectionClosedByGate = true
+		}
+		connectionMu.Unlock()
+	}
+	stopConnection := context.AfterFunc(gate, closeUpstreamConnection)
+	requestContext = httptrace.WithClientTrace(requestContext, &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) {
+		connectionMu.Lock()
+		upstreamConnection = info.Conn
+		if connectionRevoked && info.Conn.Close() == nil {
+			connectionClosedByGate = true
+		}
+		connectionMu.Unlock()
+	}})
+	finish := func() {
+		stopGate()
+		stopBody()
+		stopConnection()
+		cancel()
+	}
+	waitForCancellation := func(err error) {
+		connectionMu.Lock()
+		locallyClosed := connectionClosedByGate
+		connectionMu.Unlock()
+		if errors.Is(err, context.Canceled) || (locallyClosed && errors.Is(err, net.ErrClosed)) {
+			waitForPromptGateCancellation(r.Context(), gate)
+		}
+	}
+	return requestContext, finish, waitForCancellation
+}
+
+func (p *providerProxy) rejectInactiveRequest(w http.ResponseWriter, r *http.Request, session *providerProxySession, gate context.Context) {
+	if gate != nil {
+		// A cancelled prompt grants no authority. Only its authenticated,
+		// slot-bounded rejection waits for courtesy cancellation to settle.
+		if !providerproxy.TryAcquireSlot(session.requestSlots) {
+			providerproxy.WriteError(w, http.StatusTooManyRequests, "provider session request capacity is exhausted")
+			return
+		}
+		defer providerproxy.ReleaseSlot(session.requestSlots)
+		if !providerproxy.TryAcquireSlot(p.requestSlots) {
+			providerproxy.WriteError(w, http.StatusTooManyRequests, "provider proxy request capacity is exhausted")
+			return
+		}
+		defer providerproxy.ReleaseSlot(p.requestSlots)
+		waitForPromptGateCancellation(r.Context(), gate)
+	}
+	providerproxy.WriteError(w, http.StatusForbidden, "provider access is not active")
 }
 
 // relayUpstreamResponse forwards an upstream response to the ACP child and
 // accounts the inference outcome for the owning prompt. Successful responses
 // stream through untouched; error responses have a bounded prefix probed for
 // a detail message before the identical bytes are relayed.
+//
+//nolint:unparam // Keep the direct relay entry point for existing streaming tests.
 func (p *providerProxy) relayUpstreamResponse(
 	ctx context.Context,
 	w http.ResponseWriter,
@@ -1108,6 +1167,19 @@ func (p *providerProxy) relayUpstreamResponse(
 	requestClass providerRequestClass,
 	seq uint64,
 	response *http.Response,
+) {
+	p.relayUpstreamResponseWithCancellation(ctx, w, session, promptID, requestClass, seq, response, nil)
+}
+
+func (p *providerProxy) relayUpstreamResponseWithCancellation(
+	ctx context.Context,
+	w http.ResponseWriter,
+	session *providerProxySession,
+	promptID string,
+	requestClass providerRequestClass,
+	seq uint64,
+	response *http.Response,
+	waitForCancellation func(error),
 ) {
 	rejectUpstream := func(message string) {
 		session.recordInferenceOutcome(promptID, requestClass, seq, http.StatusBadGateway, message)
@@ -1209,6 +1281,11 @@ func (p *providerProxy) relayUpstreamResponse(
 				session.recordInferenceOutcome(promptID, requestClass, seq, http.StatusBadGateway, "provider upstream stream failed")
 			}
 		}
+		if waitForCancellation != nil && providerResponseCanWaitForCancellation(err, upstreamFailed, streamScanner) {
+			// Hold only locally cancelled termination. An HTTP/SSE error, a
+			// completed result, or a protocol/limit failure keeps its meaning.
+			waitForCancellation(err)
+		}
 		panic(http.ErrAbortHandler)
 	}
 	if !upstreamFailed {
@@ -1225,6 +1302,17 @@ func (p *providerProxy) relayUpstreamResponse(
 		// success marker so a truncated 2xx cannot mask an earlier failure.
 		session.recordInferenceOutcome(promptID, requestClass, seq, response.StatusCode, "")
 	}
+}
+
+func providerResponseCanWaitForCancellation(err error, upstreamFailed bool, streamScanner *sseTerminalErrorScanner) bool {
+	if upstreamFailed || errors.Is(err, providerproxy.ErrResponseTooLarge) || errors.Is(err, providerproxy.ErrDestinationWrite) {
+		return false
+	}
+	if streamScanner != nil {
+		streamScanner.flush()
+		return !streamScanner.failed && !streamScanner.completed
+	}
+	return true
 }
 
 // sseTerminalErrorScanner watches a relayed text/event-stream body for an
