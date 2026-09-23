@@ -74,19 +74,22 @@ With --watch the table is reprinted whenever a Task appears or changes phase.`,
 				fmt.Fprint(cmd.OutOrStdout(), renderTaskListTable(tasks)) //nolint:errcheck
 				return nil
 			}
-			return watchLoop(ctx, cmd.OutOrStdout(), opts.interval, func(ctx context.Context) (string, bool, error) {
+			return watchLoop(ctx, cmd.OutOrStdout(), opts.interval, func(ctx context.Context) (watchFrame, error) {
 				tasks, err := fetchTaskList(ctx, c, opts, since)
 				if err != nil {
-					return "", false, err
+					return watchFrame{}, err
 				}
+				frame := watchFrame{Key: taskListStateKey(tasks)}
 				if format != outputTable {
 					var buf bytes.Buffer
 					if err := printStructuredTo(&buf, format, tasks); err != nil {
-						return "", false, err
+						return watchFrame{}, err
 					}
-					return buf.String(), false, nil
+					frame.Text = buf.String()
+					return frame, nil
 				}
-				return renderTaskListTable(tasks), false, nil
+				frame.Text = renderTaskListTable(tasks)
+				return frame, nil
 			})
 		},
 	}
@@ -148,7 +151,7 @@ func fetchTaskList(ctx context.Context, c *client.Client, opts taskListOptions, 
 		}
 		if !since.IsZero() {
 			created, err := time.Parse(time.RFC3339, t.Age)
-			if err != nil || created.Before(since) {
+			if err != nil || !created.After(since) {
 				return false
 			}
 		}
@@ -161,6 +164,19 @@ func fetchTaskList(ctx context.Context, c *client.Client, opts taskListOptions, 
 		warnFilteredTaskOutputLimited(opts.limit)
 	}
 	return tasks, nil
+}
+
+// taskListStateKey describes the set of Tasks and their phases, so a watch
+// reprints when a Task appears, disappears, or changes phase, and not when
+// its age ticks over.
+func taskListStateKey(tasks []client.TaskSummary) string {
+	sorted := append([]client.TaskSummary(nil), tasks...)
+	sortTasksByCreation(sorted)
+	parts := make([]string, 0, len(sorted))
+	for _, t := range sorted {
+		parts = append(parts, t.Name+"="+t.Phase+"/"+taskAgentLabel(t.Agent, t.Image))
+	}
+	return strings.Join(parts, "\n")
 }
 
 // sortTasksByCreation orders rows oldest first so new Tasks appear at the

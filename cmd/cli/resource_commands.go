@@ -116,13 +116,11 @@ func newCRUDGetCmd(spec crudResourceSpec) *cobra.Command {
 			if format != outputTable {
 				return printStructured(cmd, result)
 			}
-			if spec.DescribeRows != nil {
-				return printDescribe(cmd, spec.DescribeRows(toGenericMap(result)))
+			rows := spec.DescribeRows
+			if rows == nil {
+				rows = genericDescribeRows
 			}
-			if spec.TablePrinter != nil {
-				return spec.TablePrinter(cmd, result)
-			}
-			return printDescribe(cmd, genericDescribeRows(toGenericMap(result)))
+			return printDescribe(cmd, rows(toGenericMap(result)))
 		},
 	}
 	addOutputFlag(cmd, outputTable)

@@ -279,15 +279,28 @@ func toolDescribeRows(tool map[string]any) []describeRow {
 	spec := nestedMap(tool, "spec")
 	httpSpec := nestedMap(spec, "http")
 	mcp := nestedMap(spec, "mcp")
+	// An MCP Tool may carry http transport settings as well, so the MCP
+	// backend is the discriminator when present.
 	kind := ""
 	switch {
-	case len(httpSpec) > 0:
-		kind = "http"
 	case len(mcp) > 0:
 		kind = "mcp"
+	case len(httpSpec) > 0:
+		kind = "http"
 	}
 	if class := firstString(spec, "brokeredToolClass"); class != "" {
 		kind = joinNonEmpty(kind, class, " / ")
+	}
+	// The MCP server is hosted by a workspace class or a Substrate actor
+	// template; that reference is its identity.
+	mcpServer := ""
+	if class := nestedString(mcp, "workspace", "classRef", "name"); class != "" {
+		mcpServer = "workspace class " + class
+	} else if template := nestedString(mcp, "substrateActor", "templateRef", "name"); template != "" {
+		mcpServer = "substrate actor template " + template
+	}
+	if path := firstString(mcp, "path"); mcpServer != "" && path != "" {
+		mcpServer += " (" + path + ")"
 	}
 	return []describeRow{
 		{Label: labelName, Value: genericRowName(tool)},
@@ -296,7 +309,7 @@ func toolDescribeRows(tool map[string]any) []describeRow {
 		{Label: "Method", Value: firstString(httpSpec, "method")},
 		{Label: "URL", Value: firstString(httpSpec, "url")},
 		{Label: "Outbound policy", Value: nestedString(httpSpec, "outboundAccessPolicyRef", "name")},
-		{Label: "MCP server", Value: firstString(mcp, "url", "name")},
+		{Label: "MCP server", Value: mcpServer},
 		{Label: "Description", Value: firstString(spec, "description")},
 	}
 }

@@ -257,6 +257,37 @@ func TestToolAndAgentRuntimeGetPrintReadableViews(t *testing.T) {
 		nil, "agent-runtime", "get", "demo-fibey")
 }
 
+func TestToolGetPrefersMCPBackendAndRuntimePoolGetDescribes(t *testing.T) {
+	mcpTool := map[string]any{
+		"metadata": map[string]any{"name": "docs-search", "namespace": "default"},
+		"spec": map[string]any{
+			"description": "Search the docs.",
+			"http":        map[string]any{"method": "POST"},
+			"mcp":         map[string]any{"path": "/mcp", "workspace": map[string]any{"classRef": map[string]any{"name": "mcp-service"}, "port": 8080}},
+		},
+	}
+	pool := map[string]any{
+		"metadata": map[string]any{"name": "acp-codex-b8fda737", "namespace": "default", "creationTimestamp": "2026-09-23T08:00:00Z"},
+		"status": map[string]any{
+			"lifecycle": "Serving", "admissionState": "Accepting", "currentReplicas": 2, "desiredReplicas": 2,
+			"capacity": map[string]any{"residentSessions": 3, "maxResidentSessions": 8, "runningPrompts": 1, "maxRunningPrompts": 4, "queuedTasks": 0},
+		},
+	}
+	srv := jsonServer(t, map[string]any{
+		"/api/v1/tools/docs-search":                mcpTool,
+		"/api/v1/runtime-pools/acp-codex-b8fda737": pool,
+	})
+	defer srv.Close()
+	assertReadableAndJSON(t, srv, mcpTool,
+		[]string{"Type:", "mcp", "MCP server:", "workspace class mcp-service (/mcp)"},
+		[]string{"Type:        http"},
+		"tool", "get", "docs-search")
+	assertReadableAndJSON(t, srv, pool,
+		[]string{"Name:", "acp-codex-b8fda737", "Lifecycle:", "Serving", "Admission:", "Accepting", "Pods:", "2/2", "Sessions:", "3/8", "Prompts:", "1/4"},
+		[]string{"LIFECYCLE"},
+		"runtime-pool", "get", "acp-codex-b8fda737")
+}
+
 func TestWorkspaceStatusAndWhoamiPrintOneFieldPerLine(t *testing.T) {
 	task := map[string]any{
 		"metadata": map[string]any{"name": "write-1", "namespace": "default"},

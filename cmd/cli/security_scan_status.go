@@ -71,23 +71,26 @@ exits when the scan finishes: exit code 0 when it succeeded, 1 when it failed.`,
 				return nil
 			}
 			var final map[string]any
-			err = watchLoop(ctx, cmd.OutOrStdout(), interval, func(ctx context.Context) (string, bool, error) {
+			err = watchLoop(ctx, cmd.OutOrStdout(), interval, func(ctx context.Context) (watchFrame, error) {
 				progress, err := fetch(ctx)
 				if err != nil {
-					return "", false, err
+					return watchFrame{}, err
 				}
 				complete, _ := progress["complete"].(bool)
 				if complete {
 					final = progress
 				}
+				frame := watchFrame{Key: scanProgressStateKey(progress), Done: complete}
 				if format != outputTable {
 					var buf bytes.Buffer
 					if err := printStructuredTo(&buf, format, progress); err != nil {
-						return "", false, err
+						return watchFrame{}, err
 					}
-					return buf.String(), complete, nil
+					frame.Text = buf.String()
+					return frame, nil
 				}
-				return renderScanProgress(progress), complete, nil
+				frame.Text = renderScanProgress(progress)
+				return frame, nil
 			})
 			if err != nil {
 				return err
@@ -137,6 +140,26 @@ func scanRunSucceeded(phase string) bool {
 	default:
 		return false
 	}
+}
+
+// scanProgressStateKey describes the counts a watch reprints for: the scan
+// phase, slice progress, and every stage's Task counts and failed names.
+// Ages are left out so the passage of time alone never reprints.
+func scanProgressStateKey(progress map[string]any) string {
+	scan := nestedMap(progress, "scan")
+	parts := []string{
+		firstString(scan, "phase"),
+		anyString(scan["reviewedSliceCount"]) + "/" + anyString(scan["sliceCount"]),
+		anyString(scan["acceptedFindings"]) + "/" + anyString(scan["droppedFindings"]),
+		firstString(scan, "errorMessage"),
+	}
+	for _, stage := range anySliceToMaps(progress["stages"]) {
+		parts = append(parts, fmt.Sprintf("%s:%d/%d/%d/%d/%d/%d:%s",
+			firstString(stage, "stage"), intField(stage, "tasks"), intField(stage, "pending"), intField(stage, "running"),
+			intField(stage, "succeeded"), intField(stage, "failed"), intField(stage, "cancelled"),
+			strings.Join(anySliceToStrings(stage["failedTasks"]), ",")))
+	}
+	return strings.Join(parts, "\n")
 }
 
 // renderScanProgress draws the header lines and the per-stage table.

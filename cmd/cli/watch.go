@@ -17,13 +17,22 @@ import (
 	"time"
 )
 
-// watchRender produces one frame of a watched view. The frame is printed
-// only when it differs from the previous one; done stops the loop.
-type watchRender func(ctx context.Context) (frame string, done bool, err error)
+// watchFrame is one rendering of a watched view. Key is a stable
+// description of the state that matters (names and phases, stage counts),
+// so a frame is reprinted only when that state changes and not when a
+// relative age such as "12s" ticks over.
+type watchFrame struct {
+	Key  string
+	Text string
+	Done bool
+}
 
-// watchLoop reprints a view whenever it changes, with a timestamp line
-// between frames, until the view reports it is done or the user interrupts
-// with Ctrl-C. An interrupt is not an error.
+// watchRender produces one frame of a watched view.
+type watchRender func(ctx context.Context) (watchFrame, error)
+
+// watchLoop reprints a view whenever its state key changes, with a
+// timestamp line between frames, until the view reports it is done or the
+// user interrupts with Ctrl-C. An interrupt is not an error.
 func watchLoop(ctx context.Context, out io.Writer, interval time.Duration, render watchRender) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -36,25 +45,25 @@ func watchLoop(ctx context.Context, out io.Writer, interval time.Duration, rende
 	last := ""
 	first := true
 	for {
-		frame, done, err := render(ctx)
+		frame, err := render(ctx)
 		if ctx.Err() != nil {
 			return nil
 		}
 		if err != nil {
 			return err
 		}
-		if frame != last {
+		if first || frame.Key != last {
 			if !first {
 				fmt.Fprintf(out, "\n--- %s\n", time.Now().Format(time.RFC3339)) //nolint:errcheck
 			}
-			fmt.Fprint(out, frame) //nolint:errcheck
-			if !strings.HasSuffix(frame, "\n") {
+			fmt.Fprint(out, frame.Text) //nolint:errcheck
+			if !strings.HasSuffix(frame.Text, "\n") {
 				fmt.Fprintln(out) //nolint:errcheck
 			}
-			last = frame
+			last = frame.Key
 			first = false
 		}
-		if done {
+		if frame.Done {
 			return nil
 		}
 		select {

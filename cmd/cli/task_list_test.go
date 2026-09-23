@@ -120,6 +120,16 @@ func TestTaskListSinceFiltersByCreationTime(t *testing.T) {
 	if _, err := runCLI(t, srv.URL, "task", "list", "--since", "later"); err == nil {
 		t.Fatal("invalid --since accepted")
 	}
+	// The cutoff is exclusive: a Task created exactly at --since is not
+	// "after" it.
+	exact := items[0]["metadata"].(map[string]any)["creationTimestamp"].(string)
+	out, err = runCLI(t, srv.URL, "task", "list", "-l", "orka.ai/source=anthropic-proxy", "--since", exact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "recent") {
+		t.Fatalf("--since boundary should be exclusive:\n%s", out)
+	}
 }
 
 func TestTaskListRejectsInvalidSelectorFromServer(t *testing.T) {
@@ -135,20 +145,21 @@ func TestTaskListRejectsInvalidSelectorFromServer(t *testing.T) {
 }
 
 func TestWatchLoopReprintsOnlyWhenTheFrameChanges(t *testing.T) {
-	frames := []string{"A\n", "A\n", "B\n", "B\n"}
+	frames := []watchFrame{{Key: "a", Text: "A 1s\n"}, {Key: "a", Text: "A 2s\n"}, {Key: "b", Text: "B 3s\n"}, {Key: "b", Text: "B 4s\n"}}
 	var out strings.Builder
 	calls := 0
-	err := watchLoop(context.Background(), &out, time.Millisecond, func(context.Context) (string, bool, error) {
+	err := watchLoop(context.Background(), &out, time.Millisecond, func(context.Context) (watchFrame, error) {
 		frame := frames[calls]
 		calls++
-		return frame, calls == len(frames), nil
+		frame.Done = calls == len(frames)
+		return frame, nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := out.String()
-	if strings.Count(text, "A\n") != 1 || strings.Count(text, "B\n") != 1 {
-		t.Fatalf("frames reprinted without a change:\n%s", text)
+	if strings.Count(text, "A 1s\n") != 1 || strings.Count(text, "B 3s\n") != 1 || strings.Contains(text, "2s") || strings.Contains(text, "4s") {
+		t.Fatalf("frames reprinted without a state change:\n%s", text)
 	}
 	if strings.Count(text, "\n--- ") != 1 {
 		t.Fatalf("expected one timestamp separator:\n%s", text)
@@ -159,30 +170,35 @@ func TestWatchLoopStopsOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var out strings.Builder
 	calls := 0
-	err := watchLoop(ctx, &out, time.Millisecond, func(context.Context) (string, bool, error) {
+	err := watchLoop(ctx, &out, time.Millisecond, func(context.Context) (watchFrame, error) {
 		calls++
 		if calls == 2 {
 			cancel()
 		}
-		return "frame\n", false, nil
+		return watchFrame{Key: "k", Text: "frame\n"}, nil
 	})
 	if err != nil {
 		t.Fatalf("cancel is not an error: %v", err)
 	}
 }
 
-func TestRenderTaskListTableChangesWhenPhaseChanges(t *testing.T) {
+func TestTaskListStateKeyChangesOnPhaseOrMembershipNotAge(t *testing.T) {
 	created := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339)
-	before := renderTaskListTable([]client.TaskSummary{{Name: "t1", Type: "agent", Phase: "Running", Agent: "coder", Age: created}})
-	after := renderTaskListTable([]client.TaskSummary{{Name: "t1", Type: "agent", Phase: "Succeeded", Agent: "coder", Age: created}})
-	if before == after {
-		t.Fatal("phase change did not change the rendered table")
+	later := time.Now().UTC().Add(-2 * time.Minute).Format(time.RFC3339)
+	before := taskListStateKey([]client.TaskSummary{{Name: "t1", Type: "agent", Phase: "Running", Agent: "coder", Age: created}})
+	aged := taskListStateKey([]client.TaskSummary{{Name: "t1", Type: "agent", Phase: "Running", Agent: "coder", Age: later}})
+	if before != aged {
+		t.Fatal("age alone changed the watch key")
 	}
-	added := renderTaskListTable([]client.TaskSummary{
+	after := taskListStateKey([]client.TaskSummary{{Name: "t1", Type: "agent", Phase: "Succeeded", Agent: "coder", Age: created}})
+	if before == after {
+		t.Fatal("phase change did not change the watch key")
+	}
+	added := taskListStateKey([]client.TaskSummary{
 		{Name: "t1", Type: "agent", Phase: "Running", Agent: "coder", Age: created},
 		{Name: "t2", Type: "container", Phase: "Pending", Image: "busybox", Age: created},
 	})
 	if added == before {
-		t.Fatal("a new task did not change the rendered table")
+		t.Fatal("a new task did not change the watch key")
 	}
 }
