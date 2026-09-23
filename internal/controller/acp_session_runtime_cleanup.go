@@ -42,6 +42,10 @@ type sessionRuntimeCleanupFence struct {
 	controller   store.ControllerEpochFence
 	runtimeEpoch uint64
 	validateTask func(context.Context) error
+	// allowPublicationFinalization lets standalone terminal cleanup finish an
+	// evidence-bound publication before exact deletion. Session teardown
+	// never sets it; that authority remains delete-only.
+	allowPublicationFinalization bool
 }
 
 func (d *ACPDispatcher) externalRuntimeCleanupEpoch(ctx context.Context, cleanup *sessionRuntimeCleanupFence) (uint64, error) {

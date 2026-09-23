@@ -451,3 +451,44 @@ func TestStandaloneRuntimeCleanupBindingAcceptsRestoredSourceUID(t *testing.T) {
 		t.Fatalf("live UID that is not the frozen binding UID was accepted: %v", err)
 	}
 }
+
+func TestExternalRuntimeCleanupMutationAllowedDistinguishesStandaloneAuthority(t *testing.T) {
+	sessionTeardown := &externalRuntimeCleanupAuthority{sessionCleanup: &sessionRuntimeCleanupFence{}}
+	standalone := &externalRuntimeCleanupAuthority{sessionCleanup: &sessionRuntimeCleanupFence{allowPublicationFinalization: true}}
+	for _, test := range []struct {
+		operation          string
+		wantSession        bool
+		wantStandalone     bool
+		wantWithoutCleanup bool
+	}{
+		{operation: "delete_runtime_session", wantSession: true, wantStandalone: true, wantWithoutCleanup: true},
+		{operation: "finalize_runtime_session_publication", wantSession: false, wantStandalone: true, wantWithoutCleanup: true},
+		{operation: "cancel_prompt", wantSession: false, wantStandalone: false, wantWithoutCleanup: true},
+		{operation: "create_workspace_delta", wantSession: false, wantStandalone: false, wantWithoutCleanup: true},
+		{operation: "create_runtime_session", wantSession: false, wantStandalone: false, wantWithoutCleanup: false},
+		{operation: "start_prompt", wantSession: false, wantStandalone: false, wantWithoutCleanup: false},
+	} {
+		t.Run(test.operation, func(t *testing.T) {
+			if got := externalRuntimeCleanupMutationAllowed(sessionTeardown, test.operation); got != test.wantSession {
+				t.Fatalf("session teardown %q = %t, want %t", test.operation, got, test.wantSession)
+			}
+			if got := externalRuntimeCleanupMutationAllowed(standalone, test.operation); got != test.wantStandalone {
+				t.Fatalf("standalone cleanup %q = %t, want %t", test.operation, got, test.wantStandalone)
+			}
+			if got := externalRuntimeCleanupMutationAllowed(&externalRuntimeCleanupAuthority{}, test.operation); got != test.wantWithoutCleanup {
+				t.Fatalf("frozen authority %q = %t, want %t", test.operation, got, test.wantWithoutCleanup)
+			}
+		})
+	}
+}
+
+func TestStandaloneRuntimeCleanupFencePermitsPublicationFinalization(t *testing.T) {
+	f := newStandaloneRuntimeCleanupFixture(t, false, nil)
+	fence, err := f.base.dispatcher.standaloneRuntimeCleanupFence(f.base.ctx, f.currentTask(t), f.task.UID, f.owner)
+	if err != nil || fence == nil {
+		t.Fatalf("previous-epoch standalone cleanup fence: fence=%v err=%v", fence, err)
+	}
+	if !fence.allowPublicationFinalization {
+		t.Fatal("standalone cleanup fence cannot finalize a prepared publication before deletion")
+	}
+}

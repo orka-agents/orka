@@ -45,7 +45,9 @@ func (d *ACPDispatcher) standaloneRuntimeCleanupFence(
 	}
 	key, liveUID := client.ObjectKeyFromObject(task), task.UID
 	bindingDigest, projectionDigest := task.Status.AgentExecutionBinding.BindingDigest, projection.PayloadDigest
-	scope := &sessionRuntimeCleanupFence{controller: owner, runtimeEpoch: uint64(validated.Execution.ControllerEpoch)}
+	scope := &sessionRuntimeCleanupFence{
+		controller: owner, runtimeEpoch: uint64(validated.Execution.ControllerEpoch), allowPublicationFinalization: true,
+	}
 	scope.validateTask = func(checkCtx context.Context) error {
 		current := &corev1alpha1.Task{}
 		if err := d.APIReader.Get(checkCtx, key, current); err != nil {

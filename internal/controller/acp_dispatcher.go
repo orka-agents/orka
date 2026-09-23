@@ -4592,7 +4592,8 @@ func externalRuntimeMutationUsesFrozenCleanupAuthority(operation string) bool {
 
 func externalRuntimeCleanupMutationAllowed(authority *externalRuntimeCleanupAuthority, operation string) bool {
 	if authority != nil && authority.sessionCleanup != nil {
-		return operation == externalRuntimeDeleteSessionOperation
+		return operation == externalRuntimeDeleteSessionOperation ||
+			(authority.sessionCleanup.allowPublicationFinalization && operation == "finalize_runtime_session_publication")
 	}
 	return externalRuntimeMutationUsesFrozenCleanupAuthority(operation)
 }
