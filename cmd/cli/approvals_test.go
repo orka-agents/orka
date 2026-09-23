@@ -7,11 +7,13 @@ MIT License - see LICENSE file for details.
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -230,5 +232,149 @@ func TestTaskApproveSendsFullIDForPrefixAndPrintsDecision(t *testing.T) {
 	var decision map[string]any
 	if err := json.Unmarshal([]byte(jsonOut), &decision); err != nil || decision["id"] != approvalFullID {
 		t.Fatalf("-o json decision = %s (%v)", jsonOut, err)
+	}
+}
+
+// approvalsWatchServer serves the approvals list from a function of the call
+// count and the task detail with the given phase, so a test can script the
+// moment a request appears.
+func approvalsWatchServer(t *testing.T, phase string, approvals func(call int) []map[string]any) *httptest.Server {
+	t.Helper()
+	var mu sync.Mutex
+	calls := 0
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/tasks/fibey/approvals":
+			mu.Lock()
+			calls++
+			items := approvals(calls)
+			mu.Unlock()
+			json.NewEncoder(w).Encode(map[string]any{"approvals": items}) //nolint:errcheck
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/tasks/fibey":
+			json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"name": "fibey"}, "status": map[string]any{"phase": phase}}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+}
+
+// runCLISplit is runCLI with stdout and stderr captured separately.
+func runCLISplit(t *testing.T, serverURL string, args ...string) (string, string, error) {
+	t.Helper()
+	var out, errOut bytes.Buffer
+	root := newRootCmd()
+	root.SetOut(&out)
+	root.SetErr(&errOut)
+	root.SetArgs(append([]string{"--server", serverURL, "--token", "test-token", "--namespace", "default"}, args...))
+	err := root.Execute()
+	return out.String(), errOut.String(), err
+}
+
+func TestTaskApprovalsWatchPrintsTheFirstPendingRequest(t *testing.T) {
+	t.Setenv("COLUMNS", "120")
+	pending := approvalFixtures(time.Now().Add(9 * time.Minute))[:1]
+	srv := approvalsWatchServer(t, "Running", func(call int) []map[string]any {
+		if call < 3 {
+			return nil
+		}
+		return pending
+	})
+	defer srv.Close()
+
+	out, errOut, err := runCLISplit(t, srv.URL, "task", "approvals", "fibey", "--watch", "--interval", "10ms")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(errOut, "Waiting for an approval request...") != 1 {
+		t.Fatalf("waiting notice should be printed once on stderr, got %q", errOut)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 2 || !strings.HasPrefix(lines[0], "ID") || !strings.Contains(lines[1], "create-work-order") || !strings.Contains(lines[1], "pending") {
+		t.Fatalf("watch should print the table once it has a pending row:\n%s", out)
+	}
+	if strings.Contains(out, "---") || strings.Contains(out, "Waiting") {
+		t.Fatalf("stdout should hold only the table:\n%s", out)
+	}
+}
+
+func TestTaskApprovalsWatchIgnoresDecidedRequests(t *testing.T) {
+	t.Setenv("COLUMNS", "120")
+	fixtures := approvalFixtures(time.Now().Add(9 * time.Minute))
+	srv := approvalsWatchServer(t, "Running", func(call int) []map[string]any {
+		if call < 2 {
+			return fixtures[1:] // approved and declined only
+		}
+		return fixtures
+	})
+	defer srv.Close()
+
+	out, errOut, err := runCLISplit(t, srv.URL, "task", "approvals", "fibey", "-w", "--interval", "10ms")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(errOut, "Waiting for an approval request...") {
+		t.Fatalf("decided requests alone should keep waiting, stderr = %q", errOut)
+	}
+	if !strings.Contains(out, "create-work-order") || !strings.Contains(out, "delete-asset") {
+		t.Fatalf("the full list is printed once a request is pending:\n%s", out)
+	}
+}
+
+func TestTaskApprovalsWatchJSONPrintsOneDocument(t *testing.T) {
+	pending := approvalFixtures(time.Now().Add(9 * time.Minute))[:1]
+	srv := approvalsWatchServer(t, "Running", func(call int) []map[string]any {
+		if call < 2 {
+			return nil
+		}
+		return pending
+	})
+	defer srv.Close()
+
+	out, _, err := runCLISplit(t, srv.URL, "task", "approvals", "fibey", "--watch", "--interval", "10ms", "-o", "json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("stdout is not one JSON document: %v\n%s", err, out)
+	}
+	if items, _ := doc["approvals"].([]any); len(items) != 1 {
+		t.Fatalf("approvals = %v", doc["approvals"])
+	}
+}
+
+func TestTaskApprovalsWatchFailsWhenTheTaskFinishesFirst(t *testing.T) {
+	srv := approvalsWatchServer(t, "Succeeded", func(int) []map[string]any { return nil })
+	defer srv.Close()
+
+	out, err := runCLI(t, srv.URL, "task", "approvals", "fibey", "--watch", "--interval", "10ms")
+	if err == nil || !strings.Contains(err.Error(), "Succeeded") || !strings.Contains(err.Error(), "fibey") {
+		t.Fatalf("error = %v\n%s", err, out)
+	}
+	if strings.Contains(out, "ID ") {
+		t.Fatalf("no table should be printed:\n%s", out)
+	}
+}
+
+func TestTaskApprovalsWatchHonoursTimeout(t *testing.T) {
+	srv := approvalsWatchServer(t, "Running", func(int) []map[string]any { return nil })
+	defer srv.Close()
+
+	_, err := runCLI(t, srv.URL, "task", "approvals", "fibey", "--watch", "--interval", "10ms", "--timeout", "60ms")
+	if err == nil || !strings.Contains(err.Error(), "timed out waiting for task fibey") {
+		t.Fatalf("error = %v", err)
+	}
+	if _, err := runCLI(t, srv.URL, "task", "approvals", "fibey", "--watch", "--timeout", "soon"); err == nil || !strings.Contains(err.Error(), "invalid timeout") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestTaskApprovalsWatchRejectsAnID(t *testing.T) {
+	srv := approvalsWatchServer(t, "Running", func(int) []map[string]any { return nil })
+	defer srv.Close()
+
+	_, err := runCLI(t, srv.URL, "task", "approvals", "fibey", "8a8d1a7d", "--watch")
+	if err == nil || !strings.Contains(err.Error(), "--watch") {
+		t.Fatalf("error = %v", err)
 	}
 }

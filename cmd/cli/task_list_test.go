@@ -186,6 +186,27 @@ func TestWatchLoopUsesFormatAwareSeparators(t *testing.T) {
 	}
 }
 
+func TestWatchLoopSkipsEmptyFramesWithoutASeparator(t *testing.T) {
+	var out strings.Builder
+	calls := 0
+	err := watchLoop(context.Background(), &out, time.Millisecond, outputTable, func(context.Context) (watchFrame, error) {
+		calls++
+		if calls < 3 {
+			return watchFrame{}, nil
+		}
+		return watchFrame{Key: "ready", Text: "ready\n", Done: true}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != "ready\n" {
+		t.Fatalf("empty frames should print nothing, got %q", out.String())
+	}
+	if calls != 3 {
+		t.Fatalf("calls = %d, want 3", calls)
+	}
+}
+
 func TestWatchLoopStopsOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var out strings.Builder

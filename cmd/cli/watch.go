@@ -20,7 +20,9 @@ import (
 // watchFrame is one rendering of a watched view. Key is a stable
 // description of the state that matters (names and phases, stage counts),
 // so a frame is reprinted only when that state changes and not when a
-// relative age such as "12s" ticks over.
+// relative age such as "12s" ticks over. A frame with no Text that is not
+// Done means there is nothing to show yet; the loop keeps polling without
+// printing anything.
 type watchFrame struct {
 	Key  string
 	Text string
@@ -67,6 +69,14 @@ func watchLoop(ctx context.Context, out io.Writer, interval time.Duration, forma
 		}
 		if err != nil {
 			return err
+		}
+		if frame.Text == "" && !frame.Done {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-ticker.C:
+			}
+			continue
 		}
 		if first || frame.Key != last {
 			if !first {
