@@ -46,8 +46,11 @@ These keep the recordings readable for someone who has never seen Orka.
   --watch` follows the work, `task status` answers "did it finish and where
   did the change go", `task events --type ... --tail 1` shows what an agent
   said last, `task approvals` shows what is waiting for a person, and every
-  `get` prints a short field list. Build the CLI from a checkout that includes
-  [#672](https://github.com/orka-agents/orka/pull/672) or newer.
+  `get` prints a short field list, and `task approvals --watch` waits for the
+  moment a Task asks a person. Build the CLI from a checkout that includes
+  [#672](https://github.com/orka-agents/orka/pull/672) and
+  [#677](https://github.com/orka-agents/orka/pull/677) or newer.
+
 - The typed command is shorter than its output. What is left for helpers is
   outside Orka: GitHub, the supplier, the host. Anything that needs `jq`,
   `sed`, `awk`, or `column` is a shell function with a plain name, defined at

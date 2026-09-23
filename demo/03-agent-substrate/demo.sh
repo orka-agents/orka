@@ -89,18 +89,13 @@ request() {
     /^  sessionRef:/ {grab=2} /^      classRef:/ {grab=2} /^      restoreFrom:/ {grab=4} /^  prompt:/ {grab=99}
     grab > 0 {print; grab--}' "$1"
 }
-# checkpoint_status — phase and a short digest.
-checkpoint_status() {
-  kubectl -n "$ORKA_NAMESPACE" get executionworkspacecheckpoint audit-checkpoint -o json |
-    jq -r '"phase:  " + (.status.phase // "-"), "digest: " + ((.status.digest // "-") | .[0:26]) + "…"'
-}
 
 banner "Orka — a save point for an agent" \
   "Priya starts a security audit. The workspace sleeps when nobody works, and a checkpoint brings the audit back after the workspace is deleted."
 
 say "Priya, on the security team, is auditing the inventory service. Nothing"
 say "should run while nobody works, and the findings must survive anything."
-helpers_note actors, workers, request, checkpoint_status
+helpers_note actors, workers, request
 
 chapter "Substrate keeps a pool of workers"
 
@@ -161,8 +156,9 @@ pe "cat checkpoint.yaml"
 pe "kubectl apply -f checkpoint.yaml"
 wait_for "the checkpoint to be Ready" \
   "[[ \$(kubectl -n $ORKA_NAMESPACE get executionworkspacecheckpoint audit-checkpoint -o jsonpath='{.status.phase}') == Ready ]]" 600
-pe "checkpoint_status"
+pe "kubectl -n orka-system get executionworkspacecheckpoint audit-checkpoint"
 ok "The audit has a save point with a digest."
+
 
 chapter "Delete the workspace, restore the copy"
 

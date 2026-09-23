@@ -62,36 +62,12 @@ counts() {
 receipts >raw/counts-initial.json
 python3 "$here/check.py" initial
 
-wait_for_review() {
-  local attempt prefix phase count
-  mkdir raw/review-polls
-  for ((attempt = 1; attempt <= 200; attempt++)); do
-    printf -v prefix 'raw/review-polls/%04d' "$attempt"
-    orka task get "$task" -o json >"$prefix-task.json"
-    orka task approvals "$task" -o json >"$prefix-approvals.json"
-    phase=$(jq -r '.status.phase' "$prefix-task.json")
-    case $phase in
-      Succeeded|Failed|Cancelled|OutcomeUnknown) echo 'Task finished before a waiting review was observed.' >&2; return 1 ;;
-    esac
-    count=$(jq '.approvals // [] | length' "$prefix-approvals.json")
-    if ((count > 0)); then
-      cp "$prefix-task.json" raw/task-pending.json
-      cp "$prefix-approvals.json" raw/approval-pending.json
-      receipts >raw/counts-pending.json
-      python3 "$here/check.py" pending
-      return
-    fi
-    sleep 2
-  done
-  echo 'Timed out waiting for the original work-order review. Inspect this Task before retrying.' >&2
-  return 1
-}
 
 banner 'Orka — Fibey investigates, a person approves the work' \
   'Fibey looks into a pump alert and proposes an inspection. Nothing happens until Lee, the shift lead, approves it.'
 say 'A pressure reading dropped after maintenance. Fibey, an AI assistant, may'
 say 'investigate. Lee, the shift lead, decides whether it may create a work order.'
-helpers_note counts, wait_for_review
+helpers_note counts
 
 chapter '1. An alert after maintenance'
 pe 'cat incident.txt'
@@ -110,12 +86,20 @@ say 'One Task holds the whole thing: the investigation, the wait for a decision,
 say 'and the result that comes back.'
 pe 'orka task create -f task.json | tee raw/create.txt'
 say 'Fibey reads the alert, checks inventory, and proposes a work order.'
-pe 'wait_for_review'
+say 'This waits until the Task asks a person, then shows what it asks for.'
+pe 'orka task approvals "$task" --watch --timeout 10m'
+# The watch exits non-zero if the Task finishes before asking, so the
+# records below are of a Task that is paused on a real request.
+orka task get "$task" -o json >raw/task-pending.json
+orka task approvals "$task" -o json >raw/approval-pending.json
+receipts >raw/counts-pending.json
+python3 "$here/check.py" pending
 ok 'A proposal is waiting. Fibey is paused inside the same Task.'
 
 chapter '4. Nothing has happened yet'
-say 'The Task lists what is waiting: the tool, its arguments, and how long Lee has.'
+say 'The request names the tool, its arguments, and how long Lee has to decide.'
 pe 'orka task approvals "$task"'
+
 orka task get "$task" -o json >raw/task-before-decision.json
 orka task approvals "$task" -o json >raw/approval-before-decision.json
 receipts >raw/counts-before-decision.json
