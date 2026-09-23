@@ -438,3 +438,16 @@ func (s *standaloneCleanupReceiptTakeoverStore) WithControllerEpochMutation(ctx 
 	guard := sessionCleanupReceiptTakeoverStore{DurableControlStore: s.DurableControlStore, takeover: true}
 	return guard.WithControllerEpochMutation(ctx, fence, fn)
 }
+
+func TestStandaloneRuntimeCleanupBindingAcceptsRestoredSourceUID(t *testing.T) {
+	f := newStandaloneRuntimeCleanupFixture(t, false, nil)
+	source := f.task.UID
+	restored := f.task.DeepCopy()
+	restored.UID = "restored-live-uid"
+	if _, err := standaloneRuntimeCleanupBinding(restored, source); err != nil {
+		t.Fatalf("restored incarnation with the frozen source UID was rejected: %v", err)
+	}
+	if _, err := standaloneRuntimeCleanupBinding(restored, restored.UID); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("live UID that is not the frozen binding UID was accepted: %v", err)
+	}
+}

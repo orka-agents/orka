@@ -61,6 +61,7 @@ func TestFoundryRetirementRequiresExactPoolWideAuthority(t *testing.T) {
 		"future epoch": func(r *FoundryBootRetirementRequest) {
 			r.RetiredFence.ControllerEpoch = r.Metadata.Fence.ControllerEpoch + 1
 		},
+		"other instance":   func(r *FoundryBootRetirementRequest) { r.RetiredFence.RuntimeInstanceID = "other-instance" },
 		"other pool":       func(r *FoundryBootRetirementRequest) { r.RetiredFence.RuntimePoolUID = "other-pool" },
 		"other generation": func(r *FoundryBootRetirementRequest) { r.RetiredFence.RuntimePoolGeneration++ },
 		"other profile": func(r *FoundryBootRetirementRequest) {

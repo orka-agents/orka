@@ -67,6 +67,7 @@ func (r FoundryBootRetirementRequest) ValidateAt(now time.Time) error {
 	relay := r.Metadata.Fence
 	if r.RetiredFence.SupervisorBootID == relay.SupervisorBootID ||
 		r.RetiredFence.ControllerEpoch > relay.ControllerEpoch ||
+		r.RetiredFence.RuntimeInstanceID != relay.RuntimeInstanceID ||
 		r.RetiredFence.RuntimePoolUID != relay.RuntimePoolUID ||
 		r.RetiredFence.RuntimePoolGeneration != relay.RuntimePoolGeneration ||
 		r.RetiredFence.RuntimeProfileDigest != relay.RuntimeProfileDigest {

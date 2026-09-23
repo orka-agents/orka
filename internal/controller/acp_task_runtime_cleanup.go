@@ -125,7 +125,9 @@ func (d *ACPDispatcher) validateStandaloneRuntimeCleanupProjection(
 }
 
 func standaloneRuntimeCleanupBinding(task *corev1alpha1.Task, taskUID types.UID) (*corev1alpha1.AgentExecutionBinding, error) {
-	if task == nil || task.UID != taskUID || task.Spec.Type != corev1alpha1.TaskTypeAgent ||
+	// taskUID is the frozen source identity; a restored incarnation's live UID
+	// may differ. The live object is bound separately by validateTask.
+	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeAgent ||
 		task.Spec.SessionRef != nil || task.Status.Execution == nil ||
 		!store.IsTerminalPromptExecutionState(store.PromptExecutionState(task.Status.Execution.State)) ||
 		task.Status.Delivery == nil || !store.IsTerminalPromptDeliveryState(store.PromptDeliveryState(task.Status.Delivery.State)) {
