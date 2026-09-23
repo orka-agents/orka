@@ -36,7 +36,6 @@ for role in author reader; do
 done
 jq -r '.spec.systemPrompt.inline' raw/reader-agent.json >reader-rules.txt
 
-
 jq -n --arg namespace "$ORKA_NAMESPACE" --arg name "$author" --rawfile note procedure.txt '
   {apiVersion:"core.orka.ai/v1alpha1",kind:"Task",
    metadata:{name:$name,namespace:$namespace,labels:{"demo.orka.ai/name":"10-reviewed-memory"}},

@@ -62,7 +62,6 @@ counts() {
 receipts >raw/counts-initial.json
 python3 "$here/check.py" initial
 
-
 banner 'Orka — Fibey investigates, a person approves the work' \
   'Fibey looks into a pump alert and proposes an inspection. Nothing happens until Lee, the shift lead, approves it.'
 say 'A pressure reading dropped after maintenance. Fibey, an AI assistant, may'
