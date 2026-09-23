@@ -43,18 +43,19 @@ func gatewayE2EManagerArgs(name string) ([]string, error) {
 	return nil, fmt.Errorf("manager container not found")
 }
 
-func gatewayE2EWorkerArgs(original []string) []string {
-	args := make([]string, 0, len(original)+1)
+func gatewayE2EFixtureArgs(original []string) []string {
+	args := make([]string, 0, len(original)+2)
 	for i := 0; i < len(original); i++ {
-		if original[i] == "--ai-worker-image" {
+		if original[i] == "--ai-worker-image" || original[i] == "--gateway-terminal-retention" {
 			i++
 			continue
 		}
-		if !strings.HasPrefix(original[i], "--ai-worker-image=") {
+		if !strings.HasPrefix(original[i], "--ai-worker-image=") && !strings.HasPrefix(original[i], "--gateway-terminal-retention=") {
 			args = append(args, original[i])
 		}
 	}
-	return append(args, "--ai-worker-image="+gatewayNativeWorkerImage)
+	return append(args, "--ai-worker-image="+gatewayNativeWorkerImage,
+		"--gateway-terminal-retention="+gatewayE2ETerminalRetention.String())
 }
 
 func gatewayE2ESetManagerArgs(name string, args []string) error {
@@ -83,11 +84,12 @@ func waitForGatewayE2ECapability(enabled bool) {
 	}, 3*time.Minute, time.Second).Should(Succeed())
 }
 
-func gatewayE2EAdmitNativeEvent(baseURL, token, eventName string) string {
+func gatewayE2EAdmitNativeEvent(baseURL, token, eventName string, cleanup *gatewayE2ECleanup) string {
 	envelope := protocol.EventEnvelope{ProtocolVersion: protocol.Version, ExternalEventID: eventName, EventType: protocol.EventTypeText, AccountID: "acct-ci", ContextID: "room-ci", ThreadID: eventName, Sender: protocol.Sender{ID: "sender-ci"}, Text: "Exercise the deterministic native worker.", ReplyTarget: "reply-ci"}
 	data, err := json.Marshal(envelope)
 	Expect(err).NotTo(HaveOccurred())
 	endpoint := fmt.Sprintf("%s/api/v1/gateways/%s/%s/events", strings.TrimRight(baseURL, "/"), namespace, gatewayE2EName)
+	Expect(cleanup.beginIngress()).To(Succeed())
 	body, status, err := doAuthorizedJSONRequest(http.MethodPost, endpoint, token, string(data), "")
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusAccepted))
@@ -95,6 +97,7 @@ func gatewayE2EAdmitNativeEvent(baseURL, token, eventName string) string {
 	Expect(json.Unmarshal([]byte(body), &accepted)).To(Succeed())
 	Expect(accepted.Status).To(Equal("accepted"))
 	Expect(accepted.EventID).NotTo(BeEmpty())
+	Expect(cleanup.finishIngress(accepted.EventID)).To(Succeed())
 	return accepted.EventID
 }
 
