@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -110,11 +111,20 @@ func (c *controllerMCPBrokerClient) Call(ctx context.Context, request harnessv2.
 	propagation.TraceContext{}.Inject(ctx, propagation.HeaderCarrier(httpRequest.Header))
 	response, err := c.client.Do(httpRequest)
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return harnessv2.MCPBrokerCallResponse{}, context.Canceled
+		}
 		return harnessv2.MCPBrokerCallResponse{}, fmt.Errorf("MCP broker transport failed")
 	}
 	defer response.Body.Close() //nolint:errcheck
 	data, err := io.ReadAll(io.LimitReader(response.Body, int64(harnessv2.MaxMCPResultBytes+(64<<10))))
-	if err != nil || response.StatusCode != http.StatusOK {
+	if response.StatusCode != http.StatusOK {
+		return harnessv2.MCPBrokerCallResponse{}, fmt.Errorf("MCP broker rejected the tool call")
+	}
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return harnessv2.MCPBrokerCallResponse{}, context.Canceled
+		}
 		return harnessv2.MCPBrokerCallResponse{}, fmt.Errorf("MCP broker rejected the tool call")
 	}
 	var decoded harnessv2.MCPBrokerCallResponse

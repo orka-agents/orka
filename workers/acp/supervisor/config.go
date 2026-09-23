@@ -145,6 +145,9 @@ func (c Config) Validate() error {
 	if err := c.validateProvider(); err != nil {
 		return err
 	}
+	if c.Capabilities.SupportsFoundryRecovery && (c.Provider.Kind != providerKindFoundry || !c.RequireCapabilities) {
+		return fmt.Errorf("foundry recovery requires a Foundry provider and operation capabilities")
+	}
 	if len(c.ControllerBearerToken) < 32 {
 		return fmt.Errorf("controller bearer token must be at least 32 bytes")
 	}

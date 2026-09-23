@@ -101,6 +101,7 @@ func TestSupervisorMutationsAuthenticateBeforeReadingBodies(t *testing.T) {
 		path   string
 	}{
 		{method: http.MethodPut, path: harnessv2.DrainPath},
+		{method: http.MethodPut, path: harnessv2.FoundryBootRetirementPath},
 		{method: http.MethodPut, path: "/v2/runtime-sessions/session-a"},
 		{method: http.MethodPut, path: "/v2/runtime-sessions/session-a/publication-finalization"},
 		{method: http.MethodDelete, path: "/v2/runtime-sessions/session-a"},

@@ -31,16 +31,18 @@ type Server struct {
 	e2ePromptWriteFaultDir string
 	e2ePromptWriteRecorder E2EPromptWriteFaultRecorder
 
-	mu            sync.Mutex
-	lifecycle     harnessv2.SupervisorLifecycle
-	poisoned      bool
-	drain         harnessv2.DrainStatus
-	sessions      map[harnessv2.RuntimeSessionID]*sessionState
-	tombstones    map[harnessv2.RuntimeSessionUID]sessionTombstone
-	failedCreates map[harnessv2.RuntimeSessionUID]failedCreateReplay
-	poolOps       map[harnessv2.OperationID]harnessv2.OperationRecord
-	statusNonces  map[string]time.Time
-	promptSlots   chan struct{}
+	mu                 sync.Mutex
+	lifecycle          harnessv2.SupervisorLifecycle
+	poisoned           bool
+	drain              harnessv2.DrainStatus
+	sessions           map[harnessv2.RuntimeSessionID]*sessionState
+	tombstones         map[harnessv2.RuntimeSessionUID]sessionTombstone
+	failedCreates      map[harnessv2.RuntimeSessionUID]failedCreateReplay
+	poolOps            map[harnessv2.OperationID]harnessv2.OperationRecord
+	statusNonces       map[string]time.Time
+	foundryIdentity    *harnessv2.FoundryBrokerIdentity
+	foundryRecoveryOps map[harnessv2.OperationID]foundryRecoveryOperation
+	promptSlots        chan struct{}
 }
 
 const e2ePromptWriteAmbiguityLedgerDir = ".orka-e2e-prompt-write-ambiguity"
@@ -444,6 +446,7 @@ func newServer(cfg Config, prepareIdentityState func(string, *acp.UIDAllocator) 
 		tombstones:             make(map[harnessv2.RuntimeSessionUID]sessionTombstone),
 		failedCreates:          make(map[harnessv2.RuntimeSessionUID]failedCreateReplay),
 		poolOps:                make(map[harnessv2.OperationID]harnessv2.OperationRecord),
+		foundryRecoveryOps:     make(map[harnessv2.OperationID]foundryRecoveryOperation),
 		promptSlots:            make(chan struct{}, cfg.Capabilities.Limits.MaxConcurrentPrompts),
 	}
 	if server.sessionIdentityCapacity().RotationRequired() {
@@ -461,6 +464,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET "+harnessv2.CapabilitiesPath, s.handleCapabilities)
 	s.mux.HandleFunc("GET "+harnessv2.StatusPath, s.handleStatus)
 	s.mux.HandleFunc("PUT "+harnessv2.DrainPath, s.handleDrain)
+	s.mux.HandleFunc("PUT "+harnessv2.FoundryBootRetirementPath, s.handleRetireFoundryBoot)
 	s.mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}", s.handleCreateSession)
 	s.mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/publication-finalization", s.handleFinalizeSessionPublication)
 	s.mux.HandleFunc("DELETE /v2/runtime-sessions/{sessionID}", s.handleDeleteSession)
@@ -511,7 +515,14 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, s.status())
+	identity, err := s.foundryStatusIdentity(r.Context())
+	if err != nil {
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeCleanupUnproven, "Foundry broker recovery identity changed", nil, true)
+		return
+	}
+	status := s.status()
+	status.FoundryBroker = identity
+	writeJSON(w, http.StatusOK, status)
 }
 
 // tombstoneFailedCreateLocked records a tombstone for a create that failed
