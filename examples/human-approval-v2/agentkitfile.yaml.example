@@ -1,5 +1,7 @@
-#syntax=ghcr.io/sozercan/agentkit/agentkit:latest
-# Pin the source-built frontend and MAF adapter with the build arguments in README.md.
+#syntax=ghcr.io/sozercan/agentkit/agentkit@sha256:<frontend-digest>
+# Replace <frontend-digest> with the immutable digest of the source-built
+# AgentKit frontend; BuildKit resolves this directive before any build
+# argument. Pin the MAF adapter with the build arguments in README.md.
 apiVersion: v1alpha1
 kind: Agent
 metadata:

@@ -134,7 +134,10 @@ FOUNDRY_DIR=/path/to/agent-runtime-foundry
 
 For direct AgentKit, build [agentkitfile.yaml.example](agentkitfile.yaml.example)
 with the source-built AgentKit frontend and Microsoft Agent Framework adapter.
-Set the frontend and adapter build arguments to their immutable image digests.
+Replace `<frontend-digest>` in its `#syntax=` directive with the frontend
+image digest, and set the adapter build argument to its immutable digest.
+BuildKit resolves the syntax directive before build arguments, so a tag
+there would let qualification evidence drift between builds.
 The baked `/agent/agent.yaml` must contain no direct `tools` or `brokeredTools`.
 The ACP supervisor supplies this Task's MCP tools at session creation.
 Compose that image with the current Orka supervisor using
