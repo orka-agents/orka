@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -24,6 +27,8 @@ const (
 	cliNameKey = "name"
 	queryAfter = "after"
 	queryLimit = "limit"
+
+	approvalStatusPending = "pending"
 )
 
 func newTaskEventsCmd() *cobra.Command {
@@ -61,18 +66,51 @@ func newTaskTraceCmd() *cobra.Command {
 }
 
 func newTaskApprovalsCmd() *cobra.Command {
-	var wide bool
+	var (
+		wide     bool
+		watch    bool
+		interval time.Duration
+		timeout  string
+	)
 	cmd := &cobra.Command{
 		Use:   "approvals <task> [id]",
-		Short: "List task approvals, or show one request in full",
+		Short: "List task approvals, or wait for one",
 		Long: `List the approval requests recorded for a task: the tool each one wants to
 run, its arguments, and how long a pending request has left. Pass an ID (or
 a unique prefix of it) to print one request with every argument on its own
-line. --wide adds the severity, risk summary, and who decided and why.`,
+line. --wide adds the severity, risk summary, and who decided and why.
+
+With --watch the command polls until the task has a pending request, prints
+the list, and exits 0. It exits non-zero if the task finishes first
+(Succeeded, Failed, Cancelled), because then no request is coming, or when
+--timeout elapses. Ctrl-C stops the wait.`,
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if watch && len(args) == 2 {
+				return fmt.Errorf("--watch waits for a pending request; it cannot be combined with an approval ID")
+			}
 			c := newClientFromCmd(cmd)
 			path := "/api/v1/tasks/" + url.PathEscape(args[0]) + "/approvals"
+			if watch {
+				format, err := outputFormat(cmd)
+				if err != nil {
+					return err
+				}
+				ctx := cmd.Context()
+				if ctx == nil {
+					ctx = context.Background()
+				}
+				if timeout != "" {
+					d, err := time.ParseDuration(timeout)
+					if err != nil {
+						return fmt.Errorf("invalid timeout: %w", err)
+					}
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithTimeout(ctx, d)
+					defer cancel()
+				}
+				return watchForApproval(ctx, cmd, c, args[0], path, format, wide, interval)
+			}
 			result, err := c.DoJSON(context.Background(), http.MethodGet, path, nil, nil)
 			if err != nil {
 				return err
@@ -95,8 +133,104 @@ line. --wide adds the severity, risk summary, and who decided and why.`,
 		},
 	}
 	cmd.Flags().BoolVar(&wide, "wide", false, "Show severity, risk summary, and decision details")
+	cmd.Flags().BoolVarP(&watch, "watch", "w", false, "Wait until the task has a pending approval request, then print it")
+	cmd.Flags().DurationVar(&interval, "interval", 5*time.Second, "Poll interval for --watch")
+	cmd.Flags().StringVar(&timeout, "timeout", "", "Maximum time to wait with --watch (e.g. 5m)")
 	addOutputFlag(cmd, outputTable)
 	return cmd
+}
+
+// watchForApproval polls the task's approvals until one is pending, then
+// prints the list once. A task that finishes first is an error, because no
+// request is coming; a --timeout deadline that elapses before the list is
+// printed is an error too. An interrupt is not. The task's phase is checked
+// on every poll, before a pending request is accepted: the server keeps
+// reporting a request as pending after the task finishes, but refuses
+// decisions on it, so it is not actionable. The same goes for a task that
+// is being deleted while its phase is not yet terminal. The phase and the
+// deleting state come from the approvals response itself, the same Task
+// read that filtered the list, so a Task recreated under the same name
+// between two calls cannot pair an old request with a new Task's phase. A
+// server that predates those fields falls back to a separate Task read.
+func watchForApproval(ctx context.Context, cmd *cobra.Command, c *client.Client, task, path, format string, wide bool, interval time.Duration) error {
+	waiting := false
+	done, err := watchLoop(ctx, cmd.OutOrStdout(), interval, format, func(ctx context.Context) (watchFrame, error) {
+		result, err := c.DoJSON(ctx, http.MethodGet, path, nil, nil)
+		if err != nil {
+			return watchFrame{}, err
+		}
+		state, err := approvalsTaskState(ctx, c, task, result)
+		if err != nil {
+			return watchFrame{}, err
+		}
+		if taskPhaseIsTerminal(state.phase) {
+			return watchFrame{}, fmt.Errorf("task %s finished with phase %s; no approval request can be decided", task, state.phase)
+		}
+		if state.deleting {
+			return watchFrame{}, fmt.Errorf("task %s is being deleted; no approval request can be decided", task)
+		}
+		if !hasPendingApproval(result) {
+			if !waiting {
+				waiting = true
+				fmt.Fprintln(cmd.ErrOrStderr(), "Waiting for an approval request...") //nolint:errcheck
+			}
+			return watchFrame{}, nil
+		}
+		var buf bytes.Buffer
+		if format != outputTable {
+			if err := printStructuredTo(&buf, format, result); err != nil {
+				return watchFrame{}, err
+			}
+		} else if err := renderApprovalsTable(&buf, result, wide, time.Now()); err != nil {
+			return watchFrame{}, err
+		}
+		return watchFrame{Key: approvalStatusPending, Text: buf.String(), Done: true}, nil
+	})
+	if err != nil {
+		return err
+	}
+	if !done && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("timed out waiting for task %s to request approval", task)
+	}
+	return nil
+}
+
+// taskApprovalState is what decides whether a pending request can still be
+// acted on: the Task's phase and whether it is being deleted.
+type taskApprovalState struct {
+	phase    string
+	deleting bool
+}
+
+// approvalsTaskState returns the state of the Task an approvals response was
+// filtered against, reading the Task separately only when the server did
+// not include it.
+func approvalsTaskState(ctx context.Context, c *client.Client, task string, result any) (taskApprovalState, error) {
+	m, _ := result.(map[string]any)
+	if phase := firstString(m, "taskPhase"); phase != "" {
+		deleting, _ := m["taskDeleting"].(bool)
+		return taskApprovalState{phase: phase, deleting: deleting}, nil
+	}
+	detail, err := c.GetTask(ctx, task, client.GetOptions{Namespace: c.Namespace})
+	if err != nil {
+		return taskApprovalState{}, err
+	}
+	return taskApprovalState{
+		phase:    client.StringField(*detail, "status", "phase"),
+		deleting: client.StringField(*detail, "metadata", "deletionTimestamp") != "",
+	}, nil
+}
+
+// hasPendingApproval reports whether any request in an approvals response is
+// still waiting for a decision.
+func hasPendingApproval(value any) bool {
+	m, _ := value.(map[string]any)
+	for _, item := range anySliceToMaps(m["approvals"]) {
+		if strings.EqualFold(firstString(item, "status"), approvalStatusPending) {
+			return true
+		}
+	}
+	return false
 }
 
 func newTaskApprovalDecisionCmd(use, short, decision string) *cobra.Command {
@@ -588,10 +722,15 @@ const approvalArgsMinWidth = 24
 // arguments cut to the terminal width, and the time left on a pending
 // request. --wide adds severity, the risk summary, and the decision.
 func printApprovalsTable(cmd *cobra.Command, value any, wide bool, now time.Time) error {
+	return renderApprovalsTable(cmd.OutOrStdout(), value, wide, now)
+}
+
+// renderApprovalsTable writes the approvals table to out.
+func renderApprovalsTable(out io.Writer, value any, wide bool, now time.Time) error {
 	m, _ := value.(map[string]any)
 	items := anySliceToMaps(m["approvals"])
 	if len(items) == 0 {
-		fmt.Fprintln(cmd.OutOrStdout(), "No approvals found.") //nolint:errcheck
+		fmt.Fprintln(out, "No approvals found.") //nolint:errcheck
 		return nil
 	}
 	fixedRows := make([][]string, 0, len(items))
@@ -606,7 +745,7 @@ func printApprovalsTable(cmd *cobra.Command, value any, wide bool, now time.Time
 			hasExecution = true
 		}
 	}
-	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
+	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	header := "ID\tSTATUS\tTOOL\tARGUMENTS\tEXPIRES"
 	if wide {
 		header += "\tSEVERITY\tRISK\tDECIDED BY\tREASON"

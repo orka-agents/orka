@@ -899,7 +899,6 @@ func (s *Server) handleResolvePermission(w http.ResponseWriter, r *http.Request)
 	}
 
 	outcome := acp.CancelledPermissionOutcome()
-	var approval *harnessv2.MCPApprovalEvidence
 	if request.Decision.Outcome == harnessv2.PermissionDecisionSelected {
 		outcome = acp.SelectedPermissionOutcome(request.Decision.OptionID)
 		optionKind := permission.options[request.Decision.OptionID]
@@ -909,17 +908,11 @@ func (s *Server) handleResolvePermission(w http.ResponseWriter, r *http.Request)
 				writeError(w, http.StatusForbidden, harnessv2.ErrorCodeForbidden, "permission has no prompt tool authority", nil, false)
 				return
 			}
-			requiresApproval, resolveErr := state.mcpProxy.permissionRequiresApproval(state.profile.ProviderKind, request.Metadata.PromptID, permission.toolName, now)
-			if resolveErr != nil || (!requiresApproval && optionKind != harnessv2.PermissionOptionAllowOnce) {
+			resolveErr := state.mcpProxy.authorizePermissionTool(state.profile.ProviderKind, request.Metadata.PromptID, permission.toolName, now)
+			if resolveErr != nil || optionKind != harnessv2.PermissionOptionAllowOnce {
 				s.mu.Unlock()
 				writeError(w, http.StatusForbidden, harnessv2.ErrorCodeForbidden, "permission cannot authorize the tool", nil, false)
 				return
-			}
-			if requiresApproval {
-				approval = &harnessv2.MCPApprovalEvidence{
-					PermissionRequestID: request.RequestID, ToolCallID: permission.toolCallID, ToolName: permission.toolName,
-					GrantedAt: now, ExpiresAt: permission.expiresAt, Reusable: optionKind == harnessv2.PermissionOptionAllowAlways,
-				}
 			}
 		}
 	}
@@ -933,14 +926,6 @@ func (s *Server) handleResolvePermission(w http.ResponseWriter, r *http.Request)
 		s.completeOperationFailure(replay, failure)
 		writeError(w, failure.status, failure.code, failure.message, nil, failure.retryable)
 		return
-	}
-	if approval != nil {
-		if err := mcpProxy.grantApproval(request.Metadata.PromptID, *approval); err != nil {
-			failure := operationFailure{status: http.StatusForbidden, code: harnessv2.ErrorCodeForbidden, message: "permission cannot authorize an MCP tool"}
-			s.completeOperationFailure(replay, failure)
-			writeError(w, failure.status, failure.code, failure.message, nil, failure.retryable)
-			return
-		}
 	}
 	if err := mutations.ResolvePermission(string(request.Metadata.PromptID), string(request.RequestID), outcome); err != nil {
 		if mcpProxy != nil {

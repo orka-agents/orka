@@ -20,7 +20,9 @@ import (
 // watchFrame is one rendering of a watched view. Key is a stable
 // description of the state that matters (names and phases, stage counts),
 // so a frame is reprinted only when that state changes and not when a
-// relative age such as "12s" ticks over.
+// relative age such as "12s" ticks over. A frame with no Text that is not
+// Done means there is nothing to show yet; the loop keeps polling without
+// printing anything.
 type watchFrame struct {
 	Key  string
 	Text string
@@ -47,8 +49,12 @@ func watchSeparator(format string) func() string {
 
 // watchLoop reprints a view whenever its state key changes, with a
 // format-aware separator between frames, until the view reports it is done
-// or the user interrupts with Ctrl-C. An interrupt is not an error.
-func watchLoop(ctx context.Context, out io.Writer, interval time.Duration, format string, render watchRender) error {
+// or the user interrupts with Ctrl-C. It reports whether the view finished
+// on its own; an interrupt or an ended context is not an error. A frame
+// rendered after the context ended is dropped, the way orka task wait
+// rejects a success that lands after its deadline, so done means the final
+// frame was printed.
+func watchLoop(ctx context.Context, out io.Writer, interval time.Duration, format string, render watchRender) (bool, error) {
 	separator := watchSeparator(format)
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -63,10 +69,18 @@ func watchLoop(ctx context.Context, out io.Writer, interval time.Duration, forma
 	for {
 		frame, err := render(ctx)
 		if ctx.Err() != nil {
-			return nil
+			return false, nil
 		}
 		if err != nil {
-			return err
+			return false, err
+		}
+		if frame.Text == "" && !frame.Done {
+			select {
+			case <-ctx.Done():
+				return false, nil
+			case <-ticker.C:
+			}
+			continue
 		}
 		if first || frame.Key != last {
 			if !first {
@@ -80,11 +94,11 @@ func watchLoop(ctx context.Context, out io.Writer, interval time.Duration, forma
 			first = false
 		}
 		if frame.Done {
-			return nil
+			return true, nil
 		}
 		select {
 		case <-ctx.Done():
-			return nil
+			return false, nil
 		case <-ticker.C:
 		}
 	}

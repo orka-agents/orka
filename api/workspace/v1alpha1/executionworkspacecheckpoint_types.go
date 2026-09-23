@@ -51,6 +51,7 @@ type ExecutionWorkspaceCheckpointStatus struct {
 // +kubebuilder:resource:categories=orka,shortName=ewcp
 // +kubebuilder:printcolumn:name="Workspace",type=string,JSONPath=`.spec.workspaceRef.name`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="Digest",type=string,JSONPath=`.status.digest`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // ExecutionWorkspaceCheckpoint retains a Data artifact independently of its

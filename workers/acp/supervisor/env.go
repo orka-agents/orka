@@ -122,6 +122,11 @@ const (
 	defaultWorkspaceDeltaUploadBytes      int64 = 100 << 20
 )
 
+// EnvBrokeredToolApprovalProfileDigest opts an operator-qualified, immutable
+// runtime profile into brokered approvals. Provider identity alone is not proof
+// that the composed adapter and hosted configuration preserve delayed outcomes.
+const EnvBrokeredToolApprovalProfileDigest = "ORKA_ACP_BROKERED_TOOL_APPROVAL_PROFILE_DIGEST"
+
 // EnvFoundryRecoveryProfileDigest opts a qualified Foundry broker and controller
 // into the recovery wire contract independently of brokered tool approvals.
 const EnvFoundryRecoveryProfileDigest = "ORKA_ACP_FOUNDRY_RECOVERY_PROFILE_DIGEST"
@@ -167,6 +172,18 @@ func LoadConfigFromEnv() (Config, error) {
 		return Config{}, err
 	}
 	providerCaps := providerCapabilities(providerKind, model)
+	if qualifiedDigest := strings.TrimSpace(os.Getenv(EnvBrokeredToolApprovalProfileDigest)); qualifiedDigest != "" {
+		if providerKind != providerKindAgentKit && providerKind != providerKindFoundry {
+			return Config{}, fmt.Errorf("%s is unsupported for provider %q", EnvBrokeredToolApprovalProfileDigest, providerKind)
+		}
+		if err := harnessv2.ValidateProfileDigest(harnessv2.ProfileDigest(qualifiedDigest)); err != nil {
+			return Config{}, fmt.Errorf("%s: %w", EnvBrokeredToolApprovalProfileDigest, err)
+		}
+		if qualifiedDigest != string(profileDigest) {
+			return Config{}, fmt.Errorf("%s does not match runtime profile digest", EnvBrokeredToolApprovalProfileDigest)
+		}
+		providerCaps.SupportsBrokeredToolApprovals = true
+	}
 	foundryRecovery := false
 	if qualifiedDigest := strings.TrimSpace(os.Getenv(EnvFoundryRecoveryProfileDigest)); qualifiedDigest != "" {
 		if providerKind != providerKindFoundry {

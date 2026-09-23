@@ -1,0 +1,79 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: human-approval-tools
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: human-approval-tools
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: human-approval-tools
+  template:
+    metadata:
+      labels:
+        app: human-approval-tools
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: simulator
+          # Replace with your immutable Python 3.11+ image before applying.
+          image: python-image-must-be-pinned
+          command: [python3, /fixture/simulated_tools.py]
+          args: [--host, 0.0.0.0, --port, '8099', --state, /data/calls.sqlite]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          ports:
+            - name: http
+              containerPort: 8099
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: fixture
+              mountPath: /fixture
+              readOnly: true
+            - name: ledger
+              mountPath: /data
+      volumes:
+        - name: fixture
+          configMap:
+            name: human-approval-tools
+        - name: ledger
+          persistentVolumeClaim:
+            claimName: human-approval-tools
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: human-approval-tools
+spec:
+  selector:
+    app: human-approval-tools
+  ports:
+    - port: 8099
+      targetPort: http

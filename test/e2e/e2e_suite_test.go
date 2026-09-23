@@ -44,7 +44,6 @@ var (
 	gatewayNativeWorkerImage     = "ghcr.io/orka-agents/orka/gateway-e2e-worker:e2e"
 	harnessV2FixtureImage        = "ghcr.io/orka-agents/orka/harness-v2-e2e-fixture:e2e"
 	gatewayE2EEnvVar             = "E2E_GATEWAY"
-	e2eEphemeralClusterEnvVar    = "E2E_EPHEMERAL_CLUSTER"
 	managerRef                   string
 	acpCodexRuntimeRef           string
 	acpClaudeRuntimeRef          string
@@ -296,73 +295,86 @@ var _ = BeforeSuite(func() {
 })
 
 var _ = AfterSuite(func() {
-	if e2eEphemeralClusterEnabled() {
-		By("skipping resource cleanup for the ephemeral E2E cluster")
-		return
+	report := e2eSuiteCleanupEvidence{SchemaVersion: 1, StartedAt: time.Now().UTC()}
+	defer func() {
+		report.FinishedAt = time.Now().UTC()
+		Expect(saveE2ESuiteCleanup(report)).To(Succeed(), "Failed to preserve suite cleanup evidence")
+	}()
+	step := func(name string, cleanup func() error) {
+		By(name)
+		report.Stage = name
+		Expect(saveE2ESuiteCleanup(report)).To(Succeed())
+		ExpectWithOffset(1, cleanup()).To(Succeed(), "Normal E2E cleanup must complete before cluster teardown")
+		report.Completed = append(report.Completed, name)
 	}
-
-	By("cleaning up the curl pod for metrics")
-	runBoundedE2ECleanup(30*time.Second, "kubectl", "delete", "pod", "curl-metrics",
-		"-n", namespace, "--ignore-not-found", "--wait=true", "--timeout=20s")
-
-	By("deleting Tasks before their ACP RuntimePools and other finalizer owners")
-	deleteAllE2EResources("tasks.core.orka.ai", true, 90*time.Second)
-
-	By("deleting Tools before execution workspaces and actor pools")
-	deleteAllE2EResources("tools.core.orka.ai", true, 45*time.Second)
-
-	By("deleting execution workspaces before workspace classes and providers")
-	deleteAllE2EResources("executionworkspaces.workspace.orka.ai", true, 45*time.Second)
-
-	By("deleting controller-owned ACP RuntimePools while the controller is still running")
-	deleteAllE2EResources("runtimepools.core.orka.ai", true, 60*time.Second)
-
-	By("deleting remaining namespaced finalizer owners")
+	step("cleaning up the curl pod for metrics", func() error {
+		return runBoundedE2ECleanup(30*time.Second, "kubectl", "delete", "pod", "curl-metrics",
+			"-n", namespace, "--ignore-not-found", "--wait=true", "--timeout=20s")
+	})
+	step("finalizing exact Tasks and archiving Sessions before runtime owners", cleanupRemainingE2ETasks)
+	step("deleting Tools before execution workspaces and actor pools", func() error {
+		return deleteAllE2EResources("tools.core.orka.ai", true, 45*time.Second)
+	})
+	step("deleting execution workspaces before workspace classes and providers", func() error {
+		return deleteAllE2EResources("executionworkspaces.workspace.orka.ai", true, 45*time.Second)
+	})
+	step("deleting Agents before their runtime owners", func() error {
+		return deleteAllE2EResources("agents.core.orka.ai", true, 45*time.Second)
+	})
+	step("finalizing external AgentRuntime registrations while the controller is still running", func() error {
+		return deleteAllE2EResources("agentruntimes.core.orka.ai", true, 2*time.Minute)
+	})
+	step("deleting ACP RuntimePools while the controller is still running", func() error {
+		return deleteAllE2EResources("runtimepools.core.orka.ai", true, 2*time.Minute)
+	})
 	for _, resource := range []string{
 		"substrateactorpools.core.orka.ai",
 		"outboundaccesspolicies.core.orka.ai",
 		"executionworkspacepools.workspace.orka.ai",
 		"executionworkspaceclasses.workspace.orka.ai",
 	} {
-		deleteAllE2EResources(resource, true, 45*time.Second)
+		step("deleting "+resource, func() error {
+			return deleteAllE2EResources(resource, true, 45*time.Second)
+		})
 	}
-
-	By("deleting cluster-scoped execution workspace providers last")
-	deleteAllE2EResources("executionworkspaceproviders.workspace.orka.ai", false, 45*time.Second)
-
-	By("cleaning up e2e secrets")
+	step("deleting cluster-scoped execution workspace providers last", func() error {
+		return deleteAllE2EResources("executionworkspaceproviders.workspace.orka.ai", false, 45*time.Second)
+	})
 	for _, s := range []string{"e2e-openai-secret", "e2e-anthropic-secret", "e2e-github-secret"} {
-		runBoundedE2ECleanup(30*time.Second, "kubectl", "delete", "secret", s,
-			"-n", namespace, "--ignore-not-found", "--wait=true", "--timeout=20s")
+		step("deleting "+s, func() error {
+			return runBoundedE2ECleanup(30*time.Second, "kubectl", "delete", "secret", s,
+				"-n", namespace, "--ignore-not-found", "--wait=true", "--timeout=20s")
+		})
 	}
-
-	By("undeploying the controller-manager")
-	runBoundedE2ECleanup(2*time.Minute, "make", "undeploy", "ignore-not-found=true")
-
-	By("uninstalling CRDs")
-	runBoundedE2ECleanup(2*time.Minute, "make", "uninstall", "ignore-not-found=true")
-
-	By("removing manager namespace")
-	runBoundedE2ECleanup(60*time.Second, "kubectl", "delete", "ns", namespace,
-		"--ignore-not-found", "--wait=true", "--timeout=45s")
-
+	step("undeploying the controller-manager", func() error {
+		return runBoundedE2ECleanup(2*time.Minute, "make", "undeploy", "ignore-not-found=true")
+	})
+	step("uninstalling CRDs", func() error {
+		return runBoundedE2ECleanup(2*time.Minute, "make", "uninstall", "ignore-not-found=true")
+	})
+	step("removing manager namespace", func() error {
+		return runBoundedE2ECleanup(60*time.Second, "kubectl", "delete", "ns", namespace,
+			"--ignore-not-found", "--wait=true", "--timeout=45s")
+	})
 	if e2eRegistryContainerName != "" {
-		By("removing the Kind-local image registry")
-		runBoundedE2ECleanup(30*time.Second, "docker", "rm", "-f", e2eRegistryContainerName)
+		step("removing the Kind-local image registry", func() error {
+			return runBoundedE2ECleanup(30*time.Second, "docker", "rm", "-f", e2eRegistryContainerName)
+		})
 	}
+	report.Stage, report.Passed = "complete", true
 })
 
-func deleteAllE2EResources(resource string, namespaced bool, timeout time.Duration) {
+func deleteAllE2EResources(resource string, namespaced bool, timeout time.Duration) error {
 	args := []string{
 		"delete", resource, "--all", "--ignore-not-found", "--wait=true", "--timeout=" + timeout.String(),
 	}
 	if namespaced {
 		args = append(args, "-n", namespace)
 	}
-	runBoundedE2ECleanup(timeout+10*time.Second, "kubectl", args...)
+	return runBoundedE2ECleanup(timeout+10*time.Second, "kubectl", args...)
 }
 
-func runBoundedE2ECleanup(timeout time.Duration, name string, args ...string) {
+func runBoundedE2ECleanup(timeout time.Duration, name string, args ...string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
@@ -371,15 +383,13 @@ func runBoundedE2ECleanup(timeout time.Duration, name string, args ...string) {
 	// can leave kubectl holding the output pipes open, so Wait would otherwise
 	// outlive this helper's deadline and eventually trip the suite timeout.
 	cmd.WaitDelay = time.Second
-	if _, err := utils.Run(cmd); err != nil {
+	if err := cmd.Run(); err != nil {
 		if ctx.Err() != nil {
-			_, _ = fmt.Fprintf(GinkgoWriter, "cleanup command timed out after %s: %s %s\n",
-				timeout, name, strings.Join(args, " "))
-			return
+			return fmt.Errorf("cleanup command %s exceeded %s: %w", name, timeout, ctx.Err())
 		}
-		_, _ = fmt.Fprintf(GinkgoWriter, "cleanup command failed: %s %s: %v\n",
-			name, strings.Join(args, " "), err)
+		return fmt.Errorf("cleanup command %s failed; output omitted", name)
 	}
+	return nil
 }
 
 // loadEnvFile reads a .env file and sets environment variables that are not already set.
@@ -574,10 +584,6 @@ func sanitizeDockerName(value string) string {
 
 func gatewayE2EEnabled() bool {
 	return e2eFlagEnabled(gatewayE2EEnvVar)
-}
-
-func e2eEphemeralClusterEnabled() bool {
-	return e2eFlagEnabled(e2eEphemeralClusterEnvVar)
 }
 
 func e2eFlagEnabled(name string) bool {

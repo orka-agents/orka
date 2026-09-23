@@ -40,6 +40,25 @@ type Approval struct {
 	DecisionTime      *time.Time      `json:"decisionTime,omitempty"`
 	DecisionReason    string          `json:"decisionReason,omitempty"`
 	DecisionActor     string          `json:"decisionActor,omitempty"`
+	Binding           *CallBinding    `json:"binding,omitempty"`
+	ExecutionOutcome  string          `json:"executionOutcome,omitempty"`
+	ExecutionReason   string          `json:"executionReason,omitempty"`
+}
+
+// CallBinding identifies the original v2 call. Runtime-supplied identifiers are
+// digested so public event sanitization cannot change the binding or expose
+// private text. The broker retains executable inputs in a Task-owned Secret.
+type CallBinding struct {
+	TaskAttempt              uint32 `json:"taskAttempt"`
+	PromptID                 string `json:"promptID"`
+	CallIDDigest             string `json:"callIDDigest,omitempty"`
+	OperationIDDigest        string `json:"operationIDDigest"`
+	RuntimeSessionUID        string `json:"runtimeSessionUID"`
+	RuntimeSessionGeneration uint64 `json:"runtimeSessionGeneration"`
+	RuntimeInstanceIDDigest  string `json:"runtimeInstanceIDDigest"`
+	SupervisorBootIDDigest   string `json:"supervisorBootIDDigest"`
+	ControllerEpoch          uint64 `json:"controllerEpoch"`
+	RequestDigest            string `json:"requestDigest"`
 }
 
 // Derive returns current approval state from a task event stream.
@@ -79,6 +98,10 @@ func Derive(input []store.ExecutionEvent, now time.Time) []Approval {
 				Status:            StatusPending,
 				CreatedAt:         createdAt,
 				Timeout:           payload.Timeout,
+				Binding:           payload.Binding,
+			}
+			if payload.Binding != nil {
+				approval.ExecutionOutcome = "not_started"
 			}
 			if payload.ExpiresAt != "" {
 				if parsed, err := time.Parse(time.RFC3339, payload.ExpiresAt); err == nil {
@@ -108,6 +131,17 @@ func Derive(input []store.ExecutionEvent, now time.Time) []Approval {
 			approval.DecisionTime = &decisionTime
 			approval.DecisionReason = firstNonEmpty(payload.Reason, event.Summary)
 			approval.DecisionActor = payload.Actor
+		case events.ExecutionEventTypeApprovalExecutionUpdated:
+			payload := approvalPayload(event.Content)
+			approval := byID[firstNonEmpty(payload.ApprovalID, event.ToolCallID)]
+			if approval == nil || approval.Binding == nil {
+				continue
+			}
+			switch payload.ExecutionOutcome {
+			case "not_started", "running", "succeeded", "failed", "unknown":
+				approval.ExecutionOutcome = payload.ExecutionOutcome
+				approval.ExecutionReason = payload.Reason
+			}
 		}
 	}
 
@@ -181,6 +215,8 @@ type payload struct {
 	ExpiresAt         string          `json:"expiresAt"`
 	Reason            string          `json:"reason"`
 	Actor             string          `json:"actor"`
+	Binding           *CallBinding    `json:"binding,omitempty"`
+	ExecutionOutcome  string          `json:"executionOutcome,omitempty"`
 }
 
 func approvalPayload(raw json.RawMessage) payload {
@@ -210,6 +246,7 @@ func EventTypes() []string {
 		events.ExecutionEventTypeApprovalDeclined,
 		events.ExecutionEventTypeApprovalExpired,
 		events.ExecutionEventTypeApprovalCancelled,
+		events.ExecutionEventTypeApprovalExecutionUpdated,
 	}
 }
 

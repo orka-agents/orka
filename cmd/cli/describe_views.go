@@ -265,7 +265,7 @@ func approvalDescribeRows(approval map[string]any) []describeRow {
 // approvalExpiry shows the time left on a pending request and nothing once
 // the request has been decided.
 func approvalExpiry(approval map[string]any, now time.Time) string {
-	if !strings.EqualFold(firstString(approval, "status"), "pending") {
+	if !strings.EqualFold(firstString(approval, "status"), approvalStatusPending) {
 		return ""
 	}
 	return formatUntil(firstString(approval, "expiresAt"), now)

@@ -34,8 +34,8 @@ func TestMCPProxyHoldsOnlyGateCancellationErrors(t *testing.T) {
 						CallID: request.Call.CallID, Result: json.RawMessage(`{"code":"approval_cancelled"}`), IsError: true}, nil
 				}
 			})
-			session, endpoint := newTestMCPProxySession(t, broker, false)
-			authorization := activateCancellationTestMCP(t, session, false)
+			session, endpoint := newTestMCPProxySession(t, broker, true)
+			authorization := activateCancellationTestMCP(t, session, true)
 			release, held := make(chan struct{}), make(chan struct{}, 1)
 			var once sync.Once
 			unblock := func() { once.Do(func() { close(release) }) }
@@ -47,7 +47,7 @@ func TestMCPProxyHoldsOnlyGateCancellationErrors(t *testing.T) {
 				case <-ctx.Done():
 				}
 			}}
-			response := serveCancellationTestMCP(session, endpoint, t.Context(), "action", "lookup")
+			response := serveCancellationTestMCP(session, endpoint, t.Context(), "action", "mutate")
 			awaitSignal(t, started, "MCP request did not reach the broker")
 			session.deactivateWithCause(authorization.PromptID, harnessv2.RuntimeSessionStateCancelling, cause)
 			if outcome == "gate cancelled" {

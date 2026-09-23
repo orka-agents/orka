@@ -8,6 +8,8 @@ repo_root="$(cd "${script_dir}/.." && pwd)"
 . "${script_dir}/lib/e2e-common.sh"
 # shellcheck source=scripts/lib/redact.sh
 . "${script_dir}/lib/redact.sh"
+# shellcheck source=scripts/lib/e2e-cleanup.sh
+. "${script_dir}/lib/e2e-cleanup.sh"
 
 kind_cluster="${KIND_CLUSTER:-orka-live-copilot-proxy-e2e}"
 orka_namespace="${ORKA_NAMESPACE:-orka-system}"
@@ -30,6 +32,11 @@ token_value="${COPILOT_GITHUB_TOKEN:-}"
   die "legacy live proxy fixture must be distinct from the production Vekil Service identity"
 proxy_pf_pid=""
 work_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/live-copilot-proxy-e2e.XXXXXX")"
+cleanup_report_root="${E2E_CLEANUP_REPORT_DIR:-${repo_root}/bin/e2e-cleanup}"
+mkdir -p "${cleanup_report_root}"
+cleanup_report_dir="$(mktemp -d "${cleanup_report_root}/copilot-attempt.XXXXXX")"
+export E2E_CLEANUP_REPORT_DIR="${cleanup_report_dir}"
+e2e_started=false
 
 cleanup_port_forward() {
   local pid="$1"
@@ -90,13 +97,22 @@ dump_diagnostics() {
 
 on_exit() {
   local status="$1"
+  trap - EXIT
   cleanup_port_forward "${proxy_pf_pid}"
+  if [[ "${e2e_started}" == true ]] && ! e2e_cleanup_evidence_passed "${cleanup_report_dir}"; then
+    log "Normal resource cleanup was not proved; preserving evidence and disabling the upstream retry"
+    status=90
+  fi
   if [[ "${status}" -ne 0 ]]; then
     dump_diagnostics
     log "Live copilot-proxy e2e failed"
   fi
-  make cleanup-test-e2e KIND_CLUSTER="${kind_cluster}" >/dev/null 2>&1 || true
+  if ! e2e_cleanup_kind "${kind_cluster}" "${cleanup_report_dir}"; then
+    log "Kind teardown was not proved; preserving evidence and disabling the upstream retry"
+    status=90
+  fi
   rm -rf "${work_dir}" >/dev/null 2>&1 || true
+  exit "${status}"
 }
 
 wait_for_http() {
@@ -349,8 +365,8 @@ YAML
   jq -e '.data | length > 0' "${work_dir}/provider-proxy-models.json" >/dev/null
 
   log "Running focused live copilot-proxy Go e2e specs"
+  e2e_started=true
   KIND_CLUSTER="${kind_cluster}" \
-  E2E_EPHEMERAL_CLUSTER=true \
   E2E_GITHUB_TOKEN="${token_value}" \
   E2E_LIVE_COPILOT_PROXY_BASE_URL="http://${copilot_proxy_service}.${copilot_proxy_namespace}.svc.cluster.local:${copilot_proxy_service_port}/v1" \
   E2E_LIVE_COPILOT_PROXY_SERVICE_NAMESPACE="${copilot_proxy_namespace}" \

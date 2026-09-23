@@ -968,10 +968,21 @@ func permutedLogicalFieldSubsetsSensitive(fields []logicalFieldBoundaries) bool 
 	// raw and normalized text in both the plan record and its journal event.
 	// Flatten only for exact search; history accounting still uses fields.
 	boundaries := make([]logicalFieldBoundary, 0, 4*len(fields))
+	needsExactSearch := false
 	for _, field := range fields {
 		boundaries = append(boundaries, field...)
+		for _, boundary := range field {
+			needsExactSearch = needsExactSearch || !boundary.whole || strings.Contains(boundary.prefix, "/")
+		}
 	}
 	if len(boundaries) < 2 {
+		return false
+	}
+	// Rule out marker-free histories before spending the exact permutation
+	// budget. Unlimited copy reuse makes this precheck conservative for whole
+	// fields. Clipped assignment prefixes need the exact truncation checks, and
+	// malformed relative URLs can require redaction without a credential marker.
+	if !needsExactSearch && !logicalFieldsHaveSensitiveMarker(fields, false) {
 		return false
 	}
 	// Equal complete copies are interchangeable. Consume them in index order

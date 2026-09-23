@@ -153,10 +153,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		}
 
 		DeferCleanup(func() {
-			cmd := exec.Command("kubectl", "delete", "task", codexTaskReadName, "-n", namespace, "--ignore-not-found")
-			_, _ = utils.Run(cmd)
-			cmd = exec.Command("kubectl", "delete", "agent", codexAgentName, "-n", namespace, "--ignore-not-found")
-			_, _ = utils.Run(cmd)
+			cleanupLiveRuntimeTask(apiBaseURL, token, codexTaskReadName, codexAgentName)
 		})
 
 		By("creating a Codex agent backed by the discovered GPT-family model")
@@ -205,10 +202,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		}
 
 		DeferCleanup(func() {
-			cmd := exec.Command("kubectl", "delete", "task", opencodeTaskReadName, "-n", namespace, "--ignore-not-found")
-			_, _ = utils.Run(cmd)
-			cmd = exec.Command("kubectl", "delete", "agent", opencodeAgentName, "-n", namespace, "--ignore-not-found")
-			_, _ = utils.Run(cmd)
+			cleanupLiveRuntimeTask(apiBaseURL, token, opencodeTaskReadName, opencodeAgentName)
 		})
 
 		By("creating an OpenCode agent with native mutation and shell tools requested")
@@ -261,14 +255,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 
 	It("should run claude code through the live proxy with session wiring and exact output", func() {
 		DeferCleanup(func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-			defer cancel()
-			Expect(cleanupAgentSessionTasks(ctx, apiBaseURL, token, claudeSessionName,
-				[]string{claudeTaskName}, utils.Run)).To(Succeed())
-			cmd := exec.CommandContext(ctx, "kubectl", "delete", "agent", claudeAgentName,
-				"-n", namespace, "--ignore-not-found", "--timeout=30s", "--request-timeout=10s")
-			_, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to delete the live Claude test Agent")
+			cleanupLiveRuntimeTask(apiBaseURL, token, claudeTaskName, claudeAgentName)
 		})
 
 		By("creating a Claude agent backed by the discovered Claude-family model")
@@ -309,6 +296,18 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		Expect(acpCopilotRuntimeRef).To(MatchRegexp(`@sha256:[a-f0-9]{64}$`))
 	})
 })
+
+func cleanupLiveRuntimeTask(apiBaseURL, token, taskName, agentName string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	cleanup, err := newE2ECleanup(apiBaseURL, token)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	ExpectWithOffset(1, cleanup.tasks(ctx, []string{taskName}, false)).To(Succeed())
+	cmd := exec.CommandContext(ctx, "kubectl", "delete", "agent", agentName,
+		"-n", namespace, "--ignore-not-found", "--wait=true", "--timeout=30s", "--request-timeout=10s")
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to delete live runtime test Agent")
+}
 
 func openCodeModelSupportsEndpoint(catalog proxyModelCatalog, model, endpoint string) bool {
 	model = strings.TrimSpace(model)

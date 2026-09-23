@@ -82,6 +82,40 @@ type failAgentRuntimeReadWhileTaskSettling struct {
 	failures atomic.Int32
 }
 
+type cancelTaskWhileSettlingReader struct {
+	client.Client
+	taskKey       client.ObjectKey
+	cancelPrompt  context.CancelFunc
+	cancellations atomic.Int32
+	deadline      time.Time
+}
+
+func (r *cancelTaskWhileSettlingReader) Get(
+	ctx context.Context,
+	key client.ObjectKey,
+	object client.Object,
+	options ...client.GetOption,
+) error {
+	if _, ok := object.(*corev1alpha1.AgentRuntime); ok && r.cancellations.Load() == 0 {
+		task := &corev1alpha1.Task{}
+		if err := r.Client.Get(ctx, r.taskKey, task); err != nil {
+			return err
+		}
+		if task.Status.Execution != nil && task.Status.Execution.State == corev1alpha1.TaskExecutionStateSettling &&
+			r.cancellations.CompareAndSwap(0, 1) {
+			if err := r.Delete(ctx, task); err != nil {
+				return err
+			}
+			r.cancelPrompt()
+			r.deadline, _ = ctx.Deadline()
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return r.Client.Get(ctx, key, object, options...)
+}
+
 func (r *failAgentRuntimeReadWhileTaskSubmitting) Get(
 	ctx context.Context,
 	key client.ObjectKey,
@@ -384,6 +418,7 @@ func newExternalACPDispatchFixtureWithOptions(
 	dispatcher := &ACPDispatcher{
 		Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: persistence,
 		EventStore: persistence, PlanStore: persistence, Snapshots: persistence, Epochs: epochs, Sessions: continuity,
+		PromptLeases: &ACPMCPPromptLeaseRegistry{},
 	}
 	return &externalACPDispatchFixture{
 		ctx: ctx, client: kubeClient, controlStore: controlStore, persistence: persistence, epochs: epochs,
@@ -1072,6 +1107,66 @@ func TestACPDispatcherRetryableUnsentExternalWorkspaceDeltaRetriesSameOperation(
 	}
 	if attempt.ExecutionState != store.PromptExecutionSucceeded || !store.IsTerminalPromptDeliveryState(attempt.DeliveryState) {
 		t.Fatalf("retried workspace delta PromptAttempt = %#v", attempt)
+	}
+}
+
+func TestACPDispatcherCompletedExternalPromptValidatesWorkspaceAfterCancellation(t *testing.T) {
+	deltaRequests := make(chan harnessv2.CreateWorkspaceDeltaRequest, 2)
+	fixture := newExternalACPDispatchFixtureWithOptions(
+		t, "external-v2", testAgentRuntimeMCPPolicy(),
+		externalACPDispatchFixtureOptions{
+			contextTimeout: 90 * time.Second,
+			workspaceDeltaObserver: func(request harnessv2.CreateWorkspaceDeltaRequest) {
+				deltaRequests <- request
+			},
+		},
+	)
+	queued := fixture.queueTask(t, "cancel-completed", "cancel-completed-uid", "finish before cancellation", nil)
+	runtimeCtx, cancelRuntime := context.WithCancel(fixture.ctx)
+	t.Cleanup(cancelRuntime)
+	fixture.dispatcher.runtimeContextFactory = func(context.Context, *corev1alpha1.Task) (context.Context, context.CancelFunc) {
+		return runtimeCtx, cancelRuntime
+	}
+	cancellingReader := &cancelTaskWhileSettlingReader{
+		Client: fixture.client, taskKey: client.ObjectKeyFromObject(queued), cancelPrompt: cancelRuntime,
+	}
+	fixture.dispatcher.APIReader = cancellingReader
+
+	completed := fixture.dispatch(t, queued)
+	if cancellingReader.cancellations.Load() != 1 || completed.DeletionTimestamp.IsZero() || !errors.Is(runtimeCtx.Err(), context.Canceled) {
+		t.Fatal("Task deletion did not cancel the prompt during settlement")
+	}
+	if completed.Status.Phase != corev1alpha1.TaskPhaseSucceeded || completed.Status.Execution == nil ||
+		completed.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeSucceeded || completed.Status.Delivery == nil ||
+		completed.Status.Delivery.Outcome != corev1alpha1.TaskDeliveryOutcomeReadValidated {
+		t.Fatalf("completed prompt lost its successful settlement after cancellation: %#v", completed.Status)
+	}
+	if len(deltaRequests) != 1 || fixture.createCalls.Load() != 1 || fixture.deleteCalls.Load() != 1 ||
+		!taskScopedRuntimeSessionCleanupComplete(completed) {
+		t.Fatalf("runtime calls = deltas:%d creates:%d deletes:%d; cleanup complete:%v",
+			len(deltaRequests), fixture.createCalls.Load(), fixture.deleteCalls.Load(), taskScopedRuntimeSessionCleanupComplete(completed))
+	}
+	deltaRequest := <-deltaRequests
+	if cancellingReader.deadline.IsZero() || cancellingReader.deadline.After(deltaRequest.Metadata.ExpiresAt) {
+		t.Fatalf("workspace validation deadline = %s, must be bounded by operation expiry %s", cancellingReader.deadline, deltaRequest.Metadata.ExpiresAt)
+	}
+	result, err := fixture.persistence.GetResult(fixture.ctx, completed.Namespace, completed.Name)
+	if err != nil || string(result) != "from runtime" {
+		t.Fatalf("completed result = %q, err=%v", result, err)
+	}
+	attemptID, err := promptAttemptIDFromTask(completed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := fixture.controlStore.GetPromptAttempt(fixture.ctx, attemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempt.ExecutionState != store.PromptExecutionSucceeded || attempt.DeliveryState != store.PromptDeliveryReadValidated {
+		t.Fatalf("durable settlement = execution:%s delivery:%s", attempt.ExecutionState, attempt.DeliveryState)
+	}
+	if exists, err := fixture.dispatcher.validateExistingStandaloneTaskProjection(fixture.ctx, completed, attempt); err != nil || !exists {
+		t.Fatalf("terminal projection does not match the completed prompt: exists=%v err=%v", exists, err)
 	}
 }
 

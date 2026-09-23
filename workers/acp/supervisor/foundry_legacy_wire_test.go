@@ -11,8 +11,8 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
-// These top-level schemas match the controller before Foundry recovery
-// fields were added. Its decoder rejects unknown fields.
+// These top-level schemas match the approval-aware controller at 51d3360dd,
+// before Foundry recovery fields were added. Its decoder rejects unknown fields.
 type legacyFoundryCapabilities struct {
 	Protocol                          string                                    `json:"protocol"`
 	Transport                         string                                    `json:"transport"`
@@ -62,39 +62,43 @@ func foundryStatusRequest(t *testing.T, cfg Config) *http.Request {
 }
 
 func TestFoundryWithoutRecoveryPreservesLegacyWireContract(t *testing.T) {
-	for _, upgradedBroker := range []bool{false, true} {
-		var calls atomic.Int32
-		server, cfg, _ := newFoundryTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			calls.Add(1)
-			if upgradedBroker {
-				writeJSON(w, http.StatusOK, foundryRecoveryIdentity())
-			} else {
-				w.WriteHeader(http.StatusNotFound)
+	for _, approvals := range []bool{false, true} {
+		for _, upgradedBroker := range []bool{false, true} {
+			var calls atomic.Int32
+			server, cfg, _ := newFoundryTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
+				if upgradedBroker {
+					writeJSON(w, http.StatusOK, foundryRecoveryIdentity())
+				} else {
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			server.cfg.Capabilities.Provider.SupportsBrokeredToolApprovals = approvals
+			if server.cfg.Capabilities.SupportsFoundryRecovery {
+				t.Fatal("Foundry provider identity implicitly enabled recovery")
 			}
-		}))
-		if server.cfg.Capabilities.SupportsFoundryRecovery {
-			t.Fatal("Foundry provider identity implicitly enabled recovery")
-		}
-		capabilities := httptest.NewRecorder()
-		server.Handler().ServeHTTP(capabilities, httptest.NewRequest(http.MethodGet, harnessv2.CapabilitiesPath, nil))
-		var legacyCapabilities legacyFoundryCapabilities
-		decoder := json.NewDecoder(capabilities.Body)
-		decoder.DisallowUnknownFields()
-		if capabilities.Code != http.StatusOK || decoder.Decode(&legacyCapabilities) != nil {
-			t.Fatal("legacy controller cannot decode unchanged Foundry capabilities")
-		}
-		status := httptest.NewRecorder()
-		server.Handler().ServeHTTP(status, foundryStatusRequest(t, cfg))
-		var legacyStatus legacyFoundryStatus
-		decoder = json.NewDecoder(status.Body)
-		decoder.DisallowUnknownFields()
-		if status.Code != http.StatusOK || decoder.Decode(&legacyStatus) != nil || legacyStatus.Fence != cfg.Fence {
-			t.Fatal("legacy controller cannot decode unchanged Foundry status")
-		}
-		retirement := performMutation(t, server.Handler(), http.MethodPut, harnessv2.FoundryBootRetirementPath,
-			foundryRecoveryRequest(t, cfg), cfg)
-		if retirement.Code != http.StatusBadRequest || calls.Load() != 0 || len(server.foundryRecoveryOps) != 0 {
-			t.Fatal("disabled recovery probed or mutated the broker")
+			capabilities := httptest.NewRecorder()
+			server.Handler().ServeHTTP(capabilities, httptest.NewRequest(http.MethodGet, harnessv2.CapabilitiesPath, nil))
+			var legacyCapabilities legacyFoundryCapabilities
+			decoder := json.NewDecoder(capabilities.Body)
+			decoder.DisallowUnknownFields()
+			if capabilities.Code != http.StatusOK || decoder.Decode(&legacyCapabilities) != nil ||
+				legacyCapabilities.Provider.SupportsBrokeredToolApprovals != approvals {
+				t.Fatal("legacy controller cannot decode unchanged Foundry capabilities")
+			}
+			status := httptest.NewRecorder()
+			server.Handler().ServeHTTP(status, foundryStatusRequest(t, cfg))
+			var legacyStatus legacyFoundryStatus
+			decoder = json.NewDecoder(status.Body)
+			decoder.DisallowUnknownFields()
+			if status.Code != http.StatusOK || decoder.Decode(&legacyStatus) != nil || legacyStatus.Fence != cfg.Fence {
+				t.Fatal("legacy controller cannot decode unchanged Foundry status")
+			}
+			retirement := performMutation(t, server.Handler(), http.MethodPut, harnessv2.FoundryBootRetirementPath,
+				foundryRecoveryRequest(t, cfg), cfg)
+			if retirement.Code != http.StatusBadRequest || calls.Load() != 0 || len(server.foundryRecoveryOps) != 0 {
+				t.Fatal("disabled recovery probed or mutated the broker")
+			}
 		}
 	}
 }

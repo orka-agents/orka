@@ -3892,6 +3892,7 @@ the filters, so "what did the agent say last?" is:
   ApprovalDeclined
   ApprovalExpired
   ApprovalCancelled
+  ApprovalExecutionUpdated
   PlanUpdated
 
 Usage:
@@ -4395,7 +4396,7 @@ Usage:
   orka task [command]
 
 Available Commands:
-  approvals   List task approvals, or show one request in full
+  approvals   List task approvals, or wait for one
   approve     Approve a pending task approval
   artifacts   List artifacts for a task
   children    List child tasks
@@ -4437,13 +4438,21 @@ run, its arguments, and how long a pending request has left. Pass an ID (or
 a unique prefix of it) to print one request with every argument on its own
 line. --wide adds the severity, risk summary, and who decided and why.
 
+With --watch the command polls until the task has a pending request, prints
+the list, and exits 0. It exits non-zero if the task finishes first
+(Succeeded, Failed, Cancelled), because then no request is coming, or when
+--timeout elapses. Ctrl-C stops the wait.
+
 Usage:
   orka task approvals <task> [id] [flags]
 
 Flags:
-  -h, --help            help for approvals
-  -o, --output string   Output format: table, json, yaml (default "table")
-      --wide            Show severity, risk summary, and decision details
+  -h, --help                help for approvals
+      --interval duration   Poll interval for --watch (default 5s)
+  -o, --output string       Output format: table, json, yaml (default "table")
+      --timeout string      Maximum time to wait with --watch (e.g. 5m)
+  -w, --watch               Wait until the task has a pending approval request, then print it
+      --wide                Show severity, risk summary, and decision details
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -4696,6 +4705,7 @@ the filters, so "what did the agent say last?" is:
   ApprovalDeclined
   ApprovalExpired
   ApprovalCancelled
+  ApprovalExecutionUpdated
   PlanUpdated
 
 Usage:

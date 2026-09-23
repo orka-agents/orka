@@ -152,6 +152,7 @@ Common task commands:
 | `orka task status NAME [--verbose]` | Show whether the Task finished and where the change went; `--verbose` adds runtime-pool details. |
 | `orka task events NAME [--type TYPE] [--tail N] [--wide]` | List execution events; `--tail 1` shows the last one, `--wide` prints full messages. |
 | `orka task approvals NAME [ID] [--wide]` | Show what each approval request asks for; pass an ID to see every argument. |
+| `orka task approvals NAME --watch [--timeout DURATION]` | Wait until the Task has a pending request, then print it; exits nonzero if the Task finishes first. |
 | `orka task approve NAME ID --reason TEXT` / `decline` | Decide a request; `ID` may be a unique prefix of the short or full ID. |
 | `orka task wait NAME --timeout DURATION` | Wait for completion; exits nonzero for failed/cancelled tasks. |
 | `orka task result NAME` | Print stored task result. |
@@ -225,6 +226,19 @@ $ orka task approve fibey-0923 8a8d1a7d418d --reason "Inspect the transmitter."
 ```
 
 `--wide` adds severity, the risk summary, and who decided and why.
+
+A Task that is waiting for approval is paused, not finished, so `orka task wait` does not
+return at that moment. `--watch` does: it polls the approvals list (`--interval`, default
+5s) until a request is pending, prints the list, and exits 0. It exits nonzero if the Task
+finishes first, naming the phase it ended in, or when `--timeout` elapses. `-o json` prints
+the approvals response instead of the table, and Ctrl-C stops the wait cleanly:
+
+```console
+$ orka task approvals fibey-0923 --watch
+Waiting for an approval request...
+ID            STATUS   TOOL               ARGUMENTS                                                 EXPIRES
+8a8d1a7d418d  pending  create-work-order  asset=pump-1 summary="Inspect the pressure transmitter."  in 9m
+```
 
 ## Chat and dashboard helpers
 

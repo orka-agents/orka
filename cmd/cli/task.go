@@ -558,6 +558,17 @@ func waitForTaskPhase(
 	}
 }
 
+// taskPhaseIsTerminal reports whether a task phase means the task is over,
+// so nothing more (such as an approval request) can come from it.
+func taskPhaseIsTerminal(phase string) bool {
+	for _, terminal := range []corev1alpha1.TaskPhase{corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled} {
+		if strings.EqualFold(phase, string(terminal)) {
+			return true
+		}
+	}
+	return false
+}
+
 // waitContextError maps the polling context's terminal state to the same
 // user-facing errors a deadline without request cancellation would produce.
 func waitContextError(ctx context.Context, taskName string) error {

@@ -13,6 +13,11 @@ var ErrNotFound = errors.New("not found")
 // ErrConflict is returned when a resource cannot be updated because it changed concurrently.
 var ErrConflict = errors.New("conflict")
 
+// ErrControllerEpochMutationContention marks an exhausted mutation-lock
+// acquisition retry window. Errors carrying it also wrap ErrConflict;
+// definitive epoch authority failures do not carry this marker.
+var ErrControllerEpochMutationContention = errors.New("controller epoch mutation contention")
+
 // ErrNotReady is returned when a durable prerequisite is expected to become ready shortly.
 var ErrNotReady = errors.New("not ready")
 

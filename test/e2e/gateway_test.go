@@ -71,7 +71,7 @@ var _ = Describe("Gateway live E2E", Ordered, func() {
 		apiPortForwardCmd     *exec.Cmd
 		eventID               string
 		taskName              string
-		taskNames             []string
+		retentionCleanup      *gatewayE2ECleanup
 		inboundBearer         string
 		originalManagerArgs   []string
 		workerImageConfigured bool
@@ -94,19 +94,15 @@ var _ = Describe("Gateway live E2E", Ordered, func() {
 		if !testActive {
 			return
 		}
+		defer stopPortForward(cancelAPIPortForward, apiPortForwardCmd)
 
-		for _, taskName := range taskNames {
-			if apiBaseURL == "" || apiToken == "" {
-				break
-			}
-			By("deleting the Gateway-owned Task through the controller API")
-			if err := gatewayE2EDeleteTaskViaAPI(apiBaseURL, apiToken, taskName); err != nil {
-				_, _ = fmt.Fprintf(GinkgoWriter, "failed to delete Gateway E2E Task through the controller API: %v\n", err)
-			} else if err := gatewayE2EWaitForTaskDeletion(taskName, 2*time.Minute); err != nil {
-				_, _ = fmt.Fprintf(GinkgoWriter, "Gateway E2E Task deletion did not complete: %v\n", err)
-			}
+		if retentionCleanup != nil {
+			By("waiting for Gateway retention to archive Sessions and normally finalize the exact Tasks")
+			ctx, cancel := context.WithTimeout(context.Background(), gatewayE2ETerminalRetention+3*time.Minute)
+			defer cancel()
+			Expect(gatewayE2EWaitForRetentionCleanup(ctx, retentionCleanup)).To(Succeed(),
+				"Gateway runtime and authentication must remain available until cleanup receipts are verified")
 		}
-		stopPortForward(cancelAPIPortForward, apiPortForwardCmd)
 
 		for _, resource := range []struct {
 			kind string
@@ -127,33 +123,23 @@ var _ = Describe("Gateway live E2E", Ordered, func() {
 			{"secret", gatewayE2EOutboundAuthResourceName},
 			{"secret", gatewayE2EAdapterTLSResourceName},
 		} {
-			gatewayE2EDelete(resource.kind, resource.name)
+			Expect(gatewayE2EDelete(resource.kind, resource.name)).To(Succeed())
 		}
-		gatewayE2EDelete("gatewayclass", gatewayE2EClassName)
+		Expect(gatewayE2EDelete("gatewayclass", gatewayE2EClassName)).To(Succeed())
 
-		var workerImageRestoreErr error
 		if workerImageConfigured {
-			By("restoring the manager's original worker image arguments")
-			workerImageRestoreErr = gatewayE2ESetManagerArgs(managerDeploymentName, originalManagerArgs)
-			if workerImageRestoreErr != nil {
-				_, _ = fmt.Fprintf(GinkgoWriter, "failed to restore Gateway E2E worker image arguments: %v\n", workerImageRestoreErr)
-			}
+			By("restoring the manager's original worker image and retention arguments")
+			Expect(gatewayE2ESetManagerArgs(managerDeploymentName, originalManagerArgs)).To(Succeed())
 		}
 		if managerCAConfigured && managerDeploymentName != "" {
 			By("removing Gateway E2E CA trust from the manager")
-			if err := gatewayE2ERemoveManagerCATrust(managerDeploymentName); err != nil {
-				_, _ = fmt.Fprintf(GinkgoWriter, "failed to remove Gateway E2E manager CA trust: %v\n", err)
-			} else if err := gatewayE2EWaitForDeployment(managerDeploymentName, 5*time.Minute); err != nil {
-				_, _ = fmt.Fprintf(GinkgoWriter, "manager rollout after Gateway E2E CA cleanup failed: %v\n", err)
-			} else {
-				managerCAConfigured = false
-			}
+			Expect(gatewayE2ERemoveManagerCATrust(managerDeploymentName)).To(Succeed())
+			Expect(gatewayE2EWaitForDeployment(managerDeploymentName, 5*time.Minute)).To(Succeed())
+			managerCAConfigured = false
 		}
 		if !managerCAConfigured {
-			gatewayE2EDelete("configmap", gatewayE2ECAConfigMapName)
+			Expect(gatewayE2EDelete("configmap", gatewayE2ECAConfigMapName)).To(Succeed())
 		}
-		// Fail only after the remaining cleanup has had a chance to run.
-		Expect(workerImageRestoreErr).NotTo(HaveOccurred(), "restore Gateway E2E worker image arguments")
 	})
 
 	It("runs authenticated ingress through an external v2 runtime and delivers the result", func() {
@@ -184,11 +170,14 @@ var _ = Describe("Gateway live E2E", Ordered, func() {
 			adapterEndpoint,
 		))).To(Succeed())
 
-		By("patching the manager to trust the ephemeral Gateway CA")
+		By("configuring Gateway retention, the native fixture image, and CA trust before runtime admission")
 		managerDeploymentName, err = controllerManagerDeploymentName()
 		Expect(err).NotTo(HaveOccurred())
-		Expect(gatewayE2EConfigureManagerCATrust(managerDeploymentName)).To(Succeed())
+		originalManagerArgs, err = gatewayE2EManagerArgs(managerDeploymentName)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(gatewayE2EConfigureManagerCATrust(managerDeploymentName, gatewayE2EFixtureArgs(originalManagerArgs))).To(Succeed())
 		managerCAConfigured = true
+		workerImageConfigured = true
 		Expect(gatewayE2EWaitForDeployment(managerDeploymentName, 5*time.Minute)).To(Succeed())
 
 		By("deploying the TLS reference adapter")
@@ -218,6 +207,8 @@ var _ = Describe("Gateway live E2E", Ordered, func() {
 		apiToken, err = serviceAccountToken()
 		Expect(err).NotTo(HaveOccurred())
 		Expect(apiToken).NotTo(BeEmpty())
+		retentionCleanup, err = newGatewayE2ECleanup(apiBaseURL, apiToken)
+		Expect(err).NotTo(HaveOccurred())
 
 		envelope := protocol.EventEnvelope{
 			ProtocolVersion: protocol.Version,
@@ -244,6 +235,7 @@ var _ = Describe("Gateway live E2E", Ordered, func() {
 		)
 
 		By("rejecting an invalid inbound bearer token")
+		Expect(retentionCleanup.beginIngress()).To(Succeed())
 		body, statusCode, err := doAuthorizedJSONRequest(
 			http.MethodPost,
 			ingressURL,
@@ -253,8 +245,10 @@ var _ = Describe("Gateway live E2E", Ordered, func() {
 		)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(statusCode).To(Equal(http.StatusUnauthorized), "unexpected invalid-token response: %s", strings.TrimSpace(body))
+		Expect(retentionCleanup.finishIngress("")).To(Succeed())
 
 		By("accepting a valid normalized event")
+		Expect(retentionCleanup.beginIngress()).To(Succeed())
 		body, statusCode, err = doAuthorizedJSONRequest(
 			http.MethodPost,
 			ingressURL,
@@ -270,8 +264,10 @@ var _ = Describe("Gateway live E2E", Ordered, func() {
 		Expect(accepted.EventID).NotTo(BeEmpty())
 		Expect(accepted.State).To(Equal(string(store.GatewayEventQueued)))
 		eventID = accepted.EventID
+		Expect(retentionCleanup.finishIngress(eventID)).To(Succeed())
 
 		By("acknowledging an exact duplicate with the same durable event ID")
+		Expect(retentionCleanup.beginIngress()).To(Succeed())
 		body, statusCode, err = doAuthorizedJSONRequest(
 			http.MethodPost,
 			ingressURL,
@@ -285,12 +281,13 @@ var _ = Describe("Gateway live E2E", Ordered, func() {
 		Expect(json.Unmarshal([]byte(body), &duplicate)).To(Succeed())
 		Expect(duplicate.Status).To(Equal("duplicate"))
 		Expect(duplicate.EventID).To(Equal(eventID))
+		Expect(retentionCleanup.finishIngress(duplicate.EventID)).To(Succeed())
 
 		By("waiting for the Gateway-created runtimeRef Task")
 		tasks := waitForGatewayE2ETasks(eventID, 1, 3*time.Minute)
 		task := tasks[0]
 		taskName = task.Name
-		taskNames = append(taskNames, taskName)
+		Expect(gatewayE2EObserveTask(context.Background(), retentionCleanup, &task)).To(Succeed())
 		Expect(task.Spec.Type).To(Equal(corev1alpha1.TaskTypeAgent))
 		Expect(task.Spec.AgentRef).NotTo(BeNil())
 		Expect(task.Spec.AgentRef.Name).To(Equal(gatewayE2EAgentName))
@@ -313,6 +310,7 @@ var _ = Describe("Gateway live E2E", Ordered, func() {
 		Expect(completedTask.Status.Execution.AgentRuntimeName).To(Equal(gatewayE2ERuntimeName))
 		Expect(completedTask.Status.Execution.RuntimePoolName).To(BeEmpty())
 		Expect(completedTask.Status.Execution.RuntimeInstanceID).To(Equal(gatewayE2ERuntimeName))
+		Expect(gatewayE2ECaptureRuntimeSession(context.Background(), retentionCleanup, completedTask)).To(Succeed())
 
 		By("waiting for durable completion projection and outbound delivery")
 		event := waitForGatewayE2ECompletedEvent(apiBaseURL, apiToken, eventID, 4*time.Minute)
@@ -364,18 +362,9 @@ var _ = Describe("Gateway live E2E", Ordered, func() {
 			name = "rejects unsupported native interim delivery without enqueueing or sending a message"
 		}
 		It(name, func() {
-			if !workerImageConfigured {
-				By("selecting the deterministic test-only native worker image")
-				var err error
-				originalManagerArgs, err = gatewayE2EManagerArgs(managerDeploymentName)
-				Expect(err).NotTo(HaveOccurred())
-				Expect(gatewayE2ESetManagerArgs(managerDeploymentName, gatewayE2EWorkerArgs(originalManagerArgs))).To(Succeed())
-				workerImageConfigured = true
-				Expect(gatewayE2EWaitForDeployment(managerDeploymentName, 5*time.Minute)).To(Succeed())
-				stopPortForward(cancelAPIPortForward, apiPortForwardCmd)
-				apiBaseURL, cancelAPIPortForward, apiPortForwardCmd, err = startControllerAPIPortForward(gatewayE2EAPIPort)
-				Expect(err).NotTo(HaveOccurred())
-			}
+			// The native image was selected before the external runtime was
+			// admitted. Retained Sessions must keep that controller/runtime epoch
+			// until the supported Gateway retention cleanup has finished.
 			agentName := "gateway-e2e-native"
 			if !capable {
 				agentName += "-legacy"
@@ -396,10 +385,10 @@ var _ = Describe("Gateway live E2E", Ordered, func() {
 			binding["spec"].(map[string]any)["agentRef"] = map[string]any{"name": agentName}
 			Expect(applyManifestJSON(binding)).To(Succeed())
 			waitForGatewayE2EReadiness(fmt.Sprintf("https://%s.%s.svc:%d", gatewayE2EAdapterName, namespace, gatewayE2EAdapterPort))
-			eventID = gatewayE2EAdmitNativeEvent(apiBaseURL, inboundBearer, agentName)
+			eventID = gatewayE2EAdmitNativeEvent(apiBaseURL, inboundBearer, agentName, retentionCleanup)
 			task := waitForGatewayE2ETasks(eventID, 1, 3*time.Minute)[0]
 			taskName = task.Name
-			taskNames = append(taskNames, taskName)
+			Expect(gatewayE2EObserveTask(context.Background(), retentionCleanup, &task)).To(Succeed())
 			gatewayE2EVerifyNativeMessage(apiBaseURL, apiToken, eventID, taskName, capable)
 		})
 	}
@@ -715,11 +704,12 @@ func gatewayE2EBindingManifest() map[string]any {
 	}
 }
 
-func gatewayE2EConfigureManagerCATrust(deploymentName string) error {
+func gatewayE2EConfigureManagerCATrust(deploymentName string, args []string) error {
 	patch := map[string]any{
 		"spec": map[string]any{"template": map[string]any{"spec": map[string]any{
 			"containers": []any{map[string]any{
 				"name": "manager",
+				"args": args,
 				"env": []any{map[string]any{
 					"name":  "SSL_CERT_DIR",
 					"value": gatewayE2EManagerCAMountPath,
@@ -873,32 +863,6 @@ func gatewayE2EGetTask(name string) (*corev1alpha1.Task, error) {
 	return task, nil
 }
 
-func gatewayE2EDeleteTaskViaAPI(apiBaseURL, bearer, taskName string) error {
-	endpoint := fmt.Sprintf(
-		"%s/api/v1/tasks/%s?namespace=%s",
-		strings.TrimRight(apiBaseURL, "/"),
-		url.PathEscape(taskName),
-		url.QueryEscape(namespace),
-	)
-	body, statusCode, err := doAuthorizedJSONRequest(http.MethodDelete, endpoint, bearer, "", "")
-	if err != nil {
-		return err
-	}
-	if statusCode != http.StatusNoContent && statusCode != http.StatusNotFound {
-		return fmt.Errorf("delete Gateway Task API returned %d: %s", statusCode, strings.TrimSpace(body))
-	}
-	return nil
-}
-
-func gatewayE2EWaitForTaskDeletion(taskName string, timeout time.Duration) error {
-	cmd := exec.Command(
-		"kubectl", "wait", "--for=delete", "task/"+taskName,
-		"-n", namespace, "--timeout="+timeout.String(),
-	)
-	_, err := utils.Run(cmd)
-	return err
-}
-
 func waitForGatewayE2ECompletedEvent(apiBaseURL, token, eventID string, timeout time.Duration) store.GatewayEvent {
 	var event store.GatewayEvent
 	Eventually(func(g Gomega) {
@@ -979,7 +943,7 @@ func getGatewayE2EDeliveries(apiBaseURL, token, eventID string) ([]store.Gateway
 	return response.Items, nil
 }
 
-func gatewayE2EDelete(kind string, args ...string) {
+func gatewayE2EDelete(kind string, args ...string) error {
 	commandArgs := []string{"delete", kind}
 	commandArgs = append(commandArgs, args...)
 	commandArgs = append(commandArgs, "-n", namespace, "--ignore-not-found", "--timeout=2m")
@@ -988,9 +952,7 @@ func gatewayE2EDelete(kind string, args ...string) {
 		commandArgs = append(commandArgs, args...)
 		commandArgs = append(commandArgs, "--ignore-not-found", "--timeout=2m")
 	}
-	if _, err := utils.Run(exec.Command("kubectl", commandArgs...)); err != nil {
-		_, _ = fmt.Fprintf(GinkgoWriter, "cleanup failed: kubectl %s: %v\n", strings.Join(commandArgs, " "), err)
-	}
+	return runBoundedE2ECleanup(2*time.Minute+10*time.Second, "kubectl", commandArgs...)
 }
 
 func dumpGatewayE2EDiagnostics(eventID, taskName string) {

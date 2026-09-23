@@ -1,0 +1,50 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: Tool
+metadata:
+  name: read-inventory
+spec:
+  description: Read the simulated pump inventory. This does not change inventory.
+  brokeredToolClass: read
+  parameters:
+    type: object
+    additionalProperties: false
+    required: [runID, asset]
+    properties:
+      runID:
+        type: string
+        minLength: 1
+        maxLength: 63
+      asset:
+        type: string
+        enum: [pump-1]
+  http:
+    url: http://human-approval-tools:8099/read-inventory
+    method: POST
+    timeout: 5s
+---
+apiVersion: core.orka.ai/v1alpha1
+kind: Tool
+metadata:
+  name: create-work-order
+spec:
+  description: Record a simulated work order. No real equipment or external system is changed.
+  brokeredToolClass: write
+  parameters:
+    type: object
+    additionalProperties: false
+    required: [runID, asset, summary]
+    properties:
+      runID:
+        type: string
+        minLength: 1
+        maxLength: 63
+      asset:
+        type: string
+        enum: [pump-1]
+      summary:
+        type: string
+        enum: [Inspect the pressure transmitter.]
+  http:
+    url: http://human-approval-tools:8099/create-work-order
+    method: POST
+    timeout: 30s
