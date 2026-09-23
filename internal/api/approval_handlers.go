@@ -30,15 +30,19 @@ import (
 )
 
 // ListTaskApprovalsResponse is one read of a Task and the approvals filtered
-// against it. TaskUID and TaskPhase come from that same read, so a client
-// polling the list can tell whether a pending request still belongs to a
-// live Task without a second, separately timed lookup by name.
+// against it. TaskUID, TaskPhase, and TaskDeleting come from that same read,
+// so a client polling the list can tell whether a pending request still
+// belongs to a live Task that DecideTaskApproval would accept, without a
+// second, separately timed lookup by name.
 type ListTaskApprovalsResponse struct {
-	Namespace string               `json:"namespace"`
-	TaskName  string               `json:"taskName"`
-	TaskUID   string               `json:"taskUID,omitempty"`
-	TaskPhase string               `json:"taskPhase,omitempty"`
-	Approvals []approvals.Approval `json:"approvals"`
+	Namespace string `json:"namespace"`
+	TaskName  string `json:"taskName"`
+	TaskUID   string `json:"taskUID,omitempty"`
+	TaskPhase string `json:"taskPhase,omitempty"`
+	// TaskDeleting is true when the Task has a deletion timestamp; decisions
+	// on its requests are refused even while its phase is not terminal.
+	TaskDeleting bool                 `json:"taskDeleting,omitempty"`
+	Approvals    []approvals.Approval `json:"approvals"`
 }
 
 const (
@@ -71,11 +75,12 @@ func (h *Handlers) ListTaskApprovals(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list execution events: %v", err))
 	}
 	return c.JSON(ListTaskApprovalsResponse{
-		Namespace: namespace,
-		TaskName:  taskName,
-		TaskUID:   string(task.UID),
-		TaskPhase: string(task.Status.Phase),
-		Approvals: deriveTaskApprovalState(filterTaskApprovalEvents(listed, task)),
+		Namespace:    namespace,
+		TaskName:     taskName,
+		TaskUID:      string(task.UID),
+		TaskPhase:    string(task.Status.Phase),
+		TaskDeleting: !task.DeletionTimestamp.IsZero(),
+		Approvals:    deriveTaskApprovalState(filterTaskApprovalEvents(listed, task)),
 	})
 }
 

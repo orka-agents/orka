@@ -146,11 +146,12 @@ the list, and exits 0. It exits non-zero if the task finishes first
 // printed is an error too. An interrupt is not. The task's phase is checked
 // on every poll, before a pending request is accepted: the server keeps
 // reporting a request as pending after the task finishes, but refuses
-// decisions on it, so it is not actionable. The phase comes from the
-// approvals response itself, the same Task read that filtered the list, so
-// a Task recreated under the same name between two calls cannot pair an old
-// request with a new Task's phase. A server that predates taskPhase falls
-// back to a separate Task read.
+// decisions on it, so it is not actionable. The same goes for a task that
+// is being deleted while its phase is not yet terminal. The phase and the
+// deleting state come from the approvals response itself, the same Task
+// read that filtered the list, so a Task recreated under the same name
+// between two calls cannot pair an old request with a new Task's phase. A
+// server that predates those fields falls back to a separate Task read.
 func watchForApproval(ctx context.Context, cmd *cobra.Command, c *client.Client, task, path, format string, wide bool, interval time.Duration) error {
 	waiting := false
 	done, err := watchLoop(ctx, cmd.OutOrStdout(), interval, format, func(ctx context.Context) (watchFrame, error) {
@@ -158,12 +159,15 @@ func watchForApproval(ctx context.Context, cmd *cobra.Command, c *client.Client,
 		if err != nil {
 			return watchFrame{}, err
 		}
-		phase, err := approvalsTaskPhase(ctx, c, task, result)
+		state, err := approvalsTaskState(ctx, c, task, result)
 		if err != nil {
 			return watchFrame{}, err
 		}
-		if taskPhaseIsTerminal(phase) {
-			return watchFrame{}, fmt.Errorf("task %s finished with phase %s; no approval request can be decided", task, phase)
+		if state.deleting {
+			return watchFrame{}, fmt.Errorf("task %s is being deleted; no approval request can be decided", task)
+		}
+		if taskPhaseIsTerminal(state.phase) {
+			return watchFrame{}, fmt.Errorf("task %s finished with phase %s; no approval request can be decided", task, state.phase)
 		}
 		if !hasPendingApproval(result) {
 			if !waiting {
@@ -191,19 +195,30 @@ func watchForApproval(ctx context.Context, cmd *cobra.Command, c *client.Client,
 	return nil
 }
 
-// approvalsTaskPhase returns the phase of the Task an approvals response was
+// taskApprovalState is what decides whether a pending request can still be
+// acted on: the Task's phase and whether it is being deleted.
+type taskApprovalState struct {
+	phase    string
+	deleting bool
+}
+
+// approvalsTaskState returns the state of the Task an approvals response was
 // filtered against, reading the Task separately only when the server did
 // not include it.
-func approvalsTaskPhase(ctx context.Context, c *client.Client, task string, result any) (string, error) {
+func approvalsTaskState(ctx context.Context, c *client.Client, task string, result any) (taskApprovalState, error) {
 	m, _ := result.(map[string]any)
 	if phase := firstString(m, "taskPhase"); phase != "" {
-		return phase, nil
+		deleting, _ := m["taskDeleting"].(bool)
+		return taskApprovalState{phase: phase, deleting: deleting}, nil
 	}
 	detail, err := c.GetTask(ctx, task, client.GetOptions{Namespace: c.Namespace})
 	if err != nil {
-		return "", err
+		return taskApprovalState{}, err
 	}
-	return client.StringField(*detail, "status", "phase"), nil
+	return taskApprovalState{
+		phase:    client.StringField(*detail, "status", "phase"),
+		deleting: client.StringField(*detail, "metadata", "deletionTimestamp") != "",
+	}, nil
 }
 
 // hasPendingApproval reports whether any request in an approvals response is

@@ -64,10 +64,11 @@ Content-Type: application/json
 {"decision":"approve","reason":"Reviewed the asset and quantity"}
 ```
 
-The list response names the Task it was filtered against (`taskUID`) and its
-phase at that same read (`taskPhase`), so a poller such as
-`orka task approvals --watch` can tell whether a pending request still belongs
-to a live Task without a second lookup by name.
+The list response names the Task it was filtered against (`taskUID`), its
+phase at that same read (`taskPhase`), and whether it is being deleted
+(`taskDeleting`), so a poller such as `orka task approvals --watch` can tell
+whether a pending request can still be decided without a second lookup by
+name. Decisions are refused for finished and deleting Tasks.
 
 Use `decline` to reject the action. Reviewers need `update` on
 `core.orka.ai/tasks/approvals` and `patch` on the parent Task. Gateway-owned

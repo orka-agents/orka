@@ -247,6 +247,11 @@ func approvalsWatchServer(t *testing.T, phase string, approvals func(call int) [
 
 func approvalsWatchServerWith(t *testing.T, phase string, includePhase bool, approvals func(call int) []map[string]any, taskReads *int) *httptest.Server {
 	t.Helper()
+	return approvalsWatchServerFull(t, phase, false, includePhase, approvals, taskReads)
+}
+
+func approvalsWatchServerFull(t *testing.T, phase string, deleting, includePhase bool, approvals func(call int) []map[string]any, taskReads *int) *httptest.Server {
+	t.Helper()
 	var mu sync.Mutex
 	calls := 0
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -259,6 +264,9 @@ func approvalsWatchServerWith(t *testing.T, phase string, includePhase bool, app
 			body := map[string]any{"namespace": "default", "taskName": "fibey", "taskUID": "uid-1", "approvals": items}
 			if includePhase {
 				body["taskPhase"] = phase
+				if deleting {
+					body["taskDeleting"] = true
+				}
 			}
 			json.NewEncoder(w).Encode(body) //nolint:errcheck
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/tasks/fibey":
@@ -267,7 +275,11 @@ func approvalsWatchServerWith(t *testing.T, phase string, includePhase bool, app
 				*taskReads++
 			}
 			mu.Unlock()
-			json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"name": "fibey", "uid": "uid-1"}, "status": map[string]any{"phase": phase}}) //nolint:errcheck
+			metadata := map[string]any{"name": "fibey", "uid": "uid-1"}
+			if deleting {
+				metadata["deletionTimestamp"] = "2026-09-23T20:00:00Z"
+			}
+			json.NewEncoder(w).Encode(map[string]any{"metadata": metadata, "status": map[string]any{"phase": phase}}) //nolint:errcheck
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -421,6 +433,24 @@ func TestTaskApprovalsWatchFallsBackToATaskReadWithoutTaskPhase(t *testing.T) {
 	}
 	if taskReads == 0 {
 		t.Fatal("an older server without taskPhase should be asked for the Task")
+	}
+}
+
+func TestTaskApprovalsWatchRejectsAPendingRequestOnADeletingTask(t *testing.T) {
+	pending := approvalFixtures(time.Now().Add(9 * time.Minute))[:1]
+	for name, includePhase := range map[string]bool{"from the approvals response": true, "from a Task read": false} {
+		t.Run(name, func(t *testing.T) {
+			srv := approvalsWatchServerFull(t, "Running", true, includePhase, func(int) []map[string]any { return pending }, nil)
+			defer srv.Close()
+
+			out, err := runCLI(t, srv.URL, "task", "approvals", "fibey", "--watch", "--interval", "10ms")
+			if err == nil || !strings.Contains(err.Error(), "being deleted") {
+				t.Fatalf("a request the server refuses with 410 must not end the wait: err = %v\n%s", err, out)
+			}
+			if strings.Contains(out, "create-work-order") {
+				t.Fatalf("no table should be printed:\n%s", out)
+			}
+		})
 	}
 }
 

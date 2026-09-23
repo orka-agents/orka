@@ -286,6 +286,7 @@ func (f *v2ApprovalAPIFixture) list(t *testing.T) []approvals.Approval {
 	require.NoError(t, f.kube.Get(t.Context(), client.ObjectKeyFromObject(f.task), current))
 	require.Equal(t, string(current.UID), listed.TaskUID, "the list must name the Task it was filtered against, even after the name is reused")
 	require.Equal(t, string(current.Status.Phase), listed.TaskPhase)
+	require.Equal(t, !current.DeletionTimestamp.IsZero(), listed.TaskDeleting)
 	return listed.Approvals
 }
 
