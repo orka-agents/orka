@@ -146,7 +146,11 @@ the list, and exits 0. It exits non-zero if the task finishes first
 // printed is an error too. An interrupt is not. The task's phase is checked
 // on every poll, before a pending request is accepted: the server keeps
 // reporting a request as pending after the task finishes, but refuses
-// decisions on it, so it is not actionable.
+// decisions on it, so it is not actionable. The phase comes from the
+// approvals response itself, the same Task read that filtered the list, so
+// a Task recreated under the same name between two calls cannot pair an old
+// request with a new Task's phase. A server that predates taskPhase falls
+// back to a separate Task read.
 func watchForApproval(ctx context.Context, cmd *cobra.Command, c *client.Client, task, path, format string, wide bool, interval time.Duration) error {
 	waiting := false
 	done, err := watchLoop(ctx, cmd.OutOrStdout(), interval, format, func(ctx context.Context) (watchFrame, error) {
@@ -154,11 +158,11 @@ func watchForApproval(ctx context.Context, cmd *cobra.Command, c *client.Client,
 		if err != nil {
 			return watchFrame{}, err
 		}
-		detail, err := c.GetTask(ctx, task, client.GetOptions{Namespace: c.Namespace})
+		phase, err := approvalsTaskPhase(ctx, c, task, result)
 		if err != nil {
 			return watchFrame{}, err
 		}
-		if phase := client.StringField(*detail, "status", "phase"); taskPhaseIsTerminal(phase) {
+		if taskPhaseIsTerminal(phase) {
 			return watchFrame{}, fmt.Errorf("task %s finished with phase %s; no approval request can be decided", task, phase)
 		}
 		if !hasPendingApproval(result) {
@@ -185,6 +189,21 @@ func watchForApproval(ctx context.Context, cmd *cobra.Command, c *client.Client,
 		return fmt.Errorf("timed out waiting for task %s to request approval", task)
 	}
 	return nil
+}
+
+// approvalsTaskPhase returns the phase of the Task an approvals response was
+// filtered against, reading the Task separately only when the server did
+// not include it.
+func approvalsTaskPhase(ctx context.Context, c *client.Client, task string, result any) (string, error) {
+	m, _ := result.(map[string]any)
+	if phase := firstString(m, "taskPhase"); phase != "" {
+		return phase, nil
+	}
+	detail, err := c.GetTask(ctx, task, client.GetOptions{Namespace: c.Namespace})
+	if err != nil {
+		return "", err
+	}
+	return client.StringField(*detail, "status", "phase"), nil
 }
 
 // hasPendingApproval reports whether any request in an approvals response is

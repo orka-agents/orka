@@ -29,9 +29,15 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
+// ListTaskApprovalsResponse is one read of a Task and the approvals filtered
+// against it. TaskUID and TaskPhase come from that same read, so a client
+// polling the list can tell whether a pending request still belongs to a
+// live Task without a second, separately timed lookup by name.
 type ListTaskApprovalsResponse struct {
 	Namespace string               `json:"namespace"`
 	TaskName  string               `json:"taskName"`
+	TaskUID   string               `json:"taskUID,omitempty"`
+	TaskPhase string               `json:"taskPhase,omitempty"`
 	Approvals []approvals.Approval `json:"approvals"`
 }
 
@@ -64,7 +70,13 @@ func (h *Handlers) ListTaskApprovals(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list execution events: %v", err))
 	}
-	return c.JSON(ListTaskApprovalsResponse{Namespace: namespace, TaskName: taskName, Approvals: deriveTaskApprovalState(filterTaskApprovalEvents(listed, task))})
+	return c.JSON(ListTaskApprovalsResponse{
+		Namespace: namespace,
+		TaskName:  taskName,
+		TaskUID:   string(task.UID),
+		TaskPhase: string(task.Status.Phase),
+		Approvals: deriveTaskApprovalState(filterTaskApprovalEvents(listed, task)),
+	})
 }
 
 // DecideTaskApproval handles POST /api/v1/tasks/{id}/approvals/{approvalID}/decision.

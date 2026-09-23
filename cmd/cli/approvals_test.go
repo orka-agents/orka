@@ -236,9 +236,16 @@ func TestTaskApproveSendsFullIDForPrefixAndPrintsDecision(t *testing.T) {
 }
 
 // approvalsWatchServer serves the approvals list from a function of the call
-// count and the task detail with the given phase, so a test can script the
-// moment a request appears.
+// count, with the task's phase in the response the way the server reports
+// it, so a test can script the moment a request appears. The task detail
+// route answers with the same phase and counts its calls, for the fallback
+// a server without taskPhase needs.
 func approvalsWatchServer(t *testing.T, phase string, approvals func(call int) []map[string]any) *httptest.Server {
+	t.Helper()
+	return approvalsWatchServerWith(t, phase, true, approvals, nil)
+}
+
+func approvalsWatchServerWith(t *testing.T, phase string, includePhase bool, approvals func(call int) []map[string]any, taskReads *int) *httptest.Server {
 	t.Helper()
 	var mu sync.Mutex
 	calls := 0
@@ -249,9 +256,18 @@ func approvalsWatchServer(t *testing.T, phase string, approvals func(call int) [
 			calls++
 			items := approvals(calls)
 			mu.Unlock()
-			json.NewEncoder(w).Encode(map[string]any{"approvals": items}) //nolint:errcheck
+			body := map[string]any{"namespace": "default", "taskName": "fibey", "taskUID": "uid-1", "approvals": items}
+			if includePhase {
+				body["taskPhase"] = phase
+			}
+			json.NewEncoder(w).Encode(body) //nolint:errcheck
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/tasks/fibey":
-			json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"name": "fibey"}, "status": map[string]any{"phase": phase}}) //nolint:errcheck
+			mu.Lock()
+			if taskReads != nil {
+				*taskReads++
+			}
+			mu.Unlock()
+			json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"name": "fibey", "uid": "uid-1"}, "status": map[string]any{"phase": phase}}) //nolint:errcheck
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -367,6 +383,44 @@ func TestTaskApprovalsWatchRejectsAPendingRequestOnAFinishedTask(t *testing.T) {
 	}
 	if strings.Contains(out, "create-work-order") {
 		t.Fatalf("no table should be printed:\n%s", out)
+	}
+}
+
+func TestTaskApprovalsWatchReadsThePhaseFromTheApprovalsResponse(t *testing.T) {
+	pending := approvalFixtures(time.Now().Add(9 * time.Minute))[:1]
+	taskReads := 0
+	srv := approvalsWatchServerWith(t, "Running", true, func(call int) []map[string]any {
+		if call < 2 {
+			return nil
+		}
+		return pending
+	}, &taskReads)
+	defer srv.Close()
+
+	out, err := runCLI(t, srv.URL, "task", "approvals", "fibey", "--watch", "--interval", "10ms")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if taskReads != 0 {
+		t.Fatalf("the phase in the approvals response should make a separate Task read unnecessary, got %d reads", taskReads)
+	}
+	if !strings.Contains(out, "create-work-order") {
+		t.Fatalf("table missing:\n%s", out)
+	}
+}
+
+func TestTaskApprovalsWatchFallsBackToATaskReadWithoutTaskPhase(t *testing.T) {
+	pending := approvalFixtures(time.Now().Add(9 * time.Minute))[:1]
+	taskReads := 0
+	srv := approvalsWatchServerWith(t, "Failed", false, func(int) []map[string]any { return pending }, &taskReads)
+	defer srv.Close()
+
+	_, err := runCLI(t, srv.URL, "task", "approvals", "fibey", "--watch", "--interval", "10ms")
+	if err == nil || !strings.Contains(err.Error(), "Failed") {
+		t.Fatalf("error = %v", err)
+	}
+	if taskReads == 0 {
+		t.Fatal("an older server without taskPhase should be asked for the Task")
 	}
 }
 
