@@ -356,6 +356,20 @@ func TestTaskApprovalsWatchFailsWhenTheTaskFinishesFirst(t *testing.T) {
 	}
 }
 
+func TestTaskApprovalsWatchRejectsAPendingRequestOnAFinishedTask(t *testing.T) {
+	pending := approvalFixtures(time.Now().Add(9 * time.Minute))[:1]
+	srv := approvalsWatchServer(t, "Cancelled", func(int) []map[string]any { return pending })
+	defer srv.Close()
+
+	out, err := runCLI(t, srv.URL, "task", "approvals", "fibey", "--watch", "--interval", "10ms")
+	if err == nil || !strings.Contains(err.Error(), "Cancelled") {
+		t.Fatalf("a request the server will refuse to decide must not end the wait: err = %v\n%s", err, out)
+	}
+	if strings.Contains(out, "create-work-order") {
+		t.Fatalf("no table should be printed:\n%s", out)
+	}
+}
+
 func TestTaskApprovalsWatchHonoursTimeout(t *testing.T) {
 	srv := approvalsWatchServer(t, "Running", func(int) []map[string]any { return nil })
 	defer srv.Close()

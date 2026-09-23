@@ -143,7 +143,9 @@ the list, and exits 0. It exits non-zero if the task finishes first
 // watchForApproval polls the task's approvals until one is pending, then
 // prints the list once. A task that finishes first is an error, because no
 // request is coming; a --timeout deadline is an error too. An interrupt is
-// not.
+// not. The task's phase is checked on every poll, before a pending request
+// is accepted: the server keeps reporting a request as pending after the
+// task finishes, but refuses decisions on it, so it is not actionable.
 func watchForApproval(ctx context.Context, cmd *cobra.Command, c *client.Client, task, path, format string, wide bool, interval time.Duration) error {
 	found := false
 	waiting := false
@@ -152,15 +154,14 @@ func watchForApproval(ctx context.Context, cmd *cobra.Command, c *client.Client,
 		if err != nil {
 			return watchFrame{}, err
 		}
+		detail, err := c.GetTask(ctx, task, client.GetOptions{Namespace: c.Namespace})
+		if err != nil {
+			return watchFrame{}, err
+		}
+		if phase := client.StringField(*detail, "status", "phase"); taskPhaseIsTerminal(phase) {
+			return watchFrame{}, fmt.Errorf("task %s finished with phase %s; no approval request can be decided", task, phase)
+		}
 		if !hasPendingApproval(result) {
-			detail, err := c.GetTask(ctx, task, client.GetOptions{Namespace: c.Namespace})
-			if err != nil {
-				return watchFrame{}, err
-			}
-			phase := client.StringField(*detail, "status", "phase")
-			if taskPhaseIsTerminal(phase) {
-				return watchFrame{}, fmt.Errorf("task %s finished with phase %s; no approval request is pending", task, phase)
-			}
 			if !waiting {
 				waiting = true
 				fmt.Fprintln(cmd.ErrOrStderr(), "Waiting for an approval request...") //nolint:errcheck

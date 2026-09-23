@@ -207,6 +207,22 @@ func TestWatchLoopSkipsEmptyFramesWithoutASeparator(t *testing.T) {
 	}
 }
 
+func TestWatchLoopPrintsAFrameRenderedAsTheContextEnds(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var out strings.Builder
+	err := watchLoop(ctx, &out, time.Millisecond, outputTable, func(context.Context) (watchFrame, error) {
+		cancel()
+		return watchFrame{Key: "final", Text: "final\n", Done: true}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != "final\n" {
+		t.Fatalf("a successfully rendered frame was dropped, got %q", out.String())
+	}
+}
+
 func TestWatchLoopStopsOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var out strings.Builder

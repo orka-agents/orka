@@ -49,7 +49,10 @@ func watchSeparator(format string) func() string {
 
 // watchLoop reprints a view whenever its state key changes, with a
 // format-aware separator between frames, until the view reports it is done
-// or the user interrupts with Ctrl-C. An interrupt is not an error.
+// or the user interrupts with Ctrl-C. An interrupt is not an error. A frame
+// the view rendered successfully is printed even if the context ended while
+// it was being rendered, so a caller that saw its final frame returned can
+// rely on it having been shown.
 func watchLoop(ctx context.Context, out io.Writer, interval time.Duration, format string, render watchRender) error {
 	separator := watchSeparator(format)
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
@@ -64,10 +67,10 @@ func watchLoop(ctx context.Context, out io.Writer, interval time.Duration, forma
 	first := true
 	for {
 		frame, err := render(ctx)
-		if ctx.Err() != nil {
-			return nil
-		}
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
 			return err
 		}
 		if frame.Text == "" && !frame.Done {
