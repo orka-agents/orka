@@ -163,3 +163,32 @@ func TestMCPApprovalReplayRejectsUnverifiedReceiptBeforeProjection(t *testing.T)
 	require.Zero(t, projection.attempts.Load(), "an unverified receipt must not be projected or returned")
 	require.EqualValues(t, 1, f.count.Load(), "an unverifiable receipt must never authorize another execution")
 }
+
+type approvalAppendOutageStore struct {
+	store.DeduplicatingExecutionEventStore
+	attempts atomic.Int32
+}
+
+func (s *approvalAppendOutageStore) AppendExecutionEventIfAbsent(context.Context, *store.ExecutionEvent, string) (*store.ExecutionEvent, bool, error) {
+	s.attempts.Add(1)
+	return nil, false, errors.New("injected event store outage")
+}
+
+func TestMCPApprovalReplaysTerminalReceiptDuringEventStoreOutage(t *testing.T) {
+	f := newMCPApprovalFixture(t)
+	done := f.start(f.request)
+	pending := f.pending()
+	f.decide(pending.ID, events.ExecutionEventTypeApprovalApproved)
+	first := awaitMCPApprovalResult(t, done)
+	require.False(t, first.Replayed)
+
+	// Exact redelivery of a completed call must return the durable receipt
+	// even when no event can be appended; recovery repairs projection later.
+	outage := &approvalAppendOutageStore{DeduplicatingExecutionEventStore: f.events}
+	f.broker.ApprovalEvents = outage
+	replayed := awaitMCPApprovalResult(t, f.start(f.request))
+	require.True(t, replayed.Replayed)
+	require.Equal(t, first.Result, replayed.Result)
+	require.EqualValues(t, 1, f.count.Load())
+	require.EqualValues(t, 1, outage.attempts.Load(), "only the best-effort outcome projection may touch the event store")
+}

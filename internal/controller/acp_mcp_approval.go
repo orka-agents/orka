@@ -147,9 +147,14 @@ func (b *ACPMCPBroker) serveApprovedCall(w http.ResponseWriter, ctx context.Cont
 		}
 		return
 	}
-	if err := b.requestToolApproval(ctx, call); err != nil {
-		writeACPMCPError(w, http.StatusServiceUnavailable, "MCP approval could not be recorded")
-		return
+	// Only an unstarted call needs its review request recorded now. A started
+	// or terminal effect already has one, and a terminal receipt must replay
+	// from durable storage alone rather than depend on event-store availability.
+	if effect.State == store.ExternalEffectPending {
+		if err := b.requestToolApproval(ctx, call); err != nil {
+			writeACPMCPError(w, http.StatusServiceUnavailable, "MCP approval could not be recorded")
+			return
+		}
 	}
 	result, replayed, err := b.waitAndExecuteApproval(ctx, call, secretUID, effect, credentials)
 	if err != nil {
