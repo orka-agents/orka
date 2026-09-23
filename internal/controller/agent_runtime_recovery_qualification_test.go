@@ -79,6 +79,10 @@ func TestAgentRuntimeFoundryRecoveryQualificationGatesBrokerWitness(t *testing.T
 		{name: "qualified identity missing", qualified: true},
 		{name: "qualified identity invalid", qualified: true, broker: &harnessv2.FoundryBrokerIdentity{Protocol: harnessv2.FoundryBrokerProtocol}},
 		{name: "qualified capabilities profile mismatch", qualified: true, broker: testFoundryRecoveryBrokerIdentity(), wrongProfile: true},
+		{name: "qualified broker configuration mismatch", qualified: true, broker: &harnessv2.FoundryBrokerIdentity{
+			Protocol: harnessv2.FoundryBrokerProtocol, LedgerIdentityDigest: testControllerDigest("foundry-ledger"),
+			AgentConfigurationDigest: testControllerDigest("another-agent"),
+		}},
 		{name: "unqualified identity does not grant recovery", broker: testFoundryRecoveryBrokerIdentity(), wantReady: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

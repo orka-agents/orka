@@ -387,7 +387,7 @@ type agentRuntimeBootObservation struct {
 	auth    agentRuntimeAuthMaterial
 }
 
-func recoveryFoundryBrokerIdentity(ctx context.Context, provider string, probe *harnessv2.Client, status *harnessv2.StatusResponse) (*harnessv2.FoundryBrokerIdentity, error) {
+func recoveryFoundryBrokerIdentity(ctx context.Context, provider, registeredConfigurationDigest string, probe *harnessv2.Client, status *harnessv2.StatusResponse) (*harnessv2.FoundryBrokerIdentity, error) {
 	if provider != agentRuntimeFoundryProvider {
 		return nil, nil
 	}
@@ -405,6 +405,12 @@ func recoveryFoundryBrokerIdentity(ctx context.Context, provider string, probe *
 	}
 	if status.FoundryBroker == nil || status.FoundryBroker.Validate() != nil {
 		return nil, errors.New("foundry recovery enrollment requires authenticated broker identity before admission")
+	}
+	// The broker ledger must partition sessions under the registered agent
+	// configuration; a different partition could certify retirement of sessions
+	// that never belonged to this profile.
+	if status.FoundryBroker.AgentConfigurationDigest != registeredConfigurationDigest {
+		return nil, errors.New("foundry broker configuration does not match the registered runtime profile")
 	}
 	identity := *status.FoundryBroker
 	return &identity, nil
@@ -427,7 +433,7 @@ func (r *AgentRuntimeReconciler) authenticateRecoveryBoot(ctx context.Context, r
 	if err != nil {
 		return nil, err
 	}
-	brokerIdentity, err := recoveryFoundryBrokerIdentity(ctx, recoveryProviderKind(runtime.Spec), probe, status)
+	brokerIdentity, err := recoveryFoundryBrokerIdentity(ctx, recoveryProviderKind(runtime.Spec), runtime.Spec.Capabilities.Profile.AgentConfigurationDigest, probe, status)
 	if err != nil {
 		return nil, err
 	}

@@ -128,6 +128,8 @@ func configureFoundryRuntimeRecoveryFixture(t *testing.T, f *runtimeRecoveryFixt
 	t.Helper()
 	f.server.Close()
 	f.config.Profile.ProviderKind = "foundry"
+	// Broker identity in these fixtures reports this same configuration digest.
+	f.config.Profile.AgentConfigurationDigest = testControllerDigest("foundry-agent")
 	server, err := conformancetest.NewServer(f.config)
 	if err != nil {
 		t.Fatal(err)
