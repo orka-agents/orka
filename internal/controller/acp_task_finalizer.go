@@ -357,8 +357,8 @@ func (r *TaskReconciler) reclaimACPTaskPublicationBundles(ctx context.Context, t
 	}
 	for _, target := range targets {
 		operationDigest, digestErr := acpDomainDigest("publication-reclaim-operation", map[string]any{
-			"namespace": task.Namespace, "taskUID": string(acpTaskControlUID(task)),
-			"publicationID": target.id, "publicationGeneration": target.generation,
+			acpCancelLogKeyNamespace: task.Namespace, taskUIDField: string(acpTaskControlUID(task)),
+			publicationIDField: target.id, "publicationGeneration": target.generation,
 		})
 		if digestErr != nil {
 			return false, digestErr

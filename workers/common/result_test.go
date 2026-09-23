@@ -138,7 +138,7 @@ func TestDoPostWithRetry_CancelsDuringBackoff(t *testing.T) {
 	go func() {
 		errCh <- doPostWithRetry(
 			ctx, "result submission", srv.URL, []byte("cancel backoff"), "",
-			"application/octet-stream", time.Second, wait,
+			"application/octet-stream", time.Second, wait, resultMaxRetries, nil,
 		)
 	}()
 
@@ -168,10 +168,11 @@ func TestDoPostOnceWithClient_DrainsAndClosesSuccessBody(t *testing.T) {
 		return &http.Response{StatusCode: http.StatusNoContent, Body: body, Header: make(http.Header)}, nil
 	})}
 
-	if err := doPostOnceWithClient(
-		context.Background(), client, "http://controller.invalid/result", []byte("result"), "", "application/octet-stream",
+	if err := doPostOnce(
+		context.Background(), client, "http://controller.invalid/result",
+		[]byte("result"), "", "application/octet-stream", nil,
 	); err != nil {
-		t.Fatalf("doPostOnceWithClient() error = %v", err)
+		t.Fatalf("doPostOnce() error = %v", err)
 	}
 	if body.read != len(payload) {
 		t.Fatalf("response body bytes read = %d, want %d", body.read, len(payload))
@@ -190,7 +191,7 @@ func TestDoPostOnceWithClient_PreservesSuccessWhenDrainIsCanceled(t *testing.T) 
 			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 				return &http.Response{StatusCode: status, Body: body, Header: make(http.Header)}, nil
 			})}
-			err := doPostOnceWithClient(ctx, client, "http://controller.invalid/result", []byte("result"), "", "text/plain")
+			err := doPostOnce(ctx, client, "http://controller.invalid/result", []byte("result"), "", "text/plain", nil)
 			if err != nil {
 				t.Fatalf("accepted delivery returned error: %v", err)
 			}
@@ -222,11 +223,12 @@ func TestDoPostOnceWithClient_BoundsErrorBodyDrainAndCloses(t *testing.T) {
 		return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: body, Header: make(http.Header)}, nil
 	})}
 
-	err := doPostOnceWithClient(
-		context.Background(), client, "http://controller.invalid/result", []byte("result"), "", "application/octet-stream",
+	err := doPostOnce(
+		context.Background(), client, "http://controller.invalid/result",
+		[]byte("result"), "", "application/octet-stream", nil,
 	)
 	if err == nil || !strings.Contains(err.Error(), "HTTP 503") {
-		t.Fatalf("doPostOnceWithClient() error = %v, want HTTP 503", err)
+		t.Fatalf("doPostOnce() error = %v, want HTTP 503", err)
 	}
 	if body.read != deliveryResponseDrainLimit {
 		t.Fatalf("response body bytes read = %d, want bounded drain %d", body.read, deliveryResponseDrainLimit)
@@ -299,7 +301,7 @@ func TestSubmitResult_Success(t *testing.T) {
 
 	t.Setenv("ORKA_RESULT_ENDPOINT", srv.URL)
 
-	err := SubmitResult([]byte("hello result"))
+	err := SubmitResultContext(context.Background(), []byte("hello result"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -318,8 +320,9 @@ func TestSubmitResult_RejectsBlank(t *testing.T) {
 	t.Setenv("ORKA_RESULT_ENDPOINT", srv.URL)
 
 	for _, result := range [][]byte{nil, {}, []byte(" \n\t")} {
-		if err := SubmitResult(result); err == nil || !strings.Contains(err.Error(), "must not be blank") {
-			t.Fatalf("SubmitResult(%q) error = %v, want blank result error", result, err)
+		err := SubmitResultContext(context.Background(), result)
+		if err == nil || !strings.Contains(err.Error(), "must not be blank") {
+			t.Fatalf("SubmitResultContext(context.Background(), %q) error = %v, want blank result error", result, err)
 		}
 	}
 	if got := attempts.Load(); got != 0 {
@@ -341,10 +344,10 @@ func TestSubmitResult_ResultStdoutWritesMarkerFile(t *testing.T) {
 
 	var submitErr error
 	stdout := captureStdout(t, func() {
-		submitErr = SubmitResult(result)
+		submitErr = SubmitResultContext(context.Background(), result)
 	})
 	if submitErr != nil {
-		t.Fatalf("SubmitResult() error = %v", submitErr)
+		t.Fatalf("SubmitResultContext(context.Background(), ) error = %v", submitErr)
 	}
 	if !strings.Contains(stdout, wantMarker+"\n") {
 		t.Fatalf("stdout = %q, want marker %q", stdout, wantMarker)
@@ -422,7 +425,7 @@ func TestDoPostWithRetry_Retries500ThenSucceeds(t *testing.T) {
 	wait := func(context.Context, time.Duration) error { return nil }
 	err := doPostWithRetry(
 		context.Background(), "result submission", srv.URL, []byte("retry result"), "",
-		"application/octet-stream", time.Second, wait,
+		"application/octet-stream", time.Second, wait, resultMaxRetries, nil,
 	)
 	if err != nil {
 		t.Fatalf("doPostWithRetry() error = %v", err)
@@ -461,7 +464,7 @@ func TestSubmitResult_ConstructEndpointFromControllerURL(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAMESPACE", "test-ns")
 	t.Setenv("ORKA_TASK_NAME", "my-task")
 
-	err := SubmitResult([]byte("constructed url"))
+	err := SubmitResultContext(context.Background(), []byte("constructed url"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -474,7 +477,7 @@ func TestSubmitResult_MissingEnvVars(t *testing.T) {
 	t.Setenv("ORKA_RESULT_ENDPOINT", "")
 	t.Setenv("ORKA_CONTROLLER_URL", "")
 
-	err := SubmitResult([]byte("should fail"))
+	err := SubmitResultContext(context.Background(), []byte("should fail"))
 	if err == nil {
 		t.Fatal("expected error when no endpoint or controller URL is set")
 	}
@@ -491,7 +494,7 @@ func TestSubmitResult_BearerToken(t *testing.T) {
 	t.Setenv("ORKA_RESULT_ENDPOINT", srv.URL)
 
 	// When no SA token file exists, no auth header is sent
-	err := SubmitResult([]byte("no token"))
+	err := SubmitResultContext(context.Background(), []byte("no token"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -517,8 +520,8 @@ func TestSubmitResult_BearerTokenFromConfiguredPath(t *testing.T) {
 	t.Setenv(workerenv.ServiceAccountTokenPath, tokenPath)
 	t.Setenv(workerenv.ServiceAccountToken, "fallback-token")
 
-	if err := SubmitResult([]byte("with token path")); err != nil {
-		t.Fatalf("SubmitResult() error = %v", err)
+	if err := SubmitResultContext(context.Background(), []byte("with token path")); err != nil {
+		t.Fatalf("SubmitResultContext(context.Background(), ) error = %v", err)
 	}
 	if gotAuth != "Bearer path-token" {
 		t.Fatalf("Authorization = %q, want Bearer path-token", gotAuth)
@@ -646,7 +649,7 @@ func TestSubmitResult_PermanentRejectionDoesNotRetry(t *testing.T) {
 		}))
 		t.Setenv("ORKA_RESULT_ENDPOINT", srv.URL)
 		slept = nil
-		err := SubmitResult([]byte("rejected result"))
+		err := SubmitResultContext(context.Background(), []byte("rejected result"))
 		srv.Close()
 		if err == nil || !strings.Contains(err.Error(), "rejected permanently") {
 			t.Fatalf("status %d: error = %v, want a permanent rejection", status, err)
@@ -673,7 +676,7 @@ func TestSubmitResult_ThrottlingIsRetried(t *testing.T) {
 	}))
 	defer srv.Close()
 	t.Setenv("ORKA_RESULT_ENDPOINT", srv.URL)
-	if err := SubmitResult([]byte("throttled result")); err != nil {
+	if err := SubmitResultContext(context.Background(), []byte("throttled result")); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if got := attempts.Load(); got != 3 {
@@ -708,7 +711,7 @@ func TestSubmitResult_AllRetriesFail(t *testing.T) {
 		}
 	}()
 
-	err := SubmitResult([]byte("failing result"))
+	err := SubmitResultContext(context.Background(), []byte("failing result"))
 	if err == nil {
 		t.Fatal("expected error after all retries exhausted")
 	}

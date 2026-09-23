@@ -267,6 +267,7 @@ func (r *TaskReconciler) resolveAgentExecutionCandidate(
 	return r.resolveAgentExecutionCandidateWithWorkspaceSessionUID(ctx, task, agent, "")
 }
 
+//nolint:gocyclo // Keep workspace routing and its mutually exclusive admission paths together.
 func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -286,10 +287,7 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 		}
 		return r.resolveExternalAgentExecutionCandidate(ctx, task, agent)
 	}
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	configuration, err := resolveACPAgentSessionConfiguration(ctx, reader, task, agent)
 	if err != nil {
 		return nil, err
@@ -488,10 +486,7 @@ func (r *TaskReconciler) resolveExternalAgentExecutionCandidate(
 	if agent.Spec.Runtime == nil || agent.Spec.Runtime.RuntimeRef == nil || strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) == "" {
 		return nil, permanentACPAgentConfiguration(errors.New("external v2 binding requires Agent.spec.runtime.runtimeRef"))
 	}
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	if reader == nil {
 		return nil, errors.New("API reader is required for external v2 binding")
 	}
@@ -759,10 +754,7 @@ func (r *TaskReconciler) persistAgentExecutionBinding(
 	task *corev1alpha1.Task,
 	candidate *agentExecutionCandidate,
 ) (*corev1alpha1.AgentExecutionBinding, error) {
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	current := &corev1alpha1.Task{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, current); err != nil {
 		return nil, fmt.Errorf("uncached task read before binding: %w", err)
@@ -1128,10 +1120,7 @@ func (r *TaskReconciler) loadVerifiedACPWorkspaceBindingForSettlement(
 	if task == nil {
 		return nil, nil
 	}
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	current := &corev1alpha1.Task{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, current); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -1225,10 +1214,7 @@ func (r *TaskReconciler) loadVerifiedBoundExecutionWithReadyRequirement(
 	if task == nil || binding == nil {
 		return nil, errors.New("task and execution binding are required")
 	}
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	current := &corev1alpha1.Task{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, current); err != nil {
 		return nil, fmt.Errorf("uncached task read before executor side effect: %w", err)
@@ -1383,10 +1369,7 @@ func (r *TaskReconciler) ensureAgentExecutionBinding(
 	if task == nil {
 		return ctrl.Result{}, errors.New("task is required for execution binding"), true
 	}
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	if task.Status.AgentExecutionBinding == nil {
 		current := &corev1alpha1.Task{}
 		if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, current); err != nil {

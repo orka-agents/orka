@@ -29,6 +29,10 @@ import (
 	"github.com/orka-agents/orka/internal/executionmode"
 )
 
+const (
+	conditionReasonReady = "Ready"
+)
+
 // AgentReconciler reconciles a Agent object
 type AgentReconciler struct {
 	client.Client
@@ -351,13 +355,24 @@ func (r *AgentReconciler) countActiveTasks(ctx context.Context, agent *corev1alp
 	for i := range taskList.Items {
 		task := &taskList.Items[i]
 		if task.Spec.AgentRef != nil && task.Spec.AgentRef.Name == agent.Name {
-			phase := task.Status.Phase
-			if phase != corev1alpha1.TaskPhaseSucceeded && phase != corev1alpha1.TaskPhaseFailed {
+			if !isTerminalTaskPhase(task.Status.Phase) {
 				count++
 			}
 		}
 	}
 	return count, nil
+}
+
+// isTerminalTaskPhase reports whether phase is a terminal Task phase for the
+// purpose of Agent active-task accounting. Unknown phases are treated as
+// non-terminal so they fail safe and remain counted as active.
+func isTerminalTaskPhase(phase corev1alpha1.TaskPhase) bool {
+	switch phase {
+	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
+		return true
+	default:
+		return false
+	}
 }
 
 // updateStatus updates the Agent's status with validation results and active task count.
@@ -371,7 +386,7 @@ func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.
 	}
 
 	condition := metav1.Condition{
-		Type:               "Ready",
+		Type:               conditionReasonReady,
 		LastTransitionTime: now,
 		ObservedGeneration: agent.Generation,
 	}

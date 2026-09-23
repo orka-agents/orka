@@ -73,22 +73,23 @@ type substrateNativeState struct {
 }
 
 type substrateNativeAttempt struct {
-	Name               string                          `json:"name"`
-	StartedAt          metav1.Time                     `json:"startedAt"`
-	BootStartedAt      metav1.Time                     `json:"bootStartedAt,omitempty"`
-	DrainStartedAt     metav1.Time                     `json:"drainStartedAt,omitempty"`
-	UID                string                          `json:"uid,omitempty"`
-	Template           substrateNativeTemplateRevision `json:"template"`
-	CreateTemplate     substrateNativeTemplateRevision `json:"createTemplate"`
-	CreateIssued       bool                            `json:"createIssued,omitempty"`
-	BootRequested      bool                            `json:"bootRequested,omitempty"`
-	Seeded             bool                            `json:"seeded,omitempty"`
-	BootstrapChallenge string                          `json:"bootstrapChallenge,omitempty"`
-	BootID             string                          `json:"bootID,omitempty"`
-	Worker             *substrateNativeWorkerFence     `json:"worker,omitempty"`
-	WorkerDrained      bool                            `json:"workerDrained,omitempty"`
-	WorkloadAbsent     bool                            `json:"workloadAbsent,omitempty"`
-	DeleteIssued       bool                            `json:"deleteIssued,omitempty"`
+	Name                    string                          `json:"name"`
+	StartedAt               metav1.Time                     `json:"startedAt"`
+	BootStartedAt           metav1.Time                     `json:"bootStartedAt,omitempty"`
+	DrainStartedAt          metav1.Time                     `json:"drainStartedAt,omitempty"`
+	SettlementWaitStartedAt *metav1.Time                    `json:"settlementWaitStartedAt,omitempty"`
+	UID                     string                          `json:"uid,omitempty"`
+	Template                substrateNativeTemplateRevision `json:"template"`
+	CreateTemplate          substrateNativeTemplateRevision `json:"createTemplate"`
+	CreateIssued            bool                            `json:"createIssued,omitempty"`
+	BootRequested           bool                            `json:"bootRequested,omitempty"`
+	Seeded                  bool                            `json:"seeded,omitempty"`
+	BootstrapChallenge      string                          `json:"bootstrapChallenge,omitempty"`
+	BootID                  string                          `json:"bootID,omitempty"`
+	Worker                  *substrateNativeWorkerFence     `json:"worker,omitempty"`
+	WorkerDrained           bool                            `json:"workerDrained,omitempty"`
+	WorkloadAbsent          bool                            `json:"workloadAbsent,omitempty"`
+	DeleteIssued            bool                            `json:"deleteIssued,omitempty"`
 }
 
 type substrateNativeWorkerFence struct {
@@ -146,10 +147,7 @@ func (r *RuntimePoolReconciler) readNativeSubstrateState(ctx context.Context, po
 		return nil, nil, fmt.Errorf("native Substrate journal requires an exact RuntimePool and infrastructure binding")
 	}
 	cm := r.substrateNativeStateObject(pool)
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	if err := reader.Get(ctx, client.ObjectKeyFromObject(cm), cm); err != nil {
 		if apierrors.IsNotFound(err) {
 			if err := validateAbsentNativeSubstrateJournal(ctx, reader, pool); err != nil {
@@ -311,10 +309,7 @@ func (r *RuntimePoolReconciler) nativeSubstrateWorker(ctx context.Context, api a
 		return nil, fmt.Errorf("native Substrate requires an exact worker with capacity for one Actor in the admitted WorkerPool")
 	}
 	pod := &corev1.Pod{}
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: worker.GetWorkerPod()}, pod); err != nil {
 		return nil, err
 	}
@@ -385,10 +380,7 @@ func (r *RuntimePoolReconciler) terminateNativeSubstrateWorker(ctx context.Conte
 	}
 	f := a.Worker
 	pod := &corev1.Pod{}
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	err := reader.Get(ctx, types.NamespacedName{Namespace: f.Namespace, Name: f.Pod}, pod)
 	if apierrors.IsNotFound(err) {
 		return true, nil

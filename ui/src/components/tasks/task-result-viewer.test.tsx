@@ -214,6 +214,53 @@ describe('TaskResultViewer', () => {
     expect(screen.queryByTestId('verdict-badge')).not.toBeInTheDocument()
   })
 
+  it.each([
+    '{"files":"README.md"}',
+    '{"summary":{"text":"done"}}',
+    '{"diff":{"patch":"example"}}',
+    '{"files":["README.md",42]}',
+    '{"version":1,"summary":"","data":{"count":2}}',
+    '{"diff":"","data":{"count":2}}',
+    '{"verdict":"","data":{"count":2}}',
+    '{"feedback":"","data":{"count":2}}',
+    '{"pushBranch":"","data":{"count":2}}',
+    '{"files":[],"data":{"count":2}}',
+    '{"summary":"","diff":"","verdict":"","feedback":"","pushBranch":"","files":[],"data":{"count":2}}',
+  ])('falls back to complete plain text for unrenderable structured result %s', async (result) => {
+    const resultText = `\n${result}\n`
+    const user = userEvent.setup()
+    server.use(
+      http.get('/api/v1/tasks/:id/result', () => HttpResponse.json({ result: resultText })),
+    )
+    const { container } = render(<TaskResultViewer taskId="task-fallback" />)
+    await user.click(screen.getByText('Load Result'))
+    await waitFor(() => {
+      expect(container.querySelector('pre')?.textContent).toBe(resultText)
+    })
+    expect(screen.queryByTestId('verdict-badge')).not.toBeInTheDocument()
+  })
+
+  it.each([
+    { fields: { summary: 'Task finished' }, text: 'Task finished' },
+    { fields: { files: ['README.md'] }, text: 'README.md' },
+    { fields: { pushBranch: 'feature/test' }, text: 'feature/test' },
+  ])('renders nonempty structured fields alongside empty optional fields: $text', async ({ fields, text }) => {
+    const result = JSON.stringify({
+      summary: '', diff: '', verdict: '', feedback: '', pushBranch: '', files: [],
+      data: { count: 2 },
+      ...fields,
+    })
+    const user = userEvent.setup()
+    server.use(
+      http.get('/api/v1/tasks/:id/result', () => HttpResponse.json({ result })),
+    )
+    render(<TaskResultViewer taskId="task-partial" />)
+    await user.click(screen.getByText('Load Result'))
+    await waitFor(() => {
+      expect(screen.getByText(text)).toBeInTheDocument()
+    })
+  })
+
   it('renders structured result with diff section', async () => {
     const structured = JSON.stringify({
       summary: 'Changes applied',

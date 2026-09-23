@@ -99,6 +99,7 @@ How Orka accepts work from and returns work to external systems exactly once. Se
 | [0012](0012-gateway-inbox-outbox-semantics.md) | Durable at-least-once inbox and outbox semantics | Accepted |
 | [0013](0013-stage-gateway-resource-rollout.md) | Stage the generic gateway resource rollout | Accepted |
 | [0020](0020-gateway-session-canonical-history.md) | Keep external conversation history in Orka Sessions | Accepted |
+| [0032](0032-gateway-interim-delivery.md) | Bounded, capability-gated nonterminal gateway deliveries | Accepted |
 
 ### Governance and telemetry
 

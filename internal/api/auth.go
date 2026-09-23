@@ -21,6 +21,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/orka-agents/orka/internal/metrics"
@@ -117,11 +118,6 @@ type AuthConfig struct {
 	// the normalized audience set so a token authenticated on an unscoped
 	// listener cannot be replayed against an audience-bound listener.
 	TokenReviewAudiences []string
-
-	// TokenSources optionally overrides the ordered request headers used to
-	// extract authentication tokens. When empty, Authorization: Bearer is used
-	// first and x-api-key remains the fallback.
-	TokenSources []AuthTokenSource
 }
 
 // parseServiceAccountNamespace extracts the namespace from a ServiceAccount username.
@@ -132,8 +128,8 @@ func parseServiceAccountNamespace(username string) string {
 		return ""
 	}
 	rest := strings.TrimPrefix(username, prefix)
-	parts := strings.SplitN(rest, ":", 2)
-	if len(parts) < 2 || parts[0] == "" {
+	parts := strings.Split(rest, ":")
+	if len(parts) != 2 || len(utilvalidation.IsDNS1123Label(parts[0])) != 0 || len(utilvalidation.IsDNS1123Subdomain(parts[1])) != 0 {
 		return ""
 	}
 	return parts[0]
@@ -145,8 +141,6 @@ func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
 	if len(configs) > 0 {
 		cfg = configs[0]
 	}
-
-	tokenExtractor := AuthTokenExtractor{Sources: cfg.TokenSources}
 
 	return func(ctx fiber.Ctx) error {
 		contextToken, profile, ok, err := extractContextTokenCandidate(ctx, cfg.ContextTokens)
@@ -170,7 +164,7 @@ func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
 			}
 
 			var token string
-			token, err = tokenExtractor.Extract(ctx)
+			token, err = extractAuthToken(ctx)
 			if err != nil {
 				if errors.Is(err, errInvalidAuthHeaderFormat) {
 					log.Info("authentication failed: invalid authorization header format", "ip", ctx.IP())

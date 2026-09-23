@@ -51,7 +51,7 @@ func hasGoalStateSentinelPrefix(s string) bool {
 // timeout (typically 10 minutes for Copilot/Anthropic). The error string is
 // the only reliable signal — upstream returns 400 without a typed error code.
 func isStreamingRequiredErr(err error) bool {
-	if err == nil {
+	if err == nil || llm.IsUsagePersistenceError(err) {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
@@ -68,6 +68,9 @@ func isStreamingRequiredErr(err error) bool {
 func completeViaStream(ctx context.Context, provider llm.Provider, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
 	streamCh, err := provider.Stream(ctx, req)
 	if err != nil {
+		if llm.IsUsagePersistenceError(err) {
+			return nil, fmt.Errorf("open stream: %w", err)
+		}
 		return nil, fmt.Errorf("%w: open: %w", errStreamUnavailable, err)
 	}
 
@@ -75,7 +78,7 @@ func completeViaStream(ctx context.Context, provider llm.Provider, req *llm.Comp
 	terminalSeen := false
 	for chunk := range streamCh {
 		if chunk.Error != nil {
-			if resp.Content == "" && len(resp.ToolCalls) == 0 {
+			if !llm.IsUsagePersistenceError(chunk.Error) && resp.Content == "" && len(resp.ToolCalls) == 0 {
 				return nil, fmt.Errorf("%w: chunk: %w", errStreamUnavailable, chunk.Error)
 			}
 			return nil, fmt.Errorf("stream chunk: %w", chunk.Error)
@@ -86,12 +89,7 @@ func completeViaStream(ctx context.Context, provider llm.Provider, req *llm.Comp
 		if chunk.ToolCall != nil {
 			resp.ToolCalls = append(resp.ToolCalls, *chunk.ToolCall)
 		}
-		if chunk.InputTokens > 0 {
-			resp.InputTokens = chunk.InputTokens
-		}
-		if chunk.OutputTokens > 0 {
-			resp.OutputTokens = chunk.OutputTokens
-		}
+		retainStreamUsage(resp, chunk)
 		if chunk.Model != "" {
 			resp.Model = chunk.Model
 		}
@@ -633,7 +631,7 @@ func executeToolCall(ctx context.Context, tc llm.ToolCall, timeout time.Duration
 
 	result, err := registryForExternalToolCall(toolCtxOpt, tc.Name).Execute(toolCtx, tc.Name, tc.Arguments)
 	if err != nil {
-		errResult, _ := json.Marshal(map[string]any{"success": false, "error": err.Error()})
+		errResult, _ := json.Marshal(map[string]any{"success": false, apiFieldError: err.Error()})
 		return string(errResult)
 	}
 	return result
@@ -643,8 +641,8 @@ func executeExposedToolCall(ctx context.Context, tc llm.ToolCall, timeout time.D
 	name := strings.TrimSpace(tc.Name)
 	if _, ok := exposedToolNames[name]; !ok {
 		errResult, _ := json.Marshal(map[string]any{
-			"success": false,
-			"error":   fmt.Sprintf("tool %q is not available in this request", tc.Name),
+			"success":     false,
+			apiFieldError: fmt.Sprintf("tool %q is not available in this request", tc.Name),
 		})
 		return string(errResult)
 	}
@@ -665,6 +663,7 @@ func runNonStreamingToolLoop(
 	return runToolLoopWithObserver(ctx, provider, req, model, config, toolCtx, nil)
 }
 
+//nolint:gocyclo // Tool calls, observer events, and stop conditions form one turn loop.
 func runToolLoopWithObserver(
 	ctx context.Context,
 	provider llm.Provider,
@@ -686,7 +685,7 @@ func runToolLoopWithObserver(
 		case <-ctx.Done():
 			resp := &llm.CompletionResponse{
 				Content:    "Request timed out during tool execution.",
-				StopReason: "end_turn",
+				StopReason: oaiStopReasonEndTurn,
 			}
 			observer.finalContent(resp.Content)
 			return resp, nil
@@ -696,7 +695,7 @@ func runToolLoopWithObserver(
 		// Check iteration limit — do one final call without tools
 		if iteration >= config.MaxIterations {
 			messages = append(messages, llm.Message{
-				Role:    "user",
+				Role:    chatRoleUser,
 				Content: "[System: You have reached the maximum number of iterations. Please provide a final summary of what you accomplished.]",
 			})
 			resp, err := provider.Complete(ctx, &llm.CompletionRequest{
@@ -707,9 +706,12 @@ func runToolLoopWithObserver(
 				Temperature:  req.Temperature,
 			})
 			if err != nil {
+				if llm.IsUsagePersistenceError(err) {
+					return nil, fmt.Errorf("final LLM completion after iteration limit failed: %w", err)
+				}
 				resp := &llm.CompletionResponse{
 					Content:    "Reached iteration limit.",
-					StopReason: "end_turn",
+					StopReason: oaiStopReasonEndTurn,
 				}
 				observer.finalContent(resp.Content)
 				return resp, nil
@@ -808,11 +810,11 @@ func runToolLoopWithObserver(
 			)
 			observer.prematureEndRetry()
 			messages = append(messages, llm.Message{
-				Role:    "assistant",
+				Role:    chatRoleAssistant,
 				Content: resp.Content,
 			})
 			messages = append(messages, llm.Message{
-				Role: "user",
+				Role: chatRoleUser,
 				Content: fmt.Sprintf(
 					"[System: You emitted text but did not include the literal %q sentinel that marks GOAL STATE A or GOAL STATE B. The workflow is not done — child Tasks you created are still in flight or pending follow-up. Per the TURN-ENDING INVARIANT, your next response MUST contain a tool_use (not text). Look at the POSTCONDITION TABLE and call the correct next tool. Do NOT emit any text until you are ready to write your final report that begins with %q on its own line.]",
 					goalStateSentinel, goalStateSentinel,
@@ -829,7 +831,7 @@ func runToolLoopWithObserver(
 
 		// Append assistant message with tool calls
 		messages = append(messages, llm.Message{
-			Role:      "assistant",
+			Role:      chatRoleAssistant,
 			Content:   resp.Content,
 			ToolCalls: resp.ToolCalls,
 		})
@@ -849,7 +851,7 @@ func runToolLoopWithObserver(
 			observer.toolResult(tc, result)
 
 			messages = append(messages, llm.Message{
-				Role:       "tool",
+				Role:       chatRoleTool,
 				ToolCallID: tc.ID,
 				Name:       tc.Name,
 				Content:    result,
@@ -859,7 +861,7 @@ func runToolLoopWithObserver(
 		// Append repetition warning if triggered
 		if repetitionWarning != "" {
 			messages = append(messages, llm.Message{
-				Role:    "user",
+				Role:    chatRoleUser,
 				Content: repetitionWarning,
 			})
 		}
@@ -870,7 +872,7 @@ func runToolLoopWithObserver(
 			for {
 				select {
 				case <-ctx.Done():
-					resp := &llm.CompletionResponse{Content: "Request timed out.", StopReason: "end_turn"}
+					resp := &llm.CompletionResponse{Content: "Request timed out.", StopReason: oaiStopReasonEndTurn}
 					observer.finalContent(resp.Content)
 					return resp, nil
 				default:
@@ -882,7 +884,7 @@ func runToolLoopWithObserver(
 				for _, tc := range resp.ToolCalls {
 					result := executeExposedToolCall(ctx, tc, config.ToolTimeout, toolCtx, exposedToolNames)
 					messages = append(messages, llm.Message{
-						Role: "tool", ToolCallID: tc.ID, Name: tc.Name, Content: result,
+						Role: chatRoleTool, ToolCallID: tc.ID, Name: tc.Name, Content: result,
 					})
 					if !isTaskStillRunning(result) {
 						allStillRunning = false

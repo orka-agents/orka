@@ -70,11 +70,7 @@ func loadArtifactClientConfigFromEnv(t *testing.T) (Config, *ArtifactClient) {
 	if !ok {
 		t.Fatalf("workspace materializer type = %T", cfg.WorkspaceMaterializer)
 	}
-	uploader, ok := cfg.ArtifactUploader.(*remoteArtifactUploader)
-	if !ok {
-		t.Fatalf("artifact uploader type = %T", cfg.ArtifactUploader)
-	}
-	if uploader.client != materializer.client {
+	if cfg.ArtifactUploader == nil || cfg.ArtifactUploader.client != materializer.client {
 		t.Fatal("workspace materializer and uploader do not share the configured artifact client")
 	}
 	return cfg, materializer.client

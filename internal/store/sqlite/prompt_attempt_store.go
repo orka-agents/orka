@@ -227,29 +227,13 @@ func normalizePromptAttemptReclamationRequestSQLite(request store.ReclaimPromptA
 	} else if request.FinalPromptAttemptID != "" || request.TerminalProjectionID != "" {
 		return store.ReclaimPromptAttemptsRequest{}, store.ValidationErrorf("only projected prompt attempt reclamation accepts final attempt and projection IDs")
 	}
-	request.RelatedExternalEffectAggregateIDs = normalizePromptAttemptReclamationIDsSQLite(request.RelatedExternalEffectAggregateIDs)
+	request.RelatedExternalEffectAggregateIDs = store.NormalizeControlIdentifierSet(request.RelatedExternalEffectAggregateIDs)
 	for _, id := range request.RelatedExternalEffectAggregateIDs {
 		if err := store.ValidateControlIdentifier("related external effect aggregate ID", id); err != nil {
 			return store.ReclaimPromptAttemptsRequest{}, err
 		}
 	}
 	return request, nil
-}
-
-func normalizePromptAttemptReclamationIDsSQLite(values []string) []string {
-	set := make(map[string]struct{}, len(values))
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value != "" {
-			set[value] = struct{}{}
-		}
-	}
-	result := make([]string, 0, len(set))
-	for value := range set {
-		result = append(result, value)
-	}
-	sort.Strings(result)
-	return result
 }
 
 func preparePromptAttemptReclamationSQLite(
@@ -339,23 +323,23 @@ func settleUnboundPromptAttemptsForReclamationSQLite(
 	for _, attempt := range attempts {
 		if attempt.ID != newestID {
 			if !store.IsTerminalPromptExecutionState(attempt.ExecutionState) || !store.IsTerminalPromptDeliveryState(attempt.DeliveryState) {
-				return nil, sqlitePromptAttemptReclaimNotReady("historical prompt attempt %q is not terminal", attempt.ID)
+				return nil, store.NotReadyErrorf("historical prompt attempt %q is not terminal", attempt.ID)
 			}
 			result = append(result, attempt)
 			continue
 		}
 		if attempt.SessionUID != "" || attempt.SessionLeaseGeneration != 0 || attempt.RuntimeInstanceID != "" {
-			return nil, sqlitePromptAttemptReclaimNotReady("unbound prompt attempt %q already has a runtime or Session binding", attempt.ID)
+			return nil, store.NotReadyErrorf("unbound prompt attempt %q already has a runtime or Session binding", attempt.ID)
 		}
 		if store.IsTerminalPromptExecutionState(attempt.ExecutionState) {
 			if !store.IsTerminalPromptDeliveryState(attempt.DeliveryState) {
-				return nil, sqlitePromptAttemptReclaimNotReady("unbound prompt attempt %q delivery is not terminal", attempt.ID)
+				return nil, store.NotReadyErrorf("unbound prompt attempt %q delivery is not terminal", attempt.ID)
 			}
 			result = append(result, attempt)
 			continue
 		}
 		if attempt.ExecutionState != store.PromptExecutionQueued || attempt.DeliveryState != store.PromptDeliveryNotRequested {
-			return nil, sqlitePromptAttemptReclaimNotReady("unbound prompt attempt %q is not safely cancellable from state %s", attempt.ID, attempt.ExecutionState)
+			return nil, store.NotReadyErrorf("unbound prompt attempt %q is not safely cancellable from state %s", attempt.ID, attempt.ExecutionState)
 		}
 		operationID := store.CanonicalControlID("reclaim-unbound-cancel", attempt.ID)
 		operationDigest := store.CanonicalBytesDigest([]byte("reclaim-unbound-cancel:" + attempt.ID))
@@ -404,26 +388,26 @@ func buildPromptAttemptReclamationMarkerSQLite(
 		if len(attempts) != 0 {
 			return promptAttemptReclamationMarker{}, store.ConflictErrorf("Task %q declared no durable attempt but owns %d PromptAttempts", request.TaskUID, len(attempts))
 		}
-		marker.RelatedExternalEffectAggregateIDs = normalizePromptAttemptReclamationIDsSQLite(append([]string{request.TaskUID}, request.RelatedExternalEffectAggregateIDs...))
+		marker.RelatedExternalEffectAggregateIDs = store.NormalizeControlIdentifierSet(append([]string{request.TaskUID}, request.RelatedExternalEffectAggregateIDs...))
 		if _, err := verifyPromptAttemptReferencesSQLite(ctx, tx, marker, nil); err != nil {
 			return promptAttemptReclamationMarker{}, err
 		}
 		return marker, nil
 	}
 	if len(attempts) == 0 {
-		return promptAttemptReclamationMarker{}, sqlitePromptAttemptReclaimNotReady("Task %q has no durable PromptAttempt and no reclamation marker", request.TaskUID)
+		return promptAttemptReclamationMarker{}, store.NotReadyErrorf("Task %q has no durable PromptAttempt and no reclamation marker", request.TaskUID)
 	}
 	for _, attempt := range attempts {
 		if !store.IsTerminalPromptExecutionState(attempt.ExecutionState) || !store.IsTerminalPromptDeliveryState(attempt.DeliveryState) {
-			return promptAttemptReclamationMarker{}, sqlitePromptAttemptReclaimNotReady("prompt attempt %q is not terminal", attempt.ID)
+			return promptAttemptReclamationMarker{}, store.NotReadyErrorf("prompt attempt %q is not terminal", attempt.ID)
 		}
 		marker.CandidateIDs = append(marker.CandidateIDs, attempt.ID)
 		if attempt.SessionUID != "" {
 			marker.RelatedExternalEffectAggregateIDs = append(marker.RelatedExternalEffectAggregateIDs, attempt.SessionUID)
 		}
 	}
-	marker.CandidateIDs = normalizePromptAttemptReclamationIDsSQLite(marker.CandidateIDs)
-	marker.RelatedExternalEffectAggregateIDs = normalizePromptAttemptReclamationIDsSQLite(append(marker.RelatedExternalEffectAggregateIDs, append([]string{request.TaskUID}, request.RelatedExternalEffectAggregateIDs...)...))
+	marker.CandidateIDs = store.NormalizeControlIdentifierSet(marker.CandidateIDs)
+	marker.RelatedExternalEffectAggregateIDs = store.NormalizeControlIdentifierSet(append(marker.RelatedExternalEffectAggregateIDs, append([]string{request.TaskUID}, request.RelatedExternalEffectAggregateIDs...)...))
 	finalAttempt, err := newestPromptAttemptForReclamationSQLite(attempts)
 	if err != nil {
 		return promptAttemptReclamationMarker{}, err
@@ -444,7 +428,7 @@ func buildPromptAttemptReclamationMarkerSQLite(
 		if request.FinalContinuitySession {
 			turn, ok := turns[finalAttempt.ID]
 			if !ok {
-				return promptAttemptReclamationMarker{}, sqlitePromptAttemptReclaimNotReady("final continuity prompt attempt %q has no finalized SessionTurn", finalAttempt.ID)
+				return promptAttemptReclamationMarker{}, store.NotReadyErrorf("final continuity prompt attempt %q has no finalized SessionTurn", finalAttempt.ID)
 			}
 			marker.FinalSessionTurnID = turn.ID
 			marker.TerminalProjectionAggregateKind = "SessionTurn"
@@ -496,7 +480,7 @@ func verifyPreparedPromptAttemptReclamationSQLite(
 			return store.ConflictErrorf("PromptAttempt %q was created after Task reclamation was prepared", attempt.ID)
 		}
 		if !store.IsTerminalPromptExecutionState(attempt.ExecutionState) || !store.IsTerminalPromptDeliveryState(attempt.DeliveryState) {
-			return sqlitePromptAttemptReclaimNotReady("prompt attempt %q is not terminal", attempt.ID)
+			return store.NotReadyErrorf("prompt attempt %q is not terminal", attempt.ID)
 		}
 	}
 	if marker.Mode == store.PromptAttemptReclamationNoAttempt && len(attempts) != 0 {
@@ -538,11 +522,11 @@ func verifyPromptAttemptReferencesSQLite(
 		}
 		if leaseTaskUID == marker.TaskUID {
 			_ = controlRows.Close()
-			return nil, sqlitePromptAttemptReclaimNotReady("Session %s/%s still has a mutation lease for Task %q", marker.Namespace, sessionName, marker.TaskUID)
+			return nil, store.NotReadyErrorf("Session %s/%s still has a mutation lease for Task %q", marker.Namespace, sessionName, marker.TaskUID)
 		}
 		if _, related := protected[relatedAttemptID]; related && availability == store.SessionReconciliationBlocked {
 			_ = controlRows.Close()
-			return nil, sqlitePromptAttemptReclaimNotReady("Session %s/%s still references prompt attempt %q", marker.Namespace, sessionName, relatedAttemptID)
+			return nil, store.NotReadyErrorf("Session %s/%s still references prompt attempt %q", marker.Namespace, sessionName, relatedAttemptID)
 		}
 	}
 	if err := controlRows.Err(); err != nil {
@@ -572,7 +556,7 @@ func verifyPromptAttemptReferencesSQLite(
 			}
 			turn, err := getSessionTurn(ctx, tx, turnID)
 			if errors.Is(err, store.ErrNotFound) {
-				return nil, sqlitePromptAttemptReclaimNotReady("SessionTurn %q for prompt attempt %q is not durable", turnID, attempt.ID)
+				return nil, store.NotReadyErrorf("SessionTurn %q for prompt attempt %q is not durable", turnID, attempt.ID)
 			}
 			if err != nil {
 				return nil, fmt.Errorf("load SessionTurn for prompt attempt reclamation: %w", err)
@@ -581,7 +565,7 @@ func verifyPromptAttemptReferencesSQLite(
 				return nil, store.ConflictErrorf("SessionTurn %q does not match prompt attempt %q", turnID, attempt.ID)
 			}
 			if turn.State != store.SessionTurnFinalized || turn.FinalizedAt == nil || strings.TrimSpace(turn.ProjectionID) == "" {
-				return nil, sqlitePromptAttemptReclaimNotReady("SessionTurn %q for prompt attempt %q is not finalized", turnID, attempt.ID)
+				return nil, store.NotReadyErrorf("SessionTurn %q for prompt attempt %q is not finalized", turnID, attempt.ID)
 			}
 			turns[attempt.ID] = turn
 		}
@@ -611,7 +595,7 @@ func verifyPromptAttemptPublicationsAndEffectsSQLite(ctx context.Context, tx *sq
 		}
 		if !store.IsTerminalPublicationState(state) {
 			_ = publicationRows.Close()
-			return sqlitePromptAttemptReclaimNotReady("publication %q is not terminal", id)
+			return store.NotReadyErrorf("publication %q is not terminal", id)
 		}
 		relatedEffects[id] = struct{}{}
 	}
@@ -641,7 +625,7 @@ func verifyPromptAttemptPublicationsAndEffectsSQLite(ctx context.Context, tx *sq
 		case store.ExternalEffectSucceeded, store.ExternalEffectFailed, store.ExternalEffectOutcomeUnknown:
 		default:
 			_ = effectRows.Close()
-			return sqlitePromptAttemptReclaimNotReady("external effect %q is not terminal", id)
+			return store.NotReadyErrorf("external effect %q is not terminal", id)
 		}
 	}
 	if err := effectRows.Err(); err != nil {
@@ -657,13 +641,13 @@ func verifyPromptAttemptPublicationsAndEffectsSQLite(ctx context.Context, tx *sq
 func verifyPromptAttemptTerminalProjectionMarkerSQLite(ctx context.Context, tx *sql.Tx, marker promptAttemptReclamationMarker) error {
 	projection, err := getOutboxProjection(ctx, tx, marker.TerminalProjectionID)
 	if errors.Is(err, store.ErrNotFound) {
-		return sqlitePromptAttemptReclaimNotReady("terminal projection %q is not durable", marker.TerminalProjectionID)
+		return store.NotReadyErrorf("terminal projection %q is not durable", marker.TerminalProjectionID)
 	}
 	if err != nil {
 		return fmt.Errorf("load terminal projection for prompt attempt reclamation: %w", err)
 	}
 	if projection.State != store.OutboxProjectionDelivered {
-		return sqlitePromptAttemptReclaimNotReady("terminal projection %q is not delivered", projection.ID)
+		return store.NotReadyErrorf("terminal projection %q is not delivered", projection.ID)
 	}
 	if projection.ProjectionKind != "TaskTerminalStatus" ||
 		projection.AggregateKind != marker.TerminalProjectionAggregateKind || projection.AggregateID != marker.TerminalProjectionAggregateID {
@@ -767,14 +751,10 @@ func getPromptAttemptReclamationMarkerSQLite(ctx context.Context, q controlQuery
 	if err := json.Unmarshal(relatedEffectsJSON, &marker.RelatedExternalEffectAggregateIDs); err != nil {
 		return promptAttemptReclamationMarker{}, fmt.Errorf("decode prompt attempt reclamation related effects: %w", err)
 	}
-	marker.CandidateIDs = normalizePromptAttemptReclamationIDsSQLite(marker.CandidateIDs)
-	marker.RequestedExternalEffectAggregateIDs = normalizePromptAttemptReclamationIDsSQLite(marker.RequestedExternalEffectAggregateIDs)
-	marker.RelatedExternalEffectAggregateIDs = normalizePromptAttemptReclamationIDsSQLite(marker.RelatedExternalEffectAggregateIDs)
+	marker.CandidateIDs = store.NormalizeControlIdentifierSet(marker.CandidateIDs)
+	marker.RequestedExternalEffectAggregateIDs = store.NormalizeControlIdentifierSet(marker.RequestedExternalEffectAggregateIDs)
+	marker.RelatedExternalEffectAggregateIDs = store.NormalizeControlIdentifierSet(marker.RelatedExternalEffectAggregateIDs)
 	return marker, nil
-}
-
-func sqlitePromptAttemptReclaimNotReady(format string, args ...any) error {
-	return fmt.Errorf("%w: %s", store.ErrNotReady, fmt.Sprintf(format, args...))
 }
 
 // RecoverPromptAttemptPreSubmission returns a pre-acceptance attempt to

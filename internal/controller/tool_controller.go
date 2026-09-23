@@ -165,7 +165,7 @@ func (r *ToolReconciler) validateToolHTTPURL(rawURL string) error {
 		return fmt.Errorf("http.url is required")
 	}
 	parsedURL, err := url.Parse(rawURL)
-	if err != nil || parsedURL.Host == "" || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
+	if err != nil || parsedURL.Host == "" || (parsedURL.Scheme != urlSchemeHTTP && parsedURL.Scheme != "https") {
 		return fmt.Errorf("invalid http.url")
 	}
 	if parsedURL.User != nil {
@@ -277,10 +277,10 @@ func (r *ToolReconciler) validateToolHTTPAuth(ctx context.Context, tool *corev1a
 	}
 
 	// Validate authInject + authBodyKey combination
-	if tool.Spec.HTTP.AuthInject == "body" && tool.Spec.HTTP.AuthBodyKey == "" {
+	if tool.Spec.HTTP.AuthInject == repositoryScanPullRequestBodyField && tool.Spec.HTTP.AuthBodyKey == "" {
 		return fmt.Errorf("authBodyKey is required when authInject is 'body'")
 	}
-	if tool.Spec.MCP != nil && tool.Spec.MCP.SubstrateActor != nil && tool.Spec.HTTP.AuthInject == "body" {
+	if tool.Spec.MCP != nil && tool.Spec.MCP.SubstrateActor != nil && tool.Spec.HTTP.AuthInject == repositoryScanPullRequestBodyField {
 		return fmt.Errorf("MCP tools do not support authInject=body")
 	}
 
@@ -338,6 +338,7 @@ func (r *ToolReconciler) substrateMCPTemplateRequest(tool *corev1alpha1.Tool) *E
 	}
 }
 
+//nolint:gocyclo // Tool admission and Actor lifecycle checks must complete before publishing readiness.
 func (r *ToolReconciler) reconcileSubstrateMCPTool(ctx context.Context, tool *corev1alpha1.Tool) (ctrl.Result, error) {
 	actorSpec := tool.Spec.MCP.SubstrateActor
 	templateRequest := r.substrateMCPTemplateRequest(tool)
@@ -883,10 +884,10 @@ func (r *ToolReconciler) substrateMCPToolActorLeaseDeleteRefs(
 	refs := make([]substrateMCPActorDeleteRef, 0, len(leases.Items))
 	for i := range leases.Items {
 		lease := &leases.Items[i]
-		if !substrateMCPToolActorLeaseHeldByTool(lease, tool) {
+		if !substratePoolActorLeaseHeldByTool(lease, tool) {
 			continue
 		}
-		actorID := substrateMCPToolActorLeaseActorID(lease)
+		actorID := substratePoolActorLeaseActorID(lease)
 		if actorID == "" {
 			continue
 		}
@@ -907,7 +908,7 @@ func (r *ToolReconciler) substrateMCPToolActorLeaseHeldByTool(
 		return nil, false, nil
 	}
 	var selected *coordinationv1.Lease
-	names := []string{substrateMCPToolActorLeaseName(actorID)}
+	names := []string{substratePoolActorLeaseName(actorID)}
 	if names[0] != actorID {
 		// Early native controllers wrote the qualified ID as the lease name.
 		// Read both forms without creating a second ownership claim.
@@ -921,7 +922,7 @@ func (r *ToolReconciler) substrateMCPToolActorLeaseHeldByTool(
 			}
 			return nil, false, err
 		}
-		if lease.Labels[labels.LabelPurpose] != substrateMCPToolActorLeasePurpose || !substrateMCPToolActorLeaseHeldByTool(lease, tool) {
+		if lease.Labels[labels.LabelPurpose] != substrateMCPToolActorLeasePurpose || !substratePoolActorLeaseHeldByTool(lease, tool) {
 			return lease, false, nil
 		}
 		if selected == nil {
@@ -950,7 +951,7 @@ func (r *ToolReconciler) deleteSubstrateMCPToolActorLease(
 		if err := r.Delete(ctx, lease, deleteCurrentObjectPreconditions(lease)...); err != nil && !errors.IsNotFound(err) {
 			if errors.IsConflict(err) {
 				stillHeld, verifyErr := substrateLeaseStillMatchesAfterDeleteConflict(ctx, r.Client, lease, func(latest *coordinationv1.Lease) bool {
-					return substrateMCPToolActorLeaseHeldByTool(latest, tool)
+					return substratePoolActorLeaseHeldByTool(latest, tool)
 				})
 				if verifyErr != nil {
 					return verifyErr
@@ -1555,7 +1556,7 @@ func sensitiveURLParameter(name string) bool {
 		strings.Contains(normalized, "apikey") {
 		return true
 	}
-	if normalized == "token" {
+	if normalized == defaultACPWorkspaceCredentialKey {
 		return true
 	}
 	if !strings.HasSuffix(normalized, "-token") {

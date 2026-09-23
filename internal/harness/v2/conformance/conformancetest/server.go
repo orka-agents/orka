@@ -445,6 +445,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+//nolint:gocyclo // This conformance fixture keeps all prompt faults and protocol responses in one handler.
 func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeMutationHeaders(w, r) {
 		return

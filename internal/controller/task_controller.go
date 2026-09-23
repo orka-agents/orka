@@ -65,6 +65,10 @@ import (
 )
 
 const (
+	taskTerminalMessage = "task is terminal"
+)
+
+const (
 	taskTransactionTokenPendingTimeout            = 2 * time.Minute
 	failedMountEventStaleAfter                    = 2 * time.Minute
 	podLogLimitBytes                              = int64(5 << 20)
@@ -101,6 +105,7 @@ const (
 	managedLabelValue      = scheduledRunLabelValue
 
 	workerRBACReconcileFailedReason = "WorkerRBACReconcileFailed"
+	taskRetryPendingReason          = "RetryPending"
 )
 
 // TaskReconciler reconciles a Task object
@@ -325,6 +330,9 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			return ctrl.Result{}, nil
 		}
 		log.Error(err, "unable to fetch Task")
+		return ctrl.Result{}, err
+	}
+	if err := r.retainUsageTask(ctx, task); err != nil {
 		return ctrl.Result{}, err
 	}
 	if tx := task.Spec.Transaction; tx != nil {
@@ -738,6 +746,9 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		if deadline, ok := r.pendingAgentTaskDeadline(ctx, task, now); ok && !now.Before(deadline) {
 			return r.cancelACPTaskBeforeDurableAttempt(ctx, task, "task deadline exceeded before runtime admission")
 		}
+	}
+	if delay := r.remainingRetryDelay(task, time.Now()); delay > 0 {
+		return ctrl.Result{RequeueAfter: delay}, nil
 	}
 
 	// Non-agent workers retain the legacy Session lock lifecycle. Agent Tasks
@@ -1435,10 +1446,7 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	log := logf.FromContext(ctx)
 
 	latest := &corev1alpha1.Task{}
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	if err := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -1452,6 +1460,11 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 			return ctrl.Result{}, err
 		}
 		return r.failTask(ctx, task, meta.FindStatusCondition(latest.Status.Conditions, ConditionTypeJobCreated).Message)
+	}
+	// Recheck the persisted deadline after the uncached read so an older
+	// Pending snapshot cannot admit a Job before its retry delay has elapsed.
+	if delay := r.remainingRetryDelay(latest, time.Now()); delay > 0 {
+		return ctrl.Result{RequeueAfter: delay}, nil
 	}
 	validationTask, err := r.repositoryMonitorValidationTask(ctx, latest)
 	if err != nil {
@@ -1701,10 +1714,7 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 			if r.isAutonomousTask(ctx, task) {
 				oldJob := task.Status.JobName
 				latest := &corev1alpha1.Task{}
-				reader := r.APIReader
-				if reader == nil {
-					reader = r.Client
-				}
+				reader := uncachedReader(r.APIReader, r.Client)
 				if latestErr := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); latestErr != nil {
 					return ctrl.Result{}, latestErr
 				}
@@ -2022,7 +2032,7 @@ func (r *TaskReconciler) diagnoseFailedJob(ctx context.Context, task *corev1alph
 			if term.Reason == "OOMKilled" || term.ExitCode == 137 {
 				limit := podContainerMemoryLimit(pod, cs.Name)
 				if limit == "" {
-					limit = "unknown"
+					limit = repositoryMonitorIssueUnknownValue
 				}
 				oomMsg = fmt.Sprintf("job failed: container OOMKilled (memory limit %s exceeded). Recreate the agent with higher resources.limits.memory or set spec.resources on the task.", limit)
 				continue
@@ -2099,6 +2109,8 @@ func (r *TaskReconciler) isWithinJobCreationVisibilityGracePeriod(task *corev1al
 }
 
 // handleCompleted handles Tasks that have completed (Succeeded or Failed)
+//
+//nolint:gocyclo // Task finalization keeps publication, Session settlement, and cleanup ordering visible.
 func (r *TaskReconciler) handleFinalizing(
 	ctx context.Context, task *corev1alpha1.Task,
 ) (ctrl.Result, error) {
@@ -2594,10 +2606,10 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 	switch phase {
 	case corev1alpha1.TaskPhaseFailed:
 		conditionStatus = metav1.ConditionFalse
-		reason = "TaskFailed"
+		reason = eventReasonTaskFailed
 	case corev1alpha1.TaskPhaseCancelled:
 		conditionStatus = metav1.ConditionFalse
-		reason = "TaskCancelled"
+		reason = eventReasonTaskCancelled
 	}
 
 	resultRef := task.Status.ResultRef
@@ -2621,7 +2633,7 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 			Status:             metav1.ConditionFalse,
 			LastTransitionTime: now,
 			Reason:             reason,
-			Message:            "task is terminal",
+			Message:            taskTerminalMessage,
 		})
 		meta.SetStatusCondition(&t.Status.Conditions, metav1.Condition{
 			Type:               ConditionTypeComplete,
@@ -2699,6 +2711,7 @@ func (r *TaskReconciler) retryTask(ctx context.Context, task *corev1alpha1.Task)
 	// Calculate backoff delay
 	delay := r.calculateRetryDelay(task)
 	oldJobName := task.Status.JobName
+	now := metav1.Now()
 
 	// Reset to pending for retry before deleting the old Job so a transient
 	// NotFound from asynchronous Job deletion does not fail the task.
@@ -2709,6 +2722,10 @@ func (r *TaskReconciler) retryTask(ctx context.Context, task *corev1alpha1.Task)
 		t.Status.Message = ""
 		t.Status.CompletionTime = nil
 		t.Status.ResultRef = nil
+		meta.SetStatusCondition(&t.Status.Conditions, metav1.Condition{
+			Type: ConditionTypeJobCreated, Status: metav1.ConditionFalse, LastTransitionTime: now,
+			Reason: taskRetryPendingReason, Message: "waiting for the next retry attempt",
+		})
 	}); err != nil {
 		log.Error(err, "failed to update status for retry")
 		return ctrl.Result{}, err
@@ -2732,6 +2749,27 @@ func (r *TaskReconciler) retryTask(ctx context.Context, task *corev1alpha1.Task)
 	}
 
 	return ctrl.Result{RequeueAfter: delay}, nil
+}
+
+// RequeueAfter does not prevent Task or owned Job events from reconciling
+// sooner. Enforce the same retry deadline on every attempt to start a Job.
+func (r *TaskReconciler) remainingRetryDelay(task *corev1alpha1.Task, now time.Time) time.Duration {
+	if task.Spec.Type == corev1alpha1.TaskTypeAgent || task.Status.Phase != corev1alpha1.TaskPhasePending {
+		return 0
+	}
+	condition := meta.FindStatusCondition(task.Status.Conditions, ConditionTypeJobCreated)
+	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != taskRetryPendingReason || condition.LastTransitionTime.IsZero() {
+		return 0
+	}
+	delay := r.calculateRetryDelay(task)
+	if delay <= 0 {
+		return 0
+	}
+	// metav1.Time JSON drops fractional seconds. Start at the next second so
+	// persistence cannot shorten a positive delay, including subsecond delays.
+	// This conservatively adds at most one second to the requested backoff.
+	retryAt := condition.LastTransitionTime.Time.Truncate(time.Second).Add(time.Second).Add(delay)
+	return max(retryAt.Sub(now), 0)
 }
 
 // calculateRetryDelay calculates the delay before retry using exponential backoff
@@ -3758,7 +3796,7 @@ func (r *TaskReconciler) ensureTrustedServiceReadBindings(ctx context.Context, t
 		}
 		binding := &rbacv1.RoleBinding{
 			ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace, Labels: maps.Clone(objectLabels)},
-			RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: key.Name},
+			RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: rbacRoleKind, Name: key.Name},
 			Subjects: []rbacv1.Subject{{
 				Kind: rbacv1.ServiceAccountKind, Name: r.aiWorkerServiceAccountName(), Namespace: taskNamespace,
 			}},
@@ -4071,7 +4109,7 @@ func trustedServiceReadRoleBindingTaskNamespace(binding *rbacv1.RoleBinding) (st
 
 func legacyTrustedServiceReadRoleBindingTaskNamespace(binding *rbacv1.RoleBinding) (string, bool) {
 	if binding == nil || !legacyTrustedServiceReadName(binding.Name) ||
-		binding.RoleRef != (rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: binding.Name}) ||
+		binding.RoleRef != (rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: rbacRoleKind, Name: binding.Name}) ||
 		len(binding.Subjects) != 1 {
 		return "", false
 	}

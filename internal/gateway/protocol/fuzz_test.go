@@ -26,6 +26,7 @@ func FuzzDecodeEvent(f *testing.F) {
 }
 
 func FuzzDecodeCapabilities(f *testing.F) {
+	f.Add([]byte(`{"protocolVersion":"orka.gateway.v1","adapterName":"adapter","capabilities":{"idempotentDelivery":true,"interimDelivery":true}}`))
 	f.Add([]byte(`{"protocolVersion":"orka.gateway.v1","adapterName":"adapter","adapterVersion":"v1","capabilities":{"inboundText":true,"outboundText":true,"idempotentDelivery":true}}`))
 	f.Add([]byte(`{"protocolVersion":"orka.gateway.v2","adapterName":"adapter","capabilities":{"idempotentDelivery":true}}`))
 	f.Add([]byte(`{"protocolVersion":"orka.gateway.v1","adapterName":"adapter","capabilities":{"idempotentDelivery":false,"unknown":true}}`))
@@ -98,6 +99,8 @@ func FuzzDecodeDeliveryResponse(f *testing.F) {
 }
 
 func FuzzValidateDeliveryRequest(f *testing.F) {
+	f.Add(Version, "delivery", "idempotency", "event", "account", "context", "reply", DeliveryKindMessage, "working")
+	f.Add(Version, "delivery", "idempotency", "event", "account", "context", "reply", DeliveryKindMessage, strings.Repeat("x", MaxInterimTextBytes+1))
 	f.Add(Version, "delivery", "idempotency", "event", "account", "context", "reply", DeliveryKindFinal, "hello")
 	f.Add(Version, "", "idempotency", "event", "account", "context", "reply", DeliveryKindError, "failure")
 	f.Add("orka.gateway.v2", "delivery", "idempotency", "event", "account", "context", "reply", "unknown", "\x00")
@@ -131,10 +134,14 @@ func FuzzValidateDeliveryRequest(f *testing.F) {
 				t.Fatalf("successful request has invalid %s: %v", name, err)
 			}
 		}
-		if request.Kind != DeliveryKindFinal && request.Kind != DeliveryKindError {
+		if request.Kind != DeliveryKindFinal && request.Kind != DeliveryKindError && request.Kind != DeliveryKindMessage {
 			t.Fatalf("successful request has unsupported kind %q", request.Kind)
 		}
-		if request.Text == "" || len(request.Text) > MaxTextBytes || !utf8.ValidString(request.Text) || containsUnsafeControl(request.Text, true) {
+		limit := MaxTextBytes
+		if request.Kind == DeliveryKindMessage {
+			limit = MaxInterimTextBytes
+		}
+		if request.Text == "" || len(request.Text) > limit || !utf8.ValidString(request.Text) || containsUnsafeControl(request.Text, true) {
 			t.Fatalf("successful request has invalid text %q", request.Text)
 		}
 	})

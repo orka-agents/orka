@@ -37,12 +37,6 @@ type ArtifactAuthorizationProvider interface {
 	AuthorizeArtifact(context.Context, ArtifactAuthorizationRequest) (artifactcap.Authorization, error)
 }
 
-type ArtifactAuthorizationProviderFunc func(context.Context, ArtifactAuthorizationRequest) (artifactcap.Authorization, error)
-
-func (f ArtifactAuthorizationProviderFunc) AuthorizeArtifact(ctx context.Context, request ArtifactAuthorizationRequest) (artifactcap.Authorization, error) {
-	return f(ctx, request)
-}
-
 type ArtifactClient struct {
 	baseURL          *url.URL
 	httpClient       *http.Client
@@ -59,7 +53,7 @@ func newArtifactClient(baseURL string, client *http.Client, authorization Artifa
 		return nil, fmt.Errorf("artifact transfer limits must be less than %d", int64(math.MaxInt64))
 	}
 	parsed, err := url.Parse(strings.TrimSpace(baseURL))
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+	if err != nil || (parsed.Scheme != providerProxyScheme && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return nil, fmt.Errorf("artifact API base URL is invalid")
 	}
 	if parsed.Path != "" && parsed.Path != "/" {

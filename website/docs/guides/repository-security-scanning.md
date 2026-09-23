@@ -107,6 +107,48 @@ patch → pull-request remediation flow.
 | **Patch generation** | From a finding, Orka creates a dedicated write-intent patch task. The agent edits the workspace and returns an identity-bound `orka.security.patch.v1` result envelope (summary, changed files, tests run, risk); it never writes artifact files into the workspace. The clean-room Workspace/Publisher commits the delta and opens the pull request, and the controller derives the reviewable diff from that published commit (read with `forgeCredentialRef`) and stores the diff and summary artifacts. The proposal is marked ready only when the envelope's changed files exactly match the published commit. |
 | **PR receipt** | The pull request already exists at this point — the clean-room publisher opened it during patch generation as part of the same governed, verified publication. The pull-request endpoint is idempotent: it records and returns the verified PR receipt (number and URL) from the proposal rather than opening a second PR, and the controller re-titles the publisher's generic PR with the finding (`fix(security): …`). |
 
+## Following a scan from the CLI
+
+`orka security scan run <repo>` starts a scan and prints its ID. A scan is a series of
+Tasks in stages (threat model, map the code, review slices, validate findings, and patch
+on request), and `orka security scan status` shows where it is. The counts come from the
+`orka.ai/security-scan-id` and `orka.ai/security-stage` labels on the scan's Tasks, and a
+caller only needs security read permission to see them.
+
+```console
+$ orka security scan status nodejs-goof
+Scan:   scan-1d0c9f2e manual
+Phase:  running, started 6m ago
+Slices: 9 of 14 reviewed
+
+STAGE              TASKS  PENDING  RUNNING  SUCCEEDED  FAILED
+threat model       1      0        0        1          0
+map the code       1      0        0        1          0
+review slices      15     0        6        9          0
+validate findings  0      0        0        0          0
+patch findings     0      0        0        0          0
+```
+
+With `--watch` the table is reprinted when a count changes and the command exits when the
+scan finishes: exit code 0 when it succeeded, 1 when it failed. Failed Tasks are listed by
+name under the table, so the next step is `orka task status <name>`. `--scan <id>` picks
+an older run, and `-o json` returns the same counts for scripts.
+
+Once the scan finishes, list the findings. The table is sorted critical-first, then
+validated before unvalidated, and titles are cut to the terminal width:
+
+```console
+$ orka security finding list nodejs-goof --recommended --validation-status validated
+SEVERITY  VALIDATED  ID                TITLE                                                  FILE
+critical  yes        fnd_a9d4f27383dc  Zip-slip via AdmZip.extractAllTo on POST /import       routes/import.js:42
+critical  yes        fnd_4ceb0dc790e6  Unauthenticated command injection via exec('identify…  routes/index.js:118
+high      yes        fnd_11a364071e0b  Hard-coded express-session secret enables cookie for…  app.js:31
+```
+
+`orka security finding get <id>` prints one finding as a readable field list, and
+`orka security scan list <repo>` shows each run's phase, slices reviewed, and the number
+of findings kept and dropped.
+
 ## Validation modes
 
 | Mode | Behavior |

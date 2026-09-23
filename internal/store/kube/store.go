@@ -3,7 +3,7 @@
 // Controller epochs and Session mutation ownership are serialized by
 // coordination.k8s.io Leases. The CR status resourceVersion is the CAS token
 // for all other logical state transitions. SessionTurn persistence remains a
-// separate SQLite concern and may be supplied through WithSessionTurnPersistence.
+// separate SQLite concern supplied through NewComposite.
 package kube
 
 import (
@@ -42,33 +42,6 @@ type SQLitePersistence interface {
 // Option configures Store.
 type Option func(*Store) error
 
-// WithSessionTurnPersistence configures the narrow SQLite persistence adapter
-// used for SessionTurn/transcript/deferred-outbox transactions.
-func WithSessionTurnPersistence(turns store.SessionTurnPersistenceStore) Option {
-	return func(s *Store) error {
-		if turns == nil {
-			return store.ValidationErrorf("session turn persistence must not be nil")
-		}
-		s.sessionTurns = turns
-		return nil
-	}
-}
-
-// WithHarnessV1Attempts supplies the route-specific receipt store used when a
-// protocol-neutral SessionTurn references a harness v1 attempt rather than a
-// v2 PromptAttempt. Kubernetes SessionControl and Lease state remain the
-// mutation authority; this store is consulted only for immutable attempt
-// identity and terminal-receipt validation.
-func WithHarnessV1Attempts(attempts store.HarnessV1AttemptStore) Option {
-	return func(s *Store) error {
-		if attempts == nil {
-			return store.ValidationErrorf("harness v1 attempt store must not be nil")
-		}
-		s.harnessV1Attempts = attempts
-		return nil
-	}
-}
-
 // WithAPIReader configures the uncached reader used for authoritative control
 // records. Controller-runtime cached clients remain the writer, but must not be
 // trusted for immediate read-after-write recovery decisions.
@@ -102,30 +75,6 @@ func WithWatchNamespace(namespace string) Option {
 func WithoutClusterScopedBranchClaims() Option {
 	return func(s *Store) error {
 		s.branchClaimsEnabled = false
-		return nil
-	}
-}
-
-// WithOutboxPersistence configures the SQLite outbox adapter used behind the
-// Kubernetes controller-epoch fence.
-func WithOutboxPersistence(outbox store.OutboxPersistenceStore) Option {
-	return func(s *Store) error {
-		if outbox == nil {
-			return store.ValidationErrorf("outbox persistence must not be nil")
-		}
-		s.outbox = outbox
-		return nil
-	}
-}
-
-// WithSessionCleanupPersistence configures the SQLite half of the fenced
-// cross-store Session deletion protocol.
-func WithSessionCleanupPersistence(cleanup store.SessionCleanupPersistenceStore) Option {
-	return func(s *Store) error {
-		if cleanup == nil {
-			return store.ValidationErrorf("session cleanup persistence must not be nil")
-		}
-		s.sessionCleanup = cleanup
 		return nil
 	}
 }
@@ -165,13 +114,20 @@ func NewComposite(kubeClient client.Client, controlNamespace string, persistence
 	if persistence == nil {
 		return nil, store.ValidationErrorf("SQLite persistence store is required")
 	}
-	combined := make([]Option, 0, len(options)+3)
-	combined = append(combined, WithSessionTurnPersistence(persistence), WithOutboxPersistence(persistence), WithSessionCleanupPersistence(persistence))
-	if attempts, ok := persistence.(store.HarnessV1AttemptStore); ok {
-		combined = append(combined, WithHarnessV1Attempts(attempts))
+	result, err := New(kubeClient, controlNamespace, options...)
+	if err != nil {
+		return nil, err
 	}
-	combined = append(combined, options...)
-	return New(kubeClient, controlNamespace, combined...)
+	result.sessionTurns = persistence
+	result.outbox = persistence
+	result.sessionCleanup = persistence
+	// Harness v1 attempt receipts are consulted only for immutable attempt
+	// identity and terminal-receipt validation; Kubernetes SessionControl and
+	// Lease state remain the mutation authority.
+	if attempts, ok := persistence.(store.HarnessV1AttemptStore); ok {
+		result.harnessV1Attempts = attempts
+	}
+	return result, nil
 }
 
 // New constructs a Kubernetes ACP control store. The caller must add the core
@@ -240,15 +196,14 @@ func (s *Store) requireClient() error {
 }
 
 var (
-	_ store.ControllerEpochStore         = (*Store)(nil)
-	_ store.PromptAttemptStore           = (*Store)(nil)
-	_ store.SessionControlStore          = (*Store)(nil)
-	_ store.SessionCleanupStore          = (*Store)(nil)
-	_ store.SessionCleanupRecoveryStore  = (*Store)(nil)
-	_ store.BranchClaimStore             = (*Store)(nil)
-	_ store.PublicationStore             = (*Store)(nil)
-	_ store.ExternalEffectStore          = (*Store)(nil)
-	_ store.ExternalEffectIdentityReader = (*Store)(nil)
-	_ store.OutboxProjectionStore        = (*Store)(nil)
-	_ store.DurableControlStore          = (*Store)(nil)
+	_ store.ControllerEpochStore        = (*Store)(nil)
+	_ store.PromptAttemptStore          = (*Store)(nil)
+	_ store.SessionControlStore         = (*Store)(nil)
+	_ store.SessionCleanupStore         = (*Store)(nil)
+	_ store.SessionCleanupRecoveryStore = (*Store)(nil)
+	_ store.BranchClaimStore            = (*Store)(nil)
+	_ store.PublicationStore            = (*Store)(nil)
+	_ store.ExternalEffectStore         = (*Store)(nil)
+	_ store.OutboxProjectionStore       = (*Store)(nil)
+	_ store.DurableControlStore         = (*Store)(nil)
 )

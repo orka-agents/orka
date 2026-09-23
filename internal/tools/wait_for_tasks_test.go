@@ -575,6 +575,14 @@ func (s *staticWaitExternalEffectStore) GetExternalEffect(_ context.Context, id 
 	return &copy, nil
 }
 
+func (s *staticWaitExternalEffectStore) GetExternalEffectByIdentity(ctx context.Context, identity store.ExternalEffectIdentity) (*store.ExternalEffect, error) {
+	id, err := identity.CanonicalID()
+	if err != nil {
+		return nil, err
+	}
+	return s.GetExternalEffect(ctx, id)
+}
+
 func (s *staticWaitExternalEffectStore) TransitionExternalEffect(
 	context.Context,
 	store.ExternalEffectTransition,

@@ -27,6 +27,10 @@ import (
 	workerexecutor "github.com/orka-agents/orka/internal/worker"
 )
 
+const (
+	errorField = "error"
+)
+
 type ACPMCPAuthenticatedTask struct {
 	Name         string
 	Namespace    string
@@ -1091,7 +1095,7 @@ func runtimePoolAuthSecretsForEpoch(secrets []corev1.Secret, epoch int64) []core
 }
 
 func writeACPMCPError(w http.ResponseWriter, status int, message string) {
-	writeACPMCPJSON(w, status, map[string]any{"error": message})
+	writeACPMCPJSON(w, status, map[string]any{errorField: message})
 }
 
 func writeACPMCPJSON(w http.ResponseWriter, status int, value any) {

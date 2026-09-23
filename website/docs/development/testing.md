@@ -216,13 +216,20 @@ missing or mismatched artifacts staying not ready.
 - `E2E_LIVE_ACP_PROVIDER_PROXY_SERVICE_NAMESPACE`, `E2E_LIVE_ACP_PROVIDER_PROXY_SERVICE_NAME`, `E2E_LIVE_ACP_PROVIDER_PROXY_SERVICE_PORT`: model-discovery coordinates for the ACP RuntimePool matrix. The full live script pins these to `vekil-system`, `vekil`, and `1337` so built-in RuntimePools traverse the production provider-proxy DNS and NetworkPolicy boundary.
 
 
+Live provider/chat tests prefer `gpt-5-mini` and `claude-haiku-4.5` when available.
+The runtime smoke and release qualification scripts default to `gpt-5.4-mini`
+for Codex and OpenCode, `claude-haiku-4.5` for Claude, and `gpt-5.3-codex` for
+Copilot. Override these with `ACP_E2E_CODEX_MODEL`, `ACP_E2E_OPENCODE_MODEL`,
+`ACP_E2E_CLAUDE_MODEL`, or `ACP_E2E_COPILOT_MODEL`. Configured models must pass
+the Vekil catalog and streaming probes.
+
 Run the trusted smoke bootstrap locally with the token exported in the shell
 rather than placed on a command line:
 
 ```bash
 read -rsp 'Copilot provider token: ' COPILOT_GITHUB_TOKEN && echo
 export COPILOT_GITHUB_TOKEN
-export ACP_E2E_OPENCODE_MODEL=openai/gpt-5.4
+export ACP_E2E_OPENCODE_MODEL=openai/gpt-5.4-mini
 export ACP_E2E_OPENCODE_CONTEXT_WINDOW=32768
 export ACP_E2E_OPENCODE_MAX_TOKENS=4096
 ACP_E2E_KIND_TAG=local bash scripts/agent-runtime-kind-e2e.sh

@@ -137,11 +137,7 @@ func (s *Store) DeleteRuntimeSession(ctx context.Context, namespace string, id h
 	return store.ValidationErrorf("runtime session %s/%s must be %s before physical deletion (current state: %s)", namespace, id, harness.RuntimeSessionStateDeleted, session.State)
 }
 
-type runtimeSessionQueryable interface {
-	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
-}
-
-func getRuntimeSessionTx(ctx context.Context, db runtimeSessionQueryable, namespace string, id harness.RuntimeSessionID) (harness.RuntimeSession, error) {
+func getRuntimeSessionTx(ctx context.Context, db controlQueryRower, namespace string, id harness.RuntimeSessionID) (harness.RuntimeSession, error) {
 	namespace, id, err := normalizeRuntimeSessionKey(namespace, id)
 	if err != nil {
 		return harness.RuntimeSession{}, err

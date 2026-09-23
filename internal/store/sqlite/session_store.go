@@ -170,6 +170,8 @@ func (s *Store) ListSessionsPage(ctx context.Context, namespace, afterName strin
 // its messages (via CASCADE), and its session-scoped execution event read
 // model. Open turns, active mutation leases, reconciliation-blocked controls,
 // and undelivered projections keep the session durable for recovery.
+//
+//nolint:gocyclo // Session deletion keeps active-work gates and dependent-row cleanup in one transaction.
 func (s *Store) DeleteSession(ctx context.Context, namespace, name string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

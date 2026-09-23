@@ -589,7 +589,9 @@ func TestExternalToolChatNamedSessionExactPermissions(t *testing.T) {
 			})
 			provider := &chatMockProvider{name: providerType, responses: []*llm.CompletionResponse{{Content: "continued"}}}
 			llm.RegisterProvider(providerType, func(llm.ProviderConfig) (llm.Provider, error) { return provider, nil })
-			backend := fake.NewClientBuilder().WithScheme(newTestScheme()).WithRuntimeObjects(providerCRD("chat-provider", externalToolNamespace, providerType, "test-model")...).Build()
+			backend := fake.NewClientBuilder().WithScheme(newTestScheme()).
+				WithObjects(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: externalToolNamespace, UID: "namespace-uid"}}).
+				WithRuntimeObjects(providerCRD("chat-provider", externalToolNamespace, providerType, "test-model")...).Build()
 			sessions := newTestSessionStore(t)
 			if existing {
 				if err := sessions.CreateSession(context.Background(), &store.SessionRecord{Namespace: externalToolNamespace, Name: sessionID, SessionType: "chat"}); err != nil {
@@ -702,8 +704,8 @@ func TestExternalToolChatDiscoveryOmitsForbiddenMetadata(t *testing.T) {
 				&corev1alpha1.Skill{ObjectMeta: metav1.ObjectMeta{Name: "private-skill", Namespace: externalToolNamespace}},
 			)
 			requestClient := newExternalToolClient(backend, clientset, externalToolUser(), externalToolNamespace, "", false, nil)
-			builder := NewSystemPromptBuilder(externalToolDiscoveryClient{Client: requestClient}, externalToolNamespace)
-			prompt, err := builder.BuildSystemPrompt(context.Background(), "", PromptModeFull)
+			builder := NewSystemPromptBuilder(externalToolDiscoveryClient{Client: requestClient}, externalToolNamespace, ACPRuntimeAvailability{})
+			prompt, err := builder.BuildSystemPrompt(context.Background(), "")
 			if err != nil {
 				t.Fatal(err)
 			}

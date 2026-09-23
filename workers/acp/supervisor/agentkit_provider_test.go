@@ -156,7 +156,7 @@ func newTestAgentKitServer(t *testing.T) (*Server, Config, harnessv2.RuntimeProf
 		_ acp.SessionPaths,
 		_ ProviderProxyBinding,
 	) (ProviderSessionProjection, error) {
-		return agentKitSessionProjection(request, profile.Model)
+		return agentKitAdapter.sessionProjection(request, profile.Model)
 	}
 	cfg.ProviderProxy.ProviderKind = providerKindAgentKit
 

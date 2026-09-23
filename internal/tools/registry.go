@@ -231,6 +231,7 @@ type Registry struct {
 type toolDurationMetricKey struct {
 	toolName string
 	toolType string
+	errType  string
 }
 
 // NewRegistry creates a new tool registry
@@ -282,7 +283,9 @@ func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessag
 	if !ok {
 		toolTelemetryName = unknownToolTelemetryName
 	}
-	toolTypeValue := toolType(ctx, tool)
+	// Registry tools are in-process functions. External Tool CRD/MCP execution is
+	// handled by worker.ToolExecutor and can be modeled as extension later.
+	toolTypeValue := genai.ToolTypeFunction
 	toolKind := registryToolKind(name)
 	meterActive := tracing.GlobalMeterProviderActive()
 	var start time.Time
@@ -352,11 +355,7 @@ func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessag
 		}
 	}
 	if meterActive {
-		if metricErrType != "" {
-			r.recordToolDuration(ctx, duration, toolTelemetryName, toolTypeValue, metricErrType)
-		} else {
-			r.recordSuccessfulToolDuration(ctx, duration, toolTelemetryName, toolTypeValue)
-		}
+		r.recordToolDuration(ctx, duration, toolTelemetryName, toolTypeValue, metricErrType)
 	}
 	return result, err
 }
@@ -434,8 +433,8 @@ func (r *Registry) getToolDurationHistogram() (metric.Float64Histogram, bool) {
 	return histogram, true
 }
 
-func (r *Registry) toolDurationMetricOption(toolName, toolType string) metric.MeasurementOption {
-	key := toolDurationMetricKey{toolName: toolName, toolType: toolType}
+func (r *Registry) toolDurationMetricOption(toolName, toolType, errType string) metric.MeasurementOption {
+	key := toolDurationMetricKey{toolName: toolName, toolType: toolType, errType: errType}
 	r.telemetryMu.Lock()
 	defer r.telemetryMu.Unlock()
 	if r.toolDurationMetricOpts == nil {
@@ -444,35 +443,28 @@ func (r *Registry) toolDurationMetricOption(toolName, toolType string) metric.Me
 	if opt, ok := r.toolDurationMetricOpts[key]; ok {
 		return opt
 	}
-	attrs := attribute.NewSet(
+	attrs := []attribute.KeyValue{
 		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
 		attribute.String(genai.AttrToolName, toolName),
 		attribute.String(genai.AttrToolType, toolType),
-	)
-	opt := metric.WithAttributeSet(attrs)
+	}
+	if errType != "" {
+		attrs = append(attrs, attribute.String(genai.AttrErrorType, errType))
+	}
+	opt := metric.WithAttributeSet(attribute.NewSet(attrs...))
 	r.toolDurationMetricOpts[key] = opt
 	return opt
 }
 
-func (r *Registry) recordSuccessfulToolDuration(ctx context.Context, seconds float64, toolName, toolType string) {
-	histogram, ok := r.getToolDurationHistogram()
-	if !ok {
-		return
-	}
-	histogram.Record(ctx, seconds, r.toolDurationMetricOption(toolName, toolType))
-}
-
+// recordToolDuration records one gen_ai.client.operation.duration sample on the
+// registry's cached histogram. An empty errType records a success sample with
+// no error.type attribute.
 func (r *Registry) recordToolDuration(ctx context.Context, seconds float64, toolName, toolType, errType string) {
 	histogram, ok := r.getToolDurationHistogram()
 	if !ok {
 		return
 	}
-	histogram.Record(ctx, seconds, metric.WithAttributes(
-		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
-		attribute.String(genai.AttrToolName, toolName),
-		attribute.String(genai.AttrToolType, toolType),
-		attribute.String(genai.AttrErrorType, errType),
-	))
+	histogram.Record(ctx, seconds, r.toolDurationMetricOption(toolName, toolType, errType))
 }
 
 func telemetryDisabled() bool {
@@ -506,13 +498,7 @@ func RecordRejectedToolCall(ctx context.Context, name, toolCallID, errType, mess
 	span.SetStatus(codes.Error, message)
 	span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
 	span.End()
-	metricAttrs := []attribute.KeyValue{
-		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
-		attribute.String(genai.AttrToolName, rejectedToolTelemetryName),
-		attribute.String(genai.AttrToolType, genai.ToolTypeFunction),
-		attribute.String(genai.AttrErrorType, errType),
-	}
-	recordToolDuration(ctx, time.Since(start).Seconds(), metricAttrs...)
+	DefaultRegistry.recordToolDuration(ctx, time.Since(start).Seconds(), rejectedToolTelemetryName, genai.ToolTypeFunction, errType)
 }
 
 // FailedToolResultForTelemetry detects structured tool failures for callers
@@ -554,30 +540,11 @@ func failedToolResult(result string) (bool, string, string) {
 	return true, errType, message
 }
 
-func toolType(ctx context.Context, _ Tool) string {
-	// Registry tools are in-process functions. External Tool CRD/MCP execution is
-	// handled by worker.ToolExecutor and can be modeled as extension later.
-	return genai.ToolTypeFunction
-}
-
 func registryToolKind(name string) string {
 	if name == delegateTaskToolName {
 		return tracing.ToolKindDelegate
 	}
 	return tracing.ToolKindBuiltin
-}
-
-func recordToolDuration(ctx context.Context, seconds float64, attrs ...attribute.KeyValue) {
-	meter := tracing.GenAIMeter(genai.InstrumentationName)
-	histogram, err := meter.Float64Histogram(
-		genai.MetricExecuteToolDuration,
-		metric.WithUnit(genai.UnitSeconds),
-		metric.WithExplicitBucketBoundaries(genai.ToolDurationBuckets...),
-	)
-	if err != nil {
-		return
-	}
-	histogram.Record(ctx, seconds, metric.WithAttributes(attrs...))
 }
 
 // ToLLMTools converts the registry to LLM tool definitions

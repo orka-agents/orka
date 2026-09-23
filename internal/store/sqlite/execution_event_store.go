@@ -250,6 +250,9 @@ func appendSQLiteExecutionEvent(
 			return nil, false, err
 		}
 	}
+	if err := projectUsageEvent(ctx, conn, event); err != nil {
+		return nil, false, err
+	}
 	return &event, true, nil
 }
 

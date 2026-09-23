@@ -45,9 +45,9 @@ func authorizeKubernetesTaskCreate(ctx context.Context, clientset kubernetes.Int
 			Extra:  extra,
 			ResourceAttributes: &authorizationv1.ResourceAttributes{
 				Namespace: task.Namespace,
-				Verb:      "create",
+				Verb:      externalToolCreateVerb,
 				Group:     corev1alpha1.GroupVersion.Group,
-				Resource:  "tasks",
+				Resource:  externalToolTaskResource,
 			},
 		},
 	}, metav1.CreateOptions{})
@@ -77,6 +77,18 @@ func kubernetesClientsetIsNil(clientset kubernetes.Interface) bool {
 	}
 	value := reflect.ValueOf(clientset)
 	return value.Kind() == reflect.Pointer && value.IsNil()
+}
+
+// authorizeCoreResourceAction enforces Kubernetes RBAC for orka.ai core-group
+// resource reads and writes (RuntimePool, AgentRuntime, Session, Provider): a
+// TokenReview-authenticated identity must pass a SubjectAccessReview for the
+// exact verb, resource, and name before the controller client acts on its
+// behalf. It is a no-op for non-TokenReview auth (context tokens carry their
+// own scope checks).
+func (h *Handlers) authorizeCoreResourceAction(c fiber.Ctx, verb, resource, namespace, name string) error {
+	return authorizeKubernetesResourceAction(
+		c.Context(), h.clientset, GetUserInfo(c), namespace, verb, corev1alpha1.GroupVersion.Group, resource, name,
+	)
 }
 
 func authorizeKubernetesResourceAction(

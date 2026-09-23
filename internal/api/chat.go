@@ -44,6 +44,11 @@ import (
 	"github.com/orka-agents/orka/internal/tracing/genai"
 )
 
+const (
+	apiFieldContent = "content"
+	apiFieldName    = "name"
+)
+
 var chatLog = logf.Log.WithName("chat-handler")
 
 const (
@@ -242,10 +247,7 @@ func NewChatHandler(c client.Client, apiReader client.Reader, sm *controller.Ses
 }
 
 func (ch *ChatHandler) contextTokenAuthorizationReader() client.Reader {
-	if ch.apiReader != nil {
-		return ch.apiReader
-	}
-	return ch.client
+	return uncachedReaderOr(ch.apiReader, ch.client)
 }
 
 // blockedNamespaces that cannot be targeted by chat requests.
@@ -314,6 +316,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 
 	// Resolve or create session ID
 	sessionID := resolveChatSessionID(req.SessionID)
+	ctx = usageRequestContext(ctx, ch.resultStore, uncachedReaderOr(ch.apiReader, ch.client), namespace, sessionID)
 	if req.SessionID != "" {
 		for _, verb := range []string{"get", "update"} {
 			if err := authorizeKubernetesResourceAction(ctx, ch.kubeClient, userInfo, namespace, verb, corev1alpha1.GroupVersion.Group, "sessions", sessionID); err != nil {
@@ -388,7 +391,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	// Build system prompt
 	discoveryClient := newExternalToolClient(ch.client, ch.kubeClient, userInfo, namespace, ch.watchNamespace, ch.enforceNamespaceIsolation, ch.gatewayEventStore)
 	promptBuilder := NewSystemPromptBuilder(externalToolDiscoveryClient{Client: discoveryClient}, namespace, ch.config.RuntimeAvailability)
-	systemPrompt, err := promptBuilder.BuildSystemPrompt(ctx, req.SystemPrompt, PromptModeFull)
+	systemPrompt, err := promptBuilder.BuildSystemPrompt(ctx, req.SystemPrompt)
 	if err != nil {
 		chatLog.Error(err, "failed to build system prompt")
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to build system prompt")
@@ -550,6 +553,7 @@ func (ch *ChatHandler) sendChatStream(c fiber.Ctx, req chatStreamRequest) error 
 		trace.ContextWithSpanContext(context.Background(), req.span.SpanContext()),
 		baggage.FromContext(req.parentCtx),
 	)
+	sseParentCtx = llm.CopyUsageRecorder(sseParentCtx, req.parentCtx)
 	var streamOwnership atomic.Uint32
 	finalizeStream := sync.OnceFunc(func() {
 		req.finalizeTurn()
@@ -993,11 +997,11 @@ func (ch *ChatHandler) runToolLoop(
 			// If so, re-prompt the LLM to keep waiting instead of ending the session.
 			if executor.tasksCreated > 0 && hasRunningTasks(iterCtx, taskClient, namespace, sessionID) {
 				if emitSSE != nil && resp.Content != "" {
-					msgData, _ := json.Marshal(map[string]string{"content": resp.Content})
+					msgData, _ := json.Marshal(map[string]string{apiFieldContent: resp.Content})
 					emitSSE("message", string(msgData))
 				}
 				appendTurnMessages(
-					llm.Message{Role: "assistant", Content: resp.Content},
+					llm.Message{Role: chatRoleAssistant, Content: resp.Content},
 					llm.Message{Role: chatRoleUser, Content: "[System: You have tasks still running. Do NOT stop. Call wait_for_task again for each running task until it reaches Succeeded or Failed, then call fetch_task_output to get the result.]"},
 				)
 				// Don't increment iteration here — the for loop's post-statement handles it
@@ -1068,7 +1072,7 @@ func (ch *ChatHandler) handleIterationLimit(
 	usage.InputTokens += resp.InputTokens
 	usage.OutputTokens += resp.OutputTokens
 
-	finalMessages := append(turnMessages, llm.Message{Role: "assistant", Content: resp.Content})
+	finalMessages := append(turnMessages, llm.Message{Role: chatRoleAssistant, Content: resp.Content})
 	usage.Duration = time.Since(start).Round(time.Millisecond).String()
 	usage.TasksCreated = executor.tasksCreated
 	if err := ch.saveChatSession(
@@ -1078,7 +1082,7 @@ func (ch *ChatHandler) handleIterationLimit(
 	}
 
 	if emitSSE != nil && resp.Content != "" {
-		msgData, _ := json.Marshal(map[string]string{"content": resp.Content})
+		msgData, _ := json.Marshal(map[string]string{apiFieldContent: resp.Content})
 		emitSSE("message", string(msgData))
 	}
 
@@ -1132,7 +1136,7 @@ func (ch *ChatHandler) executeToolCalls(
 	repetitionTracker map[string]int,
 ) ([]llm.Message, []ToolCallInfo, int) {
 	messages := []llm.Message{{
-		Role:      "assistant",
+		Role:      chatRoleAssistant,
 		Content:   resp.Content,
 		ToolCalls: resp.ToolCalls,
 	}}
@@ -1144,9 +1148,9 @@ func (ch *ChatHandler) executeToolCalls(
 	for _, tc := range resp.ToolCalls {
 		if emitSSE != nil {
 			tcData, _ := json.Marshal(map[string]any{
-				"id":   tc.ID,
-				"name": tc.Name,
-				"args": tc.Arguments,
+				"id":         tc.ID,
+				apiFieldName: tc.Name,
+				"args":       tc.Arguments,
 			})
 			emitSSE("tool_call", string(tcData))
 		}
@@ -1170,15 +1174,15 @@ func (ch *ChatHandler) executeToolCalls(
 
 		if emitSSE != nil {
 			trData, _ := json.Marshal(map[string]any{
-				"id":     tc.ID,
-				"name":   tc.Name,
-				"result": json.RawMessage(result),
+				"id":         tc.ID,
+				apiFieldName: tc.Name,
+				"result":     json.RawMessage(result),
 			})
 			emitSSE("tool_result", string(trData))
 		}
 
 		messages = append(messages, llm.Message{
-			Role:       "tool",
+			Role:       chatRoleTool,
 			ToolCallID: tc.ID,
 			Name:       tc.Name,
 			Content:    result,
@@ -1216,7 +1220,7 @@ func (ch *ChatHandler) handleFinalResponse(
 	turnID string,
 	start time.Time,
 ) (string, error) {
-	finalMessages := append(turnMessages, llm.Message{Role: "assistant", Content: content})
+	finalMessages := append(turnMessages, llm.Message{Role: chatRoleAssistant, Content: content})
 	usage.Duration = time.Since(start).Round(time.Millisecond).String()
 	usage.TasksCreated = executor.tasksCreated
 	if err := ch.saveChatSession(
@@ -1226,7 +1230,7 @@ func (ch *ChatHandler) handleFinalResponse(
 	}
 
 	if emitSSE != nil && content != "" {
-		msgData, _ := json.Marshal(map[string]string{"content": content})
+		msgData, _ := json.Marshal(map[string]string{apiFieldContent: content})
 		emitSSE("message", string(msgData))
 	}
 
@@ -1489,7 +1493,7 @@ func (ch *ChatHandler) abandonChatDeletionWaiter(namespace, sessionID string, re
 // wrapWithRetryAndFallback wraps a provider with retry logic and adds fallback
 // providers if the agent has them configured.
 func (ch *ChatHandler) wrapWithRetryAndFallback(ctx context.Context, c fiber.Ctx, provider llm.Provider, req ChatRequest, namespace string) (llm.Provider, error) {
-	var resultProvider llm.Provider = llm.NewRetryProvider(provider, 0)
+	var resultProvider llm.Provider = llm.NewRetryProvider(provider)
 
 	if req.AgentRef == "" {
 		return resultProvider, nil
@@ -1542,7 +1546,7 @@ func (ch *ChatHandler) wrapWithRetryAndFallback(ctx context.Context, c fiber.Ctx
 		}
 
 		fallbacks = append(fallbacks, llm.FallbackEntry{
-			Provider: llm.NewRetryProvider(fbProvider, 0),
+			Provider: llm.NewRetryProvider(fbProvider),
 			Model:    fbModel,
 		})
 	}

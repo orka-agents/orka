@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { Link, useLocation } from '@tanstack/react-router'
-import { LayoutDashboard, ListTodo, MessageSquare, Bot, Wrench, Sparkles, Columns3, Activity, Shield, Radar, Boxes, RadioTower, PanelLeftClose, PanelLeftOpen } from 'lucide-react'
+import { LayoutDashboard, ListTodo, MessageSquare, Bot, Wrench, Sparkles, Columns3, Activity, Shield, Radar, Boxes, RadioTower, PanelLeftClose, PanelLeftOpen, ChartNoAxesCombined } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { useUIStore } from '@/stores/ui'
@@ -10,6 +10,7 @@ import { OrcaMark } from '@/components/ui/orca-mark'
 
 const navItems = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard },
+  { to: '/usage', label: 'Usage', icon: ChartNoAxesCombined },
   { to: '/chat', label: 'Chat', icon: Sparkles },
   { to: '/monitors', label: 'Monitors', icon: Radar },
   { to: '/security', label: 'Security', icon: Shield },

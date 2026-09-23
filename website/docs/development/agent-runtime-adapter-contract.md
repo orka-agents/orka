@@ -28,6 +28,27 @@ Authenticated control operations:
 - `GET /v2/status` — exact instance fence, lifecycle, drain/admission state, resident sessions, prompts, permissions, descendants, and bounded pressure metadata;
 - `PUT /v2/drain` — atomically stop admission of new RuntimeSessions.
 
+Foundry recovery is default-off and independent of brokered approvals. After
+upgrading the controller and qualifying the broker's durable recovery contract,
+set `ORKA_ACP_FOUNDRY_RECOVERY_PROFILE_DIGEST` to the exact runtime profile
+digest. Other providers and mismatched digests fail startup. Without this opt-in,
+capabilities and status omit recovery fields, status does not probe broker
+identity, and boot-retirement requests are rejected. This preserves the wire
+contract for older strict controllers, including those supporting approvals.
+
+Qualified Foundry supervisors advertise `supportsFoundryRecovery`. Their
+authenticated status includes `foundryBroker`, which identifies the durable
+broker ledger and its frozen agent configuration. After Kubernetes proves the
+original supervisor container terminated, an authenticated replacement can relay
+`PUT /v2/recovery/foundry/retire-boot` to that same broker. The request authorizes
+only cleanup of the exact previously witnessed boot.
+
+The broker permanently seals that boot before retiring every remote session it
+owns. Orka requires both the container termination and a complete broker proof
+before releasing cleanup. A replacement ledger, missing enrollment evidence,
+pending creation, or ambiguous invocation cannot supply that proof. This
+extension never replays a prompt or changes an unknown tool outcome to success.
+
 External runtimes advertise whether they implement the drain extension. All status and mutation operations require controller authentication and operation-scoped authorization. Mutations present an exact-fence operation capability; status presents a status capability (audience `orka.harness.v2/status`, expiry-bounded, signed with the same operation-capability secret) because status is the channel through which the controller first learns the runtime-generated fence components. Conformance rejects runtimes that serve status on the controller bearer alone.
 
 ## RuntimeSession operations
@@ -63,9 +84,12 @@ Every mutation is bound to:
 
 External supervisors must also report the current Orka controller epoch from
 authenticated status. The supervisor reads `ORKA_ACP_CONTROLLER_EPOCH` once at
-startup, so its operator must restart or replace it after each controller epoch
-change. Preserve the registered runtime instance ID and rotate the supervisor
-boot ID. A stale epoch fails conformance and dispatch admission.
+startup. For registrations enrolled through `deployment.kubernetesRecovery`,
+Orka retires the old boot and updates the exact consenting Deployment after an
+epoch change. Other external runtimes require their operator to restart or
+replace them. Preserve the registered runtime instance ID and generate a fresh
+supervisor boot ID. A stale epoch fails conformance and dispatch admission;
+cleanup of a durably terminal Task can retain its exact old-epoch authority.
 
 A stale fence or digest conflict is a terminal protocol error for that request. An exact duplicate returns the recorded operation state without repeating the side effect. If prompt acceptance is known but the terminal result is not provable, Orka classifies the attempt as outcome unknown rather than replaying it.
 

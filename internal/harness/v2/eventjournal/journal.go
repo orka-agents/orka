@@ -684,7 +684,15 @@ func (s *State) appendUpdateIfNew(
 		options.diagnosticProjection = &projection
 		publishedFields = fields
 	}
-	mapped, err := mapUpdate(event, s.journal.MapContext, options)
+	var mapped *store.ExecutionEvent
+	var err error
+	if event.Update != nil && event.Update.Kind == harnessv2.UpdateUsage {
+		mapped, publishedFields, err = mapUsageUpdateWithHistory(
+			event, s.journal.MapContext, "", s.logicalFieldHistory, s.logicalFieldHistorySaturated,
+		)
+	} else {
+		mapped, err = mapUpdate(event, s.journal.MapContext, options)
+	}
 	if err != nil {
 		return nil, false, err
 	}
@@ -872,8 +880,8 @@ func (s *State) mapAssistantTranscript(
 ) (*store.ExecutionEvent, []logicalFieldBoundaries, error) {
 	var publishedFields []logicalFieldBoundaries
 	if !contentOmitted {
-		values, fields := redactLogicalFieldsWithHistory(
-			s.logicalFieldHistory, s.logicalFieldHistorySaturated, transcript,
+		values, fields := redactLogicalFieldsWithPublicCopies(
+			s.logicalFieldHistory, s.logicalFieldHistorySaturated, []logicalFieldCopyKind{logicalFieldContentSummaryCopies}, transcript,
 		)
 		transcript = values[0]
 		publishedFields = fields
@@ -1014,14 +1022,21 @@ func (s *State) AppendPromptSettlementIfNew(
 	}
 	identity := s.promptIdentity
 	identity.Sequence = s.promptAcceptedSequence
-	mapped, err := mapPromptSettlement(identity, settlement, cancellationReason, s.journal.MapContext)
+	mapped, publishedFields, err := mapPromptSettlement(
+		identity, settlement, cancellationReason, s.journal.MapContext,
+		s.logicalFieldHistory, s.logicalFieldHistorySaturated,
+	)
 	if err != nil {
 		return nil, false, err
 	}
-	return s.appendMappedEvent(
+	appended, isNew, err := s.appendMappedEvent(
 		ctx, identity, mappedJournalRecordPromptTerminal, mapped,
 		"append mapped harness v2 prompt settlement",
 	)
+	if err == nil {
+		s.rememberLogicalFields(publishedFields)
+	}
+	return appended, isNew, err
 }
 
 // AppendAssistantStreamClosureIfNew persists the complete assistant text seen
@@ -1226,6 +1241,13 @@ func (s *State) appendMappedEventWithPlan(
 	plan *store.PlanState,
 	operation string,
 ) (*store.ExecutionEvent, bool, error) {
+	// Usage attribution comes from the controller's frozen profile, not the
+	// runtime's free-text model field or the cross-turn redacted public event.
+	// Set it at the append boundary so mapped content cannot override it.
+	if mapped.Internal == nil {
+		mapped.Internal = make(map[string]any)
+	}
+	mapped.Internal["harnessV2UsageModel"] = s.journal.MapContext.normalized().Model
 	key := identity.Key()
 	if isMappedToolTerminalEvent(*mapped) {
 		// Real runtime terminal updates and synthesized recovery closures race
@@ -1260,7 +1282,7 @@ func (s *State) appendMappedEventWithPlan(
 	}
 	appended, isNew, err := appendIfAbsent()
 	if err == nil {
-		s.markPersisted(identity, kind)
+		s.markPersisted(identity, kind, isNew)
 		if !isNew {
 			return nil, false, nil
 		}
@@ -1272,13 +1294,13 @@ func (s *State) appendMappedEventWithPlan(
 		return nil, false, errors.Join(firstErr, fmt.Errorf("reconcile failed append: %w", reconcileErr))
 	}
 	if persisted {
-		s.markPersisted(identity, kind)
+		s.markPersisted(identity, kind, false)
 		return nil, false, nil
 	}
 
 	appended, isNew, err = appendIfAbsent()
 	if err == nil {
-		s.markPersisted(identity, kind)
+		s.markPersisted(identity, kind, isNew)
 		if !isNew {
 			return nil, false, nil
 		}
@@ -1290,13 +1312,19 @@ func (s *State) appendMappedEventWithPlan(
 		return nil, false, errors.Join(firstErr, retryErr, fmt.Errorf("reconcile failed append retry: %w", reconcileErr))
 	}
 	if persisted {
-		s.markPersisted(identity, kind)
+		s.markPersisted(identity, kind, false)
 		return nil, false, nil
 	}
 	return nil, false, errors.Join(firstErr, retryErr)
 }
 
-func (s *State) markPersisted(identity MappedUpdateIdentity, kind mappedJournalRecordKind) {
+func (s *State) markPersisted(identity MappedUpdateIdentity, kind mappedJournalRecordKind, isNew bool) {
+	if !isNew {
+		// A duplicate or reconciled append may have a different durable winner.
+		// Its public boundaries are unknown, so later runtime text fails closed.
+		s.logicalFieldHistory = nil
+		s.logicalFieldHistorySaturated = true
+	}
 	s.markProcessed(identity)
 	switch kind {
 	case mappedJournalRecordAssistantTranscript:

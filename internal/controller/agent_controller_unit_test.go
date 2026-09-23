@@ -888,6 +888,14 @@ func TestCountActiveTasks(t *testing.T) {
 		},
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseFailed},
 	}
+	cancelledTask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "task-cancelled", Namespace: testNS},
+		Spec: corev1alpha1.TaskSpec{
+			AgentRef: &corev1alpha1.AgentReference{Name: "count-agent"},
+			Prompt:   "do something",
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseCancelled},
+	}
 	otherAgentTask := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: "task-other", Namespace: testNS},
 		Spec: corev1alpha1.TaskSpec{
@@ -932,6 +940,16 @@ func TestCountActiveTasks(t *testing.T) {
 			name: "all terminal - zero active",
 			objs: []runtime.Object{succeededTask, failedTask},
 			want: 0,
+		},
+		{
+			name: "cancelled and succeeded - zero active",
+			objs: []runtime.Object{cancelledTask, succeededTask},
+			want: 0,
+		},
+		{
+			name: "pending alone counts as active",
+			objs: []runtime.Object{pendingTask},
+			want: 1,
 		},
 	}
 

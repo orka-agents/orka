@@ -60,10 +60,29 @@ jobs:
           go-version: '1.27'
           check-latest: true
 
+      - name: Check Go coverage reporting
+        run: bash scripts/tests/go-coverage-summary-test.sh
+
       - name: Running Tests
+        id: go_tests
         run: |
           go mod tidy
           make test
+
+      - name: Summarize Go coverage
+        if: ${{ always() }}
+        env:
+          TEST_OUTCOME: ${{ steps.go_tests.outcome }}
+        run: bash scripts/go-coverage-summary.sh
+
+      - name: Upload Go coverage evidence
+        if: ${{ always() && hashFiles('cover.out') != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: go-coverage-evidence
+          path: |
+            cover.out
+            coverage-functions.txt
 
   ui-test:
     name: UI Tests

@@ -20,6 +20,7 @@ import (
 
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/workerenv"
+	"github.com/orka-agents/orka/workers/common"
 )
 
 const internalMemoryToolBodyLimit = 1 << 20 // 1MB
@@ -712,13 +713,9 @@ func addQueryValue(values url.Values, key, value string) {
 	}
 }
 
+// firstNonEmpty returns the first non-blank value, trimmed.
 func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if value = strings.TrimSpace(value); value != "" {
-			return value
-		}
-	}
-	return ""
+	return strings.TrimSpace(common.FirstNonBlank(values...))
 }
 
 var _ Tool = (*RecallMemoryTool)(nil)

@@ -26,10 +26,7 @@ func (d *ACPDispatcher) newWorkspaceRuntimeContext(ctx context.Context, pool *co
 	if name == "" {
 		return unchanged()
 	}
-	reader := d.APIReader
-	if reader == nil {
-		reader = d.Client
-	}
+	reader := uncachedReader(d.APIReader, d.Client)
 	workspace := &workspacev1alpha1.ExecutionWorkspace{}
 	if err := reader.Get(ctx, client.ObjectKey{Namespace: pool.Namespace, Name: name}, workspace); err != nil {
 		return nil, nil, fmt.Errorf("read execution workspace lifetime: %w", err)

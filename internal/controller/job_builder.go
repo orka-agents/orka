@@ -44,6 +44,17 @@ import (
 )
 
 const (
+	workerBinaryPath              = "/worker"
+	workerHomePath                = "/home/worker"
+	workerTempPath                = "/tmp"
+	runtimePoolTracesEndpointEnv  = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
+	runtimePoolMetricsEndpointEnv = "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
+	sessionDataVolumeName         = "session-data"
+	workspaceRootPath             = "/workspace"
+	skillsVolumeName              = "skills"
+)
+
+const (
 	// DefaultAIWorkerImage is the default image for AI tasks
 	DefaultAIWorkerImage = "ghcr.io/orka-agents/orka/ai-worker:latest"
 
@@ -426,7 +437,7 @@ func buildTaskJobName(task *corev1alpha1.Task) string {
 	if len(prefix) > maxPrefixLength {
 		prefix = strings.Trim(prefix[:maxPrefixLength], "-")
 		if prefix == "" {
-			prefix = "task"
+			prefix = acpCancelLogKeyTask
 		}
 	}
 
@@ -594,7 +605,7 @@ func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1
 	switch task.Spec.Type {
 	case corev1alpha1.TaskTypeAI:
 		container.Image = b.AIWorkerImage
-		container.Command = []string{"/worker"}
+		container.Command = []string{workerBinaryPath}
 		container.Args = []string{"--mode=ai"}
 	case corev1alpha1.TaskTypeContainer:
 		if task.Spec.Image != "" {
@@ -602,7 +613,7 @@ func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1
 			if effectiveWorkspace(task) != nil {
 				container.WorkingDir = workspaceWorkingDir(task)
 				if !envVarExists(container.Env, "HOME") {
-					container.Env = append(container.Env, corev1.EnvVar{Name: "HOME", Value: "/home/worker"})
+					container.Env = append(container.Env, corev1.EnvVar{Name: "HOME", Value: workerHomePath})
 				}
 			}
 			if len(task.Spec.Command) > 0 {
@@ -627,7 +638,7 @@ func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1
 			}
 		} else {
 			container.Image = b.GeneralWorkerImage
-			container.Command = []string{"/worker"}
+			container.Command = []string{workerBinaryPath}
 			// Pass the user command as args to the worker binary
 			workerArgs := make([]string, 0, len(task.Spec.Command)+len(task.Spec.Args))
 			workerArgs = append(workerArgs, task.Spec.Command...)
@@ -639,7 +650,7 @@ func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1
 	// Add tmp volume mount for read-only root filesystem
 	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
 		Name:      runtimePoolTempVolume,
-		MountPath: "/tmp",
+		MountPath: workerTempPath,
 	})
 
 	return container
@@ -839,9 +850,9 @@ func (b *JobBuilder) addTelemetryEnvVars(envVars []corev1.EnvVar, task *corev1al
 	// credentials, and certificate env vars are file paths whose source files are
 	// not mounted into worker Pods by the controller.
 	for _, name := range []string{
-		"OTEL_EXPORTER_OTLP_ENDPOINT",
-		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
-		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+		runtimePoolTelemetryEndpointEnv,
+		runtimePoolTracesEndpointEnv,
+		runtimePoolMetricsEndpointEnv,
 		"OTEL_EXPORTER_OTLP_PROTOCOL",
 		"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
 		"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL",
@@ -1230,8 +1241,8 @@ func (b *JobBuilder) addTransactionTokenSecret(job *batchv1.Job, task *corev1alp
 				SecretName:  secretName,
 				DefaultMode: &defaultMode,
 				Items: []corev1.KeyToPath{{
-					Key:  "token",
-					Path: "token",
+					Key:  defaultACPWorkspaceCredentialKey,
+					Path: defaultACPWorkspaceCredentialKey,
 				}},
 			},
 		},
@@ -1431,9 +1442,9 @@ func reservedAIWorkerTelemetryEnvNames() []string {
 		workerenv.TraceParent,
 		workerenv.TraceState,
 		workerenv.TraceBaggage,
-		"OTEL_EXPORTER_OTLP_ENDPOINT",
-		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
-		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+		runtimePoolTelemetryEndpointEnv,
+		runtimePoolTracesEndpointEnv,
+		runtimePoolMetricsEndpointEnv,
 		"OTEL_EXPORTER_OTLP_PROTOCOL",
 		"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
 		"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL",
@@ -1586,7 +1597,7 @@ func (b *JobBuilder) addSessionVolume(job *batchv1.Job, task *corev1alpha1.Task)
 
 	// Add shared emptyDir volume for session data
 	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
-		Name: "session-data",
+		Name: sessionDataVolumeName,
 		VolumeSource: corev1.VolumeSource{
 			EmptyDir: &corev1.EmptyDirVolumeSource{},
 		},
@@ -1596,7 +1607,7 @@ func (b *JobBuilder) addSessionVolume(job *batchv1.Job, task *corev1alpha1.Task)
 	job.Spec.Template.Spec.Containers[0].VolumeMounts = append(
 		job.Spec.Template.Spec.Containers[0].VolumeMounts,
 		corev1.VolumeMount{
-			Name:      "session-data",
+			Name:      sessionDataVolumeName,
 			MountPath: "/session",
 			ReadOnly:  true,
 		},
@@ -1606,12 +1617,8 @@ func (b *JobBuilder) addSessionVolume(job *batchv1.Job, task *corev1alpha1.Task)
 	transcriptURL := fmt.Sprintf("%s/internal/v1/sessions/%s/%s/transcript?taskName=%s",
 		b.ControllerURL, url.PathEscape(task.Namespace), url.PathEscape(sessionName), url.QueryEscape(task.Name))
 
-	volumeMounts := []corev1.VolumeMount{
-		{
-			Name:      "session-data",
-			MountPath: "/session",
-		},
-	}
+	volumeMounts := make([]corev1.VolumeMount, 0, 2)
+	volumeMounts = append(volumeMounts, corev1.VolumeMount{Name: sessionDataVolumeName, MountPath: "/session"})
 	// Always project a short-lived token exclusively into the trusted init container.
 	// This keeps transcript loading available even when the main pod disables automount.
 	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
@@ -1621,7 +1628,7 @@ func (b *JobBuilder) addSessionVolume(job *batchv1.Job, task *corev1alpha1.Task)
 				Sources: []corev1.VolumeProjection{
 					{
 						ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
-							Path:              "token",
+							Path:              defaultACPWorkspaceCredentialKey,
 							ExpirationSeconds: new(int64(3600)),
 						},
 					},
@@ -1712,9 +1719,9 @@ done`
 
 func workerReachableOTLPEndpointConfigured(getenv func(string) string) bool {
 	for _, name := range []string{
-		"OTEL_EXPORTER_OTLP_ENDPOINT",
-		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
-		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+		runtimePoolTelemetryEndpointEnv,
+		runtimePoolTracesEndpointEnv,
+		runtimePoolMetricsEndpointEnv,
 	} {
 		if isWorkerReachableOTLPEndpoint(getenv(name)) {
 			return true
@@ -1871,7 +1878,7 @@ func (b *JobBuilder) addWorkspaceEnvVars(
 	envVars = append(envVars,
 		corev1.EnvVar{Name: workerenv.GitConfigCount, Value: "1"},
 		corev1.EnvVar{Name: workerenv.GitConfigKey0, Value: "safe.directory"},
-		corev1.EnvVar{Name: workerenv.GitConfigValue0, Value: "/workspace"},
+		corev1.EnvVar{Name: workerenv.GitConfigValue0, Value: workspaceRootPath},
 	)
 	if ws.Branch != "" {
 		envVars = append(envVars, corev1.EnvVar{
@@ -1920,7 +1927,7 @@ func (b *JobBuilder) addWorkspaceVolumes(job *batchv1.Job, task *corev1alpha1.Ta
 		job.Spec.Template.Spec.Containers[0].VolumeMounts,
 		corev1.VolumeMount{
 			Name:      taskWorkspaceVolume,
-			MountPath: "/workspace",
+			MountPath: workspaceRootPath,
 			ReadOnly:  validationTask,
 		},
 	)
@@ -1934,7 +1941,7 @@ func (b *JobBuilder) addWorkspaceVolumes(job *batchv1.Job, task *corev1alpha1.Ta
 		job.Spec.Template.Spec.Containers[0].VolumeMounts,
 		corev1.VolumeMount{
 			Name:      runtimePoolHomeVolume,
-			MountPath: "/home/worker",
+			MountPath: workerHomePath,
 		},
 	)
 
@@ -2085,13 +2092,13 @@ func (b *JobBuilder) addWorkspaceInitContainer(job *batchv1.Job, task *corev1alp
 		Image:           b.GeneralWorkerImage,
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		SecurityContext: b.buildContainerSecurityContext(),
-		Command:         []string{"/worker"},
+		Command:         []string{workerBinaryPath},
 		Args:            []string{"--prepare-workspace-only"},
 		Env:             b.workspaceInitEnvVars(task, validationTask),
 		VolumeMounts: []corev1.VolumeMount{
-			{Name: taskWorkspaceVolume, MountPath: "/workspace"},
-			{Name: runtimePoolHomeVolume, MountPath: "/home/worker"},
-			{Name: runtimePoolTempVolume, MountPath: "/tmp"},
+			{Name: taskWorkspaceVolume, MountPath: workspaceRootPath},
+			{Name: runtimePoolHomeVolume, MountPath: workerHomePath},
+			{Name: runtimePoolTempVolume, MountPath: workerTempPath},
 		},
 	}
 	if workspace := effectiveWorkspace(task); workspace != nil && workspace.ReadCredentialRef != nil {
@@ -2114,7 +2121,7 @@ func (b *JobBuilder) addRepositoryMonitorValidationNetworkGate(job *batchv1.Job,
 		Image:           b.GeneralWorkerImage,
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		SecurityContext: b.buildContainerSecurityContext(),
-		Command:         []string{"/worker"},
+		Command:         []string{workerBinaryPath},
 		Args: []string{
 			repositoryMonitorValidationNetworkProbeWorkerMode,
 			probeAddress,
@@ -2139,7 +2146,7 @@ func (b *JobBuilder) addRepositoryMonitorValidationNetworkGate(job *batchv1.Job,
 		Image:           b.GeneralWorkerImage,
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		SecurityContext: b.buildContainerSecurityContext(),
-		Command:         []string{"/worker"},
+		Command:         []string{workerBinaryPath},
 		Args: []string{
 			repositoryMonitorValidationNetworkGateWorkerMode,
 			path.Join(repositoryMonitorValidationNetworkGateMount, repositoryMonitorValidationNetworkGateKey),
@@ -2196,7 +2203,7 @@ func (b *JobBuilder) addRepositoryMonitorValidationCommand(job *batchv1.Job, tas
 		Image:           b.GeneralWorkerImage,
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		SecurityContext: b.buildContainerSecurityContext(),
-		Command:         []string{"/worker"},
+		Command:         []string{workerBinaryPath},
 		Args: []string{
 			repositoryMonitorValidationCommandWorkerMode,
 			sourcePath,
@@ -2257,9 +2264,9 @@ func (b *JobBuilder) workspaceInitEnvVars(task *corev1alpha1.Task, validationTas
 func workspaceWorkingDir(task *corev1alpha1.Task) string {
 	ws := effectiveWorkspace(task)
 	if ws != nil && ws.SubPath != "" {
-		return path.Join("/workspace", ws.SubPath)
+		return path.Join(workspaceRootPath, ws.SubPath)
 	}
-	return "/workspace"
+	return workspaceRootPath
 }
 
 // addSkillVolumes reads Skill CRs referenced by the agent and task, creates a ConfigMap
@@ -2376,7 +2383,7 @@ func (b *JobBuilder) addSkillVolumes(ctx context.Context, job *batchv1.Job, task
 			Namespace: job.Namespace,
 			Labels: map[string]string{
 				labels.LabelTask:    labels.SelectorValue(task.Name),
-				labels.LabelPurpose: "skills",
+				labels.LabelPurpose: skillsVolumeName,
 				labels.LabelManaged: scheduledRunLabelValue,
 			},
 			OwnerReferences: []metav1.OwnerReference{
@@ -2401,12 +2408,12 @@ func (b *JobBuilder) addSkillVolumes(ctx context.Context, job *batchv1.Job, task
 			}
 		}
 	} else {
-		logger.Info("Created skill ConfigMap", "configmap", skillCM.Name, "skills", len(skillRefs))
+		logger.Info("Created skill ConfigMap", "configmap", skillCM.Name, skillsVolumeName, len(skillRefs))
 	}
 
 	// Mount the ConfigMap into the worker pod
 	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
-		Name: "skills",
+		Name: skillsVolumeName,
 		VolumeSource: corev1.VolumeSource{
 			ConfigMap: &corev1.ConfigMapVolumeSource{
 				LocalObjectReference: corev1.LocalObjectReference{
@@ -2419,7 +2426,7 @@ func (b *JobBuilder) addSkillVolumes(ctx context.Context, job *batchv1.Job, task
 	job.Spec.Template.Spec.Containers[0].VolumeMounts = append(
 		job.Spec.Template.Spec.Containers[0].VolumeMounts,
 		corev1.VolumeMount{
-			Name:      "skills",
+			Name:      skillsVolumeName,
 			MountPath: "/workspace/.skills",
 			ReadOnly:  true,
 		},

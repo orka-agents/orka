@@ -7,9 +7,13 @@ MIT License - see LICENSE file for details.
 package metrics
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	"github.com/gofiber/fiber/v3"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	dto "github.com/prometheus/client_model/go"
 )
 
@@ -215,6 +219,54 @@ func getGaugeValue(gauge *prometheus.GaugeVec, labels ...string) float64 {
 		return 0
 	}
 	return m.GetGauge().GetValue()
+}
+
+func TestExecutionEventMetricsOwnRequestLabels(t *testing.T) {
+	ExecutionEventsAppendedTotal.Reset()
+	ExecutionEventAppendDuration.Reset()
+	t.Cleanup(ExecutionEventsAppendedTotal.Reset)
+	t.Cleanup(ExecutionEventAppendDuration.Reset)
+
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(ExecutionEventsAppendedTotal, ExecutionEventAppendDuration)
+	app := fiber.New()
+	app.Get("/events/:streamType", func(c fiber.Ctx) error {
+		streamType := c.Params("streamType")
+		RecordExecutionEventAppend(streamType, "ModelMessage", true, 0.01)
+
+		// Reuse Fiber's actual path buffer before another writer records the
+		// same label. No pooling timing or unsafe string conversion is needed.
+		c.Path("/events/xxxx")
+		if streamType != "xxxx" {
+			return fiber.NewError(http.StatusInternalServerError, "fixture did not reuse the borrowed path buffer")
+		}
+		RecordExecutionEventAppend("task", "ModelMessage", true, 0.02)
+		c.Path("/events/task")
+		return c.SendStatus(http.StatusNoContent)
+	})
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/events/task", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("request status = %d, want 204", response.StatusCode)
+	}
+
+	// A retained borrowed label leaves two series under different hashes but
+	// identical label values, which turns the entire metrics scrape into a 500.
+	scrape := httptest.NewRecorder()
+	promhttp.HandlerFor(registry, promhttp.HandlerOpts{}).ServeHTTP(
+		scrape, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if scrape.Code != http.StatusOK {
+		t.Fatalf("metrics status = %d, want 200: %s", scrape.Code, scrape.Body.String())
+	}
+	if got := getCounterValue(ExecutionEventsAppendedTotal, "task", "ModelMessage"); got != 2 {
+		t.Fatalf("appended events = %v, want 2", got)
+	}
+	if got := getHistogramCount(ExecutionEventAppendDuration, "task", "ModelMessage", "success"); got != 2 {
+		t.Fatalf("append duration count = %v, want 2", got)
+	}
 }
 
 func TestRecordExecutionEventMetrics(t *testing.T) {

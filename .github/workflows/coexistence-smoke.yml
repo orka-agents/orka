@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - ".github/workflows/coexistence-smoke.yml"
+      - ".agents/skills/orka-kind-deploy/**"
       - "Makefile"
       - "api/**"
       - "cmd/main.go"
@@ -33,6 +34,7 @@ on:
   pull_request:
     paths:
       - ".github/workflows/coexistence-smoke.yml"
+      - ".agents/skills/orka-kind-deploy/**"
       - "Makefile"
       - "api/**"
       - "cmd/main.go"

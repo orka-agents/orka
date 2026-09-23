@@ -54,6 +54,8 @@ type ForkTaskResponse struct {
 }
 
 // ForkTask handles POST /api/v1/tasks/{id}/fork.
+//
+//nolint:gocyclo // Keep fork inheritance, authorization, and the final Task creation in order.
 func (h *Handlers) ForkTask(c fiber.Ctx) error {
 	sourceName := c.Params("id")
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
@@ -157,7 +159,7 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 		Spec: spec,
 	}
 	if err := agentruntimepolicy.ResolveAndReplaceTaskRuntimeRefAllowedTools(
-		c.Context(), h.contextTokenAuthorizationReader(), forked,
+		c.Context(), h.uncachedReader(), forked,
 	); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid fork AgentRuntime policy: %v", err))
 	}

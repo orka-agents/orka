@@ -35,9 +35,9 @@ func (t *CreateAgentTaskTool) Parameters() json.RawMessage {
 	return mustMarshalSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: taskNameDescription}, promptField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "The prompt/instruction for the agent"}, agentRefField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Agent name with runtime configured"}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, timeoutField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: timeoutDescription}, "maxTurns": map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaMinimumField: minMaxTurns, jsonSchemaMaximumField: maxMaxTurns, jsonSchemaDescriptionField: "Maximum agent loop iterations"}, workspaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{
 		"intent":                       map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaEnumField: []string{"read", "write"}, jsonSchemaDescriptionField: "Workspace intent. Defaults to read; publication fields require write. Write intent requires gitRepo and publicationCredentialRef."},
 		"gitRepo":                      map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Source Git repository URL as a credential-free HTTPS URL, e.g. https://github.com/owner/repo. GitHub SSH roots (git@github.com:owner/repo) are converted automatically; other schemes and embedded credentials are rejected. Required for write intent."},
-		"branch":                       map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Source branch to clone from (must exist), as a short branch name or refs/heads/... ref. Omit with ref to resolve and freeze the repository's advertised default branch. Requires gitRepo."},
-		"ref":                          map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Exact source selector: a full commit SHA, refs/heads/... branch, refs/tags/... tag, or short ref name. Other refs/ namespaces (e.g. refs/remotes/...) are rejected. Requires gitRepo."},
-		"readCredentialRef":            map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional Secret name for clone/read credentials. Omit to auto-discover a read credential when available. Requires gitRepo."},
+		branchField:                    map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Source branch to clone from (must exist), as a short branch name or refs/heads/... ref. Omit with ref to resolve and freeze the repository's advertised default branch. Requires gitRepo."},
+		refField:                       map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Exact source selector: a full commit SHA, refs/heads/... branch, refs/tags/... tag, or short ref name. Other refs/ namespaces (e.g. refs/remotes/...) are rejected. Requires gitRepo."},
+		readCredentialRefField:         map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional Secret name for clone/read credentials. Omit to auto-discover a read credential when available. Requires gitRepo."},
 		"publicationGitRepo":           map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Publication repository URL for write Tasks as a credential-free HTTPS URL, e.g. https://github.com/owner/repo. GitHub SSH roots (git@github.com:owner/repo) are converted automatically; other schemes and embedded credentials are rejected."},
 		"publicationReadCredentialRef": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional Secret name for target-repository preflight and verification credentials. Write intent only."},
 		"publicationCredentialRef":     map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Secret name for target-repository write credentials. Required for write intent; write intent only."},
@@ -60,7 +60,7 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 
 	var a map[string]any
 	if err := json.Unmarshal(args, &a); err != nil {
-		return ChatToolErrorResult("invalid_arguments", fmt.Sprintf("failed to parse arguments: %v", err), "Ensure arguments are valid JSON")
+		return ChatToolErrorResult(invalidArgumentsErrorType, fmt.Sprintf("failed to parse arguments: %v", err), "Ensure arguments are valid JSON")
 	}
 
 	if limitErr := tc.CheckTaskLimit(); limitErr != nil {
@@ -69,12 +69,12 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 
 	prompt := chatGetStringArg(a, promptField)
 	if prompt == "" {
-		return ChatToolErrorResult("invalid_arguments", "prompt is required", "Provide a prompt for the agent task")
+		return ChatToolErrorResult(invalidArgumentsErrorType, "prompt is required", "Provide a prompt for the agent task")
 	}
 
 	agentRef := chatGetStringArg(a, agentRefField)
 	if agentRef == "" {
-		return ChatToolErrorResult("invalid_arguments", "agentRef is required", "Provide an agent reference for the agent task")
+		return ChatToolErrorResult(invalidArgumentsErrorType, "agentRef is required", "Provide an agent reference for the agent task")
 	}
 
 	namespace := chatGetStringArgDefault(a, namespaceField, tc.Namespace)
@@ -120,7 +120,7 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 	if ws, ok := a[workspaceField]; ok {
 		wsMap, ok := ws.(map[string]any)
 		if !ok {
-			return ChatToolErrorResult("invalid_arguments", "workspace must be an object", "Provide workspace as a JSON object or omit it")
+			return ChatToolErrorResult(invalidArgumentsErrorType, "workspace must be an object", "Provide workspace as a JSON object or omit it")
 		}
 		wsCfg := &corev1alpha1.WorkspaceConfig{Intent: corev1alpha1.WorkspaceIntentRead}
 		if intent := strings.ToLower(strings.TrimSpace(chatGetStringArg(wsMap, "intent"))); intent != "" {
@@ -128,7 +128,7 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 			case corev1alpha1.WorkspaceIntentRead, corev1alpha1.WorkspaceIntentWrite:
 				wsCfg.Intent = corev1alpha1.WorkspaceIntent(intent)
 			default:
-				return ChatToolErrorResult("invalid_arguments", "workspace.intent must be read or write", "Use read for inspection or write for publication")
+				return ChatToolErrorResult(invalidArgumentsErrorType, "workspace.intent must be read or write", "Use read for inspection or write for publication")
 			}
 		}
 		gitRepo, repoErr := canonicalAgentWorkspaceRepositoryArg("gitRepo", chatGetStringArg(wsMap, "gitRepo"))
@@ -136,8 +136,8 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 			return ChatToolErrorResult(repoErr.Type, repoErr.Message, repoErr.Suggestion)
 		}
 		wsCfg.GitRepo = gitRepo
-		wsCfg.Branch = chatGetStringArg(wsMap, "branch")
-		wsCfg.Ref = chatGetStringArg(wsMap, "ref")
+		wsCfg.Branch = chatGetStringArg(wsMap, branchField)
+		wsCfg.Ref = chatGetStringArg(wsMap, refField)
 		wsCfg.SubPath = chatGetStringArg(wsMap, "subPath")
 		publicationGitRepo, repoErr := canonicalAgentWorkspaceRepositoryArg("publicationGitRepo", chatGetStringArg(wsMap, "publicationGitRepo"))
 		if repoErr != nil {
@@ -154,7 +154,7 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 		if workspaceRequestsPublication(wsCfg) {
 			wsCfg.Intent = corev1alpha1.WorkspaceIntentWrite
 		}
-		readCredential := strings.TrimSpace(chatGetStringArg(wsMap, "readCredentialRef"))
+		readCredential := strings.TrimSpace(chatGetStringArg(wsMap, readCredentialRefField))
 		publicationReadCredential := strings.TrimSpace(chatGetStringArg(wsMap, "publicationReadCredentialRef"))
 		publicationCredential := strings.TrimSpace(chatGetStringArg(wsMap, "publicationCredentialRef"))
 		forgeCredential := strings.TrimSpace(chatGetStringArg(wsMap, "forgeCredentialRef"))
@@ -227,7 +227,7 @@ func agentWorkspaceArgError(wsCfg *corev1alpha1.WorkspaceConfig, readCredential,
 // behavior parity with it (not stricter and not looser).
 func agentWorkspacePreflightError(wsCfg *corev1alpha1.WorkspaceConfig, readCredential, publicationReadCredential, publicationCredential, forgeCredential string) *ChatToolError {
 	invalidArgs := func(message, suggestion string) *ChatToolError {
-		return &ChatToolError{Type: "invalid_arguments", Message: message, Suggestion: suggestion}
+		return &ChatToolError{Type: invalidArgumentsErrorType, Message: message, Suggestion: suggestion}
 	}
 	if strings.TrimSpace(wsCfg.GitRepo) == "" {
 		switch {
@@ -285,7 +285,7 @@ func canonicalAgentWorkspaceRepositoryArg(field, raw string) (string, *ChatToolE
 	canonical, err := security.CanonicalWorkspaceRepositoryCloneURL(raw)
 	if err != nil {
 		return "", &ChatToolError{
-			Type:    "invalid_arguments",
+			Type:    invalidArgumentsErrorType,
 			Message: fmt.Sprintf("workspace.%s %s", field, err.Error()),
 			Suggestion: "Use a credential-free HTTPS URL such as https://github.com/owner/repo" +
 				" (GitHub SSH roots like git@github.com:owner/repo are converted automatically)",
@@ -304,7 +304,7 @@ func agentWorkspaceSourceSelectorError(wsCfg *corev1alpha1.WorkspaceConfig) *Cha
 	if ref := strings.TrimSpace(wsCfg.Ref); ref != "" {
 		if _, err := publisherservice.CanonicalWorkspaceSourceRef(ref); err != nil {
 			return &ChatToolError{
-				Type:       "invalid_arguments",
+				Type:       invalidArgumentsErrorType,
 				Message:    fmt.Sprintf("workspace.ref is invalid: %v", err),
 				Suggestion: "Use a full commit SHA, refs/heads/... branch, refs/tags/... tag, or short ref name",
 			}
@@ -317,7 +317,7 @@ func agentWorkspaceSourceSelectorError(wsCfg *corev1alpha1.WorkspaceConfig) *Cha
 		}
 		if _, err := publisherservice.CanonicalWorkspaceSourceRef(candidate); err != nil {
 			return &ChatToolError{
-				Type:       "invalid_arguments",
+				Type:       invalidArgumentsErrorType,
 				Message:    fmt.Sprintf("workspace.branch is invalid: %v", err),
 				Suggestion: "Use a valid Git branch name or refs/heads/... ref",
 			}
@@ -338,7 +338,7 @@ func agentWorkspaceSubPathError(subPath string) *ChatToolError {
 	}
 	invalid := func(detail string) *ChatToolError {
 		return &ChatToolError{
-			Type:       "invalid_arguments",
+			Type:       invalidArgumentsErrorType,
 			Message:    "workspace.subPath " + detail,
 			Suggestion: "Use a relative slash-separated path inside the repository, such as services/api",
 		}

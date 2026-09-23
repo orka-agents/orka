@@ -451,9 +451,9 @@ func (s *Store) removeCompletedPromptAttemptReclamationMarker(
 	if err != nil {
 		return err
 	}
-	expected.CandidateIDs = normalizePromptAttemptReclamationIDs(expected.CandidateIDs)
-	expected.RequestedExternalEffectAggregateIDs = normalizePromptAttemptReclamationIDs(expected.RequestedExternalEffectAggregateIDs)
-	expected.RelatedExternalEffectAggregateIDs = normalizePromptAttemptReclamationIDs(expected.RelatedExternalEffectAggregateIDs)
+	expected.CandidateIDs = store.NormalizeControlIdentifierSet(expected.CandidateIDs)
+	expected.RequestedExternalEffectAggregateIDs = store.NormalizeControlIdentifierSet(expected.RequestedExternalEffectAggregateIDs)
+	expected.RelatedExternalEffectAggregateIDs = store.NormalizeControlIdentifierSet(expected.RelatedExternalEffectAggregateIDs)
 	if !reflect.DeepEqual(current, expected) {
 		return store.ConflictErrorf("prompt attempt reclamation marker changed before cleanup")
 	}
@@ -461,7 +461,7 @@ func (s *Store) removeCompletedPromptAttemptReclamationMarker(
 		return err
 	}
 	if len(remaining) != 0 {
-		return promptAttemptReclaimNotReady("Task %q still has %d PromptAttempts after reclamation", expected.TaskUID, len(remaining))
+		return store.NotReadyErrorf("Task %q still has %d PromptAttempts after reclamation", expected.TaskUID, len(remaining))
 	}
 	if err := recordCompletion(); err != nil {
 		return err
@@ -498,7 +498,7 @@ func promptAttemptReclamationCompletionDigest(request store.ReclaimPromptAttempt
 		TerminalProjectionID:              terminalProjectionID,
 		RelatedExternalEffectAggregateIDs: append([]string(nil), request.RelatedExternalEffectAggregateIDs...),
 	}
-	receipt.RelatedExternalEffectAggregateIDs = normalizePromptAttemptReclamationIDs(receipt.RelatedExternalEffectAggregateIDs)
+	receipt.RelatedExternalEffectAggregateIDs = store.NormalizeControlIdentifierSet(receipt.RelatedExternalEffectAggregateIDs)
 	encoded, err := json.Marshal(receipt)
 	if err != nil {
 		return "", fmt.Errorf("encode PromptAttempt reclamation completion receipt: %w", err)
@@ -696,29 +696,13 @@ func normalizePromptAttemptReclamationRequestKube(request store.ReclaimPromptAtt
 	} else if request.FinalPromptAttemptID != "" || request.TerminalProjectionID != "" {
 		return store.ReclaimPromptAttemptsRequest{}, store.ValidationErrorf("only projected prompt attempt reclamation accepts final attempt and projection IDs")
 	}
-	request.RelatedExternalEffectAggregateIDs = normalizePromptAttemptReclamationIDs(request.RelatedExternalEffectAggregateIDs)
+	request.RelatedExternalEffectAggregateIDs = store.NormalizeControlIdentifierSet(request.RelatedExternalEffectAggregateIDs)
 	for _, id := range request.RelatedExternalEffectAggregateIDs {
 		if err := store.ValidateControlIdentifier("related external effect aggregate ID", id); err != nil {
 			return store.ReclaimPromptAttemptsRequest{}, err
 		}
 	}
 	return request, nil
-}
-
-func normalizePromptAttemptReclamationIDs(values []string) []string {
-	set := make(map[string]struct{}, len(values))
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value != "" {
-			set[value] = struct{}{}
-		}
-	}
-	result := make([]string, 0, len(set))
-	for value := range set {
-		result = append(result, value)
-	}
-	sort.Strings(result)
-	return result
 }
 
 func promptAttemptReclamationMarkerName(taskUID string) string {
@@ -736,9 +720,9 @@ func promptAttemptReclamationMarkerFromConfigMap(object *corev1.ConfigMap) (prom
 	if marker.Version != promptAttemptReclamationVersion {
 		return promptAttemptReclamationMarker{}, store.ConflictErrorf("prompt attempt reclamation marker version %d is unsupported", marker.Version)
 	}
-	marker.CandidateIDs = normalizePromptAttemptReclamationIDs(marker.CandidateIDs)
-	marker.RequestedExternalEffectAggregateIDs = normalizePromptAttemptReclamationIDs(marker.RequestedExternalEffectAggregateIDs)
-	marker.RelatedExternalEffectAggregateIDs = normalizePromptAttemptReclamationIDs(marker.RelatedExternalEffectAggregateIDs)
+	marker.CandidateIDs = store.NormalizeControlIdentifierSet(marker.CandidateIDs)
+	marker.RequestedExternalEffectAggregateIDs = store.NormalizeControlIdentifierSet(marker.RequestedExternalEffectAggregateIDs)
+	marker.RelatedExternalEffectAggregateIDs = store.NormalizeControlIdentifierSet(marker.RelatedExternalEffectAggregateIDs)
 	return marker, nil
 }
 
@@ -809,23 +793,23 @@ func (s *Store) settleUnboundPromptAttemptsForReclamation(
 		attempt := promptAttemptFromObject(object)
 		if attempt.ID != newestID {
 			if !store.IsTerminalPromptExecutionState(attempt.ExecutionState) || !store.IsTerminalPromptDeliveryState(attempt.DeliveryState) {
-				return nil, promptAttemptReclaimNotReady("historical prompt attempt %q is not terminal", attempt.ID)
+				return nil, store.NotReadyErrorf("historical prompt attempt %q is not terminal", attempt.ID)
 			}
 			result = append(result, object)
 			continue
 		}
 		if attempt.SessionUID != "" || attempt.SessionLeaseGeneration != 0 || attempt.RuntimeInstanceID != "" {
-			return nil, promptAttemptReclaimNotReady("unbound prompt attempt %q already has a runtime or Session binding", attempt.ID)
+			return nil, store.NotReadyErrorf("unbound prompt attempt %q already has a runtime or Session binding", attempt.ID)
 		}
 		if store.IsTerminalPromptExecutionState(attempt.ExecutionState) {
 			if !store.IsTerminalPromptDeliveryState(attempt.DeliveryState) {
-				return nil, promptAttemptReclaimNotReady("unbound prompt attempt %q delivery is not terminal", attempt.ID)
+				return nil, store.NotReadyErrorf("unbound prompt attempt %q delivery is not terminal", attempt.ID)
 			}
 			result = append(result, object)
 			continue
 		}
 		if attempt.ExecutionState != store.PromptExecutionQueued || attempt.DeliveryState != store.PromptDeliveryNotRequested {
-			return nil, promptAttemptReclaimNotReady("unbound prompt attempt %q is not safely cancellable from state %s", attempt.ID, attempt.ExecutionState)
+			return nil, store.NotReadyErrorf("unbound prompt attempt %q is not safely cancellable from state %s", attempt.ID, attempt.ExecutionState)
 		}
 		operationID := store.CanonicalControlID("reclaim-unbound-cancel", attempt.ID)
 		operationDigest := store.CanonicalBytesDigest([]byte("reclaim-unbound-cancel:" + attempt.ID))
@@ -860,21 +844,21 @@ func (s *Store) buildPromptAttemptReclamationMarkerKube(
 		if len(candidates) != 0 {
 			return promptAttemptReclamationMarker{}, store.ConflictErrorf("Task %q declared no durable attempt but owns %d PromptAttempts", request.TaskUID, len(candidates))
 		}
-		marker.RelatedExternalEffectAggregateIDs = normalizePromptAttemptReclamationIDs(append([]string{request.TaskUID}, request.RelatedExternalEffectAggregateIDs...))
+		marker.RelatedExternalEffectAggregateIDs = store.NormalizeControlIdentifierSet(append([]string{request.TaskUID}, request.RelatedExternalEffectAggregateIDs...))
 		if _, err := s.verifyPromptAttemptReferencesKube(ctx, marker, nil); err != nil {
 			return promptAttemptReclamationMarker{}, err
 		}
 		return marker, nil
 	}
 	if len(candidates) == 0 {
-		return promptAttemptReclamationMarker{}, promptAttemptReclaimNotReady("Task %q has no durable PromptAttempt and no reclamation marker", request.TaskUID)
+		return promptAttemptReclamationMarker{}, store.NotReadyErrorf("Task %q has no durable PromptAttempt and no reclamation marker", request.TaskUID)
 	}
 
 	attempts := make([]store.PromptAttempt, 0, len(candidates))
 	for _, object := range candidates {
 		attempt := promptAttemptFromObject(object)
 		if !store.IsTerminalPromptExecutionState(attempt.ExecutionState) || !store.IsTerminalPromptDeliveryState(attempt.DeliveryState) {
-			return promptAttemptReclamationMarker{}, promptAttemptReclaimNotReady("prompt attempt %q is not terminal", attempt.ID)
+			return promptAttemptReclamationMarker{}, store.NotReadyErrorf("prompt attempt %q is not terminal", attempt.ID)
 		}
 		attempts = append(attempts, attempt)
 		marker.CandidateIDs = append(marker.CandidateIDs, attempt.ID)
@@ -882,8 +866,8 @@ func (s *Store) buildPromptAttemptReclamationMarkerKube(
 			marker.RelatedExternalEffectAggregateIDs = append(marker.RelatedExternalEffectAggregateIDs, attempt.SessionUID)
 		}
 	}
-	marker.CandidateIDs = normalizePromptAttemptReclamationIDs(marker.CandidateIDs)
-	marker.RelatedExternalEffectAggregateIDs = normalizePromptAttemptReclamationIDs(append(marker.RelatedExternalEffectAggregateIDs, append([]string{request.TaskUID}, request.RelatedExternalEffectAggregateIDs...)...))
+	marker.CandidateIDs = store.NormalizeControlIdentifierSet(marker.CandidateIDs)
+	marker.RelatedExternalEffectAggregateIDs = store.NormalizeControlIdentifierSet(append(marker.RelatedExternalEffectAggregateIDs, append([]string{request.TaskUID}, request.RelatedExternalEffectAggregateIDs...)...))
 	finalAttempt, err := newestPromptAttemptForReclamationKube(attempts)
 	if err != nil {
 		return promptAttemptReclamationMarker{}, err
@@ -905,7 +889,7 @@ func (s *Store) buildPromptAttemptReclamationMarkerKube(
 		if request.FinalContinuitySession {
 			turn := turns[finalAttempt.ID]
 			if turn == nil {
-				return promptAttemptReclamationMarker{}, promptAttemptReclaimNotReady("final continuity prompt attempt %q has no finalized SessionTurn", finalAttempt.ID)
+				return promptAttemptReclamationMarker{}, store.NotReadyErrorf("final continuity prompt attempt %q has no finalized SessionTurn", finalAttempt.ID)
 			}
 			marker.FinalSessionTurnID = turn.ID
 			marker.TerminalProjectionAggregateKind = sessionTurnAggregateKind
@@ -958,7 +942,7 @@ func (s *Store) verifyPreparedPromptAttemptReclamationKube(
 		}
 		attempt := promptAttemptFromObject(object)
 		if !store.IsTerminalPromptExecutionState(attempt.ExecutionState) || !store.IsTerminalPromptDeliveryState(attempt.DeliveryState) {
-			return promptAttemptReclaimNotReady("prompt attempt %q is not terminal", attempt.ID)
+			return store.NotReadyErrorf("prompt attempt %q is not terminal", attempt.ID)
 		}
 	}
 	if marker.Mode == store.PromptAttemptReclamationNoAttempt && len(candidates) != 0 {
@@ -990,10 +974,10 @@ func (s *Store) verifyPromptAttemptReferencesKube(
 	for i := range controls.Items {
 		control := &controls.Items[i]
 		if control.Status.MutationLease != nil && control.Status.MutationLease.TaskUID == marker.TaskUID {
-			return nil, promptAttemptReclaimNotReady("Session %s/%s still has a mutation lease for Task %q", control.Namespace, control.Spec.SessionName, marker.TaskUID)
+			return nil, store.NotReadyErrorf("Session %s/%s still has a mutation lease for Task %q", control.Namespace, control.Spec.SessionName, marker.TaskUID)
 		}
 		if _, related := protected[control.Status.RelatedPromptAttemptID]; related {
-			return nil, promptAttemptReclaimNotReady("Session %s/%s still references prompt attempt %q", control.Namespace, control.Spec.SessionName, control.Status.RelatedPromptAttemptID)
+			return nil, store.NotReadyErrorf("Session %s/%s still references prompt attempt %q", control.Namespace, control.Spec.SessionName, control.Status.RelatedPromptAttemptID)
 		}
 	}
 
@@ -1020,7 +1004,7 @@ func (s *Store) verifyPromptAttemptReferencesKube(
 			}
 			turn, _, err := s.sessionTurnForPromptAttemptReclamation(ctx, marker, turnID, attempt.ID)
 			if errors.Is(err, store.ErrNotFound) {
-				return nil, promptAttemptReclaimNotReady("SessionTurn %q for prompt attempt %q is not durable", turnID, attempt.ID)
+				return nil, store.NotReadyErrorf("SessionTurn %q for prompt attempt %q is not durable", turnID, attempt.ID)
 			}
 			if err != nil {
 				return nil, fmt.Errorf("load SessionTurn for prompt attempt reclamation: %w", err)
@@ -1029,7 +1013,7 @@ func (s *Store) verifyPromptAttemptReferencesKube(
 				return nil, store.ConflictErrorf("SessionTurn %q does not match prompt attempt %q", turnID, attempt.ID)
 			}
 			if turn.State != store.SessionTurnFinalized || turn.FinalizedAt == nil || strings.TrimSpace(turn.ProjectionID) == "" {
-				return nil, promptAttemptReclaimNotReady("SessionTurn %q for prompt attempt %q is not finalized", turnID, attempt.ID)
+				return nil, store.NotReadyErrorf("SessionTurn %q for prompt attempt %q is not finalized", turnID, attempt.ID)
 			}
 			turns[attempt.ID] = turn
 		}
@@ -1056,7 +1040,7 @@ func (s *Store) verifyPromptAttemptPublicationsAndEffectsKube(ctx context.Contex
 			continue
 		}
 		if !store.IsTerminalPublicationState(store.PublicationState(publication.Status.State)) {
-			return promptAttemptReclaimNotReady("publication %q is not terminal", publication.Spec.ID)
+			return store.NotReadyErrorf("publication %q is not terminal", publication.Spec.ID)
 		}
 		relatedEffects[publication.Spec.ID] = struct{}{}
 	}
@@ -1072,7 +1056,7 @@ func (s *Store) verifyPromptAttemptPublicationsAndEffectsKube(ctx context.Contex
 		switch store.ExternalEffectState(effect.Status.State) {
 		case store.ExternalEffectSucceeded, store.ExternalEffectFailed, store.ExternalEffectOutcomeUnknown:
 		default:
-			return promptAttemptReclaimNotReady("external effect %q is not terminal", effect.Spec.ID)
+			return store.NotReadyErrorf("external effect %q is not terminal", effect.Spec.ID)
 		}
 	}
 	return nil
@@ -1096,13 +1080,13 @@ func (s *Store) verifyPromptAttemptTerminalProjectionMarkerKube(ctx context.Cont
 		projection, err = receipt.OutboxProjection(), nil
 	}
 	if errors.Is(err, store.ErrNotFound) {
-		return "", promptAttemptReclaimNotReady("terminal projection %q is not durable", marker.TerminalProjectionID)
+		return "", store.NotReadyErrorf("terminal projection %q is not durable", marker.TerminalProjectionID)
 	}
 	if err != nil {
 		return "", fmt.Errorf("load terminal projection for prompt attempt reclamation: %w", err)
 	}
 	if projection.State != store.OutboxProjectionDelivered {
-		return "", promptAttemptReclaimNotReady("terminal projection %q is not delivered", projection.ID)
+		return "", store.NotReadyErrorf("terminal projection %q is not delivered", projection.ID)
 	}
 	if projection.ID != marker.TerminalProjectionID || projection.ProjectionKind != "TaskTerminalStatus" ||
 		projection.AggregateKind != marker.TerminalProjectionAggregateKind || projection.AggregateID != marker.TerminalProjectionAggregateID {
@@ -1128,7 +1112,7 @@ func (s *Store) verifyPromptAttemptTerminalProjectionMarkerKube(ctx context.Cont
 	attempt, err := s.GetPromptAttempt(ctx, marker.FinalPromptAttemptID)
 	if errors.Is(err, store.ErrNotFound) {
 		if marker.TerminalProjectionPayloadDigest != payloadDigest {
-			return "", promptAttemptReclaimNotReady("final prompt attempt %q is not durable", marker.FinalPromptAttemptID)
+			return "", store.NotReadyErrorf("final prompt attempt %q is not durable", marker.FinalPromptAttemptID)
 		}
 		attemptMissing = true
 	}
@@ -1149,10 +1133,6 @@ func (s *Store) verifyPromptAttemptTerminalProjectionMarkerKube(ctx context.Cont
 		}
 	}
 	return payloadDigest, nil
-}
-
-func promptAttemptReclaimNotReady(format string, args ...any) error {
-	return fmt.Errorf("%w: %s", store.ErrNotReady, fmt.Sprintf(format, args...))
 }
 
 // RecoverPromptAttemptPreSubmission refreshes Reserved or returns a

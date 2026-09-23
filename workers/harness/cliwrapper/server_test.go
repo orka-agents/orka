@@ -27,12 +27,6 @@ import (
 
 const wrapperTestShellPath = "/bin/sh"
 
-type commandRunnerFunc func(context.Context, *CommandSpec) (CommandResult, error)
-
-func (run commandRunnerFunc) Run(ctx context.Context, spec *CommandSpec) (CommandResult, error) {
-	return run(ctx, spec)
-}
-
 func TestServerHealthCapabilitiesAndAfterSeq(t *testing.T) {
 	baseURL, cleanup := startWrapperServer(t, NewFakeAdapter(FakeBehaviorSuccess))
 	defer cleanup()
@@ -385,7 +379,7 @@ func TestServerSecurityArtifactFollowUpChildCleanupFailureFailsClosed(t *testing
 	}()
 
 	runnerCalls := 0
-	server.runner = commandRunnerFunc(func(_ context.Context, spec *CommandSpec) (CommandResult, error) {
+	server.runner = func(_ context.Context, spec *CommandSpec) (CommandResult, error) {
 		if spec == nil {
 			t.Fatal("command spec is nil")
 		}
@@ -402,7 +396,7 @@ func TestServerSecurityArtifactFollowUpChildCleanupFailureFailsClosed(t *testing
 			t.Fatalf("runner calls = %d, want at most 2", runnerCalls)
 			return CommandResult{}, nil
 		}
-	})
+	}
 
 	request := validWrapperStartTurnRequest()
 	request.Input.Prompt = "REQUIRED_SECURITY_ARTIFACTS: security-findings.v2.json\nreview the repository"
@@ -484,7 +478,7 @@ func TestServerArtifactUploadFailureFailsTurnAndRetainsEvidence(t *testing.T) {
 		artifactName = "security-findings.v2.json"
 		artifactBody = `{"findings":[{"severity":"high"}]}`
 	)
-	server.runner = commandRunnerFunc(func(_ context.Context, spec *CommandSpec) (CommandResult, error) {
+	server.runner = func(_ context.Context, spec *CommandSpec) (CommandResult, error) {
 		if spec == nil {
 			t.Fatal("command spec is nil")
 		}
@@ -503,7 +497,7 @@ func TestServerArtifactUploadFailureFailsTurnAndRetainsEvidence(t *testing.T) {
 			t.Fatalf("write test artifact: %v", err)
 		}
 		return CommandResult{Stdout: "runtime succeeded", FullStdout: "runtime succeeded"}, nil
-	})
+	}
 
 	request := validWrapperStartTurnRequest()
 	turn, err := server.turnRegistry.admit(request, server.now)
@@ -1743,7 +1737,7 @@ func TestServerRedactsGeneratedRuntimeAuthProxyTokenAtOutputSinks(t *testing.T) 
 		t.Fatalf("NewServer: %v", err)
 	}
 	generatedToken := make(chan string, 1)
-	server.runner = commandRunnerFunc(func(_ context.Context, spec *CommandSpec) (CommandResult, error) {
+	server.runner = func(_ context.Context, spec *CommandSpec) (CommandResult, error) {
 		token := envEntryValue(spec.Env, workerenv.OpenAIAPIKey)
 		if token == "" {
 			return CommandResult{}, errors.New("child command is missing the runtime-auth proxy credential")
@@ -1751,7 +1745,7 @@ func TestServerRedactsGeneratedRuntimeAuthProxyTokenAtOutputSinks(t *testing.T) 
 		generatedToken <- token
 		output := "generated runtime-auth proxy credential: " + token
 		return CommandResult{Stdout: output, FullStdout: output, Stderr: output}, nil
-	})
+	}
 	srv := httptest.NewServer(server.Handler())
 	defer func() {
 		srv.Close()

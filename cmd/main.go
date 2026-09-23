@@ -59,6 +59,7 @@ import (
 	"github.com/orka-agents/orka/internal/artifactcap"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/controller"
+	"github.com/orka-agents/orka/internal/envutil"
 	"github.com/orka-agents/orka/internal/executionmode"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -75,6 +76,7 @@ import (
 	"github.com/orka-agents/orka/internal/tokenexchange"
 	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/tracing"
+	"github.com/orka-agents/orka/internal/usage"
 	"github.com/orka-agents/orka/internal/worker"
 	"github.com/orka-agents/orka/internal/workerenv"
 	// +kubebuilder:scaffold:imports
@@ -287,12 +289,14 @@ func main() {
 	var gatewayTerminalRetention time.Duration
 	var gatewayDeliveryTimeout time.Duration
 	var gatewayDeliveryMaxAttempts int
+	var gatewayInterimMessagesPerTask int
 	var gatewayClaimLease time.Duration
 	var gatewayPollInterval time.Duration
 	var gatewayBatchSize int
 	var aiWorkerImage string
 	var storeBackend string
 	var storePath string
+	var usageRetention time.Duration
 	var agentExecutionSnapshotKeyFile string
 	var agentExecutionSnapshotSecret, agentExecutionSnapshotSecretKey string
 	var agentExecutionSnapshotRetention time.Duration
@@ -495,8 +499,12 @@ func main() {
 		"Maximum age for queued events and delivery retries.")
 	flag.DurationVar(&gatewayTerminalRetention, "gateway-terminal-retention", 30*24*time.Hour,
 		"Retention for terminal gateway events and deliveries.")
+	flag.DurationVar(&usageRetention, "usage-retention", 90*24*time.Hour,
+		"Retention for inactive usage reporting cohorts; 0 retains records indefinitely.")
 	flag.DurationVar(&gatewayDeliveryTimeout, "gateway-delivery-timeout", 15*time.Second,
 		"Timeout for one synchronous adapter delivery call.")
+	flag.IntVar(&gatewayInterimMessagesPerTask, "gateway-interim-messages-per-task", 10,
+		"Maximum distinct accepted interim gateway messages per Task.")
 	flag.IntVar(&gatewayDeliveryMaxAttempts, "gateway-delivery-max-attempts", 10,
 		"Maximum adapter delivery attempts before dead-lettering.")
 	flag.DurationVar(&gatewayClaimLease, "gateway-claim-lease", time.Minute,
@@ -539,7 +547,7 @@ func main() {
 		os.Getenv("ORKA_HARNESS_V1_AUTH_SECRET_NAME"),
 		"Name of the dedicated harness v1 wrapper bearer-token Secret.")
 	flag.StringVar(&harnessV1AuthSecretKey, "harness-v1-auth-secret-key",
-		envStringDefault("ORKA_HARNESS_V1_AUTH_SECRET_KEY", "token"),
+		envutil.String("ORKA_HARNESS_V1_AUTH_SECRET_KEY", "token"),
 		"Key in the dedicated harness v1 wrapper bearer-token Secret.")
 	flag.DurationVar(&harnessV1DispatchInterval, "harness-v1-dispatch-interval",
 		envDurationDefault("ORKA_HARNESS_V1_DISPATCH_INTERVAL", controller.DefaultHarnessV1DispatchInterval),
@@ -557,13 +565,13 @@ func main() {
 		"Copilot ACP runtime image with a tag or SHA256 digest. Tags resolve to digests at startup.")
 	flag.StringVar(&acpOpencodeRuntimeImage, "acp-opencode-runtime-image", os.Getenv("ORKA_ACP_OPENCODE_RUNTIME_IMAGE"),
 		"OpenCode ACP runtime image with a tag or SHA256 digest. Tags resolve to digests at startup.")
-	flag.StringVar(&acpRuntimeNamespace, "acp-runtime-namespace", envStringDefault("ORKA_ACP_RUNTIME_NAMESPACE", "orka-runtimes"),
+	flag.StringVar(&acpRuntimeNamespace, "acp-runtime-namespace", envutil.String("ORKA_ACP_RUNTIME_NAMESPACE", "orka-runtimes"),
 		"Physical namespace for managed ACP runtime Pods.")
 	flag.StringVar(&acpProviderProxyNamespace, "acp-provider-proxy-namespace", os.Getenv("ORKA_ACP_PROVIDER_PROXY_NAMESPACE"),
 		"Namespace containing the approved credential-injecting provider proxy.")
 	flag.StringVar(&acpProviderProxyBaseURL, "acp-provider-proxy-base-url", os.Getenv("ORKA_ACP_PROVIDER_PROXY_BASE_URL"),
 		"Cluster-local base URL of the authenticated provider proxy boundary.")
-	flag.StringVar(&acpProviderProxyPodLabels, "acp-provider-proxy-pod-labels", envStringDefault("ORKA_ACP_PROVIDER_PROXY_POD_LABELS", "orka.ai/network-role=provider-auth-proxy"),
+	flag.StringVar(&acpProviderProxyPodLabels, "acp-provider-proxy-pod-labels", envutil.String("ORKA_ACP_PROVIDER_PROXY_POD_LABELS", "orka.ai/network-role=provider-auth-proxy"),
 		"Comma-separated exact Pod labels selected by RuntimePool provider-proxy egress policy.")
 	flag.StringVar(&acpProviderProxyTokenFile, "acp-provider-proxy-token-file", os.Getenv("ORKA_ACP_PROVIDER_PROXY_TOKEN_FILE"),
 		"Mounted file containing the authenticated provider proxy bearer token.")
@@ -636,9 +644,6 @@ func main() {
 	flag.BoolVar(&substrateConfig.SessionIdentityRequired, "substrate-session-identity-required",
 		substrateConfig.SessionIdentityRequired,
 		"Fail Substrate workspace handoff when SessionIdentity cannot mint a per-actor JWT.")
-	flag.BoolVar(&substrateConfig.SessionIdentityMintCert, "substrate-session-identity-mint-cert",
-		substrateConfig.SessionIdentityMintCert,
-		"Unsupported alpha option for Substrate SessionIdentity certificate minting; currently rejected when enabled.")
 	flag.StringVar(&substrateConfig.SessionIdentityAudience, "substrate-session-identity-audience",
 		substrateConfig.SessionIdentityAudience,
 		"Comma-separated audiences requested from Substrate SessionIdentity minted JWTs.")
@@ -1370,6 +1375,14 @@ func main() {
 		setupLog.Error(err, "unable to add SQLite store as runnable")
 		os.Exit(1)
 	}
+	if usageRetention < 0 {
+		setupLog.Error(fmt.Errorf("usage retention must not be negative"), "invalid usage retention")
+		os.Exit(1)
+	}
+	if err := mgr.Add(&usage.Retention{Store: sqliteStore, Period: usageRetention}); err != nil {
+		setupLog.Error(err, "unable to add usage retention")
+		os.Exit(1)
+	}
 	if cipherErr := sqliteStore.SetAgentExecutionSnapshotCipher(snapshotCipher); cipherErr != nil {
 		setupLog.Error(cipherErr, "unable to activate agent execution snapshot key; snapshot encryption fails closed",
 			"path", agentExecutionSnapshotKeyFile)
@@ -1508,7 +1521,8 @@ func main() {
 		EventExpiry:                  gatewayEventExpiry,
 		TerminalRetention:            gatewayTerminalRetention, DeliveryTimeout: gatewayDeliveryTimeout,
 		DeliveryMaxAttempts: gatewayDeliveryMaxAttempts, ClaimLease: gatewayClaimLease,
-		PollInterval: gatewayPollInterval, BatchSize: gatewayBatchSize,
+		InterimMessagesPerTask: gatewayInterimMessagesPerTask,
+		PollInterval:           gatewayPollInterval, BatchSize: gatewayBatchSize,
 	}
 	gatewayService := gatewayruntime.NewService(mgr.GetClient(), sqliteStore, sqliteStore, sqliteStore, gatewayConfig)
 	gatewayService.APIReader = mgr.GetAPIReader()
@@ -2311,23 +2325,14 @@ func workspacePublisherClientFromEnv() (*publisherservice.Client, []byte, int64,
 	return client, artifactSecret, maxArtifactBytes, nil
 }
 
-func envStringDefault(name, fallback string) string {
-	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
-		return value
-	}
-	return fallback
-}
-
+// envDurationDefault degrades to fallback on a malformed or non-positive
+// value; controller tuning knobs never block startup.
 func envDurationDefault(name string, fallback time.Duration) time.Duration {
-	value := strings.TrimSpace(os.Getenv(name))
-	if value == "" {
+	value, err := envutil.Duration(name, fallback)
+	if err != nil || value <= 0 {
 		return fallback
 	}
-	parsed, err := time.ParseDuration(value)
-	if err != nil || parsed <= 0 {
-		return fallback
-	}
-	return parsed
+	return value
 }
 
 func parseExactLabels(raw string) (map[string]string, error) {

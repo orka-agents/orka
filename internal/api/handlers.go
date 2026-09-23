@@ -20,6 +20,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8slabels "k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
@@ -34,6 +35,12 @@ import (
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/tracing"
+)
+
+const (
+	apiFieldDescription = "description"
+	apiFieldChecks      = "checks"
+	apiFieldItems       = "items"
 )
 
 const queryTrue = "true"
@@ -54,7 +61,7 @@ var builtinToolsList = []fiber.Map{
 var builtinToolsMap = func() map[string]fiber.Map {
 	m := make(map[string]fiber.Map, len(builtinToolsList))
 	for _, t := range builtinToolsList {
-		m[t["name"].(string)] = t
+		m[t[apiFieldName].(string)] = t
 	}
 	return m
 }()
@@ -69,10 +76,10 @@ func builtinToolResponse(tool tools.Tool) fiber.Map {
 	}
 
 	return fiber.Map{
-		"name":        tool.Name(),
-		"builtin":     true,
-		"description": tool.Description(),
-		"parameters":  parameters,
+		apiFieldName:        tool.Name(),
+		"builtin":           true,
+		apiFieldDescription: tool.Description(),
+		"parameters":        parameters,
 	}
 }
 
@@ -356,7 +363,7 @@ type ListMeta struct {
 
 // Healthz handles health check requests
 func (h *Handlers) Healthz(c fiber.Ctx) error {
-	return c.JSON(fiber.Map{"status": "ok"})
+	return c.JSON(fiber.Map{apiFieldStatus: "ok"})
 }
 
 // Readyz handles readiness check requests
@@ -371,8 +378,8 @@ func (h *Handlers) Readyz(c fiber.Ctx) error {
 		if err := h.healthChecker.HealthCheck(ctx); err != nil {
 			checks["store"] = "unhealthy"
 			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
-				"status": "not ready",
-				"checks": checks,
+				apiFieldStatus: "not ready",
+				apiFieldChecks: checks,
 			})
 		}
 		checks["store"] = "ok"
@@ -395,16 +402,16 @@ func (h *Handlers) Readyz(c fiber.Ctx) error {
 		if err != nil {
 			checks["kubernetes"] = "unhealthy"
 			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
-				"status": "not ready",
-				"checks": checks,
+				apiFieldStatus: "not ready",
+				apiFieldChecks: checks,
 			})
 		}
 		checks["kubernetes"] = "ok"
 	}
 
 	return c.JSON(fiber.Map{
-		"status": "ok",
-		"checks": checks,
+		apiFieldStatus: "ok",
+		apiFieldChecks: checks,
 	})
 }
 
@@ -573,7 +580,7 @@ func (h *Handlers) authorizeTaskCreate(ctx context.Context, c fiber.Ctx, task *c
 
 // ListTasks lists tasks
 func (h *Handlers) ListTasks(c fiber.Ctx) error {
-	explicitNS := c.Query("namespace", "")
+	explicitNS := c.Query(toolNamespaceArg, "")
 	limit := c.Query("limit", "100")
 	continueToken := c.Query("continue", "")
 
@@ -587,6 +594,17 @@ func (h *Handlers) ListTasks(c fiber.Ctx) error {
 	opts.Namespace = namespace
 	if err := h.authorizeContextTokenAction(c, "listTasks", h.contextTokenAuthorization.TaskListScopes); err != nil {
 		return err
+	}
+	// A label selector narrows the Kubernetes list itself (kubectl -l
+	// syntax). The per-Task authorization below still runs on every result,
+	// so the selector cannot show a caller anything they could not list
+	// without it.
+	if rawSelector := strings.TrimSpace(c.Query("labelSelector", "")); rawSelector != "" {
+		selector, err := k8slabels.Parse(rawSelector)
+		if err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid labelSelector: %v", err))
+		}
+		opts.LabelSelector = selector
 	}
 
 	// Apply pagination. A limit of 0 is an explicit unpaginated list request for
@@ -663,7 +681,7 @@ func (h *Handlers) ListTasks(c fiber.Ctx) error {
 // GetTask gets a task by ID
 func (h *Handlers) GetTask(c fiber.Ctx) error {
 	id := c.Params("id")
-	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
 	}
@@ -705,7 +723,7 @@ func (h *Handlers) GetTask(c fiber.Ctx) error {
 // DeleteTask deletes a task
 func (h *Handlers) DeleteTask(c fiber.Ctx) error {
 	id := c.Params("id")
-	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
 	}
@@ -738,7 +756,7 @@ func (h *Handlers) DeleteTask(c fiber.Ctx) error {
 // GetTaskLogs gets logs for a task
 func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 	id := c.Params("id")
-	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
 	}
@@ -770,8 +788,8 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 	// For running tasks, stream logs from the pod if clientset is available
 	if h.clientset == nil {
 		return c.JSON(fiber.Map{
-			"message": "live log streaming not available",
-			"jobName": task.Status.JobName,
+			apiFieldMessage: "live log streaming not available",
+			"jobName":       task.Status.JobName,
 		})
 	}
 
@@ -840,7 +858,7 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 // GetTaskResult gets the result of a task
 func (h *Handlers) GetTaskResult(c fiber.Ctx) error {
 	id := c.Params("id")
-	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
 	}
@@ -870,7 +888,7 @@ func (h *Handlers) GetTaskResult(c fiber.Ctx) error {
 // GetTaskPlan gets the autonomous plan state for a task
 func (h *Handlers) GetTaskPlan(c fiber.Ctx) error {
 	id := c.Params("id")
-	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
 	}
@@ -897,14 +915,14 @@ func (h *Handlers) GetTaskPlan(c fiber.Ctx) error {
 
 // ListSessions lists sessions
 func (h *Handlers) ListSessions(c fiber.Ctx) error {
-	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
 	}
 	if err := h.authorizeContextTokenAction(c, "listSessions", h.contextTokenAuthorization.SessionReadScopes); err != nil {
 		return err
 	}
-	if err := h.authorizeSessionResourceAction(c, "list", namespace, ""); err != nil {
+	if err := h.authorizeCoreResourceAction(c, "list", "sessions", namespace, ""); err != nil {
 		return err
 	}
 
@@ -939,16 +957,16 @@ func (h *Handlers) ListSessions(c fiber.Ctx) error {
 	}
 	for _, s := range sessions {
 		items = append(items, fiber.Map{
-			"id":           s.Name,
-			"name":         s.Name,
-			"namespace":    namespace,
-			"sessionType":  s.SessionType,
-			"messageCount": s.MessageCount,
-			"inputTokens":  s.InputTokens,
-			"outputTokens": s.OutputTokens,
-			"activeTask":   s.ActiveTask,
-			"createdAt":    s.CreatedAt.Format(time.RFC3339),
-			"updatedAt":    s.UpdatedAt.Format(time.RFC3339),
+			"id":             s.Name,
+			apiFieldName:     s.Name,
+			toolNamespaceArg: namespace,
+			"sessionType":    s.SessionType,
+			"messageCount":   s.MessageCount,
+			"inputTokens":    s.InputTokens,
+			"outputTokens":   s.OutputTokens,
+			"activeTask":     s.ActiveTask,
+			"createdAt":      s.CreatedAt.Format(time.RFC3339),
+			"updatedAt":      s.UpdatedAt.Format(time.RFC3339),
 		})
 	}
 
@@ -963,14 +981,14 @@ func (h *Handlers) ListSessions(c fiber.Ctx) error {
 // GetSession gets a session
 func (h *Handlers) GetSession(c fiber.Ctx) error {
 	id := c.Params("id")
-	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
 	}
 	if err := h.authorizeContextTokenAction(c, "getSession", h.contextTokenAuthorization.SessionReadScopes); err != nil {
 		return err
 	}
-	if err := h.authorizeSessionResourceAction(c, "get", namespace, id); err != nil {
+	if err := h.authorizeCoreResourceAction(c, "get", "sessions", namespace, id); err != nil {
 		return err
 	}
 
@@ -1016,15 +1034,15 @@ func (h *Handlers) GetSession(c fiber.Ctx) error {
 	}
 
 	response := fiber.Map{
-		"name":         id,
-		"namespace":    namespace,
-		"transcript":   transcript,
-		"messageCount": session.MessageCount,
-		"inputTokens":  session.InputTokens,
-		"outputTokens": session.OutputTokens,
-		"activeTask":   session.ActiveTask,
-		"createdAt":    session.CreatedAt.Format(time.RFC3339),
-		"updatedAt":    session.UpdatedAt.Format(time.RFC3339),
+		apiFieldName:     id,
+		toolNamespaceArg: namespace,
+		"transcript":     transcript,
+		"messageCount":   session.MessageCount,
+		"inputTokens":    session.InputTokens,
+		"outputTokens":   session.OutputTokens,
+		"activeTask":     session.ActiveTask,
+		"createdAt":      session.CreatedAt.Format(time.RFC3339),
+		"updatedAt":      session.UpdatedAt.Format(time.RFC3339),
 	}
 	if executionControl != nil {
 		response["executionControl"] = executionControl
@@ -1094,14 +1112,14 @@ func (h *Handlers) getSessionExecutionControl(
 // DeleteSession deletes a session
 func (h *Handlers) DeleteSession(c fiber.Ctx) error {
 	id := c.Params("id")
-	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
 	}
 	if err := h.authorizeContextTokenAction(c, "deleteSession", h.contextTokenAuthorization.SessionWriteScopes); err != nil {
 		return err
 	}
-	if err := h.authorizeSessionResourceAction(c, "delete", namespace, id); err != nil {
+	if err := h.authorizeCoreResourceAction(c, "delete", "sessions", namespace, id); err != nil {
 		return err
 	}
 
@@ -1123,15 +1141,9 @@ func (h *Handlers) DeleteSession(c fiber.Ctx) error {
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
-func (h *Handlers) authorizeSessionResourceAction(c fiber.Ctx, verb, namespace, name string) error {
-	return authorizeKubernetesResourceAction(
-		c.Context(), h.clientset, GetUserInfo(c), namespace, verb, corev1alpha1.GroupVersion.Group, "sessions", name,
-	)
-}
-
 // ListTools lists available tools
 func (h *Handlers) ListTools(c fiber.Ctx) error {
-	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
 	}
@@ -1159,7 +1171,7 @@ func (h *Handlers) ListTools(c fiber.Ctx) error {
 	toolItems := make([]fiber.Map, 0)
 	if pagination.Continue == "" {
 		for _, tool := range builtinToolsList {
-			name, _ := tool["name"].(string)
+			name, _ := tool[apiFieldName].(string)
 			allowed, err := contextTokenAllowsToolMetadata(c, h.contextTokenAuthorization, "listTools", name)
 			if err != nil {
 				return err
@@ -1194,12 +1206,12 @@ func (h *Handlers) ListTools(c fiber.Ctx) error {
 				continue
 			}
 			page = append(page, fiber.Map{
-				"name":        tool.Name,
-				"namespace":   tool.Namespace,
-				"builtin":     false,
-				"description": tool.Spec.Description,
-				"available":   tool.Status.Available,
-				"url":         toolSpecHTTPURL(&tool),
+				apiFieldName:        tool.Name,
+				toolNamespaceArg:    tool.Namespace,
+				"builtin":           false,
+				apiFieldDescription: tool.Spec.Description,
+				"available":         tool.Status.Available,
+				"url":               toolSpecHTTPURL(&tool),
 			})
 		}
 		return page, toolList.Continue, nil
@@ -1224,8 +1236,8 @@ func (h *Handlers) ListTools(c fiber.Ctx) error {
 
 // GetTool gets a tool by name
 func (h *Handlers) GetTool(c fiber.Ctx) error {
-	name := c.Params("name")
-	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	name := c.Params(apiFieldName)
+	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
 	}
@@ -1259,7 +1271,7 @@ func (h *Handlers) GetTool(c fiber.Ctx) error {
 
 // ListAgents lists available agents
 func (h *Handlers) ListAgents(c fiber.Ctx) error {
-	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
 	}
@@ -1331,8 +1343,8 @@ func (h *Handlers) ListAgents(c fiber.Ctx) error {
 
 // GetAgent gets an agent by name
 func (h *Handlers) GetAgent(c fiber.Ctx) error {
-	name := c.Params("name")
-	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	name := c.Params(apiFieldName)
+	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
 	}
@@ -1394,7 +1406,7 @@ func (h *Handlers) CreateAgent(c fiber.Ctx) error {
 	if err := authorizeContextTokenAgentContext(c, h.contextTokenAuthorization, "createAgent", agent.Namespace, agent.Name); err != nil {
 		return err
 	}
-	if err := authorizeContextTokenAgentSpec(c.Context(), h.contextTokenAuthorizationReader(), contextTokenFromUserInfo(GetUserInfo(c)), h.contextTokenAuthorization, "createAgent", agent); err != nil {
+	if err := authorizeContextTokenAgentSpec(c.Context(), h.uncachedReader(), contextTokenFromUserInfo(GetUserInfo(c)), h.contextTokenAuthorization, "createAgent", agent); err != nil {
 		return err
 	}
 
@@ -1411,8 +1423,8 @@ func (h *Handlers) CreateAgent(c fiber.Ctx) error {
 
 // UpdateAgent updates an existing agent
 func (h *Handlers) UpdateAgent(c fiber.Ctx) error {
-	name := c.Params("name")
-	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	name := c.Params(apiFieldName)
+	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
 	}
@@ -1442,7 +1454,7 @@ func (h *Handlers) UpdateAgent(c fiber.Ctx) error {
 
 		patchBase := current.DeepCopy()
 		current.Spec = req.Spec
-		if err := authorizeContextTokenAgentSpec(ctx, h.contextTokenAuthorizationReader(), token, h.contextTokenAuthorization, "updateAgent", current); err != nil {
+		if err := authorizeContextTokenAgentSpec(ctx, h.uncachedReader(), token, h.contextTokenAuthorization, "updateAgent", current); err != nil {
 			return err
 		}
 		if err := h.client.Patch(ctx, current, client.MergeFromWithOptions(patchBase, client.MergeFromWithOptimisticLock{})); err != nil {
@@ -1469,8 +1481,8 @@ func (h *Handlers) UpdateAgent(c fiber.Ctx) error {
 
 // DeleteAgent deletes an agent
 func (h *Handlers) DeleteAgent(c fiber.Ctx) error {
-	name := c.Params("name")
-	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	name := c.Params(apiFieldName)
+	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
 	}
@@ -1512,7 +1524,7 @@ type UpdateSkillRequest struct {
 
 // ListSkills lists available skills
 func (h *Handlers) ListSkills(c fiber.Ctx) error {
-	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
 	}
@@ -1540,14 +1552,14 @@ func (h *Handlers) ListSkills(c fiber.Ctx) error {
 	skills := make([]fiber.Map, 0, len(skillList.Items))
 	for _, skill := range skillList.Items {
 		skills = append(skills, fiber.Map{
-			"name":        skill.Name,
-			"namespace":   skill.Namespace,
-			"displayName": skill.Spec.DisplayName,
-			"description": skill.Spec.Description,
-			"version":     skill.Spec.Version,
-			"author":      skill.Spec.Author,
-			"tags":        skill.Spec.Tags,
-			"phase":       skill.Status.Phase,
+			apiFieldName:        skill.Name,
+			toolNamespaceArg:    skill.Namespace,
+			"displayName":       skill.Spec.DisplayName,
+			apiFieldDescription: skill.Spec.Description,
+			"version":           skill.Spec.Version,
+			"author":            skill.Spec.Author,
+			"tags":              skill.Spec.Tags,
+			"phase":             skill.Status.Phase,
 		})
 	}
 
@@ -1564,8 +1576,8 @@ func (h *Handlers) ListSkills(c fiber.Ctx) error {
 
 // GetSkill gets a skill by name
 func (h *Handlers) GetSkill(c fiber.Ctx) error {
-	name := c.Params("name")
-	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	name := c.Params(apiFieldName)
+	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
 	}
@@ -1587,8 +1599,8 @@ func (h *Handlers) GetSkill(c fiber.Ctx) error {
 
 // GetSkillContent gets the raw content of a skill
 func (h *Handlers) GetSkillContent(c fiber.Ctx) error {
-	name := c.Params("name")
-	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	name := c.Params(apiFieldName)
+	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
 	}
@@ -1654,8 +1666,8 @@ func (h *Handlers) CreateSkill(c fiber.Ctx) error {
 
 // UpdateSkill updates an existing skill
 func (h *Handlers) UpdateSkill(c fiber.Ctx) error {
-	name := c.Params("name")
-	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	name := c.Params(apiFieldName)
+	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
 	}
@@ -1687,8 +1699,8 @@ func (h *Handlers) UpdateSkill(c fiber.Ctx) error {
 
 // DeleteSkill deletes a skill
 func (h *Handlers) DeleteSkill(c fiber.Ctx) error {
-	name := c.Params("name")
-	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	name := c.Params(apiFieldName)
+	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
 	}
@@ -1721,7 +1733,7 @@ type SecretNameResponse struct {
 
 // ListSecretNames lists secret names in a namespace (metadata only, no data)
 func (h *Handlers) ListSecretNames(c fiber.Ctx) error {
-	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
 	}
@@ -1749,7 +1761,7 @@ func (h *Handlers) ListSecretNames(c fiber.Ctx) error {
 		})
 	}
 
-	return c.JSON(fiber.Map{"items": names})
+	return c.JSON(fiber.Map{apiFieldItems: names})
 }
 
 // StreamPodLogs streams logs from a pod
@@ -1776,7 +1788,7 @@ func parseDuration(s string) (*metav1.Duration, error) {
 // GetTaskChildren returns child tasks for a given parent task
 func (h *Handlers) GetTaskChildren(c fiber.Ctx) error {
 	taskName := c.Params("id")
-	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
 	}
@@ -1828,7 +1840,7 @@ func (h *Handlers) GetTaskChildren(c fiber.Ctx) error {
 // ListTaskArtifacts lists artifacts for a task
 func (h *Handlers) ListTaskArtifacts(c fiber.Ctx) error {
 	id := c.Params("id")
-	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
 	}
@@ -1858,7 +1870,7 @@ func (h *Handlers) ListTaskArtifacts(c fiber.Ctx) error {
 func (h *Handlers) DownloadTaskArtifact(c fiber.Ctx) error {
 	id := c.Params("id")
 	filename := c.Params("filename")
-	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
 	}

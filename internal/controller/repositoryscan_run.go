@@ -52,14 +52,28 @@ func (r *RepositoryScanReconciler) reconcileScanRunIdentity(ctx context.Context,
 			current.Status.LastScanTaskName = ""
 			current.Status.LastProcessedCommit = ""
 			current.Status.LastObservedHeadSHA = ""
-			meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
-				Type: repositoryScanPhaseReady, Status: metav1.ConditionFalse, Reason: repositoryScanPhasePending,
-				Message:            "Repository scan changed; waiting for a new scan run",
-				ObservedGeneration: current.Generation, LastTransitionTime: metav1.Now(),
-			})
+			meta.SetStatusCondition(&current.Status.Conditions, readyCondition(
+				current.Generation, metav1.ConditionFalse, repositoryScanPhasePending,
+				"Repository scan changed; waiting for a new scan run",
+			))
 		})
 	}
 	return false, nil
+}
+
+const readyConditionType = "Ready"
+
+// readyCondition builds a "Ready" condition observed at generation with a
+// fresh transition time.
+func readyCondition(generation int64, status metav1.ConditionStatus, reason, message string) metav1.Condition {
+	return metav1.Condition{
+		Type:               readyConditionType,
+		Status:             status,
+		Reason:             reason,
+		Message:            message,
+		LastTransitionTime: metav1.Now(),
+		ObservedGeneration: generation,
+	}
 }
 
 func (r *RepositoryScanReconciler) listCurrentScanTasks(ctx context.Context, scan *corev1alpha1.RepositoryScan, runID string) (*corev1alpha1.TaskList, error) {
@@ -84,10 +98,7 @@ func (r *RepositoryScanReconciler) createOrValidateScanStageTask(ctx context.Con
 		if !apierrors.IsAlreadyExists(err) {
 			return err
 		}
-		reader := r.APIReader
-		if reader == nil {
-			reader = r.Client
-		}
+		reader := uncachedReader(r.APIReader, r.Client)
 		existing := &corev1alpha1.Task{}
 		if err := reader.Get(ctx, client.ObjectKeyFromObject(task), existing); err != nil {
 			return err
@@ -106,9 +117,6 @@ func (r *RepositoryScanReconciler) createOrValidateScanStageTask(ctx context.Con
 }
 
 func (r *RepositoryScanReconciler) validateScanStageRun(ctx context.Context, scan *corev1alpha1.RepositoryScan, run *store.ScanRun) error {
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	return security.ValidateScanStageRun(ctx, r.SecurityStore, reader, scan, run)
 }

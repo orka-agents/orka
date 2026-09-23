@@ -9,6 +9,11 @@ Orka speaks the Anthropic Messages API at `/anthropic/v1/messages`, so Claude Co
 Anthropic-native clients can point at Orka instead of at a model vendor. Your cluster holds
 the API keys; the client holds a ServiceAccount token.
 
+The optional [shared compatibility router](../operations/shared-compatibility-api.md)
+selects the team's installation from its validated ServiceAccount token. It
+accepts `x-api-key` or Bearer authentication, with Bearer taking precedence when
+both are present. Clients can omit the namespace parameter.
+
 :::warning[Coordinator mode is enabled by default]
 Orka rewrites your request before sending it upstream: it **discards the tools your client
 sent**, injects its own, and prepends its own system prompt. See

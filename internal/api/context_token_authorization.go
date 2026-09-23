@@ -33,6 +33,10 @@ import (
 )
 
 const (
+	credentialRoleSourceRead = "source-read"
+)
+
+const (
 	defaultTaskUpdateScope = "orka:tasks:update"
 
 	// ContextTokenAuthorizationModeOff disables context-token authorization checks.
@@ -291,7 +295,7 @@ func (h *Handlers) authorizeContextTokenTaskCreate(c fiber.Ctx, req CreateTaskRe
 		return nil
 	}
 
-	reader := h.contextTokenAuthorizationReader()
+	reader := h.uncachedReader()
 	authzCtx, err := resolveContextTokenTaskCreateAuthorizationContext(c.Context(), reader, req, namespace)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
@@ -629,7 +633,7 @@ func (h *Handlers) contextTokenAllowsLoadedTaskWithIdentity(c fiber.Ctx, action 
 }
 
 func (h *Handlers) contextTokenLoadedTaskContextFailures(ctx context.Context, token *ContextToken, task *corev1alpha1.Task, includeTaskIdentity bool) ([]string, error) {
-	return contextTokenLoadedTaskContextFailures(ctx, h.contextTokenAuthorizationReader(), token, task, includeTaskIdentity)
+	return contextTokenLoadedTaskContextFailures(ctx, h.uncachedReader(), token, task, includeTaskIdentity)
 }
 
 func contextTokenLoadedTaskContextFailures(ctx context.Context, reader client.Reader, token *ContextToken, task *corev1alpha1.Task, includeTaskIdentity bool) ([]string, error) {
@@ -1160,11 +1164,18 @@ func contextTokenAgentSpecToolFailures(token *ContextToken, authzCtx contextToke
 	return failures
 }
 
-func (h *Handlers) contextTokenAuthorizationReader() client.Reader {
-	if h.apiReader != nil {
-		return h.apiReader
+// uncachedReaderOr returns apiReader when configured, otherwise the cached
+// client, so authorization decisions can bypass the informer cache when a
+// direct API reader is available.
+func uncachedReaderOr(apiReader client.Reader, fallback client.Client) client.Reader {
+	if apiReader != nil {
+		return apiReader
 	}
-	return h.client
+	return fallback
+}
+
+func (h *Handlers) uncachedReader() client.Reader {
+	return uncachedReaderOr(h.apiReader, h.client)
 }
 
 func resolveContextTokenTaskCreateAuthorizationContext(ctx context.Context, reader client.Reader, req CreateTaskRequest, namespace string) (contextTokenTaskCreateAuthorizationContext, error) {
@@ -1715,7 +1726,7 @@ func contextTokenWorkspaceCredentialFailures(token *ContextToken, cfg ContextTok
 		role string
 		ref  *corev1alpha1.WorkspaceCredentialReference
 	}{
-		{role: "source-read", ref: workspace.ReadCredentialRef},
+		{role: credentialRoleSourceRead, ref: workspace.ReadCredentialRef},
 		{role: "target-read", ref: workspace.PublicationReadCredentialRef},
 		{role: "target-write", ref: workspace.PublicationCredentialRef},
 		{role: "forge", ref: workspace.ForgeCredentialRef},

@@ -11,7 +11,7 @@ UID, groups, and extra attributes. The permission must cover the final namespace
 resource, verb, and name. Missing clients, review errors, denied decisions, and
 ambiguous results return `403` before the requested operation runs.
 
-The table covers all 129 authenticated external route registrations, including 50
+The table covers all 132 authenticated external route registrations, including 50
 non-GET registrations under `/api/v1` and the OpenAI and Anthropic compatibility
 routes. `GET /api/v1/auth/validate` and `GET /api/v1/auth/whoami` only validate or
 report the authenticated identity. They do not access tenant resources and require
@@ -150,6 +150,9 @@ otherwise. In the additional-checks column:
 | Method | Path | API group | Resource/subresource | Verb | Name | Namespace | Additional checks |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `POST` | `/api/v1/tasks` | `core.orka.ai` | `tasks` | `create` | empty | `C` | Class use; Checkpoint use |
+| `GET` | `/api/v1/usage` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | `list` on `repositorymonitors` and `sessions`; all selected team namespaces; Gateway read |
+| `GET` | `/api/v1/usage/work/:id` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | Same permissions and retained-Task access checks as the summary |
+| `GET` | `/api/v1/usage/other/:category` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | Same permissions and retained-Task access checks as the summary |
 | `GET` | `/api/v1/tasks` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | Gateway read |
 | `GET` | `/api/v1/tasks/:id` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
 | `DELETE` | `/api/v1/tasks/:id` | `core.orka.ai` | `tasks` | `delete` | `:id` | `Q` | Gateway operate |

@@ -184,10 +184,7 @@ func (r *ExecutionWorkspaceClassReconciler) classHasBoundWorkspaces(
 	ctx context.Context,
 	class *workspacev1alpha1.ExecutionWorkspaceClass,
 ) (bool, error) {
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	workspaces := &workspacev1alpha1.ExecutionWorkspaceList{}
 	if err := reader.List(ctx, workspaces, client.InNamespace(class.Namespace)); err != nil {
 		return false, fmt.Errorf("list workspaces bound to class: %w", err)
@@ -477,10 +474,7 @@ func (r *ExecutionWorkspaceClassReconciler) resolveNamespacedParameters(
 	if mapping.Scope.Name() != apimeta.RESTScopeNameNamespace {
 		return nil, reasonParametersScopeInvalid, "workspace parametersRef must reference a namespaced object", nil
 	}
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := uncachedReader(r.APIReader, r.Client)
 	parameters := &unstructured.Unstructured{}
 	parameters.SetGroupVersionKind(mapping.GroupVersionKind)
 	key := types.NamespacedName{Namespace: namespace, Name: ref.Name}

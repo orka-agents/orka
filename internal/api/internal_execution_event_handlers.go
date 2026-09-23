@@ -25,6 +25,8 @@ const maxSubmitExecutionEventRequestBytes = 256 << 10 // 256 KiB
 
 // SubmitExecutionEvent handles POST /internal/v1/events/{namespace}/{streamType}/{streamID}.
 // Workers call this to append sanitized execution timeline events.
+//
+//nolint:gocyclo // Event authentication, replay checks, and durable acceptance form one boundary.
 func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 	namespace := strings.TrimSpace(c.Params("namespace"))
 	streamType := strings.TrimSpace(c.Params("streamType"))
@@ -74,6 +76,20 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 	if events.IsTerminalTaskEventType(event.Type) || events.IsTerminalApprovalEventType(event.Type) {
 		return fiber.NewError(fiber.StatusForbidden, "terminal task and approval events must use controller-owned paths")
 	}
+	// The harness identity is controller-owned; workers may submit only their
+	// own call records, bound below to the authenticated Task UID.
+	var eventContent map[string]json.RawMessage
+	if json.Unmarshal(event.Content, &eventContent) == nil {
+		if _, ok := eventContent["harnessV2"]; ok {
+			return fiber.NewError(fiber.StatusForbidden, "harness events must use the controller journal")
+		}
+		if _, ok := eventContent["usage"]; ok {
+			if err := authorizer.verifyUsageWriter(c.Context(), GetUserInfo(c), writerTask); err != nil {
+				return err
+			}
+			event.Internal = map[string]any{"usageTaskUID": string(writerTask.UID)}
+		}
+	}
 	if event.StreamType == events.ExecutionEventStreamTypeTask {
 		event.TaskName = streamID
 		if writerTask != nil {
@@ -101,6 +117,9 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 		}
 		if current.UID != writerTask.UID {
 			return fiber.NewError(fiber.StatusForbidden, "task identity changed")
+		}
+		if event.Internal["usageTaskUID"] != nil {
+			return authorizer.verifyUsageWriter(c.Context(), GetUserInfo(c), current)
 		}
 		return nil
 	}, func(ctx context.Context) error {

@@ -525,6 +525,11 @@ func assertFoundryDeletionReplay(t *testing.T, server *Server, cfg Config, delet
 
 func newFoundryTestServer(t *testing.T, handler http.Handler) (*Server, Config, harnessv2.CreateRuntimeSessionRequest) {
 	t.Helper()
+	return newFoundryTestServerWithRecovery(t, handler, false)
+}
+
+func newFoundryTestServerWithRecovery(t *testing.T, handler http.Handler, recovery bool) (*Server, Config, harnessv2.CreateRuntimeSessionRequest) {
+	t.Helper()
 	upstream := httptest.NewServer(handler)
 	t.Cleanup(upstream.Close)
 	cfg, profile := newTestConfigWithUpstream(t, "immediate", upstream.URL+"/v1", testUpstreamToken)
@@ -539,12 +544,13 @@ func newFoundryTestServer(t *testing.T, handler http.Handler) (*Server, Config, 
 	cfg.Capabilities.RuntimeProfileDigest = profileDigest
 	cfg.Capabilities.AdapterDigests = profile.AdapterDigests
 	cfg.Capabilities.SupportsAgentSessionConfiguration = false
+	cfg.Capabilities.SupportsFoundryRecovery = recovery
 	cfg.Capabilities.Provider = providerCapabilities(providerKindFoundry, profile.Model)
 	cfg.Provider.Kind = providerKindFoundry
 	cfg.Provider.AdapterName = foundryAdapterName
 	cfg.Provider.AdapterDigest = profile.AdapterDigests[foundryAdapterName]
 	cfg.Provider.ProjectSession = func(request harnessv2.CreateRuntimeSessionRequest, _ acp.SessionPaths, _ ProviderProxyBinding) (ProviderSessionProjection, error) {
-		return foundrySessionProjection(request, profile.Model)
+		return foundryAdapter.sessionProjection(request, profile.Model)
 	}
 	cfg.ProviderProxy.ProviderKind = providerKindFoundry
 	server, err := New(cfg)

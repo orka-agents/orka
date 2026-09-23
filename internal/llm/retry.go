@@ -25,14 +25,12 @@ type RetryProvider struct {
 	jitter     float64
 }
 
-// NewRetryProvider creates a RetryProvider wrapping inner. If maxRetries is 0, defaults to 3.
-func NewRetryProvider(inner Provider, maxRetries int) *RetryProvider {
-	if maxRetries <= 0 {
-		maxRetries = defaultMaxRetries
-	}
+// NewRetryProvider creates a RetryProvider wrapping inner with the default
+// retry budget (3 retries, 1s base delay, 30s cap, 10% jitter).
+func NewRetryProvider(inner Provider) *RetryProvider {
 	return &RetryProvider{
 		inner:      inner,
-		maxRetries: maxRetries,
+		maxRetries: defaultMaxRetries,
 		baseDelay:  defaultBaseDelay,
 		maxDelay:   defaultMaxDelay,
 		jitter:     defaultJitter,
@@ -76,8 +74,7 @@ func (r *RetryProvider) Complete(ctx context.Context, req *CompletionRequest) (*
 	return nil, lastErr
 }
 
-// Stream calls the inner provider's Stream with peek-at-first-chunk retry logic.
-// Both providers' Stream() always return (ch, nil) — errors appear as the first chunk.
+// Stream retries transient errors until the provider emits output or completes.
 func (r *RetryProvider) Stream(ctx context.Context, req *CompletionRequest) (<-chan StreamChunk, error) {
 	var lastErr error
 	for attempt := 0; attempt <= r.maxRetries; attempt++ {
@@ -95,8 +92,8 @@ func (r *RetryProvider) Stream(ctx context.Context, req *CompletionRequest) (<-c
 			continue
 		}
 
-		// Peek at the first chunk to check for errors
-		firstChunk, ok := <-innerCh
+		// Usage-only updates do not commit this attempt before output arrives.
+		firstChunk, ok := firstStreamResult(innerCh)
 		if !ok {
 			ch := make(chan StreamChunk)
 			close(ch)

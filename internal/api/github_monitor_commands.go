@@ -27,6 +27,12 @@ import (
 )
 
 const (
+	githubActionFix      = "fix"
+	githubActionTriage   = "triage"
+	githubActionResearch = "research"
+)
+
+const (
 	githubAPIBaseURLEnv           = "ORKA_GITHUB_API_BASE_URL"
 	commandIntentStop             = finishReasonStop
 	commandIntentResume           = "resume"
@@ -162,8 +168,8 @@ func repositoryMonitorCommandIntentForLabel(monitor *corev1alpha1.RepositoryMoni
 	var configured []commandLabel
 	if target.IsPR {
 		configured = []commandLabel{
-			{intent: "review", label: labels.PullRequests.Review},
-			{intent: "fix", label: labels.PullRequests.Fix},
+			{intent: githubActionReview, label: labels.PullRequests.Review},
+			{intent: githubActionFix, label: labels.PullRequests.Fix},
 			{intent: commandIntentFixCI, label: labels.PullRequests.FixCI},
 			{intent: commandIntentUpdateBranch, label: labels.PullRequests.UpdateBranch},
 			{intent: "automerge", label: labels.PullRequests.Automerge},
@@ -172,11 +178,11 @@ func repositoryMonitorCommandIntentForLabel(monitor *corev1alpha1.RepositoryMoni
 		}
 	} else {
 		configured = []commandLabel{
-			{intent: "triage", label: labels.Issues.Triage},
-			{intent: "research", label: labels.Issues.Research},
-			{intent: "plan", label: labels.Issues.Plan},
+			{intent: githubActionTriage, label: labels.Issues.Triage},
+			{intent: githubActionResearch, label: labels.Issues.Research},
+			{intent: commandIntentPlan, label: labels.Issues.Plan},
 			{intent: commandIntentApprovePlan, label: labels.Issues.ApprovePlan},
-			{intent: "implement", label: labels.Issues.Implement},
+			{intent: githubActionImplement, label: labels.Issues.Implement},
 			{intent: "decompose", label: labels.Issues.Decompose},
 			{intent: commandIntentStop, label: labels.Issues.Stop},
 			{intent: commandIntentResume, label: labels.Issues.Resume},
@@ -558,7 +564,7 @@ func repositoryMonitorControlCommandIntent(intent string) bool {
 
 func repositoryMonitorReadOnlyCommandIntent(intent string) bool {
 	switch strings.TrimSpace(intent) {
-	case "triage", "research", commandIntentPlan, "review":
+	case githubActionTriage, githubActionResearch, commandIntentPlan, githubActionReview:
 		return true
 	default:
 		return false
@@ -732,7 +738,7 @@ func (h *Handlers) upsertRepositoryMonitorCommandWorkAction(ctx context.Context,
 			return h.persistRepositoryMonitorCoalescedWorkAction(ctx, monitor, command, desiredAction, dedupe, candidate)
 		}
 	}
-	metadata, _ := json.Marshal(map[string]any{"source": command.Source, "label": command.Label, "deliveryID": command.DeliveryID})
+	metadata, _ := json.Marshal(map[string]any{"source": command.Source, apiFieldLabel: command.Label, "deliveryID": command.DeliveryID})
 	metrics.RecordRepositoryMonitorWorkAction(desiredAction, status)
 	if err := h.repositoryMonitorStore.CreateWorkAction(ctx, &store.WorkAction{
 		ID:                   id,
@@ -790,7 +796,7 @@ func (h *Handlers) repositoryMonitorActiveWorkActionByDedupe(ctx context.Context
 func (h *Handlers) persistRepositoryMonitorCoalescedWorkAction(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, desiredAction, dedupe string, candidate *store.WorkAction) error {
 	id := store.RepositoryMonitorWorkActionID(command.ID, desiredAction)
 	now := time.Now()
-	metadata, _ := json.Marshal(map[string]any{"source": command.Source, "label": command.Label, "deliveryID": command.DeliveryID, "coalescedWith": candidate.ID})
+	metadata, _ := json.Marshal(map[string]any{"source": command.Source, apiFieldLabel: command.Label, "deliveryID": command.DeliveryID, "coalescedWith": candidate.ID})
 	action := &store.WorkAction{ID: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, CommandEventID: command.ID, MonitorGeneration: monitor.Generation, TargetKind: command.Kind, TargetNumber: command.Number, TargetSHA: command.HeadSHA, TargetSnapshotDigest: command.IssueSnapshotDigest, Intent: command.Intent, DesiredAction: desiredAction, DependsOnActionID: candidate.ID, DedupeKey: dedupe, IdempotencyKey: command.IdempotencyKey, Status: githubCommandStatusCompleted, Phase: "coalesced", MetadataJSON: string(metadata), CreatedAt: command.CreatedAt, CompletedAt: &now}
 	if err := h.repositoryMonitorStore.CreateWorkAction(ctx, action); err != nil {
 		existing, getErr := h.repositoryMonitorStore.GetWorkAction(ctx, monitor.Namespace, id)

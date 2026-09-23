@@ -1016,6 +1016,7 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--api-port` | `8080` | REST API server port |
 | `--gateway-enabled` | `true` | Enable generic gateway reconciliation and ingress |
 | `--gateway-pending-per-session` | `100` | Maximum pending gateway events per Session |
+| `--gateway-interim-messages-per-task` | `10` | Lifetime cap for distinct accepted interim messages per Task; failed/expired messages count, retries do not. Helm: `controller.gateway.interimMessagesPerTask` |
 | `--gateway-max-records-per-gateway` | `1000` | Maximum retained accepted/dead-letter event records per Gateway before ingress is throttled |
 | `--gateway-max-rejected-records-per-gateway` | `250` | Separate audit budget for rejected events so unauthorized traffic cannot consume operational capacity |
 | `--gateway-event-expiry` | `24h` | Queue and delivery retry expiry |
@@ -1186,6 +1187,21 @@ bin/kustomize build --load-restrictor LoadRestrictionsNone \
 That split is the point: users name a class, and provider identity, backend parameters,
 pool implementation, and provider versions all stay with the operator. The older direct
 agent-sandbox and Substrate settings below still work during migration.
+
+`kubectl get executionworkspaceclass` shows each class's lifecycle rules, so a person
+choosing a class can see whether their workspace is kept asleep (`Suspend`) or deleted
+(`Delete`) when the agent stops, how long it may sit idle, and how long it may exist:
+
+```console
+$ kubectl get executionworkspaceclass
+NAME              MODE         PROVIDER       ON DETACH   IDLE TIMEOUT   MAX LIFETIME   READY   AGE
+sandbox-session   Interactive  agent-sandbox  Suspend     30m            24h            True    2d
+scratch           Interactive  agent-sandbox  Delete                     2h             True    2d
+```
+
+`-o wide` adds the detach timeout. Helm does not update CRDs during an upgrade, so the
+columns appear once the CRDs from the new chart are applied (see
+[Upgrading](../operations/upgrading.md)).
 
 #### Who is allowed to use a class
 

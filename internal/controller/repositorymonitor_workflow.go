@@ -98,7 +98,7 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorWorkActionState(ctx
 			}
 		}
 	}
-	metadata, _ := json.Marshal(map[string]any{"actionKind": actionKind})
+	metadata, _ := json.Marshal(map[string]any{repositoryMonitorEventActionKindKey: actionKind})
 	metrics.RecordRepositoryMonitorWorkAction(desiredAction, status)
 	if err := r.Store.CreateWorkAction(ctx, &store.WorkAction{
 		ID:                   id,

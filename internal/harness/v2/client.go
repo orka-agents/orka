@@ -918,6 +918,7 @@ func validateHTTPErrorMapping(status int, response ErrorResponse) error {
 		ErrorCodeSessionPoisoned:     {http.StatusConflict: {}, http.StatusBadGateway: {}, http.StatusInternalServerError: {}},
 		ErrorCodeWorkspaceResumeLost: {http.StatusConflict: {}},
 		ErrorCodeOutcomeUnknown:      {http.StatusInternalServerError: {}},
+		ErrorCodeCleanupUnproven:     {http.StatusConflict: {}},
 	}
 	statuses, ok := allowed[response.Code]
 	if !ok {

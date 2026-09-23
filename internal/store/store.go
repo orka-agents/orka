@@ -19,6 +19,10 @@ var ErrNotReady = errors.New("not ready")
 // ErrDuplicateMismatch is returned when a stable external identifier is reused with a different payload.
 var ErrDuplicateMismatch = errors.New("duplicate payload mismatch")
 
+// ErrGatewayMessageReplayOnly is returned when receipt-only admission finds no
+// existing message. The caller must return its original live admission gate error.
+var ErrGatewayMessageReplayOnly = errors.New("gateway message receipt not found for replay-only admission")
+
 // ErrCapacity is returned when a bounded durable store quota is full.
 var ErrCapacity = errors.New("capacity exceeded")
 
@@ -123,12 +127,6 @@ type SessionTurnCommitter interface {
 	) error
 }
 
-// ExpiringSessionLockStore supports crash-recoverable transient locks. Durable
-// Task locks continue to use SessionStore.AcquireLock without an expiry.
-type ExpiringSessionLockStore interface {
-	AcquireLockUntil(ctx context.Context, namespace, name, ownerName, ownerUID string, expiresAt time.Time) error
-}
-
 // FencedSessionWriteStore binds transcript and token writes to the exact active
 // Task or transient lock owner so a stale owner cannot write after takeover.
 type FencedSessionWriteStore interface {
@@ -159,6 +157,7 @@ type GatewayEventStore interface {
 
 // GatewayDeliveryStore handles durable adapter outbox records.
 type GatewayDeliveryStore interface {
+	EnqueueGatewayMessage(ctx context.Context, request GatewayMessageEnqueue) (*GatewayDelivery, bool, error)
 	CreateGatewayDelivery(ctx context.Context, delivery *GatewayDelivery) (*GatewayDelivery, bool, error)
 	GetGatewayDelivery(ctx context.Context, namespace, id string) (*GatewayDelivery, error)
 	ListGatewayDeliveries(ctx context.Context, filter GatewayDeliveryFilter) ([]GatewayDelivery, error)

@@ -66,6 +66,7 @@ const (
 // RepositoryMonitorReconciler reconciles RepositoryMonitor resources.
 type RepositoryMonitorReconciler struct {
 	client.Client
+	APIReader                 client.Reader
 	Scheme                    *runtime.Scheme
 	Store                     store.RepositoryMonitorStore
 	ResultStore               store.ResultStore
@@ -118,7 +119,20 @@ func (r *RepositoryMonitorReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, err
 	}
 
-	return r.reconcileRepositoryMonitorRuns(ctx, monitor, state)
+	if err := r.refreshMonitorUsageOutcomes(ctx, monitor); err != nil {
+		return ctrl.Result{}, err
+	}
+	result, err = r.reconcileRepositoryMonitorRuns(ctx, monitor, state)
+	if err == nil && (result.RequeueAfter == 0 || result.RequeueAfter > usageOutcomeBacklogInterval) {
+		next, pollErr := r.usageOutcomeRequeueAfter(ctx, monitor)
+		if pollErr != nil {
+			return result, pollErr
+		}
+		if next > 0 && (result.RequeueAfter == 0 || next < result.RequeueAfter) {
+			result.RequeueAfter = next
+		}
+	}
+	return result, err
 }
 
 type repositoryMonitorReconcileState struct {
@@ -299,6 +313,29 @@ func defaultRepositoryMonitorCommandLabel(intent string) string {
 	}
 }
 
+// resolveRepositoryMonitorAgent resolves a spec.agents.<role> reference to its
+// Agent, enforcing namespace isolation. A non-empty reason reports a condition
+// the caller should surface; a non-nil error is a transient read failure.
+func (r *RepositoryMonitorReconciler) resolveRepositoryMonitorAgent(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, role string, ref *corev1alpha1.AgentReference) (*corev1alpha1.Agent, string, string, error) {
+	field := "spec.agents." + role
+	reasonPrefix := strings.ToUpper(role[:1]) + role[1:]
+	agentNamespace := strings.TrimSpace(ref.Namespace)
+	if agentNamespace == "" {
+		agentNamespace = monitor.Namespace
+	}
+	if r.EnforceNamespaceIsolation && agentNamespace != monitor.Namespace {
+		return nil, reasonPrefix + "NamespaceInvalid", fmt.Sprintf("%s namespace %q must match monitor namespace %q when namespace isolation is enforced", field, agentNamespace, monitor.Namespace), nil
+	}
+	agent := &corev1alpha1.Agent{}
+	if err := r.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: agentNamespace}, agent); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, reasonPrefix + "AgentNotFound", fmt.Sprintf("%s %q not found in namespace %q", field, ref.Name, agentNamespace), nil
+		}
+		return nil, "", "", err
+	}
+	return agent, "", "", nil
+}
+
 func (r *RepositoryMonitorReconciler) validateRepositoryMonitorReviewerAgent(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (string, string, error) {
 	if !repositoryMonitorPullRequestsEnabled(monitor.Spec) {
 		return "", "", nil
@@ -307,20 +344,9 @@ func (r *RepositoryMonitorReconciler) validateRepositoryMonitorReviewerAgent(ctx
 	if reviewer == nil || strings.TrimSpace(reviewer.Name) == "" {
 		return "", "", nil
 	}
-	agentNamespace := reviewer.Namespace
-	if agentNamespace == "" {
-		agentNamespace = monitor.Namespace
-	}
-	if r.EnforceNamespaceIsolation && agentNamespace != monitor.Namespace {
-		return "ReviewerNamespaceInvalid", fmt.Sprintf("spec.agents.reviewer namespace %q must match monitor namespace %q when namespace isolation is enforced", agentNamespace, monitor.Namespace), nil
-	}
-
-	var agent corev1alpha1.Agent
-	if err := r.Get(ctx, types.NamespacedName{Name: reviewer.Name, Namespace: agentNamespace}, &agent); err != nil {
-		if apierrors.IsNotFound(err) {
-			return "ReviewerAgentNotFound", fmt.Sprintf("spec.agents.reviewer %q not found in namespace %q", reviewer.Name, agentNamespace), nil
-		}
-		return "", "", err
+	agent, reason, message, err := r.resolveRepositoryMonitorAgent(ctx, monitor, "reviewer", reviewer)
+	if reason != "" || err != nil {
+		return reason, message, err
 	}
 	if agent.Spec.Runtime == nil {
 		return repositoryMonitorReasonUnsupportedReviewerAgent, fmt.Sprintf("spec.agents.reviewer %q must use a built-in claude, codex, or opencode runtime for read-only repository monitor reviews", reviewer.Name), nil
@@ -331,13 +357,13 @@ func (r *RepositoryMonitorReconciler) validateRepositoryMonitorReviewerAgent(ctx
 	switch agent.Spec.Runtime.Type {
 	case corev1alpha1.AgentRuntimeClaude, corev1alpha1.AgentRuntimeCodex:
 	case corev1alpha1.AgentRuntimeOpencode:
-		if err := ValidateOpenCodeAgentSpec(&agent); err != nil {
+		if err := ValidateOpenCodeAgentSpec(agent); err != nil {
 			return repositoryMonitorReasonUnsupportedReviewerAgent, fmt.Sprintf("spec.agents.reviewer %q has an invalid OpenCode configuration: %v", reviewer.Name, err), nil
 		}
 	default:
 		return repositoryMonitorReasonUnsupportedReviewerAgent, fmt.Sprintf("spec.agents.reviewer %q runtime %q is not supported for read-only repository monitor reviews; use claude, codex, or opencode", reviewer.Name, agent.Spec.Runtime.Type), nil
 	}
-	if err := validateBuiltInACPAgentCredentialSecretRef(&agent); err != nil {
+	if err := validateBuiltInACPAgentCredentialSecretRef(agent); err != nil {
 		return repositoryMonitorReasonReviewerCredentialsInvalid, fmt.Sprintf("spec.agents.reviewer %q must omit spec.secretRef; provider credentials are supplied by the controller-managed runtime proxy", reviewer.Name), nil
 	}
 	return "", "", nil
@@ -355,19 +381,9 @@ func (r *RepositoryMonitorReconciler) validateRepositoryMonitorImplementerAgent(
 	if ref == nil || strings.TrimSpace(ref.Name) == "" {
 		return "", "", nil
 	}
-	agentNamespace := strings.TrimSpace(ref.Namespace)
-	if agentNamespace == "" {
-		agentNamespace = monitor.Namespace
-	}
-	if r.EnforceNamespaceIsolation && agentNamespace != monitor.Namespace {
-		return "ImplementerNamespaceInvalid", fmt.Sprintf("spec.agents.implementer namespace %q must match monitor namespace %q when namespace isolation is enforced", agentNamespace, monitor.Namespace), nil
-	}
-	var agent corev1alpha1.Agent
-	if err := r.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: agentNamespace}, &agent); err != nil {
-		if apierrors.IsNotFound(err) {
-			return "ImplementerAgentNotFound", fmt.Sprintf("spec.agents.implementer %q not found in namespace %q", ref.Name, agentNamespace), nil
-		}
-		return "", "", err
+	agent, reason, message, err := r.resolveRepositoryMonitorAgent(ctx, monitor, "implementer", ref)
+	if reason != "" || err != nil {
+		return reason, message, err
 	}
 	if agent.Spec.Runtime == nil {
 		return repositoryMonitorReasonUnsupportedImplementerAgent, fmt.Sprintf("spec.agents.implementer %q must configure a CLI runtime", ref.Name), nil
@@ -377,7 +393,7 @@ func (r *RepositoryMonitorReconciler) validateRepositoryMonitorImplementerAgent(
 	}
 	switch agent.Spec.Runtime.Type {
 	case corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude:
-		if err := validateBuiltInACPAgentCredentialSecretRef(&agent); err != nil {
+		if err := validateBuiltInACPAgentCredentialSecretRef(agent); err != nil {
 			return repositoryMonitorReasonImplementerAuthInvalid, fmt.Sprintf("spec.agents.implementer %q must omit spec.secretRef; provider credentials are supplied by the controller-managed runtime proxy", ref.Name), nil
 		}
 		return "", "", nil
@@ -416,19 +432,9 @@ func (r *RepositoryMonitorReconciler) validateRepositoryMonitorIssueReadOnlyAgen
 func (r *RepositoryMonitorReconciler) validateRepositoryMonitorIssueReadOnlyAgent(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, role string, ref *corev1alpha1.AgentReference) (string, string, error) {
 	field := "spec.agents." + role
 	reasonPrefix := strings.ToUpper(role[:1]) + role[1:]
-	agentNamespace := strings.TrimSpace(ref.Namespace)
-	if agentNamespace == "" {
-		agentNamespace = monitor.Namespace
-	}
-	if r.EnforceNamespaceIsolation && agentNamespace != monitor.Namespace {
-		return reasonPrefix + "NamespaceInvalid", fmt.Sprintf("%s namespace %q must match monitor namespace %q when namespace isolation is enforced", field, agentNamespace, monitor.Namespace), nil
-	}
-	var agent corev1alpha1.Agent
-	if err := r.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: agentNamespace}, &agent); err != nil {
-		if apierrors.IsNotFound(err) {
-			return reasonPrefix + "AgentNotFound", fmt.Sprintf("%s %q not found in namespace %q", field, ref.Name, agentNamespace), nil
-		}
-		return "", "", err
+	agent, reason, message, err := r.resolveRepositoryMonitorAgent(ctx, monitor, role, ref)
+	if reason != "" || err != nil {
+		return reason, message, err
 	}
 	if agent.Spec.Runtime == nil {
 		runtimeType := corev1alpha1.AgentRuntimeType("")
@@ -439,14 +445,14 @@ func (r *RepositoryMonitorReconciler) validateRepositoryMonitorIssueReadOnlyAgen
 	}
 	switch agent.Spec.Runtime.Type {
 	case corev1alpha1.AgentRuntimeOpencode:
-		if err := ValidateOpenCodeAgentSpec(&agent); err != nil {
+		if err := ValidateOpenCodeAgentSpec(agent); err != nil {
 			return "Unsupported" + reasonPrefix + "Agent", fmt.Sprintf("%s %q has an invalid OpenCode configuration: %v", field, ref.Name, err), nil
 		}
 	case corev1alpha1.AgentRuntimeClaude:
 	default:
 		return "Unsupported" + reasonPrefix + "Agent", fmt.Sprintf("%s %q runtime %q is not supported for read-only repository monitor tasks; use claude or opencode", field, ref.Name, agent.Spec.Runtime.Type), nil
 	}
-	if err := validateBuiltInACPAgentCredentialSecretRef(&agent); err != nil {
+	if err := validateBuiltInACPAgentCredentialSecretRef(agent); err != nil {
 		return reasonPrefix + "CredentialsInvalid", fmt.Sprintf("%s %q must omit spec.secretRef; provider credentials are supplied by the controller-managed runtime proxy", field, ref.Name), nil
 	}
 	return "", "", nil
@@ -460,7 +466,7 @@ func repositoryMonitorGitSecretHasToken(secret *corev1.Secret) bool {
 	if secret == nil {
 		return false
 	}
-	for _, key := range []string{"token", "password", workerenv.GitHubToken} {
+	for _, key := range []string{defaultACPWorkspaceCredentialKey, "password", workerenv.GitHubToken} {
 		if value := strings.TrimSpace(string(secret.Data[key])); value != "" {
 			return true
 		}
@@ -519,7 +525,8 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorRuns(ctx context
 
 	var queuedRun *store.MonitorRun
 	requeueAfter := time.Duration(0)
-	if pendingReviews {
+	// Completed reviews still need publication retries while scheduled runs are suspended.
+	if pendingReviews || publishedReviews {
 		requeueAfter = repositoryMonitorValidationRetry
 	}
 	if state.suspended {
@@ -584,14 +591,7 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorRuns(ctx context
 			message = "Scheduled repository monitor run queued"
 		}
 		m.Status.ObservedGeneration = m.Generation
-		meta.SetStatusCondition(&m.Status.Conditions, metav1.Condition{
-			Type:               "Ready",
-			Status:             metav1.ConditionTrue,
-			Reason:             reason,
-			Message:            message,
-			LastTransitionTime: metav1.Now(),
-			ObservedGeneration: m.Generation,
-		})
+		meta.SetStatusCondition(&m.Status.Conditions, readyCondition(m.Generation, metav1.ConditionTrue, reason, message))
 	}); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -619,14 +619,7 @@ func (r *RepositoryMonitorReconciler) updateRepositoryMonitorNotReadyCondition(c
 	return r.updateStatusWithRetry(ctx, monitor, func(m *corev1alpha1.RepositoryMonitor) {
 		m.Status.Phase = phase
 		m.Status.ObservedGeneration = m.Generation
-		meta.SetStatusCondition(&m.Status.Conditions, metav1.Condition{
-			Type:               "Ready",
-			Status:             metav1.ConditionFalse,
-			Reason:             reason,
-			Message:            message,
-			LastTransitionTime: metav1.Now(),
-			ObservedGeneration: m.Generation,
-		})
+		meta.SetStatusCondition(&m.Status.Conditions, readyCondition(m.Generation, metav1.ConditionFalse, reason, message))
 	})
 }
 
@@ -788,7 +781,7 @@ func (r *RepositoryMonitorReconciler) processNextQueuedMonitorRun(ctx context.Co
 	if processErr != nil {
 		failureState := repositoryMonitorRunFailureState(processErr)
 		if strings.TrimSpace(run.CommandEventID) == "" && repositoryMonitorFailedCommandRunRetryable("["+failureState+"]") {
-			events, _, listErr := r.Store.ListMonitorEvents(ctx, store.MonitorEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, RunID: run.ID, EventType: "run_failed", Limit: repositoryMonitorCommandMaxRetries})
+			events, _, listErr := r.Store.ListMonitorEvents(ctx, store.MonitorEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, RunID: run.ID, EventType: repositoryMonitorRunFailurePermanent, Limit: repositoryMonitorCommandMaxRetries})
 			if listErr != nil {
 				return nil, 0, listErr
 			}
@@ -800,7 +793,7 @@ func (r *RepositoryMonitorReconciler) processNextQueuedMonitorRun(ctx context.Co
 				if err := r.Store.UpdateMonitorRun(ctx, &run); err != nil {
 					return nil, 0, err
 				}
-				if eventErr := r.createMonitorEvent(ctx, monitor, run.ID, "", 0, "", "run_failed", repositoryScanConditionMessage(processErr.Error(), "repository monitor run failed; retry scheduled"), map[string]any{"state": failureState}); eventErr != nil {
+				if eventErr := r.createMonitorEvent(ctx, monitor, run.ID, "", 0, "", repositoryMonitorRunFailurePermanent, repositoryScanConditionMessage(processErr.Error(), "repository monitor run failed; retry scheduled"), map[string]any{stateField: failureState}); eventErr != nil {
 					return nil, 0, eventErr
 				}
 				return &run, repositoryMonitorCommandRetryDelay, nil
@@ -814,7 +807,7 @@ func (r *RepositoryMonitorReconciler) processNextQueuedMonitorRun(ctx context.Co
 			return nil, 0, err
 		}
 		metrics.RecordRepositoryMonitorBlock(failureState)
-		if eventErr := r.createMonitorEvent(ctx, monitor, run.ID, "", 0, "", "run_failed", repositoryScanConditionMessage(processErr.Error(), "repository monitor run failed"), map[string]any{"state": failureState}); eventErr != nil {
+		if eventErr := r.createMonitorEvent(ctx, monitor, run.ID, "", 0, "", repositoryMonitorRunFailurePermanent, repositoryScanConditionMessage(processErr.Error(), "repository monitor run failed"), map[string]any{stateField: failureState}); eventErr != nil {
 			return nil, 0, eventErr
 		}
 		return &run, 0, nil
@@ -859,9 +852,9 @@ func (r *RepositoryMonitorReconciler) failStaleRunningMonitorRun(ctx context.Con
 	if err := r.Store.UpdateMonitorRun(ctx, &run); err != nil {
 		return nil, 0, err
 	}
-	if err := r.createMonitorEvent(ctx, monitor, run.ID, "", 0, "", "run_failed", run.Error, map[string]any{
-		"reason":  "stale_running_run",
-		"timeout": repositoryMonitorRunningRunTimeout.String(),
+	if err := r.createMonitorEvent(ctx, monitor, run.ID, "", 0, "", repositoryMonitorRunFailurePermanent, run.Error, map[string]any{
+		eventReasonField: "stale_running_run",
+		"timeout":        repositoryMonitorRunningRunTimeout.String(),
 	}); err != nil {
 		run.Error = fmt.Sprintf("%s; additionally failed to record recovery event: %v", run.Error, err)
 	}
@@ -889,7 +882,7 @@ func repositoryMonitorRunFailureState(err error) string {
 			return repositoryMonitorRunRetryScheduled
 		}
 		if ghErr.StatusCode >= 400 && ghErr.StatusCode < 500 {
-			return "run_failed"
+			return repositoryMonitorRunFailurePermanent
 		}
 	}
 	if errors.Is(err, io.EOF) {
@@ -936,7 +929,7 @@ func (r *RepositoryMonitorReconciler) updateStatusAfterMonitorRun(ctx context.Co
 		m.Status.ObservedGeneration = m.Generation
 
 		condition := metav1.Condition{
-			Type:               "Ready",
+			Type:               conditionReasonReady,
 			LastTransitionTime: metav1.Now(),
 			ObservedGeneration: m.Generation,
 		}
@@ -1050,6 +1043,9 @@ func (r *RepositoryMonitorReconciler) updateStatusWithRetry(ctx context.Context,
 
 // SetupWithManager sets up the controller with the manager.
 func (r *RepositoryMonitorReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.RepositoryMonitor{}).
 		Owns(&corev1alpha1.Task{}).

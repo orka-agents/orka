@@ -2,8 +2,6 @@ package controller
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +16,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/store"
 	ateapipb "github.com/orka-agents/orka/internal/substratepb"
 	"github.com/orka-agents/orka/internal/workspace"
 	"google.golang.org/grpc/codes"
@@ -493,12 +492,12 @@ func nativeSubstrateControlAuthenticationRejected(err error) bool {
 }
 
 func (r *RuntimePoolReconciler) nativeSubstrateDesiredTemplate(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig, record *substrateNativeState, auth *corev1.Secret) (*unstructured.Unstructured, substrateRuntimeTemplateRender, error) {
-	store := r.substrateTemplates()
-	previous, err := store.Get(ctx, record.Atespace, runtimePoolSubstrateTemplateName(cfg.baseName))
+	templateStore := r.substrateTemplates()
+	previous, err := templateStore.Get(ctx, record.Atespace, runtimePoolSubstrateTemplateName(cfg.baseName))
 	if err != nil {
 		return nil, substrateRuntimeTemplateRender{}, err
 	}
-	base, err := store.Get(ctx, record.Atespace, pool.Spec.ExecutionWorkspace.Substrate.BaseTemplateName)
+	base, err := templateStore.Get(ctx, record.Atespace, pool.Spec.ExecutionWorkspace.Substrate.BaseTemplateName)
 	if err != nil {
 		return nil, substrateRuntimeTemplateRender{}, err
 	}
@@ -603,8 +602,7 @@ func (r *RuntimePoolReconciler) seedNativeSubstrateRuntime(
 		if err != nil {
 			return err
 		}
-		sum := sha256.Sum256(data)
-		digest := "sha256:" + hex.EncodeToString(sum[:])
+		digest := store.CanonicalBytesDigest(data)
 		if existing := record.Attempt.BootstrapChallenge; existing != "" {
 			if existing != digest {
 				return errSubstrateCredentialFenceConflict

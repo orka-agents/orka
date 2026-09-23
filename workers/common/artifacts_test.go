@@ -291,8 +291,8 @@ func TestUploadArtifacts_UploadsFilesToInternalEndpoint(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAMESPACE", "test-ns")
 	t.Setenv("ORKA_TASK_NAME", "test-task")
 
-	if err := UploadArtifacts(); err != nil {
-		t.Fatalf("UploadArtifacts() error = %v", err)
+	if err := UploadArtifactsContext(context.Background()); err != nil {
+		t.Fatalf("UploadArtifactsContext(context.Background()) error = %v", err)
 	}
 
 	if len(received) != 2 {
@@ -321,8 +321,8 @@ func TestUploadArtifacts_URLEscapesFilename(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAMESPACE", "test-ns")
 	t.Setenv("ORKA_TASK_NAME", "test-task")
 
-	if err := UploadArtifacts(); err != nil {
-		t.Fatalf("UploadArtifacts() error = %v", err)
+	if err := UploadArtifactsContext(context.Background()); err != nil {
+		t.Fatalf("UploadArtifactsContext(context.Background()) error = %v", err)
 	}
 	if !strings.Contains(requestURI, "my%20file.txt") {
 		t.Fatalf("request URI = %q, want escaped filename", requestURI)
@@ -339,9 +339,9 @@ func TestUploadArtifactsRejectsSymlinkArtifactRoot(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAMESPACE", "test-ns")
 	t.Setenv("ORKA_TASK_NAME", "test-task")
 
-	err := UploadArtifacts()
+	err := UploadArtifactsContext(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "artifacts directory must not be a symlink") {
-		t.Fatalf("UploadArtifacts() error = %v, want symlink root rejection", err)
+		t.Fatalf("UploadArtifactsContext(context.Background()) error = %v, want symlink root rejection", err)
 	}
 }
 
@@ -355,14 +355,14 @@ func TestUploadArtifacts_ReturnsErrorWhenTotalSizeExceeded(t *testing.T) {
 	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatalf("UploadArtifacts() uploaded %s before enforcing total size", r.URL.Path)
+		t.Fatalf("UploadArtifactsContext(context.Background()) uploaded %s before enforcing total size", r.URL.Path)
 	}))
 	defer srv.Close()
 	t.Setenv("ORKA_CONTROLLER_URL", srv.URL)
 	t.Setenv("ORKA_TASK_NAMESPACE", "test-ns")
 	t.Setenv("ORKA_TASK_NAME", "test-task")
 
-	err := UploadArtifacts()
+	err := UploadArtifactsContext(context.Background())
 	if err == nil {
 		t.Fatal("expected error when total artifact size exceeds limit")
 	}
@@ -392,8 +392,8 @@ func TestUploadArtifacts_SkipsOversizedIndividualFiles(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAMESPACE", "test-ns")
 	t.Setenv("ORKA_TASK_NAME", "test-task")
 
-	if err := UploadArtifacts(); err != nil {
-		t.Fatalf("UploadArtifacts() error = %v", err)
+	if err := UploadArtifactsContext(context.Background()); err != nil {
+		t.Fatalf("UploadArtifactsContext(context.Background()) error = %v", err)
 	}
 
 	if len(uploaded) != 1 {
@@ -433,7 +433,10 @@ func TestDoPostWithContentTypePermanentRejectionDoesNotRetry(t *testing.T) {
 	}))
 	defer srv.Close()
 	start := time.Now()
-	err := doPostWithContentType(srv.URL, []byte("blob"), "", "application/octet-stream")
+	err := doPostWithRetry(
+		context.Background(), "artifact upload", srv.URL, []byte("blob"), "",
+		"application/octet-stream", 30*time.Second, retryWait, artifactMaxRetries, nil,
+	)
 	if err == nil || !strings.Contains(err.Error(), "rejected permanently") {
 		t.Fatalf("error = %v, want a permanent rejection", err)
 	}

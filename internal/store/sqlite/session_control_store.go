@@ -544,7 +544,7 @@ func (s *Store) ReconcileSessionControl(ctx context.Context, request store.Recon
 
 // CreateSessionTurn opens a durable turn only under its exact active lease.
 func (s *Store) CreateSessionTurn(ctx context.Context, request store.CreateSessionTurnRequest) (*store.SessionTurn, error) {
-	normalized, fence, err := normalizeSessionTurnForCreate(request.Turn, request.Fence)
+	normalized, fence, err := store.NormalizeSessionTurnForCreate(request.Turn, request.Fence)
 	if err != nil {
 		return nil, err
 	}
@@ -560,7 +560,7 @@ func (s *Store) CreateSessionTurn(ctx context.Context, request store.CreateSessi
 		return nil, err
 	}
 	if existing, getErr := getSessionTurn(ctx, tx, normalized.ID); getErr == nil {
-		if sameSessionTurnCreation(existing, normalized) {
+		if store.SameSessionTurnCreation(existing, normalized) {
 			return &existing, nil
 		}
 		return nil, store.ConflictErrorf("session turn %q was reused with different prompt input or request digest", normalized.ID)
@@ -914,64 +914,6 @@ func (s *Store) ResumeSessionTurnFinalization(ctx context.Context, request store
 	return &turn, nil
 }
 
-func normalizeSessionTurnForCreate(turn store.SessionTurn, fence store.ControllerEpochFence) (store.SessionTurn, store.ControllerEpochFence, error) {
-	turn.Key.SessionUID = strings.TrimSpace(turn.Key.SessionUID)
-	turn.Key.TaskUID = strings.TrimSpace(turn.Key.TaskUID)
-	turn.Key.PromptID = strings.TrimSpace(turn.Key.PromptID)
-	if err := turn.Key.Validate(); err != nil {
-		return store.SessionTurn{}, store.ControllerEpochFence{}, err
-	}
-	canonicalID, err := turn.Key.CanonicalID()
-	if err != nil {
-		return store.SessionTurn{}, store.ControllerEpochFence{}, err
-	}
-	turn.ID = strings.TrimSpace(turn.ID)
-	if turn.ID == "" {
-		turn.ID = canonicalID
-	}
-	if turn.ID != canonicalID {
-		return store.SessionTurn{}, store.ControllerEpochFence{}, store.ValidationErrorf("session turn ID must equal canonical ID %q", canonicalID)
-	}
-	turn.PromptAttemptID = strings.TrimSpace(turn.PromptAttemptID)
-	if err := store.ValidateControlIdentifier("prompt attempt ID", turn.PromptAttemptID); err != nil {
-		return store.SessionTurn{}, store.ControllerEpochFence{}, err
-	}
-	if err := store.ValidateCanonicalDigest("session turn request digest", turn.RequestDigest); err != nil {
-		return store.SessionTurn{}, store.ControllerEpochFence{}, err
-	}
-	if strings.TrimSpace(turn.UserPrompt) == "" {
-		return store.SessionTurn{}, store.ControllerEpochFence{}, store.ValidationErrorf("session turn user prompt is required")
-	}
-	if err := store.ValidateControlText("session turn user prompt", turn.UserPrompt); err != nil {
-		return store.SessionTurn{}, store.ControllerEpochFence{}, err
-	}
-	if turn.State == "" {
-		turn.State = store.SessionTurnOpen
-	}
-	if turn.State != store.SessionTurnOpen || turn.TerminalKind != "" || turn.TerminalContent != "" ||
-		turn.FinalizationDigest != "" || turn.PublicationID != "" || turn.PublicationReceipt != nil || turn.FinalizedAt != nil {
-		return store.SessionTurn{}, store.ControllerEpochFence{}, store.ValidationErrorf("new session turn must be open and must not contain finalization data")
-	}
-	fence, err = store.NormalizeEpochFence(fence)
-	if err != nil {
-		return store.SessionTurn{}, store.ControllerEpochFence{}, err
-	}
-	if turn.Version != 0 && turn.Version != 1 {
-		return store.SessionTurn{}, store.ControllerEpochFence{}, store.ValidationErrorf("new session turn version must be zero or one")
-	}
-	now := store.NormalizeControlTime(turn.CreatedAt)
-	turn.CreatedAt = now
-	if turn.UpdatedAt.IsZero() {
-		turn.UpdatedAt = now
-	} else {
-		turn.UpdatedAt = turn.UpdatedAt.UTC()
-	}
-	turn.ControllerEpochName = fence.Name
-	turn.ControllerEpoch = fence.Epoch
-	turn.Version = 1
-	return turn, fence, nil
-}
-
 func baselineColumns(baseline *store.VerifiedBranchBaseline) (string, string, string) {
 	if baseline == nil {
 		return "", "", ""
@@ -982,11 +924,6 @@ func baselineColumns(baseline *store.VerifiedBranchBaseline) (string, string, st
 func sameSessionControlCreation(a, b store.SessionControl) bool {
 	return a.Namespace == b.Namespace && a.SessionName == b.SessionName && a.SessionUID == b.SessionUID &&
 		a.RequestDigest == b.RequestDigest
-}
-
-func sameSessionTurnCreation(a, b store.SessionTurn) bool {
-	return a.ID == b.ID && a.Key == b.Key && a.PromptAttemptID == b.PromptAttemptID &&
-		a.RequestDigest == b.RequestDigest && a.UserPrompt == b.UserPrompt
 }
 
 func sessionLeaseMatches(lease *store.SessionMutationLease, key store.SessionTurnKey) bool {

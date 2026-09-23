@@ -69,10 +69,8 @@ func (r *SessionTurnCleanupReceipt) Validate(namespace, sessionName, turnID stri
 		(r.TerminalKind != SessionTurnAssistantResult && r.TerminalKind != SessionTurnOutcomeMarker) {
 		return ConflictErrorf("Session cleanup receipt has invalid finalized turn evidence")
 	}
-	if r.ProjectionKind != "TaskTerminalStatus" || r.AggregateKind != "SessionTurn" || r.AggregateID != r.TurnID ||
-		r.ProjectionID != CanonicalControlID("outbox", r.TurnID, r.ProjectionKind) ||
-		!json.Valid(r.Payload) || r.PayloadDigest != CanonicalBytesDigest(r.Payload) || r.ProjectionDigest != r.PayloadDigest {
-		return ConflictErrorf("Session cleanup receipt does not pin its terminal projection")
+	if err := r.validateTerminalProjection(); err != nil {
+		return err
 	}
 	switch r.ProjectionState {
 	case OutboxProjectionDelivered:
@@ -88,6 +86,15 @@ func (r *SessionTurnCleanupReceipt) Validate(namespace, sessionName, turnID stri
 	default:
 		return ConflictErrorf("Session cleanup receipt projection is not terminal")
 	}
+}
+
+func (r *SessionTurnCleanupReceipt) validateTerminalProjection() error {
+	if r.ProjectionKind != "TaskTerminalStatus" || r.AggregateKind != "SessionTurn" || r.AggregateID != r.TurnID ||
+		r.ProjectionID != CanonicalControlID("outbox", r.TurnID, r.ProjectionKind) ||
+		!json.Valid(r.Payload) || r.PayloadDigest != CanonicalBytesDigest(r.Payload) || r.ProjectionDigest != r.PayloadDigest {
+		return ConflictErrorf("Session cleanup receipt does not pin its terminal projection")
+	}
+	return nil
 }
 
 // SessionTurn returns only the archived metadata used by finalization checks.

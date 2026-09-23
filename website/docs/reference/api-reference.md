@@ -55,7 +55,7 @@ The controller requires `ORKA_GITHUB_WEBHOOK_SECRET` and verifies the `X-Hub-Sig
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/v1/tasks` | POST | Create a task |
-| `/api/v1/tasks` | GET | List tasks (paginated) |
+| `/api/v1/tasks` | GET | List tasks (paginated; `labelSelector` narrows by label with `kubectl -l` syntax, invalid selectors return 400) |
 | `/api/v1/tasks/:id` | GET | Get task details |
 | `/api/v1/tasks/:id` | DELETE | Cancel/delete task |
 | `/api/v1/tasks/:id/logs` | GET | Stream task logs |
@@ -340,6 +340,7 @@ Repository security endpoints manage `RepositoryScan` configurations and their g
 | `/api/v1/security/repositories/:name/threat-model` | PUT | Update threat model |
 | `/api/v1/security/repositories/:name/scans` | GET | List scan runs |
 | `/api/v1/security/repositories/:name/scans` | POST | Trigger manual scan |
+| `/api/v1/security/repositories/:name/scans/:scanID/progress` | GET | Per-stage Task counts for one scan run (see below) |
 | `/api/v1/security/repositories/:name/slices` | GET | List deterministic review slices |
 | `/api/v1/security/repositories/:name/slices/:sliceID` | GET | Get review slice details |
 | `/api/v1/security/repositories/:name/dropped-findings` | GET | List v2 dropped-finding diagnostics |
@@ -363,6 +364,15 @@ Common query parameters:
 - `scanRunID`, `sliceID`, `layer` — filters for `GET /api/v1/security/repositories/:name/dropped-findings`. `layer` is one of `validation`, `filter`, or `cap`.
 - `reason` — exact dropped-finding reason filter; use `reason=contains=<text>` for substring matching.
 - `recommended=true` — filters findings to recommended remediation candidates.
+
+`GET /api/v1/security/repositories/:name/scans/:scanID/progress` returns the scan run,
+`complete` (whether the run has finished), and `stages`: one entry per pipeline stage in
+order (`threat-model`, `mapper`, `review`, `validation`, `patch`) with `label`, `tasks`,
+`pending`, `running`, `succeeded`, `failed`, `cancelled`, and `failedTasks` (the names of
+failed and cancelled Tasks). The server groups the run's Tasks by their
+`orka.ai/security-scan-id` and `orka.ai/security-stage` labels under its own identity, so
+the caller needs the same security read permission as listing scan runs and no Task list
+permission. Stages the scan has not reached yet are present with zero counts.
 
 ### Create repository scan
 
