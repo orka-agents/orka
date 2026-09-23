@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.10.1">
 <title data-rh="true">Human approval for v2 tools | Orka</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orka-agents.github.io/orka/docs/guides/human-approval-v2"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Human approval for v2 tools | Orka"><meta data-rh="true" name="description" content="Review an exact AgentKit or Foundry tool call before Orka executes it."><meta data-rh="true" property="og:description" content="Review an exact AgentKit or Foundry tool call before Orka executes it."><link data-rh="true" rel="canonical" href="https://orka-agents.github.io/orka/docs/guides/human-approval-v2"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/guides/human-approval-v2" hreflang="en"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/guides/human-approval-v2" hreflang="x-default"><link rel="stylesheet" href="/orka/assets/css/styles.57c51b49.css">
-<script src="/orka/assets/js/runtime~main.6f609c10.js" defer="defer"></script>
+<script src="/orka/assets/js/runtime~main.7b289123.js" defer="defer"></script>
 <script src="/orka/assets/js/main.9267f4c3.js" defer="defer"></script>
 </head>
 <body>
@@ -45,6 +45,11 @@ redacted and oversized previews are bounded. The original executable inputs
 remain private; the preview is never used as execution input.</p>
 <p>The same records and decisions are available through the existing API:</p>
 <div class="language-http codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#393A34;--prism-background-color:#f6f8fa"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-http codeBlock_bY9V thin-scrollbar" style="color:#393A34;background-color:#f6f8fa"><code class="codeBlockLines_e6Vv"><div class="token-line" style="color:#393A34"><span class="token plain">GET /api/v1/tasks/:id/approvals?namespace=&lt;ns&gt;</span><br></div><div class="token-line" style="color:#393A34"><span class="token plain" style="display:inline-block"></span><br></div><div class="token-line" style="color:#393A34"><span class="token plain">POST /api/v1/tasks/:id/approvals/:approvalID/decision?namespace=&lt;ns&gt;</span><br></div><div class="token-line" style="color:#393A34"><span class="token plain">Content-Type: application/json</span><br></div><div class="token-line" style="color:#393A34"><span class="token plain" style="display:inline-block"></span><br></div><div class="token-line" style="color:#393A34"><span class="token plain">{&quot;decision&quot;:&quot;approve&quot;,&quot;reason&quot;:&quot;Reviewed the asset and quantity&quot;}</span><br></div></code></pre></div></div>
+<p>The list response names the Task it was filtered against (<code>taskUID</code>), its
+phase at that same read (<code>taskPhase</code>), and whether it is being deleted
+(<code>taskDeleting</code>), so a poller such as <code>orka task approvals --watch</code> can tell
+whether a pending request can still be decided without a second lookup by
+name. Decisions are refused for finished and deleting Tasks.</p>
 <p>Use <code>decline</code> to reject the action. Reviewers need <code>update</code> on
 <code>core.orka.ai/tasks/approvals</code> and <code>patch</code> on the parent Task. Gateway-owned
 Tasks also enforce their existing operate permission. See the

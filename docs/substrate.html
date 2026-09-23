@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.10.1">
 <title data-rh="true">Agent Substrate workspaces | Orka</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orka-agents.github.io/orka/docs/substrate"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Agent Substrate workspaces | Orka"><meta data-rh="true" name="description" content="Agent Substrate execution, data-only suspension, checkpoints, and cold restore."><meta data-rh="true" property="og:description" content="Agent Substrate execution, data-only suspension, checkpoints, and cold restore."><link data-rh="true" rel="canonical" href="https://orka-agents.github.io/orka/docs/substrate"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/substrate" hreflang="en"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/substrate" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Agent Substrate workspaces","item":"https://orka-agents.github.io/orka/docs/substrate"}]}</script><link rel="stylesheet" href="/orka/assets/css/styles.57c51b49.css">
-<script src="/orka/assets/js/runtime~main.6f609c10.js" defer="defer"></script>
+<script src="/orka/assets/js/runtime~main.7b289123.js" defer="defer"></script>
 <script src="/orka/assets/js/main.9267f4c3.js" defer="defer"></script>
 </head>
 <body>
@@ -169,6 +169,12 @@ waits for suspension and never interrupts an attached Task. When Ready, the
 checkpoint exposes an immutable digest, class revision, and timestamp, without
 native identifiers or storage URLs. Its private reference keeps the Data Tag
 and original template alive after source workspace deletion.</p>
+<p>The digest is the checkpoint&#x27;s identity for restore, so <code>kubectl get</code> shows it
+next to the phase without extra flags:</p>
+<div class="language-console codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#393A34;--prism-background-color:#f6f8fa"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-console codeBlock_bY9V thin-scrollbar" style="color:#393A34;background-color:#f6f8fa"><code class="codeBlockLines_e6Vv"><div class="token-line" style="color:#393A34"><span class="token plain">$ kubectl -n team get executionworkspacecheckpoint before-refactor</span><br></div><div class="token-line" style="color:#393A34"><span class="token plain">NAME              WORKSPACE        PHASE   DIGEST                                                                  AGE</span><br></div><div class="token-line" style="color:#393A34"><span class="token plain">before-refactor   workspace-name   Ready   sha256:3f1c0d9a7b2e4c6d8f0a1b3c5d7e9f2a4b6c8d0e1f3a5b7c9d0e2f4a6b8c0d2   2m</span><br></div></code></pre></div></div>
+<p>Helm does not update CRDs during an upgrade, so the column appears once the
+CRDs from the new chart are applied (see
+<a class="" href="/orka/docs/upgrading">Upgrading</a>).</p>
 <p>If the source workspace disappears before Orka acquires that private reference,
 export fails with phase <code>Failed</code> and reason <code>SourceMissing</code>. Temporary read
 errors leave the checkpoint <code>Pending</code> with reason <code>SourceUnavailable</code> so Orka
