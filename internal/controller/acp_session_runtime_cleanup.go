@@ -37,7 +37,9 @@ type sessionRuntimeCleanupTarget struct {
 
 // sessionRuntimeCleanupFence separates the current cleanup owner from the
 // immutable terminal execution's resident runtime. Cleanup may use this older
-// runtime epoch; it grants no admission or publication authority.
+// runtime epoch. It never grants admission. Session teardown fences permit
+// only exact deletion; a standalone terminal fence may additionally finalize
+// the evidence-bound publication that must precede that deletion.
 type sessionRuntimeCleanupFence struct {
 	controller   store.ControllerEpochFence
 	runtimeEpoch uint64

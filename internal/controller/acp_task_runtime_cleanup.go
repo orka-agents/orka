@@ -13,8 +13,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// standaloneRuntimeCleanupFence grants only exact session deletion under an
-// older runtime epoch. Mutable Task status never supplies that authority: the
+// standaloneRuntimeCleanupFence grants exact session deletion, preceded when
+// necessary by evidence-bound publication finalization, under an older runtime
+// epoch. Mutable Task status never supplies that authority: the
 // terminal attempt, immutable projection and frozen execution binding must
 // agree, and every mutation revalidates those records under the current owner.
 func (d *ACPDispatcher) standaloneRuntimeCleanupFence(
