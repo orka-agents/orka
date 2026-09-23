@@ -3892,6 +3892,7 @@ the filters, so "what did the agent say last?" is:
   ApprovalDeclined
   ApprovalExpired
   ApprovalCancelled
+  ApprovalExecutionUpdated
   PlanUpdated
 
 Usage:
@@ -4704,6 +4705,7 @@ the filters, so "what did the agent say last?" is:
   ApprovalDeclined
   ApprovalExpired
   ApprovalCancelled
+  ApprovalExecutionUpdated
   PlanUpdated
 
 Usage:
