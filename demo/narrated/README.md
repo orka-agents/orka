@@ -40,19 +40,42 @@ container serves `qwen3-tts` on `http://127.0.0.1:18080`. The AIKit configuratio
 is on branch `feat/qwen3-tts-spec` in the AIKit checkout. Do not switch a
 checkout carrying other work just to read that branch.
 
+For a continuous performance, pass the whole script to Qwen once per video.
+Keep the voice reference and its identity file in durable, ignored production
+storage. The identity file records the reference path/hash, container image ID,
+and model configuration path/hash. A new reference or changed script needs a
+new take directory.
+
 ```sh
-python3 demo/narrated/prepare.py plan
-python3 demo/06-hackathon/audio/generate_voiceover.py \
-  --manifest bin/narrated-demos/narration.json \
-  --output-dir bin/narrated-demos/audio
-python3 demo/narrated/prepare.py render --jobs 2
+python3 demo/narrated/continuous_voice.py generate \
+  --output-dir bin/narrated-demos/continuous/EDITION \
+  --identity bin/PRODUCTION/voice-reference/identity.json
+bin/narrated-demos/qa-venv/bin/python demo/narrated/align_voice.py \
+  bin/narrated-demos/continuous/EDITION/01-chat-to-pr
+python3 demo/narrated/prepare.py render 01-chat-to-pr \
+  --continuous-dir bin/narrated-demos/continuous/EDITION --jobs 2
 ```
 
-The existing generator is reused as a helper; this does not produce either
-hackathon video. It retains the speech request, raw WAV, normalized 48 kHz WAV,
-and generation metadata. Audio is normalized to −16 LUFS with a −1.5 dB true-peak
-target. Preparation adds silence only to align each clip to an exact video
-frame. It never cuts speech to fit a scene.
+Replace `EDITION` and `PRODUCTION` with the current production paths. Add demo
+IDs after `generate` to select particular videos. Generation is sequential and
+sends one complete script in each request. It retains the request, source WAV,
+normalized 48 kHz WAV, reference/model identities, and generation metadata.
+Audio is normalized to −16 LUFS with a −1.5 dB true-peak target.
+
+The alignment command transcribes locally and proposes chapter boundaries in
+measured silence. Inspect the expected text, transcript, figures, ending, and
+boundary positions before marking `alignment.json`'s `review.status` as
+`accepted`. Record the review method and evidence there. Resolve uncertain
+recognition results with listening or a second local recognizer. The renderer
+rejects unreviewed or stale alignment. It copies every sample of the complete
+performance in order and adds silence only at scene boundaries for reading
+time. The final Resolve timeline has one narration clip. Speech is never
+accelerated or trimmed to fit the terminal.
+
+The earlier per-chapter workflow remains available through `prepare.py plan`,
+the shared `demo/06-hackathon/audio/generate_voiceover.py` helper, and
+`prepare.py render` without `--continuous-dir`. Using that shared helper does
+not add the hackathon videos to the collection.
 
 Rendering needs Python with Pillow, FFmpeg, `agg`, and the installed SF Pro
 Display and SF Mono fonts. A demo ID after `render` selects one demo. Matching
@@ -70,8 +93,9 @@ python3 demo/narrated/resolve.py --prepare-lua \
   bin/narrated-demos/01-chat-to-pr/manifest.json --sandbox
 ```
 
-Run the printed `dofile(...)` command in Resolve's internal Lua Console,
-available under Workspace > Console. The script creates a new project and
+Run the printed `dofile(...)` command through a uniquely named Lua wrapper
+in Resolve's Fusion `Scripts/Utility` directory, using Workspace > Scripts.
+The internal Lua Console is an alternative when it is accessible. The script creates a new project and
 timeline, imports each scene and narration clip, checks their exact positions,
 saves and exports the project, and starts the render. It does not modify the
 previous project or application scripting preferences. Existing exports are
@@ -104,6 +128,8 @@ bin/narrated-demos/qa-venv/bin/python demo/narrated/check_audio.py
 bin/narrated-demos/qa-venv/bin/python demo/narrated/check_export.py 01-chat-to-pr
 ```
 
+For continuous takes, use `align_voice.py` and the accepted alignment review
+instead of `check_audio.py`, which checks the earlier per-chapter layout.
 Speech recognition runs locally. Inspect flagged transcripts for omissions,
 repetitions, or clipped endings. A transcript match alone is not a listening
 test. The export check decodes the complete file and compares every narration

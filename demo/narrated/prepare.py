@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare genuine terminal captures and separate voice clips for Resolve."""
+"""Prepare genuine terminal captures and narration for Resolve."""
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
@@ -17,6 +17,8 @@ ROOT = Path(__file__).resolve().parents[2]
 OUTPUT = ROOT / "bin/narrated-demos"
 STORYBOARD = Path(__file__).with_name("storyboard.json")
 WIDTH, HEIGHT, FPS = 1920, 1080, 30
+AUDIO_RATE, AUDIO_LEAD_FRAMES = 48000, 18
+SAMPLES_PER_FRAME = AUDIO_RATE // FPS
 BACKGROUND = "#1c1e20"
 WHITE, MUTED, ACCENT = "#f4f2ec", "#b1b4ba", "#e8a1ee"
 FONT = Path("/Library/Fonts/SF-Pro-Display-Regular.otf")
@@ -176,6 +178,118 @@ def frame_audio(voice, scene_dir):
     return padded, frames, metadata
 
 
+def checked_artifact(value, label):
+    require(isinstance(value, dict), "Missing artifact: " + label)
+    require(isinstance(value.get("path"), str) and Path(value["path"]).is_absolute(),
+            "Expected an absolute artifact path: " + label)
+    path = Path(value["path"])
+    require(path.is_file(), "Missing artifact file: " + str(path))
+    require(digest(path) == value.get("sha256"), "Artifact digest changed: " + label)
+    return path
+
+
+def read_continuous_alignment(demo, path, source_sha):
+    """Validate a reviewed partition of one complete narration performance."""
+    path = Path(path).resolve()
+    raw = path.read_bytes()
+    alignment = json.loads(raw)
+    require(isinstance(alignment, dict), "Expected a continuous narration alignment object")
+    require(type(alignment.get("version")) is int and alignment["version"] == 1,
+            "Expected continuous narration alignment version 1")
+    require(alignment.get("demo_id") == demo["id"], "Alignment belongs to another demo")
+    voices = list(voice_scenes(demo))
+    require(alignment.get("text") == "\n\n".join(voice["text"] for voice in voices),
+            "Continuous narration does not match storyboard: " + demo["id"])
+    require(isinstance(alignment.get("method"), str) and alignment["method"].strip(),
+            "Missing continuous narration alignment method")
+    require(isinstance(alignment.get("review"), dict)
+            and alignment["review"].get("status") == "accepted",
+            "Continuous narration alignment has not been accepted: " + demo["id"])
+    if "source_cast_sha256" in alignment:
+        require(alignment["source_cast_sha256"] == source_sha, "Alignment source cast changed")
+    if "metadata" in alignment:
+        checked_artifact(alignment["metadata"], "narration metadata")
+    sources = alignment.get("sources", [])
+    require(isinstance(sources, list), "Expected a list of narration source artifacts")
+    for index, artifact in enumerate(sources):
+        checked_artifact(artifact, f"narration source {index + 1}")
+    audio_path = checked_artifact(alignment.get("audio"), "continuous narration audio")
+    with wave.open(str(audio_path), "rb") as audio:
+        require((audio.getframerate(), audio.getnchannels(), audio.getsampwidth(), audio.getcomptype())
+                == (AUDIO_RATE, 1, 2, "NONE"), "Expected 48kHz mono PCM16 continuous narration")
+        count = audio.getnframes()
+        samples = audio.readframes(count)
+    require(count > 0 and len(samples) == count * 2, "Empty or truncated continuous narration")
+    scenes = alignment.get("scenes")
+    require(isinstance(scenes, list) and len(scenes) == len(voices),
+            "Continuous narration scene count does not match storyboard")
+    end = 0
+    for voice, scene in zip(voices, scenes):
+        require(isinstance(scene, dict) and scene.get("id") == voice["id"]
+                and scene.get("text") == voice["text"],
+                "Continuous narration scene does not match storyboard: " + voice["id"])
+        start, stop = scene.get("start_sample"), scene.get("end_sample")
+        require(type(start) is int and type(stop) is int and start == end and start < stop <= count,
+                "Continuous narration samples must be nonempty and contiguous: " + voice["id"])
+        end = stop
+    require(end == count, "Continuous narration alignment does not include the complete audio")
+    return {"path": str(path), "sha256": hashlib.sha256(raw).hexdigest(),
+            "alignment": alignment, "samples": samples, "sample_count": count}
+
+
+def write_continuous_audio(continuous, scenes, directory, demo_id):
+    """Keep every original PCM sample, adding only silence between scene slices."""
+    alignment = continuous["alignment"]
+    require(len(scenes) == len(alignment["scenes"]), "Continuous audio scene count changed")
+    path = directory / (demo_id + "-narration.wav")
+    require(path.resolve() != Path(alignment["audio"]["path"]).resolve(),
+            "Rendered narration must not replace its source audio")
+    placements, offset = [], 0
+    for index, (scene, source) in enumerate(zip(scenes, alignment["scenes"])):
+        require(scene["id"] == source["id"], "Continuous audio scene order changed")
+        frames = scene["frames"]
+        count = source["end_sample"] - source["start_sample"]
+        require(type(frames) is int and (frames - AUDIO_LEAD_FRAMES) * SAMPLES_PER_FRAME >= count,
+                "Scene is too short for its complete narration: " + scene["id"])
+        padding = frames * SAMPLES_PER_FRAME - count
+        if index == len(scenes) - 1:
+            padding -= AUDIO_LEAD_FRAMES * SAMPLES_PER_FRAME
+        placements.append({"id": scene["id"], "source_start_sample": source["start_sample"],
+                           "source_end_sample": source["end_sample"],
+                           "output_start_sample": offset * SAMPLES_PER_FRAME,
+                           "output_end_sample": offset * SAMPLES_PER_FRAME + count,
+                           "record_frame": offset + AUDIO_LEAD_FRAMES,
+                           "inserted_silence_samples": padding})
+        offset += frames
+    frames = offset - AUDIO_LEAD_FRAMES
+    temporary = path.with_suffix(".wav.partial")
+    try:
+        with wave.open(str(temporary), "wb") as audio:
+            audio.setnchannels(1)
+            audio.setsampwidth(2)
+            audio.setframerate(AUDIO_RATE)
+            audio.setnframes(frames * SAMPLES_PER_FRAME)
+            for placement in placements:
+                start, stop = placement["source_start_sample"], placement["source_end_sample"]
+                audio.writeframesraw(continuous["samples"][start * 2:stop * 2])
+                audio.writeframesraw(b"\0\0" * placement["inserted_silence_samples"])
+        with wave.open(str(temporary), "rb") as audio:
+            require(audio.getnframes() == frames * SAMPLES_PER_FRAME,
+                    "Continuous narration frame count mismatch")
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    clip = {"path": str(path), "record_frame": AUDIO_LEAD_FRAMES, "frames": frames, "track": 1}
+    report = {"alignment": continuous["path"], "alignment_sha256": continuous["sha256"],
+              "source_audio": alignment["audio"], "source_samples": continuous["sample_count"],
+              "sample_rate": AUDIO_RATE, "samples_per_frame": SAMPLES_PER_FRAME,
+              "output_audio": str(path), "output_sha256": digest(path), "output_frames": frames,
+              "record_frame": AUDIO_LEAD_FRAMES,
+              "inserted_silence_samples": sum(item["inserted_silence_samples"] for item in placements),
+              "scenes": placements}
+    return clip, report
+
+
 def encode(image, output, frames, terminal=None, factor=1.0):
     command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
     if terminal:
@@ -202,7 +316,7 @@ def encode(image, output, frames, terminal=None, factor=1.0):
          "-i", str(output), "-frames:v", "1", str(output.with_suffix(".jpg"))])
 
 
-def render_demo(demo, docs_url):
+def render_demo(demo, docs_url, continuous_dir=None):
     directory = OUTPUT / demo["id"]
     directory.mkdir(parents=True, exist_ok=True)
     cast_path, header, chapters = read_cast(demo)
@@ -210,16 +324,27 @@ def render_demo(demo, docs_url):
     scenes, audio_clips, provenance = [], [], []
     offset = 0
     voices = list(voice_scenes(demo))
+    continuous = (read_continuous_alignment(demo, Path(continuous_dir) / demo["id"] / "alignment.json",
+                                          source_sha) if continuous_dir is not None else None)
     for index, voice in enumerate(voices):
         scene_id = voice["id"]
         is_card = index in (0, len(voices) - 1)
         chapter = None if is_card else demo["chapters"][index - 1]
-        audio_path, audio_frames, audio_metadata = frame_audio(voice, directory)
+        if continuous:
+            audio_scene = continuous["alignment"]["scenes"][index]
+            audio_frames = math.ceil((audio_scene["end_sample"] - audio_scene["start_sample"])
+                                     / SAMPLES_PER_FRAME)
+            voice_sha = continuous["alignment"]["audio"]["sha256"]
+        else:
+            audio_path, audio_frames, _ = frame_audio(voice, directory)
+            voice_sha = digest(audio_path)
         output = directory / (scene_id + ".mp4")
         picture = directory / (scene_id + ".png")
         report_path = directory / (scene_id + ".json")
-        inputs = {"voice_sha256": digest(audio_path), "source_sha256": source_sha,
+        inputs = {"voice_sha256": voice_sha, "source_sha256": source_sha,
                   "demo": demo, "voice": voice, "script_sha256": digest(__file__), "docs_url": docs_url}
+        if continuous:
+            inputs["continuous_alignment_sha256"] = continuous["sha256"]
         report = json.loads(report_path.read_text()) if report_path.exists() else None
         reusable = report and report.get("inputs") == inputs and output.is_file()
         if reusable:
@@ -257,23 +382,33 @@ def render_demo(demo, docs_url):
             encode(picture, output, frames, terminal, factor)
             report = {"id": scene_id, "frames": frames, "inputs": inputs, "video_sha256": digest(output),
                       "playback_speed": 1 / factor,
-                      "source_events": {k: source[k] for k in ("first_event", "last_event")} if source else None,
-                      "audio_metadata": str(OUTPUT / "audio" / (scene_id + "-metadata.json"))}
+                      "source_events": {k: source[k] for k in ("first_event", "last_event")} if source else None}
+            if continuous:
+                report["audio_alignment"] = {"path": continuous["path"], "sha256": continuous["sha256"],
+                                             "start_sample": audio_scene["start_sample"],
+                                             "end_sample": audio_scene["end_sample"]}
+            else:
+                report["audio_metadata"] = str(OUTPUT / "audio" / (scene_id + "-metadata.json"))
             write_json(report_path, report)
         title = chapter["title"] if chapter else demo["title"] if index == 0 else "Explore more and get started"
         scenes.append({"id": scene_id, "title": title, "path": str(output), "frames": frames,
                        "note": "Recorded source: " + str(cast_path) if chapter else voice["text"]})
-        audio_clips.append({"path": str(audio_path), "record_frame": offset + 18,
-                            "frames": audio_frames, "track": 1})
+        if not continuous:
+            audio_clips.append({"path": str(audio_path), "record_frame": offset + AUDIO_LEAD_FRAMES,
+                                "frames": audio_frames, "track": 1})
         provenance.append(report)
         offset += frames
         print(f"{scene_id}: {frames / FPS:.2f}s ready", flush=True)
+    evidence = {"source_cast": str(cast_path), "source_sha256": source_sha,
+                "duration_seconds": offset / FPS, "scenes": provenance}
+    if continuous:
+        clip, evidence["continuous_narration"] = write_continuous_audio(continuous, scenes, directory, demo["id"])
+        audio_clips.append(clip)
     manifest = {"project_name": "Orka " + demo["id"][:2] + " - " + demo["title"],
                 "timeline_name": "Orka " + demo["id"][:2] + " narrated walkthrough",
                 "output_name": demo["id"], "scenes": scenes, "audio": audio_clips}
     write_json(directory / "manifest.json", manifest)
-    write_json(directory / "provenance.json", {"source_cast": str(cast_path), "source_sha256": source_sha,
-               "duration_seconds": offset / FPS, "scenes": provenance})
+    write_json(directory / "provenance.json", evidence)
     print(f"READY {demo['id']}: {offset / FPS:.2f}s", flush=True)
 
 
@@ -282,9 +417,12 @@ def main():
     parser.add_argument("action", choices=["plan", "render"])
     parser.add_argument("demos", nargs="*")
     parser.add_argument("--jobs", type=int, default=1)
+    parser.add_argument("--continuous-dir", type=Path,
+                        help="Render one narration track from PATH/<demo-id>/alignment.json")
     args = parser.parse_args()
     story = read_storyboard()
     if args.action == "plan":
+        require(args.continuous_dir is None, "--continuous-dir is only supported for render")
         plan(story)
         return
     selected = [demo for demo in story["demos"] if not args.demos or demo["id"] in args.demos]
@@ -292,7 +430,7 @@ def main():
             "Unknown demo selection")
     require(1 <= args.jobs <= 4, "Use one to four preparation jobs")
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        futures = [pool.submit(render_demo, demo, story["docs_url"]) for demo in selected]
+        futures = [pool.submit(render_demo, demo, story["docs_url"], args.continuous_dir) for demo in selected]
         for future in futures:
             future.result()
 
