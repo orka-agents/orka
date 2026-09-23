@@ -139,14 +139,15 @@ ok 'The decision is on record: who, what, and why. Orka may now run the stored a
 
 
 chapter "6. The work order comes back to the same Task"
-pe 'wait_task "$task" 600'
+pe 'orka task wait "$task" --timeout 10m'
 orka task get "$task" -o json >raw/task-final.json
 orka task approvals "$task" -o json >raw/approval-final.json
 orka task result "$task" -o json >raw/result.json
 receipts >raw/counts-final.json
 scenario_collect_events "$task" raw/events.json
 fibey_snapshot raw/installation-final.json
-pe 'result "$task" 12'
+pe 'orka task result "$task"'
+
 pe 'counts raw/counts-final.json'
 pe 'python3 "$here/check.py" final'
 ok 'One work order, created after the decision, and its receipt returned to Fibey.'

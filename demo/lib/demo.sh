@@ -232,12 +232,6 @@ helpers_note() {
   aside "Short names such as $* stand in for long kubectl and jq commands; see demo/lib/demo.sh."
 }
 
-# result NAME — the Task's final answer, capped so it fits the terminal.
-
-result() {
-  orka task result "$1" | sed -n "1,${2:-8}p"
-}
-
 # evidence "Label" "Value" ... — the closing table every demo ends on.
 # Values come from the objects the demo queried, never from narration.
 evidence() {

@@ -144,11 +144,11 @@ pe 'orka task get "$first_task"'
 ok "Accepted. Sam's app can check on it with the reference alone."
 
 chapter "Read the recommendation"
-pe 'wait_task "$first_task" 600'
+pe 'orka task wait "$first_task" --timeout 10m'
 wait_event "$event_id" first-completed completed
 pe 'answer "$task_ref" | tee raw/first-answer.txt'
 a2a-client -task-id "$task_ref" >raw/first-answer.json
-pe 'result "$first_task"'
+pe 'orka task result "$first_task"'
 orka task result "$first_task" -o json >raw/first-result.json
 python3 "$evidence" reply raw/first-answer.json raw/first-result.json
 ok "Same answer through A2A and in Orka's record. It used the stock and delivery facts we gave it."
@@ -172,7 +172,8 @@ followup_ref=$(jq -er '.id' raw/followup-admission.json)
 followup_event=$(python3 "$evidence" event-id raw/followup-admission.json)
 wait_event "$followup_event" followup dispatched
 followup_task=$(jq -er '.taskName' raw/followup-event.json)
-pe 'wait_task "$followup_task" 600'
+pe 'orka task wait "$followup_task" --timeout 10m'
+
 wait_event "$followup_event" followup-completed completed
 kubectl -n "$ORKA_NAMESPACE" get task "$followup_task" -o json >raw/followup-task.json
 python3 "$evidence" correlate raw/followup-admission.json raw/followup-completed-event.json raw/followup-task.json

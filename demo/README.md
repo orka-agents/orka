@@ -55,8 +55,9 @@ These keep the recordings readable for someone who has never seen Orka.
   long text on camera.
 - Objects are shown as a few fields, never a full status dump. `orka task
   status` prints Task, Phase, Delivery, and Publication branch.
-- Model answers are capped: prompts ask for short output and `result` shows at
-  most eight lines.
+- Model answers are capped by the prompts, so `orka task result` is shown
+  whole; `head` or `tail` caps the few that may run long.
+
 
 - Prompts contain no apologies for the runtime. They say what to do, not what
   the sandbox lacks.

@@ -124,7 +124,7 @@ wait_task healthz-implement 1800
 kubectl -n "$ORKA_NAMESPACE" get task healthz-implement -o json >"$rendered/first-task.json"
 jq -e '.status.delivery.state == "VerifiedExact"' "$rendered/first-task.json" >/dev/null ||
   { bad "the first request has no VerifiedExact publication"; exit 1; }
-pe "result healthz-implement"
+pe "orka task result healthz-implement"
 say "The agent changed files but never pushed. Orka's Publisher, which alone"
 say "holds a Git token, verified the files, published the branch, and opened"
 say "the pull request. The Task has the receipt."
@@ -181,7 +181,8 @@ grep -Eq '^main\.go:[0-9]+:.*healthz' "$rendered/follow-up-result.txt" &&
 kubectl -n "$ORKA_NAMESPACE" get task healthz-follow-up -o json >"$rendered/follow-up-task.json"
 follow_up_delivery=$(jq -r '.status.delivery.state' "$rendered/follow-up-task.json")
 [[ $follow_up_delivery == NoChange ]] || { bad "the follow-up changed the published tree"; exit 1; }
-pe "result healthz-follow-up"
+pe "orka task result healthz-follow-up"
+
 pe "orka task status healthz-follow-up"
 
 ok "The agent found yesterday's endpoint. Delivery NoChange confirms it had no new changes to publish."

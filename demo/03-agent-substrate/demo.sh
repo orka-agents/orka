@@ -129,10 +129,10 @@ pe "actors"
 say "That Actor is the agent's whole world. No Git credential rides along;"
 say "Orka's Publisher holds it, outside the sandbox."
 wait_task audit-start 1200
-pe "result audit-start"
+pe "orka task result audit-start"
 say "The Publisher verified the files and published the audit as a branch."
 pe "orka task status audit-start"
-pe "git ls-remote $DEMO_REPO refs/heads/$branch | cut -c1-12"
+pe "git ls-remote $DEMO_REPO refs/heads/$branch"
 published_audit audit-start "$branch" "$rendered/original-AUDIT.md"
 ok "Findings written by an agent with no Git token, published by Orka as a branch."
 
@@ -179,7 +179,8 @@ sed "s/CHECKPOINT_UID/$cp_uid/; s/CHECKPOINT_DIGEST/$cp_digest/" "$here/manifest
 pe "request restore-request.yaml"
 pe "orka task create -f restore-request.yaml"
 wait_task audit-restore 1200
-pe "result audit-restore"
+pe "orka task result audit-restore"
+
 published_audit audit-restore "$branch-restored" "$rendered/restored-AUDIT.md"
 if ! cmp -s "$rendered/original-AUDIT.md" "$rendered/restored-AUDIT.md"; then
   bad "the restored audit does not match the original"; exit 1

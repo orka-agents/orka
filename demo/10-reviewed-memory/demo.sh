@@ -36,15 +36,6 @@ for role in author reader; do
 done
 jq -r '.spec.systemPrompt.inline' raw/reader-agent.json >reader-rules.txt
 
-# --- on-camera helpers ---------------------------------------------------
-# answer FILE — the reader's answer.
-answer() {
-  jq -r '.result | fromjson | .answer' "$1"
-}
-# reader_check FILE — what the saved records prove about a reader Task.
-reader_check() {
-  jq -r '"shared conversation: \(.sharedSession)", "tool calls:          \(.toolCalls)"' "$1"
-}
 
 jq -n --arg namespace "$ORKA_NAMESPACE" --arg name "$author" --rawfile note procedure.txt '
   {apiVersion:"core.orka.ai/v1alpha1",kind:"Task",
@@ -66,7 +57,6 @@ banner "Orka — a procedure the next agent can use" \
   "One agent proposes a warehouse note. Jordan reviews and publishes it. A fresh agent then answers from it, with the trail on record."
 say "Jordan runs the warehouse. An assistant just read the return procedure, and"
 say "the next assistant will need it too. Nothing becomes shared until Jordan says so."
-helpers_note answer, reader_check
 
 chapter "1. Today's procedure"
 pe "cat procedure.txt"
@@ -98,9 +88,12 @@ say "conversation history."
 pe "cat question.txt"
 pe "orka task create -f reader-before-task.json | tee raw/before-create.txt"
 capture_task "$before" before
-pe "answer raw/before-result.json"
+say "The reader answers as a small record: whether a reviewed procedure was"
+say "available, the dock, the label, and a sentence for the customer."
+pe "orka task result $before"
 check_evidence before
-pe "reader_check before-evidence.json"
+say "Its events show no tool calls: it did not search for the answer."
+pe "orka task events $before --type ToolCallStarted --type ToolCallCompleted --type ToolCallFailed"
 ok "It does not know, and it did not guess. No tools, no shared conversation."
 
 chapter "4. Jordan reviews and publishes it"
@@ -124,13 +117,14 @@ chapter "5. A fresh agent knows it now"
 say "Same reader, same question, another new Task. No note and no history passed in."
 pe "orka task create -f reader-after-task.json | tee raw/after-create.txt"
 capture_task "$after" after
-pe "answer raw/after-result.json"
+pe "orka task result $after"
 check_evidence after
 orka memory list --limit 200 -o json >raw/memories-after.json
 kubectl -n "$ORKA_NAMESPACE" get agent demo-memory-reader -o json >raw/reader-agent-after.json
 check_evidence summary
-pe "reader_check after-evidence.json"
+pe "orka task events $after --type ToolCallStarted --type ToolCallCompleted --type ToolCallFailed"
 ok "Dock 3 and the right label, from the reviewed note alone."
+
 
 say "Every step above is a record, and the records link to each other."
 pe "cat evidence.txt"

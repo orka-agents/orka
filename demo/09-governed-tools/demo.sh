@@ -116,7 +116,7 @@ gateway_logs raw/gateway-lookup.jsonl
 python3 evidence.py lookup >lookup-evidence.json
 say 'The Task keeps every event. These are the tool calls: what was asked, and what came back.'
 pe 'orka task events "$lookup_task" --type ToolCallStarted --type ToolCallCompleted --type ToolCallFailed'
-pe 'result "$lookup_task"'
+pe 'orka task result "$lookup_task"'
 say "And the supplier's own record of what arrived:"
 pe 'supplier_saw raw/supplier-lookup.json'
 ok 'The lookup reached the supplier with the credential the model never saw.'
@@ -133,7 +133,8 @@ python3 evidence.py order >order-evidence.json
 pe 'orka task events "$order_task" --type ToolCallStarted --type ToolCallCompleted --type ToolCallFailed'
 say 'The gateway had no route for the order, so it refused with HTTP 404.'
 pex 'python3 evidence.py order-result'
-pe 'result "$order_task"'
+pe 'orka task result "$order_task"'
+
 
 pe 'orders_created raw/supplier-after.json'
 ok 'The assistant asked. The platform said no. The supplier never heard about it.'

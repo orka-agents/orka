@@ -110,14 +110,14 @@ say 'one engineering Task, all on hosted GPT-5.5. Quiet stretches are cut.'
 story phase baseline start
 pe 'run_batch support-baseline'
 story batch-summary baseline
-pe 'result "$SUPPORT_01_BASELINE"'
-pe 'result "$SUPPORT_02_BASELINE"'
+pe 'orka task result "$SUPPORT_01_BASELINE"'
+pe 'orka task result "$SUPPORT_02_BASELINE"'
 pe 'cat support-baseline-routes.txt'
 story begin baseline engineering
 pe 'orka task create -f engineering-baseline.yaml'
 pe 'orka task wait "$ENGINEERING_BASELINE" --timeout 10m'
 story collect baseline engineering
-pe 'result "$ENGINEERING_BASELINE"'
+pe 'orka task result "$ENGINEERING_BASELINE" | tail -n 8'
 story checkout baseline
 say 'The agent says the tests pass. Check that ourselves, in a sealed container.'
 pe 'git -C baseline/repository diff "$SOURCE_REVISION" --stat'
@@ -163,14 +163,15 @@ say 'Same twenty reports, same instructions, same starting code and tests.'
 story phase routed start
 pe 'run_batch support-routed'
 story batch-summary routed
-pe 'result "$SUPPORT_01_ROUTED"'
-pe 'result "$SUPPORT_02_ROUTED"'
+pe 'orka task result "$SUPPORT_01_ROUTED"'
+pe 'orka task result "$SUPPORT_02_ROUTED"'
 pe 'cat support-routed-routes.txt'
 story begin routed engineering
 pe 'orka task create -f engineering-routed.yaml'
 pe 'orka task wait "$ENGINEERING_ROUTED" --timeout 10m'
 story collect routed engineering
-pe 'result "$ENGINEERING_ROUTED"'
+pe 'orka task result "$ENGINEERING_ROUTED" | tail -n 8'
+
 story checkout routed
 pe 'check_tests routed'
 story finish-tests routed

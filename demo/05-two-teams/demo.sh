@@ -53,12 +53,7 @@ claude() { command claude --no-session-persistence "$@" 2>&1 | cat; }
 routes() {
   kubectl -n "$router_ns" get configmap orka-compat-router -o jsonpath='{.data.routes\.yaml}'
 }
-# models_as NAME — the models the shared URL offers to that person's token.
-models_as() {
-  local who=$1 ns token
-  case $who in alice) ns=team-payments; token=$ALICE ;; bob) ns=team-inventory; token=$BOB ;; esac
-  orka models list --compat anthropic --server "$router_url" --namespace "$ns" --token "$token"
-}
+
 # team_task_records NAMESPACE — proxy Tasks created during these requests,
 # kept off camera for the closing table.
 team_task_records() {
@@ -73,7 +68,7 @@ banner "Orka — two teams, one URL" \
 
 say "Alice is on the payments team, Bob on inventory. Different models, different"
 say "budgets, and they must never see each other's work. Both get one AI URL."
-helpers_note routes, models_as
+helpers_note routes
 
 chapter "Two teams, one door"
 
@@ -99,8 +94,9 @@ pe "export ANTHROPIC_BASE_URL=$router_url/anthropic"
 pe "ALICE=\$(kubectl -n team-payments create token alice)"
 pe "BOB=\$(kubectl -n team-inventory create token bob)"
 say "Ask the same URL which models it offers, once as Alice and once as Bob."
-pe "models_as alice"
-pe "models_as bob"
+pe "orka models list --compat anthropic -s $router_url -n team-payments -t \$ALICE"
+pe "orka models list --compat anthropic -s $router_url -n team-inventory -t \$BOB"
+
 ok "One URL, two answers. The token chose the team; nothing in the request did."
 
 chapter "The same request lands in different homes"
