@@ -540,10 +540,10 @@ def run_acceptance(cluster, args):
     work = args.work
     api_identity(cluster, work)
     cluster.call("apply", "-f", str(ROOT / "examples/human-approval-v2/tools.yaml"))
-    # Freeze the actual 240-second execution bound before any runtime binds it.
+    # Keep the Tool timeout below the four-minute approval execution budget.
     # The held-call crash must happen well before this independent timeout.
     cluster.call("patch", "tool", "create-work-order", "--type=merge", "--patch-file=/dev/stdin",
-                 body={"spec": {"http": {"timeout": "240s"}}})
+                 body={"spec": {"http": {"timeout": "239s"}}})
     epoch = wait("controller epoch", lambda: controller_epoch(cluster))
     render_runtimes.SETUP = work
     images = json.loads((work / "images.json").read_text())
