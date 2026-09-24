@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -60,37 +62,62 @@ func TestPresentationCapabilityDiscoveryAcceptsOlderPublisher(t *testing.T) {
 }
 
 func TestPullRequestPresentationSurvivesMixedPublisherRollout(t *testing.T) {
-	var attempts atomic.Int32
-	var firstDigest string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var attempts, dials atomic.Int32
+	var firstDigest atomic.Value
+	oldServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != PullRequestReconcilePath {
 			t.Error("unexpected operation during PR reconciliation")
 		}
-		w.Header().Set("Content-Type", "application/json")
-		if attempts.Add(1) == 1 {
-			firstDigest = r.Header.Get(OperationRequestDigestHeader)
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(ErrorResponse{Code: "invalid_request", Message: "pull request reconcile JSON is invalid"})
+		// Consume the body so the legacy backend can keep the connection alive.
+		if _, err := io.Copy(io.Discard, r.Body); err != nil {
+			t.Error(err)
 			return
 		}
-		if firstDigest == "" || r.Header.Get(OperationRequestDigestHeader) != firstDigest {
+		if attempts.Add(1) == 1 {
+			firstDigest.Store(r.Header.Get(OperationRequestDigestHeader))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(ErrorResponse{Code: "invalid_request", Message: "pull request reconcile JSON is invalid"})
+	}))
+	defer oldServer.Close()
+	newServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != PullRequestReconcilePath {
+			t.Error("unexpected operation during PR reconciliation")
+		}
+		attempts.Add(1)
+		if digest := r.Header.Get(OperationRequestDigestHeader); digest == "" || firstDigest.Load() != digest {
 			t.Error("rolling-upgrade retry changed the immutable request digest")
 		}
+		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(PullRequestReconcileResponse{OperationID: "rolling-pr"})
 	}))
-	defer server.Close()
+	defer newServer.Close()
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			// Model Service routing per TCP connection, not per request.
+			address := newServer.Listener.Addr().String()
+			if dials.Add(1) == 1 {
+				address = oldServer.Listener.Addr().String()
+			}
+			return (&net.Dialer{}).DialContext(ctx, network, address)
+		},
+	}
+	defer transport.CloseIdleConnections()
 	client, err := NewClient(ClientConfig{
-		BaseURL: server.URL, HTTPClient: server.Client(), BearerToken: []byte(strings.Repeat("a", 32)), CapabilitySecret: []byte(strings.Repeat("b", 32)),
+		BaseURL: oldServer.URL, HTTPClient: &http.Client{Transport: transport}, BearerToken: []byte(strings.Repeat("a", 32)), CapabilitySecret: []byte(strings.Repeat("b", 32)),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	response, err := client.ReconcilePullRequest(t.Context(), PullRequestReconcileRequest{
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	response, err := client.ReconcilePullRequest(ctx, PullRequestReconcileRequest{
 		Metadata: OperationMetadata{Namespace: "default", PublicationID: "publication", OperationID: "rolling-pr"},
 		Intent:   publisher.PullRequestIntent{Title: "fix: safe rollout"},
 	})
-	if err != nil || response.OperationID != "rolling-pr" || attempts.Load() != 2 {
-		t.Fatalf("mixed-version retry did not reconcile the original request: %v", err)
+	if err != nil || response.OperationID != "rolling-pr" || attempts.Load() != 2 || dials.Load() != 2 {
+		t.Fatalf("mixed-version retry did not reconcile the original request: err=%v, attempts=%d, connections=%d", err, attempts.Load(), dials.Load())
 	}
 }
 

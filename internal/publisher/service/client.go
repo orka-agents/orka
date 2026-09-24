@@ -176,6 +176,8 @@ func (c *Client) ReconcilePullRequest(ctx context.Context, request PullRequestRe
 			timer.Stop()
 			return response, err
 		case <-timer.C:
+			// Drop idle connections pinned to a legacy Service backend before retrying.
+			c.httpClient.CloseIdleConnections()
 		}
 	}
 }

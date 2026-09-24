@@ -97,3 +97,17 @@ func TestTaskPresentationRejectsSensitivePromptBeforePublisherCalls(t *testing.T
 		}
 	}
 }
+
+func TestPresentationTextDoesNotRequestPullRequestCreation(t *testing.T) {
+	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+		Type:      corev1alpha1.TaskTypeAgent,
+		Workspace: &corev1alpha1.WorkspaceConfig{Intent: corev1alpha1.WorkspaceIntentRead, PRTitle: "Configured title", PRBody: "Configured body"},
+	}}
+	if err := validateACPWorkspacePreflight(task); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher := &ACPDispatcher{}
+	if supported, err := dispatcher.pullRequestPresentationCapability(t.Context(), task); err != nil || supported || task.Spec.Workspace.CreatePR {
+		t.Fatal("presentation text implied PR creation or required a publisher")
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/publisher"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/store"
@@ -416,5 +417,95 @@ func TestPersistedPullRequestRequestNegotiatesLegacyShapeOnlyForFreshEffects(t *
 	after, err := controlStore.GetExternalEffect(ctx, effect.ID)
 	if err != nil || !reflect.DeepEqual(after, effect) {
 		t.Fatal("capability negotiation rewrote the persisted request")
+	}
+}
+
+func TestCompletedPresentationRecoveryDoesNotProbePublisher(t *testing.T) {
+	ctx := context.Background()
+	controlStore, fence := newBranchClaimReclamationStore(t)
+	task := branchClaimReclamationTask("cached-presentation", "cached-prompt")
+	task.Spec.Workspace = &corev1alpha1.WorkspaceConfig{
+		Intent: corev1alpha1.WorkspaceIntentWrite, GitRepo: "https://github.com/orka/base.git",
+		PublicationGitRepo: "https://github.com/orka/fork.git", CreatePR: true, PRBaseBranch: "main",
+		PublicationCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: "writer"},
+		ForgeCredentialRef:       &corev1alpha1.WorkspaceCredentialReference{Name: "forge"},
+		PRTitle:                  "fix: recover the durable PR", PRBody: "Keep the original body.",
+	}
+	base, err := workspaceRepository(task.Spec.Workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, err := workspacePublicationRepository(task.Spec.Workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := controlStore.CreateBranchClaim(ctx, &store.BranchClaim{
+		RepositoryID: head.ID, Ref: "refs/heads/orka/cached", OwnerKind: store.BranchClaimOwnerTask,
+		OwnerUID: string(task.UID), LastVerified: store.RemoteRefState{Absent: true},
+		RequestDigest: testControlDigestForDispatcher("cached-claim"), CreatedAt: time.Now().UTC(),
+	}, fence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publication := &store.Publication{
+		ID: publicationIDForTask(task), Namespace: task.Namespace, Generation: 1, Version: 4,
+		TaskUID: string(task.UID), Attempt: 1, PromptID: task.Status.Execution.PromptID,
+		BranchClaimID: claim.ID, BranchClaimGeneration: claim.Generation,
+		SourceRepositoryID: base.ID, TargetRepositoryID: head.ID, TargetRef: claim.Ref,
+		State:           store.PublicationVerifying,
+		PreparedReceipt: &store.PreparedPublicationReceipt{CommitSHA: strings.Repeat("a", 40)},
+		PRIntent: &store.PullRequestIntent{
+			BaseRepositoryID: base.ID, BaseRef: "refs/heads/main", HeadRepositoryID: head.ID, HeadRef: claim.Ref,
+			PublicationGeneration: 1, ExpectedHeadSHA: strings.Repeat("a", 40),
+		},
+	}
+	operation := publicationOperationID("pr-reconcile", task)
+	identity := store.ExternalEffectIdentity{Kind: publisherPullRequestOperation, Namespace: task.Namespace, AggregateID: publication.ID, OperationID: operation}
+	request := publisherservice.PullRequestReconcileRequest{
+		Metadata:      publisherservice.OperationMetadata{Namespace: task.Namespace, PublicationID: publication.ID, OperationID: operation},
+		CredentialRef: publisherForgeCredentialReference(task.Spec.Workspace.ForgeCredentialRef),
+		Intent: withTaskPullRequestMetadata(publisher.PullRequestIntent{
+			BaseRepository: base, BaseRef: publication.PRIntent.BaseRef, HeadRepository: head, HeadRef: claim.Ref,
+			PublicationGeneration: 1, ExpectedHeadOID: publication.PRIntent.ExpectedHeadSHA,
+		}, task),
+	}
+	key, err := request.Intent.Key()
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := publisherservice.PullRequestReconcileResponse{
+		OperationID: operation, RequestDigest: testControlDigestForDispatcher("cached-response"),
+		Receipt: publisher.PullRequestReceipt{IntentKey: key, ForgeID: "github:101:42", URL: "https://github.com/orka/base/pull/42", State: publisher.PullRequestOpen, HeadOID: publication.PRIntent.ExpectedHeadSHA},
+	}
+	dispatcher := &ACPDispatcher{Store: controlStore}
+	if _, err := runACPExternalEffect(ctx, dispatcher, fence, identity, request, func(context.Context) (publisherservice.PullRequestReconcileResponse, error) { return response, nil }); err != nil {
+		t.Fatal(err)
+	}
+	effect, err := controlStore.GetExternalEffectByIdentity(ctx, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projection := &publicationPRRecoveryReceiptStore{
+		DurableControlStore: &recoveredPublicationStore{DurableControlStore: controlStore, publication: publication}, publication: publication,
+	}
+	dispatcher.Store = projection
+	// No publisher client exists, so either a probe or another mutation would fail.
+	loaded, recovery, err := dispatcher.loadPersistedPublicationRecovery(ctx, task, "cached-attempt", fence)
+	if err != nil {
+		t.Fatalf("loading durable recovery contacted the publisher: %v", err)
+	}
+	verification := &store.PublicationVerificationReceipt{Outcome: store.PublicationVerifiedExact}
+	got, _, reason, err := dispatcher.recoverPublicationPullRequest(ctx, loaded, verification, "cached-verify", recovery)
+	if err != nil || reason != "" || projection.writes != 1 || got.PullRequestReceipt == nil || got.PullRequestReceipt.IntentKey != key {
+		t.Fatalf("completed PR response did not recover offline: %v, %s", err, reason)
+	}
+	after, err := controlStore.GetExternalEffect(ctx, effect.ID)
+	if err != nil || !reflect.DeepEqual(after, effect) {
+		t.Fatal("cached recovery rewrote the durable effect")
+	}
+	// Capability unavailability must not become permission to replay mismatched input.
+	task.Spec.Workspace.PRTitle = "different title"
+	if _, _, _, err := dispatcher.recoverPublicationPullRequest(ctx, loaded, verification, "cached-verify", recovery); !errors.Is(err, store.ErrConflict) {
+		t.Fatal("completed response was adopted for mismatched presentation")
 	}
 }

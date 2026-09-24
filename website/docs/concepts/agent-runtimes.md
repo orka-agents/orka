@@ -364,6 +364,8 @@ hold the artifact signing key.
 
 Pull-request text comes from the frozen Task spec and prompt, never from files or output produced by the agent. Orka rejects secret-like titles and bodies at runtime before publication, including prompt-derived titles. Orka reserves comments beginning with `<!-- orka.publisher.pr-` for reconciliation. Remove these comments when copying an existing PR body into `prBody`. The publisher keeps the original title and body when reconciling an existing pull request. A continuation does not overwrite a person's edits.
 
+`prTitle` and `prBody` apply only when `createPR: true`. Supplying presentation text alone does not request a pull request; it can remain configured on branch-only Tasks.
+
 Explicit `prTitle` or `prBody` overrides require a publisher that advertises `pull-request-presentation.v1`. During a rolling update, Tasks with overrides wait before prompt admission. Tasks without overrides can finish with an older publisher's generic PR text.
 
 Do not embed credentials, query strings, or fragments in repository URLs.

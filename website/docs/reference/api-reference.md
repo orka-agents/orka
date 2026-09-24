@@ -92,6 +92,8 @@ The controller requires `ORKA_GITHUB_WEBHOOK_SECRET` and verifies the `X-Hub-Sig
 | `spec.agentRuntime.allowBash` | boolean | Agent default | Per-Task bash policy override. |
 | `spec.timeout` | duration | `30m` for ACP v2 agent Tasks | Maximum wall-clock duration measured from Task creation, including queue, runtime admission, and prompt execution time. An explicit positive value overrides the default. |
 
+`prTitle` and `prBody` apply only when `createPR: true`. Supplying presentation text alone does not request a pull request; it can remain configured on branch-only Tasks.
+
 Orka rejects secret-like pull-request titles and bodies at runtime before publication, including prompt-derived titles. Explicit overrides wait for a publisher with pull-request presentation support before prompt admission.
 
 Source read, target read, target write, and forge references are distinct
