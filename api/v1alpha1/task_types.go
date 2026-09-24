@@ -1020,8 +1020,11 @@ type WorkspaceConfig struct {
 
 	// PRTitle is the pull request title supplied by the Task author. When empty,
 	// the controller uses the prompt's first nonblank line, limited to 256 characters.
-	// Only an empty prompt falls back to the publication generation title.
+	// An empty or whitespace-only prompt falls back to the publication generation title.
+	// Nonempty whitespace-only titles are rejected. Secret-like titles, including
+	// prompt-derived titles, are rejected at runtime before publication.
 	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:XValidation:rule="self == '' || self.trim() != ''",message="prTitle must not be whitespace-only"
 	// +optional
 	PRTitle string `json:"prTitle,omitempty"`
 
@@ -1029,6 +1032,7 @@ type WorkspaceConfig struct {
 	// the publisher describes the publication and identifies the Task. Publication
 	// generation and reconciliation markers are appended to either body.
 	// Orka reconciliation comments are reserved and must not be included.
+	// Secret-like text is rejected at runtime before publication.
 	// +kubebuilder:validation:MaxLength=32768
 	// +kubebuilder:validation:XValidation:rule="!self.contains('<!-- orka.publisher.pr-')",message="prBody must not contain reserved publisher reconciliation markers"
 	// +optional

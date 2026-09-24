@@ -65,7 +65,7 @@ func TestPersistedPullRequestRequestResumesOriginalExpiredEffect(t *testing.T) {
 				t.Fatal(err)
 			}
 			dispatcher := &ACPDispatcher{Store: controlStore, Publisher: client}
-			selected, err := dispatcher.persistedPullRequestRequest(ctx, request)
+			selected, err := dispatcher.persistedPullRequestRequest(ctx, request, true)
 			if err != nil || !reflect.DeepEqual(selected, original) {
 				t.Fatalf("reconstructed request differs from the original: %v", err)
 			}
@@ -128,7 +128,7 @@ func TestPersistedPullRequestRequestRejectsChangedLegacyContent(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			changed := request
 			test.mutate(&changed)
-			if _, err := dispatcher.persistedPullRequestRequest(ctx, changed); !errors.Is(err, store.ErrConflict) {
+			if _, err := dispatcher.persistedPullRequestRequest(ctx, changed, true); !errors.Is(err, store.ErrConflict) {
 				t.Fatalf("changed request = %v, want immutable request conflict", err)
 			}
 		})
@@ -143,7 +143,7 @@ func TestPersistedPullRequestRequestKeepsFreshSessionOwnership(t *testing.T) {
 	controlStore, _ := newBranchClaimReclamationStore(t)
 	request := publicationPRRecoveryTestRequest()
 	dispatcher := &ACPDispatcher{Store: controlStore}
-	selected, err := dispatcher.persistedPullRequestRequest(context.Background(), request)
+	selected, err := dispatcher.persistedPullRequestRequest(context.Background(), request, true)
 	if err != nil || !reflect.DeepEqual(request, selected) || selected.Intent.SessionUID == "" {
 		t.Fatalf("fresh publication lost its Session ownership: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestPersistedPullRequestRequestRequiresExactEffectRead(t *testing.T) {
 			}
 			reader := &publicationPRIdentityReader{effect: effect, err: test.getErr}
 			dispatcher := &ACPDispatcher{Store: reader}
-			selected, err := dispatcher.persistedPullRequestRequest(context.Background(), request)
+			selected, err := dispatcher.persistedPullRequestRequest(context.Background(), request, true)
 			switch {
 			case test.getErr != nil:
 				if !errors.Is(err, test.getErr) {
@@ -363,23 +363,58 @@ func TestPersistedPullRequestRequestPreservesTaskPresentationAcrossUpgrades(t *t
 					t.Fatal(err)
 				}
 				dispatcher := &ACPDispatcher{Store: controlStore}
-				selected, err := dispatcher.persistedPullRequestRequest(ctx, request)
+				selected, err := dispatcher.persistedPullRequestRequest(ctx, request, true)
 				if err != nil || !reflect.DeepEqual(selected, original) {
 					t.Fatalf("recovery changed the persisted presentation: %v", err)
 				}
 				if metadata {
 					changed := request
 					changed.Intent.Title = "Changed title"
-					if _, err := dispatcher.persistedPullRequestRequest(ctx, changed); !errors.Is(err, store.ErrConflict) {
+					if _, err := dispatcher.persistedPullRequestRequest(ctx, changed, true); !errors.Is(err, store.ErrConflict) {
 						t.Fatalf("accepted changed title: %v", err)
 					}
 					changed = request
 					changed.Intent.Body = "Changed body"
-					if _, err := dispatcher.persistedPullRequestRequest(ctx, changed); !errors.Is(err, store.ErrConflict) {
+					if _, err := dispatcher.persistedPullRequestRequest(ctx, changed, true); !errors.Is(err, store.ErrConflict) {
 						t.Fatalf("accepted changed body: %v", err)
 					}
 				}
 			})
 		}
+	}
+}
+
+func TestPersistedPullRequestRequestNegotiatesLegacyShapeOnlyForFreshEffects(t *testing.T) {
+	ctx := context.Background()
+	controlStore, fence := newBranchClaimReclamationStore(t)
+	dispatcher := &ACPDispatcher{Store: controlStore}
+	request := publicationPRRecoveryTestRequest()
+	request.Intent.Title, request.Intent.Body = "fix: retain metadata", "Task body"
+	request.Intent.TaskName, request.Intent.TaskNamespace = "fix-task", request.Metadata.Namespace
+	selected, err := dispatcher.persistedPullRequestRequest(ctx, request, false)
+	if err != nil || selected.Intent != withoutTaskPullRequestMetadata(request.Intent) {
+		t.Fatalf("fresh request did not use the legacy wire shape: %v", err)
+	}
+	identity := publicationPRRecoveryTestIdentity(request)
+	digest, err := acpDomainDigest("external-effect-request", map[string]any{"identity": identity, "request": request})
+	if err != nil {
+		t.Fatal(err)
+	}
+	effect, err := controlStore.ReserveExternalEffect(ctx, store.ReserveExternalEffectRequest{
+		Identity: identity, RequestDigest: digest, Fence: fence, CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dispatcher.persistedPullRequestRequest(ctx, request, false); err == nil {
+		t.Fatal("older publisher silently dropped already-persisted metadata")
+	}
+	selected, err = dispatcher.persistedPullRequestRequest(ctx, request, true)
+	if err != nil || !reflect.DeepEqual(selected, request) {
+		t.Fatalf("supported peer did not preserve the original request: %v", err)
+	}
+	after, err := controlStore.GetExternalEffect(ctx, effect.ID)
+	if err != nil || !reflect.DeepEqual(after, effect) {
+		t.Fatal("capability negotiation rewrote the persisted request")
 	}
 }

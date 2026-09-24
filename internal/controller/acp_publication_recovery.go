@@ -26,6 +26,7 @@ type persistedPublicationRecoveryContext struct {
 	targetReadCredential *publisherservice.CredentialReference
 	writeCredential      *publisherservice.CredentialReference
 	forgeCredential      *publisherservice.CredentialReference
+	prPresentation       bool
 	claim                *store.BranchClaim
 	artifact             harnessv2.ArtifactReference
 }
@@ -124,8 +125,15 @@ func (d *ACPDispatcher) loadPersistedPublicationRecovery(
 		(publication.PRIntent.BaseRepositoryID != pullRequestBase.ID || publication.PRIntent.HeadRepositoryID != target.ID) {
 		return nil, persistedPublicationRecoveryContext{}, fmt.Errorf("persisted pull request repository identity drifted")
 	}
+	prPresentation := false
+	if !store.IsTerminalPublicationState(publication.State) {
+		prPresentation, err = d.pullRequestPresentationCapability(ctx, task)
+		if err != nil {
+			return nil, persistedPublicationRecoveryContext{}, err
+		}
+	}
 	return publication, persistedPublicationRecoveryContext{
-		task: task, attemptID: attemptID, fence: fence, workspace: workspace,
+		task: task, attemptID: attemptID, fence: fence, workspace: workspace, prPresentation: prPresentation,
 		source: source, pullRequestBase: pullRequestBase, target: target,
 		sourceCredential:     sourceCredential,
 		targetReadCredential: publisherCredentialReference(workspace.PublicationReadCredentialRef, publisherservice.CredentialRoleTargetRead),
@@ -414,7 +422,7 @@ func (d *ACPDispatcher) recoverPublicationPullRequest(
 			SessionUID: publication.SessionUID,
 		}, recovery.task),
 	}
-	prRequest, err := d.persistedPullRequestRequest(ctx, prRequest)
+	prRequest, err := d.persistedPullRequestRequest(ctx, prRequest, recovery.prPresentation)
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -457,6 +465,7 @@ func (d *ACPDispatcher) recoverPublicationPullRequest(
 func (d *ACPDispatcher) persistedPullRequestRequest(
 	ctx context.Context,
 	request publisherservice.PullRequestReconcileRequest,
+	presentationSupported bool,
 ) (publisherservice.PullRequestReconcileRequest, error) {
 	if d.Store == nil {
 		return request, fmt.Errorf("external-effect store is required")
@@ -471,6 +480,9 @@ func (d *ACPDispatcher) persistedPullRequestRequest(
 	}
 	effect, err := d.Store.GetExternalEffectByIdentity(ctx, identity)
 	if errors.Is(err, store.ErrNotFound) {
+		if !presentationSupported {
+			request.Intent = withoutTaskPullRequestMetadata(request.Intent)
+		}
 		return request, nil
 	}
 	if err != nil {
@@ -483,8 +495,7 @@ func (d *ACPDispatcher) persistedPullRequestRequest(
 	// Preserve only the exact request shape proved by the original digest.
 	// A same-branch PR never establishes legacy ownership.
 	withoutMetadata := request
-	withoutMetadata.Intent.Title, withoutMetadata.Intent.Body = "", ""
-	withoutMetadata.Intent.TaskName, withoutMetadata.Intent.TaskNamespace = "", ""
+	withoutMetadata.Intent = withoutTaskPullRequestMetadata(withoutMetadata.Intent)
 	legacy := withoutMetadata
 	legacy.Intent.SessionUID = ""
 	const requestKey = "request"
@@ -496,6 +507,9 @@ func (d *ACPDispatcher) persistedPullRequestRequest(
 			return request, digestErr
 		}
 		if digest == effect.RequestDigest {
+			if !presentationSupported && candidate.Intent != withoutTaskPullRequestMetadata(candidate.Intent) {
+				return request, fmt.Errorf("publisher does not support the persisted pull-request presentation")
+			}
 			return candidate, nil
 		}
 	}

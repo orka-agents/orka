@@ -1945,6 +1945,7 @@ spec:
                       the publisher describes the publication and identifies the Task. Publication
                       generation and reconciliation markers are appended to either body.
                       Orka reconciliation comments are reserved and must not be included.
+                      Secret-like text is rejected at runtime before publication.
                     maxLength: 32768
                     type: string
                     x-kubernetes-validations:
@@ -1955,9 +1956,14 @@ spec:
                     description: |-
                       PRTitle is the pull request title supplied by the Task author. When empty,
                       the controller uses the prompt's first nonblank line, limited to 256 characters.
-                      Only an empty prompt falls back to the publication generation title.
+                      An empty or whitespace-only prompt falls back to the publication generation title.
+                      Nonempty whitespace-only titles are rejected. Secret-like titles, including
+                      prompt-derived titles, are rejected at runtime before publication.
                     maxLength: 256
                     type: string
+                    x-kubernetes-validations:
+                    - message: prTitle must not be whitespace-only
+                      rule: self == '' || self.trim() != ''
                   publicationCredentialRef:
                     description: |-
                       PublicationCredentialRef references the target-repository write credential

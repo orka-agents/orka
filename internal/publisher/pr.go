@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/orka-agents/orka/internal/security"
 )
 
 // These character limits match WorkspaceConfig's admission bounds and leave
@@ -30,13 +32,23 @@ func DefaultPullRequestTitle(prompt string, generation int64) string {
 	return line
 }
 
-// ValidatePullRequestText enforces the Task admission bounds at runtime too.
+// ValidatePullRequestText enforces admission bounds and rejects secret-like text
+// before publication or forge reconciliation.
 func ValidatePullRequestText(title, body string) error {
 	if utf8.RuneCountInString(title) > MaxPullRequestTitleLength {
 		return invalid("prTitle", "must not exceed 256 characters")
 	}
 	if utf8.RuneCountInString(body) > MaxPullRequestBodyLength {
 		return invalid("prBody", "must not exceed 32768 characters")
+	}
+	if title != "" && strings.TrimSpace(title) == "" {
+		return invalid("prTitle", "must not be whitespace-only")
+	}
+	if security.LooksLikeSecret(title) {
+		return invalid("prTitle", "must not contain credentials or tokens")
+	}
+	if security.LooksLikeSecret(body) {
+		return invalid("prBody", "must not contain credentials or tokens")
 	}
 	if strings.Contains(body, PullRequestMarkerPrefix) {
 		return invalid("prBody", "must not contain reserved publisher reconciliation markers")

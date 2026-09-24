@@ -44,11 +44,32 @@ func TestTaskWorkspacePullRequestTextAdmission(t *testing.T) {
 				require.NotEmpty(t, schemavalidation.ValidateCustomResource(nil, strings.Repeat(char, test.limit+1), validator))
 			}
 			require.NotEmpty(t, schemavalidation.ValidateCustomResource(nil, 42, validator))
-			if test.field == "prBody" {
-				structural, err := structuralschema.NewStructural(&schema)
-				require.NoError(t, err)
-				celValidator := cel.NewValidator(structural, false, celconfig.PerCallLimit)
-				require.NotNil(t, celValidator)
+			structural, err := structuralschema.NewStructural(&schema)
+			require.NoError(t, err)
+			celValidator := cel.NewValidator(structural, false, celconfig.PerCallLimit)
+			require.NotNil(t, celValidator)
+			switch test.field {
+			case "prTitle":
+				for _, title := range []string{"", "fix: preserve the title", " \tfix: preserve exact \u2003 title\u00a0", strings.Repeat("界", test.limit)} {
+					errs, _ := celValidator.Validate(t.Context(), nil, structural, title, nil, celconfig.RuntimeCELCostBudget)
+					require.Empty(t, errs)
+				}
+				for _, blank := range []struct {
+					name, title string
+				}{
+					{name: "spaces", title: "   "},
+					{name: "tabs", title: "\t\t"},
+					{name: "newlines", title: "\n\r\n"},
+					{name: "Unicode whitespace", title: "\u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"},
+					{name: "mixed whitespace", title: " \t\n\r\v\f\u00a0\u2003\u3000"},
+				} {
+					t.Run(blank.name, func(t *testing.T) {
+						errs, _ := celValidator.Validate(t.Context(), nil, structural, blank.title, nil, celconfig.RuntimeCELCostBudget)
+						require.NotEmpty(t, errs)
+						require.Contains(t, errs.ToAggregate().Error(), "prTitle must not be whitespace-only")
+					})
+				}
+			case "prBody":
 				for _, body := range []string{"", "## Summary\n\nA regular body.", strings.Repeat("界", test.limit)} {
 					errs, _ := celValidator.Validate(t.Context(), nil, structural, body, nil, celconfig.RuntimeCELCostBudget)
 					require.Empty(t, errs)

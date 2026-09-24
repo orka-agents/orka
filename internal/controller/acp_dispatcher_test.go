@@ -3075,8 +3075,17 @@ func TestACPDispatcherOpensSessionTurnBeforePrePromptFailureAndReleasesLease(t *
 	}
 }
 
-//nolint:gocyclo // The explicit state-machine branches are easier to audit together.
 func TestACPDispatcherPublishesPreparedWorkspaceDelta(t *testing.T) {
+	testACPDispatcherPublishesPreparedWorkspaceDelta(t, true)
+}
+
+func TestACPDispatcherPublishesPreparedWorkspaceDeltaWithLegacyPublisher(t *testing.T) {
+	testACPDispatcherPublishesPreparedWorkspaceDelta(t, false)
+}
+
+//nolint:gocyclo // The explicit state-machine branches are easier to audit together.
+func testACPDispatcherPublishesPreparedWorkspaceDelta(t *testing.T, supportsPresentation bool) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -3104,6 +3113,10 @@ func TestACPDispatcherPublishesPreparedWorkspaceDelta(t *testing.T) {
 			State: corev1alpha1.TaskExecutionStateSucceeded, Outcome: corev1alpha1.TaskExecutionOutcomeSucceeded,
 			Attempt: 1, PromptID: promptID, RequestDigest: testControlDigestForDispatcher("write-task"), ControllerEpoch: 1,
 		}},
+	}
+
+	if !supportsPresentation {
+		task.Spec.Workspace.PRTitle, task.Spec.Workspace.PRBody = "", ""
 	}
 
 	scheme := runtime.NewScheme()
@@ -3171,8 +3184,9 @@ func TestACPDispatcherPublishesPreparedWorkspaceDelta(t *testing.T) {
 	prepareRoots := make(chan string, 1)
 	publishRoots := make(chan string, 1)
 	publisherServer := newDispatcherPublisherServer(t, treeOID, commitOID, bundleDigest, dispatcherPublisherServerOptions{
-		inspectPullRequest: func(intent publisher.PullRequestIntent) { prIntents <- intent },
-		inspectPrepare:     func(request publisherservice.PublicationPrepareRequest) { prepareRoots <- request.Request.RelativeRoot },
+		disablePRPresentation: !supportsPresentation,
+		inspectPullRequest:    func(intent publisher.PullRequestIntent) { prIntents <- intent },
+		inspectPrepare:        func(request publisherservice.PublicationPrepareRequest) { prepareRoots <- request.Request.RelativeRoot },
 		inspectPublish: func(request publisherservice.PublicationPublishRequest) {
 			publishRoots <- request.Prepared.RelativeRoot
 		},
@@ -3228,9 +3242,13 @@ func TestACPDispatcherPublishesPreparedWorkspaceDelta(t *testing.T) {
 	}
 	select {
 	case intent := <-prIntents:
-		if intent.Title != task.Spec.Workspace.PRTitle || intent.Body != task.Spec.Workspace.PRBody ||
-			intent.TaskName != task.Name || intent.TaskNamespace != task.Namespace {
-			t.Fatal("publisher did not receive the Task-authored PR presentation")
+		if supportsPresentation {
+			if intent.Title != task.Spec.Workspace.PRTitle || intent.Body != task.Spec.Workspace.PRBody ||
+				intent.TaskName != task.Name || intent.TaskNamespace != task.Namespace {
+				t.Fatal("publisher did not receive the Task-authored PR presentation")
+			}
+		} else if intent != withoutTaskPullRequestMetadata(intent) {
+			t.Fatal("legacy publisher received Task presentation")
 		}
 		if intent.BaseRepository.ID != "github.com/orka-agents/orka" || intent.HeadRepository.ID != "github.com/sozercan/orka-fork" {
 			t.Fatalf("continuation PR repositories = base %#v head %#v", intent.BaseRepository, intent.HeadRepository)
@@ -3292,9 +3310,10 @@ func (acceptingArtifactReservations) Reserve(context.Context, artifactcap.Operat
 }
 
 type dispatcherPublisherServerOptions struct {
-	inspectPrepare     func(publisherservice.PublicationPrepareRequest)
-	inspectPublish     func(publisherservice.PublicationPublishRequest)
-	inspectPullRequest func(publisher.PullRequestIntent)
+	disablePRPresentation bool
+	inspectPrepare        func(publisherservice.PublicationPrepareRequest)
+	inspectPublish        func(publisherservice.PublicationPublishRequest)
+	inspectPullRequest    func(publisher.PullRequestIntent)
 }
 
 func newDispatcherPublisherServer(t *testing.T, treeOID, commitOID, bundleDigest string, options ...dispatcherPublisherServerOptions) *httptest.Server {
@@ -3311,6 +3330,12 @@ func newDispatcherPublisherServer(t *testing.T, treeOID, commitOID, bundleDigest
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
+		case publisherservice.CapabilitiesPath:
+			supportsPresentation := len(options) == 0 || !options[0].disablePRPresentation
+			writeDispatcherJSON(w, publisherservice.CapabilitiesResponse{
+				Protocol: publisherservice.ProtocolVersion, PullRequestReconciliation: true,
+				PullRequestPresentation: supportsPresentation && r.URL.Query().Get("features") == publisherservice.PullRequestPresentationFeature,
+			})
 		case publisherservice.WorkspaceResolvePath:
 			var request publisherservice.WorkspaceResolveRequest
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -3424,6 +3449,11 @@ func newDispatcherPublisherServer(t *testing.T, treeOID, commitOID, bundleDigest
 			var request publisherservice.PullRequestReconcileRequest
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 				t.Errorf("decode pull request: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if len(options) > 0 && options[0].disablePRPresentation && request.Intent != withoutTaskPullRequestMetadata(request.Intent) {
+				t.Error("legacy publisher received unsupported presentation fields")
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}

@@ -21,7 +21,6 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
-	"github.com/orka-agents/orka/internal/publisher"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/workspace/statusrules"
 )
@@ -1247,7 +1246,7 @@ func validateACPWorkspacePreflight(task *corev1alpha1.Task) error {
 		}
 		return nil
 	}
-	if err := publisher.ValidatePullRequestText(workspace.PRTitle, workspace.PRBody); err != nil {
+	if err := validateTaskPullRequestText(task); err != nil {
 		return err
 	}
 	if strings.TrimSpace(workspace.GitRepo) == "" {

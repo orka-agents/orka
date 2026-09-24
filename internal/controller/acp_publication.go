@@ -86,6 +86,10 @@ func (d *ACPDispatcher) publishWorkspaceDeltaOperation(
 	if workspace == nil || workspace.Intent != corev1alpha1.WorkspaceIntentWrite {
 		return acpPublicationResult{}, fmt.Errorf("non-empty workspace publication requires intent=write")
 	}
+	prPresentation, err := d.pullRequestPresentationCapability(ctx, task)
+	if err != nil {
+		return acpPublicationResult{}, err
+	}
 	if delta.Artifact == nil || !delta.PublicationSafe || !delta.NoFollowVerified {
 		return acpPublicationResult{}, fmt.Errorf("workspace delta is not publication-safe")
 	}
@@ -482,7 +486,7 @@ func (d *ACPDispatcher) publishWorkspaceDeltaOperation(
 			CredentialRef: publisherForgeCredentialReference(workspace.ForgeCredentialRef),
 			Intent:        forgeIntent,
 		}
-		prRequest, err = d.persistedPullRequestRequest(settlementCtx, prRequest)
+		prRequest, err = d.persistedPullRequestRequest(settlementCtx, prRequest, prPresentation)
 		if err != nil {
 			return acpPublicationResult{}, err
 		}
