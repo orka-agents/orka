@@ -1,6 +1,7 @@
 import React from 'react';
 import Layout from '@theme/Layout';
 import HeroSection from '../components/HeroSection';
+import DemosSection from '../components/DemosSection';
 import QuickStartSection from '../components/QuickStartSection';
 import FeaturesSection from '../components/FeaturesSection';
 import ProvidersSection from '../components/ProvidersSection';
@@ -14,6 +15,7 @@ export default function Home() {
     >
       <main className="landing-main">
         <HeroSection />
+        <DemosSection />
         <QuickStartSection />
         <FeaturesSection />
         <ProvidersSection />
