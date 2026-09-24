@@ -7,19 +7,19 @@
       "scenario": "Maya's service needs a health check.",
       "payoff": "A reviewed pull request, and no model key on Maya's laptop",
       "next": "What would your team hand off next?",
-      "intro": "This demo follows Maya, a developer on the inventory team whose service has no health check. She asks for one in Claude Code, the way she would ask a colleague. Orka runs the agents on her team's cluster and keeps the records. We'll check the resulting pull request on GitHub. The model key never reaches her laptop.",
+      "intro": "This demo follows Maya, a developer on the inventory team whose service has no health check. She asks her usual coding client for the change, the way she would ask a colleague. Orka runs the agents on her team's cluster and keeps the records. We'll check the resulting pull request on GitHub. The model key never reaches her laptop.",
       "chapters": [
         {
           "marker": "Maya has no model key",
           "title": "Connect with a cluster token",
           "cue": "Provider = the saved connection Orka uses to reach a model",
-          "text": "The model key stays in a cluster Secret. A Provider is the saved connection Orka uses to reach that model. The platform team also defined three Agents: a coder, a reviewer, and an analyst. Maya connects with a token for the cluster. The status check confirms Orka is ready. Short commands such as readme are shell helpers defined in this demo script."
+          "text": "The model key stays in a cluster Secret. A Provider holds the connection settings Orka uses to reach that model. The platform team also defined three Agents: a coder, a reviewer, and an analyst. Maya connects with a token for the cluster. The status check confirms Orka is ready. Short commands such as readme are shell helpers defined in this demo script."
         },
         {
           "marker": "Maya asks in chat",
           "title": "Ask in the familiar client",
           "cue": "Claude Code sends its requests to Orka",
-          "text": "Here is the service today, with no health check. Two environment variables point Claude Code at Orka. Maya asks for the endpoint, a test, the docs, and a pull request. She does not choose which agents do the work. She sends it as an ordinary prompt."
+          "text": "Here is the service today, with no health check. Two environment variables point the coding client at Orka. Maya asks for the endpoint, a test, the docs, and a pull request. She does not choose which agents do the work. She sends it as an ordinary prompt."
         },
         {
           "marker": "Orka turns the chat into Tasks",
@@ -189,7 +189,7 @@
           "marker": "The same request lands in different homes",
           "title": "See where the work runs",
           "cue": "Task = the record of work, inside the caller's team",
-          "text": "Both ask Claude Code for the same small thing. Each request becomes a Task in its own team's installation, run by that team's Orka on that team's budget, and nowhere else."
+          "text": "Both ask the coding client for the same small thing. Each request becomes a Task in its own team's installation, run by that team's Orka on that team's budget, and nowhere else."
         },
         {
           "marker": "Bob knocks on the wrong door",
