@@ -72,6 +72,16 @@ performance in order and adds silence only at scene boundaries for reading
 time. The final Resolve timeline has one narration clip. Speech is never
 accelerated or trimmed to fit the terminal.
 
+When speech continues across a chapter transition without a quiet pause, keep
+that join uninterrupted. A reviewed version-2 alignment can set
+`continuous_after: true` on a chapter. Its sample span must cover whole video
+frames, which means a multiple of 1,600 samples at 48 kHz and 30 fps. The
+renderer fits that chapter's video to the speech and inserts no silence at the
+join. Every original sample remains in order. The usual playback-speed limit
+still applies; a chapter that cannot fit readably fails rather than cutting or
+speeding up speech. Intro and outro cards cannot carry this flag. Version-1
+alignments retain their existing behavior.
+
 The earlier per-chapter workflow remains available through `prepare.py plan`,
 the shared `demo/06-hackathon/audio/generate_voiceover.py` helper, and
 `prepare.py render` without `--continuous-dir`. Using that shared helper does

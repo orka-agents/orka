@@ -116,7 +116,7 @@ class ContinuousRenderTests(unittest.TestCase):
 
     def test_rejects_stale_unreviewed_or_incomplete_alignment(self):
         cases = [
-            ("version", lambda value: value.update(version=2)),
+            ("version", lambda value: value.update(version=3)),
             ("boolean version", lambda value: value.update(version=True)),
             ("demo", lambda value: value.update(demo_id="02-sandbox")),
             ("script", lambda value: value.update(text="An older script.")),
@@ -234,6 +234,55 @@ class ContinuousRenderTests(unittest.TestCase):
                               [json.loads(line) for line in split.read_text().splitlines()])
         _, _, encodes = self.render_with_stub_video(self.continuous_dir)
         self.assertEqual(encodes, [], "Unchanged video scenes should be reused")
+
+    def configure_uninterrupted_chapter(self, frames=66):
+        self.counts = [1601, frames * 1600, 2407]
+        count = sum(self.counts)
+        self.samples = struct.pack(f"<{count}h", *(i % 30000 + 1 for i in range(count)))
+        self.write_wave(self.source_audio, self.samples)
+        self.alignment["version"] = 2
+        self.alignment["audio"]["sha256"] = prepare.digest(self.source_audio)
+        offset = 0
+        for scene, size in zip(self.alignment["scenes"], self.counts):
+            scene.update(start_sample=offset, end_sample=offset + size)
+            offset += size
+        self.alignment["scenes"][1]["continuous_after"] = True
+        self.write_alignment()
+
+    def test_uninterrupted_chapter_retains_audio_without_a_silent_splice(self):
+        self.configure_uninterrupted_chapter()
+        manifest, provenance, _ = self.render_with_stub_video(self.continuous_dir, duration=1)
+        self.assertEqual(manifest["scenes"][1]["frames"], 66)
+        proof = provenance["continuous_narration"]
+        self.assertEqual(proof["scenes"][1]["inserted_silence_samples"], 0)
+        self.assertEqual(proof["scenes"][1]["output_end_sample"], proof["scenes"][2]["output_start_sample"])
+        self.assert_sample_preservation(manifest["audio"][0], proof, manifest["scenes"])
+        wrong = copy.deepcopy(manifest["scenes"])
+        wrong[1]["frames"] += 1
+        with self.assertRaisesRegex(ValueError, "must not insert silence"):
+            prepare.write_continuous_audio(self.read_alignment(), wrong, self.output / self.demo["id"], self.demo["id"])
+
+    def test_uninterrupted_video_must_still_obey_the_speed_limit(self):
+        self.configure_uninterrupted_chapter()
+        with self.assertRaisesRegex(ValueError, "too short for readable video"):
+            self.render_with_stub_video(self.continuous_dir, duration=20)
+
+    def test_rejects_invalid_uninterrupted_joins(self):
+        self.configure_uninterrupted_chapter()
+        cases = [
+            lambda v: v.update(version=1),
+            lambda v: v["scenes"][1].update(continuous_after="true"),
+            lambda v: (v["scenes"][1].update(end_sample=v["scenes"][1]["end_sample"] + 1),
+                       v["scenes"][2].update(start_sample=v["scenes"][2]["start_sample"] + 1)),
+            lambda v: v["scenes"][0].update(continuous_after=True),
+            lambda v: v["scenes"][-1].update(continuous_after=True),
+        ]
+        for mutate in cases:
+            value = copy.deepcopy(self.alignment)
+            mutate(value)
+            self.write_alignment(value)
+            with self.assertRaises(ValueError):
+                self.read_alignment()
 
     def test_default_render_still_uses_separate_frame_padded_clips(self):
         audio_dir = self.output / "audio"

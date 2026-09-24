@@ -194,8 +194,8 @@ def read_continuous_alignment(demo, path, source_sha):
     raw = path.read_bytes()
     alignment = json.loads(raw)
     require(isinstance(alignment, dict), "Expected a continuous narration alignment object")
-    require(type(alignment.get("version")) is int and alignment["version"] == 1,
-            "Expected continuous narration alignment version 1")
+    require(type(alignment.get("version")) is int and alignment["version"] in (1, 2),
+            "Expected continuous narration alignment version 1 or 2")
     require(alignment.get("demo_id") == demo["id"], "Alignment belongs to another demo")
     voices = list(voice_scenes(demo))
     require(alignment.get("text") == "\n\n".join(voice["text"] for voice in voices),
@@ -224,13 +224,20 @@ def read_continuous_alignment(demo, path, source_sha):
     require(isinstance(scenes, list) and len(scenes) == len(voices),
             "Continuous narration scene count does not match storyboard")
     end = 0
-    for voice, scene in zip(voices, scenes):
+    for index, (voice, scene) in enumerate(zip(voices, scenes)):
         require(isinstance(scene, dict) and scene.get("id") == voice["id"]
                 and scene.get("text") == voice["text"],
                 "Continuous narration scene does not match storyboard: " + voice["id"])
         start, stop = scene.get("start_sample"), scene.get("end_sample")
         require(type(start) is int and type(stop) is int and start == end and start < stop <= count,
                 "Continuous narration samples must be nonempty and contiguous: " + voice["id"])
+        continuous_after = scene.get("continuous_after", False)
+        require(type(continuous_after) is bool, "Expected a boolean continuity flag")
+        if continuous_after:
+            require(alignment["version"] == 2, "Uninterrupted joins require alignment version 2")
+            require(0 < index < len(scenes) - 1, "Only a chapter may continue into the next scene")
+            require((stop - start) % SAMPLES_PER_FRAME == 0,
+                    "Uninterrupted chapter narration must span whole video frames")
         end = stop
     require(end == count, "Continuous narration alignment does not include the complete audio")
     return {"path": str(path), "sha256": hashlib.sha256(raw).hexdigest(),
@@ -249,8 +256,13 @@ def write_continuous_audio(continuous, scenes, directory, demo_id):
         require(scene["id"] == source["id"], "Continuous audio scene order changed")
         frames = scene["frames"]
         count = source["end_sample"] - source["start_sample"]
-        require(type(frames) is int and (frames - AUDIO_LEAD_FRAMES) * SAMPLES_PER_FRAME >= count,
-                "Scene is too short for its complete narration: " + scene["id"])
+        continuous_after = source.get("continuous_after", False)
+        if continuous_after:
+            require(type(frames) is int and frames * SAMPLES_PER_FRAME == count,
+                    "An uninterrupted chapter must not insert silence or cut narration: " + scene["id"])
+        else:
+            require(type(frames) is int and (frames - AUDIO_LEAD_FRAMES) * SAMPLES_PER_FRAME >= count,
+                    "Scene is too short for its complete narration: " + scene["id"])
         padding = frames * SAMPLES_PER_FRAME - count
         if index == len(scenes) - 1:
             padding -= AUDIO_LEAD_FRAMES * SAMPLES_PER_FRAME
@@ -259,7 +271,7 @@ def write_continuous_audio(continuous, scenes, directory, demo_id):
                            "output_start_sample": offset * SAMPLES_PER_FRAME,
                            "output_end_sample": offset * SAMPLES_PER_FRAME + count,
                            "record_frame": offset + AUDIO_LEAD_FRAMES,
-                           "inserted_silence_samples": padding})
+                           "inserted_silence_samples": padding, "continuous_after": continuous_after})
         offset += frames
     frames = offset - AUDIO_LEAD_FRAMES
     temporary = path.with_suffix(".wav.partial")
@@ -375,8 +387,15 @@ def render_demo(demo, docs_url, continuous_dir=None):
                 max_speed = chapter.get("max_speed", 2)
                 require(isinstance(max_speed, (int, float)) and not isinstance(max_speed, bool)
                         and 1 <= max_speed <= 4, "Chapter playback speed must be between one and four")
-                seconds = max(audio_frames / FPS + 2.4, min(duration + 1.2, 40), duration / max_speed + 1.2)
-                frames = math.ceil(seconds * FPS)
+                if continuous and audio_scene.get("continuous_after", False):
+                    # Keep this join byte-contiguous in the one voice track. Fit
+                    # the video to the speech instead of adding a pause to it.
+                    frames = audio_frames
+                    require(frames / FPS >= duration / max_speed + 1.2,
+                            "Uninterrupted narration is too short for readable video: " + scene_id)
+                else:
+                    seconds = max(audio_frames / FPS + 2.4, min(duration + 1.2, 40), duration / max_speed + 1.2)
+                    frames = math.ceil(seconds * FPS)
                 factor = min(1.0, (frames / FPS - 1.2) / duration)
                 chrome(demo, chapter, index, len(demo["chapters"]), picture)
             encode(picture, output, frames, terminal, factor)
