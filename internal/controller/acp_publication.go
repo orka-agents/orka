@@ -470,12 +470,12 @@ func (d *ACPDispatcher) publishWorkspaceDeltaOperation(
 				return acpPublicationResult{}, err
 			}
 		}
-		forgeIntent := publisher.PullRequestIntent{
+		forgeIntent := withTaskPullRequestMetadata(publisher.PullRequestIntent{
 			BaseRepository: pullRequestBase, BaseRef: publication.PRIntent.BaseRef,
 			HeadRepository: target, HeadRef: publication.PRIntent.HeadRef,
 			PublicationGeneration: publication.Generation, ExpectedHeadOID: publication.PRIntent.ExpectedHeadSHA,
 			SessionUID: publication.SessionUID,
-		}
+		}, task)
 		prOperation := publicationOperationID("pr-reconcile", task)
 		prRequest := publisherservice.PullRequestReconcileRequest{
 			Metadata:      publisherservice.OperationMetadata{Namespace: task.Namespace, PublicationID: publication.ID, OperationID: prOperation},
@@ -1568,4 +1568,17 @@ const maxSequentialPublisherSettlementStages = 3
 func publicationSettlementWindow() time.Duration {
 	perStage := externalEffectCallTimeout(store.ExternalEffectIdentity{Kind: publisherPublishOperation}) + externalEffectLeaseSettlementMargin
 	return maxSequentialPublisherSettlementStages*perStage + externalEffectLeaseSettlementMargin
+}
+
+// withTaskPullRequestMetadata accepts the verified execution snapshot's Task,
+// not agent output. The external-effect digest freezes this metadata on retry.
+func withTaskPullRequestMetadata(intent publisher.PullRequestIntent, task *corev1alpha1.Task) publisher.PullRequestIntent {
+	intent.TaskName, intent.TaskNamespace = task.Name, task.Namespace
+	if workspace := task.Spec.Workspace; workspace != nil {
+		intent.Title, intent.Body = workspace.PRTitle, workspace.PRBody
+	}
+	if intent.Title == "" {
+		intent.Title = publisher.DefaultPullRequestTitle(task.Spec.Prompt, intent.PublicationGeneration)
+	}
+	return intent
 }

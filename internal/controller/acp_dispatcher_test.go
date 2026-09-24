@@ -3097,6 +3097,7 @@ func TestACPDispatcherPublishesPreparedWorkspaceDelta(t *testing.T) {
 				PublicationCredentialRef:     &corev1alpha1.WorkspaceCredentialReference{Name: "github-publish"},
 				ForgeCredentialRef:           &corev1alpha1.WorkspaceCredentialReference{Name: "github-forge"},
 				CreatePR:                     true, PRBaseBranch: "main",
+				PRTitle: "fix: publish the authored title", PRBody: "Publish the reviewed change.",
 			},
 		},
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning, Attempts: 1, Execution: &corev1alpha1.TaskExecutionStatus{
@@ -3227,6 +3228,10 @@ func TestACPDispatcherPublishesPreparedWorkspaceDelta(t *testing.T) {
 	}
 	select {
 	case intent := <-prIntents:
+		if intent.Title != task.Spec.Workspace.PRTitle || intent.Body != task.Spec.Workspace.PRBody ||
+			intent.TaskName != task.Name || intent.TaskNamespace != task.Namespace {
+			t.Fatal("publisher did not receive the Task-authored PR presentation")
+		}
 		if intent.BaseRepository.ID != "github.com/orka-agents/orka" || intent.HeadRepository.ID != "github.com/sozercan/orka-fork" {
 			t.Fatalf("continuation PR repositories = base %#v head %#v", intent.BaseRepository, intent.HeadRepository)
 		}

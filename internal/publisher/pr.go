@@ -3,8 +3,59 @@ package publisher
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 )
+
+// These character limits match WorkspaceConfig's admission bounds and leave
+// room in the forge body for publication metadata and reconciliation markers.
+const (
+	MaxPullRequestTitleLength = 256
+	MaxPullRequestBodyLength  = 32768
+	// PullRequestMarkerPrefix is reserved for publisher-owned reconciliation metadata.
+	PullRequestMarkerPrefix = "<!-- orka.publisher.pr-"
+)
+
+// DefaultPullRequestTitle derives a bounded title from trusted Task input.
+func DefaultPullRequestTitle(prompt string, generation int64) string {
+	line, _, _ := strings.Cut(strings.TrimSpace(prompt), "\n")
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return "Orka publication generation " + strconv.FormatInt(generation, 10)
+	}
+	if utf8.RuneCountInString(line) > MaxPullRequestTitleLength {
+		line = strings.TrimSpace(string([]rune(line)[:MaxPullRequestTitleLength]))
+	}
+	return line
+}
+
+// ValidatePullRequestText enforces the Task admission bounds at runtime too.
+func ValidatePullRequestText(title, body string) error {
+	if utf8.RuneCountInString(title) > MaxPullRequestTitleLength {
+		return invalid("prTitle", "must not exceed 256 characters")
+	}
+	if utf8.RuneCountInString(body) > MaxPullRequestBodyLength {
+		return invalid("prBody", "must not exceed 32768 characters")
+	}
+	if strings.Contains(body, PullRequestMarkerPrefix) {
+		return invalid("prBody", "must not contain reserved publisher reconciliation markers")
+	}
+	return nil
+}
+
+// Description renders the Task-authored body or the default publication body.
+// The forge adapter appends its reconciliation markers after this text.
+func (i PullRequestIntent) Description() string {
+	body := i.Body
+	if body == "" {
+		body = "Created by the Orka clean-room workspace publisher."
+		if i.TaskName != "" {
+			body += "\n\nTask: `" + i.TaskNamespace + "/" + i.TaskName + "`"
+		}
+	}
+	return body + "\n\nPublication generation: " + strconv.FormatInt(i.PublicationGeneration, 10)
+}
 
 type pullRequestRepositoryIdentity struct {
 	Provider string `json:"provider"`
@@ -75,6 +126,13 @@ func validatePullRequestIntent(intent PullRequestIntent) error {
 	}
 	if len(intent.SessionUID) > 512 || strings.TrimSpace(intent.SessionUID) != intent.SessionUID {
 		return invalid("PR session UID", "must be a bounded immutable identifier")
+	}
+	if err := ValidatePullRequestText(intent.Title, intent.Body); err != nil {
+		return err
+	}
+	if len(intent.TaskName) > 253 || len(intent.TaskNamespace) > 63 ||
+		strings.ContainsAny(intent.TaskName+intent.TaskNamespace, "`\r\n") {
+		return invalid("PR Task identity", "must be bounded and single-line")
 	}
 	return validateObjectID("PR expected head", intent.ExpectedHeadOID)
 }

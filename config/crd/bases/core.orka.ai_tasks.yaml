@@ -1939,6 +1939,25 @@ spec:
                       CreatePR is true.
                     maxLength: 255
                     type: string
+                  prBody:
+                    description: |-
+                      PRBody is the pull request body supplied by the Task author. When empty,
+                      the publisher describes the publication and identifies the Task. Publication
+                      generation and reconciliation markers are appended to either body.
+                      Orka reconciliation comments are reserved and must not be included.
+                    maxLength: 32768
+                    type: string
+                    x-kubernetes-validations:
+                    - message: prBody must not contain reserved publisher reconciliation
+                        markers
+                      rule: '!self.contains(''<!-- orka.publisher.pr-'')'
+                  prTitle:
+                    description: |-
+                      PRTitle is the pull request title supplied by the Task author. When empty,
+                      the controller uses the prompt's first nonblank line, limited to 256 characters.
+                      Only an empty prompt falls back to the publication generation title.
+                    maxLength: 256
+                    type: string
                   publicationCredentialRef:
                     description: |-
                       PublicationCredentialRef references the target-repository write credential

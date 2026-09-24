@@ -407,12 +407,12 @@ func (d *ACPDispatcher) recoverPublicationPullRequest(
 	prRequest := publisherservice.PullRequestReconcileRequest{
 		Metadata:      publisherservice.OperationMetadata{Namespace: recovery.task.Namespace, PublicationID: publication.ID, OperationID: prOperation},
 		CredentialRef: recovery.forgeCredential,
-		Intent: publisher.PullRequestIntent{
+		Intent: withTaskPullRequestMetadata(publisher.PullRequestIntent{
 			BaseRepository: recovery.pullRequestBase, BaseRef: publication.PRIntent.BaseRef,
 			HeadRepository: recovery.target, HeadRef: publication.PRIntent.HeadRef,
 			PublicationGeneration: publication.Generation, ExpectedHeadOID: publication.PRIntent.ExpectedHeadSHA,
 			SessionUID: publication.SessionUID,
-		},
+		}, recovery.task),
 	}
 	prRequest, err := d.persistedPullRequestRequest(ctx, prRequest)
 	if err != nil {
@@ -458,9 +458,6 @@ func (d *ACPDispatcher) persistedPullRequestRequest(
 	ctx context.Context,
 	request publisherservice.PullRequestReconcileRequest,
 ) (publisherservice.PullRequestReconcileRequest, error) {
-	if request.Intent.SessionUID == "" {
-		return request, nil
-	}
 	if d.Store == nil {
 		return request, fmt.Errorf("external-effect store is required")
 	}
@@ -482,13 +479,16 @@ func (d *ACPDispatcher) persistedPullRequestRequest(
 	if effect == nil || effect.ID != id || effect.Identity != identity {
 		return request, store.ConflictErrorf("pull request effect does not match its immutable identity")
 	}
-	// Older controllers reserved PR effects without sessionUid. Preserve only
-	// the exact request shape proved by that original digest, including its
-	// legacy key/marker. A same-branch PR never establishes legacy ownership.
-	legacy := request
+	// Older controllers omitted Task presentation and, before that, sessionUid.
+	// Preserve only the exact request shape proved by the original digest.
+	// A same-branch PR never establishes legacy ownership.
+	withoutMetadata := request
+	withoutMetadata.Intent.Title, withoutMetadata.Intent.Body = "", ""
+	withoutMetadata.Intent.TaskName, withoutMetadata.Intent.TaskNamespace = "", ""
+	legacy := withoutMetadata
 	legacy.Intent.SessionUID = ""
 	const requestKey = "request"
-	for _, candidate := range []publisherservice.PullRequestReconcileRequest{request, legacy} {
+	for _, candidate := range []publisherservice.PullRequestReconcileRequest{request, withoutMetadata, legacy} {
 		digest, digestErr := acpDomainDigest("external-effect-request", map[string]any{
 			"identity": identity, requestKey: candidate,
 		})

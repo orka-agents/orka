@@ -1018,6 +1018,22 @@ type WorkspaceConfig struct {
 	// +optional
 	PRBaseBranch string `json:"prBaseBranch,omitempty"`
 
+	// PRTitle is the pull request title supplied by the Task author. When empty,
+	// the controller uses the prompt's first nonblank line, limited to 256 characters.
+	// Only an empty prompt falls back to the publication generation title.
+	// +kubebuilder:validation:MaxLength=256
+	// +optional
+	PRTitle string `json:"prTitle,omitempty"`
+
+	// PRBody is the pull request body supplied by the Task author. When empty,
+	// the publisher describes the publication and identifies the Task. Publication
+	// generation and reconciliation markers are appended to either body.
+	// Orka reconciliation comments are reserved and must not be included.
+	// +kubebuilder:validation:MaxLength=32768
+	// +kubebuilder:validation:XValidation:rule="!self.contains('<!-- orka.publisher.pr-')",message="prBody must not contain reserved publisher reconciliation markers"
+	// +optional
+	PRBody string `json:"prBody,omitempty"`
+
 	// PushBranch is the publication branch. For write Tasks the controller derives
 	// a full-entropy Task- or Session-owned branch when this is omitted.
 	// +kubebuilder:validation:MaxLength=255

@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -332,4 +333,53 @@ func (s *publicationPRRecoveryReceiptStore) SetPublicationPRReceipt(_ context.Co
 	result := *s.publication
 	result.PullRequestReceipt = &request.Receipt
 	return &result, nil
+}
+
+func TestPersistedPullRequestRequestPreservesTaskPresentationAcrossUpgrades(t *testing.T) {
+	for _, session := range []bool{false, true} {
+		for _, metadata := range []bool{false, true} {
+			t.Run(fmt.Sprintf("session=%t/metadata=%t", session, metadata), func(t *testing.T) {
+				ctx := context.Background()
+				controlStore, fence := newBranchClaimReclamationStore(t)
+				request := publicationPRRecoveryTestRequest()
+				request.Intent.Title, request.Intent.Body = "fix: frozen title", "Frozen body"
+				request.Intent.TaskName, request.Intent.TaskNamespace = "fix-task", request.Metadata.Namespace
+				if !session {
+					request.Intent.SessionUID = ""
+				}
+				original := request
+				if !metadata {
+					original.Intent.Title, original.Intent.Body = "", ""
+					original.Intent.TaskName, original.Intent.TaskNamespace = "", ""
+				}
+				identity := publicationPRRecoveryTestIdentity(request)
+				digest, err := acpDomainDigest("external-effect-request", map[string]any{"identity": identity, "request": original})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := controlStore.ReserveExternalEffect(ctx, store.ReserveExternalEffectRequest{
+					Identity: identity, RequestDigest: digest, Fence: fence, CreatedAt: time.Now().UTC(),
+				}); err != nil {
+					t.Fatal(err)
+				}
+				dispatcher := &ACPDispatcher{Store: controlStore}
+				selected, err := dispatcher.persistedPullRequestRequest(ctx, request)
+				if err != nil || !reflect.DeepEqual(selected, original) {
+					t.Fatalf("recovery changed the persisted presentation: %v", err)
+				}
+				if metadata {
+					changed := request
+					changed.Intent.Title = "Changed title"
+					if _, err := dispatcher.persistedPullRequestRequest(ctx, changed); !errors.Is(err, store.ErrConflict) {
+						t.Fatalf("accepted changed title: %v", err)
+					}
+					changed = request
+					changed.Intent.Body = "Changed body"
+					if _, err := dispatcher.persistedPullRequestRequest(ctx, changed); !errors.Is(err, store.ErrConflict) {
+						t.Fatalf("accepted changed body: %v", err)
+					}
+				}
+			})
+		}
+	}
 }

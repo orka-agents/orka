@@ -84,6 +84,8 @@ The controller requires `ORKA_GITHUB_WEBHOOK_SECRET` and verifies the `X-Hub-Sig
 | `spec.workspace.subPath` | string | empty | Repository subdirectory exposed as workspace root. |
 | `spec.workspace.pushBranch` | string | generated for write Tasks when omitted | Publication branch; Orka-generated names use full Task or Session identity entropy. |
 | `spec.workspace.prBaseBranch` | string | empty | Pull-request base branch. |
+| `spec.workspace.prTitle` | string | prompt's first nonblank line | Exact pull-request title, up to 256 characters. The default trims whitespace and truncates to 256 characters; only an empty prompt uses `Orka publication generation N`. |
+| `spec.workspace.prBody` | string | publisher summary and Task namespace/name | Pull-request body, up to 32,768 characters. The publisher appends the publication generation and reconciliation markers to custom and default bodies. Reserved Orka reconciliation comments are rejected. |
 | `spec.workspace.createPR` | boolean | `false` | Reconcile a pull request only after branch publication when true; requires `intent: write`. |
 | `spec.agentRuntime.maxTurns` | integer | Agent default | Per-Task prompt-loop limit. |
 | `spec.agentRuntime.allowedTools` / `disallowedTools` | list | Agent defaults | Per-Task tool policy override. |

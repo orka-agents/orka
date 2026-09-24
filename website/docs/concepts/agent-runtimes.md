@@ -312,6 +312,8 @@ spec:
     pushBranch: orka/update-auth-docs
     prBaseBranch: main
     createPR: true
+    prTitle: "fix: handle empty filters"
+    prBody: "Reject empty filters before querying."
   agentRuntime:
     maxTurns: 40
     allowBash: true
@@ -356,7 +358,11 @@ hold the artifact signing key.
 | `subPath` | Repository subdirectory exposed as the workspace root. |
 | `pushBranch` | Publication branch. If omitted for a write Task, Orka derives a full-entropy Task- or Session-owned branch. |
 | `prBaseBranch` | Pull-request base branch when `createPR` is true. |
+| `prTitle` | Optional exact pull-request title, up to 256 characters. Defaults to the prompt's first nonblank line, trimmed and truncated to 256 characters. Only an empty prompt uses `Orka publication generation N`. |
+| `prBody` | Optional pull-request body, up to 32,768 characters. Defaults to the publisher summary with the Task namespace/name. Publication generation and reconciliation markers are appended in either case. |
 | `createPR` | Explicitly request PR reconciliation after verified branch publication. |
+
+Pull-request text comes from the frozen Task spec and prompt, never from files or output produced by the agent. Orka reserves comments beginning with `<!-- orka.publisher.pr-` for reconciliation. Remove these comments when copying an existing PR body into `prBody`. The publisher keeps the original title and body when reconciling an existing pull request. A continuation does not overwrite a person's edits.
 
 Do not embed credentials, query strings, or fragments in repository URLs.
 
