@@ -566,6 +566,10 @@ status:
 
 Custom tool definitions for agents. Tools can call plain HTTP endpoints or MCP servers hosted in durable Substrate actors. Plain HTTP tools require `http.url` and support header-based or body-based auth injection.
 
+:::tip[Video demo]
+Watch [Allow stock checks but block purchasing](https://www.youtube.com/watch?v=1vDI6PxhmfY).
+:::
+
 This example uses a placeholder catalog API. Replace its URL and Secret reference with your service's values.
 
 ```yaml

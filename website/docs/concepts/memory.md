@@ -17,6 +17,10 @@ The current model has three related concepts:
 
 Memory proposal review is **non-applying**. Reviewing a proposal as accepted or rejected records the decision only. Accepted proposals with `type: "memory"` can then be applied explicitly, which creates (or idempotently returns) durable memory linked back to the proposal.
 
+:::tip[Video demo]
+Watch [Review and publish an agent's memory](https://www.youtube.com/watch?v=iCqyVfWBpyg).
+:::
+
 ## Memory proposal lifecycle
 
 Memory proposals follow an explicit review/apply lifecycle:

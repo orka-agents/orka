@@ -282,6 +282,10 @@ A read Task succeeds only after validation proves the final tree still matches t
 
 ## Write and publication Task
 
+:::tip[Video demo]
+Watch [From chat to a GitHub pull request](https://www.youtube.com/watch?v=FlLgdh2lKMk).
+:::
+
 Source read, target read, target write, and forge API credentials are distinct
 roles, even when an operator deliberately backs multiple roles with the same
 Secret.

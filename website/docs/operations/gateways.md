@@ -12,6 +12,10 @@ The experimental [A2A adapter](https://github.com/orka-agents/orka-gateway-a2a) 
 
 See its [setup guide](https://github.com/orka-agents/orka-gateway-a2a/blob/main/docs/getting-started.md) and [compatibility notes](https://github.com/orka-agents/orka-gateway-a2a/blob/main/docs/compatibility.md) for supported Orka versions, native-Agent prerequisites, and conformance limits.
 
+:::tip[Video demo]
+Watch [Agent-to-agent requests with safe retries](https://www.youtube.com/watch?v=2shxIt1ooxE).
+:::
+
 ## Default service levels and bounds
 
 The documented local reference target is p95 durable ingress acknowledgement below 500 ms for a 1,000-event burst with 100 active Sessions. This is an admission SLO, not an end-to-end model response SLO.

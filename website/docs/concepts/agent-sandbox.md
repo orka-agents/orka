@@ -11,6 +11,10 @@ RuntimeSession inside a provider-owned sandbox through a
 **workspace-provider-backed RuntimePool**. The integration is disabled by
 default and fails closed.
 
+:::tip[Video demo]
+Watch [Suspend an agent workspace and keep its files](https://www.youtube.com/watch?v=DyS9JioSRa0).
+:::
+
 Orka requires agent-sandbox `v1.0.0`; older releases are unsupported. Operators
 upgrading an existing v0.5 installation must complete the upstream
 [storage migration](https://github.com/kubernetes-sigs/agent-sandbox/blob/v0.5.6/docs/api-migration-guide.md)

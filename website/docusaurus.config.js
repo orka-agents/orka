@@ -62,6 +62,11 @@ const config = {
             label: 'Docs',
           },
           {
+            to: '/docs/demos',
+            label: 'Demos',
+            position: 'left',
+          },
+          {
             href: 'https://github.com/orka-agents/orka',
             label: 'GitHub',
             position: 'right',
@@ -77,6 +82,10 @@ const config = {
               {
                 label: 'Getting Started',
                 to: '/docs/getting-started',
+              },
+              {
+                label: 'Demos',
+                to: '/docs/demos',
               },
               {
                 label: 'API Reference',
