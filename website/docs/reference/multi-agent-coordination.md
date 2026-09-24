@@ -582,7 +582,7 @@ For the request above, a failed child's result includes:
 
 Orka supports iterative multi-agent workflows where a coordinator orchestrates coding, review, and feedback loops until code is approved.
 
-The current ACP core runtime does not accept `priorTaskRef`; use `sessionRef` for runtime continuity in direct ACP manifests. Existing `prior_task` coordination examples describe the older diff-handoff loop and are not an ACP v2 release gate.
+The current ACP core runtime does not accept `priorTaskRef`; use `sessionRef` for runtime continuity in direct ACP manifests. Existing `prior_task` coordination examples describe the older diff-handoff loop and are not an Orka harness v2 release gate.
 
 ### Flow
 

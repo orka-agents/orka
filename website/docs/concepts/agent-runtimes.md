@@ -7,6 +7,10 @@ description: "How Orka runs coding agents: ACP RuntimePools, sessions, and the p
 
 `type: agent` Tasks use the ACP core runtime and the `orka.harness.v2` session protocol. Built-in Codex, Claude, Copilot, and OpenCode profiles run in controller-owned `RuntimePool` resources; there is no per-Task agent Job and no fallback runtime path.
 
+Orka harness v2 is the controller-to-supervisor contract, carried over HTTP with
+NDJSON prompt streams. The supervisor drives each agent CLI using ACP over
+stdin/stdout. These are separate protocols with independent versions.
+
 Orka owns the durable Task attempt, RuntimeSession identity, queueing, workspace validation, delivery receipt, transcript, and result projection. The runtime Pod owns only the short-lived provider process and ACP session for a fenced RuntimeSession.
 
 The supported built-in set is intentionally closed: `codex`, `claude`,
@@ -94,7 +98,7 @@ orka runtime-pool get '<pool-name>' -o yaml
 kubectl get runtimepools
 ```
 
-## ACP v2 Task lifecycle
+## Orka harness v2 Task lifecycle {#acp-v2-task-lifecycle}
 
 The durable Task execution state is independent from the top-level compatibility phase. It is
 drawn in full under [Task lifecycle](architecture.md#task-lifecycle). Two states are worth calling
@@ -389,7 +393,7 @@ spec:
     gitRepo: https://github.com/example/project.git
 ```
 
-A RuntimeSession is ephemeral. If its Pod is replaced, Orka may create a fresh provider session from the verified workspace baseline and canonical transcript. ACP v2 intentionally does not provide prompt replay, stream reconnect, provider-session load, or workspace checkpoint endpoints.
+A RuntimeSession is ephemeral. If its Pod is replaced, Orka may create a fresh provider session from the verified workspace baseline and canonical transcript. Orka harness v2 intentionally does not provide prompt replay, stream reconnect, provider-session load, or workspace checkpoint endpoints.
 
 ## Runtime and credential boundaries
 

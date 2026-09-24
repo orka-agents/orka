@@ -686,7 +686,7 @@ test_clean_historical_cutover_applies() {
   prepare_historical_case "${case_dir}"
 
   run_upgrade "${case_dir}" --gateway-workload gateway-ns/legacy-gateway=deployment/gateway-ns/gateway-adapter >"${case_dir}/output" 2>&1
-  grep -F 'ACP v2 CRD hard cutover applied' "${case_dir}/output" >/dev/null
+  grep -F 'Orka harness v2 CRD hard cutover applied' "${case_dir}/output" >/dev/null
   assert_one_dry_run_and_one_live_apply "${case_dir}"
   [[ "$(grep -Fc 'get agentruntimes.core.orka.ai -A -o json' "${case_dir}/kubectl.log")" == "2" ]]
 }

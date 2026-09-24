@@ -9,7 +9,7 @@ description: "Controller flags, Helm values, environment variables, and CRD sett
 
 ### Task
 
-The core work unit. Supports container commands, native AI prompts, or ACP v2 coding-agent RuntimeSessions.
+The core work unit. Supports container commands, native AI prompts, or Orka harness v2 coding-agent RuntimeSessions.
 
 ```yaml
 apiVersion: core.orka.ai/v1alpha1

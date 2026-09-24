@@ -116,7 +116,7 @@ Container and native `ai` Tasks keep their existing `spec.execution` behavior.
 ## Local evaluation material
 
 The repository still contains local/kind evaluation scripts for the older
-worker-based execution-workspace prototype. They are not the supported ACP v2
+worker-based execution-workspace prototype. They are not the supported Orka harness v2
 deployment path and should not be used as release evidence. Agent runtime
 validation should verify RuntimePool scale-up, exact-instance fencing, Session
 continuation, cancellation, workspace validation, clean-room publication,

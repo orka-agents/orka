@@ -5,7 +5,7 @@ description: "The pieces Orka is made of, the two lifecycles a Task moves throug
 
 # Architecture
 
-Orka is a Kubernetes-native task execution platform. Container and native AI Tasks run through worker Jobs; built-in coding-agent Tasks run through the ACP v2 RuntimePool and RuntimeSession control plane.
+Orka is a Kubernetes-native task execution platform. Container and native AI Tasks run through worker Jobs; built-in coding-agent Tasks run through the Orka harness v2 RuntimePool and RuntimeSession control plane.
 
 ## Overview
 
@@ -17,7 +17,7 @@ Orka is a Kubernetes-native task execution platform. Container and native AI Tas
   │ prompt MCP broker   artifact/credential brokers   publisher client   │
   └───────────────┬─────────────────────┬────────────────────────────────┘
                   │                     │
-          native Task paths       type: agent (ACP v2)
+          native Task paths       type: agent (Orka harness v2)
              │                         │
       ┌──────┴──────┐          ┌───────┴────────┐        ┌──────────────┐
       │ General/AI  │          │ RuntimePool    │───────▶│ authenticated│
