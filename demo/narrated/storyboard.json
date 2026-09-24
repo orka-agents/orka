@@ -401,7 +401,7 @@
           "marker": "3. Add a small model on our own hardware",
           "title": "Use hardware we already operate",
           "cue": "A small model on the cluster's CPUs",
-          "text": "AIKit serves Qwen three point five, a small two-billion-parameter model, on the cluster's CPUs. It runs on hardware the team already pays for and operates. Its allocated CPU and memory are included in the estimate, even while it waits."
+          "text": "AIKit serves Qwen three point five, a small two-billion-parameter model, on the cluster's CPUs. It runs on hardware the team already pays for and operates. The table includes allocated CPU and memory during the measured windows, including idle time. It shows test preparation separately."
         },
         {
           "marker": "4. Let a router choose the model",
@@ -414,16 +414,16 @@
           "title": "Repeat the work",
           "cue": "Same reports, same instructions, same starting code",
           "max_speed": 4,
-          "text": "The same twenty reports and engineering request run again, with the same checks. Sixteen replies used the local model. Four fell back to hosted when Jev was unavailable. Engineering used thirteen hosted calls, compared with five before. It took one hundred thirty three seconds instead of seventy seven, seventy two point seven percent longer. All twenty replies passed, and we independently reran the six payment tests."
+          "text": "The same twenty reports and engineering request run again, with the same checks. Thirteen replies used the local model. Seven fell back to hosted when Jev was unavailable. Engineering used five hosted calls, compared with eight before. In this run, it took seventy seven seconds instead of one hundred five, twenty six point seven percent less time. Both coding runs used the same hosted model. All twenty replies passed, and we independently reran the six payment tests."
         },
         {
           "marker": "6. Compare the bill",
           "title": "Compare outcomes, time, and cost",
-          "cue": "Recorded estimate +12.7%  |  Support time +77.3%",
-          "text": "Estimated model charges went from about twenty three cents to twenty five cents, up nine point seven percent. Including the stated share of hardware, the estimate rose from about twenty three cents to twenty six cents, up twelve point seven percent. Support took two hundred seventy seven seconds, then four hundred ninety one, seventy seven point three percent longer. Extra hosted coding work outweighed savings on replies. These are estimates, not an invoice. Coding tokens are unavailable in Orka's report, so we use gateway records."
+          "cue": "Service estimate: 46.6% lower  |  Support time: 68.0% longer",
+          "text": "Using the dated rate card, estimated API charges went from about twenty nine cents to fifteen cents, down forty nine point one percent. Adding the stated share of hardware, the service estimate fell from about twenty nine cents to sixteen cents, down forty six point six percent. Support took two hundred sixty nine seconds, then four hundred fifty two, sixty eight percent longer. The hosted-only service estimate excludes local-model test preparation; the actual test totals below retain it. These are estimates, not an invoice. The seven failed classifier calls have zero-charge receipts, but their token counts are unavailable. Coding token counts are unavailable in Orka's report, so we use gateway records."
         }
       ],
-      "outro": "Both runs met the same checks. The run with routing cost more and took longer. Orka defined the jobs and kept the records. Vekil chose the models, and AIKit supplied the local option. Those layers let the platform team change how work runs and measure the result. What would you tune for your team? Visit the Orka documentation at the address on screen for setup steps and more examples."
+      "outro": "Both runs met the same checks. The routing-enabled run had a lower estimated cost, but support took longer. Orka defined the jobs and kept the records. Vekil chose the models, and AIKit supplied the local option. That lets the platform team change how work runs and measure the result. What would you tune for your team? Visit the Orka documentation at the address on screen for setup steps and more examples."
     }
   ]
 }
