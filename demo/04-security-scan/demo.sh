@@ -4,10 +4,15 @@
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/demo.sh"
 cd "$repo_root"
 
-here=demo/04-security-scan
+here=$demo_root/04-security-scan
 repo=nodejs-goof
 work=$demo_root/setup/state/04
 mkdir -p "$work"
+# Keep the registration in the selected installation, including isolated demos.
+awk -v ns="$ORKA_NAMESPACE" '
+  $0 == "  namespace: orka-system" {$0 = "  namespace: " ns}
+  {print}' "$here/manifests/repository-scan.yaml" >"$work/repository-scan.yaml"
+cd "$work"
 
 ensure_port_forward
 orka_connect
@@ -20,7 +25,7 @@ peq "kubectl -n $ORKA_NAMESPACE delete repositoryscan $repo --wait=true"
 # repository, the two agents, and the note about credentials.
 registration() {
   awk '/^  repoURL:|^  branch:|^  analysisAgentRef:|^  patchAgentRef:/ {grab=2} /^  # Four credential/ {grab=2}
-       grab > 0 {print; grab--}' "$here/manifests/repository-scan.yaml"
+       grab > 0 {print; grab--}' repository-scan.yaml
 }
 scan_runs() { orka security scan list "$repo" -o json | jq -e '.items | length > 0'; }
 
@@ -37,7 +42,7 @@ say "She registers the repository once. The record names the repository, the"
 say "Agent that reviews, and the Agent that patches. Only Orka's Publisher"
 say "ever holds the Git credentials; the agents never do."
 pe "registration"
-pe "orka security repo create -f $here/manifests/repository-scan.yaml"
+pe "orka security repo create -f repository-scan.yaml"
 pe "orka security repo list"
 ok "Registered. The first scan starts on its own."
 
@@ -57,9 +62,9 @@ ok "The scan finished with a threat model and a set of findings on record."
 
 chapter "Findings come with evidence"
 
-say "Every finding cites a file and a line. A validating agent then checks the"
-say "two most severe likely findings: it reads the code path and tries a safe"
-say "reproduction when it can. Orka keeps its decision on record. These passed."
+say "Every finding cites a file and a line. A validating agent then checks"
+say "up to two likely findings: it reads the code path and tries a safe"
+say "reproduction when it can. Orka keeps its decision. Here are the ones that passed."
 wait_for "a validated recommended finding" \
   "orka security finding list $repo --recommended --validation-status validated -o json | jq -e '.items | length > 0'" 1800
 pe "orka security finding list $repo --recommended --validation-status validated"
