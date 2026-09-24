@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.10.1">
 <title data-rh="true">Release status | Orka</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orka-agents.github.io/orka/docs/release-status"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Release status | Orka"><meta data-rh="true" name="description" content="Where to get Orka releases and what each release includes."><meta data-rh="true" property="og:description" content="Where to get Orka releases and what each release includes."><link data-rh="true" rel="canonical" href="https://orka-agents.github.io/orka/docs/release-status"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/release-status" hreflang="en"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/release-status" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Release status","item":"https://orka-agents.github.io/orka/docs/release-status"}]}</script><link rel="stylesheet" href="/orka/assets/css/styles.57c51b49.css">
-<script src="/orka/assets/js/runtime~main.7b289123.js" defer="defer"></script>
+<script src="/orka/assets/js/runtime~main.231a766d.js" defer="defer"></script>
 <script src="/orka/assets/js/main.9267f4c3.js" defer="defer"></script>
 </head>
 <body>
@@ -15,10 +15,13 @@
 <p>Get published versions from <a href="https://github.com/orka-agents/orka/releases" target="_blank" rel="noopener noreferrer" class="">GitHub Releases</a>.
 For a new installation, follow <a class="" href="/orka/docs/installation">Install Orka</a>.</p>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="release-files">Release files<a href="#release-files" class="hash-link" aria-label="Direct link to Release files" title="Direct link to Release files" translate="no">​</a></h2>
-<p>The release workflow publishes these files:</p>
-<table><thead><tr><th>File</th><th>What it contains</th></tr></thead><tbody><tr><td><code>orka-&lt;version&gt;.tgz</code></td><td>The Helm chart used to install Orka</td></tr><tr><td><code>candidate.json</code></td><td>The version, source commit, image IDs, and chart checksum</td></tr><tr><td><code>qualification.json</code></td><td>The release test run and checksums for its reports</td></tr><tr><td><code>acceptance.json</code></td><td>Results for installation, restart, agent, publication, and cleanup tests</td></tr></tbody></table>
+<p>The release workflow publishes these files. Replace <code>&lt;version&gt;</code> with a version
+number such as <code>0.3.0</code>:</p>
+<table><thead><tr><th>File</th><th>What it contains</th></tr></thead><tbody><tr><td><code>orka-&lt;version&gt;.tgz</code></td><td>The Helm chart used to install Orka</td></tr><tr><td><code>orka_v&lt;version&gt;_linux_amd64.tar.gz</code></td><td>The CLI for Linux on x86-64</td></tr><tr><td><code>orka_v&lt;version&gt;_linux_arm64.tar.gz</code></td><td>The CLI for Linux on ARM64</td></tr><tr><td><code>orka_v&lt;version&gt;_darwin_amd64.tar.gz</code></td><td>The CLI for macOS on Intel</td></tr><tr><td><code>orka_v&lt;version&gt;_darwin_arm64.tar.gz</code></td><td>The CLI for macOS on Apple silicon</td></tr><tr><td><code>orka_v&lt;version&gt;_windows_amd64.zip</code></td><td>The CLI for Windows on x86-64</td></tr><tr><td><code>orka_v&lt;version&gt;_checksums.txt</code></td><td>SHA-256 checksums for the five CLI archives</td></tr><tr><td><code>orka_v&lt;version&gt;_checksums.txt.bundle</code></td><td>The keyless Cosign signature and verification material for the checksum file</td></tr><tr><td><code>candidate.json</code></td><td>The version, source commit, image digests, and SHA-256 hashes for the chart and CLI assets</td></tr><tr><td><code>qualification.json</code></td><td>The release test run and checksums for its reports</td></tr><tr><td><code>acceptance.json</code></td><td>Results for installation, restart, agent, publication, and cleanup tests</td></tr></tbody></table>
 <p>The chart uses release version tags by default. <code>candidate.json</code> records the
-exact image digests and chart checksum for inspecting a release or pinning images.
+exact image digests and SHA-256 hashes for the chart, CLI archives, checksum file,
+and signature bundle. Use these to inspect a release or pin images. See
+<a class="" href="/orka/docs/cli-reference#installation">CLI installation</a> to choose a download and verify it.
 The chart is also available from Orka&#x27;s Helm repository
 at <code>https://orka-agents.github.io/orka/charts</code>.</p>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="which-one-am-i-running">Check your installation<a href="#which-one-am-i-running" class="hash-link" aria-label="Direct link to Check your installation" title="Direct link to Check your installation" translate="no">​</a></h2>
@@ -39,8 +42,8 @@ and may lag behind the source code.</p>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="release-publication">How a release is published<a href="#release-publication" class="hash-link" aria-label="Direct link to How a release is published" title="Direct link to How a release is published" translate="no">​</a></h2>
 <ol>
 <li class="">A maintainer starts <strong>Prepare Release</strong> from <code>main</code> and enters the version.</li>
-<li class="">The workflow prepares a release branch, builds the images and chart, and
-waits for approval to run the release tests.</li>
+<li class="">The workflow prepares a release branch, builds the images, chart, and CLI
+archives, and waits for approval to run the release tests.</li>
 <li class="">After the tests pass, a maintainer approves publication. The workflow tags
 the tested commit and publishes the images, chart, and GitHub Release files.</li>
 </ol>
