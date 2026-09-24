@@ -27,7 +27,7 @@ export default function HeroSection() {
           Get Started
         </Link>
         <Link
-          to="#demos"
+          to="/docs/demos"
           className="button button--secondary button--lg"
         >
           Watch demos
