@@ -7,7 +7,7 @@
       "scenario": "Maya's service needs a health check.",
       "payoff": "A reviewed pull request, and no model key on Maya's laptop",
       "next": "What would your team hand off next?",
-      "intro": "Maya is a developer on the inventory team. Her service has no health check. She will ask for one in Claude Code, the way she would ask a colleague. Orka will run the agents on her team's cluster, keep the records, and end with a pull request. The model key never reaches her laptop.",
+      "intro": "This demo follows Maya, a developer on the inventory team whose service has no health check. She asks for one in Claude Code, the way she would ask a colleague. Orka runs the agents on her team's cluster and keeps the records. We'll check the resulting pull request on GitHub. The model key never reaches her laptop.",
       "chapters": [
         {
           "marker": "Maya has no model key",
@@ -48,7 +48,7 @@
       "scenario": "Add a health check today. Look at the same files tomorrow.",
       "payoff": "Nothing runs in between, and nothing is lost",
       "next": "What work would you come back to tomorrow?",
-      "intro": "Maya asks an agent to add a health check today and wants to look at the same files tomorrow. Nobody should pay for an idle agent in between, and nothing should be lost. Let's see what survives between the two requests.",
+      "intro": "This demo follows Maya on the inventory team as she asks an agent to add a health check today and returns to the same files tomorrow. Orka stops the agent's Pod between requests but keeps the workspace disk. We'll check what survives. The saved disk and cluster still have costs.",
       "chapters": [
         {
           "marker": "The platform team chose the lifecycle",
@@ -89,7 +89,7 @@
       "scenario": "An audit must survive a pause and a deleted workspace.",
       "payoff": "The audit comes back from a checkpoint",
       "next": "Which work would you want a save point for?",
-      "intro": "Priya, on the security team, starts an audit of the inventory service. Nothing should run while nobody works, and the findings must survive anything, even the workspace being deleted. Orka keeps a save point. Let's follow the audit through a sleep, a deletion, and a restore.",
+      "intro": "This demo follows Priya on the security team as she audits the inventory service. She needs the agent to stop between requests and the audit files to survive deletion of the workspace. Orka keeps a checkpoint. We'll suspend the workspace, delete it, and compare the restored audit with the original.",
       "chapters": [
         {
           "marker": "Substrate keeps a pool of workers",
@@ -136,7 +136,7 @@
       "scenario": "An old app needs a security review people can act on.",
       "payoff": "A checked finding becomes a pull request Priya chose",
       "next": "Which repository would you start with?",
-      "intro": "Priya, on the security team, has an old Node.js app nobody wants to touch. She wants findings that were checked before she reads them, and fixes that arrive as pull requests. For this example we use a public test application with known vulnerabilities.",
+      "intro": "This demo follows Priya on the security team as she scans an old Node.js app. She wants findings checked before she reads them and fixes she can review as pull requests. We use a public test application with known vulnerabilities. Priya chooses which validated finding to patch.",
       "chapters": [
         {
           "marker": "Priya registers the repository",
@@ -171,7 +171,7 @@
       "scenario": "Payments and inventory need different models and separate work.",
       "payoff": "The caller's token picks the team, and the wrong door stays shut",
       "next": "How would you organize your teams?",
-      "intro": "Alice is on the payments team and Bob is on inventory. They need different models and different budgets, and they must never see each other's work. The company wants one AI address for every tool. Each team gets its own Orka, and one small router reads the caller's token.",
+      "intro": "This demo follows Alice on the payments team and Bob on inventory as they use the same AI address. They need different models and budgets, and each team's work must stay separate. Each team has its own Orka. A router uses the caller's token to pick the team. We'll check the routing and two refused cross-team requests.",
       "chapters": [
         {
           "marker": "Two teams, one door",
@@ -206,7 +206,7 @@
       "scenario": "A customer wants 24 filters. Only 18 are available today.",
       "payoff": "A reply Sam's app can retry, continue, and read back",
       "next": "Which application could ask your agents for help?",
-      "intro": "Sam runs the order desk. A customer wants twenty four replacement filters today, and only eighteen are in stock. Sam's order-desk application asks the inventory team's agent for advice. That agent runs in Orka. We will send the request, retry it, and continue the conversation.",
+      "intro": "This demo follows Sam, who runs the order desk, as a customer asks for twenty four replacement filters. Only eighteen are in stock, and the customer needs them today. Sam's application asks the inventory team's agent for advice. That agent runs in Orka. We'll send the request, retry it, and continue the conversation.",
       "chapters": [
         {
           "marker": "Sam has a customer waiting",
@@ -253,7 +253,7 @@
       "scenario": "The assistant needs supplier information, without buying anything.",
       "payoff": "Stock confirmed, zero orders created, both sides on record",
       "next": "Which actions should your platform allow?",
-      "intro": "Jordan, on the inventory team, needs twenty more replacement filters. An assistant can ask the supplier. Whether it may also buy is the platform team's decision, not the model's. We will watch one allowed request and one refused one, and check the supplier's own receipts.",
+      "intro": "This demo follows Jordan from the inventory team, who needs twenty more replacement filters. An assistant can check stock, but the platform team has not allowed purchasing. We'll request both actions and check the supplier's own receipts to see what reached it. The supplier is a test service with made-up stock.",
       "chapters": [
         {
           "marker": "1. Jordan needs 20 filters",
@@ -294,7 +294,7 @@
       "scenario": "Keep a return procedure, with a person deciding what is shared.",
       "payoff": "A fresh agent answers from the reviewed note, with the trail on record",
       "next": "Which team knowledge is worth keeping?",
-      "intro": "Jordan runs the warehouse. An assistant has just read the return procedure for replacement filters, and the next assistant will need it too. Orka lets an agent propose knowledge to keep, but nothing becomes shared until Jordan says so. Let's follow that process.",
+      "intro": "This demo follows Jordan, who runs the warehouse, as a return procedure becomes shared knowledge. An assistant has just read the procedure for replacement filters, and the next assistant needs it too. Orka lets the first agent propose a note. Jordan reviews it, then explicitly publishes it before a fresh agent can use it.",
       "chapters": [
         {
           "marker": "1. Today's procedure",
@@ -335,7 +335,7 @@
       "scenario": "A pressure reading changed after maintenance. Inspect before acting.",
       "payoff": "One approved inspection, one work order, one Task",
       "next": "Where should your agents pause for a decision?",
-      "intro": "A pump's pressure reading dropped after maintenance while the other readings look normal. Fibey, an AI assistant, may investigate. Creating a work order needs the shift lead's approval. Orka holds that action until Lee decides. The incident and the work-order service are simulated.",
+      "intro": "This demo follows Fibey, an AI assistant, as it investigates a pump's pressure reading that dropped after maintenance. The other readings look normal. Creating a work order needs approval from Lee, the shift lead. Orka holds that action until Lee decides. The incident and the work-order service are simulated.",
       "chapters": [
         {
           "marker": "1. An alert after maintenance",
@@ -382,7 +382,7 @@
       "scenario": "Twenty customer reports trace to one checkout retry bug.",
       "payoff": "Same checked outcomes, measured time and estimated cost",
       "next": "What would you measure for your team?",
-      "intro": "This video introduces the following scenario. Twenty customers report a double charge after our checkout froze. Support needs twenty replies and engineering needs one fix. Dana's platform team runs the work twice: first on a hosted model, then with a router that can choose a small local model. Both runs face the same checks. Then we compare time and estimated cost.",
+      "intro": "This demo follows Dana's platform team as it handles twenty customer reports of double charges after a frozen checkout. Support needs twenty replies and engineering needs one fix. The team runs the work twice, first on a hosted model, then with a router that can choose a small local model for support. Both runs face the same checks. We'll compare elapsed time and estimated cost.",
       "chapters": [
         {
           "marker": "1. Give each assistant its instructions",

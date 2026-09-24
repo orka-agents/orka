@@ -93,11 +93,18 @@ orka task get "$task" -o json >raw/task-pending.json
 orka task approvals "$task" -o json >raw/approval-pending.json
 receipts >raw/counts-pending.json
 python3 "$here/check.py" pending
+# The short ID is what `orka task approvals` shows: the first twelve
+# characters after the digest prefix. The CLI resolves it to the full ID.
+# Used by the command evaluated in pe below.
+# shellcheck disable=SC2034
+approval=$(jq -er '.approvals[0].id' raw/approval-pending.json)
+approval=${approval##*:}
+approval=${approval:0:12}
 ok 'A proposal is waiting. Fibey is paused inside the same Task.'
 
 chapter '4. Nothing has happened yet'
 say 'The request names the tool, its arguments, and how long Lee has to decide.'
-pe 'orka task approvals "$task"'
+pe 'orka task approvals "$task" "$approval"'
 orka task get "$task" -o json >raw/task-before-decision.json
 orka task approvals "$task" -o json >raw/approval-before-decision.json
 receipts >raw/counts-before-decision.json
@@ -106,13 +113,6 @@ pe 'counts raw/counts-before-decision.json'
 ok 'One inventory lookup, zero work orders. Fibey asking did not authorize anything.'
 
 chapter '5. Lee approves'
-# The short ID is what `orka task approvals` shows: the first twelve
-# characters after the digest prefix. The CLI resolves it to the full ID.
-# Used by the command evaluated in pe below.
-# shellcheck disable=SC2034
-approval=$(jq -er '.approvals[0].id' raw/approval-before-decision.json)
-approval=${approval##*:}
-approval=${approval:0:12}
 say 'Lee reads the proposal and approves this inspection, with a reason.'
 pe 'orka task approve "$task" "$approval" --reason "Inspect the transmitter."'
 orka task approvals "$task" "$approval" -o json >raw/decision.json
