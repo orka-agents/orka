@@ -7,7 +7,94 @@ description: "The orka CLI: installing it, pointing it at a controller, and what
 
 The `orka` CLI talks to the Orka controller REST API and is intended for day-to-day task inspection, resource CRUD, and operator workflows. It uses the same authentication and namespace rules as the API.
 
-Build the CLI locally with:
+## Installation
+
+Download the CLI from [GitHub Releases](https://github.com/orka-agents/orka/releases).
+Choose a published release that matches your installed Helm chart and controller version.
+The `v0.3.0` value below is an example. Replace it with your installation's release tag,
+including the leading `v`.
+
+Select the archive for the machine where you will run the CLI, not the cluster nodes:
+
+| Platform | Archive |
+| --- | --- |
+| Linux, x86-64 | `orka_<version>_linux_amd64.tar.gz` |
+| Linux, ARM64 | `orka_<version>_linux_arm64.tar.gz` |
+| macOS, Intel | `orka_<version>_darwin_amd64.tar.gz` |
+| macOS, Apple silicon | `orka_<version>_darwin_arm64.tar.gz` |
+| Windows, x86-64 | `orka_<version>_windows_amd64.zip` |
+
+Each archive contains `orka` or `orka.exe`, `LICENSE`, and `README`.
+
+On Linux or macOS, start in an empty directory and set `OS` and `ARCH` for your machine:
+
+```bash
+VERSION=v0.3.0 # Example only; replace with your installed Orka release.
+OS=linux      # linux or darwin
+ARCH=amd64    # amd64 or arm64
+ARCHIVE="orka_${VERSION}_${OS}_${ARCH}.tar.gz"
+CHECKSUMS="orka_${VERSION}_checksums.txt"
+RELEASE_URL="https://github.com/orka-agents/orka/releases/download/${VERSION}"
+
+curl -fsSLO "${RELEASE_URL}/${ARCHIVE}"
+curl -fsSLO "${RELEASE_URL}/${CHECKSUMS}"
+```
+
+To also authenticate the checksum file, download its keyless signature bundle and
+verify it with [Cosign](https://docs.sigstore.dev/cosign/verifying/verify/).
+The signer must be the matching `release-X.Y` branch of Orka's release workflow:
+
+```bash
+RELEASE_BRANCH="release-$(printf '%s' "${VERSION#v}" | cut -d. -f1,2)"
+curl -fsSLO "${RELEASE_URL}/${CHECKSUMS}.bundle"
+cosign verify-blob \
+  --bundle "${CHECKSUMS}.bundle" \
+  --certificate-identity "https://github.com/orka-agents/orka/.github/workflows/release.yml@refs/heads/${RELEASE_BRANCH}" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  "$CHECKSUMS"
+```
+
+Check the selected archive's SHA-256 checksum before extracting it. On Linux:
+
+```bash
+set -o pipefail
+grep "  ${ARCHIVE}$" "$CHECKSUMS" | sha256sum -c -
+```
+
+On macOS:
+
+```bash
+set -o pipefail
+grep "  ${ARCHIVE}$" "$CHECKSUMS" | shasum -a 256 -c -
+```
+
+Continue only if the checksum check reports `OK` and any signature verification you
+ran succeeds. Then extract the archive and install the binary on your `PATH`:
+
+```bash
+tar -xzf "$ARCHIVE"
+mkdir -p "$HOME/.local/bin"
+install -m 0755 orka "$HOME/.local/bin/orka"
+export PATH="$HOME/.local/bin:$PATH"
+orka version
+orka --help
+```
+
+Keep `$HOME/.local/bin` on your `PATH` in new terminals by adding the export to your
+shell's startup file.
+
+On Windows, download the `windows_amd64.zip` archive and checksum file for the same
+version. In PowerShell, run `Get-FileHash <archive> -Algorithm SHA256` and compare its
+hash with that archive's entry in the checksum file before extracting. Put `orka.exe`
+in a directory on your `PATH`, then run `orka version`.
+
+`orka version` reports the local CLI version. Confirm that it matches your installed
+Helm/controller release before using the CLI.
+
+### Building from source
+
+With the [Go toolchain](../development/development.md#prerequisites) installed, run
+these commands from the root of an Orka source checkout:
 
 ```bash
 make build-cli

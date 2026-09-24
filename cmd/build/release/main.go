@@ -22,11 +22,13 @@ func main() {
 func (w *workflow) execute(args []string) error {
 	if len(args) == 0 {
 		return errors.New("usage: release " +
-			"<prepare|update-version|candidate|bundle|download|check-bundle|check-environment|qualify|publish> [args]")
+			"<prepare|update-version|candidate|package-cli|cli-checksums|bundle|download|" +
+			"check-bundle|check-environment|qualify|publish> [args]")
 	}
 	name, values := args[0], args[1:]
 	counts := map[string]int{
-		"prepare": 1, "update-version": 1, "candidate": 2, "bundle": 4, "download": 5,
+		"prepare": 1, "update-version": 1, "candidate": 2, "package-cli": 4, "cli-checksums": 2,
+		"bundle": 4, "download": 5,
 		"check-bundle": 1, "check-environment": 2, "qualify": 1, "publish": 1,
 	}
 	count, found := counts[name]
@@ -47,6 +49,10 @@ func (w *workflow) execute(args []string) error {
 		return updateVersion(w.root, values[0])
 	case "candidate":
 		return w.validateCandidate(values[0], values[1])
+	case "package-cli":
+		return packageCLI(w.root, path(values[0]), values[1], values[2], values[3])
+	case "cli-checksums":
+		return writeCLIChecksums(path(values[0]), values[1])
 	case "bundle":
 		return w.bundle(path(values[0]), values[1], values[2], values[3])
 	case "download":

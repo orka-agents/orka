@@ -136,7 +136,7 @@ func publicationFixture(t *testing.T) *releaseFixture {
 		return nil, nil, false
 	}
 	f.command = func(spec commandSpec) (commandResult, bool) {
-		if spec.args[0] == "bash" {
+		if spec.args[0] == "bash" || spec.args[0] == "cosign" {
 			return commandResult{}, true
 		}
 		if len(spec.args) >= 3 && slices.Equal(spec.args[:3], []string{"gh", "run", "download"}) {
@@ -284,8 +284,13 @@ func TestArchiveRetriesPreserveExistingAssetsAndRejectChangedBytes(t *testing.T)
 		return commandResult{}, true
 	}
 	must(t, f.w.archiveRelease(f.data, f.directory))
-	files[acceptanceFile] = "changed published evidence"
-	wantError(t, f.w.archiveRelease(f.data, f.directory), "refusing to overwrite")
+	for _, name := range []string{acceptanceFile, f.data.CLI[0].File,
+		cliChecksumFile(testVersion), cliChecksumFile(testVersion) + ".bundle"} {
+		original := files[name]
+		files[name] = "changed published asset"
+		wantError(t, f.w.archiveRelease(f.data, f.directory), "release asset "+name+" has different bytes")
+		files[name] = original
+	}
 }
 
 func TestArchiveRejectsMismatchedMetadataBeforeUploadingOrPublishing(t *testing.T) {
@@ -328,7 +333,7 @@ func TestMatchingRCDraftPublishesAfterVerifyingExistingAssets(t *testing.T) {
 			return []releaseRecord{record}, nil, true
 		}
 		if request.method == http.MethodPatch {
-			if downloads != 4 || request.payload["draft"] != false || request.payload["make_latest"] != "false" {
+			if downloads != 4+len(f.data.CLI) || request.payload["draft"] != false || request.payload["make_latest"] != "false" {
 				t.Fatalf("incorrect release publication: %d downloads, %+v", downloads, request)
 			}
 			published = true
@@ -374,7 +379,7 @@ func TestNewReleaseUploadsAndVerifiesAssetsBeforePublishing(t *testing.T) {
 			}
 		}
 		if request.method == http.MethodPatch &&
-			(uploaded != 4 || downloaded != 4 || request.payload["make_latest"] != "true") {
+			(uploaded != 4+len(f.data.CLI) || downloaded != 4+len(f.data.CLI) || request.payload["make_latest"] != "true") {
 			t.Fatalf("premature release publication: %d uploads, %d downloads", uploaded, downloaded)
 		}
 		return record, nil, true
@@ -398,7 +403,8 @@ func TestNewReleaseUploadsAndVerifiesAssetsBeforePublishing(t *testing.T) {
 		return commandResult{}, true
 	}
 	must(t, f.w.archiveRelease(f.data, f.directory))
-	if uploaded != 4 || downloaded != 4 || f.requests[len(f.requests)-1].method != http.MethodPatch {
+	if uploaded != 4+len(f.data.CLI) || downloaded != 4+len(f.data.CLI) ||
+		f.requests[len(f.requests)-1].method != http.MethodPatch {
 		t.Fatal("release was not fully verified and published")
 	}
 }

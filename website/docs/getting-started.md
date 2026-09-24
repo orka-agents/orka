@@ -315,25 +315,30 @@ The dashboard is included in Orka. See [Web dashboard](guides/ui.md).
 
 ## The CLI
 
-The CLI is optional. Build it from the root of an Orka source checkout with the
-[Go toolchain](development/development.md#prerequisites) installed:
+The CLI is optional. Download the archive for your operating system and architecture
+from [GitHub Releases](https://github.com/orka-agents/orka/releases), choosing a published
+version that matches your installed Helm chart and controller. Follow
+[CLI installation](reference/cli.md#installation) to select the platform, verify the
+checksum and optional signature, and put `orka` on your `PATH`. No Go toolchain is needed.
+
+Run `orka version` to confirm that the local CLI matches your Helm/controller release:
 
 ```bash
-make build-cli
-./bin/orka login                                  # reads your kubeconfig, opens a browser
-./bin/orka login --server https://orka.example.com
-./bin/orka login --token '<token>'
+orka version
+orka login                                  # reads your kubeconfig, opens a browser
+orka login --server https://orka.example.com
+orka login --token '<token>'
 ```
 
 It can pull a token from a bearer token, a token file, exec-based auth (GKE, AWS IAM), or
 an OIDC provider. With it, checking a Task and downloading its artifacts looks like this:
 
 ```bash
-./bin/orka --server http://localhost:8080 --token "$ORKA_TOKEN" -n orka-system \
+orka --server http://localhost:8080 --token "$ORKA_TOKEN" -n orka-system \
   task status code-review
-./bin/orka --server http://localhost:8080 --token "$ORKA_TOKEN" -n orka-system \
+orka --server http://localhost:8080 --token "$ORKA_TOKEN" -n orka-system \
   task artifacts '<task-name>'
-./bin/orka --server http://localhost:8080 --token "$ORKA_TOKEN" -n orka-system \
+orka --server http://localhost:8080 --token "$ORKA_TOKEN" -n orka-system \
   task download '<task-name>' '<artifact-name>'
 ```
 
@@ -349,6 +354,17 @@ Phase  Succeeded
 ```
 
 Full command list: [CLI reference](reference/cli.md).
+
+### Building from source
+
+For contributors, run this from the root of an Orka source checkout with the
+[Go toolchain](development/development.md#prerequisites) installed:
+
+```bash
+make build-cli
+```
+
+Copy `bin/orka` to a directory on your `PATH` to use the commands above.
 
 ## Next steps
 

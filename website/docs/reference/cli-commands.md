@@ -46,6 +46,7 @@ Available Commands:
   task          Manage tasks
   tool          Manage tools
   usage         Inspect recorded model usage and verified PR outcomes
+  version       Print the CLI version
   workspace     Inspect task workspace status
 
 Flags:
@@ -5212,6 +5213,26 @@ Flags:
       --repository string   Filter by owner/repository
       --teams string        Explicit team namespace; must match this installation (overrides --namespace)
       --until string        Exclusive request-start end date or RFC3339 timestamp (default: report time)
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka version`
+
+```text
+Print the CLI version
+
+Usage:
+  orka version [flags]
+
+Flags:
+  -h, --help   help for version
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file

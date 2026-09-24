@@ -56,6 +56,7 @@ func newRootCmd() *cobra.Command {
 	cmd.PersistentFlags().String("kubeconfig", "", "Path to kubeconfig file")
 
 	// Register subcommands
+	cmd.AddCommand(newVersionCmd())
 	cmd.AddCommand(newLoginCmd())
 	cmd.AddCommand(newRunCmd())
 	cmd.AddCommand(newConfigCmd())
