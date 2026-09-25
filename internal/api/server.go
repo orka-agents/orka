@@ -368,6 +368,10 @@ func (s *Server) setupRoutes() {
 	api.Post("/memory-proposals/:id/archive", s.handlers.ArchiveMemoryProposal)
 
 	// Provider endpoints
+	api.Get("/usage", s.handlers.GetUsageReport)
+	api.Get("/usage/work/:id", s.handlers.GetUsageWork)
+	api.Get("/usage/other/:category", s.handlers.GetUsageOther)
+
 	api.Get("/providers", s.handlers.ListProviders)
 	api.Post("/providers", s.handlers.CreateProvider)
 	api.Get("/providers/:name", s.handlers.GetProvider)
@@ -415,6 +419,7 @@ func (s *Server) setupRoutes() {
 	api.Put("/security/repositories/:name/threat-model", s.handlers.UpdateThreatModel)
 	api.Get("/security/repositories/:name/scans", s.handlers.ListSecurityScanRuns)
 	api.Post("/security/repositories/:name/scans", s.handlers.CreateManualSecurityScan)
+	api.Get("/security/repositories/:name/scans/:scanID/progress", s.handlers.GetSecurityScanProgress)
 	api.Get("/security/repositories/:name/slices", s.handlers.ListSecurityReviewSlices)
 	api.Get("/security/repositories/:name/slices/:sliceID", s.handlers.GetSecurityReviewSlice)
 	api.Get("/security/repositories/:name/dropped-findings", s.handlers.ListSecurityDroppedFindings)
@@ -499,12 +504,14 @@ func (s *Server) setupRoutes() {
 				MemoryProposalStore:     s.MemoryProposalStore,
 				ExecutionEventStore:     s.ExecutionEventStore,
 				GatewayEventStore:       s.GatewayEventStore,
+				GatewayService:          s.config.GatewayService,
 				TaskProvenanceProtected: s.config.TaskProvenanceProtected,
 			},
 		)
 		internal := s.app.Group("/internal/v1")
 		internal.Use(NewAuthMiddleware(s.client))
 		internal.Post("/results/:namespace/:taskName", s.internalHandlers.SubmitResult)
+		internal.Post("/tasks/:namespace/:taskName/gateway-messages", s.internalHandlers.SubmitGatewayMessage)
 		internal.Post("/tasks/:namespace/:taskName/execution-workspace/status", s.internalHandlers.UpdateExecutionWorkspaceStatus)
 		internal.Get("/sessions/:namespace/search", s.internalHandlers.SearchTranscript)
 		internal.Get("/sessions/:namespace/:name/transcript", s.internalHandlers.GetSessionTranscript)
@@ -538,7 +545,8 @@ func (s *Server) hasInternalStores() bool {
 		s.ArtifactStore != nil ||
 		s.MemoryStore != nil ||
 		s.MemoryProposalStore != nil ||
-		s.ExecutionEventStore != nil
+		s.ExecutionEventStore != nil ||
+		s.config.GatewayService != nil
 }
 
 // Start starts the API server
@@ -654,9 +662,9 @@ func customErrorHandler(c fiber.Ctx, err error) error {
 	}
 
 	return c.Status(code).JSON(fiber.Map{
-		"error": fiber.Map{
-			"code":    code,
-			"message": message,
+		apiFieldError: fiber.Map{
+			apiFieldCode:    code,
+			apiFieldMessage: message,
 		},
 	})
 }

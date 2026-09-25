@@ -34,6 +34,15 @@ import (
 )
 
 const (
+	observedStatus = "observed"
+)
+
+const (
+	runtimeMetadataKey = "runtime"
+	modeMetadataKey    = "mode"
+)
+
+const (
 	maxTerminalResultBytes           = 512 * 1024
 	localOutputRef                   = "cliwrapper-result-v1"
 	terminalLedgerPersistFailed      = "persist-failed"
@@ -428,8 +437,8 @@ func (s *Server) healthResponse() harness.HealthResponse {
 	status := harness.HealthStatusOK
 	ready := true
 	metadata := map[string]string{
-		"runtime": s.adapter.Name(),
-		"mode":    "observed",
+		runtimeMetadataKey: s.adapter.Name(),
+		modeMetadataKey:    observedStatus,
 	}
 	if !s.terminalLedgerHealthy() {
 		status = harness.HealthStatusUnhealthy
@@ -497,8 +506,8 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) capabilitiesMetadata() map[string]string {
 	metadata := map[string]string{
-		"wrapper": "cli",
-		"mode":    "observed",
+		"wrapper":       "cli",
+		modeMetadataKey: observedStatus,
 	}
 	if multi, ok := s.adapter.(*MultiAdapter); ok {
 		if runtimes := multi.SupportedRuntimes(); len(runtimes) > 0 {
@@ -1239,8 +1248,8 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 		return
 	}
 	turn.appendFrame(s.runtimeLogFrame(turn, "runtime command started", map[string]any{
-		"runtime": s.adapter.Name(),
-		"command": path.Base(spec.Path),
+		runtimeMetadataKey: s.adapter.Name(),
+		"command":          path.Base(spec.Path),
 	}))
 	run, runErr := s.runner(ctx, spec)
 	if s.latchChildCredentialProcessCleanupFailure(runErr) {
@@ -1487,8 +1496,8 @@ func (s *Server) securityArtifactFollowUp(turn *turnState, base TurnContext) com
 			followTurn.WorkDir = spec.Dir
 		}
 		turn.appendFrame(s.runtimeLogFrame(turn, "security artifact follow-up started", map[string]any{
-			"runtime": s.adapter.Name(),
-			"command": path.Base(spec.Path),
+			runtimeMetadataKey: s.adapter.Name(),
+			"command":          path.Base(spec.Path),
 		}))
 		run, runErr := s.runner(ctx, spec)
 		if s.latchChildCredentialProcessCleanupFailure(runErr) {
@@ -1659,8 +1668,8 @@ func (s *Server) frame(turn *turnState, typ harness.FrameType, summary string, t
 		Severity:         events.ExecutionEventSeverityInfo,
 		Summary:          events.RedactExecutionEventText(summary),
 		Metadata: map[string]string{
-			"runtime": s.adapter.Name(),
-			"mode":    "observed",
+			runtimeMetadataKey: s.adapter.Name(),
+			modeMetadataKey:    observedStatus,
 		},
 	}
 	switch value := terminal.(type) {

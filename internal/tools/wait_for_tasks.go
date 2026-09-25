@@ -101,6 +101,10 @@ func NewWaitForTasksTool(k8sClient client.Client) *WaitForTasksTool {
 	}
 }
 
+// waitForTasksDeadlineGrace leaves time to assemble and return the result
+// before a caller's context deadline expires.
+const waitForTasksDeadlineGrace = 2 * time.Second
+
 // Name returns the tool name
 func (t *WaitForTasksTool) Name() string {
 	return waitForTasksToolName
@@ -143,6 +147,8 @@ func (t *WaitForTasksTool) Parameters() json.RawMessage {
 }
 
 // Execute waits for the specified tasks to complete and returns their results
+//
+//nolint:gocyclo // Task observation, timeout, cancellation, and result assembly share one wait loop.
 func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var waitArgs WaitForTasksArgs
 	if err := json.Unmarshal(args, &waitArgs); err != nil {
@@ -167,6 +173,14 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 	}
 	if t.maxWait > 0 {
 		timeout = min(timeout, t.maxWait)
+	}
+	// A caller's context deadline bounds the wait so a shorter enclosing
+	// execution budget, such as an approved brokered call, yields the normal
+	// in-progress result instead of a cancellation with no result.
+	if ctxDeadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(ctxDeadline) - waitForTasksDeadlineGrace; remaining < timeout {
+			timeout = max(remaining, 0)
+		}
 	}
 
 	ns := ""

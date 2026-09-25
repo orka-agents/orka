@@ -159,7 +159,7 @@ func runtimeAuthProxyUpstreamTransportAllowed(upstream *url.URL) bool {
 func runtimeAuthProxyAddNoProxyHosts(env []string, hosts ...string) []string {
 	values := make([]string, 0, len(hosts)+2)
 	seen := make(map[string]struct{}, len(hosts)+2)
-	for _, name := range []string{"NO_PROXY", "no_proxy"} {
+	for _, name := range []string{noProxyEnv, "no_proxy"} {
 		raw := runtimeAuthProxyEffectiveEnvValue(env, name)
 		for value := range strings.SplitSeq(raw, ",") {
 			value = strings.TrimSpace(value)
@@ -187,8 +187,8 @@ func runtimeAuthProxyAddNoProxyHosts(env []string, hosts ...string) []string {
 		values = append(values, host)
 	}
 	combined := strings.Join(values, ",")
-	env = removeTurnEnv(env, "NO_PROXY", "no_proxy")
-	for _, name := range []string{"NO_PROXY", "no_proxy"} {
+	env = removeTurnEnv(env, noProxyEnv, "no_proxy")
+	for _, name := range []string{noProxyEnv, "no_proxy"} {
 		env = setEnv(env, name, combined)
 	}
 	return env
@@ -229,7 +229,8 @@ func newRuntimeAuthReverseProxy(
 ) http.Handler {
 	proxy := &httputil.ReverseProxy{
 		Transport: runtimeAuthProxyTransport(),
-		Director: func(request *http.Request) {
+		Rewrite: func(proxyRequest *httputil.ProxyRequest) {
+			request := proxyRequest.Out
 			request.URL.Scheme = upstream.Scheme
 			request.URL.Host = upstream.Host
 			request.Host = upstream.Host

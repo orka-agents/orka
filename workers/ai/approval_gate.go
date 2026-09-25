@@ -31,6 +31,13 @@ import (
 )
 
 const (
+	logFieldTool         = "tool"
+	logFieldToolName     = "toolName"
+	logFieldToolCallID   = "toolCallID"
+	logFieldResultLength = "resultLength"
+)
+
+const (
 	approvalAuthInjectBody                          = "body"
 	approvalIdempotencyHeader                       = "Idempotency-Key"
 	approvalAuthRefUIDAnnotation                    = "orka.ai/approval-auth-ref-uid"
@@ -752,7 +759,7 @@ func deniedBatchToolResults(
 				decision.TargetTool,
 			)
 		}
-		results = append(results, llm.Message{Role: "tool", Content: content, ToolCallID: call.ID, Name: call.Name})
+		results = append(results, llm.Message{Role: logFieldTool, Content: content, ToolCallID: call.ID, Name: call.Name})
 	}
 	return results
 }
@@ -1009,7 +1016,7 @@ func blockingApprovalOverflowBatchToolResults(
 				toolName,
 			)
 		}
-		results = append(results, llm.Message{Role: "tool", Content: content, ToolCallID: call.ID, Name: call.Name})
+		results = append(results, llm.Message{Role: logFieldTool, Content: content, ToolCallID: call.ID, Name: call.Name})
 	}
 	return results
 }
@@ -1033,7 +1040,7 @@ func staleApprovalBatchToolResults(
 				decision.TargetTool,
 			)
 		}
-		results = append(results, llm.Message{Role: "tool", Content: content, ToolCallID: call.ID, Name: call.Name})
+		results = append(results, llm.Message{Role: logFieldTool, Content: content, ToolCallID: call.ID, Name: call.Name})
 	}
 	return results
 }
@@ -1052,7 +1059,7 @@ func approvalValidationBatchToolResults(
 				invalidToolCallID,
 			)
 		}
-		results = append(results, llm.Message{Role: "tool", Content: content, ToolCallID: call.ID, Name: call.Name})
+		results = append(results, llm.Message{Role: logFieldTool, Content: content, ToolCallID: call.ID, Name: call.Name})
 	}
 	return results
 }
@@ -1127,7 +1134,7 @@ func terminalApprovalBatchToolResults(
 				decision.TargetTool,
 			)
 		}
-		results = append(results, llm.Message{Role: "tool", Content: content, ToolCallID: call.ID, Name: call.Name})
+		results = append(results, llm.Message{Role: logFieldTool, Content: content, ToolCallID: call.ID, Name: call.Name})
 	}
 	return results
 }
@@ -1145,9 +1152,9 @@ func executeRequestApprovalToolCall(
 		common.WithEventToolCallID(call.ID),
 		common.WithEventSummary("tool call started"),
 		common.WithEventContent(eventContent(map[string]any{
-			"toolName":      toolName,
-			"toolCallID":    call.ID,
-			"argumentBytes": len(call.Arguments),
+			logFieldToolName:   toolName,
+			logFieldToolCallID: call.ID,
+			"argumentBytes":    len(call.Arguments),
 		})),
 	)
 
@@ -1185,9 +1192,9 @@ func executeRequestApprovalToolCall(
 		common.WithEventToolCallID(call.ID),
 		common.WithEventSummary("tool call completed"),
 		common.WithEventContent(eventContent(map[string]any{
-			"toolName":     toolName,
-			"toolCallID":   call.ID,
-			"resultLength": len(result),
+			logFieldToolName:     toolName,
+			logFieldToolCallID:   call.ID,
+			logFieldResultLength: len(result),
 		})),
 	)
 	return result, nil

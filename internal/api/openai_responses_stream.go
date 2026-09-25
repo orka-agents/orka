@@ -33,7 +33,7 @@ type responsesStreamWriter struct {
 }
 
 func (s *responsesStreamWriter) event(kind string, fields map[string]any) error {
-	fields["type"] = kind
+	fields[apiFieldType] = kind
 	fields["sequence_number"] = s.sequence
 	s.sequence++
 	data, err := json.Marshal(fields)
@@ -54,7 +54,7 @@ func (s *responsesStreamWriter) text(delta string) error {
 		s.textIndex = len(s.response.Output)
 		item := newResponsesMessage()
 		s.response.Output = append(s.response.Output, item)
-		added := map[string]any{"id": item.ID, "type": item.Type, "status": item.Status, "role": item.Role, "content": []any{}}
+		added := map[string]any{"id": item.ID, apiFieldType: item.Type, "status": item.Status, "role": item.Role, "content": []any{}}
 		if err := s.event("response.output_item.added", map[string]any{"output_index": s.textIndex, "item": added}); err != nil {
 			return err
 		}
@@ -129,7 +129,7 @@ func (s *responsesStreamWriter) fail(causes ...error) {
 	// error uses the SDK's closed code vocabulary with the same explicit message.
 	s.response.Status = "failed"
 	s.response.Error = detail
-	_ = s.event("error", map[string]any{"code": code, responsesMessage: detail.Message, "param": nil})
+	_ = s.event("error", map[string]any{apiFieldCode: code, responsesMessage: detail.Message, "param": nil})
 	_ = s.event("response.failed", map[string]any{responsesObject: s.response})
 }
 

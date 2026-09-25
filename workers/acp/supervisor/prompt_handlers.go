@@ -591,6 +591,7 @@ func promptExecutionDiagnosticIdentifier(value string) string {
 	return value
 }
 
+//nolint:gocyclo // Lease renewal validates every session, operation, and expiry fence before mutation.
 func (s *Server) handleRenewLease(w http.ResponseWriter, r *http.Request) {
 	var request harnessv2.RenewPromptLeaseRequest
 	if !s.decodeAuthenticatedJSON(w, r, &request) {
@@ -898,7 +899,6 @@ func (s *Server) handleResolvePermission(w http.ResponseWriter, r *http.Request)
 	}
 
 	outcome := acp.CancelledPermissionOutcome()
-	var approval *harnessv2.MCPApprovalEvidence
 	if request.Decision.Outcome == harnessv2.PermissionDecisionSelected {
 		outcome = acp.SelectedPermissionOutcome(request.Decision.OptionID)
 		optionKind := permission.options[request.Decision.OptionID]
@@ -908,17 +908,11 @@ func (s *Server) handleResolvePermission(w http.ResponseWriter, r *http.Request)
 				writeError(w, http.StatusForbidden, harnessv2.ErrorCodeForbidden, "permission has no prompt tool authority", nil, false)
 				return
 			}
-			requiresApproval, resolveErr := state.mcpProxy.permissionRequiresApproval(state.profile.ProviderKind, request.Metadata.PromptID, permission.toolName, now)
-			if resolveErr != nil || (!requiresApproval && optionKind != harnessv2.PermissionOptionAllowOnce) {
+			resolveErr := state.mcpProxy.authorizePermissionTool(state.profile.ProviderKind, request.Metadata.PromptID, permission.toolName, now)
+			if resolveErr != nil || optionKind != harnessv2.PermissionOptionAllowOnce {
 				s.mu.Unlock()
 				writeError(w, http.StatusForbidden, harnessv2.ErrorCodeForbidden, "permission cannot authorize the tool", nil, false)
 				return
-			}
-			if requiresApproval {
-				approval = &harnessv2.MCPApprovalEvidence{
-					PermissionRequestID: request.RequestID, ToolCallID: permission.toolCallID, ToolName: permission.toolName,
-					GrantedAt: now, ExpiresAt: permission.expiresAt, Reusable: optionKind == harnessv2.PermissionOptionAllowAlways,
-				}
 			}
 		}
 	}
@@ -932,14 +926,6 @@ func (s *Server) handleResolvePermission(w http.ResponseWriter, r *http.Request)
 		s.completeOperationFailure(replay, failure)
 		writeError(w, failure.status, failure.code, failure.message, nil, failure.retryable)
 		return
-	}
-	if approval != nil {
-		if err := mcpProxy.grantApproval(request.Metadata.PromptID, *approval); err != nil {
-			failure := operationFailure{status: http.StatusForbidden, code: harnessv2.ErrorCodeForbidden, message: "permission cannot authorize an MCP tool"}
-			s.completeOperationFailure(replay, failure)
-			writeError(w, failure.status, failure.code, failure.message, nil, failure.retryable)
-			return
-		}
 	}
 	if err := mutations.ResolvePermission(string(request.Metadata.PromptID), string(request.RequestID), outcome); err != nil {
 		if mcpProxy != nil {
@@ -2118,7 +2104,11 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 		state.descriptor.LastTransitionAt = event.Timestamp
 		return &harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventAccepted, Identity: identity, Accepted: &harnessv2.AcceptedEvent{AcceptedAt: event.Timestamp, Lease: prompt.lease, ACPVersion: harnessv2.ACPProfileV1}}, nil
 	case acp.PromptEventUpdate:
-		if err := prompt.rememberToolCallName(event.Update); err != nil {
+		var toolPolicy harnessv2.MCPToolPolicy
+		if state.mcpProxy != nil {
+			toolPolicy = state.mcpProxy.configuration.ToolPolicy
+		}
+		if err := prompt.rememberToolCallName(event.Update, state.profile.ProviderKind, toolPolicy); err != nil {
 			return nil, err
 		}
 		update, text, ok, err := mapACPUpdate(event.Update)
@@ -2619,11 +2609,18 @@ func deactivatePromptCapabilities(state *sessionState, promptID harnessv2.Prompt
 	if state == nil {
 		return
 	}
+	var cause *promptGateCancellation
+	if next == harnessv2.RuntimeSessionStateCancelling && state.runtime != nil {
+		runtime := state.runtime
+		cause = &promptGateCancellation{wait: func(ctx context.Context) {
+			_ = runtime.WaitPromptSettlement(ctx, string(promptID))
+		}}
+	}
 	if state.providerProxy != nil {
-		state.providerProxy.deactivate(string(promptID))
+		state.providerProxy.deactivateWithCause(string(promptID), cause)
 	}
 	if state.mcpProxy != nil {
-		state.mcpProxy.deactivate(promptID, next)
+		state.mcpProxy.deactivateWithCause(promptID, next, cause)
 	}
 }
 

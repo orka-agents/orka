@@ -109,6 +109,8 @@ controller:
     # Set true only when an offline renderer cannot use lookup and CRDs are applied separately.
     crdsReadyOverride: false
     pendingPerSession: 100
+    # Lifetime cap for distinct accepted interim messages per Task; retries do not count.
+    interimMessagesPerTask: 10
     maxRecordsPerGateway: 1000
     maxRejectedRecordsPerGateway: 250
     eventExpiry: 24h

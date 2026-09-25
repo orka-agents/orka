@@ -54,7 +54,7 @@ type CollectorConfig struct {
 
 // Collector reclaims artifact objects and replay records only after the
 // controller explicitly retires their immutable Task/publication identities.
-// The artifact store and this retention format ship together in the ACP v2
+// The artifact store and this retention format ship together in the Orka harness v2
 // hard cutover, so there is no supported pre-retention ledger to backfill.
 type Collector struct {
 	root          string

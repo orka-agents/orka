@@ -23,6 +23,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/publisher"
 	"github.com/orka-agents/orka/internal/store"
 	orkatracing "github.com/orka-agents/orka/internal/tracing"
 	"go.opentelemetry.io/otel/trace"
@@ -67,7 +68,23 @@ type WorkspaceArgs struct {
 	ForgeCredentialRef           string `json:"forgeCredentialRef,omitempty"`
 	PushBranch                   string `json:"pushBranch,omitempty"`
 	PRBaseBranch                 string `json:"prBaseBranch,omitempty"`
+	PRTitle                      string `json:"prTitle,omitempty"`
+	PRBody                       string `json:"prBody,omitempty"`
 	CreatePR                     bool   `json:"createPR,omitempty"`
+}
+
+// UnmarshalJSON rejects invalid PR text types before encoding/json can treat
+// an explicit null string as an omitted field and silently select the fallback.
+func (w *WorkspaceArgs) UnmarshalJSON(data []byte) error {
+	var wsMap map[string]any
+	if err := json.Unmarshal(data, &wsMap); err != nil {
+		return err
+	}
+	if wsErr := agentWorkspacePullRequestArgTypeError(wsMap); wsErr != nil {
+		return wsErr
+	}
+	type workspaceArgs WorkspaceArgs
+	return json.Unmarshal(data, (*workspaceArgs)(w))
 }
 
 // DelegateTaskArgs are the arguments for the delegate_task tool
@@ -252,6 +269,16 @@ func (t *DelegateTaskTool) Parameters() json.RawMessage {
 					"prBaseBranch": {
 						"type": "string",
 						"description": "Pull request base branch. Required when createPR is true."
+					},
+					"prTitle": {
+						"type": "string",
+						"maxLength": ` + strconv.Itoa(publisher.MaxPullRequestTitleLength) + `,
+						"description": "` + workspacePRTitleDescription + `"
+					},
+					"prBody": {
+						"type": "string",
+						"maxLength": ` + strconv.Itoa(publisher.MaxPullRequestBodyLength) + `,
+						"description": "` + workspacePRBodyDescription + `"
 					},
 					"createPR": {
 						"type": "boolean",
@@ -679,6 +706,8 @@ func (t *DelegateTaskTool) applyAgentRuntimeConfig(ctx context.Context, childTas
 			PublicationGitRepo: publicationGitRepo,
 			PushBranch:         dc.args.Workspace.PushBranch,
 			PRBaseBranch:       dc.args.Workspace.PRBaseBranch,
+			PRTitle:            dc.args.Workspace.PRTitle,
+			PRBody:             dc.args.Workspace.PRBody,
 			CreatePR:           dc.args.Workspace.CreatePR,
 		}
 		if workspaceRequestsPublication(workspace) {

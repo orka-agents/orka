@@ -1,0 +1,79 @@
+name: Human approval v2 E2E
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/human-approval-v2-e2e.yml
+      - .github/actions/free-disk-space/**
+      - .github/actions/setup-kind/**
+      - .agents/skills/kindctl/**
+      - .dockerignore
+      - Dockerfile
+      - Makefile
+      - api/**
+      - cmd/**
+      - config/**
+      - go.mod
+      - go.sum
+      - internal/**
+      - pkg/**
+      - workers/**
+      - examples/human-approval-v2/**
+      - scripts/human-approval-v2-e2e.sh
+      - scripts/fixtures/human-approval-v2/**
+      - scripts/lib/**
+      - scripts/apply-acp-production.sh
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/human-approval-v2-e2e.yml
+      - .github/actions/free-disk-space/**
+      - .github/actions/setup-kind/**
+      - .agents/skills/kindctl/**
+      - .dockerignore
+      - Dockerfile
+      - Makefile
+      - api/**
+      - cmd/**
+      - config/**
+      - go.mod
+      - go.sum
+      - internal/**
+      - pkg/**
+      - workers/**
+      - examples/human-approval-v2/**
+      - scripts/human-approval-v2-e2e.sh
+      - scripts/fixtures/human-approval-v2/**
+      - scripts/lib/**
+      - scripts/apply-acp-production.sh
+
+permissions:
+  contents: read
+
+concurrency:
+  group: human-approval-v2-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  acceptance:
+    name: AgentKit and Foundry approval lifecycle
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/free-disk-space
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: ./.github/actions/setup-kind
+      - name: Run real adapters with deterministic model and transport fixtures
+        run: bash scripts/human-approval-v2-e2e.sh
+      - name: Upload sanitized acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: human-approval-v2-evidence
+          path: bin/human-approval-v2-e2e/*/evidence/
+          if-no-files-found: error
+          retention-days: 7

@@ -4165,6 +4165,7 @@ func assertRepositoryMonitorInventoryEvents(t *testing.T, ctx context.Context, m
 	}
 }
 
+//nolint:gocyclo // Keep the expected review Task fields in one assertion helper.
 func assertRepositoryMonitorReviewTask(t *testing.T, ctx context.Context, cl crclient.Client, monitorStore store.RepositoryMonitorStore) {
 	t.Helper()
 	item, err := monitorStore.GetMonitorItem(ctx, "default", "inventory", repositoryMonitorPullRequestKind, "1")
@@ -4777,7 +4778,9 @@ func TestRepositoryMonitorReconcileUnsuspendSetsReady(t *testing.T) {
 }
 
 func repositoryMonitorControllerObjects(objects ...crclient.Object) []crclient.Object {
-	defaults := []crclient.Object{
+	defaults := make([]crclient.Object, 0, 11+len(objects))
+	defaults = append(defaults,
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default", UID: "namespace-uid"}},
 		repositoryMonitorControllerTestAgent("reviewer", corev1alpha1.AgentRuntimeClaude, ""),
 		repositoryMonitorControllerTestAgent("triager", corev1alpha1.AgentRuntimeClaude, ""),
 		repositoryMonitorControllerTestAgent("researcher", corev1alpha1.AgentRuntimeClaude, ""),
@@ -4788,7 +4791,7 @@ func repositoryMonitorControllerObjects(objects ...crclient.Object) []crclient.O
 		repositoryMonitorControllerTestSecret(repositoryMonitorTestPublicationReadCredential, map[string][]byte{repositoryMonitorTokenKey: []byte("target-read-token")}),
 		repositoryMonitorControllerTestSecret(repositoryMonitorTestPublicationCredential, map[string][]byte{repositoryMonitorTokenKey: []byte("target-write-token")}),
 		repositoryMonitorControllerTestSecret(repositoryMonitorTestForgeCredential, map[string][]byte{repositoryMonitorTokenKey: []byte("forge-token")}),
-	}
+	)
 	return append(defaults, objects...)
 }
 
@@ -5072,7 +5075,7 @@ func TestCreateIssueImplementationPullRequestReusesExistingPullRequest(t *testin
 	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: "github-token"}
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, GitHubAPIBaseURL: server.URL}
-	prURL, prNumber, err := reconciler.createIssueImplementationPullRequest(
+	prURL, prNumber, origin, err := reconciler.createIssueImplementationPullRequest(
 		context.Background(),
 		monitor,
 		&store.MonitorItem{Number: 77, Title: "Add health endpoint"},
@@ -5085,6 +5088,9 @@ func TestCreateIssueImplementationPullRequestReusesExistingPullRequest(t *testin
 	}
 	if prURL != "https://github.com/orka-agents/orka/pull/177" || prNumber != 177 {
 		t.Fatalf("pull request = (%q, %d), want existing pull request", prURL, prNumber)
+	}
+	if origin != store.UsagePRAssisted {
+		t.Fatalf("existing pull request origin = %q, want assisted", origin)
 	}
 	if requests != 1 {
 		t.Fatalf("GitHub request count = %d, want 1 discovery request", requests)
@@ -6049,7 +6055,7 @@ func TestRepositoryMonitorRepairTaskCreationRetryRestoresQueuedJob(t *testing.T)
 	failTaskCreate := true
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(monitor).
+		WithObjects(monitor, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: monitor.Namespace, UID: "namespace-uid"}}).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Create: func(ctx context.Context, c crclient.WithWatch, obj crclient.Object, opts ...crclient.CreateOption) error {
 				if _, ok := obj.(*corev1alpha1.Task); ok && failTaskCreate {

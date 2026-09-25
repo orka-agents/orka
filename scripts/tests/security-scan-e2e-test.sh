@@ -85,7 +85,7 @@ grep -F -- '      - Grep' "${manifest_capture}" >/dev/null
 grep -F -- '      - Read' "${manifest_capture}" >/dev/null
 grep -F -- "      - ${authority_tool_name}" "${manifest_capture}" >/dev/null
 if grep -F '  transaction:' "${manifest_capture}" >/dev/null; then
-  echo "ACP v2 authority fixture declared unsupported transaction delegation" >&2
+  echo "Orka harness v2 authority fixture declared unsupported transaction delegation" >&2
   exit 1
 fi
 
@@ -304,7 +304,7 @@ fi
 grep -Fq 'ACP_CODEX_RUNTIME_IMG="${fake_runtime_ref}"' "${security_script}"
 grep -Fq 'patch_controller_images serviceAccount' "${security_script}"
 grep -Fq '.ttsCalls == 0 and .toolCalls == 1' "${security_script}"
-grep -Fq 'Creating transactionless ACP v2 authority Task/' "${security_script}"
+grep -Fq 'Creating transactionless Orka harness v2 authority Task/' "${security_script}"
 if grep -Fq 'tasks do not support arbitrary task env' "${security_script}"; then
   echo "legacy negative-only compatibility gate remains" >&2
   exit 1
@@ -690,7 +690,7 @@ jq -e '
 
 grep -Fq 'ORKA_SECURITY_SCAN_DIAGNOSTICS_DIR: ${{ runner.temp }}/security-scan-e2e-diagnostics' "${security_workflow}"
 grep -Fq 'if: ${{ failure() }}' "${security_workflow}"
-grep -Fq 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' "${security_workflow}"
+grep -Fq 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' "${security_workflow}"
 grep -Fq 'path: ${{ runner.temp }}/security-scan-e2e-diagnostics' "${security_workflow}"
 
 preflight_root="${test_root}/preflight-cleanup"

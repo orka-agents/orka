@@ -2077,6 +2077,7 @@ func TestStream_ResponsesAPI_MaxOutputTokens(t *testing.T) {
 	}
 
 	var content, stopReason string
+	var terminal llm.StreamChunk
 	for chunk := range ch {
 		if chunk.Error != nil {
 			t.Fatalf("unexpected error: %v", chunk.Error)
@@ -2084,13 +2085,70 @@ func TestStream_ResponsesAPI_MaxOutputTokens(t *testing.T) {
 		content += chunk.Content
 		if chunk.Done {
 			stopReason = chunk.StopReason
-			if chunk.InputTokens != 5 || chunk.OutputTokens != 3 || chunk.Model != "gpt-4" || chunk.Provider != "openai" {
-				t.Fatalf("incomplete terminal lost usage/model/provider: %#v", chunk)
-			}
+			terminal = chunk
 		}
 	}
 	if content != "partial" || stopReason != stopReasonLength {
 		t.Fatalf("stream = content %q, stop reason %q; want partial content with %q", content, stopReason, stopReasonLength)
+	}
+	if !terminal.UsageReported || terminal.InputTokens != 5 || terminal.OutputTokens != 3 || terminal.Model != "gpt-4" || terminal.Provider != testProviderOpenAI {
+		t.Fatalf("terminal usage = %+v; want reported 5 input and 3 output tokens from gpt-4/openai", terminal)
+	}
+}
+
+func TestStream_ResponsesAPI_OrderedTerminalPreservesUsage(t *testing.T) {
+	for _, tc := range []struct {
+		status     string
+		stopReason string
+	}{
+		{status: "completed", stopReason: stopReasonStop},
+		{status: "incomplete", stopReason: stopReasonLength},
+	} {
+		t.Run(tc.status, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = fmt.Fprintf(w, "event: response.%s\ndata: "+
+					`{"type":"response.%s","response":{"id":"resp_usage","status":"%s","model":"fixture","incomplete_details":{"reason":"max_output_tokens"},"output":[{"id":"message_usage","type":"message","role":"assistant","status":"%s","content":[{"type":"output_text","text":"partial","annotations":[]}]}],"usage":{"input_tokens":5,"output_tokens":3,"total_tokens":8,"input_tokens_details":{"cached_tokens":2,"cache_write_tokens":1}}}}`+"\n\n",
+					tc.status, tc.status, tc.status, tc.status)
+			}))
+			defer server.Close()
+
+			provider, err := NewProvider(llm.ProviderConfig{APIKey: "fixture-key", BaseURL: server.URL})
+			if err != nil {
+				t.Fatal(err)
+			}
+			provider.mode.Store(int32(apiModeResponses))
+			chunks, err := provider.Stream(context.Background(), &llm.CompletionRequest{
+				Model: "fixture", Store: new(false), ResponsesInput: true,
+				Messages: []llm.Message{{Role: "user", Content: "hello"}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var content, itemStatus string
+			var terminal llm.StreamChunk
+			for chunk := range chunks {
+				if chunk.Error != nil {
+					t.Fatal(chunk.Error)
+				}
+				content += chunk.Content
+				if chunk.OutputItemDone {
+					itemStatus = chunk.OutputItemStatus
+				}
+				if chunk.Done {
+					terminal = chunk
+				}
+			}
+			if content != "partial" || itemStatus != tc.status || terminal.StopReason != tc.stopReason {
+				t.Fatalf("ordered output lost: content=%q status=%q terminal=%+v", content, itemStatus, terminal)
+			}
+			if !terminal.UsageReported || terminal.InputTokens != 5 || terminal.OutputTokens != 3 ||
+				terminal.CachedInputTokens == nil || *terminal.CachedInputTokens != 2 ||
+				terminal.CacheWriteInputTokens == nil || *terminal.CacheWriteInputTokens != 1 ||
+				terminal.Model != "fixture" || terminal.Provider != testProviderOpenAI {
+				t.Fatalf("ordered terminal lost usage/model/provider: %+v", terminal)
+			}
+		})
 	}
 }
 
@@ -2141,6 +2199,7 @@ func TestStream_ResponsesAPI_MaxOutputTokensPreservesUnfinishedToolCall(t *testi
 			}
 
 			var content, stopReason string
+			var terminal llm.StreamChunk
 			var toolCalls int
 			for chunk := range ch {
 				if chunk.Error != nil {
@@ -2152,10 +2211,14 @@ func TestStream_ResponsesAPI_MaxOutputTokensPreservesUnfinishedToolCall(t *testi
 				}
 				if chunk.Done {
 					stopReason = chunk.StopReason
+					terminal = chunk
 				}
 			}
 			if content != "partial" || stopReason != eventTypeResponseIncomplete || toolCalls != 0 {
 				t.Fatalf("stream = content %q, stop reason %q, tool calls %d; want partial content with an incomplete terminal and no emitted call", content, stopReason, toolCalls)
+			}
+			if !terminal.UsageReported || terminal.InputTokens != 5 || terminal.OutputTokens != 3 {
+				t.Fatalf("terminal usage = %+v; want reported 5 input and 3 output tokens", terminal)
 			}
 		})
 	}

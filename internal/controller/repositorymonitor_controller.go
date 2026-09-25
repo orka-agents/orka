@@ -66,6 +66,7 @@ const (
 // RepositoryMonitorReconciler reconciles RepositoryMonitor resources.
 type RepositoryMonitorReconciler struct {
 	client.Client
+	APIReader                 client.Reader
 	Scheme                    *runtime.Scheme
 	Store                     store.RepositoryMonitorStore
 	ResultStore               store.ResultStore
@@ -118,7 +119,20 @@ func (r *RepositoryMonitorReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, err
 	}
 
-	return r.reconcileRepositoryMonitorRuns(ctx, monitor, state)
+	if err := r.refreshMonitorUsageOutcomes(ctx, monitor); err != nil {
+		return ctrl.Result{}, err
+	}
+	result, err = r.reconcileRepositoryMonitorRuns(ctx, monitor, state)
+	if err == nil && (result.RequeueAfter == 0 || result.RequeueAfter > usageOutcomeBacklogInterval) {
+		next, pollErr := r.usageOutcomeRequeueAfter(ctx, monitor)
+		if pollErr != nil {
+			return result, pollErr
+		}
+		if next > 0 && (result.RequeueAfter == 0 || next < result.RequeueAfter) {
+			result.RequeueAfter = next
+		}
+	}
+	return result, err
 }
 
 type repositoryMonitorReconcileState struct {
@@ -452,7 +466,7 @@ func repositoryMonitorGitSecretHasToken(secret *corev1.Secret) bool {
 	if secret == nil {
 		return false
 	}
-	for _, key := range []string{"token", "password", workerenv.GitHubToken} {
+	for _, key := range []string{defaultACPWorkspaceCredentialKey, "password", workerenv.GitHubToken} {
 		if value := strings.TrimSpace(string(secret.Data[key])); value != "" {
 			return true
 		}
@@ -511,7 +525,8 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorRuns(ctx context
 
 	var queuedRun *store.MonitorRun
 	requeueAfter := time.Duration(0)
-	if pendingReviews {
+	// Completed reviews still need publication retries while scheduled runs are suspended.
+	if pendingReviews || publishedReviews {
 		requeueAfter = repositoryMonitorValidationRetry
 	}
 	if state.suspended {
@@ -766,7 +781,7 @@ func (r *RepositoryMonitorReconciler) processNextQueuedMonitorRun(ctx context.Co
 	if processErr != nil {
 		failureState := repositoryMonitorRunFailureState(processErr)
 		if strings.TrimSpace(run.CommandEventID) == "" && repositoryMonitorFailedCommandRunRetryable("["+failureState+"]") {
-			events, _, listErr := r.Store.ListMonitorEvents(ctx, store.MonitorEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, RunID: run.ID, EventType: "run_failed", Limit: repositoryMonitorCommandMaxRetries})
+			events, _, listErr := r.Store.ListMonitorEvents(ctx, store.MonitorEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, RunID: run.ID, EventType: repositoryMonitorRunFailurePermanent, Limit: repositoryMonitorCommandMaxRetries})
 			if listErr != nil {
 				return nil, 0, listErr
 			}
@@ -778,7 +793,7 @@ func (r *RepositoryMonitorReconciler) processNextQueuedMonitorRun(ctx context.Co
 				if err := r.Store.UpdateMonitorRun(ctx, &run); err != nil {
 					return nil, 0, err
 				}
-				if eventErr := r.createMonitorEvent(ctx, monitor, run.ID, "", 0, "", "run_failed", repositoryScanConditionMessage(processErr.Error(), "repository monitor run failed; retry scheduled"), map[string]any{"state": failureState}); eventErr != nil {
+				if eventErr := r.createMonitorEvent(ctx, monitor, run.ID, "", 0, "", repositoryMonitorRunFailurePermanent, repositoryScanConditionMessage(processErr.Error(), "repository monitor run failed; retry scheduled"), map[string]any{stateField: failureState}); eventErr != nil {
 					return nil, 0, eventErr
 				}
 				return &run, repositoryMonitorCommandRetryDelay, nil
@@ -792,7 +807,7 @@ func (r *RepositoryMonitorReconciler) processNextQueuedMonitorRun(ctx context.Co
 			return nil, 0, err
 		}
 		metrics.RecordRepositoryMonitorBlock(failureState)
-		if eventErr := r.createMonitorEvent(ctx, monitor, run.ID, "", 0, "", "run_failed", repositoryScanConditionMessage(processErr.Error(), "repository monitor run failed"), map[string]any{"state": failureState}); eventErr != nil {
+		if eventErr := r.createMonitorEvent(ctx, monitor, run.ID, "", 0, "", repositoryMonitorRunFailurePermanent, repositoryScanConditionMessage(processErr.Error(), "repository monitor run failed"), map[string]any{stateField: failureState}); eventErr != nil {
 			return nil, 0, eventErr
 		}
 		return &run, 0, nil
@@ -837,9 +852,9 @@ func (r *RepositoryMonitorReconciler) failStaleRunningMonitorRun(ctx context.Con
 	if err := r.Store.UpdateMonitorRun(ctx, &run); err != nil {
 		return nil, 0, err
 	}
-	if err := r.createMonitorEvent(ctx, monitor, run.ID, "", 0, "", "run_failed", run.Error, map[string]any{
-		"reason":  "stale_running_run",
-		"timeout": repositoryMonitorRunningRunTimeout.String(),
+	if err := r.createMonitorEvent(ctx, monitor, run.ID, "", 0, "", repositoryMonitorRunFailurePermanent, run.Error, map[string]any{
+		eventReasonField: "stale_running_run",
+		"timeout":        repositoryMonitorRunningRunTimeout.String(),
 	}); err != nil {
 		run.Error = fmt.Sprintf("%s; additionally failed to record recovery event: %v", run.Error, err)
 	}
@@ -867,7 +882,7 @@ func repositoryMonitorRunFailureState(err error) string {
 			return repositoryMonitorRunRetryScheduled
 		}
 		if ghErr.StatusCode >= 400 && ghErr.StatusCode < 500 {
-			return "run_failed"
+			return repositoryMonitorRunFailurePermanent
 		}
 	}
 	if errors.Is(err, io.EOF) {
@@ -914,7 +929,7 @@ func (r *RepositoryMonitorReconciler) updateStatusAfterMonitorRun(ctx context.Co
 		m.Status.ObservedGeneration = m.Generation
 
 		condition := metav1.Condition{
-			Type:               "Ready",
+			Type:               conditionReasonReady,
 			LastTransitionTime: metav1.Now(),
 			ObservedGeneration: m.Generation,
 		}
@@ -1028,6 +1043,9 @@ func (r *RepositoryMonitorReconciler) updateStatusWithRetry(ctx context.Context,
 
 // SetupWithManager sets up the controller with the manager.
 func (r *RepositoryMonitorReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.RepositoryMonitor{}).
 		Owns(&corev1alpha1.Task{}).

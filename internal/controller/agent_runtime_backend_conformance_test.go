@@ -381,6 +381,12 @@ func newBackendExistingWorkFixture(t *testing.T) (*backendConformanceFixture, *A
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	calls := &atomic.Int32{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Upstream may flush acceptance before its transport finishes reading
+		// the forwarded body. Keep HTTP/1 from closing that body during the flush.
+		if err := http.NewResponseController(w).EnableFullDuplex(); err != nil {
+			t.Errorf("enable full-duplex proxy: %v", err)
+			return
+		}
 		var response any
 		switch {
 		case r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/lease"):

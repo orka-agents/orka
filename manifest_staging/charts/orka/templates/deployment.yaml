@@ -149,6 +149,7 @@ spec:
             - --zap-log-level={{ .Values.controller.logLevel }}
             - --gateway-enabled={{ $gatewayRuntimeEnabled }}
             - --gateway-pending-per-session={{ .Values.controller.gateway.pendingPerSession }}
+            - --gateway-interim-messages-per-task={{ .Values.controller.gateway.interimMessagesPerTask }}
             - --gateway-max-records-per-gateway={{ .Values.controller.gateway.maxRecordsPerGateway }}
             - --gateway-max-rejected-records-per-gateway={{ .Values.controller.gateway.maxRejectedRecordsPerGateway }}
             - --gateway-event-expiry={{ .Values.controller.gateway.eventExpiry }}

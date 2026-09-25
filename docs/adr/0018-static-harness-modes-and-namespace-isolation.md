@@ -56,6 +56,16 @@ Same-cluster coexistence requires different:
 - SQLite stores, PVCs, backups, and Secrets;
 - wrapper, worker, publisher, proxy, and runtime data-plane resources.
 
+An optional stateless compatibility router may expose one client-facing
+OpenAI/Anthropic endpoint for several installations. Its operator-configured
+namespace map selects an installation from a TokenReview-validated
+ServiceAccount identity and forwards that same caller credential with an
+explicit namespace. The destination installation retains authentication,
+authorization, tool execution and state. The router does not broaden controller
+watches or share stores, and a missing route or unavailable installation has no
+fallback. OIDC and transaction-token clients retain their installation endpoints.
+See [shared compatibility API setup](../../website/docs/operations/shared-compatibility-api.md).
+
 The v2 installation is the sole owner of cluster-scoped gateway and
 workspace-provider reconcilers. Cluster-scoped CRDs and common admission
 resources have one designated platform owner and are not independently owned by

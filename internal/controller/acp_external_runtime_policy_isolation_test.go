@@ -457,7 +457,9 @@ func newExternalPolicyBroker(t *testing.T, f *externalACPDispatchFixture) *ACPMC
 	t.Helper()
 	broker, err := NewProductionACPMCPBroker(ACPMCPBrokerDependencies{
 		Reader: f.client, Epochs: f.epochs, ControlStore: f.controlStore, AgentExecutionSnapshots: f.persistence,
-		KubeClient: k8sfake.NewSimpleClientset(), HTTPClient: http.DefaultClient,
+		ExecutionEvents: f.persistence,
+		PromptLeases:    f.dispatcher.PromptLeases,
+		KubeClient:      k8sfake.NewSimpleClientset(), HTTPClient: http.DefaultClient,
 	})
 	if err != nil {
 		t.Fatal(err)

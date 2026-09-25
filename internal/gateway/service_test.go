@@ -428,7 +428,7 @@ func TestGatewayNativeAICannotDropFrozenRuntimePolicy(t *testing.T) {
 	setGatewayAgentNativeAI(t, service, true)
 	agent := &corev1alpha1.Agent{}
 	require.NoError(t, service.Client.Get(ctx, client.ObjectKey{Namespace: "default", Name: "assistant"}, agent))
-	_, _, _, err = service.createOrFindGatewayTask(ctx, event, binding, agent, time.Now().UTC())
+	_, _, err = service.createOrFindGatewayTask(ctx, event, binding, agent, time.Now().UTC())
 	require.ErrorContains(t, err, "frozen runtime policy")
 	var tasks corev1alpha1.TaskList
 	require.NoError(t, service.Client.List(ctx, &tasks))

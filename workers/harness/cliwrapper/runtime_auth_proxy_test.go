@@ -145,6 +145,47 @@ func TestProtectRuntimeAuthTurnUsesLoopbackProxy(t *testing.T) {
 	}
 }
 
+func TestRuntimeAuthProxyInjectsCredentialsAfterHopByHopHeadersAreRemoved(t *testing.T) {
+	for _, mode := range []runtimeAuthProxyMode{runtimeAuthProxyOpenAI, runtimeAuthProxyAnthropic} {
+		t.Run(string(mode), func(t *testing.T) {
+			header, endpoint := "Authorization", "/v1/responses"
+			expected, provided := "Bearer provider-test-value", "Bearer loopback-test-value"
+			if mode == runtimeAuthProxyAnthropic {
+				header, expected, provided, endpoint = "x-api-key", "provider-test-value", "loopback-test-value", "/v1/messages"
+			}
+			observed := make(chan bool, 1)
+			upstream := newRuntimeAuthLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				observed <- r.Header.Get(header) == expected
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			upstreamURL, err := url.Parse(upstream.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			upstreamURL.Path = "/v1"
+			handler := newRuntimeAuthReverseProxy(upstreamURL, mode, "provider-test-value", "loopback-test-value")
+			proxy := newRuntimeAuthLoopbackServer(t, handler)
+			request, err := http.NewRequest(http.MethodPost, proxy.URL+endpoint, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.Header.Set(header, provided)
+			request.Header.Set("Connection", "Authorization, X-Api-Key")
+			response, err := proxy.Client().Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = response.Body.Close()
+			if response.StatusCode != http.StatusNoContent {
+				t.Fatalf("proxy status = %d, want %d", response.StatusCode, http.StatusNoContent)
+			}
+			if !<-observed {
+				t.Fatal("proxy did not inject the provider credential after stripping hop-by-hop headers")
+			}
+		})
+	}
+}
+
 func TestRuntimeAuthProxyAddNoProxyHostsMergesCaseVariants(t *testing.T) {
 	for _, tt := range []struct {
 		name string

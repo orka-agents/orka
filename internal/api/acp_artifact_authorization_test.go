@@ -697,7 +697,8 @@ func TestPublisherArtifactAuthorizationBrokerBindsTaskAndPublicationState(t *tes
 		publisherEffectForTest("prepare-effect", "publisher.prepare", publication.Spec.ID, "prepare-operation"),
 		publisherEffectForTest("verify-effect", "publisher.verify", readyPublication.Spec.ID, "verify-operation"),
 	}
-	objects := []client.Object{task, publication, readyPublication}
+	objects := make([]client.Object, 0, 3+len(effects))
+	objects = append(objects, task, publication, readyPublication)
 	for _, effect := range effects {
 		objects = append(objects, effect)
 	}

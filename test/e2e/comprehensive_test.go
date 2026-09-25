@@ -133,7 +133,7 @@ var _ = Describe("Comprehensive Functionality", Ordered, func() {
 	})
 
 	// ACP agent task: validates shared RuntimePool planning instead of per-Task Jobs.
-	It("should plan a comprehensive Claude task on an ACP v2 RuntimePool", func() {
+	It("should plan a comprehensive Claude task on an Orka harness v2 RuntimePool", func() {
 		agentManifest := fmt.Sprintf(`{
 			"apiVersion": "core.orka.ai/v1alpha1",
 			"kind": "Agent",

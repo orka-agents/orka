@@ -10,6 +10,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const (
+	cliProviderKey = "provider"
+)
+
 type crudResourceSpec struct {
 	Use          string
 	Short        string
@@ -23,6 +27,10 @@ type crudResourceSpec struct {
 	ListFlags    func(*cobra.Command)
 	ListQuery    func(*cobra.Command) map[string]string
 	TablePrinter func(*cobra.Command, any) error
+	// DescribeRows lists the fields `get` prints first in its readable view,
+	// in reading order. A resource without one falls back to name,
+	// namespace, status or phase, and age.
+	DescribeRows func(map[string]any) []describeRow
 }
 
 func newCRUDResourceCmd(spec crudResourceSpec) *cobra.Command {
@@ -47,7 +55,7 @@ func newCRUDListCmd(spec crudResourceSpec) *cobra.Command {
 	var limit int
 	var cont string
 	cmd := &cobra.Command{
-		Use:   "list",
+		Use:   cliListUse,
 		Short: "List " + spec.Name + " resources",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			c := newClientFromCmd(cmd)
@@ -92,7 +100,7 @@ func newCRUDListCmd(spec crudResourceSpec) *cobra.Command {
 
 func newCRUDGetCmd(spec crudResourceSpec) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "get <name>",
+		Use:   cliGetByNameUse,
 		Short: "Get " + articleFor(spec.Name) + " " + spec.Name + " resource",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -105,20 +113,24 @@ func newCRUDGetCmd(spec crudResourceSpec) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if format == outputTable && spec.TablePrinter != nil {
-				return spec.TablePrinter(cmd, result)
+			if format != outputTable {
+				return printStructured(cmd, result)
 			}
-			return printStructured(cmd, result)
+			rows := spec.DescribeRows
+			if rows == nil {
+				rows = genericDescribeRows
+			}
+			return printDescribe(cmd, rows(toGenericMap(result)))
 		},
 	}
-	addOutputFlag(cmd, outputJSON)
+	addOutputFlag(cmd, outputTable)
 	return cmd
 }
 
 func newCRUDCreateCmd(spec crudResourceSpec) *cobra.Command {
 	var file string
 	cmd := &cobra.Command{
-		Use:   "create -f <file>",
+		Use:   cliCreateFromFileUse,
 		Short: "Create " + articleFor(spec.Name) + " " + spec.Name + " resource from a manifest",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if file == "" {
@@ -174,7 +186,7 @@ func newCRUDUpdateCmd(spec crudResourceSpec) *cobra.Command {
 
 func newCRUDDeleteCmd(spec crudResourceSpec) *cobra.Command {
 	return &cobra.Command{
-		Use:   "delete <name>",
+		Use:   cliDeleteByNameUse,
 		Short: "Delete " + articleFor(spec.Name) + " " + spec.Name + " resource",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -209,30 +221,33 @@ func titleName(s string) string {
 
 func newProviderCmd() *cobra.Command {
 	return newCRUDResourceCmd(crudResourceSpec{
-		Use:      "provider",
-		Short:    "Manage providers",
-		BasePath: "/api/v1/providers",
-		Name:     "provider",
+		Use:          cliProviderKey,
+		Short:        "Manage providers",
+		BasePath:     "/api/v1/providers",
+		Name:         cliProviderKey,
+		DescribeRows: providerDescribeRows,
 	})
 }
 
 func newToolCmd() *cobra.Command {
 	return newCRUDResourceCmd(crudResourceSpec{
-		Use:      "tool",
-		Short:    "Manage tools",
-		BasePath: "/api/v1/tools",
-		Name:     "tool",
+		Use:          "tool",
+		Short:        "Manage tools",
+		BasePath:     "/api/v1/tools",
+		Name:         "tool",
+		DescribeRows: toolDescribeRows,
 	})
 }
 
 func newSessionCmd() *cobra.Command {
 	cmd := newCRUDResourceCmd(crudResourceSpec{
-		Use:      "session",
-		Short:    "Manage sessions",
-		BasePath: "/api/v1/sessions",
-		Name:     "session",
-		NoCreate: true,
-		NoUpdate: true,
+		Use:          cliSessionCommand,
+		Short:        "Manage sessions",
+		BasePath:     "/api/v1/sessions",
+		Name:         cliSessionCommand,
+		NoCreate:     true,
+		NoUpdate:     true,
+		DescribeRows: sessionDescribeRows,
 	})
 	cmd.AddCommand(newSessionEventsCmd())
 	cmd.AddCommand(newSessionFollowCmd())

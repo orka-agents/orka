@@ -50,13 +50,17 @@ type RuntimeSession struct {
 	process           *Process
 	config            RuntimeSessionConfig
 
-	mu           sync.Mutex
-	active       *activePrompt
-	tombstones   map[string]PromptTombstone
-	deleted      bool
-	deleteDone   chan struct{}
-	deleteStatus CleanupStatus
-	deleteErr    error
+	mu         sync.Mutex
+	active     *activePrompt
+	tombstones map[string]PromptTombstone
+	deleted    bool
+	deletion   *runtimeSessionDeletion
+}
+
+type runtimeSessionDeletion struct {
+	done   chan struct{}
+	status CleanupStatus
+	err    error
 }
 
 type PromptEventType string
@@ -430,30 +434,72 @@ func (s *RuntimeSession) CancelPrompt(ctx context.Context, promptID string) (Pro
 	}
 }
 
+// WaitPromptSettlement joins the exact local prompt without requesting another
+// cancellation. Proxies use it after revoking authority to avoid delivering the
+// resulting request error before the adapter consumes its courtesy cancel. The
+// wait is bounded even if the caller's cancellation never reaches the child;
+// neither this wait nor its timeout supplies remote settlement or cleanup proof.
+func (s *RuntimeSession) WaitPromptSettlement(ctx context.Context, promptID string) error {
+	s.mu.Lock()
+	active := s.active
+	if active == nil || active.id != promptID || active.settled {
+		_, settled := s.tombstones[promptID]
+		s.mu.Unlock()
+		if settled {
+			return nil
+		}
+		return &StalePromptError{PromptID: promptID}
+	}
+	done := active.done
+	grace := s.config.CancelGrace
+	s.mu.Unlock()
+	if grace <= 0 {
+		grace = DefaultStopGrace
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, 2*grace)
+	defer cancel()
+	select {
+	case <-done:
+		return nil
+	case <-waitCtx.Done():
+		return waitCtx.Err()
+	}
+}
+
 func (s *RuntimeSession) Delete(ctx context.Context) (CleanupStatus, error) {
 	s.mu.Lock()
-	if s.deleteDone != nil {
-		done := s.deleteDone
-		s.mu.Unlock()
+	deletion := s.deletion
+	if deletion != nil {
 		select {
-		case <-done:
-			s.mu.Lock()
-			status, err := s.deleteStatus, s.deleteErr
+		case <-deletion.done:
+			if deletion.err == nil && deletion.status.Proven {
+				s.mu.Unlock()
+				return deletion.status, nil
+			}
+		default:
 			s.mu.Unlock()
-			return status, err
-		case <-ctx.Done():
-			return CleanupStatus{}, ctx.Err()
+			select {
+			case <-deletion.done:
+				return deletion.status, deletion.err
+			case <-ctx.Done():
+				return CleanupStatus{}, ctx.Err()
+			}
 		}
 	}
+	// A failed observation is not a cleanup proof. A later caller may observe
+	// the same stopped process again, while callers already joining an attempt
+	// retain that attempt's result even if another retry starts first.
+	firstDeletion := !s.deleted
 	s.deleted = true
-	s.deleteDone = make(chan struct{})
+	deletion = &runtimeSessionDeletion{done: make(chan struct{})}
+	s.deletion = deletion
 	active := s.active
 	if active != nil && !active.settled {
 		active.cancelRequested = true
 		cancelPendingPermissions(active)
 	}
 	s.mu.Unlock()
-	if active != nil {
+	if firstDeletion && active != nil {
 		// Best-effort courtesy cancel: the notification is a blocking pipe write,
 		// and a wedged adapter that stopped reading stdin would otherwise block
 		// Delete forever before the bounded process stop. Adapter exit closes
@@ -464,9 +510,9 @@ func (s *RuntimeSession) Delete(ctx context.Context) (CleanupStatus, error) {
 	}
 	status, err := s.process.Stop(ctx, s.config.CancelGrace)
 	s.mu.Lock()
-	s.deleteStatus = status
-	s.deleteErr = err
-	close(s.deleteDone)
+	deletion.status = status
+	deletion.err = err
+	close(deletion.done)
 	s.mu.Unlock()
 	return status, err
 }

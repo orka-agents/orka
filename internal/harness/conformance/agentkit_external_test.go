@@ -275,15 +275,21 @@ func startAgentKitFixture(t *testing.T, extraArgs ...string) (string, *bytes.Buf
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	args := []string{
+	args := make([]string, 0, 12+len(extraArgs))
+	args = append(args,
 		"run",
 		"--no-project",
-		"--with-editable", commonRoot,
-		"python", fixturePath,
-		"--host", "127.0.0.1",
-		"--port", strconv.Itoa(port),
-		"--token", "mock-token",
-	}
+		"--with-editable",
+		commonRoot,
+		"python",
+		fixturePath,
+		"--host",
+		"127.0.0.1",
+		"--port",
+		strconv.Itoa(port),
+		"--token",
+		"mock-token",
+	)
 	args = append(args, extraArgs...)
 	cmd := exec.CommandContext(ctx, "uv", args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

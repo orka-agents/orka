@@ -88,6 +88,7 @@ const CATEGORY_BY_TYPE: Record<string, ExecutionEventCategory> = {
   ApprovalDeclined: 'approvals',
   ApprovalExpired: 'approvals',
   ApprovalCancelled: 'approvals',
+  ApprovalExecutionUpdated: 'approvals',
   PlanUpdated: 'worker',
 }
 

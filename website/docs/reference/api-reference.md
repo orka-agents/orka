@@ -55,7 +55,7 @@ The controller requires `ORKA_GITHUB_WEBHOOK_SECRET` and verifies the `X-Hub-Sig
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/v1/tasks` | POST | Create a task |
-| `/api/v1/tasks` | GET | List tasks (paginated) |
+| `/api/v1/tasks` | GET | List tasks (paginated; `labelSelector` narrows by label with `kubectl -l` syntax, invalid selectors return 400) |
 | `/api/v1/tasks/:id` | GET | Get task details |
 | `/api/v1/tasks/:id` | DELETE | Cancel/delete task |
 | `/api/v1/tasks/:id/logs` | GET | Stream task logs |
@@ -84,11 +84,17 @@ The controller requires `ORKA_GITHUB_WEBHOOK_SECRET` and verifies the `X-Hub-Sig
 | `spec.workspace.subPath` | string | empty | Repository subdirectory exposed as workspace root. |
 | `spec.workspace.pushBranch` | string | generated for write Tasks when omitted | Publication branch; Orka-generated names use full Task or Session identity entropy. |
 | `spec.workspace.prBaseBranch` | string | empty | Pull-request base branch. |
+| `spec.workspace.prTitle` | string | prompt's first nonblank line | Exact pull-request title, up to 256 characters. Empty uses the default, which trims whitespace and truncates to 256 characters. An empty or whitespace-only prompt uses `Orka publication generation N`. Nonempty whitespace-only titles are rejected. |
+| `spec.workspace.prBody` | string | publisher summary and Task namespace/name | Pull-request body, up to 32,768 characters. The publisher appends the publication generation and reconciliation markers to custom and default bodies. Reserved Orka reconciliation comments are rejected. |
 | `spec.workspace.createPR` | boolean | `false` | Reconcile a pull request only after branch publication when true; requires `intent: write`. |
 | `spec.agentRuntime.maxTurns` | integer | Agent default | Per-Task prompt-loop limit. |
 | `spec.agentRuntime.allowedTools` / `disallowedTools` | list | Agent defaults | Per-Task tool policy override. |
 | `spec.agentRuntime.allowBash` | boolean | Agent default | Per-Task bash policy override. |
-| `spec.timeout` | duration | `30m` for ACP v2 agent Tasks | Maximum wall-clock duration measured from Task creation, including queue, runtime admission, and prompt execution time. An explicit positive value overrides the default. |
+| `spec.timeout` | duration | `30m` for Orka harness v2 agent Tasks | Maximum wall-clock duration measured from Task creation, including queue, runtime admission, and prompt execution time. An explicit positive value overrides the default. |
+
+`prTitle` and `prBody` apply only when `createPR: true`. Supplying presentation text alone does not request a pull request; it can remain configured on branch-only Tasks.
+
+Orka rejects secret-like pull-request titles and bodies at runtime before publication, including prompt-derived titles. Explicit overrides wait for a publisher with pull-request presentation support before prompt admission.
 
 Source read, target read, target write, and forge references are distinct
 credential roles. The selected Secret UID/resourceVersion is frozen for the
@@ -340,6 +346,7 @@ Repository security endpoints manage `RepositoryScan` configurations and their g
 | `/api/v1/security/repositories/:name/threat-model` | PUT | Update threat model |
 | `/api/v1/security/repositories/:name/scans` | GET | List scan runs |
 | `/api/v1/security/repositories/:name/scans` | POST | Trigger manual scan |
+| `/api/v1/security/repositories/:name/scans/:scanID/progress` | GET | Per-stage Task counts for one scan run (see below) |
 | `/api/v1/security/repositories/:name/slices` | GET | List deterministic review slices |
 | `/api/v1/security/repositories/:name/slices/:sliceID` | GET | Get review slice details |
 | `/api/v1/security/repositories/:name/dropped-findings` | GET | List v2 dropped-finding diagnostics |
@@ -363,6 +370,15 @@ Common query parameters:
 - `scanRunID`, `sliceID`, `layer` — filters for `GET /api/v1/security/repositories/:name/dropped-findings`. `layer` is one of `validation`, `filter`, or `cap`.
 - `reason` — exact dropped-finding reason filter; use `reason=contains=<text>` for substring matching.
 - `recommended=true` — filters findings to recommended remediation candidates.
+
+`GET /api/v1/security/repositories/:name/scans/:scanID/progress` returns the scan run,
+`complete` (whether the run has finished), and `stages`: one entry per pipeline stage in
+order (`threat-model`, `mapper`, `review`, `validation`, `patch`) with `label`, `tasks`,
+`pending`, `running`, `succeeded`, `failed`, `cancelled`, and `failedTasks` (the names of
+failed and cancelled Tasks). The server groups the run's Tasks by their
+`orka.ai/security-scan-id` and `orka.ai/security-stage` labels under its own identity, so
+the caller needs the same security read permission as listing scan runs and no Task list
+permission. Stages the scan has not reached yet are present with zero counts.
 
 ### Create repository scan
 

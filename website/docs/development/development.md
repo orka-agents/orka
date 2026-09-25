@@ -137,7 +137,7 @@ go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/repos
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/agent-substrate-e2e.yml
 ```
 
-The agent-sandbox and Substrate scripts validate workspace-backed ACP v2 Tasks against a local model fixture. Substrate also covers controller restart, DataOnly suspension, cold continuation, checkpoint file recovery, cancellation, timeout, and cleanup. External-provider execution, clean-room publication, pool replacement, and the broader runtime matrix remain covered by `Agent Runtime E2E` and `Release Qualification`. Workspace-provider-backed dispatch is still flag-gated behind `--acp-workspace-dispatch-enabled` plus the matching provider flag (`--agent-sandbox-enabled` or `--substrate-enabled`) and fails closed otherwise.
+The agent-sandbox and Substrate scripts validate workspace-backed Orka harness v2 Tasks against a local model fixture. Substrate also covers controller restart, DataOnly suspension, cold continuation, checkpoint file recovery, cancellation, timeout, and cleanup. External-provider execution, clean-room publication, pool replacement, and the broader runtime matrix remain covered by `Agent Runtime E2E` and `Release Qualification`. Workspace-provider-backed dispatch is still flag-gated behind `--acp-workspace-dispatch-enabled` plus the matching provider flag (`--agent-sandbox-enabled` or `--substrate-enabled`) and fails closed otherwise.
 
 The GitHub OIDC live script requires GitHub Actions `id-token: write` or a manual `ORKA_GITHUB_OIDC_TOKEN`; without either, it fails fast before creating a cluster. Transaction-token provider E2E now lives in the external integration repository.
 

@@ -58,7 +58,7 @@ func rejectAgentExecutionPlanWithWorkspaceStatus(reason string, err error) agent
 }
 
 // planAgentExecution owns the controller routing decision for type: agent
-// Tasks. Built-in Codex, Claude, Copilot, and OpenCode runtimes use only the ACP v2
+// Tasks. Built-in Codex, Claude, Copilot, and OpenCode runtimes use only the Orka harness v2
 // RuntimePool path; a Task.spec.execution.workspace request additionally binds
 // that path to a workspace-provider-backed RuntimePool when enabled and fails
 // closed otherwise. Strict-governed external runtimeRef registrations use the
@@ -171,7 +171,7 @@ func (r *TaskReconciler) planAgentExecution(
 // and never dispatches through, or falls back to, a harness-v1 installation.
 //
 //nolint:staticcheck // Field path begins the user-facing validation message.
-const harnessV1ExecutionWorkspaceUnsupportedReason = "Task.spec.execution.workspace is not supported on the harness v1 execution path; workspace-provider-backed RuntimeSessions require the ACP v2 RuntimePool path, and repository access uses Task.spec.workspace"
+const harnessV1ExecutionWorkspaceUnsupportedReason = "Task.spec.execution.workspace is not supported on the harness v1 execution path; workspace-provider-backed RuntimeSessions require the Orka harness v2 RuntimePool path, and repository access uses Task.spec.workspace"
 
 // taskRequestsExecutionWorkspace reports whether the Task carries an enabled
 // legacy-shaped or class-shaped execution-workspace request.

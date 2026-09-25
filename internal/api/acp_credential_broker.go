@@ -29,29 +29,29 @@ func (s *Server) issuePublisherCredential(c fiber.Ctx) error {
 	// being allowed to stream request bodies.
 	expectedBearer, err := readSecretAtEnvPath(envWorkspacePublisherControllerTokenFile, 16)
 	if err != nil {
-		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "credential_broker_unavailable"})
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{apiFieldError: "credential_broker_unavailable"})
 	}
 	bearer := strings.TrimSpace(strings.TrimPrefix(string(c.Request().Header.Peek("Authorization")), "Bearer "))
 	if !constantAPIStringEqual(bearer, string(expectedBearer)) {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorAuthorizationFailed})
 	}
 	var request publisherservice.CredentialMaterialRequest
 	decoder := json.NewDecoder(strings.NewReader(string(c.Body())))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil || decoder.Decode(&struct{}{}) == nil || request.Validate() != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid_request"})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{apiFieldError: apiErrorInvalidRequest})
 	}
 	task, reference, frozenResourceVersion, credentialRole, err := s.authorizePublisherCredentialRequest(c.Context(), request)
 	if err != nil {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorAuthorizationFailed})
 	}
 	if err := s.authorizePublisherParentEffect(c.Context(), request.ParentOperation, request.Metadata); err != nil {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorAuthorizationFailed})
 	}
 	binding, err := s.frozenPromptCredentialBinding(c.Context(), task, credentialRole)
 	if err != nil || binding.SecretName != reference.Name || binding.SecretKey != effectiveWorkspaceCredentialKey(reference) ||
 		binding.ResourceVersion != frozenResourceVersion {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authorization_failed"})
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorAuthorizationFailed})
 	}
 	secretReader := client.Reader(s.client)
 	if s.config.APIReader != nil {
@@ -60,16 +60,16 @@ func (s *Server) issuePublisherCredential(c fiber.Ctx) error {
 	secret := &corev1.Secret{}
 	if err := secretReader.Get(c.Context(), client.ObjectKey{Namespace: task.Namespace, Name: reference.Name}, secret); err != nil ||
 		secret.ResourceVersion == "" || secret.ResourceVersion != frozenResourceVersion || string(secret.UID) != binding.SecretUID {
-		return c.Status(fiber.StatusGone).JSON(fiber.Map{"error": "credential_version_changed"})
+		return c.Status(fiber.StatusGone).JSON(fiber.Map{apiFieldError: "credential_version_changed"})
 	}
 	key := effectiveWorkspaceCredentialKey(reference)
 	value := bytes.TrimSpace(secret.Data[key])
 	if len(value) == 0 || len(value) > maxBrokeredCredentialBytes || bytes.ContainsAny(value, "\r\n\x00") {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "credential_material_invalid"})
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: "credential_material_invalid"})
 	}
 	material, err := formatPublisherCredential(request.Reference.Kind, value)
 	if err != nil {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "credential_material_invalid"})
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: "credential_material_invalid"})
 	}
 	return c.JSON(publisherservice.CredentialMaterialResponse{Material: material, ResourceVersion: secret.ResourceVersion})
 }

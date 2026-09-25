@@ -192,6 +192,7 @@ type sessionCompositeTestOptions struct {
 	seedTranscript               func(context.Context, *sqlite.Store)
 }
 
+//nolint:gocyclo // The cross-store turn setup and its persistence assertions form one scenario.
 func testPrepareTaskSessionCompositeStoreOpensTurn(
 	t sessionCompositeTestTB,
 	kubeClient client.Client,

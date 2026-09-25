@@ -76,6 +76,7 @@ import (
 	"github.com/orka-agents/orka/internal/tokenexchange"
 	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/tracing"
+	"github.com/orka-agents/orka/internal/usage"
 	"github.com/orka-agents/orka/internal/worker"
 	"github.com/orka-agents/orka/internal/workerenv"
 	// +kubebuilder:scaffold:imports
@@ -288,12 +289,14 @@ func main() {
 	var gatewayTerminalRetention time.Duration
 	var gatewayDeliveryTimeout time.Duration
 	var gatewayDeliveryMaxAttempts int
+	var gatewayInterimMessagesPerTask int
 	var gatewayClaimLease time.Duration
 	var gatewayPollInterval time.Duration
 	var gatewayBatchSize int
 	var aiWorkerImage string
 	var storeBackend string
 	var storePath string
+	var usageRetention time.Duration
 	var agentExecutionSnapshotKeyFile string
 	var agentExecutionSnapshotSecret, agentExecutionSnapshotSecretKey string
 	var agentExecutionSnapshotRetention time.Duration
@@ -496,8 +499,12 @@ func main() {
 		"Maximum age for queued events and delivery retries.")
 	flag.DurationVar(&gatewayTerminalRetention, "gateway-terminal-retention", 30*24*time.Hour,
 		"Retention for terminal gateway events and deliveries.")
+	flag.DurationVar(&usageRetention, "usage-retention", 90*24*time.Hour,
+		"Retention for inactive usage reporting cohorts; 0 retains records indefinitely.")
 	flag.DurationVar(&gatewayDeliveryTimeout, "gateway-delivery-timeout", 15*time.Second,
 		"Timeout for one synchronous adapter delivery call.")
+	flag.IntVar(&gatewayInterimMessagesPerTask, "gateway-interim-messages-per-task", 10,
+		"Maximum distinct accepted interim gateway messages per Task.")
 	flag.IntVar(&gatewayDeliveryMaxAttempts, "gateway-delivery-max-attempts", 10,
 		"Maximum adapter delivery attempts before dead-lettering.")
 	flag.DurationVar(&gatewayClaimLease, "gateway-claim-lease", time.Minute,
@@ -1368,6 +1375,14 @@ func main() {
 		setupLog.Error(err, "unable to add SQLite store as runnable")
 		os.Exit(1)
 	}
+	if usageRetention < 0 {
+		setupLog.Error(fmt.Errorf("usage retention must not be negative"), "invalid usage retention")
+		os.Exit(1)
+	}
+	if err := mgr.Add(&usage.Retention{Store: sqliteStore, Period: usageRetention}); err != nil {
+		setupLog.Error(err, "unable to add usage retention")
+		os.Exit(1)
+	}
 	if cipherErr := sqliteStore.SetAgentExecutionSnapshotCipher(snapshotCipher); cipherErr != nil {
 		setupLog.Error(cipherErr, "unable to activate agent execution snapshot key; snapshot encryption fails closed",
 			"path", agentExecutionSnapshotKeyFile)
@@ -1402,6 +1417,7 @@ func main() {
 	var durableControlStore store.DurableControlStore
 	var controllerEpochManager *controller.ControllerEpochManager
 	var acpSessionContinuity *controller.ACPSessionContinuity
+	acpPromptLeases := &controller.ACPMCPPromptLeaseRegistry{}
 	var kubeControlStore *storekube.Store
 	if controlNamespace != "" {
 		// Session deletion must retain runtime cleanup even when admission is
@@ -1506,7 +1522,8 @@ func main() {
 		EventExpiry:                  gatewayEventExpiry,
 		TerminalRetention:            gatewayTerminalRetention, DeliveryTimeout: gatewayDeliveryTimeout,
 		DeliveryMaxAttempts: gatewayDeliveryMaxAttempts, ClaimLease: gatewayClaimLease,
-		PollInterval: gatewayPollInterval, BatchSize: gatewayBatchSize,
+		InterimMessagesPerTask: gatewayInterimMessagesPerTask,
+		PollInterval:           gatewayPollInterval, BatchSize: gatewayBatchSize,
 	}
 	gatewayService := gatewayruntime.NewService(mgr.GetClient(), sqliteStore, sqliteStore, sqliteStore, gatewayConfig)
 	gatewayService.APIReader = mgr.GetAPIReader()
@@ -1779,6 +1796,7 @@ func main() {
 			AdmissionGate:        acpAdmissionGate,
 			IdlePoolTTL:          acpIdlePoolTTL,
 			MCPRegistry:          acpMCPRegistry,
+			PromptLeases:         acpPromptLeases,
 			ACPRuntimeImages: controller.ACPRuntimeImages{
 				Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
 				Opencode: acpOpencodeRuntimeImage,
@@ -2136,6 +2154,8 @@ func main() {
 		mcpBroker, err := controller.NewProductionACPMCPBroker(controller.ACPMCPBrokerDependencies{
 			Reader: mgr.GetAPIReader(), Epochs: controllerEpochManager, ControlStore: durableControlStore,
 			AgentExecutionSnapshots: agentExecutionSnapshotStore,
+			ExecutionEvents:         sqliteStore,
+			PromptLeases:            acpPromptLeases,
 			KubeClient:              kubeClient, Registry: acpMCPRegistry,
 			OutboundAccess: outboundAccessResolver, TransactionExchange: brokeredTransactionExchange,
 			EnforceTransactionCredentialAuth: contextTokenAuthzConfig.Mode == api.ContextTokenAuthorizationModeEnforce,

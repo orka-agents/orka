@@ -1832,7 +1832,7 @@ func TestSupervisorRetiresPoisonedSessionWithoutPoolDrain(t *testing.T) {
 	t.Fatal("poisoned RuntimeSession remained resident without an enclosing pool drain")
 }
 
-func TestSupervisorDrainSchedulesPublicationPreparedSessionBeforeSettlement(t *testing.T) {
+func TestSupervisorDrainRetainsPublicationPreparedSessionBeforeSettlement(t *testing.T) {
 	server, cfg, _ := newTestServer(t, "immediate")
 	now := time.Now().UTC()
 	sessionID := harnessv2.RuntimeSessionID("publication-session")
@@ -1857,10 +1857,19 @@ func TestSupervisorDrainSchedulesPublicationPreparedSessionBeforeSettlement(t *t
 	if response.Code != http.StatusOK {
 		t.Fatalf("drain status=%d body=%s", response.Code, response.Body.String())
 	}
+	var result harnessv2.DrainResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.Drain.Requested || result.Drain.AcceptingNewSessions {
+		t.Fatal("drain did not close admission while publication settlement was pending")
+	}
 	server.mu.Lock()
 	defer server.mu.Unlock()
-	if server.sessions[sessionID] != state || !state.drainCleanupScheduled {
-		t.Fatalf("publication-prepared RuntimeSession was not scheduled before settlement: resident=%t scheduled=%t", server.sessions[sessionID] == state, state.drainCleanupScheduled)
+	// Cleanup can already have observed the unsettled prompt and cleared its
+	// schedule. Either ordering must retain the session until settlement.
+	if server.sessions[sessionID] != state || state.descriptor.State != harnessv2.RuntimeSessionStatePublicationPrepared || state.prompt.settlement != nil {
+		t.Fatal("publication-prepared RuntimeSession changed before settlement")
 	}
 }
 

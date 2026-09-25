@@ -26,6 +26,9 @@ jobs:
     name: Run on Ubuntu
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      KIND_CLUSTER: orka-test-e2e
+      E2E_CLEANUP_REPORT_DIR: ${{ github.workspace }}/bin/e2e-cleanup/general
     steps:
       - name: Clone the code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -47,5 +50,30 @@ jobs:
 
       - name: Running Test e2e
         run: |
+          set -Eeuo pipefail
           go mod tidy
-          make test-e2e
+          . scripts/lib/e2e-cleanup.sh
+          status=0
+          if make test-e2e; then
+            :
+          else
+            status=$?
+          fi
+          if ! e2e_cleanup_kind "${KIND_CLUSTER}" "${E2E_CLEANUP_REPORT_DIR}"; then
+            echo "::error::Kind teardown was not proved"
+            status=1
+          fi
+          if ! e2e_cleanup_evidence_passed "${E2E_CLEANUP_REPORT_DIR}"; then
+            echo "::error::normal resource cleanup was not proved"
+            status=1
+          fi
+          exit "${status}"
+
+      - name: Upload exact cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-cleanup-evidence
+          path: ${{ env.E2E_CLEANUP_REPORT_DIR }}/
+          if-no-files-found: error
+          retention-days: 7

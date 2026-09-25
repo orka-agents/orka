@@ -132,6 +132,7 @@ func (h *OpenAICompatHandler) HandleResponses(c fiber.Ctx) error {
 	if provider.Name() == "anthropic" && comp.ResponseFormat != nil && comp.ResponseFormat.Type != oaiContentTypeText {
 		return c.Status(fiber.StatusBadRequest).JSON(OAIError{Error: *responsesInvalid("text.format", "structured output requires an OpenAI-compatible provider")})
 	}
+	ctx = usageRequestContext(ctx, h.resultStore, uncachedReaderOr(h.apiReader, h.client), namespace, "")
 	provider = llm.NewTracingProvider(provider)
 	comp.Model = model
 	coordinator, err := prepareCompatCoordinatorTools(c, comp, compatCoordinatorSetup{Namespace: namespace, ToolUseAction: "openAITools", AuthorizationConfig: h.contextTokenAuthorization})

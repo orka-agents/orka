@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # Runs the fake-GitHub RepositoryMonitor integration scenarios that prove the
-# durable label-command issue-to-PR loop without requiring live GitHub secrets.
+# durable label-command issue-to-PR loop and retained usage reports without
+# requiring live GitHub secrets.
 # Keep this script secret-free: all GitHub payloads and credentials are synthetic.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -20,3 +21,5 @@ run_go_test ./internal/api 'Test(GitHubWebhook_OrkaIssueLabelCreatesDurableComma
 run_go_test ./internal/controller 'TestRepositoryMonitor(IssueImplementToPRFakeGitHubE2E|PRReviewRepairReadinessAutomergeFakeGitHubE2E|IssueStopPreventsLateImplementationMutation|AutomergeMergeableStatePolicy|RunFailureState|RequireGreenCIGatesReviewQueue)'
 
 run_go_test ./internal/store/sqlite 'TestMonitorWorkflowStoresActionsJobsAndMutations'
+
+run_go_test ./workers/ai '^TestUsageIssueToMergedPRWorkflowE2E$'
