@@ -36,6 +36,10 @@ type GatewayCapabilities struct {
 	// +optional
 	OutboundText bool `json:"outboundText,omitempty"`
 
+	// InterimDelivery indicates support for bounded nonterminal text messages.
+	// +optional
+	InterimDelivery bool `json:"interimDelivery,omitempty"`
+
 	// Threads indicates that thread identity is preserved.
 	// +optional
 	Threads bool `json:"threads,omitempty"`

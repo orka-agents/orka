@@ -248,8 +248,8 @@ func TestExecutionEventStoreConcurrentSameStreamAppendsMultiConnection(t *testin
 	if _, err := db.Exec("PRAGMA foreign_keys=ON"); err != nil {
 		t.Fatalf("set foreign keys: %v", err)
 	}
-	if err := migrate(db); err != nil {
-		t.Fatalf("migrate: %v", err)
+	if err := initializeSchema(db); err != nil {
+		t.Fatalf("initializeSchema: %v", err)
 	}
 	assertConcurrentExecutionEventAppends(t, NewStore(db, dbPath))
 }
@@ -443,84 +443,6 @@ func executionEventAuditSecrets() map[string]string {
 	}
 }
 
-func TestMigrateBackfillsExecutionEventSessionCursors(t *testing.T) {
-	const taskC = "task-c"
-	path := filepath.Join(t.TempDir(), "old.db")
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatalf("open old db: %v", err)
-	}
-	_, err = db.Exec(`CREATE TABLE execution_events (
-		id              TEXT PRIMARY KEY,
-		namespace       TEXT NOT NULL,
-		stream_type     TEXT NOT NULL,
-		stream_id       TEXT NOT NULL,
-		seq             INTEGER NOT NULL,
-		type            TEXT NOT NULL,
-		severity        TEXT NOT NULL DEFAULT 'info',
-		task_name       TEXT NOT NULL DEFAULT '',
-		session_name    TEXT NOT NULL DEFAULT '',
-		agent_name      TEXT NOT NULL DEFAULT '',
-		tool_name       TEXT NOT NULL DEFAULT '',
-		tool_call_id    TEXT NOT NULL DEFAULT '',
-		summary         TEXT NOT NULL DEFAULT '',
-		content_json    TEXT,
-		content_text    TEXT NOT NULL DEFAULT '',
-		truncation_json TEXT,
-		created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-		UNIQUE(namespace, stream_type, stream_id, seq)
-	)`)
-	if err != nil {
-		t.Fatalf("create old execution_events: %v", err)
-	}
-	for _, stmt := range []string{
-		`INSERT INTO execution_events(id, namespace, stream_type, stream_id, seq, type, severity, task_name, session_name)
-		 VALUES ('default/task/task-a/1', 'default', 'task', 'task-a', 1, 'TaskStarted', 'info', 'task-a', 'session-1')`,
-		`INSERT INTO execution_events(id, namespace, stream_type, stream_id, seq, type, severity, task_name, session_name)
-		 VALUES ('default/task/task-b/1', 'default', 'task', 'task-b', 1, 'WorkerStarted', 'info', 'task-b', 'session-1')`,
-	} {
-		if _, err := db.Exec(stmt); err != nil {
-			t.Fatalf("insert old event: %v", err)
-		}
-	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("close old db: %v", err)
-	}
-
-	migratedDB, err := NewDB(path)
-	if err != nil {
-		t.Fatalf("NewDB(migrated) error = %v", err)
-	}
-	defer migratedDB.Close() //nolint:errcheck
-	s := NewStore(migratedDB, path)
-	ctx := context.Background()
-	if err := s.DeleteExecutionEvents(ctx, "default", store.ExecutionEventStreamTypeTask, "task-a"); err != nil {
-		t.Fatalf("DeleteExecutionEvents(task-a): %v", err)
-	}
-	if err := s.DeleteExecutionEvents(ctx, "default", store.ExecutionEventStreamTypeTask, "task-b"); err != nil {
-		t.Fatalf("DeleteExecutionEvents(task-b): %v", err)
-	}
-	if _, err := s.AppendExecutionEvent(ctx, &store.ExecutionEvent{
-		Namespace:   "default",
-		StreamType:  store.ExecutionEventStreamTypeTask,
-		StreamID:    taskC,
-		TaskName:    taskC,
-		SessionName: "session-1",
-		Type:        events.ExecutionEventTypeTaskSucceeded,
-	}); err != nil {
-		t.Fatalf("AppendExecutionEvent(task-c): %v", err)
-	}
-	listed, latest, err := s.ListSessionExecutionEvents(ctx, store.SessionExecutionEventFilter{
-		Namespace: "default", SessionName: "session-1", AfterSeq: 2,
-	})
-	if err != nil {
-		t.Fatalf("ListSessionExecutionEvents: %v", err)
-	}
-	if latest != 3 || len(listed) != 1 || listed[0].SessionSeq != 3 || listed[0].TaskName != taskC {
-		t.Fatalf("latest=%d listed=%#v, want migrated cursor to continue at 3", latest, listed)
-	}
-}
-
 func TestExecutionEventStoreRejectsDuplicateTerminalApproval(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -591,7 +513,7 @@ func TestExecutionEventStoreListSessionExecutionEvents(t *testing.T) {
 	}
 }
 
-func TestExecutionEventStoreListSessionCursorSurvivesTaskDeletion(t *testing.T) {
+func TestExecutionEventStoreListSessionCursorSurvivesDeletionAndReopen(t *testing.T) {
 	const taskC = "task-c"
 	s := setupDiskStore(t)
 	ctx := context.Background()
@@ -616,6 +538,18 @@ func TestExecutionEventStoreListSessionCursorSurvivesTaskDeletion(t *testing.T) 
 	if err := s.DeleteExecutionEvents(ctx, "default", store.ExecutionEventStreamTypeTask, "task-a"); err != nil {
 		t.Fatalf("DeleteExecutionEvents: %v", err)
 	}
+	if err := s.DeleteExecutionEvents(ctx, "default", store.ExecutionEventStreamTypeTask, "task-b"); err != nil {
+		t.Fatalf("DeleteExecutionEvents: %v", err)
+	}
+	if err := s.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := NewDB(s.dbPath)
+	if err != nil {
+		t.Fatalf("reopen after deleting all events: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	s = NewStore(db, s.dbPath)
 	if _, err := s.AppendExecutionEvent(ctx, &store.ExecutionEvent{
 		Namespace:   "default",
 		StreamType:  store.ExecutionEventStreamTypeTask,

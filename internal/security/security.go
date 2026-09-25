@@ -10,9 +10,16 @@ import (
 	"path"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/store"
+)
+
+const (
+	truncationSuffix = "..."
 )
 
 const (
@@ -354,12 +361,25 @@ func ScanStageRetryTaskName(repositoryScanName, scanRunID, stage, scope string, 
 	return boundedTaskName(parts...)
 }
 
-// PatchTaskName returns a task name for a patch proposal.
-func PatchTaskName(repositoryScanName, findingID string) string {
+// AutoValidationTaskName binds automatic validation to one finding occurrence
+// so a delayed retry cannot create another Task after a lost creation response.
+func AutoValidationTaskName(repositoryScanName, findingID, scanRunID string) string {
+	return boundedTaskName(
+		sanitizeName(repositoryScanName),
+		"auto-validation",
+		sanitizeName(findingID),
+		sanitizeName(scanRunID),
+	)
+}
+
+// PatchTaskName returns a task name for a patch proposal bound to one finding
+// occurrence.
+func PatchTaskName(repositoryScanName, findingID, scanRunID string) string {
 	return boundedTaskName(
 		sanitizeName(repositoryScanName),
 		"patch",
 		sanitizeName(findingID),
+		sanitizeName(scanRunID),
 		fmt.Sprintf("%d", time.Now().Unix()),
 	)
 }
@@ -606,7 +626,10 @@ func BuildReviewResultPrompt(
 	policies ...PromptPolicy,
 ) string {
 	var prompt strings.Builder
-	sliceJSON, err := json.MarshalIndent(slice, "", "  ")
+	// Only the immutable slice identity goes into the prompt: store
+	// bookkeeping (status, timestamps, last run) changes while the scan runs,
+	// and the controller rebuilds this prompt to recognise its own retry Task.
+	sliceJSON, err := json.MarshalIndent(newReviewSlicePromptMetadata(slice), "", "  ")
 	if err != nil {
 		sliceJSON = []byte("{}")
 	}
@@ -651,7 +674,7 @@ func BuildReviewResultPrompt(
 		Findings: FindingsV2Artifact{
 			SchemaVersion: SchemaVersionFindingsV2,
 			Repository:    repository,
-			Scan:          FindingsV2Scan{Mode: mode, SliceID: slice.ID, Summary: "..."},
+			Scan:          FindingsV2Scan{Mode: mode, SliceID: slice.ID, Summary: truncationSuffix},
 			Findings:      []FindingsV2Finding{},
 		},
 	}
@@ -727,7 +750,7 @@ func BuildValidationResultPrompt(scan *corev1alpha1.RepositoryScan, finding *sto
 			Version:   1,
 			FindingID: finding.ID,
 			Status:    "validated",
-			Summary:   "...",
+			Summary:   truncationSuffix,
 		},
 	}
 	resultJSON, _ := json.Marshal(result)
@@ -747,19 +770,12 @@ func BuildValidationResultPrompt(scan *corev1alpha1.RepositoryScan, finding *sto
 	return prompt.String()
 }
 
-func appendRequiredArtifactsDirective(prompt *strings.Builder, artifacts ...string) {
-	if len(artifacts) == 0 {
-		return
-	}
-	prompt.WriteString("REQUIRED_SECURITY_ARTIFACTS: ")
-	prompt.WriteString(strings.Join(artifacts, ", "))
-	prompt.WriteString("\n")
-}
-
-// BuildPatchPrompt returns the prompt for patch proposal tasks.
+// BuildPatchPrompt returns the harness-v2 prompt for patch proposal tasks:
+// the agent edits the workspace and returns an identity-bound patch result
+// envelope; Orka publishes the delta and derives the reviewable diff from the
+// published commit.
 func BuildPatchPrompt(scan *corev1alpha1.RepositoryScan, finding *store.Finding, patchBranch string) string {
 	var prompt strings.Builder
-	artifactDir := ArtifactWorkspacePath(scan.Spec.SubPath)
 	fmt.Fprintf(&prompt, "Generate a minimal security patch for repository %s on branch %s.\n", scan.Spec.RepoURL, EffectiveBranch(scan))
 	if strings.TrimSpace(patchBranch) != "" {
 		fmt.Fprintf(&prompt, "Orka will push the final diff to patch branch %s after the task finishes.\n", patchBranch)
@@ -780,22 +796,235 @@ func BuildPatchPrompt(scan *corev1alpha1.RepositoryScan, finding *store.Finding,
 	prompt.WriteString("3. Keep the code diff as small and reviewable as possible.\n")
 	prompt.WriteString("4. Preserve existing behavior unless the vulnerability requires a behavior change.\n")
 	prompt.WriteString("5. Run focused tests when available.\n")
-	prompt.WriteString("6. The diff artifact must match the actual workspace changes after your edit.\n")
+	prompt.WriteString("6. The changedFiles you report in the terminal result below must exactly match the workspace files you actually edited.\n")
 	prompt.WriteString("7. Do not commit, push, or open a pull request directly. Leave the final file changes in the workspace so Orka can create the commit and push it to the patch branch automatically.\n")
-	fmt.Fprintf(&prompt, "\nWrite these artifacts under %s/:\n", artifactDir)
-	diffArtifact := fmt.Sprintf("security-patch-%s.diff", finding.ID)
-	summaryArtifact := fmt.Sprintf("security-patch-%s.json", finding.ID)
-	fmt.Fprintf(&prompt, "- %s/%s\n", artifactDir, diffArtifact)
-	fmt.Fprintf(&prompt, "- %s/%s\n", artifactDir, summaryArtifact)
-	appendRequiredArtifactsDirective(&prompt, diffArtifact, summaryArtifact)
-	prompt.WriteString("The JSON patch summary must be valid JSON with this exact shape:\n")
-	fmt.Fprintf(
-		&prompt,
-		`{"schemaVersion":%d,"findingId":%q,"summary":"...","changedFiles":["path/to/changed-file"],"testsRun":[{"command":"go test ./...","exitCode":0}],"risk":"low|medium|high"}`+"\n",
-		SchemaVersionPatchSummary,
-		finding.ID,
-	)
-	prompt.WriteString("The changedFiles array must exactly match the files changed in the workspace diff.\n")
-	prompt.WriteString("Prefer Bash heredocs or shell redirection when writing artifact files so they are persisted on disk.\n")
+	prompt.WriteString("8. Change only source files that belong to the fix. Do not create diff, summary, or metadata files anywhere in the workspace (no .orka-artifacts directory): every workspace change becomes part of the published commit, and unexpected files fail the proposal.\n")
+	result := PatchResultEnvelope{
+		SchemaVersion:  AgentResultSchemaVersion,
+		Kind:           AgentResultKindPatch,
+		RepositoryScan: scan.Name,
+		FindingID:      finding.ID,
+		Summary:        truncationSuffix,
+		ChangedFiles:   []string{"path/to/changed-file"},
+		TestsRun:       []PatchTestRun{{Command: "go test ./...", ExitCode: 0}},
+		Risk:           "low|medium|high",
+	}
+	resultJSON, _ := json.Marshal(result)
+	prompt.WriteString("\nTERMINAL RESULT CONTRACT:\n")
+	prompt.WriteString("Do not write artifacts. Return exactly one JSON object and no markdown fence, commentary, or tool transcript.\n")
+	prompt.WriteString("Use this exact envelope and identity values; replace only summary, changedFiles, testsRun, and risk:\n")
+	prompt.Write(resultJSON)
+	prompt.WriteString("\n")
+	prompt.WriteString("changedFiles must list every file you changed, as repository-root-relative paths, and must exactly match the files in the published commit; Orka derives the reviewable diff from that commit, and a mismatch fails the proposal.\n")
 	return prompt.String()
+}
+
+const (
+	remediationPullRequestTitlePrefix = "fix(security): "
+	maxRemediationTitleBytes          = 120
+	maxRemediationBodySectionBytes    = 4 << 10
+)
+
+// stripUnsafeTextRunes removes invalid UTF-8 and control or format runes that
+// could hide content when agent-produced text is validated or persisted.
+func stripUnsafeTextRunes(value string) string {
+	if printableASCIIText(value) {
+		return value
+	}
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' {
+			return r
+		}
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) || unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
+	}, strings.ToValidUTF8(value, ""))
+}
+
+// printableASCIIText reports whether value consists only of printable ASCII,
+// newlines, and tabs, which stripUnsafeTextRunes leaves unchanged; the byte
+// scan avoids decoding every rune of a large workspace file.
+func printableASCIIText(value string) bool {
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if c >= 0x7f || (c < 0x20 && c != '\n' && c != '\t') {
+			return false
+		}
+	}
+	return true
+}
+
+// neutralizePublishedText prepares agent-produced text for publication in
+// GitHub Markdown (remediation PR titles and bodies): invalid UTF-8 and
+// control/format runes are stripped so nothing invisible survives, credential
+// shapes are redacted, and active constructs are defanged — @mentions and
+// HTML comment markers gain a zero-width break, and lines that would read as
+// slash-commands are prefixed with one — so a repository cannot prompt-inject
+// pings or bot commands through a scanner result.
+func neutralizePublishedText(value string) string {
+	stripped := stripUnsafeTextRunes(value)
+	stripped = redact.SensitiveText(stripped)
+	// Markdown keeps its newlines and tabs, so a credential wrapped across a
+	// line break could evade the in-place redaction above. Detect on a
+	// separator-joined shadow copy; if a credential is still recoverable by
+	// joining lines, withhold the whole field rather than publish it.
+	shadow := strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\t' {
+			return -1
+		}
+		return r
+	}, stripped)
+	if redact.SensitiveText(shadow) != shadow || LooksLikeSecret(shadow) {
+		return "[content withheld: credential-shaped value detected]"
+	}
+	stripped = strings.ReplaceAll(stripped, "<!--", "<\u200b!--")
+	stripped = strings.ReplaceAll(stripped, "-->", "--\u200b>")
+	var b strings.Builder
+	b.Grow(len(stripped))
+	for i := 0; i < len(stripped); i++ {
+		ch := stripped[i]
+		b.WriteByte(ch)
+		if ch == '@' && i+1 < len(stripped) {
+			next := stripped[i+1]
+			if (next >= 'a' && next <= 'z') || (next >= 'A' && next <= 'Z') || (next >= '0' && next <= '9') {
+				b.WriteRune('\u200b')
+			}
+		}
+	}
+	lines := strings.Split(b.String(), "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimLeft(line, " \t")
+		if strings.HasPrefix(trimmed, "/") {
+			indent := line[:len(line)-len(trimmed)]
+			lines[i] = indent + "\u200b" + trimmed
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// truncateOnRuneBoundary bounds text to at most limit bytes without splitting
+// a multibyte character; a byte-index cut would leave invalid UTF-8 that
+// json.Marshal replaces with U+FFFD.
+func truncateOnRuneBoundary(text string, limit int) string {
+	if len(text) <= limit {
+		return text
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return strings.TrimSpace(text[:cut])
+}
+
+// RemediationPullRequestTitle renders the reviewer-facing title of a
+// remediation pull request from the finding.
+func RemediationPullRequestTitle(finding *store.Finding) string {
+	title := ""
+	if finding != nil {
+		title = strings.Join(strings.Fields(neutralizePublishedText(finding.Title)), " ")
+	}
+	if title == "" {
+		title = "security remediation"
+	}
+	title = truncateOnRuneBoundary(title, maxRemediationTitleBytes)
+	return remediationPullRequestTitlePrefix + title
+}
+
+// RemediationPullRequestBody renders the reviewer-facing body of a remediation
+// pull request: the finding's summary, root cause, and remediation guidance,
+// plus the patch agent's own account of the change. The caller appends the
+// publisher's intent marker so the clean-room publisher still recognizes the
+// pull request as its own.
+func RemediationPullRequestBody(finding *store.Finding, summary *PatchSummaryArtifact) string {
+	var body strings.Builder
+	section := func(heading, text string) {
+		text = strings.TrimSpace(neutralizePublishedText(text))
+		if text == "" {
+			return
+		}
+		if len(text) > maxRemediationBodySectionBytes {
+			text = truncateOnRuneBoundary(text, maxRemediationBodySectionBytes) + "…"
+		}
+		body.WriteString(heading)
+		body.WriteString("\n")
+		body.WriteString(text)
+		body.WriteString("\n\n")
+	}
+	if finding != nil {
+		fmt.Fprintf(&body, "Security remediation for finding `%s`", finding.ID)
+		if finding.Severity != "" {
+			fmt.Fprintf(&body, " (%s severity", finding.Severity)
+			if finding.Confidence != "" {
+				fmt.Fprintf(&body, ", %s confidence", finding.Confidence)
+			}
+			body.WriteString(")")
+		}
+		body.WriteString(".\n\n")
+		if finding.FilePath != "" {
+			location := finding.FilePath
+			if finding.Line > 0 {
+				location = fmt.Sprintf("%s:%d", finding.FilePath, finding.Line)
+			}
+			section("**Location:**", "`"+location+"`")
+		}
+		section("**Summary:**", finding.Summary)
+		section("**Root cause:**", finding.RootCause)
+		section("**Remediation guidance:**", finding.Remediation)
+	}
+	if summary != nil {
+		section("**Patch:**", summary.Summary)
+		if len(summary.ChangedFiles) > 0 {
+			var files strings.Builder
+			for _, file := range summary.ChangedFiles {
+				files.WriteString("- `")
+				files.WriteString(file)
+				files.WriteString("`\n")
+			}
+			section("**Changed files:**", files.String())
+		}
+		if len(summary.TestsRun) > 0 {
+			var tests strings.Builder
+			for _, test := range summary.TestsRun {
+				fmt.Fprintf(&tests, "- `%s` (exit %d)\n", test.Command, test.ExitCode)
+			}
+			section("**Tests run:**", tests.String())
+		}
+		if summary.Risk != "" {
+			section("**Risk:**", summary.Risk)
+		}
+	}
+	body.WriteString("Generated by Orka repository security scanning; the branch was published by the clean-room workspace publisher.")
+	return body.String()
+}
+
+// reviewSlicePromptMetadata is the deterministic projection of a review slice
+// that is safe to embed in a prompt: identity and scope only, no mutable
+// store bookkeeping such as status, timestamps, or the last scan run.
+type reviewSlicePromptMetadata struct {
+	SchemaVersion     int                      `json:"schemaVersion"`
+	ID                string                   `json:"id"`
+	RepositoryScan    string                   `json:"repositoryScan"`
+	Source            string                   `json:"source"`
+	Title             string                   `json:"title"`
+	Summary           string                   `json:"summary"`
+	Kind              string                   `json:"kind"`
+	Confidence        string                   `json:"confidence"`
+	Entrypoints       []store.ReviewSliceFile  `json:"entrypoints,omitempty"`
+	OwnedFiles        []store.ReviewSliceFile  `json:"ownedFiles,omitempty"`
+	ContextFiles      []store.ReviewSliceFile  `json:"contextFiles,omitempty"`
+	Tests             []store.ReviewSliceTest  `json:"tests,omitempty"`
+	ChangedFiles      []string                 `json:"changedFiles,omitempty"`
+	ChangedLineRanges []store.ChangedLineRange `json:"changedLineRanges,omitempty"`
+	Tags              []string                 `json:"tags,omitempty"`
+	TrustBoundaries   []string                 `json:"trustBoundaries,omitempty"`
+}
+
+func newReviewSlicePromptMetadata(slice store.ReviewSlice) reviewSlicePromptMetadata {
+	return reviewSlicePromptMetadata{
+		SchemaVersion: slice.SchemaVersion, ID: slice.ID, RepositoryScan: slice.RepositoryScan, Source: slice.Source,
+		Title: slice.Title, Summary: slice.Summary, Kind: slice.Kind, Confidence: slice.Confidence,
+		Entrypoints: slice.Entrypoints, OwnedFiles: slice.OwnedFiles, ContextFiles: slice.ContextFiles, Tests: slice.Tests,
+		ChangedFiles: slice.ChangedFiles, ChangedLineRanges: slice.ChangedLineRanges, Tags: slice.Tags, TrustBoundaries: slice.TrustBoundaries,
+	}
 }

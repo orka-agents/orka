@@ -231,7 +231,7 @@ func isBuiltInACPRuntime(runtimeType corev1alpha1.AgentRuntimeType) bool {
 	}
 }
 
-func normalizedCreateAgentModel(runtime *RuntimeArgs, model *ModelArgs) (string, error) {
+func normalizedCreateAgentModel(runtime *RuntimeArgs, model *ModelArgs, mode executionmode.Mode) (string, error) {
 	requested := ""
 	if model != nil {
 		requested = strings.TrimSpace(model.Name)
@@ -249,6 +249,13 @@ func normalizedCreateAgentModel(runtime *RuntimeArgs, model *ModelArgs) (string,
 		}
 	}
 	if runtimeType != corev1alpha1.AgentRuntimeOpencode {
+		// Admission rejects a harness-v2 built-in runtime Agent without
+		// spec.model.name (the ACP session has no default model); failing
+		// here keeps the tool's contract aligned with what the cluster
+		// will actually accept.
+		if mode == executionmode.HarnessV2 && isBuiltInACPRuntime(runtimeType) && requested == "" {
+			return "", fmt.Errorf("model.name is required for %s runtime Agents: the ACP runtime session has no default model", runtimeType)
+		}
 		return requested, nil
 	}
 	var spec *corev1alpha1.ModelConfig
@@ -296,6 +303,8 @@ func configureCreatedAgentRuntime(agent *corev1alpha1.Agent, runtimeArgs *Runtim
 }
 
 // Execute creates an Agent CRD dynamically
+//
+//nolint:gocyclo // Keep Agent construction and coordination-policy validation in one flow.
 func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var a CreateAgentArgs
 	if err := json.Unmarshal(args, &a); err != nil {
@@ -322,7 +331,19 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 	} else if strings.TrimSpace(a.SystemPrompt) == "" {
 		return "", fmt.Errorf("systemPrompt is required")
 	}
-	requestedModel, err := normalizedCreateAgentModel(a.Runtime, a.Model)
+	effectiveModel := a.Model
+	if runtimeType != string(corev1alpha1.AgentRuntimeOpencode) &&
+		(effectiveModel == nil || strings.TrimSpace(effectiveModel.Name) == "") {
+		if inheritedModel := strings.TrimSpace(os.Getenv(workerenv.AIModel)); inheritedModel != "" {
+			modelCopy := ModelArgs{Name: inheritedModel}
+			if effectiveModel != nil {
+				modelCopy = *effectiveModel
+				modelCopy.Name = inheritedModel
+			}
+			effectiveModel = &modelCopy
+		}
+	}
+	requestedModel, err := normalizedCreateAgentModel(a.Runtime, effectiveModel, t.executionMode)
 	if err != nil {
 		return "", err
 	}
@@ -348,10 +369,10 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 
 	// Build model config — clear provider to avoid mismatch with providerRef
 	model := &corev1alpha1.ModelConfig{}
-	if a.Model != nil {
+	if effectiveModel != nil {
 		model.Name = requestedModel
-		model.ContextWindow = a.Model.ContextWindow
-		model.MaxTokens = a.Model.MaxTokens
+		model.ContextWindow = effectiveModel.ContextWindow
+		model.MaxTokens = effectiveModel.MaxTokens
 	}
 	if model.Name == "" {
 		model.Name = os.Getenv(workerenv.AIModel)

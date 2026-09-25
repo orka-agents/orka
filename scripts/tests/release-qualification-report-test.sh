@@ -1,0 +1,395 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2016 # acp_report_update arguments are jq programs.
+set -Eeuo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=scripts/lib/release-qualification-report.sh
+. "${root}/scripts/lib/release-qualification-report.sh"
+fixture="$(mktemp -d "${TMPDIR:-/tmp}/acp-release-report-test.XXXXXX")"
+trap 'rm -rf "${fixture}"' EXIT
+export RELEASE_GATE=1 ACP_E2E_WRITE_CREATE_PR=1 ACP_E2E_REPORT_FILE="${fixture}/acceptance.json"
+unset ACP_E2E_REPO ACP_E2E_REF ACP_E2E_BASE_BRANCH
+ACP_E2E_WRITE_SOURCE_REF="$(git -C "${root}" rev-parse HEAD)"
+export ACP_E2E_WRITE_SOURCE_REF
+export ACP_E2E_WRITE_SOURCE_REPO=https://github.com/orka-agents/orka.git
+export ACP_E2E_WRITE_PUBLICATION_REPO=https://github.com/sozercan/orka-acp-release-gate.git
+export ACP_E2E_WRITE_PR_BASE=main ACP_E2E_RUN_ID=report-test
+export GITHUB_REPOSITORY=orka-agents/orka GITHUB_REF=refs/heads/main
+export GITHUB_SHA="${ACP_E2E_WRITE_SOURCE_REF}" GITHUB_RUN_ID="9999$$"
+export GITHUB_RUN_ATTEMPT=1 GITHUB_EVENT_NAME=workflow_dispatch
+acp_report_init "${root}"
+if acp_report_finish 2>/dev/null; then
+  echo 'an unexecuted release gate qualified' >&2
+  exit 1
+fi
+
+sentinel='excluded-private-evidence'
+commit=1111111111111111111111111111111111111111
+tree=2222222222222222222222222222222222222222
+digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+task_payload="$(jq -n --arg sha "${GITHUB_SHA}" --arg commit "${commit}" --arg tree "${tree}" \
+  --arg digest "${digest}" --arg sentinel "${sentinel}" '{
+    metadata:{namespace:"test",name:"write-test",uid:"task-uid",annotations:{private:$sentinel}},
+    spec:{prompt:$sentinel},
+    status:{phase:"Succeeded",message:$sentinel,result:$sentinel,
+      execution:{state:"Succeeded",outcome:"Succeeded",attempt:1,promptID:"prompt-id",
+        runtimePoolName:"write-pool",runtimePoolUID:"pool-uid",runtimeInstanceID:"instance-id",
+        runtimeSessionUID:"session-uid",runtimeSessionGeneration:1,requestDigest:$digest,
+        controllerEpoch:1,readCredentialResourceVersion:"1",publicationReadCredentialResourceVersion:"2",
+        publicationCredentialResourceVersion:"3",forgeCredentialResourceVersion:"4",message:$sentinel},
+      delivery:{state:"VerifiedExact",outcome:"VerifiedExact",publicationID:"publication-id",
+        sourceRepository:{provider:"github",id:"github.com/orka-agents/orka",private:$sentinel},
+        publicationRepository:{provider:"github",id:"github.com/sozercan/orka-acp-release-gate"},
+        branch:"orka/acp-release-gate-test",startingSHA:$sha,remoteBeforeSHA:"",treeSHA:$tree,
+        expectedCommitSHA:$commit,verifiedRemoteSHA:$commit,artifactDigest:$digest,message:$sentinel,
+        prReceipt:{id:"github:123:42",number:42,url:"https://github.com/orka-agents/orka/pull/42",
+          state:"Open",baseBranch:"main",headBranch:"orka/acp-release-gate-test",headSHA:$commit,
+          private:$sentinel}}}
+  }')"
+acp_report_task "${task_payload}"
+for role in controller publisher codex opencode claude copilot; do
+  ref="registry.example/orka/${role}@${digest}"
+  pod="$(jq -n --arg role "${role}" --arg ref "${ref}" --arg sentinel "${sentinel}" '{
+    metadata:{namespace:"test",name:$role,uid:($role + "-uid"),annotations:{private:$sentinel}},
+    spec:{containers:[{name:"runtime",image:$ref,env:[{name:"PRIVATE",value:$sentinel}]}]},
+    status:{containerStatuses:[{name:"runtime",imageID:($ref | sub("registry.example";"docker-pullable://registry.example"))}]}
+  }')"
+  acp_report_image "${role}" "${pod}" runtime
+  acp_report_update '.builtImages[$role] = $ref' --arg role "${role}" --arg ref "${ref}"
+done
+acp_report_update '
+  .validation = "passed" | .validatorStarted = true | .validatorExitCode = 0 | .bootstrapExitCode = 0
+  | .expectedBranch = .task.delivery.branch
+  | .checks |= with_entries(.value = true)
+  | .checks.publication = true | .checks.credentialsFrozen = true | .checks.publisherSecretReadDenied = true
+  | .runtime = {
+      providers: (["codex","opencode","claude","copilot"] | map({key:.,value:{read:true,continuation:true,result:true,fork:true}}) | from_entries),
+      checks: (["unsafeWorkspace","concurrency","timeout","cancellation","controllerRestart","poolReplacement","scaleToZeroRecovery","opencodeReadPolicy"]
+        | map({key:.,value:true}) | from_entries)}
+  | .publicationTests = {candidateSHA:.candidateSHA,status:"passed",exitCode:0,failedEvents:0,
+      suites:($required | with_entries(.value = {passed:true,testCount:(.value | length),passedTests:.value}))}
+  | .canary = {path:"canary.txt",expectedCommitBytesMatched:true,remoteBytesMatched:true,singleAddedFile:true}
+  | .cleanup |= with_entries(.value = "passed")
+  | .credentials = [
+    {role:"sourceRead",namespace:"test",name:"source",resourceVersion:"1"},
+    {role:"targetRead",namespace:"test",name:"target",resourceVersion:"2"},
+    {role:"targetWrite",namespace:"test",name:"write",resourceVersion:"3"},
+    {role:"forge",namespace:"test",name:"forge",resourceVersion:"4"}]
+  | .observations = {
+    baseHeads:{preflight:.candidateSHA,submission:.candidateSHA,publication:.candidateSHA,completion:.candidateSHA},
+    remoteHead:$head,
+    expectedCommit:{sha:$head,treeSHA:$tree},
+    pullRequest:{number:42,state:"open",headSHA:$head,baseSHA:.candidateSHA,
+      baseBranch:"main",headBranch:.task.delivery.branch,
+      sourceRepository:.sourceRepository,publicationRepository:.publicationRepository}}
+' --arg head "${commit}" --arg tree "${tree}" --argjson required "$(acp_publication_test_requirements)"
+if grep -F "${sentinel}" "${ACP_E2E_REPORT_FILE}" >/dev/null; then
+  echo 'acceptance report copied excluded Task or Pod content' >&2
+  exit 1
+fi
+acp_report_finish
+jq -e '.result == "qualified" and .finishedAt != null' "${ACP_E2E_REPORT_FILE}" >/dev/null
+cp "${ACP_E2E_REPORT_FILE}" "${fixture}/qualified.json"
+printf '%s\n' 'ok - the optional live canary requires its complete receipts in addition to fixture tests'
+
+jq --arg head 3333333333333333333333333333333333333333 '
+  .task.delivery.state = "DeliveredSuperseded" | .task.delivery.outcome = "DeliveredSuperseded"
+  | .task.delivery.supersedingRemoteSHA = $head | .task.delivery.prReceipt.headSHA = $head
+  | .observations.remoteHead = $head | .observations.pullRequest.headSHA = $head
+' "${fixture}/qualified.json" >"${ACP_E2E_REPORT_FILE}"
+acp_report_finish
+acp_report_update '.task.delivery.state = "VerifiedExact" | .task.delivery.outcome = "VerifiedExact"'
+if acp_report_finish 2>/dev/null; then
+  echo 'VerifiedExact qualified with a distinct superseding remote head' >&2
+  exit 1
+fi
+printf '%s\n' 'ok - a superseding head requires DeliveredSuperseded and preserves the observed commit receipt'
+
+while IFS= read -r mutation; do
+  jq "${mutation}" "${fixture}/qualified.json" >"${ACP_E2E_REPORT_FILE}"
+  if acp_report_finish 2>/dev/null; then
+    printf 'incomplete or inconsistent report qualified: %s\n' "${mutation}" >&2
+    exit 1
+  fi
+  jq -e '.result == "not_qualified"' "${ACP_E2E_REPORT_FILE}" >/dev/null
+done <<'MUTATIONS'
+.mode = "smoke"
+.candidateSHA = "0000000000000000000000000000000000000000"
+.sourceRepository = .publicationRepository
+.validation = "not_started"
+.validatorStarted = false
+.validatorExitCode = 1
+.bootstrapExitCode = 1
+.checks.publication = false
+.canary.remoteBytesMatched = false
+.canary.expectedCommitBytesMatched = false
+.canary.singleAddedFile = false
+.checks.publisherSecretReadDenied = false
+.observations.baseHeads.submission = "0000000000000000000000000000000000000000"
+.observations.baseHeads.completion = "0000000000000000000000000000000000000000"
+.observations.remoteHead = "0000000000000000000000000000000000000000"
+.observations.expectedCommit.sha = "3333333333333333333333333333333333333333"
+.observations.expectedCommit.treeSHA = "3333333333333333333333333333333333333333"
+del(.observations.expectedCommit)
+.observations.pullRequest.number = 43
+.observations.pullRequest.headBranch = "somebody-elses-branch"
+.expectedBranch = "somebody-elses-branch"
+.observations.pullRequest.sourceRepository = .publicationRepository
+.task.delivery.prReceipt = null
+.task.delivery.artifactDigest = null
+.task.delivery.expectedCommitSHA = "3333333333333333333333333333333333333333"
+.task.delivery.treeSHA = "3333333333333333333333333333333333333333"
+.task.delivery.expectedCommitSHA = "3333333333333333333333333333333333333333" | .observations.expectedCommit.sha = .task.delivery.expectedCommitSHA
+.task.delivery.outcome = "DeliveredSuperseded"
+.task.execution.attempt = 2
+.task.execution.forgeCredentialResourceVersion = "rotated"
+.credentials = []
+.credentials[1].name = .credentials[0].name
+.images.publisher.imageID = null | .images.publisher.actualDigest = null
+.images.codex.verified = false
+del(.images.copilot)
+.builtImages.controller = "registry.example/unqualified@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+.cleanup.remote = "preserved"
+.cleanup.kubernetes = "failed"
+.cleanup.validatorCredentials = "failed"
+.cleanup.bootstrapCredentials = "failed"
+.cleanup.cluster = "pending"
+.cleanup.registry = "failed"
+.preserved = {branch:"inspect-me"}
+MUTATIONS
+printf '%s\n' 'ok - skipped publication, moved base, inconsistent receipts, missing images and incomplete cleanup fail qualification'
+
+# The normal release has no live GitHub effects or credential copies. Its
+# evidence must still prove every required runtime scenario and fixture suite.
+cp "${fixture}/qualified.json" "${fixture}/qualified-live.json"
+jq '
+  .coverage.liveGitHub = "not_tested"
+  | .publicationRepository = null | .expectedBranch = null | .task = null | .credentials = []
+  | .cleanup.remote = "not_required"
+  | del(.canary,.checks.publication,.checks.credentialsFrozen,.checks.publisherSecretReadDenied,
+      .observations.expectedCommit,.observations.remoteHead,.observations.pullRequest,
+      .observations.baseHeads.submission,.observations.baseHeads.publication)
+' "${fixture}/qualified-live.json" >"${fixture}/qualified.json"
+cp "${fixture}/qualified.json" "${ACP_E2E_REPORT_FILE}"
+acp_report_finish
+while IFS= read -r mutation; do
+  jq "${mutation}" "${fixture}/qualified.json" >"${ACP_E2E_REPORT_FILE}"
+  if acp_report_finish 2>/dev/null; then
+    printf 'incomplete fixture qualification accepted: %s\n' "${mutation}" >&2
+    exit 1
+  fi
+done <<'MUTATIONS'
+.schemaVersion = 1
+.coverage.publication = "not_tested"
+.coverage.pullRequests = "not_tested"
+.coverage.liveGitHub = "passed"
+.coverage.liveGitHub = "live"
+.publicationTests.status = "not_started"
+.publicationTests.exitCode = 1
+.publicationTests.failedEvents = 1
+.publicationTests.candidateSHA = "0000000000000000000000000000000000000000"
+del(.publicationTests)
+.publicationTests.suites = {}
+.publicationTests.suites["github.com/orka-agents/orka/internal/publisher"].passed = false
+.publicationTests.suites["github.com/orka-agents/orka/internal/publisher"].passedTests |= .[1:]
+.publicationTests.suites["github.com/orka-agents/orka/internal/publisher/service"].passedTests |= .[1:]
+.runtime.checks.scaleToZeroRecovery = false
+.runtime.checks.controllerRestart = false
+.runtime.checks.poolReplacement = false
+.runtime.checks.cancellation = false
+.runtime.checks.timeout = false
+.runtime.checks.concurrency = false
+.runtime.checks.unsafeWorkspace = false
+.runtime.checks.opencodeReadPolicy = false
+.runtime.providers.codex.fork = false
+.runtime.providers.claude.result = false
+.runtime.providers.opencode.continuation = false
+del(.runtime.providers.copilot)
+.checks.publisherBrokeredAuthority = false
+.checks.baseUnchanged = false
+.observations.baseHeads.preflight = "0000000000000000000000000000000000000000"
+del(.images.publisher)
+.cleanup.remote = "passed"
+.task = {uid:"unexpected-publication"}
+.credentials = [{role:"forge"}]
+.cleanup.kubernetes = "failed"
+.cleanup.cluster = "pending"
+.cleanup.registry = "failed"
+.cleanup.bootstrapCredentials = "failed"
+.cleanup.validatorCredentials = "failed"
+MUTATIONS
+printf '%s\n' 'ok - fixture qualification retains runtime, recovery, images, candidate identity and cleanup requirements'
+
+unset ACP_E2E_WRITE_CREATE_PR
+acp_report_init "${root}"
+jq -e '.coverage.liveGitHub == "not_tested" and .publicationRepository == null
+  and .cleanup.remote == "not_required" and .publicationTests.status == "not_started"' \
+  "${ACP_E2E_REPORT_FILE}" >/dev/null
+
+jq --arg hash "${digest#sha256:}" '
+  .release = {buildRunID:"123", buildRunAttempt:"1", version:"v0.2.0", bundleSHA256:$hash}
+  | .chart = {packageSHA256:$hash, install:true, containerTask:true, recovery:true,
+      noReplay:true, oppositeModeRejected:true, jobRemovedBeforeRestart:true, noReplayObservationSeconds:10,
+      pvcs:[{name:"orka-store",uid:"store",volumeName:"store-pv",phase:"Bound"},
+        {name:"orka-workspace-publisher",uid:"publisher",volumeName:"publisher-pv",phase:"Bound"}],
+      controllerPodUIDBefore:"old",controllerPodUIDAfter:"new",
+      task:{uid:"task",phase:"Succeeded",attempts:1,resultAvailable:true,jobUID:"job"}}
+' "${fixture}/qualified.json" >"${fixture}/qualified-bundle.json"
+acp_report_qualified "${fixture}/qualified-bundle.json"
+while IFS= read -r mutation; do
+  jq "${mutation}" "${fixture}/qualified-bundle.json" >"${ACP_E2E_REPORT_FILE}"
+  if acp_report_finish 2>/dev/null; then
+    printf 'incomplete chart evidence qualified: %s\n' "${mutation}" >&2
+    exit 1
+  fi
+done <<'MUTATIONS'
+del(.chart)
+.chart.install = false
+.chart.containerTask = false
+.chart.recovery = false
+.chart.noReplay = false
+.chart.oppositeModeRejected = false
+.chart.jobRemovedBeforeRestart = false
+.chart.noReplayObservationSeconds = 0
+.chart.pvcs[0].uid = null
+.chart.controllerPodUIDAfter = .chart.controllerPodUIDBefore
+.chart.task.attempts = 2
+.release.buildRunAttempt = "0"
+.release.bundleSHA256 = "invalid"
+MUTATIONS
+printf '%s\n' 'ok - bundled releases also require chart installation, durable recovery, no replay and mode-rejection evidence'
+
+ACP_E2E_WRITE_SOURCE_REPO="https://${sentinel}@github.com/orka-agents/orka" \
+  ACP_E2E_WRITE_SOURCE_REF="${sentinel}" acp_report_init "${root}"
+jq -e '.candidateSHA == null and .sourceRepository == null' "${ACP_E2E_REPORT_FILE}" >/dev/null
+if grep -F "${sentinel}" "${ACP_E2E_REPORT_FILE}" >/dev/null; then
+  echo 'invalid inputs leaked into the failure report' >&2
+  exit 1
+fi
+printf '%s\n' 'ok - invalid source URLs and candidate inputs are omitted from failure evidence'
+
+mkdir "${fixture}/bin"
+export QUALIFICATION_FIXTURE="${fixture}"
+jq -n --arg sha "${GITHUB_SHA}" '{status:"completed",conclusion:"success",event:"workflow_dispatch",
+  head_sha:$sha,head_branch:"main",repository:{full_name:"orka-agents/orka"},
+  head_repository:{full_name:"orka-agents/orka"},path:".github/workflows/release-qualification.yml",run_attempt:1}' \
+  >"${fixture}/run-original.json"
+jq -n --arg name "release-qualification-acceptance-${GITHUB_RUN_ID}-1" \
+  '[{artifacts:[{name:$name,expired:false}]}]' >"${fixture}/artifacts.json"
+cat >"${fixture}/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+if [[ "$1" == api ]]; then
+  case "$*" in
+    *'/artifacts?'*) cat "${QUALIFICATION_FIXTURE}/artifacts.json" ;;
+    *'/actions/runs/'*)
+      if [[ -f "${QUALIFICATION_FIXTURE}/download-complete" && -f "${QUALIFICATION_FIXTURE}/run-after-download.json" ]]; then
+        cat "${QUALIFICATION_FIXTURE}/run-after-download.json"
+      else
+        cat "${QUALIFICATION_FIXTURE}/run.json"
+      fi
+      ;;
+    *) printf 'main\n' ;;
+  esac
+elif [[ "$1 $2" == 'run download' ]]; then
+  while [[ "$1" != --dir ]]; do shift; done
+  mkdir -p "$2"
+  cp "${QUALIFICATION_FIXTURE}/qualified.json" "$2/acceptance.json"
+  touch "${QUALIFICATION_FIXTURE}/download-complete"
+else
+  exit 99
+fi
+STUB
+chmod +x "${fixture}/bin/gh"
+cp "${fixture}/run-original.json" "${fixture}/run.json"
+PATH="${fixture}/bin:${PATH}" bash "${root}/scripts/verify-release-qualification.sh" \
+  "${GITHUB_SHA}" "${GITHUB_RUN_ID}" >/dev/null
+rm -rf "${root}/bin/release-qualification-${GITHUB_RUN_ID}-1"
+while IFS= read -r mutation; do
+  jq "${mutation}" "${fixture}/run-original.json" >"${fixture}/run.json"
+  if PATH="${fixture}/bin:${PATH}" bash "${root}/scripts/verify-release-qualification.sh" \
+      "${GITHUB_SHA}" "${GITHUB_RUN_ID}" >/dev/null 2>&1; then
+    printf 'untrusted workflow metadata qualified: %s\n' "${mutation}" >&2
+    exit 1
+  fi
+done <<'MUTATIONS'
+.event = "pull_request"
+.event = "schedule"
+.head_branch = "topic"
+.head_sha = "0000000000000000000000000000000000000000"
+.head_repository.full_name = "external/orka"
+.path = ".github/workflows/agent-runtime-e2e.yml"
+.conclusion = "failure"
+.status = "in_progress"
+.run_attempt = 2
+MUTATIONS
+printf '%s\n' 'ok - qualification requires the exact trusted workflow, commit, successful run and current attempt artifact'
+
+cp "${fixture}/run-original.json" "${fixture}/run.json"
+while IFS= read -r mutation; do
+  jq "${mutation}" "${fixture}/run-original.json" >"${fixture}/run-after-download.json"
+  rm -f "${fixture}/download-complete"
+  if PATH="${fixture}/bin:${PATH}" bash "${root}/scripts/verify-release-qualification.sh" \
+      "${GITHUB_SHA}" "${GITHUB_RUN_ID}" >/dev/null 2>&1; then
+    rm -rf "${root}/bin/release-qualification-${GITHUB_RUN_ID}-1"
+    printf 'workflow change during artifact download qualified: %s\n' "${mutation}" >&2
+    exit 1
+  fi
+done <<'MUTATIONS'
+.run_attempt = 2 | .status = "in_progress" | .conclusion = null
+.run_attempt = 2
+.status = "queued" | .conclusion = null
+.conclusion = "failure"
+MUTATIONS
+printf '%s\n' 'ok - workflow reruns and status changes during artifact download invalidate qualification'
+
+# Release-line evidence must name that exact workflow and candidate branch.
+rm -f "${fixture}/run-after-download.json" "${fixture}/download-complete"
+jq '.head_branch = "release-0.2"' "${fixture}/run-original.json" >"${fixture}/run.json"
+cp "${fixture}/qualified.json" "${fixture}/qualified-main.json"
+jq '.workflow.ref = "refs/heads/release-0.2" | .baseBranch = "release-0.2"' \
+  "${fixture}/qualified-main.json" >"${fixture}/qualified.json"
+PATH="${fixture}/bin:${PATH}" bash "${root}/scripts/verify-release-qualification.sh" \
+  "${GITHUB_SHA}" "${GITHUB_RUN_ID}" release-0.2 >/dev/null
+rm -rf "${root}/bin/release-qualification-${GITHUB_RUN_ID}-1"
+if PATH="${fixture}/bin:${PATH}" bash "${root}/scripts/verify-release-qualification.sh" \
+    "${GITHUB_SHA}" "${GITHUB_RUN_ID}" main >/dev/null 2>&1; then
+  echo 'release-branch evidence was accepted as default-branch evidence' >&2
+  exit 1
+fi
+printf '%s\n' 'ok - qualification binds the exact release branch as well as the candidate SHA'
+
+awk '
+  $0 == "      - name: Validate trusted dispatch inputs" { step=1; next }
+  step && $0 == "        run: |" { body=1; next }
+  body && /^      - name:/ { exit }
+  body { sub(/^          /, ""); print }
+' "${root}/.github/workflows/release-qualification.yml" >"${fixture}/dispatch.sh"
+[[ -s "${fixture}/dispatch.sh" ]]
+validate_dispatch() {
+  CHECKED_OUT_SHA="${GITHUB_SHA}" DEFAULT_BRANCH=main PR_BASE="${TEST_PR_BASE:-main}" \
+    SOURCE_REF="${TEST_SOURCE_REF:-${GITHUB_SHA}}" \
+    SOURCE_REPOSITORY="${TEST_SOURCE_REPOSITORY:-https://github.com/orka-agents/orka.git}" \
+    bash "${fixture}/dispatch.sh"
+}
+for source in https://github.com/orka-agents/orka.git https://github.com/orka-agents/orka; do
+  TEST_SOURCE_REPOSITORY="${source}" validate_dispatch
+done
+if GITHUB_REF=refs/pull/42/merge validate_dispatch >/dev/null 2>&1; then
+  echo 'trusted dispatch accepted a pull-request ref' >&2
+  exit 1
+fi
+GITHUB_REF=refs/heads/release-0.2 TEST_PR_BASE=release-0.2 validate_dispatch
+if GITHUB_REF=refs/heads/release-0.2 TEST_PR_BASE=main validate_dispatch >/dev/null 2>&1; then
+  echo 'trusted dispatch accepted a different PR base' >&2
+  exit 1
+fi
+if TEST_SOURCE_REPOSITORY=https://github.com/other/repo.git validate_dispatch >/dev/null 2>&1; then
+  echo 'trusted dispatch accepted another source repository' >&2
+  exit 1
+fi
+if TEST_SOURCE_REF=0000000000000000000000000000000000000000 validate_dispatch >/dev/null 2>&1; then
+  echo 'trusted dispatch accepted a different candidate SHA' >&2
+  exit 1
+fi
+printf '%s\n' 'ok - dispatch accepts the candidate without a publication target and rejects untrusted refs, repositories and SHAs'

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	types "k8s.io/apimachinery/pkg/types"
@@ -26,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
@@ -35,6 +37,9 @@ func bindingTestScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
@@ -116,6 +121,7 @@ func newBindingTestReconciler(t *testing.T, objects ...client.Object) (*TaskReco
 	t.Helper()
 	scheme := bindingTestScheme(t)
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithIndex(&corev1alpha1.Task{}, acpTaskSessionNameField, acpTaskSessionNameTestIndex).
 		WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.RuntimePool{}).
 		WithObjects(objects...).Build()
 	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "binding.db"))
@@ -200,6 +206,89 @@ func TestEnsureAgentExecutionBindingFreezesSnapshotBeforeDispatch(t *testing.T) 
 	}
 	if again.Status.AgentExecutionBinding.BindingDigest != binding.BindingDigest {
 		t.Fatal("verify pass must not rewrite the binding")
+	}
+}
+
+func TestSettleACPClassWorkspaceRequiresFrozenSessionUID(t *testing.T) {
+	const (
+		boundSessionUID = "bound-session-uid"
+		workspaceName   = "victim-session-workspace"
+		workspaceUID    = "victim-workspace-uid"
+	)
+	for _, test := range []struct {
+		name                string
+		workspaceSessionUID string
+		wantSurvives        bool
+	}{
+		{name: "matching frozen Session UID settles", workspaceSessionUID: boundSessionUID},
+		{name: "same name with another Session UID survives", workspaceSessionUID: "victim-session-uid", wantSurvives: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			task := workspaceBindingTestTask(func(workspace *corev1alpha1.ExecutionWorkspaceSpec) {
+				workspace.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
+			})
+			task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "shared-session"}
+			task.Labels = map[string]string{acpExecutionWorkspaceLinkLabel: workspaceName}
+			task.Annotations = map[string]string{acpExecutionWorkspaceUIDAnnotation: workspaceUID}
+			workspace := &workspacev1alpha1.ExecutionWorkspace{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: task.Namespace,
+					Name:      workspaceName,
+					UID:       types.UID(workspaceUID),
+					Labels: map[string]string{
+						workspacev1alpha1.ProviderControllerLabel: acpWorkspaceControllerLabelValue,
+					},
+				},
+				Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
+					Mode:         workspacev1alpha1.ExecutionWorkspaceModeInteractive,
+					DesiredState: workspacev1alpha1.ExecutionWorkspaceDesiredReady,
+					SessionRef: &workspacev1alpha1.ObjectIdentityReference{
+						Name: task.Spec.SessionRef.Name,
+						UID:  types.UID(test.workspaceSessionUID),
+					},
+					Lifecycle: workspacev1alpha1.ExecutionWorkspaceLifecycle{
+						DeletionPolicy: workspacev1alpha1.ExecutionWorkspaceDeletionPolicy{
+							ProviderResources: workspacev1alpha1.WorkspaceDeletionActionDelete,
+							PersistentVolumes: workspacev1alpha1.WorkspaceDeletionActionDelete,
+							Checkpoints:       workspacev1alpha1.WorkspaceDeletionActionDelete,
+						},
+					},
+				},
+			}
+			reconciler, _ := newBindingTestReconciler(t, task, bindingTestNamespace(), workspace)
+			reconciler.APIReader = reconciler.Client
+			reconciler.WorkspaceSettlementProtected = true
+			candidate, err := reconciler.resolveAgentExecutionCandidateWithWorkspaceSessionUID(
+				ctx, task, bindingTestAgent(), boundSessionUID,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := reconciler.persistAgentExecutionSnapshot(ctx, task, candidate); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := reconciler.persistAgentExecutionBinding(ctx, task, candidate); err != nil {
+				t.Fatal(err)
+			}
+			bound := &corev1alpha1.Task{}
+			if err := reconciler.Get(ctx, client.ObjectKeyFromObject(task), bound); err != nil {
+				t.Fatal(err)
+			}
+
+			done, err := reconciler.settleACPClassWorkspace(ctx, bound)
+			if err != nil || !done {
+				t.Fatalf("settle same-name Session workspace = (%v, %v), want completion", done, err)
+			}
+			current := &workspacev1alpha1.ExecutionWorkspace{}
+			err = reconciler.Get(ctx, client.ObjectKeyFromObject(workspace), current)
+			if test.wantSurvives && err != nil {
+				t.Fatalf("workspace from the unmatched frozen Session UID must survive: %v", err)
+			}
+			if !test.wantSurvives && !apierrors.IsNotFound(err) {
+				t.Fatalf("workspace with the matching frozen Session UID must be deleted, got %v", err)
+			}
+		})
 	}
 }
 
@@ -449,7 +538,7 @@ func TestEnsureAgentExecutionBindingUsesUncachedExistingBinding(t *testing.T) {
 	}
 }
 
-func TestQueueACPRuntimeTaskUsesFrozenSnapshotAfterLiveInputsMutate(t *testing.T) {
+func TestQueueACPRuntimeTaskUsesFrozenSnapshotAndCurrentImageAfterLiveInputsMutate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	task := bindingTestTask()
@@ -495,7 +584,8 @@ func TestQueueACPRuntimeTaskUsesFrozenSnapshotAfterLiveInputsMutate(t *testing.T
 	mutatedAgent := agent.DeepCopy()
 	mutatedAgent.Spec.Model.Name = "mutated/model"
 	mutatedAgent.Spec.SystemPrompt = &corev1alpha1.PromptSource{Inline: "mutable system prompt must be ignored"}
-	reconciler.ACPRuntimeImages.Codex = "docker.io/example/mutated@sha256:" + strings.Repeat("b", 64)
+	approvedImage := "docker.io/example/mutated@sha256:" + strings.Repeat("b", 64)
+	reconciler.ACPRuntimeImages.Codex = approvedImage
 
 	if _, err := reconciler.queueACPRuntimeTask(ctx, mutatedTask, mutatedAgent); err != nil {
 		t.Fatal(err)
@@ -504,9 +594,12 @@ func TestQueueACPRuntimeTaskUsesFrozenSnapshotAfterLiveInputsMutate(t *testing.T
 	if err := reconciler.List(ctx, &pools); err != nil {
 		t.Fatal(err)
 	}
-	if len(pools.Items) != 1 || pools.Items[0].Spec.Runtime.Image != wantImage ||
+	if len(pools.Items) != 1 || pools.Items[0].Spec.Runtime.Image != approvedImage ||
 		pools.Items[0].Spec.Runtime.Profile.Digest != wantProfileDigest {
-		t.Fatalf("RuntimePool did not use frozen plan: %#v", pools.Items)
+		t.Fatalf("RuntimePool did not combine the current image with the frozen profile: %#v", pools.Items)
+	}
+	if pools.Items[0].Spec.Runtime.Image == wantImage {
+		t.Fatalf("RuntimePool resurrected the superseded frozen image %q", wantImage)
 	}
 	queued := &corev1alpha1.Task{}
 	if err := reconciler.Get(ctx, client.ObjectKeyFromObject(task), queued); err != nil {

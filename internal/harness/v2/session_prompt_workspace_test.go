@@ -544,15 +544,19 @@ func TestCapabilitiesStatusAndDrainContracts(t *testing.T) {
 	}
 }
 
-func TestOutcomeUnknownErrorIsNeverRetryable(t *testing.T) {
-	response := ErrorResponse{
-		Protocol:  ProtocolVersion,
-		Code:      ErrorCodeOutcomeUnknown,
-		Message:   "provider settlement could not be proven",
-		Retryable: true,
-	}
-	if err := response.Validate(); err == nil || !strings.Contains(err.Error(), "never") {
-		t.Fatalf("retryable outcome_unknown validation = %v", err)
+func TestTerminalErrorsAreNeverRetryable(t *testing.T) {
+	for _, code := range []ErrorCode{ErrorCodeOutcomeUnknown, ErrorCodeWorkspaceResumeLost} {
+		t.Run(string(code), func(t *testing.T) {
+			response := ErrorResponse{
+				Protocol:  ProtocolVersion,
+				Code:      code,
+				Message:   "terminal operation failure",
+				Retryable: true,
+			}
+			if err := response.Validate(); err == nil || !strings.Contains(err.Error(), "never") {
+				t.Fatalf("retryable %s validation = %v", code, err)
+			}
+		})
 	}
 }
 

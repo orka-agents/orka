@@ -1,0 +1,89 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: autonomous-coordinator
+spec:
+  providerRef:
+    name: my-provider
+  model:
+    name: claude-sonnet-4.6
+  systemPrompt:
+    inline: |
+      Coordinate an implementation plan and its review across autonomous iterations.
+      The document lives in the planner child Task's result. Your working plan
+      tracks Task names, the next phase, and feedback; it is deleted on completion.
+      Do not create files, change repositories, or open pull requests.
+
+      Perform one phase per iteration:
+      1. DRAFT: delegate the original requirements to autonomous-planner and wait
+         for completion. Save planner_task=<exact child name> and next_phase=review
+         with update_plan, progress_pct=50 and goal_complete=false. End this
+         iteration; review the draft in the next one.
+      2. REVIEW: call wait_for_tasks on the saved planner_task to retrieve its
+         complete results[].data.plan. Never review the status or summary field.
+         Delegate that full document and the original requirements to
+         autonomous-reviewer, then wait for its results[].verdict and feedback.
+         If the result is not available yet, wait again on the same child.
+         On APPROVED, save the exact planner_task and reviewer_task names with
+         progress_pct=100 and goal_complete=true, then return the result below.
+         On CHANGES_NEEDED, save both Task names, the feedback, and
+         next_phase=revise with goal_complete=false. End this iteration.
+      3. REVISE: retrieve the previous planner_task result with wait_for_tasks.
+         Delegate its data.plan, the requirements, and review feedback to
+         autonomous-planner. Wait, then save the new planner_task name and
+         next_phase=review with goal_complete=false. End this iteration.
+
+      Always preserve the exact child Task names in update_plan.plan_document.
+      A missing document, missing verdict, or failed child is a blocker; do not
+      mark the goal complete. Keep the document in its child result instead of
+      replacing it with a progress checklist in your working plan.
+
+      Every final response must be raw JSON with no code fence:
+      {"version":1,"summary":"<brief status>","verdict":"IN_PROGRESS or APPROVED","data":{"plan_task":"<exact planner child name>","review_task":"<exact reviewer child name, or empty before review>"}}
+      Use APPROVED only after a reviewer approved the document from plan_task.
+  coordination:
+    enabled: true
+    autonomous: true
+    maxIterations: 4
+    maxDepth: 2
+    maxConcurrentChildren: 1
+    allowedAgents:
+      - name: autonomous-planner
+      - name: autonomous-reviewer
+---
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: autonomous-planner
+spec:
+  providerRef:
+    name: my-provider
+  model:
+    name: claude-sonnet-4.6
+  systemPrompt:
+    inline: |
+      Write a concise, implementable plan from the supplied requirements.
+      Cover API behavior, storage, validation, tests, and delivery steps.
+      Address supplied review feedback when revising a draft.
+      Use only the supplied context. Return raw JSON with no code fence:
+      {"version":1,"summary":"Draft plan ready","data":{"plan":"<full Markdown plan>"}}
+      Put the complete plan under 800 words in data.plan. The summary is only
+      a short label; it must not replace the plan.
+---
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: autonomous-reviewer
+spec:
+  providerRef:
+    name: my-provider
+  model:
+    name: claude-sonnet-4.6
+  systemPrompt:
+    inline: |
+      Review the supplied implementation plan against the original requirements.
+      Approve when every requirement has a concrete implementation and test
+      step. Otherwise identify the missing steps. Return raw JSON, no code fence:
+      {"version":1,"summary":"<brief assessment>","verdict":"APPROVED or CHANGES_NEEDED","feedback":"<missing steps, or empty when approved>"}
+      Do not require implementation, test execution, or repository access for
+      this planning task. Use only the supplied context.

@@ -14,10 +14,8 @@ import (
 	"strings"
 	"time"
 
-	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/tools"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // goalStateSentinel is the literal tag the coordinator MUST include in its
@@ -53,7 +51,7 @@ func hasGoalStateSentinelPrefix(s string) bool {
 // timeout (typically 10 minutes for Copilot/Anthropic). The error string is
 // the only reliable signal — upstream returns 400 without a typed error code.
 func isStreamingRequiredErr(err error) bool {
-	if err == nil {
+	if err == nil || llm.IsUsagePersistenceError(err) {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
@@ -70,6 +68,9 @@ func isStreamingRequiredErr(err error) bool {
 func completeViaStream(ctx context.Context, provider llm.Provider, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
 	streamCh, err := provider.Stream(ctx, req)
 	if err != nil {
+		if llm.IsUsagePersistenceError(err) {
+			return nil, fmt.Errorf("open stream: %w", err)
+		}
 		return nil, fmt.Errorf("%w: open: %w", errStreamUnavailable, err)
 	}
 
@@ -77,7 +78,7 @@ func completeViaStream(ctx context.Context, provider llm.Provider, req *llm.Comp
 	terminalSeen := false
 	for chunk := range streamCh {
 		if chunk.Error != nil {
-			if resp.Content == "" && len(resp.ToolCalls) == 0 {
+			if !llm.IsUsagePersistenceError(chunk.Error) && resp.Content == "" && len(resp.ToolCalls) == 0 {
 				return nil, fmt.Errorf("%w: chunk: %w", errStreamUnavailable, chunk.Error)
 			}
 			return nil, fmt.Errorf("stream chunk: %w", chunk.Error)
@@ -88,12 +89,7 @@ func completeViaStream(ctx context.Context, provider llm.Provider, req *llm.Comp
 		if chunk.ToolCall != nil {
 			resp.ToolCalls = append(resp.ToolCalls, *chunk.ToolCall)
 		}
-		if chunk.InputTokens > 0 {
-			resp.InputTokens = chunk.InputTokens
-		}
-		if chunk.OutputTokens > 0 {
-			resp.OutputTokens = chunk.OutputTokens
-		}
+		retainStreamUsage(resp, chunk)
 		if chunk.Model != "" {
 			resp.Model = chunk.Model
 		}
@@ -120,6 +116,26 @@ func validateToolLoopCompletion(resp *llm.CompletionResponse) error {
 	switch outcome {
 	case llm.CompletionOutcomeCompleted, llm.CompletionOutcomeToolCalls:
 		return nil
+	case llm.CompletionOutcomeIncomplete:
+		// A text response truncated by the caller's max_tokens budget is a
+		// valid terminal outcome for the compatibility APIs: Anthropic and
+		// OpenAI clients expect the partial text with stop_reason "max_tokens"
+		// / finish_reason "length" (and typically raise the budget and retry).
+		// Every other incomplete reason (pause_turn, response.incomplete, a
+		// bare "incomplete", or no reason at all), an empty truncated body,
+		// and a truncated tool call (its arguments are unusable and must not
+		// be executed) keep failing.
+		if isTokenBudgetTruncatedText(resp) {
+			return nil
+		}
+		reason := strings.TrimSpace(resp.StopReason)
+		if reason == "" {
+			return fmt.Errorf("LLM returned %s completion outcome without a stop reason", outcome)
+		}
+		if len(resp.ToolCalls) > 0 {
+			return fmt.Errorf("LLM returned %s completion outcome with truncated tool calls (stop reason %q)", outcome, reason)
+		}
+		return fmt.Errorf("LLM returned %s completion outcome with stop reason %q", outcome, reason)
 	default:
 		reason := ""
 		if resp != nil {
@@ -129,6 +145,22 @@ func validateToolLoopCompletion(resp *llm.CompletionResponse) error {
 			return fmt.Errorf("LLM returned %s completion outcome without a stop reason", outcome)
 		}
 		return fmt.Errorf("LLM returned %s completion outcome with stop reason %q", outcome, reason)
+	}
+}
+
+// isTokenBudgetTruncatedText reports whether resp is a text-only response cut
+// off by the caller's output token budget ("max_tokens" / "length"). Such a
+// response is returned to the client as-is: the loop must not discard the
+// partial text and keep calling the model.
+func isTokenBudgetTruncatedText(resp *llm.CompletionResponse) bool {
+	if resp == nil || len(resp.ToolCalls) > 0 || strings.TrimSpace(resp.Content) == "" {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(resp.StopReason)) {
+	case oaiParamMaxTokens, oaiStopReasonLength:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -292,7 +324,8 @@ your bug — read this section before calling create_agent):
     instructions belong in initialPrompt or Task prompts and credentials come from
     the controller proxy.
     For credential-backed compatibility runtimes, set runtime.secretRef when required.
-    For codex, claude, and copilot, model.name is optional because the runtime can select a default.
+    For codex, claude, and copilot, model.name is REQUIRED: the ACP runtime session has
+    no default model, and admission rejects a built-in runtime Agent without it.
   - For pure LLM analysis personas (no git, no shell): set model.provider
     + model.name, OMIT runtime.
 - Built-in ACP RuntimePool Agents (runtime.type=codex|claude|copilot|opencode)
@@ -569,28 +602,14 @@ var coordinatorProxyTools = []string{
 	"list_tasks",
 }
 
-// injectOrkaTools appends Orka's built-in tools, coordinator tools, and namespace Tool CRDs
-// to the completion request. Client-provided tools (if any) are preserved.
-func injectOrkaTools(ctx context.Context, k8sClient client.Client, req *llm.CompletionRequest, namespace string) {
+// injectOrkaTools appends the built-in and coordinator tools that the registry can execute.
+// Kubernetes Tool resources are not supported by the compatibility tool loop.
+func injectOrkaTools(req *llm.CompletionRequest) {
 	builtinTools := tools.DefaultRegistry.ToLLMTools(builtinProxyTools)
 	req.Tools = append(req.Tools, builtinTools...)
 
 	coordinatorTools := tools.DefaultRegistry.ToLLMTools(coordinatorProxyTools)
 	req.Tools = append(req.Tools, coordinatorTools...)
-
-	// Load Tool CRDs from namespace for custom HTTP tools
-	var toolList corev1alpha1.ToolList
-	if err := k8sClient.List(ctx, &toolList, client.InNamespace(namespace)); err == nil {
-		for _, t := range toolList.Items {
-			if t.Spec.Parameters != nil {
-				req.Tools = append(req.Tools, llm.Tool{
-					Name:        t.Name,
-					Description: t.Spec.Description,
-					Parameters:  t.Spec.Parameters.Raw,
-				})
-			}
-		}
-	}
 }
 
 // executeToolCall executes a single tool call via the default registry with a timeout.
@@ -610,9 +629,9 @@ func executeToolCall(ctx context.Context, tc llm.ToolCall, timeout time.Duration
 		toolCtx = tools.WithToolContext(toolCtx, &toolCtxCopy)
 	}
 
-	result, err := tools.DefaultRegistry.Execute(toolCtx, tc.Name, tc.Arguments)
+	result, err := registryForExternalToolCall(toolCtxOpt, tc.Name).Execute(toolCtx, tc.Name, tc.Arguments)
 	if err != nil {
-		errResult, _ := json.Marshal(map[string]any{"success": false, "error": err.Error()})
+		errResult, _ := json.Marshal(map[string]any{"success": false, apiFieldError: err.Error()})
 		return string(errResult)
 	}
 	return result
@@ -622,8 +641,8 @@ func executeExposedToolCall(ctx context.Context, tc llm.ToolCall, timeout time.D
 	name := strings.TrimSpace(tc.Name)
 	if _, ok := exposedToolNames[name]; !ok {
 		errResult, _ := json.Marshal(map[string]any{
-			"success": false,
-			"error":   fmt.Sprintf("tool %q is not available in this request", tc.Name),
+			"success":     false,
+			apiFieldError: fmt.Sprintf("tool %q is not available in this request", tc.Name),
 		})
 		return string(errResult)
 	}
@@ -644,6 +663,7 @@ func runNonStreamingToolLoop(
 	return runToolLoopWithObserver(ctx, provider, req, model, config, toolCtx, nil)
 }
 
+//nolint:gocyclo // Tool calls, observer events, and stop conditions form one turn loop.
 func runToolLoopWithObserver(
 	ctx context.Context,
 	provider llm.Provider,
@@ -665,7 +685,7 @@ func runToolLoopWithObserver(
 		case <-ctx.Done():
 			resp := &llm.CompletionResponse{
 				Content:    "Request timed out during tool execution.",
-				StopReason: "end_turn",
+				StopReason: oaiStopReasonEndTurn,
 			}
 			observer.finalContent(resp.Content)
 			return resp, nil
@@ -675,7 +695,7 @@ func runToolLoopWithObserver(
 		// Check iteration limit — do one final call without tools
 		if iteration >= config.MaxIterations {
 			messages = append(messages, llm.Message{
-				Role:    "user",
+				Role:    chatRoleUser,
 				Content: "[System: You have reached the maximum number of iterations. Please provide a final summary of what you accomplished.]",
 			})
 			resp, err := provider.Complete(ctx, &llm.CompletionRequest{
@@ -686,9 +706,12 @@ func runToolLoopWithObserver(
 				Temperature:  req.Temperature,
 			})
 			if err != nil {
+				if llm.IsUsagePersistenceError(err) {
+					return nil, fmt.Errorf("final LLM completion after iteration limit failed: %w", err)
+				}
 				resp := &llm.CompletionResponse{
 					Content:    "Reached iteration limit.",
-					StopReason: "end_turn",
+					StopReason: oaiStopReasonEndTurn,
 				}
 				observer.finalContent(resp.Content)
 				return resp, nil
@@ -744,6 +767,19 @@ func runToolLoopWithObserver(
 			return nil, err
 		}
 
+		// A text response cut off by the output token budget is terminal:
+		// return the partial text with its max_tokens/length stop reason
+		// instead of treating it as a premature end of turn, which would
+		// discard the text and issue more model calls.
+		if isTokenBudgetTruncatedText(resp) {
+			anthropicLog.Info("response truncated by output token budget — returning partial text",
+				"iteration", iteration,
+				"stop_reason", resp.StopReason,
+			)
+			observer.finalContent(resp.Content)
+			return resp, nil
+		}
+
 		// No tool calls → potentially final response. Guard against premature
 		// end-of-turn: if the response lacks the GOAL_STATE sentinel and we
 		// haven't yet exhausted the premature-end budget, inject a "continue"
@@ -774,11 +810,11 @@ func runToolLoopWithObserver(
 			)
 			observer.prematureEndRetry()
 			messages = append(messages, llm.Message{
-				Role:    "assistant",
+				Role:    chatRoleAssistant,
 				Content: resp.Content,
 			})
 			messages = append(messages, llm.Message{
-				Role: "user",
+				Role: chatRoleUser,
 				Content: fmt.Sprintf(
 					"[System: You emitted text but did not include the literal %q sentinel that marks GOAL STATE A or GOAL STATE B. The workflow is not done — child Tasks you created are still in flight or pending follow-up. Per the TURN-ENDING INVARIANT, your next response MUST contain a tool_use (not text). Look at the POSTCONDITION TABLE and call the correct next tool. Do NOT emit any text until you are ready to write your final report that begins with %q on its own line.]",
 					goalStateSentinel, goalStateSentinel,
@@ -795,7 +831,7 @@ func runToolLoopWithObserver(
 
 		// Append assistant message with tool calls
 		messages = append(messages, llm.Message{
-			Role:      "assistant",
+			Role:      chatRoleAssistant,
 			Content:   resp.Content,
 			ToolCalls: resp.ToolCalls,
 		})
@@ -815,7 +851,7 @@ func runToolLoopWithObserver(
 			observer.toolResult(tc, result)
 
 			messages = append(messages, llm.Message{
-				Role:       "tool",
+				Role:       chatRoleTool,
 				ToolCallID: tc.ID,
 				Name:       tc.Name,
 				Content:    result,
@@ -825,7 +861,7 @@ func runToolLoopWithObserver(
 		// Append repetition warning if triggered
 		if repetitionWarning != "" {
 			messages = append(messages, llm.Message{
-				Role:    "user",
+				Role:    chatRoleUser,
 				Content: repetitionWarning,
 			})
 		}
@@ -836,7 +872,7 @@ func runToolLoopWithObserver(
 			for {
 				select {
 				case <-ctx.Done():
-					resp := &llm.CompletionResponse{Content: "Request timed out.", StopReason: "end_turn"}
+					resp := &llm.CompletionResponse{Content: "Request timed out.", StopReason: oaiStopReasonEndTurn}
 					observer.finalContent(resp.Content)
 					return resp, nil
 				default:
@@ -848,7 +884,7 @@ func runToolLoopWithObserver(
 				for _, tc := range resp.ToolCalls {
 					result := executeExposedToolCall(ctx, tc, config.ToolTimeout, toolCtx, exposedToolNames)
 					messages = append(messages, llm.Message{
-						Role: "tool", ToolCallID: tc.ID, Name: tc.Name, Content: result,
+						Role: chatRoleTool, ToolCallID: tc.ID, Name: tc.Name, Content: result,
 					})
 					if !isTaskStillRunning(result) {
 						allStillRunning = false

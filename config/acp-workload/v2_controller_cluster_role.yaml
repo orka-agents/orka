@@ -77,13 +77,12 @@ rules:
   - gatewayclasses/finalizers
   verbs:
   - update
-# Substrate-backed RuntimePools read operator-owned infrastructure
-# ActorTemplates across namespaces; writes (derived templates and epoch-scoped
-# Secrets) require an operator-provided RoleBinding in the template namespace.
+# Native Substrate template selectors resolve WorkerPools across provider
+# namespaces. Workload mutation requires a RoleBinding in each worker namespace.
 - apiGroups:
   - ate.dev
   resources:
-  - actortemplates
+  - workerpools
   verbs:
   - get
   - list
@@ -112,6 +111,45 @@ rules:
   - executionworkspaceproviders/finalizers
   verbs:
   - update
+# Provider deletion protection scans namespaced references across all
+# namespaces. The namespaced manager RoleBinding cannot authorize those lists.
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaceclasses
+  - executionworkspacepools
+  - executionworkspaces
+  verbs:
+  - list
+# The ACP workspace-provider adapter resolves cluster-scoped
+# RuntimeProviderConfig parameters for reserved-controllerName providers; the
+# namespaced manager RoleBinding cannot grant cluster-scope reads.
+- apiGroups:
+  - acp.workspace.orka.ai
+  resources:
+  - runtimeproviderconfigs
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - storage.k8s.io
+  resources:
+  - storageclasses
+  verbs:
+  - get
+  - list
+  - watch
+# The bound durable PV's provenance and reclaim policy are verified before a
+# PVC-backed pool is admitted; PVs are cluster-scoped and read-only here.
+- apiGroups:
+  - ""
+  resources:
+  - persistentvolumes
+  verbs:
+  - get
+  - list
+  - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

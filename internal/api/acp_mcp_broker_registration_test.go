@@ -53,6 +53,9 @@ func (inertExternalEffectStore) ReserveExternalEffect(context.Context, store.Res
 func (inertExternalEffectStore) GetExternalEffect(context.Context, string) (*store.ExternalEffect, error) {
 	return nil, store.ErrNotFound
 }
+func (inertExternalEffectStore) GetExternalEffectByIdentity(context.Context, store.ExternalEffectIdentity) (*store.ExternalEffect, error) {
+	return nil, store.ErrNotFound
+}
 func (inertExternalEffectStore) TransitionExternalEffect(context.Context, store.ExternalEffectTransition) (*store.ExternalEffect, error) {
 	return nil, store.ErrNotFound
 }

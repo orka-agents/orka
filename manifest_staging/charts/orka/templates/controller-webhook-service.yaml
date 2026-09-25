@@ -7,6 +7,9 @@ metadata:
     app.kubernetes.io/component: controller
 spec:
   type: ClusterIP
+  # Task status admission must remain available while controller readiness is
+  # false during the preStop drain.
+  publishNotReadyAddresses: true
   ports:
     - port: 443
       targetPort: webhook

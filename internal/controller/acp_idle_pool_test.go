@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,10 +12,90 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
+
+func TestWorkspaceResumeTransitionPendingUsesAPIReader(t *testing.T) {
+	const (
+		testNamespace     = "default"
+		testWorkspaceName = "workspace"
+		testRuntimePool   = "pool"
+	)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	workspace := &workspacev1alpha1.ExecutionWorkspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNamespace,
+			Name:      testWorkspaceName,
+			UID:       types.UID("workspace-uid"),
+		},
+		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
+			DesiredState: workspacev1alpha1.ExecutionWorkspaceDesiredReady,
+		},
+		Status: workspacev1alpha1.ExecutionWorkspaceStatus{
+			State: workspacev1alpha1.ExecutionWorkspaceStateSuspended,
+		},
+	}
+	pool := &corev1alpha1.RuntimePool{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNamespace,
+			Name:      testRuntimePool,
+			Labels: map[string]string{
+				acpExecutionWorkspaceLinkLabel: workspace.Name,
+			},
+			Annotations: map[string]string{
+				acpExecutionWorkspaceUIDAnnotation: string(workspace.UID),
+			},
+		},
+		Spec: corev1alpha1.RuntimePoolSpec{
+			DesiredReplicas: 1,
+			ExecutionWorkspace: &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
+				Provider: corev1alpha1.WorkspaceProviderSubstrate,
+			},
+		},
+	}
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace).Build()
+	staleWorkspace := workspace.DeepCopy()
+	staleWorkspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+	staleCache := interceptor.NewClient(base, interceptor.Funcs{
+		Get: func(
+			ctx context.Context,
+			delegate client.WithWatch,
+			key client.ObjectKey,
+			object client.Object,
+			options ...client.GetOption,
+		) error {
+			if current, ok := object.(*workspacev1alpha1.ExecutionWorkspace); ok &&
+				key == client.ObjectKeyFromObject(staleWorkspace) {
+				staleWorkspace.DeepCopyInto(current)
+				return nil
+			}
+			return delegate.Get(ctx, key, object, options...)
+		},
+	})
+
+	if hold, err := (&ACPDispatcher{Client: staleCache}).workspaceResumeTransitionPending(context.Background(), pool); err != nil {
+		t.Fatalf("read stale cached workspace: %v", err)
+	} else if hold {
+		t.Fatal("stale suspended intent unexpectedly held the resumed pool")
+	}
+	if hold, err := (&ACPDispatcher{Client: staleCache, APIReader: base}).workspaceResumeTransitionPending(context.Background(), pool); err != nil {
+		t.Fatalf("read fresh workspace: %v", err)
+	} else if !hold {
+		t.Fatal("fresh resumed workspace did not hold the pool above zero")
+	}
+}
 
 func TestReapIdlePoolsStartsTTLWhenActiveDemandSettles(t *testing.T) {
 	scheme := runtime.NewScheme()
@@ -154,6 +235,78 @@ func TestReapIdlePoolsRechecksFreshCapacityBeforeScaleDown(t *testing.T) {
 	}
 }
 
+func TestReapIdlePoolsRetainsAttachedWorkspaceBeforeTaskDemandMetadata(t *testing.T) {
+	const (
+		namespace     = "default"
+		poolName      = "pool"
+		workspaceName = "workspace"
+		taskName      = "task"
+	)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	workspace := &workspacev1alpha1.ExecutionWorkspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: namespace, Name: workspaceName, UID: types.UID("workspace-uid"),
+			Annotations: map[string]string{acpExecutionWorkspacePoolAnnotation: poolName},
+		},
+		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
+			Lifecycle: workspacev1alpha1.ExecutionWorkspaceLifecycle{
+				IdleTimeout: &metav1.Duration{Duration: time.Second},
+			},
+			Attachment: &workspacev1alpha1.ExecutionWorkspaceAttachment{
+				TaskRef:   workspacev1alpha1.ObjectIdentityReference{Name: taskName, UID: types.UID("task-uid")},
+				Epoch:     1,
+				ExpiresAt: metav1.NewTime(now.Add(time.Hour)),
+			},
+		},
+	}
+	pool := &corev1alpha1.RuntimePool{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: namespace, Name: poolName, UID: types.UID("pool-uid"),
+			Labels: map[string]string{acpExecutionWorkspaceLinkLabel: workspace.Name},
+			Annotations: map[string]string{
+				acpExecutionWorkspaceUIDAnnotation: string(workspace.UID),
+				acpRuntimeLastDemandAnnotation:     now.Add(-time.Hour).Format(time.RFC3339Nano),
+			},
+		},
+		Spec: corev1alpha1.RuntimePoolSpec{
+			DesiredReplicas: 1,
+			ExecutionWorkspace: &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
+				Provider: corev1alpha1.WorkspaceProviderAgentSandbox,
+			},
+		},
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RuntimePool{}).
+		WithObjects(workspace, pool).
+		Build()
+	epochs := NewControllerEpochManager(nil, "idle-pool-attachment-test")
+	epochs.current = &store.ControllerEpoch{
+		Name: store.DefaultControllerEpochName, Epoch: 1, HolderID: "idle-pool-attachment-test",
+	}
+	close(epochs.ready)
+	dispatcher := &ACPDispatcher{
+		Client: kubeClient, APIReader: kubeClient, Epochs: epochs, IdlePoolTTL: time.Minute,
+	}
+
+	if err := dispatcher.reapIdlePools(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	current := &corev1alpha1.RuntimePool{}
+	if err := kubeClient.Get(context.Background(), client.ObjectKeyFromObject(pool), current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Spec.DesiredReplicas != 1 {
+		t.Fatalf("attached workspace pool replicas = %d, want 1", current.Spec.DesiredReplicas)
+	}
+}
+
 func TestReapIdlePoolsUsesOptimisticLockForFinalScaleDown(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
@@ -252,6 +405,63 @@ func TestRecordPoolLastDemandAtPreservesConcurrentNewerTimestamp(t *testing.T) {
 	got, err := time.Parse(time.RFC3339Nano, updated.Annotations[acpRuntimeLastDemandAnnotation])
 	if err != nil || !got.Equal(newerDemand) {
 		t.Fatalf("last demand = %s, %v, want concurrent newer value %s", got, err, newerDemand)
+	}
+}
+
+func TestReapStoppedSupersededPlainPoolDeletesAfterGrace(t *testing.T) {
+	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	oldImage := "docker.io/sozercan/orka-acp@sha256:" + strings.Repeat("a", 64)
+	newImage := "docker.io/sozercan/orka-acp@sha256:" + strings.Repeat("9", 64)
+
+	tests := []struct {
+		name        string
+		images      ACPRuntimeImages
+		activeTasks int
+		wantDeleted bool
+	}{
+		{name: "retired and idle", images: ACPRuntimeImages{Codex: newImage}, wantDeleted: true},
+		{name: "active Task still references pool", images: ACPRuntimeImages{Codex: newImage}, activeTasks: 1},
+		{name: "image is still approved", images: ACPRuntimeImages{Codex: oldImage}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pool := runtimePoolTestObject(0)
+			identity, err := acpDomainDigest("runtime-pool-identity", map[string]string{
+				"profileDigest": pool.Spec.Runtime.Profile.Digest,
+				"runtimeImage":  pool.Spec.Runtime.Image,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			pool.Name = acpRuntimePoolName(pool.Spec.Runtime.Profile.ProviderKind, harnessv2.ProfileDigest(identity))
+			pool.UID = types.UID(pool.Namespace + "-retired-pool-uid")
+			pool.Annotations = map[string]string{
+				acpRuntimeLastDemandAnnotation: now.Add(-3 * time.Minute).Format(time.RFC3339Nano),
+			}
+			pool.Status = corev1alpha1.RuntimePoolStatus{
+				ObservedGeneration: pool.Generation,
+				DesiredReplicas:    0,
+				CurrentReplicas:    0,
+				Lifecycle:          corev1alpha1.RuntimePoolLifecycleStopped,
+				AdmissionState:     corev1alpha1.RuntimePoolAdmissionClosed,
+			}
+			kubeClient := fake.NewClientBuilder().
+				WithScheme(runtimePoolTestScheme(t)).
+				WithStatusSubresource(&corev1alpha1.RuntimePool{}).
+				WithObjects(pool).
+				Build()
+			dispatcher := &ACPDispatcher{Client: kubeClient, IdlePoolTTL: time.Minute, ACPRuntimeImages: tt.images}
+			if err := dispatcher.reapStoppedSupersededPlainPool(context.Background(), pool, tt.activeTasks, now); err != nil {
+				t.Fatal(err)
+			}
+			var pools corev1alpha1.RuntimePoolList
+			if err := kubeClient.List(context.Background(), &pools); err != nil {
+				t.Fatal(err)
+			}
+			if deleted := len(pools.Items) == 0; deleted != tt.wantDeleted {
+				t.Fatalf("pool deleted = %t, want %t", deleted, tt.wantDeleted)
+			}
+		})
 	}
 }
 

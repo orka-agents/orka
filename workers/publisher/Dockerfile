@@ -8,7 +8,7 @@ ARG GIT_VERSION
 ARG GIT_SOURCE_SHA256
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential=12.9 ca-certificates=20230311+deb12u1 \
-      libcurl4-openssl-dev=7.88.1-10+deb12u15 libexpat1-dev=2.5.0-1+deb12u2 \
+      libcurl4-openssl-dev=7.88.1-10+deb12u15 libexpat1-dev=2.5.0-1+deb12u3 \
       libssl-dev=3.0.20-1~deb12u2 perl=5.36.0-7+deb12u3 pkg-config=1.8.1-1 \
       xz-utils=5.4.1-1+deb12u1 zlib1g-dev=1:1.2.13.dfsg-1 \
     && rm -rf /var/lib/apt/lists/*
@@ -47,17 +47,17 @@ LABEL org.opencontainers.image.title="Orka workspace publisher" \
       org.opencontainers.image.description="Clean-room source workspace and exact Git publication service" \
       org.opencontainers.image.source="https://github.com/orka-agents/orka" \
       org.opencontainers.image.licenses="MIT AND GPL-2.0-only" \
-      io.orka.network.identity="workspace-publisher" \
-      io.orka.scm-egress="authenticated-proxy-only" \
-      io.orka.provider-access="false" \
-      io.orka.mcp-access="false" \
-      io.orka.git.version="2.55.0" \
-      io.orka.git.revision="e9019fcafe0040228b8631c30f97ae1adb61bcdc" \
-      io.orka.git.source.digest="sha256:457fdb04dc8728e007d4688695e6912e6f680727920f2a40bf11eacc17505357"
+      ai.orka.network.identity="workspace-publisher" \
+      ai.orka.scm-egress="authenticated-proxy-only" \
+      ai.orka.provider-access="false" \
+      ai.orka.mcp-access="false" \
+      ai.orka.git.version="2.55.0" \
+      ai.orka.git.revision="e9019fcafe0040228b8631c30f97ae1adb61bcdc" \
+      ai.orka.git.source.digest="sha256:457fdb04dc8728e007d4688695e6912e6f680727920f2a40bf11eacc17505357"
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates=20230311+deb12u1 \
       libcurl4=7.88.1-10+deb12u15 \
-      libexpat1=2.5.0-1+deb12u2 \
+      libexpat1=2.5.0-1+deb12u3 \
       zlib1g=1:1.2.13.dfsg-1 \
     && rm -rf /var/lib/apt/lists/* \
     && install -d -m 0700 -o 65532 -g 65532 \

@@ -2,6 +2,14 @@
 # Static invariants for the live harness v1/v2 coexistence E2E.
 set -Eeuo pipefail
 
+# scripts/tests suites rely on 'set -e' stopping on failed (( )) arithmetic,
+# which macOS's stock bash 3.2 does not honor; failures would be silently
+# masked there. Require a modern bash (for example: brew install bash).
+if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+  echo "error: this test suite requires bash >= 4; found ${BASH_VERSION}" >&2
+  exit 1
+fi
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 e2e_script="${root}/scripts/coexistence-live-e2e.sh"
 fake_agent="${root}/scripts/fixtures/coexistence-fake-agent.sh"
@@ -49,7 +57,8 @@ grep -Fq 'orka_kind_registry_start "${kind_cluster}" "${registry_owner}"' "${e2e
 # then secrets, then the two Helm releases.
 crd_line="$(grep -nF 'run bash "${script_dir}/apply-helm-crds.sh"' "${e2e_script}" | head -n1 | cut -d: -f1)"
 v1_ns_line="$(grep -nF 'run bash "${script_dir}/lib/ensure-static-mode-namespace.sh" kubectl "${v1_namespace}" harness-v1' "${e2e_script}" | head -n1 | cut -d: -f1)"
-v2_ns_line="$(grep -nF 'run bash "${script_dir}/lib/ensure-static-mode-namespace.sh" kubectl "${v2_namespace}" harness-v2' "${e2e_script}" | head -n1 | cut -d: -f1)"
+# The v2 namespace is created unlabeled so the controller's own claim is exercised.
+v2_ns_line="$(grep -nF 'kubectl create namespace "${v2_namespace}" --dry-run=client -o yaml | kubectl apply -f -' "${e2e_script}" | head -n1 | cut -d: -f1)"
 secret_line="$(grep -nF 'create_namespace_secrets "${v1_namespace}"' "${e2e_script}" | head -n1 | cut -d: -f1)"
 v1_install_line="$(grep -nF 'helm install "${v1_release}"' "${e2e_script}" | head -n1 | cut -d: -f1)"
 v2_install_line="$(grep -nF 'helm install "${v2_release}"' "${e2e_script}" | head -n1 | cut -d: -f1)"
@@ -57,7 +66,7 @@ for line in "${crd_line}" "${v1_ns_line}" "${v2_ns_line}" "${secret_line}" "${v1
   [[ "${line}" =~ ^[0-9]+$ ]] || fail 'E2E is missing the CRD wave, namespace identity, secret, or Helm install steps'
 done
 ((crd_line < v1_ns_line && v1_ns_line < v2_ns_line && v2_ns_line < secret_line && secret_line < v1_install_line && v1_install_line < v2_install_line)) ||
-  fail 'E2E must apply CRDs, claim mode-labeled namespaces, and write secrets before installing either release'
+  fail 'E2E must apply CRDs, prepare both namespaces, and write secrets before installing either release'
 
 # Reuse safety: a pre-existing cluster must be proven free of every Orka CRD
 # and mode-labeled namespace as well as the fixed coexistence namespaces and

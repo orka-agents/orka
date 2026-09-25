@@ -1,12 +1,15 @@
 package kube
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -15,6 +18,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	controlstore "github.com/orka-agents/orka/internal/store"
 	sqlitestore "github.com/orka-agents/orka/internal/store/sqlite"
+	"github.com/orka-agents/orka/internal/taskterminal"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -2219,6 +2223,60 @@ func TestSessionMutationLeaseAndReconciliation(t *testing.T) {
 	}
 }
 
+func TestSessionRuntimeGenerationCommit(t *testing.T) {
+	ctx := context.Background()
+	kubeStore, kubeClient, fence := newTestStoreWithEpoch(t)
+	control, err := kubeStore.CreateSessionControl(ctx, &controlstore.SessionControl{
+		Namespace: "tenant-a", SessionName: "runtime-generation", SessionUID: "runtime-generation-uid",
+		RequestDigest: testDigest("runtime-generation"),
+	}, fence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	control, err = kubeStore.AcquireSessionMutationLease(ctx, controlstore.AcquireSessionMutationLeaseRequest{
+		Namespace: control.Namespace, SessionName: control.SessionName, SessionUID: control.SessionUID,
+		Fence: fence, ExpectedVersion: control.Version, ExpectedLeaseGeneration: control.LeaseGeneration,
+		TaskUID: "runtime-generation-task", Attempt: 1, PromptID: "runtime-generation-prompt",
+		RequestDigest: testDigest("runtime-generation-lease"), AcquiredAt: testNow,
+		Lineage: testSessionLineageClaim(control),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := controlstore.SessionTurnKey{
+		SessionUID: control.SessionUID, LeaseGeneration: control.LeaseGeneration,
+		TaskUID: control.Lease.TaskUID, Attempt: control.Lease.Attempt, PromptID: control.Lease.PromptID,
+	}
+	request := controlstore.CommitSessionRuntimeGenerationRequest{
+		Namespace: control.Namespace, SessionName: control.SessionName, SessionUID: control.SessionUID,
+		Key: key, Fence: fence, ExpectedSessionVersion: control.Version,
+		Generation: 3, CommittedAt: testNow.Add(time.Minute),
+	}
+	committed, err := kubeStore.CommitSessionRuntimeGeneration(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if committed.RuntimeSessionGeneration != 3 || committed.Version != control.Version+1 {
+		t.Fatalf("committed Session RuntimeSession generation = %#v", committed)
+	}
+	retry, err := kubeStore.CommitSessionRuntimeGeneration(ctx, request)
+	if err != nil || retry.Version != committed.Version {
+		t.Fatalf("idempotent generation commit = %#v, %v", retry, err)
+	}
+	regression := request
+	regression.Generation = 2
+	if _, err := kubeStore.CommitSessionRuntimeGeneration(ctx, regression); !errors.Is(err, controlstore.ErrConflict) {
+		t.Fatalf("generation regression error = %v, want conflict", err)
+	}
+	var object corev1alpha1.RuntimeSessionControl
+	if err := kubeClient.Get(ctx, client.ObjectKey{Namespace: control.Namespace, Name: runtimeSessionObjectName(control.SessionName)}, &object); err != nil {
+		t.Fatal(err)
+	}
+	if object.Status.Generation != 3 {
+		t.Fatalf("RuntimeSessionControl status generation = %d, want 3", object.Status.Generation)
+	}
+}
+
 func TestSessionLineageStatusCASRecoversAfterLeaseWrite(t *testing.T) {
 	ctx := context.Background()
 	kubeStore, rawClient, fence := newTestStoreWithEpoch(t)
@@ -2491,10 +2549,11 @@ func TestSessionTurnDelegationIsExplicit(t *testing.T) {
 		t.Fatalf("GetSessionTurn error = %v", err)
 	}
 	delegate := &recordingSessionTurnStore{}
-	withDelegate, err := New(kubeStore.client, testControlNamespace, WithSessionTurnPersistence(delegate))
+	withDelegate, err := New(kubeStore.client, testControlNamespace)
 	if err != nil {
 		t.Fatalf("New with turn delegate: %v", err)
 	}
+	withDelegate.sessionTurns = delegate
 	if _, err := withDelegate.GetSessionTurn(context.Background(), "turn-1"); err != nil || delegate.gotID != "turn-1" {
 		t.Fatalf("delegated GetSessionTurn: id=%q err=%v", delegate.gotID, err)
 	}
@@ -2784,6 +2843,7 @@ func TestCrossStoreSessionTurnFinalizationResumesAfterSQLiteCommit(t *testing.T)
 	}
 }
 
+//nolint:gocyclo // The cross-store finalization and publication-baseline assertions form one scenario.
 func TestCrossStoreSessionTurnFinalizationDerivesPublicationBaseline(t *testing.T) {
 	ctx := context.Background()
 	_, rawClient, fence := newTestStoreWithEpoch(t)
@@ -2836,15 +2896,36 @@ func TestCrossStoreSessionTurnFinalizationDerivesPublicationBaseline(t *testing.
 		t.Fatalf("AcquireSessionMutationLease: %v", err)
 	}
 	attemptKey := controlstore.PromptAttemptKey{Namespace: "tenant-a", TaskUID: "task-publication", Attempt: 1, PromptID: "prompt-publication"}
-	ensureActiveAgentTask(t, ctx, rawClient, attemptKey.Namespace, attemptKey.TaskUID, attemptKey.TaskUID)
+	task := ensureActiveAgentTask(t, ctx, rawClient, attemptKey.Namespace, attemptKey.TaskUID, attemptKey.TaskUID)
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: control.SessionName}
+	task.Spec.Workspace = &corev1alpha1.WorkspaceConfig{Intent: corev1alpha1.WorkspaceIntentWrite, GitRepo: "https://github.com/example/repo.git", PushBranch: "session-publication"}
+	if err := rawClient.Update(ctx, task); err != nil {
+		t.Fatal(err)
+	}
 	attempt, err := kubeStore.CreatePromptAttempt(ctx, boundPromptAttemptForKubeTest(&controlstore.PromptAttempt{Key: attemptKey, RequestDigest: promptRequestDigest}), fence)
 	if err != nil {
 		t.Fatalf("CreatePromptAttempt: %v", err)
 	}
 	attempt = advancePromptAttemptToSuccess(t, ctx, kubeStore, fence, attempt, control)
 	attempt = advancePromptDeliveryToVerified(t, ctx, kubeStore, fence, attempt)
+	task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	task.Status.Execution = &corev1alpha1.TaskExecutionStatus{
+		State: corev1alpha1.TaskExecutionStateSucceeded, Outcome: corev1alpha1.TaskExecutionOutcomeSucceeded,
+		Attempt: 1, PromptID: attempt.Key.PromptID, RequestDigest: attempt.RequestDigest,
+		RuntimeInstanceID: attempt.RuntimeInstanceID, RuntimeSessionUID: control.SessionUID,
+		RuntimeSessionGeneration: 1, RuntimeSessionSupervisorBootID: "publication-boot",
+		RuntimeSessionProfileDigest: testDigest("publication-profile"), ControllerEpoch: fence.Epoch,
+	}
+	// The interrupted recovery wrote the initial delivery into its immutable
+	// turn even though the authoritative attempt and publication had succeeded.
+	task.Status.Delivery = &corev1alpha1.TaskDeliveryStatus{
+		State: corev1alpha1.TaskDeliveryStateNotRequested, Outcome: corev1alpha1.TaskDeliveryOutcomeNotRequested,
+	}
+	if err := rawClient.Status().Update(ctx, task); err != nil {
+		t.Fatal(err)
+	}
 	publication, err := kubeStore.CreatePublication(ctx, &controlstore.Publication{
-		ID: "publication-finalize", Namespace: "tenant-a", Generation: 1,
+		ID: "pub-9bc84e1b490b5fd007a77c03f3f80c16c21b0050bb7067be", Namespace: "tenant-a", Generation: 1,
 		TaskUID: attemptKey.TaskUID, Attempt: attemptKey.Attempt, PromptID: attemptKey.PromptID, SessionUID: control.SessionUID,
 		BranchClaimID: branch.ID, BranchClaimGeneration: branch.Generation,
 		SourceRepositoryID: branch.RepositoryID, SourceRef: branch.Ref, SourceBaselineSHA: oldSHA,
@@ -2922,12 +3003,19 @@ func TestCrossStoreSessionTurnFinalizationDerivesPublicationBaseline(t *testing.
 	if err != nil {
 		t.Fatalf("CreateSessionTurn: %v", err)
 	}
-	payload := []byte(`{"phase":"Succeeded","delivery":"VerifiedExact"}`)
+	payload, err := json.MarshalIndent(taskterminal.Projection{
+		Namespace: task.Namespace, Task: task.Name, TaskUID: string(task.UID), Attempt: 1,
+		Phase: task.Status.Phase, Execution: *task.Status.Execution.DeepCopy(), Delivery: task.Status.Delivery.DeepCopy(),
+	}, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectionID := controlstore.CanonicalControlID("outbox", turn.ID, taskterminal.ProjectionKind)
 	finalizeRequest := controlstore.FinalizeSessionTurnRequest{
 		Key: turnKey, Fence: fence, ExpectedSessionVersion: control.Version, ExpectedTurnVersion: turn.Version,
 		FinalizationDigest: testDigest("finalize-publication-turn"), TerminalKind: controlstore.SessionTurnAssistantResult,
-		TerminalContent: "published", PublicationID: publication.ID,
-		Projection:  controlstore.OutboxProjection{ID: "projection-publication", AggregateKind: sessionTurnAggregateKind, AggregateID: turn.ID, ProjectionKind: "TaskTerminalStatus", Payload: payload, PayloadDigest: testBytesDigest(payload)},
+		TerminalContent: "private publication result", PublicationID: publication.ID,
+		Projection:  controlstore.OutboxProjection{ID: projectionID, AggregateKind: sessionTurnAggregateKind, AggregateID: turn.ID, ProjectionKind: taskterminal.ProjectionKind, Payload: payload, PayloadDigest: testBytesDigest(payload)},
 		FinalizedAt: testNow.Add(time.Hour),
 	}
 	withWatch, ok := rawClient.(client.WithWatch)
@@ -2977,6 +3065,79 @@ func TestCrossStoreSessionTurnFinalizationDerivesPublicationBaseline(t *testing.
 	}
 	if updatedBranch.LastVerified.SHA != commitSHA || updatedBranch.Availability != controlstore.BranchClaimAvailable {
 		t.Fatalf("BranchClaim did not advance verified baseline: %#v", updatedBranch)
+	}
+	if _, err := taskterminal.ValidateFinalizedSessionProjection(payload, task, string(task.UID), attempt, finalized); !errors.Is(err, controlstore.ErrConflict) {
+		t.Fatalf("general finalization validation accepted the stale delivery: %v", err)
+	}
+	if _, err := taskterminal.ValidateSessionCleanupProjection(payload, task, string(task.UID), attempt, finalized); err != nil {
+		t.Fatalf("cleanup rejected the controller publication receipt: %v", err)
+	}
+	claims, err := kubeStore.ClaimOutboxProjections(ctx, controlstore.ClaimOutboxProjectionsRequest{
+		Fence: fence, WorkerID: "publication-projector", Limit: 1, LeaseDuration: time.Minute, Now: testNow.Add(2 * time.Hour),
+	})
+	if err != nil || len(claims) != 1 || claims[0].ID != projectionID {
+		t.Fatalf("claim terminal projection: %#v, %v", claims, err)
+	}
+	delivered, err := kubeStore.CompleteOutboxProjection(ctx, controlstore.CompleteOutboxProjectionRequest{
+		ID: projectionID, Fence: fence, ExpectedVersion: claims[0].Version, LeaseOwner: claims[0].LeaseOwner,
+		OperationID: "deliver-publication", OperationDigest: testDigest("deliver-publication"),
+		NewState: controlstore.OutboxProjectionDelivered, DeliveryDigest: testDigest("publication-delivered"), UpdatedAt: testNow.Add(2*time.Hour + time.Second),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := finalizedSessionReclaimFixture{
+		task: task, attempt: attempt, turn: finalized, projection: delivered,
+		request: controlstore.ReclaimPromptAttemptsRequest{
+			Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID), Fence: fence,
+			Mode: controlstore.PromptAttemptReclamationProjected, ContinuitySession: true, FinalContinuitySession: true,
+			FinalPromptAttemptID: attempt.ID, TerminalProjectionID: projectionID,
+		},
+	}
+	createDeletingAgentTask(t, ctx, rawClient, task.Namespace, task.Name, string(task.UID))
+	if err := kubeStore.PreparePromptAttemptReclamation(ctx, fixture.request); err != nil {
+		t.Fatalf("prepare reclamation of the original stale turn: %v", err)
+	}
+	if err := kubeStore.ReclaimSession(ctx, sessionTurnCleanupRequest(fixture, fence)); err != nil {
+		t.Fatalf("archive published Session: %v", err)
+	}
+	assertSessionTurnCleanupOrdinaryStateAbsent(t, ctx, sqliteStore, fixture)
+	receipt, err := kubeStore.GetSessionTurnCleanupReceipt(ctx, task.Namespace, control.SessionName, attempt.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSessionTurnCleanupReceiptEvidence(t, ctx, db, receipt, fixture)
+	if receipt.PublicationID != publication.ID || !reflect.DeepEqual(receipt.PublicationReceipt, finalized.PublicationReceipt) ||
+		!reflect.DeepEqual(receipt.SessionTurn().PublicationReceipt, finalized.PublicationReceipt) {
+		t.Fatal("Session archival lost the immutable publication evidence")
+	}
+	var sequence int
+	var databaseName, databasePath string
+	if err := db.QueryRowContext(ctx, "PRAGMA database_list").Scan(&sequence, &databaseName, &databasePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := sqlitestore.NewDB(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	kubeStore, err = NewComposite(rawClient, testControlNamespace, sqlitestore.NewStore(reopened, databasePath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted, err := kubeStore.ReclaimPromptAttempts(ctx, fixture.request); err != nil || deleted != 1 {
+		t.Fatalf("reclaim published Task after restart = %d, %v", deleted, err)
+	}
+	if deleted, err := kubeStore.ReclaimPromptAttempts(ctx, fixture.request); err != nil || deleted != 0 {
+		t.Fatalf("repeat published Task reclamation = %d, %v", deleted, err)
+	}
+	receipt, err = kubeStore.GetSessionTurnCleanupReceipt(ctx, task.Namespace, control.SessionName, attempt.ID)
+	if err != nil || !bytes.Equal(receipt.Payload, payload) || receipt.PayloadDigest != testBytesDigest(payload) ||
+		!reflect.DeepEqual(receipt.PublicationReceipt, finalized.PublicationReceipt) {
+		t.Fatalf("reclamation changed the archived stale projection or receipt: %v", err)
 	}
 }
 

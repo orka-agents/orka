@@ -1,3 +1,7 @@
+---
+description: "The orka.harness.v2 contract an external agent runtime must implement to work with Orka."
+---
+
 # AgentRuntime adapter contract
 
 `orka.harness.v2` is the only supported Orka-facing contract for ACP runtime supervisors. It is session-centric, uses `/v2/...` paths, and fails closed on controller/runtime version skew. The old turn-oriented adapter surface is not supported.
@@ -7,9 +11,10 @@
 Built-in Kubernetes RuntimePools and external `AgentRuntime` registrations share the portable v2 identity, request, event, cancellation, duplicate, and fencing rules. Pool creation, Kubernetes scaling, exact-Pod routing, NetworkPolicy, and rollout are built-in controller behavior rather than portable adapter operations.
 
 The controller validates external registrations and records observed
-capabilities. `Agent.spec.runtime.runtimeRef` Task planning remains fail-closed
-until the external v2 dispatcher support boundary is enabled; registration
-readiness alone does not admit Task execution.
+capabilities. `Agent.spec.runtime.runtimeRef` Task planning admits only a
+current-generation ready, strict-governed registration whose frozen profile,
+endpoint, authentication authority, and observed instance still match.
+Registration drift fails closed before a runtime mutation.
 
 ## Probe and control endpoints
 
@@ -23,6 +28,27 @@ Authenticated control operations:
 - `GET /v2/status` — exact instance fence, lifecycle, drain/admission state, resident sessions, prompts, permissions, descendants, and bounded pressure metadata;
 - `PUT /v2/drain` — atomically stop admission of new RuntimeSessions.
 
+Foundry recovery is default-off and independent of brokered approvals. After
+upgrading the controller and qualifying the broker's durable recovery contract,
+set `ORKA_ACP_FOUNDRY_RECOVERY_PROFILE_DIGEST` to the exact runtime profile
+digest. Other providers and mismatched digests fail startup. Without this opt-in,
+capabilities and status omit recovery fields, status does not probe broker
+identity, and boot-retirement requests are rejected. This preserves the wire
+contract for older strict controllers, including those supporting approvals.
+
+Qualified Foundry supervisors advertise `supportsFoundryRecovery`. Their
+authenticated status includes `foundryBroker`, which identifies the durable
+broker ledger and its frozen agent configuration. After Kubernetes proves the
+original supervisor container terminated, an authenticated replacement can relay
+`PUT /v2/recovery/foundry/retire-boot` to that same broker. The request authorizes
+only cleanup of the exact previously witnessed boot.
+
+The broker permanently seals that boot before retiring every remote session it
+owns. Orka requires both the container termination and a complete broker proof
+before releasing cleanup. A replacement ledger, missing enrollment evidence,
+pending creation, or ambiguous invocation cannot supply that proof. This
+extension never replays a prompt or changes an unknown tool outcome to success.
+
 External runtimes advertise whether they implement the drain extension. All status and mutation operations require controller authentication and operation-scoped authorization. Mutations present an exact-fence operation capability; status presents a status capability (audience `orka.harness.v2/status`, expiry-bounded, signed with the same operation-capability secret) because status is the channel through which the controller first learns the runtime-generated fence components. Conformance rejects runtimes that serve status on the controller bearer alone.
 
 ## RuntimeSession operations
@@ -33,7 +59,14 @@ External runtimes advertise whether they implement the drain extension. All stat
 - `PUT /v2/runtime-sessions/{sessionID}/prompts/{promptID}/permissions/{requestID}` — resolve one ACP permission request;
 - `PUT /v2/runtime-sessions/{sessionID}/prompts/{promptID}/cancel` — cancellation barrier that waits for settlement or forced termination;
 - `PUT /v2/runtime-sessions/{sessionID}/workspace-deltas/{deltaID}` — after prompt settlement, freeze mutations and produce one durable validated workspace delta;
+- `PUT /v2/runtime-sessions/{sessionID}/publication-finalization` — record what Orka did with that delta, moving the session from `PublicationPrepared` to `Finalizing`;
 - `DELETE /v2/runtime-sessions/{sessionID}` — cancel, prove descendant cleanup, remove session state, and return idempotently.
+
+Publication finalization closes the loop on a write Task. The runtime produces the delta but
+never pushes it; the Workspace/Publisher does that, and this call is how the runtime is told
+the resulting publication identity, generation, version, and terminal receipt digest. It is
+duplicate-safe: replaying the same receipt returns the recorded one, and a *different* receipt
+for a session already finalizing is a `digest_conflict`, not an overwrite.
 
 Do not add prompt replay, stream reconnect, provider-session load, transparent recovery, or workspace checkpoint endpoints.
 
@@ -48,6 +81,15 @@ Every mutation is bound to:
 - immutable runtime-profile digest and digest schema version;
 - Task UID, attempt, prompt ID, operation ID, and request digest where applicable;
 - expiry.
+
+External supervisors must also report the current Orka controller epoch from
+authenticated status. The supervisor reads `ORKA_ACP_CONTROLLER_EPOCH` once at
+startup. For registrations enrolled through `deployment.kubernetesRecovery`,
+Orka retires the old boot and updates the exact consenting Deployment after an
+epoch change. Other external runtimes require their operator to restart or
+replace them. Preserve the registered runtime instance ID and generate a fresh
+supervisor boot ID. A stale epoch fails conformance and dispatch admission;
+cleanup of a durably terminal Task can retain its exact old-epoch authority.
 
 A stale fence or digest conflict is a terminal protocol error for that request. An exact duplicate returns the recorded operation state without repeating the side effect. If prompt acceptance is known but the terminal result is not provable, Orka classifies the attempt as outcome unknown rather than replaying it.
 
@@ -88,11 +130,68 @@ RuntimeSession creation carries the canonical MCP tool and approval policy.
 The provider child may discover that policy while idle, but every execution
 must traverse a credential-protected loopback proxy and the Orka controller
 broker. Each call binds the RuntimeSession, Task UID/attempt, prompt ID, lease
-generation/expiry, runtime fences, tool descriptor, arguments digest, and
-approval evidence. Prompt settlement, cancellation, lease expiry, poisoning,
+generation/expiry, runtime fences, tool descriptor, and arguments digest.
+The controller owns approval decisions; adapters must not supply approval
+evidence. Prompt settlement, cancellation, lease expiry, poisoning,
 and deletion revoke the authority and cancel in-flight calls. Consequential
 calls reserve a durable `ExternalEffect` identity and may replay only a
 committed matching response.
+
+## Brokered tool approvals
+
+Qualified AgentKit and Foundry adapters advertise
+`provider.supportsBrokeredToolApprovals`. This capability is separate from
+`supportsPermissions`, which describes native ACP permission requests.
+Registration conformance and RuntimeSession admission reject a nonempty
+approval policy when the runtime lacks brokered approval support.
+The supervisor defaults this capability off. An operator enables it only for
+an independently qualified profile by setting
+`ORKA_ACP_BROKERED_TOOL_APPROVAL_PROFILE_DIGEST` to that exact profile digest.
+This binds qualification to the adapter image and baked configuration,
+including a Foundry hosted target. Invalid or mismatched opt-ins fail startup.
+
+The supervisor keeps the original MCP `tools/call` open while Orka saves and
+reviews the proposed action. It returns only the final tool result. There is
+no pending tool result, second approval service, prompt replay, or new
+continuation endpoint. The controller polls the existing task approval events
+and claims the stored action only after an authorized decision.
+
+The shared bounds are 600 seconds for review, 240 seconds for execution after
+approval, and 900 seconds for the enclosing MCP call. The Task deadline may
+shorten these bounds. The normal rolling prompt lease must continue renewing
+throughout the wait; extending the MCP timeout does not extend Task or Session
+authority. The supervisor cancels calls when that authority ends.
+
+Final tool errors use `isError: true` and an allowlisted `code` in the MCP
+`structuredContent` object:
+
+| Code | Meaning |
+| --- | --- |
+| `approval_declined` | The reviewer declined; execution did not start. |
+| `approval_expired` | Review or Task time ran out before execution. |
+| `approval_cancelled` | The review or Task was cancelled before execution. |
+| `approval_stale` | The original run, policy, tool definition, or ownership changed. |
+| `tool_execution_failed` | The approved tool returned a recorded execution error. |
+| `tool_outcome_unknown` | Execution may have occurred, but a reliable result is unavailable. |
+
+Adapters preserve these codes with fixed safe messages. On
+`tool_outcome_unknown`, they must stop automatic tool/model continuation and
+must not repeat the action. An exact broker redelivery can return a committed
+receipt; it cannot reclaim an unreceipted started action, even after its
+execution lease expires.
+
+Orka injects `AGENTKIT_MCP_TIMEOUT=900` for approval-enabled direct AgentKit
+sessions. Foundry reserves 900 seconds for MCP `tools/call` while discovery
+and model requests retain their separate 120-second limit. For hosted
+AgentKit, configure a persistent `AGENTKIT_FOUNDRY_RESPONSE_STATE_FILE`, set
+`AGENTKIT_FOUNDRY_RESPONSE_STATE_TTL_SECONDS=1800`, and pin a Foundry hosted
+agent version with `session_configuration.idle_timeout_seconds` of at least 1800. The
+[Foundry session documentation](https://learn.microsoft.com/azure/foundry/agents/how-to/manage-hosted-sessions)
+describes that version-level setting. These bounds follow MCP's
+[per-request timeout guidance](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle#timeouts).
+
+See [human approval for v2 tools](../guides/human-approval-v2.md) for review,
+recovery, and the counted simulator setup.
 
 Git/forge operations are outside this broker. The Workspace/Publisher obtains
 frozen source-read, target-read, target-write, and forge credentials from the
@@ -107,4 +206,4 @@ An external v2 registration pins the endpoint, two controller-side auth referenc
 
 ## Conformance
 
-The reusable conformance implementation lives under `internal/harness/v2/conformance`. It checks protocol identity, endpoint safety, authentication, mutation capabilities, duplicate handling, fencing, cancellation, bounded event streams, workspace-delta behavior, and governance claims. A registration becoming Ready records the exact matching generation, instance/profile, auth Secret versions, workspace intent, and governance surface, but does not currently permit `runtimeRef` Task dispatch.
+The reusable conformance implementation lives under `internal/harness/v2/conformance`. It checks protocol identity, endpoint safety, authentication, mutation capabilities, duplicate handling, fencing, cancellation, bounded event streams, workspace-delta behavior, and governance claims. A registration becoming Ready records the exact matching generation, instance/profile, auth Secret versions, workspace intent, and governance surface. `runtimeRef` Task dispatch admits only that observed generation and freezes the matching endpoint, authentication authority, profile, policy, instance, and controller epoch into the execution binding. Any later drift fails closed before another runtime mutation.

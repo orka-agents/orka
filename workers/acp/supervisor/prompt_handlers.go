@@ -16,10 +16,12 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/orka-agents/orka/internal/acp"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/workspacedelta"
 )
@@ -44,6 +46,8 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeMutation(w, r, request.Metadata, true) {
 		return
 	}
+	r, span := s.traceOperation(r, request.Metadata, "prompt")
+	defer span.End()
 	sessionID := harnessv2.RuntimeSessionID(r.PathValue("sessionID"))
 	slotHeld := false
 	defer func() {
@@ -59,9 +63,9 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, harnessv2.ErrorCodeInvalidRequest, "runtime session not found", nil, false)
 		return
 	}
-	if err := s.validateSessionFence(state, request.Metadata); err != nil {
+	if mismatch := s.sessionFenceMismatch(state, request.Metadata); mismatch != harnessv2.FenceMatch {
 		s.mu.Unlock()
-		writeError(w, http.StatusGone, harnessv2.ErrorCodeStaleFence, err.Error(), nil, false)
+		writeClassificationError(w, harnessv2.Classification{Class: harnessv2.RequestClassificationStaleFence, FenceMismatch: mismatch})
 		return
 	}
 	if err := request.MCPAuthorization.ValidateProfile(state.profile); err != nil {
@@ -79,6 +83,14 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if classification.Class != harnessv2.RequestClassificationFresh {
+		if replay := state.operationReplays[request.Metadata.OperationID]; replay != nil && replay.admission != nil &&
+			(classification.Class == harnessv2.RequestClassificationAlreadyAccepted || classification.Class == harnessv2.RequestClassificationSettled) {
+			response := *replay.admission
+			response.Classification = classification
+			s.mu.Unlock()
+			writeJSON(w, http.StatusOK, response)
+			return
+		}
 		s.mu.Unlock()
 		writeClassificationError(w, classification)
 		return
@@ -104,6 +116,21 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, err.Error(), nil, false)
 		return
 	}
+	injectWriteAmbiguity, faultErr := s.consumeE2EPromptWriteAmbiguityLocked(r.Context(), request, s.cfg.E2EPromptWriteAmbiguityMarker)
+	if faultErr != nil {
+		s.mu.Unlock()
+		slog.Error("record E2E prompt write ambiguity failed", "promptID", request.Metadata.PromptID, "error", faultErr)
+		writeError(
+			w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned,
+			"E2E prompt write ambiguity state failed", nil, false,
+		)
+		return
+	}
+	if injectWriteAmbiguity {
+		s.mu.Unlock()
+		slog.Warn("injecting E2E prompt write ambiguity", "promptID", request.Metadata.PromptID)
+		panic(http.ErrAbortHandler)
+	}
 	select {
 	case s.promptSlots <- struct{}{}:
 		slotHeld = true
@@ -125,7 +152,7 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 	providerProxy := state.providerProxy
 	mcpProxy := state.mcpProxy
 	if providerProxy == nil ||
-		providerProxy.activateWithMaxTurns(string(request.Metadata.PromptID), state.agentConfiguration.MaxTurns, request.Lease.ExpiresAt, now) != nil {
+		providerProxy.activatePrompt(request, state.agentConfiguration.MaxTurns, now) != nil {
 		state.prompt = nil
 		delete(state.operations, request.Metadata.OperationID)
 		s.mu.Unlock()
@@ -135,7 +162,7 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 		)
 		return
 	}
-	if mcpProxy == nil || mcpProxy.activate(request.MCPAuthorization, request.Lease, now) != nil {
+	if mcpProxy == nil || mcpProxy.activate(r.Context(), request.MCPAuthorization, request.Lease, now) != nil {
 		deactivatePromptCapabilities(state, request.Metadata.PromptID, harnessv2.RuntimeSessionStateCancelling)
 		state.prompt = nil
 		delete(state.operations, request.Metadata.OperationID)
@@ -152,9 +179,9 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 	defer stopRequestGate()
 	s.mu.Unlock()
 
-	run, err := runtimeSession.StartPromptWithLease(
+	run, err := runtimeSession.StartPromptWithLeaseDeadline(
 		r.Context(), string(request.Metadata.PromptID), string(request.Metadata.RequestDigest),
-		content, request.Lease.ExpiresAt.Sub(now),
+		content, request.Lease.ExpiresAt,
 	)
 	if err != nil {
 		deactivatePromptCapabilities(state, request.Metadata.PromptID, harnessv2.RuntimeSessionStateCancelling)
@@ -171,6 +198,7 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 	first, ok := <-run.Events
 	if !ok {
 		result := providerTurnLimitResult(state, prompt, <-run.Result)
+		result = s.settleRemoteProvider(state, prompt, result)
 		s.finishPrompt(state, prompt, result, time.Now().UTC())
 		if result.Accepted {
 			writeError(
@@ -268,6 +296,12 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 				events = nil
 				continue
 			}
+			if run.Release != nil {
+				run.Release(event)
+			}
+			if withholdAgentDiagnostic(state, prompt, event) {
+				continue
+			}
 			for _, ready := range compactor.push(event, time.Now()) {
 				mapAndEncode(ready)
 			}
@@ -287,9 +321,37 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 			"rpcService", rpcService,
 			"rpcErrorName", rpcErrorName,
 			"accepted", result.Accepted,
+			"resultOutcome", string(result.Outcome),
+			"resultStopReason", string(result.StopReason),
+			"errorType", fmt.Sprintf("%T", result.Err),
+			// Credential-redacted before bounding (a truncation could cut a
+			// credential ahead of the text its recognizer needs), then
+			// bounded: the text is the ACP transport/client diagnostic.
+			"errorDetail", redactedPromptErrorDetail(result.Err),
 		)
 	}
-	deactivatePromptCapabilities(state, request.Metadata.PromptID, harnessv2.RuntimeSessionStateCancelling)
+	// The ACP child can settle its turn while the provider proxy is still
+	// relaying the final bytes of the last inference response. A 2xx is only
+	// accounted once its body has been relayed, so let in-flight proxy
+	// requests drain (bounded) before revoking the prompt's capabilities;
+	// otherwise the upstream-failure classification could read a snapshot
+	// with an earlier failure and no success yet, and turn a successfully
+	// retried prompt into provider_upstream_error.
+	// Capabilities close before the drain: a settled child must not start
+	// MCP/tool side effects or launch further inference calls while the
+	// last provider relay finishes. Only the provider proxy's deactivation
+	// waits, and only for responses that were already admitted.
+	if state.mcpProxy != nil {
+		state.mcpProxy.deactivate(request.Metadata.PromptID, harnessv2.RuntimeSessionStateCancelling)
+	}
+	if state.providerProxy != nil {
+		state.providerProxy.closeAdmission(string(request.Metadata.PromptID))
+	}
+	s.waitProviderProxyDrained(state, prompt)
+	result = s.settleRemoteProvider(state, prompt, result)
+	if state.providerProxy != nil {
+		state.providerProxy.deactivate(string(request.Metadata.PromptID))
+	}
 	terminal, settledResult, terminalErr := s.terminalEvent(state, prompt, result)
 	if settledResult.Outcome == acp.PromptOutcomeFailed {
 		outcome, stopReason := promptTerminalDiagnostic(settledResult)
@@ -320,6 +382,33 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 	<-s.promptSlots
 }
 
+func promptContainsE2EWriteAmbiguityMarker(input harnessv2.PromptInput, marker string) bool {
+	if marker == "" {
+		return false
+	}
+	for _, block := range input.Content {
+		if block.Type == harnessv2.ContentBlockText && strings.Contains(block.Text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// consumeE2EPromptWriteAmbiguityLocked injects the test fault once for each
+// operation. A retry of the same HTTP mutation must proceed to the provider so
+// live conformance detects it through the provider request count. The caller
+// must hold s.mu.
+func (s *Server) consumeE2EPromptWriteAmbiguityLocked(
+	ctx context.Context,
+	request harnessv2.StartPromptRequest,
+	marker string,
+) (bool, error) {
+	if !promptContainsE2EWriteAmbiguityMarker(request.Input, marker) {
+		return false, nil
+	}
+	return s.consumeE2EPromptWriteFaultLocked(ctx, request.Metadata)
+}
+
 func promptTerminalDiagnostic(result acp.PromptResult) (string, string) {
 	const promptDiagnosticOther = "Other"
 
@@ -337,6 +426,26 @@ func promptTerminalDiagnostic(result acp.PromptResult) (string, string) {
 		stopReason = ""
 	}
 	return outcome, stopReason
+}
+
+// redactedPromptErrorDetail removes control and format runes before redacting
+// the complete error text and bounding it for a log field. Dropping every
+// separator reassembles credentials split across lines or tabs so the
+// redactor can recognize the complete value.
+func redactedPromptErrorDetail(err error) string {
+	if err == nil {
+		return ""
+	}
+	cleaned := strings.Map(func(r rune) rune {
+		switch {
+		case unicode.IsControl(r):
+			return -1
+		case unicode.Is(unicode.Cf, r):
+			return -1
+		}
+		return r
+	}, strings.ToValidUTF8(err.Error(), ""))
+	return promptStreamErrorDetail(errors.New(redact.SensitiveText(cleaned)))
 }
 
 func promptStreamErrorDetail(err error) string {
@@ -456,6 +565,8 @@ func promptExecutionDiagnostic(err error) (string, int, string, string) {
 		return promptExecutionStageJSONRPCError, rpcErr.Code, "", ""
 	case errors.Is(err, acp.ErrClosed):
 		return "transport-closed", 0, "", ""
+	case errors.Is(err, acp.ErrPromptEventBufferOverflow):
+		return "event-buffer-overflow", 0, "", ""
 	case errors.Is(err, context.DeadlineExceeded):
 		return "deadline-exceeded", 0, "", ""
 	case errors.Is(err, context.Canceled):
@@ -480,6 +591,7 @@ func promptExecutionDiagnosticIdentifier(value string) string {
 	return value
 }
 
+//nolint:gocyclo // Lease renewal validates every session, operation, and expiry fence before mutation.
 func (s *Server) handleRenewLease(w http.ResponseWriter, r *http.Request) {
 	var request harnessv2.RenewPromptLeaseRequest
 	if !s.decodeAuthenticatedJSON(w, r, &request) {
@@ -494,6 +606,8 @@ func (s *Server) handleRenewLease(w http.ResponseWriter, r *http.Request) {
 	if !pathMatchesPrompt(r, request.Metadata) || !s.authorizeMutation(w, r, request.Metadata, true) {
 		return
 	}
+	r, span := s.traceOperation(r, request.Metadata, "prompt.lease")
+	defer span.End()
 	s.mu.Lock()
 	state := s.sessions[harnessv2.RuntimeSessionID(r.PathValue("sessionID"))]
 	if state == nil {
@@ -548,14 +662,83 @@ func (s *Server) handleRenewLease(w http.ResponseWriter, r *http.Request) {
 	runtimeSession := state.runtime
 	providerProxy := state.providerProxy
 	mcpProxy := state.mcpProxy
-	if err := runtimeSession.RenewPromptLeaseFor(string(request.Metadata.PromptID), request.Lease.ExpiresAt.Sub(now)); err != nil {
+	prompt := state.prompt
+	if providerProxy != nil && providerProxy.foundry != nil {
+		// A remote renewal can block on network I/O. Revalidate the exact
+		// session, prompt, and operation after reacquiring the mutex.
 		s.mu.Unlock()
+		renewCtx, renewCancel := context.WithTimeout(r.Context(), 10*time.Second)
+		remoteErr := providerProxy.foundry.renew(renewCtx, string(request.Metadata.PromptID), request.Lease)
+		renewCancel()
+		s.mu.Lock()
+		if s.sessions[state.id] != state || state.prompt != prompt || prompt.settlement != nil {
+			s.mu.Unlock()
+			s.containRejectedRemoteRenewal(state, prompt)
+			writeError(w, http.StatusGone, harnessv2.ErrorCodeSettled, "prompt settled during remote lease renewal", nil, false)
+			return
+		}
+		if remoteErr != nil {
+			s.mu.Unlock()
+			s.containRejectedRemoteRenewal(state, prompt)
+			writeError(w, http.StatusGone, harnessv2.ErrorCodeSettled, "remote provider lease renewal could not be proven", nil, false)
+			return
+		}
+		now = time.Now().UTC()
+		classification, err = harnessv2.ClassifyOperation(
+			s.expectedFence(state.descriptor.RuntimeSessionUID, state.descriptor.Generation), request.Metadata,
+			sessionOperationPtrLocked(state, request.Metadata.OperationID, now), true, now,
+		)
+		if err != nil || classification.Class != harnessv2.RequestClassificationFresh {
+			replay := state.operationReplays[request.Metadata.OperationID]
+			applied := err == nil && classification.Class == harnessv2.RequestClassificationDuplicate &&
+				replay != nil && replay.lease != nil && replay.lease.Lease == request.Lease
+			s.mu.Unlock()
+			if applied {
+				writeLeaseOperationReplay(w, r, replay, classification)
+			} else if err != nil {
+				s.containRejectedRemoteRenewal(state, prompt)
+				writeError(w, http.StatusConflict, harnessv2.ErrorCodeStaleFence, "remote lease renewal operation is stale", nil, false)
+			} else {
+				s.containRejectedRemoteRenewal(state, prompt)
+				writeClassificationError(w, classification)
+			}
+			return
+		}
+		if err := harnessv2.ValidatePromptLeaseRenewal(prompt.lease, request.Lease, request.ExpectedLeaseGeneration, now, maxLease); err != nil {
+			s.mu.Unlock()
+			s.containRejectedRemoteRenewal(state, prompt)
+			writeError(w, http.StatusConflict, harnessv2.ErrorCodeStaleFence, "remote lease renewal is stale", nil, false)
+			return
+		}
+	}
+	if err := runtimeSession.RenewPromptLeaseUntil(string(request.Metadata.PromptID), request.Lease.ExpiresAt); err != nil {
+		s.mu.Unlock()
+		if providerProxy != nil && providerProxy.foundry != nil {
+			s.containRejectedRemoteRenewal(state, prompt)
+		}
 		writeError(w, http.StatusGone, harnessv2.ErrorCodeSettled, safeError(err), nil, false)
 		return
 	}
-	if providerProxy == nil || mcpProxy == nil ||
-		providerProxy.renew(string(request.Metadata.PromptID), request.Lease.ExpiresAt, now) != nil ||
-		mcpProxy.renew(request.MCPAuthorization, request.Lease, now) != nil {
+	var providerRenewErr, mcpRenewErr error
+	if providerProxy != nil {
+		providerRenewErr = providerProxy.renew(string(request.Metadata.PromptID), request.Lease.ExpiresAt, now)
+	}
+	if mcpProxy != nil && providerRenewErr == nil {
+		mcpRenewErr = mcpProxy.renew(request.MCPAuthorization, request.Lease, now)
+	}
+	if providerProxy == nil || mcpProxy == nil || providerRenewErr != nil || mcpRenewErr != nil {
+		// The renewal is rejected fail-closed and the prompt is cancelled;
+		// record which capability refused so a cancelled prompt can be
+		// traced to its cause. Both messages are supervisor-generated.
+		slog.Error(
+			"ACP prompt lease renewal rejected; cancelling the prompt",
+			"promptID", request.Metadata.PromptID,
+			"leaseGeneration", request.Lease.Generation,
+			"providerProxyPresent", providerProxy != nil,
+			"mcpProxyPresent", mcpProxy != nil,
+			"providerRenewError", errorString(providerRenewErr),
+			"mcpRenewError", errorString(mcpRenewErr),
+		)
 		if providerProxy != nil {
 			providerProxy.revoke()
 		}
@@ -563,9 +746,13 @@ func (s *Server) handleRenewLease(w http.ResponseWriter, r *http.Request) {
 			mcpProxy.revoke(harnessv2.RuntimeSessionStateCancelling)
 		}
 		s.mu.Unlock()
-		cancelCtx, cancel := context.WithTimeout(context.Background(), defaultDuration(s.cfg.CancelGrace, acp.DefaultStopGrace)*2)
-		defer cancel()
-		_, _ = runtimeSession.CancelPrompt(cancelCtx, string(request.Metadata.PromptID))
+		if providerProxy != nil && providerProxy.foundry != nil {
+			s.containRejectedRemoteRenewal(state, prompt)
+		} else {
+			cancelCtx, cancel := context.WithTimeout(context.Background(), defaultDuration(s.cfg.CancelGrace, acp.DefaultStopGrace)*2)
+			defer cancel()
+			_, _ = runtimeSession.CancelPrompt(cancelCtx, string(request.Metadata.PromptID))
+		}
 		writeError(w, http.StatusGone, harnessv2.ErrorCodeSettled, "prompt provider lease is no longer active", nil, false)
 		return
 	}
@@ -585,6 +772,79 @@ func (s *Server) handleRenewLease(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, response)
 }
 
+// A broker renewal may have committed even when its acknowledgement is lost or
+// local validation fails. Close this exact prompt before rejecting the renewal;
+// local cancellation alone cannot prove that remote authority ended.
+func (s *Server) containRejectedRemoteRenewal(state *sessionState, prompt *promptState) {
+	s.mu.Lock()
+	if prompt.settlement != nil {
+		// Normal settlement already required the same broker proof, or recorded
+		// OutcomeUnknown. A late renewal must not disturb a continuation.
+		s.mu.Unlock()
+		return
+	}
+	remote := state.providerProxy.foundry
+	remote.mu.Lock()
+	remotePrompt := remote.prompt
+	matches := remotePrompt != nil && remotePrompt.metadata == prompt.request.Metadata
+	remote.mu.Unlock()
+	remoteErr := errFoundryCleanupUnproven
+	if matches {
+		// The supervisor lock prevents a new prompt from replacing this broker
+		// owner while its settlement operation is captured.
+		remotePrompt, remoteErr = remote.startSettlement(string(prompt.request.Metadata.PromptID))
+	}
+	current := state.prompt == prompt
+	mutations := state.promptMutations
+	if current {
+		deactivatePromptCapabilities(state, prompt.request.Metadata.PromptID, harnessv2.RuntimeSessionStateCancelling)
+	}
+	s.mu.Unlock()
+
+	result := acp.PromptResult{Outcome: acp.PromptOutcomeOutcomeUnknown, Accepted: true, Err: errFoundryCleanupUnproven, SettledAt: time.Now().UTC()}
+	if current && mutations != nil {
+		cancelCtx, cancel := context.WithTimeout(context.Background(), defaultDuration(s.cfg.CancelGrace, acp.DefaultStopGrace)*2)
+		cancelled, cancelErr := mutations.CancelPrompt(cancelCtx, string(prompt.request.Metadata.PromptID))
+		cancel()
+		if cancelled.Outcome != "" {
+			result = cancelled
+		} else if cancelErr != nil {
+			result.Err = cancelErr
+		}
+	}
+	if remoteErr == nil {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), foundryCleanupTimeout)
+		remoteErr = waitRejectedRenewalSettlement(cleanupCtx, remote, remotePrompt)
+		cancel()
+	}
+	s.mu.Lock()
+	if remoteErr != nil {
+		prompt.remoteSettlementUnproven = true
+	}
+	result = remoteSettlementFailureResult(prompt, result)
+	s.mu.Unlock()
+	s.finishPrompt(state, prompt, result, time.Now().UTC())
+}
+
+// Wait on the captured prompt, not the session's current prompt. A successfully
+// settled turn may be replaced while this compensation is joining cancellation.
+func waitRejectedRenewalSettlement(ctx context.Context, remote *foundryBrokerSession, prompt *foundryBrokerPrompt) error {
+	remote.mu.Lock()
+	done, proven := prompt.settleDone, prompt.settlementProven
+	remote.mu.Unlock()
+	if proven {
+		return nil
+	}
+	select {
+	case <-ctx.Done():
+		return errFoundryCleanupUnproven
+	case <-done:
+		remote.mu.Lock()
+		defer remote.mu.Unlock()
+		return prompt.settleErr
+	}
+}
+
 func (s *Server) handleResolvePermission(w http.ResponseWriter, r *http.Request) {
 	var request harnessv2.ResolvePermissionRequest
 	if !s.decodeAuthenticatedJSON(w, r, &request) {
@@ -598,6 +858,8 @@ func (s *Server) handleResolvePermission(w http.ResponseWriter, r *http.Request)
 	if !pathMatchesPermission(r, request) || !s.authorizeMutation(w, r, request.Metadata, true) {
 		return
 	}
+	r, span := s.traceOperation(r, request.Metadata, "prompt.permission")
+	defer span.End()
 	s.mu.Lock()
 	state := s.sessions[harnessv2.RuntimeSessionID(r.PathValue("sessionID"))]
 	if state == nil || state.prompt == nil || state.prompt.settlement != nil {
@@ -637,25 +899,20 @@ func (s *Server) handleResolvePermission(w http.ResponseWriter, r *http.Request)
 	}
 
 	outcome := acp.CancelledPermissionOutcome()
-	var approval *harnessv2.MCPApprovalEvidence
 	if request.Decision.Outcome == harnessv2.PermissionDecisionSelected {
 		outcome = acp.SelectedPermissionOutcome(request.Decision.OptionID)
 		optionKind := permission.options[request.Decision.OptionID]
 		if optionKind == harnessv2.PermissionOptionAllowOnce || optionKind == harnessv2.PermissionOptionAllowAlways {
-			if state.mcpProxy == nil {
+			if state.mcpProxy == nil || !permission.expiresAt.After(now) {
 				s.mu.Unlock()
-				writeError(w, http.StatusForbidden, harnessv2.ErrorCodeForbidden, "permission cannot authorize an MCP tool", nil, false)
+				writeError(w, http.StatusForbidden, harnessv2.ErrorCodeForbidden, "permission has no prompt tool authority", nil, false)
 				return
 			}
-			toolName, resolveErr := state.mcpProxy.resolveApprovalToolName(permission.toolName, permission.title)
-			if resolveErr != nil {
+			resolveErr := state.mcpProxy.authorizePermissionTool(state.profile.ProviderKind, request.Metadata.PromptID, permission.toolName, now)
+			if resolveErr != nil || optionKind != harnessv2.PermissionOptionAllowOnce {
 				s.mu.Unlock()
-				writeError(w, http.StatusForbidden, harnessv2.ErrorCodeForbidden, "permission cannot authorize an MCP tool", nil, false)
+				writeError(w, http.StatusForbidden, harnessv2.ErrorCodeForbidden, "permission cannot authorize the tool", nil, false)
 				return
-			}
-			approval = &harnessv2.MCPApprovalEvidence{
-				PermissionRequestID: request.RequestID, ToolCallID: permission.toolCallID, ToolName: toolName,
-				GrantedAt: now, ExpiresAt: permission.expiresAt, Reusable: optionKind == harnessv2.PermissionOptionAllowAlways,
 			}
 		}
 	}
@@ -669,14 +926,6 @@ func (s *Server) handleResolvePermission(w http.ResponseWriter, r *http.Request)
 		s.completeOperationFailure(replay, failure)
 		writeError(w, failure.status, failure.code, failure.message, nil, failure.retryable)
 		return
-	}
-	if approval != nil {
-		if err := mcpProxy.grantApproval(request.Metadata.PromptID, *approval); err != nil {
-			failure := operationFailure{status: http.StatusForbidden, code: harnessv2.ErrorCodeForbidden, message: "permission cannot authorize an MCP tool"}
-			s.completeOperationFailure(replay, failure)
-			writeError(w, failure.status, failure.code, failure.message, nil, failure.retryable)
-			return
-		}
 	}
 	if err := mutations.ResolvePermission(string(request.Metadata.PromptID), string(request.RequestID), outcome); err != nil {
 		if mcpProxy != nil {
@@ -715,11 +964,12 @@ func (s *Server) handleCancelPrompt(w http.ResponseWriter, r *http.Request) {
 	if !pathMatchesPrompt(r, request.Metadata) || !s.authorizeMutation(w, r, request.Metadata, true) {
 		return
 	}
+	r, span := s.traceOperation(r, request.Metadata, "prompt.cancel")
+	defer span.End()
 	s.mu.Lock()
 	state := s.sessions[harnessv2.RuntimeSessionID(r.PathValue("sessionID"))]
 	if state == nil {
-		s.mu.Unlock()
-		writeError(w, http.StatusGone, harnessv2.ErrorCodeSettled, "prompt is not active", nil, false)
+		s.cancelRetiredPromptLocked(w, r, request, now)
 		return
 	}
 	classification, err := harnessv2.ClassifyOperation(
@@ -743,6 +993,7 @@ func (s *Server) handleCancelPrompt(w http.ResponseWriter, r *http.Request) {
 	}
 	if state.prompt == nil {
 		s.mu.Unlock()
+		slog.Info("ACP prompt cancellation rejected: no active prompt", "promptID", request.Metadata.PromptID, "reason", request.Reason)
 		writeError(w, http.StatusGone, harnessv2.ErrorCodeSettled, "prompt is not active", nil, false)
 		return
 	}
@@ -758,6 +1009,7 @@ func (s *Server) handleCancelPrompt(w http.ResponseWriter, r *http.Request) {
 	}
 	invalidated := uint32(len(state.permissions))
 	replay := reserveOperationReplayLocked(state, request.Metadata, now)
+	replay.isCancellation = true
 	mutations := state.promptMutations
 	providerProxy := state.providerProxy
 	mcpProxy := state.mcpProxy
@@ -778,16 +1030,19 @@ func (s *Server) handleCancelPrompt(w http.ResponseWriter, r *http.Request) {
 	if cancelErr != nil && result.Outcome == "" {
 		result = acp.PromptResult{Outcome: acp.PromptOutcomeOutcomeUnknown, Accepted: true, Err: cancelErr, SettledAt: time.Now().UTC()}
 	}
+	result = s.settleRemoteProviderWithContext(cancelCtx, state, prompt, result)
+	if cancelErr != nil || result.Outcome == acp.PromptOutcomeOutcomeUnknown {
+		slog.Warn("ACP prompt cancellation did not settle cleanly",
+			"promptID", request.Metadata.PromptID, "reason", request.Reason, "outcome", result.Outcome,
+			"errorClass", promptStreamErrorClass(cancelErr), "deadlineExceeded", errors.Is(cancelErr, context.DeadlineExceeded))
+	}
 	settlement := settlementFromResult(result, time.Now().UTC())
 	forced := cancelErr != nil && result.Outcome == acp.PromptOutcomeOutcomeUnknown
 
 	s.mu.Lock()
-	settlement = settlePromptLocked(prompt, settlement)
+	settlement = recordPromptSettlementLocked(state, prompt, settlement)
 	if settlement.TerminalEvent != harnessv2.EventOutcomeUnknown {
 		forced = false
-	}
-	if state.prompt == prompt {
-		state.permissions = make(map[harnessv2.PermissionRequestID]permissionState)
 	}
 	recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseSettled, settlement.TerminalEvent, settlement.SettledAt)
 	response := cancellationResponse(harnessv2.Classification{Class: harnessv2.RequestClassificationFresh}, settlement, invalidated, forced)
@@ -907,6 +1162,8 @@ func (s *Server) handleFinalizeSessionPublication(w http.ResponseWriter, r *http
 	if !s.authorizeMutation(w, r, request.Metadata, true) {
 		return
 	}
+	r, span := s.traceOperation(r, request.Metadata, "session.finalize")
+	defer span.End()
 	sessionID := harnessv2.RuntimeSessionID(r.PathValue("sessionID"))
 	s.mu.Lock()
 	state := s.sessions[sessionID]
@@ -915,9 +1172,9 @@ func (s *Server) handleFinalizeSessionPublication(w http.ResponseWriter, r *http
 		writeError(w, http.StatusNotFound, harnessv2.ErrorCodeInvalidRequest, "runtime session not found", nil, false)
 		return
 	}
-	if err := s.validateSessionFence(state, request.Metadata); err != nil {
+	if mismatch := s.sessionFenceMismatch(state, request.Metadata); mismatch != harnessv2.FenceMatch {
 		s.mu.Unlock()
-		writeError(w, http.StatusGone, harnessv2.ErrorCodeStaleFence, err.Error(), nil, false)
+		writeClassificationError(w, harnessv2.Classification{Class: harnessv2.RequestClassificationStaleFence, FenceMismatch: mismatch})
 		return
 	}
 	classification, err := harnessv2.ClassifyOperation(
@@ -1038,6 +1295,8 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeMutation(w, r, request.Metadata, true) {
 		return
 	}
+	r, span := s.traceOperation(r, request.Metadata, "session.delete")
+	defer span.End()
 	sessionID := harnessv2.RuntimeSessionID(r.PathValue("sessionID"))
 	s.mu.Lock()
 	state := s.sessions[sessionID]
@@ -1049,7 +1308,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, harnessv2.ErrorCodeInvalidRequest, "runtime session not found", nil, false)
 			return
 		}
-		record := tombstoneOperation(tombstone, request.Metadata.OperationID)
+		record := tombstoneOperation(tombstone.RuntimeSessionTombstone, request.Metadata.OperationID)
 		if record == nil {
 			s.mu.Unlock()
 			writeError(w, http.StatusNotFound, harnessv2.ErrorCodeInvalidRequest, "runtime session not found", nil, false)
@@ -1068,13 +1327,13 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, harnessv2.DeleteRuntimeSessionResponse{
-			Protocol: harnessv2.ProtocolVersion, Classification: classification, State: harnessv2.RuntimeSessionStateDeleted, Tombstone: tombstone,
+			Protocol: harnessv2.ProtocolVersion, Classification: classification, State: harnessv2.RuntimeSessionStateDeleted, Tombstone: tombstone.RuntimeSessionTombstone,
 		})
 		return
 	}
-	if err := s.validateSessionFence(state, request.Metadata); err != nil {
+	if mismatch := s.sessionFenceMismatch(state, request.Metadata); mismatch != harnessv2.FenceMatch {
 		s.mu.Unlock()
-		writeError(w, http.StatusGone, harnessv2.ErrorCodeStaleFence, err.Error(), nil, false)
+		writeClassificationError(w, harnessv2.Classification{Class: harnessv2.RequestClassificationStaleFence, FenceMismatch: mismatch})
 		return
 	}
 	if state.descriptor.State == harnessv2.RuntimeSessionStateDeleting {
@@ -1140,7 +1399,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "runtime descendant cleanup could not be proven", nil, false)
 		return
 	}
-	if err := acp.ReclaimSessionOwnership(state.paths.Root); err != nil {
+	if err := reclaimStoppedSessionOwnership(state.paths); err != nil {
 		slog.Error("ACP runtime session deletion failed", "stage", "ownership reclaim")
 		s.poisonPool("session_root_ownership_reclaim_unproven")
 		s.mu.Lock()
@@ -1168,22 +1427,11 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	deletedAt := time.Now().UTC()
 	s.mu.Lock()
 	recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseDeleted, "", deletedAt)
-	pruneSessionOperationsLocked(state, deletedAt)
-	operations := make([]harnessv2.OperationRecord, 0, len(state.operations))
-	for _, operation := range state.operations {
-		operations = append(operations, operation)
-	}
-	tombstone := harnessv2.RuntimeSessionTombstone{
-		RuntimeSessionUID: state.descriptor.RuntimeSessionUID, RuntimeSessionGeneration: state.descriptor.Generation,
-		RuntimeProfileDigest: state.descriptor.RuntimeProfileDigest, DeletedAt: deletedAt, Operations: operations,
-	}
-	delete(s.sessions, sessionID)
-	s.pruneTombstonesLocked(deletedAt)
-	s.tombstones[tombstone.RuntimeSessionUID] = tombstone
+	tombstone := s.tombstoneSessionLocked(state, deletedAt)
 	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, harnessv2.DeleteRuntimeSessionResponse{
 		Protocol: harnessv2.ProtocolVersion, Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh},
-		State: harnessv2.RuntimeSessionStateDeleted, Tombstone: tombstone,
+		State: harnessv2.RuntimeSessionStateDeleted, Tombstone: tombstone.RuntimeSessionTombstone,
 	})
 }
 
@@ -1255,6 +1503,46 @@ func tombstoneOperation(tombstone harnessv2.RuntimeSessionTombstone, operationID
 		}
 	}
 	return nil
+}
+
+// boundedWorkspaceValidationMessage carries the workspace delta build failure
+// back to the controller in a bounded form so live diagnostics name the real
+// cause instead of a generic validation error.
+// boundedWorkspaceValidationMessage returns a categorized diagnostic for a
+// workspace delta build failure. Workspace paths and raw OS error strings are
+// agent-controlled (a file can be named after a credential) and the returned
+// message is forwarded into controller structured logs, so it carries only
+// the failing operation and the safety category - never the path or the
+// underlying error text.
+func boundedWorkspaceValidationMessage(buildErr error) string {
+	const message = "workspace validation failed"
+	if buildErr == nil {
+		return message
+	}
+	category := ""
+	for _, sentinel := range []error{
+		workspacedelta.ErrInvalidRoot, workspacedelta.ErrInvalidBaseline, workspacedelta.ErrPathTraversal,
+		workspacedelta.ErrReservedPath, workspacedelta.ErrExcludedPathModified, workspacedelta.ErrUnsafeFileType,
+		workspacedelta.ErrHardlinkAmbiguous, workspacedelta.ErrUnsafeSymlink, workspacedelta.ErrLimitExceeded,
+		workspacedelta.ErrUnsupportedFilesystem,
+	} {
+		if errors.Is(buildErr, sentinel) {
+			category = sentinel.Error()
+			break
+		}
+	}
+	if pathErr, ok := errors.AsType[*workspacedelta.PathError](buildErr); ok {
+		if category == "" {
+			category = "unsafe workspace entry"
+		}
+		if pathErr.Op != "" {
+			return message + ": " + pathErr.Op + ": " + category
+		}
+	}
+	if category != "" {
+		return message + ": " + category
+	}
+	return message
 }
 
 func workspaceDeltaChangedPaths(result workspacedelta.Result) []string {
@@ -1348,15 +1636,6 @@ func workspaceDeltaRepositoryControlPath(changedPath string) bool {
 		(strings.HasPrefix(lower, "charts/") && strings.Contains(lower, "secret"))
 }
 
-func buildWorkspaceDelta(
-	baseline *workspacedelta.Snapshot,
-	workspace string,
-	intent workspacedelta.Intent,
-	limits harnessv2.WorkspaceDeltaLimits,
-) (workspacedelta.Result, error) {
-	return buildWorkspaceDeltaContext(context.Background(), baseline, workspace, intent, limits)
-}
-
 func buildWorkspaceDeltaContext(
 	ctx context.Context,
 	baseline *workspacedelta.Snapshot,
@@ -1373,11 +1652,67 @@ func buildWorkspaceDeltaContext(
 	)
 }
 
-func workspaceDeltaContentPolicyViolation(artifact []byte, limits harnessv2.WorkspaceDeltaLimits) (string, error) {
-	return workspaceDeltaContentPolicyViolationContext(context.Background(), artifact, limits)
+// baselineCaptureOptions returns the delta options for trusted baseline
+// captures. The ContentFlagger records which baseline files already carry
+// secret-like content before any agent execution, so the delta content policy
+// can exempt pre-existing repository content (a vulnerable app's hardcoded
+// demo credential) while still rejecting secrets a prompt introduced.
+func (s *Server) baselineCaptureOptions() workspacedelta.Options {
+	options := s.cfg.DeltaOptions
+	options.ContentFlagger = func(content []byte) bool {
+		return security.LooksLikeSecret(string(content))
+	}
+	options.ContentFingerprinter = func(content []byte) []string {
+		return security.SecretLikeLineDigests(string(content))
+	}
+	return options
 }
 
-func workspaceDeltaContentPolicyViolationContext(ctx context.Context, artifact []byte, limits harnessv2.WorkspaceDeltaLimits) (string, error) {
+// workspaceDeltaBaselineExempts reports whether the secret-like content of
+// the changed file at path is entirely pre-existing. Every secret-like line
+// must match a baseline fingerprint (as a multiset) that covers the line's
+// code block together with the previous and next code blocks and every
+// blank or comment-only line in between — the only places an expression
+// continuation could still reach the credential — and once
+// those known lines are removed nothing secret-like may remain. Appending,
+// replacing, continuing, or relocating a credential is rejected, and so is
+// any edit in the neighbouring code blocks (fail closed); an untouched demo
+// credential with edits elsewhere in the file stays publishable.
+func workspaceDeltaBaselineExempts(baseline *workspacedelta.Snapshot, changedPath string, content []byte) bool {
+	if baseline == nil || !baseline.BaselineContentFlagged(changedPath) {
+		return false
+	}
+	// Fingerprints are a multiset: a known block copied to a second place in
+	// the file reproduces its digest but exceeds the baseline count, which
+	// rejects the relocated credential.
+	budget := map[string]int{}
+	for _, digest := range baseline.BaselineContentFingerprints(changedPath) {
+		budget[digest]++
+	}
+	if len(budget) == 0 {
+		return false
+	}
+	text := string(content)
+	for _, digest := range security.SecretLikeLineDigests(text) {
+		if budget[digest] == 0 {
+			return false
+		}
+		budget[digest]--
+	}
+	known := make(map[string]struct{}, len(budget))
+	for digest := range budget {
+		known[digest] = struct{}{}
+	}
+	return !security.LooksLikeSecret(security.StripLinesByDigest(text, known))
+}
+
+// workspaceDeltaContentPolicyViolationContext scans the delta artifact for
+// policy violations. baselineExempts, when non-nil, reports whether the
+// secret-like content of the named workspace-relative file is entirely
+// pre-existing in the trusted pre-prompt baseline (see
+// workspaceDeltaBaselineExempts); only then is the file exempt from the
+// secret-like rejection.
+func workspaceDeltaContentPolicyViolationContext(ctx context.Context, artifact []byte, limits harnessv2.WorkspaceDeltaLimits, baselineExempts func(changedPath string, content []byte) bool) (string, error) {
 	if len(artifact) == 0 || (!limits.RejectBinaryFiles && !limits.RejectSecretLikeContent) {
 		return "", nil
 	}
@@ -1411,13 +1746,27 @@ func workspaceDeltaContentPolicyViolationContext(ctx context.Context, artifact [
 		if int64(len(content)) != header.Size {
 			return "", fmt.Errorf("workspace delta file content is incomplete")
 		}
+		// Paths are agent-controlled too. Redact and bound them even when
+		// only the binary-file policy is enabled.
 		if fileContent && limits.RejectBinaryFiles && (bytes.IndexByte(content, 0) >= 0 || !utf8.Valid(content)) {
-			return "workspace delta contains binary file content", nil
+			return "workspace delta contains binary file content: " + workspaceDeltaDiagnosticPath(header.Name), nil
 		}
 		if limits.RejectSecretLikeContent && security.LooksLikeSecret(string(content)) {
-			return "workspace delta contains secret-like file content", nil
+			changedPath := strings.TrimPrefix(header.Name, "files/")
+			if fileContent && baselineExempts != nil && baselineExempts(changedPath, content) {
+				continue
+			}
+			return "workspace delta contains secret-like file content: " + workspaceDeltaDiagnosticPath(header.Name), nil
 		}
 	}
+}
+
+func workspaceDeltaDiagnosticPath(name string) string {
+	value := redactedPromptErrorDetail(errors.New(strings.TrimPrefix(name, "files/")))
+	if security.LooksLikeSecret(value) {
+		return "[REDACTED]"
+	}
+	return value
 }
 
 type workspaceDeltaContextReader struct {
@@ -1469,6 +1818,8 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeMutation(w, r, request.Metadata, true) {
 		return
 	}
+	r, span := s.traceOperation(r, request.Metadata, "workspace.delta")
+	defer span.End()
 	sessionID := harnessv2.RuntimeSessionID(r.PathValue("sessionID"))
 	s.mu.Lock()
 	state := s.sessions[sessionID]
@@ -1477,9 +1828,9 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "runtime session not found", nil, false)
 		return
 	}
-	if err := s.validateSessionFence(state, request.Metadata); err != nil {
+	if mismatch := s.sessionFenceMismatch(state, request.Metadata); mismatch != harnessv2.FenceMatch {
 		s.mu.Unlock()
-		writeError(w, http.StatusGone, harnessv2.ErrorCodeStaleFence, err.Error(), nil, false)
+		writeClassificationError(w, harnessv2.Classification{Class: harnessv2.RequestClassificationStaleFence, FenceMismatch: mismatch})
 		return
 	}
 	classification, err := harnessv2.ClassifyOperation(s.expectedFence(state.descriptor.RuntimeSessionUID, state.descriptor.Generation), request.Metadata, sessionOperationPtrLocked(state, request.Metadata.OperationID, now), true, now)
@@ -1547,71 +1898,87 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 		intent = workspacedelta.IntentWrite
 	}
 	uid, gid := runtimeSession.ChildIdentity()
-	if err := acp.ReclaimSessionOwnership(paths.Root); err != nil {
-		slog.Error("ACP workspace validation failed", "stage", "ownership reclaim")
-		s.poisonSession(state, "workspace ownership reclaim failed")
-		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "workspace ownership reclaim failed", nil, false)
-		return
+	// A durable workspace lives outside the session root, so the reclaim and
+	// restore below must cover it independently or the supervisor (which has
+	// no DAC_OVERRIDE) cannot read the child-owned tree it is validating.
+	ownershipRoots := []string{paths.Root}
+	if sessionWorkspaceOutsideRoot(paths) {
+		ownershipRoots = append(ownershipRoots, paths.Workspace)
+	}
+	for _, root := range ownershipRoots {
+		if err := acp.ReclaimSessionOwnership(root); err != nil {
+			slog.Error("ACP workspace validation failed", "stage", "ownership reclaim")
+			s.poisonSession(state, "workspace ownership reclaim failed")
+			writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "workspace ownership reclaim failed", nil, false)
+			return
+		}
 	}
 	result, buildErr := buildWorkspaceDeltaContext(r.Context(), baseline, paths.Workspace, intent, request.Limits)
-	if err := acp.FinalizeSessionOwnership(paths.Root, uid, gid); err != nil {
-		slog.Error("ACP workspace validation failed", "stage", "ownership restore")
-		s.poisonSession(state, "workspace ownership restore failed")
-		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "workspace ownership restore failed", nil, false)
-		return
+	for _, root := range ownershipRoots {
+		if err := acp.FinalizeSessionOwnership(root, uid, gid); err != nil {
+			slog.Error("ACP workspace validation failed", "stage", "ownership restore")
+			s.poisonSession(state, "workspace ownership restore failed")
+			writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "workspace ownership restore failed", nil, false)
+			return
+		}
 	}
 	if buildErr != nil {
 		slog.Error("ACP workspace validation failed", "stage", "delta construction")
 		if errors.Is(buildErr, workspacedelta.ErrLimitExceeded) {
-			s.poisonSession(state, "workspace delta exceeds request limits")
-			writeError(w, http.StatusRequestEntityTooLarge, harnessv2.ErrorCodeSessionPoisoned, "workspace delta exceeds request limits", nil, false)
+			s.rejectWorkspaceDeltaLimit(w, state)
 			return
 		}
 		s.poisonSession(state, "workspace validation failed")
-		writeError(w, http.StatusUnprocessableEntity, harnessv2.ErrorCodeSessionPoisoned, "workspace validation failed", nil, false)
+		// Return only the categorized diagnostic. The raw build error may
+		// contain an agent-controlled path or OS error text.
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned,
+			boundedWorkspaceValidationMessage(buildErr), nil, false)
 		return
 	}
 	entryCount := len(result.Changes) + len(result.Deletions)
 	changedPaths := workspaceDeltaChangedPaths(result)
 	if request.Limits.MaxChangedFiles > 0 && len(changedPaths) > int(request.Limits.MaxChangedFiles) {
 		s.poisonSession(state, "workspace delta exceeds changed-file limit")
-		writeError(w, http.StatusUnprocessableEntity, harnessv2.ErrorCodeSessionPoisoned, "workspace delta exceeds changed-file limit", nil, false)
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "workspace delta exceeds changed-file limit", nil, false)
 		return
 	}
 	for _, changedPath := range changedPaths {
 		if !workspaceDeltaPathAllowed(changedPath, request.Limits.AllowedPaths) {
 			s.poisonSession(state, "workspace delta contains a disallowed path")
-			writeError(w, http.StatusUnprocessableEntity, harnessv2.ErrorCodeSessionPoisoned, "workspace delta contains a disallowed path", nil, false)
+			writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "workspace delta contains a disallowed path", nil, false)
 			return
 		}
 		if request.Limits.DenyRepositoryControlPaths && workspaceDeltaRepositoryControlPathForWorkspace(state.workspaceRelativeRoot, changedPath) {
 			s.poisonSession(state, "workspace delta contains a protected repository-control path")
-			writeError(w, http.StatusUnprocessableEntity, harnessv2.ErrorCodeSessionPoisoned, "workspace delta contains a protected repository-control path", nil, false)
+			writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "workspace delta contains a protected repository-control path", nil, false)
 			return
 		}
 	}
 	if request.Limits.RejectSecretLikeContent && security.LooksLikeSecret(strings.Join(changedPaths, "\n")) {
 		s.poisonSession(state, "workspace delta path looks secret-like")
-		writeError(w, http.StatusUnprocessableEntity, harnessv2.ErrorCodeSessionPoisoned, "workspace delta path looks secret-like", nil, false)
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "workspace delta path looks secret-like", nil, false)
 		return
 	}
-	if violation, policyErr := workspaceDeltaContentPolicyViolationContext(r.Context(), result.Artifact, request.Limits); policyErr != nil {
+	// Check exact prompt-scoped credentials before content policy builds a
+	// diagnostic containing an agent-controlled file path.
+	if workspaceDeltaContainsSessionCredential(result.Artifact, state) {
+		s.poisonSession(state, "workspace delta contains a session credential")
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "workspace delta contains a session credential", nil, false)
+		return
+	}
+	if violation, policyErr := workspaceDeltaContentPolicyViolationContext(r.Context(), result.Artifact, request.Limits, func(changedPath string, content []byte) bool {
+		return workspaceDeltaBaselineExempts(state.baseline, changedPath, content)
+	}); policyErr != nil {
 		s.poisonSession(state, "workspace delta content policy could not be verified")
-		writeError(w, http.StatusUnprocessableEntity, harnessv2.ErrorCodeSessionPoisoned, "workspace delta content policy could not be verified", nil, false)
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "workspace delta content policy could not be verified", nil, false)
 		return
 	} else if violation != "" {
 		s.poisonSession(state, violation)
-		writeError(w, http.StatusUnprocessableEntity, harnessv2.ErrorCodeSessionPoisoned, violation, nil, false)
-		return
-	}
-	if workspaceDeltaContainsSessionCredential(result.Artifact, state) {
-		s.poisonSession(state, "workspace delta contains a session credential")
-		writeError(w, http.StatusUnprocessableEntity, harnessv2.ErrorCodeSessionPoisoned, "workspace delta contains a session credential", nil, false)
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, violation, nil, false)
 		return
 	}
 	if entryCount > int(request.Limits.MaxEntries) || int64(len(result.Artifact)) > request.Limits.MaxBytes {
-		s.poisonSession(state, "workspace delta exceeds request limits")
-		writeError(w, http.StatusRequestEntityTooLarge, harnessv2.ErrorCodeSessionPoisoned, "workspace delta exceeds request limits", nil, false)
+		s.rejectWorkspaceDeltaLimit(w, state)
 		return
 	}
 	descriptor := harnessv2.WorkspaceDeltaDescriptor{
@@ -1695,6 +2062,11 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) rejectWorkspaceDeltaLimit(w http.ResponseWriter, state *sessionState) {
+	s.poisonSession(state, "workspace delta exceeds request limits")
+	writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "workspace delta exceeds request limits", nil, false)
+}
+
 func (s *Server) poisonSession(state *sessionState, _ string) {
 	if state.providerProxy != nil {
 		state.providerProxy.revoke()
@@ -1727,11 +2099,18 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 		}
 		prompt.acceptedAt = event.Timestamp
 		prompt.operation = operationRecord(prompt.request.Metadata, harnessv2.OperationPhaseAccepted, "", event.Timestamp)
-		recordSessionOperationLocked(state, prompt.request.Metadata, harnessv2.OperationPhaseAccepted, "", event.Timestamp)
+		recordPromptAdmissionLocked(state, prompt)
 		state.descriptor.State = harnessv2.RuntimeSessionStatePromptRunning
 		state.descriptor.LastTransitionAt = event.Timestamp
 		return &harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventAccepted, Identity: identity, Accepted: &harnessv2.AcceptedEvent{AcceptedAt: event.Timestamp, Lease: prompt.lease, ACPVersion: harnessv2.ACPProfileV1}}, nil
 	case acp.PromptEventUpdate:
+		var toolPolicy harnessv2.MCPToolPolicy
+		if state.mcpProxy != nil {
+			toolPolicy = state.mcpProxy.configuration.ToolPolicy
+		}
+		if err := prompt.rememberToolCallName(event.Update, state.profile.ProviderKind, toolPolicy); err != nil {
+			return nil, err
+		}
 		update, text, ok, err := mapACPUpdate(event.Update)
 		if err != nil {
 			prompt.sequence--
@@ -1753,9 +2132,18 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 		}
 		return mapped, nil
 	case acp.PromptEventPermissionRequested:
-		permission, err := mapPermission(event.Permission, event.Timestamp, defaultDuration(s.cfg.PermissionTimeout, acp.DefaultPermissionTimeout))
+		permission, err := mapPermission(event.Permission, event.Timestamp, defaultDuration(s.cfg.PermissionTimeout, acp.DefaultPermissionTimeout), state.profile.ProviderKind)
 		if err != nil {
 			return nil, err
+		}
+		if name, known := prompt.toolCallNames[permission.ToolCallID]; known {
+			if permission.ToolName != "" && permission.ToolName != name {
+				return nil, fmt.Errorf("ACP permission does not match the recorded tool identity")
+			}
+			permission.ToolName = name
+		}
+		if state.mcpProxy != nil {
+			permission.ToolName = canonicalPermissionToolName(state.profile.ProviderKind, state.mcpProxy.configuration.ToolPolicy, permission.ToolName)
 		}
 		if prompt.permissionRequestIDs == nil {
 			prompt.permissionRequestIDs = make(map[harnessv2.PermissionRequestID]struct{})
@@ -1797,6 +2185,20 @@ func (s *Server) terminalEvent(
 		effective = promptResultFromSettlement(*prompt.settlement)
 	} else {
 		effective = providerTurnLimitResult(state, prompt, effective)
+		// Drain-timeout is checked before recorded upstream failures: when a
+		// later-issued request never resolved, blaming an earlier recorded
+		// failure as "the final request" would be a false diagnosis — the
+		// actually-final request's outcome is unknown.
+		effective = providerDrainFailureResult(prompt, effective)
+		effective = providerUpstreamFailureResult(state, prompt, effective)
+		effective = remoteSettlementFailureResult(prompt, effective)
+		// The durable settlement is derived from the same result the Failed
+		// event is built from: a failed result that still carries the child's
+		// end_turn or cancelled stop reason would otherwise settle as
+		// Completed or Cancelled while the controller received Failed.
+		if effective.Outcome == acp.PromptOutcomeFailed {
+			effective.StopReason = acp.StopReason(failedEventStopReason(effective.StopReason))
+		}
 	}
 	now := effective.SettledAt
 	if now.IsZero() {
@@ -1806,7 +2208,7 @@ func (s *Server) terminalEvent(
 	event := s.buildTerminalEventLocked(state, prompt, effective, now)
 	limit := s.cfg.Capabilities.Limits.MaxTerminalResultBytes
 	_, overflow := prompt.terminalResultText()
-	if !overflow && serializedEventWithinLimit(event, limit) {
+	if (!overflow || effective.Outcome != acp.PromptOutcomeCompleted) && serializedEventWithinLimit(event, limit) {
 		return event, effective, nil
 	}
 
@@ -1867,9 +2269,20 @@ func (s *Server) buildTerminalEventLocked(
 		if result.StopReason == acp.StopReasonMaxTurnRequests {
 			code = "turn_limit"
 			message = "ACP prompt exceeded maximum provider inference requests"
+		} else if upstreamFailure, ok := errors.AsType[*providerUpstreamFailureError](result.Err); ok {
+			code = providerUpstreamErrorCode
+			message = promptStreamErrorDetail(upstreamFailure)
+		} else if drainFailure, ok := errors.AsType[*providerDrainTimeoutError](result.Err); ok {
+			code = providerUpstreamErrorCode
+			message = drainFailure.Error()
+		} else if detail := promptFailureErrorDetail(result.Err); detail != "" {
+			// Keep the generic code but carry the agent's own error text
+			// (JSON-RPC error message and service/errorName data) so a
+			// provider or session failure is diagnosable from Task status.
+			message = "ACP prompt failed: " + detail
 		}
 		event.Failed = &harnessv2.FailedEvent{
-			StopReason: harnessv2.ACPStopReason(result.StopReason),
+			StopReason: failedEventStopReason(result.StopReason),
 			Code:       code,
 			Message:    message,
 			Retryable:  false,
@@ -1916,6 +2329,117 @@ func providerTurnLimitResult(state *sessionState, prompt *promptState, result ac
 	return result
 }
 
+// providerUpstreamErrorCode is the terminal Failed event code for a prompt whose
+// final inference request failed upstream.
+const providerUpstreamErrorCode = "provider_upstream_error"
+
+// providerUpstreamFailureError records that the final provider inference request
+// made during a prompt failed upstream, even though the ACP agent reported the
+// provider error as ordinary assistant text and ended its turn.
+type providerUpstreamFailureError struct {
+	Status int
+	Detail string
+}
+
+func (e providerUpstreamFailureError) Error() string {
+	message := fmt.Sprintf("provider upstream returned HTTP %d for the final inference request", e.Status)
+	if detail := sanitizeProviderUpstreamDetail(e.Detail); detail != "" {
+		message += ": " + detail
+	}
+	return message
+}
+
+// providerDrainTimeoutError records that an admitted inference request was
+// still unresolved when the child settled and did not finish within the
+// cancel grace, so the prompt's final inference outcome is unknown.
+type providerDrainTimeoutError struct{}
+
+func (providerDrainTimeoutError) Error() string {
+	return "a provider inference request was still in flight when the prompt settled and did not complete within the cancel grace"
+}
+
+// providerDrainFailureResult converts a Completed prompt whose inference
+// accounting is incomplete (an in-flight request never resolved) into a
+// Failed settlement: a successful Task must rest on accounted evidence, and
+// an unresolved request could still be a final failure that a child-reported
+// end_turn would otherwise mask.
+func providerDrainFailureResult(prompt *promptState, result acp.PromptResult) acp.PromptResult {
+	if prompt == nil || !prompt.providerDrainTimedOut || result.Outcome != acp.PromptOutcomeCompleted {
+		return result
+	}
+	slog.Error("ACP prompt settled as failed: an inference request did not drain before settlement", "promptID", string(prompt.request.Metadata.PromptID))
+	result.Outcome = acp.PromptOutcomeFailed
+	result.StopReason = acp.StopReasonRefusal
+	result.Accepted = true
+	result.Err = &providerDrainTimeoutError{}
+	return result
+}
+
+// providerUpstreamFailureResult converts a Completed prompt whose final
+// inference request failed upstream into a Failed settlement so a provider
+// quota or outage never surfaces as a successful Task result, even when an
+// earlier inference round in the same prompt succeeded.
+func providerUpstreamFailureResult(state *sessionState, prompt *promptState, result acp.PromptResult) acp.PromptResult {
+	if state == nil || prompt == nil || state.providerProxy == nil || result.Outcome != acp.PromptOutcomeCompleted {
+		return result
+	}
+	promptID := string(prompt.request.Metadata.PromptID)
+	failed, status, detail := state.providerProxy.upstreamFailureUnrecovered(promptID)
+	if !failed {
+		return result
+	}
+	slog.Error(
+		"ACP prompt settled as failed: the final provider inference request failed upstream",
+		"promptID", promptID, "upstreamStatus", status,
+	)
+	result.Outcome = acp.PromptOutcomeFailed
+	result.StopReason = acp.StopReasonRefusal
+	result.Accepted = true
+	result.Err = &providerUpstreamFailureError{Status: status, Detail: detail}
+	return result
+}
+
+// promptFailureErrorDetail renders a bounded, low-cardinality description of
+// the error that failed a prompt. Free-text error messages are never copied:
+// the ACP child (and the provider behind it) can echo credentials or private
+// routes into them, and the terminal event is persisted and projected onto
+// Task status. Only the validated JSON-RPC code plus the identifier-shaped
+// service/errorName data the agent attached, or the supervisor's own
+// classification stage, are exposed.
+func promptFailureErrorDetail(err error) string {
+	if err == nil {
+		return ""
+	}
+	stage, rpcCode, service, errorName := promptExecutionDiagnostic(err)
+	if stage != promptExecutionStageJSONRPCError {
+		return stage
+	}
+	detail := fmt.Sprintf("json-rpc error %d", rpcCode)
+	switch {
+	case service != "" && errorName != "":
+		detail += " " + service + "/" + errorName
+	case errorName != "":
+		detail += " " + errorName
+	case service != "":
+		detail += " " + service
+	}
+	return detail
+}
+
+// failedEventStopReason maps a failed prompt's ACP stop reason onto one the
+// harness v2 Failed event accepts. An agent that errors while reporting
+// end_turn or cancelled (for example a provider error surfaced after the
+// child was interrupted) would otherwise produce a malformed terminal event,
+// break the prompt stream, and leave the Task with an unknown settlement.
+func failedEventStopReason(reason acp.StopReason) harnessv2.ACPStopReason {
+	switch reason {
+	case acp.StopReasonEndTurn, acp.StopReasonCancelled:
+		return harnessv2.ACPStopReasonRefusal
+	default:
+		return harnessv2.ACPStopReason(reason)
+	}
+}
+
 func serializedEventWithinLimit(event harnessv2.Event, limit int) bool {
 	encoded, err := json.Marshal(event)
 	return err == nil && len(encoded) <= limit
@@ -1944,16 +2468,9 @@ func promptResultFromSettlement(settlement harnessv2.PromptSettlement) acp.Promp
 func (s *Server) finishPrompt(state *sessionState, prompt *promptState, result acp.PromptResult, settledAt time.Time) {
 	settlement := settlementFromResult(result, settledAt)
 	s.mu.Lock()
-	settlement = settlePromptLocked(prompt, settlement)
-	recordSessionOperationLocked(state, prompt.request.Metadata, harnessv2.OperationPhaseSettled, settlement.TerminalEvent, settlement.SettledAt)
-	state.permissions = make(map[harnessv2.PermissionRequestID]permissionState)
-	next := harnessv2.RuntimeSessionStatePoisoned
-	if settlement.TerminalEvent == harnessv2.EventCompleted {
-		next = harnessv2.RuntimeSessionStateValidating
-	}
-	state.descriptor.State = next
-	state.descriptor.LastTransitionAt = settlement.SettledAt
-	sessionCleanup := settlement.TerminalEvent != harnessv2.EventCompleted && !state.drainCleanupScheduled
+	settlement = recordPromptSettlementLocked(state, prompt, settlement)
+	next := state.descriptor.State
+	sessionCleanup := state.prompt == prompt && settlement.TerminalEvent != harnessv2.EventCompleted && !state.drainCleanupScheduled
 	if sessionCleanup {
 		state.drainCleanupScheduled = true
 	}
@@ -1962,6 +2479,60 @@ func (s *Server) finishPrompt(state *sessionState, prompt *promptState, result a
 	if sessionCleanup {
 		go s.cleanupDrainedSession(state.id, state)
 	}
+}
+
+// recordPromptSettlementLocked publishes settlement and session state together.
+// Cancellation can settle while the original HTTP stream is still flushing;
+// its finisher must not restore an earlier phase or affect a continuation.
+// The caller must hold s.mu.
+func recordPromptSettlementLocked(state *sessionState, prompt *promptState, settlement harnessv2.PromptSettlement) harnessv2.PromptSettlement {
+	wasSettled := prompt.settlement != nil
+	settlement = settlePromptLocked(prompt, settlement)
+	recordPromptAdmissionLocked(state, prompt)
+	if state.prompt != prompt {
+		return settlement
+	}
+	state.permissions = make(map[harnessv2.PermissionRequestID]permissionState)
+	switch state.descriptor.State {
+	case harnessv2.RuntimeSessionStateIdle:
+		if wasSettled {
+			// Workspace validation already made this session reusable.
+			return settlement
+		}
+	case harnessv2.RuntimeSessionStatePromptRunning, harnessv2.RuntimeSessionStateCancelling:
+	default:
+		return settlement
+	}
+	state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
+	if settlement.TerminalEvent == harnessv2.EventCompleted {
+		state.descriptor.State = harnessv2.RuntimeSessionStateValidating
+	}
+	state.descriptor.LastTransitionAt = settlement.SettledAt
+	return settlement
+}
+
+// recordPromptAdmissionLocked retains metadata, never the prompt stream, for
+// exact duplicate admissions. The operation journal bounds its retention even
+// after a later prompt replaces state.prompt. The caller must hold s.mu.
+func recordPromptAdmissionLocked(state *sessionState, prompt *promptState) {
+	response := harnessv2.PromptAdmissionResponse{
+		Protocol: harnessv2.ProtocolVersion, AcceptedAt: prompt.acceptedAt,
+		Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationAlreadyAccepted, Phase: harnessv2.OperationPhaseAccepted},
+	}
+	at := prompt.acceptedAt
+	if prompt.settlement != nil {
+		settlement := *prompt.settlement
+		response.Settlement = &settlement
+		response.Classification = harnessv2.Classification{
+			Class: harnessv2.RequestClassificationSettled, Phase: harnessv2.OperationPhaseSettled, TerminalEvent: settlement.TerminalEvent,
+		}
+		at = settlement.SettledAt
+	}
+	recordSessionOperationLocked(state, prompt.request.Metadata, response.Classification.Phase, response.Classification.TerminalEvent, at)
+	if state.operationReplays == nil {
+		state.operationReplays = make(map[harnessv2.OperationID]*operationReplay)
+	}
+	state.operationReplays[prompt.request.Metadata.OperationID] = &operationReplay{admission: &response}
 }
 
 func settlePromptLocked(prompt *promptState, settlement harnessv2.PromptSettlement) harnessv2.PromptSettlement {
@@ -1976,15 +2547,80 @@ func settlePromptLocked(prompt *promptState, settlement harnessv2.PromptSettleme
 	return settlement
 }
 
+// waitProviderProxyDrained waits, bounded by the cancel grace, for the
+// session's in-flight *inference* requests to finish so their outcomes are
+// accounted before the terminal result is classified. An inference request
+// that does not finish in time leaves the accounting incomplete: the prompt
+// is marked so a child-reported Completed result settles fail-closed instead
+// of trusting evidence that never arrived. Metadata requests (model listings,
+// token counting) never feed classification and are not waited on: a stalled
+// GET /models must not convert a completed prompt into a provider failure.
+func (s *Server) waitProviderProxyDrained(state *sessionState, prompt *promptState) {
+	if state == nil || state.providerProxy == nil {
+		return
+	}
+	waitCtx, cancel := context.WithTimeout(context.Background(), defaultDuration(s.cfg.CancelGrace, acp.DefaultStopGrace))
+	defer cancel()
+	if err := state.providerProxy.waitInference(waitCtx); err != nil {
+		slog.Warn("ACP provider proxy did not drain before prompt settlement; settling fail-closed", "errorClass", promptStreamErrorClass(err))
+		if prompt != nil {
+			s.mu.Lock()
+			prompt.providerDrainTimedOut = true
+			s.mu.Unlock()
+		}
+	}
+}
+
+func (s *Server) settleRemoteProvider(state *sessionState, prompt *promptState, result acp.PromptResult) acp.PromptResult {
+	if state == nil || state.providerProxy == nil || state.providerProxy.foundry == nil {
+		return result
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), foundryCleanupTimeout)
+	defer cancel()
+	return s.settleRemoteProviderWithContext(ctx, state, prompt, result)
+}
+
+func (s *Server) settleRemoteProviderWithContext(ctx context.Context, state *sessionState, prompt *promptState, result acp.PromptResult) acp.PromptResult {
+	if state == nil || prompt == nil || state.providerProxy == nil || state.providerProxy.foundry == nil {
+		return result
+	}
+	if err := state.providerProxy.foundry.settle(ctx, string(prompt.request.Metadata.PromptID)); err != nil {
+		s.mu.Lock()
+		prompt.remoteSettlementUnproven = true
+		s.mu.Unlock()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return remoteSettlementFailureResult(prompt, result)
+}
+
+func remoteSettlementFailureResult(prompt *promptState, result acp.PromptResult) acp.PromptResult {
+	if prompt == nil || !prompt.remoteSettlementUnproven {
+		return result
+	}
+	result.Outcome = acp.PromptOutcomeOutcomeUnknown
+	result.Accepted = true
+	result.StopReason = ""
+	result.Err = errFoundryCleanupUnproven
+	return result
+}
+
 func deactivatePromptCapabilities(state *sessionState, promptID harnessv2.PromptID, next harnessv2.RuntimeSessionState) {
 	if state == nil {
 		return
 	}
+	var cause *promptGateCancellation
+	if next == harnessv2.RuntimeSessionStateCancelling && state.runtime != nil {
+		runtime := state.runtime
+		cause = &promptGateCancellation{wait: func(ctx context.Context) {
+			_ = runtime.WaitPromptSettlement(ctx, string(promptID))
+		}}
+	}
 	if state.providerProxy != nil {
-		state.providerProxy.deactivate(string(promptID))
+		state.providerProxy.deactivateWithCause(string(promptID), cause)
 	}
 	if state.mcpProxy != nil {
-		state.mcpProxy.deactivate(promptID, next)
+		state.mcpProxy.deactivateWithCause(promptID, next, cause)
 	}
 }
 
@@ -2022,12 +2658,8 @@ func cancellationResponse(classification harnessv2.Classification, settlement ha
 	}
 }
 
-func (s *Server) validateSessionFence(state *sessionState, metadata harnessv2.MutationMetadata) error {
-	mismatch := harnessv2.CompareFence(s.expectedFence(state.descriptor.RuntimeSessionUID, state.descriptor.Generation), metadata.Fence, true)
-	if mismatch != harnessv2.FenceMatch {
-		return fmt.Errorf("stale runtime fence: %s", mismatch)
-	}
-	return nil
+func (s *Server) sessionFenceMismatch(state *sessionState, metadata harnessv2.MutationMetadata) harnessv2.FenceMismatch {
+	return harnessv2.CompareFence(s.expectedFence(state.descriptor.RuntimeSessionUID, state.descriptor.Generation), metadata.Fence, true)
 }
 
 func eventIdentity(base harnessv2.Fence, descriptor harnessv2.RuntimeSessionDescriptor, metadata harnessv2.MutationMetadata, sequence uint64, at time.Time) harnessv2.EventIdentity {
@@ -2056,4 +2688,32 @@ func pathMatchesPrompt(r *http.Request, metadata harnessv2.MutationMetadata) boo
 
 func pathMatchesPermission(r *http.Request, request harnessv2.ResolvePermissionRequest) bool {
 	return pathMatchesPrompt(r, request.Metadata) && r.PathValue("requestID") == string(request.RequestID)
+}
+
+// sessionWorkspaceOutsideRoot reports whether the session's repository
+// workspace lives outside the ephemeral session root, as it does when a
+// durable workspace directory hosts it on the provider data volume.
+func sessionWorkspaceOutsideRoot(paths acp.SessionPaths) bool {
+	root := strings.TrimSuffix(paths.Root, "/")
+	return paths.Workspace != root && !strings.HasPrefix(paths.Workspace, root+"/")
+}
+
+// reclaimStoppedSessionOwnership runs only after descendant termination is
+// proven. Durable data survives session deletion, but must return to the
+// supervisor identity so the provider can checkpoint and clean up its tree.
+func reclaimStoppedSessionOwnership(paths acp.SessionPaths) error {
+	if err := acp.ReclaimSessionOwnership(paths.Root); err != nil {
+		return err
+	}
+	if sessionWorkspaceOutsideRoot(paths) {
+		return acp.ReclaimSessionOwnership(paths.Workspace)
+	}
+	return nil
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }

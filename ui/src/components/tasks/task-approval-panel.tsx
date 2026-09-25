@@ -10,6 +10,7 @@ import { useTaskApprovals, useDecideApproval } from '@/hooks/use-execution-event
 import { ApiError } from '@/lib/api-client'
 import type { Approval } from '@/schemas/execution-event'
 import type { TaskPhase } from '@/schemas/task'
+import { formatTimestamp } from '@/lib/time'
 
 function statusStyle(status: string): { className: string; live: boolean; label: string } {
   switch (status) {
@@ -39,13 +40,6 @@ function ApprovalStatusBadge({ status }: { status: string }) {
       {label}
     </Badge>
   )
-}
-
-function formatTimestamp(ts?: string): string {
-  if (!ts) return ''
-  const d = new Date(ts)
-  if (Number.isNaN(d.getTime())) return ts
-  return d.toLocaleString(undefined, { hour12: false })
 }
 
 function ApprovalCard({
@@ -112,18 +106,38 @@ function ApprovalCard({
           <span className="ml-auto font-mono text-xs text-muted-foreground">{approval.id}</span>
         </div>
 
-        {approval.riskSummary && (
+        {/* Request guidance can describe an unexecuted tool; after a decision,
+            the execution outcome below describes its current state. */}
+        {isPending && approval.riskSummary && (
           <p className="break-words text-sm text-muted-foreground">{approval.riskSummary}</p>
+        )}
+
+        {approval.targetArgsPreview !== undefined && (
+          <div className="space-y-1 text-xs">
+            <p className="font-medium">Proposed inputs{approval.targetTool ? ` for ${approval.targetTool}` : ''}</p>
+            <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted p-3 font-mono">
+              {JSON.stringify(approval.targetArgsPreview, null, 2)}
+            </pre>
+            <p className="text-muted-foreground">Sensitive values are hidden. Approval applies to this exact call.</p>
+          </div>
+        )}
+
+        {approval.executionOutcome && (
+          <div className={`rounded-md px-3 py-2 text-xs ${approval.executionOutcome === 'unknown' ? 'bg-status-pending-bg text-status-pending' : 'bg-muted'}`}>
+            <p>Execution: {approval.executionOutcome.replace(/_/g, ' ')}</p>
+            {approval.executionReason && <p className="mt-1 break-words">{approval.executionReason}</p>}
+            {approval.executionOutcome === 'unknown' && <p className="mt-1">The action may have run. Check its outcome before trying again.</p>}
+          </div>
         )}
 
         <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
           {approval.createdAt && (
-            <span>Requested <span className="tabular-nums">{formatTimestamp(approval.createdAt)}</span></span>
+            <span>Requested <span className="tabular-nums">{formatTimestamp(approval.createdAt, { empty: '', hour12: false })}</span></span>
           )}
           {approval.expiresAt && (
             <span className="inline-flex items-center gap-1">
               <Clock className="h-3 w-3" aria-hidden="true" />
-              Expires <span className="tabular-nums">{formatTimestamp(approval.expiresAt)}</span>
+              Expires <span className="tabular-nums">{formatTimestamp(approval.expiresAt, { empty: '', hour12: false })}</span>
             </span>
           )}
           {approval.timeout && <span>Timeout {approval.timeout}</span>}
@@ -133,7 +147,7 @@ function ApprovalCard({
         {!isPending && (approval.decisionActor || approval.decisionReason || approval.decisionTime) && (
           <div className="rounded-md bg-muted px-3 py-2 text-xs">
             {approval.decisionActor && <div>Decided by <span className="font-medium">{approval.decisionActor}</span></div>}
-            {approval.decisionTime && <div className="tabular-nums text-muted-foreground">{formatTimestamp(approval.decisionTime)}</div>}
+            {approval.decisionTime && <div className="tabular-nums text-muted-foreground">{formatTimestamp(approval.decisionTime, { empty: '', hour12: false })}</div>}
             {approval.decisionReason && <div className="mt-1 break-words">{approval.decisionReason}</div>}
           </div>
         )}
@@ -188,12 +202,9 @@ function ApprovalCard({
 }
 
 export function TaskApprovalPanel({ taskId, taskPhase, taskUid }: { taskId: string; taskPhase?: TaskPhase; taskUid?: string }) {
-  // Poll while approvals are pending or the task is still running, so a live
-  // ApprovalRequested surfaces even if the panel opened before any existed.
+  // Poll for new approvals while active and unresolved execution after termination.
   const taskRunning = taskPhase === 'Running' || taskPhase === 'Pending'
-  // The backend rejects decisions on terminal tasks, so their pending approvals
-  // render read-only — and polling them is pointless since no event will flip
-  // their status. Gate both on taskTerminal.
+  // Terminal tasks reject decisions, but recovery can still update their approvals.
   const taskTerminal = taskPhase === 'Succeeded' || taskPhase === 'Failed' || taskPhase === 'Cancelled'
   const { data, isLoading, error, refetch } = useTaskApprovals(taskId, true, 5000, taskRunning, taskTerminal, taskUid)
   const approvals = data?.approvals ?? []

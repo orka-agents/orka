@@ -9,9 +9,10 @@ import { TranscriptViewer } from './transcript-viewer'
 import { SessionEventTimeline } from './session-event-timeline'
 import { SessionExecutionRouteLedger } from '@/components/execution/execution-route-ledger'
 import { useSession, useDeleteSession } from '@/hooks/use-sessions'
+import { isForbiddenError } from '@/lib/api-client'
 
 export function SessionDetail({ sessionId }: { sessionId: string }) {
-  const { data: session, isLoading } = useSession(sessionId)
+  const { data: session, isLoading, error } = useSession(sessionId)
   const deleteSession = useDeleteSession()
   const navigate = useNavigate()
 
@@ -20,6 +21,17 @@ export function SessionDetail({ sessionId }: { sessionId: string }) {
       <div className="space-y-4">
         <Skeleton className="h-8 w-64" />
         <Skeleton className="h-64 w-full" />
+      </div>
+    )
+  }
+
+  if (isForbiddenError(error)) {
+    return (
+      <div role="alert" className="space-y-1">
+        <p className="text-sm font-medium">Not authorized to view sessions</p>
+        <p className="text-sm text-muted-foreground">
+          Your token lacks <code>sessions</code> read permission ({error.message}).
+        </p>
       </div>
     )
   }

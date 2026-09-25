@@ -42,10 +42,11 @@ const (
 
 // Keep this to models that work through the OpenAI provider path; the live
 // catalog can include runtime-only GPT models rejected by the worker route.
+// Prefer the smaller model for routine live checks.
 var liveProxyOpenAIModelPreferences = []string{
+	"gpt-5-mini",
 	"gpt-5.5",
 	"gpt-5.2",
-	"gpt-5-mini",
 	"gpt-4.1",
 	"gpt-4.1-2025-04-14",
 	"gpt-4o",
@@ -121,26 +122,25 @@ var (
 		"gpt-",
 	}
 	liveCopilotProxyChatGPTModelPreferences = []string{
+		"gpt-5-mini",
 		"gpt-4o",
 		"gpt-4o-2024-11-20",
 		"gpt-4o-2024-08-06",
-		"gpt-5-mini",
 		"gpt-5.2",
 		"gpt-5.5",
 		"gpt-4.1",
 		"gpt-4.1-2025-04-14",
 	}
-	// Keep this order aligned with the CLI smoke preferences shipped by the
-	// pinned Vekil release so runtime tests do not select retired aliases that
-	// remain visible in the upstream model catalog.
+	// Prefer Haiku for routine live checks. Keep the larger-model fallbacks
+	// aligned with the pinned Vekil CLI smoke preferences to avoid retired aliases.
 	liveCopilotProxyClaudeModelPreferences = []string{
+		"claude-haiku-4.5",
 		"claude-sonnet-5",
 		"claude-opus-4.8",
 		"claude-opus-4.7",
 		"claude-opus-4.6",
 		"claude-sonnet-4.6",
 		"claude-sonnet-4.5",
-		"claude-haiku-4.5",
 		"claude-sonnet-4",
 	}
 	liveCopilotProxyClaudeModelPrefixes = []string{
@@ -264,7 +264,7 @@ func acpDeliveryOutcome(value corev1alpha1.TaskDeliveryOutcome) *corev1alpha1.Ta
 }
 
 // verifyACPTaskRuntimeForTask waits until an agent Task has been durably queued
-// for an ACP v2 RuntimePool and verifies the non-secret execution and delivery
+// for an Orka harness v2 RuntimePool and verifies the non-secret execution and delivery
 // projections. ACP Tasks never create one Kubernetes Job per prompt.
 func verifyACPTaskRuntimeForTask(taskName string, expected acpTaskExpectation, timeout time.Duration) {
 	Eventually(func(g Gomega) {

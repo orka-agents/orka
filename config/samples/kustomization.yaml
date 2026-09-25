@@ -19,5 +19,7 @@ resources:
 - workspace_v1alpha1_executionworkspace.yaml
 - fake.workspace_v1alpha1_fakeproviderconfig.yaml
 - fake.workspace_v1alpha1_fakepoolparameters.yaml
+- acp.workspace_v1alpha1_runtimeproviderconfig.yaml
+- acp.workspace_v1alpha1_runtimeworkspaceprofile.yaml
 
 # +kubebuilder:scaffold:manifestskustomizesamples

@@ -401,8 +401,10 @@ render_admission_webhooks() {
     ([.items[] | select(.kind == "ValidatingAdmissionPolicy")] | length) == 0 and
     ([.items[] | select(.kind == "ValidatingAdmissionPolicyBinding")] | length) == 0 and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration")] | length) == 1 and
-    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[]] | length) == 7 and
-    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[].name] | unique | length) == 7 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[]] | length) == 9 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[].name] | unique | length) == 9 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
+      select(.name == "namespaceexecutionmode.core.orka.ai")] | length) == 0 and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
       (.failurePolicy == "Fail" and
        .sideEffects == "None" and
@@ -410,8 +412,23 @@ render_admission_webhooks() {
        .clientConfig.service.name == "orka-admission" and
        .clientConfig.service.namespace == "orka-system" and
        (.clientConfig.service.path | type == "string" and length > 0))] | all)
+    and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
+      select(.name == "checkpointsourceuse.workspace.orka.ai" and
+             .clientConfig.service.path == "/validate-workspace-orka-ai-v1alpha1-checkpoint-source-use" and
+             .rules == [{"operations":["CREATE"],"apiGroups":["workspace.orka.ai"],"apiVersions":["v1alpha1"],"resources":["executionworkspacecheckpoints"],"scope":"Namespaced"}])] | length) == 1 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
+      select(.name == "workspaceattachmentsecret.core.orka.ai" and
+             .clientConfig.service.path == "/validate-v1-secret-workspace-attachment" and
+             .rules == [{"operations":["CREATE","UPDATE","DELETE"],"apiGroups":[""],"apiVersions":["v1"],"resources":["secrets"],"scope":"Namespaced"}] and
+             .objectSelector.matchExpressions == [{"key":"workspace.orka.ai/attachment-for","operator":"Exists"}])] | length) == 1 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
+      select(.name == "acpsuspendquotalease.core.orka.ai" and
+             .clientConfig.service.path == "/validate-coordination-k8s-io-v1-acp-suspend-quota-lease" and
+             .rules == [{"operations":["CREATE","UPDATE","DELETE"],"apiGroups":["coordination.k8s.io"],"apiVersions":["v1"],"resources":["leases"],"scope":"Namespaced"}] and
+             .matchConditions == [{"name":"reserved-acp-workspace-lease-name","expression":"request.?name.orValue(\u0027\u0027).startsWith(\u0027acp-suspend-quota-\u0027) || request.?name.orValue(\u0027\u0027).startsWith(\u0027acp-retention-fence-\u0027) || (request.operation == \u0027CREATE\u0027 && (object.metadata.?generateName.orValue(\u0027\u0027).startsWith(\u0027acp-suspend-quota-\u0027) || object.metadata.?generateName.orValue(\u0027\u0027).startsWith(\u0027acp-retention-fence-\u0027)))"}])] | length) == 1
   ' "${admission_webhooks_manifest}" >/dev/null || {
-    echo "admission wave must contain exactly seven unique, fail-closed, CA-pinned orka-admission webhooks and no legacy coexistence policies" >&2
+    echo "admission wave must contain exactly nine unique, fail-closed, CA-pinned orka-admission webhooks, including checkpoint source authorization, attachment Secret and ACP workspace coordination Lease protection, with namespace-mode claims enforced by the admission policy in the workload wave and no legacy coexistence policies" >&2
     return 1
   }
 }
@@ -510,14 +527,16 @@ smoke_admission_handlers() {
           requestKind: {group: $group, version: $version, kind: $kind},
           requestResource: {group: $group, version: $version, resource: $resource},
           name: "orka-admission-smoke",
-          namespace: (if $group == "" then "" else "orka-system" end),
+          namespace: (if $kind == "Namespace" then "" else "orka-system" end),
           operation: "CREATE",
           userInfo: {username: "system:admin", groups: ["system:masters"]},
           object: {
             apiVersion: (if $group == "" then $version else ($group + "/" + $version) end),
             kind: $kind,
             metadata: ({name: "orka-admission-smoke"} +
-              (if $group == "" then {labels: {"orka.ai/controller-mode": "harness-v2"}}
+              (if $kind == "Namespace" then {labels: {"orka.ai/controller-mode": "harness-v2"}}
+               elif $kind == "Secret" then
+                 {namespace: "orka-system", labels: {"workspace.orka.ai/attachment-for": "smoke-workspace-uid"}}
                else {namespace: "orka-system"} end))
           },
           oldObject: null,
@@ -547,10 +566,12 @@ smoke_admission_handlers() {
       return 1
     fi
   done <<'EOF_ADMISSION_HANDLERS'
-/validate-v1-namespace-execution-mode||v1|Namespace|namespaces
+/validate-v1-secret-workspace-attachment||v1|Secret|secrets
+/validate-coordination-k8s-io-v1-acp-suspend-quota-lease|coordination.k8s.io|v1|Lease|leases
 /validate-core-orka-ai-v1alpha1-task-provenance|core.orka.ai|v1alpha1|Task|tasks
 /validate-core-orka-ai-v1alpha1-task-workspace-class-use|core.orka.ai|v1alpha1|Task|tasks-workspace-class-use
 /validate-core-orka-ai-v1alpha1-tool-workspace-class-use|core.orka.ai|v1alpha1|Tool|tools
+/validate-workspace-orka-ai-v1alpha1-checkpoint-source-use|workspace.orka.ai|v1alpha1|ExecutionWorkspaceCheckpoint|executionworkspacecheckpoints
 /validate-core-orka-ai-v1alpha1-agent-contract|core.orka.ai|v1alpha1|Agent|agents
 /validate-core-orka-ai-v1alpha1-agentruntime-contract|core.orka.ai|v1alpha1|AgentRuntime|agentruntimes
 /validate-core-orka-ai-v1alpha1-task-execution-authority|core.orka.ai|v1alpha1|Task|tasks-execution-authority

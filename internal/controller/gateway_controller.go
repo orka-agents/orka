@@ -31,7 +31,7 @@ import (
 
 	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/agentruntimepolicy"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	gatewayconformance "github.com/orka-agents/orka/internal/gateway/conformance"
 	"github.com/orka-agents/orka/internal/gateway/protocol"
@@ -72,7 +72,7 @@ func (r *GatewayClassReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	now := metav1.Now()
 	object.Status.Accepted = accepted
 	object.Status.ObservedGeneration = object.Generation
-	object.Status.Message = sanitizeGatewayStatusMessage(message)
+	object.Status.Message = sanitizeStatusMessage(message)
 	setGatewayCondition(&object.Status.Conditions, "Accepted", accepted, "ValidationSucceeded", "ValidationFailed", object.Generation, object.Status.Message, now)
 	if err := r.Status().Update(ctx, object); err != nil {
 		return ctrl.Result{}, err
@@ -191,7 +191,7 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	object.Status.ObservedCapabilities = observed
 	object.Status.ObservedInboundAuthRefVersion = inboundVersion
 	object.Status.ObservedOutboundAuthRefVersion = outboundVersion
-	object.Status.Message = sanitizeGatewayStatusMessage(message)
+	object.Status.Message = sanitizeStatusMessage(message)
 	if ready {
 		object.Status.LastSuccessfulProbe = &now
 	}
@@ -221,18 +221,9 @@ func (r *GatewayReconciler) gatewaysForSecret(ctx context.Context, object client
 	if !ok {
 		return nil
 	}
-	list := &gatewayv1alpha1.GatewayList{}
-	if err := r.List(ctx, list, client.InNamespace(secret.Namespace)); err != nil {
-		return nil
-	}
-	requests := make([]reconcile.Request, 0)
-	for i := range list.Items {
-		item := &list.Items[i]
-		if item.Spec.InboundAuthRef.Name == secret.Name || item.Spec.OutboundAuthRef.Name == secret.Name {
-			requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(item)})
-		}
-	}
-	return requests
+	return r.gatewaysMatching(ctx, secret.Namespace, func(item *gatewayv1alpha1.Gateway) bool {
+		return item.Spec.InboundAuthRef.Name == secret.Name || item.Spec.OutboundAuthRef.Name == secret.Name
+	})
 }
 
 func (r *GatewayReconciler) gatewaysForService(ctx context.Context, object client.Object) []reconcile.Request {
@@ -240,18 +231,9 @@ func (r *GatewayReconciler) gatewaysForService(ctx context.Context, object clien
 	if !ok {
 		return nil
 	}
-	list := &gatewayv1alpha1.GatewayList{}
-	if err := r.List(ctx, list, client.InNamespace(service.Namespace)); err != nil {
-		return nil
-	}
-	requests := make([]reconcile.Request, 0)
-	for i := range list.Items {
-		item := &list.Items[i]
-		if item.Spec.Adapter.ServiceRef != nil && item.Spec.Adapter.ServiceRef.Name == service.Name {
-			requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(item)})
-		}
-	}
-	return requests
+	return r.gatewaysMatching(ctx, service.Namespace, func(item *gatewayv1alpha1.Gateway) bool {
+		return item.Spec.Adapter.ServiceRef != nil && item.Spec.Adapter.ServiceRef.Name == service.Name
+	})
 }
 
 func (r *GatewayReconciler) gatewaysForClass(ctx context.Context, object client.Object) []reconcile.Request {
@@ -259,14 +241,22 @@ func (r *GatewayReconciler) gatewaysForClass(ctx context.Context, object client.
 	if !ok {
 		return nil
 	}
+	return r.gatewaysMatching(ctx, "", func(item *gatewayv1alpha1.Gateway) bool {
+		return item.Spec.GatewayClassName == class.Name
+	})
+}
+
+// gatewaysMatching lists Gateways in namespace ("" for all namespaces) and
+// enqueues those accepted by matches.
+func (r *GatewayReconciler) gatewaysMatching(ctx context.Context, namespace string, matches func(*gatewayv1alpha1.Gateway) bool) []reconcile.Request {
 	list := &gatewayv1alpha1.GatewayList{}
-	if err := r.List(ctx, list); err != nil {
+	if err := r.List(ctx, list, client.InNamespace(namespace)); err != nil {
 		return nil
 	}
 	requests := make([]reconcile.Request, 0)
 	for i := range list.Items {
 		item := &list.Items[i]
-		if item.Spec.GatewayClassName == class.Name {
+		if matches(item) {
 			requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(item)})
 		}
 	}
@@ -284,6 +274,7 @@ type GatewayBindingReconciler struct {
 // +kubebuilder:rbac:groups=gateway.orka.ai,resources=gatewaybindings/finalizers,verbs=update
 // +kubebuilder:rbac:groups=gateway.orka.ai,resources=gateways,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agents,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core.orka.ai,resources=agentruntimes,verbs=get;list;watch
 
 // Reconcile validates one semantic GatewayBinding.
 func (r *GatewayBindingReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -322,7 +313,13 @@ func (r *GatewayBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 				resolved = true
 				copy := gatewayObject.Status.ObservedCapabilities.Capabilities
 				capabilities = &copy
-				if err := validateBindingCapabilities(object, copy); err != nil {
+				runtimeMessage, err := r.validateBindingAgentRuntimeDefaults(ctx, object, agent)
+				if err != nil {
+					return ctrl.Result{}, err
+				}
+				if runtimeMessage != "" {
+					message = runtimeMessage
+				} else if err := validateBindingCapabilities(object, copy); err != nil {
 					message = err.Error()
 				} else if conflict, err := r.findAmbiguousGatewayBinding(ctx, object, copy); err != nil {
 					return ctrl.Result{}, err
@@ -343,7 +340,7 @@ func (r *GatewayBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	object.Status.Ready = ready
 	object.Status.ObservedGeneration = object.Generation
 	object.Status.ResolvedCapabilities = capabilities
-	object.Status.Message = sanitizeGatewayStatusMessage(message)
+	object.Status.Message = sanitizeStatusMessage(message)
 	setGatewayCondition(&object.Status.Conditions, "Accepted", accepted, "ValidationSucceeded", "ValidationFailed", object.Generation, object.Status.Message, now)
 	setGatewayCondition(&object.Status.Conditions, "ResolvedRefs", resolved, "ReferencesResolved", "ReferencesNotResolved", object.Generation, object.Status.Message, now)
 	setGatewayCondition(&object.Status.Conditions, "Programmed", programmed, "Programmed", "AmbiguousOrUnsupported", object.Generation, object.Status.Message, now)
@@ -365,6 +362,7 @@ func (r *GatewayBindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		).
 		Watches(&gatewayv1alpha1.Gateway{}, handler.EnqueueRequestsFromMapFunc(r.bindingsForGateway)).
 		Watches(&corev1alpha1.Agent{}, handler.EnqueueRequestsFromMapFunc(r.bindingsForAgent)).
+		Watches(&corev1alpha1.AgentRuntime{}, handler.EnqueueRequestsFromMapFunc(r.bindingsForAgentRuntime)).
 		Named("gatewaybinding").
 		Complete(r)
 }
@@ -392,14 +390,40 @@ func (r *GatewayBindingReconciler) bindingsForAgent(ctx context.Context, object 
 	if !ok {
 		return nil
 	}
+	return r.bindingsForAgentNames(ctx, agent.Namespace, map[string]struct{}{agent.Name: {}})
+}
+
+func (r *GatewayBindingReconciler) bindingsForAgentRuntime(ctx context.Context, object client.Object) []reconcile.Request {
+	runtimeObject, ok := object.(*corev1alpha1.AgentRuntime)
+	if !ok {
+		return nil
+	}
+	agents := &corev1alpha1.AgentList{}
+	if err := r.List(ctx, agents, client.InNamespace(runtimeObject.Namespace)); err != nil {
+		return nil
+	}
+	names := make(map[string]struct{})
+	for i := range agents.Items {
+		agent := &agents.Items[i]
+		if agent.Spec.Runtime != nil && agent.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) == runtimeObject.Name {
+			names[agent.Name] = struct{}{}
+		}
+	}
+	return r.bindingsForAgentNames(ctx, runtimeObject.Namespace, names)
+}
+
+func (r *GatewayBindingReconciler) bindingsForAgentNames(ctx context.Context, namespace string, agentNames map[string]struct{}) []reconcile.Request {
+	if len(agentNames) == 0 {
+		return nil
+	}
 	list := &gatewayv1alpha1.GatewayBindingList{}
-	if err := r.List(ctx, list, client.InNamespace(agent.Namespace)); err != nil {
+	if err := r.List(ctx, list, client.InNamespace(namespace)); err != nil {
 		return nil
 	}
 	references := make([]*gatewayv1alpha1.GatewayBinding, 0)
 	for i := range list.Items {
 		binding := &list.Items[i]
-		if binding.Spec.AgentRef.Name == agent.Name {
+		if _, ok := agentNames[binding.Spec.AgentRef.Name]; ok {
 			references = append(references, binding)
 		}
 	}
@@ -478,7 +502,65 @@ func (r *GatewayBindingReconciler) gatewayBindingCanBeProgrammed(
 		}
 		return false, err
 	}
+	message, err := r.validateBindingAgentRuntimeDefaults(ctx, binding, agent)
+	if err != nil {
+		return false, err
+	}
+	if message != "" {
+		return false, nil
+	}
 	return true, nil
+}
+
+func (r *GatewayBindingReconciler) validateBindingAgentRuntimeDefaults(
+	ctx context.Context,
+	binding *gatewayv1alpha1.GatewayBinding,
+	agent *corev1alpha1.Agent,
+) (string, error) {
+	if binding == nil || agent == nil {
+		return "", nil
+	}
+	if agent.Spec.Runtime == nil {
+		if binding.Spec.TaskDefaults.AgentRuntimeMaxTurns != nil {
+			return fmt.Sprintf("taskDefaults.agentRuntimeMaxTurns is not supported by native AI Agent %q", agent.Name), nil
+		}
+		return "", nil
+	}
+	if agent.Spec.Runtime.RuntimeRef == nil {
+		return "", nil
+	}
+	runtimeName := strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name)
+	if runtimeName == "" {
+		return fmt.Sprintf("Agent %q runtimeRef.name is required", agent.Name), nil
+	}
+	runtimeObject := &corev1alpha1.AgentRuntime{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: agent.Namespace, Name: runtimeName}, runtimeObject); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Sprintf("AgentRuntime %q referenced by Agent %q not found", runtimeName, agent.Name), nil
+		}
+		return "", err
+	}
+	switch runtimeObject.RegisteredContractVersion() {
+	case corev1alpha1.AgentRuntimeContractHarnessV1:
+		return "", nil
+	case corev1alpha1.AgentRuntimeContractHarnessV2:
+		if binding.Spec.TaskDefaults.AgentRuntimeMaxTurns != nil {
+			return fmt.Sprintf("taskDefaults.agentRuntimeMaxTurns is not supported by external %s AgentRuntime %q", corev1alpha1.AgentRuntimeContractHarnessV2, runtimeName), nil
+		}
+		if retry := binding.Spec.TaskDefaults.RetryPolicy; retry != nil && retry.MaxRetries > 0 {
+			return fmt.Sprintf("taskDefaults.retryPolicy.maxRetries must be 0 for external %s AgentRuntime %q", corev1alpha1.AgentRuntimeContractHarnessV2, runtimeName), nil
+		}
+		policy, err := agentruntimepolicy.PolicyForRuntime(runtimeObject)
+		if err != nil {
+			return err.Error(), nil
+		}
+		if policy.WorkspaceIntent != corev1alpha1.WorkspaceIntentRead {
+			return fmt.Sprintf("external %s AgentRuntime %q profile workspace intent %q does not match Gateway Task intent %q", corev1alpha1.AgentRuntimeContractHarnessV2, runtimeName, policy.WorkspaceIntent, corev1alpha1.WorkspaceIntentRead), nil
+		}
+		return "", nil
+	default:
+		return fmt.Sprintf("AgentRuntime %q referenced by Agent %q has no supported contractVersion", runtimeName, agent.Name), nil
+	}
 }
 
 func validateGatewayClass(object *gatewayv1alpha1.GatewayClass) error {
@@ -675,6 +757,7 @@ func validateRequiredGatewayCapabilities(required, observed gatewayv1alpha1.Gate
 	}{
 		{"inboundText", required.InboundText, observed.InboundText},
 		{"outboundText", required.OutboundText, observed.OutboundText},
+		{"interimDelivery", required.InterimDelivery, observed.InterimDelivery},
 		{"threads", required.Threads, observed.Threads},
 		{"senderIdentity", required.SenderIdentity, observed.SenderIdentity},
 		{"explicitSessions", required.ExplicitSessions, observed.ExplicitSessions},
@@ -718,13 +801,14 @@ func observedGatewayCapabilities(response *protocol.CapabilitiesResponse) *gatew
 		return nil
 	}
 	return &gatewayv1alpha1.GatewayObservedCapabilities{
-		ContractVersion: sanitizeGatewayCapability(response.ProtocolVersion),
-		AdapterName:     sanitizeGatewayCapability(response.AdapterName),
-		AdapterVersion:  sanitizeGatewayCapability(response.AdapterVersion),
+		ContractVersion: sanitizeStatusValue(response.ProtocolVersion, protocol.MaxIdentityBytes),
+		AdapterName:     sanitizeStatusValue(response.AdapterName, protocol.MaxIdentityBytes),
+		AdapterVersion:  sanitizeStatusValue(response.AdapterVersion, protocol.MaxIdentityBytes),
 		Capabilities: gatewayv1alpha1.GatewayCapabilities{
 			InboundText: response.Capabilities.InboundText, OutboundText: response.Capabilities.OutboundText,
 			Threads: response.Capabilities.Threads, SenderIdentity: response.Capabilities.SenderIdentity,
 			ExplicitSessions: response.Capabilities.ExplicitSessions, IdempotentDelivery: response.Capabilities.IdempotentDelivery,
+			InterimDelivery: response.Capabilities.InterimDelivery,
 		},
 	}
 }
@@ -786,14 +870,4 @@ func setGatewayCondition(conditions *[]metav1.Condition, conditionType string, v
 		condition.Reason = falseReason
 	}
 	meta.SetStatusCondition(conditions, condition)
-}
-
-func sanitizeGatewayStatusMessage(message string) string {
-	message = events.RedactExecutionEventText(strings.TrimSpace(message))
-	return truncateUTF8(strings.ToValidUTF8(message, "�"), 1024)
-}
-
-func sanitizeGatewayCapability(value string) string {
-	value = events.RedactExecutionEventText(strings.TrimSpace(value))
-	return truncateUTF8(strings.ToValidUTF8(value, "�"), protocol.MaxIdentityBytes)
 }

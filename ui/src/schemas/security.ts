@@ -195,6 +195,7 @@ export const patchProposalSchema = z.object({
   diffArtifact: z.string().optional(),
   summaryArtifact: z.string().optional(),
   status: z.string(),
+  reason: z.string().optional(),
   prNumber: z.number().optional(),
   prURL: z.string().optional(),
   createdAt: z.string(),

@@ -290,9 +290,9 @@ func executionEventTelemetryFields(typ string, content json.RawMessage) (provide
 		return "", "", "", 0, 0, 0
 	}
 	provider = stringField(body, "provider", "gen_ai.provider.name")
-	modelKeys := []string{"model", "gen_ai.request.model", "gen_ai.response.model"}
+	modelKeys := []string{chatModelKey, "gen_ai.request.model", "gen_ai.response.model"}
 	if typ == events.ExecutionEventTypeModelRequestCompleted || typ == events.ExecutionEventTypeModelRequestFailed {
-		modelKeys = []string{"model", "gen_ai.response.model", "gen_ai.request.model"}
+		modelKeys = []string{chatModelKey, "gen_ai.response.model", "gen_ai.request.model"}
 	}
 	model = stringField(body, modelKeys...)
 	stopReason = stringField(body, "stopReason", "stop_reason", "finishReason", "gen_ai.response.finish_reasons")

@@ -4,9 +4,10 @@ ARG TARGETOS
 ARG TARGETARCH
 
 COPY scripts/fixtures/openai-responses/main.go /src/main.go
+COPY scripts/fixtures/openai-responses/workspace.go /src/workspace.go
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
     go build -buildvcs=false -trimpath -ldflags='-s -w' \
-    -o /out/openai-responses-fixture /src/main.go
+    -o /out/openai-responses-fixture /src/main.go /src/workspace.go
 
 FROM scratch
 

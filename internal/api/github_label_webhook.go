@@ -27,9 +27,17 @@ import (
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/agentruntimepolicy"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/workerenv"
+)
+
+const (
+	apiFieldStatus   = "status"
+	apiFieldTaskName = "taskName"
+	apiFieldAction   = "action"
+	apiFieldLabel    = "label"
 )
 
 const (
@@ -171,8 +179,8 @@ func (h *Handlers) HandleGitHubWebhook(c fiber.Ctx) error {
 	event := c.Get(githubEventHeader)
 	if event == githubEventPing {
 		return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
-			"status":  "ok",
-			"message": "GitHub webhook signature verified",
+			apiFieldStatus:  "ok",
+			apiFieldMessage: "GitHub webhook signature verified",
 		})
 	}
 	if event != githubEventIssues && event != githubEventPullRequest {
@@ -251,7 +259,8 @@ func (h *Handlers) HandleGitHubWebhook(c fiber.Ctx) error {
 		}
 		return fiber.NewError(fiber.StatusServiceUnavailable, "GitHub label trigger agent is not configured")
 	}
-	if err := h.ensureAgentExists(c, namespace, agentName); err != nil {
+	runtimePolicy, err := h.ensureAgentExists(c, namespace, agentName)
+	if err != nil {
 		if monitorResult.Matched > 0 && githubWebhookAgentNotFound(err) {
 			return githubRepositoryMonitorEventResponse(c, monitorResult)
 		}
@@ -267,26 +276,33 @@ func (h *Handlers) HandleGitHubWebhook(c fiber.Ctx) error {
 		delivery = githubReplayKeySuffix(replayKey)
 	}
 
-	task := buildGitHubLabelTask(namespace, agentName, action, replayKey, delivery, event, payload, target)
+	maxTurns := githubMaxTurns()
+	if runtimePolicy != nil {
+		maxTurns = nil
+	}
+	task := buildGitHubLabelTask(namespace, agentName, action, replayKey, delivery, event, payload, target, maxTurns)
+	if err := agentruntimepolicy.MaterializeRuntimeRefAllowedTools(task, runtimePolicy); err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to apply AgentRuntime policy: %v", err))
+	}
 	if err := h.client.Create(c.Context(), task); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
-				"status":    "duplicate",
-				"message":   "task already exists for this GitHub webhook payload",
-				"taskName":  task.Name,
-				"namespace": task.Namespace,
-				"action":    action,
+				apiFieldStatus:   "duplicate",
+				apiFieldMessage:  "task already exists for this GitHub webhook payload",
+				apiFieldTaskName: task.Name,
+				toolNamespaceArg: task.Namespace,
+				apiFieldAction:   action,
 			})
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create task: %v", err))
 	}
 
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
-		"status":             "created",
-		"taskName":           task.Name,
-		"namespace":          task.Namespace,
-		"action":             action,
-		"label":              payload.Label.Name,
+		apiFieldStatus:       "created",
+		apiFieldTaskName:     task.Name,
+		toolNamespaceArg:     task.Namespace,
+		apiFieldAction:       action,
+		apiFieldLabel:        payload.Label.Name,
 		"monitorRunsQueued":  monitorResult.Queued,
 		"monitorRunsSkipped": monitorResult.SkippedActive,
 	})
@@ -466,10 +482,10 @@ func githubRepositoryMonitorExactRunID(monitor *corev1alpha1.RepositoryMonitor, 
 func (h *Handlers) createRepositoryMonitorEventRunAudit(c fiber.Ctx, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, payload githubLabelWebhookPayload, target githubLabelTarget, delivery, eventType string) error {
 	eventKey := githubWebhookReplayKey([]byte(eventType + "-" + delivery))
 	metadataJSON, err := json.Marshal(map[string]any{
-		"action":     payload.Action,
-		"delivery":   delivery,
-		"repository": payload.Repository.FullName,
-		"sender":     payload.Sender.Login,
+		apiFieldAction: payload.Action,
+		"delivery":     delivery,
+		"repository":   payload.Repository.FullName,
+		"sender":       payload.Sender.Login,
 	})
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to encode monitor event metadata: %v", err))
@@ -500,7 +516,7 @@ func githubRepositoryMonitorEventResponse(c fiber.Ctx, result githubRepositoryMo
 		responseStatus = "created"
 	}
 	return c.Status(status).JSON(fiber.Map{
-		"status":             responseStatus,
+		apiFieldStatus:       responseStatus,
 		"monitorRunsQueued":  result.Queued,
 		"monitorRunsCached":  result.Duplicate,
 		"monitorRunsSkipped": result.SkippedActive,
@@ -546,8 +562,8 @@ func githubWebhookReplayKey(body []byte) string {
 
 func githubWebhookIgnored(c fiber.Ctx, reason string) error {
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
-		"status": "ignored",
-		"reason": reason,
+		apiFieldStatus: "ignored",
+		"reason":       reason,
 	})
 }
 
@@ -688,28 +704,60 @@ func githubActionAgentEnv(action string) string {
 	return "ORKA_GITHUB_LABEL_AGENT_" + strings.Trim(b.String(), "_")
 }
 
-func (h *Handlers) ensureAgentExists(c fiber.Ctx, namespace, agentName string) error {
+func (h *Handlers) ensureAgentExists(c fiber.Ctx, namespace, agentName string) (*agentruntimepolicy.RuntimeRefPolicy, error) {
+	reader := h.apiReader
+	if reader == nil {
+		reader = h.client
+	}
+
 	var agent corev1alpha1.Agent
-	if err := h.client.Get(c.Context(), types.NamespacedName{Name: agentName, Namespace: namespace}, &agent); err != nil {
+	if err := reader.Get(c.Context(), types.NamespacedName{Name: agentName, Namespace: namespace}, &agent); err != nil {
 		if apierrors.IsNotFound(err) {
-			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("agent %q not found in namespace %q", agentName, namespace))
+			return nil, fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("agent %q not found in namespace %q", agentName, namespace))
 		}
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get agent: %v", err))
+		return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get agent: %v", err))
 	}
 	if agent.Spec.Runtime == nil {
-		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("agent %q must have runtime configured", agentName))
+		return nil, fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("agent %q must have runtime configured", agentName))
 	}
-	return nil
+	if agent.Spec.Runtime.RuntimeRef == nil {
+		return nil, nil
+	}
+
+	runtimeName := strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name)
+	if runtimeName == "" {
+		return nil, fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("agent %q runtimeRef.name is required", agentName))
+	}
+	var registered corev1alpha1.AgentRuntime
+	if err := reader.Get(c.Context(), types.NamespacedName{Name: runtimeName, Namespace: namespace}, &registered); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("AgentRuntime %q referenced by agent %q not found in namespace %q", runtimeName, agentName, namespace))
+		}
+		return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get AgentRuntime %q: %v", runtimeName, err))
+	}
+	switch registered.RegisteredContractVersion() {
+	case corev1alpha1.AgentRuntimeContractHarnessV1:
+		return nil, nil
+	case corev1alpha1.AgentRuntimeContractHarnessV2:
+		policy, err := agentruntimepolicy.PolicyForRuntime(&registered)
+		if err != nil {
+			return nil, fiber.NewError(fiber.StatusBadRequest, err.Error())
+		}
+		return policy, nil
+	default:
+		return nil, fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("AgentRuntime %q referenced by agent %q has no supported contractVersion", runtimeName, agentName))
+	}
 }
 
 func githubWebhookAgentNotFound(err error) bool {
 	var fiberErr *fiber.Error
 	return errors.As(err, &fiberErr) &&
 		fiberErr.Code == fiber.StatusBadRequest &&
+		strings.HasPrefix(fiberErr.Message, "agent ") &&
 		strings.Contains(fiberErr.Message, " not found in namespace ")
 }
 
-func buildGitHubLabelTask(namespace, agentName, action, replayKey, delivery, event string, payload githubLabelWebhookPayload, target githubLabelTarget) *corev1alpha1.Task {
+func buildGitHubLabelTask(namespace, agentName, action, replayKey, delivery, event string, payload githubLabelWebhookPayload, target githubLabelTarget, maxTurns *int32) *corev1alpha1.Task {
 	workspace := githubWorkspace(action, target, replayKey)
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
@@ -737,12 +785,12 @@ func buildGitHubLabelTask(namespace, agentName, action, replayKey, delivery, eve
 			AgentRef: &corev1alpha1.AgentReference{
 				Name: agentName,
 			},
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				MaxTurns: githubMaxTurns(),
-			},
 			Workspace: workspace,
 			Timeout:   githubTimeout(),
 		},
+	}
+	if maxTurns != nil {
+		task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{MaxTurns: maxTurns}
 	}
 	if action == githubActionReview && workspace != nil && workspace.ReadCredentialRef != nil {
 		task.Annotations[labels.AnnotationWorkspaceInitContainer] = queryTrue
@@ -757,7 +805,7 @@ func buildGitHubLabelTask(namespace, agentName, action, replayKey, delivery, eve
 func githubTaskName(action string, number int, replayKey string) string {
 	action = dnsNamePart(action)
 	if action == "" {
-		action = "action"
+		action = apiFieldAction
 	}
 	deliveryHash := hex.EncodeToString(githubHash([]byte(replayKey)))[:12]
 	base := fmt.Sprintf("github-%s-%d", action, number)

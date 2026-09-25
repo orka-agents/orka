@@ -36,6 +36,11 @@ type PromptTerminalEvidence struct {
 	Identity           MappedUpdateIdentity
 	TerminalEvent      harnessv2.EventType
 	CancellationReason harnessv2.CancelReason
+	// FailureCode and FailureMessage carry the journaled (already redacted
+	// and bounded) classification of a Failed terminal so restart recovery
+	// projects the same durable reason the live path would have.
+	FailureCode    string
+	FailureMessage string
 }
 
 // FindPromptTerminal walks the task stream backward and returns the newest
@@ -78,12 +83,13 @@ func (j Journal) FindPromptTerminal(ctx context.Context) (*PromptTerminalEvidenc
 			if !ok || kind != mappedJournalRecordPromptTerminal || !identity.samePrompt(j.RecoveryIdentity) {
 				continue
 			}
-			terminalEvent, cancellationReason, err := promptTerminalClassification(event)
+			terminalEvent, cancellationReason, failure, err := promptTerminalClassification(event)
 			if err != nil {
 				return nil, err
 			}
 			return &PromptTerminalEvidence{
 				Identity: identity, TerminalEvent: terminalEvent, CancellationReason: cancellationReason,
+				FailureCode: failure.code, FailureMessage: failure.message,
 			}, nil
 		}
 		pageEnd = pageStart
@@ -91,21 +97,29 @@ func (j Journal) FindPromptTerminal(ctx context.Context) (*PromptTerminalEvidenc
 	return nil, nil
 }
 
-func promptTerminalClassification(event store.ExecutionEvent) (harnessv2.EventType, harnessv2.CancelReason, error) {
+// promptTerminalFailure is the journaled classification of a Failed terminal.
+type promptTerminalFailure struct {
+	code    string
+	message string
+}
+
+func promptTerminalClassification(event store.ExecutionEvent) (harnessv2.EventType, harnessv2.CancelReason, promptTerminalFailure, error) {
 	var content struct {
 		TerminalEvent         harnessv2.EventType    `json:"terminalEvent"`
 		StopReason            string                 `json:"stopReason"`
 		ControllerSynthesized bool                   `json:"controllerSynthesized"`
 		SettlementProven      bool                   `json:"settlementProven"`
 		CancellationReason    harnessv2.CancelReason `json:"cancellationReason"`
+		Code                  string                 `json:"code"`
+		Message               string                 `json:"message"`
 	}
 	if err := json.Unmarshal(event.Content, &content); err != nil {
-		return "", "", fmt.Errorf("%w: decode mapped harness v2 prompt terminal: %v", store.ErrConflict, err)
+		return "", "", promptTerminalFailure{}, fmt.Errorf("%w: decode mapped harness v2 prompt terminal: %v", store.ErrConflict, err)
 	}
 	if content.CancellationReason != "" {
 		if !content.ControllerSynthesized || !content.SettlementProven ||
 			!validPromptCancellationReason(content.CancellationReason) {
-			return "", "", fmt.Errorf("%w: mapped harness v2 prompt terminal has invalid cancellation reason %q", store.ErrConflict, content.CancellationReason)
+			return "", "", promptTerminalFailure{}, fmt.Errorf("%w: mapped harness v2 prompt terminal has invalid cancellation reason %q", store.ErrConflict, content.CancellationReason)
 		}
 	}
 	terminalEvent := content.TerminalEvent
@@ -128,16 +142,20 @@ func promptTerminalClassification(event store.ExecutionEvent) (harnessv2.EventTy
 		}
 	}
 	if !terminalEvent.IsTerminal() {
-		return "", "", fmt.Errorf("%w: mapped harness v2 prompt terminal has no terminal classification", store.ErrConflict)
+		return "", "", promptTerminalFailure{}, fmt.Errorf("%w: mapped harness v2 prompt terminal has no terminal classification", store.ErrConflict)
 	}
 	wantType := executionevents.ExecutionEventTypeModelRequestFailed
 	if terminalEvent == harnessv2.EventCompleted {
 		wantType = executionevents.ExecutionEventTypeModelRequestCompleted
 	}
 	if event.Type != wantType {
-		return "", "", fmt.Errorf("%w: mapped harness v2 prompt terminal type %q conflicts with %q", store.ErrConflict, event.Type, terminalEvent)
+		return "", "", promptTerminalFailure{}, fmt.Errorf("%w: mapped harness v2 prompt terminal type %q conflicts with %q", store.ErrConflict, event.Type, terminalEvent)
 	}
-	return terminalEvent, content.CancellationReason, nil
+	failure := promptTerminalFailure{}
+	if terminalEvent == harnessv2.EventFailed {
+		failure = promptTerminalFailure{code: content.Code, message: content.Message}
+	}
+	return terminalEvent, content.CancellationReason, failure, nil
 }
 
 // State is the mutable aggregation state for one non-reconnectable prompt
@@ -666,7 +684,15 @@ func (s *State) appendUpdateIfNew(
 		options.diagnosticProjection = &projection
 		publishedFields = fields
 	}
-	mapped, err := mapUpdate(event, s.journal.MapContext, options)
+	var mapped *store.ExecutionEvent
+	var err error
+	if event.Update != nil && event.Update.Kind == harnessv2.UpdateUsage {
+		mapped, publishedFields, err = mapUsageUpdateWithHistory(
+			event, s.journal.MapContext, "", s.logicalFieldHistory, s.logicalFieldHistorySaturated,
+		)
+	} else {
+		mapped, err = mapUpdate(event, s.journal.MapContext, options)
+	}
 	if err != nil {
 		return nil, false, err
 	}
@@ -854,8 +880,8 @@ func (s *State) mapAssistantTranscript(
 ) (*store.ExecutionEvent, []logicalFieldBoundaries, error) {
 	var publishedFields []logicalFieldBoundaries
 	if !contentOmitted {
-		values, fields := redactLogicalFieldsWithHistory(
-			s.logicalFieldHistory, s.logicalFieldHistorySaturated, transcript,
+		values, fields := redactLogicalFieldsWithPublicCopies(
+			s.logicalFieldHistory, s.logicalFieldHistorySaturated, []logicalFieldCopyKind{logicalFieldContentSummaryCopies}, transcript,
 		)
 		transcript = values[0]
 		publishedFields = fields
@@ -996,14 +1022,21 @@ func (s *State) AppendPromptSettlementIfNew(
 	}
 	identity := s.promptIdentity
 	identity.Sequence = s.promptAcceptedSequence
-	mapped, err := mapPromptSettlement(identity, settlement, cancellationReason, s.journal.MapContext)
+	mapped, publishedFields, err := mapPromptSettlement(
+		identity, settlement, cancellationReason, s.journal.MapContext,
+		s.logicalFieldHistory, s.logicalFieldHistorySaturated,
+	)
 	if err != nil {
 		return nil, false, err
 	}
-	return s.appendMappedEvent(
+	appended, isNew, err := s.appendMappedEvent(
 		ctx, identity, mappedJournalRecordPromptTerminal, mapped,
 		"append mapped harness v2 prompt settlement",
 	)
+	if err == nil {
+		s.rememberLogicalFields(publishedFields)
+	}
+	return appended, isNew, err
 }
 
 // AppendAssistantStreamClosureIfNew persists the complete assistant text seen
@@ -1208,6 +1241,13 @@ func (s *State) appendMappedEventWithPlan(
 	plan *store.PlanState,
 	operation string,
 ) (*store.ExecutionEvent, bool, error) {
+	// Usage attribution comes from the controller's frozen profile, not the
+	// runtime's free-text model field or the cross-turn redacted public event.
+	// Set it at the append boundary so mapped content cannot override it.
+	if mapped.Internal == nil {
+		mapped.Internal = make(map[string]any)
+	}
+	mapped.Internal["harnessV2UsageModel"] = s.journal.MapContext.normalized().Model
 	key := identity.Key()
 	if isMappedToolTerminalEvent(*mapped) {
 		// Real runtime terminal updates and synthesized recovery closures race
@@ -1242,7 +1282,7 @@ func (s *State) appendMappedEventWithPlan(
 	}
 	appended, isNew, err := appendIfAbsent()
 	if err == nil {
-		s.markPersisted(identity, kind)
+		s.markPersisted(identity, kind, isNew)
 		if !isNew {
 			return nil, false, nil
 		}
@@ -1254,13 +1294,13 @@ func (s *State) appendMappedEventWithPlan(
 		return nil, false, errors.Join(firstErr, fmt.Errorf("reconcile failed append: %w", reconcileErr))
 	}
 	if persisted {
-		s.markPersisted(identity, kind)
+		s.markPersisted(identity, kind, false)
 		return nil, false, nil
 	}
 
 	appended, isNew, err = appendIfAbsent()
 	if err == nil {
-		s.markPersisted(identity, kind)
+		s.markPersisted(identity, kind, isNew)
 		if !isNew {
 			return nil, false, nil
 		}
@@ -1272,13 +1312,19 @@ func (s *State) appendMappedEventWithPlan(
 		return nil, false, errors.Join(firstErr, retryErr, fmt.Errorf("reconcile failed append retry: %w", reconcileErr))
 	}
 	if persisted {
-		s.markPersisted(identity, kind)
+		s.markPersisted(identity, kind, false)
 		return nil, false, nil
 	}
 	return nil, false, errors.Join(firstErr, retryErr)
 }
 
-func (s *State) markPersisted(identity MappedUpdateIdentity, kind mappedJournalRecordKind) {
+func (s *State) markPersisted(identity MappedUpdateIdentity, kind mappedJournalRecordKind, isNew bool) {
+	if !isNew {
+		// A duplicate or reconciled append may have a different durable winner.
+		// Its public boundaries are unknown, so later runtime text fails closed.
+		s.logicalFieldHistory = nil
+		s.logicalFieldHistorySaturated = true
+	}
 	s.markProcessed(identity)
 	switch kind {
 	case mappedJournalRecordAssistantTranscript:

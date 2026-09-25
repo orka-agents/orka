@@ -37,6 +37,7 @@ func TestProviderProfilesDisableUpdatesAndUsePrivateHomes(t *testing.T) {
 	if codexConfig["model"] != "gpt-test" {
 		t.Fatalf("Codex model config = %#v, want gpt-test", codexConfig["model"])
 	}
+	assertCodexWebSocketTransportsDisabled(t, codexConfig)
 	if strings.Contains(strings.Join(codex.Args, " "), "npx") {
 		t.Fatalf("Codex runtime uses a download-on-start command: %v", codex.Args)
 	}
@@ -115,6 +116,7 @@ func TestCodexProviderSessionProjection(t *testing.T) {
 	if config["model"] != "gpt-test" || config["developer_instructions"] != "codex system" || config["model_reasoning_effort"] != "high" {
 		t.Fatalf("Codex config = %#v", config)
 	}
+	assertCodexWebSocketTransportsDisabled(t, config)
 	if strings.Contains(strings.Join(codex.Args, " "), "npx") {
 		t.Fatalf("Codex runtime uses a download-on-start command: %v", codex.Args)
 	}
@@ -160,6 +162,33 @@ func TestCodexProviderSessionProjectionReadOnlySurface(t *testing.T) {
 	}
 }
 
+func TestCodexProviderSessionProjectionWithBrokeredMessaging(t *testing.T) {
+	paths := acp.SessionPaths{Home: "/sessions/private/home"}
+	proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session", Credential: "test-auth-token"}
+	for _, tt := range []struct {
+		name       string
+		allowed    []string
+		disallowed []string
+		allowBash  bool
+		wantError  bool
+	}{
+		{name: "native defaults with messaging", allowed: acp.BuiltInRuntimeNativeToolNames("codex"), allowBash: true},
+		{name: "messaging without native grants", allowed: []string{}, allowBash: true, wantError: true},
+		{name: "native deny", allowed: acp.BuiltInRuntimeNativeToolNames("codex"), disallowed: []string{providerToolWrite}, allowBash: true, wantError: true},
+		{name: "bash denied", allowed: acp.BuiltInRuntimeNativeToolNames("codex"), wantError: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			allowed := append(slices.Clone(tt.allowed), "send_message", "check_messages")
+			request := testProviderProjectionRequest(t, providerKindCodex, "gpt-test", "", "", allowed, tt.disallowed, tt.allowBash)
+			request.Profile.WorkspaceIntent = harnessv2.WorkspaceIntentWrite
+			_, err := codexSessionProjection(request, paths, proxy, "gpt-test")
+			if (err != nil) != tt.wantError {
+				t.Fatalf("Codex projection error = %v, want error %t", err, tt.wantError)
+			}
+		})
+	}
+}
+
 func TestClaudeProviderSessionProjection(t *testing.T) {
 	paths := acp.SessionPaths{Home: "/sessions/private/home"}
 	proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session", Credential: "test-auth-token"}
@@ -194,6 +223,52 @@ func TestClaudeProviderSessionProjection(t *testing.T) {
 	if options["maxTurns"] != int32(7) || options["effort"] != "max" || !slices.Equal(options["tools"].([]string), []string{providerToolRead, providerToolWebFetch}) ||
 		!slices.Contains(options["disallowedTools"].([]string), providerToolBash) {
 		t.Fatalf("Claude options = %#v", options)
+	}
+}
+
+func TestClaudeProviderEffortProjection(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		model  string
+		effort string
+	}{
+		{name: "gateway model default", model: "claude-haiku-4.5"},
+		{name: "canonical non-effort model", model: "claude-haiku-4-5"},
+		{name: "recognized effort model default", model: "claude-sonnet-4-6"},
+		{name: "explicit medium", model: "claude-sonnet-4-6", effort: "medium"},
+		{name: "explicit max", model: "claude-opus-4-6", effort: "max"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			paths := acp.SessionPaths{Home: "/sessions/private/home"}
+			proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session", Credential: "test-auth-token"}
+			claude, err := providerProfile(providerKindClaude, tt.model, harnessv2.WorkspaceIntentRead)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := testProviderProjectionRequest(t, providerKindClaude, tt.model, "", tt.effort, nil, nil, true)
+			projection, err := claude.ProjectSession(request, paths, proxy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			environment, err := claude.EnvironmentForSession(request, paths, proxy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			maps.Copy(environment, projection.Environment)
+			if environment["ANTHROPIC_MODEL"] != tt.model {
+				t.Fatalf("model changed to %q", environment["ANTHROPIC_MODEL"])
+			}
+			options := projection.NewSessionMeta["claudeCode"].(map[string]any)["options"].(map[string]any)
+			if tt.effort == "" {
+				if _, ok := options["effort"]; ok || environment["CLAUDE_CODE_EFFORT_LEVEL"] != "unset" {
+					t.Fatal("unspecified effort must suppress the CLI default without adding SDK effort")
+				}
+			} else {
+				if _, ok := environment["CLAUDE_CODE_EFFORT_LEVEL"]; ok || options["effort"] != tt.effort {
+					t.Fatalf("explicit effort %q must reach the SDK without an environment override", tt.effort)
+				}
+			}
+		})
 	}
 }
 
@@ -263,7 +338,8 @@ func TestCopilotUnrestrictedProjectionKeepsPermanentExclusions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(projection.AdditionalArgs) != 1 {
+	if len(projection.AdditionalArgs) != 3 || !slices.Contains(projection.AdditionalArgs, "--allow-tool=shell") ||
+		!slices.Contains(projection.AdditionalArgs, "--allow-tool=write") {
 		t.Fatalf("Copilot unrestricted projection args = %v", projection.AdditionalArgs)
 	}
 	excluded := strings.Split(strings.TrimPrefix(projection.AdditionalArgs[0], "--excluded-tools="), ",")
@@ -271,6 +347,74 @@ func TestCopilotUnrestrictedProjectionKeepsPermanentExclusions(t *testing.T) {
 		if !slices.Contains(excluded, excludedID) {
 			t.Fatalf("Copilot unrestricted projection omitted permanent exclusion %q: %v", excludedID, excluded)
 		}
+	}
+}
+
+func TestCopilotProviderSessionProjectionWithBrokeredMessaging(t *testing.T) {
+	paths := acp.SessionPaths{Home: "/sessions/private/home"}
+	proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session", Credential: "test-auth-token"}
+	for _, tt := range []struct {
+		name       string
+		disallowed []string
+		allowBash  bool
+		wantError  bool
+	}{
+		{name: "native defaults with messaging", allowBash: true},
+		{name: "native deny retains unsupported web search", disallowed: []string{providerToolWrite}, allowBash: true, wantError: true},
+		{name: "bash denied retains unsupported web search", wantError: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			allowed := append(acp.BuiltInRuntimeNativeToolNames("copilot"), "send_message", "check_messages")
+			request := testProviderProjectionRequest(t, providerKindCopilot, "copilot-test", "", "", allowed, tt.disallowed, tt.allowBash)
+			request.Profile.WorkspaceIntent = harnessv2.WorkspaceIntentWrite
+			projection, err := copilotSessionProjection(request, paths, proxy, "copilot-test")
+			if tt.wantError {
+				if err == nil || !strings.Contains(err.Error(), providerToolWebSearch) {
+					t.Fatalf("restricted Copilot projection error = %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []string{
+				"--excluded-tools=" + strings.Join(copilotAlwaysExcludedToolIDs, ","),
+				"--allow-tool=shell", "--allow-tool=write", "--allow-tool=orka",
+			}
+			if !slices.Equal(projection.AdditionalArgs, want) {
+				t.Fatalf("delegation changed native Copilot exclusions: %v, want %v", projection.AdditionalArgs, want)
+			}
+		})
+	}
+}
+
+func TestCopilotPermissionRulesPreserveRestrictedPolicies(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		allowed   []string
+		allowBash bool
+		wantRules []string
+	}{
+		{name: "deny all", allowed: []string{}, wantRules: []string{}},
+		{name: "native read", allowed: []string{providerToolRead}, wantRules: []string{}},
+		{name: "native write", allowed: []string{providerToolWrite}, wantRules: []string{"--allow-tool=write"}},
+		{name: "native edit", allowed: []string{providerToolEdit}, wantRules: []string{"--allow-tool=write"}},
+		{name: "native shell", allowed: []string{providerToolBash}, allowBash: true, wantRules: []string{"--allow-tool=shell"}},
+		{
+			name: "read and brokered messaging", allowed: []string{providerToolRead, "check_messages", "send_message"},
+			wantRules: []string{"--allow-tool=orka"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			request := testProviderProjectionRequest(t, providerKindCopilot, "copilot-test", "", "", tt.allowed, nil, tt.allowBash)
+			projection, err := copilotSessionProjection(request, acp.SessionPaths{}, ProviderProxyBinding{}, "copilot-test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(projection.AdditionalArgs[1:], tt.wantRules) {
+				t.Fatalf("Copilot permission rules = %v, want %v", projection.AdditionalArgs[1:], tt.wantRules)
+			}
+		})
 	}
 }
 
@@ -388,6 +532,7 @@ func TestCodexProviderProfileUsesExternalRuntimeSandbox(t *testing.T) {
 	}
 }
 
+//nolint:gocyclo // The environment fixture checks one complete derived supervisor configuration.
 func TestLoadConfigFromEnv(t *testing.T) {
 	dir := t.TempDir()
 	controllerToken := filepath.Join(dir, "controller-token")
@@ -409,6 +554,9 @@ func TestLoadConfigFromEnv(t *testing.T) {
 		EnvControllerTokenFile: controllerToken, EnvCapabilitySecretFile: capabilitySecret, EnvProviderTokenFile: providerToken,
 		EnvMCPBrokerURL: "http://orka-controller.orka-system.svc:8080", EnvTrustNamespace: "default",
 		EnvSessionBaseDir: filepath.Join(dir, "sessions"), EnvFirstSessionUID: "20000", EnvLastSessionUID: "20010", EnvSessionGID: "20000",
+		EnvE2EPromptWriteAmbiguity:           testE2EPromptWriteAmbiguityMarker,
+		EnvBrokeredToolApprovalProfileDigest: "",
+		EnvFoundryRecoveryProfileDigest:      "",
 	}
 	for name, value := range values {
 		t.Setenv(name, value)
@@ -424,14 +572,17 @@ func TestLoadConfigFromEnv(t *testing.T) {
 	if !cfg.Capabilities.SupportsAgentSessionConfiguration {
 		t.Fatal("supervisor did not advertise Agent session configuration support")
 	}
+	if cfg.E2EPromptWriteAmbiguityMarker != testE2EPromptWriteAmbiguityMarker {
+		t.Fatalf("E2E prompt write ambiguity marker = %q", cfg.E2EPromptWriteAmbiguityMarker)
+	}
 	if cfg.Capabilities.AdapterDigests["codex-acp"] != "sha256:"+acp.CodexACPTarSHA256 ||
 		cfg.Capabilities.AdapterDigests["codex-acp-orka-patch"] != "sha256:"+acp.CodexACPOrkaPatchSHA256 ||
 		cfg.Capabilities.AdapterDigests["codex-acp-orka-dist"] != "sha256:"+acp.CodexACPOrkaDistSHA256 ||
 		cfg.Provider.AdapterName != "codex-acp-orka-dist" || cfg.Provider.AdapterDigest != "sha256:"+acp.CodexACPOrkaDistSHA256 {
 		t.Fatalf("unexpected adapter digests: capabilities=%#v provider=%#v", cfg.Capabilities.AdapterDigests, cfg.Provider)
 	}
-	if cfg.Capabilities.Limits.MaxUpdateEventsPerSecond != runtimeCodexMaxUpdateEventsPerSecond {
-		t.Fatalf("max update events per second = %d, want %d", cfg.Capabilities.Limits.MaxUpdateEventsPerSecond, runtimeCodexMaxUpdateEventsPerSecond)
+	if cfg.Capabilities.Limits.MaxUpdateEventsPerSecond != runtimeMaxUpdateEventsPerSecond {
+		t.Fatalf("max update events per second = %d, want %d", cfg.Capabilities.Limits.MaxUpdateEventsPerSecond, runtimeMaxUpdateEventsPerSecond)
 	}
 	if cfg.ProviderProxy.UpstreamBaseURL != "http://vekil.vekil-system.svc:1337/v1" {
 		t.Fatalf("unexpected provider proxy base URL: %q", cfg.ProviderProxy.UpstreamBaseURL)
@@ -439,6 +590,18 @@ func TestLoadConfigFromEnv(t *testing.T) {
 	if cfg.ProviderProxy.UpstreamBearerToken != "provider-capability" {
 		t.Fatal("provider proxy token was not loaded from the supervisor-only file")
 	}
+	t.Run("dedicated durable workspace", func(t *testing.T) {
+		t.Setenv(EnvDurableWorkspaceDir, filepath.Join(dir, "durable"))
+		t.Setenv(EnvDurableWorkspaceKey, "workspace")
+		dedicated, err := LoadConfigFromEnv()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dedicated.DurableWorkspaceKey != "workspace" ||
+			dedicated.Capabilities.Limits.MaxResidentSessions != 1 || dedicated.Capabilities.Limits.MaxConcurrentPrompts != 1 {
+			t.Fatal("stable durable workspace did not load as a dedicated single-session runtime")
+		}
+	})
 
 	t.Setenv(EnvProvider, providerKindCopilot)
 	copilotCfg, err := LoadConfigFromEnv()
@@ -456,6 +619,174 @@ func TestLoadConfigFromEnv(t *testing.T) {
 	if copilotCfg.Capabilities.AdapterDigests["copilot-cli-linux-amd64"] != "sha256:"+acp.CopilotCLILinuxX64SHA256 ||
 		copilotCfg.Capabilities.AdapterDigests["copilot-cli-linux-arm64"] != "sha256:"+acp.CopilotCLILinuxARM64SHA256 {
 		t.Fatalf("unexpected Copilot adapter digests: %#v", copilotCfg.Capabilities.AdapterDigests)
+	}
+
+	t.Setenv(EnvProvider, providerKindAgentKit)
+	t.Setenv(EnvAgentKitAdapterDigest, testAgentKitAdapterDigest)
+	agentKitCfg, err := LoadConfigFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agentKitCfg.Provider.Kind != providerKindAgentKit || agentKitCfg.Provider.AdapterName != agentKitAdapterName ||
+		agentKitCfg.Provider.AdapterDigest != testAgentKitAdapterDigest ||
+		len(agentKitCfg.Capabilities.AdapterDigests) != 1 ||
+		agentKitCfg.Capabilities.AdapterDigests[agentKitAdapterName] != testAgentKitAdapterDigest {
+		t.Fatalf("unexpected AgentKit provider: provider=%#v capabilities=%#v", agentKitCfg.Provider, agentKitCfg.Capabilities)
+	}
+	if agentKitCfg.ProviderProxy.UpstreamBaseURL != "http://vekil.vekil-system.svc:1337/v1" {
+		t.Fatalf("AgentKit provider proxy base URL = %q", agentKitCfg.ProviderProxy.UpstreamBaseURL)
+	}
+	if agentKitCfg.Capabilities.SupportsAgentSessionConfiguration ||
+		agentKitCfg.Capabilities.Provider.SupportsImages || agentKitCfg.Capabilities.Provider.SupportsAudio ||
+		agentKitCfg.Capabilities.Provider.SupportsEmbeddedResources ||
+		agentKitCfg.Capabilities.Provider.SupportsPermissions || agentKitCfg.Capabilities.Provider.SupportsBrokeredToolApprovals ||
+		!agentKitCfg.Capabilities.Provider.SupportsTools {
+		t.Fatalf("unexpected AgentKit provider capabilities: %#v", agentKitCfg.Capabilities.Provider)
+	}
+
+	t.Run("exact profile brokered approval qualification", testLoadConfigFromEnvBrokeredApprovalQualification)
+	t.Run("exact profile Foundry recovery qualification", testLoadConfigFromEnvFoundryRecoveryQualification)
+}
+
+func testLoadConfigFromEnvFoundryRecoveryQualification(t *testing.T) {
+	t.Setenv(EnvProvider, providerKindFoundry)
+	t.Setenv(EnvFoundryAdapterDigest, testDigest("foundry-adapter"))
+	baseline, err := LoadConfigFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baseline.Capabilities.SupportsFoundryRecovery {
+		t.Fatal("Foundry recovery was advertised without qualification")
+	}
+	digest := string(baseline.Fence.RuntimeProfileDigest)
+	t.Run("approval qualification remains independent", func(t *testing.T) {
+		t.Setenv(EnvBrokeredToolApprovalProfileDigest, digest)
+		cfg, err := LoadConfigFromEnv()
+		if err != nil || !cfg.Capabilities.Provider.SupportsBrokeredToolApprovals || cfg.Capabilities.SupportsFoundryRecovery {
+			t.Fatalf("approval qualification enabled recovery: %v", err)
+		}
+	})
+	t.Run("matching recovery qualification", func(t *testing.T) {
+		t.Setenv(EnvFoundryRecoveryProfileDigest, digest)
+		cfg, err := LoadConfigFromEnv()
+		if err != nil || !cfg.Capabilities.SupportsFoundryRecovery || cfg.Capabilities.Provider.SupportsBrokeredToolApprovals {
+			t.Fatalf("recovery qualification enabled approvals or was rejected: %v", err)
+		}
+	})
+	for _, test := range []struct{ name, value string }{
+		{"malformed", "not-a-digest"},
+		{"invalid hex", "sha256:" + strings.Repeat("g", 64)},
+		{"mismatched", testDigest("another-profile")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(EnvFoundryRecoveryProfileDigest, test.value)
+			if _, err := LoadConfigFromEnv(); err == nil || !strings.Contains(err.Error(), EnvFoundryRecoveryProfileDigest) {
+				t.Fatalf("invalid recovery qualification startup error = %v", err)
+			}
+		})
+	}
+	for _, test := range []struct{ name, variable, value string }{
+		{"adapter drift", EnvFoundryAdapterDigest, testDigest("different-adapter")},
+		{"configuration drift", EnvAgentConfigurationDigest, testDigest("different-config")},
+		{"model drift", EnvModel, "different-model"},
+		{"policy drift", EnvApprovalPolicyDigest, testDigest("different-policy")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(EnvFoundryRecoveryProfileDigest, digest)
+			t.Setenv(test.variable, test.value)
+			if _, err := LoadConfigFromEnv(); err == nil || !strings.Contains(err.Error(), "does not match runtime profile digest") {
+				t.Fatalf("changed profile retained recovery qualification: %v", err)
+			}
+		})
+	}
+	for _, provider := range []string{providerKindAgentKit, providerKindCodex, providerKindClaude, providerKindCopilot, providerKindOpencode} {
+		t.Run("unsupported "+provider, func(t *testing.T) {
+			t.Setenv(EnvProvider, provider)
+			t.Setenv(EnvAgentKitAdapterDigest, testAgentKitAdapterDigest)
+			if provider == providerKindOpencode {
+				t.Setenv(EnvModel, "openai/gpt-test")
+				t.Setenv(EnvModelContextLimit, "128000")
+				t.Setenv(EnvModelOutputLimit, "16000")
+			}
+			t.Setenv(EnvFoundryRecoveryProfileDigest, digest)
+			if _, err := LoadConfigFromEnv(); err == nil || !strings.Contains(err.Error(), EnvFoundryRecoveryProfileDigest+" is unsupported for provider") {
+				t.Fatalf("unsupported provider recovery startup error = %v", err)
+			}
+		})
+	}
+}
+
+func testLoadConfigFromEnvBrokeredApprovalQualification(t *testing.T) {
+	for _, provider := range []struct{ kind, adapterEnv string }{
+		{providerKindAgentKit, EnvAgentKitAdapterDigest},
+		{providerKindFoundry, EnvFoundryAdapterDigest},
+	} {
+		t.Run(provider.kind, func(t *testing.T) {
+			t.Setenv(EnvProvider, provider.kind)
+			t.Setenv(provider.adapterEnv, testDigest(provider.kind+"-adapter"))
+			unqualified, err := LoadConfigFromEnv()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if unqualified.Capabilities.Provider.SupportsBrokeredToolApprovals {
+				t.Fatal("approval support was advertised without qualification")
+			}
+			profileDigest := string(unqualified.Fence.RuntimeProfileDigest)
+			t.Run("matching", func(t *testing.T) {
+				t.Setenv(EnvBrokeredToolApprovalProfileDigest, profileDigest)
+				qualified, err := LoadConfigFromEnv()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !qualified.Capabilities.Provider.SupportsBrokeredToolApprovals || qualified.Capabilities.Provider.SupportsPermissions {
+					t.Fatal("qualified brokered capability did not remain separate from native permissions")
+				}
+			})
+			for _, test := range []struct{ name, value string }{
+				{"malformed", "not-a-profile-digest"},
+				{"invalid hex", "sha256:" + strings.Repeat("g", 64)},
+				{"mismatched", testDigest("another-qualified-profile")},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					t.Setenv(EnvBrokeredToolApprovalProfileDigest, test.value)
+					if _, err := LoadConfigFromEnv(); err == nil || !strings.Contains(err.Error(), EnvBrokeredToolApprovalProfileDigest) {
+						t.Fatalf("invalid qualification startup error = %v", err)
+					}
+				})
+			}
+			for _, test := range []struct{ name, variable, value string }{
+				{"adapter drift", provider.adapterEnv, testDigest("different-adapter")},
+				{"configuration drift", EnvAgentConfigurationDigest, testDigest("different-config")},
+				{"model drift", EnvModel, "different-model"},
+				{"policy drift", EnvApprovalPolicyDigest, testDigest("different-policy")},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					t.Setenv(EnvBrokeredToolApprovalProfileDigest, profileDigest)
+					t.Setenv(test.variable, test.value)
+					if _, err := LoadConfigFromEnv(); err == nil || !strings.Contains(err.Error(), "does not match runtime profile digest") {
+						t.Fatalf("changed profile retained approval qualification: %v", err)
+					}
+				})
+			}
+		})
+	}
+	for _, provider := range []string{providerKindCodex, providerKindClaude, providerKindCopilot, providerKindOpencode} {
+		t.Run("unsupported "+provider, func(t *testing.T) {
+			t.Setenv(EnvProvider, provider)
+			if provider == providerKindOpencode {
+				t.Setenv(EnvModel, "openai/gpt-test")
+				t.Setenv(EnvModelContextLimit, "128000")
+				t.Setenv(EnvModelOutputLimit, "16000")
+			}
+			baseline, err := LoadConfigFromEnv()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(EnvBrokeredToolApprovalProfileDigest, string(baseline.Fence.RuntimeProfileDigest))
+			if _, err := LoadConfigFromEnv(); err == nil || !strings.Contains(err.Error(), "is unsupported for provider") {
+				t.Fatalf("unsupported provider qualification error = %v", err)
+			}
+		})
 	}
 }
 
@@ -522,21 +853,9 @@ func TestLoadConfigFromEnvBootstrapSecrets(t *testing.T) {
 	}
 }
 
-func TestDefaultProtocolLimitsUseProviderSpecificUpdateRates(t *testing.T) {
-	tests := []struct {
-		provider string
-		want     int
-	}{
-		{provider: providerKindCodex, want: runtimeCodexMaxUpdateEventsPerSecond},
-		{provider: providerKindClaude, want: harnessv2.DefaultMaxUpdateEventsPerSecond},
-		{provider: providerKindCopilot, want: harnessv2.DefaultMaxUpdateEventsPerSecond},
-	}
-	for _, test := range tests {
-		t.Run(test.provider, func(t *testing.T) {
-			if got := defaultProtocolLimits(test.provider).MaxUpdateEventsPerSecond; got != test.want {
-				t.Fatalf("MaxUpdateEventsPerSecond = %d, want %d", got, test.want)
-			}
-		})
+func TestDefaultProtocolLimitsUpdateRate(t *testing.T) {
+	if got := defaultProtocolLimits().MaxUpdateEventsPerSecond; got != runtimeMaxUpdateEventsPerSecond {
+		t.Fatalf("MaxUpdateEventsPerSecond = %d, want %d", got, runtimeMaxUpdateEventsPerSecond)
 	}
 }
 
@@ -546,6 +865,9 @@ func TestProviderUpstreamBaseURLPreservesProviderSemantics(t *testing.T) {
 	}
 	if got := providerUpstreamBaseURL(providerKindCopilot, "http://vekil:1337/v1"); got != "http://vekil:1337/v1" {
 		t.Fatalf("Copilot upstream base URL = %q", got)
+	}
+	if got := providerUpstreamBaseURL(providerKindAgentKit, "http://vekil:1337"); got != "http://vekil:1337/v1" {
+		t.Fatalf("AgentKit upstream base URL = %q", got)
 	}
 	if got := providerUpstreamBaseURL("claude", "http://vekil:1337/"); got != "http://vekil:1337" {
 		t.Fatalf("Claude upstream base URL = %q", got)
@@ -574,13 +896,20 @@ func testProviderProjectionRequest(
 		if !toolPolicy.Allows(name) {
 			continue
 		}
-		if _, ok := canonicalProviderNativeToolName(name); !ok {
-			t.Fatalf("unknown provider-native test tool %q", name)
-		}
-		toolPolicy.Tools = append(toolPolicy.Tools, harnessv2.MCPToolDescriptor{
+		descriptor := harnessv2.MCPToolDescriptor{
 			Name: name, Description: "provider native", Source: harnessv2.MCPToolSourceProviderNative,
 			Effect: harnessv2.MCPToolEffectReadOnly,
-		})
+		}
+		if _, ok := canonicalProviderNativeToolName(name); !ok {
+			switch name {
+			case "send_message", "check_messages":
+				descriptor.Source = harnessv2.MCPToolSourceBrokeredBuiltin
+				descriptor.InputSchema = json.RawMessage(`{"type":"object"}`)
+			default:
+				t.Fatalf("unknown projection test tool %q", name)
+			}
+		}
+		toolPolicy.Tools = append(toolPolicy.Tools, descriptor)
 	}
 	slices.SortFunc(toolPolicy.Tools, func(a, b harnessv2.MCPToolDescriptor) int { return strings.Compare(a.Name, b.Name) })
 	var err error
@@ -627,4 +956,38 @@ func testProviderProjectionRequest(
 
 func containsArg(args []string, want string) bool {
 	return slices.Contains(args, want)
+}
+
+// assertCodexWebSocketTransportsDisabled proves the session config selects
+// the custom HTTPS-only provider instead of Codex's built-in "openai"
+// provider, whose Responses WebSocket attempt the proxy rejects with 403 and
+// whose fallback warning would leak into the agent's first message.
+func assertCodexWebSocketTransportsDisabled(t *testing.T, config map[string]any) {
+	t.Helper()
+	if config["model_provider"] != codexProviderID {
+		t.Fatalf("Codex model_provider = %#v, want %q", config["model_provider"], codexProviderID)
+	}
+	if _, ok := config["openai_base_url"]; ok {
+		t.Fatalf("Codex config still selects the built-in openai provider: %#v", config)
+	}
+	providers, _ := config["model_providers"].(map[string]any)
+	provider, _ := providers[codexProviderID].(map[string]any)
+	if provider["wire_api"] != "responses" || provider["env_key"] != "CODEX_API_KEY" || provider["base_url"] == "" {
+		t.Fatalf("Codex provider definition = %#v", provider)
+	}
+}
+
+func TestPrepareCodexHomeDisablesResponsesWebSockets(t *testing.T) {
+	paths := acp.SessionPaths{Home: t.TempDir()}
+	if err := prepareCodexHome(paths); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(paths.Home, ".codex", "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := string(data)
+	if !strings.Contains(config, "check_for_update_on_startup = false") {
+		t.Fatalf("config.toml lacks the update opt-out:\n%s", config)
+	}
 }

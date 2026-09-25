@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# scripts/tests suites rely on 'set -e' stopping on failed (( )) arithmetic,
+# which macOS's stock bash 3.2 does not honor; failures would be silently
+# masked there. Require a modern bash (for example: brew install bash).
+if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+  echo "error: this test suite requires bash >= 4; found ${BASH_VERSION}" >&2
+  exit 1
+fi
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 script="${root}/scripts/upgrade-orka-crds.sh"
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/upgrade-orka-crds-test.XXXXXX")"
@@ -678,7 +686,7 @@ test_clean_historical_cutover_applies() {
   prepare_historical_case "${case_dir}"
 
   run_upgrade "${case_dir}" --gateway-workload gateway-ns/legacy-gateway=deployment/gateway-ns/gateway-adapter >"${case_dir}/output" 2>&1
-  grep -F 'ACP v2 CRD hard cutover applied' "${case_dir}/output" >/dev/null
+  grep -F 'Orka harness v2 CRD hard cutover applied' "${case_dir}/output" >/dev/null
   assert_one_dry_run_and_one_live_apply "${case_dir}"
   [[ "$(grep -Fc 'get agentruntimes.core.orka.ai -A -o json' "${case_dir}/kubectl.log")" == "2" ]]
 }

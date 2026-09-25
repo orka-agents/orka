@@ -8,6 +8,9 @@ import (
 	"strings"
 	"time"
 
+	"k8s.io/apimachinery/pkg/types"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
@@ -40,6 +43,117 @@ func promptAttemptSessionBound(attempt *store.PromptAttempt) (bool, error) {
 	default:
 		return true, nil
 	}
+}
+
+func (d *ACPDispatcher) finalizedSessionTurnKnown(taskUID types.UID, turnID string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	knownTurnID, known := d.finalizedTurns[taskUID]
+	return known && knownTurnID == turnID
+}
+
+func (d *ACPDispatcher) rememberFinalizedSessionTurn(taskUID types.UID, turnID string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.finalizedTurns == nil {
+		d.finalizedTurns = map[types.UID]string{}
+	}
+	d.finalizedTurns[taskUID] = turnID
+}
+
+// pruneFinalizedSessionTurns bounds the lookup cache to Tasks returned by the
+// current cluster-wide scan. A Task deleted during the scan can leave one
+// entry until the next pass, but cumulative historical throughput cannot grow
+// the map indefinitely.
+func (d *ACPDispatcher) pruneFinalizedSessionTurns(tasks []corev1alpha1.Task) {
+	live := make(map[types.UID]struct{}, len(tasks))
+	for i := range tasks {
+		if tasks[i].UID != "" {
+			live[tasks[i].UID] = struct{}{}
+		}
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for taskUID := range d.finalizedTurns {
+		if _, ok := live[taskUID]; !ok {
+			delete(d.finalizedTurns, taskUID)
+		}
+	}
+}
+
+// sessionTurnRequiresTerminalRecovery reports a session-bound Task whose
+// attempt settled in any terminal state while its SessionTurn is still open.
+// Inline settle finalization silently skips when its in-memory turn is
+// missing, and the recovery sweep otherwise assumes a complete projection
+// implies a finalized turn - leaving artifact retirement blocked on
+// "SessionTurn is not finalized" until the Task deadline fails it. Succeeded
+// additionally waits for terminal delivery because publication recovery owns
+// the open turn until then; Failed, Cancelled, and OutcomeUnknown attempts
+// have no delivery to wait for. The check runs for Finalizing AND settled
+// terminal phases: a finalizer that silently skipped its missing in-memory
+// turn still terminalizes the Task, so a terminal phase alone is never proof
+// of a finalized turn.
+func (d *ACPDispatcher) sessionTurnRequiresTerminalRecovery(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attempt *store.PromptAttempt,
+) (bool, error) {
+	if task == nil || attempt == nil ||
+		!store.IsTerminalPromptExecutionState(attempt.ExecutionState) ||
+		(attempt.ExecutionState == store.PromptExecutionSucceeded &&
+			!store.IsTerminalPromptDeliveryState(attempt.DeliveryState)) {
+		return false, nil
+	}
+	// A settled Task phase is NOT proof of a finalized turn: a finalizer that
+	// silently skipped its missing in-memory turn still terminalizes the Task
+	// (for example deletion-driven cancellation), so every terminal phase is
+	// inspected alongside Finalizing.
+	switch task.Status.Phase {
+	case corev1alpha1.TaskPhaseFinalizing, corev1alpha1.TaskPhaseSucceeded,
+		corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
+	default:
+		return false, nil
+	}
+	bound, err := promptAttemptSessionBound(attempt)
+	if err != nil {
+		return false, err
+	}
+	if !bound {
+		return false, nil
+	}
+	key := store.SessionTurnKey{
+		SessionUID: attempt.SessionUID, LeaseGeneration: attempt.SessionLeaseGeneration,
+		TaskUID: attempt.Key.TaskUID, Attempt: attempt.Key.Attempt, PromptID: attempt.Key.PromptID,
+	}
+	turnID, err := key.CanonicalID()
+	if err != nil {
+		return false, err
+	}
+	settled := task.Status.Phase != corev1alpha1.TaskPhaseFinalizing
+	if d.finalizedSessionTurnKnown(task.UID, turnID) {
+		return false, nil
+	}
+	turn, err := d.Store.GetSessionTurn(ctx, turnID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			if settled {
+				d.rememberFinalizedSessionTurn(task.UID, turnID)
+			}
+			return false, nil
+		}
+		return false, err
+	}
+	if turn.State != store.SessionTurnFinalized {
+		return true, nil
+	}
+	// SessionTurnFinalized proves only the durable turn commit, not the
+	// cross-store activation tail (lease release, status projection, outbox
+	// activation). The Task controller can terminalize independently after
+	// that commit, so Task phase is never durable tail-completion proof.
+	// ResumeSessionTurnFinalization is idempotent, and its successful recovery
+	// records the immutable turn ID in the cache above.
+	return true, nil
 }
 
 func (d *ACPDispatcher) reconcileUnfinalizedTaskSession(
@@ -121,26 +235,45 @@ type acpSessionLineageIdentity struct {
 }
 
 func acpSessionLineageConfigDigest(plan ACPRuntimePlan) (string, error) {
-	if err := harnessv2.ValidateProfileDigest(plan.Digest); err != nil {
-		return "", fmt.Errorf("session lineage runtime profile digest: %w", err)
-	}
 	if plan.Workspace == nil || plan.Workspace.ReusePolicy != corev1alpha1.WorkspaceReusePolicySession {
+		if err := harnessv2.ValidateProfileDigest(plan.Digest); err != nil {
+			return "", fmt.Errorf("session lineage runtime profile digest: %w", err)
+		}
 		return string(plan.Digest), nil
 	}
-	runtimeImage := strings.TrimSpace(plan.Image)
+	return acpSessionLineageConfigurationDigest(
+		string(plan.Digest),
+		plan.Image,
+		plan.Workspace.BindingDigest,
+	)
+}
+
+func acpSessionLineageConfigurationDigest(
+	runtimeProfileDigest string,
+	runtimeImage string,
+	workspaceBindingDigest string,
+) (string, error) {
+	if err := harnessv2.ValidateProfileDigest(harnessv2.ProfileDigest(runtimeProfileDigest)); err != nil {
+		return "", fmt.Errorf("session lineage runtime profile digest: %w", err)
+	}
+	runtimeImage = strings.TrimSpace(runtimeImage)
 	if !digestPinnedImagePattern.MatchString(runtimeImage) {
 		return "", fmt.Errorf("session lineage runtime image must be pinned by sha256 digest")
 	}
-	workspaceBindingDigest := strings.TrimSpace(plan.Workspace.BindingDigest)
+	workspaceBindingDigest = strings.TrimSpace(workspaceBindingDigest)
 	if err := store.ValidateCanonicalDigest("session lineage workspace binding digest", workspaceBindingDigest); err != nil {
 		return "", err
 	}
+	// This is the provider-backed execution-workspace binding frozen into the
+	// RuntimePool plan. It is deliberately distinct from the harness
+	// RuntimeSession WorkspaceDigest, whose repo-less baseline may rotate after
+	// the Session lease is acquired without changing protocol lineage.
 	return acpDomainDigest("runtime-session-lineage-configuration/v1", struct {
 		RuntimeProfileDigest   string `json:"runtimeProfileDigest"`
 		RuntimeImage           string `json:"runtimeImage"`
 		WorkspaceBindingDigest string `json:"workspaceBindingDigest"`
 	}{
-		RuntimeProfileDigest:   string(plan.Digest),
+		RuntimeProfileDigest:   runtimeProfileDigest,
 		RuntimeImage:           runtimeImage,
 		WorkspaceBindingDigest: workspaceBindingDigest,
 	})
@@ -179,7 +312,10 @@ func (d *ACPDispatcher) prepareTaskSession(
 		return nil, err
 	}
 	if preparation.current == nil && lease.Session.LeaseGeneration > 1 {
-		preparation.plan.Binding.Generation = uint64(lease.Session.LeaseGeneration)
+		preparation.plan.Binding.Generation = max(
+			preparation.plan.Binding.Generation,
+			uint64(lease.Session.LeaseGeneration),
+		)
 		preparation.plan.Recreate = true
 		preparation.plan.BootstrapRequired = true
 		preparation.plan.Reason = "controller-restarted"
@@ -207,6 +343,13 @@ func (d *ACPDispatcher) prepareTaskSession(
 			preparation.plan.Reason = "persisted-runtime-session-recreation"
 		}
 	}
+	logf.FromContext(ctx).Info("ACP runtime session planned",
+		"namespace", task.Namespace, "task", task.Name, "sessionUID", preparation.control.SessionUID,
+		"reason", preparation.plan.Reason, "generation", preparation.plan.Binding.Generation,
+		"recreate", preparation.plan.Recreate, "bootstrap", preparation.plan.BootstrapRequired,
+		"currentBindingKnown", preparation.current != nil, "leaseGeneration", lease.Session.LeaseGeneration,
+		"durableGeneration", preparation.control.RuntimeSessionGeneration,
+	)
 	return &acpTaskSession{
 		Turn: turn, Binding: preparation.plan.Binding, Bootstrap: preparation.bootstrap,
 		UserPrompt:       preparation.userPrompt,
@@ -265,7 +408,20 @@ func (d *ACPDispatcher) planTaskSession(
 			return nil, err
 		}
 	}
+	if control.RuntimeSessionGeneration < 0 {
+		return nil, store.ValidationErrorf("durable Session RuntimeSession generation must not be negative")
+	}
+	generationFloor := uint64(control.RuntimeSessionGeneration)
+	workspaceGenerationFloor, err := d.taskRuntimeSessionGenerationFloor(ctx, task)
+	if err != nil {
+		return nil, err
+	}
+	generationFloor = max(generationFloor, workspaceGenerationFloor)
 	plan, err := PlanACPRuntimeSession(*control, current, profileDigest, mcpBindingDigest, runtimeInstanceID, supervisorBootID)
+	if err != nil {
+		return nil, err
+	}
+	plan, err = enforceACPRuntimeSessionGenerationFloor(plan, generationFloor)
 	if err != nil {
 		return nil, err
 	}
@@ -633,7 +789,7 @@ func (d *ACPDispatcher) acquireTaskSessionLease(
 		expires = time.Now().UTC().Add(task.Spec.Timeout.Duration + time.Minute)
 	}
 	return d.Sessions.AcquireMutationLease(ctx, ACPAcquireSessionLeaseRequest{
-		Session: *control, Fence: fence, TaskUID: string(task.UID), Attempt: int64(task.Status.Execution.Attempt),
+		Session: *control, Fence: fence, TaskName: task.Name, TaskUID: string(task.UID), Attempt: int64(task.Status.Execution.Attempt),
 		PromptID: task.Status.Execution.PromptID, PromptRequestDigest: task.Status.Execution.RequestDigest,
 		AcquiredAt: time.Now().UTC(), ExpiresAt: &expires,
 		NamespaceUID: lineage.NamespaceUID, RuntimeIdentity: lineage.RuntimeIdentity, ConfigDigest: lineage.ConfigDigest,
@@ -690,6 +846,10 @@ func (d *ACPDispatcher) finalizeTaskSessionResult(
 	delivery corev1alpha1.TaskDeliveryStatus,
 ) error {
 	if session == nil || session.Turn == nil {
+		// The turn-aware recovery sweep converges the still-open SessionTurn;
+		// log so the skip is attributable when it happens.
+		logf.FromContext(ctx).Info("skipping inline ACP session finalization without an open in-memory turn",
+			"namespace", task.Namespace, "task", task.Name)
 		return nil
 	}
 	execution, err := taskSessionProjectionExecution(task, corev1alpha1.TaskExecutionStatus{
@@ -699,9 +859,19 @@ func (d *ACPDispatcher) finalizeTaskSessionResult(
 	if err != nil {
 		return err
 	}
+	// The outbox may publish the terminal phase before or after live
+	// settlement. Include a fixed message so either ordering can record a
+	// meaningful lifecycle event without copying assistant or runtime text.
+	message := "ACP task completed"
+	switch phase {
+	case corev1alpha1.TaskPhaseFailed:
+		message = "ACP delivery failed"
+	case corev1alpha1.TaskPhaseCancelled:
+		message = "publication cancelled before push"
+	}
 	payload, err := json.Marshal(taskTerminalProjection{
 		Namespace: task.Namespace, Task: task.Name, TaskUID: string(task.UID), Attempt: task.Status.Execution.Attempt,
-		Phase: phase, Execution: execution, Delivery: &delivery,
+		Phase: phase, Message: message, Execution: execution, Delivery: &delivery,
 	})
 	if err != nil {
 		return err
@@ -709,12 +879,17 @@ func (d *ACPDispatcher) finalizeTaskSessionResult(
 	_, err = d.Sessions.FinalizeAssistantResult(ctx, ACPFinalizeAssistantRequest{
 		SessionTurn: *session.Turn, Fence: fence, AssistantResult: result,
 		PublicationID: publicationID,
-		Projection:    ACPFinalizationProjection{ProjectionKind: "TaskTerminalStatus", Payload: payload, AvailableAt: time.Now().UTC()},
+		Projection:    ACPFinalizationProjection{ProjectionKind: taskTerminalProjectionKind, Payload: payload, AvailableAt: time.Now().UTC()},
 		FinalizedAt:   time.Now().UTC(),
 	})
 	if err == nil {
 		session.finalized = true
-		d.setRuntimeSessionBinding(session.Binding)
+		// Only a complete binding may replace the live one: a recovered
+		// session that could not rebuild its generation must not clobber
+		// the binding the live path recorded.
+		if session.Binding.Generation > 0 {
+			d.setRuntimeSessionBinding(session.Binding)
+		}
 	}
 	return err
 }
@@ -740,7 +915,7 @@ func (d *ACPDispatcher) finalizeTaskSessionUnknown(ctx context.Context, task *co
 	}
 	_, err = d.Sessions.FinalizeOutcomeUnknown(ctx, ACPFinalizeOutcomeUnknownRequest{
 		SessionTurn: *session.Turn, Fence: fence, Reason: reason,
-		Projection:  ACPFinalizationProjection{ProjectionKind: "TaskTerminalStatus", Payload: payload, AvailableAt: time.Now().UTC()},
+		Projection:  ACPFinalizationProjection{ProjectionKind: taskTerminalProjectionKind, Payload: payload, AvailableAt: time.Now().UTC()},
 		FinalizedAt: time.Now().UTC(),
 	})
 	if err == nil {
@@ -776,7 +951,7 @@ func (d *ACPDispatcher) finalizeTaskSessionMarker(
 	}
 	_, err = d.Sessions.FinalizeOutcomeMarker(ctx, ACPFinalizeOutcomeMarkerRequest{
 		SessionTurn: *session.Turn, Fence: fence, Kind: kind, Reason: reason,
-		Projection:  ACPFinalizationProjection{ProjectionKind: "TaskTerminalStatus", Payload: payload, AvailableAt: time.Now().UTC()},
+		Projection:  ACPFinalizationProjection{ProjectionKind: taskTerminalProjectionKind, Payload: payload, AvailableAt: time.Now().UTC()},
 		FinalizedAt: time.Now().UTC(),
 	})
 	if err == nil {
@@ -848,6 +1023,44 @@ func (d *ACPDispatcher) removeRuntimeSessionBinding(sessionUID string) {
 	d.mu.Lock()
 	delete(d.runtimeSessions, strings.TrimSpace(sessionUID))
 	d.mu.Unlock()
+}
+
+// retireRecoveredRuntimeSessionBinding drops the in-memory RuntimeSession
+// binding after recovered terminal settlement unless the RuntimeSession is
+// known to stay live: a session-bound read RuntimeSession whose prompt
+// succeeded remains resident on the supervisor after its turn finalizes, and
+// its binding must survive so the next continuation Task plans a reuse
+// instead of a controller-restart style recreation at a new generation with
+// a full transcript bootstrap. Task-scoped sessions (no durable Session, or a
+// write workspace) are retired with the Task, and any non-successful
+// settlement (failed, cancelled, outcome unknown) schedules supervisor
+// cleanup of the RuntimeSession, so those bindings are dropped exactly as the
+// normal failure path does.
+//
+// Retention additionally requires a reusable terminal delivery state (a read
+// prompt that succeeded but whose delivery failed, for example a modified
+// read-only workspace, is cleaned up by the live failure paths) and a
+// complete binding: a recovered session may carry only the SessionUID, and
+// retaining a binding without a generation would make the next continuation
+// fail planning instead of recreating the runtime.
+func (d *ACPDispatcher) retireRecoveredRuntimeSessionBinding(task *corev1alpha1.Task, attempt *store.PromptAttempt, binding ACPRuntimeSessionBinding) {
+	sessionUID := strings.TrimSpace(binding.SessionUID)
+	reusable := task != nil && attempt != nil && sessionUID != "" &&
+		attempt.ExecutionState == store.PromptExecutionSucceeded &&
+		(attempt.DeliveryState == store.PromptDeliveryNotRequested || attempt.DeliveryState == store.PromptDeliveryReadValidated) &&
+		task.Spec.SessionRef != nil &&
+		(task.Spec.Workspace == nil || task.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentWrite)
+	if reusable {
+		if binding.Generation > 0 {
+			return
+		}
+		// The recovered binding could not be rebuilt; the live binding, if
+		// complete, is still authoritative and stays.
+		if current := d.currentRuntimeSessionBinding(sessionUID); current != nil && current.Generation > 0 {
+			return
+		}
+	}
+	d.removeRuntimeSessionBinding(sessionUID)
 }
 
 func bootstrapPromptText(bootstrap *ACPBootstrapTranscript) string {

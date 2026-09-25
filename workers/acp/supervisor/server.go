@@ -12,6 +12,7 @@ import (
 	"maps"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -22,20 +23,103 @@ import (
 )
 
 type Server struct {
-	cfg           Config
-	mux           *http.ServeMux
-	providerProxy *providerProxy
-	mcpProxy      *mcpProxy
-	identityLock  io.Closer
+	cfg                    Config
+	mux                    *http.ServeMux
+	providerProxy          *providerProxy
+	mcpProxy               *mcpProxy
+	identityLock           io.Closer
+	e2ePromptWriteFaultDir string
+	e2ePromptWriteRecorder E2EPromptWriteFaultRecorder
 
-	mu           sync.Mutex
-	lifecycle    harnessv2.SupervisorLifecycle
-	drain        harnessv2.DrainStatus
-	sessions     map[harnessv2.RuntimeSessionID]*sessionState
-	tombstones   map[harnessv2.RuntimeSessionUID]harnessv2.RuntimeSessionTombstone
-	poolOps      map[harnessv2.OperationID]harnessv2.OperationRecord
-	statusNonces map[string]time.Time
-	promptSlots  chan struct{}
+	mu                 sync.Mutex
+	lifecycle          harnessv2.SupervisorLifecycle
+	poisoned           bool
+	drain              harnessv2.DrainStatus
+	sessions           map[harnessv2.RuntimeSessionID]*sessionState
+	tombstones         map[harnessv2.RuntimeSessionUID]sessionTombstone
+	failedCreates      map[harnessv2.RuntimeSessionUID]failedCreateReplay
+	poolOps            map[harnessv2.OperationID]harnessv2.OperationRecord
+	statusNonces       map[string]time.Time
+	foundryIdentity    *harnessv2.FoundryBrokerIdentity
+	foundryRecoveryOps map[harnessv2.OperationID]foundryRecoveryOperation
+	promptSlots        chan struct{}
+}
+
+const e2ePromptWriteAmbiguityLedgerDir = ".orka-e2e-prompt-write-ambiguity"
+
+func prepareE2EPromptWriteAmbiguityLedger(identityStateDir string) (string, error) {
+	dir := filepath.Join(identityStateDir, e2ePromptWriteAmbiguityLedgerDir)
+	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return "", fmt.Errorf("create ledger directory: %w", err)
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return "", fmt.Errorf("inspect ledger directory: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode().Perm() != 0o700 {
+		return "", fmt.Errorf("ledger directory must be a real mode 0700 directory")
+	}
+	return dir, nil
+}
+
+// consumeE2EPromptWriteFaultLocked records the test fault before the handler
+// aborts its connection. Durable workspace pools use one exclusive-create file
+// per operation; direct pools use a controller-owned record. The caller must
+// hold s.mu.
+func (s *Server) consumeE2EPromptWriteFaultLocked(
+	ctx context.Context,
+	metadata harnessv2.MutationMetadata,
+) (bool, error) {
+	if s.e2ePromptWriteFaultDir == "" {
+		if s.e2ePromptWriteRecorder == nil {
+			return false, fmt.Errorf("E2E prompt write fault recorder is unavailable")
+		}
+		return s.e2ePromptWriteRecorder.Consume(ctx, metadata)
+	}
+
+	digest := sha256.Sum256([]byte(metadata.OperationID))
+	recordPath := filepath.Join(s.e2ePromptWriteFaultDir, "operation-"+hex.EncodeToString(digest[:]))
+	record, err := os.OpenFile(recordPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		info, statErr := os.Lstat(recordPath)
+		if statErr != nil {
+			return false, fmt.Errorf("inspect existing operation record: %w", statErr)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || info.Size() != 0 {
+			return false, fmt.Errorf("existing operation record must be an empty mode 0600 regular file")
+		}
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("create operation record: %w", err)
+	}
+	removeRecord := func() {
+		_ = record.Close()
+		_ = os.Remove(recordPath)
+	}
+	if err := record.Chmod(0o600); err != nil {
+		removeRecord()
+		return false, fmt.Errorf("chmod operation record: %w", err)
+	}
+	if err := record.Sync(); err != nil {
+		removeRecord()
+		return false, fmt.Errorf("sync operation record: %w", err)
+	}
+	if err := record.Close(); err != nil {
+		_ = os.Remove(recordPath)
+		return false, fmt.Errorf("close operation record: %w", err)
+	}
+	directory, err := os.Open(s.e2ePromptWriteFaultDir)
+	if err != nil {
+		_ = os.Remove(recordPath)
+		return false, fmt.Errorf("open ledger directory for sync: %w", err)
+	}
+	defer directory.Close() //nolint:errcheck
+	if err := directory.Sync(); err != nil {
+		_ = os.Remove(recordPath)
+		return false, fmt.Errorf("sync ledger directory: %w", err)
+	}
+	return true, nil
 }
 
 // statusNonceRetentionSlack keeps a consumed status nonce past its capability
@@ -62,19 +146,50 @@ const sessionDeletionOperationReserve = 1
 // replay.
 const tombstoneRetention = time.Hour
 
+type sessionTombstone struct {
+	harnessv2.RuntimeSessionTombstone
+	sessionID     harnessv2.RuntimeSessionID
+	prompt        *retiredPromptSettlement
+	cancellations map[harnessv2.OperationID]*operationReplay
+	// Late cancellation records stay separate so explicit deletion replays
+	// continue to return the original immutable wire tombstone.
+	cancellationOperations map[harnessv2.OperationID]harnessv2.OperationRecord
+}
+
+// A retired prompt retains proof, never its input, output, or capabilities.
+// Its lifetime follows the session tombstone, independently of the admission
+// capability, which can expire while a renewed prompt is still running.
+type retiredPromptSettlement struct {
+	metadata   harnessv2.MutationMetadata
+	settlement harnessv2.PromptSettlement
+}
+
 // pruneTombstonesLocked drops only records older than tombstoneRetention. It
 // must be called with s.mu held, before a new tombstone is inserted.
 func (s *Server) pruneTombstonesLocked(now time.Time) {
 	for uid, tombstone := range s.tombstones {
 		if now.Sub(tombstone.DeletedAt) > tombstoneRetention {
 			delete(s.tombstones, uid)
+			delete(s.failedCreates, uid)
 		}
 	}
 }
 
 type sessionCreationError struct {
-	stage string
-	cause error
+	stage               string
+	cause               error
+	workspaceResumeLost bool
+}
+
+const sessionCreationStageDurableResumeVerification = "durable resume verification"
+
+type failedCreateReplay struct {
+	operationID   harnessv2.OperationID
+	requestDigest harnessv2.RequestDigest
+	statusCode    int
+	code          harnessv2.ErrorCode
+	message       string
+	retryable     bool
 }
 
 func (e *sessionCreationError) Error() string {
@@ -88,6 +203,29 @@ func sessionCreationFailed(stage string, err error) error {
 		return nil
 	}
 	return &sessionCreationError{stage: stage, cause: err}
+}
+
+func sessionCreationResumeLost(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &sessionCreationError{
+		stage:               sessionCreationStageDurableResumeVerification,
+		cause:               err,
+		workspaceResumeLost: true,
+	}
+}
+
+func isSessionCreationResumeLost(err error) bool {
+	creation, ok := errors.AsType[*sessionCreationError](err)
+	return ok && creation.workspaceResumeLost
+}
+
+func durableWorkspacePreparationFailed(expectResume bool, err error) error {
+	if expectResume && errors.Is(err, acp.ErrDurableWorkspaceCheckpointUnusable) {
+		return sessionCreationResumeLost(err)
+	}
+	return sessionCreationFailed("durable workspace preparation", err)
 }
 
 func sessionCreationStage(err error) string {
@@ -116,26 +254,33 @@ type sessionState struct {
 	mcpProxy                *mcpProxySession
 	profile                 harnessv2.RuntimeProfile
 	agentConfiguration      harnessv2.AgentSessionConfiguration
+	agentDiagnosticFilter   *AgentDiagnosticFilter
 	creating                bool
 	drainCleanupScheduled   bool
 	publicationFinalization *harnessv2.PublicationFinalizationReceipt
 }
 
 type promptState struct {
-	request              harnessv2.StartPromptRequest
-	operation            harnessv2.OperationRecord
-	lease                harnessv2.PromptLease
-	startedAt            time.Time
-	acceptedAt           time.Time
-	sequence             uint64
-	assistant            strings.Builder
-	assistantOverflow    bool
-	finalAnswer          strings.Builder
-	finalAnswerSeen      bool
-	finalAnswerOverflow  bool
-	settlement           *harnessv2.PromptSettlement
-	settlementDigest     string
-	permissionRequestIDs map[harnessv2.PermissionRequestID]struct{}
+	request             harnessv2.StartPromptRequest
+	operation           harnessv2.OperationRecord
+	lease               harnessv2.PromptLease
+	startedAt           time.Time
+	acceptedAt          time.Time
+	sequence            uint64
+	assistant           strings.Builder
+	assistantOverflow   bool
+	finalAnswer         strings.Builder
+	finalAnswerSeen     bool
+	finalAnswerOverflow bool
+	settlement          *harnessv2.PromptSettlement
+	settlementDigest    string
+	// providerDrainTimedOut records that an admitted inference request was
+	// still in flight when the child settled and did not finish within the
+	// cancel grace, so the prompt's inference accounting is incomplete.
+	providerDrainTimedOut    bool
+	remoteSettlementUnproven bool
+	permissionRequestIDs     map[harnessv2.PermissionRequestID]struct{}
+	toolCallNames            map[string]string
 }
 
 type promptMutationExecutor interface {
@@ -144,11 +289,13 @@ type promptMutationExecutor interface {
 }
 
 type operationReplay struct {
-	done         chan struct{}
-	permission   *harnessv2.PermissionResolutionResponse
-	cancellation *harnessv2.CancelPromptResponse
-	lease        *harnessv2.PromptLeaseResponse
-	failure      *operationFailure
+	done           chan struct{}
+	isCancellation bool
+	admission      *harnessv2.PromptAdmissionResponse
+	permission     *harnessv2.PermissionResolutionResponse
+	cancellation   *harnessv2.CancelPromptResponse
+	lease          *harnessv2.PromptLeaseResponse
+	failure        *operationFailure
 }
 
 type operationFailure struct {
@@ -243,7 +390,19 @@ func newServer(cfg Config, prepareIdentityState func(string, *acp.UIDAllocator) 
 	if prepareIdentityState == nil {
 		return nil, fmt.Errorf("session identity state preparation is required")
 	}
-	identityLock, err := prepareIdentityState(cfg.SessionBaseDir, cfg.UIDAllocator)
+	identityStateDir := cfg.SessionBaseDir
+	if strings.TrimSpace(cfg.DurableWorkspaceDir) != "" {
+		// The session base directory dies with a data-only cold suspension
+		// while the durable workspace root survives it. The allocator
+		// high-water mark must live with the surviving data, or a cold-booted
+		// supervisor would restart allocation at zero and hand the
+		// continuation the same UID/GID the pre-suspension session used.
+		identityStateDir = filepath.Join(cfg.DurableWorkspaceDir, ".session-identity")
+		if err := validateDurableCheckpointIdentityState(cfg.DurableWorkspaceDir, identityStateDir); err != nil {
+			return nil, fmt.Errorf("inspect durable session identity state: %w", err)
+		}
+	}
+	identityLock, err := prepareIdentityState(identityStateDir, cfg.UIDAllocator)
 	if err != nil {
 		return nil, fmt.Errorf("prepare session identity state: %w", err)
 	}
@@ -253,6 +412,13 @@ func newServer(cfg Config, prepareIdentityState func(string, *acp.UIDAllocator) 
 			_ = identityLock.Close()
 		}
 	}()
+	e2ePromptWriteFaultDir := ""
+	if cfg.E2EPromptWriteAmbiguityMarker != "" && cfg.DurableWorkspaceDir != "" {
+		e2ePromptWriteFaultDir, err = prepareE2EPromptWriteAmbiguityLedger(identityStateDir)
+		if err != nil {
+			return nil, fmt.Errorf("prepare E2E prompt write ambiguity ledger: %w", err)
+		}
+	}
 	proxy, err := newProviderProxy(cfg.ProviderProxy)
 	if err != nil {
 		return nil, err
@@ -267,17 +433,21 @@ func newServer(cfg Config, prepareIdentityState func(string, *acp.UIDAllocator) 
 	cfg.ProviderProxy.UpstreamBearerToken = ""
 	cfg.MCPBroker = nil
 	server := &Server{
-		cfg:           cfg,
-		mux:           http.NewServeMux(),
-		providerProxy: proxy,
-		mcpProxy:      mcp,
-		identityLock:  identityLock,
-		lifecycle:     harnessv2.SupervisorLifecycleReady,
-		drain:         harnessv2.DrainStatus{AcceptingNewSessions: true},
-		sessions:      make(map[harnessv2.RuntimeSessionID]*sessionState),
-		tombstones:    make(map[harnessv2.RuntimeSessionUID]harnessv2.RuntimeSessionTombstone),
-		poolOps:       make(map[harnessv2.OperationID]harnessv2.OperationRecord),
-		promptSlots:   make(chan struct{}, cfg.Capabilities.Limits.MaxConcurrentPrompts),
+		cfg:                    cfg,
+		mux:                    http.NewServeMux(),
+		providerProxy:          proxy,
+		mcpProxy:               mcp,
+		identityLock:           identityLock,
+		e2ePromptWriteFaultDir: e2ePromptWriteFaultDir,
+		e2ePromptWriteRecorder: cfg.E2EPromptWriteFaultRecorder,
+		lifecycle:              harnessv2.SupervisorLifecycleReady,
+		drain:                  harnessv2.DrainStatus{AcceptingNewSessions: true},
+		sessions:               make(map[harnessv2.RuntimeSessionID]*sessionState),
+		tombstones:             make(map[harnessv2.RuntimeSessionUID]sessionTombstone),
+		failedCreates:          make(map[harnessv2.RuntimeSessionUID]failedCreateReplay),
+		poolOps:                make(map[harnessv2.OperationID]harnessv2.OperationRecord),
+		foundryRecoveryOps:     make(map[harnessv2.OperationID]foundryRecoveryOperation),
+		promptSlots:            make(chan struct{}, cfg.Capabilities.Limits.MaxConcurrentPrompts),
 	}
 	if server.sessionIdentityCapacity().RotationRequired() {
 		server.drain.AcceptingNewSessions = false
@@ -294,6 +464,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET "+harnessv2.CapabilitiesPath, s.handleCapabilities)
 	s.mux.HandleFunc("GET "+harnessv2.StatusPath, s.handleStatus)
 	s.mux.HandleFunc("PUT "+harnessv2.DrainPath, s.handleDrain)
+	s.mux.HandleFunc("PUT "+harnessv2.FoundryBootRetirementPath, s.handleRetireFoundryBoot)
 	s.mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}", s.handleCreateSession)
 	s.mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/publication-finalization", s.handleFinalizeSessionPublication)
 	s.mux.HandleFunc("DELETE /v2/runtime-sessions/{sessionID}", s.handleDeleteSession)
@@ -307,10 +478,10 @@ func (s *Server) registerRoutes() {
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	s.mu.Lock()
 	status := harnessv2.HealthStatusOK
-	switch s.lifecycle {
-	case harnessv2.SupervisorLifecycleUnhealthy:
+	switch {
+	case s.poisoned || s.lifecycle == harnessv2.SupervisorLifecycleUnhealthy:
 		status = harnessv2.HealthStatusUnhealthy
-	case harnessv2.SupervisorLifecycleDraining, harnessv2.SupervisorLifecycleTerminating:
+	case s.lifecycle == harnessv2.SupervisorLifecycleDraining || s.lifecycle == harnessv2.SupervisorLifecycleTerminating:
 		status = harnessv2.HealthStatusDegraded
 	}
 	if status == harnessv2.HealthStatusOK && !s.drain.AcceptingNewSessions {
@@ -344,27 +515,47 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, s.status())
+	identity, err := s.foundryStatusIdentity(r.Context())
+	if err != nil {
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeCleanupUnproven, "Foundry broker recovery identity changed", nil, true)
+		return
+	}
+	status := s.status()
+	status.FoundryBroker = identity
+	writeJSON(w, http.StatusOK, status)
 }
 
 // tombstoneFailedCreateLocked records a tombstone for a create that failed
 // after identity allocation so a replay of the same request is classified as
 // a duplicate rather than allocating another non-reused identity. It must be
 // called with s.mu held.
-func (s *Server) tombstoneFailedCreateLocked(sessionID harnessv2.RuntimeSessionID, metadata harnessv2.MutationMetadata, recordedAt time.Time) {
+func (s *Server) tombstoneFailedCreateLocked(
+	sessionID harnessv2.RuntimeSessionID,
+	metadata harnessv2.MutationMetadata,
+	recordedAt time.Time,
+	replay *failedCreateReplay,
+) {
 	state, ok := s.sessions[sessionID]
 	if !ok || !state.creating {
 		return
 	}
 	delete(s.sessions, sessionID)
 	s.pruneTombstonesLocked(time.Now().UTC())
-	s.tombstones[metadata.Fence.RuntimeSessionUID] = harnessv2.RuntimeSessionTombstone{
+	s.tombstones[metadata.Fence.RuntimeSessionUID] = sessionTombstone{RuntimeSessionTombstone: harnessv2.RuntimeSessionTombstone{
 		RuntimeSessionUID:        metadata.Fence.RuntimeSessionUID,
 		RuntimeSessionGeneration: metadata.Fence.RuntimeSessionGeneration,
 		RuntimeProfileDigest:     s.cfg.Fence.RuntimeProfileDigest,
 		DeletedAt:                time.Now().UTC(),
 		Operations:               []harnessv2.OperationRecord{operationRecord(metadata, harnessv2.OperationPhaseRecorded, "", recordedAt)},
+	}}
+	if replay == nil {
+		delete(s.failedCreates, metadata.Fence.RuntimeSessionUID)
+		return
 	}
+	if s.failedCreates == nil {
+		s.failedCreates = make(map[harnessv2.RuntimeSessionUID]failedCreateReplay)
+	}
+	s.failedCreates[metadata.Fence.RuntimeSessionUID] = *replay
 }
 
 // rejectTombstonedSessionCreateLocked classifies a create against the deletion
@@ -386,16 +577,28 @@ func (s *Server) rejectTombstonedSessionCreateLocked(
 		operations[tombstone.Operations[i].OperationID] = tombstone.Operations[i]
 	}
 	classification, classifyErr := harnessv2.ClassifyOperation(expected, metadata, operationPtr(operations, metadata.OperationID), true, now)
+	replay, replayExists := s.failedCreates[metadata.Fence.RuntimeSessionUID]
 	s.mu.Unlock()
 	if classifyErr != nil {
 		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, classifyErr.Error(), nil, false)
 		return true
 	}
+	slog.Info("ACP runtime session create rejected by deletion tombstone",
+		"runtimeSessionUID", metadata.Fence.RuntimeSessionUID, "runtimeSessionGeneration", metadata.Fence.RuntimeSessionGeneration,
+		"tombstonedGeneration", tombstone.RuntimeSessionGeneration, "operationID", metadata.OperationID,
+		"classification", classification.Class, "existingPhase", classification.Phase)
 	if classification.Class == harnessv2.RequestClassificationFresh {
 		// The session UID/generation is tombstoned but this operation was never
 		// recorded on it: fail closed rather than resurrect it.
 		writeError(w, http.StatusGone, harnessv2.ErrorCodeStaleFence, "runtime session was deleted", nil, false)
 		return true
+	}
+	if classification.Class == harnessv2.RequestClassificationDuplicate {
+		if replayExists &&
+			replay.operationID == metadata.OperationID && replay.requestDigest == metadata.RequestDigest {
+			writeError(w, replay.statusCode, replay.code, replay.message, nil, replay.retryable)
+			return true
+		}
 	}
 	writeClassificationError(w, classification)
 	return true
@@ -446,13 +649,13 @@ func (s *Server) status() harnessv2.StatusResponse {
 			RuntimeSessionUID:       state.descriptor.RuntimeSessionUID,
 			Generation:              state.descriptor.Generation,
 			State:                   state.descriptor.State,
-			PendingPermissionCount:  uint32(len(state.permissions)),
 			ReservedForFinalization: state.descriptor.State == harnessv2.RuntimeSessionStateFinalizing && state.publicationFinalization != nil,
 			LiveDescendantCount:     liveDescendantCount(state.runtime),
 			LastTransitionAt:        state.descriptor.LastTransitionAt,
 		}
-		if state.prompt != nil && state.prompt.settlement == nil {
+		if state.descriptor.State == harnessv2.RuntimeSessionStatePromptRunning && state.prompt != nil && state.prompt.settlement == nil {
 			status.ActivePromptID = state.prompt.request.Metadata.PromptID
+			status.PendingPermissionCount = uint32(len(state.permissions))
 			response.ActivePrompts = append(response.ActivePrompts, harnessv2.ActivePromptStatus{
 				RuntimeSessionUID:  state.descriptor.RuntimeSessionUID,
 				SessionGeneration:  state.descriptor.Generation,
@@ -464,17 +667,17 @@ func (s *Server) status() harnessv2.StatusResponse {
 				PendingPermissions: uint32(len(state.permissions)),
 				StartedAt:          state.prompt.startedAt,
 			})
+			for _, permission := range state.permissions {
+				response.PendingPermissions = append(response.PendingPermissions, harnessv2.PendingPermissionStatus{
+					RuntimeSessionUID: state.descriptor.RuntimeSessionUID,
+					PromptID:          state.prompt.request.Metadata.PromptID,
+					RequestID:         permission.requestID,
+					RequestedAt:       permission.requestedAt,
+					ExpiresAt:         permission.expiresAt,
+				})
+			}
 		}
 		response.Sessions = append(response.Sessions, status)
-		for _, permission := range state.permissions {
-			response.PendingPermissions = append(response.PendingPermissions, harnessv2.PendingPermissionStatus{
-				RuntimeSessionUID: state.descriptor.RuntimeSessionUID,
-				PromptID:          state.prompt.request.Metadata.PromptID,
-				RequestID:         permission.requestID,
-				RequestedAt:       permission.requestedAt,
-				ExpiresAt:         permission.expiresAt,
-			})
-		}
 	}
 	response.Pressure = harnessv2.PressureMetadata{
 		ResidentSessions:   uint32(len(response.Sessions)),
@@ -498,6 +701,8 @@ func (s *Server) handleDrain(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeMutation(w, r, request.Metadata, false) {
 		return
 	}
+	_, span := s.traceOperation(r, request.Metadata, "drain")
+	defer span.End()
 	s.mu.Lock()
 	classification, err := harnessv2.ClassifyOperation(s.cfg.Fence, request.Metadata, operationPtr(s.poolOps, request.Metadata.OperationID), false, now)
 	if err != nil {
@@ -520,6 +725,7 @@ func (s *Server) handleDrain(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status, response)
 }
 
+//nolint:gocyclo // Session admission keeps authentication, request validation, and replay handling together.
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	var request harnessv2.CreateRuntimeSessionRequest
 	if !s.decodeAuthenticatedJSON(w, r, &request) {
@@ -530,7 +736,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, err.Error(), nil, false)
 		return
 	}
-	if request.AgentConfiguration == nil {
+	if request.AgentConfiguration == nil && s.cfg.Capabilities.SupportsAgentSessionConfiguration {
 		writeError(w, http.StatusTooManyRequests, harnessv2.ErrorCodeRateLimited, "runtime is waiting for a controller that supports Agent session configuration", nil, true)
 		return
 	}
@@ -541,6 +747,8 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeMutation(w, r, request.Metadata, true) {
 		return
 	}
+	r, span := s.traceOperation(r, request.Metadata, "session.create")
+	defer span.End()
 	profileDigest, err := harnessv2.CanonicalProfileDigest(request.Profile)
 	if err != nil || profileDigest != s.cfg.Fence.RuntimeProfileDigest || request.Metadata.Fence.RuntimeProfileDigest != profileDigest {
 		writeError(w, http.StatusGone, harnessv2.ErrorCodeStaleFence, "runtime profile does not match this supervisor instance", nil, false)
@@ -550,7 +758,17 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, "requested provider profile is not available in this image", nil, false)
 		return
 	}
+	if len(request.MCPConfiguration.ApprovalPolicy.RequiredTools) > 0 && !s.cfg.Capabilities.Provider.SupportsBrokeredToolApprovals {
+		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, "provider does not support controller-owned brokered tool approvals", nil, false)
+		return
+	}
 	expected := s.expectedFence(request.Metadata.Fence.RuntimeSessionUID, request.Metadata.Fence.RuntimeSessionGeneration)
+	// Fresh creates have no operation record or tombstone to classify, but
+	// must still match the current supervisor before allocating an identity.
+	if mismatch := harnessv2.CompareFence(expected, request.Metadata.Fence, true); mismatch != harnessv2.FenceMatch {
+		writeClassificationError(w, harnessv2.Classification{Class: harnessv2.RequestClassificationStaleFence, FenceMismatch: mismatch})
+		return
+	}
 
 	s.mu.Lock()
 	if existing := s.sessions[request.RuntimeSessionID]; existing != nil {
@@ -566,7 +784,15 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, response)
 			return
 		}
+		existingState, existingCreating := existing.descriptor.State, existing.creating
 		s.mu.Unlock()
+		// The controller only sees the classification code; record the resident
+		// session's state so a rejected create can be reconstructed from the
+		// supervisor log without exposing request content.
+		slog.Info("ACP runtime session create rejected by replay classification",
+			"runtimeSessionID", request.RuntimeSessionID, "operationID", request.Metadata.OperationID,
+			"classification", classification.Class, "existingPhase", classification.Phase,
+			"sessionState", existingState, "creating", existingCreating)
 		writeClassificationError(w, classification)
 		return
 	}
@@ -613,6 +839,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		permissions:        make(map[harnessv2.PermissionRequestID]permissionState),
 		deltas:             make(map[harnessv2.WorkspaceDeltaID]harnessv2.CreateWorkspaceDeltaResponse),
 	}
+	delete(s.failedCreates, request.Metadata.Fence.RuntimeSessionUID)
 	recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseRecorded, "", now)
 	s.sessions[request.RuntimeSessionID] = state
 	if s.sessionIdentityCapacity().RotationRequired() {
@@ -620,18 +847,32 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Unlock()
 
-	runtimeSession, descriptor, paths, baseline, providerProxy, mcpProxy, createErr := s.createSession(r.Context(), request, now, uid, gid)
+	runtimeSession, descriptor, paths, baseline, providerProxy, mcpProxy, diagnosticFilter, createErr := s.createSession(r.Context(), request, now, uid, gid)
 	if createErr != nil {
 		// The allocated UID/GID is permanently consumed (identities are never
 		// reused). Tombstone the failed create so a replay of the same request
 		// is classified as a duplicate instead of allocating another identity
 		// on every retry and exhausting the pool's identity range; a genuine
 		// new attempt advances the session generation and is not blocked.
+		statusCode := http.StatusInternalServerError
+		code := harnessv2.ErrorCodeSessionPoisoned
+		retryable := true
+		message := safeError(createErr)
+		var replay *failedCreateReplay
+		if isSessionCreationResumeLost(createErr) {
+			statusCode = http.StatusConflict
+			code = harnessv2.ErrorCodeWorkspaceResumeLost
+			retryable = false
+			replay = &failedCreateReplay{
+				operationID: request.Metadata.OperationID, requestDigest: request.Metadata.RequestDigest,
+				statusCode: statusCode, code: code, message: message, retryable: retryable,
+			}
+		}
 		s.mu.Lock()
-		s.tombstoneFailedCreateLocked(request.RuntimeSessionID, request.Metadata, now)
+		s.tombstoneFailedCreateLocked(request.RuntimeSessionID, request.Metadata, now, replay)
 		s.mu.Unlock()
 		slog.Error("ACP runtime session creation failed", "stage", sessionCreationStage(createErr))
-		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, safeError(createErr), nil, true)
+		writeError(w, statusCode, code, message, nil, retryable)
 		return
 	}
 	s.mu.Lock()
@@ -645,7 +886,12 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	state.providerProxy = providerProxy
 	state.mcpProxy = mcpProxy
 	state.profile = request.Profile
-	state.agentConfiguration = *request.AgentConfiguration
+	if request.AgentConfiguration == nil {
+		state.agentConfiguration.MaxTurns = defaultProviderProxyMaxTurns
+	} else {
+		state.agentConfiguration = *request.AgentConfiguration
+	}
+	state.agentDiagnosticFilter = diagnosticFilter
 	state.creating = false
 	recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseApplied, "", now)
 	drainCleanup := s.drain.Requested && !state.drainCleanupScheduled && isDrainCleanupState(state)
@@ -663,17 +909,18 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+//nolint:gocyclo // Session creation and its resource cleanup paths form one admission transaction.
 func (s *Server) createSession(
 	ctx context.Context,
 	request harnessv2.CreateRuntimeSessionRequest,
 	now time.Time,
 	uid int,
 	gid int,
-) (*acp.RuntimeSession, harnessv2.RuntimeSessionDescriptor, acp.SessionPaths, *workspacedelta.Snapshot, *providerProxySession, *mcpProxySession, error) {
+) (*acp.RuntimeSession, harnessv2.RuntimeSessionDescriptor, acp.SessionPaths, *workspacedelta.Snapshot, *providerProxySession, *mcpProxySession, *AgentDiagnosticFilter, error) {
 	pathID := sessionPathID(request.Metadata.Fence.RuntimeSessionUID, request.Metadata.Fence.RuntimeSessionGeneration)
 	paths, err := acp.PrepareSessionPaths(s.cfg.SessionBaseDir, pathID)
 	if err != nil {
-		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("path preparation", err)
+		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("path preparation", err)
 	}
 	cleanup := true
 	defer func() {
@@ -681,21 +928,197 @@ func (s *Server) createSession(
 			_ = os.RemoveAll(paths.Root)
 		}
 	}()
-	if err := s.cfg.WorkspaceMaterializer.Materialize(ctx, request, paths.Workspace); err != nil {
-		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("workspace materialization", err)
+	// Under a durable workspace root, the repository workspace of one logical
+	// session lives on the provider's durable data volume so a data-only cold
+	// suspension preserves exactly it; every other session path stays in the
+	// ephemeral tree that dies with this process. Committed content resumes
+	// without re-materialization, and the recorded repository binding must
+	// match the declared baseline so continuation never silently switches
+	// source content.
+	materialize := true
+	resumedFromCheckpoint := false
+	// A dedicated provider workspace keeps the same data key when a checkpoint
+	// seeds a new RuntimeSession. Runtime identities and their UID/GID allocator
+	// remain independent; only the workspace directory has a stable name.
+	sessionComponent := s.cfg.DurableWorkspaceKey
+	if sessionComponent == "" {
+		sessionComponent = string(request.Metadata.Fence.RuntimeSessionUID)
 	}
-	baseline, err := workspacedelta.Capture(paths.Workspace, s.cfg.DeltaOptions)
-	if err != nil {
-		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("workspace baseline capture", err)
+	if request.Workspace.ExpectDurableResume && s.cfg.DurableWorkspaceDir == "" {
+		// The controller asserts this session resumes a committed durable
+		// checkpoint; a runtime without a durable root cannot possibly hold
+		// it and must fail closed instead of running on a fresh tree.
+		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationResumeLost(
+			errors.New("controller expects a committed durable checkpoint, but this runtime has no durable workspace root"))
+	}
+	if s.cfg.DurableWorkspaceDir != "" {
+		sessionIdentityHighWater := s.cfg.UIDAllocator.Capacity() - s.cfg.UIDAllocator.Remaining()
+		workspaceDir, committed, durableErr := acp.PrepareDurableSessionWorkspace(
+			s.cfg.DurableWorkspaceDir, sessionComponent, sessionIdentityHighWater,
+		)
+		if durableErr != nil {
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil,
+				durableWorkspacePreparationFailed(request.Workspace.ExpectDurableResume, durableErr)
+		}
+		if request.Workspace.ExpectDurableResume && committed == nil {
+			// The provider returned an empty or replacement volume after
+			// snapshot loss: silently materializing the verified baseline
+			// would let the continuation run cleanly while every
+			// checkpoint-only change has vanished. One authorized exception
+			// exists: a repository-identity transition staged its record
+			// durably before wiping the old checkpoint, and a transient
+			// failure before the recommit leaves exactly this shape - the
+			// retry may materialize the SAME staged target fresh.
+			transition, transitionErr := acp.DurableWorkspaceTransitionTarget(s.cfg.DurableWorkspaceDir, sessionComponent)
+			if transitionErr != nil {
+				return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace transition record", transitionErr)
+			}
+			if transition == nil || !acp.SameDurableWorkspaceIdentity(
+				acp.StableDurableWorkspaceIdentity(transition.RepositoryIdentity, transition.Revision),
+				acp.StableDurableWorkspaceIdentity(request.Workspace.Baseline.RepositoryIdentity, request.Workspace.Baseline.Revision),
+			) {
+				return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationResumeLost(
+					errors.New("controller expects a committed durable checkpoint for this session, but none exists on the durable volume"))
+			}
+			if transition.SessionGeneration < request.Workspace.ExpectDurableResumeMinGeneration {
+				return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationResumeLost(
+					fmt.Errorf(
+						"authorized durable transition records session generation %d, older than the controller's floor %d; a stale snapshot restore is refused",
+						transition.SessionGeneration, request.Workspace.ExpectDurableResumeMinGeneration))
+			}
+		}
+		paths.Workspace = workspaceDir
+		if committed != nil {
+			// Continuity is judged on the stable session-level identity, not
+			// the raw Task-scoped baseline: a no-repository continuation
+			// carries a fresh Task UID in the protocol identity, and a
+			// verified publication legitimately advances the revision the
+			// controller validated before requesting this session.
+			if request.Workspace.ExpectDurableResume &&
+				committed.SessionGeneration < request.Workspace.ExpectDurableResumeMinGeneration {
+				// Same volume, valid marker, OLDER recorded generation: the
+				// provider restored a stale data snapshot of this repository.
+				// Diffing it against the newest verified baseline would let
+				// the next publication silently drop or revert newer
+				// checkpoint-only edits; fail closed instead.
+				return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationResumeLost(
+					fmt.Errorf(
+						"committed durable checkpoint records session generation %d, older than the controller's floor %d; a stale snapshot restore is refused",
+						committed.SessionGeneration, request.Workspace.ExpectDurableResumeMinGeneration))
+			}
+			if acp.SameDurableWorkspaceIdentity(
+				acp.StableDurableWorkspaceIdentity(committed.RepositoryIdentity, committed.Revision),
+				acp.StableDurableWorkspaceIdentity(request.Workspace.Baseline.RepositoryIdentity, request.Workspace.Baseline.Revision),
+			) {
+				// The preserved tree still carries the previous session
+				// child's ownership and 0700 modes; without DAC_OVERRIDE the
+				// supervisor cannot capture the resumed baseline until the
+				// tree is reclaimed. Finalization below reassigns it to this
+				// session's fresh child identity.
+				if err := acp.ReclaimSessionOwnership(paths.Workspace); err != nil {
+					return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace ownership reclaim", err)
+				}
+				materialize = false
+				resumedFromCheckpoint = true
+			} else {
+				if request.Workspace.ExpectDurableResume {
+					if !durableResumeTransitionAuthorized(
+						committed.RepositoryIdentity, committed.Revision, request.Workspace.ExpectDurableResumeFrom,
+					) {
+						// The controller asserts continuity with this session's
+						// preserved lineage, but the committed checkpoint binds a
+						// DIFFERENT repository identity than both the resumed
+						// lineage and any controller-authorized prior identity:
+						// the provider restored a wrong or stale snapshot.
+						// Wiping it would silently destroy someone's preserved
+						// data and run the continuation on a clean baseline;
+						// fail closed instead.
+						return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationResumeLost(
+							errors.New("committed durable checkpoint binds a different repository identity than the resumed lineage; refusing to wipe it"))
+					}
+					// The checkpoint binds exactly the controller-asserted
+					// PRIOR identity of a verified publication transition:
+					// the wipe below re-materializes from the authenticated
+					// new baseline rather than poisoning the continuation.
+				}
+				// A verified publication transition can move the session to a
+				// new repository identity (for example the fork a PR
+				// publishes to); the authenticated controller validated that
+				// transition before requesting this session, so the stale
+				// durable tree is wiped and the workspace re-materializes
+				// from the newly declared baseline instead of poisoning the
+				// continuation. The authorization is staged DURABLY before
+				// the wipe: a transient failure between this wipe and the
+				// commit would otherwise leave a resumed lineage with no
+				// committed marker, and the retry would fail closed forever.
+				if err := acp.MarkDurableWorkspaceTransitionAuthorized(
+					s.cfg.DurableWorkspaceDir, sessionComponent,
+					acp.DurableWorkspaceBinding{
+						RepositoryIdentity: request.Workspace.Baseline.RepositoryIdentity,
+						Revision:           request.Workspace.Baseline.Revision,
+						SessionIdentityHighWater: s.cfg.UIDAllocator.Capacity() -
+							s.cfg.UIDAllocator.Remaining(),
+						SessionGeneration: request.Metadata.Fence.RuntimeSessionGeneration,
+					},
+				); err != nil {
+					return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace transition staging", err)
+				}
+				if err := acp.WipeDurableSessionWorkspace(s.cfg.DurableWorkspaceDir, sessionComponent); err != nil {
+					return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace transition", err)
+				}
+				if workspaceDir, _, durableErr = acp.PrepareDurableSessionWorkspace(
+					s.cfg.DurableWorkspaceDir, sessionComponent, sessionIdentityHighWater,
+				); durableErr != nil {
+					return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil,
+						durableWorkspacePreparationFailed(request.Workspace.ExpectDurableResume, durableErr)
+				}
+				paths.Workspace = workspaceDir
+			}
+		}
+	}
+	if materialize {
+		if err := s.cfg.WorkspaceMaterializer.Materialize(ctx, request, paths.Workspace); err != nil {
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("workspace materialization", err)
+		}
+	}
+	var baseline *workspacedelta.Snapshot
+	if resumedFromCheckpoint {
+		// The preserved checkpoint may carry unpublished pre-suspension
+		// edits (a failed or cancelled Task detaches with Suspend without
+		// publishing its delta). Capturing the checkpoint tree as the
+		// baseline would silently drop those edits from the next
+		// publication, so the baseline is reconstructed from the
+		// controller-verified repository baseline instead: the next delta
+		// then expresses everything not yet published, pre-suspension edits
+		// included.
+		baselineDir := filepath.Join(paths.Root, "baseline-reconstruction")
+		if err = os.MkdirAll(baselineDir, 0o700); err != nil {
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("baseline reconstruction root", err)
+		}
+		if err = s.cfg.WorkspaceMaterializer.Materialize(ctx, request, baselineDir); err != nil {
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("baseline reconstruction materialization", err)
+		}
+		baseline, err = workspacedelta.CaptureContext(ctx, baselineDir, s.baselineCaptureOptions())
+		if err != nil {
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("baseline reconstruction capture", err)
+		}
+		if err = os.RemoveAll(baselineDir); err != nil {
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("baseline reconstruction cleanup", err)
+		}
+	} else {
+		baseline, err = workspacedelta.CaptureContext(ctx, paths.Workspace, s.baselineCaptureOptions())
+		if err != nil {
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("workspace baseline capture", err)
+		}
 	}
 	if s.cfg.Provider.PrepareSession != nil {
 		if err := s.cfg.Provider.PrepareSession(paths); err != nil {
-			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("provider home preparation", err)
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider home preparation", err)
 		}
 	}
-	providerProxy, proxyBinding, err := s.providerProxy.newSession()
+	providerProxy, proxyBinding, err := s.providerProxy.newSessionForRequest(request)
 	if err != nil {
-		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("provider proxy setup", err)
+		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider proxy setup", err)
 	}
 	cleanupProviderProxy := true
 	defer func() {
@@ -705,7 +1128,7 @@ func (s *Server) createSession(
 	}()
 	mcpProxy, mcpServer, err := s.mcpProxy.newSession(request.Metadata.Fence, request.MCPConfiguration)
 	if err != nil {
-		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("MCP proxy setup", err)
+		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("MCP proxy setup", err)
 	}
 	cleanupMCPProxy := true
 	defer func() {
@@ -717,24 +1140,47 @@ func (s *Server) createSession(
 	if s.cfg.Provider.ProjectSession != nil {
 		projection, err = s.cfg.Provider.ProjectSession(request, paths, proxyBinding)
 		if err != nil {
-			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("provider session projection", err)
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider session projection", err)
 		}
 	}
 	envValues := cloneStringMap(s.cfg.Provider.Environment)
 	if s.cfg.Provider.EnvironmentForSession != nil {
 		values, envErr := s.cfg.Provider.EnvironmentForSession(request, paths, proxyBinding)
 		if envErr != nil {
-			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("provider environment setup", envErr)
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider environment setup", envErr)
 		}
 		maps.Copy(envValues, values)
 	}
 	maps.Copy(envValues, projection.Environment)
 	if err := acp.FinalizeSessionOwnership(paths.Root, uid, gid); err != nil {
-		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("ownership finalization", err)
+		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("ownership finalization", err)
+	}
+	if s.cfg.DurableWorkspaceDir != "" {
+		// The durable workspace lives outside the session root, and each cold
+		// resume allocates a fresh non-reused child identity, so the preserved
+		// tree is re-assigned to exactly this session's UID.
+		if err := acp.FinalizeSessionOwnership(paths.Workspace, uid, gid); err != nil {
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace ownership finalization", err)
+		}
 	}
 	environment, err := acp.BuildChildEnvironment(paths, acp.EnvironmentConfig{Values: envValues})
 	if err != nil {
-		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("provider environment setup", err)
+		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider environment setup", err)
+	}
+	if resumedFromCheckpoint {
+		// Invalidate the committed marker only NOW, immediately before the
+		// provider child (the only writer of the durable tree) can spawn: a
+		// failure in any earlier stage - baseline reconstruction, provider
+		// home preparation, proxy setup - leaves the committed marker intact
+		// so the untouched checkpoint is reused on retry instead of being
+		// wiped as a partial session. A failure after this point wipes, as
+		// it must: the child may have modified the repository. The
+		// successful commit below restores the marker.
+		if err := acp.MarkDurableSessionWorkspaceResumePending(
+			s.cfg.DurableWorkspaceDir, sessionComponent,
+		); err != nil {
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace pending mark", err)
+		}
 	}
 	runtimeSession, err := acp.NewRuntimeSession(ctx, acp.RuntimeSessionConfig{
 		ID:            string(request.RuntimeSessionID),
@@ -749,17 +1195,47 @@ func (s *Server) createSession(
 			GID:           gid,
 			ClientOptions: acp.Options{MaxMessageBytes: s.cfg.Capabilities.Limits.MaxRequestBytes},
 		},
-		MCPServers:        []acp.MCPServer{mcpServer},
-		NewSessionMeta:    projection.NewSessionMeta,
-		AuthMethodID:      s.cfg.Provider.AuthMethodID,
-		InitializeTimeout: defaultDuration(s.cfg.InitializeTimeout, acp.DefaultInitializeTimeout),
-		PromptLease:       time.Duration(s.cfg.Capabilities.Limits.MaxPromptLeaseMillis) * time.Millisecond,
-		PermissionTimeout: defaultDuration(s.cfg.PermissionTimeout, acp.DefaultPermissionTimeout),
-		CancelGrace:       defaultDuration(s.cfg.CancelGrace, acp.DefaultStopGrace),
-		MaxBufferedEvents: s.cfg.Capabilities.Limits.MaxBufferedEvents,
+		MCPServers:            []acp.MCPServer{mcpServer},
+		NewSessionMeta:        projection.NewSessionMeta,
+		AuthMethodID:          s.cfg.Provider.AuthMethodID,
+		InitializeTimeout:     defaultDuration(s.cfg.InitializeTimeout, acp.DefaultInitializeTimeout),
+		PromptLease:           time.Duration(s.cfg.Capabilities.Limits.MaxPromptLeaseMillis) * time.Millisecond,
+		PermissionTimeout:     defaultDuration(s.cfg.PermissionTimeout, acp.DefaultPermissionTimeout),
+		CancelGrace:           defaultDuration(s.cfg.CancelGrace, acp.DefaultStopGrace),
+		MaxBufferedEvents:     s.cfg.Capabilities.Limits.MaxBufferedEvents,
+		MaxBufferedEventBytes: supervisorMaxBufferedPromptEventBytes,
 	})
 	if err != nil {
-		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, sessionCreationFailed("provider adapter initialization", err)
+		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider adapter initialization", err)
+	}
+	if s.cfg.DurableWorkspaceDir != "" {
+		// The marker commits only after the session is fully initialized: a
+		// creation that fails part-way leaves its binding pending, so the next
+		// creation wipes the uncommitted durable tree and
+		// materializes clean instead of reusing state a failed create — or a
+		// partially started provider — may have modified. A resume recommits
+		// here, retiring its pending record.
+		if commitErr := acp.CommitDurableSessionWorkspace(
+			s.cfg.DurableWorkspaceDir,
+			sessionComponent,
+			acp.DurableWorkspaceBinding{
+				RepositoryIdentity: request.Workspace.Baseline.RepositoryIdentity,
+				Revision:           request.Workspace.Baseline.Revision,
+				SessionIdentityHighWater: s.cfg.UIDAllocator.Capacity() -
+					s.cfg.UIDAllocator.Remaining(),
+				SessionGeneration: request.Metadata.Fence.RuntimeSessionGeneration,
+			},
+		); commitErr != nil {
+			// The credential-bearing child is already running; its removal
+			// must be PROVEN before this creation is abandoned, or the
+			// surviving descendant would be untracked by any session and
+			// later pool lifecycle decisions would proceed over it.
+			cleanupResult, deleteErr := runtimeSession.Delete(ctx)
+			if deleteErr != nil || !cleanupResult.Proven {
+				s.poisonPool("durable_commit_session_cleanup_unproven")
+			}
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace commit", commitErr)
+		}
 	}
 	cleanup = false
 	cleanupProviderProxy = false
@@ -777,7 +1253,7 @@ func (s *Server) createSession(
 		CreatedAt:            now,
 		LastTransitionAt:     now,
 	}
-	return runtimeSession, descriptor, paths, baseline, providerProxy, mcpProxy, nil
+	return runtimeSession, descriptor, paths, baseline, providerProxy, mcpProxy, projection.AgentDiagnosticFilter, nil
 }
 
 func (s *Server) authorizeController(w http.ResponseWriter, r *http.Request) bool {
@@ -1015,35 +1491,73 @@ func (s *Server) cleanupDrainedSession(sessionID harnessv2.RuntimeSessionID, sta
 	}
 	cleanup, deleteErr := state.runtime.Delete(ctx)
 	if proxyErr != nil || deleteErr != nil || !cleanup.Proven {
-		s.poisonPool("drain_session_cleanup_unproven")
+		s.failDrainCleanup(sessionID, state, "drain_session_cleanup_unproven")
 		return
 	}
-	if err := acp.ReclaimSessionOwnership(state.paths.Root); err != nil {
+	if err := reclaimStoppedSessionOwnership(state.paths); err != nil {
 		slog.Error("ACP drained runtime session cleanup failed", "stage", "ownership reclaim")
-		s.poisonPool("drain_session_root_ownership_reclaim_unproven")
+		s.failDrainCleanup(sessionID, state, "drain_session_root_ownership_reclaim_unproven")
 		return
 	}
 	if err := os.RemoveAll(state.paths.Root); err != nil {
-		s.poisonPool("drain_session_root_cleanup_unproven")
+		s.failDrainCleanup(sessionID, state, "drain_session_root_cleanup_unproven")
 		return
 	}
 	deletedAt := time.Now().UTC()
 	s.mu.Lock()
 	if s.sessions[sessionID] == state {
-		pruneSessionOperationsLocked(state, deletedAt)
-		operations := make([]harnessv2.OperationRecord, 0, len(state.operations))
-		for _, operation := range state.operations {
-			operations = append(operations, operation)
-		}
-		tombstone := harnessv2.RuntimeSessionTombstone{
-			RuntimeSessionUID: state.descriptor.RuntimeSessionUID, RuntimeSessionGeneration: state.descriptor.Generation,
-			RuntimeProfileDigest: state.descriptor.RuntimeProfileDigest, DeletedAt: deletedAt, Operations: operations,
-		}
-		delete(s.sessions, sessionID)
-		s.pruneTombstonesLocked(deletedAt)
-		s.tombstones[tombstone.RuntimeSessionUID] = tombstone
+		s.tombstoneSessionLocked(state, deletedAt)
 	}
 	s.mu.Unlock()
+}
+
+func (s *Server) failDrainCleanup(sessionID harnessv2.RuntimeSessionID, state *sessionState, reason string) {
+	s.mu.Lock()
+	cleanup := s.poisonPoolLocked(reason)
+	if s.sessions[sessionID] == state {
+		// The attempt has returned, so an authenticated delete or a fresh
+		// drain may retry cleanup. Keep admission closed and retain all
+		// session evidence until that retry proves retirement.
+		state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
+		state.descriptor.LastTransitionAt = time.Now().UTC()
+		state.drainCleanupScheduled = false
+	}
+	s.mu.Unlock()
+	s.startDrainCleanup(cleanup)
+}
+
+// tombstoneSessionLocked preserves replay and terminal proof after either
+// explicit deletion or automatic cleanup. The caller must hold s.mu.
+func (s *Server) tombstoneSessionLocked(state *sessionState, deletedAt time.Time) sessionTombstone {
+	pruneSessionOperationsLocked(state, deletedAt)
+	operations := make([]harnessv2.OperationRecord, 0, len(state.operations))
+	for _, operation := range state.operations {
+		operations = append(operations, operation)
+	}
+	tombstone := sessionTombstone{
+		RuntimeSessionTombstone: harnessv2.RuntimeSessionTombstone{
+			RuntimeSessionUID: state.descriptor.RuntimeSessionUID, RuntimeSessionGeneration: state.descriptor.Generation,
+			RuntimeProfileDigest: state.descriptor.RuntimeProfileDigest, DeletedAt: deletedAt, Operations: operations,
+		},
+		sessionID:              state.id,
+		cancellations:          make(map[harnessv2.OperationID]*operationReplay),
+		cancellationOperations: make(map[harnessv2.OperationID]harnessv2.OperationRecord),
+	}
+	if state.prompt != nil && state.prompt.settlement != nil && state.prompt.settlement.Validate() == nil {
+		tombstone.prompt = &retiredPromptSettlement{metadata: state.prompt.request.Metadata, settlement: *state.prompt.settlement}
+	}
+	for operationID, replay := range state.operationReplays {
+		if replay.isCancellation {
+			// Keep the shared replay until its owner finishes, even when cleanup
+			// overtakes an in-flight cancellation handler.
+			tombstone.cancellations[operationID] = replay
+		}
+	}
+	delete(s.sessions, state.id)
+	s.pruneTombstonesLocked(deletedAt)
+	delete(s.failedCreates, tombstone.RuntimeSessionUID)
+	s.tombstones[tombstone.RuntimeSessionUID] = tombstone
+	return tombstone
 }
 
 // Close stops admission and tears down all resident runtime sessions. A cleanup
@@ -1074,7 +1588,7 @@ func (s *Server) Close(ctx context.Context) error {
 			cleanup, err := state.runtime.Delete(ctx)
 			if err != nil || !cleanup.Proven {
 				errs = append(errs, fmt.Errorf("runtime session cleanup unproven: %w", err))
-			} else if err := acp.ReclaimSessionOwnership(state.paths.Root); err != nil {
+			} else if err := reclaimStoppedSessionOwnership(state.paths); err != nil {
 				errs = append(errs, fmt.Errorf("runtime session filesystem ownership reclaim: %w", err))
 			} else if err := os.RemoveAll(state.paths.Root); err != nil {
 				errs = append(errs, fmt.Errorf("runtime session filesystem cleanup: %w", err))
@@ -1098,7 +1612,13 @@ func (s *Server) Close(ctx context.Context) error {
 
 func (s *Server) poisonPool(reason string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	cleanup := s.poisonPoolLocked(reason)
+	s.mu.Unlock()
+	s.startDrainCleanup(cleanup)
+}
+
+func (s *Server) poisonPoolLocked(reason string) []drainCleanupCandidate {
+	firstPoison := !s.poisoned
 	for _, state := range s.sessions {
 		if state.providerProxy != nil {
 			state.providerProxy.revoke()
@@ -1107,8 +1627,19 @@ func (s *Server) poisonPool(reason string) {
 			state.mcpProxy.revoke(harnessv2.RuntimeSessionStatePoisoned)
 		}
 	}
-	s.lifecycle = harnessv2.SupervisorLifecycleUnhealthy
+	// A poisoned pool can only be retired. Keep the requested drain in a
+	// protocol-valid terminal lifecycle while health reports the failure.
+	s.poisoned = true
+	s.lifecycle = harnessv2.SupervisorLifecycleTerminating
 	s.drain = harnessv2.DrainStatus{AcceptingNewSessions: false, Requested: true, RequestedAt: time.Now().UTC(), Reason: reason}
+	if !firstPoison {
+		return nil
+	}
+	// Retire eligible peers once, even when no controller Drain preceded the
+	// failure. A failing deletion is still Deleting and therefore excluded.
+	// Later failures remain available for authenticated retries, rather than
+	// repeatedly scheduling each other's unproven cleanup.
+	return s.beginDrainLocked(reason, s.drain.RequestedAt)
 }
 
 func (s *Server) BeginDrain(reason string) {
@@ -1124,4 +1655,20 @@ func (s *Server) BeginDrain(reason string) {
 		Reason:               reason,
 	}
 	s.lifecycle = harnessv2.SupervisorLifecycleDraining
+}
+
+// durableResumeTransitionAuthorized reports whether a committed durable
+// checkpoint that mismatches the resumed lineage's declared baseline may be
+// wiped and re-materialized: only when the controller asserted the exact
+// PRIOR repository identity of a verified publication transition and the
+// checkpoint binds precisely that identity.
+func durableResumeTransitionAuthorized(committedIdentity, committedRevision, expectedPrior string) bool {
+	expectedPrior = strings.TrimSpace(expectedPrior)
+	if expectedPrior == "" {
+		return false
+	}
+	return acp.SameDurableWorkspaceIdentity(
+		acp.StableDurableWorkspaceIdentity(committedIdentity, committedRevision),
+		expectedPrior,
+	)
 }

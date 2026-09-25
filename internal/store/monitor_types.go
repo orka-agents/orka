@@ -202,26 +202,27 @@ type ImplementationJobFilter struct {
 
 // GitHubMutationRecord stores one controller-owned GitHub write audit record.
 type GitHubMutationRecord struct {
-	ID                string    `json:"id"`
-	MonitorNamespace  string    `json:"monitorNamespace"`
-	MonitorName       string    `json:"monitorName"`
-	RunID             string    `json:"runID,omitempty"`
-	CommandEventID    string    `json:"commandEventID,omitempty"`
-	WorkActionID      string    `json:"workActionID,omitempty"`
-	MonitorGeneration int64     `json:"monitorGeneration,omitempty"`
-	Operation         string    `json:"operation"`
-	TargetKind        string    `json:"targetKind,omitempty"`
-	TargetNumber      int64     `json:"targetNumber,omitempty"`
-	TargetSHA         string    `json:"targetSHA,omitempty"`
-	Actor             string    `json:"actor,omitempty"`
-	Reason            string    `json:"reason,omitempty"`
-	RequestDigest     string    `json:"requestDigest,omitempty"`
-	GitHubURL         string    `json:"githubURL,omitempty"`
-	GitHubRequestID   string    `json:"githubRequestID,omitempty"`
-	ExternalID        string    `json:"externalID,omitempty"`
-	Status            string    `json:"status,omitempty"`
-	Error             string    `json:"error,omitempty"`
-	CreatedAt         time.Time `json:"createdAt"`
+	ID                string     `json:"id"`
+	MonitorNamespace  string     `json:"monitorNamespace"`
+	MonitorName       string     `json:"monitorName"`
+	RunID             string     `json:"runID,omitempty"`
+	CommandEventID    string     `json:"commandEventID,omitempty"`
+	WorkActionID      string     `json:"workActionID,omitempty"`
+	MonitorGeneration int64      `json:"monitorGeneration,omitempty"`
+	Operation         string     `json:"operation"`
+	TargetKind        string     `json:"targetKind,omitempty"`
+	TargetNumber      int64      `json:"targetNumber,omitempty"`
+	TargetSHA         string     `json:"targetSHA,omitempty"`
+	Actor             string     `json:"actor,omitempty"`
+	Reason            string     `json:"reason,omitempty"`
+	RequestDigest     string     `json:"requestDigest,omitempty"`
+	GitHubURL         string     `json:"githubURL,omitempty"`
+	GitHubRequestID   string     `json:"githubRequestID,omitempty"`
+	ExternalID        string     `json:"externalID,omitempty"`
+	Status            string     `json:"status,omitempty"`
+	Error             string     `json:"error,omitempty"`
+	PendingAt         *time.Time `json:"pendingAt,omitempty"`
+	CreatedAt         time.Time  `json:"createdAt"`
 }
 
 // GitHubMutationRecordFilter constrains mutation audit list queries.
@@ -272,27 +273,32 @@ type ActionRecordFilter struct {
 
 // ReviewRecord stores one immutable typed review result.
 type ReviewRecord struct {
-	ID               string    `json:"id"`
-	MonitorNamespace string    `json:"monitorNamespace"`
-	MonitorName      string    `json:"monitorName"`
-	Kind             string    `json:"kind"`
-	Number           int64     `json:"number,omitempty"`
-	HeadSHA          string    `json:"headSHA,omitempty"`
-	TaskName         string    `json:"taskName,omitempty"`
-	TaskNamespace    string    `json:"taskNamespace,omitempty"`
-	Verdict          string    `json:"verdict,omitempty"`
-	Confidence       string    `json:"confidence,omitempty"`
-	Repairable       bool      `json:"repairable,omitempty"`
-	SecurityStatus   string    `json:"securityStatus,omitempty"`
-	FindingsJSON     string    `json:"findingsJSON,omitempty"`
-	Summary          string    `json:"summary,omitempty"`
-	SuggestedComment string    `json:"suggestedComment,omitempty"`
-	RenderedComment  string    `json:"renderedComment,omitempty"`
-	Marker           string    `json:"marker,omitempty"`
-	GitHubReviewID   string    `json:"githubReviewID,omitempty"`
-	GitHubCommentID  string    `json:"githubCommentID,omitempty"`
-	GitHubCommentURL string    `json:"githubCommentURL,omitempty"`
-	CreatedAt        time.Time `json:"createdAt"`
+	ID                      string    `json:"id"`
+	MonitorNamespace        string    `json:"monitorNamespace"`
+	MonitorName             string    `json:"monitorName"`
+	Kind                    string    `json:"kind"`
+	Number                  int64     `json:"number,omitempty"`
+	HeadSHA                 string    `json:"headSHA,omitempty"`
+	TaskName                string    `json:"taskName,omitempty"`
+	TaskNamespace           string    `json:"taskNamespace,omitempty"`
+	Verdict                 string    `json:"verdict,omitempty"`
+	Confidence              string    `json:"confidence,omitempty"`
+	Repairable              bool      `json:"repairable,omitempty"`
+	SecurityStatus          string    `json:"securityStatus,omitempty"`
+	FindingsJSON            string    `json:"findingsJSON,omitempty"`
+	Summary                 string    `json:"summary,omitempty"`
+	SuggestedComment        string    `json:"suggestedComment,omitempty"`
+	ValidationTask          string    `json:"validationTask,omitempty"`
+	ValidationImage         string    `json:"validationImage,omitempty"`
+	ValidationCommandDigest string    `json:"validationCommandDigest,omitempty"`
+	ValidationStatus        string    `json:"validationStatus,omitempty"`
+	ValidationEvidence      string    `json:"validationEvidence,omitempty"`
+	RenderedComment         string    `json:"renderedComment,omitempty"`
+	Marker                  string    `json:"marker,omitempty"`
+	GitHubReviewID          string    `json:"githubReviewID,omitempty"`
+	GitHubCommentID         string    `json:"githubCommentID,omitempty"`
+	GitHubCommentURL        string    `json:"githubCommentURL,omitempty"`
+	CreatedAt               time.Time `json:"createdAt"`
 }
 
 // ReviewRecordFilter constrains review record list queries.
@@ -397,6 +403,7 @@ type RepairJob struct {
 	Source             string     `json:"source,omitempty"`
 	HeadSHA            string     `json:"headSHA,omitempty"`
 	BaseSHA            string     `json:"baseSHA,omitempty"`
+	BaseBranch         string     `json:"baseBranch,omitempty"`
 	Phase              string     `json:"phase,omitempty"`
 	RepairCountPR      int        `json:"repairCountPR"`
 	RepairCountHead    int        `json:"repairCountHead"`
@@ -442,6 +449,7 @@ type MonitorEvent struct {
 // MonitorEventFilter constrains monitor event list queries.
 type MonitorEventFilter struct {
 	Namespace   string
+	ID          string
 	MonitorName string
 	RunID       string
 	ItemKind    string

@@ -271,6 +271,25 @@ type WorkspaceSpec struct {
 	Intent       WorkspaceIntent   `json:"intent"`
 	Baseline     WorkspaceBaseline `json:"baseline"`
 	RelativeRoot string            `json:"relativeRoot,omitempty"`
+	// ExpectDurableResume asserts that this session MUST resume a committed
+	// durable workspace checkpoint: the controller sets it for sessions on a
+	// resumed workspace lineage, and the runtime fails session creation when
+	// no committed checkpoint exists instead of silently materializing a
+	// fresh baseline over lost data.
+	ExpectDurableResume bool `json:"expectDurableResume,omitempty"`
+	// ExpectDurableResumeFrom carries the controller-validated PRIOR
+	// repository identity of a resumed lineage whose continuation
+	// legitimately moved to a new repository (a verified publication
+	// transition, for example the fork a PR publishes to). Under
+	// ExpectDurableResume, a committed checkpoint bound to exactly this
+	// identity may be wiped and re-materialized from the new baseline;
+	// any other foreign identity still fails creation closed.
+	ExpectDurableResumeFrom string `json:"expectDurableResumeFrom,omitempty"`
+	// ExpectDurableResumeMinGeneration carries the controller's persisted
+	// floor for the committed checkpoint's session generation: a same-
+	// identity checkpoint whose recorded generation is OLDER than this floor
+	// is a stale provider restore and fails session creation closed.
+	ExpectDurableResumeMinGeneration uint64 `json:"expectDurableResumeMinGeneration,omitempty"`
 }
 
 func (w WorkspaceSpec) Validate() error {
@@ -278,6 +297,9 @@ func (w WorkspaceSpec) Validate() error {
 		return err
 	}
 	if err := w.Baseline.Validate(); err != nil {
+		return err
+	}
+	if err := validateBoundedString("expected durable resume prior identity", w.ExpectDurableResumeFrom, false, 1024); err != nil {
 		return err
 	}
 	return validateWorkspaceRelativeRoot(w.RelativeRoot)

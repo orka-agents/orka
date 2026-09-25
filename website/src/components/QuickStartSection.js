@@ -1,38 +1,44 @@
 import React from 'react';
-import CodeBlock from '@theme/CodeBlock';
+import Link from '@docusaurus/Link';
 
 export default function QuickStartSection() {
   return (
     <section className="landing-section quickstart-section">
-      <h2 className="section-title">Quick Start</h2>
+      <h2 className="section-title">Quick start</h2>
       <p className="section-subtitle">
-        One Helm install, one LLM secret, and you're chatting with an
-        orchestrator that handles the rest.
+        Install Orka on Kubernetes and run your first task.
       </p>
       <div className="quickstart-grid">
         <div className="quickstart-card">
-          <h3>Install the controller</h3>
+          <h3>1. Install with Helm</h3>
           <p>
-            Deploy Orka into your cluster with Helm — CRDs, controller, and the
-            built-in dashboard included.
+            One Helm command. The chart creates its namespaces, its encryption
+            key, and its webhook certificate. Works on kind or minikube. No
+            model API key needed yet.
           </p>
-          <CodeBlock language="bash">{`helm install orka charts/orka \\
-  --namespace orka-system \\
-  --create-namespace`}</CodeBlock>
+          <p>
+            <Link to="/docs/installation">Open the installation guide</Link>
+          </p>
         </div>
         <div className="quickstart-card">
-          <h3>Add a provider &amp; chat</h3>
+          <h3>2. Run your first AI task</h3>
           <p>
-            Store an LLM key as a Kubernetes Secret, register a Provider, then
-            open the dashboard or any OpenAI-compatible client.
+            Connect to the API, add your Anthropic, OpenAI, or Azure OpenAI key
+            as a Provider, and submit a Task.
           </p>
-          <CodeBlock language="bash">{`kubectl create secret generic anthropic-secret \\
-  --from-literal=api-key=your-api-key
-
-kubectl port-forward -n orka-system svc/orka 8080:8080
-# open http://localhost:8080`}</CodeBlock>
+          <p>
+            <Link to="/docs/getting-started#connect-to-the-api">
+              Continue with Getting started
+            </Link>
+          </p>
         </div>
       </div>
+      <p className="section-subtitle">
+        For development,{' '}
+        <Link to="/docs/build-from-source">
+          build from source
+        </Link>.
+      </p>
     </section>
   );
 }

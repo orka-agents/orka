@@ -1,4 +1,4 @@
 interface:
   display_name: "Agent Substrate Deploy"
-  short_description: "Stand up Agent Substrate direct e2e on kind for Orka"
-  default_prompt: "Use $agent-substrate-deploy to stand up Agent Substrate on a dedicated local kind cluster wired to Orka, validate the direct Substrate e2e smoke path, and treat workspace-backed Orka agent Tasks as an expected-failure/future API check until harness support lands."
+  short_description: "Validate official Substrate execution and cold checkpoints"
+  default_prompt: "Use $agent-substrate-deploy to install the official Substrate pin on a dedicated gVisor kind cluster and validate Orka direct, MCP, ACP, and DataOnly checkpoint paths."

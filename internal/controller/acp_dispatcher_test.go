@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -29,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	executionevents "github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -48,6 +50,7 @@ import (
 const (
 	acpDispatcherTestNamespace       = "default"
 	acpDispatcherTestTaskName        = "task"
+	acpDispatcherTestPoolUID         = "pool-uid"
 	acpDispatcherMissingTerminalTask = "missing-terminal"
 	acpDispatcherRuntimeSession      = "runtime-session"
 	acpDispatcherTaskUID             = "task-uid"
@@ -384,6 +387,7 @@ func prepareBoundACPDispatcherTaskWithStoresForTest(
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
 	images ACPRuntimeImages,
+	epochs ...*ControllerEpochManager,
 ) *corev1alpha1.Task {
 	t.Helper()
 	cipher, err := sqlite.NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{0x61}, sqlite.AgentExecutionSnapshotKeyBytes))
@@ -401,6 +405,9 @@ func prepareBoundACPDispatcherTaskWithStoresForTest(
 		AgentExecutionSnapshots: persistence,
 		ACPRuntimeEnabled:       true,
 		ACPRuntimeImages:        images,
+	}
+	if len(epochs) > 0 {
+		binder.ControllerEpochManager = epochs[0]
 	}
 	bound := bindACPQueueTaskForTest(t, ctx, binder, task, agent)
 	verified, err := binder.loadVerifiedBoundExecution(ctx, bound, bound.Status.AgentExecutionBinding)
@@ -464,6 +471,297 @@ func TestRuntimeSessionCreateTimeoutCoversColdAdapterInitialization(t *testing.T
 				t.Fatalf("runtimeSessionCreateTimeout() = %s, want %s", got, test.want)
 			}
 		})
+	}
+}
+
+func TestRuntimeSessionCreateExpiresAtUsesDurableIssuedAt(t *testing.T) {
+	t.Parallel()
+	issuedAt := time.Date(2026, time.September, 2, 7, 0, 0, 0, time.UTC)
+	target := acpDispatchTarget{pool: &corev1alpha1.RuntimePool{Spec: corev1alpha1.RuntimePoolSpec{ColdStartTimeoutSeconds: 600}}}
+	if got, want := runtimeSessionCreateExpiresAt(issuedAt, target), issuedAt.Add(10*time.Minute); !got.Equal(want) {
+		t.Fatalf("RuntimeSession create expiry = %s, want %s", got, want)
+	}
+}
+
+func TestRuntimeSessionCreateRenewalExpiresAtUsesShortestAuthorization(t *testing.T) {
+	t.Parallel()
+	issuedAt := time.Date(2026, time.September, 2, 7, 0, 0, 0, time.UTC)
+	createExpiresAt := issuedAt.Add(10 * time.Minute)
+	if got, want := runtimeSessionCreateRenewalExpiresAt(issuedAt, createExpiresAt, true), issuedAt.Add(artifactcap.MaxCapabilityTTL); !got.Equal(want) {
+		t.Fatalf("RuntimeSession renewal expiry with workspace authorization = %s, want %s", got, want)
+	}
+	if got := runtimeSessionCreateRenewalExpiresAt(issuedAt, createExpiresAt, false); !got.Equal(createExpiresAt) {
+		t.Fatalf("RuntimeSession renewal expiry without workspace authorization = %s, want %s", got, createExpiresAt)
+	}
+}
+
+func TestRuntimeSessionCreateAuthorizationNeedsRenewal(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, time.September, 2, 7, 0, 0, 0, time.UTC)
+	if !runtimeSessionCreateAuthorizationNeedsRenewal(now.Add(runtimeSessionCreateRenewalMargin), now) {
+		t.Fatal("authorization at the renewal margin was treated as reusable")
+	}
+	if runtimeSessionCreateAuthorizationNeedsRenewal(now.Add(runtimeSessionCreateRenewalMargin+time.Nanosecond), now) {
+		t.Fatal("authorization beyond the renewal margin was rotated early")
+	}
+}
+
+func TestReconcilePlannedTaskScopedRuntimeSessionReusesAdmissibleSession(t *testing.T) {
+	profileDigest := harnessv2.ProfileDigest(testControlDigestForDispatcher("task-scoped-recovery-profile"))
+	runtimeFence := harnessv2.Fence{
+		RuntimeInstanceID: "pod-uid.boot-id", SupervisorBootID: "boot-id", ControllerEpoch: 1,
+		RuntimePoolUID: acpDispatcherTestPoolUID, RuntimePoolGeneration: 1,
+		RuntimeProfileDigest: profileDigest, ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
+		RuntimeSessionUID: "task-scoped-recovery-uid", RuntimeSessionGeneration: 1,
+	}
+	descriptor := harnessv2.RuntimeSessionDescriptor{
+		RuntimeSessionID:  harnessv2.RuntimeSessionID(runtimeSessionID(runtimeFence)),
+		RuntimeSessionUID: runtimeFence.RuntimeSessionUID, Generation: runtimeFence.RuntimeSessionGeneration,
+		State: harnessv2.RuntimeSessionStateIdle, LastTransitionAt: time.Now().UTC(),
+	}
+	statusResponse := dispatcherRuntimeStatusResponse(profileDigest, descriptor)
+	if err := statusResponse.Validate(); err != nil {
+		t.Fatalf("build task-scoped recovery status: %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != harnessv2.StatusPath {
+			http.NotFound(w, r)
+			return
+		}
+		writeDispatcherJSON(w, statusResponse)
+	}))
+	defer server.Close()
+	runtimeClient, err := harnessv2.NewClient(
+		server.URL,
+		harnessv2.WithControllerBearerToken(strings.Repeat("t", 32)),
+		harnessv2.WithOperationCapabilitySecret([]byte(strings.Repeat("s", 32))),
+		harnessv2.WithStatusCapabilityBinding(harnessv2.StatusCapabilityBinding{RuntimeProfileDigest: profileDigest}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "task-scoped-recovery"}}
+	reused, requeued, err := (&ACPDispatcher{}).reconcilePlannedTaskScopedRuntimeSession(
+		context.Background(), runtimeClient, task, "attempt", store.ControllerEpochFence{}, runtimeFence,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reused || requeued {
+		t.Fatalf("task-scoped RuntimeSession recovery = reused %t, requeued %t; want true, false", reused, requeued)
+	}
+}
+
+func TestReconcilePlannedTaskScopedRuntimeSessionRequeuesNonAdmissibleSession(t *testing.T) {
+	ctx := context.Background()
+	controlStore, fence, closeStore := newACPSessionTestStore(t, filepath.Join(t.TempDir(), "task-scoped-recovery.db"))
+	defer closeStore()
+	task := runtimePoolReservationTestTask(
+		"task-scoped-terminal-recovery", "99999999-1111-2222-3333-444444444444", acpDispatcherTestPoolUID,
+	)
+	key := store.PromptAttemptKey{
+		Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: task.Status.Execution.PromptID,
+	}
+	attempt, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
+		Key: key, RequestDigest: task.Status.Execution.RequestDigest,
+		ExecutionState: store.PromptExecutionQueued, DeliveryState: store.PromptDeliveryNotRequested,
+	}), fence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt, err = controlStore.TransitionPromptAttemptExecution(ctx, store.PromptAttemptExecutionTransition{
+		ID: attempt.ID, Fence: fence, ExpectedVersion: attempt.Version, ExpectedState: attempt.ExecutionState,
+		NewState: store.PromptExecutionReserved, OperationID: "task-scoped-reserved",
+		OperationDigest: testControlDigestForDispatcher("task-scoped-reserved"), UpdatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialGeneration, err := taskScopedRuntimeSessionGeneration(attempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, next := range []store.PromptExecutionState{store.PromptExecutionSessionStarting, store.PromptExecutionPlanned} {
+		operation := "task-scoped-" + string(next)
+		attempt, err = controlStore.TransitionPromptAttemptExecution(ctx, store.PromptAttemptExecutionTransition{
+			ID: attempt.ID, Fence: fence, ExpectedVersion: attempt.Version, ExpectedState: attempt.ExecutionState,
+			NewState: next, OperationID: operation, OperationDigest: testControlDigestForDispatcher(operation),
+			RuntimeInstanceID: "pod-uid.boot-id", SessionUID: string(task.UID),
+			SessionLeaseGeneration: int64(initialGeneration), UpdatedAt: time.Now().UTC(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	profileDigest := harnessv2.ProfileDigest(testControlDigestForDispatcher("task-scoped-terminal-profile"))
+	runtimeFence := harnessv2.Fence{
+		RuntimeInstanceID: "pod-uid.boot-id", SupervisorBootID: "boot-id", ControllerEpoch: 1,
+		RuntimePoolUID: acpDispatcherTestPoolUID, RuntimePoolGeneration: 1,
+		RuntimeProfileDigest: profileDigest, ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
+		RuntimeSessionUID: harnessv2.RuntimeSessionUID(task.UID), RuntimeSessionGeneration: initialGeneration,
+	}
+	descriptor := harnessv2.RuntimeSessionDescriptor{
+		RuntimeSessionID:  harnessv2.RuntimeSessionID(runtimeSessionID(runtimeFence)),
+		RuntimeSessionUID: runtimeFence.RuntimeSessionUID, Generation: runtimeFence.RuntimeSessionGeneration,
+		State: harnessv2.RuntimeSessionStatePoisoned, LastTransitionAt: time.Now().UTC(),
+	}
+	statusResponse := dispatcherRuntimeStatusResponse(profileDigest, descriptor)
+	if err := statusResponse.Validate(); err != nil {
+		t.Fatalf("build non-admissible task-scoped status: %v", err)
+	}
+	var deleteCalls atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET "+harnessv2.StatusPath, func(w http.ResponseWriter, _ *http.Request) {
+		writeDispatcherJSON(w, statusResponse)
+	})
+	mux.HandleFunc("DELETE /v2/runtime-sessions/{sessionID}", func(w http.ResponseWriter, r *http.Request) {
+		var request harnessv2.DeleteRuntimeSessionRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode task-scoped RuntimeSession delete: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		deleteCalls.Add(1)
+		writeDispatcherJSON(w, harnessv2.DeleteRuntimeSessionResponse{
+			Protocol:       harnessv2.ProtocolVersion,
+			Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh},
+			State:          harnessv2.RuntimeSessionStateDeleted,
+			Tombstone:      testDeleteTombstone(request, time.Now().UTC()),
+		})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	runtimeClient, err := harnessv2.NewClient(
+		server.URL,
+		harnessv2.WithControllerBearerToken(strings.Repeat("t", 32)),
+		harnessv2.WithOperationCapabilitySecret([]byte(strings.Repeat("s", 32))),
+		harnessv2.WithStatusCapabilityBinding(harnessv2.StatusCapabilityBinding{RuntimeProfileDigest: profileDigest}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.Status.Execution.State = corev1alpha1.TaskExecutionStatePlanned
+	task.Status.Execution.RuntimeInstanceID = string(runtimeFence.RuntimeInstanceID)
+	task.Status.Execution.RuntimeSessionUID = string(runtimeFence.RuntimeSessionUID)
+	task.Status.Execution.RuntimeSessionGeneration = int64(runtimeFence.RuntimeSessionGeneration)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		WithObjects(task.DeepCopy()).Build()
+	dispatcher := &ACPDispatcher{Client: kubeClient, Store: controlStore}
+	reused, requeued, err := dispatcher.reconcilePlannedTaskScopedRuntimeSession(
+		ctx, runtimeClient, task, attempt.ID, fence, runtimeFence,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reused || !requeued || deleteCalls.Load() != 1 {
+		t.Fatalf("task-scoped RuntimeSession recovery = reused %t, requeued %t, deletes %d; want false, true, 1", reused, requeued, deleteCalls.Load())
+	}
+	recoveredAttempt, err := controlStore.GetPromptAttempt(ctx, attempt.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recoveredAttempt.ExecutionState != store.PromptExecutionReserved {
+		t.Fatalf("recovered PromptAttempt state = %s, want %s", recoveredAttempt.ExecutionState, store.PromptExecutionReserved)
+	}
+	nextGeneration, err := taskScopedRuntimeSessionGeneration(recoveredAttempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nextGeneration <= initialGeneration {
+		t.Fatalf("recovered task-scoped RuntimeSession generation = %d, want greater than %d", nextGeneration, initialGeneration)
+	}
+	currentTask := &corev1alpha1.Task{}
+	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(task), currentTask); err != nil {
+		t.Fatal(err)
+	}
+	if currentTask.Status.Execution == nil || currentTask.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved ||
+		currentTask.Status.Execution.RuntimeSessionUID != "" || currentTask.Status.Execution.RuntimeSessionGeneration != 0 {
+		t.Fatalf("requeued Task execution = %#v", currentTask.Status.Execution)
+	}
+}
+
+func TestRotateExpiredSessionBoundRuntimeSessionCreation(t *testing.T) {
+	ctx := context.Background()
+	controlStore, fence, closeStore := newACPSessionTestStore(t, filepath.Join(t.TempDir(), "expired-session-create.db"))
+	defer closeStore()
+	task := runtimePoolReservationTestTask("expired-session-create", "expired-session-create-uid", acpDispatcherTestPoolUID)
+	task.Status.Execution.State = corev1alpha1.TaskExecutionStatePlanned
+	task.Status.Execution.RuntimeSessionUID = "durable-session-uid"
+	task.Status.Execution.RuntimeSessionGeneration = 1
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		WithObjects(task.DeepCopy()).Build()
+	key := store.PromptAttemptKey{
+		Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: task.Status.Execution.PromptID,
+	}
+	attempt, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
+		Key: key, RequestDigest: task.Status.Execution.RequestDigest,
+		ExecutionState: store.PromptExecutionQueued, DeliveryState: store.PromptDeliveryNotRequested,
+	}), fence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, next := range []store.PromptExecutionState{
+		store.PromptExecutionReserved, store.PromptExecutionSessionStarting, store.PromptExecutionPlanned,
+	} {
+		operation := "expired-session-create-" + string(next)
+		attempt, err = controlStore.TransitionPromptAttemptExecution(ctx, store.PromptAttemptExecutionTransition{
+			ID: attempt.ID, Fence: fence, ExpectedVersion: attempt.Version, ExpectedState: attempt.ExecutionState,
+			NewState: next, OperationID: operation, OperationDigest: testControlDigestForDispatcher(operation),
+			UpdatedAt: time.Now().UTC(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	profileDigest := harnessv2.ProfileDigest(testControlDigestForDispatcher("expired-session-create-profile"))
+	session := &acpTaskSession{
+		Binding: ACPRuntimeSessionBinding{
+			SessionUID: "durable-session-uid", Generation: 1, ProfileDigest: profileDigest,
+			RuntimeInstanceID: "pod-uid.boot-id", SupervisorBootID: "boot-id",
+			WorkspaceDigest: testControlDigestForDispatcher("old-workspace"),
+		},
+		LeaseGeneration: 1,
+	}
+	runtimeFence := harnessv2.Fence{
+		RuntimeInstanceID: session.Binding.RuntimeInstanceID, SupervisorBootID: session.Binding.SupervisorBootID,
+		RuntimeProfileDigest: profileDigest, RuntimeSessionUID: harnessv2.RuntimeSessionUID(session.Binding.SessionUID),
+		RuntimeSessionGeneration: session.Binding.Generation,
+	}
+	dispatcher := &ACPDispatcher{Client: kubeClient, Store: controlStore}
+	if err := dispatcher.rotateExpiredSessionBoundRuntimeSessionCreation(
+		ctx, task, attempt.ID, fence, session, &runtimeFence,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if session.Binding.Generation != 2 || runtimeFence.RuntimeSessionGeneration != 2 ||
+		!session.Binding.RecreationRequired || session.Binding.WorkspaceDigest != "" || !session.requeued {
+		t.Fatalf("rotated session binding = %#v, fence generation = %d, requeued = %t", session.Binding, runtimeFence.RuntimeSessionGeneration, session.requeued)
+	}
+	currentAttempt, err := controlStore.GetPromptAttempt(ctx, attempt.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if currentAttempt.ExecutionState != store.PromptExecutionReserved {
+		t.Fatalf("rotated PromptAttempt state = %s, want %s", currentAttempt.ExecutionState, store.PromptExecutionReserved)
+	}
+	currentTask := &corev1alpha1.Task{}
+	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(task), currentTask); err != nil {
+		t.Fatal(err)
+	}
+	if currentTask.Status.Execution == nil || currentTask.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved ||
+		currentTask.Status.Execution.RuntimeSessionGeneration != 2 || !currentTask.Status.Execution.RuntimeSessionRecreationPending {
+		t.Fatalf("rotated Task execution = %#v", currentTask.Status.Execution)
 	}
 }
 
@@ -558,12 +856,49 @@ func TestRuntimeSessionStartFailureMessageAllowsOnlyKnownStages(t *testing.T) {
 	if status != http.StatusBadRequest || code != harnessv2.ErrorCodeInvalidRequest || diagnostic != "runtime session request rejected before classified creation" {
 		t.Fatalf("unknown stage diagnostic = %d/%s/%q", status, code, diagnostic)
 	}
+	// Separators are dropped, not spaced, so a line-wrapped credential
+	// reassembles for the redactor; prose merely loses the break.
 	unknown.Message = "  fixed server detail\nwith control  "
-	if got := boundedRuntimeSessionServerMessage(unknown); got != "fixed server detail with control" {
+	if got := boundedRuntimeSessionServerMessage(unknown); got != "fixed server detailwith control" {
 		t.Fatalf("bounded server message = %q", got)
 	}
 	if got := runtimeSessionStartFailureMessage(errors.New("raw-secret")); got != fallback {
 		t.Fatalf("raw error message = %q", got)
+	}
+}
+
+func TestMarkTaskRuntimePoolWorkspaceResumeLost(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	task := runtimePoolReservationTestTask("resume-lost", "resume-lost-uid", acpDispatcherTestPoolUID)
+	pool := &corev1alpha1.RuntimePool{
+		ObjectMeta: metav1.ObjectMeta{Namespace: task.Namespace, Name: task.Status.Execution.RuntimePoolName, UID: acpDispatcherTestPoolUID},
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool).Build()
+	dispatcher := &ACPDispatcher{Client: kubeClient, APIReader: kubeClient}
+	resumeLost := &harnessv2.ClientError{
+		Kind: harnessv2.ClientErrorHTTP, StatusCode: http.StatusConflict,
+		Code: harnessv2.ErrorCodeWorkspaceResumeLost, Retryable: false,
+	}
+	if !runtimeSessionWorkspaceResumeLost(resumeLost) {
+		t.Fatal("workspace resume loss was not recognized")
+	}
+	resumeLost.Retryable = true
+	if runtimeSessionWorkspaceResumeLost(resumeLost) {
+		t.Fatal("retryable error was classified as terminal workspace resume loss")
+	}
+	resumeLost.Retryable = false
+	if err := dispatcher.markTaskRuntimePoolWorkspaceResumeLost(context.Background(), task); err != nil {
+		t.Fatalf("mark workspace resume loss: %v", err)
+	}
+	current := &corev1alpha1.RuntimePool{}
+	if err := kubeClient.Get(context.Background(), client.ObjectKeyFromObject(pool), current); err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(current.Annotations[runtimePoolWorkspaceResumeLostAnnotation]) == "" {
+		t.Fatal("RuntimePool workspace resume loss was not recorded")
 	}
 }
 
@@ -577,6 +912,8 @@ func TestRuntimeSessionCreationMayHaveApplied(t *testing.T) {
 		{name: "zero bytes", err: &harnessv2.ClientError{WriteEvidence: harnessv2.RequestWriteEvidence{State: harnessv2.RequestWriteZeroBytes}}, want: false},
 		{name: "definitive HTTP rejection", err: &harnessv2.ClientError{Kind: harnessv2.ClientErrorHTTP, StatusCode: http.StatusUnprocessableEntity, WriteEvidence: harnessv2.RequestWriteEvidence{State: harnessv2.RequestWriteComplete}}, want: false},
 		{name: "ambiguous server failure", err: &harnessv2.ClientError{Kind: harnessv2.ClientErrorHTTP, StatusCode: http.StatusInternalServerError, WriteEvidence: harnessv2.RequestWriteEvidence{State: harnessv2.RequestWriteComplete}}, want: true},
+		{name: "create digest conflict records an earlier send", err: &harnessv2.ClientError{Kind: harnessv2.ClientErrorHTTP, StatusCode: http.StatusConflict, Code: harnessv2.ErrorCodeDigestConflict, WriteEvidence: harnessv2.RequestWriteEvidence{State: harnessv2.RequestWriteComplete}}, want: true},
+		{name: "other conflict rejection", err: &harnessv2.ClientError{Kind: harnessv2.ClientErrorHTTP, StatusCode: http.StatusConflict, Code: harnessv2.ErrorCodeInvalidRequest, WriteEvidence: harnessv2.RequestWriteEvidence{State: harnessv2.RequestWriteComplete}}, want: false},
 		{name: "protocol failure after write", err: &harnessv2.ClientError{Kind: harnessv2.ClientErrorProtocol, StatusCode: http.StatusOK, WriteEvidence: harnessv2.RequestWriteEvidence{State: harnessv2.RequestWriteComplete}}, want: true},
 		{name: "non client error", err: errors.New("transport setup failed"), want: true},
 	}
@@ -584,6 +921,69 @@ func TestRuntimeSessionCreationMayHaveApplied(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := runtimeSessionCreationMayHaveApplied(tc.err); got != tc.want {
 				t.Fatalf("runtimeSessionCreationMayHaveApplied() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRetryableUnsentMutationCanRetry(t *testing.T) {
+	zeroWrite := harnessv2.RequestWriteEvidence{State: harnessv2.RequestWriteZeroBytes}
+	for _, test := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "retryable zero write",
+			err:  &harnessv2.ClientError{Kind: harnessv2.ClientErrorValidation, Retryable: true, WriteEvidence: zeroWrite},
+			want: true,
+		},
+		{
+			name: "nonretryable zero write",
+			err:  &harnessv2.ClientError{Kind: harnessv2.ClientErrorValidation, WriteEvidence: zeroWrite},
+		},
+		{
+			name: "retryable ambiguous write",
+			err: &harnessv2.ClientError{
+				Kind: harnessv2.ClientErrorTransport, Retryable: true,
+				WriteEvidence: harnessv2.RequestWriteEvidence{State: harnessv2.RequestWriteAmbiguous},
+			},
+		},
+		{name: "non client error", err: errors.New("validation unavailable")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := retryableUnsentMutationCanRetry(test.err); got != test.want {
+				t.Fatalf("retryableUnsentMutationCanRetry() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func TestRetryableUnsentPromptCanRequeue(t *testing.T) {
+	zeroWrite := harnessv2.RequestWriteEvidence{State: harnessv2.RequestWriteZeroBytes}
+	ambiguousWrite := harnessv2.RequestWriteEvidence{State: harnessv2.RequestWriteAmbiguous}
+	retryableZeroWrite := &harnessv2.ClientError{Retryable: true, WriteEvidence: zeroWrite}
+	for _, test := range []struct {
+		name              string
+		accepted          bool
+		summary           harnessv2.PromptStreamSummary
+		runtimeContextErr error
+		err               error
+		want              bool
+	}{
+		{name: "retryable zero write", summary: harnessv2.PromptStreamSummary{WriteEvidence: zeroWrite}, err: retryableZeroWrite, want: true},
+		{name: "callback accepted", accepted: true, summary: harnessv2.PromptStreamSummary{WriteEvidence: zeroWrite}, err: retryableZeroWrite},
+		{name: "summary accepted", summary: harnessv2.PromptStreamSummary{Accepted: true, WriteEvidence: zeroWrite}, err: retryableZeroWrite},
+		{name: "task cancelled", summary: harnessv2.PromptStreamSummary{WriteEvidence: zeroWrite}, runtimeContextErr: context.Canceled, err: retryableZeroWrite},
+		{name: "task deadline", summary: harnessv2.PromptStreamSummary{WriteEvidence: zeroWrite}, runtimeContextErr: context.DeadlineExceeded, err: retryableZeroWrite},
+		{name: "nonretryable zero write", summary: harnessv2.PromptStreamSummary{WriteEvidence: zeroWrite}, err: &harnessv2.ClientError{WriteEvidence: zeroWrite}},
+		{name: "retryable ambiguous client write", summary: harnessv2.PromptStreamSummary{WriteEvidence: ambiguousWrite}, err: &harnessv2.ClientError{Retryable: true, WriteEvidence: ambiguousWrite}},
+		{name: "ambiguous summary", summary: harnessv2.PromptStreamSummary{WriteEvidence: ambiguousWrite}, err: retryableZeroWrite},
+		{name: "non client error", summary: harnessv2.PromptStreamSummary{WriteEvidence: zeroWrite}, err: errors.New("validation unavailable")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := retryableUnsentPromptCanRequeue(test.accepted, test.summary, test.runtimeContextErr, test.err); got != test.want {
+				t.Fatalf("retryableUnsentPromptCanRequeue() = %t, want %t", got, test.want)
 			}
 		})
 	}
@@ -1175,12 +1575,14 @@ func TestPromptStreamFailureClosesLifecycleBeforeOutcomeUnknown(t *testing.T) {
 
 func TestPromptTimeoutPersistsProvenCancellationSettlement(t *testing.T) {
 	for _, test := range []struct {
-		name         string
-		settlement   harnessv2.PromptSettlement
-		wantState    corev1alpha1.TaskExecutionState
-		wantReason   corev1alpha1.TaskExecutionReason
-		wantAttempt  store.PromptExecutionState
-		wantTerminal harnessv2.EventType
+		name           string
+		settlement     harnessv2.PromptSettlement
+		wantState      corev1alpha1.TaskExecutionState
+		wantReason     corev1alpha1.TaskExecutionReason
+		wantAttempt    store.PromptExecutionState
+		attemptReason  string
+		attemptMessage string
+		wantTerminal   harnessv2.EventType
 	}{
 		{
 			name: acpCancelledOperation,
@@ -1189,7 +1591,8 @@ func TestPromptTimeoutPersistsProvenCancellationSettlement(t *testing.T) {
 				StopReason: harnessv2.ACPStopReasonCancelled, SettledAt: time.Now().UTC(),
 			},
 			wantState: corev1alpha1.TaskExecutionStateCancelled, wantReason: acpTaskTimeoutReason,
-			wantAttempt: store.PromptExecutionCancelled, wantTerminal: harnessv2.EventCancelled,
+			wantAttempt: store.PromptExecutionCancelled, attemptReason: string(acpTaskTimeoutReason),
+			attemptMessage: acpTaskTimeoutCancellationSettledMessage, wantTerminal: harnessv2.EventCancelled,
 		},
 		{
 			name: acpPromptOutcomeFailed,
@@ -1226,8 +1629,13 @@ func TestPromptTimeoutPersistsProvenCancellationSettlement(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if attempt.ExecutionState != test.wantAttempt {
-				t.Fatalf("timeout settlement attempt = %s, want %s", attempt.ExecutionState, test.wantAttempt)
+			if attempt.ExecutionState != test.wantAttempt || attempt.TerminalReason != test.attemptReason ||
+				attempt.OutcomeMarker != test.attemptMessage {
+				t.Fatalf(
+					"timeout settlement attempt = state %s reason %q message %q, want %s/%q/%q",
+					attempt.ExecutionState, attempt.TerminalReason, attempt.OutcomeMarker,
+					test.wantAttempt, test.attemptReason, test.attemptMessage,
+				)
 			}
 			fixture.assertTerminalLifecycle(t, test.wantTerminal, true)
 		})
@@ -1883,7 +2291,7 @@ func TestACPDispatcherUsesFrozenAgentAndToolAfterLiveResourcesChange(t *testing.
 			task.Status.Execution.RuntimePoolName = plan.PoolName
 
 			createRequests := make(chan harnessv2.CreateRuntimeSessionRequest, 1)
-			server := newDispatcherRuntimeServer(t, plan.Profile, plan.Digest, func(request harnessv2.CreateRuntimeSessionRequest) {
+			server := newDispatcherRuntimeServerForPool(t, plan.Profile, plan.Digest, "frozen-pool-uid", func(request harnessv2.CreateRuntimeSessionRequest) {
 				createRequests <- request
 			})
 			defer server.Close()
@@ -1997,8 +2405,21 @@ func TestACPDispatcherUsesFrozenAgentAndToolAfterLiveResourcesChange(t *testing.
 	}
 }
 
-//nolint:goconst,gocyclo // The end-to-end write-session lifecycle assertions intentionally stay together.
 func TestACPDispatcherWriteSessionFinalizesPublicationBeforeDeleteAndPersistsCleanupReceipt(t *testing.T) {
+	testACPDispatcherWriteSessionFinalization(t, false, false)
+}
+
+func TestACPDispatcherWriteSessionSurvivesCreateConflictRequeue(t *testing.T) {
+	testACPDispatcherWriteSessionFinalization(t, true, false)
+}
+
+func TestACPDispatcherWriteTaskSettlesPublicationOwnerConflict(t *testing.T) {
+	testACPDispatcherWriteSessionFinalization(t, false, true)
+}
+
+//nolint:goconst,gocyclo // The end-to-end write-session lifecycle assertions intentionally stay together.
+func testACPDispatcherWriteSessionFinalization(t *testing.T, requeueAfterCreateConflict, publicationOwnerConflict bool) {
+	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
@@ -2030,6 +2451,10 @@ func TestACPDispatcherWriteSessionFinalizesPublicationBeforeDeleteAndPersistsCle
 			RequestDigest: testControlDigestForDispatcher("write-session-request"), ControllerEpoch: 1,
 		}},
 	}
+	if publicationOwnerConflict {
+		task.Spec.SessionRef = nil
+		task.Spec.Workspace.PushBranch = "orka/claimed-branch"
+	}
 	spanHarness, parentSpanID := stampACPTaskTrace(t, task)
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "agent", UID: types.UID("agent-uid"), Generation: 1},
@@ -2049,8 +2474,10 @@ func TestACPDispatcherWriteSessionFinalizesPublicationBeforeDeleteAndPersistsCle
 	var operationMu sync.Mutex
 	operations := make([]string, 0, 2)
 	var finalizationRequest harnessv2.FinalizeRuntimeSessionPublicationRequest
+	var creationPending atomic.Bool
+	creationPending.Store(requeueAfterCreateConflict)
 	runtimeServer := newDispatcherWriteRuntimeServer(
-		t, profile, profileDigest,
+		t, profile, profileDigest, &creationPending,
 		func(request harnessv2.FinalizeRuntimeSessionPublicationRequest) {
 			operationMu.Lock()
 			defer operationMu.Unlock()
@@ -2117,6 +2544,20 @@ func TestACPDispatcherWriteSessionFinalizesPublicationBeforeDeleteAndPersistsCle
 	if err != nil {
 		t.Fatal(err)
 	}
+	if publicationOwnerConflict {
+		claimID, err := store.CanonicalBranchClaimID("github.com/orka-agents/orka", "refs/heads/orka/claimed-branch")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := controlStore.CreateBranchClaim(ctx, &store.BranchClaim{
+			ID: claimID, RepositoryID: "github.com/orka-agents/orka", Ref: "refs/heads/orka/claimed-branch",
+			OwnerKind: store.BranchClaimOwnerTask, OwnerUID: "another-task", Generation: 1,
+			LastVerified: store.RemoteRefState{Absent: true}, Availability: store.BranchClaimAvailable,
+			RequestDigest: testControlDigestForDispatcher("existing-task-branch"), CreatedAt: time.Now().UTC(),
+		}, fence); err != nil {
+			t.Fatal(err)
+		}
+	}
 	task = prepareBoundACPDispatcherTaskForTest(t, ctx, kubeClient, scheme, controlStore, task, agent, images)
 	key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID}
 	attemptID, err := key.CanonicalID()
@@ -2175,15 +2616,89 @@ func TestACPDispatcherWriteSessionFinalizesPublicationBeforeDeleteAndPersistsCle
 		Sessions:  continuity, Publisher: publisherClient, ArtifactCapabilitySecret: []byte(strings.Repeat("d", 32)),
 		ArtifactReservations: acceptingArtifactReservations{},
 	}
+	var preservedGeneration int64
+	if requeueAfterCreateConflict {
+		reserved, target, err := dispatcher.reserveTask(ctx, task.DeepCopy())
+		if err != nil || reserved == nil {
+			t.Fatalf("reserve write task: task=%v err=%v", reserved, err)
+		}
+		if err := dispatcher.executeReservedTask(ctx, reserved, target); err != nil {
+			t.Fatalf("first dispatch: %v", err)
+		}
+		if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(task), task); err != nil {
+			t.Fatal(err)
+		}
+		if task.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved ||
+			!task.Status.Execution.RuntimeSessionRecreationPending || task.Status.Execution.RuntimeSessionUID == "" ||
+			task.Status.Execution.RuntimeSessionGeneration == 0 || task.Status.Execution.RuntimeSessionCleanupDigest != "" {
+			t.Fatalf("write session binding was not preserved for retry: %#v", task.Status.Execution)
+		}
+		preservedGeneration = task.Status.Execution.RuntimeSessionGeneration
+		operationMu.Lock()
+		beforeRetry := append([]string(nil), operations...)
+		operationMu.Unlock()
+		if len(beforeRetry) != 0 {
+			t.Fatalf("write session was finalized or deleted before retry: %v", beforeRetry)
+		}
+		creationPending.Store(false)
+	}
 	dispatchQueuedTask(ctx, t, dispatcher, task.DeepCopy())
 	completed := &corev1alpha1.Task{}
 	if err := kubeClient.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, completed); err != nil {
 		t.Fatal(err)
 	}
+	if publicationOwnerConflict {
+		if completed.Status.Phase != corev1alpha1.TaskPhaseFailed || completed.Status.Execution == nil ||
+			completed.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeSucceeded || completed.Status.Delivery == nil ||
+			completed.Status.Delivery.Outcome != corev1alpha1.TaskDeliveryOutcomeDeliveryConflict ||
+			!strings.Contains(completed.Status.Message, "already claimed by a different owner") {
+			t.Fatalf("publication conflict did not settle Task: %#v", completed.Status)
+		}
+		if !taskScopedRuntimeSessionCleanupComplete(completed) {
+			t.Fatal("publication conflict left runtime cleanup incomplete")
+		}
+		attempt, err := controlStore.GetPromptAttempt(ctx, attemptID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if attempt.ExecutionState != store.PromptExecutionSucceeded || attempt.DeliveryState != store.PromptDeliveryConflict {
+			t.Fatalf("conflict attempt = %#v", attempt)
+		}
+		if exists, err := dispatcher.validateExistingStandaloneTaskProjection(ctx, completed, attempt); err != nil || !exists {
+			t.Fatalf("conflict terminal projection: exists=%v err=%v", exists, err)
+		}
+		if _, err := controlStore.GetPublication(ctx, publicationIDForTask(completed)); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("owner conflict created a publication: %v", err)
+		}
+		claimID, err := store.CanonicalBranchClaimID("github.com/orka-agents/orka", "refs/heads/orka/claimed-branch")
+		if err != nil {
+			t.Fatal(err)
+		}
+		claim, err := controlStore.GetBranchClaim(ctx, claimID)
+		if err != nil || claim.OwnerUID != "another-task" {
+			t.Fatalf("original branch claim changed: claim=%#v err=%v", claim, err)
+		}
+		operationMu.Lock()
+		gotOperations := append([]string(nil), operations...)
+		gotFinalization := finalizationRequest
+		operationMu.Unlock()
+		if fmt.Sprint(gotOperations) != "[finalize delete]" ||
+			gotFinalization.TerminalState != harnessv2.PublicationTerminalDeliveryConflict || gotFinalization.TerminalReceiptDigest == "" {
+			t.Fatalf("conflict runtime finalization: operations=%v request=%#v", gotOperations, gotFinalization)
+		}
+		cancelEpoch()
+		if err := <-epochDone; err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
 	if completed.Status.Phase != corev1alpha1.TaskPhaseSucceeded || completed.Status.Execution == nil ||
 		completed.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeSucceeded || completed.Status.Delivery == nil ||
 		completed.Status.Delivery.Outcome != corev1alpha1.TaskDeliveryOutcomeVerifiedExact || completed.Status.Delivery.StartingSHA != baselineOID {
 		t.Fatalf("unexpected completed write status: status=%#v execution=%#v delivery=%#v", completed.Status, completed.Status.Execution, completed.Status.Delivery)
+	}
+	if requeueAfterCreateConflict && completed.Status.Execution.RuntimeSessionGeneration != preservedGeneration {
+		t.Fatalf("completed generation = %d, want preserved generation %d", completed.Status.Execution.RuntimeSessionGeneration, preservedGeneration)
 	}
 	publication, err := controlStore.GetPublication(ctx, publicationIDForTask(completed))
 	if err != nil {
@@ -2240,11 +2755,24 @@ func TestACPDispatcherWriteSessionFinalizesPublicationBeforeDeleteAndPersistsCle
 }
 
 func TestACPDispatcherDeletesTaskScopedRuntimeSessionAfterTimeoutCancellation(t *testing.T) {
+	testACPDispatcherDeadlineCancellation(t, false)
+}
+
+func TestACPDispatcherCancelsActivePromptAtWorkspaceLifetime(t *testing.T) {
+	testACPDispatcherDeadlineCancellation(t, true)
+}
+
+//nolint:gocyclo // Keep both deadline sources and their shared protocol settlement assertions together.
+func testACPDispatcherDeadlineCancellation(t *testing.T, workspaceLifetime bool) {
+	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	taskUID := types.UID("66666666-6666-6666-6666-666666666666")
@@ -2260,6 +2788,11 @@ func TestACPDispatcherDeletesTaskScopedRuntimeSessionAfterTimeoutCancellation(t 
 			RequestDigest: testControlDigestForDispatcher("timeout-task-request"), ControllerEpoch: 1,
 		}},
 	}
+	if workspaceLifetime {
+		task.Spec.Execution = &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+			Enabled: true, Provider: corev1alpha1.WorkspaceProviderAgentSandbox,
+		}}
+	}
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "agent", UID: types.UID("agent-uid"), Generation: 1},
 		Spec: corev1alpha1.AgentSpec{
@@ -2271,6 +2804,16 @@ func TestACPDispatcherDeletesTaskScopedRuntimeSessionAfterTimeoutCancellation(t 
 	}
 	images := ACPRuntimeImages{Codex: "docker.io/example/acp@sha256:" + strings.Repeat("a", 64)}
 	plan := frozenACPDispatcherPlanForTest(t, task, agent, images)
+	if workspaceLifetime {
+		binding, err := resolveACPWorkspaceBinding(task, corev1alpha1.WorkspaceProviderAgentSandbox, false, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan, err = applyACPWorkspaceBindingToPlan(plan, binding)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	profile := plan.Profile
 	profileDigest := plan.Digest
 	task.Labels[acpRuntimeTaskPoolLabel] = plan.PoolName
@@ -2302,11 +2845,30 @@ func TestACPDispatcherDeletesTaskScopedRuntimeSessionAfterTimeoutCancellation(t 
 			},
 		},
 	}
+	if workspaceLifetime {
+		pool.Spec.ExecutionWorkspace = &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
+			Provider: plan.Workspace.Provider, BindingDigest: plan.Workspace.BindingDigest,
+		}
+		pool.Labels = map[string]string{acpExecutionWorkspaceLinkLabel: "expiring-workspace"}
+		pool.Annotations = map[string]string{acpExecutionWorkspaceUIDAnnotation: "expiring-workspace-uid"}
+	}
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "orka-runtimes", Name: "pool-auth-e1", Labels: map[string]string{
 			runtimePoolAuthLabel: "true", runtimePoolUIDLabel: string(pool.UID),
 		}},
 		Data: map[string][]byte{runtimePoolControllerTokenKey: []byte(strings.Repeat("t", 32)), runtimePoolCapabilitySecretKey: []byte(strings.Repeat("s", 32))},
+	}
+	if workspaceLifetime {
+		secret.Name = runtimePoolChildName(runtimePoolResourceName(pool.Namespace, pool.Name), "auth-e1-"+strings.Repeat("a", 24))
+		secret.UID = types.UID("workspace-auth-uid")
+		secret.Immutable = new(true)
+		secret.Labels = map[string]string{
+			runtimePoolManagedByLabel: runtimePoolManagedByLabelValue, runtimePoolApplicationLabel: runtimePoolApplicationLabelValue,
+			runtimePoolKeyLabel: runtimePoolKey(pool.Namespace, pool.Name), runtimePoolNameLabel: pool.Name,
+			runtimePoolNamespaceLabel: pool.Namespace, runtimePoolUIDLabel: string(pool.UID),
+			runtimePoolNetworkRoleLabel: "provider-client", runtimePoolAuthLabel: booleanTrueValue, runtimePoolCredentialEpochLabel: "1",
+		}
+		pool.Annotations[runtimePoolPrivateAuthSecretBindingAnnotation(1)] = secret.Name + "/" + string(secret.UID)
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.RuntimePool{}).WithObjects(task, pool, secret, agent).Build()
 	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "timeout-store.db"))
@@ -2347,16 +2909,44 @@ func TestACPDispatcherDeletesTaskScopedRuntimeSessionAfterTimeoutCancellation(t 
 			return runtimeCtx, func() { cancelCause(context.Canceled) }
 		},
 	}
-	cancelAfterAcceptance := cancelRuntimeContextAfterPromptRunning(
-		ctx, controlStore, attemptID, accepted, deadlineCancels,
-	)
+	var cancelAfterAcceptance <-chan error
+	if workspaceLifetime {
+		// Exercise the real workspace deadline through reserve/execute and
+		// authenticated cancellation. The Task's own 30-second timeout must
+		// not be the cause of settlement within this test's 10-second bound.
+		dispatcher.runtimeContextFactory = nil
+		workspace := &workspacev1alpha1.ExecutionWorkspace{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: task.Namespace, Name: "expiring-workspace", UID: types.UID("expiring-workspace-uid"),
+				CreationTimestamp: metav1.NewTime(time.Now().UTC().Truncate(time.Second)),
+				Annotations:       map[string]string{acpExecutionWorkspacePoolAnnotation: pool.Name},
+			},
+			Spec: workspacev1alpha1.ExecutionWorkspaceSpec{Lifecycle: workspacev1alpha1.ExecutionWorkspaceLifecycle{
+				MaxLifetime: &metav1.Duration{Duration: 5 * time.Second},
+			}},
+		}
+		if err := kubeClient.Create(ctx, workspace); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		cancelAfterAcceptance = cancelRuntimeContextAfterPromptRunning(
+			ctx, controlStore, attemptID, accepted, deadlineCancels,
+		)
+	}
 	dispatchQueuedTask(ctx, t, dispatcher, task.DeepCopy())
-	if err := <-cancelAfterAcceptance; err != nil {
-		t.Fatalf("cancel after prompt acceptance: %v", err)
+	if cancelAfterAcceptance != nil {
+		if err := <-cancelAfterAcceptance; err != nil {
+			t.Fatalf("cancel after prompt acceptance: %v", err)
+		}
 	}
 	completed := &corev1alpha1.Task{}
 	if err := kubeClient.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, completed); err != nil {
 		t.Fatal(err)
+	}
+	select {
+	case <-accepted:
+	default:
+		t.Fatalf("prompt was not accepted: %#v", completed.Status.Execution)
 	}
 	if completed.Status.Phase != corev1alpha1.TaskPhaseCancelled || completed.Status.Execution == nil ||
 		completed.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeCancelled ||
@@ -2485,8 +3075,17 @@ func TestACPDispatcherOpensSessionTurnBeforePrePromptFailureAndReleasesLease(t *
 	}
 }
 
-//nolint:gocyclo // The explicit state-machine branches are easier to audit together.
 func TestACPDispatcherPublishesPreparedWorkspaceDelta(t *testing.T) {
+	testACPDispatcherPublishesPreparedWorkspaceDelta(t, true)
+}
+
+func TestACPDispatcherPublishesPreparedWorkspaceDeltaWithLegacyPublisher(t *testing.T) {
+	testACPDispatcherPublishesPreparedWorkspaceDelta(t, false)
+}
+
+//nolint:gocyclo // The explicit state-machine branches are easier to audit together.
+func testACPDispatcherPublishesPreparedWorkspaceDelta(t *testing.T, supportsPresentation bool) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -2507,12 +3106,17 @@ func TestACPDispatcherPublishesPreparedWorkspaceDelta(t *testing.T) {
 				PublicationCredentialRef:     &corev1alpha1.WorkspaceCredentialReference{Name: "github-publish"},
 				ForgeCredentialRef:           &corev1alpha1.WorkspaceCredentialReference{Name: "github-forge"},
 				CreatePR:                     true, PRBaseBranch: "main",
+				PRTitle: "fix: publish the authored title", PRBody: "Publish the reviewed change.",
 			},
 		},
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning, Attempts: 1, Execution: &corev1alpha1.TaskExecutionStatus{
 			State: corev1alpha1.TaskExecutionStateSucceeded, Outcome: corev1alpha1.TaskExecutionOutcomeSucceeded,
 			Attempt: 1, PromptID: promptID, RequestDigest: testControlDigestForDispatcher("write-task"), ControllerEpoch: 1,
 		}},
+	}
+
+	if !supportsPresentation {
+		task.Spec.Workspace.PRTitle, task.Spec.Workspace.PRBody = "", ""
 	}
 
 	scheme := runtime.NewScheme()
@@ -2580,8 +3184,9 @@ func TestACPDispatcherPublishesPreparedWorkspaceDelta(t *testing.T) {
 	prepareRoots := make(chan string, 1)
 	publishRoots := make(chan string, 1)
 	publisherServer := newDispatcherPublisherServer(t, treeOID, commitOID, bundleDigest, dispatcherPublisherServerOptions{
-		inspectPullRequest: func(intent publisher.PullRequestIntent) { prIntents <- intent },
-		inspectPrepare:     func(request publisherservice.PublicationPrepareRequest) { prepareRoots <- request.Request.RelativeRoot },
+		disablePRPresentation: !supportsPresentation,
+		inspectPullRequest:    func(intent publisher.PullRequestIntent) { prIntents <- intent },
+		inspectPrepare:        func(request publisherservice.PublicationPrepareRequest) { prepareRoots <- request.Request.RelativeRoot },
 		inspectPublish: func(request publisherservice.PublicationPublishRequest) {
 			publishRoots <- request.Prepared.RelativeRoot
 		},
@@ -2637,8 +3242,19 @@ func TestACPDispatcherPublishesPreparedWorkspaceDelta(t *testing.T) {
 	}
 	select {
 	case intent := <-prIntents:
+		if supportsPresentation {
+			if intent.Title != task.Spec.Workspace.PRTitle || intent.Body != task.Spec.Workspace.PRBody ||
+				intent.TaskName != task.Name || intent.TaskNamespace != task.Namespace {
+				t.Fatal("publisher did not receive the Task-authored PR presentation")
+			}
+		} else if intent != withoutTaskPullRequestMetadata(intent) {
+			t.Fatal("legacy publisher received Task presentation")
+		}
 		if intent.BaseRepository.ID != "github.com/orka-agents/orka" || intent.HeadRepository.ID != "github.com/sozercan/orka-fork" {
 			t.Fatalf("continuation PR repositories = base %#v head %#v", intent.BaseRepository, intent.HeadRepository)
+		}
+		if intent.SessionUID != sessionUID {
+			t.Fatalf("continuation PR Session UID = %q, want durable owner %q", intent.SessionUID, sessionUID)
 		}
 	default:
 		t.Fatal("publisher did not receive a pull request intent")
@@ -2694,9 +3310,10 @@ func (acceptingArtifactReservations) Reserve(context.Context, artifactcap.Operat
 }
 
 type dispatcherPublisherServerOptions struct {
-	inspectPrepare     func(publisherservice.PublicationPrepareRequest)
-	inspectPublish     func(publisherservice.PublicationPublishRequest)
-	inspectPullRequest func(publisher.PullRequestIntent)
+	disablePRPresentation bool
+	inspectPrepare        func(publisherservice.PublicationPrepareRequest)
+	inspectPublish        func(publisherservice.PublicationPublishRequest)
+	inspectPullRequest    func(publisher.PullRequestIntent)
 }
 
 func newDispatcherPublisherServer(t *testing.T, treeOID, commitOID, bundleDigest string, options ...dispatcherPublisherServerOptions) *httptest.Server {
@@ -2713,6 +3330,12 @@ func newDispatcherPublisherServer(t *testing.T, treeOID, commitOID, bundleDigest
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
+		case publisherservice.CapabilitiesPath:
+			supportsPresentation := len(options) == 0 || !options[0].disablePRPresentation
+			writeDispatcherJSON(w, publisherservice.CapabilitiesResponse{
+				Protocol: publisherservice.ProtocolVersion, PullRequestReconciliation: true,
+				PullRequestPresentation: supportsPresentation && r.URL.Query().Get("features") == publisherservice.PullRequestPresentationFeature,
+			})
 		case publisherservice.WorkspaceResolvePath:
 			var request publisherservice.WorkspaceResolveRequest
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -2829,6 +3452,11 @@ func newDispatcherPublisherServer(t *testing.T, treeOID, commitOID, bundleDigest
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
+			if len(options) > 0 && options[0].disablePRPresentation && request.Intent != withoutTaskPullRequestMetadata(request.Intent) {
+				t.Error("legacy publisher received unsupported presentation fields")
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
 			intentKey, err := request.Intent.Key()
 			if err != nil {
 				t.Errorf("PR intent key: %v", err)
@@ -2859,6 +3487,14 @@ func newDispatcherTimeoutRuntimeServer(
 	mux := http.NewServeMux()
 	limits := harnessv2.DefaultProtocolLimits()
 	var acceptedOnce sync.Once
+	var descriptorMu sync.Mutex
+	var descriptor harnessv2.RuntimeSessionDescriptor
+	mux.HandleFunc("GET "+harnessv2.StatusPath, func(w http.ResponseWriter, _ *http.Request) {
+		descriptorMu.Lock()
+		current := descriptor
+		descriptorMu.Unlock()
+		writeDispatcherJSON(w, dispatcherRuntimeStatusResponse(digest, current))
+	})
 	mux.HandleFunc("GET "+harnessv2.CapabilitiesPath, func(w http.ResponseWriter, _ *http.Request) {
 		writeDispatcherJSON(w, harnessv2.CapabilitiesResponse{
 			Protocol: harnessv2.ProtocolVersion, Transport: "http+ndjson", ACPVersion: harnessv2.ACPProfileV1,
@@ -2878,15 +3514,19 @@ func newDispatcherTimeoutRuntimeServer(
 			return
 		}
 		now := time.Now().UTC()
+		descriptorMu.Lock()
+		descriptor = harnessv2.RuntimeSessionDescriptor{
+			RuntimeSessionID: request.RuntimeSessionID, RuntimeSessionUID: request.Metadata.Fence.RuntimeSessionUID,
+			Generation: request.Metadata.Fence.RuntimeSessionGeneration, RuntimeInstanceID: request.Metadata.Fence.RuntimeInstanceID,
+			SupervisorBootID: request.Metadata.Fence.SupervisorBootID, RuntimeProfileDigest: request.Metadata.Fence.RuntimeProfileDigest,
+			State: harnessv2.RuntimeSessionStateIdle, ProviderSessionID: "provider-session", WorkspaceBaseline: request.Workspace.Baseline,
+			CreatedAt: now, LastTransitionAt: now,
+		}
+		created := descriptor
+		descriptorMu.Unlock()
 		writeDispatcherJSONStatus(w, http.StatusCreated, harnessv2.CreateRuntimeSessionResponse{
 			Protocol: harnessv2.ProtocolVersion, Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh},
-			Session: harnessv2.RuntimeSessionDescriptor{
-				RuntimeSessionID: request.RuntimeSessionID, RuntimeSessionUID: request.Metadata.Fence.RuntimeSessionUID,
-				Generation: request.Metadata.Fence.RuntimeSessionGeneration, RuntimeInstanceID: request.Metadata.Fence.RuntimeInstanceID,
-				SupervisorBootID: request.Metadata.Fence.SupervisorBootID, RuntimeProfileDigest: request.Metadata.Fence.RuntimeProfileDigest,
-				State: harnessv2.RuntimeSessionStateIdle, ProviderSessionID: "provider-session", WorkspaceBaseline: request.Workspace.Baseline,
-				CreatedAt: now, LastTransitionAt: now,
-			},
+			Session: created,
 		})
 	})
 	mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/prompts/{promptID}", func(w http.ResponseWriter, r *http.Request) {
@@ -2952,6 +3592,9 @@ func newDispatcherTimeoutRuntimeServer(
 			return
 		}
 		deleteCalls.Add(1)
+		descriptorMu.Lock()
+		descriptor = harnessv2.RuntimeSessionDescriptor{}
+		descriptorMu.Unlock()
 		writeDispatcherJSON(w, harnessv2.DeleteRuntimeSessionResponse{
 			Protocol: harnessv2.ProtocolVersion, Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh}, State: harnessv2.RuntimeSessionStateDeleted,
 			Tombstone: testDeleteTombstone(request, time.Now().UTC()),
@@ -2964,6 +3607,7 @@ func newDispatcherWriteRuntimeServer(
 	t *testing.T,
 	profile harnessv2.RuntimeProfile,
 	digest harnessv2.ProfileDigest,
+	creationPending *atomic.Bool,
 	onFinalize func(harnessv2.FinalizeRuntimeSessionPublicationRequest),
 	onDelete func(harnessv2.DeleteRuntimeSessionRequest),
 ) *httptest.Server {
@@ -2981,6 +3625,10 @@ func newDispatcherWriteRuntimeServer(
 		descriptorMu.Lock()
 		current := descriptor
 		descriptorMu.Unlock()
+		if current.RuntimeSessionID != "" && creationPending.Load() {
+			current.State = harnessv2.RuntimeSessionStateCreating
+			current.LastTransitionAt = time.Now().UTC().Add(-3 * time.Minute)
+		}
 		writeDispatcherJSON(w, dispatcherRuntimeStatusResponse(digest, current))
 	})
 	mux.HandleFunc("GET "+harnessv2.CapabilitiesPath, func(w http.ResponseWriter, _ *http.Request) {
@@ -3016,6 +3664,10 @@ func newDispatcherWriteRuntimeServer(
 		}
 		responseDescriptor := descriptor
 		descriptorMu.Unlock()
+		if creationPending.Load() {
+			writeDispatcherJSONStatus(w, http.StatusConflict, digestConflictErrorResponse())
+			return
+		}
 		writeDispatcherJSONStatus(w, http.StatusCreated, harnessv2.CreateRuntimeSessionResponse{
 			Protocol: harnessv2.ProtocolVersion, Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh},
 			Session: responseDescriptor,
@@ -3135,14 +3787,17 @@ func newDispatcherWriteRuntimeServer(
 	return httptest.NewServer(mux)
 }
 
-func newDispatcherRuntimeServer(
+func newDispatcherRuntimeServerForPool(
 	t *testing.T,
 	profile harnessv2.RuntimeProfile,
 	digest harnessv2.ProfileDigest,
+	poolUID string,
 	onCreate ...func(harnessv2.CreateRuntimeSessionRequest),
 ) *httptest.Server {
 	t.Helper()
-	return newDispatcherRuntimeServerWithTerminalEvents(t, profile, digest, nil, onCreate...)
+	return newDispatcherRuntimeServerForPoolWithOptions(
+		t, profile, digest, poolUID, dispatcherRuntimeServerOptions{}, onCreate...,
+	)
 }
 
 func newDispatcherRuntimeServerWithTerminalEvents(
@@ -3153,6 +3808,48 @@ func newDispatcherRuntimeServerWithTerminalEvents(
 	onCreate ...func(harnessv2.CreateRuntimeSessionRequest),
 ) *httptest.Server {
 	t.Helper()
+	return newDispatcherRuntimeServerForPoolWithOptions(
+		t, profile, digest, acpDispatcherTestPoolUID,
+		dispatcherRuntimeServerOptions{terminalEvents: terminalEvents}, onCreate...,
+	)
+}
+
+type dispatcherRuntimeServerOptions struct {
+	terminalEvents                   map[harnessv2.PromptID]harnessv2.EventType
+	disableAgentSessionConfiguration bool
+	disablePermissions               bool
+	// rejectCreate answers a create request with the returned error response
+	// and status instead of creating the session when the response is non-nil.
+	// resident makes the runtime keep reporting the exact requested session as
+	// Idle, as a supervisor does after an earlier send of the same create
+	// already created it.
+	rejectCreate func(request harnessv2.CreateRuntimeSessionRequest) (status int, response *harnessv2.ErrorResponse, resident bool)
+	onDelete     func(harnessv2.DeleteRuntimeSessionRequest)
+}
+
+func newDispatcherRuntimeServerWithOptions(
+	t *testing.T,
+	profile harnessv2.RuntimeProfile,
+	digest harnessv2.ProfileDigest,
+	options dispatcherRuntimeServerOptions,
+	onCreate ...func(harnessv2.CreateRuntimeSessionRequest),
+) *httptest.Server {
+	t.Helper()
+	return newDispatcherRuntimeServerForPoolWithOptions(
+		t, profile, digest, acpDispatcherTestPoolUID, options, onCreate...,
+	)
+}
+
+func newDispatcherRuntimeServerForPoolWithOptions(
+	t *testing.T,
+	profile harnessv2.RuntimeProfile,
+	digest harnessv2.ProfileDigest,
+	poolUID string,
+	options dispatcherRuntimeServerOptions,
+	onCreate ...func(harnessv2.CreateRuntimeSessionRequest),
+) *httptest.Server {
+	t.Helper()
+	terminalEvents := options.terminalEvents
 	mux := http.NewServeMux()
 	limits := harnessv2.DefaultProtocolLimits()
 	var descriptorMu sync.Mutex
@@ -3161,17 +3858,17 @@ func newDispatcherRuntimeServerWithTerminalEvents(
 		descriptorMu.Lock()
 		current := descriptor
 		descriptorMu.Unlock()
-		writeDispatcherJSON(w, dispatcherRuntimeStatusResponse(digest, current))
+		writeDispatcherJSON(w, dispatcherRuntimeStatusResponseForPool(digest, poolUID, current))
 	})
 	mux.HandleFunc("GET "+harnessv2.CapabilitiesPath, func(w http.ResponseWriter, _ *http.Request) {
 		writeDispatcherJSON(w, harnessv2.CapabilitiesResponse{
 			Protocol: harnessv2.ProtocolVersion, Transport: "http+ndjson", ACPVersion: harnessv2.ACPProfileV1,
 			RuntimeProfileDigest: digest, ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
 			AdapterDigests: profile.AdapterDigests, Limits: limits,
-			Provider:                          harnessv2.ProviderCapabilities{ProviderKinds: []string{profile.ProviderKind}, Models: []string{profile.Model}, SupportsCancel: true, SupportsPermissions: true, SupportsTools: true},
+			Provider:                          harnessv2.ProviderCapabilities{ProviderKinds: []string{profile.ProviderKind}, Models: []string{profile.Model}, SupportsCancel: true, SupportsPermissions: !options.disablePermissions, SupportsTools: true},
 			WorkspaceGovernance:               harnessv2.StrictWorkspaceGovernanceCapabilities(),
 			SupportsDrain:                     true,
-			SupportsAgentSessionConfiguration: true,
+			SupportsAgentSessionConfiguration: !options.disableAgentSessionConfiguration,
 		})
 	})
 	mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}", func(w http.ResponseWriter, r *http.Request) {
@@ -3193,6 +3890,17 @@ func newDispatcherRuntimeServerWithTerminalEvents(
 			SupervisorBootID: request.Metadata.Fence.SupervisorBootID, RuntimeProfileDigest: request.Metadata.Fence.RuntimeProfileDigest,
 			State: harnessv2.RuntimeSessionStateIdle, ProviderSessionID: "provider-session", WorkspaceBaseline: request.Workspace.Baseline,
 			CreatedAt: now, LastTransitionAt: now,
+		}
+		if options.rejectCreate != nil {
+			if status, response, resident := options.rejectCreate(request); response != nil {
+				if resident {
+					descriptorMu.Lock()
+					descriptor = created
+					descriptorMu.Unlock()
+				}
+				writeDispatcherJSONStatus(w, status, *response)
+				return
+			}
 		}
 		descriptorMu.Lock()
 		descriptor = created
@@ -3250,7 +3958,7 @@ func newDispatcherRuntimeServerWithTerminalEvents(
 				Result: harnessv2.PromptResult{
 					Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "from runtime"}},
 					Model:   "served-model",
-					Usage:   harnessv2.UsageUpdate{InputTokens: 100, OutputTokens: 25, CachedInputTokens: 40},
+					Usage:   harnessv2.UsageUpdate{InputTokens: 100, OutputTokens: 25, CachedInputTokens: new(uint64(40))},
 				},
 			}
 		case harnessv2.EventCancelled:
@@ -3301,6 +4009,9 @@ func newDispatcherRuntimeServerWithTerminalEvents(
 	mux.HandleFunc("DELETE /v2/runtime-sessions/{sessionID}", func(w http.ResponseWriter, r *http.Request) {
 		var request harnessv2.DeleteRuntimeSessionRequest
 		_ = json.NewDecoder(r.Body).Decode(&request)
+		if options.onDelete != nil {
+			options.onDelete(request)
+		}
 		descriptorMu.Lock()
 		descriptor = harnessv2.RuntimeSessionDescriptor{}
 		descriptorMu.Unlock()
@@ -3316,11 +4027,19 @@ func dispatcherRuntimeStatusResponse(
 	digest harnessv2.ProfileDigest,
 	descriptor harnessv2.RuntimeSessionDescriptor,
 ) harnessv2.StatusResponse {
+	return dispatcherRuntimeStatusResponseForPool(digest, acpDispatcherTestPoolUID, descriptor)
+}
+
+func dispatcherRuntimeStatusResponseForPool(
+	digest harnessv2.ProfileDigest,
+	poolUID string,
+	descriptor harnessv2.RuntimeSessionDescriptor,
+) harnessv2.StatusResponse {
 	response := harnessv2.StatusResponse{
 		Protocol: harnessv2.ProtocolVersion,
 		Fence: harnessv2.Fence{
 			RuntimeInstanceID: "pod-uid.boot-id", SupervisorBootID: "boot-id", ControllerEpoch: 1,
-			RuntimePoolUID: "pool-uid", RuntimePoolGeneration: 1, RuntimeProfileDigest: digest,
+			RuntimePoolUID: harnessv2.RuntimePoolUID(poolUID), RuntimePoolGeneration: 1, RuntimeProfileDigest: digest,
 			ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
 		},
 		Lifecycle: harnessv2.SupervisorLifecycleReady,
@@ -3384,112 +4103,6 @@ func testACPExecuteBindingForDispatcher() *corev1alpha1.AgentExecutionBinding {
 		Snapshot: corev1alpha1.AgentExecutionSnapshotRef{
 			Digest: testControlDigestForDispatcher("test-v2-snapshot"),
 		},
-	}
-}
-
-func TestACPDispatcherRejectsPersistedExternalRuntimeAttemptsWithoutExecution(t *testing.T) {
-	for _, state := range []corev1alpha1.TaskExecutionState{
-		corev1alpha1.TaskExecutionStateQueued,
-		corev1alpha1.TaskExecutionStateReserved,
-	} {
-		t.Run(string(state), func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			var runtimeCalls atomic.Int32
-			runtimeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				runtimeCalls.Add(1)
-				http.Error(w, "external runtime dispatch must remain unreachable", http.StatusInternalServerError)
-			}))
-			defer runtimeServer.Close()
-
-			db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "store.db"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer db.Close() //nolint:errcheck
-			controlStore := sqlite.NewStore(db, "test")
-			epochs, stopEpoch := startACPRecoveryEpochManager(t, ctx, controlStore, "external-cutover")
-			defer stopEpoch()
-			fence, err := epochs.CurrentFence(ctx)
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			uid := types.UID("persisted-external-" + strings.ToLower(string(state)))
-			promptID := "prompt-" + string(uid) + "-1"
-			requestDigest := testControlDigestForDispatcher("external-cutover-" + string(state))
-			runtimeRegistration := plannerExternalRuntime()
-			runtimeRegistration.Spec.Deployment.Endpoint = runtimeServer.URL
-			task := &corev1alpha1.Task{
-				ObjectMeta: metav1.ObjectMeta{
-					Namespace: "default", Name: "persisted-external-" + strings.ToLower(string(state)), UID: uid,
-					Labels: map[string]string{acpExternalRuntimeTaskLabel: runtimeRegistration.Name},
-				},
-				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do not dispatch"},
-				Status: corev1alpha1.TaskStatus{
-					Phase: corev1alpha1.TaskPhasePending, Attempts: 1,
-					AgentExecutionBinding: testACPExecuteBindingForDispatcher(),
-					Execution: &corev1alpha1.TaskExecutionStatus{
-						State: state, Attempt: 1, PromptID: promptID, RequestDigest: requestDigest,
-						AgentRuntimeName: runtimeRegistration.Name, AgentRuntimeUID: string(runtimeRegistration.UID), ControllerEpoch: fence.Epoch,
-					},
-					Delivery: &corev1alpha1.TaskDeliveryStatus{
-						State: corev1alpha1.TaskDeliveryStateNotRequested, Outcome: corev1alpha1.TaskDeliveryOutcomeNotRequested,
-					},
-				},
-			}
-			scheme := runtime.NewScheme()
-			if err := corev1alpha1.AddToScheme(scheme); err != nil {
-				t.Fatal(err)
-			}
-			kubeClient := fake.NewClientBuilder().WithScheme(scheme).
-				WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.AgentRuntime{}).
-				WithObjects(task, runtimeRegistration).Build()
-			key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID}
-			attempt, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
-				Key: key, RequestDigest: requestDigest, ExecutionState: store.PromptExecutionQueued, DeliveryState: store.PromptDeliveryNotRequested,
-			}), fence)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if state == corev1alpha1.TaskExecutionStateReserved {
-				attempt, err = controlStore.TransitionPromptAttemptExecution(ctx, store.PromptAttemptExecutionTransition{
-					ID: attempt.ID, Fence: fence, ExpectedVersion: attempt.Version, ExpectedState: store.PromptExecutionQueued,
-					NewState: store.PromptExecutionReserved, OperationID: "persisted-reservation", OperationDigest: testControlDigestForDispatcher("persisted-reservation"), UpdatedAt: time.Now().UTC(),
-				})
-				if err != nil {
-					t.Fatal(err)
-				}
-			}
-
-			dispatcher := &ACPDispatcher{
-				Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: controlStore, Epochs: epochs,
-				active: make(map[types.UID]struct{}), sem: make(chan struct{}, 1),
-			}
-			if err := dispatcher.dispatchOnce(ctx); err != nil {
-				t.Fatal(err)
-			}
-			if got := runtimeCalls.Load(); got != 0 {
-				t.Fatalf("external runtime received %d execution client calls", got)
-			}
-			terminalAttempt, err := controlStore.GetPromptAttempt(ctx, attempt.ID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if terminalAttempt.ExecutionState != store.PromptExecutionFailed || terminalAttempt.TerminalReason != string(acpExternalRuntimeDispatchUnsupportedExecutionReason) {
-				t.Fatalf("persisted attempt was not failed closed: %#v", terminalAttempt)
-			}
-			failed := &corev1alpha1.Task{}
-			if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(task), failed); err != nil {
-				t.Fatal(err)
-			}
-			wantMessage := externalAgentRuntimeDispatchUnsupportedReason(runtimeRegistration.Name)
-			if failed.Status.Phase != corev1alpha1.TaskPhaseFailed || failed.Status.Execution == nil ||
-				failed.Status.Execution.State != corev1alpha1.TaskExecutionStateFailed || failed.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeFailed ||
-				failed.Status.Execution.Reason != acpExternalRuntimeDispatchUnsupportedExecutionReason || failed.Status.Execution.Message != wantMessage {
-				t.Fatalf("persisted external Task was not failed closed: %#v", failed.Status)
-			}
-		})
 	}
 }
 
@@ -3924,6 +4537,95 @@ func TestACPDispatcherPreAcceptanceRateLimitRequeuesWithoutTerminalFailure(t *te
 	}
 }
 
+func TestACPDispatcherRejectedExternalPromptAdmissionReleasesTaskForRequeue(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	task := runtimePoolReservationTestTask("external-rate-limited", "external-rate-limited-uid", "")
+	task.Status.Execution.State = corev1alpha1.TaskExecutionStateSubmitting
+	task.Status.Execution.RuntimePoolName = ""
+	task.Status.Execution.RuntimePoolUID = ""
+	task.Status.Execution.AgentRuntimeName = "external-v2"
+	task.Status.Execution.AgentRuntimeUID = "external-v2-uid"
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task).Build()
+	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "store.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close() //nolint:errcheck
+	controlStore := sqlite.NewStore(db, "test")
+	epochs := NewControllerEpochManager(controlStore, "controller-test")
+	epochCtx, cancelEpoch := context.WithCancel(context.Background())
+	epochDone := make(chan error, 1)
+	go func() { epochDone <- epochs.Start(epochCtx) }()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	fence, err := epochs.CurrentFence(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: task.Status.Execution.PromptID}
+	attempt, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
+		Key: key, RequestDigest: task.Status.Execution.RequestDigest,
+	}), fence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatcher := &ACPDispatcher{Client: kubeClient, Store: controlStore, Epochs: epochs}
+	for _, next := range []store.PromptExecutionState{
+		store.PromptExecutionReserved,
+		store.PromptExecutionSessionStarting,
+		store.PromptExecutionPlanned,
+		store.PromptExecutionSubmitting,
+	} {
+		if err := dispatcher.transitionAttempt(ctx, attempt.ID, fence, attempt.ExecutionState, next, "test-"+string(next), nil); err != nil {
+			t.Fatal(err)
+		}
+		attempt, err = controlStore.GetPromptAttempt(ctx, attempt.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := controlStore.RecoverPromptAttemptPreSubmission(ctx, store.PromptAttemptPreSubmissionRecovery{
+		ID: attempt.ID, Fence: fence, ExpectedVersion: attempt.Version, ExpectedState: attempt.ExecutionState,
+		OperationID: "unsafe-submitting-reset", OperationDigest: testControlDigestForDispatcher("unsafe-submitting-reset"),
+		RecoveredAt: time.Now().UTC(),
+	}); !errors.Is(err, store.ErrValidation) {
+		t.Fatalf("unproven Submitting recovery error = %v, want ErrValidation", err)
+	}
+
+	rateLimited := &harnessv2.ClientError{
+		Kind: harnessv2.ClientErrorHTTP, StatusCode: http.StatusTooManyRequests,
+		Code: harnessv2.ErrorCodeRateLimited, Retryable: true,
+	}
+	if err := dispatcher.requeueProvenNotAcceptedPromptAdmission(
+		ctx, task.DeepCopy(), attempt.ID, fence, rateLimited, nil, false,
+	); err != nil {
+		t.Fatal(err)
+	}
+	attempt, err = controlStore.GetPromptAttempt(ctx, attempt.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempt.ExecutionState != store.PromptExecutionReserved || promptAttemptHasRuntimeOrSessionBinding(attempt) {
+		t.Fatalf("requeued external attempt = %#v, want unbound Reserved", attempt)
+	}
+	updated := &corev1alpha1.Task{}
+	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(task), updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.Execution == nil || updated.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved ||
+		updated.Status.Execution.Reason != corev1alpha1.TaskExecutionReasonAtCapacity ||
+		updated.Status.Execution.AgentRuntimeName != "external-v2" || taskExecutionStateTerminal(updated.Status.Execution.State) {
+		t.Fatalf("rate-limited external task was not released for retry: %#v", updated.Status.Execution)
+	}
+	cancelEpoch()
+	if err := <-epochDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestACPDispatcherReservedRetryReportsOnlyBoundedStage(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
@@ -3951,7 +4653,7 @@ func TestACPDispatcherReservedRetryReportsOnlyBoundedStage(t *testing.T) {
 	if updated.Status.Execution == nil {
 		t.Fatal("reserved retry removed execution status")
 	}
-	if got, want := updated.Status.Execution.Message, "RuntimePool admission will be retried (stage: session-preparation)"; got != want {
+	if got, want := updated.Status.Execution.Message, "runtime admission will be retried (stage: session-preparation)"; got != want {
 		t.Fatalf("retry message = %q, want %q", got, want)
 	}
 	if strings.Contains(updated.Status.Execution.Message, "sensitive provider diagnostic") {
@@ -4783,5 +5485,430 @@ func TestRecoveredTaskSessionPreservesLegacyNonAppendTurnPolicy(t *testing.T) {
 	}
 	if recovered.Turn.SkipTranscriptAppend {
 		t.Fatal("legacy non-append turn was migrated to transcript suppression instead of preserving its durable digest")
+	}
+}
+
+func TestPromptLeaseRenewalRetryable(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "cancelled", err: context.Canceled, want: false},
+		{name: "transport", err: &harnessv2.ClientError{Kind: harnessv2.ClientErrorTransport}, want: true},
+		{name: "protocol", err: &harnessv2.ClientError{Kind: harnessv2.ClientErrorProtocol, StatusCode: 502}, want: true},
+		{name: "http 503 retryable", err: &harnessv2.ClientError{Kind: harnessv2.ClientErrorHTTP, StatusCode: 503, Retryable: true}, want: true},
+		{name: "http 500", err: &harnessv2.ClientError{Kind: harnessv2.ClientErrorHTTP, StatusCode: 500}, want: true},
+		{name: "http 410 settled", err: &harnessv2.ClientError{Kind: harnessv2.ClientErrorHTTP, StatusCode: 410, Code: harnessv2.ErrorCodeSettled}, want: false},
+		{name: "http 409 digest conflict", err: &harnessv2.ClientError{Kind: harnessv2.ClientErrorHTTP, StatusCode: 409, Code: harnessv2.ErrorCodeDigestConflict}, want: false},
+		{name: "validation", err: &harnessv2.ClientError{Kind: harnessv2.ClientErrorValidation}, want: false},
+		{name: "retryable validation with zero write", err: &harnessv2.ClientError{Kind: harnessv2.ClientErrorValidation, Retryable: true, WriteEvidence: harnessv2.RequestWriteEvidence{State: harnessv2.RequestWriteZeroBytes}}, want: true},
+		{name: "retryable validation with unknown write", err: &harnessv2.ClientError{Kind: harnessv2.ClientErrorValidation, Retryable: true}, want: false},
+		{name: "plain error", err: errors.New("boom"), want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := promptLeaseRenewalRetryable(tc.err); got != tc.want {
+				t.Fatalf("promptLeaseRenewalRetryable(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFrozenMCPPermissionDecisionAllowsGrantedToolsOnce(t *testing.T) {
+	t.Parallel()
+	providerNativePolicy := harnessv2.MCPToolPolicy{
+		AllowedToolNames: []string{providerNativeToolRead},
+		Tools: []harnessv2.MCPToolDescriptor{{
+			Name: providerNativeToolRead, Source: harnessv2.MCPToolSourceProviderNative,
+			Effect: harnessv2.MCPToolEffectReadOnly,
+		}},
+	}
+	brokeredPolicy := harnessv2.MCPToolPolicy{
+		AllowedToolNames: []string{"lookup"},
+		Tools: []harnessv2.MCPToolDescriptor{{
+			Name: "lookup", Source: harnessv2.MCPToolSourceBrokeredBuiltin,
+			Effect: harnessv2.MCPToolEffectReadOnly,
+		}},
+	}
+	options := []harnessv2.PermissionOption{
+		{OptionID: "allow-always", Kind: harnessv2.PermissionOptionAllowAlways},
+		{OptionID: "allow-once", Kind: harnessv2.PermissionOptionAllowOnce},
+		{OptionID: "reject-once", Kind: harnessv2.PermissionOptionRejectOnce},
+	}
+	tests := []struct {
+		name       string
+		policy     harnessv2.MCPToolPolicy
+		approval   harnessv2.MCPApprovalPolicy
+		permission *harnessv2.PermissionRequestedEvent
+		want       harnessv2.PermissionDecision
+	}{
+		{
+			name:   "allowed provider-native tool",
+			policy: providerNativePolicy,
+			permission: &harnessv2.PermissionRequestedEvent{
+				ToolName: providerNativeToolRead, Options: options,
+			},
+			want: harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: "allow-once"},
+		},
+		{
+			name:   "provider-native tool without one-shot allow",
+			policy: providerNativePolicy,
+			permission: &harnessv2.PermissionRequestedEvent{
+				ToolName: providerNativeToolRead,
+				Options: []harnessv2.PermissionOption{
+					{OptionID: "allow-always", Kind: harnessv2.PermissionOptionAllowAlways},
+					{OptionID: "reject-once", Kind: harnessv2.PermissionOptionRejectOnce},
+				},
+			},
+			want: harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: "reject-once"},
+		},
+		{
+			name:   "brokered tool",
+			policy: brokeredPolicy,
+			permission: &harnessv2.PermissionRequestedEvent{
+				ToolName: "lookup", Options: options,
+			},
+			want: harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: "allow-once"},
+		},
+		{
+			name:     "brokered tool requiring Orka approval",
+			policy:   brokeredPolicy,
+			approval: harnessv2.MCPApprovalPolicy{RequiredTools: []string{"lookup"}},
+			permission: &harnessv2.PermissionRequestedEvent{
+				ToolName: "lookup", Options: options,
+			},
+			want: harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: "allow-once"},
+		},
+		{
+			name:     "provider-native tool cannot borrow brokered approval",
+			policy:   providerNativePolicy,
+			approval: harnessv2.MCPApprovalPolicy{RequiredTools: []string{providerNativeToolRead}},
+			permission: &harnessv2.PermissionRequestedEvent{
+				ToolName: providerNativeToolRead, Options: options,
+			},
+			want: harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: "reject-once"},
+		},
+		{
+			name:   "implicit native write grant",
+			policy: harnessv2.MCPToolPolicy{AllowBash: true},
+			permission: &harnessv2.PermissionRequestedEvent{
+				ToolName: providerNativeToolWrite, Options: options,
+			},
+			want: harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: "allow-once"},
+		},
+		{
+			name:   "explicit native deny all",
+			policy: harnessv2.MCPToolPolicy{AllowedToolNames: []string{}, AllowBash: true},
+			permission: &harnessv2.PermissionRequestedEvent{
+				ToolName: providerNativeToolWrite, Options: options,
+			},
+			want: harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: "reject-once"},
+		},
+		{
+			name:   "implicit native grant does not grant brokered tools",
+			policy: harnessv2.MCPToolPolicy{AllowBash: true},
+			permission: &harnessv2.PermissionRequestedEvent{
+				ToolName: "lookup", Options: options,
+			},
+			want: harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: "reject-once"},
+		},
+		{
+			name:   "tool outside frozen policy",
+			policy: providerNativePolicy,
+			permission: &harnessv2.PermissionRequestedEvent{
+				ToolName: providerNativeToolWrite, Options: options,
+			},
+			want: harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: "reject-once"},
+		},
+		{
+			name:   "missing tool identity",
+			policy: providerNativePolicy,
+			permission: &harnessv2.PermissionRequestedEvent{
+				Options: options,
+			},
+			want: harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: "reject-once"},
+		},
+		{
+			name:   "unsafe options only",
+			policy: providerNativePolicy,
+			permission: &harnessv2.PermissionRequestedEvent{
+				ToolName: providerNativeToolRead,
+				Options:  []harnessv2.PermissionOption{{OptionID: "allow-always", Kind: harnessv2.PermissionOptionAllowAlways}},
+			},
+			want: harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionCancelled},
+		},
+		{
+			name:   "missing permission",
+			policy: providerNativePolicy,
+			want:   harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionCancelled},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			configuration := harnessv2.MCPPolicyConfiguration{ToolPolicy: test.policy, ApprovalPolicy: test.approval}
+			if got := frozenMCPPermissionDecision(configuration, "claude", test.permission); got != test.want {
+				t.Fatalf("frozenMCPPermissionDecision() = %#v, want %#v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestPromptLeaseRenewalDelayUsesEarlierAuthorityWindow(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, time.September, 3, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name                 string
+		leaseExpiresAfter    time.Duration
+		authorizationExpires time.Duration
+		want                 time.Duration
+	}{
+		{name: "lease midpoint", leaseExpiresAfter: 40 * time.Second, authorizationExpires: 60 * time.Second, want: 20 * time.Second},
+		{name: "authorization midpoint", leaseExpiresAfter: 180 * time.Second, authorizationExpires: 60 * time.Second, want: 30 * time.Second},
+		{name: "expired authorization renews immediately", leaseExpiresAfter: 180 * time.Second, authorizationExpires: 0, want: 0},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			got := promptLeaseRenewalDelay(
+				now,
+				now.Add(test.leaseExpiresAfter),
+				now.Add(test.authorizationExpires),
+			)
+			if got != test.want {
+				t.Fatalf("promptLeaseRenewalDelay() = %s, want %s", got, test.want)
+			}
+		})
+	}
+}
+
+func TestRenewPromptLeaseLoopRetriesTransientFailures(t *testing.T) {
+	var calls atomic.Int32
+	var digestsMu sync.Mutex
+	var digests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		var request harnessv2.RenewPromptLeaseRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode renew: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		digestsMu.Lock()
+		digests = append(digests, string(request.Metadata.OperationID)+"|"+string(request.Metadata.RequestDigest))
+		digestsMu.Unlock()
+		if n == 1 {
+			// A busy supervisor answering through a proxy: a non-v2 502 body.
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = io.WriteString(w, "<html>bad gateway</html>")
+			return
+		}
+		writeDispatcherJSONStatus(w, http.StatusOK, harnessv2.PromptLeaseResponse{
+			Protocol: harnessv2.ProtocolVersion, Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh},
+			Lease: request.Lease,
+		})
+	}))
+	defer server.Close()
+	runtimeClient, err := harnessv2.NewClient(
+		server.URL, harnessv2.WithControllerBearerToken(strings.Repeat("t", 32)),
+		harnessv2.WithOperationCapabilitySecret([]byte(strings.Repeat("s", 32))),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "renew", UID: types.UID("99999999-9999-9999-9999-999999999999")},
+		Status:     corev1alpha1.TaskStatus{Execution: &corev1alpha1.TaskExecutionStatus{Attempt: 1, PromptID: "prompt-renew"}},
+	}
+	fence := harnessv2.Fence{
+		RuntimeInstanceID: "runtime-instance", SupervisorBootID: "boot-id", ControllerEpoch: 1,
+		RuntimePoolUID: "pool-uid", RuntimePoolGeneration: 1, RuntimeProfileDigest: harnessv2.ProfileDigest(testControlDigestForDispatcher("renew-profile")),
+		ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion, RuntimeSessionUID: "session-renew", RuntimeSessionGeneration: 1,
+	}
+	now := time.Now().UTC()
+	lease := harnessv2.PromptLease{Generation: 1, IssuedAt: now, ExpiresAt: now.Add(12 * time.Second)}
+	descriptor := harnessv2.MCPToolDescriptor{
+		Name: acpMCPTestToolName, Description: "renew test tool", InputSchema: json.RawMessage(`{"type":"object"}`),
+		Source: harnessv2.MCPToolSourceBrokeredBuiltin, Effect: harnessv2.MCPToolEffectReadOnly,
+	}
+	descriptorDigest, err := harnessv2.CanonicalMCPToolDescriptorDigest([]harnessv2.MCPToolDescriptor{descriptor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolPolicy := harnessv2.MCPToolPolicy{
+		AllowedToolNames: []string{acpMCPTestToolName}, Tools: []harnessv2.MCPToolDescriptor{descriptor}, DescriptorDigest: descriptorDigest,
+	}
+	approvalPolicy := harnessv2.MCPApprovalPolicy{}
+	toolDigest, _ := harnessv2.CanonicalRuntimeToolPolicyDigest(toolPolicy.AllowedToolNames, toolPolicy.DisallowedToolNames, toolPolicy.AllowBash)
+	approvalDigest, _ := harnessv2.CanonicalMCPApprovalPolicyDigest(approvalPolicy)
+	mcpDigest, _ := harnessv2.CanonicalMCPConfigurationDigest(toolPolicy.AllowedToolNames)
+	authorization := harnessv2.PromptMCPAuthorization{
+		RuntimeSessionUID: fence.RuntimeSessionUID, SessionGeneration: fence.RuntimeSessionGeneration,
+		TaskUID: harnessv2.TaskUID(task.UID), TaskAttempt: 1, PromptID: "prompt-renew",
+		LeaseGeneration: lease.Generation, ToolPolicyDigest: toolDigest, ApprovalPolicyDigest: approvalDigest,
+		MCPConfigurationDigest: mcpDigest, ToolPolicy: toolPolicy, ApprovalPolicy: approvalPolicy, ExpiresAt: lease.ExpiresAt,
+	}
+	authorization.ExpiresAt = now
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	admitted := make(chan struct{})
+	cancelled := make(chan struct{}, 1)
+	cancelRuntime := func() {
+		select {
+		case cancelled <- struct{}{}:
+		default:
+		}
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		(&ACPDispatcher{}).renewPromptLeaseLoop(
+			ctx, admitted, cancelRuntime, runtimeClient, "runtime-session-renew-g1", task, fence, lease, authorization,
+			harnessv2.DefaultProtocolLimits(), nil,
+		)
+	}()
+	select {
+	case <-done:
+		t.Fatal("renewal loop exited before prompt admission")
+	case <-cancelled:
+		t.Fatal("renewal loop cancelled the prompt before admission")
+	case <-time.After(250 * time.Millisecond):
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("renewal calls before prompt admission = %d, want 0", calls.Load())
+	}
+	close(admitted)
+	deadline := time.After(20 * time.Second)
+	for calls.Load() < 2 {
+		select {
+		case <-cancelled:
+			t.Fatal("runtime context was cancelled after a transient renewal failure while the lease was still valid")
+		case <-deadline:
+			t.Fatalf("renewal was not retried in time (calls=%d)", calls.Load())
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	select {
+	case <-cancelled:
+		t.Fatal("runtime context was cancelled although the retried renewal succeeded")
+	case <-time.After(500 * time.Millisecond):
+	}
+	cancel()
+	<-done
+	digestsMu.Lock()
+	defer digestsMu.Unlock()
+	if len(digests) < 2 || digests[0] != digests[1] {
+		t.Fatalf("retried renewal was not an identical replay of the sealed mutation: %v", digests)
+	}
+}
+
+func TestRenewPromptLeaseLoopStopsWithoutCancelWhenPromptSettled(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		writeDispatcherJSONStatus(w, http.StatusGone, harnessv2.ErrorResponse{
+			Protocol: harnessv2.ProtocolVersion, Code: harnessv2.ErrorCodeSettled, Message: "prompt is no longer active",
+		})
+	}))
+	defer server.Close()
+	runtimeClient, err := harnessv2.NewClient(
+		server.URL, harnessv2.WithControllerBearerToken(strings.Repeat("t", 32)),
+		harnessv2.WithOperationCapabilitySecret([]byte(strings.Repeat("s", 32))),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "renew-settled", UID: types.UID("99999999-9999-9999-9999-999999999998")},
+		Status:     corev1alpha1.TaskStatus{Execution: &corev1alpha1.TaskExecutionStatus{Attempt: 1, PromptID: "prompt-renew-settled"}},
+	}
+	fence := harnessv2.Fence{
+		RuntimeInstanceID: "runtime-instance", SupervisorBootID: "boot-id", ControllerEpoch: 1,
+		RuntimePoolUID: "pool-uid", RuntimePoolGeneration: 1, RuntimeProfileDigest: harnessv2.ProfileDigest(testControlDigestForDispatcher("renew-profile")),
+		ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion, RuntimeSessionUID: "session-renew-settled", RuntimeSessionGeneration: 1,
+	}
+	now := time.Now().UTC()
+	lease := harnessv2.PromptLease{Generation: 1, IssuedAt: now, ExpiresAt: now.Add(12 * time.Second)}
+	descriptor := harnessv2.MCPToolDescriptor{
+		Name: acpMCPTestToolName, Description: "renew test tool", InputSchema: json.RawMessage(`{"type":"object"}`),
+		Source: harnessv2.MCPToolSourceBrokeredBuiltin, Effect: harnessv2.MCPToolEffectReadOnly,
+	}
+	descriptorDigest, err := harnessv2.CanonicalMCPToolDescriptorDigest([]harnessv2.MCPToolDescriptor{descriptor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolPolicy := harnessv2.MCPToolPolicy{
+		AllowedToolNames: []string{acpMCPTestToolName}, Tools: []harnessv2.MCPToolDescriptor{descriptor}, DescriptorDigest: descriptorDigest,
+	}
+	approvalPolicy := harnessv2.MCPApprovalPolicy{}
+	toolDigest, _ := harnessv2.CanonicalRuntimeToolPolicyDigest(toolPolicy.AllowedToolNames, toolPolicy.DisallowedToolNames, toolPolicy.AllowBash)
+	approvalDigest, _ := harnessv2.CanonicalMCPApprovalPolicyDigest(approvalPolicy)
+	mcpDigest, _ := harnessv2.CanonicalMCPConfigurationDigest(toolPolicy.AllowedToolNames)
+	authorization := harnessv2.PromptMCPAuthorization{
+		RuntimeSessionUID: fence.RuntimeSessionUID, SessionGeneration: fence.RuntimeSessionGeneration,
+		TaskUID: harnessv2.TaskUID(task.UID), TaskAttempt: 1, PromptID: "prompt-renew-settled",
+		LeaseGeneration: lease.Generation, ToolPolicyDigest: toolDigest, ApprovalPolicyDigest: approvalDigest,
+		MCPConfigurationDigest: mcpDigest, ToolPolicy: toolPolicy, ApprovalPolicy: approvalPolicy, ExpiresAt: lease.ExpiresAt,
+	}
+	ctx := t.Context()
+	admitted := make(chan struct{})
+	close(admitted)
+	cancelled := make(chan struct{}, 1)
+	cancelRuntime := func() {
+		select {
+		case cancelled <- struct{}{}:
+		default:
+		}
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		(&ACPDispatcher{}).renewPromptLeaseLoop(
+			ctx, admitted, cancelRuntime, runtimeClient, "runtime-session-renew-settled-g1", task, fence, lease, authorization,
+			harnessv2.DefaultProtocolLimits(), nil,
+		)
+	}()
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("renewal loop did not stop after the supervisor reported the prompt settled")
+	}
+	select {
+	case <-cancelled:
+		t.Fatal("runtime context was cancelled although the prompt had already settled; the stream must deliver the terminal event")
+	default:
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("renewal calls = %d, want exactly one before stopping", calls.Load())
+	}
+}
+
+func TestRenewPromptLeaseLoopStopsWhileWaitingForAdmission(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	admitted := make(chan struct{})
+	cancelled := make(chan struct{}, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		(&ACPDispatcher{}).renewPromptLeaseLoop(
+			ctx, admitted, func() { cancelled <- struct{}{} }, nil, "", &corev1alpha1.Task{}, harnessv2.Fence{},
+			harnessv2.PromptLease{}, harnessv2.PromptMCPAuthorization{}, harnessv2.ProtocolLimits{}, nil,
+		)
+	}()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("renewal loop did not stop while waiting for prompt admission")
+	}
+	select {
+	case <-cancelled:
+		t.Fatal("renewal loop cancelled the runtime before prompt admission")
+	default:
 	}
 }

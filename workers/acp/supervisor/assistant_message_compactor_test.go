@@ -16,7 +16,7 @@ func TestAssistantMessageCompactorKeepsCodexBurstBelowHarnessRateLimit(t *testin
 	compactor.flushInterval = time.Hour
 	t.Cleanup(compactor.close)
 	now := time.Now().UTC()
-	const rawUpdates = runtimeCodexMaxUpdateEventsPerSecond + 1
+	const rawUpdates = runtimeMaxUpdateEventsPerSecond + 1
 
 	var compacted []acp.PromptEvent
 	for sequence := 1; sequence <= rawUpdates; sequence++ {
@@ -110,7 +110,7 @@ func TestAssistantMessageCompactorPreservesUTF8AndPermissionBoundary(t *testing.
 	t.Cleanup(compactor.close)
 	now := time.Now().UTC()
 	inputs := []string{"a", " \n", "é", "🙂"}
-	var ready []acp.PromptEvent
+	ready := make([]acp.PromptEvent, 0, len(inputs))
 	for index, input := range inputs {
 		at := now.Add(time.Duration(index) * time.Millisecond)
 		ready = append(ready, compactor.push(testAssistantMessagePromptEvent(t, int64(index+1), at, input), at)...)
@@ -127,8 +127,9 @@ func TestAssistantMessageCompactorPreservesUTF8AndPermissionBoundary(t *testing.
 	if len(ready) != 3 || ready[2].Type != acp.PromptEventPermissionRequested {
 		t.Fatalf("boundary output = %#v", ready)
 	}
-	first, firstOK := assistantMessageText(ready[0])
-	second, secondOK := assistantMessageText(ready[1])
+	firstChunk, firstOK := decodeAssistantMessageChunk(ready[0])
+	secondChunk, secondOK := decodeAssistantMessageChunk(ready[1])
+	first, second := firstChunk.Content.Text, secondChunk.Content.Text
 	if !firstOK || !secondOK || first != "a \né" || second != "🙂" {
 		t.Fatalf("UTF-8 chunks = %q/%q, want exact source text", first, second)
 	}
@@ -154,8 +155,8 @@ func TestAssistantMessageCompactorFlushesOnCadence(t *testing.T) {
 	if len(ready) != 1 {
 		t.Fatalf("cadence flush count = %d, want 1", len(ready))
 	}
-	text, ok := assistantMessageText(ready[0])
-	if !ok || text != message {
+	chunk, ok := decodeAssistantMessageChunk(ready[0])
+	if text := chunk.Content.Text; !ok || text != message {
 		t.Fatalf("cadence flush text = %q ok=%v", text, ok)
 	}
 }

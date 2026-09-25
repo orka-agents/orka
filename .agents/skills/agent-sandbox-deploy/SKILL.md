@@ -22,10 +22,17 @@ production controller flags.
 
 The repeatable standup already lives in
 `hack/demos/cluster/install-agent-sandbox.sh`. **Drive that script in place; do
-not copy it into the skill.** It pins the agent-sandbox version
-(`ORKA_AGENT_SANDBOX_VERSION`, default `v0.4.6`) and owns the gotchas (kind
-registry addressing, the SDK sandbox-router build from the Go module cache, the
-controller flag patch). Re-pin by overriding the env var, not by editing a copy.
+not copy it into the skill.** Orka requires agent-sandbox `v1.0.0`. The script
+defaults `ORKA_AGENT_SANDBOX_VERSION` to that version, matching `go.mod`, and
+owns the gotchas (kind registry addressing, the SDK sandbox-router build from
+the Go module cache, the controller flag patch). Use the version override only
+for a coordinated future dependency upgrade with matching adapter validation.
+
+Existing v0.5 installations must complete the upstream storage migration before
+applying v1.0.0. The script does not run or preflight that migration. After a
+successful v1 install, it removes only the four obsolete namespaced
+conversion-webhook resources documented by upstream; it leaves the active
+cluster-scoped controller RBAC intact.
 
 What the script does:
 
@@ -98,14 +105,14 @@ test -x "$kindctl"
 
 2. **Deploy the Orka controller** into the cluster with `$orka-kind-deploy`
    (build + load controller and worker images, install CRDs, roll out
-   `orka-controller-manager`). Run the deploy under the kindctl-scoped kubeconfig
-   so its `kubectl` discovery sees the repo-scoped cluster:
+   `orka-controller-manager`). Pass the kindctl context explicitly and run the
+   deploy under its scoped kubeconfig:
 
    ```bash
    orka_kind_deploy="${ORKA_KIND_DEPLOY_BIN:-.agents/skills/orka-kind-deploy/scripts/deploy_orka_kind.sh}"
    test -x "$orka_kind_deploy"
-   eval "$("$kindctl" env)"
-   "$orka_kind_deploy"
+   "$kindctl" exec -- "$orka_kind_deploy" \
+     --context "$("$kindctl" kubectl config current-context)"
    ```
 
    The digest-pinned ACP runtime images must be present for the separate plain-agent
@@ -142,7 +149,7 @@ test -x "$kindctl"
    ```bash
    eval "$("$kindctl" env)"
    kube="$("$kindctl" path)"
-   agent_sandbox_version="${ORKA_AGENT_SANDBOX_VERSION:-v0.4.6}"
+   agent_sandbox_version="${ORKA_AGENT_SANDBOX_VERSION:-v1.0.0}"
    go mod download "sigs.k8s.io/agent-sandbox@${agent_sandbox_version}"
    test -d "$(go env GOMODCACHE)/sigs.k8s.io/agent-sandbox@${agent_sandbox_version}/clients/python/agentic-sandbox-client/sandbox-router"
    ORKA_DEMO_CLUSTER="$(basename "$kube" .kubeconfig)" \

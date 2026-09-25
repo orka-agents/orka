@@ -17,6 +17,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -36,7 +37,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/record"
-	sandboxextv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	sandboxextv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -57,7 +57,6 @@ import (
 	orkatracing "github.com/orka-agents/orka/internal/tracing"
 	"github.com/orka-agents/orka/internal/tracing/testutil"
 	"github.com/orka-agents/orka/internal/workerenv"
-	"github.com/orka-agents/orka/internal/workspace"
 )
 
 const (
@@ -75,7 +74,6 @@ func newTestScheme() *runtime.Scheme {
 	_ = batchv1.AddToScheme(s)
 	_ = coordinationv1.AddToScheme(s)
 	_ = rbacv1.AddToScheme(s)
-	_ = sandboxextv1alpha1.AddToScheme(s)
 	_ = sandboxextv1beta1.AddToScheme(s)
 	return s
 }
@@ -134,12 +132,6 @@ func (s failingDeletePlanStore) DeletePlan(context.Context, string, string) erro
 	return s.err
 }
 
-type recordingTaskWorkspaceExecutor struct {
-	deleteReqs  []workspace.DeleteRequest
-	deleteErr   error
-	closeCalled bool
-}
-
 type failingExecutionEventStore struct {
 	err error
 }
@@ -160,49 +152,12 @@ func (s failingExecutionEventStore) GetLatestExecutionEventSeq(context.Context, 
 	return 0, s.err
 }
 
+func (s failingExecutionEventStore) GetLatestExecutionEventSeqs(context.Context, string, string, []string) (map[string]int64, error) {
+	return nil, s.err
+}
+
 func (s failingExecutionEventStore) DeleteExecutionEvents(context.Context, string, string, string) error {
 	return s.err
-}
-
-func (e *recordingTaskWorkspaceExecutor) Claim(ctx context.Context, req workspace.ClaimRequest) (*workspace.ClaimResult, error) {
-	return &workspace.ClaimResult{Ref: workspace.WorkspaceRef{Namespace: req.Namespace, ClaimName: req.ClaimName, ID: req.ClaimName}}, nil
-}
-
-func (e *recordingTaskWorkspaceExecutor) WaitReady(ctx context.Context, req workspace.WaitReadyRequest) (*workspace.ReadyResult, error) {
-	return &workspace.ReadyResult{Ref: req.Ref, Phase: workspace.PhaseReady}, nil
-}
-
-func (e *recordingTaskWorkspaceExecutor) Exec(ctx context.Context, req workspace.ExecRequest) (*workspace.ExecResult, error) {
-	return &workspace.ExecResult{Ref: req.Ref}, nil
-}
-
-func (e *recordingTaskWorkspaceExecutor) Upload(ctx context.Context, req workspace.UploadRequest) (*workspace.UploadResult, error) {
-	return &workspace.UploadResult{Ref: req.Ref}, nil
-}
-
-func (e *recordingTaskWorkspaceExecutor) Download(ctx context.Context, req workspace.DownloadRequest) (*workspace.DownloadResult, error) {
-	return &workspace.DownloadResult{Ref: req.Ref}, nil
-}
-
-func (e *recordingTaskWorkspaceExecutor) Release(ctx context.Context, req workspace.ReleaseRequest) (*workspace.ReleaseResult, error) {
-	return &workspace.ReleaseResult{Ref: req.Ref}, nil
-}
-
-func (e *recordingTaskWorkspaceExecutor) Delete(ctx context.Context, req workspace.DeleteRequest) (*workspace.DeleteResult, error) {
-	e.deleteReqs = append(e.deleteReqs, req)
-	if e.deleteErr != nil {
-		return nil, e.deleteErr
-	}
-	return &workspace.DeleteResult{Ref: req.Ref, Deleted: true, Phase: workspace.PhaseDeleted}, nil
-}
-
-func (e *recordingTaskWorkspaceExecutor) Describe(ctx context.Context, req workspace.DescribeRequest) (*workspace.Description, error) {
-	return &workspace.Description{Ref: req.Ref}, nil
-}
-
-func (e *recordingTaskWorkspaceExecutor) Close() error {
-	e.closeCalled = true
-	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -714,7 +669,7 @@ func TestValidateTaskAgentCompatibility_RuntimeRefRejectsCredentialSecretRefs(t 
 	}
 }
 
-func TestValidateTaskAgentCompatibility_RuntimeRefRejectsToolPolicyMetadata(t *testing.T) {
+func TestValidateTaskAgentCompatibility_RuntimeRefRejectsLegacyRestrictions(t *testing.T) {
 	tests := []struct {
 		name      string
 		mutate    func(*corev1alpha1.Task, *corev1alpha1.Agent)
@@ -728,12 +683,26 @@ func TestValidateTaskAgentCompatibility_RuntimeRefRejectsToolPolicyMetadata(t *t
 			wantError: "defaultAllowedTools",
 		},
 		{
+			name: "agent explicitly empty defaultAllowedTools",
+			mutate: func(_ *corev1alpha1.Task, agent *corev1alpha1.Agent) {
+				agent.Spec.Runtime.DefaultAllowedTools = []string{}
+			},
+			wantError: "defaultAllowedTools",
+		},
+		{
 			name: "agent defaultAllowBash",
 			mutate: func(_ *corev1alpha1.Task, agent *corev1alpha1.Agent) {
 				allow := false
 				agent.Spec.Runtime.DefaultAllowBash = &allow
 			},
 			wantError: "defaultAllowBash",
+		},
+		{
+			name: "agent defaultReasoningEffort",
+			mutate: func(_ *corev1alpha1.Task, agent *corev1alpha1.Agent) {
+				agent.Spec.Runtime.DefaultReasoningEffort = "high"
+			},
+			wantError: "defaultReasoningEffort",
 		},
 		{
 			name: "task disallowedTools",
@@ -770,7 +739,175 @@ func TestValidateTaskAgentCompatibility_RuntimeRefRejectsToolPolicyMetadata(t *t
 	}
 }
 
-func TestValidateTaskAgentCompatibility_RuntimeRefAllowsBrokeredAllowedTools(t *testing.T) {
+func TestValidateHarnessV2RuntimeRefAgentTaskRestrictionsRejectsUnsupportedOverrides(t *testing.T) {
+	disabled := false
+	tests := []struct {
+		name      string
+		mutate    func(*corev1alpha1.Task, *corev1alpha1.Agent)
+		wantError string
+	}{
+		{
+			name: "agent model object",
+			mutate: func(_ *corev1alpha1.Task, agent *corev1alpha1.Agent) {
+				agent.Spec.Model = &corev1alpha1.ModelConfig{}
+			},
+			wantError: "Agent.spec.model",
+		},
+		{
+			name: "agent system prompt",
+			mutate: func(_ *corev1alpha1.Task, agent *corev1alpha1.Agent) {
+				agent.Spec.SystemPrompt = &corev1alpha1.PromptSource{Inline: "ignored prompt"}
+			},
+			wantError: "Agent.spec.systemPrompt",
+		},
+		{
+			name: "agent skills",
+			mutate: func(_ *corev1alpha1.Task, agent *corev1alpha1.Agent) {
+				agent.Spec.Skills = []corev1alpha1.SkillReference{{Name: "ignored-skill"}}
+			},
+			wantError: "Agent.spec.skills",
+		},
+		{
+			name: "agent enabled tool",
+			mutate: func(_ *corev1alpha1.Task, agent *corev1alpha1.Agent) {
+				agent.Spec.Tools = []corev1alpha1.ToolReference{{Name: "ignored-tool"}, {Name: "disabled-tool", Enabled: &disabled}}
+			},
+			wantError: "enabled Agent.spec.tools",
+		},
+		{
+			name: "agent defaultMaxTurns",
+			mutate: func(_ *corev1alpha1.Task, agent *corev1alpha1.Agent) {
+				maxTurns := int32(20)
+				agent.Spec.Runtime.DefaultMaxTurns = &maxTurns
+			},
+			wantError: "defaultMaxTurns",
+		},
+		{
+			name: "agent explicitly empty defaultAllowedTools",
+			mutate: func(_ *corev1alpha1.Task, agent *corev1alpha1.Agent) {
+				agent.Spec.Runtime.DefaultAllowedTools = []string{}
+			},
+			wantError: "defaultAllowedTools",
+		},
+		{
+			name: "task maxTurns",
+			mutate: func(task *corev1alpha1.Task, _ *corev1alpha1.Agent) {
+				maxTurns := int32(20)
+				task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{MaxTurns: &maxTurns}
+			},
+			wantError: "maxTurns",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"}}
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "a1"},
+				Spec: corev1alpha1.AgentSpec{
+					Runtime: &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "custom-runtime"}},
+				},
+			}
+			tt.mutate(task, agent)
+			err := validateHarnessV2RuntimeRefAgentTaskRestrictions(task, agent)
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("validateHarnessV2RuntimeRefAgentTaskRestrictions() error = %v, want %q", err, tt.wantError)
+			}
+		})
+	}
+}
+
+func TestValidateHarnessV2RuntimeRefAgentTaskRestrictionsAcceptsPersistedHistoricalDefault(t *testing.T) {
+	defaultMaxTurns := int32(50)
+	agent := &corev1alpha1.Agent{
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				RuntimeRef:      &corev1alpha1.AgentRuntimeReference{Name: "custom-runtime"},
+				DefaultMaxTurns: &defaultMaxTurns,
+			},
+		},
+	}
+
+	if err := validateHarnessV2RuntimeRefAgentTaskRestrictions(nil, agent); err != nil {
+		t.Fatalf("validateHarnessV2RuntimeRefAgentTaskRestrictions() error = %v, want persisted historical default accepted", err)
+	}
+}
+
+func TestValidatePlannedRuntimeRefAgentTaskRestrictionsUsesResolvedContract(t *testing.T) {
+	tests := []struct {
+		name      string
+		contract  corev1alpha1.AgentRuntimeContractVersion
+		wantPath  agentExecutionPath
+		wantError string
+		mutate    func(*corev1alpha1.Task, *corev1alpha1.Agent)
+	}{
+		{
+			name:     "harness v1 preserves legacy overrides",
+			contract: corev1alpha1.AgentRuntimeContractHarnessV1,
+			wantPath: agentExecutionPathHarnessV1,
+			mutate: func(task *corev1alpha1.Task, agent *corev1alpha1.Agent) {
+				defaultMaxTurns := int32(50)
+				taskMaxTurns := int32(7)
+				agent.Spec.SystemPrompt = &corev1alpha1.PromptSource{Inline: "frozen system prompt"}
+				agent.Spec.Skills = []corev1alpha1.SkillReference{{Name: "legacy-skill"}}
+				agent.Spec.Tools = []corev1alpha1.ToolReference{{Name: "legacy-tool"}}
+				agent.Spec.Runtime.DefaultMaxTurns = &defaultMaxTurns
+				task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{MaxTurns: &taskMaxTurns}
+			},
+		},
+		{
+			name:      "harness v2 rejects model override",
+			contract:  corev1alpha1.AgentRuntimeContractHarnessV2,
+			wantPath:  agentExecutionPathExternal,
+			wantError: "Agent.spec.model",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runtime := plannerExternalRuntime()
+			runtime.Name = "custom-runtime"
+			contract := tt.contract
+			runtime.Spec.ContractVersion = &contract
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Namespace: defaultNS},
+				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"},
+			}
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "a1", Namespace: defaultNS},
+				Spec: corev1alpha1.AgentSpec{
+					Model:   &corev1alpha1.ModelConfig{Name: "configured-model"},
+					Runtime: &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: runtime.Name}},
+				},
+			}
+			if tt.mutate != nil {
+				tt.mutate(task, agent)
+			}
+			r := newUnitReconciler(newTestScheme(), runtime)
+			r.ACPRuntimeEnabled = true
+			r.HarnessV1Enabled = true
+
+			if err := r.validateTaskAgentCompatibility(task, agent); err != nil {
+				t.Fatalf("validateTaskAgentCompatibility() error = %v", err)
+			}
+			plan := r.planAgentExecution(context.Background(), task, agent)
+			if plan.path != tt.wantPath {
+				t.Fatalf("plan path = %q, want %q (plan=%#v)", plan.path, tt.wantPath, plan)
+			}
+			err := validatePlannedRuntimeRefAgentTaskRestrictions(task, agent, plan)
+			if tt.wantError == "" {
+				if err != nil {
+					t.Fatalf("validatePlannedRuntimeRefAgentTaskRestrictions() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("validatePlannedRuntimeRefAgentTaskRestrictions() error = %v, want %q", err, tt.wantError)
+			}
+		})
+	}
+}
+
+func TestValidateTaskAgentCompatibility_RuntimeRefAllowsBrokeredAllowedToolsAndDisabledAgentTools(t *testing.T) {
+	disabled := false
 	r := &TaskReconciler{}
 	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
 		Type:         corev1alpha1.TaskTypeAgent,
@@ -780,6 +917,7 @@ func TestValidateTaskAgentCompatibility_RuntimeRefAllowsBrokeredAllowedTools(t *
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
 		Spec: corev1alpha1.AgentSpec{
+			Tools:   []corev1alpha1.ToolReference{{Name: "disabled-tool", Enabled: &disabled}},
 			Runtime: &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "custom-runtime"}},
 		},
 	}
@@ -1116,36 +1254,7 @@ func TestValidateTaskAgentCompatibility_ContainerTask(t *testing.T) {
 // validateExecutionWorkspace (pure logic)
 // ---------------------------------------------------------------------------
 
-func TestResolveExecutionWorkspaceRequestRejectsLegacyTemplateRef(t *testing.T) {
-	// ACP RuntimeSessions run only in controller-rendered sandbox templates, so
-	// the legacy operator-provided templateRef surface now fails closed before
-	// any warm-pool resolution.
-	scheme := newTestScheme()
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "task-legacy-template", Namespace: defaultNS},
-		Spec: corev1alpha1.TaskSpec{
-			Type: corev1alpha1.TaskTypeAgent,
-			Execution: &corev1alpha1.ExecutionSpec{
-				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
-					Enabled:     true,
-					TemplateRef: &corev1alpha1.WorkspaceTemplateReference{Name: acpWorkspaceTestTemplateName},
-				},
-			},
-		},
-	}
-	warmPool := &sandboxextv1beta1.SandboxWarmPool{
-		ObjectMeta: metav1.ObjectMeta{Name: acpWorkspaceTestTemplateName, Namespace: defaultNS},
-	}
-	r := newUnitReconciler(scheme, warmPool)
-	r.AgentSandboxEnabled = true
-
-	_, err := r.resolveExecutionWorkspaceRequest(context.Background(), task)
-	if err == nil || !strings.Contains(err.Error(), acpWorkspaceTestTemplateRefForbiddenError) {
-		t.Fatalf("resolveExecutionWorkspaceRequest() error = %v, want templateRef rejection", err)
-	}
-}
-
-func TestValidateExecutionWorkspaceRequest(t *testing.T) {
+func TestValidateExecutionWorkspace(t *testing.T) {
 	executionWorkspace := func(mutators ...func(*corev1alpha1.ExecutionWorkspaceSpec)) *corev1alpha1.ExecutionWorkspaceSpec {
 		// ACP RuntimeSessions run in controller-rendered sandbox templates, so a
 		// valid request omits templateRef entirely.
@@ -1197,7 +1306,7 @@ func TestValidateExecutionWorkspaceRequest(t *testing.T) {
 			wantErr: "requires the workspace provider API",
 		},
 		{
-			name:                        "classRef controller integration pending",
+			name:                        "classRef admitted for agent tasks",
 			workspaceProviderAPIEnabled: true,
 			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
 				Type: corev1alpha1.TaskTypeAgent,
@@ -1205,17 +1314,17 @@ func TestValidateExecutionWorkspaceRequest(t *testing.T) {
 					ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "coding-v1"},
 				}},
 			}},
-			wantErr: "controller-first Task workspace integration",
 		},
 		{
-			name: "feature gate disabled",
+			name:                        "classRef rejected for non-agent tasks",
+			workspaceProviderAPIEnabled: true,
 			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
-				Type: corev1alpha1.TaskTypeAgent,
-				Execution: &corev1alpha1.ExecutionSpec{
-					Workspace: executionWorkspace(),
-				},
+				Type: corev1alpha1.TaskTypeAI,
+				Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+					ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "coding-v1"},
+				}},
 			}},
-			wantErr: "requires agent sandbox",
+			wantErr: "only supported for type: agent tasks",
 		},
 		{
 			name:                "non-agent task",
@@ -1227,32 +1336,6 @@ func TestValidateExecutionWorkspaceRequest(t *testing.T) {
 				},
 			}},
 			wantErr: "only supported for type: agent",
-		},
-		{
-			name:                "templateRef is rejected for ACP RuntimeSessions",
-			agentSandboxEnabled: true,
-			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
-				Type: corev1alpha1.TaskTypeAgent,
-				Execution: &corev1alpha1.ExecutionSpec{
-					Workspace: executionWorkspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
-						ws.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: "operator-template"}
-					}),
-				},
-			}},
-			wantErr: acpWorkspaceTestTemplateRefForbiddenError,
-		},
-		{
-			name:                "empty templateRef name is still a templateRef and is rejected",
-			agentSandboxEnabled: true,
-			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
-				Type: corev1alpha1.TaskTypeAgent,
-				Execution: &corev1alpha1.ExecutionSpec{
-					Workspace: executionWorkspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
-						ws.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{}
-					}),
-				},
-			}},
-			wantErr: acpWorkspaceTestTemplateRefForbiddenError,
 		},
 		{
 			name:                "unsupported reusePolicy",
@@ -1279,63 +1362,6 @@ func TestValidateExecutionWorkspaceRequest(t *testing.T) {
 				},
 			}},
 			wantErr: "unsupported execution workspace cleanupPolicy",
-		},
-		{
-			name:                "boot unsupported for agent sandbox",
-			agentSandboxEnabled: true,
-			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
-				Type: corev1alpha1.TaskTypeAgent,
-				Execution: &corev1alpha1.ExecutionSpec{
-					Workspace: executionWorkspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
-						ws.Boot = true
-					}),
-				},
-			}},
-			wantErr: "execution workspace boot is only supported",
-		},
-		{
-			name: "substrate snapshot restore unsupported",
-			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
-				Type: corev1alpha1.TaskTypeAgent,
-				Execution: &corev1alpha1.ExecutionSpec{
-					Workspace: executionWorkspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
-						ws.Provider = corev1alpha1.WorkspaceProviderSubstrate
-						ws.Snapshot = &corev1alpha1.ExecutionWorkspaceSnapshotSpec{RestoreURI: "gs://snapshots/restore"}
-					}),
-				},
-			}},
-			wantErr: "snapshot restore/checkpoint is not supported yet",
-		},
-		{
-			name: "substrate snapshot checkpoint unsupported",
-			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
-				Type: corev1alpha1.TaskTypeAgent,
-				Execution: &corev1alpha1.ExecutionSpec{
-					Workspace: executionWorkspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
-						ws.Provider = corev1alpha1.WorkspaceProviderSubstrate
-						ws.Snapshot = &corev1alpha1.ExecutionWorkspaceSnapshotSpec{
-							CheckpointURI:       "gs://snapshots/checkpoint",
-							CheckpointOnRelease: true,
-						}
-					}),
-				},
-			}},
-			wantErr: "snapshot restore/checkpoint is not supported yet",
-		},
-		{
-			name: "substrate resident process unsupported",
-			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
-				Type: corev1alpha1.TaskTypeAgent,
-				Execution: &corev1alpha1.ExecutionSpec{
-					Workspace: executionWorkspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
-						ws.Provider = corev1alpha1.WorkspaceProviderSubstrate
-						ws.Hibernation = &corev1alpha1.ExecutionWorkspaceHibernationSpec{
-							ProcessMode: corev1alpha1.ExecutionWorkspaceProcessModeResident,
-						}
-					}),
-				},
-			}},
-			wantErr: "processMode \"resident\" is not supported yet",
 		},
 		{
 			name:             "substrate Task validation does not require legacy bootstrap secret before dispatch gate",
@@ -1369,26 +1395,6 @@ func TestValidateExecutionWorkspaceRequest(t *testing.T) {
 					}),
 				},
 			}},
-		},
-		{
-			name:             "substrate poolRef rejects retain cleanup policy",
-			substrateEnabled: true,
-			substrateConfig: SubstrateConfig{
-				APIInsecureSkipVerify: true,
-				BootstrapSecretName:   testSubstrateBootstrapSecretName,
-				BootstrapSecretKey:    testSubstrateBootstrapSecretKey,
-			},
-			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
-				Type: corev1alpha1.TaskTypeAgent,
-				Execution: &corev1alpha1.ExecutionSpec{
-					Workspace: executionWorkspace(substrateTemplateRef, func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
-						ws.Provider = corev1alpha1.WorkspaceProviderSubstrate
-						ws.PoolRef = &corev1alpha1.SubstrateActorPoolReference{Name: "codex-pool"}
-						ws.CleanupPolicy = corev1alpha1.WorkspaceCleanupPolicyRetain
-					}),
-				},
-			}},
-			wantErr: "poolRef does not support cleanupPolicy \"retain\"",
 		},
 		{
 			name:                "session reuse without sessionRef",
@@ -1454,7 +1460,7 @@ func TestValidateExecutionWorkspaceRequest(t *testing.T) {
 				SubstrateConfig:             tt.substrateConfig,
 			}
 
-			err := r.validateExecutionWorkspaceRequest(tt.task)
+			err := r.validateExecutionWorkspace(tt.task)
 			if tt.wantErr == "" {
 				if err != nil {
 					t.Fatalf("expected no error, got %v", err)
@@ -1486,9 +1492,6 @@ func TestValidateExecutionWorkspaceDefersACPProviderChecksUntilContractRouting(t
 
 	if err := r.validateExecutionWorkspace(task); err != nil {
 		t.Fatalf("validateExecutionWorkspace() error = %v, want provider checks deferred to planAgentExecution", err)
-	}
-	if err := r.validateExecutionWorkspaceRequest(task); err == nil || !strings.Contains(err.Error(), acpWorkspaceTestTemplateRefForbiddenError) {
-		t.Fatalf("validateExecutionWorkspaceRequest() error = %v, want ACP templateRef rejection retained by direct resolver", err)
 	}
 }
 
@@ -2103,352 +2106,6 @@ func TestValidateCoordinationConstraints_ConcurrencyLimit(t *testing.T) {
 	}
 }
 
-func TestTryReserveSubstratePoolActorUsesOptimisticLockWhenTakingOverStaleLease(t *testing.T) {
-	scheme := newTestScheme()
-	ctx := context.Background()
-	oldHolder := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "old-task", Namespace: "default", UID: "old-task-uid"},
-		Status: corev1alpha1.TaskStatus{
-			Phase: corev1alpha1.TaskPhaseSucceeded,
-			ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
-				Phase:  corev1alpha1.ExecutionWorkspacePhaseDeleted,
-				Reason: corev1alpha1.ExecutionWorkspaceReasonDeleted,
-			},
-		},
-	}
-	lease := newSubstratePoolActorLease(oldHolder, "default", testSubstrateActorID, testSubstrateActorID)
-	lease.ResourceVersion = "42"
-
-	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(oldHolder, lease).Build()
-	patchInspected := false
-	fc := interceptor.NewClient(base, interceptor.Funcs{
-		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
-			data, err := patch.Data(obj)
-			if err != nil {
-				return err
-			}
-			var patchBody map[string]any
-			if err := json.Unmarshal(data, &patchBody); err != nil {
-				return err
-			}
-			metadata, ok := patchBody["metadata"].(map[string]any)
-			if !ok {
-				return fmt.Errorf("patch metadata missing from %s", string(data))
-			}
-			if got := metadata["resourceVersion"]; got != "42" {
-				return fmt.Errorf("patch resourceVersion = %v, want 42", got)
-			}
-			patchInspected = true
-			return nil
-		},
-	})
-	r := &TaskReconciler{Client: fc}
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "new-task", Namespace: "default", UID: "new-task-uid"},
-	}
-
-	reserved, err := r.tryReserveSubstratePoolActor(ctx, task, "default", testSubstrateActorID)
-	if err != nil {
-		t.Fatalf("tryReserveSubstratePoolActor() error = %v", err)
-	}
-	if !reserved {
-		t.Fatal("tryReserveSubstratePoolActor() reserved = false, want true")
-	}
-	if !patchInspected {
-		t.Fatal("patch was not inspected")
-	}
-}
-
-func TestTryReserveSubstratePoolActorDoesNotTakeOverMissingTaskHolderLease(t *testing.T) {
-	scheme := newTestScheme()
-	ctx := context.Background()
-	oldHolder := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "old-task", Namespace: "default", UID: "old-task-uid"},
-	}
-	lease := newSubstratePoolActorLease(oldHolder, "default", testSubstrateActorID, testSubstrateActorID)
-	r := &TaskReconciler{
-		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(lease).Build(),
-	}
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "new-task", Namespace: "default", UID: "new-task-uid"},
-	}
-
-	reserved, err := r.tryReserveSubstratePoolActor(ctx, task, "default", testSubstrateActorID)
-	if err != nil {
-		t.Fatalf("tryReserveSubstratePoolActor() error = %v", err)
-	}
-	if reserved {
-		t.Fatal("tryReserveSubstratePoolActor() reserved missing holder's actor, want false")
-	}
-	var got coordinationv1.Lease
-	if err := r.Get(ctx, types.NamespacedName{Name: testSubstrateActorID, Namespace: "default"}, &got); err != nil {
-		t.Fatalf("Get lease: %v", err)
-	}
-	if !substratePoolActorLeaseHeldByTask(&got, oldHolder) {
-		t.Fatalf("lease holder changed to annotations %#v, want missing old task", got.Annotations)
-	}
-}
-
-func TestTryReserveSubstratePoolActorDoesNotTakeOverMissingToolHolderLease(t *testing.T) {
-	scheme := newTestScheme()
-	ctx := context.Background()
-	oldHolder := &corev1alpha1.Tool{
-		ObjectMeta: metav1.ObjectMeta{Name: "old-tool", Namespace: "default", UID: "old-tool-uid"},
-	}
-	lease := newSubstrateMCPPoolActorLease(oldHolder, "default", testSubstrateActorID, testSubstrateActorID)
-	r := &TaskReconciler{
-		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(lease).Build(),
-	}
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "new-task", Namespace: "default", UID: "new-task-uid"},
-	}
-
-	reserved, err := r.tryReserveSubstratePoolActor(ctx, task, "default", testSubstrateActorID)
-	if err != nil {
-		t.Fatalf("tryReserveSubstratePoolActor() error = %v", err)
-	}
-	if reserved {
-		t.Fatal("tryReserveSubstratePoolActor() reserved missing tool holder's actor, want false")
-	}
-	var got coordinationv1.Lease
-	if err := r.Get(ctx, types.NamespacedName{Name: testSubstrateActorID, Namespace: "default"}, &got); err != nil {
-		t.Fatalf("Get lease: %v", err)
-	}
-	if !substratePoolActorLeaseHeldByTool(&got, oldHolder) {
-		t.Fatalf("lease holder changed to annotations %#v, want missing old tool", got.Annotations)
-	}
-}
-
-func TestTryReserveSubstratePoolActorDoesNotTakeOverUnverifiedCleanupLease(t *testing.T) {
-	tests := []struct {
-		name               string
-		executionWorkspace *corev1alpha1.ExecutionWorkspaceStatus
-	}{
-		{
-			name: "cleanup failed",
-			executionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
-				Phase:  corev1alpha1.ExecutionWorkspacePhaseFailed,
-				Reason: corev1alpha1.ExecutionWorkspaceReasonSecretScrubFailed,
-			},
-		},
-		{
-			name:               "missing workspace status",
-			executionWorkspace: nil,
-		},
-		{
-			name:               "empty workspace status",
-			executionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			scheme := newTestScheme()
-			ctx := context.Background()
-			oldHolder := &corev1alpha1.Task{
-				ObjectMeta: metav1.ObjectMeta{Name: "old-task", Namespace: "default", UID: "old-task-uid"},
-				Status: corev1alpha1.TaskStatus{
-					Phase:              corev1alpha1.TaskPhaseFailed,
-					ExecutionWorkspace: tt.executionWorkspace,
-				},
-			}
-			lease := newSubstratePoolActorLease(oldHolder, "default", testSubstrateActorID, testSubstrateActorID)
-			r := &TaskReconciler{
-				Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(oldHolder, lease).Build(),
-			}
-			task := &corev1alpha1.Task{
-				ObjectMeta: metav1.ObjectMeta{Name: "new-task", Namespace: "default", UID: "new-task-uid"},
-			}
-
-			reserved, err := r.tryReserveSubstratePoolActor(ctx, task, "default", testSubstrateActorID)
-			if err != nil {
-				t.Fatalf("tryReserveSubstratePoolActor() error = %v", err)
-			}
-			if reserved {
-				t.Fatal("tryReserveSubstratePoolActor() reserved unverified actor, want false")
-			}
-			var got coordinationv1.Lease
-			if err := r.Get(ctx, types.NamespacedName{Name: testSubstrateActorID, Namespace: "default"}, &got); err != nil {
-				t.Fatalf("Get lease: %v", err)
-			}
-			if !substratePoolActorLeaseHeldByTask(&got, oldHolder) {
-				t.Fatalf("lease holder changed to annotations %#v, want old task", got.Annotations)
-			}
-		})
-	}
-}
-
-func TestTryReserveSubstratePoolActorDoesNotTakeOverDeletingHolder(t *testing.T) {
-	scheme := newTestScheme()
-	ctx := context.Background()
-	oldHolder := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "old-task", Namespace: "default", UID: "old-task-uid"},
-		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseFailed},
-	}
-	lease := newSubstratePoolActorLease(oldHolder, "default", testSubstrateActorID, testSubstrateActorID)
-	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(oldHolder, lease).Build()
-	fc := interceptor.NewClient(base, interceptor.Funcs{
-		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-			if err := c.Get(ctx, key, obj, opts...); err != nil {
-				return err
-			}
-			if task, ok := obj.(*corev1alpha1.Task); ok && task.Name == oldHolder.Name {
-				task.DeletionTimestamp = &metav1.Time{Time: time.Now()}
-			}
-			return nil
-		},
-	})
-	r := &TaskReconciler{Client: fc}
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "new-task", Namespace: "default", UID: "new-task-uid"},
-	}
-
-	reserved, err := r.tryReserveSubstratePoolActor(ctx, task, "default", testSubstrateActorID)
-	if err != nil {
-		t.Fatalf("tryReserveSubstratePoolActor() error = %v", err)
-	}
-	if reserved {
-		t.Fatal("tryReserveSubstratePoolActor() reserved deleting holder's actor, want false")
-	}
-	var got coordinationv1.Lease
-	if err := r.Get(ctx, types.NamespacedName{Name: testSubstrateActorID, Namespace: "default"}, &got); err != nil {
-		t.Fatalf("Get lease: %v", err)
-	}
-	if !substratePoolActorLeaseHeldByTask(&got, oldHolder) {
-		t.Fatalf("lease holder changed to annotations %#v, want deleting old task", got.Annotations)
-	}
-}
-
-func TestReserveSubstratePoolActorDoesNotReuseTaskLeaseBeforeRetryCleanupSucceeds(t *testing.T) {
-	scheme := newTestScheme()
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "retry-task", Namespace: "default", UID: "retry-task-uid"},
-		Status: corev1alpha1.TaskStatus{
-			Phase:    corev1alpha1.TaskPhasePending,
-			Attempts: 1,
-			ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
-				Phase:  corev1alpha1.ExecutionWorkspacePhaseFailed,
-				Reason: corev1alpha1.ExecutionWorkspaceReasonCleanupFailed,
-			},
-		},
-	}
-	lease := newSubstratePoolActorLease(task, "default", testSubstrateActorID, testSubstrateActorID)
-	r := newUnitReconciler(scheme, task, lease)
-	request := &ExecutionWorkspaceRequest{
-		PoolName:         "codex-pool",
-		PoolNamespace:    "default",
-		PoolTargetActors: 3,
-		ClaimName:        "actor-2",
-	}
-
-	reserved, err := r.reserveSubstratePoolActor(context.Background(), task, request)
-	if err != nil {
-		t.Fatalf("reserveSubstratePoolActor() error = %v", err)
-	}
-	if reserved {
-		t.Fatal("reserveSubstratePoolActor() reserved existing retry lease before cleanup success, want false")
-	}
-	if request.ClaimName != "actor-2" {
-		t.Fatalf("request ClaimName = %q, want unchanged while cleanup is incomplete", request.ClaimName)
-	}
-	var got coordinationv1.Lease
-	if err := r.Get(context.Background(), types.NamespacedName{Name: testSubstrateActorID, Namespace: "default"}, &got); err != nil {
-		t.Fatalf("Get lease: %v", err)
-	}
-	if !substratePoolActorLeaseHeldByTask(&got, task) {
-		t.Fatalf("lease holder changed to annotations %#v, want retry task", got.Annotations)
-	}
-}
-
-func TestDeleteSubstratePoolActorLeasesForTaskSkipsLeaseReassignedBeforeDelete(t *testing.T) {
-	scheme := newTestScheme()
-	ctx := context.Background()
-	oldHolder := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "old-task", Namespace: "default", UID: "old-task-uid"},
-	}
-	newHolder := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "new-task", Namespace: "default", UID: "new-task-uid"},
-	}
-	oldSnapshot := newSubstratePoolActorLease(oldHolder, "default", testSubstrateActorID, testSubstrateActorID)
-	current := newSubstratePoolActorLease(newHolder, "default", testSubstrateActorID, testSubstrateActorID)
-	r := &TaskReconciler{
-		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(oldHolder, newHolder, current).Build(),
-	}
-
-	if err := r.deleteSubstratePoolActorLeasesForTask(ctx, oldHolder, []coordinationv1.Lease{*oldSnapshot}); err != nil {
-		t.Fatalf("deleteSubstratePoolActorLeasesForTask() error = %v", err)
-	}
-	var got coordinationv1.Lease
-	if err := r.Get(ctx, types.NamespacedName{Name: testSubstrateActorID, Namespace: "default"}, &got); err != nil {
-		t.Fatalf("Get lease: %v", err)
-	}
-	if !substratePoolActorLeaseHeldByTask(&got, newHolder) {
-		t.Fatalf("lease holder changed to annotations %#v, want new task", got.Annotations)
-	}
-}
-
-func TestDeleteSubstratePoolActorLeasesForTaskReturnsConflictWhenLeaseStillHeld(t *testing.T) {
-	scheme := newTestScheme()
-	ctx := context.Background()
-	holder := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "task", Namespace: "default", UID: "task-uid"},
-	}
-	lease := newSubstratePoolActorLease(holder, "default", testSubstrateActorID, testSubstrateActorID)
-	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(holder, lease).Build()
-	conflict := apierrors.NewConflict(coordinationv1.Resource("leases"), testSubstrateActorID, errors.New("resource version changed"))
-	r := &TaskReconciler{
-		Client: interceptor.NewClient(base, interceptor.Funcs{
-			Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
-				return conflict
-			},
-		}),
-	}
-
-	err := r.deleteSubstratePoolActorLeasesForTask(ctx, holder, []coordinationv1.Lease{*lease})
-	if err == nil {
-		t.Fatal("deleteSubstratePoolActorLeasesForTask() error = nil, want conflict while holder still matches")
-	}
-	if !apierrors.IsConflict(err) {
-		t.Fatalf("deleteSubstratePoolActorLeasesForTask() error = %v, want conflict", err)
-	}
-	var got coordinationv1.Lease
-	if getErr := r.Get(ctx, types.NamespacedName{Name: testSubstrateActorID, Namespace: "default"}, &got); getErr != nil {
-		t.Fatalf("Get lease after conflict: %v", getErr)
-	}
-	if !substratePoolActorLeaseHeldByTask(&got, holder) {
-		t.Fatalf("lease holder changed to annotations %#v, want original task", got.Annotations)
-	}
-}
-
-func TestDeleteSubstratePoolActorsForLeasesSkipsLeaseReassignedBeforeActorDelete(t *testing.T) {
-	scheme := newTestScheme()
-	ctx := context.Background()
-	oldHolder := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "old-task", Namespace: "default", UID: "old-task-uid"},
-	}
-	newHolder := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "new-task", Namespace: "default", UID: "new-task-uid"},
-	}
-	oldSnapshot := newSubstratePoolActorLease(oldHolder, "default", testSubstrateActorID, testSubstrateActorID)
-	current := newSubstratePoolActorLease(newHolder, "default", testSubstrateActorID, testSubstrateActorID)
-	r := &TaskReconciler{
-		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(oldHolder, newHolder, current).Build(),
-	}
-	executor := &recordingTaskWorkspaceExecutor{}
-	r.SubstrateExecutorFactory = func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
-		return executor, nil
-	}
-
-	if err := r.deleteSubstratePoolActorsForLeases(ctx, oldHolder, []coordinationv1.Lease{*oldSnapshot}); err != nil {
-		t.Fatalf("deleteSubstratePoolActorsForLeases() error = %v", err)
-	}
-	if len(executor.deleteReqs) != 0 {
-		t.Fatalf("delete requests = %#v, want no actor delete after lease reassignment", executor.deleteReqs)
-	}
-	if !executor.closeCalled {
-		t.Fatal("workspace executor was not closed")
-	}
-}
-
 // ---------------------------------------------------------------------------
 // ensureWorkerRBAC
 // ---------------------------------------------------------------------------
@@ -2983,6 +2640,26 @@ func TestCollectResult_ContainerWithoutJobDoesNotReadPodLogs(t *testing.T) {
 	}
 }
 
+func TestCollectResult_RejectedJobDoesNotReadPodLogs(t *testing.T) {
+	task := taskJobIdentityFixture()
+	task.Status.JobName = "unbound-job"
+	task.Status.Conditions = []metav1.Condition{{
+		Type: ConditionTypeJobCreated, Status: metav1.ConditionFalse, Reason: taskJobIdentityRejectedReason,
+	}}
+	r := newUnitReconciler(newTestScheme(), task)
+	kubeClient := k8sfake.NewSimpleClientset()
+	r.KubeClient = kubeClient
+	if err := r.collectResult(t.Context(), task); err != nil {
+		t.Fatalf("collectResult: %v", err)
+	}
+	if len(kubeClient.Actions()) != 0 {
+		t.Fatalf("rejected Job must not be used for log collection: %v", kubeClient.Actions())
+	}
+	if task.Status.ResultRef != nil {
+		t.Fatalf("rejected Job must not supply a result: %#v", task.Status.ResultRef)
+	}
+}
+
 func TestCollectResult_AITaskNoResult(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
@@ -3203,6 +2880,7 @@ func TestHandleDeletionRemovesFinalizerWithMetadataOnlyPatch(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              "del-agent-metadata",
+			UID:               "del-agent-metadata-uid",
 			Namespace:         "default",
 			DeletionTimestamp: &now,
 			Finalizers:        []string{labels.TaskFinalizer},
@@ -3265,6 +2943,7 @@ func TestHandleDeletion_WithPersistedResultWithoutResultRef(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "del-result",
+			UID:        "del-result-uid",
 			Namespace:  "default",
 			Finalizers: []string{labels.TaskFinalizer},
 		},
@@ -3289,6 +2968,7 @@ func TestHandleDeletionDeletesExecutionEvents(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "del-events",
+			UID:        "del-events-uid",
 			Namespace:  "default",
 			Finalizers: []string{labels.TaskFinalizer},
 		},
@@ -3413,6 +3093,7 @@ func TestHandleDeletion_WithSessionRef(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "del-sess",
+			UID:        "del-sess-uid",
 			Namespace:  "default",
 			Finalizers: []string{labels.TaskFinalizer},
 		},
@@ -3435,6 +3116,7 @@ func TestHandleDeletion_WithJobName(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "del-job",
+			UID:        "del-job-uid",
 			Namespace:  "default",
 			Finalizers: []string{labels.TaskFinalizer},
 		},
@@ -3447,99 +3129,12 @@ func TestHandleDeletion_WithJobName(t *testing.T) {
 	}
 }
 
-func TestHandleDeletionPreservesPoolLeaseAfterCleanupFailure(t *testing.T) {
-	scheme := newTestScheme()
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:       "del-pooled",
-			Namespace:  "default",
-			UID:        "del-pooled-uid",
-			Finalizers: []string{labels.TaskFinalizer},
-		},
-		Status: corev1alpha1.TaskStatus{
-			JobName: "missing-job",
-			ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
-				Phase:  corev1alpha1.ExecutionWorkspacePhaseFailed,
-				Reason: corev1alpha1.ExecutionWorkspaceReasonCleanupFailed,
-			},
-		},
-	}
-	lease := newSubstratePoolActorLease(task, "default", testSubstrateActorID, testSubstrateActorID)
-	r := newUnitReconciler(scheme, task, lease)
-	executor := &recordingTaskWorkspaceExecutor{deleteErr: errors.New("delete actor")}
-	r.SubstrateExecutorFactory = func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
-		return executor, nil
-	}
-
-	result, err := r.handleDeletion(context.Background(), task)
-	if err != nil {
-		t.Fatalf("handleDeletion() error = %v", err)
-	}
-	if result.RequeueAfter != 30*time.Second {
-		t.Fatalf("RequeueAfter = %v, want 30s", result.RequeueAfter)
-	}
-	if err := r.Get(context.Background(), types.NamespacedName{Name: testSubstrateActorID, Namespace: "default"}, &coordinationv1.Lease{}); err != nil {
-		t.Fatalf("pool lease after failed cleanup error = %v, want lease preserved", err)
-	}
-	var got corev1alpha1.Task
-	if err := r.Get(context.Background(), types.NamespacedName{Name: "del-pooled", Namespace: "default"}, &got); err != nil {
-		t.Fatalf("Get task: %v", err)
-	}
-	if !controllerutil.ContainsFinalizer(&got, labels.TaskFinalizer) {
-		t.Fatal("task finalizer was removed before workspace cleanup succeeded")
-	}
-	if len(executor.deleteReqs) != 1 || executor.deleteReqs[0].Ref.ID != testSubstrateActorID {
-		t.Fatalf("delete requests = %#v, want %s cleanup attempt", executor.deleteReqs, testSubstrateActorID)
-	}
-	if !executor.closeCalled {
-		t.Fatal("workspace executor was not closed")
-	}
-}
-
-func TestHandleDeletionReleasesPoolLeaseAfterWorkspaceCleanup(t *testing.T) {
-	scheme := newTestScheme()
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:       "del-pooled-clean",
-			Namespace:  "default",
-			UID:        "del-pooled-clean-uid",
-			Finalizers: []string{labels.TaskFinalizer},
-		},
-		Status: corev1alpha1.TaskStatus{
-			JobName: "missing-job",
-			ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
-				Phase:  corev1alpha1.ExecutionWorkspacePhaseDeleted,
-				Reason: corev1alpha1.ExecutionWorkspaceReasonDeleted,
-			},
-		},
-	}
-	lease := newSubstratePoolActorLease(task, "default", testSubstrateActorID, testSubstrateActorID)
-	r := newUnitReconciler(scheme, task, lease)
-
-	result, err := r.handleDeletion(context.Background(), task)
-	if err != nil {
-		t.Fatalf("handleDeletion() error = %v", err)
-	}
-	if result.RequeueAfter != 0 {
-		t.Fatalf("RequeueAfter = %v, want no requeue", result.RequeueAfter)
-	}
-	if err := r.Get(context.Background(), types.NamespacedName{Name: testSubstrateActorID, Namespace: "default"}, &coordinationv1.Lease{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("pool lease after deletion error = %v, want not found", err)
-	}
-	var got corev1alpha1.Task
-	if err := r.Get(context.Background(), types.NamespacedName{Name: "del-pooled-clean", Namespace: "default"}, &got); err != nil {
-		t.Fatalf("Get task: %v", err)
-	}
-	if controllerutil.ContainsFinalizer(&got, labels.TaskFinalizer) {
-		t.Fatal("task finalizer was not removed")
-	}
-}
-
 func TestHandleDeletion_WithMessageStore(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "del-msg",
+			UID:        "del-msg-uid",
 			Namespace:  "default",
 			Finalizers: []string{labels.TaskFinalizer},
 		},
@@ -3673,158 +3268,6 @@ func TestHandleCompleted_FailedInactiveJobRetainsJob(t *testing.T) {
 
 	if err := r.Get(context.Background(), types.NamespacedName{Name: "failed-inactive-job", Namespace: "default"}, &batchv1.Job{}); err != nil {
 		t.Fatalf("expected inactive failed task Job to be retained, got %v", err)
-	}
-}
-
-func TestHandleCompletedPreservesPoolLeaseAfterWorkspaceCleanupFailure(t *testing.T) {
-	scheme := newTestScheme()
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "cleanup-failed-task", Namespace: "default", UID: "cleanup-failed-task-uid"},
-		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
-		Status: corev1alpha1.TaskStatus{
-			Phase: corev1alpha1.TaskPhaseFailed,
-			ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
-				Phase:  corev1alpha1.ExecutionWorkspacePhaseFailed,
-				Reason: corev1alpha1.ExecutionWorkspaceReasonCleanupFailed,
-			},
-		},
-	}
-	lease := newSubstratePoolActorLease(task, "default", testSubstrateActorID, testSubstrateActorID)
-	r := newUnitReconciler(scheme, task, lease)
-	executor := &recordingTaskWorkspaceExecutor{deleteErr: errors.New("delete actor")}
-	r.SubstrateExecutorFactory = func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
-		return executor, nil
-	}
-
-	result, err := r.handleCompleted(context.Background(), task)
-	if err != nil {
-		t.Fatalf("handleCompleted() error = %v", err)
-	}
-	if result.RequeueAfter != 30*time.Second {
-		t.Fatalf("RequeueAfter = %v, want 30s", result.RequeueAfter)
-	}
-	var got coordinationv1.Lease
-	if err := r.Get(context.Background(), types.NamespacedName{Name: testSubstrateActorID, Namespace: "default"}, &got); err != nil {
-		t.Fatalf("pool lease was not preserved after cleanup failure: %v", err)
-	}
-	if len(executor.deleteReqs) != 1 || executor.deleteReqs[0].Ref.ID != testSubstrateActorID {
-		t.Fatalf("delete requests = %#v, want %s cleanup attempt", executor.deleteReqs, testSubstrateActorID)
-	}
-	if !executor.closeCalled {
-		t.Fatal("workspace executor was not closed")
-	}
-}
-
-func TestHandleCompletedPreservesPoolLeaseWithoutWorkspaceCleanupSuccess(t *testing.T) {
-	tests := []struct {
-		name               string
-		executionWorkspace *corev1alpha1.ExecutionWorkspaceStatus
-	}{
-		{
-			name: "command failed",
-			executionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
-				Phase:  corev1alpha1.ExecutionWorkspacePhaseFailed,
-				Reason: corev1alpha1.ExecutionWorkspaceReasonCommandFailed,
-			},
-		},
-		{
-			name:               "missing workspace status",
-			executionWorkspace: nil,
-		},
-		{
-			name:               "empty workspace status",
-			executionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			scheme := newTestScheme()
-			task := &corev1alpha1.Task{
-				ObjectMeta: metav1.ObjectMeta{Name: "command-failed-task", Namespace: "default", UID: types.UID("command-failed-task-uid-" + tt.name)},
-				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
-				Status: corev1alpha1.TaskStatus{
-					Phase:              corev1alpha1.TaskPhaseFailed,
-					ExecutionWorkspace: tt.executionWorkspace,
-				},
-			}
-			lease := newSubstratePoolActorLease(task, "default", testSubstrateActorID, testSubstrateActorID)
-			r := newUnitReconciler(scheme, task, lease)
-			executor := &recordingTaskWorkspaceExecutor{deleteErr: errors.New("delete actor")}
-			r.SubstrateExecutorFactory = func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
-				return executor, nil
-			}
-
-			result, err := r.handleCompleted(context.Background(), task)
-			if err != nil {
-				t.Fatalf("handleCompleted() error = %v", err)
-			}
-			if result.RequeueAfter != 30*time.Second {
-				t.Fatalf("RequeueAfter = %v, want 30s", result.RequeueAfter)
-			}
-			var got coordinationv1.Lease
-			if err := r.Get(context.Background(), types.NamespacedName{Name: testSubstrateActorID, Namespace: "default"}, &got); err != nil {
-				t.Fatalf("pool lease was not preserved without cleanup success: %v", err)
-			}
-			if len(executor.deleteReqs) != 1 || executor.deleteReqs[0].Ref.ID != testSubstrateActorID {
-				t.Fatalf("delete requests = %#v, want %s cleanup attempt", executor.deleteReqs, testSubstrateActorID)
-			}
-			if !executor.closeCalled {
-				t.Fatal("workspace executor was not closed")
-			}
-		})
-	}
-}
-
-func TestHandleCompletedReleasesPoolLeaseAfterWorkspaceCleanupSuccess(t *testing.T) {
-	tests := []struct {
-		name   string
-		phase  corev1alpha1.ExecutionWorkspacePhase
-		reason corev1alpha1.ExecutionWorkspaceReason
-	}{
-		{
-			name:   "retained",
-			phase:  corev1alpha1.ExecutionWorkspacePhaseRetained,
-			reason: corev1alpha1.ExecutionWorkspaceReasonRetained,
-		},
-		{
-			name:   "deleted",
-			phase:  corev1alpha1.ExecutionWorkspacePhaseDeleted,
-			reason: corev1alpha1.ExecutionWorkspaceReasonDeleted,
-		},
-		{
-			name:   "released",
-			phase:  corev1alpha1.ExecutionWorkspacePhaseReleased,
-			reason: corev1alpha1.ExecutionWorkspaceReasonReleased,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			scheme := newTestScheme()
-			task := &corev1alpha1.Task{
-				ObjectMeta: metav1.ObjectMeta{Name: "cleanup-succeeded-task", Namespace: "default", UID: types.UID("cleanup-succeeded-task-uid-" + tt.name)},
-				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
-				Status: corev1alpha1.TaskStatus{
-					Phase: corev1alpha1.TaskPhaseSucceeded,
-					ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
-						Phase:  tt.phase,
-						Reason: tt.reason,
-					},
-				},
-			}
-			lease := newSubstratePoolActorLease(task, "default", testSubstrateActorID, testSubstrateActorID)
-			r := newUnitReconciler(scheme, task, lease)
-
-			result, err := r.handleCompleted(context.Background(), task)
-			if err != nil {
-				t.Fatalf("handleCompleted() error = %v", err)
-			}
-			if result != (ctrl.Result{}) {
-				t.Fatalf("handleCompleted() result = %#v, want zero", result)
-			}
-			if err := r.Get(context.Background(), types.NamespacedName{Name: testSubstrateActorID, Namespace: "default"}, &coordinationv1.Lease{}); !apierrors.IsNotFound(err) {
-				t.Fatalf("pool lease after cleanup success error = %v, want not found", err)
-			}
-		})
 	}
 }
 
@@ -4656,156 +4099,6 @@ func TestRetryTask_NoExistingJob(t *testing.T) {
 	}
 }
 
-func TestRetryTask_PooledLeaseWaitsForOldJobDeletion(t *testing.T) {
-	scheme := newTestScheme()
-	job := &batchv1.Job{
-		ObjectMeta: metav1.ObjectMeta{Name: "retry-pooled-job", Namespace: "default"},
-	}
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "retry-pooled", Namespace: "default", UID: "retry-pooled-uid"},
-		Spec: corev1alpha1.TaskSpec{
-			Type:        corev1alpha1.TaskTypeAgent,
-			RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 3},
-		},
-		Status: corev1alpha1.TaskStatus{
-			Phase:    corev1alpha1.TaskPhaseRunning,
-			JobName:  "retry-pooled-job",
-			Attempts: 1,
-			ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
-				Phase:  corev1alpha1.ExecutionWorkspacePhaseFailed,
-				Reason: corev1alpha1.ExecutionWorkspaceReasonCleanupFailed,
-			},
-		},
-	}
-	lease := newSubstratePoolActorLease(task, "default", testSubstrateActorID, testSubstrateActorID)
-	r := newUnitReconciler(scheme, task, job, lease)
-	executor := &recordingTaskWorkspaceExecutor{}
-	r.SubstrateExecutorFactory = func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
-		return executor, nil
-	}
-
-	result, err := r.retryTask(context.Background(), task)
-	if err != nil {
-		t.Fatalf("retryTask() error = %v", err)
-	}
-	if result.RequeueAfter != 2*time.Second {
-		t.Fatalf("RequeueAfter = %v, want 2s while old Job is deleting", result.RequeueAfter)
-	}
-	if task.Status.Phase != corev1alpha1.TaskPhaseRunning {
-		t.Fatalf("phase = %s, want Running until pooled retry cleanup finishes", task.Status.Phase)
-	}
-	if task.Status.JobName != "retry-pooled-job" {
-		t.Fatalf("JobName = %q, want old Job retained in status until retry cleanup finishes", task.Status.JobName)
-	}
-	if len(executor.deleteReqs) != 0 {
-		t.Fatalf("delete requests = %#v, want no actor cleanup until old Job is gone", executor.deleteReqs)
-	}
-	if err := r.Get(context.Background(), types.NamespacedName{Name: "retry-pooled-job", Namespace: "default"}, &batchv1.Job{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("old Job error = %v, want NotFound after retry cleanup delete", err)
-	}
-	if err := r.Get(context.Background(), types.NamespacedName{Name: testSubstrateActorID, Namespace: "default"}, &coordinationv1.Lease{}); err != nil {
-		t.Fatalf("pool lease error = %v, want lease preserved while old Job deletes", err)
-	}
-}
-
-func TestRetryTask_PooledLeaseDeletesActorBeforeReset(t *testing.T) {
-	scheme := newTestScheme()
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "retry-cleanup", Namespace: "default", UID: "retry-cleanup-uid"},
-		Spec: corev1alpha1.TaskSpec{
-			Type:        corev1alpha1.TaskTypeAgent,
-			RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 3},
-		},
-		Status: corev1alpha1.TaskStatus{
-			Phase:    corev1alpha1.TaskPhaseRunning,
-			JobName:  "missing-job",
-			Attempts: 1,
-			ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
-				Phase:  corev1alpha1.ExecutionWorkspacePhaseFailed,
-				Reason: corev1alpha1.ExecutionWorkspaceReasonCleanupFailed,
-			},
-		},
-	}
-	lease := newSubstratePoolActorLease(task, "default", testSubstrateActorID, testSubstrateActorID)
-	r := newUnitReconciler(scheme, task, lease)
-	executor := &recordingTaskWorkspaceExecutor{}
-	r.SubstrateExecutorFactory = func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
-		return executor, nil
-	}
-
-	result, err := r.retryTask(context.Background(), task)
-	if err != nil {
-		t.Fatalf("retryTask() error = %v", err)
-	}
-	if result.RequeueAfter <= 0 || result.RequeueAfter == 30*time.Second {
-		t.Fatalf("RequeueAfter = %v, want retry delay after cleanup success", result.RequeueAfter)
-	}
-	if task.Status.Phase != corev1alpha1.TaskPhasePending {
-		t.Fatalf("phase = %s, want Pending after pooled retry cleanup", task.Status.Phase)
-	}
-	if task.Status.JobName != "" {
-		t.Fatalf("JobName = %q, want cleared after pooled retry cleanup", task.Status.JobName)
-	}
-	if len(executor.deleteReqs) != 1 || executor.deleteReqs[0].Ref.ID != testSubstrateActorID {
-		t.Fatalf("delete requests = %#v, want %s cleanup before retry reset", executor.deleteReqs, testSubstrateActorID)
-	}
-	if !executor.closeCalled {
-		t.Fatal("workspace executor was not closed")
-	}
-	if err := r.Get(context.Background(), types.NamespacedName{Name: testSubstrateActorID, Namespace: "default"}, &coordinationv1.Lease{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("pool lease error = %v, want NotFound after pooled retry cleanup", err)
-	}
-}
-
-func TestRetryTask_PooledLeasePreservedWhenActorCleanupFails(t *testing.T) {
-	scheme := newTestScheme()
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "retry-cleanup-fails", Namespace: "default", UID: "retry-cleanup-fails-uid"},
-		Spec: corev1alpha1.TaskSpec{
-			Type:        corev1alpha1.TaskTypeAgent,
-			RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 3},
-		},
-		Status: corev1alpha1.TaskStatus{
-			Phase:    corev1alpha1.TaskPhaseRunning,
-			JobName:  "missing-job",
-			Attempts: 1,
-			ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
-				Phase:  corev1alpha1.ExecutionWorkspacePhaseFailed,
-				Reason: corev1alpha1.ExecutionWorkspaceReasonCleanupFailed,
-			},
-		},
-	}
-	lease := newSubstratePoolActorLease(task, "default", testSubstrateActorID, testSubstrateActorID)
-	r := newUnitReconciler(scheme, task, lease)
-	executor := &recordingTaskWorkspaceExecutor{deleteErr: errors.New("delete actor")}
-	r.SubstrateExecutorFactory = func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
-		return executor, nil
-	}
-
-	result, err := r.retryTask(context.Background(), task)
-	if err != nil {
-		t.Fatalf("retryTask() error = %v", err)
-	}
-	if result.RequeueAfter != 30*time.Second {
-		t.Fatalf("RequeueAfter = %v, want 30s after pooled retry cleanup failure", result.RequeueAfter)
-	}
-	if task.Status.Phase != corev1alpha1.TaskPhaseRunning {
-		t.Fatalf("phase = %s, want Running until pooled retry cleanup succeeds", task.Status.Phase)
-	}
-	if task.Status.JobName != "missing-job" {
-		t.Fatalf("JobName = %q, want old JobName preserved until pooled retry cleanup succeeds", task.Status.JobName)
-	}
-	if len(executor.deleteReqs) != 1 || executor.deleteReqs[0].Ref.ID != testSubstrateActorID {
-		t.Fatalf("delete requests = %#v, want %s cleanup attempt", executor.deleteReqs, testSubstrateActorID)
-	}
-	if !executor.closeCalled {
-		t.Fatal("workspace executor was not closed")
-	}
-	if err := r.Get(context.Background(), types.NamespacedName{Name: testSubstrateActorID, Namespace: "default"}, &coordinationv1.Lease{}); err != nil {
-		t.Fatalf("pool lease error = %v, want lease preserved after cleanup failure", err)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // acquireSessionLock
 // ---------------------------------------------------------------------------
@@ -5194,6 +4487,48 @@ func TestHandleScheduled_MissedDeadline(t *testing.T) {
 	}
 }
 
+func TestHandleScheduled_MissedDeadlineReturnsStatusUpdateError(t *testing.T) {
+	scheme := newTestScheme()
+	deadline := int64(1)
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "sched-missed-status-error",
+			Namespace:         "default",
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-48 * time.Hour)),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:                    corev1alpha1.TaskTypeContainer,
+			Schedule:                "* * * * *",
+			StartingDeadlineSeconds: &deadline,
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:            corev1alpha1.TaskPhaseScheduled,
+			LastScheduleTime: new(metav1.NewTime(time.Now().Add(-24 * time.Hour))),
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	base, ok := r.Client.(client.WithWatch)
+	if !ok {
+		t.Fatal("fake client does not implement client.WithWatch")
+	}
+	statusErr := errors.New("injected schedule status update failure")
+	r.Client = interceptor.NewClient(base, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, delegate client.Client, subResourceName string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if subResourceName == "status" {
+				if current, ok := obj.(*corev1alpha1.Task); ok && current.Name == task.Name {
+					return statusErr
+				}
+			}
+			return delegate.SubResource(subResourceName).Update(ctx, obj, opts...)
+		},
+	})
+
+	_, err := r.handleScheduled(context.Background(), task)
+	if !errors.Is(err, statusErr) {
+		t.Fatalf("handleScheduled() error = %v, want status update error", err)
+	}
+}
+
 func TestHandleScheduled_ConcurrencyForbid(t *testing.T) {
 	tests := []struct {
 		phase       corev1alpha1.TaskPhase
@@ -5291,6 +4626,145 @@ func TestHandleScheduled_CreateChildTask(t *testing.T) {
 	}
 	if task.Status.LastScheduleTime == nil {
 		t.Error("expected LastScheduleTime to be updated")
+	}
+}
+
+func TestHandleScheduled_RefreshesRuntimeRefPolicyFromAPIReader(t *testing.T) {
+	contract := corev1alpha1.AgentRuntimeContractHarnessV2
+	for _, tt := range []struct {
+		name         string
+		allowedTools []string
+	}{
+		{name: "current policy", allowedTools: []string{"read_current"}},
+		{name: "explicit deny all", allowedTools: []string{}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := newTestScheme()
+			lastSchedule := metav1.NewTime(time.Now().Add(-2 * time.Minute))
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "sched-runtime-policy",
+					Namespace:         "default",
+					UID:               types.UID("scheduled-runtime-policy"),
+					CreationTimestamp: metav1.NewTime(time.Now().Add(-time.Hour)),
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:                    corev1alpha1.TaskTypeAgent,
+					AgentRef:                &corev1alpha1.AgentReference{Name: "external-agent"},
+					AgentRuntime:            &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"stale_tool"}},
+					Schedule:                "* * * * *",
+					StartingDeadlineSeconds: new(int64(300)),
+				},
+				Status: corev1alpha1.TaskStatus{
+					Phase:            corev1alpha1.TaskPhaseScheduled,
+					LastScheduleTime: &lastSchedule,
+				},
+			}
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "external-agent", Namespace: task.Namespace},
+				Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+					RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "external-runtime"},
+				}},
+			}
+			staleRuntime := scheduledTestAgentRuntime(contract, []string{"stale_tool"})
+			currentRuntime := scheduledTestAgentRuntime(contract, tt.allowedTools)
+
+			r := newUnitReconciler(scheme, task, agent.DeepCopy(), staleRuntime)
+			r.APIReader = fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent, currentRuntime).Build()
+
+			if _, err := r.handleScheduled(context.Background(), task); err != nil {
+				t.Fatalf("handleScheduled() error = %v", err)
+			}
+
+			children := &corev1alpha1.TaskList{}
+			if err := r.List(context.Background(), children, client.InNamespace(task.Namespace), client.MatchingLabels{
+				labels.LabelParentTask: labels.SelectorValue(task.Name),
+			}); err != nil {
+				t.Fatalf("list scheduled children: %v", err)
+			}
+			if len(children.Items) != 1 {
+				t.Fatalf("scheduled children = %d, want 1", len(children.Items))
+			}
+			got := children.Items[0].Spec.AgentRuntime
+			if got == nil || got.AllowedTools == nil || !slices.Equal(got.AllowedTools, tt.allowedTools) {
+				t.Fatalf("child allowedTools = %#v, want %#v", got, tt.allowedTools)
+			}
+			if task.Spec.AgentRuntime == nil || !slices.Equal(task.Spec.AgentRuntime.AllowedTools, []string{"stale_tool"}) {
+				t.Fatalf("parent allowedTools = %#v, want unchanged stale policy", task.Spec.AgentRuntime)
+			}
+		})
+	}
+}
+
+func TestHandleScheduled_RuntimeRefPolicyFailureHasNoSideEffects(t *testing.T) {
+	scheme := newTestScheme()
+	lastSchedule := metav1.NewTime(time.Now().Add(-2 * time.Minute))
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "sched-runtime-policy-failure",
+			Namespace:         "default",
+			UID:               types.UID("scheduled-runtime-policy-failure"),
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-time.Hour)),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:                    corev1alpha1.TaskTypeAgent,
+			AgentRef:                &corev1alpha1.AgentReference{Name: "external-agent"},
+			AgentRuntime:            &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"stale_tool"}},
+			Schedule:                "* * * * *",
+			StartingDeadlineSeconds: new(int64(300)),
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:            corev1alpha1.TaskPhaseScheduled,
+			LastScheduleTime: &lastSchedule,
+		},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "external-agent", Namespace: task.Namespace},
+		Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+			RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "missing-runtime"},
+		}},
+	}
+	r := newUnitReconciler(scheme, task)
+	r.APIReader = fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent).Build()
+
+	_, err := r.handleScheduled(context.Background(), task)
+	if err == nil || !strings.Contains(err.Error(), "refreshing scheduled child AgentRuntime policy") {
+		t.Fatalf("handleScheduled() error = %v, want policy refresh failure", err)
+	}
+	children := &corev1alpha1.TaskList{}
+	if err := r.List(context.Background(), children, client.InNamespace(task.Namespace), client.MatchingLabels{
+		labels.LabelParentTask: labels.SelectorValue(task.Name),
+	}); err != nil {
+		t.Fatalf("list scheduled children: %v", err)
+	}
+	if len(children.Items) != 0 {
+		t.Fatalf("scheduled children = %d, want 0", len(children.Items))
+	}
+	if task.Status.LastScheduleTime == nil || !task.Status.LastScheduleTime.Equal(&lastSchedule) {
+		t.Fatalf("LastScheduleTime = %v, want unchanged %v", task.Status.LastScheduleTime, lastSchedule)
+	}
+}
+
+func scheduledTestAgentRuntime(
+	contract corev1alpha1.AgentRuntimeContractVersion,
+	allowedTools []string,
+) *corev1alpha1.AgentRuntime {
+	return &corev1alpha1.AgentRuntime{
+		ObjectMeta: metav1.ObjectMeta{Name: "external-runtime", Namespace: "default"},
+		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
+			ContractVersion: &contract,
+			Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
+				Profile: &corev1alpha1.AgentRuntimeProfileSpec{
+					ProviderKind:    "codex",
+					Model:           "gpt-5.6",
+					WorkspaceIntent: corev1alpha1.WorkspaceIntentRead,
+				},
+				MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{
+					AllowedTools:    append([]string{}, allowedTools...),
+					DisallowedTools: []string{},
+				},
+			},
+		},
 	}
 }
 
@@ -5861,64 +5335,9 @@ func TestHandlePending_BuiltInAgentRuntimeFailsClosedWhenACPDisabled(t *testing.
 	assertNoJobsForTask(t, r, task)
 }
 
-func TestHandlePending_ExternalRuntimeRefFailsBeforeAttemptCreation(t *testing.T) {
-	scheme := newTestScheme()
-	externalRuntime := plannerExternalRuntime()
-	agent := &corev1alpha1.Agent{
-		ObjectMeta: metav1.ObjectMeta{Name: "external-agent", Namespace: defaultNS},
-		Spec: corev1alpha1.AgentSpec{
-			Runtime: &corev1alpha1.AgentCLIRuntime{
-				RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: externalRuntime.Name},
-			},
-		},
-	}
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "external-task", Namespace: defaultNS},
-		Spec: corev1alpha1.TaskSpec{
-			Type:     corev1alpha1.TaskTypeAgent,
-			AgentRef: &corev1alpha1.AgentReference{Name: agent.Name},
-			Prompt:   "do work",
-		},
-		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
-	}
-	r := newUnitReconciler(scheme, task, agent, externalRuntime)
-	r.ACPRuntimeEnabled = true
-
-	result, err := r.handlePending(context.Background(), task)
-	if err != nil {
-		t.Fatalf("handlePending() error = %v", err)
-	}
-	if result.RequeueAfter != time.Second {
-		t.Fatalf("RequeueAfter = %v, want %v", result.RequeueAfter, time.Second)
-	}
-
-	updated := &corev1alpha1.Task{}
-	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, updated); err != nil {
-		t.Fatalf("Get updated task: %v", err)
-	}
-	if updated.Status.Phase != corev1alpha1.TaskPhaseFailed {
-		t.Fatalf("phase = %s, want Failed", updated.Status.Phase)
-	}
-	if !strings.Contains(updated.Status.Message, "Task dispatch is not supported until the v2 dispatcher is wired") {
-		t.Fatalf("message = %q, want external dispatch support-boundary rejection", updated.Status.Message)
-	}
-	if updated.Status.Attempts != 0 {
-		t.Fatalf("attempts = %d, want 0", updated.Status.Attempts)
-	}
-	if updated.Status.Execution != nil {
-		t.Fatalf("execution = %#v, want nil", updated.Status.Execution)
-	}
-	if _, exists := updated.Labels[acpExternalRuntimeTaskLabel]; exists {
-		t.Fatalf("external runtime label was written: %v", updated.Labels)
-	}
-	attempts := &corev1alpha1.PromptAttemptList{}
-	if err := r.List(context.Background(), attempts, client.InNamespace(task.Namespace)); err != nil {
-		t.Fatalf("list PromptAttempts: %v", err)
-	}
-	if len(attempts.Items) != 0 {
-		t.Fatalf("PromptAttempts = %d, want 0", len(attempts.Items))
-	}
-	assertNoJobsForTask(t, r, task)
+func TestHandlePending_ExternalRuntimeRefQueuesDurableAttempt(t *testing.T) {
+	fixture := newExternalACPDispatchFixture(t)
+	fixture.queueTask(t, "external-task", types.UID("external-task-uid"), "do work", nil)
 }
 
 func TestHandlePending_AgentRuntimeWithResourcesFailsBeforeJobBackend(t *testing.T) {
@@ -6055,7 +5474,7 @@ func TestHandlePending_AgentRuntimeValidWorkspaceFailsBeforeJobBackend(t *testin
 			},
 		},
 	}
-	template := &sandboxextv1alpha1.SandboxTemplate{
+	template := &sandboxextv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: runtimePoolSandboxTemplateSuffix, Namespace: defaultNS},
 	}
 	warmPool := &sandboxextv1beta1.SandboxWarmPool{
@@ -7813,6 +7232,10 @@ func (failingTaskExecutionEventStore) GetLatestExecutionEventSeq(context.Context
 	return 0, errors.New("not implemented")
 }
 
+func (failingTaskExecutionEventStore) GetLatestExecutionEventSeqs(context.Context, string, string, []string) (map[string]int64, error) {
+	return nil, errors.New("not implemented")
+}
+
 func (failingTaskExecutionEventStore) DeleteExecutionEvents(context.Context, string, string, string) error {
 	return errors.New("not implemented")
 }
@@ -8048,6 +7471,7 @@ func TestTaskDeletionDeletesExecutionEvents(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              "delete-events-task",
+			UID:               "delete-events-task-uid",
 			Namespace:         "default",
 			DeletionTimestamp: &now,
 			Finalizers:        []string{labels.TaskFinalizer},
@@ -8151,7 +7575,10 @@ func TestHandleFinalizingBeginsWorkspaceAttachmentRevocation(t *testing.T) {
 	scheme := newTestScheme()
 	epoch := int64(2)
 	workspaceObject := &workspacev1alpha1.ExecutionWorkspace{
-		ObjectMeta: metav1.ObjectMeta{Name: "workspace-finalize", Namespace: "default", UID: types.UID("workspace-uid")},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "workspace-finalize", Namespace: "default", UID: types.UID("workspace-uid"),
+			Labels: map[string]string{workspacev1alpha1.ProviderControllerLabel: acpWorkspaceControllerLabelValue},
+		},
 		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
 			AttachmentEpoch: epoch,
 			Attachment:      &workspacev1alpha1.ExecutionWorkspaceAttachment{Epoch: epoch},
@@ -8185,6 +7612,82 @@ func TestHandleFinalizingBeginsWorkspaceAttachmentRevocation(t *testing.T) {
 	}
 	if current.Spec.Attachment != nil || current.Spec.AttachmentEpoch != epoch {
 		t.Fatalf("workspace attachment intent = %#v epoch=%d, want revoked at epoch %d", current.Spec.Attachment, current.Spec.AttachmentEpoch, epoch)
+	}
+	updatedTask := &corev1alpha1.Task{}
+	if err := reconciler.Get(context.Background(), client.ObjectKeyFromObject(task), updatedTask); err != nil {
+		t.Fatal(err)
+	}
+	if got := acpTaskRecordedAttachmentEpoch(updatedTask); got != epoch {
+		t.Fatalf("recorded attachment epoch = %d, want %d before revocation", got, epoch)
+	}
+}
+
+func TestHandleFinalizingRecoversRotatedACPAttachmentEpoch(t *testing.T) {
+	scheme := newTestScheme()
+	projectedEpoch := int64(2)
+	liveEpoch := projectedEpoch + 1
+	taskUID := types.UID("rotated-finalizing-task-uid")
+	workspaceObject := &workspacev1alpha1.ExecutionWorkspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "workspace-finalize-rotated", Namespace: "default", UID: types.UID("workspace-rotated-uid"),
+			Labels: map[string]string{workspacev1alpha1.ProviderControllerLabel: acpWorkspaceControllerLabelValue},
+		},
+		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
+			AttachmentEpoch: liveEpoch,
+			Attachment: &workspacev1alpha1.ExecutionWorkspaceAttachment{
+				TaskRef: workspacev1alpha1.ObjectIdentityReference{UID: taskUID},
+				Epoch:   liveEpoch,
+			},
+		},
+		Status: workspacev1alpha1.ExecutionWorkspaceStatus{AttachedEpoch: liveEpoch},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "finalize-revoke-rotated", Namespace: "default", UID: taskUID,
+			Annotations: map[string]string{acpTaskAttachmentEpochAnnotation: strconv.FormatInt(projectedEpoch, 10)},
+		},
+		Spec: corev1alpha1.TaskSpec{Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{Enabled: true}}},
+		Status: corev1alpha1.TaskStatus{
+			Phase:            corev1alpha1.TaskPhaseFinalizing,
+			ExecutionOutcome: &corev1alpha1.TaskWorkloadExecutionOutcome{Phase: corev1alpha1.TaskPhaseSucceeded, Attempt: 1},
+			ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
+				WorkspaceRef:  &corev1alpha1.WorkspaceObjectReference{Name: workspaceObject.Name, UID: string(workspaceObject.UID)},
+				AttachedEpoch: projectedEpoch,
+				Conditions:    []metav1.Condition{{Type: "Attached", Status: metav1.ConditionTrue}},
+			},
+		},
+	}
+	reconciler := newUnitReconciler(scheme, task, workspaceObject)
+
+	for attempt := range 2 {
+		result, err := reconciler.handleFinalizing(context.Background(), task)
+		if err != nil {
+			t.Fatalf("handleFinalizing() attempt %d error = %v", attempt, err)
+		}
+		if result.RequeueAfter <= 0 {
+			t.Fatalf("handleFinalizing() attempt %d result = %#v, want requeue", attempt, result)
+		}
+	}
+
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := reconciler.Get(context.Background(), client.ObjectKeyFromObject(workspaceObject), current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Spec.Attachment != nil || current.Spec.AttachmentEpoch != liveEpoch {
+		t.Fatalf("workspace attachment intent = %#v epoch=%d, want revoked rotated epoch %d",
+			current.Spec.Attachment, current.Spec.AttachmentEpoch, liveEpoch)
+	}
+	stampedEpoch, _, ok := parseACPWorkspaceRevocationStamp(current.Annotations[acpWorkspaceRevocationStartedAnnotation])
+	if !ok || stampedEpoch != liveEpoch {
+		t.Fatalf("revocation stamp = %q, want rotated epoch %d",
+			current.Annotations[acpWorkspaceRevocationStartedAnnotation], liveEpoch)
+	}
+	updatedTask := &corev1alpha1.Task{}
+	if err := reconciler.Get(context.Background(), client.ObjectKeyFromObject(task), updatedTask); err != nil {
+		t.Fatal(err)
+	}
+	if got := acpTaskRecordedAttachmentEpoch(updatedTask); got != liveEpoch {
+		t.Fatalf("recorded attachment epoch = %d, want rotated live epoch %d", got, liveEpoch)
 	}
 }
 
@@ -8957,6 +8460,103 @@ func TestEnsureWorkerRBACPrunesRemovedTrustedServiceReadBindingAfterRestart(t *t
 	}
 	if err := restarted.Get(context.Background(), types.NamespacedName{Name: unrelatedName, Namespace: "infra"}, unrelatedBinding); err != nil {
 		t.Fatalf("unrelated prefixed RoleBinding was removed: %v", err)
+	}
+}
+
+func TestHandleFinalizingUsesACPWorkspaceDetachTimeout(t *testing.T) {
+	t.Parallel()
+	const epoch int64 = 4
+	tests := []struct {
+		name          string
+		detachTimeout time.Duration
+		revocationAge time.Duration
+		outcomeAge    time.Duration
+		wantPhase     corev1alpha1.TaskPhase
+		wantState     workspacev1alpha1.ExecutionWorkspaceDesiredState
+	}{
+		{
+			name: "short-class-timeout", detachTimeout: time.Minute, revocationAge: 2 * time.Minute,
+			outcomeAge: 30 * time.Second, wantPhase: corev1alpha1.TaskPhaseFailed,
+			wantState: workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined,
+		},
+		{
+			name: "long-class-timeout", detachTimeout: 10 * time.Minute, revocationAge: 6 * time.Minute,
+			outcomeAge: 6 * time.Minute, wantPhase: corev1alpha1.TaskPhaseFinalizing,
+			wantState: workspacev1alpha1.ExecutionWorkspaceDesiredReady,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			now := time.Now().UTC()
+			workspaceName := "workspace-" + test.name
+			workspaceObject := &workspacev1alpha1.ExecutionWorkspace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: workspaceName, Namespace: defaultNS, UID: types.UID(workspaceName + "-uid"),
+					Labels: map[string]string{workspacev1alpha1.ProviderControllerLabel: acpWorkspaceControllerLabelValue},
+					Annotations: map[string]string{
+						acpWorkspaceRevocationStartedAnnotation: fmt.Sprintf(
+							"%d %s", epoch, now.Add(-test.revocationAge).Format(time.RFC3339Nano),
+						),
+					},
+				},
+				Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
+					DesiredState:    workspacev1alpha1.ExecutionWorkspaceDesiredReady,
+					AttachmentEpoch: epoch,
+					Lifecycle: workspacev1alpha1.ExecutionWorkspaceLifecycle{
+						DetachTimeout: metav1.Duration{Duration: test.detachTimeout},
+					},
+				},
+				Status: workspacev1alpha1.ExecutionWorkspaceStatus{AttachedEpoch: epoch},
+			}
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "finalize-" + test.name, Namespace: defaultNS, UID: types.UID("task-" + test.name + "-uid"),
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type: corev1alpha1.TaskTypeAgent,
+					Execution: &corev1alpha1.ExecutionSpec{
+						Workspace: &corev1alpha1.ExecutionWorkspaceSpec{Enabled: true},
+					},
+				},
+				Status: corev1alpha1.TaskStatus{
+					Phase: corev1alpha1.TaskPhaseFinalizing,
+					ExecutionOutcome: &corev1alpha1.TaskWorkloadExecutionOutcome{
+						Phase: corev1alpha1.TaskPhaseSucceeded, Attempt: 1,
+						RecordedAt: metav1.NewTime(now.Add(-test.outcomeAge)),
+					},
+					ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
+						WorkspaceRef: &corev1alpha1.WorkspaceObjectReference{
+							Name: workspaceObject.Name, UID: string(workspaceObject.UID),
+						},
+						AttachedEpoch: epoch,
+						Conditions:    []metav1.Condition{{Type: "Attached", Status: metav1.ConditionTrue}},
+					},
+				},
+			}
+			reconciler := newUnitReconciler(newTestScheme(), task, workspaceObject)
+			result, err := reconciler.handleFinalizing(context.Background(), task)
+			if err != nil {
+				t.Fatalf("handleFinalizing() error = %v", err)
+			}
+			if test.wantPhase == corev1alpha1.TaskPhaseFinalizing && result.RequeueAfter <= 0 {
+				t.Fatalf("handleFinalizing() result = %#v, want a pending-finalization requeue", result)
+			}
+			updatedTask := &corev1alpha1.Task{}
+			if err := reconciler.Get(context.Background(), client.ObjectKeyFromObject(task), updatedTask); err != nil {
+				t.Fatal(err)
+			}
+			if updatedTask.Status.Phase != test.wantPhase {
+				t.Fatalf("phase = %s, want %s", updatedTask.Status.Phase, test.wantPhase)
+			}
+			updatedWorkspace := &workspacev1alpha1.ExecutionWorkspace{}
+			if err := reconciler.Get(context.Background(), client.ObjectKeyFromObject(workspaceObject), updatedWorkspace); err != nil {
+				t.Fatal(err)
+			}
+			if updatedWorkspace.Spec.DesiredState != test.wantState {
+				t.Fatalf("desired state = %s, want %s", updatedWorkspace.Spec.DesiredState, test.wantState)
+			}
+		})
 	}
 }
 

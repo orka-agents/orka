@@ -13,7 +13,7 @@ Kubernetes Agent Sandbox). Supersedes the unconditional
 
 `Task.spec.workspace` is the agent repository/read/publication surface;
 `Task.spec.execution.workspace` describes a physical execution-workspace
-provider. Since the ACP v2 cutover, every agent Task carrying an enabled
+provider. Since the Orka harness v2 cutover, every agent Task carrying an enabled
 execution workspace was rejected before routing, because no lifecycle adapter
 mapped an ACP RuntimeSession onto a provider-owned workspace (a
 `SandboxClaim` or a Substrate Actor).
@@ -29,7 +29,7 @@ workload materialization and instance replacement.
 ## Decision
 
 **A workspace-provider-backed RuntimePool.** A Task with an enabled
-`spec.execution.workspace` routes through the normal ACP v2 path, but binds to
+`spec.execution.workspace` routes through the normal Orka harness v2 path, but binds to
 a dedicated single-session RuntimePool whose workload is materialized through
 the externally operated provider control plane instead of a controller-owned
 Deployment. Everything above the workload — session creation, fenced prompts,
@@ -143,8 +143,10 @@ treats the missing pool as cleanup proof and fresh demand recreates it by name.
   the pool reconciler plus suspend/resume/snapshot semantics behind the same
   binding contract; the Task-facing API and dispatcher remain unchanged.
 - The legacy worker-path workspace resolution (`runAgentInWorkspace`,
-  router-based exec) remains in-tree but is not reachable from the agent path;
-  its agent-sandbox `templateRef` semantics are retired for agent Tasks.
+  router-based exec) was unreachable from the agent path and has since been
+  removed from `workers/common`; its agent-sandbox `templateRef` semantics are
+  retired for agent Tasks. The `internal/workspace` agent-sandbox adapter
+  remains for the direct-adapter smoke in the live agent-sandbox E2E.
 - Live E2E promotion (claim → execute → continue → cancel → restart → cleanup
   through Vekil-backed runtimes) is tracked by issue #343's acceptance list;
   the agent-sandbox kind workflow can now exercise the Task path once runtime

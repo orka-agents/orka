@@ -341,6 +341,30 @@ func TestPlanACPRuntimeSessionProfileGenerationRotation(t *testing.T) {
 	}
 }
 
+func TestEnforceACPRuntimeSessionGenerationFloor(t *testing.T) {
+	live := ACPRuntimeSessionPlan{Binding: ACPRuntimeSessionBinding{Generation: 3}}
+	got, err := enforceACPRuntimeSessionGenerationFloor(live, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Binding.Generation != 3 || got.Recreate || got.BootstrapRequired {
+		t.Fatalf("live plan at durable floor = %#v, want unchanged reuse", got)
+	}
+
+	recreate := ACPRuntimeSessionPlan{Binding: ACPRuntimeSessionBinding{Generation: 3}, Recreate: true}
+	got, err = enforceACPRuntimeSessionGenerationFloor(recreate, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Binding.Generation != 4 || !got.Recreate || !got.BootstrapRequired || got.Reason != "durable-workspace-generation-floor" {
+		t.Fatalf("recreation plan at durable floor = %#v, want generation 4 bootstrap", got)
+	}
+
+	if _, err := enforceACPRuntimeSessionGenerationFloor(recreate, maxControllerRuntimeSessionGeneration); err == nil {
+		t.Fatal("recreation advanced an exhausted durable workspace generation")
+	}
+}
+
 func TestRuntimeSessionBindingFromTaskStatus(t *testing.T) {
 	digest := acpSessionTestDigest("persisted-workspace")
 	profileDigest := harnessv2.ProfileDigest(acpSessionTestDigest("profile"))
@@ -456,23 +480,23 @@ func TestACPRuntimeSessionWorkspaceBindingRotation(t *testing.T) {
 	}
 }
 
-func TestPrepareRuntimeWorkspaceUsesStableEmptySessionBinding(t *testing.T) {
+func TestPrepareRuntimeWorkspaceDoesNotCollapseMissingSessionIdentity(t *testing.T) {
 	dispatcher := &ACPDispatcher{}
 	firstTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{UID: types.UID("empty-task-a")}}
 	secondTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{UID: types.UID("empty-task-b")}}
-	first, err := dispatcher.prepareRuntimeWorkspace(context.Background(), firstTask, store.ControllerEpochFence{}, &acpTaskSession{})
+	first, err := dispatcher.prepareRuntimeWorkspace(context.Background(), firstTask, store.ControllerEpochFence{}, &acpTaskSession{}, time.Now().UTC(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := dispatcher.prepareRuntimeWorkspace(context.Background(), secondTask, store.ControllerEpochFence{}, &acpTaskSession{})
+	second, err := dispatcher.prepareRuntimeWorkspace(context.Background(), secondTask, store.ControllerEpochFence{}, &acpTaskSession{}, time.Now().UTC(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if first.baseline.RepositoryIdentity == second.baseline.RepositoryIdentity {
 		t.Fatal("task-scoped empty workspace baselines unexpectedly share an identity")
 	}
-	if first.bindingDigest != second.bindingDigest {
-		t.Fatalf("empty Session workspace binding changed across turns: %q != %q", first.bindingDigest, second.bindingDigest)
+	if first.bindingDigest == second.bindingDigest {
+		t.Fatal("an incomplete Session binding must not erase the task-scoped workspace identity")
 	}
 }
 

@@ -25,6 +25,20 @@ func (a WorkspaceClassAuthorizer) Authorize(
 	className string,
 	caller authenticationv1.UserInfo,
 ) error {
+	return a.authorizeResource(ctx, namespace, "executionworkspaceclasses", className, caller)
+}
+
+// AuthorizeCheckpoint checks permission to consume retained workspace data.
+func (a WorkspaceClassAuthorizer) AuthorizeCheckpoint(ctx context.Context, namespace, name string, caller authenticationv1.UserInfo) error {
+	return a.authorizeResource(ctx, namespace, "executionworkspacecheckpoints", name, caller)
+}
+
+// AuthorizeCheckpointSource checks permission to export a workspace's data.
+func (a WorkspaceClassAuthorizer) AuthorizeCheckpointSource(ctx context.Context, namespace, name string, caller authenticationv1.UserInfo) error {
+	return a.authorizeResource(ctx, namespace, "executionworkspaces", name, caller)
+}
+
+func (a WorkspaceClassAuthorizer) authorizeResource(ctx context.Context, namespace, resource, className string, caller authenticationv1.UserInfo) error {
 	if a.Client == nil {
 		return fmt.Errorf("workspace class authorizer client is required")
 	}
@@ -53,7 +67,7 @@ func (a WorkspaceClassAuthorizer) Authorize(
 				Verb:      "use",
 				Group:     "workspace.orka.ai",
 				Version:   "v1alpha1",
-				Resource:  "executionworkspaceclasses",
+				Resource:  resource,
 				Name:      className,
 			},
 		},
@@ -61,7 +75,7 @@ func (a WorkspaceClassAuthorizer) Authorize(
 	if err := a.Client.Create(ctx, review); err != nil {
 		return fmt.Errorf("authorize workspace class use: %w", err)
 	}
-	if !review.Status.Allowed {
+	if !review.Status.Allowed || review.Status.Denied || review.Status.EvaluationError != "" {
 		reason := strings.TrimSpace(review.Status.Reason)
 		if reason == "" {
 			reason = "access denied"

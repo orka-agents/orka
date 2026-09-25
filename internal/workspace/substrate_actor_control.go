@@ -12,23 +12,32 @@ type SubstrateActorPoolExecutor struct {
 }
 
 // NewSubstrateActorPoolExecutor returns the control-only adapter used by the actor pool controller.
-func NewSubstrateActorPoolExecutor(cfg SubstrateConfig, opts ...SubstrateOption) (*SubstrateActorPoolExecutor, error) {
-	for _, opt := range opts {
-		opt(&cfg)
+func NewSubstrateActorPoolExecutor(cfg SubstrateConfig) (*SubstrateActorPoolExecutor, error) {
+	control, err := resolveSubstrateControlClient(cfg)
+	if err != nil {
+		return nil, err
 	}
-	if cfg.ControlClient == nil {
-		client, err := newGRPCSubstrateControlClient(cfg)
-		if err != nil {
-			return nil, err
-		}
-		cfg.ControlClient = client
-	}
-	return &SubstrateActorPoolExecutor{control: cfg.ControlClient}, nil
+	return &SubstrateActorPoolExecutor{control: control}, nil
 }
 
 // Close releases network resources owned by this adapter.
 func (e *SubstrateActorPoolExecutor) Close() error {
-	if closer, ok := e.control.(interface{ Close() error }); ok {
+	return closeSubstrateControlClient(e.control)
+}
+
+// resolveSubstrateControlClient returns the injected control client or dials
+// the real gRPC control plane for control-only adapters.
+func resolveSubstrateControlClient(cfg SubstrateConfig) (substrateControlClient, error) {
+	if cfg.ControlClient != nil {
+		return cfg.ControlClient, nil
+	}
+	return newGRPCSubstrateControlClient(cfg)
+}
+
+// closeSubstrateControlClient releases a control client that owns network
+// resources; injected fakes without Close are left untouched.
+func closeSubstrateControlClient(control substrateControlClient) error {
+	if closer, ok := control.(interface{ Close() error }); ok {
 		return closer.Close()
 	}
 	return nil
@@ -54,7 +63,6 @@ func (e *SubstrateActorPoolExecutor) SubstratePoolTelemetry(
 		return Density{}, err
 	}
 	filteredActors := make([]substrateActor, 0, len(actors))
-	actorIDs := make(map[string]struct{}, len(actors))
 	for _, actor := range actors {
 		actorID := strings.TrimSpace(actor.ActorID)
 		if prefix != "" && !strings.HasPrefix(actorID, prefix+"-") {
@@ -67,7 +75,6 @@ func (e *SubstrateActorPoolExecutor) SubstratePoolTelemetry(
 			continue
 		}
 		filteredActors = append(filteredActors, actor)
-		actorIDs[actorID] = struct{}{}
 	}
 	filteredWorkers := make([]substrateWorker, 0, len(workers))
 	for _, worker := range workers {
@@ -77,13 +84,17 @@ func (e *SubstrateActorPoolExecutor) SubstratePoolTelemetry(
 		if strings.TrimSpace(workerPool.Namespace) != "" && strings.TrimSpace(worker.WorkerNamespace) != strings.TrimSpace(workerPool.Namespace) {
 			continue
 		}
-		if workerActorID := strings.TrimSpace(worker.ActorID); workerActorID != "" {
-			if _, ok := actorIDs[workerActorID]; !ok {
-				continue
+		assignedToPool := false
+		for _, actor := range filteredActors {
+			if substrateWorkerHostsActor(worker, actor) {
+				assignedToPool = true
+				break
 			}
-		} else if strings.TrimSpace(workerPool.Name) == "" {
+		}
+		if !assignedToPool && strings.TrimSpace(workerPool.Name) == "" {
 			continue
 		}
+
 		filteredWorkers = append(filteredWorkers, worker)
 	}
 	return substrateDensity(filteredWorkers, filteredActors), nil
@@ -105,7 +116,7 @@ func (e *SubstrateActorPoolExecutor) EnsureSubstrateActors(
 	}
 	created := 0
 	for i := range target {
-		actorID := deterministicSubstratePoolActorID(prefix, i)
+		actorID := SubstrateActorKey(template.Namespace, deterministicSubstratePoolActorID(prefix, i))
 		if actor, err := e.control.GetActor(ctx, actorID); err == nil {
 			if err := validateSubstrateActorTemplateForOp("ensure substrate actors", actor, template); err != nil {
 				return created, err
@@ -192,7 +203,7 @@ func (e *SubstrateActorPoolExecutor) PruneSubstrateActors(
 		if _, exists := actorsByOrdinal[ordinal]; exists {
 			continue
 		}
-		actorsByOrdinal[ordinal] = strings.TrimSpace(actor.ActorID)
+		actorsByOrdinal[ordinal] = SubstrateActorKey(actor.Atespace, actor.ActorID)
 		ordinals = append(ordinals, ordinal)
 	}
 	sort.Sort(sort.Reverse(sort.IntSlice(ordinals)))

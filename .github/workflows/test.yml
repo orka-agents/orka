@@ -1,6 +1,7 @@
 name: Tests
 
 on:
+  workflow_call:
   workflow_dispatch:
   push:
     paths-ignore:
@@ -23,6 +24,29 @@ permissions:
   contents: read
 
 jobs:
+  release-automation:
+    name: Release automation tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27'
+          check-latest: true
+
+      - name: Test candidate provenance, approval evidence, and publication retries
+        run: |
+          set -Eeuo pipefail
+          for suite in release-workflow release-manifest release-qualification-report release-publication-tests release-publication-acceptance release-chart-acceptance agent-runtime-kind-e2e; do
+            bash "scripts/tests/${suite}-test.sh"
+          done
+
   test:
     name: Go Tests
     runs-on: ubuntu-latest
@@ -36,10 +60,29 @@ jobs:
           go-version: '1.27'
           check-latest: true
 
+      - name: Check Go coverage reporting
+        run: bash scripts/tests/go-coverage-summary-test.sh
+
       - name: Running Tests
+        id: go_tests
         run: |
           go mod tidy
           make test
+
+      - name: Summarize Go coverage
+        if: ${{ always() }}
+        env:
+          TEST_OUTCOME: ${{ steps.go_tests.outcome }}
+        run: bash scripts/go-coverage-summary.sh
+
+      - name: Upload Go coverage evidence
+        if: ${{ always() && hashFiles('cover.out') != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: go-coverage-evidence
+          path: |
+            cover.out
+            coverage-functions.txt
 
   ui-test:
     name: UI Tests

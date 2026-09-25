@@ -7,15 +7,25 @@ import (
 	"net"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/publisher"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/store"
+)
+
+const (
+	sourceRefField    = "sourceRef"
+	relativeRootField = "relativeRoot"
 )
 
 const defaultACPSourceBranch = "main"
@@ -25,10 +35,148 @@ const workspaceRepositoryProviderGitHub = "github"
 var errWorkspaceRepositoryHTTPSPort = errors.New("repository HTTPS URL must use port 443")
 
 type preparedACPRuntimeWorkspace struct {
-	baseline      harnessv2.WorkspaceBaseline
-	spec          harnessv2.WorkspaceSpec
-	authorization *harnessv2.ArtifactAuthorization
-	bindingDigest string
+	baseline       harnessv2.WorkspaceBaseline
+	spec           harnessv2.WorkspaceSpec
+	authorization  *harnessv2.ArtifactAuthorization
+	bindingDigest  string
+	createIssuedAt time.Time
+	// priorRepositoryIdentity records the canonical repository identity the
+	// session ran on BEFORE a verified publication transition moved its
+	// continuation to a new repository. Under an expected durable resume it
+	// authorizes the supervisor to wipe a checkpoint bound to exactly this
+	// identity and re-materialize from the new baseline.
+	priorRepositoryIdentity string
+}
+
+// taskExpectsDurableResume reports whether the Task's linked execution
+// workspace carries a resumed lineage: every session on it must find a
+// committed durable checkpoint, and the runtime fails creation when the
+// preserved data is missing instead of silently materializing fresh. The
+// returned floor is the newest committed checkpoint generation the
+// controller ever recorded; a same-identity checkpoint older than it is a
+// stale provider restore.
+func (d *ACPDispatcher) taskExpectsDurableResume(ctx context.Context, task *corev1alpha1.Task) (bool, uint64, error) {
+	name := strings.TrimSpace(task.Labels[acpExecutionWorkspaceLinkLabel])
+	uid := strings.TrimSpace(task.Annotations[acpExecutionWorkspaceUIDAnnotation])
+	if name == "" || uid == "" {
+		return false, 0, nil
+	}
+	reader := client.Reader(d.Client)
+	if d.APIReader != nil {
+		reader = d.APIReader
+	}
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
+		// Fail closed: silently omitting the resume expectation on a read
+		// failure would let a lost checkpoint be silently replaced by a
+		// fresh materialization. The dispatch aborts and retries instead.
+		return false, 0, fmt.Errorf("resolve the linked workspace's resume lineage: %w", err)
+	}
+	// The lineage asserts a committed checkpoint only when a RuntimeSession
+	// was actually created (and therefore committed its durable marker) on
+	// this workspace before the suspension: a first Task cancelled before
+	// session creation validly suspends a volume that never held a
+	// checkpoint, and its continuation must materialize fresh instead of
+	// failing closed forever over data that never existed.
+	if string(workspace.UID) != uid {
+		return false, 0, nil
+	}
+	// A fresh checkpoint restore has no destination lineage yet, but must
+	// still find committed data. Otherwise it could report success from an
+	// empty newly materialized directory instead of the requested checkpoint.
+	restoring := task.Spec.Execution != nil && task.Spec.Execution.Workspace != nil &&
+		task.Spec.Execution.Workspace.RestoreFrom != nil
+	if workspace.Annotations[acpWorkspaceResumedLineageAnnotation] != booleanTrueValue {
+		return restoring, 0, nil
+	}
+	floor, committed, err := workspaceDurableSessionGeneration(workspace)
+	if err != nil {
+		return false, 0, err
+	}
+	if !committed {
+		return restoring, 0, nil
+	}
+	return true, floor, nil
+}
+
+// taskRuntimeSessionGenerationFloor returns the newest RuntimeSession
+// generation committed on the linked workspace. Session planning uses this
+// durable high-water mark when its controller-local binding cache cannot prove
+// that reusing a generation is safe.
+func (d *ACPDispatcher) taskRuntimeSessionGenerationFloor(ctx context.Context, task *corev1alpha1.Task) (uint64, error) {
+	name := strings.TrimSpace(task.Labels[acpExecutionWorkspaceLinkLabel])
+	uid := strings.TrimSpace(task.Annotations[acpExecutionWorkspaceUIDAnnotation])
+	if name == "" || uid == "" {
+		return 0, nil
+	}
+	reader := client.Reader(d.Client)
+	if d.APIReader != nil {
+		reader = d.APIReader
+	}
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
+		return 0, fmt.Errorf("resolve the linked workspace's RuntimeSession generation floor: %w", err)
+	}
+	if string(workspace.UID) != uid {
+		return 0, nil
+	}
+	floor, _, err := workspaceDurableSessionGeneration(workspace)
+	return floor, err
+}
+
+func workspaceDurableSessionGeneration(workspace *workspacev1alpha1.ExecutionWorkspace) (uint64, bool, error) {
+	recorded := strings.TrimSpace(workspace.Annotations[acpWorkspaceDurableSessionCommittedAnnotation])
+	if recorded == "" {
+		return 0, false, nil
+	}
+	if recorded == booleanTrueValue {
+		// A record stamped before generations were tracked asserts the
+		// checkpoint's existence without a generation floor.
+		return 0, true, nil
+	}
+	floor, parseErr := strconv.ParseUint(recorded, 10, 64)
+	if parseErr != nil || floor == 0 {
+		// A corrupt controller-owned record must not disable the stale-snapshot
+		// fence. Keep the raw annotation out of the error because metadata can be
+		// modified outside this controller.
+		return 0, false, fmt.Errorf("linked workspace %s has an invalid durable checkpoint generation record", workspace.Name)
+	}
+	return floor, true, nil
+}
+
+// markLinkedWorkspaceDurableSessionCommitted durably records on the linked
+// execution workspace that a RuntimeSession creation completed - and with it
+// the supervisor's durable checkpoint commit - so a later resumed lineage can
+// assert the committed checkpoint's existence.
+func (d *ACPDispatcher) markLinkedWorkspaceDurableSessionCommitted(ctx context.Context, task *corev1alpha1.Task, generation uint64) error {
+	name := strings.TrimSpace(task.Labels[acpExecutionWorkspaceLinkLabel])
+	uid := strings.TrimSpace(task.Annotations[acpExecutionWorkspaceUIDAnnotation])
+	if name == "" || uid == "" {
+		return nil
+	}
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := d.Client.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if string(workspace.UID) != uid {
+		return nil
+	}
+	// The record carries the NEWEST committed checkpoint generation and only
+	// advances: a stale provider restore then presents an older recorded
+	// generation than this floor and the resume assertion rejects it.
+	recorded := strings.TrimSpace(workspace.Annotations[acpWorkspaceDurableSessionCommittedAnnotation])
+	if current, parseErr := strconv.ParseUint(recorded, 10, 64); parseErr == nil && current >= generation {
+		return nil
+	}
+	base := workspace.DeepCopy()
+	if workspace.Annotations == nil {
+		workspace.Annotations = map[string]string{}
+	}
+	workspace.Annotations[acpWorkspaceDurableSessionCommittedAnnotation] = strconv.FormatUint(generation, 10)
+	if err := d.Client.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	return nil
 }
 
 //nolint:gocyclo // Workspace continuation, clean-room preparation, and exact authorization checks are audited together.
@@ -37,32 +185,57 @@ func (d *ACPDispatcher) prepareRuntimeWorkspace(
 	task *corev1alpha1.Task,
 	fence store.ControllerEpochFence,
 	session *acpTaskSession,
+	plannedAt time.Time,
+	runtimeSessionReused bool,
 ) (preparedACPRuntimeWorkspace, error) {
+	if plannedAt.IsZero() {
+		return preparedACPRuntimeWorkspace{}, fmt.Errorf("RuntimeSession creation timestamp is required for workspace authorization")
+	}
+	plannedAt = plannedAt.UTC()
 	workspace := task.Spec.Workspace
+	priorRepositoryIdentity := ""
 	if session != nil && session.VerifiedBaseline != nil {
 		continuationWorkspace, err := runtimeWorkspaceForSessionContinuation(workspace, session.VerifiedBaseline)
 		if err != nil {
 			return preparedACPRuntimeWorkspace{}, err
 		}
+		if workspace != nil && continuationWorkspace != nil &&
+			!sameCanonicalWorkspaceRepository(workspace.GitRepo, continuationWorkspace.GitRepo) {
+			// The verified publication transition moved the session to a new
+			// repository (for example the fork a PR publishes to); the prior
+			// canonical identity authorizes the durable-resume checkpoint
+			// transition below.
+			if prior, priorErr := workspaceRepository(workspace); priorErr == nil {
+				priorRepositoryIdentity = prior.ID
+			}
+		}
 		workspace = continuationWorkspace
 	}
 	if workspace == nil || strings.TrimSpace(workspace.GitRepo) == "" {
-		baseline, spec, err := emptyRuntimeWorkspace(task)
+		// The protocol baseline must be identical for every turn of one
+		// logical Session: the supervisor compares the delta request's
+		// VerifiedBaseline against the baseline the session was created with,
+		// so a task-scoped identity would fail every repo-less continuation
+		// with a digest conflict.
+		scope := string(task.UID)
+		if session != nil && strings.TrimSpace(session.Binding.SessionUID) != "" {
+			scope = session.Binding.SessionUID
+		}
+		baseline, spec, err := emptyRuntimeWorkspace(task, scope)
 		if err != nil {
 			return preparedACPRuntimeWorkspace{}, err
 		}
-		bindingSpec := spec
-		// The empty filesystem is the same reusable workspace across Session
-		// turns even though the task-scoped protocol baseline carries a Task UID.
-		bindingSpec.Baseline = harnessv2.WorkspaceBaseline{
-			RepositoryIdentity: acpNoWorkspaceRevision,
-			Revision:           acpNoWorkspaceRevision,
-		}
-		bindingDigest, err := acpRuntimeWorkspaceBindingDigest("", bindingSpec)
+		// Keep the stable Session-scoped baseline in the binding digest. Older
+		// controllers erased the task-scoped identity here; making the Session
+		// identity explicit forces those live sessions through one generation
+		// rotation instead of reusing a supervisor with a different baseline.
+		bindingDigest, err := acpRuntimeWorkspaceBindingDigest("", spec)
 		if err != nil {
 			return preparedACPRuntimeWorkspace{}, err
 		}
-		return preparedACPRuntimeWorkspace{baseline: baseline, spec: spec, bindingDigest: bindingDigest}, nil
+		return preparedACPRuntimeWorkspace{
+			baseline: baseline, spec: spec, bindingDigest: bindingDigest, createIssuedAt: plannedAt,
+		}, nil
 	}
 	if d.Publisher == nil || len(d.ArtifactCapabilitySecret) < artifactcap.MinSecretBytes {
 		return preparedACPRuntimeWorkspace{}, fmt.Errorf("clean-room Workspace/Publisher and artifact authorization are required")
@@ -123,6 +296,14 @@ func (d *ACPDispatcher) prepareRuntimeWorkspace(
 		}
 		return preparedACPRuntimeWorkspace{}, fmt.Errorf("prepare source workspace: %w", err)
 	}
+	prepareCommittedAt, err := externalEffectSucceededAt(ctx, d.Store, prepareIdentity)
+	if err != nil {
+		return preparedACPRuntimeWorkspace{}, fmt.Errorf("load committed workspace prepare effect: %w", err)
+	}
+	createIssuedAt := plannedAt
+	if prepareCommittedAt.After(createIssuedAt) {
+		createIssuedAt = prepareCommittedAt
+	}
 	baseline := harnessv2.WorkspaceBaseline{
 		RepositoryIdentity: repository.ID, Revision: resolved.BaselineOID,
 		TreeDigest: prepared.ManifestDigest, Artifact: &prepared.Artifact,
@@ -135,8 +316,11 @@ func (d *ACPDispatcher) prepareRuntimeWorkspace(
 	if err != nil {
 		return preparedACPRuntimeWorkspace{}, err
 	}
-	result := preparedACPRuntimeWorkspace{baseline: baseline, spec: spec, bindingDigest: bindingDigest}
-	if session != nil && session.Reused {
+	result := preparedACPRuntimeWorkspace{
+		baseline: baseline, spec: spec, bindingDigest: bindingDigest,
+		createIssuedAt: createIssuedAt, priorRepositoryIdentity: priorRepositoryIdentity,
+	}
+	if runtimeSessionReused || session != nil && session.Reused {
 		return result, nil
 	}
 
@@ -153,7 +337,7 @@ func (d *ACPDispatcher) prepareRuntimeWorkspace(
 		OperationID: fmt.Sprintf("runtime-workspace-download-%s-a%d-g%d",
 			task.Status.Execution.PromptID, task.Status.Execution.Attempt, task.Status.Execution.RuntimeSessionGeneration),
 	}
-	authorizedAt := time.Now().UTC()
+	authorizedAt := result.createIssuedAt
 	const capabilityTTL = artifactcap.MaxCapabilityTTL
 	authorization, err := artifactcap.Issue(d.ArtifactCapabilitySecret, binding, authorizedAt, capabilityTTL)
 	if err != nil {
@@ -171,14 +355,32 @@ func (d *ACPDispatcher) prepareRuntimeWorkspace(
 	return result, nil
 }
 
+func externalEffectSucceededAt(
+	ctx context.Context,
+	effects store.ExternalEffectStore,
+	identity store.ExternalEffectIdentity,
+) (time.Time, error) {
+	if effects == nil {
+		return time.Time{}, fmt.Errorf("external-effect store is required")
+	}
+	effect, err := effects.GetExternalEffectByIdentity(ctx, identity)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if effect.State != store.ExternalEffectSucceeded || effect.UpdatedAt.IsZero() {
+		return time.Time{}, fmt.Errorf("external effect %s lacks a durable success timestamp", effect.ID)
+	}
+	return effect.UpdatedAt.UTC(), nil
+}
+
 func acpRuntimeWorkspaceBindingDigest(sourceRef string, workspace harnessv2.WorkspaceSpec) (string, error) {
 	return acpDomainDigest("runtime-session-workspace-binding", map[string]any{
 		"repositoryIdentity": strings.TrimSpace(workspace.Baseline.RepositoryIdentity),
-		"sourceRef":          strings.TrimSpace(sourceRef),
+		sourceRefField:       strings.TrimSpace(sourceRef),
 		"revision":           strings.TrimSpace(workspace.Baseline.Revision),
 		"treeDigest":         strings.TrimSpace(workspace.Baseline.TreeDigest),
-		"intent":             workspace.Intent,
-		"relativeRoot":       strings.TrimSpace(workspace.RelativeRoot),
+		intentField:          workspace.Intent,
+		relativeRootField:    strings.TrimSpace(workspace.RelativeRoot),
 	})
 }
 

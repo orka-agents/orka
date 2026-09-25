@@ -84,6 +84,12 @@ func stripPrefixedExecutionEventURLQuery(candidate string) string {
 
 func stripExecutionEventURLQuery(candidate string) string {
 	trimmed := strings.TrimRight(candidate, ".,;:!?)]}")
+	// A redaction placeholder ends with ']': when the candidate already
+	// carries one (redact.SensitiveText runs first), its closing bracket is
+	// part of the placeholder, not trailing punctuation.
+	if idx := strings.LastIndex(candidate, ExecutionEventRedactedValue); idx >= 0 && len(trimmed) < idx+len(ExecutionEventRedactedValue) {
+		trimmed = candidate[:idx+len(ExecutionEventRedactedValue)]
+	}
 	suffix := candidate[len(trimmed):]
 	parsed, err := url.Parse(trimmed)
 	if err != nil {
@@ -239,6 +245,7 @@ func isExecutionEventTokenUsageKey(normalized string) bool {
 		"inputtokens",
 		"outputtokens",
 		"cachedinputtokens",
+		"cachewriteinputtokens",
 		"totaltokens",
 		"totaltokencount",
 		"tokencount",
@@ -255,7 +262,7 @@ func sanitizeExecutionEventJSONValue(value any) any {
 	case map[string]any:
 		out := make(map[string]any, len(typed))
 		for key, child := range typed {
-			if isExecutionEventTokenUsageKey(normalizeExecutionEventKey(key)) && !isExecutionEventNumericValue(child) {
+			if isExecutionEventTokenUsageKey(normalizeExecutionEventKey(key)) && child != nil && !isExecutionEventNumericValue(child) {
 				out[key] = ExecutionEventRedactedValue
 				continue
 			}

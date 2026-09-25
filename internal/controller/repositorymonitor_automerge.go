@@ -19,17 +19,32 @@ import (
 )
 
 const (
-	repositoryMonitorActionAutomerge          = "pr_automerge"
-	repositoryMonitorAutomergeStateMerged     = "merged"
-	repositoryMonitorAutomergeStateMergeReady = "merge_ready"
-	repositoryMonitorAutomergeStateBlocked    = "blocked"
-	repositoryMonitorAutomergeStateFailed     = "failed"
-	repositoryMonitorAutomergeStateStarted    = "started"
-	repositoryMonitorAutomergeStatePending    = repositoryMonitorReviewTaskStatePending
-	repositoryMonitorAutomergeReasonDisabled  = "automerge_disabled"
-	repositoryMonitorCommandIntentAutomerge   = "automerge"
-	repositoryMonitorAutomergeGateEnv         = "ORKA_REPOSITORY_MONITOR_AUTOMERGE_GATE"
-	repositoryMonitorAutomergeMethodSquash    = "squash"
+	mergeMethodField = "mergeMethod"
+)
+
+const (
+	mergeSHAField            = "mergeSHA"
+	githubPermissionAdmin    = "admin"
+	githubPermissionMaintain = "maintain"
+	bearerAuthScheme         = "Bearer"
+)
+
+const (
+	repositoryMonitorActionAutomerge                     = "pr_automerge"
+	repositoryMonitorAutomergeStateMerged                = "merged"
+	repositoryMonitorAutomergeStateMergeReady            = "merge_ready"
+	repositoryMonitorAutomergeStateBlocked               = "blocked"
+	repositoryMonitorAutomergeStateFailed                = "failed"
+	repositoryMonitorAutomergeStateStarted               = "started"
+	repositoryMonitorAutomergeStatePending               = repositoryMonitorReviewTaskStatePending
+	repositoryMonitorAutomergeReasonDisabled             = "automerge_disabled"
+	repositoryMonitorAutomergeReasonCIPending            = "ci_pending"
+	repositoryMonitorAutomergeReasonCICheckRetry         = "ci_check_error_retry"
+	repositoryMonitorAutomergeReasonMergeabilityPending  = "mergeability_pending"
+	repositoryMonitorAutomergeReasonValidationCheckRetry = "validation_check_error_retry"
+	repositoryMonitorCommandIntentAutomerge              = "automerge"
+	repositoryMonitorAutomergeGateEnv                    = "ORKA_REPOSITORY_MONITOR_AUTOMERGE_GATE"
+	repositoryMonitorAutomergeMethodSquash               = "squash"
 )
 
 func (r *RepositoryMonitorReconciler) tryProcessPullRequestAutomergeCommand(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, command *store.CommandEvent, owner, repository string, pr repositoryMonitorPullRequest, item *store.MonitorItem) (bool, error) {
@@ -38,13 +53,13 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestAutomergeCommand(ctx 
 	}
 	verdict, reason := r.repositoryMonitorAutomergeGate(ctx, monitor, command, pr, item)
 	if verdict != repositoryMonitorIssueVerdictReady {
-		if reason == "ci_pending" || reason == "ci_check_error_retry" || reason == "mergeability_pending" {
+		if reason == repositoryMonitorAutomergeReasonCIPending || reason == repositoryMonitorAutomergeReasonCICheckRetry || reason == repositoryMonitorAutomergeReasonMergeabilityPending || reason == repositoryMonitorAutomergeReasonValidationCheckRetry {
 			item.AutomergeState = repositoryMonitorAutomergeStatePending
 			item.SkipReason = reason
 			if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
 				return true, err
 			}
-			return true, r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStatePending, "waiting for CI checks", map[string]any{"reason": reason})
+			return true, r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStatePending, "waiting for CI checks", map[string]any{eventReasonField: reason})
 		}
 		preserveSuccess, err := r.terminalizeRepositoryMonitorAutomerge(ctx, monitor, *command, reason)
 		if err != nil {
@@ -58,9 +73,9 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestAutomergeCommand(ctx 
 		if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
 			return true, err
 		}
-		return true, r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStateBlocked, reason, map[string]any{"reason": reason})
+		return true, r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStateBlocked, reason, map[string]any{eventReasonField: reason})
 	}
-	if err := r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStateStarted, "merge attempt started", map[string]any{"headSHA": pr.HeadSHA}); err != nil {
+	if err := r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStateStarted, "merge attempt started", map[string]any{repositoryMonitorFieldHeadSHA: pr.HeadSHA}); err != nil {
 		return true, err
 	}
 	method := repositoryMonitorAutomergeMethod(monitor)
@@ -105,7 +120,7 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestAutomergeCommand(ctx 
 				if updateErr := r.Store.UpsertMonitorItem(ctx, item); updateErr != nil {
 					return true, updateErr
 				}
-				if recordErr := r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStatePending, err.Error(), map[string]any{"mergeMethod": method, "error": err.Error(), "reason": failureState}); recordErr != nil {
+				if recordErr := r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStatePending, err.Error(), map[string]any{mergeMethodField: method, errorField: err.Error(), eventReasonField: failureState}); recordErr != nil {
 					return true, recordErr
 				}
 				return true, err
@@ -115,7 +130,7 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestAutomergeCommand(ctx 
 			if updateErr := r.Store.UpsertMonitorItem(ctx, item); updateErr != nil {
 				return true, updateErr
 			}
-			if recordErr := r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStateFailed, err.Error(), map[string]any{"mergeMethod": method, "error": err.Error()}); recordErr != nil {
+			if recordErr := r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStateFailed, err.Error(), map[string]any{mergeMethodField: method, errorField: err.Error()}); recordErr != nil {
 				return true, recordErr
 			}
 			return true, err
@@ -133,10 +148,10 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestAutomergeCommand(ctx 
 	if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
 		return true, err
 	}
-	if err := r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStateMerged, "pull request merged", map[string]any{"mergeMethod": method, "mergeSHA": sha}); err != nil {
+	if err := r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStateMerged, "pull request merged", map[string]any{mergeMethodField: method, mergeSHAField: sha}); err != nil {
 		return true, err
 	}
-	return true, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "automerge_succeeded", fmt.Sprintf("Pull request #%d automerged", pr.Number), map[string]any{"mergeSHA": sha, "mergeMethod": method})
+	return true, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "automerge_succeeded", fmt.Sprintf("Pull request #%d automerged", pr.Number), map[string]any{mergeSHAField: sha, mergeMethodField: method})
 }
 
 func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorCompletedAutomerge(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, pullRequests []repositoryMonitorPullRequest) (bool, error) {
@@ -171,14 +186,14 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorCompletedAutomer
 	if mutation.Status != repositoryMonitorRunPhaseSucceeded && !pr.Merged {
 		return false, nil
 	}
-	targetSHA := firstNonEmptyIssueAction(strings.TrimSpace(run.TargetSHA), strings.TrimSpace(mutation.TargetSHA))
+	targetSHA := firstNonEmptyString(strings.TrimSpace(run.TargetSHA), strings.TrimSpace(mutation.TargetSHA))
 	if targetSHA == "" || pr.HeadSHA != targetSHA || (strings.TrimSpace(mutation.TargetSHA) != "" && pr.HeadSHA != strings.TrimSpace(mutation.TargetSHA)) {
 		return false, nil
 	}
 	if mutation.Status != repositoryMonitorRunPhaseSucceeded {
 		mutation.Status = repositoryMonitorRunPhaseSucceeded
 		mutation.Error = ""
-		mutation.ExternalID = firstNonEmptyIssueAction(pr.MergeCommitSHA, mutation.ExternalID)
+		mutation.ExternalID = firstNonEmptyString(pr.MergeCommitSHA, mutation.ExternalID)
 		if err := r.updateRepositoryMonitorGitHubMutation(ctx, monitor, mutation); err != nil {
 			return false, err
 		}
@@ -194,10 +209,10 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorCompletedAutomer
 	if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
 		return false, err
 	}
-	if err := r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStateMerged, "pull request merged", map[string]any{"mergeSHA": mutation.ExternalID, "recovered": true}); err != nil {
+	if err := r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStateMerged, "pull request merged", map[string]any{mergeSHAField: mutation.ExternalID, "recovered": true}); err != nil {
 		return false, err
 	}
-	if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "automerge_succeeded", fmt.Sprintf("Pull request #%d automerge state recovered", pr.Number), map[string]any{"mergeSHA": mutation.ExternalID, "recovered": true}); err != nil {
+	if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "automerge_succeeded", fmt.Sprintf("Pull request #%d automerge state recovered", pr.Number), map[string]any{mergeSHAField: mutation.ExternalID, "recovered": true}); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -217,21 +232,49 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorAutomergeGate(ctx context
 		return repositoryMonitorIssuePhaseBlocked, repositoryMonitorSkipReasonBlockedLabel
 	case item.LastVerdict != repositoryMonitorReviewVerdictPassed || item.LastReviewedHeadSHA != pr.HeadSHA:
 		return repositoryMonitorIssuePhaseBlocked, "orka_review_not_passed"
+	}
+	validationAllowed, err := r.repositoryMonitorValidationAllowsAutomerge(ctx, monitor, item, pr.HeadSHA)
+	if err != nil {
+		return repositoryMonitorIssuePhaseBlocked, repositoryMonitorAutomergeReasonValidationCheckRetry
+	}
+	if !validationAllowed {
+		return repositoryMonitorIssuePhaseBlocked, "orka_validation_not_passed"
+	}
+	switch {
 	case repositoryMonitorAutomergeRepairStateBlocks(item.RepairState):
 		return repositoryMonitorIssuePhaseBlocked, "active_or_failed_repair_state"
 	case strings.TrimSpace(pr.MergeableState) == "" || strings.EqualFold(pr.MergeableState, "unknown"):
-		return repositoryMonitorIssuePhaseBlocked, "mergeability_pending"
+		return repositoryMonitorIssuePhaseBlocked, repositoryMonitorAutomergeReasonMergeabilityPending
 	case !repositoryMonitorAutomergeMergeableStateCanCheckCI(pr.MergeableState):
 		return repositoryMonitorIssuePhaseBlocked, "pull_request_not_mergeable"
 	}
 	ci, err := r.repositoryMonitorCheckCI(ctx, monitor, pr.HeadSHA)
 	if err != nil {
-		return repositoryMonitorIssuePhaseBlocked, "ci_check_error_retry"
+		return repositoryMonitorIssuePhaseBlocked, repositoryMonitorAutomergeReasonCICheckRetry
 	}
 	if !ci.passed {
 		return repositoryMonitorIssuePhaseBlocked, ci.reason
 	}
 	return repositoryMonitorIssueVerdictReady, ""
+}
+
+func (r *RepositoryMonitorReconciler) repositoryMonitorValidationAllowsAutomerge(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, headSHA string) (bool, error) {
+	if r.Store == nil || item == nil || strings.TrimSpace(item.LastReviewID) == "" {
+		return false, nil
+	}
+	record, err := r.Store.GetReviewRecord(ctx, monitor.Namespace, item.LastReviewID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("load automerge validation review record: %w", err)
+	}
+	if record.MonitorName != monitor.Name || record.Kind != repositoryMonitorPullRequestKind ||
+		record.Number != item.Number || record.HeadSHA != headSHA || record.Verdict != repositoryMonitorReviewVerdictPassed ||
+		!repositoryMonitorReviewRecordAllowsAutomerge(monitor, record) {
+		return false, nil
+	}
+	return true, nil
 }
 
 func repositoryMonitorAutomergeMergeableStateCanCheckCI(state string) bool {
@@ -270,12 +313,12 @@ func repositoryMonitorAutomergeActorAllowed(monitor *corev1alpha1.RepositoryMoni
 
 func repositoryMonitorAutomergePermissionsAtLeast(minimum string) []string {
 	switch strings.ToLower(strings.TrimSpace(minimum)) {
-	case "admin":
-		return []string{"admin"}
-	case "maintain":
-		return []string{"maintain", "admin"}
+	case githubPermissionAdmin:
+		return []string{githubPermissionAdmin}
+	case githubPermissionMaintain:
+		return []string{githubPermissionMaintain, githubPermissionAdmin}
 	default:
-		return []string{"write", "maintain", "admin"}
+		return []string{"write", githubPermissionMaintain, githubPermissionAdmin}
 	}
 }
 
@@ -367,7 +410,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCI(ctx context.Conte
 		return repositoryMonitorCIResult{reason: "ci_not_green"}, nil
 	}
 	if len(pending) > 0 {
-		return repositoryMonitorCIResult{reason: "ci_pending"}, nil
+		return repositoryMonitorCIResult{reason: repositoryMonitorAutomergeReasonCIPending}, nil
 	}
 	status, err := r.repositoryMonitorCheckCommitStatus(ctx, baseURL, owner, repo, token, sha)
 	if err != nil {
@@ -407,7 +450,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCommitStatus(ctx con
 	case "success":
 		return repositoryMonitorCIResult{passed: true}, nil
 	case repositoryMonitorAutomergeStatePending:
-		return repositoryMonitorCIResult{reason: "ci_pending"}, nil
+		return repositoryMonitorCIResult{reason: repositoryMonitorAutomergeReasonCIPending}, nil
 	default:
 		return repositoryMonitorCIResult{reason: "ci_not_green"}, nil
 	}
@@ -418,7 +461,7 @@ func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorAuthorizedJSON(ctx c
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", strings.Join([]string{"Bearer", token}, " "))
+	req.Header.Set("Authorization", strings.Join([]string{bearerAuthScheme, token}, " "))
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	httpClient := r.HTTPClient
@@ -449,12 +492,12 @@ func (r *RepositoryMonitorReconciler) mergeRepositoryMonitorPullRequest(ctx cont
 	if baseURL == "" {
 		baseURL = repositoryMonitorDefaultGitHubAPIBaseURL
 	}
-	payload, _ := json.Marshal(map[string]any{"merge_method": method, "sha": expectedSHA})
+	payload, _ := json.Marshal(map[string]any{"merge_method": method, shaField: expectedSHA})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, fmt.Sprintf("%s/repos/%s/%s/pulls/%d/merge", baseURL, url.PathEscape(owner), url.PathEscape(repository), number), bytes.NewReader(payload))
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Authorization", strings.Join([]string{"Bearer", token}, " "))
+	req.Header.Set("Authorization", strings.Join([]string{bearerAuthScheme, token}, " "))
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
@@ -488,7 +531,7 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorAutomergeRecord(ctx
 		payload = map[string]any{}
 	}
 	payload["commandEventID"] = command.ID
-	payload["headSHA"] = command.HeadSHA
+	payload[repositoryMonitorFieldHeadSHA] = command.HeadSHA
 	payloadJSON, _ := json.Marshal(payload)
 	record := &store.ActionRecord{
 		ID:                "act-" + repositoryMonitorShortHash(command.ID+"-automerge-"+verdict),

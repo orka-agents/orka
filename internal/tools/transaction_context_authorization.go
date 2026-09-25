@@ -10,7 +10,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/acp"
-	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/aitools"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -27,17 +27,18 @@ type transactionProviderInfo struct {
 }
 
 type childTransactionContext struct {
-	agentName      string
-	agentNamespace string
-	childType      corev1alpha1.TaskType
-	agent          *corev1alpha1.Agent
-	provider       *corev1alpha1.Provider
-	providerInfo   transactionProviderInfo
-	model          string
-	fallbacks      []transactionProviderModel
-	aiTools        []string
-	runtimeTools   []string
-	runtimeBash    bool
+	agentName           string
+	agentNamespace      string
+	childType           corev1alpha1.TaskType
+	agent               *corev1alpha1.Agent
+	provider            *corev1alpha1.Provider
+	providerInfo        transactionProviderInfo
+	model               string
+	fallbacks           []transactionProviderModel
+	aiTools             []string
+	runtimeTools        []string
+	runtimeBash         bool
+	runtimeProviderKind string
 }
 
 type transactionProviderModel struct {
@@ -45,7 +46,7 @@ type transactionProviderModel struct {
 	model    string
 }
 
-func validateChildTaskAgainstParentTransaction(ctx context.Context, k8sClient client.Client, parent, child *corev1alpha1.Task, agentName string) error {
+func validateChildTaskAgainstParentTransaction(ctx context.Context, k8sClient client.Reader, parent, child *corev1alpha1.Task, agentName string) error {
 	if parent == nil || parent.Spec.Transaction == nil || child == nil {
 		return nil
 	}
@@ -127,7 +128,7 @@ func TransactionHasScope(tx *corev1alpha1.TaskTransaction, want string) bool {
 	return false
 }
 
-func resolveChildTransactionContext(ctx context.Context, k8sClient client.Client, child *corev1alpha1.Task, agentName string) (childTransactionContext, error) {
+func resolveChildTransactionContext(ctx context.Context, k8sClient client.Reader, child *corev1alpha1.Task, agentName string) (childTransactionContext, error) {
 	childCtx := childTransactionContext{
 		agentName:      agentName,
 		agentNamespace: child.Namespace,
@@ -171,9 +172,32 @@ func resolveChildTransactionContext(ctx context.Context, k8sClient client.Client
 		}
 	}
 	childCtx.providerInfo, childCtx.model = childTransactionEffectiveProviderModel(child, childCtx.agent, childCtx.provider, childCtx.providerInfo)
-	childCtx.fallbacks = childTransactionFallbackProviderModels(ctx, k8sClient, child.Namespace, childCtx.agent)
+	runtimePolicy, err := resolveRuntimeRefPolicy(ctx, k8sClient, child.Namespace, childCtx.agent)
+	if err != nil {
+		return childCtx, err
+	}
+	if runtimePolicy != nil {
+		if child.Spec.AgentRuntime == nil || !slices.Equal(child.Spec.AgentRuntime.AllowedTools, runtimePolicy.allowedTools) {
+			return childCtx, fmt.Errorf("child task allowedTools do not exactly match external AgentRuntime policy")
+		}
+		childCtx.providerInfo = transactionProviderInfo{Type: runtimePolicy.providerKind}
+		childCtx.model = runtimePolicy.model
+		childCtx.runtimeProviderKind = runtimePolicy.providerKind
+	}
+	childCtx.fallbacks, err = childTransactionFallbackProviderModels(ctx, k8sClient, child.Namespace, childCtx.agent)
+	if err != nil {
+		return childCtx, err
+	}
 	childCtx.aiTools = childTransactionEffectiveAITools(child, childCtx.agent)
 	childCtx.runtimeTools, childCtx.runtimeBash = childTransactionEffectiveRuntimePolicy(child, childCtx.agent)
+	if runtimePolicy != nil {
+		childCtx.runtimeTools = acp.BuiltInRuntimeEffectiveAllowedTools(
+			runtimePolicy.allowedTools, runtimePolicy.disallowedTools, runtimePolicy.allowBash,
+		)
+		childCtx.runtimeBash = acp.BuiltInRuntimeEffectiveAllowBash(
+			runtimePolicy.allowedTools, runtimePolicy.disallowedTools, runtimePolicy.allowBash,
+		)
+	}
 	return childCtx, nil
 }
 
@@ -249,9 +273,9 @@ func childTransactionOpenCodeModelProvider(agent *corev1alpha1.Agent) string {
 	return strings.TrimSpace(provider)
 }
 
-func childTransactionFallbackProviderModels(ctx context.Context, k8sClient client.Client, namespace string, agent *corev1alpha1.Agent) []transactionProviderModel {
+func childTransactionFallbackProviderModels(ctx context.Context, k8sClient client.Reader, namespace string, agent *corev1alpha1.Agent) ([]transactionProviderModel, error) {
 	if k8sClient == nil || agent == nil || agent.Spec.Model == nil || len(agent.Spec.Model.Fallbacks) == 0 {
-		return nil
+		return nil, nil
 	}
 	fallbacks := make([]transactionProviderModel, 0, len(agent.Spec.Model.Fallbacks))
 	for _, fb := range agent.Spec.Model.Fallbacks {
@@ -260,7 +284,7 @@ func childTransactionFallbackProviderModels(ctx context.Context, k8sClient clien
 		}
 		provider := &corev1alpha1.Provider{}
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: fb.ProviderRef, Namespace: namespace}, provider); err != nil {
-			continue
+			return nil, fmt.Errorf("resolve child fallback provider %q in namespace %q: %w", fb.ProviderRef, namespace, err)
 		}
 		model := strings.TrimSpace(fb.Model)
 		if model == "" {
@@ -275,7 +299,7 @@ func childTransactionFallbackProviderModels(ctx context.Context, k8sClient clien
 			model: model,
 		})
 	}
-	return fallbacks
+	return fallbacks, nil
 }
 
 func validateChildProviderModelConstraints(txCtx map[string]string, childCtx childTransactionContext) error {
@@ -295,7 +319,7 @@ func validateChildProviderModelConstraints(txCtx map[string]string, childCtx chi
 }
 
 func childHasProviderModelConstraints(txCtx map[string]string) bool {
-	for _, key := range []string{"provider", "allowedProviders", "model", "allowedModels"} {
+	for _, key := range []string{providerField, "allowedProviders", "model", "allowedModels"} {
 		if strings.TrimSpace(txCtx[key]) != "" {
 			return true
 		}
@@ -304,7 +328,7 @@ func childHasProviderModelConstraints(txCtx map[string]string) bool {
 }
 
 func validateChildProviderModel(txCtx map[string]string, provider transactionProviderInfo, model, tokenNamespace string, hasTokenNamespace bool, prefix string) error {
-	if want := strings.TrimSpace(txCtx["provider"]); want != "" && !transactionProviderMatches(provider, want, tokenNamespace, hasTokenNamespace) {
+	if want := strings.TrimSpace(txCtx[providerField]); want != "" && !transactionProviderMatches(provider, want, tokenNamespace, hasTokenNamespace) {
 		return fmt.Errorf("child task %sprovider %q is not allowed by transaction context", prefix, transactionProviderDisplayName(provider))
 	}
 	if allowed, ok := transactionContextStringList(txCtx["allowedProviders"]); ok && !transactionProviderAllowed(provider, allowed, tokenNamespace, hasTokenNamespace) {
@@ -350,7 +374,7 @@ type childTransactionCredentialRequirements struct {
 
 func validateChildToolCredentialConstraints(
 	ctx context.Context,
-	k8sClient client.Client,
+	k8sClient client.Reader,
 	parent, child *corev1alpha1.Task,
 	childCtx childTransactionContext,
 ) error {
@@ -416,7 +440,7 @@ func childTransactionCustomToolNames(childCtx childTransactionContext) []string 
 		if name == "" {
 			continue
 		}
-		if _, builtIn := builtInTools[name]; builtIn || childTransactionProviderNativeToolName(childCtx.agent, name) {
+		if _, builtIn := builtInTools[name]; builtIn || childTransactionProviderNativeToolName(childCtx, name) {
 			continue
 		}
 		if _, ok := seen[name]; ok {
@@ -429,9 +453,12 @@ func childTransactionCustomToolNames(childCtx childTransactionContext) []string 
 	return custom
 }
 
-func childTransactionProviderNativeToolName(agent *corev1alpha1.Agent, name string) bool {
-	return agent != nil && agent.Spec.Runtime != nil &&
-		acp.IsBuiltInRuntimeNativeTool(string(agent.Spec.Runtime.Type), name)
+func childTransactionProviderNativeToolName(childCtx childTransactionContext, name string) bool {
+	providerKind := childCtx.runtimeProviderKind
+	if providerKind == "" && childCtx.agent != nil && childCtx.agent.Spec.Runtime != nil {
+		providerKind = string(childCtx.agent.Spec.Runtime.Type)
+	}
+	return acp.IsBuiltInRuntimeNativeTool(providerKind, name)
 }
 
 func (requirements *childTransactionCredentialRequirements) addSecret(name string) {
@@ -556,7 +583,8 @@ func childTransactionOutboundAccessPolicyReady(policy *corev1alpha1.OutboundAcce
 
 func childTransactionRuntimeToolConstraints(childCtx childTransactionContext) []string {
 	runtimeTools := append([]string{}, childCtx.runtimeTools...)
-	if childCtx.agent != nil && childCtx.agent.Spec.Runtime != nil && childCtx.agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeOpencode {
+	if childTransactionRuntimeRefAgent(childCtx.agent) ||
+		(childCtx.agent != nil && childCtx.agent.Spec.Runtime != nil && childCtx.agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeOpencode) {
 		return runtimeTools
 	}
 	if childCtx.childType == corev1alpha1.TaskTypeAgent && childCtx.runtimeBash {
@@ -576,56 +604,12 @@ func childTransactionRuntimeToolsUnrestricted(tools []string) bool {
 }
 
 func childTransactionEffectiveAITools(child *corev1alpha1.Task, agent *corev1alpha1.Agent) []string {
-	tools := []string{}
-	if agent != nil {
-		for _, tool := range agent.Spec.Tools {
-			if tool.Enabled != nil && !*tool.Enabled {
-				continue
-			}
-			if strings.TrimSpace(tool.Name) != "" {
-				tools = append(tools, tool.Name)
-			}
-		}
-		if agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled && child.Annotations[labels.AnnotationDisableCoordinationToolInject] != "true" {
-			for _, tool := range transactionCoordinationToolNames() {
-				if !slices.Contains(tools, tool) {
-					tools = append(tools, tool)
-				}
-			}
-		}
-	}
-	if child.Spec.AI != nil {
-		for _, tool := range child.Spec.AI.Tools {
-			if strings.TrimSpace(tool) != "" {
-				tools = append(tools, tool)
-			}
-		}
-	}
-	if child.Spec.Type == corev1alpha1.TaskTypeAI {
-		for _, tool := range transactionMemoryToolNames() {
-			if !slices.Contains(tools, tool) {
-				tools = append(tools, tool)
-			}
-		}
-	}
-	messagingCapable := child.Spec.Type == corev1alpha1.TaskTypeAI || child.Spec.Type == corev1alpha1.TaskTypeAgent
-	if _, delegatedChild := child.Labels[labels.LabelParentTask]; messagingCapable && delegatedChild && child.Annotations[labels.AnnotationDisableCoordinationToolInject] != trueStr {
-		for _, tool := range []string{sendMessageToolName, checkMessagesToolName} {
-			if !slices.Contains(tools, tool) {
-				tools = append(tools, tool)
-			}
-		}
-	}
-	return tools
+	return aitools.Resolve(child, agent)
 }
 
-func transactionMemoryToolNames() []string {
-	return []string{
-		"recall_memory",
-		"remember",
-		"propose_memory",
-		"search_transcript",
-	}
+func childTransactionRuntimeRefAgent(agent *corev1alpha1.Agent) bool {
+	return agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.RuntimeRef != nil &&
+		strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != ""
 }
 
 func childTransactionAgentRuntimeAllowedTools(agent *corev1alpha1.Agent) []string {
@@ -687,32 +671,6 @@ func childTransactionEffectiveRuntimePolicy(child *corev1alpha1.Task, agent *cor
 	allowedTools, disallowedTools, allowBash = acp.NormalizeOpenCodeToolPolicy(readIntent, allowedTools, disallowedTools, allowBash)
 	allowedTools = acp.OpenCodeEffectiveAllowedTools(allowedTools, disallowedTools, allowBash)
 	return allowedTools, allowBash && slices.Contains(allowedTools, "bash")
-}
-
-func transactionCoordinationToolNames() []string {
-	return []string{
-		"delegate_task",
-		"wait_for_tasks",
-		"create_container_task",
-		"cancel_task",
-		"send_message",
-		"check_messages",
-		"recall_memory",
-		"remember",
-		"propose_memory",
-		"search_transcript",
-		"create_pull_request",
-		"list_pull_requests",
-		"check_pr_review_marker",
-		"check_pull_request_ci",
-		"merge_pull_request",
-		"auto_merge_pull_request",
-		"review_pull_request",
-		"post_review_comment",
-		"create_agent",
-		"delete_agent",
-		"update_plan",
-	}
 }
 
 func transactionContextStringList(value string) ([]string, bool) {
@@ -861,14 +819,14 @@ func validateChildWorkspaceSelectorConstraints(txCtx map[string]string, workspac
 		got string
 	}{
 		{key: "repo", got: workspaceGitRepo(workspace)},
-		{key: "branch", got: workspaceBranch(workspace)},
-		{key: "ref", got: workspaceRef(workspace)},
+		{key: branchField, got: workspaceBranch(workspace)},
+		{key: refField, got: workspaceRef(workspace)},
 	} {
 		if want := strings.TrimSpace(txCtx[constraint.key]); want != "" && constraint.got != want {
 			return fmt.Errorf("child task workspace %s %q does not match transaction context %q", constraint.key, constraint.got, want)
 		}
 	}
-	if strings.TrimSpace(txCtx["branch"]) != "" && strings.TrimSpace(txCtx["ref"]) == "" && workspaceRef(workspace) != "" {
+	if strings.TrimSpace(txCtx[branchField]) != "" && strings.TrimSpace(txCtx[refField]) == "" && workspaceRef(workspace) != "" {
 		return fmt.Errorf("child task workspace ref %q overrides the branch constrained by transaction context", workspaceRef(workspace))
 	}
 	return nil

@@ -141,6 +141,7 @@ func (d *HarnessV1Dispatcher) prepareHarnessV1TaskSession(
 	lease, err := d.Sessions.AcquireMutationLease(ctx, ACPAcquireSessionLeaseRequest{
 		Session:             *control,
 		Fence:               fence,
+		TaskName:            task.Name,
 		TaskUID:             string(task.UID),
 		Attempt:             int64(attempt.Attempt),
 		PromptID:            attempt.TurnID,
@@ -423,7 +424,7 @@ func (d *HarnessV1Dispatcher) finalizeHarnessV1TaskSession(
 		return false, err
 	}
 	projection := ACPFinalizationProjection{
-		ProjectionKind: "TaskTerminalStatus", Payload: payload, AvailableAt: time.Now().UTC(),
+		ProjectionKind: taskTerminalProjectionKind, Payload: payload, AvailableAt: time.Now().UTC(),
 	}
 	finalizedAt := time.Now().UTC()
 	switch attempt.State {

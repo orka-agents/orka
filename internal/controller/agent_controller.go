@@ -26,12 +26,21 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/executionmode"
+)
+
+const (
+	conditionReasonReady = "Ready"
 )
 
 // AgentReconciler reconciles a Agent object
 type AgentReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// Mode is the controller's static execution mode. A built-in Agent that
+	// omitted contractVersion is stamped with it on first reconcile so the
+	// stored object carries its classification.
+	Mode executionmode.Mode
 }
 
 const (
@@ -66,6 +75,18 @@ func (r *AgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 
 	logger.Info("Reconciling Agent", "agent", agent.Name)
 
+	if r.Mode != "" && agentOmitsBuiltInContract(agent) {
+		if err := executionmode.DefaultBuiltInAgentContract(agent, r.Mode); err != nil {
+			return ctrl.Result{}, err
+		}
+		if err := r.Update(ctx, agent); err != nil {
+			// A conflict just means the object moved; returning the error
+			// requeues with backoff and the next pass reads the fresh copy.
+			return ctrl.Result{}, fmt.Errorf("persist built-in Agent contract: %w", err)
+		}
+		logger.Info("Stamped built-in Agent with the namespace execution mode", "agent", agent.Name, "contract", *agent.Spec.Runtime.ContractVersion)
+	}
+
 	// Validate the agent configuration
 	validationErr := r.validateAgent(ctx, agent)
 
@@ -98,6 +119,14 @@ func (r *AgentReconciler) validateAgent(ctx context.Context, agent *corev1alpha1
 			return fmt.Errorf("either providerRef or model.provider must be specified")
 		}
 	} else {
+		if agent.Spec.Runtime.RuntimeRef != nil {
+			if strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) == "" {
+				return fmt.Errorf("runtimeRef.name is required")
+			}
+			if err := validateRuntimeRefAgentTaskRestrictions(nil, agent); err != nil {
+				return err
+			}
+		}
 		if err := validateACPAgentModelControls(agent.Spec.Runtime, agent.Spec.Model); err != nil {
 			return err
 		}
@@ -326,13 +355,24 @@ func (r *AgentReconciler) countActiveTasks(ctx context.Context, agent *corev1alp
 	for i := range taskList.Items {
 		task := &taskList.Items[i]
 		if task.Spec.AgentRef != nil && task.Spec.AgentRef.Name == agent.Name {
-			phase := task.Status.Phase
-			if phase != corev1alpha1.TaskPhaseSucceeded && phase != corev1alpha1.TaskPhaseFailed {
+			if !isTerminalTaskPhase(task.Status.Phase) {
 				count++
 			}
 		}
 	}
 	return count, nil
+}
+
+// isTerminalTaskPhase reports whether phase is a terminal Task phase for the
+// purpose of Agent active-task accounting. Unknown phases are treated as
+// non-terminal so they fail safe and remain counted as active.
+func isTerminalTaskPhase(phase corev1alpha1.TaskPhase) bool {
+	switch phase {
+	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
+		return true
+	default:
+		return false
+	}
 }
 
 // updateStatus updates the Agent's status with validation results and active task count.
@@ -346,7 +386,7 @@ func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.
 	}
 
 	condition := metav1.Condition{
-		Type:               "Ready",
+		Type:               conditionReasonReady,
 		LastTransitionTime: now,
 		ObservedGeneration: agent.Generation,
 	}

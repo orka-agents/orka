@@ -409,6 +409,7 @@ func TestParseRuntimeConfig_BuiltInRuntimesAreCredentialFree(t *testing.T) {
 	} {
 		t.Run(string(runtimeType), func(t *testing.T) {
 			agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{
+				Model:       &corev1alpha1.ModelConfig{Name: "test-model"},
 				ProviderRef: &corev1alpha1.ProviderReference{Name: testProviderOpenAI},
 				SecretRef:   &corev1.LocalObjectReference{Name: "legacy-runtime"},
 			}}
@@ -416,7 +417,7 @@ func TestParseRuntimeConfig_BuiltInRuntimesAreCredentialFree(t *testing.T) {
 				jsonSchemaTypeField: string(runtimeType),
 				secretRefField:      "missing-legacy-runtime",
 			}}
-			if errResult, ok := parseRuntimeConfig(args, agent); !ok {
+			if errResult, ok := parseRuntimeConfig(args, agent, executionmode.HarnessV2); !ok {
 				t.Fatalf("parseRuntimeConfig returned error: %s", errResult)
 			}
 			if agent.Spec.Runtime == nil || agent.Spec.Runtime.Type != runtimeType {
@@ -434,7 +435,7 @@ func TestParseRuntimeConfig_BuiltInRuntimesAreCredentialFree(t *testing.T) {
 			SecretRef:   &corev1.LocalObjectReference{Name: "legacy-runtime"},
 		}}
 		args := map[string]any{runtimeField: map[string]any{jsonSchemaTypeField: "opencode"}}
-		if errResult, ok := parseRuntimeConfig(args, agent); !ok {
+		if errResult, ok := parseRuntimeConfig(args, agent, executionmode.HarnessV2); !ok {
 			t.Fatalf("parseRuntimeConfig returned error: %s", errResult)
 		}
 		wantTools := []string{"Read", "Write", "Edit", "Bash", "Glob", "Grep"}
@@ -446,9 +447,9 @@ func TestParseRuntimeConfig_BuiltInRuntimesAreCredentialFree(t *testing.T) {
 		}
 	})
 	t.Run("normalizes runtime type", func(t *testing.T) {
-		agent := &corev1alpha1.Agent{}
+		agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{Name: "test-model"}}}
 		args := map[string]any{runtimeField: map[string]any{jsonSchemaTypeField: "  claude  "}}
-		if errResult, ok := parseRuntimeConfig(args, agent); !ok {
+		if errResult, ok := parseRuntimeConfig(args, agent, executionmode.HarnessV2); !ok {
 			t.Fatalf("parseRuntimeConfig returned error: %s", errResult)
 		}
 		if agent.Spec.Runtime == nil || agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeClaude {
@@ -472,7 +473,7 @@ func TestParseRuntimeConfig_RejectsModelLimitsForNonOpenCodeBuiltIns(t *testing.
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Model: tt.model}}
-			result, ok := parseRuntimeConfig(map[string]any{runtimeField: map[string]any{jsonSchemaTypeField: string(tt.runtime)}}, agent)
+			result, ok := parseRuntimeConfig(map[string]any{runtimeField: map[string]any{jsonSchemaTypeField: string(tt.runtime)}}, agent, executionmode.HarnessV2)
 			if ok {
 				t.Fatal("parseRuntimeConfig accepted ignored built-in model limits")
 			}
@@ -492,7 +493,7 @@ func TestParseRuntimeConfig_RejectsUnsupportedRuntime(t *testing.T) {
 		t.Run(runtimeType, func(t *testing.T) {
 			agent := &corev1alpha1.Agent{}
 			args := map[string]any{runtimeField: map[string]any{jsonSchemaTypeField: runtimeType}}
-			errResult, ok := parseRuntimeConfig(args, agent)
+			errResult, ok := parseRuntimeConfig(args, agent, executionmode.HarnessV2)
 			if ok {
 				t.Fatal("parseRuntimeConfig accepted invalid runtime")
 			}
@@ -510,6 +511,7 @@ func TestParseRuntimeConfig_RejectsUnsupportedRuntime(t *testing.T) {
 func TestParseRuntimeConfig_AppliesRuntimeDefaults(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		Spec: corev1alpha1.AgentSpec{
+			Model:       &corev1alpha1.ModelConfig{Name: "test-model"},
 			ProviderRef: &corev1alpha1.ProviderReference{Name: testProviderOpenAI},
 		},
 	}
@@ -520,7 +522,7 @@ func TestParseRuntimeConfig_AppliesRuntimeDefaults(t *testing.T) {
 	},
 	}
 
-	if errResult, ok := parseRuntimeConfig(args, agent); !ok {
+	if errResult, ok := parseRuntimeConfig(args, agent, executionmode.HarnessV2); !ok {
 		t.Fatalf("parseRuntimeConfig returned error: %s", errResult)
 	}
 
@@ -575,7 +577,7 @@ func TestParseRuntimeConfig_PreservesExplicitEmptyOpenCodeTools(t *testing.T) {
 		"defaultAllowedTools": []any{},
 		"defaultAllowBash":    allowBash,
 	}}
-	if errResult, ok := parseRuntimeConfig(args, agent); !ok {
+	if errResult, ok := parseRuntimeConfig(args, agent, executionmode.HarnessV2); !ok {
 		t.Fatalf("parseRuntimeConfig returned error: %s", errResult)
 	}
 	if agent.Spec.Runtime == nil || agent.Spec.Runtime.DefaultAllowedTools == nil || len(agent.Spec.Runtime.DefaultAllowedTools) != 0 {
@@ -600,7 +602,7 @@ func TestParseRuntimeConfig_RejectsInvalidOpenCodeModel(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Model: model}}
-			errResult, ok := parseRuntimeConfig(map[string]any{runtimeField: map[string]any{jsonSchemaTypeField: "opencode"}}, agent)
+			errResult, ok := parseRuntimeConfig(map[string]any{runtimeField: map[string]any{jsonSchemaTypeField: "opencode"}}, agent, executionmode.HarnessV2)
 			if ok {
 				t.Fatal("parseRuntimeConfig accepted invalid OpenCode model")
 			}

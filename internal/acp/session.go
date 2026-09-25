@@ -5,16 +5,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
 )
 
 const (
-	DefaultPromptLease       = 2 * time.Minute
-	DefaultPermissionTimeout = 5 * time.Minute
-	DefaultBufferedEvents    = 256
-	DefaultInitializeTimeout = 60 * time.Second
+	DefaultPromptLease        = 2 * time.Minute
+	DefaultPermissionTimeout  = 5 * time.Minute
+	DefaultBufferedEvents     = 256
+	DefaultBufferedEventBytes = 32 << 20
+	DefaultInitializeTimeout  = 60 * time.Second
 )
 
 type RuntimeSessionConfig struct {
@@ -32,6 +34,12 @@ type RuntimeSessionConfig struct {
 	PermissionTimeout time.Duration
 	CancelGrace       time.Duration
 	MaxBufferedEvents int
+	// MaxBufferedEventBytes bounds the aggregate size of buffered, not yet
+	// consumed prompt events (measured as the raw notification payload) so a
+	// burst of large valid events cannot exhaust the runtime's memory before
+	// the event-count limit fires. Consumers release bytes through
+	// PromptRun.Release.
+	MaxBufferedEventBytes int
 }
 
 type RuntimeSession struct {
@@ -42,13 +50,17 @@ type RuntimeSession struct {
 	process           *Process
 	config            RuntimeSessionConfig
 
-	mu           sync.Mutex
-	active       *activePrompt
-	tombstones   map[string]PromptTombstone
-	deleted      bool
-	deleteDone   chan struct{}
-	deleteStatus CleanupStatus
-	deleteErr    error
+	mu         sync.Mutex
+	active     *activePrompt
+	tombstones map[string]PromptTombstone
+	deleted    bool
+	deletion   *runtimeSessionDeletion
+}
+
+type runtimeSessionDeletion struct {
+	done   chan struct{}
+	status CleanupStatus
+	err    error
 }
 
 type PromptEventType string
@@ -60,11 +72,20 @@ const (
 )
 
 type PromptEvent struct {
-	Type       PromptEventType
-	Sequence   int64
-	Timestamp  time.Time
+	Type     PromptEventType
+	Sequence int64
+	// Timestamp is assigned when the event is enqueued for the consumer.
+	Timestamp time.Time
+	// ReceivedAt is when the session received the notification from the
+	// child, stamped before any pre-acceptance buffering, so it preserves
+	// the phase the child emitted the event in even when the event is
+	// enqueued later.
+	ReceivedAt time.Time
 	Update     *SessionNotification
 	Permission *PermissionRequestEvent
+	// Size is the raw notification payload size counted against the prompt's
+	// buffered-bytes budget until the consumer releases the event.
+	Size int
 }
 
 type PermissionRequestEvent struct {
@@ -91,7 +112,10 @@ type PromptResult struct {
 
 type PromptRun struct {
 	Events <-chan PromptEvent
-	Result <-chan PromptResult
+	// Release returns an event's bytes to the buffered-bytes budget; call it
+	// as soon as the event has been received from Events.
+	Release func(PromptEvent)
+	Result  <-chan PromptResult
 }
 
 type PromptTombstone struct {
@@ -136,8 +160,10 @@ type activePrompt struct {
 	accepted        bool
 	settled         bool
 	overflowed      bool
+	bufferedBytes   int
 	cancelRequested bool
 	lease           *time.Timer
+	leaseDeadline   time.Time
 	permissions     map[string]*pendingPermission
 	preAccepted     []PromptEvent
 }
@@ -175,6 +201,9 @@ func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (*RuntimeS
 	}
 	if cfg.MaxBufferedEvents <= 0 {
 		cfg.MaxBufferedEvents = DefaultBufferedEvents
+	}
+	if cfg.MaxBufferedEventBytes <= 0 {
+		cfg.MaxBufferedEventBytes = DefaultBufferedEventBytes
 	}
 	session := &RuntimeSession{
 		id:            cfg.ID,
@@ -241,20 +270,27 @@ func (s *RuntimeSession) Generation() int64         { return s.generation }
 func (s *RuntimeSession) ProviderSessionID() string { return s.providerSessionID }
 func (s *RuntimeSession) Process() *Process         { return s.process }
 
+// StartPrompt starts a prompt bounded by the configured default lease.
 func (s *RuntimeSession) StartPrompt(ctx context.Context, promptID, requestDigest string, prompt []ContentBlock) (PromptRun, error) {
-	return s.StartPromptWithLease(ctx, promptID, requestDigest, prompt, s.config.PromptLease)
+	if s.config.PromptLease <= 0 {
+		return PromptRun{}, fmt.Errorf("prompt lease duration must be positive")
+	}
+	return s.StartPromptWithLeaseDeadline(ctx, promptID, requestDigest, prompt, time.Now().Add(s.config.PromptLease))
 }
 
-func (s *RuntimeSession) StartPromptWithLease(ctx context.Context, promptID, requestDigest string, prompt []ContentBlock, leaseDuration time.Duration) (PromptRun, error) {
+// StartPromptWithLeaseDeadline preserves the controller's absolute lease bound
+// across capability activation and admission delays.
+func (s *RuntimeSession) StartPromptWithLeaseDeadline(ctx context.Context, promptID, requestDigest string, prompt []ContentBlock, leaseDeadline time.Time) (PromptRun, error) {
 	promptID = strings.TrimSpace(promptID)
 	requestDigest = strings.TrimSpace(requestDigest)
 	if promptID == "" || requestDigest == "" || len(prompt) == 0 {
 		return PromptRun{}, fmt.Errorf("prompt ID, request digest, and content are required")
 	}
-	if leaseDuration <= 0 {
-		return PromptRun{}, fmt.Errorf("prompt lease duration must be positive")
-	}
 	s.mu.Lock()
+	if !leaseDeadline.After(time.Now()) {
+		s.mu.Unlock()
+		return PromptRun{}, fmt.Errorf("prompt lease deadline must be in the future")
+	}
 	if s.deleted {
 		s.mu.Unlock()
 		return PromptRun{}, fmt.Errorf("runtime session is deleted")
@@ -287,9 +323,10 @@ func (s *RuntimeSession) StartPromptWithLease(ctx context.Context, promptID, req
 		events:        make(chan PromptEvent, s.config.MaxBufferedEvents),
 		result:        make(chan PromptResult, 1),
 		done:          make(chan struct{}),
+		leaseDeadline: leaseDeadline,
 		permissions:   make(map[string]*pendingPermission),
 	}
-	active.lease = time.AfterFunc(leaseDuration, func() { s.expirePrompt(promptID) })
+	active.lease = time.AfterFunc(time.Until(leaseDeadline), func() { s.expirePrompt(promptID) })
 	s.active = active
 	s.mu.Unlock()
 
@@ -303,26 +340,33 @@ func (s *RuntimeSession) StartPromptWithLease(ctx context.Context, promptID, req
 		case <-active.done:
 		}
 	}()
-	return PromptRun{Events: active.events, Result: active.result}, nil
+	return PromptRun{Events: active.events, Result: active.result, Release: func(event PromptEvent) { s.releaseBufferedEvent(active, event) }}, nil
 }
 
+// RenewPromptLease extends a still-live prompt lease by the configured default.
 func (s *RuntimeSession) RenewPromptLease(promptID string) error {
-	return s.RenewPromptLeaseFor(promptID, s.config.PromptLease)
-}
-
-func (s *RuntimeSession) RenewPromptLeaseFor(promptID string, leaseDuration time.Duration) error {
-	if leaseDuration <= 0 {
+	if s.config.PromptLease <= 0 {
 		return fmt.Errorf("prompt lease duration must be positive")
 	}
+	return s.RenewPromptLeaseUntil(promptID, time.Now().Add(s.config.PromptLease))
+}
+
+// RenewPromptLeaseUntil extends a still-live prompt lease to an absolute bound.
+func (s *RuntimeSession) RenewPromptLeaseUntil(promptID string, leaseDeadline time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now := time.Now()
+	if !leaseDeadline.After(now) {
+		return fmt.Errorf("prompt lease deadline must be in the future")
+	}
 	if s.active == nil || s.active.id != promptID || s.active.settled {
 		return &StalePromptError{PromptID: promptID}
 	}
-	if !s.active.lease.Stop() {
+	if !s.active.leaseDeadline.After(now) || !s.active.lease.Stop() {
 		return &StalePromptError{PromptID: promptID}
 	}
-	s.active.lease.Reset(leaseDuration)
+	s.active.leaseDeadline = leaseDeadline
+	s.active.lease.Reset(time.Until(leaseDeadline))
 	return nil
 }
 
@@ -390,30 +434,72 @@ func (s *RuntimeSession) CancelPrompt(ctx context.Context, promptID string) (Pro
 	}
 }
 
+// WaitPromptSettlement joins the exact local prompt without requesting another
+// cancellation. Proxies use it after revoking authority to avoid delivering the
+// resulting request error before the adapter consumes its courtesy cancel. The
+// wait is bounded even if the caller's cancellation never reaches the child;
+// neither this wait nor its timeout supplies remote settlement or cleanup proof.
+func (s *RuntimeSession) WaitPromptSettlement(ctx context.Context, promptID string) error {
+	s.mu.Lock()
+	active := s.active
+	if active == nil || active.id != promptID || active.settled {
+		_, settled := s.tombstones[promptID]
+		s.mu.Unlock()
+		if settled {
+			return nil
+		}
+		return &StalePromptError{PromptID: promptID}
+	}
+	done := active.done
+	grace := s.config.CancelGrace
+	s.mu.Unlock()
+	if grace <= 0 {
+		grace = DefaultStopGrace
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, 2*grace)
+	defer cancel()
+	select {
+	case <-done:
+		return nil
+	case <-waitCtx.Done():
+		return waitCtx.Err()
+	}
+}
+
 func (s *RuntimeSession) Delete(ctx context.Context) (CleanupStatus, error) {
 	s.mu.Lock()
-	if s.deleteDone != nil {
-		done := s.deleteDone
-		s.mu.Unlock()
+	deletion := s.deletion
+	if deletion != nil {
 		select {
-		case <-done:
-			s.mu.Lock()
-			status, err := s.deleteStatus, s.deleteErr
+		case <-deletion.done:
+			if deletion.err == nil && deletion.status.Proven {
+				s.mu.Unlock()
+				return deletion.status, nil
+			}
+		default:
 			s.mu.Unlock()
-			return status, err
-		case <-ctx.Done():
-			return CleanupStatus{}, ctx.Err()
+			select {
+			case <-deletion.done:
+				return deletion.status, deletion.err
+			case <-ctx.Done():
+				return CleanupStatus{}, ctx.Err()
+			}
 		}
 	}
+	// A failed observation is not a cleanup proof. A later caller may observe
+	// the same stopped process again, while callers already joining an attempt
+	// retain that attempt's result even if another retry starts first.
+	firstDeletion := !s.deleted
 	s.deleted = true
-	s.deleteDone = make(chan struct{})
+	deletion = &runtimeSessionDeletion{done: make(chan struct{})}
+	s.deletion = deletion
 	active := s.active
 	if active != nil && !active.settled {
 		active.cancelRequested = true
 		cancelPendingPermissions(active)
 	}
 	s.mu.Unlock()
-	if active != nil {
+	if firstDeletion && active != nil {
 		// Best-effort courtesy cancel: the notification is a blocking pipe write,
 		// and a wedged adapter that stopped reading stdin would otherwise block
 		// Delete forever before the bounded process stop. Adapter exit closes
@@ -424,9 +510,9 @@ func (s *RuntimeSession) Delete(ctx context.Context) (CleanupStatus, error) {
 	}
 	status, err := s.process.Stop(ctx, s.config.CancelGrace)
 	s.mu.Lock()
-	s.deleteStatus = status
-	s.deleteErr = err
-	close(s.deleteDone)
+	deletion.status = status
+	deletion.err = err
+	close(deletion.done)
 	s.mu.Unlock()
 	return status, err
 }
@@ -448,6 +534,9 @@ func (s *RuntimeSession) runPrompt(active *activePrompt) {
 		queued := append([]PromptEvent(nil), active.preAccepted...)
 		active.preAccepted = nil
 		for _, event := range queued {
+			// Bytes were counted when the event was parked pre-acceptance;
+			// hand them back before emitLocked counts the enqueue.
+			active.bufferedBytes -= event.Size
 			s.emitLocked(active, event)
 		}
 		s.mu.Unlock()
@@ -489,6 +578,20 @@ func (s *RuntimeSession) finishPrompt(active *activePrompt, result PromptResult)
 	if active.settled {
 		return
 	}
+	// Provider gates revoke at the exact lease deadline. Their resulting RPC
+	// error can beat the lease timer's courtesy cancel, so timer scheduling
+	// cannot decide whether a conclusively settled prompt expired. Use the
+	// original receipt time, not the time this lock became available, and
+	// never turn lost transport/settlement evidence into cancellation proof.
+	if result.Accepted && !active.leaseDeadline.IsZero() && !result.SettledAt.IsZero() &&
+		!result.SettledAt.Before(active.leaseDeadline) {
+		switch result.Outcome {
+		case PromptOutcomeCompleted, PromptOutcomeCancelled, PromptOutcomeFailed:
+			result.Outcome = PromptOutcomeCancelled
+			result.StopReason = StopReasonCancelled
+			result.Err = nil
+		}
+	}
 	active.settled = true
 	if active.lease != nil {
 		active.lease.Stop()
@@ -496,7 +599,7 @@ func (s *RuntimeSession) finishPrompt(active *activePrompt, result PromptResult)
 	cancelPendingPermissions(active)
 	if active.overflowed && result.Outcome != PromptOutcomeOutcomeUnknown {
 		result.Outcome = PromptOutcomeFailed
-		result.Err = fmt.Errorf("ACP prompt event buffer overflowed")
+		result.Err = ErrPromptEventBufferOverflow
 	}
 	s.tombstones[active.id] = PromptTombstone{PromptID: active.id, RequestDigest: active.requestDigest, Result: result}
 	if s.active == active {
@@ -522,7 +625,7 @@ func (s *RuntimeSession) handleNotification(_ context.Context, notification Inco
 	if active == nil || active.settled || update.SessionID != s.providerSessionID {
 		return
 	}
-	s.emitLocked(active, PromptEvent{Type: PromptEventUpdate, Update: &update})
+	s.emitLocked(active, PromptEvent{Type: PromptEventUpdate, Update: &update, Size: len(notification.Params)})
 }
 
 func (s *RuntimeSession) handleRequest(ctx context.Context, request IncomingRequest) (any, *RPCError) {
@@ -549,7 +652,7 @@ func (s *RuntimeSession) handleRequest(ctx context.Context, request IncomingRequ
 		pending.options[option.OptionID] = struct{}{}
 	}
 	active.permissions[requestID] = pending
-	s.emitLocked(active, PromptEvent{Type: PromptEventPermissionRequested, Permission: &PermissionRequestEvent{RequestID: requestID, Request: permission}})
+	s.emitLocked(active, PromptEvent{Type: PromptEventPermissionRequested, Permission: &PermissionRequestEvent{RequestID: requestID, Request: permission}, Size: len(request.Params)})
 	done := active.done
 	s.mu.Unlock()
 
@@ -570,12 +673,20 @@ func (s *RuntimeSession) handleRequest(ctx context.Context, request IncomingRequ
 }
 
 func (s *RuntimeSession) emitLocked(active *activePrompt, event PromptEvent) {
+	if event.ReceivedAt.IsZero() {
+		event.ReceivedAt = time.Now().UTC()
+	}
 	if !active.accepted && event.Type != PromptEventAccepted {
-		if len(active.preAccepted) >= s.config.MaxBufferedEvents {
+		if len(active.preAccepted) >= s.config.MaxBufferedEvents || active.bufferedBytes+event.Size > s.config.MaxBufferedEventBytes {
 			s.markOverflowedLocked(active)
 			return
 		}
+		active.bufferedBytes += event.Size
 		active.preAccepted = append(active.preAccepted, event)
+		return
+	}
+	if event.Size > 0 && active.bufferedBytes+event.Size > s.config.MaxBufferedEventBytes {
+		s.markOverflowedLocked(active)
 		return
 	}
 	active.seq++
@@ -583,9 +694,24 @@ func (s *RuntimeSession) emitLocked(active *activePrompt, event PromptEvent) {
 	event.Timestamp = time.Now().UTC()
 	select {
 	case active.events <- event:
+		active.bufferedBytes += event.Size
 	default:
 		s.markOverflowedLocked(active)
 	}
+}
+
+// releaseBufferedEvent returns a consumed event's bytes to the prompt's
+// buffered-bytes budget.
+func (s *RuntimeSession) releaseBufferedEvent(active *activePrompt, event PromptEvent) {
+	if active == nil || event.Size <= 0 {
+		return
+	}
+	s.mu.Lock()
+	active.bufferedBytes -= event.Size
+	if active.bufferedBytes < 0 {
+		active.bufferedBytes = 0
+	}
+	s.mu.Unlock()
 }
 
 // markOverflowedLocked records event loss and schedules the bounded prompt
@@ -597,6 +723,9 @@ func (s *RuntimeSession) markOverflowedLocked(active *activePrompt) {
 		return
 	}
 	active.overflowed = true
+	slog.Warn("ACP prompt event buffer overflowed; cancelling the prompt",
+		"promptID", active.id, "bufferedEvents", s.config.MaxBufferedEvents, "bufferedBytes", active.bufferedBytes,
+		"maxBufferedEventBytes", s.config.MaxBufferedEventBytes, "lastSequence", active.seq, "accepted", active.accepted)
 	go func(promptID string) {
 		ctx, cancel := context.WithTimeout(context.Background(), s.config.CancelGrace*2)
 		defer cancel()

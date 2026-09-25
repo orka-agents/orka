@@ -19,7 +19,22 @@ import (
 	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/workerenv"
+)
+
+const (
+	apiFieldMetadata = "metadata"
+)
+
+const (
+	monitorRoleReviewer              = "reviewer"
+	readCredentialRefPath            = "spec.readCredentialRef"
+	publicationReadCredentialRefPath = "spec.publicationReadCredentialRef"
+	publicationCredentialRefPath     = "spec.publicationCredentialRef"
+	forgeCredentialRefPath           = "spec.forgeCredentialRef"
+	commandIntentContinue            = "continue"
+	commandIntentPatch               = "patch"
 )
 
 type CreateRepositoryMonitorRequest struct {
@@ -95,9 +110,6 @@ func (h *Handlers) normalizeRepositoryMonitorSpec(spec *corev1alpha1.RepositoryM
 	if spec.Review.Event == "" {
 		spec.Review.Event = "COMMENT"
 	}
-	if spec.Validation.Mode == "" {
-		spec.Validation.Mode = "changed"
-	}
 }
 
 func validateRepositoryMonitorSpec(spec corev1alpha1.RepositoryMonitorSpec) error {
@@ -119,6 +131,12 @@ func validateRepositoryMonitorSpec(spec corev1alpha1.RepositoryMonitorSpec) erro
 	if err := validateRepositoryMonitorCommandLabels(spec); err != nil {
 		return err
 	}
+	if strings.TrimSpace(spec.Validation.Mode) != "" || len(spec.Validation.Commands) > 0 {
+		return fiber.NewError(fiber.StatusBadRequest, "spec.validation.mode and spec.validation.commands are no longer supported; replace them with spec.validation.image")
+	}
+	if image := spec.Validation.Image; image != "" && !tools.ValidRepositoryValidationImage(image) {
+		return fiber.NewError(fiber.StatusBadRequest, "spec.validation.image must be digest-pinned with sha256")
+	}
 	if repositoryMonitorPullRequestsEnabled(spec) && (spec.Agents.Reviewer == nil || strings.TrimSpace(spec.Agents.Reviewer.Name) == "") {
 		return fiber.NewError(fiber.StatusBadRequest, "spec.agents.reviewer.name is required when pull request monitoring is enabled")
 	}
@@ -131,8 +149,8 @@ func validateRepositoryMonitorSpec(spec corev1alpha1.RepositoryMonitorSpec) erro
 func validateRepositoryMonitorCommandLabels(spec corev1alpha1.RepositoryMonitorSpec) error {
 	labels := spec.Triggers.GitHub.Labels
 	groups := [][]struct{ intent, label string }{
-		{{"triage", labels.Issues.Triage}, {"research", labels.Issues.Research}, {"plan", labels.Issues.Plan}, {commandIntentApprovePlan, labels.Issues.ApprovePlan}, {"implement", labels.Issues.Implement}, {commandIntentDecompose, labels.Issues.Decompose}, {commandIntentStop, labels.Issues.Stop}, {commandIntentResume, labels.Issues.Resume}},
-		{{"review", labels.PullRequests.Review}, {"fix", labels.PullRequests.Fix}, {commandIntentFixCI, labels.PullRequests.FixCI}, {commandIntentUpdateBranch, labels.PullRequests.UpdateBranch}, {"automerge", labels.PullRequests.Automerge}, {commandIntentStop, labels.PullRequests.Stop}, {commandIntentResume, labels.PullRequests.Resume}},
+		{{"triage", labels.Issues.Triage}, {"research", labels.Issues.Research}, {"plan", labels.Issues.Plan}, {commandIntentApprovePlan, labels.Issues.ApprovePlan}, {githubActionImplement, labels.Issues.Implement}, {commandIntentDecompose, labels.Issues.Decompose}, {commandIntentStop, labels.Issues.Stop}, {commandIntentResume, labels.Issues.Resume}},
+		{{"review", labels.PullRequests.Review}, {githubActionFix, labels.PullRequests.Fix}, {commandIntentFixCI, labels.PullRequests.FixCI}, {commandIntentUpdateBranch, labels.PullRequests.UpdateBranch}, {"automerge", labels.PullRequests.Automerge}, {commandIntentStop, labels.PullRequests.Stop}, {commandIntentResume, labels.PullRequests.Resume}},
 	}
 	for _, group := range groups {
 		seen := map[string]string{}
@@ -190,6 +208,10 @@ func (h *Handlers) validateRepositoryMonitorImplementerAgent(c fiber.Ctx, namesp
 	if h.enforceNamespaceIsolation && agentNamespace != namespace {
 		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.agents.implementer namespace %q must match monitor namespace %q when namespace isolation is enforced", agentNamespace, namespace))
 	}
+	if err := authorizeKubernetesResourceAction(c.Context(), h.clientset, GetUserInfo(c),
+		agentNamespace, "get", corev1alpha1.GroupVersion.Group, "agents", ref.Name); err != nil {
+		return err
+	}
 	var agent corev1alpha1.Agent
 	if err := h.client.Get(c.Context(), types.NamespacedName{Name: ref.Name, Namespace: agentNamespace}, &agent); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -222,7 +244,7 @@ func (h *Handlers) validateRepositoryMonitorReadOnlyAgents(c fiber.Ctx, namespac
 		ref     *corev1alpha1.AgentReference
 		enabled bool
 	}{
-		{role: "reviewer", ref: spec.Agents.Reviewer, enabled: repositoryMonitorPullRequestsEnabled(spec)},
+		{role: monitorRoleReviewer, ref: spec.Agents.Reviewer, enabled: repositoryMonitorPullRequestsEnabled(spec)},
 		{role: "triager", ref: spec.Agents.Triager, enabled: spec.Targets.Issues.Enabled && (spec.IssueWorkflow.Triage.Enabled == nil || *spec.IssueWorkflow.Triage.Enabled)},
 		{role: "researcher", ref: spec.Agents.Researcher, enabled: spec.Targets.Issues.Enabled && (spec.IssueWorkflow.Research.Enabled == nil || *spec.IssueWorkflow.Research.Enabled)},
 		{role: "planner", ref: spec.Agents.Planner, enabled: spec.Targets.Issues.Enabled && (spec.IssueWorkflow.Planning.Enabled == nil || *spec.IssueWorkflow.Planning.Enabled)},
@@ -262,6 +284,10 @@ func (h *Handlers) validateRepositoryMonitorReadOnlyAgent(c fiber.Ctx, namespace
 	if h.enforceNamespaceIsolation && agentNamespace != namespace {
 		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s namespace %q must match monitor namespace %q when namespace isolation is enforced", field, agentNamespace, namespace))
 	}
+	if err := authorizeKubernetesResourceAction(c.Context(), h.clientset, GetUserInfo(c),
+		agentNamespace, "get", corev1alpha1.GroupVersion.Group, "agents", ref.Name); err != nil {
+		return err
+	}
 	var agent corev1alpha1.Agent
 	if err := h.client.Get(c.Context(), types.NamespacedName{Name: ref.Name, Namespace: agentNamespace}, &agent); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -270,7 +296,7 @@ func (h *Handlers) validateRepositoryMonitorReadOnlyAgent(c fiber.Ctx, namespace
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get %s agent %q: %v", role, ref.Name, err))
 	}
 	allowedRuntimes := "claude or opencode"
-	if role == "reviewer" {
+	if role == monitorRoleReviewer {
 		allowedRuntimes = "claude, codex, or opencode"
 	}
 	if agent.Spec.Runtime == nil {
@@ -289,7 +315,7 @@ func (h *Handlers) validateRepositoryMonitorReadOnlyAgent(c fiber.Ctx, namespace
 		// Codex reviewers run inside the RuntimeSession boundary with
 		// controller-rejected elevation requests and read-intent workspace
 		// delta classification failing any modifying turn.
-		if role != "reviewer" {
+		if role != monitorRoleReviewer {
 			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q runtime %q is not supported for read-only repository monitor tasks; use %s", field, ref.Name, agent.Spec.Runtime.Type, allowedRuntimes))
 		}
 	default:
@@ -313,10 +339,10 @@ func validateRepositoryMonitorCredentialRoleRefs(spec corev1alpha1.RepositoryMon
 		field string
 		ref   *corev1.LocalObjectReference
 	}{
-		{field: "spec.readCredentialRef", ref: spec.ReadCredentialRef},
-		{field: "spec.publicationReadCredentialRef", ref: spec.PublicationReadCredentialRef},
-		{field: "spec.publicationCredentialRef", ref: spec.PublicationCredentialRef},
-		{field: "spec.forgeCredentialRef", ref: spec.ForgeCredentialRef},
+		{field: readCredentialRefPath, ref: spec.ReadCredentialRef},
+		{field: publicationReadCredentialRefPath, ref: spec.PublicationReadCredentialRef},
+		{field: publicationCredentialRefPath, ref: spec.PublicationCredentialRef},
+		{field: forgeCredentialRefPath, ref: spec.ForgeCredentialRef},
 	}
 	seen := make(map[string]string, len(refs))
 	for _, credential := range refs {
@@ -341,7 +367,7 @@ func repositoryMonitorCredentialRefName(ref *corev1.LocalObjectReference) string
 
 func repositoryMonitorEffectiveReadCredential(spec corev1alpha1.RepositoryMonitorSpec) (string, *corev1.LocalObjectReference) {
 	if repositoryMonitorCredentialRefName(spec.ReadCredentialRef) != "" {
-		return "spec.readCredentialRef", spec.ReadCredentialRef
+		return readCredentialRefPath, spec.ReadCredentialRef
 	}
 	return "spec.gitSecretRef", spec.GitSecretRef
 }
@@ -353,14 +379,18 @@ func (h *Handlers) validateRepositoryMonitorCredentialSecrets(c fiber.Ctx, names
 		ref   *corev1.LocalObjectReference
 	}{
 		{field: readField, ref: readRef},
-		{field: "spec.publicationReadCredentialRef", ref: spec.PublicationReadCredentialRef},
-		{field: "spec.publicationCredentialRef", ref: spec.PublicationCredentialRef},
-		{field: "spec.forgeCredentialRef", ref: spec.ForgeCredentialRef},
+		{field: publicationReadCredentialRefPath, ref: spec.PublicationReadCredentialRef},
+		{field: publicationCredentialRefPath, ref: spec.PublicationCredentialRef},
+		{field: forgeCredentialRefPath, ref: spec.ForgeCredentialRef},
 	}
 	for _, credential := range refs {
 		secretName := repositoryMonitorCredentialRefName(credential.ref)
 		if secretName == "" {
 			continue
+		}
+		if err := authorizeKubernetesResourceAction(c.Context(), h.clientset, GetUserInfo(c),
+			namespace, "get", "", "secrets", secretName); err != nil {
+			return err
 		}
 		var secret corev1.Secret
 		if err := h.client.Get(c.Context(), types.NamespacedName{Name: secretName, Namespace: namespace}, &secret); err != nil {
@@ -553,9 +583,9 @@ func (h *Handlers) authorizeContextTokenRepositoryMonitorCredentialSecrets(c fib
 		ref   *corev1.LocalObjectReference
 	}{
 		{role: "sourceRead", field: readField, ref: readRef},
-		{role: "publicationRead", field: "spec.publicationReadCredentialRef", ref: spec.PublicationReadCredentialRef},
-		{role: "publication", field: "spec.publicationCredentialRef", ref: spec.PublicationCredentialRef},
-		{role: "forge", field: "spec.forgeCredentialRef", ref: spec.ForgeCredentialRef},
+		{role: "publicationRead", field: publicationReadCredentialRefPath, ref: spec.PublicationReadCredentialRef},
+		{role: "publication", field: publicationCredentialRefPath, ref: spec.PublicationCredentialRef},
+		{role: "forge", field: forgeCredentialRefPath, ref: spec.ForgeCredentialRef},
 	}
 	for _, credential := range refs {
 		name := repositoryMonitorCredentialRefName(credential.ref)
@@ -636,36 +666,45 @@ func (h *Handlers) ListRepositoryMonitors(c fiber.Ctx) error {
 		return err
 	}
 
-	pagination, err := ParsePagination(c.Query("limit", "100"), c.Query("continue", ""))
+	pagination, err := ParsePagination(c.Query("limit", "100"), c.Query(commandIntentContinue, ""))
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
-	opts := &client.ListOptions{Namespace: namespace, Limit: pagination.Limit, Continue: pagination.Continue}
-	list := &corev1alpha1.RepositoryMonitorList{}
-	if err := h.client.List(c.Context(), list, opts); err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list repository monitors: %v", err))
-	}
-
-	items := list.Items
 	filteredList := false
-	if h.contextTokenAuthorization.Enabled() {
-		filtered := make([]corev1alpha1.RepositoryMonitor, 0, len(items))
-		for i := range items {
-			if h.contextTokenRepositoryMonitorAllowed(c, &items[i]) {
-				filtered = append(filtered, items[i])
-			}
+	var remainingItemCount *int64
+	items, continueToken, err := collectAuthorizedPages(pagination.Limit, pagination.Continue, func(continueToken string, pageLimit int64) ([]corev1alpha1.RepositoryMonitor, string, error) {
+		list := &corev1alpha1.RepositoryMonitorList{}
+		opts := &client.ListOptions{Namespace: namespace, Limit: pageLimit, Continue: continueToken}
+		if err := h.listPage(c.Context(), list, opts, "repository monitors"); err != nil {
+			return nil, "", err
 		}
-		filteredList = len(filtered) != len(items)
-		items = filtered
+		remainingItemCount = list.RemainingItemCount
+		items := list.Items
+		if h.contextTokenAuthorization.Enabled() {
+			filtered := make([]corev1alpha1.RepositoryMonitor, 0, len(items))
+			for i := range items {
+				if h.contextTokenRepositoryMonitorAllowed(c, &items[i]) {
+					filtered = append(filtered, items[i])
+				}
+			}
+			if len(filtered) != len(items) {
+				filteredList = true
+			}
+			items = filtered
+		}
+		return items, list.Continue, nil
+	})
+	if err != nil {
+		return err
 	}
-	remainingItemCount := list.RemainingItemCount
 	if filteredList {
+		// The raw count describes monitors the caller is not allowed to see.
 		remainingItemCount = nil
 	}
 	return c.JSON(ListResponse{
 		Items: items,
 		Metadata: ListMeta{
-			Continue:           list.Continue,
+			Continue:           NormalizeListContinue(continueToken),
 			RemainingItemCount: remainingItemCount,
 		},
 	})
@@ -890,7 +929,7 @@ func (h *Handlers) ListRepositoryMonitorRuns(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list monitor runs: %v", err))
 	}
-	return c.JSON(fiber.Map{"items": runs, "metadata": fiber.Map{"continue": next}})
+	return c.JSON(fiber.Map{apiFieldItems: runs, apiFieldMetadata: fiber.Map{commandIntentContinue: next}})
 }
 
 // ListRepositoryMonitorItems lists current items for a repository monitor.
@@ -935,7 +974,7 @@ func (h *Handlers) ListRepositoryMonitorItems(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list monitor items: %v", err))
 	}
-	return c.JSON(fiber.Map{"items": items, "metadata": fiber.Map{"continue": next}})
+	return c.JSON(fiber.Map{apiFieldItems: items, apiFieldMetadata: fiber.Map{commandIntentContinue: next}})
 }
 
 // ListRepositoryMonitorEvents lists audit events for a repository monitor.
@@ -982,11 +1021,11 @@ func (h *Handlers) ListRepositoryMonitorEvents(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list monitor events: %v", err))
 	}
-	return c.JSON(fiber.Map{"items": events, "metadata": fiber.Map{"continue": next}})
+	return c.JSON(fiber.Map{apiFieldItems: events, apiFieldMetadata: fiber.Map{commandIntentContinue: next}})
 }
 
 func monitorListCursor(c fiber.Ctx) string {
-	if cursor := c.Query("continue"); cursor != "" {
+	if cursor := c.Query(commandIntentContinue); cursor != "" {
 		return cursor
 	}
 	return c.Query("cursor")
@@ -1040,6 +1079,9 @@ func (h *Handlers) CreateRepositoryMonitorCommandEvent(c fiber.Ctx) error {
 	if err := validateRepositoryMonitorCommandTargetEnabled(monitor.Spec, req.Kind); err != nil {
 		return err
 	}
+	if req.Intent == commandIntentUpdateBranch && (monitor.Spec.ForgeCredentialRef == nil || strings.TrimSpace(monitor.Spec.ForgeCredentialRef.Name) == "") {
+		return fiber.NewError(fiber.StatusBadRequest, "spec.forgeCredentialRef is required for update_branch commands")
+	}
 	item, err := h.repositoryMonitorStore.GetMonitorItem(c.Context(), namespace, monitor.Name, req.Kind, strconv.FormatInt(req.Number, 10))
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to inspect monitor target: %v", err))
@@ -1090,6 +1132,7 @@ func (h *Handlers) CreateRepositoryMonitorCommandEvent(c fiber.Ctx) error {
 		MonitorGeneration:   monitor.Generation,
 		DedupeKey:           id,
 		IdempotencyKey:      id,
+		CommentID:           id, // Keep the legacy comment-based uniqueness key distinct for each API request.
 		Author:              "orka-api",
 		Permission:          repositoryMonitorAPICommandPermission(req),
 		Command:             req.Intent,
@@ -1147,7 +1190,7 @@ func repositoryMonitorLabelsFromItem(item *store.MonitorItem) []string {
 
 func repositoryMonitorCommandRequiresWrite(req CreateRepositoryMonitorCommandRequest) bool {
 	switch req.Intent {
-	case commandIntentApprovePlan, commandIntentStop, commandIntentResume, "implement", commandIntentDecompose, "fix", commandIntentFixCI, commandIntentUpdateBranch, repositoryMonitorIntentAutomerge:
+	case commandIntentApprovePlan, commandIntentStop, commandIntentResume, githubActionImplement, commandIntentDecompose, githubActionFix, commandIntentFixCI, commandIntentUpdateBranch, repositoryMonitorIntentAutomerge:
 		return true
 	default:
 		return false
@@ -1186,12 +1229,12 @@ func validateRepositoryMonitorCommandRequest(req CreateRepositoryMonitorCommandR
 	switch req.Kind {
 	case repositoryMonitorTargetKindIssue:
 		switch intent {
-		case "triage", "research", "plan", "approve_plan", "implement", commandIntentDecompose, finishReasonStop, "resume":
+		case "triage", "research", "plan", "approve_plan", githubActionImplement, commandIntentDecompose, finishReasonStop, "resume":
 			return nil
 		}
 	case repositoryMonitorTargetKindPullRequest:
 		switch intent {
-		case "review", "fix", commandIntentFixCI, commandIntentUpdateBranch, repositoryMonitorIntentAutomerge, finishReasonStop, "resume":
+		case "review", githubActionFix, commandIntentFixCI, commandIntentUpdateBranch, repositoryMonitorIntentAutomerge, finishReasonStop, "resume":
 			return nil
 		}
 	}
@@ -1242,7 +1285,7 @@ func (h *Handlers) ListRepositoryMonitorCommandEvents(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list monitor commands: %v", err))
 	}
-	return c.JSON(fiber.Map{"items": events, "metadata": fiber.Map{"continue": next}})
+	return c.JSON(fiber.Map{apiFieldItems: events, apiFieldMetadata: fiber.Map{commandIntentContinue: next}})
 }
 
 // GetRepositoryMonitorCommandEvent fetches one durable command event.
@@ -1318,7 +1361,7 @@ func (h *Handlers) ListRepositoryMonitorActionRecords(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list monitor actions: %v", err))
 	}
-	return c.JSON(fiber.Map{"items": records, "metadata": fiber.Map{"continue": next}})
+	return c.JSON(fiber.Map{apiFieldItems: records, apiFieldMetadata: fiber.Map{commandIntentContinue: next}})
 }
 
 // GetRepositoryMonitorActionRecord fetches one durable action record.
@@ -1399,7 +1442,7 @@ func (h *Handlers) ListRepositoryMonitorWorkActions(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list monitor workflow actions: %v", err))
 	}
-	return c.JSON(fiber.Map{"items": actions, "metadata": fiber.Map{"continue": next}})
+	return c.JSON(fiber.Map{apiFieldItems: actions, apiFieldMetadata: fiber.Map{commandIntentContinue: next}})
 }
 
 // GetRepositoryMonitorWorkAction fetches one durable workflow action.
@@ -1475,7 +1518,7 @@ func (h *Handlers) ListRepositoryMonitorImplementationJobs(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list monitor implementation jobs: %v", err))
 	}
-	return c.JSON(fiber.Map{"items": jobs, "metadata": fiber.Map{"continue": next}})
+	return c.JSON(fiber.Map{apiFieldItems: jobs, apiFieldMetadata: fiber.Map{commandIntentContinue: next}})
 }
 
 // GetRepositoryMonitorImplementationJob fetches one implementation job.
@@ -1551,7 +1594,7 @@ func (h *Handlers) ListRepositoryMonitorGitHubMutations(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list monitor GitHub mutations: %v", err))
 	}
-	return c.JSON(fiber.Map{"items": records, "metadata": fiber.Map{"continue": next}})
+	return c.JSON(fiber.Map{apiFieldItems: records, apiFieldMetadata: fiber.Map{commandIntentContinue: next}})
 }
 
 // GetRepositoryMonitorGitHubMutation fetches one mutation audit record.
@@ -1629,5 +1672,5 @@ func (h *Handlers) GetRepositoryMonitorImplementationPatchPreview(c fiber.Ctx) e
 			patch = parsed
 		}
 	}
-	return c.JSON(fiber.Map{"job": job, "patch": patch, "contentType": contentType})
+	return c.JSON(fiber.Map{"job": job, commandIntentPatch: patch, "contentType": contentType})
 }

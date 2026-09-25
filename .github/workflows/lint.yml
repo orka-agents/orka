@@ -1,8 +1,17 @@
 name: Lint
 
 on:
+  workflow_call:
+    inputs:
+      full_check:
+        type: boolean
+        default: false
   workflow_dispatch:
   push:
+    # PR branches are linted by the pull_request event. Keep push coverage on
+    # main without running the same branch change twice.
+    branches:
+      - main
     paths-ignore:
       - ".agents/**"
       - ".claude/**"
@@ -30,6 +39,8 @@ jobs:
     steps:
       - name: Clone the code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -45,7 +56,9 @@ jobs:
         with:
           version: v2.13.1
           install-mode: goinstall
-          only-new-issues: true
+          # GitHub refuses REST PR diffs over 20,000 lines. Compare revisions
+          # locally so large PRs still filter out pre-existing lint findings.
+          args: ${{ !inputs.full_check && format('--new-from-rev={0}', github.event.pull_request.base.sha || github.event.before || 'HEAD~1') || '' }}
 
   ui-lint:
     name: UI Lint

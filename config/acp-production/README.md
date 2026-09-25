@@ -41,6 +41,13 @@ owner applies `config/orka-admission-webhooks`. A shared admission owner must
 configure every isolated controller ServiceAccount as an exact trusted
 username; individual releases must not race to own the webhook configuration.
 
+The first workload wave leaves cross-Task ancestry trust disabled. After the
+platform owner installs the webhook and verifies that it rejects unauthorized
+Task provenance changes, enable `--task-provenance-admission-external=true` in
+the controller's post-admission configuration and roll out that change. Keep
+the flag disabled if the webhook wave is omitted. Disable the flag and finish
+the controller rollout before removing the webhook configuration.
+
 For same-cluster v1/v2 operation, deploy v1 as a separate release with a
 different release namespace, watched namespace, endpoint, RBAC, storage, and
 data plane. See `docs/harness-v1-v2-coexistence-plan.md`.

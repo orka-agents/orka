@@ -1,101 +1,150 @@
 package sqlite
 
 import (
+	"context"
 	"database/sql"
-	"path/filepath"
+	"fmt"
 	"testing"
 	"time"
+
+	"github.com/orka-agents/orka/internal/store"
 )
 
-func TestSessionTurnSchemaMigrationRemovesControlRowForeignKey(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "legacy-turns.db")
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatalf("open legacy database: %v", err)
-	}
-	statements := []string{
-		`PRAGMA foreign_keys=ON`,
-		`CREATE TABLE sessions (
-			namespace TEXT NOT NULL, name TEXT NOT NULL, session_type TEXT NOT NULL DEFAULT 'task',
-			active_task TEXT NOT NULL DEFAULT '', message_count INTEGER NOT NULL DEFAULT 0,
-			input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
-			cancelled BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMP, updated_at TIMESTAMP,
-			PRIMARY KEY(namespace, name)
-		)`,
-		`CREATE TABLE session_controls (
-			namespace TEXT NOT NULL, session_name TEXT NOT NULL, session_uid TEXT NOT NULL UNIQUE,
-			availability TEXT NOT NULL, updated_at TIMESTAMP NOT NULL,
-			PRIMARY KEY(namespace, session_name),
-			FOREIGN KEY(namespace, session_name) REFERENCES sessions(namespace, name)
-		)`,
-		`CREATE TABLE session_turns (
-			id TEXT PRIMARY KEY, session_uid TEXT NOT NULL, lease_generation INTEGER NOT NULL,
-			task_uid TEXT NOT NULL, attempt INTEGER NOT NULL, prompt_id TEXT NOT NULL,
-			prompt_attempt_id TEXT NOT NULL, request_digest TEXT NOT NULL, user_prompt TEXT NOT NULL,
-			state TEXT NOT NULL, terminal_kind TEXT NOT NULL DEFAULT '', terminal_content TEXT NOT NULL DEFAULT '',
-			finalization_digest TEXT NOT NULL DEFAULT '', publication_id TEXT NOT NULL DEFAULT '',
-			publication_receipt BLOB, controller_epoch_name TEXT NOT NULL, controller_epoch INTEGER NOT NULL,
-			version INTEGER NOT NULL, created_at TIMESTAMP NOT NULL, finalized_at TIMESTAMP, updated_at TIMESTAMP NOT NULL,
-			UNIQUE(session_uid, lease_generation, task_uid, attempt, prompt_id),
-			FOREIGN KEY(session_uid) REFERENCES session_controls(session_uid)
-		)`,
-		`INSERT INTO sessions(namespace, name, created_at, updated_at) VALUES ('tenant-a', 'session-a', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-		`INSERT INTO session_controls(namespace, session_name, session_uid, availability, updated_at)
-		 VALUES ('tenant-a', 'session-a', 'session-uid-a', 'Available', CURRENT_TIMESTAMP)`,
-		`INSERT INTO session_turns(
-			id, session_uid, lease_generation, task_uid, attempt, prompt_id, prompt_attempt_id,
-			request_digest, user_prompt, state, controller_epoch_name, controller_epoch, version, created_at, updated_at
-		) VALUES (
-			'turn-a', 'session-uid-a', 1, 'task-a', 1, 'prompt-a', 'attempt-a',
-			'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'hello', 'Open',
-			'orka-controller', 1, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-		)`,
-	}
-	for _, statement := range statements {
-		if _, err := db.Exec(statement); err != nil {
-			_ = db.Close()
-			t.Fatalf("legacy setup failed for %q: %v", statement, err)
+func TestSessionTurnFinalizationTaskOwnership(t *testing.T) {
+	const taskUID = "finalized-task-uid"
+	for _, persistenceOnly := range []bool{true, false} {
+		for _, tt := range []struct {
+			name        string
+			sessionType string
+			ownerType   string
+			taskName    string
+			ownerUID    string
+			release     bool
+		}{
+			{name: "exact Task", taskName: "task-name", ownerUID: taskUID, release: true},
+			{name: "legacy UID lock", taskName: taskUID, release: true},
+			{name: "recreated Task", taskName: "task-name", ownerUID: "new-task-uid"},
+			{name: "legacy name with different UID", taskName: taskUID, ownerUID: "new-task-uid"},
+			{name: "different legacy owner", taskName: "different-task-uid"},
+			{name: "Gateway type", sessionType: store.SessionTypeGateway, taskName: "gateway-task", ownerUID: taskUID},
+			{name: "Gateway owner", ownerType: gatewaySessionOwnerType, taskName: "gateway-task", ownerUID: taskUID},
+		} {
+			for _, skipTranscript := range []bool{true, false} {
+				t.Run(fmt.Sprintf("persistence=%v/%s/skipTranscript=%v", persistenceOnly, tt.name, skipTranscript), func(t *testing.T) {
+					ctx := context.Background()
+					s := setupTestStore(t)
+					request := sessionTurnFinalizationOwnershipFixture(t, s, persistenceOnly, taskUID)
+					expires := request.FinalizedAt.Add(time.Hour)
+					sessionType := tt.sessionType
+					if sessionType == "" {
+						sessionType = "task"
+					}
+					if _, err := s.db.ExecContext(ctx, `UPDATE sessions SET session_type = ?, owner_type = ?,
+						active_task = ?, active_task_uid = ?, active_task_expires_at = ? WHERE namespace = ? AND name = ?`,
+						sessionType, tt.ownerType, tt.taskName, tt.ownerUID, expires, "ns", "session"); err != nil {
+						t.Fatal(err)
+					}
+					request.SkipTranscriptAppend = skipTranscript
+					for range 2 {
+						var finalized *store.SessionTurn
+						var err error
+						if persistenceOnly {
+							finalized, err = s.CommitSessionTurnFinalization(ctx, store.CommitSessionTurnFinalizationRequest{
+								Key: request.Key, Namespace: "ns", SessionName: "session", Fence: request.Fence,
+								ExpectedTurnVersion: request.ExpectedTurnVersion, FinalizationDigest: request.FinalizationDigest,
+								TerminalKind: request.TerminalKind, TerminalContent: request.TerminalContent,
+								SkipTranscriptAppend: request.SkipTranscriptAppend, Projection: request.Projection, FinalizedAt: request.FinalizedAt,
+							})
+						} else {
+							finalized, err = s.FinalizeSessionTurn(ctx, request)
+						}
+						if err != nil {
+							t.Fatal(err)
+						}
+						if finalized.State != store.SessionTurnFinalized {
+							t.Fatalf("turn state = %s", finalized.State)
+						}
+					}
+					session, err := s.GetSession(ctx, "ns", "session")
+					if err != nil {
+						t.Fatal(err)
+					}
+					var remainingExpiry sql.NullTime
+					if err := s.db.QueryRowContext(ctx, `SELECT active_task_expires_at FROM sessions WHERE namespace = ? AND name = ?`,
+						"ns", "session").Scan(&remainingExpiry); err != nil {
+						t.Fatal(err)
+					}
+					if tt.release {
+						if session.ActiveTask != "" || session.ActiveTaskUID != "" || remainingExpiry.Valid {
+							t.Fatalf("finalized Task ownership remains: name=%q UID=%q expiry=%v", session.ActiveTask, session.ActiveTaskUID, remainingExpiry)
+						}
+					} else if session.ActiveTask != tt.taskName || session.ActiveTaskUID != tt.ownerUID || !remainingExpiry.Valid || !remainingExpiry.Time.Equal(expires) {
+						t.Fatalf("another owner's lock changed: name=%q UID=%q expiry=%v", session.ActiveTask, session.ActiveTaskUID, remainingExpiry)
+					}
+					wantMessages := 2
+					if skipTranscript {
+						wantMessages = 0
+					}
+					if len(session.Messages) != wantMessages || session.MessageCount != wantMessages {
+						t.Fatalf("transcript messages=%d count=%d, want %d", len(session.Messages), session.MessageCount, wantMessages)
+					}
+				})
+			}
 		}
 	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("close legacy database: %v", err)
-	}
+}
 
-	migrated, err := NewDB(path)
-	if err != nil {
-		t.Fatalf("NewDB migration: %v", err)
+func sessionTurnFinalizationOwnershipFixture(t *testing.T, s *Store, persistenceOnly bool, taskUID string) store.FinalizeSessionTurnRequest {
+	t.Helper()
+	ctx := context.Background()
+	fence := store.ControllerEpochFence{Name: store.DefaultControllerEpochName, Epoch: 1, HolderID: "controller"}
+	if err := s.CreateSession(ctx, &store.SessionRecord{Namespace: "ns", Name: "session", SessionType: "task"}); err != nil {
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = migrated.Close() })
-	var namespace, sessionName string
-	if err := migrated.QueryRow(`SELECT namespace, session_name FROM session_turns WHERE id = 'turn-a'`).Scan(&namespace, &sessionName); err != nil {
-		t.Fatalf("read migrated turn binding: %v", err)
-	}
-	if namespace != "tenant-a" || sessionName != "session-a" {
-		t.Fatalf("migrated binding = %s/%s", namespace, sessionName)
-	}
-	rows, err := migrated.Query(`PRAGMA foreign_key_list(session_turns)`)
-	if err != nil {
-		t.Fatalf("foreign_key_list: %v", err)
-	}
-	for rows.Next() {
-		var id, seq int
-		var table, from, to, onUpdate, onDelete, match string
-		if err := rows.Scan(&id, &seq, &table, &from, &to, &onUpdate, &onDelete, &match); err != nil {
-			t.Fatalf("scan foreign key: %v", err)
+	key := store.SessionTurnKey{SessionUID: "session-uid", LeaseGeneration: 1, TaskUID: taskUID, Attempt: 1, PromptID: "prompt"}
+	turn := store.SessionTurn{Key: key, PromptAttemptID: "attempt", RequestDigest: controlTestDigest("turn"), UserPrompt: "user prompt"}
+	sessionVersion := int64(1)
+	if !persistenceOnly {
+		fence = seedControlEpoch(t, s)
+		control, err := s.CreateSessionControl(ctx, &store.SessionControl{
+			Namespace: "ns", SessionName: "session", SessionUID: key.SessionUID, RequestDigest: controlTestDigest("session"),
+		}, fence)
+		if err != nil {
+			t.Fatal(err)
 		}
-		if table == "session_controls" {
-			t.Fatal("session_turns still depends on SQLite session_controls")
+		control, err = s.AcquireSessionMutationLease(ctx, store.AcquireSessionMutationLeaseRequest{
+			Namespace: "ns", SessionName: "session", SessionUID: key.SessionUID, Fence: fence,
+			ExpectedVersion: control.Version, TaskUID: key.TaskUID, Attempt: key.Attempt, PromptID: key.PromptID,
+			RequestDigest: controlTestDigest("lease"),
+		})
+		if err != nil {
+			t.Fatal(err)
 		}
+		sessionVersion = control.Version
+		attempt, err := s.CreatePromptAttempt(ctx, boundPromptAttemptForSQLiteTest(&store.PromptAttempt{
+			Key:        store.PromptAttemptKey{Namespace: "ns", TaskUID: taskUID, Attempt: 1, PromptID: "prompt"},
+			SessionUID: key.SessionUID, SessionLeaseGeneration: key.LeaseGeneration, RequestDigest: controlTestDigest("prompt"),
+		}), fence)
+		if err != nil {
+			t.Fatal(err)
+		}
+		attempt = completePromptAttemptForFinalization(t, s, fence, attempt, store.PromptDeliveryNotRequested)
+		turn.PromptAttemptID = attempt.ID
 	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("foreign_key_list rows: %v", err)
+	created, err := s.CreateSessionTurnRecord(ctx, store.CreateSessionTurnRecordRequest{
+		Turn: turn, Namespace: "ns", SessionName: "session", Fence: fence,
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := rows.Close(); err != nil {
-		t.Fatalf("close foreign_key_list rows: %v", err)
-	}
-
-	var createdAt time.Time
-	if err := migrated.QueryRow(`SELECT created_at FROM session_turns WHERE id = 'turn-a'`).Scan(&createdAt); err != nil {
-		t.Fatalf("legacy turn timestamp was not preserved: %v", err)
+	payload := []byte(`{"phase":"Succeeded"}`)
+	return store.FinalizeSessionTurnRequest{
+		Key: key, Fence: fence, ExpectedSessionVersion: sessionVersion, ExpectedTurnVersion: created.Version,
+		FinalizationDigest: controlTestDigest("finalization"), TerminalKind: store.SessionTurnAssistantResult, TerminalContent: "answer",
+		Projection: store.OutboxProjection{
+			ID: "projection", AggregateKind: "SessionTurn", AggregateID: created.ID, ProjectionKind: "TaskStatus",
+			Payload: payload, PayloadDigest: controlTestDigest(string(payload)),
+		},
+		FinalizedAt: time.Now().UTC(),
 	}
 }

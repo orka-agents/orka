@@ -34,10 +34,6 @@ func newRunCmd() *cobra.Command {
   Interactive: orka run
   Piped:       echo "fix bugs" | orka run`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if agent != "" && provider != "" {
-				return fmt.Errorf("--agent and --provider are mutually exclusive")
-			}
-
 			c := newClientFromCmd(cmd)
 
 			// Pre-flight check (retry once on stale cache)
@@ -126,7 +122,7 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&agent, "agent", "", "Agent to use for the task")
 	cmd.Flags().StringVar(&session, "session", "", "Resume a specific session")
 	cmd.Flags().StringVar(&model, "model", "", "Model to use")
-	cmd.Flags().StringVar(&provider, "provider", "", "Provider to use")
+	cmd.Flags().StringVar(&provider, "provider", "", "Chat Provider to use (also selects the coordinator Provider for a runtime --agent)")
 	cmd.Flags().CountVarP(&verbose, "verbose", "v", "Verbosity level (-v, -vv)")
 
 	return cmd
@@ -256,7 +252,7 @@ func streamChat(
 		}
 
 		switch evt.Event {
-		case "status":
+		case cliStatusKey:
 			// Session acknowledged — no action needed
 		case "message":
 			if data.Content != "" {
@@ -290,7 +286,8 @@ func streamChat(
 	if hadContent {
 		fmt.Fprintln(os.Stdout) //nolint:errcheck
 	}
-	return 0
+	fmt.Fprintln(os.Stderr, "\nStream error: response ended before terminal done event")
+	return 1
 }
 
 func handleToolCallEvent(data client.SSEEventData, verbosity int) {
@@ -328,7 +325,7 @@ func handleToolResultEvent(data client.SSEEventData, verbosity int) {
 				taskName, _ := result["name"].(string)
 				elapsed, _ := result["duration"].(string)
 				if taskName == "" {
-					taskName = "task"
+					taskName = cliTaskCommand
 				}
 				if verbosity < VerbosityVV {
 					fmt.Fprintf(os.Stderr, "  ↻ %s: %s %s\n", taskName, phase, elapsed)

@@ -81,6 +81,8 @@ type GatewayEvent struct {
 	SessionName       string            `json:"sessionName,omitempty"`
 	TaskName          string            `json:"taskName,omitempty"`
 	TaskUID           string            `json:"taskUid,omitempty"`
+	TaskAllowedTools  []string          `json:"-"`
+	TaskPolicyFrozen  bool              `json:"-"`
 	DeliveryID        string            `json:"deliveryId,omitempty"`
 	ProviderMessageID string            `json:"providerMessageId,omitempty"`
 	TraceParent       string            `json:"-"`
@@ -189,6 +191,27 @@ type GatewayExpiryProjection struct {
 	Reason      string
 	Delivery    GatewayDelivery
 	CompletedAt time.Time
+}
+
+// GatewayMessageEnqueue admits one bounded nonterminal message for an exact Task/event.
+// All routing and delivery identity are derived from the durable event and RequestID;
+// callers must authorize the live Task and Gateway identity before entering the writer.
+// If current readiness/capability denies admission, ReplayOnly permits only receipt recovery.
+// MaxMessages and MaxAttempts are positive controller policy, not worker input.
+// Replays compare identity and Text, not mutable retry policy or request time.
+type GatewayMessageEnqueue struct {
+	Namespace    string
+	NamespaceUID string
+	EventID      string
+	TaskName     string
+	TaskUID      string
+	RequestID    string
+	Text         string
+	ReplayOnly   bool // Controller-only control bit; never persisted or accepted from workers.
+	MaxMessages  int
+	MaxAttempts  int
+	Now          time.Time
+	ExpiresAt    time.Time
 }
 
 // GatewayDelivery is a normalized durable outbound delivery record.

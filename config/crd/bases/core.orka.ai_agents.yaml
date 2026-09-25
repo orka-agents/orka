@@ -1094,10 +1094,13 @@ spec:
                     type: array
                   workspace:
                     description: |-
-                      Workspace requests an execution workspace for worker-backed Task types.
-                      ACP core agent Tasks reject this field because their ephemeral workspace is
-                      owned by RuntimeSession lifecycle and clean-room publication. Actor-backed
-                      RuntimeSession support is a future integration behind the v2 lifecycle seam.
+                      Workspace requests an execution workspace. Worker-backed Task types use
+                      it directly. ACP agent Tasks may bind a workspace-provider-backed
+                      RuntimeSession through it (a provider/templateRef request, or a classRef
+                      with the workspace provider API enabled); these dispatch paths are
+                      flag-gated behind --acp-workspace-dispatch-enabled plus the matching
+                      provider flag and fail closed otherwise. Clean-room publication remains
+                      owned by RuntimeSession lifecycle.
                     properties:
                       boot:
                         description: |-
@@ -1179,6 +1182,35 @@ spec:
                         - agent-sandbox
                         - substrate
                         type: string
+                      restoreFrom:
+                        description: |-
+                          RestoreFrom seeds a new workspace from a retained Data checkpoint in the
+                          Task namespace. This is a cold start with fresh credentials. It does not
+                          replay a previous Task or restore process memory. Every continuation of
+                          the new Session must keep this immutable origin reference.
+                        properties:
+                          digest:
+                            description: Digest pins the artifact accepted by the
+                              caller.
+                            pattern: ^sha256:[a-f0-9]{64}$
+                            type: string
+                          name:
+                            description: Name identifies a checkpoint in the Task
+                              namespace.
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                          uid:
+                            description: UID prevents restoring through a replaced
+                              checkpoint name.
+                            maxLength: 128
+                            minLength: 1
+                            type: string
+                        required:
+                        - digest
+                        - name
+                        - uid
+                        type: object
                       reusePolicy:
                         default: none
                         description: |-
@@ -1241,6 +1273,8 @@ spec:
                         && !has(self.poolRef) && (!has(self.enabled) || !self.enabled)
                         && !has(self.cleanupPolicy) && (!has(self.boot) || !self.boot)
                         && !has(self.snapshot) && !has(self.hibernation))'
+                    - message: restoreFrom requires classRef
+                      rule: '!has(self.restoreFrom) || has(self.classRef)'
                 type: object
               model:
                 description: |-
@@ -1314,18 +1348,6 @@ spec:
                 required:
                 - name
                 type: object
-              rateLimit:
-                description: RateLimit defines rate limiting configuration
-                properties:
-                  requestsPerMinute:
-                    description: RequestsPerMinute limits requests per minute
-                    format: int32
-                    type: integer
-                  tokensPerMinute:
-                    description: TokensPerMinute limits tokens per minute
-                    format: int64
-                    type: integer
-                type: object
               resources:
                 description: Resources defines the resource limits for tasks using
                   this agent
@@ -1393,11 +1415,12 @@ spec:
                 properties:
                   contractVersion:
                     description: |-
-                      ContractVersion is the immutable harness protocol selector for built-in
-                      runtime types. There is no default: a missing selector is never
-                      interpreted as either protocol, and fail-closed admission requires an
-                      explicit value on new built-in Agents. runtime.type alone (including
-                      opencode, which exists in both protocols) is never protocol evidence.
+                      ContractVersion is the harness protocol selector for built-in runtime
+                      types. It may be omitted: the namespace is bound to exactly one
+                      execution mode, so an omitted selector means that mode. An explicit
+                      value must match the namespace mode and, once written, never changes.
+                      runtime.type alone (including opencode, which exists in both protocols)
+                      is never protocol evidence.
                     enum:
                     - orka.harness.v1
                     - orka.harness.v2
@@ -1414,7 +1437,6 @@ spec:
                       type: string
                     type: array
                   defaultMaxTurns:
-                    default: 50
                     description: DefaultMaxTurns is the default maximum agent loop
                       iterations for tasks using this Agent
                     format: int32
@@ -1487,18 +1509,6 @@ spec:
                     format: int32
                     minimum: 1
                     type: integer
-                  persistence:
-                    default: configmap
-                    description: Persistence defines the storage backend (configmap,
-                      pvc, none)
-                    enum:
-                    - configmap
-                    - pvc
-                    - none
-                    type: string
-                  ttl:
-                    description: TTL defines the session time-to-live (auto-expire)
-                    type: string
                 type: object
               skills:
                 description: Skills lists the default skills for this agent

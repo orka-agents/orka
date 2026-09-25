@@ -40,8 +40,10 @@ import (
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	orkametrics "github.com/orka-agents/orka/internal/metrics"
+	storekube "github.com/orka-agents/orka/internal/store/kube"
 )
 
 var (
@@ -59,6 +61,7 @@ type fakeRuntimePoolSupervisorClient struct {
 	probe       RuntimePoolProbeResult
 	probeErr    error
 	probeCalls  int
+	afterProbe  func()
 	drainCalls  int
 	drainReason string
 	drainErr    error
@@ -130,6 +133,9 @@ func (c *runtimePoolPodDeleteRecordingClient) Delete(ctx context.Context, object
 
 func (f *fakeRuntimePoolSupervisorClient) Probe(_ context.Context, _, _ string, _ []byte) (RuntimePoolProbeResult, error) {
 	f.probeCalls++
+	if f.afterProbe != nil {
+		f.afterProbe()
+	}
 	return f.probe, f.probeErr
 }
 
@@ -165,6 +171,50 @@ func TestRuntimePoolReconcilerScalesZeroToOneWithHardenedResources(t *testing.T)
 	gotPool := runtimePoolTestGetPool(t, r, pool)
 	if gotPool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStarting || gotPool.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed {
 		t.Fatalf("status = %s/%s, want Starting/Closed", gotPool.Status.Lifecycle, gotPool.Status.AdmissionState)
+	}
+}
+
+func TestRuntimePoolReconcilerWaitsForProviderProxy(t *testing.T) {
+	pool := runtimePoolTestObject(1)
+	r := runtimePoolTestReconciler(t, runtimePoolTestScheme(t), nil, pool)
+	configuredProxy := r.ProviderProxy
+	r.ProviderProxy = RuntimePoolProviderProxyConfig{}
+
+	runtimePoolReconcile(t, r, pool)
+	gotPool := runtimePoolTestGetPool(t, r, pool)
+	if gotPool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded || gotPool.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed {
+		t.Fatalf("unconfigured gateway status = %s/%s, want Degraded/Closed", gotPool.Status.Lifecycle, gotPool.Status.AdmissionState)
+	}
+	if !strings.Contains(gotPool.Status.Message, "authenticated provider proxy base URL is required") {
+		t.Fatalf("missing gateway was not reported: %s", gotPool.Status.Message)
+	}
+	for _, list := range []client.ObjectList{
+		&appsv1.DeploymentList{}, &corev1.PodList{}, &corev1.SecretList{},
+		&corev1.ServiceList{}, &networkingv1.NetworkPolicyList{},
+	} {
+		if err := r.List(context.Background(), list); err != nil {
+			t.Fatal(err)
+		}
+		items, err := meta.ExtractList(list)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(items) != 0 {
+			t.Fatalf("unconfigured gateway created %T resources", list)
+		}
+	}
+
+	// Configuring the gateway later lets the existing pool start.
+	r.ProviderProxy = configuredProxy
+	runtimePoolReconcile(t, r, pool)
+	gotPool = runtimePoolTestGetPool(t, r, pool)
+	if gotPool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStarting {
+		t.Fatalf("configured gateway status = %s, want Starting", gotPool.Status.Lifecycle)
+	}
+	var deployment appsv1.Deployment
+	key := types.NamespacedName{Namespace: pool.Namespace, Name: runtimePoolResourceName(pool.Namespace, pool.Name)}
+	if err := r.Get(context.Background(), key, &deployment); err != nil {
+		t.Fatalf("configured gateway did not start the runtime Deployment: %v", err)
 	}
 }
 
@@ -988,12 +1038,52 @@ func TestRuntimePoolReconcilerRolloutFailureAndTimeoutPreserveOldPod(t *testing.
 			t.Fatal("rollout timeout replaced or stopped the live old template")
 		}
 
+		runtimePoolReconcile(t, r, pool)
+		status = runtimePoolTestGetPool(t, r, pool).Status
+		condition = meta.FindStatusCondition(status.Conditions, corev1alpha1.RuntimePoolConditionRolloutReady)
+		if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded || condition == nil || condition.Reason != runtimePoolRolloutReasonTimedOut {
+			t.Fatalf("timeout retry status/condition = %s/%#v, want Degraded/RolloutTimedOut", status.Lifecycle, condition)
+		}
+
 		supervisor.probe.Status.Pressure.LiveDescendants = 0
 		runtimePoolReconcile(t, r, pool)
 		if got := runtimePoolTestGetPool(t, r, pool).Status.Lifecycle; got != corev1alpha1.RuntimePoolLifecycleQuiescent {
 			t.Fatalf("lifecycle after late quiescence = %s, want Quiescent", got)
 		}
 	})
+}
+
+func TestRuntimePoolReconcilerRolloutFailsClosedWhenActivePodDisappears(t *testing.T) {
+	scheme := runtimePoolTestScheme(t)
+	pool := runtimePoolTestObject(1)
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	deployment, oldPod := runtimePoolTestStartServing(t, r, pool, supervisor, "lost-rollout-pod", "lost-rollout-pod-uid", "10.0.0.93", "lost-rollout-boot")
+	oldRevision := deployment.Spec.Template.Annotations[runtimePoolTemplateRevisionAnnotation]
+
+	r.ProviderProxy.BearerToken = bytes.Clone(runtimePoolTestProviderTokenNext)
+	if err := r.Delete(context.Background(), &oldPod); err != nil {
+		t.Fatalf("delete old runtime Pod: %v", err)
+	}
+	replacement := runtimePoolReadyPodForDeployment(pool, deployment, "unadmitted-replacement-pod", "unadmitted-replacement-pod-uid", "10.0.0.94")
+	runtimePoolTestCreatePod(t, r, &replacement)
+
+	runtimePoolReconcile(t, r, pool)
+	got := runtimePoolTestGetPool(t, r, pool)
+	condition := meta.FindStatusCondition(got.Status.Conditions, corev1alpha1.RuntimePoolConditionRolloutReady)
+	if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		got.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
+		got.Status.ActiveInstance == nil || got.Status.ActiveInstance.PodUID != string(oldPod.UID) ||
+		condition == nil || condition.Reason != corev1alpha1.RuntimePoolReasonRolloutFailed {
+		t.Fatalf("active-Pod loss status = %s/%s active=%#v condition=%#v, want fail-closed with the old fence preserved", got.Status.Lifecycle, got.Status.AdmissionState, got.Status.ActiveInstance, condition)
+	}
+	deployment = runtimePoolTestDeployment(t, r, pool.Namespace, deployment.Name)
+	if replicas := ptr.Deref(deployment.Spec.Replicas, -1); replicas != 1 {
+		t.Fatalf("replicas after active-Pod loss = %d, want 1", replicas)
+	}
+	if revision := deployment.Spec.Template.Annotations[runtimePoolTemplateRevisionAnnotation]; revision != oldRevision {
+		t.Fatalf("active-Pod loss installed replacement template %q without termination proof; want %q", revision, oldRevision)
+	}
 }
 
 func TestRuntimePoolPodTemplateRevisionChangesForEveryRuntimeIdentityInput(t *testing.T) {
@@ -1035,6 +1125,29 @@ func TestRuntimePoolPodTemplateRevisionChangesForEveryRuntimeIdentityInput(t *te
 				t.Fatalf("template revision did not change for %s", name)
 			}
 		})
+	}
+}
+
+func TestRuntimePoolPodTemplateProjectsE2EPromptWriteAmbiguityMarker(t *testing.T) {
+	pool := runtimePoolTestObject(1)
+	r := runtimePoolTestReconciler(t, runtimePoolTestScheme(t), nil, pool)
+	r.E2EPromptWriteAmbiguityMarker = "ORKA_E2E_WS_LC_AMBIGUOUS_OK"
+	cfg, err := r.runtimePoolConfig(pool)
+	if err != nil {
+		t.Fatalf("runtimePoolConfig: %v", err)
+	}
+	selector := map[string]string{runtimePoolKeyLabel: cfg.labels[runtimePoolKeyLabel]}
+	template := r.runtimePoolPodTemplate(pool, cfg, selector, "auth", "provider")
+	assertRuntimePoolEnvironment(t, r, pool, template.Spec.Containers[0].Env)
+
+	found := false
+	for _, item := range template.Spec.Containers[0].Env {
+		if item.Name == runtimePoolE2EPromptWriteAmbiguity && item.Value == r.E2EPromptWriteAmbiguityMarker {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("runtime template omitted the configured E2E prompt write ambiguity marker")
 	}
 }
 
@@ -1229,8 +1342,12 @@ func TestFinishRuntimePoolStatusCountsScaleToZeroOnceForStaleReconcile(t *testin
 	if _, err := r.finishRuntimePoolStatus(context.Background(), &current, stopped, runtimePoolRequeue); err != nil {
 		t.Fatalf("first stopped status patch: %v", err)
 	}
-	if _, err := r.finishRuntimePoolStatus(context.Background(), stale, stopped, runtimePoolRequeue); !apierrors.IsConflict(err) {
-		t.Fatalf("stale stopped status patch error = %v, want conflict", err)
+	// The stale writer loses the optimistic lock; that is a normal race, so
+	// it requeues quietly instead of surfacing a reconcile error, and it
+	// must not count the scale-to-zero a second time.
+	result, err := r.finishRuntimePoolStatus(context.Background(), stale, stopped, runtimePoolRequeue)
+	if err != nil || result.RequeueAfter != runtimePoolConflictRequeue {
+		t.Fatalf("stale stopped status patch = (%+v, %v), want quiet requeue", result, err)
 	}
 	var afterMetric dto.Metric
 	if err := counter.Write(&afterMetric); err != nil {
@@ -1266,6 +1383,383 @@ func TestRuntimePoolReconcilerClosesAdmissionForTwoReadyPods(t *testing.T) {
 	}
 }
 
+func TestRuntimePoolReconcilerKeepsSupersededPlainPoolAvailableForBoundDemand(t *testing.T) {
+	scheme := runtimePoolTestScheme(t)
+	pool := runtimePoolTestObject(1)
+	identity, err := acpDomainDigest("runtime-pool-identity", map[string]string{
+		"profileDigest": pool.Spec.Runtime.Profile.Digest,
+		"runtimeImage":  pool.Spec.Runtime.Image,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool.Name = acpRuntimePoolName(pool.Spec.Runtime.Profile.ProviderKind, harnessv2.ProfileDigest(identity))
+	pool.UID = types.UID(pool.Namespace + "-retired-pool-uid")
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool)
+	deployment, _ := runtimePoolTestStartServing(t, r, pool, supervisor, "retained-pod", "retained-pod-uid", "10.0.0.95", "retained-boot")
+	r.AllowedImages.Codex = "docker.io/sozercan/orka-acp@sha256:" + strings.Repeat("9", 64)
+
+	runtimePoolReconcile(t, r, pool)
+	got := runtimePoolTestGetPool(t, r, pool)
+	if got.Spec.DesiredReplicas != 1 || got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleServing ||
+		got.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionAccepting {
+		t.Fatalf("superseded pool = replicas %d status %s/%s, want 1 and Serving/Accepting", got.Spec.DesiredReplicas, got.Status.Lifecycle, got.Status.AdmissionState)
+	}
+	if got.Spec.Runtime.Image != pool.Spec.Runtime.Image {
+		t.Fatalf("superseded pool image = %q, want immutable original %q", got.Spec.Runtime.Image, pool.Spec.Runtime.Image)
+	}
+	deployment = runtimePoolTestDeployment(t, r, pool.Namespace, deployment.Name)
+	if replicas := ptr.Deref(deployment.Spec.Replicas, -1); replicas != 1 {
+		t.Fatalf("superseded deployment replicas = %d, want 1 while bound demand may remain", replicas)
+	}
+	if meta.FindStatusCondition(got.Status.Conditions, acpRuntimePoolImageProvenanceCondition) != nil {
+		t.Fatal("test requires Deployment-backed historical image provenance")
+	}
+	newGeneration := got.DeepCopy()
+	newGeneration.Generation++
+	historicalConfig, err := r.runtimePoolConfigForDrain(newGeneration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorized, err := r.historicalRuntimePoolImageAuthorized(context.Background(), newGeneration, historicalConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !authorized {
+		t.Fatal("Deployment provenance did not survive a controller-owned generation change")
+	}
+}
+
+func TestRuntimePoolReconcilerReportsSupersededScaleToZeroPoolStopped(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		configuredImage string
+	}{
+		{name: "rotated image", configuredImage: "docker.io/sozercan/orka-acp@sha256:" + strings.Repeat("9", 64)},
+		{name: "provider image removed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := runtimePoolTestScheme(t)
+			pool := runtimePoolTestObject(0)
+			identity, err := acpDomainDigest("runtime-pool-identity", map[string]string{
+				"profileDigest": pool.Spec.Runtime.Profile.Digest,
+				"runtimeImage":  pool.Spec.Runtime.Image,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			pool.Name = acpRuntimePoolName(pool.Spec.Runtime.Profile.ProviderKind, harnessv2.ProfileDigest(identity))
+			pool.UID = types.UID(pool.Namespace + "-superseded-stopped-pool-uid")
+			meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
+				Type:               acpRuntimePoolImageProvenanceCondition,
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: pool.Generation,
+				Reason:             acpRuntimePoolImageProvenanceReason,
+				Message:            "RuntimePool image and profile match a verified immutable Task execution plan",
+			})
+			pool.Generation++
+			r := runtimePoolTestReconciler(t, scheme, &fakeRuntimePoolSupervisorClient{}, pool)
+			r.AllowedImages.Codex = tc.configuredImage
+
+			runtimePoolReconcile(t, r, pool)
+			got := runtimePoolTestGetPool(t, r, pool)
+			condition := meta.FindStatusCondition(got.Status.Conditions, corev1alpha1.RuntimePoolConditionRolloutReady)
+			if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopped ||
+				got.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
+				condition == nil || condition.Status != metav1.ConditionTrue {
+				t.Fatalf("historical scale-to-zero status = %s/%s condition=%#v, want Stopped/Closed with rollout ready", got.Status.Lifecycle, got.Status.AdmissionState, condition)
+			}
+		})
+	}
+}
+
+func TestHistoricalRuntimePoolImageRecoveryBackfillsWorkspaceProvenanceFromTaskBinding(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	pool := runtimePoolTestObject(1)
+	pool.Name = "acp-ws-codex-" + strings.Repeat("a", 16)
+	pool.UID = types.UID(pool.Namespace + "-historical-workspace-pool-uid")
+	pool.Spec.ExecutionWorkspace = &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
+		Provider:      corev1alpha1.WorkspaceProviderAgentSandbox,
+		BindingDigest: "sha256:" + strings.Repeat("7", 64),
+	}
+	pool.Spec.Capacity = &corev1alpha1.RuntimePoolCapacitySpec{MaxResidentSessions: 1, MaxRunningPrompts: 1}
+	r := runtimePoolTestReconciler(t, scheme, nil, pool)
+	r.AllowedImages.Codex = "docker.io/sozercan/orka-acp@sha256:" + strings.Repeat("9", 64)
+
+	if !acpRuntimePoolImageRequiresHistoricalRecovery(pool, r.AllowedImages) {
+		t.Fatal("workspace RuntimePool was excluded from historical image recovery")
+	}
+	if acpRuntimePoolImageSuperseded(pool, r.AllowedImages) {
+		t.Fatal("workspace RuntimePool was exposed to the plain-pool superseded reaper")
+	}
+	historicalConfig, err := r.runtimePoolConfigForDrain(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorized, err := r.historicalRuntimePoolImageAuthorized(context.Background(), pool, historicalConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authorized {
+		t.Fatal("unproven workspace RuntimePool was authorized for a historical image")
+	}
+
+	forged := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:  pool.Namespace,
+			Name:       "forged-workspace-provenance",
+			UID:        types.UID("forged-workspace-provenance-uid"),
+			Generation: 1,
+		},
+		Status: corev1alpha1.TaskStatus{Execution: &corev1alpha1.TaskExecutionStatus{
+			RuntimePoolName: pool.Name,
+			RuntimePoolUID:  string(pool.UID),
+		}},
+	}
+	if err := r.Create(context.Background(), forged); err != nil {
+		t.Fatal(err)
+	}
+	authorized, err = r.historicalRuntimePoolImageAuthorized(context.Background(), pool, historicalConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authorized {
+		t.Fatal("caller-written Task execution status authorized a historical workspace image")
+	}
+
+	snapshotDigest := "sha256:" + strings.Repeat("8", 64)
+	evidence := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:  pool.Namespace,
+			Name:       "verified-workspace-provenance",
+			UID:        types.UID("verified-workspace-provenance-uid"),
+			Generation: 1,
+		},
+		Status: corev1alpha1.TaskStatus{Execution: &corev1alpha1.TaskExecutionStatus{
+			RuntimePoolName: pool.Name,
+			RuntimePoolUID:  string(pool.UID),
+		}},
+	}
+	evidence.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{
+		SchemaVersion:   1,
+		ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2,
+		Backend:         corev1alpha1.AgentExecutionBackendRuntimePool,
+		Task: corev1alpha1.AgentExecutionBindingTaskRef{
+			NamespaceUID:        types.UID("workspace-provenance-namespace-uid"),
+			UID:                 evidence.UID,
+			BoundSpecGeneration: evidence.Generation,
+		},
+		Snapshot: corev1alpha1.AgentExecutionSnapshotRef{
+			ID:            string(evidence.UID) + "/" + snapshotDigest,
+			Digest:        snapshotDigest,
+			SchemaVersion: 1,
+		},
+		RuntimeType:                       corev1alpha1.AgentRuntimeCodex,
+		RuntimeProfileDigest:              pool.Spec.Runtime.Profile.Digest,
+		RuntimeProfileDigestSchemaVersion: 1,
+		BoundAt:                           metav1.NewTime(runtimePoolTestNow),
+	}
+	evidence.Status.AgentExecutionBinding.BindingDigest, err = canonicalAgentExecutionBindingDigest(*evidence.Status.AgentExecutionBinding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Create(context.Background(), evidence); err != nil {
+		t.Fatal(err)
+	}
+	authorized, err = r.historicalRuntimePoolImageAuthorized(context.Background(), pool, historicalConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !authorized {
+		t.Fatal("exact Task execution binding did not authorize the historical workspace image")
+	}
+	condition := meta.FindStatusCondition(pool.Status.Conditions, acpRuntimePoolImageProvenanceCondition)
+	if condition == nil || condition.Status != metav1.ConditionTrue || condition.Reason != acpRuntimePoolImageProvenanceReason {
+		t.Fatalf("backfilled image provenance = %#v, want True/%s", condition, acpRuntimePoolImageProvenanceReason)
+	}
+	pool.Generation++
+	authorized, err = r.historicalRuntimePoolImageAuthorized(context.Background(), pool, historicalConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !authorized {
+		t.Fatal("proven workspace RuntimePool was not authorized after an image rotation")
+	}
+}
+
+func TestHistoricalRuntimePoolImageRecoveryBackfillsWorkspaceProvenanceFromSessionLineage(t *testing.T) {
+	scheme := runtimePoolWorkspaceTestScheme(t)
+	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	const (
+		workspaceName = "retained-session-workspace"
+		sessionName   = "retained-session"
+		sessionUID    = "retained-session-uid"
+	)
+	poolIdentity, err := acpDomainDigest("runtime-pool-identity", map[string]string{
+		acpWorkspaceSessionUIDMapKey: sessionUID,
+		acpWorkspaceSlotMapKey:       defaultWorkspaceSlotName,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := runtimePoolTestObject(0)
+	pool.Name = acpWorkspaceRuntimePoolName("session", harnessv2.ProfileDigest(poolIdentity))
+	pool.UID = types.UID("retained-session-pool-uid")
+	pool.Labels[acpExecutionWorkspaceLinkLabel] = workspaceName
+	pool.Annotations = map[string]string{}
+	pool.Annotations[acpExecutionWorkspaceUIDAnnotation] = "retained-session-workspace-uid"
+	pool.Spec.ExecutionWorkspace = &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
+		Provider:      corev1alpha1.WorkspaceProviderAgentSandbox,
+		BindingDigest: "sha256:" + strings.Repeat("7", 64),
+	}
+	pool.Spec.Capacity = &corev1alpha1.RuntimePoolCapacitySpec{MaxResidentSessions: 1, MaxRunningPrompts: 1}
+
+	classBinding := workspacev1alpha1.ImmutableObjectBinding{
+		Name: "workspace-class", UID: types.UID("workspace-class-uid"), Generation: 1,
+		ProfileHash: "sha256:" + strings.Repeat("4", 64),
+	}
+	providerBinding := workspacev1alpha1.ImmutableObjectBinding{
+		Name: "workspace-provider", UID: types.UID("workspace-provider-uid"), Generation: 1,
+	}
+	linkedWorkspace := &workspacev1alpha1.ExecutionWorkspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: pool.Namespace,
+			Name:      workspaceName,
+			UID:       types.UID(pool.Annotations[acpExecutionWorkspaceUIDAnnotation]),
+			Labels: map[string]string{
+				workspacev1alpha1.ProviderControllerLabel: acpWorkspaceControllerLabelValue,
+			},
+			Annotations: map[string]string{
+				acpExecutionWorkspacePoolAnnotation: pool.Name,
+				acpWorkspaceBackendAnnotation:       string(pool.Spec.ExecutionWorkspace.Provider),
+			},
+			Generation: 2,
+		},
+		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
+			Mode:            workspacev1alpha1.ExecutionWorkspaceModeInteractive,
+			ClassBinding:    classBinding,
+			ProviderBinding: providerBinding,
+			CoreAdmission: &workspacev1alpha1.ExecutionWorkspaceCoreAdmission{
+				ClassBinding: classBinding, ProviderBinding: providerBinding, AdmittedGeneration: 2,
+			},
+			SessionRef: &workspacev1alpha1.ObjectIdentityReference{
+				Name: sessionName,
+				UID:  types.UID(sessionUID),
+			},
+			Slot: defaultWorkspaceSlotName,
+		},
+		Status: workspacev1alpha1.ExecutionWorkspaceStatus{
+			ObservedGeneration: 2,
+			Conditions: []metav1.Condition{{
+				Type:               string(workspacev1alpha1.ConditionWorkspaceAdmitted),
+				Status:             metav1.ConditionTrue,
+				Reason:             string(workspacev1alpha1.ReasonReady),
+				ObservedGeneration: 2,
+			}},
+		},
+	}
+	lineageDigest, err := acpSessionLineageConfigurationDigest(
+		pool.Spec.Runtime.Profile.Digest,
+		pool.Spec.Runtime.Image,
+		pool.Spec.ExecutionWorkspace.BindingDigest,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionControl := &corev1alpha1.RuntimeSessionControl{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: pool.Namespace,
+			Name:      storekube.RuntimeSessionControlObjectName(sessionName),
+			UID:       types.UID("retained-session-control-uid"),
+		},
+		Spec: corev1alpha1.RuntimeSessionControlSpec{
+			SessionName:   sessionName,
+			SessionUID:    sessionUID,
+			RequestDigest: "sha256:" + strings.Repeat("5", 64),
+			Owner:         corev1alpha1.ControlRecordOwner{Kind: "Session", UID: sessionUID},
+		},
+		Status: corev1alpha1.RuntimeSessionControlStatus{
+			ControlRecordMutationStatus: corev1alpha1.ControlRecordMutationStatus{Version: 1},
+			Lineage: &corev1alpha1.RuntimeSessionLineageStatus{
+				NamespaceUID:    types.UID("retained-session-namespace-uid"),
+				SessionUID:      sessionUID,
+				ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2,
+				Generation:      1,
+				RuntimeIdentity: runtimePoolProviderCodex,
+				ConfigDigest:    lineageDigest,
+				EstablishedAt:   metav1.NewTime(runtimePoolTestNow),
+			},
+		},
+	}
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+		Name: pool.Namespace,
+		UID:  sessionControl.Status.Lineage.NamespaceUID,
+	}}
+
+	tests := []struct {
+		name   string
+		mutate func(*corev1alpha1.RuntimePool, *workspacev1alpha1.ExecutionWorkspace, *corev1alpha1.RuntimeSessionControl)
+		want   bool
+	}{
+		{
+			name: "workspace incarnation mismatch",
+			mutate: func(candidate *corev1alpha1.RuntimePool, _ *workspacev1alpha1.ExecutionWorkspace, _ *corev1alpha1.RuntimeSessionControl) {
+				candidate.Annotations[acpExecutionWorkspaceUIDAnnotation] = "recreated-workspace-uid"
+			},
+		},
+		{
+			name: "workspace lacks core admission evidence",
+			mutate: func(_ *corev1alpha1.RuntimePool, candidate *workspacev1alpha1.ExecutionWorkspace, _ *corev1alpha1.RuntimeSessionControl) {
+				candidate.Spec.CoreAdmission = nil
+			},
+		},
+		{
+			name: "reciprocal link has nondeterministic pool identity",
+			mutate: func(candidate *corev1alpha1.RuntimePool, workspace *workspacev1alpha1.ExecutionWorkspace, _ *corev1alpha1.RuntimeSessionControl) {
+				candidate.Name = "acp-ws-session-0000000000000000"
+				workspace.Annotations[acpExecutionWorkspacePoolAnnotation] = candidate.Name
+			},
+		},
+		{
+			name: "session lineage does not match runtime configuration",
+			mutate: func(_ *corev1alpha1.RuntimePool, _ *workspacev1alpha1.ExecutionWorkspace, candidate *corev1alpha1.RuntimeSessionControl) {
+				candidate.Status.Lineage.ConfigDigest = "sha256:" + strings.Repeat("6", 64)
+			},
+		},
+		{name: "exact retained session lineage", want: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			candidatePool := pool.DeepCopy()
+			candidateWorkspace := linkedWorkspace.DeepCopy()
+			candidateControl := sessionControl.DeepCopy()
+			if tc.mutate != nil {
+				tc.mutate(candidatePool, candidateWorkspace, candidateControl)
+			}
+			r := runtimePoolTestReconciler(t, scheme, nil, candidatePool, candidateWorkspace, candidateControl, namespace.DeepCopy())
+			r.AllowedImages.Codex = "docker.io/sozercan/orka-acp@sha256:" + strings.Repeat("9", 64)
+			historicalConfig, err := r.runtimePoolConfigForDrain(candidatePool)
+			if err != nil {
+				t.Fatal(err)
+			}
+			authorized, err := r.historicalRuntimePoolImageAuthorized(context.Background(), candidatePool, historicalConfig)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if authorized != tc.want {
+				t.Fatalf("historical image authorized = %t, want %t", authorized, tc.want)
+			}
+			condition := meta.FindStatusCondition(candidatePool.Status.Conditions, acpRuntimePoolImageProvenanceCondition)
+			if (condition != nil) != tc.want {
+				t.Fatalf("backfilled provenance condition = %#v, want present %t", condition, tc.want)
+			}
+		})
+	}
+}
+
 func TestRuntimePoolReconcilerReportsBadImageAndScheduling(t *testing.T) {
 	t.Run("unmanaged pool is rejected", func(t *testing.T) {
 		scheme := runtimePoolTestScheme(t)
@@ -1280,16 +1774,33 @@ func TestRuntimePoolReconcilerReportsBadImageAndScheduling(t *testing.T) {
 		}
 	})
 
-	t.Run("unapproved digest-pinned image is rejected", func(t *testing.T) {
+	t.Run("deterministic superseded pool without provenance is rejected", func(t *testing.T) {
 		scheme := runtimePoolTestScheme(t)
 		pool := runtimePoolTestObject(1)
 		pool.Spec.Runtime.Image = "docker.io/example/unapproved@sha256:" + strings.Repeat("9", 64)
+		identity, err := acpDomainDigest("runtime-pool-identity", map[string]string{
+			"profileDigest": pool.Spec.Runtime.Profile.Digest,
+			"runtimeImage":  pool.Spec.Runtime.Image,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		pool.Name = acpRuntimePoolName(pool.Spec.Runtime.Profile.ProviderKind, harnessv2.ProfileDigest(identity))
+		pool.UID = types.UID(pool.Namespace + "-unproven-superseded-pool-uid")
 		r := runtimePoolTestReconciler(t, scheme, nil, pool)
 
 		runtimePoolReconcile(t, r, pool)
 		got := runtimePoolTestGetPool(t, r, pool)
 		if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded || !strings.Contains(got.Status.Message, "controller-approved") {
 			t.Fatalf("unapproved-image status = %#v", got.Status)
+		}
+		var deployment appsv1.Deployment
+		err = r.Get(context.Background(), types.NamespacedName{
+			Namespace: pool.Namespace,
+			Name:      runtimePoolResourceName(pool.Namespace, pool.Name),
+		}, &deployment)
+		if !apierrors.IsNotFound(err) {
+			t.Fatalf("Deployment exists for unproven superseded image, err=%v", err)
 		}
 	})
 
@@ -1367,7 +1878,8 @@ func TestRuntimePoolReconcilerCleanupOnlyFinalizerCleansCrossNamespaceChildren(t
 		runtimePoolNamespaceLabel: pool.Namespace,
 		runtimePoolNameLabel:      pool.Name,
 	}
-	objects := []client.Object{
+	objects := make([]client.Object, 0, 14)
+	objects = append(objects,
 		pool,
 		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: base, Namespace: pool.Spec.RuntimeNamespace, Labels: labels}},
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: base, Namespace: pool.Spec.RuntimeNamespace, Labels: labels}},
@@ -1375,7 +1887,7 @@ func TestRuntimePoolReconcilerCleanupOnlyFinalizerCleansCrossNamespaceChildren(t
 		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "runtime-pod", Namespace: pool.Spec.RuntimeNamespace, Labels: labels}},
 		&appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{Name: "runtime-rs", Namespace: pool.Spec.RuntimeNamespace, Labels: labels}},
 		&policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: runtimePoolChildName(base, "pdb"), Namespace: pool.Spec.RuntimeNamespace, Labels: labels}},
-	}
+	)
 	for _, suffix := range []string{
 		"deny-all", "control-in", "dns-egress", "provider-proxy-egress", "controller-egress",
 		"control-plane-egress", "artifact-api-egress",
@@ -2007,9 +2519,13 @@ func runtimePoolTestReconciler(
 	objects ...client.Object,
 ) *RuntimePoolReconciler {
 	t.Helper()
+	statusObjects := []client.Object{&corev1alpha1.RuntimePool{}, &corev1alpha1.Task{}, &appsv1.Deployment{}, &corev1.Pod{}}
+	if scheme.Recognizes(workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspaceCheckpoint")) {
+		statusObjects = append(statusObjects, &workspacev1alpha1.ExecutionWorkspaceCheckpoint{}, &workspacev1alpha1.ExecutionWorkspace{})
+	}
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&corev1alpha1.RuntimePool{}, &appsv1.Deployment{}, &corev1.Pod{}).
+		WithStatusSubresource(statusObjects...).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Create: func(ctx context.Context, delegate client.WithWatch, object client.Object, opts ...client.CreateOption) error {
 				if secret, ok := object.(*corev1.Secret); ok && secret.UID == "" {

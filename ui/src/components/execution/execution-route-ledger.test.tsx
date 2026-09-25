@@ -52,7 +52,7 @@ describe('TaskExecutionRouteLedger', () => {
     )
 
     expect(screen.getByText('Route locked')).toBeInTheDocument()
-    expect(screen.getByText('ACP v2 · runtime pool')).toBeInTheDocument()
+    expect(screen.getByText('Harness v2 · runtime pool')).toBeInTheDocument()
     expect(screen.getByText('Static namespace route')).toBeInTheDocument()
     expect(screen.getByText('Contract orka.harness.v2 is fixed by the installation mode')).toBeInTheDocument()
     expect(screen.getAllByText(/sha256:aaaaaaaaaa…aaaaaaaa|sha256:bbbbbbbbbb…bbbbbbbb/)).toHaveLength(2)
@@ -129,7 +129,7 @@ describe('SessionExecutionRouteLedger', () => {
     render(<SessionExecutionRouteLedger session={session} />)
 
     expect(screen.getByText('Reconciliation required')).toBeInTheDocument()
-    expect(screen.getByText('ACP v2 · lineage 1')).toBeInTheDocument()
+    expect(screen.getByText('Harness v2 · lineage 1')).toBeInTheDocument()
     expect(screen.getByText('Continuation is blocked')).toBeInTheDocument()
     expect(screen.getByText(session.executionControl!.blockedReason!)).toBeInTheDocument()
   })

@@ -50,6 +50,20 @@ describe('useTaskArtifacts', () => {
     await waitFor(() => expect(result.current.data?.artifacts[0]?.filename).toBe('later.txt'))
   })
 
+  it('stops polling after the task is gone', async () => {
+    let calls = 0
+    server.use(http.get('/api/v1/tasks/t-gone/artifacts', () => {
+      calls += 1
+      return HttpResponse.json({ error: 'task not found' }, { status: 404 })
+    }))
+
+    const { result } = renderHook(() => useTaskArtifacts('t-gone', true, undefined, 20), { wrapper: createWrapper() })
+
+    await waitFor(() => expect(result.current.error).toBeTruthy())
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    expect(calls).toBe(1)
+  })
+
   it('handles empty artifact response', async () => {
     server.use(http.get('/api/v1/tasks/t2/artifacts', () => HttpResponse.json({ artifacts: [] })))
     const { result } = renderHook(() => useTaskArtifacts('t2'), { wrapper: createWrapper() })

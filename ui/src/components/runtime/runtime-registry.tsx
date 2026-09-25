@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { EmptyState } from '@/components/ui/empty-state'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { ApiError } from '@/lib/api-client'
+import { ApiError, isForbiddenError } from '@/lib/api-client'
 import { useAgentRuntimes, useRuntimePools } from '@/hooks/use-runtimes'
 import type { AgentRuntime, RuntimePool } from '@/schemas/runtime'
 
@@ -278,15 +278,20 @@ function AgentRuntimeCard({ runtime }: { runtime: AgentRuntime }) {
 
 function RuntimeAPIError({ error, resource }: { error: unknown; resource: string }) {
   const unavailable = error instanceof ApiError && (error.status === 404 || error.status === 501)
+  const forbidden = isForbiddenError(error)
   return (
     <Card>
       <CardContent className="pt-6">
         <EmptyState
-          icon={Activity}
-          headline={unavailable ? `${resource} API unavailable` : `Could not load ${resource.toLowerCase()}`}
-          hint={unavailable
-            ? 'This controller build does not expose the ACP runtime registry REST endpoints yet.'
-            : error instanceof Error ? error.message : 'The runtime registry request failed.'}
+          icon={forbidden ? ShieldCheck : Activity}
+          headline={forbidden
+            ? `Not authorized to view ${resource} resources`
+            : unavailable ? `${resource} API unavailable` : `Could not load ${resource.toLowerCase()}`}
+          hint={forbidden
+            ? `Your token lacks read permission for ${resource} resources (${error.message}).`
+            : unavailable
+              ? 'This controller build does not expose the ACP runtime registry REST endpoints yet.'
+              : error instanceof Error ? error.message : 'The runtime registry request failed.'}
         />
       </CardContent>
     </Card>

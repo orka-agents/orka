@@ -46,6 +46,14 @@ func TestSafeErrorExposesOnlySessionCreationStage(t *testing.T) {
 	if stage := sessionCreationStage(staged); stage != "workspace materialization" {
 		t.Fatalf("session creation stage = %q", stage)
 	}
+	if isSessionCreationResumeLost(staged) {
+		t.Fatal("ordinary session creation failure was classified as resume loss")
+	}
+	resumeLost := sessionCreationResumeLost(errors.New(secret))
+	if !isSessionCreationResumeLost(resumeLost) ||
+		sessionCreationStage(resumeLost) != sessionCreationStageDurableResumeVerification {
+		t.Fatalf("resume loss classification = %#v", resumeLost)
+	}
 	got := safeError(staged)
 	if got != "runtime session failed during workspace materialization" {
 		t.Fatalf("safe staged error = %q", got)
@@ -59,6 +67,180 @@ func TestSafeErrorExposesOnlySessionCreationStage(t *testing.T) {
 	}
 }
 
+func TestCreateSessionRejectsStaleTransitionOnlyDurableResume(t *testing.T) {
+	cfg, profile := newTestConfigWithUpstream(
+		t,
+		"immediate",
+		"http://127.0.0.1:1",
+		strings.Repeat("p", 32),
+	)
+	cfg.DurableWorkspaceDir = t.TempDir()
+	request := testCreateSessionRequest(t, cfg, profile)
+	request.Workspace.ExpectDurableResume = true
+	request.Workspace.ExpectDurableResumeMinGeneration = 5
+	if _, _, err := cfg.UIDAllocator.AllocateAboveReserve(0); err != nil {
+		t.Fatalf("allocate session identity: %v", err)
+	}
+	if err := acp.MarkDurableWorkspaceTransitionAuthorized(
+		cfg.DurableWorkspaceDir,
+		string(request.Metadata.Fence.RuntimeSessionUID),
+		acp.DurableWorkspaceBinding{
+			RepositoryIdentity:       request.Workspace.Baseline.RepositoryIdentity,
+			Revision:                 request.Workspace.Baseline.Revision,
+			SessionIdentityHighWater: 1,
+			SessionGeneration:        4,
+		},
+	); err != nil {
+		t.Fatalf("stage transition: %v", err)
+	}
+
+	server := &Server{cfg: cfg}
+	_, _, _, _, _, _, _, err := server.createSession(
+		context.Background(), request, time.Now().UTC(), os.Getuid(), os.Getgid(),
+	)
+	if err == nil || !isSessionCreationResumeLost(err) ||
+		sessionCreationStage(err) != sessionCreationStageDurableResumeVerification ||
+		!strings.Contains(err.Error(), "older than the controller's floor") {
+		t.Fatalf("createSession error = %v, want stale transition generation refusal", err)
+	}
+}
+
+func TestSupervisorClassifiesAndReplaysDurableResumeLoss(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		prepare func(*testing.T, string, harnessv2.CreateRuntimeSessionRequest)
+	}{
+		{name: "missing checkpoint"},
+		{
+			name: "marker without workspace tree",
+			prepare: func(t *testing.T, durableRoot string, request harnessv2.CreateRuntimeSessionRequest) {
+				t.Helper()
+				workspaceDir, _, err := acp.PrepareDurableSessionWorkspace(
+					durableRoot, string(request.Metadata.Fence.RuntimeSessionUID),
+					1,
+				)
+				if err != nil {
+					t.Fatalf("prepare durable checkpoint: %v", err)
+				}
+				if err := acp.CommitDurableSessionWorkspace(
+					durableRoot,
+					string(request.Metadata.Fence.RuntimeSessionUID),
+					acp.DurableWorkspaceBinding{
+						RepositoryIdentity:       request.Workspace.Baseline.RepositoryIdentity,
+						Revision:                 request.Workspace.Baseline.Revision,
+						SessionIdentityHighWater: 1,
+						SessionGeneration:        request.Workspace.ExpectDurableResumeMinGeneration,
+					},
+				); err != nil {
+					t.Fatalf("commit durable checkpoint: %v", err)
+				}
+				if err := os.RemoveAll(workspaceDir); err != nil {
+					t.Fatalf("remove durable workspace tree: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server, cfg, profile := newTestServer(t, "immediate")
+			server.cfg.DurableWorkspaceDir = t.TempDir()
+			request := testCreateSessionRequest(t, cfg, profile)
+			request.Workspace.ExpectDurableResume = true
+			request.Workspace.ExpectDurableResumeMinGeneration = 1
+			if test.prepare != nil {
+				test.prepare(t, server.cfg.DurableWorkspaceDir, request)
+			}
+			request.Metadata.RequestDigest = ""
+			sealRequest(t, &request.Metadata.RequestDigest, request)
+
+			assertResumeLost := func(response *httptest.ResponseRecorder) {
+				t.Helper()
+				if response.Code != http.StatusConflict {
+					t.Fatalf("create status=%d body=%s", response.Code, response.Body.String())
+				}
+				var envelope harnessv2.ErrorResponse
+				if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+					t.Fatalf("decode error response: %v", err)
+				}
+				if envelope.Code != harnessv2.ErrorCodeWorkspaceResumeLost || envelope.Retryable ||
+					envelope.Message != "runtime session failed during "+sessionCreationStageDurableResumeVerification {
+					t.Fatalf("durable resume error = %#v", envelope)
+				}
+			}
+
+			first := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", request, cfg)
+			assertResumeLost(first)
+			remaining := server.cfg.UIDAllocator.Remaining()
+			replay := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", request, cfg)
+			assertResumeLost(replay)
+			if got := server.cfg.UIDAllocator.Remaining(); got != remaining {
+				t.Fatalf("duplicate durable-loss create consumed identity capacity: remaining=%d want=%d", got, remaining)
+			}
+		})
+	}
+}
+
+func TestCreateSessionStagesCurrentGenerationForDurableTransitionRetry(t *testing.T) {
+	cfg, profile := newTestConfigWithUpstream(
+		t,
+		"immediate",
+		"http://127.0.0.1:1",
+		strings.Repeat("p", 32),
+	)
+	cfg.DurableWorkspaceDir = t.TempDir()
+	request := testCreateSessionRequest(t, cfg, profile)
+	request.Metadata.Fence.RuntimeSessionGeneration = 6
+	request.Workspace.ExpectDurableResume = true
+	request.Workspace.ExpectDurableResumeMinGeneration = 5
+	if _, _, err := cfg.UIDAllocator.AllocateAboveReserve(0); err != nil {
+		t.Fatalf("allocate session identity: %v", err)
+	}
+	const (
+		priorRepository = "github.com/orka-agents/prior"
+		priorRevision   = "fedcba9876543210"
+	)
+	request.Workspace.ExpectDurableResumeFrom = acp.StableDurableWorkspaceIdentity(priorRepository, priorRevision)
+	sessionUID := string(request.Metadata.Fence.RuntimeSessionUID)
+	if _, _, err := acp.PrepareDurableSessionWorkspace(cfg.DurableWorkspaceDir, sessionUID, 1); err != nil {
+		t.Fatalf("prepare prior checkpoint: %v", err)
+	}
+	if err := acp.CommitDurableSessionWorkspace(
+		cfg.DurableWorkspaceDir,
+		sessionUID,
+		acp.DurableWorkspaceBinding{
+			RepositoryIdentity:       priorRepository,
+			Revision:                 priorRevision,
+			SessionIdentityHighWater: 1,
+			SessionGeneration:        request.Workspace.ExpectDurableResumeMinGeneration,
+		},
+	); err != nil {
+		t.Fatalf("commit prior checkpoint: %v", err)
+	}
+	injected := errors.New("injected materialization failure")
+	cfg.WorkspaceMaterializer = WorkspaceMaterializerFunc(func(
+		context.Context,
+		harnessv2.CreateRuntimeSessionRequest,
+		string,
+	) error {
+		return injected
+	})
+
+	server := &Server{cfg: cfg}
+	_, _, _, _, _, _, _, err := server.createSession(
+		context.Background(), request, time.Now().UTC(), os.Getuid(), os.Getgid(),
+	)
+	if !errors.Is(err, injected) || sessionCreationStage(err) != "workspace materialization" {
+		t.Fatalf("createSession error = %v, want injected materialization failure", err)
+	}
+	transition, err := acp.DurableWorkspaceTransitionTarget(cfg.DurableWorkspaceDir, sessionUID)
+	if err != nil {
+		t.Fatalf("read staged transition: %v", err)
+	}
+	if transition == nil || transition.SessionGeneration != request.Metadata.Fence.RuntimeSessionGeneration ||
+		transition.SessionIdentityHighWater != 1 {
+		t.Fatalf("staged transition = %+v, want session generation %d and identity high-water 1", transition, request.Metadata.Fence.RuntimeSessionGeneration)
+	}
+}
+
 func TestSupervisorTombstonesFailedCreateToPreventIdentityExhaustion(t *testing.T) {
 	server, cfg, profile := newTestServer(t, "immediate")
 	create := testCreateSessionRequest(t, cfg, profile)
@@ -68,7 +250,7 @@ func TestSupervisorTombstonesFailedCreateToPreventIdentityExhaustion(t *testing.
 	// session initialization.
 	server.mu.Lock()
 	server.sessions[create.RuntimeSessionID] = &sessionState{id: create.RuntimeSessionID, creating: true}
-	server.tombstoneFailedCreateLocked(create.RuntimeSessionID, create.Metadata, now)
+	server.tombstoneFailedCreateLocked(create.RuntimeSessionID, create.Metadata, now, nil)
 	_, resident := server.sessions[create.RuntimeSessionID]
 	tombstone, tombstoned := server.tombstones[create.Metadata.Fence.RuntimeSessionUID]
 	server.mu.Unlock()
@@ -282,7 +464,7 @@ func TestSupervisorCompactsAssistantBurstBeforeHarnessRateLimit(t *testing.T) {
 			streamed.WriteString(event.Update.AssistantMessage.Text)
 		}
 	}
-	want := strings.Repeat("x", runtimeCodexMaxUpdateEventsPerSecond+1)
+	want := strings.Repeat("x", runtimeMaxUpdateEventsPerSecond+1)
 	if streamed.String() != want {
 		t.Fatalf("streamed assistant bytes = %d, want %d exact bytes", streamed.Len(), len(want))
 	}
@@ -577,6 +759,44 @@ func TestSupervisorConcurrentLeaseRenewalHasSingleWinner(t *testing.T) {
 	defer providerResponse.Body.Close() //nolint:errcheck
 	if providerResponse.StatusCode != http.StatusForbidden && providerResponse.StatusCode != http.StatusNotFound {
 		t.Fatalf("post-cancellation provider proxy status = %d, want %d or %d", providerResponse.StatusCode, http.StatusForbidden, http.StatusNotFound)
+	}
+}
+
+func TestSupervisorRejectsFreshCreateWithStaleFence(t *testing.T) {
+	for _, tc := range []struct {
+		mismatch harnessv2.FenceMismatch
+		mutate   func(*harnessv2.Fence)
+	}{
+		{harnessv2.FenceMismatchRuntimeInstance, func(f *harnessv2.Fence) { f.RuntimeInstanceID = "stale-instance" }},
+		{harnessv2.FenceMismatchSupervisorBoot, func(f *harnessv2.Fence) { f.SupervisorBootID = "stale-boot" }},
+		{harnessv2.FenceMismatchControllerEpoch, func(f *harnessv2.Fence) { f.ControllerEpoch++ }},
+		{harnessv2.FenceMismatchRuntimePoolUID, func(f *harnessv2.Fence) { f.RuntimePoolUID = "stale-pool" }},
+		{harnessv2.FenceMismatchRuntimePoolGeneration, func(f *harnessv2.Fence) { f.RuntimePoolGeneration++ }},
+	} {
+		t.Run(string(tc.mismatch), func(t *testing.T) {
+			server, cfg, profile := newTestServer(t, "immediate")
+			remaining := cfg.UIDAllocator.Remaining()
+			request := testCreateSessionRequest(t, cfg, profile)
+			tc.mutate(&request.Metadata.Fence)
+			request.Metadata.RequestDigest = ""
+			sealRequest(t, &request.Metadata.RequestDigest, request)
+			response := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", request, cfg)
+			if response.Code != http.StatusGone {
+				t.Errorf("fresh create with stale %s returned HTTP %d, want 410", tc.mismatch, response.Code)
+			}
+			var rejected harnessv2.ErrorResponse
+			if err := json.Unmarshal(response.Body.Bytes(), &rejected); err != nil {
+				t.Fatal(err)
+			}
+			if rejected.Code != harnessv2.ErrorCodeStaleFence || rejected.Classification == nil ||
+				rejected.Classification.Class != harnessv2.RequestClassificationStaleFence ||
+				rejected.Classification.FenceMismatch != tc.mismatch {
+				t.Errorf("fresh create classification = %#v, want stale_fence/%s", rejected.Classification, tc.mismatch)
+			}
+			if cfg.UIDAllocator.Remaining() != remaining {
+				t.Error("stale create consumed a session identity")
+			}
+		})
 	}
 }
 
@@ -902,6 +1122,14 @@ func newTestConfigWithUpstream(t *testing.T, mode, upstreamURL, upstreamToken st
 			return map[string]string{"CODEX_API_KEY": proxy.Credential, "CODEX_CONFIG": string(config)}, nil
 		}
 	}
+	// ACP children run as a distinct UID and need search permission on the
+	// two test-owned ancestors above the private session tree.
+	sessionTestDir := t.TempDir()
+	for _, dir := range []string{sessionTestDir, filepath.Dir(sessionTestDir)} {
+		if err := os.Chmod(dir, 0o711); err != nil {
+			t.Fatal(err)
+		}
+	}
 	cfg := Config{
 		ListenAddress: ":0",
 		Fence: harnessv2.Fence{
@@ -927,7 +1155,7 @@ func newTestConfigWithUpstream(t *testing.T, mode, upstreamURL, upstreamToken st
 		},
 		Provider:              provider,
 		ControllerBearerToken: strings.Repeat("t", 32), CapabilitySecret: []byte(strings.Repeat("s", 32)), RequireCapabilities: true,
-		SessionBaseDir: filepath.Join(t.TempDir(), "sessions"), UIDAllocator: allocator,
+		SessionBaseDir: filepath.Join(sessionTestDir, "sessions"), UIDAllocator: allocator,
 		ProviderProxy: ProviderProxyConfig{
 			UpstreamBaseURL: upstreamURL, UpstreamBearerToken: upstreamToken,
 			ProviderKind: providerKindCodex, Model: "test-model",
@@ -1177,7 +1405,7 @@ func TestSupervisorACPHelper(t *testing.T) {
 						"sessionUpdate": "tool_call", "toolCallId": "provider-call-1", "title": "Read repository", "kind": "read",
 					},
 				}})
-				for range runtimeCodexMaxUpdateEventsPerSecond + 1 {
+				for range runtimeMaxUpdateEventsPerSecond + 1 {
 					writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "method": acp.MethodSessionUpdate, "params": map[string]any{
 						"sessionId": sessionID, "update": map[string]any{
 							"sessionUpdate": "tool_call_update", "toolCallId": "provider-call-1",
@@ -1202,7 +1430,7 @@ func TestSupervisorACPHelper(t *testing.T) {
 			}
 			assistantUpdates := []string{"hello from ACP"}
 			if mode == assistantBurstMode {
-				assistantUpdates = make([]string, runtimeCodexMaxUpdateEventsPerSecond+1)
+				assistantUpdates = make([]string, runtimeMaxUpdateEventsPerSecond+1)
 				for index := range assistantUpdates {
 					assistantUpdates[index] = "x"
 				}
@@ -1604,7 +1832,7 @@ func TestSupervisorRetiresPoisonedSessionWithoutPoolDrain(t *testing.T) {
 	t.Fatal("poisoned RuntimeSession remained resident without an enclosing pool drain")
 }
 
-func TestSupervisorDrainSchedulesPublicationPreparedSessionBeforeSettlement(t *testing.T) {
+func TestSupervisorDrainRetainsPublicationPreparedSessionBeforeSettlement(t *testing.T) {
 	server, cfg, _ := newTestServer(t, "immediate")
 	now := time.Now().UTC()
 	sessionID := harnessv2.RuntimeSessionID("publication-session")
@@ -1629,10 +1857,19 @@ func TestSupervisorDrainSchedulesPublicationPreparedSessionBeforeSettlement(t *t
 	if response.Code != http.StatusOK {
 		t.Fatalf("drain status=%d body=%s", response.Code, response.Body.String())
 	}
+	var result harnessv2.DrainResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.Drain.Requested || result.Drain.AcceptingNewSessions {
+		t.Fatal("drain did not close admission while publication settlement was pending")
+	}
 	server.mu.Lock()
 	defer server.mu.Unlock()
-	if server.sessions[sessionID] != state || !state.drainCleanupScheduled {
-		t.Fatalf("publication-prepared RuntimeSession was not scheduled before settlement: resident=%t scheduled=%t", server.sessions[sessionID] == state, state.drainCleanupScheduled)
+	// Cleanup can already have observed the unsettled prompt and cleared its
+	// schedule. Either ordering must retain the session until settlement.
+	if server.sessions[sessionID] != state || state.descriptor.State != harnessv2.RuntimeSessionStatePublicationPrepared || state.prompt.settlement != nil {
+		t.Fatal("publication-prepared RuntimeSession changed before settlement")
 	}
 }
 
@@ -1738,10 +1975,10 @@ func TestSupervisorRejectsFreshPromptWhenDrainCleanupIsScheduled(t *testing.T) {
 }
 
 func TestPruneTombstonesLockedRetainsEveryUnexpiredReplay(t *testing.T) {
-	server := &Server{tombstones: map[harnessv2.RuntimeSessionUID]harnessv2.RuntimeSessionTombstone{}}
+	server := &Server{tombstones: map[harnessv2.RuntimeSessionUID]sessionTombstone{}}
 	now := time.Now().UTC()
-	server.tombstones["fresh"] = harnessv2.RuntimeSessionTombstone{RuntimeSessionUID: "fresh", DeletedAt: now.Add(-time.Minute)}
-	server.tombstones["stale"] = harnessv2.RuntimeSessionTombstone{RuntimeSessionUID: "stale", DeletedAt: now.Add(-2 * tombstoneRetention)}
+	server.tombstones["fresh"] = sessionTombstone{RuntimeSessionTombstone: harnessv2.RuntimeSessionTombstone{RuntimeSessionUID: "fresh", DeletedAt: now.Add(-time.Minute)}}
+	server.tombstones["stale"] = sessionTombstone{RuntimeSessionTombstone: harnessv2.RuntimeSessionTombstone{RuntimeSessionUID: "stale", DeletedAt: now.Add(-2 * tombstoneRetention)}}
 	server.pruneTombstonesLocked(now)
 	if _, ok := server.tombstones["stale"]; ok {
 		t.Fatal("tombstone older than the retention window was retained")
@@ -1755,9 +1992,9 @@ func TestPruneTombstonesLockedRetainsEveryUnexpiredReplay(t *testing.T) {
 	const inWindowTombstones = 4352
 	for i := range inWindowTombstones {
 		uid := harnessv2.RuntimeSessionUID(fmt.Sprintf("session-%05d", i))
-		server.tombstones[uid] = harnessv2.RuntimeSessionTombstone{
+		server.tombstones[uid] = sessionTombstone{RuntimeSessionTombstone: harnessv2.RuntimeSessionTombstone{
 			RuntimeSessionUID: uid, DeletedAt: now.Add(-time.Duration(i) * time.Millisecond),
-		}
+		}}
 	}
 	server.pruneTombstonesLocked(now)
 	if got, want := len(server.tombstones), inWindowTombstones+1; got != want {
@@ -1765,5 +2002,76 @@ func TestPruneTombstonesLockedRetainsEveryUnexpiredReplay(t *testing.T) {
 	}
 	if _, ok := server.tombstones["session-04351"]; !ok {
 		t.Fatal("oldest in-window tombstone was evicted")
+	}
+}
+
+// A create request rebuilt by the controller for the same attempt (fresh
+// expiry, fresh workspace capability) reaches a supervisor that already created
+// the session from an earlier send. The supervisor must answer digest_conflict
+// with the recorded phase and keep the resident session in status so the
+// controller can adopt it.
+func TestCreateSessionRebuiltRequestConflictsWhileSessionStaysResident(t *testing.T) {
+	server, cfg, profile := newTestServer(t, "immediate")
+	create := testCreateSessionRequest(t, cfg, profile)
+	now := time.Now().UTC()
+	state := &sessionState{
+		id: create.RuntimeSessionID,
+		descriptor: harnessv2.RuntimeSessionDescriptor{
+			RuntimeSessionID: create.RuntimeSessionID, RuntimeSessionUID: create.Metadata.Fence.RuntimeSessionUID,
+			Generation: create.Metadata.Fence.RuntimeSessionGeneration, RuntimeInstanceID: cfg.Fence.RuntimeInstanceID,
+			SupervisorBootID: cfg.Fence.SupervisorBootID, RuntimeProfileDigest: cfg.Fence.RuntimeProfileDigest,
+			State: harnessv2.RuntimeSessionStateIdle, CreatedAt: now, LastTransitionAt: now,
+		},
+	}
+	recordSessionOperationLocked(state, create.Metadata, harnessv2.OperationPhaseApplied, "", now)
+	server.mu.Lock()
+	server.sessions[create.RuntimeSessionID] = state
+	server.mu.Unlock()
+
+	rebuilt := create
+	rebuilt.Metadata.ExpiresAt = create.Metadata.ExpiresAt.Add(time.Minute)
+	sealRequest(t, &rebuilt.Metadata.RequestDigest, rebuilt)
+	if rebuilt.Metadata.RequestDigest == create.Metadata.RequestDigest {
+		t.Fatal("rebuilt create request kept the original digest")
+	}
+	response := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", rebuilt, cfg)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("rebuilt create status=%d body=%s", response.Code, response.Body.String())
+	}
+	var apiError harnessv2.ErrorResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &apiError); err != nil {
+		t.Fatal(err)
+	}
+	if apiError.Code != harnessv2.ErrorCodeDigestConflict || apiError.Classification == nil ||
+		apiError.Classification.Class != harnessv2.RequestClassificationDigestConflict ||
+		apiError.Classification.Phase != harnessv2.OperationPhaseApplied {
+		t.Fatalf("rebuilt create error = %#v, want digest_conflict with the applied phase", apiError)
+	}
+
+	statusReq := httptest.NewRequest(http.MethodGet, harnessv2.StatusPath, nil)
+	statusReq.Header.Set("Authorization", "Bearer "+cfg.ControllerBearerToken)
+	statusNonce, err := harnessv2.NewCapabilityNonce()
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusBinding := harnessv2.StatusCapabilityBinding{RuntimeProfileDigest: cfg.Fence.RuntimeProfileDigest}
+	statusCapability, err := harnessv2.SignStatusCapability(cfg.CapabilitySecret, harnessv2.NewStatusCapabilityClaims(statusBinding, statusNonce, time.Now().UTC().Add(time.Minute)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusReq.Header.Set(OperationCapabilityHeader, statusCapability)
+	statusResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(statusResponse, statusReq)
+	if statusResponse.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", statusResponse.Code, statusResponse.Body.String())
+	}
+	var status harnessv2.StatusResponse
+	if err := json.Unmarshal(statusResponse.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if len(status.Sessions) != 1 || status.Sessions[0].RuntimeSessionID != create.RuntimeSessionID ||
+		status.Sessions[0].Generation != create.Metadata.Fence.RuntimeSessionGeneration ||
+		status.Sessions[0].State != harnessv2.RuntimeSessionStateIdle {
+		t.Fatalf("resident session was not reported admissible after the rejected rebuild: %#v", status.Sessions)
 	}
 }

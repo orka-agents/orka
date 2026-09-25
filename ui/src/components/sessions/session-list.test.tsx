@@ -44,6 +44,34 @@ describe('SessionList', () => {
     })
   })
 
+  it('shows a not-authorized message (not "No sessions found.") on 403', async () => {
+    server.use(
+      http.get('/api/v1/sessions', () =>
+        HttpResponse.json({ error: { code: 403, message: 'not authorized' } }, { status: 403 }),
+      ),
+    )
+    render(<SessionList />)
+    await waitFor(() => {
+      expect(screen.getByText('Not authorized to view sessions')).toBeInTheDocument()
+    })
+    expect(screen.getByText(/read permission for sessions \(not authorized\)/)).toBeInTheDocument()
+    expect(screen.queryByText('No sessions found.')).not.toBeInTheDocument()
+    expect(screen.queryByText(/"code":403/)).not.toBeInTheDocument()
+  })
+
+  it('shows a load error for non-403 failures', async () => {
+    server.use(
+      http.get('/api/v1/sessions', () =>
+        HttpResponse.json({ error: { code: 400, message: 'invalid namespace' } }, { status: 400 }),
+      ),
+    )
+    render(<SessionList />)
+    await waitFor(() => {
+      expect(screen.getByText('Could not load sessions')).toBeInTheDocument()
+      expect(screen.getByText('invalid namespace')).toBeInTheDocument()
+    })
+  })
+
   it('renders populated table with session data', async () => {
     server.use(
       http.get('/api/v1/sessions', () => {

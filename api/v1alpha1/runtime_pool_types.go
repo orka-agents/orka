@@ -221,6 +221,7 @@ type RuntimePoolProfileSpec struct {
 // are identical to plain pools; only workload materialization changes.
 // Provider-native identifiers never enter public Task status.
 // +kubebuilder:validation:XValidation:rule="(self.provider == 'substrate') == has(self.substrate)",message="substrate settings are required exactly when provider is substrate"
+// +kubebuilder:validation:XValidation:rule="self.provider == 'agent-sandbox' || !has(self.agentSandbox)",message="agentSandbox settings are only valid when provider is agent-sandbox"
 type RuntimePoolExecutionWorkspaceSpec struct {
 	// Provider selects the execution-workspace provider control plane hosting
 	// this pool's single runtime instance.
@@ -238,6 +239,52 @@ type RuntimePoolExecutionWorkspaceSpec struct {
 	// Substrate configures the Substrate-provider backend.
 	// +optional
 	Substrate *RuntimePoolSubstrateWorkspaceSpec `json:"substrate,omitempty"`
+
+	// AgentSandbox configures the agent-sandbox-provider backend.
+	// +optional
+	AgentSandbox *RuntimePoolAgentSandboxWorkspaceSpec `json:"agentSandbox,omitempty"`
+}
+
+// RuntimePoolAgentSandboxWorkspaceSpec configures the agent-sandbox backend.
+// +kubebuilder:validation:XValidation:rule="has(self.suspendMode) == has(self.suspendVolume)",message="suspendMode and suspendVolume must be set together"
+type RuntimePoolAgentSandboxWorkspaceSpec struct {
+	// SuspendMode enables operator-governed PVC-backed cold suspension for
+	// this pool's Sandbox. When set to DataOnly, the SandboxClaim requests one
+	// controller-owned durable workspace PVC (forcing a cold start instead of
+	// warm-pool adoption) and a requested suspension terminates the Sandbox
+	// Pod while that PVC persists. Empty preserves delete-and-recreate
+	// behavior and keeps every suspension fail-closed.
+	// +kubebuilder:validation:Enum=DataOnly
+	// +optional
+	SuspendMode string `json:"suspendMode,omitempty"`
+
+	// SuspendVolume freezes the durable workspace PVC shape. Required exactly
+	// when suspendMode is set.
+	// +optional
+	SuspendVolume *RuntimePoolSandboxDurableVolumeSpec `json:"suspendVolume,omitempty"`
+}
+
+// RuntimePoolSandboxDurableVolumeSpec is the frozen durable workspace PVC
+// shape for a suspend-capable agent-sandbox pool.
+type RuntimePoolSandboxDurableVolumeSpec struct {
+	// StorageClassName optionally selects the storage class.
+	// +optional
+	StorageClassName string `json:"storageClassName,omitempty"`
+
+	// StorageClassUID pins the exact StorageClass validated at class
+	// resolution. Provisioning reverifies the live class carries this UID
+	// (and Delete reclaim semantics) before requesting the durable PVC.
+	// +optional
+	StorageClassUID string `json:"storageClassUID,omitempty"`
+
+	// AccessModes defaults to ReadWriteOnce when empty.
+	// +listType=set
+	// +optional
+	AccessModes []string `json:"accessModes,omitempty"`
+
+	// Capacity is the requested storage quantity.
+	// +kubebuilder:validation:MinLength=1
+	Capacity string `json:"capacity"`
 }
 
 // RuntimePoolSubstrateWorkspaceSpec binds a Substrate-backed pool to the
@@ -245,6 +292,10 @@ type RuntimePoolExecutionWorkspaceSpec struct {
 // (workerPoolRef, runsc, snapshotsConfig) seed the controller-rendered
 // runtime template. The runtime container itself is always controller-owned.
 type RuntimePoolSubstrateWorkspaceSpec struct {
+	// RestoreFrom is the immutable, namespaced Data checkpoint selected by the
+	// Task's frozen workspace binding. Only class-backed pools may restore.
+	// +optional
+	RestoreFrom *WorkspaceCheckpointReference `json:"restoreFrom,omitempty"`
 	// BaseTemplateNamespace is the namespace of the operator-owned
 	// infrastructure ActorTemplate. Controller-rendered runtime templates are
 	// created in the same namespace so the provider can resolve them. It must
@@ -261,6 +312,16 @@ type RuntimePoolSubstrateWorkspaceSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	BaseTemplateName string `json:"baseTemplateName"`
+
+	// SuspendMode enables operator-governed data-only cold suspension for this
+	// pool's actor. When set to DataOnly, the derived runtime template carries
+	// a controller-owned DurableDir workspace volume and an explicit
+	// data-only snapshot policy, and a requested suspension checkpoints only
+	// that volume. Empty preserves delete-and-recreate behavior and keeps
+	// every suspension fail-closed.
+	// +kubebuilder:validation:Enum=DataOnly
+	// +optional
+	SuspendMode string `json:"suspendMode,omitempty"`
 }
 
 // RuntimePoolRuntimeSpec selects the immutable supervisor image and profile.

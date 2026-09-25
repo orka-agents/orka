@@ -24,6 +24,8 @@ vi.mock('@tanstack/react-router', async () => {
 import { useUIStore } from '@/stores/ui'
 import { useAuthStore } from '@/stores/auth'
 import { TaskDetail } from './task-detail'
+import { render as renderRaw } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 describe('TaskDetail', () => {
   beforeEach(() => {
@@ -45,6 +47,87 @@ describe('TaskDetail', () => {
     expect(skeletons.length).toBeGreaterThan(0)
   })
 
+  it('renders a permission failure instead of "Task not found" when the task 403s and stops dependent polling', async () => {
+    mockSearch.current = { tab: 'runtime' }
+    const hits: Record<string, number> = {}
+    const forbidden = (key: string) => () => {
+      hits[key] = (hits[key] ?? 0) + 1
+      return HttpResponse.json({ error: { code: 403, message: 'scope missing' } }, { status: 403 })
+    }
+    server.use(
+      http.get('/api/v1/tasks/:id', forbidden('task')),
+      http.get('/api/v1/tasks/:id/events', forbidden('events')),
+      http.get('/api/v1/tasks/:id/trace', forbidden('trace')),
+      http.get('/api/v1/tasks/:id/approvals', forbidden('approvals')),
+      http.get('/api/v1/tasks/:id/artifacts', forbidden('artifacts')),
+    )
+    render(<TaskDetail taskId="test-task" />)
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent('Not authorized to view this task')
+    })
+    expect(screen.getByText(/scope missing/)).toBeInTheDocument()
+    expect(screen.queryByText('Task not found')).not.toBeInTheDocument()
+    // Nothing keeps polling once access is forbidden: no task retries and no
+    // hidden dependent 403 traffic beyond a single request that raced the lookup.
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    const snapshot = { ...hits }
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    expect(hits).toEqual(snapshot)
+    expect(hits.task).toBe(1)
+    expect(hits.events ?? 0).toBeLessThanOrEqual(1)
+    expect(hits.trace ?? 0).toBeLessThanOrEqual(1)
+    expect(hits.approvals ?? 0).toBeLessThanOrEqual(1)
+    expect(hits.artifacts ?? 0).toBeLessThanOrEqual(1)
+  })
+
+  it('stops polling the task and its dependent endpoints once the task 404s', async () => {
+    mockSearch.current = { tab: 'runtime' }
+    const hits: Record<string, number> = {}
+    const count = (key: string) => {
+      hits[key] = (hits[key] ?? 0) + 1
+    }
+    server.use(
+      http.get('/api/v1/tasks/:id', () => {
+        count('task')
+        return HttpResponse.json({ error: { code: 404, message: 'task not found' } }, { status: 404 })
+      }),
+      http.get('/api/v1/tasks/:id/events', () => {
+        count('events')
+        return HttpResponse.json({ error: { code: 404, message: 'task not found' } }, { status: 404 })
+      }),
+      http.get('/api/v1/tasks/:id/trace', () => {
+        count('trace')
+        return HttpResponse.json({ error: { code: 404, message: 'task not found' } }, { status: 404 })
+      }),
+      http.get('/api/v1/tasks/:id/approvals', () => {
+        count('approvals')
+        return HttpResponse.json({ error: { code: 404, message: 'task not found' } }, { status: 404 })
+      }),
+      http.get('/api/v1/tasks/:id/artifacts', () => {
+        count('artifacts')
+        return HttpResponse.json({ error: { code: 404, message: 'task not found' } }, { status: 404 })
+      }),
+    )
+    render(<TaskDetail taskId="nonexistent" />)
+    await waitFor(() => {
+      expect(screen.getByText('Task not found')).toBeInTheDocument()
+    })
+    // Let the trace hook's single 100ms retry settle, then confirm nothing
+    // else fires: no 5s polling, no dependent refetches.
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    const snapshot = { ...hits }
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    expect(hits).toEqual(snapshot)
+    expect(hits.task).toBe(1)
+    // A 404 is never retried: at most the single in-flight request that
+    // raced the task lookup.
+    expect(hits.events ?? 0).toBeLessThanOrEqual(1)
+    expect(hits.trace ?? 0).toBeLessThanOrEqual(1)
+    expect(hits.artifacts ?? 0).toBeLessThanOrEqual(1)
+    expect(hits.approvals ?? 0).toBeLessThanOrEqual(1)
+    expect(hits.artifacts ?? 0).toBeLessThanOrEqual(1)
+  })
+
   it('shows not-found when task does not exist', async () => {
     server.use(
       http.get('/api/v1/tasks/:id', () => new HttpResponse(null, { status: 404 })),
@@ -53,6 +136,68 @@ describe('TaskDetail', () => {
     await waitFor(() => {
       expect(screen.getByText('Task not found')).toBeInTheDocument()
     })
+  })
+
+  it('renders not-found once a loaded task 404s on refetch, ignoring the cached copy', async () => {
+    let hits = 0
+    server.use(
+      http.get('/api/v1/tasks/:id', () => {
+        hits++
+        if (hits === 1) {
+          return HttpResponse.json({
+            metadata: { name: 'gone-task', namespace: 'default', uid: 'uid-gone' },
+            spec: { type: 'container', image: 'alpine' },
+            status: { phase: 'Succeeded' },
+          })
+        }
+        return HttpResponse.json({ error: { code: 404, message: 'task not found' } }, { status: 404 })
+      }),
+    )
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
+    renderRaw(
+      <QueryClientProvider client={queryClient}>
+        <TaskDetail taskId="gone-task" />
+      </QueryClientProvider>,
+    )
+    await waitFor(() => expect(screen.getByText('gone-task')).toBeInTheDocument())
+
+    await queryClient.refetchQueries({ queryKey: ['task', 'gone-task'] })
+    await waitFor(() => expect(screen.getByText('Task not found')).toBeInTheDocument())
+    expect(screen.queryByText('gone-task')).not.toBeInTheDocument()
+  })
+
+  it('shows the Agent link for AI tasks created from an agentRef', async () => {
+    server.use(
+      http.get('/api/v1/tasks/:id', () =>
+        HttpResponse.json({
+          metadata: { name: 'ai-agent-task', namespace: 'default', uid: 'uid-ai' },
+          spec: { type: 'ai', agentRef: { name: 'native-agent' }, ai: { prompt: 'Summarize' } },
+          status: { phase: 'Pending' },
+        }),
+      ),
+    )
+    render(<TaskDetail taskId="ai-agent-task" />)
+    await waitFor(() => expect(screen.getByText('AI Config')).toBeInTheDocument())
+    const link = screen.getByRole('link', { name: 'native-agent' })
+    expect(link).toHaveAttribute('href', expect.stringContaining('/agents/'))
+    expect(screen.getAllByText('Agent default')).toHaveLength(2)
+    expect(screen.getByText('Summarize')).toBeInTheDocument()
+  })
+
+  it('shows a cross-namespace agentRef qualified instead of linking into the wrong namespace', async () => {
+    server.use(
+      http.get('/api/v1/tasks/:id', () =>
+        HttpResponse.json({
+          metadata: { name: 'ai-xns-task', namespace: 'default', uid: 'uid-xns' },
+          spec: { type: 'ai', agentRef: { name: 'shared-agent', namespace: 'platform' }, ai: { prompt: 'Summarize' } },
+          status: { phase: 'Pending' },
+        }),
+      ),
+    )
+    render(<TaskDetail taskId="ai-xns-task" />)
+    await waitFor(() => expect(screen.getByText('AI Config')).toBeInTheDocument())
+    expect(screen.queryByRole('link', { name: 'shared-agent' })).not.toBeInTheDocument()
+    expect(screen.getByText('platform/shared-agent')).toBeInTheDocument()
   })
 
   it('overview tab shows metadata', async () => {

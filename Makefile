@@ -12,6 +12,13 @@ ACP_CODEX_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-codex-runtime:latest
 ACP_CLAUDE_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-claude-runtime:latest
 ACP_COPILOT_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-copilot-runtime:latest
 ACP_OPENCODE_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-opencode-runtime:latest
+ACP_AGENTKIT_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-agentkit-runtime:latest
+ACP_FOUNDRY_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-foundry-runtime:latest
+# AgentKit images contain the framework runtime plus one frozen
+# /agent/agent.yaml. The Orka layer requires an immutable source image.
+AGENTKIT_RUNTIME_IMAGE ?=
+# Digest-pinned AgentKit source image identity used as the adapter authority.
+AGENTKIT_ADAPTER_DIGEST ?=
 WORKSPACE_PUBLISHER_IMG ?= ghcr.io/orka-agents/orka/workspace-publisher:latest
 # Providers backing the generated docker-build-acp-<provider>-runtime and
 # docker-push-acp-<provider>-runtime targets.
@@ -19,15 +26,9 @@ ACP_RUNTIME_PROVIDERS = codex claude copilot opencode
 ACP_RUNTIME_IMGS = $(ACP_CODEX_RUNTIME_IMG) $(ACP_CLAUDE_RUNTIME_IMG) $(ACP_COPILOT_RUNTIME_IMG) $(ACP_OPENCODE_RUNTIME_IMG)
 RUN_CONTROLLER_MODE ?= harness-v2
 RUN_WATCH_NAMESPACE ?= orka-system
+RUN_STORE_PATH ?= /data/orka.db
 RUN_AGENT_EXECUTION_SNAPSHOT_KEY_FILE ?=
 RUN_EXECUTION_MODE_CONTROLLER_USERNAMES ?= $(shell "$(KUBECTL)" auth whoami -o jsonpath='{.status.userInfo.username}' 2>/dev/null)
-
-# Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
-ifeq (,$(shell go env GOBIN))
-GOBIN=$(shell go env GOPATH)/bin
-else
-GOBIN=$(shell go env GOBIN)
-endif
 
 # CONTAINER_TOOL defines the container tool to be used for building images.
 # Be aware that the target commands are only tested with Docker which is
@@ -64,7 +65,8 @@ help: ## Display this help.
 
 .PHONY: manifests
 manifests: controller-gen kustomize ## Generate canonical and staged manifests.
-	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd:allowDangerousTypes=true webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	# A module pattern excludes nested provider checkouts used by local conformance.
+	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd:allowDangerousTypes=true webhook paths="github.com/orka-agents/orka/..." output:crd:artifacts:config=config/crd/bases
 	@set -euo pipefail; \
 		tmp="$$(mktemp -d .manifest_staging.tmp.XXXXXX)"; \
 		backup=""; \
@@ -94,7 +96,7 @@ manifests: controller-gen kustomize ## Generate canonical and staged manifests.
 .PHONY: release-manifest
 release-manifest: ## Prepare staging manifests for NEWVERSION=vX.Y.Z[-beta.N|-rc.N].
 	@test -n "$(NEWVERSION)" || { echo "NEWVERSION is required" >&2; exit 2; }
-	python3 scripts/update-release-version.py "$(NEWVERSION)"
+	go run ./cmd/build/release update-version "$(NEWVERSION)"
 	$(MAKE) manifests
 
 .PHONY: promote-staging-manifest
@@ -138,7 +140,7 @@ sync-helm-crds: ## Synchronize generated CRDs into the promoted Helm chart while
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
-	"$(CONTROLLER_GEN)" object:headerFile="hack/boilerplate.go.txt" paths="./..."
+	"$(CONTROLLER_GEN)" object:headerFile="hack/boilerplate.go.txt" paths="github.com/orka-agents/orka/..."
 
 .PHONY: fmt
 fmt: ## Run go fmt against code.
@@ -250,8 +252,7 @@ demo-cluster-up-all: ## ONE substrate-flavored kind cluster that runs the local 
 	ORKA_DEMO_CLUSTER=$${KIND_CLUSTER:-orka-agent-substrate-e2e} hack/demos/cluster/install-agent-sandbox.sh
 
 .PHONY: demo-cluster-up-all-down
-demo-cluster-up-all-down: ## Tear down the unified demo cluster
-	kind delete cluster --name $${KIND_CLUSTER:-orka-agent-substrate-e2e}
+demo-cluster-up-all-down: demo-substrate-down ## Tear down the unified demo cluster (alias of demo-substrate-down)
 
 .PHONY: demo-images
 demo-images: ## Build + kind-load demo-only sandbox runtime image
@@ -309,14 +310,12 @@ docs-cli-check: build-cli ## Check generated CLI command reference docs are up t
 build-cli: ## Build orka CLI binary.
 	go build -ldflags "-X main.version=$(shell git describe --tags --always --dirty 2>/dev/null || echo dev)" -o bin/orka ./cmd/cli/
 
-.PHONY: build-all
-build-all: build build-cli ## Build all binaries.
-
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
 	POD_NAMESPACE="$(RUN_WATCH_NAMESPACE)" go run ./cmd --leader-elect=true \
 		--controller-mode="$(RUN_CONTROLLER_MODE)" \
 		--watch-namespace="$(RUN_WATCH_NAMESPACE)" \
+		--store-path="$(RUN_STORE_PATH)" \
 		--agent-execution-snapshot-key-file="$(RUN_AGENT_EXECUTION_SNAPSHOT_KEY_FILE)" \
 		--enforce-namespace-isolation=true \
 		--execution-mode-controller-usernames="$(RUN_EXECUTION_MODE_CONTROLLER_USERNAMES)"
@@ -352,6 +351,22 @@ docker-build-acp-claude-runtime: ## Build the immutable Claude ACP runtime image
 docker-build-acp-copilot-runtime: ## Build the immutable GitHub Copilot ACP runtime image.
 docker-build-acp-opencode-runtime: ## Build the immutable OpenCode ACP runtime image.
 
+.PHONY: docker-build-acp-agentkit-runtime
+docker-build-acp-agentkit-runtime: ## Layer the Orka supervisor onto a digest-pinned AgentKit runtime image.
+	$(CONTAINER_TOOL) build \
+		--build-arg AGENTKIT_RUNTIME_IMAGE="$(AGENTKIT_RUNTIME_IMAGE)" \
+		--build-arg AGENTKIT_ADAPTER_DIGEST="$(AGENTKIT_ADAPTER_DIGEST)" \
+		-t ${ACP_AGENTKIT_RUNTIME_IMG} \
+		-f workers/acp/images/agentkit/Dockerfile .
+
+.PHONY: docker-build-acp-foundry-runtime
+docker-build-acp-foundry-runtime: ## Layer the Orka supervisor onto a digest-pinned configured Foundry image.
+	$(CONTAINER_TOOL) build \
+		--build-arg FOUNDRY_RUNTIME_IMAGE="$(FOUNDRY_RUNTIME_IMAGE)" \
+		--build-arg FOUNDRY_ADAPTER_DIGEST="$(FOUNDRY_ADAPTER_DIGEST)" \
+		-t ${ACP_FOUNDRY_RUNTIME_IMG} \
+		-f workers/acp/images/foundry/Dockerfile .
+
 .PHONY: docker-build-workspace-publisher
 docker-build-workspace-publisher: ## Build the clean-room workspace publisher image.
 	$(CONTAINER_TOOL) build -t ${WORKSPACE_PUBLISHER_IMG} -f workers/publisher/Dockerfile .
@@ -375,6 +390,14 @@ docker-push-acp-codex-runtime: ## Push the immutable Codex ACP runtime image.
 docker-push-acp-claude-runtime: ## Push the immutable Claude ACP runtime image.
 docker-push-acp-copilot-runtime: ## Push the immutable GitHub Copilot ACP runtime image.
 docker-push-acp-opencode-runtime: ## Push the immutable OpenCode ACP runtime image.
+
+.PHONY: docker-push-acp-agentkit-runtime
+docker-push-acp-agentkit-runtime: ## Push an AgentKit ACP runtime image built from a frozen agent image.
+	$(CONTAINER_TOOL) push ${ACP_AGENTKIT_RUNTIME_IMG}
+
+.PHONY: docker-push-acp-foundry-runtime
+docker-push-acp-foundry-runtime: ## Push a Foundry ACP runtime image built from a frozen configured image.
+	$(CONTAINER_TOOL) push ${ACP_FOUNDRY_RUNTIME_IMG}
 
 # acp-provider-uc maps an ACP runtime provider word to the uppercase form used
 # in its image variable name (ACP_<PROVIDER>_RUNTIME_IMG).
@@ -517,6 +540,7 @@ deploy: verify-acp-runtime-images verify-static-mode-crds manifests kustomize ##
 
 .PHONY: undeploy
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
+	"$(KUBECTL)" delete validatingwebhookconfiguration orka-admission --ignore-not-found=true
 	"$(KUSTOMIZE)" build config/acp-production | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
 
 ##@ Dependencies

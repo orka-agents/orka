@@ -13,7 +13,7 @@ import (
 
 // SaveResult inserts or replaces a task result.
 func (s *Store) SaveResult(ctx context.Context, namespace, taskName string, data []byte) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`INSERT INTO results (namespace, task_name, data, created_at, updated_at)
 		 VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 		 ON CONFLICT(namespace, task_name) DO UPDATE SET data = excluded.data, updated_at = CURRENT_TIMESTAMP`,
@@ -42,6 +42,9 @@ func (s *Store) DeleteResult(ctx context.Context, namespace, taskName string) er
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := advanceTaskDataCleanupGeneration(ctx, tx, namespace, taskName); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM prompt_result_receipts WHERE namespace = ? AND task_name = ?`,
 		namespace, taskName,

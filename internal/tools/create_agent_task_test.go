@@ -9,6 +9,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -18,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/publisher"
 )
 
 const (
@@ -74,9 +76,36 @@ func TestCreateAgentTaskTool_Parameters(t *testing.T) {
 	if !ok {
 		t.Fatal("workspace schema is missing properties")
 	}
+	assertWorkspacePullRequestMetadataSchema(t, workspaceSchema)
 	for _, key := range []string{"publicationReadCredentialRef", "publicationCredentialRef", "forgeCredentialRef"} {
 		if _, ok := workspaceProps[key]; !ok {
 			t.Errorf("workspace schema missing %s property", key)
+		}
+	}
+}
+
+func assertWorkspacePullRequestMetadataSchema(t *testing.T, workspaceSchema map[string]any) {
+	t.Helper()
+	properties := workspaceSchema[jsonSchemaPropertiesField].(map[string]any)
+	required, _ := workspaceSchema[jsonSchemaRequiredField].([]any)
+	for field, limit := range map[string]int{
+		"prTitle": publisher.MaxPullRequestTitleLength,
+		"prBody":  publisher.MaxPullRequestBodyLength,
+	} {
+		property, ok := properties[field].(map[string]any)
+		if !ok {
+			t.Errorf("workspace schema missing %s property", field)
+			continue
+		}
+		if property[jsonSchemaTypeField] != jsonSchemaTypeString || property["maxLength"] != float64(limit) {
+			t.Errorf("workspace.%s schema = %#v, want string with maxLength %d", field, property, limit)
+		}
+		description, _ := property[jsonSchemaDescriptionField].(string)
+		if !strings.Contains(description, "Optional") || !strings.Contains(description, "createPR") || !strings.Contains(description, "Task-creating agent") {
+			t.Errorf("workspace.%s needs optional, Task-authored PR guidance", field)
+		}
+		if slices.Contains(required, any(field)) {
+			t.Errorf("workspace.%s must remain optional", field)
 		}
 	}
 }
@@ -279,6 +308,191 @@ func TestCreateAgentTaskTool_Execute(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Both creation tools must preserve Task-authored PR text without granting
+// publication authority. Exercise their public Execute paths with nested maps.
+func testWorkspacePullRequestMetadata(t *testing.T, execute func(*testing.T, map[string]any) (*corev1alpha1.WorkspaceConfig, string)) {
+	t.Helper()
+	title := " \tfix: 修正 café e\u0301 🚀  "
+	body := "## Summary\n\nPreserve 日本語, e\u0301, and 🚀 exactly.\n\n- Keep \"quoted\" text and `code`.\r\n"
+	publicationWorkspace := func() map[string]any {
+		return map[string]any{
+			"gitRepo":                  "https://github.com/example/repo",
+			"publicationCredentialRef": "repo-write",
+			"forgeCredentialRef":       "repo-forge",
+			"prBaseBranch":             "main",
+			"createPR":                 true,
+		}
+	}
+	for _, test := range []struct {
+		name, title, body   string
+		omitTitle, omitBody bool
+	}{
+		{name: "Unicode round trip", title: title, body: body},
+		{name: "maximum Unicode lengths", title: strings.Repeat("界", publisher.MaxPullRequestTitleLength), body: strings.Repeat("🙂", publisher.MaxPullRequestBodyLength)},
+		{name: "omitted fallback", omitTitle: true, omitBody: true},
+		{name: "empty fallback"},
+		{name: "title only", title: title, omitBody: true},
+		{name: "body only", body: body, omitTitle: true},
+		{name: "whitespace body", title: title, body: " \t\n\u0085\u00a0\u2003\u3000"},
+		{name: "credential placeholders", title: "docs: configure credentials", body: "Use OPENAI_API_KEY=dummy and Authorization: Bearer $TOKEN."},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			args := publicationWorkspace()
+			if !test.omitTitle {
+				args["prTitle"] = test.title
+			}
+			if !test.omitBody {
+				args["prBody"] = test.body
+			}
+			workspace, failure := execute(t, args)
+			if failure != "" {
+				t.Fatalf("Execute() failed: %s", failure)
+			}
+			if workspace == nil {
+				t.Fatal("created Task has no workspace")
+			}
+			if workspace.PRTitle != test.title || workspace.PRBody != test.body {
+				t.Fatal("created Task did not preserve the exact PR title and body")
+			}
+			if !workspace.CreatePR || workspace.Intent != corev1alpha1.WorkspaceIntentWrite {
+				t.Fatal("created Task lost explicit PR publication authorization")
+			}
+		})
+	}
+	for _, test := range []struct {
+		name, intent string
+		omitCreatePR bool
+	}{
+		{name: "metadata with createPR false"},
+		{name: "metadata with createPR omitted", omitCreatePR: true},
+		{name: "metadata with explicit read intent", intent: "read"},
+		{name: "write intent does not imply createPR", intent: "write"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			args := map[string]any{"prTitle": title, "prBody": body}
+			if !test.omitCreatePR {
+				args["createPR"] = false
+			}
+			wantIntent := corev1alpha1.WorkspaceIntentRead
+			if test.intent != "" {
+				args["intent"] = test.intent
+				args["gitRepo"] = "https://github.com/example/repo"
+			}
+			if test.intent == "write" {
+				args["publicationCredentialRef"] = "repo-write"
+				wantIntent = corev1alpha1.WorkspaceIntentWrite
+			}
+			workspace, failure := execute(t, args)
+			if failure != "" {
+				t.Fatalf("Execute() failed: %s", failure)
+			}
+			if workspace == nil || workspace.PRTitle != title || workspace.PRBody != body {
+				t.Fatal("metadata must be preserved even without PR authorization")
+			}
+			if workspace.CreatePR || workspace.Intent != wantIntent || workspaceRequestsPublication(workspace) {
+				t.Fatal("metadata must not enable createPR, write intent, or publication fields")
+			}
+		})
+	}
+
+	// Construct fake credential-shaped text without storing token literals or
+	// printing rejected input, even when a redaction assertion fails.
+	fakeToken := "g" + "hp_" + strings.Repeat("NOTAREALSECRET", 3)
+	fakeAssignment := "password=" + strings.Repeat("FAKE_TEST_ONLY_", 3)
+	type invalidMetadata struct {
+		name, field, want string
+		value             any
+	}
+	invalid := make([]invalidMetadata, 0, 23)
+	invalid = append(invalid, []invalidMetadata{
+		{name: "case-insensitive title null", field: "PRTitle", value: nil, want: "workspace.prTitle must be a string"},
+		{name: "case-insensitive body null", field: "PRBODY", value: nil, want: "workspace.prBody must be a string"},
+		{name: "overlong ASCII title", field: "prTitle", value: strings.Repeat("a", publisher.MaxPullRequestTitleLength+1), want: "prTitle: must not exceed 256 characters"},
+		{name: "overlong Unicode title", field: "prTitle", value: strings.Repeat("界", publisher.MaxPullRequestTitleLength+1), want: "prTitle: must not exceed 256 characters"},
+		{name: "overlong ASCII body", field: "prBody", value: strings.Repeat("a", publisher.MaxPullRequestBodyLength+1), want: "prBody: must not exceed 32768 characters"},
+		{name: "overlong Unicode body", field: "prBody", value: strings.Repeat("🙂", publisher.MaxPullRequestBodyLength+1), want: "prBody: must not exceed 32768 characters"},
+		{name: "blank title", field: "prTitle", value: " \t\r\n", want: "prTitle: must not be whitespace-only"},
+		{name: "Unicode blank title", field: "prTitle", value: "\u0085\u00a0\u2003\u3000", want: "prTitle: must not be whitespace-only"},
+		{name: "token in title", field: "prTitle", value: "fix: remove " + fakeToken, want: "prTitle: must not contain credentials or tokens"},
+		{name: "token in body", field: "prBody", value: "Remove " + fakeToken, want: "prBody: must not contain credentials or tokens"},
+		{name: "credential in title", field: "prTitle", value: fakeAssignment, want: "prTitle: must not contain credentials or tokens"},
+		{name: "credential in body", field: "prBody", value: fakeAssignment, want: "prBody: must not contain credentials or tokens"},
+		{name: "reserved body marker", field: "prBody", value: publisher.PullRequestMarkerPrefix + "test -->", want: "prBody: must not contain reserved publisher reconciliation markers"},
+	}...)
+	for _, field := range []string{"prTitle", "prBody"} {
+		for _, value := range []struct {
+			name  string
+			value any
+		}{
+			{name: "null", value: nil},
+			{name: "boolean", value: false},
+			{name: "number", value: 42},
+			{name: "object", value: map[string]any{"text": fakeToken}},
+			{name: "array", value: []any{fakeToken}},
+		} {
+			invalid = append(invalid, invalidMetadata{
+				name: field + " " + value.name, field: field, value: value.value, want: "workspace." + field + " must be a string",
+			})
+		}
+	}
+	for _, test := range invalid {
+		for _, mode := range []string{"read", "createPR"} {
+			t.Run(test.name+"/"+mode, func(t *testing.T) {
+				args := map[string]any{"createPR": false}
+				if mode == "createPR" {
+					args = publicationWorkspace()
+				}
+				args[test.field] = test.value
+				_, failure := execute(t, args)
+				if strings.Contains(failure, fakeToken) || strings.Contains(failure, fakeAssignment) {
+					t.Fatal("error exposed rejected credential-like input")
+				}
+				if failure == "" || !strings.Contains(failure, test.want) {
+					t.Fatalf("Execute() did not reject invalid metadata with %q", test.want)
+				}
+			})
+		}
+	}
+}
+
+func TestCreateAgentTaskTool_Execute_PullRequestMetadata(t *testing.T) {
+	testWorkspacePullRequestMetadata(t, func(t *testing.T, workspace map[string]any) (*corev1alpha1.WorkspaceConfig, string) {
+		fc := newFakeClient()
+		args, err := json.Marshal(map[string]any{
+			"prompt": "Fix the bug", "agentRef": "codex-agent", "workspace": workspace,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := (&CreateAgentTaskTool{}).Execute(newCreateAgentTaskToolCtx(fc), args)
+		if err != nil {
+			t.Fatal("Execute() returned an unexpected Go error")
+		}
+		var response ChatToolResult
+		if err := json.Unmarshal([]byte(result), &response); err != nil {
+			t.Fatal(err)
+		}
+		if !response.Success {
+			if response.ErrorType != errTypeInvalidArgs {
+				t.Fatalf("error type = %q, want invalid arguments", response.ErrorType)
+			}
+			var tasks corev1alpha1.TaskList
+			if err := fc.List(t.Context(), &tasks); err != nil {
+				t.Fatal(err)
+			}
+			if len(tasks.Items) != 0 {
+				t.Fatal("invalid metadata created a Task")
+			}
+			return nil, result
+		}
+		task := &corev1alpha1.Task{}
+		if err := fc.Get(t.Context(), apitypes.NamespacedName{Name: testAgentTaskGeneratedName, Namespace: defaultNamespace}, task); err != nil {
+			t.Fatal(err)
+		}
+		return task.Spec.Workspace, ""
+	})
 }
 
 func TestCreateAgentTaskTool_Execute_RejectsNonObjectWorkspace(t *testing.T) {
@@ -873,6 +1087,205 @@ func TestCreateAgentTaskTool_Execute_AllowsReadWorkspaceWithoutGitRepo(t *testin
 	}
 	if task.Spec.Workspace.ReadCredentialRef != nil {
 		t.Fatalf("readCredentialRef = %#v, want nil without gitRepo", task.Spec.Workspace.ReadCredentialRef)
+	}
+}
+
+func TestCreateAgentTaskTool_Execute_MaterializesRuntimeRefAllowedTools(t *testing.T) {
+	contract := corev1alpha1.AgentRuntimeContractHarnessV2
+	for _, tt := range []struct {
+		name    string
+		allowed []string
+	}{
+		{name: "nonempty allowlist", allowed: []string{"check_messages", "web_search"}},
+		{name: "explicit deny all", allowed: []string{}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			const runtimeName = "external-runtime"
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "external-agent", Namespace: defaultNamespace},
+				Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+					RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: runtimeName},
+				}},
+			}
+			runtime := &corev1alpha1.AgentRuntime{
+				ObjectMeta: metav1.ObjectMeta{Name: runtimeName, Namespace: defaultNamespace},
+				Spec: corev1alpha1.AgentRuntimeRegistrySpec{
+					ContractVersion: &contract,
+					Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
+						Profile: &corev1alpha1.AgentRuntimeProfileSpec{
+							ProviderKind: "codex", Model: "gpt-5.6", WorkspaceIntent: corev1alpha1.WorkspaceIntentRead,
+						},
+						MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{
+							AllowedTools:          append([]string{}, tt.allowed...),
+							DisallowedTools:       []string{},
+							ApprovalRequiredTools: []string{},
+						},
+					},
+				},
+			}
+			fc := newFakeClient(agent, runtime)
+			result, err := (&CreateAgentTaskTool{}).Execute(
+				newCreateAgentTaskToolCtx(fc),
+				json.RawMessage(`{"name":"external-task","prompt":"work","agentRef":"external-agent"}`),
+			)
+			if err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			var response ChatToolResult
+			if err := json.Unmarshal([]byte(result), &response); err != nil {
+				t.Fatal(err)
+			}
+			if !response.Success {
+				t.Fatalf("Execute() result = %#v", response)
+			}
+
+			task := &corev1alpha1.Task{}
+			if err := fc.Get(context.Background(), apitypes.NamespacedName{
+				Name: testAgentTaskGeneratedName, Namespace: defaultNamespace,
+			}, task); err != nil {
+				t.Fatal(err)
+			}
+			if task.Spec.AgentRuntime == nil {
+				t.Fatal("agentRuntime = nil, want materialized runtime policy")
+			}
+			if !slices.Equal(task.Spec.AgentRuntime.AllowedTools, tt.allowed) {
+				t.Fatalf("allowedTools = %#v, want %#v", task.Spec.AgentRuntime.AllowedTools, tt.allowed)
+			}
+			if task.Spec.AgentRuntime.AllowedTools == nil {
+				t.Fatal("allowedTools = nil, want explicit list")
+			}
+		})
+	}
+}
+
+func TestCreateAgentTaskTool_Execute_UsesRuntimePolicyReader(t *testing.T) {
+	cachedAgent, cachedRuntime := externalRuntimePolicyFixtures([]string{"Read"})
+	liveAgent, liveRuntime := externalRuntimePolicyFixtures([]string{"Write"})
+	cachedClient := newFakeClient(cachedAgent, cachedRuntime)
+	liveReader := newFakeClient(liveAgent, liveRuntime)
+	ctx := newCreateAgentTaskToolCtx(cachedClient)
+	GetToolContext(ctx).PolicyReader = liveReader
+
+	result, err := (&CreateAgentTaskTool{}).Execute(
+		ctx,
+		json.RawMessage(`{"name":"external-task","prompt":"work","agentRef":"external-agent"}`),
+	)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	var response ChatToolResult
+	if err := json.Unmarshal([]byte(result), &response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.Success {
+		t.Fatalf("Execute() result = %#v", response)
+	}
+
+	task := &corev1alpha1.Task{}
+	if err := cachedClient.Get(context.Background(), apitypes.NamespacedName{
+		Name: testAgentTaskGeneratedName, Namespace: defaultNamespace,
+	}, task); err != nil {
+		t.Fatal(err)
+	}
+	if task.Spec.AgentRuntime == nil || !slices.Equal(task.Spec.AgentRuntime.AllowedTools, []string{"Write"}) {
+		t.Fatalf("agentRuntime = %#v, want current live policy", task.Spec.AgentRuntime)
+	}
+}
+
+func TestCreateAgentTaskTool_Execute_RejectsRuntimeRefMaxTurns(t *testing.T) {
+	contract := corev1alpha1.AgentRuntimeContractHarnessV2
+	const runtimeName = "external-runtime"
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "external-agent", Namespace: defaultNamespace},
+		Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+			RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: runtimeName},
+		}},
+	}
+	runtime := &corev1alpha1.AgentRuntime{
+		ObjectMeta: metav1.ObjectMeta{Name: runtimeName, Namespace: defaultNamespace},
+		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
+			ContractVersion: &contract,
+			Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
+				Profile: &corev1alpha1.AgentRuntimeProfileSpec{
+					ProviderKind: "codex", Model: "gpt-5.6", WorkspaceIntent: corev1alpha1.WorkspaceIntentRead,
+				},
+				MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{
+					AllowedTools:          []string{},
+					DisallowedTools:       []string{},
+					ApprovalRequiredTools: []string{},
+				},
+			},
+		},
+	}
+	fc := newFakeClient(agent, runtime)
+	result, err := (&CreateAgentTaskTool{}).Execute(
+		newCreateAgentTaskToolCtx(fc),
+		json.RawMessage(`{"name":"external-task","prompt":"work","agentRef":"external-agent","maxTurns":10}`),
+	)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	var response ChatToolResult
+	if err := json.Unmarshal([]byte(result), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Success || !strings.Contains(response.Error, "do not support maxTurns") {
+		t.Fatalf("Execute() result = %#v, want unsupported maxTurns error", response)
+	}
+	tasks := &corev1alpha1.TaskList{}
+	if err := fc.List(context.Background(), tasks); err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks.Items) != 0 {
+		t.Fatalf("created %d Tasks after unsupported maxTurns override", len(tasks.Items))
+	}
+}
+
+func TestCreateAgentTaskTool_Execute_RejectsRuntimeRefWithoutExplicitAllowedTools(t *testing.T) {
+	contract := corev1alpha1.AgentRuntimeContractHarnessV2
+	const runtimeName = "external-runtime"
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "external-agent", Namespace: defaultNamespace},
+		Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+			RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: runtimeName},
+		}},
+	}
+	runtime := &corev1alpha1.AgentRuntime{
+		ObjectMeta: metav1.ObjectMeta{Name: runtimeName, Namespace: defaultNamespace},
+		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
+			ContractVersion: &contract,
+			Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
+				Profile: &corev1alpha1.AgentRuntimeProfileSpec{
+					ProviderKind: "codex", Model: "gpt-5.6", WorkspaceIntent: corev1alpha1.WorkspaceIntentRead,
+				},
+				MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{
+					DisallowedTools:       []string{},
+					ApprovalRequiredTools: []string{},
+				},
+			},
+		},
+	}
+	fc := newFakeClient(agent, runtime)
+	result, err := (&CreateAgentTaskTool{}).Execute(
+		newCreateAgentTaskToolCtx(fc),
+		json.RawMessage(`{"name":"external-task","prompt":"work","agentRef":"external-agent"}`),
+	)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	var response ChatToolResult
+	if err := json.Unmarshal([]byte(result), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Success || !strings.Contains(response.Error, "allowedTools must be an explicit list") {
+		t.Fatalf("Execute() result = %#v, want fail-closed policy error", response)
+	}
+	tasks := &corev1alpha1.TaskList{}
+	if err := fc.List(context.Background(), tasks); err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks.Items) != 0 {
+		t.Fatalf("created %d Tasks after invalid runtime policy", len(tasks.Items))
 	}
 }
 

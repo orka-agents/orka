@@ -8,6 +8,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +25,8 @@ const maxSubmitExecutionEventRequestBytes = 256 << 10 // 256 KiB
 
 // SubmitExecutionEvent handles POST /internal/v1/events/{namespace}/{streamType}/{streamID}.
 // Workers call this to append sanitized execution timeline events.
+//
+//nolint:gocyclo // Event authentication, replay checks, and durable acceptance form one boundary.
 func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 	namespace := strings.TrimSpace(c.Params("namespace"))
 	streamType := strings.TrimSpace(c.Params("streamType"))
@@ -31,9 +34,6 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 
 	if namespace == "" || streamType == "" || streamID == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "namespace, streamType, and streamID are required")
-	}
-	if err := h.internalCallerAuthorizer().verifyNamespace(c, namespace); err != nil {
-		return err
 	}
 	if h.executionEventStore == nil {
 		return fiber.NewError(fiber.StatusNotImplemented, "execution event storage not enabled")
@@ -44,7 +44,8 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 	if strings.Contains(streamID, "/") {
 		return fiber.NewError(fiber.StatusBadRequest, "streamID must not contain slash")
 	}
-	writerTask, err := h.internalCallerAuthorizer().verifyExecutionEventStreamWriter(c, namespace, streamType, streamID)
+	authorizer := h.internalCallerAuthorizer()
+	writerTask, err := authorizer.verifyExecutionEventStreamWriter(c, namespace, streamType, streamID)
 	if err != nil {
 		return err
 	}
@@ -72,8 +73,23 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
-	if events.IsTerminalTaskEventType(event.Type) || events.IsTerminalApprovalEventType(event.Type) {
-		return fiber.NewError(fiber.StatusForbidden, "terminal task and approval events must use controller-owned paths")
+	if events.IsTerminalTaskEventType(event.Type) || events.IsTerminalApprovalEventType(event.Type) ||
+		event.Type == events.ExecutionEventTypeApprovalExecutionUpdated {
+		return fiber.NewError(fiber.StatusForbidden, "this event must use a controller-owned path")
+	}
+	// The harness identity is controller-owned; workers may submit only their
+	// own call records, bound below to the authenticated Task UID.
+	var eventContent map[string]json.RawMessage
+	if json.Unmarshal(event.Content, &eventContent) == nil {
+		if _, ok := eventContent["harnessV2"]; ok {
+			return fiber.NewError(fiber.StatusForbidden, "harness events must use the controller journal")
+		}
+		if _, ok := eventContent["usage"]; ok {
+			if err := authorizer.verifyUsageWriter(c.Context(), GetUserInfo(c), writerTask); err != nil {
+				return err
+			}
+			event.Internal = map[string]any{"usageTaskUID": string(writerTask.UID)}
+		}
 	}
 	if event.StreamType == events.ExecutionEventStreamTypeTask {
 		event.TaskName = streamID
@@ -94,12 +110,31 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 			event.SessionName = expectedSessionName
 		}
 	}
-	appended, err := h.executionEventStore.AppendExecutionEvent(c.Context(), event)
-	if err != nil {
-		if errors.Is(err, store.ErrValidation) {
-			return fiber.NewError(fiber.StatusBadRequest, err.Error())
+	var appended *store.ExecutionEvent
+	if err := withInternalTaskDataTransaction(c, h.executionEventStore, "", func(context.Context) error {
+		current, err := authorizer.verifyExecutionEventStreamWriter(c, namespace, streamType, streamID)
+		if err != nil {
+			return err
 		}
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to append execution event: %v", err))
+		if current.UID != writerTask.UID {
+			return fiber.NewError(fiber.StatusForbidden, "task identity changed")
+		}
+		if event.Internal["usageTaskUID"] != nil {
+			return authorizer.verifyUsageWriter(c.Context(), GetUserInfo(c), current)
+		}
+		return nil
+	}, func(ctx context.Context) error {
+		var err error
+		appended, err = h.executionEventStore.AppendExecutionEvent(ctx, event)
+		if err != nil {
+			if errors.Is(err, store.ErrValidation) {
+				return fiber.NewError(fiber.StatusBadRequest, err.Error())
+			}
+			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to append execution event: %v", err))
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	return c.Status(fiber.StatusCreated).JSON(SubmitExecutionEventResponse{

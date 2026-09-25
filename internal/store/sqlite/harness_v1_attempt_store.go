@@ -26,7 +26,7 @@ func (s *Store) CreateHarnessV1Attempt(
 	if err := attempt.Validate(); err != nil {
 		return err
 	}
-	fence, err := normalizeEpochFence(fence)
+	fence, err := store.NormalizeEpochFence(fence)
 	if err != nil {
 		return err
 	}
@@ -119,21 +119,10 @@ func (s *Store) ListHarnessV1AttemptsByTask(ctx context.Context, namespace, task
 	if strings.TrimSpace(namespace) == "" || strings.TrimSpace(taskUID) == "" {
 		return nil, store.ValidationErrorf("harness v1 attempt namespace and task UID are required")
 	}
-	rows, err := s.db.QueryContext(ctx, harnessV1AttemptSelectSQL+`
+	rows, err := s.taskDataExecutor(ctx).QueryContext(ctx, harnessV1AttemptSelectSQL+`
 		WHERE namespace = ? AND task_uid = ? ORDER BY attempt ASC`, namespace, taskUID)
 	if err != nil {
 		return nil, fmt.Errorf("list harness v1 attempts: %w", err)
-	}
-	return collectHarnessV1Attempts(rows)
-}
-
-// ListActiveHarnessV1Attempts implements store.HarnessV1AttemptStore.
-func (s *Store) ListActiveHarnessV1Attempts(ctx context.Context) ([]store.HarnessV1Attempt, error) {
-	rows, err := s.db.QueryContext(ctx, harnessV1AttemptSelectSQL+`
-		WHERE state NOT IN ('Rejected','Succeeded','Failed','Cancelled','OutcomeUnknown')
-		ORDER BY updated_at ASC, id ASC`)
-	if err != nil {
-		return nil, fmt.Errorf("list active harness v1 attempts: %w", err)
 	}
 	return collectHarnessV1Attempts(rows)
 }
@@ -154,7 +143,7 @@ func (s *Store) ReclaimHarnessV1Attempts(
 	if err := store.ValidateCanonicalDigest("harness v1 reclamation binding digest", request.BindingDigest); err != nil {
 		return 0, err
 	}
-	fence, err := normalizeEpochFence(request.Fence)
+	fence, err := store.NormalizeEpochFence(request.Fence)
 	if err != nil {
 		return 0, err
 	}
@@ -259,7 +248,7 @@ func (s *Store) TransitionHarnessV1Attempt(ctx context.Context, transition store
 	if err := store.ValidateCanonicalDigest("harness v1 attempt operation digest", transition.OperationDigest); err != nil {
 		return nil, err
 	}
-	fence, err := normalizeEpochFence(transition.Fence)
+	fence, err := store.NormalizeEpochFence(transition.Fence)
 	if err != nil {
 		return nil, err
 	}

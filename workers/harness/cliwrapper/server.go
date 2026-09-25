@@ -34,6 +34,15 @@ import (
 )
 
 const (
+	observedStatus = "observed"
+)
+
+const (
+	runtimeMetadataKey = "runtime"
+	modeMetadataKey    = "mode"
+)
+
+const (
 	maxTerminalResultBytes           = 512 * 1024
 	localOutputRef                   = "cliwrapper-result-v1"
 	terminalLedgerPersistFailed      = "persist-failed"
@@ -53,11 +62,12 @@ var failedArtifactRetentionMu sync.Mutex
 type Server struct {
 	config                         Config
 	adapter                        RuntimeAdapter
-	runner                         commandRunner
+	runner                         func(context.Context, *CommandSpec) (CommandResult, error)
 	now                            func() time.Time
 	configuredExactRedactionValues []string
 
 	turnRegistry *turnRegistry
+	ledgerMu     sync.RWMutex
 	ledger       *ledger.Ledger
 
 	healthMu           sync.RWMutex
@@ -67,14 +77,6 @@ type Server struct {
 	// failures. Ambiguous admission reconciliation failures remain fail-closed.
 	admissionLedgerErrRetryable bool
 	childCredentialProcessErr   error
-}
-
-type commandRunner interface {
-	Run(context.Context, *CommandSpec) (CommandResult, error)
-}
-
-type RuntimeSupportProvider interface {
-	SupportedRuntimes() []string
 }
 
 func NewServer(cfg Config, adapter RuntimeAdapter) (*Server, error) {
@@ -91,7 +93,7 @@ func NewServer(cfg Config, adapter RuntimeAdapter) (*Server, error) {
 	s := &Server{
 		config:                         cfg,
 		adapter:                        adapter,
-		runner:                         NewCommandRunner(cfg),
+		runner:                         NewCommandRunner(cfg).Run,
 		now:                            time.Now,
 		configuredExactRedactionValues: exactConfiguredEnvValues(cfg.CommandEnv),
 		turnRegistry:                   newTurnRegistry(),
@@ -182,7 +184,12 @@ func (s *Server) reclaimSettledTurns(ctx context.Context) error {
 // Close releases the durable wrapper admission ledger. The HTTP server must be
 // stopped before calling Close.
 func (s *Server) Close() error {
-	if s == nil || s.ledger == nil {
+	if s == nil {
+		return nil
+	}
+	s.ledgerMu.Lock()
+	defer s.ledgerMu.Unlock()
+	if s.ledger == nil {
 		return nil
 	}
 	err := s.ledger.Close()
@@ -231,6 +238,17 @@ func (s *Server) finishTurn(turn *turnState) {
 	if !s.childCredentialProcessesHealthy() {
 		return
 	}
+	if !s.persistTurnTerminal(turn) {
+		return
+	}
+	turn.close()
+	s.turnRegistry.finishActive()
+	s.scheduleTurnEviction(turn)
+}
+
+func (s *Server) persistTurnTerminal(turn *turnState) bool {
+	s.ledgerMu.RLock()
+	defer s.ledgerMu.RUnlock()
 	if s.ledger != nil {
 		receipt, outcomeUnknown := s.durableTerminalReceipt(turn)
 		var durableOutput *ledger.TurnOutput
@@ -241,7 +259,7 @@ func (s *Server) finishTurn(turn *turnState) {
 					err = errors.New("terminal output payload is missing")
 				}
 				s.setTerminalLedgerError(err)
-				return
+				return false
 			}
 			durableOutput = &ledger.TurnOutput{Ref: localOutputRef, Data: data}
 		}
@@ -253,13 +271,11 @@ func (s *Server) finishTurn(turn *turnState) {
 			// unhealthy readiness response surfaces the failure without leaking
 			// ledger details; an operator can restart into conservative recovery.
 			s.setTerminalLedgerError(err)
-			return
+			return false
 		}
 		s.setTerminalLedgerError(nil)
 	}
-	turn.close()
-	s.turnRegistry.finishActive()
-	s.scheduleTurnEviction(turn)
+	return true
 }
 
 func (s *Server) markDurableTurnAccepted(ctx context.Context, turn *turnState) error {
@@ -421,8 +437,8 @@ func (s *Server) healthResponse() harness.HealthResponse {
 	status := harness.HealthStatusOK
 	ready := true
 	metadata := map[string]string{
-		"runtime": s.adapter.Name(),
-		"mode":    "observed",
+		runtimeMetadataKey: s.adapter.Name(),
+		modeMetadataKey:    observedStatus,
 	}
 	if !s.terminalLedgerHealthy() {
 		status = harness.HealthStatusUnhealthy
@@ -490,11 +506,11 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) capabilitiesMetadata() map[string]string {
 	metadata := map[string]string{
-		"wrapper": "cli",
-		"mode":    "observed",
+		"wrapper":       "cli",
+		modeMetadataKey: observedStatus,
 	}
-	if provider, ok := s.adapter.(RuntimeSupportProvider); ok {
-		if runtimes := provider.SupportedRuntimes(); len(runtimes) > 0 {
+	if multi, ok := s.adapter.(*MultiAdapter); ok {
+		if runtimes := multi.SupportedRuntimes(); len(runtimes) > 0 {
 			metadata["supportedRuntimes"] = strings.Join(runtimes, ",")
 		}
 	}
@@ -924,14 +940,19 @@ func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request, turn *turn
 		writeSafeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	turn.cancel()
-	harness.WriteJSON(w, http.StatusAccepted, harness.CancelTurnResponse{
-		Version:          harness.ProtocolVersion,
+	accepted := turn.requestCancel()
+	status, message := http.StatusAccepted, "cancel accepted"
+	if !accepted {
+		status, message = http.StatusOK, "turn already settled"
+	}
+	harness.WriteJSON(w, status, harness.CancelTurnResponse{
+		Version: harness.ProtocolVersion,
+		// A settled turn already satisfies cancellation; clients must still drain its frames.
 		Accepted:         true,
 		RuntimeSessionID: request.RuntimeSessionID,
 		TurnID:           request.TurnID,
 		CorrelationID:    request.CorrelationID,
-		Message:          "cancel accepted",
+		Message:          message,
 	})
 }
 
@@ -1227,10 +1248,10 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 		return
 	}
 	turn.appendFrame(s.runtimeLogFrame(turn, "runtime command started", map[string]any{
-		"runtime": s.adapter.Name(),
-		"command": path.Base(spec.Path),
+		runtimeMetadataKey: s.adapter.Name(),
+		"command":          path.Base(spec.Path),
 	}))
-	run, runErr := s.runner.Run(ctx, spec)
+	run, runErr := s.runner(ctx, spec)
 	if s.latchChildCredentialProcessCleanupFailure(runErr) {
 		return
 	}
@@ -1283,7 +1304,11 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 			}
 			restoreTurnEnv()
 		}
-		if artifactErr := UploadTurnArtifacts(turnCtx, turnArtifactsDir); artifactErr != nil {
+		artifactErr := s.uploadTurnArtifacts(ctx, turnCtx, turnArtifactsDir)
+		if s.appendTurnContextTerminalIfDone(ctx, turn) {
+			return
+		}
+		if artifactErr != nil {
 			turn.appendFrame(s.runtimeLogTextFrame(
 				turn,
 				"artifact-upload",
@@ -1359,7 +1384,11 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 			))
 			return
 		}
-		if artifactErr := UploadTurnArtifacts(turnCtx, turnArtifactsDir); artifactErr != nil {
+		artifactErr := s.uploadTurnArtifacts(ctx, turnCtx, turnArtifactsDir)
+		if s.appendTurnContextTerminalIfDone(ctx, turn) {
+			return
+		}
+		if artifactErr != nil {
 			retainedArtifactsDir, retainErr := retainFailedTurnArtifacts(turnArtifactsDir)
 			if retainErr != nil {
 				// If the isolated move fails, retain the original workspace rather
@@ -1390,8 +1419,17 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 				))
 			}
 		}
-		if frameErr := s.appendCompletedFrame(turn, parsed); frameErr != nil {
-			turn.appendFrame(s.failedFrame(turn, "result_store_failed", frameErr.Error(), false))
+		if frameErr := s.appendCompletedFrame(ctx, turn, parsed); frameErr != nil {
+			if errors.Is(frameErr, errTurnCanceledBeforeCompletion) ||
+				errors.Is(frameErr, context.Canceled) ||
+				errors.Is(frameErr, context.DeadlineExceeded) {
+				s.appendTurnContextTerminalFrame(turn, frameErr)
+				return
+			}
+			storeFailed := s.failedFrame(turn, "result_store_failed", frameErr.Error(), false)
+			if terminalErr := turn.tryAppendTerminalFrame(ctx, storeFailed); terminalErr != nil {
+				s.appendTurnContextTerminalFrame(turn, terminalErr)
+			}
 			return
 		}
 	}
@@ -1458,10 +1496,10 @@ func (s *Server) securityArtifactFollowUp(turn *turnState, base TurnContext) com
 			followTurn.WorkDir = spec.Dir
 		}
 		turn.appendFrame(s.runtimeLogFrame(turn, "security artifact follow-up started", map[string]any{
-			"runtime": s.adapter.Name(),
-			"command": path.Base(spec.Path),
+			runtimeMetadataKey: s.adapter.Name(),
+			"command":          path.Base(spec.Path),
 		}))
-		run, runErr := s.runner.Run(ctx, spec)
+		run, runErr := s.runner(ctx, spec)
 		if s.latchChildCredentialProcessCleanupFailure(runErr) {
 			return "", runErr
 		}
@@ -1630,8 +1668,8 @@ func (s *Server) frame(turn *turnState, typ harness.FrameType, summary string, t
 		Severity:         events.ExecutionEventSeverityInfo,
 		Summary:          events.RedactExecutionEventText(summary),
 		Metadata: map[string]string{
-			"runtime": s.adapter.Name(),
-			"mode":    "observed",
+			runtimeMetadataKey: s.adapter.Name(),
+			modeMetadataKey:    observedStatus,
 		},
 	}
 	switch value := terminal.(type) {
@@ -1752,13 +1790,38 @@ func (s *Server) outputFrame(turn *turnState, stream, text string) harness.Harne
 	return frame
 }
 
-func (s *Server) appendCompletedFrame(turn *turnState, result TurnResult) error {
+var errTurnCanceledBeforeCompletion = errors.New("turn canceled before completion")
+
+func (s *Server) appendCompletedFrame(ctx context.Context, turn *turnState, result TurnResult) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	completed, err := s.completedFrame(turn, result)
 	if err != nil {
 		return err
 	}
-	turn.appendFrame(completed)
+	if err := turn.tryAppendTerminalFrame(ctx, completed); err != nil {
+		turn.cleanupOutput()
+		return err
+	}
 	return nil
+}
+
+func (s *Server) appendTurnContextTerminalIfDone(ctx context.Context, turn *turnState) bool {
+	err := ctx.Err()
+	if err == nil {
+		return false
+	}
+	s.appendTurnContextTerminalFrame(turn, err)
+	return true
+}
+
+func (s *Server) appendTurnContextTerminalFrame(turn *turnState, err error) {
+	if errors.Is(err, context.DeadlineExceeded) {
+		turn.appendFrame(s.failedFrame(turn, "timeout", "turn deadline exceeded", true))
+		return
+	}
+	turn.appendFrame(s.frame(turn, harness.FrameTurnCancelled, "turn cancelled", nil))
 }
 
 func (s *Server) completedFrame(turn *turnState, result TurnResult) (harness.HarnessEventFrame, error) {
@@ -1939,6 +2002,7 @@ type turnState struct {
 	resultRead           bool
 	resultKeepUntil      time.Time
 	exactRedactionValues []string
+	cancelRequested      bool
 }
 
 func newTurnState(request harness.StartTurnRequest, now func() time.Time) *turnState {
@@ -2143,9 +2207,15 @@ func (t *turnState) markOutputFetched() {
 
 func (t *turnState) cleanupOutput() {
 	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.cleanupOutputLocked()
+}
+
+func (t *turnState) cleanupOutputLocked() {
 	outputPath := t.resultPath
 	t.resultPath = ""
-	t.mu.Unlock()
+	t.resultRead = false
+	t.resultKeepUntil = time.Time{}
 	if outputPath != "" {
 		_ = os.Remove(outputPath)
 	}
@@ -2154,6 +2224,40 @@ func (t *turnState) cleanupOutput() {
 func (t *turnState) appendFrame(frame harness.HarnessEventFrame) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.appendFrameLocked(frame)
+}
+
+func (t *turnState) tryAppendTerminalFrame(
+	ctx context.Context,
+	frame harness.HarnessEventFrame,
+) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.cancelRequested {
+		return errTurnCanceledBeforeCompletion
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	t.appendFrameLocked(frame)
+	return nil
+}
+
+func (t *turnState) appendFrameLocked(frame harness.HarnessEventFrame) {
+	if t.cancelRequested && frame.Type != harness.FrameTurnCancelled && isTerminalFrameType(frame.Type) {
+		t.cleanupOutputLocked()
+		frame.Type = harness.FrameTurnCancelled
+		frame.Severity = events.ExecutionEventSeverityInfo
+		frame.Summary = "turn cancelled"
+		frame.Content = nil
+		frame.ContentText = ""
+		frame.ToolName = ""
+		frame.ToolCallID = ""
+		frame.ApprovalID = ""
+		frame.Completed = nil
+		frame.Failed = nil
+		frame.Error = nil
+	}
 	frame = redactHarnessFrameOutputValues(frame, t.exactRedactionValues)
 	if frame.Seq <= 0 {
 		frame.Seq = int64(len(t.frames) + 1)
@@ -2166,6 +2270,28 @@ func (t *turnState) appendFrame(frame harness.HarnessEventFrame) {
 	case harness.FrameTurnCompleted, harness.FrameTurnFailed, harness.FrameTurnCancelled:
 		t.terminal = true
 	}
+}
+
+func isTerminalFrameType(frameType harness.FrameType) bool {
+	switch frameType {
+	case harness.FrameTurnCompleted, harness.FrameTurnFailed, harness.FrameTurnCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
+func (t *turnState) requestCancel() bool {
+	t.mu.Lock()
+	if t.terminal {
+		t.mu.Unlock()
+		return false
+	}
+	t.cancelRequested = true
+	cancel := t.cancel
+	t.mu.Unlock()
+	cancel()
+	return true
 }
 
 func (t *turnState) exactRedactionValuesSnapshot() []string {

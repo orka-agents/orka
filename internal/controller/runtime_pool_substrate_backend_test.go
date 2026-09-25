@@ -34,11 +34,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/workspace"
 )
 
 const (
+	// substrateTestSnapshotLocation is the operator infrastructure snapshot
+	// location every derived template render must preserve.
+	substrateTestSnapshotLocation  = "gs://ate-snapshots/orka"
+	substrateTestSnapshotAtespace  = "orka-test"
 	substrateTestStatusSuspended   = "STATUS_SUSPENDED"
 	substrateTestStatusSuspending  = "STATUS_SUSPENDING"
 	substrateTestStatusCrashed     = "STATUS_CRASHED"
@@ -49,22 +54,95 @@ const (
 	substrateTestWorkerPoolName    = "orka-workers"
 	substrateTestWorkerPodName     = "worker-0"
 	substrateTestWorkerPodUID      = "worker-0-uid"
+	substrateTestWorkerPodIP       = "10.99.0.5"
 	substrateTestObjectNameField   = "name"
 	substrateTestObjectImageField  = "image"
 	substrateTestAttackerManagedBy = "attacker"
 )
 
 type fakeSubstrateActorControl struct {
-	actors      map[string]*workspace.SubstrateRuntimeActor
-	created     []string
-	resumed     []string
-	boots       []bool
-	settled     []string
-	deleted     []string
-	closed      int
-	afterCreate func()
-	afterResume func(*workspace.SubstrateRuntimeActor)
-	afterSettle func(*workspace.SubstrateRuntimeActor)
+	actors                                        map[string]*workspace.SubstrateRuntimeActor
+	created                                       []string
+	resumed                                       []string
+	boots                                         []bool
+	settled                                       []string
+	dataSuspended                                 []string
+	dataCheckpointFences                          []workspace.SubstrateDataCheckpointFence
+	dataResumeFences                              []workspace.SubstrateDataResumeFence
+	deleted                                       []string
+	closed                                        int
+	getErr                                        error
+	resumeErr                                     error
+	resumeResultErr                               error
+	suspendErr                                    error
+	dataCheckpointFencingSupported                bool
+	dataResumeFencingSupported                    bool
+	dataResumeCredentialBootstrapFencingSupported bool
+	afterCreate                                   func()
+	beforeDataSuspend                             func(*workspace.SubstrateRuntimeActor)
+	onDataSuspend                                 func(*workspace.SubstrateRuntimeActor, int) *workspace.SubstrateRuntimeActor
+	dataCheckpointResponseErr                     error
+	validateDataCheckpointFence                   func(workspace.SubstrateDataCheckpointFence) error
+	beforeDataResume                              func(*workspace.SubstrateRuntimeActor)
+	validateDataResumeFence                       func(workspace.SubstrateDataResumeFence) error
+	beforeDataResumeCredentialBootstrap           func(*workspace.SubstrateRuntimeActor)
+	dataResumeCredentialBootstrapAttempts         []workspace.SubstrateDataResumeCredentialFence
+	dataResumeCredentialBootstraps                []workspace.SubstrateCredentialBootstrapEnvelope
+	dataResumeCredentialBootstrapWorkerPod        workspace.SubstrateWorkerPodFence
+	dataResumeCredentialBootstrapResult           workspace.SubstrateCredentialBootstrapResult
+	dataResumeCredentialBootstrapErr              error
+	beforeResume                                  func()
+	afterResume                                   func(*workspace.SubstrateRuntimeActor)
+	afterSettle                                   func(*workspace.SubstrateRuntimeActor)
+	createErr                                     error
+	createBeforeMaterializeErr                    error
+	createRecoverySupported                       bool
+	createRecoverySettled                         bool
+	createRecoveryChecks                          int
+}
+
+func TestHistoricalRuntimePoolImageRecoveryRejectsOwnedSubstrateTemplateWithoutControllerProvenance(t *testing.T) {
+	r, pool := runtimePoolSubstrateTestReconciler(t, nil, &fakeSubstrateActorControl{})
+	cfg, err := r.runtimePoolConfigForDrain(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered, err := r.renderSubstrateRuntimeTemplate(
+		pool,
+		cfg,
+		substrateTestBaseTemplate(),
+		pool.Spec.ExecutionWorkspace.Substrate.BaseTemplateNamespace,
+		runtimePoolSubstrateActorID(cfg.baseName),
+		"legacy-nonce",
+		"legacy-public-key",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.createSubstrateActorTemplate(context.Background(), pool, rendered.object); err != nil {
+		t.Fatal(err)
+	}
+
+	authorized, err := r.historicalRuntimePoolImageAuthorized(context.Background(), pool, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authorized {
+		t.Fatal("caller-constructible ActorTemplate authorized the historical workspace image")
+	}
+	meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
+		Type:               acpRuntimePoolImageProvenanceCondition,
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: pool.Generation,
+		Reason:             acpRuntimePoolImageProvenanceReason,
+	})
+	authorized, err = r.historicalRuntimePoolImageAuthorized(context.Background(), pool, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !authorized {
+		t.Fatal("controller-written provenance did not authorize the historical workspace image")
+	}
 }
 
 type blockingSubstrateActorControl struct{}
@@ -97,6 +175,18 @@ func (c blockingSubstrateActorControl) SettleActor(ctx context.Context, _ string
 	return nil, c.wait(ctx)
 }
 
+func (blockingSubstrateActorControl) DataSnapshotCheckpointFencingSupported() bool {
+	return true
+}
+
+func (c blockingSubstrateActorControl) SuspendActorForDataCheckpoint(
+	ctx context.Context,
+	_ string,
+	_ workspace.SubstrateDataCheckpointFence,
+) (*workspace.SubstrateRuntimeActor, error) {
+	return nil, c.wait(ctx)
+}
+
 func (c blockingSubstrateActorControl) DeleteActor(ctx context.Context, _ string) error {
 	return c.wait(ctx)
 }
@@ -121,6 +211,10 @@ func TestSubstrateActorControlForCleanupAppliesClaimTimeout(t *testing.T) {
 		t.Fatalf("create actor control: %v", err)
 	}
 	defer control.Close() //nolint:errcheck // fake close cannot fail
+	checkpointControl, ok := control.(workspace.SubstrateRuntimeActorDataCheckpointControl)
+	if !ok {
+		t.Fatal("timeout wrapper does not expose atomic data-checkpoint control")
+	}
 
 	tests := []struct {
 		name string
@@ -142,6 +236,10 @@ func TestSubstrateActorControlForCleanupAppliesClaimTimeout(t *testing.T) {
 			_, callErr := control.SettleActor(ctx, "actor")
 			return callErr
 		}},
+		{name: "SuspendActorForDataCheckpoint", call: func(ctx context.Context) error {
+			_, callErr := checkpointControl.SuspendActorForDataCheckpoint(ctx, "actor", workspace.SubstrateDataCheckpointFence{})
+			return callErr
+		}},
 		{name: "DeleteActor", call: func(ctx context.Context) error {
 			return control.DeleteActor(ctx, "actor")
 		}},
@@ -156,27 +254,68 @@ func TestSubstrateActorControlForCleanupAppliesClaimTimeout(t *testing.T) {
 }
 
 func newFakeSubstrateActorControl() *fakeSubstrateActorControl {
-	return &fakeSubstrateActorControl{actors: map[string]*workspace.SubstrateRuntimeActor{}}
+	return &fakeSubstrateActorControl{
+		actors:                         map[string]*workspace.SubstrateRuntimeActor{},
+		dataCheckpointFencingSupported: true,
+		dataResumeFencingSupported:     true,
+		dataResumeCredentialBootstrapFencingSupported: true,
+		createRecoverySettled:                         true,
+		dataResumeCredentialBootstrapWorkerPod: workspace.SubstrateWorkerPodFence{
+			Namespace: substrateTestWorkerNamespace,
+			Name:      substrateTestWorkerPodName,
+			UID:       substrateTestWorkerPodUID,
+		},
+	}
+}
+
+func (f *fakeSubstrateActorControl) ActorCreateRecoveryAttestationSupported() bool {
+	return f.createRecoverySupported
+}
+
+func (f *fakeSubstrateActorControl) ConfirmActorCreationSettled(_ context.Context, _ string) (bool, error) {
+	f.createRecoveryChecks++
+	return f.createRecoverySettled, nil
 }
 
 func (f *fakeSubstrateActorControl) GetActor(_ context.Context, actorID string) (*workspace.SubstrateRuntimeActor, error) {
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
 	actor, ok := f.actors[actorID]
 	if !ok {
 		return nil, nil
 	}
 	view := *actor
+	if actor.DataSnapshot != nil {
+		snapshot := *actor.DataSnapshot
+		view.DataSnapshot = &snapshot
+	}
+	if actor.DataResumeOperation != nil {
+		operation := *actor.DataResumeOperation
+		view.DataResumeOperation = &operation
+	}
+	if actor.DataCheckpointOperation != nil {
+		operation := *actor.DataCheckpointOperation
+		view.DataCheckpointOperation = &operation
+	}
 	return &view, nil
 }
 
 func (f *fakeSubstrateActorControl) CreateActor(_ context.Context, actorID, templateNamespace, templateName string) (*workspace.SubstrateRuntimeActor, error) {
 	f.created = append(f.created, actorID)
+	if f.createBeforeMaterializeErr != nil {
+		return nil, f.createBeforeMaterializeErr
+	}
 	actor := &workspace.SubstrateRuntimeActor{
-		ActorID: actorID, TemplateNamespace: templateNamespace, TemplateName: templateName,
-		Status: substrateTestStatusSuspended,
+		ActorID: actorID, ActorUID: "uid-" + actorID, ActorVersion: 1,
+		TemplateNamespace: templateNamespace, TemplateName: templateName, Status: substrateTestStatusSuspended,
 	}
 	f.actors[actorID] = actor
 	if f.afterCreate != nil {
 		f.afterCreate()
+	}
+	if f.createErr != nil {
+		return nil, f.createErr
 	}
 	view := *actor
 	return &view, nil
@@ -185,20 +324,151 @@ func (f *fakeSubstrateActorControl) CreateActor(_ context.Context, actorID, temp
 func (f *fakeSubstrateActorControl) ResumeActor(_ context.Context, actorID string, boot bool) (*workspace.SubstrateRuntimeActor, error) {
 	f.resumed = append(f.resumed, actorID)
 	f.boots = append(f.boots, boot)
+	if f.beforeResume != nil {
+		f.beforeResume()
+	}
+	if f.resumeErr != nil {
+		return nil, f.resumeErr
+	}
 	actor := f.actors[actorID]
 	if actor == nil {
-		actor = &workspace.SubstrateRuntimeActor{ActorID: actorID}
+		actor = &workspace.SubstrateRuntimeActor{ActorID: actorID, ActorUID: "uid-" + actorID, ActorVersion: 1}
 		f.actors[actorID] = actor
 	}
-	actor.Status = "STATUS_RUNNING"
+	actor.ActorVersion++
+	actor.LatestDataOperationID = fmt.Sprintf("unfenced-resume:%d", actor.ActorVersion)
+	actor.DataCheckpointOperation = nil
+	actor.DataResumeOperation = nil
+	actor.Status = substrateTestStatusRunning
 	actor.PodNamespace = substrateTestWorkerNamespace
 	actor.PodName = substrateTestWorkerPodName
-	actor.PodIP = "10.99.0.5"
+	actor.PodIP = substrateTestWorkerPodIP
 	if f.afterResume != nil {
 		f.afterResume(actor)
 	}
+	if f.resumeResultErr != nil {
+		return nil, f.resumeResultErr
+	}
 	view := *actor
 	return &view, nil
+}
+
+func (f *fakeSubstrateActorControl) DataSnapshotResumeFencingSupported() bool {
+	return f.dataResumeFencingSupported
+}
+
+func (f *fakeSubstrateActorControl) DataResumeCredentialBootstrapFencingSupported() bool {
+	return f.dataResumeCredentialBootstrapFencingSupported
+}
+
+func (f *fakeSubstrateActorControl) ResumeActorFromDataCheckpoint(
+	ctx context.Context,
+	actorID string,
+	expected workspace.SubstrateDataResumeFence,
+) (*workspace.SubstrateRuntimeActor, error) {
+	f.dataResumeFences = append(f.dataResumeFences, expected)
+	actor := f.actors[actorID]
+	if actor == nil {
+		return nil, workspace.NewError("resume actor", workspace.ErrorKindNotFound, "actor not found", false, nil)
+	}
+	if strings.TrimSpace(expected.OperationID) == "" {
+		return nil, workspace.NewError(
+			"resume actor",
+			workspace.ErrorKindFailedPrecondition,
+			"resume operation id is required",
+			false,
+			nil,
+		)
+	}
+	if operation := actor.DataResumeOperation; operation != nil &&
+		strings.TrimSpace(operation.OperationID) == strings.TrimSpace(expected.OperationID) {
+		if _, _, err := actor.VerifiedDataResumeOperation(actorID, expected.OperationID); err != nil {
+			return nil, workspace.NewError(
+				"resume actor",
+				workspace.ErrorKindFailedPrecondition,
+				"recorded resume operation no longer identifies the actor lifetime",
+				false,
+				err,
+			)
+		}
+		view := *actor
+		proof := *operation
+		view.DataResumeOperation = &proof
+		return &view, nil
+	}
+	if f.beforeDataResume != nil {
+		f.beforeDataResume(actor)
+	}
+	if f.validateDataResumeFence != nil {
+		if err := f.validateDataResumeFence(expected); err != nil {
+			return nil, err
+		}
+	}
+	_, currentDigest, currentErr := actor.VerifiedDataSnapshotFence(actorID)
+	expectedActor := &workspace.SubstrateRuntimeActor{
+		ActorID: actorID, ActorUID: expected.Snapshot.ActorUID, ActorVersion: expected.Snapshot.ActorVersion,
+		DataSnapshot: &expected.Snapshot,
+	}
+	_, expectedDigest, expectedErr := expectedActor.VerifiedDataSnapshotFence(actorID)
+	if currentErr != nil || expectedErr != nil || currentDigest != expectedDigest ||
+		expected.Template.Namespace == "" || expected.Template.Name == "" || expected.Template.UID == "" ||
+		expected.Template.ResourceVersion == "" || expected.Template.Revision == "" {
+		return nil, workspace.NewError(
+			"resume actor",
+			workspace.ErrorKindFailedPrecondition,
+			"actor or snapshot fence changed before resume",
+			true,
+			errors.Join(currentErr, expectedErr),
+		)
+	}
+	if _, err := f.ResumeActor(ctx, actorID, false); err != nil {
+		return nil, err
+	}
+	actor = f.actors[actorID]
+	actor.DataResumeOperation = &workspace.SubstrateDataResumeOperationProof{
+		OperationID:  strings.TrimSpace(expected.OperationID),
+		ActorID:      actorID,
+		ActorUID:     actor.ActorUID,
+		ActorVersion: actor.ActorVersion,
+	}
+	actor.LatestDataOperationID = strings.TrimSpace(expected.OperationID)
+	view := *actor
+	proof := *actor.DataResumeOperation
+	view.DataResumeOperation = &proof
+	return &view, nil
+}
+
+func (f *fakeSubstrateActorControl) BootstrapActorCredentialsForDataResume(
+	_ context.Context,
+	actorID string,
+	expected workspace.SubstrateDataResumeCredentialFence,
+	envelope workspace.SubstrateCredentialBootstrapEnvelope,
+) (workspace.SubstrateCredentialBootstrapResult, error) {
+	f.dataResumeCredentialBootstrapAttempts = append(f.dataResumeCredentialBootstrapAttempts, expected)
+	actor := f.actors[actorID]
+	if f.beforeDataResumeCredentialBootstrap != nil {
+		f.beforeDataResumeCredentialBootstrap(actor)
+	}
+	if actor == nil {
+		return workspace.SubstrateCredentialBootstrapResult{FenceConflict: true}, nil
+	}
+	proof, _, err := actor.VerifiedDataResumeOperation(actorID, expected.ResumeOperation.OperationID)
+	if err != nil || proof != expected.ResumeOperation || expected.WorkerPod != f.dataResumeCredentialBootstrapWorkerPod {
+		return workspace.SubstrateCredentialBootstrapResult{FenceConflict: true}, nil
+	}
+	if strings.TrimSpace(envelope.Nonce) == "" || strings.TrimSpace(envelope.Signature) == "" || len(envelope.Body) == 0 {
+		return workspace.SubstrateCredentialBootstrapResult{}, workspace.NewError(
+			"bootstrap actor credentials", workspace.ErrorKindInvalidArgument,
+			"signed credential bootstrap envelope is incomplete", false, nil,
+		)
+	}
+	if f.dataResumeCredentialBootstrapErr != nil {
+		return workspace.SubstrateCredentialBootstrapResult{}, f.dataResumeCredentialBootstrapErr
+	}
+	accepted := envelope
+	accepted.Body = append([]byte(nil), envelope.Body...)
+	f.dataResumeCredentialBootstraps = append(f.dataResumeCredentialBootstraps, accepted)
+	return f.dataResumeCredentialBootstrapResult, nil
 }
 
 func (f *fakeSubstrateActorControl) SettleActor(_ context.Context, actorID string) (*workspace.SubstrateRuntimeActor, error) {
@@ -208,10 +478,130 @@ func (f *fakeSubstrateActorControl) SettleActor(_ context.Context, actorID strin
 		return nil, fmt.Errorf("settle: actor %s not found", actorID)
 	}
 	actor.Status = substrateTestStatusSuspended
+	actor.ActorVersion++
+	actor.LatestDataOperationID = fmt.Sprintf("unfenced-suspend:%d", actor.ActorVersion)
+	actor.DataCheckpointOperation = nil
+	actor.DataResumeOperation = nil
 	if f.afterSettle != nil {
 		f.afterSettle(actor)
 	}
 	view := *actor
+	return &view, nil
+}
+
+func (f *fakeSubstrateActorControl) DataSnapshotCheckpointFencingSupported() bool {
+	return f.dataCheckpointFencingSupported
+}
+
+func (f *fakeSubstrateActorControl) SuspendActorForDataCheckpoint(
+	_ context.Context,
+	actorID string,
+	expected workspace.SubstrateDataCheckpointFence,
+) (*workspace.SubstrateRuntimeActor, error) {
+	f.dataSuspended = append(f.dataSuspended, actorID)
+	f.dataCheckpointFences = append(f.dataCheckpointFences, expected)
+	actor, ok := f.actors[actorID]
+	if !ok {
+		return nil, fmt.Errorf("suspend: actor %s not found", actorID)
+	}
+	operationID := strings.TrimSpace(expected.OperationID)
+	if operationID == "" {
+		return nil, workspace.NewError(
+			"suspend actor",
+			workspace.ErrorKindFailedPrecondition,
+			"checkpoint operation id is required",
+			false,
+			nil,
+		)
+	}
+	if operation := actor.DataCheckpointOperation; operation != nil &&
+		strings.TrimSpace(operation.OperationID) == operationID {
+		if _, _, err := actor.VerifiedDataCheckpointOperation(actorID, operationID, expected.ActorVersion); err != nil {
+			return nil, workspace.NewError(
+				"suspend actor",
+				workspace.ErrorKindFailedPrecondition,
+				"recorded checkpoint operation no longer identifies the actor lifetime",
+				false,
+				err,
+			)
+		}
+		view := *actor
+		if actor.DataSnapshot != nil {
+			snapshot := *actor.DataSnapshot
+			view.DataSnapshot = &snapshot
+		}
+		proof := *operation
+		view.DataCheckpointOperation = &proof
+		return &view, nil
+	}
+	if f.suspendErr != nil {
+		return nil, f.suspendErr
+	}
+	if f.beforeDataSuspend != nil {
+		f.beforeDataSuspend(actor)
+	}
+	if f.validateDataCheckpointFence != nil {
+		if err := f.validateDataCheckpointFence(expected); err != nil {
+			return nil, err
+		}
+	}
+	if expected.ActorID != actorID || expected.ActorUID != actor.ActorUID ||
+		expected.ActorVersion != actor.ActorVersion ||
+		expected.Template.Namespace == "" || expected.Template.Name == "" ||
+		expected.Template.UID == "" || expected.Template.ResourceVersion == "" ||
+		expected.Template.Revision == "" ||
+		expected.Template.Namespace != actor.TemplateNamespace ||
+		expected.Template.Name != actor.TemplateName {
+		return nil, workspace.NewError(
+			"suspend actor",
+			workspace.ErrorKindFailedPrecondition,
+			"actor or ActorTemplate fence changed before checkpoint",
+			true,
+			nil,
+		)
+	}
+	sourceActorVersion := actor.ActorVersion
+	actor.LatestDataOperationID = operationID
+	actor.DataResumeOperation = nil
+	actor.DataCheckpointOperation = &workspace.SubstrateDataCheckpointOperationProof{
+		OperationID:  operationID,
+		ActorID:      actorID,
+		ActorUID:     actor.ActorUID,
+		ActorVersion: sourceActorVersion,
+	}
+	if f.onDataSuspend != nil {
+		view := f.onDataSuspend(actor, len(f.dataSuspended))
+		if f.dataCheckpointResponseErr != nil {
+			return nil, f.dataCheckpointResponseErr
+		}
+		return view, nil
+	}
+	actor.ActorVersion++
+	actor.Status = substrateTestStatusSuspended
+	actor.PodNamespace = ""
+	actor.PodName = ""
+	actor.PodIP = ""
+	actor.SnapshotObserved = true
+	actor.DataSnapshot = &workspace.SubstrateDataSnapshotFence{
+		ActorID:            actorID,
+		ActorUID:           actor.ActorUID,
+		ActorVersion:       actor.ActorVersion,
+		SnapshotAtespace:   substrateTestSnapshotAtespace,
+		SnapshotName:       fmt.Sprintf("snapshot-%d", len(f.dataSuspended)),
+		SnapshotUID:        fmt.Sprintf("snapshot-uid-%d", len(f.dataSuspended)),
+		SnapshotVersion:    1,
+		SourceActorUID:     actor.ActorUID,
+		SourceActorVersion: sourceActorVersion,
+		ContentScope:       workspace.SubstrateSnapshotContentScopeData,
+	}
+	view := *actor
+	snapshot := *actor.DataSnapshot
+	view.DataSnapshot = &snapshot
+	proof := *actor.DataCheckpointOperation
+	view.DataCheckpointOperation = &proof
+	if f.dataCheckpointResponseErr != nil {
+		return nil, f.dataCheckpointResponseErr
+	}
 	return &view, nil
 }
 
@@ -282,6 +672,9 @@ func (r *substrateNamespaceScopedNetworkPolicyReader) List(
 func runtimePoolSubstrateTestScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	scheme := runtimePoolTestScheme(t)
+	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add workspace scheme: %v", err)
+	}
 	scheme.AddKnownTypeWithName(substrateActorTemplateGVK, &unstructured.Unstructured{})
 	scheme.AddKnownTypeWithName(substrateActorTemplateGVK.GroupVersion().WithKind("ActorTemplateList"), &unstructured.UnstructuredList{})
 	metav1.AddToGroupVersion(scheme, substrateActorTemplateGVK.GroupVersion())
@@ -303,7 +696,7 @@ func substrateTestBaseTemplate() *unstructured.Unstructured {
 	template := &unstructured.Unstructured{Object: map[string]any{
 		substrateObjectSpecField: map[string]any{
 			"workerPoolRef":   map[string]any{"namespace": substrateTestWorkerNamespace, substrateTestObjectNameField: substrateTestWorkerPoolName},
-			"snapshotsConfig": map[string]any{"location": "gs://ate-snapshots/orka"},
+			"snapshotsConfig": map[string]any{"location": substrateTestSnapshotLocation},
 			"runsc":           map[string]any{"amd64": map[string]any{"url": "https://example.invalid/runsc"}},
 			"containers": []any{map[string]any{
 				substrateTestObjectNameField: "operator-base", substrateTestObjectImageField: "example.com/operator@sha256:" + strings.Repeat("1", 64),
@@ -332,6 +725,7 @@ func runtimePoolSubstrateTestReconciler(
 	}}
 	r := runtimePoolTestReconciler(t, scheme, supervisor, pool, substrateTestBaseTemplate(), worker)
 	r.Client = &substrateTemplateUIDClient{Client: r.Client}
+	r.SubstrateTemplates = &substrateTemplateFixtureStore{r: r}
 	r.SubstrateEnabled = true
 	r.SubstrateConfig = SubstrateConfig{
 		APIEndpoint:           "api.ate-system.svc:443",
@@ -362,7 +756,7 @@ func substrateTestActorID(pool *corev1alpha1.RuntimePool) string {
 }
 
 func substrateTestRouteHost(pool *corev1alpha1.RuntimePool) string {
-	return substrateActorRouteHost(substrateTestActorID(pool), substrateTestActorDNSSuffix)
+	return substrateActorRouteHost(workspace.SubstrateActorKey(substrateTestTemplateNamespace, substrateTestActorID(pool)), substrateTestActorDNSSuffix)
 }
 
 // substrateTestProbePod is the fixture identity the supervisor would advertise:
@@ -389,6 +783,849 @@ func substrateTestDerivedTemplate(t *testing.T, r *RuntimePoolReconciler, pool *
 		t.Fatalf("Get derived ActorTemplate: %v", err)
 	}
 	return template
+}
+
+func substrateTestTemplateMetadataABA(t *testing.T, r *RuntimePoolReconciler, pool *corev1alpha1.RuntimePool) {
+	t.Helper()
+	derived := substrateTestDerivedTemplate(t, r, pool)
+	generation := derived.GetGeneration()
+	resourceVersion := derived.GetResourceVersion()
+	originalAnnotations := cloneStringMap(derived.GetAnnotations())
+	changedAnnotations := cloneStringMap(originalAnnotations)
+	changedAnnotations[runtimePoolProviderTokenGenerationAnnotation] = "changed-during-provider-call"
+	derived.SetAnnotations(changedAnnotations)
+	if err := r.Update(context.Background(), derived); err != nil {
+		t.Fatalf("persist metadata-changed derived ActorTemplate: %v", err)
+	}
+	restored := substrateTestDerivedTemplate(t, r, pool)
+	restored.SetAnnotations(originalAnnotations)
+	if err := r.Update(context.Background(), restored); err != nil {
+		t.Fatalf("restore derived ActorTemplate metadata: %v", err)
+	}
+	refreshed := substrateTestDerivedTemplate(t, r, pool)
+	if refreshed.GetGeneration() != generation {
+		t.Fatalf("metadata-only update changed generation from %d to %d", generation, refreshed.GetGeneration())
+	}
+	if refreshed.GetResourceVersion() == resourceVersion {
+		t.Fatalf("metadata ABA retained resourceVersion %q", resourceVersion)
+	}
+	if _, err := substrateRuntimeTemplateIntegrity(refreshed); err != nil {
+		t.Fatalf("restored template integrity = %v, want original contents after metadata ABA", err)
+	}
+}
+
+func substrateTestTemplateStatusUpdate(t *testing.T, r *RuntimePoolReconciler, pool *corev1alpha1.RuntimePool) {
+	t.Helper()
+	derived := substrateTestDerivedTemplate(t, r, pool)
+	resourceVersion := derived.GetResourceVersion()
+	stableFence, err := substrateRuntimeTemplateFence(derived)
+	if err != nil {
+		t.Fatalf("stable template fence before status update: %v", err)
+	}
+	if err := unstructured.SetNestedField(derived.Object, "Ready", acpRecoveryStatusSubresource, "phase"); err != nil {
+		t.Fatalf("set derived ActorTemplate status: %v", err)
+	}
+	if err := r.Update(context.Background(), derived); err != nil {
+		t.Fatalf("persist status-only derived ActorTemplate update: %v", err)
+	}
+	refreshed := substrateTestDerivedTemplate(t, r, pool)
+	if refreshed.GetResourceVersion() == resourceVersion {
+		t.Fatalf("status-only update retained resourceVersion %q", resourceVersion)
+	}
+	refreshedFence, err := substrateRuntimeTemplateFence(refreshed)
+	if err != nil {
+		t.Fatalf("stable template fence after status update: %v", err)
+	}
+	if refreshedFence != stableFence {
+		t.Fatalf("status-only update changed stable template fence from %q to %q", stableFence, refreshedFence)
+	}
+}
+
+func assertSubstrateTestProviderCallTemplateUpdateFence(t *testing.T, r *RuntimePoolReconciler, pool *corev1alpha1.RuntimePool) {
+	t.Helper()
+	derived := substrateTestDerivedTemplate(t, r, pool)
+	want, err := substrateRuntimeTemplateUpdateFence(derived)
+	if err != nil {
+		t.Fatalf("provider-call template update fence: %v", err)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if got := strings.TrimSpace(current.Annotations[substrateActorTemplateUpdateFenceAnnotation]); got != want {
+		t.Fatalf("persisted provider-call template update fence = %q, want %q", got, want)
+	}
+}
+
+func TestSubstrateRuntimeTemplateFenceIgnoresStatusOnlyUpdates(t *testing.T) {
+	template := &unstructured.Unstructured{Object: map[string]any{
+		substrateObjectSpecField:     map[string]any{substrateTestObjectImageField: "example.invalid/runtime:v1"},
+		acpRecoveryStatusSubresource: map[string]any{"phase": "Pending"},
+	}}
+	template.SetUID("template-uid")
+	template.SetGeneration(7)
+	template.SetResourceVersion("10")
+
+	initial, err := substrateRuntimeTemplateFence(template)
+	if err != nil {
+		t.Fatalf("initial template fence: %v", err)
+	}
+	if err := unstructured.SetNestedField(template.Object, "Ready", acpRecoveryStatusSubresource, "phase"); err != nil {
+		t.Fatalf("update template status: %v", err)
+	}
+	template.SetResourceVersion("11")
+	statusUpdated, err := substrateRuntimeTemplateFence(template)
+	if err != nil {
+		t.Fatalf("status-updated template fence: %v", err)
+	}
+	if statusUpdated != initial {
+		t.Fatalf("status-only update changed template fence from %q to %q", initial, statusUpdated)
+	}
+	metadataUpdated := template.DeepCopy()
+	metadataUpdated.SetAnnotations(map[string]string{runtimePoolProviderTokenGenerationAnnotation: substrateTestAttackerManagedBy})
+	metadataFence, err := substrateRuntimeTemplateFence(metadataUpdated)
+	if err != nil {
+		t.Fatalf("metadata-updated template fence: %v", err)
+	}
+	if metadataFence == initial {
+		t.Fatalf("metadata update retained template fence %q without a generation change", metadataFence)
+	}
+	labelUpdated := template.DeepCopy()
+	labelUpdated.SetLabels(map[string]string{runtimePoolManagedByLabel: substrateTestAttackerManagedBy})
+	labelFence, err := substrateRuntimeTemplateFence(labelUpdated)
+	if err != nil {
+		t.Fatalf("label-updated template fence: %v", err)
+	}
+	if labelFence == initial {
+		t.Fatalf("ownership-label update retained template fence %q without a generation change", labelFence)
+	}
+	terminating := template.DeepCopy()
+	deletionTimestamp := metav1.Now()
+	terminating.SetDeletionTimestamp(&deletionTimestamp)
+	if _, err := substrateRuntimeTemplateFence(terminating); err == nil || !strings.Contains(err.Error(), "terminating") {
+		t.Fatalf("terminating template fence error = %v, want terminating rejection", err)
+	}
+
+	if err := unstructured.SetNestedField(template.Object, "example.invalid/runtime:v2", substrateObjectSpecField, substrateTestObjectImageField); err != nil {
+		t.Fatalf("update template spec: %v", err)
+	}
+	template.SetGeneration(8)
+	specUpdated, err := substrateRuntimeTemplateFence(template)
+	if err != nil {
+		t.Fatalf("spec-updated template fence: %v", err)
+	}
+	if specUpdated == initial {
+		t.Fatalf("spec generation update retained template fence %q", specUpdated)
+	}
+}
+
+func TestSubstrateRuntimePoolRejectsTemplateMetadataABADuringActorCreation(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	seedAttempts := 0
+	r.SubstrateCredentialSeeder = func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) error {
+		seedAttempts++
+		return nil
+	}
+	control.afterCreate = func() {
+		assertSubstrateTestProviderCallTemplateUpdateFence(t, r, pool)
+		substrateTestTemplateMetadataABA(t, r, pool)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+
+	if len(control.created) != 1 || len(control.resumed) != 0 {
+		t.Fatalf("actor activity after template metadata race = created:%v resumed:%v, want create followed by rejection before boot", control.created, control.resumed)
+	}
+	if seedAttempts != 0 || supervisor.probeCalls != 0 {
+		t.Fatalf("template metadata race reached credentials or probe: seeds=%d probes=%d", seedAttempts, supervisor.probeCalls)
+	}
+	if len(control.deleted) != 1 {
+		t.Fatalf("deleted actors = %v, want metadata-raced actor recycled", control.deleted)
+	}
+	got := runtimePoolTestGetPool(t, r, pool)
+	if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		!strings.Contains(got.Status.Message, "changed during actor creation") {
+		t.Fatalf("status = %s/%q, want template metadata-fence rejection", got.Status.Lifecycle, got.Status.Message)
+	}
+}
+
+func TestSubstrateRuntimePoolRejectsTemplateMetadataABADuringExistingActorResume(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	seedAttempts := 0
+	r.SubstrateCredentialSeeder = func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) error {
+		seedAttempts++
+		return nil
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	actorID := substrateTestActorID(pool)
+	control.actors[actorID].Status = substrateTestStatusSuspended
+	current := runtimePoolTestGetPool(t, r, pool)
+	base := current.DeepCopy()
+	delete(current.Annotations, substrateActorBootedAnnotation)
+	providerCallFence, err := substrateRuntimeTemplateUpdateFence(substrateTestDerivedTemplate(t, r, pool))
+	if err != nil {
+		t.Fatalf("existing actor provider-call template update fence: %v", err)
+	}
+	current.Annotations[substrateActorTemplateUpdateFenceAnnotation] = providerCallFence
+	current.Annotations[substrateActorBootRetryAnnotation] = actorID
+	if err := r.Patch(context.Background(), &current, client.MergeFrom(base)); err != nil {
+		t.Fatalf("clear existing actor boot record: %v", err)
+	}
+	control.afterResume = func(*workspace.SubstrateRuntimeActor) {
+		assertSubstrateTestProviderCallTemplateUpdateFence(t, r, pool)
+		substrateTestTemplateMetadataABA(t, r, pool)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+
+	got := runtimePoolTestGetPool(t, r, pool)
+	if len(control.created) != 1 || len(control.resumed) != 2 {
+		t.Fatalf("actor activity after existing-resume template race = created:%v resumed:%v, want one create and two resumes", control.created, control.resumed)
+	}
+	if seedAttempts != 0 || supervisor.probeCalls != 0 {
+		t.Fatalf("existing-resume template race reached credentials or probe: seeds=%d probes=%d", seedAttempts, supervisor.probeCalls)
+	}
+	if got.Annotations[substrateActorRecyclingAnnotation] != actorID ||
+		got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		!strings.Contains(got.Status.Message, "changed while the existing actor resumed") {
+		t.Fatalf("existing-resume template-race status = %s/%q recycling=%q, want exact-actor recycle", got.Status.Lifecycle, got.Status.Message, got.Annotations[substrateActorRecyclingAnnotation])
+	}
+}
+
+func TestSubstrateRuntimePoolRecoversProviderCallTemplateFenceBeforeBootstrap(t *testing.T) {
+	tests := []struct {
+		name           string
+		actorStatus    string
+		persistFence   bool
+		mutateTemplate bool
+		wantMessage    string
+	}{
+		{
+			name: "create call template changed", actorStatus: substrateTestStatusSuspended,
+			persistFence: true, mutateTemplate: true, wantMessage: "materialization was in progress",
+		},
+		{
+			name: "resume call template changed", actorStatus: substrateTestStatusRunning,
+			persistFence: true, mutateTemplate: true, wantMessage: "materialization was in progress",
+		},
+		{
+			name: "provider call fence missing", actorStatus: substrateTestStatusRunning,
+			wantMessage: "has no durable ActorTemplate provider-call fence",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			supervisor := &fakeRuntimePoolSupervisorClient{}
+			control := newFakeSubstrateActorControl()
+			r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+			seedAttempts := 0
+			r.SubstrateCredentialSeeder = func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) error {
+				seedAttempts++
+				return nil
+			}
+
+			runtimePoolReconcile(t, r, pool)
+			actorID := substrateTestActorID(pool)
+			control.actors[actorID].Status = test.actorStatus
+			current := runtimePoolTestGetPool(t, r, pool)
+			if got := strings.TrimSpace(current.Annotations[substrateActorTemplateUpdateFenceAnnotation]); got != "" {
+				t.Fatalf("provider-call template update fence survived durable boot: %q", got)
+			}
+			base := current.DeepCopy()
+			delete(current.Annotations, substrateActorBootedAnnotation)
+			delete(current.Annotations, substrateActorCredentialSeededAnnotation)
+			if test.persistFence {
+				fence, err := substrateRuntimeTemplateUpdateFence(substrateTestDerivedTemplate(t, r, pool))
+				if err != nil {
+					t.Fatalf("recovery provider-call template update fence: %v", err)
+				}
+				current.Annotations[substrateActorTemplateUpdateFenceAnnotation] = fence
+			} else {
+				delete(current.Annotations, substrateActorTemplateUpdateFenceAnnotation)
+			}
+			if err := r.Patch(context.Background(), &current, client.MergeFrom(base)); err != nil {
+				t.Fatalf("persist interrupted provider call state: %v", err)
+			}
+			if test.mutateTemplate {
+				substrateTestTemplateMetadataABA(t, r, pool)
+			}
+
+			resumesBeforeRecovery := len(control.resumed)
+			runtimePoolReconcile(t, r, pool)
+
+			got := runtimePoolTestGetPool(t, r, pool)
+			if len(control.resumed) != resumesBeforeRecovery {
+				t.Fatalf("provider-call recovery resumed actor: before=%d after=%d", resumesBeforeRecovery, len(control.resumed))
+			}
+			if seedAttempts != 0 || supervisor.probeCalls != 0 {
+				t.Fatalf("provider-call recovery reached credentials or probe: seeds=%d probes=%d", seedAttempts, supervisor.probeCalls)
+			}
+			if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded || !strings.Contains(got.Status.Message, test.wantMessage) {
+				t.Fatalf("provider-call recovery status = %s/%q, want Degraded containing %q", got.Status.Lifecycle, got.Status.Message, test.wantMessage)
+			}
+			if control.actors[actorID] != nil && got.Annotations[substrateActorRecyclingAnnotation] != actorID {
+				t.Fatalf("unproven actor remains without staged recycle: actor=%#v recycling=%q", control.actors[actorID], got.Annotations[substrateActorRecyclingAnnotation])
+			}
+		})
+	}
+}
+
+func TestSubstrateRuntimePoolRecoversPendingCreateOnlyAfterExactAbsence(t *testing.T) {
+	for _, test := range []struct {
+		name                 string
+		materializeLateActor bool
+	}{
+		{name: "actor remains absent"},
+		{name: "actor materializes during recovery", materializeLateActor: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			supervisor := &fakeRuntimePoolSupervisorClient{}
+			control := newFakeSubstrateActorControl()
+			// The pinned production protocol cannot attest create settlement.
+			// Enable the optional provider contract only for this recovery test.
+			control.createRecoverySupported = true
+			control.createBeforeMaterializeErr = context.DeadlineExceeded
+			r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+
+			// Establish the exact state left by a controller stop after persisting
+			// the provider-call fence but before it could classify CreateActor.
+			runtimePoolReconcile(t, r, pool)
+			actorID := substrateTestActorID(pool)
+			current := runtimePoolTestGetPool(t, r, pool)
+			pendingFence := strings.TrimSpace(current.Annotations[substrateActorTemplateUpdateFenceAnnotation])
+			if pendingFence == "" {
+				t.Fatal("ambiguous CreateActor did not persist its ActorTemplate update fence")
+			}
+			base := current.DeepCopy()
+			delete(current.Annotations, substrateActorCreateRecoveryAnnotation)
+			delete(current.Annotations, substrateActorRecyclingAnnotation)
+			delete(current.Annotations, substrateActorWorkloadAbsentAnnotation)
+			if err := r.Patch(context.Background(), &current, client.MergeFrom(base)); err != nil {
+				t.Fatalf("model controller stop before ambiguous-create classification: %v", err)
+			}
+			control.createBeforeMaterializeErr = nil
+			createCallsBeforeRecovery := len(control.created)
+
+			runtimePoolReconcile(t, r, pool)
+			staged := runtimePoolTestGetPool(t, r, pool)
+			if len(control.created) != createCallsBeforeRecovery ||
+				staged.Annotations[substrateActorCreateRecoveryAnnotation] != actorID ||
+				staged.Annotations[substrateActorRecyclingAnnotation] != actorID ||
+				staged.Annotations[substrateActorTemplateUpdateFenceAnnotation] != pendingFence {
+				t.Fatalf("pending-create recovery = created:%v recovery:%q recycling:%q fence:%q",
+					control.created,
+					staged.Annotations[substrateActorCreateRecoveryAnnotation],
+					staged.Annotations[substrateActorRecyclingAnnotation],
+					staged.Annotations[substrateActorTemplateUpdateFenceAnnotation],
+				)
+			}
+
+			// A metadata change-and-restore during the original call must remain
+			// visible through recovery. A late actor is deleted under the staged
+			// marker; an absent actor requires two separately persisted reads.
+			substrateTestTemplateMetadataABA(t, r, pool)
+			if test.materializeLateActor {
+				control.actors[actorID] = &workspace.SubstrateRuntimeActor{
+					ActorID: actorID, ActorUID: "late-" + actorID, ActorVersion: 1,
+					TemplateNamespace: substrateTestTemplateNamespace,
+					TemplateName:      runtimePoolSubstrateTemplateName(runtimePoolResourceName(pool.Namespace, pool.Name)),
+					Status:            substrateTestStatusSuspended,
+				}
+				runtimePoolReconcile(t, r, pool)
+				if control.actors[actorID] != nil || len(control.deleted) != 1 {
+					t.Fatalf("late materialized actor was not exactly deleted: actor=%#v deleted=%v", control.actors[actorID], control.deleted)
+				}
+			} else {
+				runtimePoolReconcile(t, r, pool)
+				firstAbsence := runtimePoolTestGetPool(t, r, pool)
+				if firstAbsence.Annotations[substrateActorWorkloadAbsentAnnotation] != actorID ||
+					firstAbsence.Annotations[substrateActorRecyclingAnnotation] != actorID {
+					t.Fatalf("first absence observation = absent:%q recycling:%q, want persisted exact-actor barrier",
+						firstAbsence.Annotations[substrateActorWorkloadAbsentAnnotation],
+						firstAbsence.Annotations[substrateActorRecyclingAnnotation],
+					)
+				}
+				runtimePoolReconcile(t, r, pool)
+			}
+
+			ready := runtimePoolTestGetPool(t, r, pool)
+			if len(control.created) != createCallsBeforeRecovery ||
+				ready.Annotations[substrateActorRecyclingAnnotation] != "" ||
+				ready.Annotations[substrateActorCreateRecoveryAnnotation] != actorID ||
+				ready.Annotations[substrateActorTemplateUpdateFenceAnnotation] != pendingFence {
+				t.Fatalf("post-absence recovery = created:%v recovery:%q recycling:%q fence:%q",
+					control.created,
+					ready.Annotations[substrateActorCreateRecoveryAnnotation],
+					ready.Annotations[substrateActorRecyclingAnnotation],
+					ready.Annotations[substrateActorTemplateUpdateFenceAnnotation],
+				)
+			}
+
+			control.createRecoverySettled = false
+			runtimePoolReconcile(t, r, pool)
+			waiting := runtimePoolTestGetPool(t, r, pool)
+			if len(control.created) != createCallsBeforeRecovery || control.createRecoveryChecks == 0 ||
+				waiting.Annotations[substrateActorCreateRecoveryAnnotation] != actorID ||
+				waiting.Annotations[substrateActorTemplateUpdateFenceAnnotation] != pendingFence {
+				t.Fatalf("unsettled create recovery advanced: created=%v checks=%d recovery=%q fence=%q",
+					control.created, control.createRecoveryChecks,
+					waiting.Annotations[substrateActorCreateRecoveryAnnotation],
+					waiting.Annotations[substrateActorTemplateUpdateFenceAnnotation])
+			}
+			control.createRecoverySettled = true
+			runtimePoolReconcile(t, r, pool)
+			rejected := runtimePoolTestGetPool(t, r, pool)
+			if len(control.created) != createCallsBeforeRecovery ||
+				strings.TrimSpace(rejected.Annotations[substrateActorTemplateUpdateFenceAnnotation]) != "" ||
+				strings.TrimSpace(rejected.Annotations[substrateActorCreateRecoveryAnnotation]) != "" {
+				t.Fatalf("stale pending fence was retried: created=%v recovery=%q fence=%q",
+					control.created,
+					rejected.Annotations[substrateActorCreateRecoveryAnnotation],
+					rejected.Annotations[substrateActorTemplateUpdateFenceAnnotation],
+				)
+			}
+
+			for range 3 {
+				if len(control.created) > createCallsBeforeRecovery {
+					break
+				}
+				runtimePoolReconcile(t, r, pool)
+			}
+			if len(control.created) != createCallsBeforeRecovery+1 {
+				t.Fatalf("fresh CreateActor calls = %v, want one retry after clearing the stale fence", control.created)
+			}
+		})
+	}
+}
+
+func TestSubstrateRuntimePoolDoesNotRetryAmbiguousCreateWithoutProviderAttestation(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	control.createBeforeMaterializeErr = context.DeadlineExceeded
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+
+	runtimePoolReconcile(t, r, pool)
+	actorID := substrateTestActorID(pool)
+	initial := runtimePoolTestGetPool(t, r, pool)
+	if len(control.created) != 1 || initial.Annotations[substrateActorCreateRecoveryAnnotation] != actorID ||
+		initial.Annotations[substrateActorTemplateUpdateFenceAnnotation] == "" {
+		t.Fatalf("ambiguous create state = created:%v recovery:%q fence:%q, want one fenced call",
+			control.created,
+			initial.Annotations[substrateActorCreateRecoveryAnnotation],
+			initial.Annotations[substrateActorTemplateUpdateFenceAnnotation],
+		)
+	}
+	control.createBeforeMaterializeErr = nil
+
+	current := initial
+	for range 10 {
+		runtimePoolReconcile(t, r, pool)
+		current = runtimePoolTestGetPool(t, r, pool)
+		if strings.Contains(current.Status.Message, "provider-attested operation settlement") {
+			break
+		}
+	}
+	if !strings.Contains(current.Status.Message, "provider-attested operation settlement") ||
+		current.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		current.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed {
+		t.Fatalf("unsupported recovery status = %s/%s %q, want fail-closed provider-attestation error",
+			current.Status.Lifecycle, current.Status.AdmissionState, current.Status.Message)
+	}
+	if len(control.created) != 1 || control.createRecoveryChecks != 0 {
+		t.Fatalf("unsupported recovery activity = created:%v settlement checks:%d, want no retry or unsupported call",
+			control.created, control.createRecoveryChecks)
+	}
+	if current.Annotations[substrateActorCreateRecoveryAnnotation] != actorID ||
+		current.Annotations[substrateActorTemplateUpdateFenceAnnotation] == "" ||
+		current.Annotations[substrateActorRecyclingAnnotation] != "" {
+		t.Fatalf("unsupported recovery annotations = recovery:%q fence:%q recycling:%q, want preserved fence after exact absence",
+			current.Annotations[substrateActorCreateRecoveryAnnotation],
+			current.Annotations[substrateActorTemplateUpdateFenceAnnotation],
+			current.Annotations[substrateActorRecyclingAnnotation],
+		)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	if len(control.created) != 1 {
+		t.Fatalf("unsupported create recovery retried provider call: %v", control.created)
+	}
+}
+
+func TestSubstrateRuntimePoolDefinitiveCreateErrorDoesNotEnterRecovery(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	control.createBeforeMaterializeErr = workspace.NewError(
+		"create actor", workspace.ErrorKindInvalidArgument, "invalid template", false, errors.New("definitive rejection"),
+	)
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+
+	runtimePoolReconcile(t, r, pool)
+	got := runtimePoolTestGetPool(t, r, pool)
+	if got.Annotations[substrateActorCreateRecoveryAnnotation] != "" ||
+		got.Annotations[substrateActorRecyclingAnnotation] != "" ||
+		got.Annotations[substrateActorTemplateUpdateFenceAnnotation] != "" {
+		t.Fatalf("definitive create rejection entered recovery: annotations=%v", got.Annotations)
+	}
+	if len(control.created) != 1 || len(control.deleted) != 0 {
+		t.Fatalf("definitive create activity = created:%v deleted:%v", control.created, control.deleted)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	got = runtimePoolTestGetPool(t, r, pool)
+	if got.Annotations[substrateActorCreateRecoveryAnnotation] != "" ||
+		got.Annotations[substrateActorRecyclingAnnotation] != "" ||
+		got.Annotations[substrateActorTemplateUpdateFenceAnnotation] != "" {
+		t.Fatalf("repeated definitive create rejection entered recovery: annotations=%v", got.Annotations)
+	}
+	if len(control.created) != 2 || len(control.deleted) != 0 {
+		t.Fatalf("repeated definitive create activity = created:%v deleted:%v", control.created, control.deleted)
+	}
+}
+
+func TestSubstrateRuntimePoolMigratesLegacyTemplateFenceBeforeEpochRollout(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	runtimePoolReconcile(t, r, pool)
+	probePod := substrateTestProbePod(pool)
+	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "legacy-fence-rollout", false)
+	runtimePoolReconcile(t, r, pool)
+	serving := runtimePoolTestGetPool(t, r, pool)
+	if serving.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleServing || serving.Status.ActiveInstance == nil {
+		t.Fatalf("legacy migration precondition = %s active=%v, want Serving", serving.Status.Lifecycle, serving.Status.ActiveInstance)
+	}
+
+	derived := substrateTestDerivedTemplate(t, r, pool)
+	legacyFence, err := substrateRuntimeTemplateUpdateFence(derived)
+	if err != nil {
+		t.Fatalf("legacy template fence: %v", err)
+	}
+	stableFence, err := substrateRuntimeTemplateFence(derived)
+	if err != nil {
+		t.Fatalf("stable template fence: %v", err)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	base := current.DeepCopy()
+	current.Annotations[substrateActorTemplateFenceAnnotation] = legacyFence
+	if err := r.Patch(context.Background(), &current, client.MergeFrom(base)); err != nil {
+		t.Fatalf("restore legacy template fence: %v", err)
+	}
+	r.ControllerEpoch++
+
+	runtimePoolReconcile(t, r, pool)
+
+	got := runtimePoolTestGetPool(t, r, pool)
+	if got.Annotations[substrateActorTemplateFenceAnnotation] != stableFence {
+		t.Fatalf("migrated template fence = %q, want %q", got.Annotations[substrateActorTemplateFenceAnnotation], stableFence)
+	}
+	if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDraining || supervisor.drainCalls != 1 {
+		t.Fatalf("legacy-fence epoch rollout = %s drain calls=%d, want Draining/1", got.Status.Lifecycle, supervisor.drainCalls)
+	}
+	if len(control.resumed) != 1 || len(control.settled) != 0 || len(control.deleted) != 0 {
+		t.Fatalf("actor activity during legacy-fence epoch rollout = resumed:%v settled:%v deleted:%v, want authenticated drain without recycle", control.resumed, control.settled, control.deleted)
+	}
+}
+
+func TestSubstrateRuntimePoolDrainsAmbiguousLegacyTemplateFenceBeforeReplacement(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, *RuntimePoolReconciler, *corev1alpha1.RuntimePool)
+	}{
+		{name: "status-only update", mutate: substrateTestTemplateStatusUpdate},
+		{name: "metadata change and restore", mutate: substrateTestTemplateMetadataABA},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			supervisor := &fakeRuntimePoolSupervisorClient{}
+			control := newFakeSubstrateActorControl()
+			r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+
+			runtimePoolReconcile(t, r, pool)
+			probePod := substrateTestProbePod(pool)
+			supervisor.probe = runtimePoolValidProbe(pool, &probePod, "ambiguous-legacy-fence", false)
+			runtimePoolReconcile(t, r, pool)
+			serving := runtimePoolTestGetPool(t, r, pool)
+			if serving.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleServing || serving.Status.ActiveInstance == nil {
+				t.Fatalf("ambiguous legacy-fence precondition = %s active=%v, want Serving", serving.Status.Lifecycle, serving.Status.ActiveInstance)
+			}
+
+			legacyFence, err := substrateRuntimeTemplateUpdateFence(substrateTestDerivedTemplate(t, r, pool))
+			if err != nil {
+				t.Fatalf("legacy template fence: %v", err)
+			}
+			current := runtimePoolTestGetPool(t, r, pool)
+			base := current.DeepCopy()
+			current.Annotations[substrateActorTemplateFenceAnnotation] = legacyFence
+			if err := r.Patch(context.Background(), &current, client.MergeFrom(base)); err != nil {
+				t.Fatalf("restore legacy template fence: %v", err)
+			}
+			test.mutate(t, r, pool)
+			r.ControllerEpoch++
+
+			runtimePoolReconcile(t, r, pool)
+
+			draining := runtimePoolTestGetPool(t, r, pool)
+			if draining.Annotations[substrateActorTemplateFenceAnnotation] != legacyFence {
+				t.Fatalf("ambiguous legacy fence = %q, want original %q until replacement", draining.Annotations[substrateActorTemplateFenceAnnotation], legacyFence)
+			}
+			if draining.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDraining || supervisor.drainCalls != 1 {
+				t.Fatalf("ambiguous legacy-fence rollout = %s drain calls=%d, want Draining/1", draining.Status.Lifecycle, supervisor.drainCalls)
+			}
+			if draining.Annotations[substrateActorRecyclingAnnotation] != "" || len(control.settled) != 0 || len(control.deleted) != 0 {
+				t.Fatalf("actor recycled before authenticated drain: recycling=%q settled=%v deleted=%v", draining.Annotations[substrateActorRecyclingAnnotation], control.settled, control.deleted)
+			}
+
+			supervisor.probe = runtimePoolValidProbe(pool, &probePod, "ambiguous-legacy-fence", true)
+			runtimePoolReconcile(t, r, pool)
+			quiescent := runtimePoolTestGetPool(t, r, pool)
+			if quiescent.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleQuiescent ||
+				quiescent.Annotations[substrateActorRecyclingAnnotation] != "" || len(control.deleted) != 0 {
+				t.Fatalf("quiescent barrier = %s recycling=%q deleted=%v, want persisted quiescence before recycle", quiescent.Status.Lifecycle, quiescent.Annotations[substrateActorRecyclingAnnotation], control.deleted)
+			}
+
+			runtimePoolReconcile(t, r, pool)
+			stopping := runtimePoolTestGetPool(t, r, pool)
+			if stopping.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopping ||
+				stopping.Annotations[substrateActorRecyclingAnnotation] != substrateTestActorID(pool) {
+				t.Fatalf("post-quiescence rollout = %s recycling=%q, want Stopping exact actor", stopping.Status.Lifecycle, stopping.Annotations[substrateActorRecyclingAnnotation])
+			}
+		})
+	}
+}
+
+func TestSubstrateRuntimePoolRecyclesActorAfterAmbiguousCreateError(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	control.createErr = context.DeadlineExceeded
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	seedAttempts := 0
+	r.SubstrateCredentialSeeder = func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) error {
+		seedAttempts++
+		return nil
+	}
+	control.afterCreate = func() {
+		substrateTestTemplateMetadataABA(t, r, pool)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+
+	actorID := substrateTestActorID(pool)
+	if len(control.created) != 1 || len(control.resumed) != 0 {
+		t.Fatalf("actor activity after ambiguous create = created:%v resumed:%v, want create followed by recycle", control.created, control.resumed)
+	}
+	if seedAttempts != 0 || supervisor.probeCalls != 0 {
+		t.Fatalf("ambiguous create reached credentials or probe: seeds=%d probes=%d", seedAttempts, supervisor.probeCalls)
+	}
+	got := runtimePoolTestGetPool(t, r, pool)
+	if got.Annotations[substrateActorCreateRecoveryAnnotation] != actorID ||
+		got.Annotations[substrateActorRecyclingAnnotation] != actorID ||
+		got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		!strings.Contains(got.Status.Message, "creation outcome was ambiguous") {
+		t.Fatalf("status = %s/%q recovery=%q recycling=%q, want staged ambiguous-create recycle",
+			got.Status.Lifecycle, got.Status.Message,
+			got.Annotations[substrateActorCreateRecoveryAnnotation],
+			got.Annotations[substrateActorRecyclingAnnotation],
+		)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+	if len(control.deleted) != 1 || control.deleted[0] != actorID {
+		t.Fatalf("deleted actors = %v, want ambiguously created actor %q recycled before retry", control.deleted, actorID)
+	}
+}
+
+func TestSubstrateRuntimePoolRecyclesActorAfterAmbiguousResumeError(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	control.resumeResultErr = context.DeadlineExceeded
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	seedAttempts := 0
+	r.SubstrateCredentialSeeder = func(context.Context, string, string, []byte, harnessv2.CredentialBootstrapRequest) error {
+		seedAttempts++
+		return nil
+	}
+	control.afterResume = func(*workspace.SubstrateRuntimeActor) {
+		substrateTestTemplateMetadataABA(t, r, pool)
+	}
+
+	runtimePoolReconcile(t, r, pool)
+
+	actorID := substrateTestActorID(pool)
+	got := runtimePoolTestGetPool(t, r, pool)
+	if got.Annotations[substrateActorRecyclingAnnotation] != actorID ||
+		got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		!strings.Contains(got.Status.Message, "boot outcome was ambiguous") {
+		t.Fatalf("ambiguous-resume status = %s/%q recycling=%q, want exact-actor recycle", got.Status.Lifecycle, got.Status.Message, got.Annotations[substrateActorRecyclingAnnotation])
+	}
+	if seedAttempts != 0 || supervisor.probeCalls != 0 {
+		t.Fatalf("ambiguous resume reached credentials or probe: seeds=%d probes=%d", seedAttempts, supervisor.probeCalls)
+	}
+	control.resumeResultErr = nil
+	for range 6 {
+		if len(control.deleted) != 0 {
+			break
+		}
+		runtimePoolReconcile(t, r, pool)
+	}
+	if len(control.resumed) != 1 {
+		t.Fatalf("resume calls after ambiguous outcome = %v, want no retry before recycle", control.resumed)
+	}
+	if len(control.deleted) != 1 || control.deleted[0] != actorID {
+		t.Fatalf("deleted actors = %v, want ambiguously resumed actor %q recycled", control.deleted, actorID)
+	}
+	got = runtimePoolTestGetPool(t, r, pool)
+	if got.Annotations[substrateActorRecyclingAnnotation] != "" {
+		t.Fatalf("recycling annotation survived ambiguous-resume teardown: %q", got.Annotations[substrateActorRecyclingAnnotation])
+	}
+}
+
+func TestSubstrateRuntimePoolPreservesActorAfterDefinitiveResumeError(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	control.resumeErr = workspace.NewError(
+		"resume actor", workspace.ErrorKindInvalidArgument, "invalid boot request", false, errors.New("definitive rejection"),
+	)
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	control.beforeResume = func() {
+		current := runtimePoolTestGetPool(t, r, pool)
+		if current.Annotations[substrateActorBootRetryAnnotation] != "" ||
+			current.Annotations[substrateActorTemplateUpdateFenceAnnotation] == "" {
+			t.Fatalf("resume call state = retry:%q fence:%q, want cleared retry proof with retained call fence",
+				current.Annotations[substrateActorBootRetryAnnotation],
+				current.Annotations[substrateActorTemplateUpdateFenceAnnotation])
+		}
+	}
+
+	for range 2 {
+		runtimePoolReconcile(t, r, pool)
+	}
+
+	actorID := substrateTestActorID(pool)
+	got := runtimePoolTestGetPool(t, r, pool)
+	if len(control.created) != 1 || len(control.resumed) != 2 || len(control.deleted) != 0 {
+		t.Fatalf("definitive resume activity = created:%v resumed:%v deleted:%v, want one preserved actor and no teardown",
+			control.created, control.resumed, control.deleted)
+	}
+	if control.actors[actorID] == nil || got.Annotations[substrateActorRecyclingAnnotation] != "" {
+		t.Fatalf("definitively rejected actor was not preserved: actor=%#v recycling=%q",
+			control.actors[actorID], got.Annotations[substrateActorRecyclingAnnotation])
+	}
+	if got.Annotations[substrateActorBootedAnnotation] != "" ||
+		got.Annotations[substrateActorTemplateUpdateFenceAnnotation] == "" ||
+		got.Annotations[substrateActorBootRetryAnnotation] != actorID {
+		t.Fatalf("definitive resume fences = booted:%q update:%q retry:%q, want an unbooted actor with a retained call fence and exact retry proof",
+			got.Annotations[substrateActorBootedAnnotation],
+			got.Annotations[substrateActorTemplateUpdateFenceAnnotation],
+			got.Annotations[substrateActorBootRetryAnnotation])
+	}
+}
+
+func TestSubstrateRuntimePoolRecyclesSuspendedActorWithPendingResumeFence(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	runtimePoolReconcile(t, r, pool)
+
+	actorID := substrateTestActorID(pool)
+	actor := control.actors[actorID]
+	actor.Status = substrateTestStatusSuspended
+	current := runtimePoolTestGetPool(t, r, pool)
+	base := current.DeepCopy()
+	delete(current.Annotations, substrateActorBootedAnnotation)
+	delete(current.Annotations, substrateActorCredentialSeededAnnotation)
+	providerCallFence, err := substrateRuntimeTemplateUpdateFence(substrateTestDerivedTemplate(t, r, pool))
+	if err != nil {
+		t.Fatalf("provider-call template update fence: %v", err)
+	}
+	current.Annotations[substrateActorTemplateUpdateFenceAnnotation] = providerCallFence
+	if err := r.Patch(context.Background(), &current, client.MergeFrom(base)); err != nil {
+		t.Fatalf("persist interrupted actor boot fence: %v", err)
+	}
+	resumesBefore := len(control.resumed)
+	probesBefore := supervisor.probeCalls
+
+	runtimePoolReconcile(t, r, pool)
+	got := runtimePoolTestGetPool(t, r, pool)
+	if len(control.resumed) != resumesBefore {
+		t.Fatalf("pending ordinary resume was replayed: %v", control.resumed)
+	}
+	if got.Annotations[substrateActorRecyclingAnnotation] != actorID || got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded {
+		t.Fatalf("pending-resume recovery = lifecycle %s recycling=%q, want exact-actor recycle", got.Status.Lifecycle, got.Annotations[substrateActorRecyclingAnnotation])
+	}
+	if supervisor.probeCalls != probesBefore {
+		t.Fatalf("pending ordinary resume reached authenticated probe: %d calls", supervisor.probeCalls-probesBefore)
+	}
+
+	for range 6 {
+		if len(control.deleted) != 0 {
+			break
+		}
+		runtimePoolReconcile(t, r, pool)
+	}
+	if len(control.resumed) != resumesBefore {
+		t.Fatalf("pending ordinary resume replayed before teardown: %v", control.resumed)
+	}
+	if len(control.deleted) != 1 || control.deleted[0] != actorID {
+		t.Fatalf("deleted actors = %v, want ambiguous actor %q", control.deleted, actorID)
+	}
+}
+
+func TestSubstrateRuntimePoolRetainsProviderCallFenceUntilBootRecord(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+	runtimePoolReconcile(t, r, pool)
+
+	actorID := substrateTestActorID(pool)
+	actor := control.actors[actorID]
+	actor.Status = substrateTestStatusResuming
+	actor.PodNamespace = ""
+	actor.PodName = ""
+	actor.PodIP = ""
+	current := runtimePoolTestGetPool(t, r, pool)
+	base := current.DeepCopy()
+	delete(current.Annotations, substrateActorBootedAnnotation)
+	delete(current.Annotations, substrateActorCredentialSeededAnnotation)
+	providerCallFence, err := substrateRuntimeTemplateUpdateFence(substrateTestDerivedTemplate(t, r, pool))
+	if err != nil {
+		t.Fatalf("provider-call template update fence: %v", err)
+	}
+	current.Annotations[substrateActorTemplateUpdateFenceAnnotation] = providerCallFence
+	if err := r.Patch(context.Background(), &current, client.MergeFrom(base)); err != nil {
+		t.Fatalf("model accepted in-flight actor boot: %v", err)
+	}
+	resumesBefore := len(control.resumed)
+
+	runtimePoolReconcile(t, r, pool)
+	got := runtimePoolTestGetPool(t, r, pool)
+	if len(control.resumed) != resumesBefore || got.Annotations[substrateActorBootedAnnotation] != "" ||
+		got.Annotations[substrateActorTemplateUpdateFenceAnnotation] != providerCallFence {
+		t.Fatalf("in-flight boot = resumes:%v booted:%q update:%q, want no replay with fence retained",
+			control.resumed, got.Annotations[substrateActorBootedAnnotation], got.Annotations[substrateActorTemplateUpdateFenceAnnotation])
+	}
+	if got.Annotations[substrateActorRecyclingAnnotation] != "" || len(control.deleted) != 0 {
+		t.Fatalf("in-flight boot entered teardown: recycling=%q deleted=%v", got.Annotations[substrateActorRecyclingAnnotation], control.deleted)
+	}
+
+	actor.Status = substrateTestStatusRunning
+	actor.PodNamespace = substrateTestWorkerNamespace
+	actor.PodName = substrateTestWorkerPodName
+	actor.PodIP = substrateTestWorkerPodIP
+	runtimePoolReconcile(t, r, pool)
+	got = runtimePoolTestGetPool(t, r, pool)
+	if len(control.resumed) != resumesBefore {
+		t.Fatalf("accepted in-flight boot was replayed: %v", control.resumed)
+	}
+	if got.Annotations[substrateActorBootedAnnotation] != actorID ||
+		got.Annotations[substrateActorTemplateUpdateFenceAnnotation] != "" ||
+		got.Annotations[substrateActorBootRetryAnnotation] != "" {
+		t.Fatalf("durable boot = booted:%q update:%q retry:%q, want boot record and retired recovery annotations",
+			got.Annotations[substrateActorBootedAnnotation],
+			got.Annotations[substrateActorTemplateUpdateFenceAnnotation],
+			got.Annotations[substrateActorBootRetryAnnotation])
+	}
 }
 
 //nolint:gocyclo // The materialization, fencing, and network-policy invariants form one end-to-end scenario.
@@ -440,7 +1677,7 @@ func TestSubstrateRuntimePoolMaterializesDerivedTemplateAndActor(t *testing.T) {
 		t.Fatalf("booted annotation = %q, want %q", got.Annotations[substrateActorBootedAnnotation], actorID)
 	}
 	if got.Annotations[substrateActorTemplateFenceAnnotation] == "" {
-		t.Fatal("validated ActorTemplate UID/resourceVersion fence was not recorded before actor creation")
+		t.Fatal("validated ActorTemplate UID/generation fence was not recorded before actor creation")
 	}
 	workerPodFence, err := substrateRuntimePoolWorkerPodFenceFromAnnotation(&got)
 	if err != nil {
@@ -631,6 +1868,7 @@ func TestSubstrateRuntimePoolRejectsTemplateMutateAndRestoreDuringActorCreation(
 		if err := unstructured.SetNestedSlice(derived.Object, containers, "spec", "containers"); err != nil {
 			t.Fatalf("mutate derived ActorTemplate: %v", err)
 		}
+		derived.SetGeneration(derived.GetGeneration() + 1)
 		if err := r.Update(context.Background(), derived); err != nil {
 			t.Fatalf("persist mutated derived ActorTemplate: %v", err)
 		}
@@ -646,6 +1884,7 @@ func TestSubstrateRuntimePoolRejectsTemplateMutateAndRestoreDuringActorCreation(
 		if err := unstructured.SetNestedSlice(restored.Object, containers, "spec", "containers"); err != nil {
 			t.Fatalf("restore derived ActorTemplate: %v", err)
 		}
+		restored.SetGeneration(restored.GetGeneration() + 1)
 		if err := r.Update(context.Background(), restored); err != nil {
 			t.Fatalf("persist restored derived ActorTemplate: %v", err)
 		}
@@ -671,7 +1910,7 @@ func TestSubstrateRuntimePoolRejectsTemplateMutateAndRestoreDuringActorCreation(
 		t.Fatal("template fence survived recycle of the raced actor")
 	}
 	if _, err := substrateRuntimeTemplateIntegrity(substrateTestDerivedTemplate(t, r, pool)); err != nil {
-		t.Fatalf("restored template integrity = %v, want content restored while resourceVersion still exposes the race", err)
+		t.Fatalf("restored template integrity = %v, want content restored while generation still exposes the race", err)
 	}
 }
 
@@ -867,6 +2106,62 @@ func TestSubstrateRuntimePoolScaleToZeroRecyclesUnadmittedRunningActorWithoutPro
 	}
 }
 
+func TestSubstrateRuntimePoolScaleToZeroRetriesTransientDrainProbeFailure(t *testing.T) {
+	supervisor := &fakeRuntimePoolSupervisorClient{}
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+
+	runtimePoolReconcile(t, r, pool)
+	probePod := substrateTestProbePod(pool)
+	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", false)
+	runtimePoolReconcile(t, r, pool)
+	serving := runtimePoolTestGetPool(t, r, pool)
+	if serving.Status.ActiveInstance == nil {
+		t.Fatal("serving pool has no active instance")
+	}
+	wantRuntimeInstanceID := serving.Status.ActiveInstance.RuntimeInstanceID
+
+	serving.Spec.DesiredReplicas = 0
+	if err := r.Update(context.Background(), &serving); err != nil {
+		t.Fatalf("scale admitted Substrate pool to zero: %v", err)
+	}
+	supervisor.probeErr = errors.New("route temporarily unavailable")
+	supervisor.probeCalls = 0
+	runtimePoolReconcile(t, r, pool)
+
+	failed := runtimePoolTestGetPool(t, r, pool)
+	if failed.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+		failed.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
+		failed.Status.ActiveInstance == nil ||
+		failed.Status.ActiveInstance.RuntimeInstanceID != wantRuntimeInstanceID {
+		t.Fatalf("transient probe failure status = %s/%s active=%#v, want Degraded/Closed with the admitted instance preserved", failed.Status.Lifecycle, failed.Status.AdmissionState, failed.Status.ActiveInstance)
+	}
+	if supervisor.probeCalls != 1 {
+		t.Fatalf("probe calls after transient failure = %d, want 1", supervisor.probeCalls)
+	}
+	if failed.Annotations[substrateActorRecyclingAnnotation] != "" || len(control.deleted) != 0 {
+		t.Fatalf("transient probe failure recycled actor: annotation=%q deleted=%v", failed.Annotations[substrateActorRecyclingAnnotation], control.deleted)
+	}
+
+	supervisor.probeErr = nil
+	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", false)
+	runtimePoolReconcile(t, r, pool)
+
+	retrying := runtimePoolTestGetPool(t, r, pool)
+	if retrying.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDraining ||
+		retrying.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionDraining ||
+		retrying.Status.ActiveInstance == nil ||
+		retrying.Status.ActiveInstance.RuntimeInstanceID != wantRuntimeInstanceID {
+		t.Fatalf("retry status = %s/%s active=%#v, want Draining/Draining with the admitted instance preserved", retrying.Status.Lifecycle, retrying.Status.AdmissionState, retrying.Status.ActiveInstance)
+	}
+	if supervisor.probeCalls != 2 || supervisor.drainCalls != 1 {
+		t.Fatalf("authenticated retry calls = probe:%d drain:%d, want probe:2 drain:1", supervisor.probeCalls, supervisor.drainCalls)
+	}
+	if retrying.Annotations[substrateActorRecyclingAnnotation] != "" || len(control.deleted) != 0 {
+		t.Fatalf("authenticated retry recycled actor: annotation=%q deleted=%v", retrying.Annotations[substrateActorRecyclingAnnotation], control.deleted)
+	}
+}
+
 func TestSubstrateRuntimePoolScaleToZeroRecyclesCrashedActiveActor(t *testing.T) {
 	supervisor := &fakeRuntimePoolSupervisorClient{}
 	control := newFakeSubstrateActorControl()
@@ -1027,7 +2322,7 @@ func TestSubstrateRuntimePoolRefusesActorWithUnexpectedTemplateBeforeBootstrap(t
 		ActorID:           actorID,
 		TemplateNamespace: "attacker-owned",
 		TemplateName:      "credential-capture",
-		Status:            "STATUS_RUNNING",
+		Status:            substrateTestStatusRunning,
 		PodNamespace:      substrateTestWorkerNamespace,
 		PodName:           substrateTestWorkerPodName,
 	}
@@ -1068,6 +2363,66 @@ func TestSubstrateRuntimePoolRefusesActorWithUnexpectedTemplateBeforeBootstrap(t
 	}
 	if seedAttempts != 0 {
 		t.Fatalf("credential seed attempts after deletion = %d, want none", seedAttempts)
+	}
+}
+
+func TestSubstrateRuntimePoolMarksForeignCheckpointReplacementAsResumeLoss(t *testing.T) {
+	for name, annotation := range map[string]string{
+		"suspended": substrateActorSuspendedAnnotation,
+		"resuming":  substrateActorResumingAnnotation,
+	} {
+		t.Run(name, func(t *testing.T) {
+			supervisor := &fakeRuntimePoolSupervisorClient{}
+			control := newFakeSubstrateActorControl()
+			r, pool := runtimePoolSubstrateTestReconciler(t, supervisor, control)
+			// First materialize the controller-owned template and actor. Then
+			// replace only the deterministic actor ID with a foreign workload.
+			runtimePoolReconcile(t, r, pool)
+			actorID := substrateTestActorID(pool)
+			control.actors[actorID] = &workspace.SubstrateRuntimeActor{
+				ActorID:           actorID,
+				TemplateNamespace: "attacker-owned",
+				TemplateName:      "credential-capture",
+				Status:            substrateTestStatusRunning,
+				PodNamespace:      substrateTestWorkerNamespace,
+				PodName:           substrateTestWorkerPodName,
+			}
+			control.resumed = nil
+			control.settled = nil
+			control.deleted = nil
+			current := runtimePoolTestGetPool(t, r, pool)
+			if current.Annotations == nil {
+				current.Annotations = map[string]string{}
+			}
+			current.Spec.ExecutionWorkspace.Substrate.SuspendMode = "DataOnly"
+			current.Annotations[annotation] = actorID
+			if annotation == substrateActorSuspendedAnnotation {
+				current.Annotations[substrateActorSuspendAcceptedAnnotation] = substrateActorSuspendConsentValue(actorID)
+			}
+			if err := r.Update(context.Background(), &current); err != nil {
+				t.Fatalf("record checkpoint state: %v", err)
+			}
+
+			runtimePoolReconcile(t, r, pool)
+
+			got := runtimePoolTestGetPool(t, r, pool)
+			if got.Annotations[runtimePoolWorkspaceResumeLostAnnotation] == "" {
+				t.Fatalf("foreign checkpoint replacement did not record resume loss: %v", got.Annotations)
+			}
+			if got.Annotations[substrateActorSuspendedAnnotation] != "" ||
+				got.Annotations[substrateActorSuspendAcceptedAnnotation] != "" ||
+				got.Annotations[substrateActorResumingAnnotation] != "" {
+				t.Fatalf("stale checkpoint annotations remained: %v", got.Annotations)
+			}
+			if len(control.resumed) != 0 || len(control.settled) != 0 || len(control.deleted) != 0 {
+				t.Fatalf("foreign actor was modified: resumed=%v settled=%v deleted=%v", control.resumed, control.settled, control.deleted)
+			}
+			if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded ||
+				got.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
+				!strings.Contains(got.Status.Message, "durable workspace data is unrecoverable") {
+				t.Fatalf("status = %s/%s %q, want terminal checkpoint loss", got.Status.Lifecycle, got.Status.AdmissionState, got.Status.Message)
+			}
+		})
 	}
 }
 
@@ -1159,7 +2514,7 @@ func assertSubstrateDerivedTemplate(
 	if container.ImagePullPolicy != "" {
 		t.Fatalf("derived container imagePullPolicy = %q, want the Kubernetes-only field omitted", container.ImagePullPolicy)
 	}
-	if len(container.VolumeMounts) != 0 || container.SecurityContext != nil || container.LivenessProbe != nil {
+	if len(container.VolumeMounts) != 0 || container.LivenessProbe != nil {
 		t.Fatal("derived container carries Kubernetes-only surfaces; the provider sandbox owns them")
 	}
 	env := map[string]corev1.EnvVar{}
@@ -1213,7 +2568,7 @@ func assertSubstrateDerivedTemplate(
 	if workerPool, _, _ := unstructured.NestedString(derived.Object, substrateObjectSpecField, "workerPoolRef", substrateTestObjectNameField); workerPool != substrateTestWorkerPoolName {
 		t.Fatalf("derived template workerPoolRef = %q, want operator infrastructure copied", workerPool)
 	}
-	if location, _, _ := unstructured.NestedString(derived.Object, "spec", "snapshotsConfig", "location"); location != "gs://ate-snapshots/orka" {
+	if location, _, _ := unstructured.NestedString(derived.Object, "spec", "snapshotsConfig", "location"); location != substrateTestSnapshotLocation {
 		t.Fatalf("derived template snapshotsConfig = %q, want operator infrastructure copied (safe: the golden-built instance boots credential-free)", location)
 	}
 }
@@ -2168,6 +3523,7 @@ func TestGetSubstrateActorTemplateUsesUncachedReader(t *testing.T) {
 	cachedClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	apiReader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(template).Build()
 	r := &RuntimePoolReconciler{Client: cachedClient, APIReader: apiReader}
+	r.SubstrateTemplates = &substrateTemplateFixtureStore{r: r}
 
 	got, err := r.getSubstrateActorTemplate(context.Background(), template.GetNamespace(), template.GetName())
 	if err != nil {
@@ -2252,14 +3608,23 @@ func TestSubstrateRuntimePoolScaleToZeroDrainsThenDeletesActor(t *testing.T) {
 	if len(control.deleted) != 0 {
 		t.Fatal("actor deleted before authenticated drain quiescence")
 	}
+	status := runtimePoolTestGetPool(t, r, pool).Status
+	if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDraining || status.AdmissionState != corev1alpha1.RuntimePoolAdmissionDraining {
+		t.Fatalf("status after drain request = %s/%s, want Draining/Draining", status.Lifecycle, status.AdmissionState)
+	}
 
 	supervisor.probe = runtimePoolValidProbe(pool, &probePod, "actor-boot", true)
 	runtimePoolReconcile(t, r, pool)
-	if got := runtimePoolTestGetPool(t, r, pool).Status.Lifecycle; got != corev1alpha1.RuntimePoolLifecycleQuiescent {
-		t.Fatalf("lifecycle after quiescent probe = %s, want Quiescent", got)
+	status = runtimePoolTestGetPool(t, r, pool).Status
+	if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleQuiescent || status.AdmissionState != corev1alpha1.RuntimePoolAdmissionDraining {
+		t.Fatalf("status after quiescent probe = %s/%s, want Quiescent/Draining", status.Lifecycle, status.AdmissionState)
 	}
 	// Staged teardown: settle the memoryless actor, then delete it.
 	runtimePoolReconcile(t, r, pool)
+	status = runtimePoolTestGetPool(t, r, pool).Status
+	if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopping || status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed {
+		t.Fatalf("status during actor teardown = %s/%s, want Stopping/Closed", status.Lifecycle, status.AdmissionState)
+	}
 	runtimePoolReconcile(t, r, pool)
 	runtimePoolReconcile(t, r, pool)
 	if len(control.settled) != 1 {
@@ -2270,7 +3635,7 @@ func TestSubstrateRuntimePoolScaleToZeroDrainsThenDeletesActor(t *testing.T) {
 	}
 	runtimePoolReconcile(t, r, pool)
 	runtimePoolReconcile(t, r, pool)
-	status := runtimePoolTestGetPool(t, r, pool).Status
+	status = runtimePoolTestGetPool(t, r, pool).Status
 	if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopped || status.ActiveInstance != nil {
 		t.Fatalf("status = %s (active=%v), want Stopped with no active instance", status.Lifecycle, status.ActiveInstance)
 	}
@@ -2708,5 +4073,71 @@ func TestRuntimePoolInstanceEndpoint(t *testing.T) {
 	routed := substrateTestProbePod(substrate)
 	if got := runtimePoolInstanceEndpoint(substrate, &routed); got != "http://"+substrateTestRouteHost(substrate) {
 		t.Fatalf("substrate endpoint = %q, want route host", got)
+	}
+}
+
+// Recycling an actor whose cold resume consumed the suspension consent but
+// never completed admission is terminal: the DurableDir being destroyed is
+// the only copy of the preserved session data.
+func TestRecycleSubstrateActorDuringResumeRecordsTerminalLoss(t *testing.T) {
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, &fakeRuntimePoolSupervisorClient{}, control)
+	actorID := substrateTestActorID(pool)
+	derivedName := runtimePoolSubstrateTemplateName(runtimePoolResourceName(pool.Namespace, pool.Name))
+	if _, err := control.CreateActor(context.Background(), actorID, substrateTestTemplateNamespace, derivedName); err != nil {
+		t.Fatalf("create actor: %v", err)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations == nil {
+		current.Annotations = map[string]string{}
+	}
+	current.Annotations[substrateActorResumingAnnotation] = actorID
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("record resume in progress: %v", err)
+	}
+
+	// The teardown spans reconciles; the terminal loss must be recorded
+	// before any destruction stage runs.
+	if err := r.recycleSubstrateActor(context.Background(), &current, control, actorID); err != nil {
+		t.Fatalf("recycle: %v", err)
+	}
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] == "" {
+		t.Fatalf("recycling a resuming actor must record terminal loss, annotations=%v", current.Annotations)
+	}
+}
+
+// Recycling an actor whose consensual suspension consent still stands (for
+// example through the integrity-triggered recycle that runs before the resume
+// handler) is equally terminal.
+func TestRecycleSubstrateActorWithStandingConsentRecordsTerminalLoss(t *testing.T) {
+	control := newFakeSubstrateActorControl()
+	r, pool := runtimePoolSubstrateTestReconciler(t, &fakeRuntimePoolSupervisorClient{}, control)
+	actorID := substrateTestActorID(pool)
+	derivedName := runtimePoolSubstrateTemplateName(runtimePoolResourceName(pool.Namespace, pool.Name))
+	if _, err := control.CreateActor(context.Background(), actorID, substrateTestTemplateNamespace, derivedName); err != nil {
+		t.Fatalf("create actor: %v", err)
+	}
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations == nil {
+		current.Annotations = map[string]string{}
+	}
+	current.Annotations[substrateActorSuspendedAnnotation] = actorID
+	current.Annotations[substrateActorSuspendAcceptedAnnotation] = substrateActorSuspendConsentValue(actorID)
+	current.Annotations[substrateActorSnapshotDigestAnnotation] = "sha256:" + strings.Repeat("a", 64)
+	current.Annotations[substrateActorSnapshotOperationDigestAnnotation] = "sha256:" + strings.Repeat("c", 64)
+	current.Annotations[substrateActorLastSnapshotDigestAnnotation] = current.Annotations[substrateActorSnapshotDigestAnnotation]
+	current.Annotations[substrateActorLastSnapshotIdentityDigestAnnotation] = "sha256:" + strings.Repeat("b", 64)
+	// Consent is honored only on a suspend-capable binding.
+	current.Spec.ExecutionWorkspace.Substrate.SuspendMode = "DataOnly"
+	if err := r.Update(context.Background(), &current); err != nil {
+		t.Fatalf("record suspension consent: %v", err)
+	}
+	if err := r.recycleSubstrateActor(context.Background(), &current, control, actorID); err != nil {
+		t.Fatalf("recycle: %v", err)
+	}
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Annotations[runtimePoolWorkspaceResumeLostAnnotation] == "" {
+		t.Fatalf("recycling a consensually suspended actor must record terminal loss, annotations=%v", current.Annotations)
 	}
 }

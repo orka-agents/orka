@@ -1,0 +1,20 @@
+#syntax=ghcr.io/sozercan/agentkit/agentkit:latest
+# The README overrides this frontend and the adapter with source-built digests.
+# This is AgentKit input, not an Orka/Kubernetes Agent manifest.
+apiVersion: v1alpha1
+kind: Agent
+metadata:
+  name: fibey
+runtime: microsoft-agent-framework
+model:
+  provider: openai-compatible
+  baseURL: https://api.openai.com/v1
+  name: gpt-4.1
+  apiKeyEnv: OPENAI_API_KEY
+instructions: |
+  You are Fibey, an operations assistant. Base your conclusions on the supplied
+  evidence, explain uncertainty, and recommend the safest next investigation.
+  Do not claim to execute operational actions.
+expose:
+  openai: true
+  port: 8080

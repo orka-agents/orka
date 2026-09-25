@@ -58,7 +58,7 @@ func NewHTTPEventRecorderFromEnv() EventRecorder {
 		Namespace:     os.Getenv(workerenv.TaskNamespace),
 		TaskName:      os.Getenv(workerenv.TaskName),
 		SessionName:   os.Getenv(workerenv.SessionName),
-		BearerPath:    firstNonEmpty(os.Getenv(workerenv.ServiceAccountTokenPath), DefaultServiceAccountBearerPath),
+		BearerPath:    FirstNonBlank(os.Getenv(workerenv.ServiceAccountTokenPath), DefaultServiceAccountBearerPath),
 	})
 }
 
@@ -236,7 +236,10 @@ func readServiceAccountToken(path string) string {
 	return strings.TrimSpace(string(data))
 }
 
-func firstNonEmpty(values ...string) string {
+// FirstNonBlank returns the first value that is not blank, unmodified, so
+// callers that must preserve provider-supplied strings exactly (model IDs,
+// paths) still treat whitespace-only values as empty.
+func FirstNonBlank(values ...string) string {
 	for _, value := range values {
 		if strings.TrimSpace(value) != "" {
 			return value

@@ -28,8 +28,19 @@ import (
 	"sync"
 	"time"
 
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+
 	"github.com/orka-agents/orka/internal/workspace/daemonprotocol"
 	workspaceagent "github.com/orka-agents/orka/pkg/workspaceagent"
+)
+
+const (
+	temporaryRoot = "/tmp"
+)
+
+const (
+	applicationRoot  = "/app"
+	sharedMemoryRoot = "/dev/shm"
 )
 
 const (
@@ -69,11 +80,11 @@ const (
 	envMaxDownloadBytes            = "ORKA_WORKSPACE_AGENT_MAX_DOWNLOAD_BYTES"
 )
 
-var allowedRoots = []string{"/app", defaultWorkspaceRoot, "/home/worker", "/tmp", "/dev/shm"}
+var allowedRoots = []string{applicationRoot, defaultWorkspaceRoot, "/home/worker", temporaryRoot, "/dev/shm"}
 
 // commandWritableRoots is the complete write allowlist applied to secured v1
 // command processes. Every root is also cleared by reset before rebinding.
-var commandWritableRoots = []string{defaultWorkspaceRoot, "/home/worker", "/tmp", "/dev/shm"}
+var commandWritableRoots = []string{defaultWorkspaceRoot, "/home/worker", temporaryRoot, "/dev/shm"}
 
 var (
 	errHandoffAuthMissing    = errors.New("handoff token file is missing")
@@ -85,11 +96,10 @@ var (
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == commandConfinementWrapperArg {
-		if err := runWriteConfinedCommand(os.Args[2:]); err != nil {
-			_, _ = fmt.Fprintln(os.Stderr, "workspace command confinement failed:", err)
-			os.Exit(126)
-		}
-		return
+		// A successful exec replaces this process; any return is a launch failure.
+		err := runWriteConfinedCommand(os.Args[2:])
+		_, _ = fmt.Fprintln(os.Stderr, "workspace command confinement failed:", err)
+		os.Exit(126)
 	}
 	if err := run(); err != nil {
 		slog.Error("workspace agent failed", "err", err)
@@ -133,6 +143,8 @@ type workspaceAgentServer struct {
 	maxRequestBytes       int64
 	maxDownloadBytes      int64
 	bootstrapAuth         string
+	bootstrapPublicKey    string
+	bootstrapReceiver     *harnessv2.CredentialBootstrapReceiver
 	controlAuth           string
 	controlAuthPath       string
 	controlAuthConfigured bool
@@ -196,7 +208,7 @@ func newWorkspaceAgentServer() *workspaceAgentServer {
 	if controlConfigured {
 		processTerminator = terminateAttachmentProcesses
 	}
-	return &workspaceAgentServer{
+	server := &workspaceAgentServer{
 		defaultCommandTimeout: durationEnvSeconds(envDefaultCommandTimeoutSecs, defaultCommandTimeout),
 		defaultMaxOutputBytes: int64Env(envDefaultMaxOutputBytes, defaultMaxOutputBytes),
 		maxRequestBytes:       int64Env(envMaxRequestBytes, defaultMaxRequestBytes),
@@ -223,6 +235,8 @@ func newWorkspaceAgentServer() *workspaceAgentServer {
 		resetRequired:         controlConfigured,
 		resetOperations:       make(map[string]resetOperationRecord),
 	}
+	server.configureSubstrateBootstrap()
+	return server
 }
 
 func validateCommandWriteConfinement(controlConfigured, writeConfinement bool) error {
@@ -292,6 +306,7 @@ const (
 
 func (s *workspaceAgentServer) routes() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc(harnessv2.CredentialBootstrapPath, s.handleSubstrateBootstrap)
 	mux.HandleFunc(workspaceagent.LegacyHealthPath, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
@@ -1004,7 +1019,7 @@ func normalizeAgentPath(value string) (string, error) {
 		return "", fmt.Errorf("path is required")
 	}
 	if !filepath.IsAbs(value) {
-		value = filepath.Join("/app", value)
+		value = filepath.Join(applicationRoot, value)
 	}
 	return filepath.Clean(value), nil
 }
@@ -1357,6 +1372,9 @@ func (s *workspaceAgentServer) runExec(
 		cmd.Stdout = stdout
 		cmd.Stderr = stderr
 		err = startCommand(cmd)
+	}
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "start command: %v", err)
 	}
 	groupID := commandProcessGroupID(cmd)
 	if err == nil {
@@ -1960,7 +1978,7 @@ func defaultDownloadRoot() string {
 		}
 	}
 	for _, root := range allowedRoots {
-		if filepath.Clean(root) != "/app" {
+		if filepath.Clean(root) != applicationRoot {
 			return root
 		}
 	}
@@ -2167,7 +2185,7 @@ func safePath(value string) (string, error) {
 		return "", fmt.Errorf("path is required")
 	}
 	if !filepath.IsAbs(value) {
-		value = filepath.Join("/app", value)
+		value = filepath.Join(applicationRoot, value)
 	}
 	clean := filepath.Clean(value)
 	for _, root := range allowedRoots {

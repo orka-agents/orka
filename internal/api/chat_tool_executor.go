@@ -29,12 +29,17 @@ import (
 	"github.com/orka-agents/orka/internal/tools"
 )
 
-const taskCreatedMsg = "Task created"
+const (
+	taskCreatedMsg       = "Task created"
+	toolNamespaceArg     = "namespace"
+	chatCreateAITaskTool = "create_ai_task"
+)
 
 // ToolExecutor executes orchestrator LLM tool calls by creating and managing
 // Kubernetes resources (Tasks, Agents, Tools, Sessions).
 type ToolExecutor struct {
 	client                    client.Client
+	policyReader              client.Reader
 	kubeClient                kubernetes.Interface
 	sessionManager            *controller.SessionManager
 	namespace                 string
@@ -49,6 +54,8 @@ type ToolExecutor struct {
 	watchNamespace            string
 	enforceNamespaceIsolation bool
 	resultStore               store.ResultStore
+	gatewayEventStore         store.GatewayEventStore
+	userInfo                  *UserInfo
 	registry                  *tools.Registry
 	allowedToolNames          map[string]struct{}
 	authorizeTaskCreate       func(context.Context, *corev1alpha1.Task) error
@@ -63,6 +70,11 @@ type ToolExecutor struct {
 // Agent-producing chat tools.
 func (e *ToolExecutor) SetExecutionMode(mode executionmode.Mode) {
 	e.executionMode = mode
+}
+
+// SetPolicyReader supplies the authoritative reader used by coordination tools.
+func (e *ToolExecutor) SetPolicyReader(reader client.Reader) {
+	e.policyReader = reader
 }
 
 // NewToolExecutor creates a new ToolExecutor.
@@ -160,6 +172,29 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 		recordRejectedToolCall(ctx, toolCall, resultStr)
 		return resultStr, marshalErr
 	}
+	// Match the effective string values used by the tools when constructing Tasks.
+	targetNamespace := e.namespace
+	if value, present := args[toolNamespaceArg]; present && fmt.Sprint(value) != "" {
+		targetNamespace = fmt.Sprint(value)
+	}
+	var sessionRef string
+	if value, present := args["sessionRef"]; present {
+		sessionRef = fmt.Sprint(value)
+	}
+	// Scheduled parents do not acquire the session lock, and their future runs
+	// are not part of this chat turn's wait set.
+	var schedule string
+	if value, present := args["schedule"]; present {
+		schedule = fmt.Sprint(value)
+	}
+	if toolCall.Name == chatCreateAITaskTool && schedule == "" &&
+		strings.TrimSpace(sessionRef) != "" && targetNamespace == e.namespace &&
+		strings.TrimSpace(sessionRef) == strings.TrimSpace(e.sessionID) {
+		result := toolError("invalid_arguments", "child task sessionRef cannot reuse the active chat session", "Use a different session name or omit sessionRef")
+		resultStr, err := marshalResult(result)
+		recordRejectedToolCall(ctx, toolCall, resultStr)
+		return resultStr, err
+	}
 
 	toolCtx, cancel := context.WithTimeout(ctx, e.toolTimeout)
 	defer cancel()
@@ -167,6 +202,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 	// Set up ToolContext for registry-based tools
 	tc := &tools.ToolContext{
 		Client:                    e.client,
+		PolicyReader:              e.policyReader,
 		KubeClient:                e.kubeClient,
 		Namespace:                 e.namespace,
 		SessionID:                 e.sessionID,
@@ -218,6 +254,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 		},
 		IncrementTasks: func() { e.tasksCreated++ },
 	}
+	authorizeExternalToolContext(tc, e.userInfo, e.gatewayEventStore)
 	toolCtx = tools.WithToolContext(toolCtx, tc)
 
 	// Marshal args to JSON for the Tool interface

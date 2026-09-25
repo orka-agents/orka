@@ -44,9 +44,9 @@ func (t *CreateContainerTaskTool) Parameters() json.RawMessage {
 		"command": map[string]any{jsonSchemaTypeField: jsonSchemaTypeArray, itemsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}, jsonSchemaDescriptionField: "Command to execute"},
 		"args":    map[string]any{jsonSchemaTypeField: jsonSchemaTypeArray, itemsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}, jsonSchemaDescriptionField: "Arguments to the command"}, workspaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaDescriptionField: "Git workspace for the command. Required when the command validates, builds, tests, or inspects repository files. Orka prepares /workspace before running the container and records workspace provenance in the result.", jsonSchemaPropertiesField: map[string]any{
 			"gitRepo":                  map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Source Git repository URL"},
-			"branch":                   map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Source branch to clone from (must exist). Omit to use the default branch."},
-			"ref":                      map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Exact source git ref, commit SHA, or tag to checkout. Prefer this for validation."},
-			"readCredentialRef":        map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional Secret name for clone/read credentials. Omit for public repositories."},
+			branchField:                map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Source branch to clone from (must exist). Omit to use the default branch."},
+			refField:                   map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Exact source git ref, commit SHA, or tag to checkout. Prefer this for validation."},
+			readCredentialRefField:     map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional Secret name for clone/read credentials. Omit for public repositories."},
 			"publicationGitRepo":       map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Publication repository URL for command-produced changes"},
 			"publicationCredentialRef": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional Secret name for publication credentials"},
 			"subPath":                  map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Sub-path within the repo to run from"},
@@ -373,16 +373,16 @@ func buildContainerTask(a map[string]any) *corev1alpha1.Task {
 			if gitRepo := chatGetStringArg(wsMap, "gitRepo"); gitRepo != "" {
 				wsCfg.GitRepo = gitRepo
 			}
-			if branch := chatGetStringArg(wsMap, "branch"); branch != "" {
+			if branch := chatGetStringArg(wsMap, branchField); branch != "" {
 				wsCfg.Branch = branch
 			}
-			if ref := chatGetStringArg(wsMap, "ref"); ref != "" {
+			if ref := chatGetStringArg(wsMap, refField); ref != "" {
 				wsCfg.Ref = ref
 			}
 			if subPath := chatGetStringArg(wsMap, "subPath"); subPath != "" {
 				wsCfg.SubPath = subPath
 			}
-			if readCredentialRef := chatGetStringArg(wsMap, "readCredentialRef"); readCredentialRef != "" {
+			if readCredentialRef := chatGetStringArg(wsMap, readCredentialRefField); readCredentialRef != "" {
 				wsCfg.ReadCredentialRef = &corev1alpha1.WorkspaceCredentialReference{Name: readCredentialRef}
 			}
 			if publicationGitRepo := chatGetStringArg(wsMap, "publicationGitRepo"); publicationGitRepo != "" {

@@ -1,10 +1,33 @@
 ---
 slug: /chat
+description: "The chat endpoint: describe what you want in plain language and let an orchestrator create and run the tasks."
 ---
 
-# Interactive Chat
+# Interactive chat
 
 The chat endpoint provides an agentic conversational interface where an LLM orchestrator can create and manage Kubernetes resources on the user's behalf. It accepts natural language, reasons about what tasks to create, and autonomously executes them using the platform.
+
+:::tip[Video demo]
+Watch [From chat to a GitHub pull request](https://www.youtube.com/watch?v=FlLgdh2lKMk).
+:::
+
+## Try it
+
+With the API [port-forwarded and a client token in `ORKA_TOKEN`](../getting-started.md#connect-to-the-api)
+and at least one [Provider](../getting-started.md#your-first-task) created, send one
+message. The orchestrator decides what to do, creates the Tasks it needs, and streams
+its progress back:
+
+```bash
+curl -N -H "Authorization: Bearer ${ORKA_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{"message": "Run a container task that prints the date, then tell me what it printed.", "namespace": "orka-system"}' \
+  http://localhost:8080/api/v1/chat
+```
+
+Swap `Accept: text/event-stream` for `Accept: application/json` to get one JSON
+reply instead of a stream. The [dashboard](ui.md) has the same chat with a UI.
 
 ## Endpoint
 
@@ -41,14 +64,14 @@ User ──POST /api/v1/chat──▶ API Server ──▶ Concurrency Semaphore
                                └─▶ Detect client disconnect → cleanup
 ```
 
-## Request Format
+## Request format
 
 ```json
 {
     "message": "Create an AI task that summarizes Kubernetes best practices",
     "sessionId": "my-session",
     "provider": "anthropic",
-    "model": "claude-sonnet-4-20250514",
+    "model": "claude-opus-5",
     "namespace": "default",
     "temperature": 0.7,
     "maxTokens": 4096,
@@ -64,9 +87,9 @@ Only `message` is required. All other fields are optional:
 - `systemPrompt`: Appended to the built-in orchestrator prompt
 - `namespace`: Namespace for task operations
 
-## Response Formats
+## Response formats
 
-### SSE Streaming (default)
+### SSE streaming (default)
 
 All SSE events use a structured envelope:
 
@@ -87,7 +110,7 @@ Event types:
 | `error` | Error with code and message |
 | `done` | Stream complete with usage stats |
 
-### JSON Response
+### JSON response
 
 Send `Accept: application/json` for a blocking JSON response:
 
@@ -100,7 +123,7 @@ Send `Accept: application/json` for a blocking JSON response:
 }
 ```
 
-## Live Coverage
+## Live coverage
 
 PR-blocking live CI covers the chat endpoint against a real backend in both:
 
@@ -117,7 +140,7 @@ The live suite verifies transport behavior, session creation/persistence, and us
 |------|-------------|
 | `create_ai_task` | Create an AI/LLM-powered task |
 | `create_container_task` | Create a container task for shell commands |
-| `create_agent_task` | Create a built-in Codex, Claude, Copilot, or OpenCode ACP Task. External-v2 `runtimeRef` Task dispatch remains fail-closed. |
+| `create_agent_task` | Create an ACP Task using an existing Agent configured with a built-in runtime or a ready external-v2 `runtimeRef`. |
 | `check_task_progress` | Get task phase/status conditions |
 | `fetch_task_output` | Get completed task result (truncated to 2K chars) |
 | `wait_for_task` | Wait for task completion (max 60s per call, non-blocking) |
@@ -139,7 +162,7 @@ These are only included when the user's message signals CRUD intent:
 | `delete_tool` | Delete a Tool CRD |
 | `delete_session` | Delete a session and transcript |
 
-## System Prompt
+## System prompt
 
 The system prompt uses XML-delimited sections for optimal tool-calling accuracy:
 
@@ -159,9 +182,9 @@ Kubernetes-native task execution.
 
 Dynamic context (agents, tools) is built once at request start and cached for the tool loop duration.
 
-## Safety Mechanisms
+## Safety mechanisms
 
-### Concurrency Control
+### Concurrency control
 - Bounded semaphore (`--chat-max-concurrent`, default 10)
 - Returns `429 Too Many Requests` when full
 
@@ -170,16 +193,16 @@ Dynamic context (agents, tools) is built once at request start and cached for th
 - `--chat-tool-timeout` (default 60s): Per-tool execution timeout
 - `--chat-max-iterations` (default 50): Max tool execution loops
 
-### Resource Limits
+### Resource limits
 - `--chat-max-tasks-per-turn` (default 5): Max tasks created per chat turn
 - Task names use session-scoped prefix to prevent collisions
 
-### Stuck-State Detection
+### Stuck-state detection
 - **Repetition detector**: Same tool called with identical args 3 times → warning injected, 5 iterations penalized
 - **Progress assertion**: Every 5 iterations, LLM must summarize progress
 - **Graceful termination**: On iteration exhaustion, LLM must provide final summary
 
-### Error Handling
+### Error handling
 Structured error responses help the LLM self-correct:
 
 ```json
@@ -191,20 +214,20 @@ Structured error responses help the LLM self-correct:
 }
 ```
 
-## Session Management
+## Session management
 
 - Chat sessions use prefix `chat-session-` and type `chat` in the session store
 - Sessions store message summaries, not full tool outputs
 - Auto-truncation when session exceeds `--chat-max-session-size` (default 500KB)
 - First user message is always preserved for context
 
-## Namespace Scoping
+## Namespace scoping
 
 - Default to namespace from `ChatRequest` or authenticated user's namespace
 - `kube-system`, `kube-public`, and the operator's namespace are blocked
 - All orchestrator-created resources get labels: `orka.ai/created-by: orchestrator`, `orka.ai/chat-session: <sessionId>`
 
-## Configuration Flags
+## Configuration flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -218,7 +241,7 @@ Structured error responses help the LLM self-correct:
 | `--chat-max-tasks-per-turn` | `5` | Max tasks per chat turn |
 | `--chat-max-session-size` | `512000` | Session size soft limit (bytes) |
 
-## Example Usage
+## Example usage
 
 ```bash
 # Chat with SSE streaming

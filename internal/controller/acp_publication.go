@@ -22,6 +22,17 @@ import (
 )
 
 const (
+	publisherPrepareOperation     = "publisher.prepare"
+	publisherPublishOperation     = "publisher.publish"
+	publisherVerifyOperation      = "publisher.verify"
+	intentField                   = "intent"
+	publisherPullRequestOperation = "publisher.pull-request"
+	refField                      = "ref"
+	artifactDigestField           = "artifactDigest"
+	shaField                      = "sha"
+)
+
+const (
 	acpPublicationGeneration int64 = 1
 	acpNoWorkspaceRevision         = taskterminal.NoWorkspaceRevision
 )
@@ -74,6 +85,10 @@ func (d *ACPDispatcher) publishWorkspaceDeltaOperation(
 	workspace := task.Spec.Workspace
 	if workspace == nil || workspace.Intent != corev1alpha1.WorkspaceIntentWrite {
 		return acpPublicationResult{}, fmt.Errorf("non-empty workspace publication requires intent=write")
+	}
+	prPresentation, err := d.pullRequestPresentationCapability(ctx, task)
+	if err != nil {
+		return acpPublicationResult{}, err
 	}
 	if delta.Artifact == nil || !delta.PublicationSafe || !delta.NoFollowVerified {
 		return acpPublicationResult{}, fmt.Errorf("workspace delta is not publication-safe")
@@ -221,7 +236,7 @@ func (d *ACPDispatcher) publishWorkspaceDeltaOperation(
 		},
 	}
 	prepareIdentity := store.ExternalEffectIdentity{
-		Kind: "publisher.prepare", Namespace: task.Namespace, AggregateID: publication.ID, OperationID: prepareOperation,
+		Kind: publisherPrepareOperation, Namespace: task.Namespace, AggregateID: publication.ID, OperationID: prepareOperation,
 	}
 	preparedResponse, err := runACPExternalEffectWithRetry(ctx, d, fence, prepareIdentity, prepareRequest, func(callCtx context.Context) (publisherservice.PublicationPrepareResponse, error) {
 		return d.Publisher.PreparePublication(callCtx, prepareRequest)
@@ -354,7 +369,7 @@ func (d *ACPDispatcher) publishWorkspaceDeltaOperation(
 		CredentialRef: writeCredential, Prepared: preparedTransport, Request: publishRequest,
 	}
 	publishResponse, publishErr := runACPExternalEffect(settlementCtx, d, fence, store.ExternalEffectIdentity{
-		Kind: "publisher.publish", Namespace: task.Namespace, AggregateID: publication.ID, OperationID: publishOperation,
+		Kind: publisherPublishOperation, Namespace: task.Namespace, AggregateID: publication.ID, OperationID: publishOperation,
 	}, publishServiceRequest, func(callCtx context.Context) (publisherservice.PublicationPublishResponse, error) {
 		return d.Publisher.Publish(callCtx, publishServiceRequest)
 	})
@@ -388,7 +403,7 @@ func (d *ACPDispatcher) publishWorkspaceDeltaOperation(
 		},
 	}
 	verifyResponse, verifyErr := runACPExternalEffect(settlementCtx, d, fence, store.ExternalEffectIdentity{
-		Kind: "publisher.verify", Namespace: task.Namespace, AggregateID: publication.ID, OperationID: verifyOperation,
+		Kind: publisherVerifyOperation, Namespace: task.Namespace, AggregateID: publication.ID, OperationID: verifyOperation,
 	}, verifyRequest, func(callCtx context.Context) (publisherservice.PublicationVerifyResponse, error) {
 		return d.Publisher.Verify(callCtx, verifyRequest)
 	})
@@ -409,13 +424,13 @@ func (d *ACPDispatcher) publishWorkspaceDeltaOperation(
 	} else {
 		terminalReason = "publication remote outcome could not be independently observed"
 		if err := settleACPExternalEffect(settlementCtx, d, fence, store.ExternalEffectIdentity{
-			Kind: "publisher.verify", Namespace: task.Namespace, AggregateID: publication.ID, OperationID: verifyOperation,
+			Kind: publisherVerifyOperation, Namespace: task.Namespace, AggregateID: publication.ID, OperationID: verifyOperation,
 		}, store.ExternalEffectOutcomeUnknown, nil); err != nil {
 			return acpPublicationResult{}, err
 		}
 	}
 	if publishErr != nil {
-		publishIdentity := store.ExternalEffectIdentity{Kind: "publisher.publish", Namespace: task.Namespace, AggregateID: publication.ID, OperationID: publishOperation}
+		publishIdentity := store.ExternalEffectIdentity{Kind: publisherPublishOperation, Namespace: task.Namespace, AggregateID: publication.ID, OperationID: publishOperation}
 		if verification.Outcome == store.PublicationVerifiedExact || verification.Outcome == store.PublicationDeliveredSuperseded {
 			reconciled := publisherservice.PublicationPublishResponse{
 				OperationID: publishOperation, RequestDigest: publishReceipt.RequestDigest,
@@ -446,7 +461,7 @@ func (d *ACPDispatcher) publishWorkspaceDeltaOperation(
 				PublicationGeneration: publication.Generation, ExpectedHeadSHA: verification.ObservedRemote.SHA,
 			}
 			intentOperation := publicationOperationID("pr-intent", task)
-			intentDigest, digestErr := acpDomainDigest("publication-pr-intent", map[string]any{"publicationID": publication.ID, "intent": intent})
+			intentDigest, digestErr := acpDomainDigest("publication-pr-intent", map[string]any{publicationIDField: publication.ID, intentField: intent})
 			if digestErr != nil {
 				return acpPublicationResult{}, digestErr
 			}
@@ -459,25 +474,30 @@ func (d *ACPDispatcher) publishWorkspaceDeltaOperation(
 				return acpPublicationResult{}, err
 			}
 		}
-		forgeIntent := publisher.PullRequestIntent{
+		forgeIntent := withTaskPullRequestMetadata(publisher.PullRequestIntent{
 			BaseRepository: pullRequestBase, BaseRef: publication.PRIntent.BaseRef,
 			HeadRepository: target, HeadRef: publication.PRIntent.HeadRef,
 			PublicationGeneration: publication.Generation, ExpectedHeadOID: publication.PRIntent.ExpectedHeadSHA,
-		}
+			SessionUID: publication.SessionUID,
+		}, task)
 		prOperation := publicationOperationID("pr-reconcile", task)
 		prRequest := publisherservice.PullRequestReconcileRequest{
 			Metadata:      publisherservice.OperationMetadata{Namespace: task.Namespace, PublicationID: publication.ID, OperationID: prOperation},
 			CredentialRef: publisherForgeCredentialReference(workspace.ForgeCredentialRef),
 			Intent:        forgeIntent,
 		}
+		prRequest, err = d.persistedPullRequestRequest(settlementCtx, prRequest, prPresentation)
+		if err != nil {
+			return acpPublicationResult{}, err
+		}
 		prResponse, prErr := runACPExternalEffect(settlementCtx, d, fence, store.ExternalEffectIdentity{
-			Kind: "publisher.pull-request", Namespace: task.Namespace, AggregateID: publication.ID, OperationID: prOperation,
+			Kind: publisherPullRequestOperation, Namespace: task.Namespace, AggregateID: publication.ID, OperationID: prOperation,
 		}, prRequest, func(callCtx context.Context) (publisherservice.PullRequestReconcileResponse, error) {
 			return d.Publisher.ReconcilePullRequest(callCtx, prRequest)
 		})
 		if prErr != nil {
 			if err := settleACPExternalEffect(settlementCtx, d, fence, store.ExternalEffectIdentity{
-				Kind: "publisher.pull-request", Namespace: task.Namespace, AggregateID: publication.ID, OperationID: prOperation,
+				Kind: publisherPullRequestOperation, Namespace: task.Namespace, AggregateID: publication.ID, OperationID: prOperation,
 			}, store.ExternalEffectOutcomeUnknown, nil); err != nil {
 				return acpPublicationResult{}, err
 			}
@@ -495,7 +515,7 @@ func (d *ACPDispatcher) publishWorkspaceDeltaOperation(
 				ReconciledAt: time.Now().UTC(),
 			}
 			receiptOperation := publicationOperationID("pr-receipt", task)
-			receiptDigest, digestErr := acpDomainDigest("publication-pr-receipt", map[string]any{"publicationID": publication.ID, "receipt": storedReceipt})
+			receiptDigest, digestErr := acpDomainDigest("publication-pr-receipt", map[string]any{publicationIDField: publication.ID, "receipt": storedReceipt})
 			if digestErr != nil {
 				return acpPublicationResult{}, digestErr
 			}
@@ -657,7 +677,7 @@ func (d *ACPDispatcher) refreshBranchClaimBaseline(
 			reason: "BranchMoved", message: "publication branch does not match the requested exact remote head",
 		}
 	}
-	digest := mustACPDomainDigest("branch-claim-refresh", map[string]any{"claim": claim.ID, "from": claim.LastVerified, "to": expected, "task": task.UID})
+	digest := mustACPDomainDigest("branch-claim-refresh", map[string]any{"claim": claim.ID, transitionFromField: claim.LastVerified, "to": expected, "task": task.UID})
 	updated, err := d.Store.CompareAndSwapBranchClaim(ctx, store.BranchClaimCAS{
 		ID: claim.ID, Fence: fence,
 		ExpectedVersion: claim.Version, ExpectedGeneration: claim.Generation, NewGeneration: claim.Generation,
@@ -735,11 +755,7 @@ func (d *ACPDispatcher) ensureBranchClaim(
 		Generation: 1, LastVerified: expected, Availability: store.BranchClaimAvailable,
 		RequestDigest: digest, CreatedAt: time.Now().UTC(),
 	}
-	if creator, ok := d.Store.(store.BranchClaimCreationStore); ok {
-		return creator.CreateBranchClaimWithResult(ctx, request, fence)
-	}
-	claim, err := d.Store.CreateBranchClaim(ctx, request, fence)
-	return claim, false, err
+	return d.Store.CreateBranchClaimWithResult(ctx, request, fence)
 }
 
 func (d *ACPDispatcher) persistedPublicationOwnsLegacyClaim(
@@ -799,7 +815,7 @@ func branchClaimRequestDigest(
 ) (string, error) {
 	payload := map[string]any{
 		"repository": repositoryID,
-		"ref":        ref,
+		refField:     ref,
 		"ownerKind":  ownerKind,
 		"ownerUID":   ownerUID,
 		"expected":   expected,
@@ -822,7 +838,7 @@ func legacyBranchClaimRequestDigest(
 ) (string, error) {
 	return acpDomainDigest("branch-claim", map[string]any{
 		"repository": repositoryID,
-		"ref":        ref,
+		refField:     ref,
 		"ownerKind":  ownerKind,
 		"ownerUID":   ownerUID,
 		"expected":   expected,
@@ -837,9 +853,9 @@ func (d *ACPDispatcher) ensurePublication(ctx context.Context, task *corev1alpha
 	}
 	message := "orka: apply agent task " + task.Name + "\n"
 	requestDigest, err := acpDomainDigest("publication", map[string]any{
-		"id": id, "attemptID": attemptID, "source": source, "sourceRef": sourceRef, "target": target,
+		"id": id, attemptIDField: attemptID, "source": source, "sourceRef": sourceRef, "target": target,
 		"targetRef": targetRef, "branchClaim": claim.ID, "branchClaimGeneration": claim.Generation,
-		"baseline": claim.LastVerified, "artifactDigest": delta.Artifact.Digest, "relativeRoot": delta.RelativeRoot,
+		"baseline": claim.LastVerified, artifactDigestField: delta.Artifact.Digest, "relativeRoot": delta.RelativeRoot,
 		"commitMessage": message, "commitTimestamp": commitAt,
 	})
 	if err != nil {
@@ -884,9 +900,9 @@ func publicationMatchesCreation(
 	}
 	message := "orka: apply agent task " + task.Name + "\n"
 	expectedDigest, err := acpDomainDigest("publication", map[string]any{
-		"id": publicationIDForTask(task), "attemptID": attemptID, "source": source, "sourceRef": sourceRef, "target": target,
+		"id": publicationIDForTask(task), attemptIDField: attemptID, "source": source, "sourceRef": sourceRef, "target": target,
 		"targetRef": targetRef, "branchClaim": claim.ID, "branchClaimGeneration": claim.Generation,
-		"baseline": claim.LastVerified, "artifactDigest": delta.Artifact.Digest, "relativeRoot": delta.RelativeRoot,
+		"baseline": claim.LastVerified, artifactDigestField: delta.Artifact.Digest, "relativeRoot": delta.RelativeRoot,
 		"commitMessage": message, "commitTimestamp": commitAt,
 	})
 	if err != nil {
@@ -921,7 +937,7 @@ func (d *ACPDispatcher) transitionPublication(ctx context.Context, publication *
 }
 
 func (d *ACPDispatcher) transitionPublicationTerminal(ctx context.Context, publication *store.Publication, fence store.ControllerEpochFence, state store.PublicationState, reason string) error {
-	_, err := d.transitionPublication(ctx, publication, fence, state, publicationOperationID("terminal", nil), mustACPDomainDigest("publication-terminal", map[string]any{"id": publication.ID, "state": state}), nil, nil, nil, reason)
+	_, err := d.transitionPublication(ctx, publication, fence, state, publicationOperationID("terminal", nil), mustACPDomainDigest("publication-terminal", map[string]any{"id": publication.ID, stateField: state}), nil, nil, nil, reason)
 	return err
 }
 
@@ -1035,7 +1051,7 @@ func (d *ACPDispatcher) reclaimStandaloneTaskBranchClaim(
 				return fmt.Errorf("branch claim %s baseline drifted before terminal reclamation", claim.ID)
 			}
 			digest := mustACPDomainDigest("branch-claim-advance", map[string]any{
-				"claim": claim.ID, "publication": publication.ID, "sha": expectedBaseline.SHA,
+				"claim": claim.ID, "publication": publication.ID, shaField: expectedBaseline.SHA,
 			})
 			claim, err = d.Store.CompareAndSwapBranchClaim(ctx, store.BranchClaimCAS{
 				ID: claim.ID, Fence: fence, ExpectedVersion: claim.Version,
@@ -1072,10 +1088,10 @@ func (d *ACPDispatcher) ensurePublicationExternalEffectsSettled(
 	}{
 		{kind: "publisher.claim-refresh", operation: "claim-refresh"},
 		{kind: "publisher.preflight", operation: "preflight"},
-		{kind: "publisher.prepare", operation: "prepare"},
-		{kind: "publisher.publish", operation: "publish"},
-		{kind: "publisher.verify", operation: "verify"},
-		{kind: "publisher.pull-request", operation: "pr-reconcile"},
+		{kind: publisherPrepareOperation, operation: "prepare"},
+		{kind: publisherPublishOperation, operation: "publish"},
+		{kind: publisherVerifyOperation, operation: "verify"},
+		{kind: publisherPullRequestOperation, operation: "pr-reconcile"},
 	}
 	for _, candidate := range effects {
 		identity := store.ExternalEffectIdentity{
@@ -1296,7 +1312,7 @@ func publicationID(task *corev1alpha1.Task) string {
 }
 
 func publicationIDForTaskUID(task *corev1alpha1.Task, taskUID types.UID) string {
-	digest := mustACPDomainDigest("publication-id", map[string]any{"taskUID": string(taskUID), "attempt": task.Status.Execution.Attempt, "promptID": task.Status.Execution.PromptID})
+	digest := mustACPDomainDigest("publication-id", map[string]any{taskUIDField: string(taskUID), attemptField: task.Status.Execution.Attempt, "promptID": task.Status.Execution.PromptID})
 	return "pub-" + strings.TrimPrefix(digest, "sha256:")[:48]
 }
 
@@ -1336,7 +1352,10 @@ func taskDeliveryStatusForKubernetes(task *corev1alpha1.Task, status corev1alpha
 	// repository workspace. It is not a Git object ID and must not escape into
 	// the schema-validated Task status. Preserve every other value so malformed
 	// real-workspace revisions continue to fail closed at the API boundary.
-	if task != nil && task.Spec.Workspace == nil && status.StartingSHA == acpNoWorkspaceRevision {
+	// A workspace may declare intent or options without a repository, matching
+	// the emptyRuntimeWorkspace and prepareRuntimeWorkspace admission paths.
+	if task != nil && (task.Spec.Workspace == nil || strings.TrimSpace(task.Spec.Workspace.GitRepo) == "") &&
+		status.StartingSHA == acpNoWorkspaceRevision {
 		status.StartingSHA = ""
 	}
 	return status
@@ -1404,7 +1423,9 @@ func (d *ACPDispatcher) completeSuccessWithDelivery(ctx context.Context, task *c
 		now := metav1.Now()
 		latest.Status.Phase = corev1alpha1.TaskPhaseSucceeded
 		latest.Status.Message = message
-		latest.Status.CompletionTime = &now
+		if latest.Status.CompletionTime == nil {
+			latest.Status.CompletionTime = &now
+		}
 		if latest.Status.Execution == nil {
 			latest.Status.Execution = &corev1alpha1.TaskExecutionStatus{}
 		}
@@ -1413,7 +1434,7 @@ func (d *ACPDispatcher) completeSuccessWithDelivery(ctx context.Context, task *c
 		latest.Status.Execution.LastTransitionTime = &now
 		status.LastTransitionTime = &now
 		latest.Status.Delivery = &status
-		return d.Client.Status().Patch(ctx, latest, client.MergeFrom(base))
+		return d.Client.Status().Patch(ctx, latest, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 	})
 }
 
@@ -1439,7 +1460,9 @@ func (d *ACPDispatcher) failTaskForDelivery(ctx context.Context, task *corev1alp
 		now := metav1.Now()
 		latest.Status.Phase = corev1alpha1.TaskPhaseFailed
 		latest.Status.Message = message
-		latest.Status.CompletionTime = &now
+		if latest.Status.CompletionTime == nil {
+			latest.Status.CompletionTime = &now
+		}
 		if latest.Status.Execution == nil {
 			latest.Status.Execution = &corev1alpha1.TaskExecutionStatus{}
 		}
@@ -1448,7 +1471,7 @@ func (d *ACPDispatcher) failTaskForDelivery(ctx context.Context, task *corev1alp
 		latest.Status.Execution.LastTransitionTime = &now
 		status.LastTransitionTime = &now
 		latest.Status.Delivery = &status
-		return d.Client.Status().Patch(ctx, latest, client.MergeFrom(base))
+		return d.Client.Status().Patch(ctx, latest, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 	})
 }
 
@@ -1475,7 +1498,9 @@ func (d *ACPDispatcher) cancelTaskAfterExecution(ctx context.Context, task *core
 		now := metav1.Now()
 		latest.Status.Phase = corev1alpha1.TaskPhaseCancelled
 		latest.Status.Message = message
-		latest.Status.CompletionTime = &now
+		if latest.Status.CompletionTime == nil {
+			latest.Status.CompletionTime = &now
+		}
 		if latest.Status.Execution == nil {
 			latest.Status.Execution = &corev1alpha1.TaskExecutionStatus{}
 		}
@@ -1484,7 +1509,7 @@ func (d *ACPDispatcher) cancelTaskAfterExecution(ctx context.Context, task *core
 		latest.Status.Execution.LastTransitionTime = &now
 		status.LastTransitionTime = &now
 		latest.Status.Delivery = &status
-		return d.Client.Status().Patch(ctx, latest, client.MergeFrom(base))
+		return d.Client.Status().Patch(ctx, latest, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 	})
 }
 
@@ -1545,6 +1570,19 @@ const maxSequentialPublisherSettlementStages = 3
 // verification and PR reconciliation, misclassifying a delivered push as
 // outcome-unknown.
 func publicationSettlementWindow() time.Duration {
-	perStage := externalEffectCallTimeout(store.ExternalEffectIdentity{Kind: "publisher.publish"}) + externalEffectLeaseSettlementMargin
+	perStage := externalEffectCallTimeout(store.ExternalEffectIdentity{Kind: publisherPublishOperation}) + externalEffectLeaseSettlementMargin
 	return maxSequentialPublisherSettlementStages*perStage + externalEffectLeaseSettlementMargin
+}
+
+// withTaskPullRequestMetadata accepts the verified execution snapshot's Task,
+// not agent output. The external-effect digest freezes this metadata on retry.
+func withTaskPullRequestMetadata(intent publisher.PullRequestIntent, task *corev1alpha1.Task) publisher.PullRequestIntent {
+	intent.TaskName, intent.TaskNamespace = task.Name, task.Namespace
+	if workspace := task.Spec.Workspace; workspace != nil {
+		intent.Title, intent.Body = workspace.PRTitle, workspace.PRBody
+	}
+	if intent.Title == "" {
+		intent.Title = publisher.DefaultPullRequestTitle(task.Spec.Prompt, intent.PublicationGeneration)
+	}
+	return intent
 }

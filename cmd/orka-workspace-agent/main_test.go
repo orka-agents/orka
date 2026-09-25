@@ -45,6 +45,27 @@ func TestWorkspaceAgentRejectsUnauthenticatedExec(t *testing.T) {
 	}
 }
 
+func TestWorkspaceAgentReportsCommandStartFailure(t *testing.T) {
+	t.Setenv(envHandoffAuth, "secret")
+	server := newWorkspaceAgentServer()
+	body := mustJSON(t, execRequest{Command: []string{filepath.Join(t.TempDir(), "missing-command")}, WorkDir: "/tmp"})
+	req := httptest.NewRequest(http.MethodPost, workspaceagent.ExecPath, bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer secret")
+	resp := httptest.NewRecorder()
+	server.routes().ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusOK)
+	}
+	var result execResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode == 0 || !strings.Contains(result.Stderr, "start command:") ||
+		!strings.Contains(result.Stderr, "missing-command") {
+		t.Fatalf("command start failure is not diagnosable: exit=%d stderr=%q", result.ExitCode, result.Stderr)
+	}
+}
+
 func TestSafePathRejectsTraversal(t *testing.T) {
 	if _, err := safePath("/workspace/../etc/passwd"); err == nil {
 		t.Fatal("safePath accepted path traversal")

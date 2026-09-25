@@ -2,6 +2,27 @@ package store
 
 import "time"
 
+// ScanTaskIdentity binds ingestion to one Kubernetes Task incarnation and run.
+type ScanTaskIdentity struct {
+	Namespace      string
+	RepositoryScan string
+	ScanRunID      string
+	TaskName       string
+	TaskUID        string
+	Stage          string
+	SliceID        string
+}
+
+// ScanTaskIngestion is committed with the Task's results and run counters.
+// Follow-up work uses this receipt instead of parsing and counting results again.
+type ScanTaskIngestion struct {
+	ScanTaskIdentity
+	FindingIDs          []string
+	DroppedFindingsJSON string
+	Completed           bool
+	IngestedAt          time.Time
+}
+
 // ScanRun represents a single repository security scan execution.
 type ScanRun struct {
 	ID                   string     `json:"id"`
@@ -25,6 +46,16 @@ type ScanRun struct {
 	IdempotencyKey       string     `json:"idempotencyKey,omitempty"`
 	Summary              string     `json:"summary,omitempty"`
 	ErrorMessage         string     `json:"errorMessage,omitempty"`
+
+	// RepositoryScanUID and RepositoryScanGeneration bind the run to the
+	// configuration that admitted it. Empty values identify legacy history.
+	RepositoryScanUID        string `json:"repositoryScanUID,omitempty"`
+	RepositoryScanGeneration int64  `json:"repositoryScanGeneration,omitempty"`
+
+	// CancellationVersion fences cleanup attempts. Once cancellation is
+	// requested, ordinary progress updates must never resume the run.
+	CancellationVersion int64 `json:"-"`
+	CancellationPending bool  `json:"-"`
 }
 
 // ThreatModel stores the latest generated or user-edited threat model.
@@ -61,6 +92,7 @@ type Finding struct {
 	ScanTaskName                  string               `json:"scanTaskName,omitempty"`
 	SliceID                       string               `json:"sliceID,omitempty"`
 	Fingerprint                   string               `json:"fingerprint"`
+	TargetKey                     string               `json:"-"`
 	Title                         string               `json:"title"`
 	Category                      string               `json:"category,omitempty"`
 	Summary                       string               `json:"summary"`
@@ -69,6 +101,8 @@ type Finding struct {
 	Triage                        string               `json:"triage,omitempty"`
 	ValidationStatus              string               `json:"validationStatus"`
 	State                         string               `json:"state"`
+	DecisionAt                    time.Time            `json:"-"`
+	DuplicateOf                   string               `json:"duplicateOf,omitempty"`
 	FilePath                      string               `json:"filePath,omitempty"`
 	Line                          int                  `json:"line,omitempty"`
 	CommitSHA                     string               `json:"commitSHA,omitempty"`
@@ -90,15 +124,18 @@ type Finding struct {
 
 // PatchProposal represents a patch generation attempt for a finding.
 type PatchProposal struct {
-	ID                  string                    `json:"id"`
-	Namespace           string                    `json:"namespace"`
-	RepositoryScan      string                    `json:"repositoryScan"`
-	FindingID           string                    `json:"findingID"`
-	TaskName            string                    `json:"taskName"`
-	Branch              string                    `json:"branch"`
-	DiffArtifact        string                    `json:"diffArtifact,omitempty"`
-	SummaryArtifact     string                    `json:"summaryArtifact,omitempty"`
-	Status              string                    `json:"status"`
+	ID              string `json:"id"`
+	Namespace       string `json:"namespace"`
+	RepositoryScan  string `json:"repositoryScan"`
+	FindingID       string `json:"findingID"`
+	TaskName        string `json:"taskName"`
+	Branch          string `json:"branch"`
+	DiffArtifact    string `json:"diffArtifact,omitempty"`
+	SummaryArtifact string `json:"summaryArtifact,omitempty"`
+	Status          string `json:"status"`
+	// Reason explains a failed proposal in operator-facing terms (no
+	// credential or agent-controlled text); empty while pending or succeeded.
+	Reason              string                    `json:"reason,omitempty"`
 	PRNumber            *int                      `json:"prNumber,omitempty"`
 	PRURL               string                    `json:"prURL,omitempty"`
 	PublicationEvidence *PatchPublicationEvidence `json:"publicationEvidence,omitempty"`
@@ -144,16 +181,18 @@ type FindingCounts struct {
 
 // FindingFilter constrains finding queries.
 type FindingFilter struct {
-	Namespace        string
-	RepositoryScan   string
-	SliceID          string
-	Category         string
-	Severity         string
-	ValidationStatus string
-	State            string
-	Recommended      bool
-	Limit            int
-	Cursor           string
+	Namespace         string
+	RepositoryScan    string
+	SliceID           string
+	Category          string
+	Severity          string
+	ValidationStatus  string
+	State             string
+	FilePath          string
+	Recommended       bool
+	IncludeDuplicates bool
+	Limit             int
+	Cursor            string
 }
 
 // ChangedLineRange identifies lines introduced or modified between two scan commits.

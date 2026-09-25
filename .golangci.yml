@@ -52,6 +52,12 @@ linters:
       - linters:
           - lll
         path: cmd/main.go
+      # Repeated string literals in test files are table-driven fixtures, not
+      # constants in hiding; goconst there only produces only-new-issues
+      # whack-a-mole on unrelated PRs.
+      - linters:
+          - goconst
+        path: _test\.go$
     paths:
       - third_party$
       - builtin$

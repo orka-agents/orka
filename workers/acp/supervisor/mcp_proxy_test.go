@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -38,17 +39,17 @@ func TestMCPProxyIsPromptScopedAndForwardsExactAuthorization(t *testing.T) {
 	if idleList.Error != nil || responseToolCount(idleList.Result) != 1 {
 		t.Fatalf("idle tools/list = %#v", idleList)
 	}
-	idleCall := decodeMCPResponse(t, doMCPRequest(t, server, "credential", `{"jsonrpc":"2.0","id":"call-1","method":"tools/call","params":{"name":"lookup","arguments":{}}}`))
+	idleCall := decodeMCPResponse(t, doMCPRequest(t, server, "credential", `{"jsonrpc":"2.0","id":"call-1","method":"tools/call","params":{"name":"lookup","arguments":{},"_meta":{"progressToken":1}}}`))
 	if idleCall.Error == nil || calls.Load() != 0 {
 		t.Fatalf("idle tool call = %#v calls=%d", idleCall, calls.Load())
 	}
 
 	now := time.Now().UTC()
 	authorization, lease := testMCPAuthorization(t, session.fence, now, false)
-	if err := session.activate(authorization, lease, now); err != nil {
+	if err := session.activate(t.Context(), authorization, lease, now); err != nil {
 		t.Fatal(err)
 	}
-	pendingCall := decodeMCPResponse(t, doMCPRequest(t, server, "credential", `{"jsonrpc":"2.0","id":"call-2","method":"tools/call","params":{"name":"lookup","arguments":{}}}`))
+	pendingCall := decodeMCPResponse(t, doMCPRequest(t, server, "credential", `{"jsonrpc":"2.0","id":"call-2","method":"tools/call","params":{"name":"lookup","arguments":{},"_meta":{"progressToken":2}}}`))
 	if pendingCall.Error == nil || calls.Load() != 0 {
 		t.Fatalf("pre-accept tool call = %#v calls=%d", pendingCall, calls.Load())
 	}
@@ -83,6 +84,167 @@ func TestMCPProxyIsPromptScopedAndForwardsExactAuthorization(t *testing.T) {
 	_ = unauthorized.Body.Close()
 }
 
+func TestMCPProxyToolCallMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		fields    string
+		errorCode int
+	}{
+		{name: "metadata omitted"},
+		{name: "empty metadata object", fields: `,"_meta":{}`},
+		{name: "numeric progress token", fields: `,"_meta":{"progressToken":2}`},
+		{name: "string progress token and extensions", fields: `,"_meta":{"progressToken":"progress-1","client":{"version":1}}`},
+		{name: "unknown parameter", fields: `,"progressToken":2`, errorCode: -32602},
+		{name: "metadata must be an object", fields: `,"_meta":[2]`, errorCode: -32602},
+		{name: "null metadata", fields: `,"_meta":null`, errorCode: -32602},
+		{name: "string metadata", fields: `,"_meta":"progress"`, errorCode: -32602},
+		{name: "numeric metadata", fields: `,"_meta":2`, errorCode: -32602},
+		{name: "boolean metadata", fields: `,"_meta":false`, errorCode: -32602},
+		{name: "metadata stays request bounded", fields: `,"_meta":{"padding":"` + strings.Repeat("x", harnessv2.MaxMCPArgumentsBytes+(64<<10)) + `"}`, errorCode: -32600},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			captured := make(chan harnessv2.MCPBrokerCallRequest, 1)
+			session, endpoint := newTestMCPProxySession(t, MCPBrokerFunc(func(_ context.Context, request harnessv2.MCPBrokerCallRequest) (harnessv2.MCPBrokerCallResponse, error) {
+				captured <- request
+				return harnessv2.MCPBrokerCallResponse{
+					Protocol: harnessv2.ProtocolVersion, CallID: request.Call.CallID, Result: json.RawMessage(`{"value":"ok"}`),
+				}, nil
+			}), false)
+			now := time.Now().UTC()
+			authorization, lease := testMCPAuthorization(t, session.fence, now, false)
+			if err := session.activate(t.Context(), authorization, lease, now); err != nil {
+				t.Fatal(err)
+			}
+			if err := session.markRunning(authorization.PromptID, now); err != nil {
+				t.Fatal(err)
+			}
+			payload := `{"jsonrpc":"2.0","id":"call-1","method":"tools/call","params":{"name":"lookup","arguments":{"query":"x"}` + tc.fields + `}}`
+			response := decodeMCPResponse(t, doMCPRequest(t, endpoint, "credential", payload))
+			if tc.errorCode != 0 {
+				if response.Error == nil || response.Error.Code != tc.errorCode {
+					t.Fatalf("MCP response = %#v, want error %d", response, tc.errorCode)
+				}
+				if len(captured) != 0 {
+					t.Fatal("invalid tool call reached the broker")
+				}
+				return
+			}
+			if response.Error != nil {
+				t.Fatalf("MCP metadata rejected: %#v", response.Error)
+			}
+			select {
+			case request := <-captured:
+				if request.Metadata.Fence != session.fence || request.Metadata.TaskUID != authorization.TaskUID ||
+					request.Metadata.PromptID != authorization.PromptID || request.Call.ToolName != "lookup" ||
+					!bytes.Equal(request.Call.Arguments, []byte(`{"query":"x"}`)) {
+					t.Fatal("MCP metadata changed the broker call or its authority")
+				}
+			default:
+				t.Fatal("tool call did not reach the broker")
+			}
+		})
+	}
+}
+
+func TestMCPProxySessionCapacityPreservesOtherRequests(t *testing.T) {
+	started := make(chan struct{}, defaultMCPMaxSessionCalls)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	var calls, cancelled atomic.Int32
+	broker := MCPBrokerFunc(func(ctx context.Context, request harnessv2.MCPBrokerCallRequest) (harnessv2.MCPBrokerCallResponse, error) {
+		if calls.Add(1) <= defaultMCPMaxSessionCalls {
+			started <- struct{}{}
+		}
+		select {
+		case <-release:
+			return harnessv2.MCPBrokerCallResponse{
+				Protocol: harnessv2.ProtocolVersion, CallID: request.Call.CallID,
+				Result: json.RawMessage(`{"value":"ok"}`),
+			}, nil
+		case <-ctx.Done():
+			cancelled.Add(1)
+			return harnessv2.MCPBrokerCallResponse{}, ctx.Err()
+		}
+	})
+	session, endpoint := newTestMCPProxySession(t, broker, false)
+	now := time.Now().UTC()
+	authorization, lease := testMCPAuthorization(t, session.fence, now, false)
+	if err := session.activate(t.Context(), authorization, lease, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.markRunning(authorization.PromptID, now); err != nil {
+		t.Fatal(err)
+	}
+
+	type callResult struct {
+		response mcpJSONRPCResponse
+		err      error
+	}
+	results := make(chan callResult, defaultMCPMaxSessionCalls)
+	ctx := t.Context()
+	for i := range defaultMCPMaxSessionCalls {
+		go func() {
+			payload := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"lookup","arguments":{}}}`, i)
+			request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(payload))
+			if err != nil {
+				results <- callResult{err: err}
+				return
+			}
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Authorization", "Bearer credential")
+			response, err := (&http.Client{Timeout: 5 * time.Second}).Do(request)
+			if err != nil {
+				results <- callResult{err: err}
+				return
+			}
+			defer response.Body.Close() //nolint:errcheck
+			var decoded mcpJSONRPCResponse
+			err = json.NewDecoder(response.Body).Decode(&decoded)
+			results <- callResult{response: decoded, err: err}
+		}()
+	}
+	for range defaultMCPMaxSessionCalls {
+		select {
+		case <-started:
+		case <-time.After(3 * time.Second):
+			t.Fatal("admitted tool calls did not start")
+		}
+	}
+
+	response := doMCPRequest(t, endpoint, "credential", `{"jsonrpc":"2.0","id":"overflow","method":"tools/call","params":{"name":"lookup","arguments":{}}}`)
+	status := response.StatusCode
+	rejected := decodeMCPResponse(t, response)
+	if status != http.StatusOK || string(rejected.ID) != `"overflow"` || rejected.Error == nil || rejected.Error.Code != -32003 || rejected.Result != nil {
+		t.Fatalf("capacity response = HTTP %d %#v, want a correlated JSON-RPC error", status, rejected)
+	}
+	for _, method := range []string{"ping", "tools/list"} {
+		control := decodeMCPResponse(t, doMCPRequest(t, endpoint, "credential", fmt.Sprintf(`{"jsonrpc":"2.0","id":"control","method":%q}`, method)))
+		if control.Error != nil {
+			t.Fatalf("%s was blocked by active tool calls: %#v", method, control)
+		}
+	}
+	if calls.Load() != defaultMCPMaxSessionCalls || cancelled.Load() != 0 {
+		t.Fatalf("capacity rejection changed admitted calls: calls=%d cancelled=%d", calls.Load(), cancelled.Load())
+	}
+	unblock()
+	for range defaultMCPMaxSessionCalls {
+		select {
+		case result := <-results:
+			if result.err != nil || result.response.Error != nil {
+				t.Fatalf("admitted call failed: %#v error=%v", result.response, result.err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("admitted tool call did not finish")
+		}
+	}
+	recovery := decodeMCPResponse(t, doMCPRequest(t, endpoint, "credential", `{"jsonrpc":"2.0","id":"later","method":"tools/call","params":{"name":"lookup","arguments":{}}}`))
+	if recovery.Error != nil || calls.Load() != defaultMCPMaxSessionCalls+1 || cancelled.Load() != 0 {
+		t.Fatalf("later call = %#v calls=%d cancelled=%d", recovery, calls.Load(), cancelled.Load())
+	}
+}
+
 func TestMCPProxySettlementRevokesAndCancelsInflightCall(t *testing.T) {
 	entered := make(chan struct{})
 	cancelled := make(chan struct{})
@@ -96,7 +258,7 @@ func TestMCPProxySettlementRevokesAndCancelsInflightCall(t *testing.T) {
 	session, server := newTestMCPProxySession(t, broker, false)
 	now := time.Now().UTC()
 	authorization, lease := testMCPAuthorization(t, session.fence, now, false)
-	if err := session.activate(authorization, lease, now); err != nil {
+	if err := session.activate(t.Context(), authorization, lease, now); err != nil {
 		t.Fatal(err)
 	}
 	if err := session.markRunning(authorization.PromptID, now.Add(time.Millisecond)); err != nil {
@@ -129,130 +291,6 @@ func TestMCPProxySettlementRevokesAndCancelsInflightCall(t *testing.T) {
 	postSettlement := decodeMCPResponse(t, doMCPRequest(t, server, "credential", `{"jsonrpc":"2.0","id":"after","method":"tools/call","params":{"name":"lookup","arguments":{}}}`))
 	if postSettlement.Error == nil {
 		t.Fatalf("post-settlement call = %#v", postSettlement)
-	}
-}
-
-func TestMCPProxyApprovalPolicyIsFailClosedAndOnceBound(t *testing.T) {
-	var calls atomic.Int32
-	broker := MCPBrokerFunc(func(_ context.Context, request harnessv2.MCPBrokerCallRequest) (harnessv2.MCPBrokerCallResponse, error) {
-		calls.Add(1)
-		if request.Call.Approval == nil || request.Call.Approval.ToolName != "mutate" {
-			t.Fatalf("broker call omitted approval evidence: %#v", request.Call)
-		}
-		return harnessv2.MCPBrokerCallResponse{
-			Protocol: harnessv2.ProtocolVersion, CallID: request.Call.CallID, Result: json.RawMessage(`{"changed":true}`),
-		}, nil
-	})
-	session, server := newTestMCPProxySession(t, broker, true)
-	now := time.Now().UTC()
-	authorization, lease := testMCPAuthorization(t, session.fence, now, true)
-	if err := session.activate(authorization, lease, now); err != nil {
-		t.Fatal(err)
-	}
-	if err := session.markRunning(authorization.PromptID, now.Add(time.Millisecond)); err != nil {
-		t.Fatal(err)
-	}
-	withoutApproval := decodeMCPResponse(t, doMCPRequest(t, server, "credential", `{"jsonrpc":"2.0","id":"once","method":"tools/call","params":{"name":"mutate","arguments":{}}}`))
-	if withoutApproval.Error == nil || calls.Load() != 0 {
-		t.Fatalf("unapproved call = %#v calls=%d", withoutApproval, calls.Load())
-	}
-	approvedToolCallID, err := canonicalACPToolCallID("provider-call-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	evidence := harnessv2.MCPApprovalEvidence{
-		PermissionRequestID: "permission-1", ToolCallID: approvedToolCallID, ToolName: "mutate",
-		GrantedAt: now, ExpiresAt: now.Add(time.Minute),
-	}
-	if err := session.grantApproval(authorization.PromptID, evidence); err != nil {
-		t.Fatal(err)
-	}
-	// A call whose ID differs from the approved tool call ID must not consume
-	// the allow-once grant, even though it is the first to arrive.
-	imposter := decodeMCPResponse(t, doMCPRequest(t, server, "credential", `{"jsonrpc":"2.0","id":"different","method":"tools/call","params":{"name":"mutate","arguments":{}}}`))
-	if imposter.Error == nil || calls.Load() != 0 {
-		t.Fatalf("non-approved call consumed allow-once = %#v calls=%d", imposter, calls.Load())
-	}
-	// The approved tool call ID (used as the JSON-RPC request ID) is authorized.
-	approved := decodeMCPResponse(t, doMCPRequest(t, server, "credential", `{"jsonrpc":"2.0","id":"provider-call-1","method":"tools/call","params":{"name":"mutate","arguments":{}}}`))
-	if approved.Error != nil || calls.Load() != 1 {
-		t.Fatalf("approved call = %#v calls=%d", approved, calls.Load())
-	}
-	// A retry of the approved call still passes the proxy's approval gate (the
-	// downstream broker journal deduplicates it by operation ID in production);
-	// the grant is bound to the approved call ID, not consumed on first use.
-	replay := decodeMCPResponse(t, doMCPRequest(t, server, "credential", `{"jsonrpc":"2.0","id":"provider-call-1","method":"tools/call","params":{"name":"mutate","arguments":{}}}`))
-	if replay.Error != nil || calls.Load() != 2 {
-		t.Fatalf("approved-call retry = %#v calls=%d", replay, calls.Load())
-	}
-}
-
-func TestMCPProxyReadOnlyAllowOnceGrantIsConsumed(t *testing.T) {
-	var calls atomic.Int32
-	broker := MCPBrokerFunc(func(_ context.Context, request harnessv2.MCPBrokerCallRequest) (harnessv2.MCPBrokerCallResponse, error) {
-		calls.Add(1)
-		return harnessv2.MCPBrokerCallResponse{
-			Protocol: harnessv2.ProtocolVersion, CallID: request.Call.CallID, Result: json.RawMessage(`{"ok":true}`),
-		}, nil
-	})
-	proxy, err := newMCPProxy(broker)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = proxy.close(ctx)
-	})
-	fence := harnessv2.Fence{
-		RuntimeInstanceID: "runtime-instance", SupervisorBootID: "boot", ControllerEpoch: 2,
-		RuntimePoolUID: "pool-uid", RuntimePoolGeneration: 4,
-		RuntimeSessionUID: "session-uid", RuntimeSessionGeneration: 3,
-		RuntimeProfileDigest:       harnessv2.ProfileDigest(testDigest("profile")),
-		ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
-	}
-	now := time.Now().UTC()
-	// A read-only tool that still requires approval: this is exactly the class
-	// that bypasses the broker's operation journal, so the allow-once grant must
-	// be spent in-process rather than relying on journal dedup.
-	authorization, lease := buildTestMCPAuthorization(t, fence, now, "lookup", harnessv2.MCPToolEffectReadOnly, true)
-	session, binding, err := proxy.newSession(fence, authorization.Configuration())
-	if err != nil {
-		t.Fatal(err)
-	}
-	session.mu.Lock()
-	session.credential = []byte("credential")
-	session.mu.Unlock()
-	server := binding.URL
-	if err := session.activate(authorization, lease, now); err != nil {
-		t.Fatal(err)
-	}
-	if err := session.markRunning(authorization.PromptID, now.Add(time.Millisecond)); err != nil {
-		t.Fatal(err)
-	}
-	approvedToolCallID, err := canonicalACPToolCallID("provider-call-ro")
-	if err != nil {
-		t.Fatal(err)
-	}
-	evidence := harnessv2.MCPApprovalEvidence{
-		PermissionRequestID: "permission-ro", ToolCallID: approvedToolCallID, ToolName: "lookup",
-		GrantedAt: now, ExpiresAt: now.Add(time.Minute),
-	}
-	if err := session.grantApproval(authorization.PromptID, evidence); err != nil {
-		t.Fatal(err)
-	}
-	first := decodeMCPResponse(t, doMCPRequest(t, server, "credential",
-		`{"jsonrpc":"2.0","id":"provider-call-ro","method":"tools/call","params":{"name":"lookup","arguments":{}}}`))
-	if first.Error != nil || calls.Load() != 1 {
-		t.Fatalf("first read-only approved call = %#v calls=%d", first, calls.Load())
-	}
-	// The single approval authorized exactly one read-only call. Replaying the
-	// exact approved call ID — here with different arguments to model the reuse
-	// attack — must be rejected because the grant was consumed on first use.
-	replay := decodeMCPResponse(t, doMCPRequest(t, server, "credential",
-		`{"jsonrpc":"2.0","id":"provider-call-ro","method":"tools/call","params":{"name":"lookup","arguments":{"q":"changed"}}}`))
-	if replay.Error == nil || calls.Load() != 1 {
-		t.Fatalf("read-only allow-once replay = %#v calls=%d", replay, calls.Load())
 	}
 }
 

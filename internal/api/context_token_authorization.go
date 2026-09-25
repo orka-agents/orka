@@ -17,7 +17,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/acp"
-	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/redact"
@@ -30,6 +30,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+)
+
+const (
+	credentialRoleSourceRead = "source-read"
 )
 
 const (
@@ -245,6 +249,7 @@ func (c ContextTokenAuthorizationConfig) ConfigMapReadScopes() []string {
 type contextTokenTaskCreateAuthorizationContext struct {
 	Request             CreateTaskRequest
 	Namespace           string
+	PolicyFailures      []string
 	Agent               *corev1alpha1.Agent
 	AgentName           string
 	AgentNamespace      string
@@ -256,6 +261,7 @@ type contextTokenTaskCreateAuthorizationContext struct {
 	EffectiveAITools    []string
 	RuntimeAllowedTools []string
 	RuntimeAllowBash    bool
+	RuntimeProviderKind string
 }
 
 type contextTokenAgentSpecAuthorizationContext struct {
@@ -289,13 +295,14 @@ func (h *Handlers) authorizeContextTokenTaskCreate(c fiber.Ctx, req CreateTaskRe
 		return nil
 	}
 
-	authzCtx, err := h.resolveContextTokenTaskCreateAuthorizationContext(c.Context(), req, namespace)
+	reader := h.uncachedReader()
+	authzCtx, err := resolveContextTokenTaskCreateAuthorizationContext(c.Context(), reader, req, namespace)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
 	}
 
 	failures := contextTokenTaskCreateFailures(ui.ContextToken, h.contextTokenAuthorization, authzCtx)
-	credentialFailures, err := contextTokenTaskToolCredentialFailures(c.Context(), h.client, ui.ContextToken, h.contextTokenAuthorization, authzCtx)
+	credentialFailures, err := contextTokenTaskToolCredentialFailures(c.Context(), reader, ui.ContextToken, h.contextTokenAuthorization, authzCtx)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
 	}
@@ -308,7 +315,7 @@ func (h *Handlers) authorizeContextTokenTaskCreate(c fiber.Ctx, req CreateTaskRe
 	return h.handleContextTokenAuthorizationFailures(ui.ContextToken, "createTask", failures)
 }
 
-func authorizeContextTokenTaskCreateObject(ctx context.Context, k8sClient client.Client, token *ContextToken, cfg ContextTokenAuthorizationConfig, action string, task *corev1alpha1.Task) error {
+func authorizeContextTokenTaskCreateObject(ctx context.Context, reader client.Reader, token *ContextToken, cfg ContextTokenAuthorizationConfig, action string, task *corev1alpha1.Task) error {
 	if !cfg.Enabled() || token == nil || task == nil {
 		return nil
 	}
@@ -319,13 +326,13 @@ func authorizeContextTokenTaskCreateObject(ctx context.Context, k8sClient client
 		namespace = req.Namespace
 	}
 
-	authzCtx, err := resolveContextTokenTaskCreateAuthorizationContext(ctx, k8sClient, req, namespace)
+	authzCtx, err := resolveContextTokenTaskCreateAuthorizationContext(ctx, reader, req, namespace)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
 	}
 
 	failures := contextTokenTaskCreateFailures(token, cfg, authzCtx)
-	credentialFailures, err := contextTokenTaskToolCredentialFailures(ctx, k8sClient, token, cfg, authzCtx)
+	credentialFailures, err := contextTokenTaskToolCredentialFailures(ctx, reader, token, cfg, authzCtx)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
 	}
@@ -338,8 +345,8 @@ func authorizeContextTokenTaskCreateObject(ctx context.Context, k8sClient client
 	return handleContextTokenAuthorizationFailures(cfg, token, action, failures)
 }
 
-func authorizeAndStampToolTaskCreate(ctx context.Context, k8sClient client.Client, kubeClient kubernetes.Interface, token *ContextToken, cfg ContextTokenAuthorizationConfig, action string, ui *UserInfo, task *corev1alpha1.Task) error {
-	if err := authorizeContextTokenTaskCreateObject(ctx, k8sClient, token, cfg, action, task); err != nil {
+func authorizeAndStampToolTaskCreate(ctx context.Context, reader client.Reader, kubeClient kubernetes.Interface, token *ContextToken, cfg ContextTokenAuthorizationConfig, action string, ui *UserInfo, task *corev1alpha1.Task) error {
+	if err := authorizeContextTokenTaskCreateObject(ctx, reader, token, cfg, action, task); err != nil {
 		return err
 	}
 	if err := authorizeKubernetesTaskCreate(ctx, kubeClient, ui, task); err != nil {
@@ -350,8 +357,8 @@ func authorizeAndStampToolTaskCreate(ctx context.Context, k8sClient client.Clien
 	return nil
 }
 
-func authorizeAndStampTaskContext(ctx context.Context, k8sClient client.Client, kubeClient kubernetes.Interface, token *ContextToken, cfg ContextTokenAuthorizationConfig, action string, ui *UserInfo, task *corev1alpha1.Task) error {
-	if err := authorizeContextTokenTaskContextObject(ctx, k8sClient, token, cfg, action, task); err != nil {
+func authorizeAndStampTaskContext(ctx context.Context, reader client.Reader, kubeClient kubernetes.Interface, token *ContextToken, cfg ContextTokenAuthorizationConfig, action string, ui *UserInfo, task *corev1alpha1.Task) error {
+	if err := authorizeContextTokenTaskContextObject(ctx, reader, token, cfg, action, task); err != nil {
 		return err
 	}
 	if err := authorizeKubernetesTaskCreate(ctx, kubeClient, ui, task); err != nil {
@@ -362,7 +369,7 @@ func authorizeAndStampTaskContext(ctx context.Context, k8sClient client.Client, 
 	return nil
 }
 
-func authorizeContextTokenToolAgentCreate(ctx context.Context, k8sClient client.Client, token *ContextToken, cfg ContextTokenAuthorizationConfig, action string, agent *corev1alpha1.Agent) error {
+func authorizeContextTokenToolAgentCreate(ctx context.Context, reader client.Reader, token *ContextToken, cfg ContextTokenAuthorizationConfig, action string, agent *corev1alpha1.Agent) error {
 	if !cfg.Enabled() || token == nil || agent == nil {
 		return nil
 	}
@@ -371,7 +378,7 @@ func authorizeContextTokenToolAgentCreate(ctx context.Context, k8sClient client.
 		failures = append(failures, fmt.Sprintf("missing one of required scopes %q", strings.Join(cfg.AgentWriteScopes, ",")))
 	}
 	failures = append(failures, contextTokenAgentMutationFailures(token, agent.Namespace, agent.Name)...)
-	specFailures, err := contextTokenAgentSpecFailures(ctx, k8sClient, token, agent)
+	specFailures, err := contextTokenAgentSpecFailures(ctx, reader, token, agent)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
 	}
@@ -383,11 +390,11 @@ func authorizeContextTokenToolAgentCreate(ctx context.Context, k8sClient client.
 	return handleContextTokenAuthorizationFailures(cfg, token, action, failures)
 }
 
-func authorizeContextTokenAgentSpec(ctx context.Context, k8sClient client.Client, token *ContextToken, cfg ContextTokenAuthorizationConfig, action string, agent *corev1alpha1.Agent) error {
+func authorizeContextTokenAgentSpec(ctx context.Context, reader client.Reader, token *ContextToken, cfg ContextTokenAuthorizationConfig, action string, agent *corev1alpha1.Agent) error {
 	if !cfg.Enabled() || token == nil || agent == nil {
 		return nil
 	}
-	failures, err := contextTokenAgentSpecFailures(ctx, k8sClient, token, agent)
+	failures, err := contextTokenAgentSpecFailures(ctx, reader, token, agent)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
 	}
@@ -398,7 +405,7 @@ func authorizeContextTokenAgentSpec(ctx context.Context, k8sClient client.Client
 	return handleContextTokenAuthorizationFailures(cfg, token, action, failures)
 }
 
-func authorizeContextTokenTaskContextObject(ctx context.Context, k8sClient client.Client, token *ContextToken, cfg ContextTokenAuthorizationConfig, action string, task *corev1alpha1.Task) error {
+func authorizeContextTokenTaskContextObject(ctx context.Context, reader client.Reader, token *ContextToken, cfg ContextTokenAuthorizationConfig, action string, task *corev1alpha1.Task) error {
 	if !cfg.Enabled() || token == nil || task == nil {
 		return nil
 	}
@@ -407,7 +414,7 @@ func authorizeContextTokenTaskContextObject(ctx context.Context, k8sClient clien
 	if namespace == "" {
 		namespace = req.Namespace
 	}
-	authzCtx, err := resolveContextTokenTaskCreateAuthorizationContext(ctx, k8sClient, req, namespace)
+	authzCtx, err := resolveContextTokenTaskCreateAuthorizationContext(ctx, reader, req, namespace)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
 	}
@@ -419,7 +426,7 @@ func authorizeContextTokenTaskContextObject(ctx context.Context, k8sClient clien
 	return handleContextTokenAuthorizationFailures(cfg, token, action, failures)
 }
 
-func authorizeContextTokenTaskDeleteObject(ctx context.Context, k8sClient client.Client, token *ContextToken, cfg ContextTokenAuthorizationConfig, action string, task *corev1alpha1.Task) error {
+func authorizeContextTokenTaskDeleteObject(ctx context.Context, reader client.Reader, token *ContextToken, cfg ContextTokenAuthorizationConfig, action string, task *corev1alpha1.Task) error {
 	if !cfg.Enabled() || token == nil || task == nil {
 		return nil
 	}
@@ -427,7 +434,7 @@ func authorizeContextTokenTaskDeleteObject(ctx context.Context, k8sClient client
 	if !hasAnyScope(token.Scopes, cfg.TaskDeleteScopes) {
 		failures = append(failures, fmt.Sprintf("missing one of required scopes %q", strings.Join(cfg.TaskDeleteScopes, ",")))
 	}
-	contextFailures, err := contextTokenLoadedTaskContextFailures(ctx, k8sClient, token, task, true)
+	contextFailures, err := contextTokenLoadedTaskContextFailures(ctx, reader, token, task, true)
 	if err != nil {
 		return err
 	}
@@ -439,12 +446,12 @@ func authorizeContextTokenTaskDeleteObject(ctx context.Context, k8sClient client
 	return handleContextTokenAuthorizationFailures(cfg, token, action, failures)
 }
 
-func authorizeContextTokenToolAgentUpdate(ctx context.Context, k8sClient client.Client, token *ContextToken, cfg ContextTokenAuthorizationConfig, action string, agent *corev1alpha1.Agent) error {
+func authorizeContextTokenToolAgentUpdate(ctx context.Context, reader client.Reader, token *ContextToken, cfg ContextTokenAuthorizationConfig, action string, agent *corev1alpha1.Agent) error {
 	if !cfg.Enabled() || token == nil || agent == nil {
 		return nil
 	}
 	failures := contextTokenAgentWriteFailures(token, cfg, agent.Namespace, agent.Name)
-	specFailures, err := contextTokenAgentSpecFailures(ctx, k8sClient, token, agent)
+	specFailures, err := contextTokenAgentSpecFailures(ctx, reader, token, agent)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
 	}
@@ -626,10 +633,10 @@ func (h *Handlers) contextTokenAllowsLoadedTaskWithIdentity(c fiber.Ctx, action 
 }
 
 func (h *Handlers) contextTokenLoadedTaskContextFailures(ctx context.Context, token *ContextToken, task *corev1alpha1.Task, includeTaskIdentity bool) ([]string, error) {
-	return contextTokenLoadedTaskContextFailures(ctx, h.client, token, task, includeTaskIdentity)
+	return contextTokenLoadedTaskContextFailures(ctx, h.uncachedReader(), token, task, includeTaskIdentity)
 }
 
-func contextTokenLoadedTaskContextFailures(ctx context.Context, k8sClient client.Client, token *ContextToken, task *corev1alpha1.Task, includeTaskIdentity bool) ([]string, error) {
+func contextTokenLoadedTaskContextFailures(ctx context.Context, reader client.Reader, token *ContextToken, task *corev1alpha1.Task, includeTaskIdentity bool) ([]string, error) {
 	if token == nil || task == nil {
 		return nil, nil
 	}
@@ -640,7 +647,7 @@ func contextTokenLoadedTaskContextFailures(ctx context.Context, k8sClient client
 		namespace = req.Namespace
 	}
 
-	authzCtx, err := resolveContextTokenTaskCreateAuthorizationContext(ctx, k8sClient, req, namespace)
+	authzCtx, err := resolveContextTokenTaskCreateAuthorizationContext(ctx, reader, req, namespace)
 	if err != nil {
 		return nil, fiber.NewError(fiber.StatusInternalServerError, err.Error())
 	}
@@ -654,8 +661,14 @@ func createTaskRequestFromTask(task *corev1alpha1.Task) CreateTaskRequest {
 	}
 
 	req := CreateTaskRequest{
-		Name:              task.Name,
-		Namespace:         task.Namespace,
+		Name:      task.Name,
+		Namespace: task.Namespace,
+		Metadata: MetadataRequest{
+			Name:        task.Name,
+			Namespace:   task.Namespace,
+			Labels:      task.Labels,
+			Annotations: task.Annotations,
+		},
 		Annotations:       task.Annotations,
 		Type:              task.Spec.Type,
 		Image:             task.Spec.Image,
@@ -780,6 +793,23 @@ func authorizeContextTokenProviderUse(c fiber.Ctx, cfg ContextTokenAuthorization
 	}
 
 	failures := contextTokenProviderUseFailures(ui.ContextToken, cfg, namespace, provider, model)
+	if len(failures) == 0 {
+		metrics.RecordContextTokenAuthorization(action, "allowed", "ok")
+		return nil
+	}
+	return handleContextTokenAuthorizationFailures(cfg, ui.ContextToken, action, failures)
+}
+
+func authorizeContextTokenProviderReference(c fiber.Ctx, cfg ContextTokenAuthorizationConfig, action, namespace string, provider ProviderResolutionInfo) error {
+	if !cfg.Enabled() {
+		return nil
+	}
+	ui := GetUserInfo(c)
+	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+		return nil
+	}
+
+	failures := contextTokenProviderReferenceFailures(ui.ContextToken, cfg, namespace, provider)
 	if len(failures) == 0 {
 		metrics.RecordContextTokenAuthorization(action, "allowed", "ok")
 		return nil
@@ -993,6 +1023,19 @@ func contextTokenAuthorizationFailureReason(failures []string) string {
 }
 
 func contextTokenProviderUseFailures(token *ContextToken, cfg ContextTokenAuthorizationConfig, namespace string, provider ProviderResolutionInfo, model string) []string {
+	failures := contextTokenProviderReferenceFailures(token, cfg, namespace, provider)
+	tokenNamespace, hasTokenNamespace := contextString(token.TransactionContext, "namespace")
+	if want, ok := contextString(token.TransactionContext, "model"); ok && model != want {
+		failures = append(failures, fmt.Sprintf("model %q does not match token context %q", model, want))
+	}
+	if allowed, ok := contextStringList(token.TransactionContext, "allowedModels"); ok && !modelAllowed(provider, model, allowed, tokenNamespace, hasTokenNamespace) {
+		failures = append(failures, fmt.Sprintf("model %q is not allowed by token context", model))
+	}
+
+	return failures
+}
+
+func contextTokenProviderReferenceFailures(token *ContextToken, cfg ContextTokenAuthorizationConfig, namespace string, provider ProviderResolutionInfo) []string {
 	failures := []string{}
 	if !hasAnyScope(token.Scopes, cfg.ProviderUseScopes) {
 		failures = append(failures, fmt.Sprintf("missing one of required scopes %q", strings.Join(cfg.ProviderUseScopes, ",")))
@@ -1013,21 +1056,14 @@ func contextTokenProviderUseFailures(token *ContextToken, cfg ContextTokenAuthor
 	if allowed, ok := contextStringList(token.TransactionContext, "allowedProviders"); ok && !providerAllowed(provider, allowed, tokenNamespace, hasTokenNamespace) {
 		failures = append(failures, fmt.Sprintf("provider %q is not allowed by token context", provider.Name))
 	}
-	if want, ok := contextString(token.TransactionContext, "model"); ok && model != want {
-		failures = append(failures, fmt.Sprintf("model %q does not match token context %q", model, want))
-	}
-	if allowed, ok := contextStringList(token.TransactionContext, "allowedModels"); ok && !modelAllowed(provider, model, allowed, tokenNamespace, hasTokenNamespace) {
-		failures = append(failures, fmt.Sprintf("model %q is not allowed by token context", model))
-	}
 
 	return failures
 }
-
-func contextTokenAgentSpecFailures(ctx context.Context, c client.Client, token *ContextToken, agent *corev1alpha1.Agent) ([]string, error) {
+func contextTokenAgentSpecFailures(ctx context.Context, reader client.Reader, token *ContextToken, agent *corev1alpha1.Agent) ([]string, error) {
 	if token == nil || agent == nil {
 		return nil, nil
 	}
-	authzCtx, err := resolveContextTokenAgentSpecAuthorizationContext(ctx, c, agent)
+	authzCtx, err := resolveContextTokenAgentSpecAuthorizationContext(ctx, reader, agent)
 	if err != nil {
 		return nil, err
 	}
@@ -1052,7 +1088,7 @@ func contextTokenAgentSpecNamespaceFailures(agent *corev1alpha1.Agent, tokenName
 	return []string{fmt.Sprintf("agent provider namespace %q does not match token context %q", providerNamespace, tokenNamespace)}
 }
 
-func resolveContextTokenAgentSpecAuthorizationContext(ctx context.Context, c client.Client, agent *corev1alpha1.Agent) (contextTokenAgentSpecAuthorizationContext, error) {
+func resolveContextTokenAgentSpecAuthorizationContext(ctx context.Context, reader client.Reader, agent *corev1alpha1.Agent) (contextTokenAgentSpecAuthorizationContext, error) {
 	authzCtx := contextTokenAgentSpecAuthorizationContext{
 		Agent: agent,
 	}
@@ -1062,10 +1098,10 @@ func resolveContextTokenAgentSpecAuthorizationContext(ctx context.Context, c cli
 		if providerNamespace == "" {
 			providerNamespace = agent.Namespace
 		}
-		if c != nil {
+		if reader != nil {
 			provider = &corev1alpha1.Provider{}
 			key := types.NamespacedName{Name: agent.Spec.ProviderRef.Name, Namespace: providerNamespace}
-			if err := c.Get(ctx, key, provider); err != nil {
+			if err := reader.Get(ctx, key, provider); err != nil {
 				if !apierrors.IsNotFound(err) {
 					return authzCtx, fmt.Errorf("resolve provider %q in namespace %q: %w", agent.Spec.ProviderRef.Name, providerNamespace, err)
 				}
@@ -1074,9 +1110,24 @@ func resolveContextTokenAgentSpecAuthorizationContext(ctx context.Context, c cli
 		}
 	}
 	authzCtx.EffectiveProvider, authzCtx.EffectiveModel = contextTokenTaskCreateEffectiveProviderModel(CreateTaskRequest{}, agent, provider)
-	authzCtx.Fallbacks = contextTokenTaskCreateFallbackProviderModels(ctx, c, agent.Namespace, agent)
+	fallbacks, err := contextTokenTaskCreateFallbackProviderModels(ctx, reader, agent.Namespace, agent)
+	if err != nil {
+		return authzCtx, err
+	}
+	authzCtx.Fallbacks = fallbacks
 	authzCtx.EffectiveAITools = contextTokenTaskCreateEffectiveAITools(CreateTaskRequest{}, agent)
-	authzCtx.RuntimeAllowedTools, authzCtx.RuntimeAllowBash = contextTokenAgentRuntimeAuthorizationPolicy(agent)
+	externalProfile, err := resolveContextTokenExternalRuntimeProfile(ctx, reader, agent.Namespace, agent)
+	if err != nil {
+		return authzCtx, err
+	}
+	if externalProfile != nil {
+		authzCtx.EffectiveProvider = externalProfile.provider
+		authzCtx.EffectiveModel = externalProfile.model
+		authzCtx.RuntimeAllowedTools = externalProfile.allowedTools
+		authzCtx.RuntimeAllowBash = externalProfile.allowBash
+	} else {
+		authzCtx.RuntimeAllowedTools, authzCtx.RuntimeAllowBash = contextTokenAgentRuntimeAuthorizationPolicy(agent)
+	}
 	return authzCtx, nil
 }
 
@@ -1093,8 +1144,12 @@ func contextTokenAgentSpecToolFailures(token *ContextToken, authzCtx contextToke
 		failures = append(failures, "agent runtime default tools are unrestricted while token context restricts allowedTools")
 	}
 	runtimeTools := append([]string{}, authzCtx.RuntimeAllowedTools...)
-	if authzCtx.Agent != nil && authzCtx.Agent.Spec.Runtime != nil &&
-		authzCtx.Agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeOpencode && authzCtx.RuntimeAllowBash {
+	runtime := (*corev1alpha1.AgentCLIRuntime)(nil)
+	if authzCtx.Agent != nil {
+		runtime = authzCtx.Agent.Spec.Runtime
+	}
+	if runtime != nil && runtime.RuntimeRef == nil &&
+		runtime.Type != corev1alpha1.AgentRuntimeOpencode && authzCtx.RuntimeAllowBash {
 		runtimeTools = append(runtimeTools, "Bash")
 	}
 	for _, tool := range append(append([]string{}, authzCtx.EffectiveAITools...), runtimeTools...) {
@@ -1109,11 +1164,21 @@ func contextTokenAgentSpecToolFailures(token *ContextToken, authzCtx contextToke
 	return failures
 }
 
-func (h *Handlers) resolveContextTokenTaskCreateAuthorizationContext(ctx context.Context, req CreateTaskRequest, namespace string) (contextTokenTaskCreateAuthorizationContext, error) {
-	return resolveContextTokenTaskCreateAuthorizationContext(ctx, h.client, req, namespace)
+// uncachedReaderOr returns apiReader when configured, otherwise the cached
+// client, so authorization decisions can bypass the informer cache when a
+// direct API reader is available.
+func uncachedReaderOr(apiReader client.Reader, fallback client.Client) client.Reader {
+	if apiReader != nil {
+		return apiReader
+	}
+	return fallback
 }
 
-func resolveContextTokenTaskCreateAuthorizationContext(ctx context.Context, c client.Client, req CreateTaskRequest, namespace string) (contextTokenTaskCreateAuthorizationContext, error) {
+func (h *Handlers) uncachedReader() client.Reader {
+	return uncachedReaderOr(h.apiReader, h.client)
+}
+
+func resolveContextTokenTaskCreateAuthorizationContext(ctx context.Context, reader client.Reader, req CreateTaskRequest, namespace string) (contextTokenTaskCreateAuthorizationContext, error) {
 	authzCtx := contextTokenTaskCreateAuthorizationContext{
 		Request:   req,
 		Namespace: namespace,
@@ -1126,10 +1191,10 @@ func resolveContextTokenTaskCreateAuthorizationContext(ctx context.Context, c cl
 			authzCtx.AgentNamespace = namespace
 		}
 
-		if authzCtx.AgentName != "" && c != nil {
+		if authzCtx.AgentName != "" && reader != nil {
 			agent := &corev1alpha1.Agent{}
 			key := types.NamespacedName{Name: authzCtx.AgentName, Namespace: authzCtx.AgentNamespace}
-			if err := c.Get(ctx, key, agent); err != nil {
+			if err := reader.Get(ctx, key, agent); err != nil {
 				if !apierrors.IsNotFound(err) {
 					return authzCtx, fmt.Errorf("resolve agent %q in namespace %q: %w", authzCtx.AgentName, authzCtx.AgentNamespace, err)
 				}
@@ -1146,10 +1211,10 @@ func resolveContextTokenTaskCreateAuthorizationContext(ctx context.Context, c cl
 			providerNamespace = namespace
 		}
 		authzCtx.ProviderRef = ProviderResolutionInfo{Name: providerRef.Name, Namespace: providerNamespace}
-		if c != nil {
+		if reader != nil {
 			provider := &corev1alpha1.Provider{}
 			key := types.NamespacedName{Name: providerRef.Name, Namespace: providerNamespace}
-			if err := c.Get(ctx, key, provider); err != nil {
+			if err := reader.Get(ctx, key, provider); err != nil {
 				if !apierrors.IsNotFound(err) {
 					return authzCtx, fmt.Errorf("resolve provider %q in namespace %q: %w", providerRef.Name, providerNamespace, err)
 				}
@@ -1160,16 +1225,104 @@ func resolveContextTokenTaskCreateAuthorizationContext(ctx context.Context, c cl
 	}
 
 	authzCtx.EffectiveProvider, authzCtx.EffectiveModel = contextTokenTaskCreateEffectiveProviderModel(req, authzCtx.Agent, authzCtx.Provider)
-	authzCtx.Fallbacks = contextTokenTaskCreateFallbackProviderModels(ctx, c, namespace, authzCtx.Agent)
+	externalProfile, err := resolveContextTokenExternalRuntimeProfile(ctx, reader, namespace, authzCtx.Agent)
+	if err != nil {
+		return authzCtx, err
+	}
+	if externalProfile != nil {
+		authzCtx.EffectiveProvider = externalProfile.provider
+		authzCtx.EffectiveModel = externalProfile.model
+		authzCtx.RuntimeProviderKind = externalProfile.providerKind
+	}
+	authzCtx.Fallbacks, err = contextTokenTaskCreateFallbackProviderModels(ctx, reader, namespace, authzCtx.Agent)
+	if err != nil {
+		return authzCtx, err
+	}
 	authzCtx.EffectiveAITools = contextTokenTaskCreateEffectiveAITools(req, authzCtx.Agent)
-	authzCtx.RuntimeAllowedTools, authzCtx.RuntimeAllowBash = contextTokenTaskCreateEffectiveRuntimePolicy(req, authzCtx.Agent)
+	if externalProfile != nil {
+		if req.AgentRuntime == nil || req.AgentRuntime.AllowedTools == nil {
+			authzCtx.PolicyFailures = append(authzCtx.PolicyFailures, "task agentRuntime.allowedTools must be an explicit list for an external AgentRuntime")
+		} else if !slices.Equal(contextTokenSortedUniqueToolNames(req.AgentRuntime.AllowedTools), externalProfile.registeredAllowedTools) {
+			authzCtx.PolicyFailures = append(authzCtx.PolicyFailures, "task allowedTools do not exactly match the registered external AgentRuntime MCP policy")
+		}
+		authzCtx.RuntimeAllowedTools = externalProfile.allowedTools
+		authzCtx.RuntimeAllowBash = externalProfile.allowBash
+	} else {
+		authzCtx.RuntimeAllowedTools, authzCtx.RuntimeAllowBash = contextTokenTaskCreateEffectiveRuntimePolicy(req, authzCtx.Agent)
+	}
 
 	return authzCtx, nil
 }
 
-func contextTokenTaskCreateFallbackProviderModels(ctx context.Context, c client.Client, namespace string, agent *corev1alpha1.Agent) []contextTokenProviderModel {
-	if c == nil || agent == nil || agent.Spec.Model == nil || len(agent.Spec.Model.Fallbacks) == 0 {
-		return nil
+type contextTokenExternalRuntimeProfile struct {
+	provider               ProviderResolutionInfo
+	providerKind           string
+	model                  string
+	registeredAllowedTools []string
+	allowedTools           []string
+	allowBash              bool
+}
+
+func resolveContextTokenExternalRuntimeProfile(
+	ctx context.Context,
+	reader client.Reader,
+	namespace string,
+	agent *corev1alpha1.Agent,
+) (*contextTokenExternalRuntimeProfile, error) {
+	if agent == nil || agent.Spec.Runtime == nil || agent.Spec.Runtime.RuntimeRef == nil {
+		return nil, nil
+	}
+	runtimeName := strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name)
+	if runtimeName == "" {
+		return nil, nil
+	}
+	if reader == nil {
+		return nil, fmt.Errorf("resolve AgentRuntime %q in namespace %q: Kubernetes client is required", runtimeName, namespace)
+	}
+
+	runtime := &corev1alpha1.AgentRuntime{}
+	if err := reader.Get(ctx, types.NamespacedName{Name: runtimeName, Namespace: namespace}, runtime); err != nil {
+		return nil, fmt.Errorf("resolve AgentRuntime %q in namespace %q: %w", runtimeName, namespace, err)
+	}
+	if runtime.RegisteredContractVersion() != corev1alpha1.AgentRuntimeContractHarnessV2 {
+		return nil, nil
+	}
+	if runtime.Spec.Capabilities == nil || runtime.Spec.Capabilities.Profile == nil {
+		return nil, fmt.Errorf("external AgentRuntime %q is missing capabilities.profile", runtimeName)
+	}
+
+	providerKind := strings.TrimSpace(runtime.Spec.Capabilities.Profile.ProviderKind)
+	if providerKind == "" {
+		return nil, fmt.Errorf("external AgentRuntime %q capabilities.profile.providerKind is required", runtimeName)
+	}
+	model := strings.TrimSpace(runtime.Spec.Capabilities.Profile.Model)
+	if model == "" {
+		return nil, fmt.Errorf("external AgentRuntime %q capabilities.profile.model is required", runtimeName)
+	}
+	policy := runtime.Spec.Capabilities.MCPPolicy
+	if policy == nil {
+		return nil, fmt.Errorf("external AgentRuntime %q is missing capabilities.mcpPolicy", runtimeName)
+	}
+	if policy.AllowedTools == nil || policy.DisallowedTools == nil || policy.ApprovalRequiredTools == nil {
+		return nil, fmt.Errorf("external AgentRuntime %q capabilities.mcpPolicy tool lists must be explicit", runtimeName)
+	}
+	return &contextTokenExternalRuntimeProfile{
+		provider:               ProviderResolutionInfo{Type: providerKind},
+		providerKind:           providerKind,
+		model:                  model,
+		registeredAllowedTools: contextTokenSortedUniqueToolNames(policy.AllowedTools),
+		allowedTools: acp.BuiltInRuntimeEffectiveAllowedTools(
+			policy.AllowedTools, policy.DisallowedTools, policy.AllowBash,
+		),
+		allowBash: acp.BuiltInRuntimeEffectiveAllowBash(
+			policy.AllowedTools, policy.DisallowedTools, policy.AllowBash,
+		),
+	}, nil
+}
+
+func contextTokenTaskCreateFallbackProviderModels(ctx context.Context, reader client.Reader, namespace string, agent *corev1alpha1.Agent) ([]contextTokenProviderModel, error) {
+	if reader == nil || agent == nil || agent.Spec.Model == nil || len(agent.Spec.Model.Fallbacks) == 0 {
+		return nil, nil
 	}
 	fallbacks := make([]contextTokenProviderModel, 0, len(agent.Spec.Model.Fallbacks))
 	for _, fb := range agent.Spec.Model.Fallbacks {
@@ -1177,8 +1330,8 @@ func contextTokenTaskCreateFallbackProviderModels(ctx context.Context, c client.
 			continue
 		}
 		provider := &corev1alpha1.Provider{}
-		if err := c.Get(ctx, types.NamespacedName{Name: fb.ProviderRef, Namespace: namespace}, provider); err != nil {
-			continue
+		if err := reader.Get(ctx, types.NamespacedName{Name: fb.ProviderRef, Namespace: namespace}, provider); err != nil {
+			return nil, fmt.Errorf("resolve fallback provider %q in namespace %q: %w", fb.ProviderRef, namespace, err)
 		}
 		model := strings.TrimSpace(fb.Model)
 		if model == "" {
@@ -1189,7 +1342,7 @@ func contextTokenTaskCreateFallbackProviderModels(ctx context.Context, c client.
 			Model:    model,
 		})
 	}
-	return fallbacks
+	return fallbacks, nil
 }
 
 func contextTokenTaskCreateProviderRef(req CreateTaskRequest, agent *corev1alpha1.Agent) *corev1alpha1.ProviderReference {
@@ -1268,59 +1421,28 @@ func contextTokenOpenCodeModelProvider(agent *corev1alpha1.Agent) string {
 }
 
 func contextTokenTaskCreateEffectiveAITools(req CreateTaskRequest, agent *corev1alpha1.Agent) []string {
-	tools := []string{}
-	if agent != nil {
-		for _, tool := range agent.Spec.Tools {
-			if tool.Enabled != nil && !*tool.Enabled {
-				continue
-			}
-			if strings.TrimSpace(tool.Name) != "" {
-				tools = append(tools, tool.Name)
-			}
-		}
-		if agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled && req.Annotations[labels.AnnotationDisableCoordinationToolInject] != queryTrue {
-			for _, tool := range coordinationToolNames() {
-				if !slices.Contains(tools, tool) {
-					tools = append(tools, tool)
-				}
-			}
-		}
-	}
-	if req.AI != nil {
-		for _, tool := range req.AI.Tools {
-			if strings.TrimSpace(tool) != "" {
-				tools = append(tools, tool)
-			}
-		}
-	}
-	if req.Type == corev1alpha1.TaskTypeAI {
-		for _, tool := range memoryToolNames() {
-			if !slices.Contains(tools, tool) {
-				tools = append(tools, tool)
-			}
-		}
-	}
-	return tools
+	return aitools.Resolve(contextTokenTaskCreateAIToolTask(req), agent)
 }
 
-func memoryToolNames() []string {
-	return []string{
-		"recall_memory",
-		"remember",
-		"propose_memory",
-		"search_transcript",
+func contextTokenTaskCreateAIToolTask(req CreateTaskRequest) *corev1alpha1.Task {
+	taskType := req.Type
+	taskAI := req.AI
+	if req.Spec != nil {
+		if taskType == "" {
+			taskType = req.Spec.Type
+		}
+		if taskAI == nil {
+			taskAI = req.Spec.AI
+		}
 	}
-}
-
-func coordinationToolNames() []string {
-	return []string{
-		"delegate_task", "wait_for_tasks", "create_container_task", "cancel_task",
-		"send_message", "check_messages", "recall_memory", "remember",
-		"propose_memory", "search_transcript", "create_pull_request",
-		"list_pull_requests", "check_pr_review_marker", "check_pull_request_ci",
-		"merge_pull_request", "auto_merge_pull_request", "review_pull_request",
-		"post_review_comment", "create_agent", "delete_agent", "update_plan",
+	annotations := req.Annotations
+	if annotations == nil {
+		annotations = req.Metadata.Annotations
 	}
+	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: taskType, AI: taskAI}}
+	task.Labels = req.Metadata.Labels
+	task.Annotations = annotations
+	return task
 }
 
 func contextTokenAgentRuntimeAllowedTools(agent *corev1alpha1.Agent) []string {
@@ -1401,14 +1523,35 @@ func contextTokenTaskCreateEffectiveRuntimePolicy(req CreateTaskRequest, agent *
 	return allowedTools, allowBash && slices.Contains(allowedTools, "bash")
 }
 
+func contextTokenSortedUniqueToolNames(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		normalized = append(normalized, value)
+	}
+	slices.Sort(normalized)
+	return normalized
+}
+
 func contextTokenTaskToolCredentialFailures(
 	ctx context.Context,
-	k8sClient client.Client,
+	reader client.Reader,
 	token *ContextToken,
 	cfg ContextTokenAuthorizationConfig,
 	authzCtx contextTokenTaskCreateAuthorizationContext,
 ) ([]string, error) {
-	if token == nil || k8sClient == nil {
+	if token == nil || reader == nil {
 		return nil, nil
 	}
 	toolNames := append([]string{}, authzCtx.EffectiveAITools...)
@@ -1444,7 +1587,7 @@ func contextTokenTaskToolCredentialFailures(
 			continue
 		}
 		tool := &corev1alpha1.Tool{}
-		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: authzCtx.Namespace, Name: toolName}, tool); err != nil {
+		if err := reader.Get(ctx, client.ObjectKey{Namespace: authzCtx.Namespace, Name: toolName}, tool); err != nil {
 			if apierrors.IsNotFound(err) {
 				failures = append(failures, fmt.Sprintf("Tool %q is unresolved", toolName))
 				continue
@@ -1463,7 +1606,7 @@ func contextTokenTaskToolCredentialFailures(
 		}
 		policyName := strings.TrimSpace(tool.Spec.HTTP.OutboundAccessPolicyRef.Name)
 		policy := &corev1alpha1.OutboundAccessPolicy{}
-		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: authzCtx.Namespace, Name: policyName}, policy); err != nil {
+		if err := reader.Get(ctx, client.ObjectKey{Namespace: authzCtx.Namespace, Name: policyName}, policy); err != nil {
 			if apierrors.IsNotFound(err) {
 				failures = append(failures, fmt.Sprintf("Tool %q references unresolved OutboundAccessPolicy %q", toolName, policyName))
 				continue
@@ -1583,7 +1726,7 @@ func contextTokenWorkspaceCredentialFailures(token *ContextToken, cfg ContextTok
 		role string
 		ref  *corev1alpha1.WorkspaceCredentialReference
 	}{
-		{role: "source-read", ref: workspace.ReadCredentialRef},
+		{role: credentialRoleSourceRead, ref: workspace.ReadCredentialRef},
 		{role: "target-read", ref: workspace.PublicationReadCredentialRef},
 		{role: "target-write", ref: workspace.PublicationCredentialRef},
 		{role: "forge", ref: workspace.ForgeCredentialRef},
@@ -1623,7 +1766,7 @@ func contextTokenWorkspaceCredentialFailures(token *ContextToken, cfg ContextTok
 }
 
 func contextTokenTaskContextFailures(token *ContextToken, authzCtx contextTokenTaskCreateAuthorizationContext, includeTaskIdentity bool) []string {
-	failures := []string{}
+	failures := append([]string{}, authzCtx.PolicyFailures...)
 	req := authzCtx.Request
 
 	if includeTaskIdentity {
@@ -1731,12 +1874,15 @@ func contextTokenTaskToolFailures(token *ContextToken, authzCtx contextTokenTask
 }
 
 func contextTokenPlatformAIToolName(authzCtx contextTokenTaskCreateAuthorizationContext, name string) bool {
-	if slices.Contains(memoryToolNames(), name) {
+	task := contextTokenTaskCreateAIToolTask(authzCtx.Request)
+	if slices.Contains(aitools.MemoryToolNames(), name) {
+		return true
+	}
+	if aitools.IsImplicitTool(task, authzCtx.Agent, name) {
 		return true
 	}
 	if slices.Contains(toolspkg.CoordinationToolNames(), name) {
-		coordinationEnabled := authzCtx.Agent != nil && authzCtx.Agent.Spec.Coordination != nil && authzCtx.Agent.Spec.Coordination.Enabled
-		return coordinationEnabled || slices.Contains(toolspkg.ChatToolNames(), name)
+		return aitools.RegistersCoordinationTools(task, authzCtx.Agent) || slices.Contains(toolspkg.ChatToolNames(), name)
 	}
 	_, builtin := toolspkg.DefaultRegistry.Get(name)
 	return builtin
@@ -1752,6 +1898,12 @@ func contextTokenNativeRuntimeToolName(authzCtx contextTokenTaskCreateAuthorizat
 		runtime = authzCtx.Agent.Spec.Runtime
 	}
 	if runtime != nil && runtime.RuntimeRef != nil {
+		if authzCtx.RuntimeProviderKind != "" {
+			if slices.Contains(toolspkg.KnownBuiltInToolNames(), base) {
+				return true
+			}
+			return acp.IsBuiltInRuntimeNativeTool(authzCtx.RuntimeProviderKind, base)
+		}
 		brokeredOverride := authzCtx.Request.AgentRuntime != nil && hasNonEmptyToolNames(authzCtx.Request.AgentRuntime.AllowedTools)
 		if !brokeredOverride {
 			return true
@@ -1788,8 +1940,11 @@ func contextTokenBuiltInRuntimeNativeToolName(runtimeType corev1alpha1.AgentRunt
 
 func contextTokenRuntimeToolConstraints(authzCtx contextTokenTaskCreateAuthorizationContext) []string {
 	runtimeTools := append([]string{}, authzCtx.RuntimeAllowedTools...)
-	if authzCtx.Agent != nil && authzCtx.Agent.Spec.Runtime != nil && authzCtx.Agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeOpencode {
-		return runtimeTools
+	if authzCtx.Agent != nil && authzCtx.Agent.Spec.Runtime != nil {
+		runtime := authzCtx.Agent.Spec.Runtime
+		if runtime.RuntimeRef != nil || runtime.Type == corev1alpha1.AgentRuntimeOpencode {
+			return runtimeTools
+		}
 	}
 	if authzCtx.Request.Type == corev1alpha1.TaskTypeAgent && authzCtx.RuntimeAllowBash {
 		runtimeTools = append(runtimeTools, "Bash")

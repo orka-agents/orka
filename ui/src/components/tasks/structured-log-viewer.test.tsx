@@ -83,6 +83,61 @@ describe('StructuredLogViewer', () => {
     expect(screen.getByText(/Something failed/)).toBeInTheDocument()
   })
 
+  it('keeps original row numbers and shows loaded counts while filtering', async () => {
+    mockedUseTaskLogs.mockReturnValue({
+      logs: ['[INFO] Starting', '[INFO] Ready', '[ERROR] Request failed', '[ERROR] Request failed'],
+      isStreaming: false,
+      isLive: false,
+      error: null,
+      refetch: vi.fn(),
+      clear: vi.fn(),
+    })
+
+    render(<StructuredLogViewer taskId="task-1" />)
+    expect(screen.getByText('(4 lines)')).toBeInTheDocument()
+
+    const searchInput = screen.getByPlaceholderText('Filter logs...')
+    const { default: userEvent } = await import('@testing-library/user-event')
+    const user = userEvent.setup()
+    await user.type(searchInput, 'error')
+
+    const logLines = screen.getAllByTestId('log-line')
+    expect(logLines).toHaveLength(2)
+    expect(screen.getByText('(2 of 4 loaded lines)')).toBeInTheDocument()
+    // Duplicate messages stay separate rows with their buffer positions.
+    expect(logLines[0]).toHaveTextContent('3')
+    expect(logLines[1]).toHaveTextContent('4')
+    expect(logLines[0]).toHaveTextContent('Request failed')
+    expect(logLines[1]).toHaveTextContent('Request failed')
+  })
+
+  it('shows a no-matches message and clearing the filter restores all rows', async () => {
+    mockedUseTaskLogs.mockReturnValue({
+      logs: ['[INFO] Starting', '[INFO] Ready', '[ERROR] Request failed', '[ERROR] Request failed'],
+      isStreaming: false,
+      isLive: false,
+      error: null,
+      refetch: vi.fn(),
+      clear: vi.fn(),
+    })
+
+    render(<StructuredLogViewer taskId="task-1" />)
+
+    const searchInput = screen.getByPlaceholderText('Filter logs...')
+    const { default: userEvent } = await import('@testing-library/user-event')
+    const user = userEvent.setup()
+    await user.type(searchInput, 'zzz')
+
+    expect(screen.getByTestId('log-no-matches')).toHaveTextContent('No matching lines for "zzz".')
+    expect(screen.queryByTestId('log-line')).toBeNull()
+
+    await user.click(screen.getByRole('button', { name: /clear filter/i }))
+
+    expect(screen.queryByTestId('log-no-matches')).toBeNull()
+    expect(screen.getAllByTestId('log-line')).toHaveLength(4)
+    expect(screen.getByText('(4 lines)')).toBeInTheDocument()
+  })
+
   it('shows error state with retry button', () => {
     const refetchFn = vi.fn()
     mockedUseTaskLogs.mockReturnValue({

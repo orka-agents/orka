@@ -66,6 +66,15 @@ spec:
                 maxLength: 1024
                 minLength: 1
                 type: string
+              approvalTaskUID:
+                description: |-
+                  ApprovalTaskUID binds an approval effect to its Task when continuation
+                  Tasks share a runtime-session aggregate. Cleanup may exclude another
+                  Task's effect only from this immutable binding, never from discovery labels.
+                  Older records without this field retain conservative aggregate matching.
+                maxLength: 63
+                minLength: 1
+                type: string
               id:
                 maxLength: 1024
                 minLength: 1

@@ -1,12 +1,28 @@
 ---
 slug: /ui
+description: "The dashboard built into the controller: what each page shows and how to reach it."
 ---
 
-# Web Dashboard
+# Web dashboard
 
-Orka includes a built-in React web dashboard embedded into the controller binary. No separate frontend deployment is needed.
+Orka includes a built-in web dashboard served by the controller. Nothing extra to deploy.
 
-## Tech Stack
+## Open it
+
+Forward the API port if it is not already forwarded, and have a client token ready
+(see [Connect to the API](../getting-started.md#connect-to-the-api)):
+
+```bash
+kubectl -n orka-system port-forward svc/orka 8080:8080
+kubectl -n orka-system create token orka-client
+```
+
+Open [http://localhost:8080](http://localhost:8080). The login page asks for a token;
+paste the one you just created. From there you can create Tasks, chat with the
+orchestrator, watch Tasks run live, and browse sessions and artifacts. If you use the
+CLI, `orka login` opens the dashboard already signed in.
+
+## Tech stack
 
 | Layer | Technology |
 |-------|-----------|
@@ -141,7 +157,7 @@ make ui-test-coverage  # or: cd ui && bun run test:coverage
 make ui-lint       # or: cd ui && bun run lint
 ```
 
-## Directory Structure
+## Directory structure
 
 ```
 ui/

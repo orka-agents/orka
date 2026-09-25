@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"path"
 	"strconv"
 	"strings"
@@ -339,16 +340,19 @@ type PromptAttemptExecutionTransition struct {
 	UpdatedAt              time.Time            `json:"updatedAt"`
 }
 
-// PromptAttemptPreSubmissionRecovery refreshes Reserved or resets an attempt that
-// crossed no prompt request-write boundary back to Reserved under a controller epoch. It is intentionally limited to SessionStarting and Planned.
+// PromptAttemptPreSubmissionRecovery refreshes Reserved or resets an attempt
+// that crossed no prompt acceptance boundary back to Reserved under a
+// controller epoch. Submitting requires proof that the prompt was not accepted.
 type PromptAttemptPreSubmissionRecovery struct {
-	ID              string               `json:"id"`
-	Fence           ControllerEpochFence `json:"fence"`
-	ExpectedVersion int64                `json:"expectedVersion"`
-	ExpectedState   PromptExecutionState `json:"expectedState"`
-	OperationID     string               `json:"operationId"`
-	OperationDigest string               `json:"operationDigest"`
-	RecoveredAt     time.Time            `json:"recoveredAt"`
+	ID                string               `json:"id"`
+	Fence             ControllerEpochFence `json:"fence"`
+	ExpectedVersion   int64                `json:"expectedVersion"`
+	ExpectedState     PromptExecutionState `json:"expectedState"`
+	ProvenNotAccepted bool                 `json:"provenNotAccepted,omitempty"`
+	PreserveBindings  bool                 `json:"preserveBindings,omitempty"`
+	OperationID       string               `json:"operationId"`
+	OperationDigest   string               `json:"operationDigest"`
+	RecoveredAt       time.Time            `json:"recoveredAt"`
 }
 
 // PromptAttemptDeliveryTransition performs a fenced delivery-state CAS.
@@ -428,25 +432,39 @@ type VerifiedBranchBaseline struct {
 // SessionControl stores the immutable SessionUID, monotonic lease generation,
 // availability, and independently verified branch baseline.
 type SessionControl struct {
-	Namespace              string                  `json:"namespace"`
-	SessionName            string                  `json:"sessionName"`
-	SessionUID             string                  `json:"sessionUid"`
-	RequestDigest          string                  `json:"requestDigest"`
-	Availability           SessionAvailability     `json:"availability"`
-	LeaseGeneration        int64                   `json:"leaseGeneration"`
-	Lease                  *SessionMutationLease   `json:"lease,omitempty"`
-	BlockedReason          string                  `json:"blockedReason,omitempty"`
-	RelatedPromptAttemptID string                  `json:"relatedPromptAttemptId,omitempty"`
-	RelatedPublicationID   string                  `json:"relatedPublicationId,omitempty"`
-	VerifiedBaseline       *VerifiedBranchBaseline `json:"verifiedBaseline,omitempty"`
-	Lineage                *SessionLineage         `json:"lineage,omitempty"`
-	ControllerEpochName    string                  `json:"controllerEpochName"`
-	ControllerEpoch        int64                   `json:"controllerEpoch"`
-	LastOperationID        string                  `json:"lastOperationId,omitempty"`
-	LastOperationDigest    string                  `json:"lastOperationDigest,omitempty"`
-	Version                int64                   `json:"version"`
-	CreatedAt              time.Time               `json:"createdAt"`
-	UpdatedAt              time.Time               `json:"updatedAt"`
+	Namespace                string                  `json:"namespace"`
+	SessionName              string                  `json:"sessionName"`
+	SessionUID               string                  `json:"sessionUid"`
+	RequestDigest            string                  `json:"requestDigest"`
+	Availability             SessionAvailability     `json:"availability"`
+	RuntimeSessionGeneration int64                   `json:"runtimeSessionGeneration,omitempty"`
+	LeaseGeneration          int64                   `json:"leaseGeneration"`
+	Lease                    *SessionMutationLease   `json:"lease,omitempty"`
+	BlockedReason            string                  `json:"blockedReason,omitempty"`
+	RelatedPromptAttemptID   string                  `json:"relatedPromptAttemptId,omitempty"`
+	RelatedPublicationID     string                  `json:"relatedPublicationId,omitempty"`
+	VerifiedBaseline         *VerifiedBranchBaseline `json:"verifiedBaseline,omitempty"`
+	Lineage                  *SessionLineage         `json:"lineage,omitempty"`
+	ControllerEpochName      string                  `json:"controllerEpochName"`
+	ControllerEpoch          int64                   `json:"controllerEpoch"`
+	LastOperationID          string                  `json:"lastOperationId,omitempty"`
+	LastOperationDigest      string                  `json:"lastOperationDigest,omitempty"`
+	Version                  int64                   `json:"version"`
+	CreatedAt                time.Time               `json:"createdAt"`
+	UpdatedAt                time.Time               `json:"updatedAt"`
+}
+
+// CommitSessionRuntimeGenerationRequest records the newest provider
+// RuntimeSession generation proven live under the exact active Session lease.
+type CommitSessionRuntimeGenerationRequest struct {
+	Namespace              string               `json:"namespace"`
+	SessionName            string               `json:"sessionName"`
+	SessionUID             string               `json:"sessionUid"`
+	Key                    SessionTurnKey       `json:"key"`
+	Fence                  ControllerEpochFence `json:"fence"`
+	ExpectedSessionVersion int64                `json:"expectedSessionVersion"`
+	Generation             int64                `json:"generation"`
+	CommittedAt            time.Time            `json:"committedAt"`
 }
 
 // AcquireSessionMutationLeaseRequest acquires the next lease generation using
@@ -1029,6 +1047,12 @@ type ReserveExternalEffectRequest struct {
 	RequestDigest string                 `json:"requestDigest"`
 	Fence         ControllerEpochFence   `json:"fence"`
 	CreatedAt     time.Time              `json:"createdAt"`
+	// ApprovalTaskUID is an immutable Kubernetes Task binding, with a discovery
+	// label for approval recovery, when Tasks share a RuntimeSession aggregate.
+	// Legacy records receive only the discovery label, preserving their spec.
+	// Other backends may ignore it. It does not change the canonical identity,
+	// grant execution authority, or make the record subject to Task garbage collection.
+	ApprovalTaskUID string `json:"approvalTaskUid,omitempty"`
 }
 
 // ExternalEffectTransition performs a version/state CAS.
@@ -1171,11 +1195,7 @@ func CanonicalControlID(kind string, components ...string) string {
 	return kind + ":sha256:" + hex.EncodeToString(h.Sum(nil))
 }
 
-type canonicalWriter interface {
-	Write([]byte) (int, error)
-}
-
-func writeCanonicalComponent(w canonicalWriter, value string) {
+func writeCanonicalComponent(w io.Writer, value string) {
 	_, _ = fmt.Fprintf(w, "%d:", len(value))
 	_, _ = w.Write([]byte(value))
 }

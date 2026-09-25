@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -44,6 +45,75 @@ import (
 )
 
 const testWatchNamespace = "prod"
+
+func TestHandlers_ProviderReadsRequireKubernetesRBACForTokenReviewUser(t *testing.T) {
+	// TokenReview-authenticated reads run with the controller's credentials,
+	// so the Provider list and get handlers must pass a SubjectAccessReview
+	// for the caller before the orka-client Role grant means anything.
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+
+	provider := &corev1alpha1.Provider{
+		ObjectMeta: metav1.ObjectMeta{Name: "openai", Namespace: "default"},
+		Spec:       corev1alpha1.ProviderSpec{Type: "openai", DefaultModel: "gpt-4o"},
+	}
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		wantVerb   string
+		wantName   string
+		allowed    bool
+		wantStatus int
+	}{
+		{"list denied", http.MethodGet, "/providers?namespace=default", "list", "", false, http.StatusForbidden},
+		{"list allowed", http.MethodGet, "/providers?namespace=default", "list", "", true, http.StatusOK},
+		{"get denied", http.MethodGet, "/providers/openai?namespace=default", "get", "openai", false, http.StatusForbidden},
+		{"get allowed", http.MethodGet, "/providers/openai?namespace=default", "get", "openai", true, http.StatusOK},
+		// Authorization runs before the read, so a denied caller cannot
+		// enumerate names through a 403-vs-404 difference.
+		{"get denied unknown name", http.MethodGet, "/providers/missing?namespace=default", "get", "missing", false, http.StatusForbidden},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(provider.DeepCopy()).Build()
+			kubeClient := kubefake.NewSimpleClientset()
+			reviewed := false
+			kubeClient.PrependReactor("create", "subjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				review := action.(k8stesting.CreateAction).GetObject().(*authorizationv1.SubjectAccessReview)
+				require.Equal(t, "system:serviceaccount:default:limited", review.Spec.User)
+				require.NotNil(t, review.Spec.ResourceAttributes)
+				require.Equal(t, "default", review.Spec.ResourceAttributes.Namespace)
+				require.Equal(t, tt.wantVerb, review.Spec.ResourceAttributes.Verb)
+				require.Equal(t, corev1alpha1.GroupVersion.Group, review.Spec.ResourceAttributes.Group)
+				require.Equal(t, "providers", review.Spec.ResourceAttributes.Resource)
+				require.Equal(t, tt.wantName, review.Spec.ResourceAttributes.Name)
+				reviewed = true
+				review.Status.Allowed = tt.allowed
+				return true, review, nil
+			})
+
+			handlers := NewHandlers(HandlersConfig{Client: fakeClient, KubeClient: kubeClient})
+			app := fiber.New()
+			app.Use(func(c fiber.Ctx) error {
+				c.Locals(UserInfoContextKey, &UserInfo{
+					Username: "system:serviceaccount:default:limited",
+					Groups:   []string{"system:serviceaccounts", "system:serviceaccounts:default"},
+					AuthType: AuthTypeTokenReview,
+				})
+				return c.Next()
+			})
+			app.Get("/providers", handlers.ListProviders)
+			app.Get("/providers/:name", handlers.GetProvider)
+
+			resp, err := app.Test(httptest.NewRequest(tt.method, tt.path, nil))
+			require.NoError(t, err)
+			defer resp.Body.Close() //nolint:errcheck
+			require.Equal(t, tt.wantStatus, resp.StatusCode)
+			require.True(t, reviewed, "expected a SubjectAccessReview")
+		})
+	}
+}
 
 func TestHandlers_CreateTaskRequiresKubernetesRBACForTokenReviewUser(t *testing.T) {
 	scheme := runtime.NewScheme()
@@ -209,6 +279,33 @@ func setupTestHandlersWithAuthzStore(
 	app.Put("/skills/:name", handlers.UpdateSkill)
 	app.Delete("/skills/:name", handlers.DeleteSkill)
 	return app, ss
+}
+
+func setupTestCreateTaskHandlerWithAuthzReaders(
+	t *testing.T,
+	ctxTokenConfig ContextTokenConfig,
+	mode string,
+	cachedClient client.Client,
+	apiReader client.Reader,
+) *fiber.App {
+	t.Helper()
+	db, err := sqlite.NewDB(":memory:")
+	require.NoError(t, err)
+	ss := sqlite.NewStore(db, ":memory:")
+	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: mode})
+	require.NoError(t, err)
+	handlers := NewHandlers(HandlersConfig{
+		Client:                    cachedClient,
+		APIReader:                 apiReader,
+		SessionStore:              ss,
+		ResultStore:               ss,
+		ContextTokenAuthorization: authz,
+	})
+
+	app := fiber.New()
+	app.Use(NewAuthMiddleware(cachedClient, AuthConfig{ContextTokens: ctxTokenConfig}))
+	app.Post("/tasks", handlers.CreateTask)
+	return app
 }
 
 func setupTestHandlersWithObjects(objs ...runtime.Object) (*Handlers, *fiber.App) {
@@ -698,6 +795,149 @@ func TestHandlers_CreateTask_ContextTokenAuthorizationAuditAllowsFailures(t *tes
 	}
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusCreated)
+	}
+}
+
+func TestHandlers_CreateTask_ContextTokenAuthorizationUsesAuthoritativeExternalRuntimePolicy(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+
+	tests := []struct {
+		name               string
+		mode               string
+		cachedAllowedTools []string
+		apiAllowedTools    []string
+		requestAllowed     []string
+		tokenAllowed       []string
+		nilAPIReader       bool
+		failAPIReader      bool
+		wantStatus         int
+	}{
+		{
+			name:               "rejects cached match after authoritative policy expansion",
+			mode:               ContextTokenAuthorizationModeEnforce,
+			cachedAllowedTools: []string{"Read"},
+			apiAllowedTools:    []string{"Read", "Write"},
+			requestAllowed:     []string{"Read"},
+			tokenAllowed:       []string{"Read"},
+			wantStatus:         http.StatusForbidden,
+		},
+		{
+			name:               "allows exact authoritative policy",
+			mode:               ContextTokenAuthorizationModeEnforce,
+			cachedAllowedTools: []string{"Read"},
+			apiAllowedTools:    []string{"Read", "Write"},
+			requestAllowed:     []string{"Write", "Read", "Read"},
+			tokenAllowed:       []string{"Read", "Write"},
+			wantStatus:         http.StatusCreated,
+		},
+		{
+			name:               "allows explicit empty deny all policy",
+			mode:               ContextTokenAuthorizationModeEnforce,
+			cachedAllowedTools: []string{},
+			apiAllowedTools:    []string{},
+			requestAllowed:     []string{},
+			tokenAllowed:       []string{},
+			wantStatus:         http.StatusCreated,
+		},
+		{
+			name:               "rejects omitted external allowed tools",
+			mode:               ContextTokenAuthorizationModeEnforce,
+			cachedAllowedTools: []string{},
+			apiAllowedTools:    []string{},
+			requestAllowed:     nil,
+			tokenAllowed:       []string{},
+			wantStatus:         http.StatusForbidden,
+		},
+		{
+			name:               "uses cached client when API reader is absent",
+			mode:               ContextTokenAuthorizationModeEnforce,
+			cachedAllowedTools: []string{"Read"},
+			requestAllowed:     []string{"Read"},
+			tokenAllowed:       []string{"Read"},
+			nilAPIReader:       true,
+			wantStatus:         http.StatusCreated,
+		},
+		{
+			name:               "does not fall back after authoritative read error",
+			mode:               ContextTokenAuthorizationModeEnforce,
+			cachedAllowedTools: []string{"Read"},
+			requestAllowed:     []string{"Read"},
+			tokenAllowed:       []string{"Read"},
+			failAPIReader:      true,
+			wantStatus:         http.StatusInternalServerError,
+		},
+		{
+			name:               "audit mode records mismatch without blocking",
+			mode:               ContextTokenAuthorizationModeAudit,
+			cachedAllowedTools: []string{"Read"},
+			apiAllowedTools:    []string{"Read", "Write"},
+			requestAllowed:     []string{"Read"},
+			tokenAllowed:       []string{"Read"},
+			wantStatus:         http.StatusCreated,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cachedAgent, cachedRuntime := testExternalRuntimeAuthorizationObjects(tt.cachedAllowedTools)
+			cachedClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cachedAgent, cachedRuntime).Build()
+
+			var apiReader client.Reader
+			switch {
+			case tt.nilAPIReader:
+			case tt.failAPIReader:
+				apiReader = fake.NewClientBuilder().
+					WithScheme(scheme).
+					WithInterceptorFuncs(interceptor.Funcs{
+						Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+							return errors.New("authoritative API unavailable")
+						},
+					}).
+					Build()
+			default:
+				apiAgent, apiRuntime := testExternalRuntimeAuthorizationObjects(tt.apiAllowedTools)
+				apiReader = fake.NewClientBuilder().WithScheme(scheme).WithObjects(apiAgent, apiRuntime).Build()
+			}
+
+			app := setupTestCreateTaskHandlerWithAuthzReaders(t, ctxTokenConfig, tt.mode, cachedClient, apiReader)
+			token := issueTestContextToken(t, provider, nil, map[string]any{
+				"scope": ContextTokenScopeTaskCreate,
+				"tctx": map[string]any{
+					"namespace":    "default",
+					"taskType":     "agent",
+					"agent":        "agentkit",
+					"allowedTools": tt.tokenAllowed,
+				},
+			})
+			body := CreateTaskRequest{
+				Name:         strings.ReplaceAll(tt.name, " ", "-"),
+				Namespace:    "default",
+				Type:         corev1alpha1.TaskTypeAgent,
+				AgentRef:     &corev1alpha1.AgentReference{Name: "agentkit"},
+				AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: tt.requestAllowed},
+			}
+			bodyBytes, err := json.Marshal(body)
+			require.NoError(t, err)
+			req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
+			req.Header.Set(TransactionTokenHeaderName, token)
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			respBody, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			require.Equalf(t, tt.wantStatus, resp.StatusCode, "response body: %s", respBody)
+
+			created := &corev1alpha1.Task{}
+			err = cachedClient.Get(context.Background(), client.ObjectKey{Name: body.Name, Namespace: body.Namespace}, created)
+			if tt.wantStatus == http.StatusCreated {
+				require.NoError(t, err)
+			} else {
+				require.True(t, apierrors.IsNotFound(err), "task must not be created after authorization failure: %v", err)
+			}
+		})
 	}
 }
 
@@ -2550,6 +2790,24 @@ type metadataOnlySessionStore struct {
 	getCalls   int
 }
 
+type sessionAccessRecordingStore struct {
+	store.SessionStore
+	typeReader  transcriptSessionTypeReader
+	listCalls   int
+	readCalls   int
+	deleteCalls int
+}
+
+func (s *sessionAccessRecordingStore) ListSessions(ctx context.Context, namespace string) ([]store.SessionMetadata, error) {
+	s.listCalls++
+	return s.SessionStore.ListSessions(ctx, namespace)
+}
+
+func (s *sessionAccessRecordingStore) ListSessionsPage(ctx context.Context, namespace, afterName string, limit int, excludeType string) ([]store.SessionMetadata, bool, error) {
+	s.listCalls++
+	return s.SessionStore.ListSessionsPage(ctx, namespace, afterName, limit, excludeType)
+}
+
 func (s *metadataOnlySessionStore) GetSession(ctx context.Context, namespace, name string) (*store.SessionRecord, error) {
 	s.getCalls++
 	return s.SessionStore.GetSession(ctx, namespace, name)
@@ -2557,6 +2815,21 @@ func (s *metadataOnlySessionStore) GetSession(ctx context.Context, namespace, na
 
 func (s *metadataOnlySessionStore) GetSessionType(ctx context.Context, namespace, name string) (string, error) {
 	return s.typeReader.GetSessionType(ctx, namespace, name)
+}
+
+func (s *sessionAccessRecordingStore) GetSession(ctx context.Context, namespace, name string) (*store.SessionRecord, error) {
+	s.readCalls++
+	return s.SessionStore.GetSession(ctx, namespace, name)
+}
+
+func (s *sessionAccessRecordingStore) GetSessionType(ctx context.Context, namespace, name string) (string, error) {
+	s.readCalls++
+	return s.typeReader.GetSessionType(ctx, namespace, name)
+}
+
+func (s *sessionAccessRecordingStore) DeleteSession(ctx context.Context, namespace, name string) error {
+	s.deleteCalls++
+	return s.SessionStore.DeleteSession(ctx, namespace, name)
 }
 
 func setupTestHandlersWithSessionManager() (*Handlers, *fiber.App, *sqlite.Store) {
@@ -2632,6 +2905,78 @@ func TestHandlers_ListSessions_HidesGatewaySessions(t *testing.T) {
 	require.Equal(t, "ordinary-session", item["name"])
 }
 
+func TestHandlers_ListSessions_HonorsLimitAndContinue(t *testing.T) {
+	handlers, app, ss := setupTestHandlersWithSessionManager()
+	ctx := context.Background()
+	for _, name := range []string{"session-a", "session-b", "session-c"} {
+		require.NoError(t, ss.CreateSession(ctx, &store.SessionRecord{
+			Namespace: "default", Name: name, SessionType: "task",
+		}))
+	}
+
+	app.Get("/sessions", handlers.ListSessions)
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/sessions?namespace=default&limit=2", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var page1 ListResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&page1))
+	items, ok := page1.Items.([]any)
+	require.True(t, ok)
+	require.Len(t, items, 2)
+	require.Equal(t, "session-b", page1.Metadata.Continue)
+
+	resp, err = app.Test(httptest.NewRequest(http.MethodGet, "/sessions?namespace=default&limit=2&continue="+page1.Metadata.Continue, nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var page2 ListResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&page2))
+	items, ok = page2.Items.([]any)
+	require.True(t, ok)
+	require.Len(t, items, 1)
+	item, ok := items[0].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "session-c", item["name"])
+	require.Empty(t, page2.Metadata.Continue)
+
+	resp, err = app.Test(httptest.NewRequest(http.MethodGet, "/sessions?namespace=default&limit=bogus", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
+func TestHandlers_ListSessions_CursorEqualToCacheSentinelResumes(t *testing.T) {
+	handlers, app, ss := setupTestHandlersWithSessionManager()
+	ctx := context.Background()
+	// Sorted by name: "continue-not-supported" < "session-z". A page that
+	// ends on the sentinel-named session must still resume after it.
+	for _, name := range []string{"continue-not-supported", "session-z"} {
+		require.NoError(t, ss.CreateSession(ctx, &store.SessionRecord{
+			Namespace: "default", Name: name, SessionType: "task",
+		}))
+	}
+	app.Get("/sessions", handlers.ListSessions)
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/sessions?namespace=default&limit=1", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var page1 ListResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&page1))
+	require.Equal(t, "continue-not-supported", page1.Metadata.Continue)
+
+	resp, err = app.Test(httptest.NewRequest(http.MethodGet, "/sessions?namespace=default&limit=1&continue="+page1.Metadata.Continue, nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var page2 ListResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&page2))
+	items, ok := page2.Items.([]any)
+	require.True(t, ok)
+	require.Len(t, items, 1)
+	item, ok := items[0].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "session-z", item["name"])
+	require.Empty(t, page2.Metadata.Continue)
+}
+
 func TestHandlers_ListSessions_Empty(t *testing.T) {
 	handlers, app, _ := setupTestHandlersWithSessionManager()
 	app.Get("/sessions", handlers.ListSessions)
@@ -2696,6 +3041,91 @@ func TestHandlers_ListSessions_WatchNamespace(t *testing.T) {
 }
 
 // --- GetSession tests ---
+
+func TestHandlers_SessionEndpointsRequireKubernetesRBACForTokenReviewUser(t *testing.T) {
+	const (
+		protectedSessionName = "protected-session"
+		sessionsPath         = "/sessions"
+		protectedSessionPath = sessionsPath + "/" + protectedSessionName
+	)
+	tests := []struct {
+		name         string
+		method       string
+		path         string
+		verb         string
+		resourceName string
+		allowed      bool
+		wantStatus   int
+	}{
+		{name: "list denied", method: http.MethodGet, path: sessionsPath, verb: gatewayVerbList, wantStatus: http.StatusForbidden},
+		{name: "list allowed", method: http.MethodGet, path: sessionsPath, verb: gatewayVerbList, allowed: true, wantStatus: http.StatusOK},
+		{name: "get denied", method: http.MethodGet, path: protectedSessionPath, verb: gatewayVerbGet, resourceName: protectedSessionName, wantStatus: http.StatusForbidden},
+		{name: "get allowed", method: http.MethodGet, path: protectedSessionPath, verb: gatewayVerbGet, resourceName: protectedSessionName, allowed: true, wantStatus: http.StatusOK},
+		{name: "events denied", method: http.MethodGet, path: protectedSessionPath + "/events", verb: gatewayVerbGet, resourceName: protectedSessionName, wantStatus: http.StatusForbidden},
+		{name: "stream denied", method: http.MethodGet, path: protectedSessionPath + "/stream", verb: gatewayVerbGet, resourceName: protectedSessionName, wantStatus: http.StatusForbidden},
+		{name: "delete denied", method: http.MethodDelete, path: protectedSessionPath, verb: "delete", resourceName: protectedSessionName, wantStatus: http.StatusForbidden},
+		{name: "delete allowed", method: http.MethodDelete, path: protectedSessionPath, verb: "delete", resourceName: protectedSessionName, allowed: true, wantStatus: http.StatusNoContent},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1alpha1.AddToScheme(scheme))
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+			db, err := sqlite.NewDB(":memory:")
+			require.NoError(t, err)
+			ss := sqlite.NewStore(db, ":memory:")
+			t.Cleanup(func() { require.NoError(t, db.Close()) })
+			require.NoError(t, ss.CreateSession(context.Background(), &store.SessionRecord{
+				Namespace: "default", Name: protectedSessionName, SessionType: "task",
+			}))
+			require.NoError(t, ss.AppendMessages(context.Background(), "default", protectedSessionName, []store.SessionMessage{{
+				Role: testRoleUser, Content: "private prompt",
+			}}))
+			recordingStore := &sessionAccessRecordingStore{SessionStore: ss, typeReader: ss}
+			kubeClient := kubefake.NewSimpleClientset()
+			kubeClient.PrependReactor("create", "subjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				createAction := action.(k8stesting.CreateAction)
+				review := createAction.GetObject().(*authorizationv1.SubjectAccessReview)
+				require.Equal(t, "system:serviceaccount:default:limited", review.Spec.User)
+				require.Equal(t, []string{"system:serviceaccounts", "system:serviceaccounts:default"}, review.Spec.Groups)
+				require.NotNil(t, review.Spec.ResourceAttributes)
+				require.Equal(t, "default", review.Spec.ResourceAttributes.Namespace)
+				require.Equal(t, test.verb, review.Spec.ResourceAttributes.Verb)
+				require.Equal(t, corev1alpha1.GroupVersion.Group, review.Spec.ResourceAttributes.Group)
+				require.Equal(t, "sessions", review.Spec.ResourceAttributes.Resource)
+				require.Equal(t, test.resourceName, review.Spec.ResourceAttributes.Name)
+				review.Status.Allowed = test.allowed
+				return true, review, nil
+			})
+
+			handlers := NewHandlers(HandlersConfig{
+				Client: fakeClient, KubeClient: kubeClient, SessionStore: recordingStore, ResultStore: ss,
+			})
+			app := fiber.New()
+			app.Use(tokenReviewUserMiddleware(limitedTokenReviewUser("default")))
+			app.Get("/sessions", handlers.ListSessions)
+			app.Get("/sessions/:id", handlers.GetSession)
+			app.Get("/sessions/:id/events", handlers.ListSessionEvents)
+			app.Get("/sessions/:id/stream", handlers.StreamSessionEvents)
+			app.Delete("/sessions/:id", handlers.DeleteSession)
+
+			resp, err := app.Test(httptest.NewRequest(test.method, test.path, nil))
+			require.NoError(t, err)
+			require.Equal(t, test.wantStatus, resp.StatusCode)
+			if !test.allowed {
+				require.Zero(t, recordingStore.listCalls, "denied request must not list Session state")
+				require.Zero(t, recordingStore.readCalls, "denied request must not read Session state")
+				require.Zero(t, recordingStore.deleteCalls, "denied request must not delete Session state")
+			}
+			_, getErr := ss.GetSession(context.Background(), "default", protectedSessionName)
+			if test.method == http.MethodDelete && test.allowed {
+				require.ErrorIs(t, getErr, store.ErrNotFound)
+			} else {
+				require.NoError(t, getErr)
+			}
+		})
+	}
+}
 
 func TestHandlers_GetSession_Success(t *testing.T) {
 	handlers, app, ss := setupTestHandlersWithSessionManager()

@@ -19,6 +19,108 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
+func TestReclaimSessionBeforeFirstMutationLease(t *testing.T) {
+	ctx := context.Background()
+	kubeStore, kubeClient, sqliteStore, _, fence := newSessionCleanupTestStore(t, nil)
+	const name = "cancelled-before-runtime-admission"
+	if err := sqliteStore.CreateSession(ctx, &controlstore.SessionRecord{
+		Namespace: "tenant-a", Name: name, SessionType: "task", CreatedAt: testNow, UpdatedAt: testNow,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	control, err := kubeStore.CreateSessionControl(ctx, &controlstore.SessionControl{
+		Namespace: "tenant-a", SessionName: name, SessionUID: name + "-uid",
+		RequestDigest: testDigest(name), Availability: controlstore.SessionAvailable, CreatedAt: testNow,
+	}, fence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if control.LeaseGeneration != 0 || control.Lease != nil {
+		t.Fatal("an unused Session must start with an unheld generation-zero Lease")
+	}
+	request := controlstore.ReclaimSessionRequest{
+		Namespace: control.Namespace, SessionName: name, Fence: fence,
+		OperationID: "delete-unused-session", OperationDigest: testDigest("delete-unused-session"), RequestedAt: testNow,
+	}
+	if err := kubeStore.ReclaimSession(ctx, request); err != nil {
+		t.Fatalf("delete Session cancelled before admission: %v", err)
+	}
+	if _, err := sqliteStore.GetSession(ctx, control.Namespace, name); !errors.Is(err, controlstore.ErrNotFound) {
+		t.Fatalf("transcript survived deletion: %v", err)
+	}
+	if _, err := kubeStore.GetSessionControl(ctx, control.Namespace, name); !errors.Is(err, controlstore.ErrNotFound) {
+		t.Fatalf("Session control survived deletion: %v", err)
+	}
+	if err := kubeClient.Get(ctx, client.ObjectKey{Namespace: control.Namespace, Name: runtimeSessionLeaseName(control.SessionUID)}, &coordinationv1.Lease{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("unused Session Lease survived deletion: %v", err)
+	}
+	if err := kubeStore.ReclaimSession(ctx, request); err != nil {
+		t.Fatalf("completed deletion is not idempotent: %v", err)
+	}
+}
+
+func TestReleaseChatTurnPreservesSessionCleanupIdentity(t *testing.T) {
+	ctx := context.Background()
+	kubeStore, kubeClient, sqliteStore, _, fence := newSessionCleanupTestStore(t, nil)
+	const name = "failed-chat-with-control"
+	session := &controlstore.SessionRecord{
+		Namespace: "tenant-a", Name: name, SessionType: controlstore.SessionTypeChat,
+	}
+	expiresAt := time.Now().UTC().Add(time.Minute)
+	created, err := sqliteStore.AcquireChatTurn(ctx, session, "failed-turn", expiresAt)
+	if err != nil || !created {
+		t.Fatalf("AcquireChatTurn(first turn): created=%v, err=%v", created, err)
+	}
+	// Control creation binds the transcript after the chat turn created it.
+	control, err := kubeStore.CreateSessionControl(ctx, &controlstore.SessionControl{
+		Namespace: session.Namespace, SessionName: name, SessionUID: name + "-uid",
+		RequestDigest: testDigest(name), Availability: controlstore.SessionAvailable, CreatedAt: testNow,
+	}, fence)
+	if err != nil {
+		t.Fatalf("CreateSessionControl(): %v", err)
+	}
+	if err := sqliteStore.ReleaseChatTurn(ctx, session.Namespace, name, "failed-turn", created); err != nil {
+		t.Fatalf("ReleaseChatTurn(failed turn): %v", err)
+	}
+	identity, err := sqliteStore.GetSessionCleanupIdentity(ctx, session.Namespace, name)
+	if err != nil || identity != control.SessionUID {
+		t.Fatalf("cleanup identity after failed turn = %q, err=%v, want %q", identity, err, control.SessionUID)
+	}
+	created, err = sqliteStore.AcquireChatTurn(ctx, session, "next-turn", expiresAt)
+	if err != nil || created {
+		t.Fatalf("AcquireChatTurn(next turn): created=%v, err=%v, want the preserved session with a released lease", created, err)
+	}
+	if err := sqliteStore.ReleaseChatTurn(ctx, session.Namespace, name, "next-turn", created); err != nil {
+		t.Fatalf("ReleaseChatTurn(next turn): %v", err)
+	}
+	request := controlstore.ReclaimSessionRequest{
+		Namespace: session.Namespace, SessionName: name, Fence: fence,
+		OperationID: "delete-failed-chat", OperationDigest: testDigest("delete-failed-chat"), RequestedAt: testNow,
+	}
+	if err := kubeStore.ReclaimSession(ctx, request); err != nil {
+		t.Fatalf("ReclaimSession(after failed turn): %v", err)
+	}
+	if _, err := sqliteStore.GetSession(ctx, session.Namespace, name); !errors.Is(err, controlstore.ErrNotFound) {
+		t.Fatalf("transcript survived coordinated deletion: %v", err)
+	}
+	if _, err := kubeStore.GetSessionControl(ctx, session.Namespace, name); !errors.Is(err, controlstore.ErrNotFound) {
+		t.Fatalf("Session control survived coordinated deletion: %v", err)
+	}
+	if err := kubeClient.Get(ctx, client.ObjectKey{Namespace: session.Namespace, Name: runtimeSessionLeaseName(control.SessionUID)}, &coordinationv1.Lease{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("Session Lease survived coordinated deletion: %v", err)
+	}
+	completion, err := sqliteStore.GetSessionCleanupCompletion(ctx, session.Namespace, name)
+	if err != nil {
+		t.Fatalf("GetSessionCleanupCompletion(): %v", err)
+	}
+	if completion.SessionUID != control.SessionUID || completion.OperationID != request.OperationID || completion.OperationDigest != request.OperationDigest {
+		t.Fatalf("completion receipt = %#v", completion)
+	}
+	if _, err := sqliteStore.AcquireChatTurn(ctx, session, "late-turn", expiresAt); !errors.Is(err, controlstore.ErrConflict) {
+		t.Fatalf("AcquireChatTurn(after coordinated deletion) error = %v, want ErrConflict", err)
+	}
+}
+
 func TestReclaimSessionDeletesPublishedCrossStoreStateAndIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	kubeStore, kubeClient, sqliteStore, db, fence := newSessionCleanupTestStore(t, nil)
@@ -463,26 +565,29 @@ func seedPublishedSessionCleanupState(
 	if err != nil {
 		t.Fatalf("CanonicalID(): %v", err)
 	}
+	projectionID := controlstore.CanonicalControlID("outbox", turnID, "TaskTerminalStatus")
+	payloadDigest := controlstore.CanonicalBytesDigest([]byte(`{}`))
 	if _, err := db.ExecContext(ctx, `INSERT INTO session_turns(
 		id, namespace, session_name, session_uid, lease_generation, task_uid, attempt, prompt_id,
 		prompt_attempt_id, request_digest, user_prompt, state, terminal_kind, terminal_content,
 		finalization_digest, publication_id, controller_epoch_name, controller_epoch, version,
-		created_at, finalized_at, updated_at
+		created_at, finalized_at, updated_at, projection_id, projection_kind, projection_digest
 	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'publish', 'Finalized', 'AssistantResult', 'published', ?,
-		'publication-cleanup', ?, ?, 2, ?, ?, ?)`,
+		'publication-cleanup', ?, ?, 2, ?, ?, ?, ?, 'TaskTerminalStatus', ?)`,
 		turnID, control.Namespace, control.SessionName, key.SessionUID, key.LeaseGeneration, key.TaskUID, key.Attempt, key.PromptID,
 		"attempt-published", testDigest("published-turn"), testDigest("published-finalization"),
 		fence.Name, fence.Epoch, testNow, testNow.Add(time.Minute), testNow.Add(time.Minute),
+		projectionID, payloadDigest,
 	); err != nil {
 		t.Fatalf("insert published SessionTurn: %v", err)
 	}
 	if _, err := db.ExecContext(ctx, `INSERT INTO outbox_projections(
 		id, aggregate_kind, aggregate_id, projection_kind, payload_digest, payload, state,
 		initial_available_at, available_at, controller_epoch_name, controller_epoch, version,
-		created_at, updated_at, delivered_at
-	) VALUES ('session-cleanup-projection', ?, ?, 'TaskTerminalStatus', ?, '{}', 'Delivered', ?, ?, ?, ?, 1, ?, ?, ?)`,
-		sessionTurnAggregateKind, turnID, testDigest("published-projection"), testNow, testNow,
-		fence.Name, fence.Epoch, testNow, testNow, testNow,
+		created_at, updated_at, delivered_at, delivery_digest
+	) VALUES (?, ?, ?, 'TaskTerminalStatus', ?, '{}', 'Delivered', ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
+		projectionID, sessionTurnAggregateKind, turnID, payloadDigest, testNow, testNow,
+		fence.Name, fence.Epoch, testNow, testNow, testNow, testDigest("published-projection-delivery"),
 	); err != nil {
 		t.Fatalf("insert delivered projection: %v", err)
 	}

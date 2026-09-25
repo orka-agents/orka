@@ -78,6 +78,8 @@ spec:
     contractVersion: orka.harness.v2
     type: claude
     defaultMaxTurns: 1
+  model:
+    name: claude-opus-5
 `, agentName))
 		expectOrkaSuccess(runOrka(home, "agent", "create", "-f", agentManifest), token, fakeAnthropicKey)
 

@@ -7,6 +7,8 @@ MIT License - see LICENSE file for details.
 package common
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,7 +17,11 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 func cleanupArtifactsDir(t *testing.T) {
@@ -124,6 +130,133 @@ func TestEnsureWorkspaceArtifactsLink_CreatesRepoLocalSymlink(t *testing.T) {
 	}
 }
 
+func TestUploadArtifactsContext_CanceledBeforeDelivery(t *testing.T) {
+	prepareArtifactsDir(t)
+	writeArtifactFile(t, "evidence.txt", []byte("evidence"))
+
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+	t.Setenv(workerenv.ControllerURL, srv.URL)
+	t.Setenv(workerenv.TaskNamespace, "test-ns")
+	t.Setenv(workerenv.TaskName, "test-task")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := UploadArtifactsContext(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("UploadArtifactsContext() error = %v, want context canceled", err)
+	}
+	if got := attempts.Load(); got != 0 {
+		t.Fatalf("artifact requests = %d, want 0", got)
+	}
+}
+
+func TestUploadArtifactsContext_CancellationAfterAcceptedArtifact(t *testing.T) {
+	for _, artifactCount := range []int{1, 2} {
+		t.Run(fmt.Sprintf("artifacts=%d", artifactCount), func(t *testing.T) {
+			prepareArtifactsDir(t)
+			for i := range artifactCount {
+				writeArtifactFile(t, fmt.Sprintf("evidence-%d.txt", i), []byte("evidence"))
+			}
+			t.Setenv(workerenv.ControllerURL, "http://controller.invalid")
+			t.Setenv(workerenv.TaskNamespace, "test-ns")
+			t.Setenv(workerenv.TaskName, "test-task")
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			body := &cancelingDeliveryBody{cancel: cancel}
+			attempts := 0
+			originalTransport := http.DefaultTransport
+			http.DefaultTransport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				attempts++
+				_ = request.Body.Close()
+				return &http.Response{StatusCode: http.StatusCreated, Body: body, Header: make(http.Header)}, nil
+			})
+			t.Cleanup(func() { http.DefaultTransport = originalTransport })
+
+			err := UploadArtifactsContext(ctx)
+			if artifactCount == 1 && err != nil {
+				t.Fatalf("accepted artifact batch returned error: %v", err)
+			}
+			if artifactCount == 2 && !errors.Is(err, context.Canceled) {
+				t.Fatalf("incomplete artifact batch error = %v, want cancellation", err)
+			}
+			if attempts != 1 || !body.closed || ctx.Err() == nil {
+				t.Fatalf("attempts = %d, body closed = %v, context error = %v", attempts, body.closed, ctx.Err())
+			}
+		})
+	}
+}
+
+func TestUploadArtifactsContext_CancelsBlockedTransport(t *testing.T) {
+	prepareArtifactsDir(t)
+	writeArtifactFile(t, "evidence.txt", []byte("evidence"))
+
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(requestStarted)
+		<-releaseRequest
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+	defer close(releaseRequest)
+	t.Setenv(workerenv.ControllerURL, srv.URL)
+	t.Setenv(workerenv.TaskNamespace, "test-ns")
+	t.Setenv(workerenv.TaskName, "test-task")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- UploadArtifactsContext(ctx)
+	}()
+
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for artifact request")
+	}
+	cancel()
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("UploadArtifactsContext() error = %v, want context canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("UploadArtifactsContext() did not stop after cancellation")
+	}
+}
+
+func TestUploadArtifactsContext_DoesNotRetryPermanentClientErrors(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusRequestEntityTooLarge} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			prepareArtifactsDir(t)
+			writeArtifactFile(t, "evidence.txt", []byte("evidence"))
+
+			var attempts atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				attempts.Add(1)
+				w.WriteHeader(status)
+			}))
+			defer srv.Close()
+			t.Setenv(workerenv.ControllerURL, srv.URL)
+			t.Setenv(workerenv.TaskNamespace, "test-ns")
+			t.Setenv(workerenv.TaskName, "test-task")
+
+			err := UploadArtifactsContext(context.Background())
+			if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("HTTP %d", status)) {
+				t.Fatalf("UploadArtifactsContext() error = %v, want HTTP %d", err, status)
+			}
+			if got := attempts.Load(); got != 1 {
+				t.Fatalf("attempts = %d, want 1 for HTTP %d", got, status)
+			}
+		})
+	}
+}
+
 func TestUploadArtifacts_UploadsFilesToInternalEndpoint(t *testing.T) {
 	prepareArtifactsDir(t)
 	writeArtifactFile(t, "deck.pptx", []byte("pptx-bytes"))
@@ -158,8 +291,8 @@ func TestUploadArtifacts_UploadsFilesToInternalEndpoint(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAMESPACE", "test-ns")
 	t.Setenv("ORKA_TASK_NAME", "test-task")
 
-	if err := UploadArtifacts(); err != nil {
-		t.Fatalf("UploadArtifacts() error = %v", err)
+	if err := UploadArtifactsContext(context.Background()); err != nil {
+		t.Fatalf("UploadArtifactsContext(context.Background()) error = %v", err)
 	}
 
 	if len(received) != 2 {
@@ -188,8 +321,8 @@ func TestUploadArtifacts_URLEscapesFilename(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAMESPACE", "test-ns")
 	t.Setenv("ORKA_TASK_NAME", "test-task")
 
-	if err := UploadArtifacts(); err != nil {
-		t.Fatalf("UploadArtifacts() error = %v", err)
+	if err := UploadArtifactsContext(context.Background()); err != nil {
+		t.Fatalf("UploadArtifactsContext(context.Background()) error = %v", err)
 	}
 	if !strings.Contains(requestURI, "my%20file.txt") {
 		t.Fatalf("request URI = %q, want escaped filename", requestURI)
@@ -206,9 +339,9 @@ func TestUploadArtifactsRejectsSymlinkArtifactRoot(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAMESPACE", "test-ns")
 	t.Setenv("ORKA_TASK_NAME", "test-task")
 
-	err := UploadArtifacts()
+	err := UploadArtifactsContext(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "artifacts directory must not be a symlink") {
-		t.Fatalf("UploadArtifacts() error = %v, want symlink root rejection", err)
+		t.Fatalf("UploadArtifactsContext(context.Background()) error = %v, want symlink root rejection", err)
 	}
 }
 
@@ -222,14 +355,14 @@ func TestUploadArtifacts_ReturnsErrorWhenTotalSizeExceeded(t *testing.T) {
 	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatalf("UploadArtifacts() uploaded %s before enforcing total size", r.URL.Path)
+		t.Fatalf("UploadArtifactsContext(context.Background()) uploaded %s before enforcing total size", r.URL.Path)
 	}))
 	defer srv.Close()
 	t.Setenv("ORKA_CONTROLLER_URL", srv.URL)
 	t.Setenv("ORKA_TASK_NAMESPACE", "test-ns")
 	t.Setenv("ORKA_TASK_NAME", "test-task")
 
-	err := UploadArtifacts()
+	err := UploadArtifactsContext(context.Background())
 	if err == nil {
 		t.Fatal("expected error when total artifact size exceeds limit")
 	}
@@ -259,8 +392,8 @@ func TestUploadArtifacts_SkipsOversizedIndividualFiles(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAMESPACE", "test-ns")
 	t.Setenv("ORKA_TASK_NAME", "test-task")
 
-	if err := UploadArtifacts(); err != nil {
-		t.Fatalf("UploadArtifacts() error = %v", err)
+	if err := UploadArtifactsContext(context.Background()); err != nil {
+		t.Fatalf("UploadArtifactsContext(context.Background()) error = %v", err)
 	}
 
 	if len(uploaded) != 1 {
@@ -289,5 +422,28 @@ func TestMissingArtifactsRejectsTraversalFilename(t *testing.T) {
 	prepareArtifactsDir(t)
 	if _, err := MissingArtifacts([]string{"../outside.txt"}); err == nil {
 		t.Fatal("MissingArtifacts() error = nil, want invalid filename")
+	}
+}
+
+func TestDoPostWithContentTypePermanentRejectionDoesNotRetry(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusRequestEntityTooLarge)
+	}))
+	defer srv.Close()
+	start := time.Now()
+	err := doPostWithRetry(
+		context.Background(), "artifact upload", srv.URL, []byte("blob"), "",
+		"application/octet-stream", 30*time.Second, retryWait, artifactMaxRetries, nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "rejected permanently") {
+		t.Fatalf("error = %v, want a permanent rejection", err)
+	}
+	if got := attempts.Load(); got != 1 {
+		t.Fatalf("attempts = %d, want 1", got)
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Fatal("permanent rejection slept through the retry window")
 	}
 }

@@ -18,7 +18,7 @@ const initialMessageBatchCapacity = 32
 
 // SendMessage stores a new inter-agent message.
 func (s *Store) SendMessage(ctx context.Context, msg *store.Message) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`INSERT INTO messages (namespace, from_task, to_task, parent_task, content, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
 		msg.Namespace, msg.FromTask, msg.ToTask, msg.ParentTask, msg.Content, time.Now().UTC(),
@@ -30,15 +30,8 @@ func (s *Store) SendMessage(ctx context.Context, msg *store.Message) error {
 // parentTask scopes both direct and broadcast delivery to one coordinator family.
 // If markRead is true, messages are marked as read atomically.
 func (s *Store) GetMessages(ctx context.Context, namespace, taskName, parentTask string, markRead bool) ([]store.Message, error) {
-	if !markRead {
-		// Read-only path doesn't need a transaction
-		rows, err := s.db.QueryContext(ctx, selectUnreadMessagesSQL, namespace, taskName, parentTask, taskName)
-		if err != nil {
-			return nil, err
-		}
-		defer rows.Close() //nolint:errcheck
-
-		return scanUnreadMessages(rows, namespace)
+	if !markRead || s.taskDataTx(ctx) != nil {
+		return getTaskMessages(ctx, s.taskDataExecutor(ctx), namespace, taskName, parentTask, markRead)
 	}
 
 	// Transactional mark-read path
@@ -48,7 +41,18 @@ func (s *Store) GetMessages(ctx context.Context, namespace, taskName, parentTask
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	rows, err := tx.QueryContext(ctx, selectUnreadMessagesSQL, namespace, taskName, parentTask, taskName)
+	messages, err := getTaskMessages(ctx, tx, namespace, taskName, parentTask, true)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return messages, nil
+}
+
+func getTaskMessages(ctx context.Context, executor taskDataExecutor, namespace, taskName, parentTask string, markRead bool) ([]store.Message, error) {
+	rows, err := executor.QueryContext(ctx, selectUnreadMessagesSQL, namespace, taskName, parentTask, taskName)
 	if err != nil {
 		return nil, err
 	}
@@ -62,8 +66,8 @@ func (s *Store) GetMessages(ctx context.Context, namespace, taskName, parentTask
 	// Mark the same unread direct/broadcast predicate inside the transaction.
 	// The read snapshot is fixed by the SELECT above, so this avoids building a
 	// large IN clause while preserving the set of messages observed by the read.
-	if len(messages) > 0 {
-		if _, err := tx.ExecContext(ctx,
+	if markRead && len(messages) > 0 {
+		if _, err := executor.ExecContext(ctx,
 			`UPDATE messages
 			 SET read = TRUE
 			 WHERE namespace = ? AND read = FALSE
@@ -74,10 +78,6 @@ func (s *Store) GetMessages(ctx context.Context, namespace, taskName, parentTask
 		); err != nil {
 			return nil, err
 		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, err
 	}
 
 	return messages, nil
@@ -111,18 +111,16 @@ func scanUnreadMessages(rows *sql.Rows, namespace string) ([]store.Message, erro
 
 // DeleteTaskMessages deletes all messages involving a task (sent or received).
 func (s *Store) DeleteTaskMessages(ctx context.Context, namespace, taskName string) error {
-	_, err := s.db.ExecContext(ctx,
+	return s.deleteTaskData(ctx, namespace, taskName,
 		`DELETE FROM messages WHERE namespace = ? AND (from_task = ? OR to_task = ?)`,
 		namespace, taskName, taskName,
 	)
-	return err
 }
 
 // DeleteParentMessages deletes all messages for children of a parent task.
 func (s *Store) DeleteParentMessages(ctx context.Context, namespace, parentTask string) error {
-	_, err := s.db.ExecContext(ctx,
+	return s.deleteTaskData(ctx, namespace, parentTask,
 		`DELETE FROM messages WHERE namespace = ? AND parent_task = ?`,
 		namespace, parentTask,
 	)
-	return err
 }

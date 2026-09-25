@@ -39,20 +39,9 @@ func capture(ctx context.Context, root string, options normalizedOptions, retain
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	root = filepath.Clean(root)
-	if root == "." || root == "" {
-		return nil, ErrInvalidRoot
-	}
-	absolute, err := filepath.Abs(root)
+	absolute, rootInfo, err := captureRoot(root)
 	if err != nil {
-		return nil, fmt.Errorf("absolute workspace root: %w", err)
-	}
-	rootInfo, err := os.Lstat(absolute)
-	if err != nil {
-		return nil, pathError("inspect root", "", fmt.Errorf("%w: %v", ErrInvalidRoot, err))
-	}
-	if rootInfo.Mode()&os.ModeSymlink != 0 || !rootInfo.IsDir() {
-		return nil, pathError("inspect root", "", ErrInvalidRoot)
+		return nil, err
 	}
 
 	optionsDigest, err := options.digest()
@@ -66,6 +55,10 @@ func capture(ctx context.Context, root string, options normalizedOptions, retain
 		optionsDigest: optionsDigest,
 	}
 	seenFiles := make(map[fileIdentity]string)
+	var policy *contentPolicyPool
+	if options.contentFlagger != nil || options.contentFingerprinter != nil {
+		policy = newContentPolicyPool(ctx, options)
+	}
 
 	err = filepath.WalkDir(absolute, func(filePath string, dirEntry fs.DirEntry, walkErr error) error {
 		if err := ctx.Err(); err != nil {
@@ -100,7 +93,7 @@ func capture(ctx context.Context, root string, options normalizedOptions, retain
 			current.mode = normalizedMode(EntryDirectory, mode)
 			current.sourceMode = uint32(mode.Perm())
 		case mode.IsRegular():
-			current, err = captureRegular(ctx, filePath, relative, info, protected, options, retainContent, snapshot.totalBytes, seenFiles)
+			current, err = captureRegular(ctx, filePath, relative, info, protected, options, retainContent, snapshot.totalBytes, seenFiles, policy)
 			if err != nil {
 				return err
 			}
@@ -117,6 +110,21 @@ func capture(ctx context.Context, root string, options normalizedOptions, retain
 		snapshot.entryCount++
 		return nil
 	})
+	if policy != nil {
+		if err != nil {
+			policy.cancel()
+		}
+		verdicts := policy.close()
+		if err == nil {
+			err = ctx.Err()
+		}
+		for entryPath, verdict := range verdicts {
+			current := snapshot.entries[entryPath]
+			current.flagged = verdict.flagged
+			current.fingerprints = verdict.fingerprints
+			snapshot.entries[entryPath] = current
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -134,6 +142,26 @@ func capture(ctx context.Context, root string, options normalizedOptions, retain
 	return snapshot, nil
 }
 
+func captureRoot(root string) (string, os.FileInfo, error) {
+	root = filepath.Clean(root)
+	if root == "." || root == "" {
+		return "", nil, ErrInvalidRoot
+	}
+	absolute, err := filepath.Abs(root)
+	if err != nil {
+		return "", nil, fmt.Errorf("absolute workspace root: %w", err)
+	}
+	rootInfo, err := os.Lstat(absolute)
+	if err != nil {
+		return "", nil, pathError("inspect root", "", fmt.Errorf("%w: %v", ErrInvalidRoot, err))
+	}
+	if rootInfo.Mode()&os.ModeSymlink != 0 || !rootInfo.IsDir() {
+		return "", nil, pathError("inspect root", "", ErrInvalidRoot)
+	}
+
+	return absolute, rootInfo, nil
+}
+
 //nolint:gocyclo // The explicit state-machine branches are easier to audit together.
 func captureRegular(
 	ctx context.Context,
@@ -144,6 +172,7 @@ func captureRegular(
 	retainContent bool,
 	currentTotal int64,
 	seen map[fileIdentity]string,
+	policy *contentPolicyPool,
 ) (entry, error) {
 	if err := ctx.Err(); err != nil {
 		return entry{}, err
@@ -182,10 +211,23 @@ func captureRegular(
 		return entry{}, pathError("revalidate open file", relative, ErrHardlinkAmbiguous)
 	}
 
+	var policyWeight int64
+	if policy != nil {
+		policyWeight, err = policy.reserve(opened.Size())
+		if err != nil {
+			return entry{}, pathError("content policy", relative, err)
+		}
+		defer func() {
+			if policyWeight != 0 {
+				policy.release(policyWeight)
+			}
+		}()
+	}
+
 	hash := sha256.New()
 	var content bytes.Buffer
 	writer := io.Writer(hash)
-	if retainContent {
+	if retainContent || policy != nil {
 		writer = io.MultiWriter(hash, &content)
 	}
 	read, err := io.Copy(writer, io.LimitReader(&contextReader{ctx: ctx, reader: file}, options.limits.MaxFileBytes+1))
@@ -223,6 +265,15 @@ func captureRegular(
 	}
 	if retainContent {
 		result.content = append([]byte(nil), content.Bytes()...)
+	}
+	// The content policy verdict is evaluated behind the walk and applied to
+	// the entry once every file has been captured; the buffer is handed over
+	// and not touched again here.
+	if policy != nil {
+		if err := policy.submit(relative, content.Bytes(), policyWeight); err != nil {
+			return entry{}, pathError("content policy", relative, err)
+		}
+		policyWeight = 0
 	}
 	return result, nil
 }

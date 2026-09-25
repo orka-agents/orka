@@ -136,6 +136,21 @@ func (r *RepositoryMonitorReconciler) processIssueInventoryRun(ctx context.Conte
 			skipReason = repositoryMonitorIssueCommandSkipReason(monitor.Spec, issue)
 		} else {
 			skipReason = repositoryMonitorIssueSkipReason(monitor.Spec, issue, selected, maxPerRun)
+			if skipReason == repositoryMonitorSkipReasonOverLimit &&
+				repositoryMonitorIssueRetainWorkflowUnderRunLimit(item, existing) {
+				// The per-run cap bounds newly selected issues. An issue already
+				// past discovery keeps its recorded workflow even when its current
+				// content produces a new snapshot digest. Plan approval, an open
+				// PR, and verdict bookkeeping stay intact, and the retained item
+				// does not consume a selection slot or count as selected.
+				if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
+					return selected, createdTasks, skipped, err
+				}
+				if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, issue.Number, item.SnapshotDigest, "item_retained", fmt.Sprintf("Issue #%d retained past the run limit with its workflow intact", issue.Number), nil); err != nil {
+					return selected, createdTasks, skipped, err
+				}
+				continue
+			}
 		}
 		if skipReason != "" {
 			skipped++
@@ -154,7 +169,7 @@ func (r *RepositoryMonitorReconciler) processIssueInventoryRun(ctx context.Conte
 			if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
 				return selected, createdTasks, skipped, err
 			}
-			if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, issue.Number, item.SnapshotDigest, "item_skipped", fmt.Sprintf("Issue #%d skipped: %s", issue.Number, skipReason), map[string]any{"reason": skipReason, "labels": issue.Labels}); err != nil {
+			if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, issue.Number, item.SnapshotDigest, "item_skipped", fmt.Sprintf("Issue #%d skipped: %s", issue.Number, skipReason), map[string]any{eventReasonField: skipReason, substrateObjectLabelsField: issue.Labels}); err != nil {
 				return selected, createdTasks, skipped, err
 			}
 			continue
@@ -247,11 +262,49 @@ func (r *RepositoryMonitorReconciler) retireMissingRepositoryMonitorIssues(ctx c
 		if err := r.Store.UpsertMonitorItem(ctx, &item); err != nil {
 			return err
 		}
-		if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, item.Number, item.SnapshotDigest, "item_retired", fmt.Sprintf("Issue #%d is no longer in the open issue inventory", item.Number), map[string]any{"reason": repositoryMonitorSkipReasonMissing, "state": item.State}); err != nil {
+		if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, item.Number, item.SnapshotDigest, "item_retired", fmt.Sprintf("Issue #%d is no longer in the open issue inventory", item.Number), map[string]any{eventReasonField: repositoryMonitorSkipReasonMissing, stateField: item.State}); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// repositoryMonitorIssueWorkflowRetainedUnderRunLimit reports whether an
+// existing item carries workflow state that a background run's selection
+// cap must leave intact.
+func repositoryMonitorIssueWorkflowRetainedUnderRunLimit(existing *store.MonitorItem) bool {
+	if existing == nil {
+		return false
+	}
+	switch strings.TrimSpace(existing.WorkflowPhase) {
+	case "", repositoryMonitorIssuePhaseDiscovered, repositoryMonitorIssuePhaseBlocked:
+		return false
+	default:
+		return true
+	}
+}
+
+func repositoryMonitorIssueRetainWorkflowUnderRunLimit(item, existing *store.MonitorItem) bool {
+	if item == nil || !repositoryMonitorIssueWorkflowRetainedUnderRunLimit(existing) {
+		return false
+	}
+	item.WorkflowPhase = existing.WorkflowPhase
+	item.LastActionID = existing.LastActionID
+	item.LastActionKind = existing.LastActionKind
+	item.LastActionTaskName = existing.LastActionTaskName
+	item.LastVerdict = existing.LastVerdict
+	item.SkipReason = existing.SkipReason
+	// The retained workflow describes the snapshot it was started from, so
+	// the stored snapshot must stay that one: persisting the new digest
+	// next to the old workflow would make later runs treat the edited
+	// issue as unchanged (never rediscovered) and let an in-flight
+	// implementation result settle against requirements it never saw.
+	item.SnapshotDigest = existing.SnapshotDigest
+	item.Title = existing.Title
+	item.Body = existing.Body
+	item.LabelsJSON = existing.LabelsJSON
+	item.GitHubUpdatedAt = existing.GitHubUpdatedAt
+	return true
 }
 
 func repositoryMonitorIssueInventoryBlockCanClear(reason string) bool {
@@ -456,7 +509,7 @@ func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorIssuePage(ctx contex
 		baseURL = repositoryMonitorDefaultGitHubAPIBaseURL
 	}
 	query := url.Values{}
-	query.Set("state", "open")
+	query.Set(stateField, "open")
 	query.Set("per_page", strconv.Itoa(repositoryMonitorGitHubPerPage))
 	query.Set("page", strconv.Itoa(page))
 	endpoint := fmt.Sprintf("%s/repos/%s/%s/issues?%s", baseURL, url.PathEscape(owner), url.PathEscape(repository), query.Encode())
@@ -487,7 +540,7 @@ func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorGitHubJSON(ctx conte
 		return err
 	}
 	if strings.TrimSpace(token) != "" {
-		req.Header.Set("Authorization", strings.Join([]string{"Bearer", strings.TrimSpace(token)}, " "))
+		req.Header.Set("Authorization", strings.Join([]string{bearerAuthScheme, strings.TrimSpace(token)}, " "))
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")

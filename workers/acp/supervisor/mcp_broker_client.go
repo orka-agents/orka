@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -11,6 +12,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"go.opentelemetry.io/otel/propagation"
 
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
@@ -35,7 +38,7 @@ type controllerMCPBrokerClient struct {
 
 func NewControllerMCPBrokerClient(baseURL, namespace, bearer string, capabilitySecret []byte) (MCPBroker, error) {
 	parsed, err := url.Parse(strings.TrimSpace(baseURL))
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+	if err != nil || (parsed.Scheme != providerProxyScheme && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return nil, fmt.Errorf("MCP broker URL is invalid")
 	}
 	parsed.Path = harnessv2.MCPBrokerCallPath
@@ -104,13 +107,24 @@ func (c *controllerMCPBrokerClient) Call(ctx context.Context, request harnessv2.
 	// before reading the body.
 	httpRequest.Header.Set(harnessv2.MCPBrokerPoolNamespaceHeader, request.Namespace)
 	httpRequest.Header.Set(harnessv2.MCPBrokerPoolUIDHeader, string(request.Metadata.Fence.RuntimePoolUID))
+	// Trace context is transport metadata, outside the sealed call and capability.
+	propagation.TraceContext{}.Inject(ctx, propagation.HeaderCarrier(httpRequest.Header))
 	response, err := c.client.Do(httpRequest)
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return harnessv2.MCPBrokerCallResponse{}, context.Canceled
+		}
 		return harnessv2.MCPBrokerCallResponse{}, fmt.Errorf("MCP broker transport failed")
 	}
 	defer response.Body.Close() //nolint:errcheck
 	data, err := io.ReadAll(io.LimitReader(response.Body, int64(harnessv2.MaxMCPResultBytes+(64<<10))))
-	if err != nil || response.StatusCode != http.StatusOK {
+	if response.StatusCode != http.StatusOK {
+		return harnessv2.MCPBrokerCallResponse{}, fmt.Errorf("MCP broker rejected the tool call")
+	}
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return harnessv2.MCPBrokerCallResponse{}, context.Canceled
+		}
 		return harnessv2.MCPBrokerCallResponse{}, fmt.Errorf("MCP broker rejected the tool call")
 	}
 	var decoded harnessv2.MCPBrokerCallResponse

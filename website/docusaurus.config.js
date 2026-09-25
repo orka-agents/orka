@@ -14,11 +14,15 @@ const config = {
   trailingSlash: false,
 
   onBrokenLinks: 'throw',
+  onBrokenAnchors: 'throw',
   markdown: {
+    mermaid: true,
     hooks: {
       onBrokenMarkdownLinks: 'warn',
     },
   },
+
+  themes: ['@docusaurus/theme-mermaid'],
 
   i18n: {
     defaultLocale: 'en',
@@ -48,6 +52,9 @@ const config = {
   themeConfig:
     /** @type {import('@docusaurus/preset-classic').ThemeConfig} */
     ({
+      colorMode: {
+        respectPrefersColorScheme: true,
+      },
       navbar: {
         title: 'Orka',
         items: [
@@ -56,6 +63,11 @@ const config = {
             sidebarId: 'tutorialSidebar',
             position: 'left',
             label: 'Docs',
+          },
+          {
+            to: '/docs/demos',
+            label: 'Demos',
+            position: 'left',
           },
           {
             href: 'https://github.com/orka-agents/orka',
@@ -73,6 +85,10 @@ const config = {
               {
                 label: 'Getting Started',
                 to: '/docs/getting-started',
+              },
+              {
+                label: 'Demos',
+                to: '/docs/demos',
               },
               {
                 label: 'API Reference',

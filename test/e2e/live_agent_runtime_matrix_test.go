@@ -147,16 +147,13 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		dumpLiveCopilotProxyDebugInfo()
 	})
 
-	It("should run Codex through ACP v2 against a pinned read workspace", func() {
+	It("should run Codex through Orka harness v2 against a pinned read workspace", func() {
 		if gptModel == "" {
 			Skip("Skipping Codex runtime live proxy check: " + gptModelSkipReason)
 		}
 
 		DeferCleanup(func() {
-			cmd := exec.Command("kubectl", "delete", "task", codexTaskReadName, "-n", namespace, "--ignore-not-found")
-			_, _ = utils.Run(cmd)
-			cmd = exec.Command("kubectl", "delete", "agent", codexAgentName, "-n", namespace, "--ignore-not-found")
-			_, _ = utils.Run(cmd)
+			cleanupLiveRuntimeTask(apiBaseURL, token, codexTaskReadName, codexAgentName)
 		})
 
 		By("creating a Codex agent backed by the discovered GPT-family model")
@@ -167,7 +164,8 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		err = applyManifestJSON(runtimeAgentTaskManifest(
 			codexTaskReadName,
 			codexAgentName,
-			fmt.Sprintf("Read README in the repository root and reply with exactly %s and nothing else.", liveRuntimeRepoSentinel),
+			"Use a tool to read README in the repository root. "+
+				"Wait for the read to succeed, then reply with the exact file contents and nothing else.",
 			4,
 			nil,
 			&runtimeWorkspaceConfig{GitRepo: liveRuntimeRepoURL, Ref: liveRuntimeRepoRef},
@@ -198,16 +196,13 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		verifyLiveACPTaskExecutionUpdates(apiBaseURL, token, codexTaskReadName)
 	})
 
-	It("should run OpenCode through ACP v2 and enforce read intent", func() {
+	It("should run OpenCode through Orka harness v2 and enforce read intent", func() {
 		if opencodeModel == "" {
 			Skip("Skipping OpenCode runtime live proxy check: " + opencodeModelSkipReason)
 		}
 
 		DeferCleanup(func() {
-			cmd := exec.Command("kubectl", "delete", "task", opencodeTaskReadName, "-n", namespace, "--ignore-not-found")
-			_, _ = utils.Run(cmd)
-			cmd = exec.Command("kubectl", "delete", "agent", opencodeAgentName, "-n", namespace, "--ignore-not-found")
-			_, _ = utils.Run(cmd)
+			cleanupLiveRuntimeTask(apiBaseURL, token, opencodeTaskReadName, opencodeAgentName)
 		})
 
 		By("creating an OpenCode agent with native mutation and shell tools requested")
@@ -260,17 +255,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 
 	It("should run claude code through the live proxy with session wiring and exact output", func() {
 		DeferCleanup(func() {
-			cmd := exec.Command("kubectl", "delete", "task", claudeTaskName, "-n", namespace, "--ignore-not-found")
-			_, _ = utils.Run(cmd)
-			cmd = exec.Command("kubectl", "delete", "agent", claudeAgentName, "-n", namespace, "--ignore-not-found")
-			_, _ = utils.Run(cmd)
-			_, _, _ = doAuthorizedJSONRequest(
-				http.MethodDelete,
-				fmt.Sprintf("%s/api/v1/sessions/%s", strings.TrimRight(apiBaseURL, "/"), claudeSessionName),
-				token,
-				"",
-				"",
-			)
+			cleanupLiveRuntimeTask(apiBaseURL, token, claudeTaskName, claudeAgentName)
 		})
 
 		By("creating a Claude agent backed by the discovered Claude-family model")
@@ -311,6 +296,18 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		Expect(acpCopilotRuntimeRef).To(MatchRegexp(`@sha256:[a-f0-9]{64}$`))
 	})
 })
+
+func cleanupLiveRuntimeTask(apiBaseURL, token, taskName, agentName string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	cleanup, err := newE2ECleanup(apiBaseURL, token)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	ExpectWithOffset(1, cleanup.tasks(ctx, []string{taskName}, false)).To(Succeed())
+	cmd := exec.CommandContext(ctx, "kubectl", "delete", "agent", agentName,
+		"-n", namespace, "--ignore-not-found", "--wait=true", "--timeout=30s", "--request-timeout=10s")
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to delete live runtime test Agent")
+}
 
 func openCodeModelSupportsEndpoint(catalog proxyModelCatalog, model, endpoint string) bool {
 	model = strings.TrimSpace(model)
@@ -428,9 +425,66 @@ func boolPtr(v bool) *bool {
 type liveACPTaskEventsResponse struct {
 	LatestSeq int64 `json:"latestSeq"`
 	Events    []struct {
-		Seq  int64  `json:"seq"`
-		Type string `json:"type"`
+		Seq         int64           `json:"seq"`
+		Type        string          `json:"type"`
+		Content     json.RawMessage `json:"content"`
+		ContentText string          `json:"contentText"`
 	} `json:"events"`
+}
+
+// Keep CI diagnostics to known metadata and error markers. Titles, arguments,
+// tool output and arbitrary error messages can contain credentials.
+func liveACPToolFailureDiagnostics(listed liveACPTaskEventsResponse) string {
+	var failures []map[string]any
+	for _, event := range listed.Events {
+		if event.Type != events.ExecutionEventTypeToolCallFailed {
+			continue
+		}
+		if len(failures) == 10 {
+			break
+		}
+		var content struct {
+			JournalKind           string          `json:"journalKind"`
+			ToolKind              string          `json:"toolKind"`
+			Outcome               string          `json:"outcome"`
+			ControllerSynthesized bool            `json:"controllerSynthesized"`
+			ContentOmitted        json.RawMessage `json:"contentOmitted"`
+		}
+		diagnostic := map[string]any{"seq": event.Seq, "textPresent": event.ContentText != ""}
+		if err := json.Unmarshal(event.Content, &content); err == nil {
+			diagnostic["controllerSynthesized"] = content.ControllerSynthesized
+			diagnostic["outcomeUnknown"] = content.Outcome == "outcome_unknown"
+			diagnostic["contentOmitted"] = len(content.ContentOmitted) > 0
+			switch content.JournalKind {
+			case "tool_terminal", "tool_stream_closure":
+				diagnostic["journalKind"] = content.JournalKind
+			}
+			switch content.ToolKind {
+			case "read", "edit", "delete", "move", "search", "execute", "think", "fetch", "switch_mode", "other":
+				diagnostic["toolKind"] = content.ToolKind
+			}
+		} else {
+			diagnostic["metadataUnavailable"] = true
+		}
+		// These are text matches, not a diagnosis. Never copy matching lines or
+		// unknown values into the report, even if the API already redacted them.
+		lower := strings.ToLower(event.ContentText)
+		var markers []string
+		for _, marker := range []string{
+			"failed to create unified exec process", "permission denied", "operation not permitted",
+			"sandbox", "no such file or directory", "command not found", "timed out",
+			"context canceled", "connection refused", "mcp session is at capacity",
+			"rejected", "unknown tool", "not allowed",
+		} {
+			if strings.Contains(lower, marker) {
+				markers = append(markers, marker)
+			}
+		}
+		diagnostic["errorTextMarkers"] = markers
+		failures = append(failures, diagnostic)
+	}
+	encoded, _ := json.Marshal(failures)
+	return string(encoded)
 }
 
 func verifyLiveACPTaskExecutionUpdates(apiBaseURL, token, taskName string) {
@@ -450,6 +504,9 @@ func verifyLiveACPTaskExecutionUpdates(apiBaseURL, token, taskName string) {
 	typeCounts := map[string]int{}
 	for _, event := range listed.Events {
 		typeCounts[event.Type]++
+	}
+	if typeCounts[events.ExecutionEventTypeToolCallFailed] > 0 {
+		_, _ = fmt.Fprintf(GinkgoWriter, "Live ACP failed-tool diagnostics: %s\n", liveACPToolFailureDiagnostics(listed))
 	}
 	for _, eventType := range []string{
 		events.ExecutionEventTypeModelRequestStarted,

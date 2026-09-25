@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -42,17 +43,98 @@ import (
 func setupTestInternalHandlers() (*InternalHandlers, *fiber.App, *sqlite.Store) {
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = batchv1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	fixtures := []struct {
+		name        string
+		parent      string
+		sessionName string
+	}{
+		{name: "my-task", parent: "coordinator", sessionName: "my-session"},
+		{name: "nonexistent", parent: "coordinator"},
+		{name: "worker-a", parent: "coordinator"},
+		{name: "worker-b", parent: "coordinator"},
+		{name: "worker-c", parent: "coordinator"},
+		{name: "reader", parent: "coord"},
+		{name: "prior-task", parent: "coordinator", sessionName: "prior"},
+		{name: "current-task", parent: "coordinator", sessionName: "current"},
+		{name: "gateway-private-task", parent: "coordinator", sessionName: "gateway-private"},
+		{name: "empty-session-task", parent: "coordinator", sessionName: "empty-session"},
+		{name: "slash-session-task", parent: "coordinator", sessionName: "team/a"},
+	}
+	objects := make([]client.Object, 0, 2+3*len(fixtures))
+	objects = append(objects,
+		internalCallerAuthTaskObject("coordinator", "coordinator-uid", "", "", ""),
+		internalCallerAuthTaskObject("coord", "coord-uid", "", "", ""),
+	)
+	sessionTasks := map[string]string{
+		"my-session":      "my-task",
+		"prior":           "prior-task",
+		"current":         "current-task",
+		"gateway-private": "gateway-private-task",
+		"empty-session":   "empty-session-task",
+		"team/a":          "slash-session-task",
+	}
+	for _, fixture := range fixtures {
+		task := internalCallerAuthTaskObject(
+			fixture.name,
+			fixture.name+"-uid",
+			fixture.name+"-job",
+			fixture.parent,
+			fixture.sessionName,
+		)
+		job := internalCallerAuthJob(task, fixture.name+"-job", fixture.name+"-job-uid")
+		pod := internalCallerAuthPod(task, fixture.name+"-pod", fixture.name+"-pod-uid", job)
+		objects = append(objects, task, job, pod)
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
 	h := NewInternalHandlers(ss, ss, ss, ss, ss, InternalHandlersConfig{
-		MemoryStore:         ss,
-		MemoryProposalStore: ss,
+		Client:                  k8sClient,
+		APIReader:               k8sClient,
+		MemoryStore:             ss,
+		MemoryProposalStore:     ss,
+		TaskProvenanceProtected: true,
 	})
 	app := fiber.New()
 
-	// Inject a default UserInfo so verifyCallerNamespace passes
+	// Select the fixture identity addressed by each existing handler test. This
+	// keeps the original behavior tests intact while exercising the real
+	// Pod -> Job -> Task UID authorization path.
 	app.Use(func(c fiber.Ctx) error {
-		c.Locals(UserInfoContextKey, &UserInfo{
-			Username: "system:serviceaccount:default:worker",
-		})
+		taskName := ""
+		parts := strings.Split(strings.Trim(c.Path(), "/"), "/")
+		if len(parts) >= 5 && parts[0] == "internal" && parts[1] == "v1" {
+			switch parts[2] {
+			case "results", "artifacts", "plans", "tasks", "messages":
+				taskName = parts[4]
+			case "events":
+				if len(parts) >= 6 {
+					taskName = parts[5]
+				}
+			case "sessions":
+				if len(parts) >= 6 && parts[len(parts)-1] == "transcript" {
+					sessionName, err := url.PathUnescape(strings.Join(parts[4:len(parts)-1], "/"))
+					if err == nil {
+						taskName = sessionTasks[sessionName]
+					}
+				}
+			}
+		}
+		if c.Method() == http.MethodPost && strings.Contains(c.Path(), "/messages/") {
+			var message struct {
+				FromTask string `json:"fromTask"`
+			}
+			if json.Unmarshal(c.Body(), &message) == nil && strings.TrimSpace(message.FromTask) != "" {
+				taskName = strings.TrimSpace(message.FromTask)
+			}
+		}
+		if taskName == "" {
+			taskName = "my-task"
+		}
+		c.Locals(UserInfoContextKey, internalCallerAuthWorkerUser(taskName+"-pod", taskName+"-pod-uid"))
 		return c.Next()
 	})
 
@@ -356,19 +438,16 @@ func TestUpdateExecutionWorkspaceStatus(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: "my-task", Namespace: "default", UID: taskUID},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
-		Status:     corev1alpha1.TaskStatus{JobName: "my-task-job"},
+		Status:     corev1alpha1.TaskStatus{JobName: "my-task-job", JobUID: "job-uid"},
 	}
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "my-task-job",
 			Namespace: "default",
 			UID:       types.UID("job-uid"),
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: corev1alpha1.GroupVersion.String(),
-				Kind:       "Task",
-				Name:       "my-task",
-				UID:        taskUID,
-			}},
+			OwnerReferences: []metav1.OwnerReference{internalCallerAuthOwnerReference(
+				corev1alpha1.GroupVersion.String(), kubernetesTaskKind, "my-task", taskUID,
+			)},
 		},
 	}
 	pod := &corev1.Pod{
@@ -379,25 +458,20 @@ func TestUpdateExecutionWorkspaceStatus(t *testing.T) {
 			Labels: map[string]string{
 				labels.LabelTask: labels.SelectorValue("my-task"),
 			},
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: batchv1.SchemeGroupVersion.String(),
-				Kind:       "Job",
-				Name:       "my-task-job",
-				UID:        types.UID("job-uid"),
-			}},
+			OwnerReferences: []metav1.OwnerReference{internalCallerAuthOwnerReference(
+				batchv1.SchemeGroupVersion.String(), kubernetesJobKind, "my-task-job", types.UID("job-uid"),
+			)},
 		},
+		Spec: corev1.PodSpec{ServiceAccountName: "worker"},
 	}
 	oldJob := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "my-task-old-job",
 			Namespace: "default",
 			UID:       types.UID("old-job-uid"),
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: corev1alpha1.GroupVersion.String(),
-				Kind:       "Task",
-				Name:       "my-task",
-				UID:        taskUID,
-			}},
+			OwnerReferences: []metav1.OwnerReference{internalCallerAuthOwnerReference(
+				corev1alpha1.GroupVersion.String(), kubernetesTaskKind, "my-task", taskUID,
+			)},
 		},
 	}
 	oldPod := &corev1.Pod{
@@ -408,13 +482,11 @@ func TestUpdateExecutionWorkspaceStatus(t *testing.T) {
 			Labels: map[string]string{
 				labels.LabelTask: labels.SelectorValue("my-task"),
 			},
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: batchv1.SchemeGroupVersion.String(),
-				Kind:       "Job",
-				Name:       "my-task-old-job",
-				UID:        types.UID("old-job-uid"),
-			}},
+			OwnerReferences: []metav1.OwnerReference{internalCallerAuthOwnerReference(
+				batchv1.SchemeGroupVersion.String(), kubernetesJobKind, "my-task-old-job", types.UID("old-job-uid"),
+			)},
 		},
+		Spec: corev1.PodSpec{ServiceAccountName: "worker"},
 	}
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -425,8 +497,9 @@ func TestUpdateExecutionWorkspaceStatus(t *testing.T) {
 	app := fiber.New()
 	app.Use(func(c fiber.Ctx) error {
 		c.Locals(UserInfoContextKey, &UserInfo{
-			Username: "system:serviceaccount:default:worker",
-			AuthType: AuthTypeTokenReview,
+			Username:  "system:serviceaccount:default:worker",
+			Namespace: "default",
+			AuthType:  AuthTypeTokenReview,
 			Extra: map[string]authenticationv1.ExtraValue{
 				"authentication.kubernetes.io/pod-name": {"my-task-pod"},
 				"authentication.kubernetes.io/pod-uid":  {"pod-uid"},
@@ -491,8 +564,9 @@ func TestUpdateExecutionWorkspaceStatus(t *testing.T) {
 	appOldWorker := fiber.New()
 	appOldWorker.Use(func(c fiber.Ctx) error {
 		c.Locals(UserInfoContextKey, &UserInfo{
-			Username: "system:serviceaccount:default:worker",
-			AuthType: AuthTypeTokenReview,
+			Username:  "system:serviceaccount:default:worker",
+			Namespace: "default",
+			AuthType:  AuthTypeTokenReview,
 			Extra: map[string]authenticationv1.ExtraValue{
 				"authentication.kubernetes.io/pod-name": {"my-task-old-pod"},
 				"authentication.kubernetes.io/pod-uid":  {"old-pod-uid"},
@@ -526,8 +600,9 @@ func TestUpdateExecutionWorkspaceStatus(t *testing.T) {
 	appForbidden := fiber.New()
 	appForbidden.Use(func(c fiber.Ctx) error {
 		c.Locals(UserInfoContextKey, &UserInfo{
-			Username: "system:serviceaccount:default:worker",
-			AuthType: AuthTypeTokenReview,
+			Username:  "system:serviceaccount:default:worker",
+			Namespace: "default",
+			AuthType:  AuthTypeTokenReview,
 			Extra: map[string]authenticationv1.ExtraValue{
 				"authentication.kubernetes.io/pod-name": {"other-pod"},
 				"authentication.kubernetes.io/pod-uid":  {"other-pod-uid"},
@@ -598,6 +673,7 @@ func TestUpdateExecutionWorkspaceStatusBuildsFreshStatusOnConflictRetry(t *testi
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
 		Status: corev1alpha1.TaskStatus{
 			JobName: "my-task-job",
+			JobUID:  "job-uid",
 			ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
 				Provider: corev1alpha1.WorkspaceProviderSubstrate,
 				Phase:    corev1alpha1.ExecutionWorkspacePhaseReady,
@@ -621,12 +697,9 @@ func TestUpdateExecutionWorkspaceStatusBuildsFreshStatusOnConflictRetry(t *testi
 			Name:      "my-task-job",
 			Namespace: "default",
 			UID:       types.UID("job-uid"),
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: corev1alpha1.GroupVersion.String(),
-				Kind:       "Task",
-				Name:       "my-task",
-				UID:        taskUID,
-			}},
+			OwnerReferences: []metav1.OwnerReference{internalCallerAuthOwnerReference(
+				corev1alpha1.GroupVersion.String(), kubernetesTaskKind, "my-task", taskUID,
+			)},
 		},
 	}
 	pod := &corev1.Pod{
@@ -637,13 +710,11 @@ func TestUpdateExecutionWorkspaceStatusBuildsFreshStatusOnConflictRetry(t *testi
 			Labels: map[string]string{
 				labels.LabelTask: labels.SelectorValue("my-task"),
 			},
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: batchv1.SchemeGroupVersion.String(),
-				Kind:       "Job",
-				Name:       "my-task-job",
-				UID:        types.UID("job-uid"),
-			}},
+			OwnerReferences: []metav1.OwnerReference{internalCallerAuthOwnerReference(
+				batchv1.SchemeGroupVersion.String(), kubernetesJobKind, "my-task-job", types.UID("job-uid"),
+			)},
 		},
+		Spec: corev1.PodSpec{ServiceAccountName: "worker"},
 	}
 	baseClient := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -685,8 +756,9 @@ func TestUpdateExecutionWorkspaceStatusBuildsFreshStatusOnConflictRetry(t *testi
 	app := fiber.New()
 	app.Use(func(c fiber.Ctx) error {
 		c.Locals(UserInfoContextKey, &UserInfo{
-			Username: "system:serviceaccount:default:worker",
-			AuthType: AuthTypeTokenReview,
+			Username:  "system:serviceaccount:default:worker",
+			Namespace: "default",
+			AuthType:  AuthTypeTokenReview,
 			Extra: map[string]authenticationv1.ExtraValue{
 				"authentication.kubernetes.io/pod-name": {"my-task-pod"},
 				"authentication.kubernetes.io/pod-uid":  {"pod-uid"},
@@ -808,8 +880,60 @@ func TestGetSessionTranscript(t *testing.T) {
 	})
 }
 
+type countingTranscriptSearchStore struct {
+	store.SessionStore
+	store.TaskDataTransactionStore
+	calls       int
+	policyReads int
+	filters     []store.TranscriptSearchFilter
+}
+
+func (s *countingTranscriptSearchStore) GetSessionType(ctx context.Context, namespace, name string) (string, error) {
+	s.policyReads++
+	return transcriptSessionType(ctx, s.SessionStore, namespace, name)
+}
+
+func (s *countingTranscriptSearchStore) SearchTranscript(
+	ctx context.Context,
+	filter store.TranscriptSearchFilter,
+) ([]store.TranscriptSearchResult, error) {
+	s.calls++
+	s.filters = append(s.filters, filter)
+	return s.SessionStore.SearchTranscript(ctx, filter)
+}
+
+func TestSearchAuthorizedTranscriptResultsUsesSingleBoundedQuery(t *testing.T) {
+	db, err := sqlite.NewDB(":memory:")
+	require.NoError(t, err)
+	dataStore := sqlite.NewStore(db, ":memory:")
+	for _, sessionName := range []string{"session-a", "session-b", "excluded"} {
+		require.NoError(t, dataStore.CreateSession(t.Context(), &store.SessionRecord{
+			Namespace: "default", Name: sessionName, SessionType: "task",
+		}))
+		require.NoError(t, dataStore.AppendMessages(t.Context(), "default", sessionName, []store.SessionMessage{{
+			Role: "assistant", Content: "shared needle in " + sessionName,
+		}}))
+	}
+
+	capture := &countingTranscriptSearchStore{SessionStore: dataStore, TaskDataTransactionStore: dataStore}
+	results, err := searchAuthorizedTranscriptResults(t.Context(), capture, store.TranscriptSearchFilter{
+		Namespace: "default", Query: "needle", ExcludeSessionName: "excluded", Limit: 10,
+	}, map[string][]corev1alpha1.SessionReference{
+		"session-a": {}, "session-b": {}, "excluded": {},
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, capture.calls)
+	require.Len(t, capture.filters, 1)
+	require.Equal(t, []string{"session-a", "session-b"}, capture.filters[0].SessionNames)
+	require.Empty(t, capture.filters[0].ExcludeSessionName)
+	require.Len(t, results, 2)
+	require.ElementsMatch(t, []string{"session-a", "session-b"}, []string{results[0].SessionName, results[1].SessionName})
+}
+
 func TestSearchTranscript(t *testing.T) {
 	h, app, ss := setupTestInternalHandlers()
+	capture := &countingTranscriptSearchStore{SessionStore: ss, TaskDataTransactionStore: ss}
+	h.sessionStore = capture
 	app.Get("/internal/v1/sessions/:namespace/search", h.SearchTranscript)
 
 	now := time.Now().UTC()
@@ -852,6 +976,15 @@ func TestSearchTranscript(t *testing.T) {
 		require.Equal(t, "prior", results[0].SessionName)
 		require.Equal(t, "assistant", results[0].Role)
 		require.Contains(t, results[0].Snippet, "needle")
+		require.Equal(t, 1, capture.calls)
+		require.Zero(t, capture.policyReads)
+	})
+
+	t.Run("gateway session is not searchable without a cutoff", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/internal/v1/sessions/default/search?query=needle&sessionName=gateway-private", nil)
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusForbidden, resp.StatusCode)
 	})
 
 	t.Run("missing query", func(t *testing.T) {
@@ -956,7 +1089,7 @@ func TestVerifyCallerNamespace(t *testing.T) {
 
 		resp, err := app.Test(req)
 		require.NoError(t, err)
-		require.Equal(t, http.StatusNoContent, resp.StatusCode)
+		require.Equal(t, http.StatusForbidden, resp.StatusCode)
 	})
 
 	t.Run("cross-namespace SA denied", func(t *testing.T) {
@@ -986,7 +1119,7 @@ func TestSubmitPlanAdditional(t *testing.T) {
 	t.Run("invalid json body", func(t *testing.T) {
 		app := fiber.New()
 		app.Use(func(c fiber.Ctx) error {
-			c.Locals(UserInfoContextKey, &UserInfo{Username: "system:serviceaccount:default:worker"})
+			c.Locals(UserInfoContextKey, internalCallerAuthWorkerUser("my-task-pod", "my-task-pod-uid"))
 			return c.Next()
 		})
 		app.Post("/internal/v1/plans/:namespace/:taskName", h.SubmitPlan)
@@ -1192,7 +1325,7 @@ func TestGetSessionTranscriptAppliesTaskCutoff(t *testing.T) {
 		Spec: corev1alpha1.TaskSpec{SessionRef: &corev1alpha1.SessionReference{
 			Name: "mutated-session", MaxMessages: 1, ThroughMessageID: "future-user", PromptIncluded: false,
 		}},
-		Status: corev1alpha1.TaskStatus{JobName: "gateway-task-job"},
+		Status: corev1alpha1.TaskStatus{JobName: "gateway-task-job", JobUID: "job-uid"},
 	}
 	now := time.Now().UTC()
 	if _, _, err := ss.AdmitGatewayEvent(ctx, store.GatewayEventAdmission{Event: store.GatewayEvent{
@@ -1219,17 +1352,20 @@ func TestGetSessionTranscriptAppliesTaskCutoff(t *testing.T) {
 	}}))
 	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
 		Name: "gateway-task-job", Namespace: defaultNamespace, UID: "job-uid",
-		OwnerReferences: []metav1.OwnerReference{{
-			APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: task.Name, UID: task.UID,
-		}},
+		OwnerReferences: []metav1.OwnerReference{internalCallerAuthOwnerReference(
+			corev1alpha1.GroupVersion.String(), kubernetesTaskKind, task.Name, task.UID,
+		)},
 	}}
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
-		Name: "gateway-task-pod", Namespace: defaultNamespace, UID: "pod-uid",
-		Labels: map[string]string{labels.LabelTask: labels.SelectorValue(task.Name)},
-		OwnerReferences: []metav1.OwnerReference{{
-			APIVersion: batchv1.SchemeGroupVersion.String(), Kind: "Job", Name: job.Name, UID: job.UID,
-		}},
-	}}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "gateway-task-pod", Namespace: defaultNamespace, UID: "pod-uid",
+			Labels: map[string]string{labels.LabelTask: labels.SelectorValue(task.Name)},
+			OwnerReferences: []metav1.OwnerReference{internalCallerAuthOwnerReference(
+				batchv1.SchemeGroupVersion.String(), kubernetesJobKind, job.Name, job.UID,
+			)},
+		},
+		Spec: corev1.PodSpec{ServiceAccountName: "worker"},
+	}
 	fabricated := task.DeepCopy()
 	fabricated.Name = "fabricated-task"
 	fabricated.UID = "fabricated-uid"
@@ -1242,15 +1378,12 @@ func TestGetSessionTranscriptAppliesTaskCutoff(t *testing.T) {
 		return c.Next()
 	})
 	app.Get("/internal/v1/sessions/:namespace/:name/transcript", h.GetSessionTranscript)
+	app.Get("/internal/v1/sessions/:namespace/search", h.SearchTranscript)
 
-	missingIdentity := httptest.NewRequest(
-		http.MethodGet,
-		"/internal/v1/sessions/default/gateway-session/transcript",
-		nil,
-	)
-	missingResponse, err := app.Test(missingIdentity)
+	searchReq := httptest.NewRequest(http.MethodGet, "/internal/v1/sessions/default/search?query=current", nil)
+	searchResp, err := app.Test(searchReq)
 	require.NoError(t, err)
-	require.Equal(t, http.StatusForbidden, missingResponse.StatusCode)
+	require.Equal(t, http.StatusForbidden, searchResp.StatusCode)
 
 	fabricatedRequest := httptest.NewRequest(
 		http.MethodGet,
@@ -1270,18 +1403,20 @@ func TestGetSessionTranscriptAppliesTaskCutoff(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusForbidden, mutableSessionResponse.StatusCode)
 
-	req := httptest.NewRequest(
-		http.MethodGet,
-		"/internal/v1/sessions/default/gateway-session/transcript?taskName=gateway-task",
-		nil,
-	)
-	resp, err := app.Test(req)
-	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	lines := strings.Split(strings.TrimSpace(string(body)), "\n")
-	require.Len(t, lines, 3)
-	require.Contains(t, string(body), "current")
-	require.NotContains(t, string(body), "future")
+	for _, taskHint := range []string{"", "?taskName=gateway-task"} {
+		t.Run("authenticated caller"+taskHint, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet,
+				"/internal/v1/sessions/default/gateway-session/transcript"+taskHint, nil)
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = resp.Body.Close() })
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			lines := strings.Split(strings.TrimSpace(string(body)), "\n")
+			require.Len(t, lines, 3)
+			require.Contains(t, string(body), "current")
+			require.NotContains(t, string(body), "future")
+		})
+	}
 }

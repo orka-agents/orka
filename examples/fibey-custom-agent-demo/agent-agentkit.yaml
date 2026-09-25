@@ -1,0 +1,8 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: fibey-remote-agentkit
+spec:
+  runtime:
+    runtimeRef:
+      name: fibey-agentkit-runtime

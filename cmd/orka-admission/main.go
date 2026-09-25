@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	orkaadmission "github.com/orka-agents/orka/internal/admission"
 	"github.com/orka-agents/orka/internal/controller"
 )
@@ -42,6 +43,7 @@ var admissionScheme = runtime.NewScheme()
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(admissionScheme))
 	utilruntime.Must(corev1alpha1.AddToScheme(admissionScheme))
+	utilruntime.Must(workspacev1alpha1.AddToScheme(admissionScheme))
 }
 
 type options struct {
@@ -75,7 +77,7 @@ func (o *options) bind(fs *flag.FlagSet) {
 	fs.BoolVar(&o.enableHTTP2, "enable-http2", false,
 		"Enable HTTP/2 on the webhook listener. HTTP/2 is disabled by default.")
 	fs.StringVar(&o.controllerUsernames, "controller-usernames", os.Getenv("ORKA_ADMISSION_CONTROLLER_USERNAMES"),
-		"Comma-separated exact Kubernetes usernames authorized for controller-owned Task execution writes.")
+		"Comma-separated exact Kubernetes usernames authorized for controller-owned admission writes.")
 	fs.StringVar(&o.taskProvenanceTrustedUsers, "task-provenance-trusted-users",
 		os.Getenv("ORKA_ADMISSION_TASK_PROVENANCE_TRUSTED_USERS"),
 		"Comma-separated exact Kubernetes usernames authorized to write controller-managed Task provenance; "+
@@ -184,7 +186,14 @@ func main() {
 	orkaadmission.RegisterTaskProvenanceWebhook(
 		webhookServer,
 		admissionScheme,
-		orkaadmission.NewTaskProvenanceConfig(true, provenanceUsers, opts.taskProvenanceTrustedSAs, ""),
+		orkaadmission.NewTaskProvenanceConfig(
+			true,
+			strings.Join(controllerUsernames, ","),
+			provenanceUsers,
+			opts.taskProvenanceTrustedSAs,
+			"",
+		),
+		mgr.GetAPIReader(),
 	)
 	orkaadmission.RegisterWorkspaceClassUseWebhooks(
 		webhookServer,

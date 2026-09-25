@@ -8,10 +8,12 @@ import (
 	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestPrepareTaskSessionSkipsBootstrapForLiveRuntimeSessionReuse(t *testing.T) {
@@ -107,6 +109,98 @@ func TestPrepareTaskSessionRetainsBootstrapWhenRuntimeSessionRecreationIsRequire
 	}
 }
 
+func TestPrepareTaskSessionAdvancesPastDurableWorkspaceGenerationWithoutCachedBinding(t *testing.T) {
+	ctx := context.Background()
+	controlStore, fence, closeStore := newACPSessionTestStore(t, filepath.Join(t.TempDir(), "durable-floor.db"))
+	defer closeStore()
+	continuity, transcriptStore := newBootstrapTrackingSessionContinuity(t, controlStore, "durable-floor-session-uid")
+	control := ensureACPSessionForTest(t, continuity, fence, "durable-floor")
+	appendBootstrapHistoryForTest(t, controlStore, control)
+
+	profileDigest := harnessv2.ProfileDigest(testControlDigestForDispatcher("durable-floor-profile"))
+	mcpDigest := testControlDigestForDispatcher("durable-floor-mcp")
+	task := newBootstrapSessionTaskForTest(
+		t, controlStore, fence, control, "durable-floor-task", types.UID("33333333-3333-3333-3333-333333333333"),
+	)
+	workspace := &workspacev1alpha1.ExecutionWorkspace{ObjectMeta: metav1.ObjectMeta{
+		Namespace: task.Namespace, Name: "durable-floor-workspace", UID: types.UID("durable-floor-workspace-uid"),
+		Annotations: map[string]string{acpWorkspaceDurableSessionCommittedAnnotation: "3"},
+	}}
+	task.Labels = map[string]string{acpExecutionWorkspaceLinkLabel: workspace.Name}
+	task.Annotations = map[string]string{acpExecutionWorkspaceUIDAnnotation: string(workspace.UID)}
+	kubeClient := fake.NewClientBuilder().WithScheme(bindingTestScheme(t)).WithObjects(workspace).Build()
+	dispatcher := &ACPDispatcher{
+		Client: kubeClient, APIReader: kubeClient, Store: controlStore, Sessions: continuity,
+		runtimeSessions: make(map[string]ACPRuntimeSessionBinding),
+	}
+
+	session, err := dispatcher.prepareTaskSession(
+		ctx, task, fence, profileDigest, mcpDigest, "replacement-runtime", "replacement-boot",
+		acpSessionLineageIdentity{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session == nil || session.Reused {
+		t.Fatalf("durable-floor RuntimeSession preparation = %#v, want recreated session", session)
+	}
+	if session.Binding.Generation != 4 {
+		t.Fatalf("durable-floor RuntimeSession generation = %d, want 4", session.Binding.Generation)
+	}
+	if session.Bootstrap == nil || session.Bootstrap.MessageCount != 2 {
+		t.Fatalf("durable-floor RuntimeSession bootstrap = %#v, want retained two-message history", session.Bootstrap)
+	}
+	if transcriptStore.loadTranscriptCalls != 1 || transcriptStore.loadTranscriptThroughCalls != 0 {
+		t.Fatalf(
+			"durable-floor RuntimeSession transcript loads: LoadTranscript=%d LoadTranscriptThrough=%d, want 1 and 0",
+			transcriptStore.loadTranscriptCalls, transcriptStore.loadTranscriptThroughCalls,
+		)
+	}
+}
+
+func TestPrepareTaskSessionAdvancesPastDurableSessionGenerationWithoutCachedBinding(t *testing.T) {
+	ctx := context.Background()
+	baseStore, fence, closeStore := newACPSessionTestStore(t, filepath.Join(t.TempDir(), "durable-session-floor.db"))
+	defer closeStore()
+	controlStore := &runtimeGenerationSessionStore{bootstrapSessionTestStore: baseStore}
+	continuity, transcriptStore := newBootstrapTrackingSessionContinuity(t, controlStore, "durable-session-floor-uid")
+	control := ensureACPSessionForTest(t, continuity, fence, "durable-session-floor")
+	appendBootstrapHistoryForTest(t, controlStore, control)
+	controlStore.generation = 3
+
+	profileDigest := harnessv2.ProfileDigest(testControlDigestForDispatcher("durable-session-floor-profile"))
+	mcpDigest := testControlDigestForDispatcher("durable-session-floor-mcp")
+	task := newBootstrapSessionTaskForTest(
+		t, controlStore, fence, control, "durable-session-floor-task", types.UID("44444444-4444-4444-4444-444444444444"),
+	)
+	dispatcher := &ACPDispatcher{
+		Store: controlStore, Sessions: continuity, runtimeSessions: make(map[string]ACPRuntimeSessionBinding),
+	}
+
+	session, err := dispatcher.prepareTaskSession(
+		ctx, task, fence, profileDigest, mcpDigest, "replacement-runtime", "replacement-boot",
+		acpSessionLineageIdentity{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session == nil || session.Reused {
+		t.Fatalf("durable Session floor preparation = %#v, want recreated session", session)
+	}
+	if session.Binding.Generation != 4 {
+		t.Fatalf("durable Session floor RuntimeSession generation = %d, want 4", session.Binding.Generation)
+	}
+	if session.Bootstrap == nil || session.Bootstrap.MessageCount != 2 {
+		t.Fatalf("durable Session floor bootstrap = %#v, want retained two-message history", session.Bootstrap)
+	}
+	if transcriptStore.loadTranscriptCalls != 1 || transcriptStore.loadTranscriptThroughCalls != 0 {
+		t.Fatalf(
+			"durable Session floor transcript loads: LoadTranscript=%d LoadTranscriptThrough=%d, want 1 and 0",
+			transcriptStore.loadTranscriptCalls, transcriptStore.loadTranscriptThroughCalls,
+		)
+	}
+}
+
 type bootstrapTrackingSessionStore struct {
 	store.SessionStore
 	loadTranscriptCalls        int
@@ -130,6 +224,23 @@ func (s *bootstrapTrackingSessionStore) LoadTranscriptThrough(
 type bootstrapSessionTestStore interface {
 	store.DurableControlStore
 	store.SessionStore
+}
+
+type runtimeGenerationSessionStore struct {
+	bootstrapSessionTestStore
+	generation int64
+}
+
+func (s *runtimeGenerationSessionStore) GetSessionControl(
+	ctx context.Context, namespace, sessionName string,
+) (*store.SessionControl, error) {
+	control, err := s.bootstrapSessionTestStore.GetSessionControl(ctx, namespace, sessionName)
+	if err != nil {
+		return nil, err
+	}
+	copy := *control
+	copy.RuntimeSessionGeneration = s.generation
+	return &copy, nil
 }
 
 func newBootstrapTrackingSessionContinuity(

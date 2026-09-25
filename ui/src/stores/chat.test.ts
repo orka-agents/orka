@@ -13,7 +13,63 @@ function makeMessage(overrides: Partial<ChatMessage> & { role: ChatMessage['role
 
 describe('useChatStore', () => {
   beforeEach(() => {
-    useChatStore.setState({ messages: [], currentSessionId: null, isStreaming: false })
+    useChatStore.setState({ messages: [], currentSessionId: null, isStreaming: false, activeNamespace: 'default', selections: {} })
+  })
+
+  it('resets the transcript and session when switching between namespaces', () => {
+    useChatStore.setState({
+      activeNamespace: 'alpha',
+      messages: [{ id: 'm1', role: 'user', content: 'hi', timestamp: new Date().toISOString() }],
+      currentSessionId: 'sess-alpha',
+      isStreaming: true,
+      turnEpoch: 3,
+    })
+    useChatStore.getState().selectNamespace('beta')
+    const state = useChatStore.getState()
+    expect(state.messages).toEqual([])
+    expect(state.currentSessionId).toBeNull()
+    expect(state.isStreaming).toBe(false)
+    expect(state.turnEpoch).toBe(4)
+
+    // Re-selecting the active namespace and the initial activation keep the
+    // transcript.
+    useChatStore.setState({ messages: [{ id: 'm2', role: 'user', content: 'again', timestamp: new Date().toISOString() }], currentSessionId: 'sess-beta' })
+    useChatStore.getState().selectNamespace('beta')
+    expect(useChatStore.getState().currentSessionId).toBe('sess-beta')
+    useChatStore.setState({ activeNamespace: '' })
+    useChatStore.getState().selectNamespace('gamma')
+    expect(useChatStore.getState().currentSessionId).toBe('sess-beta')
+    expect(useChatStore.getState().turnEpoch).toBe(4)
+  })
+
+  it('keeps a separate provider/model selection per namespace', () => {
+    useChatStore.getState().selectNamespace('alpha')
+    useChatStore.getState().setProvider('anthropic')
+    useChatStore.getState().setModel('claude-sonnet-4-20250514')
+
+    useChatStore.getState().selectNamespace('beta')
+    expect(useChatStore.getState().provider).toBe('')
+    expect(useChatStore.getState().model).toBe('')
+    useChatStore.getState().setProvider('openai-proxy')
+
+    useChatStore.getState().selectNamespace('alpha')
+    expect(useChatStore.getState().provider).toBe('anthropic')
+    expect(useChatStore.getState().model).toBe('claude-sonnet-4-20250514')
+    expect(useChatStore.getState().selections).toEqual({
+      alpha: { provider: 'anthropic', model: 'claude-sonnet-4-20250514' },
+      beta: { provider: 'openai-proxy', model: '' },
+    })
+  })
+
+  it('setProvider and setModel persist the picker choice', () => {
+    useChatStore.setState({ provider: '', model: '' })
+    useChatStore.getState().setProvider('anthropic')
+    useChatStore.getState().setModel('claude-sonnet-4-20250514')
+    expect(useChatStore.getState().provider).toBe('anthropic')
+    expect(useChatStore.getState().model).toBe('claude-sonnet-4-20250514')
+    // A new session keeps the picker choice.
+    useChatStore.getState().newSession()
+    expect(useChatStore.getState().provider).toBe('anthropic')
   })
 
   it('has correct initial state', () => {

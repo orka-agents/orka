@@ -19,6 +19,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 func TestCreateAgentTool_Name(t *testing.T) {
@@ -472,7 +473,9 @@ func TestCreateAgentTool_Execute_BuiltInRuntimesAreCredentialFree(t *testing.T) 
 
 			k8sClient := newFakeClient(parentTask())
 			tool := NewCreateAgentTool(k8sClient, executionmode.HarnessV2)
-			args := json.RawMessage(`{"role":"coder","systemPrompt":"You write code","runtime":` + tt.runtimeArgs + `}`)
+			// Harness-v2 built-in runtimes require model.name (mirroring the
+			// admission contract); the model is incidental to this test.
+			args := json.RawMessage(`{"role":"coder","systemPrompt":"You write code","model":{"name":"test-model"},"runtime":` + tt.runtimeArgs + `}`)
 
 			result, err := tool.Execute(context.Background(), args)
 			if err != nil {
@@ -566,6 +569,7 @@ func TestNormalizedCreateAgentModelAcceptsQualifiedIDWithNestedSlashes(t *testin
 	got, err := normalizedCreateAgentModel(
 		&RuntimeArgs{Type: string(corev1alpha1.AgentRuntimeOpencode)},
 		&ModelArgs{Name: "openrouter/anthropic/claude-sonnet-4", ContextWindow: &contextWindow, MaxTokens: &maxTokens},
+		executionmode.HarnessV2,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -730,5 +734,40 @@ func TestCreateAgentTool_Execute_DefaultNamespace(t *testing.T) {
 
 	if agentResult.Namespace != defaultNamespace {
 		t.Errorf("namespace = %q, want %q", agentResult.Namespace, defaultNamespace)
+	}
+}
+
+func TestCreateAgentModelRequiredForBuiltInRuntimesInHarnessV2(t *testing.T) {
+	if _, err := normalizedCreateAgentModel(&RuntimeArgs{Type: "codex"}, nil, executionmode.HarnessV2); err == nil || !strings.Contains(err.Error(), "model.name is required") {
+		t.Fatalf("harness v2 err = %v, want the model requirement mirroring admission", err)
+	}
+	if _, err := normalizedCreateAgentModel(&RuntimeArgs{Type: "codex"}, nil, executionmode.HarnessV1); err != nil {
+		t.Fatalf("harness v1 err = %v, want no model requirement", err)
+	}
+}
+
+func TestCreateAgentToolExecuteInheritsHarnessV2RuntimeModel(t *testing.T) {
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(workerenv.AIModel, "gpt-5.6-sol")
+	k8sClient := newFakeClient(parentTask())
+
+	result, err := NewCreateAgentTool(k8sClient, executionmode.HarnessV2).Execute(
+		context.Background(),
+		json.RawMessage(`{"role":"coder","systemPrompt":"You write code","runtime":{"type":"codex"}}`),
+	)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	var createdResult CreateAgentResult
+	if err := json.Unmarshal([]byte(result), &createdResult); err != nil {
+		t.Fatal(err)
+	}
+	created := &corev1alpha1.Agent{}
+	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{Name: createdResult.AgentName, Namespace: createdResult.Namespace}, created); err != nil {
+		t.Fatal(err)
+	}
+	if created.Spec.Model == nil || created.Spec.Model.Name != "gpt-5.6-sol" {
+		t.Fatalf("model = %#v, want inherited gpt-5.6-sol", created.Spec.Model)
 	}
 }

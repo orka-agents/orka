@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -12,11 +14,13 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
+	"github.com/orka-agents/orka/internal/gateway/protocol"
 	"github.com/orka-agents/orka/internal/gateway/referenceadapter"
 )
 
@@ -65,14 +69,14 @@ func TestGatewayReconcilerProbesReferenceAdapter(t *testing.T) {
 		}},
 		Data: map[string][]byte{"token": []byte("outbound-token")},
 	}
-	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&gatewayv1alpha1.Gateway{}).
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&gatewayv1alpha1.Gateway{}).
 		WithObjects(class, object, inbound, outbound).Build()
-	reconciler := &GatewayReconciler{Client: client, Scheme: scheme, HTTPClient: server.Client(), AllowInsecureLoopback: true}
+	reconciler := &GatewayReconciler{Client: k8sClient, Scheme: scheme, HTTPClient: server.Client(), AllowInsecureLoopback: true}
 	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "chat"}}); err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
 	updated := &gatewayv1alpha1.Gateway{}
-	if err := client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "chat"}, updated); err != nil {
+	if err := k8sClient.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "chat"}, updated); err != nil {
 		t.Fatal(err)
 	}
 	if !updated.Status.Ready || !updated.Status.Connected || updated.Status.ObservedCapabilities == nil {
@@ -80,6 +84,34 @@ func TestGatewayReconcilerProbesReferenceAdapter(t *testing.T) {
 	}
 	if updated.Status.ResolvedEndpoint != server.URL {
 		t.Fatalf("resolved endpoint = %q, want %q", updated.Status.ResolvedEndpoint, server.URL)
+	}
+}
+
+func TestGatewayInterimCapabilityProjectionAndRequirement(t *testing.T) {
+	var response protocol.CapabilitiesResponse
+	if err := json.Unmarshal([]byte(`{"capabilities":{"interimDelivery":true}}`), &response); err != nil {
+		t.Fatal(err)
+	}
+	observed := observedGatewayCapabilities(&response)
+	encoded, err := json.Marshal(observed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"interimDelivery":true`) {
+		t.Fatalf("observed capability lost: %s", encoded)
+	}
+	var required gatewayv1alpha1.GatewayCapabilities
+	if err := json.Unmarshal([]byte(`{"interimDelivery":true}`), &required); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateRequiredGatewayCapabilities(required, gatewayv1alpha1.GatewayCapabilities{}); err == nil {
+		t.Fatal("missing required interimDelivery accepted")
+	}
+	if err := validateRequiredGatewayCapabilities(required, observed.Capabilities); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateRequiredGatewayCapabilities(gatewayv1alpha1.GatewayCapabilities{}, gatewayv1alpha1.GatewayCapabilities{}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -273,6 +305,239 @@ func TestGatewayBindingReconcilerAgentChangeEnqueuesOverlappingPeers(t *testing.
 	}
 	if len(got) != 2 || !got[direct.Name] || !got[overlap.Name] {
 		t.Fatalf("bindingsForAgent() = %v, want direct and overlapping peer", got)
+	}
+}
+
+func TestGatewayBindingReconcilerNativeAI(t *testing.T) {
+	for _, withRuntimeDefault := range []bool{false, true} {
+		t.Run(fmt.Sprintf("runtimeDefault=%t", withRuntimeDefault), func(t *testing.T) {
+			scheme := newGatewayBindingTestScheme(t)
+			binding := gatewayBindingTestObject("binding", "assistant")
+			if withRuntimeDefault {
+				maxTurns := int32(12)
+				binding.Spec.TaskDefaults.AgentRuntimeMaxTurns = &maxTurns
+			}
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "assistant", Namespace: "default"},
+				Spec:       corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{Provider: "openai", Name: "test-model"}},
+			}
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+				WithStatusSubresource(&gatewayv1alpha1.GatewayBinding{}).
+				WithObjects(gatewayBindingTestGateway(), agent, binding).Build()
+			reconciler := &GatewayBindingReconciler{Client: fakeClient, Scheme: scheme}
+			request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(binding)}
+			if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+				t.Fatal(err)
+			}
+			updated := &gatewayv1alpha1.GatewayBinding{}
+			if err := fakeClient.Get(context.Background(), request.NamespacedName, updated); err != nil {
+				t.Fatal(err)
+			}
+			if updated.Status.Ready == withRuntimeDefault || updated.Status.Programmed == withRuntimeDefault {
+				t.Fatalf("status = %+v, want native readiness=%t", updated.Status, !withRuntimeDefault)
+			}
+			if withRuntimeDefault && !strings.Contains(updated.Status.Message, "agentRuntimeMaxTurns") {
+				t.Fatalf("status message = %q, want incompatible runtime-only default", updated.Status.Message)
+			}
+		})
+	}
+}
+
+func TestGatewayBindingReconcilerValidatesRuntimeMaxTurnsCompatibility(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		contract    corev1alpha1.AgentRuntimeContractVersion
+		external    bool
+		wantReady   bool
+		wantMessage string
+	}{
+		{
+			name:      "built-in harness v2",
+			contract:  corev1alpha1.AgentRuntimeContractHarnessV2,
+			wantReady: true,
+		},
+		{
+			name:      "external harness v1",
+			contract:  corev1alpha1.AgentRuntimeContractHarnessV1,
+			external:  true,
+			wantReady: true,
+		},
+		{
+			name:        "external harness v2",
+			contract:    corev1alpha1.AgentRuntimeContractHarnessV2,
+			external:    true,
+			wantMessage: "taskDefaults.agentRuntimeMaxTurns is not supported by external orka.harness.v2 AgentRuntime",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			scheme := newGatewayBindingTestScheme(t)
+			maxTurns := int32(12)
+			binding := gatewayBindingTestObject("binding", "assistant")
+			binding.Spec.TaskDefaults.AgentRuntimeMaxTurns = &maxTurns
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "assistant", Namespace: "default"},
+				Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+					Type:            corev1alpha1.AgentRuntimeCodex,
+					ContractVersion: &test.contract,
+				}},
+			}
+			objects := []client.Object{gatewayBindingTestGateway(), agent, binding}
+			if test.external {
+				agent.Spec.Runtime.Type = ""
+				agent.Spec.Runtime.ContractVersion = nil
+				agent.Spec.Runtime.RuntimeRef = &corev1alpha1.AgentRuntimeReference{Name: "external-runtime"}
+				objects = append(objects, &corev1alpha1.AgentRuntime{
+					ObjectMeta: metav1.ObjectMeta{Name: "external-runtime", Namespace: "default"},
+					Spec:       corev1alpha1.AgentRuntimeRegistrySpec{ContractVersion: &test.contract},
+				})
+			}
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+				WithStatusSubresource(&gatewayv1alpha1.GatewayBinding{}).
+				WithObjects(objects...).Build()
+			reconciler := &GatewayBindingReconciler{Client: fakeClient, Scheme: scheme}
+			request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: binding.Name}}
+			if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+				t.Fatalf("Reconcile() error = %v", err)
+			}
+
+			updated := &gatewayv1alpha1.GatewayBinding{}
+			if err := fakeClient.Get(context.Background(), request.NamespacedName, updated); err != nil {
+				t.Fatal(err)
+			}
+			if updated.Status.Ready != test.wantReady || updated.Status.Programmed != test.wantReady {
+				t.Fatalf("GatewayBinding status = %+v, want ready=%t", updated.Status, test.wantReady)
+			}
+			if !updated.Status.Accepted || !updated.Status.ResolvedRefs {
+				t.Fatalf("GatewayBinding status = %+v, want accepted and resolved", updated.Status)
+			}
+			if test.wantMessage != "" && !strings.Contains(updated.Status.Message, test.wantMessage) {
+				t.Fatalf("GatewayBinding message = %q, want substring %q", updated.Status.Message, test.wantMessage)
+			}
+		})
+	}
+}
+
+func TestGatewayBindingReconcilerValidatesExternalRuntimeDefaultsAndPolicy(t *testing.T) {
+	contract := corev1alpha1.AgentRuntimeContractHarnessV2
+	for _, test := range []struct {
+		name         string
+		capabilities *corev1alpha1.AgentRuntimeCapabilitiesSpec
+		retryPolicy  *gatewayv1alpha1.GatewayTaskRetryPolicy
+		wantReady    bool
+		wantMessage  string
+	}{
+		{
+			name: "valid registered policy",
+			capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
+				Profile: &corev1alpha1.AgentRuntimeProfileSpec{
+					ProviderKind: "codex", Model: "gpt-5.6", WorkspaceIntent: corev1alpha1.WorkspaceIntentRead,
+				},
+				MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{
+					AllowedTools:          []string{"read_evidence"},
+					DisallowedTools:       []string{},
+					ApprovalRequiredTools: []string{},
+				},
+			},
+			wantReady: true,
+		},
+		{
+			name: "missing registered policy",
+			capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
+				Profile: &corev1alpha1.AgentRuntimeProfileSpec{
+					ProviderKind: "codex", Model: "gpt-5.6", WorkspaceIntent: corev1alpha1.WorkspaceIntentRead,
+				},
+			},
+			wantMessage: "missing capabilities.mcpPolicy",
+		},
+		{
+			name: "retry defaults",
+			capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
+				Profile: &corev1alpha1.AgentRuntimeProfileSpec{
+					ProviderKind: "codex", Model: "gpt-5.6", WorkspaceIntent: corev1alpha1.WorkspaceIntentRead,
+				},
+				MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{AllowedTools: []string{}, DisallowedTools: []string{}},
+			},
+			retryPolicy: &gatewayv1alpha1.GatewayTaskRetryPolicy{MaxRetries: 1},
+			wantMessage: "taskDefaults.retryPolicy.maxRetries must be 0 for external orka.harness.v2 AgentRuntime",
+		},
+		{
+			name: "write-pinned runtime",
+			capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
+				Profile: &corev1alpha1.AgentRuntimeProfileSpec{
+					ProviderKind: "codex", Model: "gpt-5.6", WorkspaceIntent: corev1alpha1.WorkspaceIntentWrite,
+				},
+				MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{AllowedTools: []string{}, DisallowedTools: []string{}},
+			},
+			wantMessage: `profile workspace intent "write" does not match Gateway Task intent "read"`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			scheme := newGatewayBindingTestScheme(t)
+			binding := gatewayBindingTestObject("binding", "assistant")
+			binding.Spec.TaskDefaults.RetryPolicy = test.retryPolicy
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "assistant", Namespace: "default"},
+				Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+					RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "external-runtime"},
+				}},
+			}
+			runtimeObject := &corev1alpha1.AgentRuntime{
+				ObjectMeta: metav1.ObjectMeta{Name: "external-runtime", Namespace: "default"},
+				Spec: corev1alpha1.AgentRuntimeRegistrySpec{
+					ContractVersion: &contract,
+					Capabilities:    test.capabilities,
+				},
+			}
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+				WithStatusSubresource(&gatewayv1alpha1.GatewayBinding{}).
+				WithObjects(gatewayBindingTestGateway(), agent, runtimeObject, binding).Build()
+			reconciler := &GatewayBindingReconciler{Client: fakeClient, Scheme: scheme}
+			request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: binding.Name}}
+			if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+				t.Fatalf("Reconcile() error = %v", err)
+			}
+
+			updated := &gatewayv1alpha1.GatewayBinding{}
+			if err := fakeClient.Get(context.Background(), request.NamespacedName, updated); err != nil {
+				t.Fatal(err)
+			}
+			if updated.Status.Ready != test.wantReady || updated.Status.Programmed != test.wantReady {
+				t.Fatalf("GatewayBinding status = %+v, want ready=%t", updated.Status, test.wantReady)
+			}
+			if test.wantMessage != "" && !strings.Contains(updated.Status.Message, test.wantMessage) {
+				t.Fatalf("GatewayBinding message = %q, want substring %q", updated.Status.Message, test.wantMessage)
+			}
+		})
+	}
+}
+
+func TestGatewayBindingReconcilerAgentRuntimeChangeEnqueuesOverlappingPeers(t *testing.T) {
+	scheme := newGatewayBindingTestScheme(t)
+	direct := gatewayBindingTestObject("direct", "changed-agent")
+	overlap := gatewayBindingTestObject("overlap", "other-agent")
+	differentPriority := gatewayBindingTestObject("different-priority", "other-agent")
+	differentPriority.Spec.Priority = 1
+	differentContext := gatewayBindingTestObject("different-context", "other-agent")
+	differentContext.Spec.Match.ContextID = "elsewhere"
+	changedAgent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "changed-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+			RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: " changed-runtime "},
+		}},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(changedAgent, direct, overlap, differentPriority, differentContext).
+		Build()
+	reconciler := &GatewayBindingReconciler{Client: fakeClient, Scheme: scheme}
+	requests := reconciler.bindingsForAgentRuntime(context.Background(), &corev1alpha1.AgentRuntime{
+		ObjectMeta: metav1.ObjectMeta{Name: "changed-runtime", Namespace: "default"},
+	})
+	got := make(map[string]bool, len(requests))
+	for _, request := range requests {
+		got[request.Name] = true
+	}
+	if len(got) != 2 || !got[direct.Name] || !got[overlap.Name] {
+		t.Fatalf("bindingsForAgentRuntime() = %v, want direct and overlapping peer", got)
 	}
 }
 

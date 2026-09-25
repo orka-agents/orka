@@ -1,10 +1,17 @@
 ---
 slug: /autonomous-tasks
+description: "Letting a coordinator agent plan, run, and re-plan on its own until a goal is met."
 ---
 
-# Autonomous Task Execution
+# Autonomous Task execution
 
-Autonomous mode enables long-running, self-driving development loops. A coordinator agent can autonomously decompose a high-level goal into sub-tasks, implement them, test, iterate, and continue working until the goal is complete.
+Autonomous mode runs a native `type: ai` coordinator across multiple Jobs. The
+coordinator delegates work, saves a plan, and continues from that plan in the
+next iteration. ACP `type: agent` runtimes do not support
+`coordination.autonomous`.
+
+The [autonomous planning example](https://github.com/orka-agents/orka/tree/main/examples/autonomous-task) includes a
+coordinator, planner, reviewer, and Task with complete setup instructions.
 
 ## Overview
 
@@ -14,7 +21,7 @@ When a task's agent has `coordination.autonomous: true`, the controller runs a l
 2. The agent reads the current plan, delegates sub-tasks, and updates the plan
 3. When the Job completes, the controller checks termination conditions
 4. If not complete, it creates a new Job (next iteration) with the updated plan
-5. Repeats until: max iterations reached, goal marked complete, or user cancels
+5. Repeats until the goal is marked complete, the iteration limit is reached, or execution fails; suspension pauses the loop
 
 ## Configuration
 
@@ -29,7 +36,7 @@ spec:
   providerRef:
     name: my-provider
   model:
-    name: claude-sonnet-4-20250514
+    name: claude-sonnet-4.6
   coordination:
     enabled: true
     autonomous: true
@@ -55,9 +62,9 @@ spec:
   prompt: "Implement a REST API with user authentication, CRUD operations, and tests"
 ```
 
-## How It Works
+## How it works
 
-### Controller Loop
+### Controller loop
 
 The controller manages the autonomous loop at the Kubernetes level:
 
@@ -66,7 +73,7 @@ The controller manages the autonomous loop at the Kubernetes level:
 - The task's `status.iteration` tracks the current iteration number
 - Termination conditions are checked after each Job completes
 
-### Plan State
+### Plan state
 
 The LLM manages its own plan using the `update_plan` tool:
 
@@ -85,18 +92,22 @@ Plan state includes:
 - **goal_complete**: Whether the goal has been achieved
 - **plan_document**: Freeform markdown plan managed by the LLM
 
-### Termination Conditions
+### Termination conditions
 
 The autonomous loop stops when any of these conditions are met:
 
 1. **Goal complete**: The LLM calls `update_plan` with `goal_complete: true`
 2. **Max iterations**: The configured `maxIterations` limit is reached
-3. **User cancel**: The task's `suspend` field is set to `true`
+3. **Pause**: The task's `suspend` field is set to `true`; the current iteration completes and the Task waits for resume
 4. **Timeout**: The per-iteration timeout is exceeded (fails the task)
+
+Reaching `maxIterations` also gives the Task a `Succeeded` phase. The Task status
+message distinguishes `goal complete` from `reached max iterations`. Check the
+final result's deliverable as well as the phase.
 
 ## Monitoring
 
-### Task Status
+### Task status
 
 The task status shows the current iteration:
 
@@ -109,7 +120,10 @@ status:
 
 ### Plan API
 
-View the current plan state:
+View the current plan state while the Task is running. Completion deletes this
+working state, so the coordinator must include its deliverable in its final
+result. Read that result through `GET /api/v1/tasks/<task-name>/result` after
+completion.
 
 ```bash
 # Via API
@@ -121,7 +135,7 @@ Response:
 ```json
 {
   "TaskName": "build-feature",
-  "Namespace": "default",
+  "Namespace": "orka-system",
   "Iteration": 5,
   "Summary": "Completed auth and CRUD, working on tests",
   "ProgressPct": 70,
@@ -130,17 +144,61 @@ Response:
 }
 ```
 
-### Pausing and Resuming
+### Pausing and resuming
 
 Suspend an autonomous task:
 
 ```bash
-kubectl patch task build-feature --type=merge -p '{"spec":{"suspend":true}}'
+kubectl -n orka-system patch task build-feature --type=merge -p '{"spec":{"suspend":true}}'
 ```
 
 The current iteration will complete, then the task will stop.
 
-## Environment Variables
+## Human approvals
+
+An autonomous agent can run for many iterations without a human in the loop.
+For the steps that should not happen unattended — deploying, spending money,
+touching production — Orka supports **approval gates**: the task parks itself
+and waits for a person to decide.
+
+Two things create an approval:
+
+- **Tool gating.** List Custom Tool names in
+  `spec.coordination.approvalRequiredTools` on the Agent. When the agent calls
+  one of those tools, the task parks before the tool executes. Only Custom
+  Tool CRDs can be gated; built-in tools are rejected by validation.
+- **The agent asking.** In autonomous mode the `request_approval` tool is
+  auto-injected, so an agent can park its own task when its instructions tell
+  it to seek sign-off.
+
+```yaml
+spec:
+  coordination:
+    enabled: true
+    autonomous: true
+    approvalRequiredTools:
+      - deploy-to-production   # a Custom Tool CRD name
+```
+
+While parked, the task stays in a waiting state and the loop does not advance.
+Decide from the CLI:
+
+```bash
+orka task approvals '<task>'                  # list pending approvals with IDs
+orka task approve '<task>' '<approvalID>'
+orka task decline '<task>' '<approvalID>'
+```
+
+or from the dashboard: the task detail page has an **Approvals** tab with
+Approve and Decline buttons. Approving lets the gated tool call proceed;
+declining returns the refusal to the agent, which continues the loop and can
+choose another course.
+
+One timing note: approvals are derived from the task's execution event stream,
+so a decision issued in the same instant the task parks can briefly return
+`approval not found`. Re-run the command a moment later.
+
+## Environment variables
 
 These environment variables are injected into autonomous worker pods:
 

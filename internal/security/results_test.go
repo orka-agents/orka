@@ -43,6 +43,86 @@ func TestParseThreatModelResultRequiresExactEnvelopeAndBinding(t *testing.T) {
 	}
 }
 
+func TestParseThreatModelResultRedactsCredentials(t *testing.T) {
+	expected := AgentResultBinding{RepositoryScan: "repo", ScanID: "scan_123", PolicyDigest: "sha256:policy"}
+	// Synthetic values are assembled here so the fixtures cannot be mistaken
+	// for credentials copied from a repository.
+	token := "ghp_" + strings.Repeat("a", 36)
+	value := strings.Repeat("b", 32)
+	const prefix = "# Threat model\n\nCredential handling in `config/auth.go:12`.\n\n"
+	tests := []struct {
+		name, content, want string
+	}{
+		{name: "token", content: "Found `" + token + "`.", want: "Found `[REDACTED]`."},
+		{name: "assignment", content: "```\nAPI_KEY=\"" + value + "\"\n```", want: "```\nAPI_KEY=\"[REDACTED]\"\n```"},
+		{name: "inline assignment", content: "Environment assignment `API_KEY=\"" + value + "\"`.", want: "Environment assignment `API_KEY=\"[REDACTED]\"`."},
+		{name: "bearer header", content: "Authorization: Bearer " + value, want: "Authorization: [REDACTED]"},
+		{name: "transaction header", content: "Txn-Token: " + value, want: "Txn-Token: [REDACTED]"},
+		{name: "URL credentials", content: "https://user:" + value + "@example.test/repo", want: "https://[REDACTED]@example.test/repo"},
+		{name: "signed URL", content: "https://example.test/file?sig=" + value + "&page=1", want: "https://example.test/file?sig=[REDACTED]&page=1"},
+		{name: "prose", content: "The token is " + value, want: "The token is [REDACTED]"},
+		{name: "NUL", content: token[:2] + "\x00" + token[2:], want: "[REDACTED]"},
+		{name: "escape", content: token[:2] + "\x1b" + token[2:], want: "[REDACTED]"},
+		{name: "delete", content: token[:2] + "\x7f" + token[2:], want: "[REDACTED]"},
+		{name: "C1 control", content: token[:2] + "\u0085" + token[2:], want: "[REDACTED]"},
+		{name: "zero-width space", content: token[:2] + "\u200b" + token[2:], want: "[REDACTED]"},
+		{name: "zero-width joiner", content: token[:2] + "\u200d" + token[2:], want: "[REDACTED]"},
+		{name: "directional override", content: token[:2] + "\u202e" + token[2:], want: "[REDACTED]"},
+		{
+			name:    "ordinary markdown",
+			content: "Credentials come from Kubernetes Secrets.\n\n## 認証\n\n```go\n\tloadCredentials()\n```\n\n- Rotate keys regularly.",
+			want:    "Credentials come from Kubernetes Secrets.\n\n## 認証\n\n```go\n\tloadCredentials()\n```\n\n- Rotate keys regularly.",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := ThreatModelResultEnvelope{
+				SchemaVersion: AgentResultSchemaVersion, Kind: AgentResultKindThreatModel,
+				RepositoryScan: expected.RepositoryScan, ScanID: expected.ScanID, PolicyDigest: expected.PolicyDigest,
+				ThreatModel: prefix + tt.content,
+			}
+			got, err := ParseThreatModelResult(mustMarshalSecurityResult(t, result), expected)
+			if err != nil {
+				t.Fatalf("ParseThreatModelResult() error = %v", err)
+			}
+			if got != prefix+tt.want {
+				t.Fatal("threat model did not redact the credential while preserving surrounding markdown")
+			}
+			result.ThreatModel = got
+			again, err := ParseThreatModelResult(mustMarshalSecurityResult(t, result), expected)
+			if err != nil || again != got {
+				t.Fatalf("sanitized threat model is not stable on reprocessing: %v", err)
+			}
+		})
+	}
+}
+
+func TestParseThreatModelResultValidatesSanitizedContent(t *testing.T) {
+	tests := []struct {
+		name, content, wantError string
+	}{
+		{name: "empty", content: " \n\t", wantError: "threatModel is required"},
+		{name: "only invisible runes", content: "\x00\u200b", wantError: "threatModel is required"},
+		{name: "missing heading", content: "Trusted boundaries.", wantError: "beginning with a heading"},
+		{name: "transcript", content: "# Model\n<tool_call>read</tool_call>", wantError: "tool transcript"},
+		{name: "hidden transcript", content: "# Model\n<tool_\u200bcall>read</tool_\u200bcall>", wantError: "tool transcript"},
+		{name: "oversized before stripping", content: "# " + strings.Repeat("a", maxThreatModelBytes-2) + "\x00", wantError: "threatModel exceeds"},
+		{name: "oversized after redaction", content: "# Model\n" + strings.Repeat("pwd=x\n", maxThreatModelBytes/10), wantError: "threatModel exceeds"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := ThreatModelResultEnvelope{
+				SchemaVersion: AgentResultSchemaVersion, Kind: AgentResultKindThreatModel,
+				ThreatModel: tt.content,
+			}
+			got, err := ParseThreatModelResult(mustMarshalSecurityResult(t, result), AgentResultBinding{})
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) || got != "" {
+				t.Fatalf("ParseThreatModelResult() error = %v, want %q and no content", err, tt.wantError)
+			}
+		})
+	}
+}
+
 func TestParseFindingsResultRequiresExactRepositoryAndContext(t *testing.T) {
 	repository := FindingsV2Repository{
 		RepoURL: "https://github.com/sozercan/vekil",
@@ -218,4 +298,88 @@ func mustMarshalSecurityResult(t *testing.T, value any) []byte {
 		t.Fatalf("json.Marshal() error = %v", err)
 	}
 	return data
+}
+
+const testPatchFindingID = "fnd_1"
+
+func TestParsePatchResultAcceptsIdentityBoundEnvelope(t *testing.T) {
+	t.Parallel()
+	data := []byte(`{"schemaVersion":1,"kind":"orka.security.patch.v1","repositoryScan":"kaset","findingId":"fnd_1","summary":"Escaped the redirect parameter.","changedFiles":["./routes/index.js","routes/index.js","views/login.hbs"],"testsRun":[{"command":"npm test","exitCode":0}],"risk":"LOW"}`)
+	got, err := ParsePatchResult(data, PatchResultExpectation{RepositoryScan: "kaset", FindingID: testPatchFindingID})
+	if err != nil {
+		t.Fatalf("ParsePatchResult() error = %v", err)
+	}
+	if got.SchemaVersion != SchemaVersionPatchSummary || got.FindingID != testPatchFindingID || got.Risk != "low" || len(got.TestsRun) != 1 {
+		t.Fatalf("summary = %#v", got)
+	}
+	if len(got.ChangedFiles) != 2 || got.ChangedFiles[0] != "routes/index.js" || got.ChangedFiles[1] != "views/login.hbs" {
+		t.Fatalf("changedFiles = %#v, want deduplicated normalized paths", got.ChangedFiles)
+	}
+}
+
+func TestParsePatchResultNormalizesInvisibleRunes(t *testing.T) {
+	t.Parallel()
+	data := []byte(`{"schemaVersion":1,"kind":"orka.security.patch.v1","repositoryScan":"kaset","findingId":"fnd_1","summary":"Escaped\u200b redirect parameter.","changedFiles":["routes/\u200bindex.js"],"testsRun":[{"command":"npm\u200b test","exitCode":0}],"risk":"low"}`)
+	got, err := ParsePatchResult(data, PatchResultExpectation{RepositoryScan: "kaset", FindingID: testPatchFindingID})
+	if err != nil {
+		t.Fatalf("ParsePatchResult() error = %v", err)
+	}
+	if got.Summary != "Escaped redirect parameter." || got.ChangedFiles[0] != "routes/index.js" || got.TestsRun[0].Command != "npm test" {
+		t.Fatalf("normalized summary = %#v", got)
+	}
+}
+
+func TestParsePatchResultRejectsInvalidEnvelopes(t *testing.T) {
+	t.Parallel()
+	expected := PatchResultExpectation{RepositoryScan: "kaset", FindingID: testPatchFindingID}
+	cases := map[string]string{
+		"wrong kind":                          `{"schemaVersion":1,"kind":"orka.security.findings.v1","repositoryScan":"kaset","findingId":"fnd_1","summary":"s","changedFiles":["a.go"],"risk":"low"}`,
+		"wrong finding":                       `{"schemaVersion":1,"kind":"orka.security.patch.v1","repositoryScan":"kaset","findingId":"fnd_2","summary":"s","changedFiles":["a.go"],"risk":"low"}`,
+		"wrong scan":                          `{"schemaVersion":1,"kind":"orka.security.patch.v1","repositoryScan":"other","findingId":"fnd_1","summary":"s","changedFiles":["a.go"],"risk":"low"}`,
+		"unknown field":                       `{"schemaVersion":1,"kind":"orka.security.patch.v1","repositoryScan":"kaset","findingId":"fnd_1","summary":"s","changedFiles":["a.go"],"risk":"low","diff":"x"}`,
+		"no changed files":                    `{"schemaVersion":1,"kind":"orka.security.patch.v1","repositoryScan":"kaset","findingId":"fnd_1","summary":"s","changedFiles":[],"risk":"low"}`,
+		"unsafe path":                         `{"schemaVersion":1,"kind":"orka.security.patch.v1","repositoryScan":"kaset","findingId":"fnd_1","summary":"s","changedFiles":["../etc/passwd"],"risk":"low"}`,
+		"bad risk":                            `{"schemaVersion":1,"kind":"orka.security.patch.v1","repositoryScan":"kaset","findingId":"fnd_1","summary":"s","changedFiles":["a.go"],"risk":"critical"}`,
+		"tool transcript":                     `{"schemaVersion":1,"kind":"orka.security.patch.v1","repositoryScan":"kaset","findingId":"fnd_1","summary":"<tool_call>rm</tool_call>","changedFiles":["a.go"],"risk":"low"}`,
+		"markdown fence":                      "```json\n{\"schemaVersion\":1}\n```",
+		"empty":                               ``,
+		"credential summary":                  `{"schemaVersion":1,"kind":"orka.security.patch.v1","repositoryScan":"kaset","findingId":"fnd_1","summary":"Removed api_key=0123456789abcdef0123 from config","changedFiles":["a.go"],"risk":"low"}`,
+		"credential summary with format rune": `{"schemaVersion":1,"kind":"orka.security.patch.v1","repositoryScan":"kaset","findingId":"fnd_1","summary":"Removed password=short\u200bcorrect-horse-battery-staple","changedFiles":["a.go"],"risk":"low"}`,
+		"credential test command":             `{"schemaVersion":1,"kind":"orka.security.patch.v1","repositoryScan":"kaset","findingId":"fnd_1","summary":"s","changedFiles":["a.go"],"testsRun":[{"command":"AUTH_TOKEN=0123456789abcdef0123 npm test","exitCode":0}],"risk":"low"}`,
+		"credential test command with format rune": `{"schemaVersion":1,"kind":"orka.security.patch.v1","repositoryScan":"kaset","findingId":"fnd_1","summary":"s","changedFiles":["a.go"],"testsRun":[{"command":"PASSWORD=short\u200bcorrect-horse-battery-staple npm test","exitCode":0}],"risk":"low"}`,
+		"credential-shaped path":                   `{"schemaVersion":1,"kind":"orka.security.patch.v1","repositoryScan":"kaset","findingId":"fnd_1","summary":"s","changedFiles":["cfg/api_key=0123456789abcdef0123.txt"],"risk":"low"}`,
+		"credential-shaped path with format rune":  `{"schemaVersion":1,"kind":"orka.security.patch.v1","repositoryScan":"kaset","findingId":"fnd_1","summary":"s","changedFiles":["cfg/password=short\u200bcorrect-horse-battery-staple.txt"],"risk":"low"}`,
+	}
+	for name, payload := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := ParsePatchResult([]byte(payload), expected); err == nil {
+				t.Fatalf("ParsePatchResult() accepted %s", name)
+			}
+		})
+	}
+}
+
+func TestParsePatchResultRejectsGenericCredentialAssignments(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"AWS_SECRET_ACCESS_KEY", "DATABASE_SECRET", "SERVICE_CREDENTIALS"} {
+		for _, field := range []string{"summary", "test command"} {
+			t.Run(name+"/"+field, func(t *testing.T) {
+				payload := map[string]any{
+					"schemaVersion": 1, "kind": "orka.security.patch.v1", "repositoryScan": "kaset",
+					"findingId": testPatchFindingID, "summary": "Removed the credential.", "changedFiles": []string{"config.yml"}, "risk": "low",
+				}
+				assignment := name + "=" + strings.Repeat("0a1b2c3d", 5)
+				if field == "summary" {
+					payload["summary"] = "Removed " + assignment + " from config."
+				} else {
+					payload["testsRun"] = []map[string]any{{"command": assignment + " npm test", "exitCode": 0}}
+				}
+				_, err := ParsePatchResult(mustMarshalSecurityResult(t, payload), PatchResultExpectation{RepositoryScan: "kaset", FindingID: testPatchFindingID})
+				if err == nil {
+					t.Fatal("patch result accepted a credential assignment")
+				}
+			})
+		}
+	}
 }

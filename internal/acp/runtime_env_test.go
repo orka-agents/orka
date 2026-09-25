@@ -56,11 +56,20 @@ func TestPrepareSessionPathsRejectsUnsafeInputs(t *testing.T) {
 		}
 	}
 	symlink := filepath.Join(t.TempDir(), "link")
-	if err := os.Symlink(t.TempDir(), symlink); err != nil {
+	target := t.TempDir()
+	before, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, symlink); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := PrepareSessionPaths(symlink, "session"); err == nil {
 		t.Fatal("symlink base unexpectedly accepted")
+	}
+	after, err := os.Stat(target)
+	if err != nil || after.Mode() != before.Mode() {
+		t.Fatalf("rejected symlink changed target permissions: %v", err)
 	}
 }
 
@@ -74,7 +83,7 @@ func TestBuildChildEnvironmentStartsFromEmptyAllowlist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	values := EnvironmentMap(env)
+	values := environmentMap(env)
 	if _, ok := values["SUPERVISOR_SECRET"]; ok {
 		t.Fatal("ambient supervisor environment leaked")
 	}
@@ -214,12 +223,6 @@ func TestUIDAllocatorPersistsHighWaterBeforeReturningIdentity(t *testing.T) {
 	}
 }
 
-func TestSessionIdentityLabel(t *testing.T) {
-	if got := SessionIdentityLabel(42, 7); got != "uid-42-g7" {
-		t.Fatalf("label = %q", got)
-	}
-}
-
 func TestFinalizeSessionOwnershipNonRootOwnIdentity(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "file"), []byte("x"), 0o600); err != nil {
@@ -342,4 +345,38 @@ func TestSessionOwnershipReclaimOrdersParentsAndChownBeforeChmod(t *testing.T) {
 			t.Fatalf("reclaim order chmods %s before chown: %v", path, events)
 		}
 	}
+}
+
+// GitHub repository identities are case-insensitive: a continuation that
+// changes only capitalization must be judged the same repository so the
+// preserved durable tree resumes instead of being wiped.
+func TestSameDurableWorkspaceIdentity(t *testing.T) {
+	const canonicalRepo = "github.com/orka-agents/orka"
+	cases := []struct {
+		first, second string
+		want          bool
+	}{
+		{"github.com/Orka-Agents/Orka", canonicalRepo, true},
+		{canonicalRepo, canonicalRepo, true},
+		{canonicalRepo, "github.com/orka-agents/other", false},
+		{"gitlab.com/Orka/Repo", "gitlab.com/orka/repo", false},
+		{"__no_workspace__", "__no_workspace__", true},
+		{"", "", true},
+	}
+	for _, tc := range cases {
+		if got := SameDurableWorkspaceIdentity(tc.first, tc.second); got != tc.want {
+			t.Fatalf("SameDurableWorkspaceIdentity(%q, %q) = %v, want %v", tc.first, tc.second, got, tc.want)
+		}
+	}
+}
+
+func environmentMap(env []string) map[string]string {
+	result := make(map[string]string, len(env))
+	for _, entry := range env {
+		name, value, ok := strings.Cut(entry, "=")
+		if ok {
+			result[name] = value
+		}
+	}
+	return result
 }

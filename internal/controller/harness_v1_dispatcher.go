@@ -32,6 +32,10 @@ import (
 )
 
 const (
+	runtimeField = "runtime"
+)
+
+const (
 	DefaultHarnessV1DispatchInterval = time.Second
 	// The shipped harness v1 wrapper advertises and enforces one concurrent
 	// turn. Keep the default dispatcher capacity aligned so wrapper capacity is
@@ -433,10 +437,7 @@ func (d *HarnessV1Dispatcher) protocolClientAndRequest(
 		return nil, harness.StartTurnRequest{}, errors.New("verified harness v1 snapshot is required")
 	}
 	target := verified.body.HarnessV1
-	reader := d.APIReader
-	if reader == nil {
-		reader = d.Client
-	}
+	reader := uncachedReader(d.APIReader, d.Client)
 	if reader == nil {
 		return nil, harness.StartTurnRequest{}, errors.New("kubernetes reader is required for harness v1 protocol client")
 	}
@@ -464,10 +465,7 @@ func (d *HarnessV1Dispatcher) protocolClientForHarnessV1Execution(
 		return nil, errors.New("verified harness v1 snapshot is required")
 	}
 	target := verified.body.HarnessV1
-	reader := d.APIReader
-	if reader == nil {
-		reader = d.Client
-	}
+	reader := uncachedReader(d.APIReader, d.Client)
 	if reader == nil {
 		return nil, errors.New("kubernetes reader is required for harness v1 protocol client")
 	}
@@ -532,7 +530,7 @@ func buildHarnessV1StartTurnRequest(
 			harness.MetadataAttempt:             strconv.FormatInt(int64(attempt.Attempt), 10),
 			harness.MetadataBindingDigest:       attempt.BindingDigest,
 			harness.MetadataSnapshotDigest:      attempt.SnapshotDigest,
-			"runtime":                           verified.body.HarnessV1.RuntimeName,
+			runtimeField:                        verified.body.HarnessV1.RuntimeName,
 			"orka.runtimeName":                  verified.body.HarnessV1.RuntimeName,
 			harness.MetadataRuntimePolicyFrozen: booleanTrueValue,
 			"model":                             verified.body.Configuration.Model,

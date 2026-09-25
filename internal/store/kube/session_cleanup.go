@@ -1,7 +1,9 @@
 package kube
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -21,11 +23,27 @@ import (
 // Kubernetes store has no SQLite cleanup persistence adapter.
 var ErrSessionCleanupStoreNotConfigured = errors.New("session cleanup persistence is not configured")
 
-// ReclaimSession coordinates the hard-cutover Session deletion protocol under
-// one controller-epoch mutation lock. The SQLite intent is durable before any
-// Kubernetes object is deleted; transcript state is deleted only after every
-// exact authoritative object has been reclaimed.
+// ReclaimSession persists a durable cleanup intent before retiring the runtime.
+// Runtime I/O holds only the per-Session lock. Reclamation reacquires the same
+// controller epoch and revalidates the entire intent before removing authority.
 func (s *Store) ReclaimSession(ctx context.Context, request store.ReclaimSessionRequest) error {
+	return s.reclaimSession(ctx, request, nil)
+}
+
+// ReclaimGatewaySession is the retention-only entry point. The generic Session
+// API cannot opt into Gateway cleanup or replay its durable intents.
+func (s *Store) ReclaimGatewaySession(ctx context.Context, request store.ReclaimGatewaySessionRequest) error {
+	candidate := request.Session
+	operationID, operationDigest := store.GatewaySessionCleanupOperation(
+		candidate.Namespace, candidate.SessionName, candidate.SessionUID, candidate.Proof.GatewayUID, candidate.Proof.BindingUID,
+	)
+	return s.reclaimSession(ctx, store.ReclaimSessionRequest{
+		Namespace: candidate.Namespace, SessionName: candidate.SessionName, Fence: request.Fence,
+		OperationID: operationID, OperationDigest: operationDigest, RequestedAt: request.RequestedAt,
+	}, &candidate)
+}
+
+func (s *Store) reclaimSession(ctx context.Context, request store.ReclaimSessionRequest, gateway *store.GatewaySessionCleanupCandidate) error {
 	if err := s.requireClient(); err != nil {
 		return err
 	}
@@ -35,60 +53,109 @@ func (s *Store) ReclaimSession(ctx context.Context, request store.ReclaimSession
 	if err := normalizeReclaimSessionRequest(&request); err != nil {
 		return err
 	}
-	fence, snapshot, err := s.requireControllerEpoch(ctx, request.Fence)
+	release, err := s.sessionCleanupLocks.acquire(ctx, request.Namespace, request.SessionName)
 	if err != nil {
 		return err
 	}
-	defer s.releaseControllerEpochMutation(snapshot)
-	request.Fence = fence
+	defer release()
 
+	var intent *store.SessionCleanupIntent
+	if err := s.WithControllerEpochMutation(ctx, request.Fence, func(writeCtx context.Context) error {
+		var loadErr error
+		intent, loadErr = s.loadOrPrepareSessionCleanupIntent(writeCtx, request, gateway)
+		return loadErr
+	}); err != nil {
+		return err
+	}
+	if intent == nil {
+		return nil // The original operation already completed.
+	}
+	// Keep an immutable representation before calling runtime code. JSON also
+	// preserves the persisted equivalence of omitted and empty optional slices.
+	expected, err := json.Marshal(intent)
+	if err != nil {
+		return err
+	}
+	if s.sessionRuntimeCleanup != nil {
+		if err := s.sessionRuntimeCleanup(ctx, *intent, request.Fence); err != nil {
+			return err
+		}
+	}
+	return s.WithControllerEpochMutation(ctx, request.Fence, func(writeCtx context.Context) error {
+		current, err := s.sessionCleanup.GetSessionCleanupIntent(writeCtx, request.Namespace, request.SessionName)
+		if err != nil {
+			return err
+		}
+		actual, err := json.Marshal(current)
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(expected, actual) {
+			return store.ConflictErrorf("session cleanup intent for %s/%s changed during runtime retirement", request.Namespace, request.SessionName)
+		}
+		if err := s.reclaimSessionBranchClaims(writeCtx, *current); err != nil {
+			return err
+		}
+		if err := s.ensureNoSessionBranchClaims(writeCtx, current.SessionUID); err != nil {
+			return err
+		}
+		if err := s.reclaimSessionLease(writeCtx, *current); err != nil {
+			return err
+		}
+		if err := s.ensureNoSessionLease(writeCtx, *current); err != nil {
+			return err
+		}
+		if err := s.reclaimSessionControl(writeCtx, *current); err != nil {
+			return err
+		}
+		return s.sessionCleanup.CompleteSessionCleanup(writeCtx, store.CompleteSessionCleanupRequest{
+			Namespace: current.Namespace, SessionName: current.SessionName,
+			OperationID: current.OperationID, OperationDigest: current.OperationDigest,
+		})
+	})
+}
+
+func (s *Store) loadOrPrepareSessionCleanupIntent(ctx context.Context, request store.ReclaimSessionRequest, gateway *store.GatewaySessionCleanupCandidate) (*store.SessionCleanupIntent, error) {
 	intent, err := s.sessionCleanup.GetSessionCleanupIntent(ctx, request.Namespace, request.SessionName)
 	if errors.Is(err, store.ErrNotFound) {
 		completion, completionErr := s.sessionCleanup.GetSessionCleanupCompletion(ctx, request.Namespace, request.SessionName)
 		if completionErr == nil {
-			if completion.OperationID != request.OperationID || completion.OperationDigest != request.OperationDigest {
-				return controlConflict("session cleanup for %s/%s completed under a different operation", request.Namespace, request.SessionName)
+			if gateway == nil && strings.HasPrefix(completion.OperationID, store.GatewaySessionCleanupOperationPrefix) {
+				return nil, store.ErrGatewayOwnedSession
 			}
-			return s.ensureCompletedSessionKubernetesStateAbsent(ctx, *completion)
+			if completion.OperationID != request.OperationID || completion.OperationDigest != request.OperationDigest {
+				return nil, store.ConflictErrorf("session cleanup for %s/%s completed under a different operation", request.Namespace, request.SessionName)
+			}
+			return nil, s.ensureCompletedSessionKubernetesStateAbsent(ctx, *completion)
 		}
 		if !errors.Is(completionErr, store.ErrNotFound) {
-			return completionErr
+			return nil, completionErr
 		}
-		intent, err = s.prepareSessionCleanupIntent(ctx, request)
+		intent, err = s.prepareSessionCleanupIntent(ctx, request, gateway)
 	}
 	if err != nil {
-		return err
+		return nil, err
+	}
+	if gateway == nil && intent.Gateway != nil {
+		return nil, store.ErrGatewayOwnedSession
+	}
+	if gateway != nil && (intent.Gateway == nil || intent.SessionUID != gateway.SessionUID ||
+		intent.Gateway.GatewayUID != gateway.Proof.GatewayUID || intent.Gateway.BindingUID != gateway.Proof.BindingUID ||
+		!intent.Gateway.CreatedAt.Equal(gateway.Proof.CreatedAt) || intent.Gateway.TerminalCutoff.After(gateway.Proof.TerminalCutoff)) {
+		return nil, store.ConflictErrorf("Gateway session cleanup identity changed")
 	}
 	if intent.OperationID != request.OperationID || intent.OperationDigest != request.OperationDigest {
-		return controlConflict("session cleanup for %s/%s belongs to a different operation", request.Namespace, request.SessionName)
+		return nil, store.ConflictErrorf("session cleanup for %s/%s belongs to a different operation", request.Namespace, request.SessionName)
 	}
 	if err := s.validateSessionCleanupBranchClaimScope(*intent); err != nil {
-		return err
+		return nil, err
 	}
-	if err := s.reclaimSessionBranchClaims(ctx, *intent); err != nil {
-		return err
-	}
-	if err := s.ensureNoSessionBranchClaims(ctx, intent.SessionUID); err != nil {
-		return err
-	}
-	if err := s.reclaimSessionLease(ctx, *intent); err != nil {
-		return err
-	}
-	if err := s.ensureNoSessionLease(ctx, *intent); err != nil {
-		return err
-	}
-	if err := s.reclaimSessionControl(ctx, *intent); err != nil {
-		return err
-	}
-	return s.sessionCleanup.CompleteSessionCleanup(ctx, store.CompleteSessionCleanupRequest{
-		Namespace: intent.Namespace, SessionName: intent.SessionName,
-		OperationID: intent.OperationID, OperationDigest: intent.OperationDigest,
-	})
+	return intent, nil
 }
 
 func (s *Store) ensureCompletedSessionKubernetesStateAbsent(ctx context.Context, completion store.SessionCleanupCompletion) error {
 	if _, err := s.getSessionControlObject(ctx, completion.Namespace, completion.SessionName); err == nil {
-		return controlConflict("deleted session %s/%s regained a RuntimeSessionControl", completion.Namespace, completion.SessionName)
+		return store.ConflictErrorf("deleted session %s/%s regained a RuntimeSessionControl", completion.Namespace, completion.SessionName)
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return err
 	}
@@ -99,14 +166,14 @@ func (s *Store) ensureCompletedSessionKubernetesStateAbsent(ctx context.Context,
 		return nil
 	}
 	if object, err := s.findSessionControlByUID(ctx, completion.SessionUID); err == nil {
-		return controlConflict("deleted Session UID %q regained RuntimeSessionControl %s/%s", completion.SessionUID, object.Namespace, object.Spec.SessionName)
+		return store.ConflictErrorf("deleted Session UID %q regained RuntimeSessionControl %s/%s", completion.SessionUID, object.Namespace, object.Spec.SessionName)
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return err
 	}
 	lease := &coordinationv1.Lease{}
 	key := client.ObjectKey{Namespace: completion.Namespace, Name: runtimeSessionLeaseName(completion.SessionUID)}
 	if err := s.readClient().Get(ctx, key, lease); err == nil {
-		return controlConflict("deleted session %s/%s regained its coordination Lease", completion.Namespace, completion.SessionName)
+		return store.ConflictErrorf("deleted session %s/%s regained its coordination Lease", completion.Namespace, completion.SessionName)
 	} else if !apierrors.IsNotFound(err) {
 		return mapKubernetesError("verify completed Session Lease absence", err)
 	}
@@ -129,10 +196,17 @@ func (s *Store) ResumeSessionCleanups(ctx context.Context, fence store.Controlle
 	}
 	var result error
 	for _, intent := range intents {
-		reclaimErr := s.ReclaimSession(ctx, store.ReclaimSessionRequest{
+		request := store.ReclaimSessionRequest{
 			Namespace: intent.Namespace, SessionName: intent.SessionName, Fence: fence,
 			OperationID: intent.OperationID, OperationDigest: intent.OperationDigest, RequestedAt: intent.PreparedAt,
-		})
+		}
+		var gateway *store.GatewaySessionCleanupCandidate
+		if intent.Gateway != nil {
+			gateway = &store.GatewaySessionCleanupCandidate{
+				Namespace: intent.Namespace, SessionName: intent.SessionName, SessionUID: intent.SessionUID, Proof: *intent.Gateway,
+			}
+		}
+		reclaimErr := s.reclaimSession(ctx, request, gateway)
 		if reclaimErr != nil {
 			result = errors.Join(result, fmt.Errorf("resume Session cleanup %s/%s: %w", intent.Namespace, intent.SessionName, reclaimErr))
 		}
@@ -140,17 +214,32 @@ func (s *Store) ResumeSessionCleanups(ctx context.Context, fence store.Controlle
 	return result
 }
 
-func (s *Store) prepareSessionCleanupIntent(ctx context.Context, request store.ReclaimSessionRequest) (*store.SessionCleanupIntent, error) {
+func (s *Store) prepareSessionCleanupIntent(ctx context.Context, request store.ReclaimSessionRequest, gateway *store.GatewaySessionCleanupCandidate) (*store.SessionCleanupIntent, error) {
 	intent := store.SessionCleanupIntent{
 		Namespace: request.Namespace, SessionName: request.SessionName,
 		OperationID: request.OperationID, OperationDigest: request.OperationDigest,
 		PreparedAt: request.RequestedAt,
+	}
+	if gateway != nil {
+		proof := gateway.Proof
+		intent.Gateway = &proof
+	}
+	persist := func() (*store.SessionCleanupIntent, error) {
+		if gateway != nil && intent.SessionUID != gateway.SessionUID {
+			return nil, store.ConflictErrorf("Gateway session cleanup control identity changed")
+		}
+		return s.sessionCleanup.PrepareSessionCleanup(ctx, intent)
 	}
 	object, err := s.getSessionControlObject(ctx, request.Namespace, request.SessionName)
 	if errors.Is(err, store.ErrNotFound) {
 		sessionUID, identityErr := s.sessionCleanup.GetSessionCleanupIdentity(ctx, request.Namespace, request.SessionName)
 		if identityErr != nil && !errors.Is(identityErr, store.ErrNotFound) {
 			return nil, identityErr
+		}
+		if sessionUID == "" && gateway != nil {
+			// Legacy Gateway rows may predate the transcript UID binding. The
+			// SQLite transaction requires every stored turn to prove this UID.
+			sessionUID = gateway.SessionUID
 		}
 		if strings.TrimSpace(sessionUID) != "" {
 			claims, claimErr := s.sessionBranchClaimCleanupPlan(ctx, sessionUID)
@@ -167,7 +256,7 @@ func (s *Store) prepareSessionCleanupIntent(ctx context.Context, request store.R
 					return nil, stateErr
 				}
 				if (lease.Spec.HolderIdentity != nil && *lease.Spec.HolderIdentity != "") || state.Mode != leaseModeEmpty {
-					return nil, controlConflict("session %s/%s coordination Lease is active without a control record", request.Namespace, request.SessionName)
+					return nil, store.ConflictErrorf("session %s/%s coordination Lease is active without a control record", request.Namespace, request.SessionName)
 				}
 				intent.ExpectedLeaseGeneration = state.Generation
 				intent.LeaseName = lease.Name
@@ -175,9 +264,9 @@ func (s *Store) prepareSessionCleanupIntent(ctx context.Context, request store.R
 			} else if !apierrors.IsNotFound(leaseErr) {
 				return nil, mapKubernetesError("get orphan Session cleanup Lease", leaseErr)
 			}
-			return s.sessionCleanup.PrepareSessionCleanup(ctx, intent)
+			return persist()
 		}
-		return s.sessionCleanup.PrepareSessionCleanup(ctx, intent)
+		return persist()
 	}
 	if err != nil {
 		return nil, err
@@ -185,17 +274,17 @@ func (s *Store) prepareSessionCleanupIntent(ctx context.Context, request store.R
 	control := sessionControlFromObject(object)
 	if control.Availability != store.SessionAvailable || control.Lease != nil ||
 		control.BlockedReason != "" || control.RelatedPromptAttemptID != "" || control.RelatedPublicationID != "" {
-		return nil, controlConflict("session %s/%s has active or unresolved authoritative state", request.Namespace, request.SessionName)
+		return nil, store.ConflictErrorf("session %s/%s has active or unresolved authoritative state", request.Namespace, request.SessionName)
 	}
 	lease, leaseState, err := s.getSessionLease(ctx, object.Namespace, object.Spec.SessionName, object.Spec.SessionUID)
 	if err != nil {
 		return nil, err
 	}
 	if lease.Spec.HolderIdentity != nil && *lease.Spec.HolderIdentity != "" {
-		return nil, controlConflict("session %s/%s coordination Lease is held", request.Namespace, request.SessionName)
+		return nil, store.ConflictErrorf("session %s/%s coordination Lease is held", request.Namespace, request.SessionName)
 	}
 	if leaseState.Mode != leaseModeEmpty || leaseState.Generation != control.LeaseGeneration {
-		return nil, controlConflict("session %s/%s coordination Lease does not match the quiescent control generation", request.Namespace, request.SessionName)
+		return nil, store.ConflictErrorf("session %s/%s coordination Lease does not match the quiescent control generation", request.Namespace, request.SessionName)
 	}
 	claims, err := s.sessionBranchClaimCleanupPlan(ctx, control.SessionUID)
 	if err != nil {
@@ -212,7 +301,7 @@ func (s *Store) prepareSessionCleanupIntent(ctx context.Context, request store.R
 	intent.LeaseName = lease.Name
 	intent.LeaseObjectUID = string(lease.UID)
 	intent.BranchClaims = claims
-	return s.sessionCleanup.PrepareSessionCleanup(ctx, intent)
+	return persist()
 }
 
 func (s *Store) sessionBranchClaimCleanupPlan(
@@ -236,7 +325,7 @@ func (s *Store) sessionBranchClaimCleanupPlan(
 		available := claim.Availability == store.BranchClaimAvailable &&
 			claim.BlockedReason == "" && claim.RelatedPublicationID == ""
 		if !available {
-			return nil, controlConflict("Session-owned branch claim %q is reconciliation-blocked", claim.ID)
+			return nil, store.ConflictErrorf("Session-owned branch claim %q is reconciliation-blocked", claim.ID)
 		}
 		claims = append(claims, store.SessionCleanupBranchClaim{
 			ID: claim.ID, ObjectUID: string(object.UID),
@@ -268,14 +357,14 @@ func (s *Store) reclaimSessionBranchClaims(ctx context.Context, intent store.Ses
 			continue
 		}
 		if expected.ObjectUID != "" && string(object.UID) != expected.ObjectUID {
-			return controlConflict("Session-owned branch claim %q was recreated during cleanup", expected.ID)
+			return store.ConflictErrorf("Session-owned branch claim %q was recreated during cleanup", expected.ID)
 		}
 		if claim.Version != expected.ExpectedVersion || claim.Generation != expected.ExpectedGeneration ||
 			claim.RepositoryID != expected.ExpectedRepositoryID || claim.Ref != expected.ExpectedRef ||
 			!claim.LastVerified.Equal(expected.ExpectedLastVerified) || claim.Availability != expected.ExpectedAvailability ||
 			claim.BlockedReason != expected.ExpectedBlockedReason ||
 			claim.RelatedPublicationID != expected.ExpectedPublicationID {
-			return controlConflict("Session-owned branch claim %q no longer matches its cleanup fence", expected.ID)
+			return store.ConflictErrorf("Session-owned branch claim %q no longer matches its cleanup fence", expected.ID)
 		}
 		if err := deleteObjectWithExactPreconditions(ctx, s.client, object); err != nil && !apierrors.IsNotFound(err) {
 			return mapKubernetesError("delete Session-owned branch claim", err)
@@ -291,7 +380,7 @@ func (s *Store) reclaimSessionBranchClaims(ctx context.Context, intent store.Ses
 		if freshClaim.OwnerKind != store.BranchClaimOwnerSession || freshClaim.OwnerUID != expected.ExpectedOwnerUID || freshClaim.RequestDigest != expected.ExpectedRequestDigest {
 			continue
 		}
-		return controlConflict("Session-owned branch claim %q still exists after cleanup", expected.ID)
+		return store.ConflictErrorf("Session-owned branch claim %q still exists after cleanup", expected.ID)
 	}
 	return nil
 }
@@ -310,7 +399,7 @@ func (s *Store) ensureNoSessionBranchClaims(ctx context.Context, sessionUID stri
 	for i := range list.Items {
 		claim := &list.Items[i]
 		if store.BranchClaimOwnerKind(claim.Spec.OwnerKind) == store.BranchClaimOwnerSession && claim.Spec.OwnerUID == sessionUID {
-			return controlConflict("Session UID %q still owns branch claim %q after cleanup", sessionUID, claim.Spec.ID)
+			return store.ConflictErrorf("Session UID %q still owns branch claim %q after cleanup", sessionUID, claim.Spec.ID)
 		}
 	}
 	return nil
@@ -338,7 +427,7 @@ func (s *Store) reclaimSessionLease(ctx context.Context, intent store.SessionCle
 		return mapKubernetesError("get Session cleanup Lease", err)
 	}
 	if intent.LeaseObjectUID != "" && string(lease.UID) != intent.LeaseObjectUID {
-		return controlConflict("session %s/%s Lease was recreated during cleanup", intent.Namespace, intent.SessionName)
+		return store.ConflictErrorf("session %s/%s Lease was recreated during cleanup", intent.Namespace, intent.SessionName)
 	}
 	state, err := sessionLeaseFromObject(lease, intent.SessionName, intent.SessionUID)
 	if err != nil {
@@ -346,14 +435,14 @@ func (s *Store) reclaimSessionLease(ctx context.Context, intent store.SessionCle
 	}
 	if (lease.Spec.HolderIdentity != nil && *lease.Spec.HolderIdentity != "") ||
 		state.Mode != leaseModeEmpty || state.Generation != intent.ExpectedLeaseGeneration {
-		return controlConflict("session %s/%s Lease is active or changed during cleanup", intent.Namespace, intent.SessionName)
+		return store.ConflictErrorf("session %s/%s Lease is active or changed during cleanup", intent.Namespace, intent.SessionName)
 	}
 	if err := deleteObjectWithExactPreconditions(ctx, s.client, lease); err != nil && !apierrors.IsNotFound(err) {
 		return mapKubernetesError("delete Session cleanup Lease", err)
 	}
 	fresh := &coordinationv1.Lease{}
 	if err := s.readClient().Get(ctx, key, fresh); err == nil {
-		return controlConflict("session %s/%s Lease still exists after cleanup", intent.Namespace, intent.SessionName)
+		return store.ConflictErrorf("session %s/%s Lease still exists after cleanup", intent.Namespace, intent.SessionName)
 	} else if !apierrors.IsNotFound(err) {
 		return mapKubernetesError("verify Session cleanup Lease deletion", err)
 	}
@@ -372,21 +461,21 @@ func (s *Store) reclaimSessionControl(ctx context.Context, intent store.SessionC
 		return err
 	}
 	if intent.ControlRequestDigest == "" {
-		return controlConflict("session %s/%s RuntimeSessionControl appeared after UID-only cleanup preparation", intent.Namespace, intent.SessionName)
+		return store.ConflictErrorf("session %s/%s RuntimeSessionControl appeared after UID-only cleanup preparation", intent.Namespace, intent.SessionName)
 	}
 	if intent.ControlObjectUID != "" && string(object.UID) != intent.ControlObjectUID {
-		return controlConflict("session %s/%s control was recreated during cleanup", intent.Namespace, intent.SessionName)
+		return store.ConflictErrorf("session %s/%s control was recreated during cleanup", intent.Namespace, intent.SessionName)
 	}
 	control := sessionControlFromObject(object)
 	if control.SessionUID != intent.SessionUID || control.RequestDigest != intent.ControlRequestDigest ||
 		control.Version != intent.ExpectedControlVersion || control.LeaseGeneration != intent.ExpectedLeaseGeneration ||
 		control.LastOperationID != intent.ExpectedControlLastOperationID || control.LastOperationDigest != intent.ExpectedControlLastDigest ||
 		!reflect.DeepEqual(control.VerifiedBaseline, intent.ExpectedVerifiedBaseline) {
-		return controlConflict("session %s/%s control no longer matches its cleanup fence", intent.Namespace, intent.SessionName)
+		return store.ConflictErrorf("session %s/%s control no longer matches its cleanup fence", intent.Namespace, intent.SessionName)
 	}
 	if control.Availability != store.SessionAvailable || control.Lease != nil || control.BlockedReason != "" ||
 		control.RelatedPromptAttemptID != "" || control.RelatedPublicationID != "" {
-		return controlConflict("session %s/%s control no longer matches its cleanup fence", intent.Namespace, intent.SessionName)
+		return store.ConflictErrorf("session %s/%s control no longer matches its cleanup fence", intent.Namespace, intent.SessionName)
 	}
 	if err := deleteObjectWithExactPreconditions(ctx, s.client, object); err != nil && !apierrors.IsNotFound(err) {
 		return mapKubernetesError("delete RuntimeSessionControl", err)
@@ -395,7 +484,7 @@ func (s *Store) reclaimSessionControl(ctx context.Context, intent store.SessionC
 		if err != nil {
 			return err
 		}
-		return controlConflict("session %s/%s control still exists after cleanup", intent.Namespace, intent.SessionName)
+		return store.ConflictErrorf("session %s/%s control still exists after cleanup", intent.Namespace, intent.SessionName)
 	}
 	return nil
 }
@@ -407,7 +496,7 @@ func (s *Store) ensureNoSessionLease(ctx context.Context, intent store.SessionCl
 	lease := &coordinationv1.Lease{}
 	key := client.ObjectKey{Namespace: intent.Namespace, Name: runtimeSessionLeaseName(intent.SessionUID)}
 	if err := s.readClient().Get(ctx, key, lease); err == nil {
-		return controlConflict("session %s/%s coordination Lease still exists after cleanup", intent.Namespace, intent.SessionName)
+		return store.ConflictErrorf("session %s/%s coordination Lease still exists after cleanup", intent.Namespace, intent.SessionName)
 	} else if !apierrors.IsNotFound(err) {
 		return mapKubernetesError("verify Session cleanup Lease absence", err)
 	}
@@ -458,7 +547,7 @@ func normalizeReclaimSessionRequest(request *store.ReclaimSessionRequest) error 
 			return err
 		}
 	}
-	fence, err := normalizeEpochFence(request.Fence)
+	fence, err := store.NormalizeEpochFence(request.Fence)
 	if err != nil {
 		return err
 	}

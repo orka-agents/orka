@@ -8,8 +8,10 @@ package common
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,9 +23,13 @@ import (
 )
 
 const (
-	maxRetries      = 5
-	saTokenPath     = "/var/run/secrets/kubernetes.io/serviceaccount/token"
-	saNamespacePath = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+	// Result delivery must outlast routine controller restarts.
+	resultMaxRetries           = 9
+	maxBackoff                 = 60 * time.Second
+	deliveryErrorBodyLimit     = 4 << 10
+	deliveryResponseDrainLimit = 64 << 10
+	saTokenPath                = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+	saNamespacePath            = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 
 	// MaxStructuredSummaryChars bounds agent-written summaries stored in structured
 	// results. Diffs remain intact for workspace handoff, but oversized summaries
@@ -31,26 +37,41 @@ const (
 	MaxStructuredSummaryChars = 32 * 1024
 )
 
-var resultStdoutMarkerPath = agentSandboxResultMarkerExecPath
+const (
+	// resultStdoutMarkerFile mirrors the stdout result marker to a file so a
+	// supervising process can recover it when stdout is truncated.
+	resultStdoutMarkerFile  = "/app/orka-result-marker"
+	resultStdoutTokenPrefix = "ORKA_RESULT_TOKEN:"
+)
 
-// SubmitResult sends the task result to the controller via HTTP POST.
+var resultStdoutMarkerPath = resultStdoutMarkerFile
+
+// retryWait is stubbed by tests to avoid the multi-minute backoff window.
+var retryWait retryWaitFunc = waitForRetry
+
+// SubmitResultContext sends the task result to the controller via HTTP POST.
 // It reads ORKA_RESULT_ENDPOINT or constructs the URL from ORKA_CONTROLLER_URL.
-// Retries up to 5 times with exponential backoff (2s, 4s, 8s, 16s) on failure.
-func SubmitResult(result []byte) error {
+// Retryable failures use bounded exponential backoff and stop when ctx is canceled.
+func SubmitResultContext(ctx context.Context, result []byte) error {
 	if len(bytes.TrimSpace(result)) == 0 {
 		return fmt.Errorf("result must not be blank")
+	}
+	ctx = contextOrBackground(ctx)
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	if workerenv.IsTrue(os.Getenv(workerenv.ResultStdout)) {
 		marker := workerenv.ResultStdoutPrefix + base64.StdEncoding.EncodeToString(result)
 		fileData := marker + "\n"
 		if token := strings.TrimSpace(os.Getenv(workerenv.ResultStdoutToken)); token != "" {
-			fileData = agentSandboxResultTokenPrefix + token + "\n" + fileData
+			fileData = resultStdoutTokenPrefix + token + "\n" + fileData
 		}
 		if err := os.WriteFile(resultStdoutMarkerPath, []byte(fileData), 0o600); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to write stdout result marker file: %v\n", err)
 		}
 		fmt.Println(marker)
+		// Publishing the marker completes delivery even if the caller cancels during the write.
 		return nil
 	}
 
@@ -59,23 +80,74 @@ func SubmitResult(result []byte) error {
 		return err
 	}
 
-	saToken := workerServiceAccountToken()
+	return doPostWithRetry(
+		ctx, "result submission", endpoint, result, workerServiceAccountToken(),
+		"application/octet-stream", 30*time.Second, retryWait, resultMaxRetries, nil,
+	)
+}
+
+type retryWaitFunc func(context.Context, time.Duration) error
+
+// doPostWithRetry posts data with bounded exponential backoff. A nil wait uses
+// the real timer; authorize, when set, signs each attempt (including retries).
+//
+//nolint:unparam // Results and artifacts supply independent retry budgets, which currently have the same limit.
+func doPostWithRetry(
+	ctx context.Context,
+	operation, endpoint string,
+	data []byte,
+	saToken, contentType string,
+	timeout time.Duration,
+	wait retryWaitFunc,
+	maxAttempts int,
+	authorize func(*http.Request, []byte) error,
+) error {
+	ctx = contextOrBackground(ctx)
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%s canceled: %w", operation, err)
+	}
+	if wait == nil {
+		wait = waitForRetry
+	}
 
 	var lastErr error
-	for attempt := range maxRetries {
+	for attempt := range maxAttempts {
 		if attempt > 0 {
-			backoff := time.Duration(1<<uint(attempt)) * time.Second
-			time.Sleep(backoff)
+			backoff := min(time.Duration(1<<uint(attempt))*time.Second, maxBackoff)
+			if err := wait(ctx, backoff); err != nil {
+				return fmt.Errorf("%s canceled: %w", operation, err)
+			}
 		}
 
-		lastErr = doPost(endpoint, result, saToken)
+		client := &http.Client{Timeout: timeout}
+		if authorize != nil {
+			client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		}
+		lastErr = doPostOnce(ctx, client, endpoint, data, saToken, contentType, authorize)
 		if lastErr == nil {
 			return nil
 		}
-		fmt.Fprintf(os.Stderr, "result submission attempt %d/%d failed: %v\n", attempt+1, maxRetries, lastErr)
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("%s canceled: %w", operation, err)
+		}
+		if !isRetryableDeliveryError(lastErr) {
+			return fmt.Errorf("%s rejected permanently: %w", operation, lastErr)
+		}
+		fmt.Fprintf(os.Stderr, "%s attempt %d/%d failed: %v\n", operation, attempt+1, maxAttempts, lastErr)
 	}
 
-	return fmt.Errorf("all %d result submission attempts failed: %w", maxRetries, lastErr)
+	return fmt.Errorf("all %d %s attempts failed: %w", maxAttempts, operation, lastErr)
+}
+
+func waitForRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func resultEndpoint() (string, error) {
@@ -123,33 +195,105 @@ func workerServiceAccountToken() string {
 	return strings.TrimSpace(os.Getenv(workerenv.ServiceAccountToken))
 }
 
-func doPost(endpoint string, data []byte, saToken string) error {
-	return doPostOnceWithContentType(endpoint, data, saToken, "application/octet-stream", 30*time.Second)
-}
-
-func doPostOnceWithContentType(endpoint string, data []byte, saToken, contentType string, timeout time.Duration) error {
-	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(data))
+func doPostOnce(
+	ctx context.Context,
+	client *http.Client,
+	endpoint string,
+	data []byte,
+	saToken, contentType string,
+	authorize func(*http.Request, []byte) error,
+) error {
+	ctx = contextOrBackground(ctx)
+	if client == nil {
+		client = http.DefaultClient
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(data))
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+		return permanentDeliveryError(fmt.Errorf("failed to create request: %w", err))
 	}
 	req.Header.Set("Content-Type", contentType)
 	if saToken != "" {
 		req.Header.Set("Authorization", "Bearer "+saToken)
 	}
 
-	client := &http.Client{Timeout: timeout}
+	if authorize != nil {
+		if err := authorize(req, data); err != nil {
+			return permanentDeliveryError(fmt.Errorf("artifact request authorization failed: %w", err))
+		}
+	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("HTTP request failed: %w", err)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		return retryableDeliveryError(fmt.Errorf("HTTP request failed: %w", err))
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+	bodyPreview := readAndDrainDeliveryResponse(resp.Body)
+	// The controller has accepted delivery; cancellation while draining cannot undo it.
+	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
 		return nil
 	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
 
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-	return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	statusErr := fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyPreview)))
+	if isRetryableHTTPStatus(resp.StatusCode) {
+		return retryableDeliveryError(statusErr)
+	}
+	return permanentDeliveryError(statusErr)
+}
+
+func readAndDrainDeliveryResponse(body io.Reader) []byte {
+	if body == nil {
+		return nil
+	}
+	preview, _ := io.ReadAll(io.LimitReader(body, deliveryErrorBodyLimit))
+	remaining := int64(deliveryResponseDrainLimit - len(preview))
+	if remaining > 0 {
+		_, _ = io.CopyN(io.Discard, body, remaining)
+	}
+	return preview
+}
+
+func contextOrBackground(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
+}
+
+type deliveryError struct {
+	err       error
+	retryable bool
+}
+
+func (e *deliveryError) Error() string {
+	return e.err.Error()
+}
+
+func (e *deliveryError) Unwrap() error {
+	return e.err
+}
+
+func retryableDeliveryError(err error) error {
+	return &deliveryError{err: err, retryable: true}
+}
+
+func permanentDeliveryError(err error) error {
+	return &deliveryError{err: err}
+}
+
+func isRetryableDeliveryError(err error) bool {
+	var deliveryErr *deliveryError
+	return errors.As(err, &deliveryErr) && deliveryErr.retryable
+}
+
+func isRetryableHTTPStatus(statusCode int) bool {
+	return statusCode == http.StatusRequestTimeout || statusCode == http.StatusTooManyRequests ||
+		(statusCode >= http.StatusInternalServerError && statusCode != http.StatusNotImplemented)
 }
 
 // StructuredResult is an optional structured envelope for task results.
@@ -207,10 +351,16 @@ func ParseStructuredResult(raw string) *StructuredResult {
 // TruncateStructuredSummary bounds human-readable result summaries while making
 // truncation explicit to downstream coordinators.
 func TruncateStructuredSummary(summary string) string {
-	if len(summary) <= MaxStructuredSummaryChars {
+	return TruncateSummary(summary, MaxStructuredSummaryChars)
+}
+
+// TruncateSummary cuts summary to limit bytes and appends an explicit marker
+// carrying the original length so coordinators can tell truncation happened.
+func TruncateSummary(summary string, limit int) string {
+	if len(summary) <= limit {
 		return summary
 	}
-	return summary[:MaxStructuredSummaryChars] + fmt.Sprintf(
+	return summary[:limit] + fmt.Sprintf(
 		"\n[summary truncated, full summary: %d chars]",
 		len(summary),
 	)

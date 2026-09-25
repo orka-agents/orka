@@ -1,0 +1,70 @@
+{{- if include "orka.webhookTLSGenerated" . }}
+{{- /*
+Controller-managed webhook certificates need update on the release's
+ValidatingWebhookConfiguration so cert-controller can inject the CA. Update is
+whole-object, so this policy bounds it: the controller's ServiceAccount may
+change nothing but webhooks[*].clientConfig.caBundle. A compromised controller
+therefore cannot repoint or widen the release's admission webhooks. Helm and
+operators are unaffected because the policy only matches the controller user.
+*/ -}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ include "orka.fullname" . }}-webhook-configuration
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["admissionregistration.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["UPDATE"]
+        resources: ["validatingwebhookconfigurations"]
+  matchConditions:
+    - name: release-webhook-configuration
+      expression: "object.metadata.name == '{{ include "orka.controllerWebhookName" . }}'"
+    - name: controller-user
+      expression: "request.userInfo.username == '{{ include "orka.controllerUsername" . }}'"
+  variables:
+    - name: oldWebhooks
+      expression: "oldObject.?webhooks.orValue([])"
+    - name: newWebhooks
+      expression: "object.?webhooks.orValue([])"
+  validations:
+    - expression: "variables.newWebhooks.size() == variables.oldWebhooks.size()"
+      message: the controller may not add or remove webhooks; only clientConfig.caBundle may change
+    - expression: >-
+        variables.newWebhooks.all(w, variables.oldWebhooks.exists_one(o, o.name == w.name))
+      message: the controller may not rename webhooks; only clientConfig.caBundle may change
+    - expression: >-
+        variables.newWebhooks.all(w, variables.oldWebhooks.filter(o, o.name == w.name).all(o,
+          w.?rules.orValue([]) == o.?rules.orValue([]) &&
+          w.clientConfig.?service.orValue({}) == o.clientConfig.?service.orValue({}) &&
+          w.clientConfig.?url.orValue('') == o.clientConfig.?url.orValue('') &&
+          w.?failurePolicy.orValue('') == o.?failurePolicy.orValue('') &&
+          w.?matchPolicy.orValue('') == o.?matchPolicy.orValue('') &&
+          w.?sideEffects.orValue('') == o.?sideEffects.orValue('') &&
+          w.?timeoutSeconds.orValue(0) == o.?timeoutSeconds.orValue(0) &&
+          w.?admissionReviewVersions.orValue([]) == o.?admissionReviewVersions.orValue([]) &&
+          w.?namespaceSelector.orValue({}) == o.?namespaceSelector.orValue({}) &&
+          w.?objectSelector.orValue({}) == o.?objectSelector.orValue({}) &&
+          w.?matchConditions.orValue([]) == o.?matchConditions.orValue([])))
+      message: the controller may change only clientConfig.caBundle on its webhook configuration
+    - expression: >-
+        object.metadata.?labels.orValue({}) == oldObject.metadata.?labels.orValue({}) &&
+        object.metadata.?annotations.orValue({}) == oldObject.metadata.?annotations.orValue({}) &&
+        object.metadata.?ownerReferences.orValue([]) == oldObject.metadata.?ownerReferences.orValue([]) &&
+        object.metadata.?finalizers.orValue([]) == oldObject.metadata.?finalizers.orValue([])
+      message: the controller may not change webhook configuration metadata, owner references, or finalizers
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ include "orka.fullname" . }}-webhook-configuration
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+spec:
+  policyName: {{ include "orka.fullname" . }}-webhook-configuration
+  validationActions: [Deny]
+{{- end }}

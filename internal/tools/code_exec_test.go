@@ -67,18 +67,6 @@ func (e *recordingCodeExecutor) Execute(_ context.Context, req CodeExecutionRequ
 	return e.result
 }
 
-type recordingSandboxClient struct {
-	calls  int
-	req    SandboxRunRequest
-	result SandboxRunResult
-}
-
-func (c *recordingSandboxClient) Run(_ context.Context, req SandboxRunRequest) SandboxRunResult {
-	c.calls++
-	c.req = req
-	return c.result
-}
-
 func TestCodeExecTool_Name(t *testing.T) {
 	tool := NewCodeExecTool()
 	if got := tool.Name(); got != codeExecToolName {
@@ -272,13 +260,13 @@ func TestCodeExecTool_Execute_TimeoutClampsToMax(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sandbox := &recordingSandboxClient{result: SandboxRunResult{Output: "ok"}}
+			sandbox := &recordingCodeExecutor{result: CodeExecResult{Output: "ok"}}
 			tool := &CodeExecTool{
 				workDir:          t.TempDir(),
 				timeout:          defaultCodeExecTimeout,
 				allowedLangs:     defaultCodeExecAllowedLangs(),
 				denyPatterns:     defaultDenyPatterns,
-				sandboxClient:    sandbox,
+				executor:         sandbox,
 				backend:          codeExecBackendKubernetes,
 				outputLimitBytes: defaultCodeExecOutputLimitBytes,
 			}
@@ -930,11 +918,10 @@ func TestCodeExecTool_ExecuteUsesConfiguredExecutorWithoutScopedOverride(t *test
 	}
 }
 
-func TestCodeExecTool_ExecuteUsesSandboxClient(t *testing.T) {
+func TestCodeExecTool_ExecuteUsesConfiguredExecutor(t *testing.T) {
 	t.Setenv(codeExecBackendEnv, "")
 
-	executor := &recordingCodeExecutor{result: CodeExecResult{Output: "should not be used", ExitCode: 99}}
-	sandbox := &recordingSandboxClient{result: SandboxRunResult{
+	sandbox := &recordingCodeExecutor{result: CodeExecResult{
 		Output:          "from sandbox",
 		Error:           "sandbox stderr",
 		ExitCode:        42,
@@ -948,8 +935,7 @@ func TestCodeExecTool_ExecuteUsesSandboxClient(t *testing.T) {
 		timeout:          30 * time.Second,
 		allowedLangs:     defaultCodeExecAllowedLangs(),
 		denyPatterns:     defaultDenyPatterns,
-		sandboxClient:    sandbox,
-		executor:         executor,
+		executor:         sandbox,
 		backend:          codeExecBackendKubernetes,
 		outputLimitBytes: 321,
 	}
@@ -964,9 +950,6 @@ func TestCodeExecTool_ExecuteUsesSandboxClient(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	if executor.calls != 0 {
-		t.Fatalf("configured executor calls = %d, want 0 when sandbox client is configured", executor.calls)
-	}
 	if sandbox.calls != 1 {
 		t.Fatalf("sandbox calls = %d, want 1", sandbox.calls)
 	}

@@ -11,14 +11,13 @@ export default function HeroSection() {
         src={useBaseUrl('/img/orka-logo.png')}
       />
       <p className="hero-tagline">
-        Kubernetes-native AI agent orchestration —{' '}
-        <span className="hero-highlight">no orchestration graphs required.</span>
+        Run AI agents and coding agents on your cluster.{' '}
+        <span className="hero-highlight">Model keys never leave it.</span>
       </p>
       <p className="hero-description">
-        Orka turns your cluster into an AI task execution platform. A
-        coordinator agent decomposes complex work, spawns specialist agents to
-        run in parallel, and synthesizes their results — each as an isolated,
-        observable Kubernetes Job.
+        Describe work as a Task. Orka runs it in a Pod, keeps a durable record
+        of what happened, and hands you the result through an API, a CLI, or
+        the built-in dashboard. One Helm command to install.
       </p>
       <div className="hero-buttons">
         <Link
@@ -26,6 +25,12 @@ export default function HeroSection() {
           className="button button--primary button--lg"
         >
           Get Started
+        </Link>
+        <Link
+          to="/docs/demos"
+          className="button button--secondary button--lg"
+        >
+          Watch demos
         </Link>
         <Link
           to="https://github.com/orka-agents/orka"

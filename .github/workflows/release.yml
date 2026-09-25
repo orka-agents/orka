@@ -1,9 +1,21 @@
 name: Release
+run-name: Release ${{ inputs.release_version }} (${{ inputs.dispatch_id }})
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: Version prepared on release-X.Y
+        required: true
+        type: string
+      candidate_sha:
+        description: Exact generated commit to build, qualify, and approve
+        required: true
+        type: string
+      dispatch_id:
+        description: Correlation ID supplied by Prepare Release
+        required: true
+        type: string
 
 env:
   REGISTRY: ghcr.io
@@ -21,8 +33,11 @@ concurrency:
 jobs:
   validate-release:
     name: Validate release metadata and Helm chart
+    outputs:
+      artifact_attempt: ${{ steps.candidate.outputs.artifact_attempt }}
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: read
     steps:
       - name: Checkout
@@ -30,8 +45,24 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Validate tag and promoted chart
-        run: scripts/validate-release-manifest.sh "${GITHUB_REF_NAME}"
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27'
+          check-latest: true
+
+      - name: Validate candidate and approval configuration
+        id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.release_version }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: go run ./cmd/build/release candidate "${RELEASE_VERSION}" "${CANDIDATE_SHA}"
+
+      - name: Validate promoted chart
+        env:
+          RELEASE_VERSION: ${{ inputs.release_version }}
+        run: scripts/validate-release-manifest.sh "${RELEASE_VERSION}"
 
       - name: Package promoted chart
         run: |
@@ -106,25 +137,127 @@ jobs:
               continue
             fi
 
-            set +e
-            python3 -I scripts/compare-helm-chart-packages.py "${candidate}" "${published_archive}"
-            comparison_status=$?
-            set -e
-            case "${comparison_status}" in
-              0)
-                echo "Published ${published_path} has identical normalized contents."
-                ;;
-              1)
-                echo "Chart ${package_name} already exists with different contents." >&2
-                echo "Prepare and promote a new chart version before tagging." >&2
-                exit 1
-                ;;
-              *)
-                echo "Could not compare ${package_name} with published ${published_path}." >&2
-                exit "${comparison_status}"
-                ;;
-            esac
+            echo "Chart ${package_name} already exists with different bytes." >&2
+            echo "Retry publication with the original artifact or prepare a new version." >&2
+            exit 1
           done
+
+      - name: Preserve the exact candidate chart
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: chart-${{ github.run_id }}-${{ steps.candidate.outputs.artifact_attempt }}
+          path: cr-release-packages/orka-*.tgz
+          if-no-files-found: error
+          retention-days: 90
+
+  lint:
+    needs: validate-release
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: ./.github/workflows/lint.yml
+    with:
+      full_check: true
+
+  tests:
+    needs: validate-release
+    uses: ./.github/workflows/test.yml
+
+  helm:
+    needs: validate-release
+    uses: ./.github/workflows/helm-chart.yml
+
+  govulncheck:
+    needs: validate-release
+    uses: ./.github/workflows/govulncheck.yml
+
+  build-cli:
+    name: Build CLI (${{ matrix.os }}/${{ matrix.arch }})
+    needs: validate-release
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+            runner: ubuntu-latest
+          - os: linux
+            arch: arm64
+            runner: ubuntu-24.04-arm
+          - os: darwin
+            arch: amd64
+            runner: macos-15-intel
+          - os: darwin
+            arch: arm64
+            runner: macos-15
+          - os: windows
+            arch: amd64
+            runner: windows-latest
+    env:
+      CGO_ENABLED: '0'
+      GOOS: ${{ matrix.os }}
+      GOARCH: ${{ matrix.arch }}
+      RELEASE_VERSION: ${{ inputs.release_version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27'
+          check-latest: true
+
+      - name: Build and package CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary=orka
+          if [[ "${GOOS}" == windows ]]; then
+            binary=orka.exe
+          fi
+          mkdir -p "${RUNNER_TEMP}/cli-dist"
+          go build -trimpath -ldflags "-s -w -X main.version=${RELEASE_VERSION}" \
+            -o "${RUNNER_TEMP}/cli-dist/${binary}" ./cmd/cli/
+          go run ./cmd/build/release package-cli "${RUNNER_TEMP}/cli-dist" "${RELEASE_VERSION}" "${GOOS}" "${GOARCH}"
+
+      - name: Test packaged Unix CLI
+        if: matrix.os != 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/cli-smoke"
+          tar -xzf "${RUNNER_TEMP}/cli-dist/orka_${RELEASE_VERSION}_${GOOS}_${GOARCH}.tar.gz" \
+            -C "${RUNNER_TEMP}/cli-smoke"
+          actual=$("${RUNNER_TEMP}/cli-smoke/orka" version)
+          if [[ "${actual}" != "orka ${RELEASE_VERSION}" ]]; then
+            echo "Packaged CLI version does not match ${RELEASE_VERSION}." >&2
+            exit 1
+          fi
+
+      - name: Test packaged Windows CLI
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "cli-dist/orka_${env:RELEASE_VERSION}_windows_amd64.zip"
+          $destination = Join-Path $env:RUNNER_TEMP "cli-smoke"
+          Expand-Archive -Path $archive -DestinationPath $destination
+          $actual = & (Join-Path $destination "orka.exe") version
+          if ($LASTEXITCODE -ne 0 -or $actual -ne "orka ${env:RELEASE_VERSION}") {
+            throw "Packaged CLI version does not match ${env:RELEASE_VERSION}."
+          }
+
+      - name: Preserve CLI archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cli-${{ matrix.os }}-${{ matrix.arch }}-${{ needs.validate-release.outputs.artifact_attempt }}
+          path: ${{ runner.temp }}/cli-dist/orka_*
+          if-no-files-found: error
+          retention-days: 90
 
   build-and-push:
     name: Build and Push Images
@@ -134,8 +267,9 @@ jobs:
       contents: read
       packages: write
     strategy:
-      # Tagged application releases publish the default harness-v2 stack and
+      # Application releases publish the default harness-v2 stack and
       # the digest-pinned harness-v1 compatibility wrapper.
+      fail-fast: false
       matrix:
         include:
           - image: controller
@@ -177,6 +311,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
@@ -194,19 +330,11 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}${{ matrix.image_suffix }}
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha
-
-      - name: Save release tags
-        run: |
-          cat > tags-${{ matrix.image }}.txt <<'TAGS'
-          ${{ steps.meta.outputs.tags }}
-          TAGS
+            type=semver,pattern={{version}},value=${{ inputs.release_version }}
 
       - name: Build and push by digest
         id: build
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
@@ -219,21 +347,9 @@ jobs:
       - name: Save image digest
         run: printf '%s' '${{ steps.build.outputs.digest }}' > digest-${{ matrix.image }}.txt
 
-      - name: Upload image digest
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: digest-${{ matrix.image }}
-          path: digest-${{ matrix.image }}.txt
-
-      - name: Upload release tags
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: tags-${{ matrix.image }}
-          path: tags-${{ matrix.image }}.txt
-
       - name: Set up Syft
         id: syft
-        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
 
       - name: Generate platform SBOMs
         env:
@@ -245,15 +361,19 @@ jobs:
           "${SYFT_CMD}" scan --platform linux/amd64 "${IMAGE_REF}@${IMAGE_DIGEST}" -o spdx-json="sbom-${{ matrix.image }}-linux-amd64.spdx.json"
           "${SYFT_CMD}" scan --platform linux/arm64 "${IMAGE_REF}@${IMAGE_DIGEST}" -o spdx-json="sbom-${{ matrix.image }}-linux-arm64.spdx.json"
 
-      - name: Upload SBOMs
+      - name: Preserve image digest and platform SBOMs
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: sbom-${{ matrix.image }}
-          path: sbom-${{ matrix.image }}-*.spdx.json
+          name: image-${{ matrix.image }}-${{ needs.validate-release.outputs.artifact_attempt }}
+          path: |
+            digest-${{ matrix.image }}.txt
+            sbom-${{ matrix.image }}-*.spdx.json
+          if-no-files-found: error
+          retention-days: 90
 
   scan:
     name: Security Scan
-    needs: build-and-push
+    needs: [validate-release, build-and-push]
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -347,7 +467,7 @@ jobs:
       - name: Download image digest
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: digest-${{ matrix.image }}
+          name: image-${{ matrix.image }}-${{ needs.validate-release.outputs.artifact_attempt }}
           path: digests
 
       - name: Read image digest
@@ -366,7 +486,7 @@ jobs:
           exit-code: "0"
 
       - name: Upload Trivy scan results
-        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
         with:
           sarif_file: trivy-${{ matrix.image }}-${{ matrix.platform_slug }}.sarif
           category: trivy-${{ matrix.image }}-${{ matrix.platform_slug }}
@@ -375,6 +495,7 @@ jobs:
   sign-and-attest:
     name: Sign Images and Attest SBOMs
     needs:
+      - validate-release
       - build-and-push
       - scan
     runs-on: ubuntu-latest
@@ -421,14 +542,8 @@ jobs:
       - name: Download image digest
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: digest-${{ matrix.image }}
+          name: image-${{ matrix.image }}-${{ needs.validate-release.outputs.artifact_attempt }}
           path: digests
-
-      - name: Download SBOMs
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: sbom-${{ matrix.image }}
-          path: sboms
 
       - name: Read image digest
         id: digest
@@ -462,18 +577,157 @@ jobs:
           IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}${{ matrix.image_suffix }}
         run: |
           set -euo pipefail
-          cosign attest --yes --type spdxjson --predicate "sboms/sbom-${{ matrix.image }}-linux-amd64.spdx.json" "${IMAGE_REF}@${AMD64_DIGEST}"
-          cosign attest --yes --type spdxjson --predicate "sboms/sbom-${{ matrix.image }}-linux-arm64.spdx.json" "${IMAGE_REF}@${ARM64_DIGEST}"
+          cosign attest --yes --type spdxjson --predicate "digests/sbom-${{ matrix.image }}-linux-amd64.spdx.json" "${IMAGE_REF}@${AMD64_DIGEST}"
+          cosign attest --yes --type spdxjson --predicate "digests/sbom-${{ matrix.image }}-linux-arm64.spdx.json" "${IMAGE_REF}@${ARM64_DIGEST}"
 
-  promote-release-tags:
-    name: Promote Release Tags
-    needs: sign-and-attest
+  candidate-bundle:
+    name: Assemble immutable release candidate
+    needs: [validate-release, build-and-push, build-cli]
     runs-on: ubuntu-latest
     permissions:
-      actions: read
       contents: read
-      packages: write
+      id-token: write
     steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27'
+          check-latest: true
+
+      - name: Download packaged chart
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: chart-${{ github.run_id }}-${{ needs.validate-release.outputs.artifact_attempt }}
+          path: ${{ runner.temp }}/release-candidate
+
+      - name: Download image digests and SBOMs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: image-*-${{ needs.validate-release.outputs.artifact_attempt }}
+          path: ${{ runner.temp }}/release-candidate/digests
+          merge-multiple: true
+
+      - name: Download CLI archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: cli-*-${{ needs.validate-release.outputs.artifact_attempt }}
+          path: ${{ runner.temp }}/release-candidate
+          merge-multiple: true
+
+      - name: Set up Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Checksum and sign CLI archives
+        env:
+          RELEASE_VERSION: ${{ inputs.release_version }}
+        run: |
+          set -euo pipefail
+          go run ./cmd/build/release cli-checksums "${RUNNER_TEMP}/release-candidate" "${RELEASE_VERSION}"
+          checksums="${RUNNER_TEMP}/release-candidate/orka_${RELEASE_VERSION}_checksums.txt"
+          cosign sign-blob --yes --bundle "${checksums}.bundle" "${checksums}"
+
+      - name: Bind chart bytes, CLI assets, image digests, and build identity
+        env:
+          RELEASE_VERSION: ${{ inputs.release_version }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          ARTIFACT_ATTEMPT: ${{ needs.validate-release.outputs.artifact_attempt }}
+        run: go run ./cmd/build/release bundle "${RUNNER_TEMP}/release-candidate" "${RELEASE_VERSION}" "${CANDIDATE_SHA}" "${ARTIFACT_ATTEMPT}"
+
+      - name: Upload candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-candidate-${{ github.run_id }}-${{ needs.validate-release.outputs.artifact_attempt }}
+          # SBOMs remain in the image artifacts and signed attestations. The
+          # live gate carries the manifest, chart, CLI assets, and image digests.
+          path: |
+            ${{ runner.temp }}/release-candidate/candidate.json
+            ${{ runner.temp }}/release-candidate/orka-*.tgz
+            ${{ runner.temp }}/release-candidate/orka_*
+            ${{ runner.temp }}/release-candidate/digests/digest-*.txt
+          if-no-files-found: error
+          retention-days: 90
+
+  qualification:
+    name: Qualify the published digests and packaged chart
+    needs: [validate-release, candidate-bundle, lint, tests, helm, govulncheck, sign-and-attest]
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      actions: write
+      contents: read
+    outputs:
+      artifact_name: ${{ steps.evidence.outputs.name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27'
+          check-latest: true
+
+      - name: Download candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-candidate-${{ github.run_id }}-${{ needs.validate-release.outputs.artifact_attempt }}
+          path: ${{ runner.temp }}/release-candidate
+
+      - name: Dispatch and verify release qualification
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: go run ./cmd/build/release qualify "${RUNNER_TEMP}/release-candidate"
+
+      - name: Name qualified evidence for this attempt
+        id: evidence
+        run: echo "name=release-qualified-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >>"${GITHUB_OUTPUT}"
+
+      - name: Preserve candidate and qualification evidence for approval
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.evidence.outputs.name }}
+          path: ${{ runner.temp }}/release-candidate
+          if-no-files-found: error
+          retention-days: 90
+
+  publish:
+    name: Approve and publish the qualified candidate
+    needs: qualification
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: release
+      url: https://github.com/${{ github.repository }}/commit/${{ inputs.candidate_sha }}
+    permissions:
+      actions: read
+      contents: write
+      packages: write
+      pages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27'
+          check-latest: true
+
+      - name: Download approved candidate and evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.qualification.outputs.artifact_name }}
+          path: ${{ runner.temp }}/release-candidate
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
@@ -482,69 +736,14 @@ jobs:
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ github.token }}
 
-      - name: Download image digests
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          pattern: digest-*
-          path: digests
-          merge-multiple: true
+      # GITHUB_TOKEN tag pushes do not trigger another push workflow. Complete
+      # publication here, under the same environment approval and artifact set.
+      - name: Set up Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
-      - name: Download release tags
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          pattern: tags-*
-          path: tags
-          merge-multiple: true
-
-      - name: Promote release tags
+      - name: Recheck evidence, tag, and publish
         env:
-          IMAGE_PREFIX: ${{ env.IMAGE_PREFIX }}
-          REGISTRY: ${{ env.REGISTRY }}
-        run: |
-          set -euo pipefail
-
-          promote_image() {
-            local image="$1"
-            local image_suffix="$2"
-            local digest
-            digest=$(cat "digests/digest-${image}.txt")
-            local image_ref="${REGISTRY}/${IMAGE_PREFIX}${image_suffix}"
-
-            while IFS= read -r tag; do
-              test -n "${tag}" || continue
-              docker buildx imagetools create -t "${tag}" "${image_ref}@${digest}"
-            done < "tags/tags-${image}.txt"
-          }
-
-          promote_image controller ""
-          promote_image ai-worker "/ai-worker"
-          promote_image general-worker "/general-worker"
-          promote_image agent-harness-wrapper "/agent-harness-wrapper"
-          promote_image acp-codex-runtime "/acp-codex-runtime"
-          promote_image acp-claude-runtime "/acp-claude-runtime"
-          promote_image acp-copilot-runtime "/acp-copilot-runtime"
-          promote_image acp-opencode-runtime "/acp-opencode-runtime"
-          promote_image workspace-publisher "/workspace-publisher"
-
-
-  publish-helm-chart:
-    name: Publish promoted Helm chart
-    needs: promote-release-tags
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Publish Helm chart
-        uses: stefanprodan/helm-gh-pages@0ad2bb377311d61ac04ad9eb6f252fb68e207260 # v1.7.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          charts_dir: charts
-          target_dir: charts
-          linting: off
+          GH_TOKEN: ${{ github.token }}
+        run: go run ./cmd/build/release publish "${RUNNER_TEMP}/release-candidate"

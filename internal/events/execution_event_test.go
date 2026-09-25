@@ -47,16 +47,17 @@ func TestExecutionEventTypeConstantsCoverTaxonomy(t *testing.T) {
 		ExecutionEventTypeApprovalDeclined,
 		ExecutionEventTypeApprovalExpired,
 		ExecutionEventTypeApprovalCancelled,
+		ExecutionEventTypeApprovalExecutionUpdated,
 		ExecutionEventTypePlanUpdated,
 	}
-	got := ExecutionEventTypes()
+	got := executionEventTypes
 	if len(got) != len(want) {
-		t.Fatalf("ExecutionEventTypes() length = %d, want %d", len(got), len(want))
+		t.Fatalf("executionEventTypes length = %d, want %d", len(got), len(want))
 	}
 	seen := map[string]bool{}
 	for _, typ := range got {
 		if seen[typ] {
-			t.Fatalf("ExecutionEventTypes() contains duplicate %q", typ)
+			t.Fatalf("executionEventTypes contains duplicate %q", typ)
 		}
 		seen[typ] = true
 		if !IsValidExecutionEventType(typ) {
@@ -65,7 +66,7 @@ func TestExecutionEventTypeConstantsCoverTaxonomy(t *testing.T) {
 	}
 	for _, typ := range want {
 		if !seen[typ] {
-			t.Fatalf("ExecutionEventTypes() missing %q", typ)
+			t.Fatalf("executionEventTypes missing %q", typ)
 		}
 	}
 }
@@ -118,7 +119,7 @@ func TestTerminalApprovalEventTaxonomy(t *testing.T) {
 		ExecutionEventTypeApprovalExpired,
 		ExecutionEventTypeApprovalCancelled,
 	}
-	got := TerminalApprovalEventTypes()
+	got := terminalApprovalEventTypes
 	assertSameEventSet(t, got, want)
 	for _, typ := range got {
 		if !IsValidExecutionEventType(typ) {
@@ -132,10 +133,6 @@ func TestTerminalApprovalEventTaxonomy(t *testing.T) {
 		if IsTerminalApprovalEventType(typ) {
 			t.Fatalf("IsTerminalApprovalEventType(%q) = true, want false", typ)
 		}
-	}
-	got[0] = ExecutionEventTypeApprovalRequested
-	if TerminalApprovalEventTypes()[0] != ExecutionEventTypeApprovalApproved {
-		t.Fatalf("TerminalApprovalEventTypes returned mutable package storage")
 	}
 }
 

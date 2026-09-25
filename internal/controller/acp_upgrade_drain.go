@@ -400,17 +400,18 @@ type ACPUpgradeDrainMarker struct {
 // loopback trigger for a same-binary preStop child and retains leadership while
 // RuntimePools and durable finalization barriers settle.
 type ACPUpgradeDrainCoordinator struct {
-	Client           client.Client
-	APIReader        client.Reader
-	Epochs           ACPUpgradeDrainEpochSource
-	EpochStore       store.ControllerEpochStore
-	AdmissionGate    *ACPAdmissionGate
-	Barriers         ACPUpgradeDrainBarrierObserver
-	SupervisorClient RuntimePoolSupervisorClient
-	HTTPClient       *http.Client
-	SubstrateConfig  SubstrateConfig
-	Options          ACPUpgradeDrainOptions
-	Now              func() time.Time
+	Client              client.Client
+	APIReader           client.Reader
+	Epochs              ACPUpgradeDrainEpochSource
+	EpochStore          store.ControllerEpochStore
+	AdmissionGate       *ACPAdmissionGate
+	Barriers            ACPUpgradeDrainBarrierObserver
+	SupervisorClient    RuntimePoolSupervisorClient
+	HTTPClient          *http.Client
+	SubstrateConfig     SubstrateConfig
+	ControllerNamespace string
+	Options             ACPUpgradeDrainOptions
+	Now                 func() time.Time
 
 	initOnce sync.Once
 	initErr  error
@@ -613,7 +614,7 @@ func (c *ACPUpgradeDrainCoordinator) runDrain(parent context.Context) error {
 		lastErr = observeErr
 		lastErrorText := ""
 		if observeErr != nil {
-			lastErrorText = sanitizeRuntimePoolMessage(observeErr.Error())
+			lastErrorText = sanitizeStatusMessage(observeErr.Error())
 		}
 		c.setDrainingStatus(fence, marker.StartedAt, deadline, snapshot, lastErrorText)
 		if observeErr == nil && snapshot.Quiescent() {
@@ -733,6 +734,9 @@ func (c *ACPUpgradeDrainCoordinator) observeAndDrainRuntimePool(
 			}
 			return nil
 		}
+		if runtimePoolIsSubstrateBacked(pool) && pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleDegraded {
+			return c.observeFailedNativeSubstrateCleanup(ctx, pool)
+		}
 		return fmt.Errorf(
 			"has no authenticated active instance but workspace lifecycle %q does not prove the provider workspace is stopped",
 			pool.Status.Lifecycle,
@@ -775,6 +779,13 @@ func (c *ACPUpgradeDrainCoordinator) observeAndDrainRuntimePool(
 	return c.observeAndDrainRuntimeInstance(ctx, fence, pool, active, pod, snapshot)
 }
 
+func (c *ACPUpgradeDrainCoordinator) observeFailedNativeSubstrateCleanup(ctx context.Context, pool *corev1alpha1.RuntimePool) error {
+	reconciler := &RuntimePoolReconciler{
+		Client: c.Client, APIReader: c.APIReader, ControllerNamespace: c.ControllerNamespace,
+	}
+	return reconciler.verifyFailedNativeSubstrateCleanup(ctx, pool)
+}
+
 func (c *ACPUpgradeDrainCoordinator) observeAndDrainRuntimeInstance(
 	ctx context.Context,
 	fence store.ControllerEpochFence,
@@ -797,11 +808,20 @@ func (c *ACPUpgradeDrainCoordinator) observeAndDrainRuntimeInstance(
 	if err != nil {
 		return err
 	}
-	observed, err := validateRuntimePoolProbe(pool, cfg, pod, probe, c.now())
+	probeGeneration := probe.Status.Fence.RuntimePoolGeneration
+	if probeGeneration == 0 || probeGeneration > uint64(pool.Generation) {
+		return fmt.Errorf("validate authenticated supervisor probe: runtime status generation %d is not an admitted generation of current RuntimePool generation %d", probeGeneration, pool.Generation)
+	}
+	validationPool := pool
+	if probeGeneration != uint64(pool.Generation) {
+		validationPool = pool.DeepCopy()
+		validationPool.Generation = int64(probeGeneration)
+	}
+	observed, err := validateRuntimePoolProbe(validationPool, cfg, pod, probe, c.now())
 	if err != nil {
 		return fmt.Errorf("validate authenticated supervisor probe: %w", err)
 	}
-	if observed.RuntimeInstanceID != active.RuntimeInstanceID || observed.BootID != active.BootID {
+	if !runtimePoolRolloutActiveInstanceMatches(active, observed) {
 		return fmt.Errorf("authenticated supervisor identity changed during planned drain")
 	}
 	addSupervisorPressure(snapshot, probe.Status)
@@ -1001,7 +1021,7 @@ func (c *ACPUpgradeDrainCoordinator) finishTimedOut(
 ) error {
 	reason := "ACP planned-upgrade barriers did not settle before the configured deadline"
 	if lastErr != nil {
-		reason += ": " + sanitizeRuntimePoolMessage(lastErr.Error())
+		reason += ": " + sanitizeStatusMessage(lastErr.Error())
 	}
 	now := c.now()
 	markerErr := error(nil)
@@ -1011,7 +1031,7 @@ func (c *ACPUpgradeDrainCoordinator) finishTimedOut(
 		markerErr = c.persistTerminalMarker(markerCtx, marker, ACPUpgradeDrainMarkerTimedOut, snapshot, now, reason)
 	}
 	if markerErr != nil {
-		reason += "; failed to persist timeout marker: " + sanitizeRuntimePoolMessage(markerErr.Error())
+		reason += "; failed to persist timeout marker: " + sanitizeStatusMessage(markerErr.Error())
 	}
 	c.setTerminalStatus(ACPUpgradeDrainTimedOut, fence, snapshot, nil, reason)
 	return fmt.Errorf("%w: %s", ErrACPUpgradeDrainTimedOut, reason)
@@ -1107,7 +1127,7 @@ func (c *ACPUpgradeDrainCoordinator) persistTerminalMarker(
 		}
 		existing.State = state
 		existing.Snapshot = snapshot
-		existing.LastError = sanitizeRuntimePoolMessage(reason)
+		existing.LastError = sanitizeStatusMessage(reason)
 		at = at.UTC()
 		if state == ACPUpgradeDrainMarkerCompleted {
 			existing.CompletedAt = &at
@@ -1217,45 +1237,6 @@ func decodeACPUpgradeDrainMarker(raw string) (ACPUpgradeDrainMarker, bool, error
 	return marker, true, nil
 }
 
-// ReadACPUpgradeDrainMarker returns the marker atomically ordered on the
-// authoritative controller-epoch Lease.
-func ReadACPUpgradeDrainMarker(
-	ctx context.Context,
-	reader client.Reader,
-	namespace, epochName string,
-) (ACPUpgradeDrainMarker, error) {
-	lease, err := readACPUpgradeDrainControllerEpochLease(ctx, reader, namespace, epochName)
-	if err != nil {
-		return ACPUpgradeDrainMarker{}, err
-	}
-	marker, present, err := decodeACPUpgradeDrainMarker(lease.Annotations[acpUpgradeDrainMarkerAnnotation])
-	if err != nil {
-		return ACPUpgradeDrainMarker{}, err
-	}
-	if !present {
-		return ACPUpgradeDrainMarker{}, store.ErrNotFound
-	}
-	return marker, nil
-}
-
-// ACPUpgradeDrainCompletedForEpoch is the only planned-takeover predicate. A
-// timeout or merely persisted intent intentionally returns false.
-func ACPUpgradeDrainCompletedForEpoch(
-	ctx context.Context,
-	reader client.Reader,
-	namespace, epochName string,
-	epoch int64,
-) (bool, error) {
-	marker, err := ReadACPUpgradeDrainMarker(ctx, reader, namespace, epochName)
-	if errors.Is(err, store.ErrNotFound) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return marker.ControllerEpoch == epoch && marker.State == ACPUpgradeDrainMarkerCompleted, nil
-}
-
 func (c *ACPUpgradeDrainCoordinator) requireCurrentEpoch(ctx context.Context, fence store.ControllerEpochFence) error {
 	current, err := c.EpochStore.GetControllerEpoch(ctx, fence.Name)
 	if err != nil {
@@ -1360,10 +1341,7 @@ func (c *ACPUpgradeDrainCoordinator) currentLifecycleContext() context.Context {
 }
 
 func (c *ACPUpgradeDrainCoordinator) now() time.Time {
-	if c.Now != nil {
-		return c.Now().UTC()
-	}
-	return time.Now().UTC()
+	return clockNow(c.Now)
 }
 
 func (c *ACPUpgradeDrainCoordinator) setDrainingStatus(
@@ -1416,7 +1394,7 @@ func (c *ACPUpgradeDrainCoordinator) setTerminalStatus(
 func (c *ACPUpgradeDrainCoordinator) failStatus(err error) {
 	message := ""
 	if err != nil {
-		message = sanitizeRuntimePoolMessage(err.Error())
+		message = sanitizeStatusMessage(err.Error())
 	}
 	c.statusMu.Lock()
 	defer c.statusMu.Unlock()

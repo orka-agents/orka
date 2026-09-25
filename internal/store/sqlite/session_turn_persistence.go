@@ -26,7 +26,7 @@ func (s *Store) CreateSessionTurnRecord(ctx context.Context, request store.Creat
 	if err := store.ValidateControlIdentifier("session name", request.SessionName); err != nil {
 		return nil, err
 	}
-	normalized, _, err := normalizeSessionTurnForCreate(request.Turn, request.Fence)
+	normalized, _, err := store.NormalizeSessionTurnForCreate(request.Turn, request.Fence)
 	if err != nil {
 		return nil, err
 	}
@@ -37,8 +37,8 @@ func (s *Store) CreateSessionTurnRecord(ctx context.Context, request store.Creat
 	}
 	defer func() { _ = tx.Rollback() }()
 	if existing, getErr := getSessionTurn(ctx, tx, normalized.ID); getErr == nil {
-		if !sameSessionTurnCreation(existing, normalized) {
-			return nil, controlConflict("session turn %q was reused with different prompt input or request digest", normalized.ID)
+		if !store.SameSessionTurnCreation(existing, normalized) {
+			return nil, store.ConflictErrorf("session turn %q was reused with different prompt input or request digest", normalized.ID)
 		}
 		if err := requireSessionTurnBinding(ctx, tx, normalized.ID, request.Namespace, request.SessionName); err != nil {
 			return nil, err
@@ -68,7 +68,7 @@ func (s *Store) CreateSessionTurnRecord(ctx context.Context, request store.Creat
 	)
 	if err != nil {
 		if isSQLiteConstraintError(err) {
-			return nil, controlConflict("session turn %q was created concurrently", normalized.ID)
+			return nil, store.ConflictErrorf("session turn %q was created concurrently", normalized.ID)
 		}
 		return nil, err
 	}
@@ -109,13 +109,13 @@ func (s *Store) CommitSessionTurnFinalization(ctx context.Context, request store
 		if sessionTurnPersistenceFinalizationMatches(turn, normalized) {
 			return &turn, nil
 		}
-		return nil, controlConflict("session turn %q was finalized with different terminal data, receipt, or digest", turn.ID)
+		return nil, store.ConflictErrorf("session turn %q was finalized with different terminal data, receipt, or digest", turn.ID)
 	}
 	if turn.Key != normalized.Key {
-		return nil, controlConflict("session turn %q key does not match finalization request", turn.ID)
+		return nil, store.ConflictErrorf("session turn %q key does not match finalization request", turn.ID)
 	}
 	if turn.Version != normalized.ExpectedTurnVersion {
-		return nil, controlConflict("session turn %q is version %d, expected %d", turn.ID, turn.Version, normalized.ExpectedTurnVersion)
+		return nil, store.ConflictErrorf("session turn %q is version %d, expected %d", turn.ID, turn.Version, normalized.ExpectedTurnVersion)
 	}
 	if err := requireTranscriptSession(ctx, tx, normalized.Namespace, normalized.SessionName); err != nil {
 		return nil, err
@@ -138,15 +138,8 @@ func (s *Store) CommitSessionTurnFinalization(ctx context.Context, request store
 			return nil, err
 		}
 	}
-	sessionResult, err := tx.ExecContext(ctx,
-		`UPDATE sessions SET message_count = message_count + ?, active_task = '', updated_at = ?
-		 WHERE namespace = ? AND name = ?`,
-		messageCountDelta, normalized.FinalizedAt, normalized.Namespace, normalized.SessionName,
-	)
-	if err != nil {
-		return nil, err
-	}
-	if err := rowsAffectedExactlyOne(sessionResult, "session transcript finalization"); err != nil {
+	if err := finalizeSessionTranscriptTx(ctx, tx, normalized.Namespace, normalized.SessionName,
+		normalized.Key.TaskUID, messageCountDelta, normalized.FinalizedAt); err != nil {
 		return nil, err
 	}
 	turnResult, err := tx.ExecContext(ctx,
@@ -192,6 +185,30 @@ func (s *Store) CommitSessionTurnFinalization(ctx context.Context, request store
 	return &turn, nil
 }
 
+func finalizeSessionTranscriptTx(ctx context.Context, tx *sql.Tx, namespace, name, taskUID string, messageCountDelta int, finalizedAt time.Time) error {
+	result, err := tx.ExecContext(ctx,
+		`UPDATE sessions SET message_count = message_count + ?, updated_at = ?
+		 WHERE namespace = ? AND name = ?`,
+		messageCountDelta, finalizedAt, namespace, name,
+	)
+	if err != nil {
+		return err
+	}
+	if err := rowsAffectedExactlyOne(result, "session transcript finalization"); err != nil {
+		return err
+	}
+	// Gateway projection owns the canonical transcript and releases its Task
+	// lock atomically with the terminal message. Ordinary finalization releases
+	// only this Task UID, including the legacy UID-in-active_task representation.
+	_, err = tx.ExecContext(ctx,
+		`UPDATE sessions SET active_task = '', active_task_uid = '', active_task_expires_at = NULL
+		 WHERE namespace = ? AND name = ? AND session_type <> ? AND owner_type <> ?
+		   AND (active_task_uid = ? OR (active_task_uid = '' AND active_task = ?))`,
+		namespace, name, store.SessionTypeGateway, gatewaySessionOwnerType, taskUID, taskUID,
+	)
+	return err
+}
+
 // ActivateSessionTurnProjection makes the deferred terminal projection
 // claimable only after Kubernetes control finalization has committed.
 func (s *Store) ActivateSessionTurnProjection(ctx context.Context, request store.ActivateSessionTurnProjectionRequest) (*store.OutboxProjection, error) {
@@ -209,19 +226,19 @@ func (s *Store) ActivateSessionTurnProjection(ctx context.Context, request store
 		return nil, err
 	}
 	if turn.State != store.SessionTurnFinalized || turn.FinalizationDigest != normalized.FinalizationDigest {
-		return nil, controlConflict("session turn %q is not finalized with the expected digest", normalized.TurnID)
+		return nil, store.ConflictErrorf("session turn %q is not finalized with the expected digest", normalized.TurnID)
 	}
 	projection, err := getOutboxProjection(ctx, tx, normalized.ProjectionID)
 	if err != nil {
 		return nil, err
 	}
 	if projection.AggregateKind != normalized.ExpectedAggregateKind || projection.AggregateID != normalized.TurnID || projection.ProjectionKind != normalized.ExpectedProjectionKind || projection.PayloadDigest != normalized.ExpectedPayloadDigest {
-		return nil, controlConflict("outbox projection %q does not match finalized SessionTurn", projection.ID)
+		return nil, store.ConflictErrorf("outbox projection %q does not match finalized SessionTurn", projection.ID)
 	}
 	operationID := "activate-session-turn:" + normalized.TurnID
 	if projection.LastOperationID == operationID {
 		if projection.LastOperationDigest != normalized.FinalizationDigest {
-			return nil, controlConflict("outbox activation operation %q was reused with a different digest", operationID)
+			return nil, store.ConflictErrorf("outbox activation operation %q was reused with a different digest", operationID)
 		}
 		return &projection, nil
 	}
@@ -232,7 +249,7 @@ func (s *Store) ActivateSessionTurnProjection(ctx context.Context, request store
 		return &projection, nil
 	}
 	if projection.State != store.OutboxProjectionPending || projection.Attempts != 0 || projection.LeaseOwner != "" || projection.LeaseExpiresAt != nil {
-		return nil, controlConflict("outbox projection %q was claimed before SessionTurn activation", projection.ID)
+		return nil, store.ConflictErrorf("outbox projection %q was claimed before SessionTurn activation", projection.ID)
 	}
 	result, err := tx.ExecContext(ctx,
 		`UPDATE outbox_projections
@@ -274,7 +291,7 @@ func normalizeSessionTurnPersistenceFinalization(request store.CommitSessionTurn
 	if err := store.ValidateControlIdentifier("session name", request.SessionName); err != nil {
 		return store.CommitSessionTurnFinalizationRequest{}, store.OutboxProjection{}, err
 	}
-	fence, err := normalizeEpochFence(request.Fence)
+	fence, err := store.NormalizeEpochFence(request.Fence)
 	if err != nil {
 		return store.CommitSessionTurnFinalizationRequest{}, store.OutboxProjection{}, err
 	}
@@ -308,7 +325,7 @@ func normalizeSessionTurnPersistenceFinalization(request store.CommitSessionTurn
 	} else if request.PublicationReceipt != nil {
 		return store.CommitSessionTurnFinalizationRequest{}, store.OutboxProjection{}, store.ValidationErrorf("publication receipt requires a publication ID")
 	}
-	request.FinalizedAt = normalizeControlTime(request.FinalizedAt)
+	request.FinalizedAt = store.NormalizeControlTime(request.FinalizedAt)
 	projection, _, err := normalizeOutboxProjectionForCreate(request.Projection, request.Fence, request.FinalizedAt)
 	if err != nil {
 		return store.CommitSessionTurnFinalizationRequest{}, store.OutboxProjection{}, err
@@ -378,7 +395,7 @@ func normalizeActivateSessionTurnProjectionRequest(request store.ActivateSession
 	if err := store.ValidateCanonicalDigest("outbox payload digest", request.ExpectedPayloadDigest); err != nil {
 		return store.ActivateSessionTurnProjectionRequest{}, err
 	}
-	fence, err := normalizeEpochFence(request.Fence)
+	fence, err := store.NormalizeEpochFence(request.Fence)
 	if err != nil {
 		return store.ActivateSessionTurnProjectionRequest{}, err
 	}
@@ -386,7 +403,7 @@ func normalizeActivateSessionTurnProjectionRequest(request store.ActivateSession
 	if err := store.ValidateCanonicalDigest("session turn finalization digest", request.FinalizationDigest); err != nil {
 		return store.ActivateSessionTurnProjectionRequest{}, err
 	}
-	request.UpdatedAt = normalizeControlTime(request.UpdatedAt)
+	request.UpdatedAt = store.NormalizeControlTime(request.UpdatedAt)
 	if request.AvailableAt.IsZero() {
 		request.AvailableAt = request.UpdatedAt
 	} else {
@@ -431,7 +448,7 @@ func requireSessionUIDBinding(ctx context.Context, q controlQueryRower, sessionU
 		return err
 	}
 	if existingNamespace != namespace || existingSessionName != sessionName {
-		return controlConflict("session UID %q is already bound to %s/%s", sessionUID, existingNamespace, existingSessionName)
+		return store.ConflictErrorf("session UID %q is already bound to %s/%s", sessionUID, existingNamespace, existingSessionName)
 	}
 	return nil
 }
@@ -446,7 +463,7 @@ func requireSessionTurnBinding(ctx context.Context, q controlQueryRower, turnID,
 		return err
 	}
 	if existingNamespace != namespace || existingSessionName != sessionName {
-		return controlConflict("session turn %q is bound to %s/%s, not %s/%s", turnID, existingNamespace, existingSessionName, namespace, sessionName)
+		return store.ConflictErrorf("session turn %q is bound to %s/%s, not %s/%s", turnID, existingNamespace, existingSessionName, namespace, sessionName)
 	}
 	return nil
 }

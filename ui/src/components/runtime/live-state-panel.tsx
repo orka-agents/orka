@@ -42,8 +42,8 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 function Field({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div className="flex items-baseline justify-between gap-3 py-0.5">
-      <span className="text-muted-foreground">{label}</span>
-      <span className="font-mono">{value}</span>
+      <span className="shrink-0 text-muted-foreground">{label}</span>
+      <span className="min-w-0 break-all text-right font-mono">{value}</span>
     </div>
   )
 }
@@ -149,7 +149,7 @@ export function LiveStatePanel({ task }: LiveStatePanelProps) {
 
         {(labels.length > 0 || annotations.length > 0) && (
           <Section title="Metadata">
-            <dl className={cn('grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5')}>
+            <dl className={cn('grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5')}>
               {[...labels, ...annotations].map(([k, v]) => (
                 <div key={k} className="contents">
                   <dt className="truncate text-muted-foreground">{k}</dt>

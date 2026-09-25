@@ -23,19 +23,6 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - endpoints
-  - nodes
-  - persistentvolumeclaims
-  - persistentvolumes
-  - pods/status
-  - replicationcontrollers
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - ""
-  resources:
   - events
   verbs:
   - create
@@ -46,16 +33,19 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - pods/log
+  - persistentvolumeclaims
+  - persistentvolumes
+  - pods/status
   verbs:
   - get
+  - list
+  - watch
 - apiGroups:
   - ""
   resources:
-  - pods/portforward
-  - serviceaccounts/token
+  - pods/log
   verbs:
-  - create
+  - get
 - apiGroups:
   - ""
   resources:
@@ -67,12 +57,29 @@ rules:
   - update
   - watch
 - apiGroups:
+  - ""
+  resources:
+  - serviceaccounts/token
+  verbs:
+  - create
+- apiGroups:
+  - acp.workspace.orka.ai
+  resources:
+  - runtimeproviderconfigs
+  - runtimeworkspaceprofiles
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - agents.x-k8s.io
   resources:
   - sandboxes
   verbs:
   - get
   - list
+  - patch
+  - update
   - watch
 - apiGroups:
   - apiextensions.k8s.io
@@ -85,15 +92,6 @@ rules:
   - customresourcedefinitions
   verbs:
   - get
-- apiGroups:
-  - apps
-  resources:
-  - daemonsets
-  - statefulsets
-  verbs:
-  - get
-  - list
-  - watch
 - apiGroups:
   - apps
   resources:
@@ -110,7 +108,7 @@ rules:
 - apiGroups:
   - ate.dev
   resources:
-  - actortemplates
+  - workerpools
   verbs:
   - get
   - list
@@ -121,22 +119,6 @@ rules:
   - subjectaccessreviews
   verbs:
   - create
-- apiGroups:
-  - autoscaling
-  resources:
-  - horizontalpodautoscalers
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - batch
-  resources:
-  - cronjobs
-  verbs:
-  - get
-  - list
-  - watch
 - apiGroups:
   - batch
   resources:
@@ -243,6 +225,14 @@ rules:
   - list
   - watch
 - apiGroups:
+  - core.orka.ai
+  resources:
+  - sessions
+  verbs:
+  - delete
+  - get
+  - list
+- apiGroups:
   - discovery.k8s.io
   resources:
   - endpointslices
@@ -255,8 +245,10 @@ rules:
   resources:
   - events
   verbs:
+  - create
   - get
   - list
+  - patch
 - apiGroups:
   - extensions.agents.x-k8s.io
   resources:
@@ -310,22 +302,6 @@ rules:
   - get
   - patch
   - update
-- apiGroups:
-  - metrics.k8s.io
-  resources:
-  - nodes
-  - pods
-  verbs:
-  - get
-  - list
-- apiGroups:
-  - networking.k8s.io
-  resources:
-  - ingresses
-  verbs:
-  - get
-  - list
-  - watch
 - apiGroups:
   - networking.k8s.io
   resources:
@@ -391,6 +367,38 @@ rules:
 - apiGroups:
   - workspace.orka.ai
   resources:
+  - executionworkspacecheckpoints
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - use
+  - watch
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspacecheckpoints/finalizers
+  - executionworkspaceclasses/finalizers
+  - executionworkspaceproviders/finalizers
+  - executionworkspaces/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspacecheckpoints/status
+  - executionworkspaceclasses/status
+  - executionworkspacepools/status
+  - executionworkspaceproviders/status
+  - executionworkspaces/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - workspace.orka.ai
+  resources:
   - executionworkspaceclasses
   verbs:
   - create
@@ -401,25 +409,6 @@ rules:
   - update
   - use
   - watch
-- apiGroups:
-  - workspace.orka.ai
-  resources:
-  - executionworkspaceclasses/finalizers
-  - executionworkspaceproviders/finalizers
-  - executionworkspaces/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - workspace.orka.ai
-  resources:
-  - executionworkspaceclasses/status
-  - executionworkspacepools/status
-  - executionworkspaceproviders/status
-  - executionworkspaces/status
-  verbs:
-  - get
-  - patch
-  - update
 - apiGroups:
   - workspace.orka.ai
   resources:

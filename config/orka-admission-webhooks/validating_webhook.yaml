@@ -13,21 +13,41 @@ metadata:
 # runtime and webhook configuration atomically when using noncanonical release
 # namespaces or ServiceAccount names.
 webhooks:
-  - name: namespaceexecutionmode.core.orka.ai
+  - name: workspaceattachmentsecret.core.orka.ai
     admissionReviewVersions: [v1]
     sideEffects: None
     failurePolicy: Fail
     matchPolicy: Equivalent
     timeoutSeconds: 10
     clientConfig:
-      service: {name: orka-admission, namespace: orka-system, path: /validate-v1-namespace-execution-mode, port: 443}
+      service: {name: orka-admission, namespace: orka-system, path: /validate-v1-secret-workspace-attachment, port: 443}
     rules:
-      - {operations: [CREATE, UPDATE], apiGroups: [""], apiVersions: [v1], resources: [namespaces], scope: Cluster}
+      - {operations: [CREATE, UPDATE, DELETE], apiGroups: [""], apiVersions: [v1], resources: [secrets], scope: Namespaced}
+    objectSelector:
+      matchExpressions:
+        - key: workspace.orka.ai/attachment-for
+          operator: Exists
+  - name: acpsuspendquotalease.core.orka.ai
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: 10
+    clientConfig:
+      service: {name: orka-admission, namespace: orka-system, path: /validate-coordination-k8s-io-v1-acp-suspend-quota-lease, port: 443}
+    rules:
+      - {operations: [CREATE, UPDATE, DELETE], apiGroups: [coordination.k8s.io], apiVersions: [v1], resources: [leases], scope: Namespaced}
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: orka-system
     matchConditions:
-      - name: execution-mode-claim-present
+      - name: reserved-acp-workspace-lease-name
         expression: >-
-          object.metadata.?labels.orValue({}).exists(k, k == 'orka.ai/controller-mode') ||
-          oldObject.?metadata.?labels.orValue({}).exists(k, k == 'orka.ai/controller-mode')
+          request.?name.orValue('').startsWith('acp-suspend-quota-') ||
+          request.?name.orValue('').startsWith('acp-retention-fence-') ||
+          (request.operation == 'CREATE' &&
+          (object.metadata.?generateName.orValue('').startsWith('acp-suspend-quota-') ||
+          object.metadata.?generateName.orValue('').startsWith('acp-retention-fence-')))
   - name: taskprovenance.core.orka.ai
     admissionReviewVersions: [v1]
     sideEffects: None
@@ -37,7 +57,7 @@ webhooks:
     clientConfig:
       service: {name: orka-admission, namespace: orka-system, path: /validate-core-orka-ai-v1alpha1-task-provenance, port: 443}
     rules:
-      - {operations: [CREATE, UPDATE], apiGroups: [core.orka.ai], apiVersions: [v1alpha1], resources: [tasks], scope: Namespaced}
+      - {operations: [CREATE, UPDATE], apiGroups: [core.orka.ai], apiVersions: [v1alpha1], resources: [tasks, tasks/status], scope: Namespaced}
     matchConditions:
       - name: route-unless-controller-cleanup-safe
         expression: >-
@@ -120,6 +140,16 @@ webhooks:
       service: {name: orka-admission, namespace: orka-system, path: /validate-core-orka-ai-v1alpha1-tool-workspace-class-use, port: 443}
     rules:
       - {operations: [CREATE, UPDATE], apiGroups: [core.orka.ai], apiVersions: [v1alpha1], resources: [tools], scope: Namespaced}
+  - name: checkpointsourceuse.workspace.orka.ai
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: 10
+    clientConfig:
+      service: {name: orka-admission, namespace: orka-system, path: /validate-workspace-orka-ai-v1alpha1-checkpoint-source-use, port: 443}
+    rules:
+      - {operations: [CREATE], apiGroups: [workspace.orka.ai], apiVersions: [v1alpha1], resources: [executionworkspacecheckpoints], scope: Namespaced}
   - name: agentcontract.core.orka.ai
     admissionReviewVersions: [v1]
     sideEffects: None

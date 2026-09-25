@@ -23,6 +23,8 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/publisher"
+	"github.com/orka-agents/orka/internal/store"
 	orkatracing "github.com/orka-agents/orka/internal/tracing"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -66,7 +68,23 @@ type WorkspaceArgs struct {
 	ForgeCredentialRef           string `json:"forgeCredentialRef,omitempty"`
 	PushBranch                   string `json:"pushBranch,omitempty"`
 	PRBaseBranch                 string `json:"prBaseBranch,omitempty"`
+	PRTitle                      string `json:"prTitle,omitempty"`
+	PRBody                       string `json:"prBody,omitempty"`
 	CreatePR                     bool   `json:"createPR,omitempty"`
+}
+
+// UnmarshalJSON rejects invalid PR text types before encoding/json can treat
+// an explicit null string as an omitted field and silently select the fallback.
+func (w *WorkspaceArgs) UnmarshalJSON(data []byte) error {
+	var wsMap map[string]any
+	if err := json.Unmarshal(data, &wsMap); err != nil {
+		return err
+	}
+	if wsErr := agentWorkspacePullRequestArgTypeError(wsMap); wsErr != nil {
+		return wsErr
+	}
+	type workspaceArgs WorkspaceArgs
+	return json.Unmarshal(data, (*workspaceArgs)(w))
 }
 
 // DelegateTaskArgs are the arguments for the delegate_task tool
@@ -103,8 +121,10 @@ type DelegateTaskArgs struct {
 
 // DelegateTaskResult represents the delegation result
 type DelegateTaskResult struct {
-	TaskName string `json:"taskName"`
-	Status   string `json:"status"`
+	TaskName      string `json:"taskName"`
+	TaskUID       string `json:"taskUID,omitempty"`
+	ParentTaskUID string `json:"parentTaskUID,omitempty"`
+	Status        string `json:"status"`
 }
 
 // NewDelegateTaskTool creates a new delegate task tool
@@ -250,6 +270,16 @@ func (t *DelegateTaskTool) Parameters() json.RawMessage {
 						"type": "string",
 						"description": "Pull request base branch. Required when createPR is true."
 					},
+					"prTitle": {
+						"type": "string",
+						"maxLength": ` + strconv.Itoa(publisher.MaxPullRequestTitleLength) + `,
+						"description": "` + workspacePRTitleDescription + `"
+					},
+					"prBody": {
+						"type": "string",
+						"maxLength": ` + strconv.Itoa(publisher.MaxPullRequestBodyLength) + `,
+						"description": "` + workspacePRBodyDescription + `"
+					},
 					"createPR": {
 						"type": "boolean",
 						"description": "Reconcile a pull request after publication. Requires prBaseBranch and forgeCredentialRef."
@@ -357,6 +387,7 @@ func (t *DelegateTaskTool) parseDelegateArgs(ctx context.Context, args json.RawM
 	allowedAgents := os.Getenv(envOrkaCoordinationAllowedAgents)
 	maxDepthStr := os.Getenv(envOrkaCoordinationMaxDepth)
 	toolCtx := GetToolContext(ctx)
+	policyReader := toolPolicyReader(ctx, t.k8sClient)
 	brokered := toolCtx != nil && toolCtx.Brokered
 	if brokered {
 		parentName = strings.TrimSpace(toolCtx.TaskID)
@@ -425,7 +456,7 @@ func (t *DelegateTaskTool) parseDelegateArgs(ctx context.Context, args json.RawM
 		if parentLookupNS == "" {
 			parentLookupNS = taskNS
 		}
-		if err := t.k8sClient.Get(ctx, types.NamespacedName{Name: parentName, Namespace: parentLookupNS}, parentTask); err != nil {
+		if err := policyReader.Get(ctx, types.NamespacedName{Name: parentName, Namespace: parentLookupNS}, parentTask); err != nil {
 			return nil, fmt.Errorf("failed to get parent task: %w", err)
 		}
 	}
@@ -447,7 +478,7 @@ func (t *DelegateTaskTool) parseDelegateArgs(ctx context.Context, args json.RawM
 			parentAgentNamespace = value
 		}
 		parentAgent := &corev1alpha1.Agent{}
-		if err := t.k8sClient.Get(ctx, types.NamespacedName{
+		if err := policyReader.Get(ctx, types.NamespacedName{
 			Name: parentTask.Spec.AgentRef.Name, Namespace: parentAgentNamespace,
 		}, parentAgent); err != nil {
 			return nil, fmt.Errorf("failed to get parent agent: %w", err)
@@ -513,7 +544,7 @@ func (t *DelegateTaskTool) parseDelegateArgs(ctx context.Context, args json.RawM
 
 	// Look up the target Agent to determine task type.
 	targetAgent := &corev1alpha1.Agent{}
-	if err := t.k8sClient.Get(ctx, types.NamespacedName{
+	if err := policyReader.Get(ctx, types.NamespacedName{
 		Name: delegateArgs.Agent, Namespace: agentNS,
 	}, targetAgent); err != nil {
 		return nil, fmt.Errorf("failed to get agent %q: %w", namespacedDelegateAgent(agentNS, delegateArgs.Agent), err)
@@ -612,6 +643,19 @@ func (t *DelegateTaskTool) buildDelegatedTask(ctx context.Context, dc *delegatio
 	}
 
 	inheritTaskProvenance(childTask, dc.parentTask)
+	if toolCtx := GetToolContext(ctx); toolCtx != nil && toolCtx.Brokered {
+		if dc.parentTask.UID == "" {
+			return nil, fmt.Errorf("brokered delegation requires an immutable parent Task UID")
+		}
+		childTask.Annotations[labels.AnnotationParentTaskUID] = string(dc.parentTask.UID)
+		if toolCtx.ExternalEffects != nil || strings.TrimSpace(toolCtx.SessionID) != "" || strings.TrimSpace(toolCtx.OperationID) != "" {
+			effectID, err := brokeredDelegationEffectID(toolCtx)
+			if err != nil {
+				return nil, err
+			}
+			childTask.Annotations[labels.AnnotationDelegationEffectID] = effectID
+		}
+	}
 
 	// Set owner reference only for same-namespace children. Kubernetes treats
 	// cross-namespace owner references for namespaced objects as invalid and may
@@ -662,6 +706,8 @@ func (t *DelegateTaskTool) applyAgentRuntimeConfig(ctx context.Context, childTas
 			PublicationGitRepo: publicationGitRepo,
 			PushBranch:         dc.args.Workspace.PushBranch,
 			PRBaseBranch:       dc.args.Workspace.PRBaseBranch,
+			PRTitle:            dc.args.Workspace.PRTitle,
+			PRBody:             dc.args.Workspace.PRBody,
 			CreatePR:           dc.args.Workspace.CreatePR,
 		}
 		if workspaceRequestsPublication(workspace) {
@@ -703,6 +749,13 @@ func (t *DelegateTaskTool) applyAgentRuntimeConfig(ctx context.Context, childTas
 	}
 	if dc.args.AllowBash != nil {
 		childTask.Spec.AgentRuntime.AllowBash = dc.args.AllowBash
+	}
+	if err := materializeRuntimeRefAllowedTools(ctx, toolPolicyReader(ctx, t.k8sClient), childTask, dc.targetAgent); err != nil {
+		return err
+	}
+	if dc.args.PriorTask != "" && dc.targetAgent.Spec.Runtime.RuntimeRef != nil &&
+		strings.TrimSpace(dc.targetAgent.Spec.Runtime.RuntimeRef.Name) != "" {
+		return fmt.Errorf("runtimeRef custom runtimes do not support priorTaskRef workspace handoff")
 	}
 	return nil
 }
@@ -886,7 +939,7 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 	span := trace.SpanFromContext(ctx)
 	span.SetAttributes(orkatracing.DelegateAttributes(dc.parentName, "")...)
 	orkatracing.StampTaskTraceContext(ctx, childTask)
-	if err := validateChildTaskAgainstParentTransaction(ctx, t.k8sClient, dc.parentTask, childTask, dc.args.Agent); err != nil {
+	if err := validateChildTaskAgainstParentTransaction(ctx, toolPolicyReader(ctx, t.k8sClient), dc.parentTask, childTask, dc.args.Agent); err != nil {
 		return "", err
 	}
 
@@ -921,8 +974,10 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 	}
 
 	result := DelegateTaskResult{
-		TaskName: childTask.Name,
-		Status:   GitHubPullRequestStatusCreated,
+		TaskName:      childTask.Name,
+		TaskUID:       string(childTask.UID),
+		ParentTaskUID: string(dc.parentTask.UID),
+		Status:        GitHubPullRequestStatusCreated,
 	}
 
 	output, err := json.Marshal(result)
@@ -931,6 +986,23 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 	}
 
 	return string(output), nil
+}
+
+func brokeredDelegationEffectID(toolCtx *ToolContext) (string, error) {
+	if toolCtx == nil || !toolCtx.Brokered {
+		return "", nil
+	}
+	identity := store.ExternalEffectIdentity{
+		Kind:        "acp-mcp-tool",
+		Namespace:   strings.TrimSpace(toolCtx.Namespace),
+		AggregateID: strings.TrimSpace(toolCtx.SessionID),
+		OperationID: strings.TrimSpace(toolCtx.OperationID),
+	}
+	id, err := identity.CanonicalID()
+	if err != nil {
+		return "", fmt.Errorf("bind brokered delegation to its durable effect: %w", err)
+	}
+	return id, nil
 }
 
 func markChildTransactionTokenPending(childTask *corev1alpha1.Task) {

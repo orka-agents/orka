@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# scripts/tests suites rely on 'set -e' stopping on failed (( )) arithmetic,
+# which macOS's stock bash 3.2 does not honor; failures would be silently
+# masked there. Require a modern bash (for example: brew install bash).
+if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+  echo "error: this test suite requires bash >= 4; found ${BASH_VERSION}" >&2
+  exit 1
+fi
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 security_script="${root}/scripts/security-scan-e2e.sh"
 security_workflow="${root}/.github/workflows/security-scan-e2e.yml"
@@ -77,9 +85,39 @@ grep -F -- '      - Grep' "${manifest_capture}" >/dev/null
 grep -F -- '      - Read' "${manifest_capture}" >/dev/null
 grep -F -- "      - ${authority_tool_name}" "${manifest_capture}" >/dev/null
 if grep -F '  transaction:' "${manifest_capture}" >/dev/null; then
-  echo "ACP v2 authority fixture declared unsupported transaction delegation" >&2
+  echo "Orka harness v2 authority fixture declared unsupported transaction delegation" >&2
   exit 1
 fi
+
+api_role_capture="${work_dir}/api-role.json"
+kubectl() {
+  if [[ "$*" == "apply -f -" ]]; then
+    local manifest
+    manifest="$(cat)"
+    if jq -e '.kind == "Role"' <<<"${manifest}" >/dev/null; then
+      printf '%s\n' "${manifest}" >"${api_role_capture}"
+    fi
+    return 0
+  fi
+  if [[ "$*" == "-n ${test_namespace} create token ${api_identity_name} --duration=2h" ]]; then
+    printf '%s' 'fixture-only-token'
+    return 0
+  fi
+  return 1
+}
+create_api_identity
+for resource in repositoryscans/scans repositoryscans/slices repositoryscans/findings repositoryscans/droppedfindings; do
+  jq -e --arg resource "${resource}" --arg ns "${test_namespace}" --arg scan "${scan_name}" --arg badScan "${bad_scan_name}" '
+    .metadata.namespace == $ns and any(.rules[];
+      .apiGroups == ["core.orka.ai"] and (.resources | index($resource)) != null and
+      .resourceNames == [$scan,$badScan] and .verbs == ["list"])
+  ' "${api_role_capture}" >/dev/null
+done
+jq -e --arg scan "${scan_name}" --arg badScan "${bad_scan_name}" '
+  any(.rules[]; .apiGroups == ["core.orka.ai"] and .resources == ["repositoryscans/threatmodel"] and
+    .resourceNames == [$scan,$badScan] and .verbs == ["get"]) and
+  all(.rules[].verbs[]; . == "get" or . == "list" or . == "watch")
+' "${api_role_capture}" >/dev/null
 
 wait_calls="${work_dir}/authority-wait-calls"
 kubectl() {
@@ -266,7 +304,7 @@ fi
 grep -Fq 'ACP_CODEX_RUNTIME_IMG="${fake_runtime_ref}"' "${security_script}"
 grep -Fq 'patch_controller_images serviceAccount' "${security_script}"
 grep -Fq '.ttsCalls == 0 and .toolCalls == 1' "${security_script}"
-grep -Fq 'Creating transactionless ACP v2 authority Task/' "${security_script}"
+grep -Fq 'Creating transactionless Orka harness v2 authority Task/' "${security_script}"
 if grep -Fq 'tasks do not support arbitrary task env' "${security_script}"; then
   echo "legacy negative-only compatibility gate remains" >&2
   exit 1
@@ -377,7 +415,7 @@ docker() {
       local owner=""
       while (( $# > 0 )); do
         if [[ "$1" == "--label" ]]; then
-          owner="${2#io.orka.test.owner=}"
+          owner="${2#ai.orka.test.owner=}"
           shift 2
         else
           shift

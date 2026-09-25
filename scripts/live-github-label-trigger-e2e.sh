@@ -281,6 +281,8 @@ spec:
     type: codex
     defaultMaxTurns: 5
     defaultAllowBash: false
+  model:
+    name: gpt-5.6-sol
   systemPrompt:
     inline: |
       You are a CI smoke-test agent. Do not execute any work.

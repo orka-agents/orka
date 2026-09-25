@@ -42,13 +42,13 @@ export function TaskRuntimeView({ task, events = [], trace, approvals, artifacts
   return (
     <div className="space-y-4">
       <RuntimeControlBar task={task} following={following} onToggleFollow={onToggleFollow} latestSeq={pinnedSeq} forkSupported={forkSupported} />
-      <div className="grid gap-4 lg:grid-cols-3">
-        <div className="space-y-4 lg:col-span-2">
+      <div className="grid min-w-0 gap-4 lg:grid-cols-3">
+        <div className="min-w-0 space-y-4 lg:col-span-2">
           <ActivitySpotlight task={task} latestEvent={latestEvent} following={isLiveTask(task) && following} />
           <TaskFlowPanel task={task} events={events} />
           <RuntimeTimeline events={events} status={streamStatus} />
         </div>
-        <div className="space-y-4">
+        <div className="min-w-0 space-y-4">
           <ValidationSummary task={task} trace={trace} approvals={approvals} artifacts={artifacts} />
           <TaskArtifactsPanel
             taskId={task.metadata.name}

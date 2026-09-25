@@ -23,18 +23,10 @@ import { TaskExecutionRouteLedger } from '@/components/execution/execution-route
 import { useTask, useDeleteTask, useTaskEvents } from '@/hooks/use-tasks'
 import { useTaskTrace, useTaskApprovals } from '@/hooks/use-execution-events'
 import { useTaskArtifacts } from '@/hooks/use-task-artifacts'
-import { ApiError } from '@/lib/api-client'
+import { ApiError, isForbiddenError, isNotFoundError } from '@/lib/api-client'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import type { ExecutionEvent, PlanState } from '@/schemas/task'
-
-function timeAgo(ts?: string): string {
-  if (!ts) return '-'
-  const s = Math.floor((Date.now() - new Date(ts).getTime()) / 1000)
-  if (s < 60) return `${s}s ago`
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`
-  return `${Math.floor(s / 86400)}d ago`
-}
+import { timeAgo } from '@/lib/time'
 
 function latestEventPlan(events: ExecutionEvent[]): PlanState | undefined {
   let latest: ExecutionEvent | undefined
@@ -58,14 +50,20 @@ function latestEventPlan(events: ExecutionEvent[]): PlanState | undefined {
   }
 }
 
-
 export function TaskDetail({ taskId }: { taskId: string }) {
   const [following, setFollowing] = useState(true)
-  const { data: task, isLoading } = useTask(taskId, following ? 5000 : false)
+  const { data: task, isLoading, error: taskError } = useTask(taskId, following ? 5000 : false)
+  // Once the primary task query 404s or 403s, every dependent query (events,
+  // trace, approvals, artifacts) is disabled so a missing or forbidden task
+  // stops polling entirely instead of generating hidden 403 traffic.
+  const taskMissing = isNotFoundError(taskError)
+  const taskForbidden = isForbiddenError(taskError)
+  const taskUnavailable = taskMissing || taskForbidden
   const { data: taskEventsResponse, error: taskEventsError, failureReason: taskEventsFailureReason } = useTaskEvents(
     taskId,
     following ? 5000 : false,
     task?.metadata.uid,
+    !taskUnavailable,
   )
   // Fork and the runtime timeline need execution-event storage; a 501 means it's off.
   // While retries are pending, failureReason carries the current fetch failure.
@@ -103,7 +101,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
   const deleteArmed = confirmDelete === deleteIdentity
   // Runtime-tab data: fetched only when that tab is active so other tabs don't
   // pay for trace/approvals/artifacts. Each hook is namespace+uid scoped.
-  const runtimeActive = activeTab === 'runtime'
+  const runtimeActive = activeTab === 'runtime' && !taskUnavailable
   const taskRunning = task?.status?.phase === 'Running'
   const taskTerminal = ['Succeeded', 'Failed', 'Cancelled'].includes(task?.status?.phase ?? '')
   const traceRefetchInterval = runtimeActive && taskRunning && following ? 5000 : false
@@ -115,8 +113,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
     task?.metadata.uid,
     traceRefetchInterval,
   )
-  // Poll approvals while live so a new blocking approval surfaces in the runtime
-  // health panel; stops once terminal (matches TaskApprovalPanel semantics).
+  // Poll approvals while live and until execution recovery settles after termination.
   const approvalRefetchInterval = following ? 5000 : undefined
   const { data: approvalsResp } = useTaskApprovals(
     taskId,
@@ -155,14 +152,30 @@ export function TaskDetail({ taskId }: { taskId: string }) {
     )
   }
 
-  if (!task) {
+  // A 403 is an actionable permission failure, not a missing task; it must
+  // not fall through to "Task not found" just because `task` is undefined.
+  if (taskForbidden) {
+    return (
+      <div role="alert" className="space-y-1">
+        <p className="text-sm font-medium">Not authorized to view this task</p>
+        <p className="text-sm text-muted-foreground">
+          Your token lacks <code>tasks</code> read permission ({taskError.message}).
+        </p>
+      </div>
+    )
+  }
+
+  // A 404 wins over cached data: React Query keeps the last successful `data`
+  // when a refetch fails, so a task deleted after it loaded would otherwise
+  // keep rendering as if it still existed.
+  if (taskMissing || !task) {
     return <div className="text-muted-foreground">Task not found</div>
   }
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-4">
           <Link to="/tasks">
             <Button variant="ghost" size="icon" aria-label="Back to tasks">
               <ArrowLeft className="h-4 w-4" />
@@ -203,6 +216,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
       <TaskExecutionRouteLedger task={task} />
 
       <Tabs value={activeTab} onValueChange={setTab}>
+        <div className="overflow-x-auto">
         <TabsList>
           <TabsTrigger value="runtime">Runtime</TabsTrigger>
           <TabsTrigger value="overview">Overview</TabsTrigger>
@@ -219,6 +233,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
             <TabsTrigger value="children">Children</TabsTrigger>
           )}
         </TabsList>
+        </div>
 
         <TabsContent value="runtime" className="space-y-4">
           <TaskRuntimeView
@@ -245,7 +260,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
             <CardContent className="grid gap-2 text-sm md:grid-cols-2">
               <div>
                 <span className="text-muted-foreground">UID:</span>{' '}
-                <span className="font-mono text-xs">{task.metadata.uid}</span>
+                <span className="font-mono text-xs break-all">{task.metadata.uid}</span>
               </div>
               <div>
                 <span className="text-muted-foreground">Created:</span>{' '}
@@ -264,7 +279,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
               {task.status?.jobName && (
                 <div>
                   <span className="text-muted-foreground">Job:</span>{' '}
-                  <span className="font-mono text-xs">
+                  <span className="font-mono text-xs break-all">
                     {task.status.jobName}
                   </span>
                 </div>
@@ -286,7 +301,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
                 </div>
               )}
               {task.status?.message && (
-                <div className="md:col-span-2">
+                <div className="md:col-span-2 break-words">
                   <span className="text-muted-foreground">Message:</span>{' '}
                   {task.status.message}
                 </div>
@@ -335,24 +350,45 @@ export function TaskDetail({ taskId }: { taskId: string }) {
             </Card>
           )}
 
-          {task.spec.type === 'ai' && task.spec.ai && (
+          {task.spec.type === 'ai' && (task.spec.ai || task.spec.agentRef) && (
             <Card>
               <CardHeader>
                 <CardTitle>AI Config</CardTitle>
               </CardHeader>
               <CardContent className="space-y-2 text-sm">
+                {task.spec.agentRef && (
+                  <div>
+                    <span className="text-muted-foreground">Agent:</span>{' '}
+                    {!task.spec.agentRef.namespace || task.spec.agentRef.namespace === task.metadata.namespace ? (
+                      <Link
+                        to="/agents/$agentId"
+                        params={{ agentId: task.spec.agentRef.name }}
+                        className="underline-offset-4 hover:underline"
+                      >
+                        {task.spec.agentRef.name}
+                      </Link>
+                    ) : (
+                      // The agent detail route resolves in the dashboard's
+                      // current namespace, so a cross-namespace reference is
+                      // shown qualified instead of linking to the wrong Agent.
+                      <span className="font-mono">
+                        {task.spec.agentRef.namespace}/{task.spec.agentRef.name}
+                      </span>
+                    )}
+                  </div>
+                )}
                 <div>
                   <span className="text-muted-foreground">Provider:</span>{' '}
-                  {task.spec.ai.provider}
+                  {task.spec.ai?.provider || (task.spec.agentRef ? <span className="text-muted-foreground">Agent default</span> : '-')}
                 </div>
                 <div>
                   <span className="text-muted-foreground">Model:</span>{' '}
-                  {task.spec.ai.model}
+                  {task.spec.ai?.model || (task.spec.agentRef ? <span className="text-muted-foreground">Agent default</span> : '-')}
                 </div>
-                {task.spec.ai.prompt && (
+                {task.spec.ai?.prompt && (
                   <div>
                     <span className="text-muted-foreground">Prompt:</span>
-                    <pre className="mt-1 rounded-md bg-muted p-3 whitespace-pre-wrap">
+                    <pre className="mt-1 overflow-x-auto rounded-md bg-muted p-3 whitespace-pre-wrap break-words">
                       {task.spec.ai.prompt}
                     </pre>
                   </div>
@@ -374,7 +410,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
                 {task.spec.prompt && (
                   <div>
                     <span className="text-muted-foreground">Prompt:</span>
-                    <pre className="mt-1 rounded-md bg-muted p-3 whitespace-pre-wrap">
+                    <pre className="mt-1 overflow-x-auto rounded-md bg-muted p-3 whitespace-pre-wrap break-words">
                       {task.spec.prompt}
                     </pre>
                   </div>
@@ -454,7 +490,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
                       <p className="mb-1 text-xs font-medium text-muted-foreground">
                         Plan document
                       </p>
-                      <pre className="rounded-md bg-muted p-4 whitespace-pre-wrap max-h-[600px] overflow-y-auto text-xs">
+                      <pre className="rounded-md bg-muted p-4 whitespace-pre-wrap break-words max-h-[600px] overflow-auto text-xs">
                         {plan.planDocument}
                       </pre>
                     </div>

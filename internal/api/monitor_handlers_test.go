@@ -24,6 +24,8 @@ import (
 
 const monitorTestRepoURL = "https://github.com/orka-agents/orka"
 
+const monitorTestValidationImage = "ghcr.io/example/validation@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
 func setupRepositoryMonitorHandlers(t *testing.T, ctxTokenConfig ContextTokenConfig, mode string, objects ...crclient.Object) (*fiber.App, *Handlers) {
 	t.Helper()
 
@@ -169,7 +171,7 @@ func TestRepositoryMonitorHandlers_CRUDAndManualRun(t *testing.T) {
 
 func TestRepositoryMonitorHandlers_ListSubresourcesAcceptContinueToken(t *testing.T) {
 	app, handlers := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff)
-	createRepositoryMonitorForHandlerTest(t, app, "repo-monitor", "demo")
+	createRepositoryMonitorForHandlerTest(t, app)
 
 	now := time.Now().UTC().Truncate(time.Second)
 	for _, run := range []store.MonitorRun{
@@ -229,6 +231,86 @@ func TestCreateRepositoryMonitor_DerivesRepositoryIdentityFromURL(t *testing.T) 
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&created))
 	require.Equal(t, "orka-agents", created.Spec.Owner)
 	require.Equal(t, "orka", created.Spec.Repository)
+}
+
+func TestRepositoryMonitorHandlersRejectMutableValidationImage(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		method string
+		path   string
+		body   string
+		setup  bool
+	}{
+		{
+			name: "create", method: http.MethodPost, path: "/monitors/repositories",
+			body: fmt.Sprintf(`{"name":"repo-monitor","namespace":"demo","spec":{"repoURL":%q,"validation":{"image":"golang:1.25"},"agents":{"reviewer":{"name":"reviewer"}}}}`, monitorTestRepoURL),
+		},
+		{
+			name: "update", method: http.MethodPut, path: "/monitors/repositories/repo-monitor?namespace=demo", setup: true,
+			body: fmt.Sprintf(`{"spec":{"repoURL":%q,"validation":{"image":"golang:1.25"},"agents":{"reviewer":{"name":"reviewer"}}}}`, monitorTestRepoURL),
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			app, _ := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff)
+			if tt.setup {
+				createRepositoryMonitorForHandlerTest(t, app)
+			}
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+			require.Contains(t, readRespBody(t, resp), "spec.validation.image must be digest-pinned")
+		})
+	}
+
+	app, _ := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff)
+	body := fmt.Sprintf(`{"name":"repo-monitor","namespace":"demo","spec":{"repoURL":%q,"validation":{"image":%q},"agents":{"reviewer":{"name":"reviewer"}}}}`, monitorTestRepoURL, monitorTestValidationImage)
+	req := httptest.NewRequest(http.MethodPost, "/monitors/repositories", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, resp.StatusCode, readRespBody(t, resp))
+}
+
+func TestRepositoryMonitorHandlersRejectLegacyValidationCommands(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		method string
+		path   string
+		body   string
+		setup  bool
+	}{
+		{
+			name: "create", method: http.MethodPost, path: "/monitors/repositories",
+			body: fmt.Sprintf(`{"name":"repo-monitor","namespace":"demo","spec":{"repoURL":%q,"validation":{"mode":"full","commands":["go test ./..."]},"agents":{"reviewer":{"name":"reviewer"}}}}`, monitorTestRepoURL),
+		},
+		{
+			name: "create with mode only", method: http.MethodPost, path: "/monitors/repositories",
+			body: fmt.Sprintf(`{"name":"repo-monitor","namespace":"demo","spec":{"repoURL":%q,"validation":{"mode":"full"},"agents":{"reviewer":{"name":"reviewer"}}}}`, monitorTestRepoURL),
+		},
+		{
+			name: "update", method: http.MethodPut, path: "/monitors/repositories/repo-monitor?namespace=demo", setup: true,
+			body: fmt.Sprintf(`{"spec":{"repoURL":%q,"validation":{"mode":"full","commands":["go test ./..."]},"agents":{"reviewer":{"name":"reviewer"}}}}`, monitorTestRepoURL),
+		},
+		{
+			name: "update with mode only", method: http.MethodPut, path: "/monitors/repositories/repo-monitor?namespace=demo", setup: true,
+			body: fmt.Sprintf(`{"spec":{"repoURL":%q,"validation":{"mode":"full"},"agents":{"reviewer":{"name":"reviewer"}}}}`, monitorTestRepoURL),
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			app, _ := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff)
+			if tt.setup {
+				createRepositoryMonitorForHandlerTest(t, app)
+			}
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+			require.Contains(t, readRespBody(t, resp), "spec.validation.mode and spec.validation.commands are no longer supported")
+		})
+	}
 }
 
 func TestCreateRepositoryMonitor_RejectsUnsupportedTargets(t *testing.T) {
@@ -330,7 +412,7 @@ func TestCreateRepositoryMonitor_AcceptsSafePublishConfig(t *testing.T) {
 				"event":"COMMENT",
 				"postPassed":true,
 				"sameHeadPolicy":"skip",
-				"inline":{"enabled":true,"minPriority":"P2","maxComments":10,"onlyChangedLines":true}
+				"inline":{"enabled":true,"minPriority":"P2","maxComments":10}
 			}},
 			"agents":{"reviewer":{"name":"reviewer"}}
 		}
@@ -516,16 +598,16 @@ func TestCreateRepositoryMonitor_RejectsBuiltInReviewerSecretRef(t *testing.T) {
 	require.Contains(t, readRespBody(t, resp), "must omit spec.secretRef")
 }
 
-func createRepositoryMonitorForHandlerTest(t *testing.T, app *fiber.App, name, namespace string) {
+func createRepositoryMonitorForHandlerTest(t *testing.T, app *fiber.App) {
 	t.Helper()
 	body := fmt.Sprintf(`{
-		"name":%q,
-		"namespace":%q,
+		"name":"repo-monitor",
+		"namespace":"demo",
 		"spec":{
 			"repoURL":%q,
 			"agents":{"reviewer":{"name":"reviewer"}}
 		}
-	}`, name, namespace, monitorTestRepoURL)
+	}`, monitorTestRepoURL)
 	req := httptest.NewRequest(http.MethodPost, "/monitors/repositories", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := app.Test(req)
@@ -846,6 +928,105 @@ func TestCreateRepositoryMonitorCommandEventQueuesRun(t *testing.T) {
 	require.Len(t, listed.Items, 1)
 }
 
+func TestCreateRepositoryMonitorCommandEventAcceptsSameHeadFixCIRequests(t *testing.T) {
+	for _, tt := range []struct {
+		name              string
+		nextNumber        int64
+		priorRunPhase     string
+		priorActionStatus string
+	}{
+		{name: "retry after failed run", nextNumber: 12, priorRunPhase: "failed", priorActionStatus: "failed"},
+		{name: "retry after succeeded run", nextNumber: 12, priorRunPhase: "succeeded", priorActionStatus: "completed"},
+		{name: "different target while first is active", nextNumber: 13},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			app, handlers := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff)
+			createRepositoryMonitorForHandlerTest(t, app)
+			for _, number := range []int64{12, 13} {
+				require.NoError(t, handlers.repositoryMonitorStore.UpsertMonitorItem(t.Context(), &store.MonitorItem{
+					MonitorNamespace: "demo",
+					MonitorName:      "repo-monitor",
+					Kind:             "pull_request",
+					ItemKey:          fmt.Sprint(number),
+					Number:           number,
+					State:            "open",
+					HeadSHA:          "same-head",
+				}))
+			}
+			createCommand := func(number int64) store.CommandEvent {
+				t.Helper()
+				body := fmt.Sprintf(`{"kind":"pull_request","number":%d,"intent":"fix_ci","targetSHA":"same-head"}`, number)
+				req := httptest.NewRequest(http.MethodPost, "/monitors/repositories/repo-monitor/commands?namespace=demo", strings.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+				resp, err := app.Test(req)
+				require.NoError(t, err)
+				responseBody := readRespBody(t, resp)
+				require.Equal(t, http.StatusCreated, resp.StatusCode, responseBody)
+				var command store.CommandEvent
+				require.NoError(t, json.Unmarshal([]byte(responseBody), &command))
+				require.Equal(t, "accepted", command.Status)
+				require.Equal(t, "api", command.Source)
+				require.Equal(t, "orka-api", command.Author)
+				require.Equal(t, "fix_ci", command.Intent)
+				require.Equal(t, number, command.Number)
+				require.Equal(t, "same-head", command.HeadSHA)
+				return command
+			}
+
+			first := createCommand(12)
+			runFilter := store.MonitorRunFilter{Namespace: "demo", MonitorName: "repo-monitor", Limit: 10}
+			runs, _, err := handlers.repositoryMonitorStore.ListMonitorRuns(t.Context(), runFilter)
+			require.NoError(t, err)
+			require.Len(t, runs, 1)
+			require.Equal(t, first.ID, runs[0].CommandEventID)
+			require.Equal(t, "queued", runs[0].Phase)
+			actionFilter := store.WorkActionFilter{Namespace: "demo", MonitorName: "repo-monitor", DesiredAction: "fix_ci", Limit: 10}
+			actions, _, err := handlers.repositoryMonitorStore.ListWorkActions(t.Context(), actionFilter)
+			require.NoError(t, err)
+			require.Len(t, actions, 1)
+			require.Equal(t, first.ID, actions[0].CommandEventID)
+			require.Equal(t, "queued", actions[0].Status)
+			if tt.priorRunPhase != "" {
+				// Model controller completion so an intentional retry is not active-work coalescing.
+				completedAt := time.Now()
+				first.Status = "processed"
+				require.NoError(t, handlers.repositoryMonitorStore.UpdateCommandEvent(t.Context(), &first))
+				runs[0].Phase = tt.priorRunPhase
+				runs[0].CompletedAt = &completedAt
+				require.NoError(t, handlers.repositoryMonitorStore.UpdateMonitorRun(t.Context(), &runs[0]))
+				actions[0].Status = tt.priorActionStatus
+				actions[0].Phase = tt.priorActionStatus
+				actions[0].CompletedAt = &completedAt
+				require.NoError(t, handlers.repositoryMonitorStore.UpdateWorkAction(t.Context(), &actions[0]))
+			}
+
+			second := createCommand(tt.nextNumber)
+			require.NotEqual(t, first.ID, second.ID)
+			require.NotEqual(t, first.DedupeKey, second.DedupeKey)
+			require.NotEqual(t, first.IdempotencyKey, second.IdempotencyKey)
+			commands, _, err := handlers.repositoryMonitorStore.ListCommandEvents(t.Context(), store.CommandEventFilter{Namespace: "demo", MonitorName: "repo-monitor", Intent: "fix_ci", Limit: 10})
+			require.NoError(t, err)
+			require.Len(t, commands, 2)
+			runs, _, err = handlers.repositoryMonitorStore.ListMonitorRuns(t.Context(), runFilter)
+			require.NoError(t, err)
+			require.Len(t, runs, 2)
+			actionFilter.CommandEventID = second.ID
+			actions, _, err = handlers.repositoryMonitorStore.ListWorkActions(t.Context(), actionFilter)
+			require.NoError(t, err)
+			require.Len(t, actions, 1)
+			require.Equal(t, "queued", actions[0].Status)
+			require.NotEmpty(t, actions[0].RunID)
+			require.Empty(t, actions[0].DependsOnActionID)
+			queuedRun, err := handlers.repositoryMonitorStore.GetMonitorRun(t.Context(), "demo", actions[0].RunID)
+			require.NoError(t, err)
+			require.Equal(t, second.ID, queuedRun.CommandEventID)
+			require.Equal(t, "queued", queuedRun.Phase)
+			require.Equal(t, tt.nextNumber, queuedRun.TargetNumber)
+			require.Equal(t, "same-head", queuedRun.TargetSHA)
+		})
+	}
+}
+
 func TestCreateRepositoryMonitorCommandEventRequiresInventoryForIssuePlan(t *testing.T) {
 	app, _ := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff)
 	body := fmt.Sprintf(`{"name":"repo-monitor","namespace":"demo","spec":{"repoURL":%q,"targets":{"pullRequests":{"enabled":false},"issues":{"enabled":true}},"agents":{}}}`, monitorTestRepoURL)
@@ -980,6 +1161,35 @@ func TestCreateRepositoryMonitorCommandEventRequiresPRTargetSHA(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	require.Contains(t, readRespBody(t, resp), "targetSHA is required")
+	runs, _, err := handlers.repositoryMonitorStore.ListMonitorRuns(t.Context(), store.MonitorRunFilter{Namespace: "demo", MonitorName: "repo-monitor", TargetKind: repositoryMonitorTargetKindPullRequest, TargetNumber: 12, Limit: 10})
+	require.NoError(t, err)
+	require.Empty(t, runs)
+}
+
+func TestCreateRepositoryMonitorCommandEventRequiresForgeCredentialForUpdateBranch(t *testing.T) {
+	app, handlers := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff)
+	body := fmt.Sprintf(`{"name":"repo-monitor","namespace":"demo","spec":{"repoURL":%q,"agents":{"reviewer":{"name":"reviewer"}}}}`, monitorTestRepoURL)
+	createReq := httptest.NewRequest(http.MethodPost, "/monitors/repositories", strings.NewReader(body))
+	createReq.Header.Set("Content-Type", "application/json")
+	createResp, err := app.Test(createReq)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, createResp.StatusCode)
+	require.NoError(t, handlers.repositoryMonitorStore.UpsertMonitorItem(t.Context(), &store.MonitorItem{
+		MonitorNamespace: "demo",
+		MonitorName:      "repo-monitor",
+		Kind:             repositoryMonitorTargetKindPullRequest,
+		ItemKey:          "12",
+		Number:           12,
+		State:            "open",
+		HeadSHA:          "current-head",
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/monitors/repositories/repo-monitor/commands?namespace=demo", strings.NewReader(`{"kind":"pull_request","number":12,"intent":"update_branch","targetSHA":"current-head"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	require.Contains(t, readRespBody(t, resp), "spec.forgeCredentialRef is required")
 	runs, _, err := handlers.repositoryMonitorStore.ListMonitorRuns(t.Context(), store.MonitorRunFilter{Namespace: "demo", MonitorName: "repo-monitor", TargetKind: repositoryMonitorTargetKindPullRequest, TargetNumber: 12, Limit: 10})
 	require.NoError(t, err)
 	require.Empty(t, runs)

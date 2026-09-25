@@ -104,6 +104,14 @@ type ExecutionWorkspaceProviderStatus struct {
 	// +optional
 	LastHeartbeat *metav1.Time `json:"lastHeartbeat,omitempty"`
 
+	// PinnedParametersUID pins the immutable UID of the first advertised
+	// provider parameters object (for ACP, the RuntimeProviderConfig). The
+	// status subresource makes it controller-owned: metadata/spec writers
+	// cannot clear it, so a parameters object deleted and recreated under
+	// the same name keeps failing closed instead of being silently re-pinned.
+	// +optional
+	PinnedParametersUID string `json:"pinnedParametersUID,omitempty"`
+
 	// Conditions represent generic readiness and compatibility.
 	// +listType=map
 	// +listMapKey=type

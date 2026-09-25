@@ -27,12 +27,6 @@ import (
 
 const wrapperTestShellPath = "/bin/sh"
 
-type commandRunnerFunc func(context.Context, *CommandSpec) (CommandResult, error)
-
-func (run commandRunnerFunc) Run(ctx context.Context, spec *CommandSpec) (CommandResult, error) {
-	return run(ctx, spec)
-}
-
 func TestServerHealthCapabilitiesAndAfterSeq(t *testing.T) {
 	baseURL, cleanup := startWrapperServer(t, NewFakeAdapter(FakeBehaviorSuccess))
 	defer cleanup()
@@ -136,6 +130,93 @@ func TestServerReceiptPersistenceFailureRetainsTurnAndClosesReadiness(t *testing
 	if readiness.Ready || readiness.Status != harness.HealthStatusUnhealthy ||
 		readiness.Metadata["terminalLedger"] != terminalLedgerPersistFailed {
 		t.Fatalf("readiness after receipt persistence failure = %#v", readiness)
+	}
+}
+
+func TestServerCloseWaitsForTerminalReceiptPersistence(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.AdmissionLedgerPath = filepath.Join(t.TempDir(), "admission-ledger.db")
+	server, err := NewServer(cfg, NewFakeAdapter(FakeBehaviorSuccess))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	request := validWrapperStartTurnRequest()
+	durable, err := validateDurableTurnAdmission(request)
+	if err != nil {
+		t.Fatalf("validate durable admission: %v", err)
+	}
+	if _, _, err := server.ledger.AdmitTurn(
+		context.Background(), string(request.TurnID), durable.taskUID, durable.attempt, durable.requestDigest,
+		string(request.RuntimeSessionID), request.CorrelationID,
+	); err != nil {
+		t.Fatalf("admit durable turn: %v", err)
+	}
+	if err := server.ledger.MarkTurnAccepted(context.Background(), string(request.TurnID)); err != nil {
+		t.Fatalf("mark durable turn accepted: %v", err)
+	}
+	turn, err := server.turnRegistry.admit(request, server.now)
+	if err != nil {
+		t.Fatalf("admit active turn: %v", err)
+	}
+	turn.appendFrame(server.frame(
+		turn, harness.FrameTurnCompleted, "turn completed", &harness.TurnCompleted{Result: "ok"},
+	))
+
+	turn.mu.Lock()
+	turnLocked := true
+	defer func() {
+		if turnLocked {
+			turn.mu.Unlock()
+		}
+	}()
+	finishDone := make(chan struct{})
+	go func() {
+		defer close(finishDone)
+		server.finishTurn(turn)
+	}()
+	eventually(t, 2*time.Second, func() bool {
+		if server.ledgerMu.TryLock() {
+			server.ledgerMu.Unlock()
+			return false
+		}
+		return true
+	})
+
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- server.Close()
+	}()
+	eventually(t, 2*time.Second, func() bool {
+		if server.ledgerMu.TryRLock() {
+			server.ledgerMu.RUnlock()
+			return false
+		}
+		return true
+	})
+	select {
+	case err := <-closeDone:
+		t.Fatalf("Close completed before terminal persistence was released: %v", err)
+	default:
+	}
+
+	turn.mu.Unlock()
+	turnLocked = false
+	select {
+	case <-finishDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("finishTurn did not complete after terminal persistence was released")
+	}
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not complete after terminal persistence finished")
+	}
+	if server.ledger != nil {
+		t.Fatal("Close retained the admission ledger")
 	}
 }
 
@@ -298,7 +379,7 @@ func TestServerSecurityArtifactFollowUpChildCleanupFailureFailsClosed(t *testing
 	}()
 
 	runnerCalls := 0
-	server.runner = commandRunnerFunc(func(_ context.Context, spec *CommandSpec) (CommandResult, error) {
+	server.runner = func(_ context.Context, spec *CommandSpec) (CommandResult, error) {
 		if spec == nil {
 			t.Fatal("command spec is nil")
 		}
@@ -315,7 +396,7 @@ func TestServerSecurityArtifactFollowUpChildCleanupFailureFailsClosed(t *testing
 			t.Fatalf("runner calls = %d, want at most 2", runnerCalls)
 			return CommandResult{}, nil
 		}
-	})
+	}
 
 	request := validWrapperStartTurnRequest()
 	request.Input.Prompt = "REQUIRED_SECURITY_ARTIFACTS: security-findings.v2.json\nreview the repository"
@@ -397,7 +478,7 @@ func TestServerArtifactUploadFailureFailsTurnAndRetainsEvidence(t *testing.T) {
 		artifactName = "security-findings.v2.json"
 		artifactBody = `{"findings":[{"severity":"high"}]}`
 	)
-	server.runner = commandRunnerFunc(func(_ context.Context, spec *CommandSpec) (CommandResult, error) {
+	server.runner = func(_ context.Context, spec *CommandSpec) (CommandResult, error) {
 		if spec == nil {
 			t.Fatal("command spec is nil")
 		}
@@ -416,7 +497,7 @@ func TestServerArtifactUploadFailureFailsTurnAndRetainsEvidence(t *testing.T) {
 			t.Fatalf("write test artifact: %v", err)
 		}
 		return CommandResult{Stdout: "runtime succeeded", FullStdout: "runtime succeeded"}, nil
-	})
+	}
 
 	request := validWrapperStartTurnRequest()
 	turn, err := server.turnRegistry.admit(request, server.now)
@@ -899,6 +980,163 @@ func TestServerCancelEmitsCancellation(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for cancel frame")
+	}
+}
+
+func TestServerCancelDuringArtifactUploadDoesNotAppendCompletion(t *testing.T) {
+	uploadStarted := make(chan struct{}, 1)
+	releaseUpload := make(chan struct{})
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case uploadStarted <- struct{}{}:
+		default:
+		}
+		<-releaseUpload
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer func() {
+		close(releaseUpload)
+		controller.Close()
+	}()
+	t.Setenv(workerenv.ControllerURL, controller.URL)
+
+	cfg := DefaultConfig()
+	cfg.AuthValue = strings.Repeat("artifact-fixture-", 3)
+	cfg.Generic.Command = wrapperTestShellPath
+	cfg.Generic.Args = []string{
+		"-c",
+		`printf 'artifact' > "$ORKA_ARTIFACTS_DIR/evidence.txt"; printf 'done'`,
+	}
+	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, NewGenericAdapter(cfg.Generic))
+	defer cleanup()
+	client, err := harness.NewClient(baseURL, harness.WithBearerToken(cfg.AuthValue))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := validWrapperStartTurnRequest()
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+
+	select {
+	case <-uploadStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for artifact upload")
+	}
+	if _, err := client.CancelTurn(context.Background(), harness.CancelTurnRequest{
+		Version:          harness.ProtocolVersion,
+		Namespace:        request.Namespace,
+		TaskName:         request.TaskName,
+		SessionName:      request.SessionName,
+		RuntimeSessionID: request.RuntimeSessionID,
+		TurnID:           request.TurnID,
+		CorrelationID:    request.CorrelationID,
+		Reason:           "test artifact cancellation",
+	}); err != nil {
+		t.Fatalf("CancelTurn: %v", err)
+	}
+	streamCtx, cancelStream := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelStream()
+	frames := []harness.HarnessEventFrame{}
+	if err := client.StreamFrames(streamCtx, request.TurnID, 0, func(frame harness.HarnessEventFrame) error {
+		frames = append(frames, frame)
+		return nil
+	}); err != nil {
+		t.Fatalf("StreamFrames after cancellation: %v", err)
+	}
+	if len(frames) == 0 {
+		t.Fatal("no frames after cancellation")
+	}
+	last := frames[len(frames)-1]
+	if last.Type != harness.FrameTurnCancelled {
+		t.Fatalf("last frame = %#v, want cancelled", last)
+	}
+	for _, frame := range frames {
+		if frame.Type == harness.FrameTurnCompleted {
+			t.Fatalf("frames contain late completion after cancellation: %#v", frames)
+		}
+	}
+}
+
+func TestTryAppendTerminalFrameRejectsContextDoneWhileWaitingForTurnLock(t *testing.T) {
+	turn := newTurnState(validWrapperStartTurnRequest(), time.Now)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	turn.mu.Lock()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- turn.tryAppendTerminalFrame(ctx, harness.HarnessEventFrame{
+			Type: harness.FrameTurnCompleted,
+			Completed: &harness.TurnCompleted{
+				Result: "late result",
+			},
+		})
+	}()
+	<-ctx.Done()
+	turn.mu.Unlock()
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("tryAppendTerminalFrame() error = %v, want deadline exceeded", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("tryAppendTerminalFrame() did not return after deadline")
+	}
+	turn.mu.Lock()
+	defer turn.mu.Unlock()
+	if len(turn.frames) != 0 || turn.terminal {
+		t.Fatalf("turn state after expired completion = frames %#v, terminal %v", turn.frames, turn.terminal)
+	}
+}
+
+func TestTryAppendTerminalFrameRejectsAcceptedCancelBeforeFailure(t *testing.T) {
+	turn := newTurnState(validWrapperStartTurnRequest(), time.Now)
+	turn.requestCancel()
+
+	err := turn.tryAppendTerminalFrame(context.Background(), harness.HarnessEventFrame{
+		Type: harness.FrameTurnFailed,
+		Failed: &harness.TurnFailed{
+			Reason:  "result_store_failed",
+			Message: "store failed",
+		},
+	})
+	if !errors.Is(err, errTurnCanceledBeforeCompletion) {
+		t.Fatalf("tryAppendTerminalFrame() error = %v, want canceled-before-completion", err)
+	}
+	turn.mu.Lock()
+	defer turn.mu.Unlock()
+	if len(turn.frames) != 0 || turn.terminal {
+		t.Fatalf("turn state after rejected failure = frames %#v, terminal %v", turn.frames, turn.terminal)
+	}
+}
+
+func TestAppendFramePublishesCancellationAfterAcceptedCancel(t *testing.T) {
+	turn := newTurnState(validWrapperStartTurnRequest(), time.Now)
+	turn.requestCancel()
+	turn.appendFrame(harness.HarnessEventFrame{
+		Type:        harness.FrameTurnFailed,
+		Severity:    "error",
+		Summary:     "result store failed",
+		ContentText: "late failure detail",
+		Failed: &harness.TurnFailed{
+			Reason:  "result_store_failed",
+			Message: "store failed",
+		},
+	})
+
+	turn.mu.Lock()
+	defer turn.mu.Unlock()
+	if len(turn.frames) != 1 {
+		t.Fatalf("frames = %#v, want one cancellation", turn.frames)
+	}
+	frame := turn.frames[0]
+	if frame.Type != harness.FrameTurnCancelled || !turn.terminal {
+		t.Fatalf("frame after accepted cancel = %#v, terminal %v", frame, turn.terminal)
+	}
+	if frame.Failed != nil || frame.Completed != nil || frame.ContentText != "" {
+		t.Fatalf("cancellation retained late terminal payload: %#v", frame)
 	}
 }
 
@@ -1499,7 +1737,7 @@ func TestServerRedactsGeneratedRuntimeAuthProxyTokenAtOutputSinks(t *testing.T) 
 		t.Fatalf("NewServer: %v", err)
 	}
 	generatedToken := make(chan string, 1)
-	server.runner = commandRunnerFunc(func(_ context.Context, spec *CommandSpec) (CommandResult, error) {
+	server.runner = func(_ context.Context, spec *CommandSpec) (CommandResult, error) {
 		token := envEntryValue(spec.Env, workerenv.OpenAIAPIKey)
 		if token == "" {
 			return CommandResult{}, errors.New("child command is missing the runtime-auth proxy credential")
@@ -1507,7 +1745,7 @@ func TestServerRedactsGeneratedRuntimeAuthProxyTokenAtOutputSinks(t *testing.T) 
 		generatedToken <- token
 		output := "generated runtime-auth proxy credential: " + token
 		return CommandResult{Stdout: output, FullStdout: output, Stderr: output}, nil
-	})
+	}
 	srv := httptest.NewServer(server.Handler())
 	defer func() {
 		srv.Close()
@@ -1835,18 +2073,19 @@ printf 'done'
 	}
 	t.Setenv(workerenv.AllowBash, "true")
 	cfg := DefaultConfig()
-	cfg.AllowUnauthenticated = true
+	cfg.AuthValue = strings.Repeat("artifact-fixture-", 3)
 	cfg.Runtime = RuntimeCodex
 	adapter := NewCodexAdapter(CodexAdapterConfig{Path: fakeCodex, WorkDir: dir})
 	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, adapter)
 	defer cleanup()
-	client, err := harness.NewClient(baseURL)
+	client, err := harness.NewClient(baseURL, harness.WithBearerToken(cfg.AuthValue))
 	if err != nil {
 		t.Fatal(err)
 	}
 	request := validWrapperStartTurnRequest()
 	request.Input.Prompt = "REQUIRED_SECURITY_ARTIFACTS: security-threat-model.md\nwrite artifact"
 	request.Input.Env = []harness.TurnEnvVar{{Name: "ORKA_SECURITY_STAGE", Value: "threat-model"}}
+	request = sealDurableWrapperRequest(request)
 	if _, err := client.StartTurn(context.Background(), request); err != nil {
 		t.Fatalf("StartTurn: %v", err)
 	}
@@ -1860,7 +2099,7 @@ printf 'done'
 func TestServerCreatesWorkspaceArtifactLinkAndEnforcesRequiredArtifacts(t *testing.T) {
 	configureSuccessfulArtifactUpload(t)
 	cfg := DefaultConfig()
-	cfg.AllowUnauthenticated = true
+	cfg.AuthValue = strings.Repeat("artifact-fixture-", 3)
 	cfg.Generic = GenericAdapterConfig{
 		Command: wrapperTestShellPath,
 		Args: []string{"-c", strings.Join([]string{
@@ -1873,12 +2112,13 @@ func TestServerCreatesWorkspaceArtifactLinkAndEnforcesRequiredArtifacts(t *testi
 	}
 	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, NewGenericAdapter(cfg.Generic))
 	defer cleanup()
-	client, err := harness.NewClient(baseURL)
+	client, err := harness.NewClient(baseURL, harness.WithBearerToken(cfg.AuthValue))
 	if err != nil {
 		t.Fatal(err)
 	}
 	request := validWrapperStartTurnRequest()
 	request.Input.Prompt = "REQUIRED_SECURITY_ARTIFACTS: security-threat-model.md\nwrite artifact"
+	request = sealDurableWrapperRequest(request)
 	if _, err := client.StartTurn(context.Background(), request); err != nil {
 		t.Fatalf("StartTurn: %v", err)
 	}
@@ -2017,5 +2257,71 @@ func TestServerRejectsUnsupportedRuntimeAuthOnlyCommand(t *testing.T) {
 	wantMessage := `runtime-auth-only credential proxy does not support runtime "generic"`
 	if got, want := last.Failed.Message, wantMessage; got != want {
 		t.Fatalf("failed message = %q, want %q", got, want)
+	}
+}
+
+func TestHandleCancelAcceptsRepeatedCancellationAfterSettlement(t *testing.T) {
+	request := validWrapperStartTurnRequest()
+	turn := newTurnState(request, time.Now)
+	defer turn.cancel()
+	turn.appendFrame(harness.HarnessEventFrame{Type: harness.FrameTurnCompleted})
+	server := &Server{}
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server.handleCancel(w, r, turn)
+	}))
+	defer httpServer.Close()
+	client, err := harness.NewClient(httpServer.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		response, err := client.CancelTurn(context.Background(), harness.CancelTurnRequest{
+			Version: harness.ProtocolVersion, Namespace: request.Namespace, TaskName: request.TaskName,
+			SessionName: request.SessionName, RuntimeSessionID: request.RuntimeSessionID,
+			TurnID: request.TurnID, CorrelationID: request.CorrelationID,
+		})
+		if err != nil {
+			t.Fatalf("client rejected settled cancellation: %v", err)
+		}
+		if !response.Accepted || response.Message != "turn already settled" {
+			t.Fatalf("late cancellation response = %#v", response)
+		}
+	}
+	if turn.cancelRequested {
+		t.Fatal("settled turn was marked for cancellation")
+	}
+	frames, _ := turn.framesFrom(0)
+	if len(frames) != 1 || frames[0].Type != harness.FrameTurnCompleted {
+		t.Fatalf("cancellation changed settled frames: %#v", frames)
+	}
+}
+
+func TestCancelledFailureRemovesUnreachableOutput(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	server, err := NewServer(cfg, NewFakeAdapter(FakeBehaviorSuccess))
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn := newTurnState(validWrapperStartTurnRequest(), time.Now)
+	t.Cleanup(turn.cleanupOutput)
+	frame := server.failedFrameWithResult(turn, "command_failed", "failed", "partial result", false)
+	outputPath := turn.resultPath
+	if outputPath == "" {
+		t.Fatal("failed frame did not store output")
+	}
+	if !turn.requestCancel() {
+		t.Fatal("active turn rejected cancellation")
+	}
+	turn.appendFrame(frame)
+	frames, _ := turn.framesFrom(0)
+	if !turn.terminal || len(frames) != 1 || frames[0].Type != harness.FrameTurnCancelled {
+		t.Fatalf("terminal frames = %#v", frames)
+	}
+	if turn.hasUnfetchedOutput() || turn.outputRetentionActive() {
+		t.Fatal("cancelled turn retained unreachable output")
+	}
+	if _, err := os.Stat(outputPath); !os.IsNotExist(err) {
+		t.Fatalf("cancelled output still exists: %v", err)
 	}
 }

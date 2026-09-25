@@ -26,6 +26,12 @@ import (
 )
 
 const (
+	oaiErrorServer         = "server_error"
+	oaiChatCompletionChunk = "chat.completion.chunk"
+	oaiToolTypeFunction    = "function"
+)
+
+const (
 	oaiParamMaxTokens    = "max_tokens"
 	oaiRoleSystem        = "system"
 	oaiContentTypeText   = "text"
@@ -50,17 +56,19 @@ const (
 // This allows OpenAI-compatible clients to use Orka as a custom provider.
 type OpenAICompatHandler struct {
 	client                    client.Client
+	apiReader                 client.Reader
 	kubeClient                kubernetes.Interface
 	watchNamespace            string
 	enforceNamespaceIsolation bool
 	config                    ChatConfig
 	resolver                  *ProviderResolver
 	resultStore               store.ResultStore
+	gatewayEventStore         store.GatewayEventStore
 	contextTokenAuthorization ContextTokenAuthorizationConfig
 }
 
 // NewOpenAICompatHandler creates an OpenAI-compatible API handler.
-func NewOpenAICompatHandler(c client.Client, watchNamespace string, enforceNS bool, config ChatConfig, resolver *ProviderResolver, rs store.ResultStore, kubeClientOpt ...kubernetes.Interface) *OpenAICompatHandler {
+func NewOpenAICompatHandler(c client.Client, apiReader client.Reader, watchNamespace string, enforceNS bool, config ChatConfig, resolver *ProviderResolver, rs store.ResultStore, kubeClientOpt ...kubernetes.Interface) *OpenAICompatHandler {
 	var kubeClient kubernetes.Interface
 	if len(kubeClientOpt) > 0 {
 		kubeClient = kubeClientOpt[0]
@@ -68,6 +76,7 @@ func NewOpenAICompatHandler(c client.Client, watchNamespace string, enforceNS bo
 
 	return &OpenAICompatHandler{
 		client:                    c,
+		apiReader:                 apiReader,
 		kubeClient:                kubeClient,
 		watchNamespace:            watchNamespace,
 		enforceNamespaceIsolation: enforceNS,
@@ -194,6 +203,10 @@ type OAIModelList struct {
 	Data   []OAIModel `json:"data"`
 }
 
+// OAIErrorTypeInvalidRequest is the OpenAI error type for a request the API
+// will not act on.
+const OAIErrorTypeInvalidRequest = "invalid_request_error"
+
 // OAIError is the OpenAI error response format.
 type OAIError struct {
 	Error OAIErrorDetail `json:"error"`
@@ -213,14 +226,14 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 	if err := c.Bind().JSON(&req); err != nil {
 		return c.Status(400).JSON(OAIError{Error: OAIErrorDetail{
 			Message: "invalid request body: " + err.Error(),
-			Type:    "invalid_request_error",
+			Type:    OAIErrorTypeInvalidRequest,
 		}})
 	}
 
 	if len(req.Messages) == 0 {
 		return c.Status(400).JSON(OAIError{Error: OAIErrorDetail{
 			Message: "messages is required and must be non-empty",
-			Type:    "invalid_request_error",
+			Type:    OAIErrorTypeInvalidRequest,
 		}})
 	}
 
@@ -228,7 +241,7 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 		nParam := "n"
 		return c.Status(400).JSON(OAIError{Error: OAIErrorDetail{
 			Message: "n > 1 is not supported: underlying providers do not support multiple choices",
-			Type:    "invalid_request_error",
+			Type:    OAIErrorTypeInvalidRequest,
 			Param:   &nParam,
 		}})
 	}
@@ -250,21 +263,30 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 	// Resolve provider and model from the request model field.
 	// Supports "provider/model" format (e.g., "anthropic/claude-sonnet-4") or plain model name.
 	provider, model, providerInfo, err := h.resolver.ResolveWithInfo(ctx, ResolveOpts{
-		ModelStr:     req.Model,
-		Namespace:    namespace,
+		ModelStr:  req.Model,
+		Namespace: namespace,
+		AuthorizeProviderReference: func(provider ProviderResolutionInfo) error {
+			return authorizeContextTokenProviderReference(c, h.contextTokenAuthorization, "openAIChatCompletionsProviderReference", namespace, provider)
+		},
+		AuthorizeProviderUse: func(provider ProviderResolutionInfo, model string) error {
+			return authorizeContextTokenProviderUse(c, h.contextTokenAuthorization, "openAIChatCompletions", namespace, provider, model)
+		},
 		RequireModel: true,
+		// Enforced scoped context tokens get no implicit Provider selection.
+		RequireExplicitProvider: requestRequiresExplicitProvider(c, h.contextTokenAuthorization),
 	})
 	if err != nil {
-		oaiLog.Error(err, "failed to resolve provider", "model", req.Model)
+		if ferr, ok := err.(*fiber.Error); ok && ferr.Code == fiber.StatusForbidden {
+			return openAIContextTokenAuthorizationError(c, err)
+		}
+		oaiLog.Error(err, "failed to resolve provider", chatModelKey, req.Model)
 		return c.Status(400).JSON(OAIError{Error: OAIErrorDetail{
 			Message: "failed to resolve provider: " + err.Error(),
-			Type:    "invalid_request_error",
+			Type:    OAIErrorTypeInvalidRequest,
 		}})
 	}
 
-	if err := authorizeContextTokenProviderUse(c, h.contextTokenAuthorization, "openAIChatCompletions", namespace, providerInfo, model); err != nil {
-		return openAIContextTokenAuthorizationError(c, err)
-	}
+	ctx = usageRequestContext(ctx, h.resultStore, uncachedReaderOr(h.apiReader, h.client), namespace, "")
 	provider = llm.NewTracingProvider(provider)
 
 	compReq, errDetail := buildOpenAICompletionRequest(req, model)
@@ -277,8 +299,7 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 
 	// Inject Orka tools and run the server-side agentic loop by default.
 	// Set X-Orka-Tools: disabled to use as a transparent proxy instead.
-	orkaToolsEnabled, err := prepareCompatCoordinatorTools(c, ctx, compReq, compatCoordinatorSetup{
-		Client:              h.client,
+	orkaToolsEnabled, err := prepareCompatCoordinatorTools(c, compReq, compatCoordinatorSetup{
 		Namespace:           namespace,
 		ToolUseAction:       "openAITools",
 		AuthorizationConfig: h.contextTokenAuthorization,
@@ -292,12 +313,14 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 	if orkaToolsEnabled {
 		proxyToolCtx = newCompatProxyToolContext(compatProxyToolContextConfig{
 			Client:                    h.client,
+			AuthorizationReader:       h.apiReader,
 			KubeClient:                h.kubeClient,
 			Namespace:                 namespace,
 			Provider:                  providerInfo,
 			WatchNamespace:            h.watchNamespace,
 			EnforceNamespaceIsolation: h.enforceNamespaceIsolation,
 			ResultStore:               h.resultStore,
+			GatewayEventStore:         h.gatewayEventStore,
 			GenerateTaskName:          func() string { return fmt.Sprintf("proxy-%s", generateChatID()) },
 			Profile:                   openAICompatProxyToolContextProfile,
 			AuthContext:               contextToken,
@@ -345,7 +368,7 @@ func buildOpenAICompletionRequest(req OAIRequest, model string) (*llm.Completion
 			param := oaiParamMaxTokens
 			return nil, &OAIErrorDetail{
 				Message: fmt.Sprintf("max_tokens must be at least 16, got %d", maxTokens),
-				Type:    "invalid_request_error",
+				Type:    OAIErrorTypeInvalidRequest,
 				Param:   &param,
 			}
 		}
@@ -394,7 +417,7 @@ func (h *OpenAICompatHandler) handleNonStreamingCompletion(
 		oaiLog.Error(err, "completion failed")
 		return c.Status(500).JSON(OAIError{Error: OAIErrorDetail{
 			Message: "completion failed: " + err.Error(),
-			Type:    "server_error",
+			Type:    oaiErrorServer,
 		}})
 	}
 
@@ -416,7 +439,7 @@ func (h *OpenAICompatHandler) handleNonStreamingToolLoop(
 		oaiLog.Error(err, "tool loop failed")
 		return c.Status(500).JSON(OAIError{Error: OAIErrorDetail{
 			Message: "completion failed: " + err.Error(),
-			Type:    "server_error",
+			Type:    oaiErrorServer,
 		}})
 	}
 
@@ -455,12 +478,12 @@ func (h *OpenAICompatHandler) handleStreamingToolLoop(
 		// Send role chunk
 		roleChunk := OAIResponse{
 			ID:      completionID,
-			Object:  "chat.completion.chunk",
+			Object:  oaiChatCompletionChunk,
 			Created: created,
 			Model:   model,
 			Choices: []OAIChoice{{
 				Index: 0,
-				Delta: &OAIMessage{Role: "assistant"},
+				Delta: &OAIMessage{Role: chatRoleAssistant},
 			}},
 		}
 		if err := writeStreamChunk(w, roleChunk); err != nil {
@@ -514,7 +537,7 @@ func (h *OpenAICompatHandler) handleStreamingToolLoop(
 		// Send finish chunk
 		finishChunk := OAIResponse{
 			ID:      completionID,
-			Object:  "chat.completion.chunk",
+			Object:  oaiChatCompletionChunk,
 			Created: created,
 			Model:   model,
 			Choices: []OAIChoice{{
@@ -541,7 +564,7 @@ func writeOpenAIContentChunk(w *bufio.Writer, completionID string, created int64
 	}
 	return writeStreamChunk(w, OAIResponse{
 		ID:      completionID,
-		Object:  "chat.completion.chunk",
+		Object:  oaiChatCompletionChunk,
 		Created: created,
 		Model:   model,
 		Choices: []OAIChoice{{
@@ -587,7 +610,7 @@ func (h *OpenAICompatHandler) formatOAIResponse(c fiber.Ctx, resp *llm.Completio
 	}
 
 	msg := &OAIMessage{
-		Role:    "assistant",
+		Role:    chatRoleAssistant,
 		Content: resp.Content,
 	}
 
@@ -599,7 +622,7 @@ func (h *OpenAICompatHandler) formatOAIResponse(c fiber.Ctx, resp *llm.Completio
 			msg.ToolCalls = append(msg.ToolCalls, OAIToolCall{
 				Index: &idx,
 				ID:    tc.ID,
-				Type:  "function",
+				Type:  oaiToolTypeFunction,
 				Function: OAIFunctionCall{
 					Name:      tc.Name,
 					Arguments: string(tc.Arguments),
@@ -636,7 +659,7 @@ func openAICompletionOutcomeError(c fiber.Ctx, reason string) error {
 	}
 	return c.Status(fiber.StatusBadGateway).JSON(OAIError{Error: OAIErrorDetail{
 		Message: message,
-		Type:    "server_error",
+		Type:    oaiErrorServer,
 	}})
 }
 
@@ -666,6 +689,11 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 
 		streamCh, err := capturedProvider.Stream(streamCtx, capturedReq)
 		if err != nil {
+			if llm.IsUsagePersistenceError(err) {
+				oaiLog.Error(err, "stream usage persistence failed")
+				_ = writeStreamError(w, "provider_error")
+				return
+			}
 			// Try non-streaming fallback via Complete
 			resp, completeErr := capturedProvider.Complete(streamCtx, capturedReq)
 			if completeErr != nil {
@@ -690,12 +718,12 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 			// Send role chunk
 			roleChunk := OAIResponse{
 				ID:      completionID,
-				Object:  "chat.completion.chunk",
+				Object:  oaiChatCompletionChunk,
 				Created: created,
 				Model:   model,
 				Choices: []OAIChoice{{
 					Index: 0,
-					Delta: &OAIMessage{Role: "assistant"},
+					Delta: &OAIMessage{Role: chatRoleAssistant},
 				}},
 			}
 			_ = writeStreamChunk(w, roleChunk)
@@ -704,7 +732,7 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 			if resp.Content != "" {
 				contentChunk := OAIResponse{
 					ID:      completionID,
-					Object:  "chat.completion.chunk",
+					Object:  oaiChatCompletionChunk,
 					Created: created,
 					Model:   model,
 					Choices: []OAIChoice{{
@@ -720,7 +748,7 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 				idx := i
 				tcChunk := OAIResponse{
 					ID:      completionID,
-					Object:  "chat.completion.chunk",
+					Object:  oaiChatCompletionChunk,
 					Created: created,
 					Model:   model,
 					Choices: []OAIChoice{{
@@ -729,7 +757,7 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 							ToolCalls: []OAIToolCall{{
 								Index: &idx,
 								ID:    tc.ID,
-								Type:  "function",
+								Type:  oaiToolTypeFunction,
 								Function: OAIFunctionCall{
 									Name:      tc.Name,
 									Arguments: string(tc.Arguments),
@@ -744,7 +772,7 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 			// Send finish
 			finishChunk := OAIResponse{
 				ID:      completionID,
-				Object:  "chat.completion.chunk",
+				Object:  oaiChatCompletionChunk,
 				Created: created,
 				Model:   model,
 				Choices: []OAIChoice{{
@@ -759,7 +787,7 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 			if streamOpts != nil && streamOpts.IncludeUsage {
 				usageChunk := OAIResponse{
 					ID:      completionID,
-					Object:  "chat.completion.chunk",
+					Object:  oaiChatCompletionChunk,
 					Created: created,
 					Model:   model,
 					Choices: []OAIChoice{},
@@ -779,12 +807,12 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 		// Send initial role chunk
 		roleChunk := OAIResponse{
 			ID:      completionID,
-			Object:  "chat.completion.chunk",
+			Object:  oaiChatCompletionChunk,
 			Created: created,
 			Model:   model,
 			Choices: []OAIChoice{{
 				Index: 0,
-				Delta: &OAIMessage{Role: "assistant"},
+				Delta: &OAIMessage{Role: chatRoleAssistant},
 			}},
 		}
 		_ = writeStreamChunk(w, roleChunk)
@@ -803,7 +831,7 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 				hasNonBlankContent = hasNonBlankContent || strings.TrimSpace(chunk.Content) != ""
 				contentChunk := OAIResponse{
 					ID:      completionID,
-					Object:  "chat.completion.chunk",
+					Object:  oaiChatCompletionChunk,
 					Created: created,
 					Model:   model,
 					Choices: []OAIChoice{{
@@ -819,7 +847,7 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 				idx := toolCallIndex
 				tcChunk := OAIResponse{
 					ID:      completionID,
-					Object:  "chat.completion.chunk",
+					Object:  oaiChatCompletionChunk,
 					Created: created,
 					Model:   model,
 					Choices: []OAIChoice{{
@@ -828,7 +856,7 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 							ToolCalls: []OAIToolCall{{
 								Index: &idx,
 								ID:    tc.ID,
-								Type:  "function",
+								Type:  oaiToolTypeFunction,
 								Function: OAIFunctionCall{
 									Name:      tc.Name,
 									Arguments: string(tc.Arguments),
@@ -853,7 +881,7 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 				}
 				finishChunk := OAIResponse{
 					ID:      completionID,
-					Object:  "chat.completion.chunk",
+					Object:  oaiChatCompletionChunk,
 					Created: created,
 					Model:   model,
 					Choices: []OAIChoice{{
@@ -866,7 +894,7 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 				if streamOpts != nil && streamOpts.IncludeUsage && (chunk.InputTokens > 0 || chunk.OutputTokens > 0) {
 					usageChunk := OAIResponse{
 						ID:      completionID,
-						Object:  "chat.completion.chunk",
+						Object:  oaiChatCompletionChunk,
 						Created: created,
 						Model:   model,
 						Choices: []OAIChoice{},
@@ -914,7 +942,7 @@ func (h *OpenAICompatHandler) HandleListModels(c fiber.Ctx) error {
 		oaiLog.Error(err, "failed to list providers")
 		return c.Status(500).JSON(OAIError{Error: OAIErrorDetail{
 			Message: "failed to list providers",
-			Type:    "server_error",
+			Type:    oaiErrorServer,
 		}})
 	}
 
@@ -931,7 +959,7 @@ func (h *OpenAICompatHandler) HandleListModels(c fiber.Ctx) error {
 			if !seen[modelID] {
 				models = append(models, OAIModel{
 					ID:      modelID,
-					Object:  "model",
+					Object:  chatModelKey,
 					Created: now,
 					OwnedBy: string(p.Spec.Type),
 				})
@@ -941,7 +969,7 @@ func (h *OpenAICompatHandler) HandleListModels(c fiber.Ctx) error {
 			if !seen[p.Spec.DefaultModel] {
 				models = append(models, OAIModel{
 					ID:      p.Spec.DefaultModel,
-					Object:  "model",
+					Object:  chatModelKey,
 					Created: now,
 					OwnedBy: string(p.Spec.Type),
 				})
@@ -951,7 +979,7 @@ func (h *OpenAICompatHandler) HandleListModels(c fiber.Ctx) error {
 	}
 
 	return c.JSON(OAIModelList{
-		Object: "list",
+		Object: apiObjectList,
 		Data:   models,
 	})
 }
@@ -1038,7 +1066,7 @@ func convertOAITools(inputTools []OAITool) []llm.Tool {
 
 	result := make([]llm.Tool, 0, len(inputTools))
 	for _, t := range inputTools {
-		if t.Type != "function" {
+		if t.Type != oaiToolTypeFunction {
 			continue
 		}
 		result = append(result, llm.Tool{
@@ -1098,7 +1126,7 @@ func writeStreamError(w *bufio.Writer, reason string) error {
 	}
 	data, err := json.Marshal(OAIError{Error: OAIErrorDetail{
 		Message: message,
-		Type:    "server_error",
+		Type:    oaiErrorServer,
 	}})
 	if err != nil {
 		return err

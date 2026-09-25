@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -445,4 +446,102 @@ func rawIDValue(raw json.RawMessage) any {
 	var value any
 	_ = json.Unmarshal(raw, &value)
 	return value
+}
+
+func TestHandleRequestChargesPermissionEventsToByteBudget(t *testing.T) {
+	session := &RuntimeSession{config: RuntimeSessionConfig{MaxBufferedEvents: 16, MaxBufferedEventBytes: 1 << 20, PermissionTimeout: time.Second, CancelGrace: 50 * time.Millisecond}, providerSessionID: "sess-1"}
+	active := &activePrompt{id: "prompt-perm", events: make(chan PromptEvent, 16), accepted: true, done: make(chan struct{}), permissions: map[string]*pendingPermission{}}
+	session.active = active
+	params := json.RawMessage(`{"sessionId":"sess-1","toolCall":{"title":"` + strings.Repeat("x", 4096) + `"},"options":[{"optionId":"allow","name":"Allow","kind":"allow_once"}]}`)
+	go func() {
+		_, _ = session.handleRequest(context.Background(), IncomingRequest{ID: json.RawMessage(`"req-1"`), Method: MethodRequestPermission, Params: params})
+	}()
+	select {
+	case event := <-active.events:
+		if event.Type != PromptEventPermissionRequested || event.Size != len(params) {
+			t.Fatalf("event = %+v, want a permission event sized %d", event, len(params))
+		}
+		session.mu.Lock()
+		buffered := active.bufferedBytes
+		var pending *pendingPermission
+		for _, candidate := range active.permissions {
+			pending = candidate
+		}
+		session.mu.Unlock()
+		if buffered != len(params) {
+			t.Fatalf("bufferedBytes = %d, want %d", buffered, len(params))
+		}
+		if pending == nil {
+			t.Fatal("permission request was not registered")
+		}
+		pending.result <- RequestPermissionOutcome{Outcome: "selected", OptionID: "allow"}
+	case <-time.After(2 * time.Second):
+		t.Fatal("permission event was not emitted")
+	}
+}
+
+func TestEmitLockedEnforcesBufferedByteBudget(t *testing.T) {
+	session := &RuntimeSession{config: RuntimeSessionConfig{MaxBufferedEvents: 16, MaxBufferedEventBytes: 100, CancelGrace: 50 * time.Millisecond}}
+	active := &activePrompt{id: "prompt-bytes", events: make(chan PromptEvent, 16), accepted: true, done: make(chan struct{})}
+	session.mu.Lock()
+	session.emitLocked(active, PromptEvent{Type: PromptEventUpdate, Size: 60})
+	session.emitLocked(active, PromptEvent{Type: PromptEventUpdate, Size: 30})
+	overflowedEarly := active.overflowed
+	session.emitLocked(active, PromptEvent{Type: PromptEventUpdate, Size: 20})
+	overflowedLate := active.overflowed
+	session.mu.Unlock()
+	if overflowedEarly {
+		t.Fatal("buffer overflowed below the byte budget")
+	}
+	if !overflowedLate {
+		t.Fatal("buffer did not overflow once the byte budget was exceeded")
+	}
+	if got := len(active.events); got != 2 {
+		t.Fatalf("buffered events = %d, want 2 (the over-budget event was dropped)", got)
+	}
+	session.releaseBufferedEvent(active, <-active.events)
+	session.mu.Lock()
+	remaining := active.bufferedBytes
+	session.mu.Unlock()
+	if remaining != 30 {
+		t.Fatalf("bufferedBytes after release = %d, want 30", remaining)
+	}
+}
+
+// A notification the child sends before the prompt request is marked
+// written is parked until acceptance and enqueued afterwards; its receipt
+// time must still be the instant it arrived, while the enqueue timestamp
+// reflects when the consumer could first see it.
+func TestRuntimeSessionPreAcceptedEventKeepsReceiptTime(t *testing.T) {
+	session := &RuntimeSession{config: RuntimeSessionConfig{MaxBufferedEvents: 4, MaxBufferedEventBytes: 1 << 20}}
+	active := &activePrompt{events: make(chan PromptEvent, 4)}
+	before := time.Now().UTC()
+	session.emitLocked(active, PromptEvent{Type: PromptEventUpdate, Update: &SessionNotification{SessionID: "s"}, Size: 1})
+	if len(active.preAccepted) != 1 || len(active.events) != 0 {
+		t.Fatalf("pre-acceptance update was not parked: parked=%d enqueued=%d", len(active.preAccepted), len(active.events))
+	}
+	received := active.preAccepted[0].ReceivedAt
+	if received.IsZero() || received.Before(before) {
+		t.Fatalf("parked event receipt time = %v, want stamped at receipt (>= %v)", received, before)
+	}
+	time.Sleep(2 * time.Millisecond)
+
+	active.accepted = true
+	session.emitLocked(active, PromptEvent{Type: PromptEventAccepted})
+	queued := append([]PromptEvent(nil), active.preAccepted...)
+	active.preAccepted = nil
+	for _, event := range queued {
+		active.bufferedBytes -= event.Size
+		session.emitLocked(active, event)
+	}
+	accepted, update := <-active.events, <-active.events
+	if accepted.Type != PromptEventAccepted || update.Type != PromptEventUpdate {
+		t.Fatalf("enqueued order = %s, %s", accepted.Type, update.Type)
+	}
+	if !update.ReceivedAt.Equal(received) {
+		t.Fatalf("enqueued receipt time = %v, want the original %v", update.ReceivedAt, received)
+	}
+	if !update.Timestamp.After(received.Add(time.Millisecond)) || update.Timestamp.Before(accepted.Timestamp) {
+		t.Fatalf("enqueue timestamp = %v, want after receipt %v and not before acceptance %v", update.Timestamp, received, accepted.Timestamp)
+	}
 }

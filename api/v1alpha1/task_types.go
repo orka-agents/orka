@@ -133,7 +133,7 @@ type TaskTransaction struct {
 // +kubebuilder:validation:XValidation:rule="self.type != 'agent' || (has(self.prompt) == has(oldSelf.prompt) && (!has(self.prompt) || self.prompt == oldSelf.prompt))",message="agent prompt is immutable"
 // +kubebuilder:validation:XValidation:rule="self.type != 'agent' || (has(self.agentRef) == has(oldSelf.agentRef) && (!has(self.agentRef) || self.agentRef == oldSelf.agentRef))",message="agentRef is immutable for agent Tasks"
 // +kubebuilder:validation:XValidation:rule="self.type != 'agent' || (has(self.agentRuntime) == has(oldSelf.agentRuntime) && (!has(self.agentRuntime) || self.agentRuntime == oldSelf.agentRuntime))",message="agentRuntime is immutable for agent Tasks"
-// +kubebuilder:validation:XValidation:rule="self.type != 'agent' || (has(self.sessionRef) == has(oldSelf.sessionRef) && (!has(self.sessionRef) || self.sessionRef == oldSelf.sessionRef))",message="sessionRef is immutable for agent Tasks"
+// +kubebuilder:validation:XValidation:rule="has(self.sessionRef) == has(oldSelf.sessionRef) && (!has(self.sessionRef) || self.sessionRef == oldSelf.sessionRef)",message="sessionRef is immutable"
 // +kubebuilder:validation:XValidation:rule="self.type != 'agent' || (has(self.workspace) == has(oldSelf.workspace) && (!has(self.workspace) || self.workspace == oldSelf.workspace))",message="workspace is immutable for agent Tasks"
 // +kubebuilder:validation:XValidation:rule="self.type != 'agent' || (has(self.timeout) == has(oldSelf.timeout) && (!has(self.timeout) || self.timeout == oldSelf.timeout))",message="timeout is immutable for agent Tasks"
 // +kubebuilder:validation:XValidation:rule="!has(self.execution) || !has(self.execution.workspace) || self.execution.workspace.reusePolicy != 'session' || has(self.sessionRef)",message="session workspace reuse requires spec.sessionRef"
@@ -185,7 +185,8 @@ type TaskSpec struct {
 	// +optional
 	SecretRef *SecretReference `json:"secretRef,omitempty"`
 
-	// SessionRef references a session for conversation continuity
+	// SessionRef references a session for conversation continuity.
+	// It is immutable after Task creation because it bounds transcript access.
 	// +optional
 	SessionRef *SessionReference `json:"sessionRef,omitempty"`
 
@@ -455,6 +456,11 @@ type TaskStatus struct {
 	// +optional
 	JobName string `json:"jobName,omitempty"`
 
+	// JobUID is the immutable identity returned when the controller creates the
+	// current Job. A Job with the same name and a different UID has no worker authority.
+	// +optional
+	JobUID string `json:"jobUID,omitempty"`
+
 	// ResultRef indicates whether a result is available
 	// +optional
 	ResultRef *ResultReference `json:"resultRef,omitempty"`
@@ -509,7 +515,11 @@ type TaskStatus struct {
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-	// LastScheduleTime is the last time a child task was created for a scheduled run.
+	// LastScheduleTime is the schedule's progress cursor: the last time a
+	// child task was created, or — when a run was missed past
+	// startingDeadlineSeconds (for example while suspended) — the time the
+	// skipped window was re-anchored so the schedule resumes from the
+	// present instead of replaying missed runs.
 	// +optional
 	LastScheduleTime *metav1.Time `json:"lastScheduleTime,omitempty"`
 
@@ -693,6 +703,7 @@ type ChildTaskStatus struct {
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Priority",type=integer,JSONPath=`.spec.priority`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+// +kubebuilder:selectablefield:JSONPath=.spec.sessionRef.name
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || (!has(oldSelf.status.agentExecutionBinding) || self.spec == oldSelf.spec)",message="Task spec is immutable after execution authority is recorded"
 
 // Task is the Schema for the tasks API
@@ -1006,6 +1017,26 @@ type WorkspaceConfig struct {
 	// +kubebuilder:validation:MaxLength=255
 	// +optional
 	PRBaseBranch string `json:"prBaseBranch,omitempty"`
+
+	// PRTitle is the pull request title supplied by the Task author. When empty,
+	// the controller uses the prompt's first nonblank line, limited to 256 characters.
+	// An empty or whitespace-only prompt falls back to the publication generation title.
+	// Nonempty whitespace-only titles are rejected. Secret-like titles, including
+	// prompt-derived titles, are rejected at runtime before publication.
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:XValidation:rule="self == '' || self.trim() != ''",message="prTitle must not be whitespace-only"
+	// +optional
+	PRTitle string `json:"prTitle,omitempty"`
+
+	// PRBody is the pull request body supplied by the Task author. When empty,
+	// the publisher describes the publication and identifies the Task. Publication
+	// generation and reconciliation markers are appended to either body.
+	// Orka reconciliation comments are reserved and must not be included.
+	// Secret-like text is rejected at runtime before publication.
+	// +kubebuilder:validation:MaxLength=32768
+	// +kubebuilder:validation:XValidation:rule="!self.contains('<!-- orka.publisher.pr-')",message="prBody must not contain reserved publisher reconciliation markers"
+	// +optional
+	PRBody string `json:"prBody,omitempty"`
 
 	// PushBranch is the publication branch. For write Tasks the controller derives
 	// a full-entropy Task- or Session-owned branch when this is omitted.

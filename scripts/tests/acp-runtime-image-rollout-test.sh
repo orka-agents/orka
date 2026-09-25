@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# scripts/tests suites rely on 'set -e' stopping on failed (( )) arithmetic,
+# which macOS's stock bash 3.2 does not honor; failures would be silently
+# masked there. Require a modern bash (for example: brew install bash).
+if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+  echo "error: this test suite requires bash >= 4; found ${BASH_VERSION}" >&2
+  exit 1
+fi
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 renderer="${root}/scripts/render-acp-runtime-images.sh"
 kustomize="${KUSTOMIZE:-${root}/bin/kustomize}"
@@ -146,6 +154,9 @@ jq -e '
   ([.[] | select(.kind == "Deployment" and .metadata.name == "orka-controller-manager") |
     .spec.template.spec.containers[] | select(.name == "manager") | .args[] |
     select(. == "--watch-namespace=orka-system")] | length) == 1 and
+  ([.[] | select(.kind == "Deployment" and .metadata.name == "orka-controller-manager") |
+    .spec.template.spec.containers[] | select(.name == "manager") | .args[] |
+    select(. == "--task-provenance-admission-external=true")] | length) == 0 and
   ([.[] | select(.kind == "Deployment" and .metadata.name == "orka-controller-manager") |
     .spec.template.spec.containers[] | select(.name == "manager") | .args[] |
     select(. == "--task-provenance-admission-enabled=true" or
@@ -694,13 +705,13 @@ fi
 
 if jq -e 'if .kind == "List" then any(.items[]?; .kind == "ValidatingWebhookConfiguration" and .metadata.name == "orka-admission") else false end' "$3" >/dev/null; then
   [[ -e "${FAKE_KUBE_STATE}/admission-endpoints" ]] || { echo 'admission webhooks applied before ready endpoints' >&2; exit 38; }
-  [[ "$(grep -c '^smoke:' "${FAKE_KUBE_LOG}")" -ge 7 ]] || { echo 'admission webhooks applied before every handler smoke' >&2; exit 39; }
+  [[ "$(grep -c '^smoke:' "${FAKE_KUBE_LOG}")" -ge 9 ]] || { echo 'admission webhooks applied before every handler smoke' >&2; exit 39; }
   jq -e '
     ([.items[] | select(.kind == "ValidatingAdmissionPolicy")] | length) == 0 and
     ([.items[] | select(.kind == "ValidatingAdmissionPolicyBinding")] | length) == 0 and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration")] | length) == 1 and
-    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[]] | length) == 7 and
-    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[].name] | unique | length) == 7 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[]] | length) == 9 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[].name] | unique | length) == 9 and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
       (.failurePolicy == "Fail" and .sideEffects == "None" and
        .clientConfig.service.name == "orka-admission" and
@@ -710,6 +721,10 @@ if jq -e 'if .kind == "List" then any(.items[]?; .kind == "ValidatingWebhookConf
       .metadata.annotations["cert-manager.io/inject-ca-from-secret"]] | all(. == null))
     and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
+      select(.name == "checkpointsourceuse.workspace.orka.ai" and
+             .clientConfig.service.path == "/validate-workspace-orka-ai-v1alpha1-checkpoint-source-use" and
+             .rules == [{"operations":["CREATE"],"apiGroups":["workspace.orka.ai"],"apiVersions":["v1alpha1"],"resources":["executionworkspacecheckpoints"],"scope":"Namespaced"}])] | length) == 1 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
       select(.name == "taskexecutionauthority.core.orka.ai") | .matchConditions[] |
       select(.name == "route-unless-controller-cleanup-safe") | .expression |
       select(contains("orka.ai/cleanup") and
@@ -717,8 +732,17 @@ if jq -e 'if .kind == "List" then any(.items[]?; .kind == "ValidatingWebhookConf
         contains("object.spec == oldObject.spec") and
         contains("object.?status.orValue({}) == oldObject.?status.orValue({})"))] | length) == 1 and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
-      select(.name == "namespaceexecutionmode.core.orka.ai") |
-      select(.clientConfig.service.path == "/validate-v1-namespace-execution-mode")] | length) == 1 and
+      select(.name == "namespaceexecutionmode.core.orka.ai")] | length) == 0 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
+      select(.name == "workspaceattachmentsecret.core.orka.ai" and
+             .clientConfig.service.path == "/validate-v1-secret-workspace-attachment" and
+             .rules == [{"operations":["CREATE","UPDATE","DELETE"],"apiGroups":[""],"apiVersions":["v1"],"resources":["secrets"],"scope":"Namespaced"}] and
+             .objectSelector.matchExpressions == [{"key":"workspace.orka.ai/attachment-for","operator":"Exists"}])] | length) == 1 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
+      select(.name == "acpsuspendquotalease.core.orka.ai" and
+             .clientConfig.service.path == "/validate-coordination-k8s-io-v1-acp-suspend-quota-lease" and
+             .rules == [{"operations":["CREATE","UPDATE","DELETE"],"apiGroups":["coordination.k8s.io"],"apiVersions":["v1"],"resources":["leases"],"scope":"Namespaced"}] and
+             .matchConditions == [{"name":"reserved-acp-workspace-lease-name","expression":"request.?name.orValue(\u0027\u0027).startsWith(\u0027acp-suspend-quota-\u0027) || request.?name.orValue(\u0027\u0027).startsWith(\u0027acp-retention-fence-\u0027) || (request.operation == \u0027CREATE\u0027 && (object.metadata.?generateName.orValue(\u0027\u0027).startsWith(\u0027acp-suspend-quota-\u0027) || object.metadata.?generateName.orValue(\u0027\u0027).startsWith(\u0027acp-retention-fence-\u0027)))"}])] | length) == 1 and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
       select(.name == "sessionresolution.core.orka.ai" or
              .name == "agentexecutionadjudication.core.orka.ai" or
@@ -949,7 +973,8 @@ assert_converged() {
   [[ "$(grep -c '^proxy-start$' "${state_dir}/apply.log")" -ge 1 ]]
   [[ "$(grep -c '^proxy-start$' "${state_dir}/apply.log")" == "$(grep -c '^proxy-stop$' "${state_dir}/apply.log")" ]]
   [[ "$(grep -c '^secret:agent-execution-snapshot-key$' "${state_dir}/apply.log")" == "1" ]]
-  [[ "$(grep '^smoke:' "${state_dir}/apply.log" | sort -u | wc -l | tr -d '[:space:]')" == "7" ]]
+  [[ "$(grep '^smoke:' "${state_dir}/apply.log" | sort -u | wc -l | tr -d '[:space:]')" == "9" ]]
+  grep -Fxq 'smoke:/validate-workspace-orka-ai-v1alpha1-checkpoint-source-use' "${state_dir}/apply.log"
   [[ "$(grep -c '^webhooks:orka-admission$' "${state_dir}/apply.log")" -ge 1 ]]
   # Recovery scenarios run the apply script twice into one shared log, so
   # phase ordering is asserted on the final converged invocation, which always

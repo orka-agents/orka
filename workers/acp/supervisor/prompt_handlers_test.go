@@ -3,10 +3,14 @@ package supervisor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,6 +23,49 @@ import (
 	"github.com/orka-agents/orka/internal/workspacedelta"
 )
 
+const testE2EPromptWriteAmbiguityMarker = "ORKA_E2E_WS_LC_AMBIGUOUS_OK"
+
+func TestRedactedPromptErrorDetailStripsC1ControlsBeforeRedaction(t *testing.T) {
+	t.Parallel()
+	const key = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"
+	// A C1 control (U+0085) and a C0 control inside the credential must not
+	// split the token past the redactor.
+	err := errors.New("upstream rejected api_key=" + key[:12] + "\u0085" + key[12:24] + "\x01" + key[24:] + " for the model")
+	got := redactedPromptErrorDetail(err)
+	for _, fragment := range []string{key[:12], key[12:24], key[24:]} {
+		if strings.Contains(got, fragment) {
+			t.Fatalf("redactedPromptErrorDetail() leaked credential fragment %q: %q", fragment, got)
+		}
+	}
+	if !strings.Contains(got, "upstream rejected") || !strings.Contains(got, "[REDACTED]") || strings.ContainsRune(got, '\u0085') {
+		t.Fatalf("redactedPromptErrorDetail() = %q, want redacted prose without control runes", got)
+	}
+}
+
+func TestRedactedPromptErrorDetailReassemblesLineWrappedCredential(t *testing.T) {
+	t.Parallel()
+	const key = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"
+	// A credential wrapped across a line break must reassemble into one
+	// contiguous token for the redactor, not survive as two fragments.
+	err := errors.New("upstream rejected " + key[:11] + "\n" + key[11:] + " for the model")
+	got := redactedPromptErrorDetail(err)
+	if strings.Contains(got, key[:11]) || strings.Contains(got, key[11:]) || !strings.Contains(got, "[REDACTED]") {
+		t.Fatalf("redactedPromptErrorDetail() = %q, want line-wrapped credential redacted", got)
+	}
+}
+
+func TestRedactedPromptErrorDetailStripsFormatRunesBeforeRedaction(t *testing.T) {
+	t.Parallel()
+	const key = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"
+	// A zero-width space (U+200B, category Cf) inside the credential must
+	// not split the token past the redactor.
+	err := errors.New("upstream rejected api_key=" + key[:12] + "\u200b" + key[12:] + " for the model")
+	got := redactedPromptErrorDetail(err)
+	if strings.Contains(got, key[:12]) || strings.Contains(got, key[12:]) || !strings.Contains(got, "[REDACTED]") {
+		t.Fatalf("redactedPromptErrorDetail() = %q, want format-rune-split credential redacted", got)
+	}
+}
+
 func TestPromptStreamErrorDetailIsBoundedAndSingleLine(t *testing.T) {
 	if got := promptStreamErrorDetail(fmt.Errorf("first\nsecond\rthird")); got != "first second third" {
 		t.Fatalf("single-line detail = %q", got)
@@ -26,6 +73,60 @@ func TestPromptStreamErrorDetailIsBoundedAndSingleLine(t *testing.T) {
 	detail := promptStreamErrorDetail(fmt.Errorf("%s界", strings.Repeat("x", 512)))
 	if !strings.HasSuffix(detail, "...") || len(strings.TrimSuffix(detail, "...")) > 512 || !utf8.ValidString(detail) {
 		t.Fatalf("bounded detail = %q (len=%d)", detail, len(detail))
+	}
+}
+
+func TestPromptContainsE2EWriteAmbiguityMarker(t *testing.T) {
+	marker := testE2EPromptWriteAmbiguityMarker
+	input := harnessv2.PromptInput{Content: []harnessv2.ContentBlock{
+		{Type: harnessv2.ContentBlockResourceLink, URI: "https://example.com/" + testE2EPromptWriteAmbiguityMarker},
+		{Type: harnessv2.ContentBlockText, Text: "Reply exactly: " + marker},
+	}}
+	if !promptContainsE2EWriteAmbiguityMarker(input, marker) {
+		t.Fatal("configured text marker was not detected")
+	}
+	if promptContainsE2EWriteAmbiguityMarker(input, "") {
+		t.Fatal("empty fault marker enabled the injection")
+	}
+	if promptContainsE2EWriteAmbiguityMarker(input, "ORKA_E2E_OTHER_OK") {
+		t.Fatal("unrelated marker enabled the injection")
+	}
+}
+
+func TestE2EPromptWriteAmbiguityIsOneShotPerOperation(t *testing.T) {
+	request := harnessv2.StartPromptRequest{
+		Metadata: harnessv2.MutationMetadata{OperationID: "operation-1"},
+		Input: harnessv2.PromptInput{Content: []harnessv2.ContentBlock{{
+			Type: harnessv2.ContentBlockText,
+			Text: "Reply exactly: " + testE2EPromptWriteAmbiguityMarker,
+		}}},
+	}
+	recorder := &sharedE2EPromptWriteFaultRecorder{consumed: make(map[harnessv2.OperationID]struct{})}
+	server := &Server{e2ePromptWriteRecorder: recorder}
+	consumed, err := server.consumeE2EPromptWriteAmbiguityLocked(context.Background(), request, testE2EPromptWriteAmbiguityMarker)
+	if err != nil || !consumed {
+		t.Fatal("first request did not consume the ambiguity fault")
+	}
+	consumed, err = server.consumeE2EPromptWriteAmbiguityLocked(context.Background(), request, testE2EPromptWriteAmbiguityMarker)
+	if err != nil || consumed {
+		t.Fatal("retry of the same operation consumed the ambiguity fault again")
+	}
+	request.Metadata.OperationID = "operation-2"
+	consumed, err = server.consumeE2EPromptWriteAmbiguityLocked(context.Background(), request, testE2EPromptWriteAmbiguityMarker)
+	if err != nil || !consumed {
+		t.Fatal("distinct operation did not receive its own ambiguity fault")
+	}
+	// RuntimeSession state may be discarded and recreated inside the same
+	// supervisor. The one-shot decision belongs to the external recorder.
+	consumed, err = server.consumeE2EPromptWriteAmbiguityLocked(context.Background(), request, testE2EPromptWriteAmbiguityMarker)
+	if err != nil || consumed {
+		t.Fatal("runtime Session recreation reset the process-local ambiguity ledger")
+	}
+
+	restartedServer := &Server{e2ePromptWriteRecorder: recorder}
+	consumed, err = restartedServer.consumeE2EPromptWriteAmbiguityLocked(context.Background(), request, testE2EPromptWriteAmbiguityMarker)
+	if err != nil || consumed {
+		t.Fatal("supervisor restart re-armed the external ambiguity ledger")
 	}
 }
 
@@ -97,27 +198,21 @@ func TestPromptDuplicateClassificationPrecedesCapacityAdmission(t *testing.T) {
 
 	tests := []struct {
 		name           string
-		phase          harnessv2.OperationPhase
-		terminal       harnessv2.EventType
-		wantCode       harnessv2.ErrorCode
 		wantClass      harnessv2.RequestClassification
 		withSettlement bool
 	}{
 		{
-			name: "already accepted", phase: harnessv2.OperationPhaseAccepted,
-			wantCode: harnessv2.ErrorCodeAlreadyAccepted, wantClass: harnessv2.RequestClassificationAlreadyAccepted,
+			name: "already accepted", wantClass: harnessv2.RequestClassificationAlreadyAccepted,
 		},
 		{
-			name: "settled", phase: harnessv2.OperationPhaseSettled, terminal: harnessv2.EventCompleted,
-			wantCode: harnessv2.ErrorCodeSettled, wantClass: harnessv2.RequestClassificationSettled, withSettlement: true,
+			name: "settled", wantClass: harnessv2.RequestClassificationSettled, withSettlement: true,
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			server.mu.Lock()
 			state := server.sessions[create.RuntimeSessionID]
-			state.operations[prompt.Metadata.OperationID] = operationRecord(prompt.Metadata, test.phase, test.terminal, now)
-			state.prompt = &promptState{request: prompt}
+			state.prompt = &promptState{request: prompt, acceptedAt: now}
 			if test.withSettlement {
 				settlement := harnessv2.PromptSettlement{
 					TerminalEvent: harnessv2.EventCompleted, Outcome: harnessv2.PromptOutcomeSucceeded,
@@ -125,6 +220,7 @@ func TestPromptDuplicateClassificationPrecedesCapacityAdmission(t *testing.T) {
 				}
 				state.prompt.settlement = &settlement
 			}
+			recordPromptAdmissionLocked(state, state.prompt)
 			server.mu.Unlock()
 
 			for len(server.promptSlots) < cap(server.promptSlots) {
@@ -137,11 +233,15 @@ func TestPromptDuplicateClassificationPrecedesCapacityAdmission(t *testing.T) {
 			if response.Code != http.StatusOK {
 				t.Fatalf("duplicate status = %d body=%s", response.Code, response.Body.String())
 			}
-			var decoded harnessv2.ErrorResponse
+			var decoded harnessv2.PromptAdmissionResponse
 			if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
 				t.Fatal(err)
 			}
-			if decoded.Code != test.wantCode || decoded.Classification == nil || decoded.Classification.Class != test.wantClass {
+			if err := decoded.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			if decoded.Classification.Class != test.wantClass || !decoded.AcceptedAt.Equal(now) ||
+				(decoded.Settlement != nil) != test.withSettlement {
 				t.Fatalf("duplicate response = %#v", decoded)
 			}
 		})
@@ -156,17 +256,23 @@ func TestSettledPromptDoesNotBlockNextIdleTurn(t *testing.T) {
 		t.Fatalf("create status = %d body=%s", created.Code, created.Body.String())
 	}
 	previous := testStartPromptRequest(t, cfg, create.Metadata.Fence)
-	settlement := harnessv2.PromptSettlement{
-		TerminalEvent: harnessv2.EventCompleted,
-		Outcome:       harnessv2.PromptOutcomeSucceeded,
-		StopReason:    harnessv2.ACPStopReasonEndTurn,
-		SettledAt:     time.Now().UTC(),
+	previousPath := "/v2/runtime-sessions/session-1/prompts/prompt-1"
+	completed := performMutation(t, server.Handler(), http.MethodPut, previousPath, previous, cfg)
+	if completed.Code != http.StatusOK {
+		t.Fatalf("first prompt status = %d", completed.Code)
 	}
+	var original harnessv2.PromptAdmissionResponse
+	decodeResponse(t, performMutation(t, server.Handler(), http.MethodPut, previousPath, previous, cfg), &original)
+	if err := original.Validate(); err != nil {
+		t.Fatalf("first prompt replay: %v", err)
+	}
+	// Simulate completed workspace validation. This replay test does not need
+	// the Linux-only process-freeze proof used by the workspace endpoint.
 	server.mu.Lock()
 	state := server.sessions[create.RuntimeSessionID]
 	state.descriptor.State = harnessv2.RuntimeSessionStateIdle
-	state.prompt = &promptState{request: previous, settlement: &settlement}
 	server.mu.Unlock()
+	deactivatePromptCapabilities(state, previous.Metadata.PromptID, harnessv2.RuntimeSessionStateIdle)
 
 	next := testStartPromptRequest(t, cfg, create.Metadata.Fence)
 	next.Metadata.OperationID = testPromptOperationTwo
@@ -179,6 +285,15 @@ func TestSettledPromptDoesNotBlockNextIdleTurn(t *testing.T) {
 	response := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1/prompts/prompt-2", next, cfg)
 	if response.Code != http.StatusOK {
 		t.Fatalf("continuation status = %d body=%s", response.Code, response.Body.String())
+	}
+	var replayed harnessv2.PromptAdmissionResponse
+	decodeResponse(t, performMutation(t, server.Handler(), http.MethodPut, previousPath, previous, cfg), &replayed)
+	if err := replayed.Validate(); err != nil {
+		t.Fatalf("old prompt replay after continuation: %v", err)
+	}
+	if replayed.Classification != original.Classification || !replayed.AcceptedAt.Equal(original.AcceptedAt) ||
+		original.Settlement == nil || replayed.Settlement == nil || *replayed.Settlement != *original.Settlement {
+		t.Fatalf("continuation changed the original prompt admission: %#v", replayed)
 	}
 	server.mu.Lock()
 	defer server.mu.Unlock()
@@ -403,6 +518,25 @@ func TestWorkspaceDeltaRouteValidatesSettledPromptWithoutPromptPathSegment(t *te
 	}
 }
 
+func TestRejectWorkspaceDeltaLimitUsesProtocolValidPoisonedStatus(t *testing.T) {
+	server := &Server{}
+	state := &sessionState{descriptor: harnessv2.RuntimeSessionDescriptor{State: harnessv2.RuntimeSessionStateValidating}}
+	response := httptest.NewRecorder()
+	server.rejectWorkspaceDeltaLimit(response, state)
+
+	if response.Code != http.StatusConflict {
+		t.Fatalf("workspace delta status = %d body=%s", response.Code, response.Body.String())
+	}
+	var decoded harnessv2.ErrorResponse
+	decodeResponse(t, response, &decoded)
+	if decoded.Code != harnessv2.ErrorCodeSessionPoisoned || decoded.Message != "workspace delta exceeds request limits" {
+		t.Fatalf("workspace delta error = %#v", decoded)
+	}
+	if state.descriptor.State != harnessv2.RuntimeSessionStatePoisoned {
+		t.Fatalf("runtime session state = %s, want Poisoned", state.descriptor.State)
+	}
+}
+
 func TestPromptExecutionDiagnosticDoesNotExposeRPCMessage(t *testing.T) {
 	stage, code, service, errorName := promptExecutionDiagnostic(&acp.RPCError{
 		Code:    -32001,
@@ -422,6 +556,13 @@ func TestPromptExecutionDiagnosticDoesNotExposeRPCMessage(t *testing.T) {
 	stage, code, service, errorName = promptExecutionDiagnostic(acp.ErrClosed)
 	if stage != "transport-closed" || code != 0 || service != "" || errorName != "" {
 		t.Fatalf("closed diagnostic = %q/%d/%q/%q", stage, code, service, errorName)
+	}
+	stage, code, service, errorName = promptExecutionDiagnostic(fmt.Errorf("prompt: %w", acp.ErrPromptEventBufferOverflow))
+	if stage != "event-buffer-overflow" || code != 0 || service != "" || errorName != "" {
+		t.Fatalf("overflow diagnostic = %q/%d/%q/%q", stage, code, service, errorName)
+	}
+	if got := promptFailureErrorDetail(acp.ErrPromptEventBufferOverflow); got != "event-buffer-overflow" {
+		t.Fatalf("overflow failure detail = %q", got)
 	}
 }
 
@@ -774,9 +915,11 @@ func TestProviderProxyMaxTurnsMapsToTerminalFailure(t *testing.T) {
 		descriptor: harnessv2.RuntimeSessionDescriptor{
 			RuntimeSessionUID: fence.RuntimeSessionUID,
 			Generation:        fence.RuntimeSessionGeneration,
+			State:             harnessv2.RuntimeSessionStatePromptRunning,
 		},
 		operations:    make(map[harnessv2.OperationID]harnessv2.OperationRecord),
 		permissions:   make(map[harnessv2.PermissionRequestID]permissionState),
+		prompt:        prompt,
 		providerProxy: proxy,
 	}
 	adapterResult := acp.PromptResult{
@@ -805,6 +948,205 @@ func TestProviderProxyMaxTurnsMapsToTerminalFailure(t *testing.T) {
 	}
 }
 
+type upstreamFailureFixture struct {
+	server   *Server
+	state    *sessionState
+	prompt   *promptState
+	proxy    *providerProxySession
+	promptID string
+	now      time.Time
+}
+
+func newUpstreamFailureFixture(t *testing.T) upstreamFailureFixture {
+	t.Helper()
+	server, cfg, _ := newTestServer(t, "immediate")
+	fence := cfg.Fence
+	fence.RuntimeSessionUID = "upstream-failure-session-uid"
+	fence.RuntimeSessionGeneration = 1
+	prompt := &promptState{request: testStartPromptRequest(t, cfg, fence)}
+	prompt.assistant.WriteString("unexpected status 402 Payment Required: You have exceeded your monthly quota")
+	promptID := string(prompt.request.Metadata.PromptID)
+	now := time.Now().UTC()
+	proxy := &providerProxySession{}
+	if err := proxy.activateWithMaxTurns(promptID, 5, now.Add(time.Minute), now); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(proxy.close)
+	state := &sessionState{
+		descriptor: harnessv2.RuntimeSessionDescriptor{
+			RuntimeSessionUID: fence.RuntimeSessionUID,
+			Generation:        fence.RuntimeSessionGeneration,
+			State:             harnessv2.RuntimeSessionStatePromptRunning,
+		},
+		operations:    make(map[harnessv2.OperationID]harnessv2.OperationRecord),
+		permissions:   make(map[harnessv2.PermissionRequestID]permissionState),
+		prompt:        prompt,
+		providerProxy: proxy,
+	}
+	return upstreamFailureFixture{server: server, state: state, prompt: prompt, proxy: proxy, promptID: promptID, now: now}
+}
+
+func (f upstreamFailureFixture) recordInference(t *testing.T, status int, detail string) {
+	t.Helper()
+	// The real handler begins in-flight accounting at route authorization
+	// and releases it when it returns.
+	testBeginInferenceRequest(f.proxy)
+	defer f.proxy.releaseInferenceRequest(providerRequestInference)
+	seq := testAllocateInferenceSeq(f.proxy)
+	if err := f.proxy.consumeInferenceRequest(f.promptID, providerRequestInference, f.now); err != nil {
+		t.Fatal(err)
+	}
+	f.proxy.recordInferenceOutcome(f.promptID, providerRequestInference, seq, status, detail)
+}
+
+func (f upstreamFailureFixture) settleCompleted(t *testing.T) (harnessv2.Event, acp.PromptResult) {
+	t.Helper()
+	f.proxy.deactivate(f.promptID)
+	terminal, settledResult, err := f.server.terminalEvent(f.state, f.prompt, acp.PromptResult{
+		Outcome: acp.PromptOutcomeCompleted, StopReason: acp.StopReasonEndTurn,
+		Accepted: true, SettledAt: f.now,
+	})
+	if err != nil {
+		t.Fatalf("build terminal event: %v", err)
+	}
+	return terminal, settledResult
+}
+
+func TestUndrainedInferenceRequestFailsCompletedSettlement(t *testing.T) {
+	fixture := newUpstreamFailureFixture(t)
+	// An earlier inference succeeded, but one admitted request is still in
+	// flight when the child settles and never resolves within the grace.
+	fixture.recordInference(t, http.StatusOK, "")
+	fixture.proxy.mu.Lock()
+	fixture.proxy.inflightInference++
+	fixture.proxy.drainedInference = make(chan struct{})
+	fixture.proxy.mu.Unlock()
+	fixture.server.cfg.CancelGrace = 20 * time.Millisecond
+	fixture.server.waitProviderProxyDrained(fixture.state, fixture.prompt)
+	if !fixture.prompt.providerDrainTimedOut {
+		t.Fatal("drain timeout was not recorded on the prompt")
+	}
+	terminal, settledResult := fixture.settleCompleted(t)
+	if terminal.Type != harnessv2.EventFailed || terminal.Failed == nil || terminal.Failed.Code != providerUpstreamErrorCode ||
+		!strings.Contains(terminal.Failed.Message, "still in flight") {
+		t.Fatalf("undrained terminal event = %#v", terminal)
+	}
+	if settledResult.Outcome != acp.PromptOutcomeFailed || !settledResult.Accepted {
+		t.Fatalf("undrained settled result = %#v", settledResult)
+	}
+}
+
+func TestUndrainedMetadataRequestKeepsCompletedSettlement(t *testing.T) {
+	fixture := newUpstreamFailureFixture(t)
+	// The final inference resolved, but a metadata request (GET /models,
+	// count_tokens) is still in flight; its outcome never feeds prompt
+	// classification, so settlement must not fail closed on it.
+	fixture.recordInference(t, http.StatusOK, "")
+	fixture.proxy.mu.Lock()
+	fixture.proxy.inflight++
+	fixture.proxy.drained = make(chan struct{})
+	fixture.proxy.mu.Unlock()
+	fixture.server.cfg.CancelGrace = 20 * time.Millisecond
+	fixture.server.waitProviderProxyDrained(fixture.state, fixture.prompt)
+	if fixture.prompt.providerDrainTimedOut {
+		t.Fatal("a stalled metadata request was reported as an undrained inference")
+	}
+	terminal, _ := fixture.settleCompleted(t)
+	if terminal.Type != harnessv2.EventCompleted {
+		t.Fatalf("metadata-stall terminal event = %#v", terminal)
+	}
+}
+
+func TestDrainedInferenceRequestsKeepCompletedSettlement(t *testing.T) {
+	fixture := newUpstreamFailureFixture(t)
+	fixture.recordInference(t, http.StatusOK, "")
+	fixture.server.cfg.CancelGrace = 20 * time.Millisecond
+	fixture.server.waitProviderProxyDrained(fixture.state, fixture.prompt)
+	if fixture.prompt.providerDrainTimedOut {
+		t.Fatal("an idle proxy was reported as undrained")
+	}
+	terminal, _ := fixture.settleCompleted(t)
+	if terminal.Type != harnessv2.EventCompleted {
+		t.Fatalf("drained terminal event = %#v", terminal)
+	}
+}
+
+func TestProviderUpstreamFailureOnlyMapsToTerminalFailure(t *testing.T) {
+	fixture := newUpstreamFailureFixture(t)
+	for range 2 {
+		fixture.recordInference(
+			t, http.StatusPaymentRequired,
+			"You have exceeded your monthly quota\n token=/_orka/provider/secret-route",
+		)
+	}
+
+	terminal, settledResult := fixture.settleCompleted(t)
+	wantMessage := "provider upstream returned HTTP 402 for the final inference request: You have exceeded your monthly quota"
+	if terminal.Type != harnessv2.EventFailed || terminal.Failed == nil ||
+		terminal.Failed.StopReason != harnessv2.ACPStopReasonRefusal ||
+		terminal.Failed.Code != providerUpstreamErrorCode || terminal.Failed.Retryable ||
+		terminal.Failed.Message != wantMessage {
+		t.Fatalf("upstream-failure terminal event = %#v", terminal.Failed)
+	}
+	if len(terminal.Failed.Message) > 512 || strings.Contains(terminal.Failed.Message, providerProxyPathPrefix) {
+		t.Fatalf("upstream-failure message is unbounded or leaks route: %q", terminal.Failed.Message)
+	}
+	upstreamErr, ok := errors.AsType[*providerUpstreamFailureError](settledResult.Err)
+	if settledResult.Outcome != acp.PromptOutcomeFailed || settledResult.StopReason != acp.StopReasonRefusal ||
+		!settledResult.Accepted || !ok || upstreamErr.Status != http.StatusPaymentRequired {
+		t.Fatalf("upstream-failure settled result = %#v", settledResult)
+	}
+
+	fixture.server.finishPrompt(fixture.state, fixture.prompt, settledResult, terminal.Identity.Timestamp)
+	if fixture.prompt.settlement == nil || fixture.prompt.settlement.TerminalEvent != harnessv2.EventFailed ||
+		fixture.prompt.settlement.StopReason != harnessv2.ACPStopReasonRefusal {
+		t.Fatalf("upstream-failure settlement = state=%s settlement=%#v", fixture.state.descriptor.State, fixture.prompt.settlement)
+	}
+}
+
+func TestProviderUpstreamFinalFailureAfterSuccessMapsToTerminalFailure(t *testing.T) {
+	// A tool-call round succeeds, then the follow-up inference is rate
+	// limited: the agent may render that error as assistant text and settle
+	// end_turn, but the prompt must fail.
+	fixture := newUpstreamFailureFixture(t)
+	for _, status := range []int{http.StatusOK, http.StatusTooManyRequests} {
+		fixture.recordInference(t, status, "rate limit exceeded")
+	}
+	terminal, settledResult := fixture.settleCompleted(t)
+	if terminal.Type != harnessv2.EventFailed || terminal.Failed == nil ||
+		terminal.Failed.Code != providerUpstreamErrorCode ||
+		terminal.Failed.Message != "provider upstream returned HTTP 429 for the final inference request: rate limit exceeded" {
+		t.Fatalf("final-failure terminal event = %#v", terminal.Failed)
+	}
+	upstreamErr, ok := errors.AsType[*providerUpstreamFailureError](settledResult.Err)
+	if settledResult.Outcome != acp.PromptOutcomeFailed || !ok || upstreamErr.Status != http.StatusTooManyRequests {
+		t.Fatalf("final-failure settled result = %#v", settledResult)
+	}
+}
+
+func TestProviderUpstreamSuccessKeepsPromptCompleted(t *testing.T) {
+	t.Run("failure recovered by a later success", func(t *testing.T) {
+		fixture := newUpstreamFailureFixture(t)
+		for _, status := range []int{http.StatusPaymentRequired, http.StatusOK} {
+			fixture.recordInference(t, status, "detail")
+		}
+		terminal, settledResult := fixture.settleCompleted(t)
+		if terminal.Type != harnessv2.EventCompleted || terminal.Completed == nil ||
+			settledResult.Outcome != acp.PromptOutcomeCompleted || settledResult.Err != nil {
+			t.Fatalf("mixed-outcome terminal event = %#v result=%#v", terminal, settledResult)
+		}
+	})
+
+	t.Run("no inference requests", func(t *testing.T) {
+		fixture := newUpstreamFailureFixture(t)
+		fixture.proxy.recordInferenceResponse(fixture.promptID, providerRequestMetadata, http.StatusPaymentRequired, "detail")
+		terminal, settledResult := fixture.settleCompleted(t)
+		if terminal.Type != harnessv2.EventCompleted || settledResult.Outcome != acp.PromptOutcomeCompleted {
+			t.Fatalf("metadata-only terminal event = %#v result=%#v", terminal, settledResult)
+		}
+	})
+}
+
 func TestTerminalResultLimitIncludesFullSerializedEvent(t *testing.T) {
 	server, cfg, _ := newTestServer(t, "immediate")
 	fence := cfg.Fence
@@ -819,9 +1161,13 @@ func TestTerminalResultLimitIncludesFullSerializedEvent(t *testing.T) {
 		prompt := &promptState{request: testStartPromptRequest(t, cfg, fence)}
 		prompt.assistant.WriteString(text)
 		return &sessionState{
-			descriptor:  harnessv2.RuntimeSessionDescriptor{RuntimeSessionUID: fence.RuntimeSessionUID, Generation: fence.RuntimeSessionGeneration},
+			descriptor: harnessv2.RuntimeSessionDescriptor{
+				RuntimeSessionUID: fence.RuntimeSessionUID, Generation: fence.RuntimeSessionGeneration,
+				State: harnessv2.RuntimeSessionStatePromptRunning,
+			},
 			operations:  make(map[harnessv2.OperationID]harnessv2.OperationRecord),
 			permissions: make(map[harnessv2.PermissionRequestID]permissionState),
+			prompt:      prompt,
 		}, prompt
 	}
 
@@ -1035,8 +1381,9 @@ func TestWorkspaceDeltaPathAllowedRecursiveGlobs(t *testing.T) {
 }
 
 func TestWorkspaceDeltaRejectsSessionCredentials(t *testing.T) {
+	providerCredential := []byte("provider-session-secret")
 	state := &sessionState{
-		providerProxy: &providerProxySession{credential: []byte("provider-session-secret")},
+		providerProxy: &providerProxySession{credential: providerCredential},
 		mcpProxy:      &mcpProxySession{credential: []byte("mcp-session-secret")},
 	}
 	if !workspaceDeltaContainsSessionCredential([]byte("prefix provider-session-secret suffix"), state) {
@@ -1047,6 +1394,13 @@ func TestWorkspaceDeltaRejectsSessionCredentials(t *testing.T) {
 	}
 	if workspaceDeltaContainsSessionCredential([]byte("safe workspace content"), state) {
 		t.Fatal("safe artifact was rejected")
+	}
+	artifact := tarBytes(t, tarEntry{
+		name: "files/dir/" + string(providerCredential) + ".bin",
+		body: []byte{'a', 0, 'b'},
+	})
+	if !workspaceDeltaContainsSessionCredential(artifact, state) {
+		t.Fatal("provider credential in a binary file path was not detected")
 	}
 }
 
@@ -1061,18 +1415,187 @@ func TestWorkspaceDeltaRepositoryControlAndContentPolicies(t *testing.T) {
 	}
 
 	artifact := tarBytes(t, tarEntry{name: "files/config.txt", body: []byte("api_key=0123456789abcdef")})
-	violation, err := workspaceDeltaContentPolicyViolation(artifact, harnessv2.WorkspaceDeltaLimits{MaxBytes: 1 << 20, RejectSecretLikeContent: true})
+	violation, err := workspaceDeltaContentPolicyViolationContext(context.Background(), artifact, harnessv2.WorkspaceDeltaLimits{MaxBytes: 1 << 20, RejectSecretLikeContent: true}, nil)
 	if err != nil || !strings.Contains(violation, "secret-like") {
 		t.Fatalf("secret policy = %q, %v", violation, err)
 	}
 	artifact = tarBytes(t, tarEntry{name: "files/binary.bin", body: []byte{'a', 0, 'b'}})
-	violation, err = workspaceDeltaContentPolicyViolation(artifact, harnessv2.WorkspaceDeltaLimits{MaxBytes: 1 << 20, RejectBinaryFiles: true})
+	violation, err = workspaceDeltaContentPolicyViolationContext(context.Background(), artifact, harnessv2.WorkspaceDeltaLimits{MaxBytes: 1 << 20, RejectBinaryFiles: true}, nil)
 	if err != nil || !strings.Contains(violation, "binary") {
 		t.Fatalf("binary policy = %q, %v", violation, err)
 	}
 	artifact = tarBytes(t, tarEntry{name: "meta/symlinks.json", body: []byte(`{"symlinks":[{"path":"link","target":"api_key=0123456789abcdef"}]}`)})
-	violation, err = workspaceDeltaContentPolicyViolation(artifact, harnessv2.WorkspaceDeltaLimits{MaxBytes: 1 << 20, RejectSecretLikeContent: true})
+	violation, err = workspaceDeltaContentPolicyViolationContext(context.Background(), artifact, harnessv2.WorkspaceDeltaLimits{MaxBytes: 1 << 20, RejectSecretLikeContent: true}, nil)
 	if err != nil || !strings.Contains(violation, "secret-like") {
 		t.Fatalf("symlink secret policy = %q, %v", violation, err)
 	}
+}
+
+func TestWorkspaceDeltaContentPolicyRedactsAndBoundsPaths(t *testing.T) {
+	value := strings.Repeat("0a1b2c3d", 5)
+	for _, name := range []string{
+		"config/API_TOKEN=" + value,
+		"config/AWS_SECRET_ACCESS_KEY=" + value,
+		"config/API_TO\u200bKEN=" + value,
+		"config/" + strings.Repeat("long-path", 100) + "/API_TOKEN=" + value,
+	} {
+		for _, binary := range []bool{false, true} {
+			content := []byte("password=" + value)
+			limits := harnessv2.WorkspaceDeltaLimits{MaxBytes: 1 << 20, RejectSecretLikeContent: true}
+			if binary {
+				content = []byte{'a', 0, 'b'}
+				limits.RejectSecretLikeContent = false
+				limits.RejectBinaryFiles = true
+			}
+			artifact := tarBytes(t, tarEntry{name: "files/" + name, body: content})
+			violation, err := workspaceDeltaContentPolicyViolationContext(context.Background(), artifact, limits, nil)
+			if err != nil || violation == "" {
+				t.Fatal("expected a content policy violation")
+			}
+			if strings.Contains(violation, value) || strings.ContainsRune(violation, '\u200b') {
+				t.Fatal("policy diagnostic exposed credential or control text from a path")
+			}
+			if len(violation) > 600 {
+				t.Fatal("policy diagnostic did not bound the path")
+			}
+		}
+	}
+	if got := workspaceDeltaDiagnosticPath("files/config/settings.yml"); got != "config/settings.yml" {
+		t.Fatalf("ordinary diagnostic path = %q", got)
+	}
+}
+
+type baselineExemptionFixture struct {
+	t          *testing.T
+	root       string
+	baseline   *workspacedelta.Snapshot
+	limits     harnessv2.WorkspaceDeltaLimits
+	secretLine string
+	content    string
+}
+
+func newBaselineExemptionFixture(t *testing.T) *baselineExemptionFixture {
+	t.Helper()
+	f := &baselineExemptionFixture{
+		t:          t,
+		root:       t.TempDir(),
+		limits:     harnessv2.WorkspaceDeltaLimits{MaxBytes: 1 << 20, RejectSecretLikeContent: true},
+		secretLine: "password = 'SuperSecretPassword-0123456789'",
+	}
+	f.content = "const mongoose = require('mongoose')\n\n" + f.secretLine + "\n\nmodule.exports = mongoose\n\nfunction helper() {}\n"
+	f.write("mongoose-db.js", f.content)
+	return f
+}
+
+func (f *baselineExemptionFixture) write(name, content string) {
+	f.t.Helper()
+	if err := os.WriteFile(filepath.Join(f.root, name), []byte(content), 0o644); err != nil {
+		f.t.Fatal(err)
+	}
+	baseline, err := workspacedelta.Capture(f.root, (&Server{}).baselineCaptureOptions())
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	f.baseline = baseline
+}
+
+func (f *baselineExemptionFixture) check(name, body string) string {
+	f.t.Helper()
+	exempts := func(path string, content []byte) bool {
+		return workspaceDeltaBaselineExempts(f.baseline, path, content)
+	}
+	violation, err := workspaceDeltaContentPolicyViolationContext(context.Background(), tarBytes(f.t, tarEntry{name: name, body: []byte(body)}), f.limits, exempts)
+	if err != nil {
+		f.t.Fatalf("policy check %s: %v", name, err)
+	}
+	return violation
+}
+
+func (f *baselineExemptionFixture) expectExempt(name, body, what string) {
+	f.t.Helper()
+	if violation := f.check(name, body); violation != "" {
+		f.t.Fatalf("%s was rejected: %q", what, violation)
+	}
+}
+
+func (f *baselineExemptionFixture) expectRejected(name, body, what string) {
+	f.t.Helper()
+	if violation := f.check(name, body); !strings.Contains(violation, strings.TrimPrefix(name, "files/")) {
+		f.t.Fatalf("%s was not rejected: %q", what, violation)
+	}
+}
+
+func TestWorkspaceDeltaSecretPolicyExemptsBaselineFlaggedFiles(t *testing.T) {
+	f := newBaselineExemptionFixture(t)
+	live := "'" + strings.Repeat("live", 6) + "'"
+
+	t.Run("unchanged and distant edits stay publishable", func(t *testing.T) {
+		f.expectExempt("files/mongoose-db.js", f.content, "baseline-flagged file")
+		f.expectExempt("files/mongoose-db.js", f.content+"\nfunction added() { return helper() }\n", "distant edit")
+		f.expectExempt("files/mongoose-db.js", "// edited\n"+f.content, "leading comment")
+	})
+	t.Run("credential changes are rejected", func(t *testing.T) {
+		f.expectRejected("files/mongoose-db.js", f.content+"api_key = '"+strings.Repeat("zq9", 8)+"'\n", "appended credential")
+		f.expectRejected("files/mongoose-db.js", strings.Replace(f.content, f.secretLine, "password = "+live, 1), "replaced credential")
+		f.expectRejected("files/mongoose-db.js", "const edited = true\n"+f.content, "adjacent code edit")
+		f.expectRejected("files/mongoose-db.js", f.content+"\n"+f.content, "relocated credential copy")
+		f.expectRejected("files/mongoose-db.js", strings.Replace(f.content, f.secretLine+"\n", "const combined = "+live+" +\n"+f.secretLine+"\n", 1), "prefixed credential")
+		f.expectRejected("files/new-config.js", f.content, "newly secret-like file")
+	})
+	t.Run("continuations on following lines are rejected", func(t *testing.T) {
+		for _, continuation := range []string{
+			"  + " + live + "\n",
+			"  /* note */ + " + live + "\n",
+			"    " + strings.Repeat("live", 6) + "\n",
+			"\n  + " + live + "\n",
+			"// note\n  + " + live + "\n",
+			"/*\n*/\n  + " + live + "\n",
+			"  or " + live + "\n",
+			"\n// first note\n\n// second note\n+ " + live + "\n",
+		} {
+			f.expectRejected("files/mongoose-db.js", strings.Replace(f.content, f.secretLine+"\n", f.secretLine+"\n"+continuation, 1), "continuation "+strconv.Quote(continuation))
+		}
+	})
+	t.Run("multi-line expressions are covered", func(t *testing.T) {
+		multiline := "const mongoose = require('mongoose')\n" + f.secretLine + " + build(\n)\nmodule.exports = mongoose\n"
+		f.write("multi.js", multiline)
+		f.expectExempt("files/multi.js", multiline, "multi-line known expression")
+		f.expectRejected("files/multi.js", strings.Replace(multiline, ")\nmodule.exports", ")\n.concat("+live+")\nmodule.exports", 1), "extended multi-line credential")
+		f.expectRejected("files/multi.js", strings.Replace(multiline, " + build(\n)", " +\n  String(\n  "+live+"\n  )", 1), "literal inserted inside a known expression")
+	})
+	t.Run("symlink manifest is never exempt", func(t *testing.T) {
+		artifact := tarBytes(t, tarEntry{name: "meta/symlinks.json", body: []byte(`{"symlinks":[{"path":"link","target":"api_key=0123456789abcdef"}]}`)})
+		violation, err := workspaceDeltaContentPolicyViolationContext(context.Background(), artifact, f.limits, func(string, []byte) bool { return true })
+		if err != nil || !strings.Contains(violation, "secret-like") {
+			t.Fatalf("symlink manifest exemption leaked: %q, %v", violation, err)
+		}
+	})
+}
+
+func TestProviderUpstreamFailureTerminalEventRedactsCredentials(t *testing.T) {
+	fixture := newUpstreamFailureFixture(t)
+	fixture.recordInference(t, http.StatusBadRequest, providerUpstreamErrorDetail([]byte(credentialShapedUpstreamErrorBody)))
+
+	terminal, settledResult := fixture.settleCompleted(t)
+	if terminal.Type != harnessv2.EventFailed || terminal.Failed == nil || terminal.Failed.Code != providerUpstreamErrorCode {
+		t.Fatalf("upstream-failure terminal event = %#v", terminal.Failed)
+	}
+	assertNoLeakedCredential(t, "terminal Failed event message", terminal.Failed.Message)
+	if !strings.HasPrefix(terminal.Failed.Message, "provider upstream returned HTTP 400 for the final inference request: request rejected:") {
+		t.Fatalf("terminal Failed event message lost its prose: %q", terminal.Failed.Message)
+	}
+	if settledResult.Err != nil {
+		assertNoLeakedCredential(t, "settled result error", settledResult.Err.Error())
+	}
+}
+
+// testBeginInferenceRequest mirrors the in-flight inference accounting that
+// authorizeRequest performs for an inference-class route.
+func testBeginInferenceRequest(s *providerProxySession) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.inflightInference == 0 {
+		s.drainedInference = make(chan struct{})
+	}
+	s.inflightInference++
 }

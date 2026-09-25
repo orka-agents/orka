@@ -116,6 +116,54 @@ spec:
                   instead of a controller-owned Deployment. The binding is immutable;
                   workspace-backed pools host exactly one resident RuntimeSession.
                 properties:
+                  agentSandbox:
+                    description: AgentSandbox configures the agent-sandbox-provider
+                      backend.
+                    properties:
+                      suspendMode:
+                        description: |-
+                          SuspendMode enables operator-governed PVC-backed cold suspension for
+                          this pool's Sandbox. When set to DataOnly, the SandboxClaim requests one
+                          controller-owned durable workspace PVC (forcing a cold start instead of
+                          warm-pool adoption) and a requested suspension terminates the Sandbox
+                          Pod while that PVC persists. Empty preserves delete-and-recreate
+                          behavior and keeps every suspension fail-closed.
+                        enum:
+                        - DataOnly
+                        type: string
+                      suspendVolume:
+                        description: |-
+                          SuspendVolume freezes the durable workspace PVC shape. Required exactly
+                          when suspendMode is set.
+                        properties:
+                          accessModes:
+                            description: AccessModes defaults to ReadWriteOnce when
+                              empty.
+                            items:
+                              type: string
+                            type: array
+                            x-kubernetes-list-type: set
+                          capacity:
+                            description: Capacity is the requested storage quantity.
+                            minLength: 1
+                            type: string
+                          storageClassName:
+                            description: StorageClassName optionally selects the storage
+                              class.
+                            type: string
+                          storageClassUID:
+                            description: |-
+                              StorageClassUID pins the exact StorageClass validated at class
+                              resolution. Provisioning reverifies the live class carries this UID
+                              (and Delete reclaim semantics) before requesting the durable PVC.
+                            type: string
+                        required:
+                        - capacity
+                        type: object
+                    type: object
+                    x-kubernetes-validations:
+                    - message: suspendMode and suspendVolume must be set together
+                      rule: has(self.suspendMode) == has(self.suspendVolume)
                   bindingDigest:
                     description: |-
                       BindingDigest is the canonical digest of the frozen workspace binding
@@ -155,6 +203,44 @@ spec:
                         minLength: 1
                         pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                         type: string
+                      restoreFrom:
+                        description: |-
+                          RestoreFrom is the immutable, namespaced Data checkpoint selected by the
+                          Task's frozen workspace binding. Only class-backed pools may restore.
+                        properties:
+                          digest:
+                            description: Digest pins the artifact accepted by the
+                              caller.
+                            pattern: ^sha256:[a-f0-9]{64}$
+                            type: string
+                          name:
+                            description: Name identifies a checkpoint in the Task
+                              namespace.
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                          uid:
+                            description: UID prevents restoring through a replaced
+                              checkpoint name.
+                            maxLength: 128
+                            minLength: 1
+                            type: string
+                        required:
+                        - digest
+                        - name
+                        - uid
+                        type: object
+                      suspendMode:
+                        description: |-
+                          SuspendMode enables operator-governed data-only cold suspension for this
+                          pool's actor. When set to DataOnly, the derived runtime template carries
+                          a controller-owned DurableDir workspace volume and an explicit
+                          data-only snapshot policy, and a requested suspension checkpoints only
+                          that volume. Empty preserves delete-and-recreate behavior and keeps
+                          every suspension fail-closed.
+                        enum:
+                        - DataOnly
+                        type: string
                     required:
                     - baseTemplateName
                     - baseTemplateNamespace
@@ -167,6 +253,8 @@ spec:
                 - message: substrate settings are required exactly when provider is
                     substrate
                   rule: (self.provider == 'substrate') == has(self.substrate)
+                - message: agentSandbox settings are only valid when provider is agent-sandbox
+                  rule: self.provider == 'agent-sandbox' || !has(self.agentSandbox)
               runtime:
                 description: Runtime pins the immutable supervisor image and behavior
                   profile.

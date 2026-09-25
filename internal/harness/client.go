@@ -19,6 +19,12 @@ import (
 	"github.com/orka-agents/orka/internal/events"
 )
 
+const (
+	traceFieldTurnID           = "turnID"
+	traceFieldVersion          = "version"
+	traceFieldRuntimeSessionID = "runtimeSessionID"
+)
+
 // MaxFetchTurnOutputBytes is the controller client's hard cap for referenced
 // harness output payloads. Runtime readiness must reject a larger advertised
 // maximum so accepted turns cannot become permanently stuck while settling.
@@ -147,12 +153,12 @@ func (c *Client) validateDurableTurnStatus(expectedTurnID HarnessTurnID, status 
 		return fmt.Errorf("wrapper returned incomplete durable turn status")
 	}
 	for name, value := range map[string]string{
-		"turnID":        status.TurnID,
-		"taskUID":       status.TaskUID,
-		"attempt":       strconv.FormatInt(int64(status.Attempt), 10),
-		"requestDigest": status.RequestDigest,
-		"state":         string(status.State),
-		"updatedAt":     status.UpdatedAt.Format(time.RFC3339Nano),
+		traceFieldTurnID: status.TurnID,
+		"taskUID":        status.TaskUID,
+		"attempt":        strconv.FormatInt(int64(status.Attempt), 10),
+		"requestDigest":  status.RequestDigest,
+		"state":          string(status.State),
+		"updatedAt":      status.UpdatedAt.Format(time.RFC3339Nano),
 	} {
 		if c.structuralValueContainsSensitiveData(value) {
 			return fmt.Errorf("wrapper durable turn status field %s contains sensitive data", name)
@@ -201,12 +207,12 @@ func (c *Client) validateDurableTurnStatus(expectedTurnID HarnessTurnID, status 
 
 func (c *Client) validateDurableTerminalReceiptSensitiveData(receipt DurableTurnTerminalReceipt) error {
 	values := map[string]string{
-		"version":          receipt.Version,
-		"kind":             string(receipt.Kind),
-		"runtimeSessionID": string(receipt.RuntimeSessionID),
-		"turnID":           string(receipt.TurnID),
-		"correlationID":    receipt.CorrelationID,
-		"seq":              strconv.FormatInt(receipt.Seq, 10),
+		traceFieldVersion:          receipt.Version,
+		"kind":                     string(receipt.Kind),
+		traceFieldRuntimeSessionID: string(receipt.RuntimeSessionID),
+		traceFieldTurnID:           string(receipt.TurnID),
+		"correlationID":            receipt.CorrelationID,
+		"seq":                      strconv.FormatInt(receipt.Seq, 10),
 	}
 	if receipt.Completed != nil {
 		values["completed.result"] = receipt.Completed.Result
@@ -323,11 +329,11 @@ func (c *Client) AbortDurableRollover(
 
 func (c *Client) sanitizeHealthResponse(response HealthResponse) (HealthResponse, error) {
 	for name, value := range map[string]string{
-		"version":          response.Version,
-		"status":           string(response.Status),
-		"runtimeSessionID": string(response.RuntimeSessionID),
-		"ready":            strconv.FormatBool(response.Ready),
-		"checkedAt":        response.CheckedAt.Format(time.RFC3339Nano),
+		traceFieldVersion:          response.Version,
+		"status":                   string(response.Status),
+		traceFieldRuntimeSessionID: string(response.RuntimeSessionID),
+		"ready":                    strconv.FormatBool(response.Ready),
+		"checkedAt":                response.CheckedAt.Format(time.RFC3339Nano),
 	} {
 		if c.structuralValueContainsSensitiveData(value) {
 			return HealthResponse{}, fmt.Errorf("harness health structural field %s contains sensitive data", name)
@@ -340,7 +346,7 @@ func (c *Client) sanitizeHealthResponse(response HealthResponse) (HealthResponse
 
 func (c *Client) sanitizeCapabilitiesResponse(response CapabilitiesResponse) (CapabilitiesResponse, error) {
 	for name, value := range map[string]string{
-		"version":           response.Version,
+		traceFieldVersion:   response.Version,
 		"protocolVersion":   response.ProtocolVersion,
 		"transport":         response.Transport,
 		"runtimeName":       response.RuntimeName,
@@ -782,14 +788,14 @@ func (c *Client) validateHarnessFrameStructure(frame HarnessEventFrame) error {
 		return nil
 	}
 	for name, value := range map[string]string{
-		"version":          frame.Version,
-		"type":             string(frame.Type),
-		"runtimeSessionID": string(frame.RuntimeSessionID),
-		"turnID":           string(frame.TurnID),
-		"correlationID":    frame.CorrelationID,
-		"toolName":         frame.ToolName,
-		"toolCallID":       frame.ToolCallID,
-		"approvalID":       frame.ApprovalID,
+		traceFieldVersion:          frame.Version,
+		"type":                     string(frame.Type),
+		traceFieldRuntimeSessionID: string(frame.RuntimeSessionID),
+		traceFieldTurnID:           string(frame.TurnID),
+		"correlationID":            frame.CorrelationID,
+		"toolName":                 frame.ToolName,
+		"toolCallID":               frame.ToolCallID,
+		"approvalID":               frame.ApprovalID,
 	} {
 		if err := check(name, value); err != nil {
 			return err
@@ -1363,9 +1369,6 @@ type ClientError struct {
 	duplicateTurn           bool
 	completedDuplicateTurn  bool
 	capacityExceeded        bool
-	unsupportedVersion      bool
-	remoteRejected          bool
-	turnNotFound            bool
 	protocolViolation       bool
 	contextCanceled         bool
 	deadlineExceeded        bool
@@ -1382,11 +1385,8 @@ func (e ClientError) Is(target error) bool {
 func (e ClientError) IsDuplicateTurn() bool          { return e.duplicateTurn }
 func (e ClientError) IsCompletedDuplicateTurn() bool { return e.completedDuplicateTurn }
 
-func (e ClientError) IsCapacityExceeded() bool   { return e.capacityExceeded }
-func (e ClientError) IsUnsupportedVersion() bool { return e.unsupportedVersion }
-func (e ClientError) IsRemoteRejected() bool     { return e.remoteRejected }
-func (e ClientError) IsTurnNotFound() bool       { return e.turnNotFound }
-func (e ClientError) IsProtocolViolation() bool  { return e.protocolViolation }
+func (e ClientError) IsCapacityExceeded() bool  { return e.capacityExceeded }
+func (e ClientError) IsProtocolViolation() bool { return e.protocolViolation }
 
 func (e ClientError) Error() string {
 	if e.sanitizedDisplaySet {
@@ -1455,9 +1455,6 @@ func classifyClientError(clientErr ClientError, message string) ClientError {
 	clientErr.completedDuplicateTurn = clientErr.StatusCode == http.StatusConflict && duplicateMessage == "turn already completed"
 	clientErr.capacityExceeded = clientErr.StatusCode == http.StatusConflict &&
 		duplicateMessage == "maximum concurrent turns reached"
-	clientErr.unsupportedVersion = strings.Contains(lower, "unsupported version") || strings.Contains(lower, "unsupported protocol version")
-	clientErr.remoteRejected = strings.Contains(lower, "harness did not accept")
-	clientErr.turnNotFound = strings.Contains(lower, "turn not found")
 	clientErr.protocolViolation = strings.Contains(lower, "harness frame identity does not match") ||
 		strings.Contains(lower, "harness frame structural field") || strings.Contains(lower, "harness frame brokered tool content") ||
 		strings.Contains(lower, "harness health structural field") || strings.Contains(lower, "harness capabilities structural field") ||
@@ -1473,4 +1470,19 @@ func withClientErrorCause(clientErr ClientError, causes []error) ClientError {
 	clientErr.contextCanceled = errors.Is(causes[0], context.Canceled)
 	clientErr.deadlineExceeded = errors.Is(causes[0], context.DeadlineExceeded)
 	return clientErr
+}
+
+// validateAcceptedTurn checks that the harness echoed back the turn identity
+// the client asked it to start.
+func validateAcceptedTurn(request StartTurnRequest, accepted StartTurnResponse) error {
+	if accepted.RuntimeSessionID != request.RuntimeSessionID {
+		return fmt.Errorf("harness accepted runtime session %q, want %q", accepted.RuntimeSessionID, request.RuntimeSessionID)
+	}
+	if accepted.TurnID != request.TurnID {
+		return fmt.Errorf("harness accepted turn %q, want %q", accepted.TurnID, request.TurnID)
+	}
+	if accepted.CorrelationID != "" && accepted.CorrelationID != request.CorrelationID {
+		return fmt.Errorf("harness accepted correlation id %q, want %q", accepted.CorrelationID, request.CorrelationID)
+	}
+	return nil
 }

@@ -8,10 +8,34 @@ import { cn } from '@/lib/utils'
 
 interface StatsCardsProps {
   tasks?: Task[]
+  /** True when the bounded task walk stopped with more pages available. */
+  tasksTruncated?: boolean
+  /** Set when the tasks list failed with 403; the task cards show this instead of "0". */
+  tasksForbiddenMessage?: string
   sessionCount?: number
+  /** True when the bounded session walk stopped with more pages available. */
+  sessionsTruncated?: boolean
+  /** Set when the sessions list failed with 403; the card shows this instead of "0". */
+  sessionsForbiddenMessage?: string
   agentCount?: number
+  /** Set when the agents list failed with 403; the card shows this instead of "0". */
+  agentsForbiddenMessage?: string
   toolCount?: number
+  /** Set when the tools list failed with 403; the card shows this instead of "0". */
+  toolsForbiddenMessage?: string
   isLoading?: boolean
+}
+
+/** The "Not authorized" body a stat card renders instead of a fabricated count. */
+function ForbiddenStat({ resource, message }: { resource: string; message: string }) {
+  return (
+    <div className="space-y-0.5" role="alert">
+      <div className="text-sm font-medium">Not authorized</div>
+      <div className="text-xs text-muted-foreground">
+        Your token lacks <code>{resource}</code> read permission ({message}).
+      </div>
+    </div>
+  )
 }
 
 /**
@@ -55,7 +79,19 @@ function taskWindow(tasks: Task[]): { min: number; max: number } | null {
   return { min: Math.min(...times), max: Math.max(...times) }
 }
 
-export function StatsCards({ tasks, sessionCount, agentCount, toolCount, isLoading }: StatsCardsProps) {
+export function StatsCards({
+  tasks,
+  tasksTruncated,
+  tasksForbiddenMessage,
+  sessionCount,
+  sessionsTruncated,
+  sessionsForbiddenMessage,
+  agentCount,
+  agentsForbiddenMessage,
+  toolCount,
+  toolsForbiddenMessage,
+  isLoading,
+}: StatsCardsProps) {
   if (isLoading) {
     return (
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
@@ -91,7 +127,7 @@ export function StatsCards({ tasks, sessionCount, agentCount, toolCount, isLoadi
   // when there are no failures, rather than echoing the total trend).
   const window = taskWindow(allTasks)
   const stats = [
-    { label: 'Total Tasks', value: total, icon: ListTodo, color: 'text-foreground', spark: 'text-primary', series: cumulativeSeries(allTasks, window) },
+    { label: tasksTruncated ? 'Tasks loaded' : 'Total Tasks', value: total, icon: ListTodo, color: 'text-foreground', spark: 'text-primary', series: cumulativeSeries(allTasks, window) },
     { label: 'Running', value: running, icon: Play, color: phaseStyle('Running').textClass, spark: phaseStyle('Running').textClass, series: cumulativeSeries(runningTasks, window) },
     {
       label: 'Succeeded',
@@ -99,7 +135,9 @@ export function StatsCards({ tasks, sessionCount, agentCount, toolCount, isLoadi
       icon: CheckCircle,
       color: phaseStyle('Succeeded').textClass,
       spark: phaseStyle('Succeeded').textClass,
-      sub: successRate !== null ? `${successRate}% success rate` : undefined,
+      sub: successRate !== null
+        ? (tasksTruncated ? `${successRate}% of loaded finished tasks` : `${successRate}% success rate`)
+        : undefined,
       series: cumulativeSeries(succeededTasks, window),
     },
     { label: 'Failed', value: failed, icon: XCircle, color: phaseStyle('Failed').textClass, spark: phaseStyle('Failed').textClass, series: cumulativeSeries(failedTasks, window) },
@@ -114,25 +152,33 @@ export function StatsCards({ tasks, sessionCount, agentCount, toolCount, isLoadi
             <Icon className={`h-4 w-4 ${color}`} />
           </CardHeader>
           <CardContent>
-            <div className="flex items-end justify-between gap-2">
-              <div>
-                <div className="text-2xl font-bold tabular-nums">{value}</div>
-                {sub && <div className="text-xs text-muted-foreground">{sub}</div>}
+            {tasksForbiddenMessage ? (
+              <ForbiddenStat resource="tasks" message={tasksForbiddenMessage} />
+            ) : (
+              <div className="flex items-end justify-between gap-2">
+                <div>
+                  <div className="text-2xl font-bold tabular-nums">{value}</div>
+                  {sub && <div className="text-xs text-muted-foreground">{sub}</div>}
+                </div>
+                {series.length > 1 && (
+                  <Sparkline data={series} className={cn('opacity-80', spark)} aria-label={`${label} trend`} />
+                )}
               </div>
-              {series.length > 1 && (
-                <Sparkline data={series} className={cn('opacity-80', spark)} aria-label={`${label} trend`} />
-              )}
-            </div>
+            )}
           </CardContent>
         </Card>
       ))}
       <Card>
         <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-          <CardTitle className="text-sm font-medium">Sessions</CardTitle>
+          <CardTitle className="text-sm font-medium">{sessionsTruncated ? 'Sessions loaded' : 'Sessions'}</CardTitle>
           <MessageSquare className="h-4 w-4 text-muted-foreground" />
         </CardHeader>
         <CardContent>
-          <div className="text-2xl font-bold tabular-nums">{sessionCount ?? 0}</div>
+          {sessionsForbiddenMessage ? (
+            <ForbiddenStat resource="sessions" message={sessionsForbiddenMessage} />
+          ) : (
+            <div className="text-2xl font-bold tabular-nums">{sessionCount ?? 0}</div>
+          )}
         </CardContent>
       </Card>
       <Card>
@@ -141,7 +187,11 @@ export function StatsCards({ tasks, sessionCount, agentCount, toolCount, isLoadi
           <Bot className="h-4 w-4 text-muted-foreground" />
         </CardHeader>
         <CardContent>
-          <div className="text-2xl font-bold tabular-nums">{agentCount ?? 0}</div>
+          {agentsForbiddenMessage ? (
+            <ForbiddenStat resource="agents" message={agentsForbiddenMessage} />
+          ) : (
+            <div className="text-2xl font-bold tabular-nums">{agentCount ?? 0}</div>
+          )}
         </CardContent>
       </Card>
       <Card>
@@ -150,7 +200,11 @@ export function StatsCards({ tasks, sessionCount, agentCount, toolCount, isLoadi
           <Wrench className="h-4 w-4 text-muted-foreground" />
         </CardHeader>
         <CardContent>
-          <div className="text-2xl font-bold tabular-nums">{toolCount ?? 0}</div>
+          {toolsForbiddenMessage ? (
+            <ForbiddenStat resource="tools" message={toolsForbiddenMessage} />
+          ) : (
+            <div className="text-2xl font-bold tabular-nums">{toolCount ?? 0}</div>
+          )}
         </CardContent>
       </Card>
     </div>

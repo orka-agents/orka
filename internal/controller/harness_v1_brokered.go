@@ -40,22 +40,6 @@ type HarnessV1BrokeredToolExecutor interface {
 	) (json.RawMessage, error)
 }
 
-type HarnessV1BrokeredToolExecutorFunc func(
-	context.Context,
-	string,
-	*corev1alpha1.Tool,
-	harness.ToolCallRequest,
-) (json.RawMessage, error)
-
-func (f HarnessV1BrokeredToolExecutorFunc) ExecuteHarnessV1BrokeredTool(
-	ctx context.Context,
-	namespace string,
-	tool *corev1alpha1.Tool,
-	request harness.ToolCallRequest,
-) (json.RawMessage, error) {
-	return f(ctx, namespace, tool, request)
-}
-
 // harnessV1AuthenticatedTask carries the dispatcher-verified Task identity of
 // a brokered tool call. The dispatcher stamps it per request immediately
 // before invoking the executor, after the Task passed the immutable
@@ -366,8 +350,8 @@ func harnessV1BrokeredToolDefinitionDigest(tool *corev1alpha1.Tool) (string, err
 		return "", errors.New("brokered harness v1 Tool is required")
 	}
 	return acpDomainDigest("harness-v1-brokered-tool-definition", map[string]any{
-		"uid": string(tool.UID), "generation": tool.Generation, "spec": tool.Spec,
-		"endpoint": tool.Status.Endpoint, "workspace": tool.Status.Workspace, "actor": tool.Status.Actor,
+		"uid": string(tool.UID), generationField: tool.Generation, "spec": tool.Spec,
+		"endpoint": tool.Status.Endpoint, taskWorkspaceVolume: tool.Status.Workspace, "actor": tool.Status.Actor,
 	})
 }
 
@@ -528,10 +512,7 @@ func (d *HarnessV1Dispatcher) continueHarnessV1BrokeredToolCall(
 	if err != nil {
 		return fmt.Errorf("%w: %v", errHarnessV1FrameAuthorityViolation, err)
 	}
-	reader := d.APIReader
-	if reader == nil {
-		reader = d.Client
-	}
+	reader := uncachedReader(d.APIReader, d.Client)
 	if reader == nil {
 		return errors.New("harness v1 brokered tool execution requires a Kubernetes reader")
 	}
@@ -552,8 +533,8 @@ func (d *HarnessV1Dispatcher) continueHarnessV1BrokeredToolCall(
 	}
 	identity := harnessV1BrokeredToolEffectIdentity(task, turn, request.ToolCallID)
 	effectRequest := map[string]any{
-		"taskUID": task.UID, "attempt": attempt.Attempt, "bindingDigest": attempt.BindingDigest,
-		"snapshotDigest": attempt.SnapshotDigest, "toolDefinitionDigest": frozenTool.DefinitionDigest,
+		taskUIDField: task.UID, attemptField: attempt.Attempt, "bindingDigest": attempt.BindingDigest,
+		snapshotDigestField: attempt.SnapshotDigest, "toolDefinitionDigest": frozenTool.DefinitionDigest,
 		"request": request,
 	}
 	result, _, err := runExternalEffectWithReplayCallTimeout(

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/approvals"
 	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/llm"
@@ -47,9 +48,19 @@ type TranscriptSearcher interface {
 	SearchTranscript(context.Context, store.TranscriptSearchFilter) ([]store.TranscriptSearchResult, error)
 }
 
+// TaskMessageStore exposes only message send and inbox access to tools.
+// Brokered contexts must supply an implementation bound to the authenticated Task.
+type TaskMessageStore interface {
+	SendMessage(context.Context, *store.Message) error
+	GetMessages(context.Context, string, string, string, bool) ([]store.Message, error)
+}
+
 // ToolContext provides dependencies for tools that need K8s client access or other services.
 type ToolContext struct {
-	Client                    client.Client
+	Client client.Client
+	// PolicyReader bypasses informer lag when coordination tools resolve Task,
+	// Agent, Provider, Tool, and AgentRuntime policy. Writes continue through Client.
+	PolicyReader              client.Reader
 	KubeClient                kubernetes.Interface
 	Namespace                 string
 	SessionID                 string
@@ -58,6 +69,7 @@ type ToolContext struct {
 	ParentTaskID              string
 	AgentName                 string
 	ToolCallID                string
+	OperationID               string
 	Tenant                    string
 	Provider                  string
 	ProviderType              string
@@ -68,36 +80,57 @@ type ToolContext struct {
 	// Broker-aware tools must fail closed on missing request-scoped dependencies
 	// instead of falling back to controller process environment or credentials.
 	Brokered bool
+	// TaskProvenanceProtected reports that Task provenance admission reserves
+	// controller-authenticated lineage metadata from direct namespace writes.
+	TaskProvenanceProtected bool
+	// ExternalEffects and OperationID let brokered coordination tools bind
+	// created resources to the controller-owned effect receipt for this exact
+	// tool call. The receipt remains authoritative when provenance admission is
+	// disabled and Task metadata is mutable.
+	ExternalEffects store.ExternalEffectStore
 	// Least-privilege durable dependencies for brokered memory tools.
 	MemoryReader         MemoryReader
 	MemoryProposalWriter MemoryProposalWriter
 	TranscriptSearcher   TranscriptSearcher
+	// RepositoryValidationBindings stores the controller-owned command binding
+	// created before a repository validation Task.
+	RepositoryValidationBindings RepositoryValidationBindingStore
 	// ResultStore for fetching task outputs (store.ResultStore)
 	ResultStore interface {
 		GetResult(ctx context.Context, namespace, taskName string) ([]byte, error)
 	}
 	// MessageStore for inter-agent messaging when tools execute in-process from the controller broker.
-	MessageStore store.MessageStore
+	MessageStore TaskMessageStore
 	// SessionDeleter for deleting sessions (controller.SessionManager)
 	SessionDeleter interface {
 		DeleteSession(ctx context.Context, namespace, sessionID string) error
 	}
 	// Task creation helpers provided by the chat executor
-	GenerateTaskName               func() string
-	TaskLabels                     func() map[string]string
-	CheckTaskLimit                 func() *ChatToolError
-	AuthorizeTaskCreate            func(context.Context, *corev1alpha1.Task) *ChatToolError
-	AuthorizeTaskDelete            func(context.Context, *corev1alpha1.Task) *ChatToolError
-	AuthorizeAgentCreate           func(context.Context, *corev1alpha1.Agent) *ChatToolError
-	AuthorizeAgentUpdate           func(context.Context, *corev1alpha1.Agent) *ChatToolError
-	AuthorizeAgentDelete           func(context.Context, *corev1alpha1.Agent) *ChatToolError
-	AuthorizeSecretRead            func(context.Context, string, string) *ChatToolError
+	GenerateTaskName     func() string
+	TaskLabels           func() map[string]string
+	CheckTaskLimit       func() *ChatToolError
+	AuthorizeTaskCreate  func(context.Context, *corev1alpha1.Task) *ChatToolError
+	AuthorizeTaskDelete  func(context.Context, *corev1alpha1.Task) *ChatToolError
+	AuthorizeAgentCreate func(context.Context, *corev1alpha1.Agent) *ChatToolError
+	// AuthorizeAgentInitialTask preflights the combined Agent/Task operation
+	// before creating the Agent. Full Task authorization still runs later.
+	AuthorizeAgentInitialTask func(context.Context, *corev1alpha1.Agent) *ChatToolError
+	AuthorizeAgentUpdate      func(context.Context, *corev1alpha1.Agent) *ChatToolError
+	AuthorizeAgentDelete      func(context.Context, *corev1alpha1.Agent) *ChatToolError
+	AuthorizeSecretRead       func(context.Context, string, string) *ChatToolError
+	AuthorizePodLogs          func(context.Context, string, string) error
+	// AuthorizeCodeExecResources checks creation and cleanup permissions for
+	// the complete temporary resource set before code_exec creates anything.
+	AuthorizeCodeExecResources     func(context.Context, []client.Object) error
 	RequireSecretReadAuthorization bool
-	IncrementTasks                 func()
-	ApprovalEmitter                func(context.Context, approvals.ApprovalTarget) error
-	ApprovalTargetSpecDigest       func(context.Context, string) (string, error)
-	ApprovalTargetArguments        func(context.Context, string, json.RawMessage) (json.RawMessage, error)
-	ApprovalTargetRefresh          func(context.Context, string, *corev1alpha1.Tool) error
+	// RequireGitHubTaskCredentials disables controller-global repository and
+	// credential fallback for external GitHub tool calls.
+	RequireGitHubTaskCredentials bool
+	IncrementTasks               func()
+	ApprovalEmitter              func(context.Context, approvals.ApprovalTarget) error
+	ApprovalTargetSpecDigest     func(context.Context, string) (string, error)
+	ApprovalTargetArguments      func(context.Context, string, json.RawMessage) (json.RawMessage, error)
+	ApprovalTargetRefresh        func(context.Context, string, *corev1alpha1.Tool) error
 }
 
 type toolContextKey struct{}
@@ -198,6 +231,7 @@ type Registry struct {
 type toolDurationMetricKey struct {
 	toolName string
 	toolType string
+	errType  string
 }
 
 // NewRegistry creates a new tool registry
@@ -222,24 +256,6 @@ func (r *Registry) Get(name string) (Tool, bool) {
 	return tool, ok
 }
 
-func (r *Registry) get(name string) (Tool, bool) {
-	r.mu.RLock()
-	tool, ok := r.tools[name]
-	r.mu.RUnlock()
-	return tool, ok
-}
-
-// List returns all registered tools
-func (r *Registry) List() []Tool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	tools := make([]Tool, 0, len(r.tools))
-	for _, tool := range r.tools {
-		tools = append(tools, tool)
-	}
-	return tools
-}
-
 // Names returns all registered tool names in stable order.
 func (r *Registry) Names() []string {
 	r.mu.RLock()
@@ -255,7 +271,7 @@ func (r *Registry) Names() []string {
 // Execute executes a tool by name. It is the DRY instrumentation point for
 // built-in registry tools used by chat, proxy-compatible handlers, and workers.
 func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessage) (string, error) {
-	tool, ok := r.get(name)
+	tool, ok := r.Get(name)
 	if telemetryDisabled() {
 		if !ok {
 			return "", fmt.Errorf("tool %q not found", name)
@@ -267,7 +283,9 @@ func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessag
 	if !ok {
 		toolTelemetryName = unknownToolTelemetryName
 	}
-	toolTypeValue := toolType(ctx, tool)
+	// Registry tools are in-process functions. External Tool CRD/MCP execution is
+	// handled by worker.ToolExecutor and can be modeled as extension later.
+	toolTypeValue := genai.ToolTypeFunction
 	toolKind := registryToolKind(name)
 	meterActive := tracing.GlobalMeterProviderActive()
 	var start time.Time
@@ -337,11 +355,7 @@ func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessag
 		}
 	}
 	if meterActive {
-		if metricErrType != "" {
-			r.recordToolDuration(ctx, duration, toolTelemetryName, toolTypeValue, metricErrType)
-		} else {
-			r.recordSuccessfulToolDuration(ctx, duration, toolTelemetryName, toolTypeValue)
-		}
+		r.recordToolDuration(ctx, duration, toolTelemetryName, toolTypeValue, metricErrType)
 	}
 	return result, err
 }
@@ -419,8 +433,8 @@ func (r *Registry) getToolDurationHistogram() (metric.Float64Histogram, bool) {
 	return histogram, true
 }
 
-func (r *Registry) toolDurationMetricOption(toolName, toolType string) metric.MeasurementOption {
-	key := toolDurationMetricKey{toolName: toolName, toolType: toolType}
+func (r *Registry) toolDurationMetricOption(toolName, toolType, errType string) metric.MeasurementOption {
+	key := toolDurationMetricKey{toolName: toolName, toolType: toolType, errType: errType}
 	r.telemetryMu.Lock()
 	defer r.telemetryMu.Unlock()
 	if r.toolDurationMetricOpts == nil {
@@ -429,35 +443,28 @@ func (r *Registry) toolDurationMetricOption(toolName, toolType string) metric.Me
 	if opt, ok := r.toolDurationMetricOpts[key]; ok {
 		return opt
 	}
-	attrs := attribute.NewSet(
+	attrs := []attribute.KeyValue{
 		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
 		attribute.String(genai.AttrToolName, toolName),
 		attribute.String(genai.AttrToolType, toolType),
-	)
-	opt := metric.WithAttributeSet(attrs)
+	}
+	if errType != "" {
+		attrs = append(attrs, attribute.String(genai.AttrErrorType, errType))
+	}
+	opt := metric.WithAttributeSet(attribute.NewSet(attrs...))
 	r.toolDurationMetricOpts[key] = opt
 	return opt
 }
 
-func (r *Registry) recordSuccessfulToolDuration(ctx context.Context, seconds float64, toolName, toolType string) {
-	histogram, ok := r.getToolDurationHistogram()
-	if !ok {
-		return
-	}
-	histogram.Record(ctx, seconds, r.toolDurationMetricOption(toolName, toolType))
-}
-
+// recordToolDuration records one gen_ai.client.operation.duration sample on the
+// registry's cached histogram. An empty errType records a success sample with
+// no error.type attribute.
 func (r *Registry) recordToolDuration(ctx context.Context, seconds float64, toolName, toolType, errType string) {
 	histogram, ok := r.getToolDurationHistogram()
 	if !ok {
 		return
 	}
-	histogram.Record(ctx, seconds, metric.WithAttributes(
-		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
-		attribute.String(genai.AttrToolName, toolName),
-		attribute.String(genai.AttrToolType, toolType),
-		attribute.String(genai.AttrErrorType, errType),
-	))
+	histogram.Record(ctx, seconds, r.toolDurationMetricOption(toolName, toolType, errType))
 }
 
 func telemetryDisabled() bool {
@@ -491,13 +498,7 @@ func RecordRejectedToolCall(ctx context.Context, name, toolCallID, errType, mess
 	span.SetStatus(codes.Error, message)
 	span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
 	span.End()
-	metricAttrs := []attribute.KeyValue{
-		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
-		attribute.String(genai.AttrToolName, rejectedToolTelemetryName),
-		attribute.String(genai.AttrToolType, genai.ToolTypeFunction),
-		attribute.String(genai.AttrErrorType, errType),
-	}
-	recordToolDuration(ctx, time.Since(start).Seconds(), metricAttrs...)
+	DefaultRegistry.recordToolDuration(ctx, time.Since(start).Seconds(), rejectedToolTelemetryName, genai.ToolTypeFunction, errType)
 }
 
 // FailedToolResultForTelemetry detects structured tool failures for callers
@@ -539,30 +540,11 @@ func failedToolResult(result string) (bool, string, string) {
 	return true, errType, message
 }
 
-func toolType(ctx context.Context, _ Tool) string {
-	// Registry tools are in-process functions. External Tool CRD/MCP execution is
-	// handled by worker.ToolExecutor and can be modeled as extension later.
-	return genai.ToolTypeFunction
-}
-
 func registryToolKind(name string) string {
 	if name == delegateTaskToolName {
 		return tracing.ToolKindDelegate
 	}
 	return tracing.ToolKindBuiltin
-}
-
-func recordToolDuration(ctx context.Context, seconds float64, attrs ...attribute.KeyValue) {
-	meter := tracing.GenAIMeter(genai.InstrumentationName)
-	histogram, err := meter.Float64Histogram(
-		genai.MetricExecuteToolDuration,
-		metric.WithUnit(genai.UnitSeconds),
-		metric.WithExplicitBucketBoundaries(genai.ToolDurationBuckets...),
-	)
-	if err != nil {
-		return
-	}
-	histogram.Record(ctx, seconds, metric.WithAttributes(attrs...))
 }
 
 // ToLLMTools converts the registry to LLM tool definitions
@@ -640,13 +622,29 @@ func RegisterBrokeredCoordinationTools(r *Registry, k8sClient client.Client) err
 		return fmt.Errorf("brokered coordination tools require a Kubernetes client")
 	}
 	r.Register(NewDelegateTaskTool(k8sClient))
-	r.Register(NewWaitForTasksTool(k8sClient))
+	// MCP clients have shorter request deadlines than native worker tool calls.
+	// Keep each brokered poll bounded even when a model omits or exceeds timeout.
+	r.Register(&WaitForTasksTool{k8sClient: k8sClient, maxWait: RepositoryValidationWaitTimeout})
+	r.Register(NewRunValidationTool(k8sClient))
 	r.Register(NewSendMessageTool())
 	r.Register(NewCheckMessagesTool())
 	r.Register(NewRecallMemoryTool())
 	r.Register(NewRememberMemoryTool())
 	r.Register(NewProposeMemoryTool())
 	r.Register(NewSearchTranscriptTool())
+	return nil
+}
+
+// RegisterBrokeredWebTools registers public web reads whose implementations
+// are safe to execute inside the controller MCP broker. Registration is
+// idempotent because Registry.Register replaces the implementation for a
+// stable tool name.
+func RegisterBrokeredWebTools(r *Registry) error {
+	if r == nil {
+		return fmt.Errorf("brokered web tool registry is required")
+	}
+	r.Register(NewBrokeredWebSearchTool())
+	r.Register(NewBrokeredWebFetchTool())
 	return nil
 }
 
@@ -730,32 +728,7 @@ func ChatToolNames() []string {
 // CoordinationToolNames returns the names of all coordination tools registered by
 // RegisterCoordinationTools in worker processes.
 func CoordinationToolNames() []string {
-	return []string{
-		delegateTaskToolName,
-		waitForTasksToolName,
-		createContainerTaskToolName,
-		cancelTaskToolName,
-		sendMessageToolName,
-		checkMessagesToolName,
-		createPullRequestToolName,
-		checkPullRequestCIToolName,
-		mergePullRequestToolName,
-		autoMergePullRequestToolName,
-		reviewPullRequestToolName,
-		postReviewCommentToolName,
-		checkPRReviewMarkerToolName,
-		listIssuesToolName,
-		listPullRequestsToolName,
-		getIssueToolName,
-		commentOnIssueToolName,
-		createAgentToolName,
-		deleteAgentToolName,
-		updatePlanToolName,
-		"recall_memory",
-		"remember",
-		"propose_memory",
-		"search_transcript",
-	}
+	return aitools.CoordinationToolNames()
 }
 
 func init() {

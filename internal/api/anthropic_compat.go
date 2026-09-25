@@ -25,23 +25,32 @@ import (
 	"github.com/orka-agents/orka/internal/tools"
 )
 
+const (
+	apiObjectList     = "list"
+	chatRoleTool      = "tool"
+	chatRoleAssistant = "assistant"
+	apiFieldMessage   = "message"
+)
+
 var anthropicLog = logf.Log.WithName("anthropic-compat")
 
 // AnthropicCompatHandler implements Anthropic-compatible /v1/messages endpoints.
 // This allows Anthropic-compatible clients to use Orka as a custom provider.
 type AnthropicCompatHandler struct {
 	client                    client.Client
+	apiReader                 client.Reader
 	kubeClient                kubernetes.Interface
 	watchNamespace            string
 	enforceNamespaceIsolation bool
 	config                    ChatConfig
 	resolver                  *ProviderResolver
 	resultStore               store.ResultStore
+	gatewayEventStore         store.GatewayEventStore
 	contextTokenAuthorization ContextTokenAuthorizationConfig
 }
 
 // NewAnthropicCompatHandler creates an Anthropic-compatible API handler.
-func NewAnthropicCompatHandler(c client.Client, watchNamespace string, enforceNamespaceIsolation bool, config ChatConfig, resolver *ProviderResolver, rs store.ResultStore, kubeClientOpt ...kubernetes.Interface) *AnthropicCompatHandler {
+func NewAnthropicCompatHandler(c client.Client, apiReader client.Reader, watchNamespace string, enforceNamespaceIsolation bool, config ChatConfig, resolver *ProviderResolver, rs store.ResultStore, kubeClientOpt ...kubernetes.Interface) *AnthropicCompatHandler {
 	var kubeClient kubernetes.Interface
 	if len(kubeClientOpt) > 0 {
 		kubeClient = kubeClientOpt[0]
@@ -49,6 +58,7 @@ func NewAnthropicCompatHandler(c client.Client, watchNamespace string, enforceNa
 
 	return &AnthropicCompatHandler{
 		client:                    c,
+		apiReader:                 apiReader,
 		kubeClient:                kubeClient,
 		watchNamespace:            watchNamespace,
 		enforceNamespaceIsolation: enforceNamespaceIsolation,
@@ -254,18 +264,27 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 	}
 
 	provider, model, providerInfo, err := h.resolver.ResolveWithInfo(ctx, ResolveOpts{
-		ModelStr:     req.Model,
-		Namespace:    namespace,
+		ModelStr:  req.Model,
+		Namespace: namespace,
+		AuthorizeProviderReference: func(provider ProviderResolutionInfo) error {
+			return authorizeContextTokenProviderReference(c, h.contextTokenAuthorization, "anthropicMessagesProviderReference", namespace, provider)
+		},
+		AuthorizeProviderUse: func(provider ProviderResolutionInfo, model string) error {
+			return authorizeContextTokenProviderUse(c, h.contextTokenAuthorization, "anthropicMessages", namespace, provider, model)
+		},
 		RequireModel: true,
+		// Enforced scoped context tokens get no implicit Provider selection.
+		RequireExplicitProvider: requestRequiresExplicitProvider(c, h.contextTokenAuthorization),
 	})
 	if err != nil {
-		anthropicLog.Error(err, "failed to resolve provider", "model", req.Model)
+		if ferr, ok := err.(*fiber.Error); ok && ferr.Code == fiber.StatusForbidden {
+			return anthropicContextTokenAuthorizationError(c, err)
+		}
+		anthropicLog.Error(err, "failed to resolve provider", chatModelKey, req.Model)
 		return anthropicError(c, 400, "invalid_request_error", "failed to resolve provider: "+err.Error())
 	}
 
-	if err := authorizeContextTokenProviderUse(c, h.contextTokenAuthorization, "anthropicMessages", namespace, providerInfo, model); err != nil {
-		return anthropicContextTokenAuthorizationError(c, err)
-	}
+	ctx = usageRequestContext(ctx, h.resultStore, uncachedReaderOr(h.apiReader, h.client), namespace, "")
 	provider = llm.NewTracingProvider(provider)
 
 	messages, err := convertAnthropicMessages(req.Messages)
@@ -294,8 +313,7 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 
 	// Inject Orka tools and run the server-side agentic loop by default.
 	// Set X-Orka-Tools: disabled to use as a transparent proxy instead.
-	orkaToolsEnabled, err := prepareCompatCoordinatorTools(c, ctx, compReq, compatCoordinatorSetup{
-		Client:              h.client,
+	orkaToolsEnabled, err := prepareCompatCoordinatorTools(c, compReq, compatCoordinatorSetup{
 		Namespace:           namespace,
 		ToolUseAction:       "anthropicTools",
 		AuthorizationConfig: h.contextTokenAuthorization,
@@ -309,12 +327,14 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 	if orkaToolsEnabled {
 		proxyToolCtx = newCompatProxyToolContext(compatProxyToolContextConfig{
 			Client:                    h.client,
+			AuthorizationReader:       h.apiReader,
 			KubeClient:                h.kubeClient,
 			Namespace:                 namespace,
 			Provider:                  providerInfo,
 			WatchNamespace:            h.watchNamespace,
 			EnforceNamespaceIsolation: h.enforceNamespaceIsolation,
 			ResultStore:               h.resultStore,
+			GatewayEventStore:         h.gatewayEventStore,
 			GenerateTaskName:          func() string { return fmt.Sprintf("proxy-%s", uuid.New().String()[:8]) },
 			Profile:                   anthropicCompatProxyToolContextProfile,
 			AuthContext:               contextToken,
@@ -361,8 +381,8 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 		user = ui.Username
 	}
 	anthropicLog.Info("messages completed",
-		"user", user,
-		"model", model,
+		chatRoleUser, user,
+		chatModelKey, model,
 		"input_tokens", resp.InputTokens,
 		"output_tokens", resp.OutputTokens,
 		"stop_reason", resp.StopReason,
@@ -409,7 +429,7 @@ func (h *AnthropicCompatHandler) HandleListModels(c fiber.Ctx) error {
 			if !seen[modelID] {
 				models = append(models, OAIModel{
 					ID:      modelID,
-					Object:  "model",
+					Object:  chatModelKey,
 					Created: now,
 					OwnedBy: string(p.Spec.Type),
 				})
@@ -418,7 +438,7 @@ func (h *AnthropicCompatHandler) HandleListModels(c fiber.Ctx) error {
 			if !seen[p.Spec.DefaultModel] {
 				models = append(models, OAIModel{
 					ID:      p.Spec.DefaultModel,
-					Object:  "model",
+					Object:  chatModelKey,
 					Created: now,
 					OwnedBy: string(p.Spec.Type),
 				})
@@ -428,7 +448,7 @@ func (h *AnthropicCompatHandler) HandleListModels(c fiber.Ctx) error {
 	}
 
 	return c.JSON(OAIModelList{
-		Object: "list",
+		Object: apiObjectList,
 		Data:   models,
 	})
 }
@@ -444,7 +464,7 @@ func convertAnthropicMessages(msgs []AnthropicMessage) ([]llm.Message, error) {
 		}
 
 		switch m.Role {
-		case "user":
+		case chatRoleUser:
 			// Separate tool_result blocks from other content
 			var textParts []string
 			for _, b := range blocks {
@@ -470,27 +490,27 @@ func convertAnthropicMessages(msgs []AnthropicMessage) ([]llm.Message, error) {
 						}
 					}
 					messages = append(messages, llm.Message{
-						Role:       "tool",
+						Role:       chatRoleTool,
 						ToolCallID: b.ToolUseID,
 						Content:    resultContent,
 					})
-				case "text":
+				case oaiContentTypeText:
 					textParts = append(textParts, b.Text)
 				}
 			}
 			if len(textParts) > 0 {
 				messages = append(messages, llm.Message{
-					Role:    "user",
+					Role:    chatRoleUser,
 					Content: strings.Join(textParts, "\n"),
 				})
 			}
 
-		case "assistant":
-			msg := llm.Message{Role: "assistant"}
+		case chatRoleAssistant:
+			msg := llm.Message{Role: chatRoleAssistant}
 			var textParts []string
 			for _, b := range blocks {
 				switch b.Type {
-				case "text":
+				case oaiContentTypeText:
 					textParts = append(textParts, b.Text)
 				case oaiStopReasonToolUse:
 					msg.ToolCalls = append(msg.ToolCalls, llm.ToolCall{
@@ -572,8 +592,8 @@ func convertToAnthropicResponse(resp *llm.CompletionResponse, model, stopReason 
 
 	return AnthropicResponse{
 		ID:         id,
-		Type:       "message",
-		Role:       "assistant",
+		Type:       apiFieldMessage,
+		Role:       chatRoleAssistant,
 		Content:    content,
 		Model:      model,
 		StopReason: &stopReason,
@@ -587,7 +607,7 @@ func convertToAnthropicResponse(resp *llm.CompletionResponse, model, stopReason 
 // anthropicError returns an error in Anthropic API format.
 func anthropicError(c fiber.Ctx, status int, errType, message string) error {
 	return c.Status(status).JSON(AnthropicError{
-		Type: "error",
+		Type: apiFieldError,
 		Error: AnthropicErrorDetail{
 			Type:    errType,
 			Message: message,
@@ -601,11 +621,11 @@ func stripClientToolMessages(messages []llm.Message) []llm.Message {
 	filtered := make([]llm.Message, 0, len(messages))
 	for _, m := range messages {
 		// Skip tool result messages (from client tool execution)
-		if m.Role == "tool" {
+		if m.Role == chatRoleTool {
 			continue
 		}
 		// For assistant messages, strip tool calls but keep text content
-		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+		if m.Role == chatRoleAssistant && len(m.ToolCalls) > 0 {
 			if m.Content == "" {
 				continue
 			}

@@ -1,11 +1,12 @@
 ---
 slug: /observability
+description: "OpenTelemetry traces, GenAI metrics, and how to follow one task through them."
 ---
 
 # Observability
 
 Orka emits OpenTelemetry traces and metrics for controller, chat, tool, native AI
-worker, and controller-side ACP v2 paths when telemetry is enabled. ACP runtime
+worker, and Orka harness v2 controller/supervisor paths when telemetry is enabled. ACP runtime
 internals remain observable primarily through durable Task execution/delivery
 status, RuntimePool status, bounded events, and structured logs. The GenAI
 signals are backend instrumentation: they are exported over OTLP to your
@@ -14,13 +15,17 @@ collector/backend and are separate from the Orka React UI.
 Telemetry is disabled by default. Disabled mode keeps the hot path on the global
 OpenTelemetry no-op providers and does not configure OTLP exporters.
 
+For retained team usage and tokens per merged PR in the dashboard, see
+[Usage and PR outcomes](usage-and-pr-outcomes.md). That report records counts
+independently of telemetry and includes measurement gaps.
+
 ## Enable telemetry
 
 Start the controller with telemetry enabled and point it at an OTLP endpoint.
 gRPC is the default exporter protocol:
 
 ```bash
-OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector.otel.svc:4317 \
+OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector.otel.svc:4317 \
   orka-controller --enable-telemetry
 ```
 
@@ -32,10 +37,17 @@ For an existing Kubernetes Deployment, set both the controller flag and the
 collector environment. Setting `OTEL_EXPORTER_OTLP_ENDPOINT` alone does not
 enable telemetry:
 
+:::note[These commands assume a Helm install named `orka`]
+That makes the Deployment `orka-controller`. If you installed with
+`kubectl apply -f .../deploy/orka.yaml` it is `orka-controller-manager` instead. See
+[Troubleshooting](../operations/troubleshooting.md#what-is-my-controller-deployment-called).
+:::
+
+
 ```bash
 kubectl patch deployment orka-controller -n orka-system --type=json -p='[
   {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--enable-telemetry"},
-  {"op":"add","path":"/spec/template/spec/containers/0/env/-","value":{"name":"OTEL_EXPORTER_OTLP_ENDPOINT","value":"otel-collector.otel.svc:4317"}},
+  {"op":"add","path":"/spec/template/spec/containers/0/env/-","value":{"name":"OTEL_EXPORTER_OTLP_ENDPOINT","value":"http://otel-collector.otel.svc:4317"}},
   {"op":"add","path":"/spec/template/spec/containers/0/env/-","value":{"name":"OTEL_EXPORTER_OTLP_INSECURE","value":"true"}}
 ]'
 ```
@@ -82,9 +94,42 @@ trace annotations. It also exports RuntimePool desired/ready replica,
 resident-session, active-prompt, queued-Task, admission-state, and completed
 scale-to-zero metrics on the Prometheus metrics endpoint.
 
-The current ACP supervisor does not receive controller OTLP configuration or
-copy W3C trace context into provider children. Use these current sources of truth
-for runtime-internal state:
+With controller telemetry enabled and a worker-reachable trace endpoint,
+managed supervisors receive `ORKA_ENABLE_TELEMETRY=true` and non-secret OTLP
+endpoint, protocol, insecure and compression settings. Generic and trace-specific
+endpoints retain their normal SDK semantics; trace-specific settings take precedence.
+A missing or invalid trace endpoint disables supervisor export. Metrics-only
+configuration does not enable supervisor tracing. Headers, certificate paths,
+resource attributes and content-capture settings are never copied.
+
+The v2 mutation client sends W3C `traceparent`/`tracestate` HTTP headers outside canonical
+request bodies and operation capabilities. Authenticated supervisor operations
+emit `acp.supervisor.*` spans under the current controller operation, with Task
+UID/attempt, prompt/operation IDs and runtime pool/session identity. Context is
+request-local, including for reused sessions. Missing or invalid context starts
+a separate trace; disabled telemetry does not affect execution. Provider CLI
+children receive no tracing environment variables or instrumentation. Supervisor
+spans never capture prompts, completions, raw tool arguments or error text, even
+if a content-capture environment variable is set.
+
+**Collector routing is an operator prerequisite.** Managed RuntimePool network
+policies permit DNS, controller API and provider proxy traffic; enabling telemetry
+does not add collector egress. Under an enforcing CNI, configure a separate,
+narrowly selected collector route/policy before expecting exports. Pod-level
+collector access also permits provider children to reach that collector, because
+they share the Pod network. Choose a collector and authorization boundary
+accordingly. This feature does not install a collector or alter managed policies.
+External supervisors can opt in with the same environment settings. Supervisor
+exporters require `http://` or `https://` endpoint URLs and the scalar settings
+listed above. Unsupported ambient SDK settings (including OTLP headers, certificate
+paths and resource attributes) disable supervisor telemetry before SDK initialization,
+so malformed values cannot enter SDK diagnostics. The content-capture flag is ignored.
+Use an authorized local collector.
+
+Export is asynchronous and bounded. Initialization/export failure does not fail
+a Task, and supervisor shutdown spends at most two additional seconds flushing
+traces. Unavailable collectors can result in dropped spans. Use these sources of
+truth for runtime state:
 
 - `Task.status.execution` for fenced attempt, RuntimePool, RuntimeSession, prompt, and terminal outcome;
 - `Task.status.delivery` for workspace validation/publication state and non-secret receipts;
@@ -92,8 +137,7 @@ for runtime-internal state:
 - Task execution events and controller/runtime/publisher structured logs.
 
 Do not add credential-bearing OTLP headers to runtime images or provider child environments.
-Any future ACP telemetry propagation must preserve the empty child-environment allowlist and
-bind trace context to the exact Task attempt and prompt operation.
+The provider child-environment allowlist remains unchanged.
 
 Credential-bearing OTLP header environment variables are not copied from the
 controller into task workloads. Use an in-cluster collector endpoint or a
@@ -120,12 +164,14 @@ task.run
                   └─ execute_tool {tool.name}
 ```
 
-An ACP v2 Task continues the same Task-carried trace in the controller:
+An Orka harness v2 Task continues the same Task-carried trace across controller and supervisor:
 
 ```text
 <Task-carried parent span>
   ├─ acp.session.create / acp.session.continue
+  │   └─ acp.supervisor.session.create  # when a runtime session is created
   ├─ acp.prompt
+  │   ├─ acp.supervisor.prompt
   │   └─ acp.publication.reconcile  # live write-workspace delivery
   └─ acp.publication.reconcile      # recovery after the prompt span is gone
 ```
@@ -137,9 +183,11 @@ model client span.
 Task creation stamps the current W3C trace context into Task annotations. The
 controller extracts that context for `task.reconcile` and controller-side ACP
 spans. Supported native worker Tasks also receive `ORKA_TRACEPARENT` in their
-Jobs. ACP runtime requests and provider children do not currently carry that
-trace context. Delegation stamps the active `execute_tool delegate_task` span
-context onto the child Task so child controller/native spans remain linked.
+Jobs. Orka harness v2 runtime requests carry `traceparent` and `tracestate` headers to
+authenticated supervisor operations; provider CLI children remain outside this
+instrumentation. Delegation stamps the active `execute_tool delegate_task` span
+context onto the child Task so child controller, supervisor and native-worker
+spans remain linked.
 
 Outbound HTTP and MCP Tool CRD requests receive W3C `traceparent` headers. If a
 Tool config supplies its own `traceparent` header, the active Orka trace context
@@ -244,8 +292,8 @@ service:
 For local Jaeger all-in-one, expose its OTLP gRPC endpoint and set:
 
 ```bash
-kubectl set env deployment/orka-controller \
-  OTEL_EXPORTER_OTLP_ENDPOINT=jaeger-collector.observability.svc:4317
+kubectl -n orka-system set env deployment/orka-controller \
+  OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger-collector.observability.svc:4317
 ```
 
 ## Content capture and privacy

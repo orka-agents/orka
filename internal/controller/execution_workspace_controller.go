@@ -45,6 +45,24 @@ func (r *ExecutionWorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	if r.CleanupOnly && workspace.DeletionTimestamp.IsZero() {
+		// Cleanup-only mode admits nothing new, but the cleanup finalizer
+		// must still be installed: a workspace created just before the API
+		// was disabled would otherwise never gain it, retention would wait on
+		// it forever, and neither idleTimeout nor maxLifetime could ever
+		// reclaim the workspace and its pool. Only ACP-owned workspaces get
+		// this recovery: adapters registered solely under the enabled API
+		// (the development fake provider) are not running in cleanup-only
+		// mode, and a finalizer no adapter can ever settle with StateDeleted
+		// would make the object undeletable.
+		if workspace.Labels[workspacev1alpha1.ProviderControllerLabel] != acpWorkspaceControllerLabelValue {
+			return ctrl.Result{}, nil
+		}
+		if !controllerutil.ContainsFinalizer(workspace, executionWorkspaceFinalizer) {
+			controllerutil.AddFinalizer(workspace, executionWorkspaceFinalizer)
+			if err := r.Update(ctx, workspace); err != nil {
+				return ctrl.Result{}, client.IgnoreNotFound(err)
+			}
+		}
 		return ctrl.Result{}, nil
 	}
 	if !workspace.DeletionTimestamp.IsZero() {
@@ -55,7 +73,7 @@ func (r *ExecutionWorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if err := r.Update(ctx, workspace); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 	if dispositionFailed(workspace.Status.Disposition) {
 		if err := r.quarantineWorkspace(ctx, workspace, "workspace cleanup disposition contains a failed category"); err != nil {
@@ -141,7 +159,7 @@ func (r *ExecutionWorkspaceReconciler) reconcileWorkspaceAdmission(
 		if err := r.projectLatestWorkspaceToOwnerPendingAdmission(ctx, key); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 	reason, denialMessage, err := r.patchWorkspaceCoreAdmission(ctx, workspace, targetGeneration)
 	if err != nil {
@@ -162,7 +180,7 @@ func (r *ExecutionWorkspaceReconciler) reconcileWorkspaceAdmission(
 	if err := r.projectLatestWorkspaceToOwner(ctx, key); err != nil {
 		return ctrl.Result{}, err
 	}
-	return ctrl.Result{Requeue: true}, nil
+	return ctrl.Result{RequeueAfter: time.Second}, nil
 }
 
 func workspaceCapacityAdmissionRetryAfter(
@@ -434,7 +452,7 @@ func (r *ExecutionWorkspaceReconciler) validateWorkspaceProviderBinding(
 	provider := &workspacev1alpha1.ExecutionWorkspaceProvider{}
 	if err := r.workspacePolicyReader().Get(ctx, types.NamespacedName{Name: expectedProviderName}, provider); err != nil {
 		if client.IgnoreNotFound(err) == nil {
-			return "ProviderNotFound", "bound workspace provider does not exist", nil
+			return reasonProviderNotFound, "bound workspace provider does not exist", nil
 		}
 		return "", "", fmt.Errorf("get bound workspace provider: %w", err)
 	}
@@ -443,7 +461,7 @@ func (r *ExecutionWorkspaceReconciler) validateWorkspaceProviderBinding(
 	}
 	if requireActive {
 		if !provider.DeletionTimestamp.IsZero() {
-			return "ProviderDeleting", "provider is deleting and cannot admit new workspaces", nil
+			return reasonProviderDeleting, "provider is deleting and cannot admit new workspaces", nil
 		}
 		if provider.Generation != workspace.Spec.ProviderBinding.Generation {
 			return reasonProviderBindingMismatch, "new workspace provider binding is stale", nil
@@ -647,7 +665,7 @@ func (r *ExecutionWorkspaceReconciler) reconcileWorkspaceDeletion(
 		if err := r.Patch(ctx, workspace, client.MergeFrom(before)); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 	if workspace.Status.State != workspacev1alpha1.ExecutionWorkspaceStateDeleted {
 		return ctrl.Result{RequeueAfter: workspaceRequeueInterval}, nil

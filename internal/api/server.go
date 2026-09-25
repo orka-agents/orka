@@ -66,7 +66,6 @@ func (s *ControllerEpochStoreFenceSource) CurrentFence(ctx context.Context) (sto
 // ServerConfig holds configuration for the API server
 type ServerConfig struct {
 	Port                      int
-	MetricsPort               int
 	WatchNamespace            string
 	ExecutionMode             executionmode.Mode
 	EnforceNamespaceIsolation bool
@@ -80,6 +79,7 @@ type ServerConfig struct {
 	MessageStore              store.MessageStore
 	ArtifactStore             store.ArtifactStore
 	ArtifactReservations      artifactcap.CapabilityReservationRecorder
+	AgentExecutionSnapshots   store.AgentExecutionSnapshotStore
 	ExternalEffects           store.ExternalEffectIdentityReader
 	MemoryStore               store.MemoryStore
 	MemoryProposalStore       store.MemoryProposalStore
@@ -92,33 +92,31 @@ type ServerConfig struct {
 	HealthChecker             store.HealthChecker
 	Clientset                 kubernetes.Interface
 	APIReader                 client.Reader
+	TaskProvenanceProtected   bool
 	ControllerEpochs          ControllerEpochFenceSource
+	E2EPromptFaultEnabled     bool
 }
 
 // Server is the REST API server
 type Server struct {
-	app                    *fiber.App
-	client                 client.Client
-	config                 ServerConfig
-	sessionManager         *controller.SessionManager
-	handlers               *Handlers
-	chatHandler            *ChatHandler
-	openaiHandler          *OpenAICompatHandler
-	anthropicHandler       *AnthropicCompatHandler
-	internalHandlers       *InternalHandlers
-	ResultStore            store.ResultStore
-	SessionStore           store.SessionStore
-	PlanStore              store.PlanStore
-	MessageStore           store.MessageStore
-	ArtifactStore          store.ArtifactStore
-	MemoryStore            store.MemoryStore
-	MemoryProposalStore    store.MemoryProposalStore
-	SecurityStore          store.SecurityStore
-	RepositoryMonitorStore store.RepositoryMonitorStore
-	ExecutionEventStore    store.ExecutionEventStore
-	GatewayEventStore      store.GatewayEventStore
-	GatewayDeliveryStore   store.GatewayDeliveryStore
-	GatewayService         *gatewayruntime.Service
+	app                 *fiber.App
+	client              client.Client
+	config              ServerConfig
+	sessionManager      *controller.SessionManager
+	handlers            *Handlers
+	chatHandler         *ChatHandler
+	openaiHandler       *OpenAICompatHandler
+	anthropicHandler    *AnthropicCompatHandler
+	internalHandlers    *InternalHandlers
+	ResultStore         store.ResultStore
+	SessionStore        store.SessionStore
+	PlanStore           store.PlanStore
+	MessageStore        store.MessageStore
+	ArtifactStore       store.ArtifactStore
+	MemoryStore         store.MemoryStore
+	MemoryProposalStore store.MemoryProposalStore
+	ExecutionEventStore store.ExecutionEventStore
+	GatewayEventStore   store.GatewayEventStore
 }
 
 // NewServer creates a new API server
@@ -133,23 +131,19 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 	app.Server().HeaderReceived = requestBodyConfig
 
 	server := &Server{
-		app:                    app,
-		client:                 c,
-		config:                 config,
-		sessionManager:         sessionManager,
-		ResultStore:            config.ResultStore,
-		SessionStore:           config.SessionStore,
-		PlanStore:              config.PlanStore,
-		MessageStore:           config.MessageStore,
-		ArtifactStore:          config.ArtifactStore,
-		MemoryStore:            config.MemoryStore,
-		MemoryProposalStore:    config.MemoryProposalStore,
-		SecurityStore:          config.SecurityStore,
-		RepositoryMonitorStore: config.RepositoryMonitorStore,
-		ExecutionEventStore:    config.ExecutionEventStore,
-		GatewayEventStore:      config.GatewayEventStore,
-		GatewayDeliveryStore:   config.GatewayDeliveryStore,
-		GatewayService:         config.GatewayService,
+		app:                 app,
+		client:              c,
+		config:              config,
+		sessionManager:      sessionManager,
+		ResultStore:         config.ResultStore,
+		SessionStore:        config.SessionStore,
+		PlanStore:           config.PlanStore,
+		MessageStore:        config.MessageStore,
+		ArtifactStore:       config.ArtifactStore,
+		MemoryStore:         config.MemoryStore,
+		MemoryProposalStore: config.MemoryProposalStore,
+		ExecutionEventStore: config.ExecutionEventStore,
+		GatewayEventStore:   config.GatewayEventStore,
 	}
 
 	server.handlers = NewHandlers(HandlersConfig{
@@ -176,12 +170,15 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		GatewayService:            config.GatewayService,
 	})
 	resolver := NewProviderResolver(c, config.Chat)
-	server.chatHandler = NewChatHandler(c, sessionManager, config.Chat, config.WatchNamespace, config.EnforceNamespaceIsolation, config.SessionStore, config.ResultStore, resolver, config.Clientset)
+	server.chatHandler = NewChatHandler(c, config.APIReader, sessionManager, config.Chat, config.WatchNamespace, config.EnforceNamespaceIsolation, config.SessionStore, config.ResultStore, resolver, config.Clientset)
 	server.chatHandler.contextTokenAuthorization = config.ContextTokenAuthorization
-	server.openaiHandler = NewOpenAICompatHandler(c, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat, resolver, config.ResultStore, config.Clientset)
+	server.chatHandler.gatewayEventStore = config.GatewayEventStore
+	server.openaiHandler = NewOpenAICompatHandler(c, config.APIReader, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat, resolver, config.ResultStore, config.Clientset)
 	server.openaiHandler.contextTokenAuthorization = config.ContextTokenAuthorization
-	server.anthropicHandler = NewAnthropicCompatHandler(c, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat, resolver, config.ResultStore, config.Clientset)
+	server.openaiHandler.gatewayEventStore = config.GatewayEventStore
+	server.anthropicHandler = NewAnthropicCompatHandler(c, config.APIReader, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat, resolver, config.ResultStore, config.Clientset)
 	server.anthropicHandler.contextTokenAuthorization = config.ContextTokenAuthorization
+	server.anthropicHandler.gatewayEventStore = config.GatewayEventStore
 	server.setupMiddleware()
 	server.setupRoutes()
 	server.setupStaticFiles()
@@ -283,6 +280,7 @@ func (s *Server) setupRoutes() {
 	// the historical bounded request limit.
 	s.installACPArtifactTransport()
 	s.installACPArtifactAuthorizationBroker()
+	s.installACPE2EPromptWriteFaultRecorder()
 
 	// Health endpoints
 	s.app.Get("/healthz", s.handlers.Healthz)
@@ -297,10 +295,7 @@ func (s *Server) setupRoutes() {
 	externalAuth := NewAuthMiddleware(s.client, AuthConfig{OIDC: s.config.OIDC, ContextTokens: s.config.ContextTokens})
 
 	// API v1 group
-	api := s.app.Group("/api/v1")
-
-	// Auth middleware for API endpoints
-	api.Use(externalAuth)
+	api := s.externalAPIGroup("/api/v1", externalAuth)
 
 	// Task endpoints
 	api.Post("/tasks", s.handlers.CreateTask)
@@ -356,6 +351,10 @@ func (s *Server) setupRoutes() {
 	api.Post("/memory-proposals/:id/archive", s.handlers.ArchiveMemoryProposal)
 
 	// Provider endpoints
+	api.Get("/usage", s.handlers.GetUsageReport)
+	api.Get("/usage/work/:id", s.handlers.GetUsageWork)
+	api.Get("/usage/other/:category", s.handlers.GetUsageOther)
+
 	api.Get("/providers", s.handlers.ListProviders)
 	api.Post("/providers", s.handlers.CreateProvider)
 	api.Get("/providers/:name", s.handlers.GetProvider)
@@ -403,6 +402,7 @@ func (s *Server) setupRoutes() {
 	api.Put("/security/repositories/:name/threat-model", s.handlers.UpdateThreatModel)
 	api.Get("/security/repositories/:name/scans", s.handlers.ListSecurityScanRuns)
 	api.Post("/security/repositories/:name/scans", s.handlers.CreateManualSecurityScan)
+	api.Get("/security/repositories/:name/scans/:scanID/progress", s.handlers.GetSecurityScanProgress)
 	api.Get("/security/repositories/:name/slices", s.handlers.ListSecurityReviewSlices)
 	api.Get("/security/repositories/:name/slices/:sliceID", s.handlers.GetSecurityReviewSlice)
 	api.Get("/security/repositories/:name/dropped-findings", s.handlers.ListSecurityDroppedFindings)
@@ -461,14 +461,12 @@ func (s *Server) setupRoutes() {
 
 	// OpenAI-compatible API (under /openai/v1, separate from /api/v1)
 	// This allows OpenAI-compatible clients to use Orka as a custom provider.
-	oai := s.app.Group("/openai/v1")
-	oai.Use(externalAuth)
+	oai := s.externalAPIGroup("/openai/v1", externalAuth)
 	oai.Post("/chat/completions", s.openaiHandler.HandleChatCompletions)
 	oai.Get("/models", s.openaiHandler.HandleListModels)
 
 	// Anthropic-compatible API
-	anthropic := s.app.Group("/anthropic/v1")
-	anthropic.Use(externalAuth)
+	anthropic := s.externalAPIGroup("/anthropic/v1", externalAuth)
 	anthropic.Post("/messages", s.anthropicHandler.HandleMessages)
 	anthropic.Get("/models", s.anthropicHandler.HandleListModels)
 
@@ -482,17 +480,20 @@ func (s *Server) setupRoutes() {
 			s.MessageStore,
 			s.ArtifactStore,
 			InternalHandlersConfig{
-				Client:              s.client,
-				APIReader:           s.config.APIReader,
-				MemoryStore:         s.MemoryStore,
-				MemoryProposalStore: s.MemoryProposalStore,
-				ExecutionEventStore: s.ExecutionEventStore,
-				GatewayEventStore:   s.GatewayEventStore,
+				Client:                  s.client,
+				APIReader:               s.config.APIReader,
+				MemoryStore:             s.MemoryStore,
+				MemoryProposalStore:     s.MemoryProposalStore,
+				ExecutionEventStore:     s.ExecutionEventStore,
+				GatewayEventStore:       s.GatewayEventStore,
+				GatewayService:          s.config.GatewayService,
+				TaskProvenanceProtected: s.config.TaskProvenanceProtected,
 			},
 		)
 		internal := s.app.Group("/internal/v1")
 		internal.Use(NewAuthMiddleware(s.client))
 		internal.Post("/results/:namespace/:taskName", s.internalHandlers.SubmitResult)
+		internal.Post("/tasks/:namespace/:taskName/gateway-messages", s.internalHandlers.SubmitGatewayMessage)
 		internal.Post("/tasks/:namespace/:taskName/execution-workspace/status", s.internalHandlers.UpdateExecutionWorkspaceStatus)
 		internal.Get("/sessions/:namespace/search", s.internalHandlers.SearchTranscript)
 		internal.Get("/sessions/:namespace/:name/transcript", s.internalHandlers.GetSessionTranscript)
@@ -526,7 +527,8 @@ func (s *Server) hasInternalStores() bool {
 		s.ArtifactStore != nil ||
 		s.MemoryStore != nil ||
 		s.MemoryProposalStore != nil ||
-		s.ExecutionEventStore != nil
+		s.ExecutionEventStore != nil ||
+		s.config.GatewayService != nil
 }
 
 // Start starts the API server
@@ -549,6 +551,52 @@ func (s *Server) Start(ctx context.Context) error {
 	case err := <-errCh:
 		return err
 	}
+}
+
+// apiPathRoots are the request path roots served by an API rather than by the
+// dashboard. A 404 under one of them is a routing answer the caller needs to
+// see, not a client-side route for the SPA to resolve. Lower case and without
+// a trailing slash, matched against a normalized path: see routeLookupPath.
+var apiPathRoots = []string{"/api", "/openai", "/anthropic", "/internal", "/webhooks"}
+
+// routeLookupPath normalizes path the way the router matches it. Fiber is
+// case-insensitive and non-strict about a trailing slash by default, so
+// /OPENAI/v1/chat/completions and /openai/v1/chat/completions/ both reach the
+// registered handler. Unrouted paths have to be classified the same way, or a
+// caller gets a different answer for a spelling the router treats as identical.
+func routeLookupPath(path string) string {
+	folded := strings.ToLower(path)
+	for len(folded) > 1 && strings.HasSuffix(folded, "/") {
+		folded = folded[:len(folded)-1]
+	}
+	return folded
+}
+
+// spaFallbackEligible reports whether a 404 for path is served as the SPA
+// index page instead of a JSON error. Telemetry middleware uses the same
+// predicate so the recorded status matches what the client receives.
+func spaFallbackEligible(path string) bool {
+	folded := routeLookupPath(path)
+	for _, root := range apiPathRoots {
+		if folded == root || strings.HasPrefix(folded, root+"/") {
+			return false
+		}
+	}
+	return folded != "/healthz" && folded != "/readyz"
+}
+
+// spaIndexHTML returns the embedded SPA index page, or false when the UI
+// assets are unavailable.
+func spaIndexHTML() ([]byte, bool) {
+	distFS, err := uiembed.FS()
+	if err != nil {
+		return nil, false
+	}
+	data, err := fs.ReadFile(distFS, "index.html")
+	if err != nil {
+		return nil, false
+	}
+	return data, true
 }
 
 // customErrorHandler handles errors returned by handlers and produces a
@@ -580,25 +628,63 @@ func customErrorHandler(c fiber.Ctx, err error) error {
 	}
 
 	// For 404s on non-API paths, serve the SPA index.html
+	if code == fiber.StatusNotFound && spaFallbackEligible(c.Path()) {
+		if data, ok := spaIndexHTML(); ok {
+			c.Set("Content-Type", "text/html; charset=utf-8")
+			return c.Status(fiber.StatusOK).Send(data)
+		}
+	}
+
+	// Callers of the compatibility APIs are provider SDKs that parse only that
+	// provider's error envelope, so an unrouted path answers in its format.
 	if code == fiber.StatusNotFound {
-		path := c.Path()
-		isAPI := len(path) >= 4 && path[:4] == "/api"
-		if !isAPI && path != "/healthz" && path != "/readyz" {
-			distFS, fsErr := uiembed.FS()
-			if fsErr == nil {
-				data, readErr := fs.ReadFile(distFS, "index.html")
-				if readErr == nil {
-					c.Set("Content-Type", "text/html; charset=utf-8")
-					return c.Status(fiber.StatusOK).Send(data)
-				}
-			}
+		if handled, resp := compatRouteNotFound(c); handled {
+			return resp
 		}
 	}
 
 	return c.Status(code).JSON(fiber.Map{
-		"error": fiber.Map{
-			"code":    code,
-			"message": message,
+		apiFieldError: fiber.Map{
+			"code":          code,
+			apiFieldMessage: message,
 		},
 	})
+}
+
+// unsupportedCompatRoutes names endpoints of the emulated provider APIs that
+// Orka deliberately does not serve, and the supported route to use instead.
+// Keys are lower case and looked up with a folded path.
+// Saying so costs a client one line in its log rather than a parse failure
+// several frames from the cause.
+var unsupportedCompatRoutes = map[string]string{
+	"/openai/v1/responses": "the OpenAI Responses API is not supported by this endpoint; use /openai/v1/chat/completions",
+}
+
+// compatRouteNotFound answers an unrouted compatibility-API path in the error
+// format that API's clients expect. It reports whether it handled the path.
+func compatRouteNotFound(c fiber.Ctx) (bool, error) {
+	path := routeLookupPath(c.Path())
+	status := fiber.StatusNotFound
+
+	message, unsupported := unsupportedCompatRoutes[path]
+	if unsupported {
+		// The endpoint is a real part of the emulated API and this server does
+		// not implement it, which is 501 rather than "no such route".
+		status = fiber.StatusNotImplemented
+		// Provider SDKs should not retry this permanent failure.
+		c.Set("X-Should-Retry", "false")
+	} else {
+		message = fmt.Sprintf("unknown path %s", path)
+	}
+
+	switch {
+	case path == "/openai" || strings.HasPrefix(path, "/openai/"):
+		return true, c.Status(status).JSON(OAIError{Error: OAIErrorDetail{
+			Message: message,
+			Type:    OAIErrorTypeInvalidRequest,
+		}})
+	case path == "/anthropic" || strings.HasPrefix(path, "/anthropic/"):
+		return true, anthropicError(c, status, "not_found_error", message)
+	}
+	return false, nil
 }

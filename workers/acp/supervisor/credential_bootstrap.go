@@ -69,6 +69,7 @@ func CredentialBootstrapConfigured() bool {
 
 type credentialBootstrapState struct {
 	mu        sync.Mutex
+	receiver  *harnessv2.CredentialBootstrapReceiver
 	nonce     string
 	publicKey string
 	seeded    bool
@@ -81,6 +82,12 @@ type credentialBootstrapState struct {
 // controller retry after an ambiguous response converges; a different payload
 // conflicts so the controller can recycle the exact instance.
 func (s *credentialBootstrapState) handle(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet && s.receiver != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		_ = json.NewEncoder(w).Encode(s.receiver.Challenge)
+		return
+	}
 	if r.Method != http.MethodPut {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
@@ -103,6 +110,24 @@ func (s *credentialBootstrapState) handle(w http.ResponseWriter, r *http.Request
 	); err != nil {
 		w.WriteHeader(http.StatusForbidden)
 		return
+	}
+	if s.receiver != nil {
+		var envelope harnessv2.SealedCredentialBootstrap
+		decoder := json.NewDecoder(strings.NewReader(string(body)))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&envelope); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		body, err = s.receiver.Open(envelope)
+		if err != nil {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
 	}
 	var request CredentialBootstrapRequest
 	decoder := json.NewDecoder(strings.NewReader(string(body)))
@@ -166,6 +191,16 @@ func AwaitCredentialBootstrap(ctx context.Context) (CredentialBootstrapRequest, 
 		return CredentialBootstrapRequest{}, errors.New("credential bootstrap public key is not configured")
 	}
 	state := &credentialBootstrapState{nonce: nonce, publicKey: publicKey, received: make(chan struct{})}
+	identity, err := readSubstrateBootstrapIdentity(harnessv2.SubstrateIdentityDirectory)
+	if err != nil {
+		return CredentialBootstrapRequest{}, err
+	}
+	if identity != nil {
+		state.receiver, err = harnessv2.NewCredentialBootstrapReceiver(nonce, *identity)
+		if err != nil {
+			return CredentialBootstrapRequest{}, err
+		}
+	}
 	listenAddress := strings.TrimSpace(os.Getenv(EnvListenAddress))
 	if listenAddress == "" {
 		listenAddress = ":8080"
@@ -200,4 +235,8 @@ func AwaitCredentialBootstrap(ctx context.Context) (CredentialBootstrapRequest, 
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	return state.request, nil
+}
+
+func readSubstrateBootstrapIdentity(directory string) (*harnessv2.SubstrateActorIdentity, error) {
+	return harnessv2.ReadSubstrateActorIdentity(directory)
 }
