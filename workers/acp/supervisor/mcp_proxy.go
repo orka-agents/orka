@@ -31,6 +31,7 @@ const (
 )
 
 const (
+	supervisorMCPServerName   = "orka"
 	mcpProxyPathPrefix        = "/_orka/mcp/"
 	mcpProtocolVersion        = "2025-06-18"
 	defaultMCPMaxConnections  = 16
@@ -152,7 +153,7 @@ func (p *mcpProxy) newSession(
 		p.sessions[route] = session
 		p.mu.Unlock()
 		return session, acp.MCPServer{
-			Type: providerProxyScheme, Name: "orka", URL: endpoint,
+			Type: providerProxyScheme, Name: supervisorMCPServerName, URL: endpoint,
 			Headers: []acp.HTTPHeader{{Name: "Authorization", Value: "Bearer " + credential}},
 		}, nil
 	}

@@ -317,7 +317,8 @@ type acpToolCallIdentity struct {
 	ToolName   string `json:"name"`
 	Title      string `json:"title"`
 	Meta       struct {
-		ClaudeCode struct {
+		IsMCPToolCall bool `json:"is_mcp_tool_call"`
+		ClaudeCode    struct {
 			ToolName string `json:"toolName"`
 		} `json:"claudeCode"`
 	} `json:"_meta"`
@@ -338,15 +339,17 @@ func (identity acpToolCallIdentity) name() (string, error) {
 }
 
 // rememberToolCallName retains structured identities only for this prompt.
-// Claude emits its tool name in a preceding update, while the corresponding
-// permission request can contain only a toolCallId and a display title.
-func (prompt *promptState) rememberToolCallName(notification *acp.SessionNotification) error {
+// Claude and Codex emit structured tool identities in preceding updates;
+// their permission requests can contain only a toolCallId and a display title.
+func (prompt *promptState) rememberToolCallName(notification *acp.SessionNotification, provider string, policy harnessv2.MCPToolPolicy) error {
 	if notification == nil {
 		return nil
 	}
 	var call struct {
 		acpToolCallIdentity
-		SessionUpdate string `json:"sessionUpdate"`
+		SessionUpdate string          `json:"sessionUpdate"`
+		Kind          string          `json:"kind"`
+		RawInput      json.RawMessage `json:"rawInput"`
 	}
 	if err := json.Unmarshal(notification.Update, &call); err != nil {
 		return fmt.Errorf("decode ACP tool identity: %w", err)
@@ -355,8 +358,21 @@ func (prompt *promptState) rememberToolCallName(notification *acp.SessionNotific
 		return nil
 	}
 	name, err := call.name()
-	if err != nil || name == "" {
+	if err != nil {
 		return err
+	}
+	if provider == providerKindCodex && call.Meta.IsMCPToolCall {
+		brokeredName, err := codexMCPToolIdentity(call.Kind, call.RawInput, policy)
+		if err != nil {
+			return err
+		}
+		if name != "" && name != brokeredName {
+			return fmt.Errorf("ACP tool call has conflicting tool identities")
+		}
+		name = brokeredName
+	}
+	if name == "" {
+		return nil
 	}
 	id, err := canonicalACPToolCallID(call.ToolCallID)
 	if err != nil {
@@ -376,6 +392,23 @@ func (prompt *promptState) rememberToolCallName(notification *acp.SessionNotific
 	}
 	prompt.toolCallNames[id] = name
 	return nil
+}
+
+// Codex ACP 1.1.7 identifies MCP calls through structured rawInput before an
+// ID-only approval request. Never infer authority from its mcp.* display title.
+func codexMCPToolIdentity(kind string, rawInput json.RawMessage, policy harnessv2.MCPToolPolicy) (string, error) {
+	var input struct {
+		Server string `json:"server"`
+		Tool   string `json:"tool"`
+	}
+	if kind != "execute" || json.Unmarshal(rawInput, &input) != nil || input.Server != supervisorMCPServerName {
+		return "", fmt.Errorf("codex MCP update does not identify the configured broker")
+	}
+	descriptor, allowed := policy.Descriptor(input.Tool)
+	if !allowed || !descriptor.Source.Brokered() {
+		return "", fmt.Errorf("codex MCP update does not identify an allowed brokered tool")
+	}
+	return descriptor.Name, nil
 }
 
 func canonicalPermissionToolName(provider string, policy harnessv2.MCPToolPolicy, name string) string {
