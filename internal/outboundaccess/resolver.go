@@ -220,7 +220,8 @@ func (r *KubernetesResolver) resolveDirect(ctx context.Context, policy *corev1al
 			prefix = *direct.Output.Prefix
 		}
 	}
-	sensitive := []string{subject.value, actor.value, result.AccessToken}
+	sensitive := make([]string, 0, 3+len(clientSecrets))
+	sensitive = append(sensitive, subject.value, actor.value, result.AccessToken)
 	sensitive = append(sensitive, clientSecrets...)
 	return Resolution{
 		Adapter:          AdapterDirect,

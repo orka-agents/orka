@@ -21,6 +21,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/orka-agents/orka/internal/metrics"
@@ -127,8 +128,8 @@ func parseServiceAccountNamespace(username string) string {
 		return ""
 	}
 	rest := strings.TrimPrefix(username, prefix)
-	parts := strings.SplitN(rest, ":", 2)
-	if len(parts) < 2 || parts[0] == "" {
+	parts := strings.Split(rest, ":")
+	if len(parts) != 2 || len(utilvalidation.IsDNS1123Label(parts[0])) != 0 || len(utilvalidation.IsDNS1123Subdomain(parts[1])) != 0 {
 		return ""
 	}
 	return parts[0]

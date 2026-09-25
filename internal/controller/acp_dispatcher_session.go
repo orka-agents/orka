@@ -859,9 +859,19 @@ func (d *ACPDispatcher) finalizeTaskSessionResult(
 	if err != nil {
 		return err
 	}
+	// The outbox may publish the terminal phase before or after live
+	// settlement. Include a fixed message so either ordering can record a
+	// meaningful lifecycle event without copying assistant or runtime text.
+	message := "ACP task completed"
+	switch phase {
+	case corev1alpha1.TaskPhaseFailed:
+		message = "ACP delivery failed"
+	case corev1alpha1.TaskPhaseCancelled:
+		message = "publication cancelled before push"
+	}
 	payload, err := json.Marshal(taskTerminalProjection{
 		Namespace: task.Namespace, Task: task.Name, TaskUID: string(task.UID), Attempt: task.Status.Execution.Attempt,
-		Phase: phase, Execution: execution, Delivery: &delivery,
+		Phase: phase, Message: message, Execution: execution, Delivery: &delivery,
 	})
 	if err != nil {
 		return err
@@ -869,7 +879,7 @@ func (d *ACPDispatcher) finalizeTaskSessionResult(
 	_, err = d.Sessions.FinalizeAssistantResult(ctx, ACPFinalizeAssistantRequest{
 		SessionTurn: *session.Turn, Fence: fence, AssistantResult: result,
 		PublicationID: publicationID,
-		Projection:    ACPFinalizationProjection{ProjectionKind: "TaskTerminalStatus", Payload: payload, AvailableAt: time.Now().UTC()},
+		Projection:    ACPFinalizationProjection{ProjectionKind: taskTerminalProjectionKind, Payload: payload, AvailableAt: time.Now().UTC()},
 		FinalizedAt:   time.Now().UTC(),
 	})
 	if err == nil {
@@ -905,7 +915,7 @@ func (d *ACPDispatcher) finalizeTaskSessionUnknown(ctx context.Context, task *co
 	}
 	_, err = d.Sessions.FinalizeOutcomeUnknown(ctx, ACPFinalizeOutcomeUnknownRequest{
 		SessionTurn: *session.Turn, Fence: fence, Reason: reason,
-		Projection:  ACPFinalizationProjection{ProjectionKind: "TaskTerminalStatus", Payload: payload, AvailableAt: time.Now().UTC()},
+		Projection:  ACPFinalizationProjection{ProjectionKind: taskTerminalProjectionKind, Payload: payload, AvailableAt: time.Now().UTC()},
 		FinalizedAt: time.Now().UTC(),
 	})
 	if err == nil {
@@ -941,7 +951,7 @@ func (d *ACPDispatcher) finalizeTaskSessionMarker(
 	}
 	_, err = d.Sessions.FinalizeOutcomeMarker(ctx, ACPFinalizeOutcomeMarkerRequest{
 		SessionTurn: *session.Turn, Fence: fence, Kind: kind, Reason: reason,
-		Projection:  ACPFinalizationProjection{ProjectionKind: "TaskTerminalStatus", Payload: payload, AvailableAt: time.Now().UTC()},
+		Projection:  ACPFinalizationProjection{ProjectionKind: taskTerminalProjectionKind, Payload: payload, AvailableAt: time.Now().UTC()},
 		FinalizedAt: time.Now().UTC(),
 	})
 	if err == nil {

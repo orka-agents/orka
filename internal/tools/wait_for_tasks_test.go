@@ -15,6 +15,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -1350,4 +1351,42 @@ func (s *fakeWaitResultStore) GetResult(_ context.Context, _, taskName string) (
 		return nil, fmt.Errorf("result not found")
 	}
 	return []byte(value), nil
+}
+
+func TestWaitForTasksTool_Execute_ClampsToContextDeadline(t *testing.T) {
+	t.Setenv(envOrkaTaskNamespace, testNamespace)
+	running := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTaskAName, Namespace: testNamespace},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, AgentRef: &corev1alpha1.AgentReference{Name: "agent-a"}},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(running).
+		WithStatusSubresource(&corev1alpha1.Task{}).Build()
+	tool := NewWaitForTasksTool(fakeClient)
+	argsJSON, err := json.Marshal(WaitForTasksArgs{Tasks: []string{testTaskAName}, Timeout: "10m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An enclosing execution budget shorter than the requested wait must
+	// still produce the tool's in-progress result rather than a cancellation.
+	ctx, cancel := context.WithTimeout(context.Background(), waitForTasksDeadlineGrace+3*time.Second)
+	defer cancel()
+	started := time.Now()
+	result, err := tool.Execute(ctx, argsJSON)
+	if err != nil {
+		t.Fatalf("Execute() under a short context deadline returned error: %v", err)
+	}
+	if ctx.Err() != nil {
+		t.Fatal("wait did not return before the context deadline")
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("wait took %s, expected to stop before the context deadline", elapsed)
+	}
+	var got WaitForTasksResult
+	if err := json.Unmarshal([]byte(result), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Completed || len(got.Results) != 1 || got.Results[0].Phase != string(corev1alpha1.TaskPhaseRunning) {
+		t.Fatalf("clamped wait result = %+v, want an in-progress Running result", got)
+	}
 }

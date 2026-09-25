@@ -41,7 +41,7 @@ func (u ArtifactUpload) operation() (artifactcap.OperationRequest, error) {
 }
 
 // Derive a separate key so a v1 named-artifact capability cannot authorize an
-// ACP v2 object operation, even if an operator reused the underlying Secret.
+// Orka harness v2 object operation, even if an operator reused the underlying Secret.
 func artifactUploadKey(bearer string) ([]byte, error) {
 	if len(bearer) < artifactcap.MinSecretBytes {
 		return nil, artifactcap.ErrUnauthorized

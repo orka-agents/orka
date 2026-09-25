@@ -10,6 +10,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const (
+	cliPatchesCommand = "patches"
+)
+
+const (
+	cliListByRepoUse = "list <repo>"
+)
+
 func newSecurityCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "security", Short: "Manage repository security scans"}
 	cmd.AddCommand(newSecurityRepoCmd())
@@ -23,10 +31,11 @@ func newSecurityCmd() *cobra.Command {
 
 func newSecurityRepoCmd() *cobra.Command {
 	return newCRUDResourceCmd(crudResourceSpec{
-		Use:      "repo",
-		Short:    "Manage security repository scan configs",
-		BasePath: "/api/v1/security/repositories",
-		Name:     "repository scan",
+		Use:          "repo",
+		Short:        "Manage security repository scan configs",
+		BasePath:     "/api/v1/security/repositories",
+		Name:         "repository scan",
+		DescribeRows: repositoryScanDescribeRows,
 	})
 }
 
@@ -34,6 +43,7 @@ func newSecurityScanCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "scan", Short: "Run and list security scan runs"}
 	cmd.AddCommand(newSecurityScanRunCmd())
 	cmd.AddCommand(newSecurityScanListCmd())
+	cmd.AddCommand(newSecurityScanStatusCmd())
 	return cmd
 }
 
@@ -59,7 +69,7 @@ func newSecurityScanListCmd() *cobra.Command {
 	var limit int
 	var cursor string
 	cmd := &cobra.Command{
-		Use:   "list <repo>",
+		Use:   cliListByRepoUse,
 		Short: "List security scan runs",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -74,7 +84,7 @@ func newSecurityScanListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printStructured(cmd, result)
+			return printListWith(cmd, result, printScanRunsTable)
 		},
 	}
 	addOutputFlag(cmd, outputTable)
@@ -103,10 +113,10 @@ func newSecurityThreatModelGetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printStructured(cmd, result)
+			return printListWith(cmd, result, printThreatModel)
 		},
 	}
-	addOutputFlag(cmd, outputJSON)
+	addOutputFlag(cmd, outputTable)
 	return cmd
 }
 
@@ -127,7 +137,7 @@ func newSecurityThreatModelUpdateCmd() *cobra.Command {
 			if content == "" {
 				return fmt.Errorf("--content or --file is required")
 			}
-			body, _ := json.Marshal(map[string]string{"content": content, "source": source})
+			body, _ := json.Marshal(map[string]string{cliContentKey: content, "source": source})
 			c := newClientFromCmd(cmd)
 			path := "/api/v1/security/repositories/" + url.PathEscape(args[0]) + "/threat-model"
 			result, err := c.DoJSON(context.Background(), http.MethodPut, path, nil, body)
@@ -139,7 +149,7 @@ func newSecurityThreatModelUpdateCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&file, "file", "f", "", "Path to threat model content")
-	cmd.Flags().StringVar(&content, "content", "", "Threat model content")
+	cmd.Flags().StringVar(&content, cliContentKey, "", "Threat model content")
 	cmd.Flags().StringVar(&source, "source", "edited", "Threat model source")
 	return cmd
 }
@@ -148,7 +158,7 @@ func newSecurityFindingCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "finding", Short: "Manage security findings"}
 	cmd.AddCommand(newSecurityFindingListCmd())
 	cmd.AddCommand(newSecurityFindingGetCmd())
-	for _, action := range []string{"dismiss", "reopen", "validate", "patch", "patches", "pr"} {
+	for _, action := range []string{"dismiss", "reopen", "validate", cliIntentPatch, cliPatchesCommand, "pr"} {
 		cmd.AddCommand(newSecurityFindingActionCmd(action))
 	}
 	return cmd
@@ -159,7 +169,7 @@ func newSecurityFindingListCmd() *cobra.Command {
 	var cursor, sliceID, category, severity, validationStatus, state string
 	var recommended bool
 	cmd := &cobra.Command{
-		Use:   "list <repo>",
+		Use:   cliListByRepoUse,
 		Short: "List security findings",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -183,7 +193,7 @@ func newSecurityFindingListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printStructured(cmd, result)
+			return printListWith(cmd, result, printFindingsTable)
 		},
 	}
 	addOutputFlag(cmd, outputTable)
@@ -201,7 +211,7 @@ func newSecurityFindingListCmd() *cobra.Command {
 
 func newSecurityFindingGetCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "get <id>",
+		Use:   cliGetByIDUse,
 		Short: "Get a security finding",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -211,10 +221,10 @@ func newSecurityFindingGetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printStructured(cmd, result)
+			return printDescribed(cmd, result, findingDescribeRows)
 		},
 	}
-	addOutputFlag(cmd, outputJSON)
+	addOutputFlag(cmd, outputTable)
 	return cmd
 }
 
@@ -224,7 +234,7 @@ func newSecurityFindingActionCmd(action string) *cobra.Command {
 	method := http.MethodPost
 	pathSuffix := action
 	switch action {
-	case "patches":
+	case cliPatchesCommand:
 		method = http.MethodGet
 		short = "List security patch proposals"
 	case "pr":
@@ -246,15 +256,20 @@ func newSecurityFindingActionCmd(action string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if method == http.MethodGet || action == "patch" || action == "pr" {
-				return printStructured(cmd, result)
+			switch action {
+			case cliPatchesCommand:
+				return printListWith(cmd, result, printPatchProposalsTable)
+			case cliIntentPatch:
+				return printDescribed(cmd, result, patchProposalDescribeRows)
+			case "pr":
+				return printListWith(cmd, result, printPullRequestReceipt)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Security finding %s: %s\n", action, args[0]) //nolint:errcheck
 			return nil
 		},
 	}
-	if action == "patches" || action == "patch" || action == "pr" {
-		addOutputFlag(cmd, outputJSON)
+	if action == cliPatchesCommand || action == cliIntentPatch || action == "pr" {
+		addOutputFlag(cmd, outputTable)
 	}
 	return cmd
 }
@@ -270,7 +285,7 @@ func newSecuritySliceListCmd() *cobra.Command {
 	var limit int
 	var cursor, status string
 	cmd := &cobra.Command{
-		Use:   "list <repo>",
+		Use:   cliListByRepoUse,
 		Short: "List security review slices",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -311,10 +326,10 @@ func newSecuritySliceGetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printStructured(cmd, result)
+			return printDescribed(cmd, result, sliceDescribeRows)
 		},
 	}
-	addOutputFlag(cmd, outputJSON)
+	addOutputFlag(cmd, outputTable)
 	return cmd
 }
 
@@ -323,7 +338,7 @@ func newSecurityDroppedFindingsCmd() *cobra.Command {
 	var limit int
 	var cursor, layer, reason, scanRunID, sliceID string
 	list := &cobra.Command{
-		Use:   "list <repo>",
+		Use:   cliListByRepoUse,
 		Short: "List dropped security findings",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -343,7 +358,7 @@ func newSecurityDroppedFindingsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printStructured(cmd, result)
+			return printListWith(cmd, result, printDroppedFindingsTable)
 		},
 	}
 	addOutputFlag(list, outputTable)

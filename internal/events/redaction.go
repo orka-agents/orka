@@ -245,6 +245,7 @@ func isExecutionEventTokenUsageKey(normalized string) bool {
 		"inputtokens",
 		"outputtokens",
 		"cachedinputtokens",
+		"cachewriteinputtokens",
 		"totaltokens",
 		"totaltokencount",
 		"tokencount",
@@ -261,7 +262,7 @@ func sanitizeExecutionEventJSONValue(value any) any {
 	case map[string]any:
 		out := make(map[string]any, len(typed))
 		for key, child := range typed {
-			if isExecutionEventTokenUsageKey(normalizeExecutionEventKey(key)) && !isExecutionEventNumericValue(child) {
+			if isExecutionEventTokenUsageKey(normalizeExecutionEventKey(key)) && child != nil && !isExecutionEventNumericValue(child) {
 				out[key] = ExecutionEventRedactedValue
 				continue
 			}

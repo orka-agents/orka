@@ -9,6 +9,7 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as UsageRouteImport } from './routes/usage'
 import { Route as RuntimeSimulatorRouteImport } from './routes/runtime-simulator'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as LiveRouteImport } from './routes/live'
@@ -37,6 +38,11 @@ import { Route as SecurityFindingsFindingIdRouteImport } from './routes/security
 import { Route as MonitorsCreateNewRouteImport } from './routes/monitors/create/new'
 import { Route as GatewaysBindingsBindingIdRouteImport } from './routes/gateways/bindings/$bindingId'
 
+const UsageRoute = UsageRouteImport.update({
+  id: '/usage',
+  path: '/usage',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const RuntimeSimulatorRoute = RuntimeSimulatorRouteImport.update({
   id: '/runtime-simulator',
   path: '/runtime-simulator',
@@ -182,6 +188,7 @@ export interface FileRoutesByFullPath {
   '/live': typeof LiveRoute
   '/login': typeof LoginRoute
   '/runtime-simulator': typeof RuntimeSimulatorRoute
+  '/usage': typeof UsageRoute
   '/agents/$agentId': typeof AgentsAgentIdRoute
   '/agents/new': typeof AgentsNewRoute
   '/gateways/$gatewayId': typeof GatewaysGatewayIdRoute
@@ -211,6 +218,7 @@ export interface FileRoutesByTo {
   '/live': typeof LiveRoute
   '/login': typeof LoginRoute
   '/runtime-simulator': typeof RuntimeSimulatorRoute
+  '/usage': typeof UsageRoute
   '/agents/$agentId': typeof AgentsAgentIdRoute
   '/agents/new': typeof AgentsNewRoute
   '/gateways/$gatewayId': typeof GatewaysGatewayIdRoute
@@ -241,6 +249,7 @@ export interface FileRoutesById {
   '/live': typeof LiveRoute
   '/login': typeof LoginRoute
   '/runtime-simulator': typeof RuntimeSimulatorRoute
+  '/usage': typeof UsageRoute
   '/agents/$agentId': typeof AgentsAgentIdRoute
   '/agents/new': typeof AgentsNewRoute
   '/gateways/$gatewayId': typeof GatewaysGatewayIdRoute
@@ -272,6 +281,7 @@ export interface FileRouteTypes {
     | '/live'
     | '/login'
     | '/runtime-simulator'
+    | '/usage'
     | '/agents/$agentId'
     | '/agents/new'
     | '/gateways/$gatewayId'
@@ -301,6 +311,7 @@ export interface FileRouteTypes {
     | '/live'
     | '/login'
     | '/runtime-simulator'
+    | '/usage'
     | '/agents/$agentId'
     | '/agents/new'
     | '/gateways/$gatewayId'
@@ -330,6 +341,7 @@ export interface FileRouteTypes {
     | '/live'
     | '/login'
     | '/runtime-simulator'
+    | '/usage'
     | '/agents/$agentId'
     | '/agents/new'
     | '/gateways/$gatewayId'
@@ -360,6 +372,7 @@ export interface RootRouteChildren {
   LiveRoute: typeof LiveRoute
   LoginRoute: typeof LoginRoute
   RuntimeSimulatorRoute: typeof RuntimeSimulatorRoute
+  UsageRoute: typeof UsageRoute
   AgentsAgentIdRoute: typeof AgentsAgentIdRoute
   AgentsNewRoute: typeof AgentsNewRoute
   GatewaysGatewayIdRoute: typeof GatewaysGatewayIdRoute
@@ -385,6 +398,13 @@ export interface RootRouteChildren {
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/usage': {
+      id: '/usage'
+      path: '/usage'
+      fullPath: '/usage'
+      preLoaderRoute: typeof UsageRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/runtime-simulator': {
       id: '/runtime-simulator'
       path: '/runtime-simulator'
@@ -584,6 +604,7 @@ const rootRouteChildren: RootRouteChildren = {
   LiveRoute: LiveRoute,
   LoginRoute: LoginRoute,
   RuntimeSimulatorRoute: RuntimeSimulatorRoute,
+  UsageRoute: UsageRoute,
   AgentsAgentIdRoute: AgentsAgentIdRoute,
   AgentsNewRoute: AgentsNewRoute,
   GatewaysGatewayIdRoute: GatewaysGatewayIdRoute,

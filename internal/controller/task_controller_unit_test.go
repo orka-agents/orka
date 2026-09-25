@@ -152,6 +152,10 @@ func (s failingExecutionEventStore) GetLatestExecutionEventSeq(context.Context, 
 	return 0, s.err
 }
 
+func (s failingExecutionEventStore) GetLatestExecutionEventSeqs(context.Context, string, string, []string) (map[string]int64, error) {
+	return nil, s.err
+}
+
 func (s failingExecutionEventStore) DeleteExecutionEvents(context.Context, string, string, string) error {
 	return s.err
 }
@@ -7226,6 +7230,10 @@ func (failingTaskExecutionEventStore) ListSessionExecutionEvents(
 
 func (failingTaskExecutionEventStore) GetLatestExecutionEventSeq(context.Context, string, string, string) (int64, error) {
 	return 0, errors.New("not implemented")
+}
+
+func (failingTaskExecutionEventStore) GetLatestExecutionEventSeqs(context.Context, string, string, []string) (map[string]int64, error) {
+	return nil, errors.New("not implemented")
 }
 
 func (failingTaskExecutionEventStore) DeleteExecutionEvents(context.Context, string, string, string) error {

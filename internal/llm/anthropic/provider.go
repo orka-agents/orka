@@ -20,9 +20,13 @@ import (
 )
 
 type streamUsageState struct {
-	InputTokens int
-	Model       string
-	Provider    string
+	InputTokens           int
+	OutputTokens          int
+	InputReported         bool
+	CachedInputTokens     *int64
+	CacheWriteInputTokens *int64
+	Model                 string
+	Provider              string
 }
 
 func init() {
@@ -44,6 +48,7 @@ func NewProvider(config llm.ProviderConfig) (*Provider, error) {
 
 	opts := []option.RequestOption{
 		option.WithAPIKey(config.APIKey),
+		option.WithMiddleware(llm.UsageHTTPMiddleware),
 	}
 
 	if config.BaseURL != "" {
@@ -83,12 +88,16 @@ func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*l
 
 	// Convert response
 	resp := &llm.CompletionResponse{
-		Provider:     p.TelemetryProviderName(),
-		ID:           message.ID,
-		Model:        message.Model,
-		StopReason:   string(message.StopReason),
-		InputTokens:  int(message.Usage.InputTokens),
-		OutputTokens: int(message.Usage.OutputTokens),
+		Provider:              p.TelemetryProviderName(),
+		ID:                    message.ID,
+		Model:                 message.Model,
+		StopReason:            string(message.StopReason),
+		InputTokens:           int(message.Usage.InputTokens),
+		OutputTokens:          int(message.Usage.OutputTokens),
+		InputExcludesCache:    true,
+		UsageReported:         message.Usage.JSON.InputTokens.Valid() && message.Usage.JSON.OutputTokens.Valid(),
+		CachedInputTokens:     llm.ReportedTokenCount(message.Usage.CacheReadInputTokens, message.Usage.JSON.CacheReadInputTokens.Valid()),
+		CacheWriteInputTokens: llm.ReportedTokenCount(message.Usage.CacheCreationInputTokens, message.Usage.JSON.CacheCreationInputTokens.Valid()),
 	}
 
 	// Extract content and tool calls
@@ -214,8 +223,18 @@ func handleStreamEvent(
 	case anthropic.MessageStartEvent:
 		if usage != nil {
 			usage.InputTokens = int(e.Message.Usage.InputTokens)
+			usage.InputReported = e.Message.Usage.JSON.InputTokens.Valid()
+			usage.OutputTokens = int(e.Message.Usage.OutputTokens)
+			usage.CachedInputTokens = llm.ReportedTokenCount(e.Message.Usage.CacheReadInputTokens, e.Message.Usage.JSON.CacheReadInputTokens.Valid())
+			usage.CacheWriteInputTokens = llm.ReportedTokenCount(e.Message.Usage.CacheCreationInputTokens, e.Message.Usage.JSON.CacheCreationInputTokens.Valid())
 			usage.Model = e.Message.Model
 			usage.Provider = genai.ProviderAnthropic
+			if !send(llm.StreamChunk{InputTokens: usage.InputTokens, OutputTokens: usage.OutputTokens,
+				CachedInputTokens: usage.CachedInputTokens, CacheWriteInputTokens: usage.CacheWriteInputTokens,
+				UsageReported: usage.InputReported && e.Message.Usage.JSON.OutputTokens.Valid(), InputExcludesCache: true,
+				Model: usage.Model, Provider: usage.Provider}) {
+				return false
+			}
 		}
 	case anthropic.ContentBlockStartEvent:
 		cb := e.ContentBlock
@@ -257,9 +276,19 @@ func handleStreamEvent(
 			stopReason = "tool_use"
 		}
 		inputTokens := int(e.Usage.InputTokens)
+		inputReported := e.Usage.JSON.InputTokens.Valid()
+		cached := llm.ReportedTokenCount(e.Usage.CacheReadInputTokens, e.Usage.JSON.CacheReadInputTokens.Valid())
+		cacheWrite := llm.ReportedTokenCount(e.Usage.CacheCreationInputTokens, e.Usage.JSON.CacheCreationInputTokens.Valid())
 		model := ""
 		provider := genai.ProviderAnthropic
 		if usage != nil {
+			inputReported = inputReported || usage.InputReported
+			if cached == nil {
+				cached = usage.CachedInputTokens
+			}
+			if cacheWrite == nil {
+				cacheWrite = usage.CacheWriteInputTokens
+			}
 			if inputTokens == 0 {
 				inputTokens = usage.InputTokens
 			}
@@ -269,12 +298,16 @@ func handleStreamEvent(
 			}
 		}
 		if !send(llm.StreamChunk{
-			Done:         true,
-			StopReason:   stopReason,
-			InputTokens:  inputTokens,
-			OutputTokens: int(e.Usage.OutputTokens),
-			Model:        model,
-			Provider:     provider,
+			Done:                  true,
+			StopReason:            stopReason,
+			InputTokens:           inputTokens,
+			OutputTokens:          int(e.Usage.OutputTokens),
+			CachedInputTokens:     cached,
+			CacheWriteInputTokens: cacheWrite,
+			InputExcludesCache:    true,
+			UsageReported:         inputReported && e.Usage.JSON.OutputTokens.Valid(),
+			Model:                 model,
+			Provider:              provider,
 		}) {
 			return false
 		}

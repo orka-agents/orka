@@ -165,7 +165,7 @@ func (r *ToolReconciler) validateToolHTTPURL(rawURL string) error {
 		return fmt.Errorf("http.url is required")
 	}
 	parsedURL, err := url.Parse(rawURL)
-	if err != nil || parsedURL.Host == "" || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
+	if err != nil || parsedURL.Host == "" || (parsedURL.Scheme != urlSchemeHTTP && parsedURL.Scheme != "https") {
 		return fmt.Errorf("invalid http.url")
 	}
 	if parsedURL.User != nil {
@@ -277,10 +277,10 @@ func (r *ToolReconciler) validateToolHTTPAuth(ctx context.Context, tool *corev1a
 	}
 
 	// Validate authInject + authBodyKey combination
-	if tool.Spec.HTTP.AuthInject == "body" && tool.Spec.HTTP.AuthBodyKey == "" {
+	if tool.Spec.HTTP.AuthInject == repositoryScanPullRequestBodyField && tool.Spec.HTTP.AuthBodyKey == "" {
 		return fmt.Errorf("authBodyKey is required when authInject is 'body'")
 	}
-	if tool.Spec.MCP != nil && tool.Spec.MCP.SubstrateActor != nil && tool.Spec.HTTP.AuthInject == "body" {
+	if tool.Spec.MCP != nil && tool.Spec.MCP.SubstrateActor != nil && tool.Spec.HTTP.AuthInject == repositoryScanPullRequestBodyField {
 		return fmt.Errorf("MCP tools do not support authInject=body")
 	}
 
@@ -338,6 +338,7 @@ func (r *ToolReconciler) substrateMCPTemplateRequest(tool *corev1alpha1.Tool) *E
 	}
 }
 
+//nolint:gocyclo // Tool admission and Actor lifecycle checks must complete before publishing readiness.
 func (r *ToolReconciler) reconcileSubstrateMCPTool(ctx context.Context, tool *corev1alpha1.Tool) (ctrl.Result, error) {
 	actorSpec := tool.Spec.MCP.SubstrateActor
 	templateRequest := r.substrateMCPTemplateRequest(tool)
@@ -1555,7 +1556,7 @@ func sensitiveURLParameter(name string) bool {
 		strings.Contains(normalized, "apikey") {
 		return true
 	}
-	if normalized == "token" {
+	if normalized == defaultACPWorkspaceCredentialKey {
 		return true
 	}
 	if !strings.HasSuffix(normalized, "-token") {

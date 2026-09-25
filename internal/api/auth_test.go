@@ -1224,6 +1224,11 @@ func TestParseServiceAccountNamespace(t *testing.T) {
 		{"partial prefix", "system:serviceaccount:", ""},
 		{"missing name part", "system:serviceaccount:ns", ""},
 		{"empty namespace", "system:serviceaccount::sa", ""},
+		{"empty name", "system:serviceaccount:ns:", ""},
+		{"extra colon", "system:serviceaccount:ns:sa:extra", ""},
+		{"invalid namespace", "system:serviceaccount:../ns:sa", ""},
+		{"invalid name", "system:serviceaccount:ns:sa/name", ""},
+		{"valid dotted name", "system:serviceaccount:ns:chat.client", "ns"},
 	}
 
 	for _, tt := range tests {

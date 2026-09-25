@@ -342,13 +342,23 @@ func TestFoundryProfileHasOnlyFrozenBrokeredCapabilities(t *testing.T) {
 		t.Fatal("Foundry child command is not fixed")
 	}
 	capabilities := providerCapabilities(providerKindFoundry, "gpt-test")
-	if capabilities.SupportsPermissions || capabilities.SupportsImages || capabilities.SupportsAudio || capabilities.SupportsEmbeddedResources || !capabilities.SupportsCancel || !capabilities.SupportsTools {
+	if capabilities.SupportsPermissions || capabilities.SupportsBrokeredToolApprovals || capabilities.SupportsImages || capabilities.SupportsAudio || capabilities.SupportsEmbeddedResources || !capabilities.SupportsCancel || !capabilities.SupportsTools {
 		t.Fatal("Foundry advertised capabilities its ACP child does not provide")
 	}
 	request := agentKitBrokeredProjectionRequest(t)
 	request.Profile.ProviderKind = providerKindFoundry
 	if _, err := profile.ProjectSession(request, acp.SessionPaths{}, ProviderProxyBinding{}); err != nil {
 		t.Fatal(err)
+	}
+	request.MCPConfiguration.ApprovalPolicy.RequiredTools = []string{"lookup"}
+	approvalDigest, err := harnessv2.CanonicalMCPApprovalPolicyDigest(request.MCPConfiguration.ApprovalPolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.MCPConfiguration.ApprovalPolicyDigest = approvalDigest
+	request.Profile.ApprovalPolicyDigest = approvalDigest
+	if _, err := profile.ProjectSession(request, acp.SessionPaths{}, ProviderProxyBinding{}); err != nil {
+		t.Fatalf("Foundry approval-required tool error = %v", err)
 	}
 	request.AgentConfiguration = &harnessv2.AgentSessionConfiguration{}
 	if _, err := profile.ProjectSession(request, acp.SessionPaths{}, ProviderProxyBinding{}); err == nil {
@@ -525,6 +535,11 @@ func assertFoundryDeletionReplay(t *testing.T, server *Server, cfg Config, delet
 
 func newFoundryTestServer(t *testing.T, handler http.Handler) (*Server, Config, harnessv2.CreateRuntimeSessionRequest) {
 	t.Helper()
+	return newFoundryTestServerWithRecovery(t, handler, false)
+}
+
+func newFoundryTestServerWithRecovery(t *testing.T, handler http.Handler, recovery bool) (*Server, Config, harnessv2.CreateRuntimeSessionRequest) {
+	t.Helper()
 	upstream := httptest.NewServer(handler)
 	t.Cleanup(upstream.Close)
 	cfg, profile := newTestConfigWithUpstream(t, "immediate", upstream.URL+"/v1", testUpstreamToken)
@@ -539,6 +554,7 @@ func newFoundryTestServer(t *testing.T, handler http.Handler) (*Server, Config, 
 	cfg.Capabilities.RuntimeProfileDigest = profileDigest
 	cfg.Capabilities.AdapterDigests = profile.AdapterDigests
 	cfg.Capabilities.SupportsAgentSessionConfiguration = false
+	cfg.Capabilities.SupportsFoundryRecovery = recovery
 	cfg.Capabilities.Provider = providerCapabilities(providerKindFoundry, profile.Model)
 	cfg.Provider.Kind = providerKindFoundry
 	cfg.Provider.AdapterName = foundryAdapterName

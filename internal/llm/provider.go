@@ -59,14 +59,18 @@ type JSONSchemaFormat struct {
 
 // CompletionResponse represents a completion response
 type CompletionResponse struct {
-	Content      string     `json:"content"`
-	ToolCalls    []ToolCall `json:"tool_calls,omitempty"`
-	StopReason   string     `json:"stop_reason"`
-	InputTokens  int        `json:"input_tokens"`
-	OutputTokens int        `json:"output_tokens"`
-	Model        string     `json:"model"`
-	Provider     string     `json:"provider,omitempty"`
-	ID           string     `json:"id,omitempty"`
+	Content               string     `json:"content"`
+	ToolCalls             []ToolCall `json:"tool_calls,omitempty"`
+	StopReason            string     `json:"stop_reason"`
+	InputTokens           int        `json:"input_tokens"`
+	OutputTokens          int        `json:"output_tokens"`
+	CachedInputTokens     *int64     `json:"cached_input_tokens,omitempty"`
+	CacheWriteInputTokens *int64     `json:"cache_write_input_tokens,omitempty"`
+	InputExcludesCache    bool       `json:"-"`
+	UsageReported         bool       `json:"usage_reported,omitempty"`
+	Model                 string     `json:"model"`
+	Provider              string     `json:"provider,omitempty"`
+	ID                    string     `json:"id,omitempty"`
 }
 
 // CompletionOutcome describes the provider-neutral result of a completion.
@@ -143,15 +147,19 @@ type ToolCall struct {
 
 // StreamChunk represents a chunk of a streaming response
 type StreamChunk struct {
-	Content      string    `json:"content,omitempty"`
-	ToolCall     *ToolCall `json:"tool_call,omitempty"`
-	Done         bool      `json:"done"`
-	StopReason   string    `json:"stop_reason,omitempty"`
-	Provider     string    `json:"provider,omitempty"`
-	Model        string    `json:"model,omitempty"`
-	InputTokens  int       `json:"input_tokens,omitempty"`
-	OutputTokens int       `json:"output_tokens,omitempty"`
-	Error        error     `json:"error,omitempty"`
+	Content               string    `json:"content,omitempty"`
+	ToolCall              *ToolCall `json:"tool_call,omitempty"`
+	Done                  bool      `json:"done"`
+	StopReason            string    `json:"stop_reason,omitempty"`
+	Provider              string    `json:"provider,omitempty"`
+	Model                 string    `json:"model,omitempty"`
+	InputTokens           int       `json:"input_tokens,omitempty"`
+	OutputTokens          int       `json:"output_tokens,omitempty"`
+	CachedInputTokens     *int64    `json:"cached_input_tokens,omitempty"`
+	CacheWriteInputTokens *int64    `json:"cache_write_input_tokens,omitempty"`
+	InputExcludesCache    bool      `json:"-"`
+	UsageReported         bool      `json:"usage_reported,omitempty"`
+	Error                 error     `json:"error,omitempty"`
 }
 
 // ProviderConfig holds configuration for creating a provider
@@ -179,7 +187,11 @@ func NewProvider(name string, config ProviderConfig) (Provider, error) {
 	if !ok {
 		return nil, ErrUnknownProvider
 	}
-	return factory(config)
+	provider, err := factory(config)
+	if err != nil {
+		return nil, err
+	}
+	return &usageProvider{Provider: provider}, nil
 }
 
 // Error types
@@ -221,7 +233,7 @@ func (e *ProviderError) IsContextTooLong() bool {
 
 // ShouldRetry reports whether the operation that produced err should be retried.
 func ShouldRetry(err error) bool {
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+	if IsUsagePersistenceError(err) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return false
 	}
 	if pe, ok := errors.AsType[*ProviderError](err); ok {
@@ -232,7 +244,7 @@ func ShouldRetry(err error) bool {
 
 // ShouldFallback reports whether a different provider should be tried.
 func ShouldFallback(err error) bool {
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+	if IsUsagePersistenceError(err) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return false
 	}
 	if pe, ok := errors.AsType[*ProviderError](err); ok {
@@ -243,6 +255,9 @@ func ShouldFallback(err error) bool {
 
 // IsContextTooLongErr reports whether err indicates the context/token limit was exceeded.
 func IsContextTooLongErr(err error) bool {
+	if IsUsagePersistenceError(err) {
+		return false
+	}
 	if pe, ok := errors.AsType[*ProviderError](err); ok {
 		return pe.IsContextTooLong()
 	}

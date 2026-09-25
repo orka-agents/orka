@@ -342,10 +342,10 @@ func TestCheckAllowsApprovalFreeBrokeredPolicyWithoutPermissionSupport(t *testin
 	}
 }
 
-func TestCheckRejectsApprovalPolicyWithoutPermissionSupport(t *testing.T) {
+func TestCheckRejectsApprovalPolicyWithoutBrokeredApprovalSupport(t *testing.T) {
 	target, config := testTargetAndConfig(t)
 	setTestConformanceMCPPolicy(t, &target, &config, harnessv2.MCPApprovalPolicy{RequiredTools: []string{"lookup"}})
-	supportsPermissions := false
+	supportsPermissions := true
 	config.SupportsPermissions = &supportsPermissions
 	server, err := conformancetest.NewServer(config)
 	if err != nil {
@@ -355,8 +355,28 @@ func TestCheckRejectsApprovalPolicyWithoutPermissionSupport(t *testing.T) {
 	target.BaseURL = server.URL()
 
 	result := conformance.Check(t.Context(), target)
-	if result.Passed || !strings.Contains(result.Message, "policy requires permission support") {
-		t.Fatalf("Check() = %#v, want permission-capability rejection", result)
+	if result.Passed || !strings.Contains(result.Message, "policy requires brokered tool approval support") {
+		t.Fatalf("Check() = %#v, want brokered approval capability rejection", result)
+	}
+}
+
+func TestCheckAllowsBrokeredApprovalPolicyWithoutNativePermissionSupport(t *testing.T) {
+	target, config := testTargetAndConfig(t)
+	target.Profile.ProviderKind = "agentkit"
+	setTestConformanceMCPPolicy(t, &target, &config, harnessv2.MCPApprovalPolicy{RequiredTools: []string{"lookup"}})
+	supportsPermissions := false
+	config.SupportsPermissions = &supportsPermissions
+	config.SupportsBrokeredToolApprovals = true
+	server, err := conformancetest.NewServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	target.BaseURL = server.URL()
+
+	result := conformance.Check(t.Context(), target)
+	if !result.Passed {
+		t.Fatalf("Check() failed for brokered approval policy without native permissions: %s", result.Message)
 	}
 }
 

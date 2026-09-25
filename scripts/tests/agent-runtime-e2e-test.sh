@@ -452,7 +452,7 @@ jq -e '
   and .status.activeInstance.runtimeInstanceID == "pod-uid.boot-id"
 ' "${profile_output}" >/dev/null
 
-grep -F 'wait_until_fast "RuntimePool/${pool} complete stable ACP v2 ${provider}/${intent} profile projection"' \
+grep -F 'wait_until_fast "RuntimePool/${pool} complete stable Orka harness v2 ${provider}/${intent} profile projection"' \
   "${script}" >/dev/null
 grep -F 'wait_pool_profile_projection "${pool}" "${provider}" "${model}" "${intent}" "${pool_file}"' \
   "${script}" >/dev/null

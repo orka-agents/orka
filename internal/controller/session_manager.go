@@ -174,7 +174,7 @@ func (m *SessionManager) createSession(ctx context.Context, task *corev1alpha1.T
 	session := &store.SessionRecord{
 		Namespace:     task.Namespace,
 		Name:          task.Spec.SessionRef.Name,
-		SessionType:   "task",
+		SessionType:   acpCancelLogKeyTask,
 		ActiveTask:    task.Name,
 		ActiveTaskUID: string(task.UID),
 		CreatedAt:     now,
@@ -328,7 +328,7 @@ func (m *SessionManager) DeleteSession(ctx context.Context, namespace, name stri
 	}
 	operationID := store.CanonicalControlID("session-cleanup", namespace, name)
 	operationDigest, err := acpDomainDigest("session-cleanup", map[string]string{
-		"namespace": namespace, "sessionName": name, "operationID": operationID,
+		acpCancelLogKeyNamespace: namespace, "sessionName": name, "operationID": operationID,
 	})
 	if err != nil {
 		return err

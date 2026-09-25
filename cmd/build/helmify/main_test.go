@@ -131,6 +131,29 @@ func staticChartDefaultArgs() []string {
 	}
 }
 
+func TestStaticChartGatewayInterimMessagesPerTask(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"default", nil, "--gateway-interim-messages-per-task=10"},
+		{
+			"override", []string{"--set", "controller.gateway.interimMessagesPerTask=3"},
+			"--gateway-interim-messages-per-task=3",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			args := append([]string{"--show-only", "templates/deployment.yaml"}, tt.args...)
+			rendered := requireHelmRender(t, args...)
+			count := strings.Count(rendered, "--gateway-interim-messages-per-task=")
+			if !strings.Contains(rendered, tt.want+"\n") || count != 1 {
+				t.Fatalf("rendered controller must have exactly one %q argument", tt.want)
+			}
+		})
+	}
+}
+
 func TestStaticChartGrantsSessionAuthorizationRBAC(t *testing.T) {
 	output, err := helmTemplateStaticChart(t, "--show-only", "templates/rbac.yaml")
 	if err != nil {

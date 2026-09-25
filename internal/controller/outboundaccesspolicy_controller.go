@@ -34,6 +34,10 @@ import (
 	"github.com/orka-agents/orka/internal/outboundaccess"
 )
 
+const (
+	rbacRoleKind = "Role"
+)
+
 // OutboundAccessPolicyReconciler validates policy structure and references.
 type OutboundAccessPolicyReconciler struct {
 	client.Client
@@ -358,7 +362,7 @@ func (r *OutboundAccessPolicyReconciler) desiredOutboundTokenRequestGrant(
 			Labels:      bindingLabels,
 			Annotations: bindingAnnotations,
 		},
-		RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: name},
+		RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: rbacRoleKind, Name: name},
 		Subjects: []rbacv1.Subject{{
 			Kind:      rbacv1.ServiceAccountKind,
 			Name:      workerServiceAccountName(r.AIWorkerServiceAccountName, AIWorkerServiceAccount),

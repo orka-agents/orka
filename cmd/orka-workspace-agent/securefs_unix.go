@@ -212,9 +212,9 @@ func resetRootMetadata(fd int, path string, setOwner bool, uid, gid uint32) erro
 	mode := uint32(0o755)
 	setCommandOwner := setOwner
 	switch filepath.Clean(path) {
-	case "/app":
+	case applicationRoot:
 		setCommandOwner = false
-	case "/tmp", "/dev/shm":
+	case temporaryRoot, sharedMemoryRoot:
 		mode = 0o1777
 		setCommandOwner = false
 	}
@@ -568,7 +568,7 @@ func securePathParts(value string) (string, []string, string, error) {
 		return "", nil, "", fmt.Errorf("path is required")
 	}
 	if !filepath.IsAbs(value) {
-		value = filepath.Join("/app", value)
+		value = filepath.Join(applicationRoot, value)
 	}
 	clean := filepath.Clean(value)
 	for _, candidate := range allowedRoots {
@@ -608,7 +608,7 @@ func securePathParts(value string) (string, []string, string, error) {
 func logicalAllowedRoot(value string) (string, error) {
 	value = strings.TrimSpace(value)
 	if !filepath.IsAbs(value) {
-		value = filepath.Join("/app", value)
+		value = filepath.Join(applicationRoot, value)
 	}
 	clean := filepath.Clean(value)
 	for _, candidate := range allowedRoots {

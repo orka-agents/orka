@@ -20,7 +20,6 @@ import (
 	"sort"
 	"strings"
 	"syscall"
-	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -62,7 +61,7 @@ func completeTaskStatus(_ *cobra.Command, _ []string, toComplete string) ([]stri
 
 func newTaskCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "task",
+		Use:   cliTaskCommand,
 		Short: "Manage tasks",
 	}
 	cmd.AddCommand(newTaskCreateCmd())
@@ -87,6 +86,7 @@ func newTaskCmd() *cobra.Command {
 	return cmd
 }
 
+//nolint:gocyclo // Keep flag inference and the resulting Task request together.
 func newTaskCreateCmd() *cobra.Command {
 	var taskType, taskName, agent, provider, model, timeout, image, schedule, timezone, file string
 	var commandVals, argVals, envVals []string
@@ -300,94 +300,11 @@ func newTaskCreateCmd() *cobra.Command {
 	return cmd
 }
 
-func newTaskListCmd() *cobra.Command {
-	var status string
-	var transactionID string
-	var limit int
-	var continueToken string
-
-	cmd := &cobra.Command{
-		Use:     "list",
-		Aliases: []string{"ls"},
-		Short:   "List tasks",
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			c := newClientFromCmd(cmd)
-			var tasks []client.TaskSummary
-			if status != "" || transactionID != "" {
-				var truncated bool
-				var err error
-				tasks, truncated, err = listFilteredTasks(
-					context.Background(),
-					c,
-					c.Namespace,
-					limit,
-					func(t client.TaskSummary) bool {
-						if status != "" && !strings.EqualFold(t.Phase, status) {
-							return false
-						}
-						if transactionID != "" && t.TransactionID != transactionID {
-							return false
-						}
-						return true
-					},
-				)
-				if err != nil {
-					return err
-				}
-				if truncated {
-					warnFilteredTaskOutputLimited(limit)
-				}
-			} else {
-				var err error
-				tasks, err = c.ListTasks(context.Background(), client.ListTasksOptions{
-					Namespace: c.Namespace,
-					Limit:     limit,
-					Continue:  continueToken,
-				})
-				if err != nil {
-					return err
-				}
-			}
-
-			format, err := outputFormat(cmd)
-			if err != nil {
-				return err
-			}
-			if format != outputTable {
-				return printStructured(cmd, tasks)
-			}
-
-			if len(tasks) == 0 {
-				fmt.Println("No tasks found.")
-				return nil
-			}
-
-			w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-			fmt.Fprintln(w, "NAME\tTYPE\tSTATUS\tAGE") //nolint:errcheck
-			for _, t := range tasks {
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", t.Name, t.Type, t.Phase, formatAge(t.Age)) //nolint:errcheck
-			}
-			w.Flush() //nolint:errcheck
-			return nil
-		},
-	}
-
-	cmd.Flags().StringVar(&status, "status", "", "Filter by status (client-side scan; may page through many tasks)")
-	_ = cmd.RegisterFlagCompletionFunc("status", completeTaskStatus)
-	cmd.Flags().StringVar(&transactionID, "transaction", "", "Filter by transaction ID (client-side scan)")
-	cmd.Flags().IntVar(&limit, "limit", 20, "Maximum number of results")
-	cmd.Flags().StringVar(&continueToken, "continue", "", "Continue token for the next page")
-	cmd.Flags().StringVar(&continueToken, "cursor", "", "Cursor token for the next page")
-	addOutputFlag(cmd, outputTable)
-
-	return cmd
-}
-
 func newTaskGetCmd() *cobra.Command {
 	var showTransaction bool
 
 	cmd := &cobra.Command{
-		Use:   "get <name>",
+		Use:   cliGetByNameUse,
 		Short: "Get task details",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -413,12 +330,34 @@ func newTaskGetCmd() *cobra.Command {
 				return nil
 			}
 
-			return printStructured(cmd, detail)
+			format, err := outputFormat(cmd)
+			if err != nil {
+				return err
+			}
+			if format != outputTable {
+				return printStructured(cmd, detail)
+			}
+			view := toGenericMap(detail)
+			// The readable view shows the first lines of the stored result;
+			// it lives behind a separate endpoint, so fetch it only for this
+			// view and only when the Task reports one.
+			if len(nestedMap(view, "status", "resultRef")) > 0 {
+				result, err := c.GetTaskResult(context.Background(), args[0], client.GetOptions{Namespace: c.Namespace})
+				switch {
+				case err != nil:
+					// The rest of the view is still useful; say the result
+					// could not be read rather than pretending there is none.
+					view["result"] = "unavailable: " + err.Error()
+				case result != nil:
+					view["result"] = result.Result
+				}
+			}
+			return printDescribe(cmd, taskDescribeRows(view))
 		},
 	}
 
 	cmd.Flags().BoolVar(&showTransaction, "show-transaction", false, "Show only transaction metadata")
-	addOutputFlag(cmd, outputJSON)
+	addOutputFlag(cmd, outputTable)
 	return cmd
 }
 
@@ -519,10 +458,10 @@ func newTaskPlanCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printStructured(cmd, result)
+			return printDescribed(cmd, result, planDescribeRows)
 		},
 	}
-	addOutputFlag(cmd, outputJSON)
+	addOutputFlag(cmd, outputTable)
 	return cmd
 }
 
@@ -619,6 +558,17 @@ func waitForTaskPhase(
 	}
 }
 
+// taskPhaseIsTerminal reports whether a task phase means the task is over,
+// so nothing more (such as an approval request) can come from it.
+func taskPhaseIsTerminal(phase string) bool {
+	for _, terminal := range []corev1alpha1.TaskPhase{corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled} {
+		if strings.EqualFold(phase, string(terminal)) {
+			return true
+		}
+	}
+	return false
+}
+
 // waitContextError maps the polling context's terminal state to the same
 // user-facing errors a deadline without request cancellation would produce.
 func waitContextError(ctx context.Context, taskName string) error {
@@ -630,7 +580,7 @@ func waitContextError(ctx context.Context, taskName string) error {
 
 func newTaskDeleteCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:     "delete <name>",
+		Use:     cliDeleteByNameUse,
 		Aliases: []string{"rm"},
 		Short:   "Delete a task",
 		Args:    cobra.ExactArgs(1),
@@ -655,7 +605,7 @@ func formatAge(timestamp string) string {
 	if err != nil {
 		return timestamp
 	}
-	d := time.Since(t)
+	d := max(time.Since(t), 0)
 	switch {
 	case d < time.Minute:
 		return fmt.Sprintf("%ds", int(d.Seconds()))

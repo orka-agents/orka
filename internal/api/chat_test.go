@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -221,6 +222,9 @@ func newTestResultStore(t *testing.T) store.ResultStore {
 
 func newTestChatHandler(t *testing.T, c client.Client, ss store.SessionStore, rs store.ResultStore, cfg ChatConfig) *ChatHandler {
 	t.Helper()
+	if err := c.Create(t.Context(), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: defaultNamespace, UID: "namespace-uid"}}); !apierrors.IsAlreadyExists(err) {
+		require.NoError(t, err)
+	}
 	resolver := NewProviderResolver(c, cfg)
 	return NewChatHandler(c, nil, nil, cfg, "", false, ss, rs, resolver)
 }

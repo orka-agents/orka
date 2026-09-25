@@ -40,6 +40,65 @@ describe('ToolList', () => {
     })
   })
 
+  it('permission-denied (403) shows an authorization error, not "No tools found."', async () => {
+    server.use(
+      http.get('/api/v1/tools', () =>
+        HttpResponse.json({ error: { code: 403, message: 'not authorized' } }, { status: 403 }),
+      ),
+    )
+
+    render(<ToolList />)
+    await waitFor(() => {
+      expect(screen.getByText('Not authorized to view tools')).toBeInTheDocument()
+    })
+    expect(screen.getByText(/read permission for tools \(not authorized\)/)).toBeInTheDocument()
+    expect(screen.queryByText('No tools found.')).not.toBeInTheDocument()
+    expect(screen.queryByText(/"code":403/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('table')).not.toBeInTheDocument()
+    expect(screen.queryByRole('columnheader', { name: 'Name' })).not.toBeInTheDocument()
+  })
+
+  it('server-error (500) shows a load-failure error, not "No tools found."', async () => {
+    server.use(
+      http.get('/api/v1/tools', () =>
+        HttpResponse.json({ error: { code: 500, message: 'internal server error' } }, { status: 500 }),
+      ),
+    )
+
+    render(<ToolList />)
+    await waitFor(() => {
+      expect(screen.getByText('Could not load tools')).toBeInTheDocument()
+    })
+    expect(screen.getByText('internal server error')).toBeInTheDocument()
+    expect(screen.queryByText('No tools found.')).not.toBeInTheDocument()
+    expect(screen.queryByRole('table')).not.toBeInTheDocument()
+  })
+
+  it('keeps a long error message inside the page instead of overflowing the table', async () => {
+    server.use(
+      http.get('/api/v1/tools', () =>
+        HttpResponse.json(
+          {
+            error: {
+              code: 403,
+              message: 'namespace "orka-system" not allowed, restricted to "default"',
+            },
+          },
+          { status: 403 },
+        ),
+      ),
+    )
+
+    render(<ToolList />)
+    await waitFor(() => {
+      expect(screen.getByText('Not authorized to view tools')).toBeInTheDocument()
+    })
+    // The error replaces the table entirely, so no horizontally scrolling
+    // table container can clip the message.
+    expect(screen.queryByRole('table')).not.toBeInTheDocument()
+    expect(document.querySelector('[data-slot="table-container"]')).toBeNull()
+  })
+
   it('populated table shows tools with correct data', async () => {
     server.use(
       http.get('/api/v1/tools', () =>

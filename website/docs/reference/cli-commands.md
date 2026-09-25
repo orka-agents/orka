@@ -45,6 +45,8 @@ Available Commands:
   substrate     Inspect and manage substrate resources
   task          Manage tasks
   tool          Manage tools
+  usage         Inspect recorded model usage and verified PR outcomes
+  version       Print the CLI version
   workspace     Inspect task workspace status
 
 Flags:
@@ -140,7 +142,7 @@ Usage:
 
 Flags:
   -h, --help            help for get
-  -o, --output string   Output format: table, json, yaml (default "json")
+  -o, --output string   Output format: table, json, yaml (default "table")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -273,7 +275,7 @@ Usage:
 
 Flags:
   -h, --help            help for get
-  -o, --output string   Output format: table, json, yaml (default "json")
+  -o, --output string   Output format: table, json, yaml (default "table")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -411,7 +413,7 @@ Usage:
 
 Flags:
   -h, --help            help for validate
-  -o, --output string   Output format: table, json, yaml (default "json")
+  -o, --output string   Output format: table, json, yaml (default "table")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -432,7 +434,7 @@ Usage:
 
 Flags:
   -h, --help            help for whoami
-  -o, --output string   Output format: table, json, yaml (default "json")
+  -o, --output string   Output format: table, json, yaml (default "table")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -647,7 +649,7 @@ Usage:
 
 Flags:
   -h, --help            help for get
-  -o, --output string   Output format: table, json, yaml (default "json")
+  -o, --output string   Output format: table, json, yaml (default "table")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -718,7 +720,7 @@ Usage:
 
 Flags:
   -h, --help            help for get
-  -o, --output string   Output format: table, json, yaml (default "json")
+  -o, --output string   Output format: table, json, yaml (default "table")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -790,7 +792,7 @@ Usage:
 
 Flags:
   -h, --help            help for get
-  -o, --output string   Output format: table, json, yaml (default "json")
+  -o, --output string   Output format: table, json, yaml (default "table")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -841,7 +843,7 @@ Usage:
 
 Flags:
   -h, --help            help for retry
-  -o, --output string   Output format: table, json, yaml (default "json")
+  -o, --output string   Output format: table, json, yaml (default "table")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -888,7 +890,7 @@ Usage:
 
 Flags:
   -h, --help            help for get
-  -o, --output string   Output format: table, json, yaml (default "json")
+  -o, --output string   Output format: table, json, yaml (default "table")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -938,7 +940,7 @@ Usage:
 
 Flags:
   -h, --help            help for get
-  -o, --output string   Output format: table, json, yaml (default "json")
+  -o, --output string   Output format: table, json, yaml (default "table")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -1122,7 +1124,7 @@ Usage:
 
 Flags:
   -h, --help            help for get
-  -o, --output string   Output format: table, json, yaml (default "json")
+  -o, --output string   Output format: table, json, yaml (default "table")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -1245,7 +1247,7 @@ Usage:
 
 Flags:
   -h, --help            help for get
-  -o, --output string   Output format: table, json, yaml (default "json")
+  -o, --output string   Output format: table, json, yaml (default "table")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -1698,7 +1700,7 @@ Usage:
 
 Flags:
   -h, --help            help for get
-  -o, --output string   Output format: table, json, yaml (default "json")
+  -o, --output string   Output format: table, json, yaml (default "table")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -2918,7 +2920,7 @@ Usage:
 
 Flags:
   -h, --help            help for get
-  -o, --output string   Output format: table, json, yaml (default "json")
+  -o, --output string   Output format: table, json, yaml (default "table")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -3039,7 +3041,7 @@ Usage:
 
 Flags:
   -h, --help            help for get
-  -o, --output string   Output format: table, json, yaml (default "json")
+  -o, --output string   Output format: table, json, yaml (default "table")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -3268,7 +3270,7 @@ Usage:
 
 Flags:
   -h, --help            help for get
-  -o, --output string   Output format: table, json, yaml (default "json")
+  -o, --output string   Output format: table, json, yaml (default "table")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -3319,7 +3321,7 @@ Usage:
 
 Flags:
   -h, --help            help for patch
-  -o, --output string   Output format: table, json, yaml (default "json")
+  -o, --output string   Output format: table, json, yaml (default "table")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -3340,7 +3342,7 @@ Usage:
 
 Flags:
   -h, --help            help for patches
-  -o, --output string   Output format: table, json, yaml (default "json")
+  -o, --output string   Output format: table, json, yaml (default "table")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -3361,7 +3363,7 @@ Usage:
 
 Flags:
   -h, --help            help for pr
-  -o, --output string   Output format: table, json, yaml (default "json")
+  -o, --output string   Output format: table, json, yaml (default "table")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -3492,7 +3494,7 @@ Usage:
 
 Flags:
   -h, --help            help for get
-  -o, --output string   Output format: table, json, yaml (default "json")
+  -o, --output string   Output format: table, json, yaml (default "table")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -3559,6 +3561,7 @@ Usage:
 Available Commands:
   list        List security scan runs
   run         Run a manual security scan
+  status      Show a security scan's progress, stage by stage
 
 Flags:
   -h, --help   help for scan
@@ -3618,6 +3621,35 @@ Global Flags:
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
+## `orka security scan status`
+
+```text
+Show the latest scan run for a repository: its phase, how many slices have
+been reviewed, and one row per pipeline stage with the count of Tasks in each
+phase. Failed Tasks are listed by name under the table.
+
+With --watch the table is reprinted whenever a count changes and the command
+exits when the scan finishes: exit code 0 when it succeeded, 1 when it failed.
+
+Usage:
+  orka security scan status <repo> [flags]
+
+Flags:
+  -h, --help                help for status
+      --interval duration   Refresh interval for --watch (default 5s)
+  -o, --output string       Output format: table, json, yaml (default "table")
+      --scan string         Scan run ID (default: the latest run)
+  -w, --watch               Reprint when progress changes and exit when the scan finishes
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
 ## `orka security slice`
 
 ```text
@@ -3654,7 +3686,7 @@ Usage:
 
 Flags:
   -h, --help            help for get
-  -o, --output string   Output format: table, json, yaml (default "json")
+  -o, --output string   Output format: table, json, yaml (default "table")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -3726,7 +3758,7 @@ Usage:
 
 Flags:
   -h, --help            help for get
-  -o, --output string   Output format: table, json, yaml (default "json")
+  -o, --output string   Output format: table, json, yaml (default "table")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -3812,7 +3844,57 @@ Global Flags:
 ## `orka session events`
 
 ```text
-List session execution events
+List session execution events.
+
+Table rows are cut to the terminal width; --wide prints full messages and
+-o json is never truncated. --tail N keeps only the last N events that match
+the filters, so "what did the agent say last?" is:
+
+  orka task events <task> --type ModelMessage --tail 1
+
+--type accepts these event types (case-insensitive):
+
+  TaskCreated
+  TaskPhaseChanged
+  TaskJobCreated
+  TaskStarted
+  TaskSucceeded
+  TaskFailed
+  TaskCancelled
+  WorkerStarted
+  WorkerCompleted
+  WorkerFailed
+  ModelRequestStarted
+  ModelRequestCompleted
+  ModelRequestFailed
+  ModelUsageUpdated
+  ModelContextUpdated
+  ModelMessage
+  ContextTruncated
+  ToolCallStarted
+  ToolCallCompleted
+  ToolCallFailed
+  WorkspacePreparationStarted
+  WorkspacePreparationCompleted
+  WorkspacePreparationFailed
+  AgentRuntimeStarted
+  AgentRuntimeCommandStarted
+  AgentRuntimeCompleted
+  AgentRuntimeFailed
+  AgentRuntimeCancelled
+  ResultSubmitted
+  GatewayDeliveryCompleted
+  ArtifactUploadCompleted
+  ArtifactUploadFailed
+  TaskForkRequested
+  TaskForkCreated
+  ApprovalRequested
+  ApprovalApproved
+  ApprovalDeclined
+  ApprovalExpired
+  ApprovalCancelled
+  ApprovalExecutionUpdated
+  PlanUpdated
 
 Usage:
   orka session events <session> [flags]
@@ -3822,7 +3904,9 @@ Flags:
   -h, --help               help for events
       --limit int          Maximum events to return (default 100)
   -o, --output string      Output format: table, json, yaml (default "table")
-      --type stringArray   Filter by event type (repeatable; streaming supports repeats)
+      --tail int           Return only the last N matching events
+      --type stringArray   Filter by event type (repeatable; see --help for the names)
+      --wide               Print full messages instead of cutting rows to the terminal width
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -3865,7 +3949,7 @@ Usage:
 
 Flags:
   -h, --help            help for get
-  -o, --output string   Output format: table, json, yaml (default "json")
+  -o, --output string   Output format: table, json, yaml (default "table")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -4004,7 +4088,7 @@ Usage:
 
 Flags:
   -h, --help            help for get
-  -o, --output string   Output format: table, json, yaml (default "json")
+  -o, --output string   Output format: table, json, yaml (default "table")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -4248,7 +4332,7 @@ Usage:
 
 Flags:
   -h, --help            help for get
-  -o, --output string   Output format: table, json, yaml (default "json")
+  -o, --output string   Output format: table, json, yaml (default "table")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -4313,7 +4397,7 @@ Usage:
   orka task [command]
 
 Available Commands:
-  approvals   List task approvals
+  approvals   List task approvals, or wait for one
   approve     Approve a pending task approval
   artifacts   List artifacts for a task
   children    List child tasks
@@ -4329,7 +4413,7 @@ Available Commands:
   logs        Get task logs
   plan        Get task autonomous plan state
   result      Get task result
-  status      Show durable execution, delivery, and runtime-pool status
+  status      Show whether a task finished and where its change went
   trace       Show a task trace summary
   wait        Wait for a task to complete
 
@@ -4350,14 +4434,26 @@ Use "orka task [command] --help" for more information about a command.
 ## `orka task approvals`
 
 ```text
-List task approvals
+List the approval requests recorded for a task: the tool each one wants to
+run, its arguments, and how long a pending request has left. Pass an ID (or
+a unique prefix of it) to print one request with every argument on its own
+line. --wide adds the severity, risk summary, and who decided and why.
+
+With --watch the command polls until the task has a pending request, prints
+the list, and exits 0. It exits non-zero if the task finishes first
+(Succeeded, Failed, Cancelled), because then no request is coming, or when
+--timeout elapses. Ctrl-C stops the wait.
 
 Usage:
-  orka task approvals <task> [flags]
+  orka task approvals <task> [id] [flags]
 
 Flags:
-  -h, --help            help for approvals
-  -o, --output string   Output format: table, json, yaml (default "table")
+  -h, --help                help for approvals
+      --interval duration   Poll interval for --watch (default 5s)
+  -o, --output string       Output format: table, json, yaml (default "table")
+      --timeout string      Maximum time to wait with --watch (e.g. 5m)
+  -w, --watch               Wait until the task has a pending approval request, then print it
+      --wide                Show severity, risk summary, and decision details
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -4371,14 +4467,16 @@ Global Flags:
 ## `orka task approve`
 
 ```text
-Approve a pending task approval
+Approve a pending task approval. The approval ID may be the full ID, the short ID shown by
+"orka task approvals", or any prefix of either that matches exactly one
+request. The full ID is sent to the server.
 
 Usage:
   orka task approve <task> <approvalID> [flags]
 
 Flags:
   -h, --help            help for approve
-  -o, --output string   Output format: table, json, yaml (default "json")
+  -o, --output string   Output format: table, json, yaml (default "table")
       --reason string   Decision reason
 
 Global Flags:
@@ -4491,14 +4589,16 @@ Global Flags:
 ## `orka task decline`
 
 ```text
-Decline a pending task approval
+Decline a pending task approval. The approval ID may be the full ID, the short ID shown by
+"orka task approvals", or any prefix of either that matches exactly one
+request. The full ID is sent to the server.
 
 Usage:
   orka task decline <task> <approvalID> [flags]
 
 Flags:
   -h, --help            help for decline
-  -o, --output string   Output format: table, json, yaml (default "json")
+  -o, --output string   Output format: table, json, yaml (default "table")
       --reason string   Decision reason
 
 Global Flags:
@@ -4557,7 +4657,57 @@ Global Flags:
 ## `orka task events`
 
 ```text
-List task execution events
+List task execution events.
+
+Table rows are cut to the terminal width; --wide prints full messages and
+-o json is never truncated. --tail N keeps only the last N events that match
+the filters, so "what did the agent say last?" is:
+
+  orka task events <task> --type ModelMessage --tail 1
+
+--type accepts these event types (case-insensitive):
+
+  TaskCreated
+  TaskPhaseChanged
+  TaskJobCreated
+  TaskStarted
+  TaskSucceeded
+  TaskFailed
+  TaskCancelled
+  WorkerStarted
+  WorkerCompleted
+  WorkerFailed
+  ModelRequestStarted
+  ModelRequestCompleted
+  ModelRequestFailed
+  ModelUsageUpdated
+  ModelContextUpdated
+  ModelMessage
+  ContextTruncated
+  ToolCallStarted
+  ToolCallCompleted
+  ToolCallFailed
+  WorkspacePreparationStarted
+  WorkspacePreparationCompleted
+  WorkspacePreparationFailed
+  AgentRuntimeStarted
+  AgentRuntimeCommandStarted
+  AgentRuntimeCompleted
+  AgentRuntimeFailed
+  AgentRuntimeCancelled
+  ResultSubmitted
+  GatewayDeliveryCompleted
+  ArtifactUploadCompleted
+  ArtifactUploadFailed
+  TaskForkRequested
+  TaskForkCreated
+  ApprovalRequested
+  ApprovalApproved
+  ApprovalDeclined
+  ApprovalExpired
+  ApprovalCancelled
+  ApprovalExecutionUpdated
+  PlanUpdated
 
 Usage:
   orka task events <task> [flags]
@@ -4567,7 +4717,9 @@ Flags:
   -h, --help               help for events
       --limit int          Maximum events to return (default 100)
   -o, --output string      Output format: table, json, yaml (default "table")
-      --type stringArray   Filter by event type (repeatable; streaming supports repeats)
+      --tail int           Return only the last N matching events
+      --type stringArray   Filter by event type (repeatable; see --help for the names)
+      --wide               Print full messages instead of cutting rows to the terminal width
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -4635,7 +4787,7 @@ Usage:
 
 Flags:
   -h, --help               help for get
-  -o, --output string      Output format: table, json, yaml (default "json")
+  -o, --output string      Output format: table, json, yaml (default "table")
       --show-transaction   Show only transaction metadata
 
 Global Flags:
@@ -4650,7 +4802,17 @@ Global Flags:
 ## `orka task list`
 
 ```text
-List tasks
+List tasks in the namespace, oldest first.
+
+Filter with -l/--selector (kubectl label selector syntax, applied by the
+server) and --since (a duration such as 10m or 2h, or an RFC 3339 timestamp,
+applied by the client). Orka labels the Tasks it creates for you:
+
+  orka.ai/source=anthropic-proxy        Tasks from the Anthropic-compatible API
+  orka.ai/security-target=<repository>  Tasks from a security scan
+  gateway.orka.ai/gateway=<gateway>     Tasks from a gateway message
+
+With --watch the table is reprinted whenever a Task appears or changes phase.
 
 Usage:
   orka task list [flags]
@@ -4662,10 +4824,14 @@ Flags:
       --continue string      Continue token for the next page
       --cursor string        Cursor token for the next page
   -h, --help                 help for list
+      --interval duration    Refresh interval for --watch (default 5s)
       --limit int            Maximum number of results (default 20)
   -o, --output string        Output format: table, json, yaml (default "table")
+  -l, --selector string      Label selector, like kubectl -l (for example orka.ai/source=anthropic-proxy)
+      --since string         Only tasks created after this duration ago (10m, 2h) or timestamp (2026-09-23T08:00:00Z)
       --status string        Filter by status (client-side scan; may page through many tasks)
       --transaction string   Filter by transaction ID (client-side scan)
+  -w, --watch                Reprint the table when a task appears or changes phase (Ctrl-C to stop)
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -4707,7 +4873,7 @@ Usage:
 
 Flags:
   -h, --help            help for plan
-  -o, --output string   Output format: table, json, yaml (default "json")
+  -o, --output string   Output format: table, json, yaml (default "table")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -4742,7 +4908,10 @@ Global Flags:
 ## `orka task status`
 
 ```text
-Show durable execution, delivery, and runtime-pool status
+Show a task's phase and, for write-intent workspaces, its delivery state and
+publication branch. A failed task shows its reason. --verbose adds the
+execution and runtime-pool details (attempt, RuntimePool, runtime instance,
+session generation, verified remote commit) for tracing a problem.
 
 Usage:
   orka task status <name> [flags]
@@ -4750,6 +4919,7 @@ Usage:
 Flags:
   -h, --help            help for status
   -o, --output string   Output format: table, json, yaml (default "table")
+      --verbose         Show execution and runtime-pool details as well
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -4882,7 +5052,7 @@ Usage:
 
 Flags:
   -h, --help            help for get
-  -o, --output string   Output format: table, json, yaml (default "json")
+  -o, --output string   Output format: table, json, yaml (default "table")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -4938,6 +5108,141 @@ Global Flags:
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
+## `orka usage`
+
+```text
+Inspect retained usage through the Orka API. Teams are Kubernetes namespaces. Each server reports only its installation's team namespace; combined-team reports are not supported. Issue delivery totals include failed attempts, retries, and linked follow-up work. Missing measurements remain unavailable; model prices are not configured.
+
+Usage:
+  orka usage [command]
+
+Available Commands:
+  other       Inspect review_only, other_requests, or unassociated usage
+  summary     Show cohort totals, team usage, and a page of work requests
+  work        Inspect a work request's Tasks, measurements, and PR outcomes
+
+Flags:
+  -h, --help   help for usage
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka usage [command] --help" for more information about a command.
+```
+
+## `orka usage other`
+
+```text
+Inspect review_only, other_requests, or unassociated usage
+
+Usage:
+  orka usage other <category> [flags]
+
+Flags:
+      --as-of string        Include usage and outcomes through this UTC date or RFC3339 timestamp (default: now)
+      --from string         Request-start date or RFC3339 timestamp (UTC; default: current month, all retained history for work)
+  -h, --help                help for other
+      --kind string         Filter by issue or pull_request
+      --limit int           Page size, capped at 100 by the API; totals always cover the full selection (default 25)
+      --model string        Select whole requests that used this model, including their other models
+      --offset int          Page offset; reuse --as-of and filters to keep the same report time
+  -o, --output string       Output format: table, json, yaml (default "table")
+      --repository string   Filter by owner/repository
+      --teams string        Explicit team namespace; must match this installation (overrides --namespace)
+      --until string        Exclusive request-start end date or RFC3339 timestamp (default: report time)
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka usage summary`
+
+```text
+Show cohort totals, team usage, and a page of work requests
+
+Usage:
+  orka usage summary [flags]
+
+Flags:
+      --as-of string        Include usage and outcomes through this UTC date or RFC3339 timestamp (default: now)
+      --from string         Request-start date or RFC3339 timestamp (UTC; default: current month, all retained history for work)
+  -h, --help                help for summary
+      --kind string         Filter by issue or pull_request
+      --limit int           Page size, capped at 100 by the API; totals always cover the full selection (default 25)
+      --model string        Select whole requests that used this model, including their other models
+      --offset int          Page offset; reuse --as-of and filters to keep the same report time
+  -o, --output string       Output format: table, json, yaml (default "table")
+      --repository string   Filter by owner/repository
+      --teams string        Explicit team namespace; must match this installation (overrides --namespace)
+      --until string        Exclusive request-start end date or RFC3339 timestamp (default: report time)
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka usage work`
+
+```text
+Inspect a work ID returned by usage summary. Without date filters, includes all retained history for that work. Pass the summary's --as-of value to inspect the same report time.
+
+Usage:
+  orka usage work <work-id> [flags]
+
+Flags:
+      --as-of string        Include usage and outcomes through this UTC date or RFC3339 timestamp (default: now)
+      --from string         Request-start date or RFC3339 timestamp (UTC; default: current month, all retained history for work)
+  -h, --help                help for work
+      --kind string         Filter by issue or pull_request
+      --model string        Select whole requests that used this model, including their other models
+  -o, --output string       Output format: table, json, yaml (default "table")
+      --repository string   Filter by owner/repository
+      --teams string        Explicit team namespace; must match this installation (overrides --namespace)
+      --until string        Exclusive request-start end date or RFC3339 timestamp (default: report time)
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka version`
+
+```text
+Print the CLI version
+
+Usage:
+  orka version [flags]
+
+Flags:
+  -h, --help   help for version
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
 ## `orka workspace`
 
 ```text
@@ -4973,7 +5278,7 @@ Usage:
 
 Flags:
   -h, --help            help for status
-  -o, --output string   Output format: table, json, yaml (default "json")
+  -o, --output string   Output format: table, json, yaml (default "table")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file

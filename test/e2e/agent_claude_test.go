@@ -37,7 +37,7 @@ var _ = Describe("Agent Claude ACP Runtime", Ordered, func() {
 		dumpDebugInfo(taskName)
 	})
 
-	It("queues a Claude task on an ACP v2 RuntimePool without provider credentials in the Agent", func() {
+	It("queues a Claude task on an Orka harness v2 RuntimePool without provider credentials in the Agent", func() {
 		agentManifest := fmt.Sprintf(`{
 			"apiVersion": "core.orka.ai/v1alpha1",
 			"kind": "Agent",

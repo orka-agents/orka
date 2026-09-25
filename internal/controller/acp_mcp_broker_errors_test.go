@@ -47,7 +47,7 @@ func TestACPMCPBrokerCustomToolFailureAllowsRecovery(t *testing.T) {
 			if response.Validate() != nil || !response.IsError || response.CallID != request.Call.CallID || response.Replayed {
 				t.Fatalf("failed tool response = %#v", response)
 			}
-			if string(response.Result) != `{"isError":true,"error":"MCP tool execution failed"}` ||
+			if string(response.Result) != `{"isError":true,"code":"tool_execution_failed","error":"MCP tool execution failed"}` ||
 				strings.Contains(first.Body.String(), mcpUpstreamPrivateDiagnostic) {
 				t.Fatalf("tool failure was not a bounded generic result: %s", first.Body.String())
 			}
@@ -189,7 +189,7 @@ func TestACPMCPBrokerToolDeadlineRecoveryIsReadOnly(t *testing.T) {
 				t.Fatal(err)
 			}
 			if first.Code != http.StatusOK || !failed.IsError || failed.CallID != request.Call.CallID ||
-				string(failed.Result) != `{"isError":true,"error":"MCP tool execution failed"}` {
+				string(failed.Result) != `{"isError":true,"code":"tool_execution_failed","error":"MCP tool execution failed"}` {
 				t.Fatalf("read-only timeout response=%#v status=%d", failed, first.Code)
 			}
 			request.Call.CallID = "after-tool-timeout"

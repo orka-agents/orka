@@ -10,6 +10,12 @@ so clients like [Continue](https://continue.dev/) and [Cursor](https://cursor.sh
 at Orka instead of at a model vendor. Your cluster holds the API keys; the client holds a
 ServiceAccount token.
 
+For teams using separate namespaces, the optional
+[shared compatibility router](../operations/shared-compatibility-api.md) selects
+the installation from the validated ServiceAccount token. Clients use one base
+URL and omit the namespace parameter. Direct installation endpoints keep their
+existing namespace rules.
+
 :::warning[This is not a transparent proxy by default]
 Orka rewrites your request before sending it upstream: it **discards the tools your client
 sent**, injects its own, and prepends its own system prompt. Read
@@ -20,6 +26,10 @@ tools. One header turns it off.
 :::info[Endpoints moved]
 These used to live at `/v1/`. They are now at `/openai/v1/`. See
 [Anthropic compatibility](anthropic-compat.md) for the Anthropic-native equivalent.
+:::
+
+:::tip[Video demo]
+Watch [Two teams, one AI endpoint](https://www.youtube.com/watch?v=-x0tKk9epWU).
 :::
 
 ## Endpoints

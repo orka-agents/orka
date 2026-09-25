@@ -22,7 +22,7 @@ func TestGitHubPRReconcilerContinuesSessionAcrossPublicationsAndRetries(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	body := githubPullRequestBody(intent.PublicationGeneration, key, sessionKey)
+	body := githubPullRequestBody(intent, key, sessionKey)
 	scenario.create = githubTestPullRequest(scenario.base, scenario.head, 42, publisher.PullRequestOpen, intent.ExpectedHeadOID, body)
 	reconciler := newGitHubTestReconciler(t, scenario.handler(t))
 	first, err := publisher.ReconcilePullRequest(context.Background(), intent, reconciler)
@@ -81,7 +81,7 @@ func TestGitHubPRReconcilerRejectsConflictingSessionOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 	marker := githubSessionMarkerPrefix + sessionKey + githubIntentMarkerSuffix
-	body := githubPullRequestBody(intent.PublicationGeneration, key, sessionKey)
+	body := githubPullRequestBody(intent, key, sessionKey)
 	other := intent
 	other.SessionUID = "different-session-owner"
 	otherKey, err := other.SessionKey()
@@ -148,7 +148,7 @@ func TestGitHubPRReconcilerDoesNotRecreateClosedSessionPullRequests(t *testing.T
 				t.Fatal(err)
 			}
 			scenario.list = []githubPullRequest{githubTestPullRequest(scenario.base, scenario.head, 42, state,
-				intent.ExpectedHeadOID, githubPullRequestBody(intent.PublicationGeneration, key, sessionKey))}
+				intent.ExpectedHeadOID, githubPullRequestBody(intent, key, sessionKey))}
 			receipt, err := publisher.ReconcilePullRequest(context.Background(), intent, newGitHubTestReconciler(t, scenario.handler(t)))
 			if err != nil || receipt.State != state || len(scenario.createSnapshot()) != 0 {
 				t.Fatalf("known %s PR was not preserved: %#v, %v", state, receipt, err)

@@ -163,13 +163,13 @@ spec:
                         type: array
                       approvalRequiredTools:
                         description: |-
-                          ApprovalRequiredTools must remain an explicit empty list until the
-                          controller owns external-runtime permission review.
+                          ApprovalRequiredTools lists brokered tools whose exact calls require an
+                          Orka reviewer decision. The runtime must support brokered tool approvals.
                         items:
                           maxLength: 128
                           minLength: 1
                           type: string
-                        maxItems: 0
+                        maxItems: 128
                         type: array
                       disallowedTools:
                         description: DisallowedTools is the canonical sorted deny
