@@ -96,7 +96,7 @@ var _ = Describe("Agent Workspace", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create Task with workspace config")
 
-		By("verifying the read workspace is represented by ACP v2 execution and delivery status")
+		By("verifying the read workspace is represented by Orka harness v2 execution and delivery status")
 		verifyACPTaskRuntimeForTask(taskName, acpTaskExpectation{
 			ProviderKind:    "claude",
 			WorkspaceIntent: "read",

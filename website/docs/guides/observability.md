@@ -6,7 +6,7 @@ description: "OpenTelemetry traces, GenAI metrics, and how to follow one task th
 # Observability
 
 Orka emits OpenTelemetry traces and metrics for controller, chat, tool, native AI
-worker, and ACP v2 controller/supervisor paths when telemetry is enabled. ACP runtime
+worker, and Orka harness v2 controller/supervisor paths when telemetry is enabled. ACP runtime
 internals remain observable primarily through durable Task execution/delivery
 status, RuntimePool status, bounded events, and structured logs. The GenAI
 signals are backend instrumentation: they are exported over OTLP to your
@@ -164,7 +164,7 @@ task.run
                   └─ execute_tool {tool.name}
 ```
 
-An ACP v2 Task continues the same Task-carried trace across controller and supervisor:
+An Orka harness v2 Task continues the same Task-carried trace across controller and supervisor:
 
 ```text
 <Task-carried parent span>
@@ -183,7 +183,7 @@ model client span.
 Task creation stamps the current W3C trace context into Task annotations. The
 controller extracts that context for `task.reconcile` and controller-side ACP
 spans. Supported native worker Tasks also receive `ORKA_TRACEPARENT` in their
-Jobs. ACP v2 runtime requests carry `traceparent` and `tracestate` headers to
+Jobs. Orka harness v2 runtime requests carry `traceparent` and `tracestate` headers to
 authenticated supervisor operations; provider CLI children remain outside this
 instrumentation. Delegation stamps the active `execute_tool delegate_task` span
 context onto the child Task so child controller, supervisor and native-worker

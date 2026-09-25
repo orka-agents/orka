@@ -5,6 +5,7 @@ const sidebars = {
   tutorialSidebar: [
     'getting-started',
     'operations/installation',
+    'demos',
     {
       type: 'category',
       label: 'Guides',

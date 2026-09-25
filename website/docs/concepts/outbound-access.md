@@ -6,6 +6,10 @@ description: "Giving Tools a reusable, namespaced way to reach an external API w
 
 `OutboundAccessPolicy` gives HTTP and MCP-over-HTTP Tools one reusable, namespaced access adapter. The Tool and policy must be in the same namespace.
 
+:::tip[Video demo]
+Watch [Allow stock checks but block purchasing](https://www.youtube.com/watch?v=1vDI6PxhmfY).
+:::
+
 ## Direct credential exchange
 
 ```yaml

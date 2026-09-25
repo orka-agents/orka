@@ -6,7 +6,7 @@ This directory contains a small `demo-magic` kit for showing Orka in six ways:
 - `20-manual-workflow.sh`: explicit coordinator Task CR for a focused Vekil metrics first-PR workflow
 - `30-cron-workflow.sh`: scheduled runtime task with recurring child runs
 - `40-security-scanning.sh`: repository scan -> findings -> patch -> PR
-- `60-agent-sandbox.sh`: archived execution-workspace prototype; not a current ACP v2 path
+- `60-agent-sandbox.sh`: archived execution-workspace prototype; not a current Orka harness v2 path
 - `70-agent-substrate.sh`: archived Substrate prototype; requires an Actor-backed v2 supervisor before it is supported again
 
 There is also:
@@ -287,7 +287,7 @@ make demo-cluster-up-all-down     # tear it all down
 ```
 
 Notes: the agent-sandbox/Substrate bootstrap and demos are retained only for
-prototype archaeology. Current ACP v2 validation must not set a default execution
+prototype archaeology. Current Orka harness v2 validation must not set a default execution
 workspace provider or rely on a per-Task worker path. kontxt's `enforce` mode only
 gates requests carrying a `Txn-Token`, so the other demos remain independent.
 

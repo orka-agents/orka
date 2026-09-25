@@ -273,7 +273,7 @@ from failure diagnostics.
 
 
 The live agent-sandbox workflow validates both the direct workspace-adapter
-lifecycle and the initial workspace-backed ACP v2 happy path. It builds the
+lifecycle and the initial workspace-backed Orka harness v2 happy path. It builds the
 real Codex supervisor, routes a prompt through a local Responses-compatible
 fixture, waits for the Task to succeed, verifies provider-neutral status, and
 cleans up the dedicated RuntimePool. It does not replace release qualification

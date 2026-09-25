@@ -1246,6 +1246,9 @@ func validateACPWorkspacePreflight(task *corev1alpha1.Task) error {
 		}
 		return nil
 	}
+	if err := validateTaskPullRequestText(task); err != nil {
+		return err
+	}
 	if strings.TrimSpace(workspace.GitRepo) == "" {
 		switch {
 		case strings.TrimSpace(workspace.Branch) != "":

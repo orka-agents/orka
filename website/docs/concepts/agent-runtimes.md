@@ -7,6 +7,10 @@ description: "How Orka runs coding agents: ACP RuntimePools, sessions, and the p
 
 `type: agent` Tasks use the ACP core runtime and the `orka.harness.v2` session protocol. Built-in Codex, Claude, Copilot, and OpenCode profiles run in controller-owned `RuntimePool` resources; there is no per-Task agent Job and no fallback runtime path.
 
+Orka harness v2 is the controller-to-supervisor contract, carried over HTTP with
+NDJSON prompt streams. The supervisor drives each agent CLI using ACP over
+stdin/stdout. These are separate protocols with independent versions.
+
 Orka owns the durable Task attempt, RuntimeSession identity, queueing, workspace validation, delivery receipt, transcript, and result projection. The runtime Pod owns only the short-lived provider process and ACP session for a fenced RuntimeSession.
 
 The supported built-in set is intentionally closed: `codex`, `claude`,
@@ -94,7 +98,7 @@ orka runtime-pool get '<pool-name>' -o yaml
 kubectl get runtimepools
 ```
 
-## ACP v2 Task lifecycle
+## Orka harness v2 Task lifecycle {#acp-v2-task-lifecycle}
 
 The durable Task execution state is independent from the top-level compatibility phase. It is
 drawn in full under [Task lifecycle](architecture.md#task-lifecycle). Two states are worth calling
@@ -282,6 +286,10 @@ A read Task succeeds only after validation proves the final tree still matches t
 
 ## Write and publication Task
 
+:::tip[Video demo]
+Watch [From chat to a GitHub pull request](https://www.youtube.com/watch?v=FlLgdh2lKMk).
+:::
+
 Source read, target read, target write, and forge API credentials are distinct
 roles, even when an operator deliberately backs multiple roles with the same
 Secret.
@@ -312,6 +320,8 @@ spec:
     pushBranch: orka/update-auth-docs
     prBaseBranch: main
     createPR: true
+    prTitle: "fix: handle empty filters"
+    prBody: "Reject empty filters before querying."
   agentRuntime:
     maxTurns: 40
     allowBash: true
@@ -356,7 +366,15 @@ hold the artifact signing key.
 | `subPath` | Repository subdirectory exposed as the workspace root. |
 | `pushBranch` | Publication branch. If omitted for a write Task, Orka derives a full-entropy Task- or Session-owned branch. |
 | `prBaseBranch` | Pull-request base branch when `createPR` is true. |
+| `prTitle` | Optional exact pull-request title, up to 256 characters. Empty uses the prompt's first nonblank line, trimmed and truncated to 256 characters. An empty or whitespace-only prompt uses `Orka publication generation N`. Nonempty whitespace-only titles are rejected. |
+| `prBody` | Optional pull-request body, up to 32,768 characters. Defaults to the publisher summary with the Task namespace/name. Publication generation and reconciliation markers are appended in either case. |
 | `createPR` | Explicitly request PR reconciliation after verified branch publication. |
+
+Pull-request text comes from the frozen Task spec and prompt, never from files or output produced by the agent. Orka rejects secret-like titles and bodies at runtime before publication, including prompt-derived titles. Orka reserves comments beginning with `<!-- orka.publisher.pr-` for reconciliation. Remove these comments when copying an existing PR body into `prBody`. The publisher keeps the original title and body when reconciling an existing pull request. A continuation does not overwrite a person's edits.
+
+`prTitle` and `prBody` apply only when `createPR: true`. Supplying presentation text alone does not request a pull request; it can remain configured on branch-only Tasks.
+
+Explicit `prTitle` or `prBody` overrides require a publisher that advertises `pull-request-presentation.v1`. During a rolling update, Tasks with overrides wait before prompt admission. Tasks without overrides can finish with an older publisher's generic PR text.
 
 Do not embed credentials, query strings, or fragments in repository URLs.
 
@@ -389,7 +407,7 @@ spec:
     gitRepo: https://github.com/example/project.git
 ```
 
-A RuntimeSession is ephemeral. If its Pod is replaced, Orka may create a fresh provider session from the verified workspace baseline and canonical transcript. ACP v2 intentionally does not provide prompt replay, stream reconnect, provider-session load, or workspace checkpoint endpoints.
+A RuntimeSession is ephemeral. If its Pod is replaced, Orka may create a fresh provider session from the verified workspace baseline and canonical transcript. Orka harness v2 intentionally does not provide prompt replay, stream reconnect, provider-session load, or workspace checkpoint endpoints.
 
 ## Runtime and credential boundaries
 

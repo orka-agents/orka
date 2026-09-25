@@ -5,33 +5,13 @@ description: "The pieces Orka is made of, the two lifecycles a Task moves throug
 
 # Architecture
 
-Orka is a Kubernetes-native task execution platform. Container and native AI Tasks run through worker Jobs; built-in coding-agent Tasks run through the ACP v2 RuntimePool and RuntimeSession control plane.
+Orka is a Kubernetes-native task execution platform. Container and native AI Tasks run through worker Jobs; built-in coding-agent Tasks run through the Orka harness v2 RuntimePool and RuntimeSession control plane.
 
 ## Overview
 
-```text
-                               Orka Controller
-  ┌──────────────────────────────────────────────────────────────────────┐
-  │ Task/API/controllers   ACP dispatcher   RuntimePool controller       │
-  │ Kubernetes control CRDs + Leases   SQLite payload/outbox/artifacts   │
-  │ prompt MCP broker   artifact/credential brokers   publisher client   │
-  └───────────────┬─────────────────────┬────────────────────────────────┘
-                  │                     │
-          native Task paths       type: agent (ACP v2)
-             │                         │
-      ┌──────┴──────┐          ┌───────┴────────┐        ┌──────────────┐
-      │ General/AI  │          │ RuntimePool    │───────▶│ authenticated│
-      │ worker Jobs │          │ 0 or 1 Pod     │        │ provider     │
-      └─────────────┘          │ many private   │        │ proxy → Vekil│
-                               │ RuntimeSessions│        └──────────────┘
-                               └───────┬────────┘
-                                       │ validated workspace delta
-                               ┌───────┴────────────┐
-                               │ Workspace/Publisher│
-                               │ clone/prepare/CAS  │
-                               │ push/verify/PR     │
-                               └────────────────────┘
-```
+[![Simplified Orka architecture showing requests, the control plane, workers and agent runtimes, durable state, and delivery to Git or users](../../static/img/architecture/overview.svg)](../../static/img/architecture/overview.svg)
+
+Select the diagram to view it at full size.
 
 The ACP runtime and Workspace/Publisher use separate network and credential identities. Runtime Pods have only the authenticated provider-proxy and prompt-scoped MCP paths; they have no Git credentials or direct SCM publication egress. The Publisher obtains exact-operation artifact and credential capabilities from controller brokers. It has no provider/MCP access, and all HTTPS SCM and forge traffic traverses the authenticated exact-host SCM egress proxy.
 

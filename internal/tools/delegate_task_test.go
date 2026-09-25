@@ -163,6 +163,7 @@ func TestDelegateTaskTool_Parameters(t *testing.T) {
 	if !ok {
 		t.Fatal("workspace schema is missing properties")
 	}
+	assertWorkspacePullRequestMetadataSchema(t, workspaceSchema)
 	for _, key := range []string{"publicationReadCredentialRef", "publicationCredentialRef", "forgeCredentialRef"} {
 		if _, ok := workspaceProperties[key]; !ok {
 			t.Errorf("workspace schema missing %s property", key)
@@ -905,6 +906,50 @@ func TestDelegateTaskTool_Execute_AgentType(t *testing.T) {
 	if childTask.Spec.Timeout == nil || childTask.Spec.Timeout.Duration != 20*time.Minute {
 		t.Errorf("spec.timeout = %v, want 20m", childTask.Spec.Timeout)
 	}
+}
+
+func TestDelegateTaskTool_Execute_PullRequestMetadata(t *testing.T) {
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaCoordinationDepth, "0")
+	t.Setenv(envOrkaCoordinationAllowedAgents, testClaudeCoderName)
+	t.Setenv(envOrkaCoordinationMaxDepth, "3")
+
+	testWorkspacePullRequestMetadata(t, func(t *testing.T, workspace map[string]any) (*corev1alpha1.WorkspaceConfig, string) {
+		agent := &corev1alpha1.Agent{
+			ObjectMeta: metav1.ObjectMeta{Name: testClaudeCoderName, Namespace: defaultNamespace},
+			Spec: corev1alpha1.AgentSpec{
+				Runtime: &corev1alpha1.AgentCLIRuntime{Type: runtimeTypeClaude},
+			},
+		}
+		fc := newFakeClient(parentTask(), agent)
+		args, err := json.Marshal(map[string]any{
+			"agent": testClaudeCoderName, "prompt": "Fix the bug", "workspace": workspace,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := NewDelegateTaskTool(fc).Execute(t.Context(), args)
+		if err != nil {
+			var tasks corev1alpha1.TaskList
+			if listErr := fc.List(t.Context(), &tasks); listErr != nil {
+				t.Fatal(listErr)
+			}
+			if len(tasks.Items) != 1 || tasks.Items[0].Name != parentTaskName {
+				t.Fatal("invalid metadata created a child Task")
+			}
+			return nil, err.Error()
+		}
+		var response DelegateTaskResult
+		if err := json.Unmarshal([]byte(result), &response); err != nil {
+			t.Fatal(err)
+		}
+		task := &corev1alpha1.Task{}
+		if err := fc.Get(t.Context(), apitypes.NamespacedName{Name: response.TaskName, Namespace: defaultNamespace}, task); err != nil {
+			t.Fatal(err)
+		}
+		return task.Spec.Workspace, ""
+	})
 }
 
 func TestDelegateTaskTool_Execute_InvalidTimeout(t *testing.T) {

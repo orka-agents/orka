@@ -396,6 +396,14 @@ func TestWorkspaceStatusAndWhoamiPrintOneFieldPerLine(t *testing.T) {
 	if strings.TrimSpace(out) != "authenticated: true" {
 		t.Fatalf("auth validate = %q", out)
 	}
+	out, err = runCLI(t, srv.URL, "auth", "validate", "-o", outputJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var validation map[string]any
+	if err := json.Unmarshal([]byte(out), &validation); err != nil || validation["authenticated"] != true {
+		t.Fatalf("auth validate JSON = %q, err = %v", out, err)
+	}
 }
 
 func TestCRUDGetFallsBackToGenericFields(t *testing.T) {

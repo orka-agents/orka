@@ -1051,6 +1051,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	if handled, deadlineErr := d.handlePreSubmissionContextDone(ctx, runtimeCtx, task, attemptID, fence); handled {
 		return deadlineErr
 	}
+	if _, err := d.pullRequestPresentationCapability(runtimeCtx, task); err != nil {
+		return d.requeueReservedTask(ctx, task, acpReservedRetryCapabilities, err)
+	}
 	runtimeClient, runtimeFence, profile, maxResultBytes, authErr := d.runtimeClient(
 		runtimeCtx, target, bound.mcpConfiguration, true,
 	)

@@ -14,6 +14,10 @@ This applies to tools executed by Orka for qualified AgentKit and Foundry
 separate capability. Existing `type: ai` autonomous approvals keep their
 worker parking behavior; v2 approvals keep the original tool call open.
 
+:::tip[Video demo]
+Watch [Human approval before an agent takes action](https://www.youtube.com/watch?v=KgzcvW1WznE).
+:::
+
 ## Configure the policy
 
 An external `AgentRuntime` declares an explicit, sorted MCP policy and a
