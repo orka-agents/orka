@@ -85,7 +85,7 @@ grep -F -- '      - Grep' "${manifest_capture}" >/dev/null
 grep -F -- '      - Read' "${manifest_capture}" >/dev/null
 grep -F -- "      - ${authority_tool_name}" "${manifest_capture}" >/dev/null
 if grep -F '  transaction:' "${manifest_capture}" >/dev/null; then
-  echo "ACP v2 authority fixture declared unsupported transaction delegation" >&2
+  echo "Orka harness v2 authority fixture declared unsupported transaction delegation" >&2
   exit 1
 fi
 
@@ -304,7 +304,7 @@ fi
 grep -Fq 'ACP_CODEX_RUNTIME_IMG="${fake_runtime_ref}"' "${security_script}"
 grep -Fq 'patch_controller_images serviceAccount' "${security_script}"
 grep -Fq '.ttsCalls == 0 and .toolCalls == 1' "${security_script}"
-grep -Fq 'Creating transactionless ACP v2 authority Task/' "${security_script}"
+grep -Fq 'Creating transactionless Orka harness v2 authority Task/' "${security_script}"
 if grep -Fq 'tasks do not support arbitrary task env' "${security_script}"; then
   echo "legacy negative-only compatibility gate remains" >&2
   exit 1

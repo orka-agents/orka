@@ -2,7 +2,7 @@ FROM --platform=$BUILDPLATFORM golang:1.27.0 AS builder
 
 ARG TARGETARCH
 
-# Standalone execution-workspace fixture only. The ACP v2 hard cutover removed
+# Standalone execution-workspace fixture only. The Orka harness v2 hard cutover removed
 # the legacy agent worker from this image; built-in agents run in RuntimePools.
 
 RUN cat >/tmp/sandbox-runtime.go <<'GO'

@@ -9,7 +9,7 @@ description: "Controller flags, Helm values, environment variables, and CRD sett
 
 ### Task
 
-The core work unit. Supports container commands, native AI prompts, or ACP v2 coding-agent RuntimeSessions.
+The core work unit. Supports container commands, native AI prompts, or Orka harness v2 coding-agent RuntimeSessions.
 
 ```yaml
 apiVersion: core.orka.ai/v1alpha1
@@ -565,6 +565,10 @@ status:
 ### Tool
 
 Custom tool definitions for agents. Tools can call plain HTTP endpoints or MCP servers hosted in durable Substrate actors. Plain HTTP tools require `http.url` and support header-based or body-based auth injection.
+
+:::tip[Video demo]
+Watch [Allow stock checks but block purchasing](https://www.youtube.com/watch?v=1vDI6PxhmfY).
+:::
 
 This example uses a placeholder catalog API. Replace its URL and Secret reference with your service's values.
 

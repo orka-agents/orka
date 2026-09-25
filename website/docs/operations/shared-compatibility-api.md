@@ -19,6 +19,10 @@ Ordinary JSON and SSE responses retain the installation's format. Both message
 routes take conversation history in `messages`. The router has no conversation
 store and does not call model Providers itself.
 
+:::tip[Video demo]
+Watch [Two teams, one AI endpoint](https://www.youtube.com/watch?v=-x0tKk9epWU).
+:::
+
 ## Prepare the installations
 
 Prepare a separate Orka installation for each enabled namespace, following

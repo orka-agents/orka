@@ -16,6 +16,10 @@ workers. Orka owns Task outcomes, durable Sessions and transcripts, prompt
 leases, cancellation, runtime admission, workspace data references, and
 publication. Reading a dormant Session does not start an Actor.
 
+:::tip[Video demo]
+Watch [Checkpoint and restore an agent workspace](https://www.youtube.com/watch?v=jsdRB-0LLAc).
+:::
+
 ## Native provider setup
 
 Actor, ActorTemplate, Atespace, Worker, and Tag are native ate-api resources.

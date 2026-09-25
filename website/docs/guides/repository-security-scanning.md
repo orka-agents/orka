@@ -18,6 +18,10 @@ an explicit user action.
 - For the REST endpoints, see [API Reference → Security](../reference/api-reference.md#security).
 - For the internal design and storage model, see [Repository Security Scanning Design](../development/security-scanning-design.md).
 
+:::tip[Video demo]
+Watch [Turn a security finding into a pull request](https://www.youtube.com/watch?v=o7C_Kot_h8M).
+:::
+
 ## How it works
 
 ```text

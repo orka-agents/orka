@@ -264,7 +264,7 @@ func acpDeliveryOutcome(value corev1alpha1.TaskDeliveryOutcome) *corev1alpha1.Ta
 }
 
 // verifyACPTaskRuntimeForTask waits until an agent Task has been durably queued
-// for an ACP v2 RuntimePool and verifies the non-secret execution and delivery
+// for an Orka harness v2 RuntimePool and verifies the non-secret execution and delivery
 // projections. ACP Tasks never create one Kubernetes Job per prompt.
 func verifyACPTaskRuntimeForTask(taskName string, expected acpTaskExpectation, timeout time.Duration) {
 	Eventually(func(g Gomega) {

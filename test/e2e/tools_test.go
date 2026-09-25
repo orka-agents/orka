@@ -353,7 +353,7 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
 
-		By("verifying the tool policy is represented by an ACP v2 RuntimePool profile")
+		By("verifying the tool policy is represented by an Orka harness v2 RuntimePool profile")
 		verifyACPTaskRuntimeForTask(filterTaskName, acpTaskExpectation{
 			ProviderKind:    "claude",
 			WorkspaceIntent: "read",

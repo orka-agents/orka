@@ -28,6 +28,10 @@ These used to live at `/v1/`. They are now at `/openai/v1/`. See
 [Anthropic compatibility](anthropic-compat.md) for the Anthropic-native equivalent.
 :::
 
+:::tip[Video demo]
+Watch [Two teams, one AI endpoint](https://www.youtube.com/watch?v=-x0tKk9epWU).
+:::
+
 ## Endpoints
 
 | Method | Path | Description |

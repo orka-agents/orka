@@ -147,7 +147,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		dumpLiveCopilotProxyDebugInfo()
 	})
 
-	It("should run Codex through ACP v2 against a pinned read workspace", func() {
+	It("should run Codex through Orka harness v2 against a pinned read workspace", func() {
 		if gptModel == "" {
 			Skip("Skipping Codex runtime live proxy check: " + gptModelSkipReason)
 		}
@@ -196,7 +196,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		verifyLiveACPTaskExecutionUpdates(apiBaseURL, token, codexTaskReadName)
 	})
 
-	It("should run OpenCode through ACP v2 and enforce read intent", func() {
+	It("should run OpenCode through Orka harness v2 and enforce read intent", func() {
 		if opencodeModel == "" {
 			Skip("Skipping OpenCode runtime live proxy check: " + opencodeModelSkipReason)
 		}
