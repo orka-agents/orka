@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -103,7 +104,7 @@ func (c *Client) Health(ctx context.Context) (HealthResponse, error) {
 
 func (c *Client) Capabilities(ctx context.Context) (CapabilitiesResponse, error) {
 	var response CapabilitiesResponse
-	err := c.get(ctx, CapabilitiesPath, &response)
+	err := c.get(ctx, CapabilitiesPath+"?features="+PullRequestPresentationFeature, &response)
 	return response, err
 }
 
@@ -150,9 +151,35 @@ func (c *Client) ReclaimPublication(ctx context.Context, request PublicationRecl
 }
 
 func (c *Client) ReconcilePullRequest(ctx context.Context, request PullRequestReconcileRequest) (PullRequestReconcileResponse, error) {
-	var response PullRequestReconcileResponse
-	err := c.post(ctx, OperationPullRequestReconcile, request.Metadata, request, &response)
-	return response, err
+	ctx, cancel := requestContext(ctx)
+	defer cancel()
+	// Discovery and the mutation can land on different pods during a rollout.
+	// A strict legacy JSON rejection happens before any SCM effect or journal
+	// reservation. Retry only that rejection with the same immutable request.
+	retryDeadline := time.NewTimer(2 * time.Minute)
+	defer retryDeadline.Stop()
+	hasPresentation := request.Intent.Title != "" || request.Intent.Body != "" || request.Intent.TaskName != "" || request.Intent.TaskNamespace != ""
+	for {
+		var response PullRequestReconcileResponse
+		err := c.post(ctx, OperationPullRequestReconcile, request.Metadata, request, &response)
+		failure, rejected := errors.AsType[*ClientError](err)
+		if !hasPresentation || !rejected || failure.StatusCode != http.StatusBadRequest ||
+			failure.Response.Code != "invalid_request" || failure.Response.Message != "pull request reconcile JSON is invalid" {
+			return response, err
+		}
+		timer := time.NewTimer(time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return response, ctx.Err()
+		case <-retryDeadline.C:
+			timer.Stop()
+			return response, err
+		case <-timer.C:
+			// Drop idle connections pinned to a legacy Service backend before retrying.
+			c.httpClient.CloseIdleConnections()
+		}
+	}
 }
 
 // defaultRequestTimeout bounds publisher requests whose caller context carries
@@ -171,7 +198,7 @@ func (c *Client) get(ctx context.Context, path string, target any) error {
 	ctx, cancel := requestContext(ctx)
 	defer cancel()
 	endpoint := *c.baseURL
-	endpoint.Path = path
+	endpoint.Path, endpoint.RawQuery, _ = strings.Cut(path, "?")
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
 	if err != nil {
 		return fmt.Errorf("create workspace publisher request")

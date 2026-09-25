@@ -84,11 +84,17 @@ The controller requires `ORKA_GITHUB_WEBHOOK_SECRET` and verifies the `X-Hub-Sig
 | `spec.workspace.subPath` | string | empty | Repository subdirectory exposed as workspace root. |
 | `spec.workspace.pushBranch` | string | generated for write Tasks when omitted | Publication branch; Orka-generated names use full Task or Session identity entropy. |
 | `spec.workspace.prBaseBranch` | string | empty | Pull-request base branch. |
+| `spec.workspace.prTitle` | string | prompt's first nonblank line | Exact pull-request title, up to 256 characters. Empty uses the default, which trims whitespace and truncates to 256 characters. An empty or whitespace-only prompt uses `Orka publication generation N`. Nonempty whitespace-only titles are rejected. |
+| `spec.workspace.prBody` | string | publisher summary and Task namespace/name | Pull-request body, up to 32,768 characters. The publisher appends the publication generation and reconciliation markers to custom and default bodies. Reserved Orka reconciliation comments are rejected. |
 | `spec.workspace.createPR` | boolean | `false` | Reconcile a pull request only after branch publication when true; requires `intent: write`. |
 | `spec.agentRuntime.maxTurns` | integer | Agent default | Per-Task prompt-loop limit. |
 | `spec.agentRuntime.allowedTools` / `disallowedTools` | list | Agent defaults | Per-Task tool policy override. |
 | `spec.agentRuntime.allowBash` | boolean | Agent default | Per-Task bash policy override. |
 | `spec.timeout` | duration | `30m` for Orka harness v2 agent Tasks | Maximum wall-clock duration measured from Task creation, including queue, runtime admission, and prompt execution time. An explicit positive value overrides the default. |
+
+`prTitle` and `prBody` apply only when `createPR: true`. Supplying presentation text alone does not request a pull request; it can remain configured on branch-only Tasks.
+
+Orka rejects secret-like pull-request titles and bodies at runtime before publication, including prompt-derived titles. Explicit overrides wait for a publisher with pull-request presentation support before prompt admission.
 
 Source read, target read, target write, and forge references are distinct
 credential roles. The selected Secret UID/resourceVersion is frozen for the

@@ -6548,7 +6548,12 @@ func newPatchCommitServerWithPullRequest(t *testing.T, files []repositoryScanCom
 			var payload map[string]string
 			_ = json.NewDecoder(r.Body).Decode(&payload)
 			pr.patched = payload
-			pr.title, pr.body = payload[repositoryScanPullRequestTitleField], payload[repositoryScanPullRequestBodyField]
+			if title, ok := payload[repositoryScanPullRequestTitleField]; ok {
+				pr.title = title
+			}
+			if body, ok := payload[repositoryScanPullRequestBodyField]; ok {
+				pr.body = body
+			}
 			_ = json.NewEncoder(w).Encode(map[string]string{repositoryScanPullRequestTitleField: pr.title, repositoryScanPullRequestBodyField: pr.body})
 		default:
 			t.Errorf("unexpected GitHub request %s %s", r.Method, r.URL.Path)

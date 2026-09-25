@@ -4323,7 +4323,7 @@ func (r *RepositoryScanReconciler) updatePatchProposalFromSucceededTask(ctx cont
 	proposal.PRURL = publication.prURL
 	proposal.PublicationEvidence = publication.publication
 	proposal.Status = patchProposalStatusPROpened
-	r.decorateSecurityPatchPullRequest(ctx, scan, task, findingID, publication.prNumber, verified.summaryArtifact)
+	r.decorateSecurityPatchPullRequest(ctx, scan, task, findingID, publication.prNumber, publication.publication.PRIntent.PublicationGeneration, verified.summaryArtifact)
 	return nil
 }
 
