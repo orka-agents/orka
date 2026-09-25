@@ -4,8 +4,8 @@
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.10.1">
 <title data-rh="true">Glossary | Orka</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orka-agents.github.io/orka/docs/glossary"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Glossary | Orka"><meta data-rh="true" name="description" content="Every term these docs use, defined once."><meta data-rh="true" property="og:description" content="Every term these docs use, defined once."><link data-rh="true" rel="canonical" href="https://orka-agents.github.io/orka/docs/glossary"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/glossary" hreflang="en"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/glossary" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Glossary","item":"https://orka-agents.github.io/orka/docs/glossary"}]}</script><link rel="stylesheet" href="/orka/assets/css/styles.c6d2e437.css">
-<script src="/orka/assets/js/runtime~main.9c5c5074.js" defer="defer"></script>
-<script src="/orka/assets/js/main.53850170.js" defer="defer"></script>
+<script src="/orka/assets/js/runtime~main.50e8865c.js" defer="defer"></script>
+<script src="/orka/assets/js/main.b61766d3.js" defer="defer"></script>
 </head>
 <body>
 <svg style="display: none;"><defs>
@@ -51,6 +51,9 @@ it was delivered, so a controller restart never sends the same prompt twice.</p>
 <p><strong>Harness</strong> — the contract between the controller and the thing executing agent work.
 <code>harness-v1</code> is the deprecated sidecar-wrapper design, to be removed in a future release; <code>harness-v2</code> is the current ACP pool
 design. An installation picks one at install time and cannot switch.
+Orka harness v2 uses the <code>orka.harness.v2</code> controller-to-supervisor contract. The
+supervisor separately speaks ACP to agent CLIs over stdin/stdout. The harness
+version describes Orka&#x27;s contract, independently of the ACP protocol version.
 See <a class="" href="/orka/docs/operations/harness-modes">Harness modes</a>.</p>
 <p><strong>Producer</strong> — anything that creates Tasks: a person with the CLI, CI, a webhook, another
 agent. The term matters during a v1-to-v2 migration, where you point producers at one
