@@ -16,10 +16,17 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/publisher"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tracing"
+)
+
+const (
+	jsonSchemaMaxLengthField    = "maxLength"
+	workspacePRTitleDescription = "Optional PR title authored by the Task-creating agent. Supply a descriptive title when createPR is true, based on the requested change, not executing sandbox output. Omit or use an empty string for the prompt-derived fallback. Nonempty whitespace-only titles and secret-like text are rejected. Does not enable createPR or write intent."
+	workspacePRBodyDescription  = "Optional PR body authored by the Task-creating agent. When createPR is true, describe the requested change and validation plan, not executing sandbox output. Omit or use an empty string for the publisher's default body. Secret-like text and reserved publisher reconciliation comments are rejected. Does not enable createPR or write intent."
 )
 
 // CreateAgentTaskTool creates an agent-runtime Task CR.
@@ -44,6 +51,8 @@ func (t *CreateAgentTaskTool) Parameters() json.RawMessage {
 		"forgeCredentialRef":           map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional Secret name for forge API credentials used to reconcile pull requests. Required when createPR is true; write intent only."},
 		"pushBranch":                   map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Publication branch name (write intent)"},
 		"prBaseBranch":                 map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Pull request base branch. Required when createPR is true."},
+		"prTitle":                      map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaMaxLengthField: publisher.MaxPullRequestTitleLength, jsonSchemaDescriptionField: workspacePRTitleDescription},
+		"prBody":                       map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaMaxLengthField: publisher.MaxPullRequestBodyLength, jsonSchemaDescriptionField: workspacePRBodyDescription},
 		"createPR":                     map[string]any{jsonSchemaTypeField: jsonSchemaTypeBoolean, jsonSchemaDescriptionField: "Reconcile a pull request after publication. Requires prBaseBranch and forgeCredentialRef."},
 		"subPath":                      map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Sub-path within the repo as a relative slash-separated path (no leading /, no . or .. segments, max 1024 bytes). Requires gitRepo."},
 	},
@@ -122,6 +131,9 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 		if !ok {
 			return ChatToolErrorResult(invalidArgumentsErrorType, "workspace must be an object", "Provide workspace as a JSON object or omit it")
 		}
+		if wsErr := agentWorkspacePullRequestArgTypeError(wsMap); wsErr != nil {
+			return ChatToolErrorResult(wsErr.Type, wsErr.Message, wsErr.Suggestion)
+		}
 		wsCfg := &corev1alpha1.WorkspaceConfig{Intent: corev1alpha1.WorkspaceIntentRead}
 		if intent := strings.ToLower(strings.TrimSpace(chatGetStringArg(wsMap, "intent"))); intent != "" {
 			switch corev1alpha1.WorkspaceIntent(intent) {
@@ -146,6 +158,8 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 		wsCfg.PublicationGitRepo = publicationGitRepo
 		wsCfg.PushBranch = chatGetStringArg(wsMap, "pushBranch")
 		wsCfg.PRBaseBranch = chatGetStringArg(wsMap, "prBaseBranch")
+		wsCfg.PRTitle = chatGetStringArg(wsMap, "prTitle")
+		wsCfg.PRBody = chatGetStringArg(wsMap, "prBody")
 		createPR, errResult, ok := parseCreatePRArg(wsMap)
 		if !ok {
 			return errResult, nil
@@ -207,9 +221,30 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 	return ChatToolSuccess(map[string]any{nameField: task.Name, namespaceField: task.Namespace, phaseField: taskPhasePendingString, messageField: taskCreatedMsg(schedule)})
 }
 
+// agentWorkspacePullRequestArgTypeError distinguishes omitted strings from
+// invalid types, including null, without echoing argument values. Match the
+// case-insensitive field lookup used by encoding/json for WorkspaceArgs.
+func agentWorkspacePullRequestArgTypeError(wsMap map[string]any) *ChatToolError {
+	for _, field := range []string{"prTitle", "prBody"} {
+		for key, value := range wsMap {
+			if !strings.EqualFold(key, field) {
+				continue
+			}
+			if _, ok := value.(string); !ok {
+				return &ChatToolError{
+					Type:       invalidArgumentsErrorType,
+					Message:    "workspace." + field + " must be a string",
+					Suggestion: "Provide a string or omit the field for the default",
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // agentWorkspaceArgError runs the full workspace-argument preflight mirror:
-// credential/publication prerequisites, canonical source selectors, and the
-// harness-v2 subPath rule.
+// PR text, credential/publication prerequisites, canonical source selectors,
+// and the harness-v2 subPath rule.
 func agentWorkspaceArgError(wsCfg *corev1alpha1.WorkspaceConfig, readCredential, publicationReadCredential, publicationCredential, forgeCredential string) *ChatToolError {
 	if wsErr := agentWorkspacePreflightError(wsCfg, readCredential, publicationReadCredential, publicationCredential, forgeCredential); wsErr != nil {
 		return wsErr
@@ -228,6 +263,9 @@ func agentWorkspaceArgError(wsCfg *corev1alpha1.WorkspaceConfig, readCredential,
 func agentWorkspacePreflightError(wsCfg *corev1alpha1.WorkspaceConfig, readCredential, publicationReadCredential, publicationCredential, forgeCredential string) *ChatToolError {
 	invalidArgs := func(message, suggestion string) *ChatToolError {
 		return &ChatToolError{Type: invalidArgumentsErrorType, Message: message, Suggestion: suggestion}
+	}
+	if err := publisher.ValidatePullRequestText(wsCfg.PRTitle, wsCfg.PRBody); err != nil {
+		return invalidArgs(fmt.Sprintf("invalid workspace pull request metadata: %v", err), "Use non-sensitive prTitle and prBody text within the schema limits, or omit them for defaults")
 	}
 	if strings.TrimSpace(wsCfg.GitRepo) == "" {
 		switch {
