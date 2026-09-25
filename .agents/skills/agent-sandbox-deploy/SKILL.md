@@ -22,14 +22,14 @@ production controller flags.
 
 The repeatable standup already lives in
 `hack/demos/cluster/install-agent-sandbox.sh`. **Drive that script in place; do
-not copy it into the skill.** Orka requires agent-sandbox `v1.0.0`. The script
+not copy it into the skill.** Orka requires agent-sandbox `v1.0.3`. The script
 defaults `ORKA_AGENT_SANDBOX_VERSION` to that version, matching `go.mod`, and
 owns the gotchas (kind registry addressing, the SDK sandbox-router build from
 the Go module cache, the controller flag patch). Use the version override only
 for a coordinated future dependency upgrade with matching adapter validation.
 
 Existing v0.5 installations must complete the upstream storage migration before
-applying v1.0.0. The script does not run or preflight that migration. After a
+applying v1.0.3. The script does not run or preflight that migration. After a
 successful v1 install, it removes only the four obsolete namespaced
 conversion-webhook resources documented by upstream; it leaves the active
 cluster-scoped controller RBAC intact.
@@ -149,7 +149,7 @@ test -x "$kindctl"
    ```bash
    eval "$("$kindctl" env)"
    kube="$("$kindctl" path)"
-   agent_sandbox_version="${ORKA_AGENT_SANDBOX_VERSION:-v1.0.0}"
+   agent_sandbox_version="${ORKA_AGENT_SANDBOX_VERSION:-v1.0.3}"
    go mod download "sigs.k8s.io/agent-sandbox@${agent_sandbox_version}"
    test -d "$(go env GOMODCACHE)/sigs.k8s.io/agent-sandbox@${agent_sandbox_version}/clients/python/agentic-sandbox-client/sandbox-router"
    ORKA_DEMO_CLUSTER="$(basename "$kube" .kubeconfig)" \

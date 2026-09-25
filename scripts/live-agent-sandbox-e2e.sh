@@ -15,7 +15,7 @@ repo_root="$(cd "${script_dir}/.." && pwd)"
 # shellcheck source=scripts/lib/e2e-admission-tls.sh
 . "${script_dir}/lib/e2e-admission-tls.sh"
 
-agent_sandbox_version="${AGENT_SANDBOX_VERSION:-v1.0.0}"
+agent_sandbox_version="${AGENT_SANDBOX_VERSION:-v1.0.3}"
 kind_cluster="${KIND_CLUSTER:-orka-live-agent-sandbox-e2e}"
 orka_namespace="${ORKA_NAMESPACE:-orka-system}"
 orka_controller_deployment="${ORKA_CONTROLLER_DEPLOYMENT:-orka-controller-manager}"
@@ -76,8 +76,8 @@ smoke_go_dir="${repo_root}/.tmp-live-agent-sandbox-smoke-${e2e_run_id}"
 manager_kustomization="${repo_root}/config/manager/kustomization.yaml"
 manager_kustomization_backup="${work_dir}/manager-kustomization.yaml.bak"
 
-if [[ "${agent_sandbox_version}" != "v1.0.0" ]]; then
-  die "this e2e is pinned to agent-sandbox v1.0.0 to match go.mod"
+if [[ "${agent_sandbox_version}" != "v1.0.3" ]]; then
+  die "this e2e is pinned to agent-sandbox v1.0.3 to match go.mod"
 fi
 
 cleanup_one_port_forward() {
