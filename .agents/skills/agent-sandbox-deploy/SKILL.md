@@ -22,14 +22,20 @@ production controller flags.
 
 The repeatable standup already lives in
 `hack/demos/cluster/install-agent-sandbox.sh`. **Drive that script in place; do
-not copy it into the skill.** Orka requires agent-sandbox `v1.0.3`. The script
-defaults `ORKA_AGENT_SANDBOX_VERSION` to that version, matching `go.mod`, and
-owns the gotchas (kind registry addressing, the SDK sandbox-router build from
-the Go module cache, the controller flag patch). Use the version override only
-for a coordinated future dependency upgrade with matching adapter validation.
+not copy it into the skill.** The script defaults `ORKA_AGENT_SANDBOX_VERSION`
+to `v1.0.3`, matching `go.mod` and the bundled E2E test pin, and owns the gotchas
+(kind registry addressing, the SDK sandbox-router build from the Go module
+cache, the controller flag patch).
+
+Target the latest stable upstream release when updating the test baseline, and
+update the dependency, installer, and E2E pins together with adapter validation.
+The test pin is not a minimum supported version. Do not label older releases
+unsupported solely because they predate it; document the required API, feature,
+or bug fix that justifies any minimum version. Validate compatibility before
+claiming support for a different version.
 
 Existing v0.5 installations must complete the upstream storage migration before
-applying v1.0.3. The script does not run or preflight that migration. After a
+applying v1. The script does not run or preflight that migration. After a
 successful v1 install, it removes only the four obsolete namespaced
 conversion-webhook resources documented by upstream; it leaves the active
 cluster-scoped controller RBAC intact.
