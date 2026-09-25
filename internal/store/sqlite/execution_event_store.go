@@ -454,7 +454,7 @@ func (s *Store) ListExecutionEvents(ctx context.Context, filter store.ExecutionE
 		WHERE ` + strings.Join(where, " AND ") + `
 		ORDER BY namespace ASC, stream_type ASC, stream_id ASC, seq ASC
 		LIMIT ?`
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.taskDataExecutor(ctx).QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

@@ -35,6 +35,7 @@ func (f *approvalRetryReadFault) readError() error {
 }
 
 type approvalRetryEventStore struct {
+	store.TaskDataTransactionStore
 	store.DeduplicatingExecutionEventStore
 	fault *approvalRetryReadFault
 }
@@ -63,7 +64,7 @@ func configureApprovalRetryReadFault(t *testing.T, f *mcpApprovalFixture, source
 	fault := &approvalRetryReadFault{reads: make(chan struct{}, 2)}
 	switch source {
 	case "decision":
-		f.broker.ApprovalEvents = approvalRetryEventStore{DeduplicatingExecutionEventStore: f.events, fault: fault}
+		f.broker.ApprovalEvents = approvalRetryEventStore{DeduplicatingExecutionEventStore: f.events, TaskDataTransactionStore: f.events, fault: fault}
 	case "receipt":
 		f.broker.Effects = approvalRetryEffectStore{ExternalEffectStore: f.broker.Effects, fault: fault}
 	case "secret":
@@ -159,14 +160,15 @@ func TestMCPApprovalReadRetriesKeepOriginalExpiry(t *testing.T) {
 			fault.active.Store(true)
 			f.decide(pending.ID, events.ExecutionEventTypeApprovalApproved)
 			requireApprovalReadRetrying(t, f, pending.ID, approvals.StatusApproved, done, fault.reads)
-			if source == "receipt" {
-				// Without a receipt read, the expired waiter cannot assert that
-				// another delivery has not already claimed execution.
+			if source == "receipt" || source == "decision" {
+				// Unreadable receipts cannot rule out another execution claim.
+				// Unreadable history cannot prove a retained request for the
+				// expiry projection. Neither outage may be treated as absence.
 				select {
 				case response := <-done:
 					require.Equal(t, http.StatusServiceUnavailable, response.Code)
 				case <-time.After(3 * time.Second):
-					t.Fatal("receipt outage extended the original approval wait")
+					t.Fatal("storage outage extended the original approval wait")
 				}
 			} else {
 				result := awaitMCPApprovalResult(t, done)

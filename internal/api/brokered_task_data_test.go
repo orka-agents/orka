@@ -306,7 +306,7 @@ func brokeredDataRequest(t *testing.T, task *corev1alpha1.Task, tool tools.Tool)
 		Fence: fence, TaskUID: harnessv2.TaskUID(task.UID), TaskAttempt: 1, PromptID: "prompt", OperationID: "data-operation",
 		RequestDigestSchemaVersion: harnessv2.RequestDigestSchemaVersion, ExpiresAt: now.Add(time.Minute),
 	}
-	args := map[string]string{"send_message": `{"to_task":"peer","content":"late message"}`, "check_messages": `{"mark_read":true}`, "search_transcript": `{"query":"needle"}`}
+	args := map[string]string{"reply_in_conversation": `{"content":"working"}`, "send_message": `{"to_task":"peer","content":"late message"}`, "check_messages": `{"mark_read":true}`, "search_transcript": `{"query":"needle"}`}
 	request := harnessv2.MCPBrokerCallRequest{
 		Protocol: harnessv2.ProtocolVersion, Namespace: task.Namespace, SessionState: harnessv2.RuntimeSessionStatePromptRunning, Metadata: metadata,
 		Lease: harnessv2.PromptLease{Generation: 1, IssuedAt: now.Add(-time.Second), ExpiresAt: now.Add(2 * time.Minute)},

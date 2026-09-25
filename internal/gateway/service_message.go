@@ -68,26 +68,10 @@ func (s *Service) PrepareTaskMessage(ctx context.Context, namespace, taskName, t
 	if strings.TrimSpace(text) == "" || len(text) > protocol.MaxInterimTextBytes || !utf8.ValidString(text) {
 		return nil, &HTTPError{Code: http.StatusBadRequest, Message: "gateway message content is invalid after sanitization"}
 	}
-	event, err := s.EventStore.GetGatewayEventForTask(ctx, namespace, taskName, taskUID)
-	if errors.Is(err, store.ErrNotFound) {
-		return nil, &HTTPError{Code: http.StatusForbidden, Message: "task does not own a gateway event"}
-	}
+	event, object, err := s.prepareMessageIdentity(ctx, namespace, taskName, taskUID)
 	if err != nil {
 		return nil, err
 	}
-	task, err := s.liveMessageTask(ctx, event)
-	if err != nil {
-		return nil, err
-	}
-	if task.Status.Phase != corev1alpha1.TaskPhaseRunning || task.Status.ExecutionOutcome != nil || !task.DeletionTimestamp.IsZero() {
-		return nil, &HTTPError{Code: http.StatusConflict, Message: "task is not running"}
-	}
-	object, err := s.liveMessageGatewayIdentity(ctx, event)
-	if err != nil {
-		return nil, err
-	}
-	// Readiness/capability can deny new admission without hiding an authorized
-	// receipt. Only the atomic store dedupe may distinguish a replay from a miss.
 	gateErr := messageGatewayAdmissionError(object)
 	now := time.Now().UTC()
 	return &PreparedTaskMessage{service: s, admissionGateError: gateErr, request: store.GatewayMessageEnqueue{
@@ -96,6 +80,31 @@ func (s *Service) PrepareTaskMessage(ctx context.Context, namespace, taskName, t
 		MaxMessages: s.Config.InterimMessagesPerTask, MaxAttempts: s.Config.DeliveryMaxAttempts,
 		Now: now, ExpiresAt: now.Add(s.Config.EventExpiry), ReplayOnly: gateErr != nil,
 	}}, nil
+}
+
+func (s *Service) prepareMessageIdentity(ctx context.Context, namespace, taskName, taskUID string) (*store.GatewayEvent, *gatewayv1alpha1.Gateway, error) {
+	if s == nil || !s.Config.Enabled || s.EventStore == nil || s.DeliveryStore == nil || s.freshReader() == nil {
+		return nil, nil, &HTTPError{Code: http.StatusServiceUnavailable, Message: "gateway message processing is unavailable"}
+	}
+	event, err := s.EventStore.GetGatewayEventForTask(ctx, namespace, taskName, taskUID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, nil, &HTTPError{Code: http.StatusForbidden, Message: "task does not own a gateway event"}
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	task, err := s.liveMessageTask(ctx, event)
+	if err != nil {
+		return nil, nil, err
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseRunning || task.Status.ExecutionOutcome != nil || !task.DeletionTimestamp.IsZero() {
+		return nil, nil, &HTTPError{Code: http.StatusConflict, Message: "task is not running"}
+	}
+	object, err := s.liveMessageGatewayIdentity(ctx, event)
+	if err != nil {
+		return nil, nil, err
+	}
+	return event, object, nil
 }
 
 // EnqueuePreparedTaskMessage performs only store work and reuses an existing

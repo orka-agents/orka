@@ -414,6 +414,19 @@ type AISpec struct {
 	Tools []string `json:"tools,omitempty"`
 }
 
+// MarshalJSON preserves an explicitly empty native tool policy instead of
+// omitting it. Nil and nonempty lists retain their existing wire representation.
+func (in AISpec) MarshalJSON() ([]byte, error) {
+	type aiSpecJSON AISpec
+	if in.Tools == nil || len(in.Tools) > 0 {
+		return json.Marshal(aiSpecJSON(in))
+	}
+	return json.Marshal(struct {
+		aiSpecJSON
+		Tools []string `json:"tools"`
+	}{aiSpecJSON: aiSpecJSON(in), Tools: in.Tools})
+}
+
 // SkillReference references a Skill CRD by name or inline skill content from a ConfigMap key.
 type SkillReference struct {
 	// Name references a Skill CR by name

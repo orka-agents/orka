@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -38,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/llm"
@@ -312,9 +314,6 @@ func run(transcriptPath string) (err error) {
 	// Build messages
 	messages := buildInitialMessages(sessionContext, prompt, promptIncluded, planPromptContext, approvalPromptContext)
 
-	// Build tools for LLM (built-in + custom)
-	llmTools := buildLLMTools(enabledTools, customTools)
-
 	// Create tool executor for custom tools
 	toolExecutor := worker.NewToolExecutor()
 
@@ -323,6 +322,7 @@ func run(transcriptPath string) (err error) {
 		Namespace: taskNamespace,
 		Tenant:    taskNamespace,
 		TaskID:    taskName,
+		TaskUID:   workerEnv.TaskUID,
 		AuthorizeSecretRead: workerSecretReadAuthorizer(
 			k8sClient,
 			taskNamespace,
@@ -332,6 +332,16 @@ func run(transcriptPath string) (err error) {
 		),
 		RequireSecretReadAuthorization: workerEnv.EnforceTransactionCredentialAuth,
 	}
+
+	baseToolCtx.GatewayReplySender, err = newNativeGatewayReplySender(
+		ctx, inClusterNativeGatewayReplyTaskReader, workerEnv,
+		workerenv.ServiceAccountTokenFile, nativeGatewayReplyBootstrapTimeout,
+	)
+	if err != nil {
+		return err
+	}
+	// Only a bound, controller-authorized sender permits gateway tool advertisement.
+	llmTools := buildLLMTools(enabledTools, customTools, baseToolCtx)
 
 	// Execute the agent loop
 	result, err := executeAgentLoopWithEvents(
@@ -656,10 +666,17 @@ func approvalOutboundPolicySecretRefs(
 }
 
 // buildLLMTools builds the combined tool list for the LLM
-func buildLLMTools(enabledTools []string, customTools map[string]*corev1alpha1.Tool) []llm.Tool {
+func buildLLMTools(
+	enabledTools []string, customTools map[string]*corev1alpha1.Tool, toolContexts ...*tools.ToolContext,
+) []llm.Tool {
 	var llmTools []llm.Tool
+	toolCtx := optionalToolContext(toolContexts)
 
 	for _, name := range enabledTools {
+		if name == aitools.GatewayReplyToolName && (toolCtx == nil || toolCtx.GatewayReplySender == nil ||
+			toolCtx.TaskUID == "" || toolCtx.Namespace == "" || toolCtx.TaskID == "") {
+			continue
+		}
 		// Check if it's a built-in tool
 		if builtinTools := tools.DefaultRegistry.ToLLMTools([]string{name}); len(builtinTools) > 0 {
 			llmTools = append(llmTools, builtinTools...)
@@ -1224,6 +1241,9 @@ func executeAgentLoopWithEvents(
 	baseToolCtxOpt ...*tools.ToolContext,
 ) (string, error) {
 	baseToolCtx := optionalToolContext(baseToolCtxOpt)
+	// A new execution/model turn is a new logical operation, not semantic dedupe.
+	// The identity remains fixed across transport retries of that tool execution.
+	replyExecutionID := rand.Text()
 	coordinationEnv := workerenv.ParseCoordinationEnv(os.Getenv)
 	maxIterations := agentLoopMaxIterations(coordinationEnv)
 	allowedToolCalls := advertisedToolNames(llmTools)
@@ -1443,6 +1463,12 @@ func executeAgentLoopWithEvents(
 				if baseToolCtx != nil {
 					toolCtxCopy := *baseToolCtx
 					toolCtxCopy.ToolCallID = tc.ID
+					if toolName == aitools.GatewayReplyToolName {
+						toolCtxCopy.OperationID = ""
+						if strings.TrimSpace(tc.ID) != "" {
+							toolCtxCopy.OperationID = fmt.Sprintf("native/%s/%d/%s", replyExecutionID, iteration, tc.ID)
+						}
+					}
 					if toolCtxCopy.Tenant == "" {
 						toolCtxCopy.Tenant = toolCtxCopy.Namespace
 					}

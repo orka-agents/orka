@@ -93,8 +93,11 @@ func newGatewayMessageAPIFixture(t *testing.T) *gatewayMessageAPIFixture {
 	f.user = internalCallerAuthWorkerUser("pod-a", "pod-uid")
 	f.h = NewInternalHandlers(f.db, f.db, f.db, f.db, f.db, InternalHandlersConfig{Client: kube, APIReader: kube, GatewayEventStore: f.db, GatewayService: f.service})
 	f.app = fiber.New()
+	f.app.Get("/internal/v1/tasks/:namespace/:taskName/gateway-messages/origin",
+		NewAuthMiddleware(kube, AuthConfig{ReportTokenReviewUnavailable: true}), f.h.GetGatewayReplyOrigin)
 	f.app.Use(NewAuthMiddleware(kube))
 	f.app.Post("/internal/v1/tasks/:namespace/:taskName/gateway-messages", f.h.SubmitGatewayMessage)
+	f.app.Get("/internal/v1/tasks/:namespace/:taskName/gateway-messages/budget", f.h.GetGatewayMessageBudget)
 	return f
 }
 
@@ -237,6 +240,7 @@ func TestInternalGatewayMessageStrictBoundedRequest(t *testing.T) {
 		{"missing requestID", `{"content":"x"}`, 400},
 		{"noncanonical requestID", `{"content":"x","requestID":" step "}`, 400},
 		{"extra JSON", `{"content":"x","requestID":"step"}{}`, 400},
+		{"lone surrogate", `{"content":"\ud800","requestID":"step"}`, 400},
 		{"raw invalid UTF8", "{\"content\":\"\xff\",\"requestID\":\"step\"}", 400},
 		{"raw content cap", `{"content":"` + strings.Repeat("x", 16385) + `","requestID":"step"}`, 413},
 		{"body cap", strings.Repeat(" ", 101000), 413},

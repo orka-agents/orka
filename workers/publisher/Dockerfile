@@ -9,7 +9,7 @@ ARG GIT_SOURCE_SHA256
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential=12.9 ca-certificates=20230311+deb12u1 \
       libcurl4-openssl-dev=7.88.1-10+deb12u15 libexpat1-dev=2.5.0-1+deb12u3 \
-      libssl-dev=3.0.20-1~deb12u2 perl=5.36.0-7+deb12u3 pkg-config=1.8.1-1 \
+      libssl-dev=3.0.22-1~deb12u1 perl=5.36.0-7+deb12u3 pkg-config=1.8.1-1 \
       xz-utils=5.4.1-1+deb12u1 zlib1g-dev=1:1.2.13.dfsg-1 \
     && rm -rf /var/lib/apt/lists/*
 ADD --checksum=sha256:457fdb04dc8728e007d4688695e6912e6f680727920f2a40bf11eacc17505357 \

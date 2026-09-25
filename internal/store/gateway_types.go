@@ -193,6 +193,22 @@ type GatewayExpiryProjection struct {
 	CompletedAt time.Time
 }
 
+// GatewayMessageBudgetQuery identifies a receipt without content or worker policy.
+type GatewayMessageBudgetQuery struct {
+	Namespace    string
+	NamespaceUID string
+	EventID      string
+	TaskName     string
+	TaskUID      string
+	RequestID    string
+}
+
+// GatewayMessageBudget is a read-only snapshot, not an admission reservation.
+type GatewayMessageBudget struct {
+	Accepted      int  `json:"accepted"`
+	RequestExists bool `json:"requestExists"`
+}
+
 // GatewayMessageEnqueue admits one bounded nonterminal message for an exact Task/event.
 // All routing and delivery identity are derived from the durable event and RequestID;
 // callers must authorize the live Task and Gateway identity before entering the writer.

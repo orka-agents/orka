@@ -491,9 +491,16 @@ func (s *Server) setupRoutes() {
 			},
 		)
 		internal := s.app.Group("/internal/v1")
+		// Optional origin bootstrap must distinguish a TokenReview backend outage
+		// from an invalid token. Register before the default auth middleware so no
+		// other internal or public route changes its authentication error contract.
+		internal.Get("/tasks/:namespace/:taskName/gateway-messages/origin",
+			NewAuthMiddleware(s.client, AuthConfig{ReportTokenReviewUnavailable: true}),
+			s.internalHandlers.GetGatewayReplyOrigin)
 		internal.Use(NewAuthMiddleware(s.client))
 		internal.Post("/results/:namespace/:taskName", s.internalHandlers.SubmitResult)
 		internal.Post("/tasks/:namespace/:taskName/gateway-messages", s.internalHandlers.SubmitGatewayMessage)
+		internal.Get("/tasks/:namespace/:taskName/gateway-messages/budget", s.internalHandlers.GetGatewayMessageBudget)
 		internal.Post("/tasks/:namespace/:taskName/execution-workspace/status", s.internalHandlers.UpdateExecutionWorkspaceStatus)
 		internal.Get("/sessions/:namespace/search", s.internalHandlers.SearchTranscript)
 		internal.Get("/sessions/:namespace/:name/transcript", s.internalHandlers.GetSessionTranscript)

@@ -27,6 +27,7 @@ import (
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/gateway/protocol"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/test/utils"
 )
 
@@ -120,6 +121,11 @@ func gatewayE2EVerifyNativeMessage(baseURL, token, eventID, taskName string, cap
 	Expect(gatewayE2EGetKubernetesJSON("job", task.Status.JobName, true, &job)).To(Succeed())
 	Expect(string(job.UID)).To(Equal(task.Status.JobUID))
 	Expect(job.OwnerReferences).To(ContainElement(HaveField("UID", task.UID)))
+	Expect(job.Spec.Template.Spec.Containers).To(ContainElement(And(
+		HaveField("Name", "worker"),
+		HaveField("Env", ContainElement(corev1.EnvVar{Name: workerenv.TaskUID, Value: string(task.UID)})),
+		HaveField("Env", ContainElement(corev1.EnvVar{Name: workerenv.GatewayReplyEnabled, Value: "true"})),
+	)))
 	var pod corev1.Pod
 	Eventually(func(g Gomega) {
 		output, err := utils.Run(exec.Command("kubectl", "get", "pods", "-n", namespace, "-l", "batch.kubernetes.io/job-name="+job.Name, "-o", "json"))
@@ -132,8 +138,10 @@ func gatewayE2EVerifyNativeMessage(baseURL, token, eventID, taskName string, cap
 		g.Expect(pod.OwnerReferences).To(ContainElement(HaveField("UID", job.UID)))
 		g.Expect(pod.Spec.Containers[0].Image).To(Equal(gatewayNativeWorkerImage))
 	}, time.Minute, time.Second).Should(Succeed())
-	// The test drives only fixture-local fences using Kubernetes exec. All writes
-	// to the controller are made by /worker with the real Pod-bound projected token.
+	// The test drives only fixture-local fences using Kubernetes exec. /worker
+	// authenticates origin and executes the production tool/client with the real
+	// Pod-bound projected token. This is not the production model/registration loop.
+	By("executing the content-only production reply tool and replay in the native fixture")
 	_, err = gatewayE2EWorkerCommand(pod.Name, "start")
 	Expect(err).NotTo(HaveOccurred())
 	var report struct {

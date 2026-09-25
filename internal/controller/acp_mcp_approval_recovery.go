@@ -420,23 +420,15 @@ func (d *ACPDispatcher) projectMCPApprovalExecution(
 	if effect.Identity != identity || effect.RequestDigest != expected.Binding.RequestDigest {
 		return store.ErrConflict
 	}
-	listed, err := approvals.ListEvents(ctx, d.EventStore, task.Namespace, task.Name)
-	if err != nil {
-		return err
-	}
-	listed = approvals.FilterEventsForTaskUID(listed, string(task.UID))
-	for _, approval := range approvals.Derive(listed, time.Time{}) {
-		if approval.ID != expected.ID || approval.TaskUID != string(task.UID) || approval.Binding == nil ||
-			*approval.Binding != *expected.Binding {
-			continue
-		}
-		outcome, reason, result := mcpApprovalRecoveredOutcome(effect, approval.ID)
-		if mcpApprovalProjectionCurrent(approval, outcome, reason) {
-			return nil
-		}
-		return d.appendMCPApprovalRecoveryOutcome(ctx, task, approval, effect.Version, listed, outcome, reason, result)
-	}
-	return nil
+	_, err = withRetainedMCPApproval(ctx, d.EventStore, task.Namespace, task.Name, expected,
+		func(txCtx context.Context, approval approvals.Approval, listed []store.ExecutionEvent) error {
+			outcome, reason, result := mcpApprovalRecoveredOutcome(effect, approval.ID)
+			if mcpApprovalProjectionCurrent(approval, outcome, reason) {
+				return nil
+			}
+			return d.appendMCPApprovalRecoveryOutcome(txCtx, task, approval, effect.Version, listed, outcome, reason, result)
+		})
+	return err
 }
 
 // mcpApprovalProjectionCurrent reports whether the approval's public
@@ -462,6 +454,8 @@ func mcpApprovalRecoveryDecisionType(approval approvals.Approval, outcome, reaso
 	}
 }
 
+// Called only inside withRetainedMCPApproval: the decision and execution event
+// commit together against its fresh retained request and observed history.
 func (d *ACPDispatcher) appendMCPApprovalRecoveryOutcome(
 	ctx context.Context,
 	task *corev1alpha1.Task,

@@ -1300,6 +1300,7 @@ func main() {
 	var acpMCPRegistry *tools.Registry
 	if acpRuntimeEnabled {
 		acpMCPRegistry = tools.NewRegistry()
+		acpMCPRegistry.Register(tools.NewReplyInConversationTool())
 		if err := tools.RegisterBrokeredWebTools(acpMCPRegistry); err != nil {
 			setupLog.Error(err, "unable to register ACP MCP broker web tools")
 			os.Exit(1)
@@ -1668,6 +1669,7 @@ func main() {
 		APIReader:                    mgr.GetAPIReader(),
 		Scheme:                       mgr.GetScheme(),
 		JobBuilder:                   jobBuilder,
+		GatewayService:               gatewayService,
 		SessionManager:               sessionManager,
 		WebhookNotifier:              webhookNotifier,
 		KubeClient:                   kubeClient,
@@ -2169,6 +2171,12 @@ func main() {
 				if !ok {
 					return nil, fmt.Errorf("authenticated ACP MCP prompt data guard is unavailable")
 				}
+				var gatewayReplySender tools.GatewayReplySender
+				if request.Call.ToolName == "reply_in_conversation" {
+					// The broker has already checked this call against the frozen descriptor policy.
+					gatewayReplySender = api.NewBrokeredGatewayReplySender(mgr.GetAPIReader(), gatewayService,
+						crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, dataGuard)
+				}
 				return &tools.ToolContext{
 					Client: mgr.GetClient(), PolicyReader: mgr.GetAPIReader(), KubeClient: kubeClient, Namespace: request.Namespace,
 					SessionID: string(request.Authorization.RuntimeSessionUID), TaskID: task.Name,
@@ -2181,7 +2189,8 @@ func main() {
 					ResultStore:                  sqliteStore, SessionDeleter: sessionManager,
 					MessageStore: api.NewTaskMessageStore(mgr.GetAPIReader(), sqliteStore,
 						crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, taskProvenanceProtected, dataGuard),
-					MemoryReader: sqliteStore, MemoryProposalWriter: sqliteStore,
+					GatewayReplySender: gatewayReplySender,
+					MemoryReader:       sqliteStore, MemoryProposalWriter: sqliteStore,
 					TranscriptSearcher: api.NewTaskTranscriptSearcher(mgr.GetAPIReader(), sqliteStore, sqliteStore,
 						crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, taskProvenanceProtected, dataGuard),
 				}, nil

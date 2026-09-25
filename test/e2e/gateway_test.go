@@ -357,9 +357,9 @@ var _ = Describe("Gateway live E2E", Ordered, func() {
 	})
 
 	for _, capable := range []bool{true, false} {
-		name := "delivers an authenticated native interim message before final"
+		name := "delivers an authenticated native reply tool message before final"
 		if !capable {
-			name = "rejects unsupported native interim delivery without enqueueing or sending a message"
+			name = "rejects the native reply tool on unsupported interim delivery and still delivers final"
 		}
 		It(name, func() {
 			// The native image was selected before the external runtime was

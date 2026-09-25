@@ -6,10 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"unicode/utf8"
 
 	"github.com/gofiber/fiber/v3"
 
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/gateway/protocol"
 )
@@ -74,6 +74,75 @@ func (h *InternalHandlers) submitGatewayMessage(c fiber.Ctx) (*gatewayruntime.Ta
 	return receipt, err
 }
 
+// GetGatewayMessageBudget uses the same native caller and writer revocation
+// gates as POST. The GET reads only a snapshot and never reserves quota.
+func (h *InternalHandlers) GetGatewayMessageBudget(c fiber.Ctx) error {
+	namespace, taskName := c.Params("namespace"), c.Params("taskName")
+	authorizer := h.internalCallerAuthorizer()
+	task, err := authorizer.verifyTaskCaller(c, namespace, taskName)
+	if err != nil {
+		return sendGatewayMessageError(c, err)
+	}
+	if h.gatewayService == nil {
+		return sendGatewayMessageError(c, fiber.NewError(fiber.StatusServiceUnavailable))
+	}
+	requestID := c.Query("requestID")
+	var prepared *gatewayruntime.PreparedTaskMessageBudget
+	var budget *gatewayruntime.TaskMessageBudget
+	err = withInternalTaskDataTransaction(c, h.gatewayService.DeliveryStore, taskName, func(ctx context.Context) error {
+		if err := authorizer.revalidateTaskCaller(c, task); err != nil {
+			return err
+		}
+		var err error
+		prepared, err = h.gatewayService.PrepareTaskMessageBudget(ctx, namespace, taskName, string(task.UID), requestID)
+		return gatewayMessageTransactionError(err)
+	}, func(ctx context.Context) error {
+		var err error
+		budget, err = h.gatewayService.ReadPreparedTaskMessageBudget(ctx, prepared)
+		return gatewayMessageTransactionError(err)
+	})
+	if err != nil {
+		return sendGatewayMessageError(c, err)
+	}
+	return c.JSON(budget)
+}
+
+// GetGatewayReplyOrigin authenticates durable origin independently of mutable
+// message admission gates. Like POST, it requires the exact native Pod/Job and
+// rechecks revocation and durable state under the authorized writer.
+func (h *InternalHandlers) GetGatewayReplyOrigin(c fiber.Ctx) error {
+	namespace, taskName := c.Params("namespace"), c.Params("taskName")
+	authorizer := h.internalCallerAuthorizer()
+	task, err := authorizer.verifyTaskCaller(c, namespace, taskName)
+	if err != nil {
+		return sendGatewayMessageError(c, err)
+	}
+	if h.gatewayService == nil {
+		return sendGatewayMessageError(c, fiber.NewError(fiber.StatusServiceUnavailable))
+	}
+	if task.Spec.Type != corev1alpha1.TaskTypeAI {
+		return sendGatewayMessageError(c, fiber.NewError(fiber.StatusForbidden))
+	}
+	var prepared *gatewayruntime.PreparedTaskReplyOrigin
+	var origin *gatewayruntime.TaskReplyOrigin
+	err = withInternalTaskDataTransaction(c, h.gatewayService.DeliveryStore, taskName, func(ctx context.Context) error {
+		if err := authorizer.revalidateTaskCaller(c, task); err != nil {
+			return err
+		}
+		var err error
+		prepared, err = h.gatewayService.PrepareTaskReplyOrigin(ctx, namespace, taskName, string(task.UID))
+		return gatewayMessageTransactionError(err)
+	}, func(ctx context.Context) error {
+		var err error
+		origin, err = h.gatewayService.ReadPreparedTaskReplyOrigin(ctx, prepared)
+		return gatewayMessageTransactionError(err)
+	})
+	if err != nil {
+		return sendGatewayMessageError(c, err)
+	}
+	return c.JSON(origin)
+}
+
 func readGatewayMessageRequest(c fiber.Ctx) (*gatewayMessageRequest, error) {
 	var data []byte
 	if body := c.Request().BodyStream(); body != nil {
@@ -88,7 +157,7 @@ func readGatewayMessageRequest(c fiber.Ctx) (*gatewayMessageRequest, error) {
 	if len(data) > maxGatewayMessageRequestBytes {
 		return nil, fiber.NewError(fiber.StatusRequestEntityTooLarge, "gateway message body is too large")
 	}
-	if !utf8.Valid(data) {
+	if !protocol.ValidJSONUnicode(data) {
 		return nil, fiber.NewError(fiber.StatusBadRequest, "gateway message body must be valid UTF-8")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
