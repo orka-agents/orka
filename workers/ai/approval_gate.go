@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/approvals"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/events"
@@ -610,8 +611,9 @@ func validateApprovalCustomToolCompatibility(customTool *corev1alpha1.Tool) erro
 			)
 		}
 	}
-	if customTool.Spec.HTTP.AuthSecretRef != nil {
-		if approvalMountedCredentialExists(customTool.Spec.HTTP.AuthSecretRef.Name, customTool.Spec.HTTP.AuthSecretRef.Key) {
+	if authRef := customTool.Spec.HTTP.AuthSecretRef; authRef != nil {
+		// Remote credentials use the exact API Secret selector and never mounted files.
+		if !aitools.IsRemoteMCP(customTool) && approvalMountedCredentialExists(authRef.Name, authRef.Key) {
 			return fmt.Errorf(
 				"approval-gated tool %q mounted credential source cannot be approval-bound",
 				customTool.Name,
@@ -951,6 +953,10 @@ func prepareApprovalToolContext(baseToolCtx *tools.ToolContext, recorder common.
 	}
 	if baseToolCtxCopy.ApprovalTargetRefresh == nil && baseToolCtxCopy.Client != nil {
 		baseToolCtxCopy.ApprovalTargetRefresh = func(ctx context.Context, _ string, tool *corev1alpha1.Tool) error {
+			if aitools.IsRemoteMCP(tool) {
+				_, err := validateNativeRemoteTool(ctx, &baseToolCtxCopy, tool)
+				return err
+			}
 			bindApprovalAuthRefVersion(ctx, baseToolCtxCopy.Client, baseToolCtxCopy.Namespace, tool)
 			return bindApprovalOutboundAccessPolicyVersion(ctx, baseToolCtxCopy.Client, baseToolCtxCopy.Namespace, tool)
 		}
