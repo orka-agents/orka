@@ -281,6 +281,12 @@ func (h *OpenAICompatHandler) produceResponsesChunks(ctx context.Context, provid
 		sendResponsesCompletion(completion, send)
 		return
 	}
+	if provider.Name() == "anthropic" {
+		// Anthropic labels refusals only at the end of the turn. Do not
+		// release ordinary text deltas until that outcome is validated.
+		produceResponsesBufferedStream(ctx, provider, req, send)
+		return
+	}
 	upstream, err := provider.Stream(ctx, req)
 	if err != nil {
 		if ctx.Err() == nil && responsesStreamUnsupported(err, false) {
@@ -319,6 +325,22 @@ func (h *OpenAICompatHandler) responsesLoopConfig(req *llm.CompletionRequest) Ch
 		config.MaxPrematureEndRetries = 0
 	}
 	return config
+}
+
+func produceResponsesBufferedStream(ctx context.Context, provider llm.Provider, req *llm.CompletionRequest, send func(llm.StreamChunk) bool) {
+	completion, err := completeViaStream(ctx, provider, req, toolLoopOptions{allowEmptyTokenBudget: true})
+	if ctx.Err() != nil {
+		return
+	}
+	if err != nil {
+		if errors.Is(err, errStreamUnavailable) && responsesStreamUnsupported(err, true) {
+			produceResponsesFallback(ctx, provider, req, send)
+		} else {
+			send(llm.StreamChunk{Error: responsesCompletionError(err)})
+		}
+		return
+	}
+	sendResponsesCompletion(completion, send)
 }
 
 func produceResponsesFallback(ctx context.Context, provider llm.Provider, req *llm.CompletionRequest, send func(llm.StreamChunk) bool) {

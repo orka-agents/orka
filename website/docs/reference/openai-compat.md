@@ -101,6 +101,10 @@ The first version supports:
   not detected while the handler is waiting for provider or tool work; that work
   may continue until completion or the duration limit.
 
+Anthropic-backed Responses streams buffer each model turn until its terminal
+outcome is known, so refusal text is never forwarded as ordinary text deltas.
+Creation/progress events and keep-alives still stream while the model runs.
+
 Coordinator mode is the default here too. Orka replaces client tools and executes
 its own tools on the server. Streaming emits text progress between coordinator
 rounds; function arguments are emitted as complete deltas once the upstream
