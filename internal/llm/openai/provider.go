@@ -39,6 +39,7 @@ const (
 )
 
 const (
+	messageRoleAssistant                        = "assistant"
 	eventTypeResponseOutputTextDelta            = "response.output_text.delta"
 	eventTypeResponseContentPartAdded           = "response.content_part.added"
 	eventTypeResponseContentPartDone            = "response.content_part.done"
@@ -316,7 +317,7 @@ func convertInputItems(messages []llm.Message) responses.ResponseInputParam {
 					Content: responses.EasyInputMessageContentUnionParam{OfString: openai.String(msg.Content)},
 				},
 			})
-		case "assistant":
+		case messageRoleAssistant:
 			if msg.OutputItems != nil {
 				for _, item := range msg.OutputItems {
 					if item.ToolCall != nil {
@@ -1043,7 +1044,7 @@ func (p *Provider) streamResponses(ctx context.Context, req *llm.CompletionReque
 func groupAssistantTurns(messages []llm.Message) []llm.Message {
 	grouped := make([]llm.Message, 0, len(messages))
 	for _, msg := range messages {
-		if msg.Role == "assistant" && len(grouped) > 0 && grouped[len(grouped)-1].Role == "assistant" {
+		if msg.Role == messageRoleAssistant && len(grouped) > 0 && grouped[len(grouped)-1].Role == messageRoleAssistant {
 			last := &grouped[len(grouped)-1]
 			last.Content += msg.Content
 			last.ToolCalls = append(last.ToolCalls, msg.ToolCalls...)
@@ -1074,7 +1075,7 @@ func convertMessages(messages []llm.Message, systemPrompt string) []openai.ChatC
 			msgs = append(msgs, openai.SystemMessage(msg.Content))
 		case messageRoleUser:
 			msgs = append(msgs, openai.UserMessage(msg.Content))
-		case "assistant":
+		case messageRoleAssistant:
 			m := openai.AssistantMessage(msg.Content)
 			if len(msg.ToolCalls) > 0 {
 				tcs := make([]openai.ChatCompletionMessageToolCallUnionParam, 0, len(msg.ToolCalls))

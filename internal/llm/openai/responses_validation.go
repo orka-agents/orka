@@ -39,6 +39,9 @@ func validateResponsesItemType(item responses.ResponseOutputItemUnion) error {
 	case eventTypeFunctionCall:
 		return nil
 	case responseOutputTypeMessage:
+		if invalidResponseMetadataString(item.Role, item.JSON.Role) || (item.Role != "" && item.Role != messageRoleAssistant) {
+			return fmt.Errorf("provider message role is outside the Responses subset")
+		}
 		for _, part := range item.Content {
 			if part.Type != responseContentTypeOutputText && part.Type != stopReasonRefusal {
 				return fmt.Errorf("provider message content is outside the Responses subset")

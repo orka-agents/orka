@@ -94,9 +94,12 @@ The first version supports:
   argument deltas, item completion, and response completion. Token-budget
   truncation returns `response.incomplete`, including an empty `output` when no
   text was produced; provider failures emit `error` and
-  `response.failed`. Disconnects and the configured duration limit cancel work.
-  A client that stops reading is disconnected after the duration limit plus a
-  one-second grace period for terminal events.
+  `response.failed`. For SSE, detected disconnects and the configured duration
+  limit cancel provider and tool work. A client that stops reading is disconnected
+  after the duration limit plus a one-second grace period for terminal events.
+  Non-streaming JSON requests have the same duration limit, but disconnects are
+  not detected while the handler is waiting for provider or tool work; that work
+  may continue until completion or the duration limit.
 
 Coordinator mode is the default here too. Orka replaces client tools and executes
 its own tools on the server. Streaming emits text progress between coordinator
