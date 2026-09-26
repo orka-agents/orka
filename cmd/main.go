@@ -282,6 +282,7 @@ func main() {
 	var chatMaxSessionSize int
 	var chatMaxPrematureEndRetries int
 	var gatewayEnabled bool
+	var connectorsEnabled bool
 	var gatewayPendingPerSession int
 	var gatewayMaxRecordsPerGateway int
 	var gatewayMaxRejectedRecordsPerGateway int
@@ -489,6 +490,8 @@ func main() {
 			"no-tool-use response as the final turn. The model must emit the GOAL_STATE sentinel on its true "+
 			"final turn — see coordinatorSystemPrompt.")
 	flag.BoolVar(&gatewayEnabled, "gateway-enabled", true, "Enable generic gateway reconciliation and ingress.")
+	flag.BoolVar(&connectorsEnabled, "connectors-enabled", envBool("ORKA_CONNECTORS_ENABLED"),
+		"Enable per-user connector reconciliation (ConnectorProvider and Connection).")
 	flag.IntVar(&gatewayPendingPerSession, "gateway-pending-per-session", 100,
 		"Maximum pending gateway events per Session.")
 	flag.IntVar(&gatewayMaxRecordsPerGateway, "gateway-max-records-per-gateway", 1000,
@@ -1840,6 +1843,24 @@ func main() {
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "OutboundAccessPolicy")
 		os.Exit(1)
+	}
+
+	if connectorsEnabled {
+		if err := (&controller.ConnectorProviderReconciler{
+			Client:    mgr.GetClient(),
+			APIReader: mgr.GetAPIReader(),
+			Scheme:    mgr.GetScheme(),
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "ConnectorProvider")
+			os.Exit(1)
+		}
+		if err := (&controller.ConnectionReconciler{
+			Client: mgr.GetClient(),
+			Scheme: mgr.GetScheme(),
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "Connection")
+			os.Exit(1)
+		}
 	}
 
 	if err := (&controller.ToolReconciler{

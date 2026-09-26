@@ -139,6 +139,8 @@ for crd in \
   agentruntimes.core.orka.ai \
   agents.core.orka.ai \
   branchclaims.core.orka.ai \
+  connections.core.orka.ai \
+  connectorproviders.core.orka.ai \
   controllerepochs.core.orka.ai \
   executionworkspaceclasses.workspace.orka.ai \
   executionworkspacepools.workspace.orka.ai \
@@ -267,4 +269,4 @@ if grep -Fq 'claimName: controller-manager-store' <<<"${rendered_default}"; then
   exit 1
 fi
 
-printf '%s\n' 'ok - static-mode deployment requires the Established 24-CRD shared bundle, dual AgentRuntime/Agent/Task selectors, and no superseded coexistence CRDs'
+printf '%s\n' 'ok - static-mode deployment requires the Established 26-CRD shared bundle, dual AgentRuntime/Agent/Task selectors, and no superseded coexistence CRDs'
