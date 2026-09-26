@@ -331,6 +331,72 @@ spec:
 
 Policy status contains only `observedGeneration`, `Accepted`, and `ResolvedRefs`. Secret references are key-specific and same-namespace. Cross-namespace Service refs require exact controller allowlist entries. See [Outbound Access Policies](../concepts/outbound-access.md).
 
+## ConnectorProvider
+
+`ConnectorProvider` is the operator-owned catalog entry for one third-party service people may link through OAuth. It is namespaced, reconciled only when the controller runs with `--connectors-enabled`, and carries public OAuth client settings plus the tools the service offers. Only the client secret lives in a Secret.
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: ConnectorProvider
+metadata:
+  name: github
+  namespace: default
+spec:
+  displayName: GitHub
+  oauth:
+    authorizeURL: https://github.com/login/oauth/authorize
+    tokenURL: https://github.com/login/oauth/access_token
+    clientID: Iv1.example-client-id
+    clientSecretRef:
+      name: github-connector-oauth
+      key: clientSecret
+    scopes:
+      read: [read:user, repo:status]
+      write: [repo]
+  tools:
+    - name: list_pull_requests
+      class: read
+      source: Builtin
+    - name: create_pull_request
+      class: write
+      source: Builtin
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `spec.displayName` | string | object name | Shown to people in the dashboard and CLI. |
+| `spec.oauth.authorizeURL` | string | required | Absolute HTTPS authorization endpoint. Private, loopback, link-local, and cluster-internal hosts are rejected. |
+| `spec.oauth.tokenURL` | string | required | Absolute HTTPS token endpoint used for the code exchange and refresh. |
+| `spec.oauth.revocationURL` | string | empty | Optional RFC 7009 endpoint called best-effort on disconnect. |
+| `spec.oauth.clientID` | string | required | Public OAuth client identifier. |
+| `spec.oauth.clientSecretRef` | Secret key selector | required | Same-namespace Secret holding the client secret. |
+| `spec.oauth.clientAuthentication` | `ClientSecretBasic` \| `ClientSecretPost` | `ClientSecretBasic` | How the client secret is presented to the token endpoint. |
+| `spec.oauth.pkce` | bool | `true` | Enable RFC 7636 code verification. |
+| `spec.oauth.scopes.read` / `.write` | []string | empty | Scopes requested for `readOnly` Connections, and additionally for `readWrite`. |
+| `spec.oauth.additionalAuthorizeParameters` | map | empty | Static authorize query parameters. Reserved OAuth fields are rejected. |
+| `spec.tools[].name` | string | required | Tool name exposed to agents. Unique within the provider. |
+| `spec.tools[].class` | `read` \| `write` | required | Write tools are hidden from `readOnly` Connections and require approval. |
+| `spec.tools[].source` | `Builtin` \| `HTTP` | required | `Builtin` names an existing Orka tool. `HTTP` carries a curated definition in `http`. |
+| `spec.tools[].description`, `.parameters`, `.http` | | | HTTP tools only. `http.url` must be HTTPS; `Authorization`, `Cookie`, `Host`, and `Txn-Token` headers are reserved. |
+
+Status contains only `observedGeneration`, `Accepted`, and `ResolvedRefs`.
+
+## Connection
+
+`Connection` is one person's linked account with one `ConnectorProvider`. The API server creates it from the caller's verified OIDC or context-token identity; `spec.subject` and `spec.providerRef` are immutable. Deleting the Connection is the disconnect. Status never carries token material.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `spec.subject.issuer` | string | required | Identity issuer that verified the subject. Immutable. |
+| `spec.subject.subject` | string | required | Issuer-scoped stable subject. Immutable. |
+| `spec.providerRef.name` | string | required | Same-namespace `ConnectorProvider`. Immutable. |
+| `spec.mode` | `readOnly` \| `readWrite` | `readOnly` | `readOnly` hides the provider's write tools and requests only read scopes. |
+| `status.state` | string | | `Pending`, `Ready`, `Expired`, `Revoked`, or `Error`. |
+| `status.grantedScopes` | []string | | Scopes the provider reported at consent time. |
+| `status.linkedAt`, `.expiresAt`, `.lastRefreshTime` | time | | Link, access-token expiry, and refresh timestamps. |
+
+Conditions are `ProviderResolved` (set by the controller) and `Ready` (set by the consent and refresh paths). See [ADR 0033](https://github.com/orka-agents/orka/blob/main/docs/adr/0033-user-connectors.md) for the design.
+
 ## Security
 
 Repository security endpoints manage `RepositoryScan` configurations and their generated threat models, scan runs, findings, patch proposals, and remediation pull requests. Like other `/api/v1/*` endpoints, they require ServiceAccount bearer token authentication.

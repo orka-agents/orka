@@ -1,0 +1,134 @@
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
+package v1alpha1
+
+import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+const (
+	// ConnectionConditionProviderResolved reports whether providerRef names an
+	// Accepted ConnectorProvider in the same namespace.
+	ConnectionConditionProviderResolved = "ProviderResolved"
+	// ConnectionConditionReady reports whether linked token material is held
+	// and usable by the controller.
+	ConnectionConditionReady = "Ready"
+
+	ConnectionModeReadOnly  = "readOnly"
+	ConnectionModeReadWrite = "readWrite"
+
+	// ConnectionStatePending means consent has not completed.
+	ConnectionStatePending = "Pending"
+	// ConnectionStateReady means token material is held and not known to be expired.
+	ConnectionStateReady = "Ready"
+	// ConnectionStateExpired means the held material expired and could not be refreshed.
+	ConnectionStateExpired = "Expired"
+	// ConnectionStateRevoked means the provider rejected the material or the
+	// person disconnected.
+	ConnectionStateRevoked = "Revoked"
+	// ConnectionStateError means the Connection cannot be used, for example
+	// because its provider is missing or invalid.
+	ConnectionStateError = "Error"
+
+	ConnectionReasonProviderResolved = "ProviderResolved"
+	ConnectionReasonProviderMissing  = "ProviderMissing"
+	ConnectionReasonProviderInvalid  = "ProviderInvalid"
+	ConnectionReasonPendingConsent   = "PendingConsent"
+)
+
+// ConnectionSubject is the verified identity that owns a Connection. It is
+// copied from the authenticated request and never from a request body.
+type ConnectionSubject struct {
+	// Issuer is the identity issuer that verified the subject.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	Issuer string `json:"issuer"`
+
+	// Subject is the issuer-scoped stable subject identifier.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	Subject string `json:"subject"`
+}
+
+// ConnectionSpec links one person to one ConnectorProvider.
+// +kubebuilder:validation:XValidation:rule="self.subject == oldSelf.subject",message="subject is immutable"
+// +kubebuilder:validation:XValidation:rule="self.providerRef == oldSelf.providerRef",message="providerRef is immutable"
+type ConnectionSpec struct {
+	// Subject is the owning verified identity.
+	// +kubebuilder:validation:Required
+	Subject ConnectionSubject `json:"subject"`
+
+	// ProviderRef names a ConnectorProvider in the same namespace.
+	// +kubebuilder:validation:Required
+	ProviderRef LocalObjectReference `json:"providerRef"`
+
+	// Mode is readOnly or readWrite. readOnly hides the provider's write tools
+	// from agents and requests only read scopes.
+	// +kubebuilder:validation:Enum=readOnly;readWrite
+	// +kubebuilder:default=readOnly
+	// +optional
+	Mode string `json:"mode,omitempty"`
+}
+
+// ConnectionStatus reports link state. It never carries token material.
+type ConnectionStatus struct {
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// State is Pending, Ready, Expired, Revoked, or Error.
+	// +optional
+	State string `json:"state,omitempty"`
+
+	// GrantedScopes are the scopes the provider reported at consent time.
+	// +optional
+	GrantedScopes []string `json:"grantedScopes,omitempty"`
+
+	// LinkedAt is when consent last completed.
+	// +optional
+	LinkedAt *metav1.Time `json:"linkedAt,omitempty"`
+
+	// ExpiresAt is the held access token's expiry, if the provider reported one.
+	// +optional
+	ExpiresAt *metav1.Time `json:"expiresAt,omitempty"`
+
+	// LastRefreshTime is when the held material was last refreshed.
+	// +optional
+	LastRefreshTime *metav1.Time `json:"lastRefreshTime,omitempty"`
+
+	// +listType=map
+	// +listMapKey=type
+	// +optional
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Provider",type=string,JSONPath=`.spec.providerRef.name`
+// +kubebuilder:printcolumn:name="Subject",type=string,JSONPath=`.spec.subject.subject`
+// +kubebuilder:printcolumn:name="Mode",type=string,JSONPath=`.spec.mode`
+// +kubebuilder:printcolumn:name="State",type=string,JSONPath=`.status.state`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+
+// Connection is one person's linked account with one ConnectorProvider.
+// Deleting it is the disconnect.
+type Connection struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	Spec   ConnectionSpec   `json:"spec"`
+	Status ConnectionStatus `json:"status,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+
+// ConnectionList contains a list of Connection objects.
+type ConnectionList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []Connection `json:"items"`
+}
+
+func init() {
+	SchemeBuilder.Register(&Connection{}, &ConnectionList{})
+}
