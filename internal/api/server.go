@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io/fs"
@@ -128,7 +129,6 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		StreamRequestBody: true,
 		ErrorHandler:      customErrorHandler,
 	})
-	app.Server().HeaderReceived = requestBodyConfig
 
 	server := &Server{
 		app:                 app,
@@ -176,6 +176,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 	server.openaiHandler = NewOpenAICompatHandler(c, config.APIReader, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat, resolver, config.ResultStore, config.Clientset)
 	server.openaiHandler.contextTokenAuthorization = config.ContextTokenAuthorization
 	server.openaiHandler.gatewayEventStore = config.GatewayEventStore
+	app.Server().HeaderReceived = server.requestConfig
 	server.anthropicHandler = NewAnthropicCompatHandler(c, config.APIReader, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat, resolver, config.ResultStore, config.Clientset)
 	server.anthropicHandler.contextTokenAuthorization = config.ContextTokenAuthorization
 	server.anthropicHandler.gatewayEventStore = config.GatewayEventStore
@@ -206,6 +207,22 @@ func requestBodyConfig(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
 		return fasthttp.RequestConfig{MaxRequestBodySize: 1 << 20, ReadTimeout: 30 * time.Second}
 	}
 	return fasthttp.RequestConfig{}
+}
+
+// requestConfig bounds writes on the Responses route as well as provider work.
+// A context deadline cannot interrupt a socket blocked by a client that stops
+// reading. fasthttp applies and clears this deadline for each keep-alive request.
+func (s *Server) requestConfig(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
+	config := requestBodyConfig(header)
+	// Fiber routes on fasthttp PathOriginal, including its fragment handling.
+	// net/url's request-target parsing differs for a literal '#' character.
+	var uri fasthttp.URI
+	if header.IsPost() && uri.Parse(header.Host(), header.RequestURI()) == nil &&
+		bytes.EqualFold(bytes.TrimRight(uri.PathOriginal(), "/"), []byte("/openai/v1/responses")) {
+		// Allow a bounded grace period to deliver the terminal timeout event.
+		config.WriteTimeout = s.openaiHandler.config.MaxDuration + time.Second
+	}
+	return config
 }
 
 // isGatewayIngressPath matches /api/v1/gateways/{gateway}/{channel}/events,
@@ -463,6 +480,7 @@ func (s *Server) setupRoutes() {
 	// This allows OpenAI-compatible clients to use Orka as a custom provider.
 	oai := s.externalAPIGroup("/openai/v1", externalAuth)
 	oai.Post("/chat/completions", s.openaiHandler.HandleChatCompletions)
+	oai.Post("/responses", s.openaiHandler.HandleResponses)
 	oai.Get("/models", s.openaiHandler.HandleListModels)
 
 	// Anthropic-compatible API
@@ -645,7 +663,7 @@ func customErrorHandler(c fiber.Ctx, err error) error {
 
 	return c.Status(code).JSON(fiber.Map{
 		apiFieldError: fiber.Map{
-			"code":          code,
+			apiFieldCode:    code,
 			apiFieldMessage: message,
 		},
 	})
@@ -657,7 +675,7 @@ func customErrorHandler(c fiber.Ctx, err error) error {
 // Saying so costs a client one line in its log rather than a parse failure
 // several frames from the cause.
 var unsupportedCompatRoutes = map[string]string{
-	"/openai/v1/responses": "the OpenAI Responses API is not supported by this endpoint; use /openai/v1/chat/completions",
+	"/openai/v1/conversations": "saved conversations are not supported; use /openai/v1/responses with store:false and client-owned history",
 }
 
 // compatRouteNotFound answers an unrouted compatibility-API path in the error

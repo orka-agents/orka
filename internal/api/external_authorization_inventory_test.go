@@ -167,6 +167,7 @@ POST /api/v1/chat | create core.orka.ai:chats
 GET /api/v1/chat/config | get core.orka.ai:chats/config
 DELETE /api/v1/chat/:sessionId | delete core.orka.ai:sessions protected
 POST /openai/v1/chat/completions | create core.orka.ai:chats
+POST /openai/v1/responses | create core.orka.ai:chats
 GET /openai/v1/models | list core.orka.ai:providers
 POST /anthropic/v1/messages | create core.orka.ai:chats
 GET /anthropic/v1/models | list core.orka.ai:providers

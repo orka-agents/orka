@@ -38,6 +38,8 @@ import (
 )
 
 const (
+	apiFieldType        = "type"
+	apiFieldCode        = "code"
 	apiFieldDescription = "description"
 	apiFieldChecks      = "checks"
 	apiFieldItems       = "items"

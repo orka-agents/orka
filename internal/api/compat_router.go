@@ -28,15 +28,16 @@ import (
 
 const anthropicErrorEnvelopeType = "error"
 
-// CompatRouter forwards the four model compatibility routes to independent,
+// CompatRouter forwards model compatibility routes to independent,
 // namespace-scoped Orka installations. It authenticates ServiceAccount tokens;
 // the receiving installation reauthenticates the same token and authorizes the
 // route and each tool operation. It has no access to tenant resources or stores.
 type CompatRouter struct {
-	client      client.Client
-	routes      map[string]*url.URL
-	transport   *http.Transport
-	corsOrigins []string
+	client                client.Client
+	routes                map[string]*url.URL
+	transport             *http.Transport
+	corsOrigins           []string
+	responsesWriteTimeout time.Duration
 }
 
 // NewCompatRouter freezes the operator's namespace-to-installation allowlist.
@@ -77,7 +78,7 @@ func NewCompatRouter(c client.Client, namespaces map[string]string) (*CompatRout
 	if origins == "" {
 		origins = "*"
 	}
-	return &CompatRouter{client: c, routes: routes, transport: transport, corsOrigins: strings.Split(origins, ",")}, nil
+	return &CompatRouter{client: c, routes: routes, transport: transport, corsOrigins: strings.Split(origins, ","), responsesWriteTimeout: 30 * time.Second}, nil
 }
 
 // Close releases idle connections when the router shuts down.
@@ -147,6 +148,15 @@ func (r *CompatRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	req.Body = http.MaxBytesReader(w, req.Body, defaultAPIRequestBodyLimit)
+	if path == "/openai/v1/responses" {
+		// Installations bound inference time, but cannot release this hop if
+		// its client stops reading after the upstream response is drained.
+		// Bound each downstream write, not time waiting for the installation.
+		ctx, cancel := context.WithCancel(req.Context())
+		defer cancel()
+		req = req.WithContext(ctx)
+		w = &responsesDeadlineWriter{ResponseWriter: w, timeout: r.responsesWriteTimeout, cancel: cancel}
+	}
 	proxy := &httputil.ReverseProxy{
 		Transport:     r.transport,
 		FlushInterval: -1, // Forward SSE immediately, including terminal events.
@@ -193,6 +203,62 @@ func (r *CompatRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		},
 	}
 	proxy.ServeHTTP(w, req)
+	if bounded, ok := w.(*responsesDeadlineWriter); ok {
+		// Bound net/http's final headers, trailers and chunk terminator too.
+		// The server clears this deadline before reusing the connection.
+		if err := bounded.setDeadline(time.Now().Add(bounded.timeout)); err != nil {
+			panic(http.ErrAbortHandler)
+		}
+	}
+}
+
+type responsesDeadlineWriter struct {
+	http.ResponseWriter
+	timeout time.Duration
+	cancel  context.CancelFunc
+}
+
+func (w *responsesDeadlineWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func (w *responsesDeadlineWriter) setDeadline(deadline time.Time) error {
+	err := http.NewResponseController(w.ResponseWriter).SetWriteDeadline(deadline)
+	// In-memory response writers have no socket to bound. Native HTTP/1
+	// and HTTP/2 writers support deadlines, including through Unwrap.
+	if errors.Is(err, http.ErrNotSupported) {
+		return nil
+	}
+	return err
+}
+
+func (w *responsesDeadlineWriter) Write(p []byte) (int, error) {
+	if err := w.setDeadline(time.Now().Add(w.timeout)); err != nil {
+		w.cancel()
+		return 0, err
+	}
+	n, err := w.ResponseWriter.Write(p)
+	if err == nil {
+		err = w.setDeadline(time.Time{})
+	}
+	if err != nil {
+		w.cancel()
+	}
+	return n, err
+}
+
+func (w *responsesDeadlineWriter) FlushError() error {
+	if err := w.setDeadline(time.Now().Add(w.timeout)); err != nil {
+		w.cancel()
+		return err
+	}
+	err := http.NewResponseController(w.ResponseWriter).Flush()
+	if err == nil {
+		err = w.setDeadline(time.Time{})
+	}
+	if err != nil {
+		// ReverseProxy may ignore Flush errors, so cancel its upstream read.
+		w.cancel()
+	}
+	return err
 }
 
 var compatRouterRequestHeaders = []string{
@@ -203,7 +269,7 @@ var compatRouterRequestHeaders = []string{
 
 func compatRouterRoute(method, path string) bool {
 	switch method + " " + path {
-	case "POST /openai/v1/chat/completions", "GET /openai/v1/models",
+	case "POST /openai/v1/chat/completions", "POST /openai/v1/responses", "GET /openai/v1/models",
 		"POST /anthropic/v1/messages", "GET /anthropic/v1/models":
 		return true
 	default:

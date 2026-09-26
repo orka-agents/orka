@@ -609,6 +609,7 @@ See [Interactive Chat](../guides/chat.md) for full chat documentation.
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/openai/v1/chat/completions` | POST | Chat completions (streaming & non-streaming) |
+| `/openai/v1/responses` | POST | Stateless Responses (streaming & non-streaming; requires `store:false`) |
 | `/openai/v1/models` | GET | List available models |
 
 See [OpenAI Compatibility](openai-compat.md) for details.

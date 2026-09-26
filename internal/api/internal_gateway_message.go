@@ -144,5 +144,5 @@ func sendGatewayMessageError(c fiber.Ctx, err error) error {
 	if errors.Is(err, errGatewayInterimDeliveryUnsupported) {
 		code, message = "interim_delivery_unsupported", errGatewayInterimDeliveryUnsupported.Message
 	}
-	return c.Status(status).JSON(fiber.Map{"error": fiber.Map{"code": code, "message": message}})
+	return c.Status(status).JSON(fiber.Map{"error": fiber.Map{apiFieldCode: code, "message": message}})
 }

@@ -278,6 +278,7 @@ otherwise. In the additional-checks column:
 | `GET` | `/api/v1/chat/config` | `core.orka.ai` | `chats/config` | `get` | empty | `Q` | none |
 | `DELETE` | `/api/v1/chat/:sessionId` | `core.orka.ai` | `sessions` | `delete` | `:sessionId` | `Q` | none |
 | `POST` | `/openai/v1/chat/completions` | `core.orka.ai` | `chats` | `create` | empty | `Q` | Each nested tool requires its own resource permissions; custom Tool metadata requires unnamed `list core.orka.ai/tools` and is omitted on denial |
+| `POST` | `/openai/v1/responses` | `core.orka.ai` | `chats` | `create` | empty | `Q` | Stateless only; each nested coordinator tool requires its own resource permissions |
 | `GET` | `/openai/v1/models` | `core.orka.ai` | `providers` | `list` | empty | `Q` | none |
 | `POST` | `/anthropic/v1/messages` | `core.orka.ai` | `chats` | `create` | empty | `Q` | Each nested tool requires its own resource permissions; custom Tool metadata requires unnamed `list core.orka.ai/tools` and is omitted on denial |
 | `GET` | `/anthropic/v1/models` | `core.orka.ai` | `providers` | `list` | empty | `Q` | none |
