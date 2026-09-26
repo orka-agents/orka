@@ -18,6 +18,21 @@ const levelColors: Record<LogLevel, string> = {
 }
 
 function parseLogLevel(line: string): LogLevel {
+  if (line.trimStart().startsWith('{')) {
+    try {
+      const entry: unknown = JSON.parse(line)
+      if (typeof entry === 'object' && entry !== null && 'level' in entry && typeof entry.level === 'string') {
+        const level = entry.level.toLowerCase()
+        if (level === 'warning') return 'warn'
+        if (level === 'info' || level === 'warn' || level === 'error' || level === 'debug') {
+          return level
+        }
+      }
+    } catch {
+      // Malformed JSON keeps the same text-based fallback as ordinary log lines.
+    }
+  }
+
   const lower = line.toLowerCase()
   if (/\berror\b|"level"\s*:\s*"error"|level=error|\[error\]/i.test(lower)) return 'error'
   if (/\bwarn(ing)?\b|"level"\s*:\s*"warn"|level=warn|\[warn\]/i.test(lower)) return 'warn'
