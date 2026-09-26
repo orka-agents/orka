@@ -700,6 +700,52 @@ func runNonStreamingToolLoop(
 	return runToolLoopWithObserver(ctx, provider, req, model, config, toolCtx, nil, options...)
 }
 
+// addResponsesToolLoopUsage returns a request-visible usage snapshot without
+// changing the provider's per-call response. Persisted accounting owns probes
+// and failed attempts; this total includes only successful completion rounds.
+func addResponsesToolLoopUsage(total, resp *llm.CompletionResponse) *llm.CompletionResponse {
+	result := *resp
+	if resp.CachedInputTokens != nil {
+		result.CachedInputTokens = new(*resp.CachedInputTokens)
+	}
+	if resp.CacheWriteInputTokens != nil {
+		result.CacheWriteInputTokens = new(*resp.CacheWriteInputTokens)
+	}
+	if total == nil {
+		// A single completion retains its original usage representation.
+		return &result
+	}
+	result.InputTokens += total.InputTokens
+	result.OutputTokens += total.OutputTokens
+	result.UsageReported = result.UsageReported || total.UsageReported
+	// Normalize each round before adding its cache breakdown, since providers
+	// may use different input/cache conventions. Aggregates are cache-inclusive.
+	for _, usage := range []*llm.CompletionResponse{total, resp} {
+		if usage.InputExcludesCache {
+			if usage.CachedInputTokens != nil {
+				result.InputTokens += int(*usage.CachedInputTokens)
+			}
+			if usage.CacheWriteInputTokens != nil {
+				result.InputTokens += int(*usage.CacheWriteInputTokens)
+			}
+		}
+	}
+	if total.CachedInputTokens != nil {
+		if result.CachedInputTokens == nil {
+			result.CachedInputTokens = new(int64)
+		}
+		*result.CachedInputTokens += *total.CachedInputTokens
+	}
+	if total.CacheWriteInputTokens != nil {
+		if result.CacheWriteInputTokens == nil {
+			result.CacheWriteInputTokens = new(int64)
+		}
+		*result.CacheWriteInputTokens += *total.CacheWriteInputTokens
+	}
+	result.InputExcludesCache = false
+	return &result
+}
+
 //nolint:gocyclo // Tool calls, observer events, and stop conditions form one turn loop.
 func runToolLoopWithObserver(
 	ctx context.Context,
@@ -717,6 +763,7 @@ func runToolLoopWithObserver(
 	messages := make([]llm.Message, len(req.Messages))
 	copy(messages, req.Messages)
 	prematureEndRetries := 0
+	var responsesUsage *llm.CompletionResponse
 
 	for iteration := 0; ; iteration++ {
 		// Check context cancellation
@@ -761,6 +808,10 @@ func runToolLoopWithObserver(
 			}
 			if requireFinalCompletion && len(resp.ToolCalls) != 0 {
 				return nil, fmt.Errorf("tools-free final completion returned tool calls")
+			}
+			if req.ResponsesInput {
+				responsesUsage = addResponsesToolLoopUsage(responsesUsage, resp)
+				resp = responsesUsage
 			}
 			observer.finalContent(resp.Content)
 			return resp, nil
@@ -815,6 +866,8 @@ func runToolLoopWithObserver(
 				}
 				seenCalls[call.ID] = true
 			}
+			responsesUsage = addResponsesToolLoopUsage(responsesUsage, resp)
+			resp = responsesUsage
 		}
 
 		// A text response cut off by the output token budget is terminal:
