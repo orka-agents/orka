@@ -223,7 +223,22 @@ func (r *ResponsesResponse) setOutcome(completion *llm.CompletionResponse) error
 	default:
 		return fmt.Errorf("invalid completion outcome")
 	}
-	r.Usage = &responsesUsage{InputTokens: completion.InputTokens, OutputTokens: completion.OutputTokens, TotalTokens: completion.InputTokens + completion.OutputTokens, InputTokensDetails: map[string]int{"cached_tokens": 0, "cache_write_tokens": 0}, OutputTokensDetails: map[string]int{"reasoning_tokens": 0}}
+	cachedTokens, cacheWriteTokens := 0, 0
+	if completion.CachedInputTokens != nil {
+		cachedTokens = int(*completion.CachedInputTokens)
+	}
+	if completion.CacheWriteInputTokens != nil {
+		cacheWriteTokens = int(*completion.CacheWriteInputTokens)
+	}
+	inputTokens := completion.InputTokens
+	if completion.InputExcludesCache {
+		inputTokens += cachedTokens + cacheWriteTokens
+	}
+	r.Usage = &responsesUsage{
+		InputTokens: inputTokens, OutputTokens: completion.OutputTokens, TotalTokens: inputTokens + completion.OutputTokens,
+		InputTokensDetails:  map[string]int{"cached_tokens": cachedTokens, "cache_write_tokens": cacheWriteTokens},
+		OutputTokensDetails: map[string]int{"reasoning_tokens": 0},
+	}
 	return nil
 }
 

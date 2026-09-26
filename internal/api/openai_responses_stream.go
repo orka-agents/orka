@@ -138,9 +138,18 @@ func (h *OpenAICompatHandler) streamResponses(c fiber.Ctx, ctx context.Context, 
 	c.Set("Cache-Control", "no-cache")
 	c.Set("Connection", "keep-alive")
 	c.Set("X-Accel-Buffering", "no")
-	base := detachedSpanContext(ctx)
+	// Fiber runs the writer after the handler returns and cancels ctx. Keep
+	// its values and original budget without inheriting that cancellation.
+	deadline, hasDeadline := ctx.Deadline()
+	base := context.WithoutCancel(ctx)
 	return c.SendStreamWriter(func(w *bufio.Writer) {
-		streamCtx, cancel := context.WithTimeout(base, h.config.MaxDuration)
+		var streamCtx context.Context
+		var cancel context.CancelFunc
+		if hasDeadline {
+			streamCtx, cancel = context.WithDeadline(base, deadline)
+		} else {
+			streamCtx, cancel = context.WithTimeout(base, h.config.MaxDuration)
+		}
 		defer cancel()
 		writer := &responsesStreamWriter{writer: w, response: response, textIndex: -1, calls: map[string]bool{}}
 		if err := writer.event("response.created", map[string]any{responsesObject: response}); err != nil {
@@ -153,6 +162,7 @@ func (h *OpenAICompatHandler) streamResponses(c fiber.Ctx, ctx context.Context, 
 		go h.produceResponsesChunks(streamCtx, provider, req, coordinator, toolCtx, chunks)
 		heartbeat := time.NewTicker(time.Second)
 		defer heartbeat.Stop()
+		completion := &llm.CompletionResponse{}
 		for {
 			select {
 			case <-streamCtx.Done():
@@ -170,6 +180,7 @@ func (h *OpenAICompatHandler) streamResponses(c fiber.Ctx, ctx context.Context, 
 					writer.fail(chunk.Error)
 					return
 				}
+				retainStreamUsage(completion, chunk)
 				if err := writer.text(chunk.Content); err != nil {
 					return
 				}
@@ -199,7 +210,7 @@ func (h *OpenAICompatHandler) streamResponses(c fiber.Ctx, ctx context.Context, 
 					writer.fail()
 					return
 				}
-				completion := &llm.CompletionResponse{StopReason: chunk.StopReason, InputTokens: chunk.InputTokens, OutputTokens: chunk.OutputTokens}
+				completion.StopReason = chunk.StopReason
 				for _, item := range response.Output {
 					if item.Type == finishReasonFunctionCall {
 						completion.ToolCalls = append(completion.ToolCalls, llm.ToolCall{ID: item.CallID})
@@ -342,7 +353,11 @@ func sendResponsesCompletion(completion *llm.CompletionResponse, send func(llm.S
 			return
 		}
 	}
-	send(llm.StreamChunk{Done: true, StopReason: completion.StopReason, InputTokens: completion.InputTokens, OutputTokens: completion.OutputTokens})
+	send(llm.StreamChunk{
+		Done: true, StopReason: completion.StopReason, InputTokens: completion.InputTokens, OutputTokens: completion.OutputTokens,
+		CachedInputTokens: completion.CachedInputTokens, CacheWriteInputTokens: completion.CacheWriteInputTokens,
+		InputExcludesCache: completion.InputExcludesCache, UsageReported: completion.UsageReported,
+	})
 }
 
 // Only an explicit unsupported-stream capability error permits retry. Channel
