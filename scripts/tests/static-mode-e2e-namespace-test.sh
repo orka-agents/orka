@@ -269,7 +269,7 @@ if [[ ! "${live_tls_line}" =~ ^[0-9]+$ || ! "${live_runtime_line}" =~ ^[0-9]+$ |
   exit 1
 fi
 
-grep -Fq 'agent_sandbox_version="${AGENT_SANDBOX_VERSION:-v1.0.0}"' "${root}/scripts/live-agent-sandbox-e2e.sh"
+grep -Fq 'agent_sandbox_version="${AGENT_SANDBOX_VERSION:-v1.0.3}"' "${root}/scripts/live-agent-sandbox-e2e.sh"
 grep -Fq 'e2e_kubeconfig="${work_dir}/kubeconfig"' "${root}/scripts/live-agent-sandbox-e2e.sh"
 grep -Fq 'export KUBECONFIG="${e2e_kubeconfig}"' "${root}/scripts/live-agent-sandbox-e2e.sh"
 grep -Fq 'run kind export kubeconfig --name "${kind_cluster}" --kubeconfig "${e2e_kubeconfig}"' "${root}/scripts/live-agent-sandbox-e2e.sh"
