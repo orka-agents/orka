@@ -246,7 +246,16 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 			// in which case the newer material is simply returned.
 			shredErr := s.Credentials.ShredConnectorCredential(ctx, string(connection.UID), current.Version)
 			if errors.Is(shredErr, store.ErrConflict) {
-				return s.Credentials.GetConnectorCredential(ctx, ref)
+				// A consent won the race; its material is released only if it
+				// is not itself about to expire, as any resolution would judge.
+				winner, err := s.Credentials.GetConnectorCredential(ctx, ref)
+				if err != nil {
+					return store.ConnectorCredential{}, err
+				}
+				if s.needsRefresh(winner) {
+					return store.ConnectorCredential{}, errors.New("connection credential changed concurrently and is about to expire; retry")
+				}
+				return winner, nil
 			}
 			if shredErr != nil {
 				logger.Error(shredErr, "connector custody could not be shredded after revocation")

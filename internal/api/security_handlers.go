@@ -405,6 +405,7 @@ func (h *Handlers) createSecurityScanRun(ctx context.Context, ui *UserInfo, scan
 		}
 		return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create scan task: %v", err))
 	}
+	sealRequesterStamp(ctx, h.client, task)
 	if err := h.updateRepositoryScanRunStatus(ctx, scan, scanID, taskName, staleStatus); err != nil {
 		apiErr, _ := errors.AsType[*fiber.Error](err)
 		if apierrors.IsConflict(err) || (apiErr != nil && apiErr.Code == fiber.StatusConflict) {
