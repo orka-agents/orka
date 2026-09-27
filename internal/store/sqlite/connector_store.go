@@ -498,7 +498,11 @@ func (s *Store) GetConnectorCredential(ctx context.Context, ref store.ConnectorC
 	}
 	credential.UpdatedAt = updatedAt.UTC()
 	credential.Version = version
-	credential.GrantSequence = grantSequence
+	// The plaintext column is an index for queries; the grant identity that
+	// counts is the sealed one, and the two must agree.
+	if credential.GrantSequence != grantSequence {
+		return store.ConnectorCredential{}, fmt.Errorf("connector credential for connection %s: grant sequence column does not match the sealed grant", ref.ConnectionUID)
+	}
 	return credential, nil
 }
 
@@ -606,10 +610,6 @@ func (s *Store) ReplaceConnectorCredential(ctx context.Context, ref store.Connec
 	if strings.TrimSpace(credential.AccessToken) == "" {
 		return errors.New("connector credential access token is required")
 	}
-	row, err := s.sealConnectorCredentialRow(ref, credential)
-	if err != nil {
-		return err
-	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin connector credential replacement: %w", err)
@@ -627,8 +627,8 @@ func (s *Store) ReplaceConnectorCredential(ctx context.Context, ref store.Connec
 		return store.ErrConnectorCustodyTombstoned
 	}
 	// The version fence is checked next so a stale writer retires nothing.
-	var currentVersion int64
-	err = tx.QueryRowContext(ctx, `SELECT version FROM connector_credentials WHERE connection_uid = ?`, ref.ConnectionUID).Scan(&currentVersion)
+	var currentVersion, currentGrant int64
+	err = tx.QueryRowContext(ctx, `SELECT version, grant_sequence FROM connector_credentials WHERE connection_uid = ?`, ref.ConnectionUID).Scan(&currentVersion, &currentGrant)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return store.ErrNotFound
@@ -636,6 +636,14 @@ func (s *Store) ReplaceConnectorCredential(ctx context.Context, ref store.Connec
 		return fmt.Errorf("inspect connector credential row: %w", err)
 	case currentVersion != expectedVersion:
 		return store.ErrConflict
+	}
+	// A replacement carries the row's grant forward whatever the caller
+	// supplied: only a consent starts a new grant, and the sealed body must
+	// agree with the column.
+	credential.GrantSequence = currentGrant
+	row, err := s.sealConnectorCredentialRow(ref, credential)
+	if err != nil {
+		return err
 	}
 	// A refresh rotates the access token only: the previous refresh token
 	// is either the same one (no rotation) or already invalid (rotation),

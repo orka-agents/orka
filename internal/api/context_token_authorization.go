@@ -162,6 +162,8 @@ type ContextTokenAuthorizationConfigOptions struct {
 	GatewayReadScopes          string
 	GatewayOperateScopes       string
 	ConfigMapReadScopes        string
+	ConnectorReadScopes        string
+	ConnectorManageScopes      string
 }
 
 // NewContextTokenAuthorizationConfig builds context-token authorization config.
@@ -196,8 +198,8 @@ func NewContextTokenAuthorizationConfig(opts ContextTokenAuthorizationConfigOpti
 	securityWrite := defaultScopes(opts.SecurityWriteScopes, ContextTokenScopeSecurityWrite)
 	monitorRead := defaultScopes(opts.MonitorReadScopes, ContextTokenScopeMonitorsRead)
 	monitorWrite := defaultScopes(opts.MonitorWriteScopes, ContextTokenScopeMonitorsWrite)
-	connectorRead := defaultScopes("", ContextTokenScopeConnectorsRead)
-	connectorManage := defaultScopes("", ContextTokenScopeConnectorsManage)
+	connectorRead := defaultScopes(opts.ConnectorReadScopes, ContextTokenScopeConnectorsRead)
+	connectorManage := defaultScopes(opts.ConnectorManageScopes, ContextTokenScopeConnectorsManage)
 	monitorOperate := defaultScopes(opts.MonitorOperateScopes, ContextTokenScopeMonitorsOperate)
 	skillRead := defaultScopes(opts.SkillReadScopes, ContextTokenScopeSkillsRead)
 	skillWrite := defaultScopes(opts.SkillWriteScopes, ContextTokenScopeSkillsWrite)
