@@ -442,6 +442,8 @@ func (f *fakeConnectorCredentialStore) GetConnectorCredential(_ context.Context,
 
 func (f *fakeConnectorCredentialStore) ListRetiredConnectorCredentials(_ context.Context, ref store.ConnectorCredentialRef) ([]store.ConnectorCredential, error) {
 	return append([]store.ConnectorCredential(nil), f.retired[ref.ConnectionUID]...), nil
+}
+
 func (f *fakeConnectorCredentialStore) ReplaceConnectorCredential(_ context.Context, ref store.ConnectorCredentialRef, credential store.ConnectorCredential, _ int64) error {
 	f.credentials[ref.ConnectionUID] = credential
 	return nil

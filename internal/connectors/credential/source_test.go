@@ -81,10 +81,16 @@ func newHarness(t *testing.T) *harness {
 	_ = corev1alpha1.AddToScheme(scheme)
 	provider := &corev1alpha1.ConnectorProvider{
 		ObjectMeta: metav1.ObjectMeta{Name: "github", Namespace: testNamespace, Generation: 1},
-		Spec: corev1alpha1.ConnectorProviderSpec{OAuth: corev1alpha1.ConnectorOAuthConfig{
-			AuthorizeURL: "https://github.com/login/oauth/authorize", TokenURL: "https://github.com/login/oauth/access_token",
-			ClientID: "client", ClientSecretRef: corev1alpha1.SecretKeySelector{Name: "oauth", Key: "clientSecret"},
-		}},
+		Spec: corev1alpha1.ConnectorProviderSpec{
+			OAuth: corev1alpha1.ConnectorOAuthConfig{
+				AuthorizeURL: "https://github.com/login/oauth/authorize", TokenURL: "https://github.com/login/oauth/access_token",
+				ClientID: "client", ClientSecretRef: corev1alpha1.SecretKeySelector{Name: "oauth", Key: "clientSecret"},
+			},
+			Tools: []corev1alpha1.ConnectorTool{{
+				Name: "gh_search", Class: corev1alpha1.ConnectorToolClassRead, Source: corev1alpha1.ConnectorToolSourceHTTP, Description: "search",
+				HTTP: &corev1alpha1.ConnectorHTTPTool{URL: "https://api.github.com/search/issues", Method: "GET"},
+			}},
+		},
 		Status: corev1alpha1.ConnectorProviderStatus{ObservedGeneration: 1, Conditions: []metav1.Condition{
 			{Type: corev1alpha1.ConnectorProviderConditionAccepted, Status: metav1.ConditionTrue, ObservedGeneration: 1},
 			{Type: corev1alpha1.ConnectorProviderConditionResolvedRefs, Status: metav1.ConditionTrue, ObservedGeneration: 1},
@@ -137,7 +143,7 @@ func (h *harness) put(credential store.ConnectorCredential) {
 		if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: "github"}, provider); err != nil {
 			h.t.Fatal(err)
 		}
-		credential.AuthorityDigest = connectors.ProviderAuthorityDigest(provider)
+		credential.AuthorityDigest = connectors.ProviderIssuerDigest(provider)
 	}
 	if err := h.store.PutConnectorCredential(context.Background(), ref, credential); err != nil {
 		h.t.Fatal(err)
@@ -148,6 +154,7 @@ func (h *harness) request() outboundaccess.ConnectionCredentialRequest {
 	return outboundaccess.ConnectionCredentialRequest{
 		Namespace: testNamespace, Provider: "github", Issuer: testIssuer, Subject: testSubject,
 		Frozen: outboundaccess.FrozenConnection{UID: "uid-1", Generation: 2},
+		Tool:   outboundaccess.ToolBinding{Name: "gh_search", URL: "https://api.github.com/search/issues", Method: "GET", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead},
 	}
 }
 
@@ -231,9 +238,7 @@ func TestResolveRevokedRefreshShredsCustody(t *testing.T) {
 		t.Fatalf("custody after revocation err = %v, want ErrNotFound", err)
 	}
 	// The shred leaves no tombstone: the person can consent again.
-	if err := h.store.PutConnectorCredential(context.Background(), ref, store.ConnectorCredential{AccessToken: "gho_reconsented"}); err != nil {
-		t.Fatalf("re-consent after revocation must be possible: %v", err)
-	}
+	h.put(store.ConnectorCredential{AccessToken: "gho_reconsented"})
 	if err := h.store.DeleteConnectorCredential(context.Background(), ref.ConnectionUID); err != nil {
 		t.Fatal(err)
 	}
@@ -352,9 +357,7 @@ func TestRefreshLosesToConcurrentReconsent(t *testing.T) {
 	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", ExpiresAt: h.now.Add(-time.Minute)})
 	ref, _ := connectors.CredentialRef(h.connection)
 	reconsent := func() {
-		if err := h.store.PutConnectorCredential(context.Background(), ref, store.ConnectorCredential{AccessToken: "gho_reconsented", RefreshToken: "ghr_reconsented", ExpiresAt: h.now.Add(2 * time.Hour)}); err != nil {
-			t.Fatal(err)
-		}
+		h.put(store.ConnectorCredential{AccessToken: "gho_reconsented", RefreshToken: "ghr_reconsented", ExpiresAt: h.now.Add(2 * time.Hour)})
 	}
 	h.refresher.onRefresh = reconsent
 	got, err := h.source.ResolveConnectionCredential(context.Background(), h.request())
@@ -467,10 +470,7 @@ func TestRevocationVerdictYieldsToConcurrentReconsent(t *testing.T) {
 	h.refresher.onRefresh = func() {
 		// The owner re-consents while the refresh is in flight: new custody
 		// and a new status write land before the stale verdict.
-		ref, _ := connectors.CredentialRef(h.connection)
-		if err := h.store.PutConnectorCredential(context.Background(), ref, store.ConnectorCredential{AccessToken: "gho_new", RefreshToken: "ghr_new"}); err != nil {
-			t.Fatal(err)
-		}
+		h.put(store.ConnectorCredential{AccessToken: "gho_new", RefreshToken: "ghr_new"})
 		live := h.reload()
 		linked := metav1.NewTime(h.now)
 		live.Status.LinkedAt = &linked
@@ -483,5 +483,78 @@ func TestRevocationVerdictYieldsToConcurrentReconsent(t *testing.T) {
 	}
 	if live := h.reload(); live.Status.State != corev1alpha1.ConnectionStateReady {
 		t.Fatalf("a stale revocation verdict must not overwrite the fresh link: %+v", live.Status)
+	}
+}
+
+// TestResolveJudgesProviderWithoutRefresh covers a fresh (non-expiring)
+// credential: the provider is still validated on every resolution, so a
+// retargeted tool set or a rotated client refuses the token even before
+// the Connection's status catches up.
+func TestResolveJudgesProviderWithoutRefresh(t *testing.T) {
+	h := newHarness(t)
+	h.put(store.ConnectorCredential{AccessToken: "gho_fresh", RefreshToken: "ghr_fresh", ExpiresAt: h.now.Add(time.Hour), Scopes: []string{"read:user"}})
+	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err != nil {
+		t.Fatalf("baseline resolve: %v", err)
+	}
+	provider := &corev1alpha1.ConnectorProvider{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: "github"}, provider); err != nil {
+		t.Fatal(err)
+	}
+	// A new credential-receiving destination the person never consented to.
+	retargeted := provider.DeepCopy()
+	retargeted.Spec.Tools = append(retargeted.Spec.Tools, corev1alpha1.ConnectorTool{
+		Name: "gh_extra", Class: corev1alpha1.ConnectorToolClassRead, Source: corev1alpha1.ConnectorToolSourceHTTP, Description: "x",
+		HTTP: &corev1alpha1.ConnectorHTTPTool{URL: "https://api.github.com/extra"},
+	})
+	if err := h.client.Update(context.Background(), retargeted); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil || !strings.Contains(err.Error(), "changed since consent") {
+		t.Fatalf("retargeted provider err = %v, want consent refusal", err)
+	}
+	if h.refresher.calls.Load() != 0 {
+		t.Fatal("no refresh may run against an unconsented provider")
+	}
+	// A rotated OAuth client refuses the token issued by the old one.
+	rotated := retargeted.DeepCopy()
+	rotated.Spec.Tools = provider.Spec.Tools
+	rotated.Spec.OAuth.ClientID = "rotated-client"
+	if err := h.client.Update(context.Background(), rotated); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil || !strings.Contains(err.Error(), "OAuth client changed") {
+		t.Fatalf("rotated client err = %v, want issuer refusal", err)
+	}
+}
+
+// TestRefreshLosesToReconsentOnRetargetedProvider covers a provider whose
+// client and tool destination both change while a refresh is in flight and
+// the person re-consents to the new provider: the newer credential is
+// returned only if the executing tool is still what the new provider
+// declares, judged against the same provider state as the credential.
+func TestRefreshLosesToReconsentOnRetargetedProvider(t *testing.T) {
+	h := newHarness(t)
+	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", ExpiresAt: h.now.Add(-time.Minute), Scopes: []string{"read:user"}})
+	h.refresher.onRefresh = func() {
+		provider := &corev1alpha1.ConnectorProvider{}
+		if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: "github"}, provider); err != nil {
+			t.Fatal(err)
+		}
+		provider.Spec.OAuth.ClientID = "client-b"
+		provider.Spec.Tools[0].HTTP.URL = "https://api.github.com/elsewhere"
+		if err := h.client.Update(context.Background(), provider); err != nil {
+			t.Fatal(err)
+		}
+		// Re-consent to provider B lands newer material and a matching consent record.
+		h.put(store.ConnectorCredential{AccessToken: "gho_b", RefreshToken: "ghr_b", ExpiresAt: h.now.Add(time.Hour), Scopes: []string{"read:user"}})
+		live := h.reload()
+		live.Status.Consent = connectors.ConsentFor(provider)
+		if err := h.client.Status().Update(context.Background(), live); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err := h.source.ResolveConnectionCredential(context.Background(), h.request())
+	if err == nil || !strings.Contains(err.Error(), "does not match the endpoint declared") {
+		t.Fatalf("credential from a retargeted re-consent must not be paired with the old destination: err = %v", err)
 	}
 }

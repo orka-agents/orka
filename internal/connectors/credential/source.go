@@ -106,6 +106,13 @@ func (s *Source) ResolveConnectionCredential(ctx context.Context, req outboundac
 		}
 		return outboundaccess.ConnectionCredential{}, err
 	}
+	// The provider is judged on every resolution, not only when refreshing:
+	// status can trail a provider change by one reconcile, and the held
+	// material must never be released against a client or destination set
+	// the person did not consent to.
+	if _, err := s.validateProvider(ctx, connection, credential, &req.Tool); err != nil {
+		return outboundaccess.ConnectionCredential{}, err
+	}
 	if s.needsRefresh(credential) {
 		credential, err = s.refreshSingleFlight(ctx, connection, ref)
 		if err != nil {
@@ -116,6 +123,9 @@ func (s *Source) ResolveConnectionCredential(ctx context.Context, req outboundac
 		// Re-read it and reapply every check before pairing the material
 		// with a mode and generation.
 		if connection, err = s.loadLiveConnection(ctx, req); err != nil {
+			return outboundaccess.ConnectionCredential{}, err
+		}
+		if _, err := s.validateProvider(ctx, connection, credential, &req.Tool); err != nil {
 			return outboundaccess.ConnectionCredential{}, err
 		}
 	}
@@ -201,14 +211,13 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 	if s.OAuth == nil {
 		return store.ConnectorCredential{}, errors.New("connection credential refresh is not configured")
 	}
-	cfg, provider, err := s.providerConfig(ctx, connection)
+	provider, err := s.validateProvider(ctx, connection, current, nil)
 	if err != nil {
 		return store.ConnectorCredential{}, err
 	}
-	// The refresh token was issued by the OAuth client sealed with it; a
-	// replaced provider or rotated client must never receive it.
-	if current.AuthorityDigest == "" || current.AuthorityDigest != connectors.ProviderAuthorityDigest(provider) {
-		return store.ConnectorCredential{}, errors.New("connector provider OAuth client changed since the token was issued; the person must reconnect")
+	cfg, err := s.providerConfig(ctx, provider)
+	if err != nil {
+		return store.ConnectorCredential{}, err
 	}
 	token, err := s.OAuth.Refresh(ctx, cfg, current.RefreshToken)
 	if err != nil {
@@ -275,26 +284,59 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 	return refreshed, nil
 }
 
-func (s *Source) providerConfig(ctx context.Context, connection *corev1alpha1.Connection) (connectors.OAuthProviderConfig, *corev1alpha1.ConnectorProvider, error) {
+// validateProvider loads the Connection's provider uncached and checks that
+// the held credential may be used against it: the provider is accepted, the
+// credential was issued by this OAuth client (issuer digest), the person's
+// consent covers the provider's current authority (client plus tool
+// destinations), and the granted scopes cover the mode.
+func (s *Source) validateProvider(ctx context.Context, connection *corev1alpha1.Connection, credential store.ConnectorCredential, tool *outboundaccess.ToolBinding) (*corev1alpha1.ConnectorProvider, error) {
 	provider := &corev1alpha1.ConnectorProvider{}
-	reader := s.reader()
-	if err := reader.Get(ctx, types.NamespacedName{Namespace: connection.Namespace, Name: connection.Spec.ProviderRef.Name}, provider); err != nil {
-		return connectors.OAuthProviderConfig{}, nil, errors.New("connector provider is unavailable for refresh")
+	if err := s.reader().Get(ctx, types.NamespacedName{Namespace: connection.Namespace, Name: connection.Spec.ProviderRef.Name}, provider); err != nil {
+		return nil, errors.New("connector provider is unavailable")
 	}
 	if !connectors.ProviderAccepted(provider) {
-		return connectors.OAuthProviderConfig{}, nil, errors.New("connector provider is not accepted")
+		return nil, errors.New("connector provider is not accepted")
 	}
+	// The token was issued by the OAuth client sealed with it (the issuer
+	// digest: client identity and endpoints, not tool destinations); a
+	// replaced provider or rotated client must never receive or use it.
+	if credential.AuthorityDigest == "" || credential.AuthorityDigest != connectors.ProviderIssuerDigest(provider) {
+		return nil, errors.New("connector provider OAuth client changed since the token was issued; the person must reconnect")
+	}
+	if !connectors.ConsentMatchesProvider(connection, provider) {
+		return nil, errors.New("connector provider changed since consent; the person must consent again")
+	}
+	mode := connection.Spec.Mode
+	if mode == "" {
+		mode = corev1alpha1.ConnectionModeReadOnly
+	}
+	if !connectors.ScopesCover(credential.Scopes, connectors.ScopesForMode(provider, mode)) {
+		return nil, errors.New("connection credential does not cover the connection mode; the person must consent again")
+	}
+	// The executing Tool is judged against this same provider state, so a
+	// credential returned after a re-consent on a retargeted provider can
+	// never be paired with a destination that provider no longer declares.
+	if tool != nil {
+		if _, err := outboundaccess.DeclaredConnectorTool(provider, *tool); err != nil {
+			return nil, err
+		}
+	}
+	return provider, nil
+}
+
+func (s *Source) providerConfig(ctx context.Context, provider *corev1alpha1.ConnectorProvider) (connectors.OAuthProviderConfig, error) {
+	reader := s.reader()
 	secretRef := provider.Spec.OAuth.ClientSecretRef
 	secret := &corev1.Secret{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: provider.Namespace, Name: secretRef.Name}, secret); err != nil {
-		return connectors.OAuthProviderConfig{}, nil, errors.New("connector provider client secret is unavailable")
+		return connectors.OAuthProviderConfig{}, errors.New("connector provider client secret is unavailable")
 	}
 	// The secret is opaque bytes; only emptiness is judged, never trimmed.
 	value := string(secret.Data[secretRef.Key])
 	if strings.TrimSpace(value) == "" {
-		return connectors.OAuthProviderConfig{}, nil, errors.New("connector provider client secret is empty")
+		return connectors.OAuthProviderConfig{}, errors.New("connector provider client secret is empty")
 	}
-	return connectors.ProviderOAuthConfig(provider, value), provider, nil
+	return connectors.ProviderOAuthConfig(provider, value), nil
 }
 
 // recordNarrowedScopes stores the scopes a refresh actually returned and
@@ -323,7 +365,10 @@ func (s *Source) recordNarrowedScopes(ctx context.Context, connection *corev1alp
 // custody and the call may proceed.
 func (s *Source) recordRefresh(ctx context.Context, connection *corev1alpha1.Connection, credential store.ConnectorCredential) {
 	now := metav1.NewTime(s.now().UTC())
-	patch := client.MergeFrom(connection.DeepCopy())
+	// Fenced on the resourceVersion read at flight start: a consent that
+	// completed meanwhile has already rewritten status, and this stale
+	// refresh must not overwrite its scopes or expiry.
+	patch := client.MergeFromWithOptions(connection.DeepCopy(), client.MergeFromWithOptimisticLock{})
 	connection.Status.GrantedScopes = append([]string(nil), credential.Scopes...)
 	connection.Status.LastRefreshTime = &now
 	connection.Status.ExpiresAt = nil
@@ -332,6 +377,10 @@ func (s *Source) recordRefresh(ctx context.Context, connection *corev1alpha1.Con
 		connection.Status.ExpiresAt = &expires
 	}
 	if err := s.Client.Status().Patch(ctx, connection, patch); err != nil {
+		if apierrors.IsConflict(err) {
+			log.FromContext(ctx).Info("connection changed concurrently; leaving refresh status to the newer writer", "connection", connection.Name)
+			return
+		}
 		log.FromContext(ctx).Info("connection refresh status could not be recorded", "connection", connection.Name)
 	}
 }

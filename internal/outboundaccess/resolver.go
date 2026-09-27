@@ -97,6 +97,9 @@ type ConnectionCredentialRequest struct {
 	Issuer    string
 	Subject   string
 	Frozen    FrozenConnection
+	// Tool is the executing Tool; the source verifies it against the same
+	// provider state it validates the returned credential with.
+	Tool ToolBinding
 }
 
 // ConnectionCredential is a resolved, possibly just-refreshed access token
@@ -213,10 +216,12 @@ func (r *KubernetesResolver) Resolve(ctx context.Context, req ResolveRequest) (R
 	return r.resolveGateway(ctx, policy)
 }
 
-// declaredConnectorTool returns the provider's curated HTTP definition that
+// DeclaredConnectorTool returns the provider's curated HTTP definition that
 // exactly matches the executing Tool, or an error. Built-in declarations are
-// never matched by custom Tools.
-func declaredConnectorTool(provider *corev1alpha1.ConnectorProvider, tool ToolBinding) (corev1alpha1.ConnectorTool, error) {
+// never matched by custom Tools. The credential source applies the same
+// check against the provider it validates the returned credential with, so
+// the tool and the credential are always judged against one provider state.
+func DeclaredConnectorTool(provider *corev1alpha1.ConnectorProvider, tool ToolBinding) (corev1alpha1.ConnectorTool, error) {
 	name := strings.TrimSpace(tool.Name)
 	if name == "" {
 		return corev1alpha1.ConnectorTool{}, errors.New("connection outbound access requires the executing tool identity")
@@ -266,7 +271,7 @@ func (r *KubernetesResolver) resolveConnection(ctx context.Context, policy *core
 	if err := r.Reader.Get(ctx, client.ObjectKey{Namespace: policy.Namespace, Name: policy.Spec.Connection.ProviderRef.Name}, provider); err != nil {
 		return Resolution{}, fmt.Errorf("resolve connector provider: %w", err)
 	}
-	declared, err := declaredConnectorTool(provider, req.Tool)
+	declared, err := DeclaredConnectorTool(provider, req.Tool)
 	if err != nil {
 		return Resolution{}, err
 	}
@@ -276,6 +281,7 @@ func (r *KubernetesResolver) resolveConnection(ctx context.Context, policy *core
 		Issuer:    requester.Issuer,
 		Subject:   requester.Subject,
 		Frozen:    frozen,
+		Tool:      req.Tool,
 	})
 	if err != nil {
 		return Resolution{}, fmt.Errorf("resolve connection credential: %w", err)

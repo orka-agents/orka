@@ -938,7 +938,7 @@ func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *core
 		Requester:                   e.requester,
 		FrozenConnections:           e.frozenConnections,
 		Tool: outboundaccess.ToolBinding{
-			Name: tool.Name, URL: strings.TrimSpace(tool.Spec.HTTP.URL), Method: tool.Spec.HTTP.Method, Class: tool.Spec.BrokeredToolClass,
+			Name: tool.Name, URL: strings.TrimSpace(tool.Spec.HTTP.URL), Method: prepared.request.Method, Class: tool.Spec.BrokeredToolClass,
 		},
 	})
 	if err != nil {
@@ -950,6 +950,20 @@ func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *core
 		prepared.direct = true
 		if prepared.request == nil || prepared.request.URL == nil || !strings.EqualFold(prepared.request.URL.Scheme, "https") {
 			return errors.New("credential-injecting outbound access requires an HTTPS Tool URL")
+		}
+		if resolution.Adapter == outboundaccess.AdapterConnection {
+			// The linked-account credential is bound to the destination the
+			// provider declared. An MCP-backed Tool sends its requests to the
+			// actor endpoint rather than spec.http.url, and a prepared request
+			// whose origin differs from the declared URL would carry the token
+			// elsewhere; both fail closed.
+			if isMCPSubstrateActorTool(tool) || prepared.mcp {
+				return errors.New("connection outbound access policies are not supported on MCP-backed tools")
+			}
+			declared, err := neturl.Parse(strings.TrimSpace(tool.Spec.HTTP.URL))
+			if err != nil || !sameHTTPOrigin(declared, prepared.request.URL) {
+				return errors.New("connection credential request must target the declared tool origin")
+			}
 		}
 		if prepared.httpConfig.AuthSecretRef != nil {
 			return errors.New("credential-injecting outbound access cannot coexist with authSecretRef")
