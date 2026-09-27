@@ -897,7 +897,11 @@ func (h *Handlers) CompleteConnection(c fiber.Ctx) error {
 // from a replaced client are dropped unrevoked rather than sent to a
 // different authority.
 func (h *Handlers) discardCompletion(ctx context.Context, provider *corev1alpha1.ConnectorProvider, completion store.ConnectorCompletion, nonce string) {
-	if provider != nil && completion.Credential.AuthorityDigest == connectors.ProviderAuthorityDigest(provider) {
+	// A completion whose tokens already entered custody (its commit succeeded
+	// but the status write failed before the row was removed) is active
+	// material, never revoked; only the parked row is dropped.
+	if provider != nil && !h.completionCommitted(ctx, completion) &&
+		completion.Credential.AuthorityDigest == connectors.ProviderAuthorityDigest(provider) {
 		if cfg, err := h.providerOAuthConfig(ctx, provider); err == nil {
 			h.revokeIssuedTokens(ctx, provider, cfg, connectors.TokenResponse{
 				AccessToken: completion.Credential.AccessToken, RefreshToken: completion.Credential.RefreshToken,
@@ -907,6 +911,21 @@ func (h *Handlers) discardCompletion(ctx context.Context, provider *corev1alpha1
 	if err := h.connectors.Consents.DeleteConnectorCompletion(ctx, nonce); err != nil {
 		log.Error(err, "discarded completion could not be removed", "connection", completion.Name)
 	}
+}
+
+// completionCommitted reports whether the completion's tokens are exactly
+// the credential held in custody for its Connection.
+func (h *Handlers) completionCommitted(ctx context.Context, completion store.ConnectorCompletion) bool {
+	committed, err := h.connectors.Credentials.GetConnectorCredential(ctx, store.ConnectorCredentialRef{
+		ConnectionUID: completion.ConnectionUID, Namespace: completion.Namespace, Name: completion.Name,
+		SubjectDigest: completion.SubjectDigest, Provider: completion.Provider,
+	})
+	if err != nil {
+		return false
+	}
+	return committed.AccessToken != "" && committed.AccessToken == completion.Credential.AccessToken &&
+		committed.RefreshToken == completion.Credential.RefreshToken &&
+		committed.AuthorityDigest == completion.Credential.AuthorityDigest
 }
 
 // revokeIssuedTokens revokes tokens Orka obtained but will never keep,

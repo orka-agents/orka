@@ -1235,3 +1235,39 @@ func TestConnectionGrantWideProviderNeverRevokesUncommittedTokens(t *testing.T) 
 		t.Fatalf("grant-wide provider must not revoke discarded tokens, revoked = %v", h.revoked)
 	}
 }
+
+// TestConnectionStaleModeDiscardKeepsCommittedCredential covers a completion
+// whose credential entered custody but whose status write failed: a later
+// mode change discards the parked row without revoking the committed tokens.
+func TestConnectionStaleModeDiscardKeepsCommittedCredential(t *testing.T) {
+	h := newConnectorTestHarness(t, acceptedTestProvider())
+	var fail atomic.Bool
+	h.statusFailure = &fail
+	created := h.create("readOnly")
+	location := h.consentAndCallback(created)
+	completion := completionFromLocation(t, location)
+	fail.Store(true)
+	if resp, raw := h.complete(created.Connection.Name, completion); resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("failed status update = %d %s, want 500", resp.StatusCode, raw)
+	}
+	fail.Store(false)
+	// The credential is committed; the completion row is still parked.
+	if resp, raw := h.do(http.MethodPut, "/api/v1/connections/"+created.Connection.Name, map[string]string{"mode": "readWrite"}); resp.StatusCode != http.StatusOK {
+		t.Fatalf("widen = %d %s", resp.StatusCode, raw)
+	}
+	h.revoked = nil
+	if resp, raw := h.complete(created.Connection.Name, completion); resp.StatusCode != http.StatusConflict || !strings.Contains(string(raw), "mode changed") {
+		t.Fatalf("stale-mode completion = %d %s, want 409", resp.StatusCode, raw)
+	}
+	if len(h.revoked) != 0 {
+		t.Fatalf("committed tokens must not be revoked when their parked row is discarded, revoked = %v", h.revoked)
+	}
+	stored := &corev1alpha1.Connection{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: created.Connection.Name}, stored); err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := connectors.CredentialRef(stored)
+	if _, err := h.store.GetConnectorCredential(context.Background(), ref); err != nil {
+		t.Fatalf("committed credential must remain in custody: %v", err)
+	}
+}

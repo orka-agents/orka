@@ -249,7 +249,14 @@ func TestTokenResponseEdgeCases(t *testing.T) {
 			w.WriteHeader(500)
 			_, _ = w.Write([]byte(`{"error":"Bad Things<script>"}`))
 		},
-		"/null-exp": func(w http.ResponseWriter) { _, _ = w.Write([]byte(`{"access_token":"a","expires_in":null}`)) },
+		"/null-exp": func(w http.ResponseWriter) {
+			_, _ = w.Write([]byte(`{"access_token":"a","token_type":"Bearer","expires_in":null}`))
+		},
+		"/mac-type": func(w http.ResponseWriter) { _, _ = w.Write([]byte(`{"access_token":"a","token_type":"mac"}`)) },
+		"/no-type":  func(w http.ResponseWriter) { _, _ = w.Write([]byte(`{"access_token":"a"}`)) },
+		"/huge-exp": func(w http.ResponseWriter) {
+			_, _ = w.Write([]byte(`{"access_token":"a","token_type":"bearer","expires_in":9223372036854775807}`))
+		},
 	}
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -262,7 +269,10 @@ func TestTokenResponseEdgeCases(t *testing.T) {
 	defer server.Close()
 	client := NewOAuthClient(OAuthClientOptions{HTTPClient: fixtureClient(server)})
 	ctx := context.Background()
-	for path, wantErr := range map[string]bool{"/not-json": true, "/no-token": true, "/too-large": true, "/weird-err": true, "/null-exp": false} {
+	for path, wantErr := range map[string]bool{
+		"/not-json": true, "/no-token": true, "/too-large": true, "/weird-err": true, "/null-exp": false,
+		"/mac-type": true, "/no-type": true, "/huge-exp": true,
+	} {
 		cfg := testOAuthConfig()
 		cfg.TokenURL = "https://provider.example.test" + path
 		token, err := client.ExchangeCode(ctx, cfg, "code", "verifier", "https://orka.example.test/cb")

@@ -24,8 +24,9 @@ func TestSubjectDigestAndConnectionName(t *testing.T) {
 	if a == b || a == c || len(a) != 64 {
 		t.Fatalf("digests must differ per issuer and subject: %s %s %s", a, b, c)
 	}
-	if SubjectDigest(" https://issuer.example.test ", " alice ") != a {
-		t.Fatal("digest must ignore surrounding whitespace")
+	// Claims are opaque: a differently spaced subject is a different person.
+	if SubjectDigest(" https://issuer.example.test ", " alice ") == a {
+		t.Fatal("digest must hash the exact verified claims")
 	}
 	name := ConnectionName("github", "https://issuer.example.test", "alice")
 	if !strings.HasPrefix(name, "github-") || len(name) != len("github-")+connectionNameDigestLength {
@@ -40,6 +41,11 @@ func TestSubjectDigestAndConnectionName(t *testing.T) {
 	}
 	if !strings.HasPrefix(ConnectionName("", "i", "s"), "connection-") {
 		t.Fatal("empty provider must fall back to a generic prefix")
+	}
+	// Providers that share a truncated prefix still get distinct names.
+	sharedPrefix := strings.Repeat("p", 55)
+	if ConnectionName(sharedPrefix+"-one", "i", "s") == ConnectionName(sharedPrefix+"-two", "i", "s") {
+		t.Fatal("the digest must cover the full provider name")
 	}
 }
 

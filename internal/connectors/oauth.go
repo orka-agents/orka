@@ -297,6 +297,11 @@ func (c *OAuthClient) tokenRequest(ctx context.Context, cfg OAuthProviderConfig,
 	if strings.TrimSpace(payload.AccessToken) == "" {
 		return TokenResponse{}, errors.New("token response has no access_token")
 	}
+	// Credentials are injected as a bearer header; any other token type would
+	// yield a Ready link that can never authenticate.
+	if !strings.EqualFold(strings.TrimSpace(payload.TokenType), "bearer") {
+		return TokenResponse{}, errors.New("token response token_type must be Bearer")
+	}
 	result := TokenResponse{
 		AccessToken:  payload.AccessToken,
 		RefreshToken: payload.RefreshToken,
@@ -304,10 +309,17 @@ func (c *OAuthClient) tokenRequest(ctx context.Context, cfg OAuthProviderConfig,
 		Scopes:       splitScopes(payload.Scope),
 	}
 	if seconds, ok := parseExpiresIn(payload.ExpiresIn); ok {
+		if seconds > maxExpiresInSeconds {
+			return TokenResponse{}, errors.New("token response expires_in is out of range")
+		}
 		result.ExpiresAt = c.now().Add(time.Duration(seconds) * time.Second).UTC()
 	}
 	return result, nil
 }
+
+// maxExpiresInSeconds bounds expires_in (ten years) so the seconds-to-
+// duration conversion cannot overflow into a past expiry.
+const maxExpiresInSeconds int64 = 10 * 365 * 24 * 60 * 60
 
 func (c *OAuthClient) post(ctx context.Context, cfg OAuthProviderConfig, endpoint string, form url.Values) (*http.Response, error) {
 	parsed, err := url.Parse(endpoint)

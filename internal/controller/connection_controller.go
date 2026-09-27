@@ -274,8 +274,14 @@ func (r *ConnectionReconciler) committedCredential(ctx context.Context, connecti
 	return &credential
 }
 
+// sameConnectorCredential reports whether a parked completion holds exactly
+// the committed material: access token, refresh token, and issuing authority.
+// A rotated refresh token is distinct material and must still be revoked.
 func sameConnectorCredential(committed *store.ConnectorCredential, parked store.ConnectorCredential) bool {
-	return committed != nil && committed.AccessToken != "" && committed.AccessToken == parked.AccessToken
+	return committed != nil && committed.AccessToken != "" &&
+		committed.AccessToken == parked.AccessToken &&
+		committed.RefreshToken == parked.RefreshToken &&
+		committed.AuthorityDigest == parked.AuthorityDigest
 }
 
 // revokeTokens revokes the refresh then access token of one credential at
@@ -316,14 +322,17 @@ func (r *ConnectionReconciler) revokeTokens(ctx context.Context, connection *cor
 	if strings.TrimSpace(clientSecret) == "" {
 		return
 	}
-	revokeCtx, cancel := context.WithTimeout(ctx, connectionRevokeTimeout)
-	defer cancel()
 	cfg := connectors.ProviderOAuthConfig(provider, clientSecret)
 	for _, token := range []string{credential.RefreshToken, credential.AccessToken} {
 		if token == "" {
 			continue
 		}
-		if err := r.Revoker.Revoke(revokeCtx, cfg, token); err != nil {
+		// Each token gets its own bounded attempt so a stalled first call
+		// cannot consume the deadline of the second.
+		revokeCtx, cancel := context.WithTimeout(ctx, connectionRevokeTimeout)
+		err := r.Revoker.Revoke(revokeCtx, cfg, token)
+		cancel()
+		if err != nil {
 			logger.Info("provider token revocation failed; continuing with disconnect", "connection", connection.Name, "provider", provider.Name)
 		}
 	}

@@ -390,3 +390,25 @@ func TestConnectorCredentialTombstoneBlocksRecreation(t *testing.T) {
 		t.Fatalf("a new UID must not be affected by another UID's tombstone: %v", err)
 	}
 }
+
+// TestConnectorCompletionAuthenticatesPlaintextColumns covers a parked row
+// whose mode column was altered: the sealed payload no longer opens, so the
+// completion fence cannot be widened from readOnly to readWrite by editing
+// the store.
+func TestConnectorCompletionAuthenticatesPlaintextColumns(t *testing.T) {
+	s := newConnectorTestStore(t)
+	ctx := context.Background()
+	completion := testConnectorCompletion()
+	if err := s.CreateConnectorCompletion(ctx, completion); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE connector_completions SET mode = 'readWrite' WHERE nonce = ?`, completion.Nonce); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PeekConnectorCompletion(ctx, completion.Nonce); err == nil {
+		t.Fatal("a completion whose mode column changed must not open")
+	}
+	if _, err := s.ConsumeConnectorCompletion(ctx, completion.Nonce); err == nil {
+		t.Fatal("a completion whose mode column changed must not be consumable")
+	}
+}

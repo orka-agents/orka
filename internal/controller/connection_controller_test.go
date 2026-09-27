@@ -605,6 +605,8 @@ func TestConnectionReconcilerReapsExpiredCompletions(t *testing.T) {
 		{Nonce: "committed", ExpiresAt: time.Now().Add(-time.Minute), Credential: store.ConnectorCredential{AccessToken: "gho_committed", RefreshToken: "ghr_committed", AuthorityDigest: authority}},
 		// Issued by a provider OAuth client that has since changed: deleted, but never sent to the new authority.
 		{Nonce: "foreign", ExpiresAt: time.Now().Add(-time.Minute), Credential: store.ConnectorCredential{AccessToken: "gho_foreign", RefreshToken: "ghr_foreign", AuthorityDigest: "stale-authority"}},
+		// Same access token as custody but a rotated refresh token: distinct material, revoked.
+		{Nonce: "rotated", ExpiresAt: time.Now().Add(-time.Minute), Credential: store.ConnectorCredential{AccessToken: "gho_committed", RefreshToken: "ghr_rotated", AuthorityDigest: authority}},
 	}
 	credentials.credentials[string(connection.UID)] = store.ConnectorCredential{AccessToken: "gho_committed", RefreshToken: "ghr_committed", AuthorityDigest: authority}
 	revoker := &fakeConnectorRevoker{}
@@ -614,10 +616,10 @@ func TestConnectionReconcilerReapsExpiredCompletions(t *testing.T) {
 	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "tenant", Name: "github-alice"}}); err != nil {
 		t.Fatal(err)
 	}
-	if len(revoker.tokens) != 2 || revoker.tokens[0] != "ghr_stale" || revoker.tokens[1] != "gho_stale" {
-		t.Fatalf("revoked = %v, want only the abandoned completion's tokens", revoker.tokens)
+	if strings.Join(revoker.tokens, ",") != "ghr_stale,gho_stale,ghr_rotated,gho_committed" {
+		t.Fatalf("revoked = %v, want the abandoned and the rotated completion's tokens", revoker.tokens)
 	}
-	if strings.Join(credentials.deletedCompletions, ",") != "stale,committed,foreign" {
+	if strings.Join(credentials.deletedCompletions, ",") != "stale,committed,foreign,rotated" {
 		t.Fatalf("deleted completions = %v, want every expired row dropped", credentials.deletedCompletions)
 	}
 	if remaining := credentials.parked[string(connection.UID)]; len(remaining) != 1 || remaining[0].Nonce != "live" {

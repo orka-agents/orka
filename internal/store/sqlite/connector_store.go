@@ -107,8 +107,13 @@ func connectorConsentAdditionalData(nonce, connectionUID string) []byte {
 	return fmt.Appendf(nil, "orka.connector-consent\x00%s\x00%s", nonce, connectionUID)
 }
 
-func connectorCompletionAdditionalData(nonce, connectionUID, subjectDigest string) []byte {
-	return fmt.Appendf(nil, "orka.connector-completion\x00%s\x00%s\x00%s", nonce, connectionUID, subjectDigest)
+// connectorCompletionAdditionalData binds the sealed payload to every
+// plaintext column the completion fence reads, so a row whose mode, name,
+// provider, or expiry was altered no longer opens.
+func connectorCompletionAdditionalData(completion store.ConnectorCompletion) []byte {
+	return fmt.Appendf(nil, "orka.connector-completion\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%d",
+		completion.Nonce, completion.ConnectionUID, completion.SubjectDigest,
+		completion.Namespace, completion.Name, completion.Provider, completion.Mode, completion.ExpiresAt.UTC().Unix())
 }
 
 func encodeSealedConnectorCredential(credential store.ConnectorCredential) ([]byte, error) {
@@ -408,7 +413,7 @@ func (s *Store) CreateConnectorCompletion(ctx context.Context, completion store.
 		return err
 	}
 	payloadNonce, payload, err := sealWithAEAD(s.snapshotCipher.aead,
-		connectorCompletionAdditionalData(completion.Nonce, completion.ConnectionUID, completion.SubjectDigest), body)
+		connectorCompletionAdditionalData(completion), body)
 	if err != nil {
 		return err
 	}
@@ -477,7 +482,7 @@ func (s *Store) ConsumeConnectorCompletion(ctx context.Context, nonce string) (s
 		return store.ConnectorCompletion{}, store.ErrNotFound
 	}
 	body, err := s.snapshotCipher.aead.Open(nil, payloadNonce, payload,
-		connectorCompletionAdditionalData(completion.Nonce, completion.ConnectionUID, completion.SubjectDigest))
+		connectorCompletionAdditionalData(completion))
 	if err != nil {
 		return store.ConnectorCompletion{}, fmt.Errorf("open connector completion: %w", err)
 	}
@@ -557,7 +562,7 @@ func (s *Store) queryConnectorCompletions(ctx context.Context, where string, arg
 			continue
 		}
 		body, err := s.snapshotCipher.aead.Open(nil, payloadNonce, payload,
-			connectorCompletionAdditionalData(completion.Nonce, completion.ConnectionUID, completion.SubjectDigest))
+			connectorCompletionAdditionalData(completion))
 		if err != nil {
 			continue
 		}

@@ -35,16 +35,20 @@ const (
 
 // SubjectDigest returns a stable, non-reversible identifier for a verified
 // identity. It binds sealed material to its owner without storing the raw
-// subject beside the ciphertext.
+// subject beside the ciphertext. Issuer and subject are opaque claims and
+// are hashed exactly as verified; callers reject blank values separately.
 func SubjectDigest(issuer, subject string) string {
-	sum := sha256.Sum256([]byte(strings.TrimSpace(issuer) + "\x00" + strings.TrimSpace(subject)))
+	sum := sha256.Sum256([]byte(issuer + "\x00" + subject))
 	return hex.EncodeToString(sum[:])
 }
 
 // ConnectionName derives the deterministic name for one person's Connection
-// to one provider, so a person has at most one Connection per provider.
+// to one provider, so a person has at most one Connection per provider. The
+// digest covers the full provider name, so two providers that share a long
+// prefix still yield distinct names after truncation.
 func ConnectionName(provider, issuer, subject string) string {
-	digest := SubjectDigest(issuer, subject)[:connectionNameDigestLength]
+	sum := sha256.Sum256([]byte(provider + "\x00" + SubjectDigest(issuer, subject)))
+	digest := hex.EncodeToString(sum[:])[:connectionNameDigestLength]
 	prefix := strings.ToLower(strings.TrimSpace(provider))
 	maxPrefix := maxConnectionNameLength - len(digest) - 1
 	if len(prefix) > maxPrefix {
