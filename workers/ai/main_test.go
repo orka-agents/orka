@@ -624,7 +624,7 @@ func TestCreateK8sClient_OutsideCluster(t *testing.T) {
 
 func TestLoadCustomTools_NilClient(t *testing.T) {
 	// With nil client and no tool names, should return empty map
-	tools := loadCustomTools(context.Background(), nil, "default", nil)
+	tools, _ := loadCustomTools(context.Background(), nil, "default", nil)
 	if len(tools) != 0 {
 		t.Errorf("expected empty map, got %d tools", len(tools))
 	}
@@ -632,7 +632,7 @@ func TestLoadCustomTools_NilClient(t *testing.T) {
 
 func TestLoadCustomTools_BuiltinToolSkipped(t *testing.T) {
 	// Built-in tools should be skipped (no k8s lookup needed)
-	tools := loadCustomTools(context.Background(), nil, "default", []string{"web_search"})
+	tools, _ := loadCustomTools(context.Background(), nil, "default", []string{"web_search"})
 	if len(tools) != 0 {
 		t.Errorf("expected empty map for built-in tools, got %d tools", len(tools))
 	}

@@ -2370,7 +2370,7 @@ func TestAddAIEnvVars_FallbackProviders(t *testing.T) {
 			AI:   &corev1alpha1.AISpec{Prompt: "test"},
 		},
 	}
-	envVars, _ := jb.addAIEnvVars(context.Background(), nil, task, agent, nil)
+	envVars, _ := jb.addAIEnvVars(context.Background(), nil, task, agent, nil, JobBuildOptions{})
 	envMap := make(map[string]string)
 	for _, e := range envVars {
 		envMap[e.Name] = e.Value
@@ -2444,7 +2444,7 @@ func TestAddAIEnvVars_ChildTaskMessaging(t *testing.T) {
 			AI:   &corev1alpha1.AISpec{Prompt: "test"},
 		},
 	}
-	envVars, _ := jb.addAIEnvVars(context.Background(), nil, task, nil, nil)
+	envVars, _ := jb.addAIEnvVars(context.Background(), nil, task, nil, nil, JobBuildOptions{})
 	envMap := make(map[string]string)
 	for _, e := range envVars {
 		envMap[e.Name] = e.Value
@@ -2474,7 +2474,7 @@ func TestAddAIEnvVars_ChildTaskMessagingDisabled(t *testing.T) {
 			AI:   &corev1alpha1.AISpec{Prompt: "test"},
 		},
 	}
-	envVars, _ := jb.addAIEnvVars(context.Background(), nil, task, nil, nil)
+	envVars, _ := jb.addAIEnvVars(context.Background(), nil, task, nil, nil, JobBuildOptions{})
 	envMap := make(map[string]string)
 	for _, e := range envVars {
 		envMap[e.Name] = e.Value
@@ -2516,7 +2516,7 @@ func TestAddAIEnvVars_ChildTaskExplicitCoordinationWithInjectionDisabled(t *test
 		},
 	}
 
-	envVars, _ := jb.addAIEnvVars(context.Background(), nil, task, nil, nil)
+	envVars, _ := jb.addAIEnvVars(context.Background(), nil, task, nil, nil, JobBuildOptions{})
 	envMap := make(map[string]string)
 	for _, envVar := range envVars {
 		envMap[envVar.Name] = envVar.Value
@@ -2568,7 +2568,7 @@ func TestJobBuilderEffectiveAIToolsMatchAuthorizationResolver(t *testing.T) {
 				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, AI: &corev1alpha1.AISpec{Tools: tt.tools}},
 			}
 			agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Coordination: tt.coordination}}
-			envVars, _ := jb.addAIEnvVars(context.Background(), nil, task, agent, nil)
+			envVars, _ := jb.addAIEnvVars(context.Background(), nil, task, agent, nil, JobBuildOptions{})
 			env, found := findEnvVar(envVars, workerenv.AITools)
 			if !found {
 				t.Fatalf("missing %s", workerenv.AITools)
@@ -2600,7 +2600,7 @@ func TestAddAIEnvVars_CoordinationEnabled(t *testing.T) {
 			},
 		},
 	}
-	envVars, _ := jb.addAIEnvVars(context.Background(), nil, task, agent, nil)
+	envVars, _ := jb.addAIEnvVars(context.Background(), nil, task, agent, nil, JobBuildOptions{})
 	envMap := make(map[string]string)
 	for _, e := range envVars {
 		envMap[e.Name] = e.Value
@@ -2639,7 +2639,7 @@ func TestAddAIEnvVars_CoordinationEnabledWithExplicitToolsOnly(t *testing.T) {
 			},
 		},
 	}
-	envVars, _ := jb.addAIEnvVars(context.Background(), nil, task, agent, nil)
+	envVars, _ := jb.addAIEnvVars(context.Background(), nil, task, agent, nil, JobBuildOptions{})
 	envMap := make(map[string]string)
 	for _, e := range envVars {
 		envMap[e.Name] = e.Value

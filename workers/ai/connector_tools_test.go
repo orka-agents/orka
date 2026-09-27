@@ -328,3 +328,44 @@ func TestConnectorBackedToolsRetriesThenFailsOnPolicyReadErrors(t *testing.T) {
 		t.Fatal("a policy that stays unreadable must fail startup")
 	}
 }
+
+// A Tool the Job dispatched as connector-backed is never silently dropped
+// at startup: a transient read is retried, and one that keeps failing fails
+// the worker instead of running with a reduced tool set.
+func TestLoadCustomToolsKeepsFrozenConnectorTools(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	tool := connectorTestTool("gh_search", "github-conn")
+	policy := connectorTestPolicy("github-conn", corev1alpha1.OutboundAccessPolicySpec{
+		Connection: &corev1alpha1.ConnectionOutboundAccess{ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}},
+	})
+	var reads atomic.Int32
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tool, policy).WithInterceptorFuncs(interceptor.Funcs{
+		Get: func(
+			ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption,
+		) error {
+			if _, ok := obj.(*corev1alpha1.Tool); ok && reads.Add(1) < 3 {
+				return errors.New("transient")
+			}
+			return cl.Get(ctx, key, obj, opts...)
+		},
+	}).Build()
+	previous := connectorPolicyReadBackoff
+	connectorPolicyReadBackoff = time.Millisecond
+	t.Cleanup(func() { connectorPolicyReadBackoff = previous })
+	t.Setenv(workerenv.ConnectorToolDigests, `{"gh_search":"digest-a"}`)
+	loaded, err := loadCustomTools(context.Background(), c, "default", []string{"gh_search"})
+	if err != nil || loaded["gh_search"] == nil {
+		t.Fatalf("frozen tool after transient failures: %v err = %v", loaded, err)
+	}
+	reads.Store(-1000)
+	if _, err := loadCustomTools(context.Background(), c, "default", []string{"gh_search"}); err == nil {
+		t.Fatal("a frozen connector tool that stays unreadable must fail startup")
+	}
+	// A tool the Job did not freeze is still skipped with a warning.
+	t.Setenv(workerenv.ConnectorToolDigests, "")
+	loaded, err = loadCustomTools(context.Background(), c, "default", []string{"gh_search"})
+	if err != nil || loaded["gh_search"] != nil {
+		t.Fatalf("unfrozen tool: %v err = %v, want skipped", loaded, err)
+	}
+}

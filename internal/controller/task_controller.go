@@ -1528,6 +1528,7 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		ResolvedApprovalsJSON:       resolvedApprovalsJSON,
 		RepositoryMonitorValidation: validationTask,
 		ConnectionBindings:          connectionBindings,
+		Reader:                      reader,
 	})
 	if err != nil {
 		if errors.Is(err, ErrConnectorToolResolution) {

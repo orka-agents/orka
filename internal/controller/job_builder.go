@@ -455,6 +455,18 @@ type JobBuildOptions struct {
 	// dispatch; they are carried on the Job so recovery and the controller's
 	// connector endpoint judge the Job's own bindings, never a later freeze.
 	ConnectionBindings []corev1alpha1.ConnectionBinding
+	// Reader, when set, is the uncached reader the dispatch froze its
+	// bindings through; connector visibility and dispatch digests are read
+	// through the same reader so one Job never mixes revisions.
+	Reader client.Reader
+}
+
+// connectorReader is the reader connector dispatch data is derived from.
+func (b *JobBuilder) connectorReader(opts JobBuildOptions) client.Reader {
+	if opts.Reader != nil {
+		return opts.Reader
+	}
+	return b.Client
 }
 
 // Build creates a Job for the given Task.
@@ -832,7 +844,7 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 
 	// Add AI-specific env vars
 	if task.Spec.Type == corev1alpha1.TaskTypeAI {
-		aiEnvVars, err := b.addAIEnvVars(ctx, envVars, task, agent, provider)
+		aiEnvVars, err := b.addAIEnvVars(ctx, envVars, task, agent, provider, opts)
 		if err != nil {
 			return nil, err
 		}
@@ -1136,7 +1148,7 @@ var ErrConnectorToolResolution = errors.New("connector tool resolution failed")
 
 // addAIEnvVars adds AI-specific environment variables
 func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
-	envVars []corev1.EnvVar, task *corev1alpha1.Task, agent *corev1alpha1.Agent, providerCRD *corev1alpha1.Provider) ([]corev1.EnvVar, error) {
+	envVars []corev1.EnvVar, task *corev1alpha1.Task, agent *corev1alpha1.Agent, providerCRD *corev1alpha1.Provider, opts JobBuildOptions) ([]corev1.EnvVar, error) {
 	cfg := resolveAIConfig(task, agent, providerCRD)
 
 	// Resolve system prompt from ConfigMapRef if not already set inline
@@ -1173,7 +1185,7 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 	// build so dispatch retries: starting the worker with a connector write
 	// tool advertised but missing from the approval set would let it run
 	// without the promised approval.
-	visible, connectorWrite, err := FilterConnectorToolsForRequester(ctx, b.Client, tools.DefaultRegistry, task, cfg.tools)
+	visible, connectorWrite, err := FilterConnectorToolsForRequester(ctx, b.connectorReader(opts), tools.DefaultRegistry, task, cfg.tools)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrConnectorToolResolution, err)
 	}
@@ -1192,7 +1204,7 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 	}
 	// The controller executes a connector-backed tool only as it was defined
 	// when the worker was dispatched with it.
-	digests, err := FrozenConnectorToolDigests(ctx, b.Client, task.Namespace, cfg.tools)
+	digests, err := FrozenConnectorToolDigests(ctx, b.connectorReader(opts), task.Namespace, cfg.tools)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrConnectorToolResolution, err)
 	}

@@ -297,7 +297,7 @@ func TestLoadCustomTools_WithFakeClient(t *testing.T) {
 		WithObjects(tool).
 		Build()
 
-	result := loadCustomTools(context.Background(), fakeClient, "default", []string{"my-custom-tool"})
+	result, _ := loadCustomTools(context.Background(), fakeClient, "default", []string{"my-custom-tool"})
 	if len(result) != 1 {
 		t.Fatalf("expected 1 custom tool, got %d", len(result))
 	}
@@ -314,7 +314,7 @@ func TestLoadCustomTools_ToolNotFound(t *testing.T) {
 		WithScheme(newTestScheme()).
 		Build()
 
-	result := loadCustomTools(context.Background(), fakeClient, "default", []string{"nonexistent-tool"})
+	result, _ := loadCustomTools(context.Background(), fakeClient, "default", []string{"nonexistent-tool"})
 	if len(result) != 0 {
 		t.Errorf("expected 0 tools for missing CRD, got %d", len(result))
 	}
@@ -337,7 +337,7 @@ func TestLoadCustomTools_MixedBuiltinAndCustom(t *testing.T) {
 		Build()
 
 	// web_search is built-in and should be skipped; my-tool is custom
-	result := loadCustomTools(context.Background(), fakeClient, "test-ns", []string{"web_search", "my-tool"})
+	result, _ := loadCustomTools(context.Background(), fakeClient, "test-ns", []string{"web_search", "my-tool"})
 	if len(result) != 1 {
 		t.Fatalf("expected 1 custom tool (builtin skipped), got %d", len(result))
 	}
@@ -975,7 +975,7 @@ func TestLoadCustomToolsSkipsToolWhenOutboundApprovalBindingFails(t *testing.T) 
 		}},
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(tool).Build()
-	got := loadCustomTools(context.Background(), fakeClient, "default", []string{tool.Name})
+	got, _ := loadCustomTools(context.Background(), fakeClient, "default", []string{tool.Name})
 	if len(got) != 0 {
 		t.Fatalf("loaded tools = %#v, want fail-closed omission", got)
 	}
