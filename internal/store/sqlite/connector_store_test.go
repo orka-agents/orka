@@ -268,6 +268,34 @@ func TestConnectorCompletionRoundTripAndTombstone(t *testing.T) {
 	if _, err := s.ConsumeConnectorCompletion(ctx, completion.Nonce); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("second consume err = %v, want ErrNotFound", err)
 	}
+	// Peek leaves the row for a retry; list opens every parked completion.
+	peekable := completion
+	peekable.Nonce = "completion-peek"
+	if err := s.CreateConnectorCompletion(ctx, peekable); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		peeked, err := s.PeekConnectorCompletion(ctx, peekable.Nonce)
+		if err != nil || peeked.Credential.AccessToken != "gho_parked" {
+			t.Fatalf("peek = %+v err = %v", peeked, err)
+		}
+	}
+	listed, err := s.ListConnectorCompletionsForConnection(ctx, completion.ConnectionUID)
+	if err != nil || len(listed) != 1 || listed[0].Nonce != peekable.Nonce || listed[0].Credential.RefreshToken != "ghr_parked" {
+		t.Fatalf("listed = %+v err = %v", listed, err)
+	}
+	if err := s.DeleteConnectorCompletion(ctx, peekable.Nonce); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PeekConnectorCompletion(ctx, peekable.Nonce); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("peek after delete err = %v", err)
+	}
+	if err := s.DeleteConnectorCompletion(ctx, peekable.Nonce); err != nil {
+		t.Fatalf("delete must be idempotent: %v", err)
+	}
+	if _, err := s.PeekConnectorCompletion(ctx, ""); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("peek empty nonce err = %v", err)
+	}
 	expired := completion
 	expired.Nonce = "completion-expired"
 	expired.ExpiresAt = time.Now().Add(-time.Second)
@@ -276,6 +304,23 @@ func TestConnectorCompletionRoundTripAndTombstone(t *testing.T) {
 	}
 	if _, err := s.ConsumeConnectorCompletion(ctx, expired.Nonce); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("expired consume err = %v", err)
+	}
+	// Expired rows cannot be redeemed but remain listed for revocation until
+	// the reconciler deletes them.
+	expiredToo := expired
+	expiredToo.Nonce = "completion-expired-2"
+	if err := s.CreateConnectorCompletion(ctx, expiredToo); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PeekConnectorCompletion(ctx, expiredToo.Nonce); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expired peek err = %v", err)
+	}
+	expiredListed, listErr := s.ListConnectorCompletionsForConnection(ctx, completion.ConnectionUID)
+	if listErr != nil || len(expiredListed) != 1 || expiredListed[0].Nonce != expiredToo.Nonce || expiredListed[0].Credential.AccessToken != "gho_parked" {
+		t.Fatalf("expired listing = %+v err = %v", expiredListed, listErr)
+	}
+	if err := s.DeleteConnectorCompletion(ctx, expiredToo.Nonce); err != nil {
+		t.Fatal(err)
 	}
 	if err := s.CreateConnectorCompletion(ctx, store.ConnectorCompletion{Nonce: "x"}); err == nil {
 		t.Fatal("incomplete completion must be rejected")

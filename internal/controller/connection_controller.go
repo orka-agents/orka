@@ -83,6 +83,8 @@ func (r *ConnectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{RequeueAfter: connectionRequeueInterval}, nil
 	}
 
+	r.reapExpiredCompletions(ctx, connection)
+
 	now := metav1.Now()
 	providerResolved := metav1.Condition{
 		Type:               corev1alpha1.ConnectionConditionProviderResolved,
@@ -174,6 +176,9 @@ func (r *ConnectionReconciler) finalize(ctx context.Context, connection *corev1a
 		}
 	}
 	if r.Consents != nil {
+		// A callback may have parked a freshly issued token that the owner
+		// never committed. It is still live upstream, so revoke it too.
+		r.revokeParkedCompletions(ctx, connection)
 		if err := r.Consents.DeleteConnectorConsentsForConnection(ctx, string(connection.UID)); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -201,6 +206,56 @@ func (r *ConnectionReconciler) revokeBestEffort(ctx context.Context, connection 
 		}
 		return
 	}
+	r.revokeTokens(ctx, connection, credential)
+}
+
+// reapExpiredCompletions revokes and deletes parked completions whose
+// redemption window closed. Expired rows are never purged by the store
+// itself because only this path can revoke the tokens they hold.
+func (r *ConnectionReconciler) reapExpiredCompletions(ctx context.Context, connection *corev1alpha1.Connection) {
+	if r.Consents == nil {
+		return
+	}
+	completions, err := r.Consents.ListConnectorCompletionsForConnection(ctx, string(connection.UID))
+	if err != nil {
+		log.FromContext(ctx).Info("parked completions could not be listed for expiry", "connection", connection.Name)
+		return
+	}
+	now := time.Now()
+	for _, completion := range completions {
+		if completion.ExpiresAt.After(now) {
+			continue
+		}
+		r.revokeTokens(ctx, connection, completion.Credential)
+		if err := r.Consents.DeleteConnectorCompletion(ctx, completion.Nonce); err != nil {
+			log.FromContext(ctx).Info("expired completion could not be deleted", "connection", connection.Name)
+		}
+	}
+}
+
+// revokeParkedCompletions revokes tokens the callback obtained but the owner
+// never committed. Failures are logged; the rows are deleted regardless.
+func (r *ConnectionReconciler) revokeParkedCompletions(ctx context.Context, connection *corev1alpha1.Connection) {
+	if r.Revoker == nil {
+		return
+	}
+	completions, err := r.Consents.ListConnectorCompletionsForConnection(ctx, string(connection.UID))
+	if err != nil {
+		log.FromContext(ctx).Info("parked completions could not be listed for revocation", "connection", connection.Name)
+		return
+	}
+	for _, completion := range completions {
+		r.revokeTokens(ctx, connection, completion.Credential)
+	}
+}
+
+// revokeTokens revokes the refresh then access token of one credential at
+// the provider, best effort.
+func (r *ConnectionReconciler) revokeTokens(ctx context.Context, connection *corev1alpha1.Connection, credential store.ConnectorCredential) {
+	if r.Revoker == nil {
+		return
+	}
+	logger := log.FromContext(ctx)
 	provider := &corev1alpha1.ConnectorProvider{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: connection.Namespace, Name: connection.Spec.ProviderRef.Name}, provider); err != nil {
 		return

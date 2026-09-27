@@ -121,6 +121,17 @@ type ConnectorConsentStore interface {
 	// ConsumeConnectorCompletion atomically removes and returns the parked
 	// material for nonce, or ErrNotFound (also for expired entries).
 	ConsumeConnectorCompletion(ctx context.Context, nonce string) (ConnectorCompletion, error)
+	// PeekConnectorCompletion returns the parked material for nonce without
+	// removing it, so a commit that fails after the credential write can be
+	// retried with the same token. Expired entries report ErrNotFound.
+	PeekConnectorCompletion(ctx context.Context, nonce string) (ConnectorCompletion, error)
+	// DeleteConnectorCompletion removes one parked completion. Missing rows
+	// succeed.
+	DeleteConnectorCompletion(ctx context.Context, nonce string) error
+	// ListConnectorCompletionsForConnection opens every parked completion for
+	// a Connection, expired ones included, so the reconciler can revoke tokens
+	// that were never committed before dropping them.
+	ListConnectorCompletionsForConnection(ctx context.Context, connectionUID string) ([]ConnectorCompletion, error)
 	// DeleteConnectorConsentsForConnection drops every pending consent and
 	// completion for a Connection, for example on disconnect.
 	DeleteConnectorConsentsForConnection(ctx context.Context, connectionUID string) error

@@ -116,6 +116,7 @@ type Handlers struct {
 	eventStreamPollInterval   time.Duration
 	eventStreamHeartbeatEvery time.Duration
 	connectors                ConnectorConfig
+	completionLocks           *completionLocks
 }
 
 // HandlersConfig holds configuration for creating Handlers.
@@ -172,6 +173,7 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		eventStreamPollInterval:   defaultEventStreamPollInterval,
 		eventStreamHeartbeatEvery: defaultEventStreamHeartbeatEvery,
 		connectors:                cfg.Connectors,
+		completionLocks:           newCompletionLocks(),
 	}
 }
 

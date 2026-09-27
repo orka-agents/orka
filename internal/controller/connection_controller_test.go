@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"testing"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -407,13 +408,17 @@ func TestConnectionRequestsForProvider(t *testing.T) {
 }
 
 type fakeConnectorCredentialStore struct {
-	credentials map[string]store.ConnectorCredential
-	consents    map[string]int
-	deleted     []string
+	credentials        map[string]store.ConnectorCredential
+	consents           map[string]int
+	parked             map[string][]store.ConnectorCompletion
+	deleted            []string
+	deletedCompletions []string
 }
 
 func newFakeConnectorCredentialStore() *fakeConnectorCredentialStore {
-	return &fakeConnectorCredentialStore{credentials: map[string]store.ConnectorCredential{}, consents: map[string]int{}}
+	return &fakeConnectorCredentialStore{
+		credentials: map[string]store.ConnectorCredential{}, consents: map[string]int{}, parked: map[string][]store.ConnectorCompletion{},
+	}
 }
 
 func (f *fakeConnectorCredentialStore) PutConnectorCredential(_ context.Context, ref store.ConnectorCredentialRef, credential store.ConnectorCredential) error {
@@ -450,6 +455,28 @@ func (f *fakeConnectorCredentialStore) CreateConnectorCompletion(context.Context
 
 func (f *fakeConnectorCredentialStore) ConsumeConnectorCompletion(context.Context, string) (store.ConnectorCompletion, error) {
 	return store.ConnectorCompletion{}, store.ErrNotFound
+}
+
+func (f *fakeConnectorCredentialStore) PeekConnectorCompletion(context.Context, string) (store.ConnectorCompletion, error) {
+	return store.ConnectorCompletion{}, store.ErrNotFound
+}
+
+func (f *fakeConnectorCredentialStore) DeleteConnectorCompletion(_ context.Context, nonce string) error {
+	for uid, completions := range f.parked {
+		kept := completions[:0]
+		for _, completion := range completions {
+			if completion.Nonce != nonce {
+				kept = append(kept, completion)
+			}
+		}
+		f.parked[uid] = kept
+	}
+	f.deletedCompletions = append(f.deletedCompletions, nonce)
+	return nil
+}
+
+func (f *fakeConnectorCredentialStore) ListConnectorCompletionsForConnection(_ context.Context, connectionUID string) ([]store.ConnectorCompletion, error) {
+	return f.parked[connectionUID], nil
 }
 
 func (f *fakeConnectorCredentialStore) DeleteConnectorConsentsForConnection(_ context.Context, connectionUID string) error {
@@ -503,9 +530,10 @@ func TestConnectionReconcilerFinalizerAndDisconnect(t *testing.T) {
 		t.Fatalf("state = %q, want Pending", updated.Status.State)
 	}
 
-	// Link it, then disconnect.
+	// Link it, park an uncommitted completion, then disconnect.
 	credentials.credentials[string(updated.UID)] = store.ConnectorCredential{AccessToken: "gho_access", RefreshToken: "ghr_refresh"}
 	credentials.consents[string(updated.UID)] = 1
+	credentials.parked[string(updated.UID)] = []store.ConnectorCompletion{{Credential: store.ConnectorCredential{AccessToken: "gho_parked", RefreshToken: "ghr_parked"}}}
 	if err := c.Delete(context.Background(), updated); err != nil {
 		t.Fatal(err)
 	}
@@ -515,8 +543,9 @@ func TestConnectionReconcilerFinalizerAndDisconnect(t *testing.T) {
 	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
 		t.Fatalf("disconnect reconcile: %v", err)
 	}
-	if len(revoker.tokens) != 2 || revoker.tokens[0] != "ghr_refresh" || revoker.tokens[1] != "gho_access" {
-		t.Fatalf("revoked tokens = %v, want refresh then access", revoker.tokens)
+	if len(revoker.tokens) != 4 || revoker.tokens[0] != "ghr_refresh" || revoker.tokens[1] != "gho_access" ||
+		revoker.tokens[2] != "ghr_parked" || revoker.tokens[3] != "gho_parked" {
+		t.Fatalf("revoked tokens = %v, want committed then parked, refresh before access", revoker.tokens)
 	}
 	if _, held := credentials.credentials[string(updated.UID)]; held || len(credentials.deleted) != 1 {
 		t.Fatalf("custody must be deleted even when revocation fails: %+v", credentials)
@@ -547,5 +576,34 @@ func TestConnectionReconcilerDisconnectWithoutCredentialSkipsRevocation(t *testi
 	}
 	if len(credentials.deleted) != 1 {
 		t.Fatal("custody delete must still run")
+	}
+}
+
+func TestConnectionReconcilerReapsExpiredCompletions(t *testing.T) {
+	scheme := connectorTestScheme(t)
+	provider := acceptedConnectorProvider()
+	provider.Spec.OAuth.RevocationURL = "https://github.com/revoke"
+	connection := testConnection("tenant", "github-alice", "github")
+	connection.Finalizers = []string{ConnectionCustodyFinalizer}
+	credentials := newFakeConnectorCredentialStore()
+	credentials.parked[string(connection.UID)] = []store.ConnectorCompletion{
+		{Nonce: "live", ExpiresAt: time.Now().Add(5 * time.Minute), Credential: store.ConnectorCredential{AccessToken: "gho_live"}},
+		{Nonce: "stale", ExpiresAt: time.Now().Add(-time.Minute), Credential: store.ConnectorCredential{AccessToken: "gho_stale", RefreshToken: "ghr_stale"}},
+	}
+	revoker := &fakeConnectorRevoker{}
+	c := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(connection, provider, connectorClientSecret("tenant")).
+		WithStatusSubresource(&corev1alpha1.Connection{}).Build()
+	reconciler := &ConnectionReconciler{Client: c, APIReader: c, Scheme: scheme, Credentials: credentials, Consents: credentials, Revoker: revoker}
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "tenant", Name: "github-alice"}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(revoker.tokens) != 2 || revoker.tokens[0] != "ghr_stale" || revoker.tokens[1] != "gho_stale" {
+		t.Fatalf("revoked = %v, want only the expired completion's tokens", revoker.tokens)
+	}
+	if len(credentials.deletedCompletions) != 1 || credentials.deletedCompletions[0] != "stale" {
+		t.Fatalf("deleted completions = %v", credentials.deletedCompletions)
+	}
+	if remaining := credentials.parked[string(connection.UID)]; len(remaining) != 1 || remaining[0].Nonce != "live" {
+		t.Fatalf("remaining completions = %+v", remaining)
 	}
 }

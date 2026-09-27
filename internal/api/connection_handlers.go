@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -44,6 +45,30 @@ const (
 	connectionSubjectLabelLength = 32
 	maxConnectionRequestBytes    = 4 << 10
 )
+
+// completionLocks serializes completion per Connection UID so a stalled
+// duplicate request cannot write a superseded credential after a newer link
+// committed. The API server is a single process, so a process lock suffices.
+type completionLocks struct {
+	mu    sync.Mutex
+	locks map[string]*sync.Mutex
+}
+
+func newCompletionLocks() *completionLocks {
+	return &completionLocks{locks: map[string]*sync.Mutex{}}
+}
+
+func (l *completionLocks) lock(key string) func() {
+	l.mu.Lock()
+	m, ok := l.locks[key]
+	if !ok {
+		m = &sync.Mutex{}
+		l.locks[key] = m
+	}
+	l.mu.Unlock()
+	m.Lock()
+	return m.Unlock
+}
 
 // ConnectorConfig wires the consent flow and custody into the API server.
 type ConnectorConfig struct {
@@ -703,7 +728,14 @@ func (h *Handlers) CompleteConnection(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "completion token is invalid")
 	}
 	ctx := c.Context()
-	completion, err := h.connectors.Consents.ConsumeConnectorCompletion(ctx, nonce)
+	// One completion at a time per Connection: a duplicate that waited here
+	// re-reads the row and finds it consumed.
+	unlock := h.completionLocks.lock(string(connection.UID))
+	defer unlock()
+	// Peek rather than consume: the row is removed only after the credential
+	// and the linked status are both committed, so a transient failure in
+	// between can be retried with the same token.
+	completion, err := h.connectors.Consents.PeekConnectorCompletion(ctx, nonce)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return fiber.NewError(fiber.StatusConflict, "completion token was already used or has expired")
@@ -713,7 +745,18 @@ func (h *Handlers) CompleteConnection(c fiber.Ctx) error {
 	if completion.ConnectionUID != string(connection.UID) || completion.Namespace != connection.Namespace ||
 		completion.Name != connection.Name || completion.Provider != connection.Spec.ProviderRef.Name ||
 		completion.SubjectDigest != connectors.SubjectDigest(connection.Spec.Subject.Issuer, connection.Spec.Subject.Subject) {
+		// A token presented against the wrong Connection is discarded so it
+		// cannot be tried across Connections.
+		_ = h.connectors.Consents.DeleteConnectorCompletion(ctx, nonce)
 		return fiber.NewError(fiber.StatusConflict, "completion token does not belong to this connection")
+	}
+	// The consent was granted for the mode in force when it started. A
+	// narrower or wider mode now would mismatch the granted scopes, so the
+	// person must consent again under the current mode.
+	currentMode, _ := normalizeConnectionMode(connection.Spec.Mode)
+	if completion.Mode != currentMode {
+		_ = h.connectors.Consents.DeleteConnectorCompletion(ctx, nonce)
+		return fiber.NewError(fiber.StatusConflict, "the connection mode changed after consent started; start consent again")
 	}
 	ref, err := connectors.CredentialRef(connection)
 	if err != nil {
@@ -721,14 +764,18 @@ func (h *Handlers) CompleteConnection(c fiber.Ctx) error {
 	}
 	if err := h.connectors.Credentials.PutConnectorCredential(ctx, ref, completion.Credential); err != nil {
 		if errors.Is(err, store.ErrConnectorCustodyTombstoned) {
+			_ = h.connectors.Consents.DeleteConnectorCompletion(ctx, nonce)
 			return fiber.NewError(fiber.StatusConflict, "connection was disconnected; create it again")
 		}
 		log.Error(err, "connector credential could not be sealed", "connection", connection.Name)
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to store credential")
 	}
 	if err := h.markConnectionLinked(ctx, connection, completion.Credential); err != nil {
-		log.Error(err, "connection status could not be updated after completion", "connection", connection.Name)
-		return fiber.NewError(fiber.StatusInternalServerError, "failed to update connection status")
+		log.Error(err, "connection status could not be updated after completion; the completion token remains valid for retry", "connection", connection.Name)
+		return fiber.NewError(fiber.StatusInternalServerError, "failed to update connection status; retry")
+	}
+	if err := h.connectors.Consents.DeleteConnectorCompletion(ctx, nonce); err != nil {
+		log.Error(err, "consumed completion could not be removed", "connection", connection.Name)
 	}
 	return c.JSON(connectionResponse(connection))
 }

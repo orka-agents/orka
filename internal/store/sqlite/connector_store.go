@@ -414,9 +414,8 @@ func (s *Store) CreateConnectorCompletion(ctx context.Context, completion store.
 		return fmt.Errorf("begin connector completion transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM connector_completions WHERE expires_at < ?`, now); err != nil {
-		return fmt.Errorf("purge expired connector completions: %w", err)
-	}
+	// Expired completions are not purged here: they may hold live provider
+	// tokens that only the Connection reconciler can revoke before deletion.
 	// A callback that was mid-exchange while the Connection was disconnected
 	// must not park tokens for the tombstoned UID.
 	var tombstoned int
@@ -449,11 +448,6 @@ func (s *Store) ConsumeConnectorCompletion(ctx context.Context, nonce string) (s
 		return store.ConnectorCompletion{}, fmt.Errorf("begin connector completion transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	// Expired parked tokens are purged on every consume so they never outlive
-	// the TTL by more than one later callback or completion.
-	if _, err := tx.ExecContext(ctx, `DELETE FROM connector_completions WHERE expires_at < ?`, time.Now().UTC()); err != nil {
-		return store.ConnectorCompletion{}, fmt.Errorf("purge expired connector completions: %w", err)
-	}
 	var (
 		completion            store.ConnectorCompletion
 		payloadNonce, payload []byte
@@ -489,6 +483,91 @@ func (s *Store) ConsumeConnectorCompletion(ctx context.Context, nonce string) (s
 	}
 	completion.Credential = credential
 	return completion, nil
+}
+
+// PeekConnectorCompletion implements store.ConnectorConsentStore.
+func (s *Store) PeekConnectorCompletion(ctx context.Context, nonce string) (store.ConnectorCompletion, error) {
+	if s.snapshotCipher == nil {
+		return store.ConnectorCompletion{}, errConnectorCipherRequired
+	}
+	if strings.TrimSpace(nonce) == "" {
+		return store.ConnectorCompletion{}, store.ErrNotFound
+	}
+	rows, err := s.queryConnectorCompletions(ctx, `WHERE nonce = ?`, nonce, false)
+	if err != nil {
+		return store.ConnectorCompletion{}, err
+	}
+	if len(rows) == 0 {
+		return store.ConnectorCompletion{}, store.ErrNotFound
+	}
+	return rows[0], nil
+}
+
+// DeleteConnectorCompletion implements store.ConnectorConsentStore.
+func (s *Store) DeleteConnectorCompletion(ctx context.Context, nonce string) error {
+	if strings.TrimSpace(nonce) == "" {
+		return nil
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM connector_completions WHERE nonce = ?`, nonce); err != nil {
+		return fmt.Errorf("delete connector completion: %w", err)
+	}
+	return nil
+}
+
+// ListConnectorCompletionsForConnection implements store.ConnectorConsentStore.
+func (s *Store) ListConnectorCompletionsForConnection(ctx context.Context, connectionUID string) ([]store.ConnectorCompletion, error) {
+	if s.snapshotCipher == nil {
+		return nil, errConnectorCipherRequired
+	}
+	if strings.TrimSpace(connectionUID) == "" {
+		return nil, errors.New("connector completion connection UID is required")
+	}
+	// Expired rows are included: their tokens may still be live upstream and
+	// disconnect must revoke them before the rows are dropped.
+	return s.queryConnectorCompletions(ctx, `WHERE connection_uid = ?`, connectionUID, true)
+}
+
+// queryConnectorCompletions reads and opens completions matching the clause.
+// Redemption paths exclude expired rows; revocation paths include them. Rows
+// that fail to open are skipped rather than returned.
+func (s *Store) queryConnectorCompletions(ctx context.Context, where string, arg any, includeExpired bool) ([]store.ConnectorCompletion, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT nonce, connection_uid, namespace, name, subject_digest, provider, mode,
+		payload_nonce, payload, expires_at FROM connector_completions `+where, arg)
+	if err != nil {
+		return nil, fmt.Errorf("read connector completions: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	now := time.Now()
+	var result []store.ConnectorCompletion
+	for rows.Next() {
+		var (
+			completion            store.ConnectorCompletion
+			payloadNonce, payload []byte
+		)
+		if err := rows.Scan(&completion.Nonce, &completion.ConnectionUID, &completion.Namespace, &completion.Name, &completion.SubjectDigest,
+			&completion.Provider, &completion.Mode, &payloadNonce, &payload, &completion.ExpiresAt); err != nil {
+			return nil, fmt.Errorf("scan connector completion: %w", err)
+		}
+		completion.ExpiresAt = completion.ExpiresAt.UTC()
+		if !includeExpired && !completion.ExpiresAt.After(now) {
+			continue
+		}
+		body, err := s.snapshotCipher.aead.Open(nil, payloadNonce, payload,
+			connectorCompletionAdditionalData(completion.Nonce, completion.ConnectionUID, completion.SubjectDigest))
+		if err != nil {
+			continue
+		}
+		credential, err := decodeSealedConnectorCredential(body)
+		if err != nil {
+			continue
+		}
+		completion.Credential = credential
+		result = append(result, completion)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate connector completions: %w", err)
+	}
+	return result, nil
 }
 
 // DeleteConnectorConsentsForConnection implements store.ConnectorConsentStore.

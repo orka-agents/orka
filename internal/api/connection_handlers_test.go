@@ -11,12 +11,14 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -54,6 +56,9 @@ type connectorTestHarness struct {
 	// skipFinalizer strips the custody finalizer from new Connections, as if
 	// they were created outside the API, to prove consent refuses them.
 	skipFinalizer bool
+	// statusFailure, when set and true, makes Connection status updates fail
+	// to model a transient API server error during completion.
+	statusFailure *atomic.Bool
 }
 
 func acceptedTestProvider() *corev1alpha1.ConnectorProvider {
@@ -95,6 +100,12 @@ func newConnectorTestHarness(t *testing.T, objects ...runtime.Object) *connector
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objects...).
 		WithStatusSubresource(&corev1alpha1.Connection{}, &corev1alpha1.ConnectorProvider{}).
 		WithInterceptorFuncs(interceptor.Funcs{
+			SubResourceUpdate: func(ctx context.Context, c client.Client, subResource string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+				if harness.statusFailure != nil && harness.statusFailure.Load() {
+					return errors.New("transient status failure")
+				}
+				return c.SubResource(subResource).Update(ctx, obj, opts...)
+			},
 			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 				if obj.GetUID() == "" {
 					obj.SetUID(types.UID("uid-" + obj.GetName()))
@@ -841,5 +852,77 @@ func TestConnectionCompletionRequiresFinalizerAndRefusesTombstones(t *testing.T)
 	location = h.consentAndCallback(reauthorized)
 	if !strings.Contains(location, "reason=disconnected") || strings.Contains(location, "completion=") {
 		t.Fatalf("callback after tombstone location = %q", location)
+	}
+}
+
+func TestConnectionCompletionRejectsStaleModeAndIsRetryable(t *testing.T) {
+	h := newConnectorTestHarness(t, acceptedTestProvider())
+	created := h.create("readOnly")
+	location := h.consentAndCallback(created)
+	completion := completionFromLocation(t, location)
+
+	// Widen the mode after consent started: the parked read-only token must
+	// not mark the readWrite generation Ready.
+	resp, raw := h.do(http.MethodPut, "/api/v1/connections/"+created.Connection.Name, map[string]string{"mode": "readWrite"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("widen = %d %s", resp.StatusCode, raw)
+	}
+	resp, raw = h.complete(created.Connection.Name, completion)
+	if resp.StatusCode != http.StatusConflict || !strings.Contains(string(raw), "mode changed") {
+		t.Fatalf("stale-mode completion = %d %s, want 409", resp.StatusCode, raw)
+	}
+	stored := &corev1alpha1.Connection{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: created.Connection.Name}, stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status.State == corev1alpha1.ConnectionStateReady {
+		t.Fatal("a stale-mode completion must not link")
+	}
+	// The stale completion was discarded, not left for later.
+	if resp, _ := h.complete(created.Connection.Name, completion); resp.StatusCode != http.StatusConflict {
+		t.Fatalf("discarded completion = %d, want 409", resp.StatusCode)
+	}
+
+	// A completion whose status update fails transiently stays retryable.
+	var fail atomic.Bool
+	h.statusFailure = &fail
+	second := h.create("readWrite")
+	location = h.consentAndCallback(second)
+	completion = completionFromLocation(t, location)
+	fail.Store(true)
+	if resp, raw := h.complete(second.Connection.Name, completion); resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("failed status update = %d %s, want 500", resp.StatusCode, raw)
+	}
+	fail.Store(false)
+	if resp, raw := h.complete(second.Connection.Name, completion); resp.StatusCode != http.StatusOK {
+		t.Fatalf("retry after transient failure = %d %s, want 200", resp.StatusCode, raw)
+	}
+	assertConnectionLinked(t, h, second.Connection.Name)
+	if resp, _ := h.complete(second.Connection.Name, completion); resp.StatusCode != http.StatusConflict {
+		t.Fatal("a committed completion must be consumed")
+	}
+}
+
+func TestCompletionLocksSerializePerKey(t *testing.T) {
+	locks := newCompletionLocks()
+	unlockA := locks.lock("a")
+	released := make(chan struct{})
+	go func() {
+		unlock := locks.lock("a")
+		unlock()
+		close(released)
+	}()
+	select {
+	case <-released:
+		t.Fatal("a second holder of the same key must wait")
+	case <-time.After(50 * time.Millisecond):
+	}
+	unlockB := locks.lock("b")
+	unlockB()
+	unlockA()
+	select {
+	case <-released:
+	case <-time.After(time.Second):
+		t.Fatal("the waiter must proceed once the key is released")
 	}
 }
