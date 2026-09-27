@@ -105,6 +105,12 @@ Anthropic-backed Responses streams buffer each model turn until its terminal
 outcome is known, so refusal text is never forwarded as ordinary text deltas.
 Creation/progress events and keep-alives still stream while the model runs.
 
+A lost response does not prove that coordinator tools did not run. Requests are
+not deduplicated, including when a client sends `Idempotency-Key`. Retrying after
+a disconnect, timeout, or controller crash can repeat tool side effects. Check the
+resulting state before retrying a coordinator request, or use
+`X-Orka-Tools: disabled` and deduplicate tool execution in the client.
+
 Coordinator mode is the default here too. Orka replaces client tools and executes
 its own tools on the server. Streaming emits text progress between coordinator
 rounds; function arguments are emitted as complete deltas once the upstream
