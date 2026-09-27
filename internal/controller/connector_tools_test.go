@@ -226,6 +226,30 @@ func TestRegistryACPMCPToolExecutorConnectionDigest(t *testing.T) {
 	if digest, err := executor.ConnectionDigest(ctx, request, harnessv2.MCPToolDescriptor{Name: "plain", Source: harnessv2.MCPToolSourceBrokeredCustom}); err != nil || digest != "" {
 		t.Fatalf("non-connector tools have no digest: %q err = %v", digest, err)
 	}
+	if digest, err := executor.ConnectionDigest(ctx, request, harnessv2.MCPToolDescriptor{Name: "direct_write", Source: harnessv2.MCPToolSourceBrokeredCustom}); err != nil || digest != "" {
+		t.Fatalf("a tool whose policy was never frozen has no digest: %q err = %v", digest, err)
+	}
+	// A policy retargeted after dispatch (connection mode when the Task
+	// froze a Connection for it, direct now) is classification drift: the
+	// call never executes under the policy's new credentials.
+	retargeted := f.policy.DeepCopy()
+	retargeted.Spec = f.direct.Spec
+	retargetedReader := ctrlfake.NewClientBuilder().WithScheme(f.scheme).WithObjects(retargeted, f.direct, f.readTool, f.writeTool, f.plainTool, f.directTool, task).Build()
+	retargetedExecutor := RegistryACPMCPToolExecutor{Reader: retargetedReader, AgentExecutionSnapshots: fakeSnapshotStore{snapshot: &store.AgentExecutionSnapshot{Body: body}}}
+	if _, err := retargetedExecutor.ConnectionDigest(ctx, request, custom); err == nil || !strings.Contains(err.Error(), "connection mode when the task was dispatched") {
+		t.Fatalf("retargeted policy err = %v, want classification drift refused", err)
+	}
+	frozen := map[string]outboundaccess.FrozenConnection{"github-conn": {UID: "conn-uid", Generation: 3, GrantSequence: 1}}
+	if _, _, err := connectorPolicyPin(ctx, retargetedReader, nil, frozen, f.writeTool); err == nil {
+		t.Fatal("execution must refuse the retargeted policy too")
+	}
+	name, identity, err := connectorPolicyPin(ctx, reader, nil, frozen, f.writeTool)
+	if err != nil || name != "github-conn" || identity == nil || identity.Generation != f.policy.Generation {
+		t.Fatalf("pin = %q %+v err = %v, want the live connection-mode policy pinned", name, identity, err)
+	}
+	if name, identity, err := connectorPolicyPin(ctx, reader, nil, frozen, f.plainTool); err != nil || name != "" || identity != nil {
+		t.Fatalf("a tool without a policy pins nothing: %q %+v err = %v", name, identity, err)
+	}
 	if digest, err := executor.ConnectionDigest(ctx, request, harnessv2.MCPToolDescriptor{Name: "web_search", Source: harnessv2.MCPToolSourceBrokeredBuiltin}); err != nil || digest != "" {
 		t.Fatalf("built-in tools have no digest: %q err = %v", digest, err)
 	}

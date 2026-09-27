@@ -43,6 +43,10 @@ type connectorToolInfo struct {
 	// SpecDigest is the dispatch digest of the Tool spec and its policy spec
 	// as read; see ConnectorToolDispatchDigest.
 	SpecDigest string
+	// PolicyUID and PolicyGeneration pin the policy object this
+	// classification was read from, so execution can refuse another.
+	PolicyUID        string
+	PolicyGeneration int64
 }
 
 // ConnectorToolDispatchDigest digests everything that shapes a connector-backed
@@ -120,10 +124,12 @@ func connectorToolsFor(ctx context.Context, reader client.Reader, registry *tool
 			return nil, fmt.Errorf("digest tool %q: %w", name, err)
 		}
 		result[name] = connectorToolInfo{
-			PolicyName: policyName,
-			Provider:   policy.Spec.Connection.ProviderRef.Name,
-			Class:      tool.Spec.BrokeredToolClass,
-			SpecDigest: specDigest,
+			PolicyName:       policyName,
+			Provider:         policy.Spec.Connection.ProviderRef.Name,
+			Class:            tool.Spec.BrokeredToolClass,
+			SpecDigest:       specDigest,
+			PolicyUID:        string(policy.UID),
+			PolicyGeneration: policy.Generation,
 		}
 	}
 	return result, nil
