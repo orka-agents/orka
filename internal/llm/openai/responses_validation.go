@@ -46,7 +46,7 @@ func validateResponsesItemType(item responses.ResponseOutputItemUnion) error {
 			if part.Type != responseContentTypeOutputText && part.Type != stopReasonRefusal {
 				return fmt.Errorf("provider message content is outside the Responses subset")
 			}
-			if part.Type == responseContentTypeOutputText && invalidResponseTextField(part.RawJSON(), part.JSON.Text) {
+			if part.Type == responseContentTypeOutputText && invalidResponseStringField(part.RawJSON(), part.JSON.Text) {
 				return fmt.Errorf("provider text content requires a string text field")
 			}
 		}
@@ -59,7 +59,7 @@ func validateResponsesItemType(item responses.ResponseOutputItemUnion) error {
 // SDK field validity permits coercion of numbers and booleans into strings.
 // Validate the wire type while preserving explicitly empty text and synthetic
 // in-process events that have no decoded JSON metadata.
-func invalidResponseTextField(rawObject string, field respjson.Field) bool {
+func invalidResponseStringField(rawObject string, field respjson.Field) bool {
 	return rawObject != "" && (!field.Valid() || !strings.HasPrefix(strings.TrimSpace(field.Raw()), "\""))
 }
 
@@ -101,7 +101,7 @@ func validateResponseFunctionMetadata(item responses.ResponseOutputItemUnion) er
 	if invalidResponseMetadataString(item.CallID, item.JSON.CallID) || invalidResponseMetadataString(item.Name, item.JSON.Name) {
 		return fmt.Errorf("response function call has invalid metadata")
 	}
-	if item.JSON.Arguments.Raw() != "" && !item.JSON.Arguments.Valid() {
+	if item.JSON.Arguments.Raw() != "" && invalidResponseStringField(item.RawJSON(), item.JSON.Arguments) {
 		return fmt.Errorf("response function call has invalid arguments")
 	}
 	return nil
@@ -218,21 +218,9 @@ func (t *responseFuncCallTracker) prepareEvent(evt *responses.ResponseStreamEven
 		}
 	case eventTypeResponseFunctionCallArgumentsDelta, eventTypeResponseFunctionCallArgumentsDone:
 		return validateResponseFunctionEventMetadata(*evt)
-	case eventTypeResponseOutputTextDelta:
-		if invalidResponseTextField(evt.RawJSON(), evt.JSON.Delta) {
-			return fmt.Errorf("provider text delta requires a string delta field")
-		}
-	case eventTypeResponseOutputTextDone:
-		if invalidResponseTextField(evt.RawJSON(), evt.JSON.Text) {
-			return fmt.Errorf("provider text completion requires a string text field")
-		}
-	case eventTypeResponseContentPartAdded, eventTypeResponseContentPartDone:
-		if evt.Part.Type != responseContentTypeOutputText && evt.Part.Type != stopReasonRefusal {
-			return fmt.Errorf("provider message content is outside the Responses subset")
-		}
-		if evt.Part.Type == responseContentTypeOutputText && invalidResponseTextField(evt.RawJSON(), evt.Part.JSON.Text) {
-			return fmt.Errorf("provider text content requires a string text field")
-		}
+	case eventTypeResponseOutputTextDelta, eventTypeResponseOutputTextDone,
+		eventTypeResponseContentPartAdded, eventTypeResponseContentPartDone:
+		return validateResponseTextEvent(*evt)
 	case eventTypeResponseCompleted, eventTypeResponseIncomplete:
 		if (evt.Type == eventTypeResponseCompleted && evt.Response.Status != stopReasonCompleted) ||
 			(evt.Type == eventTypeResponseIncomplete && evt.Response.Status != stopReasonIncomplete) {
@@ -266,6 +254,27 @@ func (t *responseFuncCallTracker) prepareEvent(evt *responses.ResponseStreamEven
 			evt.Response.Output[i] = item
 		}
 		return validateResponsesOutput(evt.Response.Output)
+	}
+	return nil
+}
+
+func validateResponseTextEvent(evt responses.ResponseStreamEventUnion) error {
+	switch evt.Type {
+	case eventTypeResponseOutputTextDelta:
+		if invalidResponseStringField(evt.RawJSON(), evt.JSON.Delta) {
+			return fmt.Errorf("provider text delta requires a string delta field")
+		}
+	case eventTypeResponseOutputTextDone:
+		if invalidResponseStringField(evt.RawJSON(), evt.JSON.Text) {
+			return fmt.Errorf("provider text completion requires a string text field")
+		}
+	case eventTypeResponseContentPartAdded, eventTypeResponseContentPartDone:
+		if evt.Part.Type != responseContentTypeOutputText && evt.Part.Type != stopReasonRefusal {
+			return fmt.Errorf("provider message content is outside the Responses subset")
+		}
+		if evt.Part.Type == responseContentTypeOutputText && invalidResponseStringField(evt.RawJSON(), evt.Part.JSON.Text) {
+			return fmt.Errorf("provider text content requires a string text field")
+		}
 	}
 	return nil
 }
