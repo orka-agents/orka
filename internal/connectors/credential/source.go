@@ -146,8 +146,7 @@ func (s *Source) loadLiveConnection(ctx context.Context, req outboundaccess.Conn
 	if string(connection.UID) != req.Frozen.UID || connection.Generation != req.Frozen.Generation {
 		return nil, errors.New("connection changed since the task was dispatched; re-dispatch to use it")
 	}
-	ready := meta.FindStatusCondition(connection.Status.Conditions, corev1alpha1.ConnectionConditionReady)
-	if ready == nil || ready.Status != metav1.ConditionTrue || ready.ObservedGeneration != connection.Generation {
+	if !connectors.ConnectionLinked(connection) {
 		return nil, errors.New("connection is not ready")
 	}
 	return connection, nil
@@ -203,10 +202,16 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 	if err != nil {
 		var oauthErr *connectors.OAuthError
 		if errors.As(err, &oauthErr) && oauthErr.IsInvalidGrant() {
-			// The provider no longer honors this link. Shred custody so a
-			// stale token can never be replayed, and record why.
-			if deleteErr := s.Credentials.DeleteConnectorCredential(ctx, string(connection.UID)); deleteErr != nil {
-				logger.Error(deleteErr, "connector custody could not be deleted after revocation")
+			// The provider no longer honors this refresh token. Shred the
+			// stale material (without a disconnect tombstone, so the person
+			// can consent again) unless a newer consent already replaced it,
+			// in which case the newer material is simply returned.
+			shredErr := s.Credentials.ShredConnectorCredential(ctx, string(connection.UID), current.Version)
+			if errors.Is(shredErr, store.ErrConflict) {
+				return s.Credentials.GetConnectorCredential(ctx, ref)
+			}
+			if shredErr != nil {
+				logger.Error(shredErr, "connector custody could not be shredded after revocation")
 			}
 			s.markNotReady(ctx, connection, corev1alpha1.ConnectionReasonRevoked, corev1alpha1.ConnectionStateRevoked,
 				"The provider rejected the refresh token; the person must reconnect")
@@ -231,13 +236,18 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 	if len(refreshed.Scopes) == 0 {
 		refreshed.Scopes = current.Scopes
 	}
-	if err := s.Credentials.PutConnectorCredential(ctx, ref, refreshed); err != nil {
-		if errors.Is(err, store.ErrConnectorCustodyTombstoned) {
-			return store.ConnectorCredential{}, errors.New("connection was disconnected during refresh")
-		}
+	// Fenced on the version read at flight start: a consent that completed
+	// meanwhile wins, and its material is returned instead.
+	switch err := s.Credentials.ReplaceConnectorCredential(ctx, ref, refreshed, current.Version); {
+	case errors.Is(err, store.ErrConflict):
+		return s.Credentials.GetConnectorCredential(ctx, ref)
+	case errors.Is(err, store.ErrNotFound):
+		return store.ConnectorCredential{}, errors.New("connection was disconnected during refresh")
+	case err != nil:
 		return store.ConnectorCredential{}, fmt.Errorf("store refreshed connection credential: %w", err)
 	}
 	s.recordRefresh(ctx, connection, refreshed)
+	refreshed.Version = current.Version + 1
 	return refreshed, nil
 }
 

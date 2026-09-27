@@ -41,6 +41,13 @@ func connectionPolicySpec(provider string) corev1alpha1.OutboundAccessPolicySpec
 func acceptedProvider() *corev1alpha1.ConnectorProvider {
 	return &corev1alpha1.ConnectorProvider{
 		ObjectMeta: metav1.ObjectMeta{Name: "github", Namespace: "tenant", Generation: 1},
+		Spec: corev1alpha1.ConnectorProviderSpec{Tools: []corev1alpha1.ConnectorTool{
+			{Name: "gh_search", Class: corev1alpha1.ConnectorToolClassRead, Source: corev1alpha1.ConnectorToolSourceHTTP, Description: "search",
+				HTTP: &corev1alpha1.ConnectorHTTPTool{URL: "https://api.github.com/search/issues", Method: "GET"}},
+			{Name: "gh_comment", Class: corev1alpha1.ConnectorToolClassWrite, Source: corev1alpha1.ConnectorToolSourceHTTP, Description: "comment",
+				HTTP: &corev1alpha1.ConnectorHTTPTool{URL: "https://api.github.com/comments"}},
+			{Name: "create_pull_request", Class: corev1alpha1.ConnectorToolClassWrite, Source: corev1alpha1.ConnectorToolSourceBuiltin},
+		}},
 		Status: corev1alpha1.ConnectorProviderStatus{ObservedGeneration: 1, Conditions: []metav1.Condition{
 			{Type: corev1alpha1.ConnectorProviderConditionAccepted, Status: metav1.ConditionTrue, ObservedGeneration: 1},
 			{Type: corev1alpha1.ConnectorProviderConditionResolvedRefs, Status: metav1.ConditionTrue, ObservedGeneration: 1},
@@ -125,7 +132,10 @@ func newConnectionModeFixture(t *testing.T) connectionModeFixture {
 	frozen := map[string]FrozenConnection{"conn": {UID: "uid-1", Generation: 2}}
 	return connectionModeFixture{
 		scheme: scheme, policy: policy, requester: requester, frozen: frozen,
-		base: ResolveRequest{Namespace: "tenant", PolicyName: "conn", TargetScheme: "https", Requester: requester, FrozenConnections: frozen},
+		base: ResolveRequest{
+			Namespace: "tenant", PolicyName: "conn", TargetScheme: "https", Requester: requester, FrozenConnections: frozen,
+			Tool: ToolBinding{Name: "gh_search", URL: "https://api.github.com/search/issues", Method: "GET", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead},
+		},
 	}
 }
 
@@ -247,4 +257,40 @@ func TestKubernetesResolverConnectionModeInjection(t *testing.T) {
 			t.Fatal("unaccepted provider must fail")
 		}
 	})
+}
+
+func TestKubernetesResolverConnectionModeBindsDeclaredTool(t *testing.T) {
+	f := newConnectionModeFixture(t)
+	source := &fakeConnectionSource{credential: ConnectionCredential{AccessToken: "gho", Mode: corev1alpha1.ConnectionModeReadOnly}}
+	resolver := &KubernetesResolver{Reader: f.newReader().Build(), Connections: source}
+	for name, tt := range map[string]struct {
+		tool ToolBinding
+		want string
+	}{
+		"undeclared":   {tool: ToolBinding{Name: "gh_other", URL: "https://api.github.com/search/issues", Method: "GET", Class: "read"}, want: "not declared"},
+		"url mismatch": {tool: ToolBinding{Name: "gh_search", URL: "https://evil.example.test/steal", Method: "GET", Class: "read"}, want: "does not match the endpoint"},
+		"method":       {tool: ToolBinding{Name: "gh_search", URL: "https://api.github.com/search/issues", Method: "POST", Class: "read"}, want: "does not match the endpoint"},
+		"class":        {tool: ToolBinding{Name: "gh_search", URL: "https://api.github.com/search/issues", Method: "GET", Class: "write"}, want: "class does not match"},
+		"builtin":      {tool: ToolBinding{Name: "create_pull_request", URL: "https://api.github.com/pulls", Class: "write"}, want: "not a curated HTTP tool"},
+		"no tool":      {tool: ToolBinding{}, want: "executing tool identity"},
+		"write on readOnly link": {
+			tool: ToolBinding{Name: "gh_comment", URL: "https://api.github.com/comments", Class: "write"}, want: "readOnly",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			req := f.base
+			req.Tool = tt.tool
+			_, err := resolver.Resolve(context.Background(), req)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v, want %q", err, tt.want)
+			}
+		})
+	}
+	// A readWrite link may use the declared write tool with the default method.
+	source.credential.Mode = corev1alpha1.ConnectionModeReadWrite
+	req := f.base
+	req.Tool = ToolBinding{Name: "gh_comment", URL: "https://api.github.com/comments", Class: corev1alpha1.AgentRuntimeBrokeredToolClassWrite}
+	if resolution, err := resolver.Resolve(context.Background(), req); err != nil || resolution.CredentialValue != "Bearer gho" {
+		t.Fatalf("declared write tool on readWrite link: %+v err = %v", resolution, err)
+	}
 }

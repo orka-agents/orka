@@ -22,6 +22,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/connectors"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 	workerexecutor "github.com/orka-agents/orka/internal/worker"
 )
@@ -45,9 +46,18 @@ func freezeFixtures(ready bool) (runtime.Object, runtime.Object, runtime.Object,
 		},
 	}
 	if ready {
-		connection.Status.Conditions = []metav1.Condition{{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonLinked, ObservedGeneration: 4}}
+		connection.Status.Conditions = []metav1.Condition{
+			{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonLinked, ObservedGeneration: 4},
+			{Type: corev1alpha1.ConnectionConditionScopesGranted, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonScopesGranted, ObservedGeneration: 4},
+		}
 	}
-	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "task", Namespace: "tenant", UID: "task-uid"}, Spec: corev1alpha1.TaskSpec{RequestedBy: requester}}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "task", Namespace: "tenant", UID: "task-uid",
+			Annotations: map[string]string{labels.AnnotationRequestedBySource: labels.RequestedBySourceAPI},
+		},
+		Spec: corev1alpha1.TaskSpec{RequestedBy: requester},
+	}
 	return tool, policy, connection, task
 }
 
@@ -165,4 +175,46 @@ func TestBindFrozenConnections(t *testing.T) {
 		t.Fatal("nil task must fail")
 	}
 	_ = types.UID("")
+}
+
+// TestFreezeRequiresVerifiedRequesterProvenance covers a compromised trusted
+// worker creating a Task that copies another person's requester identity:
+// without the API stamp or a matching verified parent chain, nothing freezes.
+func TestFreezeRequiresVerifiedRequesterProvenance(t *testing.T) {
+	scheme := connectorTestScheme(t)
+	tool, policy, connection, stamped := freezeFixtures(true)
+	forged := stamped.DeepCopy()
+	forged.Name, forged.UID, forged.Annotations = "forged", "forged-uid", nil
+	reader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(tool, policy, connection, stamped, forged).Build()
+	if frozen, err := freezeRequesterConnections(context.Background(), reader, forged, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
+		t.Fatalf("forged parentless task: frozen = %+v err = %v", frozen, err)
+	}
+	if frozen, err := freezeRequesterConnections(context.Background(), reader, stamped, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 1 {
+		t.Fatalf("api-stamped task: frozen = %+v err = %v", frozen, err)
+	}
+
+	// A child that inherits the requester through its verified coordination
+	// parent is trusted; one that names a different person is not.
+	controller := true
+	child := forged.DeepCopy()
+	child.Name, child.UID = "child", "child-uid"
+	child.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: stamped.Name, UID: stamped.UID, Controller: &controller,
+	}}
+	impostor := child.DeepCopy()
+	impostor.Name, impostor.UID = "impostor", "impostor-uid"
+	impostor.Spec.RequestedBy = &corev1alpha1.RequestedBy{Issuer: stamped.Spec.RequestedBy.Issuer, Subject: "victim"}
+	orphan := child.DeepCopy()
+	orphan.Name, orphan.UID = "orphan", "orphan-uid"
+	orphan.OwnerReferences[0].UID = "stale-parent-uid"
+	reader = ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(tool, policy, connection, stamped, child, impostor, orphan).Build()
+	if frozen, err := freezeRequesterConnections(context.Background(), reader, child, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 1 {
+		t.Fatalf("inheriting child: frozen = %+v err = %v", frozen, err)
+	}
+	if frozen, err := freezeRequesterConnections(context.Background(), reader, impostor, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
+		t.Fatalf("impostor child: frozen = %+v err = %v", frozen, err)
+	}
+	if frozen, err := freezeRequesterConnections(context.Background(), reader, orphan, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
+		t.Fatalf("child with a replaced parent: frozen = %+v err = %v", frozen, err)
+	}
 }

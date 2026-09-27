@@ -132,6 +132,14 @@ func (r *TaskReconciler) resolveHarnessV1ExecutionCandidate(
 	if err != nil {
 		return nil, err
 	}
+	// Connector-backed tools freeze and bind a person's Connection through
+	// the v2 execution snapshot; the v1 path has no such binding, so they
+	// must never be exposed there.
+	if connectorTools, err := connectorToolsFor(ctx, reader, task.Namespace, effectiveACPAllowedTools(task, agent)); err != nil {
+		return nil, err
+	} else if len(connectorTools) > 0 {
+		return nil, permanentHarnessV1Candidate(errors.New("connector-backed tools require harness v2 execution"))
+	}
 	if task.Spec.Transaction != nil && toolGovernance.mode != harness.ToolExecutionModeBrokered {
 		return nil, permanentHarnessV1Candidate(
 			errors.New("harness v1 transaction authority requires brokered tool execution"),

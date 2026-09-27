@@ -36,6 +36,7 @@ func connectorSchemaStatements() []string {
 			nonce           BLOB NOT NULL,
 			ciphertext      BLOB NOT NULL,
 			expires_at      TIMESTAMP,
+			version         INTEGER NOT NULL DEFAULT 1,
 			created_at      TIMESTAMP NOT NULL,
 			updated_at      TIMESTAMP NOT NULL
 		)`,
@@ -321,6 +322,7 @@ func (s *Store) putConnectorCredentialTx(ctx context.Context, tx *sql.Tx, ref st
 			nonce = excluded.nonce,
 			ciphertext = excluded.ciphertext,
 			expires_at = excluded.expires_at,
+			version = connector_credentials.version + 1,
 			updated_at = excluded.updated_at`,
 		ref.ConnectionUID, ref.Namespace, ref.Name, ref.SubjectDigest, ref.Provider,
 		row.dekNonce, row.dekCiphertext, row.nonce, row.ciphertext, row.expiresAt, now, now)
@@ -434,10 +436,11 @@ func (s *Store) GetConnectorCredential(ctx context.Context, ref store.ConnectorC
 	var (
 		dekNonce, dekCiphertext, nonce, ciphertext []byte
 		updatedAt                                  time.Time
+		version                                    int64
 	)
-	err := s.db.QueryRowContext(ctx, `SELECT dek_nonce, dek_ciphertext, nonce, ciphertext, updated_at
+	err := s.db.QueryRowContext(ctx, `SELECT dek_nonce, dek_ciphertext, nonce, ciphertext, updated_at, version
 		FROM connector_credentials WHERE connection_uid = ?`, ref.ConnectionUID).
-		Scan(&dekNonce, &dekCiphertext, &nonce, &ciphertext, &updatedAt)
+		Scan(&dekNonce, &dekCiphertext, &nonce, &ciphertext, &updatedAt, &version)
 	if errors.Is(err, sql.ErrNoRows) {
 		return store.ConnectorCredential{}, store.ErrNotFound
 	}
@@ -449,6 +452,7 @@ func (s *Store) GetConnectorCredential(ctx context.Context, ref store.ConnectorC
 		return store.ConnectorCredential{}, err
 	}
 	credential.UpdatedAt = updatedAt.UTC()
+	credential.Version = version
 	return credential, nil
 }
 
@@ -513,6 +517,64 @@ func (s *Store) TombstoneConnectorCustody(ctx context.Context, connectionUID str
 		return fmt.Errorf("tombstone connector custody: %w", err)
 	}
 	return nil
+}
+
+// ReplaceConnectorCredential implements store.ConnectorCredentialStore.
+func (s *Store) ReplaceConnectorCredential(ctx context.Context, ref store.ConnectorCredentialRef, credential store.ConnectorCredential, expectedVersion int64) error {
+	if s.snapshotCipher == nil {
+		return errConnectorCipherRequired
+	}
+	if err := ref.Validate(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(credential.AccessToken) == "" {
+		return errors.New("connector credential access token is required")
+	}
+	row, err := s.sealConnectorCredentialRow(ref, credential)
+	if err != nil {
+		return err
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE connector_credentials SET
+			dek_nonce = ?, dek_ciphertext = ?, nonce = ?, ciphertext = ?, expires_at = ?,
+			version = version + 1, updated_at = ?
+		WHERE connection_uid = ? AND version = ?`,
+		row.dekNonce, row.dekCiphertext, row.nonce, row.ciphertext, row.expiresAt, time.Now().UTC(), ref.ConnectionUID, expectedVersion)
+	if err != nil {
+		return fmt.Errorf("replace connector credential: %w", err)
+	}
+	return s.connectorRowFenced(ctx, result, ref.ConnectionUID)
+}
+
+// ShredConnectorCredential implements store.ConnectorCredentialStore.
+func (s *Store) ShredConnectorCredential(ctx context.Context, connectionUID string, expectedVersion int64) error {
+	if strings.TrimSpace(connectionUID) == "" {
+		return errors.New("connector credential connection UID is required")
+	}
+	result, err := s.db.ExecContext(ctx, `DELETE FROM connector_credentials WHERE connection_uid = ? AND version = ?`, connectionUID, expectedVersion)
+	if err != nil {
+		return fmt.Errorf("shred connector credential: %w", err)
+	}
+	return s.connectorRowFenced(ctx, result, connectionUID)
+}
+
+// connectorRowFenced turns a zero-row fenced write into ErrConflict when the
+// row still exists at another version, or ErrNotFound when it is gone.
+func (s *Store) connectorRowFenced(ctx context.Context, result sql.Result, connectionUID string) error {
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("inspect connector credential write: %w", err)
+	}
+	if affected > 0 {
+		return nil
+	}
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM connector_credentials WHERE connection_uid = ?`, connectionUID).Scan(&count); err != nil {
+		return fmt.Errorf("inspect connector credential row: %w", err)
+	}
+	if count == 0 {
+		return store.ErrNotFound
+	}
+	return store.ErrConflict
 }
 
 // DeleteConnectorCredential implements store.ConnectorCredentialStore.

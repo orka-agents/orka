@@ -14,13 +14,13 @@ import (
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/connectors"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
 	workerexecutor "github.com/orka-agents/orka/internal/worker"
@@ -42,6 +42,16 @@ func freezeRequesterConnections(
 		return nil, nil
 	}
 	requester := task.Spec.RequestedBy
+	if requester == nil || strings.TrimSpace(requester.Issuer) == "" || strings.TrimSpace(requester.Subject) == "" {
+		return nil, nil
+	}
+	verified, err := requesterProvenanceVerified(ctx, reader, task)
+	if err != nil {
+		return nil, err
+	}
+	if !verified {
+		return nil, nil
+	}
 	var frozen []agentExecutionSnapshotConnection
 	seenPolicies := map[string]struct{}{}
 	for _, descriptor := range mcpConfiguration.ToolPolicy.Tools {
@@ -73,9 +83,6 @@ func freezeRequesterConnections(
 		if policy.Spec.Connection == nil {
 			continue
 		}
-		if requester == nil || strings.TrimSpace(requester.Issuer) == "" || strings.TrimSpace(requester.Subject) == "" {
-			continue
-		}
 		provider := policy.Spec.Connection.ProviderRef.Name
 		connection := &corev1alpha1.Connection{}
 		name := connectors.ConnectionName(provider, requester.Issuer, requester.Subject)
@@ -100,8 +107,47 @@ func freezeRequesterConnections(
 	return frozen, nil
 }
 
+// maxRequesterProvenanceDepth bounds the coordination ancestry walk.
+const maxRequesterProvenanceDepth = 16
+
+// requesterProvenanceVerified reports whether task.spec.requestedBy can be
+// trusted for connector use. Trusted workers may set requestedBy on the
+// Tasks they create, so the field alone proves nothing. It is trusted when
+// the API server stamped the controller-only source annotation, or when the
+// Task descends, through controller-owned coordination parents that admission
+// verified, from such a Task with the same requester at every step.
+func requesterProvenanceVerified(ctx context.Context, reader client.Reader, task *corev1alpha1.Task) (bool, error) {
+	current := task
+	for depth := 0; depth <= maxRequesterProvenanceDepth; depth++ {
+		if current == nil || current.Spec.RequestedBy == nil {
+			return false, nil
+		}
+		if current.Annotations[labels.AnnotationRequestedBySource] == labels.RequestedBySourceAPI {
+			return true, nil
+		}
+		owner := metav1.GetControllerOf(current)
+		if owner == nil || owner.APIVersion != corev1alpha1.GroupVersion.String() || owner.Kind != taskResourceKind {
+			return false, nil
+		}
+		parent := &corev1alpha1.Task{}
+		if err := reader.Get(ctx, client.ObjectKey{Namespace: current.Namespace, Name: owner.Name}, parent); err != nil {
+			if apierrors.IsNotFound(err) {
+				return false, nil
+			}
+			return false, fmt.Errorf("load coordination parent %q: %w", owner.Name, err)
+		}
+		if parent.UID != owner.UID || parent.Spec.RequestedBy == nil ||
+			parent.Spec.RequestedBy.Issuer != current.Spec.RequestedBy.Issuer ||
+			parent.Spec.RequestedBy.Subject != current.Spec.RequestedBy.Subject {
+			return false, nil
+		}
+		current = parent
+	}
+	return false, nil
+}
+
 // connectionReadyFor reports whether connection is the requester's live,
-// Ready link to provider for its current generation.
+// linked Connection to provider for its current generation.
 func connectionReadyFor(connection *corev1alpha1.Connection, requester *corev1alpha1.RequestedBy, provider string) bool {
 	if connection == nil || requester == nil || !connection.DeletionTimestamp.IsZero() {
 		return false
@@ -110,8 +156,7 @@ func connectionReadyFor(connection *corev1alpha1.Connection, requester *corev1al
 		connection.Spec.ProviderRef.Name != provider {
 		return false
 	}
-	ready := meta.FindStatusCondition(connection.Status.Conditions, corev1alpha1.ConnectionConditionReady)
-	return ready != nil && ready.Status == metav1.ConditionTrue && ready.ObservedGeneration == connection.Generation
+	return connectors.ConnectionLinked(connection)
 }
 
 // bindFrozenConnections loads the Task's execution snapshot and hands the
@@ -160,4 +205,62 @@ func frozenConnectionsFromSnapshot(body agentExecutionSnapshotBody) map[string]o
 		frozen[connection.PolicyName] = outboundaccess.FrozenConnection{UID: connection.UID, Generation: connection.Generation}
 	}
 	return frozen
+}
+
+// connectorToolInfo describes one Tool whose OutboundAccessPolicy is in
+// connection mode.
+type connectorToolInfo struct {
+	PolicyName string
+	Provider   string
+	Class      corev1alpha1.AgentRuntimeBrokeredToolClass
+}
+
+// connectorToolsFor returns, for every named Tool backed by a connection-mode
+// policy, its policy, provider, and class. Unknown tools and tools without
+// such a policy are skipped; read failures are returned so callers retry.
+func connectorToolsFor(ctx context.Context, reader client.Reader, namespace string, toolNames []string) (map[string]connectorToolInfo, error) {
+	if reader == nil {
+		return nil, nil
+	}
+	result := map[string]connectorToolInfo{}
+	policies := map[string]*corev1alpha1.OutboundAccessPolicy{}
+	seen := map[string]struct{}{}
+	for _, name := range toolNames {
+		if _, done := seen[name]; done {
+			continue
+		}
+		seen[name] = struct{}{}
+		tool := &corev1alpha1.Tool{}
+		if err := reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, tool); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return nil, fmt.Errorf("load tool %q: %w", name, err)
+		}
+		if tool.Spec.HTTP == nil || tool.Spec.HTTP.OutboundAccessPolicyRef == nil {
+			continue
+		}
+		policyName := tool.Spec.HTTP.OutboundAccessPolicyRef.Name
+		policy, cached := policies[policyName]
+		if !cached {
+			policy = &corev1alpha1.OutboundAccessPolicy{}
+			if err := reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: policyName}, policy); err != nil {
+				if apierrors.IsNotFound(err) {
+					policies[policyName] = nil
+					continue
+				}
+				return nil, fmt.Errorf("load outbound access policy %q: %w", policyName, err)
+			}
+			policies[policyName] = policy
+		}
+		if policy == nil || policy.Spec.Connection == nil {
+			continue
+		}
+		result[name] = connectorToolInfo{
+			PolicyName: policyName,
+			Provider:   policy.Spec.Connection.ProviderRef.Name,
+			Class:      tool.Spec.BrokeredToolClass,
+		}
+	}
+	return result, nil
 }

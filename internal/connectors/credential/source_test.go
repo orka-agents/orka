@@ -39,19 +39,23 @@ const (
 )
 
 type fakeRefresher struct {
-	mu       sync.Mutex
-	calls    atomic.Int32
-	response connectors.TokenResponse
-	err      error
-	delay    time.Duration
-	lastCfg  connectors.OAuthProviderConfig
-	lastTok  string
+	mu        sync.Mutex
+	calls     atomic.Int32
+	response  connectors.TokenResponse
+	err       error
+	delay     time.Duration
+	lastCfg   connectors.OAuthProviderConfig
+	lastTok   string
+	onRefresh func()
 }
 
 func (f *fakeRefresher) Refresh(_ context.Context, cfg connectors.OAuthProviderConfig, refreshToken string) (connectors.TokenResponse, error) {
 	f.calls.Add(1)
 	if f.delay > 0 {
 		time.Sleep(f.delay)
+	}
+	if f.onRefresh != nil {
+		f.onRefresh()
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -96,6 +100,7 @@ func newHarness(t *testing.T) *harness {
 		},
 		Status: corev1alpha1.ConnectionStatus{State: corev1alpha1.ConnectionStateReady, Conditions: []metav1.Condition{
 			{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonLinked, ObservedGeneration: 2},
+			{Type: corev1alpha1.ConnectionConditionScopesGranted, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonScopesGranted, ObservedGeneration: 2},
 		}},
 	}
 	c := ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(provider, secret, connection).WithStatusSubresource(&corev1alpha1.Connection{}).Build()
@@ -216,6 +221,13 @@ func TestResolveRevokedRefreshShredsCustody(t *testing.T) {
 	if _, err := h.store.GetConnectorCredential(context.Background(), ref); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("custody after revocation err = %v, want ErrNotFound", err)
 	}
+	// The shred leaves no tombstone: the person can consent again.
+	if err := h.store.PutConnectorCredential(context.Background(), ref, store.ConnectorCredential{AccessToken: "gho_reconsented"}); err != nil {
+		t.Fatalf("re-consent after revocation must be possible: %v", err)
+	}
+	if err := h.store.DeleteConnectorCredential(context.Background(), ref.ConnectionUID); err != nil {
+		t.Fatal(err)
+	}
 	updated := h.reload()
 	ready := meta.FindStatusCondition(updated.Status.Conditions, corev1alpha1.ConnectionConditionReady)
 	if updated.Status.State != corev1alpha1.ConnectionStateRevoked || ready == nil || ready.Status != metav1.ConditionTrue && ready.Reason != corev1alpha1.ConnectionReasonRevoked {
@@ -283,16 +295,14 @@ func TestResolveFailsClosedOnIdentityAndBindingMismatch(t *testing.T) {
 			t.Fatalf("%s must fail closed", name)
 		}
 	}
-	// A Connection that is Ready for an older generation is not usable.
+	// A Connection whose scopes no longer cover its mode is not usable.
 	stale := h.reload()
-	stale.Generation = 3
-	if err := h.client.Update(context.Background(), stale); err != nil {
+	meta.SetStatusCondition(&stale.Status.Conditions, metav1.Condition{Type: corev1alpha1.ConnectionConditionScopesGranted, Status: metav1.ConditionFalse, Reason: corev1alpha1.ConnectionReasonConsentRequired})
+	if err := h.client.Status().Update(context.Background(), stale); err != nil {
 		t.Fatal(err)
 	}
-	req := h.request()
-	req.Frozen.Generation = 3
-	if _, err := h.source.ResolveConnectionCredential(context.Background(), req); err == nil || !strings.Contains(err.Error(), "not ready") {
-		t.Fatalf("stale readiness err = %v", err)
+	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil || !strings.Contains(err.Error(), "not ready") {
+		t.Fatalf("scopes not granted err = %v", err)
 	}
 	if _, err := (&Source{}).ResolveConnectionCredential(context.Background(), h.request()); err == nil {
 		t.Fatal("unconfigured source must fail")
@@ -322,5 +332,42 @@ func TestResolveRefreshIsSingleFlight(t *testing.T) {
 	}
 	if calls := h.refresher.calls.Load(); calls != 1 {
 		t.Fatalf("refresh calls = %d, want 1", calls)
+	}
+}
+
+// TestRefreshLosesToConcurrentReconsent models a tool call refreshing while
+// the owner completes a new consent: the refresh result must not overwrite
+// the newer material, and an invalid_grant for the old token must not shred it.
+func TestRefreshLosesToConcurrentReconsent(t *testing.T) {
+	h := newHarness(t)
+	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", ExpiresAt: h.now.Add(-time.Minute)})
+	ref, _ := connectors.CredentialRef(h.connection)
+	reconsent := func() {
+		if err := h.store.PutConnectorCredential(context.Background(), ref, store.ConnectorCredential{AccessToken: "gho_reconsented", RefreshToken: "ghr_reconsented", ExpiresAt: h.now.Add(2 * time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.refresher.onRefresh = reconsent
+	got, err := h.source.ResolveConnectionCredential(context.Background(), h.request())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AccessToken != "gho_reconsented" {
+		t.Fatalf("refresh must yield to the newer consent, got %q", got.AccessToken)
+	}
+	stored, _ := h.store.GetConnectorCredential(context.Background(), ref)
+	if stored.AccessToken != "gho_reconsented" || stored.RefreshToken != "ghr_reconsented" {
+		t.Fatalf("custody after lost race = %+v", stored)
+	}
+
+	// The same for a late invalid_grant: the newer consent survives.
+	h.put(store.ConnectorCredential{AccessToken: "gho_old2", RefreshToken: "ghr_old2", ExpiresAt: h.now.Add(-time.Minute)})
+	h.refresher.err = &connectors.OAuthError{StatusCode: 400, Code: "invalid_grant"}
+	got, err = h.source.ResolveConnectionCredential(context.Background(), h.request())
+	if err != nil || got.AccessToken != "gho_reconsented" {
+		t.Fatalf("late invalid_grant must not shred the newer consent: got %+v err = %v", got, err)
+	}
+	if h.reload().Status.State != corev1alpha1.ConnectionStateReady {
+		t.Fatal("the link must stay Ready when the revoked token was already superseded")
 	}
 }

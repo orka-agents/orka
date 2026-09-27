@@ -937,6 +937,9 @@ func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *core
 		CredentialSecret:            e.credentialSecret,
 		Requester:                   e.requester,
 		FrozenConnections:           e.frozenConnections,
+		Tool: outboundaccess.ToolBinding{
+			Name: tool.Name, URL: strings.TrimSpace(tool.Spec.HTTP.URL), Method: tool.Spec.HTTP.Method, Class: tool.Spec.BrokeredToolClass,
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("resolve outbound access policy: %w", err)

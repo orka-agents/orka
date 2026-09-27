@@ -70,6 +70,10 @@ const (
 	AnnotationOriginalPrompt                = "orka.ai/original-prompt"
 	AnnotationParentTaskName                = "orka.ai/parent-task-name"
 	AnnotationParentTaskUID                 = "orka.ai/parent-task-uid"
+	// AnnotationRequestedBySource records that spec.requestedBy was stamped
+	// by the API server from a verified identity. Only controller identities
+	// may set it; child Tasks inherit trust through their coordination parent.
+	AnnotationRequestedBySource             = "orka.ai/requested-by-source"
 	AnnotationDelegationEffectID            = "orka.ai/delegation-effect-id"
 	AnnotationForkSourceTask                = "orka.ai/fork-source-task"
 	AnnotationForkSourceSeq                 = "orka.ai/fork-source-seq"
@@ -223,3 +227,7 @@ func isValidLabelValue(value string) bool {
 func isAlphaNum(r rune) bool {
 	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
 }
+
+// RequestedBySourceAPI is the AnnotationRequestedBySource value for Tasks whose
+// requester was verified by the API server.
+const RequestedBySourceAPI = "api"

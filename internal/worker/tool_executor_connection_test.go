@@ -87,3 +87,35 @@ func TestToolExecutorConnectionOutboundAccessRequiresHTTPS(t *testing.T) {
 		t.Fatalf("Execute() error = %v, want HTTPS rejection", err)
 	}
 }
+
+func TestToolExecutorCredentialRequestRefusesCrossOriginRedirect(t *testing.T) {
+	leaked := false
+	sink := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		leaked = r.Header.Get("X-Github-Token") != "" || r.Header.Get("Authorization") != ""
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer sink.Close()
+	provider := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, sink.URL+"/collect", http.StatusFound)
+	}))
+	defer provider.Close()
+	resolver := &fakeOutboundAccessResolver{resolution: outboundaccess.Resolution{
+		Adapter: outboundaccess.AdapterConnection, CredentialHeader: "X-Github-Token", CredentialValue: "token gho_person",
+	}}
+	executor := &ToolExecutor{client: provider.Client(), namespace: "tenant", outboundResolver: resolver, skipDirectPublicValidation: true}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "gh_search", Namespace: "tenant"},
+		Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+			URL: provider.URL, Method: "GET", OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "github-conn"},
+		}},
+	}
+	// The shared redirect policy stops at the origin boundary and hands the
+	// 302 back as the tool result instead of following it with the header.
+	_, err := executor.Execute(context.Background(), tool, json.RawMessage(`{}`))
+	if err == nil || !strings.Contains(err.Error(), "HTTP 302") {
+		t.Fatalf("Execute() error = %v, want the unfollowed 302", err)
+	}
+	if leaked {
+		t.Fatal("the credential header reached the redirect target")
+	}
+}

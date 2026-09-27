@@ -68,6 +68,19 @@ type ResolveRequest struct {
 	// resolution requires an entry and fails closed when the live Connection
 	// differs from it.
 	FrozenConnections map[string]FrozenConnection
+	// Tool identifies the executing Tool. Connection-mode resolution releases
+	// a credential only to a Tool the ConnectorProvider declares, with the
+	// same URL, method, and class, so a policy cannot be attached to an
+	// arbitrary endpoint to exfiltrate a person's token.
+	Tool ToolBinding
+}
+
+// ToolBinding is the executing Tool's identity for connector checks.
+type ToolBinding struct {
+	Name   string
+	URL    string
+	Method string
+	Class  corev1alpha1.AgentRuntimeBrokeredToolClass
 }
 
 // FrozenConnection is the dispatch-time identity of a person's Connection.
@@ -200,6 +213,40 @@ func (r *KubernetesResolver) Resolve(ctx context.Context, req ResolveRequest) (R
 	return r.resolveGateway(ctx, policy)
 }
 
+// declaredConnectorTool returns the provider's curated HTTP definition that
+// exactly matches the executing Tool, or an error. Built-in declarations are
+// never matched by custom Tools.
+func declaredConnectorTool(provider *corev1alpha1.ConnectorProvider, tool ToolBinding) (corev1alpha1.ConnectorTool, error) {
+	name := strings.TrimSpace(tool.Name)
+	if name == "" {
+		return corev1alpha1.ConnectorTool{}, errors.New("connection outbound access requires the executing tool identity")
+	}
+	for _, candidate := range provider.Spec.Tools {
+		if candidate.Name != name {
+			continue
+		}
+		if candidate.Source != corev1alpha1.ConnectorToolSourceHTTP || candidate.HTTP == nil {
+			return corev1alpha1.ConnectorTool{}, fmt.Errorf("connector tool %q is not a curated HTTP tool of provider %q", name, provider.Name)
+		}
+		method := strings.ToUpper(strings.TrimSpace(candidate.HTTP.Method))
+		if method == "" {
+			method = http.MethodPost
+		}
+		toolMethod := strings.ToUpper(strings.TrimSpace(tool.Method))
+		if toolMethod == "" {
+			toolMethod = http.MethodPost
+		}
+		if strings.TrimSpace(tool.URL) != candidate.HTTP.URL || toolMethod != method {
+			return corev1alpha1.ConnectorTool{}, fmt.Errorf("tool %q does not match the endpoint declared by provider %q", name, provider.Name)
+		}
+		if string(candidate.Class) != string(tool.Class) {
+			return corev1alpha1.ConnectorTool{}, fmt.Errorf("tool %q class does not match the class declared by provider %q", name, provider.Name)
+		}
+		return candidate, nil
+	}
+	return corev1alpha1.ConnectorTool{}, fmt.Errorf("tool %q is not declared by provider %q", name, provider.Name)
+}
+
 // resolveConnection injects the requester's linked-account credential. Every
 // precondition fails closed: no source in this process, no verified
 // requester, no frozen binding, or a source error all mean no credential.
@@ -215,6 +262,14 @@ func (r *KubernetesResolver) resolveConnection(ctx context.Context, policy *core
 	if !ok || strings.TrimSpace(frozen.UID) == "" {
 		return Resolution{}, fmt.Errorf("connection outbound access policy %q has no Connection frozen into the execution snapshot", policy.Name)
 	}
+	provider := &corev1alpha1.ConnectorProvider{}
+	if err := r.Reader.Get(ctx, client.ObjectKey{Namespace: policy.Namespace, Name: policy.Spec.Connection.ProviderRef.Name}, provider); err != nil {
+		return Resolution{}, fmt.Errorf("resolve connector provider: %w", err)
+	}
+	declared, err := declaredConnectorTool(provider, req.Tool)
+	if err != nil {
+		return Resolution{}, err
+	}
 	credential, err := r.Connections.ResolveConnectionCredential(ctx, ConnectionCredentialRequest{
 		Namespace: policy.Namespace,
 		Provider:  policy.Spec.Connection.ProviderRef.Name,
@@ -227,6 +282,9 @@ func (r *KubernetesResolver) resolveConnection(ctx context.Context, policy *core
 	}
 	if strings.TrimSpace(credential.AccessToken) == "" {
 		return Resolution{}, errors.New("connection credential source returned an empty credential")
+	}
+	if declared.Class == corev1alpha1.ConnectorToolClassWrite && credential.Mode != corev1alpha1.ConnectionModeReadWrite {
+		return Resolution{}, errors.New("connection is readOnly; write tools are not available")
 	}
 	header := defaultCredentialHeader
 	prefix := "Bearer "

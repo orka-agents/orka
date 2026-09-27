@@ -15,6 +15,7 @@ import (
 	"strconv"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/taskmeta"
 )
 
@@ -80,6 +81,12 @@ func stampTaskRequesterFromUserInfo(task *corev1alpha1.Task, ui *UserInfo) {
 		return
 	}
 
+	if task.Annotations == nil {
+		task.Annotations = map[string]string{}
+	}
+	// Only controller identities may write this annotation, so it proves the
+	// requester below came from a verified sign-in rather than a worker.
+	task.Annotations[labels.AnnotationRequestedBySource] = labels.RequestedBySourceAPI
 	task.Spec.RequestedBy = &corev1alpha1.RequestedBy{
 		Subject:  ui.Subject,
 		Issuer:   ui.Issuer,
