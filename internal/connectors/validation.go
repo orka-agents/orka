@@ -718,18 +718,19 @@ func ProviderRevocationDigest(provider *corev1alpha1.ConnectorProvider) string {
 }
 
 // providerIssuerParts names the OAuth client a token was issued by: what
-// the refresh and revocation endpoints authenticate. The authorize URL and
-// authorize-only parameters (prompt, audience hints) shape consent but not
-// the issued token's authority, so they belong to the consent fence
-// (providerConsentParts), not here: changing one must neither block a
-// refresh nor skip revocation at disconnect.
+// the refresh endpoint authenticates. The authorize URL and authorize-only
+// parameters (prompt, audience hints) shape consent but not the issued
+// token's authority, so they belong to the consent fence
+// (providerConsentParts); the revocation URL belongs to the revocation
+// identity (ProviderRevocationDigest). Changing either must neither block a
+// refresh nor force a new consent.
 func providerIssuerParts(provider *corev1alpha1.ConnectorProvider) []string {
 	oauth := provider.Spec.OAuth
 	return []string{
 		"uid", string(provider.UID), "clientID", oauth.ClientID,
 		"secretName", oauth.ClientSecretRef.Name, "secretKey", oauth.ClientSecretRef.Key,
 		"clientAuthentication", oauth.ClientAuthentication,
-		"tokenURL", oauth.TokenURL, "revocationURL", oauth.RevocationURL,
+		"tokenURL", oauth.TokenURL,
 	}
 }
 

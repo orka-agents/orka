@@ -966,6 +966,10 @@ func (h *Handlers) CompleteConnection(c fiber.Ctx) error {
 			h.discardCompletion(ctx, completion, nonce)
 			return fiber.NewError(fiber.StatusConflict, "connection was disconnected; create it again")
 		}
+		if errors.Is(err, store.ErrConnectorCompletionCommitted) {
+			// Another API replica committed it meanwhile; a retry resumes it.
+			return fiber.NewError(fiber.StatusConflict, "completion was already committed; retry to finish it")
+		}
 		if errors.Is(err, store.ErrNotFound) {
 			return fiber.NewError(fiber.StatusConflict, "completion token was already used or has expired")
 		}

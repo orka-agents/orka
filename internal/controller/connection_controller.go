@@ -200,13 +200,15 @@ func (r *ConnectionReconciler) applyCommittedCompletions(ctx context.Context, co
 		held, err := r.Credentials.GetConnectorCredential(ctx, ref)
 		if err == nil && held.GrantSequence == completion.Credential.GrantSequence && held.AccessToken == completion.Credential.AccessToken &&
 			held.RefreshToken == completion.Credential.RefreshToken && held.AuthorityDigest == completion.Credential.AuthorityDigest {
-			mode, _ := connectors.NormalizeConnectionMode(connection.Spec.Mode)
 			// The same fence the API applies to a retried completion: the
 			// material must have been issued by the provider's current OAuth
 			// client and consented under its current authority (client plus
 			// tool destinations). Otherwise the link stays Pending until the
-			// person consents again; the row is dropped either way.
-			if completion.Mode == mode && completion.Credential.AuthorityDigest == issuer && completion.ConsentAuthorityDigest == authority {
+			// person consents again; the row is dropped either way. A mode
+			// changed since the completion does not discard it: custody
+			// holds this material, and recording it against the current
+			// mode projects Pending on its own when the scopes fall short.
+			if completion.Credential.AuthorityDigest == issuer && completion.ConsentAuthorityDigest == authority {
 				connectors.ApplyLinkedStatus(connection, provider, held, now)
 				applied = append(applied, completion.Nonce)
 				continue
@@ -313,7 +315,6 @@ const connectionRevocationRetry = time.Minute
 var errRevocationUnavailable = errors.New("revocation material is unavailable")
 
 func (r *ConnectionReconciler) revokeBestEffort(ctx context.Context, connection *corev1alpha1.Connection) error {
-	logger := log.FromContext(ctx)
 	if r.Revoker == nil {
 		return nil
 	}
@@ -332,14 +333,15 @@ func (r *ConnectionReconciler) revokeBestEffort(ctx context.Context, connection 
 		// custody was shredded); the grants earlier commits replaced can
 		// still be live and are revoked below regardless.
 	default:
-		logger.Info("connector credential could not be opened for revocation; deleting custody anyway", "connection", connection.Name)
+		// A row that cannot be opened is not deleted on that account: the
+		// disconnect retries rather than discarding the only copy.
+		return fmt.Errorf("%w: current credential: %w", errRevocationUnavailable, err)
 	}
 	// Credentials that later commits replaced were committed by the same
 	// owner and are still live upstream; disconnect revokes them too.
 	retired, err := r.Credentials.ListRetiredConnectorCredentials(ctx, ref)
 	if err != nil {
-		logger.Info("retired connector credentials could not be opened for revocation", "connection", connection.Name)
-		return nil
+		return fmt.Errorf("%w: retired credentials: %w", errRevocationUnavailable, err)
 	}
 	for _, previous := range retired {
 		if err := r.revokeTokens(ctx, connection, previous); err != nil {
