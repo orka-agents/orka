@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package outboundaccess
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -31,6 +32,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/tokenexchange"
 	"github.com/orka-agents/orka/internal/transactiontoken"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 )
 
 const (
@@ -85,6 +87,10 @@ type ToolBinding struct {
 	// must match exactly, or a header the provider never declared could
 	// change what the credential authorizes.
 	Headers map[string]string
+	// Parameters is the Tool's JSON Schema; it must equal the provider's
+	// curated schema so no weaker Tool schema admits arguments the
+	// provider excluded.
+	Parameters *apiextensionsv1.JSON
 }
 
 // FrozenConnection is the dispatch-time identity of a person's Connection.
@@ -139,6 +145,10 @@ type Resolution struct {
 	// ConnectionUID identifies the person's Connection for connection-mode
 	// resolutions, for audit records. Never the token.
 	ConnectionUID string
+	// Parameters is the provider-declared JSON Schema for the tool's
+	// arguments; the executor validates the call against it before the
+	// credential leaves the process.
+	Parameters *apiextensionsv1.JSON
 }
 
 // Resolver resolves one same-namespace policy at execution time.
@@ -254,9 +264,34 @@ func DeclaredConnectorTool(provider *corev1alpha1.ConnectorProvider, tool ToolBi
 		if !sameStaticHeaders(candidate.HTTP.Headers, tool.Headers) {
 			return corev1alpha1.ConnectorTool{}, fmt.Errorf("tool %q headers do not match the headers declared by provider %q", name, provider.Name)
 		}
+		if !sameParameterSchema(candidate.Parameters, tool.Parameters) {
+			return corev1alpha1.ConnectorTool{}, fmt.Errorf("tool %q parameters do not match the schema declared by provider %q", name, provider.Name)
+		}
 		return candidate, nil
 	}
 	return corev1alpha1.ConnectorTool{}, fmt.Errorf("tool %q is not declared by provider %q", name, provider.Name)
+}
+
+// sameParameterSchema compares two JSON Schemas structurally; absent and
+// empty are the same.
+func sameParameterSchema(declared, actual *apiextensionsv1.JSON) bool {
+	canonical := func(schema *apiextensionsv1.JSON) (string, bool) {
+		if schema == nil || len(bytes.TrimSpace(schema.Raw)) == 0 {
+			return "", true
+		}
+		var value any
+		if err := json.Unmarshal(schema.Raw, &value); err != nil {
+			return "", false
+		}
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return "", false
+		}
+		return string(encoded), true
+	}
+	a, okA := canonical(declared)
+	b, okB := canonical(actual)
+	return okA && okB && a == b
 }
 
 // sameStaticHeaders compares two header sets by canonical name and exact
@@ -334,6 +369,7 @@ func (r *KubernetesResolver) resolveConnection(ctx context.Context, policy *core
 		CredentialValue:  prefix + credential.AccessToken,
 		SensitiveValues:  compactSensitiveValues([]string{credential.AccessToken}),
 		ConnectionUID:    credential.ConnectionUID,
+		Parameters:       declared.Parameters,
 	}, nil
 }
 

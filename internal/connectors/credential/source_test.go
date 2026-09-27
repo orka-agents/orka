@@ -727,3 +727,40 @@ func TestRefreshWithinSkewIsSealedButNotReleased(t *testing.T) {
 		t.Fatalf("custody after in-skew refresh = %+v err = %v, want the rotated pair sealed", held, err)
 	}
 }
+
+// TestRevocationVerdictYieldsToReconsentAfterShred covers the ABA case: the
+// revoked row was version 1, custody was shredded, and a new consent
+// committed a fresh row before the stale flight's shred and verdict landed.
+// Versions never repeat for a Connection, so the stale shred misses the
+// fresh row, its material is returned, and the fresh link stays Ready.
+func TestRevocationVerdictYieldsToReconsentAfterShred(t *testing.T) {
+	h := newHarness(t)
+	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", ExpiresAt: h.now.Add(-time.Minute)})
+	h.refresher.err = &connectors.OAuthError{StatusCode: 400, Code: "invalid_grant"}
+	live := h.reload()
+	ref, _ := connectors.CredentialRef(live)
+	h.refresher.onRefresh = func() {
+		// Between the shred and the verdict: the previous row is gone and a
+		// re-consent commits a new row at the same version number, then a
+		// status write bumps the resourceVersion so the verdict conflicts.
+		if err := h.store.ShredConnectorCredential(context.Background(), string(live.UID), 1); err != nil {
+			t.Fatal(err)
+		}
+		h.put(store.ConnectorCredential{AccessToken: "gho_new", RefreshToken: "ghr_new"})
+		fresh := h.reload()
+		linked := metav1.NewTime(h.now)
+		fresh.Status.LinkedAt = &linked
+		if err := h.client.Status().Update(context.Background(), fresh); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err != nil || got.AccessToken != "gho_new" {
+		t.Fatalf("resolve during re-consent = %+v err = %v, want the fresh material", got, err)
+	}
+	if held, err := h.store.GetConnectorCredential(context.Background(), ref); err != nil || held.Version != 2 || held.AccessToken != "gho_new" {
+		t.Fatalf("custody = %+v err = %v, want the re-consented row at a fresh version", held, err)
+	}
+	if fresh := h.reload(); fresh.Status.State != corev1alpha1.ConnectionStateReady {
+		t.Fatalf("a verdict judged against the shredded row must not overwrite the fresh link: %+v", fresh.Status)
+	}
+}

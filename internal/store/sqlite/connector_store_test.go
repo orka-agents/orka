@@ -691,3 +691,37 @@ func TestConnectorReplaceRetiresUnexpiredPreviousCredential(t *testing.T) {
 		t.Fatalf("custody = %+v err = %v", held, err)
 	}
 }
+
+func TestConnectorCredentialVersionsNeverRepeatAcrossShreds(t *testing.T) {
+	s := newConnectorTestStore(t)
+	ctx := context.Background()
+	completion := testConnectorCompletion()
+	ref := store.ConnectorCredentialRef{ConnectionUID: completion.ConnectionUID, Namespace: completion.Namespace, Name: completion.Name, SubjectDigest: completion.SubjectDigest, Provider: completion.Provider}
+	if err := s.PutConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho_a"}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := s.GetConnectorCredential(ctx, ref)
+	if err != nil || first.Version != 1 {
+		t.Fatalf("first = %+v err = %v", first, err)
+	}
+	if err := s.ShredConnectorCredential(ctx, ref.ConnectionUID, first.Version); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho_b"}); err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.GetConnectorCredential(ctx, ref)
+	if err != nil || second.Version != 2 {
+		t.Fatalf("after shred and re-consent = %+v err = %v, want version 2", second, err)
+	}
+	// A fence taken against the shredded row no longer matches the new one.
+	if err := s.ShredConnectorCredential(ctx, ref.ConnectionUID, first.Version); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("stale shred err = %v, want ErrConflict", err)
+	}
+	if err := s.ReplaceConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho_c"}, second.Version); err != nil {
+		t.Fatal(err)
+	}
+	if third, err := s.GetConnectorCredential(ctx, ref); err != nil || third.Version != 3 {
+		t.Fatalf("after replace = %+v err = %v, want version 3", third, err)
+	}
+}

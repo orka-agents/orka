@@ -34,6 +34,7 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/redact"
@@ -889,14 +890,14 @@ func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.To
 		trustedActorRoute: isMCP && routeHost != "",
 	}
 	if tool != nil && tool.Spec.HTTP != nil && tool.Spec.HTTP.OutboundAccessPolicyRef != nil {
-		if err := e.applyOutboundAccessPolicy(ctx, tool, &prepared); err != nil {
+		if err := e.applyOutboundAccessPolicy(ctx, tool, args, &prepared); err != nil {
 			return preparedToolRequest{}, err
 		}
 	}
 	return prepared, nil
 }
 
-func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *corev1alpha1.Tool, prepared *preparedToolRequest) error {
+func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage, prepared *preparedToolRequest) error {
 	if e.outboundResolver == nil {
 		return errors.New("outbound access policy is configured but the resolver is unavailable")
 	}
@@ -939,7 +940,7 @@ func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *core
 		FrozenConnections:           e.frozenConnections,
 		Tool: outboundaccess.ToolBinding{
 			Name: tool.Name, URL: strings.TrimSpace(tool.Spec.HTTP.URL), Method: prepared.request.Method, Class: tool.Spec.BrokeredToolClass,
-			Headers: tool.Spec.HTTP.Headers,
+			Headers: tool.Spec.HTTP.Headers, Parameters: tool.Spec.Parameters,
 		},
 	})
 	if err != nil {
@@ -964,6 +965,12 @@ func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *core
 			declared, err := neturl.Parse(strings.TrimSpace(tool.Spec.HTTP.URL))
 			if err != nil || !sameHTTPOrigin(declared, prepared.request.URL) {
 				return errors.New("connection credential request must target the declared tool origin")
+			}
+			// The caller (a worker or an ACP runtime) is not trusted to have
+			// honored the provider's curated schema; the person's credential
+			// is attached only to arguments that schema admits.
+			if err := connectors.ValidateToolArguments(resolution.Parameters, args); err != nil {
+				return fmt.Errorf("connection credential request arguments rejected: %w", err)
 			}
 		}
 		if prepared.httpConfig.AuthSecretRef != nil {

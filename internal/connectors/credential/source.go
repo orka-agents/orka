@@ -302,7 +302,10 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 	case err != nil:
 		return store.ConnectorCredential{}, fmt.Errorf("store refreshed connection credential: %w", err)
 	}
-	refreshed.Version = current.Version + 1
+	// The version the replacement received comes from the store's sequence.
+	if stored, err := s.Credentials.GetConnectorCredential(ctx, ref); err == nil {
+		refreshed.Version = stored.Version
+	}
 	if !connectors.ScopesCover(refreshed.Scopes, connectors.ScopesForMode(provider, mode)) {
 		s.recordNarrowedScopes(ctx, connection, refreshed.Scopes, mode)
 		return store.ConnectorCredential{}, errors.New("refreshed connection credential no longer covers the connection mode; the person must consent again")
@@ -478,8 +481,10 @@ func (s *Source) markNotReady(ctx context.Context, connection *corev1alpha1.Conn
 
 // verdictStillCurrent re-reads the Connection for another markNotReady
 // attempt and reports whether the judged material is still what custody
-// holds: nothing (shredded and not re-committed) or the same version. A
-// newer credential means a consent or refresh won, and its status stands.
+// holds: nothing (shredded and not re-committed) or the same version.
+// Versions never repeat for a Connection, even across a shred and
+// re-consent, so any other version means a consent or refresh won and its
+// status stands.
 func (s *Source) verdictStillCurrent(ctx context.Context, connection *corev1alpha1.Connection, ref store.ConnectorCredentialRef, judgedVersion int64) bool {
 	fresh := &corev1alpha1.Connection{}
 	if err := s.reader().Get(ctx, client.ObjectKeyFromObject(connection), fresh); err != nil {

@@ -17,6 +17,7 @@ import (
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 )
 
 type fakeConnectionSource struct {
@@ -314,6 +315,33 @@ func TestDeclaredConnectorToolRequiresDeclaredHeaders(t *testing.T) {
 		binding.Headers = headers
 		if _, err := DeclaredConnectorTool(provider, binding); err == nil || !strings.Contains(err.Error(), "headers") {
 			t.Fatalf("%s headers err = %v, want refusal", name, err)
+		}
+	}
+}
+
+func TestDeclaredConnectorToolRequiresDeclaredSchema(t *testing.T) {
+	schema := `{"type":"object","required":["q"],"properties":{"q":{"type":"string"}},"additionalProperties":false}`
+	provider := &corev1alpha1.ConnectorProvider{Spec: corev1alpha1.ConnectorProviderSpec{Tools: []corev1alpha1.ConnectorTool{{
+		Name: "gh_search", Source: corev1alpha1.ConnectorToolSourceHTTP, Class: corev1alpha1.ConnectorToolClassRead,
+		Parameters: &apiextensionsv1.JSON{Raw: []byte(schema)},
+		HTTP:       &corev1alpha1.ConnectorHTTPTool{URL: "https://api.github.com/search/issues", Method: "GET"},
+	}}}}
+	binding := ToolBinding{Name: "gh_search", URL: "https://api.github.com/search/issues", Method: "GET", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead}
+	// The same schema, however formatted, is accepted.
+	binding.Parameters = &apiextensionsv1.JSON{Raw: []byte(`{
+		"additionalProperties": false, "properties": {"q": {"type": "string"}}, "required": ["q"], "type": "object"}`)}
+	if _, err := DeclaredConnectorTool(provider, binding); err != nil {
+		t.Fatalf("equivalent schema must be accepted: %v", err)
+	}
+	// A weaker or absent Tool schema cannot replace the curated one.
+	for name, parameters := range map[string]*apiextensionsv1.JSON{
+		"absent": nil,
+		"weaker": {Raw: []byte(`{"type":"object"}`)},
+		"broken": {Raw: []byte(`{`)},
+	} {
+		binding.Parameters = parameters
+		if _, err := DeclaredConnectorTool(provider, binding); err == nil || !strings.Contains(err.Error(), "parameters") {
+			t.Fatalf("%s schema err = %v, want refusal", name, err)
 		}
 	}
 }

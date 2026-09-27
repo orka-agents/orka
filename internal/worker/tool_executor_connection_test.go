@@ -18,6 +18,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/outboundaccess"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 )
 
 func TestToolExecutorConnectionOutboundAccessInjectsCredential(t *testing.T) {
@@ -117,5 +118,44 @@ func TestToolExecutorCredentialRequestRefusesCrossOriginRedirect(t *testing.T) {
 	}
 	if leaked {
 		t.Fatal("the credential header reached the redirect target")
+	}
+}
+
+func TestToolExecutorConnectionOutboundAccessValidatesArgumentsBeforeInjecting(t *testing.T) {
+	var requests int
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	resolver := &fakeOutboundAccessResolver{resolution: outboundaccess.Resolution{
+		Adapter: outboundaccess.AdapterConnection, CredentialHeader: "Authorization", CredentialValue: "Bearer gho_person_token",
+		SensitiveValues: []string{"gho_person_token"}, ConnectionUID: "conn-uid",
+		Parameters: &apiextensionsv1.JSON{Raw: []byte(`{"type":"object","required":["q"],"properties":{"q":{"type":"string"},"limit":{"type":"integer","maximum":10}},"additionalProperties":false}`)},
+	}}
+	executor := &ToolExecutor{client: server.Client(), namespace: "tenant", outboundResolver: resolver, skipDirectPublicValidation: true}
+	executor.SetRequester(&corev1alpha1.RequestedBy{Issuer: "https://issuer.example.test", Subject: "alice"})
+	executor.SetFrozenConnections(map[string]outboundaccess.FrozenConnection{"github-conn": {UID: "conn-uid", Generation: 3}})
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "gh_search", Namespace: "tenant"},
+		Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+			URL: server.URL, OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "github-conn"},
+		}},
+	}
+	// Arguments outside the provider's curated schema never leave with the
+	// person's credential, whatever the caller supplied.
+	for _, args := range []string{`{"limit":3}`, `{"q":"x","limit":11}`, `{"q":"x","extra":true}`} {
+		if _, err := executor.Execute(context.Background(), tool, json.RawMessage(args)); err == nil || !strings.Contains(err.Error(), "arguments rejected") || ToolRequestWasAttempted(err) {
+			t.Fatalf("%s: err = %v, want refusal before any request", args, err)
+		}
+	}
+	if requests != 0 {
+		t.Fatalf("provider received %d requests for rejected arguments", requests)
+	}
+	if _, err := executor.Execute(context.Background(), tool, json.RawMessage(`{"q":"x","limit":3}`)); err != nil {
+		t.Fatalf("admitted arguments: %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("provider received %d requests, want one", requests)
 	}
 }

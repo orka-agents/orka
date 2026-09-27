@@ -86,6 +86,10 @@ func connectorSchemaStatements() []string {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_connector_completions_connection
 			ON connector_completions(connection_uid)`,
+		`CREATE TABLE IF NOT EXISTS connector_credential_versions (
+			connection_uid  TEXT PRIMARY KEY,
+			last_version    INTEGER NOT NULL
+		)`,
 		`CREATE TABLE IF NOT EXISTS connector_credential_tombstones (
 			connection_uid  TEXT PRIMARY KEY,
 			deleted_at      TIMESTAMP NOT NULL
@@ -310,9 +314,16 @@ func (s *Store) putConnectorCredentialTx(ctx context.Context, tx *sql.Tx, ref st
 	if tombstoned > 0 {
 		return store.ErrConnectorCustodyTombstoned
 	}
+	// Versions are drawn from a per-Connection sequence that survives a
+	// shred, so a row re-created after one never reuses a version number
+	// that a stale fenced write or verdict could still be holding.
+	next, err := nextConnectorCredentialVersion(ctx, tx, ref.ConnectionUID)
+	if err != nil {
+		return err
+	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO connector_credentials
-		(connection_uid, namespace, name, subject_digest, provider, dek_nonce, dek_ciphertext, nonce, ciphertext, expires_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		(connection_uid, namespace, name, subject_digest, provider, dek_nonce, dek_ciphertext, nonce, ciphertext, expires_at, version, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(connection_uid) DO UPDATE SET
 			namespace = excluded.namespace,
 			name = excluded.name,
@@ -323,14 +334,27 @@ func (s *Store) putConnectorCredentialTx(ctx context.Context, tx *sql.Tx, ref st
 			nonce = excluded.nonce,
 			ciphertext = excluded.ciphertext,
 			expires_at = excluded.expires_at,
-			version = connector_credentials.version + 1,
+			version = excluded.version,
 			updated_at = excluded.updated_at`,
 		ref.ConnectionUID, ref.Namespace, ref.Name, ref.SubjectDigest, ref.Provider,
-		row.dekNonce, row.dekCiphertext, row.nonce, row.ciphertext, row.expiresAt, now, now)
+		row.dekNonce, row.dekCiphertext, row.nonce, row.ciphertext, row.expiresAt, next, now, now)
 	if err != nil {
 		return fmt.Errorf("persist connector credential: %w", err)
 	}
 	return nil
+}
+
+// nextConnectorCredentialVersion advances and returns the Connection's
+// version sequence inside tx.
+func nextConnectorCredentialVersion(ctx context.Context, tx *sql.Tx, connectionUID string) (int64, error) {
+	var next int64
+	err := tx.QueryRowContext(ctx, `INSERT INTO connector_credential_versions (connection_uid, last_version) VALUES (?, 1)
+		ON CONFLICT(connection_uid) DO UPDATE SET last_version = connector_credential_versions.last_version + 1
+		RETURNING last_version`, connectionUID).Scan(&next)
+	if err != nil {
+		return 0, fmt.Errorf("advance connector credential version: %w", err)
+	}
+	return next, nil
 }
 
 // CommitConnectorCompletion implements store.ConnectorConsentStore.
@@ -537,11 +561,15 @@ func (s *Store) ReplaceConnectorCredential(ctx context.Context, ref store.Connec
 	if err := s.retireConnectorCredentialTx(ctx, tx, ref, credential, now, retireAccessToken); err != nil {
 		return err
 	}
+	next, err := nextConnectorCredentialVersion(ctx, tx, ref.ConnectionUID)
+	if err != nil {
+		return err
+	}
 	result, err := tx.ExecContext(ctx, `UPDATE connector_credentials SET
 			dek_nonce = ?, dek_ciphertext = ?, nonce = ?, ciphertext = ?, expires_at = ?,
-			version = version + 1, updated_at = ?
+			version = ?, updated_at = ?
 		WHERE connection_uid = ? AND version = ?`,
-		row.dekNonce, row.dekCiphertext, row.nonce, row.ciphertext, row.expiresAt, now, ref.ConnectionUID, expectedVersion)
+		row.dekNonce, row.dekCiphertext, row.nonce, row.ciphertext, row.expiresAt, next, now, ref.ConnectionUID, expectedVersion)
 	if err != nil {
 		return fmt.Errorf("replace connector credential: %w", err)
 	}
