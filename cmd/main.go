@@ -60,6 +60,7 @@ import (
 	"github.com/orka-agents/orka/internal/api"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	"github.com/orka-agents/orka/internal/connectors"
+	"github.com/orka-agents/orka/internal/connectors/credential"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/controller"
 	"github.com/orka-agents/orka/internal/envutil"
@@ -1420,6 +1421,16 @@ func main() {
 		if err := api.ValidateConnectorConfig(connectorConfig); err != nil {
 			setupLog.Error(err, "invalid connector configuration; set --connector-callback-base-url or disable --connectors-enabled")
 			os.Exit(1)
+		}
+	}
+	if connectorsEnabled {
+		// Connection-mode outbound access resolves a person's credential only
+		// here, in the controller. Worker Pods keep a nil source and fail closed.
+		outboundAccessResolver.Connections = &credential.Source{
+			Client:      mgr.GetClient(),
+			APIReader:   mgr.GetAPIReader(),
+			Credentials: sqliteStore,
+			OAuth:       connectorOAuthClient,
 		}
 	}
 	setupLog.Info("agent execution binding stage enabled: executable agent Tasks freeze an immutable encrypted snapshot and write-once binding before dispatch")

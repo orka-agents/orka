@@ -95,6 +95,21 @@ type agentExecutionSnapshotBody struct {
 	// ExecutionWorkspace freezes the resolved execution-workspace binding for
 	// workspace-provider-backed RuntimePools. It is absent for plain pools.
 	ExecutionWorkspace *agentExecutionSnapshotWorkspaceBinding `json:"executionWorkspace,omitempty"`
+	// Connections freezes, per connection-mode OutboundAccessPolicy reachable
+	// from the frozen tool policy, the identity of the requester's Connection
+	// at dispatch. Call-time resolution fails closed unless the live
+	// Connection still matches. No token material is ever recorded.
+	Connections []agentExecutionSnapshotConnection `json:"connections,omitempty"`
+}
+
+// agentExecutionSnapshotConnection is one frozen person-to-provider link.
+type agentExecutionSnapshotConnection struct {
+	PolicyName     string `json:"policyName"`
+	Provider       string `json:"provider"`
+	ConnectionName string `json:"connectionName"`
+	UID            string `json:"uid"`
+	Generation     int64  `json:"generation"`
+	Mode           string `json:"mode"`
 }
 
 // agentExecutionSnapshotExternalRuntime freezes the non-secret registration
@@ -369,6 +384,10 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	if err != nil {
 		return nil, fmt.Errorf("resolve frozen ACP MCP configuration: %w", err)
 	}
+	frozenConnections, err := freezeRequesterConnections(ctx, reader, task, mcpConfiguration)
+	if err != nil {
+		return nil, fmt.Errorf("freeze requester connections: %w", err)
+	}
 
 	namespace := &corev1.Namespace{}
 	if err := reader.Get(ctx, types.NamespacedName{Name: task.Namespace}, namespace); err != nil {
@@ -405,6 +424,7 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 		SessionRef:       task.Spec.SessionRef.DeepCopy(),
 		Workspace:        task.Spec.Workspace.DeepCopy(),
 		RuntimeOverride:  task.Spec.AgentRuntime.DeepCopy(),
+		Connections:      frozenConnections,
 	}
 	if task.Spec.Timeout != nil {
 		body.Timeout = task.Spec.Timeout.Duration.String()

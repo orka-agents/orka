@@ -36,8 +36,11 @@ import (
 const (
 	AdapterDirect  = "direct"
 	AdapterGateway = "gateway"
-	schemeHTTP     = "http"
-	schemeHTTPS    = "https"
+	// AdapterConnection injects a person's linked-account credential; the
+	// executor applies it exactly like a direct credential.
+	AdapterConnection = "connection"
+	schemeHTTP        = "http"
+	schemeHTTPS       = "https"
 
 	// DefaultCredentialReadScope authorizes use of cluster-managed credential material.
 	DefaultCredentialReadScope = "orka:secrets:credentials:read"
@@ -56,6 +59,48 @@ type ResolveRequest struct {
 	CredentialAuthorityEnforced bool
 	CredentialScopeAllowed      bool
 	CredentialSecret            string
+
+	// Requester is the Task's verified human identity. Connection-mode
+	// policies resolve the credential of this person and nobody else.
+	Requester *corev1alpha1.RequestedBy
+	// FrozenConnections maps policy name to the Connection identity frozen
+	// into the Task's execution snapshot at dispatch. Connection-mode
+	// resolution requires an entry and fails closed when the live Connection
+	// differs from it.
+	FrozenConnections map[string]FrozenConnection
+}
+
+// FrozenConnection is the dispatch-time identity of a person's Connection.
+type FrozenConnection struct {
+	UID        string
+	Generation int64
+}
+
+// ConnectionCredentialRequest asks the credential source for one person's
+// current access token for one provider.
+type ConnectionCredentialRequest struct {
+	Namespace string
+	Provider  string
+	Issuer    string
+	Subject   string
+	Frozen    FrozenConnection
+}
+
+// ConnectionCredential is a resolved, possibly just-refreshed access token
+// plus the non-secret identity of the Connection that supplied it.
+type ConnectionCredential struct {
+	AccessToken   string
+	TokenType     string
+	ConnectionUID string
+	Generation    int64
+	Mode          string
+}
+
+// ConnectionCredentialSource resolves and refreshes per-person credentials.
+// It exists only in the controller; worker Pods have no implementation and
+// therefore fail closed on connection-mode policies.
+type ConnectionCredentialSource interface {
+	ResolveConnectionCredential(context.Context, ConnectionCredentialRequest) (ConnectionCredential, error)
 }
 
 // Resolution describes how ToolExecutor should modify a prepared request.
@@ -70,6 +115,10 @@ type Resolution struct {
 	GatewayTLS    tokenexchange.TLSConfig
 
 	SensitiveValues []string
+
+	// ConnectionUID identifies the person's Connection for connection-mode
+	// resolutions, for audit records. Never the token.
+	ConnectionUID string
 }
 
 // Resolver resolves one same-namespace policy at execution time.
@@ -84,6 +133,10 @@ type KubernetesResolver struct {
 	KubeClient kubernetes.Interface
 	Trust      TrustConfig
 	Exchanger  tokenexchange.Exchanger
+	// Connections supplies per-person credentials for connection-mode
+	// policies. Nil means this process may not execute connector-backed
+	// tools.
+	Connections ConnectionCredentialSource
 
 	exchangeOnce     sync.Once
 	defaultExchanger tokenexchange.Exchanger
@@ -130,16 +183,68 @@ func (r *KubernetesResolver) Resolve(ctx context.Context, req ResolveRequest) (R
 		}
 		req.TransactionToken = token
 	}
-	if policy.Spec.Direct != nil {
+	if policy.Spec.Direct != nil || policy.Spec.Connection != nil {
 		if !strings.EqualFold(strings.TrimSpace(req.TargetScheme), schemeHTTPS) {
-			return Resolution{}, errors.New("direct outbound access requires an HTTPS Tool URL")
+			return Resolution{}, errors.New("credential-injecting outbound access requires an HTTPS Tool URL")
 		}
 		if req.HasAuthSecretRef {
-			return Resolution{}, errors.New("direct outbound access cannot coexist with authSecretRef")
+			return Resolution{}, errors.New("credential-injecting outbound access cannot coexist with authSecretRef")
 		}
+	}
+	switch {
+	case policy.Spec.Direct != nil:
 		return r.resolveDirect(ctx, policy, req)
+	case policy.Spec.Connection != nil:
+		return r.resolveConnection(ctx, policy, req)
 	}
 	return r.resolveGateway(ctx, policy)
+}
+
+// resolveConnection injects the requester's linked-account credential. Every
+// precondition fails closed: no source in this process, no verified
+// requester, no frozen binding, or a source error all mean no credential.
+func (r *KubernetesResolver) resolveConnection(ctx context.Context, policy *corev1alpha1.OutboundAccessPolicy, req ResolveRequest) (Resolution, error) {
+	if r.Connections == nil {
+		return Resolution{}, errors.New("connector-backed tools execute only in the controller")
+	}
+	requester := req.Requester
+	if requester == nil || strings.TrimSpace(requester.Issuer) == "" || strings.TrimSpace(requester.Subject) == "" {
+		return Resolution{}, errors.New("connection outbound access requires a Task with a verified requester")
+	}
+	frozen, ok := req.FrozenConnections[policy.Name]
+	if !ok || strings.TrimSpace(frozen.UID) == "" {
+		return Resolution{}, fmt.Errorf("connection outbound access policy %q has no Connection frozen into the execution snapshot", policy.Name)
+	}
+	credential, err := r.Connections.ResolveConnectionCredential(ctx, ConnectionCredentialRequest{
+		Namespace: policy.Namespace,
+		Provider:  policy.Spec.Connection.ProviderRef.Name,
+		Issuer:    requester.Issuer,
+		Subject:   requester.Subject,
+		Frozen:    frozen,
+	})
+	if err != nil {
+		return Resolution{}, fmt.Errorf("resolve connection credential: %w", err)
+	}
+	if strings.TrimSpace(credential.AccessToken) == "" {
+		return Resolution{}, errors.New("connection credential source returned an empty credential")
+	}
+	header := defaultCredentialHeader
+	prefix := "Bearer "
+	if output := policy.Spec.Connection.Output; output != nil {
+		if strings.TrimSpace(output.Header) != "" {
+			header = http.CanonicalHeaderKey(strings.TrimSpace(output.Header))
+		}
+		if output.Prefix != nil {
+			prefix = *output.Prefix
+		}
+	}
+	return Resolution{
+		Adapter:          AdapterConnection,
+		CredentialHeader: header,
+		CredentialValue:  prefix + credential.AccessToken,
+		SensitiveValues:  compactSensitiveValues([]string{credential.AccessToken}),
+		ConnectionUID:    credential.ConnectionUID,
+	}, nil
 }
 
 func (r *KubernetesResolver) exchanger() tokenexchange.Exchanger {

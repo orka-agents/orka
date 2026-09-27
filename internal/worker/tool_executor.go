@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	neturl "net/url"
@@ -108,6 +109,8 @@ type ToolExecutor struct {
 	credentialSecret            string
 	transactionExchange         *TransactionExchangeConfig
 	authSecretValues            map[string]string
+	requester                   *corev1alpha1.RequestedBy
+	frozenConnections           map[string]outboundaccess.FrozenConnection
 
 	ttsMu        sync.Mutex
 	ttsClient    *contexttoken.TTSClient
@@ -121,6 +124,44 @@ type TransactionExchangeConfig struct {
 	Exchanger        contexttoken.Exchanger
 	SubjectTokenType string
 	OutboundScope    string
+}
+
+// SetRequester records the Task's verified human identity for connection-mode
+// outbound access. A nil requester makes every connector-backed call fail
+// closed.
+func (e *ToolExecutor) SetRequester(requester *corev1alpha1.RequestedBy) {
+	if e == nil {
+		return
+	}
+	e.requester = requester.DeepCopy()
+}
+
+// SetFrozenConnections records the Connection identities frozen into the
+// Task's execution snapshot, keyed by OutboundAccessPolicy name.
+func (e *ToolExecutor) SetFrozenConnections(frozen map[string]outboundaccess.FrozenConnection) {
+	if e == nil {
+		return
+	}
+	e.frozenConnections = make(map[string]outboundaccess.FrozenConnection, len(frozen))
+	maps.Copy(e.frozenConnections, frozen)
+}
+
+// Requester returns a copy of the bound requester identity, or nil.
+func (e *ToolExecutor) Requester() *corev1alpha1.RequestedBy {
+	if e == nil || e.requester == nil {
+		return nil
+	}
+	return e.requester.DeepCopy()
+}
+
+// FrozenConnections returns a copy of the frozen Connection bindings.
+func (e *ToolExecutor) FrozenConnections() map[string]outboundaccess.FrozenConnection {
+	if e == nil || len(e.frozenConnections) == 0 {
+		return nil
+	}
+	frozen := make(map[string]outboundaccess.FrozenConnection, len(e.frozenConnections))
+	maps.Copy(frozen, e.frozenConnections)
+	return frozen
 }
 
 // SetTransactionAuthority sets task-scoped transaction authority. Calling it
@@ -894,19 +935,21 @@ func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *core
 		CredentialAuthorityEnforced: e.credentialAuthorityEnforced,
 		CredentialScopeAllowed:      e.credentialScopeAllowed,
 		CredentialSecret:            e.credentialSecret,
+		Requester:                   e.requester,
+		FrozenConnections:           e.frozenConnections,
 	})
 	if err != nil {
 		return fmt.Errorf("resolve outbound access policy: %w", err)
 	}
 	prepared.redactionSecrets = compactToolSecrets(append(prepared.redactionSecrets, resolution.SensitiveValues...)...)
 	switch resolution.Adapter {
-	case outboundaccess.AdapterDirect:
+	case outboundaccess.AdapterDirect, outboundaccess.AdapterConnection:
 		prepared.direct = true
 		if prepared.request == nil || prepared.request.URL == nil || !strings.EqualFold(prepared.request.URL.Scheme, "https") {
-			return errors.New("direct outbound access requires an HTTPS Tool URL")
+			return errors.New("credential-injecting outbound access requires an HTTPS Tool URL")
 		}
 		if prepared.httpConfig.AuthSecretRef != nil {
-			return errors.New("direct outbound access cannot coexist with authSecretRef")
+			return errors.New("credential-injecting outbound access cannot coexist with authSecretRef")
 		}
 		header := http.CanonicalHeaderKey(strings.TrimSpace(resolution.CredentialHeader))
 		if header == "" || strings.EqualFold(header, transactiontoken.HeaderName) {

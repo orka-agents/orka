@@ -22,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/tokenexchange"
 	"github.com/orka-agents/orka/internal/transactiontoken"
 )
@@ -57,14 +58,48 @@ func ValidateSpec(policy *corev1alpha1.OutboundAccessPolicy) *Issue {
 	if policy == nil {
 		return invalid("policy is required")
 	}
-	direct, gateway := policy.Spec.Direct, policy.Spec.Gateway
-	if (direct == nil) == (gateway == nil) {
-		return invalid("exactly one of direct or gateway is required")
+	direct, gateway, connection := policy.Spec.Direct, policy.Spec.Gateway, policy.Spec.Connection
+	modes := 0
+	for _, set := range []bool{direct != nil, gateway != nil, connection != nil} {
+		if set {
+			modes++
+		}
 	}
-	if direct != nil {
+	if modes != 1 {
+		return invalid("exactly one of direct, gateway, or connection is required")
+	}
+	switch {
+	case direct != nil:
 		return validateDirectSpec(direct)
+	case connection != nil:
+		return validateConnectionSpec(connection)
 	}
 	return validateGatewaySpec(gateway)
+}
+
+func validateConnectionSpec(connection *corev1alpha1.ConnectionOutboundAccess) *Issue {
+	name := strings.TrimSpace(connection.ProviderRef.Name)
+	if name == "" || name != connection.ProviderRef.Name {
+		return invalid("connection providerRef name is required and must not contain surrounding whitespace")
+	}
+	if errs := validation.IsDNS1123Subdomain(name); len(errs) > 0 {
+		return invalid("connection providerRef name must be a valid resource name")
+	}
+	return validateCredentialOutput(connection.Output)
+}
+
+func validateCredentialOutput(output *corev1alpha1.OutboundCredentialOutput) *Issue {
+	header := defaultCredentialHeader
+	if output != nil && strings.TrimSpace(output.Header) != "" {
+		header = output.Header
+	}
+	if err := ValidateCredentialHeader(header); err != nil {
+		return invalid(err.Error())
+	}
+	if output != nil && output.Prefix != nil && strings.ContainsAny(*output.Prefix, "\r\n") {
+		return invalid("output prefix must not contain carriage returns or newlines")
+	}
+	return nil
 }
 
 func validateDirectSpec(direct *corev1alpha1.DirectOutboundAccess) *Issue {
@@ -109,17 +144,7 @@ func validateDirectSpec(direct *corev1alpha1.DirectOutboundAccess) *Issue {
 	if issue := validateClientAuthentication(direct.ClientAuthentication); issue != nil {
 		return issue
 	}
-	header := defaultCredentialHeader
-	if direct.Output != nil && strings.TrimSpace(direct.Output.Header) != "" {
-		header = direct.Output.Header
-	}
-	if err := ValidateCredentialHeader(header); err != nil {
-		return invalid(err.Error())
-	}
-	if direct.Output != nil && direct.Output.Prefix != nil && strings.ContainsAny(*direct.Output.Prefix, "\r\n") {
-		return invalid("output prefix must not contain carriage returns or newlines")
-	}
-	return nil
+	return validateCredentialOutput(direct.Output)
 }
 
 func validateTokenEndpoint(endpoint corev1alpha1.OutboundTokenEndpoint) *Issue {
@@ -308,6 +333,9 @@ func ResolveReferences(ctx context.Context, reader client.Reader, policy *corev1
 	if issue := ValidateSpec(policy); issue != nil {
 		return issue, nil
 	}
+	if connection := policy.Spec.Connection; connection != nil {
+		return resolveConnectorProvider(ctx, reader, policy.Namespace, connection.ProviderRef.Name)
+	}
 	if policy.Spec.Direct != nil {
 		direct := policy.Spec.Direct
 		if issue, err := resolveTokenEndpoint(ctx, reader, policy.Namespace, direct.TokenEndpoint, trust.TokenEndpoints); issue != nil || err != nil {
@@ -418,6 +446,22 @@ func resolveTLS(ctx context.Context, reader client.Reader, namespace string, con
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(value) {
 		return unresolved(ReasonReferenceInvalid, "referenced TLS CA Secret key is not valid PEM certificate data"), nil
+	}
+	return nil, nil
+}
+
+// resolveConnectorProvider verifies the same-namespace ConnectorProvider
+// exists and is Accepted with resolved references for its current generation.
+func resolveConnectorProvider(ctx context.Context, reader client.Reader, namespace, name string) (*Issue, error) {
+	provider := &corev1alpha1.ConnectorProvider{}
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, provider); err != nil {
+		if apierrors.IsNotFound(err) {
+			return unresolved(ReasonReferenceNotFound, "referenced ConnectorProvider was not found"), nil
+		}
+		return nil, fmt.Errorf("resolve connector provider reference: %w", err)
+	}
+	if !connectors.ProviderAccepted(provider) {
+		return unresolved(ReasonReferenceInvalid, "referenced ConnectorProvider is not accepted for its current generation"), nil
 	}
 	return nil, nil
 }
