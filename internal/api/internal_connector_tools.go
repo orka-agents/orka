@@ -386,17 +386,27 @@ func (h *InternalHandlers) runConnectorToolEffect(
 		settleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		if settleErr := controller.SettleExternalEffect(settleCtx, cfg.ExternalEffects, fence, identity, state); settleErr != nil {
 			log.Error(settleErr, "connector tool effect could not be settled", "task", run.task.Name, "tool", run.tool.Name)
+			// The ledger still shows the call in flight; the worker must
+			// retry (503) rather than treat the failure as a settled 502 and
+			// spend its approval on a record nothing will reconcile.
+			err = errors.Join(err, fmt.Errorf("%w: the effect record could not be settled; retry", errConnectorEffectLedgerUnavailable))
 		}
 		cancel()
 	}
 	return result, replayed, err
 }
 
+// connectorToolMaxTimeout is the longest a connector-backed call and its
+// effect lease may run: the same bound the ConnectorProvider declaration
+// enforces on curated tools.
+const connectorToolMaxTimeout = 10 * time.Minute
+
 // connectorToolTimeout is the Tool's declared request timeout, the same
-// deadline the executor applies, so the effect lease covers the whole call.
+// deadline the executor applies, so the effect lease covers the whole call;
+// a Tool CR carries no upper bound of its own, so it is clamped here.
 func connectorToolTimeout(tool *corev1alpha1.Tool) time.Duration {
 	if tool != nil && tool.Spec.HTTP != nil && tool.Spec.HTTP.Timeout != nil && tool.Spec.HTTP.Timeout.Duration > 0 {
-		return tool.Spec.HTTP.Timeout.Duration
+		return min(tool.Spec.HTTP.Timeout.Duration, connectorToolMaxTimeout)
 	}
 	return connectorToolDefaultTimeout
 }

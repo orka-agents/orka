@@ -954,3 +954,19 @@ func TestExecuteConnectorToolRefusesBindingWithoutGrant(t *testing.T) {
 		t.Fatalf("resolve request = %+v, want the checked policy pinned", resolver.request)
 	}
 }
+
+// A Tool CR carries no upper bound on its timeout; the connector call and
+// its effect lease are clamped to the provider maximum.
+func TestConnectorToolTimeoutClamps(t *testing.T) {
+	tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{Timeout: &metav1.Duration{Duration: 3 * time.Hour}}}}
+	if got := connectorToolTimeout(tool); got != connectorToolMaxTimeout {
+		t.Fatalf("timeout = %v, want the %v maximum", got, connectorToolMaxTimeout)
+	}
+	tool.Spec.HTTP.Timeout = &metav1.Duration{Duration: 45 * time.Second}
+	if got := connectorToolTimeout(tool); got != 45*time.Second {
+		t.Fatalf("timeout = %v, want the declared 45s", got)
+	}
+	if got := connectorToolTimeout(&corev1alpha1.Tool{}); got != connectorToolDefaultTimeout {
+		t.Fatalf("timeout = %v, want the default", got)
+	}
+}
