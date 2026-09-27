@@ -1280,6 +1280,7 @@ func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.
 		}
 
 		stream := p.client.Chat.Completions.NewStreaming(ctx, params)
+		defer func() { _ = stream.Close() }()
 		acc := openai.ChatCompletionAccumulator{}
 		finishReason := ""
 		hasContent := false
@@ -1308,6 +1309,9 @@ func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.
 				if strings.TrimSpace(delta.Refusal) != "" {
 					hasRefusal = true
 				}
+				if req.ResponsesInput && delta.JSON.FunctionCall.Valid() {
+					legacyFunctionCallSeen = true
+				}
 				legacyName, legacyArguments := legacyFunctionCallFromJSON(delta.RawJSON())
 				if legacyName != "" {
 					legacyFunctionCallSeen = true
@@ -1319,7 +1323,12 @@ func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.
 				}
 			}
 
-			if acc.AddChunk(chunk) {
+			if accumulated := acc.AddChunk(chunk); req.ResponsesInput {
+				if !accumulated && len(chunk.Choices) > 0 {
+					send(llm.StreamChunk{Error: errors.New("inconsistent chat stream chunks"), Done: true})
+					return
+				}
+			} else if accumulated {
 				if tc, ok := acc.JustFinishedToolCall(); ok {
 					hasToolCalls = true
 					if !send(llm.StreamChunk{
@@ -1371,7 +1380,7 @@ func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.
 			return
 		}
 		legacyName := legacyFunctionCallName.String()
-		if legacyFunctionCallSeen && !hasToolCalls && strings.TrimSpace(legacyName) != "" {
+		if !req.ResponsesInput && legacyFunctionCallSeen && !hasToolCalls && strings.TrimSpace(legacyName) != "" {
 			hasToolCalls = true
 			if !send(llm.StreamChunk{ToolCall: &llm.ToolCall{
 				ID:        legacyFunctionCallID(legacyFunctionCallIDValue),
@@ -1381,8 +1390,29 @@ func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.
 				return
 			}
 		}
+		// Responses publishes executable function items immediately. The SDK's
+		// JustFinishedToolCall only detects delta transitions, not a successful
+		// terminal outcome, and cannot reliably represent parallel calls. Keep
+		// the whole accumulated call set private until the stream ends cleanly.
+		var pendingCalls []llm.ToolCall
+		if req.ResponsesInput {
+			if len(acc.Choices) > 0 {
+				for _, call := range acc.Choices[0].Message.ToolCalls {
+					pendingCalls = append(pendingCalls, llm.ToolCall{
+						ID: call.ID, Name: call.Function.Name, Arguments: json.RawMessage(call.Function.Arguments),
+					})
+				}
+			}
+			if len(pendingCalls) == 0 && legacyFunctionCallSeen {
+				pendingCalls = append(pendingCalls, llm.ToolCall{
+					ID: legacyFunctionCallID(legacyFunctionCallIDValue), Name: legacyName,
+					Arguments: json.RawMessage(legacyFunctionCallArgs.String()),
+				})
+			}
+			hasToolCalls = len(pendingCalls) > 0
+		}
 		finishReason = normalizeChatStreamStopReason(finishReason, hasContent, hasRefusal, hasToolCalls)
-		send(llm.StreamChunk{
+		terminal := llm.StreamChunk{
 			Done:                  true,
 			StopReason:            finishReason,
 			InputTokens:           inputTokens,
@@ -1392,9 +1422,42 @@ func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.
 			UsageReported:         usageReported,
 			Model:                 streamModel,
 			Provider:              p.TelemetryProviderName(),
-		})
+		}
+		if req.ResponsesInput && hasToolCalls {
+			outcome := llm.NormalizeCompletionOutcome(&llm.CompletionResponse{StopReason: finishReason, ToolCalls: pendingCalls})
+			if outcome != llm.CompletionOutcomeRefused {
+				if finishReason != stopReasonToolCalls {
+					terminal.Error = errors.New("chat stream ended without completed tool calls")
+				} else {
+					terminal.Error = validateResponsesChatToolCalls(pendingCalls)
+				}
+				if terminal.Error == nil {
+					for _, call := range pendingCalls {
+						if !send(llm.StreamChunk{ToolCall: &call}) {
+							return
+						}
+					}
+				}
+			}
+		}
+		send(terminal)
 	}()
 	return ch
+}
+
+// Validate every call before releasing any: a malformed later call must not
+// leave an earlier executable call in a failed public Responses stream.
+func validateResponsesChatToolCalls(calls []llm.ToolCall) error {
+	seen := make(map[string]bool, len(calls))
+	for _, call := range calls {
+		var arguments map[string]json.RawMessage
+		if strings.TrimSpace(call.ID) == "" || strings.TrimSpace(call.Name) == "" || seen[call.ID] ||
+			json.Unmarshal(call.Arguments, &arguments) != nil || arguments == nil {
+			return errors.New("chat stream returned invalid tool calls")
+		}
+		seen[call.ID] = true
+	}
+	return nil
 }
 
 func legacyFunctionCallID(responseID string) string {
