@@ -29,10 +29,11 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/tokenexchange"
 	"github.com/orka-agents/orka/internal/transactiontoken"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 )
 
 const (
@@ -95,6 +96,22 @@ type ToolBinding struct {
 	// curated schema so no weaker Tool schema admits arguments the
 	// provider excluded.
 	Parameters *apiextensionsv1.JSON
+	// Timeout is the Tool's request timeout (zero means the 30s default);
+	// it must equal the provider's curated bound so a Tool cannot keep a
+	// credential-bearing request open longer than the provider allows.
+	Timeout time.Duration
+}
+
+// connectorDefaultTimeout is the request timeout both a Tool CR and a
+// ConnectorProvider tool declaration mean when they declare none.
+const connectorDefaultTimeout = 30 * time.Second
+
+// normalizedConnectorTimeout applies the shared default.
+func normalizedConnectorTimeout(timeout time.Duration) time.Duration {
+	if timeout <= 0 {
+		return connectorDefaultTimeout
+	}
+	return timeout
 }
 
 // PolicyIdentity pins the OutboundAccessPolicy a caller checked before
@@ -295,6 +312,13 @@ func DeclaredConnectorTool(provider *corev1alpha1.ConnectorProvider, tool ToolBi
 		}
 		if !sameParameterSchema(candidate.Parameters, tool.Parameters) {
 			return corev1alpha1.ConnectorTool{}, fmt.Errorf("tool %q parameters do not match the schema declared by provider %q", name, provider.Name)
+		}
+		declaredTimeout := time.Duration(0)
+		if candidate.HTTP.Timeout != nil {
+			declaredTimeout = candidate.HTTP.Timeout.Duration
+		}
+		if normalizedConnectorTimeout(declaredTimeout) != normalizedConnectorTimeout(tool.Timeout) {
+			return corev1alpha1.ConnectorTool{}, fmt.Errorf("tool %q timeout does not match the timeout declared by provider %q", name, provider.Name)
 		}
 		return candidate, nil
 	}

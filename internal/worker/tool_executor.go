@@ -424,7 +424,7 @@ func (e *ToolExecutor) executeToolRequest(ctx context.Context, tool *corev1alpha
 }
 
 func (e *ToolExecutor) executePreparedToolRequest(ctx context.Context, prepared preparedToolRequest) (string, error) {
-	httpClient, err := toolHTTPClient(e.client, prepared.httpConfig.Timeout, prepared.gatewayTLS, prepared.gateway)
+	httpClient, err := toolHTTPClient(e.client, prepared.httpConfig.Timeout, prepared.gatewayTLS, prepared.gateway, prepared.connection)
 	if err != nil {
 		return "", err
 	}
@@ -508,7 +508,7 @@ func exactEndpointDialContext(endpoint *neturl.URL) func(context.Context, string
 	}
 }
 
-func toolHTTPClient(base *http.Client, timeout *metav1.Duration, gatewayTLS tokenexchange.TLSConfig, gateway bool) (*http.Client, error) {
+func toolHTTPClient(base *http.Client, timeout *metav1.Duration, gatewayTLS tokenexchange.TLSConfig, gateway, connection bool) (*http.Client, error) {
 	if base == nil {
 		base = http.DefaultClient
 	}
@@ -557,6 +557,12 @@ func toolHTTPClient(base *http.Client, timeout *metav1.Duration, gatewayTLS toke
 			}
 		}
 		if gateway {
+			return http.ErrUseLastResponse
+		}
+		if connection {
+			// A linked-account credential travels only to the origin the
+			// provider declared: Go forwards custom headers on redirects,
+			// so the redirect is returned unfollowed instead.
 			return http.ErrUseLastResponse
 		}
 		if len(via) == 0 {
@@ -766,14 +772,17 @@ func toolIdempotencyKeyFromContext(ctx context.Context) string {
 }
 
 type preparedToolRequest struct {
-	httpConfig        corev1alpha1.HTTPExecution
-	request           *http.Request
-	authToken         string
-	transactionToken  string
-	redactionSecrets  []string
-	gatewayTLS        tokenexchange.TLSConfig
-	gateway           bool
-	direct            bool
+	httpConfig       corev1alpha1.HTTPExecution
+	request          *http.Request
+	authToken        string
+	transactionToken string
+	redactionSecrets []string
+	gatewayTLS       tokenexchange.TLSConfig
+	gateway          bool
+	direct           bool
+	// connection marks a request carrying a person's linked-account
+	// credential: it is never followed across a redirect.
+	connection        bool
 	mcp               bool
 	trustedActorRoute bool
 }
@@ -963,7 +972,7 @@ func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *core
 		CheckedPolicy:               e.checkedPolicy(ref.Name),
 		Tool: outboundaccess.ToolBinding{
 			Name: tool.Name, URL: strings.TrimSpace(tool.Spec.HTTP.URL), Method: prepared.request.Method, Class: tool.Spec.BrokeredToolClass,
-			Headers: tool.Spec.HTTP.Headers, Parameters: tool.Spec.Parameters,
+			Headers: tool.Spec.HTTP.Headers, Parameters: tool.Spec.Parameters, Timeout: toolHTTPTimeout(tool),
 		},
 	})
 	if err != nil {
@@ -977,6 +986,7 @@ func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *core
 			return errors.New("credential-injecting outbound access requires an HTTPS Tool URL")
 		}
 		if resolution.Adapter == outboundaccess.AdapterConnection {
+			prepared.connection = true
 			// The linked-account credential is bound to the destination the
 			// provider declared. An MCP-backed Tool sends its requests to the
 			// actor endpoint rather than spec.http.url, and a prepared request
@@ -2028,4 +2038,12 @@ func outboundTTSClientKey(cfg contexttoken.TTSConfig) string {
 		cfg.ChildTokenTTL.String(),
 		cfg.ToolTokenTTL.String(),
 	}, "\x00")
+}
+
+// toolHTTPTimeout is the Tool's declared request timeout, zero when none.
+func toolHTTPTimeout(tool *corev1alpha1.Tool) time.Duration {
+	if tool == nil || tool.Spec.HTTP == nil || tool.Spec.HTTP.Timeout == nil {
+		return 0
+	}
+	return tool.Spec.HTTP.Timeout.Duration
 }

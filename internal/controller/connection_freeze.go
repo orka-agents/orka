@@ -461,22 +461,23 @@ func freezeRequesterConnectionsForTools(
 		if err != nil {
 			return nil, err
 		}
-		if connection == nil {
-			continue
+		// Every connection-mode policy the Task can reach is frozen, with or
+		// without a usable link: an entry without a Connection keeps the
+		// call failing closed even if the policy is later retargeted to a
+		// service credential, because the resolver refuses a frozen policy
+		// whose adapter changed. The policy the Connection is bound under is
+		// part of what the Task is dispatched with.
+		entry := agentExecutionSnapshotConnection{
+			PolicyName: info.PolicyName, Provider: info.Provider, PolicyUID: info.PolicyUID, PolicyGeneration: info.PolicyGeneration,
 		}
-		frozen = append(frozen, agentExecutionSnapshotConnection{
-			PolicyName:     info.PolicyName,
-			Provider:       info.Provider,
-			ConnectionName: connection.Name,
-			UID:            string(connection.UID),
-			Generation:     connection.Generation,
-			GrantSequence:  connection.Status.GrantSequence,
-			Mode:           connection.Spec.Mode,
-			// The policy the Connection is bound under: its credential
-			// output semantics are part of what the Task is dispatched with.
-			PolicyUID:        info.PolicyUID,
-			PolicyGeneration: info.PolicyGeneration,
-		})
+		if connection != nil {
+			entry.ConnectionName = connection.Name
+			entry.UID = string(connection.UID)
+			entry.Generation = connection.Generation
+			entry.GrantSequence = connection.Status.GrantSequence
+			entry.Mode = connection.Spec.Mode
+		}
+		frozen = append(frozen, entry)
 	}
 	return frozen, nil
 }

@@ -11,13 +11,15 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
 type fakeConnectionSource struct {
@@ -380,5 +382,39 @@ func TestDeclaredConnectorToolEmptyDeclaredHeaderStillRequiresPresence(t *testin
 	binding.Headers = map[string]string{"Accept": ""}
 	if _, err := DeclaredConnectorTool(provider, binding); err != nil {
 		t.Fatalf("the declared empty header must be accepted: %v", err)
+	}
+}
+
+// A Tool may not keep a credential-bearing request open longer than the
+// provider's curated timeout; both sides default to 30s.
+func TestDeclaredConnectorToolComparesTimeouts(t *testing.T) {
+	provider := &corev1alpha1.ConnectorProvider{ObjectMeta: metav1.ObjectMeta{Name: "github"}, Spec: corev1alpha1.ConnectorProviderSpec{
+		Tools: []corev1alpha1.ConnectorTool{{
+			Name: "gh_search", Source: corev1alpha1.ConnectorToolSourceHTTP, Class: corev1alpha1.ConnectorToolClassRead,
+			HTTP: &corev1alpha1.ConnectorHTTPTool{URL: "https://api.github.com/search/issues", Method: "GET", Timeout: &metav1.Duration{Duration: time.Second}},
+		}, {
+			Name: "gh_default", Source: corev1alpha1.ConnectorToolSourceHTTP, Class: corev1alpha1.ConnectorToolClassRead,
+			HTTP: &corev1alpha1.ConnectorHTTPTool{URL: "https://api.github.com/user", Method: "GET"},
+		}},
+	}}
+	binding := ToolBinding{Name: "gh_search", URL: "https://api.github.com/search/issues", Method: "GET", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead}
+	if _, err := DeclaredConnectorTool(provider, binding); err == nil || !strings.Contains(err.Error(), "timeout") {
+		t.Fatalf("a Tool defaulting to 30s against a 1s curated bound err = %v, want refusal", err)
+	}
+	binding.Timeout = time.Second
+	if _, err := DeclaredConnectorTool(provider, binding); err != nil {
+		t.Fatalf("matching timeout: %v", err)
+	}
+	defaulted := ToolBinding{Name: "gh_default", URL: "https://api.github.com/user", Method: "GET", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead}
+	if _, err := DeclaredConnectorTool(provider, defaulted); err != nil {
+		t.Fatalf("both sides defaulting to 30s: %v", err)
+	}
+	defaulted.Timeout = 30 * time.Second
+	if _, err := DeclaredConnectorTool(provider, defaulted); err != nil {
+		t.Fatalf("an explicit 30s equals the default: %v", err)
+	}
+	defaulted.Timeout = 10 * time.Minute
+	if _, err := DeclaredConnectorTool(provider, defaulted); err == nil {
+		t.Fatal("a longer Tool timeout must be refused")
 	}
 }
