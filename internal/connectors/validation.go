@@ -648,21 +648,7 @@ func ProviderAuthorityDigest(provider *corev1alpha1.ConnectorProvider) string {
 	if provider == nil {
 		return ""
 	}
-	oauth := provider.Spec.OAuth
-	parts := []string{
-		"uid", string(provider.UID), "clientID", oauth.ClientID,
-		"secretName", oauth.ClientSecretRef.Name, "secretKey", oauth.ClientSecretRef.Key,
-		"clientAuthentication", oauth.ClientAuthentication,
-		"authorizeURL", oauth.AuthorizeURL, "tokenURL", oauth.TokenURL, "revocationURL", oauth.RevocationURL,
-	}
-	keys := make([]string, 0, len(oauth.AdditionalAuthorizeParameters))
-	for key := range oauth.AdditionalAuthorizeParameters {
-		keys = append(keys, key)
-	}
-	slices.Sort(keys)
-	for _, key := range keys {
-		parts = append(parts, "param", key, oauth.AdditionalAuthorizeParameters[key])
-	}
+	parts := providerIssuerParts(provider)
 	tools := make([]corev1alpha1.ConnectorTool, 0, len(provider.Spec.Tools))
 	for _, tool := range provider.Spec.Tools {
 		if tool.Source == corev1alpha1.ConnectorToolSourceHTTP && tool.HTTP != nil {
@@ -681,6 +667,45 @@ func ProviderAuthorityDigest(provider *corev1alpha1.ConnectorProvider) string {
 			parts = append(parts, "header", name, tool.HTTP.Headers[name])
 		}
 	}
+	return lengthPrefixedDigest(parts)
+}
+
+// ProviderIssuerDigest is a hex SHA-256 digest of the OAuth client that
+// issues, refreshes, and revokes tokens: the provider UID, client ID, client
+// secret reference, authentication method, endpoints, and static authorize
+// parameters. Unlike ProviderAuthorityDigest it excludes the curated tool
+// destinations, so a retargeted tool still lets a held token be refreshed
+// or revoked against the client that issued it. It is sealed with every
+// credential.
+func ProviderIssuerDigest(provider *corev1alpha1.ConnectorProvider) string {
+	if provider == nil {
+		return ""
+	}
+	return lengthPrefixedDigest(providerIssuerParts(provider))
+}
+
+func providerIssuerParts(provider *corev1alpha1.ConnectorProvider) []string {
+	oauth := provider.Spec.OAuth
+	parts := []string{
+		"uid", string(provider.UID), "clientID", oauth.ClientID,
+		"secretName", oauth.ClientSecretRef.Name, "secretKey", oauth.ClientSecretRef.Key,
+		"clientAuthentication", oauth.ClientAuthentication,
+		"authorizeURL", oauth.AuthorizeURL, "tokenURL", oauth.TokenURL, "revocationURL", oauth.RevocationURL,
+	}
+	keys := make([]string, 0, len(oauth.AdditionalAuthorizeParameters))
+	for key := range oauth.AdditionalAuthorizeParameters {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	for _, key := range keys {
+		parts = append(parts, "param", key, oauth.AdditionalAuthorizeParameters[key])
+	}
+	return parts
+}
+
+// lengthPrefixedDigest hashes parts with an injective length-prefixed
+// encoding.
+func lengthPrefixedDigest(parts []string) string {
 	sum := sha256.New()
 	for _, part := range parts {
 		_, _ = fmt.Fprintf(sum, "%d:", len(part))

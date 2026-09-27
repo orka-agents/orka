@@ -58,9 +58,10 @@ type ConnectorCredential struct {
 	// ExpiresAt is zero when the provider reported no expiry.
 	ExpiresAt time.Time
 	Scopes    []string
-	// AuthorityDigest is the provider OAuth-authority digest that issued the
-	// tokens. It is sealed with them, so refresh and revocation always know
-	// which client the material belongs to regardless of Connection status.
+	// AuthorityDigest is the provider OAuth issuer digest of the client that
+	// issued the tokens. It is sealed with them, so refresh and revocation
+	// always know which client the material belongs to regardless of
+	// Connection status or later tool changes.
 	AuthorityDigest string
 	// UpdatedAt is set by the store on read.
 	UpdatedAt time.Time
@@ -75,6 +76,9 @@ type ConnectorCredentialStore interface {
 	PutConnectorCredential(ctx context.Context, ref ConnectorCredentialRef, credential ConnectorCredential) error
 	// GetConnectorCredential opens the material bound to ref, or ErrNotFound.
 	GetConnectorCredential(ctx context.Context, ref ConnectorCredentialRef) (ConnectorCredential, error)
+	// ListRetiredConnectorCredentials opens the committed credentials a later
+	// commit replaced. They stay sealed until disconnect revokes them.
+	ListRetiredConnectorCredentials(ctx context.Context, ref ConnectorCredentialRef) ([]ConnectorCredential, error)
 	// DeleteConnectorCredential removes the row and its wrapped key and
 	// tombstones the UID so later writes fail with
 	// ErrConnectorCustodyTombstoned. Missing rows succeed.
@@ -97,7 +101,11 @@ type ConnectorConsent struct {
 	// started against; the callback refuses to exchange the code with a
 	// different authority.
 	AuthorityDigest string
-	ExpiresAt       time.Time
+	// Scopes are the scopes the consent requested. A token response that
+	// omits scope is taken to grant exactly these, never a later configured
+	// set.
+	Scopes    []string
+	ExpiresAt time.Time
 }
 
 // ConnectorCompletion is the second half of a consent: token material the

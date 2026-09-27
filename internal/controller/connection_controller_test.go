@@ -410,6 +410,7 @@ func TestConnectionRequestsForProvider(t *testing.T) {
 
 type fakeConnectorCredentialStore struct {
 	credentials        map[string]store.ConnectorCredential
+	retired            map[string][]store.ConnectorCredential
 	consents           map[string]int
 	parked             map[string][]store.ConnectorCompletion
 	deleted            []string
@@ -433,6 +434,10 @@ func (f *fakeConnectorCredentialStore) GetConnectorCredential(_ context.Context,
 		return store.ConnectorCredential{}, store.ErrNotFound
 	}
 	return credential, nil
+}
+
+func (f *fakeConnectorCredentialStore) ListRetiredConnectorCredentials(_ context.Context, ref store.ConnectorCredentialRef) ([]store.ConnectorCredential, error) {
+	return append([]store.ConnectorCredential(nil), f.retired[ref.ConnectionUID]...), nil
 }
 
 func (f *fakeConnectorCredentialStore) DeleteConnectorCredential(_ context.Context, connectionUID string) error {
@@ -541,8 +546,11 @@ func TestConnectionReconcilerFinalizerAndDisconnect(t *testing.T) {
 	if err := c.Status().Update(context.Background(), updated); err != nil {
 		t.Fatal(err)
 	}
-	authority := connectors.ProviderAuthorityDigest(provider)
+	authority := connectors.ProviderIssuerDigest(provider)
 	credentials.credentials[string(updated.UID)] = store.ConnectorCredential{AccessToken: "gho_access", RefreshToken: "ghr_refresh", AuthorityDigest: authority}
+	credentials.retired = map[string][]store.ConnectorCredential{string(updated.UID): {
+		{AccessToken: "gho_previous", RefreshToken: "ghr_previous", AuthorityDigest: authority},
+	}}
 	credentials.consents[string(updated.UID)] = 1
 	credentials.parked[string(updated.UID)] = []store.ConnectorCompletion{{
 		Credential: store.ConnectorCredential{AccessToken: "gho_parked", RefreshToken: "ghr_parked", AuthorityDigest: authority},
@@ -556,8 +564,8 @@ func TestConnectionReconcilerFinalizerAndDisconnect(t *testing.T) {
 	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
 		t.Fatalf("disconnect reconcile: %v", err)
 	}
-	if strings.Join(revoker.tokens, ",") != "ghr_refresh,gho_access" {
-		t.Fatalf("revoked tokens = %v, want only the committed credential, refresh before access", revoker.tokens)
+	if strings.Join(revoker.tokens, ",") != "ghr_refresh,gho_access,ghr_previous,gho_previous" {
+		t.Fatalf("revoked tokens = %v, want the committed credential and the ones it replaced, refresh before access", revoker.tokens)
 	}
 	if _, held := credentials.credentials[string(updated.UID)]; held || len(credentials.deleted) != 1 {
 		t.Fatalf("custody must be deleted even when revocation fails: %+v", credentials)
@@ -598,7 +606,7 @@ func TestConnectionReconcilerReapsExpiredCompletions(t *testing.T) {
 	connection := testConnection("tenant", "github-alice", "github")
 	connection.Finalizers = []string{ConnectionCustodyFinalizer}
 	credentials := newFakeConnectorCredentialStore()
-	authority := connectors.ProviderAuthorityDigest(provider)
+	authority := connectors.ProviderIssuerDigest(provider)
 	credentials.parked[string(connection.UID)] = []store.ConnectorCompletion{
 		{Nonce: "live", ExpiresAt: time.Now().Add(5 * time.Minute), Credential: store.ConnectorCredential{AccessToken: "gho_live", AuthorityDigest: authority}},
 		{Nonce: "stale", ExpiresAt: time.Now().Add(-time.Minute), Credential: store.ConnectorCredential{AccessToken: "gho_stale", RefreshToken: "ghr_stale", AuthorityDigest: authority}},
@@ -671,7 +679,7 @@ func TestConnectionReconcilerRevokesOnlyCommittedTokens(t *testing.T) {
 	provider.Spec.OAuth.RevocationURL = "https://github.com/revoke"
 	connection := testConnection("tenant", "github-alice", "github")
 	connection.Finalizers = []string{ConnectionCustodyFinalizer}
-	authority := connectors.ProviderAuthorityDigest(provider)
+	authority := connectors.ProviderIssuerDigest(provider)
 	credentials := newFakeConnectorCredentialStore()
 	credentials.credentials[string(connection.UID)] = store.ConnectorCredential{AccessToken: "gho_access", RefreshToken: "ghr_refresh", AuthorityDigest: authority}
 	credentials.parked[string(connection.UID)] = []store.ConnectorCompletion{

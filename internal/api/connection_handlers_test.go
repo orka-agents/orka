@@ -1336,3 +1336,112 @@ func TestConnectionCompletionRetryDoesNotOverwriteNewerCommit(t *testing.T) {
 		t.Fatalf("custody after resumed retry = %+v err = %v", credential, err)
 	}
 }
+
+// TestConnectionReauthorizationRetiresPreviousCredential covers linking twice:
+// the first credential is retained sealed so disconnect can revoke it.
+func TestConnectionReauthorizationRetiresPreviousCredential(t *testing.T) {
+	h := newConnectorTestHarness(t, acceptedTestProvider())
+	created := h.create("readOnly")
+	h.tokenSuffix = "-a"
+	h.link(created)
+	var reauthorized ConnectionAuthorizeResponse
+	if resp, raw := h.do(http.MethodPost, "/api/v1/connections/"+created.Connection.Name+"/authorize", nil); resp.StatusCode != http.StatusOK {
+		t.Fatalf("authorize = %d %s", resp.StatusCode, raw)
+	} else if err := json.Unmarshal(raw, &reauthorized); err != nil {
+		t.Fatal(err)
+	}
+	h.tokenSuffix = "-b"
+	h.link(reauthorized)
+	stored := &corev1alpha1.Connection{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: created.Connection.Name}, stored); err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := connectors.CredentialRef(stored)
+	retired, err := h.store.ListRetiredConnectorCredentials(context.Background(), ref)
+	if err != nil || len(retired) != 1 || retired[0].AccessToken != "gho_secret_access-a" {
+		t.Fatalf("retired = %+v err = %v, want the first credential", retired, err)
+	}
+	if held, err := h.store.GetConnectorCredential(context.Background(), ref); err != nil || held.AccessToken != "gho_secret_access-b" {
+		t.Fatalf("custody = %+v err = %v", held, err)
+	}
+}
+
+// TestConnectionOmittedScopeBindsToConsentRequest covers a provider whose
+// configured scopes grow between consent start and callback while the token
+// response omits scope: the grant is what the consent asked for, so the
+// link stays Pending until the person consents again.
+func TestConnectionOmittedScopeBindsToConsentRequest(t *testing.T) {
+	h := newConnectorTestHarness(t, acceptedTestProvider())
+	created := h.create("readOnly")
+	provider := &corev1alpha1.ConnectorProvider{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: "github"}, provider); err != nil {
+		t.Fatal(err)
+	}
+	provider.Spec.OAuth.Scopes.Read = []string{"read:user", "read:org"}
+	if err := h.client.Update(context.Background(), provider); err != nil {
+		t.Fatal(err)
+	}
+	h.grantScope = " "
+	location := h.consentAndCallback(created)
+	if resp, raw := h.complete(created.Connection.Name, completionFromLocation(t, location)); resp.StatusCode != http.StatusOK {
+		t.Fatalf("complete = %d %s", resp.StatusCode, raw)
+	}
+	stored := &corev1alpha1.Connection{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: created.Connection.Name}, stored); err != nil {
+		t.Fatal(err)
+	}
+	granted := meta.FindStatusCondition(stored.Status.Conditions, corev1alpha1.ConnectionConditionScopesGranted)
+	if strings.Join(stored.Status.GrantedScopes, ",") != "read:user" || granted == nil || granted.Status != metav1.ConditionFalse ||
+		stored.Status.State != corev1alpha1.ConnectionStatePending {
+		t.Fatalf("status after expanded provider = %+v", stored.Status)
+	}
+}
+
+// TestConnectionCreateRestoresOwnershipLabels covers a deterministic
+// Connection that exists without its list labels: reuse restores them.
+func TestConnectionCreateRestoresOwnershipLabels(t *testing.T) {
+	h := newConnectorTestHarness(t, acceptedTestProvider())
+	name := connectors.ConnectionName("github", connectorTestIssuer, "alice")
+	unlabeled := &corev1alpha1.Connection{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: connectorTestNamespace, Finalizers: []string{controller.ConnectionCustodyFinalizer}},
+		Spec: corev1alpha1.ConnectionSpec{
+			Subject: corev1alpha1.ConnectionSubject{Issuer: connectorTestIssuer, Subject: "alice"}, ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}, Mode: "readOnly",
+		},
+	}
+	if err := h.client.Create(context.Background(), unlabeled); err != nil {
+		t.Fatal(err)
+	}
+	created := h.create("readOnly")
+	stored := &corev1alpha1.Connection{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: created.Connection.Name}, stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.Labels[ConnectionProviderLabel] != "github" || stored.Labels[ConnectionSubjectDigestLabel] == "" {
+		t.Fatalf("labels after reuse = %v", stored.Labels)
+	}
+	if resp, raw := h.do(http.MethodGet, "/api/v1/connections", nil); resp.StatusCode != http.StatusOK || !strings.Contains(string(raw), created.Connection.Name) {
+		t.Fatalf("list after reuse = %d %s", resp.StatusCode, raw)
+	}
+}
+
+// TestConnectionNarrowingReportsReady covers narrowing a widened Connection
+// back to a mode the existing grant covers: the response is usable at once.
+func TestConnectionNarrowingReportsReady(t *testing.T) {
+	h := newConnectorTestHarness(t, acceptedTestProvider())
+	created := h.create("readOnly")
+	h.link(created)
+	if resp, raw := h.do(http.MethodPut, "/api/v1/connections/"+created.Connection.Name, map[string]string{"mode": "readWrite"}); resp.StatusCode != http.StatusOK || !strings.Contains(string(raw), `"state":"Pending"`) {
+		t.Fatalf("widen = %d %s", resp.StatusCode, raw)
+	}
+	resp, raw := h.do(http.MethodPut, "/api/v1/connections/"+created.Connection.Name, map[string]string{"mode": "readOnly"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("narrow = %d %s", resp.StatusCode, raw)
+	}
+	var narrowed ConnectionAuthorizeResponse
+	if err := json.Unmarshal(raw, &narrowed); err != nil {
+		t.Fatal(err)
+	}
+	if narrowed.AuthorizeURL != "" || !narrowed.Connection.Ready || narrowed.Connection.State != corev1alpha1.ConnectionStateReady {
+		t.Fatalf("narrowed = %+v, want ready without consent", narrowed)
+	}
+}

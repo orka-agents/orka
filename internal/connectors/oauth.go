@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -308,7 +309,11 @@ func (c *OAuthClient) tokenRequest(ctx context.Context, cfg OAuthProviderConfig,
 		TokenType:    payload.TokenType,
 		Scopes:       splitScopes(payload.Scope),
 	}
-	if seconds, ok := parseExpiresIn(payload.ExpiresIn); ok {
+	seconds, present, err := parseExpiresIn(payload.ExpiresIn)
+	if err != nil {
+		return TokenResponse{}, err
+	}
+	if present {
 		if seconds > maxExpiresInSeconds {
 			return TokenResponse{}, errors.New("token response expires_in is out of range")
 		}
@@ -386,21 +391,21 @@ func splitScopes(raw string) []string {
 
 // parseExpiresIn accepts the integer RFC form and the string form some
 // providers emit.
-func parseExpiresIn(raw json.RawMessage) (int64, bool) {
+// parseExpiresIn reads expires_in as a positive integer number of seconds,
+// given as a JSON number or a decimal string. An absent or null value is not
+// present; a present value that is zero, negative, fractional, or otherwise
+// malformed is an error, never silently a non-expiring credential.
+func parseExpiresIn(raw json.RawMessage) (int64, bool, error) {
 	if len(raw) == 0 || string(raw) == "null" {
-		return 0, false
-	}
-	var seconds int64
-	if err := json.Unmarshal(raw, &seconds); err == nil {
-		return seconds, seconds > 0
+		return 0, false, nil
 	}
 	var text string
 	if err := json.Unmarshal(raw, &text); err != nil {
-		return 0, false
+		text = string(raw)
 	}
-	var parsed int64
-	if _, err := fmt.Sscanf(strings.TrimSpace(text), "%d", &parsed); err != nil {
-		return 0, false
+	seconds, err := strconv.ParseInt(strings.TrimSpace(text), 10, 64)
+	if err != nil || seconds <= 0 {
+		return 0, true, errors.New("token response expires_in must be a positive integer")
 	}
-	return parsed, parsed > 0
+	return seconds, true, nil
 }

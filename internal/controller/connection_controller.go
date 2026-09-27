@@ -206,6 +206,16 @@ func (r *ConnectionReconciler) revokeBestEffort(ctx context.Context, connection 
 		return
 	}
 	r.revokeTokens(ctx, connection, credential)
+	// Credentials that later commits replaced were committed by the same
+	// owner and are still live upstream; disconnect revokes them too.
+	retired, err := r.Credentials.ListRetiredConnectorCredentials(ctx, ref)
+	if err != nil {
+		logger.Info("retired connector credentials could not be opened for revocation", "connection", connection.Name)
+		return
+	}
+	for _, previous := range retired {
+		r.revokeTokens(ctx, connection, previous)
+	}
 }
 
 // reapExpiredCompletions deletes parked completions whose redemption window
@@ -247,7 +257,7 @@ func (r *ConnectionReconciler) revokeTokens(ctx context.Context, connection *cor
 	if err := r.Get(ctx, types.NamespacedName{Namespace: connection.Namespace, Name: connection.Spec.ProviderRef.Name}, provider); err != nil {
 		return
 	}
-	if credential.AuthorityDigest == "" || credential.AuthorityDigest != connectors.ProviderAuthorityDigest(provider) {
+	if credential.AuthorityDigest == "" || credential.AuthorityDigest != connectors.ProviderIssuerDigest(provider) {
 		logger.Info("provider OAuth client changed since the token was issued; not revoking against a different authority",
 			"connection", connection.Name, "provider", provider.Name)
 		return

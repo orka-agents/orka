@@ -173,7 +173,7 @@ func TestConnectorConsentSingleUseAndExpiry(t *testing.T) {
 	s := newConnectorTestStore(t)
 	ctx := context.Background()
 	consent := store.ConnectorConsent{
-		Nonce: "nonce-1", ConnectionUID: "uid-1", Namespace: "tenant", Name: "github-abc", AuthorityDigest: "authority-1",
+		Nonce: "nonce-1", ConnectionUID: "uid-1", Namespace: "tenant", Name: "github-abc", AuthorityDigest: "authority-1", Scopes: []string{"read:user", "repo"},
 		SubjectDigest: "digest-a", Provider: "github", Mode: "readOnly", CodeVerifier: "verifier-secret",
 		ExpiresAt: time.Now().Add(10 * time.Minute),
 	}
@@ -192,7 +192,7 @@ func TestConnectorConsentSingleUseAndExpiry(t *testing.T) {
 		t.Fatalf("ConsumeConnectorConsent: %v", err)
 	}
 	if got.CodeVerifier != consent.CodeVerifier || got.ConnectionUID != consent.ConnectionUID || got.Mode != consent.Mode ||
-		got.SubjectDigest != consent.SubjectDigest || got.AuthorityDigest != "authority-1" {
+		got.SubjectDigest != consent.SubjectDigest || got.AuthorityDigest != "authority-1" || strings.Join(got.Scopes, " ") != "read:user repo" {
 		t.Fatalf("consent = %+v", got)
 	}
 	if _, err := s.ConsumeConnectorConsent(ctx, consent.Nonce); !errors.Is(err, store.ErrNotFound) {
@@ -468,5 +468,37 @@ func TestConnectorCompletionCommitMarksRowAtomically(t *testing.T) {
 	}
 	if _, err := s.PeekConnectorCompletion(ctx, completion.Nonce); err == nil {
 		t.Fatal("a committed completion whose fence column changed must not open")
+	}
+}
+
+// TestConnectorCommitRetiresReplacedCredential covers a re-authorization:
+// the credential a commit replaces stays sealed for disconnect to revoke,
+// and disconnect removes it with custody.
+func TestConnectorCommitRetiresReplacedCredential(t *testing.T) {
+	s := newConnectorTestStore(t)
+	ctx := context.Background()
+	completion := testConnectorCompletion()
+	ref := store.ConnectorCredentialRef{ConnectionUID: completion.ConnectionUID, Namespace: completion.Namespace, Name: completion.Name, SubjectDigest: completion.SubjectDigest, Provider: completion.Provider}
+	if err := s.PutConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho_first", RefreshToken: "ghr_first"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateConnectorCompletion(ctx, completion); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CommitConnectorCompletion(ctx, completion.Nonce, ref, completion.Credential); err != nil {
+		t.Fatal(err)
+	}
+	retired, err := s.ListRetiredConnectorCredentials(ctx, ref)
+	if err != nil || len(retired) != 1 || retired[0].AccessToken != "gho_first" || retired[0].RefreshToken != "ghr_first" {
+		t.Fatalf("retired = %+v err = %v, want the replaced credential", retired, err)
+	}
+	if held, err := s.GetConnectorCredential(ctx, ref); err != nil || held.AccessToken != "gho_parked" {
+		t.Fatalf("custody = %+v err = %v", held, err)
+	}
+	if err := s.DeleteConnectorCredential(ctx, ref.ConnectionUID); err != nil {
+		t.Fatal(err)
+	}
+	if retired, err := s.ListRetiredConnectorCredentials(ctx, ref); err != nil || len(retired) != 0 {
+		t.Fatalf("retired after disconnect = %+v err = %v, want none", retired, err)
 	}
 }

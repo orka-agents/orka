@@ -257,6 +257,18 @@ func TestTokenResponseEdgeCases(t *testing.T) {
 		"/huge-exp": func(w http.ResponseWriter) {
 			_, _ = w.Write([]byte(`{"access_token":"a","token_type":"bearer","expires_in":9223372036854775807}`))
 		},
+		"/junk-exp": func(w http.ResponseWriter) {
+			_, _ = w.Write([]byte(`{"access_token":"a","token_type":"bearer","expires_in":"3600oops"}`))
+		},
+		"/zero-exp": func(w http.ResponseWriter) {
+			_, _ = w.Write([]byte(`{"access_token":"a","token_type":"bearer","expires_in":0}`))
+		},
+		"/frac-exp": func(w http.ResponseWriter) {
+			_, _ = w.Write([]byte(`{"access_token":"a","token_type":"bearer","expires_in":1.5}`))
+		},
+		"/str-exp": func(w http.ResponseWriter) {
+			_, _ = w.Write([]byte(`{"access_token":"a","token_type":"bearer","expires_in":"3600"}`))
+		},
 	}
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -272,6 +284,7 @@ func TestTokenResponseEdgeCases(t *testing.T) {
 	for path, wantErr := range map[string]bool{
 		"/not-json": true, "/no-token": true, "/too-large": true, "/weird-err": true, "/null-exp": false,
 		"/mac-type": true, "/no-type": true, "/huge-exp": true,
+		"/junk-exp": true, "/zero-exp": true, "/frac-exp": true, "/str-exp": false,
 	} {
 		cfg := testOAuthConfig()
 		cfg.TokenURL = "https://provider.example.test" + path

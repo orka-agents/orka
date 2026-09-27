@@ -457,10 +457,24 @@ func (h *Handlers) CreateConnection(c fiber.Ctx) error {
 	case !connection.DeletionTimestamp.IsZero():
 		return fiber.NewError(fiber.StatusConflict, "the previous connection is still being removed; retry shortly")
 	default:
-		if connection.Spec.Mode != mode {
+		// A reused object may lack the ownership labels the list route
+		// selects by (created through Kubernetes, or labels stripped);
+		// restore them from the authoritative spec before consent.
+		wantLabels := map[string]string{ConnectionSubjectDigestLabel: connectionSubjectLabel(ui), ConnectionProviderLabel: provider.Name}
+		changed := connection.Spec.Mode != mode
+		for key, value := range wantLabels {
+			if connection.Labels[key] != value {
+				if connection.Labels == nil {
+					connection.Labels = map[string]string{}
+				}
+				connection.Labels[key] = value
+				changed = true
+			}
+		}
+		if changed {
 			connection.Spec.Mode = mode
 			if err := h.client.Update(ctx, connection); err != nil {
-				return fiber.NewError(fiber.StatusInternalServerError, "failed to update connection mode")
+				return fiber.NewError(fiber.StatusInternalServerError, "failed to update connection")
 			}
 		}
 	}
@@ -550,6 +564,13 @@ func (h *Handlers) UpdateConnection(c fiber.Ctx) error {
 		response.Connection.Ready = false
 		response.Connection.State = corev1alpha1.ConnectionStatePending
 		response.Connection.Message = "Consent is required for the " + mode + " mode"
+	} else if ready := meta.FindStatusCondition(connection.Status.Conditions, corev1alpha1.ConnectionConditionReady); ready != nil && ready.Status == metav1.ConditionTrue {
+		// Narrowing to a mode the existing grant covers is usable at once,
+		// even though the controller's conditions still observe the previous
+		// generation.
+		response.Connection.Ready = true
+		response.Connection.State = corev1alpha1.ConnectionStateReady
+		response.Connection.Message = "Account linked"
 	}
 	return c.JSON(response)
 }
@@ -663,8 +684,10 @@ func (h *Handlers) startConnectorConsent(ctx context.Context, connection *corev1
 		Provider:      provider.Name,
 		Mode:          mode,
 		CodeVerifier:  verifier,
-		// The code may only ever be exchanged with this OAuth client.
+		// The code may only ever be exchanged with this OAuth client and
+		// for these scopes; a token that reports no scope grants exactly them.
 		AuthorityDigest: connectors.ProviderAuthorityDigest(provider),
+		Scopes:          connectors.ScopesForMode(provider, mode),
 		ExpiresAt:       h.connectors.now().Add(connectors.ConsentTTL),
 	}); err != nil {
 		return "", fiber.NewError(fiber.StatusInternalServerError, "failed to record consent")
@@ -747,7 +770,13 @@ func (h *Handlers) ConnectionCallback(c fiber.Ctx) error {
 	// advertise tools its token cannot use, so refuse it and revoke the
 	// token rather than parking it. A provider that reports no scopes is
 	// taken at its word for the requested set.
-	required := connectors.ScopesForMode(provider, consent.Mode)
+	// The requested set is the one sealed with the consent, never the
+	// provider's current configuration: a provider expanded after consent
+	// started must not be credited with scopes the token never received.
+	required := consent.Scopes
+	if len(required) == 0 {
+		required = connectors.ScopesForMode(provider, consent.Mode)
+	}
 	if len(token.Scopes) == 0 {
 		token.Scopes = append([]string(nil), required...)
 	} else if !connectors.ScopesCover(token.Scopes, required) {
@@ -783,8 +812,9 @@ func (h *Handlers) ConnectionCallback(c fiber.Ctx) error {
 			ExpiresAt:    token.ExpiresAt,
 			Scopes:       token.Scopes,
 			// Sealed with the tokens: whichever path later refreshes or
-			// revokes them knows the client that issued them.
-			AuthorityDigest: consent.AuthorityDigest,
+			// revokes them knows the client that issued them, independent
+			// of tool-destination changes.
+			AuthorityDigest: connectors.ProviderIssuerDigest(provider),
 		},
 		ExpiresAt: h.connectors.now().Add(connectors.ConsentTTL),
 	}); err != nil {
@@ -865,7 +895,7 @@ func (h *Handlers) CompleteConnection(c fiber.Ctx) error {
 	}
 	// Tokens issued by a provider OAuth client that has since changed belong
 	// to a different authority; they are discarded, never committed.
-	if completion.Credential.AuthorityDigest != connectors.ProviderAuthorityDigest(provider) {
+	if completion.Credential.AuthorityDigest != connectors.ProviderIssuerDigest(provider) {
 		h.discardCompletion(ctx, completion, nonce)
 		return fiber.NewError(fiber.StatusConflict, "the connector provider changed after consent started; start consent again")
 	}
@@ -949,10 +979,11 @@ func (h *Handlers) markConnectionLinked(ctx context.Context, connection *corev1a
 		ObservedGeneration: connection.Generation,
 		LastTransitionTime: now,
 	})
-	// The provider was just verified Accepted, the callback refused a grant
-	// that does not cover the consented mode, and the consent record above
-	// matches the provider, so the link is usable as soon as it is committed.
-	// The controller recomputes both conditions on every reconcile.
+	// The provider was just verified Accepted and the consent record above
+	// matches it. The granted scopes are judged against what the mode
+	// requires now: a provider expanded after consent started leaves the
+	// link Pending until the person consents again. The controller
+	// recomputes both conditions on every reconcile.
 	meta.SetStatusCondition(&connection.Status.Conditions, metav1.Condition{
 		Type:               corev1alpha1.ConnectionConditionProviderResolved,
 		Status:             metav1.ConditionTrue,
@@ -961,14 +992,21 @@ func (h *Handlers) markConnectionLinked(ctx context.Context, connection *corev1a
 		ObservedGeneration: connection.Generation,
 		LastTransitionTime: now,
 	})
-	meta.SetStatusCondition(&connection.Status.Conditions, metav1.Condition{
+	granted := metav1.Condition{
 		Type:               corev1alpha1.ConnectionConditionScopesGranted,
 		Status:             metav1.ConditionTrue,
 		Reason:             corev1alpha1.ConnectionReasonScopesGranted,
 		Message:            "Granted scopes cover the " + mode + " mode",
 		ObservedGeneration: connection.Generation,
 		LastTransitionTime: now,
-	})
+	}
+	if !connectors.ScopesCover(credential.Scopes, connectors.ScopesForMode(provider, mode)) {
+		granted.Status = metav1.ConditionFalse
+		granted.Reason = corev1alpha1.ConnectionReasonConsentRequired
+		granted.Message = "Granted scopes do not cover the " + mode + " mode; consent again"
+		connection.Status.State = corev1alpha1.ConnectionStatePending
+	}
+	meta.SetStatusCondition(&connection.Status.Conditions, granted)
 	return h.client.Status().Update(ctx, connection)
 }
 

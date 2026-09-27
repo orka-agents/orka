@@ -52,11 +52,23 @@ func connectorSchemaStatements() []string {
 			verifier_nonce      BLOB NOT NULL,
 			verifier_ciphertext BLOB NOT NULL,
 			authority_digest    TEXT NOT NULL DEFAULT '',
+			scopes              TEXT NOT NULL DEFAULT '',
 			expires_at          TIMESTAMP NOT NULL,
 			created_at          TIMESTAMP NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_connector_consents_connection
 			ON connector_consents(connection_uid)`,
+		`CREATE TABLE IF NOT EXISTS connector_retired_credentials (
+			id             INTEGER PRIMARY KEY AUTOINCREMENT,
+			connection_uid TEXT NOT NULL,
+			dek_nonce      BLOB NOT NULL,
+			dek_ciphertext BLOB NOT NULL,
+			nonce          BLOB NOT NULL,
+			ciphertext     BLOB NOT NULL,
+			retired_at     TIMESTAMP NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_connector_retired_credentials_connection
+			ON connector_retired_credentials(connection_uid)`,
 		`CREATE TABLE IF NOT EXISTS connector_completions (
 			nonce           TEXT PRIMARY KEY,
 			connection_uid  TEXT NOT NULL,
@@ -107,9 +119,9 @@ func connectorCredentialAdditionalData(ref store.ConnectorCredentialRef) []byte 
 // column the callback fence reads, including the OAuth-authority digest, so
 // an altered row cannot steer the code exchange to a different endpoint.
 func connectorConsentAdditionalData(consent store.ConnectorConsent) []byte {
-	return fmt.Appendf(nil, "orka.connector-consent\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%d",
+	return fmt.Appendf(nil, "orka.connector-consent\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%d",
 		consent.Nonce, consent.ConnectionUID, consent.Namespace, consent.Name, consent.SubjectDigest,
-		consent.Provider, consent.Mode, consent.AuthorityDigest, consent.ExpiresAt.UTC().Unix())
+		consent.Provider, consent.Mode, consent.AuthorityDigest, strings.Join(consent.Scopes, " "), consent.ExpiresAt.UTC().Unix())
 }
 
 // connectorCompletionAdditionalData binds the sealed payload to every
@@ -322,6 +334,14 @@ func (s *Store) CommitConnectorCompletion(ctx context.Context, nonce string, ref
 		return fmt.Errorf("begin connector completion commit: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	// A credential this commit replaces is kept sealed so disconnect can
+	// still revoke it; only Orka held a copy.
+	if _, err := tx.ExecContext(ctx, `INSERT INTO connector_retired_credentials
+		(connection_uid, dek_nonce, dek_ciphertext, nonce, ciphertext, retired_at)
+		SELECT connection_uid, dek_nonce, dek_ciphertext, nonce, ciphertext, ? FROM connector_credentials WHERE connection_uid = ?`,
+		time.Now().UTC(), ref.ConnectionUID); err != nil {
+		return fmt.Errorf("retire replaced connector credential: %w", err)
+	}
 	if err := s.putConnectorCredentialTx(ctx, tx, ref, credential); err != nil {
 		return err
 	}
@@ -381,6 +401,17 @@ func (s *Store) GetConnectorCredential(ctx context.Context, ref store.ConnectorC
 	if err != nil {
 		return store.ConnectorCredential{}, fmt.Errorf("read connector credential: %w", err)
 	}
+	credential, err := s.openConnectorCredentialRow(ref, dekNonce, dekCiphertext, nonce, ciphertext)
+	if err != nil {
+		return store.ConnectorCredential{}, err
+	}
+	credential.UpdatedAt = updatedAt.UTC()
+	return credential, nil
+}
+
+// openConnectorCredentialRow unwraps a row's data key and opens its sealed
+// body, both bound to ref.
+func (s *Store) openConnectorCredentialRow(ref store.ConnectorCredentialRef, dekNonce, dekCiphertext, nonce, ciphertext []byte) (store.ConnectorCredential, error) {
 	dataKey, err := s.snapshotCipher.aead.Open(nil, dekNonce, dekCiphertext, connectorDataKeyAdditionalData(ref.ConnectionUID))
 	if err != nil {
 		return store.ConnectorCredential{}, fmt.Errorf("unwrap connector data key for connection %s: %w", ref.ConnectionUID, err)
@@ -393,12 +424,40 @@ func (s *Store) GetConnectorCredential(ctx context.Context, ref store.ConnectorC
 	if err != nil {
 		return store.ConnectorCredential{}, fmt.Errorf("open connector credential for connection %s: binding mismatch or corrupt row: %w", ref.ConnectionUID, err)
 	}
-	credential, err := decodeSealedConnectorCredential(body)
-	if err != nil {
-		return store.ConnectorCredential{}, err
+	return decodeSealedConnectorCredential(body)
+}
+
+// ListRetiredConnectorCredentials implements store.ConnectorCredentialStore.
+func (s *Store) ListRetiredConnectorCredentials(ctx context.Context, ref store.ConnectorCredentialRef) ([]store.ConnectorCredential, error) {
+	if s.snapshotCipher == nil {
+		return nil, errConnectorCipherRequired
 	}
-	credential.UpdatedAt = updatedAt.UTC()
-	return credential, nil
+	if err := ref.Validate(); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT dek_nonce, dek_ciphertext, nonce, ciphertext, retired_at
+		FROM connector_retired_credentials WHERE connection_uid = ? ORDER BY id`, ref.ConnectionUID)
+	if err != nil {
+		return nil, fmt.Errorf("read retired connector credentials: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var result []store.ConnectorCredential
+	for rows.Next() {
+		var (
+			dekNonce, dekCiphertext, nonce, ciphertext []byte
+			retiredAt                                  time.Time
+		)
+		if err := rows.Scan(&dekNonce, &dekCiphertext, &nonce, &ciphertext, &retiredAt); err != nil {
+			return nil, fmt.Errorf("scan retired connector credential: %w", err)
+		}
+		credential, err := s.openConnectorCredentialRow(ref, dekNonce, dekCiphertext, nonce, ciphertext)
+		if err != nil {
+			return nil, err
+		}
+		credential.UpdatedAt = retiredAt.UTC()
+		result = append(result, credential)
+	}
+	return result, rows.Err()
 }
 
 // DeleteConnectorCredential implements store.ConnectorCredentialStore.
@@ -413,6 +472,9 @@ func (s *Store) DeleteConnectorCredential(ctx context.Context, connectionUID str
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `DELETE FROM connector_credentials WHERE connection_uid = ?`, connectionUID); err != nil {
 		return fmt.Errorf("delete connector credential: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM connector_retired_credentials WHERE connection_uid = ?`, connectionUID); err != nil {
+		return fmt.Errorf("delete retired connector credentials: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO connector_credential_tombstones (connection_uid, deleted_at) VALUES (?, ?)
 		ON CONFLICT(connection_uid) DO NOTHING`, connectionUID, time.Now().UTC()); err != nil {
@@ -453,10 +515,10 @@ func (s *Store) CreateConnectorConsent(ctx context.Context, consent store.Connec
 		return fmt.Errorf("purge expired connector consents: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO connector_consents
-		(nonce, connection_uid, namespace, name, subject_digest, provider, mode, verifier_nonce, verifier_ciphertext, authority_digest, expires_at, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(nonce, connection_uid, namespace, name, subject_digest, provider, mode, verifier_nonce, verifier_ciphertext, authority_digest, scopes, expires_at, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		consent.Nonce, consent.ConnectionUID, consent.Namespace, consent.Name, consent.SubjectDigest, consent.Provider,
-		consent.Mode, verifierNonce, verifierCiphertext, consent.AuthorityDigest, consent.ExpiresAt.UTC(), now); err != nil {
+		consent.Mode, verifierNonce, verifierCiphertext, consent.AuthorityDigest, strings.Join(consent.Scopes, " "), consent.ExpiresAt.UTC(), now); err != nil {
 		return fmt.Errorf("persist connector consent: %w", err)
 	}
 	return tx.Commit()
@@ -482,10 +544,12 @@ func (s *Store) ConsumeConnectorConsent(ctx context.Context, nonce string) (stor
 		consent                           store.ConnectorConsent
 		verifierNonce, verifierCiphertext []byte
 	)
+	var scopes string
 	err = tx.QueryRowContext(ctx, `SELECT nonce, connection_uid, namespace, name, subject_digest, provider, mode,
-		verifier_nonce, verifier_ciphertext, authority_digest, expires_at FROM connector_consents WHERE nonce = ?`, nonce).
+		verifier_nonce, verifier_ciphertext, authority_digest, scopes, expires_at FROM connector_consents WHERE nonce = ?`, nonce).
 		Scan(&consent.Nonce, &consent.ConnectionUID, &consent.Namespace, &consent.Name, &consent.SubjectDigest,
-			&consent.Provider, &consent.Mode, &verifierNonce, &verifierCiphertext, &consent.AuthorityDigest, &consent.ExpiresAt)
+			&consent.Provider, &consent.Mode, &verifierNonce, &verifierCiphertext, &consent.AuthorityDigest, &scopes, &consent.ExpiresAt)
+	consent.Scopes = strings.Fields(scopes)
 	if errors.Is(err, sql.ErrNoRows) {
 		return store.ConnectorConsent{}, store.ErrNotFound
 	}

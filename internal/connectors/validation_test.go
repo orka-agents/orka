@@ -555,6 +555,17 @@ func TestProviderAuthorityDigestAndConsent(t *testing.T) {
 	if ProviderAuthorityDigest(collide) == ProviderAuthorityDigest(split) {
 		t.Fatal("delimiter-bearing values must not collide with a different parameter set")
 	}
+	// The issuer digest ignores tool destinations but follows the client.
+	retargeted := provider.DeepCopy()
+	retargeted.Spec.Tools[2].HTTP.URL = "https://api.github.com/elsewhere"
+	if ProviderIssuerDigest(retargeted) != ProviderIssuerDigest(provider) || ProviderAuthorityDigest(retargeted) == ProviderAuthorityDigest(provider) {
+		t.Fatal("a retargeted tool must move the authority digest but not the issuer digest")
+	}
+	rotated := provider.DeepCopy()
+	rotated.Spec.OAuth.ClientID = "other"
+	if ProviderIssuerDigest(rotated) == ProviderIssuerDigest(provider) || ProviderIssuerDigest(nil) != "" {
+		t.Fatal("a rotated client must move the issuer digest")
+	}
 	// Built-in declarations do not carry a destination and do not move the digest.
 	builtinOnly := provider.DeepCopy()
 	builtinOnly.Spec.Tools = append(builtinOnly.Spec.Tools, corev1alpha1.ConnectorTool{Name: "list_issues", Class: corev1alpha1.ConnectorToolClassRead, Source: corev1alpha1.ConnectorToolSourceBuiltin})
