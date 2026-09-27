@@ -10,8 +10,10 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -19,21 +21,43 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/connectors"
+	"github.com/orka-agents/orka/internal/store"
 )
 
-const connectionRefreshInterval = 5 * time.Minute
+const (
+	connectionRefreshInterval = 5 * time.Minute
+	connectionRequeueInterval = 100 * time.Millisecond
 
-// ConnectionReconciler resolves a Connection's provider and projects link
-// state. Token custody is handled by the API server's consent flow; this
-// reconciler never reads or writes token material.
+	// ConnectionCustodyFinalizer holds a Connection until its sealed token
+	// material is deleted and the provider token is revoked best-effort.
+	ConnectionCustodyFinalizer = "core.orka.ai/connector-custody"
+
+	connectionRevokeTimeout = 10 * time.Second
+)
+
+// ConnectorTokenRevoker revokes a token at the provider. It is satisfied by
+// *connectors.OAuthClient and by test fakes.
+type ConnectorTokenRevoker interface {
+	Revoke(ctx context.Context, cfg connectors.OAuthProviderConfig, token string) error
+}
+
+// ConnectionReconciler resolves a Connection's provider, projects link state,
+// and on deletion removes sealed custody and revokes the upstream token. It
+// never writes token material anywhere.
 type ConnectionReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	APIReader   client.Reader
+	Scheme      *runtime.Scheme
+	Credentials store.ConnectorCredentialStore
+	Consents    store.ConnectorConsentStore
+	Revoker     ConnectorTokenRevoker
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=connections,verbs=get;list;watch;update;patch;delete
@@ -49,7 +73,14 @@ func (r *ConnectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 	if !connection.DeletionTimestamp.IsZero() {
-		return ctrl.Result{}, nil
+		return r.finalize(ctx, connection)
+	}
+	if r.Credentials != nil && !controllerutil.ContainsFinalizer(connection, ConnectionCustodyFinalizer) {
+		controllerutil.AddFinalizer(connection, ConnectionCustodyFinalizer)
+		if err := r.Update(ctx, connection); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: connectionRequeueInterval}, nil
 	}
 
 	now := metav1.Now()
@@ -128,6 +159,84 @@ func scopesGrantedCondition(connection *corev1alpha1.Connection, provider *corev
 	return condition
 }
 
+// finalize deletes sealed custody, drops pending consents, revokes the
+// provider token best-effort, and releases the finalizer. Custody deletion
+// must succeed before the finalizer is removed; revocation failures are
+// logged and do not block disconnect.
+func (r *ConnectionReconciler) finalize(ctx context.Context, connection *corev1alpha1.Connection) (ctrl.Result, error) {
+	if !controllerutil.ContainsFinalizer(connection, ConnectionCustodyFinalizer) {
+		return ctrl.Result{}, nil
+	}
+	if r.Credentials != nil {
+		r.revokeBestEffort(ctx, connection)
+		if err := r.Credentials.DeleteConnectorCredential(ctx, string(connection.UID)); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	if r.Consents != nil {
+		if err := r.Consents.DeleteConnectorConsentsForConnection(ctx, string(connection.UID)); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	controllerutil.RemoveFinalizer(connection, ConnectionCustodyFinalizer)
+	if err := r.Update(ctx, connection); err != nil && !apierrors.IsNotFound(err) {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
+}
+
+func (r *ConnectionReconciler) revokeBestEffort(ctx context.Context, connection *corev1alpha1.Connection) {
+	logger := log.FromContext(ctx)
+	if r.Revoker == nil {
+		return
+	}
+	ref, err := connectors.CredentialRef(connection)
+	if err != nil {
+		return
+	}
+	credential, err := r.Credentials.GetConnectorCredential(ctx, ref)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			logger.Info("connector credential could not be opened for revocation; deleting custody anyway", "connection", connection.Name)
+		}
+		return
+	}
+	provider := &corev1alpha1.ConnectorProvider{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: connection.Namespace, Name: connection.Spec.ProviderRef.Name}, provider); err != nil {
+		return
+	}
+	if strings.TrimSpace(provider.Spec.OAuth.RevocationURL) == "" {
+		return
+	}
+	secret := &corev1.Secret{}
+	secretRef := provider.Spec.OAuth.ClientSecretRef
+	if err := r.referenceReader().Get(ctx, types.NamespacedName{Namespace: provider.Namespace, Name: secretRef.Name}, secret); err != nil {
+		return
+	}
+	clientSecret := strings.TrimSpace(string(secret.Data[secretRef.Key]))
+	if clientSecret == "" {
+		return
+	}
+	revokeCtx, cancel := context.WithTimeout(ctx, connectionRevokeTimeout)
+	defer cancel()
+	cfg := connectors.ProviderOAuthConfig(provider, clientSecret)
+	for _, token := range []string{credential.RefreshToken, credential.AccessToken} {
+		if token == "" {
+			continue
+		}
+		if err := r.Revoker.Revoke(revokeCtx, cfg, token); err != nil {
+			logger.Info("provider token revocation failed; continuing with disconnect", "connection", connection.Name, "provider", provider.Name)
+		}
+	}
+}
+
+func (r *ConnectionReconciler) referenceReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
+}
+
 func (r *ConnectionReconciler) updateStatus(
 	ctx context.Context,
 	connection *corev1alpha1.Connection,
@@ -195,6 +304,9 @@ func (r *ConnectionReconciler) requestsForProvider(ctx context.Context, object c
 
 // SetupWithManager registers Connection and provider watches.
 func (r *ConnectionReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.Connection{}).
 		Watches(&corev1alpha1.ConnectorProvider{}, handler.EnqueueRequestsFromMapFunc(r.requestsForProvider)).

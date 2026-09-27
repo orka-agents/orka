@@ -1,0 +1,331 @@
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
+package connectors
+
+import (
+	"context"
+	"crypto/tls"
+	"encoding/json"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"testing"
+	"time"
+
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+)
+
+// fixtureClient routes every request for the configured public-looking host
+// to the local TLS fixture, so the production URL checks stay strict.
+func fixtureClient(server *httptest.Server) *http.Client {
+	addr := server.Listener.Addr().String()
+	return &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, network, addr)
+			},
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // #nosec G402 -- local test fixture
+		},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+}
+
+func testOAuthConfig() OAuthProviderConfig {
+	return OAuthProviderConfig{
+		AuthorizeURL:         "https://provider.example.test/authorize",
+		TokenURL:             "https://provider.example.test/token",
+		RevocationURL:        "https://provider.example.test/revoke",
+		ClientID:             "client-id",
+		ClientSecret:         "client-secret",
+		ClientAuthentication: corev1alpha1.ConnectorClientAuthSecretBasic,
+		PKCE:                 true,
+	}
+}
+
+func TestAuthorizeURL(t *testing.T) {
+	cfg := testOAuthConfig()
+	cfg.AdditionalAuthorizeParameters = map[string]string{"prompt": "consent"}
+	raw, err := AuthorizeURL(cfg, "https://orka.example.test/api/v1/connections/callback", "nonce.sig", []string{"read:user", "repo"}, "challenge")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := parsed.Query()
+	for key, want := range map[string]string{
+		"response_type": "code", "client_id": "client-id", "redirect_uri": "https://orka.example.test/api/v1/connections/callback",
+		"state": "nonce.sig", "scope": "read:user repo", "code_challenge": "challenge", "code_challenge_method": "S256", "prompt": "consent",
+	} {
+		if query.Get(key) != want {
+			t.Fatalf("%s = %q, want %q", key, query.Get(key), want)
+		}
+	}
+	cfg.PKCE = false
+	raw, err = AuthorizeURL(cfg, "https://orka.example.test/cb", "s", nil, "")
+	if err != nil || strings.Contains(raw, "code_challenge") || strings.Contains(raw, "scope=") {
+		t.Fatalf("non-PKCE URL = %q, err = %v", raw, err)
+	}
+	cfg.PKCE = true
+	if _, err := AuthorizeURL(cfg, "https://orka.example.test/cb", "s", nil, ""); err == nil {
+		t.Fatal("PKCE without a challenge must fail")
+	}
+	cfg.AdditionalAuthorizeParameters = map[string]string{"Redirect_URI": "https://evil.example"}
+	if _, err := AuthorizeURL(cfg, "https://orka.example.test/cb", "s", nil, "c"); err == nil {
+		t.Fatal("reserved authorize parameter must fail")
+	}
+	cfg.AdditionalAuthorizeParameters = nil
+	cfg.AuthorizeURL = "http://provider.example.test/authorize"
+	if _, err := AuthorizeURL(cfg, "https://orka.example.test/cb", "s", nil, "c"); err == nil {
+		t.Fatal("plain http authorize URL must fail")
+	}
+}
+
+func TestExchangeCodeAndRefresh(t *testing.T) {
+	var lastForm url.Values
+	var lastAuth string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.Header.Get("Accept") != "application/json" {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "bad form", http.StatusBadRequest)
+			return
+		}
+		lastForm = r.PostForm
+		lastAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/token":
+			switch r.PostForm.Get("grant_type") {
+			case "authorization_code":
+				if r.PostForm.Get("code") != "good-code" {
+					_ = json.NewEncoder(w).Encode(map[string]string{"error": "bad_verification_code", "error_description": "The code passed is incorrect or expired."})
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"access_token": "gho_access", "refresh_token": "ghr_refresh", "token_type": "bearer",
+					"expires_in": 28800, "scope": "repo,read:user",
+				})
+			case "refresh_token":
+				if r.PostForm.Get("refresh_token") != "ghr_refresh" {
+					w.WriteHeader(http.StatusUnauthorized)
+					_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid_grant"})
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "gho_rotated", "refresh_token": "ghr_rotated", "expires_in": "3600", "scope": "repo read:user"})
+			default:
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "unsupported_grant_type"})
+			}
+		case "/revoke":
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	client := NewOAuthClient(OAuthClientOptions{HTTPClient: fixtureClient(server), Now: func() time.Time { return now }})
+	cfg := testOAuthConfig()
+	ctx := context.Background()
+
+	token, err := client.ExchangeCode(ctx, cfg, "good-code", "verifier", "https://orka.example.test/cb")
+	if err != nil {
+		t.Fatalf("ExchangeCode: %v", err)
+	}
+	if token.AccessToken != "gho_access" || token.RefreshToken != "ghr_refresh" || token.TokenType != "bearer" {
+		t.Fatalf("token = %+v", token)
+	}
+	if !token.ExpiresAt.Equal(now.Add(8 * time.Hour)) {
+		t.Fatalf("ExpiresAt = %v", token.ExpiresAt)
+	}
+	if len(token.Scopes) != 2 || token.Scopes[0] != "repo" || token.Scopes[1] != "read:user" {
+		t.Fatalf("scopes = %v", token.Scopes)
+	}
+	if lastForm.Get("code_verifier") != "verifier" || lastForm.Get("redirect_uri") != "https://orka.example.test/cb" || lastForm.Get("client_secret") != "" {
+		t.Fatalf("form = %v", lastForm)
+	}
+	if !strings.HasPrefix(lastAuth, "Basic ") {
+		t.Fatalf("Authorization = %q, want basic client auth", lastAuth)
+	}
+
+	// GitHub-style 200 with an error body is a rejection with a sanitized code.
+	_, err = client.ExchangeCode(ctx, cfg, "bad-code", "verifier", "https://orka.example.test/cb")
+	var oauthErr *OAuthError
+	if !asOAuthError(err, &oauthErr) || oauthErr.Code != "bad_verification_code" || !oauthErr.IsInvalidGrant() {
+		t.Fatalf("bad code err = %v", err)
+	}
+	if strings.Contains(err.Error(), "incorrect or expired") {
+		t.Fatalf("error leaked the provider description: %v", err)
+	}
+
+	assertRefreshAndRevoke(t, client, cfg, &lastForm, &lastAuth)
+}
+
+func assertRefreshAndRevoke(t *testing.T, client *OAuthClient, cfg OAuthProviderConfig, lastForm *url.Values, lastAuth *string) {
+	t.Helper()
+	ctx := context.Background()
+	var oauthErr *OAuthError
+	cfg.ClientAuthentication = corev1alpha1.ConnectorClientAuthSecretPost
+	refreshed, err := client.Refresh(ctx, cfg, "ghr_refresh")
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if refreshed.AccessToken != "gho_rotated" || refreshed.RefreshToken != "ghr_rotated" || refreshed.ExpiresAt.IsZero() {
+		t.Fatalf("refreshed = %+v", refreshed)
+	}
+	if (*lastForm).Get("client_secret") != "client-secret" || (*lastForm).Get("client_id") != "client-id" || *lastAuth != "" {
+		t.Fatalf("post client auth form = %v auth = %q", *lastForm, *lastAuth)
+	}
+	_, err = client.Refresh(ctx, cfg, "stale")
+	if !asOAuthError(err, &oauthErr) || oauthErr.StatusCode != http.StatusUnauthorized || !oauthErr.IsInvalidGrant() {
+		t.Fatalf("stale refresh err = %v", err)
+	}
+
+	if err := client.Revoke(ctx, cfg, "gho_access"); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	if (*lastForm).Get("token") != "gho_access" {
+		t.Fatalf("revoke form = %v", lastForm)
+	}
+	cfg.RevocationURL = ""
+	if err := client.Revoke(ctx, cfg, "gho_access"); err != nil {
+		t.Fatalf("Revoke without endpoint must succeed: %v", err)
+	}
+}
+
+func TestOAuthClientRejectsUnsafeEndpoints(t *testing.T) {
+	client := NewOAuthClient(OAuthClientOptions{})
+	ctx := context.Background()
+	for name, tokenURL := range map[string]string{
+		"http":         "http://provider.example.test/token",
+		"loopback":     "https://127.0.0.1/token",
+		"link-local":   "https://[fe80::1]/token",
+		"zone":         "https://[fe80::1%25eth0]/token",
+		"trailing dot": "https://provider.example.test./token",
+		"userinfo":     "https://u:p@provider.example.test/token",
+	} {
+		cfg := testOAuthConfig()
+		cfg.TokenURL = tokenURL
+		if _, err := client.ExchangeCode(ctx, cfg, "code", "verifier", "https://orka.example.test/cb"); err == nil {
+			t.Fatalf("%s endpoint must be rejected", name)
+		}
+	}
+	cfg := testOAuthConfig()
+	if _, err := client.ExchangeCode(ctx, cfg, "", "verifier", "https://orka.example.test/cb"); err == nil {
+		t.Fatal("empty code must be rejected")
+	}
+	if _, err := client.ExchangeCode(ctx, cfg, "code", "", "https://orka.example.test/cb"); err == nil {
+		t.Fatal("PKCE without a verifier must be rejected")
+	}
+	if _, err := client.Refresh(ctx, cfg, ""); err == nil {
+		t.Fatal("empty refresh token must be rejected")
+	}
+	cfg.ClientAuthentication = "PrivateKeyJWT"
+	if _, err := client.ExchangeCode(ctx, cfg, "code", "verifier", "https://orka.example.test/cb"); err == nil {
+		t.Fatal("unsupported client auth must be rejected")
+	}
+}
+
+func TestTokenResponseEdgeCases(t *testing.T) {
+	responses := map[string]func(http.ResponseWriter){
+		"/not-json": func(w http.ResponseWriter) { _, _ = w.Write([]byte("<html>")) },
+		"/no-token": func(w http.ResponseWriter) { _, _ = w.Write([]byte(`{"token_type":"bearer"}`)) },
+		"/too-large": func(w http.ResponseWriter) {
+			_, _ = w.Write([]byte(`{"access_token":"` + strings.Repeat("a", maxOAuthResponseBytes) + `"}`))
+		},
+		"/weird-err": func(w http.ResponseWriter) {
+			w.WriteHeader(500)
+			_, _ = w.Write([]byte(`{"error":"Bad Things<script>"}`))
+		},
+		"/null-exp": func(w http.ResponseWriter) { _, _ = w.Write([]byte(`{"access_token":"a","expires_in":null}`)) },
+	}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if respond, ok := responses[r.URL.Path]; ok {
+			respond(w)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	client := NewOAuthClient(OAuthClientOptions{HTTPClient: fixtureClient(server)})
+	ctx := context.Background()
+	for path, wantErr := range map[string]bool{"/not-json": true, "/no-token": true, "/too-large": true, "/weird-err": true, "/null-exp": false} {
+		cfg := testOAuthConfig()
+		cfg.TokenURL = "https://provider.example.test" + path
+		token, err := client.ExchangeCode(ctx, cfg, "code", "verifier", "https://orka.example.test/cb")
+		if (err != nil) != wantErr {
+			t.Fatalf("%s: err = %v, want error %t", path, err, wantErr)
+		}
+		if path == "/weird-err" {
+			var oauthErr *OAuthError
+			if !asOAuthError(err, &oauthErr) || oauthErr.Code != unknownOAuthErrorCode {
+				t.Fatalf("unsanitized code: %v", err)
+			}
+		}
+		if path == "/null-exp" && !token.ExpiresAt.IsZero() {
+			t.Fatalf("null expires_in must yield zero expiry, got %v", token.ExpiresAt)
+		}
+	}
+}
+
+func TestProviderOAuthConfigDefaults(t *testing.T) {
+	if cfg := ProviderOAuthConfig(nil, "x"); cfg.ClientID != "" {
+		t.Fatal("nil provider must yield empty config")
+	}
+	provider := &corev1alpha1.ConnectorProvider{}
+	provider.Spec.OAuth.ClientID = "id"
+	cfg := ProviderOAuthConfig(provider, "secret")
+	if !cfg.PKCE || cfg.ClientAuthentication != corev1alpha1.ConnectorClientAuthSecretBasic || cfg.ClientSecret != "secret" {
+		t.Fatalf("defaults = %+v", cfg)
+	}
+	disabled := false
+	provider.Spec.OAuth.PKCE = &disabled
+	provider.Spec.OAuth.ClientAuthentication = corev1alpha1.ConnectorClientAuthSecretPost
+	cfg = ProviderOAuthConfig(provider, "secret")
+	if cfg.PKCE || cfg.ClientAuthentication != corev1alpha1.ConnectorClientAuthSecretPost {
+		t.Fatalf("overrides = %+v", cfg)
+	}
+}
+
+func TestGeneratePKCEAndNonce(t *testing.T) {
+	verifier, challenge, err := GeneratePKCE()
+	if err != nil || len(verifier) < 43 || challenge == "" || challenge == verifier {
+		t.Fatalf("PKCE = %q %q %v", verifier, challenge, err)
+	}
+	nonce, err := GenerateStateNonce()
+	if err != nil || len(nonce) < 43 || strings.Contains(nonce, ".") {
+		t.Fatalf("nonce = %q %v", nonce, err)
+	}
+	other, _ := GenerateStateNonce()
+	if other == nonce {
+		t.Fatal("nonces must be random")
+	}
+}
+
+func asOAuthError(err error, target **OAuthError) bool {
+	for err != nil {
+		if e, ok := err.(*OAuthError); ok {
+			*target = e
+			return true
+		}
+		unwrapper, ok := err.(interface{ Unwrap() error })
+		if !ok {
+			return false
+		}
+		err = unwrapper.Unwrap()
+	}
+	return false
+}

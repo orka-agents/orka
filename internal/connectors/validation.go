@@ -223,7 +223,7 @@ func validateEndpointURL(field, raw string, required bool) *Issue {
 		return invalid(fmt.Sprintf("oauth.%s must not contain surrounding whitespace", field))
 	}
 	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" || strings.Contains(raw, "#") || parsed.String() != raw {
+	if err != nil || parsed.Scheme != schemeHTTPS || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" || strings.Contains(raw, "#") || parsed.String() != raw {
 		return invalid(fmt.Sprintf("oauth.%s must be an absolute HTTPS URL without userinfo or fragment", field))
 	}
 	host := parsed.Hostname()

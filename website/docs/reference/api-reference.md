@@ -398,6 +398,24 @@ Status contains only `observedGeneration`, `Accepted`, and `ResolvedRefs`. `Buil
 
 Conditions are `ProviderResolved` and `ScopesGranted` (set by the controller; the latter compares `status.grantedScopes` with the scopes the current mode and provider require, so widening the mode or a provider requiring more scopes projects `Pending` with reason `ConsentRequired` without erasing the consent, and narrowing restores readiness; it also requires `status.consent` to match the current provider, so a replaced provider or a changed OAuth client asks for consent again instead of refreshing or revoking the held token against a different authority) and `Ready` (set by the consent and refresh paths). A Connection is usable only when `Ready` is True and both controller conditions are True for the current generation. See [ADR 0033](https://github.com/orka-agents/orka/blob/main/docs/adr/0033-user-connectors.md) for the design.
 
+## Connector endpoints
+
+Available when the controller runs with `--connectors-enabled` and `--connector-callback-base-url`. Every route requires a verified OIDC or context-token identity carrying an issuer and subject; ServiceAccount bearer tokens are refused with 403. A person sees and changes only Connections whose `spec.subject` matches their identity; a foreign Connection reads as 404. Responses never carry token material.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/connectors` | GET | List the provider catalog: name, display name, readiness, scopes, and tools with their `read`/`write` class. |
+| `/api/v1/connections` | GET | List the caller's Connections. |
+| `/api/v1/connections` | POST | Body `{"provider": "github", "mode": "readOnly"}`. Creates or reuses the caller's Connection for that provider and returns `{"connection": ..., "authorizeURL": ...}`. The browser opens `authorizeURL`; unknown body fields, including any subject, are rejected. |
+| `/api/v1/connections/:name` | GET | One Connection. |
+| `/api/v1/connections/:name` | PUT | Body `{"mode": "readWrite"}`. Widening to `readWrite` returns a new `authorizeURL` because write scopes must be granted; narrowing takes effect immediately. |
+| `/api/v1/connections/:name` | DELETE | Disconnect. The controller's finalizer deletes the sealed material and revokes the provider token best-effort. |
+| `/api/v1/connections/:name/authorize` | POST | Restart consent for an existing Connection, for example after the provider revoked it. |
+| `/api/v1/connections/callback` | GET | OAuth redirect target. Unauthenticated: the signed single-use `state` and the server-side PKCE verifier authenticate it. It exchanges the code, parks the tokens sealed as a pending completion, and redirects to `<callback base>/settings/connectors?status=pending&connection=<name>#completion=<token>`, or `?status=error&reason=<code>`. |
+| `/api/v1/connections/:name/complete` | POST | Body `{"completion": "<token from the fragment>"}`. Commits the parked tokens. Only the Connection's owner can call it and only with the one-time token the completing browser received, so a consent link forwarded to someone else can never bind their account to the sender's Connection. Requires the controller's custody finalizer to be present; after a disconnect the UID is tombstoned and completion is refused. |
+
+The consent `state` and the completion token are HMACs over random single-use nonces, keyed by a value derived from the controller's snapshot key. The pending consent row, sealed with the controller key, binds the nonce to the Connection UID, owner digest, provider, and a 10 minute expiry. Token material is sealed under a per-Connection data key that is itself wrapped by the controller key; see [ADR 0033](https://github.com/orka-agents/orka/blob/main/docs/adr/0033-user-connectors.md).
+
 ## Security
 
 Repository security endpoints manage `RepositoryScan` configurations and their generated threat models, scan runs, findings, patch proposals, and remediation pull requests. Like other `/api/v1/*` endpoints, they require ServiceAccount bearer token authentication.

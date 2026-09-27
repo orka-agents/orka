@@ -1,0 +1,127 @@
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
+package store
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"time"
+)
+
+// ConnectorFieldNamespace names the namespace binding field in validation messages.
+const ConnectorFieldNamespace = "namespace"
+
+// ErrConnectorCustodyTombstoned is returned when material is written for a
+// Connection UID that was already disconnected. Deletion is permanent per UID
+// so a late consent completion can never recreate custody.
+var ErrConnectorCustodyTombstoned = errors.New("connector custody for this connection was deleted")
+
+// ConnectorCredentialRef binds sealed token material to exactly one
+// Connection. Every field participates in the AEAD additional data, so a row
+// copied to another Connection, subject, or provider fails to open.
+type ConnectorCredentialRef struct {
+	ConnectionUID string
+	Namespace     string
+	Name          string
+	// SubjectDigest is a stable digest of the owning verified identity.
+	SubjectDigest string
+	Provider      string
+}
+
+// Validate reports whether every binding field is present.
+func (r ConnectorCredentialRef) Validate() error {
+	for _, field := range []struct{ name, value string }{
+		{"connection UID", r.ConnectionUID},
+		{ConnectorFieldNamespace, r.Namespace},
+		{"name", r.Name},
+		{"subject digest", r.SubjectDigest},
+		{"provider", r.Provider},
+	} {
+		if strings.TrimSpace(field.value) == "" {
+			return errors.New("connector credential " + field.name + " is required")
+		}
+	}
+	return nil
+}
+
+// ConnectorCredential is the plaintext token material for one Connection. It
+// exists only in controller memory; the store seals it at rest.
+type ConnectorCredential struct {
+	AccessToken  string
+	RefreshToken string
+	TokenType    string
+	// ExpiresAt is zero when the provider reported no expiry.
+	ExpiresAt time.Time
+	Scopes    []string
+	// UpdatedAt is set by the store on read.
+	UpdatedAt time.Time
+}
+
+// ConnectorCredentialStore seals per-Connection token material with one data
+// key per Connection, itself wrapped by the controller key. Deleting a row
+// deletes its wrapped key, which makes the ciphertext unrecoverable.
+type ConnectorCredentialStore interface {
+	// PutConnectorCredential replaces the material for ref, minting a fresh
+	// data key so previous ciphertext can no longer be opened.
+	PutConnectorCredential(ctx context.Context, ref ConnectorCredentialRef, credential ConnectorCredential) error
+	// GetConnectorCredential opens the material bound to ref, or ErrNotFound.
+	GetConnectorCredential(ctx context.Context, ref ConnectorCredentialRef) (ConnectorCredential, error)
+	// DeleteConnectorCredential removes the row and its wrapped key and
+	// tombstones the UID so later writes fail with
+	// ErrConnectorCustodyTombstoned. Missing rows succeed.
+	DeleteConnectorCredential(ctx context.Context, connectionUID string) error
+}
+
+// ConnectorConsent is one in-flight OAuth authorization for a Connection. The
+// PKCE verifier stays server-side, sealed, and single-use.
+type ConnectorConsent struct {
+	// Nonce is the random single-use identifier carried in the OAuth state.
+	Nonce         string
+	ConnectionUID string
+	Namespace     string
+	Name          string
+	SubjectDigest string
+	Provider      string
+	Mode          string
+	CodeVerifier  string
+	ExpiresAt     time.Time
+}
+
+// ConnectorCompletion is the second half of a consent: token material the
+// callback obtained, sealed and parked until the verified owner commits it
+// with the one-time completion nonce the completing browser received.
+type ConnectorCompletion struct {
+	Nonce         string
+	ConnectionUID string
+	Namespace     string
+	Name          string
+	SubjectDigest string
+	Provider      string
+	Mode          string
+	Credential    ConnectorCredential
+	ExpiresAt     time.Time
+}
+
+// ConnectorConsentStore holds pending consents and pending completions.
+type ConnectorConsentStore interface {
+	// CreateConnectorConsent stores a consent and drops expired ones.
+	CreateConnectorConsent(ctx context.Context, consent ConnectorConsent) error
+	// ConsumeConnectorConsent atomically removes and returns the consent for
+	// nonce, or ErrNotFound. Expired consents are removed and reported as
+	// ErrNotFound.
+	ConsumeConnectorConsent(ctx context.Context, nonce string) (ConnectorConsent, error)
+	// CreateConnectorCompletion parks sealed token material until the owner
+	// commits it. A tombstoned UID fails with ErrConnectorCustodyTombstoned.
+	CreateConnectorCompletion(ctx context.Context, completion ConnectorCompletion) error
+	// ConsumeConnectorCompletion atomically removes and returns the parked
+	// material for nonce, or ErrNotFound (also for expired entries).
+	ConsumeConnectorCompletion(ctx context.Context, nonce string) (ConnectorCompletion, error)
+	// DeleteConnectorConsentsForConnection drops every pending consent and
+	// completion for a Connection, for example on disconnect.
+	DeleteConnectorConsentsForConnection(ctx context.Context, connectionUID string) error
+}

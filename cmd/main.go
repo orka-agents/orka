@@ -8,6 +8,8 @@ package main
 
 import (
 	"context"
+	"crypto/hkdf"
+	"crypto/sha256"
 	"crypto/tls"
 	"errors"
 	"flag"
@@ -57,6 +59,7 @@ import (
 	orkaadmission "github.com/orka-agents/orka/internal/admission"
 	"github.com/orka-agents/orka/internal/api"
 	"github.com/orka-agents/orka/internal/artifactcap"
+	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/controller"
 	"github.com/orka-agents/orka/internal/envutil"
@@ -283,6 +286,7 @@ func main() {
 	var chatMaxPrematureEndRetries int
 	var gatewayEnabled bool
 	var connectorsEnabled bool
+	var connectorCallbackBaseURL string
 	var gatewayPendingPerSession int
 	var gatewayMaxRecordsPerGateway int
 	var gatewayMaxRejectedRecordsPerGateway int
@@ -492,6 +496,9 @@ func main() {
 	flag.BoolVar(&gatewayEnabled, "gateway-enabled", true, "Enable generic gateway reconciliation and ingress.")
 	flag.BoolVar(&connectorsEnabled, "connectors-enabled", envBool("ORKA_CONNECTORS_ENABLED"),
 		"Enable per-user connector reconciliation (ConnectorProvider and Connection).")
+	flag.StringVar(&connectorCallbackBaseURL, "connector-callback-base-url", os.Getenv("ORKA_CONNECTOR_CALLBACK_BASE_URL"),
+		"Absolute origin the OAuth provider redirects back to for connector consent, for example https://orka.example.com. "+
+			"The provider must register exactly this origin plus /api/v1/connections/callback.")
 	flag.IntVar(&gatewayPendingPerSession, "gateway-pending-per-session", 100,
 		"Maximum pending gateway events per Session.")
 	flag.IntVar(&gatewayMaxRecordsPerGateway, "gateway-max-records-per-gateway", 1000,
@@ -1344,7 +1351,7 @@ func main() {
 		os.Exit(1)
 	}
 	storePreexisted := storeStatErr == nil
-	var snapshotCipher *sqlite.AgentExecutionSnapshotCipher
+	var snapshotKey []byte
 	if agentExecutionSnapshotSecretOpts.enabled() {
 		key, keyErr := ensureAgentExecutionSnapshotKey(context.Background(), mgr.GetAPIReader(), mgr.GetClient(),
 			currentPodNamespace(), agentExecutionSnapshotSecretOpts, storePreexisted)
@@ -1353,21 +1360,20 @@ func main() {
 				"secret", agentExecutionSnapshotSecretOpts.Name)
 			os.Exit(1)
 		}
-		cipher, cipherErr := sqlite.NewAgentExecutionSnapshotCipher(key)
-		if cipherErr != nil {
-			setupLog.Error(cipherErr, "unable to load agent execution snapshot key; snapshot encryption fails closed",
-				"secret", agentExecutionSnapshotSecretOpts.Name)
-			os.Exit(1)
-		}
-		snapshotCipher = cipher
+		snapshotKey = key
 	} else {
-		cipher, cipherErr := loadAgentExecutionSnapshotCipher(agentExecutionSnapshotKeyFile)
-		if cipherErr != nil {
-			setupLog.Error(cipherErr, "unable to load agent execution snapshot key; snapshot encryption fails closed",
+		key, keyErr := loadAgentExecutionSnapshotKey(agentExecutionSnapshotKeyFile)
+		if keyErr != nil {
+			setupLog.Error(keyErr, "unable to load agent execution snapshot key; snapshot encryption fails closed",
 				"path", agentExecutionSnapshotKeyFile)
 			os.Exit(1)
 		}
-		snapshotCipher = cipher
+		snapshotKey = key
+	}
+	snapshotCipher, cipherErr := sqlite.NewAgentExecutionSnapshotCipher(snapshotKey)
+	if cipherErr != nil {
+		setupLog.Error(cipherErr, "unable to load agent execution snapshot key; snapshot encryption fails closed")
+		os.Exit(1)
 	}
 	sqliteStore, err := sqlite.OpenLockedStore(storePath)
 	if err != nil {
@@ -1392,6 +1398,28 @@ func main() {
 		os.Exit(1)
 	}
 	agentExecutionSnapshotStore := sqliteStore
+	connectorConfig := api.ConnectorConfig{Enabled: connectorsEnabled}
+	var connectorOAuthClient *connectors.OAuthClient
+	if connectorsEnabled {
+		stateKey, keyErr := deriveConnectorStateKey(snapshotKey)
+		if keyErr != nil {
+			setupLog.Error(keyErr, "unable to derive the connector state key; connectors fail closed")
+			os.Exit(1)
+		}
+		connectorOAuthClient = connectors.NewOAuthClient(connectors.OAuthClientOptions{})
+		connectorConfig = api.ConnectorConfig{
+			Enabled:         true,
+			CallbackBaseURL: strings.TrimSpace(connectorCallbackBaseURL),
+			StateKey:        stateKey,
+			Credentials:     sqliteStore,
+			Consents:        sqliteStore,
+			OAuth:           connectorOAuthClient,
+		}
+		if err := api.ValidateConnectorConfig(connectorConfig); err != nil {
+			setupLog.Error(err, "invalid connector configuration; set --connector-callback-base-url or disable --connectors-enabled")
+			os.Exit(1)
+		}
+	}
 	setupLog.Info("agent execution binding stage enabled: executable agent Tasks freeze an immutable encrypted snapshot and write-once binding before dispatch")
 	snapshotRetentionManager := &controller.AgentExecutionSnapshotRetentionManager{
 		APIReader: mgr.GetAPIReader(),
@@ -1863,8 +1891,12 @@ func main() {
 			os.Exit(1)
 		}
 		if err := (&controller.ConnectionReconciler{
-			Client: mgr.GetClient(),
-			Scheme: mgr.GetScheme(),
+			Client:      mgr.GetClient(),
+			APIReader:   mgr.GetAPIReader(),
+			Scheme:      mgr.GetScheme(),
+			Credentials: sqliteStore,
+			Consents:    sqliteStore,
+			Revoker:     connectorOAuthClient,
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "Connection")
 			os.Exit(1)
@@ -2165,6 +2197,7 @@ func main() {
 		ControllerEpochs:          publisherControllerEpochs,
 		TaskProvenanceProtected:   taskProvenanceProtected,
 		E2EPromptFaultEnabled:     strings.TrimSpace(acpE2EPromptWriteAmbiguityMarker) != "",
+		Connectors:                connectorConfig,
 		Chat: api.ChatConfig{
 			Enabled:                chatEnabled,
 			Provider:               chatProvider,
@@ -2521,16 +2554,30 @@ func currentPodNamespace() string {
 
 // loadAgentExecutionSnapshotCipher reads the AES-256 snapshot key from a file
 // holding either exactly 32 raw bytes or whitespace-padded base64 text.
-func loadAgentExecutionSnapshotCipher(path string) (*sqlite.AgentExecutionSnapshotCipher, error) {
+func loadAgentExecutionSnapshotKey(path string) ([]byte, error) {
 	raw, err := os.ReadFile(path) // #nosec G304 -- operator-supplied key path.
 	if err != nil {
 		return nil, err
 	}
-	key, err := decodeAgentExecutionSnapshotKey(raw)
+	return decodeAgentExecutionSnapshotKey(raw)
+}
+
+func loadAgentExecutionSnapshotCipher(path string) (*sqlite.AgentExecutionSnapshotCipher, error) {
+	key, err := loadAgentExecutionSnapshotKey(path)
 	if err != nil {
 		return nil, err
 	}
 	return sqlite.NewAgentExecutionSnapshotCipher(key)
+}
+
+// connectorStateKeyInfo is the HKDF label separating the connector state
+// signing key from every other use of the controller key.
+const connectorStateKeyInfo = "orka.connector.state.v1"
+
+// deriveConnectorStateKey derives the OAuth state signing key from the
+// controller key so connectors need no additional operator secret.
+func deriveConnectorStateKey(controllerKey []byte) ([]byte, error) {
+	return hkdf.Key(sha256.New, controllerKey, nil, connectorStateKeyInfo, connectors.MinStateKeyBytes)
 }
 
 func validateAgentExecutionSnapshotOptions(

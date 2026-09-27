@@ -115,6 +115,7 @@ type Handlers struct {
 	gatewayIngressLimiter     *gatewayIngressLimiter
 	eventStreamPollInterval   time.Duration
 	eventStreamHeartbeatEvery time.Duration
+	connectors                ConnectorConfig
 }
 
 // HandlersConfig holds configuration for creating Handlers.
@@ -140,6 +141,7 @@ type HandlersConfig struct {
 	GatewayEventStore         store.GatewayEventStore
 	GatewayDeliveryStore      store.GatewayDeliveryStore
 	GatewayService            *gatewayruntime.Service
+	Connectors                ConnectorConfig
 }
 
 // NewHandlers creates a new Handlers instance
@@ -169,6 +171,7 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		gatewayIngressLimiter:     newGatewayIngressLimiter(),
 		eventStreamPollInterval:   defaultEventStreamPollInterval,
 		eventStreamHeartbeatEvery: defaultEventStreamHeartbeatEvery,
+		connectors:                cfg.Connectors,
 	}
 }
 

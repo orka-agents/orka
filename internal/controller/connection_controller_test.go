@@ -10,6 +10,7 @@ import (
 	"context"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -18,9 +19,11 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/connectors"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 func testConnection(namespace, name, provider string) *corev1alpha1.Connection {
@@ -400,5 +403,149 @@ func TestConnectionRequestsForProvider(t *testing.T) {
 		if request.Namespace != "tenant" || (request.Name != "alice" && request.Name != "bob") {
 			t.Fatalf("unexpected request %#v", request)
 		}
+	}
+}
+
+type fakeConnectorCredentialStore struct {
+	credentials map[string]store.ConnectorCredential
+	consents    map[string]int
+	deleted     []string
+}
+
+func newFakeConnectorCredentialStore() *fakeConnectorCredentialStore {
+	return &fakeConnectorCredentialStore{credentials: map[string]store.ConnectorCredential{}, consents: map[string]int{}}
+}
+
+func (f *fakeConnectorCredentialStore) PutConnectorCredential(_ context.Context, ref store.ConnectorCredentialRef, credential store.ConnectorCredential) error {
+	f.credentials[ref.ConnectionUID] = credential
+	return nil
+}
+
+func (f *fakeConnectorCredentialStore) GetConnectorCredential(_ context.Context, ref store.ConnectorCredentialRef) (store.ConnectorCredential, error) {
+	credential, ok := f.credentials[ref.ConnectionUID]
+	if !ok {
+		return store.ConnectorCredential{}, store.ErrNotFound
+	}
+	return credential, nil
+}
+
+func (f *fakeConnectorCredentialStore) DeleteConnectorCredential(_ context.Context, connectionUID string) error {
+	delete(f.credentials, connectionUID)
+	f.deleted = append(f.deleted, connectionUID)
+	return nil
+}
+
+func (f *fakeConnectorCredentialStore) CreateConnectorConsent(_ context.Context, consent store.ConnectorConsent) error {
+	f.consents[consent.ConnectionUID]++
+	return nil
+}
+
+func (f *fakeConnectorCredentialStore) ConsumeConnectorConsent(context.Context, string) (store.ConnectorConsent, error) {
+	return store.ConnectorConsent{}, store.ErrNotFound
+}
+
+func (f *fakeConnectorCredentialStore) CreateConnectorCompletion(context.Context, store.ConnectorCompletion) error {
+	return nil
+}
+
+func (f *fakeConnectorCredentialStore) ConsumeConnectorCompletion(context.Context, string) (store.ConnectorCompletion, error) {
+	return store.ConnectorCompletion{}, store.ErrNotFound
+}
+
+func (f *fakeConnectorCredentialStore) DeleteConnectorConsentsForConnection(_ context.Context, connectionUID string) error {
+	delete(f.consents, connectionUID)
+	return nil
+}
+
+type fakeConnectorRevoker struct {
+	tokens []string
+	err    error
+}
+
+func (f *fakeConnectorRevoker) Revoke(_ context.Context, _ connectors.OAuthProviderConfig, token string) error {
+	f.tokens = append(f.tokens, token)
+	return f.err
+}
+
+func TestConnectionReconcilerFinalizerAndDisconnect(t *testing.T) {
+	scheme := connectorTestScheme(t)
+	provider := acceptedConnectorProvider()
+	provider.Spec.OAuth.RevocationURL = "https://github.com/revoke"
+	connection := testConnection("tenant", "github-alice", "github")
+	credentials := newFakeConnectorCredentialStore()
+	revoker := &fakeConnectorRevoker{err: errTestProviderRead}
+	c := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(connection, provider, connectorClientSecret("tenant")).
+		WithStatusSubresource(&corev1alpha1.Connection{}).Build()
+	reconciler := &ConnectionReconciler{Client: c, APIReader: c, Scheme: scheme, Credentials: credentials, Consents: credentials, Revoker: revoker}
+	key := types.NamespacedName{Namespace: "tenant", Name: "github-alice"}
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RequeueAfter != connectionRequeueInterval {
+		t.Fatalf("finalizer add must requeue quickly, got %v", result.RequeueAfter)
+	}
+	updated := &corev1alpha1.Connection{}
+	if err := c.Get(context.Background(), key, updated); err != nil {
+		t.Fatal(err)
+	}
+	if !controllerutil.ContainsFinalizer(updated, ConnectionCustodyFinalizer) {
+		t.Fatal("custody finalizer must be added before any consent can complete")
+	}
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(context.Background(), key, updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.State != corev1alpha1.ConnectionStatePending {
+		t.Fatalf("state = %q, want Pending", updated.Status.State)
+	}
+
+	// Link it, then disconnect.
+	credentials.credentials[string(updated.UID)] = store.ConnectorCredential{AccessToken: "gho_access", RefreshToken: "ghr_refresh"}
+	credentials.consents[string(updated.UID)] = 1
+	if err := c.Delete(context.Background(), updated); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(context.Background(), key, updated); err != nil {
+		t.Fatalf("finalizer must hold the object: %v", err)
+	}
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatalf("disconnect reconcile: %v", err)
+	}
+	if len(revoker.tokens) != 2 || revoker.tokens[0] != "ghr_refresh" || revoker.tokens[1] != "gho_access" {
+		t.Fatalf("revoked tokens = %v, want refresh then access", revoker.tokens)
+	}
+	if _, held := credentials.credentials[string(updated.UID)]; held || len(credentials.deleted) != 1 {
+		t.Fatalf("custody must be deleted even when revocation fails: %+v", credentials)
+	}
+	if _, held := credentials.consents[string(updated.UID)]; held {
+		t.Fatal("pending consents must be dropped on disconnect")
+	}
+	if err := c.Get(context.Background(), key, updated); err == nil || !apierrors.IsNotFound(err) {
+		t.Fatalf("finalizer must be released after custody deletion, err = %v", err)
+	}
+}
+
+func TestConnectionReconcilerDisconnectWithoutCredentialSkipsRevocation(t *testing.T) {
+	scheme := connectorTestScheme(t)
+	connection := testConnection("tenant", "github-alice", "github")
+	connection.Finalizers = []string{ConnectionCustodyFinalizer}
+	now := metav1.Now()
+	connection.DeletionTimestamp = &now
+	credentials := newFakeConnectorCredentialStore()
+	revoker := &fakeConnectorRevoker{}
+	c := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(connection).WithStatusSubresource(&corev1alpha1.Connection{}).Build()
+	reconciler := &ConnectionReconciler{Client: c, Scheme: scheme, Credentials: credentials, Consents: credentials, Revoker: revoker}
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "tenant", Name: "github-alice"}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(revoker.tokens) != 0 {
+		t.Fatalf("nothing to revoke, got %v", revoker.tokens)
+	}
+	if len(credentials.deleted) != 1 {
+		t.Fatal("custody delete must still run")
 	}
 }
