@@ -58,6 +58,7 @@ func TestValidateProviderSpec(t *testing.T) {
 	}{
 		{name: "valid"},
 		{name: "nil provider", mutate: nil, want: ""},
+		{name: "name longer than a label value", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Name = strings.Repeat("a", 64) }, want: "provider name must be at most 63 characters"},
 		{name: "http authorize url", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.AuthorizeURL = "http://github.com/authorize" }, want: "authorizeURL must be an absolute HTTPS URL"},
 		{name: "userinfo in token url", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://user:pw@github.com/token" }, want: "tokenURL must be an absolute HTTPS URL"},
 		{name: "fragment in token url", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://github.com/token#frag" }, want: "tokenURL must be an absolute HTTPS URL"},

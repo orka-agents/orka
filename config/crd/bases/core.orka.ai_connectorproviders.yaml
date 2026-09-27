@@ -334,6 +334,9 @@ spec:
         required:
         - spec
         type: object
+        x-kubernetes-validations:
+        - message: 'metadata.name must be at most 63 characters: it labels every Connection'
+          rule: self.metadata.name.size() <= 63
     served: true
     storage: true
     subresources:

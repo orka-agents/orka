@@ -163,9 +163,18 @@ type BuiltinToolCheck func(name string) bool
 
 // ValidateProviderSpec validates structural and security invariants of a
 // ConnectorProvider without reading referenced objects.
+// maxProviderNameLength is the Kubernetes label value limit; the provider
+// name is a label on every Connection.
+const maxProviderNameLength = 63
+
 func ValidateProviderSpec(provider *corev1alpha1.ConnectorProvider, knownBuiltin BuiltinToolCheck) *Issue {
 	if provider == nil {
 		return invalid("provider is required")
+	}
+	if len(provider.Name) > maxProviderNameLength {
+		// The provider name labels every Connection; label values stop at
+		// 63 characters.
+		return invalid("provider name must be at most 63 characters")
 	}
 	oauth := provider.Spec.OAuth
 	for _, endpoint := range []struct{ name, value string }{
@@ -690,6 +699,22 @@ func ProviderIssuerDigest(provider *corev1alpha1.ConnectorProvider) string {
 		return ""
 	}
 	return lengthPrefixedDigest(providerIssuerParts(provider))
+}
+
+// ProviderRevocationDigest names what the revocation endpoint authenticates:
+// the OAuth client and the revocation URL, without the token URL. It is
+// sealed with every credential so disconnect still revokes after an
+// operator moved only the token endpoint.
+func ProviderRevocationDigest(provider *corev1alpha1.ConnectorProvider) string {
+	if provider == nil {
+		return ""
+	}
+	oauth := provider.Spec.OAuth
+	return lengthPrefixedDigest([]string{
+		"revocation", "uid", string(provider.UID), "clientID", oauth.ClientID,
+		"secretName", oauth.ClientSecretRef.Name, "secretKey", oauth.ClientSecretRef.Key,
+		"clientAuthentication", oauth.ClientAuthentication, "revocationURL", oauth.RevocationURL,
+	})
 }
 
 // providerIssuerParts names the OAuth client a token was issued by: what

@@ -201,6 +201,7 @@ type ConnectorProviderStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
+// +kubebuilder:validation:XValidation:rule="self.metadata.name.size() <= 63",message="metadata.name must be at most 63 characters: it labels every Connection"
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Accepted",type=string,JSONPath=`.status.conditions[?(@.type=="Accepted")].status`
