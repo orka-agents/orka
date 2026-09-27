@@ -922,11 +922,18 @@ func (h *Handlers) CompleteConnection(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := completionFenceError(connection, provider, completion); err != nil {
-		// A completion that no longer fits its Connection, mode, or provider
-		// is discarded so it cannot be tried again or across Connections.
-		h.discardCompletion(ctx, completion, nonce)
-		return err
+	// A committed completion is judged by custody below (its grant and
+	// material), never by the pre-commit fences: custody already holds it,
+	// and a mode change or token expiry since then must not discard the only
+	// record that repairs a lost status write.
+	if !completion.Committed {
+		if err := completionFenceError(connection, provider, completion); err != nil {
+			// A completion that no longer fits its Connection, mode, or
+			// provider is discarded so it cannot be tried again or across
+			// Connections.
+			h.discardCompletion(ctx, completion, nonce)
+			return err
+		}
 	}
 	ref, err := connectors.CredentialRef(connection)
 	if err != nil {
@@ -935,7 +942,7 @@ func (h *Handlers) CompleteConnection(c fiber.Ctx) error {
 	// A short-lived token without a refresh token that expired while the
 	// browser held the completion can never authenticate; committing it
 	// would advertise a Ready link nothing can use.
-	if completion.Credential.RefreshToken == "" && !completion.Credential.ExpiresAt.IsZero() &&
+	if !completion.Committed && completion.Credential.RefreshToken == "" && !completion.Credential.ExpiresAt.IsZero() &&
 		!completion.Credential.ExpiresAt.After(h.connectors.now()) {
 		h.discardCompletion(ctx, completion, nonce)
 		return fiber.NewError(fiber.StatusConflict, "the granted token expired before completion; start consent again")

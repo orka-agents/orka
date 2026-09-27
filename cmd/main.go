@@ -366,6 +366,8 @@ func main() {
 	var contextTokenMonitorReadScopes string
 	var contextTokenMonitorWriteScopes string
 	var contextTokenMonitorOperateScopes string
+	var contextTokenConnectorReadScopes string
+	var contextTokenConnectorManageScopes string
 	var contextTokenSkillReadScopes string
 	var contextTokenSkillWriteScopes string
 	var contextTokenGatewayReadScopes string
@@ -807,6 +809,14 @@ func main() {
 		"Enable OpenTelemetry tracing and metrics. Configure endpoint via OTEL_EXPORTER_OTLP_ENDPOINT env var.")
 	flag.BoolVar(&enableTracing, "enable-tracing", false,
 		"Alias for --enable-telemetry; enables OpenTelemetry traces and metrics.")
+	flag.StringVar(&contextTokenConnectorReadScopes, "context-token-connector-read-scopes",
+		os.Getenv("ORKA_CONTEXT_TOKEN_CONNECTOR_READ_SCOPES"),
+		"Comma-separated context-token scopes that authorize reading a person's own connector Connections. "+
+			"Defaults to orka:connectors:read.")
+	flag.StringVar(&contextTokenConnectorManageScopes, "context-token-connector-manage-scopes",
+		os.Getenv("ORKA_CONTEXT_TOKEN_CONNECTOR_MANAGE_SCOPES"),
+		"Comma-separated context-token scopes that authorize linking, updating, and disconnecting a person's own connector Connections. "+
+			"Defaults to orka:connectors:manage.")
 
 	opts := zap.Options{
 		Development: true,
@@ -1002,6 +1012,8 @@ func main() {
 		MonitorReadScopes:          contextTokenMonitorReadScopes,
 		MonitorWriteScopes:         contextTokenMonitorWriteScopes,
 		MonitorOperateScopes:       contextTokenMonitorOperateScopes,
+		ConnectorReadScopes:        contextTokenConnectorReadScopes,
+		ConnectorManageScopes:      contextTokenConnectorManageScopes,
 		SkillReadScopes:            contextTokenSkillReadScopes,
 		SkillWriteScopes:           contextTokenSkillWriteScopes,
 		GatewayReadScopes:          contextTokenGatewayReadScopes,

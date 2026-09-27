@@ -237,6 +237,8 @@ controller:
       monitorRead: ""
       monitorWrite: ""
       monitorOperate: ""
+      connectorRead: ""
+      connectorManage: ""
       skillRead: ""
       skillWrite: ""
       gatewayRead: ""
