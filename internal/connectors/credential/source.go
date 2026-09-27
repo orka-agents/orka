@@ -111,6 +111,13 @@ func (s *Source) ResolveConnectionCredential(ctx context.Context, req outboundac
 		if err != nil {
 			return outboundaccess.ConnectionCredential{}, err
 		}
+		// The refresh may have lost to a re-consent, or the Connection may
+		// have changed mode or generation while the exchange was in flight.
+		// Re-read it and reapply every check before pairing the material
+		// with a mode and generation.
+		if connection, err = s.loadLiveConnection(ctx, req); err != nil {
+			return outboundaccess.ConnectionCredential{}, err
+		}
 	}
 	return outboundaccess.ConnectionCredential{
 		AccessToken:   credential.AccessToken,

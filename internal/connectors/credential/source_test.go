@@ -360,6 +360,29 @@ func TestRefreshLosesToConcurrentReconsent(t *testing.T) {
 		t.Fatalf("custody after lost race = %+v", stored)
 	}
 
+	// A mode change and re-consent that land during the refresh are seen:
+	// the generation no longer matches the frozen binding, so nothing is
+	// released even though custody now holds fresh material.
+	h.put(store.ConnectorCredential{AccessToken: "gho_old3", RefreshToken: "ghr_old3", ExpiresAt: h.now.Add(-time.Minute)})
+	h.refresher.onRefresh = func() {
+		reconsent()
+		live := h.reload()
+		live.Generation = 3
+		if err := h.client.Update(context.Background(), live); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil || !strings.Contains(err.Error(), "changed since the task was dispatched") {
+		t.Fatalf("generation change during refresh err = %v", err)
+	}
+	h.refresher.onRefresh = reconsent
+	live := h.reload()
+	live.Generation = 2
+	if err := h.client.Update(context.Background(), live); err != nil {
+		t.Fatal(err)
+	}
+	h.put(store.ConnectorCredential{AccessToken: "gho_old4", RefreshToken: "ghr_old4", ExpiresAt: h.now.Add(-time.Minute)})
+
 	// The same for a late invalid_grant: the newer consent survives.
 	h.put(store.ConnectorCredential{AccessToken: "gho_old2", RefreshToken: "ghr_old2", ExpiresAt: h.now.Add(-time.Minute)})
 	h.refresher.err = &connectors.OAuthError{StatusCode: 400, Code: "invalid_grant"}
