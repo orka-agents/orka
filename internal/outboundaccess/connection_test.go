@@ -294,3 +294,26 @@ func TestKubernetesResolverConnectionModeBindsDeclaredTool(t *testing.T) {
 		t.Fatalf("declared write tool on readWrite link: %+v err = %v", resolution, err)
 	}
 }
+
+func TestDeclaredConnectorToolRequiresDeclaredHeaders(t *testing.T) {
+	provider := &corev1alpha1.ConnectorProvider{Spec: corev1alpha1.ConnectorProviderSpec{Tools: []corev1alpha1.ConnectorTool{{
+		Name: "gh_search", Source: corev1alpha1.ConnectorToolSourceHTTP, Class: corev1alpha1.ConnectorToolClassRead,
+		HTTP: &corev1alpha1.ConnectorHTTPTool{URL: "https://api.github.com/search/issues", Method: "GET", Headers: map[string]string{"Accept": "application/vnd.github+json"}},
+	}}}}
+	binding := ToolBinding{Name: "gh_search", URL: "https://api.github.com/search/issues", Method: "GET", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead}
+	// The declared header set must match exactly; a canonical spelling is fine.
+	binding.Headers = map[string]string{"accept": "application/vnd.github+json"}
+	if _, err := DeclaredConnectorTool(provider, binding); err != nil {
+		t.Fatalf("declared headers must be accepted: %v", err)
+	}
+	for name, headers := range map[string]map[string]string{
+		"missing":   nil,
+		"extra":     {"Accept": "application/vnd.github+json", "X-HTTP-Method-Override": "DELETE"},
+		"different": {"Accept": "text/plain"},
+	} {
+		binding.Headers = headers
+		if _, err := DeclaredConnectorTool(provider, binding); err == nil || !strings.Contains(err.Error(), "headers") {
+			t.Fatalf("%s headers err = %v, want refusal", name, err)
+		}
+	}
+}

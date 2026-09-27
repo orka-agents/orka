@@ -284,10 +284,9 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 	if mode == "" {
 		mode = corev1alpha1.ConnectionModeReadOnly
 	}
-	if !connectors.ScopesCover(refreshed.Scopes, connectors.ScopesForMode(provider, mode)) {
-		s.recordNarrowedScopes(ctx, connection, refreshed.Scopes, mode)
-		return store.ConnectorCredential{}, errors.New("refreshed connection credential no longer covers the connection mode; the person must consent again")
-	}
+	// The rotated material is sealed first, whatever the verdict below: the
+	// provider may have invalidated the previous refresh token, and only
+	// what custody holds can later be revoked at disconnect or re-consent.
 	// Fenced on the version read at flight start: a consent that completed
 	// meanwhile wins, and its material is returned instead.
 	switch err := s.Credentials.ReplaceConnectorCredential(ctx, ref, refreshed, current.Version); {
@@ -303,8 +302,17 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 	case err != nil:
 		return store.ConnectorCredential{}, fmt.Errorf("store refreshed connection credential: %w", err)
 	}
-	s.recordRefresh(ctx, connection, refreshed)
 	refreshed.Version = current.Version + 1
+	if !connectors.ScopesCover(refreshed.Scopes, connectors.ScopesForMode(provider, mode)) {
+		s.recordNarrowedScopes(ctx, connection, refreshed.Scopes, mode)
+		return store.ConnectorCredential{}, errors.New("refreshed connection credential no longer covers the connection mode; the person must consent again")
+	}
+	s.recordRefresh(ctx, connection, refreshed)
+	// A token the provider issued already inside the refresh skew would
+	// expire mid-call; it is not released, and the next call refreshes again.
+	if s.needsRefresh(refreshed) {
+		return store.ConnectorCredential{}, errors.New("the provider issued a token that expires within the refresh window; retry")
+	}
 	return refreshed, nil
 }
 

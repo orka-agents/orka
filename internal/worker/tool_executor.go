@@ -939,6 +939,7 @@ func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *core
 		FrozenConnections:           e.frozenConnections,
 		Tool: outboundaccess.ToolBinding{
 			Name: tool.Name, URL: strings.TrimSpace(tool.Spec.HTTP.URL), Method: prepared.request.Method, Class: tool.Spec.BrokeredToolClass,
+			Headers: tool.Spec.HTTP.Headers,
 		},
 	})
 	if err != nil {

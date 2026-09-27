@@ -458,6 +458,13 @@ func TestRefreshWithNarrowedScopesFailsClosed(t *testing.T) {
 		t.Fatalf("narrowed refresh err = %v", err)
 	}
 	live := h.reload()
+	// The rotated material is sealed even though it is not released: the
+	// provider may have invalidated the previous refresh token, and only
+	// what custody holds can be revoked later.
+	ref, _ := connectors.CredentialRef(live)
+	if held, err := h.store.GetConnectorCredential(context.Background(), ref); err != nil || held.AccessToken != "gho_narrow" {
+		t.Fatalf("custody after narrowed refresh = %+v err = %v, want the rotated material sealed", held, err)
+	}
 	granted := meta.FindStatusCondition(live.Status.Conditions, corev1alpha1.ConnectionConditionScopesGranted)
 	if granted == nil || granted.Status != metav1.ConditionFalse || granted.Reason != corev1alpha1.ConnectionReasonConsentRequired ||
 		strings.Join(live.Status.GrantedScopes, ",") != "public_repo" || live.Status.State != corev1alpha1.ConnectionStatePending {
@@ -700,5 +707,23 @@ func TestRefreshLosingToDisconnectRevokesRotatedTokens(t *testing.T) {
 	ref, _ := connectors.CredentialRef(live)
 	if held, err := h.store.GetConnectorCredential(context.Background(), ref); err != nil || held.AccessToken != "gho_old" {
 		t.Fatalf("custody = %+v err = %v, want the fenced material untouched for disconnect to revoke", held, err)
+	}
+}
+
+// TestRefreshWithinSkewIsSealedButNotReleased covers a provider that
+// accepts the refresh but issues a token already inside the refresh skew:
+// the material is sealed (it is the current grant) but not handed to a call
+// it would expire during.
+func TestRefreshWithinSkewIsSealedButNotReleased(t *testing.T) {
+	h := newHarness(t)
+	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", ExpiresAt: h.now.Add(-time.Minute)})
+	h.refresher.response = connectors.TokenResponse{AccessToken: "gho_short", RefreshToken: "ghr_short", TokenType: "bearer", ExpiresAt: h.now.Add(30 * time.Second)}
+	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil || !strings.Contains(err.Error(), "refresh window") {
+		t.Fatalf("in-skew refresh err = %v", err)
+	}
+	live := h.reload()
+	ref, _ := connectors.CredentialRef(live)
+	if held, err := h.store.GetConnectorCredential(context.Background(), ref); err != nil || held.AccessToken != "gho_short" || held.RefreshToken != "ghr_short" {
+		t.Fatalf("custody after in-skew refresh = %+v err = %v, want the rotated pair sealed", held, err)
 	}
 }

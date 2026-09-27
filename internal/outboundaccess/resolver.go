@@ -81,6 +81,10 @@ type ToolBinding struct {
 	URL    string
 	Method string
 	Class  corev1alpha1.AgentRuntimeBrokeredToolClass
+	// Headers are the Tool's static headers; the provider's declared set
+	// must match exactly, or a header the provider never declared could
+	// change what the credential authorizes.
+	Headers map[string]string
 }
 
 // FrozenConnection is the dispatch-time identity of a person's Connection.
@@ -247,9 +251,31 @@ func DeclaredConnectorTool(provider *corev1alpha1.ConnectorProvider, tool ToolBi
 		if string(candidate.Class) != string(tool.Class) {
 			return corev1alpha1.ConnectorTool{}, fmt.Errorf("tool %q class does not match the class declared by provider %q", name, provider.Name)
 		}
+		if !sameStaticHeaders(candidate.HTTP.Headers, tool.Headers) {
+			return corev1alpha1.ConnectorTool{}, fmt.Errorf("tool %q headers do not match the headers declared by provider %q", name, provider.Name)
+		}
 		return candidate, nil
 	}
 	return corev1alpha1.ConnectorTool{}, fmt.Errorf("tool %q is not declared by provider %q", name, provider.Name)
+}
+
+// sameStaticHeaders compares two header sets by canonical name and exact
+// value; an empty and a nil set are the same.
+func sameStaticHeaders(declared, actual map[string]string) bool {
+	if len(declared) != len(actual) {
+		return false
+	}
+	canonical := make(map[string]string, len(declared))
+	for name, value := range declared {
+		canonical[http.CanonicalHeaderKey(strings.TrimSpace(name))] = value
+	}
+	for name, value := range actual {
+		want, ok := canonical[http.CanonicalHeaderKey(strings.TrimSpace(name))]
+		if !ok || want != value {
+			return false
+		}
+	}
+	return true
 }
 
 // resolveConnection injects the requester's linked-account credential. Every
