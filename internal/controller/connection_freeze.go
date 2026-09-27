@@ -97,13 +97,15 @@ func freezeRequesterConnections(
 			continue
 		}
 		frozen = append(frozen, agentExecutionSnapshotConnection{
-			PolicyName:     policyName,
-			Provider:       provider,
-			ConnectionName: connection.Name,
-			UID:            string(connection.UID),
-			Generation:     connection.Generation,
-			GrantSequence:  connection.Status.GrantSequence,
-			Mode:           connection.Spec.Mode,
+			PolicyName:       policyName,
+			Provider:         provider,
+			ConnectionName:   connection.Name,
+			UID:              string(connection.UID),
+			Generation:       connection.Generation,
+			GrantSequence:    connection.Status.GrantSequence,
+			Mode:             connection.Spec.Mode,
+			PolicyUID:        string(policy.UID),
+			PolicyGeneration: policy.Generation,
 		})
 	}
 	return frozen, nil
@@ -230,6 +232,7 @@ func frozenConnectionsFromSnapshot(body agentExecutionSnapshotBody) map[string]o
 	for _, connection := range body.Connections {
 		frozen[connection.PolicyName] = outboundaccess.FrozenConnection{
 			UID: connection.UID, Generation: connection.Generation, GrantSequence: connection.GrantSequence,
+			PolicyUID: connection.PolicyUID, PolicyGeneration: connection.PolicyGeneration,
 		}
 	}
 	return frozen
@@ -241,6 +244,10 @@ type connectorToolInfo struct {
 	PolicyName string
 	Provider   string
 	Class      corev1alpha1.AgentRuntimeBrokeredToolClass
+	// PolicyUID and PolicyGeneration pin the policy object this
+	// classification was read from, so execution can refuse another.
+	PolicyUID        string
+	PolicyGeneration int64
 }
 
 // connectorToolsFor returns, for every named Tool backed by a connection-mode

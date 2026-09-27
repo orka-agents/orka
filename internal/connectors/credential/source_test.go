@@ -216,7 +216,7 @@ func TestResolveReturnsFreshCredentialWithoutRefresh(t *testing.T) {
 
 func TestResolveRefreshesNearExpiryAndWritesBack(t *testing.T) {
 	h := newHarness(t)
-	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", TokenType: "bearer", ExpiresAt: h.now.Add(30 * time.Second), Scopes: []string{"repo"}})
+	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", TokenType: "bearer", ExpiresAt: h.now.Add(30 * time.Second), Scopes: []string{"repo"}, RevocationDigest: "revocation-1"})
 	got, err := h.source.ResolveConnectionCredential(context.Background(), h.request())
 	if err != nil {
 		t.Fatal(err)
@@ -231,6 +231,11 @@ func TestResolveRefreshesNearExpiryAndWritesBack(t *testing.T) {
 	stored, err := h.store.GetConnectorCredential(context.Background(), ref)
 	if err != nil || stored.AccessToken != "gho_new" || stored.RefreshToken != "ghr_new" || stored.TokenType != "bearer" || len(stored.Scopes) != 1 {
 		t.Fatalf("stored = %+v err = %v", stored, err)
+	}
+	// The refreshed row keeps the grant and the revocation identity, so a
+	// later disconnect can still revoke the rotated material.
+	if stored.RevocationDigest != "revocation-1" || stored.GrantSequence != 1 {
+		t.Fatalf("stored revocation digest = %q grant = %d, want carried over", stored.RevocationDigest, stored.GrantSequence)
 	}
 	updated := h.reload()
 	if updated.Status.LastRefreshTime == nil || updated.Status.ExpiresAt == nil || !updated.Status.ExpiresAt.Time.Equal(h.now.Add(time.Hour)) {

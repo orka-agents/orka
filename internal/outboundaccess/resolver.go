@@ -101,6 +101,11 @@ type FrozenConnection struct {
 	// Connection must carry exactly this grant: a re-link of the same
 	// object is a new grant the snapshot never bound.
 	GrantSequence int64
+	// PolicyUID and PolicyGeneration, when set, pin the policy object the
+	// Connection was frozen under; a policy edited since (for example its
+	// credential output header or prefix) needs a re-dispatch.
+	PolicyUID        string
+	PolicyGeneration int64
 }
 
 // ConnectionCredentialRequest asks the credential source for one person's
@@ -351,6 +356,9 @@ func (r *KubernetesResolver) resolveConnection(ctx context.Context, policy *core
 	frozen, ok := req.FrozenConnections[policy.Name]
 	if !ok || strings.TrimSpace(frozen.UID) == "" {
 		return Resolution{}, fmt.Errorf("connection outbound access policy %q has no Connection frozen into the execution snapshot", policy.Name)
+	}
+	if frozen.PolicyUID != "" && (string(policy.UID) != frozen.PolicyUID || policy.Generation != frozen.PolicyGeneration) {
+		return Resolution{}, fmt.Errorf("connection outbound access policy %q changed since the task was dispatched; re-dispatch to use it", policy.Name)
 	}
 	provider := &corev1alpha1.ConnectorProvider{}
 	if err := r.Reader.Get(ctx, client.ObjectKey{Namespace: policy.Namespace, Name: policy.Spec.Connection.ProviderRef.Name}, provider); err != nil {

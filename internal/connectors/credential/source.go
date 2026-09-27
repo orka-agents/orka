@@ -288,8 +288,10 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 		ExpiresAt:       token.ExpiresAt,
 		Scopes:          token.Scopes,
 		AuthorityDigest: current.AuthorityDigest,
-		// A refresh carries the grant forward; only a consent starts a new one.
-		GrantSequence: current.GrantSequence,
+		// A refresh carries the grant and the revocation identity forward;
+		// only a consent starts a new grant.
+		GrantSequence:    current.GrantSequence,
+		RevocationDigest: current.RevocationDigest,
 	}
 	if refreshed.RefreshToken == "" {
 		refreshed.RefreshToken = current.RefreshToken
@@ -353,10 +355,18 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 	case err != nil:
 		return store.ConnectorCredential{}, fmt.Errorf("store refreshed connection credential: %w", err)
 	}
-	// The version the replacement received comes from the store's sequence.
-	if stored, err := s.Credentials.GetConnectorCredential(ctx, ref); err == nil {
-		refreshed.Version = stored.Version
+	// The row as stored (its version comes from the store's sequence) is
+	// what the status records. A row that already differs was replaced by a
+	// newer refresh or consent, whose own status write must not be undone
+	// with this call's older material.
+	stored, err := s.Credentials.GetConnectorCredential(ctx, ref)
+	if err != nil {
+		return store.ConnectorCredential{}, fmt.Errorf("re-read refreshed connection credential: %w", err)
 	}
+	if stored.AccessToken != refreshed.AccessToken || stored.RefreshToken != refreshed.RefreshToken || stored.GrantSequence != refreshed.GrantSequence {
+		return store.ConnectorCredential{}, errors.New("connection credential changed concurrently; retry")
+	}
+	refreshed = stored
 	if !connectors.ScopesCover(refreshed.Scopes, connectors.ScopesForMode(provider, mode)) {
 		s.recordNarrowedScopes(ctx, connection, ref, refreshed, mode)
 		return store.ConnectorCredential{}, errors.New("refreshed connection credential no longer covers the connection mode; the person must consent again")
