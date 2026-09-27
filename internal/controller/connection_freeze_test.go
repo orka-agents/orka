@@ -241,28 +241,52 @@ func TestFreezeRequiresVerifiedRequesterProvenance(t *testing.T) {
 	}
 	SetRequesterStampKey(testRequesterStampKey)
 
-	// A child that inherits the requester through its verified coordination
-	// parent is trusted; one that names a different person is not.
+	// A coordination child is trusted only once the controller sealed a stamp
+	// for the child's own UID (on its parent's worker's authenticated
+	// request); an owner reference to a stamped parent proves nothing by
+	// itself, since a Task writer can plant one while admission is off.
 	controller := true
 	child := forged.DeepCopy()
 	child.Name, child.UID = "child", "child-uid"
 	child.OwnerReferences = []metav1.OwnerReference{{
 		APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: stamped.Name, UID: stamped.UID, Controller: &controller,
 	}}
-	impostor := child.DeepCopy()
+	sealed := child.DeepCopy()
+	sealed.Name, sealed.UID = "sealed", "sealed-uid"
+	sealed.Annotations = map[string]string{
+		labels.AnnotationRequestedBySource: labels.RequestedBySourceAPI,
+		labels.AnnotationRequestedByStamp:  connectors.RequesterStamp(testRequesterStampKey, "sealed-uid", stamped.Spec.RequestedBy.Issuer, stamped.Spec.RequestedBy.Subject),
+	}
+	impostor := sealed.DeepCopy()
 	impostor.Name, impostor.UID = "impostor", "impostor-uid"
 	impostor.Spec.RequestedBy = &corev1alpha1.RequestedBy{Issuer: stamped.Spec.RequestedBy.Issuer, Subject: "victim"}
-	orphan := child.DeepCopy()
-	orphan.Name, orphan.UID = "orphan", "orphan-uid"
-	orphan.OwnerReferences[0].UID = "stale-parent-uid"
-	reader = ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(tool, policy, connection, stamped, child, impostor, orphan).Build()
-	if frozen, err := freezeRequesterConnections(context.Background(), reader, child, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 1 {
-		t.Fatalf("inheriting child: frozen = %+v err = %v", frozen, err)
+	reader = ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(tool, policy, connection, stamped, child, sealed, impostor).Build()
+	if frozen, err := freezeRequesterConnections(context.Background(), reader, child, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
+		t.Fatalf("owner reference alone: frozen = %+v err = %v, want nothing without the child's own seal", frozen, err)
+	}
+	// A child a worker just created is waiting for its parent's worker to
+	// have it sealed: dispatch retries instead of committing a write-once
+	// binding with no Connections. Past the grace window it is unverified.
+	freshChild := child.DeepCopy()
+	freshChild.Name, freshChild.UID, freshChild.CreationTimestamp = "fresh-child", "fresh-child-uid", metav1.Now()
+	if _, err := freezeRequesterConnections(context.Background(), reader, freshChild, brokeredConfiguration("gh_search")); !errors.Is(err, ErrRequesterStampPending) {
+		t.Fatalf("fresh unsealed child: err = %v, want ErrRequesterStampPending", err)
+	}
+	freshChild.CreationTimestamp = metav1.NewTime(time.Now().Add(-requesterStampGrace - time.Minute))
+	if frozen, err := freezeRequesterConnections(context.Background(), reader, freshChild, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
+		t.Fatalf("stale unsealed child: frozen = %+v err = %v, want unverified", frozen, err)
+	}
+	// A fresh Task that is neither API-stamped nor a coordination child
+	// waits for nothing.
+	loose := freshChild.DeepCopy()
+	loose.Name, loose.UID, loose.CreationTimestamp, loose.OwnerReferences = "loose", "loose-uid", metav1.Now(), nil
+	if frozen, err := freezeRequesterConnections(context.Background(), reader, loose, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
+		t.Fatalf("loose fresh task: frozen = %+v err = %v, want no wait", frozen, err)
+	}
+	if frozen, err := freezeRequesterConnections(context.Background(), reader, sealed, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 1 {
+		t.Fatalf("sealed child: frozen = %+v err = %v", frozen, err)
 	}
 	if frozen, err := freezeRequesterConnections(context.Background(), reader, impostor, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
-		t.Fatalf("impostor child: frozen = %+v err = %v", frozen, err)
-	}
-	if frozen, err := freezeRequesterConnections(context.Background(), reader, orphan, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
-		t.Fatalf("child with a replaced parent: frozen = %+v err = %v", frozen, err)
+		t.Fatalf("child with a copied stamp and another requester: frozen = %+v err = %v", frozen, err)
 	}
 }

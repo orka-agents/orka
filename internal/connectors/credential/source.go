@@ -329,7 +329,7 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 		s.recordNarrowedScopes(ctx, connection, ref, refreshed, mode)
 		return store.ConnectorCredential{}, errors.New("refreshed connection credential no longer covers the connection mode; the person must consent again")
 	}
-	s.recordRefresh(ctx, connection, refreshed)
+	s.recordRefresh(ctx, connection, ref, refreshed)
 	// A token the provider issued already inside the refresh skew would
 	// expire mid-call; it is not released, and the next call refreshes again.
 	if s.needsRefresh(refreshed) {
@@ -453,25 +453,36 @@ func (s *Source) recordNarrowedScopes(ctx context.Context, connection *corev1alp
 // recordRefresh updates non-secret status after a successful refresh. A
 // failed status write is logged; the refreshed material is already safe in
 // custody and the call may proceed.
-func (s *Source) recordRefresh(ctx context.Context, connection *corev1alpha1.Connection, credential store.ConnectorCredential) {
-	now := metav1.NewTime(s.now().UTC())
+func (s *Source) recordRefresh(ctx context.Context, connection *corev1alpha1.Connection, ref store.ConnectorCredentialRef, credential store.ConnectorCredential) {
+	logger := log.FromContext(ctx).WithValues("connection", connection.Name)
+	const maxAttempts = 4
 	// Fenced on the resourceVersion read at flight start: a consent that
 	// completed meanwhile has already rewritten status, and this stale
-	// refresh must not overwrite its scopes or expiry.
-	patch := client.MergeFromWithOptions(connection.DeepCopy(), client.MergeFromWithOptimisticLock{})
-	connection.Status.GrantedScopes = append([]string(nil), credential.Scopes...)
-	connection.Status.LastRefreshTime = &now
-	connection.Status.ExpiresAt = nil
-	if !credential.ExpiresAt.IsZero() {
-		expires := metav1.NewTime(credential.ExpiresAt.UTC())
-		connection.Status.ExpiresAt = &expires
-	}
-	if err := s.Client.Status().Patch(ctx, connection, patch); err != nil {
-		if apierrors.IsConflict(err) {
-			log.FromContext(ctx).Info("connection changed concurrently; leaving refresh status to the newer writer", "connection", connection.Name)
+	// refresh must not overwrite its scopes or expiry. Any other concurrent
+	// writer is retried while custody still holds this refreshed material,
+	// or scopes and expiry would stay stale indefinitely.
+	for attempt := 1; ; attempt++ {
+		now := metav1.NewTime(s.now().UTC())
+		patch := client.MergeFromWithOptions(connection.DeepCopy(), client.MergeFromWithOptimisticLock{})
+		connection.Status.GrantedScopes = append([]string(nil), credential.Scopes...)
+		connection.Status.LastRefreshTime = &now
+		connection.Status.ExpiresAt = nil
+		if !credential.ExpiresAt.IsZero() {
+			expires := metav1.NewTime(credential.ExpiresAt.UTC())
+			connection.Status.ExpiresAt = &expires
+		}
+		err := s.Client.Status().Patch(ctx, connection, patch)
+		if err == nil {
 			return
 		}
-		log.FromContext(ctx).Info("connection refresh status could not be recorded", "connection", connection.Name)
+		if !apierrors.IsConflict(err) {
+			logger.Info("connection refresh status could not be recorded")
+			return
+		}
+		if attempt >= maxAttempts || !s.verdictStillCurrent(ctx, connection, ref, credential.Version) {
+			logger.Info("connection changed concurrently; leaving refresh status to the newer writer")
+			return
+		}
 	}
 }
 

@@ -20,6 +20,9 @@ import (
 	"testing"
 	"time"
 
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/llm"
@@ -30,7 +33,6 @@ import (
 	"github.com/orka-agents/orka/internal/tracing/testutil"
 	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/workers/common"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 const customToolName = "custom_tool"
@@ -1671,5 +1673,41 @@ func TestParseSessionContextIncludesGatewaySenderProvenance(t *testing.T) {
 		if !strings.Contains(messages[0].Content, want) {
 			t.Fatalf("parsed content = %q, want %q", messages[0].Content, want)
 		}
+	}
+}
+
+func TestSealChildTaskViaControllerAsksTheParentEndpoint(t *testing.T) {
+	var path, auth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path, auth = r.URL.EscapedPath(), r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv(workerenv.ControllerURL, server.URL)
+	t.Setenv(workerenv.TaskNamespace, "default")
+	t.Setenv(workerenv.TaskName, "parent-task")
+	t.Setenv(workerenv.ServiceAccountTokenPath, "")
+	t.Setenv(workerenv.ServiceAccountToken, "sa-token")
+	previous := sealHTTPClient
+	sealHTTPClient = server.Client
+	t.Cleanup(func() { sealHTTPClient = previous })
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "child task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{RequestedBy: &corev1alpha1.RequestedBy{
+			Issuer: "https://issuer.example.test", Subject: "alice",
+		}},
+	}
+	if err := sealChildTaskViaController(context.Background(), nil, child); err != nil {
+		t.Fatal(err)
+	}
+	wantPath := "/internal/v1/tasks/default/parent-task/children/child%20task/requester-stamp"
+	if path != wantPath || auth != "Bearer sa-token" {
+		t.Fatalf("path = %q auth = %q", path, auth)
+	}
+	// A child without a requester has nothing to seal.
+	path = ""
+	plain := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "plain"}}
+	if err := sealChildTaskViaController(context.Background(), nil, plain); err != nil || path != "" {
+		t.Fatalf("plain child: err = %v path = %q", err, path)
 	}
 }
