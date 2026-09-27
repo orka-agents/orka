@@ -175,6 +175,15 @@ func TestValidateProviderSpec(t *testing.T) {
 		{name: "http tool benign header ok", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.Tools[2].HTTP.Headers = map[string]string{"X-Github-Api-Version": "2022-11-28", "Accept": "application/vnd.github+json"}
 		}},
+		{name: "http tool subscription key header", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].HTTP.Headers = map[string]string{"Ocp-Apim-Subscription-Key": "abc"}
+		}, want: "looks like a credential"},
+		{name: "http tool functions key header", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].HTTP.Headers = map[string]string{"X-Functions-Key": "abc"}
+		}, want: "looks like a credential"},
+		{name: "client key authorize parameter", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.AdditionalAuthorizeParameters = map[string]string{"client_key": "x"}
+		}, want: "must not carry credentials"},
 		{name: "http tool x-auth header", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.Tools[2].HTTP.Headers = map[string]string{"X-Auth": "abc"}
 		}, want: "looks like a credential"},

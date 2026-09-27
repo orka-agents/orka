@@ -326,6 +326,7 @@ func credentialLikeParameter(name string) bool {
 	for _, fragment := range []string{
 		"secret", "password", "passwd", "credential", "authorization", "api-key", "apikey", "token", "assertion", "signature",
 		"auth-", "-auth", "access-key", "private-key", "secret-key", "session", "cookie", "bearer", "jwt",
+		"-key", "key-",
 	} {
 		if strings.Contains(normalized, fragment) {
 			return true
