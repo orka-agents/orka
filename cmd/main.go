@@ -1846,10 +1846,18 @@ func main() {
 	}
 
 	if connectorsEnabled {
+		knownBuiltinTools := map[string]struct{}{}
+		for _, name := range tools.KnownBuiltInToolNames() {
+			knownBuiltinTools[name] = struct{}{}
+		}
 		if err := (&controller.ConnectorProviderReconciler{
 			Client:    mgr.GetClient(),
 			APIReader: mgr.GetAPIReader(),
 			Scheme:    mgr.GetScheme(),
+			KnownBuiltinTool: func(name string) bool {
+				_, ok := knownBuiltinTools[name]
+				return ok
+			},
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "ConnectorProvider")
 			os.Exit(1)

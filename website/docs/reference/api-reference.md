@@ -372,14 +372,14 @@ spec:
 | `spec.oauth.clientSecretRef` | Secret key selector | required | Same-namespace Secret holding the client secret. |
 | `spec.oauth.clientAuthentication` | `ClientSecretBasic` \| `ClientSecretPost` | `ClientSecretBasic` | How the client secret is presented to the token endpoint. |
 | `spec.oauth.pkce` | bool | `true` | Enable RFC 7636 code verification. |
-| `spec.oauth.scopes.read` / `.write` | []string | empty | Scopes requested for `readOnly` Connections, and additionally for `readWrite`. |
-| `spec.oauth.additionalAuthorizeParameters` | map | empty | Static authorize query parameters. Reserved OAuth fields are rejected. |
+| `spec.oauth.scopes.read` / `.write` | []string | empty | Scopes requested for `readOnly` Connections, and additionally for `readWrite`. Entries must be RFC 6749 scope tokens (printable ASCII without spaces, quotes, or backslashes). |
+| `spec.oauth.additionalAuthorizeParameters` | map | empty | Static authorize query parameters. Reserved OAuth fields and credential-like names (`token`, `secret`, `api_key`, `assertion`, and similar) are rejected; the spec is public configuration. Endpoint URLs may carry a query, but not credential-like parameters, and `authorizeURL` may not preset reserved OAuth fields. |
 | `spec.tools[].name` | string | required | Tool name exposed to agents. Unique within the provider. |
 | `spec.tools[].class` | `read` \| `write` | required | Write tools are hidden from `readOnly` Connections and require approval. |
 | `spec.tools[].source` | `Builtin` \| `HTTP` | required | `Builtin` names an existing Orka tool. `HTTP` carries a curated definition in `http`. |
-| `spec.tools[].description`, `.parameters`, `.http` | | | HTTP tools only. `http.url` must be HTTPS; `Authorization`, `Cookie`, `Host`, and `Txn-Token` headers are reserved. |
+| `spec.tools[].description`, `.parameters`, `.http` | | | HTTP tools only. `parameters` must be an object-shaped JSON Schema that resolves in full, including nested property schemas. `http.url` must be HTTPS; `Authorization`, `Cookie`, `Host`, and `Txn-Token` headers are reserved. |
 
-Status contains only `observedGeneration`, `Accepted`, and `ResolvedRefs`.
+Status contains only `observedGeneration`, `Accepted`, and `ResolvedRefs`. `Builtin` tool names are checked against the controller's built-in tool registry, so a misspelled built-in is rejected.
 
 ## Connection
 
@@ -394,8 +394,9 @@ Status contains only `observedGeneration`, `Accepted`, and `ResolvedRefs`.
 | `status.state` | string | | `Pending`, `Ready`, `Expired`, `Revoked`, or `Error`. |
 | `status.grantedScopes` | []string | | Scopes the provider reported at consent time. |
 | `status.linkedAt`, `.expiresAt`, `.lastRefreshTime` | time | | Link, access-token expiry, and refresh timestamps. |
+| `status.consent.providerUID`, `.authorityDigest` | string | | The `ConnectorProvider` UID and a non-secret digest of its OAuth client identity (client ID, secret reference, authentication method, endpoints) the last consent was granted against. |
 
-Conditions are `ProviderResolved` and `ScopesGranted` (set by the controller; the latter compares `status.grantedScopes` with the scopes the current mode and provider require, so widening the mode or a provider requiring more scopes projects `Pending` with reason `ConsentRequired` without erasing the consent, and narrowing restores readiness) and `Ready` (set by the consent and refresh paths). A Connection is usable only when both `Ready` and `ScopesGranted` are True. See [ADR 0033](https://github.com/orka-agents/orka/blob/main/docs/adr/0033-user-connectors.md) for the design.
+Conditions are `ProviderResolved` and `ScopesGranted` (set by the controller; the latter compares `status.grantedScopes` with the scopes the current mode and provider require, so widening the mode or a provider requiring more scopes projects `Pending` with reason `ConsentRequired` without erasing the consent, and narrowing restores readiness; it also requires `status.consent` to match the current provider, so a replaced provider or a changed OAuth client asks for consent again instead of refreshing or revoking the held token against a different authority) and `Ready` (set by the consent and refresh paths). A Connection is usable only when `Ready` is True and both controller conditions are True for the current generation. See [ADR 0033](https://github.com/orka-agents/orka/blob/main/docs/adr/0033-user-connectors.md) for the design.
 
 ## Security
 

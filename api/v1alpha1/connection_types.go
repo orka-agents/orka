@@ -86,6 +86,18 @@ type ConnectionSpec struct {
 	Mode string `json:"mode,omitempty"`
 }
 
+// ConnectionConsent records which provider OAuth client a consent belongs to.
+type ConnectionConsent struct {
+	// ProviderUID is the UID of the ConnectorProvider at consent time.
+	// +kubebuilder:validation:MaxLength=253
+	ProviderUID string `json:"providerUID,omitempty"`
+	// AuthorityDigest is a hex SHA-256 digest of the provider's OAuth client
+	// identity (client ID, client secret reference, authentication method,
+	// and endpoints) at consent time. It carries no secret material.
+	// +kubebuilder:validation:MaxLength=64
+	AuthorityDigest string `json:"authorityDigest,omitempty"`
+}
+
 // ConnectionStatus reports link state. It never carries token material.
 type ConnectionStatus struct {
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
@@ -110,6 +122,12 @@ type ConnectionStatus struct {
 	// LastRefreshTime is when the held material was last refreshed.
 	// +optional
 	LastRefreshTime *metav1.Time `json:"lastRefreshTime,omitempty"`
+
+	// Consent identifies the ConnectorProvider OAuth client the last consent
+	// was granted against. The controller requires a new consent when the
+	// provider is replaced or its OAuth authority changes.
+	// +optional
+	Consent *ConnectionConsent `json:"consent,omitempty"`
 
 	// +listType=map
 	// +listMapKey=type

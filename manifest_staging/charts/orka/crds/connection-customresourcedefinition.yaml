@@ -165,6 +165,25 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              consent:
+                description: |-
+                  Consent identifies the ConnectorProvider OAuth client the last consent
+                  was granted against. The controller requires a new consent when the
+                  provider is replaced or its OAuth authority changes.
+                properties:
+                  authorityDigest:
+                    description: |-
+                      AuthorityDigest is a hex SHA-256 digest of the provider's OAuth client
+                      identity (client ID, client secret reference, authentication method,
+                      and endpoints) at consent time. It carries no secret material.
+                    maxLength: 64
+                    type: string
+                  providerUID:
+                    description: ProviderUID is the UID of the ConnectorProvider at
+                      consent time.
+                    maxLength: 253
+                    type: string
+                type: object
               expiresAt:
                 description: ExpiresAt is the held access token's expiry, if the provider
                   reported one.

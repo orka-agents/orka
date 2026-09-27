@@ -15,6 +15,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -124,6 +125,44 @@ func TestValidateProviderSpec(t *testing.T) {
 		{name: "missing secret key", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.ClientSecretRef.Key = "" }, want: "clientSecretRef requires name and key"},
 		{name: "bad client auth", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.ClientAuthentication = "PrivateKeyJWT" }, want: "clientAuthentication must be"},
 		{name: "scope with space", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.Scopes.Read = []string{"read user"} }, want: "scopes.read entries"},
+		{name: "scope with control byte", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.Scopes.Read = []string{"read\x00profile"} }, want: "scopes.read entries"},
+		{name: "scope with non-ascii", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.Scopes.Write = []string{"répo"} }, want: "scopes.write entries"},
+		{name: "scope with quote", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.Scopes.Read = []string{`read"x`} }, want: "scopes.read entries"},
+		{name: "credential-like authorize parameter", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.AdditionalAuthorizeParameters = map[string]string{"access_token": "x"}
+		}, want: "must not carry credentials"},
+		{name: "api key authorize parameter", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.AdditionalAuthorizeParameters = map[string]string{"api_key": "x"}
+		}, want: "must not carry credentials"},
+		{name: "client assertion authorize parameter", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.AdditionalAuthorizeParameters = map[string]string{"client_assertion": "x"}
+		}, want: "must not carry credentials"},
+		{name: "authorize url presets state", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.AuthorizeURL = "https://example.com/authorize?state=fixed"
+		}, want: "must not preset reserved"},
+		{name: "authorize url presets redirect", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.AuthorizeURL = "https://example.com/authorize?redirect_uri=https%3A%2F%2Fevil.example.test"
+		}, want: "must not preset reserved"},
+		{name: "authorize url benign query ok", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.AuthorizeURL = "https://example.com/authorize?audience=api"
+		}},
+		{name: "token url credential query", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.TokenURL = "https://example.com/token?client_secret=abc"
+		}, want: "must not carry credentials"},
+		{name: "malformed query", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://example.com/token?a=%zz" }, want: "query must be well-formed"},
+		{name: "semicolon query", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://example.com/token?a=1;b=2" }, want: "semicolon"},
+		{name: "http tool credential query", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].HTTP.URL = "https://api.github.com/x?token=abc"
+		}, want: "must not carry credentials"},
+		{name: "parameters nested property not a schema", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].Parameters = &apiextensionsv1.JSON{Raw: []byte(`{"type":"object","properties":{"q":1}}`)}
+		}, want: "valid JSON Schema"},
+		{name: "parameters unresolvable ref", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].Parameters = &apiextensionsv1.JSON{Raw: []byte(`{"type":"object","properties":{"q":{"$ref":"#/$defs/missing"}}}`)}
+		}, want: "resolvable JSON Schema"},
+		{name: "parameters nested ok", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].Parameters = &apiextensionsv1.JSON{Raw: []byte(`{"type":"object","properties":{"q":{"type":"string","minLength":1},"tags":{"type":"array","items":{"type":"string"}}},"required":["q"]}`)}
+		}},
 		{name: "duplicate scope", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.Scopes.Write = []string{"repo", "repo"} }, want: "duplicate scope"},
 		{name: "reserved authorize parameter", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.OAuth.AdditionalAuthorizeParameters = map[string]string{"redirect_uri": "https://evil.example"}
@@ -371,7 +410,7 @@ func TestScopesCoverAndConnectionLinked(t *testing.T) {
 	if !ScopesCover([]string{"a", "b"}, []string{"a"}) || ScopesCover([]string{"a"}, []string{"a", "b"}) || !ScopesCover(nil, nil) || ScopesCover(nil, []string{"a"}) {
 		t.Fatal("ScopesCover is wrong")
 	}
-	connection := &corev1alpha1.Connection{}
+	connection := &corev1alpha1.Connection{ObjectMeta: metav1.ObjectMeta{Generation: 2}}
 	if ConnectionLinked(connection) || ConnectionLinked(nil) {
 		t.Fatal("no conditions must not be linked")
 	}
@@ -379,14 +418,65 @@ func TestScopesCoverAndConnectionLinked(t *testing.T) {
 	if ConnectionLinked(connection) {
 		t.Fatal("Ready alone is not linked")
 	}
-	connection.Status.Conditions = append(connection.Status.Conditions, metav1.Condition{Type: corev1alpha1.ConnectionConditionScopesGranted, Status: metav1.ConditionTrue})
+	connection.Status.Conditions = append(connection.Status.Conditions, metav1.Condition{Type: corev1alpha1.ConnectionConditionScopesGranted, Status: metav1.ConditionTrue, ObservedGeneration: 2})
+	if ConnectionLinked(connection) {
+		t.Fatal("an unresolved provider is not linked")
+	}
+	connection.Status.Conditions = append(connection.Status.Conditions, metav1.Condition{Type: corev1alpha1.ConnectionConditionProviderResolved, Status: metav1.ConditionTrue, ObservedGeneration: 2})
 	if !ConnectionLinked(connection) {
-		t.Fatal("Ready plus ScopesGranted is linked")
+		t.Fatal("Ready plus current ProviderResolved and ScopesGranted is linked")
+	}
+	stale := connection.DeepCopy()
+	stale.Generation = 3
+	if ConnectionLinked(stale) {
+		t.Fatal("controller conditions from an older generation are not linked")
+	}
+	unresolved := connection.DeepCopy()
+	meta.SetStatusCondition(&unresolved.Status.Conditions, metav1.Condition{Type: corev1alpha1.ConnectionConditionProviderResolved, Status: metav1.ConditionFalse, ObservedGeneration: 2})
+	if ConnectionLinked(unresolved) {
+		t.Fatal("a lost provider is not linked even with Ready and ScopesGranted preserved")
 	}
 	deleting := connection.DeepCopy()
 	now := metav1.Now()
 	deleting.DeletionTimestamp = &now
 	if ConnectionLinked(deleting) {
 		t.Fatal("a deleting connection is not linked")
+	}
+}
+
+func TestProviderAuthorityDigestAndConsent(t *testing.T) {
+	provider := validProvider()
+	provider.UID = "provider-uid"
+	digest := ProviderAuthorityDigest(provider)
+	if len(digest) != 64 || ProviderAuthorityDigest(nil) != "" {
+		t.Fatalf("digest = %q", digest)
+	}
+	connection := &corev1alpha1.Connection{}
+	if ConsentMatchesProvider(connection, provider) {
+		t.Fatal("a missing consent record must not match")
+	}
+	connection.Status.Consent = ConsentFor(provider)
+	if !ConsentMatchesProvider(connection, provider) {
+		t.Fatal("the recorded consent must match the same provider")
+	}
+	for name, mutate := range map[string]func(p *corev1alpha1.ConnectorProvider){
+		"uid":        func(p *corev1alpha1.ConnectorProvider) { p.UID = "recreated" },
+		"client id":  func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.ClientID = "other" },
+		"token url":  func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://example.com/other-token" },
+		"secret ref": func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.ClientSecretRef.Key = "other" },
+		"client auth": func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.ClientAuthentication = corev1alpha1.ConnectorClientAuthSecretPost
+		},
+	} {
+		changed := provider.DeepCopy()
+		mutate(changed)
+		if ConsentMatchesProvider(connection, changed) {
+			t.Fatalf("%s change must require a new consent", name)
+		}
+	}
+	scopesOnly := provider.DeepCopy()
+	scopesOnly.Spec.OAuth.Scopes.Read = append(scopesOnly.Spec.OAuth.Scopes.Read, "read:org")
+	if !ConsentMatchesProvider(connection, scopesOnly) {
+		t.Fatal("a scope-only change is judged by ScopesGranted, not the authority digest")
 	}
 }

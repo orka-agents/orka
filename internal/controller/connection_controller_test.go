@@ -20,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/connectors"
 )
 
 func testConnection(namespace, name, provider string) *corev1alpha1.Connection {
@@ -100,6 +101,7 @@ func TestConnectionReconcilerProviderResolution(t *testing.T) {
 			objects: []runtime.Object{acceptedConnectorProvider()},
 			existing: &corev1alpha1.ConnectionStatus{
 				State:      corev1alpha1.ConnectionStateReady,
+				Consent:    connectors.ConsentFor(scopedConnectorProvider()),
 				Conditions: []metav1.Condition{{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionTrue, Reason: "Linked"}},
 			},
 			wantStatus: metav1.ConditionTrue,
@@ -132,6 +134,7 @@ func TestConnectionReconcilerProviderResolution(t *testing.T) {
 			name:    "ready condition true without recorded state",
 			objects: []runtime.Object{acceptedConnectorProvider()},
 			existing: &corev1alpha1.ConnectionStatus{
+				Consent:    connectors.ConsentFor(scopedConnectorProvider()),
 				Conditions: []metav1.Condition{{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionTrue, Reason: "Linked"}},
 			},
 			wantStatus: metav1.ConditionTrue,
@@ -143,6 +146,7 @@ func TestConnectionReconcilerProviderResolution(t *testing.T) {
 			existing: &corev1alpha1.ConnectionStatus{
 				State:         corev1alpha1.ConnectionStateReady,
 				GrantedScopes: []string{"read:user"},
+				Consent:       connectors.ConsentFor(scopedConnectorProvider()),
 				Conditions:    []metav1.Condition{{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonLinked, ObservedGeneration: 1}},
 			},
 			mode:        corev1alpha1.ConnectionModeReadWrite,
@@ -156,6 +160,7 @@ func TestConnectionReconcilerProviderResolution(t *testing.T) {
 			name:    "narrowed back to readOnly restores readiness",
 			objects: []runtime.Object{scopedConnectorProvider()},
 			existing: &corev1alpha1.ConnectionStatus{
+				Consent:       connectors.ConsentFor(scopedConnectorProvider()),
 				State:         corev1alpha1.ConnectionStatePending,
 				GrantedScopes: []string{"read:user"},
 				Conditions: []metav1.Condition{
@@ -180,6 +185,38 @@ func TestConnectionReconcilerProviderResolution(t *testing.T) {
 			existing: &corev1alpha1.ConnectionStatus{
 				State:         corev1alpha1.ConnectionStateReady,
 				GrantedScopes: []string{"read:user"},
+				Consent:       connectors.ConsentFor(scopedConnectorProvider()),
+				Conditions:    []metav1.Condition{{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonLinked, ObservedGeneration: 1}},
+			},
+			wantStatus:  metav1.ConditionTrue,
+			wantState:   corev1alpha1.ConnectionStatePending,
+			wantReady:   metav1.ConditionTrue,
+			wantGranted: metav1.ConditionFalse,
+		},
+		{
+			name: "provider whose OAuth client changed asks for consent again",
+			objects: func() []runtime.Object {
+				provider := scopedConnectorProvider()
+				provider.Spec.OAuth.ClientID = "rotated-client"
+				return []runtime.Object{provider}
+			}(),
+			existing: &corev1alpha1.ConnectionStatus{
+				State:         corev1alpha1.ConnectionStateReady,
+				GrantedScopes: []string{"read:user"},
+				Consent:       connectors.ConsentFor(scopedConnectorProvider()),
+				Conditions:    []metav1.Condition{{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonLinked, ObservedGeneration: 1}},
+			},
+			wantStatus:  metav1.ConditionTrue,
+			wantState:   corev1alpha1.ConnectionStatePending,
+			wantReady:   metav1.ConditionTrue,
+			wantGranted: metav1.ConditionFalse,
+		},
+		{
+			name:    "consent without a provider record asks for consent again",
+			objects: []runtime.Object{scopedConnectorProvider()},
+			existing: &corev1alpha1.ConnectionStatus{
+				State:         corev1alpha1.ConnectionStateReady,
+				GrantedScopes: []string{"read:user"},
 				Conditions:    []metav1.Condition{{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonLinked, ObservedGeneration: 1}},
 			},
 			wantStatus:  metav1.ConditionTrue,
@@ -192,6 +229,7 @@ func TestConnectionReconcilerProviderResolution(t *testing.T) {
 			objects: []runtime.Object{scopedConnectorProvider()},
 			existing: &corev1alpha1.ConnectionStatus{
 				GrantedScopes: []string{"read:user", "repo"},
+				Consent:       connectors.ConsentFor(scopedConnectorProvider()),
 				Conditions:    []metav1.Condition{{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonLinked, ObservedGeneration: 1}},
 			},
 			mode:        corev1alpha1.ConnectionModeReadWrite,
