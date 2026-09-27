@@ -54,6 +54,10 @@ const (
 	ContextTokenScopeTaskList = "orka:tasks:list"
 	// ContextTokenScopeTaskDelete authorizes context-token callers to delete Tasks.
 	ContextTokenScopeTaskDelete = "orka:tasks:delete"
+	// ContextTokenScopeConnectorsRead lists and reads a person's Connections.
+	ContextTokenScopeConnectorsRead = "orka:connectors:read"
+	// ContextTokenScopeConnectorsManage links, changes, and disconnects them.
+	ContextTokenScopeConnectorsManage = "orka:connectors:manage"
 	// ContextTokenScopeToolsRead authorizes context-token callers to read Tool definitions.
 	ContextTokenScopeToolsRead = "orka:tools:read"
 	// ContextTokenScopeToolsUse authorizes context-token callers to execute Orka-managed tools.
@@ -122,6 +126,10 @@ type ContextTokenAuthorizationConfig struct {
 	GatewayReadScopes             []string
 	GatewayOperateScopes          []string
 	ConfigMapReadScopeList        []string
+	// ConnectorReadScopes and ConnectorManageScopes gate a delegated
+	// context token's access to a person's linked accounts.
+	ConnectorReadScopes   []string
+	ConnectorManageScopes []string
 }
 
 // ContextTokenAuthorizationConfigOptions names the inputs used to build
@@ -188,6 +196,8 @@ func NewContextTokenAuthorizationConfig(opts ContextTokenAuthorizationConfigOpti
 	securityWrite := defaultScopes(opts.SecurityWriteScopes, ContextTokenScopeSecurityWrite)
 	monitorRead := defaultScopes(opts.MonitorReadScopes, ContextTokenScopeMonitorsRead)
 	monitorWrite := defaultScopes(opts.MonitorWriteScopes, ContextTokenScopeMonitorsWrite)
+	connectorRead := defaultScopes("", ContextTokenScopeConnectorsRead)
+	connectorManage := defaultScopes("", ContextTokenScopeConnectorsManage)
 	monitorOperate := defaultScopes(opts.MonitorOperateScopes, ContextTokenScopeMonitorsOperate)
 	skillRead := defaultScopes(opts.SkillReadScopes, ContextTokenScopeSkillsRead)
 	skillWrite := defaultScopes(opts.SkillWriteScopes, ContextTokenScopeSkillsWrite)
@@ -216,6 +226,8 @@ func NewContextTokenAuthorizationConfig(opts ContextTokenAuthorizationConfigOpti
 		SecurityWriteScopes:           securityWrite,
 		MonitorReadScopes:             monitorRead,
 		MonitorWriteScopes:            monitorWrite,
+		ConnectorReadScopes:           connectorRead,
+		ConnectorManageScopes:         connectorManage,
 		MonitorOperateScopes:          monitorOperate,
 		SkillReadScopes:               skillRead,
 		SkillWriteScopes:              skillWrite,

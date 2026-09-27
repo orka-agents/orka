@@ -222,11 +222,16 @@ func (r *ConnectionReconciler) reapExpiredCompletions(ctx context.Context, conne
 		return
 	}
 	now := time.Now()
+	committed := r.committedCredential(ctx, connection)
 	for _, completion := range completions {
 		if completion.ExpiresAt.After(now) {
 			continue
 		}
-		r.revokeTokens(ctx, connection, completion.Credential)
+		// A completion whose token entered custody (its row outlived a
+		// failed delete after commit) is active, not abandoned.
+		if !sameConnectorCredential(committed, completion.Credential) {
+			r.revokeTokens(ctx, connection, completion.Credential)
+		}
 		if err := r.Consents.DeleteConnectorCompletion(ctx, completion.Nonce); err != nil {
 			log.FromContext(ctx).Info("expired completion could not be deleted", "connection", connection.Name)
 		}
@@ -244,9 +249,33 @@ func (r *ConnectionReconciler) revokeParkedCompletions(ctx context.Context, conn
 		log.FromContext(ctx).Info("parked completions could not be listed for revocation", "connection", connection.Name)
 		return
 	}
+	committed := r.committedCredential(ctx, connection)
 	for _, completion := range completions {
+		if sameConnectorCredential(committed, completion.Credential) {
+			continue // revoked with the committed credential
+		}
 		r.revokeTokens(ctx, connection, completion.Credential)
 	}
+}
+
+// committedCredential returns the committed custody material, or nil.
+func (r *ConnectionReconciler) committedCredential(ctx context.Context, connection *corev1alpha1.Connection) *store.ConnectorCredential {
+	if r.Credentials == nil {
+		return nil
+	}
+	ref, err := connectors.CredentialRef(connection)
+	if err != nil {
+		return nil
+	}
+	credential, err := r.Credentials.GetConnectorCredential(ctx, ref)
+	if err != nil {
+		return nil
+	}
+	return &credential
+}
+
+func sameConnectorCredential(committed *store.ConnectorCredential, parked store.ConnectorCredential) bool {
+	return committed != nil && committed.AccessToken != "" && committed.AccessToken == parked.AccessToken
 }
 
 // revokeTokens revokes the refresh then access token of one credential at

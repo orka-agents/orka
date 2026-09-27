@@ -337,7 +337,17 @@ func TestConnectorCompletionRoundTripAndTombstone(t *testing.T) {
 	if _, err := s.ConsumeConnectorCompletion(ctx, parked.Nonce); !errors.Is(err, store.ErrNotFound) {
 		t.Fatal("completions must be gone after disconnect")
 	}
+}
 
+func TestConnectorCredentialTombstoneBlocksRecreation(t *testing.T) {
+	s := newConnectorTestStore(t)
+	ctx := context.Background()
+	completion := store.ConnectorCompletion{
+		Nonce: "completion-t", ConnectionUID: "uid-1", Namespace: "tenant", Name: "github-abc",
+		SubjectDigest: "digest-a", Provider: "github", Mode: "readOnly",
+		Credential: store.ConnectorCredential{AccessToken: "gho_parked"},
+		ExpiresAt:  time.Now().Add(10 * time.Minute),
+	}
 	// Deleting custody tombstones the UID permanently.
 	ref := testCredentialRef()
 	if err := s.PutConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho"}); err != nil {

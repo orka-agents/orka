@@ -59,6 +59,12 @@ type connectorTestHarness struct {
 	// statusFailure, when set and true, makes Connection status updates fail
 	// to model a transient API server error during completion.
 	statusFailure *atomic.Bool
+	// grantScope overrides the scope the token fixture reports; revoked
+	// records every token the fixture was asked to revoke.
+	grantScope string
+	revoked    []string
+	// contextTokenAuthorization, when set, enables scope enforcement.
+	contextTokenAuthorization ContextTokenAuthorizationConfig
 }
 
 func acceptedTestProvider() *corev1alpha1.ConnectorProvider {
@@ -69,6 +75,7 @@ func acceptedTestProvider() *corev1alpha1.ConnectorProvider {
 			OAuth: corev1alpha1.ConnectorOAuthConfig{
 				AuthorizeURL:    "https://provider.example.test/authorize",
 				TokenURL:        "https://provider.example.test/token",
+				RevocationURL:   "https://provider.example.test/revoke",
 				ClientID:        "client-id",
 				ClientSecretRef: corev1alpha1.SecretKeySelector{Name: "github-oauth", Key: "clientSecret"},
 				Scopes:          corev1alpha1.ConnectorScopes{Read: []string{"read:user"}, Write: []string{"repo"}},
@@ -89,7 +96,23 @@ func acceptedTestProvider() *corev1alpha1.ConnectorProvider {
 
 func newConnectorTestHarness(t *testing.T, objects ...runtime.Object) *connectorTestHarness {
 	t.Helper()
-	harness := &connectorTestHarness{t: t}
+	return buildConnectorTestHarness(t, ContextTokenAuthorizationConfig{}, objects...)
+}
+
+// newConnectorTestHarnessWithContextTokens enforces context-token scopes with
+// the default connector scope names.
+func newConnectorTestHarnessWithContextTokens(t *testing.T, objects ...runtime.Object) *connectorTestHarness {
+	t.Helper()
+	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: ContextTokenAuthorizationModeEnforce})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return buildConnectorTestHarness(t, authz, objects...)
+}
+
+func buildConnectorTestHarness(t *testing.T, authz ContextTokenAuthorizationConfig, objects ...runtime.Object) *connectorTestHarness {
+	t.Helper()
+	harness := &connectorTestHarness{t: t, contextTokenAuthorization: authz}
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
@@ -137,6 +160,11 @@ func newConnectorTestHarness(t *testing.T, objects ...runtime.Object) *connector
 	h.oauth = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/revoke" {
+			h.revoked = append(h.revoked, r.PostForm.Get("token"))
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		if r.URL.Path != "/token" {
 			http.NotFound(w, r)
 			return
@@ -146,9 +174,13 @@ func newConnectorTestHarness(t *testing.T, objects ...runtime.Object) *connector
 			return
 		}
 		h.tokens++
+		scope := "read:user"
+		if h.grantScope != "" {
+			scope = h.grantScope
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"access_token": "gho_secret_access", "refresh_token": "ghr_secret_refresh", "token_type": "bearer",
-			"expires_in": 3600, "scope": "read:user",
+			"expires_in": 3600, "scope": scope,
 		})
 	}))
 	t.Cleanup(h.oauth.Close)
@@ -164,9 +196,10 @@ func newConnectorTestHarness(t *testing.T, objects ...runtime.Object) *connector
 	}})
 
 	handlers := NewHandlers(HandlersConfig{
-		Client:         fakeClient,
-		APIReader:      fakeClient,
-		WatchNamespace: connectorTestNamespace,
+		Client:                    fakeClient,
+		APIReader:                 fakeClient,
+		WatchNamespace:            connectorTestNamespace,
+		ContextTokenAuthorization: harness.contextTokenAuthorization,
 		Connectors: ConnectorConfig{
 			Enabled:         true,
 			CallbackBaseURL: connectorCallbackBase,
@@ -366,7 +399,7 @@ func assertConnectionLinked(t *testing.T, h *connectorTestHarness, name string) 
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.State != corev1alpha1.ConnectionStateReady || !got.Ready || got.LinkedAt == nil || got.ExpiresAt == nil || len(got.GrantedScopes) != 1 {
+	if got.State != corev1alpha1.ConnectionStateReady || !got.Ready || got.LinkedAt == nil || got.ExpiresAt == nil || len(got.GrantedScopes) == 0 {
 		t.Fatalf("linked connection = %+v", got)
 	}
 	if strings.Contains(string(raw), "gho_") || strings.Contains(string(raw), "ghr_") {
@@ -886,6 +919,7 @@ func TestConnectionCompletionRejectsStaleModeAndIsRetryable(t *testing.T) {
 	// A completion whose status update fails transiently stays retryable.
 	var fail atomic.Bool
 	h.statusFailure = &fail
+	h.grantScope = "read:user repo"
 	second := h.create("readWrite")
 	location = h.consentAndCallback(second)
 	completion = completionFromLocation(t, location)
@@ -924,5 +958,123 @@ func TestCompletionLocksSerializePerKey(t *testing.T) {
 	case <-released:
 	case <-time.After(time.Second):
 		t.Fatal("the waiter must proceed once the key is released")
+	}
+}
+
+func TestConnectionUpdateRequiresModeAndRetriesConsent(t *testing.T) {
+	h := newConnectorTestHarness(t, acceptedTestProvider())
+	created := h.create("readOnly")
+	h.link(created)
+
+	resp, raw := h.do(http.MethodPut, "/api/v1/connections/"+created.Connection.Name, map[string]string{})
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(raw), "mode is required") {
+		t.Fatalf("empty mode = %d %s, want 400", resp.StatusCode, raw)
+	}
+	stored := &corev1alpha1.Connection{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: created.Connection.Name}, stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.Spec.Mode != corev1alpha1.ConnectionModeReadOnly {
+		t.Fatal("an update without a mode must change nothing")
+	}
+
+	// Widening returns an authorize URL, and so does retrying it while the
+	// write scopes are still not granted.
+	for attempt := range 2 {
+		resp, raw = h.do(http.MethodPut, "/api/v1/connections/"+created.Connection.Name, map[string]string{"mode": "readWrite"})
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("widen attempt %d = %d %s", attempt, resp.StatusCode, raw)
+		}
+		var updated ConnectionAuthorizeResponse
+		_ = json.Unmarshal(raw, &updated)
+		if updated.AuthorizeURL == "" || stateFromAuthorizeURL(t, updated.AuthorizeURL).Get("scope") != "read:user repo" {
+			t.Fatalf("widen attempt %d must restart consent for the write scope: %+v", attempt, updated)
+		}
+	}
+}
+
+func TestConnectionCallbackRefusesPartialScopeGrants(t *testing.T) {
+	h := newConnectorTestHarness(t, acceptedTestProvider())
+	created := h.create("readWrite")
+	// The person declines the write permission at the provider.
+	h.grantScope = "read:user"
+	location := h.consentAndCallback(created)
+	if !strings.Contains(location, "reason=scopes_denied") || strings.Contains(location, "completion=") {
+		t.Fatalf("partial grant location = %q", location)
+	}
+	if len(h.revoked) != 2 || h.revoked[0] != "ghr_secret_refresh" || h.revoked[1] != "gho_secret_access" {
+		t.Fatalf("partial grant must revoke the issued tokens, revoked = %v", h.revoked)
+	}
+
+	// A provider that reports no scopes is taken at its word.
+	h.grantScope = ""
+	h.revoked = nil
+	created = h.create("readWrite")
+	h.grantScope = " "
+	location = h.consentAndCallback(created)
+	if !strings.Contains(location, "status=pending") {
+		t.Fatalf("no-scope grant location = %q", location)
+	}
+	resp, raw := h.complete(created.Connection.Name, completionFromLocation(t, location))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("complete = %d %s", resp.StatusCode, raw)
+	}
+	stored := &corev1alpha1.Connection{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: created.Connection.Name}, stored); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(stored.Status.GrantedScopes, " ") != "read:user repo" {
+		t.Fatalf("granted scopes = %v, want the requested set assumed", stored.Status.GrantedScopes)
+	}
+}
+
+func TestConnectionCallbackRevokesWhenDisconnectedMidExchange(t *testing.T) {
+	h := newConnectorTestHarness(t, acceptedTestProvider())
+	created := h.create("readOnly")
+	stored := &corev1alpha1.Connection{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: created.Connection.Name}, stored); err != nil {
+		t.Fatal(err)
+	}
+	// Disconnect finalizes while the code exchange is in flight.
+	if err := h.store.DeleteConnectorCredential(context.Background(), string(stored.UID)); err != nil {
+		t.Fatal(err)
+	}
+	location := h.consentAndCallback(created)
+	if !strings.Contains(location, "reason=disconnected") {
+		t.Fatalf("location = %q", location)
+	}
+	if len(h.revoked) != 2 {
+		t.Fatalf("tokens issued for a disconnected link must be revoked, revoked = %v", h.revoked)
+	}
+}
+
+func TestConnectionRoutesEnforceContextTokenScopes(t *testing.T) {
+	h := newConnectorTestHarnessWithContextTokens(t, acceptedTestProvider())
+	token := func(scopes ...string) *UserInfo {
+		return &UserInfo{
+			AuthType: AuthTypeContextToken, Username: "alice", Subject: "alice", Issuer: connectorTestIssuer, Namespace: connectorTestNamespace,
+			ContextToken: &ContextToken{Subject: "alice", Issuer: connectorTestIssuer, Scopes: scopes},
+		}
+	}
+	h.identity = token("orka:tasks:get")
+	if resp, _ := h.do(http.MethodGet, "/api/v1/connections", nil); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("unrelated scope list = %d, want 403", resp.StatusCode)
+	}
+	if resp, _ := h.do(http.MethodPost, "/api/v1/connections", map[string]string{"provider": "github"}); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("unrelated scope create = %d, want 403", resp.StatusCode)
+	}
+	h.identity = token(ContextTokenScopeConnectorsRead)
+	if resp, _ := h.do(http.MethodGet, "/api/v1/connections", nil); resp.StatusCode != http.StatusOK {
+		t.Fatalf("read scope list = %d, want 200", resp.StatusCode)
+	}
+	if resp, _ := h.do(http.MethodPost, "/api/v1/connections", map[string]string{"provider": "github"}); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("read scope create = %d, want 403", resp.StatusCode)
+	}
+	h.identity = token(ContextTokenScopeConnectorsManage)
+	if resp, raw := h.do(http.MethodPost, "/api/v1/connections", map[string]string{"provider": "github"}); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("manage scope create = %d %s, want 201", resp.StatusCode, raw)
+	}
+	if resp, _ := h.do(http.MethodGet, "/api/v1/connections", nil); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("manage scope list = %d, want 403 (read scope required)", resp.StatusCode)
 	}
 }

@@ -216,8 +216,11 @@ func connectionResponse(connection *corev1alpha1.Connection) ConnectionResponse 
 		LastRefreshTime: connection.Status.LastRefreshTime,
 	}
 	if ready := meta.FindStatusCondition(connection.Status.Conditions, corev1alpha1.ConnectionConditionReady); ready != nil {
-		response.Ready = ready.Status == metav1.ConditionTrue
+		response.Ready = connectors.ConnectionLinked(connection)
 		response.Message = ready.Message
+	}
+	if granted := meta.FindStatusCondition(connection.Status.Conditions, corev1alpha1.ConnectionConditionScopesGranted); granted != nil && granted.Status != metav1.ConditionTrue {
+		response.Message = granted.Message
 	}
 	if resolved := meta.FindStatusCondition(connection.Status.Conditions, corev1alpha1.ConnectionConditionProviderResolved); resolved != nil && resolved.Status != metav1.ConditionTrue {
 		response.Ready = false
@@ -229,7 +232,7 @@ func connectionResponse(connection *corev1alpha1.Connection) ConnectionResponse 
 // connectorIdentity returns the verified human identity behind a request.
 // ServiceAccount and other TokenReview callers fail closed: a shared
 // ServiceAccount must never be able to link or use a person's accounts.
-func (h *Handlers) connectorIdentity(c fiber.Ctx) (*UserInfo, error) {
+func (h *Handlers) connectorIdentity(c fiber.Ctx, action connectorAction) (*UserInfo, error) {
 	if !h.connectors.Enabled {
 		return nil, fiber.NewError(fiber.StatusNotImplemented, "connectors are not enabled on this controller")
 	}
@@ -243,8 +246,25 @@ func (h *Handlers) connectorIdentity(c fiber.Ctx) (*UserInfo, error) {
 	if strings.TrimSpace(ui.Subject) == "" || strings.TrimSpace(ui.Issuer) == "" {
 		return nil, fiber.NewError(fiber.StatusForbidden, "connectors require an identity with issuer and subject")
 	}
+	// A delegated context token acts within its scopes: a token narrowed to
+	// unrelated work must not be able to link, inspect, or revoke accounts.
+	scopes := h.contextTokenAuthorization.ConnectorReadScopes
+	if action == connectorActionManage {
+		scopes = h.contextTokenAuthorization.ConnectorManageScopes
+	}
+	if err := h.authorizeContextTokenAction(c, string(action), scopes); err != nil {
+		return nil, err
+	}
 	return ui, nil
 }
+
+// connectorAction names the scope class a connector route needs.
+type connectorAction string
+
+const (
+	connectorActionRead   connectorAction = "connectorsRead"
+	connectorActionManage connectorAction = "connectorsManage"
+)
 
 func decodeStrictJSON(body []byte, target any) error {
 	if len(body) > maxConnectionRequestBytes {
@@ -286,7 +306,7 @@ func normalizeConnectionMode(mode string) (string, error) {
 
 // ListConnectors returns the provider catalog for the caller's namespace.
 func (h *Handlers) ListConnectors(c fiber.Ctx) error {
-	if _, err := h.connectorIdentity(c); err != nil {
+	if _, err := h.connectorIdentity(c, connectorActionRead); err != nil {
 		return err
 	}
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
@@ -306,7 +326,7 @@ func (h *Handlers) ListConnectors(c fiber.Ctx) error {
 
 // ListConnections returns only the caller's own Connections.
 func (h *Handlers) ListConnections(c fiber.Ctx) error {
-	ui, err := h.connectorIdentity(c)
+	ui, err := h.connectorIdentity(c, connectorActionRead)
 	if err != nil {
 		return err
 	}
@@ -330,7 +350,7 @@ func (h *Handlers) ListConnections(c fiber.Ctx) error {
 
 // GetConnection returns one of the caller's Connections.
 func (h *Handlers) GetConnection(c fiber.Ctx) error {
-	ui, err := h.connectorIdentity(c)
+	ui, err := h.connectorIdentity(c, connectorActionRead)
 	if err != nil {
 		return err
 	}
@@ -345,7 +365,7 @@ func (h *Handlers) GetConnection(c fiber.Ctx) error {
 // and starts the consent flow. The subject is taken from the verified
 // identity only; request bodies carrying any other field are rejected.
 func (h *Handlers) CreateConnection(c fiber.Ctx) error {
-	ui, err := h.connectorIdentity(c)
+	ui, err := h.connectorIdentity(c, connectorActionManage)
 	if err != nil {
 		return err
 	}
@@ -422,7 +442,7 @@ func (h *Handlers) CreateConnection(c fiber.Ctx) error {
 // AuthorizeConnection restarts consent for an existing Connection, for
 // example after the provider revoked it.
 func (h *Handlers) AuthorizeConnection(c fiber.Ctx) error {
-	ui, err := h.connectorIdentity(c)
+	ui, err := h.connectorIdentity(c, connectorActionManage)
 	if err != nil {
 		return err
 	}
@@ -445,13 +465,18 @@ func (h *Handlers) AuthorizeConnection(c fiber.Ctx) error {
 // UpdateConnection changes the mode. Widening to readWrite requests the write
 // scopes, so it returns a new consent URL; narrowing takes effect at once.
 func (h *Handlers) UpdateConnection(c fiber.Ctx) error {
-	ui, err := h.connectorIdentity(c)
+	ui, err := h.connectorIdentity(c, connectorActionManage)
 	if err != nil {
 		return err
 	}
 	var req updateConnectionRequest
 	if err := decodeStrictJSON(c.Body(), &req); err != nil {
 		return err
+	}
+	if strings.TrimSpace(req.Mode) == "" {
+		// The empty default belongs to creation only; an update must say what
+		// it wants so a client cannot narrow a link by omission.
+		return fiber.NewError(fiber.StatusBadRequest, "mode is required")
 	}
 	mode, err := normalizeConnectionMode(req.Mode)
 	if err != nil {
@@ -462,6 +487,10 @@ func (h *Handlers) UpdateConnection(c fiber.Ctx) error {
 		return err
 	}
 	ctx := c.Context()
+	provider, err := h.loadReadyConnectorProvider(ctx, connection.Namespace, connection.Spec.ProviderRef.Name)
+	if err != nil {
+		return err
+	}
 	previous, _ := normalizeConnectionMode(connection.Spec.Mode)
 	if previous != mode {
 		connection.Spec.Mode = mode
@@ -470,11 +499,10 @@ func (h *Handlers) UpdateConnection(c fiber.Ctx) error {
 		}
 	}
 	response := ConnectionAuthorizeResponse{Connection: connectionResponse(connection)}
-	if mode == corev1alpha1.ConnectionModeReadWrite && previous != mode {
-		provider, err := h.loadReadyConnectorProvider(ctx, connection.Namespace, connection.Spec.ProviderRef.Name)
-		if err != nil {
-			return err
-		}
+	// Consent is needed whenever the granted scopes do not cover the mode,
+	// not only on the request that changed it, so a retry after a failed
+	// consent start still returns an authorize URL.
+	if !connectors.ScopesCover(connection.Status.GrantedScopes, connectors.ScopesForMode(provider, mode)) {
 		authorizeURL, err := h.startConnectorConsent(ctx, connection, provider, mode)
 		if err != nil {
 			return err
@@ -488,7 +516,7 @@ func (h *Handlers) UpdateConnection(c fiber.Ctx) error {
 // revocation happen in the controller's finalizer so kubectl deletes behave
 // identically.
 func (h *Handlers) DeleteConnection(c fiber.Ctx) error {
-	ui, err := h.connectorIdentity(c)
+	ui, err := h.connectorIdentity(c, connectorActionManage)
 	if err != nil {
 		return err
 	}
@@ -660,6 +688,18 @@ func (h *Handlers) ConnectionCallback(c fiber.Ctx) error {
 		log.Info("connector code exchange failed", "connection", consent.Name, "provider", consent.Provider, "reason", oauthFailureReason(err))
 		return h.connectorCallbackRedirect(c, consent.Name, "exchange_failed", "")
 	}
+	// A provider may grant fewer scopes than requested (the person declined
+	// the write permission, say). A partial grant would let a readWrite link
+	// advertise tools its token cannot use, so refuse it and revoke the
+	// token rather than parking it. A provider that reports no scopes is
+	// taken at its word for the requested set.
+	required := connectors.ScopesForMode(provider, consent.Mode)
+	if len(token.Scopes) == 0 {
+		token.Scopes = append([]string(nil), required...)
+	} else if !connectors.ScopesCover(token.Scopes, required) {
+		h.revokeIssuedTokens(ctx, cfg, token)
+		return h.connectorCallbackRedirect(c, consent.Name, "scopes_denied", "")
+	}
 	// Park the material until the verified owner commits it. This is what
 	// stops a forwarded consent link from binding a victim's account to the
 	// attacker's Connection: the browser that finished consent receives a
@@ -690,9 +730,13 @@ func (h *Handlers) ConnectionCallback(c fiber.Ctx) error {
 		ExpiresAt: h.connectors.now().Add(connectors.ConsentTTL),
 	}); err != nil {
 		if errors.Is(err, store.ErrConnectorCustodyTombstoned) {
+			// The link was disconnected while the code was being exchanged.
+			// Nothing will ever park or commit this token, so revoke it now.
+			h.revokeIssuedTokens(ctx, cfg, token)
 			return h.connectorCallbackRedirect(c, consent.Name, "disconnected", "")
 		}
 		log.Error(err, "connector completion could not be sealed", "connection", consent.Name)
+		h.revokeIssuedTokens(ctx, cfg, token)
 		return h.connectorCallbackRedirect(c, consent.Name, "storage_failed", "")
 	}
 	return h.connectorCallbackRedirect(c, consent.Name, "", completionToken)
@@ -703,7 +747,7 @@ func (h *Handlers) ConnectionCallback(c fiber.Ctx) error {
 // to the completing browser, so a link can only be finished by the person who
 // both started it and approved it.
 func (h *Handlers) CompleteConnection(c fiber.Ctx) error {
-	ui, err := h.connectorIdentity(c)
+	ui, err := h.connectorIdentity(c, connectorActionManage)
 	if err != nil {
 		return err
 	}
@@ -780,6 +824,22 @@ func (h *Handlers) CompleteConnection(c fiber.Ctx) error {
 	return c.JSON(connectionResponse(connection))
 }
 
+// revokeIssuedTokens revokes tokens Orka obtained but will never keep,
+// best effort, refresh token first.
+func (h *Handlers) revokeIssuedTokens(ctx context.Context, cfg connectors.OAuthProviderConfig, token connectors.TokenResponse) {
+	if h.connectors.OAuth == nil {
+		return
+	}
+	for _, value := range []string{token.RefreshToken, token.AccessToken} {
+		if value == "" {
+			continue
+		}
+		if err := h.connectors.OAuth.Revoke(ctx, cfg, value); err != nil {
+			log.Info("issued token could not be revoked", "reason", oauthFailureReason(err))
+		}
+	}
+}
+
 func oauthFailureReason(err error) string {
 	if oauthErr, ok := errors.AsType[*connectors.OAuthError](err); ok {
 		return fmt.Sprintf("status=%d code=%s", oauthErr.StatusCode, oauthErr.Code)
@@ -790,6 +850,7 @@ func oauthFailureReason(err error) string {
 // markConnectionLinked records the successful consent on the Connection.
 func (h *Handlers) markConnectionLinked(ctx context.Context, connection *corev1alpha1.Connection, credential store.ConnectorCredential) error {
 	now := metav1.NewTime(h.connectors.now().UTC())
+	mode, _ := normalizeConnectionMode(connection.Spec.Mode)
 	connection.Status.State = corev1alpha1.ConnectionStateReady
 	connection.Status.GrantedScopes = append([]string(nil), credential.Scopes...)
 	connection.Status.LinkedAt = &now
@@ -804,6 +865,17 @@ func (h *Handlers) markConnectionLinked(ctx context.Context, connection *corev1a
 		Status:             metav1.ConditionTrue,
 		Reason:             corev1alpha1.ConnectionReasonLinked,
 		Message:            "Account linked",
+		ObservedGeneration: connection.Generation,
+		LastTransitionTime: now,
+	})
+	// The callback refused a grant that does not cover the consented mode, so
+	// the link is usable as soon as it is committed. The controller recomputes
+	// this condition on every reconcile from the provider's current scopes.
+	meta.SetStatusCondition(&connection.Status.Conditions, metav1.Condition{
+		Type:               corev1alpha1.ConnectionConditionScopesGranted,
+		Status:             metav1.ConditionTrue,
+		Reason:             corev1alpha1.ConnectionReasonScopesGranted,
+		Message:            "Granted scopes cover the " + mode + " mode",
 		ObservedGeneration: connection.Generation,
 		LastTransitionTime: now,
 	})

@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -589,7 +590,10 @@ func TestConnectionReconcilerReapsExpiredCompletions(t *testing.T) {
 	credentials.parked[string(connection.UID)] = []store.ConnectorCompletion{
 		{Nonce: "live", ExpiresAt: time.Now().Add(5 * time.Minute), Credential: store.ConnectorCredential{AccessToken: "gho_live"}},
 		{Nonce: "stale", ExpiresAt: time.Now().Add(-time.Minute), Credential: store.ConnectorCredential{AccessToken: "gho_stale", RefreshToken: "ghr_stale"}},
+		// A committed completion whose row outlived a failed delete: active custody, never revoked.
+		{Nonce: "committed", ExpiresAt: time.Now().Add(-time.Minute), Credential: store.ConnectorCredential{AccessToken: "gho_committed", RefreshToken: "ghr_committed"}},
 	}
+	credentials.credentials[string(connection.UID)] = store.ConnectorCredential{AccessToken: "gho_committed", RefreshToken: "ghr_committed"}
 	revoker := &fakeConnectorRevoker{}
 	c := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(connection, provider, connectorClientSecret("tenant")).
 		WithStatusSubresource(&corev1alpha1.Connection{}).Build()
@@ -598,10 +602,10 @@ func TestConnectionReconcilerReapsExpiredCompletions(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(revoker.tokens) != 2 || revoker.tokens[0] != "ghr_stale" || revoker.tokens[1] != "gho_stale" {
-		t.Fatalf("revoked = %v, want only the expired completion's tokens", revoker.tokens)
+		t.Fatalf("revoked = %v, want only the abandoned completion's tokens", revoker.tokens)
 	}
-	if len(credentials.deletedCompletions) != 1 || credentials.deletedCompletions[0] != "stale" {
-		t.Fatalf("deleted completions = %v", credentials.deletedCompletions)
+	if strings.Join(credentials.deletedCompletions, ",") != "stale,committed" {
+		t.Fatalf("deleted completions = %v, want both expired rows dropped", credentials.deletedCompletions)
 	}
 	if remaining := credentials.parked[string(connection.UID)]; len(remaining) != 1 || remaining[0].Nonce != "live" {
 		t.Fatalf("remaining completions = %+v", remaining)
