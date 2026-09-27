@@ -155,6 +155,15 @@ func TestValidateProviderSpec(t *testing.T) {
 		}, want: "must not carry credentials"},
 		{name: "malformed query", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://example.com/token?a=%zz" }, want: "query must be well-formed"},
 		{name: "semicolon query", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://example.com/token?a=1;b=2" }, want: "semicolon"},
+		{name: "http tool api key header", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].HTTP.Headers = map[string]string{"X-Api-Key": "abc"}
+		}, want: "looks like a credential"},
+		{name: "http tool auth token header", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].HTTP.Headers = map[string]string{"X-Auth-Token": "abc"}
+		}, want: "looks like a credential"},
+		{name: "http tool benign header ok", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].HTTP.Headers = map[string]string{"X-Github-Api-Version": "2022-11-28", "Accept": "application/vnd.github+json"}
+		}},
 		{name: "http tool credential query", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.Tools[2].HTTP.URL = "https://api.github.com/x?token=abc"
 		}, want: "must not carry credentials"},
