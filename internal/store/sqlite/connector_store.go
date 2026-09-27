@@ -397,19 +397,11 @@ func (s *Store) CommitConnectorCompletion(ctx context.Context, nonce string, ref
 		return store.ConnectorCredential{}, fmt.Errorf("begin connector completion commit: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	// A re-consent replaces a whole grant: its refresh token outlives its
-	// access token, so the row is kept until disconnect revokes it.
-	if err := s.retireConnectorCredentialTx(ctx, tx, ref, credential, time.Now().UTC(), retireGrant); err != nil {
-		return store.ConnectorCredential{}, err
-	}
-	committed, err := s.putConnectorCredentialTx(ctx, tx, ref, credential)
-	if err != nil {
-		return store.ConnectorCredential{}, err
-	}
-	credential = committed
-	// Re-seal the parked row with the committed marker inside the sealed
-	// body, bound to the same fence columns, so only a holder of the
-	// snapshot key can flip it.
+	// The parked row is read and judged inside this transaction before
+	// custody changes: a completion another API replica already committed
+	// (the in-process completion lock does not span replicas) is never
+	// committed twice, which would take another grant and replay material
+	// a newer consent may have replaced.
 	var (
 		completion            store.ConnectorCompletion
 		payloadNonce, payload []byte
@@ -433,6 +425,22 @@ func (s *Store) CommitConnectorCompletion(ctx context.Context, nonce string, ref
 	if err != nil {
 		return store.ConnectorCredential{}, err
 	}
+	if fields.Committed {
+		return store.ConnectorCredential{}, store.ErrConnectorCompletionCommitted
+	}
+	// A re-consent replaces a whole grant: its refresh token outlives its
+	// access token, so the row is kept until disconnect revokes it.
+	if err := s.retireConnectorCredentialTx(ctx, tx, ref, credential, time.Now().UTC(), retireGrant); err != nil {
+		return store.ConnectorCredential{}, err
+	}
+	committed, err := s.putConnectorCredentialTx(ctx, tx, ref, credential)
+	if err != nil {
+		return store.ConnectorCredential{}, err
+	}
+	credential = committed
+	// Re-seal the parked row with the committed marker inside the sealed
+	// body, bound to the same fence columns, so only a holder of the
+	// snapshot key can flip it.
 	fields.Committed = true
 	body, err := encodeSealedConnectorCompletionPayload(credential, fields)
 	if err != nil {
@@ -539,9 +547,39 @@ func (s *Store) TombstoneConnectorCustody(ctx context.Context, connectionUID str
 	if strings.TrimSpace(connectionUID) == "" {
 		return errors.New("connector credential connection UID is required")
 	}
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO connector_credential_tombstones (connection_uid, deleted_at) VALUES (?, ?)
-		ON CONFLICT(connection_uid) DO NOTHING`, connectionUID, time.Now().UTC()); err != nil {
+	now := time.Now().UTC()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin connector tombstone transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := reapConnectorTombstonesTx(ctx, tx, now); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO connector_credential_tombstones (connection_uid, deleted_at) VALUES (?, ?)
+		ON CONFLICT(connection_uid) DO NOTHING`, connectionUID, now); err != nil {
 		return fmt.Errorf("tombstone connector custody: %w", err)
+	}
+	return tx.Commit()
+}
+
+// connectorTombstoneRetention is how long a tombstone outlives its
+// Connection. It only has to fence a consent or completion that was in
+// flight at disconnect, and those expire after minutes; a UID is never
+// reused, so an expired tombstone fences nothing.
+const connectorTombstoneRetention = 24 * time.Hour
+
+// reapConnectorTombstonesTx drops tombstones past their retention together
+// with the grant counters of those Connections, so create/delete churn does
+// not grow the store without bound.
+func reapConnectorTombstonesTx(ctx context.Context, tx *sql.Tx, now time.Time) error {
+	cutoff := now.Add(-connectorTombstoneRetention)
+	if _, err := tx.ExecContext(ctx, `DELETE FROM connector_credential_grants WHERE connection_uid IN
+		(SELECT connection_uid FROM connector_credential_tombstones WHERE deleted_at < ?)`, cutoff); err != nil {
+		return fmt.Errorf("reap connector grant counters: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM connector_credential_tombstones WHERE deleted_at < ?`, cutoff); err != nil {
+		return fmt.Errorf("reap connector tombstones: %w", err)
 	}
 	return nil
 }

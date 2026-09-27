@@ -114,6 +114,11 @@ type agentExecutionSnapshotConnection struct {
 	// this snapshot's authority to use the account.
 	GrantSequence int64  `json:"grantSequence"`
 	Mode          string `json:"mode"`
+	// PolicyUID and PolicyGeneration pin the connection-mode policy the
+	// Connection was frozen under: its credential output semantics are part
+	// of what the Task was dispatched with.
+	PolicyUID        string `json:"policyUID,omitempty"`
+	PolicyGeneration int64  `json:"policyGeneration,omitempty"`
 }
 
 // agentExecutionSnapshotExternalRuntime freezes the non-secret registration

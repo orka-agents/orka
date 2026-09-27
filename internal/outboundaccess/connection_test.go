@@ -187,6 +187,24 @@ func TestKubernetesResolverConnectionModePreconditions(t *testing.T) {
 			t.Fatal("source must not be consulted without a frozen binding")
 		}
 	})
+	t.Run("requires the policy the Connection was frozen under", func(t *testing.T) {
+		source := &fakeConnectionSource{credential: ConnectionCredential{AccessToken: "gho"}}
+		resolver := &KubernetesResolver{Reader: newReader().Build(), Connections: source}
+		req := base
+		req.FrozenConnections = map[string]FrozenConnection{}
+		for name, frozen := range base.FrozenConnections {
+			// The snapshot pinned another policy object (or generation): the
+			// policy's credential output may differ from what was dispatched.
+			frozen.PolicyUID, frozen.PolicyGeneration = "another-policy-uid", 7
+			req.FrozenConnections[name] = frozen
+		}
+		if _, err := resolver.Resolve(context.Background(), req); err == nil || !strings.Contains(err.Error(), "changed since the task was dispatched") {
+			t.Fatalf("err = %v", err)
+		}
+		if source.calls != 0 {
+			t.Fatal("source must not be consulted under a policy the snapshot did not pin")
+		}
+	})
 	t.Run("requires https and no authSecretRef", func(t *testing.T) {
 		source := &fakeConnectionSource{credential: ConnectionCredential{AccessToken: "gho"}}
 		resolver := &KubernetesResolver{Reader: newReader().Build(), Connections: source}

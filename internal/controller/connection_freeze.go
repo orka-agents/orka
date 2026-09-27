@@ -472,6 +472,10 @@ func freezeRequesterConnectionsForTools(
 			Generation:     connection.Generation,
 			GrantSequence:  connection.Status.GrantSequence,
 			Mode:           connection.Spec.Mode,
+			// The policy the Connection is bound under: its credential
+			// output semantics are part of what the Task is dispatched with.
+			PolicyUID:        info.PolicyUID,
+			PolicyGeneration: info.PolicyGeneration,
 		})
 	}
 	return frozen, nil
@@ -618,6 +622,7 @@ func frozenConnectionsFromSnapshot(body agentExecutionSnapshotBody) map[string]o
 	for _, connection := range body.Connections {
 		frozen[connection.PolicyName] = outboundaccess.FrozenConnection{
 			UID: connection.UID, Generation: connection.Generation, GrantSequence: connection.GrantSequence,
+			PolicyUID: connection.PolicyUID, PolicyGeneration: connection.PolicyGeneration,
 		}
 	}
 	return frozen
