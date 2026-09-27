@@ -182,8 +182,8 @@ func ValidateProviderSpec(provider *corev1alpha1.ConnectorProvider, knownBuiltin
 	default:
 		return invalid("oauth.revocationSemantics must be Grant or PerToken")
 	}
-	if strings.TrimSpace(oauth.ClientID) == "" || oauth.ClientID != strings.TrimSpace(oauth.ClientID) {
-		return invalid("oauth.clientID is required and must not contain surrounding whitespace")
+	if !validClientID(oauth.ClientID) {
+		return invalid("oauth.clientID is required and must be printable ASCII without surrounding whitespace")
 	}
 	if strings.TrimSpace(oauth.ClientSecretRef.Name) == "" || strings.TrimSpace(oauth.ClientSecretRef.Key) == "" {
 		return invalid("oauth.clientSecretRef requires name and key")
@@ -266,13 +266,13 @@ func validateEndpointQuery(field, rawQuery string) *Issue {
 	}
 	for key := range values {
 		normalized := strings.ToLower(strings.TrimSpace(key))
-		if field == "authorizeURL" {
-			if _, reserved := reservedAuthorizeParameters[normalized]; reserved {
-				return invalid("oauth.authorizeURL query must not preset reserved OAuth fields")
-			}
-		}
 		if credentialLikeParameter(normalized) {
 			return invalid(fmt.Sprintf("oauth.%s query must not carry credentials; the spec is public configuration", field))
+		}
+		// Flow-owned fields (code, grant_type, refresh_token, state, ...) are
+		// never legitimate static configuration on any endpoint.
+		if _, reserved := reservedAuthorizeParameters[normalized]; reserved {
+			return invalid(fmt.Sprintf("oauth.%s query must not preset reserved OAuth fields", field))
 		}
 	}
 	return nil
@@ -309,6 +309,20 @@ func validateScopes(group string, scopes []string) *Issue {
 		seen[scope] = struct{}{}
 	}
 	return nil
+}
+
+// validClientID applies the RFC 6749 client identifier grammar (VSCHAR,
+// %x20-7E) and forbids surrounding whitespace.
+func validClientID(clientID string) bool {
+	if clientID == "" || clientID != strings.TrimSpace(clientID) {
+		return false
+	}
+	for i := 0; i < len(clientID); i++ {
+		if clientID[i] < 0x20 || clientID[i] > 0x7E {
+			return false
+		}
+	}
+	return true
 }
 
 // validScopeToken applies the RFC 6749 scope-token grammar: one or more bytes
@@ -360,6 +374,11 @@ func validateTools(tools []corev1alpha1.ConnectorTool, knownBuiltin BuiltinToolC
 		case corev1alpha1.ConnectorToolSourceHTTP:
 			if tool.HTTP == nil {
 				return invalid(fmt.Sprintf("HTTP tool %q requires http", tool.Name))
+			}
+			// Tool selection and execution are name-based: an HTTP tool
+			// named like a built-in would shadow or be shadowed by it.
+			if knownBuiltin != nil && knownBuiltin(tool.Name) {
+				return invalid(fmt.Sprintf("HTTP tool %q collides with a built-in Orka tool name", tool.Name))
 			}
 			if strings.TrimSpace(tool.Description) == "" {
 				return invalid(fmt.Sprintf("HTTP tool %q requires a description", tool.Name))
