@@ -58,9 +58,74 @@ var (
 	}
 
 	// deniedHosts are cluster-internal or metadata endpoints that must never be
-	// an OAuth endpoint.
-	deniedHosts = []string{"metadata.google.internal", "kubernetes.default", "kubernetes.default.svc", "localhost"}
+	// an OAuth or tool endpoint. A host equal to one of these, or under it,
+	// is rejected.
+	deniedHosts = []string{"metadata.google.internal", "kubernetes.default", "localhost"}
+
+	// deniedHostSuffixes cover cluster-local service names under any cluster
+	// domain, mDNS, and other non-public name spaces. Names under these never
+	// resolve to a public provider.
+	deniedHostSuffixes = []string{".svc", ".cluster.local", ".local", ".localhost", ".internal", ".localdomain", ".home.arpa"}
+
+	// reservedToolHeaders may not be set by a provider tool definition.
+	reservedToolHeaders = map[string]struct{}{
+		"Authorization": {}, "Cookie": {}, "Host": {}, "Txn-Token": {}, "Proxy-Authorization": {},
+		"Content-Length": {}, "Transfer-Encoding": {},
+	}
 )
+
+// hostDenied reports whether host is a denied name, lies under one, extends
+// one with more labels (kubernetes.default.svc.example), or carries a
+// cluster-local service label. It expects a lowercase host without a
+// trailing dot.
+func hostDenied(host string) bool {
+	for _, denied := range deniedHosts {
+		if host == denied || strings.HasSuffix(host, "."+denied) || strings.HasPrefix(host, denied+".") {
+			return true
+		}
+	}
+	for _, suffix := range deniedHostSuffixes {
+		if strings.HasSuffix(host, suffix) {
+			return true
+		}
+	}
+	// <service>.<namespace>.svc.<cluster-domain> under any cluster domain.
+	return strings.Contains(host, ".svc.")
+}
+
+// validHeaderToken reports whether name is an RFC 9110 token, which is what
+// net/http requires of a header field name. http.CanonicalHeaderKey returns
+// invalid names unchanged, so canonical-form equality alone is not enough.
+func validHeaderToken(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// validHeaderValue reports whether value contains only bytes net/http will
+// serialize: visible ASCII, space, tab, and obs-text; no other control bytes.
+func validHeaderValue(value string) bool {
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if c == '\t' {
+			continue
+		}
+		if c < 0x20 || c == 0x7f {
+			return false
+		}
+	}
+	return true
+}
 
 // Issue is a status-safe validation failure.
 type Issue struct {
@@ -155,10 +220,8 @@ func validateEndpointURL(field, raw string, required bool) *Issue {
 	if host == "" || strings.HasSuffix(host, ".") || strings.Contains(host, "%") {
 		return invalid(fmt.Sprintf("oauth.%s host must not be empty, end with a dot, or carry an IPv6 zone", field))
 	}
-	for _, denied := range deniedHosts {
-		if strings.EqualFold(host, denied) {
-			return invalid(fmt.Sprintf("oauth.%s host is not allowed", field))
-		}
+	if hostDenied(strings.ToLower(host)) {
+		return invalid(fmt.Sprintf("oauth.%s host is not allowed", field))
 	}
 	if ip := net.ParseIP(host); ip != nil && !tokenexchange.IsPublicAddress(ip) {
 		return invalid(fmt.Sprintf("oauth.%s must not target private, loopback, or link-local addresses", field))
@@ -239,16 +302,18 @@ func validateHTTPTool(name string, spec corev1alpha1.ConnectorHTTPTool) *Issue {
 		return invalid(fmt.Sprintf("HTTP tool %q method is not supported", name))
 	}
 	for key, value := range spec.Headers {
-		canonical := http.CanonicalHeaderKey(strings.TrimSpace(key))
-		if canonical == "" || canonical != key {
-			return invalid(fmt.Sprintf("HTTP tool %q header names must be canonical without whitespace", name))
+		if !validHeaderToken(key) {
+			return invalid(fmt.Sprintf("HTTP tool %q header names must be valid HTTP tokens", name))
 		}
-		switch canonical {
-		case "Authorization", "Cookie", "Host", "Txn-Token", "Proxy-Authorization":
+		canonical := http.CanonicalHeaderKey(key)
+		if canonical != key {
+			return invalid(fmt.Sprintf("HTTP tool %q header names must be in canonical form", name))
+		}
+		if _, reserved := reservedToolHeaders[canonical]; reserved {
 			return invalid(fmt.Sprintf("HTTP tool %q may not set the %s header", name, canonical))
 		}
-		if strings.ContainsAny(value, "\r\n") {
-			return invalid(fmt.Sprintf("HTTP tool %q header values must not contain line breaks", name))
+		if !validHeaderValue(value) {
+			return invalid(fmt.Sprintf("HTTP tool %q header values must not contain control bytes", name))
 		}
 	}
 	if spec.Timeout != nil && (spec.Timeout.Duration <= 0 || spec.Timeout.Duration > MaxHTTPToolTimeout) {

@@ -77,6 +77,22 @@ func TestValidateProviderSpec(t *testing.T) {
 		{name: "ipv6 link-local literal", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://[fe80::1]/token" }, want: "must not target private"},
 		{name: "ipv6 loopback literal", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.AuthorizeURL = "https://[::1]/authorize" }, want: "must not target private"},
 		{name: "http tool ipv6 zone", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.Tools[2].HTTP.URL = "https://[fe80::1%25en0]/x" }, want: "carry an IPv6 zone"},
+		{name: "cluster-local fqdn", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.TokenURL = "https://kubernetes.default.svc.cluster.local/token"
+		}, want: "tokenURL host is not allowed"},
+		{name: "custom cluster domain svc", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.TokenURL = "https://kubernetes.default.svc.example/token"
+		}, want: "tokenURL host is not allowed"},
+		{name: "any svc name", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.AuthorizeURL = "https://orka-api.orka-system.svc/authorize"
+		}, want: "authorizeURL host is not allowed"},
+		{name: "subdomain of denied host", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://api.localhost/token" }, want: "tokenURL host is not allowed"},
+		{name: "internal suffix", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://oauth.corp.internal/token" }, want: "tokenURL host is not allowed"},
+		{name: "mdns suffix", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://printer.local/token" }, want: "tokenURL host is not allowed"},
+		{name: "http tool cluster-local", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].HTTP.URL = "https://api.default.svc.cluster.local/x"
+		}, want: "host is not allowed"},
+		{name: "public host with local label", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://local.example.com/token" }},
 		{name: "uppercase denied host", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.OAuth.TokenURL = "https://METADATA.GOOGLE.INTERNAL/token"
 		}, want: "tokenURL host is not allowed"},
@@ -117,10 +133,31 @@ func TestValidateProviderSpec(t *testing.T) {
 		}, want: "may not set the Txn-Token header"},
 		{name: "http non-canonical header", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.Tools[2].HTTP.Headers = map[string]string{"x-custom": "v"}
-		}, want: "header names must be canonical"},
+		}, want: "header names must be in canonical form"},
+		{name: "http header with space", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].HTTP.Headers = map[string]string{"X Bad": "v"}
+		}, want: "header names must be valid HTTP tokens"},
+		{name: "http header with colon", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].HTTP.Headers = map[string]string{"Bad:Header": "v"}
+		}, want: "header names must be valid HTTP tokens"},
+		{name: "http header non-ascii", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].HTTP.Headers = map[string]string{"X-Ünicode": "v"}
+		}, want: "header names must be valid HTTP tokens"},
+		{name: "http content-length header", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].HTTP.Headers = map[string]string{"Content-Length": "0"}
+		}, want: "may not set the Content-Length header"},
 		{name: "http header newline", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.Tools[2].HTTP.Headers = map[string]string{"X-Custom": "a\r\nb"}
-		}, want: "header values must not contain line breaks"},
+		}, want: "header values must not contain control bytes"},
+		{name: "http header nul", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].HTTP.Headers = map[string]string{"X-Custom": "a\x00b"}
+		}, want: "header values must not contain control bytes"},
+		{name: "http header del", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].HTTP.Headers = map[string]string{"X-Custom": "a\x7fb"}
+		}, want: "header values must not contain control bytes"},
+		{name: "http header tab ok", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].HTTP.Headers = map[string]string{"X-Custom": "a\tb"}
+		}},
 		{name: "http zero timeout", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.Tools[2].HTTP.Timeout = &metav1.Duration{}
 		}, want: "timeout must be positive and at most"},

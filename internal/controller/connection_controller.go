@@ -91,6 +91,7 @@ func (r *ConnectionReconciler) updateStatus(
 	before := connection.Status.DeepCopy()
 	connection.Status.ObservedGeneration = connection.Generation
 	meta.SetStatusCondition(&connection.Status.Conditions, providerResolved)
+	demoteStaleReadiness(connection)
 	connection.Status.State = projectConnectionState(connection, providerResolved)
 	if reflect.DeepEqual(before, &connection.Status) {
 		return ctrl.Result{RequeueAfter: connectionRefreshInterval}, reconcileErr
@@ -101,10 +102,33 @@ func (r *ConnectionReconciler) updateStatus(
 	return ctrl.Result{RequeueAfter: connectionRefreshInterval}, reconcileErr
 }
 
-// projectConnectionState derives the coarse state. An unresolved provider is an
-// Error regardless of held material; otherwise the Ready condition (owned by
-// the consent and refresh paths) decides between Pending and the recorded
-// state, so this reconciler never demotes a Ready link on its own.
+// demoteStaleReadiness withdraws Ready when the spec widened to readWrite
+// after the last consent. Consent granted only the read scopes for the older
+// generation, so advertising Ready for the new generation would expose write
+// tools without the person's approval. Narrowing needs no new consent.
+func demoteStaleReadiness(connection *corev1alpha1.Connection) {
+	ready := meta.FindStatusCondition(connection.Status.Conditions, corev1alpha1.ConnectionConditionReady)
+	if ready == nil || ready.Status != metav1.ConditionTrue {
+		return
+	}
+	if connection.Spec.Mode != corev1alpha1.ConnectionModeReadWrite || ready.ObservedGeneration >= connection.Generation {
+		return
+	}
+	meta.SetStatusCondition(&connection.Status.Conditions, metav1.Condition{
+		Type:               corev1alpha1.ConnectionConditionReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             corev1alpha1.ConnectionReasonConsentRequired,
+		Message:            "Mode widened to readWrite; consent for write scopes is required",
+		ObservedGeneration: connection.Generation,
+		LastTransitionTime: metav1.Now(),
+	})
+}
+
+// projectConnectionState derives the coarse state from the conditions. An
+// unresolved provider is an Error; otherwise the Ready condition owned by the
+// consent and refresh paths decides. Its reason, not the previously stored
+// state, carries Expired and Revoked, so a provider outage that briefly
+// projects Error cannot erase them.
 func projectConnectionState(connection *corev1alpha1.Connection, providerResolved metav1.Condition) string {
 	if providerResolved.Status != metav1.ConditionTrue {
 		return corev1alpha1.ConnectionStateError
@@ -113,12 +137,14 @@ func projectConnectionState(connection *corev1alpha1.Connection, providerResolve
 	if ready == nil {
 		return corev1alpha1.ConnectionStatePending
 	}
-	switch connection.Status.State {
-	case corev1alpha1.ConnectionStateReady, corev1alpha1.ConnectionStateExpired, corev1alpha1.ConnectionStateRevoked:
-		return connection.Status.State
-	}
 	if ready.Status == metav1.ConditionTrue {
 		return corev1alpha1.ConnectionStateReady
+	}
+	switch ready.Reason {
+	case corev1alpha1.ConnectionReasonExpired:
+		return corev1alpha1.ConnectionStateExpired
+	case corev1alpha1.ConnectionReasonRevoked:
+		return corev1alpha1.ConnectionStateRevoked
 	}
 	return corev1alpha1.ConnectionStatePending
 }
