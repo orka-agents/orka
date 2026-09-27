@@ -35,7 +35,14 @@ const (
 	ConnectionReasonProviderResolved = "ProviderResolved"
 	ConnectionReasonProviderMissing  = "ProviderMissing"
 	ConnectionReasonProviderInvalid  = "ProviderInvalid"
-	ConnectionReasonPendingConsent   = "PendingConsent"
+
+	// Ready condition reasons. The reason, not status.state, is the durable
+	// record of the link, so a transient provider outage cannot erase it.
+	ConnectionReasonPendingConsent  = "PendingConsent"
+	ConnectionReasonLinked          = "Linked"
+	ConnectionReasonExpired         = "Expired"
+	ConnectionReasonRevoked         = "Revoked"
+	ConnectionReasonConsentRequired = "ConsentRequired"
 )
 
 // ConnectionSubject is the verified identity that owns a Connection. It is

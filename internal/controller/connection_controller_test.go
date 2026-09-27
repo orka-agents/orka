@@ -45,13 +45,15 @@ func acceptedConnectorProvider() *corev1alpha1.ConnectorProvider {
 
 func TestConnectionReconcilerProviderResolution(t *testing.T) {
 	tests := []struct {
-		name         string
-		objects      []runtime.Object
-		existing     *corev1alpha1.ConnectionStatus
-		wantStatus   metav1.ConditionStatus
-		wantReason   string
-		wantState    string
-		wantNoStatus bool
+		name       string
+		objects    []runtime.Object
+		existing   *corev1alpha1.ConnectionStatus
+		mode       string
+		generation int64
+		wantStatus metav1.ConditionStatus
+		wantReason string
+		wantState  string
+		wantReady  metav1.ConditionStatus
 	}{
 		{
 			name:       "provider missing",
@@ -100,10 +102,22 @@ func TestConnectionReconcilerProviderResolution(t *testing.T) {
 			objects: []runtime.Object{acceptedConnectorProvider()},
 			existing: &corev1alpha1.ConnectionStatus{
 				State:      corev1alpha1.ConnectionStateRevoked,
-				Conditions: []metav1.Condition{{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionFalse, Reason: "Revoked"}},
+				Conditions: []metav1.Condition{{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionFalse, Reason: corev1alpha1.ConnectionReasonRevoked}},
 			},
 			wantStatus: metav1.ConditionTrue,
 			wantState:  corev1alpha1.ConnectionStateRevoked,
+		},
+		{
+			name:    "expired survives a provider outage",
+			objects: []runtime.Object{acceptedConnectorProvider()},
+			existing: &corev1alpha1.ConnectionStatus{
+				// A previous reconcile with a missing provider projected Error
+				// over the stored state; the Ready reason still says Expired.
+				State:      corev1alpha1.ConnectionStateError,
+				Conditions: []metav1.Condition{{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionFalse, Reason: corev1alpha1.ConnectionReasonExpired}},
+			},
+			wantStatus: metav1.ConditionTrue,
+			wantState:  corev1alpha1.ConnectionStateExpired,
 		},
 		{
 			name:    "ready condition true without recorded state",
@@ -113,6 +127,32 @@ func TestConnectionReconcilerProviderResolution(t *testing.T) {
 			},
 			wantStatus: metav1.ConditionTrue,
 			wantState:  corev1alpha1.ConnectionStateReady,
+		},
+		{
+			name:    "widened to readWrite after consent demotes ready",
+			objects: []runtime.Object{acceptedConnectorProvider()},
+			existing: &corev1alpha1.ConnectionStatus{
+				State:      corev1alpha1.ConnectionStateReady,
+				Conditions: []metav1.Condition{{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonLinked, ObservedGeneration: 1}},
+			},
+			mode:       corev1alpha1.ConnectionModeReadWrite,
+			generation: 2,
+			wantStatus: metav1.ConditionTrue,
+			wantState:  corev1alpha1.ConnectionStatePending,
+			wantReady:  metav1.ConditionFalse,
+		},
+		{
+			name:    "narrowed to readOnly after consent keeps ready",
+			objects: []runtime.Object{acceptedConnectorProvider()},
+			existing: &corev1alpha1.ConnectionStatus{
+				State:      corev1alpha1.ConnectionStateReady,
+				Conditions: []metav1.Condition{{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonLinked, ObservedGeneration: 1}},
+			},
+			mode:       corev1alpha1.ConnectionModeReadOnly,
+			generation: 2,
+			wantStatus: metav1.ConditionTrue,
+			wantState:  corev1alpha1.ConnectionStateReady,
+			wantReady:  metav1.ConditionTrue,
 		},
 		{
 			name:    "ready condition false without recorded state",
@@ -130,6 +170,12 @@ func TestConnectionReconcilerProviderResolution(t *testing.T) {
 			connection := testConnection("tenant", "github-alice", "github")
 			if tt.existing != nil {
 				connection.Status = *tt.existing
+			}
+			if tt.mode != "" {
+				connection.Spec.Mode = tt.mode
+			}
+			if tt.generation != 0 {
+				connection.Generation = tt.generation
 			}
 			objects := append([]runtime.Object{connection}, tt.objects...)
 			c := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objects...).WithStatusSubresource(&corev1alpha1.Connection{}).Build()
@@ -160,8 +206,12 @@ func TestConnectionReconcilerProviderResolution(t *testing.T) {
 				t.Fatalf("state = %q, want %q", updated.Status.State, tt.wantState)
 			}
 			if tt.existing != nil {
-				if ready := meta.FindStatusCondition(updated.Status.Conditions, corev1alpha1.ConnectionConditionReady); ready == nil {
+				ready := meta.FindStatusCondition(updated.Status.Conditions, corev1alpha1.ConnectionConditionReady)
+				if ready == nil {
 					t.Fatal("reconciler must preserve the Ready condition owned by the consent path")
+				}
+				if tt.wantReady != "" && ready.Status != tt.wantReady {
+					t.Fatalf("Ready = %#v, want %s", ready, tt.wantReady)
 				}
 			}
 		})

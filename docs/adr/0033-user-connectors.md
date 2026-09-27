@@ -4,7 +4,10 @@ Date: 2026-09-25
 
 ## Status
 
-Accepted as a design; no code has landed. Builds on the outbound-access split in
+Accepted. Landing in stages behind `--connectors-enabled` (default off): the
+`ConnectorProvider` and `Connection` resources and their reconcilers are in;
+consent, custody, injection, controller-only execution, and the user surfaces
+follow in later pull requests and are not active yet. Builds on the outbound-access split in
 [ADR 0011](0011-vendor-neutral-transaction-and-outbound-access.md) and reuses the
 `OutboundAccessPolicy` resolver, the ACP MCP broker, approvals, and the
 external-effect ledger. Proactive (event-driven) connectors and a remote MCP
@@ -47,9 +50,9 @@ carried in the provider, or, later, a remote MCP server URL. Provider URLs pass
 the same public-address and SSRF validation as `internal/outboundaccess`.
 
 `Connection` is one person's linked account with one provider. Its spec carries
-an immutable `subject`, a `providerRef`, a `mode` of `readOnly` or `readWrite`,
-and the granted scopes. Its status carries state, expiry, and last-refresh time,
-never token material. Deleting the Connection is the disconnect.
+an immutable `subject`, a `providerRef`, and a `mode` of `readOnly` or
+`readWrite`. Its status carries state, the granted scopes, expiry, and
+last-refresh time, never token material. Deleting the Connection is the disconnect.
 
 ### Only verified human identities own Connections
 
