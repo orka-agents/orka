@@ -1820,26 +1820,49 @@ func sealChildTaskViaController(ctx context.Context, _ client.Client, task *core
 		controllerURL, url.PathEscape(namespace), url.PathEscape(parent), url.PathEscape(task.Name))
 	callCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(callCtx, http.MethodPost, endpoint, nil)
-	if err != nil {
-		return nil
+	token := workerServiceAccountToken()
+	// A 409 means the child changed between the controller's read and its
+	// fenced seal (a reconcile touched it); the seal is retried briefly.
+	backoff := sealConflictBackoff
+	for range 4 {
+		req, err := http.NewRequestWithContext(callCtx, http.MethodPost, endpoint, nil)
+		if err != nil {
+			return nil
+		}
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := sealHTTPClient().Do(req)
+		if err != nil {
+			fmt.Printf("Warning: child task %q could not be sealed for connector use: %v\n", task.Name, err)
+			return nil
+		}
+		status := resp.StatusCode
+		_ = resp.Body.Close()
+		if status >= 200 && status < 300 {
+			return nil
+		}
+		if status != http.StatusConflict {
+			fmt.Printf("Warning: child task %q could not be sealed for connector use: controller returned %d\n",
+				task.Name, status)
+			return nil
+		}
+		select {
+		case <-callCtx.Done():
+			return nil
+		case <-time.After(backoff):
+		}
+		backoff *= 2
 	}
-	if token := workerServiceAccountToken(); token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-	resp, err := sealHTTPClient().Do(req)
-	if err != nil {
-		fmt.Printf("Warning: child task %q could not be sealed for connector use: %v\n", task.Name, err)
-		return nil
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		fmt.Printf("Warning: child task %q could not be sealed for connector use: controller returned %d\n",
-			task.Name, resp.StatusCode)
-	}
+	fmt.Printf("Warning: child task %q could not be sealed for connector use: the controller kept reporting a conflict\n",
+		task.Name)
 	return nil
 }
 
 // sealHTTPClient is the client used to reach the controller for sealing;
 // tests replace it with a fixture client.
+// sealConflictBackoff is the first wait after the controller reports a seal
+// conflict; each retry doubles it.
+var sealConflictBackoff = 250 * time.Millisecond
+
 var sealHTTPClient = func() *http.Client { return &http.Client{Timeout: 15 * time.Second} }

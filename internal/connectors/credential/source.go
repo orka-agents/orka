@@ -172,6 +172,9 @@ func (s *Source) loadLiveConnection(ctx context.Context, req outboundaccess.Conn
 	if string(connection.UID) != req.Frozen.UID || connection.Generation != req.Frozen.Generation {
 		return nil, errors.New("connection changed since the task was dispatched; re-dispatch to use it")
 	}
+	if req.Frozen.GrantSequence <= 0 || connection.Status.GrantSequence != req.Frozen.GrantSequence {
+		return nil, errors.New("connection was re-linked since the task was dispatched; re-dispatch to use it")
+	}
 	if !connectors.ConnectionLinked(connection) {
 		return nil, errors.New("connection is not ready")
 	}
@@ -302,10 +305,16 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 	case errors.Is(err, store.ErrConflict):
 		// A consent won the race. Its material is released only if it is
 		// not itself about to expire; otherwise this call fails and the
-		// next one refreshes the winner as any resolution would.
+		// next one refreshes the winner as any resolution would. The pair
+		// this refresh obtained cannot be stored and derives from this
+		// Connection's own committed grant, so it is revoked rather than
+		// left live outside custody.
 		winner, err := s.Credentials.GetConnectorCredential(ctx, ref)
 		if err != nil {
 			return store.ConnectorCredential{}, err
+		}
+		if winner.AccessToken != refreshed.AccessToken || winner.RefreshToken != refreshed.RefreshToken {
+			s.revokeUnstorable(ctx, cfg, refreshed, logger)
 		}
 		if s.needsRefresh(winner) {
 			return store.ConnectorCredential{}, errors.New("connection credential changed concurrently and is about to expire; retry")

@@ -38,6 +38,9 @@ func TestValidateToolArguments(t *testing.T) {
 		{name: "inexact large integer", parameters: nil, arguments: `{"n":9007199254740993}`, wantErr: true},
 		{name: "inexact nested decimal", parameters: nil, arguments: `{"a":[{"n":0.1000000000000000055511151231257827}]}`, wantErr: true},
 		{name: "exact decimal", parameters: nil, arguments: `{"n":0.5}`},
+		{name: "ordinary decimal", parameters: &apiextensionsv1.JSON{Raw: []byte(`{"type":"object","properties":{"n":{"type":"number","maximum":0.1}}}`)}, arguments: `{"n":0.1}`},
+		{name: "ordinary decimal over bound", parameters: &apiextensionsv1.JSON{Raw: []byte(`{"type":"object","properties":{"n":{"type":"number","maximum":0.1}}}`)}, arguments: `{"n":0.2}`, wantErr: true},
+		{name: "scientific decimal", parameters: nil, arguments: `{"n":1.5e-7}`},
 		// A schema whose own constants would round is refused, or an
 		// argument equal to the rounded value would pass a constraint the
 		// provider never declared.

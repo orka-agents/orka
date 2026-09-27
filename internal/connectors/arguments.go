@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"strconv"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -80,12 +81,20 @@ func numbersExactlyRepresentable(document json.RawMessage) error {
 	walk = func(value any) error {
 		switch v := value.(type) {
 		case json.Number:
-			rational, ok := new(big.Rat).SetString(v.String())
+			exact, ok := new(big.Rat).SetString(v.String())
 			if !ok {
 				return fmt.Errorf("number %q is not a valid number", v.String())
 			}
+			// A literal is judged faithfully when the float64 it decodes to
+			// prints back (shortest round-trip form) as the same decimal
+			// value: 0.1 does, 9007199254740993 (which rounds to ...992)
+			// does not.
 			approx, err := v.Float64()
-			if err != nil || rational.Cmp(new(big.Rat).SetFloat64(approx)) != 0 {
+			if err != nil {
+				return fmt.Errorf("number %q is not exactly representable and cannot be validated", v.String())
+			}
+			roundTrip, ok := new(big.Rat).SetString(strconv.FormatFloat(approx, 'g', -1, 64))
+			if !ok || roundTrip.Cmp(exact) != 0 {
 				return fmt.Errorf("number %q is not exactly representable and cannot be validated", v.String())
 			}
 		case map[string]any:

@@ -109,7 +109,11 @@ type agentExecutionSnapshotConnection struct {
 	ConnectionName string `json:"connectionName"`
 	UID            string `json:"uid"`
 	Generation     int64  `json:"generation"`
-	Mode           string `json:"mode"`
+	// GrantSequence is the consent count the Connection carried when
+	// frozen; a later re-link of the same object raises it and invalidates
+	// this snapshot's authority to use the account.
+	GrantSequence int64  `json:"grantSequence"`
+	Mode          string `json:"mode"`
 }
 
 // agentExecutionSnapshotExternalRuntime freezes the non-secret registration

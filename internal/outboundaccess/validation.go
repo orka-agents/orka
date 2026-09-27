@@ -509,6 +509,11 @@ func ValidateCredentialHeader(name string) error {
 	switch strings.ToLower(name) {
 	case "host", "content-length", "transfer-encoding", "connection", "trailer", "upgrade", "proxy-connection":
 		return fmt.Errorf("output header %q is managed by net/http", name)
+	case "traceparent", "tracestate", "baggage":
+		// Trace propagation writes these on the outbound request; a
+		// credential bound to one would be overwritten or would leak
+		// into telemetry context.
+		return fmt.Errorf("output header %q is reserved for trace propagation", name)
 	}
 	return nil
 }

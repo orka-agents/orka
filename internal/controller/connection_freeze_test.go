@@ -10,9 +10,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -47,6 +49,7 @@ func freezeFixtures(ready bool) (runtime.Object, runtime.Object, runtime.Object,
 		},
 	}
 	if ready {
+		connection.Status.GrantSequence = 1
 		connection.Status.Conditions = []metav1.Condition{
 			{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonLinked, ObservedGeneration: 4},
 			{Type: corev1alpha1.ConnectionConditionScopesGranted, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonScopesGranted, ObservedGeneration: 4},
@@ -288,5 +291,89 @@ func TestFreezeRequiresVerifiedRequesterProvenance(t *testing.T) {
 	}
 	if frozen, err := freezeRequesterConnections(context.Background(), reader, impostor, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
 		t.Fatalf("child with a copied stamp and another requester: frozen = %+v err = %v", frozen, err)
+	}
+}
+
+// The broker seals the children it creates for an authenticated ACP Task
+// directly: the parent must carry a valid stamp, the child must be
+// controller-owned by it with the same requester, and a concurrent write
+// that fences the patch is retried against the re-read child.
+func TestACPChildTaskSealerSealsOwnedChildren(t *testing.T) {
+	SetRequesterStampKey(testRequesterStampKey)
+	t.Cleanup(func() { SetRequesterStampKey(nil) })
+	requester := &corev1alpha1.RequestedBy{Issuer: "https://issuer.example.test", Subject: "alice"}
+	parent := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: "tenant", UID: "parent-uid", Annotations: map[string]string{
+			labels.AnnotationRequestedBySource: labels.RequestedBySourceAPI,
+			labels.AnnotationRequestedByStamp:  connectors.RequesterStamp(testRequesterStampKey, "parent-uid", requester.Issuer, requester.Subject),
+		}},
+		Spec: corev1alpha1.TaskSpec{RequestedBy: requester},
+	}
+	isController := true
+	owned := func(name, uid string, by *corev1alpha1.RequestedBy) *corev1alpha1.Task {
+		return &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "tenant", UID: types.UID(uid), OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: parent.Name, UID: parent.UID, Controller: &isController,
+			}}},
+			Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, RequestedBy: by},
+		}
+	}
+	child := owned("child", "child-uid", requester)
+	impostor := owned("impostor", "impostor-uid", &corev1alpha1.RequestedBy{Issuer: requester.Issuer, Subject: "victim"})
+	stranger := owned("stranger", "stranger-uid", requester)
+	stranger.OwnerReferences[0].UID = "other-parent-uid"
+	fenced := owned("fenced", "fenced-uid", requester)
+	var fenceOnce atomic.Bool
+	c := ctrlfake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(parent, child, impostor, stranger, fenced).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, cl ctrlclient.WithWatch, obj ctrlclient.Object, patch ctrlclient.Patch, opts ...ctrlclient.PatchOption) error {
+				if task, ok := obj.(*corev1alpha1.Task); ok && task.Name == "fenced" && fenceOnce.CompareAndSwap(false, true) {
+					return apierrors.NewConflict(corev1alpha1.GroupVersion.WithResource("tasks").GroupResource(), task.Name, errors.New("fenced"))
+				}
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+		}).Build()
+	seal := ACPChildTaskSealer(c, parent.Namespace, parent.Name, string(parent.UID))
+	ctx := context.Background()
+	for _, task := range []*corev1alpha1.Task{child, fenced} {
+		if err := seal(ctx, c, task.DeepCopy()); err != nil {
+			t.Fatalf("%s: %v", task.Name, err)
+		}
+		sealed := &corev1alpha1.Task{}
+		if err := c.Get(ctx, ctrlclient.ObjectKeyFromObject(task), sealed); err != nil {
+			t.Fatal(err)
+		}
+		want := connectors.RequesterStamp(testRequesterStampKey, task.UID, requester.Issuer, requester.Subject)
+		if sealed.Annotations[labels.AnnotationRequestedByStamp] != want || sealed.Annotations[labels.AnnotationRequestedBySource] != labels.RequestedBySourceAPI {
+			t.Fatalf("%s annotations = %v, want a UID-bound stamp", task.Name, sealed.Annotations)
+		}
+		if !connectors.RequesterStampValid(testRequesterStampKey, sealed) {
+			t.Fatalf("%s must verify after sealing", task.Name)
+		}
+	}
+	if !fenceOnce.Load() {
+		t.Fatal("the fenced child must have hit the conflict once")
+	}
+	for _, task := range []*corev1alpha1.Task{impostor, stranger} {
+		if err := seal(ctx, c, task.DeepCopy()); !errors.Is(err, ErrChildSealRefused) {
+			t.Fatalf("%s: err = %v, want refusal", task.Name, err)
+		}
+		unsealed := &corev1alpha1.Task{}
+		if err := c.Get(ctx, ctrlclient.ObjectKeyFromObject(task), unsealed); err != nil || unsealed.Annotations[labels.AnnotationRequestedByStamp] != "" {
+			t.Fatalf("%s must stay unsealed: %v %v", task.Name, unsealed.Annotations, err)
+		}
+	}
+	// A parent whose identity changed, or one without a verified stamp,
+	// seals nothing.
+	if err := ACPChildTaskSealer(c, parent.Namespace, parent.Name, "other-uid")(ctx, c, child.DeepCopy()); !errors.Is(err, ErrChildSealRefused) {
+		t.Fatalf("changed parent identity err = %v", err)
+	}
+	unverified := parent.DeepCopy()
+	unverified.Annotations[labels.AnnotationRequestedByStamp] = "forged"
+	if err := SealChildRequesterStamp(ctx, c, testRequesterStampKey, unverified, child.DeepCopy()); !errors.Is(err, ErrChildSealRefused) {
+		t.Fatalf("unverified parent err = %v", err)
+	}
+	if err := SealChildRequesterStamp(ctx, c, nil, parent, child.DeepCopy()); err == nil || errors.Is(err, ErrChildSealRefused) {
+		t.Fatalf("missing key err = %v, want a configuration error", err)
 	}
 }

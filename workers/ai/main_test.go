@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1709,5 +1710,48 @@ func TestSealChildTaskViaControllerAsksTheParentEndpoint(t *testing.T) {
 	plain := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "plain"}}
 	if err := sealChildTaskViaController(context.Background(), nil, plain); err != nil || path != "" {
 		t.Fatalf("plain child: err = %v path = %q", err, path)
+	}
+}
+
+// A conflict means a reconcile touched the child between the controller's
+// read and its fenced seal; the worker asks again rather than leaving the
+// child unsealed.
+func TestSealChildTaskViaControllerRetriesConflicts(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) < 3 {
+			w.WriteHeader(http.StatusConflict)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv(workerenv.ControllerURL, server.URL)
+	t.Setenv(workerenv.TaskNamespace, "default")
+	t.Setenv(workerenv.TaskName, "parent-task")
+	t.Setenv(workerenv.ServiceAccountTokenPath, "")
+	t.Setenv(workerenv.ServiceAccountToken, "sa-token")
+	previousClient, previousBackoff := sealHTTPClient, sealConflictBackoff
+	sealHTTPClient, sealConflictBackoff = server.Client, time.Millisecond
+	t.Cleanup(func() { sealHTTPClient, sealConflictBackoff = previousClient, previousBackoff })
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "child", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{RequestedBy: &corev1alpha1.RequestedBy{
+			Issuer: "https://issuer.example.test", Subject: "alice",
+		}},
+	}
+	if err := sealChildTaskViaController(context.Background(), nil, child); err != nil {
+		t.Fatal(err)
+	}
+	if got := attempts.Load(); got != 3 {
+		t.Fatalf("attempts = %d, want two conflicts then success", got)
+	}
+	// A conflict that never clears stops after a bounded number of tries.
+	attempts.Store(-1000)
+	if err := sealChildTaskViaController(context.Background(), nil, child); err != nil {
+		t.Fatal(err)
+	}
+	if got := attempts.Load(); got != -996 {
+		t.Fatalf("bounded attempts = %d, want 4", got+1000)
 	}
 }

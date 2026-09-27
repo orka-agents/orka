@@ -97,6 +97,10 @@ type ToolBinding struct {
 type FrozenConnection struct {
 	UID        string
 	Generation int64
+	// GrantSequence is the consent count frozen with the identity. The live
+	// Connection must carry exactly this grant: a re-link of the same
+	// object is a new grant the snapshot never bound.
+	GrantSequence int64
 }
 
 // ConnectionCredentialRequest asks the credential source for one person's

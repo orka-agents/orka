@@ -102,6 +102,7 @@ func freezeRequesterConnections(
 			ConnectionName: connection.Name,
 			UID:            string(connection.UID),
 			Generation:     connection.Generation,
+			GrantSequence:  connection.Status.GrantSequence,
 			Mode:           connection.Spec.Mode,
 		})
 	}
@@ -179,7 +180,9 @@ func connectionReadyFor(connection *corev1alpha1.Connection, requester *corev1al
 		connection.Spec.ProviderRef.Name != provider {
 		return false
 	}
-	return connectors.ConnectionLinked(connection)
+	// A linked Connection always carries the grant that linked it; without
+	// one there is nothing to bind the snapshot's authority to.
+	return connection.Status.GrantSequence > 0 && connectors.ConnectionLinked(connection)
 }
 
 // bindFrozenConnections loads the Task's execution snapshot and hands the
@@ -225,7 +228,9 @@ func frozenConnectionsFromSnapshot(body agentExecutionSnapshotBody) map[string]o
 	}
 	frozen := make(map[string]outboundaccess.FrozenConnection, len(body.Connections))
 	for _, connection := range body.Connections {
-		frozen[connection.PolicyName] = outboundaccess.FrozenConnection{UID: connection.UID, Generation: connection.Generation}
+		frozen[connection.PolicyName] = outboundaccess.FrozenConnection{
+			UID: connection.UID, Generation: connection.Generation, GrantSequence: connection.GrantSequence,
+		}
 	}
 	return frozen
 }
@@ -286,4 +291,87 @@ func connectorToolsFor(ctx context.Context, reader client.Reader, namespace stri
 		}
 	}
 	return result, nil
+}
+
+// ErrChildSealRefused reports a child Task that must not inherit its
+// parent's connector authority: the parent is unverified, the child is not
+// controller-owned by it, or the child names a different requester.
+var ErrChildSealRefused = errors.New("the child task cannot inherit the parent's requester")
+
+// SealChildRequesterStamp seals the requester stamp onto a child Task the
+// parent created for its own requester. The parent must itself carry a valid
+// stamp, the child must be controller-owned by the parent, and the child's
+// requester must equal the parent's. The stamp is computed from the parent's
+// identity and written together with the source annotation in one patch
+// fenced on the child's resource version, so a requester swapped in between
+// validation and sealing makes the write conflict instead of being signed.
+func SealChildRequesterStamp(ctx context.Context, c client.Client, key []byte, parent, child *corev1alpha1.Task) error {
+	if c == nil || parent == nil || child == nil {
+		return errors.New("sealing a child task requires a client, the parent, and the child")
+	}
+	if len(key) < connectors.MinRequesterStampKeyBytes {
+		return errors.New("requester stamps are not enabled on this controller")
+	}
+	if !connectors.RequesterStampValid(key, parent) {
+		return fmt.Errorf("%w: the parent task carries no verified requester", ErrChildSealRefused)
+	}
+	owner := metav1.GetControllerOf(child)
+	if owner == nil || owner.UID != parent.UID || owner.Kind != taskResourceKind || owner.APIVersion != corev1alpha1.GroupVersion.String() {
+		return fmt.Errorf("%w: the child task is not controller-owned by the parent", ErrChildSealRefused)
+	}
+	if child.Spec.RequestedBy == nil || parent.Spec.RequestedBy == nil ||
+		child.Spec.RequestedBy.Issuer != parent.Spec.RequestedBy.Issuer || child.Spec.RequestedBy.Subject != parent.Spec.RequestedBy.Subject {
+		return fmt.Errorf("%w: the child task names a different requester than its parent", ErrChildSealRefused)
+	}
+	stamp := connectors.RequesterStamp(key, child.UID, parent.Spec.RequestedBy.Issuer, parent.Spec.RequestedBy.Subject)
+	if stamp == "" {
+		return errors.New("the child task has no UID to bind the requester stamp to")
+	}
+	original := child.DeepCopy()
+	if child.Annotations == nil {
+		child.Annotations = map[string]string{}
+	}
+	child.Annotations[labels.AnnotationRequestedBySource] = labels.RequestedBySourceAPI
+	child.Annotations[labels.AnnotationRequestedByStamp] = stamp
+	return c.Patch(ctx, child, client.MergeFromWithOptions(original, client.MergeFromWithOptimisticLock{}))
+}
+
+// acpChildSealAttempts bounds how often a seal fenced out by a concurrent
+// write to the fresh child is retried.
+const acpChildSealAttempts = 4
+
+// ACPChildTaskSealer returns the seal hook for coordination tools the broker
+// executes on behalf of an authenticated ACP Task. The controller created
+// the child itself, so it seals the child directly against that Task as the
+// parent, re-reading both when a concurrent write fences the patch.
+func ACPChildTaskSealer(reader client.Reader, parentNamespace, parentName, parentUID string) func(context.Context, client.Client, *corev1alpha1.Task) error {
+	return func(ctx context.Context, c client.Client, child *corev1alpha1.Task) error {
+		if reader == nil || child == nil || strings.TrimSpace(parentUID) == "" {
+			return errors.New("sealing a brokered child task requires the authenticated parent")
+		}
+		parent := &corev1alpha1.Task{}
+		if err := reader.Get(ctx, client.ObjectKey{Namespace: parentNamespace, Name: parentName}, parent); err != nil {
+			return fmt.Errorf("load the parent task to seal its child: %w", err)
+		}
+		if string(parent.UID) != parentUID {
+			return fmt.Errorf("%w: the authenticated parent task identity changed", ErrChildSealRefused)
+		}
+		var err error
+		for attempt := range acpChildSealAttempts {
+			if attempt > 0 {
+				latest := &corev1alpha1.Task{}
+				if err = reader.Get(ctx, client.ObjectKeyFromObject(child), latest); err != nil {
+					return fmt.Errorf("re-read the child task to seal it: %w", err)
+				}
+				if latest.UID != child.UID {
+					return fmt.Errorf("%w: the child task was replaced while it was being sealed", ErrChildSealRefused)
+				}
+				child = latest
+			}
+			if err = SealChildRequesterStamp(ctx, c, requesterStampKey, parent, child); !apierrors.IsConflict(err) {
+				return err
+			}
+		}
+		return fmt.Errorf("seal the child task: %w", err)
+	}
 }

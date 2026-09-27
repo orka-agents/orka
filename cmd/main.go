@@ -2275,7 +2275,10 @@ func main() {
 				return &tools.ToolContext{
 					Client: mgr.GetClient(), PolicyReader: mgr.GetAPIReader(), KubeClient: kubeClient, Namespace: request.Namespace,
 					SessionID: string(request.Authorization.RuntimeSessionUID), TaskID: task.Name,
-					TaskUID: task.UID, ParentTaskID: task.ParentTaskID, AgentName: task.AgentName,
+					// Children the broker creates for this Task inherit its
+					// verified requester only through this seal.
+					SealTaskCreate: controller.ACPChildTaskSealer(mgr.GetAPIReader(), task.Namespace, task.Name, task.UID),
+					TaskUID:        task.UID, ParentTaskID: task.ParentTaskID, AgentName: task.AgentName,
 					OperationID: string(request.Metadata.OperationID), ExternalEffects: durableControlStore,
 					Tenant: request.Namespace, WatchNamespace: watchNamespace,
 					EnforceNamespaceIsolation: enforceNamespaceIsolation, Brokered: true,

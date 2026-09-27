@@ -112,7 +112,7 @@ func newHarness(t *testing.T) *harness {
 		Spec: corev1alpha1.ConnectionSpec{
 			Subject: corev1alpha1.ConnectionSubject{Issuer: testIssuer, Subject: testSubject}, ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}, Mode: "readOnly",
 		},
-		Status: corev1alpha1.ConnectionStatus{State: corev1alpha1.ConnectionStateReady, Consent: connectors.ConsentFor(provider), Conditions: []metav1.Condition{
+		Status: corev1alpha1.ConnectionStatus{State: corev1alpha1.ConnectionStateReady, GrantSequence: 1, Consent: connectors.ConsentFor(provider), Conditions: []metav1.Condition{
 			{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonLinked, ObservedGeneration: 2},
 			{Type: corev1alpha1.ConnectionConditionScopesGranted, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonScopesGranted, ObservedGeneration: 2},
 			{Type: corev1alpha1.ConnectionConditionProviderResolved, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonProviderResolved, ObservedGeneration: 2},
@@ -161,7 +161,7 @@ func (h *harness) put(credential store.ConnectorCredential) {
 func (h *harness) request() outboundaccess.ConnectionCredentialRequest {
 	return outboundaccess.ConnectionCredentialRequest{
 		Namespace: testNamespace, Provider: "github", Issuer: testIssuer, Subject: testSubject,
-		Frozen: outboundaccess.FrozenConnection{UID: "uid-1", Generation: 2},
+		Frozen: outboundaccess.FrozenConnection{UID: "uid-1", Generation: 2, GrantSequence: 1},
 		Tool:   outboundaccess.ToolBinding{Name: "gh_search", URL: "https://api.github.com/search/issues", Method: "GET", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead},
 	}
 }
@@ -308,6 +308,8 @@ func TestResolveFailsClosedOnIdentityAndBindingMismatch(t *testing.T) {
 		"other provider":    func(r *outboundaccess.ConnectionCredentialRequest) { r.Provider = "gmail" },
 		"frozen uid":        func(r *outboundaccess.ConnectionCredentialRequest) { r.Frozen.UID = "uid-9" },
 		"frozen generation": func(r *outboundaccess.ConnectionCredentialRequest) { r.Frozen.Generation = 1 },
+		"frozen grant":      func(r *outboundaccess.ConnectionCredentialRequest) { r.Frozen.GrantSequence = 2 },
+		"no frozen grant":   func(r *outboundaccess.ConnectionCredentialRequest) { r.Frozen.GrantSequence = 0 },
 		"no frozen":         func(r *outboundaccess.ConnectionCredentialRequest) { r.Frozen = outboundaccess.FrozenConnection{} },
 		"no subject":        func(r *outboundaccess.ConnectionCredentialRequest) { r.Subject = "" },
 	} {
@@ -316,6 +318,21 @@ func TestResolveFailsClosedOnIdentityAndBindingMismatch(t *testing.T) {
 		if _, err := h.source.ResolveConnectionCredential(context.Background(), req); err == nil {
 			t.Fatalf("%s must fail closed", name)
 		}
+	}
+	// A re-link of the same Connection object is a new grant the frozen
+	// snapshot never bound, even though UID and generation are unchanged.
+	relinked := h.reload()
+	relinked.Status.GrantSequence++
+	if err := h.client.Status().Update(context.Background(), relinked); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil || !strings.Contains(err.Error(), "re-linked") {
+		t.Fatalf("re-linked connection err = %v", err)
+	}
+	relinked = h.reload()
+	relinked.Status.GrantSequence--
+	if err := h.client.Status().Update(context.Background(), relinked); err != nil {
+		t.Fatal(err)
 	}
 	// A Connection whose scopes no longer cover its mode is not usable.
 	stale := h.reload()
@@ -378,6 +395,15 @@ func TestRefreshLosesToConcurrentReconsent(t *testing.T) {
 	stored, _ := h.store.GetConnectorCredential(context.Background(), ref)
 	if stored.AccessToken != "gho_reconsented" || stored.RefreshToken != "ghr_reconsented" {
 		t.Fatalf("custody after lost race = %+v", stored)
+	}
+	// The pair the losing refresh obtained cannot be stored; it derives
+	// from this Connection's own grant, so it is revoked rather than left
+	// live outside custody.
+	h.refresher.mu.Lock()
+	revoked := strings.Join(h.refresher.revoked, ",")
+	h.refresher.mu.Unlock()
+	if !strings.Contains(revoked, "gho_new") {
+		t.Fatalf("revoked = %q, want the losing refresh's material", revoked)
 	}
 
 	// A mode change and re-consent that land during the refresh are seen:
