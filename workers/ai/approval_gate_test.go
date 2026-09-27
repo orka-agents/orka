@@ -2565,8 +2565,29 @@ func TestApprovalTargetSpecDigestUsesPlainSpecForConnectorBackedTools(t *testing
 		t.Fatalf("a worker-executed tool folds policy identity into its digest: got %q err = %v", got, err)
 	}
 	markConnectorBackedTools(map[string]*corev1alpha1.Tool{"gh_write": tool}, map[string]bool{"gh_write": true})
-	if got, err := approvalTargetSpecDigest(tool); err != nil || got != plain {
-		t.Fatalf("a connector-backed tool must digest its plain spec: got %q want %q err = %v", got, plain, err)
+	// Without a frozen binding the digest carries an empty Connection
+	// identity, which the controller never matches; with one it binds the
+	// exact link the Job was dispatched under.
+	previous := connectorBindings
+	t.Cleanup(func() { connectorBindings = previous })
+	connectorBindings = map[string]corev1alpha1.ConnectionBinding{}
+	unbound, err := approvals.ConnectorTargetSpecDigest(tool.Spec, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := approvalTargetSpecDigest(tool); err != nil || got != unbound || got == plain {
+		t.Fatalf("a connector-backed tool digests its plain spec plus the frozen Connection: got %q want %q err = %v",
+			got, unbound, err)
+	}
+	connectorBindings = parseConnectionBindings(
+		`[{"policyName":"github-conn","provider":"github","connectionName":"github-abc",` +
+			`"uid":"conn-uid","generation":2,"mode":"readWrite"}]`)
+	bound, err := approvals.ConnectorTargetSpecDigest(tool.Spec, "conn-uid", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := approvalTargetSpecDigest(tool); err != nil || got != bound || got == unbound {
+		t.Fatalf("a connector-backed tool must bind the frozen Connection: got %q want %q err = %v", got, bound, err)
 	}
 	// A marker that arrived on the Tool object is not a classification: it
 	// is cleared unless routing derived it.

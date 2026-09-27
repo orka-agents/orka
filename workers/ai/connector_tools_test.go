@@ -154,3 +154,19 @@ func TestExecuteConnectorToolViaController(t *testing.T) {
 		t.Fatalf("missing controller err = %v", err)
 	}
 }
+
+func TestParseConnectionBindings(t *testing.T) {
+	if got := parseConnectionBindings(""); len(got) != 0 {
+		t.Fatalf("empty env = %+v, want no bindings", got)
+	}
+	if got := parseConnectionBindings("{not json"); len(got) != 0 {
+		t.Fatalf("unreadable env = %+v, want no bindings (fail closed at the controller)", got)
+	}
+	got := parseConnectionBindings(`[` +
+		`{"policyName":"github-conn","provider":"github","connectionName":"github-abc",` +
+		`"uid":"conn-uid","generation":2,"mode":"readOnly"},` +
+		`{"policyName":"","uid":"ignored"}]`)
+	if len(got) != 1 || got["github-conn"].UID != "conn-uid" || got["github-conn"].Generation != 2 {
+		t.Fatalf("bindings = %+v", got)
+	}
+}

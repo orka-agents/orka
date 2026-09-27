@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"strings"
@@ -27,6 +28,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/aitools"
+	"github.com/orka-agents/orka/internal/approvals"
 	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/executionmode"
@@ -3015,6 +3017,18 @@ func TestJobBuilder_buildEnvVars_ConnectorWriteToolsRequireApprovalAndHideOnRead
 	if approval.Value != "dispatch_work_order,gh_write" {
 		t.Fatalf("%s = %q, want the connector write tool added", workerenv.ApprovalRequiredTools, approval.Value)
 	}
+	// The controller executes each connector tool only as defined at
+	// dispatch: the Job carries the spec digest of every dispatched one.
+	digests := map[string]string{}
+	digestsEnv, _ := findEnvVar(envVars, workerenv.ConnectorToolDigests)
+	if err := json.Unmarshal([]byte(digestsEnv.Value), &digests); err != nil {
+		t.Fatalf("%s = %q: %v", workerenv.ConnectorToolDigests, digestsEnv.Value, err)
+	}
+	wantRead, _ := approvals.TargetSpecDigest(connectorTool("gh_read", corev1alpha1.AgentRuntimeBrokeredToolClassRead).Spec)
+	wantWrite, _ := approvals.TargetSpecDigest(connectorTool("gh_write", corev1alpha1.AgentRuntimeBrokeredToolClassWrite).Spec)
+	if len(digests) != 2 || digests["gh_read"] != wantRead || digests["gh_write"] != wantWrite {
+		t.Fatalf("%s = %v, want both connector tools digested", workerenv.ConnectorToolDigests, digests)
+	}
 
 	readOnly := connection.DeepCopy()
 	readOnly.Spec.Mode = corev1alpha1.ConnectionModeReadOnly
@@ -3022,6 +3036,10 @@ func TestJobBuilder_buildEnvVars_ConnectorWriteToolsRequireApprovalAndHideOnRead
 	tools, _ = findEnvVar(envVars, workerenv.AITools)
 	if strings.Contains(tools.Value, "gh_write") || !strings.Contains(tools.Value, "gh_read") {
 		t.Fatalf("readOnly link must hide the write tool, got %q", tools.Value)
+	}
+	digestsEnv, _ = findEnvVar(envVars, workerenv.ConnectorToolDigests)
+	if !strings.Contains(digestsEnv.Value, "gh_read") || strings.Contains(digestsEnv.Value, "gh_write") {
+		t.Fatalf("%s = %q, want only the dispatched tool digested", workerenv.ConnectorToolDigests, digestsEnv.Value)
 	}
 	approval, _ = findEnvVar(envVars, workerenv.ApprovalRequiredTools)
 	if approval.Value != "dispatch_work_order" {
@@ -3032,6 +3050,49 @@ func TestJobBuilder_buildEnvVars_ConnectorWriteToolsRequireApprovalAndHideOnRead
 	tools, _ = findEnvVar(envVars, workerenv.AITools)
 	if !strings.Contains(tools.Value, "gh_write") {
 		t.Fatalf("without a link the tool stays visible and fails closed at call time, got %q", tools.Value)
+	}
+}
+
+func TestJobBuilder_buildEnvVars_FreezesConnectionBindingsOnTheJob(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "Review"},
+	}
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{Provider: "anthropic", Name: "claude"}}}
+	bindings := []corev1alpha1.ConnectionBinding{{PolicyName: "github-conn", Provider: "github", ConnectionName: "github-abc", UID: "conn-uid", Generation: 2, Mode: "readOnly"}}
+	envVars, err := builder.buildEnvVarsWithOptions(context.Background(), task, agent, nil, JobBuildOptions{ConnectionBindings: bindings})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, found := findEnvVar(envVars, workerenv.ConnectionBindings)
+	if !found {
+		t.Fatalf("missing %s", workerenv.ConnectionBindings)
+	}
+	job := &batchv1.Job{Spec: batchv1.JobSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: workerContainerName, Env: envVars}}}}}}
+	decoded, present, err := FrozenConnectionBindingsFromJob(job)
+	if err != nil || !present || !ConnectionBindingsEqual(decoded, bindings) {
+		t.Fatalf("bindings from job = %+v present = %v err = %v (env %q)", decoded, present, err, env.Value)
+	}
+	if strings.Contains(env.Value, "token") {
+		t.Fatalf("frozen bindings must carry no token material: %q", env.Value)
+	}
+	// A Task-supplied value never survives: the controller owns the name.
+	task.Spec.Env = []corev1.EnvVar{{Name: workerenv.ConnectionBindings, Value: `[{"policyName":"github-conn","uid":"forged"}]`}}
+	envVars, err = builder.buildEnvVarsWithOptions(context.Background(), task, agent, nil, JobBuildOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, _ = findEnvVar(envVars, workerenv.ConnectionBindings)
+	if env.Value != "" {
+		t.Fatalf("%s = %q, want the Task's value replaced by the controller's empty freeze", workerenv.ConnectionBindings, env.Value)
+	}
+	if _, present, err := FrozenConnectionBindingsFromJob(&batchv1.Job{Spec: batchv1.JobSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: workerContainerName, Env: []corev1.EnvVar{{Name: workerenv.ConnectionBindings, Value: "{bad"}}}}}}}}); err == nil || !present {
+		t.Fatalf("unreadable bindings must fail closed, got present = %v err = %v", present, err)
+	}
+	if ConnectionBindingsEqual(bindings, []corev1alpha1.ConnectionBinding{{PolicyName: "github-conn", UID: "conn-uid", Generation: 3}}) ||
+		!ConnectionBindingsEqual(nil, []corev1alpha1.ConnectionBinding{}) {
+		t.Fatal("binding equality must compare every field and treat empty sets alike")
 	}
 }
 

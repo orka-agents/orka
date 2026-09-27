@@ -33,6 +33,31 @@ const (
 	saTokenPathDefault          = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 )
 
+// connectorBindings holds, by OutboundAccessPolicy name, the Connection
+// identity the controller froze for this Task at dispatch. It is set once at
+// startup from the Job environment and carries no token material.
+var connectorBindings = map[string]corev1alpha1.ConnectionBinding{}
+
+// parseConnectionBindings decodes the frozen bindings the Job builder placed
+// in the worker environment. An unreadable value yields no bindings, which
+// makes every connector approval digest fail to match at the controller.
+func parseConnectionBindings(raw string) map[string]corev1alpha1.ConnectionBinding {
+	result := map[string]corev1alpha1.ConnectionBinding{}
+	if strings.TrimSpace(raw) == "" {
+		return result
+	}
+	var bindings []corev1alpha1.ConnectionBinding
+	if err := json.Unmarshal([]byte(raw), &bindings); err != nil {
+		return result
+	}
+	for _, binding := range bindings {
+		if binding.PolicyName != "" {
+			result[binding.PolicyName] = binding
+		}
+	}
+	return result
+}
+
 // connectorBackedToolNames is set once at startup from the loaded custom
 // Tools; the agent loop consults it to route calls to the controller.
 var connectorBackedToolNames = map[string]bool{}

@@ -134,3 +134,24 @@ func URLUsesPlaceholder(customTool *corev1alpha1.Tool, key string) bool {
 	key = strings.TrimSpace(key)
 	return key != "" && strings.Contains(customTool.Spec.HTTP.URL, "{{"+key+"}}")
 }
+
+// ConnectorTargetSpecDigest digests a connector-backed Tool's spec together
+// with the identity of the Connection frozen for its policy at dispatch. An
+// approval for such a tool therefore binds the person's link as it was when
+// the approval was requested: a Job re-created after the decision against a
+// re-linked account produces a different digest and needs a fresh approval.
+func ConnectorTargetSpecDigest(spec corev1alpha1.ToolSpec, connectionUID string, connectionGeneration int64) (string, error) {
+	return TargetSpecDigest(struct {
+		Spec       corev1alpha1.ToolSpec `json:"spec"`
+		Connection struct {
+			UID        string `json:"uid"`
+			Generation int64  `json:"generation"`
+		} `json:"connection"`
+	}{
+		Spec: spec,
+		Connection: struct {
+			UID        string `json:"uid"`
+			Generation int64  `json:"generation"`
+		}{UID: connectionUID, Generation: connectionGeneration},
+	})
+}

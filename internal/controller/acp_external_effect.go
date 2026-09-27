@@ -417,3 +417,37 @@ func (d *ACPDispatcher) reconcileExpiredExternalEffects(ctx context.Context, tas
 	}
 	return d.reconcileMCPApprovalExecutions(ctx, fence, tasks, approvalEffects)
 }
+
+// RunExternalEffectWithReplay runs one idempotent external effect from outside
+// the ACP dispatcher, such as the controller's connector-tool endpoint, with
+// the same reservation, lease, and replay semantics the ACP broker uses.
+func RunExternalEffectWithReplay[T any](
+	ctx context.Context,
+	effects store.ExternalEffectStore,
+	fence store.ControllerEpochFence,
+	identity store.ExternalEffectIdentity,
+	request any,
+	call func(context.Context) (T, error),
+) (T, bool, error) {
+	return runExternalEffectWithReplay(ctx, effects, fence, identity, request, call)
+}
+
+// SettleExternalEffect records a terminal state for an effect whose call
+// returned an error, so the ledger never shows it as still in flight.
+func SettleExternalEffect(
+	ctx context.Context,
+	effects store.ExternalEffectStore,
+	fence store.ControllerEpochFence,
+	identity store.ExternalEffectIdentity,
+	state store.ExternalEffectState,
+) error {
+	return settleExternalEffectStore(ctx, effects, fence, identity, state, nil)
+}
+
+// ExternalEffectRequestDigest is the digest under which RunExternalEffectWithReplay
+// reserves an effect, so a caller can recognize its own committed record.
+func ExternalEffectRequestDigest(identity store.ExternalEffectIdentity, request any) (string, error) {
+	return acpDomainDigest("external-effect-request", map[string]any{
+		"identity": identity, "request": request,
+	})
+}

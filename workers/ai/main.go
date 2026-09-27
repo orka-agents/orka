@@ -258,6 +258,7 @@ func run(transcriptPath string) (err error) {
 	// Tools behind a connection-mode policy never run in this Pod.
 	connectorBackedToolNames = connectorBackedTools(ctx, k8sClient, taskNamespace, customTools)
 	markConnectorBackedTools(customTools, connectorBackedToolNames)
+	connectorBindings = parseConnectionBindings(os.Getenv(workerenv.ConnectionBindings))
 
 	// Load skills from mounted volume and prepend to system prompt
 	if skillContent := loadSkillsFromVolume(); skillContent != "" {

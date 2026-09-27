@@ -17,17 +17,20 @@ import (
 	"strings"
 	"time"
 
+	batchv1 "k8s.io/api/batch/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/approvals"
 	"github.com/orka-agents/orka/internal/connectors"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
 	workerexecutor "github.com/orka-agents/orka/internal/worker"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 // connectorToolInfo describes one Tool whose OutboundAccessPolicy is in
@@ -36,6 +39,8 @@ type connectorToolInfo struct {
 	PolicyName string
 	Provider   string
 	Class      corev1alpha1.AgentRuntimeBrokeredToolClass
+	// SpecDigest is the approval-target digest of the Tool spec as read.
+	SpecDigest string
 }
 
 // connectorToolsFor returns, for every named Tool backed by a connection-mode
@@ -79,10 +84,15 @@ func connectorToolsFor(ctx context.Context, reader client.Reader, namespace stri
 		if policy == nil || policy.Spec.Connection == nil {
 			continue
 		}
+		specDigest, err := approvals.TargetSpecDigest(tool.Spec)
+		if err != nil {
+			return nil, fmt.Errorf("digest tool %q: %w", name, err)
+		}
 		result[name] = connectorToolInfo{
 			PolicyName: policyName,
 			Provider:   policy.Spec.Connection.ProviderRef.Name,
 			Class:      tool.Spec.BrokeredToolClass,
+			SpecDigest: specDigest,
 		}
 	}
 	return result, nil
@@ -169,6 +179,74 @@ func ACPChildTaskSealer(reader client.Reader, parentNamespace, parentName, paren
 		}
 		return fmt.Errorf("seal the child task: %w", err)
 	}
+}
+
+// FrozenConnectorToolDigests returns, for every named Tool backed by a
+// connection-mode policy, the digest of its spec as read now. The Job builder
+// freezes the result into the worker's environment so the controller executes
+// only the definition the worker was dispatched with.
+func FrozenConnectorToolDigests(ctx context.Context, reader client.Reader, namespace string, toolNames []string) (map[string]string, error) {
+	infos, err := connectorToolsFor(ctx, reader, namespace, toolNames)
+	if err != nil {
+		return nil, err
+	}
+	if len(infos) == 0 {
+		return nil, nil
+	}
+	digests := make(map[string]string, len(infos))
+	for name, info := range infos {
+		digests[name] = info.SpecDigest
+	}
+	return digests, nil
+}
+
+// FrozenConnectionBindingsFromJob decodes the Connection bindings the Job
+// builder froze into the worker's environment. It reports false when the Job
+// carries none. A Job whose value cannot be decoded fails closed with an error
+// rather than yielding an empty binding set.
+func FrozenConnectionBindingsFromJob(job *batchv1.Job) ([]corev1alpha1.ConnectionBinding, bool, error) {
+	if job == nil {
+		return nil, false, nil
+	}
+	for _, container := range job.Spec.Template.Spec.Containers {
+		if container.Name != workerContainerName {
+			continue
+		}
+		for _, env := range container.Env {
+			if env.Name != workerenv.ConnectionBindings {
+				continue
+			}
+			if strings.TrimSpace(env.Value) == "" {
+				return nil, false, nil
+			}
+			var bindings []corev1alpha1.ConnectionBinding
+			if err := json.Unmarshal([]byte(env.Value), &bindings); err != nil {
+				return nil, true, fmt.Errorf("decode frozen connection bindings on job %q: %w", job.Name, err)
+			}
+			return bindings, true, nil
+		}
+	}
+	return nil, false, nil
+}
+
+// ConnectionBindingsEqual reports whether two binding lists pin the same
+// Connections, regardless of order.
+func ConnectionBindingsEqual(a, b []corev1alpha1.ConnectionBinding) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	byPolicy := make(map[string]corev1alpha1.ConnectionBinding, len(a))
+	for _, binding := range a {
+		byPolicy[binding.PolicyName] = binding
+	}
+	for _, binding := range b {
+		if byPolicy[binding.PolicyName] != binding {
+			return false
+		}
+	}
+	return true
+}
+
 // requesterStampKey verifies the stamp the API server seals onto Tasks it
 // created for a verified person. Without it no requester is ever trusted
 // for connector use.

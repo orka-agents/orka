@@ -21,9 +21,11 @@ import (
 	"github.com/orka-agents/orka/internal/approvals"
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/internal/store/storetest"
 	"github.com/orka-agents/orka/internal/workerenv"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 
 	"github.com/gofiber/fiber/v3"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -33,6 +35,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/connectors"
+	"github.com/orka-agents/orka/internal/controller"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 )
@@ -64,9 +67,16 @@ func connectorToolFixtures() *corev1alpha1.Task {
 }
 
 func connectorTestTool(name string, class corev1alpha1.AgentRuntimeBrokeredToolClass, policyName string) *corev1alpha1.Tool {
+	return connectorTestToolWithSchema(name, class, policyName, "")
+}
+
+func connectorTestToolWithSchema(name string, class corev1alpha1.AgentRuntimeBrokeredToolClass, policyName, parameters string) *corev1alpha1.Tool {
 	spec := corev1alpha1.ToolSpec{Description: name, BrokeredToolClass: class, HTTP: &corev1alpha1.HTTPExecution{URL: "https://api.github.example.test/" + name}}
 	if policyName != "" {
 		spec.HTTP.OutboundAccessPolicyRef = &corev1alpha1.LocalObjectReference{Name: policyName}
+	}
+	if parameters != "" {
+		spec.Parameters = &apiextensionsv1.JSON{Raw: []byte(parameters)}
 	}
 	return &corev1alpha1.Tool{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"}, Spec: spec}
 }
@@ -76,6 +86,52 @@ type connectorToolAppOptions struct {
 	approvalRequired []string
 	// tools is the tool list frozen into the Job; nil means every fixture tool.
 	tools []string
+	// bindingsEnv overrides the bindings frozen into the Job; nil means the
+	// Task's status bindings.
+	bindingsEnv *string
+	// parameters is the JSON Schema of every fixture connector tool.
+	parameters string
+	// transactionSecret names a Task-owned transaction-token Secret that
+	// does not exist, so authority binding fails after the approval claim.
+	transactionSecret string
+	// noLedger leaves the effect ledger unconfigured.
+	noLedger bool
+}
+
+// connectorToolHarness is the endpoint under test with its fakes.
+type connectorToolHarness struct {
+	app     *fiber.App
+	events  *storetest.FakeExecutionEventStore
+	client  client.Client
+	effects *sqlite.Store
+	fence   store.ControllerEpochFence
+	tools   map[string]*corev1alpha1.Tool
+}
+
+type staticFenceSource struct{ fence store.ControllerEpochFence }
+
+func (s staticFenceSource) CurrentFence(context.Context) (store.ControllerEpochFence, error) {
+	return s.fence, nil
+}
+
+// newConnectorToolLedger opens an in-memory effect ledger with one live
+// controller epoch, the way the production controller runs.
+func newConnectorToolLedger(t *testing.T) (*sqlite.Store, store.ControllerEpochFence) {
+	t.Helper()
+	db, err := sqlite.NewDB(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	effects := sqlite.NewStore(db, ":memory:")
+	epoch, err := effects.CompareAndSwapControllerEpoch(context.Background(), store.ControllerEpochCAS{
+		ExpectedVersion: 0, ExpectedEpoch: 0, NewEpoch: 1, HolderID: "connector-controller",
+		RequestDigest: store.CanonicalBytesDigest([]byte("connector-epoch")), UpdatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return effects, store.ControllerEpochFence{Name: epoch.Name, Epoch: epoch.Epoch, HolderID: epoch.HolderID}
 }
 
 func newConnectorToolApp(t *testing.T, resolver outboundaccess.Resolver, enabled bool) *fiber.App {
@@ -86,19 +142,51 @@ func newConnectorToolApp(t *testing.T, resolver outboundaccess.Resolver, enabled
 
 func newConnectorToolAppWithOptions(t *testing.T, resolver outboundaccess.Resolver, enabled bool, opts connectorToolAppOptions) (*fiber.App, *storetest.FakeExecutionEventStore, client.Client) {
 	t.Helper()
+	h := newConnectorToolHarness(t, resolver, enabled, opts)
+	return h.app, h.events, h.client
+}
+
+func newConnectorToolHarness(t *testing.T, resolver outboundaccess.Resolver, enabled bool, opts connectorToolAppOptions) *connectorToolHarness {
+	t.Helper()
 	task := connectorToolFixtures()
 	task.Status.ConnectionBindings[0].Mode = opts.mode
+	if opts.transactionSecret != "" {
+		task.Spec.Transaction = &corev1alpha1.TaskTransaction{Scopes: []string{"orka.credentials.read"}}
+		task.Annotations[labels.AnnotationTransactionTokenSecret] = opts.transactionSecret
+	}
 	job := internalCallerAuthJob(task, "job-a", "job-uid")
-	// The tool list and approval policy the Job builder froze at dispatch.
+	fixtureTools := map[string]*corev1alpha1.Tool{
+		"gh_search": connectorTestToolWithSchema("gh_search", corev1alpha1.AgentRuntimeBrokeredToolClassRead, "github-conn", opts.parameters),
+		"gh_write":  connectorTestToolWithSchema("gh_write", corev1alpha1.AgentRuntimeBrokeredToolClassWrite, "github-conn", opts.parameters),
+		"plain":     connectorTestTool("plain", corev1alpha1.AgentRuntimeBrokeredToolClassRead, ""),
+	}
+	// The tool list, approval policy, connector tool digests, and Connection
+	// bindings the Job builder froze at dispatch.
 	frozenTools := opts.tools
 	if frozenTools == nil {
 		frozenTools = []string{"gh_search", "gh_write", "plain"}
+	}
+	digests := map[string]string{}
+	for _, name := range []string{"gh_search", "gh_write"} {
+		digest, err := approvals.TargetSpecDigest(fixtureTools[name].Spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		digests[name] = digest
+	}
+	digestsJSON, _ := json.Marshal(digests)
+	bindingsJSON, _ := json.Marshal(task.Status.ConnectionBindings)
+	bindingsEnv := string(bindingsJSON)
+	if opts.bindingsEnv != nil {
+		bindingsEnv = *opts.bindingsEnv
 	}
 	job.Spec.Template.Spec.Containers = []corev1.Container{{
 		Name: "worker",
 		Env: []corev1.EnvVar{
 			{Name: workerenv.AITools, Value: strings.Join(frozenTools, ",")},
 			{Name: workerenv.ApprovalRequiredTools, Value: workerenv.JoinCSV(opts.approvalRequired)},
+			{Name: workerenv.ConnectorToolDigests, Value: string(digestsJSON)},
+			{Name: workerenv.ConnectionBindings, Value: bindingsEnv},
 		},
 	}}
 	eventStore := storetest.NewFakeExecutionEventStore()
@@ -111,7 +199,6 @@ func newConnectorToolAppWithOptions(t *testing.T, resolver outboundaccess.Resolv
 		ObjectMeta: metav1.ObjectMeta{Name: "github-conn", Namespace: "default"},
 		Spec:       corev1alpha1.OutboundAccessPolicySpec{Connection: &corev1alpha1.ConnectionOutboundAccess{ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}}},
 	}
-	tool := connectorTestTool
 	connection := &corev1alpha1.Connection{
 		ObjectMeta: metav1.ObjectMeta{Name: "github-abc", Namespace: "default", UID: "conn-uid", Generation: 2},
 		Spec: corev1alpha1.ConnectionSpec{
@@ -128,16 +215,19 @@ func newConnectorToolAppWithOptions(t *testing.T, resolver outboundaccess.Resolv
 	connection.Name = connectors.ConnectionName("github", "https://issuer.example.test", "alice")
 	builder := fake.NewClientBuilder().WithScheme(internalCallerAuthScheme(t)).
 		WithObjects(task, job, pod, agent, policy, connection,
-			tool("gh_search", corev1alpha1.AgentRuntimeBrokeredToolClassRead, "github-conn"),
-			tool("gh_write", corev1alpha1.AgentRuntimeBrokeredToolClassWrite, "github-conn"),
-			tool("plain", corev1alpha1.AgentRuntimeBrokeredToolClassRead, ""))
+			fixtureTools["gh_search"].DeepCopy(), fixtureTools["gh_write"].DeepCopy(), fixtureTools["plain"].DeepCopy())
 	c := builder.Build()
+	cfg := ConnectorToolExecutionConfig{
+		Enabled: enabled, OutboundAccess: resolver, KubeClient: k8sfake.NewSimpleClientset(), HTTPClient: &http.Client{Timeout: time.Second},
+	}
+	harness := &connectorToolHarness{events: eventStore, client: c, tools: fixtureTools}
+	if !opts.noLedger {
+		harness.effects, harness.fence = newConnectorToolLedger(t)
+		cfg.ExternalEffects = harness.effects
+		cfg.ControllerEpochs = staticFenceSource{fence: harness.fence}
+	}
 	handlers := NewInternalHandlers(nil, nil, nil, nil, nil, InternalHandlersConfig{
-		Client: c, APIReader: c, ExecutionEventStore: eventStore,
-		ConnectorTools: ConnectorToolExecutionConfig{
-			Enabled: enabled, OutboundAccess: resolver, KubeClient: k8sfake.NewSimpleClientset(),
-			HTTPClient: &http.Client{Timeout: time.Second},
-		},
+		Client: c, APIReader: c, ExecutionEventStore: eventStore, ConnectorTools: cfg,
 	})
 	app := fiber.New()
 	app.Use(func(ctx fiber.Ctx) error {
@@ -145,16 +235,22 @@ func newConnectorToolAppWithOptions(t *testing.T, resolver outboundaccess.Resolv
 		return ctx.Next()
 	})
 	app.Post("/internal/v1/tasks/:namespace/:taskName/connector-tools/:tool", handlers.ExecuteConnectorTool)
-	return app, eventStore, c
+	harness.app = app
+	return harness
 }
 
 // seedApproval records a requested-then-approved approval for tool bound to
 // args, the way the worker's gate and a human decision would.
 func seedApproval(t *testing.T, eventStore *storetest.FakeExecutionEventStore, id string, args string, approve bool) {
-	const tool = "gh_write"
 	t.Helper()
-	// The worker digests the plain spec of a connector-backed tool.
-	approvedTool := connectorTestTool(tool, corev1alpha1.AgentRuntimeBrokeredToolClassWrite, "github-conn")
+	seedApprovalForTool(t, eventStore, id, args, approve, connectorTestTool("gh_write", corev1alpha1.AgentRuntimeBrokeredToolClassWrite, "github-conn"))
+}
+
+func seedApprovalForTool(t *testing.T, eventStore *storetest.FakeExecutionEventStore, id string, args string, approve bool, approvedTool *corev1alpha1.Tool) {
+	t.Helper()
+	tool := approvedTool.Name
+	// The worker digests the plain spec of a connector-backed tool together
+	// with the Connection frozen into its Job.
 	targetArgs, err := approvals.TargetArguments(json.RawMessage(args), approvedTool)
 	if err != nil {
 		t.Fatal(err)
@@ -163,7 +259,7 @@ func seedApproval(t *testing.T, eventStore *storetest.FakeExecutionEventStore, i
 	if err != nil {
 		t.Fatal(err)
 	}
-	specDigest, err := approvals.TargetSpecDigest(approvedTool.Spec)
+	specDigest, err := approvals.ConnectorTargetSpecDigest(approvedTool.Spec, "conn-uid", 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,5 +454,249 @@ func TestExecuteConnectorToolReleasesClaimWithoutProviderRequest(t *testing.T) {
 	})
 	if err != nil || len(claims) != 4 {
 		t.Fatalf("claim/release events = %d err = %v, want two claims and two releases", len(claims), err)
+	}
+}
+
+func TestExecuteConnectorToolValidatesArgumentsAgainstSchema(t *testing.T) {
+	resolver := &stubOutboundResolver{err: errors.New("the requester has no connection to this provider")}
+	app, _, _ := newConnectorToolAppWithOptions(t, resolver, true, connectorToolAppOptions{
+		mode: "readOnly", parameters: `{"type":"object","required":["q"],"properties":{"q":{"type":"string"},"limit":{"type":"integer","maximum":10}},"additionalProperties":false}`,
+	})
+	for _, body := range []string{
+		`{"arguments":{"limit":1}}`,
+		`{"arguments":{"q":7}}`,
+		`{"arguments":{"q":"x","limit":11}}`,
+		`{"arguments":{"q":"x","extra":true}}`,
+		`{"arguments":["q"]}`,
+	} {
+		if status, reply := postConnectorTool(t, app, "gh_search", body); status != http.StatusBadRequest || !strings.Contains(reply, "invalid tool arguments") {
+			t.Fatalf("%s = %d %s, want 400 before any credential is resolved", body, status, reply)
+		}
+	}
+	if resolver.request.PolicyName != "" {
+		t.Fatal("schema-rejected arguments must not reach credential resolution")
+	}
+	// Arguments the schema admits reach resolution.
+	if status, reply := postConnectorTool(t, app, "gh_search", `{"arguments":{"q":"x","limit":3}}`); status != http.StatusFailedDependency || !strings.Contains(reply, "no connection") {
+		t.Fatalf("valid arguments = %d %s", status, reply)
+	}
+}
+
+func TestExecuteConnectorToolRefusesToolChangedSinceDispatch(t *testing.T) {
+	resolver := &stubOutboundResolver{err: errors.New("the requester has no connection to this provider")}
+	app, eventStore, c := newConnectorToolAppWithOptions(t, resolver, true, connectorToolAppOptions{mode: "readWrite", approvalRequired: []string{"gh_write"}})
+	// A read tool retargeted after dispatch: same name, class, and policy,
+	// different URL. Read tools pass no approval, so the dispatch digest is
+	// the only thing standing between the worker and the new destination.
+	live := &corev1alpha1.Tool{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "gh_search"}, live); err != nil {
+		t.Fatal(err)
+	}
+	live.Spec.HTTP.URL = "https://api.github.example.test/elsewhere"
+	if err := c.Update(context.Background(), live); err != nil {
+		t.Fatal(err)
+	}
+	if status, body := postConnectorTool(t, app, "gh_search", `{"arguments":{"q":"x"}}`); status != http.StatusConflict || !strings.Contains(body, "changed since dispatch") {
+		t.Fatalf("retargeted read tool = %d %s", status, body)
+	}
+	// The same drift on a write tool is refused before the approval is
+	// claimed, so the approval stays usable once the Task is re-dispatched.
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "gh_write"}, live); err != nil {
+		t.Fatal(err)
+	}
+	live.Spec.HTTP.Method = "DELETE"
+	if err := c.Update(context.Background(), live); err != nil {
+		t.Fatal(err)
+	}
+	seedApproval(t, eventStore, "ap-1", `{"q":"x"}`, true)
+	if status, body := postConnectorTool(t, app, "gh_write", `{"arguments":{"q":"x"},"approvalId":"ap-1"}`); status != http.StatusConflict || !strings.Contains(body, "changed since dispatch") {
+		t.Fatalf("retargeted write tool = %d %s", status, body)
+	}
+	claims, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "task-a",
+		EventTypes: []string{events.ExecutionEventTypeApprovalExecutionUpdated}, Limit: 10,
+	})
+	if err != nil || len(claims) != 0 {
+		t.Fatalf("claim events = %d err = %v, want none", len(claims), err)
+	}
+}
+
+func TestExecuteConnectorToolRequiresJobBindingsToMatchTaskStatus(t *testing.T) {
+	resolver := &stubOutboundResolver{err: errors.New("the requester has no connection to this provider")}
+	// Task status names a different Connection than the one frozen into the
+	// Job: neither a rewritten status nor a recovered Job may redirect the call.
+	other := `[{"policyName":"github-conn","provider":"github","connectionName":"github-abc","uid":"other-uid","generation":2,"mode":"readOnly"}]`
+	app, _, _ := newConnectorToolAppWithOptions(t, resolver, true, connectorToolAppOptions{mode: "readOnly", bindingsEnv: &other})
+	if status, body := postConnectorTool(t, app, "gh_search", `{"arguments":{"q":"x"}}`); status != http.StatusConflict || !strings.Contains(body, "do not match its dispatched job") {
+		t.Fatalf("mismatched bindings = %d %s", status, body)
+	}
+	// A Job dispatched without any binding for the policy can never bind a
+	// credential; the call fails closed before approval or resolution.
+	none := ""
+	app, _, _ = newConnectorToolAppWithOptions(t, resolver, true, connectorToolAppOptions{mode: "readOnly", bindingsEnv: &none})
+	if status, body := postConnectorTool(t, app, "gh_search", `{"arguments":{"q":"x"}}`); status != http.StatusConflict {
+		t.Fatalf("missing job bindings = %d %s", status, body)
+	}
+	if resolver.request.PolicyName != "" {
+		t.Fatal("a binding mismatch must not reach credential resolution")
+	}
+}
+
+func TestExecuteConnectorToolBindsApprovalToFrozenConnection(t *testing.T) {
+	resolver := &stubOutboundResolver{err: errors.New("the requester has no connection to this provider")}
+	app, eventStore, _ := newConnectorToolAppWithOptions(t, resolver, true, connectorToolAppOptions{mode: "readWrite", approvalRequired: []string{"gh_write"}})
+	// An approval requested while a different account was linked (the
+	// worker digested another Connection identity) does not authorize a
+	// call under the Connection frozen with this Job.
+	approvedTool := connectorTestTool("gh_write", corev1alpha1.AgentRuntimeBrokeredToolClassWrite, "github-conn")
+	targetArgs, _ := approvals.TargetArguments(json.RawMessage(`{"q":"x"}`), approvedTool)
+	argsDigest, _ := approvals.TargetArgsDigest(targetArgs)
+	staleDigest, _ := approvals.ConnectorTargetSpecDigest(approvedTool.Spec, "previous-account-uid", 1)
+	requested, _ := json.Marshal(map[string]any{"approvalID": "ap-stale", "taskUID": "task-uid", "targetTool": "gh_write", "targetArgsDigest": argsDigest, "targetSpecDigest": staleDigest, "action": "Execute gh_write"})
+	decided, _ := json.Marshal(map[string]any{"approvalID": "ap-stale", "actor": "reviewer"})
+	for _, event := range []*store.ExecutionEvent{
+		{Type: events.ExecutionEventTypeApprovalRequested, Content: requested},
+		{Type: events.ExecutionEventTypeApprovalApproved, Content: decided},
+	} {
+		event.Namespace, event.StreamType, event.StreamID, event.TaskName = "default", store.ExecutionEventStreamTypeTask, "task-a", "task-a"
+		event.ToolName, event.ToolCallID, event.CreatedAt = "gh_write", "ap-stale", time.Now()
+		if _, err := eventStore.AppendExecutionEvent(context.Background(), event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if status, body := postConnectorTool(t, app, "gh_write", `{"arguments":{"q":"x"},"approvalId":"ap-stale"}`); status != http.StatusConflict || !strings.Contains(body, "linked account changed") {
+		t.Fatalf("approval for another account = %d %s", status, body)
+	}
+}
+
+func TestExecuteConnectorToolReleasesClaimWhenAuthorityBindingFails(t *testing.T) {
+	resolver := &stubOutboundResolver{err: errors.New("the requester has no connection to this provider")}
+	app, eventStore, _ := newConnectorToolAppWithOptions(t, resolver, true, connectorToolAppOptions{
+		mode: "readWrite", approvalRequired: []string{"gh_write"}, transactionSecret: "missing-tx-secret",
+	})
+	seedApproval(t, eventStore, "ap-1", `{"q":"x"}`, true)
+	// Loading the Task's transaction-token Secret fails after the claim and
+	// before any provider request: the claim is handed back each time.
+	for range 2 {
+		if status, body := postConnectorTool(t, app, "gh_write", `{"arguments":{"q":"x"},"approvalId":"ap-1"}`); status != http.StatusInternalServerError || !strings.Contains(body, "bind task authority") {
+			t.Fatalf("authority binding failure = %d %s", status, body)
+		}
+	}
+	claims, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "task-a",
+		EventTypes: []string{events.ExecutionEventTypeApprovalExecutionUpdated}, Limit: 10,
+	})
+	if err != nil || len(claims) != 4 {
+		t.Fatalf("claim/release events = %d err = %v, want two claims and two releases", len(claims), err)
+	}
+}
+
+func TestExecuteConnectorToolRecordsApprovedCallsInEffectLedger(t *testing.T) {
+	resolver := &stubOutboundResolver{err: errors.New("the requester has no connection to this provider")}
+	h := newConnectorToolHarness(t, resolver, true, connectorToolAppOptions{mode: "readWrite", approvalRequired: []string{"gh_write"}})
+	seedApproval(t, h.events, "ap-1", `{"q":"x"}`, true)
+	// Every approval-claimed call is reserved in the durable effect ledger
+	// under its claim before the provider is contacted; one that fails
+	// before any request settles as Failed and hands the claim back.
+	for range 2 {
+		if status, body := postConnectorTool(t, h.app, "gh_write", `{"arguments":{"q":"x"},"approvalId":"ap-1"}`); status != http.StatusFailedDependency || !strings.Contains(body, "no connection") {
+			t.Fatalf("pre-request failure = %d %s", status, body)
+		}
+	}
+	history, err := approvals.ListEvents(context.Background(), h.events, "default", "task-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decisionSeq int64
+	for _, approval := range approvals.Derive(history, time.Now()) {
+		if approval.ID == "ap-1" {
+			decisionSeq = approval.DecisionSeq
+		}
+	}
+	task := connectorToolFixtures()
+	tool := h.tools["gh_write"]
+	targetArgs, _ := approvals.TargetArguments(json.RawMessage(`{"q":"x"}`), tool)
+	argsDigest, _ := approvals.TargetArgsDigest(targetArgs)
+	specDigest, _ := approvals.ConnectorTargetSpecDigest(tool.Spec, "conn-uid", 2)
+	runFor := func(releases int) connectorToolRun {
+		return connectorToolRun{task: task, tool: tool, binding: task.Status.ConnectionBindings[0], claim: &connectorApprovalClaim{
+			approvalID: "ap-1", key: fmt.Sprintf("connector-approval-claim:ap-1:%d:%d", decisionSeq, releases), releases: releases,
+			argsDigest: argsDigest, specDigest: specDigest,
+		}}
+	}
+	for releases := range 2 {
+		run := runFor(releases)
+		id, err := connectorToolEffectIdentity(run.task, run.claim).CanonicalID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		effect, err := h.effects.GetExternalEffect(context.Background(), id)
+		if err != nil || effect.State != store.ExternalEffectFailed {
+			t.Fatalf("effect for claim %d = %+v err = %v, want Failed", releases, effect, err)
+		}
+		if requestDigest, err := controller.ExternalEffectRequestDigest(effect.Identity, connectorToolEffectRequest(run)); err != nil || requestDigest != effect.RequestDigest {
+			t.Fatalf("effect request digest = %q, want the tool, approval, argument, spec, and connection digests bound (%q, err %v)", effect.RequestDigest, requestDigest, err)
+		}
+	}
+	// A claim that reached the provider and committed its result stays
+	// spent; a worker that lost the response (a controller restart between
+	// commit and reply) receives the committed result again from the ledger
+	// with no second request, while other arguments are still refused.
+	committed := runFor(2)
+	identity := connectorToolEffectIdentity(committed.task, committed.claim)
+	requestDigest, err := controller.ExternalEffectRequestDigest(identity, connectorToolEffectRequest(committed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	reserved, err := h.effects.ReserveExternalEffect(context.Background(), store.ReserveExternalEffectRequest{Identity: identity, RequestDigest: requestDigest, Fence: h.fence, CreatedAt: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, _ := json.Marshal(`{"ok":true}`)
+	lease := now.Add(time.Minute)
+	inFlight, err := h.effects.TransitionExternalEffect(context.Background(), store.ExternalEffectTransition{
+		ID: reserved.ID, Fence: h.fence, ExpectedVersion: reserved.Version, ExpectedState: reserved.State, NewState: store.ExternalEffectInFlight,
+		RequestDigest: requestDigest, LeaseOwner: "controller", LeaseExpiresAt: &lease, UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.effects.TransitionExternalEffect(context.Background(), store.ExternalEffectTransition{
+		ID: inFlight.ID, Fence: h.fence, ExpectedVersion: inFlight.Version, ExpectedState: store.ExternalEffectInFlight, NewState: store.ExternalEffectSucceeded,
+		RequestDigest: requestDigest, ResponseDigest: store.CanonicalBytesDigest(response), Response: response, ExpectedLeaseOwner: "controller", UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	spent, _ := json.Marshal(map[string]any{"approvalID": "ap-1", "executionOutcome": "running"})
+	if _, appended, err := h.events.AppendExecutionEventIfAbsent(context.Background(), &store.ExecutionEvent{
+		Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "task-a", TaskName: "task-a",
+		Type: events.ExecutionEventTypeApprovalExecutionUpdated, ToolCallID: "ap-1", Content: spent, CreatedAt: time.Now(),
+	}, committed.claim.key); err != nil || !appended {
+		t.Fatalf("spent claim seed appended = %v err = %v", appended, err)
+	}
+	resolver.request = outboundaccess.ResolveRequest{}
+	status, body := postConnectorTool(t, h.app, "gh_write", `{"arguments":{"q":"x"},"approvalId":"ap-1"}`)
+	if status != http.StatusOK || !strings.Contains(body, `"replayed":true`) || !strings.Contains(body, `ok`) {
+		t.Fatalf("replay = %d %s", status, body)
+	}
+	if resolver.request.PolicyName != "" {
+		t.Fatal("a replayed result must not resolve a credential or contact the provider")
+	}
+	if status, body := postConnectorTool(t, h.app, "gh_write", `{"arguments":{"q":"other"},"approvalId":"ap-1"}`); status != http.StatusForbidden || !strings.Contains(body, "does not bind") {
+		t.Fatalf("other arguments = %d %s", status, body)
+	}
+}
+
+func TestExecuteConnectorToolRefusesApprovedCallsWithoutLedger(t *testing.T) {
+	resolver := &stubOutboundResolver{err: errors.New("the requester has no connection to this provider")}
+	app, eventStore, _ := newConnectorToolAppWithOptions(t, resolver, true, connectorToolAppOptions{mode: "readWrite", approvalRequired: []string{"gh_write"}, noLedger: true})
+	seedApproval(t, eventStore, "ap-1", `{"q":"x"}`, true)
+	if status, body := postConnectorTool(t, app, "gh_write", `{"arguments":{"q":"x"},"approvalId":"ap-1"}`); status != http.StatusServiceUnavailable || !strings.Contains(body, "ledger is unavailable") {
+		t.Fatalf("no ledger = %d %s", status, body)
+	}
+	// Read calls have no effect record and still run.
+	if status, body := postConnectorTool(t, app, "gh_search", `{"arguments":{"q":"x"}}`); status != http.StatusFailedDependency {
+		t.Fatalf("read without ledger = %d %s", status, body)
 	}
 }

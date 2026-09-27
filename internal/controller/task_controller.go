@@ -1521,10 +1521,13 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		return ctrl.Result{}, err
 	}
 
+	connectionBindings := taskConnectionBindings(frozenConnections)
+
 	// Create the Job
 	job, err := r.JobBuilder.BuildWithOptions(ctx, jobTask, agent, provider, JobBuildOptions{
 		ResolvedApprovalsJSON:       resolvedApprovalsJSON,
 		RepositoryMonitorValidation: validationTask,
+		ConnectionBindings:          connectionBindings,
 	})
 	if err != nil {
 		if errors.Is(err, ErrConnectorToolResolution) {
@@ -1552,6 +1555,14 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 				return ctrl.Result{}, recoveryErr
 			}
 			job = existing
+			// The recovered Job was built against the Connections frozen
+			// for it; a freeze taken now must not hand it authority over a
+			// Connection that changed since.
+			recovered, _, bindingErr := FrozenConnectionBindingsFromJob(existing)
+			if bindingErr != nil {
+				return r.failTask(ctx, task, fmt.Sprintf("%v: %v", errTaskJobIdentity, bindingErr))
+			}
+			connectionBindings = recovered
 		} else {
 			log.Error(err, "failed to create Job")
 			return r.failTask(ctx, task, fmt.Sprintf("failed to create job: %v", err))
@@ -1559,7 +1570,6 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	}
 	task.Status.JobName = job.Name
 	task.Status.JobUID = string(job.UID)
-	connectionBindings := taskConnectionBindings(frozenConnections)
 	task.Status.ConnectionBindings = connectionBindings
 
 	// Update status to Running

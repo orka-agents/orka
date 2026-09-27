@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -450,6 +451,10 @@ func buildTaskJobName(task *corev1alpha1.Task) string {
 type JobBuildOptions struct {
 	ResolvedApprovalsJSON       string
 	RepositoryMonitorValidation bool
+	// ConnectionBindings are the requester's Connections frozen for this
+	// dispatch; they are carried on the Job so recovery and the controller's
+	// connector endpoint judge the Job's own bindings, never a later freeze.
+	ConnectionBindings []corev1alpha1.ConnectionBinding
 }
 
 // Build creates a Job for the given Task.
@@ -602,7 +607,7 @@ func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1
 		return corev1.Container{}, err
 	}
 	container := corev1.Container{
-		Name:            "worker",
+		Name:            workerContainerName,
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		SecurityContext: b.buildContainerSecurityContext(),
 		Resources:       b.buildResources(task, agent),
@@ -838,6 +843,15 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 		envVars = b.addWorkspaceEnvVars(envVars, task)
 	}
 	envVars = setControllerEnvValue(envVars, workerenv.ResolvedApprovals, opts.ResolvedApprovalsJSON)
+	frozenBindings := ""
+	if len(opts.ConnectionBindings) > 0 {
+		encoded, err := json.Marshal(opts.ConnectionBindings)
+		if err != nil {
+			return nil, fmt.Errorf("encode frozen connection bindings: %w", err)
+		}
+		frozenBindings = string(encoded)
+	}
+	envVars = setControllerEnvValue(envVars, workerenv.ConnectionBindings, frozenBindings)
 	if taskRequestsReadOnlyAgent(task) {
 		envVars = setControllerEnv(envVars, workerenv.AgentReadOnly, scheduledRunLabelValue)
 		envVars = setControllerEnv(envVars, workerenv.ResultStdout, scheduledRunLabelValue)
@@ -1111,6 +1125,10 @@ func (b *JobBuilder) addCoordinationEnvVars(envVars []corev1.EnvVar, task *corev
 	return setControllerEnvValue(envVars, workerenv.ApprovalRequiredTools, workerenv.JoinCSV(sortedUnique(required)))
 }
 
+// workerContainerName is the Job container the worker runs in; the
+// controller reads the frozen dispatch policy from its environment.
+const workerContainerName = "worker"
+
 // ErrConnectorToolResolution marks a Job build that could not determine which
 // tools are connector-backed. It is transient: the Task controller requeues
 // rather than failing the Task.
@@ -1172,6 +1190,21 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 	if len(cfg.tools) > 0 {
 		envVars = setControllerEnvValue(envVars, workerenv.AITools, strings.Join(cfg.tools, ","))
 	}
+	// The controller executes a connector-backed tool only as it was defined
+	// when the worker was dispatched with it.
+	digests, err := FrozenConnectorToolDigests(ctx, b.Client, task.Namespace, cfg.tools)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrConnectorToolResolution, err)
+	}
+	frozenDigests := ""
+	if len(digests) > 0 {
+		encoded, err := json.Marshal(digests)
+		if err != nil {
+			return nil, fmt.Errorf("encode connector tool digests: %w", err)
+		}
+		frozenDigests = string(encoded)
+	}
+	envVars = setControllerEnvValue(envVars, workerenv.ConnectorToolDigests, frozenDigests)
 
 	if coordinationConfigured {
 		envVars = b.addCoordinationEnvVars(envVars, task, agent, connectorWrite)

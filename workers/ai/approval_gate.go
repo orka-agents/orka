@@ -368,8 +368,14 @@ func approvalTargetSpecDigest(customTool *corev1alpha1.Tool) (string, error) {
 	}
 	if customTool.Annotations[connectorBackedToolAnnotation] == "true" {
 		// Executed in the controller, which recomputes this digest from the
-		// live Tool and refuses a claim when the configuration changed.
-		digest, err := approvals.TargetSpecDigest(customTool.Spec)
+		// live Tool and the Connection frozen with the Job, and refuses a
+		// claim when either changed: a Job re-created after the decision
+		// against a re-linked account needs a fresh approval.
+		var binding corev1alpha1.ConnectionBinding
+		if customTool.Spec.HTTP != nil && customTool.Spec.HTTP.OutboundAccessPolicyRef != nil {
+			binding = connectorBindings[customTool.Spec.HTTP.OutboundAccessPolicyRef.Name]
+		}
+		digest, err := approvals.ConnectorTargetSpecDigest(customTool.Spec, binding.UID, binding.Generation)
 		if err != nil {
 			return "", fmt.Errorf("digest connector tool %q approval target spec: %w", customTool.Name, err)
 		}

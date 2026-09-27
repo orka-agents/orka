@@ -9,11 +9,14 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,6 +35,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/aitools"
+	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/controller"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	workerexecutor "github.com/orka-agents/orka/internal/worker"
@@ -55,7 +59,18 @@ type ConnectorToolExecutionConfig struct {
 	// mirror the broker's Secret-credential authorization settings.
 	EnforceTransactionCredentialAuth bool
 	TransactionCredentialReadScopes  []string
+	// ExternalEffects and ControllerEpochs record every approval-claimed
+	// (consequential) connector call in the durable effect ledger. Without
+	// both, such calls are refused.
+	ExternalEffects  store.ExternalEffectStore
+	ControllerEpochs ControllerEpochFenceSource
 }
+
+// connectorToolEffectKind is the effect-ledger kind for consequential
+// connector-backed calls made on behalf of native type: ai Tasks.
+const connectorToolEffectKind = "connector.tool"
+
+var errConnectorEffectLedgerUnavailable = errors.New("the external effect ledger is unavailable; consequential connector calls are refused")
 
 type connectorToolCallRequest struct {
 	Arguments      json.RawMessage `json:"arguments"`
@@ -74,9 +89,9 @@ type connectorToolCallRequest struct {
 // frozen into Task status. The response carries the tool result only; the
 // executor redacts credential material from errors.
 func (h *InternalHandlers) ExecuteConnectorTool(c fiber.Ctx) error {
-	namespace := c.Params("namespace")
-	taskName := c.Params("taskName")
-	toolName := c.Params("tool")
+	namespace := strings.TrimSpace(c.Params("namespace"))
+	taskName := strings.TrimSpace(c.Params("taskName"))
+	toolName := strings.TrimSpace(c.Params("tool"))
 	if namespace == "" || taskName == "" || strings.TrimSpace(toolName) == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "namespace, taskName, and tool are required")
 	}
@@ -116,6 +131,11 @@ func (h *InternalHandlers) ExecuteConnectorTool(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	// The worker is not trusted to have honored the Tool's schema; the
+	// person's credential is attached only to arguments the schema admits.
+	if err := connectors.ValidateToolArguments(tool.Spec.Parameters, req.Arguments); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid tool arguments: "+err.Error())
+	}
 	if err := connectorToolEnabledForTask(ctx, reader, task, toolName); err != nil {
 		return err
 	}
@@ -129,52 +149,225 @@ func (h *InternalHandlers) ExecuteConnectorTool(c fiber.Ctx) error {
 	if _, dispatched := frozen.tools[toolName]; !dispatched {
 		return fiber.NewError(fiber.StatusForbidden, "tool was not in the tool list dispatched with the task's job")
 	}
-	claim, err := h.enforceConnectorToolApproval(ctx, task, tool, req.Arguments, req.ApprovalID, frozen)
+	// Only the definition the worker was dispatched with executes: a Tool
+	// retargeted after dispatch (URL, method, headers, schema) is refused
+	// whether or not the call needs an approval.
+	liveDigest, err := approvals.TargetSpecDigest(tool.Spec)
 	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, "failed to digest tool configuration")
+	}
+	if dispatchedDigest, ok := frozen.digests[toolName]; !ok || dispatchedDigest != liveDigest {
+		return fiber.NewError(fiber.StatusConflict, "tool configuration changed since dispatch; re-dispatch the task")
+	}
+	binding, ok := frozen.binding(tool.Spec.HTTP.OutboundAccessPolicyRef.Name)
+	if !ok {
+		return fiber.NewError(fiber.StatusFailedDependency, "no Connection was frozen for the tool's policy when the task was dispatched")
+	}
+	claim, err := h.enforceConnectorToolApproval(ctx, task, tool, req.Arguments, req.ApprovalID, frozen, binding)
+	if err != nil {
+		if replay, ok := errors.AsType[*connectorToolReplay](err); ok {
+			return c.JSON(fiber.Map{connectorToolResultField: replay.result, "replayed": true})
+		}
 		return err
 	}
+	return h.runConnectorTool(c, connectorToolRun{
+		task: task, tool: tool, req: req, claim: claim, binding: binding, authorizer: authorizer,
+	})
+}
 
-	executor := workerexecutor.NewToolExecutorForNamespace(namespace, cfg.KubeClient, cfg.HTTPClient, cfg.OutboundAccess)
+// connectorToolRun is one authorized call about to be executed.
+type connectorToolRun struct {
+	task       *corev1alpha1.Task
+	tool       *corev1alpha1.Tool
+	req        connectorToolCallRequest
+	claim      *connectorApprovalClaim
+	binding    corev1alpha1.ConnectionBinding
+	authorizer internalCallerAuthorizer
+}
+
+// runConnectorTool binds the Task's authority and executes the call. Every
+// failure before a provider request hands a claimed approval back, so an
+// exact retry or a fresh human decision can claim it again; a request that
+// reached the provider keeps its claim spent.
+func (h *InternalHandlers) runConnectorTool(c fiber.Ctx, run connectorToolRun) error {
+	ctx := c.Context()
+	cfg := h.connectorTools
+	reader := h.apiReader
+	if reader == nil {
+		reader = h.k8sClient
+	}
+	toolName := run.tool.Name
+	attempted := false
+	fail := func(status int, message string) error {
+		if run.claim != nil && !attempted {
+			if err := h.releaseConnectorApprovalClaim(ctx, run.task, toolName, run.claim); err != nil {
+				log.Error(err, "connector approval claim could not be released", "task", run.task.Name, "approval", run.claim.approvalID)
+				return fiber.NewError(fiber.StatusInternalServerError, message+"; the approval claim could not be released, request approval again")
+			}
+		}
+		return fiber.NewError(status, message)
+	}
+	executor := workerexecutor.NewToolExecutorForNamespace(run.task.Namespace, cfg.KubeClient, cfg.HTTPClient, cfg.OutboundAccess)
 	executor.SetTransactionExchangeConfig(cfg.TransactionExchange)
-	if err := controller.BindNativeTaskConnectorAuthority(ctx, reader, task, cfg.TransactionCredentialReadScopes, cfg.EnforceTransactionCredentialAuth, executor); err != nil {
-		log.Error(err, "connector tool authority binding failed", "task", taskName, "tool", toolName)
-		return fiber.NewError(fiber.StatusInternalServerError, "failed to bind task authority")
+	if err := controller.BindNativeTaskConnectorAuthority(ctx, reader, run.task, cfg.TransactionCredentialReadScopes, cfg.EnforceTransactionCredentialAuth, executor); err != nil {
+		log.Error(err, "connector tool authority binding failed", "task", run.task.Name, "tool", toolName)
+		return fail(fiber.StatusInternalServerError, "failed to bind task authority")
 	}
 	execCtx := ctx
-	if strings.TrimSpace(req.CallID) != "" {
-		execCtx = workerexecutor.WithToolCallID(execCtx, req.CallID)
+	if strings.TrimSpace(run.req.CallID) != "" {
+		execCtx = workerexecutor.WithToolCallID(execCtx, run.req.CallID)
 	}
 	switch {
-	case claim != nil:
+	case run.claim != nil:
 		// The downstream idempotency key is the claimed approval, not a
 		// worker-chosen value, so the provider sees one request per approval.
-		execCtx = workerexecutor.WithToolIdempotencyKey(execCtx, claim.key)
-	case strings.TrimSpace(req.IdempotencyKey) != "":
-		execCtx = workerexecutor.WithToolIdempotencyKey(execCtx, req.IdempotencyKey)
+		execCtx = workerexecutor.WithToolIdempotencyKey(execCtx, run.claim.key)
+	case strings.TrimSpace(run.req.IdempotencyKey) != "":
+		execCtx = workerexecutor.WithToolIdempotencyKey(execCtx, run.req.IdempotencyKey)
 	}
 	// The caller's authority is judged again right before the external
 	// effect: a Task cancelled or a Job replaced while this request did its
 	// lookups must not still reach the provider.
-	if _, err := authorizer.verifyTaskCaller(c, namespace, taskName); err != nil {
-		return err
+	if _, err := run.authorizer.verifyTaskCaller(c, run.task.Namespace, run.task.Name); err != nil {
+		status, message := fiber.StatusForbidden, "task caller is no longer authorized"
+		if fiberErr, ok := errors.AsType[*fiber.Error](err); ok {
+			status, message = fiberErr.Code, fiberErr.Message
+		}
+		return fail(status, message)
 	}
-	result, err := executor.Execute(execCtx, tool, req.Arguments)
-	if err != nil {
-		status := fiber.StatusBadGateway
+	call := func(ctx context.Context) (string, error) {
+		result, err := executor.Execute(ctx, run.tool, run.req.Arguments)
 		var executionErr workerexecutor.ToolExecutionError
-		if !errors.As(err, &executionErr) && !workerexecutor.ToolRequestWasAttempted(err) {
+		if err == nil || errors.As(err, &executionErr) || workerexecutor.ToolRequestWasAttempted(err) {
+			attempted = true
+		}
+		return result, err
+	}
+	var (
+		result   string
+		replayed bool
+		err      error
+	)
+	if run.claim != nil {
+		result, replayed, err = h.runConnectorToolEffect(execCtx, run, call, &attempted)
+	} else {
+		result, err = call(execCtx)
+	}
+	if err != nil {
+		if errors.Is(err, errConnectorEffectLedgerUnavailable) {
+			return fail(fiber.StatusServiceUnavailable, err.Error())
+		}
+		status := fiber.StatusBadGateway
+		if !attempted {
 			// Resolution failed before any request was sent (no connection,
 			// revoked, changed since dispatch): report it as a client-visible
-			// precondition failure, and hand the approval back so an exact
-			// retry or a fresh human decision can claim it again.
+			// precondition failure and hand the approval back.
 			status = fiber.StatusFailedDependency
-			if claim != nil {
-				h.releaseConnectorApprovalClaim(ctx, task, toolName, claim)
+			if releaseErr := fail(status, ""); releaseErr != nil {
+				var fiberErr *fiber.Error
+				if errors.As(releaseErr, &fiberErr) && fiberErr.Code == fiber.StatusInternalServerError {
+					return fiberErr
+				}
 			}
 		}
 		return c.Status(status).JSON(fiber.Map{"error": fmt.Sprintf("connector tool %q: %v", toolName, err)})
 	}
-	return c.JSON(fiber.Map{connectorToolResultField: result})
+	response := fiber.Map{connectorToolResultField: result}
+	if replayed {
+		response["replayed"] = true
+	}
+	return c.JSON(response)
+}
+
+// runConnectorToolEffect records an approval-claimed call in the durable
+// effect ledger under the claim's key, with the frozen Connection digest and
+// the approval's argument and configuration digests, so the outcome of a
+// consequential call survives a controller restart and can be audited. A
+// call that fails before any request settles as Failed; one whose outcome
+// the provider may have applied settles as OutcomeUnknown.
+func (h *InternalHandlers) runConnectorToolEffect(
+	ctx context.Context,
+	run connectorToolRun,
+	call func(context.Context) (string, error),
+	attempted *bool,
+) (string, bool, error) {
+	cfg := h.connectorTools
+	if cfg.ExternalEffects == nil || cfg.ControllerEpochs == nil {
+		return "", false, errConnectorEffectLedgerUnavailable
+	}
+	fence, err := cfg.ControllerEpochs.CurrentFence(ctx)
+	if err != nil {
+		return "", false, fmt.Errorf("%w: %w", errConnectorEffectLedgerUnavailable, err)
+	}
+	identity := connectorToolEffectIdentity(run.task, run.claim)
+	request := connectorToolEffectRequest(run)
+	result, replayed, err := controller.RunExternalEffectWithReplay(ctx, cfg.ExternalEffects, fence, identity, request, call)
+	if err != nil && !errors.Is(err, store.ErrConflict) {
+		state := store.ExternalEffectOutcomeUnknown
+		if !*attempted {
+			state = store.ExternalEffectFailed
+		}
+		settleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		if settleErr := controller.SettleExternalEffect(settleCtx, cfg.ExternalEffects, fence, identity, state); settleErr != nil {
+			log.Error(settleErr, "connector tool effect could not be settled", "task", run.task.Name, "tool", run.tool.Name)
+		}
+		cancel()
+	}
+	return result, replayed, err
+}
+
+func connectorToolEffectIdentity(task *corev1alpha1.Task, claim *connectorApprovalClaim) store.ExternalEffectIdentity {
+	return store.ExternalEffectIdentity{
+		Kind: connectorToolEffectKind, Namespace: task.Namespace,
+		AggregateID: string(task.UID), OperationID: claim.key,
+	}
+}
+
+// connectorToolEffectRequest is the non-secret request record of one
+// consequential connector call: what was approved and which person's link
+// (by frozen identity digest) it acted under.
+func connectorToolEffectRequest(run connectorToolRun) map[string]any {
+	return map[string]any{
+		"tool": run.tool.Name, "approval": run.claim.approvalID,
+		"argsDigest": run.claim.argsDigest, "specDigest": run.claim.specDigest,
+		"connection": connectorBindingDigest(run.binding),
+	}
+}
+
+// connectorBindingDigest names a frozen Connection without exposing more
+// than its policy, UID, and generation.
+func connectorBindingDigest(binding corev1alpha1.ConnectionBinding) string {
+	sum := sha256.Sum256([]byte(binding.PolicyName + "\x00" + binding.UID + "\x00" + strconv.FormatInt(binding.Generation, 10)))
+	return hex.EncodeToString(sum[:])
+}
+
+// replayConnectorToolEffect returns the committed result of a claim that was
+// already spent, when the ledger holds a Succeeded record for exactly this
+// call. A worker that lost the response to a crash then receives the result
+// it was owed instead of a replay refusal, and no second request is made.
+func (h *InternalHandlers) replayConnectorToolEffect(ctx context.Context, run connectorToolRun) (string, bool) {
+	cfg := h.connectorTools
+	if cfg.ExternalEffects == nil || run.claim == nil {
+		return "", false
+	}
+	identity := connectorToolEffectIdentity(run.task, run.claim)
+	id, err := identity.CanonicalID()
+	if err != nil {
+		return "", false
+	}
+	effect, err := cfg.ExternalEffects.GetExternalEffect(ctx, id)
+	if err != nil || effect == nil || effect.State != store.ExternalEffectSucceeded {
+		return "", false
+	}
+	requestDigest, err := controller.ExternalEffectRequestDigest(identity, connectorToolEffectRequest(run))
+	if err != nil || requestDigest != effect.RequestDigest {
+		return "", false
+	}
+	var result string
+	if json.Unmarshal(effect.Response, &result) != nil {
+		return "", false
+	}
+	return result, true
 }
 
 // loadConnectorBackedTool returns the Tool only when it sits behind a
@@ -250,6 +443,10 @@ type connectorApprovalClaim struct {
 	approvalID string
 	key        string
 	releases   int
+	// argsDigest and specDigest are what the approval bound, recorded with
+	// the effect ledger entry.
+	argsDigest string
+	specDigest string
 }
 
 func (h *InternalHandlers) enforceConnectorToolApproval(
@@ -259,6 +456,7 @@ func (h *InternalHandlers) enforceConnectorToolApproval(
 	arguments json.RawMessage,
 	approvalID string,
 	frozen frozenJobPolicy,
+	binding corev1alpha1.ConnectionBinding,
 ) (*connectorApprovalClaim, error) {
 	_, approvalRequired := frozen.approvalRequired[tool.Name]
 	if tool.Spec.BrokeredToolClass == corev1alpha1.AgentRuntimeBrokeredToolClassWrite && !approvalRequired {
@@ -288,10 +486,11 @@ func (h *InternalHandlers) enforceConnectorToolApproval(
 		return nil, fiber.NewError(fiber.StatusBadRequest, "invalid tool arguments")
 	}
 	// The approval also binds the tool's execution configuration (URL,
-	// method, headers, schema) as digested by the worker when it asked; the
-	// live Tool must still match, or a retargeted Tool would ride an old
-	// approval to a different write.
-	specDigest, err := approvals.TargetSpecDigest(tool.Spec)
+	// method, headers, schema) and the Connection frozen for its policy, as
+	// digested by the worker when it asked; the live Tool and the Job's
+	// binding must still match, or a retargeted Tool or a re-linked account
+	// would ride an old approval to a different write.
+	specDigest, err := approvals.ConnectorTargetSpecDigest(tool.Spec, binding.UID, binding.Generation)
 	if err != nil {
 		return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to digest tool configuration")
 	}
@@ -316,19 +515,38 @@ func (h *InternalHandlers) enforceConnectorToolApproval(
 	case matched.TargetArgsDigest != digest:
 		return nil, fiber.NewError(fiber.StatusForbidden, "approval does not bind these arguments")
 	case matched.TargetSpecDigest == "" || matched.TargetSpecDigest != specDigest:
-		return nil, fiber.NewError(fiber.StatusConflict, "tool configuration changed since approval; request approval again")
+		return nil, fiber.NewError(fiber.StatusConflict, "tool configuration or the linked account changed since approval; request approval again")
 	case matched.ExpiresAt != nil && matched.ExpiresAt.Before(now):
 		return nil, fiber.NewError(fiber.StatusForbidden, "approval has expired")
 	}
 	claim := &connectorApprovalClaim{
 		approvalID: approvalID,
 		releases:   connectorClaimReleases(history, approvalID),
+		argsDigest: digest,
+		specDigest: specDigest,
 	}
 	claim.key = fmt.Sprintf("connector-approval-claim:%s:%d:%d", approvalID, matched.DecisionSeq, claim.releases)
 	if err := claimConnectorApproval(ctx, claims, task, tool.Name, claim); err != nil {
+		if errors.Is(err, errConnectorApprovalClaimed) {
+			if result, ok := h.replayConnectorToolEffect(ctx, connectorToolRun{task: task, tool: tool, claim: claim, binding: binding}); ok {
+				return nil, &connectorToolReplay{result: result}
+			}
+			return nil, fiber.NewError(fiber.StatusConflict, "approval was already used for an execution; request approval again")
+		}
 		return nil, err
 	}
 	return claim, nil
+}
+
+// errConnectorApprovalClaimed reports a claim key that already exists.
+var errConnectorApprovalClaimed = errors.New("approval was already claimed")
+
+// connectorToolReplay carries a committed result for a spent claim back to
+// the handler as an error value, so the gate's signature stays one-shaped.
+type connectorToolReplay struct{ result string }
+
+func (r *connectorToolReplay) Error() string {
+	return "connector tool result replayed from the effect ledger"
 }
 
 // connectorClaimReleaseReason marks an execution-update event that hands a
@@ -359,10 +577,10 @@ func connectorClaimReleases(history []store.ExecutionEvent, approvalID string) i
 
 // releaseConnectorApprovalClaim records that a claimed execution never
 // reached the provider, so the approval may be claimed once more.
-func (h *InternalHandlers) releaseConnectorApprovalClaim(ctx context.Context, task *corev1alpha1.Task, toolName string, claim *connectorApprovalClaim) {
+func (h *InternalHandlers) releaseConnectorApprovalClaim(ctx context.Context, task *corev1alpha1.Task, toolName string, claim *connectorApprovalClaim) error {
 	claims, ok := h.executionEventStore.(store.DeduplicatingExecutionEventStore)
 	if !ok {
-		return
+		return errors.New("approval history is unavailable")
 	}
 	content, err := json.Marshal(struct {
 		ApprovalID       string `json:"approvalID"`
@@ -372,15 +590,14 @@ func (h *InternalHandlers) releaseConnectorApprovalClaim(ctx context.Context, ta
 		Reason           string `json:"reason"`
 	}{claim.approvalID, string(task.UID), toolName, "not_started", connectorClaimReleaseReason})
 	if err != nil {
-		return
+		return err
 	}
-	if _, _, err := claims.AppendExecutionEventIfAbsent(ctx, &store.ExecutionEvent{
+	_, _, err = claims.AppendExecutionEventIfAbsent(ctx, &store.ExecutionEvent{
 		Namespace: task.Namespace, StreamType: store.ExecutionEventStreamTypeTask, StreamID: task.Name, TaskName: task.Name,
 		AgentName: taskAgentName(task), Type: events.ExecutionEventTypeApprovalExecutionUpdated, Severity: events.ExecutionEventSeverityInfo,
 		ToolName: toolName, ToolCallID: claim.approvalID, Summary: "Connector tool execution released approval " + claim.approvalID, Content: content,
-	}, fmt.Sprintf("connector-approval-release:%s:%d", claim.approvalID, claim.releases)); err != nil {
-		log.Error(err, "connector approval claim could not be released", "approval", claim.approvalID)
-	}
+	}, fmt.Sprintf("connector-approval-release:%s:%d", claim.approvalID, claim.releases))
+	return err
 }
 
 // claimConnectorApproval records the single execution an approval authorizes,
@@ -410,7 +627,7 @@ func claimConnectorApproval(ctx context.Context, claims store.DeduplicatingExecu
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to record approval claim")
 	}
 	if !appended {
-		return fiber.NewError(fiber.StatusConflict, "approval was already used for an execution; request approval again")
+		return errConnectorApprovalClaimed
 	}
 	return nil
 }
@@ -428,6 +645,19 @@ func taskAgentName(task *corev1alpha1.Task) string {
 type frozenJobPolicy struct {
 	tools            map[string]struct{}
 	approvalRequired map[string]struct{}
+	// digests pins each connector-backed tool to the spec it was dispatched with.
+	digests map[string]string
+	// bindings are the Connections frozen for this Job.
+	bindings []corev1alpha1.ConnectionBinding
+}
+
+func (p frozenJobPolicy) binding(policyName string) (corev1alpha1.ConnectionBinding, bool) {
+	for _, binding := range p.bindings {
+		if binding.PolicyName == policyName && strings.TrimSpace(binding.UID) != "" {
+			return binding, true
+		}
+	}
+	return corev1alpha1.ConnectionBinding{}, false
 }
 
 func frozenJobToolPolicy(ctx context.Context, reader client.Reader, task *corev1alpha1.Task) (frozenJobPolicy, error) {
@@ -442,7 +672,7 @@ func frozenJobToolPolicy(ctx context.Context, reader client.Reader, task *corev1
 	if task.Status.JobUID != "" && string(job.UID) != task.Status.JobUID {
 		return frozenJobPolicy{}, fiber.NewError(fiber.StatusConflict, "the task's job was replaced")
 	}
-	policy := frozenJobPolicy{tools: map[string]struct{}{}, approvalRequired: map[string]struct{}{}}
+	policy := frozenJobPolicy{tools: map[string]struct{}{}, approvalRequired: map[string]struct{}{}, digests: map[string]string{}}
 	for _, container := range job.Spec.Template.Spec.Containers {
 		if container.Name != workerContainerName {
 			continue
@@ -454,6 +684,11 @@ func frozenJobToolPolicy(ctx context.Context, reader client.Reader, task *corev1
 				target = policy.approvalRequired
 			case workerenv.AITools:
 				target = policy.tools
+			case workerenv.ConnectorToolDigests:
+				if strings.TrimSpace(env.Value) != "" && json.Unmarshal([]byte(env.Value), &policy.digests) != nil {
+					return frozenJobPolicy{}, fiber.NewError(fiber.StatusConflict, "the task's job carries unreadable connector tool digests")
+				}
+				continue
 			default:
 				continue
 			}
@@ -464,6 +699,16 @@ func frozenJobToolPolicy(ctx context.Context, reader client.Reader, task *corev1
 			}
 		}
 	}
+	bindings, _, err := controller.FrozenConnectionBindingsFromJob(job)
+	if err != nil {
+		return frozenJobPolicy{}, fiber.NewError(fiber.StatusConflict, "the task's job carries unreadable connection bindings")
+	}
+	// The Job's bindings are authoritative; Task status must agree with
+	// them, or a status rewritten after dispatch could redirect the call.
+	if !controller.ConnectionBindingsEqual(bindings, task.Status.ConnectionBindings) {
+		return frozenJobPolicy{}, fiber.NewError(fiber.StatusConflict, "the task's connection bindings do not match its dispatched job")
+	}
+	policy.bindings = bindings
 	return policy, nil
 }
 

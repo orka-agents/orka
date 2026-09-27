@@ -2199,8 +2199,12 @@ func main() {
 
 	// Start REST API server
 	var publisherControllerEpochs api.ControllerEpochFenceSource
+	// Consequential connector calls are recorded in the same durable ledger
+	// as ACP effects; a nil pointer must not become a non-nil interface.
+	var connectorToolEffects store.ExternalEffectStore
 	if kubeControlStore != nil {
 		publisherControllerEpochs = api.NewControllerEpochStoreFenceSource(kubeControlStore)
+		connectorToolEffects = kubeControlStore
 	}
 	apiServer := api.NewServer(mgr.GetClient(), sessionManager, api.ServerConfig{
 		Port:                      apiPort,
@@ -2246,6 +2250,8 @@ func main() {
 			TransactionExchange:              brokeredTransactionExchange,
 			EnforceTransactionCredentialAuth: contextTokenAuthzConfig.Mode == api.ContextTokenAuthorizationModeEnforce,
 			TransactionCredentialReadScopes:  contextTokenAuthzConfig.SecretCredentialReadScopes(),
+			ExternalEffects:                  connectorToolEffects,
+			ControllerEpochs:                 publisherControllerEpochs,
 		},
 		Chat: api.ChatConfig{
 			Enabled:                chatEnabled,
