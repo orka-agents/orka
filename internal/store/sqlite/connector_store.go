@@ -66,6 +66,7 @@ func connectorSchemaStatements() []string {
 			dek_ciphertext BLOB NOT NULL,
 			nonce          BLOB NOT NULL,
 			ciphertext     BLOB NOT NULL,
+			revocable_until TIMESTAMP,
 			retired_at     TIMESTAMP NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_connector_retired_credentials_connection
@@ -332,39 +333,6 @@ func (s *Store) putConnectorCredentialTx(ctx context.Context, tx *sql.Tx, ref st
 	return nil
 }
 
-// retireConnectorCredentialTx keeps the credential row a commit is about to
-// replace sealed in the retired table so disconnect can still revoke it;
-// only Orka held a copy. A replacement that carries the very same tokens (a
-// provider that re-issues long-lived material on every re-consent) retires
-// nothing: the current row will be revoked, and duplicate rows would only
-// multiply the serial provider calls disconnect has to make.
-func (s *Store) retireConnectorCredentialTx(ctx context.Context, tx *sql.Tx, ref store.ConnectorCredentialRef, replacement store.ConnectorCredential, now time.Time) error {
-	var dekNonce, dekCiphertext, nonce, ciphertext []byte
-	err := tx.QueryRowContext(ctx, `SELECT dek_nonce, dek_ciphertext, nonce, ciphertext
-		FROM connector_credentials WHERE connection_uid = ?`, ref.ConnectionUID).
-		Scan(&dekNonce, &dekCiphertext, &nonce, &ciphertext)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("read replaced connector credential: %w", err)
-	}
-	previous, err := s.openConnectorCredentialRow(ref, dekNonce, dekCiphertext, nonce, ciphertext)
-	if err != nil {
-		return fmt.Errorf("open replaced connector credential: %w", err)
-	}
-	if previous.AccessToken == replacement.AccessToken && previous.RefreshToken == replacement.RefreshToken {
-		return nil
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO connector_retired_credentials
-		(connection_uid, dek_nonce, dek_ciphertext, nonce, ciphertext, retired_at)
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		ref.ConnectionUID, dekNonce, dekCiphertext, nonce, ciphertext, now); err != nil {
-		return fmt.Errorf("retire replaced connector credential: %w", err)
-	}
-	return nil
-}
-
 // CommitConnectorCompletion implements store.ConnectorConsentStore.
 func (s *Store) CommitConnectorCompletion(ctx context.Context, nonce string, ref store.ConnectorCredentialRef, credential store.ConnectorCredential) error {
 	if strings.TrimSpace(nonce) == "" {
@@ -378,7 +346,9 @@ func (s *Store) CommitConnectorCompletion(ctx context.Context, nonce string, ref
 		return fmt.Errorf("begin connector completion commit: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := s.retireConnectorCredentialTx(ctx, tx, ref, credential, time.Now().UTC()); err != nil {
+	// A re-consent replaces a whole grant: its refresh token outlives its
+	// access token, so the row is kept until disconnect revokes it.
+	if err := s.retireConnectorCredentialTx(ctx, tx, ref, credential, time.Now().UTC(), retireGrant); err != nil {
 		return err
 	}
 	if err := s.putConnectorCredentialTx(ctx, tx, ref, credential); err != nil {
@@ -534,15 +504,112 @@ func (s *Store) ReplaceConnectorCredential(ctx context.Context, ref store.Connec
 	if err != nil {
 		return err
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE connector_credentials SET
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin connector credential replacement: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	now := time.Now().UTC()
+	// The version fence is checked first so a stale writer retires nothing.
+	var currentVersion int64
+	err = tx.QueryRowContext(ctx, `SELECT version FROM connector_credentials WHERE connection_uid = ?`, ref.ConnectionUID).Scan(&currentVersion)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return store.ErrNotFound
+	case err != nil:
+		return fmt.Errorf("inspect connector credential row: %w", err)
+	case currentVersion != expectedVersion:
+		return store.ErrConflict
+	}
+	// A refresh rotates the access token only: the previous refresh token
+	// is either the same one (no rotation) or already invalid (rotation),
+	// so the replaced row matters until its access token expires.
+	if err := s.retireConnectorCredentialTx(ctx, tx, ref, credential, now, retireAccessToken); err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE connector_credentials SET
 			dek_nonce = ?, dek_ciphertext = ?, nonce = ?, ciphertext = ?, expires_at = ?,
 			version = version + 1, updated_at = ?
 		WHERE connection_uid = ? AND version = ?`,
-		row.dekNonce, row.dekCiphertext, row.nonce, row.ciphertext, row.expiresAt, time.Now().UTC(), ref.ConnectionUID, expectedVersion)
+		row.dekNonce, row.dekCiphertext, row.nonce, row.ciphertext, row.expiresAt, now, ref.ConnectionUID, expectedVersion)
 	if err != nil {
 		return fmt.Errorf("replace connector credential: %w", err)
 	}
-	return s.connectorRowFenced(ctx, result, ref.ConnectionUID)
+	if affected, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("inspect connector credential write: %w", err)
+	} else if affected == 0 {
+		return store.ErrConflict
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit connector credential replacement: %w", err)
+	}
+	return nil
+}
+
+// connectorRetirement says how long a replaced credential row must stay
+// revocable.
+type connectorRetirement int
+
+const (
+	// retireAccessToken keeps the row until its access token expires; its
+	// refresh token is not a separate grant.
+	retireAccessToken connectorRetirement = iota
+	// retireGrant keeps a row that holds a refresh token until disconnect,
+	// because a refresh token stays usable after its access token expires;
+	// a row without one is kept until its access token expires.
+	retireGrant
+)
+
+// retireConnectorCredentialTx keeps the credential row a write is about to
+// replace sealed in the retired table so disconnect can still revoke it:
+// only Orka held a copy, and neither a refresh nor a re-consent makes the
+// provider forget the previous material. Material that has nothing left to
+// revoke is dropped, from the row being replaced and from earlier
+// retirements alike, so the table stays bounded by the provider's token
+// lifetime rather than by refresh count.
+func (s *Store) retireConnectorCredentialTx(ctx context.Context, tx *sql.Tx, ref store.ConnectorCredentialRef, replacement store.ConnectorCredential, now time.Time, retirement connectorRetirement) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM connector_retired_credentials
+		WHERE connection_uid = ? AND revocable_until IS NOT NULL AND revocable_until <= ?`, ref.ConnectionUID, now); err != nil {
+		return fmt.Errorf("prune expired retired connector credentials: %w", err)
+	}
+	var (
+		dekNonce, dekCiphertext, nonce, ciphertext []byte
+		expiresAt                                  sql.NullTime
+	)
+	err := tx.QueryRowContext(ctx, `SELECT dek_nonce, dek_ciphertext, nonce, ciphertext, expires_at
+		FROM connector_credentials WHERE connection_uid = ?`, ref.ConnectionUID).
+		Scan(&dekNonce, &dekCiphertext, &nonce, &ciphertext, &expiresAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read replaced connector credential: %w", err)
+	}
+	previous, err := s.openConnectorCredentialRow(ref, dekNonce, dekCiphertext, nonce, ciphertext)
+	if err != nil {
+		return fmt.Errorf("open replaced connector credential: %w", err)
+	}
+	// A replacement that carries the very same tokens (a provider that
+	// re-issues long-lived material on every re-consent) retires nothing:
+	// the current row will be revoked, and duplicate rows would only
+	// multiply the serial provider calls disconnect has to make.
+	if previous.AccessToken == replacement.AccessToken && previous.RefreshToken == replacement.RefreshToken {
+		return nil
+	}
+	revocableUntil := expiresAt
+	if retirement == retireGrant && previous.RefreshToken != "" {
+		revocableUntil = sql.NullTime{}
+	}
+	if revocableUntil.Valid && !revocableUntil.Time.After(now) {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO connector_retired_credentials
+		(connection_uid, dek_nonce, dek_ciphertext, nonce, ciphertext, revocable_until, retired_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		ref.ConnectionUID, dekNonce, dekCiphertext, nonce, ciphertext, revocableUntil, now); err != nil {
+		return fmt.Errorf("retire replaced connector credential: %w", err)
+	}
+	return nil
 }
 
 // ShredConnectorCredential implements store.ConnectorCredentialStore.
