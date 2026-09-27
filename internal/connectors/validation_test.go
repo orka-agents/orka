@@ -566,6 +566,17 @@ func TestProviderAuthorityDigestAndConsent(t *testing.T) {
 	if ProviderIssuerDigest(rotated) == ProviderIssuerDigest(provider) || ProviderIssuerDigest(nil) != "" {
 		t.Fatal("a rotated client must move the issuer digest")
 	}
+	// Authorize-only parameters shape consent, not the issued token's
+	// authority: they move the consent fence but neither block a refresh nor
+	// skip revocation.
+	prompted := provider.DeepCopy()
+	if prompted.Spec.OAuth.AdditionalAuthorizeParameters == nil {
+		prompted.Spec.OAuth.AdditionalAuthorizeParameters = map[string]string{}
+	}
+	prompted.Spec.OAuth.AdditionalAuthorizeParameters["prompt"] = "select_account"
+	if ProviderIssuerDigest(prompted) != ProviderIssuerDigest(provider) || ProviderAuthorityDigest(prompted) == ProviderAuthorityDigest(provider) {
+		t.Fatal("an authorize parameter must move the authority digest but not the issuer digest")
+	}
 	// Built-in declarations do not carry a destination and do not move the digest.
 	builtinOnly := provider.DeepCopy()
 	builtinOnly.Spec.Tools = append(builtinOnly.Spec.Tools, corev1alpha1.ConnectorTool{Name: "list_issues", Class: corev1alpha1.ConnectorToolClassRead, Source: corev1alpha1.ConnectorToolSourceBuiltin})

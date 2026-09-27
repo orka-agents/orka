@@ -330,6 +330,39 @@ func (s *Store) putConnectorCredentialTx(ctx context.Context, tx *sql.Tx, ref st
 	return nil
 }
 
+// retireConnectorCredentialTx keeps the credential row a commit is about to
+// replace sealed in the retired table so disconnect can still revoke it;
+// only Orka held a copy. A replacement that carries the very same tokens (a
+// provider that re-issues long-lived material on every re-consent) retires
+// nothing: the current row will be revoked, and duplicate rows would only
+// multiply the serial provider calls disconnect has to make.
+func (s *Store) retireConnectorCredentialTx(ctx context.Context, tx *sql.Tx, ref store.ConnectorCredentialRef, replacement store.ConnectorCredential, now time.Time) error {
+	var dekNonce, dekCiphertext, nonce, ciphertext []byte
+	err := tx.QueryRowContext(ctx, `SELECT dek_nonce, dek_ciphertext, nonce, ciphertext
+		FROM connector_credentials WHERE connection_uid = ?`, ref.ConnectionUID).
+		Scan(&dekNonce, &dekCiphertext, &nonce, &ciphertext)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read replaced connector credential: %w", err)
+	}
+	previous, err := s.openConnectorCredentialRow(ref, dekNonce, dekCiphertext, nonce, ciphertext)
+	if err != nil {
+		return fmt.Errorf("open replaced connector credential: %w", err)
+	}
+	if previous.AccessToken == replacement.AccessToken && previous.RefreshToken == replacement.RefreshToken {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO connector_retired_credentials
+		(connection_uid, dek_nonce, dek_ciphertext, nonce, ciphertext, retired_at)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		ref.ConnectionUID, dekNonce, dekCiphertext, nonce, ciphertext, now); err != nil {
+		return fmt.Errorf("retire replaced connector credential: %w", err)
+	}
+	return nil
+}
+
 // CommitConnectorCompletion implements store.ConnectorConsentStore.
 func (s *Store) CommitConnectorCompletion(ctx context.Context, nonce string, ref store.ConnectorCredentialRef, credential store.ConnectorCredential) error {
 	if strings.TrimSpace(nonce) == "" {
@@ -343,13 +376,8 @@ func (s *Store) CommitConnectorCompletion(ctx context.Context, nonce string, ref
 		return fmt.Errorf("begin connector completion commit: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	// A credential this commit replaces is kept sealed so disconnect can
-	// still revoke it; only Orka held a copy.
-	if _, err := tx.ExecContext(ctx, `INSERT INTO connector_retired_credentials
-		(connection_uid, dek_nonce, dek_ciphertext, nonce, ciphertext, retired_at)
-		SELECT connection_uid, dek_nonce, dek_ciphertext, nonce, ciphertext, ? FROM connector_credentials WHERE connection_uid = ?`,
-		time.Now().UTC(), ref.ConnectionUID); err != nil {
-		return fmt.Errorf("retire replaced connector credential: %w", err)
+	if err := s.retireConnectorCredentialTx(ctx, tx, ref, credential, time.Now().UTC()); err != nil {
+		return err
 	}
 	if err := s.putConnectorCredentialTx(ctx, tx, ref, credential); err != nil {
 		return err

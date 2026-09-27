@@ -205,13 +205,16 @@ func (r *ConnectionReconciler) revokeBestEffort(ctx context.Context, connection 
 		return
 	}
 	credential, err := r.Credentials.GetConnectorCredential(ctx, ref)
-	if err != nil {
-		if !errors.Is(err, store.ErrNotFound) {
-			logger.Info("connector credential could not be opened for revocation; deleting custody anyway", "connection", connection.Name)
-		}
-		return
+	switch {
+	case err == nil:
+		r.revokeTokens(ctx, connection, credential)
+	case errors.Is(err, store.ErrNotFound):
+		// The current grant may already be gone (the provider revoked it and
+		// custody was shredded); the grants earlier commits replaced can
+		// still be live and are revoked below regardless.
+	default:
+		logger.Info("connector credential could not be opened for revocation; deleting custody anyway", "connection", connection.Name)
 	}
-	r.revokeTokens(ctx, connection, credential)
 	// Credentials that later commits replaced were committed by the same
 	// owner and are still live upstream; disconnect revokes them too.
 	retired, err := r.Credentials.ListRetiredConnectorCredentials(ctx, ref)

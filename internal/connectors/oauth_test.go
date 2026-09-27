@@ -278,6 +278,12 @@ func TestTokenResponseEdgeCases(t *testing.T) {
 		"/no-scope": func(w http.ResponseWriter) {
 			_, _ = w.Write([]byte(`{"access_token":"a","token_type":"bearer"}`))
 		},
+		"/null-scope": func(w http.ResponseWriter) {
+			_, _ = w.Write([]byte(`{"access_token":"a","token_type":"bearer","scope":null}`))
+		},
+		"/array-scope": func(w http.ResponseWriter) {
+			_, _ = w.Write([]byte(`{"access_token":"a","token_type":"bearer","scope":["repo"]}`))
+		},
 	}
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -294,7 +300,7 @@ func TestTokenResponseEdgeCases(t *testing.T) {
 		"/not-json": true, "/no-token": true, "/too-large": true, "/weird-err": true, "/null-exp": false,
 		"/mac-type": true, "/no-type": true, "/huge-exp": true,
 		"/junk-exp": true, "/zero-exp": true, "/frac-exp": true, "/str-exp": false,
-		"/comma-scope": false, "/empty-scope": false, "/no-scope": false,
+		"/comma-scope": false, "/empty-scope": false, "/no-scope": false, "/null-scope": true, "/array-scope": true,
 	} {
 		cfg := testOAuthConfig()
 		cfg.TokenURL = "https://provider.example.test" + path

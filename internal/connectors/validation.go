@@ -654,7 +654,7 @@ func ProviderAuthorityDigest(provider *corev1alpha1.ConnectorProvider) string {
 	if provider == nil {
 		return ""
 	}
-	parts := providerIssuerParts(provider)
+	parts := providerConsentParts(provider)
 	tools := make([]corev1alpha1.ConnectorTool, 0, len(provider.Spec.Tools))
 	for _, tool := range provider.Spec.Tools {
 		if tool.Source == corev1alpha1.ConnectorToolSourceHTTP && tool.HTTP != nil {
@@ -690,14 +690,27 @@ func ProviderIssuerDigest(provider *corev1alpha1.ConnectorProvider) string {
 	return lengthPrefixedDigest(providerIssuerParts(provider))
 }
 
+// providerIssuerParts names the OAuth client a token was issued by: what
+// the refresh and revocation endpoints authenticate. Authorize-only
+// parameters (prompt, audience hints) shape consent but not the issued
+// token's authority, so they belong to the consent fence
+// (providerConsentParts), not here: changing one must neither block a
+// refresh nor skip revocation at disconnect.
 func providerIssuerParts(provider *corev1alpha1.ConnectorProvider) []string {
 	oauth := provider.Spec.OAuth
-	parts := []string{
+	return []string{
 		"uid", string(provider.UID), "clientID", oauth.ClientID,
 		"secretName", oauth.ClientSecretRef.Name, "secretKey", oauth.ClientSecretRef.Key,
 		"clientAuthentication", oauth.ClientAuthentication,
 		"authorizeURL", oauth.AuthorizeURL, "tokenURL", oauth.TokenURL, "revocationURL", oauth.RevocationURL,
 	}
+}
+
+// providerConsentParts extends the issuer parts with the authorize-only
+// parameters the person consented under.
+func providerConsentParts(provider *corev1alpha1.ConnectorProvider) []string {
+	oauth := provider.Spec.OAuth
+	parts := providerIssuerParts(provider)
 	keys := make([]string, 0, len(oauth.AdditionalAuthorizeParameters))
 	for key := range oauth.AdditionalAuthorizeParameters {
 		keys = append(keys, key)

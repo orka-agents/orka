@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -532,5 +533,40 @@ func TestConnectorTombstoneFencesCommitsBeforeDeletion(t *testing.T) {
 	}
 	if _, err := s.GetConnectorCredential(ctx, ref); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("custody after delete err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestConnectorCommitDoesNotRetireIdenticalMaterial(t *testing.T) {
+	s := newConnectorTestStore(t)
+	ctx := context.Background()
+	completion := testConnectorCompletion()
+	ref := store.ConnectorCredentialRef{ConnectionUID: completion.ConnectionUID, Namespace: completion.Namespace, Name: completion.Name, SubjectDigest: completion.SubjectDigest, Provider: completion.Provider}
+	// The provider re-issues the same long-lived tokens on every re-consent.
+	if err := s.PutConnectorCredential(ctx, ref, completion.Credential); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 3 {
+		completion.Nonce = fmt.Sprintf("nonce-%d", i)
+		if err := s.CreateConnectorCompletion(ctx, completion); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.CommitConnectorCompletion(ctx, completion.Nonce, ref, completion.Credential); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if retired, err := s.ListRetiredConnectorCredentials(ctx, ref); err != nil || len(retired) != 0 {
+		t.Fatalf("retired = %+v err = %v, want identical material not duplicated", retired, err)
+	}
+	// Genuinely different material is still kept for revocation.
+	completion.Nonce = "nonce-new"
+	completion.Credential.AccessToken = "gho_different"
+	if err := s.CreateConnectorCompletion(ctx, completion); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CommitConnectorCompletion(ctx, completion.Nonce, ref, completion.Credential); err != nil {
+		t.Fatal(err)
+	}
+	if retired, err := s.ListRetiredConnectorCredentials(ctx, ref); err != nil || len(retired) != 1 || retired[0].AccessToken != "gho_parked" {
+		t.Fatalf("retired = %+v err = %v, want the distinct predecessor", retired, err)
 	}
 }

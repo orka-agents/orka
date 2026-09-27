@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package connectors
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -285,7 +286,7 @@ func (c *OAuthClient) tokenRequest(ctx context.Context, cfg OAuthProviderConfig,
 		RefreshToken string          `json:"refresh_token"`
 		TokenType    string          `json:"token_type"`
 		ExpiresIn    json.RawMessage `json:"expires_in"`
-		Scope        *string         `json:"scope"`
+		Scope        json.RawMessage `json:"scope"`
 		Error        string          `json:"error"`
 	}
 	decodeErr := json.Unmarshal(body, &payload)
@@ -311,10 +312,17 @@ func (c *OAuthClient) tokenRequest(ctx context.Context, cfg OAuthProviderConfig,
 		AccessToken:  payload.AccessToken,
 		RefreshToken: payload.RefreshToken,
 		TokenType:    payload.TokenType,
-		ScopePresent: payload.Scope != nil,
 	}
-	if payload.Scope != nil {
-		result.Scopes = splitScopes(*payload.Scope)
+	// An omitted scope field means "as requested". A present field must be
+	// a string: JSON null is neither an omission nor a grant and is refused
+	// rather than collapsed into the omitted case.
+	if len(payload.Scope) > 0 {
+		var scope string
+		if bytes.Equal(bytes.TrimSpace(payload.Scope), []byte("null")) || json.Unmarshal(payload.Scope, &scope) != nil {
+			return TokenResponse{}, errors.New("token response scope must be a string")
+		}
+		result.ScopePresent = true
+		result.Scopes = splitScopes(scope)
 	}
 	seconds, present, err := parseExpiresIn(payload.ExpiresIn)
 	if err != nil {
