@@ -475,7 +475,10 @@ func TestProviderAuthorityDigestAndConsent(t *testing.T) {
 		t.Fatal("the recorded consent must match the same provider")
 	}
 	for name, mutate := range map[string]func(p *corev1alpha1.ConnectorProvider){
-		"uid":        func(p *corev1alpha1.ConnectorProvider) { p.UID = "recreated" },
+		"uid": func(p *corev1alpha1.ConnectorProvider) { p.UID = "recreated" },
+		"audience": func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.AdditionalAuthorizeParameters = map[string]string{"audience": "https://other.example.test"}
+		},
 		"client id":  func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.ClientID = "other" },
 		"token url":  func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://example.com/other-token" },
 		"secret ref": func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.ClientSecretRef.Key = "other" },
@@ -493,5 +496,12 @@ func TestProviderAuthorityDigestAndConsent(t *testing.T) {
 	scopesOnly.Spec.OAuth.Scopes.Read = append(scopesOnly.Spec.OAuth.Scopes.Read, "read:org")
 	if !ConsentMatchesProvider(connection, scopesOnly) {
 		t.Fatal("a scope-only change is judged by ScopesGranted, not the authority digest")
+	}
+	// The parameter encoding is deterministic regardless of map order.
+	withParams := provider.DeepCopy()
+	withParams.Spec.OAuth.AdditionalAuthorizeParameters = map[string]string{"audience": "api", "prompt": "consent"}
+	again := withParams.DeepCopy()
+	if ProviderAuthorityDigest(withParams) != ProviderAuthorityDigest(again) || ProviderAuthorityDigest(withParams) == digest {
+		t.Fatal("authorize parameters must change the digest deterministically")
 	}
 }

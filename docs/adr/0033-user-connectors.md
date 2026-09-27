@@ -79,10 +79,15 @@ using AES-256-GCM and additional data binding the Connection UID, subject, and
 provider; the data key is itself sealed with the controller's existing
 agent-execution snapshot key (`--agent-execution-snapshot-key-file` /
 `--agent-execution-snapshot-secret`) using the same cipher the snapshot store
-uses. Deleting a Connection deletes its wrapped key, so the ciphertext becomes
-unrecoverable everywhere, including old volume snapshots. Raw tokens never
-appear in Task specs, status, events, logs, or anywhere in the store outside the
-sealed column; the controller records its own audit events for connector use.
+uses. Deleting a Connection deletes its wrapped key, so the ciphertext in the
+live store becomes unrecoverable. That crypto-shredding does not reach copies
+Orka did not make: a volume snapshot, filesystem backup, or database copy taken
+while the row existed still holds the ciphertext together with its wrapped data
+key, and both open with the snapshot key of that time. Operators who need
+deletion to reach backups must bound backup retention, or rotate the snapshot
+key and discard copies sealed under the old one. Raw tokens never appear in
+Task specs, status, events, logs, or anywhere in the store outside the sealed
+column; the controller records its own audit events for connector use.
 
 ### Consent flow lives in the API server
 
