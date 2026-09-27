@@ -697,6 +697,7 @@ func providerIssuerParts(provider *corev1alpha1.ConnectorProvider) []string {
 		keys = append(keys, key)
 	}
 	slices.Sort(keys)
+	parts = slices.Grow(parts, 3*len(keys))
 	for _, key := range keys {
 		parts = append(parts, "param", key, oauth.AdditionalAuthorizeParameters[key])
 	}

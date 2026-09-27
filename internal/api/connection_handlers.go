@@ -482,10 +482,24 @@ func (h *Handlers) CreateConnection(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	return c.Status(fiber.StatusCreated).JSON(ConnectionAuthorizeResponse{
-		Connection:   connectionResponse(connection),
-		AuthorizeURL: authorizeURL,
-	})
+	response := ConnectionAuthorizeResponse{Connection: connectionResponse(connection), AuthorizeURL: authorizeURL}
+	if !connectors.ScopesCover(connection.Status.GrantedScopes, connectors.ScopesForMode(provider, mode)) ||
+		!connectors.ConsentMatchesProvider(connection, provider) {
+		// A reused link whose grant does not cover the requested mode is
+		// pending until this consent completes, whatever the stale
+		// conditions say.
+		markConsentPending(&response.Connection, mode)
+	}
+	return c.Status(fiber.StatusCreated).JSON(response)
+}
+
+// markConsentPending projects a link as unusable while consent for mode is
+// outstanding, regardless of controller conditions that have not observed
+// the change yet.
+func markConsentPending(view *ConnectionResponse, mode string) {
+	view.Ready = false
+	view.State = corev1alpha1.ConnectionStatePending
+	view.Message = "Consent is required for the " + mode + " mode"
 }
 
 // AuthorizeConnection restarts consent for an existing Connection, for
@@ -561,9 +575,7 @@ func (h *Handlers) UpdateConnection(c fiber.Ctx) error {
 		response.AuthorizeURL = authorizeURL
 		// The controller has not judged the new mode yet; do not let the
 		// stale conditions advertise a usable link in the meantime.
-		response.Connection.Ready = false
-		response.Connection.State = corev1alpha1.ConnectionStatePending
-		response.Connection.Message = "Consent is required for the " + mode + " mode"
+		markConsentPending(&response.Connection, mode)
 	} else if ready := meta.FindStatusCondition(connection.Status.Conditions, corev1alpha1.ConnectionConditionReady); ready != nil && ready.Status == metav1.ConditionTrue {
 		// Narrowing to a mode the existing grant covers is usable at once,
 		// even though the controller's conditions still observe the previous
@@ -880,30 +892,11 @@ func (h *Handlers) CompleteConnection(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if completion.ConnectionUID != string(connection.UID) || completion.Namespace != connection.Namespace ||
-		completion.Name != connection.Name || completion.Provider != connection.Spec.ProviderRef.Name ||
-		completion.SubjectDigest != connectors.SubjectDigest(connection.Spec.Subject.Issuer, connection.Spec.Subject.Subject) {
-		// A token presented against the wrong Connection is discarded so it
-		// cannot be tried across Connections.
+	if err := completionFenceError(connection, provider, completion); err != nil {
+		// A completion that no longer fits its Connection, mode, or provider
+		// is discarded so it cannot be tried again or across Connections.
 		h.discardCompletion(ctx, completion, nonce)
-		return fiber.NewError(fiber.StatusConflict, "completion token does not belong to this connection")
-	}
-	// The consent was granted for the mode in force when it started. A
-	// narrower or wider mode now would mismatch the granted scopes, so the
-	// person must consent again under the current mode.
-	currentMode, _ := normalizeConnectionMode(connection.Spec.Mode)
-	if completion.Mode != currentMode {
-		h.discardCompletion(ctx, completion, nonce)
-		return fiber.NewError(fiber.StatusConflict, "the connection mode changed after consent started; start consent again")
-	}
-	// Tokens issued by a provider OAuth client that has since changed belong
-	// to a different authority; they are discarded, never committed.
-	if completion.Credential.AuthorityDigest != connectors.ProviderIssuerDigest(provider) ||
-		completion.ConsentAuthorityDigest != connectors.ProviderAuthorityDigest(provider) {
-		// The OAuth client or the consented destinations changed after the
-		// callback: nothing the person consented to may be recorded now.
-		h.discardCompletion(ctx, completion, nonce)
-		return fiber.NewError(fiber.StatusConflict, "the connector provider changed after consent started; start consent again")
+		return err
 	}
 	ref, err := connectors.CredentialRef(connection)
 	if err != nil {
@@ -941,6 +934,27 @@ func (h *Handlers) CompleteConnection(c fiber.Ctx) error {
 		log.Error(err, "consumed completion could not be removed", "connection", connection.Name)
 	}
 	return c.JSON(connectionResponse(connection))
+}
+
+// completionFenceError judges a parked completion against the Connection
+// that presents it: it must belong to this Connection, to the mode in force
+// now (a narrower or wider mode would mismatch the granted scopes), and to
+// the provider's current OAuth client and consented destinations.
+func completionFenceError(connection *corev1alpha1.Connection, provider *corev1alpha1.ConnectorProvider, completion store.ConnectorCompletion) error {
+	if completion.ConnectionUID != string(connection.UID) || completion.Namespace != connection.Namespace ||
+		completion.Name != connection.Name || completion.Provider != connection.Spec.ProviderRef.Name ||
+		completion.SubjectDigest != connectors.SubjectDigest(connection.Spec.Subject.Issuer, connection.Spec.Subject.Subject) {
+		return fiber.NewError(fiber.StatusConflict, "completion token does not belong to this connection")
+	}
+	currentMode, _ := normalizeConnectionMode(connection.Spec.Mode)
+	if completion.Mode != currentMode {
+		return fiber.NewError(fiber.StatusConflict, "the connection mode changed after consent started; start consent again")
+	}
+	if completion.Credential.AuthorityDigest != connectors.ProviderIssuerDigest(provider) ||
+		completion.ConsentAuthorityDigest != connectors.ProviderAuthorityDigest(provider) {
+		return fiber.NewError(fiber.StatusConflict, "the connector provider changed after consent started; start consent again")
+	}
+	return nil
 }
 
 // discardCompletion deletes a parked completion that will never be

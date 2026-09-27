@@ -1477,3 +1477,28 @@ func TestConnectionCompletionRefusesRetargetedToolAfterCallback(t *testing.T) {
 		t.Fatalf("a retargeted provider must not be recorded as consented: %+v", stored.Status)
 	}
 }
+
+// TestConnectionCreateWideningReusedLinkReportsPending covers POST reusing a
+// Ready readOnly Connection with readWrite requested: consent for the wider
+// mode is outstanding, so the view is Pending, not the stale Ready state.
+func TestConnectionCreateWideningReusedLinkReportsPending(t *testing.T) {
+	h := newConnectorTestHarness(t, acceptedTestProvider())
+	created := h.create("readOnly")
+	h.link(created)
+	resp, raw := h.do(http.MethodPost, "/api/v1/connections", map[string]string{"provider": "github", "mode": "readWrite"})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("widening create = %d %s", resp.StatusCode, raw)
+	}
+	var widened ConnectionAuthorizeResponse
+	if err := json.Unmarshal(raw, &widened); err != nil {
+		t.Fatal(err)
+	}
+	if widened.AuthorizeURL == "" || widened.Connection.Ready || widened.Connection.State != corev1alpha1.ConnectionStatePending {
+		t.Fatalf("widening create must report pending: %+v", widened)
+	}
+	// Re-authorizing the same mode keeps the current view.
+	resp, raw = h.do(http.MethodPost, "/api/v1/connections", map[string]string{"provider": "github", "mode": "readOnly"})
+	if resp.StatusCode != http.StatusCreated || !strings.Contains(string(raw), `"ready":true`) {
+		t.Fatalf("same-mode create = %d %s, want the current ready view", resp.StatusCode, raw)
+	}
+}

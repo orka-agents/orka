@@ -1399,14 +1399,16 @@ func main() {
 	}
 	agentExecutionSnapshotStore := sqliteStore
 	connectorConfig := api.ConnectorConfig{Enabled: connectorsEnabled}
-	var connectorOAuthClient *connectors.OAuthClient
+	// The OAuth client exists whether or not new consent is enabled: the
+	// Connection finalizer must still be able to revoke committed tokens for
+	// accounts linked before an operator disabled connectors.
+	connectorOAuthClient := connectors.NewOAuthClient(connectors.OAuthClientOptions{})
 	if connectorsEnabled {
 		stateKey, keyErr := deriveConnectorStateKey(snapshotKey)
 		if keyErr != nil {
 			setupLog.Error(keyErr, "unable to derive the connector state key; connectors fail closed")
 			os.Exit(1)
 		}
-		connectorOAuthClient = connectors.NewOAuthClient(connectors.OAuthClientOptions{})
 		connectorConfig = api.ConnectorConfig{
 			Enabled:         true,
 			CallbackBaseURL: strings.TrimSpace(connectorCallbackBaseURL),
@@ -1903,11 +1905,7 @@ func main() {
 		Credentials: sqliteStore,
 		Consents:    sqliteStore,
 	}
-	if connectorOAuthClient != nil {
-		// Assigned only when present: a nil *OAuthClient in the interface
-		// would defeat the reconciler's nil check.
-		connectionReconciler.Revoker = connectorOAuthClient
-	}
+	connectionReconciler.Revoker = connectorOAuthClient
 	if err := connectionReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Connection")
 		os.Exit(1)
