@@ -177,11 +177,6 @@ func ValidateProviderSpec(provider *corev1alpha1.ConnectorProvider, knownBuiltin
 	if issue := validateEndpointURL("revocationURL", oauth.RevocationURL, false); issue != nil {
 		return issue
 	}
-	switch oauth.RevocationSemantics {
-	case "", corev1alpha1.ConnectorRevocationGrant, corev1alpha1.ConnectorRevocationPerToken:
-	default:
-		return invalid("oauth.revocationSemantics must be Grant or PerToken")
-	}
 	if !validClientID(oauth.ClientID) {
 		return invalid("oauth.clientID is required and must be printable ASCII without surrounding whitespace")
 	}
@@ -590,13 +585,6 @@ func ConnectionLinked(connection *corev1alpha1.Connection) bool {
 		}
 	}
 	return true
-}
-
-// RevokesPerToken reports whether the provider declares per-token revocation.
-// Only then may Orka revoke a token that no verified owner committed: under
-// grant-wide semantics such a token could belong to another person's grant.
-func RevokesPerToken(provider *corev1alpha1.ConnectorProvider) bool {
-	return provider != nil && provider.Spec.OAuth.RevocationSemantics == corev1alpha1.ConnectorRevocationPerToken
 }
 
 // ProviderAuthorityDigest is a hex SHA-256 digest of everything a consent
