@@ -103,8 +103,13 @@ func connectorCredentialAdditionalData(ref store.ConnectorCredentialRef) []byte 
 		ref.ConnectionUID, ref.Namespace, ref.Name, ref.SubjectDigest, ref.Provider)
 }
 
-func connectorConsentAdditionalData(nonce, connectionUID string) []byte {
-	return fmt.Appendf(nil, "orka.connector-consent\x00%s\x00%s", nonce, connectionUID)
+// connectorConsentAdditionalData binds the sealed verifier to every plaintext
+// column the callback fence reads, including the OAuth-authority digest, so
+// an altered row cannot steer the code exchange to a different endpoint.
+func connectorConsentAdditionalData(consent store.ConnectorConsent) []byte {
+	return fmt.Appendf(nil, "orka.connector-consent\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%d",
+		consent.Nonce, consent.ConnectionUID, consent.Namespace, consent.Name, consent.SubjectDigest,
+		consent.Provider, consent.Mode, consent.AuthorityDigest, consent.ExpiresAt.UTC().Unix())
 }
 
 // connectorCompletionAdditionalData binds the sealed payload to every
@@ -319,7 +324,7 @@ func (s *Store) CreateConnectorConsent(ctx context.Context, consent store.Connec
 		return errors.New("connector consent expiry is required")
 	}
 	verifierNonce, verifierCiphertext, err := sealWithAEAD(s.snapshotCipher.aead,
-		connectorConsentAdditionalData(consent.Nonce, consent.ConnectionUID), []byte(consent.CodeVerifier))
+		connectorConsentAdditionalData(consent), []byte(consent.CodeVerifier))
 	if err != nil {
 		return err
 	}
@@ -383,7 +388,7 @@ func (s *Store) ConsumeConnectorConsent(ctx context.Context, nonce string) (stor
 		return store.ConnectorConsent{}, store.ErrNotFound
 	}
 	verifier, err := s.snapshotCipher.aead.Open(nil, verifierNonce, verifierCiphertext,
-		connectorConsentAdditionalData(consent.Nonce, consent.ConnectionUID))
+		connectorConsentAdditionalData(consent))
 	if err != nil {
 		return store.ConnectorConsent{}, fmt.Errorf("open connector consent verifier: %w", err)
 	}

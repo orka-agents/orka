@@ -122,7 +122,7 @@ func TestExchangeCodeAndRefresh(t *testing.T) {
 					_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid_grant"})
 					return
 				}
-				_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "gho_rotated", "refresh_token": "ghr_rotated", "expires_in": "3600", "scope": "repo read:user"})
+				_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "gho_rotated", "refresh_token": "ghr_rotated", "token_type": "bearer", "expires_in": "3600", "scope": "repo read:user"})
 			default:
 				w.WriteHeader(http.StatusBadRequest)
 				_ = json.NewEncoder(w).Encode(map[string]string{"error": "unsupported_grant_type"})

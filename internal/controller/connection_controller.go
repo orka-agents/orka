@@ -206,7 +206,7 @@ func (r *ConnectionReconciler) revokeBestEffort(ctx context.Context, connection 
 		}
 		return
 	}
-	r.revokeTokens(ctx, connection, credential, true)
+	r.revokeTokens(ctx, connection, credential, true, nil)
 }
 
 // reapExpiredCompletions revokes and deletes parked completions whose
@@ -227,11 +227,10 @@ func (r *ConnectionReconciler) reapExpiredCompletions(ctx context.Context, conne
 		if completion.ExpiresAt.After(now) {
 			continue
 		}
-		// A completion whose token entered custody (its row outlived a
-		// failed delete after commit) is active, not abandoned.
-		if !sameConnectorCredential(committed, completion.Credential) {
-			r.revokeTokens(ctx, connection, completion.Credential, false)
-		}
+		// Token values that entered custody (a row that outlived a failed
+		// delete after commit, or a re-issued long-lived token) are active,
+		// not abandoned; only the other values are revoked.
+		r.revokeTokens(ctx, connection, completion.Credential, false, committed)
 		if err := r.Consents.DeleteConnectorCompletion(ctx, completion.Nonce); err != nil {
 			log.FromContext(ctx).Info("expired completion could not be deleted", "connection", connection.Name)
 		}
@@ -251,10 +250,8 @@ func (r *ConnectionReconciler) revokeParkedCompletions(ctx context.Context, conn
 	}
 	committed := r.committedCredential(ctx, connection)
 	for _, completion := range completions {
-		if sameConnectorCredential(committed, completion.Credential) {
-			continue // revoked with the committed credential
-		}
-		r.revokeTokens(ctx, connection, completion.Credential, false)
+		// Values shared with custody are revoked with the committed credential.
+		r.revokeTokens(ctx, connection, completion.Credential, false, committed)
 	}
 }
 
@@ -274,24 +271,15 @@ func (r *ConnectionReconciler) committedCredential(ctx context.Context, connecti
 	return &credential
 }
 
-// sameConnectorCredential reports whether a parked completion holds exactly
-// the committed material: access token, refresh token, and issuing authority.
-// A rotated refresh token is distinct material and must still be revoked.
-func sameConnectorCredential(committed *store.ConnectorCredential, parked store.ConnectorCredential) bool {
-	return committed != nil && committed.AccessToken != "" &&
-		committed.AccessToken == parked.AccessToken &&
-		committed.RefreshToken == parked.RefreshToken &&
-		committed.AuthorityDigest == parked.AuthorityDigest
-}
-
 // revokeTokens revokes the refresh then access token of one credential at
 // the provider, best effort. The tokens are sent only to the OAuth authority
 // sealed with them: when the provider was replaced or its client changed since
 // they were issued, nothing is sent. Uncommitted (parked) tokens are revoked
 // only when the provider revokes per token: under grant-wide semantics they
 // may belong to another person's grant, and revoking them would sever that
-// person's live link.
-func (r *ConnectionReconciler) revokeTokens(ctx context.Context, connection *corev1alpha1.Connection, credential store.ConnectorCredential, committed bool) {
+// person's live link. Values equal to a token in keep (the committed
+// credential) are skipped individually.
+func (r *ConnectionReconciler) revokeTokens(ctx context.Context, connection *corev1alpha1.Connection, credential store.ConnectorCredential, committed bool, keep *store.ConnectorCredential) {
 	if r.Revoker == nil {
 		return
 	}
@@ -324,7 +312,7 @@ func (r *ConnectionReconciler) revokeTokens(ctx context.Context, connection *cor
 	}
 	cfg := connectors.ProviderOAuthConfig(provider, clientSecret)
 	for _, token := range []string{credential.RefreshToken, credential.AccessToken} {
-		if token == "" {
+		if token == "" || heldInCustody(keep, token) {
 			continue
 		}
 		// Each token gets its own bounded attempt so a stalled first call
@@ -336,6 +324,13 @@ func (r *ConnectionReconciler) revokeTokens(ctx context.Context, connection *cor
 			logger.Info("provider token revocation failed; continuing with disconnect", "connection", connection.Name, "provider", provider.Name)
 		}
 	}
+}
+
+// heldInCustody reports whether value is exactly one of the committed
+// credential's tokens. Per-token revocation would invalidate that live token,
+// so it is never revoked through an abandoned completion.
+func heldInCustody(keep *store.ConnectorCredential, value string) bool {
+	return keep != nil && value != "" && (value == keep.AccessToken || value == keep.RefreshToken)
 }
 
 func (r *ConnectionReconciler) referenceReader() client.Reader {

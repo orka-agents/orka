@@ -1271,3 +1271,31 @@ func TestConnectionStaleModeDiscardKeepsCommittedCredential(t *testing.T) {
 		t.Fatalf("committed credential must remain in custody: %v", err)
 	}
 }
+
+// TestConnectionPartialGrantKeepsReissuedCommittedToken covers a provider that
+// re-issues the committed long-lived access token during a widening consent
+// the person then declines: the refusal must not revoke the live token.
+func TestConnectionPartialGrantKeepsReissuedCommittedToken(t *testing.T) {
+	h := newConnectorTestHarness(t, acceptedTestProvider())
+	created := h.create("readOnly")
+	h.link(created)
+	h.revoked = nil
+	// The fixture always issues gho_secret_access / ghr_secret_refresh: the
+	// widening exchange re-issues exactly the committed material.
+	if resp, raw := h.do(http.MethodPut, "/api/v1/connections/"+created.Connection.Name, map[string]string{"mode": "readWrite"}); resp.StatusCode != http.StatusOK {
+		t.Fatalf("widen = %d %s", resp.StatusCode, raw)
+	}
+	var widened ConnectionAuthorizeResponse
+	if resp, raw := h.do(http.MethodPost, "/api/v1/connections/"+created.Connection.Name+"/authorize", nil); resp.StatusCode != http.StatusOK {
+		t.Fatalf("authorize = %d %s", resp.StatusCode, raw)
+	} else if err := json.Unmarshal(raw, &widened); err != nil {
+		t.Fatal(err)
+	}
+	h.grantScope = "read:user"
+	if location := h.consentAndCallback(widened); !strings.Contains(location, "reason=scopes_denied") {
+		t.Fatalf("partial grant location = %q", location)
+	}
+	if len(h.revoked) != 0 {
+		t.Fatalf("re-issued committed tokens must not be revoked, revoked = %v", h.revoked)
+	}
+}

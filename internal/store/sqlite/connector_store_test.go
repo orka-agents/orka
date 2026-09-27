@@ -412,3 +412,24 @@ func TestConnectorCompletionAuthenticatesPlaintextColumns(t *testing.T) {
 		t.Fatal("a completion whose mode column changed must not be consumable")
 	}
 }
+
+// TestConnectorConsentAuthenticatesPlaintextColumns covers a pending consent
+// whose authority digest column was altered: the verifier no longer opens, so
+// the callback cannot be steered to a replaced token endpoint.
+func TestConnectorConsentAuthenticatesPlaintextColumns(t *testing.T) {
+	s := newConnectorTestStore(t)
+	ctx := context.Background()
+	consent := store.ConnectorConsent{
+		Nonce: "nonce-aad", ConnectionUID: "uid-1", Namespace: "tenant", Name: "github-abc", AuthorityDigest: "authority-1",
+		SubjectDigest: "digest-a", Provider: "github", Mode: "readOnly", CodeVerifier: "verifier", ExpiresAt: time.Now().Add(5 * time.Minute),
+	}
+	if err := s.CreateConnectorConsent(ctx, consent); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE connector_consents SET authority_digest = 'authority-2' WHERE nonce = ?`, consent.Nonce); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ConsumeConnectorConsent(ctx, consent.Nonce); err == nil {
+		t.Fatal("a consent whose authority digest changed must not open")
+	}
+}

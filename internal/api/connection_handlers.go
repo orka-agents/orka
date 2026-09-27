@@ -751,7 +751,7 @@ func (h *Handlers) ConnectionCallback(c fiber.Ctx) error {
 	if len(token.Scopes) == 0 {
 		token.Scopes = append([]string(nil), required...)
 	} else if !connectors.ScopesCover(token.Scopes, required) {
-		h.revokeIssuedTokens(ctx, provider, cfg, token)
+		h.revokeIssuedTokens(ctx, provider, cfg, token, h.custodyFor(ctx, connection))
 		return h.connectorCallbackRedirect(c, consent.Name, "scopes_denied", "")
 	}
 	// Park the material until the verified owner commits it. This is what
@@ -789,11 +789,11 @@ func (h *Handlers) ConnectionCallback(c fiber.Ctx) error {
 		if errors.Is(err, store.ErrConnectorCustodyTombstoned) {
 			// The link was disconnected while the code was being exchanged.
 			// Nothing will ever park or commit this token, so revoke it now.
-			h.revokeIssuedTokens(ctx, provider, cfg, token)
+			h.revokeIssuedTokens(ctx, provider, cfg, token, h.custodyFor(ctx, connection))
 			return h.connectorCallbackRedirect(c, consent.Name, "disconnected", "")
 		}
 		log.Error(err, "connector completion could not be sealed", "connection", consent.Name)
-		h.revokeIssuedTokens(ctx, provider, cfg, token)
+		h.revokeIssuedTokens(ctx, provider, cfg, token, h.custodyFor(ctx, connection))
 		return h.connectorCallbackRedirect(c, consent.Name, "storage_failed", "")
 	}
 	return h.connectorCallbackRedirect(c, consent.Name, "", completionToken)
@@ -897,15 +897,15 @@ func (h *Handlers) CompleteConnection(c fiber.Ctx) error {
 // from a replaced client are dropped unrevoked rather than sent to a
 // different authority.
 func (h *Handlers) discardCompletion(ctx context.Context, provider *corev1alpha1.ConnectorProvider, completion store.ConnectorCompletion, nonce string) {
-	// A completion whose tokens already entered custody (its commit succeeded
-	// but the status write failed before the row was removed) is active
-	// material, never revoked; only the parked row is dropped.
-	if provider != nil && !h.completionCommitted(ctx, completion) &&
-		completion.Credential.AuthorityDigest == connectors.ProviderAuthorityDigest(provider) {
+	// Token values that already entered custody (a commit whose status write
+	// failed before the row was removed, or a re-issued long-lived token) are
+	// active material and are skipped individually; only the parked row is
+	// dropped for them.
+	if provider != nil && completion.Credential.AuthorityDigest == connectors.ProviderAuthorityDigest(provider) {
 		if cfg, err := h.providerOAuthConfig(ctx, provider); err == nil {
 			h.revokeIssuedTokens(ctx, provider, cfg, connectors.TokenResponse{
 				AccessToken: completion.Credential.AccessToken, RefreshToken: completion.Credential.RefreshToken,
-			})
+			}, h.custodyForCompletion(ctx, completion))
 		}
 	}
 	if err := h.connectors.Consents.DeleteConnectorCompletion(ctx, nonce); err != nil {
@@ -913,19 +913,30 @@ func (h *Handlers) discardCompletion(ctx context.Context, provider *corev1alpha1
 	}
 }
 
-// completionCommitted reports whether the completion's tokens are exactly
-// the credential held in custody for its Connection.
-func (h *Handlers) completionCommitted(ctx context.Context, completion store.ConnectorCompletion) bool {
+// custodyForCompletion returns the credential held in custody for the
+// completion's Connection, or nil.
+func (h *Handlers) custodyForCompletion(ctx context.Context, completion store.ConnectorCompletion) *store.ConnectorCredential {
 	committed, err := h.connectors.Credentials.GetConnectorCredential(ctx, store.ConnectorCredentialRef{
 		ConnectionUID: completion.ConnectionUID, Namespace: completion.Namespace, Name: completion.Name,
 		SubjectDigest: completion.SubjectDigest, Provider: completion.Provider,
 	})
 	if err != nil {
-		return false
+		return nil
 	}
-	return committed.AccessToken != "" && committed.AccessToken == completion.Credential.AccessToken &&
-		committed.RefreshToken == completion.Credential.RefreshToken &&
-		committed.AuthorityDigest == completion.Credential.AuthorityDigest
+	return &committed
+}
+
+// custodyFor returns the credential held in custody for connection, or nil.
+func (h *Handlers) custodyFor(ctx context.Context, connection *corev1alpha1.Connection) *store.ConnectorCredential {
+	ref, err := connectors.CredentialRef(connection)
+	if err != nil {
+		return nil
+	}
+	committed, err := h.connectors.Credentials.GetConnectorCredential(ctx, ref)
+	if err != nil {
+		return nil
+	}
+	return &committed
 }
 
 // revokeIssuedTokens revokes tokens Orka obtained but will never keep,
@@ -933,7 +944,7 @@ func (h *Handlers) completionCommitted(ctx context.Context, completion store.Con
 // tokens, so under grant-wide revocation they might belong to another
 // person's grant (a forwarded consent link completed by an already-linked
 // person); only a per-token provider may be asked to revoke them.
-func (h *Handlers) revokeIssuedTokens(ctx context.Context, provider *corev1alpha1.ConnectorProvider, cfg connectors.OAuthProviderConfig, token connectors.TokenResponse) {
+func (h *Handlers) revokeIssuedTokens(ctx context.Context, provider *corev1alpha1.ConnectorProvider, cfg connectors.OAuthProviderConfig, token connectors.TokenResponse, keep *store.ConnectorCredential) {
 	if h.connectors.OAuth == nil {
 		return
 	}
@@ -942,7 +953,9 @@ func (h *Handlers) revokeIssuedTokens(ctx context.Context, provider *corev1alpha
 		return
 	}
 	for _, value := range []string{token.RefreshToken, token.AccessToken} {
-		if value == "" {
+		// A value the provider re-issued that is already the committed
+		// credential stays live: per-token revocation would sever the link.
+		if value == "" || (keep != nil && (value == keep.AccessToken || value == keep.RefreshToken)) {
 			continue
 		}
 		if err := h.connectors.OAuth.Revoke(ctx, cfg, value); err != nil {

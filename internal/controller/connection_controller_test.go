@@ -616,8 +616,8 @@ func TestConnectionReconcilerReapsExpiredCompletions(t *testing.T) {
 	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "tenant", Name: "github-alice"}}); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(revoker.tokens, ",") != "ghr_stale,gho_stale,ghr_rotated,gho_committed" {
-		t.Fatalf("revoked = %v, want the abandoned and the rotated completion's tokens", revoker.tokens)
+	if strings.Join(revoker.tokens, ",") != "ghr_stale,gho_stale,ghr_rotated" {
+		t.Fatalf("revoked = %v, want the abandoned tokens and the rotated refresh token, never the committed access token", revoker.tokens)
 	}
 	if strings.Join(credentials.deletedCompletions, ",") != "stale,committed,foreign,rotated" {
 		t.Fatalf("deleted completions = %v, want every expired row dropped", credentials.deletedCompletions)
