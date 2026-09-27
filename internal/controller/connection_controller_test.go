@@ -500,7 +500,6 @@ func TestConnectionReconcilerFinalizerAndDisconnect(t *testing.T) {
 	scheme := connectorTestScheme(t)
 	provider := acceptedConnectorProvider()
 	provider.Spec.OAuth.RevocationURL = "https://github.com/revoke"
-	provider.Spec.OAuth.RevocationSemantics = corev1alpha1.ConnectorRevocationPerToken
 	connection := testConnection("tenant", "github-alice", "github")
 	credentials := newFakeConnectorCredentialStore()
 	revoker := &fakeConnectorRevoker{err: errTestProviderRead}
@@ -553,9 +552,8 @@ func TestConnectionReconcilerFinalizerAndDisconnect(t *testing.T) {
 	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
 		t.Fatalf("disconnect reconcile: %v", err)
 	}
-	if len(revoker.tokens) != 4 || revoker.tokens[0] != "ghr_refresh" || revoker.tokens[1] != "gho_access" ||
-		revoker.tokens[2] != "ghr_parked" || revoker.tokens[3] != "gho_parked" {
-		t.Fatalf("revoked tokens = %v, want committed then parked, refresh before access", revoker.tokens)
+	if strings.Join(revoker.tokens, ",") != "ghr_refresh,gho_access" {
+		t.Fatalf("revoked tokens = %v, want only the committed credential, refresh before access", revoker.tokens)
 	}
 	if _, held := credentials.credentials[string(updated.UID)]; held || len(credentials.deleted) != 1 {
 		t.Fatalf("custody must be deleted even when revocation fails: %+v", credentials)
@@ -593,7 +591,6 @@ func TestConnectionReconcilerReapsExpiredCompletions(t *testing.T) {
 	scheme := connectorTestScheme(t)
 	provider := acceptedConnectorProvider()
 	provider.Spec.OAuth.RevocationURL = "https://github.com/revoke"
-	provider.Spec.OAuth.RevocationSemantics = corev1alpha1.ConnectorRevocationPerToken
 	connection := testConnection("tenant", "github-alice", "github")
 	connection.Finalizers = []string{ConnectionCustodyFinalizer}
 	credentials := newFakeConnectorCredentialStore()
@@ -616,8 +613,8 @@ func TestConnectionReconcilerReapsExpiredCompletions(t *testing.T) {
 	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "tenant", Name: "github-alice"}}); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(revoker.tokens, ",") != "ghr_stale,gho_stale,ghr_rotated" {
-		t.Fatalf("revoked = %v, want the abandoned tokens and the rotated refresh token, never the committed access token", revoker.tokens)
+	if len(revoker.tokens) != 0 {
+		t.Fatalf("revoked = %v, want no revocation of tokens nobody committed", revoker.tokens)
 	}
 	if strings.Join(credentials.deletedCompletions, ",") != "stale,committed,foreign,rotated" {
 		t.Fatalf("deleted completions = %v, want every expired row dropped", credentials.deletedCompletions)
@@ -634,7 +631,6 @@ func TestConnectionReconcilerDisconnectSkipsRevocationAgainstChangedAuthority(t 
 	scheme := connectorTestScheme(t)
 	provider := acceptedConnectorProvider()
 	provider.Spec.OAuth.RevocationURL = "https://github.com/revoke"
-	provider.Spec.OAuth.RevocationSemantics = corev1alpha1.ConnectorRevocationPerToken
 	connection := testConnection("tenant", "github-alice", "github")
 	connection.Finalizers = []string{ConnectionCustodyFinalizer}
 	credentials := newFakeConnectorCredentialStore()
@@ -661,11 +657,11 @@ func TestConnectionReconcilerDisconnectSkipsRevocationAgainstChangedAuthority(t 
 	}
 }
 
-// TestConnectionReconcilerGrantWideProviderRevokesOnlyCommittedTokens covers
-// a provider whose revocation invalidates the whole grant: disconnect revokes
-// the committed credential, but parked tokens nobody committed are deleted
-// unrevoked because they may belong to another person's grant.
-func TestConnectionReconcilerGrantWideProviderRevokesOnlyCommittedTokens(t *testing.T) {
+// TestConnectionReconcilerRevokesOnlyCommittedTokens covers the rule that
+// disconnect revokes the committed credential while parked tokens nobody
+// committed are deleted unrevoked, because they may belong to another
+// person's grant.
+func TestConnectionReconcilerRevokesOnlyCommittedTokens(t *testing.T) {
 	scheme := connectorTestScheme(t)
 	provider := acceptedConnectorProvider()
 	provider.Spec.OAuth.RevocationURL = "https://github.com/revoke"

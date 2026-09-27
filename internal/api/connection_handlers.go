@@ -751,7 +751,9 @@ func (h *Handlers) ConnectionCallback(c fiber.Ctx) error {
 	if len(token.Scopes) == 0 {
 		token.Scopes = append([]string(nil), required...)
 	} else if !connectors.ScopesCover(token.Scopes, required) {
-		h.revokeIssuedTokens(ctx, provider, cfg, token, h.custodyFor(ctx, connection))
+		// The issued material is dropped, never revoked: Orka cannot prove
+		// whose grant a token nobody committed belongs to, and a shared or
+		// re-issued token could be another person's live credential.
 		return h.connectorCallbackRedirect(c, consent.Name, "scopes_denied", "")
 	}
 	// Park the material until the verified owner commits it. This is what
@@ -788,12 +790,10 @@ func (h *Handlers) ConnectionCallback(c fiber.Ctx) error {
 	}); err != nil {
 		if errors.Is(err, store.ErrConnectorCustodyTombstoned) {
 			// The link was disconnected while the code was being exchanged.
-			// Nothing will ever park or commit this token, so revoke it now.
-			h.revokeIssuedTokens(ctx, provider, cfg, token, h.custodyFor(ctx, connection))
+			// The material is dropped and left to expire, never revoked.
 			return h.connectorCallbackRedirect(c, consent.Name, "disconnected", "")
 		}
 		log.Error(err, "connector completion could not be sealed", "connection", consent.Name)
-		h.revokeIssuedTokens(ctx, provider, cfg, token, h.custodyFor(ctx, connection))
 		return h.connectorCallbackRedirect(c, consent.Name, "storage_failed", "")
 	}
 	return h.connectorCallbackRedirect(c, consent.Name, "", completionToken)
@@ -852,7 +852,7 @@ func (h *Handlers) CompleteConnection(c fiber.Ctx) error {
 		completion.SubjectDigest != connectors.SubjectDigest(connection.Spec.Subject.Issuer, connection.Spec.Subject.Subject) {
 		// A token presented against the wrong Connection is discarded so it
 		// cannot be tried across Connections.
-		h.discardCompletion(ctx, provider, completion, nonce)
+		h.discardCompletion(ctx, completion, nonce)
 		return fiber.NewError(fiber.StatusConflict, "completion token does not belong to this connection")
 	}
 	// The consent was granted for the mode in force when it started. A
@@ -860,13 +860,13 @@ func (h *Handlers) CompleteConnection(c fiber.Ctx) error {
 	// person must consent again under the current mode.
 	currentMode, _ := normalizeConnectionMode(connection.Spec.Mode)
 	if completion.Mode != currentMode {
-		h.discardCompletion(ctx, provider, completion, nonce)
+		h.discardCompletion(ctx, completion, nonce)
 		return fiber.NewError(fiber.StatusConflict, "the connection mode changed after consent started; start consent again")
 	}
 	// Tokens issued by a provider OAuth client that has since changed belong
 	// to a different authority; they are discarded, never committed.
 	if completion.Credential.AuthorityDigest != connectors.ProviderAuthorityDigest(provider) {
-		h.discardCompletion(ctx, provider, completion, nonce)
+		h.discardCompletion(ctx, completion, nonce)
 		return fiber.NewError(fiber.StatusConflict, "the connector provider changed after consent started; start consent again")
 	}
 	ref, err := connectors.CredentialRef(connection)
@@ -875,7 +875,7 @@ func (h *Handlers) CompleteConnection(c fiber.Ctx) error {
 	}
 	if err := h.connectors.Credentials.PutConnectorCredential(ctx, ref, completion.Credential); err != nil {
 		if errors.Is(err, store.ErrConnectorCustodyTombstoned) {
-			h.discardCompletion(ctx, provider, completion, nonce)
+			h.discardCompletion(ctx, completion, nonce)
 			return fiber.NewError(fiber.StatusConflict, "connection was disconnected; create it again")
 		}
 		log.Error(err, "connector credential could not be sealed", "connection", connection.Name)
@@ -891,78 +891,20 @@ func (h *Handlers) CompleteConnection(c fiber.Ctx) error {
 	return c.JSON(connectionResponse(connection))
 }
 
-// discardCompletion deletes a parked completion that will never be committed
-// and revokes its tokens best-effort, but only against the OAuth authority
-// that issued them and only when that provider revokes per token; tokens
-// from a replaced client are dropped unrevoked rather than sent to a
-// different authority.
-func (h *Handlers) discardCompletion(ctx context.Context, provider *corev1alpha1.ConnectorProvider, completion store.ConnectorCompletion, nonce string) {
-	// Token values that already entered custody (a commit whose status write
-	// failed before the row was removed, or a re-issued long-lived token) are
-	// active material and are skipped individually; only the parked row is
-	// dropped for them.
-	if provider != nil && completion.Credential.AuthorityDigest == connectors.ProviderAuthorityDigest(provider) {
-		if cfg, err := h.providerOAuthConfig(ctx, provider); err == nil {
-			h.revokeIssuedTokens(ctx, provider, cfg, connectors.TokenResponse{
-				AccessToken: completion.Credential.AccessToken, RefreshToken: completion.Credential.RefreshToken,
-			}, h.custodyForCompletion(ctx, completion))
-		}
-	}
+// discardCompletion deletes a parked completion that will never be
+// committed. Its tokens are left to expire, never revoked: Orka cannot prove
+// whose grant a token nobody committed belongs to (a forwarded consent link
+// completed by an already-linked person parks that person's token under
+// another Connection, and providers re-issue long-lived tokens), so a
+// revocation could sever a live link that is not this one.
+func (h *Handlers) discardCompletion(ctx context.Context, completion store.ConnectorCompletion, nonce string) {
 	if err := h.connectors.Consents.DeleteConnectorCompletion(ctx, nonce); err != nil {
 		log.Error(err, "discarded completion could not be removed", "connection", completion.Name)
 	}
 }
 
-// custodyForCompletion returns the credential held in custody for the
-// completion's Connection, or nil.
-func (h *Handlers) custodyForCompletion(ctx context.Context, completion store.ConnectorCompletion) *store.ConnectorCredential {
-	committed, err := h.connectors.Credentials.GetConnectorCredential(ctx, store.ConnectorCredentialRef{
-		ConnectionUID: completion.ConnectionUID, Namespace: completion.Namespace, Name: completion.Name,
-		SubjectDigest: completion.SubjectDigest, Provider: completion.Provider,
-	})
-	if err != nil {
-		return nil
-	}
-	return &committed
-}
 
-// custodyFor returns the credential held in custody for connection, or nil.
-func (h *Handlers) custodyFor(ctx context.Context, connection *corev1alpha1.Connection) *store.ConnectorCredential {
-	ref, err := connectors.CredentialRef(connection)
-	if err != nil {
-		return nil
-	}
-	committed, err := h.connectors.Credentials.GetConnectorCredential(ctx, ref)
-	if err != nil {
-		return nil
-	}
-	return &committed
-}
 
-// revokeIssuedTokens revokes tokens Orka obtained but will never keep,
-// best effort, refresh token first. Nobody verified has committed these
-// tokens, so under grant-wide revocation they might belong to another
-// person's grant (a forwarded consent link completed by an already-linked
-// person); only a per-token provider may be asked to revoke them.
-func (h *Handlers) revokeIssuedTokens(ctx context.Context, provider *corev1alpha1.ConnectorProvider, cfg connectors.OAuthProviderConfig, token connectors.TokenResponse, keep *store.ConnectorCredential) {
-	if h.connectors.OAuth == nil {
-		return
-	}
-	if !connectors.RevokesPerToken(provider) {
-		log.Info("uncommitted connector tokens left to expire: provider revocation is grant-wide", "provider", provider.Name)
-		return
-	}
-	for _, value := range []string{token.RefreshToken, token.AccessToken} {
-		// A value the provider re-issued that is already the committed
-		// credential stays live: per-token revocation would sever the link.
-		if value == "" || (keep != nil && (value == keep.AccessToken || value == keep.RefreshToken)) {
-			continue
-		}
-		if err := h.connectors.OAuth.Revoke(ctx, cfg, value); err != nil {
-			log.Info("issued token could not be revoked", "reason", oauthFailureReason(err))
-		}
-	}
-}
 
 func oauthFailureReason(err error) string {
 	if oauthErr, ok := errors.AsType[*connectors.OAuthError](err); ok {
