@@ -69,7 +69,7 @@ type responsesInputItem struct {
 
 type responsesContentPart struct {
 	Type        string            `json:"type"`
-	Text        string            `json:"text"`
+	Text        *string           `json:"text"`
 	Annotations []json.RawMessage `json:"annotations,omitempty"`
 	Logprobs    []json.RawMessage `json:"logprobs,omitempty"`
 }
@@ -182,7 +182,10 @@ func responsesInputText(content json.RawMessage, output bool) (string, error) {
 		if len(part.Annotations) != 0 || len(part.Logprobs) != 0 {
 			return "", fmt.Errorf("annotations and logprobs are unsupported")
 		}
-		result.WriteString(part.Text)
+		if part.Text == nil {
+			return "", fmt.Errorf("text content parts require a string text field")
+		}
+		result.WriteString(*part.Text)
 	}
 	return result.String(), nil
 }
