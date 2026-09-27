@@ -890,3 +890,55 @@ func TestConnectionNextPassFollowsExpiry(t *testing.T) {
 		t.Fatalf("past expiry = %v, want the refresh interval", got)
 	}
 }
+
+// A completion recovered on an already settled Connection is the only thing
+// that changes its status; that change must be written before the
+// completion row goes, or a lost write leaves the link Pending for good.
+func TestConnectionReconcilerPersistsRecoveredStatusOnSettledConnection(t *testing.T) {
+	scheme := connectorTestScheme(t)
+	provider := acceptedConnectorProvider()
+	connection := testConnection("tenant", "github-alice", "github")
+	connection.Finalizers = []string{ConnectionCustodyFinalizer}
+	connection.Spec.Mode = corev1alpha1.ConnectionModeReadOnly
+	credentials := newFakeConnectorCredentialStore()
+	c := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(connection, provider, connectorClientSecret("tenant")).
+		WithStatusSubresource(&corev1alpha1.Connection{}).Build()
+	reconciler := &ConnectionReconciler{Client: c, APIReader: c, Scheme: scheme, Credentials: credentials, Consents: credentials}
+	key := types.NamespacedName{Namespace: "tenant", Name: "github-alice"}
+	// First pass settles the controller-owned status with nothing to recover.
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	settled := &corev1alpha1.Connection{}
+	if err := c.Get(context.Background(), key, settled); err != nil {
+		t.Fatal(err)
+	}
+	if connectors.ConnectionLinked(settled) || settled.Status.ObservedGeneration != settled.Generation {
+		t.Fatalf("settled status = %+v, want an observed, unlinked Connection", settled.Status)
+	}
+	// Custody and a committed completion land (the API's status write was
+	// lost); the next pass must record the link from them.
+	authority := connectors.ProviderIssuerDigest(provider)
+	material := store.ConnectorCredential{
+		AccessToken: "gho_done", RefreshToken: "ghr_done", AuthorityDigest: authority,
+		Scopes: connectors.ScopesForMode(provider, corev1alpha1.ConnectionModeReadOnly), ExpiresAt: time.Now().Add(time.Hour),
+	}
+	credentials.credentials[string(connection.UID)] = material
+	credentials.parked[string(connection.UID)] = []store.ConnectorCompletion{{
+		Nonce: "done", Committed: true, Mode: corev1alpha1.ConnectionModeReadOnly, ExpiresAt: time.Now().Add(-time.Minute),
+		ConsentAuthorityDigest: connectors.ProviderAuthorityDigest(provider), Credential: material,
+	}}
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	updated := &corev1alpha1.Connection{}
+	if err := c.Get(context.Background(), key, updated); err != nil {
+		t.Fatal(err)
+	}
+	if !connectors.ConnectionLinked(updated) || updated.Status.GrantSequence != 1 {
+		t.Fatalf("status after recovery = %+v, want the link persisted with its grant", updated.Status)
+	}
+	if strings.Join(credentials.deletedCompletions, ",") != "done" {
+		t.Fatalf("deleted completions = %v, want the recovered one removed after the write", credentials.deletedCompletions)
+	}
+}
