@@ -535,6 +535,13 @@ func ScopesCover(granted, required []string) bool {
 // The two controller-owned conditions must have observed the current
 // generation, so a mode change or provider loss fails closed until the
 // controller has judged it.
+//
+// This is a status view, and status trails the provider by one reconcile:
+// after a provider change the old conditions stay True until the Connection's
+// watch-driven reconcile runs. A caller that releases token material must
+// also load the provider and verify ProviderAccepted, the authority digest
+// sealed with the credential, and the scopes the mode requires; the
+// credential-injection path does exactly that.
 func ConnectionLinked(connection *corev1alpha1.Connection) bool {
 	if connection == nil || !connection.DeletionTimestamp.IsZero() {
 		return false
@@ -561,19 +568,31 @@ func RevokesPerToken(provider *corev1alpha1.ConnectorProvider) bool {
 
 // ProviderAuthorityDigest is a hex SHA-256 digest of the OAuth client identity
 // a consent is granted against: the provider UID, client ID, client secret
-// reference, authentication method, and endpoints. It carries no secret
-// material and changes whenever a held token would belong to a different
-// client or be sent to a different token endpoint.
+// reference, authentication method, endpoints, and the static authorize
+// parameters (which can select the resource server a token targets, such as
+// an Auth0 audience). It carries no secret material and changes whenever a
+// held token would belong to a different client, target a different
+// resource, or be sent to a different token endpoint. Scopes are judged
+// separately by ScopesGranted.
 func ProviderAuthorityDigest(provider *corev1alpha1.ConnectorProvider) string {
 	if provider == nil {
 		return ""
 	}
 	oauth := provider.Spec.OAuth
 	sum := sha256.New()
-	for _, part := range []string{
+	parts := []string{
 		string(provider.UID), oauth.ClientID, oauth.ClientSecretRef.Name, oauth.ClientSecretRef.Key,
 		oauth.ClientAuthentication, oauth.AuthorizeURL, oauth.TokenURL, oauth.RevocationURL,
-	} {
+	}
+	keys := make([]string, 0, len(oauth.AdditionalAuthorizeParameters))
+	for key := range oauth.AdditionalAuthorizeParameters {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	for _, key := range keys {
+		parts = append(parts, "param:"+key, oauth.AdditionalAuthorizeParameters[key])
+	}
+	for _, part := range parts {
 		_, _ = sum.Write([]byte(part))
 		_, _ = sum.Write([]byte{0})
 	}
