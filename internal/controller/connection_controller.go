@@ -206,7 +206,7 @@ func (r *ConnectionReconciler) applyCommittedCompletions(ctx context.Context, co
 			// tool destinations). Otherwise the link stays Pending until the
 			// person consents again; the row is dropped either way.
 			if completion.Mode == mode && completion.Credential.AuthorityDigest == issuer && completion.ConsentAuthorityDigest == authority {
-				connectors.ApplyLinkedStatus(connection, provider, completion.Credential, now)
+				connectors.ApplyLinkedStatus(connection, provider, held, now)
 				applied = append(applied, completion.Nonce)
 				continue
 			}

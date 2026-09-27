@@ -36,11 +36,16 @@ func connectorSchemaStatements() []string {
 			nonce           BLOB NOT NULL,
 			ciphertext      BLOB NOT NULL,
 			expires_at      TIMESTAMP,
+			grant_sequence  INTEGER NOT NULL DEFAULT 0,
 			created_at      TIMESTAMP NOT NULL,
 			updated_at      TIMESTAMP NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_connector_credentials_subject
 			ON connector_credentials(namespace, subject_digest, provider)`,
+		`CREATE TABLE IF NOT EXISTS connector_credential_grants (
+			connection_uid  TEXT PRIMARY KEY,
+			grant_sequence  INTEGER NOT NULL
+		)`,
 		`CREATE TABLE IF NOT EXISTS connector_consents (
 			nonce               TEXT PRIMARY KEY,
 			connection_uid      TEXT NOT NULL,
@@ -279,38 +284,56 @@ func (s *Store) PutConnectorCredential(ctx context.Context, ref store.ConnectorC
 		return fmt.Errorf("begin connector credential transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := s.putConnectorCredentialTx(ctx, tx, ref, credential); err != nil {
+	if _, err := s.putConnectorCredentialTx(ctx, tx, ref, credential, true); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
-// putConnectorCredentialTx seals and upserts custody inside tx.
-func (s *Store) putConnectorCredentialTx(ctx context.Context, tx *sql.Tx, ref store.ConnectorCredentialRef, credential store.ConnectorCredential) error {
+// putConnectorCredentialTx seals and upserts custody inside tx and returns
+// the material as stored. A new grant takes the next grant sequence for the
+// Connection (the counter outlives the row, so a re-consent after a shred
+// never repeats a number); otherwise the current row's grant is carried.
+func (s *Store) putConnectorCredentialTx(ctx context.Context, tx *sql.Tx, ref store.ConnectorCredentialRef, credential store.ConnectorCredential, newGrant bool) (store.ConnectorCredential, error) {
 	if s.snapshotCipher == nil {
-		return errConnectorCipherRequired
+		return store.ConnectorCredential{}, errConnectorCipherRequired
 	}
 	if err := ref.Validate(); err != nil {
-		return err
+		return store.ConnectorCredential{}, err
 	}
 	if strings.TrimSpace(credential.AccessToken) == "" {
-		return errors.New("connector credential access token is required")
+		return store.ConnectorCredential{}, errors.New("connector credential access token is required")
+	}
+	var tombstoned int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM connector_credential_tombstones WHERE connection_uid = ?`, ref.ConnectionUID).Scan(&tombstoned); err != nil {
+		return store.ConnectorCredential{}, fmt.Errorf("check connector custody tombstone: %w", err)
+	}
+	if tombstoned > 0 {
+		return store.ConnectorCredential{}, store.ErrConnectorCustodyTombstoned
+	}
+	if newGrant {
+		if err := tx.QueryRowContext(ctx, `INSERT INTO connector_credential_grants (connection_uid, grant_sequence) VALUES (?, 1)
+			ON CONFLICT(connection_uid) DO UPDATE SET grant_sequence = grant_sequence + 1
+			RETURNING grant_sequence`, ref.ConnectionUID).Scan(&credential.GrantSequence); err != nil {
+			return store.ConnectorCredential{}, fmt.Errorf("assign connector grant sequence: %w", err)
+		}
+	} else {
+		err := tx.QueryRowContext(ctx, `SELECT grant_sequence FROM connector_credentials WHERE connection_uid = ?`, ref.ConnectionUID).Scan(&credential.GrantSequence)
+		if errors.Is(err, sql.ErrNoRows) {
+			return store.ConnectorCredential{}, store.ErrNotFound
+		}
+		if err != nil {
+			return store.ConnectorCredential{}, fmt.Errorf("read connector grant sequence: %w", err)
+		}
 	}
 	row, err := s.sealConnectorCredentialRow(ref, credential)
 	if err != nil {
-		return err
+		return store.ConnectorCredential{}, err
 	}
 	now := time.Now().UTC()
-	var tombstoned int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM connector_credential_tombstones WHERE connection_uid = ?`, ref.ConnectionUID).Scan(&tombstoned); err != nil {
-		return fmt.Errorf("check connector custody tombstone: %w", err)
-	}
-	if tombstoned > 0 {
-		return store.ErrConnectorCustodyTombstoned
-	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO connector_credentials
-		(connection_uid, namespace, name, subject_digest, provider, dek_nonce, dek_ciphertext, nonce, ciphertext, expires_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		(connection_uid, namespace, name, subject_digest, provider, dek_nonce, dek_ciphertext, nonce, ciphertext, expires_at, grant_sequence, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(connection_uid) DO UPDATE SET
 			namespace = excluded.namespace,
 			name = excluded.name,
@@ -321,13 +344,15 @@ func (s *Store) putConnectorCredentialTx(ctx context.Context, tx *sql.Tx, ref st
 			nonce = excluded.nonce,
 			ciphertext = excluded.ciphertext,
 			expires_at = excluded.expires_at,
+			grant_sequence = excluded.grant_sequence,
 			updated_at = excluded.updated_at`,
 		ref.ConnectionUID, ref.Namespace, ref.Name, ref.SubjectDigest, ref.Provider,
-		row.dekNonce, row.dekCiphertext, row.nonce, row.ciphertext, row.expiresAt, now, now)
+		row.dekNonce, row.dekCiphertext, row.nonce, row.ciphertext, row.expiresAt, credential.GrantSequence, now, now)
 	if err != nil {
-		return fmt.Errorf("persist connector credential: %w", err)
+		return store.ConnectorCredential{}, fmt.Errorf("persist connector credential: %w", err)
 	}
-	return nil
+	credential.UpdatedAt = now
+	return credential, nil
 }
 
 // retireConnectorCredentialTx keeps the credential row a commit is about to
@@ -364,24 +389,26 @@ func (s *Store) retireConnectorCredentialTx(ctx context.Context, tx *sql.Tx, ref
 }
 
 // CommitConnectorCompletion implements store.ConnectorConsentStore.
-func (s *Store) CommitConnectorCompletion(ctx context.Context, nonce string, ref store.ConnectorCredentialRef, credential store.ConnectorCredential) error {
+func (s *Store) CommitConnectorCompletion(ctx context.Context, nonce string, ref store.ConnectorCredentialRef, credential store.ConnectorCredential) (store.ConnectorCredential, error) {
 	if strings.TrimSpace(nonce) == "" {
-		return errors.New("connector completion nonce is required")
+		return store.ConnectorCredential{}, errors.New("connector completion nonce is required")
 	}
 	if s.snapshotCipher == nil {
-		return errConnectorCipherRequired
+		return store.ConnectorCredential{}, errConnectorCipherRequired
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("begin connector completion commit: %w", err)
+		return store.ConnectorCredential{}, fmt.Errorf("begin connector completion commit: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	if err := s.retireConnectorCredentialTx(ctx, tx, ref, credential, time.Now().UTC()); err != nil {
-		return err
+		return store.ConnectorCredential{}, err
 	}
-	if err := s.putConnectorCredentialTx(ctx, tx, ref, credential); err != nil {
-		return err
+	committed, err := s.putConnectorCredentialTx(ctx, tx, ref, credential, true)
+	if err != nil {
+		return store.ConnectorCredential{}, err
 	}
+	credential = committed
 	// Re-seal the parked row with the committed marker inside the sealed
 	// body, bound to the same fence columns, so only a holder of the
 	// snapshot key can flip it.
@@ -394,33 +421,36 @@ func (s *Store) CommitConnectorCompletion(ctx context.Context, nonce string, ref
 		Scan(&completion.Nonce, &completion.ConnectionUID, &completion.Namespace, &completion.Name, &completion.SubjectDigest,
 			&completion.Provider, &completion.Mode, &payloadNonce, &payload, &completion.ExpiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return store.ErrNotFound
+		return store.ConnectorCredential{}, store.ErrNotFound
 	}
 	if err != nil {
-		return fmt.Errorf("read connector completion for commit: %w", err)
+		return store.ConnectorCredential{}, fmt.Errorf("read connector completion for commit: %w", err)
 	}
 	completion.ExpiresAt = completion.ExpiresAt.UTC()
 	current, err := s.snapshotCipher.aead.Open(nil, payloadNonce, payload, connectorCompletionAdditionalData(completion))
 	if err != nil {
-		return fmt.Errorf("open connector completion for commit: %w", err)
+		return store.ConnectorCredential{}, fmt.Errorf("open connector completion for commit: %w", err)
 	}
 	_, fields, err := decodeSealedConnectorCompletionPayload(current)
 	if err != nil {
-		return err
+		return store.ConnectorCredential{}, err
 	}
 	fields.Committed = true
 	body, err := encodeSealedConnectorCompletionPayload(credential, fields)
 	if err != nil {
-		return err
+		return store.ConnectorCredential{}, err
 	}
 	newNonce, newPayload, err := sealWithAEAD(s.snapshotCipher.aead, connectorCompletionAdditionalData(completion), body)
 	if err != nil {
-		return err
+		return store.ConnectorCredential{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE connector_completions SET payload_nonce = ?, payload = ? WHERE nonce = ?`, newNonce, newPayload, nonce); err != nil {
-		return fmt.Errorf("mark connector completion committed: %w", err)
+		return store.ConnectorCredential{}, fmt.Errorf("mark connector completion committed: %w", err)
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return store.ConnectorCredential{}, err
+	}
+	return credential, nil
 }
 
 // GetConnectorCredential implements store.ConnectorCredentialStore.
@@ -434,10 +464,11 @@ func (s *Store) GetConnectorCredential(ctx context.Context, ref store.ConnectorC
 	var (
 		dekNonce, dekCiphertext, nonce, ciphertext []byte
 		updatedAt                                  time.Time
+		grantSequence                              int64
 	)
-	err := s.db.QueryRowContext(ctx, `SELECT dek_nonce, dek_ciphertext, nonce, ciphertext, updated_at
+	err := s.db.QueryRowContext(ctx, `SELECT dek_nonce, dek_ciphertext, nonce, ciphertext, updated_at, grant_sequence
 		FROM connector_credentials WHERE connection_uid = ?`, ref.ConnectionUID).
-		Scan(&dekNonce, &dekCiphertext, &nonce, &ciphertext, &updatedAt)
+		Scan(&dekNonce, &dekCiphertext, &nonce, &ciphertext, &updatedAt, &grantSequence)
 	if errors.Is(err, sql.ErrNoRows) {
 		return store.ConnectorCredential{}, store.ErrNotFound
 	}
@@ -449,6 +480,7 @@ func (s *Store) GetConnectorCredential(ctx context.Context, ref store.ConnectorC
 		return store.ConnectorCredential{}, err
 	}
 	credential.UpdatedAt = updatedAt.UTC()
+	credential.GrantSequence = grantSequence
 	return credential, nil
 }
 

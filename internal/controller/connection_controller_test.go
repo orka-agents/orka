@@ -419,6 +419,7 @@ type fakeConnectorCredentialStore struct {
 	deleted            []string
 	tombstoned         []string
 	deletedCompletions []string
+	grants             map[string]int64
 }
 
 func newFakeConnectorCredentialStore() *fakeConnectorCredentialStore {
@@ -428,6 +429,11 @@ func newFakeConnectorCredentialStore() *fakeConnectorCredentialStore {
 }
 
 func (f *fakeConnectorCredentialStore) PutConnectorCredential(_ context.Context, ref store.ConnectorCredentialRef, credential store.ConnectorCredential) error {
+	if f.grants == nil {
+		f.grants = map[string]int64{}
+	}
+	f.grants[ref.ConnectionUID]++
+	credential.GrantSequence = f.grants[ref.ConnectionUID]
 	f.credentials[ref.ConnectionUID] = credential
 	return nil
 }
@@ -472,8 +478,11 @@ func (f *fakeConnectorCredentialStore) ConsumeConnectorCompletion(context.Contex
 	return store.ConnectorCompletion{}, store.ErrNotFound
 }
 
-func (f *fakeConnectorCredentialStore) CommitConnectorCompletion(ctx context.Context, _ string, ref store.ConnectorCredentialRef, credential store.ConnectorCredential) error {
-	return f.PutConnectorCredential(ctx, ref, credential)
+func (f *fakeConnectorCredentialStore) CommitConnectorCompletion(ctx context.Context, _ string, ref store.ConnectorCredentialRef, credential store.ConnectorCredential) (store.ConnectorCredential, error) {
+	if err := f.PutConnectorCredential(ctx, ref, credential); err != nil {
+		return store.ConnectorCredential{}, err
+	}
+	return f.credentials[ref.ConnectionUID], nil
 }
 
 func (f *fakeConnectorCredentialStore) PeekConnectorCompletion(context.Context, string) (store.ConnectorCompletion, error) {
@@ -920,7 +929,7 @@ func TestConnectionReconcilerPersistsRecoveredStatusOnSettledConnection(t *testi
 	// lost); the next pass must record the link from them.
 	authority := connectors.ProviderIssuerDigest(provider)
 	material := store.ConnectorCredential{
-		AccessToken: "gho_done", RefreshToken: "ghr_done", AuthorityDigest: authority,
+		AccessToken: "gho_done", RefreshToken: "ghr_done", AuthorityDigest: authority, GrantSequence: 1,
 		Scopes: connectors.ScopesForMode(provider, corev1alpha1.ConnectionModeReadOnly), ExpiresAt: time.Now().Add(time.Hour),
 	}
 	credentials.credentials[string(connection.UID)] = material
