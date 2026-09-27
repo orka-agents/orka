@@ -144,6 +144,9 @@ func TestValidateProviderSpec(t *testing.T) {
 		{name: "scope with control byte", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.Scopes.Read = []string{"read\x00profile"} }, want: "scopes.read entries"},
 		{name: "scope with non-ascii", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.Scopes.Write = []string{"répo"} }, want: "scopes.write entries"},
 		{name: "scope with quote", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.Scopes.Read = []string{`read"x`} }, want: "scopes.read entries"},
+		{name: "authorize parameter with control byte", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.AdditionalAuthorizeParameters = map[string]string{"audience": "a\x00b"}
+		}, want: "without control bytes"},
 		{name: "credential-like authorize parameter", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.OAuth.AdditionalAuthorizeParameters = map[string]string{"access_token": "x"}
 		}, want: "must not carry credentials"},
@@ -197,7 +200,7 @@ func TestValidateProviderSpec(t *testing.T) {
 		}, want: "keys must be lowercase"},
 		{name: "newline authorize parameter", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.OAuth.AdditionalAuthorizeParameters = map[string]string{"prompt": "a\nb"}
-		}, want: "line breaks"},
+		}, want: "without control bytes"},
 		{name: "no tools", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.Tools = nil }, want: "at least one"},
 		{name: "bad tool name", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.Tools[0].Name = "List-PRs" }, want: "snake_case"},
 		{name: "duplicate tool", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.Tools[1].Name = p.Spec.Tools[0].Name }, want: "more than once"},
@@ -500,6 +503,12 @@ func TestProviderAuthorityDigestAndConsent(t *testing.T) {
 		"audience": func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.OAuth.AdditionalAuthorizeParameters = map[string]string{"audience": "https://other.example.test"}
 		},
+		"http tool url":    func(p *corev1alpha1.ConnectorProvider) { p.Spec.Tools[2].HTTP.URL = "https://api.github.com/elsewhere" },
+		"http tool method": func(p *corev1alpha1.ConnectorProvider) { p.Spec.Tools[2].HTTP.Method = "DELETE" },
+		"http tool class":  func(p *corev1alpha1.ConnectorProvider) { p.Spec.Tools[2].Class = corev1alpha1.ConnectorToolClassWrite },
+		"new http tool": func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools = append(p.Spec.Tools, corev1alpha1.ConnectorTool{Name: "extra", Class: corev1alpha1.ConnectorToolClassRead, Source: corev1alpha1.ConnectorToolSourceHTTP, Description: "x", HTTP: &corev1alpha1.ConnectorHTTPTool{URL: "https://api.github.com/extra"}})
+		},
 		"client id":  func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.ClientID = "other" },
 		"token url":  func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://example.com/other-token" },
 		"secret ref": func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.ClientSecretRef.Key = "other" },
@@ -524,5 +533,20 @@ func TestProviderAuthorityDigestAndConsent(t *testing.T) {
 	again := withParams.DeepCopy()
 	if ProviderAuthorityDigest(withParams) != ProviderAuthorityDigest(again) || ProviderAuthorityDigest(withParams) == digest {
 		t.Fatal("authorize parameters must change the digest deterministically")
+	}
+	// The encoding is injective: values that embed delimiters cannot collide
+	// with a different parameter set.
+	collide := provider.DeepCopy()
+	collide.Spec.OAuth.AdditionalAuthorizeParameters = map[string]string{"a": "x\x00param:b\x00v"}
+	split := provider.DeepCopy()
+	split.Spec.OAuth.AdditionalAuthorizeParameters = map[string]string{"a": "x", "b": "v"}
+	if ProviderAuthorityDigest(collide) == ProviderAuthorityDigest(split) {
+		t.Fatal("delimiter-bearing values must not collide with a different parameter set")
+	}
+	// Built-in declarations do not carry a destination and do not move the digest.
+	builtinOnly := provider.DeepCopy()
+	builtinOnly.Spec.Tools = append(builtinOnly.Spec.Tools, corev1alpha1.ConnectorTool{Name: "list_issues", Class: corev1alpha1.ConnectorToolClassRead, Source: corev1alpha1.ConnectorToolSourceBuiltin})
+	if ProviderAuthorityDigest(builtinOnly) != digest {
+		t.Fatal("a new built-in declaration must not require consent again")
 	}
 }

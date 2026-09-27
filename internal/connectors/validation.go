@@ -210,8 +210,8 @@ func ValidateProviderSpec(provider *corev1alpha1.ConnectorProvider, knownBuiltin
 		if credentialLikeParameter(normalized) {
 			return invalid("oauth.additionalAuthorizeParameters must not carry credentials; the spec is public configuration")
 		}
-		if strings.ContainsAny(value, "\r\n") {
-			return invalid("oauth.additionalAuthorizeParameters values must not contain line breaks")
+		if !validAuthorizeParameterValue(value) {
+			return invalid("oauth.additionalAuthorizeParameters values must be printable text without control bytes")
 		}
 	}
 	return validateTools(provider.Spec.Tools, knownBuiltin)
@@ -309,6 +309,17 @@ func validateScopes(group string, scopes []string) *Issue {
 		seen[scope] = struct{}{}
 	}
 	return nil
+}
+
+// validAuthorizeParameterValue rejects control bytes (including NUL, CR, and
+// LF) in a static authorize parameter value.
+func validAuthorizeParameterValue(value string) bool {
+	for i := 0; i < len(value); i++ {
+		if value[i] < 0x20 || value[i] == 0x7F {
+			return false
+		}
+	}
+	return true
 }
 
 // validClientID applies the RFC 6749 client identifier grammar (VSCHAR,
@@ -588,23 +599,26 @@ func RevokesPerToken(provider *corev1alpha1.ConnectorProvider) bool {
 	return provider != nil && provider.Spec.OAuth.RevocationSemantics == corev1alpha1.ConnectorRevocationPerToken
 }
 
-// ProviderAuthorityDigest is a hex SHA-256 digest of the OAuth client identity
-// a consent is granted against: the provider UID, client ID, client secret
-// reference, authentication method, endpoints, and the static authorize
+// ProviderAuthorityDigest is a hex SHA-256 digest of everything a consent
+// authorizes a token to reach: the provider UID, client ID, client secret
+// reference, authentication method, endpoints, the static authorize
 // parameters (which can select the resource server a token targets, such as
-// an Auth0 audience). It carries no secret material and changes whenever a
-// held token would belong to a different client, target a different
-// resource, or be sent to a different token endpoint. Scopes are judged
-// separately by ScopesGranted.
+// an Auth0 audience), and the curated HTTP tool destinations the credential
+// is sent to. It carries no secret material and changes whenever a held token
+// would belong to a different client, target a different resource, or be sent
+// to a different endpoint, so such a change asks for consent again. Scopes
+// are judged separately by ScopesGranted. Every field is length-prefixed, so
+// the encoding is injective regardless of field contents.
 func ProviderAuthorityDigest(provider *corev1alpha1.ConnectorProvider) string {
 	if provider == nil {
 		return ""
 	}
 	oauth := provider.Spec.OAuth
-	sum := sha256.New()
 	parts := []string{
-		string(provider.UID), oauth.ClientID, oauth.ClientSecretRef.Name, oauth.ClientSecretRef.Key,
-		oauth.ClientAuthentication, oauth.AuthorizeURL, oauth.TokenURL, oauth.RevocationURL,
+		"uid", string(provider.UID), "clientID", oauth.ClientID,
+		"secretName", oauth.ClientSecretRef.Name, "secretKey", oauth.ClientSecretRef.Key,
+		"clientAuthentication", oauth.ClientAuthentication,
+		"authorizeURL", oauth.AuthorizeURL, "tokenURL", oauth.TokenURL, "revocationURL", oauth.RevocationURL,
 	}
 	keys := make([]string, 0, len(oauth.AdditionalAuthorizeParameters))
 	for key := range oauth.AdditionalAuthorizeParameters {
@@ -612,11 +626,22 @@ func ProviderAuthorityDigest(provider *corev1alpha1.ConnectorProvider) string {
 	}
 	slices.Sort(keys)
 	for _, key := range keys {
-		parts = append(parts, "param:"+key, oauth.AdditionalAuthorizeParameters[key])
+		parts = append(parts, "param", key, oauth.AdditionalAuthorizeParameters[key])
 	}
+	tools := make([]corev1alpha1.ConnectorTool, 0, len(provider.Spec.Tools))
+	for _, tool := range provider.Spec.Tools {
+		if tool.Source == corev1alpha1.ConnectorToolSourceHTTP && tool.HTTP != nil {
+			tools = append(tools, tool)
+		}
+	}
+	slices.SortFunc(tools, func(a, b corev1alpha1.ConnectorTool) int { return strings.Compare(a.Name, b.Name) })
+	for _, tool := range tools {
+		parts = append(parts, "tool", tool.Name, string(tool.Class), tool.HTTP.URL, tool.HTTP.Method)
+	}
+	sum := sha256.New()
 	for _, part := range parts {
+		_, _ = fmt.Fprintf(sum, "%d:", len(part))
 		_, _ = sum.Write([]byte(part))
-		_, _ = sum.Write([]byte{0})
 	}
 	return hex.EncodeToString(sum.Sum(nil))
 }
