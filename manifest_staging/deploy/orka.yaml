@@ -1143,6 +1143,7 @@ rules:
   - agentruntimes
   - agents
   - branchclaims
+  - connections
   - controllerepochs
   - externaleffects
   - promptattempts
@@ -1214,17 +1215,6 @@ rules:
   - get
   - patch
   - update
-- apiGroups:
-  - core.orka.ai
-  resources:
-  - connections
-  verbs:
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
 - apiGroups:
   - core.orka.ai
   resources:
