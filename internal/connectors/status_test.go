@@ -10,8 +10,9 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// Every completed consent raises the grant sequence, so a snapshot or
-// approval bound to one grant can tell a re-link of the same object apart.
+// The status mirrors the grant custody assigned to the committed material,
+// so a snapshot or approval bound to one grant can tell a re-link of the
+// same object apart.
 func TestApplyLinkedStatusRaisesGrantSequenceOnEveryCommit(t *testing.T) {
 	provider := &corev1alpha1.ConnectorProvider{
 		ObjectMeta: metav1.ObjectMeta{Name: "github", Namespace: "orka-system", UID: "provider-uid"},
@@ -24,12 +25,13 @@ func TestApplyLinkedStatusRaisesGrantSequenceOnEveryCommit(t *testing.T) {
 		Spec:       corev1alpha1.ConnectionSpec{ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}},
 	}
 	now := metav1.NewTime(time.Date(2026, 9, 27, 0, 0, 0, 0, time.UTC))
-	credential := store.ConnectorCredential{Scopes: []string{"read:user"}}
+	credential := store.ConnectorCredential{Scopes: []string{"read:user"}, GrantSequence: 1}
 
 	ApplyLinkedStatus(connection, provider, credential, now)
 	if connection.Status.GrantSequence != 1 {
 		t.Fatalf("first commit must record grant 1, got %d", connection.Status.GrantSequence)
 	}
+	credential.GrantSequence = 2
 	ApplyLinkedStatus(connection, provider, credential, now)
 	if connection.Status.GrantSequence != 2 {
 		t.Fatalf("re-link of the same Connection must record grant 2, got %d", connection.Status.GrantSequence)

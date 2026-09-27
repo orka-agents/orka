@@ -1374,6 +1374,11 @@ func TestConnectionCompletionRetryDoesNotOverwriteNewerCommit(t *testing.T) {
 	if err != nil || credential.AccessToken != "gho_secret_access-b" || credential.RefreshToken != "ghr_secret_refresh-b" {
 		t.Fatalf("custody = %+v err = %v, want the newer commit", credential, err)
 	}
+	// Each commit is a new grant, and the status mirrors custody's number:
+	// A took grant 1 (its status write failed), B took grant 2.
+	if credential.GrantSequence != 2 || stored.Status.GrantSequence != 2 {
+		t.Fatalf("grant after the newer commit: custody %d status %d, want 2 and 2", credential.GrantSequence, stored.Status.GrantSequence)
+	}
 	if resp, _ := h.complete(created.Connection.Name, completionA); resp.StatusCode != http.StatusConflict {
 		t.Fatal("the stale completion must be discarded")
 	}
@@ -1396,8 +1401,11 @@ func TestConnectionCompletionRetryDoesNotOverwriteNewerCommit(t *testing.T) {
 	if resp, raw := h.do(http.MethodGet, "/api/v1/connections/"+created.Connection.Name, nil); resp.StatusCode != http.StatusOK || !strings.Contains(string(raw), `"ready":true`) {
 		t.Fatalf("resumed link = %d %s, want ready", resp.StatusCode, raw)
 	}
-	if credential, err := h.store.GetConnectorCredential(context.Background(), ref); err != nil || credential.AccessToken != "gho_secret_access-c" {
-		t.Fatalf("custody after resumed retry = %+v err = %v", credential, err)
+	if credential, err := h.store.GetConnectorCredential(context.Background(), ref); err != nil || credential.AccessToken != "gho_secret_access-c" || credential.GrantSequence != 3 {
+		t.Fatalf("custody after resumed retry = %+v err = %v, want grant 3", credential, err)
+	}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: created.Connection.Name}, stored); err != nil || stored.Status.GrantSequence != 3 {
+		t.Fatalf("status grant after resumed retry = %d err = %v, want 3", stored.Status.GrantSequence, err)
 	}
 }
 
