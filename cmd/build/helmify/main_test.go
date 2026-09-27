@@ -164,9 +164,25 @@ func TestStaticChartConnectorsFlags(t *testing.T) {
 	if err == nil || !strings.Contains(output, "callbackBaseUrl is required") {
 		t.Fatalf("enabling connectors without a callback base URL must fail: %v\n%s", err, output)
 	}
+	// Linked-account tokens live only in the controller store: an ephemeral
+	// store would lose them on every Pod replacement.
+	// (harness-v2 already requires the persistent store; the rule guards the
+	// v1 compatibility mode too.)
+	output, err = helmTemplateStaticChart(t, "--show-only", "templates/deployment.yaml",
+		"--set-string", "controller.mode=harness-v1",
+		"--set-string", "harnessV1.image.digest=sha256:"+strings.Repeat("1", 64),
+		"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
+		"--set-string", "harnessV1.tls.existingSecret=harness-wrapper-tls",
+		"--set", "controller.connectors.enabled=true",
+		"--set", "controller.connectors.callbackBaseUrl=https://orka.example.test",
+		"--set", "store.persistence.enabled=false")
+	if err == nil || !strings.Contains(output, "controller.connectors.enabled requires store.persistence.enabled=true") {
+		t.Fatalf("enabling connectors on an ephemeral store must fail: %v\n%s", err, output)
+	}
 	rendered = requireHelmRender(t, "--show-only", "templates/deployment.yaml",
 		"--set", "controller.connectors.enabled=true",
-		"--set", "controller.connectors.callbackBaseUrl=https://orka.example.test")
+		"--set", "controller.connectors.callbackBaseUrl=https://orka.example.test",
+		"--set", "store.persistence.enabled=true")
 	for _, want := range []string{
 		"- --connectors-enabled=true\n",
 		"- \"--connector-callback-base-url=https://orka.example.test\"\n",
