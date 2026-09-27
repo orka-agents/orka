@@ -508,6 +508,12 @@ func (h *Handlers) CreateConnection(c fiber.Ctx) error {
 		// pending until this consent completes, whatever the stale
 		// conditions say.
 		markConsentPending(&response.Connection, mode)
+	} else if ready := meta.FindStatusCondition(connection.Status.Conditions, corev1alpha1.ConnectionConditionReady); ready != nil && ready.Status == metav1.ConditionTrue {
+		// A reused link narrowed to a mode its grant already covers stays
+		// usable; the spec write bumped the generation the conditions
+		// observe, which the controller catches up on its next pass.
+		response.Connection.Ready = true
+		response.Connection.State = corev1alpha1.ConnectionStateReady
 	}
 	return c.Status(fiber.StatusCreated).JSON(response)
 }

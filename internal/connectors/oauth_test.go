@@ -290,6 +290,12 @@ func TestTokenResponseEdgeCases(t *testing.T) {
 		"/ctl-refresh": func(w http.ResponseWriter) {
 			_, _ = w.Write([]byte(`{"access_token":"gho_a","refresh_token":"ghr\na","token_type":"bearer"}`))
 		},
+		"/many-scopes": func(w http.ResponseWriter) {
+			_, _ = w.Write([]byte(`{"access_token":"a","token_type":"bearer","scope":"` + strings.Repeat("s,", 300) + `s"}`))
+		},
+		"/long-scope": func(w http.ResponseWriter) {
+			_, _ = w.Write([]byte(`{"access_token":"a","token_type":"bearer","scope":"` + strings.Repeat("s", 300) + `"}`))
+		},
 		"/null-scope": func(w http.ResponseWriter) {
 			_, _ = w.Write([]byte(`{"access_token":"a","token_type":"bearer","scope":null}`))
 		},
@@ -314,6 +320,7 @@ func TestTokenResponseEdgeCases(t *testing.T) {
 		"/junk-exp": true, "/zero-exp": true, "/frac-exp": true, "/str-exp": false,
 		"/comma-scope": false, "/empty-scope": false, "/no-scope": false, "/null-scope": true, "/array-scope": true,
 		"/space-token": true, "/ctl-token": true, "/quote-token": true, "/ctl-refresh": true,
+		"/many-scopes": true, "/long-scope": true,
 	} {
 		cfg := testOAuthConfig()
 		cfg.TokenURL = "https://provider.example.test" + path

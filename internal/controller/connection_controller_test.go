@@ -867,3 +867,26 @@ func TestConnectionReconcilerExpiresRefreshlessLink(t *testing.T) {
 		}
 	}
 }
+
+func TestConnectionNextPassFollowsExpiry(t *testing.T) {
+	now := time.Now()
+	connection := testConnection("tenant", "github-alice", "github")
+	if got := connectionNextPass(connection, now); got != connectionRefreshInterval {
+		t.Fatalf("no expiry = %v, want the refresh interval", got)
+	}
+	soon := metav1.NewTime(now.Add(20 * time.Second))
+	connection.Status.ExpiresAt = &soon
+	if got := connectionNextPass(connection, now); got <= 0 || got > 21*time.Second {
+		t.Fatalf("near expiry = %v, want just past the expiry", got)
+	}
+	far := metav1.NewTime(now.Add(time.Hour))
+	connection.Status.ExpiresAt = &far
+	if got := connectionNextPass(connection, now); got != connectionRefreshInterval {
+		t.Fatalf("far expiry = %v, want the refresh interval", got)
+	}
+	past := metav1.NewTime(now.Add(-time.Minute))
+	connection.Status.ExpiresAt = &past
+	if got := connectionNextPass(connection, now); got != connectionRefreshInterval {
+		t.Fatalf("past expiry = %v, want the refresh interval", got)
+	}
+}

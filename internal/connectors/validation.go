@@ -39,7 +39,9 @@ import (
 )
 
 const (
-	ReasonAccepted          = "Accepted"
+	ReasonAccepted = "Accepted"
+	// ReasonConnectionsRemain holds a deleting provider while Connections reference it.
+	ReasonConnectionsRemain = "ConnectionsRemain"
 	ReasonInvalidProvider   = "InvalidProvider"
 	ReasonResolvedRefs      = "ResolvedRefs"
 	ReasonReferenceNotFound = "ReferenceNotFound"
@@ -710,7 +712,11 @@ func providerIssuerParts(provider *corev1alpha1.ConnectorProvider) []string {
 // the authorize-only parameters the person consented under.
 func providerConsentParts(provider *corev1alpha1.ConnectorProvider) []string {
 	oauth := provider.Spec.OAuth
-	parts := append(providerIssuerParts(provider), "authorizeURL", oauth.AuthorizeURL)
+	pkce := true
+	if oauth.PKCE != nil {
+		pkce = *oauth.PKCE
+	}
+	parts := append(providerIssuerParts(provider), "authorizeURL", oauth.AuthorizeURL, "pkce", strconv.FormatBool(pkce))
 	keys := make([]string, 0, len(oauth.AdditionalAuthorizeParameters))
 	for key := range oauth.AdditionalAuthorizeParameters {
 		keys = append(keys, key)

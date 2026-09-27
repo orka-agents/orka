@@ -332,6 +332,16 @@ func (c *OAuthClient) tokenRequest(ctx context.Context, cfg OAuthProviderConfig,
 		}
 		result.ScopePresent = true
 		result.Scopes = splitScopes(scope)
+		// The granted list is copied into Connection status, one API object:
+		// a provider cannot be allowed to make that object unwritable.
+		if len(result.Scopes) > maxGrantedScopes {
+			return TokenResponse{}, errors.New("token response grants more scopes than Orka records")
+		}
+		for _, granted := range result.Scopes {
+			if len(granted) > maxGrantedScopeBytes {
+				return TokenResponse{}, errors.New("token response grants a scope longer than Orka records")
+			}
+		}
 	}
 	seconds, present, err := parseExpiresIn(payload.ExpiresIn)
 	if err != nil {
@@ -433,6 +443,13 @@ func validCredentialToken(token string) bool {
 	}
 	return true
 }
+
+// maxGrantedScopes and maxGrantedScopeBytes bound the scope list a token
+// response may carry; they are far above any provider's real grant.
+const (
+	maxGrantedScopes     = 256
+	maxGrantedScopeBytes = 256
+)
 
 // maxCredentialTokenBytes bounds a single token; real bearer tokens are far
 // smaller, and a larger value cannot be a credential.

@@ -416,13 +416,27 @@ func (r *ConnectionReconciler) updateStatus(
 	connection.Status.ObservedGeneration = connection.Generation
 	meta.SetStatusCondition(&connection.Status.Conditions, providerResolved)
 	connection.Status.State = projectConnectionState(connection, providerResolved)
+	requeue := connectionNextPass(connection, time.Now())
 	if reflect.DeepEqual(before, &connection.Status) {
-		return ctrl.Result{RequeueAfter: connectionRefreshInterval}, reconcileErr
+		return ctrl.Result{RequeueAfter: requeue}, reconcileErr
 	}
 	if err := r.Status().Update(ctx, connection); err != nil {
 		return ctrl.Result{}, errors.Join(reconcileErr, err)
 	}
-	return ctrl.Result{RequeueAfter: connectionRefreshInterval}, reconcileErr
+	return ctrl.Result{RequeueAfter: requeue}, reconcileErr
+}
+
+// connectionNextPass schedules the next reconcile at the credential's known
+// expiry when that is sooner than the refresh interval, so a link whose
+// only material expires stops advertising itself promptly.
+func connectionNextPass(connection *corev1alpha1.Connection, now time.Time) time.Duration {
+	next := connectionRefreshInterval
+	if connection.Status.ExpiresAt != nil {
+		if until := connection.Status.ExpiresAt.Sub(now) + time.Second; until > 0 && until < next {
+			next = until
+		}
+	}
+	return next
 }
 
 // projectConnectionState derives the coarse state from the conditions. An

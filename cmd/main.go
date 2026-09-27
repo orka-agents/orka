@@ -1875,7 +1875,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	if connectorsEnabled {
+	// The provider reconciler runs whether or not new consent is enabled: it
+	// owns the finalizer that holds a provider while Connections reference
+	// it, and that finalizer must be released by a running controller even
+	// after an operator disables connectors.
+	{
 		knownBuiltinTools := map[string]struct{}{}
 		for _, name := range tools.KnownBuiltInToolNames() {
 			knownBuiltinTools[name] = struct{}{}
@@ -1897,7 +1901,7 @@ func main() {
 	// owns the custody finalizer, so Connections created earlier must still
 	// finalize (custody deleted, tokens revoked where the OAuth client is
 	// available) instead of wedging in Terminating. New consent stays
-	// closed because the API routes and the provider reconciler are gated.
+	// closed because the API routes are gated.
 	connectionReconciler := &controller.ConnectionReconciler{
 		Client:      mgr.GetClient(),
 		APIReader:   mgr.GetAPIReader(),

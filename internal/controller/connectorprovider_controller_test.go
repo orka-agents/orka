@@ -22,6 +22,7 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/connectors"
@@ -227,5 +228,46 @@ func TestConnectorProviderRequestsForSecret(t *testing.T) {
 	requests := reconciler.requestsForSecret(context.Background(), connectorClientSecret("tenant"))
 	if len(requests) != 1 || requests[0].Name != "github" || requests[0].Namespace != "tenant" {
 		t.Fatalf("requests = %#v, want only tenant/github", requests)
+	}
+}
+
+func TestConnectorProviderDeletionWaitsForConnections(t *testing.T) {
+	scheme := connectorTestScheme(t)
+	provider := acceptedConnectorProvider()
+	now := metav1.Now()
+	provider.DeletionTimestamp = &now
+	provider.Finalizers = []string{ConnectorProviderConnectionsFinalizer}
+	connection := testConnection("tenant", "github-alice", "github")
+	unrelated := testConnection("tenant", "other-bob", "other")
+	c := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(provider, connection, unrelated, connectorClientSecret("tenant")).
+		WithStatusSubresource(&corev1alpha1.ConnectorProvider{}).Build()
+	reconciler := &ConnectorProviderReconciler{Client: c, Scheme: scheme}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "tenant", Name: "github"}}
+	// A Connection still references the provider: deletion is held and the
+	// condition says why, so the tokens it holds can still be revoked
+	// against the issuing client at disconnect.
+	result, err := reconciler.Reconcile(context.Background(), request)
+	if err != nil || result.RequeueAfter == 0 {
+		t.Fatalf("held deletion: result = %+v err = %v", result, err)
+	}
+	held := &corev1alpha1.ConnectorProvider{}
+	if err := c.Get(context.Background(), request.NamespacedName, held); err != nil {
+		t.Fatal(err)
+	}
+	accepted := meta.FindStatusCondition(held.Status.Conditions, corev1alpha1.ConnectorProviderConditionAccepted)
+	if !controllerutil.ContainsFinalizer(held, ConnectorProviderConnectionsFinalizer) || accepted == nil || accepted.Reason != connectors.ReasonConnectionsRemain {
+		t.Fatalf("held provider = finalizers %v condition %+v", held.Finalizers, accepted)
+	}
+	// Once the last referencing Connection is gone the provider is released;
+	// a Connection to another provider does not hold it.
+	if err := c.Delete(context.Background(), connection); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	released := &corev1alpha1.ConnectorProvider{}
+	if err := c.Get(context.Background(), request.NamespacedName, released); err == nil && controllerutil.ContainsFinalizer(released, ConnectorProviderConnectionsFinalizer) {
+		t.Fatalf("released provider still holds the finalizer: %v", released.Finalizers)
 	}
 }

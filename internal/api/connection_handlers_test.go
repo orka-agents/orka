@@ -1698,3 +1698,24 @@ func TestValidateConnectorConfigRefusesDelimiterOnlyBases(t *testing.T) {
 		t.Fatalf("a plain origin must pass the URL checks: %v", err)
 	}
 }
+
+func TestConnectionCreateNarrowingReusedLinkStaysReady(t *testing.T) {
+	h := newConnectorTestHarness(t, acceptedTestProvider())
+	h.grantScope = "read:user repo"
+	created := h.create("readWrite")
+	h.link(created)
+	// Reusing the Ready readWrite link with readOnly narrows it: the grant
+	// already covers the narrower mode, so the response stays Ready even
+	// though the spec write bumped the generation the conditions observe.
+	resp, raw := h.do(http.MethodPost, "/api/v1/connections", map[string]string{"provider": "github", "mode": "readOnly"})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("narrowing create = %d %s", resp.StatusCode, raw)
+	}
+	var reused ConnectionAuthorizeResponse
+	if err := json.Unmarshal(raw, &reused); err != nil {
+		t.Fatal(err)
+	}
+	if !reused.Connection.Ready || reused.Connection.State != corev1alpha1.ConnectionStateReady || reused.Connection.Mode != corev1alpha1.ConnectionModeReadOnly {
+		t.Fatalf("narrowed reuse view = %+v, want Ready in the narrower mode", reused.Connection)
+	}
+}

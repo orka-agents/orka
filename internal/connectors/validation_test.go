@@ -587,6 +587,14 @@ func TestProviderAuthorityDigestAndConsent(t *testing.T) {
 	if ProviderIssuerDigest(moved) == ProviderIssuerDigest(provider) {
 		t.Fatal("the token URL must move the issuer digest")
 	}
+	// The effective PKCE setting is part of what the browser's consent was
+	// started with; flipping it mid-flow must fail the callback's fence.
+	noPKCE := provider.DeepCopy()
+	off := false
+	noPKCE.Spec.OAuth.PKCE = &off
+	if ProviderAuthorityDigest(noPKCE) == ProviderAuthorityDigest(provider) || ProviderIssuerDigest(noPKCE) != ProviderIssuerDigest(provider) {
+		t.Fatal("the PKCE setting must move the authority digest but not the issuer digest")
+	}
 	// Built-in declarations do not carry a destination and do not move the digest.
 	builtinOnly := provider.DeepCopy()
 	builtinOnly.Spec.Tools = append(builtinOnly.Spec.Tools, corev1alpha1.ConnectorTool{Name: "list_issues", Class: corev1alpha1.ConnectorToolClassRead, Source: corev1alpha1.ConnectorToolSourceBuiltin})

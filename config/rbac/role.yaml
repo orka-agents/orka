@@ -235,6 +235,15 @@ rules:
   - core.orka.ai
   resources:
   - connectorproviders
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - core.orka.ai
+  resources:
   - outboundaccesspolicies
   verbs:
   - get
