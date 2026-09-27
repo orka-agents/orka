@@ -33,6 +33,14 @@ func testConnection(namespace, name, provider string) *corev1alpha1.Connection {
 	}
 }
 
+// scopedConnectorProvider is an accepted provider whose read and write scopes
+// differ, so mode changes have observable scope requirements.
+func scopedConnectorProvider() *corev1alpha1.ConnectorProvider {
+	provider := acceptedConnectorProvider()
+	provider.Spec.OAuth.Scopes = corev1alpha1.ConnectorScopes{Read: []string{"read:user"}, Write: []string{"repo"}}
+	return provider
+}
+
 func acceptedConnectorProvider() *corev1alpha1.ConnectorProvider {
 	provider := testConnectorProvider("tenant", "github")
 	provider.Status.ObservedGeneration = provider.Generation
@@ -45,15 +53,16 @@ func acceptedConnectorProvider() *corev1alpha1.ConnectorProvider {
 
 func TestConnectionReconcilerProviderResolution(t *testing.T) {
 	tests := []struct {
-		name       string
-		objects    []runtime.Object
-		existing   *corev1alpha1.ConnectionStatus
-		mode       string
-		generation int64
-		wantStatus metav1.ConditionStatus
-		wantReason string
-		wantState  string
-		wantReady  metav1.ConditionStatus
+		name        string
+		objects     []runtime.Object
+		existing    *corev1alpha1.ConnectionStatus
+		mode        string
+		generation  int64
+		wantStatus  metav1.ConditionStatus
+		wantReason  string
+		wantState   string
+		wantReady   metav1.ConditionStatus
+		wantGranted metav1.ConditionStatus
 	}{
 		{
 			name:       "provider missing",
@@ -129,30 +138,67 @@ func TestConnectionReconcilerProviderResolution(t *testing.T) {
 			wantState:  corev1alpha1.ConnectionStateReady,
 		},
 		{
-			name:    "widened to readWrite after consent demotes ready",
-			objects: []runtime.Object{acceptedConnectorProvider()},
+			name:    "widened to readWrite after consent projects pending without touching ready",
+			objects: []runtime.Object{scopedConnectorProvider()},
 			existing: &corev1alpha1.ConnectionStatus{
-				State:      corev1alpha1.ConnectionStateReady,
-				Conditions: []metav1.Condition{{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonLinked, ObservedGeneration: 1}},
+				State:         corev1alpha1.ConnectionStateReady,
+				GrantedScopes: []string{"read:user"},
+				Conditions:    []metav1.Condition{{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonLinked, ObservedGeneration: 1}},
 			},
-			mode:       corev1alpha1.ConnectionModeReadWrite,
-			generation: 2,
-			wantStatus: metav1.ConditionTrue,
-			wantState:  corev1alpha1.ConnectionStatePending,
-			wantReady:  metav1.ConditionFalse,
+			mode:        corev1alpha1.ConnectionModeReadWrite,
+			generation:  2,
+			wantStatus:  metav1.ConditionTrue,
+			wantState:   corev1alpha1.ConnectionStatePending,
+			wantReady:   metav1.ConditionTrue,
+			wantGranted: metav1.ConditionFalse,
 		},
 		{
-			name:    "narrowed to readOnly after consent keeps ready",
-			objects: []runtime.Object{acceptedConnectorProvider()},
+			name:    "narrowed back to readOnly restores readiness",
+			objects: []runtime.Object{scopedConnectorProvider()},
 			existing: &corev1alpha1.ConnectionStatus{
-				State:      corev1alpha1.ConnectionStateReady,
-				Conditions: []metav1.Condition{{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonLinked, ObservedGeneration: 1}},
+				State:         corev1alpha1.ConnectionStatePending,
+				GrantedScopes: []string{"read:user"},
+				Conditions: []metav1.Condition{
+					{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonLinked, ObservedGeneration: 1},
+					{Type: corev1alpha1.ConnectionConditionScopesGranted, Status: metav1.ConditionFalse, Reason: corev1alpha1.ConnectionReasonConsentRequired, ObservedGeneration: 2},
+				},
 			},
-			mode:       corev1alpha1.ConnectionModeReadOnly,
-			generation: 2,
-			wantStatus: metav1.ConditionTrue,
-			wantState:  corev1alpha1.ConnectionStateReady,
-			wantReady:  metav1.ConditionTrue,
+			mode:        corev1alpha1.ConnectionModeReadOnly,
+			generation:  3,
+			wantStatus:  metav1.ConditionTrue,
+			wantState:   corev1alpha1.ConnectionStateReady,
+			wantReady:   metav1.ConditionTrue,
+			wantGranted: metav1.ConditionTrue,
+		},
+		{
+			name: "provider that starts requiring more scopes asks for consent again",
+			objects: func() []runtime.Object {
+				provider := scopedConnectorProvider()
+				provider.Spec.OAuth.Scopes.Read = []string{"read:user", "read:org"}
+				return []runtime.Object{provider}
+			}(),
+			existing: &corev1alpha1.ConnectionStatus{
+				State:         corev1alpha1.ConnectionStateReady,
+				GrantedScopes: []string{"read:user"},
+				Conditions:    []metav1.Condition{{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonLinked, ObservedGeneration: 1}},
+			},
+			wantStatus:  metav1.ConditionTrue,
+			wantState:   corev1alpha1.ConnectionStatePending,
+			wantReady:   metav1.ConditionTrue,
+			wantGranted: metav1.ConditionFalse,
+		},
+		{
+			name:    "readWrite consent covers a readWrite mode",
+			objects: []runtime.Object{scopedConnectorProvider()},
+			existing: &corev1alpha1.ConnectionStatus{
+				GrantedScopes: []string{"read:user", "repo"},
+				Conditions:    []metav1.Condition{{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonLinked, ObservedGeneration: 1}},
+			},
+			mode:        corev1alpha1.ConnectionModeReadWrite,
+			wantStatus:  metav1.ConditionTrue,
+			wantState:   corev1alpha1.ConnectionStateReady,
+			wantReady:   metav1.ConditionTrue,
+			wantGranted: metav1.ConditionTrue,
 		},
 		{
 			name:    "ready condition false without recorded state",
@@ -212,6 +258,12 @@ func TestConnectionReconcilerProviderResolution(t *testing.T) {
 				}
 				if tt.wantReady != "" && ready.Status != tt.wantReady {
 					t.Fatalf("Ready = %#v, want %s", ready, tt.wantReady)
+				}
+			}
+			if tt.wantGranted != "" {
+				granted := meta.FindStatusCondition(updated.Status.Conditions, corev1alpha1.ConnectionConditionScopesGranted)
+				if granted == nil || granted.Status != tt.wantGranted {
+					t.Fatalf("ScopesGranted = %#v, want %s", granted, tt.wantGranted)
 				}
 			}
 		})

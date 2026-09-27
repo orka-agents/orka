@@ -11,6 +11,7 @@ package connectors
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -18,10 +19,12 @@ import (
 	"net/url"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -220,6 +223,11 @@ func validateEndpointURL(field, raw string, required bool) *Issue {
 	if host == "" || strings.HasSuffix(host, ".") || strings.Contains(host, "%") {
 		return invalid(fmt.Sprintf("oauth.%s host must not be empty, end with a dot, or carry an IPv6 zone", field))
 	}
+	if port := parsed.Port(); port != "" {
+		if number, err := strconv.Atoi(port); err != nil || number < 1 || number > 65535 {
+			return invalid(fmt.Sprintf("oauth.%s port must be between 1 and 65535", field))
+		}
+	}
 	if hostDenied(strings.ToLower(host)) {
 		return invalid(fmt.Sprintf("oauth.%s host is not allowed", field))
 	}
@@ -282,11 +290,45 @@ func validateTools(tools []corev1alpha1.ConnectorTool, knownBuiltin BuiltinToolC
 			if strings.TrimSpace(tool.Description) == "" {
 				return invalid(fmt.Sprintf("HTTP tool %q requires a description", tool.Name))
 			}
+			if issue := validateToolParameters(tool.Name, tool.Parameters); issue != nil {
+				return issue
+			}
 			if issue := validateHTTPTool(tool.Name, *tool.HTTP); issue != nil {
 				return issue
 			}
 		default:
 			return invalid(fmt.Sprintf("tool %q source must be Builtin or HTTP", tool.Name))
+		}
+	}
+	return nil
+}
+
+// validateToolParameters requires an object-shaped JSON Schema, which is the
+// only shape LLM tool definitions accept.
+func validateToolParameters(name string, parameters *apiextensionsv1.JSON) *Issue {
+	if parameters == nil || len(parameters.Raw) == 0 {
+		return nil
+	}
+	var schema map[string]json.RawMessage
+	if err := json.Unmarshal(parameters.Raw, &schema); err != nil || schema == nil {
+		return invalid(fmt.Sprintf("HTTP tool %q parameters must be a JSON Schema object", name))
+	}
+	if raw, ok := schema["type"]; ok {
+		var typeName string
+		if err := json.Unmarshal(raw, &typeName); err != nil || typeName != "object" {
+			return invalid(fmt.Sprintf("HTTP tool %q parameters must describe an object", name))
+		}
+	}
+	if raw, ok := schema["properties"]; ok {
+		var properties map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &properties); err != nil {
+			return invalid(fmt.Sprintf("HTTP tool %q parameters.properties must be an object", name))
+		}
+	}
+	if raw, ok := schema["required"]; ok {
+		var required []string
+		if err := json.Unmarshal(raw, &required); err != nil {
+			return invalid(fmt.Sprintf("HTTP tool %q parameters.required must be an array of strings", name))
 		}
 	}
 	return nil
@@ -387,6 +429,37 @@ func ToolsForMode(provider *corev1alpha1.ConnectorProvider, mode string) []corev
 		result = append(result, tool)
 	}
 	return result
+}
+
+// ScopesCover reports whether every required scope was granted. No required
+// scopes means any grant suffices.
+func ScopesCover(granted, required []string) bool {
+	have := make(map[string]struct{}, len(granted))
+	for _, scope := range granted {
+		have[scope] = struct{}{}
+	}
+	for _, scope := range required {
+		if _, ok := have[scope]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// ConnectionLinked reports whether a Connection currently holds usable
+// material for its mode: consent completed (Ready) and the granted scopes
+// cover the mode (ScopesGranted, maintained by the controller).
+func ConnectionLinked(connection *corev1alpha1.Connection) bool {
+	if connection == nil || !connection.DeletionTimestamp.IsZero() {
+		return false
+	}
+	for _, conditionType := range []string{corev1alpha1.ConnectionConditionReady, corev1alpha1.ConnectionConditionScopesGranted} {
+		condition := meta.FindStatusCondition(connection.Status.Conditions, conditionType)
+		if condition == nil || condition.Status != metav1.ConditionTrue {
+			return false
+		}
+	}
+	return true
 }
 
 // ScopesForMode returns the OAuth scopes to request for a Connection mode.

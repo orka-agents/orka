@@ -14,6 +14,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -93,6 +94,28 @@ func TestValidateProviderSpec(t *testing.T) {
 			p.Spec.Tools[2].HTTP.URL = "https://api.default.svc.cluster.local/x"
 		}, want: "host is not allowed"},
 		{name: "public host with local label", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://local.example.com/token" }},
+		{name: "port too large", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://example.com:99999/token" }, want: "port must be between"},
+		{name: "port zero", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.AuthorizeURL = "https://example.com:0/authorize" }, want: "port must be between"},
+		{name: "explicit port ok", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://example.com:8443/token" }},
+		{name: "http tool bad port", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.Tools[2].HTTP.URL = "https://api.github.com:70000/x" }, want: "port must be between"},
+		{name: "parameters not an object", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].Parameters = &apiextensionsv1.JSON{Raw: []byte(`"string"`)}
+		}, want: "parameters must be a JSON Schema object"},
+		{name: "parameters array", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].Parameters = &apiextensionsv1.JSON{Raw: []byte(`[]`)}
+		}, want: "parameters must be a JSON Schema object"},
+		{name: "parameters wrong type", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].Parameters = &apiextensionsv1.JSON{Raw: []byte(`{"type":"string"}`)}
+		}, want: "parameters must describe an object"},
+		{name: "parameters bad properties", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].Parameters = &apiextensionsv1.JSON{Raw: []byte(`{"type":"object","properties":[]}`)}
+		}, want: "parameters.properties must be an object"},
+		{name: "parameters bad required", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].Parameters = &apiextensionsv1.JSON{Raw: []byte(`{"type":"object","required":"q"}`)}
+		}, want: "parameters.required must be an array"},
+		{name: "parameters ok", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].Parameters = &apiextensionsv1.JSON{Raw: []byte(`{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}`)}
+		}},
 		{name: "uppercase denied host", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.OAuth.TokenURL = "https://METADATA.GOOGLE.INTERNAL/token"
 		}, want: "tokenURL host is not allowed"},
@@ -341,5 +364,29 @@ func TestIssueError(t *testing.T) {
 	var nilIssue *Issue
 	if nilIssue.Error() == "" || (&Issue{Message: "m"}).Error() != "m" {
 		t.Fatal("Issue.Error is wrong")
+	}
+}
+
+func TestScopesCoverAndConnectionLinked(t *testing.T) {
+	if !ScopesCover([]string{"a", "b"}, []string{"a"}) || ScopesCover([]string{"a"}, []string{"a", "b"}) || !ScopesCover(nil, nil) || ScopesCover(nil, []string{"a"}) {
+		t.Fatal("ScopesCover is wrong")
+	}
+	connection := &corev1alpha1.Connection{}
+	if ConnectionLinked(connection) || ConnectionLinked(nil) {
+		t.Fatal("no conditions must not be linked")
+	}
+	connection.Status.Conditions = []metav1.Condition{{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionTrue}}
+	if ConnectionLinked(connection) {
+		t.Fatal("Ready alone is not linked")
+	}
+	connection.Status.Conditions = append(connection.Status.Conditions, metav1.Condition{Type: corev1alpha1.ConnectionConditionScopesGranted, Status: metav1.ConditionTrue})
+	if !ConnectionLinked(connection) {
+		t.Fatal("Ready plus ScopesGranted is linked")
+	}
+	deleting := connection.DeepCopy()
+	now := metav1.Now()
+	deleting.DeletionTimestamp = &now
+	if ConnectionLinked(deleting) {
+		t.Fatal("a deleting connection is not linked")
 	}
 }
