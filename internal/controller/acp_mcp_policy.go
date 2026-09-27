@@ -244,9 +244,24 @@ func adjustInputsForConnectorTools(
 		return task, agent, nil
 	}
 	allowed := effectiveACPAllowedTools(task, agent)
-	visible, connectorWrite, err := FilterConnectorToolsForRequester(ctx, reader, task, allowed)
+	// Provider-native tools take precedence over a Tool resource of the same
+	// name, so those names are never judged as connector-backed.
+	candidates := allowed
+	if native := providerNativeTools[strings.ToLower(string(agent.Spec.Runtime.Type))]; len(native) > 0 {
+		candidates = make([]string, 0, len(allowed))
+		for _, name := range allowed {
+			if _, ok := native[strings.ToLower(name)]; !ok {
+				candidates = append(candidates, name)
+			}
+		}
+	}
+	hidden, connectorWrite, err := FilterConnectorToolsForRequester(ctx, reader, task, candidates)
 	if err != nil {
 		return nil, nil, fmt.Errorf("apply connector tool visibility: %w", err)
+	}
+	visible := allowed
+	if len(hidden) != len(candidates) {
+		visible = withoutTools(allowed, withoutTools(candidates, hidden))
 	}
 	supportsApprovals := runtimeSupportsMCPApprovals(harnessv2.RuntimeProfile{ProviderKind: string(agent.Spec.Runtime.Type)})
 	if !supportsApprovals && len(connectorWrite) > 0 {

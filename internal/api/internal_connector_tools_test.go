@@ -166,9 +166,13 @@ func newConnectorToolHarness(t *testing.T, resolver outboundaccess.Resolver, ena
 	if frozenTools == nil {
 		frozenTools = []string{"gh_search", "gh_write", "plain"}
 	}
+	policy := &corev1alpha1.OutboundAccessPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "github-conn", Namespace: "default"},
+		Spec:       corev1alpha1.OutboundAccessPolicySpec{Connection: &corev1alpha1.ConnectionOutboundAccess{ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}}},
+	}
 	digests := map[string]string{}
 	for _, name := range []string{"gh_search", "gh_write"} {
-		digest, err := approvals.TargetSpecDigest(fixtureTools[name].Spec)
+		digest, err := controller.ConnectorToolDispatchDigest(fixtureTools[name].Spec, policy.Spec)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -194,10 +198,6 @@ func newConnectorToolHarness(t *testing.T, resolver outboundaccess.Resolver, ena
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: "default"},
 		Spec:       corev1alpha1.AgentSpec{Tools: []corev1alpha1.ToolReference{{Name: "gh_search"}, {Name: "gh_write"}, {Name: "plain"}}},
-	}
-	policy := &corev1alpha1.OutboundAccessPolicy{
-		ObjectMeta: metav1.ObjectMeta{Name: "github-conn", Namespace: "default"},
-		Spec:       corev1alpha1.OutboundAccessPolicySpec{Connection: &corev1alpha1.ConnectionOutboundAccess{ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}}},
 	}
 	connection := &corev1alpha1.Connection{
 		ObjectMeta: metav1.ObjectMeta{Name: "github-abc", Namespace: "default", UID: "conn-uid", Generation: 2},
@@ -698,5 +698,26 @@ func TestExecuteConnectorToolRefusesApprovedCallsWithoutLedger(t *testing.T) {
 	// Read calls have no effect record and still run.
 	if status, body := postConnectorTool(t, app, "gh_search", `{"arguments":{"q":"x"}}`); status != http.StatusFailedDependency {
 		t.Fatalf("read without ledger = %d %s", status, body)
+	}
+}
+
+func TestExecuteConnectorToolRefusesPolicyChangedSinceDispatch(t *testing.T) {
+	resolver := &stubOutboundResolver{err: errors.New("the requester has no connection to this provider")}
+	app, _, c := newConnectorToolAppWithOptions(t, resolver, true, connectorToolAppOptions{mode: "readOnly"})
+	// The policy keeps its name and provider but changes how the credential
+	// is injected after dispatch; the frozen dispatch digest covers it.
+	live := &corev1alpha1.OutboundAccessPolicy{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "github-conn"}, live); err != nil {
+		t.Fatal(err)
+	}
+	live.Spec.Connection.Output = &corev1alpha1.OutboundCredentialOutput{Header: "X-Linked-Token"}
+	if err := c.Update(context.Background(), live); err != nil {
+		t.Fatal(err)
+	}
+	if status, body := postConnectorTool(t, app, "gh_search", `{"arguments":{"q":"x"}}`); status != http.StatusConflict || !strings.Contains(body, "changed since dispatch") {
+		t.Fatalf("policy output drift = %d %s", status, body)
+	}
+	if resolver.request.PolicyName != "" {
+		t.Fatal("a changed policy must not reach credential resolution")
 	}
 }

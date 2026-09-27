@@ -28,7 +28,6 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/aitools"
-	"github.com/orka-agents/orka/internal/approvals"
 	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/executionmode"
@@ -3024,8 +3023,8 @@ func TestJobBuilder_buildEnvVars_ConnectorWriteToolsRequireApprovalAndHideOnRead
 	if err := json.Unmarshal([]byte(digestsEnv.Value), &digests); err != nil {
 		t.Fatalf("%s = %q: %v", workerenv.ConnectorToolDigests, digestsEnv.Value, err)
 	}
-	wantRead, _ := approvals.TargetSpecDigest(connectorTool("gh_read", corev1alpha1.AgentRuntimeBrokeredToolClassRead).Spec)
-	wantWrite, _ := approvals.TargetSpecDigest(connectorTool("gh_write", corev1alpha1.AgentRuntimeBrokeredToolClassWrite).Spec)
+	wantRead, _ := ConnectorToolDispatchDigest(connectorTool("gh_read", corev1alpha1.AgentRuntimeBrokeredToolClassRead).Spec, policy.Spec)
+	wantWrite, _ := ConnectorToolDispatchDigest(connectorTool("gh_write", corev1alpha1.AgentRuntimeBrokeredToolClassWrite).Spec, policy.Spec)
 	if len(digests) != 2 || digests["gh_read"] != wantRead || digests["gh_write"] != wantWrite {
 		t.Fatalf("%s = %v, want both connector tools digested", workerenv.ConnectorToolDigests, digests)
 	}

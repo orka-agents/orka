@@ -29,6 +29,7 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/tools"
 	workerexecutor "github.com/orka-agents/orka/internal/worker"
 	"github.com/orka-agents/orka/internal/workerenv"
 )
@@ -39,8 +40,21 @@ type connectorToolInfo struct {
 	PolicyName string
 	Provider   string
 	Class      corev1alpha1.AgentRuntimeBrokeredToolClass
-	// SpecDigest is the approval-target digest of the Tool spec as read.
+	// SpecDigest is the dispatch digest of the Tool spec and its policy spec
+	// as read; see ConnectorToolDispatchDigest.
 	SpecDigest string
+}
+
+// ConnectorToolDispatchDigest digests everything that shapes a connector-backed
+// call besides the person's Connection: the Tool spec (URL, method, headers,
+// schema) and the connection-mode policy that injects the credential (output
+// header and prefix). The Job builder freezes it at dispatch and the
+// controller executes only a definition that still matches.
+func ConnectorToolDispatchDigest(tool corev1alpha1.ToolSpec, policy corev1alpha1.OutboundAccessPolicySpec) (string, error) {
+	return approvals.TargetSpecDigest(struct {
+		Tool   corev1alpha1.ToolSpec                 `json:"tool"`
+		Policy corev1alpha1.OutboundAccessPolicySpec `json:"policy"`
+	}{Tool: tool, Policy: policy})
 }
 
 // connectorToolsFor returns, for every named Tool backed by a connection-mode
@@ -58,6 +72,11 @@ func connectorToolsFor(ctx context.Context, reader client.Reader, namespace stri
 			continue
 		}
 		seen[name] = struct{}{}
+		// A built-in tool wins over a Tool resource of the same name in every
+		// runtime, so such a resource is never the implementation here.
+		if _, builtin := tools.DefaultRegistry.Get(name); builtin {
+			continue
+		}
 		tool := &corev1alpha1.Tool{}
 		if err := reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, tool); err != nil {
 			if apierrors.IsNotFound(err) {
@@ -84,7 +103,7 @@ func connectorToolsFor(ctx context.Context, reader client.Reader, namespace stri
 		if policy == nil || policy.Spec.Connection == nil {
 			continue
 		}
-		specDigest, err := approvals.TargetSpecDigest(tool.Spec)
+		specDigest, err := ConnectorToolDispatchDigest(tool.Spec, policy.Spec)
 		if err != nil {
 			return nil, fmt.Errorf("digest tool %q: %w", name, err)
 		}

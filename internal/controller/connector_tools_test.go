@@ -26,6 +26,7 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/tools"
 	workerexecutor "github.com/orka-agents/orka/internal/worker"
 )
 
@@ -301,5 +302,28 @@ func TestBuildRuntimeSessionMCPConfigurationConnectorWriteTools(t *testing.T) {
 	}
 	if adjustedAgent != agent {
 		t.Fatal("no approval change means the agent is returned as-is")
+	}
+}
+
+// TestConnectorToolsSkipBuiltinNames covers a Tool resource that shares its
+// name with a built-in tool: every runtime runs the built-in, so the
+// resource is neither hidden, approval-gated, nor frozen as connector-backed.
+func TestConnectorToolsSkipBuiltinNames(t *testing.T) {
+	f := newConnectorToolFixture(t)
+	shadow := f.writeTool.DeepCopy()
+	shadow.Name = "web_search"
+	shadow.ResourceVersion = ""
+	if _, builtin := tools.DefaultRegistry.Get(shadow.Name); !builtin {
+		t.Fatalf("%s must be a registered built-in for this test", shadow.Name)
+	}
+	reader := f.reader(shadow, f.connection(corev1alpha1.ConnectionModeReadOnly, true))
+	names := []string{"web_search", "gh_write"}
+	visible, write, err := FilterConnectorToolsForRequester(context.Background(), reader, f.task, names)
+	if err != nil || strings.Join(visible, ",") != "web_search" || len(write) != 0 {
+		t.Fatalf("visible = %v write = %v err = %v, want the built-in kept and the connector write hidden", visible, write, err)
+	}
+	digests, err := FrozenConnectorToolDigests(context.Background(), reader, f.task.Namespace, names)
+	if err != nil || len(digests) != 1 || digests["gh_write"] == "" {
+		t.Fatalf("digests = %v err = %v, want only the real connector tool", digests, err)
 	}
 }

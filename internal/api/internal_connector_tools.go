@@ -127,7 +127,7 @@ func (h *InternalHandlers) ExecuteConnectorTool(c fiber.Ctx) error {
 	if reader == nil {
 		reader = h.k8sClient
 	}
-	tool, err := loadConnectorBackedTool(ctx, reader, namespace, toolName)
+	tool, policy, err := loadConnectorBackedTool(ctx, reader, namespace, toolName)
 	if err != nil {
 		return err
 	}
@@ -150,9 +150,10 @@ func (h *InternalHandlers) ExecuteConnectorTool(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusForbidden, "tool was not in the tool list dispatched with the task's job")
 	}
 	// Only the definition the worker was dispatched with executes: a Tool
-	// retargeted after dispatch (URL, method, headers, schema) is refused
-	// whether or not the call needs an approval.
-	liveDigest, err := approvals.TargetSpecDigest(tool.Spec)
+	// retargeted after dispatch (URL, method, headers, schema) or a policy
+	// whose credential output changed is refused whether or not the call
+	// needs an approval.
+	liveDigest, err := controller.ConnectorToolDispatchDigest(tool.Spec, policy.Spec)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to digest tool configuration")
 	}
@@ -372,29 +373,29 @@ func (h *InternalHandlers) replayConnectorToolEffect(ctx context.Context, run co
 
 // loadConnectorBackedTool returns the Tool only when it sits behind a
 // connection-mode policy; every other Tool runs in the worker Pod.
-func loadConnectorBackedTool(ctx context.Context, reader client.Reader, namespace, toolName string) (*corev1alpha1.Tool, error) {
+func loadConnectorBackedTool(ctx context.Context, reader client.Reader, namespace, toolName string) (*corev1alpha1.Tool, *corev1alpha1.OutboundAccessPolicy, error) {
 	tool := &corev1alpha1.Tool{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: toolName}, tool); err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, fiber.NewError(fiber.StatusNotFound, "tool not found")
+			return nil, nil, fiber.NewError(fiber.StatusNotFound, "tool not found")
 		}
-		return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to read tool")
+		return nil, nil, fiber.NewError(fiber.StatusInternalServerError, "failed to read tool")
 	}
 	if tool.Spec.HTTP == nil || tool.Spec.HTTP.OutboundAccessPolicyRef == nil {
-		return nil, fiber.NewError(fiber.StatusForbidden, errConnectorToolOnly)
+		return nil, nil, fiber.NewError(fiber.StatusForbidden, errConnectorToolOnly)
 	}
 	policy := &corev1alpha1.OutboundAccessPolicy{}
 	policyKey := types.NamespacedName{Namespace: namespace, Name: tool.Spec.HTTP.OutboundAccessPolicyRef.Name}
 	if err := reader.Get(ctx, policyKey, policy); err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, fiber.NewError(fiber.StatusForbidden, errConnectorToolOnly)
+			return nil, nil, fiber.NewError(fiber.StatusForbidden, errConnectorToolOnly)
 		}
-		return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to read outbound access policy")
+		return nil, nil, fiber.NewError(fiber.StatusInternalServerError, "failed to read outbound access policy")
 	}
 	if policy.Spec.Connection == nil {
-		return nil, fiber.NewError(fiber.StatusForbidden, errConnectorToolOnly)
+		return nil, nil, fiber.NewError(fiber.StatusForbidden, errConnectorToolOnly)
 	}
-	return tool, nil
+	return tool, policy, nil
 }
 
 // connectorToolEnabledForTask re-derives the Task's enabled tools, including

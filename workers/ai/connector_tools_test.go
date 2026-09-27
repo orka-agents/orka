@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -168,5 +170,59 @@ func TestParseConnectionBindings(t *testing.T) {
 		`{"policyName":"","uid":"ignored"}]`)
 	if len(got) != 1 || got["github-conn"].UID != "conn-uid" || got["github-conn"].Generation != 2 {
 		t.Fatalf("bindings = %+v", got)
+	}
+}
+
+func TestExecuteConnectorToolRetriesUnavailableController(t *testing.T) {
+	stub := newConnectorControllerStub(t)
+	previous := connectorToolRetryBackoff
+	connectorToolRetryBackoff = time.Millisecond
+	t.Cleanup(func() { connectorToolRetryBackoff = previous })
+	var calls int
+	stub.responses["/internal/v1/tasks/default/task-a/connector-tools/gh_search"] = func(w http.ResponseWriter) {
+		calls++
+		if calls < 3 {
+			// The Task's Job identity is not published yet.
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "task job identity is not yet published"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"result": "ready now"})
+	}
+	result, err := stub.call("gh_search", json.RawMessage(`{"q":"x"}`), "call-1", "")
+	if err != nil || result != "ready now" || calls != 3 {
+		t.Fatalf("result = %q err = %v calls = %d, want the call retried until the controller could judge it",
+			result, err, calls)
+	}
+
+	calls = 0
+	stub.responses["/internal/v1/tasks/default/task-a/connector-tools/gh_search"] = func(w http.ResponseWriter) {
+		calls++
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "still unavailable"})
+	}
+	_, err = stub.call("gh_search", json.RawMessage(`{"q":"x"}`), "call-2", "")
+	if err == nil || calls != connectorToolUnavailableRetries+1 {
+		t.Fatalf("err = %v calls = %d, want a bounded number of attempts", err, calls)
+	}
+}
+
+func TestExecuteConnectorToolReportsOversizedControllerResponse(t *testing.T) {
+	stub := newConnectorControllerStub(t)
+	stub.responses["/internal/v1/tasks/default/task-a/connector-tools/gh_search"] = func(w http.ResponseWriter) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"result":"`))
+		chunk := bytes.Repeat([]byte("a"), 1<<20)
+		for written := 0; written <= connectorToolResponseLimit; written += len(chunk) {
+			_, _ = w.Write(chunk)
+		}
+		_, _ = w.Write([]byte(`"}`))
+	}
+	_, err := stub.call("gh_search", json.RawMessage(`{"q":"x"}`), "call-1", "")
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("err = %v, want an explicit size error rather than a truncated document", err)
+	}
+	if !worker.ToolRequestWasAttempted(err) {
+		t.Fatal("a response that arrived means the request was attempted")
 	}
 }

@@ -27,10 +27,18 @@ import (
 )
 
 const (
-	connectorToolCallTimeout    = 5 * time.Minute
-	connectorToolResponseLimit  = 4 << 20
-	connectorToolErrorBodyLimit = 2048
-	saTokenPathDefault          = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+	connectorToolCallTimeout = 5 * time.Minute
+	// connectorToolResponseLimit bounds the controller's JSON envelope. The
+	// executor caps a tool body at 10 MiB; the envelope escapes it, so the
+	// bound leaves room and overflow is reported rather than truncated.
+	connectorToolResponseLimit = 32 << 20
+	// connectorToolUnavailableRetries bounds how often a 503 from the
+	// controller is retried: a fresh worker Pod can reach the endpoint
+	// before the Task's Job identity is published, and that window closes
+	// within seconds.
+	connectorToolUnavailableRetries = 5
+	connectorToolErrorBodyLimit     = 2048
+	saTokenPathDefault              = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 )
 
 // connectorBindings holds, by OutboundAccessPolicy name, the Connection
@@ -57,6 +65,10 @@ func parseConnectionBindings(raw string) map[string]corev1alpha1.ConnectionBindi
 	}
 	return result
 }
+
+// connectorToolRetryBackoff is the first 503 retry delay; it doubles per
+// attempt. A variable so tests do not wait through it.
+var connectorToolRetryBackoff = 500 * time.Millisecond
 
 // connectorBackedToolNames is set once at startup from the loaded custom
 // Tools; the agent loop consults it to route calls to the controller.
@@ -167,26 +179,56 @@ func executeConnectorToolViaController(
 	}
 	callCtx, cancel := context.WithTimeout(ctx, connectorToolCallTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(callCtx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	backoff := connectorToolRetryBackoff
+	for attempt := 0; ; attempt++ {
+		status, raw, err := postConnectorToolRequest(callCtx, httpClient, endpoint, token, body)
+		if err != nil {
+			return "", attempted(fmt.Errorf("connector tool %q: %w", toolName, err))
+		}
+		// 503 means the controller cannot yet judge this caller (the Task's
+		// Job identity is not published); nothing was executed, so retry.
+		if status == http.StatusServiceUnavailable && attempt < connectorToolUnavailableRetries {
+			select {
+			case <-callCtx.Done():
+				return "", fmt.Errorf("connector tool %q: controller unavailable: %w", toolName, callCtx.Err())
+			case <-time.After(backoff):
+			}
+			backoff *= 2
+			continue
+		}
+		return decodeConnectorToolResponse(toolName, status, raw)
+	}
+}
+
+// postConnectorToolRequest sends one request and returns the status and
+// bounded body. A body past the bound is an error rather than a truncated
+// document that would later fail to decode as an attempted call.
+func postConnectorToolRequest(
+	ctx context.Context, httpClient *http.Client, endpoint, token string, body []byte,
+) (int, []byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return "", fmt.Errorf("build connector tool request: %w", err)
+		return 0, nil, fmt.Errorf("build connector tool request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
-	if httpClient == nil {
-		httpClient = http.DefaultClient
-	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return "", attempted(fmt.Errorf("connector tool %q: controller request failed: %w", toolName, err))
+		return 0, nil, fmt.Errorf("controller request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, connectorToolResponseLimit))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, connectorToolResponseLimit+1))
 	if err != nil {
-		return "", attempted(fmt.Errorf("connector tool %q: read controller response: %w", toolName, err))
+		return 0, nil, fmt.Errorf("read controller response: %w", err)
 	}
-	return decodeConnectorToolResponse(toolName, resp.StatusCode, raw)
+	if len(raw) > connectorToolResponseLimit {
+		return 0, nil, fmt.Errorf("controller response exceeds %d bytes", connectorToolResponseLimit)
+	}
+	return resp.StatusCode, raw, nil
 }
 
 func attempted(err error) error {
