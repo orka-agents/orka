@@ -1186,6 +1186,12 @@ func TestConnectionLinkRecordsConsentAuthority(t *testing.T) {
 	if !connectors.ConsentMatchesProvider(stored, provider) || !connectors.ConnectionLinked(stored) {
 		t.Fatalf("a committed consent must record the provider authority and be linked: %+v", stored.Status)
 	}
+	// The sealed credential carries the same authority, independent of status.
+	ref, _ := connectors.CredentialRef(stored)
+	credential, err := h.store.GetConnectorCredential(context.Background(), ref)
+	if err != nil || credential.AuthorityDigest != connectors.ProviderAuthorityDigest(provider) {
+		t.Fatalf("stored credential authority = %q err = %v", credential.AuthorityDigest, err)
+	}
 	// A rotated client makes the next mode change ask for consent again even
 	// though the granted scopes already cover the mode.
 	provider.Spec.OAuth.ClientID = "rotated-client"

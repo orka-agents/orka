@@ -1896,14 +1896,19 @@ func main() {
 	// finalize (custody deleted, tokens revoked where the OAuth client is
 	// available) instead of wedging in Terminating. New consent stays
 	// closed because the API routes and the provider reconciler are gated.
-	if err := (&controller.ConnectionReconciler{
+	connectionReconciler := &controller.ConnectionReconciler{
 		Client:      mgr.GetClient(),
 		APIReader:   mgr.GetAPIReader(),
 		Scheme:      mgr.GetScheme(),
 		Credentials: sqliteStore,
 		Consents:    sqliteStore,
-		Revoker:     connectorOAuthClient,
-	}).SetupWithManager(mgr); err != nil {
+	}
+	if connectorOAuthClient != nil {
+		// Assigned only when present: a nil *OAuthClient in the interface
+		// would defeat the reconciler's nil check.
+		connectionReconciler.Revoker = connectorOAuthClient
+	}
+	if err := connectionReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Connection")
 		os.Exit(1)
 	}

@@ -537,11 +537,11 @@ func TestConnectionReconcilerFinalizerAndDisconnect(t *testing.T) {
 	if err := c.Status().Update(context.Background(), updated); err != nil {
 		t.Fatal(err)
 	}
-	credentials.credentials[string(updated.UID)] = store.ConnectorCredential{AccessToken: "gho_access", RefreshToken: "ghr_refresh"}
+	authority := connectors.ProviderAuthorityDigest(provider)
+	credentials.credentials[string(updated.UID)] = store.ConnectorCredential{AccessToken: "gho_access", RefreshToken: "ghr_refresh", AuthorityDigest: authority}
 	credentials.consents[string(updated.UID)] = 1
 	credentials.parked[string(updated.UID)] = []store.ConnectorCompletion{{
-		AuthorityDigest: connectors.ProviderAuthorityDigest(provider),
-		Credential:      store.ConnectorCredential{AccessToken: "gho_parked", RefreshToken: "ghr_parked"},
+		Credential: store.ConnectorCredential{AccessToken: "gho_parked", RefreshToken: "ghr_parked", AuthorityDigest: authority},
 	}}
 	if err := c.Delete(context.Background(), updated); err != nil {
 		t.Fatal(err)
@@ -597,14 +597,14 @@ func TestConnectionReconcilerReapsExpiredCompletions(t *testing.T) {
 	credentials := newFakeConnectorCredentialStore()
 	authority := connectors.ProviderAuthorityDigest(provider)
 	credentials.parked[string(connection.UID)] = []store.ConnectorCompletion{
-		{Nonce: "live", ExpiresAt: time.Now().Add(5 * time.Minute), AuthorityDigest: authority, Credential: store.ConnectorCredential{AccessToken: "gho_live"}},
-		{Nonce: "stale", ExpiresAt: time.Now().Add(-time.Minute), AuthorityDigest: authority, Credential: store.ConnectorCredential{AccessToken: "gho_stale", RefreshToken: "ghr_stale"}},
+		{Nonce: "live", ExpiresAt: time.Now().Add(5 * time.Minute), Credential: store.ConnectorCredential{AccessToken: "gho_live", AuthorityDigest: authority}},
+		{Nonce: "stale", ExpiresAt: time.Now().Add(-time.Minute), Credential: store.ConnectorCredential{AccessToken: "gho_stale", RefreshToken: "ghr_stale", AuthorityDigest: authority}},
 		// A committed completion whose row outlived a failed delete: active custody, never revoked.
-		{Nonce: "committed", ExpiresAt: time.Now().Add(-time.Minute), AuthorityDigest: authority, Credential: store.ConnectorCredential{AccessToken: "gho_committed", RefreshToken: "ghr_committed"}},
+		{Nonce: "committed", ExpiresAt: time.Now().Add(-time.Minute), Credential: store.ConnectorCredential{AccessToken: "gho_committed", RefreshToken: "ghr_committed", AuthorityDigest: authority}},
 		// Issued by a provider OAuth client that has since changed: deleted, but never sent to the new authority.
-		{Nonce: "foreign", ExpiresAt: time.Now().Add(-time.Minute), AuthorityDigest: "stale-authority", Credential: store.ConnectorCredential{AccessToken: "gho_foreign", RefreshToken: "ghr_foreign"}},
+		{Nonce: "foreign", ExpiresAt: time.Now().Add(-time.Minute), Credential: store.ConnectorCredential{AccessToken: "gho_foreign", RefreshToken: "ghr_foreign", AuthorityDigest: "stale-authority"}},
 	}
-	credentials.credentials[string(connection.UID)] = store.ConnectorCredential{AccessToken: "gho_committed", RefreshToken: "ghr_committed"}
+	credentials.credentials[string(connection.UID)] = store.ConnectorCredential{AccessToken: "gho_committed", RefreshToken: "ghr_committed", AuthorityDigest: authority}
 	revoker := &fakeConnectorRevoker{}
 	c := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(connection, provider, connectorClientSecret("tenant")).
 		WithStatusSubresource(&corev1alpha1.Connection{}).Build()
@@ -632,9 +632,8 @@ func TestConnectionReconcilerDisconnectSkipsRevocationAgainstChangedAuthority(t 
 	provider.Spec.OAuth.RevocationURL = "https://github.com/revoke"
 	connection := testConnection("tenant", "github-alice", "github")
 	connection.Finalizers = []string{ConnectionCustodyFinalizer}
-	connection.Status.Consent = &corev1alpha1.ConnectionConsent{ProviderUID: "old-provider", AuthorityDigest: "old-authority"}
 	credentials := newFakeConnectorCredentialStore()
-	credentials.credentials[string(connection.UID)] = store.ConnectorCredential{AccessToken: "gho_access", RefreshToken: "ghr_refresh"}
+	credentials.credentials[string(connection.UID)] = store.ConnectorCredential{AccessToken: "gho_access", RefreshToken: "ghr_refresh", AuthorityDigest: "old-authority"}
 	revoker := &fakeConnectorRevoker{}
 	c := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(connection, provider, connectorClientSecret("tenant")).
 		WithStatusSubresource(&corev1alpha1.Connection{}).Build()

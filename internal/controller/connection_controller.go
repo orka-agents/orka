@@ -206,11 +206,7 @@ func (r *ConnectionReconciler) revokeBestEffort(ctx context.Context, connection 
 		}
 		return
 	}
-	if connection.Status.Consent == nil {
-		logger.Info("connector credential has no consent record; not revoking against an unverified authority", "connection", connection.Name)
-		return
-	}
-	r.revokeTokens(ctx, connection, credential, connection.Status.Consent.AuthorityDigest)
+	r.revokeTokens(ctx, connection, credential)
 }
 
 // reapExpiredCompletions revokes and deletes parked completions whose
@@ -234,7 +230,7 @@ func (r *ConnectionReconciler) reapExpiredCompletions(ctx context.Context, conne
 		// A completion whose token entered custody (its row outlived a
 		// failed delete after commit) is active, not abandoned.
 		if !sameConnectorCredential(committed, completion.Credential) {
-			r.revokeTokens(ctx, connection, completion.Credential, completion.AuthorityDigest)
+			r.revokeTokens(ctx, connection, completion.Credential)
 		}
 		if err := r.Consents.DeleteConnectorCompletion(ctx, completion.Nonce); err != nil {
 			log.FromContext(ctx).Info("expired completion could not be deleted", "connection", connection.Name)
@@ -258,7 +254,7 @@ func (r *ConnectionReconciler) revokeParkedCompletions(ctx context.Context, conn
 		if sameConnectorCredential(committed, completion.Credential) {
 			continue // revoked with the committed credential
 		}
-		r.revokeTokens(ctx, connection, completion.Credential, completion.AuthorityDigest)
+		r.revokeTokens(ctx, connection, completion.Credential)
 	}
 }
 
@@ -284,9 +280,9 @@ func sameConnectorCredential(committed *store.ConnectorCredential, parked store.
 
 // revokeTokens revokes the refresh then access token of one credential at
 // the provider, best effort. The tokens are sent only to the OAuth authority
-// that issued them: when the provider was replaced or its client changed since
-// authorityDigest was recorded, nothing is sent.
-func (r *ConnectionReconciler) revokeTokens(ctx context.Context, connection *corev1alpha1.Connection, credential store.ConnectorCredential, authorityDigest string) {
+// sealed with them: when the provider was replaced or its client changed since
+// they were issued, nothing is sent.
+func (r *ConnectionReconciler) revokeTokens(ctx context.Context, connection *corev1alpha1.Connection, credential store.ConnectorCredential) {
 	if r.Revoker == nil {
 		return
 	}
@@ -295,7 +291,7 @@ func (r *ConnectionReconciler) revokeTokens(ctx context.Context, connection *cor
 	if err := r.Get(ctx, types.NamespacedName{Namespace: connection.Namespace, Name: connection.Spec.ProviderRef.Name}, provider); err != nil {
 		return
 	}
-	if authorityDigest == "" || authorityDigest != connectors.ProviderAuthorityDigest(provider) {
+	if credential.AuthorityDigest == "" || credential.AuthorityDigest != connectors.ProviderAuthorityDigest(provider) {
 		logger.Info("provider OAuth client changed since the token was issued; not revoking against a different authority",
 			"connection", connection.Name, "provider", provider.Name)
 		return

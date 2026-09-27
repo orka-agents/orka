@@ -58,6 +58,10 @@ type ConnectorCredential struct {
 	// ExpiresAt is zero when the provider reported no expiry.
 	ExpiresAt time.Time
 	Scopes    []string
+	// AuthorityDigest is the provider OAuth-authority digest that issued the
+	// tokens. It is sealed with them, so refresh and revocation always know
+	// which client the material belongs to regardless of Connection status.
+	AuthorityDigest string
 	// UpdatedAt is set by the store on read.
 	UpdatedAt time.Time
 }
@@ -107,11 +111,10 @@ type ConnectorCompletion struct {
 	SubjectDigest string
 	Provider      string
 	Mode          string
-	Credential    ConnectorCredential
-	// AuthorityDigest is the provider OAuth-authority digest that issued the
-	// parked tokens; they are only ever revoked against that authority.
-	AuthorityDigest string
-	ExpiresAt       time.Time
+	// Credential carries the parked tokens and, sealed with them, the
+	// AuthorityDigest of the OAuth client that issued them.
+	Credential ConnectorCredential
+	ExpiresAt  time.Time
 }
 
 // ConnectorConsentStore holds pending consents and pending completions.

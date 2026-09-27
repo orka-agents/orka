@@ -67,7 +67,6 @@ func connectorSchemaStatements() []string {
 			mode            TEXT NOT NULL,
 			payload_nonce   BLOB NOT NULL,
 			payload         BLOB NOT NULL,
-			authority_digest TEXT NOT NULL DEFAULT '',
 			expires_at      TIMESTAMP NOT NULL,
 			created_at      TIMESTAMP NOT NULL
 		)`,
@@ -87,11 +86,12 @@ const connectorDataKeyBytes = 32
 // sealedConnectorCredential is the JSON body sealed under the Connection's
 // data key. Field names are part of the stored format.
 type sealedConnectorCredential struct {
-	AccessToken  string   `json:"accessToken"`
-	RefreshToken string   `json:"refreshToken,omitempty"`
-	TokenType    string   `json:"tokenType,omitempty"`
-	ExpiresAt    string   `json:"expiresAt,omitempty"`
-	Scopes       []string `json:"scopes,omitempty"`
+	AccessToken     string   `json:"accessToken"`
+	RefreshToken    string   `json:"refreshToken,omitempty"`
+	TokenType       string   `json:"tokenType,omitempty"`
+	ExpiresAt       string   `json:"expiresAt,omitempty"`
+	Scopes          []string `json:"scopes,omitempty"`
+	AuthorityDigest string   `json:"authorityDigest,omitempty"`
 }
 
 func connectorDataKeyAdditionalData(connectionUID string) []byte {
@@ -113,11 +113,12 @@ func connectorCompletionAdditionalData(nonce, connectionUID, subjectDigest strin
 
 func encodeSealedConnectorCredential(credential store.ConnectorCredential) ([]byte, error) {
 	body, err := json.Marshal(sealedConnectorCredential{
-		AccessToken:  credential.AccessToken,
-		RefreshToken: credential.RefreshToken,
-		TokenType:    credential.TokenType,
-		ExpiresAt:    formatConnectorTime(credential.ExpiresAt),
-		Scopes:       credential.Scopes,
+		AccessToken:     credential.AccessToken,
+		RefreshToken:    credential.RefreshToken,
+		TokenType:       credential.TokenType,
+		ExpiresAt:       formatConnectorTime(credential.ExpiresAt),
+		Scopes:          credential.Scopes,
+		AuthorityDigest: credential.AuthorityDigest,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("encode connector credential: %w", err)
@@ -135,11 +136,12 @@ func decodeSealedConnectorCredential(body []byte) (store.ConnectorCredential, er
 		return store.ConnectorCredential{}, fmt.Errorf("decode connector credential expiry: %w", err)
 	}
 	return store.ConnectorCredential{
-		AccessToken:  sealed.AccessToken,
-		RefreshToken: sealed.RefreshToken,
-		TokenType:    sealed.TokenType,
-		ExpiresAt:    expiresAt,
-		Scopes:       sealed.Scopes,
+		AccessToken:     sealed.AccessToken,
+		RefreshToken:    sealed.RefreshToken,
+		TokenType:       sealed.TokenType,
+		ExpiresAt:       expiresAt,
+		Scopes:          sealed.Scopes,
+		AuthorityDigest: sealed.AuthorityDigest,
 	}, nil
 }
 
@@ -428,10 +430,10 @@ func (s *Store) CreateConnectorCompletion(ctx context.Context, completion store.
 		return store.ErrConnectorCustodyTombstoned
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO connector_completions
-		(nonce, connection_uid, namespace, name, subject_digest, provider, mode, payload_nonce, payload, authority_digest, expires_at, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(nonce, connection_uid, namespace, name, subject_digest, provider, mode, payload_nonce, payload, expires_at, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		completion.Nonce, completion.ConnectionUID, completion.Namespace, completion.Name, completion.SubjectDigest,
-		completion.Provider, completion.Mode, payloadNonce, payload, completion.AuthorityDigest, completion.ExpiresAt.UTC(), now); err != nil {
+		completion.Provider, completion.Mode, payloadNonce, payload, completion.ExpiresAt.UTC(), now); err != nil {
 		return fmt.Errorf("persist connector completion: %w", err)
 	}
 	return tx.Commit()
@@ -455,9 +457,9 @@ func (s *Store) ConsumeConnectorCompletion(ctx context.Context, nonce string) (s
 		payloadNonce, payload []byte
 	)
 	err = tx.QueryRowContext(ctx, `SELECT nonce, connection_uid, namespace, name, subject_digest, provider, mode,
-		payload_nonce, payload, authority_digest, expires_at FROM connector_completions WHERE nonce = ?`, nonce).
+		payload_nonce, payload, expires_at FROM connector_completions WHERE nonce = ?`, nonce).
 		Scan(&completion.Nonce, &completion.ConnectionUID, &completion.Namespace, &completion.Name, &completion.SubjectDigest,
-			&completion.Provider, &completion.Mode, &payloadNonce, &payload, &completion.AuthorityDigest, &completion.ExpiresAt)
+			&completion.Provider, &completion.Mode, &payloadNonce, &payload, &completion.ExpiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return store.ConnectorCompletion{}, store.ErrNotFound
 	}
@@ -534,7 +536,7 @@ func (s *Store) ListConnectorCompletionsForConnection(ctx context.Context, conne
 // that fail to open are skipped rather than returned.
 func (s *Store) queryConnectorCompletions(ctx context.Context, where string, arg any, includeExpired bool) ([]store.ConnectorCompletion, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT nonce, connection_uid, namespace, name, subject_digest, provider, mode,
-		payload_nonce, payload, authority_digest, expires_at FROM connector_completions `+where, arg)
+		payload_nonce, payload, expires_at FROM connector_completions `+where, arg)
 	if err != nil {
 		return nil, fmt.Errorf("read connector completions: %w", err)
 	}
@@ -547,7 +549,7 @@ func (s *Store) queryConnectorCompletions(ctx context.Context, where string, arg
 			payloadNonce, payload []byte
 		)
 		if err := rows.Scan(&completion.Nonce, &completion.ConnectionUID, &completion.Namespace, &completion.Name, &completion.SubjectDigest,
-			&completion.Provider, &completion.Mode, &payloadNonce, &payload, &completion.AuthorityDigest, &completion.ExpiresAt); err != nil {
+			&completion.Provider, &completion.Mode, &payloadNonce, &payload, &completion.ExpiresAt); err != nil {
 			return nil, fmt.Errorf("scan connector completion: %w", err)
 		}
 		completion.ExpiresAt = completion.ExpiresAt.UTC()

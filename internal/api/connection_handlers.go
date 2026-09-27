@@ -780,9 +780,11 @@ func (h *Handlers) ConnectionCallback(c fiber.Ctx) error {
 			TokenType:    token.TokenType,
 			ExpiresAt:    token.ExpiresAt,
 			Scopes:       token.Scopes,
+			// Sealed with the tokens: whichever path later refreshes or
+			// revokes them knows the client that issued them.
+			AuthorityDigest: consent.AuthorityDigest,
 		},
-		AuthorityDigest: consent.AuthorityDigest,
-		ExpiresAt:       h.connectors.now().Add(connectors.ConsentTTL),
+		ExpiresAt: h.connectors.now().Add(connectors.ConsentTTL),
 	}); err != nil {
 		if errors.Is(err, store.ErrConnectorCustodyTombstoned) {
 			// The link was disconnected while the code was being exchanged.
@@ -863,7 +865,7 @@ func (h *Handlers) CompleteConnection(c fiber.Ctx) error {
 	}
 	// Tokens issued by a provider OAuth client that has since changed belong
 	// to a different authority; they are discarded, never committed.
-	if completion.AuthorityDigest != connectors.ProviderAuthorityDigest(provider) {
+	if completion.Credential.AuthorityDigest != connectors.ProviderAuthorityDigest(provider) {
 		h.discardCompletion(ctx, provider, completion, nonce)
 		return fiber.NewError(fiber.StatusConflict, "the connector provider changed after consent started; start consent again")
 	}
@@ -894,7 +896,7 @@ func (h *Handlers) CompleteConnection(c fiber.Ctx) error {
 // that issued them; tokens from a replaced client are dropped unrevoked
 // rather than sent to a different authority.
 func (h *Handlers) discardCompletion(ctx context.Context, provider *corev1alpha1.ConnectorProvider, completion store.ConnectorCompletion, nonce string) {
-	if provider != nil && completion.AuthorityDigest == connectors.ProviderAuthorityDigest(provider) {
+	if provider != nil && completion.Credential.AuthorityDigest == connectors.ProviderAuthorityDigest(provider) {
 		if cfg, err := h.providerOAuthConfig(ctx, provider); err == nil {
 			h.revokeIssuedTokens(ctx, cfg, connectors.TokenResponse{
 				AccessToken: completion.Credential.AccessToken, RefreshToken: completion.Credential.RefreshToken,

@@ -243,8 +243,8 @@ func TestConnectorConsentSingleUseAndExpiry(t *testing.T) {
 func testConnectorCompletion() store.ConnectorCompletion {
 	return store.ConnectorCompletion{
 		Nonce: "completion-1", ConnectionUID: "uid-1", Namespace: "tenant", Name: "github-abc",
-		SubjectDigest: "digest-a", Provider: "github", Mode: "readOnly", AuthorityDigest: "authority-1",
-		Credential: store.ConnectorCredential{AccessToken: "gho_parked", RefreshToken: "ghr_parked", Scopes: []string{"repo"}},
+		SubjectDigest: "digest-a", Provider: "github", Mode: "readOnly",
+		Credential: store.ConnectorCredential{AccessToken: "gho_parked", RefreshToken: "ghr_parked", Scopes: []string{"repo"}, AuthorityDigest: "authority-1"},
 		ExpiresAt:  time.Now().Add(10 * time.Minute),
 	}
 }
@@ -268,7 +268,7 @@ func TestConnectorCompletionRoundTrip(t *testing.T) {
 		t.Fatalf("ConsumeConnectorCompletion: %v", err)
 	}
 	if got.Credential.AccessToken != "gho_parked" || got.Credential.RefreshToken != "ghr_parked" || got.SubjectDigest != "digest-a" ||
-		got.Mode != "readOnly" || got.AuthorityDigest != "authority-1" {
+		got.Mode != "readOnly" || got.Credential.AuthorityDigest != "authority-1" {
 		t.Fatalf("completion = %+v", got)
 	}
 	if _, err := s.ConsumeConnectorCompletion(ctx, completion.Nonce); !errors.Is(err, store.ErrNotFound) {
