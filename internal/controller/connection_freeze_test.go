@@ -49,6 +49,7 @@ func freezeFixtures(ready bool) (runtime.Object, runtime.Object, runtime.Object,
 		connection.Status.Conditions = []metav1.Condition{
 			{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonLinked, ObservedGeneration: 4},
 			{Type: corev1alpha1.ConnectionConditionScopesGranted, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonScopesGranted, ObservedGeneration: 4},
+			{Type: corev1alpha1.ConnectionConditionProviderResolved, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonProviderResolved, ObservedGeneration: 4},
 		}
 	}
 	task := &corev1alpha1.Task{

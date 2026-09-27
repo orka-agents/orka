@@ -267,13 +267,19 @@ func (s *Source) providerConfig(ctx context.Context, connection *corev1alpha1.Co
 	if !connectors.ProviderAccepted(provider) {
 		return connectors.OAuthProviderConfig{}, errors.New("connector provider is not accepted")
 	}
+	// The held refresh token was issued by the OAuth client recorded at
+	// consent; a replaced provider or rotated client must never receive it.
+	if !connectors.ConsentMatchesProvider(connection, provider) {
+		return connectors.OAuthProviderConfig{}, errors.New("connector provider OAuth client changed since consent; the person must reconnect")
+	}
 	secretRef := provider.Spec.OAuth.ClientSecretRef
 	secret := &corev1.Secret{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: provider.Namespace, Name: secretRef.Name}, secret); err != nil {
 		return connectors.OAuthProviderConfig{}, errors.New("connector provider client secret is unavailable")
 	}
-	value := strings.TrimSpace(string(secret.Data[secretRef.Key]))
-	if value == "" {
+	// The secret is opaque bytes; only emptiness is judged, never trimmed.
+	value := string(secret.Data[secretRef.Key])
+	if strings.TrimSpace(value) == "" {
 		return connectors.OAuthProviderConfig{}, errors.New("connector provider client secret is empty")
 	}
 	return connectors.ProviderOAuthConfig(provider, value), nil

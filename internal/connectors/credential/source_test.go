@@ -98,9 +98,10 @@ func newHarness(t *testing.T) *harness {
 		Spec: corev1alpha1.ConnectionSpec{
 			Subject: corev1alpha1.ConnectionSubject{Issuer: testIssuer, Subject: testSubject}, ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}, Mode: "readOnly",
 		},
-		Status: corev1alpha1.ConnectionStatus{State: corev1alpha1.ConnectionStateReady, Conditions: []metav1.Condition{
+		Status: corev1alpha1.ConnectionStatus{State: corev1alpha1.ConnectionStateReady, Consent: connectors.ConsentFor(provider), Conditions: []metav1.Condition{
 			{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonLinked, ObservedGeneration: 2},
 			{Type: corev1alpha1.ConnectionConditionScopesGranted, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonScopesGranted, ObservedGeneration: 2},
+			{Type: corev1alpha1.ConnectionConditionProviderResolved, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonProviderResolved, ObservedGeneration: 2},
 		}},
 	}
 	c := ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(provider, secret, connection).WithStatusSubresource(&corev1alpha1.Connection{}).Build()
@@ -392,5 +393,28 @@ func TestRefreshLosesToConcurrentReconsent(t *testing.T) {
 	}
 	if h.reload().Status.State != corev1alpha1.ConnectionStateReady {
 		t.Fatal("the link must stay Ready when the revoked token was already superseded")
+	}
+}
+
+// TestRefreshRefusesChangedProviderAuthority covers a provider whose OAuth
+// client was rotated after consent: the held refresh token belongs to the old
+// client and is never sent to the new token endpoint.
+func TestRefreshRefusesChangedProviderAuthority(t *testing.T) {
+	h := newHarness(t)
+	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", ExpiresAt: h.now.Add(-time.Minute)})
+	provider := &corev1alpha1.ConnectorProvider{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: h.connection.Namespace, Name: h.connection.Spec.ProviderRef.Name}, provider); err != nil {
+		t.Fatal(err)
+	}
+	provider.Spec.OAuth.TokenURL = "https://provider.example.test/rotated-token"
+	if err := h.client.Update(context.Background(), provider); err != nil {
+		t.Fatal(err)
+	}
+	_, err := h.source.ResolveConnectionCredential(context.Background(), h.request())
+	if err == nil || !strings.Contains(err.Error(), "OAuth client changed") {
+		t.Fatalf("refresh against a rotated client err = %v", err)
+	}
+	if h.refresher.calls.Load() != 0 {
+		t.Fatal("the refresh token must not be sent to a different authority")
 	}
 }
