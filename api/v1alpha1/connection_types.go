@@ -13,8 +13,14 @@ const (
 	// Accepted ConnectorProvider in the same namespace.
 	ConnectionConditionProviderResolved = "ProviderResolved"
 	// ConnectionConditionReady reports whether linked token material is held
-	// and usable by the controller.
+	// and usable by the controller. It is owned by the consent and refresh
+	// paths and records the outcome of the last consent.
 	ConnectionConditionReady = "Ready"
+	// ConnectionConditionScopesGranted reports whether the granted scopes
+	// cover the scopes the current mode requires. It is owned by the
+	// controller, so widening the mode after consent projects Pending without
+	// erasing the still-valid consent, and narrowing restores readiness.
+	ConnectionConditionScopesGranted = "ScopesGranted"
 
 	ConnectionModeReadOnly  = "readOnly"
 	ConnectionModeReadWrite = "readWrite"
@@ -43,6 +49,7 @@ const (
 	ConnectionReasonExpired         = "Expired"
 	ConnectionReasonRevoked         = "Revoked"
 	ConnectionReasonConsentRequired = "ConsentRequired"
+	ConnectionReasonScopesGranted   = "ScopesGranted"
 )
 
 // ConnectionSubject is the verified identity that owns a Connection. It is
@@ -87,7 +94,8 @@ type ConnectionStatus struct {
 	// +optional
 	State string `json:"state,omitempty"`
 
-	// GrantedScopes are the scopes the provider reported at consent time.
+	// GrantedScopes are the scopes the provider reported at consent time, or
+	// the requested scopes when the provider reported none.
 	// +optional
 	GrantedScopes []string `json:"grantedScopes,omitempty"`
 

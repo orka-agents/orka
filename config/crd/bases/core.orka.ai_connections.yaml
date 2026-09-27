@@ -171,8 +171,9 @@ spec:
                 format: date-time
                 type: string
               grantedScopes:
-                description: GrantedScopes are the scopes the provider reported at
-                  consent time.
+                description: |-
+                  GrantedScopes are the scopes the provider reported at consent time, or
+                  the requested scopes when the provider reported none.
                 items:
                   type: string
                 type: array

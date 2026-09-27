@@ -395,7 +395,7 @@ Status contains only `observedGeneration`, `Accepted`, and `ResolvedRefs`.
 | `status.grantedScopes` | []string | | Scopes the provider reported at consent time. |
 | `status.linkedAt`, `.expiresAt`, `.lastRefreshTime` | time | | Link, access-token expiry, and refresh timestamps. |
 
-Conditions are `ProviderResolved` (set by the controller) and `Ready` (set by the consent and refresh paths). See [ADR 0033](https://github.com/orka-agents/orka/blob/main/docs/adr/0033-user-connectors.md) for the design.
+Conditions are `ProviderResolved` and `ScopesGranted` (set by the controller; the latter compares `status.grantedScopes` with the scopes the current mode and provider require, so widening the mode or a provider requiring more scopes projects `Pending` with reason `ConsentRequired` without erasing the consent, and narrowing restores readiness) and `Ready` (set by the consent and refresh paths). A Connection is usable only when both `Ready` and `ScopesGranted` are True. See [ADR 0033](https://github.com/orka-agents/orka/blob/main/docs/adr/0033-user-connectors.md) for the design.
 
 ## Security
 

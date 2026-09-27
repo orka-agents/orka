@@ -79,7 +79,44 @@ func (r *ConnectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		providerResolved.Reason = corev1alpha1.ConnectionReasonProviderInvalid
 		providerResolved.Message = "ConnectorProvider is not accepted for its current generation"
 	}
+	if providerResolved.Status == metav1.ConditionTrue {
+		meta.SetStatusCondition(&connection.Status.Conditions, scopesGrantedCondition(connection, provider, now))
+	}
 	return r.updateStatus(ctx, connection, providerResolved, nil)
+}
+
+// scopesGrantedCondition compares the scopes granted at the last consent with
+// the scopes the current mode and provider require. It never touches the
+// consent-owned Ready condition, so widening projects Pending while the
+// read-only consent stays valid, narrowing restores readiness, and a provider
+// that starts requiring more scopes asks for consent again.
+func scopesGrantedCondition(connection *corev1alpha1.Connection, provider *corev1alpha1.ConnectorProvider, now metav1.Time) metav1.Condition {
+	condition := metav1.Condition{
+		Type:               corev1alpha1.ConnectionConditionScopesGranted,
+		ObservedGeneration: connection.Generation,
+		LastTransitionTime: now,
+	}
+	ready := meta.FindStatusCondition(connection.Status.Conditions, corev1alpha1.ConnectionConditionReady)
+	if ready == nil || ready.Status != metav1.ConditionTrue {
+		condition.Status = metav1.ConditionFalse
+		condition.Reason = corev1alpha1.ConnectionReasonPendingConsent
+		condition.Message = "Consent has not completed"
+		return condition
+	}
+	mode := connection.Spec.Mode
+	if mode == "" {
+		mode = corev1alpha1.ConnectionModeReadOnly
+	}
+	if connectors.ScopesCover(connection.Status.GrantedScopes, connectors.ScopesForMode(provider, mode)) {
+		condition.Status = metav1.ConditionTrue
+		condition.Reason = corev1alpha1.ConnectionReasonScopesGranted
+		condition.Message = "Granted scopes cover the " + mode + " mode"
+		return condition
+	}
+	condition.Status = metav1.ConditionFalse
+	condition.Reason = corev1alpha1.ConnectionReasonConsentRequired
+	condition.Message = "Granted scopes do not cover the " + mode + " mode; consent again"
+	return condition
 }
 
 func (r *ConnectionReconciler) updateStatus(
@@ -91,7 +128,6 @@ func (r *ConnectionReconciler) updateStatus(
 	before := connection.Status.DeepCopy()
 	connection.Status.ObservedGeneration = connection.Generation
 	meta.SetStatusCondition(&connection.Status.Conditions, providerResolved)
-	demoteStaleReadiness(connection)
 	connection.Status.State = projectConnectionState(connection, providerResolved)
 	if reflect.DeepEqual(before, &connection.Status) {
 		return ctrl.Result{RequeueAfter: connectionRefreshInterval}, reconcileErr
@@ -102,31 +138,10 @@ func (r *ConnectionReconciler) updateStatus(
 	return ctrl.Result{RequeueAfter: connectionRefreshInterval}, reconcileErr
 }
 
-// demoteStaleReadiness withdraws Ready when the spec widened to readWrite
-// after the last consent. Consent granted only the read scopes for the older
-// generation, so advertising Ready for the new generation would expose write
-// tools without the person's approval. Narrowing needs no new consent.
-func demoteStaleReadiness(connection *corev1alpha1.Connection) {
-	ready := meta.FindStatusCondition(connection.Status.Conditions, corev1alpha1.ConnectionConditionReady)
-	if ready == nil || ready.Status != metav1.ConditionTrue {
-		return
-	}
-	if connection.Spec.Mode != corev1alpha1.ConnectionModeReadWrite || ready.ObservedGeneration >= connection.Generation {
-		return
-	}
-	meta.SetStatusCondition(&connection.Status.Conditions, metav1.Condition{
-		Type:               corev1alpha1.ConnectionConditionReady,
-		Status:             metav1.ConditionFalse,
-		Reason:             corev1alpha1.ConnectionReasonConsentRequired,
-		Message:            "Mode widened to readWrite; consent for write scopes is required",
-		ObservedGeneration: connection.Generation,
-		LastTransitionTime: metav1.Now(),
-	})
-}
-
 // projectConnectionState derives the coarse state from the conditions. An
 // unresolved provider is an Error; otherwise the Ready condition owned by the
-// consent and refresh paths decides. Its reason, not the previously stored
+// consent and refresh paths decides, qualified by the controller-owned
+// ScopesGranted condition. Its reason, not the previously stored
 // state, carries Expired and Revoked, so a provider outage that briefly
 // projects Error cannot erase them.
 func projectConnectionState(connection *corev1alpha1.Connection, providerResolved metav1.Condition) string {
@@ -138,6 +153,11 @@ func projectConnectionState(connection *corev1alpha1.Connection, providerResolve
 		return corev1alpha1.ConnectionStatePending
 	}
 	if ready.Status == metav1.ConditionTrue {
+		granted := meta.FindStatusCondition(connection.Status.Conditions, corev1alpha1.ConnectionConditionScopesGranted)
+		if granted != nil && granted.Status != metav1.ConditionTrue {
+			// Consent is valid but does not cover the current mode.
+			return corev1alpha1.ConnectionStatePending
+		}
 		return corev1alpha1.ConnectionStateReady
 	}
 	switch ready.Reason {
