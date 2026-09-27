@@ -1059,3 +1059,42 @@ func TestConnectionReconcilerRetainsCustodyWithoutRevocationMaterial(t *testing.
 		t.Fatalf("finalizer must be released, err = %v", err)
 	}
 }
+
+// TestConnectionReconcilerFinishesDisconnectWhenProviderIsBeingDeleted covers
+// namespace teardown: the client Secret is gone and the provider carries a
+// deletion timestamp, so nothing can restore the revocation material; the
+// disconnect finishes with the tokens left to expire instead of holding the
+// namespace.
+func TestConnectionReconcilerFinishesDisconnectWhenProviderIsBeingDeleted(t *testing.T) {
+	scheme := connectorTestScheme(t)
+	provider := acceptedConnectorProvider()
+	provider.Spec.OAuth.RevocationURL = "https://github.com/revoke"
+	provider.Finalizers = []string{ConnectorProviderConnectionsFinalizer}
+	connection := testConnection("tenant", "github-alice", "github")
+	connection.Finalizers = []string{ConnectionCustodyFinalizer}
+	credentials := newFakeConnectorCredentialStore()
+	credentials.credentials[string(connection.UID)] = store.ConnectorCredential{
+		AccessToken: "gho_access", RefreshToken: "ghr_refresh",
+		AuthorityDigest: connectors.ProviderIssuerDigest(provider), RevocationDigest: connectors.ProviderRevocationDigest(provider),
+	}
+	revoker := &fakeConnectorRevoker{}
+	c := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(connection, provider).
+		WithStatusSubresource(&corev1alpha1.Connection{}).Build()
+	reconciler := &ConnectionReconciler{Client: c, APIReader: c, Scheme: scheme, Credentials: credentials, Consents: credentials, Revoker: revoker}
+	key := types.NamespacedName{Namespace: "tenant", Name: "github-alice"}
+	if err := c.Delete(context.Background(), provider); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Delete(context.Background(), connection); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	if len(revoker.tokens) != 0 || len(credentials.deleted) != 1 {
+		t.Fatalf("revoked = %v deleted = %v, want custody deleted unrevoked", revoker.tokens, credentials.deleted)
+	}
+	if err := c.Get(context.Background(), key, &corev1alpha1.Connection{}); err == nil || !apierrors.IsNotFound(err) {
+		t.Fatalf("finalizer must be released, err = %v", err)
+	}
+}

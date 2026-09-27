@@ -410,13 +410,26 @@ func (r *ConnectionReconciler) revokeTokens(ctx context.Context, connection *cor
 	}
 	secret := &corev1.Secret{}
 	secretRef := provider.Spec.OAuth.ClientSecretRef
+	// A missing Secret is recoverable while the provider stays: an operator
+	// restores it and the disconnect finishes. A provider being deleted
+	// (namespace teardown deletes the Secret first and nothing can be
+	// recreated in a terminating namespace) is not: the tokens are left to
+	// expire rather than holding the namespace forever.
+	unavailable := func(err error) error {
+		if !provider.DeletionTimestamp.IsZero() {
+			logger.Info("provider is being deleted and its client secret is gone; tokens are left to expire unrevoked",
+				"connection", connection.Name, "provider", provider.Name)
+			return nil
+		}
+		return err
+	}
 	if err := r.referenceReader().Get(ctx, types.NamespacedName{Namespace: provider.Namespace, Name: secretRef.Name}, secret); err != nil {
-		return fmt.Errorf("%w: client secret %q: %w", errRevocationUnavailable, secretRef.Name, err)
+		return unavailable(fmt.Errorf("%w: client secret %q: %w", errRevocationUnavailable, secretRef.Name, err))
 	}
 	// The secret is opaque bytes; only emptiness is judged, never trimmed.
 	clientSecret := string(secret.Data[secretRef.Key])
 	if strings.TrimSpace(clientSecret) == "" {
-		return fmt.Errorf("%w: client secret %q has no %q", errRevocationUnavailable, secretRef.Name, secretRef.Key)
+		return unavailable(fmt.Errorf("%w: client secret %q has no %q", errRevocationUnavailable, secretRef.Name, secretRef.Key))
 	}
 	cfg := connectors.ProviderOAuthConfig(provider, clientSecret)
 	for _, token := range []string{credential.RefreshToken, credential.AccessToken} {
