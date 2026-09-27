@@ -124,6 +124,10 @@ func TestValidateProviderSpec(t *testing.T) {
 		{name: "missing client id", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.ClientID = " " }, want: "clientID is required"},
 		{name: "missing secret key", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.ClientSecretRef.Key = "" }, want: "clientSecretRef requires name and key"},
 		{name: "bad client auth", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.ClientAuthentication = "PrivateKeyJWT" }, want: "clientAuthentication must be"},
+		{name: "bad revocation semantics", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.RevocationSemantics = "Token" }, want: "revocationSemantics must be"},
+		{name: "per-token revocation ok", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.RevocationSemantics = corev1alpha1.ConnectorRevocationPerToken
+		}},
 		{name: "scope with space", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.Scopes.Read = []string{"read user"} }, want: "scopes.read entries"},
 		{name: "scope with control byte", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.Scopes.Read = []string{"read\x00profile"} }, want: "scopes.read entries"},
 		{name: "scope with non-ascii", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.Scopes.Write = []string{"répo"} }, want: "scopes.write entries"},
@@ -441,6 +445,17 @@ func TestScopesCoverAndConnectionLinked(t *testing.T) {
 	deleting.DeletionTimestamp = &now
 	if ConnectionLinked(deleting) {
 		t.Fatal("a deleting connection is not linked")
+	}
+}
+
+func TestRevokesPerToken(t *testing.T) {
+	provider := validProvider()
+	if RevokesPerToken(provider) || RevokesPerToken(nil) {
+		t.Fatal("grant-wide revocation is the default")
+	}
+	provider.Spec.OAuth.RevocationSemantics = corev1alpha1.ConnectorRevocationPerToken
+	if !RevokesPerToken(provider) {
+		t.Fatal("PerToken must be honored")
 	}
 }
 

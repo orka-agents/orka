@@ -18,6 +18,13 @@ const (
 	ConnectorClientAuthSecretBasic = "ClientSecretBasic"
 	ConnectorClientAuthSecretPost  = "ClientSecretPost"
 
+	// ConnectorRevocationGrant means revoking any token invalidates the
+	// person's whole grant for the OAuth client (Google, for example).
+	ConnectorRevocationGrant = "Grant"
+	// ConnectorRevocationPerToken means revocation affects only the token
+	// presented (GitHub's per-token endpoint, for example).
+	ConnectorRevocationPerToken = "PerToken"
+
 	ConnectorToolSourceBuiltin = "Builtin"
 	ConnectorToolSourceHTTP    = "HTTP"
 )
@@ -75,6 +82,18 @@ type ConnectorOAuthConfig struct {
 	// disconnect. Revocation is best-effort.
 	// +optional
 	RevocationURL string `json:"revocationURL,omitempty"`
+
+	// RevocationSemantics declares what a revocation call affects at this
+	// provider. With Grant (the default), revoking one token invalidates the
+	// person's entire grant for the client, so Orka revokes only the
+	// committed credential on disconnect and never tokens from consents that
+	// were never committed: such a token may belong to a different person's
+	// grant, and revoking it would sever their live link. With PerToken,
+	// abandoned and discarded tokens are revoked individually as well.
+	// +kubebuilder:validation:Enum=Grant;PerToken
+	// +kubebuilder:default=Grant
+	// +optional
+	RevocationSemantics string `json:"revocationSemantics,omitempty"`
 
 	// ClientID is the public OAuth client identifier registered with the provider.
 	// +kubebuilder:validation:MinLength=1
