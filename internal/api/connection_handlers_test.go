@@ -1731,3 +1731,45 @@ func TestConnectionCreateNarrowingReusedLinkStaysReady(t *testing.T) {
 		t.Fatalf("narrowed reuse view = %+v, want Ready in the narrower mode", reused.Connection)
 	}
 }
+
+// TestConnectionCommittedRetryKeepsProviderConsentFence covers custody
+// committed and the status write lost, then a provider tool retargeted
+// before the retry: the committed material is not recorded as consented for
+// a destination the person never saw, and nothing is revoked.
+func TestConnectionCommittedRetryKeepsProviderConsentFence(t *testing.T) {
+	h := newConnectorTestHarness(t, acceptedTestProvider())
+	var fail atomic.Bool
+	h.statusFailure = &fail
+	created := h.create("readOnly")
+	completion := completionFromLocation(t, h.consentAndCallback(created))
+	fail.Store(true)
+	if resp, raw := h.complete(created.Connection.Name, completion); resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("failed status update = %d %s, want 500", resp.StatusCode, raw)
+	}
+	fail.Store(false)
+	provider := &corev1alpha1.ConnectorProvider{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: "github"}, provider); err != nil {
+		t.Fatal(err)
+	}
+	provider.Spec.Tools = append(provider.Spec.Tools, corev1alpha1.ConnectorTool{
+		Name: "gh_search", Class: corev1alpha1.ConnectorToolClassRead, Source: corev1alpha1.ConnectorToolSourceHTTP, Description: "search",
+		HTTP: &corev1alpha1.ConnectorHTTPTool{URL: "https://api.github.com/search/issues"},
+	})
+	if err := h.client.Update(context.Background(), provider); err != nil {
+		t.Fatal(err)
+	}
+	h.revoked = nil
+	if resp, raw := h.complete(created.Connection.Name, completion); resp.StatusCode != http.StatusConflict || !strings.Contains(string(raw), "provider changed") {
+		t.Fatalf("committed retry after retarget = %d %s, want 409", resp.StatusCode, raw)
+	}
+	if len(h.revoked) != 0 {
+		t.Fatalf("committed tokens must not be revoked when their parked row is discarded, revoked = %v", h.revoked)
+	}
+	stored := &corev1alpha1.Connection{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: created.Connection.Name}, stored); err != nil {
+		t.Fatal(err)
+	}
+	if connectors.ConnectionLinked(stored) || stored.Status.Consent != nil {
+		t.Fatalf("a retargeted provider must not be recorded as consented: %+v", stored.Status)
+	}
+}
