@@ -46,11 +46,21 @@ func validateResponsesItemType(item responses.ResponseOutputItemUnion) error {
 			if part.Type != responseContentTypeOutputText && part.Type != stopReasonRefusal {
 				return fmt.Errorf("provider message content is outside the Responses subset")
 			}
+			if part.Type == responseContentTypeOutputText && invalidResponseTextField(part.RawJSON(), part.JSON.Text) {
+				return fmt.Errorf("provider text content requires a string text field")
+			}
 		}
 		return nil
 	default:
 		return fmt.Errorf("provider output item is outside the Responses subset")
 	}
+}
+
+// SDK field validity permits coercion of numbers and booleans into strings.
+// Validate the wire type while preserving explicitly empty text and synthetic
+// in-process events that have no decoded JSON metadata.
+func invalidResponseTextField(rawObject string, field respjson.Field) bool {
+	return rawObject != "" && (!field.Valid() || !strings.HasPrefix(strings.TrimSpace(field.Raw()), "\""))
 }
 
 func validateResponsesOutput(output []responses.ResponseOutputItemUnion) error {
@@ -208,9 +218,20 @@ func (t *responseFuncCallTracker) prepareEvent(evt *responses.ResponseStreamEven
 		}
 	case eventTypeResponseFunctionCallArgumentsDelta, eventTypeResponseFunctionCallArgumentsDone:
 		return validateResponseFunctionEventMetadata(*evt)
+	case eventTypeResponseOutputTextDelta:
+		if invalidResponseTextField(evt.RawJSON(), evt.JSON.Delta) {
+			return fmt.Errorf("provider text delta requires a string delta field")
+		}
+	case eventTypeResponseOutputTextDone:
+		if invalidResponseTextField(evt.RawJSON(), evt.JSON.Text) {
+			return fmt.Errorf("provider text completion requires a string text field")
+		}
 	case eventTypeResponseContentPartAdded, eventTypeResponseContentPartDone:
 		if evt.Part.Type != responseContentTypeOutputText && evt.Part.Type != stopReasonRefusal {
 			return fmt.Errorf("provider message content is outside the Responses subset")
+		}
+		if evt.Part.Type == responseContentTypeOutputText && invalidResponseTextField(evt.RawJSON(), evt.Part.JSON.Text) {
+			return fmt.Errorf("provider text content requires a string text field")
 		}
 	case eventTypeResponseCompleted, eventTypeResponseIncomplete:
 		if (evt.Type == eventTypeResponseCompleted && evt.Response.Status != stopReasonCompleted) ||

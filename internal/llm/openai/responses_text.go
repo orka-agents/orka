@@ -50,7 +50,7 @@ func (o *responseOutputOrder) textItem(index *int64) *responseTextItem {
 
 func isResponseTextEvent(evt responses.ResponseStreamEventUnion) bool {
 	switch evt.Type {
-	case eventTypeResponseOutputTextDelta, "response.output_text.done":
+	case eventTypeResponseOutputTextDelta, eventTypeResponseOutputTextDone:
 		return true
 	case eventTypeResponseContentPartAdded, eventTypeResponseContentPartDone:
 		return evt.Part.Type == responseContentTypeOutputText
@@ -88,7 +88,7 @@ func (o *responseOutputOrder) textEvent(evt responses.ResponseStreamEventUnion, 
 			return failResponsesStream(send, errors.New(responseTextContradiction))
 		}
 		part.text += evt.Delta
-	case "response.output_text.done", eventTypeResponseContentPartDone:
+	case eventTypeResponseOutputTextDone, eventTypeResponseContentPartDone:
 		text := evt.Text
 		if evt.Type == eventTypeResponseContentPartDone {
 			text = evt.Part.Text

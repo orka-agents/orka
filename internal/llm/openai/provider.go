@@ -41,6 +41,7 @@ const (
 const (
 	messageRoleAssistant                        = "assistant"
 	eventTypeResponseOutputTextDelta            = "response.output_text.delta"
+	eventTypeResponseOutputTextDone             = "response.output_text.done"
 	eventTypeResponseContentPartAdded           = "response.content_part.added"
 	eventTypeResponseContentPartDone            = "response.content_part.done"
 	eventTypeResponseFunctionCallArgumentsDelta = "response.function_call_arguments.delta"
