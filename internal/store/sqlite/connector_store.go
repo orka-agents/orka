@@ -498,7 +498,11 @@ func (s *Store) GetConnectorCredential(ctx context.Context, ref store.ConnectorC
 	}
 	credential.UpdatedAt = updatedAt.UTC()
 	credential.Version = version
-	credential.GrantSequence = grantSequence
+	// The plaintext column is an index for queries; the grant identity that
+	// counts is the sealed one, and the two must agree.
+	if credential.GrantSequence != grantSequence {
+		return store.ConnectorCredential{}, fmt.Errorf("connector credential for connection %s: grant sequence column does not match the sealed grant", ref.ConnectionUID)
+	}
 	return credential, nil
 }
 

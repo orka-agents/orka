@@ -1289,8 +1289,12 @@ func TestConnectionStaleModeDiscardKeepsCommittedCredential(t *testing.T) {
 		t.Fatalf("widen = %d %s", resp.StatusCode, raw)
 	}
 	h.revoked = nil
-	if resp, raw := h.complete(created.Connection.Name, completion); resp.StatusCode != http.StatusConflict || !strings.Contains(string(raw), "mode changed") {
-		t.Fatalf("stale-mode completion = %d %s, want 409", resp.StatusCode, raw)
+	// Custody already holds this grant, so the retry records the link from
+	// it against the current (wider) mode, which the granted scopes do not
+	// cover: the link is Pending until the person consents again, and
+	// nothing is discarded or revoked.
+	if resp, raw := h.complete(created.Connection.Name, completion); resp.StatusCode != http.StatusOK || !strings.Contains(string(raw), `"state":"Pending"`) {
+		t.Fatalf("committed completion after a mode change = %d %s, want 200 and Pending", resp.StatusCode, raw)
 	}
 	if len(h.revoked) != 0 {
 		t.Fatalf("committed tokens must not be revoked when their parked row is discarded, revoked = %v", h.revoked)

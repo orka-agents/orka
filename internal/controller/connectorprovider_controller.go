@@ -65,8 +65,15 @@ func (r *ConnectorProviderReconciler) finalize(ctx context.Context, provider *co
 	if !controllerutil.ContainsFinalizer(provider, ConnectorProviderConnectionsFinalizer) {
 		return ctrl.Result{}, nil
 	}
+	// The decision below is irreversible (a released provider cannot revoke
+	// its Connections' tokens), so the reference check reads the API server
+	// rather than the cache, which can trail a Connection created moments ago.
+	var reader client.Reader = r.Client
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
 	connections := &corev1alpha1.ConnectionList{}
-	if err := r.List(ctx, connections, client.InNamespace(provider.Namespace)); err != nil {
+	if err := reader.List(ctx, connections, client.InNamespace(provider.Namespace)); err != nil {
 		return ctrl.Result{}, err
 	}
 	remaining := 0
