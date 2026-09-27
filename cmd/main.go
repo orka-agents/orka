@@ -2239,6 +2239,14 @@ func main() {
 		TaskProvenanceProtected:   taskProvenanceProtected,
 		E2EPromptFaultEnabled:     strings.TrimSpace(acpE2EPromptWriteAmbiguityMarker) != "",
 		Connectors:                connectorConfig,
+		ConnectorTools: api.ConnectorToolExecutionConfig{
+			Enabled:                          connectorsEnabled,
+			OutboundAccess:                   outboundAccessResolver,
+			KubeClient:                       kubeClient,
+			TransactionExchange:              brokeredTransactionExchange,
+			EnforceTransactionCredentialAuth: contextTokenAuthzConfig.Mode == api.ContextTokenAuthorizationModeEnforce,
+			TransactionCredentialReadScopes:  contextTokenAuthzConfig.SecretCredentialReadScopes(),
+		},
 		Chat: api.ChatConfig{
 			Enabled:                chatEnabled,
 			Provider:               chatProvider,

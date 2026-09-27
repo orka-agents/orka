@@ -2548,3 +2548,32 @@ func TestBindApprovalOutboundAccessPolicyVersionFailsClosedOnMissingCredentialSe
 		t.Fatal("partial outbound policy identity was retained after failed binding")
 	}
 }
+
+func TestApprovalTargetSpecDigestUsesPlainSpecForConnectorBackedTools(t *testing.T) {
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "gh_write", Annotations: map[string]string{
+			approvalOutboundPolicyUIDAnnotation: "policy-uid", approvalOutboundPolicyGenerationAnnotation: "3",
+		}},
+		Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{URL: "https://api.github.example.test/gh_write",
+			OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "github-conn"}}},
+	}
+	plain, err := approvals.TargetSpecDigest(tool.Spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := approvalTargetSpecDigest(tool); err != nil || got == plain {
+		t.Fatalf("a worker-executed tool folds policy identity into its digest: got %q err = %v", got, err)
+	}
+	markConnectorBackedTools(map[string]*corev1alpha1.Tool{"gh_write": tool}, map[string]bool{"gh_write": true})
+	if got, err := approvalTargetSpecDigest(tool); err != nil || got != plain {
+		t.Fatalf("a connector-backed tool must digest its plain spec: got %q want %q err = %v", got, plain, err)
+	}
+	// A marker that arrived on the Tool object is not a classification: it
+	// is cleared unless routing derived it.
+	local := tool.DeepCopy()
+	local.Annotations[connectorBackedToolAnnotation] = "true"
+	markConnectorBackedTools(map[string]*corev1alpha1.Tool{"gh_write": local}, map[string]bool{})
+	if got, err := approvalTargetSpecDigest(local); err != nil || got == plain {
+		t.Fatalf("a locally executed tool must keep the full digest: got %q err = %v", got, err)
+	}
+}

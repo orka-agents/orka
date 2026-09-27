@@ -8,8 +8,10 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,6 +27,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/aitools"
+	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
@@ -120,7 +123,11 @@ func setupJobBuilder() *JobBuilder {
 
 // buildEnvVars builds the environment variables for the container
 func (b *JobBuilder) buildEnvVars(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) []corev1.EnvVar {
-	return b.buildEnvVarsWithOptions(ctx, task, agent, provider, JobBuildOptions{})
+	envVars, err := b.buildEnvVarsWithOptions(ctx, task, agent, provider, JobBuildOptions{})
+	if err != nil {
+		panic(err)
+	}
+	return envVars
 }
 
 func assertServiceAccountName(t *testing.T, got, want string) {
@@ -1379,7 +1386,10 @@ func TestJobBuilder_buildContainer_ContainerWithoutImage(t *testing.T) {
 		},
 	}
 
-	container := builder.buildContainerWithOptions(context.Background(), task, nil, nil, JobBuildOptions{})
+	container, err := builder.buildContainerWithOptions(context.Background(), task, nil, nil, JobBuildOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if container.Image != DefaultGeneralWorkerImage {
 		t.Errorf("Image = %s, want %s", container.Image, DefaultGeneralWorkerImage)
 	}
@@ -2359,7 +2369,7 @@ func TestAddAIEnvVars_FallbackProviders(t *testing.T) {
 			AI:   &corev1alpha1.AISpec{Prompt: "test"},
 		},
 	}
-	envVars := jb.addAIEnvVars(context.Background(), nil, task, agent, nil)
+	envVars, _ := jb.addAIEnvVars(context.Background(), nil, task, agent, nil)
 	envMap := make(map[string]string)
 	for _, e := range envVars {
 		envMap[e.Name] = e.Value
@@ -2433,7 +2443,7 @@ func TestAddAIEnvVars_ChildTaskMessaging(t *testing.T) {
 			AI:   &corev1alpha1.AISpec{Prompt: "test"},
 		},
 	}
-	envVars := jb.addAIEnvVars(context.Background(), nil, task, nil, nil)
+	envVars, _ := jb.addAIEnvVars(context.Background(), nil, task, nil, nil)
 	envMap := make(map[string]string)
 	for _, e := range envVars {
 		envMap[e.Name] = e.Value
@@ -2463,7 +2473,7 @@ func TestAddAIEnvVars_ChildTaskMessagingDisabled(t *testing.T) {
 			AI:   &corev1alpha1.AISpec{Prompt: "test"},
 		},
 	}
-	envVars := jb.addAIEnvVars(context.Background(), nil, task, nil, nil)
+	envVars, _ := jb.addAIEnvVars(context.Background(), nil, task, nil, nil)
 	envMap := make(map[string]string)
 	for _, e := range envVars {
 		envMap[e.Name] = e.Value
@@ -2505,7 +2515,7 @@ func TestAddAIEnvVars_ChildTaskExplicitCoordinationWithInjectionDisabled(t *test
 		},
 	}
 
-	envVars := jb.addAIEnvVars(context.Background(), nil, task, nil, nil)
+	envVars, _ := jb.addAIEnvVars(context.Background(), nil, task, nil, nil)
 	envMap := make(map[string]string)
 	for _, envVar := range envVars {
 		envMap[envVar.Name] = envVar.Value
@@ -2557,7 +2567,7 @@ func TestJobBuilderEffectiveAIToolsMatchAuthorizationResolver(t *testing.T) {
 				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, AI: &corev1alpha1.AISpec{Tools: tt.tools}},
 			}
 			agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Coordination: tt.coordination}}
-			envVars := jb.addAIEnvVars(context.Background(), nil, task, agent, nil)
+			envVars, _ := jb.addAIEnvVars(context.Background(), nil, task, agent, nil)
 			env, found := findEnvVar(envVars, workerenv.AITools)
 			if !found {
 				t.Fatalf("missing %s", workerenv.AITools)
@@ -2589,7 +2599,7 @@ func TestAddAIEnvVars_CoordinationEnabled(t *testing.T) {
 			},
 		},
 	}
-	envVars := jb.addAIEnvVars(context.Background(), nil, task, agent, nil)
+	envVars, _ := jb.addAIEnvVars(context.Background(), nil, task, agent, nil)
 	envMap := make(map[string]string)
 	for _, e := range envVars {
 		envMap[e.Name] = e.Value
@@ -2628,7 +2638,7 @@ func TestAddAIEnvVars_CoordinationEnabledWithExplicitToolsOnly(t *testing.T) {
 			},
 		},
 	}
-	envVars := jb.addAIEnvVars(context.Background(), nil, task, agent, nil)
+	envVars, _ := jb.addAIEnvVars(context.Background(), nil, task, agent, nil)
 	envMap := make(map[string]string)
 	for _, e := range envVars {
 		envMap[e.Name] = e.Value
@@ -2922,6 +2932,109 @@ func TestJobBuilder_buildEnvVars_WithApprovalRequiredTools(t *testing.T) {
 	}
 }
 
+func TestJobBuilder_buildEnvVars_ConnectorWriteToolsRequireApprovalAndHideOnReadOnly(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	policy := &corev1alpha1.OutboundAccessPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "github-conn", Namespace: defaultNS},
+		Spec:       corev1alpha1.OutboundAccessPolicySpec{Connection: &corev1alpha1.ConnectionOutboundAccess{ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}}},
+	}
+	connectorTool := func(name string, class corev1alpha1.AgentRuntimeBrokeredToolClass) *corev1alpha1.Tool {
+		return &corev1alpha1.Tool{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: defaultNS},
+			Spec: corev1alpha1.ToolSpec{Description: name, BrokeredToolClass: class, HTTP: &corev1alpha1.HTTPExecution{
+				URL: "https://api.github.example.test/" + name, OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "github-conn"},
+			}},
+		}
+	}
+	requester := &corev1alpha1.RequestedBy{Issuer: "https://issuer.example.test", Subject: "alice"}
+	connection := &corev1alpha1.Connection{
+		ObjectMeta: metav1.ObjectMeta{Name: connectors.ConnectionName("github", requester.Issuer, requester.Subject), Namespace: defaultNS, UID: "conn-uid", Generation: 1},
+		Spec: corev1alpha1.ConnectionSpec{
+			Subject: corev1alpha1.ConnectionSubject{Issuer: requester.Issuer, Subject: requester.Subject}, ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}, Mode: corev1alpha1.ConnectionModeReadWrite,
+		},
+		Status: corev1alpha1.ConnectionStatus{Conditions: []metav1.Condition{
+			{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionTrue, Reason: "Linked", ObservedGeneration: 1},
+			{Type: corev1alpha1.ConnectionConditionScopesGranted, Status: metav1.ConditionTrue, Reason: "ScopesGranted", ObservedGeneration: 1},
+			{Type: corev1alpha1.ConnectionConditionProviderResolved, Status: metav1.ConditionTrue, Reason: "ProviderResolved", ObservedGeneration: 1},
+		}},
+	}
+	var toolReadFailure atomic.Bool
+	buildWith := func(connection *corev1alpha1.Connection) []corev1.EnvVar {
+		objects := []client.Object{policy, connectorTool("gh_read", corev1alpha1.AgentRuntimeBrokeredToolClassRead), connectorTool("gh_write", corev1alpha1.AgentRuntimeBrokeredToolClassWrite)}
+		if connection != nil {
+			objects = append(objects, connection)
+		}
+		builder := setupJobBuilder()
+		builder.Client = fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).
+			WithInterceptorFuncs(interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if _, isTool := obj.(*corev1alpha1.Tool); isTool && toolReadFailure.Load() {
+						return errors.New("transient tool read failure")
+					}
+					return c.Get(ctx, key, obj, opts...)
+				},
+			}).Build()
+		task := &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: testTask, Namespace: defaultNS,
+				Annotations: map[string]string{labels.AnnotationRequestedBySource: labels.RequestedBySourceAPI},
+			},
+			Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "Review", RequestedBy: requester},
+		}
+		agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{
+			Model:        &corev1alpha1.ModelConfig{Provider: "anthropic", Name: "claude"},
+			Tools:        []corev1alpha1.ToolReference{{Name: "gh_read"}, {Name: "gh_write"}},
+			Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true, ApprovalRequiredTools: []string{"dispatch_work_order"}},
+		}}
+		return builder.buildEnvVars(context.Background(), task, agent, nil)
+	}
+	// A read failure while resolving connector tools must fail the build
+	// (the Task controller requeues) rather than start a worker with a write
+	// tool advertised but absent from the approval set.
+	toolReadFailure.Store(true)
+	func() {
+		defer func() {
+			recovered := recover()
+			err, _ := recovered.(error)
+			if err == nil || !errors.Is(err, ErrConnectorToolResolution) {
+				t.Fatalf("build with unreadable tools = %v, want ErrConnectorToolResolution", recovered)
+			}
+		}()
+		buildWith(connection)
+	}()
+	toolReadFailure.Store(false)
+
+	envVars := buildWith(connection)
+	tools, _ := findEnvVar(envVars, workerenv.AITools)
+	if !strings.Contains(tools.Value, "gh_write") || !strings.Contains(tools.Value, "gh_read") {
+		t.Fatalf("readWrite link must expose both tools, got %q", tools.Value)
+	}
+	approval, _ := findEnvVar(envVars, workerenv.ApprovalRequiredTools)
+	if approval.Value != "dispatch_work_order,gh_write" {
+		t.Fatalf("%s = %q, want the connector write tool added", workerenv.ApprovalRequiredTools, approval.Value)
+	}
+
+	readOnly := connection.DeepCopy()
+	readOnly.Spec.Mode = corev1alpha1.ConnectionModeReadOnly
+	envVars = buildWith(readOnly)
+	tools, _ = findEnvVar(envVars, workerenv.AITools)
+	if strings.Contains(tools.Value, "gh_write") || !strings.Contains(tools.Value, "gh_read") {
+		t.Fatalf("readOnly link must hide the write tool, got %q", tools.Value)
+	}
+	approval, _ = findEnvVar(envVars, workerenv.ApprovalRequiredTools)
+	if approval.Value != "dispatch_work_order" {
+		t.Fatalf("%s = %q, want only the agent's own list", workerenv.ApprovalRequiredTools, approval.Value)
+	}
+
+	envVars = buildWith(nil)
+	tools, _ = findEnvVar(envVars, workerenv.AITools)
+	if !strings.Contains(tools.Value, "gh_write") {
+		t.Fatalf("without a link the tool stays visible and fails closed at call time, got %q", tools.Value)
+	}
+}
+
 func TestJobBuilder_buildEnvVars_WithResolvedApprovalsOption(t *testing.T) {
 	builder := setupJobBuilder()
 	task := &corev1alpha1.Task{
@@ -2929,7 +3042,10 @@ func TestJobBuilder_buildEnvVars_WithResolvedApprovalsOption(t *testing.T) {
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "Coordinate incident"},
 	}
 	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{Provider: "anthropic", Name: "claude"}}}
-	envVars := builder.buildEnvVarsWithOptions(context.Background(), task, agent, nil, JobBuildOptions{ResolvedApprovalsJSON: `[{"id":"k","status":"approved"}]`})
+	envVars, err := builder.buildEnvVarsWithOptions(context.Background(), task, agent, nil, JobBuildOptions{ResolvedApprovalsJSON: `[{"id":"k","status":"approved"}]`})
+	if err != nil {
+		t.Fatal(err)
+	}
 	env, found := findEnvVar(envVars, workerenv.ResolvedApprovals)
 	if !found {
 		t.Fatalf("missing %s", workerenv.ResolvedApprovals)
@@ -2956,7 +3072,7 @@ func TestJobBuilder_buildEnvVars_KeepsEmptyResolvedApprovalsEnvOverride(t *testi
 			ApprovalRequiredTools: []string{"dispatch_work_order"},
 		},
 	}}
-	envVars := builder.buildEnvVarsWithOptions(context.Background(), task, agent, nil, JobBuildOptions{})
+	envVars, _ := builder.buildEnvVarsWithOptions(context.Background(), task, agent, nil, JobBuildOptions{})
 	env, ok := findEnvVar(envVars, workerenv.ResolvedApprovals)
 	if !ok {
 		t.Fatalf("missing %s", workerenv.ResolvedApprovals)
@@ -3032,7 +3148,7 @@ func TestJobBuilder_buildEnvVars_TaskEnvCannotSpoofApprovalState(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "real-agent", Namespace: defaultNS},
 		Spec:       corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"}},
 	}
-	envVars := builder.buildEnvVarsWithOptions(context.Background(), task, agent, nil, JobBuildOptions{})
+	envVars, _ := builder.buildEnvVarsWithOptions(context.Background(), task, agent, nil, JobBuildOptions{})
 	if env, ok := findEnvVar(envVars, workerenv.TaskUID); !ok || env.Value != "real-uid" {
 		t.Fatalf("%s = %#v, found=%t; want real-uid", workerenv.TaskUID, env, ok)
 	}

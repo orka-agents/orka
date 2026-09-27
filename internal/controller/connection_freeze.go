@@ -8,9 +8,12 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,214 +29,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 	workerexecutor "github.com/orka-agents/orka/internal/worker"
 )
-
-// freezeRequesterConnections records, for every connection-mode
-// OutboundAccessPolicy reachable from the frozen tool policy, which of the
-// requester's Connections was Ready at dispatch. A missing or unready
-// Connection is simply not frozen, which makes the later call fail closed.
-// Read failures are returned so binding retries rather than freezing a
-// partial view.
-func freezeRequesterConnections(
-	ctx context.Context,
-	reader client.Reader,
-	task *corev1alpha1.Task,
-	mcpConfiguration harnessv2.MCPPolicyConfiguration,
-) ([]agentExecutionSnapshotConnection, error) {
-	if reader == nil || task == nil {
-		return nil, nil
-	}
-	requester := task.Spec.RequestedBy
-	if requester == nil || strings.TrimSpace(requester.Issuer) == "" || strings.TrimSpace(requester.Subject) == "" {
-		return nil, nil
-	}
-	verified, err := requesterProvenanceVerified(ctx, reader, task)
-	if err != nil {
-		return nil, err
-	}
-	if !verified {
-		return nil, nil
-	}
-	var frozen []agentExecutionSnapshotConnection
-	seenPolicies := map[string]struct{}{}
-	for _, descriptor := range mcpConfiguration.ToolPolicy.Tools {
-		if descriptor.Source != harnessv2.MCPToolSourceBrokeredCustom {
-			continue
-		}
-		tool := &corev1alpha1.Tool{}
-		if err := reader.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: descriptor.Name}, tool); err != nil {
-			if apierrors.IsNotFound(err) {
-				continue
-			}
-			return nil, fmt.Errorf("load tool %q: %w", descriptor.Name, err)
-		}
-		if tool.Spec.HTTP == nil || tool.Spec.HTTP.OutboundAccessPolicyRef == nil {
-			continue
-		}
-		policyName := tool.Spec.HTTP.OutboundAccessPolicyRef.Name
-		if _, seen := seenPolicies[policyName]; seen {
-			continue
-		}
-		seenPolicies[policyName] = struct{}{}
-		policy := &corev1alpha1.OutboundAccessPolicy{}
-		if err := reader.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: policyName}, policy); err != nil {
-			if apierrors.IsNotFound(err) {
-				continue
-			}
-			return nil, fmt.Errorf("load outbound access policy %q: %w", policyName, err)
-		}
-		if policy.Spec.Connection == nil {
-			continue
-		}
-		provider := policy.Spec.Connection.ProviderRef.Name
-		connection := &corev1alpha1.Connection{}
-		name := connectors.ConnectionName(provider, requester.Issuer, requester.Subject)
-		if err := reader.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: name}, connection); err != nil {
-			if apierrors.IsNotFound(err) {
-				continue
-			}
-			return nil, fmt.Errorf("load connection %q: %w", name, err)
-		}
-		if !connectionReadyFor(connection, requester, provider) {
-			continue
-		}
-		frozen = append(frozen, agentExecutionSnapshotConnection{
-			PolicyName:     policyName,
-			Provider:       provider,
-			ConnectionName: connection.Name,
-			UID:            string(connection.UID),
-			Generation:     connection.Generation,
-			GrantSequence:  connection.Status.GrantSequence,
-			Mode:           connection.Spec.Mode,
-		})
-	}
-	return frozen, nil
-}
-
-// requesterStampKey verifies the stamp the API server seals onto Tasks it
-// created for a verified person. Without it no requester is ever trusted
-// for connector use.
-var requesterStampKey []byte
-
-// requesterStampGrace is how long after creation a Task the API stamped may
-// still be waiting for its seal (a second write after the create). Within it
-// an unsealed stamp is a transient condition and dispatch retries rather
-// than committing a write-once binding with no Connections; after it, an
-// unsealed stamp is treated as unverified.
-const requesterStampGrace = 2 * time.Minute
-
-// ErrRequesterStampPending reports a freshly created, API-stamped Task whose
-// seal has not landed yet; callers retry rather than freeze nothing.
-var ErrRequesterStampPending = errors.New("the task's requester stamp is not sealed yet; retry")
-
-// requesterStampPending reports whether task is still waiting for its seal
-// and young enough for it to be on its way: a Task the API stamped (the seal
-// is a second write after the create) or a coordination child a worker
-// created (its parent's worker asks the controller to seal it right after).
-// Without a configured key no seal can ever arrive (connectors are
-// disabled), so nothing is pending and dispatch is never delayed.
-func requesterStampPending(task *corev1alpha1.Task, now time.Time) bool {
-	if len(requesterStampKey) == 0 || task == nil || task.Spec.RequestedBy == nil ||
-		task.Annotations[labels.AnnotationRequestedByStamp] != "" ||
-		task.CreationTimestamp.IsZero() || now.Sub(task.CreationTimestamp.Time) >= requesterStampGrace {
-		return false
-	}
-	if task.Annotations[labels.AnnotationRequestedBySource] == labels.RequestedBySourceAPI {
-		return true
-	}
-	owner := metav1.GetControllerOf(task)
-	return owner != nil && owner.APIVersion == corev1alpha1.GroupVersion.String() && owner.Kind == taskResourceKind
-}
-
-// SetRequesterStampKey installs the key requester stamps are verified with.
-func SetRequesterStampKey(key []byte) {
-	requesterStampKey = append([]byte(nil), key...)
-}
-
-// requesterProvenanceVerified reports whether task.spec.requestedBy can be
-// trusted for connector use. Trusted workers may set requestedBy on the
-// Tasks they create, so the field alone proves nothing, and admission is not
-// retroactive, so the controller-only source annotation alone proves nothing
-// either: a Task planted while admission was disabled could carry it. Only a
-// stamp the controller key sealed for this Task's own UID is trusted. The
-// API seals Tasks it creates; a coordination child is sealed only through
-// its parent's own worker, which the controller authenticates, so an owner
-// reference alone never lets a child inherit another person's authority.
-func requesterProvenanceVerified(ctx context.Context, reader client.Reader, task *corev1alpha1.Task) (bool, error) {
-	_ = reader
-	_ = ctx
-	if requesterStampPending(task, time.Now()) {
-		return false, ErrRequesterStampPending
-	}
-	if task == nil || task.Spec.RequestedBy == nil {
-		return false, nil
-	}
-	return connectors.RequesterStampValid(requesterStampKey, task), nil
-}
-
-// connectionReadyFor reports whether connection is the requester's live,
-// linked Connection to provider for its current generation.
-func connectionReadyFor(connection *corev1alpha1.Connection, requester *corev1alpha1.RequestedBy, provider string) bool {
-	if connection == nil || requester == nil || !connection.DeletionTimestamp.IsZero() {
-		return false
-	}
-	if connection.Spec.Subject.Issuer != requester.Issuer || connection.Spec.Subject.Subject != requester.Subject ||
-		connection.Spec.ProviderRef.Name != provider {
-		return false
-	}
-	// A linked Connection always carries the grant that linked it; without
-	// one there is nothing to bind the snapshot's authority to.
-	return connection.Status.GrantSequence > 0 && connectors.ConnectionLinked(connection)
-}
-
-// bindFrozenConnections loads the Task's execution snapshot and hands the
-// executor the requester identity and frozen Connection bindings. Without a
-// snapshot store or binding the executor keeps none, so connection-mode
-// policies fail closed.
-func bindFrozenConnections(
-	ctx context.Context,
-	snapshots store.AgentExecutionSnapshotStore,
-	task *corev1alpha1.Task,
-	executor *workerexecutor.ToolExecutor,
-) error {
-	if task == nil || executor == nil {
-		return errors.New("frozen connection binding requires a Task and executor")
-	}
-	executor.SetRequester(task.Spec.RequestedBy)
-	executor.SetFrozenConnections(nil)
-	if snapshots == nil || task.Status.AgentExecutionBinding == nil {
-		return nil
-	}
-	binding := task.Status.AgentExecutionBinding
-	snapshot, err := snapshots.GetAgentExecutionSnapshot(ctx, store.AgentExecutionSnapshotKey{
-		TaskUID: string(task.UID),
-		Digest:  binding.Snapshot.Digest,
-	})
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return nil
-		}
-		return fmt.Errorf("load execution snapshot for frozen connections: %w", err)
-	}
-	var body agentExecutionSnapshotBody
-	if err := json.Unmarshal(snapshot.Body, &body); err != nil {
-		return fmt.Errorf("decode execution snapshot for frozen connections: %w", err)
-	}
-	executor.SetFrozenConnections(frozenConnectionsFromSnapshot(body))
-	return nil
-}
-
-func frozenConnectionsFromSnapshot(body agentExecutionSnapshotBody) map[string]outboundaccess.FrozenConnection {
-	if len(body.Connections) == 0 {
-		return nil
-	}
-	frozen := make(map[string]outboundaccess.FrozenConnection, len(body.Connections))
-	for _, connection := range body.Connections {
-		frozen[connection.PolicyName] = outboundaccess.FrozenConnection{
-			UID: connection.UID, Generation: connection.Generation, GrantSequence: connection.GrantSequence,
-		}
-	}
-	return frozen
-}
 
 // connectorToolInfo describes one Tool whose OutboundAccessPolicy is in
 // connection mode.
@@ -374,4 +169,330 @@ func ACPChildTaskSealer(reader client.Reader, parentNamespace, parentName, paren
 		}
 		return fmt.Errorf("seal the child task: %w", err)
 	}
+// requesterStampKey verifies the stamp the API server seals onto Tasks it
+// created for a verified person. Without it no requester is ever trusted
+// for connector use.
+var requesterStampKey []byte
+
+// SetRequesterStampKey installs the key requester stamps are verified with.
+func SetRequesterStampKey(key []byte) {
+	requesterStampKey = append([]byte(nil), key...)
+}
+
+// requesterStampGrace is how long after creation a Task the API stamped may
+// still be waiting for its seal (a second write after the create). Within it
+// an unsealed stamp is a transient condition and dispatch retries rather
+// than committing a write-once binding with no Connections; after it, an
+// unsealed stamp is treated as unverified.
+const requesterStampGrace = 2 * time.Minute
+
+// ErrRequesterStampPending reports a freshly created, API-stamped Task whose
+// seal has not landed yet; callers retry rather than freeze nothing.
+var ErrRequesterStampPending = errors.New("the task's requester stamp is not sealed yet; retry")
+
+// requesterStampPending reports whether task is still waiting for its seal
+// and young enough for it to be on its way: a Task the API stamped (the seal
+// is a second write after the create) or a coordination child a worker
+// created (its parent's worker asks the controller to seal it right after).
+// Without a configured key no seal can ever arrive (connectors are
+// disabled), so nothing is pending and dispatch is never delayed.
+func requesterStampPending(task *corev1alpha1.Task, now time.Time) bool {
+	if len(requesterStampKey) == 0 || task == nil || task.Spec.RequestedBy == nil ||
+		task.Annotations[labels.AnnotationRequestedByStamp] != "" ||
+		task.CreationTimestamp.IsZero() || now.Sub(task.CreationTimestamp.Time) >= requesterStampGrace {
+		return false
+	}
+	if task.Annotations[labels.AnnotationRequestedBySource] == labels.RequestedBySourceAPI {
+		return true
+	}
+	owner := metav1.GetControllerOf(task)
+	return owner != nil && owner.APIVersion == corev1alpha1.GroupVersion.String() && owner.Kind == taskResourceKind
+}
+
+// requesterProvenanceVerified reports whether task.spec.requestedBy can be
+// trusted for connector use. Trusted workers may set requestedBy on the
+// Tasks they create, so the field alone proves nothing, and admission is not
+// retroactive, so the controller-only source annotation alone proves nothing
+// either: a Task planted while admission was disabled could carry it. Only a
+// stamp the controller key sealed for this Task's own UID is trusted. The
+// API seals Tasks it creates; a coordination child is sealed only through
+// its parent's own worker, which the controller authenticates, so an owner
+// reference alone never lets a child inherit another person's authority.
+func requesterProvenanceVerified(ctx context.Context, reader client.Reader, task *corev1alpha1.Task) (bool, error) {
+	_ = reader
+	_ = ctx
+	if requesterStampPending(task, time.Now()) {
+		return false, ErrRequesterStampPending
+	}
+	if task == nil || task.Spec.RequestedBy == nil {
+		return false, nil
+	}
+	return connectors.RequesterStampValid(requesterStampKey, task), nil
+}
+
+// requesterConnection returns the requester's linked Connection for provider,
+// or nil when none is usable or the requester is not provably the person.
+func requesterConnection(ctx context.Context, reader client.Reader, task *corev1alpha1.Task, provider string) (*corev1alpha1.Connection, error) {
+	requester := task.Spec.RequestedBy
+	if requester == nil || strings.TrimSpace(requester.Issuer) == "" || strings.TrimSpace(requester.Subject) == "" {
+		return nil, nil
+	}
+	verified, err := requesterProvenanceVerified(ctx, reader, task)
+	if err != nil {
+		return nil, err
+	}
+	if !verified {
+		return nil, nil
+	}
+	connection := &corev1alpha1.Connection{}
+	name := connectors.ConnectionName(provider, requester.Issuer, requester.Subject)
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: name}, connection); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("load connection %q: %w", name, err)
+	}
+	if !connectionReadyFor(connection, requester, provider) {
+		return nil, nil
+	}
+	return connection, nil
+}
+
+// FilterConnectorToolsForRequester applies the readOnly rule: write-class
+// tools behind a connection-mode policy are hidden from the agent when the
+// requester's Connection to that provider is readOnly. It returns the visible
+// tool names in their original order and the connector write tools that
+// remain visible, which default into the approval-required set.
+func FilterConnectorToolsForRequester(
+	ctx context.Context,
+	reader client.Reader,
+	task *corev1alpha1.Task,
+	toolNames []string,
+) (visible []string, connectorWrite []string, err error) {
+	if reader == nil || task == nil || len(toolNames) == 0 {
+		return toolNames, nil, nil
+	}
+	infos, err := connectorToolsFor(ctx, reader, task.Namespace, toolNames)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(infos) == 0 {
+		return toolNames, nil, nil
+	}
+	modes := map[string]string{}
+	for _, name := range toolNames {
+		info, ok := infos[name]
+		if !ok {
+			visible = append(visible, name)
+			continue
+		}
+		mode, cached := modes[info.Provider]
+		if !cached {
+			connection, err := requesterConnection(ctx, reader, task, info.Provider)
+			if err != nil {
+				return nil, nil, err
+			}
+			if connection != nil {
+				mode = connection.Spec.Mode
+				if mode == "" {
+					mode = corev1alpha1.ConnectionModeReadOnly
+				}
+			}
+			modes[info.Provider] = mode
+		}
+		if info.Class == corev1alpha1.AgentRuntimeBrokeredToolClassWrite && mode == corev1alpha1.ConnectionModeReadOnly {
+			continue
+		}
+		visible = append(visible, name)
+		if info.Class == corev1alpha1.AgentRuntimeBrokeredToolClassWrite {
+			connectorWrite = append(connectorWrite, name)
+		}
+	}
+	return visible, connectorWrite, nil
+}
+
+// freezeRequesterConnectionsForTools records, for every connection-mode
+// policy reachable from the named tools, which of the requester's Connections
+// was Ready now. A missing or unready Connection is simply not frozen, which
+// makes the later call fail closed. Read failures are returned so the caller
+// retries rather than freezing a partial view.
+func freezeRequesterConnectionsForTools(
+	ctx context.Context,
+	reader client.Reader,
+	task *corev1alpha1.Task,
+	toolNames []string,
+) ([]agentExecutionSnapshotConnection, error) {
+	if reader == nil || task == nil {
+		return nil, nil
+	}
+	infos, err := connectorToolsFor(ctx, reader, task.Namespace, toolNames)
+	if err != nil {
+		return nil, err
+	}
+	var frozen []agentExecutionSnapshotConnection
+	seenPolicies := map[string]struct{}{}
+	for _, name := range toolNames {
+		info, ok := infos[name]
+		if !ok {
+			continue
+		}
+		if _, seen := seenPolicies[info.PolicyName]; seen {
+			continue
+		}
+		seenPolicies[info.PolicyName] = struct{}{}
+		connection, err := requesterConnection(ctx, reader, task, info.Provider)
+		if err != nil {
+			return nil, err
+		}
+		if connection == nil {
+			continue
+		}
+		frozen = append(frozen, agentExecutionSnapshotConnection{
+			PolicyName:     info.PolicyName,
+			Provider:       info.Provider,
+			ConnectionName: connection.Name,
+			UID:            string(connection.UID),
+			Generation:     connection.Generation,
+			Mode:           connection.Spec.Mode,
+		})
+	}
+	return frozen, nil
+}
+
+// freezeRequesterConnections is the ACP entry point: it freezes the
+// Connections behind the brokered custom tools of the frozen tool policy.
+func freezeRequesterConnections(
+	ctx context.Context,
+	reader client.Reader,
+	task *corev1alpha1.Task,
+	mcpConfiguration harnessv2.MCPPolicyConfiguration,
+) ([]agentExecutionSnapshotConnection, error) {
+	var names []string
+	for _, descriptor := range mcpConfiguration.ToolPolicy.Tools {
+		if descriptor.Source == harnessv2.MCPToolSourceBrokeredCustom {
+			names = append(names, descriptor.Name)
+		}
+	}
+	return freezeRequesterConnectionsForTools(ctx, reader, task, names)
+}
+
+// taskConnectionBindings converts frozen links to the Task status form used
+// by native workers.
+func taskConnectionBindings(frozen []agentExecutionSnapshotConnection) []corev1alpha1.ConnectionBinding {
+	if len(frozen) == 0 {
+		return nil
+	}
+	bindings := make([]corev1alpha1.ConnectionBinding, 0, len(frozen))
+	for _, connection := range frozen {
+		bindings = append(bindings, corev1alpha1.ConnectionBinding{
+			PolicyName: connection.PolicyName, Provider: connection.Provider, ConnectionName: connection.ConnectionName,
+			UID: connection.UID, Generation: connection.Generation, Mode: connection.Mode,
+		})
+	}
+	return bindings
+}
+
+// FrozenConnectionsFromTaskStatus converts native-Task status bindings into
+// the executor's frozen map.
+func FrozenConnectionsFromTaskStatus(task *corev1alpha1.Task) map[string]outboundaccess.FrozenConnection {
+	if task == nil || len(task.Status.ConnectionBindings) == 0 {
+		return nil
+	}
+	frozen := make(map[string]outboundaccess.FrozenConnection, len(task.Status.ConnectionBindings))
+	for _, binding := range task.Status.ConnectionBindings {
+		frozen[binding.PolicyName] = outboundaccess.FrozenConnection{UID: binding.UID, Generation: binding.Generation}
+	}
+	return frozen
+}
+
+// BindNativeTaskConnectorAuthority prepares an executor for a connector-backed
+// tool call made on behalf of a native type: ai Task through the internal
+// controller endpoint: transaction authority plus the requester identity and
+// the Connection bindings frozen into Task status at Job creation.
+func BindNativeTaskConnectorAuthority(
+	ctx context.Context,
+	reader client.Reader,
+	task *corev1alpha1.Task,
+	readScopes []string,
+	enforceCredentialAuth bool,
+	executor *workerexecutor.ToolExecutor,
+) error {
+	if task == nil || executor == nil {
+		return errors.New("native connector authority binding requires a Task and executor")
+	}
+	executor.SetRequester(task.Spec.RequestedBy)
+	executor.SetFrozenConnections(FrozenConnectionsFromTaskStatus(task))
+	return bindVerifiedTaskTransactionAuthority(ctx, reader, task, readScopes, enforceCredentialAuth, executor)
+}
+
+// frozenConnectionDigest returns a stable, non-secret digest of the frozen
+// Connection identity behind policyName, for external-effect audit records.
+func frozenConnectionDigest(frozen map[string]outboundaccess.FrozenConnection, policyName string) string {
+	binding, ok := frozen[policyName]
+	if !ok {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(policyName + "\x00" + binding.UID + "\x00" + strconv.FormatInt(binding.Generation, 10)))
+	return hex.EncodeToString(sum[:])
+}
+
+// connectionReadyFor reports whether connection is the requester's live,
+// Ready link to provider for its current generation.
+func connectionReadyFor(connection *corev1alpha1.Connection, requester *corev1alpha1.RequestedBy, provider string) bool {
+	if connection == nil || requester == nil || !connection.DeletionTimestamp.IsZero() {
+		return false
+	}
+	if connection.Spec.Subject.Issuer != requester.Issuer || connection.Spec.Subject.Subject != requester.Subject ||
+		connection.Spec.ProviderRef.Name != provider {
+		return false
+	}
+	return connectors.ConnectionLinked(connection)
+}
+
+// bindFrozenConnections loads the Task's execution snapshot and hands the
+// executor the requester identity and frozen Connection bindings. Without a
+// snapshot store or binding the executor keeps none, so connection-mode
+// policies fail closed.
+func bindFrozenConnections(
+	ctx context.Context,
+	snapshots store.AgentExecutionSnapshotStore,
+	task *corev1alpha1.Task,
+	executor *workerexecutor.ToolExecutor,
+) error {
+	if task == nil || executor == nil {
+		return errors.New("frozen connection binding requires a Task and executor")
+	}
+	executor.SetRequester(task.Spec.RequestedBy)
+	executor.SetFrozenConnections(nil)
+	if snapshots == nil || task.Status.AgentExecutionBinding == nil {
+		return nil
+	}
+	binding := task.Status.AgentExecutionBinding
+	snapshot, err := snapshots.GetAgentExecutionSnapshot(ctx, store.AgentExecutionSnapshotKey{
+		TaskUID: string(task.UID),
+		Digest:  binding.Snapshot.Digest,
+	})
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		return fmt.Errorf("load execution snapshot for frozen connections: %w", err)
+	}
+	var body agentExecutionSnapshotBody
+	if err := json.Unmarshal(snapshot.Body, &body); err != nil {
+		return fmt.Errorf("decode execution snapshot for frozen connections: %w", err)
+	}
+	executor.SetFrozenConnections(frozenConnectionsFromSnapshot(body))
+	return nil
+}
+
+func frozenConnectionsFromSnapshot(body agentExecutionSnapshotBody) map[string]outboundaccess.FrozenConnection {
+	if len(body.Connections) == 0 {
+		return nil
+	}
+	frozen := make(map[string]outboundaccess.FrozenConnection, len(body.Connections))
+	for _, connection := range body.Connections {
+		frozen[connection.PolicyName] = outboundaccess.FrozenConnection{UID: connection.UID, Generation: connection.Generation}
+	}
+	return frozen
 }

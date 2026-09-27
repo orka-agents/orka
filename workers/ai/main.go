@@ -255,6 +255,9 @@ func run(transcriptPath string) (err error) {
 
 	// Load custom Tool CRDs
 	customTools := loadCustomTools(ctx, k8sClient, taskNamespace, enabledTools)
+	// Tools behind a connection-mode policy never run in this Pod.
+	connectorBackedToolNames = connectorBackedTools(ctx, k8sClient, taskNamespace, customTools)
+	markConnectorBackedTools(customTools, connectorBackedToolNames)
 
 	// Load skills from mounted volume and prepend to system prompt
 	if skillContent := loadSkillsFromVolume(); skillContent != "" {
@@ -1434,7 +1437,13 @@ func executeAgentLoopWithEvents(
 				if approvalKey != "" {
 					execCtx = worker.WithToolIdempotencyKey(execCtx, approvalKey)
 				}
-				result, execErr = toolExecutor.Execute(execCtx, customTool, execArgs)
+				if connectorBackedToolNames[toolName] {
+					// The person's linked-account token lives only in the
+					// controller; the worker asks it to run the call.
+					result, execErr = executeConnectorToolViaController(execCtx, nil, toolName, execArgs, tc.ID, approvalKey)
+				} else {
+					result, execErr = toolExecutor.Execute(execCtx, customTool, execArgs)
+				}
 				if execErr == nil || worker.ToolRequestWasAttempted(execErr) {
 					approvalGate.markFired(approvalKey)
 				}

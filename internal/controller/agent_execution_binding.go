@@ -311,6 +311,13 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	if err != nil {
 		return nil, err
 	}
+	// Connector-backed tool visibility and approval defaults depend on the
+	// requester's links; apply them to copies so the plan, the MCP policy,
+	// and the frozen snapshot all describe the same effective policy.
+	task, agent, err = adjustInputsForConnectorTools(ctx, reader, task, agent)
+	if err != nil {
+		return nil, err
+	}
 	plan, err := PlanACPRuntimeWithConfiguration(task, withEffectiveBuiltInContract(agent, r.Mode), r.ACPRuntimeImages, configuration)
 	if err != nil {
 		return nil, permanentACPAgentConfiguration(err)
@@ -530,6 +537,16 @@ func (r *TaskReconciler) resolveExternalAgentExecutionCandidate(
 	profile, external, err := r.resolveExternalAgentRuntimeSnapshot(ctx, task, runtime)
 	if err != nil {
 		return nil, err
+	}
+	// An external runtime's MCP approval policy is fixed by its registered
+	// profile, so per-requester connector visibility and approval defaults
+	// cannot be applied, and this path freezes no Connections. Connector-
+	// backed tools therefore fail closed here rather than being advertised
+	// as tools that can never bind a credential.
+	if connectorTools, err := connectorToolsFor(ctx, reader, task.Namespace, effectiveACPAllowedTools(task, agent)); err != nil {
+		return nil, err
+	} else if len(connectorTools) > 0 {
+		return nil, permanentACPAgentConfiguration(errors.New("connector-backed tools are not supported on external v2 AgentRuntimes"))
 	}
 	registry := r.MCPRegistry
 	if registry == nil {

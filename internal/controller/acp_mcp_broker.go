@@ -128,6 +128,42 @@ type RegistryACPMCPToolExecutor struct {
 	AgentExecutionSnapshots store.AgentExecutionSnapshotStore
 }
 
+// acpMCPConnectionDigester is implemented by executors that can name the
+// frozen Connection behind a connector-backed tool for audit records.
+type acpMCPConnectionDigester interface {
+	ConnectionDigest(ctx context.Context, request harnessv2.MCPBrokerCallRequest, descriptor harnessv2.MCPToolDescriptor) string
+}
+
+// ConnectionDigest returns a non-secret digest of the frozen Connection
+// identity behind a brokered custom tool, or "" when the tool is not
+// connector-backed or the binding is unavailable.
+func (e RegistryACPMCPToolExecutor) ConnectionDigest(ctx context.Context, request harnessv2.MCPBrokerCallRequest, descriptor harnessv2.MCPToolDescriptor) string {
+	if descriptor.Source != harnessv2.MCPToolSourceBrokeredCustom || e.Reader == nil || e.AgentExecutionSnapshots == nil {
+		return ""
+	}
+	authenticated, ok := ACPMCPAuthenticatedTaskFromContext(ctx)
+	if !ok || authenticated.Namespace != request.Namespace || authenticated.UID != string(request.Metadata.TaskUID) {
+		return ""
+	}
+	task := &corev1alpha1.Task{}
+	if err := e.Reader.Get(ctx, client.ObjectKey{Namespace: authenticated.Namespace, Name: authenticated.Name}, task); err != nil || string(task.UID) != authenticated.UID {
+		return ""
+	}
+	infos, err := connectorToolsFor(ctx, e.Reader, request.Namespace, []string{descriptor.Name})
+	if err != nil {
+		return ""
+	}
+	info, ok := infos[descriptor.Name]
+	if !ok {
+		return ""
+	}
+	executor := workerexecutor.NewToolExecutorForNamespace(request.Namespace, nil, nil)
+	if err := bindFrozenConnections(ctx, e.AgentExecutionSnapshots, task, executor); err != nil {
+		return ""
+	}
+	return frozenConnectionDigest(executor.FrozenConnections(), info.PolicyName)
+}
+
 // ValidateACPMCPTool checks configuration drift before spending an approval.
 // ExecuteACPMCPTool repeats this check at the custom Tool execution boundary.
 func (e RegistryACPMCPToolExecutor) ValidateACPMCPTool(ctx context.Context, request harnessv2.MCPBrokerCallRequest, descriptor harnessv2.MCPToolDescriptor) error {
@@ -514,9 +550,15 @@ func (b *ACPMCPBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			OperationID: string(request.Metadata.OperationID),
 		}
 		effectIdentity = &identity
+		effectRequest := map[string]any{"call": request.Call, "descriptor": descriptor}
+		if digester, ok := b.Executor.(acpMCPConnectionDigester); ok {
+			if digest := digester.ConnectionDigest(promptCtx, request, descriptor); digest != "" {
+				// Audit which person's link a consequential call acted under.
+				effectRequest["connection"] = digest
+			}
+		}
 		result, replayed, err = runExternalEffectWithReplay(
-			promptCtx, b.Effects, credentials.ControllerFence, identity,
-			map[string]any{"call": request.Call, "descriptor": descriptor}, call,
+			promptCtx, b.Effects, credentials.ControllerFence, identity, effectRequest, call,
 		)
 	} else {
 		result, err = call(promptCtx)
