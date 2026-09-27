@@ -368,6 +368,7 @@ spec:
 | `spec.oauth.authorizeURL` | string | required | Absolute HTTPS authorization endpoint. Private, loopback, link-local, and cluster-internal hosts are rejected. |
 | `spec.oauth.tokenURL` | string | required | Absolute HTTPS token endpoint used for the code exchange and refresh. |
 | `spec.oauth.revocationURL` | string | empty | Optional RFC 7009 endpoint called best-effort on disconnect. |
+| `spec.oauth.revocationSemantics` | `Grant` \| `PerToken` | `Grant` | What one revocation call affects at the provider. Under `Grant` (Google-style, the default) Orka revokes only the committed credential on disconnect; tokens from consents nobody committed are deleted but never revoked, because they may belong to another person's grant. Under `PerToken` (GitHub-style) abandoned and discarded tokens are revoked individually too. |
 | `spec.oauth.clientID` | string | required | Public OAuth client identifier. |
 | `spec.oauth.clientSecretRef` | Secret key selector | required | Same-namespace Secret holding the client secret. |
 | `spec.oauth.clientAuthentication` | `ClientSecretBasic` \| `ClientSecretPost` | `ClientSecretBasic` | How the client secret is presented to the token endpoint. |
