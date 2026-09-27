@@ -3,7 +3,9 @@ package controller
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -131,37 +133,63 @@ type RegistryACPMCPToolExecutor struct {
 // acpMCPConnectionDigester is implemented by executors that can name the
 // frozen Connection behind a connector-backed tool for audit records.
 type acpMCPConnectionDigester interface {
-	ConnectionDigest(ctx context.Context, request harnessv2.MCPBrokerCallRequest, descriptor harnessv2.MCPToolDescriptor) string
+	ConnectionDigest(ctx context.Context, request harnessv2.MCPBrokerCallRequest, descriptor harnessv2.MCPToolDescriptor) (string, error)
 }
 
 // ConnectionDigest returns a non-secret digest of the frozen Connection
 // identity behind a brokered custom tool, or "" when the tool is not
-// connector-backed or the binding is unavailable.
-func (e RegistryACPMCPToolExecutor) ConnectionDigest(ctx context.Context, request harnessv2.MCPBrokerCallRequest, descriptor harnessv2.MCPToolDescriptor) string {
-	if descriptor.Source != harnessv2.MCPToolSourceBrokeredCustom || e.Reader == nil || e.AgentExecutionSnapshots == nil {
-		return ""
+// connector-backed. A read that fails is an error, never a silent "not
+// connector-backed": the effect record must carry the binding it promises,
+// and its request digest must not depend on transient read availability.
+func (e RegistryACPMCPToolExecutor) ConnectionDigest(ctx context.Context, request harnessv2.MCPBrokerCallRequest, descriptor harnessv2.MCPToolDescriptor) (string, error) {
+	if descriptor.Source != harnessv2.MCPToolSourceBrokeredCustom {
+		return "", nil
 	}
-	authenticated, ok := ACPMCPAuthenticatedTaskFromContext(ctx)
-	if !ok || authenticated.Namespace != request.Namespace || authenticated.UID != string(request.Metadata.TaskUID) {
-		return ""
-	}
-	task := &corev1alpha1.Task{}
-	if err := e.Reader.Get(ctx, client.ObjectKey{Namespace: authenticated.Namespace, Name: authenticated.Name}, task); err != nil || string(task.UID) != authenticated.UID {
-		return ""
+	if e.Reader == nil {
+		return "", errors.New("connector digest resolution requires a reader")
 	}
 	infos, err := connectorToolsFor(ctx, e.Reader, request.Namespace, []string{descriptor.Name})
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("classify connector tool %q: %w", descriptor.Name, err)
 	}
 	info, ok := infos[descriptor.Name]
 	if !ok {
-		return ""
+		return "", nil
+	}
+	if e.AgentExecutionSnapshots == nil {
+		return "", errors.New("connector digest resolution requires execution snapshots")
+	}
+	authenticated, ok := ACPMCPAuthenticatedTaskFromContext(ctx)
+	if !ok || authenticated.Namespace != request.Namespace || authenticated.UID != string(request.Metadata.TaskUID) {
+		return "", errors.New("authenticated ACP MCP task authority is unavailable")
+	}
+	task := &corev1alpha1.Task{}
+	if err := e.Reader.Get(ctx, client.ObjectKey{Namespace: authenticated.Namespace, Name: authenticated.Name}, task); err != nil {
+		return "", fmt.Errorf("load authenticated task for connector digest: %w", err)
+	}
+	if string(task.UID) != authenticated.UID {
+		return "", errors.New("authenticated ACP MCP task identity changed")
 	}
 	executor := workerexecutor.NewToolExecutorForNamespace(request.Namespace, nil, nil)
 	if err := bindFrozenConnections(ctx, e.AgentExecutionSnapshots, task, executor); err != nil {
-		return ""
+		return "", err
 	}
-	return frozenConnectionDigest(executor.FrozenConnections(), info.PolicyName)
+	digest := frozenConnectionDigest(executor.FrozenConnections(), info.PolicyName)
+	if digest == "" {
+		return "", fmt.Errorf("connector tool %q has no Connection frozen for policy %q", descriptor.Name, info.PolicyName)
+	}
+	// The binding names the injection configuration too (the Tool spec and
+	// the policy's credential output), so an approval or effect record is
+	// tied to the configuration in force when it was made and a changed
+	// policy is detected when the call is revalidated.
+	return connectorBindingDigest(digest, info.SpecDigest), nil
+}
+
+// connectorBindingDigest combines the frozen Connection identity digest with
+// the dispatch digest of the Tool and its policy.
+func connectorBindingDigest(connectionDigest, specDigest string) string {
+	sum := sha256.Sum256([]byte(connectionDigest + "\x00" + specDigest))
+	return hex.EncodeToString(sum[:])
 }
 
 // ValidateACPMCPTool checks configuration drift before spending an approval.
@@ -552,7 +580,14 @@ func (b *ACPMCPBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		effectIdentity = &identity
 		effectRequest := map[string]any{"call": request.Call, "descriptor": descriptor}
 		if digester, ok := b.Executor.(acpMCPConnectionDigester); ok {
-			if digest := digester.ConnectionDigest(promptCtx, request, descriptor); digest != "" {
+			digest, digestErr := digester.ConnectionDigest(promptCtx, request, descriptor)
+			if digestErr != nil {
+				// The effect must carry the binding it promises; a call that
+				// cannot name its Connection is refused before reservation.
+				writeACPMCPError(w, http.StatusBadGateway, "MCP tool connection binding is unavailable")
+				return
+			}
+			if digest != "" {
 				// Audit which person's link a consequential call acted under.
 				effectRequest["connection"] = digest
 			}

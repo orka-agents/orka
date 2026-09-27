@@ -29,9 +29,10 @@ import (
 const (
 	connectorToolCallTimeout = 5 * time.Minute
 	// connectorToolResponseLimit bounds the controller's JSON envelope. The
-	// executor caps a tool body at 10 MiB; the envelope escapes it, so the
-	// bound leaves room and overflow is reported rather than truncated.
-	connectorToolResponseLimit = 32 << 20
+	// executor caps a tool body at 10 MiB and JSON escaping can expand a
+	// body of control characters sixfold, so the bound covers that worst
+	// case with room for the envelope; overflow is reported, not truncated.
+	connectorToolResponseLimit = 64 << 20
 	// connectorToolUnavailableRetries bounds how often a 503 from the
 	// controller is retried: a fresh worker Pod can reach the endpoint
 	// before the Task's Job identity is published, and that window closes
@@ -66,6 +67,19 @@ func parseConnectionBindings(raw string) map[string]corev1alpha1.ConnectionBindi
 	return result
 }
 
+// connectorToolProxyTimeout is the Tool's declared request timeout plus a
+// settlement margin, or the default proxy deadline when it declares none.
+func connectorToolProxyTimeout(tool *corev1alpha1.Tool) time.Duration {
+	if tool != nil && tool.Spec.HTTP != nil && tool.Spec.HTTP.Timeout != nil && tool.Spec.HTTP.Timeout.Duration > 0 {
+		return tool.Spec.HTTP.Timeout.Duration + connectorToolSettlementMargin
+	}
+	return connectorToolCallTimeout
+}
+
+// connectorToolSettlementMargin covers the controller's own work around the
+// provider call (claims, ledger writes, response encoding).
+const connectorToolSettlementMargin = 30 * time.Second
+
 // connectorToolRetryBackoff is the first 503 retry delay; it doubles per
 // attempt. A variable so tests do not wait through it.
 var connectorToolRetryBackoff = 500 * time.Millisecond
@@ -73,6 +87,24 @@ var connectorToolRetryBackoff = 500 * time.Millisecond
 // connectorBackedToolNames is set once at startup from the loaded custom
 // Tools; the agent loop consults it to route calls to the controller.
 var connectorBackedToolNames = map[string]bool{}
+
+// frozenConnectorToolDigests decodes the connector tool digests the Job
+// builder froze into the worker environment; an unreadable value yields none.
+func frozenConnectorToolDigests(raw string) map[string]string {
+	digests := map[string]string{}
+	if strings.TrimSpace(raw) == "" {
+		return digests
+	}
+	if err := json.Unmarshal([]byte(raw), &digests); err != nil {
+		return map[string]string{}
+	}
+	return digests
+}
+
+// connectorToolPolicies holds, per connector-backed tool, the connection-mode
+// policy spec loaded with it, so approval targets bind the injection
+// configuration the controller will recompute from the live policy.
+var connectorToolPolicies = map[string]corev1alpha1.OutboundAccessPolicySpec{}
 
 // connectorBackedTools reports which loaded custom Tools sit behind a
 // connection-mode OutboundAccessPolicy. Those tools never execute in this
@@ -85,6 +117,15 @@ func connectorBackedTools(
 	customTools map[string]*corev1alpha1.Tool,
 ) map[string]bool {
 	result := map[string]bool{}
+	// The digests the controller froze into this Job are the routing upper
+	// bound: a tool dispatched as connector-backed always goes to the
+	// controller, which refuses it if its policy or definition drifted. Live
+	// state can only add tools, never route a frozen one back into this Pod.
+	for name := range frozenConnectorToolDigests(os.Getenv(workerenv.ConnectorToolDigests)) {
+		if _, loaded := customTools[name]; loaded {
+			result[name] = true
+		}
+	}
 	for name, tool := range customTools {
 		if tool == nil || tool.Spec.HTTP == nil || tool.Spec.HTTP.OutboundAccessPolicyRef == nil {
 			continue
@@ -99,6 +140,7 @@ func connectorBackedTools(
 		}
 		if policy.Spec.Connection != nil {
 			result[name] = true
+			connectorToolPolicies[name] = policy.Spec
 		}
 	}
 	return result
@@ -155,10 +197,14 @@ type connectorToolResponse struct {
 func executeConnectorToolViaController(
 	ctx context.Context,
 	httpClient *http.Client,
-	toolName string,
+	tool *corev1alpha1.Tool,
 	args json.RawMessage,
 	callID, idempotencyKey string,
 ) (string, error) {
+	toolName := ""
+	if tool != nil {
+		toolName = tool.Name
+	}
 	endpoint, err := connectorToolEndpoint(toolName)
 	if err != nil {
 		return "", err
@@ -177,7 +223,10 @@ func executeConnectorToolViaController(
 	if token == "" {
 		return "", errors.New("worker service account token is unavailable for connector tool execution")
 	}
-	callCtx, cancel := context.WithTimeout(ctx, connectorToolCallTimeout)
+	// The controller applies the Tool's own request timeout; the proxy
+	// deadline covers that plus the controller's settlement margin, so a
+	// legitimately slow tool is never cut off by the proxy first.
+	callCtx, cancel := context.WithTimeout(ctx, connectorToolProxyTimeout(tool))
 	defer cancel()
 	if httpClient == nil {
 		httpClient = http.DefaultClient
@@ -186,7 +235,16 @@ func executeConnectorToolViaController(
 	for attempt := 0; ; attempt++ {
 		status, raw, err := postConnectorToolRequest(callCtx, httpClient, endpoint, token, body)
 		if err != nil {
-			return "", attempted(fmt.Errorf("connector tool %q: %w", toolName, err))
+			// A transport failure is ambiguous (the request may or may not
+			// have reached the controller) but never consumes the local
+			// approval: the controller's claim and effect ledger make an
+			// exact retry safe, replaying a committed result or refusing a
+			// call that is still executing. A response that arrived but
+			// could not be read was attempted.
+			if errors.As(err, new(connectorResponseError)) {
+				return "", attempted(fmt.Errorf("connector tool %q: %w", toolName, err))
+			}
+			return "", fmt.Errorf("connector tool %q: %w", toolName, err)
 		}
 		// 503 means the controller cannot yet judge this caller (the Task's
 		// Job identity is not published); nothing was executed, so retry.
@@ -223,13 +281,22 @@ func postConnectorToolRequest(
 	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, connectorToolResponseLimit+1))
 	if err != nil {
-		return 0, nil, fmt.Errorf("read controller response: %w", err)
+		return 0, nil, connectorResponseError{err: fmt.Errorf("read controller response: %w", err)}
 	}
 	if len(raw) > connectorToolResponseLimit {
-		return 0, nil, fmt.Errorf("controller response exceeds %d bytes", connectorToolResponseLimit)
+		return 0, nil, connectorResponseError{
+			err: fmt.Errorf("controller response exceeds %d bytes", connectorToolResponseLimit),
+		}
 	}
 	return resp.StatusCode, raw, nil
 }
+
+// connectorResponseError marks a failure after the controller answered: the
+// call was attempted, whatever the body said.
+type connectorResponseError struct{ err error }
+
+func (e connectorResponseError) Error() string { return e.err.Error() }
+func (e connectorResponseError) Unwrap() error { return e.err }
 
 func attempted(err error) error {
 	return worker.ToolRequestAttemptedError{Err: err}

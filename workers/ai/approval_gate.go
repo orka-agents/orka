@@ -375,7 +375,8 @@ func approvalTargetSpecDigest(customTool *corev1alpha1.Tool) (string, error) {
 		if customTool.Spec.HTTP != nil && customTool.Spec.HTTP.OutboundAccessPolicyRef != nil {
 			binding = connectorBindings[customTool.Spec.HTTP.OutboundAccessPolicyRef.Name]
 		}
-		digest, err := approvals.ConnectorTargetSpecDigest(customTool.Spec, binding.UID, binding.Generation)
+		digest, err := approvals.ConnectorTargetSpecDigest(
+			customTool.Spec, connectorToolPolicies[customTool.Name], binding.UID, binding.Generation)
 		if err != nil {
 			return "", fmt.Errorf("digest connector tool %q approval target spec: %w", customTool.Name, err)
 		}

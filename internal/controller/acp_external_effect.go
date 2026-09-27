@@ -432,6 +432,21 @@ func RunExternalEffectWithReplay[T any](
 	return runExternalEffectWithReplay(ctx, effects, fence, identity, request, call)
 }
 
+// RunExternalEffectWithReplayCallTimeout is RunExternalEffectWithReplay with
+// the caller's real operation deadline, so the effect call and its ledger
+// lease cover a legitimately long tool timeout instead of the per-kind clamp.
+func RunExternalEffectWithReplayCallTimeout[T any](
+	ctx context.Context,
+	effects store.ExternalEffectStore,
+	fence store.ControllerEpochFence,
+	identity store.ExternalEffectIdentity,
+	request any,
+	callTimeout time.Duration,
+	call func(context.Context) (T, error),
+) (T, bool, error) {
+	return runExternalEffectWithReplayCallTimeout(ctx, effects, fence, identity, request, callTimeout, call)
+}
+
 // SettleExternalEffect records a terminal state for an effect whose call
 // returned an error, so the ledger never shows it as still in flight.
 func SettleExternalEffect(

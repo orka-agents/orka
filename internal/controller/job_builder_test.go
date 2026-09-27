@@ -2977,10 +2977,14 @@ func TestJobBuilder_buildEnvVars_ConnectorWriteToolsRequireApprovalAndHideOnRead
 					return c.Get(ctx, key, obj, opts...)
 				},
 			}).Build()
+		SetRequesterStampKey(testRequesterStampKey)
 		task := &corev1alpha1.Task{
 			ObjectMeta: metav1.ObjectMeta{
-				Name: testTask, Namespace: defaultNS,
-				Annotations: map[string]string{labels.AnnotationRequestedBySource: labels.RequestedBySourceAPI},
+				Name: testTask, Namespace: defaultNS, UID: "task-uid",
+				Annotations: map[string]string{
+					labels.AnnotationRequestedBySource: labels.RequestedBySourceAPI,
+					labels.AnnotationRequestedByStamp:  connectors.RequesterStamp(testRequesterStampKey, "task-uid", requester.Issuer, requester.Subject),
+				},
 			},
 			Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "Review", RequestedBy: requester},
 		}

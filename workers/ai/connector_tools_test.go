@@ -102,7 +102,20 @@ func (s *connectorControllerStub) respond(tool string, status int, payload map[s
 }
 
 func (s *connectorControllerStub) call(tool string, args json.RawMessage, callID, key string) (string, error) {
-	return executeConnectorToolViaController(context.Background(), s.server.Client(), tool, args, callID, key)
+	named := &corev1alpha1.Tool{ObjectMeta: metav1.ObjectMeta{Name: tool}}
+	return executeConnectorToolViaController(context.Background(), s.server.Client(), named, args, callID, key)
+}
+
+func TestConnectorToolProxyTimeoutFollowsTheTool(t *testing.T) {
+	if got := connectorToolProxyTimeout(nil); got != connectorToolCallTimeout {
+		t.Fatalf("no tool = %v, want the default", got)
+	}
+	slow := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+		Timeout: &metav1.Duration{Duration: 8 * time.Minute},
+	}}}
+	if got := connectorToolProxyTimeout(slow); got != 8*time.Minute+connectorToolSettlementMargin {
+		t.Fatalf("slow tool = %v, want the tool timeout plus the settlement margin", got)
+	}
 }
 
 func TestExecuteConnectorToolViaController(t *testing.T) {
@@ -224,5 +237,48 @@ func TestExecuteConnectorToolReportsOversizedControllerResponse(t *testing.T) {
 	}
 	if !worker.ToolRequestWasAttempted(err) {
 		t.Fatal("a response that arrived means the request was attempted")
+	}
+}
+
+func TestExecuteConnectorToolTransportFailureIsNotAttempted(t *testing.T) {
+	stub := newConnectorControllerStub(t)
+	// The controller is unreachable: nothing was executed and the local
+	// approval must not be consumed, so an exact retry can go back through
+	// the controller's claim and effect ledger.
+	stub.server.Close()
+	_, err := stub.call("gh_search", json.RawMessage(`{"q":"x"}`), "call-1", "ap-1")
+	if err == nil || worker.ToolRequestWasAttempted(err) {
+		t.Fatalf("err = %v, want a non-attempted transport failure", err)
+	}
+}
+
+func TestConnectorBackedToolsHonorFrozenDigestsAsUpperBound(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	// The policy moved out of connection mode after dispatch; the frozen
+	// digests still route the tool to the controller, which refuses it.
+	direct := &corev1alpha1.OutboundAccessPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "github-conn", Namespace: "default"},
+		Spec:       corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{}},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(direct).Build()
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "gh_search", Namespace: "default"},
+		Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+			URL:                     "https://api.github.example.test/search",
+			OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "github-conn"},
+		}},
+	}
+	t.Setenv(workerenv.ConnectorToolDigests, `{"gh_search":"digest-a"}`)
+	got := connectorBackedTools(context.Background(), c, "default", map[string]*corev1alpha1.Tool{"gh_search": tool})
+	if !got["gh_search"] {
+		t.Fatalf("a tool frozen as connector-backed must stay routed to the controller: %v", got)
+	}
+	t.Setenv(workerenv.ConnectorToolDigests, "")
+	got = connectorBackedTools(context.Background(), c, "default", map[string]*corev1alpha1.Tool{"gh_search": tool})
+	if got["gh_search"] {
+		t.Fatalf("without a frozen digest the live direct policy runs locally: %v", got)
 	}
 }

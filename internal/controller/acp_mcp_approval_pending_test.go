@@ -25,7 +25,7 @@ func seedMCPApprovalPending(t *testing.T, f *mcpApprovalRecoveryFixture, request
 	require.NoError(t, err)
 	credentials, err := f.broker.Credentials.ResolveACPMCPBrokerCredentials(f.ctx, f.request)
 	require.NoError(t, err)
-	call, _, err := f.broker.persistApprovalCall(f.ctx, f.request, descriptor, credentials.Task)
+	call, _, err := f.broker.persistApprovalCall(f.ctx, f.request, descriptor, credentials.Task, "")
 	require.NoError(t, err)
 	effect, err := f.control.ReserveExternalEffect(f.ctx, store.ReserveExternalEffectRequest{
 		Identity: store.ExternalEffectIdentity{

@@ -43,6 +43,7 @@ type connectorToolFixture struct {
 }
 
 func newConnectorToolFixture(t *testing.T) connectorToolFixture {
+	SetRequesterStampKey(testRequesterStampKey)
 	t.Helper()
 	tool := func(name string, class corev1alpha1.AgentRuntimeBrokeredToolClass, policy string) *corev1alpha1.Tool {
 		spec := corev1alpha1.ToolSpec{
@@ -74,7 +75,10 @@ func newConnectorToolFixture(t *testing.T) connectorToolFixture {
 		task: &corev1alpha1.Task{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: "task", Namespace: "tenant", UID: "task-uid",
-				Annotations: map[string]string{labels.AnnotationRequestedBySource: labels.RequestedBySourceAPI},
+				Annotations: map[string]string{
+					labels.AnnotationRequestedBySource: labels.RequestedBySourceAPI,
+					labels.AnnotationRequestedByStamp:  connectors.RequesterStamp(testRequesterStampKey, "task-uid", requester.Issuer, requester.Subject),
+				},
 			},
 			Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, RequestedBy: requester},
 		},
@@ -203,21 +207,38 @@ func TestRegistryACPMCPToolExecutorConnectionDigest(t *testing.T) {
 	request.Metadata.TaskUID = "task-uid"
 	ctx := withACPMCPAuthenticatedTask(context.Background(), ACPMCPAuthenticatedTask{Name: "task", Namespace: "tenant", UID: "task-uid"})
 	custom := harnessv2.MCPToolDescriptor{Name: "gh_write", Source: harnessv2.MCPToolSourceBrokeredCustom}
-	digest := executor.ConnectionDigest(ctx, request, custom)
-	if digest == "" || digest != frozenConnectionDigest(map[string]outboundaccess.FrozenConnection{"github-conn": {UID: "conn-uid", Generation: 3}}, "github-conn") {
-		t.Fatalf("digest = %q", digest)
+	digest, err := executor.ConnectionDigest(ctx, request, custom)
+	dispatch, _ := ConnectorToolDispatchDigest(f.writeTool.Spec, f.policy.Spec)
+	want := connectorBindingDigest(frozenConnectionDigest(map[string]outboundaccess.FrozenConnection{"github-conn": {UID: "conn-uid", Generation: 3}}, "github-conn"), dispatch)
+	if err != nil || digest == "" || digest != want {
+		t.Fatalf("digest = %q err = %v want %q", digest, err, want)
 	}
-	if executor.ConnectionDigest(ctx, request, harnessv2.MCPToolDescriptor{Name: "plain", Source: harnessv2.MCPToolSourceBrokeredCustom}) != "" {
-		t.Fatal("non-connector tools have no digest")
+	// A changed policy or Tool moves the binding, which an approval or
+	// effect record made under the old one will no longer match.
+	changed := f.policy.DeepCopy()
+	changed.Spec.Connection.Output = &corev1alpha1.OutboundCredentialOutput{Header: "X-Linked-Token"}
+	changedReader := ctrlfake.NewClientBuilder().WithScheme(f.scheme).WithObjects(changed, f.direct, f.readTool, f.writeTool, f.plainTool, f.directTool, task).Build()
+	changedExecutor := RegistryACPMCPToolExecutor{Reader: changedReader, AgentExecutionSnapshots: fakeSnapshotStore{snapshot: &store.AgentExecutionSnapshot{Body: body}}}
+	if moved, err := changedExecutor.ConnectionDigest(ctx, request, custom); err != nil || moved == digest {
+		t.Fatalf("a changed policy must move the binding digest: %q err = %v", moved, err)
 	}
-	if executor.ConnectionDigest(ctx, request, harnessv2.MCPToolDescriptor{Name: "web_search", Source: harnessv2.MCPToolSourceBrokeredBuiltin}) != "" {
-		t.Fatal("built-in tools have no digest")
+	if digest, err := executor.ConnectionDigest(ctx, request, harnessv2.MCPToolDescriptor{Name: "plain", Source: harnessv2.MCPToolSourceBrokeredCustom}); err != nil || digest != "" {
+		t.Fatalf("non-connector tools have no digest: %q err = %v", digest, err)
 	}
-	if executor.ConnectionDigest(context.Background(), request, custom) != "" {
-		t.Fatal("an unauthenticated context yields no digest")
+	if digest, err := executor.ConnectionDigest(ctx, request, harnessv2.MCPToolDescriptor{Name: "web_search", Source: harnessv2.MCPToolSourceBrokeredBuiltin}); err != nil || digest != "" {
+		t.Fatalf("built-in tools have no digest: %q err = %v", digest, err)
 	}
-	if (RegistryACPMCPToolExecutor{Reader: reader}).ConnectionDigest(ctx, request, custom) != "" {
-		t.Fatal("no snapshot store yields no digest")
+	// A binding that cannot be established is an error, never a silent
+	// "not connector-backed": the effect must carry the digest it promises.
+	if _, err := executor.ConnectionDigest(context.Background(), request, custom); err == nil {
+		t.Fatal("an unauthenticated context must be an error")
+	}
+	if _, err := (RegistryACPMCPToolExecutor{Reader: reader}).ConnectionDigest(ctx, request, custom); err == nil {
+		t.Fatal("a missing snapshot store must be an error")
+	}
+	unbound, _ := json.Marshal(agentExecutionSnapshotBody{})
+	if _, err := (RegistryACPMCPToolExecutor{Reader: reader, AgentExecutionSnapshots: fakeSnapshotStore{snapshot: &store.AgentExecutionSnapshot{Body: unbound}}}).ConnectionDigest(ctx, request, custom); err == nil {
+		t.Fatal("a connector tool with no frozen Connection must be an error")
 	}
 }
 

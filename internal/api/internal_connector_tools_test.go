@@ -62,9 +62,16 @@ func connectorToolFixtures() *corev1alpha1.Task {
 		task.Annotations = map[string]string{}
 	}
 	task.Annotations[labels.AnnotationRequestedBySource] = labels.RequestedBySourceAPI
+	// The API sealed this stamp for the Task's UID; the controller trusts
+	// the requester only through it.
+	controller.SetRequesterStampKey(testConnectorStampKey)
+	task.Annotations[labels.AnnotationRequestedByStamp] = connectors.RequesterStamp(testConnectorStampKey, task.UID, task.Spec.RequestedBy.Issuer, task.Spec.RequestedBy.Subject)
 	task.Status.ConnectionBindings = []corev1alpha1.ConnectionBinding{{PolicyName: "github-conn", Provider: "github", ConnectionName: "github-abc", UID: "conn-uid", Generation: 2, Mode: "readOnly"}}
 	return task
 }
+
+// testConnectorStampKey is the requester stamp key the endpoint tests verify under.
+var testConnectorStampKey = []byte("0123456789abcdef0123456789abcdef")
 
 func connectorTestTool(name string, class corev1alpha1.AgentRuntimeBrokeredToolClass, policyName string) *corev1alpha1.Tool {
 	return connectorTestToolWithSchema(name, class, policyName, "")
@@ -168,7 +175,7 @@ func newConnectorToolHarness(t *testing.T, resolver outboundaccess.Resolver, ena
 	}
 	policy := &corev1alpha1.OutboundAccessPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: "github-conn", Namespace: "default"},
-		Spec:       corev1alpha1.OutboundAccessPolicySpec{Connection: &corev1alpha1.ConnectionOutboundAccess{ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}}},
+		Spec:       connectorTestPolicySpec(),
 	}
 	digests := map[string]string{}
 	for _, name := range []string{"gh_search", "gh_write"} {
@@ -259,7 +266,7 @@ func seedApprovalForTool(t *testing.T, eventStore *storetest.FakeExecutionEventS
 	if err != nil {
 		t.Fatal(err)
 	}
-	specDigest, err := approvals.ConnectorTargetSpecDigest(approvedTool.Spec, "conn-uid", 2)
+	specDigest, err := approvals.ConnectorTargetSpecDigest(approvedTool.Spec, connectorTestPolicySpec(), "conn-uid", 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -351,7 +358,8 @@ func TestExecuteConnectorToolDisabledAndWrongCaller(t *testing.T) {
 
 func TestExecuteConnectorToolEnforcesApprovalAtTheController(t *testing.T) {
 	resolver := &stubOutboundResolver{err: errors.New("the requester has no connection to this provider")}
-	app, eventStore, c := newConnectorToolAppWithOptions(t, resolver, true, connectorToolAppOptions{mode: "readWrite", approvalRequired: []string{"gh_write"}})
+	h := newConnectorToolHarness(t, resolver, true, connectorToolAppOptions{mode: "readWrite", approvalRequired: []string{"gh_write"}})
+	app, eventStore, c := h.app, h.events, h.client
 
 	// A write tool in the frozen approval set executes only with an approval.
 	if status, body := postConnectorTool(t, app, "gh_write", `{"arguments":{"q":"x"}}`); status != http.StatusForbidden || !strings.Contains(body, "approval is required") {
@@ -374,8 +382,9 @@ func TestExecuteConnectorToolEnforcesApprovalAtTheController(t *testing.T) {
 	if status, body := postConnectorTool(t, app, "gh_write", `{"arguments":{"q":"x"},"approvalId":"ap-1","idempotencyKey":"ap-1"}`); status != http.StatusFailedDependency || !strings.Contains(body, "no connection") {
 		t.Fatalf("approved write = %d %s", status, body)
 	}
-	// An execution that reached the provider never hands its claim back:
-	// presenting the same approval again, with any idempotency key, is a replay.
+	// A claim whose call reached the provider never hands itself back:
+	// while its effect record is in flight under a live lease, presenting
+	// the same approval again, with any idempotency key, is refused.
 	history, err := approvals.ListEvents(context.Background(), eventStore, "default", "task-a")
 	if err != nil {
 		t.Fatal(err)
@@ -393,7 +402,8 @@ func TestExecuteConnectorToolEnforcesApprovalAtTheController(t *testing.T) {
 	}, fmt.Sprintf("connector-approval-claim:ap-1:%d:1", decisionSeq)); err != nil || !appended {
 		t.Fatalf("seed spent claim: appended = %t err = %v", appended, err)
 	}
-	if status, body := postConnectorTool(t, app, "gh_write", `{"arguments":{"q":"x"},"approvalId":"ap-1","idempotencyKey":"fresh"}`); status != http.StatusConflict || !strings.Contains(body, "already used") {
+	seedConnectorEffect(t, h, "gh_write", `{"q":"x"}`, decisionSeq, 1, store.ExternalEffectInFlight, time.Now().Add(time.Minute))
+	if status, body := postConnectorTool(t, app, "gh_write", `{"arguments":{"q":"x"},"approvalId":"ap-1","idempotencyKey":"fresh"}`); status != http.StatusConflict || !strings.Contains(body, "still executing") {
 		t.Fatalf("replayed approval = %d %s", status, body)
 	}
 	// A Tool retargeted after approval (same name, class, policy, and
@@ -551,7 +561,7 @@ func TestExecuteConnectorToolBindsApprovalToFrozenConnection(t *testing.T) {
 	approvedTool := connectorTestTool("gh_write", corev1alpha1.AgentRuntimeBrokeredToolClassWrite, "github-conn")
 	targetArgs, _ := approvals.TargetArguments(json.RawMessage(`{"q":"x"}`), approvedTool)
 	argsDigest, _ := approvals.TargetArgsDigest(targetArgs)
-	staleDigest, _ := approvals.ConnectorTargetSpecDigest(approvedTool.Spec, "previous-account-uid", 1)
+	staleDigest, _ := approvals.ConnectorTargetSpecDigest(approvedTool.Spec, connectorTestPolicySpec(), "previous-account-uid", 1)
 	requested, _ := json.Marshal(map[string]any{"approvalID": "ap-stale", "taskUID": "task-uid", "targetTool": "gh_write", "targetArgsDigest": argsDigest, "targetSpecDigest": staleDigest, "action": "Execute gh_write"})
 	decided, _ := json.Marshal(map[string]any{"approvalID": "ap-stale", "actor": "reviewer"})
 	for _, event := range []*store.ExecutionEvent{
@@ -617,7 +627,7 @@ func TestExecuteConnectorToolRecordsApprovedCallsInEffectLedger(t *testing.T) {
 	tool := h.tools["gh_write"]
 	targetArgs, _ := approvals.TargetArguments(json.RawMessage(`{"q":"x"}`), tool)
 	argsDigest, _ := approvals.TargetArgsDigest(targetArgs)
-	specDigest, _ := approvals.ConnectorTargetSpecDigest(tool.Spec, "conn-uid", 2)
+	specDigest, _ := approvals.ConnectorTargetSpecDigest(tool.Spec, connectorTestPolicySpec(), "conn-uid", 2)
 	runFor := func(releases int) connectorToolRun {
 		return connectorToolRun{task: task, tool: tool, binding: task.Status.ConnectionBindings[0], claim: &connectorApprovalClaim{
 			approvalID: "ap-1", key: fmt.Sprintf("connector-approval-claim:ap-1:%d:%d", decisionSeq, releases), releases: releases,
@@ -653,7 +663,7 @@ func TestExecuteConnectorToolRecordsApprovedCallsInEffectLedger(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	response, _ := json.Marshal(`{"ok":true}`)
+	response, _ := json.Marshal(connectorToolOutcome{Result: `{"ok":true}`})
 	lease := now.Add(time.Minute)
 	inFlight, err := h.effects.TransitionExternalEffect(context.Background(), store.ExternalEffectTransition{
 		ID: reserved.ID, Fence: h.fence, ExpectedVersion: reserved.Version, ExpectedState: reserved.State, NewState: store.ExternalEffectInFlight,
@@ -719,5 +729,200 @@ func TestExecuteConnectorToolRefusesPolicyChangedSinceDispatch(t *testing.T) {
 	}
 	if resolver.request.PolicyName != "" {
 		t.Fatal("a changed policy must not reach credential resolution")
+	}
+}
+
+// seedConnectorEffect records an effect for the claim (approval ap-1,
+// decisionSeq, releases) in the given state, the way a run that reached the
+// ledger would have.
+func seedConnectorEffect(t *testing.T, h *connectorToolHarness, toolName, args string, decisionSeq int64, releases int, state store.ExternalEffectState, lease time.Time) {
+	t.Helper()
+	task := connectorToolFixtures()
+	tool := h.tools[toolName]
+	targetArgs, _ := approvals.TargetArguments(json.RawMessage(args), tool)
+	argsDigest, _ := approvals.TargetArgsDigest(targetArgs)
+	specDigest, _ := approvals.ConnectorTargetSpecDigest(tool.Spec, connectorTestPolicySpec(), "conn-uid", 2)
+	run := connectorToolRun{task: task, tool: tool, binding: task.Status.ConnectionBindings[0], claim: &connectorApprovalClaim{
+		approvalID: "ap-1", key: fmt.Sprintf("connector-approval-claim:ap-1:%d:%d", decisionSeq, releases), releases: releases, argsDigest: argsDigest, specDigest: specDigest,
+	}}
+	identity := connectorToolEffectIdentity(run.task, run.claim)
+	requestDigest, err := controller.ExternalEffectRequestDigest(identity, connectorToolEffectRequest(run))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	reserved, err := h.effects.ReserveExternalEffect(context.Background(), store.ReserveExternalEffectRequest{Identity: identity, RequestDigest: requestDigest, Fence: h.fence, CreatedAt: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state == store.ExternalEffectPending {
+		return
+	}
+	inFlight, err := h.effects.TransitionExternalEffect(context.Background(), store.ExternalEffectTransition{
+		ID: reserved.ID, Fence: h.fence, ExpectedVersion: reserved.Version, ExpectedState: reserved.State, NewState: store.ExternalEffectInFlight,
+		RequestDigest: requestDigest, LeaseOwner: "controller", LeaseExpiresAt: &lease, UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state == store.ExternalEffectInFlight {
+		return
+	}
+	if _, err := h.effects.TransitionExternalEffect(context.Background(), store.ExternalEffectTransition{
+		ID: inFlight.ID, Fence: h.fence, ExpectedVersion: inFlight.Version, ExpectedState: store.ExternalEffectInFlight, NewState: state,
+		RequestDigest: requestDigest, ExpectedLeaseOwner: "controller", UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestExecuteConnectorToolReconcilesSpentClaimsFromTheLedger(t *testing.T) {
+	resolver := &stubOutboundResolver{err: errors.New("the requester has no connection to this provider")}
+	h := newConnectorToolHarness(t, resolver, true, connectorToolAppOptions{mode: "readWrite", approvalRequired: []string{"gh_write"}})
+	seedApproval(t, h.events, "ap-1", `{"q":"x"}`, true)
+	history, err := approvals.ListEvents(context.Background(), h.events, "default", "task-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decisionSeq int64
+	for _, approval := range approvals.Derive(history, time.Now()) {
+		if approval.ID == "ap-1" {
+			decisionSeq = approval.DecisionSeq
+		}
+	}
+	claimSpent := func(releases int) {
+		t.Helper()
+		spent, _ := json.Marshal(map[string]any{"approvalID": "ap-1", "executionOutcome": "running"})
+		if _, appended, err := h.events.AppendExecutionEventIfAbsent(context.Background(), &store.ExecutionEvent{
+			Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "task-a", TaskName: "task-a",
+			Type: events.ExecutionEventTypeApprovalExecutionUpdated, ToolCallID: "ap-1", Content: spent, CreatedAt: time.Now(),
+		}, fmt.Sprintf("connector-approval-claim:ap-1:%d:%d", decisionSeq, releases)); err != nil || !appended {
+			t.Fatalf("seed spent claim %d: appended = %t err = %v", releases, appended, err)
+		}
+	}
+	// The controller stopped after the durable claim: the retry reserves
+	// the record (idempotently), moves it to Failed, which fences out any
+	// request still between its claim and its call, hands the claim back
+	// and proceeds under the next claim (which the stub then refuses).
+	claimSpent(0)
+	if status, body := postConnectorTool(t, h.app, "gh_write", `{"arguments":{"q":"x"},"approvalId":"ap-1"}`); status != http.StatusFailedDependency || !strings.Contains(body, "no connection") {
+		t.Fatalf("unstarted claim = %d %s", status, body)
+	}
+	if fenced, err := h.effects.GetExternalEffect(context.Background(), mustEffectID(t, decisionSeq, 0)); err != nil || fenced.State != store.ExternalEffectFailed {
+		t.Fatalf("fenced record = %+v err = %v, want Failed so the original request cannot start", fenced, err)
+	}
+	// The same holds when the stopped request had already reserved its
+	// record (still Pending).
+	claimSpent(2)
+	seedConnectorEffect(t, h, "gh_write", `{"q":"x"}`, decisionSeq, 2, store.ExternalEffectPending, time.Time{})
+	if status, body := postConnectorTool(t, h.app, "gh_write", `{"arguments":{"q":"x"},"approvalId":"ap-1"}`); status != http.StatusFailedDependency || !strings.Contains(body, "no connection") {
+		t.Fatalf("pending claim = %d %s", status, body)
+	}
+	claims, err := h.events.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "task-a",
+		EventTypes: []string{events.ExecutionEventTypeApprovalExecutionUpdated}, Limit: 20,
+	})
+	if err != nil || len(claims) != 8 {
+		t.Fatalf("claim/release events = %d err = %v, want each stopped claim released and each retry claimed then released", len(claims), err)
+	}
+	// The controller stopped during the call: the lease expired with the
+	// outcome unknown. The approval is spent and the worker is told so.
+	claimSpent(4)
+	// The lease must be in the future when taken; it lapses before the retry.
+	seedConnectorEffect(t, h, "gh_write", `{"q":"x"}`, decisionSeq, 4, store.ExternalEffectInFlight, time.Now().Add(150*time.Millisecond))
+	time.Sleep(200 * time.Millisecond)
+	resolver.request = outboundaccess.ResolveRequest{}
+	if status, body := postConnectorTool(t, h.app, "gh_write", `{"arguments":{"q":"x"},"approvalId":"ap-1"}`); status != http.StatusBadGateway || !strings.Contains(body, "outcome is unknown") {
+		t.Fatalf("expired in-flight claim = %d %s", status, body)
+	}
+	if status, body := postConnectorTool(t, h.app, "gh_write", `{"arguments":{"q":"x"},"approvalId":"ap-1"}`); status != http.StatusBadGateway || !strings.Contains(body, "outcome is unknown") {
+		t.Fatalf("settled unknown claim = %d %s", status, body)
+	}
+	if resolver.request.PolicyName != "" {
+		t.Fatal("an unknown outcome must not be re-executed")
+	}
+}
+
+func TestExecuteConnectorToolRetainsBoundedResultsInTheLedger(t *testing.T) {
+	small := connectorToolOutcomeFor("ok")
+	if small.Receipt != nil || small.Result != "ok" {
+		t.Fatalf("small outcome = %+v", small)
+	}
+	large := connectorToolOutcomeFor(strings.Repeat("x", connectorToolResultRetention+1))
+	if large.Result != "" || large.Receipt == nil || large.Receipt.Bytes != connectorToolResultRetention+1 || large.Receipt.Digest == "" {
+		t.Fatalf("large outcome = %+v, want a receipt instead of the result", large)
+	}
+	encoded, _ := json.Marshal(large)
+	if len(encoded) > 1024 {
+		t.Fatalf("receipt must stay small, got %d bytes", len(encoded))
+	}
+}
+
+func mustEffectID(t *testing.T, decisionSeq int64, releases int) string {
+	t.Helper()
+	id, err := store.ExternalEffectIdentity{
+		Kind: connectorToolEffectKind, Namespace: "default", AggregateID: "task-uid",
+		OperationID: fmt.Sprintf("connector-approval-claim:ap-1:%d:%d", decisionSeq, releases),
+	}.CanonicalID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func TestConnectorClaimReleasesAreScopedToTheDecision(t *testing.T) {
+	release := func(seq int64) store.ExecutionEvent {
+		content, _ := json.Marshal(map[string]any{"approvalID": "ap-1", "reason": connectorClaimReleaseReason, "decisionSeq": seq})
+		return store.ExecutionEvent{Type: events.ExecutionEventTypeApprovalExecutionUpdated, ToolCallID: "ap-1", Content: content}
+	}
+	other, _ := json.Marshal(map[string]any{"approvalID": "ap-2", "reason": connectorClaimReleaseReason, "decisionSeq": int64(7)})
+	history := []store.ExecutionEvent{
+		release(3), release(3), release(7),
+		{Type: events.ExecutionEventTypeApprovalExecutionUpdated, ToolCallID: "ap-2", Content: other},
+	}
+	// A late release from an older decision must never advance a newer
+	// decision's claim counter, or the newer decision could execute twice.
+	if got := connectorClaimReleases(history, "ap-1", 3); got != 2 {
+		t.Fatalf("releases for decision 3 = %d, want 2", got)
+	}
+	if got := connectorClaimReleases(history, "ap-1", 7); got != 1 {
+		t.Fatalf("releases for decision 7 = %d, want 1", got)
+	}
+	if got := connectorClaimReleases(history, "ap-1", 9); got != 0 {
+		t.Fatalf("releases for a fresh decision = %d, want 0", got)
+	}
+}
+
+// connectorTestPolicySpec is the connection-mode policy the fixtures use.
+func connectorTestPolicySpec() corev1alpha1.OutboundAccessPolicySpec {
+	return corev1alpha1.OutboundAccessPolicySpec{Connection: &corev1alpha1.ConnectionOutboundAccess{ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}}}
+}
+
+func TestExecuteConnectorToolApprovalBindsPolicyConfiguration(t *testing.T) {
+	resolver := &stubOutboundResolver{err: errors.New("the requester has no connection to this provider")}
+	app, eventStore, _ := newConnectorToolAppWithOptions(t, resolver, true, connectorToolAppOptions{mode: "readWrite", approvalRequired: []string{"gh_write"}})
+	// The approval was requested while the policy injected the credential
+	// differently (another output header); it does not authorize a call
+	// under the policy as it is now, even though the Tool is unchanged.
+	approvedTool := connectorTestTool("gh_write", corev1alpha1.AgentRuntimeBrokeredToolClassWrite, "github-conn")
+	targetArgs, _ := approvals.TargetArguments(json.RawMessage(`{"q":"x"}`), approvedTool)
+	argsDigest, _ := approvals.TargetArgsDigest(targetArgs)
+	previous := connectorTestPolicySpec()
+	previous.Connection.Output = &corev1alpha1.OutboundCredentialOutput{Header: "X-Previous-Token"}
+	staleDigest, _ := approvals.ConnectorTargetSpecDigest(approvedTool.Spec, previous, "conn-uid", 2)
+	requested, _ := json.Marshal(map[string]any{"approvalID": "ap-policy", "taskUID": "task-uid", "targetTool": "gh_write", "targetArgsDigest": argsDigest, "targetSpecDigest": staleDigest, "action": "Execute gh_write"})
+	decided, _ := json.Marshal(map[string]any{"approvalID": "ap-policy", "actor": "reviewer"})
+	for _, event := range []*store.ExecutionEvent{
+		{Type: events.ExecutionEventTypeApprovalRequested, Content: requested},
+		{Type: events.ExecutionEventTypeApprovalApproved, Content: decided},
+	} {
+		event.Namespace, event.StreamType, event.StreamID, event.TaskName = "default", store.ExecutionEventStreamTypeTask, "task-a", "task-a"
+		event.ToolName, event.ToolCallID, event.CreatedAt = "gh_write", "ap-policy", time.Now()
+		if _, err := eventStore.AppendExecutionEvent(context.Background(), event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if status, body := postConnectorTool(t, app, "gh_write", `{"arguments":{"q":"x"},"approvalId":"ap-policy"}`); status != http.StatusConflict || !strings.Contains(body, "changed since approval") {
+		t.Fatalf("approval under another policy configuration = %d %s", status, body)
 	}
 }

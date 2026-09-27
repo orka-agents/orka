@@ -2571,7 +2571,10 @@ func TestApprovalTargetSpecDigestUsesPlainSpecForConnectorBackedTools(t *testing
 	previous := connectorBindings
 	t.Cleanup(func() { connectorBindings = previous })
 	connectorBindings = map[string]corev1alpha1.ConnectionBinding{}
-	unbound, err := approvals.ConnectorTargetSpecDigest(tool.Spec, "", 0)
+	previousPolicies := connectorToolPolicies
+	t.Cleanup(func() { connectorToolPolicies = previousPolicies })
+	connectorToolPolicies = map[string]corev1alpha1.OutboundAccessPolicySpec{}
+	unbound, err := approvals.ConnectorTargetSpecDigest(tool.Spec, corev1alpha1.OutboundAccessPolicySpec{}, "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2582,12 +2585,25 @@ func TestApprovalTargetSpecDigestUsesPlainSpecForConnectorBackedTools(t *testing
 	connectorBindings = parseConnectionBindings(
 		`[{"policyName":"github-conn","provider":"github","connectionName":"github-abc",` +
 			`"uid":"conn-uid","generation":2,"mode":"readWrite"}]`)
-	bound, err := approvals.ConnectorTargetSpecDigest(tool.Spec, "conn-uid", 2)
+	bound, err := approvals.ConnectorTargetSpecDigest(tool.Spec, corev1alpha1.OutboundAccessPolicySpec{}, "conn-uid", 2)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got, err := approvalTargetSpecDigest(tool); err != nil || got != bound || got == unbound {
 		t.Fatalf("a connector-backed tool must bind the frozen Connection: got %q want %q err = %v", got, bound, err)
+	}
+	// The policy that injects the credential is part of the target too.
+	policy := corev1alpha1.OutboundAccessPolicySpec{Connection: &corev1alpha1.ConnectionOutboundAccess{
+		ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"},
+		Output:      &corev1alpha1.OutboundCredentialOutput{Header: "X-Token"},
+	}}
+	connectorToolPolicies["gh_write"] = policy
+	withPolicy, err := approvals.ConnectorTargetSpecDigest(tool.Spec, policy, "conn-uid", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := approvalTargetSpecDigest(tool); err != nil || got != withPolicy || got == bound {
+		t.Fatalf("a connector-backed tool must bind its policy configuration: got %q want %q err = %v", got, withPolicy, err)
 	}
 	// A marker that arrived on the Tool object is not a classification: it
 	// is cleared unless routing derived it.
