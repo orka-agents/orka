@@ -715,6 +715,9 @@ type ConnectionBinding struct {
 	// UID and Generation pin the Connection as it was when frozen.
 	UID        string `json:"uid"`
 	Generation int64  `json:"generation"`
+	// GrantSequence is the Connection's consent count when frozen; a
+	// re-link of the same object raises it and invalidates this binding.
+	GrantSequence int64 `json:"grantSequence"`
 	// Mode is the Connection mode at freeze time.
 	Mode string `json:"mode"`
 }

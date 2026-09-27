@@ -57,13 +57,25 @@ func ConnectorToolDispatchDigest(tool corev1alpha1.ToolSpec, policy corev1alpha1
 	}{Tool: tool, Policy: policy})
 }
 
+// classificationRegistry is the built-in tool registry a runtime's policy
+// was built against: the one handed in, or the default. Classification
+// must use the same registry as the policy, or a Tool resource shadowed by
+// a built-in in one and not the other would be treated differently.
+func classificationRegistry(registry *tools.Registry) *tools.Registry {
+	if registry == nil {
+		return tools.DefaultRegistry
+	}
+	return registry
+}
+
 // connectorToolsFor returns, for every named Tool backed by a connection-mode
 // policy, its policy, provider, and class. Unknown tools and tools without
 // such a policy are skipped; read failures are returned so callers retry.
-func connectorToolsFor(ctx context.Context, reader client.Reader, namespace string, toolNames []string) (map[string]connectorToolInfo, error) {
+func connectorToolsFor(ctx context.Context, reader client.Reader, registry *tools.Registry, namespace string, toolNames []string) (map[string]connectorToolInfo, error) {
 	if reader == nil {
 		return nil, nil
 	}
+	registry = classificationRegistry(registry)
 	result := map[string]connectorToolInfo{}
 	policies := map[string]*corev1alpha1.OutboundAccessPolicy{}
 	seen := map[string]struct{}{}
@@ -74,7 +86,7 @@ func connectorToolsFor(ctx context.Context, reader client.Reader, namespace stri
 		seen[name] = struct{}{}
 		// A built-in tool wins over a Tool resource of the same name in every
 		// runtime, so such a resource is never the implementation here.
-		if _, builtin := tools.DefaultRegistry.Get(name); builtin {
+		if _, builtin := registry.Get(name); builtin {
 			continue
 		}
 		tool := &corev1alpha1.Tool{}
@@ -205,7 +217,7 @@ func ACPChildTaskSealer(reader client.Reader, parentNamespace, parentName, paren
 // freezes the result into the worker's environment so the controller executes
 // only the definition the worker was dispatched with.
 func FrozenConnectorToolDigests(ctx context.Context, reader client.Reader, namespace string, toolNames []string) (map[string]string, error) {
-	infos, err := connectorToolsFor(ctx, reader, namespace, toolNames)
+	infos, err := connectorToolsFor(ctx, reader, tools.DefaultRegistry, namespace, toolNames)
 	if err != nil {
 		return nil, err
 	}
@@ -363,13 +375,14 @@ func requesterConnection(ctx context.Context, reader client.Reader, task *corev1
 func FilterConnectorToolsForRequester(
 	ctx context.Context,
 	reader client.Reader,
+	registry *tools.Registry,
 	task *corev1alpha1.Task,
 	toolNames []string,
 ) (visible []string, connectorWrite []string, err error) {
 	if reader == nil || task == nil || len(toolNames) == 0 {
 		return toolNames, nil, nil
 	}
-	infos, err := connectorToolsFor(ctx, reader, task.Namespace, toolNames)
+	infos, err := connectorToolsFor(ctx, reader, registry, task.Namespace, toolNames)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -416,13 +429,14 @@ func FilterConnectorToolsForRequester(
 func freezeRequesterConnectionsForTools(
 	ctx context.Context,
 	reader client.Reader,
+	registry *tools.Registry,
 	task *corev1alpha1.Task,
 	toolNames []string,
 ) ([]agentExecutionSnapshotConnection, error) {
 	if reader == nil || task == nil {
 		return nil, nil
 	}
-	infos, err := connectorToolsFor(ctx, reader, task.Namespace, toolNames)
+	infos, err := connectorToolsFor(ctx, reader, registry, task.Namespace, toolNames)
 	if err != nil {
 		return nil, err
 	}
@@ -450,6 +464,7 @@ func freezeRequesterConnectionsForTools(
 			ConnectionName: connection.Name,
 			UID:            string(connection.UID),
 			Generation:     connection.Generation,
+			GrantSequence:  connection.Status.GrantSequence,
 			Mode:           connection.Spec.Mode,
 		})
 	}
@@ -461,6 +476,7 @@ func freezeRequesterConnectionsForTools(
 func freezeRequesterConnections(
 	ctx context.Context,
 	reader client.Reader,
+	registry *tools.Registry,
 	task *corev1alpha1.Task,
 	mcpConfiguration harnessv2.MCPPolicyConfiguration,
 ) ([]agentExecutionSnapshotConnection, error) {
@@ -470,7 +486,7 @@ func freezeRequesterConnections(
 			names = append(names, descriptor.Name)
 		}
 	}
-	return freezeRequesterConnectionsForTools(ctx, reader, task, names)
+	return freezeRequesterConnectionsForTools(ctx, reader, registry, task, names)
 }
 
 // taskConnectionBindings converts frozen links to the Task status form used
@@ -483,7 +499,7 @@ func taskConnectionBindings(frozen []agentExecutionSnapshotConnection) []corev1a
 	for _, connection := range frozen {
 		bindings = append(bindings, corev1alpha1.ConnectionBinding{
 			PolicyName: connection.PolicyName, Provider: connection.Provider, ConnectionName: connection.ConnectionName,
-			UID: connection.UID, Generation: connection.Generation, Mode: connection.Mode,
+			UID: connection.UID, Generation: connection.Generation, GrantSequence: connection.GrantSequence, Mode: connection.Mode,
 		})
 	}
 	return bindings
@@ -497,7 +513,9 @@ func FrozenConnectionsFromTaskStatus(task *corev1alpha1.Task) map[string]outboun
 	}
 	frozen := make(map[string]outboundaccess.FrozenConnection, len(task.Status.ConnectionBindings))
 	for _, binding := range task.Status.ConnectionBindings {
-		frozen[binding.PolicyName] = outboundaccess.FrozenConnection{UID: binding.UID, Generation: binding.Generation}
+		frozen[binding.PolicyName] = outboundaccess.FrozenConnection{
+			UID: binding.UID, Generation: binding.Generation, GrantSequence: binding.GrantSequence,
+		}
 	}
 	return frozen
 }
@@ -529,7 +547,8 @@ func frozenConnectionDigest(frozen map[string]outboundaccess.FrozenConnection, p
 	if !ok {
 		return ""
 	}
-	sum := sha256.Sum256([]byte(policyName + "\x00" + binding.UID + "\x00" + strconv.FormatInt(binding.Generation, 10)))
+	sum := sha256.Sum256([]byte(policyName + "\x00" + binding.UID + "\x00" + strconv.FormatInt(binding.Generation, 10) +
+		"\x00" + strconv.FormatInt(binding.GrantSequence, 10)))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -543,7 +562,9 @@ func connectionReadyFor(connection *corev1alpha1.Connection, requester *corev1al
 		connection.Spec.ProviderRef.Name != provider {
 		return false
 	}
-	return connectors.ConnectionLinked(connection)
+	// A linked Connection always carries the grant that linked it; without
+	// one there is nothing to bind the snapshot's authority to.
+	return connection.Status.GrantSequence > 0 && connectors.ConnectionLinked(connection)
 }
 
 // bindFrozenConnections loads the Task's execution snapshot and hands the
@@ -589,7 +610,9 @@ func frozenConnectionsFromSnapshot(body agentExecutionSnapshotBody) map[string]o
 	}
 	frozen := make(map[string]outboundaccess.FrozenConnection, len(body.Connections))
 	for _, connection := range body.Connections {
-		frozen[connection.PolicyName] = outboundaccess.FrozenConnection{UID: connection.UID, Generation: connection.Generation}
+		frozen[connection.PolicyName] = outboundaccess.FrozenConnection{
+			UID: connection.UID, Generation: connection.Generation, GrantSequence: connection.GrantSequence,
+		}
 	}
 	return frozen
 }

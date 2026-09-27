@@ -66,7 +66,7 @@ func connectorToolFixtures() *corev1alpha1.Task {
 	// the requester only through it.
 	controller.SetRequesterStampKey(testConnectorStampKey)
 	task.Annotations[labels.AnnotationRequestedByStamp] = connectors.RequesterStamp(testConnectorStampKey, task.UID, task.Spec.RequestedBy.Issuer, task.Spec.RequestedBy.Subject)
-	task.Status.ConnectionBindings = []corev1alpha1.ConnectionBinding{{PolicyName: "github-conn", Provider: "github", ConnectionName: "github-abc", UID: "conn-uid", Generation: 2, Mode: "readOnly"}}
+	task.Status.ConnectionBindings = []corev1alpha1.ConnectionBinding{{PolicyName: "github-conn", Provider: "github", ConnectionName: "github-abc", UID: "conn-uid", Generation: 2, GrantSequence: 1, Mode: "readOnly"}}
 	return task
 }
 
@@ -103,6 +103,8 @@ type connectorToolAppOptions struct {
 	transactionSecret string
 	// noLedger leaves the effect ledger unconfigured.
 	noLedger bool
+	// noGrant freezes a binding that carries no grant sequence.
+	noGrant bool
 }
 
 // connectorToolHarness is the endpoint under test with its fakes.
@@ -157,6 +159,9 @@ func newConnectorToolHarness(t *testing.T, resolver outboundaccess.Resolver, ena
 	t.Helper()
 	task := connectorToolFixtures()
 	task.Status.ConnectionBindings[0].Mode = opts.mode
+	if opts.noGrant {
+		task.Status.ConnectionBindings[0].GrantSequence = 0
+	}
 	if opts.transactionSecret != "" {
 		task.Spec.Transaction = &corev1alpha1.TaskTransaction{Scopes: []string{"orka.credentials.read"}}
 		task.Annotations[labels.AnnotationTransactionTokenSecret] = opts.transactionSecret
@@ -211,7 +216,7 @@ func newConnectorToolHarness(t *testing.T, resolver outboundaccess.Resolver, ena
 		Spec: corev1alpha1.ConnectionSpec{
 			Subject: corev1alpha1.ConnectionSubject{Issuer: "https://issuer.example.test", Subject: "alice"}, ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}, Mode: opts.mode,
 		},
-		Status: corev1alpha1.ConnectionStatus{Conditions: []metav1.Condition{
+		Status: corev1alpha1.ConnectionStatus{GrantSequence: 1, Conditions: []metav1.Condition{
 			{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionTrue, Reason: "Linked", ObservedGeneration: 2},
 			{Type: corev1alpha1.ConnectionConditionScopesGranted, Status: metav1.ConditionTrue, Reason: "ScopesGranted", ObservedGeneration: 2},
 			{Type: corev1alpha1.ConnectionConditionProviderResolved, Status: metav1.ConditionTrue, Reason: "ProviderResolved", ObservedGeneration: 2},
@@ -266,7 +271,7 @@ func seedApprovalForTool(t *testing.T, eventStore *storetest.FakeExecutionEventS
 	if err != nil {
 		t.Fatal(err)
 	}
-	specDigest, err := approvals.ConnectorTargetSpecDigest(approvedTool.Spec, connectorTestPolicySpec(), "conn-uid", 2)
+	specDigest, err := approvals.ConnectorTargetSpecDigest(approvedTool.Spec, connectorTestPolicySpec(), "conn-uid", 2, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -535,7 +540,7 @@ func TestExecuteConnectorToolRequiresJobBindingsToMatchTaskStatus(t *testing.T) 
 	resolver := &stubOutboundResolver{err: errors.New("the requester has no connection to this provider")}
 	// Task status names a different Connection than the one frozen into the
 	// Job: neither a rewritten status nor a recovered Job may redirect the call.
-	other := `[{"policyName":"github-conn","provider":"github","connectionName":"github-abc","uid":"other-uid","generation":2,"mode":"readOnly"}]`
+	other := `[{"policyName":"github-conn","provider":"github","connectionName":"github-abc","uid":"other-uid","generation":2,"grantSequence":1,"mode":"readOnly"}]`
 	app, _, _ := newConnectorToolAppWithOptions(t, resolver, true, connectorToolAppOptions{mode: "readOnly", bindingsEnv: &other})
 	if status, body := postConnectorTool(t, app, "gh_search", `{"arguments":{"q":"x"}}`); status != http.StatusConflict || !strings.Contains(body, "do not match its dispatched job") {
 		t.Fatalf("mismatched bindings = %d %s", status, body)
@@ -561,7 +566,7 @@ func TestExecuteConnectorToolBindsApprovalToFrozenConnection(t *testing.T) {
 	approvedTool := connectorTestTool("gh_write", corev1alpha1.AgentRuntimeBrokeredToolClassWrite, "github-conn")
 	targetArgs, _ := approvals.TargetArguments(json.RawMessage(`{"q":"x"}`), approvedTool)
 	argsDigest, _ := approvals.TargetArgsDigest(targetArgs)
-	staleDigest, _ := approvals.ConnectorTargetSpecDigest(approvedTool.Spec, connectorTestPolicySpec(), "previous-account-uid", 1)
+	staleDigest, _ := approvals.ConnectorTargetSpecDigest(approvedTool.Spec, connectorTestPolicySpec(), "previous-account-uid", 1, 1)
 	requested, _ := json.Marshal(map[string]any{"approvalID": "ap-stale", "taskUID": "task-uid", "targetTool": "gh_write", "targetArgsDigest": argsDigest, "targetSpecDigest": staleDigest, "action": "Execute gh_write"})
 	decided, _ := json.Marshal(map[string]any{"approvalID": "ap-stale", "actor": "reviewer"})
 	for _, event := range []*store.ExecutionEvent{
@@ -627,7 +632,7 @@ func TestExecuteConnectorToolRecordsApprovedCallsInEffectLedger(t *testing.T) {
 	tool := h.tools["gh_write"]
 	targetArgs, _ := approvals.TargetArguments(json.RawMessage(`{"q":"x"}`), tool)
 	argsDigest, _ := approvals.TargetArgsDigest(targetArgs)
-	specDigest, _ := approvals.ConnectorTargetSpecDigest(tool.Spec, connectorTestPolicySpec(), "conn-uid", 2)
+	specDigest, _ := approvals.ConnectorTargetSpecDigest(tool.Spec, connectorTestPolicySpec(), "conn-uid", 2, 1)
 	runFor := func(releases int) connectorToolRun {
 		return connectorToolRun{task: task, tool: tool, binding: task.Status.ConnectionBindings[0], claim: &connectorApprovalClaim{
 			approvalID: "ap-1", key: fmt.Sprintf("connector-approval-claim:ap-1:%d:%d", decisionSeq, releases), releases: releases,
@@ -741,7 +746,7 @@ func seedConnectorEffect(t *testing.T, h *connectorToolHarness, toolName, args s
 	tool := h.tools[toolName]
 	targetArgs, _ := approvals.TargetArguments(json.RawMessage(args), tool)
 	argsDigest, _ := approvals.TargetArgsDigest(targetArgs)
-	specDigest, _ := approvals.ConnectorTargetSpecDigest(tool.Spec, connectorTestPolicySpec(), "conn-uid", 2)
+	specDigest, _ := approvals.ConnectorTargetSpecDigest(tool.Spec, connectorTestPolicySpec(), "conn-uid", 2, 1)
 	run := connectorToolRun{task: task, tool: tool, binding: task.Status.ConnectionBindings[0], claim: &connectorApprovalClaim{
 		approvalID: "ap-1", key: fmt.Sprintf("connector-approval-claim:ap-1:%d:%d", decisionSeq, releases), releases: releases, argsDigest: argsDigest, specDigest: specDigest,
 	}}
@@ -909,7 +914,7 @@ func TestExecuteConnectorToolApprovalBindsPolicyConfiguration(t *testing.T) {
 	argsDigest, _ := approvals.TargetArgsDigest(targetArgs)
 	previous := connectorTestPolicySpec()
 	previous.Connection.Output = &corev1alpha1.OutboundCredentialOutput{Header: "X-Previous-Token"}
-	staleDigest, _ := approvals.ConnectorTargetSpecDigest(approvedTool.Spec, previous, "conn-uid", 2)
+	staleDigest, _ := approvals.ConnectorTargetSpecDigest(approvedTool.Spec, previous, "conn-uid", 2, 1)
 	requested, _ := json.Marshal(map[string]any{"approvalID": "ap-policy", "taskUID": "task-uid", "targetTool": "gh_write", "targetArgsDigest": argsDigest, "targetSpecDigest": staleDigest, "action": "Execute gh_write"})
 	decided, _ := json.Marshal(map[string]any{"approvalID": "ap-policy", "actor": "reviewer"})
 	for _, event := range []*store.ExecutionEvent{
@@ -924,5 +929,28 @@ func TestExecuteConnectorToolApprovalBindsPolicyConfiguration(t *testing.T) {
 	}
 	if status, body := postConnectorTool(t, app, "gh_write", `{"arguments":{"q":"x"},"approvalId":"ap-policy"}`); status != http.StatusConflict || !strings.Contains(body, "changed since approval") {
 		t.Fatalf("approval under another policy configuration = %d %s", status, body)
+	}
+}
+
+// A binding without a grant sequence never came from the controller's freeze
+// (a linked Connection always carries one), so nothing executes under it.
+func TestExecuteConnectorToolRefusesBindingWithoutGrant(t *testing.T) {
+	resolver := &stubOutboundResolver{}
+	app, _, _ := newConnectorToolAppWithOptions(t, resolver, true, connectorToolAppOptions{mode: "readOnly", noGrant: true})
+	if status, body := postConnectorTool(t, app, "gh_search", `{"arguments":{}}`); status != http.StatusFailedDependency || !strings.Contains(body, "carries no grant") {
+		t.Fatalf("no grant = %d %s", status, body)
+	}
+	if resolver.request.PolicyName != "" {
+		t.Fatal("resolution must not be attempted for a binding without a grant")
+	}
+	// A dispatched binding resolves with the checked policy pinned, so the
+	// resolver refuses a policy object replaced between check and execute.
+	resolver = &stubOutboundResolver{err: errors.New("the requester has no connection to this provider")}
+	app = newConnectorToolApp(t, resolver, true)
+	if status, _ := postConnectorTool(t, app, "gh_search", `{"arguments":{}}`); status != http.StatusFailedDependency {
+		t.Fatalf("resolver refusal = %d", status)
+	}
+	if resolver.request.CheckedPolicy == nil || resolver.request.PolicyName != "github-conn" {
+		t.Fatalf("resolve request = %+v, want the checked policy pinned", resolver.request)
 	}
 }

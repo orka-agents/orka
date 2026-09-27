@@ -6477,7 +6477,7 @@ func TestCreateTaskJob_RecoveredJobKeepsItsOwnConnectionBindings(t *testing.T) {
 	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Status.JobName, Namespace: task.Namespace}, job); err != nil {
 		t.Fatal(err)
 	}
-	frozen := []corev1alpha1.ConnectionBinding{{PolicyName: "github-conn", Provider: "github", ConnectionName: "github-abc", UID: "conn-uid", Generation: 2, Mode: "readOnly"}}
+	frozen := []corev1alpha1.ConnectionBinding{{PolicyName: "github-conn", Provider: "github", ConnectionName: "github-abc", UID: "conn-uid", Generation: 2, GrantSequence: 1, Mode: "readOnly"}}
 	encoded, _ := json.Marshal(frozen)
 	// The fake API server assigns no UID; recovery adopts only a recorded one.
 	job.UID = "job-uid-1"

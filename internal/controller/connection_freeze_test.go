@@ -85,7 +85,7 @@ func TestFreezeRequesterConnections(t *testing.T) {
 	scheme := connectorTestScheme(t)
 	tool, policy, connection, task := freezeFixtures(true)
 	reader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(tool, policy, connection).Build()
-	frozen, err := freezeRequesterConnections(context.Background(), reader, task, brokeredConfiguration("gh_search", "gh_search"))
+	frozen, err := freezeRequesterConnections(context.Background(), reader, nil, task, brokeredConfiguration("gh_search", "gh_search"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,22 +96,22 @@ func TestFreezeRequesterConnections(t *testing.T) {
 	// Not Ready, no requester, non-connection policy, or unknown tool: nothing frozen, no error.
 	_, _, unready, _ := freezeFixtures(false)
 	reader = ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(tool, policy, unready).Build()
-	if frozen, err := freezeRequesterConnections(context.Background(), reader, task, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
+	if frozen, err := freezeRequesterConnections(context.Background(), reader, nil, task, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
 		t.Fatalf("unready: frozen = %+v err = %v", frozen, err)
 	}
 	reader = ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(tool, policy, connection).Build()
 	anonymous := task.DeepCopy()
 	anonymous.Spec.RequestedBy = nil
-	if frozen, err := freezeRequesterConnections(context.Background(), reader, anonymous, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
+	if frozen, err := freezeRequesterConnections(context.Background(), reader, nil, anonymous, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
 		t.Fatalf("anonymous: frozen = %+v err = %v", frozen, err)
 	}
 	direct := policy.(*corev1alpha1.OutboundAccessPolicy).DeepCopy()
 	direct.Spec = corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{}}
 	reader = ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(tool, direct, connection).Build()
-	if frozen, err := freezeRequesterConnections(context.Background(), reader, task, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
+	if frozen, err := freezeRequesterConnections(context.Background(), reader, nil, task, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
 		t.Fatalf("direct: frozen = %+v err = %v", frozen, err)
 	}
-	if frozen, err := freezeRequesterConnections(context.Background(), reader, task, brokeredConfiguration("missing_tool")); err != nil || len(frozen) != 0 {
+	if frozen, err := freezeRequesterConnections(context.Background(), reader, nil, task, brokeredConfiguration("missing_tool")); err != nil || len(frozen) != 0 {
 		t.Fatalf("missing tool: frozen = %+v err = %v", frozen, err)
 	}
 
@@ -124,7 +124,7 @@ func TestFreezeRequesterConnections(t *testing.T) {
 			return c.Get(ctx, key, obj, opts...)
 		},
 	}).Build()
-	if _, err := freezeRequesterConnections(context.Background(), failing, task, brokeredConfiguration("gh_search")); err == nil {
+	if _, err := freezeRequesterConnections(context.Background(), failing, nil, task, brokeredConfiguration("gh_search")); err == nil {
 		t.Fatal("read failure must propagate")
 	}
 }
@@ -198,10 +198,10 @@ func TestFreezeRequiresVerifiedRequesterProvenance(t *testing.T) {
 	forged := stamped.DeepCopy()
 	forged.Name, forged.UID, forged.Annotations = "forged", "forged-uid", nil
 	reader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(tool, policy, connection, stamped, forged).Build()
-	if frozen, err := freezeRequesterConnections(context.Background(), reader, forged, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
+	if frozen, err := freezeRequesterConnections(context.Background(), reader, nil, forged, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
 		t.Fatalf("forged parentless task: frozen = %+v err = %v", frozen, err)
 	}
-	if frozen, err := freezeRequesterConnections(context.Background(), reader, stamped, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 1 {
+	if frozen, err := freezeRequesterConnections(context.Background(), reader, nil, stamped, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 1 {
 		t.Fatalf("api-stamped task: frozen = %+v err = %v", frozen, err)
 	}
 	// Admission is not retroactive: a Task planted with the source
@@ -215,7 +215,7 @@ func TestFreezeRequiresVerifiedRequesterProvenance(t *testing.T) {
 	copied.Annotations[labels.AnnotationRequestedByStamp] = stamped.Annotations[labels.AnnotationRequestedByStamp]
 	reader = ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(tool, policy, connection, stamped, planted, copied).Build()
 	for _, task := range []*corev1alpha1.Task{planted, copied} {
-		if frozen, err := freezeRequesterConnections(context.Background(), reader, task, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
+		if frozen, err := freezeRequesterConnections(context.Background(), reader, nil, task, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
 			t.Fatalf("%s task: frozen = %+v err = %v, want nothing without a stamp sealed for this UID", task.Name, frozen, err)
 		}
 	}
@@ -224,22 +224,22 @@ func TestFreezeRequiresVerifiedRequesterProvenance(t *testing.T) {
 	// binding with no Connections. Past the grace window it is unverified.
 	fresh := planted.DeepCopy()
 	fresh.Name, fresh.UID, fresh.CreationTimestamp = "fresh", "fresh-uid", metav1.Now()
-	if _, err := freezeRequesterConnections(context.Background(), reader, fresh, brokeredConfiguration("gh_search")); !errors.Is(err, ErrRequesterStampPending) {
+	if _, err := freezeRequesterConnections(context.Background(), reader, nil, fresh, brokeredConfiguration("gh_search")); !errors.Is(err, ErrRequesterStampPending) {
 		t.Fatalf("fresh unsealed task: err = %v, want ErrRequesterStampPending", err)
 	}
 	fresh.CreationTimestamp = metav1.NewTime(time.Now().Add(-requesterStampGrace - time.Minute))
-	if frozen, err := freezeRequesterConnections(context.Background(), reader, fresh, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
+	if frozen, err := freezeRequesterConnections(context.Background(), reader, nil, fresh, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
 		t.Fatalf("stale unsealed task: frozen = %+v err = %v, want unverified", frozen, err)
 	}
 	// Without a configured key nothing is ever verified, and nothing waits
 	// for a seal that cannot arrive: dispatch proceeds without Connections.
 	SetRequesterStampKey(nil)
 	t.Cleanup(func() { SetRequesterStampKey(testRequesterStampKey) })
-	if frozen, err := freezeRequesterConnections(context.Background(), reader, stamped, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
+	if frozen, err := freezeRequesterConnections(context.Background(), reader, nil, stamped, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
 		t.Fatalf("no stamp key: frozen = %+v err = %v, want fail closed", frozen, err)
 	}
 	fresh.CreationTimestamp = metav1.Now()
-	if frozen, err := freezeRequesterConnections(context.Background(), reader, fresh, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
+	if frozen, err := freezeRequesterConnections(context.Background(), reader, nil, fresh, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
 		t.Fatalf("no stamp key, fresh task: frozen = %+v err = %v, want no wait", frozen, err)
 	}
 	SetRequesterStampKey(testRequesterStampKey)
@@ -264,7 +264,7 @@ func TestFreezeRequiresVerifiedRequesterProvenance(t *testing.T) {
 	impostor.Name, impostor.UID = "impostor", "impostor-uid"
 	impostor.Spec.RequestedBy = &corev1alpha1.RequestedBy{Issuer: stamped.Spec.RequestedBy.Issuer, Subject: "victim"}
 	reader = ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(tool, policy, connection, stamped, child, sealed, impostor).Build()
-	if frozen, err := freezeRequesterConnections(context.Background(), reader, child, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
+	if frozen, err := freezeRequesterConnections(context.Background(), reader, nil, child, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
 		t.Fatalf("owner reference alone: frozen = %+v err = %v, want nothing without the child's own seal", frozen, err)
 	}
 	// A child a worker just created is waiting for its parent's worker to
@@ -272,24 +272,24 @@ func TestFreezeRequiresVerifiedRequesterProvenance(t *testing.T) {
 	// binding with no Connections. Past the grace window it is unverified.
 	freshChild := child.DeepCopy()
 	freshChild.Name, freshChild.UID, freshChild.CreationTimestamp = "fresh-child", "fresh-child-uid", metav1.Now()
-	if _, err := freezeRequesterConnections(context.Background(), reader, freshChild, brokeredConfiguration("gh_search")); !errors.Is(err, ErrRequesterStampPending) {
+	if _, err := freezeRequesterConnections(context.Background(), reader, nil, freshChild, brokeredConfiguration("gh_search")); !errors.Is(err, ErrRequesterStampPending) {
 		t.Fatalf("fresh unsealed child: err = %v, want ErrRequesterStampPending", err)
 	}
 	freshChild.CreationTimestamp = metav1.NewTime(time.Now().Add(-requesterStampGrace - time.Minute))
-	if frozen, err := freezeRequesterConnections(context.Background(), reader, freshChild, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
+	if frozen, err := freezeRequesterConnections(context.Background(), reader, nil, freshChild, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
 		t.Fatalf("stale unsealed child: frozen = %+v err = %v, want unverified", frozen, err)
 	}
 	// A fresh Task that is neither API-stamped nor a coordination child
 	// waits for nothing.
 	loose := freshChild.DeepCopy()
 	loose.Name, loose.UID, loose.CreationTimestamp, loose.OwnerReferences = "loose", "loose-uid", metav1.Now(), nil
-	if frozen, err := freezeRequesterConnections(context.Background(), reader, loose, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
+	if frozen, err := freezeRequesterConnections(context.Background(), reader, nil, loose, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
 		t.Fatalf("loose fresh task: frozen = %+v err = %v, want no wait", frozen, err)
 	}
-	if frozen, err := freezeRequesterConnections(context.Background(), reader, sealed, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 1 {
+	if frozen, err := freezeRequesterConnections(context.Background(), reader, nil, sealed, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 1 {
 		t.Fatalf("sealed child: frozen = %+v err = %v", frozen, err)
 	}
-	if frozen, err := freezeRequesterConnections(context.Background(), reader, impostor, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
+	if frozen, err := freezeRequesterConnections(context.Background(), reader, nil, impostor, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
 		t.Fatalf("child with a copied stamp and another requester: frozen = %+v err = %v", frozen, err)
 	}
 }

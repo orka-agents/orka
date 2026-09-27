@@ -237,6 +237,7 @@ func runtimeSupportsMCPApprovals(profile harnessv2.RuntimeProfile) bool {
 func adjustInputsForConnectorTools(
 	ctx context.Context,
 	reader client.Reader,
+	registry *tools.Registry,
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
 ) (*corev1alpha1.Task, *corev1alpha1.Agent, error) {
@@ -255,7 +256,7 @@ func adjustInputsForConnectorTools(
 			}
 		}
 	}
-	hidden, connectorWrite, err := FilterConnectorToolsForRequester(ctx, reader, task, candidates)
+	hidden, connectorWrite, err := FilterConnectorToolsForRequester(ctx, reader, registry, task, candidates)
 	if err != nil {
 		return nil, nil, fmt.Errorf("apply connector tool visibility: %w", err)
 	}

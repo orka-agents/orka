@@ -2955,7 +2955,7 @@ func TestJobBuilder_buildEnvVars_ConnectorWriteToolsRequireApprovalAndHideOnRead
 		Spec: corev1alpha1.ConnectionSpec{
 			Subject: corev1alpha1.ConnectionSubject{Issuer: requester.Issuer, Subject: requester.Subject}, ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}, Mode: corev1alpha1.ConnectionModeReadWrite,
 		},
-		Status: corev1alpha1.ConnectionStatus{Conditions: []metav1.Condition{
+		Status: corev1alpha1.ConnectionStatus{GrantSequence: 1, Conditions: []metav1.Condition{
 			{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionTrue, Reason: "Linked", ObservedGeneration: 1},
 			{Type: corev1alpha1.ConnectionConditionScopesGranted, Status: metav1.ConditionTrue, Reason: "ScopesGranted", ObservedGeneration: 1},
 			{Type: corev1alpha1.ConnectionConditionProviderResolved, Status: metav1.ConditionTrue, Reason: "ProviderResolved", ObservedGeneration: 1},
@@ -3063,7 +3063,7 @@ func TestJobBuilder_buildEnvVars_FreezesConnectionBindingsOnTheJob(t *testing.T)
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "Review"},
 	}
 	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{Provider: "anthropic", Name: "claude"}}}
-	bindings := []corev1alpha1.ConnectionBinding{{PolicyName: "github-conn", Provider: "github", ConnectionName: "github-abc", UID: "conn-uid", Generation: 2, Mode: "readOnly"}}
+	bindings := []corev1alpha1.ConnectionBinding{{PolicyName: "github-conn", Provider: "github", ConnectionName: "github-abc", UID: "conn-uid", Generation: 2, GrantSequence: 1, Mode: "readOnly"}}
 	envVars, err := builder.buildEnvVarsWithOptions(context.Background(), task, agent, nil, JobBuildOptions{ConnectionBindings: bindings})
 	if err != nil {
 		t.Fatal(err)

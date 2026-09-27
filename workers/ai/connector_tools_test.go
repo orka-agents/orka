@@ -179,7 +179,7 @@ func TestParseConnectionBindings(t *testing.T) {
 	}
 	got := parseConnectionBindings(`[` +
 		`{"policyName":"github-conn","provider":"github","connectionName":"github-abc",` +
-		`"uid":"conn-uid","generation":2,"mode":"readOnly"},` +
+		`"uid":"conn-uid","generation":2,"grantSequence":1,"mode":"readOnly"},` +
 		`{"policyName":"","uid":"ignored"}]`)
 	if len(got) != 1 || got["github-conn"].UID != "conn-uid" || got["github-conn"].Generation != 2 {
 		t.Fatalf("bindings = %+v", got)

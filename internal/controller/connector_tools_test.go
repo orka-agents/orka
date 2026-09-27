@@ -93,6 +93,7 @@ func (f connectorToolFixture) connection(mode string, ready bool) *corev1alpha1.
 		},
 	}
 	if ready {
+		connection.Status.GrantSequence = 1
 		connection.Status.Conditions = []metav1.Condition{
 			{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonLinked, ObservedGeneration: 3},
 			{Type: corev1alpha1.ConnectionConditionScopesGranted, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonScopesGranted, ObservedGeneration: 3},
@@ -112,29 +113,29 @@ func TestFilterConnectorToolsForRequester(t *testing.T) {
 	names := []string{"gh_read", "gh_write", "plain", "direct_write", "missing"}
 	ctx := context.Background()
 
-	visible, write, err := FilterConnectorToolsForRequester(ctx, f.reader(), f.task, names)
+	visible, write, err := FilterConnectorToolsForRequester(ctx, f.reader(), nil, f.task, names)
 	if err != nil || strings.Join(visible, ",") != strings.Join(names, ",") || strings.Join(write, ",") != "gh_write" {
 		t.Fatalf("no link: visible = %v write = %v err = %v", visible, write, err)
 	}
-	visible, write, err = FilterConnectorToolsForRequester(ctx, f.reader(f.connection(corev1alpha1.ConnectionModeReadWrite, true)), f.task, names)
+	visible, write, err = FilterConnectorToolsForRequester(ctx, f.reader(f.connection(corev1alpha1.ConnectionModeReadWrite, true)), nil, f.task, names)
 	if err != nil || strings.Join(visible, ",") != strings.Join(names, ",") || strings.Join(write, ",") != "gh_write" {
 		t.Fatalf("readWrite: visible = %v write = %v err = %v", visible, write, err)
 	}
-	visible, write, err = FilterConnectorToolsForRequester(ctx, f.reader(f.connection(corev1alpha1.ConnectionModeReadOnly, true)), f.task, names)
+	visible, write, err = FilterConnectorToolsForRequester(ctx, f.reader(f.connection(corev1alpha1.ConnectionModeReadOnly, true)), nil, f.task, names)
 	if err != nil || strings.Join(visible, ",") != "gh_read,plain,direct_write,missing" || len(write) != 0 {
 		t.Fatalf("readOnly: visible = %v write = %v err = %v", visible, write, err)
 	}
-	visible, _, err = FilterConnectorToolsForRequester(ctx, f.reader(f.connection(corev1alpha1.ConnectionModeReadOnly, false)), f.task, names)
+	visible, _, err = FilterConnectorToolsForRequester(ctx, f.reader(f.connection(corev1alpha1.ConnectionModeReadOnly, false)), nil, f.task, names)
 	if err != nil || strings.Join(visible, ",") != strings.Join(names, ",") {
 		t.Fatalf("unready readOnly link must not hide (call fails closed instead): %v err = %v", visible, err)
 	}
 	anonymous := f.task.DeepCopy()
 	anonymous.Spec.RequestedBy = nil
-	visible, _, err = FilterConnectorToolsForRequester(ctx, f.reader(f.connection(corev1alpha1.ConnectionModeReadOnly, true)), anonymous, names)
+	visible, _, err = FilterConnectorToolsForRequester(ctx, f.reader(f.connection(corev1alpha1.ConnectionModeReadOnly, true)), nil, anonymous, names)
 	if err != nil || strings.Join(visible, ",") != strings.Join(names, ",") {
 		t.Fatalf("anonymous: visible = %v err = %v", visible, err)
 	}
-	if visible, _, err := FilterConnectorToolsForRequester(ctx, nil, f.task, names); err != nil || len(visible) != len(names) {
+	if visible, _, err := FilterConnectorToolsForRequester(ctx, nil, nil, f.task, names); err != nil || len(visible) != len(names) {
 		t.Fatalf("nil reader: %v %v", visible, err)
 	}
 	failing := ctrlfake.NewClientBuilder().WithScheme(f.scheme).WithObjects(f.policy, f.readTool).WithInterceptorFuncs(interceptor.Funcs{
@@ -145,7 +146,7 @@ func TestFilterConnectorToolsForRequester(t *testing.T) {
 			return c.Get(ctx, key, obj, opts...)
 		},
 	}).Build()
-	if _, _, err := FilterConnectorToolsForRequester(ctx, failing, f.task, []string{"gh_read"}); err == nil {
+	if _, _, err := FilterConnectorToolsForRequester(ctx, failing, nil, f.task, []string{"gh_read"}); err == nil {
 		t.Fatal("read failure must propagate")
 	}
 }
@@ -153,7 +154,7 @@ func TestFilterConnectorToolsForRequester(t *testing.T) {
 func TestFreezeAndBindNativeConnections(t *testing.T) {
 	f := newConnectorToolFixture(t)
 	ctx := context.Background()
-	frozen, err := freezeRequesterConnectionsForTools(ctx, f.reader(f.connection(corev1alpha1.ConnectionModeReadWrite, true)), f.task, []string{"gh_read", "gh_write", "plain", "direct_write"})
+	frozen, err := freezeRequesterConnectionsForTools(ctx, f.reader(f.connection(corev1alpha1.ConnectionModeReadWrite, true)), nil, f.task, []string{"gh_read", "gh_write", "plain", "direct_write"})
 	if err != nil || len(frozen) != 1 || frozen[0].PolicyName != "github-conn" || frozen[0].UID != "conn-uid" || frozen[0].Generation != 3 {
 		t.Fatalf("frozen = %+v err = %v", frozen, err)
 	}
@@ -183,7 +184,7 @@ func TestFreezeAndBindNativeConnections(t *testing.T) {
 		t.Fatal("nil task must fail")
 	}
 	digest := frozenConnectionDigest(executor.FrozenConnections(), "github-conn")
-	if digest == "" || digest != frozenConnectionDigest(map[string]outboundaccess.FrozenConnection{"github-conn": {UID: "conn-uid", Generation: 3}}, "github-conn") {
+	if digest == "" || digest != frozenConnectionDigest(map[string]outboundaccess.FrozenConnection{"github-conn": {UID: "conn-uid", Generation: 3, GrantSequence: 1}}, "github-conn") {
 		t.Fatalf("digest = %q", digest)
 	}
 	if frozenConnectionDigest(nil, "github-conn") != "" || frozenConnectionDigest(executor.FrozenConnections(), "other") != "" {
@@ -196,7 +197,7 @@ func TestRegistryACPMCPToolExecutorConnectionDigest(t *testing.T) {
 	task := f.task.DeepCopy()
 	task.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{Snapshot: corev1alpha1.AgentExecutionSnapshotRef{Digest: "abc"}}
 	body, err := json.Marshal(agentExecutionSnapshotBody{Connections: []agentExecutionSnapshotConnection{
-		{PolicyName: "github-conn", Provider: "github", ConnectionName: "github-x", UID: "conn-uid", Generation: 3, Mode: "readWrite"},
+		{PolicyName: "github-conn", Provider: "github", ConnectionName: "github-x", UID: "conn-uid", Generation: 3, GrantSequence: 1, Mode: "readWrite"},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -209,7 +210,7 @@ func TestRegistryACPMCPToolExecutorConnectionDigest(t *testing.T) {
 	custom := harnessv2.MCPToolDescriptor{Name: "gh_write", Source: harnessv2.MCPToolSourceBrokeredCustom}
 	digest, err := executor.ConnectionDigest(ctx, request, custom)
 	dispatch, _ := ConnectorToolDispatchDigest(f.writeTool.Spec, f.policy.Spec)
-	want := connectorBindingDigest(frozenConnectionDigest(map[string]outboundaccess.FrozenConnection{"github-conn": {UID: "conn-uid", Generation: 3}}, "github-conn"), dispatch)
+	want := connectorBindingDigest(frozenConnectionDigest(map[string]outboundaccess.FrozenConnection{"github-conn": {UID: "conn-uid", Generation: 3, GrantSequence: 1}}, "github-conn"), dispatch)
 	if err != nil || digest == "" || digest != want {
 		t.Fatalf("digest = %q err = %v want %q", digest, err, want)
 	}
@@ -275,7 +276,7 @@ func TestBuildRuntimeSessionMCPConfigurationConnectorWriteTools(t *testing.T) {
 		reader := f.reader(extra...)
 		planAgent := agent.DeepCopy()
 		planAgent.Spec.Runtime.Type = runtimeType
-		adjustedTask, adjustedAgent, err := adjustInputsForConnectorTools(context.Background(), reader, task, planAgent)
+		adjustedTask, adjustedAgent, err := adjustInputsForConnectorTools(context.Background(), reader, nil, task, planAgent)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -311,7 +312,7 @@ func TestBuildRuntimeSessionMCPConfigurationConnectorWriteTools(t *testing.T) {
 
 	// The adjustment leaves unrelated inputs untouched and never mutates the
 	// caller's objects.
-	adjustedTask, adjustedAgent, err := adjustInputsForConnectorTools(context.Background(), f.reader(f.connection(corev1alpha1.ConnectionModeReadWrite, true)), task, agent)
+	adjustedTask, adjustedAgent, err := adjustInputsForConnectorTools(context.Background(), f.reader(f.connection(corev1alpha1.ConnectionModeReadWrite, true)), nil, task, agent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,12 +340,19 @@ func TestConnectorToolsSkipBuiltinNames(t *testing.T) {
 	}
 	reader := f.reader(shadow, f.connection(corev1alpha1.ConnectionModeReadOnly, true))
 	names := []string{"web_search", "gh_write"}
-	visible, write, err := FilterConnectorToolsForRequester(context.Background(), reader, f.task, names)
+	visible, write, err := FilterConnectorToolsForRequester(context.Background(), reader, nil, f.task, names)
 	if err != nil || strings.Join(visible, ",") != "web_search" || len(write) != 0 {
 		t.Fatalf("visible = %v write = %v err = %v, want the built-in kept and the connector write hidden", visible, write, err)
 	}
 	digests, err := FrozenConnectorToolDigests(context.Background(), reader, f.task.Namespace, names)
 	if err != nil || len(digests) != 1 || digests["gh_write"] == "" {
 		t.Fatalf("digests = %v err = %v, want only the real connector tool", digests, err)
+	}
+	// Classification follows the registry the runtime's policy was built
+	// against: a runtime whose registry has no such built-in sees the Tool
+	// resource, and it is the connector write tool a readOnly link hides.
+	visible, write, err = FilterConnectorToolsForRequester(context.Background(), reader, tools.NewRegistry(), f.task, names)
+	if err != nil || len(visible) != 0 || len(write) != 0 {
+		t.Fatalf("visible = %v write = %v err = %v, want the shadowed resource classified by the runtime registry", visible, write, err)
 	}
 }

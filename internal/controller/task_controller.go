@@ -1515,7 +1515,7 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	// Freeze the requester's Connections before anything is created, so a
 	// transient read failure retries dispatch instead of starting a worker
 	// whose connector-backed tools could never bind.
-	frozenConnections, err := freezeRequesterConnectionsForTools(ctx, r.Client, task, aitools.Resolve(task, agent))
+	frozenConnections, err := freezeRequesterConnectionsForTools(ctx, r.Client, tools.DefaultRegistry, task, aitools.Resolve(task, agent))
 	if err != nil {
 		log.Error(err, "failed to freeze requester connections; retrying dispatch")
 		return ctrl.Result{}, err

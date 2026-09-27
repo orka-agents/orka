@@ -38,6 +38,7 @@ import (
 	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/controller"
 	"github.com/orka-agents/orka/internal/outboundaccess"
+	"github.com/orka-agents/orka/internal/tools"
 	workerexecutor "github.com/orka-agents/orka/internal/worker"
 )
 
@@ -198,6 +199,9 @@ func (h *InternalHandlers) ExecuteConnectorTool(c fiber.Ctx) error {
 	if !ok {
 		return fiber.NewError(fiber.StatusFailedDependency, "no Connection was frozen for the tool's policy when the task was dispatched")
 	}
+	if binding.GrantSequence <= 0 {
+		return fiber.NewError(fiber.StatusFailedDependency, "the Connection frozen for the tool's policy carries no grant")
+	}
 	claim, err := h.enforceConnectorToolApproval(ctx, task, tool, policy, req.Arguments, req.ApprovalID, frozen, binding)
 	if err != nil {
 		if replay, ok := errors.AsType[*connectorToolReplay](err); ok {
@@ -206,7 +210,7 @@ func (h *InternalHandlers) ExecuteConnectorTool(c fiber.Ctx) error {
 		return err
 	}
 	return h.runConnectorTool(c, connectorToolRun{
-		task: task, tool: tool, req: req, claim: claim, binding: binding, authorizer: authorizer,
+		task: task, tool: tool, policy: policy, req: req, claim: claim, binding: binding, authorizer: authorizer,
 	})
 }
 
@@ -214,6 +218,7 @@ func (h *InternalHandlers) ExecuteConnectorTool(c fiber.Ctx) error {
 type connectorToolRun struct {
 	task       *corev1alpha1.Task
 	tool       *corev1alpha1.Tool
+	policy     *corev1alpha1.OutboundAccessPolicy
 	req        connectorToolCallRequest
 	claim      *connectorApprovalClaim
 	binding    corev1alpha1.ConnectionBinding
@@ -256,6 +261,13 @@ func (h *InternalHandlers) runConnectorTool(c fiber.Ctx, run connectorToolRun) e
 		log.Error(err, "connector tool authority binding failed", "task", run.task.Name, "tool", toolName)
 		return fail(fiber.StatusInternalServerError, "failed to bind task authority")
 	}
+	if run.policy == nil {
+		return fail(fiber.StatusInternalServerError, "connector tool run carries no checked policy")
+	}
+	// The policy whose dispatch digest was checked above is the only one
+	// resolution may inject under; a policy replaced or edited in between
+	// is refused rather than executed under a configuration never checked.
+	executor.SetCheckedPolicy(run.policy.Name, outboundaccess.PolicyIdentity{UID: string(run.policy.UID), Generation: run.policy.Generation})
 	execCtx := ctx
 	if strings.TrimSpace(run.req.CallID) != "" {
 		execCtx = workerexecutor.WithToolCallID(execCtx, run.req.CallID)
@@ -307,8 +319,11 @@ func (h *InternalHandlers) runConnectorTool(c fiber.Ctx, run connectorToolRun) e
 			// precondition failure and hand the approval back.
 			status = fiber.StatusFailedDependency
 			if releaseErr := fail(status, ""); releaseErr != nil {
+				// Anything other than the plain 424 the helper hands back
+				// (a settlement or release that could not be made durable)
+				// is what the worker must see, so it retries appropriately.
 				var fiberErr *fiber.Error
-				if errors.As(releaseErr, &fiberErr) && fiberErr.Code == fiber.StatusInternalServerError {
+				if errors.As(releaseErr, &fiberErr) && fiberErr.Code != status {
 					return fiberErr
 				}
 			}
@@ -472,7 +487,7 @@ func connectorToolEnabledForTask(ctx context.Context, reader client.Reader, task
 			return fiber.NewError(fiber.StatusInternalServerError, "failed to read agent")
 		}
 	}
-	visible, _, err := controller.FilterConnectorToolsForRequester(ctx, reader, task, aitools.Resolve(task, agent))
+	visible, _, err := controller.FilterConnectorToolsForRequester(ctx, reader, tools.DefaultRegistry, task, aitools.Resolve(task, agent))
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to resolve enabled tools")
 	}
@@ -553,7 +568,7 @@ func (h *InternalHandlers) enforceConnectorToolApproval(
 	// digested by the worker when it asked; the live Tool and the Job's
 	// binding must still match, or a retargeted Tool or a re-linked account
 	// would ride an old approval to a different write.
-	specDigest, err := approvals.ConnectorTargetSpecDigest(tool.Spec, policy.Spec, binding.UID, binding.Generation)
+	specDigest, err := approvals.ConnectorTargetSpecDigest(tool.Spec, policy.Spec, binding.UID, binding.Generation, binding.GrantSequence)
 	if err != nil {
 		return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to digest tool configuration")
 	}
@@ -590,7 +605,7 @@ func (h *InternalHandlers) enforceConnectorToolApproval(
 		specDigest:  specDigest,
 	}
 	claim.key = fmt.Sprintf("connector-approval-claim:%s:%d:%d", approvalID, matched.DecisionSeq, claim.releases)
-	run := connectorToolRun{task: task, tool: tool, claim: claim, binding: binding}
+	run := connectorToolRun{task: task, tool: tool, policy: policy, claim: claim, binding: binding}
 	// The effect record is reserved before the claim is recorded, so every
 	// claim has a record whose state says whether its call started; a
 	// claim with no record is never assumed unstarted.

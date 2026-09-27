@@ -2574,7 +2574,7 @@ func TestApprovalTargetSpecDigestUsesPlainSpecForConnectorBackedTools(t *testing
 	previousPolicies := connectorToolPolicies
 	t.Cleanup(func() { connectorToolPolicies = previousPolicies })
 	connectorToolPolicies = map[string]corev1alpha1.OutboundAccessPolicySpec{}
-	unbound, err := approvals.ConnectorTargetSpecDigest(tool.Spec, corev1alpha1.OutboundAccessPolicySpec{}, "", 0)
+	unbound, err := approvals.ConnectorTargetSpecDigest(tool.Spec, corev1alpha1.OutboundAccessPolicySpec{}, "", 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2584,8 +2584,8 @@ func TestApprovalTargetSpecDigestUsesPlainSpecForConnectorBackedTools(t *testing
 	}
 	connectorBindings = parseConnectionBindings(
 		`[{"policyName":"github-conn","provider":"github","connectionName":"github-abc",` +
-			`"uid":"conn-uid","generation":2,"mode":"readWrite"}]`)
-	bound, err := approvals.ConnectorTargetSpecDigest(tool.Spec, corev1alpha1.OutboundAccessPolicySpec{}, "conn-uid", 2)
+			`"uid":"conn-uid","generation":2,"grantSequence":1,"mode":"readWrite"}]`)
+	bound, err := approvals.ConnectorTargetSpecDigest(tool.Spec, corev1alpha1.OutboundAccessPolicySpec{}, "conn-uid", 2, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2598,7 +2598,7 @@ func TestApprovalTargetSpecDigestUsesPlainSpecForConnectorBackedTools(t *testing
 		Output:      &corev1alpha1.OutboundCredentialOutput{Header: "X-Token"},
 	}}
 	connectorToolPolicies["gh_write"] = policy
-	withPolicy, err := approvals.ConnectorTargetSpecDigest(tool.Spec, policy, "conn-uid", 2)
+	withPolicy, err := approvals.ConnectorTargetSpecDigest(tool.Spec, policy, "conn-uid", 2, 1)
 	if err != nil {
 		t.Fatal(err)
 	}

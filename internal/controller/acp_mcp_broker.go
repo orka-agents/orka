@@ -148,7 +148,7 @@ func (e RegistryACPMCPToolExecutor) ConnectionDigest(ctx context.Context, reques
 	if e.Reader == nil {
 		return "", errors.New("connector digest resolution requires a reader")
 	}
-	infos, err := connectorToolsFor(ctx, e.Reader, request.Namespace, []string{descriptor.Name})
+	infos, err := connectorToolsFor(ctx, e.Reader, e.Registry, request.Namespace, []string{descriptor.Name})
 	if err != nil {
 		return "", fmt.Errorf("classify connector tool %q: %w", descriptor.Name, err)
 	}

@@ -2469,6 +2469,12 @@ spec:
                     generation:
                       format: int64
                       type: integer
+                    grantSequence:
+                      description: |-
+                        GrantSequence is the Connection's consent count when frozen; a
+                        re-link of the same object raises it and invalidates this binding.
+                      format: int64
+                      type: integer
                     mode:
                       description: Mode is the Connection mode at freeze time.
                       type: string
@@ -2485,6 +2491,7 @@ spec:
                   required:
                   - connectionName
                   - generation
+                  - grantSequence
                   - mode
                   - policyName
                   - provider

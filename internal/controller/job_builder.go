@@ -1173,7 +1173,7 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 	// build so dispatch retries: starting the worker with a connector write
 	// tool advertised but missing from the approval set would let it run
 	// without the promised approval.
-	visible, connectorWrite, err := FilterConnectorToolsForRequester(ctx, b.Client, task, cfg.tools)
+	visible, connectorWrite, err := FilterConnectorToolsForRequester(ctx, b.Client, tools.DefaultRegistry, task, cfg.tools)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrConnectorToolResolution, err)
 	}

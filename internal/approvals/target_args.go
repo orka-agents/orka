@@ -142,20 +142,21 @@ func URLUsesPlaceholder(customTool *corev1alpha1.Tool, key string) bool {
 // and the injection configuration as they were when the approval was
 // requested: a Job re-created after the decision against a re-linked account
 // or a changed policy produces a different digest and needs a fresh approval.
-func ConnectorTargetSpecDigest(spec corev1alpha1.ToolSpec, policy corev1alpha1.OutboundAccessPolicySpec, connectionUID string, connectionGeneration int64) (string, error) {
+func ConnectorTargetSpecDigest(spec corev1alpha1.ToolSpec, policy corev1alpha1.OutboundAccessPolicySpec, connectionUID string, connectionGeneration, grantSequence int64) (string, error) {
+	type connectionIdentity struct {
+		UID        string `json:"uid"`
+		Generation int64  `json:"generation"`
+		// GrantSequence binds the approval to one consent: a re-link of
+		// the same Connection object needs a fresh decision.
+		GrantSequence int64 `json:"grantSequence"`
+	}
 	return TargetSpecDigest(struct {
 		Spec       corev1alpha1.ToolSpec                 `json:"spec"`
 		Policy     corev1alpha1.OutboundAccessPolicySpec `json:"policy"`
-		Connection struct {
-			UID        string `json:"uid"`
-			Generation int64  `json:"generation"`
-		} `json:"connection"`
+		Connection connectionIdentity                    `json:"connection"`
 	}{
-		Spec:   spec,
-		Policy: policy,
-		Connection: struct {
-			UID        string `json:"uid"`
-			Generation int64  `json:"generation"`
-		}{UID: connectionUID, Generation: connectionGeneration},
+		Spec:       spec,
+		Policy:     policy,
+		Connection: connectionIdentity{UID: connectionUID, Generation: connectionGeneration, GrantSequence: grantSequence},
 	})
 }
