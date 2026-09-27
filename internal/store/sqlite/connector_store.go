@@ -121,6 +121,48 @@ func connectorCompletionAdditionalData(completion store.ConnectorCompletion) []b
 		completion.Namespace, completion.Name, completion.Provider, completion.Mode, completion.ExpiresAt.UTC().Unix())
 }
 
+// sealedConnectorCompletionPayload is a parked completion's sealed body: the
+// credential plus the committed marker, which is authenticated by the seal
+// so a plaintext column cannot flip a commit back into a fresh write.
+type sealedConnectorCompletionPayload struct {
+	sealedConnectorCredential
+	Committed bool `json:"committed,omitempty"`
+}
+
+func encodeSealedConnectorCompletionPayload(credential store.ConnectorCredential, committed bool) ([]byte, error) {
+	body, err := json.Marshal(sealedConnectorCompletionPayload{
+		sealedConnectorCredential: sealedConnectorCredential{
+			AccessToken:     credential.AccessToken,
+			RefreshToken:    credential.RefreshToken,
+			TokenType:       credential.TokenType,
+			ExpiresAt:       formatConnectorTime(credential.ExpiresAt),
+			Scopes:          credential.Scopes,
+			AuthorityDigest: credential.AuthorityDigest,
+		},
+		Committed: committed,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("encode connector completion: %w", err)
+	}
+	return body, nil
+}
+
+func decodeSealedConnectorCompletionPayload(body []byte) (store.ConnectorCredential, bool, error) {
+	var sealed sealedConnectorCompletionPayload
+	if err := json.Unmarshal(body, &sealed); err != nil {
+		return store.ConnectorCredential{}, false, fmt.Errorf("decode connector completion: %w", err)
+	}
+	inner, err := json.Marshal(sealed.sealedConnectorCredential)
+	if err != nil {
+		return store.ConnectorCredential{}, false, fmt.Errorf("decode connector completion: %w", err)
+	}
+	credential, err := decodeSealedConnectorCredential(inner)
+	if err != nil {
+		return store.ConnectorCredential{}, false, err
+	}
+	return credential, sealed.Committed, nil
+}
+
 func encodeSealedConnectorCredential(credential store.ConnectorCredential) ([]byte, error) {
 	body, err := json.Marshal(sealedConnectorCredential{
 		AccessToken:     credential.AccessToken,
@@ -175,8 +217,55 @@ func sealWithAEAD(aead cipher.AEAD, additionalData, body []byte) (nonce, ciphert
 	return nonce, aead.Seal(nil, nonce, body, additionalData), nil
 }
 
+// sealedConnectorRow is one credential sealed under a fresh data key.
+type sealedConnectorRow struct {
+	dekNonce, dekCiphertext, nonce, ciphertext []byte
+	expiresAt                                  any
+}
+
+// sealConnectorCredentialRow seals credential under a fresh per-row data key
+// bound to ref, and wraps that key with the snapshot key.
+func (s *Store) sealConnectorCredentialRow(ref store.ConnectorCredentialRef, credential store.ConnectorCredential) (sealedConnectorRow, error) {
+	body, err := encodeSealedConnectorCredential(credential)
+	if err != nil {
+		return sealedConnectorRow{}, err
+	}
+	dataKey := make([]byte, connectorDataKeyBytes)
+	if _, err := rand.Read(dataKey); err != nil {
+		return sealedConnectorRow{}, fmt.Errorf("generate connector data key: %w", err)
+	}
+	dataAEAD, err := newConnectorDataKeyAEAD(dataKey)
+	if err != nil {
+		return sealedConnectorRow{}, err
+	}
+	row := sealedConnectorRow{}
+	if row.nonce, row.ciphertext, err = sealWithAEAD(dataAEAD, connectorCredentialAdditionalData(ref), body); err != nil {
+		return sealedConnectorRow{}, err
+	}
+	if row.dekNonce, row.dekCiphertext, err = sealWithAEAD(s.snapshotCipher.aead, connectorDataKeyAdditionalData(ref.ConnectionUID), dataKey); err != nil {
+		return sealedConnectorRow{}, err
+	}
+	if !credential.ExpiresAt.IsZero() {
+		row.expiresAt = credential.ExpiresAt.UTC()
+	}
+	return row, nil
+}
+
 // PutConnectorCredential implements store.ConnectorCredentialStore.
 func (s *Store) PutConnectorCredential(ctx context.Context, ref store.ConnectorCredentialRef, credential store.ConnectorCredential) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin connector credential transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := s.putConnectorCredentialTx(ctx, tx, ref, credential); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// putConnectorCredentialTx seals and upserts custody inside tx.
+func (s *Store) putConnectorCredentialTx(ctx context.Context, tx *sql.Tx, ref store.ConnectorCredentialRef, credential store.ConnectorCredential) error {
 	if s.snapshotCipher == nil {
 		return errConnectorCipherRequired
 	}
@@ -186,36 +275,11 @@ func (s *Store) PutConnectorCredential(ctx context.Context, ref store.ConnectorC
 	if strings.TrimSpace(credential.AccessToken) == "" {
 		return errors.New("connector credential access token is required")
 	}
-	body, err := encodeSealedConnectorCredential(credential)
-	if err != nil {
-		return err
-	}
-	dataKey := make([]byte, connectorDataKeyBytes)
-	if _, err := rand.Read(dataKey); err != nil {
-		return fmt.Errorf("generate connector data key: %w", err)
-	}
-	dataAEAD, err := newConnectorDataKeyAEAD(dataKey)
-	if err != nil {
-		return err
-	}
-	nonce, ciphertext, err := sealWithAEAD(dataAEAD, connectorCredentialAdditionalData(ref), body)
-	if err != nil {
-		return err
-	}
-	dekNonce, dekCiphertext, err := sealWithAEAD(s.snapshotCipher.aead, connectorDataKeyAdditionalData(ref.ConnectionUID), dataKey)
+	row, err := s.sealConnectorCredentialRow(ref, credential)
 	if err != nil {
 		return err
 	}
 	now := time.Now().UTC()
-	var expiresAt any
-	if !credential.ExpiresAt.IsZero() {
-		expiresAt = credential.ExpiresAt.UTC()
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin connector credential transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
 	var tombstoned int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM connector_credential_tombstones WHERE connection_uid = ?`, ref.ConnectionUID).Scan(&tombstoned); err != nil {
 		return fmt.Errorf("check connector custody tombstone: %w", err)
@@ -238,9 +302,60 @@ func (s *Store) PutConnectorCredential(ctx context.Context, ref store.ConnectorC
 			expires_at = excluded.expires_at,
 			updated_at = excluded.updated_at`,
 		ref.ConnectionUID, ref.Namespace, ref.Name, ref.SubjectDigest, ref.Provider,
-		dekNonce, dekCiphertext, nonce, ciphertext, expiresAt, now, now)
+		row.dekNonce, row.dekCiphertext, row.nonce, row.ciphertext, row.expiresAt, now, now)
 	if err != nil {
 		return fmt.Errorf("persist connector credential: %w", err)
+	}
+	return nil
+}
+
+// CommitConnectorCompletion implements store.ConnectorConsentStore.
+func (s *Store) CommitConnectorCompletion(ctx context.Context, nonce string, ref store.ConnectorCredentialRef, credential store.ConnectorCredential) error {
+	if strings.TrimSpace(nonce) == "" {
+		return errors.New("connector completion nonce is required")
+	}
+	if s.snapshotCipher == nil {
+		return errConnectorCipherRequired
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin connector completion commit: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := s.putConnectorCredentialTx(ctx, tx, ref, credential); err != nil {
+		return err
+	}
+	// Re-seal the parked row with the committed marker inside the sealed
+	// body, bound to the same fence columns, so only a holder of the
+	// snapshot key can flip it.
+	var (
+		completion            store.ConnectorCompletion
+		payloadNonce, payload []byte
+	)
+	err = tx.QueryRowContext(ctx, `SELECT nonce, connection_uid, namespace, name, subject_digest, provider, mode,
+		payload_nonce, payload, expires_at FROM connector_completions WHERE nonce = ?`, nonce).
+		Scan(&completion.Nonce, &completion.ConnectionUID, &completion.Namespace, &completion.Name, &completion.SubjectDigest,
+			&completion.Provider, &completion.Mode, &payloadNonce, &payload, &completion.ExpiresAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return store.ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("read connector completion for commit: %w", err)
+	}
+	completion.ExpiresAt = completion.ExpiresAt.UTC()
+	if _, err := s.snapshotCipher.aead.Open(nil, payloadNonce, payload, connectorCompletionAdditionalData(completion)); err != nil {
+		return fmt.Errorf("open connector completion for commit: %w", err)
+	}
+	body, err := encodeSealedConnectorCompletionPayload(credential, true)
+	if err != nil {
+		return err
+	}
+	newNonce, newPayload, err := sealWithAEAD(s.snapshotCipher.aead, connectorCompletionAdditionalData(completion), body)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE connector_completions SET payload_nonce = ?, payload = ? WHERE nonce = ?`, newNonce, newPayload, nonce); err != nil {
+		return fmt.Errorf("mark connector completion committed: %w", err)
 	}
 	return tx.Commit()
 }
@@ -413,7 +528,7 @@ func (s *Store) CreateConnectorCompletion(ctx context.Context, completion store.
 	if completion.ExpiresAt.IsZero() {
 		return errors.New("connector completion expiry is required")
 	}
-	body, err := encodeSealedConnectorCredential(completion.Credential)
+	body, err := encodeSealedConnectorCompletionPayload(completion.Credential, false)
 	if err != nil {
 		return err
 	}
@@ -491,11 +606,12 @@ func (s *Store) ConsumeConnectorCompletion(ctx context.Context, nonce string) (s
 	if err != nil {
 		return store.ConnectorCompletion{}, fmt.Errorf("open connector completion: %w", err)
 	}
-	credential, err := decodeSealedConnectorCredential(body)
+	credential, committed, err := decodeSealedConnectorCompletionPayload(body)
 	if err != nil {
 		return store.ConnectorCompletion{}, err
 	}
 	completion.Credential = credential
+	completion.Committed = committed
 	return completion, nil
 }
 
@@ -571,11 +687,12 @@ func (s *Store) queryConnectorCompletions(ctx context.Context, where string, arg
 		if err != nil {
 			continue
 		}
-		credential, err := decodeSealedConnectorCredential(body)
+		credential, committed, err := decodeSealedConnectorCompletionPayload(body)
 		if err != nil {
 			continue
 		}
 		completion.Credential = credential
+		completion.Committed = committed
 		result = append(result, completion)
 	}
 	if err := rows.Err(); err != nil {

@@ -873,10 +873,26 @@ func (h *Handlers) CompleteConnection(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusConflict, "connection identity is incomplete")
 	}
-	if err := h.connectors.Credentials.PutConnectorCredential(ctx, ref, completion.Credential); err != nil {
+	if completion.Committed {
+		// A retry after the status write failed: custody was written by
+		// this completion. It resumes only if that material is still what
+		// custody holds; a newer completion that replaced it wins.
+		current, err := h.connectors.Credentials.GetConnectorCredential(ctx, ref)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return fiber.NewError(fiber.StatusInternalServerError, "failed to read custody; retry")
+		}
+		if err != nil || current.AccessToken != completion.Credential.AccessToken ||
+			current.RefreshToken != completion.Credential.RefreshToken || current.AuthorityDigest != completion.Credential.AuthorityDigest {
+			h.discardCompletion(ctx, completion, nonce)
+			return fiber.NewError(fiber.StatusConflict, "a newer completion replaced this one; nothing to resume")
+		}
+	} else if err := h.connectors.Consents.CommitConnectorCompletion(ctx, nonce, ref, completion.Credential); err != nil {
 		if errors.Is(err, store.ErrConnectorCustodyTombstoned) {
 			h.discardCompletion(ctx, completion, nonce)
 			return fiber.NewError(fiber.StatusConflict, "connection was disconnected; create it again")
+		}
+		if errors.Is(err, store.ErrNotFound) {
+			return fiber.NewError(fiber.StatusConflict, "completion token was already used or has expired")
 		}
 		log.Error(err, "connector credential could not be sealed", "connection", connection.Name)
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to store credential")
@@ -902,9 +918,6 @@ func (h *Handlers) discardCompletion(ctx context.Context, completion store.Conne
 		log.Error(err, "discarded completion could not be removed", "connection", completion.Name)
 	}
 }
-
-
-
 
 func oauthFailureReason(err error) string {
 	if oauthErr, ok := errors.AsType[*connectors.OAuthError](err); ok {

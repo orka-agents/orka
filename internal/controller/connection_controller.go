@@ -231,8 +231,6 @@ func (r *ConnectionReconciler) reapExpiredCompletions(ctx context.Context, conne
 	}
 }
 
-
-
 // revokeTokens revokes the refresh then access token of the committed
 // credential at the provider, best effort. The tokens are sent only to the
 // OAuth authority sealed with them: when the provider was replaced or its
@@ -282,7 +280,6 @@ func (r *ConnectionReconciler) revokeTokens(ctx context.Context, connection *cor
 		}
 	}
 }
-
 
 func (r *ConnectionReconciler) referenceReader() client.Reader {
 	if r.APIReader != nil {

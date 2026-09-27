@@ -63,6 +63,8 @@ type connectorTestHarness struct {
 	// records every token the fixture was asked to revoke.
 	grantScope string
 	revoked    []string
+	// tokenSuffix makes each exchange issue distinct token values.
+	tokenSuffix string
 	// contextTokenAuthorization, when set, enables scope enforcement.
 	contextTokenAuthorization ContextTokenAuthorizationConfig
 }
@@ -179,7 +181,7 @@ func buildConnectorTestHarness(t *testing.T, authz ContextTokenAuthorizationConf
 			scope = h.grantScope
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"access_token": "gho_secret_access", "refresh_token": "ghr_secret_refresh", "token_type": "bearer",
+			"access_token": "gho_secret_access" + h.tokenSuffix, "refresh_token": "ghr_secret_refresh" + h.tokenSuffix, "token_type": "bearer",
 			"expires_in": 3600, "scope": scope,
 		})
 	}))
@@ -1264,5 +1266,73 @@ func TestConnectionPartialGrantKeepsReissuedCommittedToken(t *testing.T) {
 	}
 	if len(h.revoked) != 0 {
 		t.Fatalf("re-issued committed tokens must not be revoked, revoked = %v", h.revoked)
+	}
+}
+
+// TestConnectionCompletionRetryDoesNotOverwriteNewerCommit covers a
+// completion that wrote custody but failed its status write, retried after a
+// newer completion committed different tokens: the retry must not write the
+// superseded tokens over the newer commit.
+func TestConnectionCompletionRetryDoesNotOverwriteNewerCommit(t *testing.T) {
+	h := newConnectorTestHarness(t, acceptedTestProvider())
+	var fail atomic.Bool
+	h.statusFailure = &fail
+	created := h.create("readOnly")
+	h.tokenSuffix = "-a"
+	completionA := completionFromLocation(t, h.consentAndCallback(created))
+	fail.Store(true)
+	if resp, raw := h.complete(created.Connection.Name, completionA); resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("first attempt = %d %s, want 500", resp.StatusCode, raw)
+	}
+	fail.Store(false)
+	// A second consent commits newer material while A is still retryable.
+	var reauthorized ConnectionAuthorizeResponse
+	if resp, raw := h.do(http.MethodPost, "/api/v1/connections/"+created.Connection.Name+"/authorize", nil); resp.StatusCode != http.StatusOK {
+		t.Fatalf("authorize = %d %s", resp.StatusCode, raw)
+	} else if err := json.Unmarshal(raw, &reauthorized); err != nil {
+		t.Fatal(err)
+	}
+	h.tokenSuffix = "-b"
+	completionB := completionFromLocation(t, h.consentAndCallback(reauthorized))
+	if resp, raw := h.complete(created.Connection.Name, completionB); resp.StatusCode != http.StatusOK {
+		t.Fatalf("newer completion = %d %s", resp.StatusCode, raw)
+	}
+	// Retrying A resumes nothing: custody now holds B.
+	if resp, raw := h.complete(created.Connection.Name, completionA); resp.StatusCode != http.StatusConflict || !strings.Contains(string(raw), "newer completion") {
+		t.Fatalf("stale retry = %d %s, want 409", resp.StatusCode, raw)
+	}
+	stored := &corev1alpha1.Connection{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: created.Connection.Name}, stored); err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := connectors.CredentialRef(stored)
+	credential, err := h.store.GetConnectorCredential(context.Background(), ref)
+	if err != nil || credential.AccessToken != "gho_secret_access-b" || credential.RefreshToken != "ghr_secret_refresh-b" {
+		t.Fatalf("custody = %+v err = %v, want the newer commit", credential, err)
+	}
+	if resp, _ := h.complete(created.Connection.Name, completionA); resp.StatusCode != http.StatusConflict {
+		t.Fatal("the stale completion must be discarded")
+	}
+	// A retry whose material is still current resumes the status update.
+	h.tokenSuffix = "-c"
+	if resp, raw := h.do(http.MethodPost, "/api/v1/connections/"+created.Connection.Name+"/authorize", nil); resp.StatusCode != http.StatusOK {
+		t.Fatalf("authorize = %d %s", resp.StatusCode, raw)
+	} else if err := json.Unmarshal(raw, &reauthorized); err != nil {
+		t.Fatal(err)
+	}
+	completionC := completionFromLocation(t, h.consentAndCallback(reauthorized))
+	fail.Store(true)
+	if resp, _ := h.complete(created.Connection.Name, completionC); resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("attempt C = %d, want 500", resp.StatusCode)
+	}
+	fail.Store(false)
+	if resp, raw := h.complete(created.Connection.Name, completionC); resp.StatusCode != http.StatusOK {
+		t.Fatalf("resumed retry = %d %s, want 200", resp.StatusCode, raw)
+	}
+	if resp, raw := h.do(http.MethodGet, "/api/v1/connections/"+created.Connection.Name, nil); resp.StatusCode != http.StatusOK || !strings.Contains(string(raw), `"ready":true`) {
+		t.Fatalf("resumed link = %d %s, want ready", resp.StatusCode, raw)
+	}
+	if credential, err := h.store.GetConnectorCredential(context.Background(), ref); err != nil || credential.AccessToken != "gho_secret_access-c" {
+		t.Fatalf("custody after resumed retry = %+v err = %v", credential, err)
 	}
 }

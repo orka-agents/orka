@@ -115,6 +115,11 @@ type ConnectorCompletion struct {
 	// AuthorityDigest of the OAuth client that issued them.
 	Credential ConnectorCredential
 	ExpiresAt  time.Time
+	// Committed is sealed into the parked payload atomically with the custody
+	// write, so a retry after a failed status update resumes that commit
+	// instead of writing the parked tokens again over a newer commit, and no
+	// plaintext column can flip it.
+	Committed bool
 }
 
 // ConnectorConsentStore holds pending consents and pending completions.
@@ -131,6 +136,11 @@ type ConnectorConsentStore interface {
 	// ConsumeConnectorCompletion atomically removes and returns the parked
 	// material for nonce, or ErrNotFound (also for expired entries).
 	ConsumeConnectorCompletion(ctx context.Context, nonce string) (ConnectorCompletion, error)
+	// CommitConnectorCompletion seals credential into custody for ref and
+	// marks the completion committed in one transaction. It fails with
+	// ErrConnectorCustodyTombstoned after a disconnect and ErrNotFound when
+	// the completion no longer exists.
+	CommitConnectorCompletion(ctx context.Context, nonce string, ref ConnectorCredentialRef, credential ConnectorCredential) error
 	// PeekConnectorCompletion returns the parked material for nonce without
 	// removing it, so a commit that fails after the credential write can be
 	// retried with the same token. Expired entries report ErrNotFound.

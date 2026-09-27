@@ -458,6 +458,10 @@ func (f *fakeConnectorCredentialStore) ConsumeConnectorCompletion(context.Contex
 	return store.ConnectorCompletion{}, store.ErrNotFound
 }
 
+func (f *fakeConnectorCredentialStore) CommitConnectorCompletion(ctx context.Context, _ string, ref store.ConnectorCredentialRef, credential store.ConnectorCredential) error {
+	return f.PutConnectorCredential(ctx, ref, credential)
+}
+
 func (f *fakeConnectorCredentialStore) PeekConnectorCompletion(context.Context, string) (store.ConnectorCompletion, error) {
 	return store.ConnectorCompletion{}, store.ErrNotFound
 }

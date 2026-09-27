@@ -433,3 +433,40 @@ func TestConnectorConsentAuthenticatesPlaintextColumns(t *testing.T) {
 		t.Fatal("a consent whose authority digest changed must not open")
 	}
 }
+
+func TestConnectorCompletionCommitMarksRowAtomically(t *testing.T) {
+	s := newConnectorTestStore(t)
+	ctx := context.Background()
+	completion := testConnectorCompletion()
+	if err := s.CreateConnectorCompletion(ctx, completion); err != nil {
+		t.Fatal(err)
+	}
+	ref := store.ConnectorCredentialRef{ConnectionUID: completion.ConnectionUID, Namespace: completion.Namespace, Name: completion.Name, SubjectDigest: completion.SubjectDigest, Provider: completion.Provider}
+	if err := s.CommitConnectorCompletion(ctx, completion.Nonce, ref, completion.Credential); err != nil {
+		t.Fatalf("CommitConnectorCompletion: %v", err)
+	}
+	peeked, err := s.PeekConnectorCompletion(ctx, completion.Nonce)
+	if err != nil || !peeked.Committed {
+		t.Fatalf("peek after commit = %+v err = %v, want committed", peeked, err)
+	}
+	held, err := s.GetConnectorCredential(ctx, ref)
+	if err != nil || held.AccessToken != "gho_parked" {
+		t.Fatalf("custody after commit = %+v err = %v", held, err)
+	}
+	if err := s.CommitConnectorCompletion(ctx, "missing", ref, completion.Credential); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("commit of a missing completion err = %v, want ErrNotFound", err)
+	}
+	// A missing completion leaves custody untouched: the transaction rolled back.
+	if held, err := s.GetConnectorCredential(ctx, ref); err != nil || held.AccessToken != "gho_parked" {
+		t.Fatalf("custody after rolled-back commit = %+v err = %v", held, err)
+	}
+	// The committed marker lives inside the sealed body: the row has no
+	// plaintext column to flip, and the re-sealed payload still opens only
+	// against its fence columns.
+	if _, err := s.db.Exec(`UPDATE connector_completions SET mode = 'readWrite' WHERE nonce = ?`, completion.Nonce); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PeekConnectorCompletion(ctx, completion.Nonce); err == nil {
+		t.Fatal("a committed completion whose fence column changed must not open")
+	}
+}
