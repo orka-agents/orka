@@ -318,33 +318,7 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 	// meanwhile wins, and its material is returned instead.
 	switch err := s.Credentials.ReplaceConnectorCredential(ctx, ref, refreshed, current.Version); {
 	case errors.Is(err, store.ErrConflict):
-		// A consent won the race. Its material is released only if it is
-		// not itself about to expire; otherwise this call fails and the
-		// next one refreshes the winner as any resolution would. The pair
-		// this refresh obtained cannot be stored and derives from this
-		// Connection's own committed grant, so it is revoked rather than
-		// left live outside custody.
-		winner, err := s.Credentials.GetConnectorCredential(ctx, ref)
-		if err != nil {
-			return store.ConnectorCredential{}, err
-		}
-		// Only material the winner does not hold is revoked: a provider
-		// that kept the refresh token across both exchanges shares it with
-		// the winning row, and revoking it would kill the winner's grant.
-		losing := refreshed
-		if losing.RefreshToken == winner.RefreshToken {
-			losing.RefreshToken = ""
-		}
-		if losing.AccessToken == winner.AccessToken {
-			losing.AccessToken = ""
-		}
-		if losing.RefreshToken != "" || losing.AccessToken != "" {
-			s.revokeUnstorable(ctx, cfg, losing, logger)
-		}
-		if s.needsRefresh(winner) {
-			return store.ConnectorCredential{}, errors.New("connection credential changed concurrently and is about to expire; retry")
-		}
-		return winner, nil
+		return s.refreshLostToConsent(ctx, cfg, ref, refreshed, logger)
 	case errors.Is(err, store.ErrConnectorCustodyTombstoned), errors.Is(err, store.ErrNotFound):
 		// Disconnect fenced custody while the provider was rotating the
 		// material. The rotated pair derives from this Connection's own
@@ -606,4 +580,34 @@ func frozenGrantHolds(req outboundaccess.ConnectionCredentialRequest, credential
 		return errors.New("connection was re-linked since the task was dispatched; re-dispatch to use it")
 	}
 	return nil
+}
+
+// refreshLostToConsent handles a refresh whose store write lost to a consent
+// that committed meanwhile. The winner's material is released only if it
+// is not itself about to expire; otherwise this call fails and the next one
+// refreshes the winner as any resolution would. The pair this refresh
+// obtained cannot be stored and derives from this Connection's own
+// committed grant, so it is revoked rather than left live outside custody;
+// only material the winner does not hold is revoked, because a provider that
+// kept the refresh token across both exchanges shares it with the winning
+// row, and revoking it would kill the winner's grant.
+func (s *Source) refreshLostToConsent(ctx context.Context, cfg connectors.OAuthProviderConfig, ref store.ConnectorCredentialRef, refreshed store.ConnectorCredential, logger logr.Logger) (store.ConnectorCredential, error) {
+	winner, err := s.Credentials.GetConnectorCredential(ctx, ref)
+	if err != nil {
+		return store.ConnectorCredential{}, err
+	}
+	losing := refreshed
+	if losing.RefreshToken == winner.RefreshToken {
+		losing.RefreshToken = ""
+	}
+	if losing.AccessToken == winner.AccessToken {
+		losing.AccessToken = ""
+	}
+	if losing.RefreshToken != "" || losing.AccessToken != "" {
+		s.revokeUnstorable(ctx, cfg, losing, logger)
+	}
+	if s.needsRefresh(winner) {
+		return store.ConnectorCredential{}, errors.New("connection credential changed concurrently and is about to expire; retry")
+	}
+	return winner, nil
 }
