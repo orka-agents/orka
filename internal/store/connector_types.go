@@ -63,6 +63,10 @@ type ConnectorCredential struct {
 	// always know which client the material belongs to regardless of
 	// Connection status or later tool changes.
 	AuthorityDigest string
+	// RevocationDigest is the provider revocation digest (client and
+	// revocation endpoint, without the token endpoint) the material can be
+	// revoked against; see connectors.ProviderRevocationDigest.
+	RevocationDigest string
 	// GrantSequence identifies the consent that produced this material. The
 	// store assigns it when a grant is committed (never on a refresh, which
 	// carries the current grant forward), it rises monotonically for the

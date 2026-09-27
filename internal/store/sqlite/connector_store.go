@@ -115,6 +115,12 @@ type sealedConnectorCredential struct {
 	ExpiresAt       string   `json:"expiresAt,omitempty"`
 	Scopes          []string `json:"scopes,omitempty"`
 	AuthorityDigest string   `json:"authorityDigest,omitempty"`
+	// RevocationDigest travels sealed so a retired row and a parked
+	// completion keep the authority they can be revoked against.
+	RevocationDigest string `json:"revocationDigest,omitempty"`
+	// GrantSequence is also a plain column on custody rows (which wins on
+	// read); sealed here so a committed completion carries its grant.
+	GrantSequence int64 `json:"grantSequence,omitempty"`
 }
 
 func connectorDataKeyAdditionalData(connectionUID string) []byte {
@@ -168,7 +174,7 @@ func encodeSealedConnectorCompletionPayload(credential store.ConnectorCredential
 			TokenType:       credential.TokenType,
 			ExpiresAt:       formatConnectorTime(credential.ExpiresAt),
 			Scopes:          credential.Scopes,
-			AuthorityDigest: credential.AuthorityDigest,
+			AuthorityDigest: credential.AuthorityDigest, RevocationDigest: credential.RevocationDigest, GrantSequence: credential.GrantSequence,
 		},
 		ConsentAuthorityDigest: fields.ConsentAuthorityDigest,
 		Committed:              fields.Committed,
@@ -197,12 +203,14 @@ func decodeSealedConnectorCompletionPayload(body []byte) (store.ConnectorCredent
 
 func encodeSealedConnectorCredential(credential store.ConnectorCredential) ([]byte, error) {
 	body, err := json.Marshal(sealedConnectorCredential{
-		AccessToken:     credential.AccessToken,
-		RefreshToken:    credential.RefreshToken,
-		TokenType:       credential.TokenType,
-		ExpiresAt:       formatConnectorTime(credential.ExpiresAt),
-		Scopes:          credential.Scopes,
-		AuthorityDigest: credential.AuthorityDigest,
+		AccessToken:      credential.AccessToken,
+		RefreshToken:     credential.RefreshToken,
+		TokenType:        credential.TokenType,
+		ExpiresAt:        formatConnectorTime(credential.ExpiresAt),
+		Scopes:           credential.Scopes,
+		AuthorityDigest:  credential.AuthorityDigest,
+		RevocationDigest: credential.RevocationDigest,
+		GrantSequence:    credential.GrantSequence,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("encode connector credential: %w", err)
@@ -220,12 +228,14 @@ func decodeSealedConnectorCredential(body []byte) (store.ConnectorCredential, er
 		return store.ConnectorCredential{}, fmt.Errorf("decode connector credential expiry: %w", err)
 	}
 	return store.ConnectorCredential{
-		AccessToken:     sealed.AccessToken,
-		RefreshToken:    sealed.RefreshToken,
-		TokenType:       sealed.TokenType,
-		ExpiresAt:       expiresAt,
-		Scopes:          sealed.Scopes,
-		AuthorityDigest: sealed.AuthorityDigest,
+		AccessToken:      sealed.AccessToken,
+		RefreshToken:     sealed.RefreshToken,
+		TokenType:        sealed.TokenType,
+		ExpiresAt:        expiresAt,
+		Scopes:           sealed.Scopes,
+		AuthorityDigest:  sealed.AuthorityDigest,
+		RevocationDigest: sealed.RevocationDigest,
+		GrantSequence:    sealed.GrantSequence,
 	}, nil
 }
 
@@ -764,6 +774,11 @@ func (s *Store) CreateConnectorConsent(ctx context.Context, consent store.Connec
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `DELETE FROM connector_consents WHERE expires_at < ?`, now); err != nil {
 		return fmt.Errorf("purge expired connector consents: %w", err)
+	}
+	// One pending consent per Connection: a new authorize replaces any
+	// earlier one, so repeated calls cannot grow the table within the TTL.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM connector_consents WHERE connection_uid = ?`, consent.ConnectionUID); err != nil {
+		return fmt.Errorf("replace pending connector consents: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO connector_consents
 		(nonce, connection_uid, namespace, name, subject_digest, provider, mode, verifier_nonce, verifier_ciphertext, authority_digest, scopes, expires_at, created_at)
