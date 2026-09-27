@@ -79,6 +79,10 @@ type ConnectorCredentialStore interface {
 	// ListRetiredConnectorCredentials opens the committed credentials a later
 	// commit replaced. They stay sealed until disconnect revokes them.
 	ListRetiredConnectorCredentials(ctx context.Context, ref ConnectorCredentialRef) ([]ConnectorCredential, error)
+	// TombstoneConnectorCustody fences the UID before its material is read
+	// for revocation: later commits fail with ErrConnectorCustodyTombstoned
+	// while the rows stay readable until DeleteConnectorCredential.
+	TombstoneConnectorCustody(ctx context.Context, connectionUID string) error
 	// DeleteConnectorCredential removes the row and its wrapped key and
 	// tombstones the UID so later writes fail with
 	// ErrConnectorCustodyTombstoned. Missing rows succeed.

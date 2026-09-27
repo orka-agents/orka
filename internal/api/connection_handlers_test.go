@@ -24,9 +24,11 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -63,6 +65,23 @@ type connectorTestHarness struct {
 	// records every token the fixture was asked to revoke.
 	grantScope string
 	revoked    []string
+	// omitScope leaves the scope field out of the token response entirely,
+	// which RFC 6749 reads as "as requested"; grantScope " " is an explicit
+	// empty grant instead.
+	omitScope bool
+	// omitRefreshToken issues an access token only; expiresIn overrides the
+	// fixture lifetime.
+	omitRefreshToken bool
+	expiresIn        int
+	// now is the handlers' clock.
+	now time.Time
+	// createConflict makes the next Connection create report AlreadyExists
+	// after the object was created, as a concurrent request would.
+	createConflict *atomic.Bool
+	// statusConflictOnce makes the next Connection status update fail with a
+	// conflict after applying a concurrent mode change to the stored object.
+	statusConflictOnce *atomic.Bool
+	statusConflictMode string
 	// tokenSuffix makes each exchange issue distinct token values.
 	tokenSuffix string
 	// contextTokenAuthorization, when set, enables scope enforcement.
@@ -129,6 +148,19 @@ func buildConnectorTestHarness(t *testing.T, authz ContextTokenAuthorizationConf
 				if harness.statusFailure != nil && harness.statusFailure.Load() {
 					return errors.New("transient status failure")
 				}
+				if connection, ok := obj.(*corev1alpha1.Connection); ok && harness.statusConflictOnce != nil && harness.statusConflictOnce.Swap(false) {
+					// A PUT moved the mode between the completion fence and
+					// this status write.
+					stored := &corev1alpha1.Connection{}
+					if err := c.Get(ctx, client.ObjectKeyFromObject(connection), stored); err != nil {
+						return err
+					}
+					stored.Spec.Mode = harness.statusConflictMode
+					if err := c.Update(ctx, stored); err != nil {
+						return err
+					}
+					return apierrors.NewConflict(schema.GroupResource{Group: corev1alpha1.GroupVersion.Group, Resource: "connections"}, connection.Name, errors.New("the object has been modified"))
+				}
 				return c.SubResource(subResource).Update(ctx, obj, opts...)
 			},
 			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
@@ -139,7 +171,13 @@ func buildConnectorTestHarness(t *testing.T, authz ContextTokenAuthorizationConf
 					// Model a Connection created outside the API, before the controller protects it.
 					obj.SetFinalizers(nil)
 				}
-				return c.Create(ctx, obj, opts...)
+				if err := c.Create(ctx, obj, opts...); err != nil {
+					return err
+				}
+				if _, isConnection := obj.(*corev1alpha1.Connection); isConnection && harness.createConflict != nil && harness.createConflict.Swap(false) {
+					return apierrors.NewAlreadyExists(schema.GroupResource{Group: corev1alpha1.GroupVersion.Group, Resource: "connections"}, obj.GetName())
+				}
+				return nil
 			},
 		}).Build()
 
@@ -180,10 +218,21 @@ func buildConnectorTestHarness(t *testing.T, authz ContextTokenAuthorizationConf
 		if h.grantScope != "" {
 			scope = h.grantScope
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		expiresIn := 3600
+		if h.expiresIn != 0 {
+			expiresIn = h.expiresIn
+		}
+		payload := map[string]any{
 			"access_token": "gho_secret_access" + h.tokenSuffix, "refresh_token": "ghr_secret_refresh" + h.tokenSuffix, "token_type": "bearer",
-			"expires_in": 3600, "scope": scope,
-		})
+			"expires_in": expiresIn, "scope": scope,
+		}
+		if h.omitScope {
+			delete(payload, "scope")
+		}
+		if h.omitRefreshToken {
+			delete(payload, "refresh_token")
+		}
+		_ = json.NewEncoder(w).Encode(payload)
 	}))
 	t.Cleanup(h.oauth.Close)
 	addr := h.oauth.Listener.Addr().String()
@@ -209,6 +258,12 @@ func buildConnectorTestHarness(t *testing.T, authz ContextTokenAuthorizationConf
 			Credentials:     sqliteStore,
 			Consents:        sqliteStore,
 			OAuth:           oauthClient,
+			Now: func() time.Time {
+				if h.now.IsZero() {
+					return time.Now()
+				}
+				return h.now
+			},
 		},
 	})
 	h.identity = &UserInfo{AuthType: AuthTypeOIDC, Username: "alice", Subject: "alice", Issuer: connectorTestIssuer, Namespace: connectorTestNamespace}
@@ -1022,11 +1077,19 @@ func TestConnectionCallbackRefusesPartialScopeGrants(t *testing.T) {
 		t.Fatalf("a refused partial grant must not revoke tokens nobody committed, revoked = %v", h.revoked)
 	}
 
-	// A provider that reports no scopes is taken at its word.
+	// An explicitly empty scope is a grant of nothing, not "as requested".
+	h.grantScope = " "
+	created = h.create("readWrite")
+	location = h.consentAndCallback(created)
+	if !strings.Contains(location, "reason=scopes_denied") {
+		t.Fatalf("explicit empty grant location = %q", location)
+	}
+
+	// A provider that omits the scope field granted what was requested.
 	h.grantScope = ""
+	h.omitScope = true
 	h.revoked = nil
 	created = h.create("readWrite")
-	h.grantScope = " "
 	location = h.consentAndCallback(created)
 	if !strings.Contains(location, "status=pending") {
 		t.Fatalf("no-scope grant location = %q", location)
@@ -1381,7 +1444,7 @@ func TestConnectionOmittedScopeBindsToConsentRequest(t *testing.T) {
 	if err := h.client.Update(context.Background(), provider); err != nil {
 		t.Fatal(err)
 	}
-	h.grantScope = " "
+	h.omitScope = true
 	location := h.consentAndCallback(created)
 	if resp, raw := h.complete(created.Connection.Name, completionFromLocation(t, location)); resp.StatusCode != http.StatusOK {
 		t.Fatalf("complete = %d %s", resp.StatusCode, raw)
@@ -1500,5 +1563,95 @@ func TestConnectionCreateWideningReusedLinkReportsPending(t *testing.T) {
 	resp, raw = h.do(http.MethodPost, "/api/v1/connections", map[string]string{"provider": "github", "mode": "readOnly"})
 	if resp.StatusCode != http.StatusCreated || !strings.Contains(string(raw), `"ready":true`) {
 		t.Fatalf("same-mode create = %d %s, want the current ready view", resp.StatusCode, raw)
+	}
+}
+
+func TestConnectionCreateReusesConcurrentlyCreatedConnection(t *testing.T) {
+	h := newConnectorTestHarness(t, acceptedTestProvider())
+	h.createConflict = &atomic.Bool{}
+	h.createConflict.Store(true)
+	// The create races another request for the same identity and provider:
+	// the object exists by the time this create is answered, and this
+	// request reuses it under the ordinary ownership checks.
+	created := h.create("readOnly")
+	if created.AuthorizeURL == "" || created.Connection.Name != connectors.ConnectionName("github", connectorTestIssuer, "alice") {
+		t.Fatalf("created = %+v", created)
+	}
+	stored := &corev1alpha1.Connection{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: created.Connection.Name}, stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.Labels[ConnectionSubjectDigestLabel] == "" {
+		t.Fatalf("reused connection labels = %v", stored.Labels)
+	}
+	// Another identity's object is still refused.
+	h.identity.Subject = "mallory"
+	h.createConflict.Store(true)
+	if resp, raw := h.do(http.MethodPost, "/api/v1/connections", map[string]string{"provider": "github", "mode": "readOnly"}); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("mallory's own connection = %d %s", resp.StatusCode, raw)
+	}
+}
+
+func TestConnectionCompleteRefusesExpiredTokenWithoutRefresh(t *testing.T) {
+	h := newConnectorTestHarness(t, acceptedTestProvider())
+	h.omitRefreshToken = true
+	h.expiresIn = 60
+	h.now = time.Now()
+	created := h.create("readOnly")
+	location := h.consentAndCallback(created)
+	completion := completionFromLocation(t, location)
+	// The browser held the completion past the token's lifetime: a link
+	// that could never authenticate is not committed as Ready.
+	h.now = h.now.Add(2 * time.Minute)
+	resp, raw := h.complete(created.Connection.Name, completion)
+	if resp.StatusCode != http.StatusConflict || !strings.Contains(string(raw), "expired before completion") {
+		t.Fatalf("complete = %d %s", resp.StatusCode, raw)
+	}
+	stored := &corev1alpha1.Connection{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: created.Connection.Name}, stored); err != nil {
+		t.Fatal(err)
+	}
+	if connectors.ConnectionLinked(stored) {
+		t.Fatal("an expired grant must not link the connection")
+	}
+	ref, _ := connectors.CredentialRef(stored)
+	if _, err := h.store.GetConnectorCredential(context.Background(), ref); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("custody err = %v, want nothing committed", err)
+	}
+	// The completion is gone; a retry cannot commit it later.
+	if resp, _ := h.complete(created.Connection.Name, completion); resp.StatusCode == http.StatusOK {
+		t.Fatal("a discarded completion must not commit on retry")
+	}
+}
+
+func TestConnectionCompleteRejudgesLinkAfterConcurrentModeChange(t *testing.T) {
+	h := newConnectorTestHarness(t, acceptedTestProvider())
+	h.grantScope = "read:user"
+	created := h.create("readOnly")
+	location := h.consentAndCallback(created)
+	// Between the completion fence and the status write a PUT widened the
+	// mode. Custody now holds the read-only grant, so the link is judged
+	// against the new mode from the committed material rather than left
+	// describing a grant custody no longer holds.
+	h.statusConflictOnce = &atomic.Bool{}
+	h.statusConflictOnce.Store(true)
+	h.statusConflictMode = corev1alpha1.ConnectionModeReadWrite
+	resp, raw := h.complete(created.Connection.Name, completionFromLocation(t, location))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("complete = %d %s", resp.StatusCode, raw)
+	}
+	stored := &corev1alpha1.Connection{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: created.Connection.Name}, stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.Spec.Mode != corev1alpha1.ConnectionModeReadWrite || strings.Join(stored.Status.GrantedScopes, " ") != "read:user" {
+		t.Fatalf("stored = mode %q scopes %v", stored.Spec.Mode, stored.Status.GrantedScopes)
+	}
+	if connectors.ConnectionLinked(stored) || stored.Status.State != corev1alpha1.ConnectionStatePending {
+		t.Fatalf("a read-only grant must not satisfy the widened mode: state %q conditions %+v", stored.Status.State, stored.Status.Conditions)
+	}
+	ref, _ := connectors.CredentialRef(stored)
+	if held, err := h.store.GetConnectorCredential(context.Background(), ref); err != nil || strings.Join(held.Scopes, " ") != "read:user" {
+		t.Fatalf("custody = %+v err = %v", held, err)
 	}
 }

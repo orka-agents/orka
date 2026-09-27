@@ -91,6 +91,10 @@ type TokenResponse struct {
 	// ExpiresAt is zero when the provider reported no expires_in.
 	ExpiresAt time.Time
 	Scopes    []string
+	// ScopePresent reports whether the response carried a scope field at
+	// all. An omitted field means "as requested" (RFC 6749 §5.1); an
+	// explicitly empty one is a grant of nothing.
+	ScopePresent bool
 }
 
 // OAuthError is a provider rejection. It carries only the HTTP status and a
@@ -281,7 +285,7 @@ func (c *OAuthClient) tokenRequest(ctx context.Context, cfg OAuthProviderConfig,
 		RefreshToken string          `json:"refresh_token"`
 		TokenType    string          `json:"token_type"`
 		ExpiresIn    json.RawMessage `json:"expires_in"`
-		Scope        string          `json:"scope"`
+		Scope        *string         `json:"scope"`
 		Error        string          `json:"error"`
 	}
 	decodeErr := json.Unmarshal(body, &payload)
@@ -307,7 +311,10 @@ func (c *OAuthClient) tokenRequest(ctx context.Context, cfg OAuthProviderConfig,
 		AccessToken:  payload.AccessToken,
 		RefreshToken: payload.RefreshToken,
 		TokenType:    payload.TokenType,
-		Scopes:       splitScopes(payload.Scope),
+		ScopePresent: payload.Scope != nil,
+	}
+	if payload.Scope != nil {
+		result.Scopes = splitScopes(*payload.Scope)
 	}
 	seconds, present, err := parseExpiresIn(payload.ExpiresIn)
 	if err != nil {
@@ -379,6 +386,12 @@ func splitScopes(raw string) []string {
 	if raw == "" {
 		return nil
 	}
+	// RFC 6749 scope lists are space-delimited, but GitHub reports the
+	// granted scopes comma-delimited in its JSON token response
+	// ("repo,gist"). Both delimiters are accepted. This cannot fabricate a
+	// grant: Orka's own scope grammar refuses commas inside a configured
+	// scope name (validScopeToken), so no required scope can be produced by
+	// splitting a comma-bearing token the provider issued as one.
 	fields := strings.FieldsFunc(raw, func(r rune) bool { return r == ' ' || r == ',' })
 	result := make([]string, 0, len(fields))
 	for _, field := range fields {

@@ -379,13 +379,19 @@ func validClientID(clientID string) bool {
 
 // validScopeToken applies the RFC 6749 scope-token grammar: one or more bytes
 // in %x21 / %x23-5B / %x5D-7E, which excludes whitespace, quotes, backslashes,
-// control bytes, and non-ASCII text.
+// control bytes, and non-ASCII text. A comma, though RFC-legal inside a
+// token, is refused as well: GitHub delimits granted scopes with commas in
+// its token response, and a configured scope that contained one could be
+// fabricated by splitting a single scope the provider issued.
 func validScopeToken(scope string) bool {
 	if scope == "" {
 		return false
 	}
 	for i := 0; i < len(scope); i++ {
 		b := scope[i]
+		if b == ',' {
+			return false
+		}
 		if b == 0x21 || (b >= 0x23 && b <= 0x5B) || (b >= 0x5D && b <= 0x7E) {
 			continue
 		}

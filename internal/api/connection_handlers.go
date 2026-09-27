@@ -427,8 +427,7 @@ func (h *Handlers) CreateConnection(c fiber.Ctx) error {
 	name := connectors.ConnectionName(provider.Name, ui.Issuer, ui.Subject)
 	connection := &corev1alpha1.Connection{}
 	err = h.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, connection)
-	switch {
-	case apierrors.IsNotFound(err):
+	if apierrors.IsNotFound(err) {
 		connection = &corev1alpha1.Connection{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      name,
@@ -447,9 +446,20 @@ func (h *Handlers) CreateConnection(c fiber.Ctx) error {
 				Mode:        mode,
 			},
 		}
-		if err := h.client.Create(ctx, connection); err != nil {
+		err = h.client.Create(ctx, connection)
+		if apierrors.IsAlreadyExists(err) {
+			// A concurrent request for the same identity and provider created
+			// it first; this one reuses it under the same ownership checks.
+			connection = &corev1alpha1.Connection{}
+			err = h.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, connection)
+		} else if err != nil {
 			return fiber.NewError(fiber.StatusInternalServerError, "failed to create connection")
+		} else {
+			err = errConnectionCreated
 		}
+	}
+	switch {
+	case errors.Is(err, errConnectionCreated):
 	case err != nil:
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to read connection")
 	case !connectionOwnedBy(connection, ui):
@@ -492,6 +502,10 @@ func (h *Handlers) CreateConnection(c fiber.Ctx) error {
 	}
 	return c.Status(fiber.StatusCreated).JSON(response)
 }
+
+// errConnectionCreated marks a Connection this request created itself, so
+// the reuse checks are skipped.
+var errConnectionCreated = errors.New("connection created")
 
 // markConsentPending projects a link as unusable while consent for mode is
 // outstanding, regardless of controller conditions that have not observed
@@ -784,12 +798,12 @@ func (h *Handlers) ConnectionCallback(c fiber.Ctx) error {
 	// taken at its word for the requested set.
 	// The requested set is the one sealed with the consent, never the
 	// provider's current configuration: a provider expanded after consent
-	// started must not be credited with scopes the token never received.
+	// started must not be credited with scopes the token never received,
+	// and a consent that legitimately requested no scopes stays empty.
+	// Only an omitted scope field means "as requested"; an explicitly
+	// empty one is a grant of nothing.
 	required := consent.Scopes
-	if len(required) == 0 {
-		required = connectors.ScopesForMode(provider, consent.Mode)
-	}
-	if len(token.Scopes) == 0 {
+	if !token.ScopePresent {
 		token.Scopes = append([]string(nil), required...)
 	} else if !connectors.ScopesCover(token.Scopes, required) {
 		// The issued material is dropped, never revoked: Orka cannot prove
@@ -902,6 +916,14 @@ func (h *Handlers) CompleteConnection(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusConflict, "connection identity is incomplete")
 	}
+	// A short-lived token without a refresh token that expired while the
+	// browser held the completion can never authenticate; committing it
+	// would advertise a Ready link nothing can use.
+	if completion.Credential.RefreshToken == "" && !completion.Credential.ExpiresAt.IsZero() &&
+		!completion.Credential.ExpiresAt.After(h.connectors.now()) {
+		h.discardCompletion(ctx, completion, nonce)
+		return fiber.NewError(fiber.StatusConflict, "the granted token expired before completion; start consent again")
+	}
 	if completion.Committed {
 		// A retry after the status write failed: custody was written by
 		// this completion. It resumes only if that material is still what
@@ -977,8 +999,30 @@ func oauthFailureReason(err error) string {
 }
 
 // markConnectionLinked records the successful consent on the Connection,
-// including the provider OAuth client it was granted against.
+// including the provider OAuth client it was granted against. Custody was
+// already replaced, so a Connection that changed meanwhile (a PUT that moved
+// the mode, a reconciler status pass) is re-read and judged again against
+// the committed material rather than left describing a grant custody no
+// longer holds.
 func (h *Handlers) markConnectionLinked(ctx context.Context, connection *corev1alpha1.Connection, provider *corev1alpha1.ConnectorProvider, credential store.ConnectorCredential) error {
+	const maxAttempts = 4
+	for attempt := 1; ; attempt++ {
+		err := h.applyConnectionLinked(ctx, connection, provider, credential)
+		if err == nil || !apierrors.IsConflict(err) || attempt >= maxAttempts {
+			return err
+		}
+		fresh := &corev1alpha1.Connection{}
+		if getErr := h.client.Get(ctx, client.ObjectKeyFromObject(connection), fresh); getErr != nil {
+			return getErr
+		}
+		if fresh.UID != connection.UID || !fresh.DeletionTimestamp.IsZero() {
+			return err
+		}
+		*connection = *fresh
+	}
+}
+
+func (h *Handlers) applyConnectionLinked(ctx context.Context, connection *corev1alpha1.Connection, provider *corev1alpha1.ConnectorProvider, credential store.ConnectorCredential) error {
 	now := metav1.NewTime(h.connectors.now().UTC())
 	mode, _ := normalizeConnectionMode(connection.Spec.Mode)
 	connection.Status.State = corev1alpha1.ConnectionStateReady

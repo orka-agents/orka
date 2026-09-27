@@ -475,6 +475,18 @@ func (s *Store) ListRetiredConnectorCredentials(ctx context.Context, ref store.C
 	return result, rows.Err()
 }
 
+// TombstoneConnectorCustody implements store.ConnectorCredentialStore.
+func (s *Store) TombstoneConnectorCustody(ctx context.Context, connectionUID string) error {
+	if strings.TrimSpace(connectionUID) == "" {
+		return errors.New("connector credential connection UID is required")
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO connector_credential_tombstones (connection_uid, deleted_at) VALUES (?, ?)
+		ON CONFLICT(connection_uid) DO NOTHING`, connectionUID, time.Now().UTC()); err != nil {
+		return fmt.Errorf("tombstone connector custody: %w", err)
+	}
+	return nil
+}
+
 // DeleteConnectorCredential implements store.ConnectorCredentialStore.
 func (s *Store) DeleteConnectorCredential(ctx context.Context, connectionUID string) error {
 	if strings.TrimSpace(connectionUID) == "" {

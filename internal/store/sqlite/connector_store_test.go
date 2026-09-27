@@ -502,3 +502,35 @@ func TestConnectorCommitRetiresReplacedCredential(t *testing.T) {
 		t.Fatalf("retired after disconnect = %+v err = %v, want none", retired, err)
 	}
 }
+
+func TestConnectorTombstoneFencesCommitsBeforeDeletion(t *testing.T) {
+	s := newConnectorTestStore(t)
+	ctx := context.Background()
+	completion := testConnectorCompletion()
+	ref := store.ConnectorCredentialRef{ConnectionUID: completion.ConnectionUID, Namespace: completion.Namespace, Name: completion.Name, SubjectDigest: completion.SubjectDigest, Provider: completion.Provider}
+	if err := s.PutConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho_a", RefreshToken: "ghr_a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateConnectorCompletion(ctx, completion); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.TombstoneConnectorCustody(ctx, ref.ConnectionUID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.TombstoneConnectorCustody(ctx, ref.ConnectionUID); err != nil {
+		t.Fatalf("tombstoning twice must be idempotent: %v", err)
+	}
+	// The material stays readable for revocation while new commits fail.
+	if held, err := s.GetConnectorCredential(ctx, ref); err != nil || held.AccessToken != "gho_a" {
+		t.Fatalf("custody after tombstone = %+v err = %v", held, err)
+	}
+	if err := s.CommitConnectorCompletion(ctx, completion.Nonce, ref, completion.Credential); !errors.Is(err, store.ErrConnectorCustodyTombstoned) {
+		t.Fatalf("commit after tombstone err = %v, want ErrConnectorCustodyTombstoned", err)
+	}
+	if err := s.DeleteConnectorCredential(ctx, ref.ConnectionUID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetConnectorCredential(ctx, ref); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("custody after delete err = %v, want ErrNotFound", err)
+	}
+}

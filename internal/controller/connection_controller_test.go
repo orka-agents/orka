@@ -414,6 +414,7 @@ type fakeConnectorCredentialStore struct {
 	consents           map[string]int
 	parked             map[string][]store.ConnectorCompletion
 	deleted            []string
+	tombstoned         []string
 	deletedCompletions []string
 }
 
@@ -438,6 +439,11 @@ func (f *fakeConnectorCredentialStore) GetConnectorCredential(_ context.Context,
 
 func (f *fakeConnectorCredentialStore) ListRetiredConnectorCredentials(_ context.Context, ref store.ConnectorCredentialRef) ([]store.ConnectorCredential, error) {
 	return append([]store.ConnectorCredential(nil), f.retired[ref.ConnectionUID]...), nil
+}
+
+func (f *fakeConnectorCredentialStore) TombstoneConnectorCustody(_ context.Context, connectionUID string) error {
+	f.tombstoned = append(f.tombstoned, connectionUID)
+	return nil
 }
 
 func (f *fakeConnectorCredentialStore) DeleteConnectorCredential(_ context.Context, connectionUID string) error {
@@ -498,9 +504,17 @@ func (f *fakeConnectorCredentialStore) DeleteConnectorConsentsForConnection(_ co
 type fakeConnectorRevoker struct {
 	tokens []string
 	err    error
+	// custody, when set, records whether the UID was already tombstoned
+	// when the first provider call was made.
+	custody            *fakeConnectorCredentialStore
+	tombstonedAtRevoke *bool
 }
 
 func (f *fakeConnectorRevoker) Revoke(_ context.Context, _ connectors.OAuthProviderConfig, token string) error {
+	if f.custody != nil && f.tombstonedAtRevoke == nil {
+		fenced := len(f.custody.tombstoned) > 0
+		f.tombstonedAtRevoke = &fenced
+	}
 	f.tokens = append(f.tokens, token)
 	return f.err
 }
@@ -511,7 +525,7 @@ func TestConnectionReconcilerFinalizerAndDisconnect(t *testing.T) {
 	provider.Spec.OAuth.RevocationURL = "https://github.com/revoke"
 	connection := testConnection("tenant", "github-alice", "github")
 	credentials := newFakeConnectorCredentialStore()
-	revoker := &fakeConnectorRevoker{err: errTestProviderRead}
+	revoker := &fakeConnectorRevoker{err: errTestProviderRead, custody: credentials}
 	c := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(connection, provider, connectorClientSecret("tenant")).
 		WithStatusSubresource(&corev1alpha1.Connection{}).Build()
 	reconciler := &ConnectionReconciler{Client: c, APIReader: c, Scheme: scheme, Credentials: credentials, Consents: credentials, Revoker: revoker}
@@ -566,6 +580,11 @@ func TestConnectionReconcilerFinalizerAndDisconnect(t *testing.T) {
 	}
 	if strings.Join(revoker.tokens, ",") != "ghr_refresh,gho_access,ghr_previous,gho_previous" {
 		t.Fatalf("revoked tokens = %v, want the committed credential and the ones it replaced, refresh before access", revoker.tokens)
+	}
+	// Commits are fenced before the slow provider calls, so a completion
+	// racing the disconnect cannot land material that is never revoked.
+	if revoker.tombstonedAtRevoke == nil || !*revoker.tombstonedAtRevoke {
+		t.Fatal("custody must be tombstoned before revocation starts")
 	}
 	if _, held := credentials.credentials[string(updated.UID)]; held || len(credentials.deleted) != 1 {
 		t.Fatalf("custody must be deleted even when revocation fails: %+v", credentials)

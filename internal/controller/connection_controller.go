@@ -170,6 +170,12 @@ func (r *ConnectionReconciler) finalize(ctx context.Context, connection *corev1a
 		return ctrl.Result{}, nil
 	}
 	if r.Credentials != nil {
+		// Fence commits first: a completion that loaded the Connection just
+		// before deletion must not land new material while the provider
+		// calls below are in flight, or it would be neither revoked nor kept.
+		if err := r.Credentials.TombstoneConnectorCustody(ctx, string(connection.UID)); err != nil {
+			return ctrl.Result{}, err
+		}
 		r.revokeBestEffort(ctx, connection)
 		if err := r.Credentials.DeleteConnectorCredential(ctx, string(connection.UID)); err != nil {
 			return ctrl.Result{}, err

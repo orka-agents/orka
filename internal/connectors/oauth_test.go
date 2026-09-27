@@ -269,6 +269,15 @@ func TestTokenResponseEdgeCases(t *testing.T) {
 		"/str-exp": func(w http.ResponseWriter) {
 			_, _ = w.Write([]byte(`{"access_token":"a","token_type":"bearer","expires_in":"3600"}`))
 		},
+		"/comma-scope": func(w http.ResponseWriter) {
+			_, _ = w.Write([]byte(`{"access_token":"a","token_type":"bearer","scope":"read,write repo"}`))
+		},
+		"/empty-scope": func(w http.ResponseWriter) {
+			_, _ = w.Write([]byte(`{"access_token":"a","token_type":"bearer","scope":""}`))
+		},
+		"/no-scope": func(w http.ResponseWriter) {
+			_, _ = w.Write([]byte(`{"access_token":"a","token_type":"bearer"}`))
+		},
 	}
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -285,12 +294,28 @@ func TestTokenResponseEdgeCases(t *testing.T) {
 		"/not-json": true, "/no-token": true, "/too-large": true, "/weird-err": true, "/null-exp": false,
 		"/mac-type": true, "/no-type": true, "/huge-exp": true,
 		"/junk-exp": true, "/zero-exp": true, "/frac-exp": true, "/str-exp": false,
+		"/comma-scope": false, "/empty-scope": false, "/no-scope": false,
 	} {
 		cfg := testOAuthConfig()
 		cfg.TokenURL = "https://provider.example.test" + path
 		token, err := client.ExchangeCode(ctx, cfg, "code", "verifier", "https://orka.example.test/cb")
 		if (err != nil) != wantErr {
 			t.Fatalf("%s: err = %v, want error %t", path, err, wantErr)
+		}
+		switch path {
+		case "/comma-scope":
+			// GitHub delimits granted scopes with commas; spaces are accepted too.
+			if strings.Join(token.Scopes, "|") != "read|write|repo" || !token.ScopePresent {
+				t.Fatalf("comma scope = %v present %t", token.Scopes, token.ScopePresent)
+			}
+		case "/empty-scope":
+			if len(token.Scopes) != 0 || !token.ScopePresent {
+				t.Fatalf("empty scope = %v present %t, want an explicit empty grant", token.Scopes, token.ScopePresent)
+			}
+		case "/no-scope":
+			if len(token.Scopes) != 0 || token.ScopePresent {
+				t.Fatalf("omitted scope = %v present %t, want absent", token.Scopes, token.ScopePresent)
+			}
 		}
 		if path == "/weird-err" {
 			var oauthErr *OAuthError

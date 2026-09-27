@@ -573,3 +573,13 @@ func TestProviderAuthorityDigestAndConsent(t *testing.T) {
 		t.Fatal("a new built-in declaration must not require consent again")
 	}
 }
+
+func TestValidScopeTokenRefusesCommas(t *testing.T) {
+	// Comma-delimited scope lists (GitHub) are split on the comma, so a
+	// configured scope must never contain one.
+	for scope, want := range map[string]bool{"repo": true, "read:user": true, "repo,gist": false, "": false, "a b": false, "ünï": false} {
+		if got := validScopeToken(scope); got != want {
+			t.Fatalf("validScopeToken(%q) = %t, want %t", scope, got, want)
+		}
+	}
+}
