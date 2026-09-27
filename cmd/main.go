@@ -1405,6 +1405,15 @@ func main() {
 	// accounts linked before an operator disabled connectors.
 	connectorOAuthClient := connectors.NewOAuthClient(connectors.OAuthClientOptions{})
 	if connectorsEnabled {
+		// Connector use trusts spec.requestedBy only when the controller-only
+		// provenance annotation proves the API server stamped it. Without
+		// provenance admission any Task writer could forge both, so the
+		// feature fails closed at startup.
+		if !taskProvenanceProtected {
+			setupLog.Error(errors.New("--connectors-enabled requires --task-provenance-admission-enabled or --task-provenance-admission-external"),
+				"connectors fail closed without Task provenance admission")
+			os.Exit(1)
+		}
 		stateKey, keyErr := deriveConnectorStateKey(snapshotKey)
 		if keyErr != nil {
 			setupLog.Error(keyErr, "unable to derive the connector state key; connectors fail closed")

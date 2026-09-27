@@ -201,9 +201,14 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 	if s.OAuth == nil {
 		return store.ConnectorCredential{}, errors.New("connection credential refresh is not configured")
 	}
-	cfg, err := s.providerConfig(ctx, connection)
+	cfg, provider, err := s.providerConfig(ctx, connection)
 	if err != nil {
 		return store.ConnectorCredential{}, err
+	}
+	// The refresh token was issued by the OAuth client sealed with it; a
+	// replaced provider or rotated client must never receive it.
+	if current.AuthorityDigest == "" || current.AuthorityDigest != connectors.ProviderAuthorityDigest(provider) {
+		return store.ConnectorCredential{}, errors.New("connector provider OAuth client changed since the token was issued; the person must reconnect")
 	}
 	token, err := s.OAuth.Refresh(ctx, cfg, current.RefreshToken)
 	if err != nil {
@@ -228,11 +233,12 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 		return store.ConnectorCredential{}, errors.New("connection credential refresh failed")
 	}
 	refreshed := store.ConnectorCredential{
-		AccessToken:  token.AccessToken,
-		RefreshToken: token.RefreshToken,
-		TokenType:    token.TokenType,
-		ExpiresAt:    token.ExpiresAt,
-		Scopes:       token.Scopes,
+		AccessToken:     token.AccessToken,
+		RefreshToken:    token.RefreshToken,
+		TokenType:       token.TokenType,
+		ExpiresAt:       token.ExpiresAt,
+		Scopes:          token.Scopes,
+		AuthorityDigest: current.AuthorityDigest,
 	}
 	if refreshed.RefreshToken == "" {
 		refreshed.RefreshToken = current.RefreshToken
@@ -242,6 +248,17 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 	}
 	if len(refreshed.Scopes) == 0 {
 		refreshed.Scopes = current.Scopes
+	}
+	// A provider may narrow the scopes on refresh. The narrowed grant is
+	// recorded so the controller re-judges ScopesGranted, and nothing is
+	// released for a mode the new token no longer covers.
+	mode := connection.Spec.Mode
+	if mode == "" {
+		mode = corev1alpha1.ConnectionModeReadOnly
+	}
+	if !connectors.ScopesCover(refreshed.Scopes, connectors.ScopesForMode(provider, mode)) {
+		s.recordNarrowedScopes(ctx, connection, refreshed.Scopes, mode)
+		return store.ConnectorCredential{}, errors.New("refreshed connection credential no longer covers the connection mode; the person must consent again")
 	}
 	// Fenced on the version read at flight start: a consent that completed
 	// meanwhile wins, and its material is returned instead.
@@ -258,31 +275,47 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 	return refreshed, nil
 }
 
-func (s *Source) providerConfig(ctx context.Context, connection *corev1alpha1.Connection) (connectors.OAuthProviderConfig, error) {
+func (s *Source) providerConfig(ctx context.Context, connection *corev1alpha1.Connection) (connectors.OAuthProviderConfig, *corev1alpha1.ConnectorProvider, error) {
 	provider := &corev1alpha1.ConnectorProvider{}
 	reader := s.reader()
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: connection.Namespace, Name: connection.Spec.ProviderRef.Name}, provider); err != nil {
-		return connectors.OAuthProviderConfig{}, errors.New("connector provider is unavailable for refresh")
+		return connectors.OAuthProviderConfig{}, nil, errors.New("connector provider is unavailable for refresh")
 	}
 	if !connectors.ProviderAccepted(provider) {
-		return connectors.OAuthProviderConfig{}, errors.New("connector provider is not accepted")
-	}
-	// The held refresh token was issued by the OAuth client recorded at
-	// consent; a replaced provider or rotated client must never receive it.
-	if !connectors.ConsentMatchesProvider(connection, provider) {
-		return connectors.OAuthProviderConfig{}, errors.New("connector provider OAuth client changed since consent; the person must reconnect")
+		return connectors.OAuthProviderConfig{}, nil, errors.New("connector provider is not accepted")
 	}
 	secretRef := provider.Spec.OAuth.ClientSecretRef
 	secret := &corev1.Secret{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: provider.Namespace, Name: secretRef.Name}, secret); err != nil {
-		return connectors.OAuthProviderConfig{}, errors.New("connector provider client secret is unavailable")
+		return connectors.OAuthProviderConfig{}, nil, errors.New("connector provider client secret is unavailable")
 	}
 	// The secret is opaque bytes; only emptiness is judged, never trimmed.
 	value := string(secret.Data[secretRef.Key])
 	if strings.TrimSpace(value) == "" {
-		return connectors.OAuthProviderConfig{}, errors.New("connector provider client secret is empty")
+		return connectors.OAuthProviderConfig{}, nil, errors.New("connector provider client secret is empty")
 	}
-	return connectors.ProviderOAuthConfig(provider, value), nil
+	return connectors.ProviderOAuthConfig(provider, value), provider, nil
+}
+
+// recordNarrowedScopes stores the scopes a refresh actually returned and
+// withdraws ScopesGranted for the current mode. The controller recomputes the
+// condition from the same field on its next pass.
+func (s *Source) recordNarrowedScopes(ctx context.Context, connection *corev1alpha1.Connection, scopes []string, mode string) {
+	now := metav1.NewTime(s.now().UTC())
+	patch := client.MergeFromWithOptions(connection.DeepCopy(), client.MergeFromWithOptimisticLock{})
+	connection.Status.GrantedScopes = append([]string(nil), scopes...)
+	connection.Status.State = corev1alpha1.ConnectionStatePending
+	meta.SetStatusCondition(&connection.Status.Conditions, metav1.Condition{
+		Type:               corev1alpha1.ConnectionConditionScopesGranted,
+		Status:             metav1.ConditionFalse,
+		Reason:             corev1alpha1.ConnectionReasonConsentRequired,
+		Message:            "The refreshed token no longer covers the " + mode + " mode; consent again",
+		ObservedGeneration: connection.Generation,
+		LastTransitionTime: now,
+	})
+	if err := s.Client.Status().Patch(ctx, connection, patch); err != nil {
+		log.FromContext(ctx).Info("connection narrowed scopes could not be recorded", "connection", connection.Name, "reason", err.Error())
+	}
 }
 
 // recordRefresh updates non-secret status after a successful refresh. A
@@ -291,6 +324,7 @@ func (s *Source) providerConfig(ctx context.Context, connection *corev1alpha1.Co
 func (s *Source) recordRefresh(ctx context.Context, connection *corev1alpha1.Connection, credential store.ConnectorCredential) {
 	now := metav1.NewTime(s.now().UTC())
 	patch := client.MergeFrom(connection.DeepCopy())
+	connection.Status.GrantedScopes = append([]string(nil), credential.Scopes...)
 	connection.Status.LastRefreshTime = &now
 	connection.Status.ExpiresAt = nil
 	if !credential.ExpiresAt.IsZero() {
@@ -303,10 +337,13 @@ func (s *Source) recordRefresh(ctx context.Context, connection *corev1alpha1.Con
 }
 
 // markNotReady records a terminal link failure. The Ready reason is the
-// durable record the controller projects state from.
+// durable record the controller projects state from. The patch is fenced on
+// the resourceVersion read at flight start: a consent that completed after
+// the custody shred has already rewritten status, and this stale verdict
+// must not overwrite it.
 func (s *Source) markNotReady(ctx context.Context, connection *corev1alpha1.Connection, reason, state, message string) {
 	now := metav1.NewTime(s.now().UTC())
-	patch := client.MergeFrom(connection.DeepCopy())
+	patch := client.MergeFromWithOptions(connection.DeepCopy(), client.MergeFromWithOptimisticLock{})
 	connection.Status.State = state
 	meta.SetStatusCondition(&connection.Status.Conditions, metav1.Condition{
 		Type:               corev1alpha1.ConnectionConditionReady,
@@ -317,6 +354,10 @@ func (s *Source) markNotReady(ctx context.Context, connection *corev1alpha1.Conn
 		LastTransitionTime: now,
 	})
 	if err := s.Client.Status().Patch(ctx, connection, patch); err != nil {
+		if apierrors.IsConflict(err) {
+			log.FromContext(ctx).Info("connection changed concurrently; leaving status to the newer writer", "connection", connection.Name, "reason", reason)
+			return
+		}
 		log.FromContext(ctx).Error(err, "connection status could not record link failure", "connection", connection.Name, "reason", reason)
 	}
 }

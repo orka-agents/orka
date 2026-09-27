@@ -1019,7 +1019,7 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 |------|---------|-------------|
 | `--api-port` | `8080` | REST API server port |
 | `--gateway-enabled` | `true` | Enable generic gateway reconciliation and ingress |
-| `--connectors-enabled` | `false` | Enable per-user connector reconciliation (`ConnectorProvider` and `Connection`). Env: `ORKA_CONNECTORS_ENABLED` |
+| `--connectors-enabled` | `false` | Enable per-user connector reconciliation (`ConnectorProvider` and `Connection`). Requires Task provenance admission (`--task-provenance-admission-enabled` or `--task-provenance-admission-external`); the controller refuses to start otherwise, because connector use trusts `spec.requestedBy` only when the API server provably stamped it. Env: `ORKA_CONNECTORS_ENABLED` |
 | `--connector-callback-base-url` | `ORKA_CONNECTOR_CALLBACK_BASE_URL` env or `""` | Required with `--connectors-enabled`. Absolute https origin (scheme and host only, no path) the OAuth provider redirects back to; the provider must register exactly this origin plus `/api/v1/connections/callback`. Plain http is accepted only for `localhost`. Helm: `controller.connectors.callbackBaseUrl`. Sealed linked-account credentials live in the controller store, which the chart already requires to be persistent in every mode. |
 | `--gateway-pending-per-session` | `100` | Maximum pending gateway events per Session |
 | `--gateway-interim-messages-per-task` | `10` | Lifetime cap for distinct accepted interim messages per Task; failed/expired messages count, retries do not. Helm: `controller.gateway.interimMessagesPerTask` |

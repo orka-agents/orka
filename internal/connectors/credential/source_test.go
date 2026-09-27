@@ -131,6 +131,14 @@ func (h *harness) put(credential store.ConnectorCredential) {
 	if err != nil {
 		h.t.Fatal(err)
 	}
+	if credential.AuthorityDigest == "" {
+		// Issued by the fixture provider unless a test says otherwise.
+		provider := &corev1alpha1.ConnectorProvider{}
+		if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: "github"}, provider); err != nil {
+			h.t.Fatal(err)
+		}
+		credential.AuthorityDigest = connectors.ProviderAuthorityDigest(provider)
+	}
 	if err := h.store.PutConnectorCredential(context.Background(), ref, credential); err != nil {
 		h.t.Fatal(err)
 	}
@@ -416,5 +424,64 @@ func TestRefreshRefusesChangedProviderAuthority(t *testing.T) {
 	}
 	if h.refresher.calls.Load() != 0 {
 		t.Fatal("the refresh token must not be sent to a different authority")
+	}
+}
+
+// TestRefreshWithNarrowedScopesFailsClosed covers a provider that narrows the
+// grant on refresh: the narrowed scopes are recorded, ScopesGranted is
+// withdrawn, and nothing is released for the mode.
+func TestRefreshWithNarrowedScopesFailsClosed(t *testing.T) {
+	h := newHarness(t)
+	provider := &corev1alpha1.ConnectorProvider{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: "github"}, provider); err != nil {
+		t.Fatal(err)
+	}
+	provider.Spec.OAuth.Scopes.Read = []string{"read:user"}
+	if err := h.client.Update(context.Background(), provider); err != nil {
+		t.Fatal(err)
+	}
+	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", ExpiresAt: h.now.Add(-time.Minute), Scopes: []string{"read:user"}})
+	h.refresher.response = connectors.TokenResponse{AccessToken: "gho_narrow", TokenType: "bearer", ExpiresAt: h.now.Add(time.Hour), Scopes: []string{"public_repo"}}
+	_, err := h.source.ResolveConnectionCredential(context.Background(), h.request())
+	if err == nil || !strings.Contains(err.Error(), "no longer covers") {
+		t.Fatalf("narrowed refresh err = %v", err)
+	}
+	live := h.reload()
+	granted := meta.FindStatusCondition(live.Status.Conditions, corev1alpha1.ConnectionConditionScopesGranted)
+	if granted == nil || granted.Status != metav1.ConditionFalse || granted.Reason != corev1alpha1.ConnectionReasonConsentRequired ||
+		strings.Join(live.Status.GrantedScopes, ",") != "public_repo" || live.Status.State != corev1alpha1.ConnectionStatePending {
+		t.Fatalf("status after narrowed refresh = %+v", live.Status)
+	}
+	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil {
+		t.Fatal("the link must stay unusable until the person consents again")
+	}
+}
+
+// TestRevocationVerdictYieldsToConcurrentReconsent covers a consent that
+// completes between the custody shred and the Revoked status write: the
+// fenced patch conflicts and the fresh link keeps its Ready status.
+func TestRevocationVerdictYieldsToConcurrentReconsent(t *testing.T) {
+	h := newHarness(t)
+	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", ExpiresAt: h.now.Add(-time.Minute)})
+	h.refresher.err = &connectors.OAuthError{StatusCode: 400, Code: "invalid_grant"}
+	h.refresher.onRefresh = func() {
+		// The owner re-consents while the refresh is in flight: new custody
+		// and a new status write land before the stale verdict.
+		ref, _ := connectors.CredentialRef(h.connection)
+		if err := h.store.PutConnectorCredential(context.Background(), ref, store.ConnectorCredential{AccessToken: "gho_new", RefreshToken: "ghr_new"}); err != nil {
+			t.Fatal(err)
+		}
+		live := h.reload()
+		linked := metav1.NewTime(h.now)
+		live.Status.LinkedAt = &linked
+		if err := h.client.Status().Update(context.Background(), live); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err != nil || got.AccessToken != "gho_new" {
+		t.Fatalf("resolve during re-consent = %+v err = %v", got, err)
+	}
+	if live := h.reload(); live.Status.State != corev1alpha1.ConnectionStateReady {
+		t.Fatalf("a stale revocation verdict must not overwrite the fresh link: %+v", live.Status)
 	}
 }
