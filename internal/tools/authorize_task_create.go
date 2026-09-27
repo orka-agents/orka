@@ -22,3 +22,12 @@ func authorizeTaskCreate(ctx context.Context, tc *ToolContext, task *corev1alpha
 	}
 	return "", true
 }
+
+// sealTaskCreate hands a just-created Task to the API's sealer, when one is
+// installed, so its server-assigned UID is bound to the stamped requester.
+func sealTaskCreate(ctx context.Context, tc *ToolContext, task *corev1alpha1.Task) {
+	if tc == nil || tc.SealTaskCreate == nil || tc.Client == nil {
+		return
+	}
+	_ = tc.SealTaskCreate(ctx, tc.Client, task)
+}

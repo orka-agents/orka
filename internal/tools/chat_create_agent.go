@@ -242,6 +242,7 @@ func (t *ChatCreateAgentTool) handleInitialPrompt(ctx context.Context, tc *ToolC
 			"agentNamespace": agent.Namespace, messageField: fmt.Sprintf("Agent created, but task creation failed: %v", err),
 		})
 	}
+	sealTaskCreate(ctx, tc, task)
 
 	tc.IncrementTasks()
 	return ChatToolSuccess(map[string]any{

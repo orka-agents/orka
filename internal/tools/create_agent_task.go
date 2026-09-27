@@ -216,6 +216,7 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 	if err := tc.Client.Create(ctx, task); err != nil {
 		return classifyChatK8sErr(err)
 	}
+	sealTaskCreate(ctx, tc, task)
 
 	tc.IncrementTasks()
 	return ChatToolSuccess(map[string]any{nameField: task.Name, namespaceField: task.Namespace, phaseField: taskPhasePendingString, messageField: taskCreatedMsg(schedule)})

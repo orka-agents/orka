@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -110,19 +111,56 @@ func freezeRequesterConnections(
 // maxRequesterProvenanceDepth bounds the coordination ancestry walk.
 const maxRequesterProvenanceDepth = 16
 
+// requesterStampKey verifies the stamp the API server seals onto Tasks it
+// created for a verified person. Without it no requester is ever trusted
+// for connector use.
+var requesterStampKey []byte
+
+// requesterStampGrace is how long after creation a Task the API stamped may
+// still be waiting for its seal (a second write after the create). Within it
+// an unsealed stamp is a transient condition and dispatch retries rather
+// than committing a write-once binding with no Connections; after it, an
+// unsealed stamp is treated as unverified.
+const requesterStampGrace = 2 * time.Minute
+
+// ErrRequesterStampPending reports a freshly created, API-stamped Task whose
+// seal has not landed yet; callers retry rather than freeze nothing.
+var ErrRequesterStampPending = errors.New("the task's requester stamp is not sealed yet; retry")
+
+// requesterStampPending reports whether task carries the API's source
+// annotation but no stamp, and is young enough for the seal to still be
+// on its way. Without a configured key no seal can ever arrive (connectors
+// are disabled), so nothing is pending and dispatch is never delayed.
+func requesterStampPending(task *corev1alpha1.Task, now time.Time) bool {
+	return len(requesterStampKey) > 0 && task != nil && task.Annotations[labels.AnnotationRequestedBySource] == labels.RequestedBySourceAPI &&
+		task.Annotations[labels.AnnotationRequestedByStamp] == "" &&
+		!task.CreationTimestamp.IsZero() && now.Sub(task.CreationTimestamp.Time) < requesterStampGrace
+}
+
+// SetRequesterStampKey installs the key requester stamps are verified with.
+func SetRequesterStampKey(key []byte) {
+	requesterStampKey = append([]byte(nil), key...)
+}
+
 // requesterProvenanceVerified reports whether task.spec.requestedBy can be
 // trusted for connector use. Trusted workers may set requestedBy on the
-// Tasks they create, so the field alone proves nothing. It is trusted when
-// the API server stamped the controller-only source annotation, or when the
-// Task descends, through controller-owned coordination parents that admission
-// verified, from such a Task with the same requester at every step.
+// Tasks they create, so the field alone proves nothing, and admission is not
+// retroactive, so the controller-only source annotation alone proves nothing
+// either: a Task planted while admission was disabled could carry it. A
+// requester is trusted when the API server sealed a stamp binding this
+// Task's UID to it, or when the Task descends, through controller-owned
+// coordination parents that admission verified, from such a Task with the
+// same requester at every step.
 func requesterProvenanceVerified(ctx context.Context, reader client.Reader, task *corev1alpha1.Task) (bool, error) {
+	if requesterStampPending(task, time.Now()) {
+		return false, ErrRequesterStampPending
+	}
 	current := task
 	for depth := 0; depth <= maxRequesterProvenanceDepth; depth++ {
 		if current == nil || current.Spec.RequestedBy == nil {
 			return false, nil
 		}
-		if current.Annotations[labels.AnnotationRequestedBySource] == labels.RequestedBySourceAPI {
+		if connectors.RequesterStampValid(requesterStampKey, current) {
 			return true, nil
 		}
 		owner := metav1.GetControllerOf(current)

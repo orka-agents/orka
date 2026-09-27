@@ -73,7 +73,13 @@ const (
 	// AnnotationRequestedBySource records that spec.requestedBy was stamped
 	// by the API server from a verified identity. Only controller identities
 	// may set it; child Tasks inherit trust through their coordination parent.
-	AnnotationRequestedBySource             = "orka.ai/requested-by-source"
+	AnnotationRequestedBySource = "orka.ai/requested-by-source"
+	// AnnotationRequestedByStamp is an HMAC over the Task UID and requester
+	// that the API server seals right after creating a Task it stamped.
+	// Only controller identities may write it, and admission is not
+	// retroactive, so the source annotation alone proves nothing: a Task
+	// planted while admission was disabled carries no valid stamp.
+	AnnotationRequestedByStamp              = "orka.ai/requested-by-stamp"
 	AnnotationDelegationEffectID            = "orka.ai/delegation-effect-id"
 	AnnotationForkSourceTask                = "orka.ai/fork-source-task"
 	AnnotationForkSourceSeq                 = "orka.ai/fork-source-seq"

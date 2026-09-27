@@ -1419,6 +1419,15 @@ func main() {
 			setupLog.Error(keyErr, "unable to derive the connector state key; connectors fail closed")
 			os.Exit(1)
 		}
+		stampKey, keyErr := deriveRequesterStampKey(snapshotKey)
+		if keyErr != nil {
+			setupLog.Error(keyErr, "unable to derive the requester stamp key; connectors fail closed")
+			os.Exit(1)
+		}
+		// The API seals the stamp onto Tasks it creates; the controller
+		// verifies it before freezing anyone's Connection.
+		api.SetRequesterStampKey(stampKey)
+		controller.SetRequesterStampKey(stampKey)
 		connectorConfig = api.ConnectorConfig{
 			Enabled:         true,
 			CallbackBaseURL: strings.TrimSpace(connectorCallbackBaseURL),
@@ -2605,6 +2614,15 @@ func loadAgentExecutionSnapshotCipher(path string) (*sqlite.AgentExecutionSnapsh
 // connectorStateKeyInfo is the HKDF label separating the connector state
 // signing key from every other use of the controller key.
 const connectorStateKeyInfo = "orka.connector.state.v1"
+
+// requesterStampKeyInfo is the HKDF label for the requester stamp key.
+const requesterStampKeyInfo = "orka.connector.requester-stamp.v1"
+
+// deriveRequesterStampKey derives the key that binds API-created Tasks to the
+// requester the API verified for them.
+func deriveRequesterStampKey(controllerKey []byte) ([]byte, error) {
+	return hkdf.Key(sha256.New, controllerKey, nil, requesterStampKeyInfo, connectors.MinRequesterStampKeyBytes)
+}
 
 // deriveConnectorStateKey derives the OAuth state signing key from the
 // controller key so connectors need no additional operator secret.

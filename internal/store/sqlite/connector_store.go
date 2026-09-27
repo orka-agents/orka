@@ -589,8 +589,9 @@ func (s *Store) ReplaceConnectorCredential(ctx context.Context, ref store.Connec
 type connectorRetirement int
 
 const (
-	// retireAccessToken keeps the row until its access token expires; its
-	// refresh token is not a separate grant.
+	// retireAccessToken keeps the row until its access token expires when
+	// the replacement carries the same refresh token; a rotated refresh
+	// token makes the row a grant kept until disconnect.
 	retireAccessToken connectorRetirement = iota
 	// retireGrant keeps a row that holds a refresh token until disconnect,
 	// because a refresh token stays usable after its access token expires;
@@ -635,7 +636,12 @@ func (s *Store) retireConnectorCredentialTx(ctx context.Context, tx *sql.Tx, ref
 		return nil
 	}
 	revocableUntil := expiresAt
-	if retirement == retireGrant && previous.RefreshToken != "" {
+	// A row whose refresh token the replacement does not carry is a grant
+	// the provider may still honor (rotation does not promise immediate
+	// invalidation): it is kept until disconnect. Only a replacement that
+	// keeps the same refresh token leaves nothing but the old access token
+	// to revoke.
+	if previous.RefreshToken != "" && (retirement == retireGrant || previous.RefreshToken != replacement.RefreshToken) {
 		revocableUntil = sql.NullTime{}
 	}
 	if revocableUntil.Valid && !revocableUntil.Time.After(now) {

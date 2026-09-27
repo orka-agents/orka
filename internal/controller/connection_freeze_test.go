@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -52,15 +53,22 @@ func freezeFixtures(ready bool) (runtime.Object, runtime.Object, runtime.Object,
 			{Type: corev1alpha1.ConnectionConditionProviderResolved, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonProviderResolved, ObservedGeneration: 4},
 		}
 	}
+	SetRequesterStampKey(testRequesterStampKey)
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "task", Namespace: "tenant", UID: "task-uid",
-			Annotations: map[string]string{labels.AnnotationRequestedBySource: labels.RequestedBySourceAPI},
+			Annotations: map[string]string{
+				labels.AnnotationRequestedBySource: labels.RequestedBySourceAPI,
+				labels.AnnotationRequestedByStamp:  connectors.RequesterStamp(testRequesterStampKey, "task-uid", requester.Issuer, requester.Subject),
+			},
 		},
 		Spec: corev1alpha1.TaskSpec{RequestedBy: requester},
 	}
 	return tool, policy, connection, task
 }
+
+// testRequesterStampKey is the stamp key the freeze fixtures verify under.
+var testRequesterStampKey = []byte("0123456789abcdef0123456789abcdef")
 
 func brokeredConfiguration(names ...string) harnessv2.MCPPolicyConfiguration {
 	cfg := harnessv2.MCPPolicyConfiguration{}
@@ -193,6 +201,45 @@ func TestFreezeRequiresVerifiedRequesterProvenance(t *testing.T) {
 	if frozen, err := freezeRequesterConnections(context.Background(), reader, stamped, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 1 {
 		t.Fatalf("api-stamped task: frozen = %+v err = %v", frozen, err)
 	}
+	// Admission is not retroactive: a Task planted with the source
+	// annotation while admission was disabled carries no stamp the API
+	// sealed, and a stamp copied from another Task does not match this UID.
+	planted := stamped.DeepCopy()
+	planted.Name, planted.UID = "planted", "planted-uid"
+	planted.Annotations = map[string]string{labels.AnnotationRequestedBySource: labels.RequestedBySourceAPI}
+	copied := planted.DeepCopy()
+	copied.Name, copied.UID = "copied", "copied-uid"
+	copied.Annotations[labels.AnnotationRequestedByStamp] = stamped.Annotations[labels.AnnotationRequestedByStamp]
+	reader = ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(tool, policy, connection, stamped, planted, copied).Build()
+	for _, task := range []*corev1alpha1.Task{planted, copied} {
+		if frozen, err := freezeRequesterConnections(context.Background(), reader, task, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
+			t.Fatalf("%s task: frozen = %+v err = %v, want nothing without a stamp sealed for this UID", task.Name, frozen, err)
+		}
+	}
+	// A Task the API just created is waiting for its seal (a second write
+	// after the create): dispatch retries instead of committing a write-once
+	// binding with no Connections. Past the grace window it is unverified.
+	fresh := planted.DeepCopy()
+	fresh.Name, fresh.UID, fresh.CreationTimestamp = "fresh", "fresh-uid", metav1.Now()
+	if _, err := freezeRequesterConnections(context.Background(), reader, fresh, brokeredConfiguration("gh_search")); !errors.Is(err, ErrRequesterStampPending) {
+		t.Fatalf("fresh unsealed task: err = %v, want ErrRequesterStampPending", err)
+	}
+	fresh.CreationTimestamp = metav1.NewTime(time.Now().Add(-requesterStampGrace - time.Minute))
+	if frozen, err := freezeRequesterConnections(context.Background(), reader, fresh, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
+		t.Fatalf("stale unsealed task: frozen = %+v err = %v, want unverified", frozen, err)
+	}
+	// Without a configured key nothing is ever verified, and nothing waits
+	// for a seal that cannot arrive: dispatch proceeds without Connections.
+	SetRequesterStampKey(nil)
+	t.Cleanup(func() { SetRequesterStampKey(testRequesterStampKey) })
+	if frozen, err := freezeRequesterConnections(context.Background(), reader, stamped, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
+		t.Fatalf("no stamp key: frozen = %+v err = %v, want fail closed", frozen, err)
+	}
+	fresh.CreationTimestamp = metav1.Now()
+	if frozen, err := freezeRequesterConnections(context.Background(), reader, fresh, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
+		t.Fatalf("no stamp key, fresh task: frozen = %+v err = %v, want no wait", frozen, err)
+	}
+	SetRequesterStampKey(testRequesterStampKey)
 
 	// A child that inherits the requester through its verified coordination
 	// parent is trusted; one that names a different person is not.

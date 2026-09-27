@@ -221,6 +221,12 @@ func (r *KubernetesResolver) Resolve(ctx context.Context, req ResolveRequest) (R
 			return Resolution{}, errors.New("credential-injecting outbound access cannot coexist with authSecretRef")
 		}
 	}
+	if _, frozen := req.FrozenConnections[policy.Name]; frozen && policy.Spec.Connection == nil {
+		// The Task was dispatched under a person's Connection for this
+		// policy; a policy moved to another adapter since must not hand it
+		// a service credential or route instead.
+		return Resolution{}, fmt.Errorf("outbound access policy %q was in connection mode when the task was dispatched and no longer is", policy.Name)
+	}
 	switch {
 	case policy.Spec.Direct != nil:
 		return r.resolveDirect(ctx, policy, req)
@@ -297,16 +303,30 @@ func sameParameterSchema(declared, actual *apiextensionsv1.JSON) bool {
 // sameStaticHeaders compares two header sets by canonical name and exact
 // value; an empty and a nil set are the same.
 func sameStaticHeaders(declared, actual map[string]string) bool {
-	if len(declared) != len(actual) {
+	canonicalize := func(headers map[string]string) (map[string]string, bool) {
+		result := make(map[string]string, len(headers))
+		for name, value := range headers {
+			key := http.CanonicalHeaderKey(strings.TrimSpace(name))
+			if _, dup := result[key]; dup {
+				// Two spellings of one header would collapse into one field
+				// on the wire; the set is not the declared one.
+				return nil, false
+			}
+			result[key] = value
+		}
+		return result, true
+	}
+	want, ok := canonicalize(declared)
+	if !ok {
 		return false
 	}
-	canonical := make(map[string]string, len(declared))
-	for name, value := range declared {
-		canonical[http.CanonicalHeaderKey(strings.TrimSpace(name))] = value
+	got, ok := canonicalize(actual)
+	if !ok || len(want) != len(got) {
+		return false
 	}
-	for name, value := range actual {
-		want, ok := canonical[http.CanonicalHeaderKey(strings.TrimSpace(name))]
-		if !ok || want != value {
+	for key, value := range want {
+		actualValue, present := got[key]
+		if !present || actualValue != value {
 			return false
 		}
 	}

@@ -653,20 +653,22 @@ func TestConnectorReplaceRetiresUnexpiredPreviousCredential(t *testing.T) {
 		t.Fatalf("retired after stale replace = %+v err = %v, want none", retired, err)
 	}
 	// The refreshed-away access token is still valid at the provider, so it
-	// is kept for revocation.
-	if err := s.ReplaceConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho_b", RefreshToken: "ghr_b", ExpiresAt: past}, held.Version); err != nil {
+	// is kept for revocation; the refresh token is unchanged here, so the
+	// row is bounded by the access token's lifetime.
+	if err := s.ReplaceConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho_b", RefreshToken: "ghr_a", ExpiresAt: past}, held.Version); err != nil {
 		t.Fatal(err)
 	}
 	retired, err := s.ListRetiredConnectorCredentials(ctx, ref)
 	if err != nil || len(retired) != 1 || retired[0].AccessToken != "gho_a" || retired[0].RefreshToken != "ghr_a" {
 		t.Fatalf("retired = %+v err = %v, want the replaced credential", retired, err)
 	}
-	// An already expired token has nothing left to revoke and is not kept.
+	// An already expired access token under the same refresh token has
+	// nothing left to revoke and is not kept.
 	held, err = s.GetConnectorCredential(ctx, ref)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ReplaceConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho_c", ExpiresAt: future}, held.Version); err != nil {
+	if err := s.ReplaceConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho_c", RefreshToken: "ghr_a", ExpiresAt: future}, held.Version); err != nil {
 		t.Fatal(err)
 	}
 	if retired, err := s.ListRetiredConnectorCredentials(ctx, ref); err != nil || len(retired) != 1 || retired[0].AccessToken != "gho_a" {
@@ -681,7 +683,7 @@ func TestConnectorReplaceRetiresUnexpiredPreviousCredential(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ReplaceConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho_d", ExpiresAt: future}, held.Version); err != nil {
+	if err := s.ReplaceConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho_d", RefreshToken: "ghr_a", ExpiresAt: future}, held.Version); err != nil {
 		t.Fatal(err)
 	}
 	if retired, err := s.ListRetiredConnectorCredentials(ctx, ref); err != nil || len(retired) != 1 || retired[0].AccessToken != "gho_c" {
@@ -723,5 +725,40 @@ func TestConnectorCredentialVersionsNeverRepeatAcrossShreds(t *testing.T) {
 	}
 	if third, err := s.GetConnectorCredential(ctx, ref); err != nil || third.Version != 3 {
 		t.Fatalf("after replace = %+v err = %v, want version 3", third, err)
+	}
+}
+
+func TestConnectorReplaceKeepsRotatedRefreshTokenUntilDisconnect(t *testing.T) {
+	s := newConnectorTestStore(t)
+	ctx := context.Background()
+	completion := testConnectorCompletion()
+	ref := store.ConnectorCredentialRef{ConnectionUID: completion.ConnectionUID, Namespace: completion.Namespace, Name: completion.Name, SubjectDigest: completion.SubjectDigest, Provider: completion.Provider}
+	past := time.Now().Add(-time.Minute).UTC()
+	future := time.Now().Add(time.Hour).UTC()
+	if err := s.PutConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho_a", RefreshToken: "ghr_a", ExpiresAt: past}); err != nil {
+		t.Fatal(err)
+	}
+	held, err := s.GetConnectorCredential(ctx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The provider rotated the refresh token without promising to invalidate
+	// the previous one: that grant is kept for revocation at disconnect even
+	// though its access token has expired, and no later refresh prunes it.
+	if err := s.ReplaceConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho_b", RefreshToken: "ghr_b", ExpiresAt: future}, held.Version); err != nil {
+		t.Fatal(err)
+	}
+	if retired, err := s.ListRetiredConnectorCredentials(ctx, ref); err != nil || len(retired) != 1 || retired[0].RefreshToken != "ghr_a" {
+		t.Fatalf("retired = %+v err = %v, want the rotated-away grant kept", retired, err)
+	}
+	held, err = s.GetConnectorCredential(ctx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReplaceConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho_c", RefreshToken: "ghr_b", ExpiresAt: future}, held.Version); err != nil {
+		t.Fatal(err)
+	}
+	if retired, err := s.ListRetiredConnectorCredentials(ctx, ref); err != nil || len(retired) != 2 || retired[0].RefreshToken != "ghr_a" {
+		t.Fatalf("retired after a same-refresh-token replacement = %+v err = %v, want the grant kept and the access token retired", retired, err)
 	}
 }

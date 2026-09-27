@@ -291,7 +291,17 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 	// meanwhile wins, and its material is returned instead.
 	switch err := s.Credentials.ReplaceConnectorCredential(ctx, ref, refreshed, current.Version); {
 	case errors.Is(err, store.ErrConflict):
-		return s.Credentials.GetConnectorCredential(ctx, ref)
+		// A consent won the race. Its material is released only if it is
+		// not itself about to expire; otherwise this call fails and the
+		// next one refreshes the winner as any resolution would.
+		winner, err := s.Credentials.GetConnectorCredential(ctx, ref)
+		if err != nil {
+			return store.ConnectorCredential{}, err
+		}
+		if s.needsRefresh(winner) {
+			return store.ConnectorCredential{}, errors.New("connection credential changed concurrently and is about to expire; retry")
+		}
+		return winner, nil
 	case errors.Is(err, store.ErrConnectorCustodyTombstoned), errors.Is(err, store.ErrNotFound):
 		// Disconnect fenced custody while the provider was rotating the
 		// material. The rotated pair derives from this Connection's own
@@ -307,7 +317,7 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 		refreshed.Version = stored.Version
 	}
 	if !connectors.ScopesCover(refreshed.Scopes, connectors.ScopesForMode(provider, mode)) {
-		s.recordNarrowedScopes(ctx, connection, refreshed.Scopes, mode)
+		s.recordNarrowedScopes(ctx, connection, ref, refreshed, mode)
 		return store.ConnectorCredential{}, errors.New("refreshed connection credential no longer covers the connection mode; the person must consent again")
 	}
 	s.recordRefresh(ctx, connection, refreshed)
@@ -397,22 +407,37 @@ func (s *Source) providerConfig(ctx context.Context, provider *corev1alpha1.Conn
 
 // recordNarrowedScopes stores the scopes a refresh actually returned and
 // withdraws ScopesGranted for the current mode. The controller recomputes the
-// condition from the same field on its next pass.
-func (s *Source) recordNarrowedScopes(ctx context.Context, connection *corev1alpha1.Connection, scopes []string, mode string) {
-	now := metav1.NewTime(s.now().UTC())
-	patch := client.MergeFromWithOptions(connection.DeepCopy(), client.MergeFromWithOptimisticLock{})
-	connection.Status.GrantedScopes = append([]string(nil), scopes...)
-	connection.Status.State = corev1alpha1.ConnectionStatePending
-	meta.SetStatusCondition(&connection.Status.Conditions, metav1.Condition{
-		Type:               corev1alpha1.ConnectionConditionScopesGranted,
-		Status:             metav1.ConditionFalse,
-		Reason:             corev1alpha1.ConnectionReasonConsentRequired,
-		Message:            "The refreshed token no longer covers the " + mode + " mode; consent again",
-		ObservedGeneration: connection.Generation,
-		LastTransitionTime: now,
-	})
-	if err := s.Client.Status().Patch(ctx, connection, patch); err != nil {
-		log.FromContext(ctx).Info("connection narrowed scopes could not be recorded", "connection", connection.Name, "reason", err.Error())
+// condition from the same field on its next pass. Like markNotReady, a
+// conflict with an unrelated writer is retried while custody still holds
+// the narrowed material, or status would keep advertising the wider grant.
+func (s *Source) recordNarrowedScopes(ctx context.Context, connection *corev1alpha1.Connection, ref store.ConnectorCredentialRef, narrowed store.ConnectorCredential, mode string) {
+	logger := log.FromContext(ctx).WithValues("connection", connection.Name)
+	const maxAttempts = 4
+	for attempt := 1; ; attempt++ {
+		now := metav1.NewTime(s.now().UTC())
+		patch := client.MergeFromWithOptions(connection.DeepCopy(), client.MergeFromWithOptimisticLock{})
+		connection.Status.GrantedScopes = append([]string(nil), narrowed.Scopes...)
+		connection.Status.State = corev1alpha1.ConnectionStatePending
+		meta.SetStatusCondition(&connection.Status.Conditions, metav1.Condition{
+			Type:               corev1alpha1.ConnectionConditionScopesGranted,
+			Status:             metav1.ConditionFalse,
+			Reason:             corev1alpha1.ConnectionReasonConsentRequired,
+			Message:            "The refreshed token no longer covers the " + mode + " mode; consent again",
+			ObservedGeneration: connection.Generation,
+			LastTransitionTime: now,
+		})
+		err := s.Client.Status().Patch(ctx, connection, patch)
+		if err == nil {
+			return
+		}
+		if !apierrors.IsConflict(err) {
+			logger.Info("connection narrowed scopes could not be recorded", "reason", err.Error())
+			return
+		}
+		if attempt >= maxAttempts || !s.verdictStillCurrent(ctx, connection, ref, narrowed.Version) {
+			logger.Info("connection changed concurrently; leaving narrowed scopes to the newer writer")
+			return
+		}
 	}
 }
 

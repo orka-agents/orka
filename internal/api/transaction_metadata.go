@@ -7,12 +7,16 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"slices"
 	"sort"
 	"strconv"
+
+	"github.com/orka-agents/orka/internal/connectors"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
@@ -74,6 +78,38 @@ var authorizationTransactionContextKeys = map[string]struct{}{
 	contextAllowedProvidersKey: {},
 	chatModelKey:               {},
 	contextAllowedModelsKey:    {},
+}
+
+// requesterStampKey seals the requester stamp onto Tasks the API creates.
+// Without it, stamped Tasks stay unverified for connector use (fail closed).
+var requesterStampKey []byte
+
+// SetRequesterStampKey installs the key the API seals requester stamps with.
+func SetRequesterStampKey(key []byte) {
+	requesterStampKey = append([]byte(nil), key...)
+}
+
+// sealRequesterStamp binds a just-created, API-stamped Task's UID to its
+// requester. A failure leaves the Task unverified for connector use rather
+// than failing the creation; the Task itself is intact.
+func sealRequesterStamp(ctx context.Context, c client.Client, task *corev1alpha1.Task) {
+	if task == nil || task.Annotations[labels.AnnotationRequestedBySource] != labels.RequestedBySourceAPI {
+		return
+	}
+	if len(requesterStampKey) == 0 {
+		// Connectors are disabled: nothing verifies stamps, so none is sealed.
+		return
+	}
+	if err := connectors.SealRequesterStamp(ctx, c, requesterStampKey, task); err != nil {
+		log.Error(err, "requester stamp could not be sealed; the task stays unverified for connector use", "task", task.Name, "namespace", task.Namespace)
+	}
+}
+
+// requesterStampSealer is the tool-side hook that seals Tasks created by
+// chat and compatibility tools on the API's behalf.
+func requesterStampSealer(ctx context.Context, c client.Client, task *corev1alpha1.Task) error {
+	sealRequesterStamp(ctx, c, task)
+	return nil
 }
 
 func stampTaskRequesterFromUserInfo(task *corev1alpha1.Task, ui *UserInfo) {

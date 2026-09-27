@@ -487,7 +487,11 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInf
 	if err := authorizeAndStampTaskContext(ctx, h.uncachedReader(), h.clientset, contextTokenFromUserInfo(ui), h.contextTokenAuthorization, "createSecurityValidationTask", ui, task); err != nil {
 		return err
 	}
-	if err := h.client.Create(ctx, task); err != nil {
+	createErr := h.client.Create(ctx, task)
+	if createErr == nil {
+		sealRequesterStamp(ctx, h.client, task)
+	}
+	if err := createErr; err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create validation task: %v", err))
 	}
 	finding.ValidationStatus = "pending"
@@ -561,7 +565,11 @@ func (h *Handlers) createSecurityPatchTask(ctx context.Context, ui *UserInfo, sc
 	if err := authorizeAndStampTaskContext(ctx, h.uncachedReader(), h.clientset, contextTokenFromUserInfo(ui), h.contextTokenAuthorization, "createSecurityPatchTask", ui, task); err != nil {
 		return nil, err
 	}
-	if err := h.client.Create(ctx, task); err != nil {
+	createErr := h.client.Create(ctx, task)
+	if createErr == nil {
+		sealRequesterStamp(ctx, h.client, task)
+	}
+	if err := createErr; err != nil {
 		return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create patch task: %v", err))
 	}
 

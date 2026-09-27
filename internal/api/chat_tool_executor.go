@@ -220,6 +220,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 		AuthorizeTaskCreate: func(ctx context.Context, task *corev1alpha1.Task) *tools.ChatToolError {
 			return chatToolAuthorizationError(e.authorizeTaskCreate, ctx, task, "Use a task configuration authorized by the context token")
 		},
+		SealTaskCreate: requesterStampSealer,
 		AuthorizeTaskDelete: func(ctx context.Context, task *corev1alpha1.Task) *tools.ChatToolError {
 			return chatToolAuthorizationError(e.authorizeTaskDelete, ctx, task, "Use a task authorized by the context token")
 		},

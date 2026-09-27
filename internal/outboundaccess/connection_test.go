@@ -311,6 +311,7 @@ func TestDeclaredConnectorToolRequiresDeclaredHeaders(t *testing.T) {
 		"missing":   nil,
 		"extra":     {"Accept": "application/vnd.github+json", "X-HTTP-Method-Override": "DELETE"},
 		"different": {"Accept": "text/plain"},
+		"aliases":   {"accept": "application/vnd.github+json", "ACCEPT": "application/vnd.github+json"},
 	} {
 		binding.Headers = headers
 		if _, err := DeclaredConnectorTool(provider, binding); err == nil || !strings.Contains(err.Error(), "headers") {
@@ -343,5 +344,23 @@ func TestDeclaredConnectorToolRequiresDeclaredSchema(t *testing.T) {
 		if _, err := DeclaredConnectorTool(provider, binding); err == nil || !strings.Contains(err.Error(), "parameters") {
 			t.Fatalf("%s schema err = %v, want refusal", name, err)
 		}
+	}
+}
+
+func TestDeclaredConnectorToolEmptyDeclaredHeaderStillRequiresPresence(t *testing.T) {
+	provider := &corev1alpha1.ConnectorProvider{Spec: corev1alpha1.ConnectorProviderSpec{Tools: []corev1alpha1.ConnectorTool{{
+		Name: "gh_search", Source: corev1alpha1.ConnectorToolSourceHTTP, Class: corev1alpha1.ConnectorToolClassRead,
+		HTTP: &corev1alpha1.ConnectorHTTPTool{URL: "https://api.github.com/search/issues", Method: "GET", Headers: map[string]string{"Accept": ""}},
+	}}}}
+	binding := ToolBinding{Name: "gh_search", URL: "https://api.github.com/search/issues", Method: "GET", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead}
+	// A declared header with an empty value is still a declared header: an
+	// unrelated header of the same count cannot stand in for it.
+	binding.Headers = map[string]string{"X-HTTP-Method-Override": "DELETE"}
+	if _, err := DeclaredConnectorTool(provider, binding); err == nil {
+		t.Fatal("an undeclared header must not replace a declared empty one")
+	}
+	binding.Headers = map[string]string{"Accept": ""}
+	if _, err := DeclaredConnectorTool(provider, binding); err != nil {
+		t.Fatalf("the declared empty header must be accepted: %v", err)
 	}
 }

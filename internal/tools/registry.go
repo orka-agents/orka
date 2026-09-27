@@ -15,6 +15,8 @@ import (
 	"sync"
 	"time"
 
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/approvals"
@@ -28,7 +30,6 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 	"k8s.io/client-go/kubernetes"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // MemoryReader is the least-privilege store dependency required by recall_memory.
@@ -106,10 +107,14 @@ type ToolContext struct {
 		DeleteSession(ctx context.Context, namespace, sessionID string) error
 	}
 	// Task creation helpers provided by the chat executor
-	GenerateTaskName     func() string
-	TaskLabels           func() map[string]string
-	CheckTaskLimit       func() *ChatToolError
-	AuthorizeTaskCreate  func(context.Context, *corev1alpha1.Task) *ChatToolError
+	GenerateTaskName    func() string
+	TaskLabels          func() map[string]string
+	CheckTaskLimit      func() *ChatToolError
+	AuthorizeTaskCreate func(context.Context, *corev1alpha1.Task) *ChatToolError
+	// SealTaskCreate runs right after a Task this tool created exists, so
+	// the API can bind server-assigned identity (the UID) to the requester
+	// it stamped. A failure is logged by the sealer; the Task stays.
+	SealTaskCreate       func(context.Context, client.Client, *corev1alpha1.Task) error
 	AuthorizeTaskDelete  func(context.Context, *corev1alpha1.Task) *ChatToolError
 	AuthorizeAgentCreate func(context.Context, *corev1alpha1.Agent) *ChatToolError
 	// AuthorizeAgentInitialTask preflights the combined Agent/Task operation
