@@ -51,23 +51,47 @@ const (
 // committed. The API server is a single process, so a process lock suffices.
 type completionLocks struct {
 	mu    sync.Mutex
-	locks map[string]*sync.Mutex
+	locks map[string]*completionLock
 }
 
 func newCompletionLocks() *completionLocks {
-	return &completionLocks{locks: map[string]*sync.Mutex{}}
+	return &completionLocks{locks: map[string]*completionLock{}}
+}
+
+// completionLock is one keyed mutex with a waiter count, so the entry is
+// dropped when the last holder releases it and the map stays bounded by
+// the number of in-flight completions rather than by account churn.
+type completionLock struct {
+	mu      sync.Mutex
+	waiters int
 }
 
 func (l *completionLocks) lock(key string) func() {
 	l.mu.Lock()
-	m, ok := l.locks[key]
+	entry, ok := l.locks[key]
 	if !ok {
-		m = &sync.Mutex{}
-		l.locks[key] = m
+		entry = &completionLock{}
+		l.locks[key] = entry
 	}
+	entry.waiters++
 	l.mu.Unlock()
-	m.Lock()
-	return m.Unlock
+	entry.mu.Lock()
+	return func() {
+		entry.mu.Unlock()
+		l.mu.Lock()
+		entry.waiters--
+		if entry.waiters == 0 {
+			delete(l.locks, key)
+		}
+		l.mu.Unlock()
+	}
+}
+
+// size reports the number of keyed entries currently held or awaited.
+func (l *completionLocks) size() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.locks)
 }
 
 // ConnectorConfig wires the consent flow and custody into the API server.
@@ -105,6 +129,11 @@ func ValidateConnectorConfig(cfg ConnectorConfig) error {
 	parsed, err := url.Parse(base)
 	if base == "" || err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return errors.New("connector callback base URL must be an absolute http(s) URL without userinfo, query, or fragment")
+	}
+	if parsed.Path != "" && parsed.Path != "/" {
+		// The callback is mounted at the server root, so a prefixed origin
+		// would register a redirect URI nothing serves.
+		return errors.New("connector callback base URL must be an origin without a path")
 	}
 	switch parsed.Scheme {
 	case connectorSchemeHTTPS:
@@ -245,6 +274,12 @@ func (h *Handlers) connectorIdentity(c fiber.Ctx, action connectorAction) (*User
 	}
 	if strings.TrimSpace(ui.Subject) == "" || strings.TrimSpace(ui.Issuer) == "" {
 		return nil, fiber.NewError(fiber.StatusForbidden, "connectors require an identity with issuer and subject")
+	}
+	// Resolve the namespace first so the delegated transaction constraints
+	// (tctx.namespace) are compared against the namespace this request will
+	// actually act in, not skipped for lack of one.
+	if _, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, "")); err != nil {
+		return nil, err
 	}
 	// A delegated context token acts within its scopes: a token narrowed to
 	// unrelated work must not be able to link, inspect, or revoke accounts.
@@ -499,15 +534,22 @@ func (h *Handlers) UpdateConnection(c fiber.Ctx) error {
 		}
 	}
 	response := ConnectionAuthorizeResponse{Connection: connectionResponse(connection)}
-	// Consent is needed whenever the granted scopes do not cover the mode,
-	// not only on the request that changed it, so a retry after a failed
-	// consent start still returns an authorize URL.
-	if !connectors.ScopesCover(connection.Status.GrantedScopes, connectors.ScopesForMode(provider, mode)) {
+	// Consent is needed whenever the granted scopes do not cover the mode or
+	// the provider's OAuth client changed, not only on the request that
+	// changed the mode, so a retry after a failed consent start still
+	// returns an authorize URL.
+	if !connectors.ScopesCover(connection.Status.GrantedScopes, connectors.ScopesForMode(provider, mode)) ||
+		!connectors.ConsentMatchesProvider(connection, provider) {
 		authorizeURL, err := h.startConnectorConsent(ctx, connection, provider, mode)
 		if err != nil {
 			return err
 		}
 		response.AuthorizeURL = authorizeURL
+		// The controller has not judged the new mode yet; do not let the
+		// stale conditions advertise a usable link in the meantime.
+		response.Connection.Ready = false
+		response.Connection.State = corev1alpha1.ConnectionStatePending
+		response.Connection.Message = "Consent is required for the " + mode + " mode"
 	}
 	return c.JSON(response)
 }
@@ -575,8 +617,9 @@ func (h *Handlers) providerOAuthConfig(ctx context.Context, provider *corev1alph
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: provider.Namespace, Name: ref.Name}, secret); err != nil {
 		return connectors.OAuthProviderConfig{}, errors.New("connector provider client secret is unavailable")
 	}
-	value := strings.TrimSpace(string(secret.Data[ref.Key]))
-	if value == "" {
+	// The secret is opaque bytes; only emptiness is judged, never trimmed.
+	value := string(secret.Data[ref.Key])
+	if strings.TrimSpace(value) == "" {
 		return connectors.OAuthProviderConfig{}, errors.New("connector provider client secret is empty")
 	}
 	return connectors.ProviderOAuthConfig(provider, value), nil
@@ -589,6 +632,9 @@ func connectionSubjectLabel(ui *UserInfo) string {
 // startConnectorConsent records a pending consent and returns the provider
 // authorize URL. The PKCE verifier stays sealed server-side.
 func (h *Handlers) startConnectorConsent(ctx context.Context, connection *corev1alpha1.Connection, provider *corev1alpha1.ConnectorProvider, mode string) (string, error) {
+	if !connection.DeletionTimestamp.IsZero() {
+		return "", fiber.NewError(fiber.StatusConflict, "connection is being deleted")
+	}
 	if !connectionCustodyProtected(connection) {
 		return "", fiber.NewError(fiber.StatusConflict, "connection is not yet protected by the controller; retry shortly")
 	}
@@ -617,7 +663,9 @@ func (h *Handlers) startConnectorConsent(ctx context.Context, connection *corev1
 		Provider:      provider.Name,
 		Mode:          mode,
 		CodeVerifier:  verifier,
-		ExpiresAt:     h.connectors.now().Add(connectors.ConsentTTL),
+		// The code may only ever be exchanged with this OAuth client.
+		AuthorityDigest: connectors.ProviderAuthorityDigest(provider),
+		ExpiresAt:       h.connectors.now().Add(connectors.ConsentTTL),
 	}); err != nil {
 		return "", fiber.NewError(fiber.StatusInternalServerError, "failed to record consent")
 	}
@@ -679,6 +727,12 @@ func (h *Handlers) ConnectionCallback(c fiber.Ctx) error {
 	if err := h.client.Get(ctx, types.NamespacedName{Namespace: consent.Namespace, Name: consent.Provider}, provider); err != nil || !connectors.ProviderAccepted(provider) {
 		return h.connectorCallbackRedirect(c, consent.Name, "provider_unavailable", "")
 	}
+	// The provider was replaced or its OAuth client changed while the person
+	// was at the provider: the code belongs to the old client and must not be
+	// exchanged with the new endpoints.
+	if consent.AuthorityDigest != connectors.ProviderAuthorityDigest(provider) {
+		return h.connectorCallbackRedirect(c, consent.Name, "provider_changed", "")
+	}
 	cfg, err := h.providerOAuthConfig(ctx, provider)
 	if err != nil {
 		return h.connectorCallbackRedirect(c, consent.Name, "provider_unavailable", "")
@@ -727,7 +781,8 @@ func (h *Handlers) ConnectionCallback(c fiber.Ctx) error {
 			ExpiresAt:    token.ExpiresAt,
 			Scopes:       token.Scopes,
 		},
-		ExpiresAt: h.connectors.now().Add(connectors.ConsentTTL),
+		AuthorityDigest: consent.AuthorityDigest,
+		ExpiresAt:       h.connectors.now().Add(connectors.ConsentTTL),
 	}); err != nil {
 		if errors.Is(err, store.ErrConnectorCustodyTombstoned) {
 			// The link was disconnected while the code was being exchanged.
@@ -786,12 +841,16 @@ func (h *Handlers) CompleteConnection(c fiber.Ctx) error {
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to read completion")
 	}
+	provider, err := h.loadReadyConnectorProvider(ctx, connection.Namespace, connection.Spec.ProviderRef.Name)
+	if err != nil {
+		return err
+	}
 	if completion.ConnectionUID != string(connection.UID) || completion.Namespace != connection.Namespace ||
 		completion.Name != connection.Name || completion.Provider != connection.Spec.ProviderRef.Name ||
 		completion.SubjectDigest != connectors.SubjectDigest(connection.Spec.Subject.Issuer, connection.Spec.Subject.Subject) {
 		// A token presented against the wrong Connection is discarded so it
 		// cannot be tried across Connections.
-		_ = h.connectors.Consents.DeleteConnectorCompletion(ctx, nonce)
+		h.discardCompletion(ctx, provider, completion, nonce)
 		return fiber.NewError(fiber.StatusConflict, "completion token does not belong to this connection")
 	}
 	// The consent was granted for the mode in force when it started. A
@@ -799,8 +858,14 @@ func (h *Handlers) CompleteConnection(c fiber.Ctx) error {
 	// person must consent again under the current mode.
 	currentMode, _ := normalizeConnectionMode(connection.Spec.Mode)
 	if completion.Mode != currentMode {
-		_ = h.connectors.Consents.DeleteConnectorCompletion(ctx, nonce)
+		h.discardCompletion(ctx, provider, completion, nonce)
 		return fiber.NewError(fiber.StatusConflict, "the connection mode changed after consent started; start consent again")
+	}
+	// Tokens issued by a provider OAuth client that has since changed belong
+	// to a different authority; they are discarded, never committed.
+	if completion.AuthorityDigest != connectors.ProviderAuthorityDigest(provider) {
+		h.discardCompletion(ctx, provider, completion, nonce)
+		return fiber.NewError(fiber.StatusConflict, "the connector provider changed after consent started; start consent again")
 	}
 	ref, err := connectors.CredentialRef(connection)
 	if err != nil {
@@ -808,13 +873,13 @@ func (h *Handlers) CompleteConnection(c fiber.Ctx) error {
 	}
 	if err := h.connectors.Credentials.PutConnectorCredential(ctx, ref, completion.Credential); err != nil {
 		if errors.Is(err, store.ErrConnectorCustodyTombstoned) {
-			_ = h.connectors.Consents.DeleteConnectorCompletion(ctx, nonce)
+			h.discardCompletion(ctx, provider, completion, nonce)
 			return fiber.NewError(fiber.StatusConflict, "connection was disconnected; create it again")
 		}
 		log.Error(err, "connector credential could not be sealed", "connection", connection.Name)
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to store credential")
 	}
-	if err := h.markConnectionLinked(ctx, connection, completion.Credential); err != nil {
+	if err := h.markConnectionLinked(ctx, connection, provider, completion.Credential); err != nil {
 		log.Error(err, "connection status could not be updated after completion; the completion token remains valid for retry", "connection", connection.Name)
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to update connection status; retry")
 	}
@@ -822,6 +887,23 @@ func (h *Handlers) CompleteConnection(c fiber.Ctx) error {
 		log.Error(err, "consumed completion could not be removed", "connection", connection.Name)
 	}
 	return c.JSON(connectionResponse(connection))
+}
+
+// discardCompletion deletes a parked completion that will never be committed
+// and revokes its tokens best-effort, but only against the OAuth authority
+// that issued them; tokens from a replaced client are dropped unrevoked
+// rather than sent to a different authority.
+func (h *Handlers) discardCompletion(ctx context.Context, provider *corev1alpha1.ConnectorProvider, completion store.ConnectorCompletion, nonce string) {
+	if provider != nil && completion.AuthorityDigest == connectors.ProviderAuthorityDigest(provider) {
+		if cfg, err := h.providerOAuthConfig(ctx, provider); err == nil {
+			h.revokeIssuedTokens(ctx, cfg, connectors.TokenResponse{
+				AccessToken: completion.Credential.AccessToken, RefreshToken: completion.Credential.RefreshToken,
+			})
+		}
+	}
+	if err := h.connectors.Consents.DeleteConnectorCompletion(ctx, nonce); err != nil {
+		log.Error(err, "discarded completion could not be removed", "connection", completion.Name)
+	}
 }
 
 // revokeIssuedTokens revokes tokens Orka obtained but will never keep,
@@ -847,11 +929,13 @@ func oauthFailureReason(err error) string {
 	return "transport"
 }
 
-// markConnectionLinked records the successful consent on the Connection.
-func (h *Handlers) markConnectionLinked(ctx context.Context, connection *corev1alpha1.Connection, credential store.ConnectorCredential) error {
+// markConnectionLinked records the successful consent on the Connection,
+// including the provider OAuth client it was granted against.
+func (h *Handlers) markConnectionLinked(ctx context.Context, connection *corev1alpha1.Connection, provider *corev1alpha1.ConnectorProvider, credential store.ConnectorCredential) error {
 	now := metav1.NewTime(h.connectors.now().UTC())
 	mode, _ := normalizeConnectionMode(connection.Spec.Mode)
 	connection.Status.State = corev1alpha1.ConnectionStateReady
+	connection.Status.Consent = connectors.ConsentFor(provider)
 	connection.Status.GrantedScopes = append([]string(nil), credential.Scopes...)
 	connection.Status.LinkedAt = &now
 	connection.Status.LastRefreshTime = nil
@@ -868,9 +952,18 @@ func (h *Handlers) markConnectionLinked(ctx context.Context, connection *corev1a
 		ObservedGeneration: connection.Generation,
 		LastTransitionTime: now,
 	})
-	// The callback refused a grant that does not cover the consented mode, so
-	// the link is usable as soon as it is committed. The controller recomputes
-	// this condition on every reconcile from the provider's current scopes.
+	// The provider was just verified Accepted, the callback refused a grant
+	// that does not cover the consented mode, and the consent record above
+	// matches the provider, so the link is usable as soon as it is committed.
+	// The controller recomputes both conditions on every reconcile.
+	meta.SetStatusCondition(&connection.Status.Conditions, metav1.Condition{
+		Type:               corev1alpha1.ConnectionConditionProviderResolved,
+		Status:             metav1.ConditionTrue,
+		Reason:             corev1alpha1.ConnectionReasonProviderResolved,
+		Message:            "ConnectorProvider is accepted",
+		ObservedGeneration: connection.Generation,
+		LastTransitionTime: now,
+	})
 	meta.SetStatusCondition(&connection.Status.Conditions, metav1.Condition{
 		Type:               corev1alpha1.ConnectionConditionScopesGranted,
 		Status:             metav1.ConditionTrue,

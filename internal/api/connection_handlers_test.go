@@ -473,6 +473,10 @@ func TestConnectionOwnershipModeAndDisconnect(t *testing.T) {
 	if updated.Connection.Mode != corev1alpha1.ConnectionModeReadWrite || updated.AuthorizeURL == "" {
 		t.Fatalf("updated = %+v", updated)
 	}
+	// The stale read-only conditions must not advertise a usable readWrite link.
+	if updated.Connection.Ready || updated.Connection.State != corev1alpha1.ConnectionStatePending {
+		t.Fatalf("widened response must be pending until consent completes: %+v", updated.Connection)
+	}
 	if scope := stateFromAuthorizeURL(t, updated.AuthorizeURL).Get("scope"); scope != "read:user repo" {
 		t.Fatalf("readWrite scope = %q", scope)
 	}
@@ -720,6 +724,7 @@ func TestValidateConnectorConfig(t *testing.T) {
 		"empty url":   func(c *ConnectorConfig) { c.CallbackBaseURL = "" },
 		"http public": func(c *ConnectorConfig) { c.CallbackBaseURL = "http://orka.example.test" },
 		"query":       func(c *ConnectorConfig) { c.CallbackBaseURL = "https://orka.example.test/?x=1" },
+		"path":        func(c *ConnectorConfig) { c.CallbackBaseURL = "https://orka.example.test/prefix" },
 		"userinfo":    func(c *ConnectorConfig) { c.CallbackBaseURL = "https://u@orka.example.test" },
 		"ftp":         func(c *ConnectorConfig) { c.CallbackBaseURL = "ftp://orka.example.test" },
 		"short key":   func(c *ConnectorConfig) { c.StateKey = []byte("short") },
@@ -904,6 +909,11 @@ func TestConnectionCompletionRejectsStaleModeAndIsRetryable(t *testing.T) {
 	if resp.StatusCode != http.StatusConflict || !strings.Contains(string(raw), "mode changed") {
 		t.Fatalf("stale-mode completion = %d %s, want 409", resp.StatusCode, raw)
 	}
+	// The discarded tokens were revoked at the provider, refresh before access.
+	if len(h.revoked) != 2 || h.revoked[0] != "ghr_secret_refresh" || h.revoked[1] != "gho_secret_access" {
+		t.Fatalf("a discarded completion must revoke its tokens, revoked = %v", h.revoked)
+	}
+	h.revoked = nil
 	stored := &corev1alpha1.Connection{}
 	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: created.Connection.Name}, stored); err != nil {
 		t.Fatal(err)
@@ -958,6 +968,11 @@ func TestCompletionLocksSerializePerKey(t *testing.T) {
 	case <-released:
 	case <-time.After(time.Second):
 		t.Fatal("the waiter must proceed once the key is released")
+	}
+	// Entries are dropped once the last holder releases them, so account
+	// churn does not grow the map for the lifetime of the process.
+	if size := locks.size(); size != 0 {
+		t.Fatalf("lock map size = %d after release, want 0", size)
 	}
 }
 
@@ -1076,5 +1091,109 @@ func TestConnectionRoutesEnforceContextTokenScopes(t *testing.T) {
 	}
 	if resp, _ := h.do(http.MethodGet, "/api/v1/connections", nil); resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("manage scope list = %d, want 403 (read scope required)", resp.StatusCode)
+	}
+}
+
+func TestConnectionCallbackRefusesChangedProvider(t *testing.T) {
+	h := newConnectorTestHarness(t, acceptedTestProvider())
+	created := h.create("readOnly")
+	// The provider's OAuth client is rotated while the person is at the
+	// provider: the code must not be exchanged with the new client.
+	provider := &corev1alpha1.ConnectorProvider{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: "github"}, provider); err != nil {
+		t.Fatal(err)
+	}
+	provider.Spec.OAuth.ClientID = "rotated-client"
+	if err := h.client.Update(context.Background(), provider); err != nil {
+		t.Fatal(err)
+	}
+	location := h.consentAndCallback(created)
+	if !strings.Contains(location, "reason=provider_changed") || strings.Contains(location, "completion=") {
+		t.Fatalf("callback after provider change location = %q", location)
+	}
+	if h.tokens != 0 {
+		t.Fatal("no code exchange may happen against a changed provider")
+	}
+}
+
+func TestConnectionCompletionRefusesChangedProvider(t *testing.T) {
+	h := newConnectorTestHarness(t, acceptedTestProvider())
+	created := h.create("readOnly")
+	location := h.consentAndCallback(created)
+	completion := completionFromLocation(t, location)
+	provider := &corev1alpha1.ConnectorProvider{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: "github"}, provider); err != nil {
+		t.Fatal(err)
+	}
+	provider.Spec.OAuth.TokenURL = "https://provider.example.test/other-token"
+	if err := h.client.Update(context.Background(), provider); err != nil {
+		t.Fatal(err)
+	}
+	resp, raw := h.complete(created.Connection.Name, completion)
+	if resp.StatusCode != http.StatusConflict || !strings.Contains(string(raw), "provider changed") {
+		t.Fatalf("completion after provider change = %d %s, want 409", resp.StatusCode, raw)
+	}
+	// The parked tokens belong to the old client: discarded, not sent to the new one.
+	if len(h.revoked) != 0 {
+		t.Fatalf("tokens must not be revoked against a different authority, revoked = %v", h.revoked)
+	}
+	if resp, _ := h.complete(created.Connection.Name, completion); resp.StatusCode != http.StatusConflict {
+		t.Fatalf("discarded completion = %d, want 409", resp.StatusCode)
+	}
+	stored := &corev1alpha1.Connection{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: created.Connection.Name}, stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status.State == corev1alpha1.ConnectionStateReady || stored.Status.Consent != nil {
+		t.Fatalf("a completion from a changed provider must not link: %+v", stored.Status)
+	}
+}
+
+func TestConnectionAuthorizeRefusesDeletingConnection(t *testing.T) {
+	h := newConnectorTestHarness(t, acceptedTestProvider())
+	created := h.create("readOnly")
+	stored := &corev1alpha1.Connection{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: created.Connection.Name}, stored); err != nil {
+		t.Fatal(err)
+	}
+	// The custody finalizer holds the object in Terminating until the
+	// controller finalizes it; no new consent may start meanwhile.
+	if err := h.client.Delete(context.Background(), stored); err != nil {
+		t.Fatal(err)
+	}
+	resp, raw := h.do(http.MethodPost, "/api/v1/connections/"+created.Connection.Name+"/authorize", nil)
+	if resp.StatusCode != http.StatusConflict || !strings.Contains(string(raw), "being deleted") {
+		t.Fatalf("authorize on deleting connection = %d %s, want 409", resp.StatusCode, raw)
+	}
+	resp, raw = h.do(http.MethodPut, "/api/v1/connections/"+created.Connection.Name, map[string]string{"mode": "readWrite"})
+	if resp.StatusCode != http.StatusConflict || !strings.Contains(string(raw), "being deleted") {
+		t.Fatalf("widen on deleting connection = %d %s, want 409", resp.StatusCode, raw)
+	}
+}
+
+func TestConnectionLinkRecordsConsentAuthority(t *testing.T) {
+	h := newConnectorTestHarness(t, acceptedTestProvider())
+	created := h.create("readOnly")
+	h.link(created)
+	stored := &corev1alpha1.Connection{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: created.Connection.Name}, stored); err != nil {
+		t.Fatal(err)
+	}
+	provider := &corev1alpha1.ConnectorProvider{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: "github"}, provider); err != nil {
+		t.Fatal(err)
+	}
+	if !connectors.ConsentMatchesProvider(stored, provider) || !connectors.ConnectionLinked(stored) {
+		t.Fatalf("a committed consent must record the provider authority and be linked: %+v", stored.Status)
+	}
+	// A rotated client makes the next mode change ask for consent again even
+	// though the granted scopes already cover the mode.
+	provider.Spec.OAuth.ClientID = "rotated-client"
+	if err := h.client.Update(context.Background(), provider); err != nil {
+		t.Fatal(err)
+	}
+	resp, raw := h.do(http.MethodPut, "/api/v1/connections/"+created.Connection.Name, map[string]string{"mode": "readOnly"})
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(raw), "authorizeURL") {
+		t.Fatalf("update after provider rotation = %d %s, want a new authorize URL", resp.StatusCode, raw)
 	}
 }

@@ -1890,17 +1890,22 @@ func main() {
 			setupLog.Error(err, "unable to create controller", "controller", "ConnectorProvider")
 			os.Exit(1)
 		}
-		if err := (&controller.ConnectionReconciler{
-			Client:      mgr.GetClient(),
-			APIReader:   mgr.GetAPIReader(),
-			Scheme:      mgr.GetScheme(),
-			Credentials: sqliteStore,
-			Consents:    sqliteStore,
-			Revoker:     connectorOAuthClient,
-		}).SetupWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to create controller", "controller", "Connection")
-			os.Exit(1)
-		}
+	}
+	// The Connection reconciler runs even when connectors are disabled: it
+	// owns the custody finalizer, so Connections created earlier must still
+	// finalize (custody deleted, tokens revoked where the OAuth client is
+	// available) instead of wedging in Terminating. New consent stays
+	// closed because the API routes and the provider reconciler are gated.
+	if err := (&controller.ConnectionReconciler{
+		Client:      mgr.GetClient(),
+		APIReader:   mgr.GetAPIReader(),
+		Scheme:      mgr.GetScheme(),
+		Credentials: sqliteStore,
+		Consents:    sqliteStore,
+		Revoker:     connectorOAuthClient,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "Connection")
+		os.Exit(1)
 	}
 
 	if err := (&controller.ToolReconciler{

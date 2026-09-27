@@ -173,7 +173,7 @@ func TestConnectorConsentSingleUseAndExpiry(t *testing.T) {
 	s := newConnectorTestStore(t)
 	ctx := context.Background()
 	consent := store.ConnectorConsent{
-		Nonce: "nonce-1", ConnectionUID: "uid-1", Namespace: "tenant", Name: "github-abc",
+		Nonce: "nonce-1", ConnectionUID: "uid-1", Namespace: "tenant", Name: "github-abc", AuthorityDigest: "authority-1",
 		SubjectDigest: "digest-a", Provider: "github", Mode: "readOnly", CodeVerifier: "verifier-secret",
 		ExpiresAt: time.Now().Add(10 * time.Minute),
 	}
@@ -191,7 +191,8 @@ func TestConnectorConsentSingleUseAndExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ConsumeConnectorConsent: %v", err)
 	}
-	if got.CodeVerifier != consent.CodeVerifier || got.ConnectionUID != consent.ConnectionUID || got.Mode != consent.Mode || got.SubjectDigest != consent.SubjectDigest {
+	if got.CodeVerifier != consent.CodeVerifier || got.ConnectionUID != consent.ConnectionUID || got.Mode != consent.Mode ||
+		got.SubjectDigest != consent.SubjectDigest || got.AuthorityDigest != "authority-1" {
 		t.Fatalf("consent = %+v", got)
 	}
 	if _, err := s.ConsumeConnectorConsent(ctx, consent.Nonce); !errors.Is(err, store.ErrNotFound) {
@@ -239,15 +240,19 @@ func TestConnectorConsentSingleUseAndExpiry(t *testing.T) {
 	}
 }
 
-func TestConnectorCompletionRoundTripAndTombstone(t *testing.T) {
-	s := newConnectorTestStore(t)
-	ctx := context.Background()
-	completion := store.ConnectorCompletion{
+func testConnectorCompletion() store.ConnectorCompletion {
+	return store.ConnectorCompletion{
 		Nonce: "completion-1", ConnectionUID: "uid-1", Namespace: "tenant", Name: "github-abc",
-		SubjectDigest: "digest-a", Provider: "github", Mode: "readOnly",
+		SubjectDigest: "digest-a", Provider: "github", Mode: "readOnly", AuthorityDigest: "authority-1",
 		Credential: store.ConnectorCredential{AccessToken: "gho_parked", RefreshToken: "ghr_parked", Scopes: []string{"repo"}},
 		ExpiresAt:  time.Now().Add(10 * time.Minute),
 	}
+}
+
+func TestConnectorCompletionRoundTrip(t *testing.T) {
+	s := newConnectorTestStore(t)
+	ctx := context.Background()
+	completion := testConnectorCompletion()
 	if err := s.CreateConnectorCompletion(ctx, completion); err != nil {
 		t.Fatalf("CreateConnectorCompletion: %v", err)
 	}
@@ -262,7 +267,8 @@ func TestConnectorCompletionRoundTripAndTombstone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ConsumeConnectorCompletion: %v", err)
 	}
-	if got.Credential.AccessToken != "gho_parked" || got.Credential.RefreshToken != "ghr_parked" || got.SubjectDigest != "digest-a" || got.Mode != "readOnly" {
+	if got.Credential.AccessToken != "gho_parked" || got.Credential.RefreshToken != "ghr_parked" || got.SubjectDigest != "digest-a" ||
+		got.Mode != "readOnly" || got.AuthorityDigest != "authority-1" {
 		t.Fatalf("completion = %+v", got)
 	}
 	if _, err := s.ConsumeConnectorCompletion(ctx, completion.Nonce); !errors.Is(err, store.ErrNotFound) {
@@ -296,6 +302,14 @@ func TestConnectorCompletionRoundTripAndTombstone(t *testing.T) {
 	if _, err := s.PeekConnectorCompletion(ctx, ""); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("peek empty nonce err = %v", err)
 	}
+}
+
+// TestConnectorCompletionExpiryAndDisconnect covers expired rows, which stay
+// listed for revocation, and disconnect, which drops every parked row.
+func TestConnectorCompletionExpiryAndDisconnect(t *testing.T) {
+	s := newConnectorTestStore(t)
+	ctx := context.Background()
+	completion := testConnectorCompletion()
 	expired := completion
 	expired.Nonce = "completion-expired"
 	expired.ExpiresAt = time.Now().Add(-time.Second)

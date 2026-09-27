@@ -477,7 +477,8 @@ func (f *fakeConnectorCredentialStore) DeleteConnectorCompletion(_ context.Conte
 }
 
 func (f *fakeConnectorCredentialStore) ListConnectorCompletionsForConnection(_ context.Context, connectionUID string) ([]store.ConnectorCompletion, error) {
-	return f.parked[connectionUID], nil
+	// A copy, as the real store returns: callers delete while iterating.
+	return append([]store.ConnectorCompletion(nil), f.parked[connectionUID]...), nil
 }
 
 func (f *fakeConnectorCredentialStore) DeleteConnectorConsentsForConnection(_ context.Context, connectionUID string) error {
@@ -532,9 +533,16 @@ func TestConnectionReconcilerFinalizerAndDisconnect(t *testing.T) {
 	}
 
 	// Link it, park an uncommitted completion, then disconnect.
+	updated.Status.Consent = connectors.ConsentFor(provider)
+	if err := c.Status().Update(context.Background(), updated); err != nil {
+		t.Fatal(err)
+	}
 	credentials.credentials[string(updated.UID)] = store.ConnectorCredential{AccessToken: "gho_access", RefreshToken: "ghr_refresh"}
 	credentials.consents[string(updated.UID)] = 1
-	credentials.parked[string(updated.UID)] = []store.ConnectorCompletion{{Credential: store.ConnectorCredential{AccessToken: "gho_parked", RefreshToken: "ghr_parked"}}}
+	credentials.parked[string(updated.UID)] = []store.ConnectorCompletion{{
+		AuthorityDigest: connectors.ProviderAuthorityDigest(provider),
+		Credential:      store.ConnectorCredential{AccessToken: "gho_parked", RefreshToken: "ghr_parked"},
+	}}
 	if err := c.Delete(context.Background(), updated); err != nil {
 		t.Fatal(err)
 	}
@@ -587,11 +595,14 @@ func TestConnectionReconcilerReapsExpiredCompletions(t *testing.T) {
 	connection := testConnection("tenant", "github-alice", "github")
 	connection.Finalizers = []string{ConnectionCustodyFinalizer}
 	credentials := newFakeConnectorCredentialStore()
+	authority := connectors.ProviderAuthorityDigest(provider)
 	credentials.parked[string(connection.UID)] = []store.ConnectorCompletion{
-		{Nonce: "live", ExpiresAt: time.Now().Add(5 * time.Minute), Credential: store.ConnectorCredential{AccessToken: "gho_live"}},
-		{Nonce: "stale", ExpiresAt: time.Now().Add(-time.Minute), Credential: store.ConnectorCredential{AccessToken: "gho_stale", RefreshToken: "ghr_stale"}},
+		{Nonce: "live", ExpiresAt: time.Now().Add(5 * time.Minute), AuthorityDigest: authority, Credential: store.ConnectorCredential{AccessToken: "gho_live"}},
+		{Nonce: "stale", ExpiresAt: time.Now().Add(-time.Minute), AuthorityDigest: authority, Credential: store.ConnectorCredential{AccessToken: "gho_stale", RefreshToken: "ghr_stale"}},
 		// A committed completion whose row outlived a failed delete: active custody, never revoked.
-		{Nonce: "committed", ExpiresAt: time.Now().Add(-time.Minute), Credential: store.ConnectorCredential{AccessToken: "gho_committed", RefreshToken: "ghr_committed"}},
+		{Nonce: "committed", ExpiresAt: time.Now().Add(-time.Minute), AuthorityDigest: authority, Credential: store.ConnectorCredential{AccessToken: "gho_committed", RefreshToken: "ghr_committed"}},
+		// Issued by a provider OAuth client that has since changed: deleted, but never sent to the new authority.
+		{Nonce: "foreign", ExpiresAt: time.Now().Add(-time.Minute), AuthorityDigest: "stale-authority", Credential: store.ConnectorCredential{AccessToken: "gho_foreign", RefreshToken: "ghr_foreign"}},
 	}
 	credentials.credentials[string(connection.UID)] = store.ConnectorCredential{AccessToken: "gho_committed", RefreshToken: "ghr_committed"}
 	revoker := &fakeConnectorRevoker{}
@@ -604,10 +615,44 @@ func TestConnectionReconcilerReapsExpiredCompletions(t *testing.T) {
 	if len(revoker.tokens) != 2 || revoker.tokens[0] != "ghr_stale" || revoker.tokens[1] != "gho_stale" {
 		t.Fatalf("revoked = %v, want only the abandoned completion's tokens", revoker.tokens)
 	}
-	if strings.Join(credentials.deletedCompletions, ",") != "stale,committed" {
-		t.Fatalf("deleted completions = %v, want both expired rows dropped", credentials.deletedCompletions)
+	if strings.Join(credentials.deletedCompletions, ",") != "stale,committed,foreign" {
+		t.Fatalf("deleted completions = %v, want every expired row dropped", credentials.deletedCompletions)
 	}
 	if remaining := credentials.parked[string(connection.UID)]; len(remaining) != 1 || remaining[0].Nonce != "live" {
 		t.Fatalf("remaining completions = %+v", remaining)
+	}
+}
+
+// TestConnectionReconcilerDisconnectSkipsRevocationAgainstChangedAuthority
+// covers a provider replaced under the same name: custody is deleted, but the
+// stored tokens are never sent to the replacement's revocation endpoint.
+func TestConnectionReconcilerDisconnectSkipsRevocationAgainstChangedAuthority(t *testing.T) {
+	scheme := connectorTestScheme(t)
+	provider := acceptedConnectorProvider()
+	provider.Spec.OAuth.RevocationURL = "https://github.com/revoke"
+	connection := testConnection("tenant", "github-alice", "github")
+	connection.Finalizers = []string{ConnectionCustodyFinalizer}
+	connection.Status.Consent = &corev1alpha1.ConnectionConsent{ProviderUID: "old-provider", AuthorityDigest: "old-authority"}
+	credentials := newFakeConnectorCredentialStore()
+	credentials.credentials[string(connection.UID)] = store.ConnectorCredential{AccessToken: "gho_access", RefreshToken: "ghr_refresh"}
+	revoker := &fakeConnectorRevoker{}
+	c := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(connection, provider, connectorClientSecret("tenant")).
+		WithStatusSubresource(&corev1alpha1.Connection{}).Build()
+	reconciler := &ConnectionReconciler{Client: c, APIReader: c, Scheme: scheme, Credentials: credentials, Consents: credentials, Revoker: revoker}
+	key := types.NamespacedName{Namespace: "tenant", Name: "github-alice"}
+	if err := c.Delete(context.Background(), connection); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	if len(revoker.tokens) != 0 {
+		t.Fatalf("tokens must not be sent to a different authority, revoked = %v", revoker.tokens)
+	}
+	if len(credentials.deleted) != 1 {
+		t.Fatal("custody must still be deleted")
+	}
+	if err := c.Get(context.Background(), key, &corev1alpha1.Connection{}); err == nil || !apierrors.IsNotFound(err) {
+		t.Fatalf("finalizer must be released, err = %v", err)
 	}
 }

@@ -89,7 +89,11 @@ type ConnectorConsent struct {
 	Provider      string
 	Mode          string
 	CodeVerifier  string
-	ExpiresAt     time.Time
+	// AuthorityDigest is the provider OAuth-authority digest the consent was
+	// started against; the callback refuses to exchange the code with a
+	// different authority.
+	AuthorityDigest string
+	ExpiresAt       time.Time
 }
 
 // ConnectorCompletion is the second half of a consent: token material the
@@ -104,7 +108,10 @@ type ConnectorCompletion struct {
 	Provider      string
 	Mode          string
 	Credential    ConnectorCredential
-	ExpiresAt     time.Time
+	// AuthorityDigest is the provider OAuth-authority digest that issued the
+	// parked tokens; they are only ever revoked against that authority.
+	AuthorityDigest string
+	ExpiresAt       time.Time
 }
 
 // ConnectorConsentStore holds pending consents and pending completions.

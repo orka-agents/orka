@@ -51,6 +51,7 @@ func connectorSchemaStatements() []string {
 			mode                TEXT NOT NULL,
 			verifier_nonce      BLOB NOT NULL,
 			verifier_ciphertext BLOB NOT NULL,
+			authority_digest    TEXT NOT NULL DEFAULT '',
 			expires_at          TIMESTAMP NOT NULL,
 			created_at          TIMESTAMP NOT NULL
 		)`,
@@ -66,6 +67,7 @@ func connectorSchemaStatements() []string {
 			mode            TEXT NOT NULL,
 			payload_nonce   BLOB NOT NULL,
 			payload         BLOB NOT NULL,
+			authority_digest TEXT NOT NULL DEFAULT '',
 			expires_at      TIMESTAMP NOT NULL,
 			created_at      TIMESTAMP NOT NULL
 		)`,
@@ -324,10 +326,10 @@ func (s *Store) CreateConnectorConsent(ctx context.Context, consent store.Connec
 		return fmt.Errorf("purge expired connector consents: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO connector_consents
-		(nonce, connection_uid, namespace, name, subject_digest, provider, mode, verifier_nonce, verifier_ciphertext, expires_at, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(nonce, connection_uid, namespace, name, subject_digest, provider, mode, verifier_nonce, verifier_ciphertext, authority_digest, expires_at, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		consent.Nonce, consent.ConnectionUID, consent.Namespace, consent.Name, consent.SubjectDigest, consent.Provider,
-		consent.Mode, verifierNonce, verifierCiphertext, consent.ExpiresAt.UTC(), now); err != nil {
+		consent.Mode, verifierNonce, verifierCiphertext, consent.AuthorityDigest, consent.ExpiresAt.UTC(), now); err != nil {
 		return fmt.Errorf("persist connector consent: %w", err)
 	}
 	return tx.Commit()
@@ -354,9 +356,9 @@ func (s *Store) ConsumeConnectorConsent(ctx context.Context, nonce string) (stor
 		verifierNonce, verifierCiphertext []byte
 	)
 	err = tx.QueryRowContext(ctx, `SELECT nonce, connection_uid, namespace, name, subject_digest, provider, mode,
-		verifier_nonce, verifier_ciphertext, expires_at FROM connector_consents WHERE nonce = ?`, nonce).
+		verifier_nonce, verifier_ciphertext, authority_digest, expires_at FROM connector_consents WHERE nonce = ?`, nonce).
 		Scan(&consent.Nonce, &consent.ConnectionUID, &consent.Namespace, &consent.Name, &consent.SubjectDigest,
-			&consent.Provider, &consent.Mode, &verifierNonce, &verifierCiphertext, &consent.ExpiresAt)
+			&consent.Provider, &consent.Mode, &verifierNonce, &verifierCiphertext, &consent.AuthorityDigest, &consent.ExpiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return store.ConnectorConsent{}, store.ErrNotFound
 	}
@@ -426,10 +428,10 @@ func (s *Store) CreateConnectorCompletion(ctx context.Context, completion store.
 		return store.ErrConnectorCustodyTombstoned
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO connector_completions
-		(nonce, connection_uid, namespace, name, subject_digest, provider, mode, payload_nonce, payload, expires_at, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(nonce, connection_uid, namespace, name, subject_digest, provider, mode, payload_nonce, payload, authority_digest, expires_at, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		completion.Nonce, completion.ConnectionUID, completion.Namespace, completion.Name, completion.SubjectDigest,
-		completion.Provider, completion.Mode, payloadNonce, payload, completion.ExpiresAt.UTC(), now); err != nil {
+		completion.Provider, completion.Mode, payloadNonce, payload, completion.AuthorityDigest, completion.ExpiresAt.UTC(), now); err != nil {
 		return fmt.Errorf("persist connector completion: %w", err)
 	}
 	return tx.Commit()
@@ -453,9 +455,9 @@ func (s *Store) ConsumeConnectorCompletion(ctx context.Context, nonce string) (s
 		payloadNonce, payload []byte
 	)
 	err = tx.QueryRowContext(ctx, `SELECT nonce, connection_uid, namespace, name, subject_digest, provider, mode,
-		payload_nonce, payload, expires_at FROM connector_completions WHERE nonce = ?`, nonce).
+		payload_nonce, payload, authority_digest, expires_at FROM connector_completions WHERE nonce = ?`, nonce).
 		Scan(&completion.Nonce, &completion.ConnectionUID, &completion.Namespace, &completion.Name, &completion.SubjectDigest,
-			&completion.Provider, &completion.Mode, &payloadNonce, &payload, &completion.ExpiresAt)
+			&completion.Provider, &completion.Mode, &payloadNonce, &payload, &completion.AuthorityDigest, &completion.ExpiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return store.ConnectorCompletion{}, store.ErrNotFound
 	}
@@ -532,7 +534,7 @@ func (s *Store) ListConnectorCompletionsForConnection(ctx context.Context, conne
 // that fail to open are skipped rather than returned.
 func (s *Store) queryConnectorCompletions(ctx context.Context, where string, arg any, includeExpired bool) ([]store.ConnectorCompletion, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT nonce, connection_uid, namespace, name, subject_digest, provider, mode,
-		payload_nonce, payload, expires_at FROM connector_completions `+where, arg)
+		payload_nonce, payload, authority_digest, expires_at FROM connector_completions `+where, arg)
 	if err != nil {
 		return nil, fmt.Errorf("read connector completions: %w", err)
 	}
@@ -545,7 +547,7 @@ func (s *Store) queryConnectorCompletions(ctx context.Context, where string, arg
 			payloadNonce, payload []byte
 		)
 		if err := rows.Scan(&completion.Nonce, &completion.ConnectionUID, &completion.Namespace, &completion.Name, &completion.SubjectDigest,
-			&completion.Provider, &completion.Mode, &payloadNonce, &payload, &completion.ExpiresAt); err != nil {
+			&completion.Provider, &completion.Mode, &payloadNonce, &payload, &completion.AuthorityDigest, &completion.ExpiresAt); err != nil {
 			return nil, fmt.Errorf("scan connector completion: %w", err)
 		}
 		completion.ExpiresAt = completion.ExpiresAt.UTC()
