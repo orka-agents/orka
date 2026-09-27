@@ -156,12 +156,31 @@ func (h *harness) put(credential store.ConnectorCredential) {
 	if err := h.store.PutConnectorCredential(context.Background(), ref, credential); err != nil {
 		h.t.Fatal(err)
 	}
+	// A put is a committed consent: the status mirrors custody's grant, as
+	// the API's completion does.
+	held, err := h.store.GetConnectorCredential(context.Background(), ref)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	live := h.reload()
+	live.Status.GrantSequence = held.GrantSequence
+	if err := h.client.Status().Update(context.Background(), live); err != nil {
+		h.t.Fatal(err)
+	}
 }
 
+// request freezes the grant custody holds right now (every put is a new
+// grant), so a Task dispatched after the latest consent is modeled.
 func (h *harness) request() outboundaccess.ConnectionCredentialRequest {
+	grant := int64(1)
+	if ref, err := connectors.CredentialRef(h.connection); err == nil {
+		if held, err := h.store.GetConnectorCredential(context.Background(), ref); err == nil && held.GrantSequence > 0 {
+			grant = held.GrantSequence
+		}
+	}
 	return outboundaccess.ConnectionCredentialRequest{
 		Namespace: testNamespace, Provider: "github", Issuer: testIssuer, Subject: testSubject,
-		Frozen: outboundaccess.FrozenConnection{UID: "uid-1", Generation: 2, GrantSequence: 1},
+		Frozen: outboundaccess.FrozenConnection{UID: "uid-1", Generation: 2, GrantSequence: grant},
 		Tool:   outboundaccess.ToolBinding{Name: "gh_search", URL: "https://api.github.com/search/issues", Method: "GET", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead},
 	}
 }
@@ -385,12 +404,10 @@ func TestRefreshLosesToConcurrentReconsent(t *testing.T) {
 		h.put(store.ConnectorCredential{AccessToken: "gho_reconsented", RefreshToken: "ghr_reconsented", ExpiresAt: h.now.Add(2 * time.Hour)})
 	}
 	h.refresher.onRefresh = reconsent
-	got, err := h.source.ResolveConnectionCredential(context.Background(), h.request())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.AccessToken != "gho_reconsented" {
-		t.Fatalf("refresh must yield to the newer consent, got %q", got.AccessToken)
+	// The newer consent is another grant this Task never bound, so the
+	// call is refused rather than handed the re-consented material.
+	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil || !strings.Contains(err.Error(), "re-linked") {
+		t.Fatalf("refresh losing to a re-consent err = %v, want refusal", err)
 	}
 	stored, _ := h.store.GetConnectorCredential(context.Background(), ref)
 	if stored.AccessToken != "gho_reconsented" || stored.RefreshToken != "ghr_reconsented" {
@@ -429,12 +446,15 @@ func TestRefreshLosesToConcurrentReconsent(t *testing.T) {
 	}
 	h.put(store.ConnectorCredential{AccessToken: "gho_old4", RefreshToken: "ghr_old4", ExpiresAt: h.now.Add(-time.Minute)})
 
-	// The same for a late invalid_grant: the newer consent survives.
+	// The same for a late invalid_grant: the newer consent survives and the
+	// stale flight is refused rather than handed its material.
 	h.put(store.ConnectorCredential{AccessToken: "gho_old2", RefreshToken: "ghr_old2", ExpiresAt: h.now.Add(-time.Minute)})
 	h.refresher.err = &connectors.OAuthError{StatusCode: 400, Code: "invalid_grant"}
-	got, err = h.source.ResolveConnectionCredential(context.Background(), h.request())
-	if err != nil || got.AccessToken != "gho_reconsented" {
-		t.Fatalf("late invalid_grant must not shred the newer consent: got %+v err = %v", got, err)
+	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil || !strings.Contains(err.Error(), "re-linked") {
+		t.Fatalf("late invalid_grant err = %v, want refusal", err)
+	}
+	if held, _ := h.store.GetConnectorCredential(context.Background(), ref); held.AccessToken != "gho_reconsented" {
+		t.Fatalf("custody after late invalid_grant = %+v, want the newer consent kept", held)
 	}
 	if h.reload().Status.State != corev1alpha1.ConnectionStateReady {
 		t.Fatal("the link must stay Ready when the revoked token was already superseded")
@@ -519,11 +539,17 @@ func TestRevocationVerdictYieldsToConcurrentReconsent(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err != nil || got.AccessToken != "gho_new" {
-		t.Fatalf("resolve during re-consent = %+v err = %v", got, err)
+	// The fresh link is another grant this Task never bound: the call is
+	// refused, the verdict yields, and the fresh material stays sealed.
+	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil || !strings.Contains(err.Error(), "re-linked") {
+		t.Fatalf("resolve during re-consent err = %v, want refusal", err)
 	}
 	if live := h.reload(); live.Status.State != corev1alpha1.ConnectionStateReady {
 		t.Fatalf("a stale revocation verdict must not overwrite the fresh link: %+v", live.Status)
+	}
+	ref, _ := connectors.CredentialRef(h.connection)
+	if held, err := h.store.GetConnectorCredential(context.Background(), ref); err != nil || held.AccessToken != "gho_new" {
+		t.Fatalf("custody after a yielded verdict = %+v err = %v, want the fresh consent kept", held, err)
 	}
 }
 
@@ -594,8 +620,11 @@ func TestRefreshLosesToReconsentOnRetargetedProvider(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// The re-consent is another grant this Task never bound; it is refused
+	// on that ground before its material could be paired with a
+	// destination the person did not consent to for it.
 	_, err := h.source.ResolveConnectionCredential(context.Background(), h.request())
-	if err == nil || !strings.Contains(err.Error(), "does not match the endpoint declared") {
+	if err == nil || (!strings.Contains(err.Error(), "re-linked") && !strings.Contains(err.Error(), "does not match the endpoint declared")) {
 		t.Fatalf("credential from a retargeted re-consent must not be paired with the old destination: err = %v", err)
 	}
 }
@@ -780,8 +809,10 @@ func TestRevocationVerdictYieldsToReconsentAfterShred(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err != nil || got.AccessToken != "gho_new" {
-		t.Fatalf("resolve during re-consent = %+v err = %v, want the fresh material", got, err)
+	// The re-consented row is another grant this Task never bound: the
+	// stale flight is refused and the fresh row survives its shred.
+	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil || !strings.Contains(err.Error(), "re-linked") {
+		t.Fatalf("resolve during re-consent err = %v, want refusal", err)
 	}
 	if held, err := h.store.GetConnectorCredential(context.Background(), ref); err != nil || held.Version != 2 || held.AccessToken != "gho_new" {
 		t.Fatalf("custody = %+v err = %v, want the re-consented row at a fresh version", held, err)

@@ -115,6 +115,12 @@ func (s *Source) ResolveConnectionCredential(ctx context.Context, req outboundac
 		}
 		return outboundaccess.ConnectionCredential{}, err
 	}
+	// Custody, not only status, is fenced to the frozen grant: a consent
+	// that committed between the Connection read and this read (its status
+	// write may still be pending) holds another grant's material.
+	if err := frozenGrantHolds(req, credential); err != nil {
+		return outboundaccess.ConnectionCredential{}, err
+	}
 	// The provider is judged on every resolution, not only when refreshing:
 	// status can trail a provider change by one reconcile, and the held
 	// material must never be released against a client or destination set
@@ -135,6 +141,11 @@ func (s *Source) ResolveConnectionCredential(ctx context.Context, req outboundac
 			return outboundaccess.ConnectionCredential{}, err
 		}
 		if _, err := s.validateProvider(ctx, connection, credential, &req.Tool); err != nil {
+			return outboundaccess.ConnectionCredential{}, err
+		}
+		// The refresh carries the grant forward; a re-consent that won the
+		// race returns its own grant's material, which this Task never bound.
+		if err := frozenGrantHolds(req, credential); err != nil {
 			return outboundaccess.ConnectionCredential{}, err
 		}
 	}
@@ -172,11 +183,11 @@ func (s *Source) loadLiveConnection(ctx context.Context, req outboundaccess.Conn
 	if string(connection.UID) != req.Frozen.UID || connection.Generation != req.Frozen.Generation {
 		return nil, errors.New("connection changed since the task was dispatched; re-dispatch to use it")
 	}
-	if req.Frozen.GrantSequence <= 0 || connection.Status.GrantSequence != req.Frozen.GrantSequence {
-		return nil, errors.New("connection was re-linked since the task was dispatched; re-dispatch to use it")
-	}
 	if !connectors.ConnectionLinked(connection) {
 		return nil, errors.New("connection is not ready")
+	}
+	if req.Frozen.GrantSequence <= 0 || connection.Status.GrantSequence != req.Frozen.GrantSequence {
+		return nil, errors.New("connection was re-linked since the task was dispatched; re-dispatch to use it")
 	}
 	return connection, nil
 }
@@ -277,6 +288,8 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 		ExpiresAt:       token.ExpiresAt,
 		Scopes:          token.Scopes,
 		AuthorityDigest: current.AuthorityDigest,
+		// A refresh carries the grant forward; only a consent starts a new one.
+		GrantSequence: current.GrantSequence,
 	}
 	if refreshed.RefreshToken == "" {
 		refreshed.RefreshToken = current.RefreshToken
@@ -313,8 +326,18 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 		if err != nil {
 			return store.ConnectorCredential{}, err
 		}
-		if winner.AccessToken != refreshed.AccessToken || winner.RefreshToken != refreshed.RefreshToken {
-			s.revokeUnstorable(ctx, cfg, refreshed, logger)
+		// Only material the winner does not hold is revoked: a provider
+		// that kept the refresh token across both exchanges shares it with
+		// the winning row, and revoking it would kill the winner's grant.
+		losing := refreshed
+		if losing.RefreshToken == winner.RefreshToken {
+			losing.RefreshToken = ""
+		}
+		if losing.AccessToken == winner.AccessToken {
+			losing.AccessToken = ""
+		}
+		if losing.RefreshToken != "" || losing.AccessToken != "" {
+			s.revokeUnstorable(ctx, cfg, losing, logger)
 		}
 		if s.needsRefresh(winner) {
 			return store.ConnectorCredential{}, errors.New("connection credential changed concurrently and is about to expire; retry")
@@ -564,4 +587,13 @@ func oauthReason(err error) string {
 		return fmt.Sprintf("status=%d code=%s", oauthErr.StatusCode, oauthErr.Code)
 	}
 	return "transport"
+}
+
+// frozenGrantHolds refuses custody that a consent other than the frozen one
+// produced.
+func frozenGrantHolds(req outboundaccess.ConnectionCredentialRequest, credential store.ConnectorCredential) error {
+	if req.Frozen.GrantSequence <= 0 || credential.GrantSequence != req.Frozen.GrantSequence {
+		return errors.New("connection was re-linked since the task was dispatched; re-dispatch to use it")
+	}
+	return nil
 }
