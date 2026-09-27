@@ -206,7 +206,7 @@ func (r *ConnectionReconciler) revokeBestEffort(ctx context.Context, connection 
 		}
 		return
 	}
-	r.revokeTokens(ctx, connection, credential)
+	r.revokeTokens(ctx, connection, credential, true)
 }
 
 // reapExpiredCompletions revokes and deletes parked completions whose
@@ -230,7 +230,7 @@ func (r *ConnectionReconciler) reapExpiredCompletions(ctx context.Context, conne
 		// A completion whose token entered custody (its row outlived a
 		// failed delete after commit) is active, not abandoned.
 		if !sameConnectorCredential(committed, completion.Credential) {
-			r.revokeTokens(ctx, connection, completion.Credential)
+			r.revokeTokens(ctx, connection, completion.Credential, false)
 		}
 		if err := r.Consents.DeleteConnectorCompletion(ctx, completion.Nonce); err != nil {
 			log.FromContext(ctx).Info("expired completion could not be deleted", "connection", connection.Name)
@@ -254,7 +254,7 @@ func (r *ConnectionReconciler) revokeParkedCompletions(ctx context.Context, conn
 		if sameConnectorCredential(committed, completion.Credential) {
 			continue // revoked with the committed credential
 		}
-		r.revokeTokens(ctx, connection, completion.Credential)
+		r.revokeTokens(ctx, connection, completion.Credential, false)
 	}
 }
 
@@ -281,14 +281,21 @@ func sameConnectorCredential(committed *store.ConnectorCredential, parked store.
 // revokeTokens revokes the refresh then access token of one credential at
 // the provider, best effort. The tokens are sent only to the OAuth authority
 // sealed with them: when the provider was replaced or its client changed since
-// they were issued, nothing is sent.
-func (r *ConnectionReconciler) revokeTokens(ctx context.Context, connection *corev1alpha1.Connection, credential store.ConnectorCredential) {
+// they were issued, nothing is sent. Uncommitted (parked) tokens are revoked
+// only when the provider revokes per token: under grant-wide semantics they
+// may belong to another person's grant, and revoking them would sever that
+// person's live link.
+func (r *ConnectionReconciler) revokeTokens(ctx context.Context, connection *corev1alpha1.Connection, credential store.ConnectorCredential, committed bool) {
 	if r.Revoker == nil {
 		return
 	}
 	logger := log.FromContext(ctx)
 	provider := &corev1alpha1.ConnectorProvider{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: connection.Namespace, Name: connection.Spec.ProviderRef.Name}, provider); err != nil {
+		return
+	}
+	if !committed && !connectors.RevokesPerToken(provider) {
+		logger.Info("uncommitted connector tokens left to expire: provider revocation is grant-wide", "connection", connection.Name, "provider", provider.Name)
 		return
 	}
 	if credential.AuthorityDigest == "" || credential.AuthorityDigest != connectors.ProviderAuthorityDigest(provider) {

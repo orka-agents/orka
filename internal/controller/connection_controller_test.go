@@ -500,6 +500,7 @@ func TestConnectionReconcilerFinalizerAndDisconnect(t *testing.T) {
 	scheme := connectorTestScheme(t)
 	provider := acceptedConnectorProvider()
 	provider.Spec.OAuth.RevocationURL = "https://github.com/revoke"
+	provider.Spec.OAuth.RevocationSemantics = corev1alpha1.ConnectorRevocationPerToken
 	connection := testConnection("tenant", "github-alice", "github")
 	credentials := newFakeConnectorCredentialStore()
 	revoker := &fakeConnectorRevoker{err: errTestProviderRead}
@@ -592,6 +593,7 @@ func TestConnectionReconcilerReapsExpiredCompletions(t *testing.T) {
 	scheme := connectorTestScheme(t)
 	provider := acceptedConnectorProvider()
 	provider.Spec.OAuth.RevocationURL = "https://github.com/revoke"
+	provider.Spec.OAuth.RevocationSemantics = corev1alpha1.ConnectorRevocationPerToken
 	connection := testConnection("tenant", "github-alice", "github")
 	connection.Finalizers = []string{ConnectionCustodyFinalizer}
 	credentials := newFakeConnectorCredentialStore()
@@ -630,6 +632,7 @@ func TestConnectionReconcilerDisconnectSkipsRevocationAgainstChangedAuthority(t 
 	scheme := connectorTestScheme(t)
 	provider := acceptedConnectorProvider()
 	provider.Spec.OAuth.RevocationURL = "https://github.com/revoke"
+	provider.Spec.OAuth.RevocationSemantics = corev1alpha1.ConnectorRevocationPerToken
 	connection := testConnection("tenant", "github-alice", "github")
 	connection.Finalizers = []string{ConnectionCustodyFinalizer}
 	credentials := newFakeConnectorCredentialStore()
@@ -653,5 +656,55 @@ func TestConnectionReconcilerDisconnectSkipsRevocationAgainstChangedAuthority(t 
 	}
 	if err := c.Get(context.Background(), key, &corev1alpha1.Connection{}); err == nil || !apierrors.IsNotFound(err) {
 		t.Fatalf("finalizer must be released, err = %v", err)
+	}
+}
+
+// TestConnectionReconcilerGrantWideProviderRevokesOnlyCommittedTokens covers
+// a provider whose revocation invalidates the whole grant: disconnect revokes
+// the committed credential, but parked tokens nobody committed are deleted
+// unrevoked because they may belong to another person's grant.
+func TestConnectionReconcilerGrantWideProviderRevokesOnlyCommittedTokens(t *testing.T) {
+	scheme := connectorTestScheme(t)
+	provider := acceptedConnectorProvider()
+	provider.Spec.OAuth.RevocationURL = "https://github.com/revoke"
+	connection := testConnection("tenant", "github-alice", "github")
+	connection.Finalizers = []string{ConnectionCustodyFinalizer}
+	authority := connectors.ProviderAuthorityDigest(provider)
+	credentials := newFakeConnectorCredentialStore()
+	credentials.credentials[string(connection.UID)] = store.ConnectorCredential{AccessToken: "gho_access", RefreshToken: "ghr_refresh", AuthorityDigest: authority}
+	credentials.parked[string(connection.UID)] = []store.ConnectorCompletion{
+		{Nonce: "stale", ExpiresAt: time.Now().Add(-time.Minute), Credential: store.ConnectorCredential{AccessToken: "gho_stale", RefreshToken: "ghr_stale", AuthorityDigest: authority}},
+	}
+	revoker := &fakeConnectorRevoker{}
+	c := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(connection, provider, connectorClientSecret("tenant")).
+		WithStatusSubresource(&corev1alpha1.Connection{}).Build()
+	reconciler := &ConnectionReconciler{Client: c, APIReader: c, Scheme: scheme, Credentials: credentials, Consents: credentials, Revoker: revoker}
+	key := types.NamespacedName{Namespace: "tenant", Name: "github-alice"}
+	// The reaper drops the expired parked row without revoking it.
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	if len(revoker.tokens) != 0 || strings.Join(credentials.deletedCompletions, ",") != "stale" {
+		t.Fatalf("reaper: revoked = %v deleted = %v", revoker.tokens, credentials.deletedCompletions)
+	}
+	// Disconnect revokes the committed credential only.
+	credentials.parked[string(connection.UID)] = []store.ConnectorCompletion{
+		{Nonce: "parked", ExpiresAt: time.Now().Add(time.Minute), Credential: store.ConnectorCredential{AccessToken: "gho_parked", RefreshToken: "ghr_parked", AuthorityDigest: authority}},
+	}
+	live := &corev1alpha1.Connection{}
+	if err := c.Get(context.Background(), key, live); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Delete(context.Background(), live); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(revoker.tokens, ",") != "ghr_refresh,gho_access" {
+		t.Fatalf("disconnect revoked = %v, want only the committed credential", revoker.tokens)
+	}
+	if len(credentials.deleted) != 1 {
+		t.Fatal("custody must be deleted")
 	}
 }

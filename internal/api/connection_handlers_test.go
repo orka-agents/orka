@@ -73,12 +73,14 @@ func acceptedTestProvider() *corev1alpha1.ConnectorProvider {
 		Spec: corev1alpha1.ConnectorProviderSpec{
 			DisplayName: "GitHub",
 			OAuth: corev1alpha1.ConnectorOAuthConfig{
-				AuthorizeURL:    "https://provider.example.test/authorize",
-				TokenURL:        "https://provider.example.test/token",
-				RevocationURL:   "https://provider.example.test/revoke",
-				ClientID:        "client-id",
-				ClientSecretRef: corev1alpha1.SecretKeySelector{Name: "github-oauth", Key: "clientSecret"},
-				Scopes:          corev1alpha1.ConnectorScopes{Read: []string{"read:user"}, Write: []string{"repo"}},
+				AuthorizeURL:  "https://provider.example.test/authorize",
+				TokenURL:      "https://provider.example.test/token",
+				RevocationURL: "https://provider.example.test/revoke",
+				// Per-token so the tests can observe revocation of discarded tokens.
+				RevocationSemantics: corev1alpha1.ConnectorRevocationPerToken,
+				ClientID:            "client-id",
+				ClientSecretRef:     corev1alpha1.SecretKeySelector{Name: "github-oauth", Key: "clientSecret"},
+				Scopes:              corev1alpha1.ConnectorScopes{Read: []string{"read:user"}, Write: []string{"repo"}},
 			},
 			Tools: []corev1alpha1.ConnectorTool{
 				{Name: "list_pull_requests", Class: corev1alpha1.ConnectorToolClassRead, Source: corev1alpha1.ConnectorToolSourceBuiltin},
@@ -1201,5 +1203,35 @@ func TestConnectionLinkRecordsConsentAuthority(t *testing.T) {
 	resp, raw := h.do(http.MethodPut, "/api/v1/connections/"+created.Connection.Name, map[string]string{"mode": "readOnly"})
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(raw), "authorizeURL") {
 		t.Fatalf("update after provider rotation = %d %s, want a new authorize URL", resp.StatusCode, raw)
+	}
+}
+
+func TestConnectionGrantWideProviderNeverRevokesUncommittedTokens(t *testing.T) {
+	provider := acceptedTestProvider()
+	provider.Spec.OAuth.RevocationSemantics = corev1alpha1.ConnectorRevocationGrant
+	h := newConnectorTestHarness(t, provider)
+	// A partial grant is still refused, but the issued token is left to
+	// expire: it may belong to another person's grant.
+	created := h.create("readWrite")
+	h.grantScope = "read:user"
+	if location := h.consentAndCallback(created); !strings.Contains(location, "reason=scopes_denied") {
+		t.Fatalf("partial grant location = %q", location)
+	}
+	if len(h.revoked) != 0 {
+		t.Fatalf("grant-wide provider must not revoke uncommitted tokens, revoked = %v", h.revoked)
+	}
+	// Likewise for a completion discarded because the mode changed.
+	h.grantScope = ""
+	second := h.create("readOnly")
+	location := h.consentAndCallback(second)
+	completion := completionFromLocation(t, location)
+	if resp, raw := h.do(http.MethodPut, "/api/v1/connections/"+second.Connection.Name, map[string]string{"mode": "readWrite"}); resp.StatusCode != http.StatusOK {
+		t.Fatalf("widen = %d %s", resp.StatusCode, raw)
+	}
+	if resp, _ := h.complete(second.Connection.Name, completion); resp.StatusCode != http.StatusConflict {
+		t.Fatalf("stale-mode completion = %d, want 409", resp.StatusCode)
+	}
+	if len(h.revoked) != 0 {
+		t.Fatalf("grant-wide provider must not revoke discarded tokens, revoked = %v", h.revoked)
 	}
 }
