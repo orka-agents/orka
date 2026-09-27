@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"time"
@@ -197,7 +198,7 @@ func (r *ConnectionReconciler) applyCommittedCompletions(ctx context.Context, co
 			continue
 		}
 		held, err := r.Credentials.GetConnectorCredential(ctx, ref)
-		if err == nil && held.AccessToken == completion.Credential.AccessToken &&
+		if err == nil && held.GrantSequence == completion.Credential.GrantSequence && held.AccessToken == completion.Credential.AccessToken &&
 			held.RefreshToken == completion.Credential.RefreshToken && held.AuthorityDigest == completion.Credential.AuthorityDigest {
 			mode, _ := connectors.NormalizeConnectionMode(connection.Spec.Mode)
 			// The same fence the API applies to a retried completion: the
@@ -276,7 +277,15 @@ func (r *ConnectionReconciler) finalize(ctx context.Context, connection *corev1a
 		if err := r.Credentials.TombstoneConnectorCustody(ctx, string(connection.UID)); err != nil {
 			return ctrl.Result{}, err
 		}
-		r.revokeBestEffort(ctx, connection)
+		// Custody is the only copy of the tokens. Without the material to
+		// authenticate a revocation (the client Secret or its key is gone)
+		// it is kept, and the finalizer with it, until an operator restores
+		// the Secret; a provider that refuses a revocation is best effort.
+		if err := r.revokeBestEffort(ctx, connection); err != nil {
+			log.FromContext(ctx).Info("connector tokens cannot be revoked yet; custody is retained until they can be",
+				"connection", connection.Name, "reason", err.Error())
+			return ctrl.Result{RequeueAfter: connectionRevocationRetry}, nil
+		}
 		if err := r.Credentials.DeleteConnectorCredential(ctx, string(connection.UID)); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -295,19 +304,29 @@ func (r *ConnectionReconciler) finalize(ctx context.Context, connection *corev1a
 	return ctrl.Result{}, nil
 }
 
-func (r *ConnectionReconciler) revokeBestEffort(ctx context.Context, connection *corev1alpha1.Connection) {
+// connectionRevocationRetry is how long a disconnect waits for revocation
+// material (the provider's client Secret) to be restored before trying again.
+const connectionRevocationRetry = time.Minute
+
+// errRevocationUnavailable reports tokens that could not be offered for
+// revocation because the material to authenticate the call is missing.
+var errRevocationUnavailable = errors.New("revocation material is unavailable")
+
+func (r *ConnectionReconciler) revokeBestEffort(ctx context.Context, connection *corev1alpha1.Connection) error {
 	logger := log.FromContext(ctx)
 	if r.Revoker == nil {
-		return
+		return nil
 	}
 	ref, err := connectors.CredentialRef(connection)
 	if err != nil {
-		return
+		return nil
 	}
 	credential, err := r.Credentials.GetConnectorCredential(ctx, ref)
 	switch {
 	case err == nil:
-		r.revokeTokens(ctx, connection, credential)
+		if err := r.revokeTokens(ctx, connection, credential); err != nil {
+			return err
+		}
 	case errors.Is(err, store.ErrNotFound):
 		// The current grant may already be gone (the provider revoked it and
 		// custody was shredded); the grants earlier commits replaced can
@@ -320,11 +339,14 @@ func (r *ConnectionReconciler) revokeBestEffort(ctx context.Context, connection 
 	retired, err := r.Credentials.ListRetiredConnectorCredentials(ctx, ref)
 	if err != nil {
 		logger.Info("retired connector credentials could not be opened for revocation", "connection", connection.Name)
-		return
+		return nil
 	}
 	for _, previous := range retired {
-		r.revokeTokens(ctx, connection, previous)
+		if err := r.revokeTokens(ctx, connection, previous); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // reapExpiredCompletions deletes parked completions whose redemption window
@@ -360,32 +382,41 @@ func (r *ConnectionReconciler) reapExpiredCompletions(ctx context.Context, conne
 // material is ever revoked; a token from a consent nobody completed may be
 // another person's live credential (a forwarded consent link, or a provider
 // re-issuing a long-lived token), so it is deleted and left to expire.
-func (r *ConnectionReconciler) revokeTokens(ctx context.Context, connection *corev1alpha1.Connection, credential store.ConnectorCredential) {
+// revokeTokens offers a credential's tokens to the provider's revocation
+// endpoint. A provider whose revocation authority (client and revocation
+// endpoint) no longer matches the one sealed with the material, or that has
+// no revocation endpoint, cannot revoke it and the tokens are left to
+// expire; missing material to authenticate the call is reported so the
+// caller keeps custody instead of deleting the only copy.
+func (r *ConnectionReconciler) revokeTokens(ctx context.Context, connection *corev1alpha1.Connection, credential store.ConnectorCredential) error {
 	if r.Revoker == nil {
-		return
+		return nil
 	}
 	logger := log.FromContext(ctx)
 	provider := &corev1alpha1.ConnectorProvider{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: connection.Namespace, Name: connection.Spec.ProviderRef.Name}, provider); err != nil {
-		return
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("%w: %w", errRevocationUnavailable, err)
 	}
-	if credential.AuthorityDigest == "" || credential.AuthorityDigest != connectors.ProviderIssuerDigest(provider) {
-		logger.Info("provider OAuth client changed since the token was issued; not revoking against a different authority",
+	if credential.RevocationDigest == "" || credential.RevocationDigest != connectors.ProviderRevocationDigest(provider) {
+		logger.Info("provider OAuth client or revocation endpoint changed since the token was issued; not revoking against a different authority",
 			"connection", connection.Name, "provider", provider.Name)
-		return
+		return nil
 	}
 	if strings.TrimSpace(provider.Spec.OAuth.RevocationURL) == "" {
-		return
+		return nil
 	}
 	secret := &corev1.Secret{}
 	secretRef := provider.Spec.OAuth.ClientSecretRef
 	if err := r.referenceReader().Get(ctx, types.NamespacedName{Namespace: provider.Namespace, Name: secretRef.Name}, secret); err != nil {
-		return
+		return fmt.Errorf("%w: client secret %q: %w", errRevocationUnavailable, secretRef.Name, err)
 	}
 	// The secret is opaque bytes; only emptiness is judged, never trimmed.
 	clientSecret := string(secret.Data[secretRef.Key])
 	if strings.TrimSpace(clientSecret) == "" {
-		return
+		return fmt.Errorf("%w: client secret %q has no %q", errRevocationUnavailable, secretRef.Name, secretRef.Key)
 	}
 	cfg := connectors.ProviderOAuthConfig(provider, clientSecret)
 	for _, token := range []string{credential.RefreshToken, credential.AccessToken} {
@@ -401,6 +432,7 @@ func (r *ConnectionReconciler) revokeTokens(ctx context.Context, connection *cor
 			logger.Info("provider token revocation failed; continuing with disconnect", "connection", connection.Name, "provider", provider.Name)
 		}
 	}
+	return nil
 }
 
 func (r *ConnectionReconciler) referenceReader() client.Reader {

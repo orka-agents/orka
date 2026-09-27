@@ -855,7 +855,8 @@ func (h *Handlers) ConnectionCallback(c fiber.Ctx) error {
 			// Sealed with the tokens: whichever path later refreshes or
 			// revokes them knows the client that issued them, independent
 			// of tool-destination changes.
-			AuthorityDigest: connectors.ProviderIssuerDigest(provider),
+			AuthorityDigest:  connectors.ProviderIssuerDigest(provider),
+			RevocationDigest: connectors.ProviderRevocationDigest(provider),
 		},
 		// The full authority the person consented to (client identity plus
 		// tool destinations), verified again at completion.
@@ -947,7 +948,12 @@ func (h *Handlers) CompleteConnection(c fiber.Ctx) error {
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			return fiber.NewError(fiber.StatusInternalServerError, "failed to read custody; retry")
 		}
-		if err != nil || current.AccessToken != completion.Credential.AccessToken ||
+		// The committed completion carries the grant custody assigned it;
+		// custody holding any other grant (even one that re-issued the same
+		// token strings with other scopes or expiry) means a newer
+		// completion replaced this one.
+		if err != nil || current.GrantSequence != completion.Credential.GrantSequence ||
+			current.AccessToken != completion.Credential.AccessToken ||
 			current.RefreshToken != completion.Credential.RefreshToken || current.AuthorityDigest != completion.Credential.AuthorityDigest {
 			h.discardCompletion(ctx, completion, nonce)
 			return fiber.NewError(fiber.StatusConflict, "a newer completion replaced this one; nothing to resume")

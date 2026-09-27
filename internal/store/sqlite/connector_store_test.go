@@ -799,3 +799,58 @@ func TestConnectorCustodyAssignsMonotonicGrants(t *testing.T) {
 		t.Fatalf("grant after shred = %+v err = %v, want 3", held, err)
 	}
 }
+
+// TestConnectorConsentReplacesPendingConsent covers one pending consent per
+// Connection: a new authorize replaces the earlier one, so repeated calls
+// never grow the table, and a committed completion carries its grant.
+func TestConnectorConsentReplacesPendingConsent(t *testing.T) {
+	s := newConnectorTestStore(t)
+	ctx := context.Background()
+	first := testConnectorConsent()
+	if err := s.CreateConnectorConsent(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	second := testConnectorConsent()
+	second.Nonce = "nonce-second"
+	if err := s.CreateConnectorConsent(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ConsumeConnectorConsent(ctx, first.Nonce); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("first consent after a second authorize err = %v, want ErrNotFound", err)
+	}
+	if _, err := s.ConsumeConnectorConsent(ctx, second.Nonce); err != nil {
+		t.Fatalf("second consent must be usable: %v", err)
+	}
+	other := testConnectorConsent()
+	other.Nonce, other.ConnectionUID, other.Name = "nonce-other", "uid-2", "github-def"
+	if err := s.CreateConnectorConsent(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	third := testConnectorConsent()
+	third.Nonce = "nonce-third"
+	if err := s.CreateConnectorConsent(ctx, third); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ConsumeConnectorConsent(ctx, other.Nonce); err != nil {
+		t.Fatalf("another Connection's consent must survive: %v", err)
+	}
+	completion := testConnectorCompletion()
+	if err := s.CreateConnectorCompletion(ctx, completion); err != nil {
+		t.Fatal(err)
+	}
+	ref := store.ConnectorCredentialRef{ConnectionUID: completion.ConnectionUID, Namespace: completion.Namespace, Name: completion.Name, SubjectDigest: completion.SubjectDigest, Provider: completion.Provider}
+	if _, err := s.CommitConnectorCompletion(ctx, completion.Nonce, ref, completion.Credential); err != nil {
+		t.Fatal(err)
+	}
+	if peeked, err := s.PeekConnectorCompletion(ctx, completion.Nonce); err != nil || peeked.Credential.GrantSequence != 1 {
+		t.Fatalf("committed completion = %+v err = %v, want its grant sealed with it", peeked, err)
+	}
+}
+
+func testConnectorConsent() store.ConnectorConsent {
+	return store.ConnectorConsent{
+		Nonce: "nonce-1", ConnectionUID: "uid-1", Namespace: "tenant", Name: "github-abc", AuthorityDigest: "authority-1", Scopes: []string{"read:user", "repo"},
+		SubjectDigest: "digest-a", Provider: "github", Mode: "readOnly", CodeVerifier: "verifier-secret",
+		ExpiresAt: time.Now().Add(10 * time.Minute),
+	}
+}
