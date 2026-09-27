@@ -952,7 +952,10 @@ func (h *Handlers) CompleteConnection(c fiber.Ctx) error {
 			h.discardCompletion(ctx, completion, nonce)
 			return fiber.NewError(fiber.StatusConflict, "a newer completion replaced this one; nothing to resume")
 		}
-	} else if err := h.connectors.Consents.CommitConnectorCompletion(ctx, nonce, ref, completion.Credential); err != nil {
+		completion.Credential = current
+	} else if committed, err := h.connectors.Consents.CommitConnectorCompletion(ctx, nonce, ref, completion.Credential); err == nil {
+		completion.Credential = committed
+	} else {
 		if errors.Is(err, store.ErrConnectorCustodyTombstoned) {
 			h.discardCompletion(ctx, completion, nonce)
 			return fiber.NewError(fiber.StatusConflict, "connection was disconnected; create it again")
@@ -1038,6 +1041,11 @@ func (h *Handlers) markConnectionLinked(ctx context.Context, connection *corev1a
 }
 
 func (h *Handlers) applyConnectionLinked(ctx context.Context, connection *corev1alpha1.Connection, provider *corev1alpha1.ConnectorProvider, credential store.ConnectorCredential) error {
+	if connection.Status.GrantSequence > credential.GrantSequence {
+		// A later consent already recorded its grant; this older one must
+		// not roll the status back behind custody.
+		return nil
+	}
 	connectors.ApplyLinkedStatus(connection, provider, credential, metav1.NewTime(h.connectors.now().UTC()))
 	return h.client.Status().Update(ctx, connection)
 }

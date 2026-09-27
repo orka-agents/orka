@@ -42,7 +42,7 @@ func ApplyLinkedStatus(connection *corev1alpha1.Connection, provider *corev1alph
 	connection.Status.Consent = ConsentFor(provider)
 	connection.Status.GrantedScopes = append([]string(nil), credential.Scopes...)
 	connection.Status.LinkedAt = &now
-	connection.Status.GrantSequence++
+	connection.Status.GrantSequence = credential.GrantSequence
 	connection.Status.LastRefreshTime = nil
 	connection.Status.ExpiresAt = nil
 	if !credential.ExpiresAt.IsZero() {

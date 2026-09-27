@@ -63,6 +63,13 @@ type ConnectorCredential struct {
 	// always know which client the material belongs to regardless of
 	// Connection status or later tool changes.
 	AuthorityDigest string
+	// GrantSequence identifies the consent that produced this material. The
+	// store assigns it when a grant is committed (never on a refresh, which
+	// carries the current grant forward), it rises monotonically for the
+	// Connection's lifetime even across a shred, and the Connection status
+	// mirrors it, so authority frozen under one grant can be refused against
+	// custody that a later consent replaced.
+	GrantSequence int64
 	// UpdatedAt is set by the store on read.
 	UpdatedAt time.Time
 	// Version is the custody row version, set by the store on read. Refresh
@@ -168,7 +175,9 @@ type ConnectorConsentStore interface {
 	// marks the completion committed in one transaction. It fails with
 	// ErrConnectorCustodyTombstoned after a disconnect and ErrNotFound when
 	// the completion no longer exists.
-	CommitConnectorCompletion(ctx context.Context, nonce string, ref ConnectorCredentialRef, credential ConnectorCredential) error
+	// The committed material, with the grant sequence the store assigned,
+	// is returned.
+	CommitConnectorCompletion(ctx context.Context, nonce string, ref ConnectorCredentialRef, credential ConnectorCredential) (ConnectorCredential, error)
 	// PeekConnectorCompletion returns the parked material for nonce without
 	// removing it, so a commit that fails after the credential write can be
 	// retried with the same token. Expired entries report ErrNotFound.

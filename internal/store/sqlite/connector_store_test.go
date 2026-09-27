@@ -443,7 +443,7 @@ func TestConnectorCompletionCommitMarksRowAtomically(t *testing.T) {
 		t.Fatal(err)
 	}
 	ref := store.ConnectorCredentialRef{ConnectionUID: completion.ConnectionUID, Namespace: completion.Namespace, Name: completion.Name, SubjectDigest: completion.SubjectDigest, Provider: completion.Provider}
-	if err := s.CommitConnectorCompletion(ctx, completion.Nonce, ref, completion.Credential); err != nil {
+	if _, err := s.CommitConnectorCompletion(ctx, completion.Nonce, ref, completion.Credential); err != nil {
 		t.Fatalf("CommitConnectorCompletion: %v", err)
 	}
 	peeked, err := s.PeekConnectorCompletion(ctx, completion.Nonce)
@@ -454,7 +454,7 @@ func TestConnectorCompletionCommitMarksRowAtomically(t *testing.T) {
 	if err != nil || held.AccessToken != "gho_parked" {
 		t.Fatalf("custody after commit = %+v err = %v", held, err)
 	}
-	if err := s.CommitConnectorCompletion(ctx, "missing", ref, completion.Credential); !errors.Is(err, store.ErrNotFound) {
+	if _, err := s.CommitConnectorCompletion(ctx, "missing", ref, completion.Credential); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("commit of a missing completion err = %v, want ErrNotFound", err)
 	}
 	// A missing completion leaves custody untouched: the transaction rolled back.
@@ -486,7 +486,7 @@ func TestConnectorCommitRetiresReplacedCredential(t *testing.T) {
 	if err := s.CreateConnectorCompletion(ctx, completion); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CommitConnectorCompletion(ctx, completion.Nonce, ref, completion.Credential); err != nil {
+	if _, err := s.CommitConnectorCompletion(ctx, completion.Nonce, ref, completion.Credential); err != nil {
 		t.Fatal(err)
 	}
 	retired, err := s.ListRetiredConnectorCredentials(ctx, ref)
@@ -526,7 +526,7 @@ func TestConnectorTombstoneFencesCommitsBeforeDeletion(t *testing.T) {
 	if err != nil || held.AccessToken != "gho_a" {
 		t.Fatalf("custody after tombstone = %+v err = %v", held, err)
 	}
-	if err := s.CommitConnectorCompletion(ctx, completion.Nonce, ref, completion.Credential); !errors.Is(err, store.ErrConnectorCustodyTombstoned) {
+	if _, err := s.CommitConnectorCompletion(ctx, completion.Nonce, ref, completion.Credential); !errors.Is(err, store.ErrConnectorCustodyTombstoned) {
 		t.Fatalf("commit after tombstone err = %v, want ErrConnectorCustodyTombstoned", err)
 	}
 	// A refresh that lands after the fence must not add rotated material
@@ -559,7 +559,7 @@ func TestConnectorCommitDoesNotRetireIdenticalMaterial(t *testing.T) {
 		if err := s.CreateConnectorCompletion(ctx, completion); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.CommitConnectorCompletion(ctx, completion.Nonce, ref, completion.Credential); err != nil {
+		if _, err := s.CommitConnectorCompletion(ctx, completion.Nonce, ref, completion.Credential); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -572,7 +572,7 @@ func TestConnectorCommitDoesNotRetireIdenticalMaterial(t *testing.T) {
 	if err := s.CreateConnectorCompletion(ctx, completion); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CommitConnectorCompletion(ctx, completion.Nonce, ref, completion.Credential); err != nil {
+	if _, err := s.CommitConnectorCompletion(ctx, completion.Nonce, ref, completion.Credential); err != nil {
 		t.Fatal(err)
 	}
 	if retired, err := s.ListRetiredConnectorCredentials(ctx, ref); err != nil || len(retired) != 1 || retired[0].AccessToken != "gho_parked" {
@@ -589,7 +589,7 @@ func TestConnectorCommitKeepsReplacedGrantWithRefreshTokenUntilDisconnect(t *tes
 		if err := s.CreateConnectorCompletion(ctx, completion); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.CommitConnectorCompletion(ctx, completion.Nonce, ref, completion.Credential); err != nil {
+		if _, err := s.CommitConnectorCompletion(ctx, completion.Nonce, ref, completion.Credential); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -760,5 +760,42 @@ func TestConnectorReplaceKeepsRotatedRefreshTokenUntilDisconnect(t *testing.T) {
 	}
 	if retired, err := s.ListRetiredConnectorCredentials(ctx, ref); err != nil || len(retired) != 2 || retired[0].RefreshToken != "ghr_a" {
 		t.Fatalf("retired after a same-refresh-token replacement = %+v err = %v, want the grant kept and the access token retired", retired, err)
+	}
+}
+
+// TestConnectorCustodyAssignsMonotonicGrants covers the grant sequence: every
+// committed grant takes the next number for the Connection, the counter
+// outlives the credential row, and the number is read back with custody.
+func TestConnectorCustodyAssignsMonotonicGrants(t *testing.T) {
+	s := newConnectorTestStore(t)
+	ctx := context.Background()
+	completion := testConnectorCompletion()
+	ref := store.ConnectorCredentialRef{ConnectionUID: completion.ConnectionUID, Namespace: completion.Namespace, Name: completion.Name, SubjectDigest: completion.SubjectDigest, Provider: completion.Provider}
+	if err := s.PutConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho_1"}); err != nil {
+		t.Fatal(err)
+	}
+	if held, err := s.GetConnectorCredential(ctx, ref); err != nil || held.GrantSequence != 1 {
+		t.Fatalf("first grant = %+v err = %v, want 1", held, err)
+	}
+	if err := s.CreateConnectorCompletion(ctx, completion); err != nil {
+		t.Fatal(err)
+	}
+	committed, err := s.CommitConnectorCompletion(ctx, completion.Nonce, ref, completion.Credential)
+	if err != nil || committed.GrantSequence != 2 || committed.AccessToken != "gho_parked" {
+		t.Fatalf("committed = %+v err = %v, want grant 2", committed, err)
+	}
+	if held, err := s.GetConnectorCredential(ctx, ref); err != nil || held.GrantSequence != 2 {
+		t.Fatalf("custody after commit = %+v err = %v, want grant 2", held, err)
+	}
+	// A row that goes away without a disconnect (a shred) does not reset
+	// the counter: the next grant is still later than every earlier one.
+	if _, err := s.db.Exec(`DELETE FROM connector_credentials WHERE connection_uid = ?`, ref.ConnectionUID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho_3"}); err != nil {
+		t.Fatal(err)
+	}
+	if held, err := s.GetConnectorCredential(ctx, ref); err != nil || held.GrantSequence != 3 {
+		t.Fatalf("grant after shred = %+v err = %v, want 3", held, err)
 	}
 }
