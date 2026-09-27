@@ -60,7 +60,7 @@ type ConnectionReconciler struct {
 	Revoker     ConnectorTokenRevoker
 }
 
-// +kubebuilder:rbac:groups=core.orka.ai,resources=connections,verbs=get;list;watch;update;patch;delete
+// +kubebuilder:rbac:groups=core.orka.ai,resources=connections,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core.orka.ai,resources=connections/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core.orka.ai,resources=connections/finalizers,verbs=update
 
