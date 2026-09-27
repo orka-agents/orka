@@ -42,16 +42,19 @@ func freezeRequesterConnections(
 	if reader == nil || task == nil {
 		return nil, nil
 	}
+	// Every connection-mode policy the Task can reach is frozen, with or
+	// without a usable link: an entry without a Connection keeps the call
+	// failing closed even if the policy is later retargeted to a service
+	// credential, because the resolver refuses a frozen policy whose adapter
+	// changed. Only a verified requester's Ready Connection fills the entry.
 	requester := task.Spec.RequestedBy
-	if requester == nil || strings.TrimSpace(requester.Issuer) == "" || strings.TrimSpace(requester.Subject) == "" {
-		return nil, nil
-	}
-	verified, err := requesterProvenanceVerified(ctx, reader, task)
-	if err != nil {
-		return nil, err
-	}
-	if !verified {
-		return nil, nil
+	linkable := requester != nil && strings.TrimSpace(requester.Issuer) != "" && strings.TrimSpace(requester.Subject) != ""
+	if linkable {
+		verified, err := requesterProvenanceVerified(ctx, reader, task)
+		if err != nil {
+			return nil, err
+		}
+		linkable = verified
 	}
 	var frozen []agentExecutionSnapshotConnection
 	seenPolicies := map[string]struct{}{}
@@ -85,28 +88,25 @@ func freezeRequesterConnections(
 			continue
 		}
 		provider := policy.Spec.Connection.ProviderRef.Name
-		connection := &corev1alpha1.Connection{}
-		name := connectors.ConnectionName(provider, requester.Issuer, requester.Subject)
-		if err := reader.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: name}, connection); err != nil {
-			if apierrors.IsNotFound(err) {
-				continue
+		entry := agentExecutionSnapshotConnection{
+			PolicyName: policyName, Provider: provider, PolicyUID: string(policy.UID), PolicyGeneration: policy.Generation,
+		}
+		if linkable {
+			connection := &corev1alpha1.Connection{}
+			name := connectors.ConnectionName(provider, requester.Issuer, requester.Subject)
+			err := reader.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: name}, connection)
+			switch {
+			case err == nil && connectionReadyFor(connection, requester, provider):
+				entry.ConnectionName = connection.Name
+				entry.UID = string(connection.UID)
+				entry.Generation = connection.Generation
+				entry.GrantSequence = connection.Status.GrantSequence
+				entry.Mode = connection.Spec.Mode
+			case err != nil && !apierrors.IsNotFound(err):
+				return nil, fmt.Errorf("load connection %q: %w", name, err)
 			}
-			return nil, fmt.Errorf("load connection %q: %w", name, err)
 		}
-		if !connectionReadyFor(connection, requester, provider) {
-			continue
-		}
-		frozen = append(frozen, agentExecutionSnapshotConnection{
-			PolicyName:       policyName,
-			Provider:         provider,
-			ConnectionName:   connection.Name,
-			UID:              string(connection.UID),
-			Generation:       connection.Generation,
-			GrantSequence:    connection.Status.GrantSequence,
-			Mode:             connection.Spec.Mode,
-			PolicyUID:        string(policy.UID),
-			PolicyGeneration: policy.Generation,
-		})
+		frozen = append(frozen, entry)
 	}
 	return frozen, nil
 }
