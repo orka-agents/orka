@@ -110,24 +110,13 @@ spec:
                       PKCE enables RFC 7636 code verification. Defaults to true and must stay
                       true unless the provider cannot accept a code_challenge.
                     type: boolean
-                  revocationSemantics:
-                    default: Grant
-                    description: |-
-                      RevocationSemantics declares what a revocation call affects at this
-                      provider. With Grant (the default), revoking one token invalidates the
-                      person's entire grant for the client, so Orka revokes only the
-                      committed credential on disconnect and never tokens from consents that
-                      were never committed: such a token may belong to a different person's
-                      grant, and revoking it would sever their live link. With PerToken,
-                      abandoned and discarded tokens are revoked individually as well.
-                    enum:
-                    - Grant
-                    - PerToken
-                    type: string
                   revocationURL:
                     description: |-
                       RevocationURL is an optional RFC 7009 revocation endpoint called on
-                      disconnect. Revocation is best-effort.
+                      disconnect for the committed credential. Revocation is best-effort, and
+                      Orka never revokes material it did not commit: a token from a consent
+                      nobody completed is deleted and left to expire, because it may belong
+                      to a different person's grant.
                     type: string
                   scopes:
                     description: |-
