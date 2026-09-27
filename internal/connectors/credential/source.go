@@ -16,6 +16,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-logr/logr"
+
 	"golang.org/x/sync/singleflight"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -37,6 +39,13 @@ const DefaultRefreshSkew = 60 * time.Second
 
 // Refresher performs the OAuth refresh grant. *connectors.OAuthClient
 // satisfies it.
+// Revoker revokes a token at the provider. *connectors.OAuthClient
+// implements it; a Source whose OAuth client does not can only let tokens
+// it could not store expire.
+type Revoker interface {
+	Revoke(ctx context.Context, cfg connectors.OAuthProviderConfig, token string) error
+}
+
 type Refresher interface {
 	Refresh(ctx context.Context, cfg connectors.OAuthProviderConfig, refreshToken string) (connectors.TokenResponse, error)
 }
@@ -177,7 +186,7 @@ func (s *Source) needsRefresh(credential store.ConnectorCredential) bool {
 // callers share the result, and a waiter that arrives after another flight
 // finished re-reads custody instead of refreshing again.
 func (s *Source) refreshSingleFlight(ctx context.Context, connection *corev1alpha1.Connection, ref store.ConnectorCredentialRef) (store.ConnectorCredential, error) {
-	result, err, _ := s.flights.Do(string(connection.UID), func() (any, error) {
+	results := s.flights.DoChan(string(connection.UID), func() (any, error) {
 		// Detach from the caller so a canceled waiter cannot abort a refresh
 		// other callers depend on; bound it independently.
 		flightCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
@@ -191,10 +200,18 @@ func (s *Source) refreshSingleFlight(ctx context.Context, connection *corev1alph
 		}
 		return s.refresh(flightCtx, connection, ref, current)
 	})
-	if err != nil {
-		return store.ConnectorCredential{}, err
+	// The shared flight keeps running for the callers that still need it,
+	// but each caller returns as soon as its own context is done.
+	var flight singleflight.Result
+	select {
+	case flight = <-results:
+	case <-ctx.Done():
+		return store.ConnectorCredential{}, fmt.Errorf("connection credential refresh abandoned: %w", ctx.Err())
 	}
-	credential, ok := result.(store.ConnectorCredential)
+	if flight.Err != nil {
+		return store.ConnectorCredential{}, flight.Err
+	}
+	credential, ok := flight.Val.(store.ConnectorCredential)
 	if !ok {
 		return store.ConnectorCredential{}, errors.New("connection refresh returned an unexpected result")
 	}
@@ -204,7 +221,7 @@ func (s *Source) refreshSingleFlight(ctx context.Context, connection *corev1alph
 func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connection, ref store.ConnectorCredentialRef, current store.ConnectorCredential) (store.ConnectorCredential, error) {
 	logger := log.FromContext(ctx).WithValues("connection", connection.Name, "provider", connection.Spec.ProviderRef.Name)
 	if strings.TrimSpace(current.RefreshToken) == "" {
-		s.markNotReady(ctx, connection, corev1alpha1.ConnectionReasonExpired, corev1alpha1.ConnectionStateExpired,
+		s.markNotReady(ctx, connection, ref, current.Version, corev1alpha1.ConnectionReasonExpired, corev1alpha1.ConnectionStateExpired,
 			"Access token expired and the provider issued no refresh token")
 		return store.ConnectorCredential{}, errors.New("connection credential expired and cannot be refreshed; the person must reconnect")
 	}
@@ -234,7 +251,7 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 			if shredErr != nil {
 				logger.Error(shredErr, "connector custody could not be shredded after revocation")
 			}
-			s.markNotReady(ctx, connection, corev1alpha1.ConnectionReasonRevoked, corev1alpha1.ConnectionStateRevoked,
+			s.markNotReady(ctx, connection, ref, current.Version, corev1alpha1.ConnectionReasonRevoked, corev1alpha1.ConnectionStateRevoked,
 				"The provider rejected the refresh token; the person must reconnect")
 			return store.ConnectorCredential{}, errors.New("connection was revoked by the provider; the person must reconnect")
 		}
@@ -255,7 +272,9 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 	if refreshed.TokenType == "" {
 		refreshed.TokenType = current.TokenType
 	}
-	if len(refreshed.Scopes) == 0 {
+	// Only an omitted scope field inherits the previous grant; an explicitly
+	// empty one is a grant of nothing and fails the mode check below.
+	if !token.ScopePresent {
 		refreshed.Scopes = current.Scopes
 	}
 	// A provider may narrow the scopes on refresh. The narrowed grant is
@@ -274,7 +293,12 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 	switch err := s.Credentials.ReplaceConnectorCredential(ctx, ref, refreshed, current.Version); {
 	case errors.Is(err, store.ErrConflict):
 		return s.Credentials.GetConnectorCredential(ctx, ref)
-	case errors.Is(err, store.ErrNotFound):
+	case errors.Is(err, store.ErrConnectorCustodyTombstoned), errors.Is(err, store.ErrNotFound):
+		// Disconnect fenced custody while the provider was rotating the
+		// material. The rotated pair derives from this Connection's own
+		// committed grant, so its ownership is proven and it is revoked
+		// rather than left live outside the disconnect's revocation set.
+		s.revokeUnstorable(ctx, cfg, refreshed, logger)
 		return store.ConnectorCredential{}, errors.New("connection was disconnected during refresh")
 	case err != nil:
 		return store.ConnectorCredential{}, fmt.Errorf("store refreshed connection credential: %w", err)
@@ -282,6 +306,27 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 	s.recordRefresh(ctx, connection, refreshed)
 	refreshed.Version = current.Version + 1
 	return refreshed, nil
+}
+
+// revokeUnstorable revokes, best effort, a refreshed credential that custody
+// refused because the Connection was disconnected meanwhile.
+func (s *Source) revokeUnstorable(ctx context.Context, cfg connectors.OAuthProviderConfig, credential store.ConnectorCredential, logger logr.Logger) {
+	revoker, ok := s.OAuth.(Revoker)
+	if !ok {
+		logger.Info("refreshed credential could not be stored after disconnect and the OAuth client cannot revoke it")
+		return
+	}
+	for _, token := range []string{credential.RefreshToken, credential.AccessToken} {
+		if token == "" {
+			continue
+		}
+		revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		err := revoker.Revoke(revokeCtx, cfg, token)
+		cancel()
+		if err != nil {
+			logger.Info("refreshed credential could not be revoked after disconnect")
+		}
+	}
 }
 
 // validateProvider loads the Connection's provider uncached and checks that
@@ -389,26 +434,62 @@ func (s *Source) recordRefresh(ctx context.Context, connection *corev1alpha1.Con
 // durable record the controller projects state from. The patch is fenced on
 // the resourceVersion read at flight start: a consent that completed after
 // the custody shred has already rewritten status, and this stale verdict
-// must not overwrite it.
-func (s *Source) markNotReady(ctx context.Context, connection *corev1alpha1.Connection, reason, state, message string) {
-	now := metav1.NewTime(s.now().UTC())
-	patch := client.MergeFromWithOptions(connection.DeepCopy(), client.MergeFromWithOptimisticLock{})
-	connection.Status.State = state
-	meta.SetStatusCondition(&connection.Status.Conditions, metav1.Condition{
-		Type:               corev1alpha1.ConnectionConditionReady,
-		Status:             metav1.ConditionFalse,
-		Reason:             reason,
-		Message:            message,
-		ObservedGeneration: connection.Generation,
-		LastTransitionTime: now,
-	})
-	if err := s.Client.Status().Patch(ctx, connection, patch); err != nil {
-		if apierrors.IsConflict(err) {
-			log.FromContext(ctx).Info("connection changed concurrently; leaving status to the newer writer", "connection", connection.Name, "reason", reason)
+// must not overwrite it. A conflict caused by any other writer (a periodic
+// reconciler pass, say) is retried against the re-read Connection as long as
+// custody still holds nothing newer than the material this verdict judged;
+// otherwise a Ready link with no usable credential could persist.
+func (s *Source) markNotReady(ctx context.Context, connection *corev1alpha1.Connection, ref store.ConnectorCredentialRef, judgedVersion int64, reason, state, message string) {
+	logger := log.FromContext(ctx).WithValues("connection", connection.Name, "reason", reason)
+	const maxAttempts = 4
+	for attempt := 1; ; attempt++ {
+		now := metav1.NewTime(s.now().UTC())
+		patch := client.MergeFromWithOptions(connection.DeepCopy(), client.MergeFromWithOptimisticLock{})
+		connection.Status.State = state
+		meta.SetStatusCondition(&connection.Status.Conditions, metav1.Condition{
+			Type:               corev1alpha1.ConnectionConditionReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             reason,
+			Message:            message,
+			ObservedGeneration: connection.Generation,
+			LastTransitionTime: now,
+		})
+		err := s.Client.Status().Patch(ctx, connection, patch)
+		if err == nil {
 			return
 		}
-		log.FromContext(ctx).Error(err, "connection status could not record link failure", "connection", connection.Name, "reason", reason)
+		if !apierrors.IsConflict(err) {
+			logger.Error(err, "connection status could not record link failure")
+			return
+		}
+		if attempt >= maxAttempts || !s.verdictStillCurrent(ctx, connection, ref, judgedVersion) {
+			logger.Info("connection changed concurrently; leaving status to the newer writer")
+			return
+		}
 	}
+}
+
+// verdictStillCurrent re-reads the Connection for another markNotReady
+// attempt and reports whether the judged material is still what custody
+// holds: nothing (shredded and not re-committed) or the same version. A
+// newer credential means a consent or refresh won, and its status stands.
+func (s *Source) verdictStillCurrent(ctx context.Context, connection *corev1alpha1.Connection, ref store.ConnectorCredentialRef, judgedVersion int64) bool {
+	fresh := &corev1alpha1.Connection{}
+	if err := s.reader().Get(ctx, client.ObjectKeyFromObject(connection), fresh); err != nil {
+		return false
+	}
+	if fresh.UID != connection.UID || fresh.Generation != connection.Generation || !fresh.DeletionTimestamp.IsZero() {
+		return false
+	}
+	held, err := s.Credentials.GetConnectorCredential(ctx, ref)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+	case err != nil:
+		return false
+	case held.Version != judgedVersion:
+		return false
+	}
+	*connection = *fresh
+	return true
 }
 
 func oauthReason(err error) string {

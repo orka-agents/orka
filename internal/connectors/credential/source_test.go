@@ -45,8 +45,16 @@ type fakeRefresher struct {
 	err       error
 	delay     time.Duration
 	lastCfg   connectors.OAuthProviderConfig
+	revoked   []string
 	lastTok   string
 	onRefresh func()
+}
+
+func (f *fakeRefresher) Revoke(_ context.Context, _ connectors.OAuthProviderConfig, token string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.revoked = append(f.revoked, token)
+	return nil
 }
 
 func (f *fakeRefresher) Refresh(_ context.Context, cfg connectors.OAuthProviderConfig, refreshToken string) (connectors.TokenResponse, error) {
@@ -444,7 +452,7 @@ func TestRefreshWithNarrowedScopesFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", ExpiresAt: h.now.Add(-time.Minute), Scopes: []string{"read:user"}})
-	h.refresher.response = connectors.TokenResponse{AccessToken: "gho_narrow", TokenType: "bearer", ExpiresAt: h.now.Add(time.Hour), Scopes: []string{"public_repo"}}
+	h.refresher.response = connectors.TokenResponse{AccessToken: "gho_narrow", TokenType: "bearer", ExpiresAt: h.now.Add(time.Hour), Scopes: []string{"public_repo"}, ScopePresent: true}
 	_, err := h.source.ResolveConnectionCredential(context.Background(), h.request())
 	if err == nil || !strings.Contains(err.Error(), "no longer covers") {
 		t.Fatalf("narrowed refresh err = %v", err)
@@ -556,5 +564,141 @@ func TestRefreshLosesToReconsentOnRetargetedProvider(t *testing.T) {
 	_, err := h.source.ResolveConnectionCredential(context.Background(), h.request())
 	if err == nil || !strings.Contains(err.Error(), "does not match the endpoint declared") {
 		t.Fatalf("credential from a retargeted re-consent must not be paired with the old destination: err = %v", err)
+	}
+}
+
+// TestRefreshScopeFieldPresenceIsHonored covers the two ways a refresh
+// response can carry no scopes: an omitted field inherits the previous
+// grant (RFC 6749 §5.1), while an explicitly empty one is a grant of
+// nothing and fails closed.
+func TestRefreshScopeFieldPresenceIsHonored(t *testing.T) {
+	h := newHarness(t)
+	provider := &corev1alpha1.ConnectorProvider{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: "github"}, provider); err != nil {
+		t.Fatal(err)
+	}
+	provider.Spec.OAuth.Scopes.Read = []string{"read:user"}
+	if err := h.client.Update(context.Background(), provider); err != nil {
+		t.Fatal(err)
+	}
+	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", ExpiresAt: h.now.Add(-time.Minute), Scopes: []string{"read:user"}})
+	h.refresher.response = connectors.TokenResponse{AccessToken: "gho_omitted", TokenType: "bearer", ExpiresAt: h.now.Add(time.Hour)}
+	got, err := h.source.ResolveConnectionCredential(context.Background(), h.request())
+	if err != nil || got.AccessToken != "gho_omitted" {
+		t.Fatalf("omitted scope refresh = %+v err = %v", got, err)
+	}
+	if live := h.reload(); strings.Join(live.Status.GrantedScopes, ",") != "read:user" {
+		t.Fatalf("granted scopes after omitted-scope refresh = %v, want the previous grant inherited", live.Status.GrantedScopes)
+	}
+
+	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", ExpiresAt: h.now.Add(-time.Minute), Scopes: []string{"read:user"}})
+	h.refresher.response = connectors.TokenResponse{AccessToken: "gho_empty", TokenType: "bearer", ExpiresAt: h.now.Add(time.Hour), ScopePresent: true}
+	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil || !strings.Contains(err.Error(), "no longer covers") {
+		t.Fatalf("explicit empty scope refresh err = %v, want fail closed", err)
+	}
+	if live := h.reload(); strings.Join(live.Status.GrantedScopes, ",") != "" || live.Status.State != corev1alpha1.ConnectionStatePending {
+		t.Fatalf("status after empty grant = %+v", live.Status)
+	}
+}
+
+// TestRevocationVerdictSurvivesUnrelatedStatusWrite covers a status write
+// that is not a re-consent (a periodic reconciler pass) landing between the
+// custody shred and the Revoked verdict: the fenced patch conflicts, custody
+// still holds nothing newer, so the verdict is retried and recorded.
+func TestRevocationVerdictSurvivesUnrelatedStatusWrite(t *testing.T) {
+	h := newHarness(t)
+	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", ExpiresAt: h.now.Add(-time.Minute)})
+	h.refresher.err = &connectors.OAuthError{StatusCode: 400, Code: "invalid_grant"}
+	h.refresher.onRefresh = func() {
+		live := h.reload()
+		touched := metav1.NewTime(h.now)
+		live.Status.LastRefreshTime = &touched
+		if err := h.client.Status().Update(context.Background(), live); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil || !strings.Contains(err.Error(), "revoked") {
+		t.Fatalf("resolve after invalid_grant err = %v", err)
+	}
+	live := h.reload()
+	ready := meta.FindStatusCondition(live.Status.Conditions, corev1alpha1.ConnectionConditionReady)
+	if live.Status.State != corev1alpha1.ConnectionStateRevoked || ready == nil || ready.Reason != corev1alpha1.ConnectionReasonRevoked {
+		t.Fatalf("a verdict that lost only to an unrelated status write must still land: %+v", live.Status)
+	}
+}
+
+// TestRefreshWaiterReturnsWhenItsContextEnds covers a caller whose own
+// context is cancelled while the shared refresh is still talking to the
+// provider: the caller returns at once and the flight keeps running for the
+// callers that still need it.
+func TestRefreshWaiterReturnsWhenItsContextEnds(t *testing.T) {
+	h := newHarness(t)
+	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", ExpiresAt: h.now.Add(-time.Minute)})
+	release := make(chan struct{})
+	started := make(chan struct{})
+	h.refresher.response = connectors.TokenResponse{AccessToken: "gho_new", RefreshToken: "ghr_new", TokenType: "bearer", ExpiresAt: h.now.Add(time.Hour)}
+	h.refresher.onRefresh = func() {
+		close(started)
+		<-release
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := h.source.ResolveConnectionCredential(ctx, h.request())
+		done <- err
+	}()
+	<-started
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "abandoned") {
+			t.Fatalf("cancelled waiter err = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		close(release)
+		t.Fatal("a cancelled caller must not wait for the detached refresh")
+	}
+	close(release)
+	// The flight itself completed and wrote the refreshed material back.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got, err := h.source.ResolveConnectionCredential(context.Background(), h.request())
+		if err == nil && got.AccessToken == "gho_new" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("refresh after cancelled waiter = %+v err = %v", got, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestRefreshLosingToDisconnectRevokesRotatedTokens covers a disconnect
+// that fences custody while the provider is rotating the material: the
+// rotated pair cannot be stored, and because it derives from this
+// Connection's own committed grant it is revoked rather than left live
+// outside the disconnect's revocation set.
+func TestRefreshLosingToDisconnectRevokesRotatedTokens(t *testing.T) {
+	h := newHarness(t)
+	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", ExpiresAt: h.now.Add(-time.Minute)})
+	h.refresher.response = connectors.TokenResponse{AccessToken: "gho_rotated", RefreshToken: "ghr_rotated", TokenType: "bearer", ExpiresAt: h.now.Add(time.Hour)}
+	live := h.reload()
+	h.refresher.onRefresh = func() {
+		if err := h.store.TombstoneConnectorCustody(context.Background(), string(live.UID)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil || !strings.Contains(err.Error(), "disconnected") {
+		t.Fatalf("refresh after disconnect err = %v", err)
+	}
+	h.refresher.mu.Lock()
+	revoked := strings.Join(h.refresher.revoked, ",")
+	h.refresher.mu.Unlock()
+	if revoked != "ghr_rotated,gho_rotated" {
+		t.Fatalf("revoked = %q, want the rotated pair, refresh token first", revoked)
+	}
+	ref, _ := connectors.CredentialRef(live)
+	if held, err := h.store.GetConnectorCredential(context.Background(), ref); err != nil || held.AccessToken != "gho_old" {
+		t.Fatalf("custody = %+v err = %v, want the fenced material untouched for disconnect to revoke", held, err)
 	}
 }

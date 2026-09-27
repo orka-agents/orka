@@ -510,7 +510,17 @@ func (s *Store) ReplaceConnectorCredential(ctx context.Context, ref store.Connec
 	}
 	defer func() { _ = tx.Rollback() }()
 	now := time.Now().UTC()
-	// The version fence is checked first so a stale writer retires nothing.
+	// A disconnect fences custody before it reads the material to revoke;
+	// a refresh that lands afterwards must not add a rotated credential
+	// outside that revocation set.
+	var tombstoned int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM connector_credential_tombstones WHERE connection_uid = ?`, ref.ConnectionUID).Scan(&tombstoned); err != nil {
+		return fmt.Errorf("check connector custody tombstone: %w", err)
+	}
+	if tombstoned > 0 {
+		return store.ErrConnectorCustodyTombstoned
+	}
+	// The version fence is checked next so a stale writer retires nothing.
 	var currentVersion int64
 	err = tx.QueryRowContext(ctx, `SELECT version FROM connector_credentials WHERE connection_uid = ?`, ref.ConnectionUID).Scan(&currentVersion)
 	switch {

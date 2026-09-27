@@ -522,11 +522,20 @@ func TestConnectorTombstoneFencesCommitsBeforeDeletion(t *testing.T) {
 		t.Fatalf("tombstoning twice must be idempotent: %v", err)
 	}
 	// The material stays readable for revocation while new commits fail.
-	if held, err := s.GetConnectorCredential(ctx, ref); err != nil || held.AccessToken != "gho_a" {
+	held, err := s.GetConnectorCredential(ctx, ref)
+	if err != nil || held.AccessToken != "gho_a" {
 		t.Fatalf("custody after tombstone = %+v err = %v", held, err)
 	}
 	if err := s.CommitConnectorCompletion(ctx, completion.Nonce, ref, completion.Credential); !errors.Is(err, store.ErrConnectorCustodyTombstoned) {
 		t.Fatalf("commit after tombstone err = %v, want ErrConnectorCustodyTombstoned", err)
+	}
+	// A refresh that lands after the fence must not add rotated material
+	// outside the revocation set either.
+	if err := s.ReplaceConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho_rotated", RefreshToken: "ghr_rotated"}, held.Version); !errors.Is(err, store.ErrConnectorCustodyTombstoned) {
+		t.Fatalf("replace after tombstone err = %v, want ErrConnectorCustodyTombstoned", err)
+	}
+	if held, err := s.GetConnectorCredential(ctx, ref); err != nil || held.AccessToken != "gho_a" {
+		t.Fatalf("custody after refused replace = %+v err = %v", held, err)
 	}
 	if err := s.DeleteConnectorCredential(ctx, ref.ConnectionUID); err != nil {
 		t.Fatal(err)
