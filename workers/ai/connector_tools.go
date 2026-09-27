@@ -19,6 +19,8 @@ import (
 	"strings"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -110,12 +112,16 @@ var connectorToolPolicies = map[string]corev1alpha1.OutboundAccessPolicySpec{}
 // connection-mode OutboundAccessPolicy. Those tools never execute in this
 // Pod: the person's token lives only in the controller, so the worker asks
 // the controller to run the call on the Task's behalf.
+//
+// A policy that cannot be read is retried briefly and then fails startup:
+// a tool marked connector-backed without its policy spec would compute an
+// approval target the controller never matches, wasting the approval.
 func connectorBackedTools(
 	ctx context.Context,
 	k8sClient client.Client,
 	namespace string,
 	customTools map[string]*corev1alpha1.Tool,
-) map[string]bool {
+) (map[string]bool, error) {
 	result := map[string]bool{}
 	// The digests the controller froze into this Job are the routing upper
 	// bound: a tool dispatched as connector-backed always goes to the
@@ -130,20 +136,55 @@ func connectorBackedTools(
 		if tool == nil || tool.Spec.HTTP == nil || tool.Spec.HTTP.OutboundAccessPolicyRef == nil {
 			continue
 		}
-		policy := &corev1alpha1.OutboundAccessPolicy{}
-		key := client.ObjectKey{Namespace: namespace, Name: tool.Spec.HTTP.OutboundAccessPolicyRef.Name}
-		if err := k8sClient.Get(ctx, key, policy); err != nil {
-			// Unreadable policies are treated as connector-backed so the Pod
-			// never tries to resolve a credential it may not hold.
-			result[name] = true
-			continue
+		policyKey := client.ObjectKey{Namespace: namespace, Name: tool.Spec.HTTP.OutboundAccessPolicyRef.Name}
+		policy, err := readConnectorPolicy(ctx, k8sClient, policyKey)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				// A missing policy is treated as connector-backed so the Pod
+				// never tries to resolve a credential it may not hold.
+				result[name] = true
+				continue
+			}
+			return nil, fmt.Errorf("read outbound access policy for tool %q: %w", name, err)
 		}
 		if policy.Spec.Connection != nil {
 			result[name] = true
 			connectorToolPolicies[name] = policy.Spec
 		}
 	}
-	return result
+	return result, nil
+}
+
+// connectorPolicyReadAttempts and connectorPolicyReadBackoff bound the
+// retries of a transient policy read at startup; tests shorten the backoff.
+var (
+	connectorPolicyReadAttempts = 5
+	connectorPolicyReadBackoff  = 200 * time.Millisecond
+)
+
+// readConnectorPolicy reads a policy, retrying transient failures; a
+// NotFound is returned at once.
+func readConnectorPolicy(
+	ctx context.Context, k8sClient client.Client, key client.ObjectKey,
+) (*corev1alpha1.OutboundAccessPolicy, error) {
+	backoff := connectorPolicyReadBackoff
+	var err error
+	for range connectorPolicyReadAttempts {
+		policy := &corev1alpha1.OutboundAccessPolicy{}
+		if err = k8sClient.Get(ctx, key, policy); err == nil {
+			return policy, nil
+		}
+		if apierrors.IsNotFound(err) {
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+	}
+	return nil, err
 }
 
 // connectorToolRequest is the body sent to the controller's internal

@@ -723,9 +723,16 @@ func (h *InternalHandlers) reconcileSpentConnectorClaim(ctx context.Context, cla
 	case store.ExternalEffectInFlight:
 		if effect.LeaseExpiresAt != nil && effect.LeaseExpiresAt.Before(time.Now()) && cfg.ControllerEpochs != nil {
 			// The controller that made the call is gone; the provider may
-			// have applied it. Record that the outcome is unknown.
-			if fence, err := cfg.ControllerEpochs.CurrentFence(ctx); err == nil {
-				_ = controller.SettleExternalEffect(ctx, cfg.ExternalEffects, fence, identity, store.ExternalEffectOutcomeUnknown)
+			// have applied it. The unknown outcome is recorded durably
+			// before the approval is reported spent: until then the worker
+			// is asked to retry rather than told a verdict the ledger does
+			// not hold yet.
+			fence, err := cfg.ControllerEpochs.CurrentFence(ctx)
+			if err != nil {
+				return nil, fiber.NewError(fiber.StatusServiceUnavailable, "the interrupted action's outcome could not be recorded; retry")
+			}
+			if err := controller.SettleExternalEffect(ctx, cfg.ExternalEffects, fence, identity, store.ExternalEffectOutcomeUnknown); err != nil {
+				return nil, fiber.NewError(fiber.StatusServiceUnavailable, "the interrupted action's outcome could not be recorded; retry")
 			}
 			return nil, fiber.NewError(fiber.StatusBadGateway, "the approved action was interrupted and its outcome is unknown; the approval is spent")
 		}

@@ -14,12 +14,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/worker"
@@ -54,7 +57,10 @@ func TestConnectorBackedTools(t *testing.T) {
 		"plain":      connectorTestTool("plain", ""),
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(connectionPolicy, directPolicy).Build()
-	got := connectorBackedTools(context.Background(), c, "default", customTools)
+	got, err := connectorBackedTools(context.Background(), c, "default", customTools)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !got["gh_search"] || got["direct"] || got["plain"] {
 		t.Fatalf("connector-backed = %v", got)
 	}
@@ -272,13 +278,53 @@ func TestConnectorBackedToolsHonorFrozenDigestsAsUpperBound(t *testing.T) {
 		}},
 	}
 	t.Setenv(workerenv.ConnectorToolDigests, `{"gh_search":"digest-a"}`)
-	got := connectorBackedTools(context.Background(), c, "default", map[string]*corev1alpha1.Tool{"gh_search": tool})
+	got, err := connectorBackedTools(context.Background(), c, "default", map[string]*corev1alpha1.Tool{"gh_search": tool})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !got["gh_search"] {
 		t.Fatalf("a tool frozen as connector-backed must stay routed to the controller: %v", got)
 	}
 	t.Setenv(workerenv.ConnectorToolDigests, "")
-	got = connectorBackedTools(context.Background(), c, "default", map[string]*corev1alpha1.Tool{"gh_search": tool})
+	got, err = connectorBackedTools(context.Background(), c, "default", map[string]*corev1alpha1.Tool{"gh_search": tool})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got["gh_search"] {
 		t.Fatalf("without a frozen digest the live direct policy runs locally: %v", got)
+	}
+}
+
+// A transient policy read failure at startup is retried and then fails the
+// worker, instead of marking the tool connector-backed without the policy
+// spec its approval target needs.
+func TestConnectorBackedToolsRetriesThenFailsOnPolicyReadErrors(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	policy := connectorTestPolicy("github-conn", corev1alpha1.OutboundAccessPolicySpec{
+		Connection: &corev1alpha1.ConnectionOutboundAccess{ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}},
+	})
+	var reads atomic.Int32
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(policy).WithInterceptorFuncs(interceptor.Funcs{
+		Get: func(
+			ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption,
+		) error {
+			if _, ok := obj.(*corev1alpha1.OutboundAccessPolicy); ok && reads.Add(1) < 3 {
+				return errors.New("transient")
+			}
+			return cl.Get(ctx, key, obj, opts...)
+		},
+	}).Build()
+	previous := connectorPolicyReadBackoff
+	connectorPolicyReadBackoff = time.Millisecond
+	t.Cleanup(func() { connectorPolicyReadBackoff = previous })
+	tools := map[string]*corev1alpha1.Tool{"gh_search": connectorTestTool("gh_search", "github-conn")}
+	got, err := connectorBackedTools(context.Background(), c, "default", tools)
+	if err != nil || !got["gh_search"] || connectorToolPolicies["gh_search"].Connection == nil {
+		t.Fatalf("after two transient failures: got %v err = %v policy = %+v", got, err, connectorToolPolicies["gh_search"])
+	}
+	reads.Store(-1000)
+	if _, err := connectorBackedTools(context.Background(), c, "default", tools); err == nil {
+		t.Fatal("a policy that stays unreadable must fail startup")
 	}
 }

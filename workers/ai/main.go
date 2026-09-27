@@ -256,7 +256,10 @@ func run(transcriptPath string) (err error) {
 	// Load custom Tool CRDs
 	customTools := loadCustomTools(ctx, k8sClient, taskNamespace, enabledTools)
 	// Tools behind a connection-mode policy never run in this Pod.
-	connectorBackedToolNames = connectorBackedTools(ctx, k8sClient, taskNamespace, customTools)
+	connectorBackedToolNames, err = connectorBackedTools(ctx, k8sClient, taskNamespace, customTools)
+	if err != nil {
+		return fmt.Errorf("classify connector-backed tools: %w", err)
+	}
 	markConnectorBackedTools(customTools, connectorBackedToolNames)
 	connectorBindings = parseConnectionBindings(os.Getenv(workerenv.ConnectionBindings))
 
