@@ -21,6 +21,10 @@ const ConnectorFieldNamespace = "namespace"
 // so a late consent completion can never recreate custody.
 var ErrConnectorCustodyTombstoned = errors.New("connector custody for this connection was deleted")
 
+// ErrConnectorCompletionCommitted reports a completion another commit already
+// finished; the caller resumes it instead of committing again.
+var ErrConnectorCompletionCommitted = errors.New("connector completion was already committed")
+
 // ConnectorCredentialRef binds sealed token material to exactly one
 // Connection. Every field participates in the AEAD additional data, so a row
 // copied to another Connection, subject, or provider fails to open.

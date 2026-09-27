@@ -662,3 +662,49 @@ func testConnectorConsent() store.ConnectorConsent {
 		ExpiresAt: time.Now().Add(10 * time.Minute),
 	}
 }
+
+// TestConnectorCommitIsFencedInsideTheTransaction covers two API replicas
+// committing one completion: the second commit sees the sealed committed
+// marker inside its own transaction and changes nothing, so custody keeps
+// one grant. Old tombstones are reaped with their grant counters.
+func TestConnectorCommitIsFencedInsideTheTransaction(t *testing.T) {
+	s := newConnectorTestStore(t)
+	ctx := context.Background()
+	completion := testConnectorCompletion()
+	if err := s.CreateConnectorCompletion(ctx, completion); err != nil {
+		t.Fatal(err)
+	}
+	ref := store.ConnectorCredentialRef{ConnectionUID: completion.ConnectionUID, Namespace: completion.Namespace, Name: completion.Name, SubjectDigest: completion.SubjectDigest, Provider: completion.Provider}
+	if _, err := s.CommitConnectorCompletion(ctx, completion.Nonce, ref, completion.Credential); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CommitConnectorCompletion(ctx, completion.Nonce, ref, completion.Credential); !errors.Is(err, store.ErrConnectorCompletionCommitted) {
+		t.Fatalf("second commit err = %v, want ErrConnectorCompletionCommitted", err)
+	}
+	if held, err := s.GetConnectorCredential(ctx, ref); err != nil || held.GrantSequence != 1 {
+		t.Fatalf("custody after a repeated commit = %+v err = %v, want one grant", held, err)
+	}
+	old := time.Now().Add(-2 * connectorTombstoneRetention).UTC()
+	if _, err := s.db.Exec(`INSERT INTO connector_credential_tombstones (connection_uid, deleted_at) VALUES ('uid-old', ?)`, old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO connector_credential_grants (connection_uid, grant_sequence) VALUES ('uid-old', 7)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.TombstoneConnectorCustody(ctx, "uid-recent"); err != nil {
+		t.Fatal(err)
+	}
+	var tombstones, grants int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM connector_credential_tombstones WHERE connection_uid = 'uid-old'`).Scan(&tombstones); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM connector_credential_grants WHERE connection_uid = 'uid-old'`).Scan(&grants); err != nil {
+		t.Fatal(err)
+	}
+	if tombstones != 0 || grants != 0 {
+		t.Fatalf("old tombstone rows = %d grant rows = %d, want both reaped", tombstones, grants)
+	}
+	if err := s.PutConnectorCredential(ctx, store.ConnectorCredentialRef{ConnectionUID: "uid-recent", Namespace: "tenant", Name: "n", SubjectDigest: "d", Provider: "github"}, store.ConnectorCredential{AccessToken: "x"}); !errors.Is(err, store.ErrConnectorCustodyTombstoned) {
+		t.Fatalf("a fresh tombstone must still fence: err = %v", err)
+	}
+}
