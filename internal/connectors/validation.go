@@ -11,6 +11,8 @@ package connectors
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,6 +31,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/google/jsonschema-go/jsonschema"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/tokenexchange"
@@ -198,6 +202,9 @@ func ValidateProviderSpec(provider *corev1alpha1.ConnectorProvider, knownBuiltin
 		if _, reserved := reservedAuthorizeParameters[normalized]; reserved {
 			return invalid("oauth.additionalAuthorizeParameters must not contain reserved OAuth fields")
 		}
+		if credentialLikeParameter(normalized) {
+			return invalid("oauth.additionalAuthorizeParameters must not carry credentials; the spec is public configuration")
+		}
 		if strings.ContainsAny(value, "\r\n") {
 			return invalid("oauth.additionalAuthorizeParameters values must not contain line breaks")
 		}
@@ -234,7 +241,52 @@ func validateEndpointURL(field, raw string, required bool) *Issue {
 	if ip := net.ParseIP(host); ip != nil && !tokenexchange.IsPublicAddress(ip) {
 		return invalid(fmt.Sprintf("oauth.%s must not target private, loopback, or link-local addresses", field))
 	}
+	return validateEndpointQuery(field, parsed.RawQuery)
+}
+
+// validateEndpointQuery rejects malformed queries and credential-like query
+// parameters on every endpoint, and flow-owned OAuth parameters on the
+// authorization endpoint, so a preconfigured state, redirect URI, or secret
+// can never ride along in public configuration.
+func validateEndpointQuery(field, rawQuery string) *Issue {
+	if rawQuery == "" {
+		return nil
+	}
+	if strings.Contains(rawQuery, ";") {
+		return invalid(fmt.Sprintf("oauth.%s query must not use semicolon separators", field))
+	}
+	values, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return invalid(fmt.Sprintf("oauth.%s query must be well-formed", field))
+	}
+	for key := range values {
+		normalized := strings.ToLower(strings.TrimSpace(key))
+		if field == "authorizeURL" {
+			if _, reserved := reservedAuthorizeParameters[normalized]; reserved {
+				return invalid("oauth.authorizeURL query must not preset reserved OAuth fields")
+			}
+		}
+		if credentialLikeParameter(normalized) {
+			return invalid(fmt.Sprintf("oauth.%s query must not carry credentials; the spec is public configuration", field))
+		}
+	}
 	return nil
+}
+
+// credentialLikeParameter reports whether a query or authorization parameter
+// name looks like it carries a credential. Names are compared lowercased with
+// underscores folded to hyphens.
+func credentialLikeParameter(name string) bool {
+	normalized := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(name)), "_", "-")
+	if slices.Contains([]string{"sig", "signature", "assertion", "key"}, normalized) {
+		return true
+	}
+	for _, fragment := range []string{"secret", "password", "passwd", "credential", "authorization", "api-key", "apikey", "token", "assertion", "signature"} {
+		if strings.Contains(normalized, fragment) {
+			return true
+		}
+	}
+	return false
 }
 
 func validateScopes(group string, scopes []string) *Issue {
@@ -243,8 +295,8 @@ func validateScopes(group string, scopes []string) *Issue {
 	}
 	seen := map[string]struct{}{}
 	for _, scope := range scopes {
-		if scope == "" || scope != strings.TrimSpace(scope) || strings.ContainsAny(scope, " \t\r\n\"\\") {
-			return invalid(fmt.Sprintf("oauth.scopes.%s entries must be non-empty scope tokens without whitespace", group))
+		if !validScopeToken(scope) {
+			return invalid(fmt.Sprintf("oauth.scopes.%s entries must be non-empty RFC 6749 scope tokens", group))
 		}
 		if _, dup := seen[scope]; dup {
 			return invalid(fmt.Sprintf("oauth.scopes.%s contains duplicate scope %q", group, scope))
@@ -252,6 +304,23 @@ func validateScopes(group string, scopes []string) *Issue {
 		seen[scope] = struct{}{}
 	}
 	return nil
+}
+
+// validScopeToken applies the RFC 6749 scope-token grammar: one or more bytes
+// in %x21 / %x23-5B / %x5D-7E, which excludes whitespace, quotes, backslashes,
+// control bytes, and non-ASCII text.
+func validScopeToken(scope string) bool {
+	if scope == "" {
+		return false
+	}
+	for i := 0; i < len(scope); i++ {
+		b := scope[i]
+		if b == 0x21 || (b >= 0x23 && b <= 0x5B) || (b >= 0x5D && b <= 0x7E) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func validateTools(tools []corev1alpha1.ConnectorTool, knownBuiltin BuiltinToolCheck) *Issue {
@@ -330,6 +399,15 @@ func validateToolParameters(name string, parameters *apiextensionsv1.JSON) *Issu
 		if err := json.Unmarshal(raw, &required); err != nil {
 			return invalid(fmt.Sprintf("HTTP tool %q parameters.required must be an array of strings", name))
 		}
+	}
+	// The execution path resolves the whole schema, so a nested shape it
+	// would reject must not be accepted here.
+	var full jsonschema.Schema
+	if err := json.Unmarshal(parameters.Raw, &full); err != nil {
+		return invalid(fmt.Sprintf("HTTP tool %q parameters must be a valid JSON Schema: %s", name, err.Error()))
+	}
+	if _, err := full.Resolve(nil); err != nil {
+		return invalid(fmt.Sprintf("HTTP tool %q parameters must be a resolvable JSON Schema: %s", name, err.Error()))
 	}
 	return nil
 }
@@ -447,19 +525,67 @@ func ScopesCover(granted, required []string) bool {
 }
 
 // ConnectionLinked reports whether a Connection currently holds usable
-// material for its mode: consent completed (Ready) and the granted scopes
-// cover the mode (ScopesGranted, maintained by the controller).
+// material for its mode: consent completed (Ready), the provider resolves
+// (ProviderResolved), and the granted scopes cover the mode (ScopesGranted).
+// The two controller-owned conditions must have observed the current
+// generation, so a mode change or provider loss fails closed until the
+// controller has judged it.
 func ConnectionLinked(connection *corev1alpha1.Connection) bool {
 	if connection == nil || !connection.DeletionTimestamp.IsZero() {
 		return false
 	}
-	for _, conditionType := range []string{corev1alpha1.ConnectionConditionReady, corev1alpha1.ConnectionConditionScopesGranted} {
+	ready := meta.FindStatusCondition(connection.Status.Conditions, corev1alpha1.ConnectionConditionReady)
+	if ready == nil || ready.Status != metav1.ConditionTrue {
+		return false
+	}
+	for _, conditionType := range []string{corev1alpha1.ConnectionConditionProviderResolved, corev1alpha1.ConnectionConditionScopesGranted} {
 		condition := meta.FindStatusCondition(connection.Status.Conditions, conditionType)
-		if condition == nil || condition.Status != metav1.ConditionTrue {
+		if condition == nil || condition.Status != metav1.ConditionTrue || condition.ObservedGeneration != connection.Generation {
 			return false
 		}
 	}
 	return true
+}
+
+// ProviderAuthorityDigest is a hex SHA-256 digest of the OAuth client identity
+// a consent is granted against: the provider UID, client ID, client secret
+// reference, authentication method, and endpoints. It carries no secret
+// material and changes whenever a held token would belong to a different
+// client or be sent to a different token endpoint.
+func ProviderAuthorityDigest(provider *corev1alpha1.ConnectorProvider) string {
+	if provider == nil {
+		return ""
+	}
+	oauth := provider.Spec.OAuth
+	sum := sha256.New()
+	for _, part := range []string{
+		string(provider.UID), oauth.ClientID, oauth.ClientSecretRef.Name, oauth.ClientSecretRef.Key,
+		oauth.ClientAuthentication, oauth.AuthorizeURL, oauth.TokenURL, oauth.RevocationURL,
+	} {
+		_, _ = sum.Write([]byte(part))
+		_, _ = sum.Write([]byte{0})
+	}
+	return hex.EncodeToString(sum.Sum(nil))
+}
+
+// ConsentFor returns the consent record to store when a consent completes
+// against provider.
+func ConsentFor(provider *corev1alpha1.ConnectorProvider) *corev1alpha1.ConnectionConsent {
+	if provider == nil {
+		return nil
+	}
+	return &corev1alpha1.ConnectionConsent{ProviderUID: string(provider.UID), AuthorityDigest: ProviderAuthorityDigest(provider)}
+}
+
+// ConsentMatchesProvider reports whether the Connection's recorded consent
+// was granted against exactly this provider OAuth client. A missing record
+// never matches.
+func ConsentMatchesProvider(connection *corev1alpha1.Connection, provider *corev1alpha1.ConnectorProvider) bool {
+	if connection == nil || provider == nil || connection.Status.Consent == nil {
+		return false
+	}
+	consent := connection.Status.Consent
+	return consent.ProviderUID == string(provider.UID) && consent.AuthorityDigest == ProviderAuthorityDigest(provider)
 }
 
 // ScopesForMode returns the OAuth scopes to request for a Connection mode.

@@ -103,6 +103,15 @@ func scopesGrantedCondition(connection *corev1alpha1.Connection, provider *corev
 		condition.Message = "Consent has not completed"
 		return condition
 	}
+	if !connectors.ConsentMatchesProvider(connection, provider) {
+		// The held token belongs to another OAuth client (the provider was
+		// replaced, or its client or endpoints changed); it must never be
+		// refreshed against the new authority.
+		condition.Status = metav1.ConditionFalse
+		condition.Reason = corev1alpha1.ConnectionReasonConsentRequired
+		condition.Message = "The provider's OAuth client changed since consent; consent again"
+		return condition
+	}
 	mode := connection.Spec.Mode
 	if mode == "" {
 		mode = corev1alpha1.ConnectionModeReadOnly
