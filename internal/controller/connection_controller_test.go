@@ -8,7 +8,11 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,7 +24,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -735,5 +738,132 @@ func TestConnectionReconcilerRevokesOnlyCommittedTokens(t *testing.T) {
 	}
 	if len(credentials.deleted) != 1 {
 		t.Fatal("custody must be deleted")
+	}
+}
+
+// TestConnectionReconcilerFinishesCommittedCompletion covers a completion
+// whose custody write succeeded but whose status write never did: the
+// controller records the link from the committed material and removes the
+// completion; a committed row custody no longer matches is only removed.
+func TestConnectionReconcilerFinishesCommittedCompletion(t *testing.T) {
+	scheme := connectorTestScheme(t)
+	provider := acceptedConnectorProvider()
+	connection := testConnection("tenant", "github-alice", "github")
+	connection.Finalizers = []string{ConnectionCustodyFinalizer}
+	connection.Spec.Mode = corev1alpha1.ConnectionModeReadOnly
+	credentials := newFakeConnectorCredentialStore()
+	authority := connectors.ProviderIssuerDigest(provider)
+	material := store.ConnectorCredential{
+		AccessToken: "gho_done", RefreshToken: "ghr_done", AuthorityDigest: authority,
+		Scopes: connectors.ScopesForMode(provider, corev1alpha1.ConnectionModeReadOnly), ExpiresAt: time.Now().Add(time.Hour),
+	}
+	credentials.credentials[string(connection.UID)] = material
+	consented := connectors.ProviderAuthorityDigest(provider)
+	credentials.parked[string(connection.UID)] = []store.ConnectorCompletion{
+		{Nonce: "replaced", Committed: true, Mode: corev1alpha1.ConnectionModeReadOnly, ExpiresAt: time.Now().Add(-time.Minute), ConsentAuthorityDigest: consented,
+			Credential: store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", AuthorityDigest: authority}},
+		{Nonce: "done", Committed: true, Mode: corev1alpha1.ConnectionModeReadOnly, ExpiresAt: time.Now().Add(-time.Minute), ConsentAuthorityDigest: consented, Credential: material},
+	}
+	var statusFailure atomic.Bool
+	c := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(connection, provider, connectorClientSecret("tenant")).
+		WithStatusSubresource(&corev1alpha1.Connection{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			SubResourceUpdate: func(ctx context.Context, c client.Client, subResource string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+				if statusFailure.Load() {
+					return errors.New("transient status failure")
+				}
+				return c.SubResource(subResource).Update(ctx, obj, opts...)
+			},
+		}).Build()
+	reconciler := &ConnectionReconciler{Client: c, APIReader: c, Scheme: scheme, Credentials: credentials, Consents: credentials}
+	// A failed status write keeps the committed completion: it is the
+	// durable record the next pass repairs the status from.
+	statusFailure.Store(true)
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "tenant", Name: "github-alice"}}); err == nil {
+		t.Fatal("a failed status write must surface")
+	}
+	if remaining := credentials.parked[string(connection.UID)]; len(remaining) != 1 || remaining[0].Nonce != "done" {
+		t.Fatalf("remaining after failed status write = %+v, want the applied completion kept", remaining)
+	}
+	statusFailure.Store(false)
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "tenant", Name: "github-alice"}}); err != nil {
+		t.Fatal(err)
+	}
+	updated := &corev1alpha1.Connection{}
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "tenant", Name: "github-alice"}, updated); err != nil {
+		t.Fatal(err)
+	}
+	if !connectors.ConnectionLinked(updated) || strings.Join(updated.Status.GrantedScopes, " ") != strings.Join(material.Scopes, " ") || updated.Status.LinkedAt == nil {
+		t.Fatalf("status after committed completion = %+v, want the link recorded from custody", updated.Status)
+	}
+	if strings.Join(credentials.deletedCompletions, ",") != "replaced,done" || len(credentials.parked[string(connection.UID)]) != 0 {
+		t.Fatalf("deleted completions = %v remaining = %+v", credentials.deletedCompletions, credentials.parked[string(connection.UID)])
+	}
+
+	// A committed completion consented under an authority the provider no
+	// longer has (a retargeted tool destination) is dropped without linking:
+	// the same fence the API applies to a retried completion.
+	stale := testConnection("tenant", "github-carol", "github")
+	stale.Finalizers = []string{ConnectionCustodyFinalizer}
+	stale.Spec.Mode = corev1alpha1.ConnectionModeReadOnly
+	credentials.credentials[string(stale.UID)] = material
+	credentials.parked[string(stale.UID)] = []store.ConnectorCompletion{
+		{Nonce: "retargeted", Committed: true, Mode: corev1alpha1.ConnectionModeReadOnly, ExpiresAt: time.Now().Add(-time.Minute), ConsentAuthorityDigest: "previous-authority", Credential: material},
+	}
+	c = ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(stale, provider, connectorClientSecret("tenant")).
+		WithStatusSubresource(&corev1alpha1.Connection{}).Build()
+	reconciler = &ConnectionReconciler{Client: c, APIReader: c, Scheme: scheme, Credentials: credentials, Consents: credentials}
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "tenant", Name: "github-carol"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "tenant", Name: "github-carol"}, updated); err != nil {
+		t.Fatal(err)
+	}
+	if connectors.ConnectionLinked(updated) || updated.Status.LinkedAt != nil {
+		t.Fatalf("a completion consented under another authority must not link: %+v", updated.Status)
+	}
+	if len(credentials.parked[string(stale.UID)]) != 0 {
+		t.Fatalf("stale committed completion must be dropped, remaining = %+v", credentials.parked[string(stale.UID)])
+	}
+}
+
+// TestConnectionReconcilerExpiresRefreshlessLink covers an access token
+// without a refresh token that expired after the link was recorded: the
+// controller withdraws Ready instead of advertising an unusable account.
+func TestConnectionReconcilerExpiresRefreshlessLink(t *testing.T) {
+	scheme := connectorTestScheme(t)
+	provider := acceptedConnectorProvider()
+	credentials := newFakeConnectorCredentialStore()
+	authority := connectors.ProviderIssuerDigest(provider)
+	for name, refreshToken := range map[string]string{"github-alice": "", "github-bob": "ghr_live"} {
+		connection := testConnection("tenant", name, "github")
+		connection.Finalizers = []string{ConnectionCustodyFinalizer}
+		expired := metav1.NewTime(time.Now().Add(-time.Minute))
+		connection.Status.State = corev1alpha1.ConnectionStateReady
+		connection.Status.Consent = connectors.ConsentFor(provider)
+		connection.Status.ExpiresAt = &expired
+		connection.Status.GrantedScopes = connectors.ScopesForMode(provider, corev1alpha1.ConnectionModeReadOnly)
+		connection.Status.Conditions = []metav1.Condition{
+			{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonLinked, ObservedGeneration: connection.Generation},
+		}
+		credentials.credentials[string(connection.UID)] = store.ConnectorCredential{AccessToken: "gho_" + name, RefreshToken: refreshToken, AuthorityDigest: authority, ExpiresAt: expired.Time}
+		c := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(connection, provider, connectorClientSecret("tenant")).
+			WithStatusSubresource(&corev1alpha1.Connection{}).Build()
+		reconciler := &ConnectionReconciler{Client: c, APIReader: c, Scheme: scheme, Credentials: credentials, Consents: credentials}
+		if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "tenant", Name: name}}); err != nil {
+			t.Fatal(err)
+		}
+		updated := &corev1alpha1.Connection{}
+		if err := c.Get(context.Background(), types.NamespacedName{Namespace: "tenant", Name: name}, updated); err != nil {
+			t.Fatal(err)
+		}
+		ready := meta.FindStatusCondition(updated.Status.Conditions, corev1alpha1.ConnectionConditionReady)
+		if refreshToken == "" {
+			if updated.Status.State != corev1alpha1.ConnectionStateExpired || ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != corev1alpha1.ConnectionReasonExpired {
+				t.Fatalf("%s: status = %+v, want Expired", name, updated.Status)
+			}
+		} else if updated.Status.State != corev1alpha1.ConnectionStateReady || ready == nil || ready.Status != metav1.ConditionTrue {
+			t.Fatalf("%s: status = %+v, want a refreshable link left alone", name, updated.Status)
+		}
 	}
 }

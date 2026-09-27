@@ -278,6 +278,18 @@ func TestTokenResponseEdgeCases(t *testing.T) {
 		"/no-scope": func(w http.ResponseWriter) {
 			_, _ = w.Write([]byte(`{"access_token":"a","token_type":"bearer"}`))
 		},
+		"/space-token": func(w http.ResponseWriter) {
+			_, _ = w.Write([]byte(`{"access_token":" gho_a","token_type":"bearer"}`))
+		},
+		"/ctl-token": func(w http.ResponseWriter) {
+			_, _ = w.Write([]byte(`{"access_token":"gho\u0001a","token_type":"bearer"}`))
+		},
+		"/quote-token": func(w http.ResponseWriter) {
+			_, _ = w.Write([]byte(`{"access_token":"gho\"a","token_type":"bearer"}`))
+		},
+		"/ctl-refresh": func(w http.ResponseWriter) {
+			_, _ = w.Write([]byte(`{"access_token":"gho_a","refresh_token":"ghr\na","token_type":"bearer"}`))
+		},
 		"/null-scope": func(w http.ResponseWriter) {
 			_, _ = w.Write([]byte(`{"access_token":"a","token_type":"bearer","scope":null}`))
 		},
@@ -301,6 +313,7 @@ func TestTokenResponseEdgeCases(t *testing.T) {
 		"/mac-type": true, "/no-type": true, "/huge-exp": true,
 		"/junk-exp": true, "/zero-exp": true, "/frac-exp": true, "/str-exp": false,
 		"/comma-scope": false, "/empty-scope": false, "/no-scope": false, "/null-scope": true, "/array-scope": true,
+		"/space-token": true, "/ctl-token": true, "/quote-token": true, "/ctl-refresh": true,
 	} {
 		cfg := testOAuthConfig()
 		cfg.TokenURL = "https://provider.example.test" + path

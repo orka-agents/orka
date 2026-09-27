@@ -577,6 +577,16 @@ func TestProviderAuthorityDigestAndConsent(t *testing.T) {
 	if ProviderIssuerDigest(prompted) != ProviderIssuerDigest(provider) || ProviderAuthorityDigest(prompted) == ProviderAuthorityDigest(provider) {
 		t.Fatal("an authorize parameter must move the authority digest but not the issuer digest")
 	}
+	relocated := provider.DeepCopy()
+	relocated.Spec.OAuth.AuthorizeURL = "https://github.example.test/login/oauth/authorize-v2"
+	if ProviderIssuerDigest(relocated) != ProviderIssuerDigest(provider) || ProviderAuthorityDigest(relocated) == ProviderAuthorityDigest(provider) {
+		t.Fatal("the authorize URL must move the authority digest but not the issuer digest")
+	}
+	moved := provider.DeepCopy()
+	moved.Spec.OAuth.TokenURL = "https://github.example.test/login/oauth/token-v2"
+	if ProviderIssuerDigest(moved) == ProviderIssuerDigest(provider) {
+		t.Fatal("the token URL must move the issuer digest")
+	}
 	// Built-in declarations do not carry a destination and do not move the digest.
 	builtinOnly := provider.DeepCopy()
 	builtinOnly.Spec.Tools = append(builtinOnly.Spec.Tools, corev1alpha1.ConnectorTool{Name: "list_issues", Class: corev1alpha1.ConnectorToolClassRead, Source: corev1alpha1.ConnectorToolSourceBuiltin})

@@ -1023,54 +1023,7 @@ func (h *Handlers) markConnectionLinked(ctx context.Context, connection *corev1a
 }
 
 func (h *Handlers) applyConnectionLinked(ctx context.Context, connection *corev1alpha1.Connection, provider *corev1alpha1.ConnectorProvider, credential store.ConnectorCredential) error {
-	now := metav1.NewTime(h.connectors.now().UTC())
-	mode, _ := normalizeConnectionMode(connection.Spec.Mode)
-	connection.Status.State = corev1alpha1.ConnectionStateReady
-	connection.Status.Consent = connectors.ConsentFor(provider)
-	connection.Status.GrantedScopes = append([]string(nil), credential.Scopes...)
-	connection.Status.LinkedAt = &now
-	connection.Status.LastRefreshTime = nil
-	connection.Status.ExpiresAt = nil
-	if !credential.ExpiresAt.IsZero() {
-		expires := metav1.NewTime(credential.ExpiresAt.UTC())
-		connection.Status.ExpiresAt = &expires
-	}
-	meta.SetStatusCondition(&connection.Status.Conditions, metav1.Condition{
-		Type:               corev1alpha1.ConnectionConditionReady,
-		Status:             metav1.ConditionTrue,
-		Reason:             corev1alpha1.ConnectionReasonLinked,
-		Message:            "Account linked",
-		ObservedGeneration: connection.Generation,
-		LastTransitionTime: now,
-	})
-	// The provider was just verified Accepted and the consent record above
-	// matches it. The granted scopes are judged against what the mode
-	// requires now: a provider expanded after consent started leaves the
-	// link Pending until the person consents again. The controller
-	// recomputes both conditions on every reconcile.
-	meta.SetStatusCondition(&connection.Status.Conditions, metav1.Condition{
-		Type:               corev1alpha1.ConnectionConditionProviderResolved,
-		Status:             metav1.ConditionTrue,
-		Reason:             corev1alpha1.ConnectionReasonProviderResolved,
-		Message:            "ConnectorProvider is accepted",
-		ObservedGeneration: connection.Generation,
-		LastTransitionTime: now,
-	})
-	granted := metav1.Condition{
-		Type:               corev1alpha1.ConnectionConditionScopesGranted,
-		Status:             metav1.ConditionTrue,
-		Reason:             corev1alpha1.ConnectionReasonScopesGranted,
-		Message:            "Granted scopes cover the " + mode + " mode",
-		ObservedGeneration: connection.Generation,
-		LastTransitionTime: now,
-	}
-	if !connectors.ScopesCover(credential.Scopes, connectors.ScopesForMode(provider, mode)) {
-		granted.Status = metav1.ConditionFalse
-		granted.Reason = corev1alpha1.ConnectionReasonConsentRequired
-		granted.Message = "Granted scopes do not cover the " + mode + " mode; consent again"
-		connection.Status.State = corev1alpha1.ConnectionStatePending
-	}
-	meta.SetStatusCondition(&connection.Status.Conditions, granted)
+	connectors.ApplyLinkedStatus(connection, provider, credential, metav1.NewTime(h.connectors.now().UTC()))
 	return h.client.Status().Update(ctx, connection)
 }
 

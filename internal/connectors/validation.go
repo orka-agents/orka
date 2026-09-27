@@ -691,9 +691,9 @@ func ProviderIssuerDigest(provider *corev1alpha1.ConnectorProvider) string {
 }
 
 // providerIssuerParts names the OAuth client a token was issued by: what
-// the refresh and revocation endpoints authenticate. Authorize-only
-// parameters (prompt, audience hints) shape consent but not the issued
-// token's authority, so they belong to the consent fence
+// the refresh and revocation endpoints authenticate. The authorize URL and
+// authorize-only parameters (prompt, audience hints) shape consent but not
+// the issued token's authority, so they belong to the consent fence
 // (providerConsentParts), not here: changing one must neither block a
 // refresh nor skip revocation at disconnect.
 func providerIssuerParts(provider *corev1alpha1.ConnectorProvider) []string {
@@ -702,15 +702,15 @@ func providerIssuerParts(provider *corev1alpha1.ConnectorProvider) []string {
 		"uid", string(provider.UID), "clientID", oauth.ClientID,
 		"secretName", oauth.ClientSecretRef.Name, "secretKey", oauth.ClientSecretRef.Key,
 		"clientAuthentication", oauth.ClientAuthentication,
-		"authorizeURL", oauth.AuthorizeURL, "tokenURL", oauth.TokenURL, "revocationURL", oauth.RevocationURL,
+		"tokenURL", oauth.TokenURL, "revocationURL", oauth.RevocationURL,
 	}
 }
 
-// providerConsentParts extends the issuer parts with the authorize-only
-// parameters the person consented under.
+// providerConsentParts extends the issuer parts with the authorize URL and
+// the authorize-only parameters the person consented under.
 func providerConsentParts(provider *corev1alpha1.ConnectorProvider) []string {
 	oauth := provider.Spec.OAuth
-	parts := providerIssuerParts(provider)
+	parts := append(providerIssuerParts(provider), "authorizeURL", oauth.AuthorizeURL)
 	keys := make([]string, 0, len(oauth.AdditionalAuthorizeParameters))
 	for key := range oauth.AdditionalAuthorizeParameters {
 		keys = append(keys, key)

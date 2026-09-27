@@ -112,10 +112,106 @@ func (r *ConnectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		providerResolved.Reason = corev1alpha1.ConnectionReasonProviderInvalid
 		providerResolved.Message = "ConnectorProvider is not accepted for its current generation"
 	}
+	var applied []string
 	if providerResolved.Status == metav1.ConditionTrue {
 		meta.SetStatusCondition(&connection.Status.Conditions, scopesGrantedCondition(connection, provider, now))
+		applied = r.applyCommittedCompletions(ctx, connection, provider, now)
 	}
-	return r.updateStatus(ctx, connection, providerResolved, nil)
+	r.expireLinkedCredential(ctx, connection, now)
+	result, err := r.updateStatus(ctx, connection, providerResolved, nil)
+	if err == nil {
+		// The completion is the durable record that lets a lost status write
+		// be repaired; it goes only once the recovered status is persisted.
+		r.deleteCompletions(ctx, connection, applied)
+	}
+	return result, err
+}
+
+func (r *ConnectionReconciler) deleteCompletions(ctx context.Context, connection *corev1alpha1.Connection, nonces []string) {
+	for _, nonce := range nonces {
+		if err := r.Consents.DeleteConnectorCompletion(ctx, nonce); err != nil {
+			log.FromContext(ctx).Info("finished completion could not be removed", "connection", connection.Name)
+		}
+	}
+}
+
+// expireLinkedCredential withdraws Ready from a link whose only material is
+// an access token that has passed its expiry and cannot be refreshed. The
+// credential source records the same verdict when a call happens to hit it;
+// a link nothing calls must not advertise itself as usable forever.
+func (r *ConnectionReconciler) expireLinkedCredential(ctx context.Context, connection *corev1alpha1.Connection, now metav1.Time) {
+	if r.Credentials == nil || connection.Status.ExpiresAt == nil || connection.Status.ExpiresAt.After(now.Time) {
+		return
+	}
+	ready := meta.FindStatusCondition(connection.Status.Conditions, corev1alpha1.ConnectionConditionReady)
+	if ready == nil || ready.Status != metav1.ConditionTrue {
+		return
+	}
+	ref, err := connectors.CredentialRef(connection)
+	if err != nil {
+		return
+	}
+	credential, err := r.Credentials.GetConnectorCredential(ctx, ref)
+	if err != nil || credential.RefreshToken != "" || credential.ExpiresAt.IsZero() || credential.ExpiresAt.After(now.Time) {
+		return
+	}
+	connection.Status.State = corev1alpha1.ConnectionStateExpired
+	meta.SetStatusCondition(&connection.Status.Conditions, metav1.Condition{
+		Type:               corev1alpha1.ConnectionConditionReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             corev1alpha1.ConnectionReasonExpired,
+		Message:            "Access token expired and the provider issued no refresh token",
+		ObservedGeneration: connection.Generation,
+		LastTransitionTime: now,
+	})
+}
+
+// applyCommittedCompletions finishes a completion whose custody write
+// succeeded but whose status write never did (the client lost its retry
+// window). The committed marker is authoritative: while custody still holds
+// exactly that material, the link is recorded from it, and the nonce is
+// returned so the caller removes the row only after the status is
+// persisted; a completion custody or the provider no longer matches is
+// dropped at once.
+func (r *ConnectionReconciler) applyCommittedCompletions(ctx context.Context, connection *corev1alpha1.Connection, provider *corev1alpha1.ConnectorProvider, now metav1.Time) []string {
+	if r.Consents == nil || r.Credentials == nil {
+		return nil
+	}
+	completions, err := r.Consents.ListConnectorCompletionsForConnection(ctx, string(connection.UID))
+	if err != nil {
+		return nil
+	}
+	ref, err := connectors.CredentialRef(connection)
+	if err != nil {
+		return nil
+	}
+	var applied []string
+	issuer := connectors.ProviderIssuerDigest(provider)
+	authority := connectors.ProviderAuthorityDigest(provider)
+	for _, completion := range completions {
+		if !completion.Committed {
+			continue
+		}
+		held, err := r.Credentials.GetConnectorCredential(ctx, ref)
+		if err == nil && held.AccessToken == completion.Credential.AccessToken &&
+			held.RefreshToken == completion.Credential.RefreshToken && held.AuthorityDigest == completion.Credential.AuthorityDigest {
+			mode, _ := connectors.NormalizeConnectionMode(connection.Spec.Mode)
+			// The same fence the API applies to a retried completion: the
+			// material must have been issued by the provider's current OAuth
+			// client and consented under its current authority (client plus
+			// tool destinations). Otherwise the link stays Pending until the
+			// person consents again; the row is dropped either way.
+			if completion.Mode == mode && completion.Credential.AuthorityDigest == issuer && completion.ConsentAuthorityDigest == authority {
+				connectors.ApplyLinkedStatus(connection, provider, completion.Credential, now)
+				applied = append(applied, completion.Nonce)
+				continue
+			}
+		}
+		if err := r.Consents.DeleteConnectorCompletion(ctx, completion.Nonce); err != nil {
+			log.FromContext(ctx).Info("committed completion could not be removed", "connection", connection.Name)
+		}
+	}
+	return applied
 }
 
 // scopesGrantedCondition compares the scopes granted at the last consent with
@@ -241,7 +337,10 @@ func (r *ConnectionReconciler) reapExpiredCompletions(ctx context.Context, conne
 	}
 	now := time.Now()
 	for _, completion := range completions {
-		if completion.ExpiresAt.After(now) {
+		// A committed completion is finished by applyCommittedCompletions,
+		// never reaped: its marker is what lets the link be recorded from the
+		// material custody already holds.
+		if completion.ExpiresAt.After(now) || completion.Committed {
 			continue
 		}
 		if err := r.Consents.DeleteConnectorCompletion(ctx, completion.Nonce); err != nil {

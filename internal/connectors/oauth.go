@@ -303,6 +303,15 @@ func (c *OAuthClient) tokenRequest(ctx context.Context, cfg OAuthProviderConfig,
 	if strings.TrimSpace(payload.AccessToken) == "" {
 		return TokenResponse{}, errors.New("token response has no access_token")
 	}
+	// Tokens are injected verbatim into an Authorization header; material
+	// outside the RFC 6750 b64token grammar could never authenticate and
+	// must not be parked as a Ready link.
+	if !validBearerToken(payload.AccessToken) {
+		return TokenResponse{}, errors.New("token response access_token is not a valid bearer token")
+	}
+	if payload.RefreshToken != "" && !validCredentialToken(payload.RefreshToken) {
+		return TokenResponse{}, errors.New("token response refresh_token contains invalid characters")
+	}
 	// Credentials are injected as a bearer header; any other token type would
 	// yield a Ready link that can never authenticate.
 	if !strings.EqualFold(strings.TrimSpace(payload.TokenType), "bearer") {
@@ -388,6 +397,46 @@ func sanitizeTransportError(err error) string {
 	}
 	return "transport error"
 }
+
+// validBearerToken applies the RFC 6750 b64token grammar: one or more of
+// ALPHA / DIGIT / "-" / "." / "_" / "~" / "+" / "/" followed by optional "=".
+func validBearerToken(token string) bool {
+	if token == "" || len(token) > maxCredentialTokenBytes {
+		return false
+	}
+	trimmed := strings.TrimRight(token, "=")
+	if trimmed == "" {
+		return false
+	}
+	for i := 0; i < len(trimmed); i++ {
+		b := trimmed[i]
+		switch {
+		case b >= 'a' && b <= 'z', b >= 'A' && b <= 'Z', b >= '0' && b <= '9':
+		case b == '-', b == '.', b == '_', b == '~', b == '+', b == '/':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// validCredentialToken refuses whitespace and control bytes in material that
+// is sent verbatim in a form body.
+func validCredentialToken(token string) bool {
+	if len(token) > maxCredentialTokenBytes {
+		return false
+	}
+	for i := 0; i < len(token); i++ {
+		if b := token[i]; b <= 0x20 || b == 0x7F {
+			return false
+		}
+	}
+	return true
+}
+
+// maxCredentialTokenBytes bounds a single token; real bearer tokens are far
+// smaller, and a larger value cannot be a credential.
+const maxCredentialTokenBytes = 16 << 10
 
 func splitScopes(raw string) []string {
 	raw = strings.TrimSpace(raw)
