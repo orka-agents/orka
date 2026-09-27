@@ -1656,3 +1656,45 @@ func TestConnectionCompleteRejudgesLinkAfterConcurrentModeChange(t *testing.T) {
 		t.Fatalf("custody = %+v err = %v", held, err)
 	}
 }
+
+func TestConnectionCreateRefusesObjectBoundToAnotherProvider(t *testing.T) {
+	h := newConnectorTestHarness(t, acceptedTestProvider())
+	// An object created outside the API under this identity's deterministic
+	// name, but bound to a different provider, is not reused: the provider
+	// reference is immutable and a consent for it could never link.
+	name := connectors.ConnectionName("github", connectorTestIssuer, "alice")
+	foreign := &corev1alpha1.Connection{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: connectorTestNamespace, Finalizers: []string{controller.ConnectionCustodyFinalizer}},
+		Spec: corev1alpha1.ConnectionSpec{
+			Subject:     corev1alpha1.ConnectionSubject{Issuer: connectorTestIssuer, Subject: "alice"},
+			ProviderRef: corev1alpha1.LocalObjectReference{Name: "other-provider"}, Mode: corev1alpha1.ConnectionModeReadOnly,
+		},
+	}
+	if err := h.client.Create(context.Background(), foreign); err != nil {
+		t.Fatal(err)
+	}
+	resp, raw := h.do(http.MethodPost, "/api/v1/connections", map[string]string{"provider": "github", "mode": "readOnly"})
+	if resp.StatusCode != http.StatusConflict || !strings.Contains(string(raw), "another provider") {
+		t.Fatalf("create over a foreign-provider object = %d %s", resp.StatusCode, raw)
+	}
+	stored := &corev1alpha1.Connection{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: name}, stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.Labels[ConnectionProviderLabel] == "github" {
+		t.Fatal("the foreign object must not be relabeled for the requested provider")
+	}
+}
+
+func TestValidateConnectorConfigRefusesDelimiterOnlyBases(t *testing.T) {
+	for _, base := range []string{"https://orka.example.test?", "https://orka.example.test#", "https://orka.example.test/?", "https://orka.example.test/#frag"} {
+		cfg := ConnectorConfig{Enabled: true, CallbackBaseURL: base, StateKey: bytes.Repeat([]byte{9}, connectors.MinStateKeyBytes)}
+		if err := ValidateConnectorConfig(cfg); err == nil {
+			t.Fatalf("%q must be refused", base)
+		}
+	}
+	cfg := ConnectorConfig{Enabled: true, CallbackBaseURL: "https://orka.example.test", StateKey: bytes.Repeat([]byte{9}, connectors.MinStateKeyBytes)}
+	if err := ValidateConnectorConfig(cfg); err != nil && strings.Contains(err.Error(), "callback base URL") {
+		t.Fatalf("a plain origin must pass the URL checks: %v", err)
+	}
+}

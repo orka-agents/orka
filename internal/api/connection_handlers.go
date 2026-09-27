@@ -127,7 +127,11 @@ func ValidateConnectorConfig(cfg ConnectorConfig) error {
 	}
 	base := strings.TrimSpace(cfg.CallbackBaseURL)
 	parsed, err := url.Parse(base)
-	if base == "" || err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+	// A bare "?" or "#" parses to an empty query or fragment but would turn
+	// the appended callback path into one; the delimiters themselves are
+	// refused, as is anything whose canonical form differs from the input.
+	if base == "" || err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" ||
+		parsed.ForceQuery || strings.ContainsAny(base, "?#") || parsed.String() != base {
 		return errors.New("connector callback base URL must be an absolute http(s) URL without userinfo, query, or fragment")
 	}
 	if parsed.Path != "" && parsed.Path != "/" {
@@ -466,6 +470,11 @@ func (h *Handlers) CreateConnection(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusConflict, "a connection with this name belongs to another identity")
 	case !connection.DeletionTimestamp.IsZero():
 		return fiber.NewError(fiber.StatusConflict, "the previous connection is still being removed; retry shortly")
+	case connection.Spec.ProviderRef.Name != provider.Name:
+		// The provider reference is immutable; an object created outside
+		// the API for another provider cannot be relabeled into this one, and
+		// a consent started for it could never link.
+		return fiber.NewError(fiber.StatusConflict, "a connection with this name is bound to another provider")
 	default:
 		// A reused object may lack the ownership labels the list route
 		// selects by (created through Kubernetes, or labels stripped);

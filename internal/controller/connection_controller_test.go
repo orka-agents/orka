@@ -9,12 +9,12 @@ package controller
 import (
 	"context"
 	"errors"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -768,7 +768,7 @@ func TestConnectionReconcilerFinishesCommittedCompletion(t *testing.T) {
 	c := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(connection, provider, connectorClientSecret("tenant")).
 		WithStatusSubresource(&corev1alpha1.Connection{}).
 		WithInterceptorFuncs(interceptor.Funcs{
-			SubResourceUpdate: func(ctx context.Context, c client.Client, subResource string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			SubResourceUpdate: func(ctx context.Context, c ctrlclient.Client, subResource string, obj ctrlclient.Object, opts ...ctrlclient.SubResourceUpdateOption) error {
 				if statusFailure.Load() {
 					return errors.New("transient status failure")
 				}
