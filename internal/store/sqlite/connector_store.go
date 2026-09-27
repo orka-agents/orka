@@ -138,10 +138,18 @@ func connectorCompletionAdditionalData(completion store.ConnectorCompletion) []b
 // so a plaintext column cannot flip a commit back into a fresh write.
 type sealedConnectorCompletionPayload struct {
 	sealedConnectorCredential
-	Committed bool `json:"committed,omitempty"`
+	ConsentAuthorityDigest string `json:"consentAuthorityDigest,omitempty"`
+	Committed              bool   `json:"committed,omitempty"`
 }
 
-func encodeSealedConnectorCompletionPayload(credential store.ConnectorCredential, committed bool) ([]byte, error) {
+// sealedConnectorCompletionFields are the non-credential facts sealed with a
+// parked completion.
+type sealedConnectorCompletionFields struct {
+	ConsentAuthorityDigest string
+	Committed              bool
+}
+
+func encodeSealedConnectorCompletionPayload(credential store.ConnectorCredential, fields sealedConnectorCompletionFields) ([]byte, error) {
 	body, err := json.Marshal(sealedConnectorCompletionPayload{
 		sealedConnectorCredential: sealedConnectorCredential{
 			AccessToken:     credential.AccessToken,
@@ -151,7 +159,8 @@ func encodeSealedConnectorCompletionPayload(credential store.ConnectorCredential
 			Scopes:          credential.Scopes,
 			AuthorityDigest: credential.AuthorityDigest,
 		},
-		Committed: committed,
+		ConsentAuthorityDigest: fields.ConsentAuthorityDigest,
+		Committed:              fields.Committed,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("encode connector completion: %w", err)
@@ -159,20 +168,20 @@ func encodeSealedConnectorCompletionPayload(credential store.ConnectorCredential
 	return body, nil
 }
 
-func decodeSealedConnectorCompletionPayload(body []byte) (store.ConnectorCredential, bool, error) {
+func decodeSealedConnectorCompletionPayload(body []byte) (store.ConnectorCredential, sealedConnectorCompletionFields, error) {
 	var sealed sealedConnectorCompletionPayload
 	if err := json.Unmarshal(body, &sealed); err != nil {
-		return store.ConnectorCredential{}, false, fmt.Errorf("decode connector completion: %w", err)
+		return store.ConnectorCredential{}, sealedConnectorCompletionFields{}, fmt.Errorf("decode connector completion: %w", err)
 	}
 	inner, err := json.Marshal(sealed.sealedConnectorCredential)
 	if err != nil {
-		return store.ConnectorCredential{}, false, fmt.Errorf("decode connector completion: %w", err)
+		return store.ConnectorCredential{}, sealedConnectorCompletionFields{}, fmt.Errorf("decode connector completion: %w", err)
 	}
 	credential, err := decodeSealedConnectorCredential(inner)
 	if err != nil {
-		return store.ConnectorCredential{}, false, err
+		return store.ConnectorCredential{}, sealedConnectorCompletionFields{}, err
 	}
-	return credential, sealed.Committed, nil
+	return credential, sealedConnectorCompletionFields{ConsentAuthorityDigest: sealed.ConsentAuthorityDigest, Committed: sealed.Committed}, nil
 }
 
 func encodeSealedConnectorCredential(credential store.ConnectorCredential) ([]byte, error) {
@@ -363,10 +372,16 @@ func (s *Store) CommitConnectorCompletion(ctx context.Context, nonce string, ref
 		return fmt.Errorf("read connector completion for commit: %w", err)
 	}
 	completion.ExpiresAt = completion.ExpiresAt.UTC()
-	if _, err := s.snapshotCipher.aead.Open(nil, payloadNonce, payload, connectorCompletionAdditionalData(completion)); err != nil {
+	current, err := s.snapshotCipher.aead.Open(nil, payloadNonce, payload, connectorCompletionAdditionalData(completion))
+	if err != nil {
 		return fmt.Errorf("open connector completion for commit: %w", err)
 	}
-	body, err := encodeSealedConnectorCompletionPayload(credential, true)
+	_, fields, err := decodeSealedConnectorCompletionPayload(current)
+	if err != nil {
+		return err
+	}
+	fields.Committed = true
+	body, err := encodeSealedConnectorCompletionPayload(credential, fields)
 	if err != nil {
 		return err
 	}
@@ -592,7 +607,7 @@ func (s *Store) CreateConnectorCompletion(ctx context.Context, completion store.
 	if completion.ExpiresAt.IsZero() {
 		return errors.New("connector completion expiry is required")
 	}
-	body, err := encodeSealedConnectorCompletionPayload(completion.Credential, false)
+	body, err := encodeSealedConnectorCompletionPayload(completion.Credential, sealedConnectorCompletionFields{ConsentAuthorityDigest: completion.ConsentAuthorityDigest})
 	if err != nil {
 		return err
 	}
@@ -670,12 +685,13 @@ func (s *Store) ConsumeConnectorCompletion(ctx context.Context, nonce string) (s
 	if err != nil {
 		return store.ConnectorCompletion{}, fmt.Errorf("open connector completion: %w", err)
 	}
-	credential, committed, err := decodeSealedConnectorCompletionPayload(body)
+	credential, fields, err := decodeSealedConnectorCompletionPayload(body)
 	if err != nil {
 		return store.ConnectorCompletion{}, err
 	}
 	completion.Credential = credential
-	completion.Committed = committed
+	completion.ConsentAuthorityDigest = fields.ConsentAuthorityDigest
+	completion.Committed = fields.Committed
 	return completion, nil
 }
 
@@ -751,12 +767,13 @@ func (s *Store) queryConnectorCompletions(ctx context.Context, where string, arg
 		if err != nil {
 			continue
 		}
-		credential, committed, err := decodeSealedConnectorCompletionPayload(body)
+		credential, fields, err := decodeSealedConnectorCompletionPayload(body)
 		if err != nil {
 			continue
 		}
 		completion.Credential = credential
-		completion.Committed = committed
+		completion.ConsentAuthorityDigest = fields.ConsentAuthorityDigest
+		completion.Committed = fields.Committed
 		result = append(result, completion)
 	}
 	if err := rows.Err(); err != nil {

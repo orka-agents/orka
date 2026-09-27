@@ -123,6 +123,10 @@ type ConnectorCompletion struct {
 	// AuthorityDigest of the OAuth client that issued them.
 	Credential ConnectorCredential
 	ExpiresAt  time.Time
+	// ConsentAuthorityDigest is the full provider authority digest (client
+	// identity plus tool destinations) the consent was granted against,
+	// sealed with the tokens; completion refuses a provider that changed it.
+	ConsentAuthorityDigest string
 	// Committed is sealed into the parked payload atomically with the custody
 	// write, so a retry after a failed status update resumes that commit
 	// instead of writing the parked tokens again over a newer commit, and no

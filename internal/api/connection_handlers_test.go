@@ -1445,3 +1445,35 @@ func TestConnectionNarrowingReportsReady(t *testing.T) {
 		t.Fatalf("narrowed = %+v, want ready without consent", narrowed)
 	}
 }
+
+// TestConnectionCompletionRefusesRetargetedToolAfterCallback covers a tool
+// destination changed between callback and completion: the OAuth client is
+// unchanged, but the consented authority is not, so nothing is recorded.
+func TestConnectionCompletionRefusesRetargetedToolAfterCallback(t *testing.T) {
+	h := newConnectorTestHarness(t, acceptedTestProvider())
+	created := h.create("readOnly")
+	completion := completionFromLocation(t, h.consentAndCallback(created))
+	provider := &corev1alpha1.ConnectorProvider{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: "github"}, provider); err != nil {
+		t.Fatal(err)
+	}
+	// A new credential-receiving destination changes the consented authority
+	// while the OAuth client (issuer digest) stays the same.
+	provider.Spec.Tools = append(provider.Spec.Tools, corev1alpha1.ConnectorTool{
+		Name: "gh_search", Class: corev1alpha1.ConnectorToolClassRead, Source: corev1alpha1.ConnectorToolSourceHTTP, Description: "search",
+		HTTP: &corev1alpha1.ConnectorHTTPTool{URL: "https://api.github.com/search/issues"},
+	})
+	if err := h.client.Update(context.Background(), provider); err != nil {
+		t.Fatal(err)
+	}
+	if resp, raw := h.complete(created.Connection.Name, completion); resp.StatusCode != http.StatusConflict || !strings.Contains(string(raw), "provider changed") {
+		t.Fatalf("completion after retarget = %d %s, want 409", resp.StatusCode, raw)
+	}
+	stored := &corev1alpha1.Connection{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: created.Connection.Name}, stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status.Consent != nil || stored.Status.State == corev1alpha1.ConnectionStateReady {
+		t.Fatalf("a retargeted provider must not be recorded as consented: %+v", stored.Status)
+	}
+}

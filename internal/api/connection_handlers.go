@@ -816,7 +816,10 @@ func (h *Handlers) ConnectionCallback(c fiber.Ctx) error {
 			// of tool-destination changes.
 			AuthorityDigest: connectors.ProviderIssuerDigest(provider),
 		},
-		ExpiresAt: h.connectors.now().Add(connectors.ConsentTTL),
+		// The full authority the person consented to (client identity plus
+		// tool destinations), verified again at completion.
+		ConsentAuthorityDigest: consent.AuthorityDigest,
+		ExpiresAt:              h.connectors.now().Add(connectors.ConsentTTL),
 	}); err != nil {
 		if errors.Is(err, store.ErrConnectorCustodyTombstoned) {
 			// The link was disconnected while the code was being exchanged.
@@ -895,7 +898,10 @@ func (h *Handlers) CompleteConnection(c fiber.Ctx) error {
 	}
 	// Tokens issued by a provider OAuth client that has since changed belong
 	// to a different authority; they are discarded, never committed.
-	if completion.Credential.AuthorityDigest != connectors.ProviderIssuerDigest(provider) {
+	if completion.Credential.AuthorityDigest != connectors.ProviderIssuerDigest(provider) ||
+		completion.ConsentAuthorityDigest != connectors.ProviderAuthorityDigest(provider) {
+		// The OAuth client or the consented destinations changed after the
+		// callback: nothing the person consented to may be recorded now.
 		h.discardCompletion(ctx, completion, nonce)
 		return fiber.NewError(fiber.StatusConflict, "the connector provider changed after consent started; start consent again")
 	}
