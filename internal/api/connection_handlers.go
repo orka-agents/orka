@@ -922,18 +922,17 @@ func (h *Handlers) CompleteConnection(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	// A committed completion is judged by custody below (its grant and
-	// material), never by the pre-commit fences: custody already holds it,
-	// and a mode change or token expiry since then must not discard the only
-	// record that repairs a lost status write.
-	if !completion.Committed {
-		if err := completionFenceError(connection, provider, completion); err != nil {
-			// A completion that no longer fits its Connection, mode, or
-			// provider is discarded so it cannot be tried again or across
-			// Connections.
-			h.discardCompletion(ctx, completion, nonce)
-			return err
-		}
+	// The completion must still belong to this Connection and to the
+	// provider authority (OAuth client and consented tool destinations) the
+	// person consented under; otherwise it is discarded so it cannot be
+	// tried again or across Connections. A committed completion is exempt
+	// only from the mode check: custody already holds its material, and a
+	// mode change since must not discard the only record that repairs a
+	// lost status write, while recording it against the current mode
+	// projects Pending on its own when the scopes fall short.
+	if err := completionFenceError(connection, provider, completion, !completion.Committed); err != nil {
+		h.discardCompletion(ctx, completion, nonce)
+		return err
 	}
 	ref, err := connectors.CredentialRef(connection)
 	if err != nil {
@@ -997,14 +996,18 @@ func (h *Handlers) CompleteConnection(c fiber.Ctx) error {
 // that presents it: it must belong to this Connection, to the mode in force
 // now (a narrower or wider mode would mismatch the granted scopes), and to
 // the provider's current OAuth client and consented destinations.
-func completionFenceError(connection *corev1alpha1.Connection, provider *corev1alpha1.ConnectorProvider, completion store.ConnectorCompletion) error {
+// completionFenceError judges a parked completion against its Connection and
+// the provider's current authority; requireMode additionally demands the mode
+// consent started under (a committed completion is recorded against the
+// current mode instead).
+func completionFenceError(connection *corev1alpha1.Connection, provider *corev1alpha1.ConnectorProvider, completion store.ConnectorCompletion, requireMode bool) error {
 	if completion.ConnectionUID != string(connection.UID) || completion.Namespace != connection.Namespace ||
 		completion.Name != connection.Name || completion.Provider != connection.Spec.ProviderRef.Name ||
 		completion.SubjectDigest != connectors.SubjectDigest(connection.Spec.Subject.Issuer, connection.Spec.Subject.Subject) {
 		return fiber.NewError(fiber.StatusConflict, "completion token does not belong to this connection")
 	}
 	currentMode, _ := normalizeConnectionMode(connection.Spec.Mode)
-	if completion.Mode != currentMode {
+	if requireMode && completion.Mode != currentMode {
 		return fiber.NewError(fiber.StatusConflict, "the connection mode changed after consent started; start consent again")
 	}
 	if completion.Credential.AuthorityDigest != connectors.ProviderIssuerDigest(provider) ||
