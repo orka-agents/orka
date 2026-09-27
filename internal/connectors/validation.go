@@ -241,7 +241,49 @@ func validateEndpointURL(field, raw string, required bool) *Issue {
 	if ip := net.ParseIP(host); ip != nil && !tokenexchange.IsPublicAddress(ip) {
 		return invalid(fmt.Sprintf("oauth.%s must not target private, loopback, or link-local addresses", field))
 	}
+	if ip := net.ParseIP(host); ip == nil && nonCanonicalNumericHost(host) {
+		return invalid(fmt.Sprintf("oauth.%s host must be a hostname or a canonical IP address", field))
+	}
 	return validateEndpointQuery(field, parsed.RawQuery)
+}
+
+// nonCanonicalNumericHost reports whether host is a numeric spelling that
+// net.ParseIP rejects but resolvers accept, such as 127.1, 2130706433,
+// 0177.0.0.1, or 0x7f000001. The authorize URL is opened by the person's
+// browser, not the guarded dialer, so such spellings must not slip past the
+// loopback check. Hostnames whose last label contains a non-hex letter, and
+// labels without digits, are ordinary names.
+func nonCanonicalNumericHost(host string) bool {
+	labels := strings.Split(strings.ToLower(host), ".")
+	last := labels[len(labels)-1]
+	if last == "" {
+		return false
+	}
+	allDigits := true
+	for i := 0; i < len(last); i++ {
+		if last[i] < '0' || last[i] > '9' {
+			allDigits = false
+			break
+		}
+	}
+	if allDigits {
+		return true
+	}
+	hexOnly := true
+	hasDigit := false
+	for _, label := range labels {
+		for i := 0; i < len(label); i++ {
+			c := label[i]
+			switch {
+			case c >= '0' && c <= '9':
+				hasDigit = true
+			case (c >= 'a' && c <= 'f') || c == 'x':
+			default:
+				hexOnly = false
+			}
+		}
+	}
+	return hexOnly && hasDigit && strings.HasPrefix(last, "0x")
 }
 
 // validateEndpointQuery rejects malformed queries and credential-like query
@@ -278,10 +320,13 @@ func validateEndpointQuery(field, rawQuery string) *Issue {
 // underscores folded to hyphens.
 func credentialLikeParameter(name string) bool {
 	normalized := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(name)), "_", "-")
-	if slices.Contains([]string{"sig", "signature", "assertion", "key"}, normalized) {
+	if slices.Contains([]string{"sig", "signature", "assertion", "key", "auth", "x-auth", "pin", "passcode"}, normalized) {
 		return true
 	}
-	for _, fragment := range []string{"secret", "password", "passwd", "credential", "authorization", "api-key", "apikey", "token", "assertion", "signature"} {
+	for _, fragment := range []string{
+		"secret", "password", "passwd", "credential", "authorization", "api-key", "apikey", "token", "assertion", "signature",
+		"auth-", "-auth", "access-key", "private-key", "secret-key", "session", "cookie", "bearer", "jwt",
+	} {
 		if strings.Contains(normalized, fragment) {
 			return true
 		}
@@ -592,7 +637,8 @@ func ConnectionLinked(connection *corev1alpha1.Connection) bool {
 // reference, authentication method, endpoints, the static authorize
 // parameters (which can select the resource server a token targets, such as
 // an Auth0 audience), and the curated HTTP tool destinations the credential
-// is sent to. It carries no secret material and changes whenever a held token
+// is sent to, including their static headers (which can change request
+// semantics, such as a tenant-routing or method-override header). It carries no secret material and changes whenever a held token
 // would belong to a different client, target a different resource, or be sent
 // to a different endpoint, so such a change asks for consent again. Scopes
 // are judged separately by ScopesGranted. Every field is length-prefixed, so
@@ -625,6 +671,14 @@ func ProviderAuthorityDigest(provider *corev1alpha1.ConnectorProvider) string {
 	slices.SortFunc(tools, func(a, b corev1alpha1.ConnectorTool) int { return strings.Compare(a.Name, b.Name) })
 	for _, tool := range tools {
 		parts = append(parts, "tool", tool.Name, string(tool.Class), tool.HTTP.URL, tool.HTTP.Method)
+		headerNames := make([]string, 0, len(tool.HTTP.Headers))
+		for name := range tool.HTTP.Headers {
+			headerNames = append(headerNames, name)
+		}
+		slices.Sort(headerNames)
+		for _, name := range headerNames {
+			parts = append(parts, "header", name, tool.HTTP.Headers[name])
+		}
 	}
 	sum := sha256.New()
 	for _, part := range parts {

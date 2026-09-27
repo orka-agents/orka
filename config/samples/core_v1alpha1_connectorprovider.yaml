@@ -15,7 +15,6 @@ spec:
     scopes:
       read:
         - read:user
-        - repo:status
       write:
         - repo
   tools:

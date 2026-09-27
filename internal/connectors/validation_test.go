@@ -175,6 +175,21 @@ func TestValidateProviderSpec(t *testing.T) {
 		{name: "http tool benign header ok", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.Tools[2].HTTP.Headers = map[string]string{"X-Github-Api-Version": "2022-11-28", "Accept": "application/vnd.github+json"}
 		}},
+		{name: "http tool x-auth header", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].HTTP.Headers = map[string]string{"X-Auth": "abc"}
+		}, want: "looks like a credential"},
+		{name: "http tool access key header", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].HTTP.Headers = map[string]string{"X-Access-Key": "abc"}
+		}, want: "looks like a credential"},
+		{name: "auth authorize parameter", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.AdditionalAuthorizeParameters = map[string]string{"auth": "x"}
+		}, want: "must not carry credentials"},
+		{name: "loopback shorthand host", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.AuthorizeURL = "https://127.1/authorize" }, want: "canonical IP"},
+		{name: "decimal loopback host", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.AuthorizeURL = "https://2130706433/authorize" }, want: "canonical IP"},
+		{name: "octal loopback host", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://0177.0.0.1/token" }, want: "canonical IP"},
+		{name: "hex loopback host", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://0x7f000001/token" }, want: "canonical IP"},
+		{name: "numeric tld host", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://example.123/token" }, want: "canonical IP"},
+		{name: "hexish hostname ok", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://ab12.cafe.example.com/token" }},
 		{name: "http tool credential query", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.Tools[2].HTTP.URL = "https://api.github.com/x?token=abc"
 		}, want: "must not carry credentials"},
@@ -490,7 +505,10 @@ func TestProviderAuthorityDigestAndConsent(t *testing.T) {
 		},
 		"http tool url":    func(p *corev1alpha1.ConnectorProvider) { p.Spec.Tools[2].HTTP.URL = "https://api.github.com/elsewhere" },
 		"http tool method": func(p *corev1alpha1.ConnectorProvider) { p.Spec.Tools[2].HTTP.Method = "DELETE" },
-		"http tool class":  func(p *corev1alpha1.ConnectorProvider) { p.Spec.Tools[2].Class = corev1alpha1.ConnectorToolClassWrite },
+		"http tool header": func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].HTTP.Headers = map[string]string{"X-Http-Method-Override": "DELETE"}
+		},
+		"http tool class": func(p *corev1alpha1.ConnectorProvider) { p.Spec.Tools[2].Class = corev1alpha1.ConnectorToolClassWrite },
 		"new http tool": func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.Tools = append(p.Spec.Tools, corev1alpha1.ConnectorTool{Name: "extra", Class: corev1alpha1.ConnectorToolClassRead, Source: corev1alpha1.ConnectorToolSourceHTTP, Description: "x", HTTP: &corev1alpha1.ConnectorHTTPTool{URL: "https://api.github.com/extra"}})
 		},
