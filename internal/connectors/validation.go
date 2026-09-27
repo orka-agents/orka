@@ -437,6 +437,9 @@ func validateHTTPTool(name string, spec corev1alpha1.ConnectorHTTPTool) *Issue {
 		if _, reserved := reservedToolHeaders[canonical]; reserved {
 			return invalid(fmt.Sprintf("HTTP tool %q may not set the %s header", name, canonical))
 		}
+		if credentialLikeParameter(canonical) {
+			return invalid(fmt.Sprintf("HTTP tool %q header %s looks like a credential; the linked account is the only credential", name, canonical))
+		}
 		if !validHeaderValue(value) {
 			return invalid(fmt.Sprintf("HTTP tool %q header values must not contain control bytes", name))
 		}
