@@ -386,7 +386,11 @@ func (s *Store) retireConnectorCredentialTx(ctx context.Context, tx *sql.Tx, ref
 	if err != nil {
 		return fmt.Errorf("open replaced connector credential: %w", err)
 	}
-	if previous.AccessToken == replacement.AccessToken && previous.RefreshToken == replacement.RefreshToken {
+	// Identical material under the same revocation identity is one grant;
+	// the same strings issued by another client or revocation endpoint are
+	// kept, because disconnect must offer them to that authority too.
+	if previous.AccessToken == replacement.AccessToken && previous.RefreshToken == replacement.RefreshToken &&
+		previous.RevocationDigest == replacement.RevocationDigest {
 		return nil
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO connector_retired_credentials
@@ -431,6 +435,17 @@ func (s *Store) CommitConnectorCompletion(ctx context.Context, nonce string, ref
 		return store.ConnectorCredential{}, fmt.Errorf("read connector completion for commit: %w", err)
 	}
 	completion.ExpiresAt = completion.ExpiresAt.UTC()
+	if !completion.ExpiresAt.After(time.Now().UTC()) {
+		// The token's lifetime is judged here, not only at the peek: a
+		// commit that stalled past the deadline redeems nothing.
+		if _, err := tx.ExecContext(ctx, `DELETE FROM connector_completions WHERE nonce = ?`, nonce); err != nil {
+			return store.ConnectorCredential{}, fmt.Errorf("drop expired connector completion: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return store.ConnectorCredential{}, err
+		}
+		return store.ConnectorCredential{}, store.ErrNotFound
+	}
 	current, err := s.snapshotCipher.aead.Open(nil, payloadNonce, payload, connectorCompletionAdditionalData(completion))
 	if err != nil {
 		return store.ConnectorCredential{}, fmt.Errorf("open connector completion for commit: %w", err)
@@ -942,4 +957,94 @@ func parseConnectorTime(value string) (time.Time, error) {
 		return time.Time{}, err
 	}
 	return parsed.UTC(), nil
+}
+
+// verifyConnectorRowsWithCipher authenticates every retained connector row
+// with a candidate key: the wrapped data keys of current and retired
+// custody, and the sealed payloads of pending consents and completions.
+func (s *Store) verifyConnectorRowsWithCipher(snapshotCipher *AgentExecutionSnapshotCipher) error {
+	if snapshotCipher == nil {
+		return errors.New("agent execution snapshot cipher is required")
+	}
+	for _, table := range []string{"connector_credentials", "connector_retired_credentials"} {
+		rows, err := s.db.Query(`SELECT connection_uid, dek_nonce, dek_ciphertext FROM ` + table)
+		if err != nil {
+			return fmt.Errorf("verify connector custody key (%s): %w", table, err)
+		}
+		for rows.Next() {
+			var (
+				connectionUID           string
+				dekNonce, dekCiphertext []byte
+			)
+			if err := rows.Scan(&connectionUID, &dekNonce, &dekCiphertext); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("scan connector custody (%s) while verifying key: %w", table, err)
+			}
+			if _, err := snapshotCipher.aead.Open(nil, dekNonce, dekCiphertext, connectorDataKeyAdditionalData(connectionUID)); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("candidate agent execution snapshot key cannot open connector custody for connection %s (%s); "+
+					"restore the previous key: linked accounts would be unusable and unrevocable: %w", connectionUID, table, err)
+			}
+		}
+		err = rows.Err()
+		_ = rows.Close()
+		if err != nil {
+			return fmt.Errorf("iterate connector custody (%s) while verifying key: %w", table, err)
+		}
+	}
+	consents, err := s.db.Query(`SELECT nonce, connection_uid, namespace, name, subject_digest, provider, mode, authority_digest, scopes,
+		expires_at, verifier_nonce, verifier_ciphertext FROM connector_consents`)
+	if err != nil {
+		return fmt.Errorf("verify connector consents key: %w", err)
+	}
+	for consents.Next() {
+		var (
+			consent               store.ConnectorConsent
+			scopes                string
+			verifierNonce, sealed []byte
+		)
+		if err := consents.Scan(&consent.Nonce, &consent.ConnectionUID, &consent.Namespace, &consent.Name, &consent.SubjectDigest,
+			&consent.Provider, &consent.Mode, &consent.AuthorityDigest, &scopes, &consent.ExpiresAt, &verifierNonce, &sealed); err != nil {
+			_ = consents.Close()
+			return fmt.Errorf("scan connector consent while verifying key: %w", err)
+		}
+		consent.Scopes = strings.Fields(scopes)
+		consent.ExpiresAt = consent.ExpiresAt.UTC()
+		if _, err := snapshotCipher.aead.Open(nil, verifierNonce, sealed, connectorConsentAdditionalData(consent)); err != nil {
+			_ = consents.Close()
+			return fmt.Errorf("candidate agent execution snapshot key cannot open pending connector consent for connection %s; restore the previous key: %w", consent.ConnectionUID, err)
+		}
+	}
+	err = consents.Err()
+	_ = consents.Close()
+	if err != nil {
+		return fmt.Errorf("iterate connector consents while verifying key: %w", err)
+	}
+	completions, err := s.db.Query(`SELECT nonce, connection_uid, namespace, name, subject_digest, provider, mode,
+		payload_nonce, payload, expires_at FROM connector_completions`)
+	if err != nil {
+		return fmt.Errorf("verify connector completions key: %w", err)
+	}
+	for completions.Next() {
+		var (
+			completion            store.ConnectorCompletion
+			payloadNonce, payload []byte
+		)
+		if err := completions.Scan(&completion.Nonce, &completion.ConnectionUID, &completion.Namespace, &completion.Name, &completion.SubjectDigest,
+			&completion.Provider, &completion.Mode, &payloadNonce, &payload, &completion.ExpiresAt); err != nil {
+			_ = completions.Close()
+			return fmt.Errorf("scan connector completion while verifying key: %w", err)
+		}
+		completion.ExpiresAt = completion.ExpiresAt.UTC()
+		if _, err := snapshotCipher.aead.Open(nil, payloadNonce, payload, connectorCompletionAdditionalData(completion)); err != nil {
+			_ = completions.Close()
+			return fmt.Errorf("candidate agent execution snapshot key cannot open parked connector completion for connection %s; restore the previous key: %w", completion.ConnectionUID, err)
+		}
+	}
+	err = completions.Err()
+	_ = completions.Close()
+	if err != nil {
+		return fmt.Errorf("iterate connector completions while verifying key: %w", err)
+	}
+	return nil
 }

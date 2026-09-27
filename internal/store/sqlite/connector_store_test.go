@@ -708,3 +708,86 @@ func TestConnectorCommitIsFencedInsideTheTransaction(t *testing.T) {
 		t.Fatalf("a fresh tombstone must still fence: err = %v", err)
 	}
 }
+
+// TestConnectorKeyActivationAuthenticatesCustody covers key rotation while
+// linked accounts exist: a candidate key that cannot open the retained
+// connector rows is refused even when no execution snapshot is retained,
+// and the current key still activates.
+func TestConnectorKeyActivationAuthenticatesCustody(t *testing.T) {
+	s := newConnectorTestStore(t)
+	ctx := context.Background()
+	completion := testConnectorCompletion()
+	ref := store.ConnectorCredentialRef{ConnectionUID: completion.ConnectionUID, Namespace: completion.Namespace, Name: completion.Name, SubjectDigest: completion.SubjectDigest, Provider: completion.Provider}
+	if err := s.PutConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho_1"}); err != nil {
+		t.Fatal(err)
+	}
+	other, err := NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{0x24}, AgentExecutionSnapshotKeyBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetAgentExecutionSnapshotCipher(other); err == nil || !strings.Contains(err.Error(), "connector custody") {
+		t.Fatalf("rotation over linked custody err = %v, want refusal", err)
+	}
+	same, err := NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{0x42}, AgentExecutionSnapshotKeyBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetAgentExecutionSnapshotCipher(same); err != nil {
+		t.Fatalf("the current key must activate: %v", err)
+	}
+	// Pending rows are sealed under the key too.
+	if err := s.DeleteConnectorCredential(ctx, ref.ConnectionUID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateConnectorConsent(ctx, testConnectorConsent()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetAgentExecutionSnapshotCipher(other); err == nil || !strings.Contains(err.Error(), "consent") {
+		t.Fatalf("rotation over a pending consent err = %v, want refusal", err)
+	}
+}
+
+// TestConnectorCommitJudgesExpiryAndRevocationIdentity covers a commit that
+// stalled past the completion's lifetime (refused and the row dropped) and
+// a re-consent that re-issued the same token strings under another
+// revocation identity (the previous row is retired, not deduplicated).
+func TestConnectorCommitJudgesExpiryAndRevocationIdentity(t *testing.T) {
+	s := newConnectorTestStore(t)
+	ctx := context.Background()
+	expired := testConnectorCompletion()
+	expired.Nonce = "nonce-expired"
+	expired.ExpiresAt = time.Now().Add(time.Second)
+	if err := s.CreateConnectorCompletion(ctx, expired); err != nil {
+		t.Fatal(err)
+	}
+	ref := store.ConnectorCredentialRef{ConnectionUID: expired.ConnectionUID, Namespace: expired.Namespace, Name: expired.Name, SubjectDigest: expired.SubjectDigest, Provider: expired.Provider}
+	if _, err := s.db.Exec(`UPDATE connector_completions SET expires_at = ? WHERE nonce = ?`, time.Now().Add(-time.Minute).UTC(), expired.Nonce); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CommitConnectorCompletion(ctx, expired.Nonce, ref, expired.Credential); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("commit past expiry err = %v, want ErrNotFound", err)
+	}
+	if _, err := s.GetConnectorCredential(ctx, ref); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("custody after an expired commit err = %v, want nothing stored", err)
+	}
+	if _, err := s.PeekConnectorCompletion(ctx, expired.Nonce); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expired completion after commit attempt err = %v, want dropped", err)
+	}
+
+	first := store.ConnectorCredential{AccessToken: "gho_same", RefreshToken: "ghr_same", RevocationDigest: "revocation-a"}
+	if err := s.PutConnectorCredential(ctx, ref, first); err != nil {
+		t.Fatal(err)
+	}
+	completion := testConnectorCompletion()
+	completion.Credential = store.ConnectorCredential{AccessToken: "gho_same", RefreshToken: "ghr_same", RevocationDigest: "revocation-b"}
+	if err := s.CreateConnectorCompletion(ctx, completion); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CommitConnectorCompletion(ctx, completion.Nonce, ref, completion.Credential); err != nil {
+		t.Fatal(err)
+	}
+	retired, err := s.ListRetiredConnectorCredentials(ctx, ref)
+	if err != nil || len(retired) != 1 || retired[0].RevocationDigest != "revocation-a" {
+		t.Fatalf("retired = %+v err = %v, want the same tokens kept under their previous revocation identity", retired, err)
+	}
+}

@@ -35,6 +35,9 @@
 {{- if and $gatewayRuntimeEnabled (not .Values.store.persistence.enabled) (not .Values.controller.gateway.allowEphemeralStore) -}}
 {{- fail "controller.gateway.enabled requires store.persistence.enabled=true; set controller.gateway.allowEphemeralStore=true only for disposable development" -}}
 {{- end -}}
+{{- if and .Values.controller.connectors.enabled (not .Values.store.persistence.enabled) -}}
+{{- fail "controller.connectors.enabled requires store.persistence.enabled=true: linked-account tokens live only in the controller store, and an ephemeral store would lose them on every Pod replacement while Connections stay Ready" -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
