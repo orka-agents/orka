@@ -128,6 +128,18 @@ func TestValidateProviderSpec(t *testing.T) {
 		{name: "per-token revocation ok", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.OAuth.RevocationSemantics = corev1alpha1.ConnectorRevocationPerToken
 		}},
+		{name: "client id control byte", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.ClientID = "client\nid" }, want: "clientID"},
+		{name: "client id non-ascii", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.ClientID = "clïent" }, want: "clientID"},
+		{name: "token url presets code", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://example.com/token?code=abc" }, want: "must not preset reserved"},
+		{name: "revocation url carries refresh token", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.RevocationURL = "https://example.com/revoke?refresh_token=abc"
+		}, want: "must not carry credentials"},
+		{name: "revocation url presets grant type", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.RevocationURL = "https://example.com/revoke?grant_type=x"
+		}, want: "must not preset reserved"},
+		{name: "http tool named like a builtin", builtin: func(name string) bool {
+			return name == "file_read" || name == "create_pull_request" || name == "list_pull_requests"
+		}, mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.Tools[2].Name = "file_read" }, want: "collides with a built-in"},
 		{name: "scope with space", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.Scopes.Read = []string{"read user"} }, want: "scopes.read entries"},
 		{name: "scope with control byte", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.Scopes.Read = []string{"read\x00profile"} }, want: "scopes.read entries"},
 		{name: "scope with non-ascii", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.Scopes.Write = []string{"répo"} }, want: "scopes.write entries"},
@@ -194,7 +206,7 @@ func TestValidateProviderSpec(t *testing.T) {
 			p.Spec.Tools[0].HTTP = &corev1alpha1.ConnectorHTTPTool{URL: "https://example.test"}
 		}, want: "must not set http"},
 		{name: "unknown builtin", builtin: func(name string) bool { return name == "list_pull_requests" }, want: `builtin tool "create_pull_request" is not a known`},
-		{name: "known builtin", builtin: func(string) bool { return true }},
+		{name: "known builtin", builtin: func(name string) bool { return name == "create_pull_request" || name == "list_pull_requests" }},
 		{name: "http without http", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.Tools[2].HTTP = nil }, want: "requires http"},
 		{name: "http without description", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.Tools[2].Description = "" }, want: "requires a description"},
 		{name: "http plain url", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.Tools[2].HTTP.URL = "http://api.github.com/x" }, want: "tools.search.url must be an absolute HTTPS URL"},
