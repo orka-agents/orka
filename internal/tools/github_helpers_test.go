@@ -756,6 +756,40 @@ func TestResolveRepoAndToken_LinkedAccountFirst(t *testing.T) {
 	if _, repo, _, _, err := resolveScopedReadRepoAndToken(ctx, k8sClient, "list_pull_requests", testMyTaskName, "", ""); err != nil || repo != "taskrepo" {
 		t.Fatalf("own task_name: repo=%q err=%v", repo, err)
 	}
+	// A child this Task controls may supply the scope (a coordinator opening
+	// its coder's pull request); a child of somebody else may not.
+	child := other.DeepCopy()
+	child.Name, child.ResourceVersion = "child-task", ""
+	child.Spec.Workspace.GitRepo = "https://github.com/taskorg/childrepo"
+	child.OwnerReferences = []metav1.OwnerReference{{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: testMyTaskName, UID: "task-uid", Controller: new(true)}}
+	if err := k8sClient.Create(context.Background(), child); err != nil {
+		t.Fatal(err)
+	}
+	owned := WithToolContext(context.Background(), &ToolContext{Namespace: defaultNamespace, TaskID: testMyTaskName, TaskUID: "task-uid", LinkedAccounts: linked})
+	if _, repo, token, _, err := resolveForgeRepoAndToken(owned, k8sClient, "create_pull_request", "child-task", "", ""); err != nil || repo != "childrepo" || token != "linked-token" {
+		t.Fatalf("owned child: repo=%q token=%q err=%v", repo, token, err)
+	}
+	stranger := WithToolContext(context.Background(), &ToolContext{Namespace: defaultNamespace, TaskID: testMyTaskName, TaskUID: "another-uid", LinkedAccounts: linked})
+	if _, _, _, _, err := resolveForgeRepoAndToken(stranger, k8sClient, "create_pull_request", "child-task", "", ""); err == nil || !strings.Contains(err.Error(), "child tasks") {
+		t.Fatalf("foreign child err = %v", err)
+	}
+	// A transaction's repository context never widens a linked token's scope.
+	transacted := task.DeepCopy()
+	transacted.Name, transacted.ResourceVersion = "tx-task", ""
+	transacted.Spec.Transaction = &corev1alpha1.TaskTransaction{Context: map[string]string{"repo": "https://github.com/txorg/txrepo"}}
+	if err := k8sClient.Create(context.Background(), transacted); err != nil {
+		t.Fatal(err)
+	}
+	txCtx := WithToolContext(context.Background(), &ToolContext{Namespace: defaultNamespace, TaskID: "tx-task", LinkedAccounts: linked})
+	if _, _, _, _, err := resolveScopedReadRepoAndToken(txCtx, k8sClient, "list_pull_requests", "", "https://github.com/txorg/txrepo", ""); err == nil {
+		t.Fatal("transaction repo context must not scope a linked token")
+	}
+	txSecret := WithToolContext(context.Background(), &ToolContext{Namespace: defaultNamespace, TaskID: "tx-task", LinkedAccounts: unboundFor(t)})
+	// (The scope is accepted; only the credential lookup fails here, as
+	// before, because the transaction scope carries no Secret reference.)
+	if _, _, _, _, err := resolveScopedReadRepoAndToken(txSecret, k8sClient, "list_pull_requests", "", "https://github.com/txorg/txrepo", ""); err == nil || strings.Contains(err.Error(), "repository scope") {
+		t.Fatalf("transaction scope under Task credentials must be unchanged: err=%v", err)
+	}
 	// A forge mutation under the link needs no forge Secret.
 	if _, _, token, _, err := resolveForgeRepoAndToken(ctx, k8sClient, "create_pull_request", "", "", ""); err != nil || token != "linked-token" {
 		t.Fatalf("forge under link: token=%q err=%v", token, err)
@@ -791,4 +825,12 @@ func TestResolveRepoAndToken_LinkedAccountFirst(t *testing.T) {
 	if _, _, _, _, err := resolveScopedReadRepoAndToken(ctx, k8sClient, "", "", "", ""); err == nil || !strings.Contains(err.Error(), "tool name") {
 		t.Fatalf("missing tool name err = %v", err)
 	}
+}
+
+//go:fix inline
+func ptrTo[T any](v T) *T { return new(v) }
+
+func unboundFor(t *testing.T) *fakeLinkedAccounts {
+	t.Helper()
+	return &fakeLinkedAccounts{}
 }

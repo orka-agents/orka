@@ -138,9 +138,13 @@ approval and `readOnly` rules its class carries. The built-ins call
 issuer is rejected, because its token would be sent to the wrong server.
 Curated `HTTP` tools remain available for such providers.
 
-Under a linked account the repository scope comes from the current Task's
-workspace alone. A `task_name` argument naming a different Task is refused,
-and `repo_url` must still fall inside the Task's repository scope.
+Under a linked account the repository scope comes from `spec.workspace` of
+the current Task, or of a child Task it controls (a coordinator opening the
+pull request for its coder's work). Any other `task_name` is refused, a
+transaction's repository context never widens the scope, and `repo_url` must
+fall inside it. A `review_pull_request` result that would exceed the broker's
+result limit is cut (file patches first, then the diff) and marked
+`truncated` instead of failing.
 
 The full example, with an Agent that uses these tools, is in
 [`examples/github-connector/`](https://github.com/orka-agents/orka/tree/main/examples/github-connector).

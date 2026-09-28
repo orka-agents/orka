@@ -15,6 +15,7 @@ import (
 	"github.com/orka-agents/orka/internal/workerenv"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -96,12 +97,13 @@ func resolveRepoAndTokenWithPolicy(
 	}
 
 	// Under a linked account the repository scope comes from the current
-	// Task alone: naming another Task would borrow its workspace to point
-	// the person's token at a repository this Task was never given.
+	// Task, or from a child it controls (a coordinator opening the pull
+	// request for its coder's work): any other Task would lend its
+	// workspace to point the person's token at a repository this Task was
+	// never given.
 	if linked != "" {
-		if tc := GetToolContext(ctx); tc != nil && strings.TrimSpace(tc.TaskID) != "" &&
-			strings.TrimSpace(taskName) != "" && strings.TrimSpace(taskName) != strings.TrimSpace(tc.TaskID) {
-			return "", "", "", "", fmt.Errorf("task_name %q must name the current task when acting through a linked account", strings.TrimSpace(taskName))
+		if err := linkedTaskScopeAllowed(ctx, k8sClient, taskName); err != nil {
+			return "", "", "", "", err
 		}
 	}
 
@@ -125,7 +127,9 @@ func resolveRepoAndTokenWithPolicy(
 		return "", "", "", "", fmt.Errorf("repo_url repository %s/%s requires a permitted repository scope", owner, repo)
 	}
 	if scopeTaskName != "" {
-		taskContext, err := loadGitHubTaskContext(ctx, k8sClient, scopeTaskName)
+		// A linked token is scoped by the Task's declared workspace alone;
+		// a transaction's repository context never widens it.
+		taskContext, err := loadGitHubTaskScopes(ctx, k8sClient, scopeTaskName, linked != "")
 		if err != nil {
 			return "", "", "", "", err
 		}
@@ -217,7 +221,37 @@ func githubRepoAllowed(owner, repo string, scopes []githubRepoScope) bool {
 	return false
 }
 
+// linkedTaskScopeAllowed reports whether taskName may supply the repository
+// scope for a call made through a linked account: it must be the current
+// Task or a Task the current Task controller-owns.
+func linkedTaskScopeAllowed(ctx context.Context, k8sClient client.Client, taskName string) error {
+	tc := GetToolContext(ctx)
+	taskName = strings.TrimSpace(taskName)
+	if tc == nil || strings.TrimSpace(tc.TaskID) == "" || taskName == "" || taskName == strings.TrimSpace(tc.TaskID) {
+		return nil
+	}
+	if strings.TrimSpace(tc.TaskUID) == "" || k8sClient == nil {
+		return fmt.Errorf("task_name %q must name the current task when acting through a linked account", taskName)
+	}
+	var task corev1alpha1.Task
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: taskName, Namespace: githubTaskNamespace(ctx)}, &task); err != nil {
+		return fmt.Errorf("failed to get task %s: %w", taskName, err)
+	}
+	owner := metav1.GetControllerOf(&task)
+	if owner == nil || string(owner.UID) != strings.TrimSpace(tc.TaskUID) || owner.Kind != taskKindString || owner.APIVersion != corev1alpha1.GroupVersion.String() {
+		return fmt.Errorf("task_name %q must name the current task or one of its own child tasks when acting through a linked account", taskName)
+	}
+	return nil
+}
+
 func loadGitHubTaskContext(ctx context.Context, k8sClient client.Client, taskName string) (githubTaskContext, error) {
+	return loadGitHubTaskScopes(ctx, k8sClient, taskName, false)
+}
+
+// loadGitHubTaskScopes loads the Task's repository scopes. With
+// workspaceOnly, only spec.workspace repositories count; the transaction's
+// repository context is left out.
+func loadGitHubTaskScopes(ctx context.Context, k8sClient client.Client, taskName string, workspaceOnly bool) (githubTaskContext, error) {
 	taskName = githubTaskNameFromContext(ctx, taskName)
 	if strings.TrimSpace(taskName) == "" {
 		return githubTaskContext{}, nil
@@ -263,7 +297,7 @@ func loadGitHubTaskContext(ctx context.Context, k8sClient client.Client, taskNam
 			readCredentialRef: ws.PublicationReadCredentialRef,
 		})
 	}
-	if task.Spec.Transaction != nil {
+	if task.Spec.Transaction != nil && !workspaceOnly {
 		if txRepo := strings.TrimSpace(task.Spec.Transaction.Context["repo"]); txRepo != "" {
 			owner, repo, err := parseGitHubRepo(txRepo)
 			if err != nil {
