@@ -145,13 +145,18 @@ func (h *harness) put(credential store.ConnectorCredential) {
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	if credential.AuthorityDigest == "" {
+	if credential.AuthorityDigest == "" || credential.RevocationDigest == "" {
 		// Issued by the fixture provider unless a test says otherwise.
 		provider := &corev1alpha1.ConnectorProvider{}
 		if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: "github"}, provider); err != nil {
 			h.t.Fatal(err)
 		}
-		credential.AuthorityDigest = connectors.ProviderIssuerDigest(provider)
+		if credential.AuthorityDigest == "" {
+			credential.AuthorityDigest = connectors.ProviderIssuerDigest(provider)
+		}
+		if credential.RevocationDigest == "" {
+			credential.RevocationDigest = connectors.ProviderRevocationDigest(provider)
+		}
 	}
 	if err := h.store.PutConnectorCredential(context.Background(), ref, credential); err != nil {
 		h.t.Fatal(err)
@@ -824,5 +829,59 @@ func TestRevocationVerdictYieldsToReconsentAfterShred(t *testing.T) {
 	}
 	if fresh := h.reload(); fresh.Status.State != corev1alpha1.ConnectionStateReady {
 		t.Fatalf("a verdict judged against the shredded row must not overwrite the fresh link: %+v", fresh.Status)
+	}
+}
+
+// TestRefreshLosingToDisconnectSkipsMovedRevocationEndpoint covers a
+// revocation endpoint moved after consent (refresh stays allowed): the pair a
+// losing refresh cannot store is not sent to the new endpoint, because the
+// sealed revocation identity no longer matches the provider's.
+func TestRefreshLosingToDisconnectSkipsMovedRevocationEndpoint(t *testing.T) {
+	h := newHarness(t)
+	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", ExpiresAt: h.now.Add(-time.Minute), RevocationDigest: "revocation-at-consent"})
+	h.refresher.response = connectors.TokenResponse{AccessToken: "gho_rotated", RefreshToken: "ghr_rotated", TokenType: "bearer", ExpiresAt: h.now.Add(time.Hour)}
+	live := h.reload()
+	h.refresher.onRefresh = func() {
+		if err := h.store.TombstoneConnectorCustody(context.Background(), string(live.UID)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil || !strings.Contains(err.Error(), "disconnected") {
+		t.Fatalf("refresh after disconnect err = %v", err)
+	}
+	h.refresher.mu.Lock()
+	revoked := strings.Join(h.refresher.revoked, ",")
+	h.refresher.mu.Unlock()
+	if revoked != "" {
+		t.Fatalf("revoked = %q, want nothing sent to a revocation authority the material was not sealed under", revoked)
+	}
+}
+
+// TestRefreshHorizonCoversTheToolTimeout covers a long curated request: a
+// token that would expire before the Tool's timeout elapses is refreshed
+// even though it is outside the plain refresh skew.
+func TestRefreshHorizonCoversTheToolTimeout(t *testing.T) {
+	h := newHarness(t)
+	h.put(store.ConnectorCredential{AccessToken: "gho_short", RefreshToken: "ghr", TokenType: "bearer", ExpiresAt: h.now.Add(3 * time.Minute)})
+	req := h.request()
+	if got, err := h.source.ResolveConnectionCredential(context.Background(), req); err != nil || got.AccessToken != "gho_short" || h.refresher.calls.Load() != 0 {
+		t.Fatalf("default 30s timeout: got %+v err = %v calls = %d, want the token released unrefreshed", got, err, h.refresher.calls.Load())
+	}
+	// The provider curates a five-minute bound for this tool.
+	provider := &corev1alpha1.ConnectorProvider{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: "github"}, provider); err != nil {
+		t.Fatal(err)
+	}
+	for i := range provider.Spec.Tools {
+		if provider.Spec.Tools[i].Name == "gh_search" && provider.Spec.Tools[i].HTTP != nil {
+			provider.Spec.Tools[i].HTTP.Timeout = &metav1.Duration{Duration: 5 * time.Minute}
+		}
+	}
+	if err := h.client.Update(context.Background(), provider); err != nil {
+		t.Fatal(err)
+	}
+	req.Tool.Timeout, req.Tool.TimeoutSet = 5*time.Minute, true
+	if got, err := h.source.ResolveConnectionCredential(context.Background(), req); err != nil || got.AccessToken != "gho_new" || h.refresher.calls.Load() != 1 {
+		t.Fatalf("5m timeout: got %+v err = %v calls = %d, want a refresh before release", got, err, h.refresher.calls.Load())
 	}
 }

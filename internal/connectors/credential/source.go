@@ -128,8 +128,9 @@ func (s *Source) ResolveConnectionCredential(ctx context.Context, req outboundac
 	if _, err := s.validateProvider(ctx, connection, credential, &req.Tool); err != nil {
 		return outboundaccess.ConnectionCredential{}, err
 	}
-	if s.needsRefresh(credential) {
-		credential, err = s.refreshSingleFlight(ctx, connection, ref)
+	horizon := s.refreshHorizon(req.Tool)
+	if s.expiresWithin(credential, horizon) {
+		credential, err = s.refreshSingleFlight(ctx, connection, ref, horizon)
 		if err != nil {
 			return outboundaccess.ConnectionCredential{}, err
 		}
@@ -193,13 +194,30 @@ func (s *Source) loadLiveConnection(ctx context.Context, req outboundaccess.Conn
 }
 
 func (s *Source) needsRefresh(credential store.ConnectorCredential) bool {
-	return !credential.ExpiresAt.IsZero() && !credential.ExpiresAt.After(s.now().Add(s.skew()))
+	return s.expiresWithin(credential, s.skew())
+}
+
+// expiresWithin reports a credential that will not outlive horizon.
+func (s *Source) expiresWithin(credential store.ConnectorCredential, horizon time.Duration) bool {
+	return !credential.ExpiresAt.IsZero() && !credential.ExpiresAt.After(s.now().Add(horizon))
+}
+
+// refreshHorizon is how long a released token must stay valid: the refresh
+// skew, or the executing Tool's curated request timeout when that is longer,
+// so a provider that rechecks the bearer during a long call never sees it
+// expire mid-request.
+func (s *Source) refreshHorizon(tool outboundaccess.ToolBinding) time.Duration {
+	horizon := s.skew()
+	if timeout := outboundaccess.NormalizedConnectorTimeout(tool.Timeout); timeout > horizon {
+		horizon = timeout
+	}
+	return horizon
 }
 
 // refreshSingleFlight refreshes once per Connection at a time. Concurrent
 // callers share the result, and a waiter that arrives after another flight
 // finished re-reads custody instead of refreshing again.
-func (s *Source) refreshSingleFlight(ctx context.Context, connection *corev1alpha1.Connection, ref store.ConnectorCredentialRef) (store.ConnectorCredential, error) {
+func (s *Source) refreshSingleFlight(ctx context.Context, connection *corev1alpha1.Connection, ref store.ConnectorCredentialRef, horizon time.Duration) (store.ConnectorCredential, error) {
 	results := s.flights.DoChan(string(connection.UID), func() (any, error) {
 		// Detach from the caller so a canceled waiter cannot abort a refresh
 		// other callers depend on; bound it independently.
@@ -209,10 +227,10 @@ func (s *Source) refreshSingleFlight(ctx context.Context, connection *corev1alph
 		if err != nil {
 			return nil, err
 		}
-		if !s.needsRefresh(current) {
+		if !s.expiresWithin(current, horizon) {
 			return current, nil
 		}
-		return s.refresh(flightCtx, connection, ref, current)
+		return s.refresh(flightCtx, connection, ref, current, horizon)
 	})
 	// The shared flight keeps running for the callers that still need it,
 	// but each caller returns as soon as its own context is done.
@@ -232,7 +250,7 @@ func (s *Source) refreshSingleFlight(ctx context.Context, connection *corev1alph
 	return credential, nil
 }
 
-func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connection, ref store.ConnectorCredentialRef, current store.ConnectorCredential) (store.ConnectorCredential, error) {
+func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connection, ref store.ConnectorCredentialRef, current store.ConnectorCredential, horizon time.Duration) (store.ConnectorCredential, error) {
 	logger := log.FromContext(ctx).WithValues("connection", connection.Name, "provider", connection.Spec.ProviderRef.Name)
 	if strings.TrimSpace(current.RefreshToken) == "" {
 		s.markNotReady(ctx, connection, ref, current.Version, corev1alpha1.ConnectionReasonExpired, corev1alpha1.ConnectionStateExpired,
@@ -266,7 +284,7 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 				if err != nil {
 					return store.ConnectorCredential{}, err
 				}
-				if s.needsRefresh(winner) {
+				if s.expiresWithin(winner, horizon) {
 					return store.ConnectorCredential{}, errors.New("connection credential changed concurrently and is about to expire; retry")
 				}
 				return winner, nil
@@ -318,13 +336,13 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 	// meanwhile wins, and its material is returned instead.
 	switch err := s.Credentials.ReplaceConnectorCredential(ctx, ref, refreshed, current.Version); {
 	case errors.Is(err, store.ErrConflict):
-		return s.refreshLostToConsent(ctx, cfg, ref, refreshed, logger)
+		return s.refreshLostToConsent(ctx, cfg, provider, ref, refreshed, horizon, logger)
 	case errors.Is(err, store.ErrConnectorCustodyTombstoned), errors.Is(err, store.ErrNotFound):
 		// Disconnect fenced custody while the provider was rotating the
 		// material. The rotated pair derives from this Connection's own
 		// committed grant, so its ownership is proven and it is revoked
 		// rather than left live outside the disconnect's revocation set.
-		s.revokeUnstorable(ctx, cfg, refreshed, logger)
+		s.revokeUnstorable(ctx, cfg, provider, refreshed, logger)
 		return store.ConnectorCredential{}, errors.New("connection was disconnected during refresh")
 	case err != nil:
 		return store.ConnectorCredential{}, fmt.Errorf("store refreshed connection credential: %w", err)
@@ -348,18 +366,25 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 	s.recordRefresh(ctx, connection, ref, refreshed)
 	// A token the provider issued already inside the refresh skew would
 	// expire mid-call; it is not released, and the next call refreshes again.
-	if s.needsRefresh(refreshed) {
-		return store.ConnectorCredential{}, errors.New("the provider issued a token that expires within the refresh window; retry")
+	if s.expiresWithin(refreshed, horizon) {
+		return store.ConnectorCredential{}, errors.New("the provider issued a token that expires within the refresh window or before the tool's request timeout; retry or shorten the tool timeout")
 	}
 	return refreshed, nil
 }
 
 // revokeUnstorable revokes, best effort, a refreshed credential that custody
 // refused because the Connection was disconnected meanwhile.
-func (s *Source) revokeUnstorable(ctx context.Context, cfg connectors.OAuthProviderConfig, credential store.ConnectorCredential, logger logr.Logger) {
+func (s *Source) revokeUnstorable(ctx context.Context, cfg connectors.OAuthProviderConfig, provider *corev1alpha1.ConnectorProvider, credential store.ConnectorCredential, logger logr.Logger) {
 	revoker, ok := s.OAuth.(Revoker)
 	if !ok {
 		logger.Info("refreshed credential could not be stored after disconnect and the OAuth client cannot revoke it")
+		return
+	}
+	// The tokens go only to the revocation authority sealed with the
+	// material they derive from; a revocation endpoint moved since consent
+	// is never handed them, the same rule disconnect applies.
+	if credential.RevocationDigest == "" || credential.RevocationDigest != connectors.ProviderRevocationDigest(provider) {
+		logger.Info("refreshed credential could not be stored and the provider's revocation authority changed since consent; the tokens are left to expire")
 		return
 	}
 	for _, token := range []string{credential.RefreshToken, credential.AccessToken} {
@@ -591,7 +616,7 @@ func frozenGrantHolds(req outboundaccess.ConnectionCredentialRequest, credential
 // only material the winner does not hold is revoked, because a provider that
 // kept the refresh token across both exchanges shares it with the winning
 // row, and revoking it would kill the winner's grant.
-func (s *Source) refreshLostToConsent(ctx context.Context, cfg connectors.OAuthProviderConfig, ref store.ConnectorCredentialRef, refreshed store.ConnectorCredential, logger logr.Logger) (store.ConnectorCredential, error) {
+func (s *Source) refreshLostToConsent(ctx context.Context, cfg connectors.OAuthProviderConfig, provider *corev1alpha1.ConnectorProvider, ref store.ConnectorCredentialRef, refreshed store.ConnectorCredential, horizon time.Duration, logger logr.Logger) (store.ConnectorCredential, error) {
 	winner, err := s.Credentials.GetConnectorCredential(ctx, ref)
 	if err != nil {
 		return store.ConnectorCredential{}, err
@@ -604,9 +629,9 @@ func (s *Source) refreshLostToConsent(ctx context.Context, cfg connectors.OAuthP
 		losing.AccessToken = ""
 	}
 	if losing.RefreshToken != "" || losing.AccessToken != "" {
-		s.revokeUnstorable(ctx, cfg, losing, logger)
+		s.revokeUnstorable(ctx, cfg, provider, losing, logger)
 	}
-	if s.needsRefresh(winner) {
+	if s.expiresWithin(winner, horizon) {
 		return store.ConnectorCredential{}, errors.New("connection credential changed concurrently and is about to expire; retry")
 	}
 	return winner, nil
