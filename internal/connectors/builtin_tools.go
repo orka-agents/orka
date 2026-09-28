@@ -7,10 +7,40 @@ MIT License - see LICENSE file for details.
 package connectors
 
 import (
+	"net/url"
 	"slices"
+	"strings"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
+
+// BuiltinConnectorToolAudience is the resource server every catalog
+// built-in sends its credential to. It is fixed in the tool
+// implementations, so only a provider issuing credentials for it may
+// declare them; see ProviderIssuesGitHubCredentials.
+const BuiltinConnectorToolAudience = "https://api.github.com"
+
+// builtinConnectorIssuerHost is the OAuth host whose tokens the catalog
+// built-ins' audience accepts. GitHub Enterprise Server issues tokens for
+// its own API host, which the built-ins never call.
+const builtinConnectorIssuerHost = "github.com"
+
+// ProviderIssuesGitHubCredentials reports whether provider's OAuth
+// endpoints are github.com's, so a token it issues is meant for
+// BuiltinConnectorToolAudience and nothing else.
+func ProviderIssuesGitHubCredentials(provider *corev1alpha1.ConnectorProvider) bool {
+	if provider == nil {
+		return false
+	}
+	for _, raw := range []string{provider.Spec.OAuth.AuthorizeURL, provider.Spec.OAuth.TokenURL} {
+		parsed, err := url.Parse(strings.TrimSpace(raw))
+		if err != nil || parsed.Scheme != "https" || !strings.EqualFold(parsed.Hostname(), builtinConnectorIssuerHost) ||
+			(parsed.Port() != "" && parsed.Port() != "443") {
+			return false
+		}
+	}
+	return true
+}
 
 // builtinConnectorTools are the Orka built-in tools that consume a person's
 // linked-account credential when a ConnectorProvider declares them with

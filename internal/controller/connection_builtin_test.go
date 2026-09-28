@@ -62,8 +62,14 @@ func TestBuiltinConnectorToolCatalogMatchesBrokeredEffects(t *testing.T) {
 		if _, registered := registry.Get(name); !registered {
 			t.Fatalf("catalog built-in %q is not a registered tool", name)
 		}
-		if class == corev1alpha1.ConnectorToolClassWrite && brokeredToolEffect(name) != harnessv2.MCPToolEffectConsequential {
+		effect := brokeredToolEffect(name)
+		if class == corev1alpha1.ConnectorToolClassWrite && effect != harnessv2.MCPToolEffectConsequential {
 			t.Fatalf("write built-in %q must be consequential", name)
+		}
+		// A read tool judged consequential would be ledgered and replay-
+		// blocked like a mutation for what is only a fetch.
+		if class == corev1alpha1.ConnectorToolClassRead && effect != harnessv2.MCPToolEffectReadOnly {
+			t.Fatalf("read built-in %q must be read-only", name)
 		}
 	}
 }

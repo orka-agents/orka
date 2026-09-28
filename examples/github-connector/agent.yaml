@@ -12,7 +12,10 @@ spec:
     defaultAllowBash: false
     # The GitHub tools are offered to the agent only when the person who
     # created the Task has linked GitHub. Write tools also need a readWrite
-    # Connection and ask for approval before they run.
+    # Connection and ask for approval before they run, which the built-in
+    # codex runtime cannot do: on it only the read tools are offered. Keep
+    # the write tools listed so the same Agent works on an external
+    # AgentKit or Foundry runtime that registers them as approval-required.
     defaultAllowedTools:
       - list_pull_requests
       - list_issues

@@ -95,10 +95,16 @@ func TestValidateProviderSpec(t *testing.T) {
 		{name: "http tool cluster-local", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.Tools[2].HTTP.URL = "https://api.default.svc.cluster.local/x"
 		}, want: "host is not allowed"},
-		{name: "public host with local label", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://local.example.com/token" }},
+		{name: "public host with local label", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.TokenURL = "https://local.example.com/token"
+			p.Spec.Tools = p.Spec.Tools[2:]
+		}},
 		{name: "port too large", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://example.com:99999/token" }, want: "port must be between"},
 		{name: "port zero", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.AuthorizeURL = "https://example.com:0/authorize" }, want: "port must be between"},
-		{name: "explicit port ok", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://example.com:8443/token" }},
+		{name: "explicit port ok", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.TokenURL = "https://example.com:8443/token"
+			p.Spec.Tools = p.Spec.Tools[2:]
+		}},
 		{name: "http tool bad port", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.Tools[2].HTTP.URL = "https://api.github.com:70000/x" }, want: "port must be between"},
 		{name: "parameters not an object", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.Tools[2].Parameters = &apiextensionsv1.JSON{Raw: []byte(`"string"`)}
@@ -161,6 +167,7 @@ func TestValidateProviderSpec(t *testing.T) {
 		}, want: "must not preset reserved"},
 		{name: "authorize url benign query ok", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.OAuth.AuthorizeURL = "https://example.com/authorize?audience=api"
+			p.Spec.Tools = p.Spec.Tools[2:]
 		}},
 		{name: "token url credential query", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.OAuth.TokenURL = "https://example.com/token?client_secret=abc"
@@ -199,7 +206,10 @@ func TestValidateProviderSpec(t *testing.T) {
 		{name: "octal loopback host", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://0177.0.0.1/token" }, want: "canonical IP"},
 		{name: "hex loopback host", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://0x7f000001/token" }, want: "canonical IP"},
 		{name: "numeric tld host", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://example.123/token" }, want: "canonical IP"},
-		{name: "hexish hostname ok", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://ab12.cafe.example.com/token" }},
+		{name: "hexish hostname ok", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.TokenURL = "https://ab12.cafe.example.com/token"
+			p.Spec.Tools = p.Spec.Tools[2:]
+		}},
 		{name: "http tool credential query", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.Tools[2].HTTP.URL = "https://api.github.com/x?token=abc"
 		}, want: "must not carry credentials"},

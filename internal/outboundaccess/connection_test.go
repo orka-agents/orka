@@ -428,7 +428,9 @@ func TestDeclaredConnectorToolComparesTimeouts(t *testing.T) {
 }
 
 func TestDeclaredConnectorToolBuiltinBindings(t *testing.T) {
-	provider := &corev1alpha1.ConnectorProvider{ObjectMeta: metav1.ObjectMeta{Name: "github"}, Spec: corev1alpha1.ConnectorProviderSpec{Tools: []corev1alpha1.ConnectorTool{
+	provider := &corev1alpha1.ConnectorProvider{ObjectMeta: metav1.ObjectMeta{Name: "github"}, Spec: corev1alpha1.ConnectorProviderSpec{OAuth: corev1alpha1.ConnectorOAuthConfig{
+		AuthorizeURL: "https://github.com/login/oauth/authorize", TokenURL: "https://github.com/login/oauth/access_token",
+	}, Tools: []corev1alpha1.ConnectorTool{
 		{Name: "list_pull_requests", Class: corev1alpha1.ConnectorToolClassRead, Source: corev1alpha1.ConnectorToolSourceBuiltin},
 		{Name: "create_pull_request", Class: corev1alpha1.ConnectorToolClassWrite, Source: corev1alpha1.ConnectorToolSourceBuiltin},
 		{Name: "gh_search", Class: corev1alpha1.ConnectorToolClassRead, Source: corev1alpha1.ConnectorToolSourceHTTP,
@@ -441,6 +443,13 @@ func TestDeclaredConnectorToolBuiltinBindings(t *testing.T) {
 	write := ToolBinding{Name: "create_pull_request", Class: corev1alpha1.AgentRuntimeBrokeredToolClassWrite, Builtin: true}
 	if _, err := DeclaredConnectorTool(provider, write); err != nil {
 		t.Fatalf("write built-in: %v", err)
+	}
+	// A provider that does not issue github.com credentials never serves a
+	// built-in, even when its declaration slipped past validation.
+	enterprise := provider.DeepCopy()
+	enterprise.Spec.OAuth.TokenURL = "https://github.example.com/login/oauth/access_token"
+	if _, err := DeclaredConnectorTool(enterprise, read); err == nil || !strings.Contains(err.Error(), "does not issue credentials for") {
+		t.Fatalf("enterprise err = %v", err)
 	}
 	for name, binding := range map[string]ToolBinding{
 		// The class is fixed by the catalog, not by the caller.

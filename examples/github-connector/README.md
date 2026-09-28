@@ -57,4 +57,7 @@ orka task create "List the open pull requests in example/project and summarize t
 
 The agent's `list_pull_requests` call runs in the controller with the person's
 token. `create_pull_request` and the other write tools appear only for a
-`readWrite` Connection and pause for approval first.
+`readWrite` Connection, pause for approval first, and therefore need a runtime
+that can ask: register the same allowlist and `approvalRequiredTools` on an
+external AgentKit or Foundry `AgentRuntime` (see the guide) to use them; the
+built-in `codex` runtime in this example gets the read tools.

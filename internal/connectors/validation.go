@@ -220,7 +220,7 @@ func ValidateProviderSpec(provider *corev1alpha1.ConnectorProvider, knownBuiltin
 			return invalid("oauth.additionalAuthorizeParameters values must be printable text without control bytes")
 		}
 	}
-	return validateTools(provider.Spec.Tools, knownBuiltin)
+	return validateTools(provider, knownBuiltin)
 }
 
 func validateEndpointURL(field, raw string, required bool) *Issue {
@@ -411,7 +411,8 @@ func validScopeToken(scope string) bool {
 	return true
 }
 
-func validateTools(tools []corev1alpha1.ConnectorTool, knownBuiltin BuiltinToolCheck) *Issue {
+func validateTools(provider *corev1alpha1.ConnectorProvider, knownBuiltin BuiltinToolCheck) *Issue {
+	tools := provider.Spec.Tools
 	if len(tools) == 0 {
 		return invalid("tools requires at least one entry")
 	}
@@ -451,6 +452,13 @@ func validateTools(tools []corev1alpha1.ConnectorTool, knownBuiltin BuiltinToolC
 			}
 			if tool.Class != class {
 				return invalid(fmt.Sprintf("builtin tool %q must be declared with class %s", tool.Name, class))
+			}
+			// The built-ins send the credential to one fixed resource
+			// server; a provider whose tokens are not meant for it (GitHub
+			// Enterprise, or another service entirely) would have the
+			// person's token disclosed to the wrong server.
+			if !ProviderIssuesGitHubCredentials(provider) {
+				return invalid(fmt.Sprintf("builtin tool %q sends its credential to %s; only a %s OAuth provider may declare it", tool.Name, BuiltinConnectorToolAudience, builtinConnectorIssuerHost))
 			}
 		case corev1alpha1.ConnectorToolSourceHTTP:
 			if tool.HTTP == nil {

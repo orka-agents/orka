@@ -14,7 +14,13 @@ import (
 )
 
 func TestValidateToolsBuiltinDeclarationsFollowTheCatalog(t *testing.T) {
-	known := func(string) bool { return true }
+	known := func(name string) bool {
+		if name == "web_search" {
+			return true
+		}
+		_, ok := BuiltinConnectorToolClass(name)
+		return ok
+	}
 	for _, tc := range []struct {
 		name string
 		tool corev1alpha1.ConnectorTool
@@ -29,7 +35,9 @@ func TestValidateToolsBuiltinDeclarationsFollowTheCatalog(t *testing.T) {
 		{name: "not linked", tool: corev1alpha1.ConnectorTool{Name: "web_search", Class: corev1alpha1.ConnectorToolClassRead, Source: corev1alpha1.ConnectorToolSourceBuiltin}, want: "cannot use a linked account"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			issue := validateTools([]corev1alpha1.ConnectorTool{tc.tool}, known)
+			provider := validProvider()
+			provider.Spec.Tools = []corev1alpha1.ConnectorTool{tc.tool}
+			issue := validateTools(provider, known)
 			switch {
 			case tc.want == "" && issue != nil:
 				t.Fatalf("unexpected issue: %s", issue.Message)
@@ -37,6 +45,47 @@ func TestValidateToolsBuiltinDeclarationsFollowTheCatalog(t *testing.T) {
 				t.Fatalf("issue = %v, want %q", issue, tc.want)
 			}
 		})
+	}
+	// Only github.com's OAuth endpoints issue tokens for the built-ins'
+	// fixed audience; GitHub Enterprise or any other issuer is refused.
+	for name, mutate := range map[string]func(*corev1alpha1.ConnectorProvider){
+		"enterprise": func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.AuthorizeURL = "https://github.example.com/login/oauth/authorize"
+			p.Spec.OAuth.TokenURL = "https://github.example.com/login/oauth/access_token"
+		},
+		"token url elsewhere": func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://oauth.example.com/token" },
+		"port": func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.TokenURL = "https://github.com:8443/login/oauth/access_token"
+		},
+		"lookalike": func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.TokenURL = "https://github.com.example.com/token"
+		},
+	} {
+		provider := validProvider()
+		mutate(provider)
+		if ProviderIssuesGitHubCredentials(provider) {
+			t.Fatalf("%s: provider must not count as github.com", name)
+		}
+		if issue := ValidateProviderSpec(provider, known); issue == nil || !strings.Contains(issue.Message, "only a github.com OAuth provider") {
+			t.Fatalf("%s: issue = %v, want built-in declarations refused", name, issue)
+		}
+		provider.Spec.Tools = provider.Spec.Tools[2:]
+		if issue := ValidateProviderSpec(provider, known); issue != nil {
+			t.Fatalf("%s: HTTP-only provider must stay valid: %s", name, issue.Message)
+		}
+	}
+	if !ProviderIssuesGitHubCredentials(validProvider()) || ProviderIssuesGitHubCredentials(nil) {
+		t.Fatal("github.com provider must count, nil must not")
+	}
+	plain := validProvider()
+	plain.Spec.OAuth.TokenURL = "http://github.com/login/oauth/access_token"
+	if ProviderIssuesGitHubCredentials(plain) {
+		t.Fatal("a plain-http github.com endpoint must not count")
+	}
+	explicitPort := validProvider()
+	explicitPort.Spec.OAuth.TokenURL = "https://github.com:443/login/oauth/access_token"
+	if !ProviderIssuesGitHubCredentials(explicitPort) {
+		t.Fatal("github.com on its default port must count")
 	}
 	if names := BuiltinConnectorToolNames(); len(names) != 9 || names[0] != "check_pr_review_marker" {
 		t.Fatalf("catalog names = %v", names)

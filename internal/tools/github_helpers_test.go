@@ -743,6 +743,19 @@ func TestResolveRepoAndToken_LinkedAccountFirst(t *testing.T) {
 	if _, _, _, _, err := resolveScopedReadRepoAndToken(ctx, k8sClient, "list_pull_requests", "", "https://github.com/other/repo", ""); err == nil {
 		t.Fatal("a linked account must not widen the repository scope")
 	}
+	// Nor may another Task's workspace lend its scope to the linked token.
+	other := task.DeepCopy()
+	other.Name, other.ResourceVersion = "other-task", ""
+	other.Spec.Workspace.GitRepo = "https://github.com/other/repo"
+	if err := k8sClient.Create(context.Background(), other); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, _, err := resolveScopedReadRepoAndToken(ctx, k8sClient, "list_pull_requests", "other-task", "", ""); err == nil || !strings.Contains(err.Error(), "must name the current task") {
+		t.Fatalf("foreign task_name err = %v", err)
+	}
+	if _, repo, _, _, err := resolveScopedReadRepoAndToken(ctx, k8sClient, "list_pull_requests", testMyTaskName, "", ""); err != nil || repo != "taskrepo" {
+		t.Fatalf("own task_name: repo=%q err=%v", repo, err)
+	}
 	// A forge mutation under the link needs no forge Secret.
 	if _, _, token, _, err := resolveForgeRepoAndToken(ctx, k8sClient, "create_pull_request", "", "", ""); err != nil || token != "linked-token" {
 		t.Fatalf("forge under link: token=%q err=%v", token, err)

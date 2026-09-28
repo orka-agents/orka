@@ -361,6 +361,9 @@ func declaredBuiltinConnectorTool(provider *corev1alpha1.ConnectorProvider, cand
 	if candidate.Source != corev1alpha1.ConnectorToolSourceBuiltin {
 		return corev1alpha1.ConnectorTool{}, fmt.Errorf("built-in tool %q is not declared as a built-in by provider %q", tool.Name, provider.Name)
 	}
+	if !connectors.ProviderIssuesGitHubCredentials(provider) {
+		return corev1alpha1.ConnectorTool{}, fmt.Errorf("built-in tool %q sends its credential to %s, which provider %q does not issue credentials for", tool.Name, connectors.BuiltinConnectorToolAudience, provider.Name)
+	}
 	if strings.TrimSpace(tool.URL) != "" || strings.TrimSpace(tool.Method) != "" || len(tool.Headers) > 0 || tool.Parameters != nil || tool.TimeoutSet {
 		return corev1alpha1.ConnectorTool{}, fmt.Errorf("built-in tool %q binding carries a destination, headers, schema, or timeout", tool.Name)
 	}

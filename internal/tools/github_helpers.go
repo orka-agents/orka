@@ -95,6 +95,16 @@ func resolveRepoAndTokenWithPolicy(
 		token = linked
 	}
 
+	// Under a linked account the repository scope comes from the current
+	// Task alone: naming another Task would borrow its workspace to point
+	// the person's token at a repository this Task was never given.
+	if linked != "" {
+		if tc := GetToolContext(ctx); tc != nil && strings.TrimSpace(tc.TaskID) != "" &&
+			strings.TrimSpace(taskName) != "" && strings.TrimSpace(taskName) != strings.TrimSpace(tc.TaskID) {
+			return "", "", "", "", fmt.Errorf("task_name %q must name the current task when acting through a linked account", strings.TrimSpace(taskName))
+		}
+	}
+
 	hasRepoURL := strings.TrimSpace(repoURL) != ""
 	if hasRepoURL {
 		owner, repo, err = parseGitHubRepo(repoURL)

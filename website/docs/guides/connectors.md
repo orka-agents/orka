@@ -132,7 +132,15 @@ approval before it runs.
 Declaring any other built-in, or declaring one of these with the other
 class, is rejected: a tool that ignored the credential would silently run
 under something else, and a write tool declared as read would skip the
-approval and `readOnly` rules its class carries.
+approval and `readOnly` rules its class carries. The built-ins call
+`https://api.github.com`, so only a provider whose OAuth endpoints are on
+`github.com` may declare them; a GitHub Enterprise Server or any other
+issuer is rejected, because its token would be sent to the wrong server.
+Curated `HTTP` tools remain available for such providers.
+
+Under a linked account the repository scope comes from the current Task's
+workspace alone. A `task_name` argument naming a different Task is refused,
+and `repo_url` must still fall inside the Task's repository scope.
 
 The full example, with an Agent that uses these tools, is in
 [`examples/github-connector/`](https://github.com/orka-agents/orka/tree/main/examples/github-connector).
@@ -179,8 +187,9 @@ the GitHub built-ins), the controller:
 
 1. Finds the requester's Ready GitHub Connection and freezes it.
 2. Offers `list_pull_requests` and the other read tools to the agent. Write
-   tools are offered only for a `readWrite` link, and are added to the
-   approval-required set.
+   tools are offered only for a `readWrite` link, only on a runtime that
+   can pause for brokered approval (an external AgentKit or Foundry
+   registration, see below), and always in the approval-required set.
 3. Executes each call in its MCP broker with the person's token, refreshing
    it first if it is about to expire.
 4. Pauses a write call for approval and, once approved, executes exactly the
@@ -193,7 +202,8 @@ link changes whose credential is used, not where.
 
 | Path | GitHub credential |
 | --- | --- |
-| ACP runtimes (`codex`, `claude`, `copilot`, `opencode`) | The requester's Connection only. The GitHub tools are offered when the provider declares them and the requester holds a Ready link; otherwise they are not offered, and a call without a frozen link is refused. |
+| Built-in ACP runtimes (`codex`, `claude`, `copilot`, `opencode`) | The requester's Connection only. The read tools are offered when the provider declares them and the requester holds a Ready link; otherwise they are not offered, and a call without a frozen link is refused. These runtimes cannot ask for brokered approval, so the write tools are never offered on them. |
+| External v2 `AgentRuntime` registrations (AgentKit, Foundry) | The requester's Connection only, and only when the link leaves the registered policy untouched: every declared GitHub built-in in the registered allowlist needs a Ready link (`readWrite` for write tools), and every write tool must already be in the registered `approvalRequiredTools`. Otherwise the Task is refused with a permanent reason rather than the profile narrowed per person. This is the path where linked write tools with approval run. |
 | Native `type: ai` worker Pods | The Task's own credential Secrets (`readCredentialRef`, `forgeCredentialRef`), as before. Worker Pods never receive linked tokens. |
 | Custom `HTTP` tools behind a connection-mode `OutboundAccessPolicy` | The requester's Connection only, in the controller, for both ACP and native Tasks. |
 
@@ -209,8 +219,9 @@ additive.
 - A `readOnly` link never runs a write tool, even if the token could.
 - Two accepted providers declaring the same built-in tool is a configuration
   error; the Task is refused rather than one provider chosen.
-- External v2 `AgentRuntime` registrations and harness v1 Tasks do not
-  freeze Connections and do not receive connector tools.
+- Curated `HTTP` connector tools are not available on external v2
+  `AgentRuntime` registrations, and harness v1 Tasks receive no connector
+  tools at all.
 
 ## Troubleshooting
 
