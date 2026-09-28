@@ -134,6 +134,11 @@ func (s *Source) ResolveConnectionCredential(ctx context.Context, req outboundac
 		if err != nil {
 			return outboundaccess.ConnectionCredential{}, err
 		}
+		// The flight may have been started by a caller with a shorter
+		// horizon; its result is judged against this call's own.
+		if s.expiresWithin(credential, horizon) {
+			return outboundaccess.ConnectionCredential{}, errors.New("the provider issued a token that expires before the tool's request timeout; retry or shorten the tool timeout")
+		}
 		// The refresh may have lost to a re-consent, or the Connection may
 		// have changed mode or generation while the exchange was in flight.
 		// Re-read it and reapply every check before pairing the material
@@ -253,6 +258,11 @@ func (s *Source) refreshSingleFlight(ctx context.Context, connection *corev1alph
 func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connection, ref store.ConnectorCredentialRef, current store.ConnectorCredential, horizon time.Duration) (store.ConnectorCredential, error) {
 	logger := log.FromContext(ctx).WithValues("connection", connection.Name, "provider", connection.Spec.ProviderRef.Name)
 	if strings.TrimSpace(current.RefreshToken) == "" {
+		if !s.needsRefresh(current) {
+			// Still valid for shorter requests: only this call's horizon is
+			// not covered, so the link is left Ready.
+			return store.ConnectorCredential{}, errors.New("connection credential cannot be refreshed and expires before the tool's request timeout; shorten the tool timeout or reconnect")
+		}
 		s.markNotReady(ctx, connection, ref, current.Version, corev1alpha1.ConnectionReasonExpired, corev1alpha1.ConnectionStateExpired,
 			"Access token expired and the provider issued no refresh token")
 		return store.ConnectorCredential{}, errors.New("connection credential expired and cannot be refreshed; the person must reconnect")

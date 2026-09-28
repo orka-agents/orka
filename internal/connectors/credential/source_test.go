@@ -885,3 +885,86 @@ func TestRefreshHorizonCoversTheToolTimeout(t *testing.T) {
 		t.Fatalf("5m timeout: got %+v err = %v calls = %d, want a refresh before release", got, err, h.refresher.calls.Load())
 	}
 }
+
+// curateSlowTool declares a ten-minute tool on the fixture provider and
+// returns a request bound to it.
+func (h *harness) curateSlowTool() outboundaccess.ConnectionCredentialRequest {
+	h.t.Helper()
+	provider := &corev1alpha1.ConnectorProvider{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: "github"}, provider); err != nil {
+		h.t.Fatal(err)
+	}
+	provider.Spec.Tools = append(provider.Spec.Tools, corev1alpha1.ConnectorTool{
+		Name: "gh_slow", Class: corev1alpha1.ConnectorToolClassRead, Source: corev1alpha1.ConnectorToolSourceHTTP, Description: "slow",
+		HTTP: &corev1alpha1.ConnectorHTTPTool{URL: "https://api.github.com/slow", Method: "GET", Timeout: &metav1.Duration{Duration: 10 * time.Minute}},
+	})
+	if err := h.client.Update(context.Background(), provider); err != nil {
+		h.t.Fatal(err)
+	}
+	// The consent covered the provider's tools when it was granted; the
+	// fixture records the widened authority as if the person re-consented.
+	live := h.reload()
+	live.Status.Consent = connectors.ConsentFor(provider)
+	if err := h.client.Status().Update(context.Background(), live); err != nil {
+		h.t.Fatal(err)
+	}
+	req := h.request()
+	req.Tool = outboundaccess.ToolBinding{Name: "gh_slow", URL: "https://api.github.com/slow", Method: "GET", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Timeout: 10 * time.Minute, TimeoutSet: true}
+	return req
+}
+
+// TestSharedRefreshIsJudgedAgainstEachCallersHorizon covers a flight started
+// by a short request whose token also reaches a long request waiting on it:
+// the long request judges the shared result against its own horizon and is
+// refused rather than released a token that expires mid-request.
+func TestSharedRefreshIsJudgedAgainstEachCallersHorizon(t *testing.T) {
+	h := newHarness(t)
+	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", ExpiresAt: h.now.Add(30 * time.Second)})
+	h.refresher.response = connectors.TokenResponse{AccessToken: "gho_5m", RefreshToken: "ghr_5m", TokenType: "bearer", ExpiresAt: h.now.Add(5 * time.Minute)}
+	slow := h.curateSlowTool()
+	joined := make(chan error, 1)
+	h.refresher.onRefresh = func() {
+		// The long request joins the flight the short one started.
+		go func() {
+			_, err := h.source.ResolveConnectionCredential(context.Background(), slow)
+			joined <- err
+		}()
+		time.Sleep(50 * time.Millisecond)
+	}
+	if got, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err != nil || got.AccessToken != "gho_5m" {
+		t.Fatalf("short request = %+v err = %v, want the five-minute token", got, err)
+	}
+	select {
+	case err := <-joined:
+		if err == nil || !strings.Contains(err.Error(), "request timeout") {
+			t.Fatalf("long request joining the flight err = %v, want refusal against its own horizon", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the long request never returned")
+	}
+	if calls := h.refresher.calls.Load(); calls != 1 {
+		t.Fatalf("refresh calls = %d, want the one shared flight", calls)
+	}
+}
+
+// TestNonrefreshableTokenWithinHorizonKeepsTheLinkReady covers a token with
+// no refresh token that is still valid but not for a long request: the call
+// is refused with a request-specific reason and the link stays Ready for
+// shorter requests, instead of being marked Expired.
+func TestNonrefreshableTokenWithinHorizonKeepsTheLinkReady(t *testing.T) {
+	h := newHarness(t)
+	h.put(store.ConnectorCredential{AccessToken: "gho_5m", TokenType: "bearer", ExpiresAt: h.now.Add(5 * time.Minute)})
+	slow := h.curateSlowTool()
+	if _, err := h.source.ResolveConnectionCredential(context.Background(), slow); err == nil || !strings.Contains(err.Error(), "shorten the tool timeout") {
+		t.Fatalf("long request err = %v, want a request-specific refusal", err)
+	}
+	if live := h.reload(); live.Status.State != corev1alpha1.ConnectionStateReady {
+		t.Fatalf("state = %q, want the link left Ready", live.Status.State)
+	}
+	if got, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err != nil || got.AccessToken != "gho_5m" {
+		t.Fatalf("short request = %+v err = %v, want the still-valid token", got, err)
+	}
+	if h.refresher.calls.Load() != 0 {
+		t.Fatal("a token without a refresh token must not be refreshed")
+	}
+}
