@@ -29,7 +29,8 @@ func TestConnectorPrivateEndpointsPermitted(t *testing.T) {
 		"http but public":     {ack, "http://orka.example.com", "local fixtures only"},
 		"no callback":         {ack, "", "local fixtures only"},
 	} {
-		if ok, err := connectorPrivateEndpointsPermitted(tc.ack, tc.base); ok || err == nil || !strings.Contains(err.Error(), tc.want) {
+		ok, err := connectorPrivateEndpointsPermitted(tc.ack, tc.base)
+		if ok || err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Fatalf("%s: ok=%t err=%v", name, ok, err)
 		}
 	}
