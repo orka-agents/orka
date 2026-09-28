@@ -85,7 +85,7 @@ func (t *ListConnectionsTool) Execute(ctx context.Context, _ json.RawMessage) (s
 		return ChatToolErrorResult("no_identity", "no verified person is attached to this request, so there are no linked accounts to list",
 			"Linked accounts belong to a signed-in person (OIDC or context token); service accounts and unverified tasks have none")
 	}
-	reader := client.Reader(tc.PolicyReader)
+	var reader = tc.PolicyReader
 	if reader == nil {
 		reader = tc.Client
 	}

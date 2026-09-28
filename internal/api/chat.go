@@ -39,7 +39,6 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/store"
-	"github.com/orka-agents/orka/internal/tools"
 	chattools "github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/tracing"
 	"github.com/orka-agents/orka/internal/tracing/genai"
@@ -90,7 +89,7 @@ type ChatConfig struct {
 
 // LinkedAccountsFactory returns a resolver for a person's linked accounts
 // in a namespace, or nil when there is nothing to resolve.
-type LinkedAccountsFactory func(namespace string, requester *corev1alpha1.RequestedBy) tools.LinkedAccountCredentials
+type LinkedAccountsFactory func(namespace string, requester *corev1alpha1.RequestedBy) chattools.LinkedAccountCredentials
 
 // ACPRuntimeAvailability identifies built-in profiles backed by configured,
 // digest-pinned RuntimePool images.

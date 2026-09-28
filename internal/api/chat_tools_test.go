@@ -198,8 +198,8 @@ func TestChatToolNames_Idempotent(t *testing.T) {
 
 func TestChatToolNames_Count(t *testing.T) {
 	names := tools.ChatToolNames()
-	if len(names) != 17 {
-		t.Errorf("ChatToolNames() returned %d tools, want 17", len(names))
+	if len(names) != 18 {
+		t.Errorf("ChatToolNames() returned %d tools, want 18", len(names))
 	}
 }
 
@@ -208,8 +208,8 @@ func TestChatRegistry_ToLLMTools(t *testing.T) {
 	tools.RegisterChatTools(reg)
 
 	llmTools := reg.ToLLMTools(tools.ChatToolNames())
-	if len(llmTools) != 17 {
-		t.Errorf("ToLLMTools() returned %d tools, want 17", len(llmTools))
+	if len(llmTools) != 18 {
+		t.Errorf("ToLLMTools() returned %d tools, want 18", len(llmTools))
 	}
 
 	nameSet := make(map[string]bool, len(llmTools))

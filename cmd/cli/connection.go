@@ -188,7 +188,7 @@ func newConnectionGetCmd() *cobra.Command {
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
 			for _, row := range [][2]string{
 				{"Name", item.Name}, {"Provider", item.Provider}, {"Mode", item.Mode}, {"State", item.State},
-				{"Ready", fmt.Sprint(item.Ready)}, {"Linked", item.LinkedAt}, {"Message", item.Message},
+				{labelReady, fmt.Sprint(item.Ready)}, {"Linked", item.LinkedAt}, {"Message", item.Message},
 			} {
 				if row[1] != "" {
 					fmt.Fprintf(w, "%s:\t%s\n", row[0], row[1]) //nolint:errcheck
