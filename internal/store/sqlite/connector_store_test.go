@@ -884,18 +884,24 @@ func TestConnectorCommitIsFencedInsideTheTransaction(t *testing.T) {
 	if _, err := s.db.Exec(`INSERT INTO connector_credential_grants (connection_uid, grant_sequence) VALUES ('uid-old', 7)`); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.db.Exec(`INSERT INTO connector_credential_versions (connection_uid, last_version) VALUES ('uid-old', 9)`); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.TombstoneConnectorCustody(ctx, "uid-recent"); err != nil {
 		t.Fatal(err)
 	}
-	var tombstones, grants int
+	var tombstones, grants, versions int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM connector_credential_tombstones WHERE connection_uid = 'uid-old'`).Scan(&tombstones); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM connector_credential_grants WHERE connection_uid = 'uid-old'`).Scan(&grants); err != nil {
 		t.Fatal(err)
 	}
-	if tombstones != 0 || grants != 0 {
-		t.Fatalf("old tombstone rows = %d grant rows = %d, want both reaped", tombstones, grants)
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM connector_credential_versions WHERE connection_uid = 'uid-old'`).Scan(&versions); err != nil {
+		t.Fatal(err)
+	}
+	if tombstones != 0 || grants != 0 || versions != 0 {
+		t.Fatalf("old tombstone rows = %d grant rows = %d version rows = %d, want all reaped", tombstones, grants, versions)
 	}
 	if err := s.PutConnectorCredential(ctx, store.ConnectorCredentialRef{ConnectionUID: "uid-recent", Namespace: "tenant", Name: "n", SubjectDigest: "d", Provider: "github"}, store.ConnectorCredential{AccessToken: "x"}); !errors.Is(err, store.ErrConnectorCustodyTombstoned) {
 		t.Fatalf("a fresh tombstone must still fence: err = %v", err)

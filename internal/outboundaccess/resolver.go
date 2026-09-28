@@ -109,8 +109,8 @@ type ToolBinding struct {
 // ConnectorProvider tool declaration mean when they declare none.
 const connectorDefaultTimeout = 30 * time.Second
 
-// normalizedConnectorTimeout applies the shared default.
-func normalizedConnectorTimeout(timeout time.Duration) time.Duration {
+// NormalizedConnectorTimeout applies the shared default.
+func NormalizedConnectorTimeout(timeout time.Duration) time.Duration {
 	if timeout <= 0 {
 		return connectorDefaultTimeout
 	}
@@ -323,7 +323,7 @@ func DeclaredConnectorTool(provider *corev1alpha1.ConnectorProvider, tool ToolBi
 		if candidate.HTTP.Timeout != nil {
 			declaredTimeout = candidate.HTTP.Timeout.Duration
 		}
-		if normalizedConnectorTimeout(declaredTimeout) != normalizedConnectorTimeout(tool.Timeout) {
+		if NormalizedConnectorTimeout(declaredTimeout) != NormalizedConnectorTimeout(tool.Timeout) {
 			return corev1alpha1.ConnectorTool{}, fmt.Errorf("tool %q timeout does not match the timeout declared by provider %q", name, provider.Name)
 		}
 		return candidate, nil
