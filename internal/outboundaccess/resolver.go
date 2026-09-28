@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package outboundaccess
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -28,6 +29,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/tokenexchange"
 	"github.com/orka-agents/orka/internal/transactiontoken"
@@ -36,8 +39,11 @@ import (
 const (
 	AdapterDirect  = "direct"
 	AdapterGateway = "gateway"
-	schemeHTTP     = "http"
-	schemeHTTPS    = "https"
+	// AdapterConnection injects a person's linked-account credential; the
+	// executor applies it exactly like a direct credential.
+	AdapterConnection = "connection"
+	schemeHTTP        = "http"
+	schemeHTTPS       = "https"
 
 	// DefaultCredentialReadScope authorizes use of cluster-managed credential material.
 	DefaultCredentialReadScope = "orka:secrets:credentials:read"
@@ -56,6 +62,100 @@ type ResolveRequest struct {
 	CredentialAuthorityEnforced bool
 	CredentialScopeAllowed      bool
 	CredentialSecret            string
+
+	// Requester is the Task's verified human identity. Connection-mode
+	// policies resolve the credential of this person and nobody else.
+	Requester *corev1alpha1.RequestedBy
+	// FrozenConnections maps policy name to the Connection identity frozen
+	// into the Task's execution snapshot at dispatch. Connection-mode
+	// resolution requires an entry and fails closed when the live Connection
+	// differs from it.
+	FrozenConnections map[string]FrozenConnection
+	// Tool identifies the executing Tool. Connection-mode resolution releases
+	// a credential only to a Tool the ConnectorProvider declares, with the
+	// same URL, method, and class, so a policy cannot be attached to an
+	// arbitrary endpoint to exfiltrate a person's token.
+	Tool ToolBinding
+}
+
+// ToolBinding is the executing Tool's identity for connector checks.
+type ToolBinding struct {
+	Name   string
+	URL    string
+	Method string
+	Class  corev1alpha1.AgentRuntimeBrokeredToolClass
+	// Headers are the Tool's static headers; the provider's declared set
+	// must match exactly, or a header the provider never declared could
+	// change what the credential authorizes.
+	Headers map[string]string
+	// Parameters is the Tool's JSON Schema; it must equal the provider's
+	// curated schema so no weaker Tool schema admits arguments the
+	// provider excluded.
+	Parameters *apiextensionsv1.JSON
+	// Timeout is the Tool's request timeout; it must equal the provider's
+	// curated bound so a Tool cannot keep a credential-bearing request open
+	// longer than the provider allows. An omitted timeout (TimeoutSet false)
+	// means the 30s default; an explicit nonpositive one is refused, because
+	// the executor would run such a request without any deadline.
+	Timeout    time.Duration
+	TimeoutSet bool
+}
+
+// connectorDefaultTimeout is the request timeout both a Tool CR and a
+// ConnectorProvider tool declaration mean when they declare none.
+const connectorDefaultTimeout = 30 * time.Second
+
+// NormalizedConnectorTimeout applies the shared default.
+func NormalizedConnectorTimeout(timeout time.Duration) time.Duration {
+	if timeout <= 0 {
+		return connectorDefaultTimeout
+	}
+	return timeout
+}
+
+// FrozenConnection is the dispatch-time identity of a person's Connection.
+type FrozenConnection struct {
+	UID        string
+	Generation int64
+	// GrantSequence is the consent count frozen with the identity. The live
+	// Connection must carry exactly this grant: a re-link of the same
+	// object is a new grant the snapshot never bound.
+	GrantSequence int64
+	// PolicyUID and PolicyGeneration, when set, pin the policy object the
+	// Connection was frozen under; a policy edited since (for example its
+	// credential output header or prefix) needs a re-dispatch.
+	PolicyUID        string
+	PolicyGeneration int64
+}
+
+// ConnectionCredentialRequest asks the credential source for one person's
+// current access token for one provider.
+type ConnectionCredentialRequest struct {
+	Namespace string
+	Provider  string
+	Issuer    string
+	Subject   string
+	Frozen    FrozenConnection
+	// Tool is the executing Tool; the source verifies it against the same
+	// provider state it validates the returned credential with.
+	Tool ToolBinding
+}
+
+// ConnectionCredential is a resolved, possibly just-refreshed access token
+// plus the non-secret identity of the Connection that supplied it.
+type ConnectionCredential struct {
+	AccessToken   string
+	TokenType     string
+	ConnectionUID string
+	Generation    int64
+	Mode          string
+}
+
+// ConnectionCredentialSource resolves and refreshes per-person credentials.
+// It exists only in the controller; worker Pods have no implementation and
+// therefore fail closed on connection-mode policies.
+type ConnectionCredentialSource interface {
+	ResolveConnectionCredential(context.Context, ConnectionCredentialRequest) (ConnectionCredential, error)
 }
 
 // Resolution describes how ToolExecutor should modify a prepared request.
@@ -70,6 +170,14 @@ type Resolution struct {
 	GatewayTLS    tokenexchange.TLSConfig
 
 	SensitiveValues []string
+
+	// ConnectionUID identifies the person's Connection for connection-mode
+	// resolutions, for audit records. Never the token.
+	ConnectionUID string
+	// Parameters is the provider-declared JSON Schema for the tool's
+	// arguments; the executor validates the call against it before the
+	// credential leaves the process.
+	Parameters *apiextensionsv1.JSON
 }
 
 // Resolver resolves one same-namespace policy at execution time.
@@ -84,6 +192,10 @@ type KubernetesResolver struct {
 	KubeClient kubernetes.Interface
 	Trust      TrustConfig
 	Exchanger  tokenexchange.Exchanger
+	// Connections supplies per-person credentials for connection-mode
+	// policies. Nil means this process may not execute connector-backed
+	// tools.
+	Connections ConnectionCredentialSource
 
 	exchangeOnce     sync.Once
 	defaultExchanger tokenexchange.Exchanger
@@ -130,16 +242,197 @@ func (r *KubernetesResolver) Resolve(ctx context.Context, req ResolveRequest) (R
 		}
 		req.TransactionToken = token
 	}
-	if policy.Spec.Direct != nil {
+	if policy.Spec.Direct != nil || policy.Spec.Connection != nil {
 		if !strings.EqualFold(strings.TrimSpace(req.TargetScheme), schemeHTTPS) {
-			return Resolution{}, errors.New("direct outbound access requires an HTTPS Tool URL")
+			return Resolution{}, errors.New("credential-injecting outbound access requires an HTTPS Tool URL")
 		}
 		if req.HasAuthSecretRef {
-			return Resolution{}, errors.New("direct outbound access cannot coexist with authSecretRef")
+			return Resolution{}, errors.New("credential-injecting outbound access cannot coexist with authSecretRef")
 		}
+	}
+	if _, frozen := req.FrozenConnections[policy.Name]; frozen && policy.Spec.Connection == nil {
+		// The Task was dispatched under a person's Connection for this
+		// policy; a policy moved to another adapter since must not hand it
+		// a service credential or route instead.
+		return Resolution{}, fmt.Errorf("outbound access policy %q was in connection mode when the task was dispatched and no longer is", policy.Name)
+	}
+	switch {
+	case policy.Spec.Direct != nil:
 		return r.resolveDirect(ctx, policy, req)
+	case policy.Spec.Connection != nil:
+		return r.resolveConnection(ctx, policy, req)
 	}
 	return r.resolveGateway(ctx, policy)
+}
+
+// DeclaredConnectorTool returns the provider's curated HTTP definition that
+// exactly matches the executing Tool, or an error. Built-in declarations are
+// never matched by custom Tools. The credential source applies the same
+// check against the provider it validates the returned credential with, so
+// the tool and the credential are always judged against one provider state.
+func DeclaredConnectorTool(provider *corev1alpha1.ConnectorProvider, tool ToolBinding) (corev1alpha1.ConnectorTool, error) {
+	name := strings.TrimSpace(tool.Name)
+	if name == "" {
+		return corev1alpha1.ConnectorTool{}, errors.New("connection outbound access requires the executing tool identity")
+	}
+	for _, candidate := range provider.Spec.Tools {
+		if candidate.Name != name {
+			continue
+		}
+		if candidate.Source != corev1alpha1.ConnectorToolSourceHTTP || candidate.HTTP == nil {
+			return corev1alpha1.ConnectorTool{}, fmt.Errorf("connector tool %q is not a curated HTTP tool of provider %q", name, provider.Name)
+		}
+		method := strings.ToUpper(strings.TrimSpace(candidate.HTTP.Method))
+		if method == "" {
+			method = http.MethodPost
+		}
+		toolMethod := strings.ToUpper(strings.TrimSpace(tool.Method))
+		if toolMethod == "" {
+			toolMethod = http.MethodPost
+		}
+		if strings.TrimSpace(tool.URL) != candidate.HTTP.URL || toolMethod != method {
+			return corev1alpha1.ConnectorTool{}, fmt.Errorf("tool %q does not match the endpoint declared by provider %q", name, provider.Name)
+		}
+		if string(candidate.Class) != string(tool.Class) {
+			return corev1alpha1.ConnectorTool{}, fmt.Errorf("tool %q class does not match the class declared by provider %q", name, provider.Name)
+		}
+		if !sameStaticHeaders(candidate.HTTP.Headers, tool.Headers) {
+			return corev1alpha1.ConnectorTool{}, fmt.Errorf("tool %q headers do not match the headers declared by provider %q", name, provider.Name)
+		}
+		if !sameParameterSchema(candidate.Parameters, tool.Parameters) {
+			return corev1alpha1.ConnectorTool{}, fmt.Errorf("tool %q parameters do not match the schema declared by provider %q", name, provider.Name)
+		}
+		if tool.TimeoutSet && tool.Timeout <= 0 {
+			return corev1alpha1.ConnectorTool{}, fmt.Errorf("tool %q declares a timeout of %s; connector-backed requests need a positive one", name, tool.Timeout)
+		}
+		declaredTimeout := time.Duration(0)
+		if candidate.HTTP.Timeout != nil {
+			declaredTimeout = candidate.HTTP.Timeout.Duration
+		}
+		if NormalizedConnectorTimeout(declaredTimeout) != NormalizedConnectorTimeout(tool.Timeout) {
+			return corev1alpha1.ConnectorTool{}, fmt.Errorf("tool %q timeout does not match the timeout declared by provider %q", name, provider.Name)
+		}
+		return candidate, nil
+	}
+	return corev1alpha1.ConnectorTool{}, fmt.Errorf("tool %q is not declared by provider %q", name, provider.Name)
+}
+
+// sameParameterSchema compares two JSON Schemas structurally; absent and
+// empty are the same.
+func sameParameterSchema(declared, actual *apiextensionsv1.JSON) bool {
+	canonical := func(schema *apiextensionsv1.JSON) (string, bool) {
+		if schema == nil || len(bytes.TrimSpace(schema.Raw)) == 0 {
+			return "", true
+		}
+		var value any
+		if err := json.Unmarshal(schema.Raw, &value); err != nil {
+			return "", false
+		}
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return "", false
+		}
+		return string(encoded), true
+	}
+	a, okA := canonical(declared)
+	b, okB := canonical(actual)
+	return okA && okB && a == b
+}
+
+// sameStaticHeaders compares two header sets by canonical name and exact
+// value; an empty and a nil set are the same.
+func sameStaticHeaders(declared, actual map[string]string) bool {
+	canonicalize := func(headers map[string]string) (map[string]string, bool) {
+		result := make(map[string]string, len(headers))
+		for name, value := range headers {
+			key := http.CanonicalHeaderKey(strings.TrimSpace(name))
+			if _, dup := result[key]; dup {
+				// Two spellings of one header would collapse into one field
+				// on the wire; the set is not the declared one.
+				return nil, false
+			}
+			result[key] = value
+		}
+		return result, true
+	}
+	want, ok := canonicalize(declared)
+	if !ok {
+		return false
+	}
+	got, ok := canonicalize(actual)
+	if !ok || len(want) != len(got) {
+		return false
+	}
+	for key, value := range want {
+		actualValue, present := got[key]
+		if !present || actualValue != value {
+			return false
+		}
+	}
+	return true
+}
+
+// resolveConnection injects the requester's linked-account credential. Every
+// precondition fails closed: no source in this process, no verified
+// requester, no frozen binding, or a source error all mean no credential.
+func (r *KubernetesResolver) resolveConnection(ctx context.Context, policy *corev1alpha1.OutboundAccessPolicy, req ResolveRequest) (Resolution, error) {
+	if r.Connections == nil {
+		return Resolution{}, errors.New("connector-backed tools execute only in the controller")
+	}
+	requester := req.Requester
+	if requester == nil || strings.TrimSpace(requester.Issuer) == "" || strings.TrimSpace(requester.Subject) == "" {
+		return Resolution{}, errors.New("connection outbound access requires a Task with a verified requester")
+	}
+	frozen, ok := req.FrozenConnections[policy.Name]
+	if !ok || strings.TrimSpace(frozen.UID) == "" {
+		return Resolution{}, fmt.Errorf("connection outbound access policy %q has no Connection frozen into the execution snapshot", policy.Name)
+	}
+	if frozen.PolicyUID != "" && (string(policy.UID) != frozen.PolicyUID || policy.Generation != frozen.PolicyGeneration) {
+		return Resolution{}, fmt.Errorf("connection outbound access policy %q changed since the task was dispatched; re-dispatch to use it", policy.Name)
+	}
+	provider := &corev1alpha1.ConnectorProvider{}
+	if err := r.Reader.Get(ctx, client.ObjectKey{Namespace: policy.Namespace, Name: policy.Spec.Connection.ProviderRef.Name}, provider); err != nil {
+		return Resolution{}, fmt.Errorf("resolve connector provider: %w", err)
+	}
+	declared, err := DeclaredConnectorTool(provider, req.Tool)
+	if err != nil {
+		return Resolution{}, err
+	}
+	credential, err := r.Connections.ResolveConnectionCredential(ctx, ConnectionCredentialRequest{
+		Namespace: policy.Namespace,
+		Provider:  policy.Spec.Connection.ProviderRef.Name,
+		Issuer:    requester.Issuer,
+		Subject:   requester.Subject,
+		Frozen:    frozen,
+		Tool:      req.Tool,
+	})
+	if err != nil {
+		return Resolution{}, fmt.Errorf("resolve connection credential: %w", err)
+	}
+	if strings.TrimSpace(credential.AccessToken) == "" {
+		return Resolution{}, errors.New("connection credential source returned an empty credential")
+	}
+	if declared.Class == corev1alpha1.ConnectorToolClassWrite && credential.Mode != corev1alpha1.ConnectionModeReadWrite {
+		return Resolution{}, errors.New("connection is readOnly; write tools are not available")
+	}
+	header := defaultCredentialHeader
+	prefix := "Bearer "
+	if output := policy.Spec.Connection.Output; output != nil {
+		if strings.TrimSpace(output.Header) != "" {
+			header = http.CanonicalHeaderKey(strings.TrimSpace(output.Header))
+		}
+		if output.Prefix != nil {
+			prefix = *output.Prefix
+		}
+	}
+	return Resolution{
+		Adapter:          AdapterConnection,
+		CredentialHeader: header,
+		CredentialValue:  prefix + credential.AccessToken,
+		SensitiveValues:  compactSensitiveValues([]string{credential.AccessToken}),
+		ConnectionUID:    credential.ConnectionUID,
+		Parameters:       declared.Parameters,
+	}, nil
 }
 
 func (r *KubernetesResolver) exchanger() tokenexchange.Exchanger {

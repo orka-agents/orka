@@ -10,6 +10,23 @@ description: "Giving Tools a reusable, namespaced way to reach an external API w
 Watch [Allow stock checks but block purchasing](https://www.youtube.com/watch?v=1vDI6PxhmfY).
 :::
 
+## Linked-account credentials (connection mode)
+
+When a person has linked an account through a `ConnectorProvider`, a policy in `connection` mode lets a Tool act as that person:
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: OutboundAccessPolicy
+metadata:
+  name: github-as-me
+spec:
+  connection:
+    providerRef:
+      name: github
+```
+
+The credential belongs to the Task's verified requester, never to the namespace or the Agent. The controller looks up that person's Connection at call time, refreshes the token if it is about to expire, and injects it. Nothing falls back: a missing, revoked, or expired Connection, a Task without a verified requester, or a Connection that changed since the Task was dispatched all fail the call. Tools behind such a policy execute only in the controller, so runtime Pods and worker Pods never see the token. See [ADR 0033](https://github.com/orka-agents/orka/blob/main/docs/adr/0033-user-connectors.md).
+
 ## Direct credential exchange
 
 ```yaml

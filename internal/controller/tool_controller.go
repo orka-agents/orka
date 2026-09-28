@@ -245,9 +245,9 @@ func (r *ToolReconciler) validateToolHTTPAuth(ctx context.Context, tool *corev1a
 				return fmt.Errorf("outbound access policy %q is not accepted with resolved references", ref.Name)
 			}
 		}
-		if policy.Spec.Direct != nil {
+		if policy.Spec.Direct != nil || policy.Spec.Connection != nil {
 			if tool.Spec.HTTP.AuthSecretRef != nil {
-				return fmt.Errorf("direct outbound access policy %q cannot coexist with authSecretRef", ref.Name)
+				return fmt.Errorf("credential-injecting outbound access policy %q cannot coexist with authSecretRef", ref.Name)
 			}
 			targetURL := strings.TrimSpace(tool.Spec.HTTP.URL)
 			if tool.Spec.MCP != nil && tool.Spec.MCP.SubstrateActor != nil {

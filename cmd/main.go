@@ -60,6 +60,7 @@ import (
 	"github.com/orka-agents/orka/internal/api"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	"github.com/orka-agents/orka/internal/connectors"
+	"github.com/orka-agents/orka/internal/connectors/credential"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/controller"
 	"github.com/orka-agents/orka/internal/envutil"
@@ -1416,11 +1417,29 @@ func main() {
 	// accounts linked before an operator disabled connectors.
 	connectorOAuthClient := connectors.NewOAuthClient(connectors.OAuthClientOptions{})
 	if connectorsEnabled {
+		// Connector use trusts spec.requestedBy only when the controller-only
+		// provenance annotation proves the API server stamped it. Without
+		// provenance admission any Task writer could forge both, so the
+		// feature fails closed at startup.
+		if !taskProvenanceProtected {
+			setupLog.Error(errors.New("--connectors-enabled requires --task-provenance-admission-enabled or --task-provenance-admission-external"),
+				"connectors fail closed without Task provenance admission")
+			os.Exit(1)
+		}
 		stateKey, keyErr := deriveConnectorStateKey(snapshotKey)
 		if keyErr != nil {
 			setupLog.Error(keyErr, "unable to derive the connector state key; connectors fail closed")
 			os.Exit(1)
 		}
+		stampKey, keyErr := deriveRequesterStampKey(snapshotKey)
+		if keyErr != nil {
+			setupLog.Error(keyErr, "unable to derive the requester stamp key; connectors fail closed")
+			os.Exit(1)
+		}
+		// The API seals the stamp onto Tasks it creates; the controller
+		// verifies it before freezing anyone's Connection.
+		api.SetRequesterStampKey(stampKey)
+		controller.SetRequesterStampKey(stampKey)
 		connectorConfig = api.ConnectorConfig{
 			Enabled:         true,
 			CallbackBaseURL: strings.TrimSpace(connectorCallbackBaseURL),
@@ -1432,6 +1451,16 @@ func main() {
 		if err := api.ValidateConnectorConfig(connectorConfig); err != nil {
 			setupLog.Error(err, "invalid connector configuration; set --connector-callback-base-url or disable --connectors-enabled")
 			os.Exit(1)
+		}
+	}
+	if connectorsEnabled {
+		// Connection-mode outbound access resolves a person's credential only
+		// here, in the controller. Worker Pods keep a nil source and fail closed.
+		outboundAccessResolver.Connections = &credential.Source{
+			Client:      mgr.GetClient(),
+			APIReader:   mgr.GetAPIReader(),
+			Credentials: sqliteStore,
+			OAuth:       connectorOAuthClient,
 		}
 	}
 	setupLog.Info("agent execution binding stage enabled: executable agent Tasks freeze an immutable encrypted snapshot and write-once binding before dispatch")
@@ -2258,7 +2287,10 @@ func main() {
 				return &tools.ToolContext{
 					Client: mgr.GetClient(), PolicyReader: mgr.GetAPIReader(), KubeClient: kubeClient, Namespace: request.Namespace,
 					SessionID: string(request.Authorization.RuntimeSessionUID), TaskID: task.Name,
-					TaskUID: task.UID, ParentTaskID: task.ParentTaskID, AgentName: task.AgentName,
+					// Children the broker creates for this Task inherit its
+					// verified requester only through this seal.
+					SealTaskCreate: controller.ACPChildTaskSealer(mgr.GetAPIReader(), task.Namespace, task.Name, task.UID),
+					TaskUID:        task.UID, ParentTaskID: task.ParentTaskID, AgentName: task.AgentName,
 					OperationID: string(request.Metadata.OperationID), ExternalEffects: durableControlStore,
 					Tenant: request.Namespace, WatchNamespace: watchNamespace,
 					EnforceNamespaceIsolation: enforceNamespaceIsolation, Brokered: true,
@@ -2597,6 +2629,15 @@ func loadAgentExecutionSnapshotCipher(path string) (*sqlite.AgentExecutionSnapsh
 // connectorStateKeyInfo is the HKDF label separating the connector state
 // signing key from every other use of the controller key.
 const connectorStateKeyInfo = "orka.connector.state.v1"
+
+// requesterStampKeyInfo is the HKDF label for the requester stamp key.
+const requesterStampKeyInfo = "orka.connector.requester-stamp.v1"
+
+// deriveRequesterStampKey derives the key that binds API-created Tasks to the
+// requester the API verified for them.
+func deriveRequesterStampKey(controllerKey []byte) ([]byte, error) {
+	return hkdf.Key(sha256.New, controllerKey, nil, requesterStampKeyInfo, connectors.MinRequesterStampKeyBytes)
+}
 
 // deriveConnectorStateKey derives the OAuth state signing key from the
 // controller key so connectors need no additional operator secret.

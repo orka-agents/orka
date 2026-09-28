@@ -202,6 +202,20 @@ func TestTaskProvenanceValidator_Update(t *testing.T) {
 			contains: fieldSpecRequestedBy,
 		},
 		{
+			name:     "trusted worker changing an API-stamped requester denied",
+			user:     trustedWorkerUser,
+			oldTask:  withRequestedBySource(withRequestedBy(oldTask.DeepCopy())),
+			newTask:  withRequestedBySubject(withRequestedBySource(withRequestedBy(oldTask.DeepCopy())), "victim"),
+			contains: fieldSpecRequestedBy,
+		},
+		{
+			name:    "trusted worker changing an unstamped requester allowed",
+			user:    trustedWorkerUser,
+			oldTask: withRequestedBy(oldTask.DeepCopy()),
+			newTask: withRequestedBySubject(withRequestedBy(oldTask.DeepCopy()), "other"),
+			allowed: true,
+		},
+		{
 			name:     "untrusted update changing transaction denied",
 			user:     untrustedUsername,
 			oldTask:  oldWithProvenance,
@@ -479,4 +493,20 @@ func TestTaskProvenanceFlagTrustedUserCannotWriteWorkspaceMetadata(t *testing.T)
 	if !response.Allowed {
 		t.Fatalf("a flag-trusted provenance writer must keep the provenance allowance: %v", response.Result)
 	}
+}
+
+func withRequestedBySource(task *corev1alpha1.Task) *corev1alpha1.Task {
+	if task.Annotations == nil {
+		task.Annotations = map[string]string{}
+	}
+	task.Annotations[labels.AnnotationRequestedBySource] = labels.RequestedBySourceAPI
+	return task
+}
+
+func withRequestedBySubject(task *corev1alpha1.Task, subject string) *corev1alpha1.Task {
+	if task.Spec.RequestedBy == nil {
+		task.Spec.RequestedBy = &corev1alpha1.RequestedBy{}
+	}
+	task.Spec.RequestedBy.Subject = subject
+	return task
 }

@@ -80,6 +80,10 @@ type ConnectorCredential struct {
 	GrantSequence int64
 	// UpdatedAt is set by the store on read.
 	UpdatedAt time.Time
+	// Version is the custody row version, set by the store on read. Refresh
+	// writes are fenced against it so a concurrent re-consent is never
+	// overwritten by material derived from an older refresh token.
+	Version int64
 }
 
 // ConnectorCredentialStore seals per-Connection token material with one data
@@ -98,6 +102,20 @@ type ConnectorCredentialStore interface {
 	// for revocation: later commits fail with ErrConnectorCustodyTombstoned
 	// while the rows stay readable until DeleteConnectorCredential.
 	TombstoneConnectorCustody(ctx context.Context, connectionUID string) error
+	// ReplaceConnectorCredential replaces the material only while the row is
+	// still at expectedVersion, minting a fresh data key. A newer row returns
+	// ErrConflict; a missing row returns ErrNotFound.
+	ReplaceConnectorCredential(ctx context.Context, ref ConnectorCredentialRef, credential ConnectorCredential, expectedVersion int64) error
+	// ShredConnectorCredential deletes the material without tombstoning the
+	// UID, for a link the provider revoked that the person may re-consent to.
+	// A newer row returns ErrConflict; a missing row succeeds.
+	ShredConnectorCredential(ctx context.Context, connectionUID string, expectedVersion int64) error
+	// RetireConnectorCredential keeps material that was obtained for ref
+	// but cannot become its current row (a refresh that lost to a consent)
+	// sealed for revocation at disconnect. A refresh token keeps the row
+	// until disconnect; without one the row lives until the access token
+	// expires. A tombstoned Connection refuses it.
+	RetireConnectorCredential(ctx context.Context, ref ConnectorCredentialRef, credential ConnectorCredential) error
 	// DeleteConnectorCredential removes the row and its wrapped key and
 	// tombstones the UID so later writes fail with
 	// ErrConnectorCustodyTombstoned. Missing rows succeed.

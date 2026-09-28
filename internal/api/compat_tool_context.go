@@ -95,6 +95,7 @@ func newCompatProxyToolContext(cfg compatProxyToolContextConfig) *tools.ToolCont
 			}
 			return chatToolAuthorizationError(authorize, ctx, task, "Use a task configuration authorized by the context token")
 		}
+		toolCtx.SealTaskCreate = requesterStampSealer
 	}
 	if cfg.Profile.TaskDeleteAction != "" {
 		toolCtx.AuthorizeTaskDelete = func(ctx context.Context, task *corev1alpha1.Task) *tools.ChatToolError {

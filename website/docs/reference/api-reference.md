@@ -38,7 +38,7 @@ Authentication modes:
 Txn-Token: <txntoken+jwt>
 ```
 
-When a Task is created through OIDC or context-token authentication, Orka stamps the verified caller identity into immutable `spec.requestedBy` (`subject`, `issuer`, `username`, `email`, `groups`, and `roles` when present). Context-token Task creation also stamps immutable `spec.transaction` plus transaction labels/annotations for audit correlation. Clients cannot provide or override `requestedBy` or `transaction`; requests containing top-level or nested `spec.requestedBy`/`spec.transaction` are rejected with `400`. See [Transaction Token integration](../concepts/transaction-tokens.md) for scope/`tctx` authorization, TTS exchange, delegation, and audit behavior.
+When a Task is created through OIDC or context-token authentication, Orka stamps the verified caller identity into immutable `spec.requestedBy` (`subject`, `issuer`, `username`, `email`, `groups`, and `roles` when present). Context-token Task creation also stamps immutable `spec.transaction` plus transaction labels/annotations for audit correlation. Clients cannot provide or override `requestedBy` or `transaction`; requests containing top-level or nested `spec.requestedBy`/`spec.transaction` are rejected with `400`. Right after creating such a Task the API seals `orka.ai/requested-by-stamp`, an HMAC over the server-assigned Task UID and the requester, next to the controller-only `orka.ai/requested-by-source=api` annotation; connector use trusts a requester only when that stamp verifies for the Task's own UID, so a Task planted with the source annotation while admission was disabled is never trusted. A coordination child created by a worker is sealed only through `POST /internal/v1/tasks/:namespace/:taskName/children/:child/requester-stamp`, which authenticates the caller as the parent's current worker and checks that the child is controller-owned by that parent and names the same requester; an owner reference alone never lets a child inherit authority. Because the seal is a second write after the create (or, for a coordination child, a request from the parent's worker), an API-stamped Task or controller-owned child less than two minutes old whose seal has not landed is retried at dispatch rather than dispatched without Connections; an older unsealed Task is treated as unverified. See [Transaction Token integration](../concepts/transaction-tokens.md) for scope/`tctx` authorization, TTS exchange, delegation, and audit behavior.
 
 ## Webhooks
 
@@ -309,7 +309,7 @@ MCP actor-backed tools require Substrate support to be enabled on the controller
 
 ## OutboundAccessPolicy
 
-`OutboundAccessPolicy` is namespaced and selects exactly one adapter. Direct mode performs RFC 8693/RFC 7523 exchange and injects a validated Bearer resource credential. Gateway mode dials a trusted Kubernetes Service while preserving the original Tool authority, path, query, method, body, and protocol headers.
+`OutboundAccessPolicy` is namespaced and selects exactly one adapter. Direct mode performs RFC 8693/RFC 7523 exchange and injects a validated Bearer resource credential. Gateway mode dials a trusted Kubernetes Service while preserving the original Tool authority, path, query, method, body, and protocol headers. Connection mode injects the requesting person's linked-account credential for a `ConnectorProvider`.
 
 ```yaml
 apiVersion: core.orka.ai/v1alpha1
@@ -328,6 +328,25 @@ spec:
     requestedTokenType: urn:ietf:params:oauth:token-type:access_token
     expectedIssuedTokenType: urn:ietf:params:oauth:token-type:access_token
 ```
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: OutboundAccessPolicy
+metadata:
+  name: github-as-me
+  namespace: default
+spec:
+  connection:
+    providerRef:
+      name: github
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `spec.connection.providerRef.name` | string | required | Same-namespace `ConnectorProvider`. `ResolvedRefs` is True only while the provider is Accepted. |
+| `spec.connection.output` | object | `Authorization: Bearer` | Header and prefix for the injected credential. `Txn-Token` is forbidden. |
+
+Connection mode resolves at call time, in the controller only: the Task's verified `spec.requestedBy` selects the person, the Connection identity frozen into the Task's execution snapshot at dispatch must still match the live Connection (UID, generation, and grant sequence, so a re-link of the same Connection object needs a re-dispatch), the Connection must be Ready for its current generation, and the Tool URL must be HTTPS without `authSecretRef`. A token that expires within 60 seconds is refreshed once per Connection at a time and the rotated material written back to custody. A provider that rejects the refresh marks the Connection `Revoked` and shreds its custody; an expired token with no refresh token marks it `Expired`. Any other condition fails the call with no fallback to Task Secrets, environment credentials, or other people's Connections. Worker Pods have no credential source and refuse connection-mode policies.
 
 Policy status contains only `observedGeneration`, `Accepted`, and `ResolvedRefs`. Secret references are key-specific and same-namespace. Cross-namespace Service refs require exact controller allowlist entries. See [Outbound Access Policies](../concepts/outbound-access.md).
 

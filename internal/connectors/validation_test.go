@@ -596,6 +596,13 @@ func TestProviderAuthorityDigestAndConsent(t *testing.T) {
 	if ProviderAuthorityDigest(noPKCE) == ProviderAuthorityDigest(provider) || ProviderIssuerDigest(noPKCE) != ProviderIssuerDigest(provider) {
 		t.Fatal("the PKCE setting must move the authority digest but not the issuer digest")
 	}
+	// A broadened parameter schema on a declared tool moves the consent
+	// fence: the constraint the person consented under is gone.
+	widened := provider.DeepCopy()
+	widened.Spec.Tools[2].Parameters = &apiextensionsv1.JSON{Raw: []byte(`{"type":"object"}`)}
+	if ProviderAuthorityDigest(widened) == ProviderAuthorityDigest(provider) || ProviderIssuerDigest(widened) != ProviderIssuerDigest(provider) {
+		t.Fatal("a tool's parameter schema must move the authority digest but not the issuer digest")
+	}
 	// Built-in declarations do not carry a destination and do not move the digest.
 	builtinOnly := provider.DeepCopy()
 	builtinOnly.Spec.Tools = append(builtinOnly.Spec.Tools, corev1alpha1.ConnectorTool{Name: "list_issues", Class: corev1alpha1.ConnectorToolClassRead, Source: corev1alpha1.ConnectorToolSourceBuiltin})

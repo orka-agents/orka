@@ -74,6 +74,8 @@ var (
 
 	controllerManagedTaskAnnotationKeys = []string{
 		labels.AnnotationParentTaskUID,
+		labels.AnnotationRequestedBySource,
+		labels.AnnotationRequestedByStamp,
 	}
 )
 
@@ -258,10 +260,14 @@ func presentTaskProvenanceFields(task *corev1alpha1.Task, workerTrusted bool) []
 
 func changedTaskProvenanceFields(oldTask, newTask *corev1alpha1.Task, workerTrusted bool) []string {
 	fields := []string{}
+	// A requester the API server stamped from a verified sign-in is bound to
+	// that identity: no worker, trusted or not, may rewrite it, or a forged
+	// lineage could inherit another person's connector authority.
+	stamped := oldTask.Annotations[labels.AnnotationRequestedBySource] == labels.RequestedBySourceAPI
+	if (!workerTrusted || stamped) && !reflect.DeepEqual(oldTask.Spec.RequestedBy, newTask.Spec.RequestedBy) {
+		fields = append(fields, fieldSpecRequestedBy)
+	}
 	if !workerTrusted {
-		if !reflect.DeepEqual(oldTask.Spec.RequestedBy, newTask.Spec.RequestedBy) {
-			fields = append(fields, fieldSpecRequestedBy)
-		}
 		if !reflect.DeepEqual(oldTask.Spec.Transaction, newTask.Spec.Transaction) {
 			fields = append(fields, fieldSpecTransaction)
 		}

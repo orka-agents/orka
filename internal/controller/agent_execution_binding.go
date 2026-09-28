@@ -95,6 +95,30 @@ type agentExecutionSnapshotBody struct {
 	// ExecutionWorkspace freezes the resolved execution-workspace binding for
 	// workspace-provider-backed RuntimePools. It is absent for plain pools.
 	ExecutionWorkspace *agentExecutionSnapshotWorkspaceBinding `json:"executionWorkspace,omitempty"`
+	// Connections freezes, per connection-mode OutboundAccessPolicy reachable
+	// from the frozen tool policy, the identity of the requester's Connection
+	// at dispatch. Call-time resolution fails closed unless the live
+	// Connection still matches. No token material is ever recorded.
+	Connections []agentExecutionSnapshotConnection `json:"connections,omitempty"`
+}
+
+// agentExecutionSnapshotConnection is one frozen person-to-provider link.
+type agentExecutionSnapshotConnection struct {
+	PolicyName     string `json:"policyName"`
+	Provider       string `json:"provider"`
+	ConnectionName string `json:"connectionName"`
+	UID            string `json:"uid"`
+	Generation     int64  `json:"generation"`
+	// GrantSequence is the consent count the Connection carried when
+	// frozen; a later re-link of the same object raises it and invalidates
+	// this snapshot's authority to use the account.
+	GrantSequence int64  `json:"grantSequence"`
+	Mode          string `json:"mode"`
+	// PolicyUID and PolicyGeneration pin the connection-mode policy the
+	// Connection was frozen under: its credential output semantics are part
+	// of what the Task was dispatched with.
+	PolicyUID        string `json:"policyUID,omitempty"`
+	PolicyGeneration int64  `json:"policyGeneration,omitempty"`
 }
 
 // agentExecutionSnapshotExternalRuntime freezes the non-secret registration
@@ -369,6 +393,10 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	if err != nil {
 		return nil, fmt.Errorf("resolve frozen ACP MCP configuration: %w", err)
 	}
+	frozenConnections, err := freezeRequesterConnections(ctx, reader, task, mcpConfiguration)
+	if err != nil {
+		return nil, fmt.Errorf("freeze requester connections: %w", err)
+	}
 
 	namespace := &corev1.Namespace{}
 	if err := reader.Get(ctx, types.NamespacedName{Name: task.Namespace}, namespace); err != nil {
@@ -405,6 +433,7 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 		SessionRef:       task.Spec.SessionRef.DeepCopy(),
 		Workspace:        task.Spec.Workspace.DeepCopy(),
 		RuntimeOverride:  task.Spec.AgentRuntime.DeepCopy(),
+		Connections:      frozenConnections,
 	}
 	if task.Spec.Timeout != nil {
 		body.Timeout = task.Spec.Timeout.Duration.String()
@@ -506,6 +535,20 @@ func (r *TaskReconciler) resolveExternalAgentExecutionCandidate(
 	profile, external, err := r.resolveExternalAgentRuntimeSnapshot(ctx, task, runtime)
 	if err != nil {
 		return nil, err
+	}
+	// An external runtime's snapshot freezes no Connections: its MCP policy
+	// is fixed by its registered profile and per-requester links cannot be
+	// applied to it. Connector-backed tools therefore fail closed here, with
+	// a definitive reason, rather than being advertised as tools whose every
+	// call would fail for want of a frozen Connection.
+	var runtimeDisallowed []string
+	if runtime.Spec.Capabilities.MCPPolicy != nil {
+		runtimeDisallowed = runtime.Spec.Capabilities.MCPPolicy.DisallowedTools
+	}
+	if connectorTools, err := connectorToolsFor(ctx, reader, task.Namespace, connectorCandidateTools(task, agent, runtimeDisallowed)); err != nil {
+		return nil, err
+	} else if len(connectorTools) > 0 {
+		return nil, permanentACPAgentConfiguration(errors.New("connector-backed tools are not supported on external v2 AgentRuntimes"))
 	}
 	registry := r.MCPRegistry
 	if registry == nil {

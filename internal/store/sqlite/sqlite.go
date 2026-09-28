@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -972,6 +973,9 @@ type Store struct {
 	dbPath           string
 	processLock      io.Closer
 	executionEventMu sync.Mutex
+	// pendingWALTruncate remembers a connector custody deletion whose log
+	// truncation found the log busy; the next custody operation finishes it.
+	pendingWALTruncate atomic.Bool
 
 	// snapshotCipher encrypts immutable agent execution snapshot bodies at
 	// rest. Snapshot persistence fails closed while it is nil.

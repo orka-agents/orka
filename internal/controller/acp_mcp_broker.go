@@ -122,6 +122,10 @@ type RegistryACPMCPToolExecutor struct {
 	// authorize Secret-backed outbound credentials, matching the scopes the
 	// controller stamps into worker Jobs.
 	TransactionCredentialReadScopes []string
+	// AgentExecutionSnapshots supplies the frozen Connection bindings for
+	// connection-mode outbound access. Nil leaves connector-backed tools
+	// failing closed.
+	AgentExecutionSnapshots store.AgentExecutionSnapshotStore
 }
 
 // ValidateACPMCPTool checks configuration drift before spending an approval.
@@ -302,6 +306,9 @@ func (e RegistryACPMCPToolExecutor) bindTaskTransactionAuthority(
 	if string(task.UID) != authenticated.UID {
 		return errors.New("authenticated ACP MCP task identity changed")
 	}
+	if err := bindFrozenConnections(ctx, e.AgentExecutionSnapshots, task, executor); err != nil {
+		return err
+	}
 	return bindVerifiedTaskTransactionAuthority(
 		ctx, e.Reader, task, e.TransactionCredentialReadScopes,
 		e.EnforceTransactionCredentialAuth, executor,
@@ -348,7 +355,8 @@ func NewProductionACPMCPBroker(dependencies ACPMCPBrokerDependencies) (*ACPMCPBr
 		},
 		Prompts: DurableACPMCPPromptAuthorizer{Attempts: dependencies.ControlStore, PromptLeases: dependencies.PromptLeases},
 		Executor: RegistryACPMCPToolExecutor{
-			Registry: dependencies.Registry, Reader: dependencies.Reader, KubeClient: dependencies.KubeClient,
+			AgentExecutionSnapshots: dependencies.AgentExecutionSnapshots,
+			Registry:                dependencies.Registry, Reader: dependencies.Reader, KubeClient: dependencies.KubeClient,
 			HTTPClient: dependencies.HTTPClient, OutboundAccess: dependencies.OutboundAccess,
 			TransactionExchange: dependencies.TransactionExchange, ContextFactory: dependencies.ContextFactory,
 			EnforceTransactionCredentialAuth: dependencies.EnforceTransactionCredentialAuth,
