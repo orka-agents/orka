@@ -631,15 +631,18 @@ func (s *Source) refreshLostToConsent(ctx context.Context, cfg connectors.OAuthP
 	if err != nil {
 		return store.ConnectorCredential{}, err
 	}
-	losing := refreshed
-	if losing.RefreshToken == winner.RefreshToken {
-		losing.RefreshToken = ""
-	}
-	if losing.AccessToken == winner.AccessToken {
-		losing.AccessToken = ""
-	}
-	if losing.RefreshToken != "" || losing.AccessToken != "" {
-		s.revokeUnstorable(ctx, cfg, provider, losing, logger)
+	// The pair this refresh obtained is kept in sealed retirement custody
+	// and revoked at disconnect, never revoked now: some providers revoke
+	// every token of a grant together, which would kill the winning
+	// consent that just committed.
+	if winner.AccessToken != refreshed.AccessToken || winner.RefreshToken != refreshed.RefreshToken {
+		switch err := s.Credentials.RetireConnectorCredential(ctx, ref, refreshed); {
+		case errors.Is(err, store.ErrConnectorCustodyTombstoned):
+			// The Connection is being disconnected: the whole grant goes.
+			s.revokeUnstorable(ctx, cfg, provider, refreshed, logger)
+		case err != nil:
+			logger.Info("refreshed credential that lost to a consent could not be retired; it is left to expire")
+		}
 	}
 	if s.expiresWithin(winner, horizon) {
 		return store.ConnectorCredential{}, errors.New("connection credential changed concurrently and is about to expire; retry")

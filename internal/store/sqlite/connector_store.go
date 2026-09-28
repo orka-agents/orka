@@ -1283,3 +1283,51 @@ func (s *Store) verifyConnectorRowsWithCipher(snapshotCipher *AgentExecutionSnap
 	}
 	return nil
 }
+
+// RetireConnectorCredential implements store.ConnectorCredentialStore.
+func (s *Store) RetireConnectorCredential(ctx context.Context, ref store.ConnectorCredentialRef, credential store.ConnectorCredential) error {
+	if s.snapshotCipher == nil {
+		return errConnectorCipherRequired
+	}
+	if err := ref.Validate(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(credential.AccessToken) == "" {
+		return errors.New("connector credential access token is required")
+	}
+	now := time.Now().UTC()
+	revocableUntil := sql.NullTime{}
+	if credential.RefreshToken == "" && !credential.ExpiresAt.IsZero() {
+		if !credential.ExpiresAt.After(now) {
+			return nil
+		}
+		revocableUntil = sql.NullTime{Time: credential.ExpiresAt.UTC(), Valid: true}
+	}
+	row, err := s.sealConnectorCredentialRow(ref, credential)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin connector retirement transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var tombstoned int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM connector_credential_tombstones WHERE connection_uid = ?`, ref.ConnectionUID).Scan(&tombstoned); err != nil {
+		return fmt.Errorf("check connector custody tombstone: %w", err)
+	}
+	if tombstoned > 0 {
+		return store.ErrConnectorCustodyTombstoned
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM connector_retired_credentials
+		WHERE connection_uid = ? AND revocable_until IS NOT NULL AND revocable_until <= ?`, ref.ConnectionUID, now); err != nil {
+		return fmt.Errorf("prune expired retired connector credentials: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO connector_retired_credentials
+		(connection_uid, dek_nonce, dek_ciphertext, nonce, ciphertext, revocable_until, retired_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		ref.ConnectionUID, row.dekNonce, row.dekCiphertext, row.nonce, row.ciphertext, revocableUntil, now); err != nil {
+		return fmt.Errorf("retire connector credential: %w", err)
+	}
+	return tx.Commit()
+}

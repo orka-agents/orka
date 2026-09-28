@@ -423,14 +423,18 @@ func TestRefreshLosesToConcurrentReconsent(t *testing.T) {
 	if stored.AccessToken != "gho_reconsented" || stored.RefreshToken != "ghr_reconsented" {
 		t.Fatalf("custody after lost race = %+v", stored)
 	}
-	// The pair the losing refresh obtained cannot be stored; it derives
-	// from this Connection's own grant, so it is revoked rather than left
-	// live outside custody.
+	// The pair the losing refresh obtained cannot be stored; it is kept in
+	// retirement custody for disconnect rather than revoked now, since a
+	// provider may revoke the whole grant, including the winner's tokens.
 	h.refresher.mu.Lock()
 	revoked := strings.Join(h.refresher.revoked, ",")
 	h.refresher.mu.Unlock()
-	if !strings.Contains(revoked, "gho_new") {
-		t.Fatalf("revoked = %q, want the losing refresh's material", revoked)
+	if revoked != "" {
+		t.Fatalf("revoked = %q, want nothing revoked while the winning consent is live", revoked)
+	}
+	retired, err := h.store.ListRetiredConnectorCredentials(context.Background(), ref)
+	if err != nil || len(retired) == 0 || retired[len(retired)-1].AccessToken != "gho_new" {
+		t.Fatalf("retired = %+v err = %v, want the losing refresh's material kept for disconnect", retired, err)
 	}
 
 	// A mode change and re-consent that land during the refresh are seen:
