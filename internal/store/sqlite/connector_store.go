@@ -296,6 +296,7 @@ func (s *Store) sealConnectorCredentialRow(ref store.ConnectorCredentialRef, cre
 
 // PutConnectorCredential implements store.ConnectorCredentialStore.
 func (s *Store) PutConnectorCredential(ctx context.Context, ref store.ConnectorCredentialRef, credential store.ConnectorCredential) error {
+	s.finishPendingWALTruncate(ctx)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin connector credential transaction: %w", err)
@@ -602,6 +603,7 @@ func reapConnectorTombstonesTx(ctx context.Context, tx *sql.Tx, now time.Time) e
 
 // ReplaceConnectorCredential implements store.ConnectorCredentialStore.
 func (s *Store) ReplaceConnectorCredential(ctx context.Context, ref store.ConnectorCredentialRef, credential store.ConnectorCredential, expectedVersion int64) error {
+	s.finishPendingWALTruncate(ctx)
 	if s.snapshotCipher == nil {
 		return errConnectorCipherRequired
 	}
@@ -753,6 +755,7 @@ func (s *Store) retireConnectorCredentialTx(ctx context.Context, tx *sql.Tx, ref
 
 // ShredConnectorCredential implements store.ConnectorCredentialStore.
 func (s *Store) ShredConnectorCredential(ctx context.Context, connectionUID string, expectedVersion int64) error {
+	s.finishPendingWALTruncate(ctx)
 	if strings.TrimSpace(connectionUID) == "" {
 		return errors.New("connector credential connection UID is required")
 	}
@@ -760,12 +763,14 @@ func (s *Store) ShredConnectorCredential(ctx context.Context, connectionUID stri
 	if err != nil {
 		return fmt.Errorf("shred connector credential: %w", err)
 	}
-	if err := s.connectorRowFenced(ctx, result, connectionUID); err != nil {
+	// A shred is a crypto-shred only once the log frames that carried the
+	// row are gone too. The truncation runs whether or not this call was the
+	// one that removed the row, so a retry after a busy log finishes it.
+	fenced := s.connectorRowFenced(ctx, result, connectionUID)
+	if err := s.truncateWAL(ctx); err != nil && fenced == nil {
 		return err
 	}
-	// A shred is a crypto-shred only once the log frames that carried the
-	// row are gone too.
-	return s.truncateWAL(ctx)
+	return fenced
 }
 
 // connectorRowFenced turns a zero-row fenced write into ErrConflict when the
@@ -790,6 +795,7 @@ func (s *Store) connectorRowFenced(ctx context.Context, result sql.Result, conne
 
 // DeleteConnectorCredential implements store.ConnectorCredentialStore.
 func (s *Store) DeleteConnectorCredential(ctx context.Context, connectionUID string) error {
+	s.finishPendingWALTruncate(ctx)
 	if strings.TrimSpace(connectionUID) == "" {
 		return errors.New("connector credential connection UID is required")
 	}
@@ -824,18 +830,31 @@ func (s *Store) truncateWAL(ctx context.Context) error {
 		var busy, logFrames, checkpointed int
 		err = s.db.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &logFrames, &checkpointed)
 		if err != nil {
+			s.pendingWALTruncate.Store(true)
 			return fmt.Errorf("truncate connector custody log: %w", err)
 		}
 		if busy == 0 {
+			s.pendingWALTruncate.Store(false)
 			return nil
 		}
 		select {
 		case <-ctx.Done():
+			s.pendingWALTruncate.Store(true)
 			return ctx.Err()
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
+	s.pendingWALTruncate.Store(true)
 	return errors.New("truncate connector custody log: readers kept the log busy; retry")
+}
+
+// finishPendingWALTruncate completes a truncation an earlier deletion could
+// not, so a shredded row's log frames never outlive the next custody
+// operation even when the caller of that deletion did not retry.
+func (s *Store) finishPendingWALTruncate(ctx context.Context) {
+	if s.pendingWALTruncate.Load() {
+		_ = s.truncateWAL(ctx)
+	}
 }
 
 // CreateConnectorConsent implements store.ConnectorConsentStore.
@@ -1060,6 +1079,7 @@ func (s *Store) PeekConnectorCompletion(ctx context.Context, nonce string) (stor
 
 // DeleteConnectorCompletion implements store.ConnectorConsentStore.
 func (s *Store) DeleteConnectorCompletion(ctx context.Context, nonce string) error {
+	s.finishPendingWALTruncate(ctx)
 	if strings.TrimSpace(nonce) == "" {
 		return nil
 	}
@@ -1129,6 +1149,7 @@ func (s *Store) queryConnectorCompletions(ctx context.Context, where string, arg
 
 // DeleteConnectorConsentsForConnection implements store.ConnectorConsentStore.
 func (s *Store) DeleteConnectorConsentsForConnection(ctx context.Context, connectionUID string) error {
+	s.finishPendingWALTruncate(ctx)
 	if strings.TrimSpace(connectionUID) == "" {
 		return errors.New("connector consent connection UID is required")
 	}

@@ -79,9 +79,10 @@ func freezeRequesterConnections(
 		seenPolicies[policyName] = struct{}{}
 		policy := &corev1alpha1.OutboundAccessPolicy{}
 		if err := reader.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: policyName}, policy); err != nil {
-			if apierrors.IsNotFound(err) {
-				continue
-			}
+			// A policy that cannot be read, including one that is missing, is
+			// never left out of the snapshot: a name recreated later in
+			// direct or gateway mode would then pass the adapter-change
+			// guard. Dispatch retries instead of committing a partial view.
 			return nil, fmt.Errorf("load outbound access policy %q: %w", policyName, err)
 		}
 		if policy.Spec.Connection == nil {
@@ -381,4 +382,32 @@ func ACPChildTaskSealer(reader client.Reader, parentNamespace, parentName, paren
 		}
 		return fmt.Errorf("seal the child task: %w", err)
 	}
+}
+
+// connectorCandidateTools is the allowed tool list with every name the
+// effective MCP policy denies removed (the Task's disallowed tools, plus any
+// extra denied set such as an external runtime's registered policy), so a
+// refusal never triggers on a connector tool the policy would not expose.
+func connectorCandidateTools(task *corev1alpha1.Task, agent *corev1alpha1.Agent, extraDisallowed []string) []string {
+	allowed := effectiveACPAllowedTools(task, agent)
+	denied := map[string]struct{}{}
+	if task != nil && task.Spec.AgentRuntime != nil {
+		for _, name := range task.Spec.AgentRuntime.DisallowedTools {
+			denied[name] = struct{}{}
+		}
+	}
+	for _, name := range extraDisallowed {
+		denied[name] = struct{}{}
+	}
+	if len(denied) == 0 {
+		return allowed
+	}
+	kept := make([]string, 0, len(allowed))
+	for _, name := range allowed {
+		if _, gone := denied[name]; gone {
+			continue
+		}
+		kept = append(kept, name)
+	}
+	return kept
 }

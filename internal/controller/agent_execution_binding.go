@@ -541,7 +541,11 @@ func (r *TaskReconciler) resolveExternalAgentExecutionCandidate(
 	// applied to it. Connector-backed tools therefore fail closed here, with
 	// a definitive reason, rather than being advertised as tools whose every
 	// call would fail for want of a frozen Connection.
-	if connectorTools, err := connectorToolsFor(ctx, reader, task.Namespace, effectiveACPAllowedTools(task, agent)); err != nil {
+	var runtimeDisallowed []string
+	if runtime.Spec.Capabilities.MCPPolicy != nil {
+		runtimeDisallowed = runtime.Spec.Capabilities.MCPPolicy.DisallowedTools
+	}
+	if connectorTools, err := connectorToolsFor(ctx, reader, task.Namespace, connectorCandidateTools(task, agent, runtimeDisallowed)); err != nil {
 		return nil, err
 	} else if len(connectorTools) > 0 {
 		return nil, permanentACPAgentConfiguration(errors.New("connector-backed tools are not supported on external v2 AgentRuntimes"))
