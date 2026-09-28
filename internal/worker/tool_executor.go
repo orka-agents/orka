@@ -24,6 +24,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -429,7 +430,7 @@ func (e *ToolExecutor) executePreparedToolRequest(ctx context.Context, prepared 
 		return "", err
 	}
 
-	if prepared.direct && !e.skipDirectPublicValidation {
+	if prepared.direct && !e.skipDirectPublicValidation && (!prepared.connection || !allowPrivateConnectionEndpoints.Load()) {
 		dialContext := tokenexchange.PublicEndpointDialContext
 		if prepared.trustedActorRoute {
 			dialContext = exactEndpointDialContext(prepared.request.URL)
@@ -507,6 +508,16 @@ func exactEndpointDialContext(endpoint *neturl.URL) func(context.Context, string
 		return dialer.DialContext(ctx, network, address)
 	}
 }
+
+// allowPrivateConnectionEndpoints lets connection-mode (linked-account)
+// requests reach private and cluster-local destinations. It exists for
+// local and CI fixtures only and is set once by the controller from its
+// dev-only flag; worker Pods never set it.
+var allowPrivateConnectionEndpoints atomic.Bool
+
+// SetAllowPrivateConnectionEndpoints turns the fixture allowance on or off
+// for this process. Never enable it in production.
+func SetAllowPrivateConnectionEndpoints(allowed bool) { allowPrivateConnectionEndpoints.Store(allowed) }
 
 func toolHTTPClient(base *http.Client, timeout *metav1.Duration, gatewayTLS tokenexchange.TLSConfig, gateway, connection bool) (*http.Client, error) {
 	if base == nil {

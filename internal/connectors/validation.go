@@ -23,6 +23,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -82,6 +83,19 @@ var (
 		"Content-Length": {}, "Transfer-Encoding": {},
 	}
 )
+
+// allowPrivateEndpoints relaxes the public-host rules for provider and tool
+// endpoints. It exists for local and CI fixtures only: a controller that
+// sets it will hand a person's token to a cluster-local address.
+var allowPrivateEndpoints atomic.Bool
+
+// SetAllowPrivateEndpoints turns the private-endpoint allowance on or off
+// for this process. Never enable it in production.
+func SetAllowPrivateEndpoints(allowed bool) { allowPrivateEndpoints.Store(allowed) }
+
+// PrivateEndpointsAllowed reports whether private, loopback, and
+// cluster-local provider endpoints are accepted in this process.
+func PrivateEndpointsAllowed() bool { return allowPrivateEndpoints.Load() }
 
 // hostDenied reports whether host is a denied name, lies under one, extends
 // one with more labels (kubernetes.default.svc.example), or carries a
@@ -246,11 +260,13 @@ func validateEndpointURL(field, raw string, required bool) *Issue {
 			return invalid(fmt.Sprintf("oauth.%s port must be between 1 and 65535", field))
 		}
 	}
-	if hostDenied(strings.ToLower(host)) {
-		return invalid(fmt.Sprintf("oauth.%s host is not allowed", field))
-	}
-	if ip := net.ParseIP(host); ip != nil && !tokenexchange.IsPublicAddress(ip) {
-		return invalid(fmt.Sprintf("oauth.%s must not target private, loopback, or link-local addresses", field))
+	if !PrivateEndpointsAllowed() {
+		if hostDenied(strings.ToLower(host)) {
+			return invalid(fmt.Sprintf("oauth.%s host is not allowed", field))
+		}
+		if ip := net.ParseIP(host); ip != nil && !tokenexchange.IsPublicAddress(ip) {
+			return invalid(fmt.Sprintf("oauth.%s must not target private, loopback, or link-local addresses", field))
+		}
 	}
 	if ip := net.ParseIP(host); ip == nil && nonCanonicalNumericHost(host) {
 		return invalid(fmt.Sprintf("oauth.%s host must be a hostname or a canonical IP address", field))

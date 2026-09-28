@@ -288,6 +288,7 @@ func main() {
 	var gatewayEnabled bool
 	var connectorsEnabled bool
 	var connectorCallbackBaseURL string
+	var connectorsAllowPrivateEndpoints bool
 	var gatewayPendingPerSession int
 	var gatewayMaxRecordsPerGateway int
 	var gatewayMaxRejectedRecordsPerGateway int
@@ -499,6 +500,9 @@ func main() {
 	flag.BoolVar(&gatewayEnabled, "gateway-enabled", true, "Enable generic gateway reconciliation and ingress.")
 	flag.BoolVar(&connectorsEnabled, "connectors-enabled", envBool("ORKA_CONNECTORS_ENABLED"),
 		"Enable per-user connector reconciliation (ConnectorProvider and Connection).")
+	flag.BoolVar(&connectorsAllowPrivateEndpoints, "connectors-allow-private-endpoints", envBool("ORKA_CONNECTORS_ALLOW_PRIVATE_ENDPOINTS"),
+		"FIXTURE USE ONLY: accept private, loopback, and cluster-local connector provider and tool endpoints, "+
+			"and let linked-account requests reach them. A person's token would be sent to such an address; never enable this in production.")
 	flag.StringVar(&connectorCallbackBaseURL, "connector-callback-base-url", os.Getenv("ORKA_CONNECTOR_CALLBACK_BASE_URL"),
 		"Absolute origin the OAuth provider redirects back to for connector consent, for example https://orka.example.com. "+
 			"The provider must register exactly this origin plus /api/v1/connections/callback.")
@@ -1424,7 +1428,12 @@ func main() {
 	// The OAuth client exists whether or not new consent is enabled: the
 	// Connection finalizer must still be able to revoke committed tokens for
 	// accounts linked before an operator disabled connectors.
-	connectorOAuthClient := connectors.NewOAuthClient(connectors.OAuthClientOptions{})
+	if connectorsAllowPrivateEndpoints {
+		setupLog.Info("WARNING: --connectors-allow-private-endpoints is set; connector endpoints may be private or cluster-local. This is for fixtures only and must never be enabled in production")
+		connectors.SetAllowPrivateEndpoints(true)
+		worker.SetAllowPrivateConnectionEndpoints(true)
+	}
+	connectorOAuthClient := connectors.NewOAuthClient(connectors.OAuthClientOptions{AllowPrivateEndpoints: connectorsAllowPrivateEndpoints})
 	if connectorsEnabled {
 		// Connector use trusts spec.requestedBy only when the controller-only
 		// provenance annotation proves the API server stamped it. Without

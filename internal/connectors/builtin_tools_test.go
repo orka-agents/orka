@@ -104,3 +104,27 @@ func TestValidateToolsBuiltinDeclarationsFollowTheCatalog(t *testing.T) {
 		t.Fatalf("declared = %+v %t", tool, ok)
 	}
 }
+
+func TestPrivateEndpointsAllowedRelaxesOnlyHostRules(t *testing.T) {
+	t.Cleanup(func() { SetAllowPrivateEndpoints(false) })
+	provider := validProvider()
+	provider.Spec.Tools = provider.Spec.Tools[2:] // HTTP tools only; built-ins need github.com
+	provider.Spec.OAuth.AuthorizeURL = "https://fixture.orka-system.svc:8443/oauth/authorize"
+	provider.Spec.OAuth.TokenURL = "https://fixture.orka-system.svc:8443/oauth/token"
+	provider.Spec.Tools[0].HTTP.URL = "https://127.0.0.1:8443/api/items"
+	if issue := ValidateProviderSpec(provider, nil); issue == nil || !strings.Contains(issue.Message, "host is not allowed") {
+		t.Fatalf("issue = %v, want cluster-local hosts refused by default", issue)
+	}
+	SetAllowPrivateEndpoints(true)
+	if !PrivateEndpointsAllowed() {
+		t.Fatal("toggle must report on")
+	}
+	if issue := ValidateProviderSpec(provider, nil); issue != nil {
+		t.Fatalf("private endpoints allowed: %s", issue.Message)
+	}
+	// Plain http stays refused even for fixtures.
+	provider.Spec.OAuth.TokenURL = "http://fixture.orka-system.svc:8080/oauth/token"
+	if issue := ValidateProviderSpec(provider, nil); issue == nil || !strings.Contains(issue.Message, "HTTPS") {
+		t.Fatalf("issue = %v, want https still required", issue)
+	}
+}
