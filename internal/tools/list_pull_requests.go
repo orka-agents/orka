@@ -10,7 +10,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
@@ -117,7 +116,10 @@ func (t *ListPullRequestsTool) Execute(ctx context.Context, argsJSON json.RawMes
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	respBody, err := readGitHubResponse(resp.Body, githubResponseLimit)
+	if err != nil {
+		return "", err
+	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(respBody))

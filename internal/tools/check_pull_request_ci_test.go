@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -288,6 +289,9 @@ func TestCheckPullRequestCITool_WaitTimeoutPending(t *testing.T) {
 // The tool should keep polling through the empty responses and finally
 // report status=success.
 func TestCheckPullRequestCITool_NoChecksKeepsPollingUntilChecksRegister(t *testing.T) {
+	previousMinimum := minPullRequestCIPollInterval
+	minPullRequestCIPollInterval = time.Millisecond
+	t.Cleanup(func() { minPullRequestCIPollInterval = previousMinimum })
 	checkRunsCalls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -460,4 +464,18 @@ func checkPullRequestCITestObjects() (*corev1alpha1.Task, *corev1.Secret) {
 		Data:       map[string][]byte{tokenKey: []byte(testGitHubToken)},
 	}
 	return task, secret
+}
+
+func TestParsePullRequestCIWaitConfigBounds(t *testing.T) {
+	wait, poll, err := parsePullRequestCIWaitConfig("30m", "1ns")
+	if err != nil || wait != maxPullRequestCIWait || poll != minPullRequestCIPollInterval {
+		t.Fatalf("wait=%s poll=%s err=%v, want the bounds applied", wait, poll, err)
+	}
+	wait, poll, err = parsePullRequestCIWaitConfig("2m", "45s")
+	if err != nil || wait != 2*time.Minute || poll != 45*time.Second {
+		t.Fatalf("wait=%s poll=%s err=%v, want in-range values kept", wait, poll, err)
+	}
+	if _, _, err := parsePullRequestCIWaitConfig("", "0s"); err == nil {
+		t.Fatal("a nonpositive poll_interval is still an error")
+	}
 }

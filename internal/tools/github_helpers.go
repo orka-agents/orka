@@ -9,6 +9,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -210,6 +211,23 @@ func linkedGitHubToken(ctx context.Context, toolName string) (string, error) {
 		return "", fmt.Errorf("the linked account bound for %s returned no credential", toolName)
 	}
 	return credential.AccessToken, nil
+}
+
+// githubResponseLimit bounds one GitHub API document.
+const githubResponseLimit int64 = 1 << 20
+
+// readGitHubResponse reads at most limit bytes of a GitHub response and
+// reports one that exceeds the limit, instead of handing a document cut
+// mid-way to the JSON decoder.
+func readGitHubResponse(body io.Reader, limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(body, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("read GitHub response: %w", err)
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("GitHub response exceeds %d bytes; request fewer results (per_page) or a narrower filter", limit)
+	}
+	return data, nil
 }
 
 func githubRepoAllowed(owner, repo string, scopes []githubRepoScope) bool {

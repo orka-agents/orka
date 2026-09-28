@@ -268,7 +268,7 @@ func TestLinkedBuiltinAccounts(t *testing.T) {
 	req := source.request
 	if req.Namespace != "tenant" || req.Provider != "github" || req.Issuer != requester.Issuer || req.Subject != requester.Subject ||
 		req.Frozen.UID != "conn-uid" || req.Frozen.GrantSequence != 1 || !req.Tool.Builtin || req.Tool.Name != "list_pull_requests" ||
-		req.Tool.Class != corev1alpha1.AgentRuntimeBrokeredToolClassRead {
+		req.Tool.Class != corev1alpha1.AgentRuntimeBrokeredToolClassRead || !req.Tool.TimeoutSet || req.Tool.Timeout != connectors.BuiltinToolTimeout {
 		t.Fatalf("request = %+v", req)
 	}
 	// Not in the catalog, or no binding frozen: the tool keeps its own path.

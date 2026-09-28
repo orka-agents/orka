@@ -364,8 +364,8 @@ func declaredBuiltinConnectorTool(provider *corev1alpha1.ConnectorProvider, cand
 	if !connectors.ProviderIssuesGitHubCredentials(provider) {
 		return corev1alpha1.ConnectorTool{}, fmt.Errorf("built-in tool %q sends its credential to %s, which provider %q does not issue credentials for", tool.Name, connectors.BuiltinConnectorToolAudience, provider.Name)
 	}
-	if strings.TrimSpace(tool.URL) != "" || strings.TrimSpace(tool.Method) != "" || len(tool.Headers) > 0 || tool.Parameters != nil || tool.TimeoutSet {
-		return corev1alpha1.ConnectorTool{}, fmt.Errorf("built-in tool %q binding carries a destination, headers, schema, or timeout", tool.Name)
+	if strings.TrimSpace(tool.URL) != "" || strings.TrimSpace(tool.Method) != "" || len(tool.Headers) > 0 || tool.Parameters != nil {
+		return corev1alpha1.ConnectorTool{}, fmt.Errorf("built-in tool %q binding carries a destination, headers, or schema", tool.Name)
 	}
 	class, linked := connectors.BuiltinConnectorToolClass(tool.Name)
 	if !linked {
@@ -373,6 +373,12 @@ func declaredBuiltinConnectorTool(provider *corev1alpha1.ConnectorProvider, cand
 	}
 	if string(tool.Class) != string(class) || candidate.Class != class {
 		return corev1alpha1.ConnectorTool{}, fmt.Errorf("built-in tool %q class does not match the class declared by provider %q", tool.Name, provider.Name)
+	}
+	// The binding carries the catalog's bound for the call, so the
+	// credential is refreshed to cover all of it, never a caller's own.
+	timeout, _ := connectors.BuiltinConnectorToolTimeout(tool.Name)
+	if !tool.TimeoutSet || tool.Timeout != timeout {
+		return corev1alpha1.ConnectorTool{}, fmt.Errorf("built-in tool %q binding must carry the catalog timeout %s", tool.Name, timeout)
 	}
 	return candidate, nil
 }

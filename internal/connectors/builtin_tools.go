@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
@@ -52,22 +53,46 @@ func ProviderIssuesGitHubCredentials(provider *corev1alpha1.ConnectorProvider) b
 // check_pr_review_marker stays out: its marker secrets and trusted author
 // are Task environment the controller does not hold, so a brokered run
 // would judge markers against the wrong configuration.
-var builtinConnectorTools = map[string]corev1alpha1.ConnectorToolClass{
-	"check_pull_request_ci": corev1alpha1.ConnectorToolClassRead,
-	"get_issue":             corev1alpha1.ConnectorToolClassRead,
-	"list_issues":           corev1alpha1.ConnectorToolClassRead,
-	"list_pull_requests":    corev1alpha1.ConnectorToolClassRead,
-	"review_pull_request":   corev1alpha1.ConnectorToolClassRead,
-	"comment_on_issue":      corev1alpha1.ConnectorToolClassWrite,
-	"create_pull_request":   corev1alpha1.ConnectorToolClassWrite,
-	"post_review_comment":   corev1alpha1.ConnectorToolClassWrite,
+var builtinConnectorTools = map[string]builtinConnectorTool{
+	"check_pull_request_ci": {Class: corev1alpha1.ConnectorToolClassRead, Timeout: BuiltinPollingToolTimeout},
+	"get_issue":             {Class: corev1alpha1.ConnectorToolClassRead, Timeout: BuiltinToolTimeout},
+	"list_issues":           {Class: corev1alpha1.ConnectorToolClassRead, Timeout: BuiltinToolTimeout},
+	"list_pull_requests":    {Class: corev1alpha1.ConnectorToolClassRead, Timeout: BuiltinToolTimeout},
+	"review_pull_request":   {Class: corev1alpha1.ConnectorToolClassRead, Timeout: BuiltinToolTimeout},
+	"comment_on_issue":      {Class: corev1alpha1.ConnectorToolClassWrite, Timeout: BuiltinToolTimeout},
+	"create_pull_request":   {Class: corev1alpha1.ConnectorToolClassWrite, Timeout: BuiltinToolTimeout},
+	"post_review_comment":   {Class: corev1alpha1.ConnectorToolClassWrite, Timeout: BuiltinToolTimeout},
 }
+
+// builtinConnectorTool is one catalog entry: the class its credential use
+// fixes and the longest a call may hold the credential.
+type builtinConnectorTool struct {
+	Class   corev1alpha1.ConnectorToolClass
+	Timeout time.Duration
+}
+
+const (
+	// BuiltinToolTimeout bounds a catalog built-in that makes a few
+	// requests: the credential must stay valid for this long.
+	BuiltinToolTimeout = 2 * time.Minute
+	// BuiltinPollingToolTimeout bounds check_pull_request_ci, which may
+	// poll for up to its maximum wait plus one request.
+	BuiltinPollingToolTimeout = 11 * time.Minute
+)
 
 // BuiltinConnectorToolClass returns the fixed class of a built-in tool that
 // can run under a linked account, and false for every other name.
 func BuiltinConnectorToolClass(name string) (corev1alpha1.ConnectorToolClass, bool) {
-	class, ok := builtinConnectorTools[name]
-	return class, ok
+	tool, ok := builtinConnectorTools[name]
+	return tool.Class, ok
+}
+
+// BuiltinConnectorToolTimeout returns how long a catalog built-in may hold
+// the credential, and false for every other name. The credential source
+// refreshes a token that would expire within it before the call starts.
+func BuiltinConnectorToolTimeout(name string) (time.Duration, bool) {
+	tool, ok := builtinConnectorTools[name]
+	return tool.Timeout, ok
 }
 
 // BuiltinConnectorToolNames returns the catalog names in sorted order.

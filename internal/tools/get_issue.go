@@ -10,7 +10,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -153,10 +152,13 @@ func (t *GetIssueTool) Execute(ctx context.Context, argsJSON json.RawMessage) (s
 		return "", fmt.Errorf("failed to fetch issue: %w", err)
 	}
 
-	// Fetch comments (non-fatal on failure)
+	// Fetch comments (non-fatal on failure, but never silent)
 	comments, err := fetchIssueComments(ctx, httpClient, baseURL, token, owner, repo, args.IssueNumber)
 	if err == nil {
 		issueResult.Comments = comments
+	} else {
+		issueResult.Truncated = true
+		issueResult.TruncationNote = "comments could not be fetched: " + err.Error()
 	}
 
 	resultJSON, _ := json.Marshal(boundGetIssueResult(*issueResult, t.maxResultBytes))
@@ -181,7 +183,10 @@ func fetchIssueDetails(ctx context.Context, httpClient *http.Client, baseURL, to
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	respBody, err := readGitHubResponse(resp.Body, githubResponseLimit)
+	if err != nil {
+		return nil, err
+	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(respBody))
@@ -252,7 +257,10 @@ func fetchIssueComments(ctx context.Context, httpClient *http.Client, baseURL, t
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	respBody, err := readGitHubResponse(resp.Body, githubResponseLimit)
+	if err != nil {
+		return nil, err
+	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(respBody))

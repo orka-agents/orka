@@ -146,7 +146,13 @@ the current Task itself holds. Any other `task_name` is refused, a
 transaction's repository context never widens the scope, and `repo_url` must
 fall inside it. A `review_pull_request` or `get_issue` result that would
 exceed the broker's result limit is cut (file patches or the oldest comments
-first, then the diff or body) and marked `truncated` instead of failing.
+first, then the diff or body) and marked `truncated` instead of failing; a
+GitHub page larger than 1 MiB is refused with a request for a smaller
+`per_page`. Each built-in carries a fixed time bound (two minutes, eleven
+for `check_pull_request_ci`, whose `wait_timeout` is clamped to ten minutes
+and whose `poll_interval` is never shorter than five seconds), and the
+controller refreshes a token that would expire within that bound before
+the call starts.
 
 The full example, with an Agent that uses these tools, is in
 [`examples/github-connector/`](https://github.com/orka-agents/orka/tree/main/examples/github-connector).

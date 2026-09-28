@@ -20,6 +20,7 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/connectors"
 )
 
 type fakeConnectionSource struct {
@@ -436,11 +437,11 @@ func TestDeclaredConnectorToolBuiltinBindings(t *testing.T) {
 		{Name: "gh_search", Class: corev1alpha1.ConnectorToolClassRead, Source: corev1alpha1.ConnectorToolSourceHTTP,
 			HTTP: &corev1alpha1.ConnectorHTTPTool{URL: "https://api.github.com/search/issues", Method: "GET"}},
 	}}}
-	read := ToolBinding{Name: "list_pull_requests", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Builtin: true}
+	read := ToolBinding{Name: "list_pull_requests", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Builtin: true, Timeout: connectors.BuiltinToolTimeout, TimeoutSet: true}
 	if declared, err := DeclaredConnectorTool(provider, read); err != nil || declared.Name != "list_pull_requests" {
 		t.Fatalf("declared = %+v err = %v", declared, err)
 	}
-	write := ToolBinding{Name: "create_pull_request", Class: corev1alpha1.AgentRuntimeBrokeredToolClassWrite, Builtin: true}
+	write := ToolBinding{Name: "create_pull_request", Class: corev1alpha1.AgentRuntimeBrokeredToolClassWrite, Builtin: true, Timeout: connectors.BuiltinToolTimeout, TimeoutSet: true}
 	if _, err := DeclaredConnectorTool(provider, write); err != nil {
 		t.Fatalf("write built-in: %v", err)
 	}
@@ -457,8 +458,10 @@ func TestDeclaredConnectorToolBuiltinBindings(t *testing.T) {
 		"http":       {Name: "gh_search", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Builtin: true},
 		"unknown":    {Name: "get_issue", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Builtin: true},
 		"not linked": {Name: "web_search", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Builtin: true},
-		"url":        {Name: "list_pull_requests", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Builtin: true, URL: "https://evil.example.test"},
-		"timeout":    {Name: "list_pull_requests", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Builtin: true, TimeoutSet: true},
+		"url":        {Name: "list_pull_requests", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Builtin: true, URL: "https://evil.example.test", Timeout: connectors.BuiltinToolTimeout, TimeoutSet: true},
+		// The binding must carry exactly the catalog bound: no timeout, or a caller's own, is refused.
+		"no timeout": {Name: "list_pull_requests", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Builtin: true},
+		"timeout":    {Name: "list_pull_requests", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Builtin: true, TimeoutSet: true, Timeout: 30 * time.Minute},
 		// A custom Tool never matches a built-in declaration.
 		"custom": {Name: "list_pull_requests", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, URL: "https://api.github.com/pulls", Method: "GET"},
 	} {
@@ -483,7 +486,7 @@ func TestResolveConnectionRefusesBuiltinBindingsAndForeignProviders(t *testing.T
 	if _, err := resolver.resolveConnection(context.Background(), policy, ResolveRequest{Requester: requester, FrozenConnections: foreign, Tool: tool}); err == nil || !strings.Contains(err.Error(), "different provider") {
 		t.Fatalf("foreign provider err = %v", err)
 	}
-	builtin := ToolBinding{Name: "list_pull_requests", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Builtin: true}
+	builtin := ToolBinding{Name: "list_pull_requests", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Builtin: true, Timeout: connectors.BuiltinToolTimeout, TimeoutSet: true}
 	if _, err := resolver.resolveConnection(context.Background(), policy, ResolveRequest{Requester: requester, FrozenConnections: frozen, Tool: builtin}); err == nil || !strings.Contains(err.Error(), "no outbound access policy") {
 		t.Fatalf("built-in binding err = %v", err)
 	}

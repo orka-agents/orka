@@ -58,7 +58,13 @@ func (l linkedBuiltinAccounts) BuiltinToolCredential(ctx context.Context, toolNa
 	if strings.TrimSpace(frozen.Provider) == "" {
 		return tools.LinkedAccountCredential{}, false, fmt.Errorf("the binding frozen for %s names no provider", toolName)
 	}
-	binding := outboundaccess.ToolBinding{Name: toolName, Class: corev1alpha1.AgentRuntimeBrokeredToolClass(class), Builtin: true}
+	// The catalog's bound for the call rides with the binding, so the
+	// credential source refreshes a token that would expire before the
+	// call could finish, whatever the caller's own polling arguments.
+	timeout, _ := connectors.BuiltinConnectorToolTimeout(toolName)
+	binding := outboundaccess.ToolBinding{
+		Name: toolName, Class: corev1alpha1.AgentRuntimeBrokeredToolClass(class), Builtin: true, Timeout: timeout, TimeoutSet: true,
+	}
 	credential, err := l.source.ResolveConnectionCredential(ctx, outboundaccess.ConnectionCredentialRequest{
 		Namespace: l.namespace,
 		Provider:  frozen.Provider,

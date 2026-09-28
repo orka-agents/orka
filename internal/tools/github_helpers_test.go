@@ -849,3 +849,17 @@ func unboundFor(t *testing.T) *fakeLinkedAccounts {
 	t.Helper()
 	return &fakeLinkedAccounts{}
 }
+
+func TestReadGitHubResponseRefusesOversizedDocuments(t *testing.T) {
+	if data, err := readGitHubResponse(strings.NewReader(`{"ok":true}`), 64); err != nil || string(data) != `{"ok":true}` {
+		t.Fatalf("data=%q err=%v", data, err)
+	}
+	exact := strings.Repeat("x", 64)
+	if data, err := readGitHubResponse(strings.NewReader(exact), 64); err != nil || len(data) != 64 {
+		t.Fatalf("a document exactly at the limit must be read: len=%d err=%v", len(data), err)
+	}
+	// One byte over is refused whole rather than decoded cut in half.
+	if _, err := readGitHubResponse(strings.NewReader(exact+"y"), 64); err == nil || !strings.Contains(err.Error(), "exceeds 64 bytes") {
+		t.Fatalf("oversized err = %v", err)
+	}
+}
