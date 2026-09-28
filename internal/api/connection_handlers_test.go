@@ -1773,3 +1773,36 @@ func TestConnectionCommittedRetryKeepsProviderConsentFence(t *testing.T) {
 		t.Fatalf("a retargeted provider must not be recorded as consented: %+v", stored.Status)
 	}
 }
+
+// TestConnectionRevocationIdentityBoundAtConsentStart covers a revocation
+// endpoint moved while the person is at the provider: the consent still
+// completes (the OAuth client and tool destinations are unchanged), but the
+// tokens are sealed with the revocation identity consent started under, so
+// disconnect never hands them to the endpoint that appeared meanwhile.
+func TestConnectionRevocationIdentityBoundAtConsentStart(t *testing.T) {
+	h := newConnectorTestHarness(t, acceptedTestProvider())
+	created := h.create("readOnly")
+	provider := &corev1alpha1.ConnectorProvider{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: "github"}, provider); err != nil {
+		t.Fatal(err)
+	}
+	original := connectors.ProviderRevocationDigest(provider)
+	provider.Spec.OAuth.RevocationURL = "https://provider.example.test/revoke-elsewhere"
+	if err := h.client.Update(context.Background(), provider); err != nil {
+		t.Fatal(err)
+	}
+	moved := connectors.ProviderRevocationDigest(provider)
+	if moved == original {
+		t.Fatal("fixture: moving the revocation endpoint must change the revocation identity")
+	}
+	h.link(created)
+	stored := &corev1alpha1.Connection{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: created.Connection.Name}, stored); err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := connectors.CredentialRef(stored)
+	credential, err := h.store.GetConnectorCredential(context.Background(), ref)
+	if err != nil || credential.RevocationDigest != original {
+		t.Fatalf("sealed revocation digest = %q err = %v, want the identity consent started under (%q), not the moved endpoint (%q)", credential.RevocationDigest, err, original, moved)
+	}
+}

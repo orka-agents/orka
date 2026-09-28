@@ -132,6 +132,11 @@ type ConnectorConsent struct {
 	// started against; the callback refuses to exchange the code with a
 	// different authority.
 	AuthorityDigest string
+	// RevocationDigest is the provider revocation identity (client and
+	// revocation endpoint) when consent started; the callback seals it with
+	// the tokens, so a revocation endpoint moved during the consent window
+	// is never handed the credential at disconnect.
+	RevocationDigest string
 	// Scopes are the scopes the consent requested. A token response that
 	// omits scope is taken to grant exactly these, never a later configured
 	// set.
