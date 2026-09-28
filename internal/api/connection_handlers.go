@@ -653,9 +653,19 @@ func (h *Handlers) loadOwnedConnection(c fiber.Ctx, ui *UserInfo) (*corev1alpha1
 	return connection, nil
 }
 
+// providerReader reads ConnectorProviders through the uncached reader when
+// one is configured: the reads that precede a code exchange or a custody
+// commit must see the provider as it is, not as the informer last saw it.
+func (h *Handlers) providerReader() client.Reader {
+	if h.apiReader != nil {
+		return h.apiReader
+	}
+	return h.client
+}
+
 func (h *Handlers) loadReadyConnectorProvider(ctx context.Context, namespace, name string) (*corev1alpha1.ConnectorProvider, error) {
 	provider := &corev1alpha1.ConnectorProvider{}
-	if err := h.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, provider); err != nil {
+	if err := h.providerReader().Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, provider); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, fiber.NewError(fiber.StatusNotFound, "connector provider not found")
 		}
@@ -670,10 +680,7 @@ func (h *Handlers) loadReadyConnectorProvider(ctx context.Context, namespace, na
 // providerOAuthConfig reads the client secret through the uncached reader so
 // it never enters the informer cache, and returns the resolved configuration.
 func (h *Handlers) providerOAuthConfig(ctx context.Context, provider *corev1alpha1.ConnectorProvider) (connectors.OAuthProviderConfig, error) {
-	reader := client.Reader(h.client)
-	if h.apiReader != nil {
-		reader = h.apiReader
-	}
+	reader := h.providerReader()
 	ref := provider.Spec.OAuth.ClientSecretRef
 	secret := &corev1.Secret{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: provider.Namespace, Name: ref.Name}, secret); err != nil {
@@ -788,7 +795,7 @@ func (h *Handlers) ConnectionCallback(c fiber.Ctx) error {
 		return h.connectorCallbackRedirect(c, consent.Name, "connection_mismatch", "")
 	}
 	provider := &corev1alpha1.ConnectorProvider{}
-	if err := h.client.Get(ctx, types.NamespacedName{Namespace: consent.Namespace, Name: consent.Provider}, provider); err != nil || !connectors.ProviderAccepted(provider) {
+	if err := h.providerReader().Get(ctx, types.NamespacedName{Namespace: consent.Namespace, Name: consent.Provider}, provider); err != nil || !connectors.ProviderAccepted(provider) {
 		return h.connectorCallbackRedirect(c, consent.Name, "provider_unavailable", "")
 	}
 	// The provider was replaced or its OAuth client changed while the person

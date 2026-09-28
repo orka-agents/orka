@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -981,5 +982,34 @@ func TestConnectorCommitJudgesExpiryAndRevocationIdentity(t *testing.T) {
 	retired, err := s.ListRetiredConnectorCredentials(ctx, ref)
 	if err != nil || len(retired) != 1 || retired[0].RevocationDigest != "revocation-a" {
 		t.Fatalf("retired = %+v err = %v, want the same tokens kept under their previous revocation identity", retired, err)
+	}
+}
+
+// TestConnectorDeletionLeavesNoCiphertextInFiles covers the crypto-shred:
+// after a disconnect neither the database file nor its write-ahead log
+// still holds the deleted row's wrapped data key or ciphertext.
+func TestConnectorDeletionLeavesNoCiphertextInFiles(t *testing.T) {
+	s := newConnectorTestStore(t)
+	ctx := context.Background()
+	completion := testConnectorCompletion()
+	ref := store.ConnectorCredentialRef{ConnectionUID: completion.ConnectionUID, Namespace: completion.Namespace, Name: completion.Name, SubjectDigest: completion.SubjectDigest, Provider: completion.Provider}
+	if err := s.PutConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho_shred_me", RefreshToken: "ghr_shred_me"}); err != nil {
+		t.Fatal(err)
+	}
+	var dekCiphertext, ciphertext []byte
+	if err := s.db.QueryRow(`SELECT dek_ciphertext, ciphertext FROM connector_credentials WHERE connection_uid = ?`, ref.ConnectionUID).Scan(&dekCiphertext, &ciphertext); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteConnectorCredential(ctx, ref.ConnectionUID); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{s.dbPath, s.dbPath + "-wal"} {
+		data, err := os.ReadFile(path)
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if bytes.Contains(data, dekCiphertext) || bytes.Contains(data, ciphertext) {
+			t.Fatalf("%s still holds the deleted row's sealed material", path)
+		}
 	}
 }
