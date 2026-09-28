@@ -4,7 +4,8 @@
 // revokes them, a resource API that only honours those tokens, and an
 // OpenAI-compatible model that drives a read, an approval-gated write, and a
 // second read. Never expose it as a real service.
-//nolint:goconst // Keep the fixed OAuth, JSON, and model wire fixtures readable.
+//
+//nolint:goconst,lll // Keep the fixed OAuth, JSON, and model wire fixtures readable.
 package connectorsfixture
 
 import (
@@ -92,7 +93,8 @@ type Counters struct {
 
 // New builds a fixture with a fresh signing key.
 func New(cfg Config) (*Fixture, error) {
-	if cfg.Issuer == "" || cfg.Audience == "" || cfg.ClientID == "" || cfg.ClientSecret == "" || cfg.ModelCredential == "" {
+	if cfg.Issuer == "" || cfg.Audience == "" || cfg.ClientID == "" || cfg.ClientSecret == "" ||
+		cfg.ModelCredential == "" {
 		return nil, errors.New("issuer, audience, client id, client secret, and model credential are required")
 	}
 	if cfg.AccessTokenTTL <= 0 {

@@ -1,3 +1,4 @@
+//nolint:lll // The fixture assertions read best as single lines.
 package connectorsfixture
 
 import (
@@ -28,12 +29,21 @@ func newTestFixture(t *testing.T, now *time.Time) (*Fixture, *httptest.Server, *
 	return f, plain, secure
 }
 
-func TestFixtureOAuthLifecycle(t *testing.T) {
-	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
-	f, plain, secure := newTestFixture(t, &now)
-	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+// linkedTokens runs authorize and code exchange with PKCE and returns the
+// issued pair plus the helpers the lifecycle tests share.
+type linkedTokens struct {
+	f               *Fixture
+	plain, secure   *httptest.Server
+	client          *http.Client
+	access, refresh string
+	exchange        func(form url.Values) (map[string]any, int)
+	call            func(method, bearer, title string) int
+}
 
-	// Authorize redirects back with a code bound to the PKCE challenge.
+func link(t *testing.T, now *time.Time) linkedTokens {
+	t.Helper()
+	f, plain, secure := newTestFixture(t, now)
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	verifier := "verifier-verifier-verifier-verifier-verifier"
 	sum := sha256.Sum256([]byte(verifier))
 	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
@@ -41,16 +51,6 @@ func TestFixtureOAuthLifecycle(t *testing.T) {
 		"client_id": {"client"}, "response_type": {"code"}, "redirect_uri": {"http://localhost:1/cb"}, "state": {"s1"},
 		"scope": {"read write"}, "code_challenge": {challenge}, "code_challenge_method": {"S256"},
 	}.Encode()
-	resp, err := client.Get(authorize)
-	if err != nil || resp.StatusCode != http.StatusFound {
-		t.Fatalf("authorize = %v %v", resp, err)
-	}
-	location, _ := url.Parse(resp.Header.Get("Location"))
-	if location.Query().Get("state") != "s1" || location.Query().Get("code") == "" {
-		t.Fatalf("location = %s", location)
-	}
-	code := location.Query().Get("code")
-
 	exchange := func(form url.Values) (map[string]any, int) {
 		req, _ := http.NewRequest(http.MethodPost, secure.URL+"/oauth/token", strings.NewReader(form.Encode()))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -64,19 +64,6 @@ func TestFixtureOAuthLifecycle(t *testing.T) {
 		_ = json.NewDecoder(resp.Body).Decode(&body)
 		return body, resp.StatusCode
 	}
-	// A wrong verifier is refused; the right one issues a token pair.
-	if _, status := exchange(url.Values{"grant_type": {"authorization_code"}, "code": {code}, "redirect_uri": {"http://localhost:1/cb"}, "code_verifier": {"wrong"}}); status != http.StatusBadRequest {
-		t.Fatalf("wrong verifier status = %d", status)
-	}
-	resp, _ = client.Get(authorize)
-	code = mustQuery(t, resp.Header.Get("Location"), "code")
-	body, status := exchange(url.Values{"grant_type": {"authorization_code"}, "code": {code}, "redirect_uri": {"http://localhost:1/cb"}, "code_verifier": {verifier}})
-	if status != http.StatusOK || body["token_type"] != "Bearer" || body["scope"] != "read write" || body["access_token"] == "" || body["refresh_token"] == "" {
-		t.Fatalf("exchange = %d %v", status, body)
-	}
-	access, refresh := body["access_token"].(string), body["refresh_token"].(string)
-
-	// The resource API honours the token until it expires.
 	call := func(method, bearer, title string) int {
 		var req *http.Request
 		if method == http.MethodPost {
@@ -92,6 +79,35 @@ func TestFixtureOAuthLifecycle(t *testing.T) {
 		_ = resp.Body.Close()
 		return resp.StatusCode
 	}
+	resp, err := client.Get(authorize)
+	if err != nil || resp.StatusCode != http.StatusFound {
+		t.Fatalf("authorize = %v %v", resp, err)
+	}
+	location, _ := url.Parse(resp.Header.Get("Location"))
+	if location.Query().Get("state") != "s1" || location.Query().Get("code") == "" {
+		t.Fatalf("location = %s", location)
+	}
+	code := location.Query().Get("code")
+	// A wrong verifier is refused; the right one issues a token pair.
+	if _, status := exchange(url.Values{"grant_type": {"authorization_code"}, "code": {code}, "redirect_uri": {"http://localhost:1/cb"}, "code_verifier": {"wrong"}}); status != http.StatusBadRequest {
+		t.Fatalf("wrong verifier status = %d", status)
+	}
+	resp, _ = client.Get(authorize)
+	code = mustQuery(t, resp.Header.Get("Location"), "code")
+	body, status := exchange(url.Values{"grant_type": {"authorization_code"}, "code": {code}, "redirect_uri": {"http://localhost:1/cb"}, "code_verifier": {verifier}})
+	if status != http.StatusOK || body["token_type"] != "Bearer" || body["scope"] != "read write" || body["access_token"] == "" || body["refresh_token"] == "" {
+		t.Fatalf("exchange = %d %v", status, body)
+	}
+	return linkedTokens{f: f, plain: plain, secure: secure, client: client, access: body["access_token"].(string), refresh: body["refresh_token"].(string), exchange: exchange, call: call}
+}
+
+func TestFixtureOAuthLifecycle(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	l := link(t, &now)
+	f, plain, client, access, refresh, exchange, call := l.f, l.plain, l.client, l.access, l.refresh, l.exchange, l.call
+	secure := l.secure
+
+	// The resource API honours the token until it expires.
 	if call(http.MethodGet, access, "") != http.StatusOK || call(http.MethodPost, access, "hello") != http.StatusCreated || call(http.MethodGet, "nope", "") != http.StatusUnauthorized {
 		t.Fatal("resource API must honour only issued tokens")
 	}
@@ -100,7 +116,7 @@ func TestFixtureOAuthLifecycle(t *testing.T) {
 		t.Fatal("an expired token must be rejected")
 	}
 	// Refresh rotates the pair; the old access token stays dead.
-	body, status = exchange(url.Values{"grant_type": {"refresh_token"}, "refresh_token": {refresh}})
+	body, status := exchange(url.Values{"grant_type": {"refresh_token"}, "refresh_token": {refresh}})
 	if status != http.StatusOK || body["access_token"] == access {
 		t.Fatalf("refresh = %d %v", status, body)
 	}
@@ -127,7 +143,7 @@ func TestFixtureOAuthLifecycle(t *testing.T) {
 		t.Fatalf("counters = %+v", counters)
 	}
 	// State is readable over plain HTTP and never carries tokens.
-	resp, _ = http.Get(plain.URL + "/fixture/state")
+	resp, _ := http.Get(plain.URL + "/fixture/state")
 	raw, _ := json.Marshal(counters)
 	if resp.StatusCode != http.StatusOK || strings.Contains(string(raw), "fx-access") {
 		t.Fatalf("state = %d %s", resp.StatusCode, raw)
