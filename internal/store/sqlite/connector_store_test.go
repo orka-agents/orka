@@ -1028,3 +1028,34 @@ func TestConnectorDeletionLeavesNoCiphertextInFiles(t *testing.T) {
 		}
 	}
 }
+
+// A log truncation that could not finish is remembered and completed by the
+// next custody operation, and a shred that finds the row already gone still
+// truncates.
+func TestConnectorPendingLogTruncationIsFinishedLater(t *testing.T) {
+	s := newConnectorTestStore(t)
+	ctx := context.Background()
+	completion := testConnectorCompletion()
+	ref := store.ConnectorCredentialRef{ConnectionUID: completion.ConnectionUID, Namespace: completion.Namespace, Name: completion.Name, SubjectDigest: completion.SubjectDigest, Provider: completion.Provider}
+	s.pendingWALTruncate.Store(true)
+	if err := s.PutConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho_1"}); err != nil {
+		t.Fatal(err)
+	}
+	if s.pendingWALTruncate.Load() {
+		t.Fatal("the next custody operation must finish a pending truncation")
+	}
+	held, err := s.GetConnectorCredential(ctx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ShredConnectorCredential(ctx, ref.ConnectionUID, held.Version); err != nil {
+		t.Fatal(err)
+	}
+	s.pendingWALTruncate.Store(true)
+	if err := s.ShredConnectorCredential(ctx, ref.ConnectionUID, held.Version); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("shred of an absent row err = %v, want ErrNotFound", err)
+	}
+	if s.pendingWALTruncate.Load() {
+		t.Fatal("a shred retry must finish the pending truncation even when the row is already gone")
+	}
+}

@@ -2858,4 +2858,14 @@ func TestExternalRuntimeCandidateRefusesConnectorBackedTools(t *testing.T) {
 	if err == nil || candidate != nil || !isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "not supported on external v2 AgentRuntimes") {
 		t.Fatalf("resolveExternalAgentExecutionCandidate() = (%#v, %v), want a permanent connector refusal", candidate, err)
 	}
+	// A connector tool the policy denies is never exposed, so it is no
+	// reason to refuse the runtime.
+	denied := task.DeepCopy()
+	denied.Name, denied.UID = "external-connector-denied", types.UID("external-connector-denied-uid")
+	denied.Spec.AgentRuntime.DisallowedTools = []string{"gh_search"}
+	// (The fixture's registered policy then rejects the changed tool list on
+	// its own; what matters is that the refusal is no longer the connector.)
+	if _, err := fixture.reconciler.resolveExternalAgentExecutionCandidate(fixture.ctx, denied, fixture.agent); err != nil && strings.Contains(err.Error(), "not supported on external v2 AgentRuntimes") {
+		t.Fatalf("resolveExternalAgentExecutionCandidate() with the connector tool denied = %v, want no connector refusal", err)
+	}
 }

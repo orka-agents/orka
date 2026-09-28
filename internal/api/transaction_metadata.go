@@ -14,9 +14,11 @@ import (
 	"slices"
 	"sort"
 	"strconv"
+	"time"
+
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/orka-agents/orka/internal/connectors"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
@@ -100,10 +102,35 @@ func sealRequesterStamp(ctx context.Context, c client.Client, task *corev1alpha1
 		// Connectors are disabled: nothing verifies stamps, so none is sealed.
 		return
 	}
-	if err := connectors.SealRequesterStamp(ctx, c, requesterStampKey, task); err != nil {
-		log.Error(err, "requester stamp could not be sealed; the task stays unverified for connector use", "task", task.Name, "namespace", task.Namespace)
+	// A transient write failure is retried briefly: the seal is the only
+	// thing that lets the controller trust the requester, and nothing else
+	// repairs it once the creation has been reported.
+	backoff := requesterStampSealBackoff
+	var err error
+	for attempt := range requesterStampSealAttempts {
+		if err = connectors.SealRequesterStamp(ctx, c, requesterStampKey, task.DeepCopy()); err == nil {
+			return
+		}
+		if attempt+1 == requesterStampSealAttempts {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			log.Error(err, "requester stamp could not be sealed before the request ended; the task stays unverified for connector use", "task", task.Name, "namespace", task.Namespace)
+			return
+		case <-time.After(backoff):
+		}
+		backoff *= 2
 	}
+	log.Error(err, "requester stamp could not be sealed; the task stays unverified for connector use", "task", task.Name, "namespace", task.Namespace)
 }
+
+// requesterStampSealAttempts and requesterStampSealBackoff bound the retries
+// of the post-create seal; tests shorten the backoff.
+var (
+	requesterStampSealAttempts = 3
+	requesterStampSealBackoff  = 200 * time.Millisecond
+)
 
 // requesterStampSealer is the tool-side hook that seals Tasks created by
 // chat and compatibility tools on the API's behalf.

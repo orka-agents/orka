@@ -76,6 +76,15 @@ func classificationRegistry(registry *tools.Registry) *tools.Registry {
 // policy, its policy, provider, and class. Unknown tools and tools without
 // such a policy are skipped; read failures are returned so callers retry.
 func connectorToolsFor(ctx context.Context, reader client.Reader, registry *tools.Registry, namespace string, toolNames []string) (map[string]connectorToolInfo, error) {
+	return classifyConnectorTools(ctx, reader, registry, namespace, toolNames, false)
+}
+
+// classifyConnectorTools is connectorToolsFor with a choice about a policy
+// that is missing: a classification treats the Tool as not connector-backed
+// (its execution fails on its own), while a snapshot freeze (strictPolicies)
+// retries instead, so a policy of the same name recreated later in another
+// mode can never pass the adapter-change guard through an omitted entry.
+func classifyConnectorTools(ctx context.Context, reader client.Reader, registry *tools.Registry, namespace string, toolNames []string, strictPolicies bool) (map[string]connectorToolInfo, error) {
 	if reader == nil {
 		return nil, nil
 	}
@@ -108,7 +117,7 @@ func connectorToolsFor(ctx context.Context, reader client.Reader, registry *tool
 		if !cached {
 			policy = &corev1alpha1.OutboundAccessPolicy{}
 			if err := reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: policyName}, policy); err != nil {
-				if apierrors.IsNotFound(err) {
+				if apierrors.IsNotFound(err) && !strictPolicies {
 					policies[policyName] = nil
 					continue
 				}
@@ -442,7 +451,7 @@ func freezeRequesterConnectionsForTools(
 	if reader == nil || task == nil {
 		return nil, nil
 	}
-	infos, err := connectorToolsFor(ctx, reader, registry, task.Namespace, toolNames)
+	infos, err := classifyConnectorTools(ctx, reader, registry, task.Namespace, toolNames, true)
 	if err != nil {
 		return nil, err
 	}
@@ -627,4 +636,32 @@ func frozenConnectionsFromSnapshot(body agentExecutionSnapshotBody) map[string]o
 		}
 	}
 	return frozen
+}
+
+// connectorCandidateTools is the allowed tool list with every name the
+// effective MCP policy denies removed (the Task's disallowed tools, plus any
+// extra denied set such as an external runtime's registered policy), so a
+// refusal never triggers on a connector tool the policy would not expose.
+func connectorCandidateTools(task *corev1alpha1.Task, agent *corev1alpha1.Agent, extraDisallowed []string) []string {
+	allowed := effectiveACPAllowedTools(task, agent)
+	denied := map[string]struct{}{}
+	if task != nil && task.Spec.AgentRuntime != nil {
+		for _, name := range task.Spec.AgentRuntime.DisallowedTools {
+			denied[name] = struct{}{}
+		}
+	}
+	for _, name := range extraDisallowed {
+		denied[name] = struct{}{}
+	}
+	if len(denied) == 0 {
+		return allowed
+	}
+	kept := make([]string, 0, len(allowed))
+	for _, name := range allowed {
+		if _, gone := denied[name]; gone {
+			continue
+		}
+		kept = append(kept, name)
+	}
+	return kept
 }
