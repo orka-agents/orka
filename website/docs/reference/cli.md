@@ -373,6 +373,7 @@ orka connection list
 orka connection get github-<digest>
 orka connection delete github-<digest>
 orka connection providers
+orka connection complete github-<digest> --completion <value>   # when the dashboard is not signed in as you
 ```
 
 These commands need a personal identity (OIDC or context token). A

@@ -14,8 +14,8 @@ describe('/settings/connectors route', () => {
   it('mounts the connectors page and keeps only the callback parameters', () => {
     expect(Route.path).toBe('/settings/connectors')
     expect(Route.component).toBe(ConnectorsSettingsRoute)
-    expect((Route as any).validateSearch({ status: 'pending', connection: 'github-abc', reason: 7, extra: 'x' })).toEqual({
-      status: 'pending', reason: undefined, connection: 'github-abc',
+    expect((Route as any).validateSearch({ status: 'pending', connection: 'github-abc', namespace: 'team-a', reason: 7, extra: 'x' })).toEqual({
+      status: 'pending', reason: undefined, connection: 'github-abc', namespace: 'team-a',
     })
   })
 })

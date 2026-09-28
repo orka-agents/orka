@@ -618,6 +618,7 @@ Usage:
   orka connection [command]
 
 Available Commands:
+  complete    Finish a consent with the completion value the provider callback returned
   delete      Disconnect a linked account and revoke its tokens
   get         Show one of your linked accounts
   list        List your linked accounts
@@ -635,6 +636,27 @@ Global Flags:
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka connection [command] --help" for more information about a command.
+```
+
+## `orka connection complete`
+
+```text
+After consent, the controller sends the browser to the dashboard with a one-time completion value in the URL fragment (#completion=...). When the dashboard is not signed in as you, pass that value here to finish the link as yourself; it is accepted exactly once.
+
+Usage:
+  orka connection complete <name> [flags]
+
+Flags:
+      --completion string   The value after '#completion=' in the dashboard URL the provider callback opened
+  -h, --help                help for complete
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka connection delete`
