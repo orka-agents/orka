@@ -36,7 +36,6 @@ func RegisterBrokeredGitHubTools(r *Registry, k8sClient client.Client) error {
 	}
 	registered := map[string]Tool{}
 	for _, tool := range []Tool{
-		NewCheckPRReviewMarkerTool(k8sClient),
 		NewCheckPullRequestCITool(k8sClient),
 		NewGetIssueTool(k8sClient).WithMaxResultBytes(brokeredResultBudget),
 		NewListIssuesTool(k8sClient),

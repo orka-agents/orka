@@ -124,13 +124,14 @@ approval before it runs.
 | `get_issue` | read | Read one issue. |
 | `review_pull_request` | read | Fetch a pull request's diff and metadata. |
 | `check_pull_request_ci` | read | Report CI status for a pull request. |
-| `check_pr_review_marker` | read | Look for an earlier review marker. |
 | `comment_on_issue` | write | Comment on an issue or pull request. |
 | `create_pull_request` | write | Open a pull request. |
 | `post_review_comment` | write | Post a review comment. |
 
-Declaring any other built-in, or declaring one of these with the other
-class, is rejected: a tool that ignored the credential would silently run
+`check_pr_review_marker` is not in the catalog: its marker secrets and
+trusted author come from the worker Task's environment, which the
+controller does not hold. Declaring any other built-in, or declaring one of
+these with the other class, is rejected: a tool that ignored the credential would silently run
 under something else, and a write tool declared as read would skip the
 approval and `readOnly` rules its class carries. The built-ins call
 `https://api.github.com`, so only a provider whose OAuth endpoints are on
@@ -181,6 +182,7 @@ identity. `kubectl apply` of a Task has no requester and gets no link.
 
 ```bash
 orka task create "List the open pull requests and summarize them" \
+  --namespace orka-system \
   --type agent \
   --agent github-as-me \
   --workspace-intent read \

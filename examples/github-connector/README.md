@@ -49,11 +49,15 @@ a Task through the API, so it carries the person's verified identity:
 
 ```bash
 orka task create "List the open pull requests in example/project and summarize them" \
+  --namespace orka-system \
   --type agent \
   --agent github-as-me \
   --workspace-intent read \
   --git-repo https://github.com/example/project
 ```
+
+Add `--read-credential <secret>` for a private repository clone. Every command
+here uses the controller's watched namespace, `orka-system`.
 
 The agent's `list_pull_requests` call runs in the controller with the person's
 token. `create_pull_request` and the other write tools appear only for a

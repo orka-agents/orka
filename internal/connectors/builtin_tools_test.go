@@ -87,7 +87,7 @@ func TestValidateToolsBuiltinDeclarationsFollowTheCatalog(t *testing.T) {
 	if !ProviderIssuesGitHubCredentials(explicitPort) {
 		t.Fatal("github.com on its default port must count")
 	}
-	if names := BuiltinConnectorToolNames(); len(names) != 9 || names[0] != "check_pr_review_marker" {
+	if names := BuiltinConnectorToolNames(); len(names) != 8 || names[0] != "check_pull_request_ci" {
 		t.Fatalf("catalog names = %v", names)
 	}
 	if _, ok := DeclaresBuiltinTool(nil, "get_issue"); ok {

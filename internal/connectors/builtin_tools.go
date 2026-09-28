@@ -49,9 +49,11 @@ func ProviderIssuesGitHubCredentials(provider *corev1alpha1.ConnectorProvider) b
 // mutate the forge with it. A provider cannot declare a different class,
 // and a built-in outside this catalog cannot be declared at all, because it
 // would ignore the credential and silently run under something else.
+// check_pr_review_marker stays out: its marker secrets and trusted author
+// are Task environment the controller does not hold, so a brokered run
+// would judge markers against the wrong configuration.
 var builtinConnectorTools = map[string]corev1alpha1.ConnectorToolClass{
-	"check_pr_review_marker": corev1alpha1.ConnectorToolClassRead,
-	"check_pull_request_ci":  corev1alpha1.ConnectorToolClassRead,
+	"check_pull_request_ci": corev1alpha1.ConnectorToolClassRead,
 	"get_issue":              corev1alpha1.ConnectorToolClassRead,
 	"list_issues":            corev1alpha1.ConnectorToolClassRead,
 	"list_pull_requests":     corev1alpha1.ConnectorToolClassRead,
