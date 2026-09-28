@@ -514,6 +514,11 @@ func ValidateCredentialHeader(name string) error {
 		// credential bound to one would be overwritten or would leak
 		// into telemetry context.
 		return fmt.Errorf("output header %q is reserved for trace propagation", name)
+	case "content-type":
+		// Every Tool request carries its own Content-Type before outbound
+		// access applies, so a credential bound to it would collide on
+		// every call: such a policy could be accepted but never used.
+		return fmt.Errorf("output header %q is set by the request body", name)
 	}
 	return nil
 }
