@@ -92,10 +92,13 @@ type ToolBinding struct {
 	// curated schema so no weaker Tool schema admits arguments the
 	// provider excluded.
 	Parameters *apiextensionsv1.JSON
-	// Timeout is the Tool's request timeout (zero means the 30s default);
-	// it must equal the provider's curated bound so a Tool cannot keep a
-	// credential-bearing request open longer than the provider allows.
-	Timeout time.Duration
+	// Timeout is the Tool's request timeout; it must equal the provider's
+	// curated bound so a Tool cannot keep a credential-bearing request open
+	// longer than the provider allows. An omitted timeout (TimeoutSet false)
+	// means the 30s default; an explicit nonpositive one is refused, because
+	// the executor would run such a request without any deadline.
+	Timeout    time.Duration
+	TimeoutSet bool
 }
 
 // connectorDefaultTimeout is the request timeout both a Tool CR and a
@@ -298,6 +301,9 @@ func DeclaredConnectorTool(provider *corev1alpha1.ConnectorProvider, tool ToolBi
 		}
 		if !sameParameterSchema(candidate.Parameters, tool.Parameters) {
 			return corev1alpha1.ConnectorTool{}, fmt.Errorf("tool %q parameters do not match the schema declared by provider %q", name, provider.Name)
+		}
+		if tool.TimeoutSet && tool.Timeout <= 0 {
+			return corev1alpha1.ConnectorTool{}, fmt.Errorf("tool %q declares a timeout of %s; connector-backed requests need a positive one", name, tool.Timeout)
 		}
 		declaredTimeout := time.Duration(0)
 		if candidate.HTTP.Timeout != nil {

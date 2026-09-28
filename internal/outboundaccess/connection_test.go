@@ -417,4 +417,12 @@ func TestDeclaredConnectorToolComparesTimeouts(t *testing.T) {
 	if _, err := DeclaredConnectorTool(provider, defaulted); err == nil {
 		t.Fatal("a longer Tool timeout must be refused")
 	}
+	// An explicit 0s or negative timeout would run without a deadline; it
+	// is refused rather than read as the default.
+	for _, explicit := range []time.Duration{0, -time.Second} {
+		defaulted.Timeout, defaulted.TimeoutSet = explicit, true
+		if _, err := DeclaredConnectorTool(provider, defaulted); err == nil || !strings.Contains(err.Error(), "positive") {
+			t.Fatalf("explicit %s timeout err = %v, want refusal", explicit, err)
+		}
+	}
 }

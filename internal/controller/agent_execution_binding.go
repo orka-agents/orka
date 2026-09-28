@@ -536,6 +536,16 @@ func (r *TaskReconciler) resolveExternalAgentExecutionCandidate(
 	if err != nil {
 		return nil, err
 	}
+	// An external runtime's snapshot freezes no Connections: its MCP policy
+	// is fixed by its registered profile and per-requester links cannot be
+	// applied to it. Connector-backed tools therefore fail closed here, with
+	// a definitive reason, rather than being advertised as tools whose every
+	// call would fail for want of a frozen Connection.
+	if connectorTools, err := connectorToolsFor(ctx, reader, task.Namespace, effectiveACPAllowedTools(task, agent)); err != nil {
+		return nil, err
+	} else if len(connectorTools) > 0 {
+		return nil, permanentACPAgentConfiguration(errors.New("connector-backed tools are not supported on external v2 AgentRuntimes"))
+	}
 	registry := r.MCPRegistry
 	if registry == nil {
 		registry = tools.DefaultRegistry
