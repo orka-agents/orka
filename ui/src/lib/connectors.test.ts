@@ -1,20 +1,27 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { callbackReasonMessage, takeCompletionToken } from './connectors'
+import { callbackReasonMessage, clearCompletionFragment, completionCommand, readCompletionToken } from './connectors'
 
 describe('connectors helpers', () => {
   beforeEach(() => window.history.replaceState(null, '', '/settings/connectors'))
 
-  it('takes the completion token out of the fragment once', () => {
+  it('reads the completion token and clears it only when asked', () => {
     window.history.replaceState(null, '', '/settings/connectors?status=pending&connection=c#completion=tok%2B1')
-    expect(takeCompletionToken()).toBe('tok+1')
+    expect(readCompletionToken()).toBe('tok+1')
+    expect(readCompletionToken()).toBe('tok+1')
+    clearCompletionFragment()
     expect(window.location.hash).toBe('')
     expect(window.location.search).toBe('?status=pending&connection=c')
-    expect(takeCompletionToken()).toBeNull()
+    expect(readCompletionToken()).toBeNull()
   })
 
   it('ignores fragments without a completion', () => {
     window.history.replaceState(null, '', '/settings/connectors#other=1')
-    expect(takeCompletionToken()).toBeNull()
+    expect(readCompletionToken()).toBeNull()
+  })
+
+  it('names the CLI fallback with the sealed namespace', () => {
+    expect(completionCommand('github-abc', 'team-a')).toBe('orka connection complete github-abc --namespace team-a --completion <value from the address bar>')
+    expect(completionCommand('github-abc', undefined)).toBe('orka connection complete github-abc --completion <value from the address bar>')
   })
 
   it('words the callback reasons', () => {

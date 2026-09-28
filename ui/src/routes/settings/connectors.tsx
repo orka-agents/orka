@@ -7,6 +7,7 @@ export const Route = createFileRoute('/settings/connectors')({
     status: typeof search.status === 'string' ? search.status : undefined,
     reason: typeof search.reason === 'string' ? search.reason : undefined,
     connection: typeof search.connection === 'string' ? search.connection : undefined,
+    namespace: typeof search.namespace === 'string' ? search.namespace : undefined,
   }),
   component: ConnectorsSettingsRoute,
 })

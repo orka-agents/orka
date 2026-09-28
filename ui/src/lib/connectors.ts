@@ -40,25 +40,36 @@ export interface ConnectorCallbackSearch {
   status?: 'pending' | 'error' | string
   reason?: string
   connection?: string
+  /** The namespace the consent was sealed in; completion must go there. */
+  namespace?: string
 }
 
 /**
  * The one-time completion token travels in the URL fragment so it never
- * reaches a server log or referrer. Read it once and remove it from the
- * address bar so a reload or a shared link cannot replay it.
+ * reaches a server log or referrer. It stays in the address bar until the
+ * completion succeeds, so a failed attempt (network, expired sign-in) can be
+ * retried with a reload; the server accepts the token exactly once.
  */
-export function takeCompletionToken(): string | null {
+export function readCompletionToken(): string | null {
   if (typeof window === 'undefined') return null
   const fragment = window.location.hash.startsWith('#') ? window.location.hash.slice(1) : window.location.hash
   if (!fragment) return null
-  const token = new URLSearchParams(fragment).get('completion')
-  if (!token) return null
+  return new URLSearchParams(fragment).get('completion')
+}
+
+/** Removes the spent completion token from the address bar. */
+export function clearCompletionFragment() {
+  if (typeof window === 'undefined') return
   try {
     window.history.replaceState(null, '', window.location.pathname + window.location.search)
   } catch {
     // Leaving the fragment in place is harmless: the token is single use.
   }
-  return token
+}
+
+/** The CLI command that spends a completion token when the page cannot. */
+export function completionCommand(name: string, namespace: string | undefined): string {
+  return `orka connection complete ${name}${namespace ? ` --namespace ${namespace}` : ''} --completion <value from the address bar>`
 }
 
 /** Sends the browser to the provider's consent page. */

@@ -83,6 +83,9 @@ func newConnectCmd() *cobra.Command {
 			} else if err := openBrowser(started.AuthorizeURL); err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "Could not open browser: %v\nOpen the URL above manually.\n", err) //nolint:errcheck
 			}
+			// The provider sends the browser back to the dashboard, which
+			// finishes the link only when it is signed in as this person.
+			fmt.Fprintf(out, "After consenting, the dashboard finishes the link if it is signed in as you. Otherwise copy the value after '#completion=' from the address bar and run:\n  orka connection complete %s --completion <value>\n", started.Connection.Name) //nolint:errcheck
 			if noWait {
 				return nil
 			}
@@ -120,7 +123,7 @@ func newConnectCmd() *cobra.Command {
 
 func newConnectionCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "connection", Short: "Manage your linked accounts"}
-	cmd.AddCommand(newConnectionListCmd(), newConnectionGetCmd(), newConnectionDeleteCmd(), newConnectionProvidersCmd())
+	cmd.AddCommand(newConnectionListCmd(), newConnectionGetCmd(), newConnectionCompleteCmd(), newConnectionDeleteCmd(), newConnectionProvidersCmd())
 	return cmd
 }
 
@@ -198,6 +201,41 @@ func newConnectionGetCmd() *cobra.Command {
 		},
 	}
 	addOutputFlag(cmd, outputTable)
+	return cmd
+}
+
+func newConnectionCompleteCmd() *cobra.Command {
+	var completion string
+	cmd := &cobra.Command{
+		Use:   "complete <name>",
+		Short: "Finish a consent with the completion value the provider callback returned",
+		Long: "After consent, the controller sends the browser to the dashboard with a one-time completion value in the " +
+			"URL fragment (#completion=...). When the dashboard is not signed in as you, pass that value here to " +
+			"finish the link as yourself; it is accepted exactly once.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			completion = strings.TrimSpace(completion)
+			if completion == "" {
+				return errors.New("--completion is required")
+			}
+			c := newClientFromCmd(cmd)
+			body, err := json.Marshal(map[string]string{"completion": completion})
+			if err != nil {
+				return err
+			}
+			raw, err := c.DoJSON(context.Background(), http.MethodPost, connectionsAPIPath+"/"+url.PathEscape(args[0])+"/complete", nil, body)
+			if err != nil {
+				return connectionError(err)
+			}
+			var item connectionView
+			if err := decodeInto(raw, &item); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Linked %s (%s): %s\n", item.Provider, item.Mode, strings.ToLower(item.State)) //nolint:errcheck
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&completion, "completion", "", "The value after '#completion=' in the dashboard URL the provider callback opened")
 	return cmd
 }
 

@@ -400,7 +400,7 @@ func TestConnectionConsentFlow(t *testing.T) {
 	// The browser half: the callback parks the tokens and hands back a
 	// completion token in the fragment; nothing is committed yet.
 	location := h.callback(url.Values{"code": {"good-code"}, "state": {query.Get("state")}})
-	if !strings.HasPrefix(location, connectorCallbackBase+"/settings/connectors?") || !strings.Contains(location, "status=pending") || !strings.Contains(location, "connection="+created.Connection.Name) {
+	if !strings.HasPrefix(location, connectorCallbackBase+"/settings/connectors?") || !strings.Contains(location, "status=pending") || !strings.Contains(location, "connection="+created.Connection.Name) || !strings.Contains(location, "namespace="+created.Connection.Namespace) {
 		t.Fatalf("location = %q", location)
 	}
 	if strings.Contains(location, "gho_") || strings.Contains(location, "good-code") {

@@ -2,9 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link2, Unplug } from 'lucide-react'
 import { toast } from 'sonner'
-import { api, isForbiddenError } from '@/lib/api-client'
+import { api, isForbiddenError, isUnauthorizedError } from '@/lib/api-client'
 import {
-  callbackReasonMessage, openAuthorizeURL, takeCompletionToken,
+  callbackReasonMessage, clearCompletionFragment, completionCommand, openAuthorizeURL, readCompletionToken,
   type Connection, type ConnectionAuthorizeResponse, type ConnectionMode, type ConnectorCallbackSearch, type ConnectorProvider,
 } from '@/lib/connectors'
 import { useUIStore } from '@/stores/ui'
@@ -40,25 +40,38 @@ function ConnectorsPageContent({ namespace, search }: { namespace: string; searc
   })
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ['connections', namespace] })
 
-  // Finish a consent the provider just sent us back from: the completion
-  // token in the fragment is taken once, on first render, and spent once.
+  // Finish a consent the provider just sent us back from. The completion
+  // token stays in the fragment until the server accepts it, so a failed
+  // attempt can be retried here or by reloading; it is spent in the
+  // namespace the consent was sealed in, never the page's current pick.
   const returning = search.status === 'pending' && Boolean(search.connection)
-  const [completionToken] = useState(() => (returning ? takeCompletionToken() : null))
+  const [completionToken] = useState(() => (returning ? readCompletionToken() : null))
+  const completionNamespace = search.namespace || namespace
+  const completionParams = completionNamespace ? { namespace: completionNamespace } : undefined
   const completionAttempted = useRef(false)
-  const [callbackNotice, setCallbackNotice] = useState<{ tone: 'error' | 'info'; text: string } | null>(() => {
+  const [callbackNotice, setCallbackNotice] = useState<{ tone: 'error' | 'info'; text: string; retry?: boolean } | null>(() => {
     if (search.status === 'error') return { tone: 'error', text: callbackReasonMessage(search.reason) }
     if (returning && !completionToken) return { tone: 'error', text: 'The consent came back without a completion token. Start the link again.' }
     return null
   })
   const complete = useMutation({
     mutationFn: ({ name, completion }: { name: string; completion: string }) =>
-      api.post<Connection>(`/connections/${encodeURIComponent(name)}/complete`, { completion }, params),
+      api.post<Connection>(`/connections/${encodeURIComponent(name)}/complete`, { completion }, completionParams),
     onSuccess: (connection) => {
+      clearCompletionFragment()
       setCallbackNotice({ tone: 'info', text: `Linked ${connection.provider} (${connection.mode}).` })
       invalidate()
     },
-    onError: (error: unknown) => setCallbackNotice({ tone: 'error', text: `Could not finish linking: ${errorText(error)}` }),
+    onError: (error: unknown) => {
+      const hint = isForbiddenError(error) || isUnauthorizedError(error)
+        ? ` Sign in as yourself and retry, or run: ${completionCommand(search.connection ?? '', search.namespace)}`
+        : ''
+      setCallbackNotice({ tone: 'error', text: `Could not finish linking: ${errorText(error)}.${hint}`, retry: true })
+    },
   })
+  const retryCompletion = () => {
+    if (completionToken && search.connection) complete.mutate({ name: search.connection, completion: completionToken })
+  }
   useEffect(() => {
     if (completionAttempted.current || !returning || !completionToken || !search.connection) return
     completionAttempted.current = true
@@ -112,8 +125,11 @@ function ConnectorsPageContent({ namespace, search }: { namespace: string; searc
       />
       {callbackNotice && (
         <div role={callbackNotice.tone === 'error' ? 'alert' : 'status'}
-          className={callbackNotice.tone === 'error' ? 'rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-sm' : 'rounded-lg border bg-card p-3 text-sm'}>
-          {callbackNotice.text}
+          className={callbackNotice.tone === 'error' ? 'flex flex-wrap items-center gap-3 rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-sm' : 'rounded-lg border bg-card p-3 text-sm'}>
+          <span>{callbackNotice.text}</span>
+          {callbackNotice.retry && completionToken && (
+            <Button size="sm" variant="outline" disabled={complete.isPending} onClick={retryCompletion}>Retry</Button>
+          )}
         </div>
       )}
       {providers.isPending || connections.isPending ? (

@@ -189,7 +189,11 @@ orka connection providers                  # what an operator has made available
 `orka connect` needs a personal token (`--token` with your OIDC or
 context token, or the token `orka config` stores); it explains a `403` from
 a ServiceAccount token. `--no-open` prints the consent URL instead of opening
-a browser, `--no-wait` returns as soon as consent has started.
+a browser, `--no-wait` returns as soon as consent has started. The provider
+sends the browser back to the dashboard, which finishes the link when it is
+signed in as you; when it is not, copy the value after `#completion=` from
+the address bar and run `orka connection complete <name> --completion
+<value>` so the CLI finishes it with your token instead.
 
 **API.**
 

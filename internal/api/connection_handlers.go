@@ -882,7 +882,7 @@ func (h *Handlers) ConnectionCallback(c fiber.Ctx) error {
 		log.Error(err, "connector completion could not be sealed", "connection", consent.Name)
 		return h.connectorCallbackRedirect(c, consent.Name, "storage_failed", "")
 	}
-	return h.connectorCallbackRedirect(c, consent.Name, "", completionToken)
+	return h.connectorCallbackRedirectTo(c, consent.Namespace, consent.Name, "", completionToken)
 }
 
 // CompleteConnection commits parked token material. The caller must own the
@@ -1086,6 +1086,13 @@ func (h *Handlers) applyConnectionLinked(ctx context.Context, connection *corev1
 // one-time completion token travels in the URL fragment, which browsers keep
 // out of requests, referrers, and server logs.
 func (h *Handlers) connectorCallbackRedirect(c fiber.Ctx, connectionName, reason, completionToken string) error {
+	return h.connectorCallbackRedirectTo(c, "", connectionName, reason, completionToken)
+}
+
+// connectorCallbackRedirectTo is connectorCallbackRedirect with the
+// namespace the consent was sealed in, so the page completes the link where
+// it was started rather than in whatever namespace it currently shows.
+func (h *Handlers) connectorCallbackRedirectTo(c fiber.Ctx, namespace, connectionName, reason, completionToken string) error {
 	target, err := url.Parse(strings.TrimRight(h.connectors.CallbackBaseURL, "/") + connectorSettingsPath)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "connector callback base URL is invalid")
@@ -1099,6 +1106,9 @@ func (h *Handlers) connectorCallbackRedirect(c fiber.Ctx, connectionName, reason
 	}
 	if connectionName != "" {
 		query.Set("connection", connectionName)
+	}
+	if strings.TrimSpace(namespace) != "" {
+		query.Set("namespace", namespace)
 	}
 	target.RawQuery = query.Encode()
 	if completionToken != "" {

@@ -69,17 +69,37 @@ describe('ConnectorsPage', () => {
     open.mockRestore()
   })
 
-  it('completes a consent from the callback fragment exactly once', async () => {
+  it('completes a consent from the callback fragment exactly once, in the sealed namespace', async () => {
+    useProviders([github], [{ ...linked, state: 'Pending', ready: false }])
+    window.history.replaceState(null, '', '/settings/connectors?status=pending&connection=github-abc&namespace=team-a#completion=one-time')
+    const completions: { body: unknown; namespace: string | null }[] = []
+    server.use(http.post(`${API}/connections/github-abc/complete`, async ({ request }) => {
+      completions.push({ body: await request.json(), namespace: new URL(request.url).searchParams.get('namespace') })
+      return HttpResponse.json({ ...linked, mode: 'readWrite' })
+    }))
+    render(<ConnectorsPage search={{ status: 'pending', connection: 'github-abc', namespace: 'team-a' }} />)
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Linked github (readWrite).'))
+    // The page shows orka-system, but the consent was sealed in team-a.
+    expect(completions).toEqual([{ body: { completion: 'one-time' }, namespace: 'team-a' }])
+    expect(window.location.hash).toBe('')
+  })
+
+  it('keeps the completion token for a retry when finishing fails', async () => {
     useProviders([github], [{ ...linked, state: 'Pending', ready: false }])
     window.history.replaceState(null, '', '/settings/connectors?status=pending&connection=github-abc#completion=one-time')
-    const completions: unknown[] = []
-    server.use(http.post(`${API}/connections/github-abc/complete`, async ({ request }) => {
-      completions.push(await request.json())
+    let attempts = 0
+    server.use(http.post(`${API}/connections/github-abc/complete`, async () => {
+      attempts += 1
+      if (attempts === 1) return new HttpResponse('not signed in', { status: 401 })
       return HttpResponse.json({ ...linked, mode: 'readWrite' })
     }))
     render(<ConnectorsPage search={{ status: 'pending', connection: 'github-abc' }} />)
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('orka connection complete github-abc'))
+    // The token is still in the address bar, so a reload could retry too.
+    expect(window.location.hash).toBe('#completion=one-time')
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Linked github (readWrite).'))
-    expect(completions).toEqual([{ completion: 'one-time' }])
+    expect(attempts).toBe(2)
     expect(window.location.hash).toBe('')
   })
 

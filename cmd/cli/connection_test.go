@@ -61,8 +61,40 @@ func TestConnectStartsConsentOpensBrowserAndWaits(t *testing.T) {
 	if opened != "https://github.com/login/oauth/authorize?state=signed" {
 		t.Fatalf("opened = %q", opened)
 	}
-	if !strings.Contains(out.String(), "Linked github (readWrite)") || polls < 2 {
+	if !strings.Contains(out.String(), "Linked github (readWrite)") || polls < 2 || !strings.Contains(out.String(), "orka connection complete github-abc --completion") {
 		t.Fatalf("output = %q polls = %d", out.String(), polls)
+	}
+}
+
+func TestConnectionCompleteSpendsTheCompletionValue(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var gotBody map[string]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/connections/github-abc/complete" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"name": "github-abc", "provider": "github", "mode": "readWrite", "state": "Ready", "ready": true}) //nolint:errcheck
+	}))
+	defer srv.Close()
+	root := newRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetArgs([]string{"connection", "complete", "github-abc", "--completion", "one-time", "--server", srv.URL, "--token", "person-token"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+	if gotBody["completion"] != "one-time" || !strings.Contains(out.String(), "Linked github (readWrite): ready") {
+		t.Fatalf("body = %v output = %q", gotBody, out.String())
+	}
+	root = newRootCmd()
+	root.SetArgs([]string{"connection", "complete", "github-abc", "--server", srv.URL, "--token", "person-token"})
+	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "--completion is required") {
+		t.Fatalf("missing completion err = %v", err)
 	}
 }
 
