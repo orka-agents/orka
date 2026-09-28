@@ -634,7 +634,34 @@ func (s *Store) DeleteConnectorCredential(ctx context.Context, connectionUID str
 		ON CONFLICT(connection_uid) DO NOTHING`, connectionUID, time.Now().UTC()); err != nil {
 		return fmt.Errorf("tombstone connector custody: %w", err)
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return s.truncateWAL(ctx)
+}
+
+// truncateWAL checkpoints the write-ahead log and truncates it, so frames
+// that still carry a deleted custody row (its wrapped data key and
+// ciphertext) do not outlive the deletion in the -wal file. secure_delete
+// zeroes the row in the main file; this removes the log copy.
+func (s *Store) truncateWAL(ctx context.Context) error {
+	var err error
+	for range 5 {
+		var busy, logFrames, checkpointed int
+		err = s.db.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &logFrames, &checkpointed)
+		if err != nil {
+			return fmt.Errorf("truncate connector custody log: %w", err)
+		}
+		if busy == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	return errors.New("truncate connector custody log: readers kept the log busy; retry")
 }
 
 // CreateConnectorConsent implements store.ConnectorConsentStore.
