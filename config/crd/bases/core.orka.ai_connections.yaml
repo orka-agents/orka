@@ -189,6 +189,14 @@ spec:
                   reported one.
                 format: date-time
                 type: string
+              grantSequence:
+                description: |-
+                  GrantSequence counts completed consents on this Connection. It rises
+                  on every commit, so authority bound to one grant (a frozen execution
+                  snapshot or a standing approval) does not carry over to a later
+                  re-link of the same Connection object.
+                format: int64
+                type: integer
               grantedScopes:
                 description: |-
                   GrantedScopes are the scopes the provider reported at consent time, or

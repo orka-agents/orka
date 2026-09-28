@@ -39,7 +39,9 @@ import (
 )
 
 const (
-	ReasonAccepted          = "Accepted"
+	ReasonAccepted = "Accepted"
+	// ReasonConnectionsRemain holds a deleting provider while Connections reference it.
+	ReasonConnectionsRemain = "ConnectionsRemain"
 	ReasonInvalidProvider   = "InvalidProvider"
 	ReasonResolvedRefs      = "ResolvedRefs"
 	ReasonReferenceNotFound = "ReferenceNotFound"
@@ -161,9 +163,18 @@ type BuiltinToolCheck func(name string) bool
 
 // ValidateProviderSpec validates structural and security invariants of a
 // ConnectorProvider without reading referenced objects.
+// maxProviderNameLength is the Kubernetes label value limit; the provider
+// name is a label on every Connection.
+const maxProviderNameLength = 63
+
 func ValidateProviderSpec(provider *corev1alpha1.ConnectorProvider, knownBuiltin BuiltinToolCheck) *Issue {
 	if provider == nil {
 		return invalid("provider is required")
+	}
+	if len(provider.Name) > maxProviderNameLength {
+		// The provider name labels every Connection; label values stop at
+		// 63 characters.
+		return invalid("provider name must be at most 63 characters")
 	}
 	oauth := provider.Spec.OAuth
 	for _, endpoint := range []struct{ name, value string }{
@@ -223,7 +234,7 @@ func validateEndpointURL(field, raw string, required bool) *Issue {
 		return invalid(fmt.Sprintf("oauth.%s must not contain surrounding whitespace", field))
 	}
 	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" || strings.Contains(raw, "#") || parsed.String() != raw {
+	if err != nil || parsed.Scheme != schemeHTTPS || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" || strings.Contains(raw, "#") || parsed.String() != raw {
 		return invalid(fmt.Sprintf("oauth.%s must be an absolute HTTPS URL without userinfo or fragment", field))
 	}
 	host := parsed.Hostname()
@@ -379,13 +390,19 @@ func validClientID(clientID string) bool {
 
 // validScopeToken applies the RFC 6749 scope-token grammar: one or more bytes
 // in %x21 / %x23-5B / %x5D-7E, which excludes whitespace, quotes, backslashes,
-// control bytes, and non-ASCII text.
+// control bytes, and non-ASCII text. A comma, though RFC-legal inside a
+// token, is refused as well: GitHub delimits granted scopes with commas in
+// its token response, and a configured scope that contained one could be
+// fabricated by splitting a single scope the provider issued.
 func validScopeToken(scope string) bool {
 	if scope == "" {
 		return false
 	}
 	for i := 0; i < len(scope); i++ {
 		b := scope[i]
+		if b == ',' {
+			return false
+		}
 		if b == 0x21 || (b >= 0x23 && b <= 0x5B) || (b >= 0x5D && b <= 0x7E) {
 			continue
 		}
@@ -648,21 +665,7 @@ func ProviderAuthorityDigest(provider *corev1alpha1.ConnectorProvider) string {
 	if provider == nil {
 		return ""
 	}
-	oauth := provider.Spec.OAuth
-	parts := []string{
-		"uid", string(provider.UID), "clientID", oauth.ClientID,
-		"secretName", oauth.ClientSecretRef.Name, "secretKey", oauth.ClientSecretRef.Key,
-		"clientAuthentication", oauth.ClientAuthentication,
-		"authorizeURL", oauth.AuthorizeURL, "tokenURL", oauth.TokenURL, "revocationURL", oauth.RevocationURL,
-	}
-	keys := make([]string, 0, len(oauth.AdditionalAuthorizeParameters))
-	for key := range oauth.AdditionalAuthorizeParameters {
-		keys = append(keys, key)
-	}
-	slices.Sort(keys)
-	for _, key := range keys {
-		parts = append(parts, "param", key, oauth.AdditionalAuthorizeParameters[key])
-	}
+	parts := providerConsentParts(provider)
 	tools := make([]corev1alpha1.ConnectorTool, 0, len(provider.Spec.Tools))
 	for _, tool := range provider.Spec.Tools {
 		if tool.Source == corev1alpha1.ConnectorToolSourceHTTP && tool.HTTP != nil {
@@ -681,6 +684,80 @@ func ProviderAuthorityDigest(provider *corev1alpha1.ConnectorProvider) string {
 			parts = append(parts, "header", name, tool.HTTP.Headers[name])
 		}
 	}
+	return lengthPrefixedDigest(parts)
+}
+
+// ProviderIssuerDigest is a hex SHA-256 digest of the OAuth client that
+// issues, refreshes, and revokes tokens: the provider UID, client ID, client
+// secret reference, authentication method, endpoints, and static authorize
+// parameters. Unlike ProviderAuthorityDigest it excludes the curated tool
+// destinations, so a retargeted tool still lets a held token be refreshed
+// or revoked against the client that issued it. It is sealed with every
+// credential.
+func ProviderIssuerDigest(provider *corev1alpha1.ConnectorProvider) string {
+	if provider == nil {
+		return ""
+	}
+	return lengthPrefixedDigest(providerIssuerParts(provider))
+}
+
+// ProviderRevocationDigest names what the revocation endpoint authenticates:
+// the OAuth client and the revocation URL, without the token URL. It is
+// sealed with every credential so disconnect still revokes after an
+// operator moved only the token endpoint.
+func ProviderRevocationDigest(provider *corev1alpha1.ConnectorProvider) string {
+	if provider == nil {
+		return ""
+	}
+	oauth := provider.Spec.OAuth
+	return lengthPrefixedDigest([]string{
+		"revocation", "uid", string(provider.UID), "clientID", oauth.ClientID,
+		"secretName", oauth.ClientSecretRef.Name, "secretKey", oauth.ClientSecretRef.Key,
+		"clientAuthentication", oauth.ClientAuthentication, "revocationURL", oauth.RevocationURL,
+	})
+}
+
+// providerIssuerParts names the OAuth client a token was issued by: what
+// the refresh endpoint authenticates. The authorize URL and authorize-only
+// parameters (prompt, audience hints) shape consent but not the issued
+// token's authority, so they belong to the consent fence
+// (providerConsentParts); the revocation URL belongs to the revocation
+// identity (ProviderRevocationDigest). Changing either must neither block a
+// refresh nor force a new consent.
+func providerIssuerParts(provider *corev1alpha1.ConnectorProvider) []string {
+	oauth := provider.Spec.OAuth
+	return []string{
+		"uid", string(provider.UID), "clientID", oauth.ClientID,
+		"secretName", oauth.ClientSecretRef.Name, "secretKey", oauth.ClientSecretRef.Key,
+		"clientAuthentication", oauth.ClientAuthentication,
+		"tokenURL", oauth.TokenURL,
+	}
+}
+
+// providerConsentParts extends the issuer parts with the authorize URL and
+// the authorize-only parameters the person consented under.
+func providerConsentParts(provider *corev1alpha1.ConnectorProvider) []string {
+	oauth := provider.Spec.OAuth
+	pkce := true
+	if oauth.PKCE != nil {
+		pkce = *oauth.PKCE
+	}
+	parts := append(providerIssuerParts(provider), "authorizeURL", oauth.AuthorizeURL, "pkce", strconv.FormatBool(pkce))
+	keys := make([]string, 0, len(oauth.AdditionalAuthorizeParameters))
+	for key := range oauth.AdditionalAuthorizeParameters {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	parts = slices.Grow(parts, 3*len(keys))
+	for _, key := range keys {
+		parts = append(parts, "param", key, oauth.AdditionalAuthorizeParameters[key])
+	}
+	return parts
+}
+
+// lengthPrefixedDigest hashes parts with an injective length-prefixed
+// encoding.
+func lengthPrefixedDigest(parts []string) string {
 	sum := sha256.New()
 	for _, part := range parts {
 		_, _ = fmt.Fprintf(sum, "%d:", len(part))

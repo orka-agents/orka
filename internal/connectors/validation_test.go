@@ -58,6 +58,7 @@ func TestValidateProviderSpec(t *testing.T) {
 	}{
 		{name: "valid"},
 		{name: "nil provider", mutate: nil, want: ""},
+		{name: "name longer than a label value", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Name = strings.Repeat("a", 64) }, want: "provider name must be at most 63 characters"},
 		{name: "http authorize url", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.AuthorizeURL = "http://github.com/authorize" }, want: "authorizeURL must be an absolute HTTPS URL"},
 		{name: "userinfo in token url", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://user:pw@github.com/token" }, want: "tokenURL must be an absolute HTTPS URL"},
 		{name: "fragment in token url", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://github.com/token#frag" }, want: "tokenURL must be an absolute HTTPS URL"},
@@ -555,10 +556,60 @@ func TestProviderAuthorityDigestAndConsent(t *testing.T) {
 	if ProviderAuthorityDigest(collide) == ProviderAuthorityDigest(split) {
 		t.Fatal("delimiter-bearing values must not collide with a different parameter set")
 	}
+	// The issuer digest ignores tool destinations but follows the client.
+	retargeted := provider.DeepCopy()
+	retargeted.Spec.Tools[2].HTTP.URL = "https://api.github.com/elsewhere"
+	if ProviderIssuerDigest(retargeted) != ProviderIssuerDigest(provider) || ProviderAuthorityDigest(retargeted) == ProviderAuthorityDigest(provider) {
+		t.Fatal("a retargeted tool must move the authority digest but not the issuer digest")
+	}
+	rotated := provider.DeepCopy()
+	rotated.Spec.OAuth.ClientID = "other"
+	if ProviderIssuerDigest(rotated) == ProviderIssuerDigest(provider) || ProviderIssuerDigest(nil) != "" {
+		t.Fatal("a rotated client must move the issuer digest")
+	}
+	// Authorize-only parameters shape consent, not the issued token's
+	// authority: they move the consent fence but neither block a refresh nor
+	// skip revocation.
+	prompted := provider.DeepCopy()
+	if prompted.Spec.OAuth.AdditionalAuthorizeParameters == nil {
+		prompted.Spec.OAuth.AdditionalAuthorizeParameters = map[string]string{}
+	}
+	prompted.Spec.OAuth.AdditionalAuthorizeParameters["prompt"] = "select_account"
+	if ProviderIssuerDigest(prompted) != ProviderIssuerDigest(provider) || ProviderAuthorityDigest(prompted) == ProviderAuthorityDigest(provider) {
+		t.Fatal("an authorize parameter must move the authority digest but not the issuer digest")
+	}
+	relocated := provider.DeepCopy()
+	relocated.Spec.OAuth.AuthorizeURL = "https://github.example.test/login/oauth/authorize-v2"
+	if ProviderIssuerDigest(relocated) != ProviderIssuerDigest(provider) || ProviderAuthorityDigest(relocated) == ProviderAuthorityDigest(provider) {
+		t.Fatal("the authorize URL must move the authority digest but not the issuer digest")
+	}
+	moved := provider.DeepCopy()
+	moved.Spec.OAuth.TokenURL = "https://github.example.test/login/oauth/token-v2"
+	if ProviderIssuerDigest(moved) == ProviderIssuerDigest(provider) {
+		t.Fatal("the token URL must move the issuer digest")
+	}
+	// The effective PKCE setting is part of what the browser's consent was
+	// started with; flipping it mid-flow must fail the callback's fence.
+	noPKCE := provider.DeepCopy()
+	off := false
+	noPKCE.Spec.OAuth.PKCE = &off
+	if ProviderAuthorityDigest(noPKCE) == ProviderAuthorityDigest(provider) || ProviderIssuerDigest(noPKCE) != ProviderIssuerDigest(provider) {
+		t.Fatal("the PKCE setting must move the authority digest but not the issuer digest")
+	}
 	// Built-in declarations do not carry a destination and do not move the digest.
 	builtinOnly := provider.DeepCopy()
 	builtinOnly.Spec.Tools = append(builtinOnly.Spec.Tools, corev1alpha1.ConnectorTool{Name: "list_issues", Class: corev1alpha1.ConnectorToolClassRead, Source: corev1alpha1.ConnectorToolSourceBuiltin})
 	if ProviderAuthorityDigest(builtinOnly) != digest {
 		t.Fatal("a new built-in declaration must not require consent again")
+	}
+}
+
+func TestValidScopeTokenRefusesCommas(t *testing.T) {
+	// Comma-delimited scope lists (GitHub) are split on the comma, so a
+	// configured scope must never contain one.
+	for scope, want := range map[string]bool{"repo": true, "read:user": true, "repo,gist": false, "": false, "a b": false, "ünï": false} {
+		if got := validScopeToken(scope); got != want {
+			t.Fatalf("validScopeToken(%q) = %t, want %t", scope, got, want)
+		}
 	}
 }

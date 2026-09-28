@@ -9,8 +9,12 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"time"
+
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -19,7 +23,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -41,10 +44,64 @@ type ConnectorProviderReconciler struct {
 	KnownBuiltinTool connectors.BuiltinToolCheck
 }
 
-// +kubebuilder:rbac:groups=core.orka.ai,resources=connectorproviders,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core.orka.ai,resources=connectorproviders,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=core.orka.ai,resources=connectorproviders/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core.orka.ai,resources=connectorproviders/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+
+// ConnectorProviderConnectionsFinalizer holds a ConnectorProvider while
+// Connections still reference it, so their tokens can be revoked against the
+// client that issued them before the provider disappears.
+const ConnectorProviderConnectionsFinalizer = "core.orka.ai/connector-connections"
+
+// connectorProviderDeletionRequeue is how often a provider blocked by live
+// Connections re-checks for their removal.
+const connectorProviderDeletionRequeue = 30 * time.Second
+
+// finalize releases a deleting provider only once no Connection in its
+// namespace references it; until then the deletion is held and the
+// remaining Connections are named in the Accepted condition.
+func (r *ConnectorProviderReconciler) finalize(ctx context.Context, provider *corev1alpha1.ConnectorProvider) (ctrl.Result, error) {
+	if !controllerutil.ContainsFinalizer(provider, ConnectorProviderConnectionsFinalizer) {
+		return ctrl.Result{}, nil
+	}
+	// The decision below is irreversible (a released provider cannot revoke
+	// its Connections' tokens), so the reference check reads the API server
+	// rather than the cache, which can trail a Connection created moments ago.
+	var reader client.Reader = r.Client
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
+	connections := &corev1alpha1.ConnectionList{}
+	if err := reader.List(ctx, connections, client.InNamespace(provider.Namespace)); err != nil {
+		return ctrl.Result{}, err
+	}
+	remaining := 0
+	for i := range connections.Items {
+		if connections.Items[i].Spec.ProviderRef.Name == provider.Name {
+			remaining++
+		}
+	}
+	if remaining > 0 {
+		meta.SetStatusCondition(&provider.Status.Conditions, metav1.Condition{
+			Type:               corev1alpha1.ConnectorProviderConditionAccepted,
+			Status:             metav1.ConditionFalse,
+			Reason:             connectors.ReasonConnectionsRemain,
+			Message:            fmt.Sprintf("Deletion is held until the %d Connection(s) that reference this provider are removed", remaining),
+			ObservedGeneration: provider.Generation,
+			LastTransitionTime: metav1.Now(),
+		})
+		if err := r.Status().Update(ctx, provider); err != nil && !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: connectorProviderDeletionRequeue}, nil
+	}
+	controllerutil.RemoveFinalizer(provider, ConnectorProviderConnectionsFinalizer)
+	if err := r.Update(ctx, provider); err != nil && !apierrors.IsNotFound(err) {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
+}
 
 func (r *ConnectorProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	provider := &corev1alpha1.ConnectorProvider{}
@@ -55,7 +112,16 @@ func (r *ConnectorProviderReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, err
 	}
 	if !provider.DeletionTimestamp.IsZero() {
-		return ctrl.Result{}, nil
+		return r.finalize(ctx, provider)
+	}
+	// The provider's OAuth client is what revokes the tokens its Connections
+	// hold; it must outlive them, or disconnect would delete the only sealed
+	// copies without revoking anything.
+	if !controllerutil.ContainsFinalizer(provider, ConnectorProviderConnectionsFinalizer) {
+		controllerutil.AddFinalizer(provider, ConnectorProviderConnectionsFinalizer)
+		if err := r.Update(ctx, provider); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	now := metav1.Now()

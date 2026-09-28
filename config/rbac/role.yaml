@@ -149,6 +149,7 @@ rules:
   - agentruntimes
   - agents
   - branchclaims
+  - connections
   - controllerepochs
   - externaleffects
   - promptattempts
@@ -223,9 +224,8 @@ rules:
 - apiGroups:
   - core.orka.ai
   resources:
-  - connections
+  - connectorproviders
   verbs:
-  - delete
   - get
   - list
   - patch
@@ -234,7 +234,6 @@ rules:
 - apiGroups:
   - core.orka.ai
   resources:
-  - connectorproviders
   - outboundaccesspolicies
   verbs:
   - get

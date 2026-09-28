@@ -980,6 +980,8 @@ controller:
       monitorRead: orka:monitors:read
       monitorWrite: orka:monitors:write
       monitorOperate: orka:monitors:operate
+      connectorRead: orka:connectors:read
+      connectorManage: orka:connectors:manage
       gatewayRead: orka:gateways:read
       gatewayOperate: orka:gateways:operate
     tts:
@@ -1020,6 +1022,7 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--api-port` | `8080` | REST API server port |
 | `--gateway-enabled` | `true` | Enable generic gateway reconciliation and ingress |
 | `--connectors-enabled` | `false` | Enable per-user connector reconciliation (`ConnectorProvider` and `Connection`). Env: `ORKA_CONNECTORS_ENABLED` |
+| `--connector-callback-base-url` | `ORKA_CONNECTOR_CALLBACK_BASE_URL` env or `""` | Required with `--connectors-enabled`. Absolute https origin (scheme and host only, no path) the OAuth provider redirects back to; the provider must register exactly this origin plus `/api/v1/connections/callback`. Plain http is accepted only for `localhost`. Helm: `controller.connectors.callbackBaseUrl`. Sealed linked-account credentials live in the controller store, which the chart already requires to be persistent in every mode. |
 | `--gateway-pending-per-session` | `100` | Maximum pending gateway events per Session |
 | `--gateway-interim-messages-per-task` | `10` | Lifetime cap for distinct accepted interim messages per Task; failed/expired messages count, retries do not. Helm: `controller.gateway.interimMessagesPerTask` |
 | `--gateway-max-records-per-gateway` | `1000` | Maximum retained accepted/dead-letter event records per Gateway before ingress is throttled |
@@ -1077,6 +1080,8 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--context-token-monitor-read-scopes` | `ORKA_CONTEXT_TOKEN_MONITOR_READ_SCOPES` env or `""` | Comma-separated scopes authorizing repository monitor reads. Defaults to `orka:monitors:read` |
 | `--context-token-monitor-write-scopes` | `ORKA_CONTEXT_TOKEN_MONITOR_WRITE_SCOPES` env or `""` | Comma-separated scopes authorizing repository monitor create, update, and delete operations. Defaults to `orka:monitors:write` |
 | `--context-token-monitor-operate-scopes` | `ORKA_CONTEXT_TOKEN_MONITOR_OPERATE_SCOPES` env or `""` | Comma-separated scopes authorizing repository monitor manual runs. Defaults to `orka:monitors:operate` |
+| `--context-token-connector-read-scopes` | `ORKA_CONTEXT_TOKEN_CONNECTOR_READ_SCOPES` env or `""` | Comma-separated scopes authorizing a person to read their own connector Connections. Defaults to `orka:connectors:read` |
+| `--context-token-connector-manage-scopes` | `ORKA_CONTEXT_TOKEN_CONNECTOR_MANAGE_SCOPES` env or `""` | Comma-separated scopes authorizing a person to link, update, and disconnect their own connector Connections. Defaults to `orka:connectors:manage` |
 | `--context-token-skill-read-scopes` | `ORKA_CONTEXT_TOKEN_SKILL_READ_SCOPES` env or `""` | Comma-separated scopes authorizing Skill reads. Defaults to `orka:skills:read` |
 | `--context-token-skill-write-scopes` | `ORKA_CONTEXT_TOKEN_SKILL_WRITE_SCOPES` env or `""` | Comma-separated scopes authorizing Skill writes. Defaults to `orka:skills:write` |
 | `--context-token-gateway-read-scopes` | `ORKA_CONTEXT_TOKEN_GATEWAY_READ_SCOPES` env or `""` | Comma-separated scopes authorizing gateway resource and ledger reads. Defaults to `orka:gateways:read` |

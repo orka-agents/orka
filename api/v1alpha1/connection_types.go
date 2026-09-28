@@ -115,6 +115,13 @@ type ConnectionStatus struct {
 	// +optional
 	LinkedAt *metav1.Time `json:"linkedAt,omitempty"`
 
+	// GrantSequence counts completed consents on this Connection. It rises
+	// on every commit, so authority bound to one grant (a frozen execution
+	// snapshot or a standing approval) does not carry over to a later
+	// re-link of the same Connection object.
+	// +optional
+	GrantSequence int64 `json:"grantSequence,omitempty"`
+
 	// ExpiresAt is the held access token's expiry, if the provider reported one.
 	// +optional
 	ExpiresAt *metav1.Time `json:"expiresAt,omitempty"`

@@ -50,6 +50,10 @@ func NewDB(path string) (*sql.DB, error) {
 		"PRAGMA busy_timeout=5000",
 		"PRAGMA synchronous=NORMAL",
 		"PRAGMA foreign_keys=ON",
+		// Deleted content is overwritten with zeros rather than left in free
+		// pages: connector custody rows are crypto-shredded on disconnect,
+		// and a later file snapshot must not be able to recover them.
+		"PRAGMA secure_delete=ON",
 	}
 	for _, p := range pragmas {
 		if _, err := db.Exec(p); err != nil {
@@ -957,7 +961,8 @@ func currentSchemaStatements() []string {
 	statements = append(statements, controlSchemaStatements()...)
 	statements = append(statements, gatewayTaskCleanupSchemaStatements()...)
 	statements = append(statements, usageSchema()...)
-	return append(statements, agentExecutionSchemaStatements()...)
+	statements = append(statements, agentExecutionSchemaStatements()...)
+	return append(statements, connectorSchemaStatements()...)
 }
 
 // Store implements both store.ResultStore and store.SessionStore.

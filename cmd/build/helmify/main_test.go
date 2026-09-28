@@ -154,6 +154,40 @@ func TestStaticChartGatewayInterimMessagesPerTask(t *testing.T) {
 	}
 }
 
+func TestStaticChartConnectorsFlags(t *testing.T) {
+	rendered := requireHelmRender(t, "--show-only", "templates/deployment.yaml")
+	if strings.Contains(rendered, "--connectors-enabled") || strings.Contains(rendered, "--connector-callback-base-url") {
+		t.Fatalf("connectors must be off by default:\n%s", rendered)
+	}
+	output, err := helmTemplateStaticChart(t, "--show-only", "templates/deployment.yaml",
+		"--set", "controller.connectors.enabled=true")
+	if err == nil || !strings.Contains(output, "callbackBaseUrl is required") {
+		t.Fatalf("enabling connectors without a callback base URL must fail: %v\n%s", err, output)
+	}
+	// Linked-account tokens live only in the controller store; both
+	// controller modes already refuse an ephemeral store outright, so the
+	// combination cannot render.
+	output, err = helmTemplateStaticChart(t, "--show-only", "templates/deployment.yaml",
+		"--set", "controller.connectors.enabled=true",
+		"--set", "controller.connectors.callbackBaseUrl=https://orka.example.test",
+		"--set", "store.persistence.enabled=false")
+	if err == nil || !strings.Contains(output, "store.persistence.enabled must be true") {
+		t.Fatalf("enabling connectors on an ephemeral store must fail: %v\n%s", err, output)
+	}
+	rendered = requireHelmRender(t, "--show-only", "templates/deployment.yaml",
+		"--set", "controller.connectors.enabled=true",
+		"--set", "controller.connectors.callbackBaseUrl=https://orka.example.test",
+		"--set", "store.persistence.enabled=true")
+	for _, want := range []string{
+		"- --connectors-enabled=true\n",
+		"- \"--connector-callback-base-url=https://orka.example.test\"\n",
+	} {
+		if strings.Count(rendered, want) != 1 {
+			t.Fatalf("rendered controller must have exactly one %q argument:\n%s", want, rendered)
+		}
+	}
+}
+
 func TestStaticChartGrantsSessionAuthorizationRBAC(t *testing.T) {
 	output, err := helmTemplateStaticChart(t, "--show-only", "templates/rbac.yaml")
 	if err != nil {
