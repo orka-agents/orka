@@ -241,6 +241,23 @@ func linkedTaskScopeAllowed(ctx context.Context, k8sClient client.Client, taskNa
 	if owner == nil || string(owner.UID) != strings.TrimSpace(tc.TaskUID) || owner.Kind != taskKindString || owner.APIVersion != corev1alpha1.GroupVersion.String() {
 		return fmt.Errorf("task_name %q must name the current task or one of its own child tasks when acting through a linked account", taskName)
 	}
+	// Ownership alone is not repository authority: a coordinator can create
+	// a child naming any repository, so the child's workspace may only
+	// point the linked token at repositories the current Task itself holds.
+	parent, err := loadGitHubTaskScopes(ctx, k8sClient, strings.TrimSpace(tc.TaskID), true)
+	if err != nil {
+		return fmt.Errorf("resolve the current task's repository scope: %w", err)
+	}
+	child, err := loadGitHubTaskScopes(ctx, k8sClient, taskName, true)
+	if err != nil {
+		return err
+	}
+	for _, scope := range child.scopes {
+		if !githubRepoAllowed(scope.owner, scope.repo, parent.scopes) {
+			return fmt.Errorf("child task %q names repository %s/%s, which is outside the current task's repository scope %s",
+				taskName, scope.owner, scope.repo, formatGitHubRepoScopes(parent.scopes))
+		}
+	}
 	return nil
 }
 

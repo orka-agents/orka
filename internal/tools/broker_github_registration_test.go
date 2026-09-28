@@ -33,8 +33,12 @@ func TestRegisterBrokeredGitHubToolsMatchesTheConnectorCatalog(t *testing.T) {
 		t.Fatalf("registered = %v, want the catalog %v", names, want)
 	}
 	review, _ := registry.Get("review_pull_request")
-	if tool, ok := review.(*ReviewPullRequestTool); !ok || tool.maxResultBytes != brokeredReviewResultBudget {
+	if tool, ok := review.(*ReviewPullRequestTool); !ok || tool.maxResultBytes != brokeredResultBudget {
 		t.Fatalf("brokered review_pull_request must be bounded: %#v", review)
+	}
+	issue, _ := registry.Get("get_issue")
+	if tool, ok := issue.(*GetIssueTool); !ok || tool.maxResultBytes != brokeredResultBudget {
+		t.Fatalf("brokered get_issue must be bounded: %#v", issue)
 	}
 	if err := RegisterBrokeredGitHubTools(nil, k8sClient); err == nil {
 		t.Fatal("nil registry must be refused")
@@ -72,6 +76,35 @@ func TestBoundReviewPullRequestResult(t *testing.T) {
 		}
 	}
 	if result.Files[0].Patch == "" {
+		t.Fatal("the caller's result must not be mutated")
+	}
+}
+
+func TestBoundGetIssueResult(t *testing.T) {
+	comment := func(i int) IssueComment {
+		return IssueComment{Author: "a", Body: strings.Repeat("c", 10_000), CreatedAt: strings.Repeat("t", i+1)}
+	}
+	result := GetIssueResult{Number: 7, Title: "t", Body: strings.Repeat("b", 50_000), CommentCount: 5, Comments: []IssueComment{comment(0), comment(1), comment(2), comment(3), comment(4)}}
+	if got := boundGetIssueResult(result, 0); got.Truncated || len(got.Comments) != 5 {
+		t.Fatal("no limit must leave the result alone")
+	}
+	encoded, _ := json.Marshal(result)
+	if got := boundGetIssueResult(result, len(encoded)); got.Truncated {
+		t.Fatal("a result within the limit must not be truncated")
+	}
+	// The oldest comments go first and the newest stay; then the body.
+	got := boundGetIssueResult(result, len(encoded)-1)
+	if out, _ := json.Marshal(got); len(out) > len(encoded)-1 || !got.Truncated || len(got.Comments) != 4 || got.Comments[0].CreatedAt != "tt" || got.Body != result.Body || got.CommentCount != 5 {
+		t.Fatalf("one comment: len=%d %+v", len(out), got)
+	}
+	for _, limit := range []int{60_000, 4096, 512} {
+		got := boundGetIssueResult(result, limit)
+		out, _ := json.Marshal(got)
+		if len(out) > limit || !got.Truncated || got.TruncationNote == "" || !utf8.ValidString(got.Body) {
+			t.Fatalf("limit %d: len=%d truncated=%t note=%q", limit, len(out), got.Truncated, got.TruncationNote)
+		}
+	}
+	if len(result.Comments) != 5 || result.Body == "" {
 		t.Fatal("the caller's result must not be mutated")
 	}
 }

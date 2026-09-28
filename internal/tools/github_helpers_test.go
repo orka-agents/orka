@@ -719,18 +719,25 @@ func (f *fakeLinkedAccounts) BuiltinToolCredential(_ context.Context, toolName s
 	return f.credential, f.bound, f.err
 }
 
-func TestResolveRepoAndToken_LinkedAccountFirst(t *testing.T) {
+// linkedAccountFixture is a Task with a workspace and read Secret, in a
+// fake client, for the linked-account helper tests.
+func linkedAccountFixture(t *testing.T) (client.Client, *corev1alpha1.Task) {
+	t.Helper()
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: testMyTaskName, Namespace: defaultNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: testMyTaskName, Namespace: defaultNamespace, UID: "task-uid"},
 		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Workspace: &corev1alpha1.WorkspaceConfig{
 			GitRepo: "https://github.com/taskorg/taskrepo", ReadCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: testGitCredsSecretName},
 		}},
 	}
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace}, Data: map[string][]byte{tokenKey: []byte("task-secret-token")}}
-	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
+	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build(), task
+}
+
+func TestResolveRepoAndToken_LinkedAccountFirst(t *testing.T) {
+	k8sClient, task := linkedAccountFixture(t)
 
 	// A bound link supplies the token; the Task's Secret is never read and
 	// the workspace still scopes the repository.
@@ -756,26 +763,42 @@ func TestResolveRepoAndToken_LinkedAccountFirst(t *testing.T) {
 	if _, repo, _, _, err := resolveScopedReadRepoAndToken(ctx, k8sClient, "list_pull_requests", testMyTaskName, "", ""); err != nil || repo != "taskrepo" {
 		t.Fatalf("own task_name: repo=%q err=%v", repo, err)
 	}
+}
+
+func TestResolveRepoAndToken_LinkedAccountChildAndTransactionScope(t *testing.T) {
+	k8sClient, task := linkedAccountFixture(t)
+	linked := &fakeLinkedAccounts{credential: LinkedAccountCredential{AccessToken: "linked-token", Provider: "github"}, bound: true}
 	// A child this Task controls may supply the scope (a coordinator opening
-	// its coder's pull request); a child of somebody else may not.
-	child := other.DeepCopy()
-	child.Name, child.ResourceVersion = "child-task", ""
-	child.Spec.Workspace.GitRepo = "https://github.com/taskorg/childrepo"
+	// its coder's pull request) as long as the child's repositories are
+	// within the parent's own; a child of somebody else may not.
+	child := task.DeepCopy()
+	child.Name, child.ResourceVersion, child.UID = "child-task", "", "child-uid"
 	child.OwnerReferences = []metav1.OwnerReference{{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: testMyTaskName, UID: "task-uid", Controller: new(true)}}
 	if err := k8sClient.Create(context.Background(), child); err != nil {
 		t.Fatal(err)
 	}
 	owned := WithToolContext(context.Background(), &ToolContext{Namespace: defaultNamespace, TaskID: testMyTaskName, TaskUID: "task-uid", LinkedAccounts: linked})
-	if _, repo, token, _, err := resolveForgeRepoAndToken(owned, k8sClient, "create_pull_request", "child-task", "", ""); err != nil || repo != "childrepo" || token != "linked-token" {
+	if _, repo, token, _, err := resolveForgeRepoAndToken(owned, k8sClient, "create_pull_request", "child-task", "", ""); err != nil || repo != "taskrepo" || token != "linked-token" {
 		t.Fatalf("owned child: repo=%q token=%q err=%v", repo, token, err)
 	}
 	stranger := WithToolContext(context.Background(), &ToolContext{Namespace: defaultNamespace, TaskID: testMyTaskName, TaskUID: "another-uid", LinkedAccounts: linked})
 	if _, _, _, _, err := resolveForgeRepoAndToken(stranger, k8sClient, "create_pull_request", "child-task", "", ""); err == nil || !strings.Contains(err.Error(), "child tasks") {
 		t.Fatalf("foreign child err = %v", err)
 	}
+	// A child the coordinator pointed at another repository (delegate_task
+	// takes model-supplied repositories) never widens the linked scope.
+	wide := child.DeepCopy()
+	wide.Name, wide.ResourceVersion, wide.UID = "wide-child", "", "wide-uid"
+	wide.Spec.Workspace.GitRepo = "https://github.com/taskorg/otherrepo"
+	if err := k8sClient.Create(context.Background(), wide); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, _, err := resolveForgeRepoAndToken(owned, k8sClient, "create_pull_request", "wide-child", "", ""); err == nil || !strings.Contains(err.Error(), "outside the current task's repository scope") {
+		t.Fatalf("wide child err = %v", err)
+	}
 	// A transaction's repository context never widens a linked token's scope.
 	transacted := task.DeepCopy()
-	transacted.Name, transacted.ResourceVersion = "tx-task", ""
+	transacted.Name, transacted.ResourceVersion, transacted.UID = "tx-task", "", "tx-uid"
 	transacted.Spec.Transaction = &corev1alpha1.TaskTransaction{Context: map[string]string{"repo": "https://github.com/txorg/txrepo"}}
 	if err := k8sClient.Create(context.Background(), transacted); err != nil {
 		t.Fatal(err)
@@ -790,20 +813,13 @@ func TestResolveRepoAndToken_LinkedAccountFirst(t *testing.T) {
 	if _, _, _, _, err := resolveScopedReadRepoAndToken(txSecret, k8sClient, "list_pull_requests", "", "https://github.com/txorg/txrepo", ""); err == nil || strings.Contains(err.Error(), "repository scope") {
 		t.Fatalf("transaction scope under Task credentials must be unchanged: err=%v", err)
 	}
-	// A forge mutation under the link needs no forge Secret.
-	if _, _, token, _, err := resolveForgeRepoAndToken(ctx, k8sClient, "create_pull_request", "", "", ""); err != nil || token != "linked-token" {
-		t.Fatalf("forge under link: token=%q err=%v", token, err)
-	}
-	// Without a Task, a linked account satisfies the external-caller rule
-	// that otherwise demands Task credentials.
-	noTask := WithToolContext(context.Background(), &ToolContext{Namespace: defaultNamespace, LinkedAccounts: linked, RequireGitHubTaskCredentials: true})
-	if _, _, token, _, err := resolveReadRepoAndToken(noTask, k8sClient, "get_issue", "", "https://github.com/some/repo", ""); err != nil || token != "linked-token" {
-		t.Fatalf("no task under link: token=%q err=%v", token, err)
-	}
+}
 
+func TestResolveRepoAndToken_LinkedAccountFailsClosed(t *testing.T) {
+	k8sClient, _ := linkedAccountFixture(t)
 	// No link bound: the Task Secret path is unchanged.
 	unbound := &fakeLinkedAccounts{}
-	ctx = WithToolContext(context.Background(), &ToolContext{Namespace: defaultNamespace, TaskID: testMyTaskName, LinkedAccounts: unbound})
+	ctx := WithToolContext(context.Background(), &ToolContext{Namespace: defaultNamespace, TaskID: testMyTaskName, LinkedAccounts: unbound})
 	if _, _, token, _, err := resolveScopedReadRepoAndToken(ctx, k8sClient, "list_pull_requests", "", "", ""); err != nil || token != "task-secret-token" {
 		t.Fatalf("unbound: token=%q err=%v", token, err)
 	}

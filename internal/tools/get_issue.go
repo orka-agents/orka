@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -23,6 +24,47 @@ const getIssueToolName = "get_issue"
 type GetIssueTool struct {
 	k8sClient  client.Client
 	apiBaseURL string // override for testing; empty uses https://api.github.com
+	// maxResultBytes bounds the encoded result when positive.
+	maxResultBytes int
+}
+
+// WithMaxResultBytes bounds the encoded result: the oldest comments are
+// dropped first, then the body is cut, so a long discussion returns usable
+// partial data instead of a result too big for its transport.
+func (t *GetIssueTool) WithMaxResultBytes(limit int) *GetIssueTool {
+	t.maxResultBytes = limit
+	return t
+}
+
+// boundGetIssueResult trims result until its JSON encoding fits limit; a
+// nonpositive limit leaves it unchanged. comment_count keeps the true total.
+func boundGetIssueResult(result GetIssueResult, limit int) GetIssueResult {
+	if limit <= 0 {
+		return result
+	}
+	encoded, _ := json.Marshal(result)
+	if len(encoded) <= limit {
+		return result
+	}
+	result.Truncated = true
+	result.Comments = append([]IssueComment(nil), result.Comments...)
+	for len(encoded) > limit && len(result.Comments) > 0 {
+		result.Comments = result.Comments[1:]
+		result.TruncationNote = fmt.Sprintf("the oldest comments were omitted to fit the result size limit; %d of %d comments remain", len(result.Comments), result.CommentCount)
+		encoded, _ = json.Marshal(result)
+	}
+	for len(encoded) > limit && result.Body != "" {
+		excess := len(encoded) - limit
+		cut := excess + excess/8 + 64
+		if cut >= len(result.Body) {
+			result.Body = ""
+		} else {
+			result.Body = strings.ToValidUTF8(result.Body[:len(result.Body)-cut], "")
+		}
+		result.TruncationNote = "comments omitted and the body cut to fit the result size limit; read the issue directly for the rest"
+		encoded, _ = json.Marshal(result)
+	}
+	return result
 }
 
 // GetIssueArgs are the arguments for the get_issue tool.
@@ -55,6 +97,10 @@ type GetIssueResult struct {
 	HTMLURL      string         `json:"html_url"`
 	CommentCount int            `json:"comment_count"`
 	Comments     []IssueComment `json:"comments"`
+	// Truncated reports that the result was cut to fit a size budget; the
+	// note says what was dropped.
+	Truncated      bool   `json:"truncated,omitempty"`
+	TruncationNote string `json:"truncation_note,omitempty"`
 }
 
 // NewGetIssueTool creates a new get_issue tool.
@@ -113,7 +159,7 @@ func (t *GetIssueTool) Execute(ctx context.Context, argsJSON json.RawMessage) (s
 		issueResult.Comments = comments
 	}
 
-	resultJSON, _ := json.Marshal(issueResult)
+	resultJSON, _ := json.Marshal(boundGetIssueResult(*issueResult, t.maxResultBytes))
 	return string(resultJSON), nil
 }
 

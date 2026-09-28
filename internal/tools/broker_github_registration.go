@@ -15,9 +15,10 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
-// brokeredReviewResultBudget keeps a review_pull_request result under the
-// broker's result limit with room for the result envelope.
-const brokeredReviewResultBudget = harnessv2.MaxMCPResultBytes - 16*1024
+// brokeredResultBudget keeps a tool result that can grow with the size of
+// a pull request or issue discussion under the broker's result limit, with
+// room for the result envelope.
+const brokeredResultBudget = harnessv2.MaxMCPResultBytes - 16*1024
 
 // RegisterBrokeredGitHubTools registers the GitHub built-ins that can run
 // under a person's linked account into the controller MCP broker registry.
@@ -37,10 +38,10 @@ func RegisterBrokeredGitHubTools(r *Registry, k8sClient client.Client) error {
 	for _, tool := range []Tool{
 		NewCheckPRReviewMarkerTool(k8sClient),
 		NewCheckPullRequestCITool(k8sClient),
-		NewGetIssueTool(k8sClient),
+		NewGetIssueTool(k8sClient).WithMaxResultBytes(brokeredResultBudget),
 		NewListIssuesTool(k8sClient),
 		NewListPullRequestsTool(k8sClient),
-		NewReviewPullRequestTool(k8sClient).WithMaxResultBytes(brokeredReviewResultBudget),
+		NewReviewPullRequestTool(k8sClient).WithMaxResultBytes(brokeredResultBudget),
 		NewCommentOnIssueTool(k8sClient),
 		NewCreatePullRequestTool(k8sClient),
 		NewPostReviewCommentTool(k8sClient),
