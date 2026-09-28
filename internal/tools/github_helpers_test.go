@@ -828,7 +828,6 @@ func TestResolveRepoAndToken_LinkedAccountFirst(t *testing.T) {
 }
 
 //go:fix inline
-func ptrTo[T any](v T) *T { return new(v) }
 
 func unboundFor(t *testing.T) *fakeLinkedAccounts {
 	t.Helper()
