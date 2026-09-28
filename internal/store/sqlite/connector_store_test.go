@@ -1065,3 +1065,30 @@ func TestConnectorPendingLogTruncationIsFinishedLater(t *testing.T) {
 		t.Fatal("a shred retry must finish the pending truncation even when the row is already gone")
 	}
 }
+
+// TestConnectorRetireConnectorCredential covers material that lost a race
+// and cannot become the current row: it is kept sealed for disconnect (until
+// disconnect with a refresh token, until expiry without one), and a
+// tombstoned Connection refuses it.
+func TestConnectorRetireConnectorCredential(t *testing.T) {
+	s := newConnectorTestStore(t)
+	ctx := context.Background()
+	completion := testConnectorCompletion()
+	ref := store.ConnectorCredentialRef{ConnectionUID: completion.ConnectionUID, Namespace: completion.Namespace, Name: completion.Name, SubjectDigest: completion.SubjectDigest, Provider: completion.Provider}
+	if err := s.RetireConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho_lost", RefreshToken: "ghr_lost", RevocationDigest: "revocation-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RetireConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho_gone", ExpiresAt: time.Now().Add(-time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	retired, err := s.ListRetiredConnectorCredentials(ctx, ref)
+	if err != nil || len(retired) != 1 || retired[0].RefreshToken != "ghr_lost" || retired[0].RevocationDigest != "revocation-1" {
+		t.Fatalf("retired = %+v err = %v, want only the live grant kept with its revocation identity", retired, err)
+	}
+	if err := s.TombstoneConnectorCustody(ctx, ref.ConnectionUID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RetireConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho_late", RefreshToken: "ghr_late"}); !errors.Is(err, store.ErrConnectorCustodyTombstoned) {
+		t.Fatalf("retire after disconnect err = %v, want ErrConnectorCustodyTombstoned", err)
+	}
+}

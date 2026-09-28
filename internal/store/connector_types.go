@@ -110,6 +110,12 @@ type ConnectorCredentialStore interface {
 	// UID, for a link the provider revoked that the person may re-consent to.
 	// A newer row returns ErrConflict; a missing row succeeds.
 	ShredConnectorCredential(ctx context.Context, connectionUID string, expectedVersion int64) error
+	// RetireConnectorCredential keeps material that was obtained for ref
+	// but cannot become its current row (a refresh that lost to a consent)
+	// sealed for revocation at disconnect. A refresh token keeps the row
+	// until disconnect; without one the row lives until the access token
+	// expires. A tombstoned Connection refuses it.
+	RetireConnectorCredential(ctx context.Context, ref ConnectorCredentialRef, credential ConnectorCredential) error
 	// DeleteConnectorCredential removes the row and its wrapped key and
 	// tombstones the UID so later writes fail with
 	// ErrConnectorCustodyTombstoned. Missing rows succeed.
