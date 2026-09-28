@@ -113,6 +113,9 @@ func buildRuntimeSessionMCPConfigurationWithRegistry(
 	allowed, disallowed, allowBash = normalizeACPRuntimeToolPolicy(
 		profile.ProviderKind, corev1alpha1.WorkspaceIntent(profile.WorkspaceIntent), allowed, disallowed, allowBash,
 	)
+	// Connector visibility and approval defaults are applied to the planning
+	// inputs by adjustInputsForConnectorTools before the profile is planned,
+	// so the policy built here matches the profile exactly.
 	approval := harnessv2.MCPApprovalPolicy{}
 	if agent.Spec.Coordination != nil {
 		approval.RequiredTools = sortedUnique(agent.Spec.Coordination.ApprovalRequiredTools)
@@ -219,6 +222,87 @@ func validateAgentRuntimeMCPPolicyClaims(
 	return nil
 }
 
+// runtimeSupportsMCPApprovals reports whether a runtime profile can honor an
+// approval-required MCP policy.
+func runtimeSupportsMCPApprovals(profile harnessv2.RuntimeProfile) bool {
+	return profile.ProviderKind == "agentkit" || profile.ProviderKind == "foundry"
+}
+
+// adjustInputsForConnectorTools returns planning inputs with the connector
+// rules applied: write-class connector tools are hidden when the requester's
+// link is readOnly or when the runtime cannot honor approvals, and visible
+// connector write tools are added to the approval-required set. Both the
+// runtime plan and the MCP configuration are built from the returned copies,
+// so their digests agree and the frozen snapshot records the effective policy.
+func adjustInputsForConnectorTools(
+	ctx context.Context,
+	reader client.Reader,
+	registry *tools.Registry,
+	task *corev1alpha1.Task,
+	agent *corev1alpha1.Agent,
+) (*corev1alpha1.Task, *corev1alpha1.Agent, error) {
+	if reader == nil || task == nil || agent == nil || agent.Spec.Runtime == nil {
+		return task, agent, nil
+	}
+	allowed := effectiveACPAllowedTools(task, agent)
+	// Provider-native tools take precedence over a Tool resource of the same
+	// name, so those names are never judged as connector-backed.
+	candidates := allowed
+	if native := providerNativeTools[strings.ToLower(string(agent.Spec.Runtime.Type))]; len(native) > 0 {
+		candidates = make([]string, 0, len(allowed))
+		for _, name := range allowed {
+			if _, ok := native[strings.ToLower(name)]; !ok {
+				candidates = append(candidates, name)
+			}
+		}
+	}
+	hidden, connectorWrite, err := FilterConnectorToolsForRequester(ctx, reader, registry, task, candidates)
+	if err != nil {
+		return nil, nil, fmt.Errorf("apply connector tool visibility: %w", err)
+	}
+	visible := allowed
+	if len(hidden) != len(candidates) {
+		visible = withoutTools(allowed, withoutTools(candidates, hidden))
+	}
+	supportsApprovals := runtimeSupportsMCPApprovals(harnessv2.RuntimeProfile{ProviderKind: string(agent.Spec.Runtime.Type)})
+	if !supportsApprovals && len(connectorWrite) > 0 {
+		// No write without approval: a runtime that cannot ask never sees them.
+		visible = withoutTools(visible, connectorWrite)
+		connectorWrite = nil
+	}
+	if len(visible) != len(allowed) {
+		task = task.DeepCopy()
+		if task.Spec.AgentRuntime == nil {
+			task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{}
+		}
+		task.Spec.AgentRuntime.AllowedTools = visible
+	}
+	if len(connectorWrite) > 0 {
+		agent = agent.DeepCopy()
+		if agent.Spec.Coordination == nil {
+			agent.Spec.Coordination = &corev1alpha1.CoordinationConfig{}
+		}
+		agent.Spec.Coordination.ApprovalRequiredTools = sortedUnique(append(agent.Spec.Coordination.ApprovalRequiredTools, connectorWrite...))
+	}
+	return task, agent, nil
+}
+
+// withoutTools returns names with every entry of removed dropped, preserving order.
+func withoutTools(names, removed []string) []string {
+	drop := make(map[string]struct{}, len(removed))
+	for _, name := range removed {
+		drop[name] = struct{}{}
+	}
+	kept := make([]string, 0, len(names))
+	for _, name := range names {
+		if _, gone := drop[name]; gone {
+			continue
+		}
+		kept = append(kept, name)
+	}
+	return kept
+}
+
 func agentRuntimeMCPApprovalPolicy(policy *corev1alpha1.AgentRuntimeMCPPolicySpec) harnessv2.MCPApprovalPolicy {
 	if policy == nil || len(policy.ApprovalRequiredTools) == 0 {
 		return harnessv2.MCPApprovalPolicy{}
@@ -236,7 +320,7 @@ func buildMCPPolicyConfigurationWithRegistry(
 	approval harnessv2.MCPApprovalPolicy,
 	registry *tools.Registry,
 ) (harnessv2.MCPPolicyConfiguration, error) {
-	if len(approval.RequiredTools) > 0 && profile.ProviderKind != "agentkit" && profile.ProviderKind != "foundry" {
+	if len(approval.RequiredTools) > 0 && !runtimeSupportsMCPApprovals(profile) {
 		return harnessv2.MCPPolicyConfiguration{}, permanentACPAgentConfiguration(
 			fmt.Errorf("approval-required MCP tools require a qualified AgentKit or Foundry runtime"),
 		)

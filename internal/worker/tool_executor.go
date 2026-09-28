@@ -112,6 +112,7 @@ type ToolExecutor struct {
 	authSecretValues            map[string]string
 	requester                   *corev1alpha1.RequestedBy
 	frozenConnections           map[string]outboundaccess.FrozenConnection
+	checkedPolicies             map[string]outboundaccess.PolicyIdentity
 
 	ttsMu        sync.Mutex
 	ttsClient    *contexttoken.TTSClient
@@ -145,6 +146,27 @@ func (e *ToolExecutor) SetFrozenConnections(frozen map[string]outboundaccess.Fro
 	}
 	e.frozenConnections = make(map[string]outboundaccess.FrozenConnection, len(frozen))
 	maps.Copy(e.frozenConnections, frozen)
+}
+
+// SetCheckedPolicy records the OutboundAccessPolicy object the caller
+// validated before execution. Resolution of that policy name then refuses
+// any other policy object or generation.
+func (e *ToolExecutor) SetCheckedPolicy(name string, identity outboundaccess.PolicyIdentity) {
+	if e == nil || strings.TrimSpace(name) == "" {
+		return
+	}
+	if e.checkedPolicies == nil {
+		e.checkedPolicies = map[string]outboundaccess.PolicyIdentity{}
+	}
+	e.checkedPolicies[name] = identity
+}
+
+func (e *ToolExecutor) checkedPolicy(name string) *outboundaccess.PolicyIdentity {
+	identity, ok := e.checkedPolicies[name]
+	if !ok {
+		return nil
+	}
+	return &identity
 }
 
 // Requester returns a copy of the bound requester identity, or nil.
@@ -947,6 +969,7 @@ func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *core
 		CredentialSecret:            e.credentialSecret,
 		Requester:                   e.requester,
 		FrozenConnections:           e.frozenConnections,
+		CheckedPolicy:               e.checkedPolicy(ref.Name),
 		Tool: outboundaccess.ToolBinding{
 			Name: tool.Name, URL: strings.TrimSpace(tool.Spec.HTTP.URL), Method: prepared.request.Method, Class: tool.Spec.BrokeredToolClass,
 			Headers: tool.Spec.HTTP.Headers, Parameters: tool.Spec.Parameters,

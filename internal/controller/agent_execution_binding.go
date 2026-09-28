@@ -316,6 +316,13 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	if err != nil {
 		return nil, err
 	}
+	// Connector-backed tool visibility and approval defaults depend on the
+	// requester's links; apply them to copies so the plan, the MCP policy,
+	// and the frozen snapshot all describe the same effective policy.
+	task, agent, err = adjustInputsForConnectorTools(ctx, reader, r.MCPRegistry, task, agent)
+	if err != nil {
+		return nil, err
+	}
 	plan, err := PlanACPRuntimeWithConfiguration(task, withEffectiveBuiltInContract(agent, r.Mode), r.ACPRuntimeImages, configuration)
 	if err != nil {
 		return nil, permanentACPAgentConfiguration(err)
@@ -393,7 +400,7 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	if err != nil {
 		return nil, fmt.Errorf("resolve frozen ACP MCP configuration: %w", err)
 	}
-	frozenConnections, err := freezeRequesterConnections(ctx, reader, task, mcpConfiguration)
+	frozenConnections, err := freezeRequesterConnections(ctx, reader, r.MCPRegistry, task, mcpConfiguration)
 	if err != nil {
 		return nil, fmt.Errorf("freeze requester connections: %w", err)
 	}
@@ -545,7 +552,7 @@ func (r *TaskReconciler) resolveExternalAgentExecutionCandidate(
 	if runtime.Spec.Capabilities.MCPPolicy != nil {
 		runtimeDisallowed = runtime.Spec.Capabilities.MCPPolicy.DisallowedTools
 	}
-	if connectorTools, err := connectorToolsFor(ctx, reader, task.Namespace, connectorCandidateTools(task, agent, runtimeDisallowed)); err != nil {
+	if connectorTools, err := connectorToolsFor(ctx, reader, r.MCPRegistry, task.Namespace, connectorCandidateTools(task, agent, runtimeDisallowed)); err != nil {
 		return nil, err
 	} else if len(connectorTools) > 0 {
 		return nil, permanentACPAgentConfiguration(errors.New("connector-backed tools are not supported on external v2 AgentRuntimes"))

@@ -129,7 +129,7 @@ func TestMCPApprovalBindingRecoveryPreservesLegacyHintBehavior(t *testing.T) {
 			createMCPApprovalRecoveryOtherTask(t, f)
 			descriptor, err := f.request.ValidateAt(time.Now().UTC())
 			require.NoError(t, err)
-			digest, err := acpMCPApprovalRequestDigest(f.request, descriptor)
+			digest, err := acpMCPApprovalRequestDigest(f.request, descriptor, "")
 			require.NoError(t, err)
 			// A pre-upgrade reservation has no immutable binding. The broker
 			// may later add the discovery label without changing that spec.
@@ -261,7 +261,7 @@ func seedMCPApprovalRecoveryExpiredLease(t *testing.T, f *mcpApprovalRecoveryFix
 	t.Helper()
 	descriptor, err := f.request.ValidateAt(time.Now().UTC())
 	require.NoError(t, err)
-	digest, err := acpMCPApprovalRequestDigest(f.request, descriptor)
+	digest, err := acpMCPApprovalRequestDigest(f.request, descriptor, "")
 	require.NoError(t, err)
 	// Seed coherent historical times through the real store API. No status
 	// patch or sleep fabricates expiry, and recovery has no executable Secret.

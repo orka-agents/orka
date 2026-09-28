@@ -3,7 +3,9 @@ package controller
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +16,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -128,6 +131,139 @@ type RegistryACPMCPToolExecutor struct {
 	AgentExecutionSnapshots store.AgentExecutionSnapshotStore
 }
 
+// acpMCPConnectionDigester is implemented by executors that can name the
+// frozen Connection behind a connector-backed tool for audit records.
+type acpMCPConnectionDigester interface {
+	ConnectionDigest(ctx context.Context, request harnessv2.MCPBrokerCallRequest, descriptor harnessv2.MCPToolDescriptor) (string, error)
+}
+
+// ConnectionDigest returns a non-secret digest of the frozen Connection
+// identity behind a brokered custom tool, or "" when the tool is not
+// connector-backed. A read that fails is an error, never a silent "not
+// connector-backed": the effect record must carry the binding it promises,
+// and its request digest must not depend on transient read availability.
+func (e RegistryACPMCPToolExecutor) ConnectionDigest(ctx context.Context, request harnessv2.MCPBrokerCallRequest, descriptor harnessv2.MCPToolDescriptor) (string, error) {
+	if descriptor.Source != harnessv2.MCPToolSourceBrokeredCustom {
+		return "", nil
+	}
+	if e.Reader == nil {
+		return "", errors.New("connector digest resolution requires a reader")
+	}
+	infos, err := connectorToolsFor(ctx, e.Reader, e.Registry, request.Namespace, []string{descriptor.Name})
+	if err != nil {
+		return "", fmt.Errorf("classify connector tool %q: %w", descriptor.Name, err)
+	}
+	info, ok := infos[descriptor.Name]
+	if !ok {
+		// Not connector-backed as read now. If the Task froze a Connection
+		// for this Tool's policy, it was connection mode at dispatch and
+		// has since been retargeted; that drift never executes under the
+		// policy's new credentials.
+		return "", e.refuseConnectorClassificationDrift(ctx, request, descriptor.Name)
+	}
+	frozen, err := e.taskFrozenConnections(ctx, request)
+	if err != nil {
+		return "", err
+	}
+	digest := frozenConnectionDigest(frozen, info.PolicyName)
+	if digest == "" {
+		return "", fmt.Errorf("connector tool %q has no Connection frozen for policy %q", descriptor.Name, info.PolicyName)
+	}
+	// The binding names the injection configuration too (the Tool spec and
+	// the policy's credential output), so an approval or effect record is
+	// tied to the configuration in force when it was made and a changed
+	// policy is detected when the call is revalidated.
+	return connectorBindingDigest(digest, info.SpecDigest), nil
+}
+
+// taskFrozenConnections loads the frozen Connection bindings of the
+// authenticated ACP Task behind request.
+func (e RegistryACPMCPToolExecutor) taskFrozenConnections(ctx context.Context, request harnessv2.MCPBrokerCallRequest) (map[string]outboundaccess.FrozenConnection, error) {
+	if e.AgentExecutionSnapshots == nil {
+		return nil, errors.New("connector digest resolution requires execution snapshots")
+	}
+	authenticated, ok := ACPMCPAuthenticatedTaskFromContext(ctx)
+	if !ok || authenticated.Namespace != request.Namespace || authenticated.UID != string(request.Metadata.TaskUID) {
+		return nil, errors.New("authenticated ACP MCP task authority is unavailable")
+	}
+	task := &corev1alpha1.Task{}
+	if err := e.Reader.Get(ctx, client.ObjectKey{Namespace: authenticated.Namespace, Name: authenticated.Name}, task); err != nil {
+		return nil, fmt.Errorf("load authenticated task for connector digest: %w", err)
+	}
+	if string(task.UID) != authenticated.UID {
+		return nil, errors.New("authenticated ACP MCP task identity changed")
+	}
+	executor := workerexecutor.NewToolExecutorForNamespace(request.Namespace, nil, nil)
+	if err := bindFrozenConnections(ctx, e.AgentExecutionSnapshots, task, executor); err != nil {
+		return nil, err
+	}
+	return executor.FrozenConnections(), nil
+}
+
+// refuseConnectorClassificationDrift returns an error when the named Tool's
+// policy has a Connection frozen in the Task's snapshot although the policy
+// is no longer connection mode. A Tool without a policy, or whose policy
+// was never frozen, is simply not connector-backed.
+func (e RegistryACPMCPToolExecutor) refuseConnectorClassificationDrift(ctx context.Context, request harnessv2.MCPBrokerCallRequest, toolName string) error {
+	tool := &corev1alpha1.Tool{}
+	if err := e.Reader.Get(ctx, client.ObjectKey{Namespace: request.Namespace, Name: toolName}, tool); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("load tool %q: %w", toolName, err)
+	}
+	if tool.Spec.HTTP == nil || tool.Spec.HTTP.OutboundAccessPolicyRef == nil || e.AgentExecutionSnapshots == nil {
+		return nil
+	}
+	if _, ok := ACPMCPAuthenticatedTaskFromContext(ctx); !ok {
+		return nil
+	}
+	frozen, err := e.taskFrozenConnections(ctx, request)
+	if err != nil {
+		return err
+	}
+	return connectorClassificationDrift(frozen, tool)
+}
+
+// connectorClassificationDrift is the check itself: a frozen Connection for
+// a policy that no longer classifies the Tool as connector-backed.
+func connectorClassificationDrift(frozen map[string]outboundaccess.FrozenConnection, tool *corev1alpha1.Tool) error {
+	if tool == nil || tool.Spec.HTTP == nil || tool.Spec.HTTP.OutboundAccessPolicyRef == nil {
+		return nil
+	}
+	policyName := tool.Spec.HTTP.OutboundAccessPolicyRef.Name
+	if _, ok := frozen[policyName]; ok {
+		return fmt.Errorf("tool %q: policy %q was connection mode when the task was dispatched and is not any more; re-dispatch the task", tool.Name, policyName)
+	}
+	return nil
+}
+
+// connectorPolicyPin classifies tool against its live policy and returns the
+// policy identity execution must resolve under, or a drift error when the
+// Task froze a Connection for a policy that is no longer connection mode.
+// A Tool that is not connector-backed (and was not at dispatch) pins nothing.
+func connectorPolicyPin(ctx context.Context, reader client.Reader, registry *tools.Registry, frozen map[string]outboundaccess.FrozenConnection, tool *corev1alpha1.Tool) (string, *outboundaccess.PolicyIdentity, error) {
+	if tool == nil || tool.Spec.HTTP == nil || tool.Spec.HTTP.OutboundAccessPolicyRef == nil {
+		return "", nil, nil
+	}
+	infos, err := connectorToolsFor(ctx, reader, registry, tool.Namespace, []string{tool.Name})
+	if err != nil {
+		return "", nil, fmt.Errorf("classify connector tool %q: %w", tool.Name, err)
+	}
+	info, ok := infos[tool.Name]
+	if !ok {
+		return "", nil, connectorClassificationDrift(frozen, tool)
+	}
+	return info.PolicyName, &outboundaccess.PolicyIdentity{UID: info.PolicyUID, Generation: info.PolicyGeneration}, nil
+}
+
+// connectorBindingDigest combines the frozen Connection identity digest with
+// the dispatch digest of the Tool and its policy.
+func connectorBindingDigest(connectionDigest, specDigest string) string {
+	sum := sha256.Sum256([]byte(connectionDigest + "\x00" + specDigest))
+	return hex.EncodeToString(sum[:])
+}
+
 // ValidateACPMCPTool checks configuration drift before spending an approval.
 // ExecuteACPMCPTool repeats this check at the custom Tool execution boundary.
 func (e RegistryACPMCPToolExecutor) ValidateACPMCPTool(ctx context.Context, request harnessv2.MCPBrokerCallRequest, descriptor harnessv2.MCPToolDescriptor) error {
@@ -234,6 +370,18 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 		executor.SetTransactionExchangeConfig(e.TransactionExchange)
 		if bindErr := e.bindTaskTransactionAuthority(ctx, request, executor); bindErr != nil {
 			return nil, bindErr
+		}
+		// The policy this call is classified under is the one it resolves
+		// under: a policy retargeted after dispatch (no longer connection
+		// mode while the Task froze a Connection for it) is refused, and a
+		// policy replaced or edited before the request is refused by the
+		// resolver.
+		policyName, identity, pinErr := connectorPolicyPin(ctx, e.Reader, e.Registry, executor.FrozenConnections(), tool)
+		if pinErr != nil {
+			return nil, pinErr
+		}
+		if identity != nil {
+			executor.SetCheckedPolicy(policyName, *identity)
 		}
 		execute = func(callCtx context.Context) (string, error) {
 			execCtx := workerexecutor.WithToolCallID(callCtx, request.Call.CallID)
@@ -514,9 +662,22 @@ func (b *ACPMCPBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			OperationID: string(request.Metadata.OperationID),
 		}
 		effectIdentity = &identity
+		effectRequest := map[string]any{"call": request.Call, "descriptor": descriptor}
+		if digester, ok := b.Executor.(acpMCPConnectionDigester); ok {
+			digest, digestErr := digester.ConnectionDigest(promptCtx, request, descriptor)
+			if digestErr != nil {
+				// The effect must carry the binding it promises; a call that
+				// cannot name its Connection is refused before reservation.
+				writeACPMCPError(w, http.StatusBadGateway, "MCP tool connection binding is unavailable")
+				return
+			}
+			if digest != "" {
+				// Audit which person's link a consequential call acted under.
+				effectRequest["connection"] = digest
+			}
+		}
 		result, replayed, err = runExternalEffectWithReplay(
-			promptCtx, b.Effects, credentials.ControllerFence, identity,
-			map[string]any{"call": request.Call, "descriptor": descriptor}, call,
+			promptCtx, b.Effects, credentials.ControllerFence, identity, effectRequest, call,
 		)
 	} else {
 		result, err = call(promptCtx)

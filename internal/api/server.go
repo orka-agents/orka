@@ -97,6 +97,7 @@ type ServerConfig struct {
 	ControllerEpochs          ControllerEpochFenceSource
 	E2EPromptFaultEnabled     bool
 	Connectors                ConnectorConfig
+	ConnectorTools            ConnectorToolExecutionConfig
 }
 
 // Server is the REST API server
@@ -507,11 +508,15 @@ func (s *Server) setupRoutes() {
 				GatewayEventStore:       s.GatewayEventStore,
 				GatewayService:          s.config.GatewayService,
 				TaskProvenanceProtected: s.config.TaskProvenanceProtected,
+				ConnectorTools:          s.config.ConnectorTools,
 			},
 		)
 		internal := s.app.Group("/internal/v1")
 		internal.Use(NewAuthMiddleware(s.client))
 		internal.Post("/results/:namespace/:taskName", s.internalHandlers.SubmitResult)
+		// Native workers run connector-backed tools here; the person's token
+		// never leaves the controller.
+		internal.Post("/tasks/:namespace/:taskName/connector-tools/:tool", s.internalHandlers.ExecuteConnectorTool)
 		internal.Post("/tasks/:namespace/:taskName/gateway-messages", s.internalHandlers.SubmitGatewayMessage)
 		internal.Post("/tasks/:namespace/:taskName/children/:child/requester-stamp", s.internalHandlers.SealChildRequesterStamp)
 		internal.Post("/tasks/:namespace/:taskName/execution-workspace/status", s.internalHandlers.UpdateExecutionWorkspaceStatus)

@@ -47,6 +47,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/agentruntimepolicy"
+	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/approvals"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	execevents "github.com/orka-agents/orka/internal/events"
@@ -1511,12 +1512,29 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		}
 	}
 
+	// Freeze the requester's Connections before anything is created, so a
+	// transient read failure retries dispatch instead of starting a worker
+	// whose connector-backed tools could never bind.
+	frozenConnections, err := freezeRequesterConnectionsForTools(ctx, reader, tools.DefaultRegistry, task, aitools.Resolve(task, agent))
+	if err != nil {
+		log.Error(err, "failed to freeze requester connections; retrying dispatch")
+		return ctrl.Result{}, err
+	}
+
+	connectionBindings := taskConnectionBindings(frozenConnections)
+
 	// Create the Job
 	job, err := r.JobBuilder.BuildWithOptions(ctx, jobTask, agent, provider, JobBuildOptions{
 		ResolvedApprovalsJSON:       resolvedApprovalsJSON,
 		RepositoryMonitorValidation: validationTask,
+		ConnectionBindings:          connectionBindings,
+		Reader:                      reader,
 	})
 	if err != nil {
+		if errors.Is(err, ErrConnectorToolResolution) {
+			log.Error(err, "failed to resolve connector-backed tools; retrying dispatch")
+			return ctrl.Result{}, err
+		}
 		log.Error(err, "failed to build Job")
 		return r.failTask(ctx, task, fmt.Sprintf("failed to build job: %v", err))
 	}
@@ -1538,6 +1556,14 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 				return ctrl.Result{}, recoveryErr
 			}
 			job = existing
+			// The recovered Job was built against the Connections frozen
+			// for it; a freeze taken now must not hand it authority over a
+			// Connection that changed since.
+			recovered, _, bindingErr := FrozenConnectionBindingsFromJob(existing)
+			if bindingErr != nil {
+				return r.failTask(ctx, task, fmt.Sprintf("%v: %v", errTaskJobIdentity, bindingErr))
+			}
+			connectionBindings = recovered
 		} else {
 			log.Error(err, "failed to create Job")
 			return r.failTask(ctx, task, fmt.Sprintf("failed to create job: %v", err))
@@ -1545,6 +1571,7 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	}
 	task.Status.JobName = job.Name
 	task.Status.JobUID = string(job.UID)
+	task.Status.ConnectionBindings = connectionBindings
 
 	// Update status to Running
 	now := metav1.Now()
@@ -1573,6 +1600,9 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		t.Status.Attempts = attempts
 		t.Status.JobName = jobName
 		t.Status.JobUID = jobUID
+		// The retry re-fetches the Task; the bindings frozen before the
+		// Job was created must land in the same status write.
+		t.Status.ConnectionBindings = connectionBindings
 		meta.SetStatusCondition(&t.Status.Conditions, metav1.Condition{
 			Type:               ConditionTypeJobCreated,
 			Status:             metav1.ConditionTrue,

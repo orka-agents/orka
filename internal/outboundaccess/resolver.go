@@ -71,6 +71,10 @@ type ResolveRequest struct {
 	// resolution requires an entry and fails closed when the live Connection
 	// differs from it.
 	FrozenConnections map[string]FrozenConnection
+	// CheckedPolicy, when set, is the policy the caller validated against
+	// the dispatched configuration; resolution refuses a policy object that
+	// changed after that check rather than injecting under a different one.
+	CheckedPolicy *PolicyIdentity
 	// Tool identifies the executing Tool. Connection-mode resolution releases
 	// a credential only to a Tool the ConnectorProvider declares, with the
 	// same URL, method, and class, so a policy cannot be attached to an
@@ -111,6 +115,13 @@ func NormalizedConnectorTimeout(timeout time.Duration) time.Duration {
 		return connectorDefaultTimeout
 	}
 	return timeout
+}
+
+// PolicyIdentity pins the OutboundAccessPolicy a caller checked before
+// asking for resolution.
+type PolicyIdentity struct {
+	UID        string
+	Generation int64
 }
 
 // FrozenConnection is the dispatch-time identity of a person's Connection.
@@ -221,6 +232,9 @@ func (r *KubernetesResolver) Resolve(ctx context.Context, req ResolveRequest) (R
 	if !policyConditionCurrentTrue(policy, corev1alpha1.OutboundAccessPolicyConditionAccepted) ||
 		!policyConditionCurrentTrue(policy, corev1alpha1.OutboundAccessPolicyConditionResolvedRefs) {
 		return Resolution{}, errors.New("outbound access policy is not accepted with resolved references")
+	}
+	if req.CheckedPolicy != nil && (string(policy.UID) != req.CheckedPolicy.UID || policy.Generation != req.CheckedPolicy.Generation) {
+		return Resolution{}, errors.New("outbound access policy changed since it was checked; re-dispatch the task")
 	}
 	if issue, err := ResolveReferences(ctx, r.Reader, policy, r.Trust); err != nil {
 		return Resolution{}, err

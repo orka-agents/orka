@@ -32,6 +32,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
@@ -254,7 +255,17 @@ func run(transcriptPath string) (err error) {
 	enabledTools = autoEnableMemoryTools(enabledTools)
 
 	// Load custom Tool CRDs
-	customTools := loadCustomTools(ctx, k8sClient, taskNamespace, enabledTools)
+	customTools, err := loadCustomTools(ctx, k8sClient, taskNamespace, enabledTools)
+	if err != nil {
+		return fmt.Errorf("load custom tools: %w", err)
+	}
+	// Tools behind a connection-mode policy never run in this Pod.
+	connectorBackedToolNames, err = connectorBackedTools(ctx, k8sClient, taskNamespace, customTools)
+	if err != nil {
+		return fmt.Errorf("classify connector-backed tools: %w", err)
+	}
+	markConnectorBackedTools(customTools, connectorBackedToolNames)
+	connectorBindings = parseConnectionBindings(os.Getenv(workerenv.ConnectionBindings))
 
 	// Load skills from mounted volume and prepend to system prompt
 	if skillContent := loadSkillsFromVolume(); skillContent != "" {
@@ -423,28 +434,42 @@ func createK8sClient() (client.Client, error) {
 }
 
 // loadCustomTools loads Tool CRDs from the cluster
+//
+// A Tool the controller dispatched as connector-backed (it is in the frozen
+// digest set) is never silently dropped: a read that keeps failing fails
+// startup so the Pod restarts with the tool set it was dispatched with,
+// instead of running with a permanently reduced one.
 func loadCustomTools(
 	ctx context.Context,
 	k8sClient client.Client,
 	namespace string,
 	toolNames []string,
-) map[string]*corev1alpha1.Tool {
+) (map[string]*corev1alpha1.Tool, error) {
 	customTools := make(map[string]*corev1alpha1.Tool)
+	frozenConnector := frozenConnectorToolDigests(os.Getenv(workerenv.ConnectorToolDigests))
 
 	for _, name := range toolNames {
 		// Skip built-in tools
 		if _, ok := tools.DefaultRegistry.Get(name); ok {
 			continue
 		}
+		_, frozen := frozenConnector[name]
 
 		// Try to load as custom Tool CRD
 		tool := &corev1alpha1.Tool{}
-		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, tool); err != nil {
+		key := client.ObjectKey{Namespace: namespace, Name: name}
+		if err := readCustomTool(ctx, k8sClient, key, tool, frozen); err != nil {
+			if frozen && !apierrors.IsNotFound(err) {
+				return nil, fmt.Errorf("load connector-backed tool %q: %w", name, err)
+			}
 			fmt.Printf("Warning: tool %q not found as built-in or CRD: %v\n", name, err)
 			continue
 		}
 		bindApprovalAuthRefVersion(ctx, k8sClient, namespace, tool)
 		if err := bindApprovalOutboundAccessPolicyVersion(ctx, k8sClient, namespace, tool); err != nil {
+			if frozen {
+				return nil, fmt.Errorf("bind outbound access policy for connector-backed tool %q: %w", name, err)
+			}
 			fmt.Printf("Warning: outbound access policy approval binding for tool %q failed: %v\n", tool.Name, err)
 			continue
 		}
@@ -452,7 +477,31 @@ func loadCustomTools(
 		customTools[name] = tool
 	}
 
-	return customTools
+	return customTools, nil
+}
+
+// readCustomTool reads a Tool; a frozen connector-backed one is retried on
+// transient failures with the same bounds as its policy.
+func readCustomTool(
+	ctx context.Context, k8sClient client.Client, key client.ObjectKey, tool *corev1alpha1.Tool, frozen bool,
+) error {
+	if !frozen {
+		return k8sClient.Get(ctx, key, tool)
+	}
+	backoff := connectorPolicyReadBackoff
+	var err error
+	for range connectorPolicyReadAttempts {
+		if err = k8sClient.Get(ctx, key, tool); err == nil || apierrors.IsNotFound(err) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+	}
+	return err
 }
 
 func clearApprovalAuthRefVersion(tool *corev1alpha1.Tool) {
@@ -1434,7 +1483,13 @@ func executeAgentLoopWithEvents(
 				if approvalKey != "" {
 					execCtx = worker.WithToolIdempotencyKey(execCtx, approvalKey)
 				}
-				result, execErr = toolExecutor.Execute(execCtx, customTool, execArgs)
+				if connectorBackedToolNames[toolName] {
+					// The person's linked-account token lives only in the
+					// controller; the worker asks it to run the call.
+					result, execErr = executeConnectorToolViaController(execCtx, nil, customTool, execArgs, tc.ID, approvalKey)
+				} else {
+					result, execErr = toolExecutor.Execute(execCtx, customTool, execArgs)
+				}
 				if execErr == nil || worker.ToolRequestWasAttempted(execErr) {
 					approvalGate.markFired(approvalKey)
 				}
