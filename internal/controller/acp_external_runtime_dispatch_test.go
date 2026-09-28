@@ -2826,3 +2826,36 @@ func TestExternalRuntimeFrozenCapabilityEnvelopeRejectsEveryLiveDriftClass(t *te
 		})
 	}
 }
+
+// An external runtime's snapshot freezes no Connections, so a connector-
+// backed tool on it is refused with a definitive reason at candidate
+// resolution instead of failing every call for want of a frozen Connection.
+func TestExternalRuntimeCandidateRefusesConnectorBackedTools(t *testing.T) {
+	fixture := newExternalACPDispatchFixture(t)
+	policy := &corev1alpha1.OutboundAccessPolicy{
+		ObjectMeta: metav1.ObjectMeta{Namespace: defaultNS, Name: "github-conn"},
+		Spec:       corev1alpha1.OutboundAccessPolicySpec{Connection: &corev1alpha1.ConnectionOutboundAccess{ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}}},
+	}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Namespace: defaultNS, Name: "gh_search"},
+		Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+			URL: "https://api.github.com/search/issues", OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "github-conn"},
+		}},
+	}
+	for _, object := range []client.Object{policy, tool} {
+		if err := fixture.client.Create(fixture.ctx, object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Namespace: defaultNS, Name: "external-connector", UID: types.UID("external-connector-uid"), Generation: 1},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: fixture.agent.Name},
+			Prompt: "search issues", AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"gh_search"}},
+		},
+	}
+	candidate, err := fixture.reconciler.resolveExternalAgentExecutionCandidate(fixture.ctx, task, fixture.agent)
+	if err == nil || candidate != nil || !isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "not supported on external v2 AgentRuntimes") {
+		t.Fatalf("resolveExternalAgentExecutionCandidate() = (%#v, %v), want a permanent connector refusal", candidate, err)
+	}
+}
