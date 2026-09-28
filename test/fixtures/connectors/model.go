@@ -1,3 +1,4 @@
+//nolint:goconst // Keep the fixed model wire fixtures readable.
 package connectorsfixture
 
 import (
