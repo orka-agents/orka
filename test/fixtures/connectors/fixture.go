@@ -4,6 +4,7 @@
 // revokes them, a resource API that only honours those tokens, and an
 // OpenAI-compatible model that drives a read, an approval-gated write, and a
 // second read. Never expose it as a real service.
+//nolint:goconst // Keep the fixed OAuth, JSON, and model wire fixtures readable.
 package connectorsfixture
 
 import (
