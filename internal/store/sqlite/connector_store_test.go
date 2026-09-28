@@ -808,7 +808,20 @@ func TestConnectorDeletionLeavesNoCiphertextInFiles(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT dek_ciphertext, ciphertext FROM connector_credentials WHERE connection_uid = ?`, ref.ConnectionUID).Scan(&dekCiphertext, &ciphertext); err != nil {
 		t.Fatal(err)
 	}
+	// A parked completion is sealed under the controller key itself, so its
+	// payload must leave the files with the disconnect as well; the
+	// finalizer deletes custody first and the parked rows after it.
+	if err := s.CreateConnectorCompletion(ctx, completion); err != nil {
+		t.Fatal(err)
+	}
+	var payload []byte
+	if err := s.db.QueryRow(`SELECT payload FROM connector_completions WHERE nonce = ?`, completion.Nonce).Scan(&payload); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.DeleteConnectorCredential(ctx, ref.ConnectionUID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteConnectorConsentsForConnection(ctx, ref.ConnectionUID); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{s.dbPath, s.dbPath + "-wal"} {
@@ -816,8 +829,10 @@ func TestConnectorDeletionLeavesNoCiphertextInFiles(t *testing.T) {
 		if err != nil && !os.IsNotExist(err) {
 			t.Fatal(err)
 		}
-		if bytes.Contains(data, dekCiphertext) || bytes.Contains(data, ciphertext) {
-			t.Fatalf("%s still holds the deleted row's sealed material", path)
+		for name, sealed := range map[string][]byte{"wrapped key": dekCiphertext, "ciphertext": ciphertext, "completion payload": payload} {
+			if bytes.Contains(data, sealed) {
+				t.Fatalf("%s still holds the deleted %s", path, name)
+			}
 		}
 	}
 }

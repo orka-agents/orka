@@ -892,7 +892,7 @@ func (s *Store) DeleteConnectorCompletion(ctx context.Context, nonce string) err
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM connector_completions WHERE nonce = ?`, nonce); err != nil {
 		return fmt.Errorf("delete connector completion: %w", err)
 	}
-	return nil
+	return s.truncateWAL(ctx)
 }
 
 // ListConnectorCompletionsForConnection implements store.ConnectorConsentStore.
@@ -969,7 +969,12 @@ func (s *Store) DeleteConnectorConsentsForConnection(ctx context.Context, connec
 	if _, err := tx.ExecContext(ctx, `DELETE FROM connector_completions WHERE connection_uid = ?`, connectionUID); err != nil {
 		return fmt.Errorf("delete connector completions: %w", err)
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	// Parked completions carry token material sealed under the controller
+	// key itself; their log frames go with the rows, as custody's do.
+	return s.truncateWAL(ctx)
 }
 
 func formatConnectorTime(t time.Time) string {
