@@ -104,6 +104,9 @@ spec:
 `kubectl get connectorprovider github` shows `Accepted` and `ResolvedRefs`.
 The controller rejects a provider whose built-in declarations do not match
 the catalog below, so a typo or a wrong class never becomes a live provider.
+The declared tools are part of what a person consents to: adding a built-in
+(or an HTTP tool) later asks every linked person for consent again before
+the new tool can use their account.
 
 GitHub OAuth Apps have no read-only scope for private repositories: reading
 them needs `repo`, which also grants write. Orka hides write tools from a

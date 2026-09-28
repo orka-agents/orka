@@ -613,11 +613,18 @@ func TestProviderAuthorityDigestAndConsent(t *testing.T) {
 	if ProviderAuthorityDigest(widened) == ProviderAuthorityDigest(provider) || ProviderIssuerDigest(widened) != ProviderIssuerDigest(provider) {
 		t.Fatal("a tool's parameter schema must move the authority digest but not the issuer digest")
 	}
-	// Built-in declarations do not carry a destination and do not move the digest.
-	builtinOnly := provider.DeepCopy()
-	builtinOnly.Spec.Tools = append(builtinOnly.Spec.Tools, corev1alpha1.ConnectorTool{Name: "list_issues", Class: corev1alpha1.ConnectorToolClassRead, Source: corev1alpha1.ConnectorToolSourceBuiltin})
-	if ProviderAuthorityDigest(builtinOnly) != digest {
-		t.Fatal("a new built-in declaration must not require consent again")
+	// A built-in declaration is a use of the token the person consented to:
+	// adding one, or changing its class, moves the authority digest but not
+	// the issuer digest.
+	builtinAdded := provider.DeepCopy()
+	builtinAdded.Spec.Tools = append(builtinAdded.Spec.Tools, corev1alpha1.ConnectorTool{Name: "list_issues", Class: corev1alpha1.ConnectorToolClassRead, Source: corev1alpha1.ConnectorToolSourceBuiltin})
+	if ProviderAuthorityDigest(builtinAdded) == digest || ProviderIssuerDigest(builtinAdded) != ProviderIssuerDigest(provider) {
+		t.Fatal("a new built-in declaration must require consent again without moving the issuer digest")
+	}
+	reclassed := provider.DeepCopy()
+	reclassed.Spec.Tools[1].Class = corev1alpha1.ConnectorToolClassRead
+	if ProviderAuthorityDigest(reclassed) == digest {
+		t.Fatal("a built-in's class is part of the consented authority")
 	}
 }
 

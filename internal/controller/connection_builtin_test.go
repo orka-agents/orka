@@ -426,6 +426,22 @@ func TestRegistryACPMCPToolExecutorBindsLinkedAccountsForBuiltins(t *testing.T) 
 	if _, err := executor.ExecuteACPMCPTool(context.Background(), request, builtin); err == nil {
 		t.Fatal("an unauthenticated context must fail the built-in call")
 	}
+	// No context factory, or one that yields nothing: the catalog built-in
+	// is refused rather than run on the tool's own credential path, while
+	// a non-catalog built-in still runs.
+	for name, factory := range map[string]func(context.Context, harnessv2.MCPBrokerCallRequest) (*tools.ToolContext, error){
+		"absent": nil,
+		"empty":  func(context.Context, harnessv2.MCPBrokerCallRequest) (*tools.ToolContext, error) { return nil, nil },
+	} {
+		bare := executor
+		bare.ContextFactory = factory
+		if _, err := bare.ExecuteACPMCPTool(ctx, request, builtin); err == nil || !strings.Contains(err.Error(), "no authenticated task context") {
+			t.Fatalf("%s factory: err = %v, want the built-in refused", name, err)
+		}
+		if _, err := bare.ExecuteACPMCPTool(ctx, request, harnessv2.MCPToolDescriptor{Name: "web_search", Source: harnessv2.MCPToolSourceBrokeredBuiltin}); err != nil {
+			t.Fatalf("%s factory: non-catalog built-in must still run: %v", name, err)
+		}
+	}
 }
 
 func TestBrokeredLinkedBuiltins(t *testing.T) {

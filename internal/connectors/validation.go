@@ -704,6 +704,20 @@ func ProviderAuthorityDigest(provider *corev1alpha1.ConnectorProvider) string {
 			parts = append(parts, "header", name, tool.HTTP.Headers[name])
 		}
 	}
+	// Built-in declarations are part of what the person consented to as
+	// well: each names a tool that will act with the token against the
+	// catalog's fixed audience, and a write tool added later must not be
+	// authorized by a consent that never mentioned it.
+	builtins := make([]corev1alpha1.ConnectorTool, 0, len(provider.Spec.Tools))
+	for _, tool := range provider.Spec.Tools {
+		if tool.Source == corev1alpha1.ConnectorToolSourceBuiltin {
+			builtins = append(builtins, tool)
+		}
+	}
+	slices.SortFunc(builtins, func(a, b corev1alpha1.ConnectorTool) int { return strings.Compare(a.Name, b.Name) })
+	for _, tool := range builtins {
+		parts = append(parts, "builtin", tool.Name, string(tool.Class), BuiltinConnectorToolAudience)
+	}
 	return lengthPrefixedDigest(parts)
 }
 

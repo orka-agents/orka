@@ -350,6 +350,7 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 		if _, ok := registry.Get(descriptor.Name); !ok {
 			return nil, fmt.Errorf("MCP tool %q is not registered", descriptor.Name)
 		}
+		_, linkedBuiltin := connectors.BuiltinConnectorToolClass(descriptor.Name)
 		var toolContext *tools.ToolContext
 		if e.ContextFactory != nil {
 			var contextErr error
@@ -370,7 +371,7 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 				// read here, before the call, so a snapshot that cannot be
 				// loaded is a preparation failure and never a silent run
 				// on the Task's own credentials.
-				if _, linked := connectors.BuiltinConnectorToolClass(descriptor.Name); linked {
+				if linkedBuiltin {
 					requester, frozen, err := e.taskConnectionAuthority(ctx, request)
 					if err != nil {
 						return nil, err
@@ -381,6 +382,12 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 				}
 				toolContext = &copy
 			}
+		}
+		// A catalog built-in reaches the broker only through the link;
+		// without the authenticated context that carries the binding it
+		// would fall through to the tool's own credential path.
+		if linkedBuiltin && (toolContext == nil || toolContext.LinkedAccounts == nil) {
+			return nil, fmt.Errorf("built-in tool %q runs only under the requester's linked account, and no authenticated task context is available", descriptor.Name)
 		}
 		execute = func(callCtx context.Context) (string, error) {
 			if toolContext != nil {
