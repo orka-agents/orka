@@ -207,7 +207,8 @@ func TestFixtureOIDCAndModelScript(t *testing.T) {
 	if name, _ := turn([]map[string]any{user, readResult}, ""); name != WriteToolName {
 		t.Fatalf("second turn = %q", name)
 	}
-	approved := map[string]any{"role": "system", "content": "## Resolved Human Approvals\n\n- APPROVED ap-1 for itemswrite"}
+	approvedText := "## Resolved Human Approvals\n\n- APPROVED ap-1 for itemswrite"
+	approved := map[string]any{"role": "system", "content": approvedText}
 	if name, _ := turn([]map[string]any{approved, user}, ""); name != WriteToolName {
 		t.Fatal("after approval the write must be reissued first")
 	}
