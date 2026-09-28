@@ -10,8 +10,8 @@ import (
 // The model script the fixture plays, keyed by what the conversation already
 // holds. Tool call ids carry a prefix so results can be recognised.
 const (
-	ReadToolName  = "gh_read"
-	WriteToolName = "gh_write"
+	ReadToolName  = "itemsread"
+	WriteToolName = "itemswrite"
 	WriteTitle    = "hello from orka"
 	readOneID     = "read1"
 	readTwoID     = "read2"
@@ -43,10 +43,10 @@ type modelRequest struct {
 // model plays a fixed script through either the Chat Completions or the
 // Responses shape:
 //
-//  1. gh_read, then gh_write. The worker parks gh_write for approval, so
+//  1. itemsread, then itemswrite. The worker parks itemswrite for approval, so
 //     the first run ends there.
 //  2. After a person approves, the run resumes with the resolved approval
-//     in the prompt: gh_write again with identical arguments, then gh_read
+//     in the prompt: itemswrite again with identical arguments, then itemsread
 //     again (by now the first access token has expired, so this read is
 //     served by a refreshed token), then update_plan with the goal complete
 //     and a final answer.

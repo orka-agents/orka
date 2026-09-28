@@ -59,7 +59,7 @@ func TestFixtureOAuthLifecycle(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		var body map[string]any
 		_ = json.NewDecoder(resp.Body).Decode(&body)
 		return body, resp.StatusCode
@@ -89,7 +89,7 @@ func TestFixtureOAuthLifecycle(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return resp.StatusCode
 	}
 	if call(http.MethodGet, access, "") != http.StatusOK || call(http.MethodPost, access, "hello") != http.StatusCreated || call(http.MethodGet, "nope", "") != http.StatusUnauthorized {
@@ -177,7 +177,7 @@ func TestFixtureOIDCAndModelScript(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		var out struct {
 			Choices []struct {
 				Message struct {
@@ -207,7 +207,7 @@ func TestFixtureOIDCAndModelScript(t *testing.T) {
 	if name, _ := turn([]map[string]any{user, readResult}, ""); name != WriteToolName {
 		t.Fatalf("second turn = %q", name)
 	}
-	approved := map[string]any{"role": "system", "content": "## Resolved Human Approvals\n\n- APPROVED ap-1 for gh_write"}
+	approved := map[string]any{"role": "system", "content": "## Resolved Human Approvals\n\n- APPROVED ap-1 for itemswrite"}
 	if name, _ := turn([]map[string]any{approved, user}, ""); name != WriteToolName {
 		t.Fatal("after approval the write must be reissued first")
 	}

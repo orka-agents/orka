@@ -160,6 +160,10 @@ the call starts.
 The full example, with an Agent that uses these tools, is in
 [`examples/github-connector/`](https://github.com/orka-agents/orka/tree/main/examples/github-connector).
 
+A curated `HTTP` tool is also a `Tool` object of the same name, so name it
+with lowercase letters and digits only: connector tool names are
+`snake_case` identifiers, and a Kubernetes object name cannot contain `_`.
+
 ## 3. Link an account
 
 Each person links once, signed in as themselves (an OIDC or context-token

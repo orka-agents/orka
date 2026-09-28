@@ -254,13 +254,13 @@ spec:
       read: [items:read]
       write: [items:write]
   tools:
-    - name: gh_read
+    - name: itemsread
       class: read
       source: HTTP
       description: Read items as the linked person
       parameters: {"type":"object","properties":{"q":{"type":"string"}},"additionalProperties":false}
       http: {url: "https://${fixture_host}:8443/api/items", method: GET}
-    - name: gh_write
+    - name: itemswrite
       class: write
       source: HTTP
       description: Create an item as the linked person
@@ -278,7 +278,7 @@ spec:
 apiVersion: core.orka.ai/v1alpha1
 kind: Tool
 metadata:
-  name: gh_read
+  name: itemsread
 spec:
   description: Read items as the linked person
   brokeredToolClass: read
@@ -291,7 +291,7 @@ spec:
 apiVersion: core.orka.ai/v1alpha1
 kind: Tool
 metadata:
-  name: gh_write
+  name: itemswrite
 spec:
   description: Create an item as the linked person
   brokeredToolClass: write
@@ -321,13 +321,13 @@ spec:
   systemPrompt:
     inline: Use the linked account tools exactly as the fixture script says.
   tools:
-    - {name: gh_read}
-    - {name: gh_write}
+    - {name: itemsread}
+    - {name: itemswrite}
   coordination:
     enabled: true
     autonomous: true
     maxIterations: 3
-    approvalRequiredTools: [gh_write]
+    approvalRequiredTools: [itemswrite]
 YAML
 for ((i = 0; i < 60; i++)); do
   if kubectl -n "${namespace}" get connectorprovider fixture -o json | jq -e '[.status.conditions[]? | select(.type=="Accepted" or .type=="ResolvedRefs") | select(.status=="True")] | length == 2' >/dev/null 2>&1; then break; fi
@@ -382,10 +382,10 @@ ttl_seconds="$(( $(printf '%s' "${access_ttl}" | sed 's/s$//') ))"
 elapsed="$(( $(date +%s) - linked_at ))"
 if (( elapsed < ttl_seconds + 5 )); then sleep "$(( ttl_seconds + 5 - elapsed ))"; fi
 
-log "Approval on write: approve the parked gh_write"
+log "Approval on write: approve the parked itemswrite"
 status="$(request GET "${api}/tasks/${task}/approvals?namespace=${namespace}" "${workdir}/approvals.json" "${auth[@]}")"
 [[ "${status}" == 200 ]] || die "approvals list returned HTTP ${status}"
-approval_id="$(jq -er '[.approvals[] | select(.targetTool=="gh_write" and .status=="pending")][0].id' "${workdir}/approvals.json")"
+approval_id="$(jq -er '[.approvals[] | select(.targetTool=="itemswrite" and .status=="pending")][0].id' "${workdir}/approvals.json")"
 status="$(request POST "${api}/tasks/${task}/approvals/${approval_id}/decision?namespace=${namespace}" "${workdir}/decision.json" "${auth[@]}" \
   -H 'Content-Type: application/json' -d '{"decision":"approve"}')"
 [[ "${status}" == 200 ]] || { cat "${workdir}/decision.json" | redact >&2; die "approval decision returned HTTP ${status}"; }

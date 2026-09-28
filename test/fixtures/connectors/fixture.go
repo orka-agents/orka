@@ -42,6 +42,9 @@ type Config struct {
 	Now             func() time.Time
 }
 
+// signingAlgorithm is the only JWT algorithm the fixture signs with.
+const signingAlgorithm = "RS256"
+
 // Fixture is the shared state behind both listeners.
 type Fixture struct {
 	cfg Config
@@ -138,14 +141,14 @@ func (f *Fixture) TLSHandler() http.Handler {
 func (f *Fixture) discovery(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"issuer": f.cfg.Issuer, "jwks_uri": strings.TrimRight(f.cfg.Issuer, "/") + "/jwks",
-		"id_token_signing_alg_values_supported": []string{"RS256"},
+		"id_token_signing_alg_values_supported": []string{signingAlgorithm},
 	})
 }
 
 func (f *Fixture) jwks(w http.ResponseWriter, _ *http.Request) {
 	pub := f.key.PublicKey
 	writeJSON(w, http.StatusOK, map[string]any{"keys": []map[string]any{{
-		"kty": "RSA", "use": "sig", "alg": "RS256", "kid": f.kid,
+		"kty": "RSA", "use": "sig", "alg": signingAlgorithm, "kid": f.kid,
 		"n": base64.RawURLEncoding.EncodeToString(pub.N.Bytes()),
 		"e": base64.RawURLEncoding.EncodeToString(big.NewInt(int64(pub.E)).Bytes()),
 	}}})
@@ -175,7 +178,7 @@ func (f *Fixture) mint(w http.ResponseWriter, r *http.Request) {
 }
 
 func (f *Fixture) sign(claims map[string]any) (string, error) {
-	header, _ := json.Marshal(map[string]string{"alg": "RS256", "typ": "JWT", "kid": f.kid})
+	header, _ := json.Marshal(map[string]string{"alg": signingAlgorithm, "typ": "JWT", "kid": f.kid})
 	payload, err := json.Marshal(claims)
 	if err != nil {
 		return "", err
