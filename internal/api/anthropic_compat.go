@@ -340,6 +340,7 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 			AuthContext:               contextToken,
 			AuthorizationConfig:       h.contextTokenAuthorization,
 			UserInfo:                  userInfo,
+			LinkedAccounts:            h.config.LinkedAccounts,
 		})
 	}
 

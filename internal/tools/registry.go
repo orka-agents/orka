@@ -153,7 +153,11 @@ type ToolContext struct {
 	// built-in tools the controller executes on their behalf. Only the
 	// controller sets it; worker Pods never hold one and keep their own
 	// credential path.
-	LinkedAccounts           LinkedAccountCredentials
+	LinkedAccounts LinkedAccountCredentials
+	// Requester is the verified person this call acts for: the signed-in
+	// caller for chat, the Task's verified requester for the broker. Tools
+	// that show or use linked accounts read it; nothing else does.
+	Requester                *corev1alpha1.RequestedBy
 	IncrementTasks           func()
 	ApprovalEmitter          func(context.Context, approvals.ApprovalTarget) error
 	ApprovalTargetSpecDigest func(context.Context, string) (string, error)
@@ -660,6 +664,7 @@ func RegisterBrokeredCoordinationTools(r *Registry, k8sClient client.Client) err
 	r.Register(NewRememberMemoryTool())
 	r.Register(NewProposeMemoryTool())
 	r.Register(NewSearchTranscriptTool())
+	r.Register(&ListConnectionsTool{})
 	return nil
 }
 
@@ -689,6 +694,7 @@ func RegisterChatTools(r *Registry) {
 	r.Register(&ListAgentsTool{})
 	r.Register(&ListToolsTool{})
 	r.Register(&ListTasksTool{})
+	r.Register(&ListConnectionsTool{})
 	r.Register(&ChatCreateAgentTool{})
 	r.Register(&UpdateAgentTool{})
 	r.Register(&ChatDeleteAgentTool{})
@@ -746,7 +752,7 @@ func ChatToolNames() []string {
 		createPRMonitorToolName,
 		createContainerTaskToolName,
 		createAgentTaskToolName,
-		checkTaskProgressToolName, fetchTaskOutputToolName, waitForTaskToolName, cancelTaskToolName, listAgentsToolName, listToolsToolName, listTasksToolName, createAgentToolName, updateAgentToolName, "delete_agent",
+		checkTaskProgressToolName, fetchTaskOutputToolName, waitForTaskToolName, cancelTaskToolName, listAgentsToolName, listToolsToolName, listTasksToolName, ListConnectionsToolName, createAgentToolName, updateAgentToolName, "delete_agent",
 		createToolCRDToolName,
 		deleteToolToolName,
 		deleteSessionToolName,

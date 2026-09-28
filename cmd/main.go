@@ -1462,6 +1462,9 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	// chatLinkedAccounts lets chat and the compatibility proxies run the
+	// GitHub built-ins as the signed-in person; nil until connectors exist.
+	var chatLinkedAccounts api.LinkedAccountsFactory
 	if connectorsEnabled {
 		// Connection-mode outbound access resolves a person's credential only
 		// here, in the controller. Worker Pods keep a nil source and fail closed.
@@ -1470,6 +1473,9 @@ func main() {
 			APIReader:   mgr.GetAPIReader(),
 			Credentials: sqliteStore,
 			OAuth:       connectorOAuthClient,
+		}
+		chatLinkedAccounts = func(namespace string, requester *corev1alpha1.RequestedBy) tools.LinkedAccountCredentials {
+			return controller.LiveLinkedAccounts(mgr.GetAPIReader(), tools.DefaultRegistry, outboundAccessResolver.Connections, namespace, requester)
 		}
 	}
 	setupLog.Info("agent execution binding stage enabled: executable agent Tasks freeze an immutable encrypted snapshot and write-once binding before dispatch")
@@ -2275,6 +2281,7 @@ func main() {
 			ControllerEpochs:                 publisherControllerEpochs,
 		},
 		Chat: api.ChatConfig{
+			LinkedAccounts:         chatLinkedAccounts,
 			Enabled:                chatEnabled,
 			Provider:               chatProvider,
 			Model:                  chatModel,

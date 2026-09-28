@@ -154,6 +154,7 @@ func TestRegisterBrokeredCoordinationToolsIsIdempotentAndBounded(t *testing.T) {
 	want := []string{
 		checkMessagesToolName,
 		delegateTaskToolName,
+		ListConnectionsToolName,
 		"propose_memory",
 		"recall_memory",
 		"remember",

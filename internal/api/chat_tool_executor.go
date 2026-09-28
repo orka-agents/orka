@@ -56,14 +56,18 @@ type ToolExecutor struct {
 	resultStore               store.ResultStore
 	gatewayEventStore         store.GatewayEventStore
 	userInfo                  *UserInfo
-	registry                  *tools.Registry
-	allowedToolNames          map[string]struct{}
-	authorizeTaskCreate       func(context.Context, *corev1alpha1.Task) error
-	authorizeTaskDelete       func(context.Context, *corev1alpha1.Task) error
-	authorizeAgentCreate      func(context.Context, *corev1alpha1.Agent) error
-	authorizeAgentUpdate      func(context.Context, *corev1alpha1.Agent) error
-	authorizeAgentDelete      func(context.Context, *corev1alpha1.Agent) error
-	authorizeSecretRead       func(context.Context, string, string) error
+	// requester is the signed-in person (issuer and subject) this turn acts
+	// for, or nil for callers without a verified personal identity.
+	requester            *corev1alpha1.RequestedBy
+	linkedAccounts       tools.LinkedAccountCredentials
+	registry             *tools.Registry
+	allowedToolNames     map[string]struct{}
+	authorizeTaskCreate  func(context.Context, *corev1alpha1.Task) error
+	authorizeTaskDelete  func(context.Context, *corev1alpha1.Task) error
+	authorizeAgentCreate func(context.Context, *corev1alpha1.Agent) error
+	authorizeAgentUpdate func(context.Context, *corev1alpha1.Agent) error
+	authorizeAgentDelete func(context.Context, *corev1alpha1.Agent) error
+	authorizeSecretRead  func(context.Context, string, string) error
 }
 
 // SetExecutionMode supplies the immutable installation mode used by trusted
@@ -221,6 +225,8 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 			return chatToolAuthorizationError(e.authorizeTaskCreate, ctx, task, "Use a task configuration authorized by the context token")
 		},
 		SealTaskCreate: requesterStampSealer,
+		Requester:      e.requester,
+		LinkedAccounts: e.linkedAccounts,
 		AuthorizeTaskDelete: func(ctx context.Context, task *corev1alpha1.Task) *tools.ChatToolError {
 			return chatToolAuthorizationError(e.authorizeTaskDelete, ctx, task, "Use a task authorized by the context token")
 		},

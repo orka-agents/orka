@@ -213,7 +213,7 @@ The 18 injected tools:
 | --- | --- |
 | Built-in | `web_search`, `web_fetch`, `code_exec`, `file_read`, `file_write` |
 | Create work | `create_agent`, `create_agent_task`, `create_ai_task`, `create_container_task`, `create_pr_monitor` |
-| Track work | `check_task_progress`, `fetch_task_output`, `wait_for_task`, `cancel_task`, `list_agents`, `list_tasks` |
+| Track work | `check_task_progress`, `fetch_task_output`, `wait_for_task`, `cancel_task`, `list_agents`, `list_tasks`, `list_connections` |
 | Pull requests | `create_pull_request`, `check_pull_request_ci` |
 
 Orka advertises only the tools listed above that are registered for server-side execution.

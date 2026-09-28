@@ -326,6 +326,7 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 			AuthContext:               contextToken,
 			AuthorizationConfig:       h.contextTokenAuthorization,
 			UserInfo:                  userInfo,
+			LinkedAccounts:            h.config.LinkedAccounts,
 		})
 
 	}

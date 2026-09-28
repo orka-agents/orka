@@ -162,7 +162,32 @@ The full example, with an Agent that uses these tools, is in
 
 ## 3. Link an account
 
-Each person links once. Signed in as themselves:
+Each person links once, signed in as themselves (an OIDC or context-token
+identity; a ServiceAccount token has no accounts to link). Three ways:
+
+**Dashboard.** Open **Settings › Connectors** (`/settings/connectors`). Every
+provider shows its read and write tools and whether you are linked. *Connect
+(read only)* or *Connect with writes* sends you to the provider's consent
+page; the callback brings you back and the page finishes the link. From the
+same page you can allow or limit writes, reconnect a link that lost its
+consent, and disconnect.
+
+**CLI.**
+
+```bash
+orka connect github --mode readWrite       # opens the consent page, waits until Ready
+orka connection list                       # your linked accounts
+orka connection get github-<digest>
+orka connection delete github-<digest>     # disconnect and revoke
+orka connection providers                  # what an operator has made available
+```
+
+`orka connect` needs a personal token (`--token` with your OIDC or
+context token, or the token `orka config` stores); it explains a `403` from
+a ServiceAccount token. `--no-open` prints the consent URL instead of opening
+a browser, `--no-wait` returns as soon as consent has started.
+
+**API.**
 
 ```bash
 curl -sS -X POST "$ORKA_API_URL/api/v1/connections" \
@@ -213,6 +238,27 @@ the GitHub built-ins), the controller:
 
 The Task's workspace still scopes which repository the tools may touch; the
 link changes whose credential is used, not where.
+
+### Ask what is linked: `list_connections`
+
+Agents and chat have a read-only `list_connections` tool. It returns the
+signed-in person's (or the Task's verified requester's) linked accounts with
+their mode and readiness, the providers they could still link, and the
+settings path, never any token. An agent that needs an account the person
+has not linked should say so and point them at **Settings › Connectors**
+rather than try another credential. The tool is available to chat, to the
+compatibility proxies' coordinator mode, and to ACP runtimes through the
+broker; a Task without a verified requester gets an explicit "no identity"
+result.
+
+### Chat and the compatibility proxies
+
+The GitHub tools the chat and compatibility endpoints offer (for example
+`create_pull_request` and `check_pull_request_ci` in coordinator mode) run
+as the signed-in person when they hold a Ready link to a provider that
+declares the tool: the Connection is read live at call time, since there is
+no dispatch to freeze it. Without a link those tools keep the Task-Secret
+path they always had; a link that exists but cannot be used fails the call.
 
 ### What runs where
 

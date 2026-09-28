@@ -39,6 +39,7 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/tools"
 	chattools "github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/tracing"
 	"github.com/orka-agents/orka/internal/tracing/genai"
@@ -81,7 +82,15 @@ type ChatConfig struct {
 	MaxPrematureEndRetries int // re-prompts when the model emits text without the GOAL_STATE sentinel
 	RuntimeAvailability    ACPRuntimeAvailability
 	ExecutionMode          executionmode.Mode
+	// LinkedAccounts builds the linked-account resolver for one signed-in
+	// person's chat turn; nil leaves built-in GitHub tools on their own
+	// credentials. The controller wires it when connectors are enabled.
+	LinkedAccounts LinkedAccountsFactory
 }
+
+// LinkedAccountsFactory returns a resolver for a person's linked accounts
+// in a namespace, or nil when there is nothing to resolve.
+type LinkedAccountsFactory func(namespace string, requester *corev1alpha1.RequestedBy) tools.LinkedAccountCredentials
 
 // ACPRuntimeAvailability identifies built-in profiles backed by configured,
 // digest-pinned RuntimePool images.
@@ -452,6 +461,10 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	executor := NewToolExecutor(ch.client, ch.sessionManager, namespace, sessionID, ch.watchNamespace, ch.enforceNamespaceIsolation, ch.config.MaxTasksPerTurn, ch.config.ToolTimeout, ch.resultStore, ch.kubeClient)
 	executor.userInfo = userInfo
 	executor.gatewayEventStore = ch.gatewayEventStore
+	executor.requester = requesterFromUserInfo(userInfo)
+	if ch.config.LinkedAccounts != nil && executor.requester != nil {
+		executor.linkedAccounts = ch.config.LinkedAccounts(namespace, executor.requester)
+	}
 	executor.SetExecutionMode(ch.config.ExecutionMode)
 	executor.provider = providerInfo.Name
 	executor.providerType = providerInfo.Type

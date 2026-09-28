@@ -62,14 +62,22 @@ type compatProxyToolContextConfig struct {
 	AuthContext               *ContextToken
 	AuthorizationConfig       ContextTokenAuthorizationConfig
 	UserInfo                  *UserInfo
+	LinkedAccounts            LinkedAccountsFactory
 }
 
 func newCompatProxyToolContext(cfg compatProxyToolContextConfig) *tools.ToolContext {
 	tasksCreated := 0
 	authorizationReader := uncachedReaderOr(cfg.AuthorizationReader, cfg.Client)
+	requester := requesterFromUserInfo(cfg.UserInfo)
+	var linkedAccounts tools.LinkedAccountCredentials
+	if cfg.LinkedAccounts != nil && requester != nil {
+		linkedAccounts = cfg.LinkedAccounts(cfg.Namespace, requester)
+	}
 	toolCtx := &tools.ToolContext{
 		Client:                    cfg.Client,
 		PolicyReader:              authorizationReader,
+		Requester:                 requester,
+		LinkedAccounts:            linkedAccounts,
 		KubeClient:                cfg.KubeClient,
 		Namespace:                 cfg.Namespace,
 		Tenant:                    cfg.Namespace,

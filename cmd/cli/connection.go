@@ -1,0 +1,290 @@
+/* Copyright (c) 2026. MIT License - see LICENSE file for details. */
+
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/url"
+	"strings"
+	"text/tabwriter"
+	"time"
+
+	"github.com/spf13/cobra"
+)
+
+const (
+	connectionsAPIPath      = "/api/v1/connections"
+	connectorsAPIPath       = "/api/v1/connectors"
+	connectionModeReadOnly  = "readOnly"
+	connectionModeReadWrite = "readWrite"
+)
+
+// connectionReadyPollInterval paces the wait for a consent to complete. It
+// is a variable only so tests can poll a local server quickly.
+var connectionReadyPollInterval = 2 * time.Second
+
+// connectionView is the API's public view of a Connection.
+type connectionView struct {
+	Name     string `json:"name"`
+	Provider string `json:"provider"`
+	Mode     string `json:"mode"`
+	State    string `json:"state"`
+	Ready    bool   `json:"ready"`
+	LinkedAt string `json:"linkedAt"`
+	Message  string `json:"message"`
+}
+
+// connectionAuthorizeView is the API's response to a consent start.
+type connectionAuthorizeView struct {
+	Connection   connectionView `json:"connection"`
+	AuthorizeURL string         `json:"authorizeURL"`
+}
+
+func newConnectCmd() *cobra.Command {
+	var mode string
+	var noOpen, noWait bool
+	var timeout time.Duration
+	cmd := &cobra.Command{
+		Use:   "connect <provider>",
+		Short: "Link one of your accounts to a connector provider",
+		Long: "Start the OAuth consent for a connector provider as the signed-in person, open the consent page in your " +
+			"browser, and wait for the link to become ready. The token you use must identify you as a person " +
+			"(OIDC or context token); ServiceAccount tokens cannot link accounts.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if mode != connectionModeReadOnly && mode != connectionModeReadWrite {
+				return fmt.Errorf("--mode must be %s or %s", connectionModeReadOnly, connectionModeReadWrite)
+			}
+			c := newClientFromCmd(cmd)
+			body, err := json.Marshal(map[string]string{"provider": args[0], "mode": mode})
+			if err != nil {
+				return err
+			}
+			raw, err := c.DoJSON(context.Background(), http.MethodPost, connectionsAPIPath, nil, body)
+			if err != nil {
+				return connectionError(err)
+			}
+			var started connectionAuthorizeView
+			if err := decodeInto(raw, &started); err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			if started.AuthorizeURL == "" {
+				fmt.Fprintf(out, "Connection %s to %s is already %s (%s)\n", started.Connection.Name, started.Connection.Provider, strings.ToLower(started.Connection.State), started.Connection.Mode) //nolint:errcheck
+				return nil
+			}
+			fmt.Fprintf(out, "Authorize %s (%s) at:\n%s\n", args[0], mode, started.AuthorizeURL) //nolint:errcheck
+			if noOpen {
+				fmt.Fprintln(out, "Browser opening skipped. Open the URL above in your browser to finish.") //nolint:errcheck
+			} else if err := openBrowser(started.AuthorizeURL); err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Could not open browser: %v\nOpen the URL above manually.\n", err) //nolint:errcheck
+			}
+			if noWait {
+				return nil
+			}
+			fmt.Fprintf(out, "Waiting up to %s for the link to become ready...\n", timeout) //nolint:errcheck
+			deadline := time.Now().Add(timeout)
+			for {
+				raw, err := c.DoJSON(context.Background(), http.MethodGet, connectionsAPIPath+"/"+url.PathEscape(started.Connection.Name), nil, nil)
+				if err != nil {
+					return connectionError(err)
+				}
+				var current connectionView
+				if err := decodeInto(raw, &current); err != nil {
+					return err
+				}
+				if current.Ready {
+					fmt.Fprintf(out, "Linked %s (%s)\n", current.Provider, current.Mode) //nolint:errcheck
+					return nil
+				}
+				if current.State == "Error" || current.State == "Revoked" {
+					return fmt.Errorf("connection %s is %s: %s", current.Name, current.State, current.Message)
+				}
+				if time.Now().After(deadline) {
+					return fmt.Errorf("connection %s is still %s after %s; finish the consent and run 'orka connection get %s'", current.Name, current.State, timeout, current.Name)
+				}
+				time.Sleep(connectionReadyPollInterval)
+			}
+		},
+	}
+	cmd.Flags().StringVar(&mode, "mode", connectionModeReadOnly, "Link mode: readOnly or readWrite (write tools ask for approval)")
+	cmd.Flags().BoolVar(&noOpen, "no-open", false, "Print the consent URL without opening a browser")
+	cmd.Flags().BoolVar(&noWait, "no-wait", false, "Return as soon as consent has started")
+	cmd.Flags().DurationVar(&timeout, "timeout", 5*time.Minute, "How long to wait for the link to become ready")
+	return cmd
+}
+
+func newConnectionCmd() *cobra.Command {
+	cmd := &cobra.Command{Use: "connection", Short: "Manage your linked accounts"}
+	cmd.AddCommand(newConnectionListCmd(), newConnectionGetCmd(), newConnectionDeleteCmd(), newConnectionProvidersCmd())
+	return cmd
+}
+
+func newConnectionListCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   cliListUse,
+		Short: "List your linked accounts",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			c := newClientFromCmd(cmd)
+			raw, err := c.DoJSON(context.Background(), http.MethodGet, connectionsAPIPath, nil, nil)
+			if err != nil {
+				return connectionError(err)
+			}
+			format, err := outputFormat(cmd)
+			if err != nil {
+				return err
+			}
+			if format != outputTable {
+				return printStructuredTo(cmd.OutOrStdout(), format, raw)
+			}
+			var list struct {
+				Items []connectionView `json:"items"`
+			}
+			if err := decodeInto(raw, &list); err != nil {
+				return err
+			}
+			if len(list.Items) == 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), "No linked accounts. Link one with 'orka connect <provider>'.") //nolint:errcheck
+				return nil
+			}
+			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
+			fmt.Fprintln(w, "NAME\tPROVIDER\tMODE\tSTATE\tREADY\tLINKED") //nolint:errcheck
+			for _, item := range list.Items {
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%t\t%s\n", item.Name, item.Provider, item.Mode, item.State, item.Ready, item.LinkedAt) //nolint:errcheck
+			}
+			return w.Flush()
+		},
+	}
+	addOutputFlag(cmd, outputTable)
+	return cmd
+}
+
+func newConnectionGetCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "get <name>",
+		Short: "Show one of your linked accounts",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c := newClientFromCmd(cmd)
+			raw, err := c.DoJSON(context.Background(), http.MethodGet, connectionsAPIPath+"/"+url.PathEscape(args[0]), nil, nil)
+			if err != nil {
+				return connectionError(err)
+			}
+			format, err := outputFormat(cmd)
+			if err != nil {
+				return err
+			}
+			if format != outputTable {
+				return printStructuredTo(cmd.OutOrStdout(), format, raw)
+			}
+			var item connectionView
+			if err := decodeInto(raw, &item); err != nil {
+				return err
+			}
+			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
+			for _, row := range [][2]string{
+				{"Name", item.Name}, {"Provider", item.Provider}, {"Mode", item.Mode}, {"State", item.State},
+				{"Ready", fmt.Sprint(item.Ready)}, {"Linked", item.LinkedAt}, {"Message", item.Message},
+			} {
+				if row[1] != "" {
+					fmt.Fprintf(w, "%s:\t%s\n", row[0], row[1]) //nolint:errcheck
+				}
+			}
+			return w.Flush()
+		},
+	}
+	addOutputFlag(cmd, outputTable)
+	return cmd
+}
+
+func newConnectionDeleteCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "delete <name>",
+		Short: "Disconnect a linked account and revoke its tokens",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c := newClientFromCmd(cmd)
+			if err := c.DeleteResource(context.Background(), connectionsAPIPath+"/"+url.PathEscape(args[0]), nil); err != nil {
+				return connectionError(err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Connection deleted: %s\n", args[0]) //nolint:errcheck
+			return nil
+		},
+	}
+}
+
+func newConnectionProvidersCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "providers",
+		Short: "List the connector providers you can link",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			c := newClientFromCmd(cmd)
+			raw, err := c.DoJSON(context.Background(), http.MethodGet, connectorsAPIPath, nil, nil)
+			if err != nil {
+				return connectionError(err)
+			}
+			format, err := outputFormat(cmd)
+			if err != nil {
+				return err
+			}
+			if format != outputTable {
+				return printStructuredTo(cmd.OutOrStdout(), format, raw)
+			}
+			var list struct {
+				Items []struct {
+					Name        string `json:"name"`
+					DisplayName string `json:"displayName"`
+					Ready       bool   `json:"ready"`
+					Tools       []struct {
+						Name  string `json:"name"`
+						Class string `json:"class"`
+					} `json:"tools"`
+				} `json:"items"`
+			}
+			if err := decodeInto(raw, &list); err != nil {
+				return err
+			}
+			if len(list.Items) == 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), "No connector providers are configured.") //nolint:errcheck
+				return nil
+			}
+			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
+			fmt.Fprintln(w, "NAME\tDISPLAY NAME\tREADY\tTOOLS") //nolint:errcheck
+			for _, item := range list.Items {
+				names := make([]string, 0, len(item.Tools))
+				for _, tool := range item.Tools {
+					names = append(names, tool.Name+" ("+tool.Class+")")
+				}
+				fmt.Fprintf(w, "%s\t%s\t%t\t%s\n", item.Name, item.DisplayName, item.Ready, strings.Join(names, ", ")) //nolint:errcheck
+			}
+			return w.Flush()
+		},
+	}
+	addOutputFlag(cmd, outputTable)
+	return cmd
+}
+
+// decodeInto re-encodes a generic JSON value into a typed view.
+func decodeInto(raw any, target any) error {
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(encoded, target)
+}
+
+// connectionError explains the one failure people hit first: a token that
+// is not a person's.
+func connectionError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if strings.Contains(err.Error(), "HTTP 403") {
+		return errors.Join(err, errors.New("linked accounts belong to a signed-in person: pass a personal OIDC or context token with --token (ServiceAccount tokens cannot link accounts)"))
+	}
+	return err
+}

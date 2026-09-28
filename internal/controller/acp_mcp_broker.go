@@ -225,7 +225,17 @@ func (e RegistryACPMCPToolExecutor) taskConnectionAuthority(ctx context.Context,
 	if err := bindFrozenConnections(ctx, e.AgentExecutionSnapshots, task, executor); err != nil {
 		return nil, nil, err
 	}
-	return executor.Requester(), executor.FrozenConnections(), nil
+	// Only a requester the controller key sealed for this Task is handed
+	// to tools; an unverified spec.requestedBy is nobody.
+	verified, err := requesterProvenanceVerified(ctx, e.Reader, task)
+	if err != nil {
+		return nil, nil, err
+	}
+	var requester *corev1alpha1.RequestedBy
+	if verified {
+		requester = task.Spec.RequestedBy.DeepCopy()
+	}
+	return requester, executor.FrozenConnections(), nil
 }
 
 // refuseConnectorClassificationDrift returns an error when the named Tool's
@@ -351,6 +361,9 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 			return nil, fmt.Errorf("MCP tool %q is not registered", descriptor.Name)
 		}
 		_, linkedBuiltin := connectors.BuiltinConnectorToolClass(descriptor.Name)
+		// Tools that act for or describe the person need the Task's verified
+		// requester; the catalog built-ins also need the frozen binding.
+		needsRequester := linkedBuiltin || descriptor.Name == tools.ListConnectionsToolName
 		var toolContext *tools.ToolContext
 		if e.ContextFactory != nil {
 			var contextErr error
@@ -371,13 +384,16 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 				// read here, before the call, so a snapshot that cannot be
 				// loaded is a preparation failure and never a silent run
 				// on the Task's own credentials.
-				if linkedBuiltin {
+				if needsRequester {
 					requester, frozen, err := e.taskConnectionAuthority(ctx, request)
 					if err != nil {
 						return nil, err
 					}
-					copy.LinkedAccounts = linkedBuiltinAccounts{
-						source: e.Connections, namespace: request.Namespace, requester: requester, frozen: frozen, required: true,
+					copy.Requester = requester
+					if linkedBuiltin {
+						copy.LinkedAccounts = linkedBuiltinAccounts{
+							source: e.Connections, namespace: request.Namespace, requester: requester, frozen: frozen, required: true,
+						}
 					}
 				}
 				toolContext = &copy

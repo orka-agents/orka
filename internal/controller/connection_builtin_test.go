@@ -12,6 +12,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -542,5 +543,80 @@ func TestLinkedRepositoryScopeInherited(t *testing.T) {
 	// Without a linked built-in in play the chain is never walked.
 	if _, _, err := FilterBrokeredConnectorToolsForRequester(ctx, f.reader(beyond), registry, stamp(beyond), []string{"web_search"}); err != nil {
 		t.Fatalf("no built-in: %v", err)
+	}
+}
+
+func TestLiveLinkedAccounts(t *testing.T) {
+	f := newConnectorToolFixture(t)
+	ctx := context.Background()
+	registry := brokeredGitHubRegistry(t)
+	github := acceptedBuiltinProvider("github", "list_pull_requests", "create_pull_request")
+	source := &fakeLinkedSource{credential: outboundaccess.ConnectionCredential{AccessToken: "gho_live", ConnectionUID: "conn-uid", Mode: corev1alpha1.ConnectionModeReadOnly}}
+	if LiveLinkedAccounts(nil, registry, source, "tenant", f.requester) != nil || LiveLinkedAccounts(f.reader(), registry, nil, "tenant", f.requester) != nil ||
+		LiveLinkedAccounts(f.reader(), registry, source, "tenant", nil) != nil || LiveLinkedAccounts(f.reader(), registry, source, "", f.requester) != nil {
+		t.Fatal("a resolver without a reader, source, namespace, or person must be nil")
+	}
+	// No link: the built-in keeps its own path.
+	accounts := LiveLinkedAccounts(f.reader(github), registry, source, "tenant", f.requester)
+	if _, bound, err := accounts.BuiltinToolCredential(ctx, "list_pull_requests"); bound || err != nil {
+		t.Fatalf("no link: bound = %t err = %v", bound, err)
+	}
+	// A Ready link is bound as it is right now and resolved through the source.
+	accounts = LiveLinkedAccounts(f.reader(github, f.connection(corev1alpha1.ConnectionModeReadOnly, true)), registry, source, "tenant", f.requester)
+	credential, bound, err := accounts.BuiltinToolCredential(ctx, "list_pull_requests")
+	if err != nil || !bound || credential.AccessToken != "gho_live" || source.request.Frozen.UID != "conn-uid" || source.request.Frozen.GrantSequence != 1 ||
+		source.request.Frozen.Provider != "github" || source.request.Tool.Name != "list_pull_requests" || !source.request.Tool.Builtin {
+		t.Fatalf("live: credential = %+v bound = %t err = %v request = %+v", credential, bound, err, source.request)
+	}
+	// A readOnly link never serves a write tool; an unready link binds nothing.
+	if _, _, err := accounts.BuiltinToolCredential(ctx, "create_pull_request"); err == nil || !strings.Contains(err.Error(), "readOnly") {
+		t.Fatalf("readOnly write err = %v", err)
+	}
+	unready := LiveLinkedAccounts(f.reader(github, f.connection(corev1alpha1.ConnectionModeReadWrite, false)), registry, source, "tenant", f.requester)
+	if _, bound, err := unready.BuiltinToolCredential(ctx, "list_pull_requests"); bound || err != nil {
+		t.Fatalf("unready: bound = %t err = %v", bound, err)
+	}
+	// Not in the catalog, or declared by no provider: not the resolver's concern.
+	if _, bound, err := accounts.BuiltinToolCredential(ctx, "web_search"); bound || err != nil {
+		t.Fatalf("web_search: bound = %t err = %v", bound, err)
+	}
+	if _, bound, err := accounts.BuiltinToolCredential(ctx, "get_issue"); bound || err != nil {
+		t.Fatalf("undeclared: bound = %t err = %v", bound, err)
+	}
+}
+
+func TestRegistryACPMCPToolExecutorHandsRequesterToListConnections(t *testing.T) {
+	f := newConnectorToolFixture(t)
+	task := f.task.DeepCopy()
+	registry := tools.NewRegistry()
+	listTool := &contextCapturingTool{name: tools.ListConnectionsToolName}
+	registry.Register(listTool)
+	executor := RegistryACPMCPToolExecutor{
+		Registry: registry, Reader: f.reader(task), AgentExecutionSnapshots: fakeSnapshotStore{err: store.ErrNotFound},
+		ContextFactory: func(context.Context, harnessv2.MCPBrokerCallRequest) (*tools.ToolContext, error) {
+			return &tools.ToolContext{Brokered: true}, nil
+		},
+	}
+	request := harnessv2.MCPBrokerCallRequest{Namespace: "tenant"}
+	request.Metadata.TaskUID = "task-uid"
+	ctx := withACPMCPAuthenticatedTask(context.Background(), ACPMCPAuthenticatedTask{Name: "task", Namespace: "tenant", UID: "task-uid"})
+	descriptor := harnessv2.MCPToolDescriptor{Name: tools.ListConnectionsToolName, Source: harnessv2.MCPToolSourceBrokeredBuiltin}
+	if _, err := executor.ExecuteACPMCPTool(ctx, request, descriptor); err != nil {
+		t.Fatal(err)
+	}
+	if listTool.captured == nil || listTool.captured.Requester == nil || listTool.captured.Requester.Subject != "alice" || listTool.captured.LinkedAccounts != nil {
+		t.Fatalf("captured = %+v", listTool.captured)
+	}
+	// An unverified requester (no sealed stamp) is nobody.
+	unstamped := task.DeepCopy()
+	unstamped.Annotations = nil
+	unstamped.CreationTimestamp = metav1.NewTime(time.Now().Add(-time.Hour))
+	executor.Reader = f.reader(unstamped)
+	listTool.captured = nil
+	if _, err := executor.ExecuteACPMCPTool(ctx, request, descriptor); err != nil {
+		t.Fatal(err)
+	}
+	if listTool.captured == nil || listTool.captured.Requester != nil {
+		t.Fatalf("unverified captured = %+v", listTool.captured)
 	}
 }

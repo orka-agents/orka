@@ -12,6 +12,9 @@ import (
 	"fmt"
 	"strings"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/outboundaccess"
@@ -85,4 +88,63 @@ func (l linkedBuiltinAccounts) BuiltinToolCredential(ctx context.Context, toolNa
 	return tools.LinkedAccountCredential{
 		AccessToken: credential.AccessToken, Provider: frozen.Provider, ConnectionUID: credential.ConnectionUID,
 	}, true, nil
+}
+
+// liveLinkedAccounts resolves a signed-in person's linked account for
+// catalog built-ins the API executes for them right now (chat and the
+// compatibility proxies), where there is no dispatch and so no snapshot:
+// the API verified the identity, and the Connection is read live and
+// bound as it is at that moment. A built-in with no Ready link keeps the
+// tool's own credential path, as chat always had; a link that cannot be
+// used fails the call.
+type liveLinkedAccounts struct {
+	reader    client.Reader
+	registry  *tools.Registry
+	source    outboundaccess.ConnectionCredentialSource
+	namespace string
+	requester *corev1alpha1.RequestedBy
+}
+
+// LiveLinkedAccounts returns the linked-account resolver for one signed-in
+// person in namespace, or nil when nothing can be resolved (no source,
+// no reader, or no personal identity).
+func LiveLinkedAccounts(reader client.Reader, registry *tools.Registry, source outboundaccess.ConnectionCredentialSource, namespace string, requester *corev1alpha1.RequestedBy) tools.LinkedAccountCredentials {
+	if reader == nil || source == nil || requester == nil ||
+		strings.TrimSpace(requester.Issuer) == "" || strings.TrimSpace(requester.Subject) == "" || strings.TrimSpace(namespace) == "" {
+		return nil
+	}
+	return liveLinkedAccounts{reader: reader, registry: registry, source: source, namespace: namespace, requester: requester}
+}
+
+// BuiltinToolCredential implements tools.LinkedAccountCredentials.
+func (l liveLinkedAccounts) BuiltinToolCredential(ctx context.Context, toolName string) (tools.LinkedAccountCredential, bool, error) {
+	if _, linked := connectors.BuiltinConnectorToolClass(toolName); !linked {
+		return tools.LinkedAccountCredential{}, false, nil
+	}
+	infos, err := classifyConnectorTools(ctx, l.reader, l.registry, l.namespace, []string{toolName}, connectorScope{builtins: true})
+	if err != nil {
+		return tools.LinkedAccountCredential{}, false, err
+	}
+	info, declared := infos[toolName]
+	if !declared {
+		return tools.LinkedAccountCredential{}, false, nil
+	}
+	connection := &corev1alpha1.Connection{}
+	name := connectors.ConnectionName(info.Provider, l.requester.Issuer, l.requester.Subject)
+	if err := l.reader.Get(ctx, client.ObjectKey{Namespace: l.namespace, Name: name}, connection); err != nil {
+		if apierrors.IsNotFound(err) {
+			return tools.LinkedAccountCredential{}, false, nil
+		}
+		return tools.LinkedAccountCredential{}, false, fmt.Errorf("load connection %q: %w", name, err)
+	}
+	if !connectionReadyFor(connection, l.requester, info.Provider) {
+		return tools.LinkedAccountCredential{}, false, nil
+	}
+	bound := linkedBuiltinAccounts{
+		source: l.source, namespace: l.namespace, requester: l.requester, required: true,
+		frozen: map[string]outboundaccess.FrozenConnection{outboundaccess.BuiltinConnectionKey(toolName): {
+			UID: string(connection.UID), Generation: connection.Generation, GrantSequence: connection.Status.GrantSequence, Provider: info.Provider,
+		}},
+	}
+	return bound.BuiltinToolCredential(ctx, toolName)
 }
