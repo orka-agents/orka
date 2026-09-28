@@ -56,6 +56,24 @@ type TaskMessageStore interface {
 	GetMessages(context.Context, string, string, string, bool) ([]store.Message, error)
 }
 
+// LinkedAccountCredential is a person's linked-account credential resolved
+// for one built-in tool call, with the non-secret identity of the Connection
+// that supplied it.
+type LinkedAccountCredential struct {
+	AccessToken   string
+	Provider      string
+	ConnectionUID string
+}
+
+// LinkedAccountCredentials resolves a linked-account credential for a
+// built-in tool. BuiltinToolCredential reports false when the Task has no
+// Connection bound for the tool, in which case the tool keeps its own
+// credential path; an error means a Connection is bound but cannot be used
+// now, and the tool fails closed rather than falling back.
+type LinkedAccountCredentials interface {
+	BuiltinToolCredential(ctx context.Context, toolName string) (LinkedAccountCredential, bool, error)
+}
+
 // ToolContext provides dependencies for tools that need K8s client access or other services.
 type ToolContext struct {
 	Client client.Client
@@ -131,11 +149,16 @@ type ToolContext struct {
 	// RequireGitHubTaskCredentials disables controller-global repository and
 	// credential fallback for external GitHub tool calls.
 	RequireGitHubTaskCredentials bool
-	IncrementTasks               func()
-	ApprovalEmitter              func(context.Context, approvals.ApprovalTarget) error
-	ApprovalTargetSpecDigest     func(context.Context, string) (string, error)
-	ApprovalTargetArguments      func(context.Context, string, json.RawMessage) (json.RawMessage, error)
-	ApprovalTargetRefresh        func(context.Context, string, *corev1alpha1.Tool) error
+	// LinkedAccounts resolves the requester's linked-account credential for
+	// built-in tools the controller executes on their behalf. Only the
+	// controller sets it; worker Pods never hold one and keep their own
+	// credential path.
+	LinkedAccounts           LinkedAccountCredentials
+	IncrementTasks           func()
+	ApprovalEmitter          func(context.Context, approvals.ApprovalTarget) error
+	ApprovalTargetSpecDigest func(context.Context, string) (string, error)
+	ApprovalTargetArguments  func(context.Context, string, json.RawMessage) (json.RawMessage, error)
+	ApprovalTargetRefresh    func(context.Context, string, *corev1alpha1.Tool) error
 }
 
 type toolContextKey struct{}

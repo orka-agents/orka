@@ -154,7 +154,7 @@ func TestFilterConnectorToolsForRequester(t *testing.T) {
 func TestFreezeAndBindNativeConnections(t *testing.T) {
 	f := newConnectorToolFixture(t)
 	ctx := context.Background()
-	frozen, err := freezeRequesterConnectionsForTools(ctx, f.reader(f.connection(corev1alpha1.ConnectionModeReadWrite, true)), nil, f.task, []string{"gh_read", "gh_write", "plain", "direct_write"})
+	frozen, err := freezeRequesterConnectionsForTools(ctx, f.reader(f.connection(corev1alpha1.ConnectionModeReadWrite, true)), nil, f.task, []string{"gh_read", "gh_write", "plain", "direct_write"}, connectorScope{})
 	if err != nil || len(frozen) != 1 || frozen[0].PolicyName != "github-conn" || frozen[0].UID != "conn-uid" || frozen[0].Generation != 3 {
 		t.Fatalf("frozen = %+v err = %v", frozen, err)
 	}

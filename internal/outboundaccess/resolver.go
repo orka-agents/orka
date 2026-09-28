@@ -32,6 +32,7 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/tokenexchange"
 	"github.com/orka-agents/orka/internal/transactiontoken"
 )
@@ -88,6 +89,10 @@ type ToolBinding struct {
 	URL    string
 	Method string
 	Class  corev1alpha1.AgentRuntimeBrokeredToolClass
+	// Builtin marks an Orka built-in tool the controller executes itself.
+	// It matches only a Builtin declaration of the same name and class; a
+	// built-in carries no destination, headers, schema, or timeout to compare.
+	Builtin bool
 	// Headers are the Tool's static headers; the provider's declared set
 	// must match exactly, or a header the provider never declared could
 	// change what the credential authorizes.
@@ -137,6 +142,20 @@ type FrozenConnection struct {
 	// credential output header or prefix) needs a re-dispatch.
 	PolicyUID        string
 	PolicyGeneration int64
+	// Provider is the ConnectorProvider the Connection links. A binding
+	// frozen for a built-in tool carries it because no policy names one.
+	Provider string
+}
+
+// builtinConnectionKeyPrefix keys a built-in tool's frozen Connection in
+// the same map as policy bindings. Policy names are DNS labels, which never
+// contain a colon, so the two key spaces cannot collide.
+const builtinConnectionKeyPrefix = "builtin:"
+
+// BuiltinConnectionKey returns the FrozenConnections key under which the
+// requester's Connection for the named built-in tool is frozen.
+func BuiltinConnectionKey(toolName string) string {
+	return builtinConnectionKeyPrefix + strings.TrimSpace(toolName)
 }
 
 // ConnectionCredentialRequest asks the credential source for one person's
@@ -293,6 +312,9 @@ func DeclaredConnectorTool(provider *corev1alpha1.ConnectorProvider, tool ToolBi
 		if candidate.Name != name {
 			continue
 		}
+		if tool.Builtin {
+			return declaredBuiltinConnectorTool(provider, candidate, tool)
+		}
 		if candidate.Source != corev1alpha1.ConnectorToolSourceHTTP || candidate.HTTP == nil {
 			return corev1alpha1.ConnectorTool{}, fmt.Errorf("connector tool %q is not a curated HTTP tool of provider %q", name, provider.Name)
 		}
@@ -329,6 +351,36 @@ func DeclaredConnectorTool(provider *corev1alpha1.ConnectorProvider, tool ToolBi
 		return candidate, nil
 	}
 	return corev1alpha1.ConnectorTool{}, fmt.Errorf("tool %q is not declared by provider %q", name, provider.Name)
+}
+
+// declaredBuiltinConnectorTool judges a built-in binding against the
+// provider's declaration of the same name: it must be a Builtin declaration
+// of the class the catalog fixes for the tool, and the binding must carry
+// nothing a built-in cannot have.
+func declaredBuiltinConnectorTool(provider *corev1alpha1.ConnectorProvider, candidate corev1alpha1.ConnectorTool, tool ToolBinding) (corev1alpha1.ConnectorTool, error) {
+	if candidate.Source != corev1alpha1.ConnectorToolSourceBuiltin {
+		return corev1alpha1.ConnectorTool{}, fmt.Errorf("built-in tool %q is not declared as a built-in by provider %q", tool.Name, provider.Name)
+	}
+	if !connectors.ProviderIssuesGitHubCredentials(provider) {
+		return corev1alpha1.ConnectorTool{}, fmt.Errorf("built-in tool %q sends its credential to %s, which provider %q does not issue credentials for", tool.Name, connectors.BuiltinConnectorToolAudience, provider.Name)
+	}
+	if strings.TrimSpace(tool.URL) != "" || strings.TrimSpace(tool.Method) != "" || len(tool.Headers) > 0 || tool.Parameters != nil {
+		return corev1alpha1.ConnectorTool{}, fmt.Errorf("built-in tool %q binding carries a destination, headers, or schema", tool.Name)
+	}
+	class, linked := connectors.BuiltinConnectorToolClass(tool.Name)
+	if !linked {
+		return corev1alpha1.ConnectorTool{}, fmt.Errorf("built-in tool %q cannot use a linked account", tool.Name)
+	}
+	if string(tool.Class) != string(class) || candidate.Class != class {
+		return corev1alpha1.ConnectorTool{}, fmt.Errorf("built-in tool %q class does not match the class declared by provider %q", tool.Name, provider.Name)
+	}
+	// The binding carries the catalog's bound for the call, so the
+	// credential is refreshed to cover all of it, never a caller's own.
+	timeout, _ := connectors.BuiltinConnectorToolTimeout(tool.Name)
+	if !tool.TimeoutSet || tool.Timeout != timeout {
+		return corev1alpha1.ConnectorTool{}, fmt.Errorf("built-in tool %q binding must carry the catalog timeout %s", tool.Name, timeout)
+	}
+	return candidate, nil
 }
 
 // sameParameterSchema compares two JSON Schemas structurally; absent and
@@ -403,6 +455,12 @@ func (r *KubernetesResolver) resolveConnection(ctx context.Context, policy *core
 	}
 	if frozen.PolicyUID != "" && (string(policy.UID) != frozen.PolicyUID || policy.Generation != frozen.PolicyGeneration) {
 		return Resolution{}, fmt.Errorf("connection outbound access policy %q changed since the task was dispatched; re-dispatch to use it", policy.Name)
+	}
+	if frozen.Provider != "" && frozen.Provider != policy.Spec.Connection.ProviderRef.Name {
+		return Resolution{}, fmt.Errorf("connection outbound access policy %q selects a different provider than the one frozen for it", policy.Name)
+	}
+	if req.Tool.Builtin {
+		return Resolution{}, errors.New("a built-in tool has no outbound access policy")
 	}
 	provider := &corev1alpha1.ConnectorProvider{}
 	if err := r.Reader.Get(ctx, client.ObjectKey{Namespace: policy.Namespace, Name: policy.Spec.Connection.ProviderRef.Name}, provider); err != nil {

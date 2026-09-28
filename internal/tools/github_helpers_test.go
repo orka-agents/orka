@@ -8,8 +8,10 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -44,10 +46,7 @@ func (c *countingClient) Get(ctx context.Context, key client.ObjectKey, obj clie
 func TestResolveReadRepoAndToken_DirectRepoURL_HTTPS(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", testEnvToken)
 
-	owner, repo, token, baseURL, err := resolveReadRepoAndToken(
-		context.Background(), nil,
-		"", testMyOrgRepoURL, "",
-	)
+	owner, repo, token, baseURL, err := resolveReadRepoAndToken(context.Background(), nil, "list_pull_requests", "", testMyOrgRepoURL, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -65,10 +64,7 @@ func TestResolveReadRepoAndToken_DirectRepoURL_HTTPS(t *testing.T) {
 func TestResolveReadRepoAndToken_DirectRepoURL_SSH(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", testEnvToken)
 
-	owner, repo, token, _, err := resolveReadRepoAndToken(
-		context.Background(), nil,
-		"", "git@github.com:myorg/myrepo.git", "",
-	)
+	owner, repo, token, _, err := resolveReadRepoAndToken(context.Background(), nil, "list_pull_requests", "", "git@github.com:myorg/myrepo.git", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -84,10 +80,7 @@ func TestResolveReadRepoAndToken_EnvVarFallback(t *testing.T) {
 	t.Setenv("ORKA_GIT_REPO", "https://github.com/envorg/envrepo")
 	t.Setenv("GITHUB_TOKEN", testEnvToken)
 
-	owner, repo, token, _, err := resolveReadRepoAndToken(
-		context.Background(), nil,
-		"", "", "",
-	)
+	owner, repo, token, _, err := resolveReadRepoAndToken(context.Background(), nil, "list_pull_requests", "", "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -123,9 +116,7 @@ func TestResolveReadRepoAndToken_TaskName(t *testing.T) {
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
 
-	owner, repo, token, baseURL, err := resolveReadRepoAndToken(
-		context.Background(), k8sClient, testMyTaskName, "", "",
-	)
+	owner, repo, token, baseURL, err := resolveReadRepoAndToken(context.Background(), k8sClient, "list_pull_requests", testMyTaskName, "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -186,7 +177,7 @@ func TestResolveGitHubCredentials_RoleSeparation(t *testing.T) {
 		{
 			name: "source read",
 			resolve: func() (string, error) {
-				_, _, token, _, err := resolveReadRepoAndToken(context.Background(), k8sClient, task.Name, "", "")
+				_, _, token, _, err := resolveReadRepoAndToken(context.Background(), k8sClient, "list_pull_requests", task.Name, "", "")
 				return token, err
 			},
 			want: "source-read-token",
@@ -194,9 +185,7 @@ func TestResolveGitHubCredentials_RoleSeparation(t *testing.T) {
 		{
 			name: "publication read",
 			resolve: func() (string, error) {
-				_, _, token, _, err := resolveScopedReadRepoAndToken(
-					context.Background(), k8sClient, task.Name, task.Spec.Workspace.PublicationGitRepo, "",
-				)
+				_, _, token, _, err := resolveScopedReadRepoAndToken(context.Background(), k8sClient, "list_pull_requests", task.Name, task.Spec.Workspace.PublicationGitRepo, "")
 				return token, err
 			},
 			want: "target-read-token",
@@ -204,7 +193,7 @@ func TestResolveGitHubCredentials_RoleSeparation(t *testing.T) {
 		{
 			name: "source forge mutation",
 			resolve: func() (string, error) {
-				_, _, token, _, err := resolveForgeRepoAndToken(context.Background(), k8sClient, task.Name, "", "")
+				_, _, token, _, err := resolveForgeRepoAndToken(context.Background(), k8sClient, "list_pull_requests", task.Name, "", "")
 				return token, err
 			},
 			want: "forge-token",
@@ -212,9 +201,7 @@ func TestResolveGitHubCredentials_RoleSeparation(t *testing.T) {
 		{
 			name: "publication forge mutation",
 			resolve: func() (string, error) {
-				_, _, token, _, err := resolveScopedForgeRepoAndToken(
-					context.Background(), k8sClient, task.Name, task.Spec.Workspace.PublicationGitRepo, "",
-				)
+				_, _, token, _, err := resolveScopedForgeRepoAndToken(context.Background(), k8sClient, "list_pull_requests", task.Name, task.Spec.Workspace.PublicationGitRepo, "")
 				return token, err
 			},
 			want: "forge-token",
@@ -260,7 +247,7 @@ func TestResolveForgeRepoAndToken_TaskWithoutForgeCredentialFailsClosed(t *testi
 	}
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
 
-	_, _, _, _, err := resolveForgeRepoAndToken(context.Background(), k8sClient, task.Name, "", "")
+	_, _, _, _, err := resolveForgeRepoAndToken(context.Background(), k8sClient, "list_pull_requests", task.Name, "", "")
 	if err == nil {
 		t.Fatal("expected missing forgeCredentialRef error")
 	}
@@ -295,9 +282,7 @@ func TestResolveReadRepoAndToken_TaskNameAndRepoURLLoadsTaskOnce(t *testing.T) {
 		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build(),
 	}
 
-	owner, repo, token, _, err := resolveReadRepoAndToken(
-		context.Background(), k8sClient, testMyTaskName, testMyOrgRepoURL, "",
-	)
+	owner, repo, token, _, err := resolveReadRepoAndToken(context.Background(), k8sClient, "list_pull_requests", testMyTaskName, testMyOrgRepoURL, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -340,10 +325,7 @@ func TestResolveReadRepoAndToken_TaskName_MissingCustomKeyDoesNotUseSiblings(t *
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
 
-	_, _, _, _, err := resolveReadRepoAndToken(
-		context.Background(), k8sClient,
-		"pw-task", "", "",
-	)
+	_, _, _, _, err := resolveReadRepoAndToken(context.Background(), k8sClient, "list_pull_requests", "pw-task", "", "")
 	if err == nil {
 		t.Fatal("expected configured-key error")
 	}
@@ -383,10 +365,7 @@ func TestResolveReadRepoAndToken_TaskName_CustomKey(t *testing.T) {
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
 
-	_, _, token, _, err := resolveReadRepoAndToken(
-		context.Background(), k8sClient,
-		"custom-key-task", "", "",
-	)
+	_, _, token, _, err := resolveReadRepoAndToken(context.Background(), k8sClient, "list_pull_requests", "custom-key-task", "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -426,10 +405,7 @@ func TestResolveReadRepoAndToken_TaskName_EmptySelectedKeyDoesNotUseSibling(t *t
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
 
-	_, _, _, _, err := resolveReadRepoAndToken(
-		context.Background(), k8sClient,
-		"empty-key-task", "", "",
-	)
+	_, _, _, _, err := resolveReadRepoAndToken(context.Background(), k8sClient, "list_pull_requests", "empty-key-task", "", "")
 	if err == nil {
 		t.Fatal("expected empty configured-key error")
 	}
@@ -474,9 +450,7 @@ func TestResolveReadRepoAndToken_TaskName_ToolContextNamespace(t *testing.T) {
 
 	ctx := WithToolContext(context.Background(), &ToolContext{Namespace: proxyNamespace})
 
-	owner, repo, token, _, err := resolveReadRepoAndToken(
-		ctx, k8sClient, "proxy-task", "", "",
-	)
+	owner, repo, token, _, err := resolveReadRepoAndToken(ctx, k8sClient, "list_pull_requests", "proxy-task", "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -509,10 +483,7 @@ func TestResolveReadRepoAndToken_TokenFromFile(t *testing.T) {
 func TestResolveReadRepoAndToken_TokenFromEnvVar(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "my-gh-token")
 
-	owner, repo, token, _, err := resolveReadRepoAndToken(
-		context.Background(), nil,
-		"", testOrgTestRepoURL, "",
-	)
+	owner, repo, token, _, err := resolveReadRepoAndToken(context.Background(), nil, "list_pull_requests", "", testOrgTestRepoURL, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -527,10 +498,7 @@ func TestResolveReadRepoAndToken_TokenFromEnvVar(t *testing.T) {
 func TestResolveReadRepoAndToken_BaseURLOverride(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "tok")
 
-	_, _, _, baseURL, err := resolveReadRepoAndToken(
-		context.Background(), nil,
-		"", "https://github.com/o/r", "http://localhost:8080",
-	)
+	_, _, _, baseURL, err := resolveReadRepoAndToken(context.Background(), nil, "list_pull_requests", "", "https://github.com/o/r", "http://localhost:8080")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -543,10 +511,7 @@ func TestResolveReadRepoAndToken_ErrorNoRepoURL(t *testing.T) {
 	// Ensure ORKA_GIT_REPO is not set
 	t.Setenv("ORKA_GIT_REPO", "")
 
-	_, _, _, _, err := resolveReadRepoAndToken(
-		context.Background(), nil,
-		"", "", "",
-	)
+	_, _, _, _, err := resolveReadRepoAndToken(context.Background(), nil, "list_pull_requests", "", "", "")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -558,10 +523,7 @@ func TestResolveReadRepoAndToken_ErrorNoRepoURL(t *testing.T) {
 func TestResolveReadRepoAndToken_ErrorInvalidURL(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "tok")
 
-	_, _, _, _, err := resolveReadRepoAndToken(
-		context.Background(), nil,
-		"", "not-a-valid-url", "",
-	)
+	_, _, _, _, err := resolveReadRepoAndToken(context.Background(), nil, "list_pull_requests", "", "not-a-valid-url", "")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -579,10 +541,7 @@ func TestResolveReadRepoAndToken_ErrorTaskNotFound(t *testing.T) {
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	_, _, _, _, err := resolveReadRepoAndToken(
-		context.Background(), k8sClient,
-		"nonexistent-task", "", "",
-	)
+	_, _, _, _, err := resolveReadRepoAndToken(context.Background(), k8sClient, "list_pull_requests", "nonexistent-task", "", "")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -595,10 +554,7 @@ func TestResolveReadRepoAndToken_ErrorNoToken(t *testing.T) {
 	// Clear all token sources
 	t.Setenv("GITHUB_TOKEN", "")
 
-	_, _, _, _, err := resolveReadRepoAndToken(
-		context.Background(), nil,
-		"", "https://github.com/o/r", "",
-	)
+	_, _, _, _, err := resolveReadRepoAndToken(context.Background(), nil, "list_pull_requests", "", "https://github.com/o/r", "")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -623,9 +579,7 @@ func TestResolveReadRepoAndToken_ErrorTaskNoWorkspace(t *testing.T) {
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
 
-	_, _, _, _, err := resolveReadRepoAndToken(
-		context.Background(), k8sClient, testNoWorkspaceTaskName, "", "",
-	)
+	_, _, _, _, err := resolveReadRepoAndToken(context.Background(), k8sClient, "list_pull_requests", testNoWorkspaceTaskName, "", "")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -654,10 +608,7 @@ func TestResolveReadRepoAndToken_TaskWithoutGitSecretRefFallsBackToEnvToken(t *t
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).Build()
 
-	owner, repo, token, _, err := resolveReadRepoAndToken(
-		context.Background(), k8sClient,
-		"no-secret-task", "", "",
-	)
+	owner, repo, token, _, err := resolveReadRepoAndToken(context.Background(), k8sClient, "list_pull_requests", "no-secret-task", "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -692,10 +643,7 @@ func TestResolveReadRepoAndToken_RepoURLMatchingTaskNameUsesTaskToken(t *testing
 	}
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
 
-	owner, repo, token, _, err := resolveReadRepoAndToken(
-		context.Background(), k8sClient,
-		"some-task", "https://github.com/task-org/task-repo", "",
-	)
+	owner, repo, token, _, err := resolveReadRepoAndToken(context.Background(), k8sClient, "list_pull_requests", "some-task", "https://github.com/task-org/task-repo", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -730,10 +678,7 @@ func TestResolveReadRepoAndToken_RepoURLMismatchRejectsTaskToken(t *testing.T) {
 	}
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
 
-	_, _, _, _, err := resolveReadRepoAndToken(
-		context.Background(), k8sClient,
-		"some-task", "https://github.com/url-org/url-repo", "",
-	)
+	_, _, _, _, err := resolveReadRepoAndToken(context.Background(), k8sClient, "list_pull_requests", "some-task", "https://github.com/url-org/url-repo", "")
 	if err == nil {
 		t.Fatal("expected repo scope mismatch error")
 	}
@@ -751,14 +696,170 @@ func TestResolveReadRepoAndToken_RepoURLWithMissingTaskFailsClosed(t *testing.T)
 	_ = corev1.AddToScheme(scheme)
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	_, _, _, _, err := resolveReadRepoAndToken(
-		context.Background(), k8sClient,
-		"nonexistent-task", "https://github.com/url-org/url-repo", "",
-	)
+	_, _, _, _, err := resolveReadRepoAndToken(context.Background(), k8sClient, "list_pull_requests", "nonexistent-task", "https://github.com/url-org/url-repo", "")
 	if err == nil {
 		t.Fatal("expected task lookup error")
 	}
 	if !contains(err.Error(), "failed to get task nonexistent-task") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+type fakeLinkedAccounts struct {
+	tool       string
+	credential LinkedAccountCredential
+	bound      bool
+	err        error
+	calls      int
+}
+
+func (f *fakeLinkedAccounts) BuiltinToolCredential(_ context.Context, toolName string) (LinkedAccountCredential, bool, error) {
+	f.calls++
+	f.tool = toolName
+	return f.credential, f.bound, f.err
+}
+
+// linkedAccountFixture is a Task with a workspace and read Secret, in a
+// fake client, for the linked-account helper tests.
+func linkedAccountFixture(t *testing.T) (client.Client, *corev1alpha1.Task) {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testMyTaskName, Namespace: defaultNamespace, UID: "task-uid"},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Workspace: &corev1alpha1.WorkspaceConfig{
+			GitRepo: "https://github.com/taskorg/taskrepo", ReadCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: testGitCredsSecretName},
+		}},
+	}
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace}, Data: map[string][]byte{tokenKey: []byte("task-secret-token")}}
+	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build(), task
+}
+
+func TestResolveRepoAndToken_LinkedAccountFirst(t *testing.T) {
+	k8sClient, task := linkedAccountFixture(t)
+
+	// A bound link supplies the token; the Task's Secret is never read and
+	// the workspace still scopes the repository.
+	linked := &fakeLinkedAccounts{credential: LinkedAccountCredential{AccessToken: "linked-token", Provider: "github"}, bound: true}
+	ctx := WithToolContext(context.Background(), &ToolContext{Namespace: defaultNamespace, TaskID: testMyTaskName, LinkedAccounts: linked, RequireGitHubTaskCredentials: true})
+	owner, repo, token, _, err := resolveScopedReadRepoAndToken(ctx, k8sClient, "list_pull_requests", "", "", "")
+	if err != nil || owner != "taskorg" || repo != "taskrepo" || token != "linked-token" || linked.tool != "list_pull_requests" {
+		t.Fatalf("linked: %s/%s token=%q err=%v tool=%q", owner, repo, token, err, linked.tool)
+	}
+	if _, _, _, _, err := resolveScopedReadRepoAndToken(ctx, k8sClient, "list_pull_requests", "", "https://github.com/other/repo", ""); err == nil {
+		t.Fatal("a linked account must not widen the repository scope")
+	}
+	// Nor may another Task's workspace lend its scope to the linked token.
+	other := task.DeepCopy()
+	other.Name, other.ResourceVersion = "other-task", ""
+	other.Spec.Workspace.GitRepo = "https://github.com/other/repo"
+	if err := k8sClient.Create(context.Background(), other); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, _, err := resolveScopedReadRepoAndToken(ctx, k8sClient, "list_pull_requests", "other-task", "", ""); err == nil || !strings.Contains(err.Error(), "must name the current task") {
+		t.Fatalf("foreign task_name err = %v", err)
+	}
+	if _, repo, _, _, err := resolveScopedReadRepoAndToken(ctx, k8sClient, "list_pull_requests", testMyTaskName, "", ""); err != nil || repo != "taskrepo" {
+		t.Fatalf("own task_name: repo=%q err=%v", repo, err)
+	}
+}
+
+func TestResolveRepoAndToken_LinkedAccountChildAndTransactionScope(t *testing.T) {
+	k8sClient, task := linkedAccountFixture(t)
+	linked := &fakeLinkedAccounts{credential: LinkedAccountCredential{AccessToken: "linked-token", Provider: "github"}, bound: true}
+	// A child this Task controls may supply the scope (a coordinator opening
+	// its coder's pull request) as long as the child's repositories are
+	// within the parent's own; a child of somebody else may not.
+	child := task.DeepCopy()
+	child.Name, child.ResourceVersion, child.UID = "child-task", "", "child-uid"
+	child.OwnerReferences = []metav1.OwnerReference{{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: testMyTaskName, UID: "task-uid", Controller: new(true)}}
+	if err := k8sClient.Create(context.Background(), child); err != nil {
+		t.Fatal(err)
+	}
+	owned := WithToolContext(context.Background(), &ToolContext{Namespace: defaultNamespace, TaskID: testMyTaskName, TaskUID: "task-uid", LinkedAccounts: linked})
+	if _, repo, token, _, err := resolveForgeRepoAndToken(owned, k8sClient, "create_pull_request", "child-task", "", ""); err != nil || repo != "taskrepo" || token != "linked-token" {
+		t.Fatalf("owned child: repo=%q token=%q err=%v", repo, token, err)
+	}
+	stranger := WithToolContext(context.Background(), &ToolContext{Namespace: defaultNamespace, TaskID: testMyTaskName, TaskUID: "another-uid", LinkedAccounts: linked})
+	if _, _, _, _, err := resolveForgeRepoAndToken(stranger, k8sClient, "create_pull_request", "child-task", "", ""); err == nil || !strings.Contains(err.Error(), "child tasks") {
+		t.Fatalf("foreign child err = %v", err)
+	}
+	// A child the coordinator pointed at another repository (delegate_task
+	// takes model-supplied repositories) never widens the linked scope.
+	wide := child.DeepCopy()
+	wide.Name, wide.ResourceVersion, wide.UID = "wide-child", "", "wide-uid"
+	wide.Spec.Workspace.GitRepo = "https://github.com/taskorg/otherrepo"
+	if err := k8sClient.Create(context.Background(), wide); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, _, err := resolveForgeRepoAndToken(owned, k8sClient, "create_pull_request", "wide-child", "", ""); err == nil || !strings.Contains(err.Error(), "outside the current task's repository scope") {
+		t.Fatalf("wide child err = %v", err)
+	}
+	// A transaction's repository context never widens a linked token's scope.
+	transacted := task.DeepCopy()
+	transacted.Name, transacted.ResourceVersion, transacted.UID = "tx-task", "", "tx-uid"
+	transacted.Spec.Transaction = &corev1alpha1.TaskTransaction{Context: map[string]string{"repo": "https://github.com/txorg/txrepo"}}
+	if err := k8sClient.Create(context.Background(), transacted); err != nil {
+		t.Fatal(err)
+	}
+	txCtx := WithToolContext(context.Background(), &ToolContext{Namespace: defaultNamespace, TaskID: "tx-task", LinkedAccounts: linked})
+	if _, _, _, _, err := resolveScopedReadRepoAndToken(txCtx, k8sClient, "list_pull_requests", "", "https://github.com/txorg/txrepo", ""); err == nil {
+		t.Fatal("transaction repo context must not scope a linked token")
+	}
+	txSecret := WithToolContext(context.Background(), &ToolContext{Namespace: defaultNamespace, TaskID: "tx-task", LinkedAccounts: unboundFor(t)})
+	// (The scope is accepted; only the credential lookup fails here, as
+	// before, because the transaction scope carries no Secret reference.)
+	if _, _, _, _, err := resolveScopedReadRepoAndToken(txSecret, k8sClient, "list_pull_requests", "", "https://github.com/txorg/txrepo", ""); err == nil || strings.Contains(err.Error(), "repository scope") {
+		t.Fatalf("transaction scope under Task credentials must be unchanged: err=%v", err)
+	}
+}
+
+func TestResolveRepoAndToken_LinkedAccountFailsClosed(t *testing.T) {
+	k8sClient, _ := linkedAccountFixture(t)
+	// No link bound: the Task Secret path is unchanged.
+	unbound := &fakeLinkedAccounts{}
+	ctx := WithToolContext(context.Background(), &ToolContext{Namespace: defaultNamespace, TaskID: testMyTaskName, LinkedAccounts: unbound})
+	if _, _, token, _, err := resolveScopedReadRepoAndToken(ctx, k8sClient, "list_pull_requests", "", "", ""); err != nil || token != "task-secret-token" {
+		t.Fatalf("unbound: token=%q err=%v", token, err)
+	}
+	if _, _, _, _, err := resolveForgeRepoAndToken(ctx, k8sClient, "create_pull_request", "", "", ""); err == nil {
+		t.Fatal("unbound forge mutation still needs the forge credential")
+	}
+
+	// A bound link that cannot be used fails closed: no Secret fallback.
+	broken := &fakeLinkedAccounts{err: errors.New("connection revoked")}
+	ctx = WithToolContext(context.Background(), &ToolContext{Namespace: defaultNamespace, TaskID: testMyTaskName, LinkedAccounts: broken})
+	if _, _, _, _, err := resolveScopedReadRepoAndToken(ctx, k8sClient, "list_pull_requests", "", "", ""); err == nil || !strings.Contains(err.Error(), "connection revoked") {
+		t.Fatalf("broken link err = %v, want fail closed", err)
+	}
+	empty := &fakeLinkedAccounts{bound: true}
+	ctx = WithToolContext(context.Background(), &ToolContext{Namespace: defaultNamespace, TaskID: testMyTaskName, LinkedAccounts: empty})
+	if _, _, _, _, err := resolveScopedReadRepoAndToken(ctx, k8sClient, "list_pull_requests", "", "", ""); err == nil || !strings.Contains(err.Error(), "no credential") {
+		t.Fatalf("empty credential err = %v, want fail closed", err)
+	}
+	if _, _, _, _, err := resolveScopedReadRepoAndToken(ctx, k8sClient, "", "", "", ""); err == nil || !strings.Contains(err.Error(), "tool name") {
+		t.Fatalf("missing tool name err = %v", err)
+	}
+}
+
+//go:fix inline
+
+func unboundFor(t *testing.T) *fakeLinkedAccounts {
+	t.Helper()
+	return &fakeLinkedAccounts{}
+}
+
+func TestReadGitHubResponseRefusesOversizedDocuments(t *testing.T) {
+	if data, err := readGitHubResponse(strings.NewReader(`{"ok":true}`), 64); err != nil || string(data) != `{"ok":true}` {
+		t.Fatalf("data=%q err=%v", data, err)
+	}
+	exact := strings.Repeat("x", 64)
+	if data, err := readGitHubResponse(strings.NewReader(exact), 64); err != nil || len(data) != 64 {
+		t.Fatalf("a document exactly at the limit must be read: len=%d err=%v", len(data), err)
+	}
+	// One byte over is refused whole rather than decoded cut in half.
+	if _, err := readGitHubResponse(strings.NewReader(exact+"y"), 64); err == nil || !strings.Contains(err.Error(), "exceeds 64 bytes") {
+		t.Fatalf("oversized err = %v", err)
 	}
 }

@@ -74,8 +74,8 @@ func (t *CheckPullRequestCITool) Description() string {
 
 // Parameters returns the JSON schema for tool parameters.
 func (t *CheckPullRequestCITool) Parameters() json.RawMessage {
-	schema := map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{taskNameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Task whose workspace supplies the repository and read credentials. TokenReview API callers need a Task and its referenced credential; current Task context may supply the name."}, repoURLField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional GitHub repository URL within the selected Task's repository scope."}, githubPRNumberField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "GitHub pull request number to inspect"}, "wait_timeout": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional maximum time to wait for pending checks (for example '30m'). Empty means one immediate check"},
-		"poll_interval": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional delay between polls while waiting (for example '30s'). Defaults to '30s' when wait_timeout is set"},
+	schema := map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{taskNameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Task whose workspace supplies the repository and read credentials. TokenReview API callers need a Task and its referenced credential; current Task context may supply the name."}, repoURLField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional GitHub repository URL within the selected Task's repository scope."}, githubPRNumberField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "GitHub pull request number to inspect"}, "wait_timeout": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional maximum time to wait for pending checks (for example '5m'). Empty means one immediate check; longer than 10m is clamped to 10m"},
+		"poll_interval": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional delay between polls while waiting (for example '30s'). Defaults to '30s' when wait_timeout is set; never shorter than 5s"},
 	}, jsonSchemaRequiredField: []string{githubPRNumberField},
 	}
 	data, _ := json.Marshal(schema)
@@ -98,7 +98,7 @@ func (t *CheckPullRequestCITool) Execute(ctx context.Context, argsJSON json.RawM
 		return "", err
 	}
 
-	owner, repo, token, baseURL, err := resolveScopedReadRepoAndToken(ctx, t.k8sClient, args.TaskName, args.RepoURL, t.apiBaseURL)
+	owner, repo, token, baseURL, err := resolveScopedReadRepoAndToken(ctx, t.k8sClient, t.Name(), args.TaskName, args.RepoURL, t.apiBaseURL)
 	if err != nil {
 		return "", err
 	}
@@ -109,6 +109,15 @@ func (t *CheckPullRequestCITool) Execute(ctx context.Context, argsJSON json.RawM
 	}
 	return marshalCheckPullRequestCIResult(*result), nil
 }
+
+// maxPullRequestCIWait is the longest one check_pull_request_ci call may
+// keep polling; a larger wait_timeout is clamped to it.
+const maxPullRequestCIWait = 10 * time.Minute
+
+// minPullRequestCIPollInterval keeps a poll loop from exhausting the
+// caller's GitHub rate limit; a shorter poll_interval is raised to it. It
+// is a variable only so tests can poll a local fixture quickly.
+var minPullRequestCIPollInterval = 5 * time.Second
 
 func parsePullRequestCIWaitConfig(waitTimeoutArg, pollIntervalArg string) (time.Duration, time.Duration, error) {
 	var waitTimeout time.Duration
@@ -121,6 +130,7 @@ func parsePullRequestCIWaitConfig(waitTimeoutArg, pollIntervalArg string) (time.
 		if waitTimeout < 0 {
 			return 0, 0, fmt.Errorf("wait_timeout must be non-negative")
 		}
+		waitTimeout = min(waitTimeout, maxPullRequestCIWait)
 	}
 
 	pollInterval := 30 * time.Second
@@ -133,6 +143,7 @@ func parsePullRequestCIWaitConfig(waitTimeoutArg, pollIntervalArg string) (time.
 	if pollInterval <= 0 {
 		return 0, 0, fmt.Errorf("poll_interval must be positive")
 	}
+	pollInterval = max(pollInterval, minPullRequestCIPollInterval)
 
 	return waitTimeout, pollInterval, nil
 }

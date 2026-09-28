@@ -20,6 +20,7 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/connectors"
 )
 
 type fakeConnectionSource struct {
@@ -424,5 +425,72 @@ func TestDeclaredConnectorToolComparesTimeouts(t *testing.T) {
 		if _, err := DeclaredConnectorTool(provider, defaulted); err == nil || !strings.Contains(err.Error(), "positive") {
 			t.Fatalf("explicit %s timeout err = %v, want refusal", explicit, err)
 		}
+	}
+}
+
+func TestDeclaredConnectorToolBuiltinBindings(t *testing.T) {
+	provider := &corev1alpha1.ConnectorProvider{ObjectMeta: metav1.ObjectMeta{Name: "github"}, Spec: corev1alpha1.ConnectorProviderSpec{OAuth: corev1alpha1.ConnectorOAuthConfig{
+		AuthorizeURL: "https://github.com/login/oauth/authorize", TokenURL: "https://github.com/login/oauth/access_token",
+	}, Tools: []corev1alpha1.ConnectorTool{
+		{Name: "list_pull_requests", Class: corev1alpha1.ConnectorToolClassRead, Source: corev1alpha1.ConnectorToolSourceBuiltin},
+		{Name: "create_pull_request", Class: corev1alpha1.ConnectorToolClassWrite, Source: corev1alpha1.ConnectorToolSourceBuiltin},
+		{Name: "gh_search", Class: corev1alpha1.ConnectorToolClassRead, Source: corev1alpha1.ConnectorToolSourceHTTP,
+			HTTP: &corev1alpha1.ConnectorHTTPTool{URL: "https://api.github.com/search/issues", Method: "GET"}},
+	}}}
+	read := ToolBinding{Name: "list_pull_requests", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Builtin: true, Timeout: connectors.BuiltinToolTimeout, TimeoutSet: true}
+	if declared, err := DeclaredConnectorTool(provider, read); err != nil || declared.Name != "list_pull_requests" {
+		t.Fatalf("declared = %+v err = %v", declared, err)
+	}
+	write := ToolBinding{Name: "create_pull_request", Class: corev1alpha1.AgentRuntimeBrokeredToolClassWrite, Builtin: true, Timeout: connectors.BuiltinToolTimeout, TimeoutSet: true}
+	if _, err := DeclaredConnectorTool(provider, write); err != nil {
+		t.Fatalf("write built-in: %v", err)
+	}
+	// A provider that does not issue github.com credentials never serves a
+	// built-in, even when its declaration slipped past validation.
+	enterprise := provider.DeepCopy()
+	enterprise.Spec.OAuth.TokenURL = "https://github.example.com/login/oauth/access_token"
+	if _, err := DeclaredConnectorTool(enterprise, read); err == nil || !strings.Contains(err.Error(), "does not issue credentials for") {
+		t.Fatalf("enterprise err = %v", err)
+	}
+	for name, binding := range map[string]ToolBinding{
+		// The class is fixed by the catalog, not by the caller.
+		"class":      {Name: "create_pull_request", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Builtin: true},
+		"http":       {Name: "gh_search", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Builtin: true},
+		"unknown":    {Name: "get_issue", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Builtin: true},
+		"not linked": {Name: "web_search", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Builtin: true},
+		"url":        {Name: "list_pull_requests", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Builtin: true, URL: "https://evil.example.test", Timeout: connectors.BuiltinToolTimeout, TimeoutSet: true},
+		// The binding must carry exactly the catalog bound: no timeout, or a caller's own, is refused.
+		"no timeout": {Name: "list_pull_requests", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Builtin: true},
+		"timeout":    {Name: "list_pull_requests", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Builtin: true, TimeoutSet: true, Timeout: 30 * time.Minute},
+		// A custom Tool never matches a built-in declaration.
+		"custom": {Name: "list_pull_requests", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, URL: "https://api.github.com/pulls", Method: "GET"},
+	} {
+		if _, err := DeclaredConnectorTool(provider, binding); err == nil {
+			t.Fatalf("%s: want refusal", name)
+		}
+	}
+}
+
+func TestResolveConnectionRefusesBuiltinBindingsAndForeignProviders(t *testing.T) {
+	provider := acceptedProvider()
+	policy := &corev1alpha1.OutboundAccessPolicy{ObjectMeta: metav1.ObjectMeta{Name: "github-conn", Namespace: "tenant", UID: "policy-uid"}, Spec: connectionPolicySpec("github")}
+	source := &fakeConnectionSource{credential: ConnectionCredential{AccessToken: "tok", Mode: corev1alpha1.ConnectionModeReadWrite}}
+	resolver := &KubernetesResolver{Reader: ctrlfake.NewClientBuilder().WithScheme(resolverScheme(t)).WithObjects(policy, provider).Build(), Connections: source}
+	requester := &corev1alpha1.RequestedBy{Issuer: "https://issuer.example.test", Subject: "alice"}
+	tool := ToolBinding{Name: "gh_search", URL: "https://api.github.com/search/issues", Method: "GET", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead}
+	frozen := map[string]FrozenConnection{"github-conn": {UID: "conn-uid", Generation: 1, GrantSequence: 1, Provider: "github"}}
+	if _, err := resolver.resolveConnection(context.Background(), policy, ResolveRequest{Requester: requester, FrozenConnections: frozen, Tool: tool}); err != nil {
+		t.Fatalf("matching provider: %v", err)
+	}
+	foreign := map[string]FrozenConnection{"github-conn": {UID: "conn-uid", Generation: 1, GrantSequence: 1, Provider: "gitlab"}}
+	if _, err := resolver.resolveConnection(context.Background(), policy, ResolveRequest{Requester: requester, FrozenConnections: foreign, Tool: tool}); err == nil || !strings.Contains(err.Error(), "different provider") {
+		t.Fatalf("foreign provider err = %v", err)
+	}
+	builtin := ToolBinding{Name: "list_pull_requests", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Builtin: true, Timeout: connectors.BuiltinToolTimeout, TimeoutSet: true}
+	if _, err := resolver.resolveConnection(context.Background(), policy, ResolveRequest{Requester: requester, FrozenConnections: frozen, Tool: builtin}); err == nil || !strings.Contains(err.Error(), "no outbound access policy") {
+		t.Fatalf("built-in binding err = %v", err)
+	}
+	if source.calls != 1 {
+		t.Fatalf("source calls = %d, want only the matching resolution", source.calls)
 	}
 }

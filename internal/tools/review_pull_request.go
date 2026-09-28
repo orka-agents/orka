@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -21,6 +22,8 @@ import (
 type ReviewPullRequestTool struct {
 	k8sClient  client.Client
 	apiBaseURL string // override for testing; empty uses https://api.github.com
+	// maxResultBytes bounds the encoded result when positive.
+	maxResultBytes int
 }
 
 // ReviewPullRequestArgs are the arguments for the review_pull_request tool.
@@ -52,6 +55,51 @@ type ReviewPullRequestResult struct {
 	Diff       string       `json:"diff"`
 	Files      []FileChange `json:"files"`
 	Status     string       `json:"status"`
+	// Truncated reports that the result was cut to fit a size budget; the
+	// note says what was dropped.
+	Truncated      bool   `json:"truncated,omitempty"`
+	TruncationNote string `json:"truncation_note,omitempty"`
+}
+
+// WithMaxResultBytes bounds the encoded result: file patches are dropped
+// first, then the unified diff is cut, so a large pull request returns
+// usable partial data instead of a result too big for its transport.
+func (t *ReviewPullRequestTool) WithMaxResultBytes(limit int) *ReviewPullRequestTool {
+	t.maxResultBytes = limit
+	return t
+}
+
+// boundReviewPullRequestResult trims result until its JSON encoding fits
+// limit; a nonpositive limit leaves it unchanged.
+func boundReviewPullRequestResult(result ReviewPullRequestResult, limit int) ReviewPullRequestResult {
+	if limit <= 0 {
+		return result
+	}
+	encoded, _ := json.Marshal(result)
+	if len(encoded) <= limit {
+		return result
+	}
+	result.Truncated = true
+	result.TruncationNote = "file patches omitted to fit the result size limit; the unified diff carries the changes"
+	files := make([]FileChange, len(result.Files))
+	for i, file := range result.Files {
+		file.Patch = ""
+		files[i] = file
+	}
+	result.Files = files
+	encoded, _ = json.Marshal(result)
+	for len(encoded) > limit && result.Diff != "" {
+		excess := len(encoded) - limit
+		cut := excess + excess/8 + 64
+		if cut >= len(result.Diff) {
+			result.Diff = ""
+		} else {
+			result.Diff = strings.ToValidUTF8(result.Diff[:len(result.Diff)-cut], "")
+		}
+		result.TruncationNote = "file patches omitted and the unified diff cut to fit the result size limit; fetch the remaining hunks separately"
+		encoded, _ = json.Marshal(result)
+	}
+	return result
 }
 
 // NewReviewPullRequestTool creates a new review_pull_request tool.
@@ -91,7 +139,7 @@ func (t *ReviewPullRequestTool) Execute(ctx context.Context, argsJSON json.RawMe
 		return "", fmt.Errorf("pr_number is required")
 	}
 
-	owner, repo, token, baseURL, err := resolveScopedReadRepoAndToken(ctx, t.k8sClient, args.TaskName, args.RepoURL, t.apiBaseURL)
+	owner, repo, token, baseURL, err := resolveScopedReadRepoAndToken(ctx, t.k8sClient, t.Name(), args.TaskName, args.RepoURL, t.apiBaseURL)
 	if err != nil {
 		return "", err
 	}
@@ -126,7 +174,7 @@ func (t *ReviewPullRequestTool) Execute(ctx context.Context, argsJSON json.RawMe
 		Files:      files,
 		Status:     "fetched",
 	}
-	resultJSON, _ := json.Marshal(result)
+	resultJSON, _ := json.Marshal(boundReviewPullRequestResult(result, t.maxResultBytes))
 	return string(resultJSON), nil
 }
 
@@ -148,7 +196,10 @@ func fetchPRDetails(ctx context.Context, httpClient *http.Client, baseURL, token
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	respBody, err := readGitHubResponse(resp.Body, githubResponseLimit)
+	if err != nil {
+		return "", "", "", "", "", err
+	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", "", "", "", "", fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(respBody))

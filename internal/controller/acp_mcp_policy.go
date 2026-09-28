@@ -29,7 +29,7 @@ var readOnlyBrokeredTools = map[string]struct{}{
 	"check_pr_review_marker": {}, "check_pull_request_ci": {}, "check_task_progress": {},
 	"fetch_task_output": {}, "file_read": {}, "get_issue": {},
 	"list_agents": {}, "list_issues": {}, "list_pull_requests": {}, "list_tasks": {},
-	"list_tools": {}, "recall_memory": {}, "search_transcript": {}, "wait_for_task": {},
+	"list_tools": {}, "recall_memory": {}, "review_pull_request": {}, "search_transcript": {}, "wait_for_task": {},
 	"wait_for_tasks": {}, "web_fetch": {}, "web_search": {},
 }
 
@@ -256,8 +256,11 @@ func adjustInputsForConnectorTools(
 			}
 		}
 	}
-	hidden, connectorWrite, err := FilterConnectorToolsForRequester(ctx, reader, registry, task, candidates)
+	hidden, connectorWrite, err := FilterBrokeredConnectorToolsForRequester(ctx, reader, registry, task, candidates)
 	if err != nil {
+		if permanent := permanentLinkedBuiltinError(err); permanent != err {
+			return nil, nil, permanent
+		}
 		return nil, nil, fmt.Errorf("apply connector tool visibility: %w", err)
 	}
 	visible := allowed

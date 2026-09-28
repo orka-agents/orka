@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 
@@ -104,7 +105,11 @@ type agentExecutionSnapshotBody struct {
 
 // agentExecutionSnapshotConnection is one frozen person-to-provider link.
 type agentExecutionSnapshotConnection struct {
-	PolicyName     string `json:"policyName"`
+	// PolicyName is the connection-mode policy, or the BuiltinConnectionKey
+	// of a built-in tool the controller runs under the link.
+	PolicyName string `json:"policyName"`
+	// Tool is set for a built-in binding: the tool the link was frozen for.
+	Tool           string `json:"tool,omitempty"`
 	Provider       string `json:"provider"`
 	ConnectionName string `json:"connectionName"`
 	UID            string `json:"uid"`
@@ -543,19 +548,28 @@ func (r *TaskReconciler) resolveExternalAgentExecutionCandidate(
 	if err != nil {
 		return nil, err
 	}
-	// An external runtime's snapshot freezes no Connections: its MCP policy
-	// is fixed by its registered profile and per-requester links cannot be
-	// applied to it. Connector-backed tools therefore fail closed here, with
-	// a definitive reason, rather than being advertised as tools whose every
-	// call would fail for want of a frozen Connection.
+	// An external runtime's MCP policy is fixed by its registered profile,
+	// so per-requester links cannot narrow it. Tools behind connection-mode
+	// policies therefore fail closed here, with a definitive reason, rather
+	// than being advertised as tools whose every call would fail for want
+	// of a frozen Connection. GitHub built-ins under a linked account are
+	// carried only when the requester's link leaves the registered policy
+	// exactly as registered; see checkExternalLinkedBuiltins.
 	var runtimeDisallowed []string
 	if runtime.Spec.Capabilities.MCPPolicy != nil {
 		runtimeDisallowed = runtime.Spec.Capabilities.MCPPolicy.DisallowedTools
 	}
-	if connectorTools, err := connectorToolsFor(ctx, reader, r.MCPRegistry, task.Namespace, connectorCandidateTools(task, agent, runtimeDisallowed)); err != nil {
+	candidates := connectorCandidateTools(task, agent, runtimeDisallowed)
+	if connectorTools, err := connectorToolsFor(ctx, reader, r.MCPRegistry, task.Namespace, candidates); err != nil {
 		return nil, err
 	} else if len(connectorTools) > 0 {
 		return nil, permanentACPAgentConfiguration(errors.New("connector-backed tools are not supported on external v2 AgentRuntimes"))
+	}
+	linkedBuiltins := brokeredLinkedBuiltins(r.MCPRegistry, candidates)
+	if len(linkedBuiltins) > 0 {
+		if err := checkExternalLinkedBuiltins(ctx, reader, r.MCPRegistry, task, runtime, candidates); err != nil {
+			return nil, err
+		}
 	}
 	registry := r.MCPRegistry
 	if registry == nil {
@@ -570,11 +584,25 @@ func (r *TaskReconciler) resolveExternalAgentExecutionCandidate(
 	if runtime.Status.ObservedCapabilities.MCPToolDescriptorDigest != mcpConfiguration.ToolPolicy.DescriptorDigest {
 		return nil, errors.New("external AgentRuntime MCP tool descriptors have not passed current conformance")
 	}
+	var frozenConnections []agentExecutionSnapshotConnection
+	if len(linkedBuiltins) > 0 {
+		frozenConnections, err = freezeRequesterConnections(ctx, reader, r.MCPRegistry, task, mcpConfiguration)
+		if err != nil {
+			return nil, fmt.Errorf("freeze requester connections: %w", err)
+		}
+		// The visibility check above saw a Ready link for every linked
+		// built-in; a link gone since then is a transient state, and the
+		// snapshot is not written without it.
+		if len(frozenConnections) != len(linkedBuiltins) {
+			return nil, fmt.Errorf("the requester's linked account changed while the task was being bound; retrying")
+		}
+	}
 
 	body := agentExecutionSnapshotBody{
 		SchemaVersion:   store.AgentExecutionSnapshotSchemaVersion,
 		ContractVersion: string(corev1alpha1.AgentRuntimeContractHarnessV2),
 		Backend:         string(corev1alpha1.AgentExecutionBackendExternalEndpoint),
+		Connections:     frozenConnections,
 		Agent: agentExecutionSnapshotAgent{
 			Namespace: agent.Namespace, Name: agent.Name, UID: string(agent.UID), Generation: agent.Generation,
 		},
@@ -1504,4 +1532,45 @@ func (r *TaskReconciler) ensureAgentExecutionBinding(
 		return result, handleErr, true
 	}
 	return ctrl.Result{}, nil, false
+}
+
+// checkExternalLinkedBuiltins admits GitHub built-ins under a linked account
+// on an external v2 runtime only when the requester's link changes nothing
+// about the registered policy: every such tool must stay visible (a Ready
+// link, readWrite for write tools) and every write tool must already be in
+// the registered approval-required set. Anything else is a permanent
+// configuration refusal, never a per-person narrowing of the profile.
+func checkExternalLinkedBuiltins(
+	ctx context.Context,
+	reader client.Reader,
+	registry *tools.Registry,
+	task *corev1alpha1.Task,
+	runtime *corev1alpha1.AgentRuntime,
+	candidates []string,
+) error {
+	visible, connectorWrite, err := FilterBrokeredConnectorToolsForRequester(ctx, reader, registry, task, candidates)
+	if err != nil {
+		if permanent := permanentLinkedBuiltinError(err); permanent != err {
+			return permanent
+		}
+		return fmt.Errorf("apply connector tool visibility: %w", err)
+	}
+	if hidden := withoutTools(candidates, visible); len(hidden) > 0 {
+		return permanentACPAgentConfiguration(fmt.Errorf(
+			"built-in tools %s run only under the requester's linked account, and the registered external AgentRuntime policy cannot be narrowed per person; link the account (readWrite for write tools) before creating the task",
+			strings.Join(hidden, ", "),
+		))
+	}
+	var registeredApprovals []string
+	if runtime != nil && runtime.Spec.Capabilities != nil && runtime.Spec.Capabilities.MCPPolicy != nil {
+		registeredApprovals = runtime.Spec.Capabilities.MCPPolicy.ApprovalRequiredTools
+	}
+	for _, name := range connectorWrite {
+		if !slices.Contains(registeredApprovals, name) {
+			return permanentACPAgentConfiguration(fmt.Errorf(
+				"write tool %q runs under the requester's linked account and must be in the external AgentRuntime's registered approvalRequiredTools", name,
+			))
+		}
+	}
+	return nil
 }

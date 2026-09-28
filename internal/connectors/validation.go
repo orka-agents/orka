@@ -220,7 +220,7 @@ func ValidateProviderSpec(provider *corev1alpha1.ConnectorProvider, knownBuiltin
 			return invalid("oauth.additionalAuthorizeParameters values must be printable text without control bytes")
 		}
 	}
-	return validateTools(provider.Spec.Tools, knownBuiltin)
+	return validateTools(provider, knownBuiltin)
 }
 
 func validateEndpointURL(field, raw string, required bool) *Issue {
@@ -411,7 +411,8 @@ func validScopeToken(scope string) bool {
 	return true
 }
 
-func validateTools(tools []corev1alpha1.ConnectorTool, knownBuiltin BuiltinToolCheck) *Issue {
+func validateTools(provider *corev1alpha1.ConnectorProvider, knownBuiltin BuiltinToolCheck) *Issue {
+	tools := provider.Spec.Tools
 	if len(tools) == 0 {
 		return invalid("tools requires at least one entry")
 	}
@@ -439,6 +440,25 @@ func validateTools(tools []corev1alpha1.ConnectorTool, knownBuiltin BuiltinToolC
 			}
 			if knownBuiltin != nil && !knownBuiltin(tool.Name) {
 				return invalid(fmt.Sprintf("builtin tool %q is not a known Orka tool", tool.Name))
+			}
+			// Only a built-in that consumes the linked credential may be
+			// declared, and only with the class its credential use fixes:
+			// a declaration the tool would ignore, or a write tool declared
+			// as read, would let a call run under a different credential or
+			// skip the approval and readOnly rules the class carries.
+			class, linked := BuiltinConnectorToolClass(tool.Name)
+			if !linked {
+				return invalid(fmt.Sprintf("builtin tool %q cannot use a linked account; only %s can", tool.Name, strings.Join(BuiltinConnectorToolNames(), ", ")))
+			}
+			if tool.Class != class {
+				return invalid(fmt.Sprintf("builtin tool %q must be declared with class %s", tool.Name, class))
+			}
+			// The built-ins send the credential to one fixed resource
+			// server; a provider whose tokens are not meant for it (GitHub
+			// Enterprise, or another service entirely) would have the
+			// person's token disclosed to the wrong server.
+			if !ProviderIssuesGitHubCredentials(provider) {
+				return invalid(fmt.Sprintf("builtin tool %q sends its credential to %s; only a %s OAuth provider may declare it", tool.Name, BuiltinConnectorToolAudience, builtinConnectorIssuerHost))
 			}
 		case corev1alpha1.ConnectorToolSourceHTTP:
 			if tool.HTTP == nil {
@@ -683,6 +703,20 @@ func ProviderAuthorityDigest(provider *corev1alpha1.ConnectorProvider) string {
 		for _, name := range headerNames {
 			parts = append(parts, "header", name, tool.HTTP.Headers[name])
 		}
+	}
+	// Built-in declarations are part of what the person consented to as
+	// well: each names a tool that will act with the token against the
+	// catalog's fixed audience, and a write tool added later must not be
+	// authorized by a consent that never mentioned it.
+	builtins := make([]corev1alpha1.ConnectorTool, 0, len(provider.Spec.Tools))
+	for _, tool := range provider.Spec.Tools {
+		if tool.Source == corev1alpha1.ConnectorToolSourceBuiltin {
+			builtins = append(builtins, tool)
+		}
+	}
+	slices.SortFunc(builtins, func(a, b corev1alpha1.ConnectorTool) int { return strings.Compare(a.Name, b.Name) })
+	for _, tool := range builtins {
+		parts = append(parts, "builtin", tool.Name, string(tool.Class), BuiltinConnectorToolAudience)
 	}
 	return lengthPrefixedDigest(parts)
 }
