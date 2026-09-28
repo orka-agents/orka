@@ -759,7 +759,12 @@ func (s *Store) ShredConnectorCredential(ctx context.Context, connectionUID stri
 	if err != nil {
 		return fmt.Errorf("shred connector credential: %w", err)
 	}
-	return s.connectorRowFenced(ctx, result, connectionUID)
+	if err := s.connectorRowFenced(ctx, result, connectionUID); err != nil {
+		return err
+	}
+	// A shred is a crypto-shred only once the log frames that carried the
+	// row are gone too.
+	return s.truncateWAL(ctx)
 }
 
 // connectorRowFenced turns a zero-row fenced write into ErrConflict when the
