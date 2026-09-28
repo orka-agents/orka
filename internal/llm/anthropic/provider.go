@@ -49,6 +49,7 @@ func NewProvider(config llm.ProviderConfig) (*Provider, error) {
 	opts := []option.RequestOption{
 		option.WithAPIKey(config.APIKey),
 		option.WithMiddleware(llm.UsageHTTPMiddleware),
+		option.WithHTTPClient(llm.SharedHTTPClient()),
 	}
 
 	if config.BaseURL != "" {

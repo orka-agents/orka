@@ -92,7 +92,10 @@ func NewProvider(config llm.ProviderConfig) (*Provider, error) {
 		return nil, llm.ErrAPIKeyRequired
 	}
 
-	opts := []option.RequestOption{option.WithMiddleware(llm.UsageHTTPMiddleware)}
+	opts := []option.RequestOption{
+		option.WithMiddleware(llm.UsageHTTPMiddleware),
+		option.WithHTTPClient(llm.SharedHTTPClient()),
+	}
 	if config.ProviderType == providerTypeAzureOpenAI {
 		apiVersion := config.AzureAPIVersion
 		if apiVersion == "" {
