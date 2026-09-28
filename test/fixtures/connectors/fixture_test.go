@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -85,7 +86,7 @@ func link(t *testing.T, now *time.Time) linkedTokens {
 	}
 	location, _ := url.Parse(resp.Header.Get("Location"))
 	if location.Query().Get("state") != "s1" || location.Query().Get("code") == "" {
-		t.Fatalf("location = %s", location)
+		t.Fatalf("location query keys = %v", queryKeys(location))
 	}
 	code := location.Query().Get("code")
 	// A wrong verifier is refused; the right one issues a token pair.
@@ -96,7 +97,7 @@ func link(t *testing.T, now *time.Time) linkedTokens {
 	code = mustQuery(t, resp.Header.Get("Location"), "code")
 	body, status := exchange(url.Values{"grant_type": {"authorization_code"}, "code": {code}, "redirect_uri": {"http://localhost:1/cb"}, "code_verifier": {verifier}})
 	if status != http.StatusOK || body["token_type"] != "Bearer" || body["scope"] != "read write" || body["access_token"] == "" || body["refresh_token"] == "" {
-		t.Fatalf("exchange = %d %v", status, body)
+		t.Fatalf("exchange = %d keys=%v token_type=%v scope=%v", status, bodyKeys(body), body["token_type"], body["scope"])
 	}
 	return linkedTokens{f: f, plain: plain, secure: secure, client: client, access: body["access_token"].(string), refresh: body["refresh_token"].(string), exchange: exchange, call: call}
 }
@@ -118,7 +119,7 @@ func TestFixtureOAuthLifecycle(t *testing.T) {
 	// Refresh rotates the pair; the old access token stays dead.
 	body, status := exchange(url.Values{"grant_type": {"refresh_token"}, "refresh_token": {refresh}})
 	if status != http.StatusOK || body["access_token"] == access {
-		t.Fatalf("refresh = %d %v", status, body)
+		t.Fatalf("refresh = %d keys=%v rotated=%t", status, bodyKeys(body), body["access_token"] != access)
 	}
 	rotated := body["access_token"].(string)
 	if call(http.MethodGet, rotated, "") != http.StatusOK {
@@ -163,11 +164,13 @@ func TestFixtureOIDCAndModelScript(t *testing.T) {
 	_ = json.NewDecoder(resp.Body).Decode(&minted)
 	parts := strings.Split(minted.Token, ".")
 	if len(parts) != 3 {
-		t.Fatalf("token = %q", minted.Token)
+		t.Fatalf("minted token has %d parts, want 3", len(parts))
 	}
 	payload, _ := base64.RawURLEncoding.DecodeString(parts[1])
-	if !strings.Contains(string(payload), `"iss":"http://issuer.test/oidc"`) || !strings.Contains(string(payload), `"sub":"alice"`) || !strings.Contains(string(payload), `"aud":"orka"`) {
-		t.Fatalf("claims = %s", payload)
+	var claims map[string]any
+	_ = json.Unmarshal(payload, &claims)
+	if claims["iss"] != "http://issuer.test/oidc" || claims["sub"] != "alice" || claims["aud"] != "orka" {
+		t.Fatalf("claims iss=%v sub=%v aud=%v", claims["iss"], claims["sub"], claims["aud"])
 	}
 	resp, _ = http.Get(plain.URL + "/oidc/.well-known/openid-configuration")
 	var discovery map[string]string
@@ -250,7 +253,27 @@ func mustQuery(t *testing.T, raw, key string) string {
 	t.Helper()
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Query().Get(key) == "" {
-		t.Fatalf("%s has no %s: %v", raw, key, err)
+		t.Fatalf("redirect has no %s (keys %v): %v", key, queryKeys(parsed), err)
 	}
 	return parsed.Query().Get(key)
+}
+
+// queryKeys and bodyKeys describe a response without its values, so a
+// failing assertion never prints a code, state, or token.
+func queryKeys(location *url.URL) []string {
+	keys := make([]string, 0, len(location.Query()))
+	for key := range location.Query() {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func bodyKeys(body map[string]any) []string {
+	keys := make([]string, 0, len(body))
+	for key := range body {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }

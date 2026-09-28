@@ -29,8 +29,13 @@ fixture_image="${ORKA_CONNECTORS_FIXTURE_IMAGE:-orka-connectors-fixture:live-con
 api_port="${ORKA_API_LOCAL_PORT:-18080}"
 fixture_port="${ORKA_FIXTURE_LOCAL_PORT:-18081}"
 fixture_tls_port="${ORKA_FIXTURE_LOCAL_TLS_PORT:-18443}"
-access_ttl="${ORKA_CONNECTORS_E2E_ACCESS_TTL:-75s}"
+# Whole seconds only (an optional trailing "s"): the script sleeps past it.
+access_ttl_seconds="${ORKA_CONNECTORS_E2E_ACCESS_TTL_SECONDS:-75}"
+access_ttl_seconds="${access_ttl_seconds%s}"
+[[ "${access_ttl_seconds}" =~ ^[1-9][0-9]*$ ]] || { printf 'error: ORKA_CONNECTORS_E2E_ACCESS_TTL_SECONDS must be whole seconds, got %q\n' "${access_ttl_seconds}" >&2; exit 1; }
+access_ttl="${access_ttl_seconds}s"
 subject="alice"
+other_subject="bob"
 audience="orka-live-connectors-e2e"
 fixture_host="connectors-fixture.${namespace}.svc"
 issuer="http://${fixture_host}:8080/oidc"
@@ -70,6 +75,18 @@ trap cleanup EXIT
 request() {
   local method="$1" url="$2" output="$3"; shift 3
   curl -sS -o "${output}" -w '%{http_code}' -X "${method}" "${url}" "$@"
+}
+
+# url_shape prints a URL without its query values and fragment: the
+# authorization code, state, and completion token never reach the log.
+url_shape() {
+  local raw="$1" base query keys=""
+  base="${raw%%\?*}"
+  query="${raw#*\?}"; query="${query%%#*}"
+  if [[ "${raw}" == *"?"* ]]; then
+    keys="$(printf '%s' "${query}" | tr '&' '\n' | sed 's/=.*//' | paste -sd, -)"
+  fi
+  printf '%s?{%s}%s' "${base}" "${keys}" "$([[ "${raw}" == *"#"* ]] && printf '#<fragment>')"
 }
 
 start_port_forwards() {
@@ -224,7 +241,7 @@ kubectl -n "${namespace}" get deployment "${deployment}" -o json | jq \
 kubectl -n "${namespace}" set env deployment/"${deployment}" \
   ORKA_OIDC_ISSUER="${issuer}" \
   ORKA_OIDC_AUDIENCE="${audience}" \
-  ORKA_OIDC_ALLOWED_SUBJECTS="${subject}" \
+  ORKA_OIDC_ALLOWED_SUBJECTS="${subject},${other_subject}" \
   ORKA_OIDC_NAMESPACE="${namespace}" \
   ORKA_TASK_PROVENANCE_ADMISSION_EXTERNAL=true \
   ORKA_CONNECTORS_ENABLED=true \
@@ -353,14 +370,14 @@ authorize_url="$(jq -er '.authorizeURL' "${workdir}/start.json")"
 # completion token in the fragment.
 local_authorize="https://127.0.0.1:${fixture_tls_port}${authorize_url#https://${fixture_host}:8443}"
 callback_location="$(curl -sS --cacert "${tls_dir}/ca.crt" --resolve "${fixture_host}:${fixture_tls_port}:127.0.0.1" -o /dev/null -w '%{redirect_url}' "${local_authorize}")"
-[[ "${callback_location}" == "${callback_base}/api/v1/connections/callback?"* ]] || die "provider redirected elsewhere: $(printf '%s' "${callback_location}" | redact)"
+[[ "${callback_location}" == "${callback_base}/api/v1/connections/callback?"* ]] || die "provider redirected elsewhere: $(url_shape "${callback_location}")"
 settings_location="$(curl -sS -o /dev/null -w '%{redirect_url}' "http://127.0.0.1:${api_port}${callback_location#${callback_base}}")"
 settings_query="${settings_location#*\?}"; settings_query="${settings_query%%#*}"
 [[ "${settings_location}" == "${callback_base}/settings/connectors?"*"#completion="* ]] \
   && [[ "&${settings_query}&" == *"&status=pending&"* ]] \
   && [[ "&${settings_query}&" == *"&connection=${connection}&"* ]] \
   && [[ "&${settings_query}&" == *"&namespace=${namespace}&"* ]] \
-  || die "callback redirected elsewhere: $(printf '%s' "${settings_location}" | sed -E 's/completion=[^&]+/completion=<redacted>/' | redact)"
+  || die "callback redirected elsewhere: $(url_shape "${settings_location}")"
 completion="${settings_location#*#completion=}"
 status="$(request POST "${api}/connections/${connection}/complete" "${workdir}/complete.json" "${auth[@]}" -H 'Content-Type: application/json' \
   -d "$(jq -n --arg c "${completion}" '{completion:$c}')")"
@@ -382,9 +399,8 @@ kubectl -n "${namespace}" get task "${task}" -o json | jq -e '.status.connection
   || die "the Task did not freeze the requester's Connection"
 
 log "Refresh: let the first access token expire before approving"
-ttl_seconds="$(( $(printf '%s' "${access_ttl}" | sed 's/s$//') ))"
 elapsed="$(( $(date +%s) - linked_at ))"
-if (( elapsed < ttl_seconds + 5 )); then sleep "$(( ttl_seconds + 5 - elapsed ))"; fi
+if (( elapsed < access_ttl_seconds + 5 )); then sleep "$(( access_ttl_seconds + 5 - elapsed ))"; fi
 
 log "Approval on write: approve the parked itemswrite"
 status="$(request GET "${api}/tasks/${task}/approvals?namespace=${namespace}" "${workdir}/approvals.json" "${auth[@]}")"
@@ -396,17 +412,24 @@ status="$(request POST "${api}/tasks/${task}/approvals/${approval_id}/decision?n
 wait_for_state '.writes == 1 and .lastWriteTitle == "hello from orka" and .reads == 2 and .refreshes >= 1 and .distinctBearers >= 2' \
   "the approved write and a refreshed second read" 240
 wait_for_task_condition "${task}" '.status.phase == "Succeeded"' "Succeeded" 150
-kubectl -n "${namespace}" get task "${task}" -o json | jq -e '(.status.result // "" | test("CONNECTORS_E2E_DONE")) or true' >/dev/null
+status="$(request GET "${api}/tasks/${task}/result?namespace=${namespace}" "${workdir}/result.json" "${auth[@]}")"
+[[ "${status}" == 200 ]] || die "task result returned HTTP ${status}"
+jq -e '(.result // "" | tostring) | test("CONNECTORS_E2E_DONE")' "${workdir}/result.json" >/dev/null \
+  || { jq -c '{keys: keys}' "${workdir}/result.json" >&2; die "the scripted model never reached its final answer"; }
 
-log "Fail closed: an unlinked person gets no credential"
-other_token="$(curl -fsS -X POST "http://127.0.0.1:${fixture_port}/oidc/mint" -H 'Content-Type: application/json' -d '{"subject":"bob"}' | jq -er '.token')"
-status="$(request GET "${api}/connections" "${workdir}/bob.json" -H "Authorization: Bearer ${other_token}")"
-[[ "${status}" == 403 ]] || jq -e '.items | length == 0' "${workdir}/bob.json" >/dev/null || die "another person saw ${subject}'s connections"
+log "Isolation: another signed-in person sees none of ${subject}'s links"
+other_token="$(curl -fsS -X POST "http://127.0.0.1:${fixture_port}/oidc/mint" -H 'Content-Type: application/json' \
+  -d "{\"subject\":\"${other_subject}\"}" | jq -er '.token')"
+status="$(request GET "${api}/connections?namespace=${namespace}" "${workdir}/other.json" -H "Authorization: Bearer ${other_token}")"
+[[ "${status}" == 200 ]] || die "${other_subject}'s connection list returned HTTP ${status}"
+jq -e '(.items | type) == "array" and (.items | length) == 0' "${workdir}/other.json" >/dev/null || die "${other_subject} saw ${subject}'s connections"
+status="$(request GET "${api}/connections/${connection}?namespace=${namespace}" "${workdir}/other-get.json" -H "Authorization: Bearer ${other_token}")"
+[[ "${status}" == 404 ]] || die "${other_subject} could read ${subject}'s connection (HTTP ${status})"
 
 log "Disconnect: revoke the tokens and remove the link"
 status="$(request DELETE "${api}/connections/${connection}" "${workdir}/delete.json" "${auth[@]}")"
 [[ "${status}" == 200 || "${status}" == 202 || "${status}" == 204 ]] || { cat "${workdir}/delete.json" | redact >&2; die "disconnect returned HTTP ${status}"; }
-wait_for_state '.revocations >= 1' "a revocation" 60
+wait_for_state '.revocations >= 1 and .revokedRefreshes >= 1' "revocation of the issued refresh token" 60
 for ((i = 0; i < 60; i++)); do
   status="$(request GET "${api}/connections/${connection}" "${workdir}/gone.json" "${auth[@]}")"
   [[ "${status}" == 404 ]] && break
@@ -418,8 +441,8 @@ log "No token material in controller logs"
 if kubectl -n "${namespace}" logs deployment/"${deployment}" --all-containers=true 2>/dev/null | grep -Eq 'fx-access-|fx-refresh-'; then
   die "linked token material appeared in controller logs"
 fi
-if kubectl -n "${namespace}" logs deployment/"${deployment}" --all-containers=true 2>/dev/null | grep -Fq "${token}"; then
-  die "the OIDC token appeared in controller logs"
+if kubectl -n "${namespace}" logs deployment/"${deployment}" --all-containers=true 2>/dev/null | grep -Fq -e "${token}" -e "${other_token}"; then
+  die "an OIDC token appeared in controller logs"
 fi
 fixture_state | jq '{codeExchanges, refreshes, revocations, reads, writes, distinctBearers, rejected, modelTurns}' >&2
 log "Live connectors E2E passed"
