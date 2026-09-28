@@ -426,3 +426,59 @@ func TestDeclaredConnectorToolComparesTimeouts(t *testing.T) {
 		}
 	}
 }
+
+func TestDeclaredConnectorToolBuiltinBindings(t *testing.T) {
+	provider := &corev1alpha1.ConnectorProvider{ObjectMeta: metav1.ObjectMeta{Name: "github"}, Spec: corev1alpha1.ConnectorProviderSpec{Tools: []corev1alpha1.ConnectorTool{
+		{Name: "list_pull_requests", Class: corev1alpha1.ConnectorToolClassRead, Source: corev1alpha1.ConnectorToolSourceBuiltin},
+		{Name: "create_pull_request", Class: corev1alpha1.ConnectorToolClassWrite, Source: corev1alpha1.ConnectorToolSourceBuiltin},
+		{Name: "gh_search", Class: corev1alpha1.ConnectorToolClassRead, Source: corev1alpha1.ConnectorToolSourceHTTP,
+			HTTP: &corev1alpha1.ConnectorHTTPTool{URL: "https://api.github.com/search/issues", Method: "GET"}},
+	}}}
+	read := ToolBinding{Name: "list_pull_requests", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Builtin: true}
+	if declared, err := DeclaredConnectorTool(provider, read); err != nil || declared.Name != "list_pull_requests" {
+		t.Fatalf("declared = %+v err = %v", declared, err)
+	}
+	write := ToolBinding{Name: "create_pull_request", Class: corev1alpha1.AgentRuntimeBrokeredToolClassWrite, Builtin: true}
+	if _, err := DeclaredConnectorTool(provider, write); err != nil {
+		t.Fatalf("write built-in: %v", err)
+	}
+	for name, binding := range map[string]ToolBinding{
+		// The class is fixed by the catalog, not by the caller.
+		"class":      {Name: "create_pull_request", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Builtin: true},
+		"http":       {Name: "gh_search", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Builtin: true},
+		"unknown":    {Name: "get_issue", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Builtin: true},
+		"not linked": {Name: "web_search", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Builtin: true},
+		"url":        {Name: "list_pull_requests", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Builtin: true, URL: "https://evil.example.test"},
+		"timeout":    {Name: "list_pull_requests", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Builtin: true, TimeoutSet: true},
+		// A custom Tool never matches a built-in declaration.
+		"custom": {Name: "list_pull_requests", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, URL: "https://api.github.com/pulls", Method: "GET"},
+	} {
+		if _, err := DeclaredConnectorTool(provider, binding); err == nil {
+			t.Fatalf("%s: want refusal", name)
+		}
+	}
+}
+
+func TestResolveConnectionRefusesBuiltinBindingsAndForeignProviders(t *testing.T) {
+	provider := acceptedProvider()
+	policy := &corev1alpha1.OutboundAccessPolicy{ObjectMeta: metav1.ObjectMeta{Name: "github-conn", Namespace: "tenant", UID: "policy-uid"}, Spec: connectionPolicySpec("github")}
+	source := &fakeConnectionSource{credential: ConnectionCredential{AccessToken: "tok", Mode: corev1alpha1.ConnectionModeReadWrite}}
+	resolver := &KubernetesResolver{Reader: ctrlfake.NewClientBuilder().WithScheme(resolverScheme(t)).WithObjects(policy, provider).Build(), Connections: source}
+	requester := &corev1alpha1.RequestedBy{Issuer: "https://issuer.example.test", Subject: "alice"}
+	tool := ToolBinding{Name: "gh_search", URL: "https://api.github.com/search/issues", Method: "GET", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead}
+	frozen := map[string]FrozenConnection{"github-conn": {UID: "conn-uid", Generation: 1, GrantSequence: 1, Provider: "github"}}
+	if _, err := resolver.resolveConnection(context.Background(), policy, ResolveRequest{Requester: requester, FrozenConnections: frozen, Tool: tool}); err != nil {
+		t.Fatalf("matching provider: %v", err)
+	}
+	foreign := map[string]FrozenConnection{"github-conn": {UID: "conn-uid", Generation: 1, GrantSequence: 1, Provider: "gitlab"}}
+	if _, err := resolver.resolveConnection(context.Background(), policy, ResolveRequest{Requester: requester, FrozenConnections: foreign, Tool: tool}); err == nil || !strings.Contains(err.Error(), "different provider") {
+		t.Fatalf("foreign provider err = %v", err)
+	}
+	builtin := ToolBinding{Name: "list_pull_requests", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Builtin: true}
+	if _, err := resolver.resolveConnection(context.Background(), policy, ResolveRequest{Requester: requester, FrozenConnections: frozen, Tool: builtin}); err == nil || !strings.Contains(err.Error(), "no outbound access policy") {
+		t.Fatalf("built-in binding err = %v", err)
+	}
+	if source.calls != 1 {
+		t.Fatalf("source calls = %d, want only the matching resolution", source.calls)
+	}
+}

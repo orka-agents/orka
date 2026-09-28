@@ -53,35 +53,46 @@ type githubTaskContext struct {
 // readCredentialRef for the source repository and publicationReadCredentialRef
 // for the publication repository. Repository write and forge mutation credentials
 // are never used for read-only calls.
-func resolveReadRepoAndToken(ctx context.Context, k8sClient client.Client, taskName, repoURL, overrideBaseURL string) (owner, repo, token, baseURL string, err error) {
-	return resolveRepoAndTokenWithPolicy(ctx, k8sClient, taskName, repoURL, overrideBaseURL, false, githubCredentialRead)
+func resolveReadRepoAndToken(ctx context.Context, k8sClient client.Client, toolName, taskName, repoURL, overrideBaseURL string) (owner, repo, token, baseURL string, err error) {
+	return resolveRepoAndTokenWithPolicy(ctx, k8sClient, toolName, taskName, repoURL, overrideBaseURL, false, githubCredentialRead)
 }
 
-func resolveScopedReadRepoAndToken(ctx context.Context, k8sClient client.Client, taskName, repoURL, overrideBaseURL string) (owner, repo, token, baseURL string, err error) {
-	return resolveRepoAndTokenWithPolicy(ctx, k8sClient, taskName, repoURL, overrideBaseURL, true, githubCredentialRead)
+func resolveScopedReadRepoAndToken(ctx context.Context, k8sClient client.Client, toolName, taskName, repoURL, overrideBaseURL string) (owner, repo, token, baseURL string, err error) {
+	return resolveRepoAndTokenWithPolicy(ctx, k8sClient, toolName, taskName, repoURL, overrideBaseURL, true, githubCredentialRead)
 }
 
 // resolveForgeRepoAndToken resolves GitHub owner/repo, forge-mutation auth token,
 // and API base URL. Task-scoped mutations require forgeCredentialRef and never
 // fall back to publication or read credentials.
-func resolveForgeRepoAndToken(ctx context.Context, k8sClient client.Client, taskName, repoURL, overrideBaseURL string) (owner, repo, token, baseURL string, err error) {
-	return resolveRepoAndTokenWithPolicy(ctx, k8sClient, taskName, repoURL, overrideBaseURL, false, githubCredentialForgeMutation)
+func resolveForgeRepoAndToken(ctx context.Context, k8sClient client.Client, toolName, taskName, repoURL, overrideBaseURL string) (owner, repo, token, baseURL string, err error) {
+	return resolveRepoAndTokenWithPolicy(ctx, k8sClient, toolName, taskName, repoURL, overrideBaseURL, false, githubCredentialForgeMutation)
 }
 
-func resolveScopedForgeRepoAndToken(ctx context.Context, k8sClient client.Client, taskName, repoURL, overrideBaseURL string) (owner, repo, token, baseURL string, err error) {
-	return resolveRepoAndTokenWithPolicy(ctx, k8sClient, taskName, repoURL, overrideBaseURL, true, githubCredentialForgeMutation)
+func resolveScopedForgeRepoAndToken(ctx context.Context, k8sClient client.Client, toolName, taskName, repoURL, overrideBaseURL string) (owner, repo, token, baseURL string, err error) {
+	return resolveRepoAndTokenWithPolicy(ctx, k8sClient, toolName, taskName, repoURL, overrideBaseURL, true, githubCredentialForgeMutation)
 }
 
 func resolveRepoAndTokenWithPolicy(
 	ctx context.Context,
 	k8sClient client.Client,
-	taskName, repoURL, overrideBaseURL string,
+	toolName, taskName, repoURL, overrideBaseURL string,
 	requireRepoURLScope bool,
 	credentialPolicy githubCredentialPolicy,
 ) (owner, repo, token, baseURL string, err error) {
 	baseURL = githubAPIBaseURL
 	if overrideBaseURL != "" {
 		baseURL = overrideBaseURL
+	}
+
+	// The requester's linked account comes first. A bound Connection that
+	// cannot be used fails the call; only a call with no Connection bound
+	// resolves the Task's own credential Secrets below.
+	linked, err := linkedGitHubToken(ctx, toolName)
+	if err != nil {
+		return "", "", "", "", err
+	}
+	if linked != "" {
+		token = linked
 	}
 
 	hasRepoURL := strings.TrimSpace(repoURL) != ""
@@ -97,7 +108,7 @@ func resolveRepoAndTokenWithPolicy(
 	if tc := GetToolContext(ctx); tc != nil {
 		requireTaskCredentials = tc.RequireGitHubTaskCredentials
 	}
-	if requireTaskCredentials && scopeTaskName == "" {
+	if requireTaskCredentials && scopeTaskName == "" && token == "" {
 		return "", "", "", "", fmt.Errorf("task_name or current Task context is required for external GitHub access")
 	}
 	if hasRepoURL && requireRepoURLScope && scopeTaskName == "" {
@@ -122,13 +133,15 @@ func resolveRepoAndTokenWithPolicy(
 			)
 		}
 
-		credentialRef, err := taskContext.credentialRef(scopeTaskName, owner, repo, credentialPolicy)
-		if err != nil {
-			return "", "", "", "", err
-		}
-		token, err = resolveGitSecretToken(ctx, k8sClient, credentialRef)
-		if err != nil {
-			return "", "", "", "", err
+		if token == "" {
+			credentialRef, err := taskContext.credentialRef(scopeTaskName, owner, repo, credentialPolicy)
+			if err != nil {
+				return "", "", "", "", err
+			}
+			token, err = resolveGitSecretToken(ctx, k8sClient, credentialRef)
+			if err != nil {
+				return "", "", "", "", err
+			}
 		}
 	}
 
@@ -158,6 +171,31 @@ func resolveRepoAndTokenWithPolicy(
 	}
 
 	return owner, repo, token, baseURL, nil
+}
+
+// linkedGitHubToken returns the requester's linked-account token for the
+// named tool when the ToolContext binds one, "" when none is bound, and an
+// error when a bound Connection cannot be used. The binding itself refuses
+// a forge mutation under a linked account the person limited to reading.
+func linkedGitHubToken(ctx context.Context, toolName string) (string, error) {
+	tc := GetToolContext(ctx)
+	if tc == nil || tc.LinkedAccounts == nil {
+		return "", nil
+	}
+	if strings.TrimSpace(toolName) == "" {
+		return "", fmt.Errorf("linked-account resolution requires the executing tool name")
+	}
+	credential, bound, err := tc.LinkedAccounts.BuiltinToolCredential(ctx, toolName)
+	if err != nil {
+		return "", fmt.Errorf("resolve the linked account for %s: %w", toolName, err)
+	}
+	if !bound {
+		return "", nil
+	}
+	if strings.TrimSpace(credential.AccessToken) == "" {
+		return "", fmt.Errorf("the linked account bound for %s returned no credential", toolName)
+	}
+	return credential.AccessToken, nil
 }
 
 func githubRepoAllowed(owner, repo string, scopes []githubRepoScope) bool {

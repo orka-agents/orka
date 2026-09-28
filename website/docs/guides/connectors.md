@@ -1,0 +1,228 @@
+---
+slug: /connectors
+description: "Letting people link their own GitHub account so agents act as them, with approval on every write."
+---
+
+# Connectors: act as the person, not the namespace
+
+A connector lets a person link one of their own accounts to Orka once, and
+then lets the agents they start act through that account. The first provider
+is GitHub. This guide sets it up end to end: the OAuth App, the
+`ConnectorProvider`, the link, and a Task whose GitHub tools run as the person
+who created it.
+
+The controller is the only process that ever holds the linked token. Runtime
+Pods, worker Pods, Task specs, status, events, and logs never carry it.
+
+## How it fits together
+
+- **`ConnectorProvider`** is the operator-owned catalog entry: the OAuth
+  client, the scopes for `readOnly` and `readWrite` links, and the tools the
+  provider offers. It lives in the controller's watched namespace.
+- **`Connection`** is one person's link to one provider. The API server
+  creates it from the caller's verified sign-in identity; nobody can create
+  one for somebody else, and a Connection is visible only to its owner.
+- **Tools** come in two shapes. `Builtin` tools are Orka's own GitHub tools,
+  which run under the link. `HTTP` tools are curated request definitions the
+  controller executes with the person's bearer token; they attach to Tools
+  through a connection-mode `OutboundAccessPolicy` (see
+  [Outbound access](../concepts/outbound-access.md#linked-account-credentials-connection-mode)).
+
+When a Task is dispatched, the controller looks up the requester's Ready
+Connection for each provider its tools need and freezes that exact link (its
+UID, generation, and consent grant) into the Task's execution snapshot. A
+link made, re-linked, or removed after dispatch never changes what a running
+Task can do.
+
+## Prerequisites
+
+- A sign-in that yields an issuer and subject: OIDC (`--oidc-issuer`,
+  `--oidc-audience`) or a context-token profile. ServiceAccount bearer tokens
+  cannot link accounts.
+- Task provenance admission (`--task-provenance-admission-enabled` or the
+  external webhook). Connector use trusts `spec.requestedBy` only when the API
+  server provably stamped it.
+- `--connectors-enabled` and `--connector-callback-base-url`, the public
+  https origin the OAuth provider redirects back to. See
+  [Configuration](../reference/configuration.md).
+- The persistent controller store. Sealed credentials live there.
+
+## 1. Register a GitHub OAuth App
+
+In GitHub, create an OAuth App (Settings > Developer settings > OAuth Apps)
+with the authorization callback URL set to exactly:
+
+```text
+<connector-callback-base-url>/api/v1/connections/callback
+```
+
+Note the client ID. Store the client secret in the controller's watched
+namespace, outside git:
+
+```bash
+kubectl -n orka-system create secret generic github-connector-oauth \
+  --from-literal=clientSecret='<github-oauth-app-client-secret>'
+```
+
+## 2. Declare the provider
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: ConnectorProvider
+metadata:
+  name: github
+  namespace: orka-system
+spec:
+  displayName: GitHub
+  oauth:
+    authorizeURL: https://github.com/login/oauth/authorize
+    tokenURL: https://github.com/login/oauth/access_token
+    clientID: Iv1.replace-with-your-client-id
+    clientSecretRef:
+      name: github-connector-oauth
+      key: clientSecret
+    scopes:
+      read:
+        - read:user
+      write:
+        - repo
+  tools:
+    - name: list_pull_requests
+      class: read
+      source: Builtin
+    - name: get_issue
+      class: read
+      source: Builtin
+    - name: create_pull_request
+      class: write
+      source: Builtin
+    - name: comment_on_issue
+      class: write
+      source: Builtin
+```
+
+`kubectl get connectorprovider github` shows `Accepted` and `ResolvedRefs`.
+The controller rejects a provider whose built-in declarations do not match
+the catalog below, so a typo or a wrong class never becomes a live provider.
+
+GitHub OAuth Apps have no read-only scope for private repositories: reading
+them needs `repo`, which also grants write. Orka hides write tools from a
+`readOnly` Connection regardless of what the token could do, but decide
+deliberately whether `repo` belongs in `read`.
+
+### Built-in GitHub tools
+
+Only the tools below can be declared with `source: Builtin`, and each has a
+fixed class. A read tool only reads through the link; a write tool mutates
+the forge, is hidden from `readOnly` Connections, and always asks for
+approval before it runs.
+
+| Tool | Class | What it does |
+| --- | --- | --- |
+| `list_pull_requests` | read | List pull requests in the Task's repository. |
+| `list_issues` | read | List issues. |
+| `get_issue` | read | Read one issue. |
+| `review_pull_request` | read | Fetch a pull request's diff and metadata. |
+| `check_pull_request_ci` | read | Report CI status for a pull request. |
+| `check_pr_review_marker` | read | Look for an earlier review marker. |
+| `comment_on_issue` | write | Comment on an issue or pull request. |
+| `create_pull_request` | write | Open a pull request. |
+| `post_review_comment` | write | Post a review comment. |
+
+Declaring any other built-in, or declaring one of these with the other
+class, is rejected: a tool that ignored the credential would silently run
+under something else, and a write tool declared as read would skip the
+approval and `readOnly` rules its class carries.
+
+The full example, with an Agent that uses these tools, is in
+[`examples/github-connector/`](https://github.com/orka-agents/orka/tree/main/examples/github-connector).
+
+## 3. Link an account
+
+Each person links once. Signed in as themselves:
+
+```bash
+curl -sS -X POST "$ORKA_API_URL/api/v1/connections" \
+  -H "Authorization: Bearer $ORKA_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"provider":"github","mode":"readWrite"}'
+```
+
+The response carries the Connection and an `authorizeURL`. Open it in a
+browser, approve the GitHub consent screen, and the callback commits the
+tokens under the controller key. `GET /api/v1/connections` then shows the
+Connection as `Ready` with its granted scopes and no token material.
+
+`mode` is `readOnly` (only read scopes; write tools hidden) or `readWrite`.
+Widening the mode later (`PUT /api/v1/connections/<name>`) asks for consent
+again with the extra scopes; narrowing takes effect immediately. Disconnect
+with `DELETE`: the controller revokes the committed tokens against the
+client they were issued to and then deletes the sealed material.
+
+The [API reference](../reference/api-reference.md#connector-endpoints) lists
+every route and the scopes a context token needs for them.
+
+## 4. Use it from a Task
+
+Create the Task through the API, so it carries the person's verified
+identity. `kubectl apply` of a Task has no requester and gets no link.
+
+```bash
+orka task create "List the open pull requests and summarize them" \
+  --type agent \
+  --agent github-as-me \
+  --workspace-intent read \
+  --git-repo https://github.com/example/project
+```
+
+With the Agent from the example (an ACP runtime whose allowed tools include
+the GitHub built-ins), the controller:
+
+1. Finds the requester's Ready GitHub Connection and freezes it.
+2. Offers `list_pull_requests` and the other read tools to the agent. Write
+   tools are offered only for a `readWrite` link, and are added to the
+   approval-required set.
+3. Executes each call in its MCP broker with the person's token, refreshing
+   it first if it is about to expire.
+4. Pauses a write call for approval and, once approved, executes exactly the
+   stored call.
+
+The Task's workspace still scopes which repository the tools may touch; the
+link changes whose credential is used, not where.
+
+### What runs where
+
+| Path | GitHub credential |
+| --- | --- |
+| ACP runtimes (`codex`, `claude`, `copilot`, `opencode`) | The requester's Connection only. The GitHub tools are offered when the provider declares them and the requester holds a Ready link; otherwise they are not offered, and a call without a frozen link is refused. |
+| Native `type: ai` worker Pods | The Task's own credential Secrets (`readCredentialRef`, `forgeCredentialRef`), as before. Worker Pods never receive linked tokens. |
+| Custom `HTTP` tools behind a connection-mode `OutboundAccessPolicy` | The requester's Connection only, in the controller, for both ACP and native Tasks. |
+
+Existing per-Task GitHub Secrets keep working everywhere they did. Linking is
+additive.
+
+## What fails closed
+
+- No verified requester, no Ready link at dispatch, a link re-consented after
+  dispatch, or a provider whose OAuth client changed since consent: the call
+  fails. Nothing falls back to Task Secrets, environment variables, or
+  another person's Connection.
+- A `readOnly` link never runs a write tool, even if the token could.
+- Two accepted providers declaring the same built-in tool is a configuration
+  error; the Task is refused rather than one provider chosen.
+- External v2 `AgentRuntime` registrations and harness v1 Tasks do not
+  freeze Connections and do not receive connector tools.
+
+## Troubleshooting
+
+- **Provider shows `Accepted=False`**: the condition message names the
+  problem, usually a built-in declared with the wrong class or a missing
+  client secret.
+- **`Ready=False` with `ConsentRequired`**: the provider or the mode now
+  needs scopes the last consent did not grant. `POST
+  /api/v1/connections/<name>/authorize` starts consent again.
+- **The agent does not see the GitHub tools**: check that the Task was
+  created through the API by a signed-in person, that the Connection is
+  `Ready`, and that the Agent's allowed tools include them. Write tools also
+  need `mode: readWrite`.
+- **`requires the requester's linked account`** in a tool result: the Task
+  was dispatched without a Ready link. Link first, then create a new Task.

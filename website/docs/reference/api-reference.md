@@ -398,7 +398,7 @@ spec:
 | `spec.tools[].source` | `Builtin` \| `HTTP` | required | `Builtin` names an existing Orka tool. `HTTP` carries a curated definition in `http`. |
 | `spec.tools[].description`, `.parameters`, `.http` | | | HTTP tools only. `parameters` must be an object-shaped JSON Schema that resolves in full, including nested property schemas. `http.url` must be HTTPS; `Authorization`, `Cookie`, `Host`, and `Txn-Token` headers are reserved, and credential-like header names (`X-Api-Key`, `X-Auth-Token`, and similar) are rejected: the linked account is the only credential. |
 
-Status contains only `observedGeneration`, `Accepted`, and `ResolvedRefs`. `Builtin` tool names are checked against the controller's built-in tool registry, so a misspelled built-in is rejected.
+Status contains only `observedGeneration`, `Accepted`, and `ResolvedRefs`. `Builtin` declarations are checked against the controller's built-in tool registry and the connector built-in catalog (the GitHub tools listed in the [Connectors guide](../guides/connectors.md#built-in-github-tools)): a misspelled name, a built-in that would ignore the linked credential, or a class other than the one the catalog fixes for the tool is rejected.
 
 ## Connection
 

@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -256,8 +257,11 @@ func adjustInputsForConnectorTools(
 			}
 		}
 	}
-	hidden, connectorWrite, err := FilterConnectorToolsForRequester(ctx, reader, registry, task, candidates)
+	hidden, connectorWrite, err := FilterBrokeredConnectorToolsForRequester(ctx, reader, registry, task, candidates)
 	if err != nil {
+		if errors.Is(err, ErrBuiltinToolProviderAmbiguous) {
+			return nil, nil, permanentACPAgentConfiguration(err)
+		}
 		return nil, nil, fmt.Errorf("apply connector tool visibility: %w", err)
 	}
 	visible := allowed

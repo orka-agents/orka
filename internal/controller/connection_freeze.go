@@ -47,6 +47,28 @@ type connectorToolInfo struct {
 	// classification was read from, so execution can refuse another.
 	PolicyUID        string
 	PolicyGeneration int64
+	// Builtin marks an Orka built-in tool a ConnectorProvider declares. It
+	// has no policy: PolicyName is its BuiltinConnectionKey and the
+	// controller resolves the person's credential for it directly.
+	Builtin bool
+}
+
+// ErrBuiltinToolProviderAmbiguous reports a built-in tool that more than one
+// accepted ConnectorProvider declares; a linked account can serve it from
+// only one, so the configuration is refused rather than a provider chosen.
+var ErrBuiltinToolProviderAmbiguous = errors.New("built-in tool is declared by more than one ConnectorProvider")
+
+// connectorScope chooses what classifyConnectorTools treats as
+// connector-backed beyond Tools behind connection-mode policies.
+type connectorScope struct {
+	// strictPolicies retries on a missing policy instead of skipping the
+	// Tool; see classifyConnectorTools.
+	strictPolicies bool
+	// builtins classifies catalog built-ins a ConnectorProvider declares.
+	// Only paths that execute built-ins in the controller (the ACP broker)
+	// set it: a native worker runs built-ins itself and never holds a
+	// linked account, so for it they stay on the Task's own credentials.
+	builtins bool
 }
 
 // ConnectorToolDispatchDigest digests everything that shapes a connector-backed
@@ -76,7 +98,7 @@ func classificationRegistry(registry *tools.Registry) *tools.Registry {
 // policy, its policy, provider, and class. Unknown tools and tools without
 // such a policy are skipped; read failures are returned so callers retry.
 func connectorToolsFor(ctx context.Context, reader client.Reader, registry *tools.Registry, namespace string, toolNames []string) (map[string]connectorToolInfo, error) {
-	return classifyConnectorTools(ctx, reader, registry, namespace, toolNames, false)
+	return classifyConnectorTools(ctx, reader, registry, namespace, toolNames, connectorScope{})
 }
 
 // classifyConnectorTools is connectorToolsFor with a choice about a policy
@@ -84,13 +106,14 @@ func connectorToolsFor(ctx context.Context, reader client.Reader, registry *tool
 // (its execution fails on its own), while a snapshot freeze (strictPolicies)
 // retries instead, so a policy of the same name recreated later in another
 // mode can never pass the adapter-change guard through an omitted entry.
-func classifyConnectorTools(ctx context.Context, reader client.Reader, registry *tools.Registry, namespace string, toolNames []string, strictPolicies bool) (map[string]connectorToolInfo, error) {
+func classifyConnectorTools(ctx context.Context, reader client.Reader, registry *tools.Registry, namespace string, toolNames []string, scope connectorScope) (map[string]connectorToolInfo, error) {
 	if reader == nil {
 		return nil, nil
 	}
 	registry = classificationRegistry(registry)
 	result := map[string]connectorToolInfo{}
 	policies := map[string]*corev1alpha1.OutboundAccessPolicy{}
+	var providers *corev1alpha1.ConnectorProviderList
 	seen := map[string]struct{}{}
 	for _, name := range toolNames {
 		if _, done := seen[name]; done {
@@ -100,6 +123,30 @@ func classifyConnectorTools(ctx context.Context, reader client.Reader, registry 
 		// A built-in tool wins over a Tool resource of the same name in every
 		// runtime, so such a resource is never the implementation here.
 		if _, builtin := registry.Get(name); builtin {
+			if !scope.builtins {
+				continue
+			}
+			class, linked := connectors.BuiltinConnectorToolClass(name)
+			if !linked {
+				continue
+			}
+			if providers == nil {
+				providers = &corev1alpha1.ConnectorProviderList{}
+				if err := reader.List(ctx, providers, client.InNamespace(namespace)); err != nil {
+					return nil, fmt.Errorf("list connector providers: %w", err)
+				}
+			}
+			provider, err := builtinToolProvider(providers, name)
+			if err != nil {
+				return nil, err
+			}
+			if provider == nil {
+				continue
+			}
+			result[name] = connectorToolInfo{
+				PolicyName: outboundaccess.BuiltinConnectionKey(name), Provider: provider.Name,
+				Class: corev1alpha1.AgentRuntimeBrokeredToolClass(class), Builtin: true,
+			}
 			continue
 		}
 		tool := &corev1alpha1.Tool{}
@@ -117,7 +164,7 @@ func classifyConnectorTools(ctx context.Context, reader client.Reader, registry 
 		if !cached {
 			policy = &corev1alpha1.OutboundAccessPolicy{}
 			if err := reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: policyName}, policy); err != nil {
-				if apierrors.IsNotFound(err) && !strictPolicies {
+				if apierrors.IsNotFound(err) && !scope.strictPolicies {
 					policies[policyName] = nil
 					continue
 				}
@@ -142,6 +189,46 @@ func classifyConnectorTools(ctx context.Context, reader client.Reader, registry 
 		}
 	}
 	return result, nil
+}
+
+// builtinToolProvider returns the one accepted provider declaring name as a
+// built-in, nil when none does, or ErrBuiltinToolProviderAmbiguous when
+// several do.
+func builtinToolProvider(providers *corev1alpha1.ConnectorProviderList, name string) (*corev1alpha1.ConnectorProvider, error) {
+	var found *corev1alpha1.ConnectorProvider
+	var names []string
+	for i := range providers.Items {
+		provider := &providers.Items[i]
+		if !connectors.ProviderAccepted(provider) {
+			continue
+		}
+		if _, declared := connectors.DeclaresBuiltinTool(provider, name); !declared {
+			continue
+		}
+		names = append(names, provider.Name)
+		found = provider
+	}
+	if len(names) > 1 {
+		return nil, fmt.Errorf("%w: %q is declared by %s", ErrBuiltinToolProviderAmbiguous, name, strings.Join(names, ", "))
+	}
+	return found, nil
+}
+
+// brokeredLinkedBuiltins returns the names that are catalog built-ins the
+// given registry can execute: tools that reach an agent only through a
+// linked account frozen at dispatch.
+func brokeredLinkedBuiltins(registry *tools.Registry, toolNames []string) []string {
+	registry = classificationRegistry(registry)
+	var linked []string
+	for _, name := range toolNames {
+		if _, catalog := connectors.BuiltinConnectorToolClass(name); !catalog {
+			continue
+		}
+		if _, registered := registry.Get(name); registered {
+			linked = append(linked, name)
+		}
+	}
+	return linked
 }
 
 // ErrChildSealRefused reports a child Task that must not inherit its
@@ -394,20 +481,58 @@ func FilterConnectorToolsForRequester(
 	task *corev1alpha1.Task,
 	toolNames []string,
 ) (visible []string, connectorWrite []string, err error) {
+	return filterConnectorToolsForRequester(ctx, reader, registry, task, toolNames, connectorScope{})
+}
+
+// FilterBrokeredConnectorToolsForRequester is FilterConnectorToolsForRequester
+// for tools the controller's broker executes itself: catalog built-ins a
+// ConnectorProvider declares follow the same readOnly and approval rules as
+// Tools behind connection-mode policies whenever the requester holds a
+// Ready link to that provider.
+func FilterBrokeredConnectorToolsForRequester(
+	ctx context.Context,
+	reader client.Reader,
+	registry *tools.Registry,
+	task *corev1alpha1.Task,
+	toolNames []string,
+) (visible []string, connectorWrite []string, err error) {
+	return filterConnectorToolsForRequester(ctx, reader, registry, task, toolNames, connectorScope{builtins: true})
+}
+
+func filterConnectorToolsForRequester(
+	ctx context.Context,
+	reader client.Reader,
+	registry *tools.Registry,
+	task *corev1alpha1.Task,
+	toolNames []string,
+	scope connectorScope,
+) (visible []string, connectorWrite []string, err error) {
 	if reader == nil || task == nil || len(toolNames) == 0 {
 		return toolNames, nil, nil
 	}
-	infos, err := connectorToolsFor(ctx, reader, registry, task.Namespace, toolNames)
+	infos, err := classifyConnectorTools(ctx, reader, registry, task.Namespace, toolNames, scope)
 	if err != nil {
 		return nil, nil, err
 	}
-	if len(infos) == 0 {
-		return toolNames, nil, nil
+	registry = classificationRegistry(registry)
+	// brokeredBuiltin reports a catalog built-in the broker could execute:
+	// the requester reaches it only through a linked account, so without
+	// one it is hidden rather than run on other credentials.
+	brokeredBuiltin := func(name string) bool {
+		if !scope.builtins {
+			return false
+		}
+		_, linked := connectors.BuiltinConnectorToolClass(name)
+		_, registered := registry.Get(name)
+		return linked && registered
 	}
 	modes := map[string]string{}
 	for _, name := range toolNames {
 		info, ok := infos[name]
 		if !ok {
+			if brokeredBuiltin(name) {
+				continue
+			}
 			visible = append(visible, name)
 			continue
 		}
@@ -424,6 +549,13 @@ func FilterConnectorToolsForRequester(
 				}
 			}
 			modes[info.Provider] = mode
+		}
+		// A brokered built-in has no credential path but the link: with
+		// no Ready link it is hidden. A Tool behind a connection-mode
+		// policy stays visible and fails closed at call time instead, so
+		// a policy retargeted later still cannot serve it.
+		if info.Builtin && mode == "" {
+			continue
 		}
 		if info.Class == corev1alpha1.AgentRuntimeBrokeredToolClassWrite && mode == corev1alpha1.ConnectionModeReadOnly {
 			continue
@@ -447,16 +579,19 @@ func freezeRequesterConnectionsForTools(
 	registry *tools.Registry,
 	task *corev1alpha1.Task,
 	toolNames []string,
+	scope connectorScope,
 ) ([]agentExecutionSnapshotConnection, error) {
 	if reader == nil || task == nil {
 		return nil, nil
 	}
-	infos, err := classifyConnectorTools(ctx, reader, registry, task.Namespace, toolNames, true)
+	scope.strictPolicies = true
+	infos, err := classifyConnectorTools(ctx, reader, registry, task.Namespace, toolNames, scope)
 	if err != nil {
 		return nil, err
 	}
 	var frozen []agentExecutionSnapshotConnection
 	seenPolicies := map[string]struct{}{}
+	connections := map[string]*corev1alpha1.Connection{}
 	for _, name := range toolNames {
 		info, ok := infos[name]
 		if !ok {
@@ -466,9 +601,28 @@ func freezeRequesterConnectionsForTools(
 			continue
 		}
 		seenPolicies[info.PolicyName] = struct{}{}
-		connection, err := requesterConnection(ctx, reader, task, info.Provider)
-		if err != nil {
-			return nil, err
+		connection, cached := connections[info.Provider]
+		if !cached {
+			connection, err = requesterConnection(ctx, reader, task, info.Provider)
+			if err != nil {
+				return nil, err
+			}
+			connections[info.Provider] = connection
+		}
+		if info.Builtin {
+			// A built-in is frozen only with a usable link: without one
+			// the broker never offers it, and a link made after dispatch
+			// is never picked up, so the approval set computed at dispatch
+			// stays true for the whole run.
+			if connection == nil {
+				continue
+			}
+			frozen = append(frozen, agentExecutionSnapshotConnection{
+				PolicyName: info.PolicyName, Tool: name, Provider: info.Provider, ConnectionName: connection.Name,
+				UID: string(connection.UID), Generation: connection.Generation,
+				GrantSequence: connection.Status.GrantSequence, Mode: connection.Spec.Mode,
+			})
+			continue
 		}
 		// Every connection-mode policy the Task can reach is frozen, with or
 		// without a usable link: an entry without a Connection keeps the
@@ -502,11 +656,15 @@ func freezeRequesterConnections(
 ) ([]agentExecutionSnapshotConnection, error) {
 	var names []string
 	for _, descriptor := range mcpConfiguration.ToolPolicy.Tools {
-		if descriptor.Source == harnessv2.MCPToolSourceBrokeredCustom {
+		if descriptor.Source == harnessv2.MCPToolSourceBrokeredCustom || descriptor.Source == harnessv2.MCPToolSourceBrokeredBuiltin {
 			names = append(names, descriptor.Name)
 		}
 	}
-	return freezeRequesterConnectionsForTools(ctx, reader, registry, task, names)
+	frozen, err := freezeRequesterConnectionsForTools(ctx, reader, registry, task, names, connectorScope{builtins: true})
+	if errors.Is(err, ErrBuiltinToolProviderAmbiguous) {
+		return nil, permanentACPAgentConfiguration(err)
+	}
+	return frozen, err
 }
 
 // taskConnectionBindings converts frozen links to the Task status form used
@@ -632,7 +790,7 @@ func frozenConnectionsFromSnapshot(body agentExecutionSnapshotBody) map[string]o
 	for _, connection := range body.Connections {
 		frozen[connection.PolicyName] = outboundaccess.FrozenConnection{
 			UID: connection.UID, Generation: connection.Generation, GrantSequence: connection.GrantSequence,
-			PolicyUID: connection.PolicyUID, PolicyGeneration: connection.PolicyGeneration,
+			PolicyUID: connection.PolicyUID, PolicyGeneration: connection.PolicyGeneration, Provider: connection.Provider,
 		}
 	}
 	return frozen

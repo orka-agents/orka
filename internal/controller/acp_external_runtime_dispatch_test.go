@@ -2868,4 +2868,16 @@ func TestExternalRuntimeCandidateRefusesConnectorBackedTools(t *testing.T) {
 	if _, err := fixture.reconciler.resolveExternalAgentExecutionCandidate(fixture.ctx, denied, fixture.agent); err != nil && strings.Contains(err.Error(), "not supported on external v2 AgentRuntimes") {
 		t.Fatalf("resolveExternalAgentExecutionCandidate() with the connector tool denied = %v, want no connector refusal", err)
 	}
+	// A GitHub built-in the broker would run under a linked account is
+	// refused the same way: an external runtime freezes no Connections.
+	linked := task.DeepCopy()
+	linked.Name, linked.UID = "external-linked-builtin", types.UID("external-linked-builtin-uid")
+	linked.Spec.AgentRuntime.AllowedTools = []string{"list_pull_requests"}
+	previous := fixture.reconciler.MCPRegistry
+	fixture.reconciler.MCPRegistry = brokeredGitHubRegistry(t)
+	defer func() { fixture.reconciler.MCPRegistry = previous }()
+	if candidate, err := fixture.reconciler.resolveExternalAgentExecutionCandidate(fixture.ctx, linked, fixture.agent); err == nil || candidate != nil ||
+		!isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "linked account") {
+		t.Fatalf("resolveExternalAgentExecutionCandidate() with a linked built-in = (%#v, %v), want a permanent refusal", candidate, err)
+	}
 }

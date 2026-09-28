@@ -22,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/connectors"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
@@ -129,6 +130,10 @@ type RegistryACPMCPToolExecutor struct {
 	// connection-mode outbound access. Nil leaves connector-backed tools
 	// failing closed.
 	AgentExecutionSnapshots store.AgentExecutionSnapshotStore
+	// Connections resolves the requester's linked-account credential for
+	// catalog built-in tools frozen with a link. Nil leaves such tools
+	// failing closed.
+	Connections outboundaccess.ConnectionCredentialSource
 }
 
 // acpMCPConnectionDigester is implemented by executors that can name the
@@ -143,6 +148,18 @@ type acpMCPConnectionDigester interface {
 // connector-backed": the effect record must carry the binding it promises,
 // and its request digest must not depend on transient read availability.
 func (e RegistryACPMCPToolExecutor) ConnectionDigest(ctx context.Context, request harnessv2.MCPBrokerCallRequest, descriptor harnessv2.MCPToolDescriptor) (string, error) {
+	if descriptor.Source == harnessv2.MCPToolSourceBrokeredBuiltin {
+		// A catalog built-in runs under the link frozen for it, if any;
+		// the record then names that binding, and nothing otherwise.
+		if _, linked := connectors.BuiltinConnectorToolClass(descriptor.Name); !linked {
+			return "", nil
+		}
+		_, frozen, err := e.taskConnectionAuthority(ctx, request)
+		if err != nil {
+			return "", err
+		}
+		return frozenConnectionDigest(frozen, outboundaccess.BuiltinConnectionKey(descriptor.Name)), nil
+	}
 	if descriptor.Source != harnessv2.MCPToolSourceBrokeredCustom {
 		return "", nil
 	}
@@ -179,25 +196,36 @@ func (e RegistryACPMCPToolExecutor) ConnectionDigest(ctx context.Context, reques
 // taskFrozenConnections loads the frozen Connection bindings of the
 // authenticated ACP Task behind request.
 func (e RegistryACPMCPToolExecutor) taskFrozenConnections(ctx context.Context, request harnessv2.MCPBrokerCallRequest) (map[string]outboundaccess.FrozenConnection, error) {
+	_, frozen, err := e.taskConnectionAuthority(ctx, request)
+	return frozen, err
+}
+
+// taskConnectionAuthority loads the authenticated ACP Task behind request
+// and returns its requester together with the Connection bindings frozen
+// into its execution snapshot.
+func (e RegistryACPMCPToolExecutor) taskConnectionAuthority(ctx context.Context, request harnessv2.MCPBrokerCallRequest) (*corev1alpha1.RequestedBy, map[string]outboundaccess.FrozenConnection, error) {
 	if e.AgentExecutionSnapshots == nil {
-		return nil, errors.New("connector digest resolution requires execution snapshots")
+		return nil, nil, errors.New("connector digest resolution requires execution snapshots")
+	}
+	if e.Reader == nil {
+		return nil, nil, errors.New("connector binding resolution requires a reader")
 	}
 	authenticated, ok := ACPMCPAuthenticatedTaskFromContext(ctx)
 	if !ok || authenticated.Namespace != request.Namespace || authenticated.UID != string(request.Metadata.TaskUID) {
-		return nil, errors.New("authenticated ACP MCP task authority is unavailable")
+		return nil, nil, errors.New("authenticated ACP MCP task authority is unavailable")
 	}
 	task := &corev1alpha1.Task{}
 	if err := e.Reader.Get(ctx, client.ObjectKey{Namespace: authenticated.Namespace, Name: authenticated.Name}, task); err != nil {
-		return nil, fmt.Errorf("load authenticated task for connector digest: %w", err)
+		return nil, nil, fmt.Errorf("load authenticated task for connector digest: %w", err)
 	}
 	if string(task.UID) != authenticated.UID {
-		return nil, errors.New("authenticated ACP MCP task identity changed")
+		return nil, nil, errors.New("authenticated ACP MCP task identity changed")
 	}
 	executor := workerexecutor.NewToolExecutorForNamespace(request.Namespace, nil, nil)
 	if err := bindFrozenConnections(ctx, e.AgentExecutionSnapshots, task, executor); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return executor.FrozenConnections(), nil
+	return executor.Requester(), executor.FrozenConnections(), nil
 }
 
 // refuseConnectorClassificationDrift returns an error when the named Tool's
@@ -336,6 +364,20 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 				copy.ToolCallID = request.Call.CallID
 				if copy.Tenant == "" {
 					copy.Tenant = request.Namespace
+				}
+				// A catalog built-in runs under the requester's linked
+				// account when the Task froze one for it. The binding is
+				// read here, before the call, so a snapshot that cannot be
+				// loaded is a preparation failure and never a silent run
+				// on the Task's own credentials.
+				if _, linked := connectors.BuiltinConnectorToolClass(descriptor.Name); linked {
+					requester, frozen, err := e.taskConnectionAuthority(ctx, request)
+					if err != nil {
+						return nil, err
+					}
+					copy.LinkedAccounts = linkedBuiltinAccounts{
+						source: e.Connections, namespace: request.Namespace, requester: requester, frozen: frozen, required: true,
+					}
 				}
 				toolContext = &copy
 			}
@@ -476,6 +518,9 @@ type ACPMCPBrokerDependencies struct {
 	OutboundAccess          outboundaccess.Resolver
 	TransactionExchange     *workerexecutor.TransactionExchangeConfig
 	ContextFactory          func(context.Context, harnessv2.MCPBrokerCallRequest) (*tools.ToolContext, error)
+	// Connections resolves linked-account credentials for catalog
+	// built-in tools; see RegistryACPMCPToolExecutor.Connections.
+	Connections outboundaccess.ConnectionCredentialSource
 
 	// EnforceTransactionCredentialAuth and TransactionCredentialReadScopes bind
 	// brokered custom-Tool executions to the authenticated Task's transaction
@@ -507,6 +552,7 @@ func NewProductionACPMCPBroker(dependencies ACPMCPBrokerDependencies) (*ACPMCPBr
 			Registry:                dependencies.Registry, Reader: dependencies.Reader, KubeClient: dependencies.KubeClient,
 			HTTPClient: dependencies.HTTPClient, OutboundAccess: dependencies.OutboundAccess,
 			TransactionExchange: dependencies.TransactionExchange, ContextFactory: dependencies.ContextFactory,
+			Connections:                      dependencies.Connections,
 			EnforceTransactionCredentialAuth: dependencies.EnforceTransactionCredentialAuth,
 			TransactionCredentialReadScopes: append(
 				[]string(nil),

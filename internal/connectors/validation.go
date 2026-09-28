@@ -440,6 +440,18 @@ func validateTools(tools []corev1alpha1.ConnectorTool, knownBuiltin BuiltinToolC
 			if knownBuiltin != nil && !knownBuiltin(tool.Name) {
 				return invalid(fmt.Sprintf("builtin tool %q is not a known Orka tool", tool.Name))
 			}
+			// Only a built-in that consumes the linked credential may be
+			// declared, and only with the class its credential use fixes:
+			// a declaration the tool would ignore, or a write tool declared
+			// as read, would let a call run under a different credential or
+			// skip the approval and readOnly rules the class carries.
+			class, linked := BuiltinConnectorToolClass(tool.Name)
+			if !linked {
+				return invalid(fmt.Sprintf("builtin tool %q cannot use a linked account; only %s can", tool.Name, strings.Join(BuiltinConnectorToolNames(), ", ")))
+			}
+			if tool.Class != class {
+				return invalid(fmt.Sprintf("builtin tool %q must be declared with class %s", tool.Name, class))
+			}
 		case corev1alpha1.ConnectorToolSourceHTTP:
 			if tool.HTTP == nil {
 				return invalid(fmt.Sprintf("HTTP tool %q requires http", tool.Name))

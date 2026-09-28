@@ -104,7 +104,11 @@ type agentExecutionSnapshotBody struct {
 
 // agentExecutionSnapshotConnection is one frozen person-to-provider link.
 type agentExecutionSnapshotConnection struct {
-	PolicyName     string `json:"policyName"`
+	// PolicyName is the connection-mode policy, or the BuiltinConnectionKey
+	// of a built-in tool the controller runs under the link.
+	PolicyName string `json:"policyName"`
+	// Tool is set for a built-in binding: the tool the link was frozen for.
+	Tool           string `json:"tool,omitempty"`
 	Provider       string `json:"provider"`
 	ConnectionName string `json:"connectionName"`
 	UID            string `json:"uid"`
@@ -552,10 +556,14 @@ func (r *TaskReconciler) resolveExternalAgentExecutionCandidate(
 	if runtime.Spec.Capabilities.MCPPolicy != nil {
 		runtimeDisallowed = runtime.Spec.Capabilities.MCPPolicy.DisallowedTools
 	}
-	if connectorTools, err := connectorToolsFor(ctx, reader, r.MCPRegistry, task.Namespace, connectorCandidateTools(task, agent, runtimeDisallowed)); err != nil {
+	candidates := connectorCandidateTools(task, agent, runtimeDisallowed)
+	if connectorTools, err := connectorToolsFor(ctx, reader, r.MCPRegistry, task.Namespace, candidates); err != nil {
 		return nil, err
 	} else if len(connectorTools) > 0 {
 		return nil, permanentACPAgentConfiguration(errors.New("connector-backed tools are not supported on external v2 AgentRuntimes"))
+	}
+	if linked := brokeredLinkedBuiltins(r.MCPRegistry, candidates); len(linked) > 0 {
+		return nil, permanentACPAgentConfiguration(fmt.Errorf("built-in tools that run under a linked account (%s) are not supported on external v2 AgentRuntimes", strings.Join(linked, ", ")))
 	}
 	registry := r.MCPRegistry
 	if registry == nil {
