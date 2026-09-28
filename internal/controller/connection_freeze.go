@@ -58,6 +58,79 @@ type connectorToolInfo struct {
 // only one, so the configuration is refused rather than a provider chosen.
 var ErrBuiltinToolProviderAmbiguous = errors.New("built-in tool is declared by more than one ConnectorProvider")
 
+// ErrLinkedRepositoryScope reports a coordination child whose workspace
+// names a repository its parent chain never held: the requester it
+// inherited must not reach further than the Task the person created.
+var ErrLinkedRepositoryScope = errors.New("the task's workspace reaches beyond the repository scope of the task its requester was inherited from")
+
+// permanentLinkedBuiltinError turns the configuration refusals of the
+// linked built-in path into permanent ACP configuration errors and leaves
+// every other error retryable.
+func permanentLinkedBuiltinError(err error) error {
+	if errors.Is(err, ErrBuiltinToolProviderAmbiguous) || errors.Is(err, ErrLinkedRepositoryScope) {
+		return permanentACPAgentConfiguration(err)
+	}
+	return err
+}
+
+// linkedInheritanceDepth bounds the parent chain walked for repository scope.
+const linkedInheritanceDepth = 16
+
+// taskRepositories returns the GitHub repositories a Task's workspace
+// names, as canonical owner/repo pairs (or the raw value when not a GitHub
+// URL), so scopes compare the way the GitHub tools compare them.
+func taskRepositories(task *corev1alpha1.Task) map[string]struct{} {
+	repositories := map[string]struct{}{}
+	if task == nil || task.Spec.Workspace == nil {
+		return repositories
+	}
+	for _, raw := range []string{task.Spec.Workspace.GitRepo, task.Spec.Workspace.PublicationGitRepo} {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		if owner, repo, err := tools.ParseGitHubRepository(raw); err == nil {
+			repositories[strings.ToLower(owner+"/"+repo)] = struct{}{}
+			continue
+		}
+		repositories[strings.ToLower(raw)] = struct{}{}
+	}
+	return repositories
+}
+
+// linkedRepositoryScopeInherited checks that a coordination child's
+// workspace stays within its parent's repositories, all the way up the
+// controller-owner chain to the Task the person created. A child inherits
+// its parent's verified requester, and delegate_task lets a coordinator
+// name any repository, so without this the person's linked account could
+// be pointed anywhere by delegating instead of calling directly. A Task
+// with no controlling Task is its own root and passes. Read failures are
+// returned as they are, so the caller retries.
+func linkedRepositoryScopeInherited(ctx context.Context, reader client.Reader, task *corev1alpha1.Task) error {
+	current := task
+	for range linkedInheritanceDepth {
+		owner := metav1.GetControllerOf(current)
+		if owner == nil || owner.Kind != taskResourceKind || owner.APIVersion != corev1alpha1.GroupVersion.String() {
+			return nil
+		}
+		parent := &corev1alpha1.Task{}
+		if err := reader.Get(ctx, client.ObjectKey{Namespace: current.Namespace, Name: owner.Name}, parent); err != nil {
+			return fmt.Errorf("load parent task %q for repository scope: %w", owner.Name, err)
+		}
+		if parent.UID != owner.UID {
+			return fmt.Errorf("%w: parent task %q was replaced", ErrLinkedRepositoryScope, owner.Name)
+		}
+		allowed := taskRepositories(parent)
+		for repository := range taskRepositories(current) {
+			if _, ok := allowed[repository]; !ok {
+				return fmt.Errorf("%w: task %q names %s, which task %q does not hold", ErrLinkedRepositoryScope, current.Name, repository, parent.Name)
+			}
+		}
+		current = parent
+	}
+	return fmt.Errorf("%w: the parent chain of task %q is deeper than %d", ErrLinkedRepositoryScope, task.Name, linkedInheritanceDepth)
+}
+
 // connectorScope chooses what classifyConnectorTools treats as
 // connector-backed beyond Tools behind connection-mode policies.
 type connectorScope struct {
@@ -514,6 +587,11 @@ func filterConnectorToolsForRequester(
 	if err != nil {
 		return nil, nil, err
 	}
+	if scope.builtins && anyBuiltinInfo(infos) {
+		if err := linkedRepositoryScopeInherited(ctx, reader, task); err != nil {
+			return nil, nil, err
+		}
+	}
 	registry = classificationRegistry(registry)
 	// brokeredBuiltin reports a catalog built-in the broker could execute:
 	// the requester reaches it only through a linked account, so without
@@ -589,6 +667,12 @@ func freezeRequesterConnectionsForTools(
 	if err != nil {
 		return nil, err
 	}
+	if scope.builtins && anyBuiltinInfo(infos) {
+		// The link is frozen for a child only within its parents' repositories.
+		if err := linkedRepositoryScopeInherited(ctx, reader, task); err != nil {
+			return nil, err
+		}
+	}
 	var frozen []agentExecutionSnapshotConnection
 	seenPolicies := map[string]struct{}{}
 	connections := map[string]*corev1alpha1.Connection{}
@@ -661,10 +745,17 @@ func freezeRequesterConnections(
 		}
 	}
 	frozen, err := freezeRequesterConnectionsForTools(ctx, reader, registry, task, names, connectorScope{builtins: true})
-	if errors.Is(err, ErrBuiltinToolProviderAmbiguous) {
-		return nil, permanentACPAgentConfiguration(err)
+	return frozen, permanentLinkedBuiltinError(err)
+}
+
+// anyBuiltinInfo reports whether any classified tool is a linked built-in.
+func anyBuiltinInfo(infos map[string]connectorToolInfo) bool {
+	for _, info := range infos {
+		if info.Builtin {
+			return true
+		}
 	}
-	return frozen, err
+	return false
 }
 
 // taskConnectionBindings converts frozen links to the Task status form used

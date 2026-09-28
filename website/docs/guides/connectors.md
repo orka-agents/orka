@@ -232,6 +232,9 @@ additive.
 - A `readOnly` link never runs a write tool, even if the token could.
 - Two accepted providers declaring the same built-in tool is a configuration
   error; the Task is refused rather than one provider chosen.
+- A coordination child inherits its parent's requester, so its workspace may
+  only name repositories its parent chain holds; a child delegated to another
+  repository is refused rather than given the person's account there.
 - Curated `HTTP` connector tools are not available on external v2
   `AgentRuntime` registrations, and harness v1 Tasks receive no connector
   tools at all.

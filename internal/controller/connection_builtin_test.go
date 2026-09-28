@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -21,6 +22,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/connectors"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
@@ -434,5 +436,95 @@ func TestBrokeredLinkedBuiltins(t *testing.T) {
 	}
 	if got := brokeredLinkedBuiltins(tools.NewRegistry(), names); len(got) != 0 {
 		t.Fatalf("an unregistered catalog name is not brokered: %v", got)
+	}
+}
+
+func TestLinkedRepositoryScopeInherited(t *testing.T) {
+	f := newConnectorToolFixture(t)
+	ctx := context.Background()
+	workspace := func(repos ...string) *corev1alpha1.WorkspaceConfig {
+		ws := &corev1alpha1.WorkspaceConfig{}
+		if len(repos) > 0 {
+			ws.GitRepo = repos[0]
+		}
+		if len(repos) > 1 {
+			ws.PublicationGitRepo = repos[1]
+		}
+		return ws
+	}
+	owned := func(name, uid string, parent *corev1alpha1.Task, ws *corev1alpha1.WorkspaceConfig) *corev1alpha1.Task {
+		return &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "tenant", UID: types.UID(uid), OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: corev1alpha1.GroupVersion.String(), Kind: taskResourceKind, Name: parent.Name, UID: parent.UID, Controller: new(true),
+			}}},
+			Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Workspace: ws},
+		}
+	}
+	root := f.task.DeepCopy()
+	root.Spec.Workspace = workspace("https://github.com/acme/app", "git@github.com:acme/app-fork.git")
+	within := owned("within", "within-uid", root, workspace("https://github.com/Acme/App.git"))
+	publication := owned("publication", "publication-uid", root, workspace("https://github.com/acme/app", "https://github.com/acme/app-fork"))
+	beyond := owned("beyond", "beyond-uid", root, workspace("https://github.com/acme/other"))
+	grandchild := owned("grandchild", "grandchild-uid", within, workspace("https://github.com/acme/app"))
+	deepBeyond := owned("deep-beyond", "deep-beyond-uid", within, workspace("https://github.com/acme/app", "https://github.com/acme/elsewhere"))
+	reader := f.reader(root, within, publication, beyond, grandchild, deepBeyond)
+
+	if err := linkedRepositoryScopeInherited(ctx, reader, root); err != nil {
+		t.Fatalf("a root task is its own scope: %v", err)
+	}
+	for _, task := range []*corev1alpha1.Task{within, publication, grandchild} {
+		if err := linkedRepositoryScopeInherited(ctx, reader, task); err != nil {
+			t.Fatalf("%s: %v", task.Name, err)
+		}
+	}
+	for _, task := range []*corev1alpha1.Task{beyond, deepBeyond} {
+		if err := linkedRepositoryScopeInherited(ctx, reader, task); !errors.Is(err, ErrLinkedRepositoryScope) {
+			t.Fatalf("%s: err = %v, want the scope refused", task.Name, err)
+		}
+	}
+	// A replaced parent (same name, other UID) is never trusted as the scope.
+	replaced := root.DeepCopy()
+	replaced.UID = "other-root-uid"
+	if err := linkedRepositoryScopeInherited(ctx, f.reader(replaced, within), within); !errors.Is(err, ErrLinkedRepositoryScope) {
+		t.Fatalf("replaced parent err = %v", err)
+	}
+	// A parent that cannot be read is a retryable error, not a verdict.
+	if err := linkedRepositoryScopeInherited(ctx, f.reader(within), within); err == nil || errors.Is(err, ErrLinkedRepositoryScope) {
+		t.Fatalf("missing parent err = %v", err)
+	}
+
+	// The brokered filter and freeze refuse such a child permanently, and
+	// leave a child within scope alone.
+	github := acceptedBuiltinProvider("github", "list_pull_requests")
+	registry := brokeredGitHubRegistry(t)
+	names := []string{"list_pull_requests", "web_search"}
+	linkedReader := f.reader(root, within, beyond, github, f.connection(corev1alpha1.ConnectionModeReadWrite, true))
+	stamp := func(task *corev1alpha1.Task) *corev1alpha1.Task {
+		task = task.DeepCopy()
+		task.Spec.RequestedBy = f.requester
+		task.Annotations = map[string]string{
+			labels.AnnotationRequestedBySource: labels.RequestedBySourceAPI,
+			labels.AnnotationRequestedByStamp:  connectors.RequesterStamp(testRequesterStampKey, task.UID, f.requester.Issuer, f.requester.Subject),
+		}
+		return task
+	}
+	if _, _, err := FilterBrokeredConnectorToolsForRequester(ctx, linkedReader, registry, stamp(beyond), names); !errors.Is(err, ErrLinkedRepositoryScope) {
+		t.Fatalf("beyond filter err = %v", err)
+	}
+	configuration := brokeredConfiguration()
+	configuration.ToolPolicy.Tools = []harnessv2.MCPToolDescriptor{{Name: "list_pull_requests", Source: harnessv2.MCPToolSourceBrokeredBuiltin}}
+	var permanent *permanentACPAgentConfigurationError
+	if _, err := freezeRequesterConnections(ctx, linkedReader, registry, stamp(beyond), configuration); !errors.As(err, &permanent) || !errors.Is(err, ErrLinkedRepositoryScope) {
+		t.Fatalf("beyond freeze err = %v", err)
+	}
+	if visible, _, err := FilterBrokeredConnectorToolsForRequester(ctx, linkedReader, registry, stamp(within), names); err != nil || strings.Join(visible, ",") != "list_pull_requests,web_search" {
+		t.Fatalf("within filter: visible = %v err = %v", visible, err)
+	}
+	if frozen, err := freezeRequesterConnections(ctx, linkedReader, registry, stamp(within), configuration); err != nil || len(frozen) != 1 {
+		t.Fatalf("within freeze: frozen = %+v err = %v", frozen, err)
+	}
+	// Without a linked built-in in play the chain is never walked.
+	if _, _, err := FilterBrokeredConnectorToolsForRequester(ctx, f.reader(beyond), registry, stamp(beyond), []string{"web_search"}); err != nil {
+		t.Fatalf("no built-in: %v", err)
 	}
 }

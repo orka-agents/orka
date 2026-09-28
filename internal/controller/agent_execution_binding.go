@@ -1550,8 +1550,8 @@ func checkExternalLinkedBuiltins(
 ) error {
 	visible, connectorWrite, err := FilterBrokeredConnectorToolsForRequester(ctx, reader, registry, task, candidates)
 	if err != nil {
-		if errors.Is(err, ErrBuiltinToolProviderAmbiguous) {
-			return permanentACPAgentConfiguration(err)
+		if permanent := permanentLinkedBuiltinError(err); permanent != err {
+			return permanent
 		}
 		return fmt.Errorf("apply connector tool visibility: %w", err)
 	}
