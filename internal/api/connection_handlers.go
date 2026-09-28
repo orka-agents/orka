@@ -732,6 +732,10 @@ func (h *Handlers) startConnectorConsent(ctx context.Context, connection *corev1
 		Provider:      provider.Name,
 		Mode:          mode,
 		CodeVerifier:  verifier,
+		// The revocation identity is bound when consent starts and carried
+		// through the callback, so an endpoint moved during the window is
+		// never handed the tokens at disconnect.
+		RevocationDigest: connectors.ProviderRevocationDigest(provider),
 		// The code may only ever be exchanged with this OAuth client and
 		// for these scopes; a token that reports no scope grants exactly them.
 		AuthorityDigest: connectors.ProviderAuthorityDigest(provider),
@@ -863,7 +867,7 @@ func (h *Handlers) ConnectionCallback(c fiber.Ctx) error {
 			// revokes them knows the client that issued them, independent
 			// of tool-destination changes.
 			AuthorityDigest:  connectors.ProviderIssuerDigest(provider),
-			RevocationDigest: connectors.ProviderRevocationDigest(provider),
+			RevocationDigest: consent.RevocationDigest,
 		},
 		// The full authority the person consented to (client identity plus
 		// tool destinations), verified again at completion.

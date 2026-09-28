@@ -175,7 +175,7 @@ func TestConnectorConsentSingleUseAndExpiry(t *testing.T) {
 	s := newConnectorTestStore(t)
 	ctx := context.Background()
 	consent := store.ConnectorConsent{
-		Nonce: "nonce-1", ConnectionUID: "uid-1", Namespace: "tenant", Name: "github-abc", AuthorityDigest: "authority-1", Scopes: []string{"read:user", "repo"},
+		Nonce: "nonce-1", ConnectionUID: "uid-1", Namespace: "tenant", Name: "github-abc", AuthorityDigest: "authority-1", RevocationDigest: "revocation-1", Scopes: []string{"read:user", "repo"},
 		SubjectDigest: "digest-a", Provider: "github", Mode: "readOnly", CodeVerifier: "verifier-secret",
 		ExpiresAt: time.Now().Add(10 * time.Minute),
 	}
@@ -194,7 +194,7 @@ func TestConnectorConsentSingleUseAndExpiry(t *testing.T) {
 		t.Fatalf("ConsumeConnectorConsent: %v", err)
 	}
 	if got.CodeVerifier != consent.CodeVerifier || got.ConnectionUID != consent.ConnectionUID || got.Mode != consent.Mode ||
-		got.SubjectDigest != consent.SubjectDigest || got.AuthorityDigest != "authority-1" || strings.Join(got.Scopes, " ") != "read:user repo" {
+		got.SubjectDigest != consent.SubjectDigest || got.AuthorityDigest != "authority-1" || got.RevocationDigest != "revocation-1" || strings.Join(got.Scopes, " ") != "read:user repo" {
 		t.Fatalf("consent = %+v", got)
 	}
 	if _, err := s.ConsumeConnectorConsent(ctx, consent.Nonce); !errors.Is(err, store.ErrNotFound) {

@@ -57,6 +57,7 @@ func connectorSchemaStatements() []string {
 			verifier_nonce      BLOB NOT NULL,
 			verifier_ciphertext BLOB NOT NULL,
 			authority_digest    TEXT NOT NULL DEFAULT '',
+			revocation_digest   TEXT NOT NULL DEFAULT '',
 			scopes              TEXT NOT NULL DEFAULT '',
 			expires_at          TIMESTAMP NOT NULL,
 			created_at          TIMESTAMP NOT NULL
@@ -130,9 +131,9 @@ func connectorCredentialAdditionalData(ref store.ConnectorCredentialRef) []byte 
 // column the callback fence reads, including the OAuth-authority digest, so
 // an altered row cannot steer the code exchange to a different endpoint.
 func connectorConsentAdditionalData(consent store.ConnectorConsent) []byte {
-	return fmt.Appendf(nil, "orka.connector-consent\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%d",
+	return fmt.Appendf(nil, "orka.connector-consent\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%d",
 		consent.Nonce, consent.ConnectionUID, consent.Namespace, consent.Name, consent.SubjectDigest,
-		consent.Provider, consent.Mode, consent.AuthorityDigest, strings.Join(consent.Scopes, " "), consent.ExpiresAt.UTC().Unix())
+		consent.Provider, consent.Mode, consent.AuthorityDigest, consent.RevocationDigest, strings.Join(consent.Scopes, " "), consent.ExpiresAt.UTC().Unix())
 }
 
 // connectorCompletionAdditionalData binds the sealed payload to every
@@ -701,10 +702,10 @@ func (s *Store) CreateConnectorConsent(ctx context.Context, consent store.Connec
 		return fmt.Errorf("replace pending connector consents: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO connector_consents
-		(nonce, connection_uid, namespace, name, subject_digest, provider, mode, verifier_nonce, verifier_ciphertext, authority_digest, scopes, expires_at, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(nonce, connection_uid, namespace, name, subject_digest, provider, mode, verifier_nonce, verifier_ciphertext, authority_digest, revocation_digest, scopes, expires_at, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		consent.Nonce, consent.ConnectionUID, consent.Namespace, consent.Name, consent.SubjectDigest, consent.Provider,
-		consent.Mode, verifierNonce, verifierCiphertext, consent.AuthorityDigest, strings.Join(consent.Scopes, " "), consent.ExpiresAt.UTC(), now); err != nil {
+		consent.Mode, verifierNonce, verifierCiphertext, consent.AuthorityDigest, consent.RevocationDigest, strings.Join(consent.Scopes, " "), consent.ExpiresAt.UTC(), now); err != nil {
 		return fmt.Errorf("persist connector consent: %w", err)
 	}
 	return tx.Commit()
@@ -732,9 +733,9 @@ func (s *Store) ConsumeConnectorConsent(ctx context.Context, nonce string) (stor
 	)
 	var scopes string
 	err = tx.QueryRowContext(ctx, `SELECT nonce, connection_uid, namespace, name, subject_digest, provider, mode,
-		verifier_nonce, verifier_ciphertext, authority_digest, scopes, expires_at FROM connector_consents WHERE nonce = ?`, nonce).
+		verifier_nonce, verifier_ciphertext, authority_digest, revocation_digest, scopes, expires_at FROM connector_consents WHERE nonce = ?`, nonce).
 		Scan(&consent.Nonce, &consent.ConnectionUID, &consent.Namespace, &consent.Name, &consent.SubjectDigest,
-			&consent.Provider, &consent.Mode, &verifierNonce, &verifierCiphertext, &consent.AuthorityDigest, &scopes, &consent.ExpiresAt)
+			&consent.Provider, &consent.Mode, &verifierNonce, &verifierCiphertext, &consent.AuthorityDigest, &consent.RevocationDigest, &scopes, &consent.ExpiresAt)
 	consent.Scopes = strings.Fields(scopes)
 	if errors.Is(err, sql.ErrNoRows) {
 		return store.ConnectorConsent{}, store.ErrNotFound
@@ -1028,7 +1029,7 @@ func (s *Store) verifyConnectorRowsWithCipher(snapshotCipher *AgentExecutionSnap
 			return fmt.Errorf("iterate connector custody (%s) while verifying key: %w", table, err)
 		}
 	}
-	consents, err := s.db.Query(`SELECT nonce, connection_uid, namespace, name, subject_digest, provider, mode, authority_digest, scopes,
+	consents, err := s.db.Query(`SELECT nonce, connection_uid, namespace, name, subject_digest, provider, mode, authority_digest, revocation_digest, scopes,
 		expires_at, verifier_nonce, verifier_ciphertext FROM connector_consents`)
 	if err != nil {
 		return fmt.Errorf("verify connector consents key: %w", err)
@@ -1040,7 +1041,7 @@ func (s *Store) verifyConnectorRowsWithCipher(snapshotCipher *AgentExecutionSnap
 			verifierNonce, sealed []byte
 		)
 		if err := consents.Scan(&consent.Nonce, &consent.ConnectionUID, &consent.Namespace, &consent.Name, &consent.SubjectDigest,
-			&consent.Provider, &consent.Mode, &consent.AuthorityDigest, &scopes, &consent.ExpiresAt, &verifierNonce, &sealed); err != nil {
+			&consent.Provider, &consent.Mode, &consent.AuthorityDigest, &consent.RevocationDigest, &scopes, &consent.ExpiresAt, &verifierNonce, &sealed); err != nil {
 			_ = consents.Close()
 			return fmt.Errorf("scan connector consent while verifying key: %w", err)
 		}
