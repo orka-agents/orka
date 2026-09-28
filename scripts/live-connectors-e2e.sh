@@ -355,8 +355,12 @@ local_authorize="https://127.0.0.1:${fixture_tls_port}${authorize_url#https://${
 callback_location="$(curl -sS --cacert "${tls_dir}/ca.crt" --resolve "${fixture_host}:${fixture_tls_port}:127.0.0.1" -o /dev/null -w '%{redirect_url}' "${local_authorize}")"
 [[ "${callback_location}" == "${callback_base}/api/v1/connections/callback?"* ]] || die "provider redirected elsewhere: $(printf '%s' "${callback_location}" | redact)"
 settings_location="$(curl -sS -o /dev/null -w '%{redirect_url}' "http://127.0.0.1:${api_port}${callback_location#${callback_base}}")"
-[[ "${settings_location}" == "${callback_base}/settings/connectors?status=pending&connection=${connection}#completion="* ]] \
-  || die "callback redirected elsewhere: $(printf '%s' "${settings_location}" | redact)"
+settings_query="${settings_location#*\?}"; settings_query="${settings_query%%#*}"
+[[ "${settings_location}" == "${callback_base}/settings/connectors?"*"#completion="* ]] \
+  && [[ "&${settings_query}&" == *"&status=pending&"* ]] \
+  && [[ "&${settings_query}&" == *"&connection=${connection}&"* ]] \
+  && [[ "&${settings_query}&" == *"&namespace=${namespace}&"* ]] \
+  || die "callback redirected elsewhere: $(printf '%s' "${settings_location}" | sed -E 's/completion=[^&]+/completion=<redacted>/' | redact)"
 completion="${settings_location#*#completion=}"
 status="$(request POST "${api}/connections/${connection}/complete" "${workdir}/complete.json" "${auth[@]}" -H 'Content-Type: application/json' \
   -d "$(jq -n --arg c "${completion}" '{completion:$c}')")"
