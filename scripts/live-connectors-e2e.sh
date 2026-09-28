@@ -246,7 +246,7 @@ kubectl -n "${namespace}" set env deployment/"${deployment}" \
   ORKA_TASK_PROVENANCE_ADMISSION_EXTERNAL=true \
   ORKA_CONNECTORS_ENABLED=true \
   ORKA_CONNECTOR_CALLBACK_BASE_URL="${callback_base}" \
-  ORKA_CONNECTORS_ALLOW_PRIVATE_ENDPOINTS=true \
+  ORKA_CONNECTORS_ALLOW_PRIVATE_ENDPOINTS=i-understand-tokens-may-leave-the-cluster \
   ORKA_OIDC_JWKS_URL- ORKA_CONTEXT_TOKEN_PROFILE- ORKA_CONTEXT_TOKEN_ISSUER- ORKA_CONTEXT_TOKEN_AUDIENCE-
 kubectl -n "${namespace}" rollout status deployment/"${deployment}" --timeout=5m
 start_port_forwards
