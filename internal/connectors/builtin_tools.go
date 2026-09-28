@@ -54,13 +54,13 @@ func ProviderIssuesGitHubCredentials(provider *corev1alpha1.ConnectorProvider) b
 // would judge markers against the wrong configuration.
 var builtinConnectorTools = map[string]corev1alpha1.ConnectorToolClass{
 	"check_pull_request_ci": corev1alpha1.ConnectorToolClassRead,
-	"get_issue":              corev1alpha1.ConnectorToolClassRead,
-	"list_issues":            corev1alpha1.ConnectorToolClassRead,
-	"list_pull_requests":     corev1alpha1.ConnectorToolClassRead,
-	"review_pull_request":    corev1alpha1.ConnectorToolClassRead,
-	"comment_on_issue":       corev1alpha1.ConnectorToolClassWrite,
-	"create_pull_request":    corev1alpha1.ConnectorToolClassWrite,
-	"post_review_comment":    corev1alpha1.ConnectorToolClassWrite,
+	"get_issue":             corev1alpha1.ConnectorToolClassRead,
+	"list_issues":           corev1alpha1.ConnectorToolClassRead,
+	"list_pull_requests":    corev1alpha1.ConnectorToolClassRead,
+	"review_pull_request":   corev1alpha1.ConnectorToolClassRead,
+	"comment_on_issue":      corev1alpha1.ConnectorToolClassWrite,
+	"create_pull_request":   corev1alpha1.ConnectorToolClassWrite,
+	"post_review_comment":   corev1alpha1.ConnectorToolClassWrite,
 }
 
 // BuiltinConnectorToolClass returns the fixed class of a built-in tool that
