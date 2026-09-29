@@ -116,6 +116,11 @@ function ConnectorsPageContent({ namespace, search }: { namespace: string; searc
 
   const busy = start.isPending || changeMode.isPending || reauthorize.isPending || disconnect.isPending
   const byProvider = new Map((connections.data?.items ?? []).map((c) => [c.provider, c]))
+  // A Connection outlives its ConnectorProvider on purpose (it still holds
+  // the person's tokens), so it is shown, and can be disconnected, even
+  // when no provider card claims it.
+  const providerNames = new Set((providers.data?.items ?? []).map((p) => p.name))
+  const retained = (connections.data?.items ?? []).filter((c) => !providerNames.has(c.provider))
 
   return (
     <div className="space-y-6">
@@ -145,7 +150,7 @@ function ConnectorsPageContent({ namespace, search }: { namespace: string; searc
         ) : (
           <ListAccessError error={providers.error ?? connections.error} resource="connectors" />
         )
-      ) : (providers.data?.items.length ?? 0) === 0 ? (
+      ) : (providers.data?.items.length ?? 0) === 0 && retained.length === 0 ? (
         <EmptyState icon={Unplug} headline="No connector providers"
           hint="An operator adds a ConnectorProvider (for example GitHub) before accounts can be linked." />
       ) : (
@@ -157,9 +162,34 @@ function ConnectorsPageContent({ namespace, search }: { namespace: string; searc
               onReauthorize={(name) => reauthorize.mutate(name)}
               onDisconnect={(name) => disconnect.mutate(name)} />
           ))}
+          {retained.map((connection) => (
+            <RetainedConnectionCard key={connection.name} connection={connection} busy={busy}
+              onDisconnect={(name) => disconnect.mutate(name)} />
+          ))}
         </div>
       )}
     </div>
+  )
+}
+
+/** A linked account whose provider is no longer configured: still yours, still disconnectable. */
+function RetainedConnectionCard({ connection, busy, onDisconnect }: { connection: Connection; busy: boolean; onDisconnect: (name: string) => void }) {
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-start justify-between gap-3 space-y-0">
+        <div>
+          <CardTitle className="text-base">{connection.provider}</CardTitle>
+          <p className="text-xs text-muted-foreground">Provider no longer configured</p>
+        </div>
+        <Badge variant="outline">{connection.state}</Badge>
+      </CardHeader>
+      <CardContent className="space-y-3 text-sm">
+        <p className="text-muted-foreground">
+          {connection.message || 'This provider was removed by an operator. The link keeps its tokens until you disconnect it.'}
+        </p>
+        <Button size="sm" variant="destructive" disabled={busy} onClick={() => onDisconnect(connection.name)}>Disconnect</Button>
+      </CardContent>
+    </Card>
   )
 }
 
