@@ -763,6 +763,15 @@ func TestResolveRepoAndToken_LinkedAccountFirst(t *testing.T) {
 	if _, repo, _, _, err := resolveScopedReadRepoAndToken(ctx, k8sClient, "list_pull_requests", testMyTaskName, "", ""); err != nil || repo != "taskrepo" {
 		t.Fatalf("own task_name: repo=%q err=%v", repo, err)
 	}
+	// Outside a Task (chat and the proxies) no task_name is accepted: there
+	// is no current scope to hold a named Task's repository against.
+	outside := WithToolContext(context.Background(), &ToolContext{Namespace: defaultNamespace, LinkedAccounts: linked})
+	if _, _, _, _, err := resolveScopedReadRepoAndToken(ctx, k8sClient, "list_pull_requests", testMyTaskName, "", ""); err != nil {
+		t.Fatalf("precondition: %v", err)
+	}
+	if _, _, _, _, err := resolveScopedReadRepoAndToken(outside, k8sClient, "list_pull_requests", testMyTaskName, "", ""); err == nil || !strings.Contains(err.Error(), "outside a task") {
+		t.Fatalf("task_name outside a task err = %v", err)
+	}
 }
 
 func TestResolveRepoAndToken_LinkedAccountChildAndTransactionScope(t *testing.T) {

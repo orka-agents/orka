@@ -4,7 +4,7 @@ import { Link2, Unplug } from 'lucide-react'
 import { toast } from 'sonner'
 import { api, isForbiddenError, isUnauthorizedError } from '@/lib/api-client'
 import {
-  callbackReasonMessage, clearCompletionFragment, completionCommand, openAuthorizeURL, readCompletionToken,
+  callbackReasonMessage, clearConsentCallback, completionCommand, openAuthorizeURL, readCompletionToken,
   type Connection, type ConnectionAuthorizeResponse, type ConnectionMode, type ConnectorCallbackSearch, type ConnectorProvider,
 } from '@/lib/connectors'
 import { useUIStore } from '@/stores/ui'
@@ -58,13 +58,14 @@ function ConnectorsPageContent({ namespace, search }: { namespace: string; searc
     mutationFn: ({ name, completion }: { name: string; completion: string }) =>
       api.post<Connection>(`/connections/${encodeURIComponent(name)}/complete`, { completion }, completionParams),
     onSuccess: (connection) => {
-      clearCompletionFragment()
+      clearConsentCallback()
       setCallbackNotice({ tone: 'info', text: `Linked ${connection.provider} (${connection.mode}).` })
       invalidate()
     },
     onError: (error: unknown) => {
+      const command = completionCommand(search.connection, search.namespace)
       const hint = isForbiddenError(error) || isUnauthorizedError(error)
-        ? ` Sign in as yourself and retry, or run: ${completionCommand(search.connection ?? '', search.namespace)}`
+        ? ` Sign in as yourself and retry${command ? `, or run: ${command}` : ''}.`
         : ''
       setCallbackNotice({ tone: 'error', text: `Could not finish linking: ${errorText(error)}.${hint}`, retry: true })
     },

@@ -81,7 +81,18 @@ describe('ConnectorsPage', () => {
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Linked github (readWrite).'))
     // The page shows orka-system, but the consent was sealed in team-a.
     expect(completions).toEqual([{ body: { completion: 'one-time' }, namespace: 'team-a' }])
+    // A reload of the address bar no longer looks like an unfinished consent.
     expect(window.location.hash).toBe('')
+    expect(window.location.search).toBe('')
+  })
+
+  it('withholds the CLI fallback when the callback names are not Kubernetes names', async () => {
+    useProviders([github])
+    window.history.replaceState(null, '', '/settings/connectors?status=pending&connection=github-abc%3B%20curl%20evil#completion=one-time')
+    server.use(http.post(`${API}/connections/:name/complete`, () => new HttpResponse('not signed in', { status: 401 })))
+    render(<ConnectorsPage search={{ status: 'pending', connection: 'github-abc; curl evil' }} />)
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Sign in as yourself and retry.'))
+    expect(screen.getByRole('alert')).not.toHaveTextContent('orka connection complete')
   })
 
   it('keeps the completion token for a retry when finishing fails', async () => {

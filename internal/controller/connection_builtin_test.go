@@ -568,13 +568,30 @@ func TestLiveLinkedAccounts(t *testing.T) {
 		source.request.Frozen.Provider != "github" || source.request.Tool.Name != "list_pull_requests" || !source.request.Tool.Builtin {
 		t.Fatalf("live: credential = %+v bound = %t err = %v request = %+v", credential, bound, err, source.request)
 	}
-	// A readOnly link never serves a write tool; an unready link binds nothing.
-	if _, _, err := accounts.BuiltinToolCredential(ctx, "create_pull_request"); err == nil || !strings.Contains(err.Error(), "readOnly") {
+	// Chat and the proxies execute tools directly, with no approval gate,
+	// so a linked write is refused here whatever the link's mode.
+	if _, _, err := accounts.BuiltinToolCredential(ctx, "create_pull_request"); err == nil || !strings.Contains(err.Error(), "waits for approval") {
 		t.Fatalf("readOnly write err = %v", err)
 	}
-	unready := LiveLinkedAccounts(f.reader(github, f.connection(corev1alpha1.ConnectionModeReadWrite, false)), registry, source, "tenant", f.requester)
-	if _, bound, err := unready.BuiltinToolCredential(ctx, "list_pull_requests"); bound || err != nil {
+	source.request = outboundaccess.ConnectionCredentialRequest{}
+	writable := LiveLinkedAccounts(f.reader(github, f.connection(corev1alpha1.ConnectionModeReadWrite, true)), registry, source, "tenant", f.requester)
+	if _, _, err := writable.BuiltinToolCredential(ctx, "create_pull_request"); err == nil || !strings.Contains(err.Error(), "waits for approval") || source.request.Tool.Name != "" {
+		t.Fatalf("readWrite write err = %v request = %+v", err, source.request)
+	}
+	// An existing link that cannot be used now fails the call: only a
+	// missing link leaves the tool on its own credential path.
+	pending := f.connection(corev1alpha1.ConnectionModeReadWrite, false)
+	pending.Status.State = "Pending"
+	unready := LiveLinkedAccounts(f.reader(github, pending), registry, source, "tenant", f.requester)
+	if _, bound, err := unready.BuiltinToolCredential(ctx, "list_pull_requests"); bound || err == nil || !strings.Contains(err.Error(), "not usable right now") || !strings.Contains(err.Error(), "Pending") {
 		t.Fatalf("unready: bound = %t err = %v", bound, err)
+	}
+	deleting := f.connection(corev1alpha1.ConnectionModeReadWrite, true)
+	deleting.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+	deleting.Finalizers = []string{"test"}
+	gone := LiveLinkedAccounts(f.reader(github, deleting), registry, source, "tenant", f.requester)
+	if _, bound, err := gone.BuiltinToolCredential(ctx, "list_pull_requests"); bound || err == nil || !strings.Contains(err.Error(), "being deleted") {
+		t.Fatalf("deleting: bound = %t err = %v", bound, err)
 	}
 	// Not in the catalog, or declared by no provider: not the resolver's concern.
 	if _, bound, err := accounts.BuiltinToolCredential(ctx, "web_search"); bound || err != nil {

