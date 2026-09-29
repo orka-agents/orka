@@ -627,6 +627,15 @@ func TestLiveLinkedAccountsUnusableLinkFailsClosed(t *testing.T) {
 	if _, bound, err := unlinked.BuiltinToolCredential(ctx, "list_pull_requests"); bound || err != nil {
 		t.Fatalf("lagging provider without a link: bound = %t err = %v", bound, err)
 	}
+	// A link whose provider was deleted outright is bound and unusable too:
+	// nothing can say any more which tools it declared.
+	orphan := f.connection(corev1alpha1.ConnectionModeReadWrite, true)
+	orphan.Name = connectors.ConnectionName("gone", f.requester.Issuer, f.requester.Subject)
+	orphan.Spec.ProviderRef.Name = "gone"
+	orphaned := LiveLinkedAccounts(f.reader(orphan), registry, source, "tenant", f.requester)
+	if _, bound, err := orphaned.BuiltinToolCredential(ctx, "create_pull_request"); bound || err == nil || !strings.Contains(err.Error(), "no longer configured") {
+		t.Fatalf("orphaned link: bound = %t err = %v", bound, err)
+	}
 }
 
 func TestRegistryACPMCPToolExecutorHandsRequesterToListConnections(t *testing.T) {

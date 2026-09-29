@@ -41,7 +41,8 @@ func TestListConnectionsTool(t *testing.T) {
 	pending := accepted("jira", "Jira")
 	pending.Status.Conditions = nil
 	linked := &corev1alpha1.Connection{
-		ObjectMeta: metav1.ObjectMeta{Name: connectors.ConnectionName("github", requester.Issuer, requester.Subject), Namespace: "tenant", Generation: 2},
+		ObjectMeta: metav1.ObjectMeta{Name: connectors.ConnectionName("github", requester.Issuer, requester.Subject), Namespace: "tenant", Generation: 2,
+			Labels: map[string]string{connectors.ConnectionSubjectLabel: connectors.ConnectionSubjectLabelValue(requester.Issuer, requester.Subject)}},
 		Spec: corev1alpha1.ConnectionSpec{Subject: corev1alpha1.ConnectionSubject{Issuer: requester.Issuer, Subject: requester.Subject},
 			ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}, Mode: corev1alpha1.ConnectionModeReadWrite},
 		Status: corev1alpha1.ConnectionStatus{State: "Ready", GrantSequence: 1, LinkedAt: &metav1.Time{Time: metav1.Now().Time}, Conditions: []metav1.Condition{
@@ -53,11 +54,20 @@ func TestListConnectionsTool(t *testing.T) {
 	// Somebody else's Connection under the name this requester would get
 	// (a collision) is never listed as theirs.
 	foreign := &corev1alpha1.Connection{
-		ObjectMeta: metav1.ObjectMeta{Name: connectors.ConnectionName("slack", requester.Issuer, requester.Subject), Namespace: "tenant"},
+		ObjectMeta: metav1.ObjectMeta{Name: connectors.ConnectionName("slack", requester.Issuer, requester.Subject), Namespace: "tenant",
+			Labels: map[string]string{connectors.ConnectionSubjectLabel: connectors.ConnectionSubjectLabelValue(requester.Issuer, requester.Subject)}},
 		Spec: corev1alpha1.ConnectionSpec{Subject: corev1alpha1.ConnectionSubject{Issuer: requester.Issuer, Subject: "bob"},
 			ProviderRef: corev1alpha1.LocalObjectReference{Name: "slack"}},
 	}
-	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(github, slack, pending, linked, foreign).Build()
+	// A link whose provider was removed is still the person's, and still listed.
+	retained := &corev1alpha1.Connection{
+		ObjectMeta: metav1.ObjectMeta{Name: connectors.ConnectionName("gone", requester.Issuer, requester.Subject), Namespace: "tenant",
+			Labels: map[string]string{connectors.ConnectionSubjectLabel: connectors.ConnectionSubjectLabelValue(requester.Issuer, requester.Subject)}},
+		Spec: corev1alpha1.ConnectionSpec{Subject: corev1alpha1.ConnectionSubject{Issuer: requester.Issuer, Subject: requester.Subject},
+			ProviderRef: corev1alpha1.LocalObjectReference{Name: "gone"}, Mode: corev1alpha1.ConnectionModeReadWrite},
+		Status: corev1alpha1.ConnectionStatus{State: "Ready", GrantSequence: 1},
+	}
+	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(github, slack, pending, linked, foreign, retained).Build()
 	tool := &ListConnectionsTool{}
 	if tool.Name() != ListConnectionsToolName || !strings.Contains(tool.Description(), ConnectorSettingsPath) {
 		t.Fatalf("name = %q description = %q", tool.Name(), tool.Description())
@@ -75,10 +85,15 @@ func TestListConnectionsTool(t *testing.T) {
 		t.Fatalf("decode %s: %v", out, err)
 	}
 	result := envelope.Data
-	if len(result.Connections) != 1 || result.Connections[0].Provider != "github" || result.Connections[0].DisplayName != "GitHub" ||
+	if len(result.Connections) != 2 || result.Connections[0].Provider != "github" || result.Connections[0].DisplayName != "GitHub" ||
 		result.Connections[0].Mode != corev1alpha1.ConnectionModeReadWrite || !result.Connections[0].Ready || result.Connections[0].LinkedAt == "" ||
 		strings.Join(result.Connections[0].Tools, ",") != "list_pull_requests (read),create_pull_request (write)" {
 		t.Fatalf("connections = %+v", result.Connections)
+	}
+	// The link to the removed provider is reported, unusable, with no tools.
+	if gone := result.Connections[1]; gone.Provider != "gone" || !gone.ProviderMissing || gone.Ready || len(gone.Tools) != 0 ||
+		!strings.Contains(gone.Message, "no longer configured") {
+		t.Fatalf("retained = %+v", gone)
 	}
 	if len(result.Available) != 2 || result.Available[0].Provider != "jira" || result.Available[0].Ready || result.Available[1].Provider != "slack" ||
 		result.Available[1].DisplayName != "slack" || !result.Available[1].Ready {

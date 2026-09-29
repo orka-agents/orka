@@ -35,15 +35,14 @@ import (
 const (
 	// ConnectionSubjectDigestLabel indexes Connections by owner without
 	// exposing the raw subject as a label value.
-	ConnectionSubjectDigestLabel = "orka.ai/connection-subject"
+	ConnectionSubjectDigestLabel = connectors.ConnectionSubjectLabel
 	// ConnectionProviderLabel indexes Connections by provider.
 	ConnectionProviderLabel = "orka.ai/connector-provider"
 
-	connectorSettingsPath        = "/settings/connectors"
-	connectorSchemeHTTPS         = "https"
-	connectorSchemeHTTP          = "http"
-	connectionSubjectLabelLength = 32
-	maxConnectionRequestBytes    = 4 << 10
+	connectorSettingsPath     = "/settings/connectors"
+	connectorSchemeHTTPS      = "https"
+	connectorSchemeHTTP       = "http"
+	maxConnectionRequestBytes = 4 << 10
 )
 
 // completionLocks serializes completion per Connection UID so a stalled
@@ -695,7 +694,7 @@ func (h *Handlers) providerOAuthConfig(ctx context.Context, provider *corev1alph
 }
 
 func connectionSubjectLabel(ui *UserInfo) string {
-	return connectors.SubjectDigest(ui.Issuer, ui.Subject)[:connectionSubjectLabelLength]
+	return connectors.ConnectionSubjectLabelValue(ui.Issuer, ui.Subject)
 }
 
 // startConnectorConsent records a pending consent and returns the provider
