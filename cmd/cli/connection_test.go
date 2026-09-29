@@ -27,13 +27,15 @@ func TestConnectStartsConsentOpensBrowserAndWaits(t *testing.T) {
 				t.Fatalf("decode: %v", err)
 			}
 			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
-				"connection":   map[string]any{"name": "github-abc", "provider": "github", "mode": "readWrite", "state": "Pending"},
+				"connection":   map[string]any{"name": "github-abc", "namespace": "team-a", "provider": "github", "mode": "readWrite", "state": "Revoked"},
 				"authorizeURL": "https://github.com/login/oauth/authorize?state=signed",
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/connections/github-abc":
 			polls++
 			ready := polls >= 2
-			state := "Pending"
+			// The link being repaired stays Revoked until the new consent
+			// completes; the command keeps waiting through it.
+			state := "Revoked"
 			if ready {
 				state = "Ready"
 			}
@@ -61,8 +63,49 @@ func TestConnectStartsConsentOpensBrowserAndWaits(t *testing.T) {
 	if opened != "https://github.com/login/oauth/authorize?state=signed" {
 		t.Fatalf("opened = %q", opened)
 	}
-	if !strings.Contains(out.String(), "Linked github (readWrite)") || polls < 2 || !strings.Contains(out.String(), "orka connection complete github-abc --completion") {
+	if !strings.Contains(out.String(), "Linked github (readWrite)") || polls < 2 || !strings.Contains(out.String(), "orka connection complete github-abc --namespace team-a --completion") {
 		t.Fatalf("output = %q polls = %d", out.String(), polls)
+	}
+}
+
+func TestConnectTimeoutBoundsAStalledPoll(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	release := make(chan struct{})
+	defer close(release)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/connections":
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"connection":   map[string]any{"name": "github-abc", "provider": "github", "mode": "readOnly", "state": "Pending"},
+				"authorizeURL": "https://github.com/login/oauth/authorize?state=signed",
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/connections/github-abc":
+			// A stalled status read must not outlive --timeout.
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	origBrowser := openBrowserFunc
+	openBrowserFunc = func(string) error { return nil }
+	t.Cleanup(func() { openBrowserFunc = origBrowser })
+
+	root := newRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetArgs([]string{"connect", "github", "--server", srv.URL, "--token", "person-token", "--timeout", "300ms"})
+	start := time.Now()
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "did not become ready within 300ms") {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("the poll outlived the timeout: %s", elapsed)
 	}
 }
 

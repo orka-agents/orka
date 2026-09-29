@@ -763,14 +763,31 @@ func TestResolveRepoAndToken_LinkedAccountFirst(t *testing.T) {
 	if _, repo, _, _, err := resolveScopedReadRepoAndToken(ctx, k8sClient, "list_pull_requests", testMyTaskName, "", ""); err != nil || repo != "taskrepo" {
 		t.Fatalf("own task_name: repo=%q err=%v", repo, err)
 	}
-	// Outside a Task (chat and the proxies) no task_name is accepted: there
-	// is no current scope to hold a named Task's repository against.
-	outside := WithToolContext(context.Background(), &ToolContext{Namespace: defaultNamespace, LinkedAccounts: linked})
-	if _, _, _, _, err := resolveScopedReadRepoAndToken(ctx, k8sClient, "list_pull_requests", testMyTaskName, "", ""); err != nil {
-		t.Fatalf("precondition: %v", err)
-	}
-	if _, _, _, _, err := resolveScopedReadRepoAndToken(outside, k8sClient, "list_pull_requests", testMyTaskName, "", ""); err == nil || !strings.Contains(err.Error(), "outside a task") {
+	// Outside a Task (chat and the proxies) only a Task this turn created
+	// for the same person may lend its repository scope to the link.
+	requester := &corev1alpha1.RequestedBy{Issuer: "https://issuer.example.test", Subject: "alice"}
+	outsideCtx := &ToolContext{Namespace: defaultNamespace, LinkedAccounts: linked, Requester: requester, CreatedTasks: NewCreatedTasks()}
+	outside := WithToolContext(context.Background(), outsideCtx)
+	if _, _, _, _, err := resolveScopedReadRepoAndToken(outside, k8sClient, "list_pull_requests", testMyTaskName, "", ""); err == nil || !strings.Contains(err.Error(), "created in this conversation") {
 		t.Fatalf("task_name outside a task err = %v", err)
+	}
+	// A Task created this turn but stamped for somebody else (or nobody) is refused.
+	outsideCtx.RecordCreatedTask(testMyTaskName)
+	if _, _, _, _, err := resolveScopedReadRepoAndToken(outside, k8sClient, "list_pull_requests", testMyTaskName, "", ""); err == nil || !strings.Contains(err.Error(), "not requested by the person") {
+		t.Fatalf("unstamped created task err = %v", err)
+	}
+	stamped := task.DeepCopy()
+	stamped.Spec.RequestedBy = requester
+	if err := k8sClient.Update(context.Background(), stamped); err != nil {
+		t.Fatal(err)
+	}
+	if _, repo, token, _, err := resolveScopedReadRepoAndToken(outside, k8sClient, "list_pull_requests", testMyTaskName, "", ""); err != nil || repo != "taskrepo" || token != "linked-token" {
+		t.Fatalf("created task scope: repo=%q token=%q err=%v", repo, token, err)
+	}
+	// No record set at all (a context the API did not build) never accepts one.
+	bare := WithToolContext(context.Background(), &ToolContext{Namespace: defaultNamespace, LinkedAccounts: linked, Requester: requester})
+	if _, _, _, _, err := resolveScopedReadRepoAndToken(bare, k8sClient, "list_pull_requests", testMyTaskName, "", ""); err == nil || !strings.Contains(err.Error(), "created in this conversation") {
+		t.Fatalf("bare context err = %v", err)
 	}
 }
 

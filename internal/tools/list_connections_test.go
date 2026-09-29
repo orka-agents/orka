@@ -98,3 +98,20 @@ func TestListConnectionsTool(t *testing.T) {
 		t.Fatalf("no context = %s err = %v", out, err)
 	}
 }
+
+func TestListConnectionsToolHonoursConnectorReadGate(t *testing.T) {
+	tool := &ListConnectionsTool{}
+	denied := &ToolContext{
+		Namespace: "tenant", Requester: &corev1alpha1.RequestedBy{Issuer: "https://issuer.example.test", Subject: "alice"},
+		AuthorizeConnectorRead: func() *ChatToolError {
+			return &ChatToolError{Type: "unauthorized_tool", Message: "token lacks orka:connectors:read", Suggestion: "use a wider token"}
+		},
+	}
+	out, err := tool.Execute(WithToolContext(context.Background(), denied), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "unauthorized_tool") || !strings.Contains(out, "orka:connectors:read") || strings.Contains(out, "connections\":[") {
+		t.Fatalf("denied output = %s", out)
+	}
+}

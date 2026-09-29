@@ -257,7 +257,10 @@ has not linked should say so and point them at **Settings › Connectors**
 rather than try another credential. The tool is available to chat, to the
 compatibility proxies' coordinator mode, and to ACP runtimes through the
 broker; a Task without a verified requester gets an explicit "no identity"
-result.
+result. Under enforced context-token authorization the tool follows the
+same boundary as the connector routes: a delegated token without the
+connector-read scope (`orka:connectors:read` by default) is not offered
+the tool and is refused if it calls it anyway.
 
 ### Chat and the compatibility proxies
 
@@ -268,9 +271,12 @@ the Connection is read live at call time, since there is no dispatch to
 freeze it. These surfaces execute tools directly, with no approval gate,
 so a linked write tool such as `create_pull_request` is refused there once
 the person has a link; linked writes run only from a Task, where the write
-waits for approval. A linked call may not name another Task in `task_name`
-either, because there is no current Task whose repository scope could bound
-it. Without a link those tools keep the Task-Secret path they always had; a
+waits for approval. A linked call may name a Task in `task_name` only
+when this conversation's tools created that Task for the same person
+(the API stamps it with their identity), so the person's token is scoped
+by a repository they chose themselves; any other `task_name` is refused,
+because there is no current Task whose repository scope could bound it.
+Without a link those tools keep the Task-Secret path they always had; a
 link that exists but cannot be used (pending, expired, revoked, or being
 deleted) fails the call rather than falling back.
 

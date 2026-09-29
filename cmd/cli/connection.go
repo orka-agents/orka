@@ -29,13 +29,14 @@ var connectionReadyPollInterval = 2 * time.Second
 
 // connectionView is the API's public view of a Connection.
 type connectionView struct {
-	Name     string `json:"name"`
-	Provider string `json:"provider"`
-	Mode     string `json:"mode"`
-	State    string `json:"state"`
-	Ready    bool   `json:"ready"`
-	LinkedAt string `json:"linkedAt"`
-	Message  string `json:"message"`
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
+	Provider  string `json:"provider"`
+	Mode      string `json:"mode"`
+	State     string `json:"state"`
+	Ready     bool   `json:"ready"`
+	LinkedAt  string `json:"linkedAt"`
+	Message   string `json:"message"`
 }
 
 // connectionAuthorizeView is the API's response to a consent start.
@@ -85,15 +86,24 @@ func newConnectCmd() *cobra.Command {
 			}
 			// The provider sends the browser back to the dashboard, which
 			// finishes the link only when it is signed in as this person.
-			fmt.Fprintf(out, "After consenting, the dashboard finishes the link if it is signed in as you. Otherwise copy the value after '#completion=' from the address bar and run:\n  orka connection complete %s --completion <value>\n", started.Connection.Name) //nolint:errcheck
+			// The consent is sealed in the Connection's namespace, so the
+			// fallback names it explicitly rather than trusting a later
+			// invocation's default.
+			fmt.Fprintf(out, "After consenting, the dashboard finishes the link if it is signed in as you. Otherwise copy the value after '#completion=' from the address bar and run:\n  %s\n", completionCommand(started.Connection)) //nolint:errcheck
 			if noWait {
 				return nil
 			}
 			fmt.Fprintf(out, "Waiting up to %s for the link to become ready...\n", timeout) //nolint:errcheck
-			deadline := time.Now().Add(timeout)
+			// The deadline bounds the requests themselves, not only the
+			// checks between them, so a stalled poll cannot outlive --timeout.
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			defer cancel()
 			for {
-				raw, err := c.DoJSON(context.Background(), http.MethodGet, connectionsAPIPath+"/"+url.PathEscape(started.Connection.Name), nil, nil)
+				raw, err := c.DoJSON(ctx, http.MethodGet, connectionsAPIPath+"/"+url.PathEscape(started.Connection.Name), nil, nil)
 				if err != nil {
+					if ctx.Err() != nil {
+						return fmt.Errorf("connection %s did not become ready within %s; finish the consent and run 'orka connection get %s'", started.Connection.Name, timeout, started.Connection.Name)
+					}
 					return connectionError(err)
 				}
 				var current connectionView
@@ -104,13 +114,17 @@ func newConnectCmd() *cobra.Command {
 					fmt.Fprintf(out, "Linked %s (%s)\n", current.Provider, current.Mode) //nolint:errcheck
 					return nil
 				}
-				if current.State == "Error" || current.State == "Revoked" {
+				// A fresh consent was just started, so a Revoked or Expired
+				// link is what is being repaired, not the outcome: only an
+				// Error is final before the person finishes in the browser.
+				if current.State == "Error" {
 					return fmt.Errorf("connection %s is %s: %s", current.Name, current.State, current.Message)
 				}
-				if time.Now().After(deadline) {
+				select {
+				case <-ctx.Done():
 					return fmt.Errorf("connection %s is still %s after %s; finish the consent and run 'orka connection get %s'", current.Name, current.State, timeout, current.Name)
+				case <-time.After(connectionReadyPollInterval):
 				}
-				time.Sleep(connectionReadyPollInterval)
 			}
 		},
 	}
@@ -119,6 +133,16 @@ func newConnectCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&noWait, "no-wait", false, "Return as soon as consent has started")
 	cmd.Flags().DurationVar(&timeout, "timeout", 5*time.Minute, "How long to wait for the link to become ready")
 	return cmd
+}
+
+// completionCommand is the CLI fallback that finishes a consent when the
+// dashboard cannot, in the namespace the consent was sealed in.
+func completionCommand(connection connectionView) string {
+	command := "orka connection complete " + connection.Name
+	if strings.TrimSpace(connection.Namespace) != "" {
+		command += " --namespace " + connection.Namespace
+	}
+	return command + " --completion <value>"
 }
 
 func newConnectionCmd() *cobra.Command {

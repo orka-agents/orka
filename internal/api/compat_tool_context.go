@@ -78,6 +78,8 @@ func newCompatProxyToolContext(cfg compatProxyToolContextConfig) *tools.ToolCont
 		PolicyReader:              authorizationReader,
 		Requester:                 requester,
 		LinkedAccounts:            linkedAccounts,
+		AuthorizeConnectorRead:    connectorReadToolAuthorizer(cfg.UserInfo, cfg.AuthorizationConfig),
+		CreatedTasks:              tools.NewCreatedTasks(),
 		KubeClient:                cfg.KubeClient,
 		Namespace:                 cfg.Namespace,
 		Tenant:                    cfg.Namespace,
