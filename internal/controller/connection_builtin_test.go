@@ -578,6 +578,21 @@ func TestLiveLinkedAccounts(t *testing.T) {
 	if _, _, err := writable.BuiltinToolCredential(ctx, "create_pull_request"); err == nil || !strings.Contains(err.Error(), "waits for approval") || source.request.Tool.Name != "" {
 		t.Fatalf("readWrite write err = %v request = %+v", err, source.request)
 	}
+	// Not in the catalog, or declared by no provider: not the resolver's concern.
+	if _, bound, err := accounts.BuiltinToolCredential(ctx, "web_search"); bound || err != nil {
+		t.Fatalf("web_search: bound = %t err = %v", bound, err)
+	}
+	if _, bound, err := accounts.BuiltinToolCredential(ctx, "get_issue"); bound || err != nil {
+		t.Fatalf("undeclared: bound = %t err = %v", bound, err)
+	}
+}
+
+func TestLiveLinkedAccountsUnusableLinkFailsClosed(t *testing.T) {
+	f := newConnectorToolFixture(t)
+	ctx := context.Background()
+	registry := brokeredGitHubRegistry(t)
+	github := acceptedBuiltinProvider("github", "list_pull_requests", "create_pull_request")
+	source := &fakeLinkedSource{credential: outboundaccess.ConnectionCredential{AccessToken: "gho_live", ConnectionUID: "conn-uid", Mode: corev1alpha1.ConnectionModeReadWrite}}
 	// An existing link that cannot be used now fails the call: only a
 	// missing link leaves the tool on its own credential path.
 	pending := f.connection(corev1alpha1.ConnectionModeReadWrite, false)
@@ -593,12 +608,8 @@ func TestLiveLinkedAccounts(t *testing.T) {
 	if _, bound, err := gone.BuiltinToolCredential(ctx, "list_pull_requests"); bound || err == nil || !strings.Contains(err.Error(), "being deleted") {
 		t.Fatalf("deleting: bound = %t err = %v", bound, err)
 	}
-	// Not in the catalog, or declared by no provider: not the resolver's concern.
-	if _, bound, err := accounts.BuiltinToolCredential(ctx, "web_search"); bound || err != nil {
-		t.Fatalf("web_search: bound = %t err = %v", bound, err)
-	}
-	if _, bound, err := accounts.BuiltinToolCredential(ctx, "get_issue"); bound || err != nil {
-		t.Fatalf("undeclared: bound = %t err = %v", bound, err)
+	if source.request.Tool.Name != "" {
+		t.Fatalf("an unusable link must never reach the credential source: %+v", source.request)
 	}
 }
 
