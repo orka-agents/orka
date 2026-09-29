@@ -283,7 +283,10 @@ func TestContextTokenConnectorReadScopeGatesListConnections(t *testing.T) {
 		compReq := &llm.CompletionRequest{}
 		injectOrkaTools(compReq)
 		gotNames = completionToolNames(filterCompletionToolsForContextToken(c, handler.contextTokenAuthorization, compReq.Tools))
-		gateDenied = connectorReadToolAuthorizer(GetUserInfo(c), handler.contextTokenAuthorization) != nil
+		gateDenied = connectorReadToolAuthorizer(GetUserInfo(c), handler.contextTokenAuthorization, true) != nil
+		if connectorReadToolAuthorizer(GetUserInfo(c), handler.contextTokenAuthorization, false) == nil {
+			t.Error("with connectors disabled the gate must refuse every caller")
+		}
 		return c.SendStatus(http.StatusNoContent)
 	})
 	probe := func(scope string) {

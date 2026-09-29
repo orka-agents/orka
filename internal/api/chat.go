@@ -69,7 +69,10 @@ const (
 
 // ChatConfig holds configuration for the chat handler.
 type ChatConfig struct {
-	Enabled                bool
+	Enabled bool
+	// ConnectorsEnabled mirrors --connectors-enabled: without it the
+	// linked-account surfaces (list_connections) are not offered at all.
+	ConnectorsEnabled      bool
 	Provider               string
 	Model                  string
 	MaxIterations          int
@@ -464,7 +467,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	if ch.config.LinkedAccounts != nil && executor.requester != nil {
 		executor.linkedAccounts = ch.config.LinkedAccounts(namespace, executor.requester)
 	}
-	executor.authorizeConnectorRead = connectorReadToolAuthorizer(userInfo, ch.contextTokenAuthorization)
+	executor.authorizeConnectorRead = connectorReadToolAuthorizer(userInfo, ch.contextTokenAuthorization, ch.config.ConnectorsEnabled)
 	executor.createdTasks = chattools.NewCreatedTasks()
 	executor.SetExecutionMode(ch.config.ExecutionMode)
 	executor.provider = providerInfo.Name
@@ -492,6 +495,9 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 
 	// Build tools from the chat registry and restrict execution to the exposed set.
 	tools := executor.registry.ToLLMTools(chattools.ChatToolNames())
+	if !ch.config.ConnectorsEnabled {
+		tools = filterCompletionToolsExcluding(tools, chattools.ListConnectionsToolName)
+	}
 	tools = filterCompletionToolsForContextToken(c, ch.contextTokenAuthorization, tools)
 	if err := authorizeContextTokenToolUse(c, ch.contextTokenAuthorization, "chatTools", completionToolNames(tools)); err != nil {
 		return err

@@ -110,7 +110,10 @@ func newConnectCmd() *cobra.Command {
 				if err := decodeInto(raw, &current); err != nil {
 					return err
 				}
-				if current.Ready {
+				// A link that was already Ready stays Ready while the new
+				// consent runs; only a later linkedAt proves this consent
+				// finished rather than reporting the old grant.
+				if current.Ready && (!started.Connection.Ready || current.LinkedAt != started.Connection.LinkedAt) {
 					fmt.Fprintf(out, "Linked %s (%s)\n", current.Provider, current.Mode) //nolint:errcheck
 					return nil
 				}

@@ -706,6 +706,15 @@ func RegisterBrokeredCoordinationTools(r *Registry, k8sClient client.Client) err
 	r.Register(NewRememberMemoryTool())
 	r.Register(NewProposeMemoryTool())
 	r.Register(NewSearchTranscriptTool())
+	return nil
+}
+
+// RegisterBrokeredConnectionTools registers the linked-account tools the
+// ACP broker offers only when connectors are enabled on the controller.
+func RegisterBrokeredConnectionTools(r *Registry) error {
+	if r == nil {
+		return fmt.Errorf("registry is required")
+	}
 	r.Register(&ListConnectionsTool{})
 	return nil
 }

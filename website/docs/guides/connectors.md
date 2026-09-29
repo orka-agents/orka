@@ -253,10 +253,13 @@ has not linked should say so and point them at **Settings › Connectors**
 rather than try another credential. The tool is available to chat, to the
 compatibility proxies' coordinator mode, and to ACP runtimes through the
 broker; a Task without a verified requester gets an explicit "no identity"
-result. Under enforced context-token authorization the tool follows the
-same boundary as the connector routes: a delegated token without the
-connector-read scope (`orka:connectors:read` by default) is not offered
-the tool and is refused if it calls it anyway.
+result. The tool exists only while `--connectors-enabled` is set: without
+it chat, the proxies, and the broker neither offer nor run it. Under
+enforced context-token authorization it follows the same boundary as the
+connector routes: a delegated token without the connector-read scope
+(`orka:connectors:read` by default) is not offered the tool and is refused
+if it calls it anyway, and a Task created by such a token is refused the
+same way through the broker.
 
 ### Chat and the compatibility proxies
 

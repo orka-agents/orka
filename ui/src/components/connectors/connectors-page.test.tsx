@@ -32,7 +32,8 @@ describe('ConnectorsPage', () => {
   })
 
   it('lists providers with link state and starts consent', async () => {
-    useProviders([github, jira], [linked])
+    const slack = { name: 'slack', namespace: 'orka-system', displayName: 'Slack', ready: true, tools: [{ name: 'slack_search', class: 'read' }] }
+    useProviders([github, jira, slack], [linked, { ...linked, name: 'slack-abc', provider: 'slack' }])
     const open = vi.spyOn(connectors, 'openAuthorizeURL').mockImplementation(() => {})
     let posted: unknown
     server.use(http.post(`${API}/connections`, async ({ request }) => {
@@ -41,12 +42,14 @@ describe('ConnectorsPage', () => {
     }))
     render(<ConnectorsPage />)
     await waitFor(() => expect(screen.getByText('GitHub')).toBeInTheDocument())
-    expect(screen.getByText('Linked · read only')).toBeInTheDocument()
+    expect(screen.getAllByText('Linked · read only')).toHaveLength(2)
     expect(screen.getByText('Unavailable')).toBeInTheDocument()
     expect(screen.getByText(/create_pull_request/)).toBeInTheDocument()
     // A linked provider offers mode change and disconnect, not connect.
     expect(screen.getByRole('button', { name: 'Allow writes' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Disconnect' })).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: 'Disconnect' })).toHaveLength(2)
+    // A read-only link to a provider with no write tools has nothing to widen to.
+    expect(screen.getAllByRole('button', { name: 'Allow writes' })).toHaveLength(1)
     // An unready provider cannot be connected yet.
     expect(screen.getByRole('button', { name: 'Connect (read only)' })).toBeDisabled()
     open.mockRestore()
