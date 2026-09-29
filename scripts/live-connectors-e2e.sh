@@ -55,6 +55,7 @@ export KUBECONFIG="${workdir}/kubeconfig"
 kustomization="${repo_root}/config/manager/kustomization.yaml"
 backup="${workdir}/kustomization.yaml"
 api_pf_pid=""; fixture_pf_pid=""; fixture_tls_pf_pid=""
+created_kind_cluster="0"
 pf_log="${workdir}/port-forward.log"
 
 cleanup() {
@@ -73,7 +74,8 @@ cleanup() {
     } | redact >&2
   fi
   orka_kind_registry_stop
-  kind delete cluster --name "${cluster}" >/dev/null 2>&1 || true
+  # Only a cluster this run created is torn down.
+  if [[ "${created_kind_cluster}" == "1" ]]; then kind delete cluster --name "${cluster}" >/dev/null 2>&1 || true; fi
   rm -rf "${workdir}"
   exit "${status}"
 }
@@ -143,8 +145,14 @@ for cmd in make go docker kind kubectl curl jq openssl; do require_cmd "${cmd}";
 cd "${repo_root}"
 cp "${kustomization}" "${backup}"
 
+# A cluster of this name that already exists belongs to somebody else:
+# it would not be in this run's kubeconfig, and it is never deleted here.
+if kind get clusters 2>/dev/null | grep -qx "${cluster}"; then
+  die "kind cluster ${cluster} already exists; delete it or set KIND_CLUSTER to an unused name"
+fi
 log "Creating kind cluster ${cluster}"
 make setup-test-e2e KIND_CLUSTER="${cluster}"
+created_kind_cluster="1"
 kubectl config use-context "kind-${cluster}" >/dev/null
 log "Installing current Orka CRDs"
 make install
