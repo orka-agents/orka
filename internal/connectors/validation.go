@@ -116,6 +116,24 @@ func hostDenied(host string) bool {
 	return strings.Contains(host, ".svc.")
 }
 
+// infrastructureHostDenied reports the hosts no connector endpoint may
+// ever name, allowance or not: cloud metadata services and the Kubernetes
+// API service under any cluster domain.
+func infrastructureHostDenied(host string) bool {
+	host = strings.TrimSuffix(host, ".")
+	for _, denied := range []string{"metadata.google.internal", "metadata", "kubernetes.default", "kubernetes.default.svc"} {
+		if host == denied || strings.HasPrefix(host, "kubernetes.default.svc.") {
+			return true
+		}
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		// The cloud metadata addresses; the general link-local rule is
+		// applied separately, outside the allowance.
+		return ip.Equal(net.ParseIP("169.254.169.254")) || ip.Equal(net.ParseIP("fd00:ec2::254"))
+	}
+	return false
+}
+
 // validHeaderToken reports whether name is an RFC 9110 token, which is what
 // net/http requires of a header field name. http.CanonicalHeaderKey returns
 // invalid names unchanged, so canonical-form equality alone is not enough.
@@ -259,6 +277,12 @@ func validateEndpointURL(field, raw string, required bool) *Issue {
 		if number, err := strconv.Atoi(port); err != nil || number < 1 || number > 65535 {
 			return invalid(fmt.Sprintf("oauth.%s port must be between 1 and 65535", field))
 		}
+	}
+	// The fixed infrastructure hosts (cloud metadata, the Kubernetes API)
+	// stay denied even under the fixture allowance, which relaxes only the
+	// general private, loopback, and cluster-local rules.
+	if infrastructureHostDenied(strings.ToLower(host)) {
+		return invalid(fmt.Sprintf("oauth.%s host is not allowed", field))
 	}
 	if !PrivateEndpointsAllowed() {
 		if hostDenied(strings.ToLower(host)) {
