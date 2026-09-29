@@ -1994,6 +1994,10 @@ func main() {
 		EnforceNamespaceIsolation:   enforceNamespaceIsolation,
 		WorkspaceProviderAPIEnabled: workspaceProviderAPIEnabled,
 		OutboundAccessTrust:         outboundAccessTrust,
+		// The fixture allowance reaches Tool reconciliation too, or the
+		// fixture's Tools would sit at Available=False while the same
+		// endpoints are accepted on the provider and at execution.
+		AllowPrivateConnectorEndpoints: connectorsAllowPrivateEndpoints,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Tool")
 		os.Exit(1)

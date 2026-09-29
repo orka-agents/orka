@@ -30,7 +30,10 @@ api_port="${ORKA_API_LOCAL_PORT:-18080}"
 fixture_port="${ORKA_FIXTURE_LOCAL_PORT:-18081}"
 fixture_tls_port="${ORKA_FIXTURE_LOCAL_TLS_PORT:-18443}"
 # Whole seconds only (an optional trailing "s"): the script sleeps past it.
-access_ttl_seconds="${ORKA_CONNECTORS_E2E_ACCESS_TTL_SECONDS:-75}"
+# The credential source refreshes a token with 60s or less left, so the
+# fixture TTL leaves the first read a full minute to happen on the token
+# consent issued, before the lane waits that token out.
+access_ttl_seconds="${ORKA_CONNECTORS_E2E_ACCESS_TTL_SECONDS:-120}"
 access_ttl_seconds="${access_ttl_seconds%s}"
 [[ "${access_ttl_seconds}" =~ ^[1-9][0-9]*$ ]] || { printf 'error: ORKA_CONNECTORS_E2E_ACCESS_TTL_SECONDS must be whole seconds, got %q\n' "${access_ttl_seconds}" >&2; exit 1; }
 access_ttl="${access_ttl_seconds}s"
@@ -45,6 +48,10 @@ model_credential="fixture-$(openssl rand -hex 12)"
 callback_base="http://localhost:${api_port}"
 workdir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/orka-connectors-e2e.XXXXXX")"
 chmod 700 "${workdir}"
+# The lane's cluster lives in its own kubeconfig: kind writes it there and
+# every kubectl below reads it, so the developer's current-context is never
+# switched to a cluster this script later deletes.
+export KUBECONFIG="${workdir}/kubeconfig"
 kustomization="${repo_root}/config/manager/kustomization.yaml"
 backup="${workdir}/kustomization.yaml"
 api_pf_pid=""; fixture_pf_pid=""; fixture_tls_pf_pid=""
@@ -117,14 +124,18 @@ wait_for_state() {
   die "fixture never reached: ${label}"
 }
 
-wait_for_task_condition() {
-  local task="$1" expression="$2" label="$3" attempts="${4:-150}"
+wait_for_task_condition_on() {
+  local kind="$1" name="$2" expression="$3" label="$4" attempts="${5:-150}"
   while (( attempts > 0 )); do
-    if kubectl -n "${namespace}" get task "${task}" -o json 2>/dev/null | jq -e "${expression}" >/dev/null 2>&1; then return 0; fi
+    if kubectl -n "${namespace}" get "${kind}" "${name}" -o json 2>/dev/null | jq -e "${expression}" >/dev/null 2>&1; then return 0; fi
     attempts=$((attempts - 1)); sleep 2
   done
-  kubectl -n "${namespace}" get task "${task}" -o yaml 2>/dev/null | redact >&2 || true
-  die "task ${task} never reached: ${label}"
+  kubectl -n "${namespace}" get "${kind}" "${name}" -o yaml 2>/dev/null | redact >&2 || true
+  die "${kind} ${name} never reached: ${label}"
+}
+
+wait_for_task_condition() {
+  wait_for_task_condition_on task "$@"
 }
 
 [[ "${namespace}" == "orka-system" ]] || die "ORKA_NAMESPACE must be orka-system for the canonical make deploy path"
@@ -385,7 +396,10 @@ status="$(request POST "${api}/connections/${connection}/complete" "${workdir}/c
 jq -e '.ready == true and .mode == "readWrite" and .state == "Ready"' "${workdir}/complete.json" >/dev/null || die "connection is not Ready after completion"
 jq -e 'tostring | test("fx-access|fx-refresh") | not' "${workdir}/complete.json" >/dev/null || die "connection response leaked token material"
 wait_for_state '.codeExchanges == 1 and .tokensIssued == 1' "one code exchange" 5
-linked_at="$(date +%s)"
+
+for tool in itemsread itemswrite; do
+  wait_for_task_condition_on tool "${tool}" '.status.available == true' "Tool ${tool} Available under the private-endpoint allowance" 30
+done
 
 log "Use: a Task created by ${subject} reads through the linked account, then parks its write for approval"
 task="linked-$(date +%s)-${RANDOM}"
@@ -394,13 +408,16 @@ status="$(request POST "${api}/tasks" "${workdir}/task.json" "${auth[@]}" -H 'Co
 [[ "${status}" == 201 ]] || { cat "${workdir}/task.json" | redact >&2; die "task creation returned HTTP ${status}"; }
 jq -e --arg issuer "${issuer}" --arg subject "${subject}" '.spec.requestedBy.issuer == $issuer and .spec.requestedBy.subject == $subject' "${workdir}/task.json" >/dev/null
 wait_for_state '.reads == 1 and .writes == 0 and .distinctBearers == 1' "the first read with the linked token" 150
+first_read_at="$(date +%s)"
 # The native autonomous path parks by writing the pending approval into status.message; it does not set a condition.
 wait_for_task_condition "${task}" '.status.phase == "Running" and (.status.message | startswith("waiting for approval ")) and (.status.message | test(" for itemswrite "))' "parked on the itemswrite approval" 90
 kubectl -n "${namespace}" get task "${task}" -o json | jq -e '.status.connectionBindings[0].provider == "fixture" and .status.connectionBindings[0].uid != ""' >/dev/null \
   || die "the Task did not freeze the requester's Connection"
 
-log "Refresh: let the first access token expire before approving"
-elapsed="$(( $(date +%s) - linked_at ))"
+log "Refresh: let the access token the first read used expire before approving"
+# The first read proved it used the token consent issued (one bearer), so
+# waiting a full TTL past that read leaves that token expired for certain.
+elapsed="$(( $(date +%s) - first_read_at ))"
 if (( elapsed < access_ttl_seconds + 5 )); then sleep "$(( access_ttl_seconds + 5 - elapsed ))"; fi
 
 log "Approval on write: approve the parked itemswrite"

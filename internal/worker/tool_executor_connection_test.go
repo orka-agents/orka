@@ -159,3 +159,63 @@ func TestToolExecutorConnectionOutboundAccessValidatesArgumentsBeforeInjecting(t
 		t.Fatalf("provider received %d requests, want one", requests)
 	}
 }
+
+func TestToolExecutorPrivateConnectionEndpointsKeepTransportHardening(t *testing.T) {
+	var authorization string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authorization = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+
+	resolver := &fakeOutboundAccessResolver{resolution: outboundaccess.Resolution{
+		Adapter:          outboundaccess.AdapterConnection,
+		CredentialHeader: "Authorization",
+		CredentialValue:  "Bearer gho_person_token",
+		SensitiveValues:  []string{"gho_person_token"},
+		ConnectionUID:    "conn-uid",
+	}}
+	// A Pod-wide proxy setting must not carry a linked-account bearer
+	// anywhere: the hardened transport ignores it even under the allowance.
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:9")
+	t.Setenv("https_proxy", "http://127.0.0.1:9")
+	base := server.Client()
+	transport := base.Transport.(*http.Transport).Clone()
+	transport.Proxy = http.ProxyFromEnvironment
+	client := &http.Client{Transport: transport}
+
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "items", Namespace: "tenant"},
+		Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+			URL:                     server.URL,
+			OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "as-me"},
+		}},
+	}
+	newExecutor := func() *ToolExecutor {
+		executor := &ToolExecutor{client: client, namespace: "tenant", outboundResolver: resolver}
+		executor.SetRequester(&corev1alpha1.RequestedBy{Issuer: "https://issuer.example.test", Subject: "alice"})
+		executor.SetFrozenConnections(map[string]outboundaccess.FrozenConnection{"as-me": {UID: "conn-uid", Generation: 3}})
+		return executor
+	}
+
+	// Without the allowance the loopback server is refused outright.
+	SetAllowPrivateConnectionEndpoints(false)
+	if _, err := newExecutor().Execute(context.Background(), tool, json.RawMessage(`{}`)); err == nil {
+		t.Fatal("a private endpoint must be refused without the allowance")
+	}
+	if authorization != "" {
+		t.Fatalf("the bearer reached the endpoint without the allowance: %q", authorization)
+	}
+
+	SetAllowPrivateConnectionEndpoints(true)
+	t.Cleanup(func() { SetAllowPrivateConnectionEndpoints(false) })
+	if _, err := newExecutor().Execute(context.Background(), tool, json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("under the allowance the private endpoint is dialed directly, never through the proxy: %v", err)
+	}
+	if authorization != "Bearer gho_person_token" {
+		t.Fatalf("Authorization = %q", authorization)
+	}
+	if transport.Proxy == nil {
+		t.Fatal("the executor must clone the transport rather than strip the caller's proxy")
+	}
+}

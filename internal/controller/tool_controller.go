@@ -74,6 +74,11 @@ type ToolReconciler struct {
 	// SkipSSRFValidation disables SSRF protection for testing. Do NOT set to true in production.
 	SkipSSRFValidation bool
 
+	// AllowPrivateConnectorEndpoints mirrors --connectors-allow-private-endpoints:
+	// a Tool behind an outbound access policy may target a private or
+	// cluster-local endpoint. Local fixtures only.
+	AllowPrivateConnectorEndpoints bool
+
 	// SubstrateEnabled enables durable MCP tool actors.
 	SubstrateEnabled            bool
 	SubstrateConfig             SubstrateConfig
@@ -156,10 +161,17 @@ func (r *ToolReconciler) validateTool(ctx context.Context, tool *corev1alpha1.To
 	if tool.Spec.HTTP == nil {
 		return fmt.Errorf("http is required unless mcp.substrateActor is set")
 	}
-	return r.validateToolHTTPURL(tool.Spec.HTTP.URL)
+	// Only a Tool behind an outbound access policy can be called with a
+	// linked account, so only such a Tool may point at a private endpoint
+	// under the fixture allowance.
+	allowPrivate := r.AllowPrivateConnectorEndpoints && tool.Spec.HTTP.OutboundAccessPolicyRef != nil
+	return r.validateToolHTTPURL(tool.Spec.HTTP.URL, allowPrivate)
 }
 
-func (r *ToolReconciler) validateToolHTTPURL(rawURL string) error {
+// validateToolHTTPURL checks the Tool's endpoint. With allowPrivate the
+// private, loopback, and link-local address rules are skipped, for local
+// fixtures only; the fixed metadata and API server hosts stay blocked.
+func (r *ToolReconciler) validateToolHTTPURL(rawURL string, allowPrivate bool) error {
 	// Validate URL
 	if rawURL == "" {
 		return fmt.Errorf("http.url is required")
@@ -192,6 +204,9 @@ func (r *ToolReconciler) validateToolHTTPURL(rawURL string) error {
 		}
 		if slices.Contains(blockedHosts, host) {
 			return fmt.Errorf("tool URL host %q is not allowed", host)
+		}
+		if allowPrivate {
+			return nil
 		}
 		if ip := net.ParseIP(host); ip != nil {
 			if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {

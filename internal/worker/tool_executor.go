@@ -430,10 +430,16 @@ func (e *ToolExecutor) executePreparedToolRequest(ctx context.Context, prepared 
 		return "", err
 	}
 
-	if prepared.direct && !e.skipDirectPublicValidation && (!prepared.connection || !allowPrivateConnectionEndpoints.Load()) {
+	if prepared.direct && !e.skipDirectPublicValidation {
 		dialContext := tokenexchange.PublicEndpointDialContext
-		if prepared.trustedActorRoute {
+		switch {
+		case prepared.trustedActorRoute:
 			dialContext = exactEndpointDialContext(prepared.request.URL)
+		case prepared.connection && allowPrivateConnectionEndpoints.Load():
+			// The fixture allowance relaxes only where a linked-account
+			// request may go; the transport keeps its hardening (no proxy,
+			// verified TLS 1.2 or newer, no custom TLS dial).
+			dialContext = privateConnectionEndpointDialContext
 		}
 		httpClient, err = directCredentialHTTPClient(httpClient, dialContext)
 		if err != nil {
@@ -456,6 +462,10 @@ func (e *ToolExecutor) executePreparedToolRequest(ctx context.Context, prepared 
 
 	return string(respBody), nil
 }
+
+// privateConnectionEndpointDialContext dials any address, for the fixture-only
+// private-endpoint allowance on linked-account requests.
+var privateConnectionEndpointDialContext = (&net.Dialer{Timeout: 10 * time.Second}).DialContext
 
 func directCredentialHTTPClient(
 	base *http.Client,
