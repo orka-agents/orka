@@ -56,6 +56,7 @@ kustomization="${repo_root}/config/manager/kustomization.yaml"
 backup="${workdir}/kustomization.yaml"
 api_pf_pid=""; fixture_pf_pid=""; fixture_tls_pf_pid=""
 created_kind_cluster="0"
+created_kind_registry="0"
 pf_log="${workdir}/port-forward.log"
 
 cleanup() {
@@ -73,8 +74,8 @@ cleanup() {
       [[ -f "${pf_log}" ]] && { printf '%s\n' '--- port-forward log ---'; cat "${pf_log}"; }
     } | redact >&2
   fi
-  orka_kind_registry_stop
-  # Only a cluster this run created is torn down.
+  # Only a registry and a cluster this run created are torn down.
+  if [[ "${created_kind_registry}" == "1" ]]; then orka_kind_registry_stop; fi
   if [[ "${created_kind_cluster}" == "1" ]]; then kind delete cluster --name "${cluster}" >/dev/null 2>&1 || true; fi
   rm -rf "${workdir}"
   exit "${status}"
@@ -157,7 +158,14 @@ kubectl config use-context "kind-${cluster}" >/dev/null
 log "Installing current Orka CRDs"
 make install
 kubectl create namespace vekil-system --dry-run=client -o yaml | kubectl apply -f -
+# The registry helper reuses a running container of this name; one that
+# exists already belongs to another invocation and is neither reused nor
+# removed here.
+if [[ -n "$(docker container ls --all --filter "name=^/$(orka_kind_registry_name "${cluster}")$" --format '{{.ID}}')" ]]; then
+  die "kind registry $(orka_kind_registry_name "${cluster}") already exists; remove it or set KIND_CLUSTER to an unused name"
+fi
 orka_kind_registry_start "${cluster}"
+created_kind_registry="1"
 
 log "Building and loading images"
 make docker-build IMG="${manager_image}"
