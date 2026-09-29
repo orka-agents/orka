@@ -4,8 +4,8 @@
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.10.1">
 <title data-rh="true">Shared OpenAI and Anthropic endpoints | Orka</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orka-agents.github.io/orka/docs/operations/shared-compatibility-api"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Shared OpenAI and Anthropic endpoints | Orka"><meta data-rh="true" name="description" content="The optional compatibility router lets teams use the same OpenAI or Anthropic"><meta data-rh="true" property="og:description" content="The optional compatibility router lets teams use the same OpenAI or Anthropic"><link data-rh="true" rel="canonical" href="https://orka-agents.github.io/orka/docs/operations/shared-compatibility-api"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/operations/shared-compatibility-api" hreflang="en"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/operations/shared-compatibility-api" hreflang="x-default"><link rel="stylesheet" href="/orka/assets/css/styles.c6d2e437.css">
-<script src="/orka/assets/js/runtime~main.aae25a12.js" defer="defer"></script>
-<script src="/orka/assets/js/main.b61766d3.js" defer="defer"></script>
+<script src="/orka/assets/js/runtime~main.434fab1a.js" defer="defer"></script>
+<script src="/orka/assets/js/main.53850170.js" defer="defer"></script>
 </head>
 <body>
 <svg style="display: none;"><defs>
@@ -16,10 +16,11 @@ base URL. The caller&#x27;s validated Kubernetes ServiceAccount token selects th
 namespace. The router forwards the request to the Orka installation serving that
 namespace, where the API checks the caller&#x27;s permissions and executes tools.</p>
 <p>The router serves exactly these routes:</p>
-<table><thead><tr><th>API</th><th>Messages</th><th>Model discovery</th></tr></thead><tbody><tr><td>OpenAI</td><td><code>POST /openai/v1/chat/completions</code></td><td><code>GET /openai/v1/models</code></td></tr><tr><td>Anthropic</td><td><code>POST /anthropic/v1/messages</code></td><td><code>GET /anthropic/v1/models</code></td></tr></tbody></table>
-<p>Ordinary JSON and SSE responses retain the installation&#x27;s format. Both message
-routes take conversation history in <code>messages</code>. The router has no conversation
-store and does not call model Providers itself.</p>
+<table><thead><tr><th>API</th><th>Requests</th><th>Model discovery</th></tr></thead><tbody><tr><td>OpenAI</td><td><code>POST /openai/v1/chat/completions</code>, <code>POST /openai/v1/responses</code></td><td><code>GET /openai/v1/models</code></td></tr><tr><td>Anthropic</td><td><code>POST /anthropic/v1/messages</code></td><td><code>GET /anthropic/v1/models</code></td></tr></tbody></table>
+<p>Ordinary JSON and SSE responses retain the installation&#x27;s format. Chat Completions
+and Anthropic Messages take history in <code>messages</code>. Responses takes history in
+<code>input</code> and requires <code>store:false</code>; see the <a class="" href="/orka/docs/openai-compat">supported Responses subset</a>.
+The router has no conversation store and does not call model Providers itself.</p>
 <div class="theme-admonition theme-admonition-tip admonition_xJq3 alert alert--success"><div class="admonitionHeading_Gvgb"><span class="admonitionIcon_Rf37"><svg viewBox="0 0 12 16"><path fill-rule="evenodd" d="M6.5 0C3.48 0 1 2.19 1 5c0 .92.55 2.25 1 3 1.34 2.25 1.78 2.78 2 4v1h5v-1c.22-1.22.66-1.75 2-4 .45-.75 1-2.08 1-3 0-2.81-2.48-5-5.5-5zm3.64 7.48c-.25.44-.47.8-.67 1.11-.86 1.41-1.25 2.06-1.45 3.23-.02.05-.02.11-.02.17H5c0-.06 0-.13-.02-.17-.2-1.17-.59-1.83-1.45-3.23-.2-.31-.42-.67-.67-1.11C2.44 6.78 2 5.65 2 5c0-2.2 2.02-4 4.5-4 1.22 0 2.36.42 3.22 1.19C10.55 2.94 11 3.94 11 5c0 .66-.44 1.78-.86 2.48zM4 14h5c-.23 1.14-1.3 2-2.5 2s-2.27-.86-2.5-2z"></path></svg></span>Video demo</div><div class="admonitionContent_BuS1"><p>Watch <a href="https://www.youtube.com/watch?v=-x0tKk9epWU" target="_blank" rel="noopener noreferrer" class="">Two teams, one AI endpoint</a>.</p></div></div>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="prepare-the-installations">Prepare the installations<a href="#prepare-the-installations" class="hash-link" aria-label="Direct link to Prepare the installations" title="Direct link to Prepare the installations" translate="no">​</a></h2>
 <p>Prepare a separate Orka installation for each enabled namespace, following
@@ -58,8 +59,10 @@ disable response buffering for SSE. The router preserves client cancellation
 and imposes no additional whole-response timeout. Connection and TLS handshake
 attempts time out after five seconds. The installation retains its chat and
 tool deadlines.</p>
-<p>The router bounds request uploads with <code>--read-timeout</code> (default <code>30s</code>) but
-leaves response writes unrestricted, so this limit does not cut off long chats.
+<p>The router bounds request uploads with <code>--read-timeout</code> (default <code>30s</code>). Responses
+has a separate 30-second limit on each downstream write or flush, so a stalled
+reader cannot keep a socket blocked after the installation finishes. This does
+not limit time waiting for model inference or affect other compatibility routes.
 On shutdown, <code>--shutdown-timeout</code> allows active requests to finish (default
 <code>30m</code>, matching the installation&#x27;s default chat limit). The example Deployment
 sets <code>terminationGracePeriodSeconds: 1810</code>. If an installation permits longer
@@ -67,7 +70,7 @@ chats, increase the router&#x27;s shutdown timeout and keep the Pod grace period
 least ten seconds longer. Keep the Deployment progress deadline above that
 window too (the example allows <code>2100</code> seconds). New connections stop being
 accepted during shutdown.</p>
-<p>Browser clients can make unauthenticated CORS preflight requests for the four
+<p>Browser clients can make unauthenticated CORS preflight requests for the
 compatibility routes. Actual API requests still require authentication. Set
 <code>ORKA_CORS_ALLOWED_ORIGINS</code> on the router to a comma-separated list of exact UI
 origins, such as <code>https://chat.example.com</code>; the default is <code>*</code>, as on the
