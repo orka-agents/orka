@@ -2034,8 +2034,16 @@ func contextTokenAllowsConnectorRead(ui *UserInfo, cfg ContextTokenAuthorization
 }
 
 // connectorReadToolAuthorizer is the execution-time twin of the exposure
-// filter for list_connections.
-func connectorReadToolAuthorizer(ui *UserInfo, cfg ContextTokenAuthorizationConfig) func() *toolspkg.ChatToolError {
+// filter for list_connections: connectors disabled on the controller, or a
+// delegated token without the connector-read scope, refuse the call.
+func connectorReadToolAuthorizer(ui *UserInfo, cfg ContextTokenAuthorizationConfig, connectorsEnabled bool) func() *toolspkg.ChatToolError {
+	if !connectorsEnabled {
+		return func() *toolspkg.ChatToolError {
+			return &toolspkg.ChatToolError{
+				Type: "unauthorized_tool", Message: "connectors are disabled on this controller", Suggestion: "Ask the operator to enable --connectors-enabled",
+			}
+		}
+	}
 	if contextTokenAllowsConnectorRead(ui, cfg) {
 		return nil
 	}

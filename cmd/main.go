@@ -1337,6 +1337,12 @@ func main() {
 			os.Exit(1)
 		}
 		if connectorsEnabled {
+			// list_connections describes linked accounts, which do not
+			// exist without connectors; it is not registered otherwise.
+			if err := tools.RegisterBrokeredConnectionTools(acpMCPRegistry); err != nil {
+				setupLog.Error(err, "unable to register ACP MCP broker connection tools")
+				os.Exit(1)
+			}
 			// GitHub built-ins reach ACP runtimes only through the
 			// requester's linked account; without connectors there is no
 			// such account and the tools are not offered at all.
@@ -2301,6 +2307,7 @@ func main() {
 		},
 		Chat: api.ChatConfig{
 			LinkedAccounts:         chatLinkedAccounts,
+			ConnectorsEnabled:      connectorsEnabled,
 			Enabled:                chatEnabled,
 			Provider:               chatProvider,
 			Model:                  chatModel,
@@ -2323,6 +2330,7 @@ func main() {
 			KubeClient:              kubeClient, Registry: acpMCPRegistry,
 			OutboundAccess: outboundAccessResolver, TransactionExchange: brokeredTransactionExchange,
 			Connections:                      outboundAccessResolver.Connections,
+			ConnectorReadScopes:              append([]string(nil), contextTokenAuthzConfig.ConnectorReadScopes...),
 			EnforceTransactionCredentialAuth: contextTokenAuthzConfig.Mode == api.ContextTokenAuthorizationModeEnforce,
 			TransactionCredentialReadScopes:  contextTokenAuthzConfig.SecretCredentialReadScopes(),
 			ContextFactory: func(ctx context.Context, request harnessv2.MCPBrokerCallRequest) (*tools.ToolContext, error) {

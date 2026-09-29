@@ -68,6 +68,47 @@ func TestConnectStartsConsentOpensBrowserAndWaits(t *testing.T) {
 	}
 }
 
+func TestConnectWaitsForTheNewConsentWhenAlreadyLinked(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	polls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/connections":
+			// Re-consenting an already Ready link: the API starts a new
+			// consent but the current view is still the old, Ready grant.
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"connection":   map[string]any{"name": "github-abc", "provider": "github", "mode": "readOnly", "state": "Ready", "ready": true, "linkedAt": "2026-09-01T00:00:00Z"},
+				"authorizeURL": "https://github.com/login/oauth/authorize?state=signed",
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/connections/github-abc":
+			polls++
+			linkedAt := "2026-09-01T00:00:00Z"
+			if polls >= 3 {
+				linkedAt = "2026-09-29T00:00:00Z"
+			}
+			json.NewEncoder(w).Encode(map[string]any{"name": "github-abc", "provider": "github", "mode": "readOnly", "state": "Ready", "ready": true, "linkedAt": linkedAt}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	origBrowser := openBrowserFunc
+	openBrowserFunc = func(string) error { return nil }
+	t.Cleanup(func() { openBrowserFunc = origBrowser })
+
+	root := newRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetArgs([]string{"connect", "github", "--server", srv.URL, "--token", "person-token", "--timeout", "5s"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+	if polls < 3 || !strings.Contains(out.String(), "Linked github (readOnly)") {
+		t.Fatalf("the stale Ready view must not end the wait: polls = %d output = %q", polls, out.String())
+	}
+}
+
 func TestConnectTimeoutBoundsAStalledPoll(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	release := make(chan struct{})

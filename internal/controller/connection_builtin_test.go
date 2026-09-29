@@ -635,6 +635,47 @@ func TestRegistryACPMCPToolExecutorHandsRequesterToListConnections(t *testing.T)
 	if listTool.captured == nil || listTool.captured.Requester == nil || listTool.captured.Requester.Subject != "alice" || listTool.captured.LinkedAccounts != nil {
 		t.Fatalf("captured = %+v", listTool.captured)
 	}
+	if listTool.captured.AuthorizeConnectorRead != nil {
+		t.Fatal("a Task without a transaction is not narrowed by the connector-read scope")
+	}
+	// A Task created by a delegated context token carries that token's
+	// scopes; under enforcement, missing the connector-read scope refuses
+	// the listing while carrying it does not.
+	executor.EnforceTransactionCredentialAuth = true
+	executor.ConnectorReadScopes = []string{"orka:connectors:read"}
+	narrowed := task.DeepCopy()
+	narrowed.Spec.Transaction = &corev1alpha1.TaskTransaction{ID: "txn-1", Scopes: []string{"orka:tools:use"}}
+	executor.Reader = f.reader(narrowed)
+	listTool.captured = nil
+	if _, err := executor.ExecuteACPMCPTool(ctx, request, descriptor); err != nil {
+		t.Fatal(err)
+	}
+	if listTool.captured == nil || listTool.captured.AuthorizeConnectorRead == nil {
+		t.Fatalf("narrowed captured = %+v", listTool.captured)
+	}
+	if denied := listTool.captured.AuthorizeConnectorRead(); denied == nil || !strings.Contains(denied.Message, "orka:connectors:read") {
+		t.Fatalf("narrowed denial = %+v", denied)
+	}
+	widened := task.DeepCopy()
+	widened.Spec.Transaction = &corev1alpha1.TaskTransaction{ID: "txn-2", Scopes: []string{"orka:tools:use", "orka:connectors:read"}}
+	executor.Reader = f.reader(widened)
+	listTool.captured = nil
+	if _, err := executor.ExecuteACPMCPTool(ctx, request, descriptor); err != nil {
+		t.Fatal(err)
+	}
+	if listTool.captured == nil || listTool.captured.AuthorizeConnectorRead != nil {
+		t.Fatalf("widened captured = %+v", listTool.captured)
+	}
+	// Audit mode records but never narrows.
+	executor.EnforceTransactionCredentialAuth = false
+	executor.Reader = f.reader(narrowed)
+	listTool.captured = nil
+	if _, err := executor.ExecuteACPMCPTool(ctx, request, descriptor); err != nil {
+		t.Fatal(err)
+	}
+	if listTool.captured == nil || listTool.captured.AuthorizeConnectorRead != nil {
+		t.Fatalf("audit captured = %+v", listTool.captured)
+	}
 	// An unverified requester (no sealed stamp) is nobody.
 	unstamped := task.DeepCopy()
 	unstamped.Annotations = nil

@@ -194,9 +194,9 @@ function ProviderCard({ provider, connection, busy, onConnect, onChangeMode, onR
           <div className="flex flex-wrap gap-2">
             {connection.mode === 'readWrite' ? (
               <Button size="sm" variant="outline" disabled={busy} onClick={() => onChangeMode(connection.name, 'readOnly')}>Limit to reads</Button>
-            ) : (
+            ) : writeTools.length > 0 ? (
               <Button size="sm" variant="outline" disabled={busy} onClick={() => onChangeMode(connection.name, 'readWrite')}>Allow writes</Button>
-            )}
+            ) : null}
             {!connection.ready && (
               <Button size="sm" variant="outline" disabled={busy} onClick={() => onReauthorize(connection.name)}>Reconnect</Button>
             )}
