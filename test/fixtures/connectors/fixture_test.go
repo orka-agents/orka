@@ -82,7 +82,7 @@ func link(t *testing.T, now *time.Time) linkedTokens {
 	}
 	resp, err := client.Get(authorize)
 	if err != nil || resp.StatusCode != http.StatusFound {
-		t.Fatalf("authorize = %v %v", resp, err)
+		t.Fatalf("authorize status = %d err = %v", statusOf(resp), err)
 	}
 	location, _ := url.Parse(resp.Header.Get("Location"))
 	if location.Query().Get("state") != "s1" || location.Query().Get("code") == "" {
@@ -133,7 +133,7 @@ func TestFixtureOAuthLifecycle(t *testing.T) {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.SetBasicAuth("client", "secret")
 	if resp, err := client.Do(req); err != nil || resp.StatusCode != http.StatusOK {
-		t.Fatalf("revoke = %v %v", resp, err)
+		t.Fatalf("revoke status = %d err = %v", statusOf(resp), err)
 	}
 	if call(http.MethodGet, rotated, "") != http.StatusUnauthorized {
 		t.Fatal("a revoked pair must be rejected")
@@ -156,7 +156,7 @@ func TestFixtureOIDCAndModelScript(t *testing.T) {
 	_, plain, _ := newTestFixture(t, &now)
 	resp, err := http.Post(plain.URL+"/oidc/mint", "application/json", strings.NewReader(`{"subject":"alice","email":"alice@example.test"}`))
 	if err != nil || resp.StatusCode != http.StatusOK {
-		t.Fatalf("mint = %v %v", resp, err)
+		t.Fatalf("mint status = %d err = %v", statusOf(resp), err)
 	}
 	var minted struct {
 		Token string `json:"token"`
@@ -276,4 +276,13 @@ func bodyKeys(body map[string]any) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// statusOf reports only a response's status: a redirect's Location would
+// carry a live authorization code and state into test output.
+func statusOf(resp *http.Response) int {
+	if resp == nil {
+		return 0
+	}
+	return resp.StatusCode
 }

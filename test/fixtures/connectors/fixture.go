@@ -203,6 +203,12 @@ func (f *Fixture) authorize(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid authorize request", http.StatusBadRequest)
 		return
 	}
+	// PKCE S256 is the advertised flow; an authorization without it must
+	// fail the lane rather than silently issue a code.
+	if strings.TrimSpace(q.Get("code_challenge")) == "" || q.Get("code_challenge_method") != "S256" {
+		http.Error(w, "code_challenge with code_challenge_method=S256 is required", http.StatusBadRequest)
+		return
+	}
 	redirect, err := url.Parse(q.Get("redirect_uri"))
 	if err != nil {
 		http.Error(w, "invalid redirect_uri", http.StatusBadRequest)

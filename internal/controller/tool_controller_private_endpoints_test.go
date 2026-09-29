@@ -23,7 +23,10 @@ func TestValidateToolHTTPURLPrivateConnectorEndpoints(t *testing.T) {
 		t.Fatalf("loopback under the allowance: %v", err)
 	}
 	// The fixed metadata and API server hosts stay blocked under the allowance.
-	for _, url := range []string{"https://169.254.169.254/latest", "https://kubernetes.default.svc/api", "https://metadata.google.internal/"} {
+	for _, url := range []string{
+		"https://169.254.169.254/latest", "https://kubernetes.default.svc/api", "https://metadata.google.internal/",
+		"https://KUBERNETES.DEFAULT.SVC/api", "https://kubernetes.default.svc./api", "https://Metadata.Google.Internal./",
+	} {
 		if err := r.validateToolHTTPURL(url, true); err == nil || !strings.Contains(err.Error(), "not allowed") {
 			t.Fatalf("%s under the allowance: %v", url, err)
 		}

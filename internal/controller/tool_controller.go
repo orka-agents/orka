@@ -161,11 +161,32 @@ func (r *ToolReconciler) validateTool(ctx context.Context, tool *corev1alpha1.To
 	if tool.Spec.HTTP == nil {
 		return fmt.Errorf("http is required unless mcp.substrateActor is set")
 	}
-	// Only a Tool behind an outbound access policy can be called with a
-	// linked account, so only such a Tool may point at a private endpoint
-	// under the fixture allowance.
-	allowPrivate := r.AllowPrivateConnectorEndpoints && tool.Spec.HTTP.OutboundAccessPolicyRef != nil
+	// Only a Tool behind a connection-mode outbound access policy is
+	// called with a linked account, so only such a Tool may point at a
+	// private endpoint under the fixture allowance.
+	allowPrivate := false
+	if r.AllowPrivateConnectorEndpoints {
+		connectionMode, err := r.toolPolicyIsConnectionMode(ctx, tool)
+		if err != nil {
+			return err
+		}
+		allowPrivate = connectionMode
+	}
 	return r.validateToolHTTPURL(tool.Spec.HTTP.URL, allowPrivate)
+}
+
+// toolPolicyIsConnectionMode reports whether the Tool's outbound access
+// policy injects a linked-account credential.
+func (r *ToolReconciler) toolPolicyIsConnectionMode(ctx context.Context, tool *corev1alpha1.Tool) (bool, error) {
+	ref := tool.Spec.HTTP.OutboundAccessPolicyRef
+	if ref == nil {
+		return false, nil
+	}
+	policy := &corev1alpha1.OutboundAccessPolicy{}
+	if err := r.Get(ctx, client.ObjectKey{Name: ref.Name, Namespace: tool.Namespace}, policy); err != nil {
+		return false, fmt.Errorf("failed to get outbound access policy %q: %w", ref.Name, err)
+	}
+	return policy.Spec.Connection != nil, nil
 }
 
 // validateToolHTTPURL checks the Tool's endpoint. With allowPrivate the
@@ -195,7 +216,9 @@ func (r *ToolReconciler) validateToolHTTPURL(rawURL string, allowPrivate bool) e
 
 	// Block private/internal network targets (unless in test mode)
 	if !r.SkipSSRFValidation {
-		host := parsedURL.Hostname()
+		// DNS names are case-insensitive and a trailing dot names the
+		// same host, so the fixed block list compares canonical forms.
+		host := strings.TrimSuffix(strings.ToLower(parsedURL.Hostname()), ".")
 		blockedHosts := []string{
 			"169.254.169.254",
 			"metadata.google.internal",
