@@ -94,9 +94,12 @@ func (l linkedBuiltinAccounts) BuiltinToolCredential(ctx context.Context, toolNa
 // catalog built-ins the API executes for them right now (chat and the
 // compatibility proxies), where there is no dispatch and so no snapshot:
 // the API verified the identity, and the Connection is read live and
-// bound as it is at that moment. A built-in with no Ready link keeps the
-// tool's own credential path, as chat always had; a link that cannot be
-// used fails the call.
+// bound as it is at that moment. Only a built-in the person has never
+// linked keeps the tool's own credential path, as chat always had. An
+// existing link that cannot be used now fails the call rather than
+// running on other credentials, and so does a write-class built-in:
+// these surfaces execute tools directly, with no approval gate, so a
+// linked write is available only through a dispatched Task.
 type liveLinkedAccounts struct {
 	reader    client.Reader
 	registry  *tools.Registry
@@ -118,7 +121,8 @@ func LiveLinkedAccounts(reader client.Reader, registry *tools.Registry, source o
 
 // BuiltinToolCredential implements tools.LinkedAccountCredentials.
 func (l liveLinkedAccounts) BuiltinToolCredential(ctx context.Context, toolName string) (tools.LinkedAccountCredential, bool, error) {
-	if _, linked := connectors.BuiltinConnectorToolClass(toolName); !linked {
+	class, linked := connectors.BuiltinConnectorToolClass(toolName)
+	if !linked {
 		return tools.LinkedAccountCredential{}, false, nil
 	}
 	infos, err := classifyConnectorTools(ctx, l.reader, l.registry, l.namespace, []string{toolName}, connectorScope{builtins: true})
@@ -137,8 +141,15 @@ func (l liveLinkedAccounts) BuiltinToolCredential(ctx context.Context, toolName 
 		}
 		return tools.LinkedAccountCredential{}, false, fmt.Errorf("load connection %q: %w", name, err)
 	}
+	if class == corev1alpha1.ConnectorToolClassWrite {
+		return tools.LinkedAccountCredential{}, false, fmt.Errorf(
+			"%s writes through your linked %s account only from a task, where the write waits for approval; it is not available here",
+			toolName, info.Provider)
+	}
 	if !connectionReadyFor(connection, l.requester, info.Provider) {
-		return tools.LinkedAccountCredential{}, false, nil
+		return tools.LinkedAccountCredential{}, false, fmt.Errorf(
+			"your linked %s account (%s) is not usable right now: relink it under Settings > Connectors before using %s",
+			info.Provider, liveConnectionState(connection), toolName)
 	}
 	bound := linkedBuiltinAccounts{
 		source: l.source, namespace: l.namespace, requester: l.requester, required: true,
@@ -147,4 +158,18 @@ func (l liveLinkedAccounts) BuiltinToolCredential(ctx context.Context, toolName 
 		}},
 	}
 	return bound.BuiltinToolCredential(ctx, toolName)
+}
+
+// liveConnectionState words why an existing Connection is not usable.
+func liveConnectionState(connection *corev1alpha1.Connection) string {
+	switch {
+	case connection == nil:
+		return "missing"
+	case !connection.DeletionTimestamp.IsZero():
+		return "being deleted"
+	case strings.TrimSpace(connection.Status.State) != "":
+		return connection.Status.State
+	default:
+		return "not ready"
+	}
 }

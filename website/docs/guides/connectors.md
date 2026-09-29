@@ -257,12 +257,18 @@ result.
 
 ### Chat and the compatibility proxies
 
-The GitHub tools the chat and compatibility endpoints offer (for example
-`create_pull_request` and `check_pull_request_ci` in coordinator mode) run
-as the signed-in person when they hold a Ready link to a provider that
-declares the tool: the Connection is read live at call time, since there is
-no dispatch to freeze it. Without a link those tools keep the Task-Secret
-path they always had; a link that exists but cannot be used fails the call.
+The GitHub read tools the chat and compatibility endpoints offer (for
+example `check_pull_request_ci` in coordinator mode) run as the signed-in
+person when they hold a Ready link to a provider that declares the tool:
+the Connection is read live at call time, since there is no dispatch to
+freeze it. These surfaces execute tools directly, with no approval gate,
+so a linked write tool such as `create_pull_request` is refused there once
+the person has a link; linked writes run only from a Task, where the write
+waits for approval. A linked call may not name another Task in `task_name`
+either, because there is no current Task whose repository scope could bound
+it. Without a link those tools keep the Task-Secret path they always had; a
+link that exists but cannot be used (pending, expired, revoked, or being
+deleted) fails the call rather than falling back.
 
 ### What runs where
 

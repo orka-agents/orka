@@ -245,7 +245,17 @@ func githubRepoAllowed(owner, repo string, scopes []githubRepoScope) bool {
 func linkedTaskScopeAllowed(ctx context.Context, k8sClient client.Client, taskName string) error {
 	tc := GetToolContext(ctx)
 	taskName = strings.TrimSpace(taskName)
-	if tc == nil || strings.TrimSpace(tc.TaskID) == "" || taskName == "" || taskName == strings.TrimSpace(tc.TaskID) {
+	if taskName == "" {
+		return nil
+	}
+	// Outside a Task (chat and the compatibility proxies) there is no
+	// current Task whose scope a named Task could be checked against, so a
+	// task_name would let the model point the person's token at any Task's
+	// repository.
+	if tc == nil || strings.TrimSpace(tc.TaskID) == "" {
+		return fmt.Errorf("task_name %q is not accepted when acting through a linked account outside a task", taskName)
+	}
+	if taskName == strings.TrimSpace(tc.TaskID) {
 		return nil
 	}
 	if strings.TrimSpace(tc.TaskUID) == "" || k8sClient == nil {
