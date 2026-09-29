@@ -153,12 +153,58 @@ type ToolContext struct {
 	// built-in tools the controller executes on their behalf. Only the
 	// controller sets it; worker Pods never hold one and keep their own
 	// credential path.
-	LinkedAccounts           LinkedAccountCredentials
-	IncrementTasks           func()
+	LinkedAccounts LinkedAccountCredentials
+	// Requester is the verified person this call acts for: the signed-in
+	// caller for chat, the Task's verified requester for the broker. Tools
+	// that show or use linked accounts read it; nothing else does.
+	Requester *corev1alpha1.RequestedBy
+	// AuthorizeConnectorRead gates list_connections for callers whose
+	// delegated token may not read the person's linked accounts.
+	AuthorizeConnectorRead func() *ChatToolError
+	IncrementTasks         func()
+	// CreatedTasks records the Tasks this turn's tools created: the only
+	// Tasks a linked account may be scoped by outside a Task. The API
+	// owns one per turn and shares it across the turn's tool calls; a
+	// context without one never accepts a task_name outside a Task.
+	CreatedTasks             *CreatedTasks
 	ApprovalEmitter          func(context.Context, approvals.ApprovalTarget) error
 	ApprovalTargetSpecDigest func(context.Context, string) (string, error)
 	ApprovalTargetArguments  func(context.Context, string, json.RawMessage) (json.RawMessage, error)
 	ApprovalTargetRefresh    func(context.Context, string, *corev1alpha1.Tool) error
+}
+
+// CreatedTasks is the set of Task names one turn's tools created. It is
+// held by pointer so the per-call copies of a ToolContext share it.
+type CreatedTasks struct {
+	mu    sync.Mutex
+	names map[string]struct{}
+}
+
+// NewCreatedTasks returns an empty set for one turn.
+func NewCreatedTasks() *CreatedTasks { return &CreatedTasks{names: map[string]struct{}{}} }
+
+// RecordCreatedTask notes a Task this turn's tools created, so a later
+// call may name it as the repository scope for the requester's linked
+// account (see CreatedTask). Without a set the record is dropped.
+func (tc *ToolContext) RecordCreatedTask(name string) {
+	name = strings.TrimSpace(name)
+	if tc == nil || tc.CreatedTasks == nil || name == "" {
+		return
+	}
+	tc.CreatedTasks.mu.Lock()
+	defer tc.CreatedTasks.mu.Unlock()
+	tc.CreatedTasks.names[name] = struct{}{}
+}
+
+// CreatedTask reports whether this turn's tools created the named Task.
+func (tc *ToolContext) CreatedTask(name string) bool {
+	if tc == nil || tc.CreatedTasks == nil {
+		return false
+	}
+	tc.CreatedTasks.mu.Lock()
+	defer tc.CreatedTasks.mu.Unlock()
+	_, ok := tc.CreatedTasks.names[strings.TrimSpace(name)]
+	return ok
 }
 
 type toolContextKey struct{}
@@ -663,6 +709,16 @@ func RegisterBrokeredCoordinationTools(r *Registry, k8sClient client.Client) err
 	return nil
 }
 
+// RegisterBrokeredConnectionTools registers the linked-account tools the
+// ACP broker offers only when connectors are enabled on the controller.
+func RegisterBrokeredConnectionTools(r *Registry) error {
+	if r == nil {
+		return fmt.Errorf("registry is required")
+	}
+	r.Register(&ListConnectionsTool{})
+	return nil
+}
+
 // RegisterBrokeredWebTools registers public web reads whose implementations
 // are safe to execute inside the controller MCP broker. Registration is
 // idempotent because Registry.Register replaces the implementation for a
@@ -689,6 +745,7 @@ func RegisterChatTools(r *Registry) {
 	r.Register(&ListAgentsTool{})
 	r.Register(&ListToolsTool{})
 	r.Register(&ListTasksTool{})
+	r.Register(&ListConnectionsTool{})
 	r.Register(&ChatCreateAgentTool{})
 	r.Register(&UpdateAgentTool{})
 	r.Register(&ChatDeleteAgentTool{})
@@ -746,7 +803,7 @@ func ChatToolNames() []string {
 		createPRMonitorToolName,
 		createContainerTaskToolName,
 		createAgentTaskToolName,
-		checkTaskProgressToolName, fetchTaskOutputToolName, waitForTaskToolName, cancelTaskToolName, listAgentsToolName, listToolsToolName, listTasksToolName, createAgentToolName, updateAgentToolName, "delete_agent",
+		checkTaskProgressToolName, fetchTaskOutputToolName, waitForTaskToolName, cancelTaskToolName, listAgentsToolName, listToolsToolName, listTasksToolName, ListConnectionsToolName, createAgentToolName, updateAgentToolName, "delete_agent",
 		createToolCRDToolName,
 		deleteToolToolName,
 		deleteSessionToolName,

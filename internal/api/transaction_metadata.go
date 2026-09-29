@@ -14,6 +14,7 @@ import (
 	"slices"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -137,6 +138,20 @@ var (
 func requesterStampSealer(ctx context.Context, c client.Client, task *corev1alpha1.Task) error {
 	sealRequesterStamp(ctx, c, task)
 	return nil
+}
+
+// requesterFromUserInfo returns the verified person behind ui as a
+// requester identity, or nil when the caller has no personal identity
+// (ServiceAccount tokens, anonymous callers).
+func requesterFromUserInfo(ui *UserInfo) *corev1alpha1.RequestedBy {
+	if ui == nil || (ui.AuthType != AuthTypeOIDC && ui.AuthType != AuthTypeContextToken) ||
+		strings.TrimSpace(ui.Issuer) == "" || strings.TrimSpace(ui.Subject) == "" {
+		return nil
+	}
+	return &corev1alpha1.RequestedBy{
+		Subject: ui.Subject, Issuer: ui.Issuer, Username: ui.Username, Email: ui.Email,
+		Groups: append([]string{}, ui.Groups...), Roles: append([]string{}, ui.Roles...),
+	}
 }
 
 func stampTaskRequesterFromUserInfo(task *corev1alpha1.Task, ui *UserInfo) {

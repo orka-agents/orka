@@ -359,6 +359,28 @@ orka login \
 
 Do not use default `login` output in logs or shared terminals where the generated browser URL might be captured.
 
+## Linked accounts
+
+`orka connect <provider>` links one of your own accounts (see the
+[Connectors guide](../guides/connectors.md)) as the signed-in person: it starts
+the consent flow, opens the provider's consent page, and waits until the link is
+ready. `orka connection` lists, shows, and disconnects your links and shows the
+providers an operator made available:
+
+```bash
+orka connect github --mode readWrite --token "$OIDC_TOKEN"
+orka connection list
+orka connection get github-<digest>
+orka connection delete github-<digest>
+orka connection providers
+orka connection complete github-<digest> --completion <value>   # when the dashboard is not signed in as you
+```
+
+These commands need a personal identity (OIDC or context token). A
+ServiceAccount token, such as the one `orka login` creates, has no accounts to
+link; the CLI explains the resulting `403`. `--no-open` prints the consent URL
+without opening a browser and `--no-wait` returns once consent has started.
+
 ## Resource management commands
 
 The CLI can create/read/list/update/delete the core resource types through the controller API:

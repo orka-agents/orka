@@ -219,6 +219,7 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 	sealTaskCreate(ctx, tc, task)
 
 	tc.IncrementTasks()
+	tc.RecordCreatedTask(task.Name)
 	return ChatToolSuccess(map[string]any{nameField: task.Name, namespaceField: task.Namespace, phaseField: taskPhasePendingString, messageField: taskCreatedMsg(schedule)})
 }
 

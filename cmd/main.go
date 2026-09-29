@@ -1332,6 +1332,12 @@ func main() {
 			os.Exit(1)
 		}
 		if connectorsEnabled {
+			// list_connections describes linked accounts, which do not
+			// exist without connectors; it is not registered otherwise.
+			if err := tools.RegisterBrokeredConnectionTools(acpMCPRegistry); err != nil {
+				setupLog.Error(err, "unable to register ACP MCP broker connection tools")
+				os.Exit(1)
+			}
 			// GitHub built-ins reach ACP runtimes only through the
 			// requester's linked account; without connectors there is no
 			// such account and the tools are not offered at all.
@@ -1462,6 +1468,9 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	// chatLinkedAccounts lets chat and the compatibility proxies run the
+	// GitHub built-ins as the signed-in person; nil until connectors exist.
+	var chatLinkedAccounts api.LinkedAccountsFactory
 	if connectorsEnabled {
 		// Connection-mode outbound access resolves a person's credential only
 		// here, in the controller. Worker Pods keep a nil source and fail closed.
@@ -1470,6 +1479,9 @@ func main() {
 			APIReader:   mgr.GetAPIReader(),
 			Credentials: sqliteStore,
 			OAuth:       connectorOAuthClient,
+		}
+		chatLinkedAccounts = func(namespace string, requester *corev1alpha1.RequestedBy) tools.LinkedAccountCredentials {
+			return controller.LiveLinkedAccounts(mgr.GetAPIReader(), tools.DefaultRegistry, outboundAccessResolver.Connections, namespace, requester)
 		}
 	}
 	setupLog.Info("agent execution binding stage enabled: executable agent Tasks freeze an immutable encrypted snapshot and write-once binding before dispatch")
@@ -2275,6 +2287,8 @@ func main() {
 			ControllerEpochs:                 publisherControllerEpochs,
 		},
 		Chat: api.ChatConfig{
+			LinkedAccounts:         chatLinkedAccounts,
+			ConnectorsEnabled:      connectorsEnabled,
 			Enabled:                chatEnabled,
 			Provider:               chatProvider,
 			Model:                  chatModel,
@@ -2297,6 +2311,7 @@ func main() {
 			KubeClient:              kubeClient, Registry: acpMCPRegistry,
 			OutboundAccess: outboundAccessResolver, TransactionExchange: brokeredTransactionExchange,
 			Connections:                      outboundAccessResolver.Connections,
+			ConnectorReadScopes:              append([]string(nil), contextTokenAuthzConfig.ConnectorReadScopes...),
 			EnforceTransactionCredentialAuth: contextTokenAuthzConfig.Mode == api.ContextTokenAuthorizationModeEnforce,
 			TransactionCredentialReadScopes:  contextTokenAuthzConfig.SecretCredentialReadScopes(),
 			ContextFactory: func(ctx context.Context, request harnessv2.MCPBrokerCallRequest) (*tools.ToolContext, error) {

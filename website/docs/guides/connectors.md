@@ -162,7 +162,36 @@ The full example, with an Agent that uses these tools, is in
 
 ## 3. Link an account
 
-Each person links once. Signed in as themselves:
+Each person links once, signed in as themselves (an OIDC or context-token
+identity; a ServiceAccount token has no accounts to link). Three ways:
+
+**Dashboard.** Open **Settings › Connectors** (`/settings/connectors`). Every
+provider shows its read and write tools and whether you are linked. *Connect
+(read only)* or *Connect with writes* sends you to the provider's consent
+page; the callback brings you back and the page finishes the link. From the
+same page you can allow or limit writes, reconnect a link that lost its
+consent, and disconnect.
+
+**CLI.**
+
+```bash
+orka connect github --mode readWrite       # opens the consent page, waits until Ready
+orka connection list                       # your linked accounts
+orka connection get github-<digest>
+orka connection delete github-<digest>     # disconnect and revoke
+orka connection providers                  # what an operator has made available
+```
+
+`orka connect` needs a personal token (`--token` with your OIDC or
+context token, or the token `orka config` stores); it explains a `403` from
+a ServiceAccount token. `--no-open` prints the consent URL instead of opening
+a browser, `--no-wait` returns as soon as consent has started. The provider
+sends the browser back to the dashboard, which finishes the link when it is
+signed in as you; when it is not, copy the value after `#completion=` from
+the address bar and run `orka connection complete <name> --completion
+<value>` so the CLI finishes it with your token instead.
+
+**API.**
 
 ```bash
 curl -sS -X POST "$ORKA_API_URL/api/v1/connections" \
@@ -213,6 +242,44 @@ the GitHub built-ins), the controller:
 
 The Task's workspace still scopes which repository the tools may touch; the
 link changes whose credential is used, not where.
+
+### Ask what is linked: `list_connections`
+
+Agents and chat have a read-only `list_connections` tool. It returns the
+signed-in person's (or the Task's verified requester's) linked accounts with
+their mode and readiness, the providers they could still link, and the
+settings path, never any token. A link whose provider was removed is still
+listed, marked `providerMissing` and never ready, until the person
+disconnects it. An agent that needs an account the person
+has not linked should say so and point them at **Settings › Connectors**
+rather than try another credential. The tool is available to chat, to the
+compatibility proxies' coordinator mode, and to ACP runtimes through the
+broker; a Task without a verified requester gets an explicit "no identity"
+result. The tool exists only while `--connectors-enabled` is set: without
+it chat, the proxies, and the broker neither offer nor run it. Under
+enforced context-token authorization it follows the same boundary as the
+connector routes: a delegated token without the connector-read scope
+(`orka:connectors:read` by default) is not offered the tool and is refused
+if it calls it anyway, and a Task created by such a token is refused the
+same way through the broker.
+
+### Chat and the compatibility proxies
+
+The GitHub read tools the chat and compatibility endpoints offer (for
+example `check_pull_request_ci` in coordinator mode) run as the signed-in
+person when they hold a Ready link to a provider that declares the tool:
+the Connection is read live at call time, since there is no dispatch to
+freeze it. These surfaces execute tools directly, with no approval gate,
+so a linked write tool such as `create_pull_request` is refused there once
+the person has a link; linked writes run only from a Task, where the write
+waits for approval. A linked call may name a Task in `task_name` only
+when this conversation's tools created that Task for the same person
+(the API stamps it with their identity), so the person's token is scoped
+by a repository they chose themselves; any other `task_name` is refused,
+because there is no current Task whose repository scope could bound it.
+Without a link those tools keep the Task-Secret path they always had; a
+link that exists but cannot be used (pending, expired, revoked, or being
+deleted) fails the call rather than falling back.
 
 ### What runs where
 

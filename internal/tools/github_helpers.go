@@ -245,7 +245,17 @@ func githubRepoAllowed(owner, repo string, scopes []githubRepoScope) bool {
 func linkedTaskScopeAllowed(ctx context.Context, k8sClient client.Client, taskName string) error {
 	tc := GetToolContext(ctx)
 	taskName = strings.TrimSpace(taskName)
-	if tc == nil || strings.TrimSpace(tc.TaskID) == "" || taskName == "" || taskName == strings.TrimSpace(tc.TaskID) {
+	if taskName == "" {
+		return nil
+	}
+	// Outside a Task (chat and the compatibility proxies) there is no
+	// current Task whose scope a named Task could be checked against, so
+	// the only Tasks that may lend their workspace to the person's token
+	// are the ones this turn's tools created for that same person.
+	if tc == nil || strings.TrimSpace(tc.TaskID) == "" {
+		return linkedCreatedTaskScopeAllowed(ctx, k8sClient, tc, taskName)
+	}
+	if taskName == strings.TrimSpace(tc.TaskID) {
 		return nil
 	}
 	if strings.TrimSpace(tc.TaskUID) == "" || k8sClient == nil {
@@ -275,6 +285,27 @@ func linkedTaskScopeAllowed(ctx context.Context, k8sClient client.Client, taskNa
 			return fmt.Errorf("child task %q names repository %s/%s, which is outside the current task's repository scope %s",
 				taskName, scope.owner, scope.repo, formatGitHubRepoScopes(parent.scopes))
 		}
+	}
+	return nil
+}
+
+// linkedCreatedTaskScopeAllowed accepts taskName outside a Task only when
+// this turn created it and it is stamped with the same requester the
+// linked account belongs to: the person chose that repository themselves.
+func linkedCreatedTaskScopeAllowed(ctx context.Context, k8sClient client.Client, tc *ToolContext, taskName string) error {
+	if tc == nil || !tc.CreatedTask(taskName) {
+		return fmt.Errorf("task_name %q must name a task created in this conversation when acting through a linked account outside a task", taskName)
+	}
+	if k8sClient == nil || tc.Requester == nil {
+		return fmt.Errorf("task_name %q cannot be verified for the linked account", taskName)
+	}
+	var task corev1alpha1.Task
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: taskName, Namespace: githubTaskNamespace(ctx)}, &task); err != nil {
+		return fmt.Errorf("failed to get task %s: %w", taskName, err)
+	}
+	requested := task.Spec.RequestedBy
+	if requested == nil || requested.Issuer != tc.Requester.Issuer || requested.Subject != tc.Requester.Subject {
+		return fmt.Errorf("task_name %q was not requested by the person whose linked account this call uses", taskName)
 	}
 	return nil
 }

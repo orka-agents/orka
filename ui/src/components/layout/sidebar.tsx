@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { Link, useLocation } from '@tanstack/react-router'
-import { LayoutDashboard, ListTodo, MessageSquare, Bot, Wrench, Sparkles, Columns3, Activity, Shield, Radar, Boxes, RadioTower, PanelLeftClose, PanelLeftOpen, ChartNoAxesCombined } from 'lucide-react'
+import { LayoutDashboard, ListTodo, MessageSquare, Bot, Wrench, Sparkles, Columns3, Activity, Shield, Radar, Boxes, RadioTower, PanelLeftClose, PanelLeftOpen, ChartNoAxesCombined, Link2 } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { useUIStore } from '@/stores/ui'
@@ -22,6 +22,7 @@ const navItems = [
   { to: '/runtimes', label: 'Runtimes', icon: Boxes },
   { to: '/agents', label: 'Agents', icon: Bot },
   { to: '/tools', label: 'Tools', icon: Wrench },
+  { to: '/settings/connectors', label: 'Connectors', icon: Link2 },
 ] as const
 
 export function Sidebar() {
