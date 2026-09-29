@@ -193,6 +193,26 @@ func (l liveLinkedAccounts) unacceptedProviderLink(ctx context.Context, toolName
 			"your linked %s account cannot be used right now: the provider is not accepted (it may be mid-reconcile); retry shortly before using %s",
 			provider.Name, toolName)
 	}
+	// A link whose provider was removed keeps its tokens until the person
+	// disconnects it. Whether that provider declared toolName can no longer
+	// be known, so the link is bound and unusable rather than a reason to
+	// run on other credentials.
+	owned, err := connectors.ListSubjectConnections(ctx, l.reader, l.namespace, l.requester)
+	if err != nil {
+		return tools.LinkedAccountCredential{}, false, fmt.Errorf("list the requester's connections: %w", err)
+	}
+	configured := make(map[string]struct{}, len(providers.Items))
+	for i := range providers.Items {
+		configured[providers.Items[i].Name] = struct{}{}
+	}
+	for i := range owned {
+		if _, ok := configured[owned[i].Spec.ProviderRef.Name]; ok {
+			continue
+		}
+		return tools.LinkedAccountCredential{}, false, fmt.Errorf(
+			"your linked %s account's provider is no longer configured; disconnect it under Settings > Connectors before using %s",
+			owned[i].Spec.ProviderRef.Name, toolName)
+	}
 	return tools.LinkedAccountCredential{}, false, nil
 }
 

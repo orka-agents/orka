@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"strings"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -64,6 +63,8 @@ type LinkedConnectionSummary struct {
 	LinkedAt    string   `json:"linkedAt,omitempty"`
 	Message     string   `json:"message,omitempty"`
 	Tools       []string `json:"tools"`
+	// ProviderMissing marks a link whose ConnectorProvider was removed.
+	ProviderMissing bool `json:"providerMissing,omitempty"`
 }
 
 // ConnectorProviderSummary is a provider the requester has not linked.
@@ -101,6 +102,17 @@ func (t *ListConnectionsTool) Execute(ctx context.Context, _ json.RawMessage) (s
 	if err := reader.List(ctx, providers, client.InNamespace(tc.Namespace)); err != nil {
 		return classifyChatK8sErr(err)
 	}
+	// The person's Connections are listed on their own, so a link whose
+	// provider was removed (it keeps its tokens until disconnected) is
+	// still reported, as unusable, rather than silently dropped.
+	owned, err := connectors.ListSubjectConnections(ctx, reader, tc.Namespace, requester)
+	if err != nil {
+		return classifyChatK8sErr(err)
+	}
+	byProvider := make(map[string]*corev1alpha1.Connection, len(owned))
+	for i := range owned {
+		byProvider[owned[i].Spec.ProviderRef.Name] = &owned[i]
+	}
 	result := ListConnectionsResult{
 		Connections: []LinkedConnectionSummary{}, Available: []ConnectorProviderSummary{}, SettingsPath: ConnectorSettingsPath,
 	}
@@ -114,39 +126,43 @@ func (t *ListConnectionsTool) Execute(ctx context.Context, _ json.RawMessage) (s
 		for _, tool := range provider.Spec.Tools {
 			toolNames = append(toolNames, tool.Name+" ("+string(tool.Class)+")")
 		}
-		connection := &corev1alpha1.Connection{}
-		name := connectors.ConnectionName(provider.Name, requester.Issuer, requester.Subject)
-		err := reader.Get(ctx, client.ObjectKey{Namespace: tc.Namespace, Name: name}, connection)
-		switch {
-		case apierrors.IsNotFound(err) || (err == nil && !connectionBelongsTo(connection, requester, provider.Name)):
+		connection, linked := byProvider[provider.Name]
+		if !linked {
 			result.Available = append(result.Available, ConnectorProviderSummary{
 				Provider: provider.Name, DisplayName: displayName, Ready: connectors.ProviderAccepted(provider), Tools: toolNames,
 			})
-		case err != nil:
-			return classifyChatK8sErr(err)
-		default:
-			summary := LinkedConnectionSummary{
-				Provider: provider.Name, DisplayName: displayName, Mode: connection.Spec.Mode, State: connection.Status.State,
-				Ready: connectors.ConnectionLinked(connection) && connection.DeletionTimestamp.IsZero(), Tools: toolNames,
-			}
-			if summary.Mode == "" {
-				summary.Mode = corev1alpha1.ConnectionModeReadOnly
-			}
-			if connection.Status.LinkedAt != nil {
-				summary.LinkedAt = connection.Status.LinkedAt.UTC().Format("2006-01-02T15:04:05Z")
-			}
-			if condition := meta.FindStatusCondition(connection.Status.Conditions, corev1alpha1.ConnectionConditionReady); condition != nil && condition.Status != "True" {
-				summary.Message = condition.Message
-			}
-			result.Connections = append(result.Connections, summary)
+			continue
+		}
+		delete(byProvider, provider.Name)
+		result.Connections = append(result.Connections, linkedConnectionSummary(connection, displayName, toolNames, false))
+	}
+	for _, connection := range owned {
+		if retained, ok := byProvider[connection.Spec.ProviderRef.Name]; ok && retained.Name == connection.Name {
+			result.Connections = append(result.Connections, linkedConnectionSummary(retained, connection.Spec.ProviderRef.Name, []string{}, true))
 		}
 	}
 	return ChatToolSuccess(result)
 }
 
-// connectionBelongsTo reports whether connection is requester's link to
-// provider; a name collision with somebody else's object is never listed.
-func connectionBelongsTo(connection *corev1alpha1.Connection, requester *corev1alpha1.RequestedBy, provider string) bool {
-	return connection.Spec.Subject.Issuer == requester.Issuer && connection.Spec.Subject.Subject == requester.Subject &&
-		connection.Spec.ProviderRef.Name == provider
+// linkedConnectionSummary describes one of the person's links. A link
+// whose provider is gone is never ready and says so.
+func linkedConnectionSummary(connection *corev1alpha1.Connection, displayName string, toolNames []string, providerMissing bool) LinkedConnectionSummary {
+	summary := LinkedConnectionSummary{
+		Provider: connection.Spec.ProviderRef.Name, DisplayName: displayName, Mode: connection.Spec.Mode, State: connection.Status.State,
+		Ready: !providerMissing && connectors.ConnectionLinked(connection) && connection.DeletionTimestamp.IsZero(), Tools: toolNames,
+		ProviderMissing: providerMissing,
+	}
+	if summary.Mode == "" {
+		summary.Mode = corev1alpha1.ConnectionModeReadOnly
+	}
+	if connection.Status.LinkedAt != nil {
+		summary.LinkedAt = connection.Status.LinkedAt.UTC().Format("2006-01-02T15:04:05Z")
+	}
+	if condition := meta.FindStatusCondition(connection.Status.Conditions, corev1alpha1.ConnectionConditionReady); condition != nil && condition.Status != "True" {
+		summary.Message = condition.Message
+	}
+	if providerMissing {
+		summary.Message = "the provider is no longer configured; this link cannot be used and should be disconnected under " + ConnectorSettingsPath
+	}
+	return summary
 }

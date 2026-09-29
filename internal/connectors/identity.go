@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package connectors
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -14,6 +15,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
@@ -40,6 +43,41 @@ const (
 func SubjectDigest(issuer, subject string) string {
 	sum := sha256.Sum256([]byte(issuer + "\x00" + subject))
 	return hex.EncodeToString(sum[:])
+}
+
+// ConnectionSubjectLabel indexes Connections by their person without
+// exposing the raw subject; the API stamps it on every Connection it creates.
+const ConnectionSubjectLabel = "orka.ai/connection-subject"
+
+// connectionSubjectLabelLength keeps the label value well under the 63
+// character limit while staying collision-resistant.
+const connectionSubjectLabelLength = 32
+
+// ConnectionSubjectLabelValue is the label value for one person's Connections.
+func ConnectionSubjectLabelValue(issuer, subject string) string {
+	return SubjectDigest(issuer, subject)[:connectionSubjectLabelLength]
+}
+
+// ListSubjectConnections returns the person's Connections in namespace:
+// the label narrows the list, and the exact subject on each object is
+// what admits it, so a digest collision never lends somebody else's link.
+func ListSubjectConnections(ctx context.Context, reader client.Reader, namespace string, requester *corev1alpha1.RequestedBy) ([]corev1alpha1.Connection, error) {
+	if reader == nil || requester == nil {
+		return nil, nil
+	}
+	list := &corev1alpha1.ConnectionList{}
+	if err := reader.List(ctx, list, client.InNamespace(namespace),
+		client.MatchingLabels{ConnectionSubjectLabel: ConnectionSubjectLabelValue(requester.Issuer, requester.Subject)}); err != nil {
+		return nil, err
+	}
+	var owned []corev1alpha1.Connection
+	for i := range list.Items {
+		connection := &list.Items[i]
+		if connection.Spec.Subject.Issuer == requester.Issuer && connection.Spec.Subject.Subject == requester.Subject {
+			owned = append(owned, *connection)
+		}
+	}
+	return owned, nil
 }
 
 // ConnectionName derives the deterministic name for one person's Connection

@@ -87,7 +87,10 @@ func newConnectorToolFixture(t *testing.T) connectorToolFixture {
 
 func (f connectorToolFixture) connection(mode string, ready bool) *corev1alpha1.Connection {
 	connection := &corev1alpha1.Connection{
-		ObjectMeta: metav1.ObjectMeta{Name: connectors.ConnectionName("github", f.requester.Issuer, f.requester.Subject), Namespace: "tenant", UID: "conn-uid", Generation: 3},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: connectors.ConnectionName("github", f.requester.Issuer, f.requester.Subject), Namespace: "tenant", UID: "conn-uid", Generation: 3,
+			Labels: map[string]string{connectors.ConnectionSubjectLabel: connectors.ConnectionSubjectLabelValue(f.requester.Issuer, f.requester.Subject)},
+		},
 		Spec: corev1alpha1.ConnectionSpec{
 			Subject: corev1alpha1.ConnectionSubject{Issuer: f.requester.Issuer, Subject: f.requester.Subject}, ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}, Mode: mode,
 		},

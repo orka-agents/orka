@@ -252,7 +252,9 @@ link changes whose credential is used, not where.
 Agents and chat have a read-only `list_connections` tool. It returns the
 signed-in person's (or the Task's verified requester's) linked accounts with
 their mode and readiness, the providers they could still link, and the
-settings path, never any token. An agent that needs an account the person
+settings path, never any token. A link whose provider was removed is still
+listed, marked `providerMissing` and never ready, until the person
+disconnects it. An agent that needs an account the person
 has not linked should say so and point them at **Settings › Connectors**
 rather than try another credential. The tool is available to chat, to the
 compatibility proxies' coordinator mode, and to ACP runtimes through the
