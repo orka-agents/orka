@@ -117,6 +117,18 @@ describe('ConnectorsPage', () => {
     expect(window.location.hash).toBe('')
   })
 
+  it('keeps a link whose provider is gone visible and disconnectable', async () => {
+    useProviders([], [{ ...linked, name: 'gone-abc', provider: 'gone', state: 'Error', ready: false, message: 'provider gone not found' }])
+    let deleted = ''
+    server.use(http.delete(`${API}/connections/:name`, ({ params }) => { deleted = String(params.name); return new HttpResponse(null, { status: 204 }) }))
+    render(<ConnectorsPage />)
+    await waitFor(() => expect(screen.getByText('Provider no longer configured')).toBeInTheDocument())
+    expect(screen.queryByText('No connector providers')).not.toBeInTheDocument()
+    expect(screen.getByText('provider gone not found')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }))
+    await waitFor(() => expect(deleted).toBe('gone-abc'))
+  })
+
   it('explains a failed callback', async () => {
     useProviders([github])
     render(<ConnectorsPage search={{ status: 'error', reason: 'scopes_denied' }} />)

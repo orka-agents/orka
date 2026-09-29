@@ -611,6 +611,22 @@ func TestLiveLinkedAccountsUnusableLinkFailsClosed(t *testing.T) {
 	if source.request.Tool.Name != "" {
 		t.Fatalf("an unusable link must never reach the credential source: %+v", source.request)
 	}
+	// A provider that is not accepted right now (its conditions lag a spec
+	// edit) still owns the person's link: bound but unusable, for reads and
+	// writes alike, never a fallback to other credentials.
+	lagging := acceptedBuiltinProvider("github", "list_pull_requests", "create_pull_request")
+	lagging.Generation++
+	linkedToLagging := LiveLinkedAccounts(f.reader(lagging, f.connection(corev1alpha1.ConnectionModeReadWrite, true)), registry, source, "tenant", f.requester)
+	for _, tool := range []string{"list_pull_requests", "create_pull_request"} {
+		if _, bound, err := linkedToLagging.BuiltinToolCredential(ctx, tool); bound || err == nil || !strings.Contains(err.Error(), "not accepted") {
+			t.Fatalf("%s under a lagging provider: bound = %t err = %v", tool, bound, err)
+		}
+	}
+	// With no link to that provider the tool simply keeps its own path.
+	unlinked := LiveLinkedAccounts(f.reader(lagging), registry, source, "tenant", f.requester)
+	if _, bound, err := unlinked.BuiltinToolCredential(ctx, "list_pull_requests"); bound || err != nil {
+		t.Fatalf("lagging provider without a link: bound = %t err = %v", bound, err)
+	}
 }
 
 func TestRegistryACPMCPToolExecutorHandsRequesterToListConnections(t *testing.T) {

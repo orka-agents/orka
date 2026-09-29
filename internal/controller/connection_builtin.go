@@ -131,7 +131,11 @@ func (l liveLinkedAccounts) BuiltinToolCredential(ctx context.Context, toolName 
 	}
 	info, declared := infos[toolName]
 	if !declared {
-		return tools.LinkedAccountCredential{}, false, nil
+		// No accepted provider declares the tool. A provider that declares
+		// it but is not accepted right now (its spec changed and the
+		// conditions lag) still owns the person's link: that link is bound
+		// but unusable, never a reason to fall back to other credentials.
+		return l.unacceptedProviderLink(ctx, toolName)
 	}
 	connection := &corev1alpha1.Connection{}
 	name := connectors.ConnectionName(info.Provider, l.requester.Issuer, l.requester.Subject)
@@ -158,6 +162,38 @@ func (l liveLinkedAccounts) BuiltinToolCredential(ctx context.Context, toolName 
 		}},
 	}
 	return bound.BuiltinToolCredential(ctx, toolName)
+}
+
+// unacceptedProviderLink reports the person's link to a provider that
+// declares toolName without being accepted: an error when such a link
+// exists, unbound when no provider declares the tool or none is linked.
+func (l liveLinkedAccounts) unacceptedProviderLink(ctx context.Context, toolName string) (tools.LinkedAccountCredential, bool, error) {
+	providers := &corev1alpha1.ConnectorProviderList{}
+	if err := l.reader.List(ctx, providers, client.InNamespace(l.namespace)); err != nil {
+		return tools.LinkedAccountCredential{}, false, fmt.Errorf("list connector providers: %w", err)
+	}
+	for i := range providers.Items {
+		provider := &providers.Items[i]
+		if _, declares := connectors.DeclaresBuiltinTool(provider, toolName); !declares {
+			continue
+		}
+		connection := &corev1alpha1.Connection{}
+		name := connectors.ConnectionName(provider.Name, l.requester.Issuer, l.requester.Subject)
+		if err := l.reader.Get(ctx, client.ObjectKey{Namespace: l.namespace, Name: name}, connection); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return tools.LinkedAccountCredential{}, false, fmt.Errorf("load connection %q: %w", name, err)
+		}
+		if connection.Spec.Subject.Issuer != l.requester.Issuer || connection.Spec.Subject.Subject != l.requester.Subject ||
+			connection.Spec.ProviderRef.Name != provider.Name {
+			continue
+		}
+		return tools.LinkedAccountCredential{}, false, fmt.Errorf(
+			"your linked %s account cannot be used right now: the provider is not accepted (it may be mid-reconcile); retry shortly before using %s",
+			provider.Name, toolName)
+	}
+	return tools.LinkedAccountCredential{}, false, nil
 }
 
 // liveConnectionState words why an existing Connection is not usable.
