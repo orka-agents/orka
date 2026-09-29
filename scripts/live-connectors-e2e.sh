@@ -394,7 +394,8 @@ status="$(request POST "${api}/tasks" "${workdir}/task.json" "${auth[@]}" -H 'Co
 [[ "${status}" == 201 ]] || { cat "${workdir}/task.json" | redact >&2; die "task creation returned HTTP ${status}"; }
 jq -e --arg issuer "${issuer}" --arg subject "${subject}" '.spec.requestedBy.issuer == $issuer and .spec.requestedBy.subject == $subject' "${workdir}/task.json" >/dev/null
 wait_for_state '.reads == 1 and .writes == 0 and .distinctBearers == 1' "the first read with the linked token" 150
-wait_for_task_condition "${task}" '[.status.conditions[]? | select(.type=="WaitingForApproval" and .status=="True")] | length == 1' "WaitingForApproval" 90
+# The native autonomous path parks by writing the pending approval into status.message; it does not set a condition.
+wait_for_task_condition "${task}" '.status.phase == "Running" and (.status.message | startswith("waiting for approval ")) and (.status.message | test(" for itemswrite "))' "parked on the itemswrite approval" 90
 kubectl -n "${namespace}" get task "${task}" -o json | jq -e '.status.connectionBindings[0].provider == "fixture" and .status.connectionBindings[0].uid != ""' >/dev/null \
   || die "the Task did not freeze the requester's Connection"
 
