@@ -122,8 +122,9 @@ func (e *OAuthError) IsInvalidGrant() bool {
 // OAuthClient performs the authorization-code, refresh, and revocation calls
 // against public HTTPS endpoints only.
 type OAuthClient struct {
-	httpClient *http.Client
-	now        func() time.Time
+	httpClient   *http.Client
+	now          func() time.Time // allowPrivate mirrors OAuthClientOptions.AllowPrivateEndpoints.
+	allowPrivate bool
 }
 
 // OAuthClientOptions customizes an OAuthClient. Tests supply an HTTPClient
@@ -131,6 +132,9 @@ type OAuthClient struct {
 type OAuthClientOptions struct {
 	HTTPClient *http.Client
 	Now        func() time.Time
+	// AllowPrivateEndpoints dials private and cluster-local provider
+	// endpoints too. Fixture use only; see SetAllowPrivateEndpoints.
+	AllowPrivateEndpoints bool
 }
 
 // NewOAuthClient builds a client whose default transport dials only public
@@ -141,9 +145,13 @@ func NewOAuthClient(opts OAuthClientOptions) *OAuthClient {
 		// No proxy: through a CONNECT proxy the public-address dialer would only
 		// validate the proxy hop, so a hostname resolving to a private address
 		// could bypass the endpoint check. Providers are public; dial them directly.
+		dialContext := tokenexchange.PublicEndpointDialContext
+		if opts.AllowPrivateEndpoints {
+			dialContext = (&net.Dialer{Timeout: 10 * time.Second}).DialContext
+		}
 		transport := &http.Transport{
 			Proxy:               nil,
-			DialContext:         tokenexchange.PublicEndpointDialContext,
+			DialContext:         dialContext,
 			ForceAttemptHTTP2:   false,
 			TLSHandshakeTimeout: 10 * time.Second,
 			MaxIdleConns:        16,
@@ -161,7 +169,7 @@ func NewOAuthClient(opts OAuthClientOptions) *OAuthClient {
 	if now == nil {
 		now = time.Now
 	}
-	return &OAuthClient{httpClient: httpClient, now: now}
+	return &OAuthClient{httpClient: httpClient, now: now, allowPrivate: opts.AllowPrivateEndpoints}
 }
 
 // GeneratePKCE returns a fresh RFC 7636 verifier and its S256 challenge.
@@ -368,7 +376,7 @@ func (c *OAuthClient) post(ctx context.Context, cfg OAuthProviderConfig, endpoin
 	if host := parsed.Hostname(); host == "" || strings.HasSuffix(host, ".") || strings.Contains(host, "%") {
 		return nil, errors.New("provider endpoint host is not allowed")
 	}
-	if ip := net.ParseIP(parsed.Hostname()); ip != nil && !tokenexchange.IsPublicAddress(ip) {
+	if ip := net.ParseIP(parsed.Hostname()); ip != nil && !tokenexchange.IsPublicAddress(ip) && !c.allowPrivate {
 		return nil, errors.New("provider endpoint host is not a public address")
 	}
 	switch cfg.ClientAuthentication {

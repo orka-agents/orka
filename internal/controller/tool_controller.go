@@ -74,6 +74,11 @@ type ToolReconciler struct {
 	// SkipSSRFValidation disables SSRF protection for testing. Do NOT set to true in production.
 	SkipSSRFValidation bool
 
+	// AllowPrivateConnectorEndpoints mirrors --connectors-allow-private-endpoints:
+	// a Tool behind an outbound access policy may target a private or
+	// cluster-local endpoint. Local fixtures only.
+	AllowPrivateConnectorEndpoints bool
+
 	// SubstrateEnabled enables durable MCP tool actors.
 	SubstrateEnabled            bool
 	SubstrateConfig             SubstrateConfig
@@ -156,10 +161,38 @@ func (r *ToolReconciler) validateTool(ctx context.Context, tool *corev1alpha1.To
 	if tool.Spec.HTTP == nil {
 		return fmt.Errorf("http is required unless mcp.substrateActor is set")
 	}
-	return r.validateToolHTTPURL(tool.Spec.HTTP.URL)
+	// Only a Tool behind a connection-mode outbound access policy is
+	// called with a linked account, so only such a Tool may point at a
+	// private endpoint under the fixture allowance.
+	allowPrivate := false
+	if r.AllowPrivateConnectorEndpoints {
+		connectionMode, err := r.toolPolicyIsConnectionMode(ctx, tool)
+		if err != nil {
+			return err
+		}
+		allowPrivate = connectionMode
+	}
+	return r.validateToolHTTPURL(tool.Spec.HTTP.URL, allowPrivate)
 }
 
-func (r *ToolReconciler) validateToolHTTPURL(rawURL string) error {
+// toolPolicyIsConnectionMode reports whether the Tool's outbound access
+// policy injects a linked-account credential.
+func (r *ToolReconciler) toolPolicyIsConnectionMode(ctx context.Context, tool *corev1alpha1.Tool) (bool, error) {
+	ref := tool.Spec.HTTP.OutboundAccessPolicyRef
+	if ref == nil {
+		return false, nil
+	}
+	policy := &corev1alpha1.OutboundAccessPolicy{}
+	if err := r.Get(ctx, client.ObjectKey{Name: ref.Name, Namespace: tool.Namespace}, policy); err != nil {
+		return false, fmt.Errorf("failed to get outbound access policy %q: %w", ref.Name, err)
+	}
+	return policy.Spec.Connection != nil, nil
+}
+
+// validateToolHTTPURL checks the Tool's endpoint. With allowPrivate the
+// private, loopback, and link-local address rules are skipped, for local
+// fixtures only; the fixed metadata and API server hosts stay blocked.
+func (r *ToolReconciler) validateToolHTTPURL(rawURL string, allowPrivate bool) error {
 	// Validate URL
 	if rawURL == "" {
 		return fmt.Errorf("http.url is required")
@@ -183,7 +216,9 @@ func (r *ToolReconciler) validateToolHTTPURL(rawURL string) error {
 
 	// Block private/internal network targets (unless in test mode)
 	if !r.SkipSSRFValidation {
-		host := parsedURL.Hostname()
+		// DNS names are case-insensitive and a trailing dot names the
+		// same host, so the fixed block list compares canonical forms.
+		host := strings.TrimSuffix(strings.ToLower(parsedURL.Hostname()), ".")
 		blockedHosts := []string{
 			"169.254.169.254",
 			"metadata.google.internal",
@@ -192,6 +227,9 @@ func (r *ToolReconciler) validateToolHTTPURL(rawURL string) error {
 		}
 		if slices.Contains(blockedHosts, host) {
 			return fmt.Errorf("tool URL host %q is not allowed", host)
+		}
+		if allowPrivate {
+			return nil
 		}
 		if ip := net.ParseIP(host); ip != nil {
 			if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {

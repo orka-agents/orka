@@ -160,6 +160,10 @@ the call starts.
 The full example, with an Agent that uses these tools, is in
 [`examples/github-connector/`](https://github.com/orka-agents/orka/tree/main/examples/github-connector).
 
+A curated `HTTP` tool is also a `Tool` object of the same name, so name it
+with lowercase letters and digits only: connector tool names are
+`snake_case` identifiers, and a Kubernetes object name cannot contain `_`.
+
 ## 3. Link an account
 
 Each person links once, signed in as themselves (an OIDC or context-token
@@ -308,6 +312,16 @@ additive.
 - Curated `HTTP` connector tools are not available on external v2
   `AgentRuntime` registrations, and harness v1 Tasks receive no connector
   tools at all.
+
+## Proving it in CI
+
+`scripts/live-connectors-e2e.sh` (the `Live Connectors E2E` workflow) runs the
+whole lifecycle against an in-cluster fixture with no real provider: sign-in
+through an OIDC stub, consent with a fake OAuth provider, a Task that reads as
+the person, a write that waits for approval, a refresh forced by a short token
+lifetime, and a disconnect that revokes. It is the reference for what a
+working installation looks like; see
+[Development](../development/development.md#ci-validation).
 
 ## Troubleshooting
 

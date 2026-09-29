@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -403,3 +404,25 @@ func asOAuthError(err error, target **OAuthError) bool {
 	}
 	return false
 }
+
+func TestOAuthClientAllowPrivateEndpointsOption(t *testing.T) {
+	cfg := OAuthProviderConfig{ClientID: "c", ClientSecret: "s", TokenURL: "https://10.0.0.1/token"}
+	strict := NewOAuthClient(OAuthClientOptions{})
+	if _, err := strict.post(context.Background(), cfg, cfg.TokenURL, url.Values{}); err == nil || !strings.Contains(err.Error(), "not a public address") {
+		t.Fatalf("strict err = %v", err)
+	}
+	relaxed := NewOAuthClient(OAuthClientOptions{AllowPrivateEndpoints: true, HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{}`)), Header: http.Header{}}, nil
+	})}})
+	resp, err := relaxed.post(context.Background(), cfg, cfg.TokenURL, url.Values{})
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("relaxed = %v %v", resp, err)
+	}
+	if _, err := relaxed.post(context.Background(), cfg, "http://10.0.0.1/token", url.Values{}); err == nil {
+		t.Fatal("plain http stays refused")
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

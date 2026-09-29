@@ -23,6 +23,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -83,6 +84,19 @@ var (
 	}
 )
 
+// allowPrivateEndpoints relaxes the public-host rules for provider and tool
+// endpoints. It exists for local and CI fixtures only: a controller that
+// sets it will hand a person's token to a cluster-local address.
+var allowPrivateEndpoints atomic.Bool
+
+// SetAllowPrivateEndpoints turns the private-endpoint allowance on or off
+// for this process. Never enable it in production.
+func SetAllowPrivateEndpoints(allowed bool) { allowPrivateEndpoints.Store(allowed) }
+
+// PrivateEndpointsAllowed reports whether private, loopback, and
+// cluster-local provider endpoints are accepted in this process.
+func PrivateEndpointsAllowed() bool { return allowPrivateEndpoints.Load() }
+
 // hostDenied reports whether host is a denied name, lies under one, extends
 // one with more labels (kubernetes.default.svc.example), or carries a
 // cluster-local service label. It expects a lowercase host without a
@@ -100,6 +114,24 @@ func hostDenied(host string) bool {
 	}
 	// <service>.<namespace>.svc.<cluster-domain> under any cluster domain.
 	return strings.Contains(host, ".svc.")
+}
+
+// infrastructureHostDenied reports the hosts no connector endpoint may
+// ever name, allowance or not: cloud metadata services and the Kubernetes
+// API service under any cluster domain.
+func infrastructureHostDenied(host string) bool {
+	host = strings.TrimSuffix(host, ".")
+	for _, denied := range []string{"metadata.google.internal", "metadata", "kubernetes.default", "kubernetes.default.svc"} {
+		if host == denied || strings.HasPrefix(host, "kubernetes.default.svc.") {
+			return true
+		}
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		// The cloud metadata addresses; the general link-local rule is
+		// applied separately, outside the allowance.
+		return ip.Equal(net.ParseIP("169.254.169.254")) || ip.Equal(net.ParseIP("fd00:ec2::254"))
+	}
+	return false
 }
 
 // validHeaderToken reports whether name is an RFC 9110 token, which is what
@@ -246,11 +278,19 @@ func validateEndpointURL(field, raw string, required bool) *Issue {
 			return invalid(fmt.Sprintf("oauth.%s port must be between 1 and 65535", field))
 		}
 	}
-	if hostDenied(strings.ToLower(host)) {
+	// The fixed infrastructure hosts (cloud metadata, the Kubernetes API)
+	// stay denied even under the fixture allowance, which relaxes only the
+	// general private, loopback, and cluster-local rules.
+	if infrastructureHostDenied(strings.ToLower(host)) {
 		return invalid(fmt.Sprintf("oauth.%s host is not allowed", field))
 	}
-	if ip := net.ParseIP(host); ip != nil && !tokenexchange.IsPublicAddress(ip) {
-		return invalid(fmt.Sprintf("oauth.%s must not target private, loopback, or link-local addresses", field))
+	if !PrivateEndpointsAllowed() {
+		if hostDenied(strings.ToLower(host)) {
+			return invalid(fmt.Sprintf("oauth.%s host is not allowed", field))
+		}
+		if ip := net.ParseIP(host); ip != nil && !tokenexchange.IsPublicAddress(ip) {
+			return invalid(fmt.Sprintf("oauth.%s must not target private, loopback, or link-local addresses", field))
+		}
 	}
 	if ip := net.ParseIP(host); ip == nil && nonCanonicalNumericHost(host) {
 		return invalid(fmt.Sprintf("oauth.%s host must be a hostname or a canonical IP address", field))
