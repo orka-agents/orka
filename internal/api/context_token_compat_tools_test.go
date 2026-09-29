@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -262,5 +263,48 @@ func assertCompatToolNames(t *testing.T, got, want []string) {
 	t.Helper()
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("tool names = %#v, want %#v", got, want)
+	}
+}
+
+func TestContextTokenConnectorReadScopeGatesListConnections(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	handler, app := setupTestOpenAIHandler()
+	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: ContextTokenAuthorizationModeEnforce})
+	if err != nil {
+		t.Fatalf("NewContextTokenAuthorizationConfig returned error: %v", err)
+	}
+	handler.contextTokenAuthorization = authz
+
+	var gotNames []string
+	var gateDenied bool
+	app.Use(NewAuthMiddleware(handler.client, AuthConfig{ContextTokens: ctxTokenConfig}))
+	app.Get("/filter", func(c fiber.Ctx) error {
+		compReq := &llm.CompletionRequest{}
+		injectOrkaTools(compReq)
+		gotNames = completionToolNames(filterCompletionToolsForContextToken(c, handler.contextTokenAuthorization, compReq.Tools))
+		gateDenied = connectorReadToolAuthorizer(GetUserInfo(c), handler.contextTokenAuthorization) != nil
+		return c.SendStatus(http.StatusNoContent)
+	})
+	probe := func(scope string) {
+		t.Helper()
+		token := issueTestContextToken(t, provider, nil, map[string]any{"scope": scope})
+		req := httptest.NewRequest(http.MethodGet, "/filter", nil)
+		req.Header.Set(TransactionTokenHeaderName, token)
+		resp, err := app.Test(req, fiber.TestConfig{Timeout: 10 * time.Second})
+		if err != nil || resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("probe(%q): status = %v err = %v", scope, resp, err)
+		}
+	}
+
+	// tools:use alone offers the coordinator tools but not the person's
+	// linked accounts; execution is refused the same way.
+	probe(ContextTokenScopeToolsUse)
+	if slices.Contains(gotNames, "list_connections") || !slices.Contains(gotNames, "create_agent_task") || !gateDenied {
+		t.Fatalf("tools:use only: names = %v denied = %t", gotNames, gateDenied)
+	}
+	probe(ContextTokenScopeToolsUse + " " + ContextTokenScopeConnectorsRead)
+	if !slices.Contains(gotNames, "list_connections") || gateDenied {
+		t.Fatalf("with connectors:read: names = %v denied = %t", gotNames, gateDenied)
 	}
 }

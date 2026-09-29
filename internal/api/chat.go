@@ -464,6 +464,8 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	if ch.config.LinkedAccounts != nil && executor.requester != nil {
 		executor.linkedAccounts = ch.config.LinkedAccounts(namespace, executor.requester)
 	}
+	executor.authorizeConnectorRead = connectorReadToolAuthorizer(userInfo, ch.contextTokenAuthorization)
+	executor.createdTasks = chattools.NewCreatedTasks()
 	executor.SetExecutionMode(ch.config.ExecutionMode)
 	executor.provider = providerInfo.Name
 	executor.providerType = providerInfo.Type

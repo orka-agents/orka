@@ -2011,11 +2011,52 @@ func filterCompletionToolsForContextToken(c fiber.Ctx, cfg ContextTokenAuthoriza
 		return tools
 	}
 
+	// list_connections shows the person's linked accounts, which the
+	// connector routes guard with the connector-read scope; a delegated
+	// token narrowed away from that boundary does not see the tool at all.
+	if !hasAnyScope(ui.ContextToken.Scopes, cfg.ConnectorReadScopes) {
+		tools = filterCompletionToolsExcluding(tools, toolspkg.ListConnectionsToolName)
+	}
 	allowed, ok := contextStringList(ui.ContextToken.TransactionContext, "allowedTools")
 	if !ok {
 		return tools
 	}
 	return filterCompletionToolsByName(tools, allowed)
+}
+
+// contextTokenAllowsConnectorRead reports whether a context-token caller
+// may read the person's linked accounts; every other caller may.
+func contextTokenAllowsConnectorRead(ui *UserInfo, cfg ContextTokenAuthorizationConfig) bool {
+	if !cfg.Enabled() || !cfg.enforcing() || ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+		return true
+	}
+	return hasAnyScope(ui.ContextToken.Scopes, cfg.ConnectorReadScopes)
+}
+
+// connectorReadToolAuthorizer is the execution-time twin of the exposure
+// filter for list_connections.
+func connectorReadToolAuthorizer(ui *UserInfo, cfg ContextTokenAuthorizationConfig) func() *toolspkg.ChatToolError {
+	if contextTokenAllowsConnectorRead(ui, cfg) {
+		return nil
+	}
+	return func() *toolspkg.ChatToolError {
+		return &toolspkg.ChatToolError{
+			Type:       "unauthorized_tool",
+			Message:    fmt.Sprintf("this token lacks one of the scopes %q needed to read linked accounts", strings.Join(cfg.ConnectorReadScopes, ",")),
+			Suggestion: "Use a token that carries the connector-read scope",
+		}
+	}
+}
+
+func filterCompletionToolsExcluding(tools []llm.Tool, name string) []llm.Tool {
+	filtered := make([]llm.Tool, 0, len(tools))
+	for _, tool := range tools {
+		if strings.TrimSpace(tool.Name) == name {
+			continue
+		}
+		filtered = append(filtered, tool)
+	}
+	return filtered
 }
 
 func filterCompletionToolsByName(tools []llm.Tool, allowed []string) []llm.Tool {

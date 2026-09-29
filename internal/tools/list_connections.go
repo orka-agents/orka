@@ -80,6 +80,11 @@ func (t *ListConnectionsTool) Execute(ctx context.Context, _ json.RawMessage) (s
 	if tc == nil {
 		return ChatToolErrorResult(internalErrorType, "missing tool context", "")
 	}
+	if tc.AuthorizeConnectorRead != nil {
+		if denied := tc.AuthorizeConnectorRead(); denied != nil {
+			return ChatToolErrorResult(denied.Type, denied.Message, denied.Suggestion)
+		}
+	}
 	requester := tc.Requester
 	if requester == nil || strings.TrimSpace(requester.Issuer) == "" || strings.TrimSpace(requester.Subject) == "" {
 		return ChatToolErrorResult("no_identity", "no verified person is attached to this request, so there are no linked accounts to list",
