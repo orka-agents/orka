@@ -16,6 +16,7 @@ on:
       - "internal/**"
       - "scripts/live-connectors-e2e.sh"
       - "scripts/lib/**"
+      - "test/e2e/kind-config.yaml"
       - "test/fixtures/connectors/**"
       - "workers/**"
   pull_request:
@@ -32,6 +33,7 @@ on:
       - "internal/**"
       - "scripts/live-connectors-e2e.sh"
       - "scripts/lib/**"
+      - "test/e2e/kind-config.yaml"
       - "test/fixtures/connectors/**"
       - "workers/**"
 

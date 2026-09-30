@@ -147,7 +147,7 @@ func NewOAuthClient(opts OAuthClientOptions) *OAuthClient {
 		// could bypass the endpoint check. Providers are public; dial them directly.
 		dialContext := tokenexchange.PublicEndpointDialContext
 		if opts.AllowPrivateEndpoints {
-			dialContext = (&net.Dialer{Timeout: 10 * time.Second}).DialContext
+			dialContext = PrivateEndpointDialContext
 		}
 		transport := &http.Transport{
 			Proxy:               nil,

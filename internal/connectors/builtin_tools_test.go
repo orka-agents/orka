@@ -7,6 +7,8 @@ MIT License - see LICENSE file for details.
 package connectors
 
 import (
+	"context"
+	"net"
 	"strings"
 	"testing"
 
@@ -136,6 +138,21 @@ func TestPrivateEndpointsAllowedRelaxesOnlyHostRules(t *testing.T) {
 			t.Fatalf("tool host %s under the allowance: %v", host, issue)
 		}
 		provider.Spec.Tools[0].HTTP.URL = "https://127.0.0.1:8443/api/items"
+	}
+	// The API server's literal address, as the Pod sees it, is refused too.
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.96.0.1")
+	provider.Spec.OAuth.TokenURL = "https://10.96.0.1/oauth/token"
+	if issue := ValidateProviderSpec(provider, nil); issue == nil || !strings.Contains(issue.Message, "host is not allowed") {
+		t.Fatalf("API service address under the allowance: %v", issue)
+	}
+	if !InfrastructureAddressDenied(net.ParseIP("10.96.0.1")) || InfrastructureAddressDenied(net.ParseIP("10.96.0.2")) {
+		t.Fatal("the API service address alone is denied by address")
+	}
+	if _, err := PrivateEndpointDialContext(context.Background(), "tcp", "10.96.0.1:443"); err == nil || !strings.Contains(err.Error(), "infrastructure") {
+		t.Fatalf("dialing the API service address under the allowance: %v", err)
+	}
+	if _, err := PrivateEndpointDialContext(context.Background(), "tcp", "169.254.169.254:80"); err == nil || !strings.Contains(err.Error(), "infrastructure") {
+		t.Fatalf("dialing metadata under the allowance: %v", err)
 	}
 	// Plain http stays refused even for fixtures.
 	provider.Spec.OAuth.TokenURL = "http://fixture.orka-system.svc:8080/oauth/token"

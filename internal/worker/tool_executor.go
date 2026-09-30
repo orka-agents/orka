@@ -463,9 +463,10 @@ func (e *ToolExecutor) executePreparedToolRequest(ctx context.Context, prepared 
 	return string(respBody), nil
 }
 
-// privateConnectionEndpointDialContext dials any address, for the fixture-only
-// private-endpoint allowance on linked-account requests.
-var privateConnectionEndpointDialContext = (&net.Dialer{Timeout: 10 * time.Second}).DialContext
+// privateConnectionEndpointDialContext dials private addresses for the
+// fixture-only allowance on linked-account requests, still refusing the
+// infrastructure addresses.
+var privateConnectionEndpointDialContext = connectors.PrivateEndpointDialContext
 
 func directCredentialHTTPClient(
 	base *http.Client,

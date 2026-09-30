@@ -161,8 +161,10 @@ The full example, with an Agent that uses these tools, is in
 [`examples/github-connector/`](https://github.com/orka-agents/orka/tree/main/examples/github-connector).
 
 A curated `HTTP` tool is also a `Tool` object of the same name, so name it
-with lowercase letters and digits only: connector tool names are
-`snake_case` identifiers, and a Kubernetes object name cannot contain `_`.
+with lowercase letters and digits only, starting with a letter: connector
+tool names must match `^[a-z][a-z0-9_]*$`, and a Kubernetes object name
+cannot contain `_`, so `itemsread` works while `1tool` and `items_read` do
+not.
 
 ## 3. Link an account
 

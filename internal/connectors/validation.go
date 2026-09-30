@@ -19,6 +19,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"slices"
 	"strconv"
@@ -127,12 +128,68 @@ func InfrastructureHostDenied(host string) bool {
 			return true
 		}
 	}
+	// The API server's own address as the Pod sees it, so an alias or a
+	// rebinding to the literal address is refused like the name.
+	if apiHost := strings.ToLower(strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_HOST"))); apiHost != "" && host == strings.Trim(apiHost, "[]") {
+		return true
+	}
 	if ip := net.ParseIP(host); ip != nil {
-		// The cloud metadata addresses; the general link-local rule is
-		// applied separately, outside the allowance.
-		return ip.Equal(net.ParseIP("169.254.169.254")) || ip.Equal(net.ParseIP("fd00:ec2::254"))
+		return InfrastructureAddressDenied(ip)
 	}
 	return false
+}
+
+// InfrastructureAddressDenied reports the addresses no connector request
+// may be dialed to under the private-endpoint allowance: the cloud metadata
+// services and the Kubernetes API service address. The general private,
+// loopback, and link-local rules are applied separately, outside the
+// allowance.
+func InfrastructureAddressDenied(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	if ip.Equal(net.ParseIP("169.254.169.254")) || ip.Equal(net.ParseIP("fd00:ec2::254")) {
+		return true
+	}
+	if apiHost := net.ParseIP(strings.Trim(strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_HOST")), "[]")); apiHost != nil && ip.Equal(apiHost) {
+		return true
+	}
+	return false
+}
+
+// PrivateEndpointDialContext is the dialer for the fixture-only allowance:
+// it reaches private and cluster-local addresses, but never the
+// infrastructure addresses, whatever name resolved to them.
+func PrivateEndpointDialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	if InfrastructureHostDenied(host) {
+		return nil, fmt.Errorf("refusing to dial infrastructure host %q", host)
+	}
+	addresses, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	for _, candidate := range addresses {
+		if InfrastructureAddressDenied(candidate.IP) {
+			return nil, fmt.Errorf("refusing to dial %q: it resolves to the infrastructure address %s", host, candidate.IP)
+		}
+	}
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	var lastErr error
+	for _, candidate := range addresses {
+		conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(candidate.IP.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no addresses for %q", host)
+	}
+	return nil, lastErr
 }
 
 // validHeaderToken reports whether name is an RFC 9110 token, which is what
