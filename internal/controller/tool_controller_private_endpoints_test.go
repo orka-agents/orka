@@ -26,6 +26,7 @@ func TestValidateToolHTTPURLPrivateConnectorEndpoints(t *testing.T) {
 	for _, url := range []string{
 		"https://169.254.169.254/latest", "https://kubernetes.default.svc/api", "https://metadata.google.internal/",
 		"https://KUBERNETES.DEFAULT.SVC/api", "https://kubernetes.default.svc./api", "https://Metadata.Google.Internal./",
+		"https://kubernetes.default.svc.cluster.local/api", "https://[fd00:ec2::254]/latest", "https://metadata/computeMetadata/v1/",
 	} {
 		if err := r.validateToolHTTPURL(url, true); err == nil || !strings.Contains(err.Error(), "not allowed") {
 			t.Fatalf("%s under the allowance: %v", url, err)

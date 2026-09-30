@@ -116,10 +116,11 @@ func hostDenied(host string) bool {
 	return strings.Contains(host, ".svc.")
 }
 
-// infrastructureHostDenied reports the hosts no connector endpoint may
+// InfrastructureHostDenied reports the hosts no connector endpoint may
 // ever name, allowance or not: cloud metadata services and the Kubernetes
-// API service under any cluster domain.
-func infrastructureHostDenied(host string) bool {
+// API service under any cluster domain. host is compared lowercased.
+func InfrastructureHostDenied(host string) bool {
+	host = strings.ToLower(host)
 	host = strings.TrimSuffix(host, ".")
 	for _, denied := range []string{"metadata.google.internal", "metadata", "kubernetes.default", "kubernetes.default.svc"} {
 		if host == denied || strings.HasPrefix(host, "kubernetes.default.svc.") {
@@ -281,7 +282,7 @@ func validateEndpointURL(field, raw string, required bool) *Issue {
 	// The fixed infrastructure hosts (cloud metadata, the Kubernetes API)
 	// stay denied even under the fixture allowance, which relaxes only the
 	// general private, loopback, and cluster-local rules.
-	if infrastructureHostDenied(strings.ToLower(host)) {
+	if InfrastructureHostDenied(host) {
 		return invalid(fmt.Sprintf("oauth.%s host is not allowed", field))
 	}
 	if !PrivateEndpointsAllowed() {

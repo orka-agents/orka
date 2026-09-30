@@ -41,8 +41,12 @@ type linkedTokens struct {
 	call            func(method, bearer, title string) int
 }
 
-func link(t *testing.T, now *time.Time) linkedTokens {
+func link(t *testing.T, now *time.Time, scopes ...string) linkedTokens {
 	t.Helper()
+	scope := "items:read items:write"
+	if len(scopes) > 0 {
+		scope = strings.Join(scopes, " ")
+	}
 	f, plain, secure := newTestFixture(t, now)
 	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	verifier := "verifier-verifier-verifier-verifier-verifier"
@@ -50,7 +54,7 @@ func link(t *testing.T, now *time.Time) linkedTokens {
 	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
 	authorize := secure.URL + "/oauth/authorize?" + url.Values{
 		"client_id": {"client"}, "response_type": {"code"}, "redirect_uri": {"http://localhost:1/cb"}, "state": {"s1"},
-		"scope": {"read write"}, "code_challenge": {challenge}, "code_challenge_method": {"S256"},
+		"scope": {scope}, "code_challenge": {challenge}, "code_challenge_method": {"S256"},
 	}.Encode()
 	exchange := func(form url.Values) (map[string]any, int) {
 		req, _ := http.NewRequest(http.MethodPost, secure.URL+"/oauth/token", strings.NewReader(form.Encode()))
@@ -96,7 +100,7 @@ func link(t *testing.T, now *time.Time) linkedTokens {
 	resp, _ = client.Get(authorize)
 	code = mustQuery(t, resp.Header.Get("Location"), "code")
 	body, status := exchange(url.Values{"grant_type": {"authorization_code"}, "code": {code}, "redirect_uri": {"http://localhost:1/cb"}, "code_verifier": {verifier}})
-	if status != http.StatusOK || body["token_type"] != "Bearer" || body["scope"] != "read write" || body["access_token"] == "" || body["refresh_token"] == "" {
+	if status != http.StatusOK || body["token_type"] != "Bearer" || body["scope"] != scope || body["access_token"] == "" || body["refresh_token"] == "" {
 		t.Fatalf("exchange = %d keys=%v token_type=%v scope=%v", status, bodyKeys(body), body["token_type"], body["scope"])
 	}
 	return linkedTokens{f: f, plain: plain, secure: secure, client: client, access: body["access_token"].(string), refresh: body["refresh_token"].(string), exchange: exchange, call: call}
@@ -148,6 +152,22 @@ func TestFixtureOAuthLifecycle(t *testing.T) {
 	raw, _ := json.Marshal(counters)
 	if resp.StatusCode != http.StatusOK || strings.Contains(string(raw), "fx-access") {
 		t.Fatalf("state = %d %s", resp.StatusCode, raw)
+	}
+}
+
+func TestFixtureResourceAPIEnforcesGrantedScopes(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	readOnly := link(t, &now, "items:read")
+	if status := readOnly.call(http.MethodGet, readOnly.access, ""); status != http.StatusOK {
+		t.Fatalf("read with items:read status = %d", status)
+	}
+	// A consent that granted only reads cannot write, so a lane whose
+	// consent stopped asking for items:write fails at the write.
+	if status := readOnly.call(http.MethodPost, readOnly.access, "nope"); status != http.StatusForbidden {
+		t.Fatalf("write with items:read only status = %d", status)
+	}
+	if snapshot := readOnly.f.Snapshot(); snapshot.Writes != 0 || snapshot.Rejected != 1 {
+		t.Fatalf("counters after refused write = %+v", snapshot)
 	}
 }
 

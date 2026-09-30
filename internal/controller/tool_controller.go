@@ -20,6 +20,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/orka-agents/orka/internal/connectors"
+
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -219,13 +221,10 @@ func (r *ToolReconciler) validateToolHTTPURL(rawURL string, allowPrivate bool) e
 		// DNS names are case-insensitive and a trailing dot names the
 		// same host, so the fixed block list compares canonical forms.
 		host := strings.TrimSuffix(strings.ToLower(parsedURL.Hostname()), ".")
-		blockedHosts := []string{
-			"169.254.169.254",
-			"metadata.google.internal",
-			"kubernetes.default",
-			"kubernetes.default.svc",
-		}
-		if slices.Contains(blockedHosts, host) {
+		// The same infrastructure block list the connector validator keeps
+		// under the fixture allowance: metadata services and the Kubernetes
+		// API service under any cluster domain, by name or address.
+		if connectors.InfrastructureHostDenied(host) {
 			return fmt.Errorf("tool URL host %q is not allowed", host)
 		}
 		if allowPrivate {

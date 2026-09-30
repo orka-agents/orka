@@ -313,17 +313,21 @@ func (f *Fixture) revoke(w http.ResponseWriter, r *http.Request) {
 
 // ---- resource API ----
 
-func (f *Fixture) bearerAccepted(r *http.Request) bool {
+// bearerAccepted reports whether the request carries a live access token
+// and returns that token's granted scope. The resource API enforces the
+// scope, so a consent that stopped asking for items:write would fail the
+// lane's write rather than pass unnoticed.
+func (f *Fixture) bearerAccepted(r *http.Request) (string, bool) {
 	bearer := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if bearer == "" || bearer == r.Header.Get("Authorization") {
-		return false
+		return "", false
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	issued, ok := f.tokens[bearer]
 	if !ok || f.cfg.Now().After(issued.expires) {
 		f.counters.Rejected++
-		return false
+		return "", false
 	}
 	seen := false
 	for _, d := range f.counters.BearerDigests {
@@ -335,12 +339,35 @@ func (f *Fixture) bearerAccepted(r *http.Request) bool {
 		f.counters.BearerDigests = append(f.counters.BearerDigests, digest(bearer))
 		f.counters.DistinctBearers++
 	}
-	return true
+	return issued.scope, true
+}
+
+// hasScope reports whether a space-separated granted scope carries want.
+func hasScope(granted, want string) bool {
+	for _, scope := range strings.Fields(granted) {
+		if scope == want {
+			return true
+		}
+	}
+	return false
+}
+
+// scopeRefused records a bearer that is live but not granted the scope.
+func (f *Fixture) scopeRefused(w http.ResponseWriter, want string) {
+	f.mu.Lock()
+	f.counters.Rejected++
+	f.mu.Unlock()
+	writeJSON(w, http.StatusForbidden, map[string]any{"error": "insufficient_scope", "required": want})
 }
 
 func (f *Fixture) readItems(w http.ResponseWriter, r *http.Request) {
-	if !f.bearerAccepted(r) {
+	scope, ok := f.bearerAccepted(r)
+	if !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "bad or expired bearer"})
+		return
+	}
+	if !hasScope(scope, "items:read") {
+		f.scopeRefused(w, "items:read")
 		return
 	}
 	f.mu.Lock()
@@ -351,8 +378,13 @@ func (f *Fixture) readItems(w http.ResponseWriter, r *http.Request) {
 }
 
 func (f *Fixture) writeItem(w http.ResponseWriter, r *http.Request) {
-	if !f.bearerAccepted(r) {
+	scope, ok := f.bearerAccepted(r)
+	if !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "bad or expired bearer"})
+		return
+	}
+	if !hasScope(scope, "items:write") {
+		f.scopeRefused(w, "items:write")
 		return
 	}
 	var body struct {
