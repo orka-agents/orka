@@ -10,15 +10,16 @@ import (
 	"time"
 
 	copilot "github.com/github/copilot-sdk/go"
+	"github.com/github/copilot-sdk/go/embeddedcli"
+	"github.com/github/copilot-sdk/go/rpc"
 
 	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/workers/common"
 )
 
 const (
-	defaultCopilotMaxTurns              = 50
-	defaultCopilotTimeout               = 20 * time.Minute
-	copilotPermissionDeniedByToolPolicy = "denied-no-approval-rule-and-could-not-request-from-user"
+	defaultCopilotMaxTurns = 50
+	defaultCopilotTimeout  = 20 * time.Minute
 )
 
 type CopilotAdapter struct {
@@ -122,17 +123,7 @@ func executeCopilotTurn(ctx context.Context, cfg *common.AgentConfig, workDir st
 		}
 	}
 
-	opts := &copilot.ClientOptions{
-		Cwd: workDir,
-		Env: sanitizedProcessEnv(os.Environ()),
-	}
-	if p := strings.TrimSpace(os.Getenv(workerenv.CopilotCLIPath)); p != "" {
-		opts.CLIPath = p
-	}
-	if token := strings.TrimSpace(os.Getenv(workerenv.GitHubToken)); token != "" {
-		opts.GithubToken = token
-	}
-	client := copilot.NewClient(opts)
+	client := copilot.NewClient(buildCopilotClientOptions(workDir))
 	if err := client.Start(execCtx); err != nil {
 		return "", fmt.Errorf("start copilot client: %w", err)
 	}
@@ -161,6 +152,24 @@ func executeCopilotTurn(ctx context.Context, cfg *common.AgentConfig, workDir st
 	)
 }
 
+func buildCopilotClientOptions(workDir string) *copilot.ClientOptions {
+	// Preserve override -> embedded CLI -> PATH selection. The wrapper image
+	// bundles its CLI, while externally provisioned runtimes can override it.
+	cliPath := strings.TrimSpace(os.Getenv(workerenv.CopilotCLIPath))
+	if cliPath == "" {
+		cliPath = embeddedcli.Path()
+	}
+	if cliPath == "" {
+		cliPath = "copilot"
+	}
+	return &copilot.ClientOptions{
+		Connection:       copilot.StdioConnection{Path: cliPath},
+		WorkingDirectory: workDir,
+		Env:              sanitizedProcessEnv(os.Environ()),
+		GitHubToken:      strings.TrimSpace(os.Getenv(workerenv.GitHubToken)),
+	}
+}
+
 func buildCopilotSessionConfig(cfg *common.AgentConfig, workDir string) *copilot.SessionConfig {
 	if cfg == nil {
 		cfg = &common.AgentConfig{MaxTurns: defaultCopilotMaxTurns}
@@ -174,11 +183,11 @@ func buildCopilotSessionConfig(cfg *common.AgentConfig, workDir string) *copilot
 		OnPermissionRequest: func(
 			_ copilot.PermissionRequest,
 			_ copilot.PermissionInvocation,
-		) (copilot.PermissionRequestResult, error) {
+		) (rpc.PermissionDecision, error) {
 			if denyAllTools {
-				return copilot.PermissionRequestResult{Kind: copilotPermissionDeniedByToolPolicy}, nil
+				return &rpc.PermissionDecisionDeniedNoApprovalRuleAndCouldNotRequestFromUser{}, nil
 			}
-			return copilot.PermissionRequestResult{Kind: "approved"}, nil
+			return &rpc.PermissionDecisionApproved{}, nil
 		},
 	}
 	if systemPrompt := strings.TrimSpace(cfg.SystemPrompt); systemPrompt != "" {
@@ -192,9 +201,8 @@ func buildCopilotSessionConfig(cfg *common.AgentConfig, workDir string) *copilot
 		sessionCfg.ExcludedTools = tools
 	}
 	if denyAllTools {
-		// The SDK omits an empty availableTools array from the wire request.
-		// Keep both enforcement points fail-closed so no permission request or
-		// tool invocation can turn an explicit empty allowlist into allow-all.
+		// Keep both enforcement points fail-closed in addition to the explicit
+		// empty availableTools array sent by the SDK.
 		sessionCfg.Hooks = &copilot.SessionHooks{
 			OnPreToolUse: func(
 				_ copilot.PreToolUseHookInput,
@@ -214,18 +222,23 @@ func extractCopilotResult(event *copilot.SessionEvent) string {
 	if event == nil {
 		return ""
 	}
-	if event.Data.Content != nil && strings.TrimSpace(*event.Data.Content) != "" {
-		return *event.Data.Content
-	}
-	if event.Data.SummaryContent != nil && strings.TrimSpace(*event.Data.SummaryContent) != "" {
-		return *event.Data.SummaryContent
-	}
-	if event.Data.Result != nil {
-		if event.Data.Result.DetailedContent != nil && strings.TrimSpace(*event.Data.Result.DetailedContent) != "" {
-			return *event.Data.Result.DetailedContent
+	switch data := event.Data.(type) {
+	case *copilot.AssistantMessageData:
+		if data != nil && strings.TrimSpace(data.Content) != "" {
+			return data.Content
 		}
-		if strings.TrimSpace(event.Data.Result.Content) != "" {
-			return event.Data.Result.Content
+	case *copilot.SessionCompactionCompleteData:
+		if data != nil && data.SummaryContent != nil && strings.TrimSpace(*data.SummaryContent) != "" {
+			return *data.SummaryContent
+		}
+	case *copilot.ToolExecutionCompleteData:
+		if data != nil && data.Result != nil {
+			if data.Result.DetailedContent != nil && strings.TrimSpace(*data.Result.DetailedContent) != "" {
+				return *data.Result.DetailedContent
+			}
+			if strings.TrimSpace(data.Result.Content) != "" {
+				return data.Result.Content
+			}
 		}
 	}
 	return ""
