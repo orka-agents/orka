@@ -16,6 +16,14 @@ require_cmd() { command -v "$1" >/dev/null 2>&1 || die "missing required command
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 . "${script_dir}/lib/redact.sh"
+
+# The shared redactor knows nothing of the fixture's own token format, and
+# the literal OIDC/model credentials this run minted must never reach a
+# log either: every diagnostic below goes through redact_all.
+ORKA_REDACT_SECRET_VARS=(token other_token model_credential)
+redact_all() {
+  redact | sed -E 's/fx-(access|refresh)-[A-Za-z0-9._~+\/=-]+/fx-\1-[REDACTED]/g'
+}
 . "${script_dir}/lib/kind-local-registry.sh"
 . "${script_dir}/lib/e2e-admission-tls.sh"
 
@@ -72,7 +80,7 @@ cleanup() {
       kubectl -n "${namespace}" logs deployment/connectors-fixture --tail=100 2>/dev/null || true
       kubectl -n "${namespace}" logs -l orka.ai/task-name --tail=200 --all-containers=true 2>/dev/null || true
       [[ -f "${pf_log}" ]] && { printf '%s\n' '--- port-forward log ---'; cat "${pf_log}"; }
-    } | redact >&2
+    } | redact_all >&2
   fi
   # Only a registry and a cluster this run created are torn down.
   if [[ "${created_kind_registry}" == "1" ]]; then orka_kind_registry_stop; fi
@@ -123,7 +131,7 @@ wait_for_state() {
     if fixture_state | jq -e "${expression}" >/dev/null 2>&1; then return 0; fi
     attempts=$((attempts - 1)); sleep 2
   done
-  fixture_state | redact >&2 || true
+  fixture_state | redact_all >&2 || true
   die "fixture never reached: ${label}"
 }
 
@@ -133,7 +141,7 @@ wait_for_task_condition_on() {
     if kubectl -n "${namespace}" get "${kind}" "${name}" -o json 2>/dev/null | jq -e "${expression}" >/dev/null 2>&1; then return 0; fi
     attempts=$((attempts - 1)); sleep 2
   done
-  kubectl -n "${namespace}" get "${kind}" "${name}" -o yaml 2>/dev/null | redact >&2 || true
+  kubectl -n "${namespace}" get "${kind}" "${name}" -o yaml 2>/dev/null | redact_all >&2 || true
   die "${kind} ${name} never reached: ${label}"
 }
 
@@ -265,6 +273,11 @@ kubectl -n "${namespace}" get deployment "${deployment}" -o json | jq \
       else . end)
     | .spec.template.spec.volumes = (((.spec.template.spec.volumes // []) | map(select(.name != "fixture-ca"))) + [{"name": "fixture-ca", "configMap": {"name": "connectors-fixture-ca"}}])
   ' | kubectl apply -f - >/dev/null
+log "Deploying fail-closed Orka admission (task provenance webhook) with the controller image under test"
+orka_e2e_deploy_admission "${manager_ref}" kubectl "${namespace}"
+kubectl get validatingwebhookconfiguration orka-admission -o jsonpath='{.webhooks[*].name}' 2>/dev/null | grep -q . \
+  || die "the Orka admission webhook configuration is not installed; external provenance protection would be a lie"
+
 kubectl -n "${namespace}" set env deployment/"${deployment}" \
   ORKA_OIDC_ISSUER="${issuer}" \
   ORKA_OIDC_AUDIENCE="${audience}" \
@@ -378,7 +391,7 @@ for ((i = 0; i < 60; i++)); do
   sleep 2
 done
 kubectl -n "${namespace}" get connectorprovider fixture -o json | jq -e '[.status.conditions[]? | select(.status=="True")] | length >= 2' >/dev/null \
-  || { kubectl -n "${namespace}" get connectorprovider fixture -o yaml | redact >&2; die "ConnectorProvider was not accepted"; }
+  || { kubectl -n "${namespace}" get connectorprovider fixture -o yaml | redact_all >&2; die "ConnectorProvider was not accepted"; }
 
 log "Signing in as ${subject} through the OIDC fixture"
 token="$(curl -fsS -X POST "http://127.0.0.1:${fixture_port}/oidc/mint" -H 'Content-Type: application/json' \
@@ -388,7 +401,11 @@ api="http://127.0.0.1:${api_port}/api/v1"
 
 log "Link: start consent as ${subject} (readWrite)"
 status="$(request POST "${api}/connections" "${workdir}/start.json" "${auth[@]}" -H 'Content-Type: application/json' -d '{"provider":"fixture","mode":"readWrite"}')"
-[[ "${status}" == 200 || "${status}" == 201 ]] || { cat "${workdir}/start.json" | redact >&2; die "start consent returned HTTP ${status}"; }
+[[ "${status}" == 200 || "${status}" == 201 ]] || {
+  # Keys and the URL's shape only: the authorize URL carries the live OAuth state.
+  { jq -r 'keys | join(",")' "${workdir}/start.json"; url_shape "$(jq -r '.authorizeURL // ""' "${workdir}/start.json")"; } >&2 2>/dev/null || true
+  die "start consent returned HTTP ${status}"
+}
 connection="$(jq -er '.connection.name' "${workdir}/start.json")"
 authorize_url="$(jq -er '.authorizeURL' "${workdir}/start.json")"
 [[ "${authorize_url}" == "https://${fixture_host}:8443/oauth/authorize?"* ]] || die "unexpected authorize URL host"
@@ -408,7 +425,7 @@ settings_query="${settings_location#*\?}"; settings_query="${settings_query%%#*}
 completion="${settings_location#*#completion=}"
 status="$(request POST "${api}/connections/${connection}/complete" "${workdir}/complete.json" "${auth[@]}" -H 'Content-Type: application/json' \
   -d "$(jq -n --arg c "${completion}" '{completion:$c}')")"
-[[ "${status}" == 200 ]] || { cat "${workdir}/complete.json" | redact >&2; die "complete returned HTTP ${status}"; }
+[[ "${status}" == 200 ]] || { cat "${workdir}/complete.json" | redact_all >&2; die "complete returned HTTP ${status}"; }
 jq -e '.ready == true and .mode == "readWrite" and .state == "Ready"' "${workdir}/complete.json" >/dev/null || die "connection is not Ready after completion"
 jq -e 'tostring | test("fx-access|fx-refresh") | not' "${workdir}/complete.json" >/dev/null || die "connection response leaked token material"
 wait_for_state '.codeExchanges == 1 and .tokensIssued == 1' "one code exchange" 5
@@ -421,7 +438,7 @@ log "Use: a Task created by ${subject} reads through the linked account, then pa
 task="linked-$(date +%s)-${RANDOM}"
 status="$(request POST "${api}/tasks" "${workdir}/task.json" "${auth[@]}" -H 'Content-Type: application/json' \
   -d "$(jq -n --arg name "${task}" --arg ns "${namespace}" '{name:$name,namespace:$ns,type:"ai",agentRef:{name:"linked-agent"},prompt:"Exercise the linked account: read, write, read.",timeout:"20m"}')")"
-[[ "${status}" == 201 ]] || { cat "${workdir}/task.json" | redact >&2; die "task creation returned HTTP ${status}"; }
+[[ "${status}" == 201 ]] || { cat "${workdir}/task.json" | redact_all >&2; die "task creation returned HTTP ${status}"; }
 jq -e --arg issuer "${issuer}" --arg subject "${subject}" '.spec.requestedBy.issuer == $issuer and .spec.requestedBy.subject == $subject' "${workdir}/task.json" >/dev/null
 wait_for_state '.reads == 1 and .writes == 0 and .distinctBearers == 1' "the first read with the linked token" 150
 first_read_at="$(date +%s)"
@@ -442,7 +459,7 @@ status="$(request GET "${api}/tasks/${task}/approvals?namespace=${namespace}" "$
 approval_id="$(jq -er '[.approvals[] | select(.targetTool=="itemswrite" and .status=="pending")][0].id' "${workdir}/approvals.json")"
 status="$(request POST "${api}/tasks/${task}/approvals/${approval_id}/decision?namespace=${namespace}" "${workdir}/decision.json" "${auth[@]}" \
   -H 'Content-Type: application/json' -d '{"decision":"approve"}')"
-[[ "${status}" == 200 ]] || { cat "${workdir}/decision.json" | redact >&2; die "approval decision returned HTTP ${status}"; }
+[[ "${status}" == 200 ]] || { cat "${workdir}/decision.json" | redact_all >&2; die "approval decision returned HTTP ${status}"; }
 wait_for_state '.writes == 1 and .lastWriteTitle == "hello from orka" and .reads == 2 and .refreshes >= 1 and .distinctBearers >= 2' \
   "the approved write and a refreshed second read" 240
 wait_for_task_condition "${task}" '.status.phase == "Succeeded"' "Succeeded" 150
@@ -462,7 +479,7 @@ status="$(request GET "${api}/connections/${connection}?namespace=${namespace}" 
 
 log "Disconnect: revoke the tokens and remove the link"
 status="$(request DELETE "${api}/connections/${connection}" "${workdir}/delete.json" "${auth[@]}")"
-[[ "${status}" == 200 || "${status}" == 202 || "${status}" == 204 ]] || { cat "${workdir}/delete.json" | redact >&2; die "disconnect returned HTTP ${status}"; }
+[[ "${status}" == 200 || "${status}" == 202 || "${status}" == 204 ]] || { cat "${workdir}/delete.json" | redact_all >&2; die "disconnect returned HTTP ${status}"; }
 wait_for_state '.revocations >= 1 and .revokedRefreshes >= 1' "revocation of the issued refresh token" 60
 for ((i = 0; i < 60; i++)); do
   status="$(request GET "${api}/connections/${connection}" "${workdir}/gone.json" "${auth[@]}")"
@@ -471,12 +488,22 @@ for ((i = 0; i < 60; i++)); do
 done
 [[ "${status}" == 404 ]] || die "connection still readable after disconnect (HTTP ${status})"
 
+log "Terminal fixture counters: exactly one read, one approved write, one more read"
+# The earlier waits pass as soon as a counter is reached; only the terminal
+# state proves nothing ran twice (a duplicate write after approval, say).
+fixture_state | jq -e '.reads == 2 and .writes == 1 and .codeExchanges == 1 and .refreshes >= 1 and .revocations >= 1 and .rejected == 0' >/dev/null \
+  || { fixture_state | redact_all >&2; die "terminal fixture counters do not match the single read/write/read the lane expects"; }
+fixture_state | jq '{codeExchanges, refreshes, revocations, reads, writes, distinctBearers, rejected, modelTurns}' >&2
+
 log "No token material in controller logs"
-if kubectl -n "${namespace}" logs deployment/"${deployment}" --all-containers=true 2>/dev/null | grep -Eq 'fx-access-|fx-refresh-'; then
+# The logs are captured first, so an unreadable log can never pass as "no match".
+kubectl -n "${namespace}" logs deployment/"${deployment}" --all-containers=true > "${workdir}/controller.log" \
+  || die "could not read the controller logs for the leak check"
+[[ -s "${workdir}/controller.log" ]] || die "the controller logs are empty; the leak check proves nothing"
+if grep -Eq 'fx-access-|fx-refresh-' "${workdir}/controller.log"; then
   die "linked token material appeared in controller logs"
 fi
-if kubectl -n "${namespace}" logs deployment/"${deployment}" --all-containers=true 2>/dev/null | grep -Fq -e "${token}" -e "${other_token}"; then
+if grep -Fq -e "${token}" -e "${other_token}" "${workdir}/controller.log"; then
   die "an OIDC token appeared in controller logs"
 fi
-fixture_state | jq '{codeExchanges, refreshes, revocations, reads, writes, distinctBearers, rejected, modelTurns}' >&2
 log "Live connectors E2E passed"
