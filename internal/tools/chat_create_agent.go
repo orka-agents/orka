@@ -245,7 +245,7 @@ func (t *ChatCreateAgentTool) handleInitialPrompt(ctx context.Context, tc *ToolC
 	sealTaskCreate(ctx, tc, task)
 
 	tc.IncrementTasks()
-	tc.RecordCreatedTask(task.Name)
+	tc.RecordCreatedTask(task)
 	return ChatToolSuccess(map[string]any{
 		"agentName":      agent.Name,
 		"agentNamespace": agent.Namespace,

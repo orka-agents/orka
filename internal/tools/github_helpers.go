@@ -293,15 +293,26 @@ func linkedTaskScopeAllowed(ctx context.Context, k8sClient client.Client, taskNa
 // this turn created it and it is stamped with the same requester the
 // linked account belongs to: the person chose that repository themselves.
 func linkedCreatedTaskScopeAllowed(ctx context.Context, k8sClient client.Client, tc *ToolContext, taskName string) error {
-	if tc == nil || !tc.CreatedTask(taskName) {
-		return fmt.Errorf("task_name %q must name a task created in this conversation when acting through a linked account outside a task", taskName)
+	// The repository scope is read from the call's namespace, so only a
+	// Task created there counts; a same-named Task in another namespace
+	// is a different object with a different UID.
+	namespace := githubTaskNamespace(ctx)
+	uid := ""
+	if tc != nil {
+		uid = tc.CreatedTaskUID(namespace, taskName)
+	}
+	if uid == "" {
+		return fmt.Errorf("task_name %q must name a task created in this conversation, in namespace %q, when acting through a linked account outside a task", taskName, namespace)
 	}
 	if k8sClient == nil || tc.Requester == nil {
 		return fmt.Errorf("task_name %q cannot be verified for the linked account", taskName)
 	}
 	var task corev1alpha1.Task
-	if err := k8sClient.Get(ctx, types.NamespacedName{Name: taskName, Namespace: githubTaskNamespace(ctx)}, &task); err != nil {
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: taskName, Namespace: namespace}, &task); err != nil {
 		return fmt.Errorf("failed to get task %s: %w", taskName, err)
+	}
+	if string(task.UID) != uid {
+		return fmt.Errorf("task_name %q is not the task this conversation created (identity changed)", taskName)
 	}
 	requested := task.Spec.RequestedBy
 	if requested == nil || requested.Issuer != tc.Requester.Issuer || requested.Subject != tc.Requester.Subject {
