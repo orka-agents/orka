@@ -159,6 +159,33 @@ describe('ConnectorsPage', () => {
     expect(cleared).toHaveBeenCalled()
   })
 
+  it('keeps a retryable conflict retryable', async () => {
+    useProviders([github], [{ ...linked, state: 'Pending', ready: false }])
+    window.history.replaceState(null, '', '/settings/connectors?status=pending&connection=github-abc#completion=one-time')
+    server.use(http.post(`${API}/connections/github-abc/complete`, () => new HttpResponse('connection is not yet protected by the controller; retry shortly', { status: 409 })))
+    render(<ConnectorsPage search={{ status: 'pending', connection: 'github-abc' }} />)
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('retry shortly'))
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+    expect(window.location.hash).toBe('#completion=one-time')
+  })
+
+  it('shows a link to an unaccepted provider as unusable', async () => {
+    useProviders([{ ...github, ready: false }], [linked])
+    render(<ConnectorsPage />)
+    await waitFor(() => expect(screen.getByText('Linked · provider unavailable')).toBeInTheDocument())
+    expect(screen.queryByRole('button', { name: 'Allow writes' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Disconnect' })).toBeInTheDocument()
+  })
+
+  it('says so when connectors are disabled on the controller', async () => {
+    server.use(
+      http.get(`${API}/connectors`, () => new HttpResponse('connectors are not enabled on this controller', { status: 501 })),
+      http.get(`${API}/connections`, () => new HttpResponse('connectors are not enabled on this controller', { status: 501 })),
+    )
+    render(<ConnectorsPage />)
+    await waitFor(() => expect(screen.getByText('Connectors are disabled on this controller')).toBeInTheDocument())
+  })
+
   it('tells a scope-limited person what their token lacks', async () => {
     server.use(
       http.get(`${API}/connectors`, () => new HttpResponse('context token is not authorized for connectorsRead', { status: 403 })),

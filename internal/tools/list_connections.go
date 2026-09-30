@@ -163,6 +163,11 @@ func linkedConnectionSummary(connection *corev1alpha1.Connection, displayName st
 	if summary.Mode == "" {
 		summary.Mode = corev1alpha1.ConnectionModeReadOnly
 	}
+	// A Connection the controller has not reconciled yet has no state;
+	// the API view calls that Pending, and so does this listing.
+	if summary.State == "" {
+		summary.State = corev1alpha1.ConnectionStatePending
+	}
 	if connection.Status.LinkedAt != nil {
 		summary.LinkedAt = connection.Status.LinkedAt.UTC().Format("2006-01-02T15:04:05Z")
 	}

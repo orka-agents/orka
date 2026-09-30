@@ -5,10 +5,11 @@ import { LayoutDashboard, ListTodo, MessageSquare, Bot, Wrench, Sparkles, Column
 import { cn } from '@/lib/utils'
 import { useUIStore } from '@/stores/ui'
 import { useIsMobile } from '@/hooks/use-media-query'
+import { useChatConfig } from '@/hooks/use-chat'
 import { Button } from '@/components/ui/button'
 import { OrcaMark } from '@/components/ui/orca-mark'
 
-const navItems = [
+const NAV_ITEMS = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/usage', label: 'Usage', icon: ChartNoAxesCombined },
   { to: '/chat', label: 'Chat', icon: Sparkles },
@@ -27,6 +28,10 @@ const navItems = [
 
 export function Sidebar() {
   const location = useLocation()
+  // Connectors exist only on a controller started with --connectors-enabled;
+  // the entry is hidden once the server says they are off (shown until known).
+  const { data: chatConfig } = useChatConfig()
+  const navItems = NAV_ITEMS.filter((item) => item.to !== '/settings/connectors' || chatConfig?.connectorsEnabled !== false)
   const { sidebarCollapsed: desktopCollapsed, toggleSidebar, mobileSidebarOpen, setMobileSidebarOpen } = useUIStore()
   const isMobile = useIsMobile()
 

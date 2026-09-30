@@ -52,6 +52,7 @@ export const isForbiddenError = (error: unknown) => isApiErrorStatus(error, 403)
 export const isUnauthorizedError = (error: unknown) => isApiErrorStatus(error, 401)
 export const isNotFoundError = (error: unknown) => isApiErrorStatus(error, 404)
 export const isConflictError = (error: unknown) => isApiErrorStatus(error, 409)
+export const isNotImplementedError = (error: unknown) => isApiErrorStatus(error, 501)
 
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const { params, ...fetchOptions } = options
