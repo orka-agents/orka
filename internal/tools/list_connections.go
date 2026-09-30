@@ -134,7 +134,15 @@ func (t *ListConnectionsTool) Execute(ctx context.Context, _ json.RawMessage) (s
 			continue
 		}
 		delete(byProvider, provider.Name)
-		result.Connections = append(result.Connections, linkedConnectionSummary(connection, displayName, toolNames, false))
+		summary := linkedConnectionSummary(connection, displayName, toolNames, false)
+		// Credential resolution refuses a link whose provider is not
+		// accepted, so the listing says so instead of advertising a link
+		// the Connection's own conditions have not caught up on.
+		if !connectors.ProviderAccepted(provider) {
+			summary.Ready = false
+			summary.Message = "the provider is not accepted right now (its spec changed or its references are invalid); the link cannot be used until it is"
+		}
+		result.Connections = append(result.Connections, summary)
 	}
 	for _, connection := range owned {
 		if retained, ok := byProvider[connection.Spec.ProviderRef.Name]; ok && retained.Name == connection.Name {

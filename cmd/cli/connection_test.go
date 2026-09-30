@@ -78,16 +78,18 @@ func TestConnectWaitsForTheNewConsentWhenAlreadyLinked(t *testing.T) {
 			// Re-consenting an already Ready link: the API starts a new
 			// consent but the current view is still the old, Ready grant.
 			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
-				"connection":   map[string]any{"name": "github-abc", "provider": "github", "mode": "readOnly", "state": "Ready", "ready": true, "linkedAt": "2026-09-01T00:00:00Z"},
+				"connection":   map[string]any{"name": "github-abc", "provider": "github", "mode": "readOnly", "state": "Ready", "ready": true, "linkedAt": "2026-09-01T00:00:00Z", "grantSequence": 1},
 				"authorizeURL": "https://github.com/login/oauth/authorize?state=signed",
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/connections/github-abc":
 			polls++
-			linkedAt := "2026-09-01T00:00:00Z"
+			// Same second, same linkedAt: only the grant sequence tells the
+			// new grant apart.
+			sequence := 1
 			if polls >= 3 {
-				linkedAt = "2026-09-29T00:00:00Z"
+				sequence = 2
 			}
-			json.NewEncoder(w).Encode(map[string]any{"name": "github-abc", "provider": "github", "mode": "readOnly", "state": "Ready", "ready": true, "linkedAt": linkedAt}) //nolint:errcheck
+			json.NewEncoder(w).Encode(map[string]any{"name": "github-abc", "provider": "github", "mode": "readOnly", "state": "Ready", "ready": true, "linkedAt": "2026-09-01T00:00:00Z", "grantSequence": sequence}) //nolint:errcheck
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -244,7 +246,7 @@ func TestConnectionListGetDeleteAndProviders(t *testing.T) {
 	if out := run("connection", "get", "github-abc"); !strings.Contains(out, "Provider:") || !strings.Contains(out, "linked") {
 		t.Fatalf("get = %q", out)
 	}
-	if out := run("connection", "delete", "github-abc"); deleted != "/api/v1/connections/github-abc" || !strings.Contains(out, "Connection deleted") {
+	if out := run("connection", "delete", "github-abc"); deleted != "/api/v1/connections/github-abc" || !strings.Contains(out, "Disconnect requested for github-abc") {
 		t.Fatalf("delete = %q path = %q", out, deleted)
 	}
 	if out := run("connection", "providers"); !strings.Contains(out, "GitHub") || !strings.Contains(out, "list_pull_requests (read)") {

@@ -90,6 +90,23 @@ func TestListConnectionsTool(t *testing.T) {
 		strings.Join(result.Connections[0].Tools, ",") != "list_pull_requests (read),create_pull_request (write)" {
 		t.Fatalf("connections = %+v", result.Connections)
 	}
+	// A link whose provider is not accepted right now is reported unusable.
+	unaccepted := github.DeepCopy()
+	unaccepted.Generation++
+	lagging := fake.NewClientBuilder().WithScheme(scheme).WithObjects(unaccepted, linked).Build()
+	laggingOut, err := tool.Execute(WithToolContext(context.Background(), &ToolContext{Namespace: "tenant", PolicyReader: lagging, Requester: requester}), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var laggingParsed struct {
+		Data ListConnectionsResult `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(laggingOut), &laggingParsed); err != nil {
+		t.Fatal(err)
+	}
+	if len(laggingParsed.Data.Connections) != 1 || laggingParsed.Data.Connections[0].Ready || !strings.Contains(laggingParsed.Data.Connections[0].Message, "not accepted") {
+		t.Fatalf("lagging provider connections = %+v", laggingParsed.Data.Connections)
+	}
 	// The link to the removed provider is reported, unusable, with no tools.
 	if gone := result.Connections[1]; gone.Provider != "gone" || !gone.ProviderMissing || gone.Ready || len(gone.Tools) != 0 ||
 		!strings.Contains(gone.Message, "no longer configured") {

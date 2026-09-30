@@ -146,6 +146,29 @@ describe('ConnectorsPage', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Connect (read only)' })).toBeInTheDocument(), { timeout: 8000 })
   }, 12000)
 
+  it('drops a consent the server will never accept again', async () => {
+    useProviders([github], [{ ...linked, state: 'Pending', ready: false }])
+    window.history.replaceState(null, '', '/settings/connectors?status=pending&connection=github-abc#completion=stale')
+    server.use(http.post(`${API}/connections/github-abc/complete`, () => new HttpResponse('completion superseded', { status: 409 })))
+    const cleared = vi.fn()
+    render(<ConnectorsPage search={{ status: 'pending', connection: 'github-abc' }} clearCallback={cleared} />)
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('can no longer be finished'))
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
+    expect(window.location.hash).toBe('')
+    expect(window.location.search).toBe('')
+    expect(cleared).toHaveBeenCalled()
+  })
+
+  it('tells a scope-limited person what their token lacks', async () => {
+    server.use(
+      http.get(`${API}/connectors`, () => new HttpResponse('context token is not authorized for connectorsRead', { status: 403 })),
+      http.get(`${API}/connections`, () => new HttpResponse('context token is not authorized for connectorsRead', { status: 403 })),
+    )
+    render(<ConnectorsPage />)
+    await waitFor(() => expect(screen.getByText('This token cannot read linked accounts')).toBeInTheDocument())
+    expect(screen.queryByText('Sign in as yourself to link accounts')).not.toBeInTheDocument()
+  })
+
   it('explains a failed callback', async () => {
     useProviders([github])
     render(<ConnectorsPage search={{ status: 'error', reason: 'scopes_denied' }} />)
