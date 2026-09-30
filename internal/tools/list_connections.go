@@ -65,6 +65,8 @@ type LinkedConnectionSummary struct {
 	Tools       []string `json:"tools"`
 	// ProviderMissing marks a link whose ConnectorProvider was removed.
 	ProviderMissing bool `json:"providerMissing,omitempty"`
+	// Deleting marks a link whose disconnect is still finishing.
+	Deleting bool `json:"deleting,omitempty"`
 }
 
 // ConnectorProviderSummary is a provider the requester has not linked.
@@ -176,6 +178,13 @@ func linkedConnectionSummary(connection *corev1alpha1.Connection, displayName st
 	}
 	if providerMissing {
 		summary.Message = "the provider is no longer configured; this link cannot be used and should be disconnected under " + ConnectorSettingsPath
+	}
+	// A disconnect in progress (the finalizer revokes tokens first, and may
+	// retry) is neither Ready nor something to relink.
+	if !connection.DeletionTimestamp.IsZero() {
+		summary.Deleting = true
+		summary.State = "Disconnecting"
+		summary.Message = "this link is being disconnected; its tokens are being revoked and it will disappear"
 	}
 	return summary
 }

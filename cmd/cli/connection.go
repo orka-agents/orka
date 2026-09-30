@@ -13,6 +13,8 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/orka-agents/orka/internal/cli/client"
+
 	"github.com/spf13/cobra"
 )
 
@@ -155,6 +157,46 @@ func completionCommand(connection connectionView) string {
 	return command + " --completion <value>"
 }
 
+// providerReadiness returns which connector providers are accepted right
+// now. A link's own conditions can lag a provider change, and credential
+// resolution refuses a link whose provider is not accepted, so the CLI
+// joins the two before calling a link ready.
+func providerReadiness(ctx context.Context, c *client.Client) (map[string]bool, error) {
+	raw, err := c.DoJSON(ctx, http.MethodGet, connectorsAPIPath, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	var list struct {
+		Items []struct {
+			Name  string `json:"name"`
+			Ready bool   `json:"ready"`
+		} `json:"items"`
+	}
+	if err := decodeInto(raw, &list); err != nil {
+		return nil, err
+	}
+	ready := make(map[string]bool, len(list.Items))
+	for _, item := range list.Items {
+		ready[item.Name] = item.Ready
+	}
+	return ready, nil
+}
+
+// joinProviderReadiness folds the provider's acceptance into the view.
+func joinProviderReadiness(item connectionView, providersReady map[string]bool) connectionView {
+	if !item.Ready {
+		return item
+	}
+	if providerReady, configured := providersReady[item.Provider]; !configured || !providerReady {
+		item.Ready = false
+		item.State += " (provider unavailable)"
+		if item.Message == "" {
+			item.Message = "the provider is not accepted right now, so this link cannot be used"
+		}
+	}
+	return item
+}
+
 func newConnectionCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "connection", Short: "Manage your linked accounts"}
 	cmd.AddCommand(newConnectionListCmd(), newConnectionGetCmd(), newConnectionCompleteCmd(), newConnectionDeleteCmd(), newConnectionProvidersCmd())
@@ -188,9 +230,14 @@ func newConnectionListCmd() *cobra.Command {
 				fmt.Fprintln(cmd.OutOrStdout(), "No linked accounts. Link one with 'orka connect <provider>'.") //nolint:errcheck
 				return nil
 			}
+			providersReady, err := providerReadiness(cmd.Context(), c)
+			if err != nil {
+				return connectionError(err)
+			}
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
 			fmt.Fprintln(w, "NAME\tPROVIDER\tMODE\tSTATE\tREADY\tLINKED") //nolint:errcheck
 			for _, item := range list.Items {
+				item = joinProviderReadiness(item, providersReady)
 				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%t\t%s\n", item.Name, item.Provider, item.Mode, item.State, item.Ready, item.LinkedAt) //nolint:errcheck
 			}
 			return w.Flush()
@@ -222,6 +269,11 @@ func newConnectionGetCmd() *cobra.Command {
 			if err := decodeInto(raw, &item); err != nil {
 				return err
 			}
+			providersReady, err := providerReadiness(cmd.Context(), c)
+			if err != nil {
+				return connectionError(err)
+			}
+			item = joinProviderReadiness(item, providersReady)
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
 			for _, row := range [][2]string{
 				{"Name", item.Name}, {"Provider", item.Provider}, {"Mode", item.Mode}, {"State", item.State},

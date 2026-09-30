@@ -172,9 +172,16 @@ func (l liveLinkedAccounts) unacceptedProviderLink(ctx context.Context, toolName
 	if err := l.reader.List(ctx, providers, client.InNamespace(l.namespace)); err != nil {
 		return tools.LinkedAccountCredential{}, false, fmt.Errorf("list connector providers: %w", err)
 	}
+	// A GitHub provider that is accepted but no longer declares the tool
+	// still owns the person's link: dropping a write tool from the catalog
+	// must not hand the call to operator credentials.
+	withdrawn := map[string]struct{}{}
 	for i := range providers.Items {
 		provider := &providers.Items[i]
 		if _, declares := connectors.DeclaresBuiltinTool(provider, toolName); !declares {
+			if connectors.ProviderIssuesGitHubCredentials(provider) {
+				withdrawn[provider.Name] = struct{}{}
+			}
 			continue
 		}
 		connection := &corev1alpha1.Connection{}
@@ -206,12 +213,17 @@ func (l liveLinkedAccounts) unacceptedProviderLink(ctx context.Context, toolName
 		configured[providers.Items[i].Name] = struct{}{}
 	}
 	for i := range owned {
-		if _, ok := configured[owned[i].Spec.ProviderRef.Name]; ok {
+		providerName := owned[i].Spec.ProviderRef.Name
+		if _, ok := withdrawn[providerName]; ok {
+			return tools.LinkedAccountCredential{}, false, fmt.Errorf(
+				"your linked %s account's provider no longer offers %s; the link stays bound, so the tool is not available", providerName, toolName)
+		}
+		if _, ok := configured[providerName]; ok {
 			continue
 		}
 		return tools.LinkedAccountCredential{}, false, fmt.Errorf(
 			"your linked %s account's provider is no longer configured; disconnect it under Settings > Connectors before using %s",
-			owned[i].Spec.ProviderRef.Name, toolName)
+			providerName, toolName)
 	}
 	return tools.LinkedAccountCredential{}, false, nil
 }

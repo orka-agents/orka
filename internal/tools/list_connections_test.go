@@ -110,6 +110,25 @@ func TestListConnectionsTool(t *testing.T) {
 		laggingParsed.Data.Connections[0].State != corev1alpha1.ConnectionStatePending {
 		t.Fatalf("lagging provider connections = %+v", laggingParsed.Data.Connections)
 	}
+	// A link being disconnected says so instead of a contradictory Ready.
+	terminating := linked.DeepCopy()
+	terminating.DeletionTimestamp = &metav1.Time{Time: metav1.Now().Time}
+	terminating.Finalizers = []string{"test"}
+	deletingReader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(github, terminating).Build()
+	deletingOut, err := tool.Execute(WithToolContext(context.Background(), &ToolContext{Namespace: "tenant", PolicyReader: deletingReader, Requester: requester}), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var deletingParsed struct {
+		Data ListConnectionsResult `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(deletingOut), &deletingParsed); err != nil {
+		t.Fatal(err)
+	}
+	if len(deletingParsed.Data.Connections) != 1 || !deletingParsed.Data.Connections[0].Deleting || deletingParsed.Data.Connections[0].Ready ||
+		deletingParsed.Data.Connections[0].State != "Disconnecting" {
+		t.Fatalf("deleting connections = %+v", deletingParsed.Data.Connections)
+	}
 	// The link to the removed provider is reported, unusable, with no tools.
 	if gone := result.Connections[1]; gone.Provider != "gone" || !gone.ProviderMissing || gone.Ready || len(gone.Tools) != 0 ||
 		!strings.Contains(gone.Message, "no longer configured") {
