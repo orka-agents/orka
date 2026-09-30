@@ -7,6 +7,8 @@ MIT License - see LICENSE file for details.
 package controller
 
 import (
+	"errors"
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -35,5 +37,27 @@ func TestValidateToolHTTPURLPrivateConnectorEndpoints(t *testing.T) {
 	// The rest of the URL rules are untouched by the allowance.
 	if err := r.validateToolHTTPURL("https://user:pw@10.96.0.10/api", true); err == nil || !strings.Contains(err.Error(), "embedded credentials") {
 		t.Fatalf("embedded credentials under the allowance: %v", err)
+	}
+}
+
+func TestPrivateEndpointHealthClientRefusesInfrastructureAndRedirects(t *testing.T) {
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.96.0.1")
+	client := privateEndpointHealthClient(0)
+	for _, target := range []string{"https://169.254.169.254/latest", "https://10.96.0.1/api", "https://kubernetes.default.svc/api"} {
+		resp, err := client.Head(target)
+		if err == nil {
+			_ = resp.Body.Close()
+			t.Fatalf("%s: the probe must not reach an infrastructure address", target)
+		}
+		if !strings.Contains(err.Error(), "infrastructure") {
+			t.Fatalf("%s: err = %v", target, err)
+		}
+	}
+	// A redirect is reported as the response it is, never followed.
+	if err := client.CheckRedirect(nil, nil); !errors.Is(err, http.ErrUseLastResponse) {
+		t.Fatalf("CheckRedirect = %v", err)
+	}
+	if transport, ok := client.Transport.(*http.Transport); !ok || transport.Proxy != nil {
+		t.Fatal("the probe transport must not use a proxy")
 	}
 }

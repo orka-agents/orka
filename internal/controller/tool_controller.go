@@ -1546,6 +1546,13 @@ func (r *ToolReconciler) healthCheck(ctx context.Context, tool *corev1alpha1.Too
 		if policy.Spec.Gateway != nil {
 			return nil
 		}
+		// Under the fixture allowance a connection-mode Tool skipped the
+		// DNS-based private-address rule, so its probe dials through the
+		// hardened private-endpoint dialer (infrastructure addresses
+		// refused, no proxy, no redirect hops) rather than the plain one.
+		if r.AllowPrivateConnectorEndpoints && policy.Spec.Connection != nil {
+			httpClient = privateEndpointHealthClient(httpClient.Timeout)
+		}
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, tool.Spec.HTTP.URL, nil)
@@ -1662,6 +1669,24 @@ func (r *ToolReconciler) waitForMCPActorEndpoint(ctx context.Context, endpoint s
 }
 
 // getHTTPClient returns the HTTP client for health checks.
+// privateEndpointHealthClient probes a private connection-mode endpoint
+// without ever following a hop the validator did not see.
+func privateEndpointHealthClient(timeout time.Duration) *http.Client {
+	if timeout <= 0 {
+		timeout = toolHealthCheckTimeout
+	}
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			Proxy:             nil,
+			DialContext:       connectors.PrivateEndpointDialContext,
+			DisableKeepAlives: true,
+			TLSClientConfig:   &tls.Config{MinVersion: tls.VersionTLS12},
+		},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+}
+
 func (r *ToolReconciler) getHTTPClient() *http.Client {
 	if r.HTTPClient != nil {
 		return r.HTTPClient

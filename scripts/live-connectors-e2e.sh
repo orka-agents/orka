@@ -20,7 +20,7 @@ repo_root="$(cd "${script_dir}/.." && pwd)"
 # The shared redactor knows nothing of the fixture's own token format, and
 # the literal OIDC/model credentials this run minted must never reach a
 # log either: every diagnostic below goes through redact_all.
-ORKA_REDACT_SECRET_VARS=(token other_token model_credential)
+ORKA_REDACT_SECRET_VARS=(token other_token model_credential client_secret)
 redact_all() {
   redact | sed -E 's/fx-(access|refresh)-[A-Za-z0-9._~+\/=-]+/fx-\1-[REDACTED]/g'
 }
@@ -172,8 +172,11 @@ kubectl create namespace vekil-system --dry-run=client -o yaml | kubectl apply -
 if [[ -n "$(docker container ls --all --filter "name=^/$(orka_kind_registry_name "${cluster}")$" --format '{{.ID}}')" ]]; then
   die "kind registry $(orka_kind_registry_name "${cluster}") already exists; remove it or set KIND_CLUSTER to an unused name"
 fi
-orka_kind_registry_start "${cluster}"
+# Ownership is recorded before the helper runs: the check above proved the
+# name free, so whatever the helper creates (even partially) is this run's
+# to remove.
 created_kind_registry="1"
+orka_kind_registry_start "${cluster}"
 
 log "Building and loading images"
 make docker-build IMG="${manager_image}"
@@ -440,7 +443,10 @@ status="$(request POST "${api}/tasks" "${workdir}/task.json" "${auth[@]}" -H 'Co
   -d "$(jq -n --arg name "${task}" --arg ns "${namespace}" '{name:$name,namespace:$ns,type:"ai",agentRef:{name:"linked-agent"},prompt:"Exercise the linked account: read, write, read.",timeout:"20m"}')")"
 [[ "${status}" == 201 ]] || { cat "${workdir}/task.json" | redact_all >&2; die "task creation returned HTTP ${status}"; }
 jq -e --arg issuer "${issuer}" --arg subject "${subject}" '.spec.requestedBy.issuer == $issuer and .spec.requestedBy.subject == $subject' "${workdir}/task.json" >/dev/null
-wait_for_state '.reads == 1 and .writes == 0 and .distinctBearers == 1' "the first read with the linked token" 150
+# The first read must run on the token consent issued: no refresh yet and a
+# single issued token, so the later refresh assertions test expiry, not a
+# proactive refresh that happened before the Task ever called.
+wait_for_state '.reads == 1 and .writes == 0 and .distinctBearers == 1 and .refreshes == 0 and .tokensIssued == 1' "the first read with the consent-issued token" 150
 first_read_at="$(date +%s)"
 # The native autonomous path parks by writing the pending approval into status.message; it does not set a condition.
 wait_for_task_condition "${task}" '.status.phase == "Running" and (.status.message | startswith("waiting for approval ")) and (.status.message | test(" for itemswrite "))' "parked on the itemswrite approval" 90
