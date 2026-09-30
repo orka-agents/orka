@@ -28,6 +28,8 @@ export interface Connection {
   lastRefreshTime?: string
   ready: boolean
   message?: string
+  /** The disconnect is still finishing (tokens are revoked first). */
+  deleting?: boolean
 }
 
 export interface ConnectionAuthorizeResponse {

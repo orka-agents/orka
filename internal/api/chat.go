@@ -1368,6 +1368,12 @@ func (ch *ChatHandler) saveChatSession(
 // HandleChatConfig handles GET /api/v1/chat/config.
 func (ch *ChatHandler) HandleChatConfig(c fiber.Ctx) error {
 	toolNames := chattools.ChatToolNames()
+	// The advertised set matches what a turn will actually offer: no
+	// list_connections without connectors, or for a delegated token that
+	// may not read linked accounts.
+	if !ch.config.ConnectorsEnabled || !contextTokenAllowsConnectorRead(GetUserInfo(c), ch.contextTokenAuthorization) {
+		toolNames = slices.DeleteFunc(slices.Clone(toolNames), func(name string) bool { return name == chattools.ListConnectionsToolName })
+	}
 
 	// Context-token callers must name a Provider explicitly: the resolver
 	// refuses the implicit server default for them, so the UI must not offer

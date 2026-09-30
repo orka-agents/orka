@@ -112,7 +112,7 @@ func (t *CreateAITaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 	sealTaskCreate(ctx, tc, task)
 
 	tc.IncrementTasks()
-	tc.RecordCreatedTask(task.Name)
+	tc.RecordCreatedTask(task)
 	return ChatToolSuccess(map[string]any{nameField: task.Name, namespaceField: task.Namespace, phaseField: taskPhasePendingString, messageField: taskCreatedMsg(schedule)})
 }
 

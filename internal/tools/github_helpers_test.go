@@ -771,8 +771,22 @@ func TestResolveRepoAndToken_LinkedAccountFirst(t *testing.T) {
 	if _, _, _, _, err := resolveScopedReadRepoAndToken(outside, k8sClient, "list_pull_requests", testMyTaskName, "", ""); err == nil || !strings.Contains(err.Error(), "created in this conversation") {
 		t.Fatalf("task_name outside a task err = %v", err)
 	}
+	// A same-named Task created in another namespace never lends its scope.
+	elsewhere := task.DeepCopy()
+	elsewhere.Namespace, elsewhere.UID = "elsewhere", "other-uid"
+	outsideCtx.RecordCreatedTask(elsewhere)
+	if _, _, _, _, err := resolveScopedReadRepoAndToken(outside, k8sClient, "list_pull_requests", testMyTaskName, "", ""); err == nil || !strings.Contains(err.Error(), "created in this conversation") {
+		t.Fatalf("other-namespace created task err = %v", err)
+	}
+	// A recorded identity that no longer matches the live object is refused.
+	replaced := task.DeepCopy()
+	replaced.UID = "replaced-uid"
+	outsideCtx.RecordCreatedTask(replaced)
+	if _, _, _, _, err := resolveScopedReadRepoAndToken(outside, k8sClient, "list_pull_requests", testMyTaskName, "", ""); err == nil || !strings.Contains(err.Error(), "identity changed") {
+		t.Fatalf("replaced task err = %v", err)
+	}
 	// A Task created this turn but stamped for somebody else (or nobody) is refused.
-	outsideCtx.RecordCreatedTask(testMyTaskName)
+	outsideCtx.RecordCreatedTask(task)
 	if _, _, _, _, err := resolveScopedReadRepoAndToken(outside, k8sClient, "list_pull_requests", testMyTaskName, "", ""); err == nil || !strings.Contains(err.Error(), "not requested by the person") {
 		t.Fatalf("unstamped created task err = %v", err)
 	}

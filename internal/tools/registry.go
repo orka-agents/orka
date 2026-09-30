@@ -173,38 +173,42 @@ type ToolContext struct {
 	ApprovalTargetRefresh    func(context.Context, string, *corev1alpha1.Tool) error
 }
 
-// CreatedTasks is the set of Task names one turn's tools created. It is
-// held by pointer so the per-call copies of a ToolContext share it.
+// CreatedTasks is the set of Tasks one turn's tools created, by namespace
+// and name with the UID the API server assigned. It is held by pointer so
+// the per-call copies of a ToolContext share it.
 type CreatedTasks struct {
-	mu    sync.Mutex
-	names map[string]struct{}
+	mu   sync.Mutex
+	uids map[string]string
 }
 
 // NewCreatedTasks returns an empty set for one turn.
-func NewCreatedTasks() *CreatedTasks { return &CreatedTasks{names: map[string]struct{}{}} }
+func NewCreatedTasks() *CreatedTasks { return &CreatedTasks{uids: map[string]string{}} }
+
+func createdTaskKey(namespace, name string) string {
+	return strings.TrimSpace(namespace) + "/" + strings.TrimSpace(name)
+}
 
 // RecordCreatedTask notes a Task this turn's tools created, so a later
 // call may name it as the repository scope for the requester's linked
-// account (see CreatedTask). Without a set the record is dropped.
-func (tc *ToolContext) RecordCreatedTask(name string) {
-	name = strings.TrimSpace(name)
-	if tc == nil || tc.CreatedTasks == nil || name == "" {
+// account (see CreatedTaskUID). Without a set the record is dropped.
+func (tc *ToolContext) RecordCreatedTask(task *corev1alpha1.Task) {
+	if tc == nil || tc.CreatedTasks == nil || task == nil || strings.TrimSpace(task.Name) == "" {
 		return
 	}
 	tc.CreatedTasks.mu.Lock()
 	defer tc.CreatedTasks.mu.Unlock()
-	tc.CreatedTasks.names[name] = struct{}{}
+	tc.CreatedTasks.uids[createdTaskKey(task.Namespace, task.Name)] = string(task.UID)
 }
 
-// CreatedTask reports whether this turn's tools created the named Task.
-func (tc *ToolContext) CreatedTask(name string) bool {
+// CreatedTaskUID returns the UID of the Task this turn's tools created
+// under namespace and name, or "" when this turn created no such Task.
+func (tc *ToolContext) CreatedTaskUID(namespace, name string) string {
 	if tc == nil || tc.CreatedTasks == nil {
-		return false
+		return ""
 	}
 	tc.CreatedTasks.mu.Lock()
 	defer tc.CreatedTasks.mu.Unlock()
-	_, ok := tc.CreatedTasks.names[strings.TrimSpace(name)]
-	return ok
+	return tc.CreatedTasks.uids[createdTaskKey(namespace, name)]
 }
 
 type toolContextKey struct{}

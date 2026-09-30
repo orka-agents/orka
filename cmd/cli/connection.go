@@ -45,6 +45,9 @@ type connectionAuthorizeView struct {
 	AuthorizeURL string         `json:"authorizeURL"`
 }
 
+// connectionStateError is the API's state for a link that cannot be used.
+const connectionStateError = "Error"
+
 func newConnectCmd() *cobra.Command {
 	var mode string
 	var noOpen, noWait bool
@@ -117,10 +120,12 @@ func newConnectCmd() *cobra.Command {
 					fmt.Fprintf(out, "Linked %s (%s)\n", current.Provider, current.Mode) //nolint:errcheck
 					return nil
 				}
-				// A fresh consent was just started, so a Revoked or Expired
-				// link is what is being repaired, not the outcome: only an
-				// Error is final before the person finishes in the browser.
-				if current.State == "Error" {
+				// A fresh consent was just started, so the state the link
+				// had before it (Revoked, Expired, or a stale Error from a
+				// provider that has since recovered) is what is being
+				// repaired, not the outcome: only an Error that appeared
+				// after the consent started is final.
+				if current.State == connectionStateError && (started.Connection.State != connectionStateError || current.Message != started.Connection.Message) {
 					return fmt.Errorf("connection %s is %s: %s", current.Name, current.State, current.Message)
 				}
 				select {

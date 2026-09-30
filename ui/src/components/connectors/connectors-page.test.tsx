@@ -129,6 +129,23 @@ describe('ConnectorsPage', () => {
     await waitFor(() => expect(deleted).toBe('gone-abc'))
   })
 
+  it('shows a link whose disconnect is still finishing and keeps polling it', async () => {
+    let fetches = 0
+    server.use(
+      http.get(`${API}/connectors`, () => HttpResponse.json({ items: [github] })),
+      http.get(`${API}/connections`, () => {
+        fetches += 1
+        return HttpResponse.json({ items: fetches < 2 ? [{ ...linked, deleting: true }] : [] })
+      }),
+    )
+    render(<ConnectorsPage />)
+    await waitFor(() => expect(screen.getByText('Disconnecting…')).toBeInTheDocument())
+    expect(screen.queryByRole('button', { name: 'Disconnect' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Reconnect' })).not.toBeInTheDocument()
+    // The poll keeps going until the finalizer has removed the object.
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Connect (read only)' })).toBeInTheDocument(), { timeout: 8000 })
+  }, 12000)
+
   it('explains a failed callback', async () => {
     useProviders([github])
     render(<ConnectorsPage search={{ status: 'error', reason: 'scopes_denied' }} />)

@@ -36,7 +36,9 @@ function ConnectorsPageContent({ namespace, search }: { namespace: string; searc
   const connections = useQuery({
     queryKey: ['connections', namespace],
     queryFn: () => api.get<{ items: Connection[] }>('/connections', params),
-    refetchInterval: (query) => (query.state.data?.items.some((c) => c.state === 'Pending') ? 5000 : false),
+    // Keep polling while a link is being established or torn down, so a
+    // disconnect whose finalizer is still revoking tokens resolves on screen.
+    refetchInterval: (query) => (query.state.data?.items.some((c) => c.state === 'Pending' || c.deleting) ? 5000 : false),
   })
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ['connections', namespace] })
 
@@ -181,13 +183,15 @@ function RetainedConnectionCard({ connection, busy, onDisconnect }: { connection
           <CardTitle className="text-base">{connection.provider}</CardTitle>
           <p className="text-xs text-muted-foreground">Provider no longer configured</p>
         </div>
-        <Badge variant="outline">{connection.state}</Badge>
+        <Badge variant="outline">{connection.deleting ? 'Disconnecting…' : connection.state}</Badge>
       </CardHeader>
       <CardContent className="space-y-3 text-sm">
         <p className="text-muted-foreground">
           {connection.message || 'This provider was removed by an operator. The link keeps its tokens until you disconnect it.'}
         </p>
-        <Button size="sm" variant="destructive" disabled={busy} onClick={() => onDisconnect(connection.name)}>Disconnect</Button>
+        {!connection.deleting && (
+          <Button size="sm" variant="destructive" disabled={busy} onClick={() => onDisconnect(connection.name)}>Disconnect</Button>
+        )}
       </CardContent>
     </Card>
   )
@@ -220,7 +224,9 @@ function ProviderCard({ provider, connection, busy, onConnect, onChangeMode, onR
         {readTools.length > 0 && <p><span className="text-muted-foreground">Reads:</span> {readTools.join(', ')}</p>}
         {writeTools.length > 0 && <p><span className="text-muted-foreground">Writes (ask for approval):</span> {writeTools.join(', ')}</p>}
         {connection?.message && connection.state !== 'Ready' && <p className="text-muted-foreground">{connection.message}</p>}
-        {connection ? (
+        {connection?.deleting ? (
+          <p className="text-muted-foreground">Revoking tokens and removing the link.</p>
+        ) : connection ? (
           <div className="flex flex-wrap gap-2">
             {connection.mode === 'readWrite' ? (
               <Button size="sm" variant="outline" disabled={busy} onClick={() => onChangeMode(connection.name, 'readOnly')}>Limit to reads</Button>
@@ -248,6 +254,7 @@ function ProviderCard({ provider, connection, busy, onConnect, onChangeMode, onR
 
 function ConnectionBadge({ provider, connection }: { provider: ConnectorProvider; connection?: Connection }) {
   if (!connection) return <Badge variant="outline">{provider.ready ? 'Not linked' : 'Unavailable'}</Badge>
+  if (connection.deleting) return <Badge variant="secondary">Disconnecting…</Badge>
   if (connection.ready) return <Badge>{connection.mode === 'readWrite' ? 'Linked · read and write' : 'Linked · read only'}</Badge>
   return <Badge variant="secondary">{connection.state || 'Pending'}</Badge>
 }

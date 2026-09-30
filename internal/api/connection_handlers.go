@@ -187,6 +187,9 @@ type ConnectionResponse struct {
 	LastRefreshTime *metav1.Time `json:"lastRefreshTime,omitempty"`
 	Ready           bool         `json:"ready"`
 	Message         string       `json:"message,omitempty"`
+	// Deleting marks a Connection whose disconnect is still finishing
+	// (the finalizer revokes tokens first).
+	Deleting bool `json:"deleting,omitempty"`
 }
 
 // ConnectionAuthorizeResponse returns the consent URL alongside the Connection.
@@ -246,6 +249,7 @@ func connectionResponse(connection *corev1alpha1.Connection) ConnectionResponse 
 		LinkedAt:        connection.Status.LinkedAt,
 		ExpiresAt:       connection.Status.ExpiresAt,
 		LastRefreshTime: connection.Status.LastRefreshTime,
+		Deleting:        !connection.DeletionTimestamp.IsZero(),
 	}
 	if ready := meta.FindStatusCondition(connection.Status.Conditions, corev1alpha1.ConnectionConditionReady); ready != nil {
 		response.Ready = connectors.ConnectionLinked(connection)
