@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { render, screen } from '@/test/test-utils'
+import { render, screen, waitFor } from '@/test/test-utils'
+import { http, HttpResponse } from 'msw'
+import { server } from '@/test/mocks/server'
 import userEvent from '@testing-library/user-event'
 
 vi.mock('zustand/middleware', () => ({
@@ -35,6 +37,15 @@ describe('Sidebar', () => {
     expect(screen.getByText('Sessions')).toBeInTheDocument()
     expect(screen.getByText('Runtimes')).toBeInTheDocument()
     expect(screen.getByText('Agents')).toBeInTheDocument()
+    expect(screen.getByText('Tools')).toBeInTheDocument()
+  })
+
+  it('hides Connectors once the server says connectors are disabled', async () => {
+    server.use(http.get('/api/v1/chat/config', () => HttpResponse.json({
+      enabled: true, provider: 'p', model: 'm', maxIterations: 1, maxDuration: '1m', maxTasksPerTurn: 1, maxConcurrent: 1, availableTools: [], connectorsEnabled: false,
+    })))
+    render(<Sidebar />)
+    await waitFor(() => expect(screen.queryByText('Connectors')).not.toBeInTheDocument())
     expect(screen.getByText('Tools')).toBeInTheDocument()
   })
 

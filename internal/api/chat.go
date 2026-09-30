@@ -1393,6 +1393,7 @@ func (ch *ChatHandler) HandleChatConfig(c fiber.Ctx) error {
 		"maxTasksPerTurn":         ch.config.MaxTasksPerTurn,
 		"maxConcurrent":           ch.config.MaxConcurrent,
 		"availableTools":          toolNames,
+		"connectorsEnabled":       ch.config.ConnectorsEnabled,
 	})
 }
 

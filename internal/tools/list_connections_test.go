@@ -93,7 +93,9 @@ func TestListConnectionsTool(t *testing.T) {
 	// A link whose provider is not accepted right now is reported unusable.
 	unaccepted := github.DeepCopy()
 	unaccepted.Generation++
-	lagging := fake.NewClientBuilder().WithScheme(scheme).WithObjects(unaccepted, linked).Build()
+	fresh := linked.DeepCopy()
+	fresh.Status.State = "" // not reconciled yet
+	lagging := fake.NewClientBuilder().WithScheme(scheme).WithObjects(unaccepted, fresh).Build()
 	laggingOut, err := tool.Execute(WithToolContext(context.Background(), &ToolContext{Namespace: "tenant", PolicyReader: lagging, Requester: requester}), json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatal(err)
@@ -104,7 +106,8 @@ func TestListConnectionsTool(t *testing.T) {
 	if err := json.Unmarshal([]byte(laggingOut), &laggingParsed); err != nil {
 		t.Fatal(err)
 	}
-	if len(laggingParsed.Data.Connections) != 1 || laggingParsed.Data.Connections[0].Ready || !strings.Contains(laggingParsed.Data.Connections[0].Message, "not accepted") {
+	if len(laggingParsed.Data.Connections) != 1 || laggingParsed.Data.Connections[0].Ready || !strings.Contains(laggingParsed.Data.Connections[0].Message, "not accepted") ||
+		laggingParsed.Data.Connections[0].State != corev1alpha1.ConnectionStatePending {
 		t.Fatalf("lagging provider connections = %+v", laggingParsed.Data.Connections)
 	}
 	// The link to the removed provider is reported, unusable, with no tools.

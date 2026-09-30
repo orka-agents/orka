@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link2, Unplug } from 'lucide-react'
 import { toast } from 'sonner'
-import { api, isConflictError, isForbiddenError, isUnauthorizedError } from '@/lib/api-client'
+import { api, isConflictError, isForbiddenError, isNotImplementedError, isUnauthorizedError } from '@/lib/api-client'
 import {
   callbackReasonMessage, clearConsentCallback, completionCommand, openAuthorizeURL, readCompletionToken,
   type Connection, type ConnectionAuthorizeResponse, type ConnectionMode, type ConnectorCallbackSearch, type ConnectorProvider,
@@ -68,9 +68,11 @@ function ConnectorsPageContent({ namespace, search, clearCallback }: { namespace
       invalidate()
     },
     onError: (error: unknown) => {
-      // A conflict means the completion can never succeed: the consent
-      // expired or a newer one replaced it. Nothing to retry.
-      if (isConflictError(error)) {
+      // A conflict that asks for a retry (the controller has not adopted
+      // the Connection yet, or a committed completion still needs its
+      // status pass) keeps the token; any other conflict means the consent
+      // expired or was superseded and can never succeed.
+      if (isConflictError(error) && !/retry/i.test(errorText(error))) {
         clearConsentCallback()
         clearCallback?.()
         setCallbackNotice({ tone: 'error', text: `This consent can no longer be finished (${errorText(error)}). Start the link again.` })
@@ -157,7 +159,10 @@ function ConnectorsPageContent({ namespace, search, clearCallback }: { namespace
           <Skeleton className="h-24 w-full" />
         </div>
       ) : providers.error || connections.error ? (
-        isForbiddenError(providers.error ?? connections.error) ? (
+        isNotImplementedError(providers.error ?? connections.error) ? (
+          <EmptyState icon={Unplug} headline="Connectors are disabled on this controller"
+            hint="An operator starts the controller with --connectors-enabled (and Task provenance admission) before accounts can be linked." />
+        ) : isForbiddenError(providers.error ?? connections.error) ? (
           scopeDenied(providers.error ?? connections.error) ? (
             <EmptyState icon={Link2} headline="This token cannot read linked accounts"
               hint={`You are signed in, but this context token is not delegated the connector scope: ${errorText(providers.error ?? connections.error)}. Use a token that carries orka:connectors:read.`} />
@@ -242,6 +247,11 @@ function ProviderCard({ provider, connection, busy, onConnect, onChangeMode, onR
         {connection?.message && connection.state !== 'Ready' && <p className="text-muted-foreground">{connection.message}</p>}
         {connection?.deleting ? (
           <p className="text-muted-foreground">Revoking tokens and removing the link.</p>
+        ) : connection && !provider.ready ? (
+          <div className="flex flex-wrap gap-2">
+            <p className="w-full text-muted-foreground">The provider is not accepted right now, so this link cannot be used or changed until it is.</p>
+            <Button size="sm" variant="destructive" disabled={busy} onClick={() => onDisconnect(connection.name)}>Disconnect</Button>
+          </div>
         ) : connection ? (
           <div className="flex flex-wrap gap-2">
             {connection.mode === 'readWrite' ? (
@@ -271,6 +281,9 @@ function ProviderCard({ provider, connection, busy, onConnect, onChangeMode, onR
 function ConnectionBadge({ provider, connection }: { provider: ConnectorProvider; connection?: Connection }) {
   if (!connection) return <Badge variant="outline">{provider.ready ? 'Not linked' : 'Unavailable'}</Badge>
   if (connection.deleting) return <Badge variant="secondary">Disconnecting…</Badge>
+  // A link is usable only while its provider is accepted; the Connection's
+  // own conditions can lag a provider change.
+  if (!provider.ready) return <Badge variant="secondary">Linked · provider unavailable</Badge>
   if (connection.ready) return <Badge>{connection.mode === 'readWrite' ? 'Linked · read and write' : 'Linked · read only'}</Badge>
   return <Badge variant="secondary">{connection.state || 'Pending'}</Badge>
 }

@@ -356,6 +356,7 @@ func TestHandleChatConfig(t *testing.T) {
 	require.True(t, ok)
 	assert.Greater(t, len(tools), 0)
 	assert.NotContains(t, tools, chattools.ListConnectionsToolName)
+	assert.Equal(t, false, body["connectorsEnabled"])
 
 	ch.config.ConnectorsEnabled = true
 	resp, err = app.Test(httptest.NewRequest(http.MethodGet, "/api/v1/chat/config", nil))
@@ -363,6 +364,7 @@ func TestHandleChatConfig(t *testing.T) {
 	body = map[string]any{}
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
 	assert.Contains(t, body["availableTools"].([]any), chattools.ListConnectionsToolName)
+	assert.Equal(t, true, body["connectorsEnabled"])
 }
 
 func TestHandleChatConfigRequiresExplicitProviderForContextTokens(t *testing.T) {
