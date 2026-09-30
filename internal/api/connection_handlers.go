@@ -190,6 +190,9 @@ type ConnectionResponse struct {
 	// Deleting marks a Connection whose disconnect is still finishing
 	// (the finalizer revokes tokens first).
 	Deleting bool `json:"deleting,omitempty"`
+	// GrantSequence advances on every completed consent, so a client can
+	// tell a new grant from the one it started with.
+	GrantSequence int64 `json:"grantSequence"`
 }
 
 // ConnectionAuthorizeResponse returns the consent URL alongside the Connection.
@@ -250,6 +253,7 @@ func connectionResponse(connection *corev1alpha1.Connection) ConnectionResponse 
 		ExpiresAt:       connection.Status.ExpiresAt,
 		LastRefreshTime: connection.Status.LastRefreshTime,
 		Deleting:        !connection.DeletionTimestamp.IsZero(),
+		GrantSequence:   connection.Status.GrantSequence,
 	}
 	if ready := meta.FindStatusCondition(connection.Status.Conditions, corev1alpha1.ConnectionConditionReady); ready != nil {
 		response.Ready = connectors.ConnectionLinked(connection)

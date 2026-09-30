@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link2, Unplug } from 'lucide-react'
 import { toast } from 'sonner'
-import { api, isForbiddenError, isUnauthorizedError } from '@/lib/api-client'
+import { api, isConflictError, isForbiddenError, isUnauthorizedError } from '@/lib/api-client'
 import {
   callbackReasonMessage, clearConsentCallback, completionCommand, openAuthorizeURL, readCompletionToken,
   type Connection, type ConnectionAuthorizeResponse, type ConnectionMode, type ConnectorCallbackSearch, type ConnectorProvider,
@@ -19,14 +19,16 @@ import { ListAccessError } from '@/components/ui/list-access-error'
 interface ConnectorsPageProps {
   /** The callback's query parameters, when the browser just came back from a provider. */
   search?: ConnectorCallbackSearch
+  /** Drops the callback from the router's own state once it is spent, so a remount never sees it again. */
+  clearCallback?: () => void
 }
 
-export function ConnectorsPage({ search }: ConnectorsPageProps) {
+export function ConnectorsPage({ search, clearCallback }: ConnectorsPageProps) {
   const namespace = useUIStore((s) => s.namespace)
-  return <ConnectorsPageContent key={namespace} namespace={namespace} search={search ?? {}} />
+  return <ConnectorsPageContent key={namespace} namespace={namespace} search={search ?? {}} clearCallback={clearCallback} />
 }
 
-function ConnectorsPageContent({ namespace, search }: { namespace: string; search: ConnectorCallbackSearch }) {
+function ConnectorsPageContent({ namespace, search, clearCallback }: { namespace: string; search: ConnectorCallbackSearch; clearCallback?: () => void }) {
   const queryClient = useQueryClient()
   const params = namespace ? { namespace } : undefined
   const providers = useQuery({
@@ -61,10 +63,19 @@ function ConnectorsPageContent({ namespace, search }: { namespace: string; searc
       api.post<Connection>(`/connections/${encodeURIComponent(name)}/complete`, { completion }, completionParams),
     onSuccess: (connection) => {
       clearConsentCallback()
+      clearCallback?.()
       setCallbackNotice({ tone: 'info', text: `Linked ${connection.provider} (${connection.mode}).` })
       invalidate()
     },
     onError: (error: unknown) => {
+      // A conflict means the completion can never succeed: the consent
+      // expired or a newer one replaced it. Nothing to retry.
+      if (isConflictError(error)) {
+        clearConsentCallback()
+        clearCallback?.()
+        setCallbackNotice({ tone: 'error', text: `This consent can no longer be finished (${errorText(error)}). Start the link again.` })
+        return
+      }
       const command = completionCommand(search.connection, search.namespace)
       const hint = isForbiddenError(error) || isUnauthorizedError(error)
         ? ` Sign in as yourself and retry${command ? `, or run: ${command}` : ''}.`
@@ -147,8 +158,13 @@ function ConnectorsPageContent({ namespace, search }: { namespace: string; searc
         </div>
       ) : providers.error || connections.error ? (
         isForbiddenError(providers.error ?? connections.error) ? (
-          <EmptyState icon={Link2} headline="Sign in as yourself to link accounts"
-            hint="Linked accounts belong to a person. This token is not a personal identity (OIDC or context token), so there is nothing to link here." />
+          scopeDenied(providers.error ?? connections.error) ? (
+            <EmptyState icon={Link2} headline="This token cannot read linked accounts"
+              hint={`You are signed in, but this context token is not delegated the connector scope: ${errorText(providers.error ?? connections.error)}. Use a token that carries orka:connectors:read.`} />
+          ) : (
+            <EmptyState icon={Link2} headline="Sign in as yourself to link accounts"
+              hint="Linked accounts belong to a person. This token is not a personal identity (OIDC or context token), so there is nothing to link here." />
+          )
         ) : (
           <ListAccessError error={providers.error ?? connections.error} resource="connectors" />
         )
@@ -257,6 +273,11 @@ function ConnectionBadge({ provider, connection }: { provider: ConnectorProvider
   if (connection.deleting) return <Badge variant="secondary">Disconnecting…</Badge>
   if (connection.ready) return <Badge>{connection.mode === 'readWrite' ? 'Linked · read and write' : 'Linked · read only'}</Badge>
   return <Badge variant="secondary">{connection.state || 'Pending'}</Badge>
+}
+
+/** A 403 from a verified person whose delegated token lacks the connector scope, as opposed to a non-personal identity. */
+function scopeDenied(error: unknown): boolean {
+  return /not authorized/i.test(errorText(error))
 }
 
 function errorText(error: unknown): string {

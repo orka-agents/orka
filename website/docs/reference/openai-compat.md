@@ -200,14 +200,14 @@ Concretely, Orka does five things to every request before it reaches the model:
 | # | What happens | Consequence for you |
 | --- | --- | --- |
 | 1 | **Your `tools` array is discarded.** Not merged — replaced. | Your client's own tools never run. |
-| 2 | 18 built-in Orka tools are injected. | The model can act on your cluster with the tools listed below. |
+| 2 | 19 built-in Orka tools are injected. | The model can act on your cluster with the tools listed below. |
 | 3 | The tool list is filtered against your context token's allowed tools, if you use [transaction tokens](../concepts/transaction-tokens.md). | Denied tools disappear rather than failing at call time. |
 | 4 | A large Orka system prompt is **prepended** to yours. | Your system prompt still applies, but it is no longer first. |
 | 5 | Tool history is stripped from your messages. `role: tool` messages are dropped; assistant messages keep their text but lose their tool calls; consecutive same-role messages are merged. | Sending back a conversation that contains client-side tool use loses that structure. |
 
 Orka then runs the tool loop itself and returns the final answer.
 
-The 18 injected tools:
+The 19 injected tools:
 
 | Group | Tools |
 | --- | --- |

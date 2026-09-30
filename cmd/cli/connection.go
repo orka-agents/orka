@@ -37,6 +37,8 @@ type connectionView struct {
 	Ready     bool   `json:"ready"`
 	LinkedAt  string `json:"linkedAt"`
 	Message   string `json:"message"`
+	// GrantSequence advances on every completed consent.
+	GrantSequence int64 `json:"grantSequence"`
 }
 
 // connectionAuthorizeView is the API's response to a consent start.
@@ -114,9 +116,9 @@ func newConnectCmd() *cobra.Command {
 					return err
 				}
 				// A link that was already Ready stays Ready while the new
-				// consent runs; only a later linkedAt proves this consent
-				// finished rather than reporting the old grant.
-				if current.Ready && (!started.Connection.Ready || current.LinkedAt != started.Connection.LinkedAt) {
+				// consent runs; only an advanced grant sequence proves this
+				// consent finished rather than reporting the old grant.
+				if current.Ready && (!started.Connection.Ready || current.GrantSequence > started.Connection.GrantSequence) {
 					fmt.Fprintf(out, "Linked %s (%s)\n", current.Provider, current.Mode) //nolint:errcheck
 					return nil
 				}
@@ -281,7 +283,9 @@ func newConnectionDeleteCmd() *cobra.Command {
 			if err := c.DeleteResource(context.Background(), connectionsAPIPath+"/"+url.PathEscape(args[0]), nil); err != nil {
 				return connectionError(err)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Connection deleted: %s\n", args[0]) //nolint:errcheck
+			// DELETE only starts the removal: the finalizer revokes the
+			// tokens first and may retry, so nothing is claimed finished.
+			fmt.Fprintf(cmd.OutOrStdout(), "Disconnect requested for %s: its tokens are being revoked and the link removed. Check with 'orka connection get %s'.\n", args[0], args[0]) //nolint:errcheck
 			return nil
 		},
 	}
@@ -354,7 +358,10 @@ func connectionError(err error) error {
 		return nil
 	}
 	if strings.Contains(err.Error(), "HTTP 403") {
-		return errors.Join(err, errors.New("linked accounts belong to a signed-in person: pass a personal OIDC or context token with --token (ServiceAccount tokens cannot link accounts)"))
+		if strings.Contains(err.Error(), "not authorized") {
+			return errors.Join(err, errors.New("this context token is not delegated the connector scope this command needs (orka:connectors:read to list, orka:connectors:manage to link or disconnect)"))
+		}
+		return errors.Join(err, errors.New("linked accounts belong to a signed-in person: pass your OIDC token with --token, or a context token with --txn-token (ServiceAccount tokens cannot link accounts)"))
 	}
 	return err
 }

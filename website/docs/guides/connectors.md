@@ -182,14 +182,19 @@ orka connection delete github-<digest>     # disconnect and revoke
 orka connection providers                  # what an operator has made available
 ```
 
-`orka connect` needs a personal token (`--token` with your OIDC or
-context token, or the token `orka config` stores); it explains a `403` from
-a ServiceAccount token. `--no-open` prints the consent URL instead of opening
+`orka connect` needs a personal token: your OIDC token with `--token` (or
+the token `orka config` stores), or a context token with `--txn-token` or
+`--txn-token-file` (it travels in the `Txn-Token` header; `--token` sends a
+bearer, which carries a context token only when the server opts in). It
+explains a `403`, whether from a ServiceAccount token or from a context
+token that lacks the connector scope. `--no-open` prints the consent URL instead of opening
 a browser, `--no-wait` returns as soon as consent has started. The provider
 sends the browser back to the dashboard, which finishes the link when it is
 signed in as you; when it is not, copy the value after `#completion=` from
-the address bar and run `orka connection complete <name> --completion
-<value>` so the CLI finishes it with your token instead.
+the address bar and run `orka connection complete <name> --namespace
+<namespace> --completion <value>` (the namespace the consent was started
+in; `orka connect` prints the exact command) so the CLI finishes it with
+your token instead.
 
 **API.**
 
@@ -265,9 +270,10 @@ same way through the broker.
 
 ### Chat and the compatibility proxies
 
-The GitHub read tools the chat and compatibility endpoints offer (for
-example `check_pull_request_ci` in coordinator mode) run as the signed-in
-person when they hold a Ready link to a provider that declares the tool:
+The GitHub read tools the compatibility proxies offer in coordinator mode
+(for example `check_pull_request_ci`) run as the signed-in person when they
+hold a Ready link to a provider that declares the tool (the dashboard chat
+offers no GitHub tools, only `list_connections`):
 the Connection is read live at call time, since there is no dispatch to
 freeze it. These surfaces execute tools directly, with no approval gate,
 so a linked write tool such as `create_pull_request` is refused there once
