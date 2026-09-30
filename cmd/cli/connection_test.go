@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -204,6 +205,7 @@ func TestConnectRejectsUnknownModeAndExplainsForbidden(t *testing.T) {
 }
 
 func TestConnectionListGetDeleteAndProviders(t *testing.T) {
+	providerReady := true
 	t.Setenv("HOME", t.TempDir())
 	var deleted string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -220,7 +222,7 @@ func TestConnectionListGetDeleteAndProviders(t *testing.T) {
 			w.WriteHeader(http.StatusNoContent)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/connectors":
 			json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{ //nolint:errcheck
-				{"name": "github", "displayName": "GitHub", "ready": true, "tools": []map[string]any{{"name": "list_pull_requests", "class": "read"}}},
+				{"name": "github", "displayName": "GitHub", "ready": providerReady, "tools": []map[string]any{{"name": "list_pull_requests", "class": "read"}}},
 			}})
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -243,6 +245,15 @@ func TestConnectionListGetDeleteAndProviders(t *testing.T) {
 	if out := run("connection", "list", "-o", "json"); !strings.Contains(out, `"provider": "github"`) {
 		t.Fatalf("list json = %q", out)
 	}
+	// A link whose provider is not accepted right now is not called ready.
+	providerReady = false
+	if out := run("connection", "list"); !strings.Contains(out, "Ready (provider unavailable)") || regexp.MustCompile(`\s+true\s+`).MatchString(out) {
+		t.Fatalf("list with an unaccepted provider = %q", out)
+	}
+	if out := run("connection", "get", "github-abc"); !strings.Contains(out, "provider unavailable") || !regexp.MustCompile(`Ready:\s+false`).MatchString(out) {
+		t.Fatalf("get with an unaccepted provider = %q", out)
+	}
+	providerReady = true
 	if out := run("connection", "get", "github-abc"); !strings.Contains(out, "Provider:") || !strings.Contains(out, "linked") {
 		t.Fatalf("get = %q", out)
 	}

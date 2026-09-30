@@ -582,8 +582,13 @@ func TestLiveLinkedAccounts(t *testing.T) {
 	if _, bound, err := accounts.BuiltinToolCredential(ctx, "web_search"); bound || err != nil {
 		t.Fatalf("web_search: bound = %t err = %v", bound, err)
 	}
-	if _, bound, err := accounts.BuiltinToolCredential(ctx, "get_issue"); bound || err != nil {
-		t.Fatalf("undeclared: bound = %t err = %v", bound, err)
+	// A tool the linked GitHub provider does not declare is refused while the
+	// link exists (the link stays bound); with no link it keeps its own path.
+	if _, bound, err := accounts.BuiltinToolCredential(ctx, "get_issue"); bound || err == nil || !strings.Contains(err.Error(), "no longer offers") {
+		t.Fatalf("undeclared with a link: bound = %t err = %v", bound, err)
+	}
+	if _, bound, err := LiveLinkedAccounts(f.reader(github), registry, source, "tenant", f.requester).BuiltinToolCredential(ctx, "get_issue"); bound || err != nil {
+		t.Fatalf("undeclared without a link: bound = %t err = %v", bound, err)
 	}
 }
 
@@ -626,6 +631,13 @@ func TestLiveLinkedAccountsUnusableLinkFailsClosed(t *testing.T) {
 	unlinked := LiveLinkedAccounts(f.reader(lagging), registry, source, "tenant", f.requester)
 	if _, bound, err := unlinked.BuiltinToolCredential(ctx, "list_pull_requests"); bound || err != nil {
 		t.Fatalf("lagging provider without a link: bound = %t err = %v", bound, err)
+	}
+	// A provider that dropped the tool from its catalog still owns the link:
+	// removing create_pull_request must not restore operator-credential writes.
+	narrowed := acceptedBuiltinProvider("github", "list_pull_requests")
+	narrowedLink := LiveLinkedAccounts(f.reader(narrowed, f.connection(corev1alpha1.ConnectionModeReadWrite, true)), registry, source, "tenant", f.requester)
+	if _, bound, err := narrowedLink.BuiltinToolCredential(ctx, "create_pull_request"); bound || err == nil || !strings.Contains(err.Error(), "no longer offers") {
+		t.Fatalf("withdrawn tool: bound = %t err = %v", bound, err)
 	}
 	// A link whose provider was deleted outright is bound and unusable too:
 	// nothing can say any more which tools it declared.
