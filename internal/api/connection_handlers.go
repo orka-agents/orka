@@ -679,7 +679,10 @@ func (h *Handlers) loadReadyConnectorProvider(ctx context.Context, namespace, na
 		return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to read connector provider")
 	}
 	if !connectors.ProviderAccepted(provider) {
-		return nil, fiber.NewError(fiber.StatusConflict, "connector provider is not ready")
+		// Retryable: the completion row is kept while the provider's
+		// conditions catch up. Every retryable conflict says "retry" so a
+		// client can tell it from a consent that can never be finished.
+		return nil, fiber.NewError(fiber.StatusConflict, "connector provider is not ready; retry shortly")
 	}
 	return provider, nil
 }

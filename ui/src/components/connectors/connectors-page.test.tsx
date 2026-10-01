@@ -163,9 +163,20 @@ describe('ConnectorsPage', () => {
   it('keeps a retryable conflict retryable', async () => {
     useProviders([github], [{ ...linked, state: 'Pending', ready: false }])
     window.history.replaceState(null, '', '/settings/connectors?status=pending&connection=github-abc#completion=one-time')
-    server.use(http.post(`${API}/connections/github-abc/complete`, () => new HttpResponse('connection is not yet protected by the controller; retry shortly', { status: 409 })))
+    let attempts = 0
+    server.use(http.post(`${API}/connections/github-abc/complete`, () => {
+      attempts += 1
+      // Both retryable conflicts the API can return while a completion is parked.
+      const message = attempts === 1 ? 'connection is not yet protected by the controller; retry shortly' : 'connector provider is not ready; retry shortly'
+      return new HttpResponse(message, { status: 409 })
+    }))
     render(<ConnectorsPage search={{ status: 'pending', connection: 'github-abc' }} />)
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('retry shortly'))
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+    expect(window.location.hash).toBe('#completion=one-time')
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(attempts).toBe(2))
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('provider is not ready'))
     expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
     expect(window.location.hash).toBe('#completion=one-time')
   })
