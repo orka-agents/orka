@@ -141,7 +141,11 @@ func (l liveLinkedAccounts) BuiltinToolCredential(ctx context.Context, toolName 
 	name := connectors.ConnectionName(info.Provider, l.requester.Issuer, l.requester.Subject)
 	if err := l.reader.Get(ctx, client.ObjectKey{Namespace: l.namespace, Name: name}, connection); err != nil {
 		if apierrors.IsNotFound(err) {
-			return tools.LinkedAccountCredential{}, false, nil
+			// No link to the provider that declares the tool; the person
+			// may still hold a link to another GitHub provider that no
+			// longer declares it (or was removed), and that link keeps
+			// the call bound rather than falling back.
+			return l.unacceptedProviderLink(ctx, toolName)
 		}
 		return tools.LinkedAccountCredential{}, false, fmt.Errorf("load connection %q: %w", name, err)
 	}

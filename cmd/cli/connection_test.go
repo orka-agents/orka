@@ -253,6 +253,13 @@ func TestConnectionListGetDeleteAndProviders(t *testing.T) {
 	if out := run("connection", "get", "github-abc"); !strings.Contains(out, "provider unavailable") || !regexp.MustCompile(`Ready:\s+false`).MatchString(out) {
 		t.Fatalf("get with an unaccepted provider = %q", out)
 	}
+	// Structured output carries the same joined readiness.
+	if out := run("connection", "list", "-o", "json"); !strings.Contains(out, `"ready": false`) || !strings.Contains(out, "provider unavailable") || !strings.Contains(out, `"linkedAt"`) {
+		t.Fatalf("list -o json with an unaccepted provider = %q", out)
+	}
+	if out := run("connection", "get", "github-abc", "-o", "json"); !strings.Contains(out, `"ready": false`) || !strings.Contains(out, `"message": "linked"`) {
+		t.Fatalf("get -o json with an unaccepted provider = %q", out)
+	}
 	providerReady = true
 	if out := run("connection", "get", "github-abc"); !strings.Contains(out, "Provider:") || !strings.Contains(out, "linked") {
 		t.Fatalf("get = %q", out)
