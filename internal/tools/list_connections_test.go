@@ -110,6 +110,24 @@ func TestListConnectionsTool(t *testing.T) {
 		laggingParsed.Data.Connections[0].State != corev1alpha1.ConnectionStatePending {
 		t.Fatalf("lagging provider connections = %+v", laggingParsed.Data.Connections)
 	}
+	// Two links to one provider are both reported, both unusable.
+	duplicate := linked.DeepCopy()
+	duplicate.Name = "my-second-github-link"
+	dupReader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(github, linked, duplicate).Build()
+	dupOut, err := tool.Execute(WithToolContext(context.Background(), &ToolContext{Namespace: "tenant", PolicyReader: dupReader, Requester: requester}), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dupParsed struct {
+		Data ListConnectionsResult `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(dupOut), &dupParsed); err != nil {
+		t.Fatal(err)
+	}
+	if len(dupParsed.Data.Connections) != 2 || dupParsed.Data.Connections[0].Ready || dupParsed.Data.Connections[1].Ready ||
+		!strings.Contains(dupParsed.Data.Connections[0].Message, "several links") {
+		t.Fatalf("duplicate connections = %+v", dupParsed.Data.Connections)
+	}
 	// A link being disconnected says so instead of a contradictory Ready.
 	terminating := linked.DeepCopy()
 	terminating.DeletionTimestamp = &metav1.Time{Time: metav1.Now().Time}

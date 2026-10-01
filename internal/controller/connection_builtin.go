@@ -215,16 +215,13 @@ func (l liveLinkedAccounts) unacceptedProviderLink(ctx context.Context, toolName
 			}
 			continue
 		}
-		connection := &corev1alpha1.Connection{}
-		name := connectors.ConnectionName(provider.Name, l.requester.Issuer, l.requester.Subject)
-		if err := l.reader.Get(ctx, client.ObjectKey{Namespace: l.namespace, Name: name}, connection); err != nil {
-			if apierrors.IsNotFound(err) {
-				continue
-			}
-			return tools.LinkedAccountCredential{}, false, fmt.Errorf("load connection %q: %w", name, err)
+		// Any of the person's links to this (declaring, unaccepted)
+		// provider, whatever its name: the canonical name is only one of them.
+		links, err := l.ownedConnectionsTo(ctx, provider.Name)
+		if err != nil {
+			return tools.LinkedAccountCredential{}, false, err
 		}
-		if connection.Spec.Subject.Issuer != l.requester.Issuer || connection.Spec.Subject.Subject != l.requester.Subject ||
-			connection.Spec.ProviderRef.Name != provider.Name {
+		if len(links) == 0 {
 			continue
 		}
 		return tools.LinkedAccountCredential{}, false, fmt.Errorf(

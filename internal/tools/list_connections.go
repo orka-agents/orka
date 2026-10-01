@@ -111,9 +111,13 @@ func (t *ListConnectionsTool) Execute(ctx context.Context, _ json.RawMessage) (s
 	if err != nil {
 		return classifyChatK8sErr(err)
 	}
-	byProvider := make(map[string]*corev1alpha1.Connection, len(owned))
+	// Every link is kept: a person can hold several Connections to one
+	// provider (created outside the API under their own names), and
+	// credential resolution refuses the tool while duplicates exist, so
+	// each one is reported rather than one hiding the rest.
+	byProvider := make(map[string][]*corev1alpha1.Connection, len(owned))
 	for i := range owned {
-		byProvider[owned[i].Spec.ProviderRef.Name] = &owned[i]
+		byProvider[owned[i].Spec.ProviderRef.Name] = append(byProvider[owned[i].Spec.ProviderRef.Name], &owned[i])
 	}
 	result := ListConnectionsResult{
 		Connections: []LinkedConnectionSummary{}, Available: []ConnectorProviderSummary{}, SettingsPath: ConnectorSettingsPath,
@@ -128,7 +132,7 @@ func (t *ListConnectionsTool) Execute(ctx context.Context, _ json.RawMessage) (s
 		for _, tool := range provider.Spec.Tools {
 			toolNames = append(toolNames, tool.Name+" ("+string(tool.Class)+")")
 		}
-		connection, linked := byProvider[provider.Name]
+		links, linked := byProvider[provider.Name]
 		if !linked {
 			result.Available = append(result.Available, ConnectorProviderSummary{
 				Provider: provider.Name, DisplayName: displayName, Ready: connectors.ProviderAccepted(provider), Tools: toolNames,
@@ -136,19 +140,29 @@ func (t *ListConnectionsTool) Execute(ctx context.Context, _ json.RawMessage) (s
 			continue
 		}
 		delete(byProvider, provider.Name)
-		summary := linkedConnectionSummary(connection, displayName, toolNames, false)
-		// Credential resolution refuses a link whose provider is not
-		// accepted, so the listing says so instead of advertising a link
-		// the Connection's own conditions have not caught up on.
-		if !connectors.ProviderAccepted(provider) {
-			summary.Ready = false
-			summary.Message = "the provider is not accepted right now (its spec changed or its references are invalid); the link cannot be used until it is"
+		for _, connection := range links {
+			summary := linkedConnectionSummary(connection, displayName, toolNames, false)
+			switch {
+			case len(links) > 1:
+				// Resolution refuses the tool while the person holds more
+				// than one link to the provider; each is reported unusable.
+				summary.Ready = false
+				summary.Message = "you hold several links to this provider; disconnect the extra ones under " + ConnectorSettingsPath + " before its tools can run"
+			case !connectors.ProviderAccepted(provider):
+				// Credential resolution refuses a link whose provider is not
+				// accepted, so the listing says so instead of advertising a
+				// link the Connection's own conditions have not caught up on.
+				summary.Ready = false
+				summary.Message = "the provider is not accepted right now (its spec changed or its references are invalid); the link cannot be used until it is"
+			}
+			result.Connections = append(result.Connections, summary)
 		}
-		result.Connections = append(result.Connections, summary)
 	}
 	for _, connection := range owned {
-		if retained, ok := byProvider[connection.Spec.ProviderRef.Name]; ok && retained.Name == connection.Name {
-			result.Connections = append(result.Connections, linkedConnectionSummary(retained, connection.Spec.ProviderRef.Name, []string{}, true))
+		for _, retained := range byProvider[connection.Spec.ProviderRef.Name] {
+			if retained.Name == connection.Name {
+				result.Connections = append(result.Connections, linkedConnectionSummary(retained, connection.Spec.ProviderRef.Name, []string{}, true))
+			}
 		}
 	}
 	return ChatToolSuccess(result)

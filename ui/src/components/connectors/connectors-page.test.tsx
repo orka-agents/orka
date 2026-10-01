@@ -229,6 +229,14 @@ describe('ConnectorsPage', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Limit to reads' })).toBeInTheDocument(), { timeout: 3000 })
   }, 15000)
 
+  it('shows an extra link to the same provider as disconnectable', async () => {
+    useProviders([github], [linked, { ...linked, name: 'my-second-github-link' }])
+    render(<ConnectorsPage />)
+    await waitFor(() => expect(screen.getByText('Extra link to this provider')).toBeInTheDocument())
+    expect(screen.getByText(/github · my-second-github-link/)).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: 'Disconnect' })).toHaveLength(2)
+  })
+
   it('explains a failed callback', async () => {
     useProviders([github])
     render(<ConnectorsPage search={{ status: 'error', reason: 'scopes_denied' }} />)
