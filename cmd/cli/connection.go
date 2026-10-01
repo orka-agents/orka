@@ -113,6 +113,17 @@ func newConnectCmd() *cobra.Command {
 					if ctx.Err() != nil {
 						return fmt.Errorf("connection %s did not become ready within %s; finish the consent and run 'orka connection get %s'", started.Connection.Name, timeout, started.Connection.Name)
 					}
+					// The API reads through a cache that may not hold the
+					// Connection the POST just created; a 404 here is a
+					// moment too early, not a verdict.
+					if strings.Contains(err.Error(), "HTTP 404") {
+						select {
+						case <-ctx.Done():
+							return fmt.Errorf("connection %s did not become ready within %s; finish the consent and run 'orka connection get %s'", started.Connection.Name, timeout, started.Connection.Name)
+						case <-time.After(connectionReadyPollInterval):
+						}
+						continue
+					}
 					return connectionError(err)
 				}
 				var current connectionView

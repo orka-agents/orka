@@ -151,30 +151,32 @@ func (l liveLinkedAccounts) BuiltinToolCredential(ctx context.Context, toolName 
 		// but unusable, never a reason to fall back to other credentials.
 		return l.unacceptedProviderLink(ctx, toolName)
 	}
+	// The person's links to the declaring provider, under any name: the
+	// API accepts any owned name and the reconciler adopts Connections
+	// created outside it, so the canonical name is only one possibility.
+	// Exactly one link is used (read fresh for its current readiness);
+	// several are refused outright, as the listing already reports them;
+	// none means another provider's link may still keep the call bound.
+	owned, err := l.ownedConnectionsTo(ctx, info.Provider)
+	if err != nil {
+		return tools.LinkedAccountCredential{}, false, err
+	}
+	switch len(owned) {
+	case 0:
+		return l.unacceptedProviderLink(ctx, toolName)
+	case 1:
+	default:
+		return tools.LinkedAccountCredential{}, false, fmt.Errorf(
+			"you hold %d links to %s; disconnect the extra ones under Settings > Connectors before using %s", len(owned), info.Provider, toolName)
+	}
 	connection := &corev1alpha1.Connection{}
-	name := connectors.ConnectionName(info.Provider, l.requester.Issuer, l.requester.Subject)
+	name := owned[0].Name
 	if err := l.reader.Get(ctx, client.ObjectKey{Namespace: l.namespace, Name: name}, connection); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return tools.LinkedAccountCredential{}, false, fmt.Errorf("load connection %q: %w", name, err)
+		if apierrors.IsNotFound(err) {
+			// Listed a moment ago and gone now: being removed, not unlinked.
+			return tools.LinkedAccountCredential{}, false, fmt.Errorf("your linked %s account is being removed; it cannot be used for %s", info.Provider, toolName)
 		}
-		// Not under the canonical name. The API accepts any owned name and
-		// the reconciler adopts Connections created outside it, so the
-		// person's link to this provider may exist under another name:
-		// exactly one such link is used; several are refused; none means
-		// another provider's link may still keep the call bound.
-		owned, err := l.ownedConnectionsTo(ctx, info.Provider)
-		if err != nil {
-			return tools.LinkedAccountCredential{}, false, err
-		}
-		switch len(owned) {
-		case 0:
-			return l.unacceptedProviderLink(ctx, toolName)
-		case 1:
-			connection = &owned[0]
-		default:
-			return tools.LinkedAccountCredential{}, false, fmt.Errorf(
-				"you hold %d links to %s; disconnect the extra ones under Settings > Connectors before using %s", len(owned), info.Provider, toolName)
-		}
+		return tools.LinkedAccountCredential{}, false, fmt.Errorf("load connection %q: %w", name, err)
 	}
 	if class == corev1alpha1.ConnectorToolClassWrite {
 		return tools.LinkedAccountCredential{}, false, fmt.Errorf(
