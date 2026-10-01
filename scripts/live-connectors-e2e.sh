@@ -163,8 +163,11 @@ log "Creating kind cluster ${cluster}"
 # Created directly with the e2e Kind config: the Makefile's setup target
 # treats any cluster whose name merely contains this one as "already
 # exists", which would leave this run's kubeconfig without a context.
-kind create cluster --name "${cluster}" --config "${repo_root}/test/e2e/kind-config.yaml"
+# Ownership is recorded before the fallible create: the preflight proved
+# the name free, so a cluster that fails mid-bootstrap is still this run's
+# to delete.
 created_kind_cluster="1"
+kind create cluster --name "${cluster}" --config "${repo_root}/test/e2e/kind-config.yaml"
 kubectl config use-context "kind-${cluster}" >/dev/null
 log "Installing current Orka CRDs"
 make install

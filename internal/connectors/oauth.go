@@ -120,10 +120,18 @@ func (e *OAuthError) IsInvalidGrant() bool {
 }
 
 // OAuthClient performs the authorization-code, refresh, and revocation calls
-// against public HTTPS endpoints only.
+// against public HTTPS endpoints. The one exception is the fixture-only
+// private-endpoint allowance (OAuthClientOptions.AllowPrivateEndpoints,
+// behind --connectors-allow-private-endpoints): it lets the client reach
+// private and cluster-local HTTPS endpoints through the hardened
+// PrivateEndpointDialContext, which still refuses infrastructure addresses.
+// Production configurations cannot enable it.
 type OAuthClient struct {
-	httpClient   *http.Client
-	now          func() time.Time // allowPrivate mirrors OAuthClientOptions.AllowPrivateEndpoints.
+	httpClient *http.Client
+	now        func() time.Time
+	// allowPrivate mirrors OAuthClientOptions.AllowPrivateEndpoints: when
+	// set, the public-address check on the token and revocation endpoints
+	// is skipped, because the dialer enforces the infrastructure block list.
 	allowPrivate bool
 }
 
