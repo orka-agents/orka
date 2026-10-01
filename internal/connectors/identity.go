@@ -16,6 +16,8 @@ import (
 	"strings"
 	"time"
 
+	"k8s.io/apimachinery/pkg/util/validation"
+
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -83,6 +85,18 @@ func ListSubjectConnections(ctx context.Context, reader client.Reader, namespace
 // ConnectionProviderLabel indexes Connections by provider.
 const ConnectionProviderLabel = "orka.ai/connector-provider"
 
+// ConnectionProviderLabelValue is the provider index label value: the
+// provider name when it is a valid label value, otherwise a digest of it,
+// since an object name may be 253 characters while a label value is
+// limited to 63.
+func ConnectionProviderLabelValue(provider string) string {
+	if len(provider) <= 63 && len(validation.IsValidLabelValue(provider)) == 0 {
+		return provider
+	}
+	sum := sha256.Sum256([]byte(provider))
+	return "sha256-" + hex.EncodeToString(sum[:])[:32]
+}
+
 // ConnectionLabels are the index labels every Connection should carry; the
 // API sets them at creation and the controller repairs them.
 func ConnectionLabels(connection *corev1alpha1.Connection) map[string]string {
@@ -91,7 +105,7 @@ func ConnectionLabels(connection *corev1alpha1.Connection) map[string]string {
 	}
 	return map[string]string{
 		ConnectionSubjectLabel:  ConnectionSubjectLabelValue(connection.Spec.Subject.Issuer, connection.Spec.Subject.Subject),
-		ConnectionProviderLabel: connection.Spec.ProviderRef.Name,
+		ConnectionProviderLabel: ConnectionProviderLabelValue(connection.Spec.ProviderRef.Name),
 	}
 }
 

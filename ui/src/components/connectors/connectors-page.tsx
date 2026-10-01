@@ -30,19 +30,49 @@ export function ConnectorsPage({ search, clearCallback }: ConnectorsPageProps) {
 
 function ConnectorsPageContent({ namespace, search, clearCallback }: { namespace: string; search: ConnectorCallbackSearch; clearCallback?: () => void }) {
   const queryClient = useQueryClient()
+  const setNamespace = useUIStore((s) => s.setNamespace)
   const params = namespace ? { namespace } : undefined
   const providers = useQuery({
     queryKey: ['connectors', namespace],
     queryFn: () => api.get<{ items: ConnectorProvider[] }>('/connectors', params),
   })
+  // What this page asked the server for and has not yet seen reflected:
+  // the list is served through an eventually consistent cache, so after a
+  // mode change or a disconnect the page keeps polling until the list
+  // shows the requested mode, or no longer shows the link at all.
+  const expectations = useRef(new Map<string, (connection: Connection | undefined) => boolean>())
+  // Only data the server returned settles an expectation; the optimistic
+  // cache writes below never do, or a stale refetch could end the polling.
+  const settleExpectations = (items: Connection[]) => {
+    for (const [name, satisfied] of expectations.current) {
+      if (satisfied(items.find((c) => c.name === name))) expectations.current.delete(name)
+    }
+  }
   const connections = useQuery({
     queryKey: ['connections', namespace],
-    queryFn: () => api.get<{ items: Connection[] }>('/connections', params),
+    queryFn: async () => {
+      const data = await api.get<{ items: Connection[] }>('/connections', params)
+      settleExpectations(data.items)
+      return data
+    },
     // Keep polling while a link is being established or torn down, so a
     // disconnect whose finalizer is still revoking tokens resolves on screen.
-    refetchInterval: (query) => (query.state.data?.items.some((c) => c.state === 'Pending' || c.deleting) ? 5000 : false),
+    refetchInterval: (query) => {
+      const items = query.state.data?.items
+      return items?.some((c) => c.state === 'Pending' || c.deleting) || expectations.current.size > 0 ? 5000 : false
+    },
   })
-  const invalidate = () => queryClient.invalidateQueries({ queryKey: ['connections', namespace] })
+  const invalidate = (target: string = namespace) => queryClient.invalidateQueries({ queryKey: ['connections', target] })
+  /** Writes the server's own view of a link into the list cache right away. */
+  const applyConnection = (connection: Connection) => {
+    queryClient.setQueryData<{ items: Connection[] }>(['connections', namespace], (current) => {
+      if (!current) return current
+      const items = current.items.some((c) => c.name === connection.name)
+        ? current.items.map((c) => (c.name === connection.name ? connection : c))
+        : [...current.items, connection]
+      return { items }
+    })
+  }
 
   // Finish a consent the provider just sent us back from. The completion
   // token stays in the fragment until the server accepts it, so a failed
@@ -64,8 +94,19 @@ function ConnectorsPageContent({ namespace, search, clearCallback }: { namespace
     onSuccess: (connection) => {
       clearConsentCallback()
       clearCallback?.()
+      const linkedIn = connection.namespace || completionNamespace
+      if (linkedIn && linkedIn !== namespace) {
+        // The consent was sealed in another namespace: switch the page to
+        // it (which remounts this content), or the new link would be
+        // invisible behind a success notice. The toast outlives the remount.
+        toast.success(`Linked ${connection.provider} (${connection.mode}) in ${linkedIn}`)
+        void invalidate(linkedIn)
+        setNamespace(linkedIn)
+        return
+      }
       setCallbackNotice({ tone: 'info', text: `Linked ${connection.provider} (${connection.mode}).` })
-      invalidate()
+      applyConnection(connection)
+      void invalidate()
     },
     onError: (error: unknown) => {
       // A conflict that asks for a retry (the controller has not adopted
@@ -113,7 +154,10 @@ function ConnectorsPageContent({ namespace, search, clearCallback }: { namespace
       if (result.authorizeURL) openAuthorizeURL(result.authorizeURL)
       else {
         toast.success(`Mode set to ${result.connection.mode}`)
-        invalidate()
+        const wanted = result.connection.mode
+        applyConnection(result.connection)
+        expectations.current.set(result.connection.name, (c) => c?.mode === wanted)
+        void invalidate()
       }
     },
     onError: (error: unknown) => toast.error(`Could not change the mode: ${errorText(error)}`),
@@ -125,7 +169,14 @@ function ConnectorsPageContent({ namespace, search, clearCallback }: { namespace
   })
   const disconnect = useMutation({
     mutationFn: (name: string) => api.delete<void>(`/connections/${encodeURIComponent(name)}`, params),
-    onSuccess: () => { toast.success('Disconnected'); invalidate() },
+    onSuccess: (_result, name) => {
+      toast.success('Disconnect requested')
+      // Shown as disconnecting right away, and polled until it is gone.
+      queryClient.setQueryData<{ items: Connection[] }>(['connections', namespace], (current) =>
+        current ? { items: current.items.map((c) => (c.name === name ? { ...c, deleting: true, ready: false } : c)) } : current)
+      expectations.current.set(name, (c) => c === undefined)
+      void invalidate()
+    },
     onError: (error: unknown) => toast.error(`Could not disconnect: ${errorText(error)}`),
   })
 
