@@ -148,7 +148,10 @@ func InfrastructureAddressDenied(ip net.IP) bool {
 	if ip == nil {
 		return false
 	}
-	if ip.Equal(net.ParseIP("169.254.169.254")) || ip.Equal(net.ParseIP("fd00:ec2::254")) {
+	// The whole link-local range: cloud metadata and credential services
+	// (169.254.169.254, EKS Pod Identity at 169.254.170.23, and the like)
+	// live there, and no fixture needs it; plus the IPv6 metadata address.
+	if ip.IsLinkLocalUnicast() || ip.Equal(net.ParseIP("fd00:ec2::254")) {
 		return true
 	}
 	if apiHost := net.ParseIP(strings.Trim(strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_HOST")), "[]")); apiHost != nil && ip.Equal(apiHost) {
@@ -336,12 +339,6 @@ func validateEndpointURL(field, raw string, required bool) *Issue {
 			return invalid(fmt.Sprintf("oauth.%s port must be between 1 and 65535", field))
 		}
 	}
-	// The fixed infrastructure hosts (cloud metadata, the Kubernetes API)
-	// stay denied even under the fixture allowance, which relaxes only the
-	// general private, loopback, and cluster-local rules.
-	if InfrastructureHostDenied(host) {
-		return invalid(fmt.Sprintf("oauth.%s host is not allowed", field))
-	}
 	if !PrivateEndpointsAllowed() {
 		if hostDenied(strings.ToLower(host)) {
 			return invalid(fmt.Sprintf("oauth.%s host is not allowed", field))
@@ -349,6 +346,13 @@ func validateEndpointURL(field, raw string, required bool) *Issue {
 		if ip := net.ParseIP(host); ip != nil && !tokenexchange.IsPublicAddress(ip) {
 			return invalid(fmt.Sprintf("oauth.%s must not target private, loopback, or link-local addresses", field))
 		}
+	}
+	// The fixed infrastructure hosts (cloud metadata and credential services
+	// on the link-local range, the Kubernetes API) stay denied even under
+	// the fixture allowance, which relaxes only the general private,
+	// loopback, and cluster-local rules.
+	if InfrastructureHostDenied(host) {
+		return invalid(fmt.Sprintf("oauth.%s host is not allowed", field))
 	}
 	if ip := net.ParseIP(host); ip == nil && nonCanonicalNumericHost(host) {
 		return invalid(fmt.Sprintf("oauth.%s host must be a hostname or a canonical IP address", field))

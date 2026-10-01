@@ -19,6 +19,9 @@ func TestConnectorPrivateEndpointsPermitted(t *testing.T) {
 	if ok, err := connectorPrivateEndpointsPermitted(ack, "http://localhost:18080"); !ok || err != nil {
 		t.Fatalf("local fixture = %t %v", ok, err)
 	}
+	if ok, err := connectorPrivateEndpointsPermitted(ack, "http://[::1]:18080"); !ok || err != nil {
+		t.Fatalf("IPv6 loopback: ok = %t err = %v", ok, err)
+	}
 	if ok, err := connectorPrivateEndpointsPermitted(ack, "http://127.0.0.1:18080/"); !ok || err != nil {
 		t.Fatalf("loopback fixture = %t %v", ok, err)
 	}

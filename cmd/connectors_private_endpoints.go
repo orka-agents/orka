@@ -34,9 +34,19 @@ func connectorPrivateEndpointsPermitted(acknowledgement, callbackBaseURL string)
 			ConnectorPrivateEndpointsAcknowledgement)
 	}
 	parsed, err := url.Parse(strings.TrimSpace(callbackBaseURL))
-	if err != nil || parsed.Scheme != "http" || (parsed.Hostname() != "localhost" && parsed.Hostname() != "127.0.0.1") {
+	if err != nil || parsed.Scheme != "http" || !localhostName(parsed.Hostname()) {
 		return false, errors.New("--connectors-allow-private-endpoints is for local fixtures only: " +
 			"it requires a plain-http localhost --connector-callback-base-url")
 	}
 	return true, nil
+}
+
+// localhostName accepts the loopback names the connector callback validator
+// accepts: localhost and the IPv4/IPv6 loopback literals.
+func localhostName(host string) bool {
+	switch strings.ToLower(host) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	return false
 }

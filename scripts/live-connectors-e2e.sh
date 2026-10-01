@@ -160,7 +160,10 @@ if kind get clusters 2>/dev/null | grep -qx "${cluster}"; then
   die "kind cluster ${cluster} already exists; delete it or set KIND_CLUSTER to an unused name"
 fi
 log "Creating kind cluster ${cluster}"
-make setup-test-e2e KIND_CLUSTER="${cluster}"
+# Created directly with the e2e Kind config: the Makefile's setup target
+# treats any cluster whose name merely contains this one as "already
+# exists", which would leave this run's kubeconfig without a context.
+kind create cluster --name "${cluster}" --config "${repo_root}/test/e2e/kind-config.yaml"
 created_kind_cluster="1"
 kubectl config use-context "kind-${cluster}" >/dev/null
 log "Installing current Orka CRDs"
