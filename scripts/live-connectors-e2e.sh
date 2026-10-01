@@ -32,7 +32,6 @@ namespace="${ORKA_NAMESPACE:-orka-system}"
 deployment="${ORKA_CONTROLLER_DEPLOYMENT:-orka-controller-manager}"
 manager_image="${ORKA_MANAGER_IMAGE:-orka-controller:live-connectors-e2e}"
 worker_image="${ORKA_AI_WORKER_IMAGE:-orka-ai-worker:live-connectors-e2e}"
-publisher_image="${ORKA_WORKSPACE_PUBLISHER_IMAGE:-orka-workspace-publisher:live-connectors-e2e}"
 fixture_image="${ORKA_CONNECTORS_FIXTURE_IMAGE:-orka-connectors-fixture:live-connectors-e2e}"
 api_port="${ORKA_API_LOCAL_PORT:-18080}"
 fixture_port="${ORKA_FIXTURE_LOCAL_PORT:-18081}"
@@ -187,12 +186,14 @@ orka_kind_registry_start "${cluster}"
 log "Building and loading images"
 make docker-build IMG="${manager_image}"
 make docker-build-ai-worker AI_WORKER_IMG="${worker_image}"
-make docker-build-workspace-publisher WORKSPACE_PUBLISHER_IMG="${publisher_image}"
 docker build -f test/fixtures/connectors/Dockerfile -t "${fixture_image}" .
 kind load docker-image "${manager_image}" "${worker_image}" "${fixture_image}" --name "${cluster}"
 manager_ref="$(orka_kind_registry_push "${manager_image}" "orka/controller")"
-publisher_ref="$(orka_kind_registry_push "${publisher_image}" "orka/workspace-publisher")"
 placeholder_digest="sha256:$(printf '0%.0s' {1..64})"
+# This lane never publishes a workspace, so the publisher image stays an
+# inert digest-pinned reference like the unused ACP runtimes; an unrelated
+# publisher build failure cannot block the connector lifecycle checks.
+publisher_ref="example.invalid/orka/workspace-publisher@${placeholder_digest}"
 
 log "Bootstrapping test-only admission TLS (task provenance webhook)"
 orka_e2e_bootstrap_admission_tls
