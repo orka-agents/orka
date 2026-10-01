@@ -8,6 +8,8 @@ package tools
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -179,10 +181,30 @@ type ToolContext struct {
 type CreatedTasks struct {
 	mu   sync.Mutex
 	uids map[string]string
+	// workspaces digests each created Task's spec.workspace as created, so
+	// a later linked call can refuse a Task whose repository scope was
+	// changed after this turn chose it.
+	workspaces map[string]string
 }
 
 // NewCreatedTasks returns an empty set for one turn.
-func NewCreatedTasks() *CreatedTasks { return &CreatedTasks{uids: map[string]string{}} }
+func NewCreatedTasks() *CreatedTasks {
+	return &CreatedTasks{uids: map[string]string{}, workspaces: map[string]string{}}
+}
+
+// WorkspaceDigest is a stable digest of a Task's workspace as the turn
+// created it; "" when the Task has no workspace.
+func WorkspaceDigest(task *corev1alpha1.Task) string {
+	if task == nil || task.Spec.Workspace == nil {
+		return ""
+	}
+	raw, err := json.Marshal(task.Spec.Workspace)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
 
 func createdTaskKey(namespace, name string) string {
 	return strings.TrimSpace(namespace) + "/" + strings.TrimSpace(name)
@@ -197,7 +219,20 @@ func (tc *ToolContext) RecordCreatedTask(task *corev1alpha1.Task) {
 	}
 	tc.CreatedTasks.mu.Lock()
 	defer tc.CreatedTasks.mu.Unlock()
-	tc.CreatedTasks.uids[createdTaskKey(task.Namespace, task.Name)] = string(task.UID)
+	key := createdTaskKey(task.Namespace, task.Name)
+	tc.CreatedTasks.uids[key] = string(task.UID)
+	tc.CreatedTasks.workspaces[key] = WorkspaceDigest(task)
+}
+
+// CreatedTaskWorkspaceDigest returns the workspace digest recorded for a
+// Task this turn created, or "" when none was recorded.
+func (tc *ToolContext) CreatedTaskWorkspaceDigest(namespace, name string) string {
+	if tc == nil || tc.CreatedTasks == nil {
+		return ""
+	}
+	tc.CreatedTasks.mu.Lock()
+	defer tc.CreatedTasks.mu.Unlock()
+	return tc.CreatedTasks.workspaces[createdTaskKey(namespace, name)]
 }
 
 // CreatedTaskUID returns the UID of the Task this turn's tools created

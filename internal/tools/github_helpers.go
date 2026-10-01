@@ -327,6 +327,11 @@ func linkedCreatedTaskScopeAllowed(ctx context.Context, k8sClient client.Client,
 	if string(task.UID) != uid {
 		return "", fmt.Errorf("task_name %q is not the task this conversation created (identity changed)", taskName)
 	}
+	// The repository scope is the one this turn chose at creation: a
+	// workspace edited since then may not redirect the person's token.
+	if WorkspaceDigest(&task) != tc.CreatedTaskWorkspaceDigest(namespace, taskName) {
+		return "", fmt.Errorf("task_name %q: its workspace changed after this conversation created it, so it cannot scope the linked account", taskName)
+	}
 	requested := task.Spec.RequestedBy
 	if requested == nil || requested.Issuer != tc.Requester.Issuer || requested.Subject != tc.Requester.Subject {
 		return "", fmt.Errorf("task_name %q was not requested by the person whose linked account this call uses", taskName)

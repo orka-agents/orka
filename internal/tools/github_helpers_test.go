@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/types"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -783,6 +785,22 @@ func TestResolveRepoAndToken_LinkedAccountFirst(t *testing.T) {
 	outsideCtx.RecordCreatedTask(elsewhere)
 	if _, repo, token, _, err := resolveScopedReadRepoAndToken(outside, k8sClient, "list_pull_requests", "elsewhere-task", "", ""); err != nil || repo != "elserepo" || token != "linked-token" {
 		t.Fatalf("other-namespace created task: repo=%q token=%q err=%v", repo, token, err)
+	}
+	// A workspace edited after creation no longer scopes the linked token.
+	drifted := &corev1alpha1.Task{}
+	if err := k8sClient.Get(context.Background(), types.NamespacedName{Name: "elsewhere-task", Namespace: "elsewhere"}, drifted); err != nil {
+		t.Fatal(err)
+	}
+	drifted.Spec.Workspace.GitRepo = "https://github.com/victim/repo"
+	if err := k8sClient.Update(context.Background(), drifted); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, _, err := resolveScopedReadRepoAndToken(outside, k8sClient, "list_pull_requests", "elsewhere-task", "", ""); err == nil || !strings.Contains(err.Error(), "workspace changed") {
+		t.Fatalf("drifted workspace err = %v", err)
+	}
+	drifted.Spec.Workspace.GitRepo = "https://github.com/elseorg/elserepo"
+	if err := k8sClient.Update(context.Background(), drifted); err != nil {
+		t.Fatal(err)
 	}
 	// The same name recorded in two namespaces is ambiguous and refused.
 	twin := elsewhere.DeepCopy()

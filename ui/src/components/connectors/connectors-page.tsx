@@ -83,6 +83,13 @@ function ConnectorsPageContent({ namespace, search, clearCallback }: { namespace
   const completionNamespace = search.namespace || namespace
   const completionParams = completionNamespace ? { namespace: completionNamespace } : undefined
   const completionAttempted = useRef(false)
+  // A failed consent that was sealed in another namespace is recovered
+  // there: the page switches to it so "start the link again" targets the
+  // affected provider and Connection (the content remounts with the same
+  // callback search, so the error notice is kept).
+  useEffect(() => {
+    if (search.status === 'error' && search.namespace && search.namespace !== namespace) setNamespace(search.namespace)
+  }, [search.status, search.namespace, namespace, setNamespace])
   const [callbackNotice, setCallbackNotice] = useState<{ tone: 'error' | 'info'; text: string; retry?: boolean } | null>(() => {
     if (search.status === 'error') return { tone: 'error', text: callbackReasonMessage(search.reason) }
     if (returning && !completionToken) return { tone: 'error', text: 'The consent came back without a completion token. Start the link again.' }
@@ -118,6 +125,12 @@ function ConnectorsPageContent({ namespace, search, clearCallback }: { namespace
         clearConsentCallback()
         clearCallback?.()
         setCallbackNotice({ tone: 'error', text: `This consent can no longer be finished (${errorText(error)}). Start the link again.` })
+        return
+      }
+      if (isForbiddenError(error) && scopeDenied(error)) {
+        // Signed in as themselves, but the delegated token may not manage
+        // links; the CLI fallback would fail with the same token.
+        setCallbackNotice({ tone: 'error', text: `Could not finish linking: ${errorText(error)}. This token lacks the connector-manage scope (orka:connectors:manage); finish with a token that carries it.`, retry: true })
         return
       }
       const command = completionCommand(search.connection, search.namespace)
