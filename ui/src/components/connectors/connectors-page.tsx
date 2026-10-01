@@ -110,10 +110,11 @@ function ConnectorsPageContent({ namespace, search, clearCallback }: { namespace
     },
     onError: (error: unknown) => {
       // A conflict that asks for a retry (the controller has not adopted
-      // the Connection yet, or a committed completion still needs its
-      // status pass) keeps the token; any other conflict means the consent
-      // expired or was superseded and can never succeed.
-      if (isConflictError(error) && !/retry/i.test(errorText(error))) {
+      // the Connection yet, the provider is not accepted right now, or a
+      // committed completion still needs its status pass) keeps the token;
+      // the API phrases every retryable conflict with "retry". Any other
+      // conflict means the consent expired or was superseded.
+      if (isConflictError(error) && !isRetryableConflict(error)) {
         clearConsentCallback()
         clearCallback?.()
         setCallbackNotice({ tone: 'error', text: `This consent can no longer be finished (${errorText(error)}). Start the link again.` })
@@ -337,6 +338,11 @@ function ConnectionBadge({ provider, connection }: { provider: ConnectorProvider
   if (!provider.ready) return <Badge variant="secondary">Linked · provider unavailable</Badge>
   if (connection.ready) return <Badge>{connection.mode === 'readWrite' ? 'Linked · read and write' : 'Linked · read only'}</Badge>
   return <Badge variant="secondary">{connection.state || 'Pending'}</Badge>
+}
+
+/** The API words every conflict a later attempt can clear with "retry". */
+function isRetryableConflict(error: unknown): boolean {
+  return /retry/i.test(errorText(error))
 }
 
 /** A 403 from a verified person whose delegated token lacks the connector scope, as opposed to a non-personal identity. */
