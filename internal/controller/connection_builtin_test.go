@@ -652,10 +652,12 @@ func TestLiveLinkedAccountsUnusableLinkFailsClosed(t *testing.T) {
 		t.Fatalf("withdrawn tool on a second provider: bound = %t err = %v", bound, err)
 	}
 	// A link whose provider was deleted outright is bound and unusable too:
-	// nothing can say any more which tools it declared.
+	// nothing can say any more which tools it declared. It is found even
+	// without its index label (created outside the API, or label stripped).
 	orphan := f.connection(corev1alpha1.ConnectionModeReadWrite, true)
 	orphan.Name = connectors.ConnectionName("gone", f.requester.Issuer, f.requester.Subject)
 	orphan.Spec.ProviderRef.Name = "gone"
+	orphan.Labels = nil
 	orphaned := LiveLinkedAccounts(f.reader(orphan), registry, source, "tenant", f.requester)
 	if _, bound, err := orphaned.BuiltinToolCredential(ctx, "create_pull_request"); bound || err == nil || !strings.Contains(err.Error(), "no longer configured") {
 		t.Fatalf("orphaned link: bound = %t err = %v", bound, err)

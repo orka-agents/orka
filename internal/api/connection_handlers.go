@@ -37,7 +37,7 @@ const (
 	// exposing the raw subject as a label value.
 	ConnectionSubjectDigestLabel = connectors.ConnectionSubjectLabel
 	// ConnectionProviderLabel indexes Connections by provider.
-	ConnectionProviderLabel = "orka.ai/connector-provider"
+	ConnectionProviderLabel = connectors.ConnectionProviderLabel
 
 	connectorSettingsPath     = "/settings/connectors"
 	connectorSchemeHTTPS      = "https"
