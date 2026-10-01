@@ -639,6 +639,18 @@ func TestLiveLinkedAccountsUnusableLinkFailsClosed(t *testing.T) {
 	if _, bound, err := narrowedLink.BuiltinToolCredential(ctx, "create_pull_request"); bound || err == nil || !strings.Contains(err.Error(), "no longer offers") {
 		t.Fatalf("withdrawn tool: bound = %t err = %v", bound, err)
 	}
+	// Two GitHub providers: A declares the tool and is unlinked, B owns the
+	// person's link but withdrew the tool. The link to B keeps the call
+	// bound; A's declaration is no reason to fall back.
+	other := acceptedBuiltinProvider("github2", "list_pull_requests")
+	other.Spec.OAuth.ClientID = "other"
+	linkToOther := f.connection(corev1alpha1.ConnectionModeReadWrite, true)
+	linkToOther.Name = connectors.ConnectionName("github2", f.requester.Issuer, f.requester.Subject)
+	linkToOther.Spec.ProviderRef.Name = "github2"
+	two := LiveLinkedAccounts(f.reader(acceptedBuiltinProvider("github", "create_pull_request"), other, linkToOther), registry, source, "tenant", f.requester)
+	if _, bound, err := two.BuiltinToolCredential(ctx, "create_pull_request"); bound || err == nil || !strings.Contains(err.Error(), "no longer offers") {
+		t.Fatalf("withdrawn tool on a second provider: bound = %t err = %v", bound, err)
+	}
 	// A link whose provider was deleted outright is bound and unusable too:
 	// nothing can say any more which tools it declared.
 	orphan := f.connection(corev1alpha1.ConnectionModeReadWrite, true)

@@ -197,6 +197,25 @@ func joinProviderReadiness(item connectionView, providersReady map[string]bool) 
 	return item
 }
 
+// joinProviderReadinessInto is joinProviderReadiness for the raw API
+// object, so structured output keeps every field the API returned.
+func joinProviderReadinessInto(item map[string]any, providersReady map[string]bool) {
+	ready, _ := item["ready"].(bool)
+	if !ready {
+		return
+	}
+	provider, _ := item["provider"].(string)
+	if providerReady, configured := providersReady[provider]; configured && providerReady {
+		return
+	}
+	item["ready"] = false
+	state, _ := item["state"].(string)
+	item["state"] = state + " (provider unavailable)"
+	if message, _ := item["message"].(string); message == "" {
+		item["message"] = "the provider is not accepted right now, so this link cannot be used"
+	}
+}
+
 func newConnectionCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "connection", Short: "Manage your linked accounts"}
 	cmd.AddCommand(newConnectionListCmd(), newConnectionGetCmd(), newConnectionCompleteCmd(), newConnectionDeleteCmd(), newConnectionProvidersCmd())
@@ -217,8 +236,23 @@ func newConnectionListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			providersReady, err := providerReadiness(cmd.Context(), c)
+			if err != nil {
+				return connectionError(err)
+			}
 			if format != outputTable {
-				return printStructuredTo(cmd.OutOrStdout(), format, raw)
+				// Structured output carries the same joined readiness as
+				// the table, so scripts never see a link the resolver refuses.
+				var payload struct {
+					Items []map[string]any `json:"items"`
+				}
+				if err := decodeInto(raw, &payload); err != nil {
+					return err
+				}
+				for i := range payload.Items {
+					joinProviderReadinessInto(payload.Items[i], providersReady)
+				}
+				return printStructuredTo(cmd.OutOrStdout(), format, payload)
 			}
 			var list struct {
 				Items []connectionView `json:"items"`
@@ -229,10 +263,6 @@ func newConnectionListCmd() *cobra.Command {
 			if len(list.Items) == 0 {
 				fmt.Fprintln(cmd.OutOrStdout(), "No linked accounts. Link one with 'orka connect <provider>'.") //nolint:errcheck
 				return nil
-			}
-			providersReady, err := providerReadiness(cmd.Context(), c)
-			if err != nil {
-				return connectionError(err)
 			}
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
 			fmt.Fprintln(w, "NAME\tPROVIDER\tMODE\tSTATE\tREADY\tLINKED") //nolint:errcheck
@@ -262,16 +292,21 @@ func newConnectionGetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			providersReady, err := providerReadiness(cmd.Context(), c)
+			if err != nil {
+				return connectionError(err)
+			}
 			if format != outputTable {
-				return printStructuredTo(cmd.OutOrStdout(), format, raw)
+				var payload map[string]any
+				if err := decodeInto(raw, &payload); err != nil {
+					return err
+				}
+				joinProviderReadinessInto(payload, providersReady)
+				return printStructuredTo(cmd.OutOrStdout(), format, payload)
 			}
 			var item connectionView
 			if err := decodeInto(raw, &item); err != nil {
 				return err
-			}
-			providersReady, err := providerReadiness(cmd.Context(), c)
-			if err != nil {
-				return connectionError(err)
 			}
 			item = joinProviderReadiness(item, providersReady)
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
