@@ -316,6 +316,35 @@ func TestConnectionReconcilerProviderResolution(t *testing.T) {
 	}
 }
 
+func TestConnectionReconcilerRepairsIndexLabels(t *testing.T) {
+	scheme := connectorTestScheme(t)
+	connection := testConnection("tenant", "github-alice", "github")
+	connection.Labels = map[string]string{"orka.ai/connection-subject": "stale"} // stripped provider label, wrong subject digest
+	provider := acceptedConnectorProvider()
+	c := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(connection, provider).WithStatusSubresource(&corev1alpha1.Connection{}).Build()
+	reconciler := &ConnectionReconciler{Client: c, Scheme: scheme}
+	key := types.NamespacedName{Namespace: "tenant", Name: "github-alice"}
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	repaired := &corev1alpha1.Connection{}
+	if err := c.Get(context.Background(), key, repaired); err != nil {
+		t.Fatal(err)
+	}
+	want := connectors.ConnectionLabels(repaired)
+	for key, value := range want {
+		if repaired.Labels[key] != value {
+			t.Fatalf("label %s = %q, want %q (labels %v)", key, repaired.Labels[key], value, repaired.Labels)
+		}
+	}
+	// The repaired object is now found by the label-indexed listing.
+	owned, err := connectors.ListSubjectConnections(context.Background(), c, "tenant",
+		&corev1alpha1.RequestedBy{Issuer: repaired.Spec.Subject.Issuer, Subject: repaired.Spec.Subject.Subject})
+	if err != nil || len(owned) != 1 {
+		t.Fatalf("owned = %d err = %v", len(owned), err)
+	}
+}
+
 func TestConnectionReconcilerSteadyStateAndErrors(t *testing.T) {
 	scheme := connectorTestScheme(t)
 	connection := testConnection("tenant", "github-alice", "github")

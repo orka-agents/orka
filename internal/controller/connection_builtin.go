@@ -208,7 +208,9 @@ func (l liveLinkedAccounts) unacceptedProviderLink(ctx context.Context, toolName
 	// disconnects it. Whether that provider declared toolName can no longer
 	// be known, so the link is bound and unusable rather than a reason to
 	// run on other credentials.
-	owned, err := connectors.ListSubjectConnections(ctx, l.reader, l.namespace, l.requester)
+	// Authoritative (unlabeled) listing: a link created outside the API or
+	// with its index label stripped must still keep the call bound.
+	owned, err := connectors.ListSubjectConnectionsAuthoritative(ctx, l.reader, l.namespace, l.requester)
 	if err != nil {
 		return tools.LinkedAccountCredential{}, false, fmt.Errorf("list the requester's connections: %w", err)
 	}

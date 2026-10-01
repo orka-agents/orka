@@ -80,6 +80,45 @@ func ListSubjectConnections(ctx context.Context, reader client.Reader, namespace
 	return owned, nil
 }
 
+// ConnectionProviderLabel indexes Connections by provider.
+const ConnectionProviderLabel = "orka.ai/connector-provider"
+
+// ConnectionLabels are the index labels every Connection should carry; the
+// API sets them at creation and the controller repairs them.
+func ConnectionLabels(connection *corev1alpha1.Connection) map[string]string {
+	if connection == nil {
+		return nil
+	}
+	return map[string]string{
+		ConnectionSubjectLabel:  ConnectionSubjectLabelValue(connection.Spec.Subject.Issuer, connection.Spec.Subject.Subject),
+		ConnectionProviderLabel: connection.Spec.ProviderRef.Name,
+	}
+}
+
+// ListSubjectConnectionsAuthoritative returns the person's Connections in
+// namespace without relying on the index label: it lists every Connection
+// there and keeps those whose spec names the requester exactly. The
+// controller's cached reader makes this cheap; fail-closed decisions use it
+// so an object created outside the API, or with its label stripped, can
+// never look unlinked.
+func ListSubjectConnectionsAuthoritative(ctx context.Context, reader client.Reader, namespace string, requester *corev1alpha1.RequestedBy) ([]corev1alpha1.Connection, error) {
+	if reader == nil || requester == nil {
+		return nil, nil
+	}
+	list := &corev1alpha1.ConnectionList{}
+	if err := reader.List(ctx, list, client.InNamespace(namespace)); err != nil {
+		return nil, err
+	}
+	var owned []corev1alpha1.Connection
+	for i := range list.Items {
+		connection := &list.Items[i]
+		if connection.Spec.Subject.Issuer == requester.Issuer && connection.Spec.Subject.Subject == requester.Subject {
+			owned = append(owned, *connection)
+		}
+	}
+	return owned, nil
+}
+
 // ConnectionName derives the deterministic name for one person's Connection
 // to one provider, so a person has at most one Connection per provider. The
 // digest covers the full provider name, so two providers that share a long

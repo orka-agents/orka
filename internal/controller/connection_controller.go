@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 	"strings"
 	"time"
@@ -86,6 +87,20 @@ func (r *ConnectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: connectionRequeueInterval}, nil
+	}
+
+	// The index labels are what the API lists by; an object created
+	// outside the API, or with a label stripped, is repaired here so the
+	// person's listing never misses a link it owns.
+	if want := connectors.ConnectionLabels(connection); !labelsPresent(connection.Labels, want) {
+		base := connection.DeepCopy()
+		if connection.Labels == nil {
+			connection.Labels = map[string]string{}
+		}
+		maps.Copy(connection.Labels, want)
+		if err := r.Patch(ctx, connection, client.MergeFrom(base)); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	r.reapExpiredCompletions(ctx, connection)
@@ -546,4 +561,14 @@ func (r *ConnectionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&corev1alpha1.ConnectorProvider{}, handler.EnqueueRequestsFromMapFunc(r.requestsForProvider)).
 		Named("connection").
 		Complete(r)
+}
+
+// labelsPresent reports whether every wanted label is set to its value.
+func labelsPresent(have, want map[string]string) bool {
+	for key, value := range want {
+		if have[key] != value {
+			return false
+		}
+	}
+	return true
 }
