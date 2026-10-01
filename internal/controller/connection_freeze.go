@@ -531,10 +531,26 @@ func requesterConnection(ctx context.Context, reader client.Reader, task *corev1
 	connection := &corev1alpha1.Connection{}
 	name := connectors.ConnectionName(provider, requester.Issuer, requester.Subject)
 	if err := reader.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: name}, connection); err != nil {
-		if apierrors.IsNotFound(err) {
+		if !apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("load connection %q: %w", name, err)
+		}
+		// The person's link may live under a non-canonical name (created
+		// outside the API and adopted): exactly one such link to the
+		// provider is used; several are ambiguous and bind nothing.
+		owned, err := connectors.ListSubjectConnectionsAuthoritative(ctx, reader, task.Namespace, requester)
+		if err != nil {
+			return nil, fmt.Errorf("list the requester's connections: %w", err)
+		}
+		var matching []corev1alpha1.Connection
+		for i := range owned {
+			if owned[i].Spec.ProviderRef.Name == provider {
+				matching = append(matching, owned[i])
+			}
+		}
+		if len(matching) != 1 {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("load connection %q: %w", name, err)
+		connection = &matching[0]
 	}
 	if !connectionReadyFor(connection, requester, provider) {
 		return nil, nil
@@ -783,7 +799,7 @@ func FrozenConnectionsFromTaskStatus(task *corev1alpha1.Task) map[string]outboun
 	frozen := make(map[string]outboundaccess.FrozenConnection, len(task.Status.ConnectionBindings))
 	for _, binding := range task.Status.ConnectionBindings {
 		frozen[binding.PolicyName] = outboundaccess.FrozenConnection{
-			UID: binding.UID, Generation: binding.Generation, GrantSequence: binding.GrantSequence,
+			Name: binding.ConnectionName, UID: binding.UID, Generation: binding.Generation, GrantSequence: binding.GrantSequence,
 		}
 	}
 	return frozen
@@ -880,7 +896,7 @@ func frozenConnectionsFromSnapshot(body agentExecutionSnapshotBody) map[string]o
 	frozen := make(map[string]outboundaccess.FrozenConnection, len(body.Connections))
 	for _, connection := range body.Connections {
 		frozen[connection.PolicyName] = outboundaccess.FrozenConnection{
-			UID: connection.UID, Generation: connection.Generation, GrantSequence: connection.GrantSequence,
+			Name: connection.ConnectionName, UID: connection.UID, Generation: connection.Generation, GrantSequence: connection.GrantSequence,
 			PolicyUID: connection.PolicyUID, PolicyGeneration: connection.PolicyGeneration, Provider: connection.Provider,
 		}
 	}

@@ -45,7 +45,7 @@ func TestListConnectionsTool(t *testing.T) {
 			Labels: map[string]string{connectors.ConnectionSubjectLabel: connectors.ConnectionSubjectLabelValue(requester.Issuer, requester.Subject)}},
 		Spec: corev1alpha1.ConnectionSpec{Subject: corev1alpha1.ConnectionSubject{Issuer: requester.Issuer, Subject: requester.Subject},
 			ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}, Mode: corev1alpha1.ConnectionModeReadWrite},
-		Status: corev1alpha1.ConnectionStatus{State: "Ready", GrantSequence: 1, LinkedAt: &metav1.Time{Time: metav1.Now().Time}, Conditions: []metav1.Condition{
+		Status: corev1alpha1.ConnectionStatus{State: "Ready", GrantSequence: 1, LinkedAt: &metav1.Time{Time: metav1.Now().Time}, Consent: connectors.ConsentFor(github), Conditions: []metav1.Condition{
 			{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonLinked, ObservedGeneration: 2},
 			{Type: corev1alpha1.ConnectionConditionScopesGranted, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonScopesGranted, ObservedGeneration: 2},
 			{Type: corev1alpha1.ConnectionConditionProviderResolved, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonProviderResolved, ObservedGeneration: 2},
@@ -127,6 +127,24 @@ func TestListConnectionsTool(t *testing.T) {
 	if len(dupParsed.Data.Connections) != 2 || dupParsed.Data.Connections[0].Ready || dupParsed.Data.Connections[1].Ready ||
 		!strings.Contains(dupParsed.Data.Connections[0].Message, "several links") {
 		t.Fatalf("duplicate connections = %+v", dupParsed.Data.Connections)
+	}
+	// A provider changed since consent refuses the token at once, so the
+	// listing says so before the Connection's conditions catch up.
+	retargeted := github.DeepCopy()
+	retargeted.Spec.OAuth.TokenURL = "https://github.example.test/login/oauth/access_token"
+	retargetedReader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(retargeted, linked).Build()
+	retargetedOut, err := tool.Execute(WithToolContext(context.Background(), &ToolContext{Namespace: "tenant", PolicyReader: retargetedReader, Requester: requester}), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var retargetedParsed struct {
+		Data ListConnectionsResult `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(retargetedOut), &retargetedParsed); err != nil {
+		t.Fatal(err)
+	}
+	if len(retargetedParsed.Data.Connections) != 1 || retargetedParsed.Data.Connections[0].Ready || !strings.Contains(retargetedParsed.Data.Connections[0].Message, "changed since you consented") {
+		t.Fatalf("retargeted provider connections = %+v", retargetedParsed.Data.Connections)
 	}
 	// A link being disconnected says so instead of a contradictory Ready.
 	terminating := linked.DeepCopy()

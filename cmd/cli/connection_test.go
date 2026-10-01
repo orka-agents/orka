@@ -212,15 +212,20 @@ func TestConnectRejectsUnknownModeAndExplainsForbidden(t *testing.T) {
 func TestConnectionListGetDeleteAndProviders(t *testing.T) {
 	providerReady := true
 	connectionDeleting := false
+	connectionDuplicated := false
 	t.Setenv("HOME", t.TempDir())
 	var deleted string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/connections":
-			json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{ //nolint:errcheck
+			items := []map[string]any{
 				{"name": "github-abc", "provider": "github", "mode": "readOnly", "state": "Ready", "ready": true, "linkedAt": "2026-09-28T10:00:00Z", "deleting": connectionDeleting},
-			}})
+			}
+			if connectionDuplicated {
+				items = append(items, map[string]any{"name": "my-other-github", "provider": "github", "mode": "readOnly", "state": "Ready", "ready": true})
+			}
+			json.NewEncoder(w).Encode(map[string]any{"items": items}) //nolint:errcheck
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/connections/github-abc":
 			json.NewEncoder(w).Encode(map[string]any{"name": "github-abc", "provider": "github", "mode": "readOnly", "state": "Ready", "ready": true, "message": "linked", "deleting": connectionDeleting}) //nolint:errcheck
 		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/connections/github-abc":
@@ -268,6 +273,15 @@ func TestConnectionListGetDeleteAndProviders(t *testing.T) {
 		t.Fatalf("list -o json while deleting = %q", out)
 	}
 	connectionDeleting = false
+	// A second link to the same provider makes both unusable, in every format.
+	connectionDuplicated = true
+	if out := run("connection", "list"); !strings.Contains(out, "(duplicate link)") || regexp.MustCompile(`\s+true\s+`).MatchString(out) {
+		t.Fatalf("list with duplicate links = %q", out)
+	}
+	if out := run("connection", "get", "github-abc", "-o", "json"); !strings.Contains(out, `"ready": false`) || !strings.Contains(out, "duplicate link") {
+		t.Fatalf("get -o json with duplicate links = %q", out)
+	}
+	connectionDuplicated = false
 	// Structured output carries the same joined readiness.
 	if out := run("connection", "list", "-o", "json"); !strings.Contains(out, `"ready": false`) || !strings.Contains(out, "provider unavailable") || !strings.Contains(out, `"linkedAt"`) {
 		t.Fatalf("list -o json with an unaccepted provider = %q", out)

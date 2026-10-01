@@ -161,6 +161,19 @@ func (l liveLinkedAccounts) BuiltinToolCredential(ctx context.Context, toolName 
 	if err != nil {
 		return tools.LinkedAccountCredential{}, false, err
 	}
+	if len(owned) == 0 {
+		// The cached listing can trail a Connection the API just created
+		// (always under the canonical name): read that name fresh before
+		// any fallback, so informer lag never looks like "unlinked".
+		fresh := &corev1alpha1.Connection{}
+		canonical := connectors.ConnectionName(info.Provider, l.requester.Issuer, l.requester.Subject)
+		switch err := l.reader.Get(ctx, client.ObjectKey{Namespace: l.namespace, Name: canonical}, fresh); {
+		case err == nil && fresh.Spec.Subject.Issuer == l.requester.Issuer && fresh.Spec.Subject.Subject == l.requester.Subject && fresh.Spec.ProviderRef.Name == info.Provider:
+			owned = []corev1alpha1.Connection{*fresh}
+		case err != nil && !apierrors.IsNotFound(err):
+			return tools.LinkedAccountCredential{}, false, fmt.Errorf("load connection %q: %w", canonical, err)
+		}
+	}
 	switch len(owned) {
 	case 0:
 		return l.unacceptedProviderLink(ctx, toolName)
@@ -191,7 +204,7 @@ func (l liveLinkedAccounts) BuiltinToolCredential(ctx context.Context, toolName 
 	bound := linkedBuiltinAccounts{
 		source: l.source, namespace: l.namespace, requester: l.requester, required: true,
 		frozen: map[string]outboundaccess.FrozenConnection{outboundaccess.BuiltinConnectionKey(toolName): {
-			UID: string(connection.UID), Generation: connection.Generation, GrantSequence: connection.Status.GrantSequence, Provider: info.Provider,
+			Name: connection.Name, UID: string(connection.UID), Generation: connection.Generation, GrantSequence: connection.Status.GrantSequence, Provider: info.Provider,
 		}},
 	}
 	return bound.BuiltinToolCredential(ctx, toolName)
