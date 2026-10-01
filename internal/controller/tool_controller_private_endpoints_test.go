@@ -9,13 +9,15 @@ package controller
 import (
 	"context"
 	"errors"
-	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"net/http"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"strings"
 	"testing"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
 func TestValidateToolHTTPURLPrivateConnectorEndpoints(t *testing.T) {
