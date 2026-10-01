@@ -174,6 +174,15 @@ func (r *ToolReconciler) validateTool(ctx context.Context, tool *corev1alpha1.To
 		}
 		allowPrivate = connectionMode
 	}
+	if allowPrivate {
+		// The allowance relaxes where a linked-account call may go, never
+		// how: execution refuses plain http for credential-injecting
+		// policies, so a private endpoint is accepted only over HTTPS and
+		// the Tool's status matches what can actually run.
+		if parsed, err := url.Parse(strings.TrimSpace(tool.Spec.HTTP.URL)); err != nil || !strings.EqualFold(parsed.Scheme, "https") {
+			return fmt.Errorf("a private connector endpoint requires an HTTPS Tool URL")
+		}
+	}
 	return r.validateToolHTTPURL(tool.Spec.HTTP.URL, allowPrivate)
 }
 

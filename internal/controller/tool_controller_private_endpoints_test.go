@@ -7,8 +7,13 @@ MIT License - see LICENSE file for details.
 package controller
 
 import (
+	"context"
 	"errors"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"net/http"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"strings"
 	"testing"
 )
@@ -37,6 +42,35 @@ func TestValidateToolHTTPURLPrivateConnectorEndpoints(t *testing.T) {
 	// The rest of the URL rules are untouched by the allowance.
 	if err := r.validateToolHTTPURL("https://user:pw@10.96.0.10/api", true); err == nil || !strings.Contains(err.Error(), "embedded credentials") {
 		t.Fatalf("embedded credentials under the allowance: %v", err)
+	}
+}
+
+func TestValidateToolRequiresHTTPSUnderThePrivateAllowance(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	policy := &corev1alpha1.OutboundAccessPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "as-me", Namespace: "tenant", Generation: 1},
+		Spec:       corev1alpha1.OutboundAccessPolicySpec{Connection: &corev1alpha1.ConnectionOutboundAccess{ProviderRef: corev1alpha1.LocalObjectReference{Name: "fixture"}}},
+		Status: corev1alpha1.OutboundAccessPolicyStatus{ObservedGeneration: 1, Conditions: []metav1.Condition{
+			{Type: corev1alpha1.OutboundAccessPolicyConditionAccepted, Status: metav1.ConditionTrue, Reason: "Accepted", ObservedGeneration: 1},
+			{Type: corev1alpha1.OutboundAccessPolicyConditionResolvedRefs, Status: metav1.ConditionTrue, Reason: "Resolved", ObservedGeneration: 1},
+		}},
+	}
+	r := &ToolReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(policy).Build(), AllowPrivateConnectorEndpoints: true}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "items", Namespace: "tenant"},
+		Spec: corev1alpha1.ToolSpec{Description: "items", HTTP: &corev1alpha1.HTTPExecution{
+			URL: "http://10.96.0.10/api/items", OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "as-me"},
+		}},
+	}
+	if err := r.validateTool(context.Background(), tool); err == nil || !strings.Contains(err.Error(), "HTTPS") {
+		t.Fatalf("plain http under the allowance: %v", err)
+	}
+	tool.Spec.HTTP.URL = "https://10.96.0.10/api/items"
+	if err := r.validateTool(context.Background(), tool); err != nil {
+		t.Fatalf("https private endpoint under the allowance: %v", err)
 	}
 }
 
