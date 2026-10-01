@@ -154,6 +154,15 @@ func (t *ListConnectionsTool) Execute(ctx context.Context, _ json.RawMessage) (s
 				// link the Connection's own conditions have not caught up on.
 				summary.Ready = false
 				summary.Message = "the provider is not accepted right now (its spec changed or its references are invalid); the link cannot be used until it is"
+			case summary.Ready && !connectors.ConsentMatchesProvider(connection, provider):
+				// The same checks credential resolution applies: a provider
+				// changed since consent refuses the token at once, before the
+				// Connection's conditions catch up.
+				summary.Ready = false
+				summary.Message = "the provider changed since you consented; relink it under " + ConnectorSettingsPath + " before its tools can run"
+			case summary.Ready && !connectors.ScopesCover(connection.Status.GrantedScopes, connectors.ScopesForMode(provider, summary.Mode)):
+				summary.Ready = false
+				summary.Message = "the provider now requires scopes this link was not granted; relink it under " + ConnectorSettingsPath + " before its tools can run"
 			}
 			result.Connections = append(result.Connections, summary)
 		}

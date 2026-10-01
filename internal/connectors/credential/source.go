@@ -168,7 +168,10 @@ func (s *Source) ResolveConnectionCredential(ctx context.Context, req outboundac
 // is exactly the one frozen at dispatch and still Ready for its current
 // generation.
 func (s *Source) loadLiveConnection(ctx context.Context, req outboundaccess.ConnectionCredentialRequest) (*corev1alpha1.Connection, error) {
-	name := connectors.ConnectionName(req.Provider, req.Issuer, req.Subject)
+	name := req.Frozen.Name
+	if name == "" {
+		name = connectors.ConnectionName(req.Provider, req.Issuer, req.Subject)
+	}
 	connection := &corev1alpha1.Connection{}
 	// Authorization reads bypass the informer cache: a generation change
 	// after dispatch must be seen even before the watch catches up, or the

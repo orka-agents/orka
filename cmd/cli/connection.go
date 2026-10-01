@@ -195,14 +195,52 @@ func providerReadiness(ctx context.Context, c *client.Client) (map[string]bool, 
 	return ready, nil
 }
 
-// joinProviderReadiness folds the provider's acceptance into the view.
-func joinProviderReadiness(item connectionView, providersReady map[string]bool) connectionView {
+// duplicateProviders names the providers a person holds more than one
+// link to; credential resolution refuses every link to such a provider.
+func duplicateProviders(items []connectionView) map[string]bool {
+	counts := map[string]int{}
+	for _, item := range items {
+		counts[item.Provider]++
+	}
+	duplicated := map[string]bool{}
+	for provider, count := range counts {
+		if count > 1 {
+			duplicated[provider] = true
+		}
+	}
+	return duplicated
+}
+
+// duplicateProvidersFor lists the person's links to find duplicated providers.
+func duplicateProvidersFor(ctx context.Context, c *client.Client) (map[string]bool, error) {
+	raw, err := c.DoJSON(ctx, http.MethodGet, connectionsAPIPath, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	var list struct {
+		Items []connectionView `json:"items"`
+	}
+	if err := decodeInto(raw, &list); err != nil {
+		return nil, err
+	}
+	return duplicateProviders(list.Items), nil
+}
+
+// joinProviderReadiness folds the provider's acceptance and the person's
+// duplicate links into the view.
+func joinProviderReadiness(item connectionView, providersReady map[string]bool, duplicated map[string]bool) connectionView {
 	// A disconnect in progress (tokens being revoked, possibly retrying)
 	// is neither ready nor something to relink.
 	if item.Deleting {
 		item.Ready = false
 		item.State = "Disconnecting"
 		item.Message = "this link is being disconnected; its tokens are being revoked and it will disappear"
+		return item
+	}
+	if duplicated[item.Provider] {
+		item.Ready = false
+		item.State += " (duplicate link)"
+		item.Message = "you hold several links to this provider; disconnect the extra ones before its tools can run"
 		return item
 	}
 	if !item.Ready {
@@ -220,11 +258,18 @@ func joinProviderReadiness(item connectionView, providersReady map[string]bool) 
 
 // joinProviderReadinessInto is joinProviderReadiness for the raw API
 // object, so structured output keeps every field the API returned.
-func joinProviderReadinessInto(item map[string]any, providersReady map[string]bool) {
+func joinProviderReadinessInto(item map[string]any, providersReady map[string]bool, duplicated map[string]bool) {
 	if deleting, _ := item["deleting"].(bool); deleting {
 		item["ready"] = false
 		item["state"] = "Disconnecting"
 		item["message"] = "this link is being disconnected; its tokens are being revoked and it will disappear"
+		return
+	}
+	if provider, _ := item["provider"].(string); duplicated[provider] {
+		item["ready"] = false
+		state, _ := item["state"].(string)
+		item["state"] = state + " (duplicate link)"
+		item["message"] = "you hold several links to this provider; disconnect the extra ones before its tools can run"
 		return
 	}
 	ready, _ := item["ready"].(bool)
@@ -267,6 +312,13 @@ func newConnectionListCmd() *cobra.Command {
 			if err != nil {
 				return connectionError(err)
 			}
+			var list struct {
+				Items []connectionView `json:"items"`
+			}
+			if err := decodeInto(raw, &list); err != nil {
+				return err
+			}
+			duplicated := duplicateProviders(list.Items)
 			if format != outputTable {
 				// Structured output carries the same joined readiness as
 				// the table, so scripts never see a link the resolver refuses.
@@ -277,15 +329,9 @@ func newConnectionListCmd() *cobra.Command {
 					return err
 				}
 				for i := range payload.Items {
-					joinProviderReadinessInto(payload.Items[i], providersReady)
+					joinProviderReadinessInto(payload.Items[i], providersReady, duplicated)
 				}
 				return printStructuredTo(cmd.OutOrStdout(), format, payload)
-			}
-			var list struct {
-				Items []connectionView `json:"items"`
-			}
-			if err := decodeInto(raw, &list); err != nil {
-				return err
 			}
 			if len(list.Items) == 0 {
 				fmt.Fprintln(cmd.OutOrStdout(), "No linked accounts. Link one with 'orka connect <provider>'.") //nolint:errcheck
@@ -294,7 +340,7 @@ func newConnectionListCmd() *cobra.Command {
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
 			fmt.Fprintln(w, "NAME\tPROVIDER\tMODE\tSTATE\tREADY\tLINKED") //nolint:errcheck
 			for _, item := range list.Items {
-				item = joinProviderReadiness(item, providersReady)
+				item = joinProviderReadiness(item, providersReady, duplicated)
 				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%t\t%s\n", item.Name, item.Provider, item.Mode, item.State, item.Ready, item.LinkedAt) //nolint:errcheck
 			}
 			return w.Flush()
@@ -323,19 +369,25 @@ func newConnectionGetCmd() *cobra.Command {
 			if err != nil {
 				return connectionError(err)
 			}
+			// A duplicate link to the same provider makes every link to it
+			// unusable, so one link is judged against the whole list.
+			duplicated, err := duplicateProvidersFor(cmd.Context(), c)
+			if err != nil {
+				return connectionError(err)
+			}
 			if format != outputTable {
 				var payload map[string]any
 				if err := decodeInto(raw, &payload); err != nil {
 					return err
 				}
-				joinProviderReadinessInto(payload, providersReady)
+				joinProviderReadinessInto(payload, providersReady, duplicated)
 				return printStructuredTo(cmd.OutOrStdout(), format, payload)
 			}
 			var item connectionView
 			if err := decodeInto(raw, &item); err != nil {
 				return err
 			}
-			item = joinProviderReadiness(item, providersReady)
+			item = joinProviderReadiness(item, providersReady, duplicated)
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
 			for _, row := range [][2]string{
 				{"Name", item.Name}, {"Provider", item.Provider}, {"Mode", item.Mode}, {"State", item.State},

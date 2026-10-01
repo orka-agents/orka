@@ -131,6 +131,11 @@ type PolicyIdentity struct {
 
 // FrozenConnection is the dispatch-time identity of a person's Connection.
 type FrozenConnection struct {
+	// Name is the Connection object's name when known. A person's link
+	// may live under a non-canonical name (created outside the API and
+	// adopted), so the credential source loads by this name, not by the
+	// canonical one, when it is set.
+	Name       string
 	UID        string
 	Generation int64
 	// GrantSequence is the consent count frozen with the identity. The live
