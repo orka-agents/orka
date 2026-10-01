@@ -651,6 +651,31 @@ func TestLiveLinkedAccountsUnusableLinkFailsClosed(t *testing.T) {
 	if _, bound, err := two.BuiltinToolCredential(ctx, "create_pull_request"); bound || err == nil || !strings.Contains(err.Error(), "no longer offers") {
 		t.Fatalf("withdrawn tool on a second provider: bound = %t err = %v", bound, err)
 	}
+	// A provider retargeted since consent (endpoints moved off github.com,
+	// built-ins removed) is recognised by the consent-time authority digest:
+	// the link stays bound until the person relinks or disconnects.
+	moved := acceptedBuiltinProvider("moved")
+	moved.Spec.OAuth.AuthorizeURL, moved.Spec.OAuth.TokenURL = "https://sso.example.test/authorize", "https://sso.example.test/token"
+	movedLink := f.connection(corev1alpha1.ConnectionModeReadWrite, true)
+	movedLink.Name = connectors.ConnectionName("moved", f.requester.Issuer, f.requester.Subject)
+	movedLink.Spec.ProviderRef.Name = "moved"
+	movedLink.Status.Consent = &corev1alpha1.ConnectionConsent{AuthorityDigest: "digest-at-consent-time"}
+	retargeted := LiveLinkedAccounts(f.reader(acceptedBuiltinProvider("github", "create_pull_request"), moved, movedLink), registry, source, "tenant", f.requester)
+	if _, bound, err := retargeted.BuiltinToolCredential(ctx, "create_pull_request"); bound || err == nil || !strings.Contains(err.Error(), "changed since you consented") {
+		t.Fatalf("retargeted provider: bound = %t err = %v", bound, err)
+	}
+	// An unrelated provider whose authority is unchanged (a Jira link, say)
+	// is not a GitHub link and does not block the tool's own path.
+	jira := acceptedBuiltinProvider("jira")
+	jira.Spec.OAuth.AuthorizeURL, jira.Spec.OAuth.TokenURL = "https://jira.example.test/authorize", "https://jira.example.test/token"
+	jiraLink := f.connection(corev1alpha1.ConnectionModeReadOnly, true)
+	jiraLink.Name = connectors.ConnectionName("jira", f.requester.Issuer, f.requester.Subject)
+	jiraLink.Spec.ProviderRef.Name = "jira"
+	jiraLink.Status.Consent = &corev1alpha1.ConnectionConsent{AuthorityDigest: connectors.ProviderAuthorityDigest(jira)}
+	unrelated := LiveLinkedAccounts(f.reader(acceptedBuiltinProvider("github", "create_pull_request"), jira, jiraLink), registry, source, "tenant", f.requester)
+	if _, bound, err := unrelated.BuiltinToolCredential(ctx, "create_pull_request"); bound || err != nil {
+		t.Fatalf("unrelated provider link: bound = %t err = %v", bound, err)
+	}
 	// A link whose provider was deleted outright is bound and unusable too:
 	// nothing can say any more which tools it declared. It is found even
 	// without its index label (created outside the API, or label stripped).

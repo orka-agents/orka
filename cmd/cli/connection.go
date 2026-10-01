@@ -41,6 +41,8 @@ type connectionView struct {
 	Message   string `json:"message"`
 	// GrantSequence advances on every completed consent.
 	GrantSequence int64 `json:"grantSequence"`
+	// Deleting marks a disconnect that is still finishing.
+	Deleting bool `json:"deleting"`
 }
 
 // connectionAuthorizeView is the API's response to a consent start.
@@ -184,6 +186,14 @@ func providerReadiness(ctx context.Context, c *client.Client) (map[string]bool, 
 
 // joinProviderReadiness folds the provider's acceptance into the view.
 func joinProviderReadiness(item connectionView, providersReady map[string]bool) connectionView {
+	// A disconnect in progress (tokens being revoked, possibly retrying)
+	// is neither ready nor something to relink.
+	if item.Deleting {
+		item.Ready = false
+		item.State = "Disconnecting"
+		item.Message = "this link is being disconnected; its tokens are being revoked and it will disappear"
+		return item
+	}
 	if !item.Ready {
 		return item
 	}
@@ -200,6 +210,12 @@ func joinProviderReadiness(item connectionView, providersReady map[string]bool) 
 // joinProviderReadinessInto is joinProviderReadiness for the raw API
 // object, so structured output keeps every field the API returned.
 func joinProviderReadinessInto(item map[string]any, providersReady map[string]bool) {
+	if deleting, _ := item["deleting"].(bool); deleting {
+		item["ready"] = false
+		item["state"] = "Disconnecting"
+		item["message"] = "this link is being disconnected; its tokens are being revoked and it will disappear"
+		return
+	}
 	ready, _ := item["ready"].(bool)
 	if !ready {
 		return

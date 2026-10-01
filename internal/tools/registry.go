@@ -211,6 +211,32 @@ func (tc *ToolContext) CreatedTaskUID(namespace, name string) string {
 	return tc.CreatedTasks.uids[createdTaskKey(namespace, name)]
 }
 
+// CreatedTaskByName resolves a Task this turn created by name alone, as
+// the GitHub tools receive it: the one recorded entry with that name, in
+// whichever namespace the creation tool was told. Two entries with the
+// same name in different namespaces are ambiguous and resolve to nothing.
+func (tc *ToolContext) CreatedTaskByName(name string) (namespace, uid string, ok bool) {
+	if tc == nil || tc.CreatedTasks == nil {
+		return "", "", false
+	}
+	name = strings.TrimSpace(name)
+	tc.CreatedTasks.mu.Lock()
+	defer tc.CreatedTasks.mu.Unlock()
+	matches := 0
+	for key, recorded := range tc.CreatedTasks.uids {
+		ns, recordedName, found := strings.Cut(key, "/")
+		if !found || recordedName != name {
+			continue
+		}
+		matches++
+		namespace, uid = ns, recorded
+	}
+	if matches != 1 {
+		return "", "", false
+	}
+	return namespace, uid, true
+}
+
 type toolContextKey struct{}
 
 // WithToolContext adds a ToolContext to a context.

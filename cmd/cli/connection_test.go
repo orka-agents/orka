@@ -206,6 +206,7 @@ func TestConnectRejectsUnknownModeAndExplainsForbidden(t *testing.T) {
 
 func TestConnectionListGetDeleteAndProviders(t *testing.T) {
 	providerReady := true
+	connectionDeleting := false
 	t.Setenv("HOME", t.TempDir())
 	var deleted string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -213,10 +214,10 @@ func TestConnectionListGetDeleteAndProviders(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/connections":
 			json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{ //nolint:errcheck
-				{"name": "github-abc", "provider": "github", "mode": "readOnly", "state": "Ready", "ready": true, "linkedAt": "2026-09-28T10:00:00Z"},
+				{"name": "github-abc", "provider": "github", "mode": "readOnly", "state": "Ready", "ready": true, "linkedAt": "2026-09-28T10:00:00Z", "deleting": connectionDeleting},
 			}})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/connections/github-abc":
-			json.NewEncoder(w).Encode(map[string]any{"name": "github-abc", "provider": "github", "mode": "readOnly", "state": "Ready", "ready": true, "message": "linked"}) //nolint:errcheck
+			json.NewEncoder(w).Encode(map[string]any{"name": "github-abc", "provider": "github", "mode": "readOnly", "state": "Ready", "ready": true, "message": "linked", "deleting": connectionDeleting}) //nolint:errcheck
 		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/connections/github-abc":
 			deleted = r.URL.Path
 			w.WriteHeader(http.StatusNoContent)
@@ -253,6 +254,15 @@ func TestConnectionListGetDeleteAndProviders(t *testing.T) {
 	if out := run("connection", "get", "github-abc"); !strings.Contains(out, "provider unavailable") || !regexp.MustCompile(`Ready:\s+false`).MatchString(out) {
 		t.Fatalf("get with an unaccepted provider = %q", out)
 	}
+	// A disconnect still finishing is shown as such, in every format.
+	connectionDeleting = true
+	if out := run("connection", "get", "github-abc"); !strings.Contains(out, "Disconnecting") || !regexp.MustCompile(`Ready:\s+false`).MatchString(out) {
+		t.Fatalf("get while deleting = %q", out)
+	}
+	if out := run("connection", "list", "-o", "json"); !strings.Contains(out, `"state": "Disconnecting"`) || !strings.Contains(out, `"ready": false`) {
+		t.Fatalf("list -o json while deleting = %q", out)
+	}
+	connectionDeleting = false
 	// Structured output carries the same joined readiness.
 	if out := run("connection", "list", "-o", "json"); !strings.Contains(out, `"ready": false`) || !strings.Contains(out, "provider unavailable") || !strings.Contains(out, `"linkedAt"`) {
 		t.Fatalf("list -o json with an unaccepted provider = %q", out)

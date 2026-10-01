@@ -787,42 +787,42 @@ func (h *Handlers) ConnectionCallback(c fiber.Ctx) error {
 		if providerError != "access_denied" {
 			reason = "provider_rejected"
 		}
-		return h.connectorCallbackRedirect(c, consent.Name, reason, "")
+		return h.connectorCallbackRedirectTo(c, consent.Namespace, consent.Name, reason, "")
 	}
 	code := c.Query("code")
 	if strings.TrimSpace(code) == "" {
-		return h.connectorCallbackRedirect(c, consent.Name, "missing_code", "")
+		return h.connectorCallbackRedirectTo(c, consent.Namespace, consent.Name, "missing_code", "")
 	}
 	connection := &corev1alpha1.Connection{}
 	if err := h.client.Get(ctx, types.NamespacedName{Namespace: consent.Namespace, Name: consent.Name}, connection); err != nil {
-		return h.connectorCallbackRedirect(c, consent.Name, "connection_missing", "")
+		return h.connectorCallbackRedirectTo(c, consent.Namespace, consent.Name, "connection_missing", "")
 	}
 	if !connectionCustodyProtected(connection) {
-		return h.connectorCallbackRedirect(c, consent.Name, "connection_unprotected", "")
+		return h.connectorCallbackRedirectTo(c, consent.Namespace, consent.Name, "connection_unprotected", "")
 	}
 	if string(connection.UID) != consent.ConnectionUID || !connection.DeletionTimestamp.IsZero() ||
 		connectors.SubjectDigest(connection.Spec.Subject.Issuer, connection.Spec.Subject.Subject) != consent.SubjectDigest ||
 		connection.Spec.ProviderRef.Name != consent.Provider {
-		return h.connectorCallbackRedirect(c, consent.Name, "connection_mismatch", "")
+		return h.connectorCallbackRedirectTo(c, consent.Namespace, consent.Name, "connection_mismatch", "")
 	}
 	provider := &corev1alpha1.ConnectorProvider{}
 	if err := h.providerReader().Get(ctx, types.NamespacedName{Namespace: consent.Namespace, Name: consent.Provider}, provider); err != nil || !connectors.ProviderAccepted(provider) {
-		return h.connectorCallbackRedirect(c, consent.Name, "provider_unavailable", "")
+		return h.connectorCallbackRedirectTo(c, consent.Namespace, consent.Name, "provider_unavailable", "")
 	}
 	// The provider was replaced or its OAuth client changed while the person
 	// was at the provider: the code belongs to the old client and must not be
 	// exchanged with the new endpoints.
 	if consent.AuthorityDigest != connectors.ProviderAuthorityDigest(provider) {
-		return h.connectorCallbackRedirect(c, consent.Name, "provider_changed", "")
+		return h.connectorCallbackRedirectTo(c, consent.Namespace, consent.Name, "provider_changed", "")
 	}
 	cfg, err := h.providerOAuthConfig(ctx, provider)
 	if err != nil {
-		return h.connectorCallbackRedirect(c, consent.Name, "provider_unavailable", "")
+		return h.connectorCallbackRedirectTo(c, consent.Namespace, consent.Name, "provider_unavailable", "")
 	}
 	token, err := h.connectors.OAuth.ExchangeCode(ctx, cfg, code, consent.CodeVerifier, h.connectors.redirectURI())
 	if err != nil {
 		log.Info("connector code exchange failed", "connection", consent.Name, "provider", consent.Provider, "reason", oauthFailureReason(err))
-		return h.connectorCallbackRedirect(c, consent.Name, "exchange_failed", "")
+		return h.connectorCallbackRedirectTo(c, consent.Namespace, consent.Name, "exchange_failed", "")
 	}
 	// A provider may grant fewer scopes than requested (the person declined
 	// the write permission, say). A partial grant would let a readWrite link
@@ -842,7 +842,7 @@ func (h *Handlers) ConnectionCallback(c fiber.Ctx) error {
 		// The issued material is dropped, never revoked: Orka cannot prove
 		// whose grant a token nobody committed belongs to, and a shared or
 		// re-issued token could be another person's live credential.
-		return h.connectorCallbackRedirect(c, consent.Name, "scopes_denied", "")
+		return h.connectorCallbackRedirectTo(c, consent.Namespace, consent.Name, "scopes_denied", "")
 	}
 	// Park the material until the verified owner commits it. This is what
 	// stops a forwarded consent link from binding a victim's account to the
@@ -850,11 +850,11 @@ func (h *Handlers) ConnectionCallback(c fiber.Ctx) error {
 	// one-time completion token, and only the Connection's owner may spend it.
 	completionNonce, err := connectors.GenerateStateNonce()
 	if err != nil {
-		return h.connectorCallbackRedirect(c, consent.Name, "storage_failed", "")
+		return h.connectorCallbackRedirectTo(c, consent.Namespace, consent.Name, "storage_failed", "")
 	}
 	completionToken, err := connectors.SignState(h.connectors.StateKey, completionNonce)
 	if err != nil {
-		return h.connectorCallbackRedirect(c, consent.Name, "storage_failed", "")
+		return h.connectorCallbackRedirectTo(c, consent.Namespace, consent.Name, "storage_failed", "")
 	}
 	if err := h.connectors.Consents.CreateConnectorCompletion(ctx, store.ConnectorCompletion{
 		Nonce:         completionNonce,
@@ -884,10 +884,10 @@ func (h *Handlers) ConnectionCallback(c fiber.Ctx) error {
 		if errors.Is(err, store.ErrConnectorCustodyTombstoned) {
 			// The link was disconnected while the code was being exchanged.
 			// The material is dropped and left to expire, never revoked.
-			return h.connectorCallbackRedirect(c, consent.Name, "disconnected", "")
+			return h.connectorCallbackRedirectTo(c, consent.Namespace, consent.Name, "disconnected", "")
 		}
 		log.Error(err, "connector completion could not be sealed", "connection", consent.Name)
-		return h.connectorCallbackRedirect(c, consent.Name, "storage_failed", "")
+		return h.connectorCallbackRedirectTo(c, consent.Namespace, consent.Name, "storage_failed", "")
 	}
 	return h.connectorCallbackRedirectTo(c, consent.Namespace, consent.Name, "", completionToken)
 }

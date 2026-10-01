@@ -101,7 +101,10 @@ func (l linkedBuiltinAccounts) BuiltinToolCredential(ctx context.Context, toolNa
 // these surfaces execute tools directly, with no approval gate, so a
 // linked write is available only through a dispatched Task.
 type liveLinkedAccounts struct {
-	reader    client.Reader
+	reader client.Reader
+	// cache serves the namespace-wide scans (providers, the authoritative
+	// Connection listing); reader serves the fresh point reads.
+	cache     client.Reader
 	registry  *tools.Registry
 	source    outboundaccess.ConnectionCredentialSource
 	namespace string
@@ -112,11 +115,22 @@ type liveLinkedAccounts struct {
 // person in namespace, or nil when nothing can be resolved (no source,
 // no reader, or no personal identity).
 func LiveLinkedAccounts(reader client.Reader, registry *tools.Registry, source outboundaccess.ConnectionCredentialSource, namespace string, requester *corev1alpha1.RequestedBy) tools.LinkedAccountCredentials {
+	return LiveLinkedAccountsWithCache(reader, reader, registry, source, namespace, requester)
+}
+
+// LiveLinkedAccountsWithCache is LiveLinkedAccounts with the point reads
+// (the person's Connection for the declaring provider) served fresh by
+// reader and the namespace-wide scans served by cache, so a call with no
+// link never lists every Connection against the API server.
+func LiveLinkedAccountsWithCache(reader, cache client.Reader, registry *tools.Registry, source outboundaccess.ConnectionCredentialSource, namespace string, requester *corev1alpha1.RequestedBy) tools.LinkedAccountCredentials {
 	if reader == nil || source == nil || requester == nil ||
 		strings.TrimSpace(requester.Issuer) == "" || strings.TrimSpace(requester.Subject) == "" || strings.TrimSpace(namespace) == "" {
 		return nil
 	}
-	return liveLinkedAccounts{reader: reader, registry: registry, source: source, namespace: namespace, requester: requester}
+	if cache == nil {
+		cache = reader
+	}
+	return liveLinkedAccounts{reader: reader, cache: cache, registry: registry, source: source, namespace: namespace, requester: requester}
 }
 
 // BuiltinToolCredential implements tools.LinkedAccountCredentials.
@@ -125,7 +139,7 @@ func (l liveLinkedAccounts) BuiltinToolCredential(ctx context.Context, toolName 
 	if !linked {
 		return tools.LinkedAccountCredential{}, false, nil
 	}
-	infos, err := classifyConnectorTools(ctx, l.reader, l.registry, l.namespace, []string{toolName}, connectorScope{builtins: true})
+	infos, err := classifyConnectorTools(ctx, l.cache, l.registry, l.namespace, []string{toolName}, connectorScope{builtins: true})
 	if err != nil {
 		return tools.LinkedAccountCredential{}, false, err
 	}
@@ -173,7 +187,7 @@ func (l liveLinkedAccounts) BuiltinToolCredential(ctx context.Context, toolName 
 // exists, unbound when no provider declares the tool or none is linked.
 func (l liveLinkedAccounts) unacceptedProviderLink(ctx context.Context, toolName string) (tools.LinkedAccountCredential, bool, error) {
 	providers := &corev1alpha1.ConnectorProviderList{}
-	if err := l.reader.List(ctx, providers, client.InNamespace(l.namespace)); err != nil {
+	if err := l.cache.List(ctx, providers, client.InNamespace(l.namespace)); err != nil {
 		return tools.LinkedAccountCredential{}, false, fmt.Errorf("list connector providers: %w", err)
 	}
 	// A GitHub provider that is accepted but no longer declares the tool
@@ -210,13 +224,13 @@ func (l liveLinkedAccounts) unacceptedProviderLink(ctx context.Context, toolName
 	// run on other credentials.
 	// Authoritative (unlabeled) listing: a link created outside the API or
 	// with its index label stripped must still keep the call bound.
-	owned, err := connectors.ListSubjectConnectionsAuthoritative(ctx, l.reader, l.namespace, l.requester)
+	owned, err := connectors.ListSubjectConnectionsAuthoritative(ctx, l.cache, l.namespace, l.requester)
 	if err != nil {
 		return tools.LinkedAccountCredential{}, false, fmt.Errorf("list the requester's connections: %w", err)
 	}
-	configured := make(map[string]struct{}, len(providers.Items))
+	configured := make(map[string]*corev1alpha1.ConnectorProvider, len(providers.Items))
 	for i := range providers.Items {
-		configured[providers.Items[i].Name] = struct{}{}
+		configured[providers.Items[i].Name] = &providers.Items[i]
 	}
 	for i := range owned {
 		providerName := owned[i].Spec.ProviderRef.Name
@@ -224,7 +238,16 @@ func (l liveLinkedAccounts) unacceptedProviderLink(ctx context.Context, toolName
 			return tools.LinkedAccountCredential{}, false, fmt.Errorf(
 				"your linked %s account's provider no longer offers %s; the link stays bound, so the tool is not available", providerName, toolName)
 		}
-		if _, ok := configured[providerName]; ok {
+		if provider, ok := configured[providerName]; ok {
+			// A provider retargeted since consent (endpoints or catalog
+			// changed, so its authority digest moved) may have been the
+			// GitHub provider this link was granted for: the link stays
+			// bound until the person consents again or disconnects.
+			if consent := owned[i].Status.Consent; consent != nil && consent.AuthorityDigest != "" &&
+				consent.AuthorityDigest != connectors.ProviderAuthorityDigest(provider) {
+				return tools.LinkedAccountCredential{}, false, fmt.Errorf(
+					"your linked %s account's provider changed since you consented; relink it under Settings > Connectors before using %s", providerName, toolName)
+			}
 			continue
 		}
 		return tools.LinkedAccountCredential{}, false, fmt.Errorf(
