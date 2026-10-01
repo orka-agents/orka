@@ -33,7 +33,12 @@ func TestConnectStartsConsentOpensBrowserAndWaits(t *testing.T) {
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/connections/github-abc":
 			polls++
-			ready := polls >= 2
+			if polls == 1 {
+				// The cache has not seen the Connection the POST created yet.
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			ready := polls >= 3
 			// The link being repaired stays Revoked until the new consent
 			// completes; the command keeps waiting through it.
 			state := "Revoked"
@@ -64,7 +69,7 @@ func TestConnectStartsConsentOpensBrowserAndWaits(t *testing.T) {
 	if opened != "https://github.com/login/oauth/authorize?state=signed" {
 		t.Fatalf("opened = %q", opened)
 	}
-	if !strings.Contains(out.String(), "Linked github (readWrite)") || polls < 2 || !strings.Contains(out.String(), "orka connection complete github-abc --namespace team-a --completion") {
+	if !strings.Contains(out.String(), "Linked github (readWrite)") || polls < 3 || !strings.Contains(out.String(), "orka connection complete github-abc --namespace team-a --completion") {
 		t.Fatalf("output = %q polls = %d", out.String(), polls)
 	}
 }

@@ -593,6 +593,22 @@ func TestLiveLinkedAccounts(t *testing.T) {
 	if _, bound, err := twice.BuiltinToolCredential(ctx, "list_pull_requests"); bound || err == nil || !strings.Contains(err.Error(), "2 links") {
 		t.Fatalf("two non-canonical links: bound = %t err = %v", bound, err)
 	}
+	// A canonical link plus an extra one is just as ambiguous: the canonical
+	// name never wins silently.
+	canonicalPlus := LiveLinkedAccounts(f.reader(github, f.connection(corev1alpha1.ConnectionModeReadOnly, true), custom), registry, source, "tenant", f.requester)
+	if _, bound, err := canonicalPlus.BuiltinToolCredential(ctx, "list_pull_requests"); bound || err == nil || !strings.Contains(err.Error(), "2 links") {
+		t.Fatalf("canonical plus extra link: bound = %t err = %v", bound, err)
+	}
+	// Somebody else's object under the canonical name does not hide the
+	// person's own link under another name.
+	squatter := f.connection(corev1alpha1.ConnectionModeReadOnly, true)
+	squatter.Spec.Subject.Subject = "mallory"
+	squatter.UID = "squatter-uid"
+	source.request = outboundaccess.ConnectionCredentialRequest{}
+	squatted := LiveLinkedAccounts(f.reader(github, squatter, custom), registry, source, "tenant", f.requester)
+	if credential, bound, err := squatted.BuiltinToolCredential(ctx, "list_pull_requests"); err != nil || !bound || credential.AccessToken != "gho_live" || source.request.Frozen.UID != "conn-uid" {
+		t.Fatalf("squatted canonical name: credential = %+v bound = %t err = %v", credential, bound, err)
+	}
 	// Not in the catalog, or declared by no provider: not the resolver's concern.
 	if _, bound, err := accounts.BuiltinToolCredential(ctx, "web_search"); bound || err != nil {
 		t.Fatalf("web_search: bound = %t err = %v", bound, err)
