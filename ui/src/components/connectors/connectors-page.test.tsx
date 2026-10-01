@@ -78,11 +78,12 @@ describe('ConnectorsPage', () => {
     const completions: { body: unknown; namespace: string | null }[] = []
     server.use(http.post(`${API}/connections/github-abc/complete`, async ({ request }) => {
       completions.push({ body: await request.json(), namespace: new URL(request.url).searchParams.get('namespace') })
-      return HttpResponse.json({ ...linked, mode: 'readWrite' })
+      return HttpResponse.json({ ...linked, namespace: 'team-a', mode: 'readWrite' })
     }))
     render(<ConnectorsPage search={{ status: 'pending', connection: 'github-abc', namespace: 'team-a' }} />)
-    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Linked github (readWrite).'))
-    // The page shows orka-system, but the consent was sealed in team-a.
+    // The page showed orka-system, but the consent was sealed in team-a:
+    // the completion went there, and the page switches to that namespace.
+    await waitFor(() => expect(useUIStore.getState().namespace).toBe('team-a'))
     expect(completions).toEqual([{ body: { completion: 'one-time' }, namespace: 'team-a' }])
     // A reload of the address bar no longer looks like an unfinished consent.
     expect(window.location.hash).toBe('')
@@ -195,6 +196,27 @@ describe('ConnectorsPage', () => {
     await waitFor(() => expect(screen.getByText('This token cannot read linked accounts')).toBeInTheDocument())
     expect(screen.queryByText('Sign in as yourself to link accounts')).not.toBeInTheDocument()
   })
+
+  it('keeps polling after a mode change until the list shows the new mode', async () => {
+    let lists = 0
+    server.use(
+      http.get(`${API}/connectors`, () => HttpResponse.json({ items: [github] })),
+      http.get(`${API}/connections`, () => {
+        lists += 1
+        // The cache lags: the first refetch after the PUT still says readOnly.
+        return HttpResponse.json({ items: [{ ...linked, mode: lists >= 3 ? 'readWrite' : 'readOnly' }] })
+      }),
+      http.put(`${API}/connections/github-abc`, () => HttpResponse.json({ connection: { ...linked, mode: 'readWrite' } })),
+    )
+    render(<ConnectorsPage />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Allow writes' })).toBeEnabled())
+    fireEvent.click(screen.getByRole('button', { name: 'Allow writes' }))
+    // The PUT response is applied at once, but the stale refetch that
+    // follows flips the card back; polling continues until the list shows
+    // the requested mode (the third list here), and the card settles.
+    await waitFor(() => expect(lists).toBeGreaterThanOrEqual(3), { timeout: 12000 })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Limit to reads' })).toBeInTheDocument(), { timeout: 3000 })
+  }, 15000)
 
   it('explains a failed callback', async () => {
     useProviders([github])

@@ -448,7 +448,7 @@ func (h *Handlers) CreateConnection(c fiber.Ctx) error {
 				Finalizers: []string{controller.ConnectionCustodyFinalizer},
 				Labels: map[string]string{
 					ConnectionSubjectDigestLabel: connectionSubjectLabel(ui),
-					ConnectionProviderLabel:      provider.Name,
+					ConnectionProviderLabel:      connectors.ConnectionProviderLabelValue(provider.Name),
 				},
 			},
 			Spec: corev1alpha1.ConnectionSpec{
@@ -486,7 +486,7 @@ func (h *Handlers) CreateConnection(c fiber.Ctx) error {
 		// A reused object may lack the ownership labels the list route
 		// selects by (created through Kubernetes, or labels stripped);
 		// restore them from the authoritative spec before consent.
-		wantLabels := map[string]string{ConnectionSubjectDigestLabel: connectionSubjectLabel(ui), ConnectionProviderLabel: provider.Name}
+		wantLabels := map[string]string{ConnectionSubjectDigestLabel: connectionSubjectLabel(ui), ConnectionProviderLabel: connectors.ConnectionProviderLabelValue(provider.Name)}
 		changed := connection.Spec.Mode != mode
 		for key, value := range wantLabels {
 			if connection.Labels[key] != value {
