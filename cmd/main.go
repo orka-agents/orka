@@ -1481,7 +1481,9 @@ func main() {
 			OAuth:       connectorOAuthClient,
 		}
 		chatLinkedAccounts = func(namespace string, requester *corev1alpha1.RequestedBy) tools.LinkedAccountCredentials {
-			return controller.LiveLinkedAccounts(mgr.GetAPIReader(), tools.DefaultRegistry, outboundAccessResolver.Connections, namespace, requester)
+			// Fresh point reads from the API server; namespace-wide scans
+			// (providers, the authoritative Connection listing) from the cache.
+			return controller.LiveLinkedAccountsWithCache(mgr.GetAPIReader(), mgr.GetClient(), tools.DefaultRegistry, outboundAccessResolver.Connections, namespace, requester)
 		}
 	}
 	setupLog.Info("agent execution binding stage enabled: executable agent Tasks freeze an immutable encrypted snapshot and write-once binding before dispatch")

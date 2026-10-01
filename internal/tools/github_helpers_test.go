@@ -771,12 +771,25 @@ func TestResolveRepoAndToken_LinkedAccountFirst(t *testing.T) {
 	if _, _, _, _, err := resolveScopedReadRepoAndToken(outside, k8sClient, "list_pull_requests", testMyTaskName, "", ""); err == nil || !strings.Contains(err.Error(), "created in this conversation") {
 		t.Fatalf("task_name outside a task err = %v", err)
 	}
-	// A same-named Task created in another namespace never lends its scope.
+	// A Task this turn created in another namespace is resolved from the
+	// record (name alone is what the tool receives) and read from there.
 	elsewhere := task.DeepCopy()
-	elsewhere.Namespace, elsewhere.UID = "elsewhere", "other-uid"
+	elsewhere.Name, elsewhere.Namespace, elsewhere.UID, elsewhere.ResourceVersion = "elsewhere-task", "elsewhere", "other-uid", ""
+	elsewhere.Spec.RequestedBy = requester
+	elsewhere.Spec.Workspace.GitRepo = "https://github.com/elseorg/elserepo"
+	if err := k8sClient.Create(context.Background(), elsewhere); err != nil {
+		t.Fatal(err)
+	}
 	outsideCtx.RecordCreatedTask(elsewhere)
-	if _, _, _, _, err := resolveScopedReadRepoAndToken(outside, k8sClient, "list_pull_requests", testMyTaskName, "", ""); err == nil || !strings.Contains(err.Error(), "created in this conversation") {
-		t.Fatalf("other-namespace created task err = %v", err)
+	if _, repo, token, _, err := resolveScopedReadRepoAndToken(outside, k8sClient, "list_pull_requests", "elsewhere-task", "", ""); err != nil || repo != "elserepo" || token != "linked-token" {
+		t.Fatalf("other-namespace created task: repo=%q token=%q err=%v", repo, token, err)
+	}
+	// The same name recorded in two namespaces is ambiguous and refused.
+	twin := elsewhere.DeepCopy()
+	twin.Namespace, twin.UID = "third", "third-uid"
+	outsideCtx.RecordCreatedTask(twin)
+	if _, _, _, _, err := resolveScopedReadRepoAndToken(outside, k8sClient, "list_pull_requests", "elsewhere-task", "", ""); err == nil || !strings.Contains(err.Error(), "created in this conversation") {
+		t.Fatalf("ambiguous created task err = %v", err)
 	}
 	// A recorded identity that no longer matches the live object is refused.
 	replaced := task.DeepCopy()
