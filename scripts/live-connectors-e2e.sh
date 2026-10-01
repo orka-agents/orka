@@ -44,6 +44,10 @@ fixture_tls_port="${ORKA_FIXTURE_LOCAL_TLS_PORT:-18443}"
 access_ttl_seconds="${ORKA_CONNECTORS_E2E_ACCESS_TTL_SECONDS:-120}"
 access_ttl_seconds="${access_ttl_seconds%s}"
 [[ "${access_ttl_seconds}" =~ ^[1-9][0-9]*$ ]] || { printf 'error: ORKA_CONNECTORS_E2E_ACCESS_TTL_SECONDS must be whole seconds, got %q\n' "${access_ttl_seconds}" >&2; exit 1; }
+# The credential source refreshes a token with 60s or less left, and the
+# first read must run on the consent-issued token (refreshes == 0), so the
+# TTL needs the refresh horizon plus room for Task startup.
+(( access_ttl_seconds >= 90 )) || { printf 'error: ORKA_CONNECTORS_E2E_ACCESS_TTL_SECONDS must be at least 90 (60s refresh horizon plus Task startup), got %s\n' "${access_ttl_seconds}" >&2; exit 1; }
 access_ttl="${access_ttl_seconds}s"
 subject="alice"
 other_subject="bob"

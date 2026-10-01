@@ -52,8 +52,10 @@ type modelRequest struct {
 //     served by a refreshed token), then update_plan with the goal complete
 //     and a final answer.
 func (f *Fixture) model(w http.ResponseWriter, r *http.Request) {
-	credential := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if credential == "" || credential != f.cfg.ModelCredential {
+	// The scheme is part of the contract: a bare credential is refused.
+	authorization := r.Header.Get("Authorization")
+	credential, bearer := strings.CutPrefix(authorization, "Bearer ")
+	if !bearer || credential == "" || credential != f.cfg.ModelCredential {
 		http.Error(w, "expected fixture model credential", http.StatusUnauthorized)
 		return
 	}
