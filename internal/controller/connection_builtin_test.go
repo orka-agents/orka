@@ -647,6 +647,12 @@ func TestLiveLinkedAccountsUnusableLinkFailsClosed(t *testing.T) {
 	if _, bound, err := unlinked.BuiltinToolCredential(ctx, "list_pull_requests"); bound || err != nil {
 		t.Fatalf("lagging provider without a link: bound = %t err = %v", bound, err)
 	}
+	// The same, for a link under a non-canonical name to the lagging provider.
+	customLagging := f.connection(corev1alpha1.ConnectionModeReadWrite, true)
+	customLagging.Name = "my-github-link"
+	if _, bound, err := LiveLinkedAccounts(f.reader(lagging, customLagging), registry, source, "tenant", f.requester).BuiltinToolCredential(ctx, "create_pull_request"); bound || err == nil || !strings.Contains(err.Error(), "not accepted") {
+		t.Fatalf("non-canonical link under a lagging provider: bound = %t err = %v", bound, err)
+	}
 	// A provider that dropped the tool from its catalog still owns the link:
 	// removing create_pull_request must not restore operator-credential writes.
 	narrowed := acceptedBuiltinProvider("github", "list_pull_requests")

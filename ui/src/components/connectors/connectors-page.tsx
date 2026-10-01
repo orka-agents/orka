@@ -195,12 +195,21 @@ function ConnectorsPageContent({ namespace, search, clearCallback }: { namespace
   })
 
   const busy = start.isPending || changeMode.isPending || reauthorize.isPending || disconnect.isPending
-  const byProvider = new Map((connections.data?.items ?? []).map((c) => [c.provider, c]))
+  // One link per provider card; any further link to the same provider is
+  // shown on its own, disconnectable, because tools refuse to run while
+  // duplicates exist.
+  const byProvider = new Map<string, Connection>()
+  const extras: Connection[] = []
+  for (const c of connections.data?.items ?? []) {
+    if (byProvider.has(c.provider)) extras.push(c)
+    else byProvider.set(c.provider, c)
+  }
   // A Connection outlives its ConnectorProvider on purpose (it still holds
   // the person's tokens), so it is shown, and can be disconnected, even
   // when no provider card claims it.
   const providerNames = new Set((providers.data?.items ?? []).map((p) => p.name))
   const retained = (connections.data?.items ?? []).filter((c) => !providerNames.has(c.provider))
+  const duplicates = extras.filter((c) => providerNames.has(c.provider))
 
   return (
     <div className="space-y-6">
@@ -254,26 +263,32 @@ function ConnectorsPageContent({ namespace, search, clearCallback }: { namespace
             <RetainedConnectionCard key={connection.name} connection={connection} busy={busy}
               onDisconnect={(name) => disconnect.mutate(name)} />
           ))}
+          {duplicates.map((connection) => (
+            <RetainedConnectionCard key={connection.name} connection={connection} busy={busy} duplicate
+              onDisconnect={(name) => disconnect.mutate(name)} />
+          ))}
         </div>
       )}
     </div>
   )
 }
 
-/** A linked account whose provider is no longer configured: still yours, still disconnectable. */
-function RetainedConnectionCard({ connection, busy, onDisconnect }: { connection: Connection; busy: boolean; onDisconnect: (name: string) => void }) {
+/** A linked account outside its provider card: the provider is gone, or this is an extra link to it. Still yours, still disconnectable. */
+function RetainedConnectionCard({ connection, busy, duplicate, onDisconnect }: { connection: Connection; busy: boolean; duplicate?: boolean; onDisconnect: (name: string) => void }) {
   return (
     <Card>
       <CardHeader className="flex flex-row items-start justify-between gap-3 space-y-0">
         <div>
-          <CardTitle className="text-base">{connection.provider}</CardTitle>
-          <p className="text-xs text-muted-foreground">Provider no longer configured</p>
+          <CardTitle className="text-base">{connection.provider} · {connection.name}</CardTitle>
+          <p className="text-xs text-muted-foreground">{duplicate ? 'Extra link to this provider' : 'Provider no longer configured'}</p>
         </div>
         <Badge variant="outline">{connection.deleting ? 'Disconnecting…' : connection.state}</Badge>
       </CardHeader>
       <CardContent className="space-y-3 text-sm">
         <p className="text-muted-foreground">
-          {connection.message || 'This provider was removed by an operator. The link keeps its tokens until you disconnect it.'}
+          {duplicate
+            ? 'You hold more than one link to this provider; its tools will not run until the extra links are disconnected.'
+            : connection.message || 'This provider was removed by an operator. The link keeps its tokens until you disconnect it.'}
         </p>
         {!connection.deleting && (
           <Button size="sm" variant="destructive" disabled={busy} onClick={() => onDisconnect(connection.name)}>Disconnect</Button>
