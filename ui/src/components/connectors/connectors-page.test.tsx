@@ -235,6 +235,23 @@ describe('ConnectorsPage', () => {
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('fewer permissions'))
   })
 
+  it('switches to the consent namespace when a callback fails elsewhere', async () => {
+    useProviders([github])
+    render(<ConnectorsPage search={{ status: 'error', reason: 'access_denied', connection: 'github-abc', namespace: 'team-a' }} />)
+    await waitFor(() => expect(useUIStore.getState().namespace).toBe('team-a'))
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('cancelled'))
+  })
+
+  it('names the missing manage scope when completion is refused for it', async () => {
+    useProviders([github], [{ ...linked, state: 'Pending', ready: false }])
+    window.history.replaceState(null, '', '/settings/connectors?status=pending&connection=github-abc#completion=one-time')
+    server.use(http.post(`${API}/connections/github-abc/complete`, () => new HttpResponse('context token is not authorized for connectorsManage', { status: 403 })))
+    render(<ConnectorsPage search={{ status: 'pending', connection: 'github-abc' }} />)
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('orka:connectors:manage'))
+    expect(screen.getByRole('alert')).not.toHaveTextContent('orka connection complete')
+    expect(screen.getByRole('alert')).not.toHaveTextContent('Sign in as yourself')
+  })
+
   it('tells a non-person token there is nothing to link', async () => {
     server.use(
       http.get(`${API}/connectors`, () => new HttpResponse('connector endpoints require a verified person', { status: 403 })),

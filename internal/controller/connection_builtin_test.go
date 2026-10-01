@@ -578,6 +578,21 @@ func TestLiveLinkedAccounts(t *testing.T) {
 	if _, _, err := writable.BuiltinToolCredential(ctx, "create_pull_request"); err == nil || !strings.Contains(err.Error(), "waits for approval") || source.request.Tool.Name != "" {
 		t.Fatalf("readWrite write err = %v request = %+v", err, source.request)
 	}
+	// A Ready link under a non-canonical name (created outside the API and
+	// adopted) is the person's link all the same, and binds the call.
+	custom := f.connection(corev1alpha1.ConnectionModeReadOnly, true)
+	custom.Name = "my-github-link"
+	source.request = outboundaccess.ConnectionCredentialRequest{}
+	named := LiveLinkedAccounts(f.reader(github, custom), registry, source, "tenant", f.requester)
+	if credential, bound, err := named.BuiltinToolCredential(ctx, "list_pull_requests"); err != nil || !bound || credential.AccessToken != "gho_live" || source.request.Frozen.UID != "conn-uid" {
+		t.Fatalf("non-canonical name: credential = %+v bound = %t err = %v", credential, bound, err)
+	}
+	second := custom.DeepCopy()
+	second.Name, second.UID = "my-other-github-link", "conn-uid-2"
+	twice := LiveLinkedAccounts(f.reader(github, custom, second), registry, source, "tenant", f.requester)
+	if _, bound, err := twice.BuiltinToolCredential(ctx, "list_pull_requests"); bound || err == nil || !strings.Contains(err.Error(), "2 links") {
+		t.Fatalf("two non-canonical links: bound = %t err = %v", bound, err)
+	}
 	// Not in the catalog, or declared by no provider: not the resolver's concern.
 	if _, bound, err := accounts.BuiltinToolCredential(ctx, "web_search"); bound || err != nil {
 		t.Fatalf("web_search: bound = %t err = %v", bound, err)

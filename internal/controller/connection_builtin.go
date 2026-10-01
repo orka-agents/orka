@@ -154,14 +154,27 @@ func (l liveLinkedAccounts) BuiltinToolCredential(ctx context.Context, toolName 
 	connection := &corev1alpha1.Connection{}
 	name := connectors.ConnectionName(info.Provider, l.requester.Issuer, l.requester.Subject)
 	if err := l.reader.Get(ctx, client.ObjectKey{Namespace: l.namespace, Name: name}, connection); err != nil {
-		if apierrors.IsNotFound(err) {
-			// No link to the provider that declares the tool; the person
-			// may still hold a link to another GitHub provider that no
-			// longer declares it (or was removed), and that link keeps
-			// the call bound rather than falling back.
-			return l.unacceptedProviderLink(ctx, toolName)
+		if !apierrors.IsNotFound(err) {
+			return tools.LinkedAccountCredential{}, false, fmt.Errorf("load connection %q: %w", name, err)
 		}
-		return tools.LinkedAccountCredential{}, false, fmt.Errorf("load connection %q: %w", name, err)
+		// Not under the canonical name. The API accepts any owned name and
+		// the reconciler adopts Connections created outside it, so the
+		// person's link to this provider may exist under another name:
+		// exactly one such link is used; several are refused; none means
+		// another provider's link may still keep the call bound.
+		owned, err := l.ownedConnectionsTo(ctx, info.Provider)
+		if err != nil {
+			return tools.LinkedAccountCredential{}, false, err
+		}
+		switch len(owned) {
+		case 0:
+			return l.unacceptedProviderLink(ctx, toolName)
+		case 1:
+			connection = &owned[0]
+		default:
+			return tools.LinkedAccountCredential{}, false, fmt.Errorf(
+				"you hold %d links to %s; disconnect the extra ones under Settings > Connectors before using %s", len(owned), info.Provider, toolName)
+		}
 	}
 	if class == corev1alpha1.ConnectorToolClassWrite {
 		return tools.LinkedAccountCredential{}, false, fmt.Errorf(
@@ -255,6 +268,22 @@ func (l liveLinkedAccounts) unacceptedProviderLink(ctx context.Context, toolName
 			providerName, toolName)
 	}
 	return tools.LinkedAccountCredential{}, false, nil
+}
+
+// ownedConnectionsTo returns the person's Connections to provider,
+// whatever their names, from the authoritative listing.
+func (l liveLinkedAccounts) ownedConnectionsTo(ctx context.Context, provider string) ([]corev1alpha1.Connection, error) {
+	owned, err := connectors.ListSubjectConnectionsAuthoritative(ctx, l.cache, l.namespace, l.requester)
+	if err != nil {
+		return nil, fmt.Errorf("list the requester's connections: %w", err)
+	}
+	var matching []corev1alpha1.Connection
+	for i := range owned {
+		if owned[i].Spec.ProviderRef.Name == provider {
+			matching = append(matching, owned[i])
+		}
+	}
+	return matching, nil
 }
 
 // liveConnectionState words why an existing Connection is not usable.
