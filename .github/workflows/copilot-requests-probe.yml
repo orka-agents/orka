@@ -1,0 +1,36 @@
+name: Copilot requests probe
+on: push
+permissions:
+  contents: read
+  copilot-requests: write
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      TOKEN: ${{ github.token }}
+    steps:
+      - name: Probe Copilot API with the Actions token
+        run: |
+          set -uo pipefail
+          echo "token prefix: ${TOKEN:0:4}"
+          hdrs=(-H "Authorization: Bearer ${TOKEN}" -H "editor-version: vscode/1.95.0" -H "editor-plugin-version: copilot-chat/0.26.7" -H "user-agent: GitHubCopilotChat/0.26.7" -H "x-github-api-version: 2026-08-20")
+          for id in copilot-developer-cli vscode-chat copilot-language-server; do
+            code=$(curl -sS -o /tmp/models.json -w '%{http_code}' "${hdrs[@]}" -H "copilot-integration-id: ${id}" https://api.githubcopilot.com/models)
+            if [ "$code" = 200 ]; then echo "GET /models [$id] -> 200, $(jq '.data|length' /tmp/models.json) models"; else echo "GET /models [$id] -> $code: $(head -c 300 /tmp/models.json)"; fi
+          done
+          jq -r '.data[]?.id' /tmp/models.json 2>/dev/null | head -40 | tr '\n' ' '; echo
+          curl -sS -o /tmp/models.json "${hdrs[@]}" -H "copilot-integration-id: copilot-developer-cli" https://api.githubcopilot.com/models
+          model=$(jq -r '[.data[]?.id] | (map(select(.=="gpt-4.1"))[0] // map(select(test("mini")))[0] // .[0])' /tmp/models.json)
+          echo "chat model: ${model}"
+          code=$(curl -sS -o /tmp/chat.json -w '%{http_code}' "${hdrs[@]}" -H "copilot-integration-id: copilot-developer-cli" -H "openai-intent: conversation-panel" -H "Content-Type: application/json" \
+            -d "{\"model\":\"${model}\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with OK\"}],\"max_tokens\":5}" https://api.githubcopilot.com/chat/completions)
+          echo "POST /chat/completions [copilot-developer-cli] -> $code: $(jq -c '.choices[0].message.content? // .' /tmp/chat.json | head -c 300)"
+          rmodel=$(jq -r '[.data[]? | select((.supported_endpoints // []) | index("/responses")) | .id] | (map(select(test("mini")))[0] // .[0] // "")' /tmp/models.json)
+          if [ -n "$rmodel" ]; then
+            code=$(curl -sS -o /tmp/resp.json -w '%{http_code}' "${hdrs[@]}" -H "copilot-integration-id: copilot-developer-cli" -H "openai-intent: conversation-panel" -H "Content-Type: application/json" \
+              -d "{\"model\":\"${rmodel}\",\"input\":\"Reply with OK\"}" https://api.githubcopilot.com/responses)
+            echo "POST /responses [$rmodel] -> $code: $(jq -c '[.output[]?.content[]?.text] // .' /tmp/resp.json | head -c 300)"
+          fi
+          code=$(curl -sS -o /tmp/legacy.json -w '%{http_code}' -H "Authorization: token ${TOKEN}" https://api.github.com/copilot_internal/v2/token)
+          echo "legacy exchange copilot_internal/v2/token -> $code: $(jq -c '{message, error_details} // .' /tmp/legacy.json 2>/dev/null | head -c 300)"
