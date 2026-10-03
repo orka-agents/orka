@@ -165,7 +165,7 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorGitHubMutation(ctx 
 	record.MonitorName = monitor.Name
 	record.MonitorGeneration = monitor.Generation
 	if record.Actor == "" {
-		record.Actor = "orka-controller"
+		record.Actor = repositoryMonitorControllerActor
 	}
 	if record.CreatedAt.IsZero() {
 		record.CreatedAt = time.Now()
@@ -185,7 +185,7 @@ func (r *RepositoryMonitorReconciler) updateRepositoryMonitorGitHubMutation(ctx 
 	record.MonitorName = monitor.Name
 	record.MonitorGeneration = monitor.Generation
 	if record.Actor == "" {
-		record.Actor = "orka-controller"
+		record.Actor = repositoryMonitorControllerActor
 	}
 	if err := r.Store.UpdateGitHubMutationRecord(ctx, record); err != nil {
 		return err

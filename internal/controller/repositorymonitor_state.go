@@ -13,16 +13,15 @@ func repositoryMonitorIssuePhaseTransitionAllowed(from, to string) bool {
 		repositoryMonitorIssuePhaseResearching:          {repositoryMonitorIssuePhaseResearched: {}, repositoryMonitorIssuePhaseBlocked: {}},
 		repositoryMonitorIssuePhaseResearched:           {repositoryMonitorIssuePhasePlanQueued: {}, repositoryMonitorIssuePhaseImplementationQueued: {}, repositoryMonitorIssuePhaseBlocked: {}},
 		repositoryMonitorIssuePhasePlanQueued:           {repositoryMonitorIssuePhasePlanning: {}, repositoryMonitorIssuePhaseBlocked: {}},
-		repositoryMonitorIssuePhasePlanning:             {repositoryMonitorIssuePhasePlanReady: {}, repositoryMonitorIssuePhaseApprovalRequired: {}, repositoryMonitorIssuePhaseApproved: {}, repositoryMonitorIssuePhaseBlocked: {}},
-		repositoryMonitorIssuePhasePlanReady:            {repositoryMonitorIssuePhaseApprovalRequired: {}, repositoryMonitorIssuePhaseApproved: {}, repositoryMonitorIssuePhaseBlocked: {}},
-		repositoryMonitorIssuePhaseApprovalRequired:     {repositoryMonitorIssuePhaseApproved: {}, repositoryMonitorIssuePhaseBlocked: {}},
-		repositoryMonitorIssuePhaseApproved:             {repositoryMonitorIssuePhaseImplementationQueued: {}, repositoryMonitorIssuePhaseBlocked: {}},
+		repositoryMonitorIssuePhasePlanning:             {repositoryMonitorIssuePhasePlanReady: {}, repositoryMonitorIssuePhasePlanned: {}, repositoryMonitorIssuePhaseBlocked: {}},
+		repositoryMonitorIssuePhasePlanReady:            {repositoryMonitorIssuePhasePlanned: {}, repositoryMonitorIssuePhaseBlocked: {}},
+		repositoryMonitorIssuePhasePlanned:              {repositoryMonitorIssuePhaseImplementationQueued: {}, repositoryMonitorIssuePhaseBlocked: {}},
 		repositoryMonitorIssuePhaseImplementationQueued: {repositoryMonitorIssuePhaseImplementing: {}, repositoryMonitorIssuePhaseBlocked: {}},
 		repositoryMonitorIssuePhaseImplementing:         {repositoryMonitorIssuePhasePatchReady: {}, repositoryMonitorIssuePhaseMutationQueued: {}, repositoryMonitorIssuePhaseBlocked: {}},
 		repositoryMonitorIssuePhasePatchReady:           {repositoryMonitorIssuePhaseMutationQueued: {}, repositoryMonitorIssuePhaseBlocked: {}},
 		repositoryMonitorIssuePhaseMutationQueued:       {repositoryMonitorIssuePhaseMutatingToPR: {}, repositoryMonitorIssuePhaseBlocked: {}},
 		repositoryMonitorIssuePhaseMutatingToPR:         {repositoryMonitorIssuePhasePROpened: {}, repositoryMonitorIssuePhaseBlocked: {}},
-		repositoryMonitorIssuePhaseBlocked:              {repositoryMonitorIssuePhaseDiscovered: {}, repositoryMonitorIssuePhaseTriageQueued: {}, repositoryMonitorIssuePhaseResearchQueued: {}, repositoryMonitorIssuePhasePlanQueued: {}, repositoryMonitorIssuePhaseApproved: {}},
+		repositoryMonitorIssuePhaseBlocked:              {repositoryMonitorIssuePhaseDiscovered: {}, repositoryMonitorIssuePhaseTriageQueued: {}, repositoryMonitorIssuePhaseResearchQueued: {}, repositoryMonitorIssuePhasePlanQueued: {}, repositoryMonitorIssuePhasePlanned: {}},
 	}
 	_, ok := allowed[from][to]
 	return ok

@@ -143,29 +143,6 @@ spec:
                     - name
                     type: object
                 type: object
-              automerge:
-                description: Automerge controls deterministic merge behavior.
-                properties:
-                  allowedMergeMethods:
-                    description: AllowedMergeMethods lists merge methods allowed by
-                      policy.
-                    items:
-                      enum:
-                      - merge
-                      - squash
-                      - rebase
-                      type: string
-                    type: array
-                    x-kubernetes-list-type: set
-                  enabled:
-                    description: Enabled enables automerge jobs.
-                    type: boolean
-                  requireGlobalMergeGate:
-                    default: true
-                    description: RequireGlobalMergeGate requires the controller-wide
-                      merge gate.
-                    type: boolean
-                type: object
               branch:
                 default: main
                 description: Branch is the default base branch for repository-wide
@@ -247,9 +224,9 @@ spec:
                         format: int32
                         minimum: 1
                         type: integer
-                      requireApprovedPlan:
-                        description: RequireApprovedPlan blocks implementation unless
-                          the latest plan was approved.
+                      requirePlan:
+                        description: RequirePlan requires a current ready plan before
+                          implementation. Defaults to true.
                         type: boolean
                     type: object
                   planning:
@@ -259,13 +236,6 @@ spec:
                         description: Enabled enables planning. Defaults to true when
                           a planner agent is configured and a command requests it.
                         type: boolean
-                      requireHumanApprovalFor:
-                        description: RequireHumanApprovalFor names risk levels or
-                          plan categories that require explicit approval.
-                        items:
-                          type: string
-                        type: array
-                        x-kubernetes-list-type: set
                     type: object
                   research:
                     description: Research controls read-only issue research.
@@ -305,7 +275,10 @@ spec:
                     type: array
                     x-kubernetes-list-type: set
                   pauseLabels:
+                    default:
+                    - orka:pause
                     description: PauseLabels block further automation while present.
+                      Removing them permits fresh reconciliation.
                     items:
                       type: string
                     type: array
@@ -383,18 +356,21 @@ spec:
                     description: Enabled enables repair jobs.
                     type: boolean
                   maxRepairsPerHead:
+                    default: 2
                     description: MaxRepairsPerHead bounds automated repairs per PR
                       head SHA.
                     format: int32
                     minimum: 0
                     type: integer
                   maxRepairsPerPR:
+                    default: 5
                     description: MaxRepairsPerPR bounds total automated repairs per
                       PR.
                     format: int32
                     minimum: 0
                     type: integer
                   maxValidationRetries:
+                    default: 2
                     description: MaxValidationRetries bounds validation retries for
                       one repair job.
                     format: int32
@@ -611,41 +587,9 @@ spec:
                             description: Issues maps issue command intents to label
                               names. Empty fields use the default orka:* labels.
                             properties:
-                              approvePlan:
-                                type: string
-                              decompose:
-                                type: string
                               implement:
-                                type: string
-                              plan:
-                                type: string
-                              research:
-                                type: string
-                              resume:
-                                type: string
-                              stop:
-                                type: string
-                              triage:
-                                type: string
-                            type: object
-                          pullRequests:
-                            description: PullRequests maps pull-request command intents
-                              to label names. Empty fields use the default orka:*
-                              labels.
-                            properties:
-                              automerge:
-                                type: string
-                              fix:
-                                type: string
-                              fixCI:
-                                type: string
-                              resume:
-                                type: string
-                              review:
-                                type: string
-                              stop:
-                                type: string
-                              updateBranch:
+                                description: Implement starts the complete issue workflow.
+                                  Defaults to orka:implement.
                                 type: string
                             type: object
                           requireActorPermission:

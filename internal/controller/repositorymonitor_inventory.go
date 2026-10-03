@@ -109,12 +109,6 @@ func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context
 	if err != nil {
 		return 0, 0, 0, err
 	}
-	if handled, err := r.reconcileRepositoryMonitorCompletedAutomerge(ctx, monitor, run, pullRequests); handled || err != nil {
-		if err != nil {
-			return 0, 0, 0, err
-		}
-		return 1, 0, 0, nil
-	}
 	if handled, err := r.reconcileRepositoryMonitorCompletedUpdateBranch(ctx, monitor, run, pullRequests); handled || err != nil {
 		if err != nil {
 			return 0, 0, 0, err
@@ -143,6 +137,46 @@ func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context
 			return selected, createdTasks, skipped, err
 		}
 		item := repositoryMonitorItemFromPullRequest(monitor, pr, existing)
+		if repositoryMonitorManagedWorkflow(monitor) && item.SkipReason != repositoryMonitorIssueSkipStoppedByCommand {
+			state, err := r.repositoryMonitorRepairStateForHead(ctx, monitor, pr.Number, pr.HeadSHA)
+			if err != nil {
+				return selected, createdTasks, skipped, err
+			}
+			item.RepairState = state
+		}
+		if err := r.reconcileRepositoryMonitorReadiness(ctx, monitor, &pr, item); err != nil {
+			return selected, createdTasks, skipped, err
+		}
+		// Readiness may observe a newer head or a PR leaving this monitor's scope.
+		// Do not start work from the old inventory; the next poll will rebuild it.
+		if pr.State != repositoryMonitorItemStateOpen || pr.HeadSHA != item.HeadSHA || pr.BaseBranch != baseBranch {
+			skipped++
+			continue
+		}
+		if run.CommandEventID == "" && item.SkipReason == repositoryMonitorIssueSkipStoppedByCommand {
+			if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
+				return selected, createdTasks, skipped, err
+			}
+			skipped++
+			continue
+		}
+		if selected < maxPerRun {
+			repairWasQueued := item.RepairState == repositoryMonitorRepairPhaseQueued
+			if handled, created, err := r.tryRepositoryMonitorAutomaticRepair(ctx, monitor, run, owner, repository, pr, item); err != nil {
+				return selected, createdTasks, skipped, err
+			} else if handled {
+				// Only newly started work consumes a slot. Active or exhausted
+				// repairs must not starve later PRs on every workflow poll.
+				// GitHub update-branch queues work without creating a Task.
+				if created > 0 || (!repairWasQueued && item.RepairState == repositoryMonitorRepairPhaseQueued) {
+					selected++
+				} else {
+					skipped++
+				}
+				createdTasks += created
+				continue
+			}
+		}
 		if handled, created, err := r.tryProcessPullRequestCommandRun(ctx, monitor, run, owner, repository, pr, item); err != nil {
 			return selected, createdTasks, skipped, err
 		} else if handled {
@@ -215,7 +249,7 @@ func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context
 				item.CIState = repositoryMonitorCIStatePassed
 			} else {
 				skipped++
-				item.CIState = firstNonEmptyString(ci.reason, "ci_not_green")
+				item.CIState = firstNonEmptyString(ci.reason, repositoryMonitorCINotGreen)
 				item.LastVerdict = repositoryMonitorVerdictSkipped
 				item.SkipReason = item.CIState
 				if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
@@ -322,18 +356,7 @@ func (r *RepositoryMonitorReconciler) blockRepositoryMonitorTargetCommand(ctx co
 		return err
 	}
 	actionKind := repositoryMonitorCommandActionKind(command.Intent)
-	if command.Intent == repositoryMonitorCommandIntentAutomerge {
-		preserveSuccess, err := r.terminalizeRepositoryMonitorAutomerge(ctx, monitor, *command, reason)
-		if err != nil {
-			return err
-		}
-		if preserveSuccess {
-			if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorPullRequestKind, run.TargetNumber, run.TargetSHA, "", actionKind, repositoryMonitorWorkActionStatusSucceeded, repositoryMonitorAutomergeStateMerged, "", ""); err != nil {
-				return err
-			}
-			return r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, run.TargetNumber, run.TargetSHA, "command_target_already_completed", fmt.Sprintf("Command %s target already completed", command.ID), map[string]any{commandEventIDField: command.ID, intentField: command.Intent})
-		}
-	}
+
 	if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorPullRequestKind, run.TargetNumber, run.TargetSHA, "", actionKind, repositoryMonitorWorkActionStatusBlocked, "command_blocked", "", reason); err != nil {
 		return err
 	}
@@ -964,7 +987,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorExistingReviewVerdict(ctx
 
 func repositoryMonitorBlockedLabel(spec corev1alpha1.RepositoryMonitorSpec, prLabels []string) string {
 	blocked := map[string]struct{}{}
-	for _, label := range append(spec.Policy.ProtectedLabels, spec.Policy.PauseLabels...) {
+	for _, label := range append(append([]string(nil), spec.Policy.ProtectedLabels...), repositoryMonitorPauseLabels(spec)...) {
 		label = strings.ToLower(strings.TrimSpace(label))
 		if label != "" {
 			blocked[label] = struct{}{}
@@ -1007,6 +1030,12 @@ func repositoryMonitorItemFromPullRequest(monitor *corev1alpha1.RepositoryMonito
 		item.LastVerdict = existing.LastVerdict
 		item.RepairState = existing.RepairState
 		item.AutomergeState = existing.AutomergeState
+		if existing.SkipReason == repositoryMonitorIssueSkipStoppedByCommand {
+			item.SkipReason = existing.SkipReason
+		}
+		if !sameHead && item.RepairState != repositoryMonitorRepairPhaseQueued {
+			item.RepairState = ""
+		}
 		if !sameHead && item.AutomergeState != repositoryMonitorAutomergeStateMerged {
 			item.AutomergeState = ""
 		}
@@ -1026,7 +1055,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorGitHubToken(ctx context.C
 	if monitor != nil && localObjectReferenceName(monitor.Spec.ForgeCredentialRef) != "" {
 		return r.repositoryMonitorCredentialToken(ctx, monitor, "forge credential Secret", monitor.Spec.ForgeCredentialRef)
 	}
-	return r.repositoryMonitorCredentialToken(ctx, monitor, "legacy GitHub read credential Secret", monitor.Spec.GitSecretRef)
+	return r.repositoryMonitorCredentialToken(ctx, monitor, "GitHub read credential Secret", repositoryMonitorReadCredentialRef(monitor))
 }
 
 func (r *RepositoryMonitorReconciler) listRepositoryMonitorPullRequests(ctx context.Context, owner, repository, token, baseBranch string) ([]repositoryMonitorPullRequest, error) {
@@ -1058,7 +1087,7 @@ func (r *RepositoryMonitorReconciler) listRepositoryMonitorPullRequestsForRun(ct
 			if commandErr != nil {
 				return nil, commandErr
 			}
-			if command.Intent != repositoryMonitorCommandIntentAutomerge && command.Intent != repositoryMonitorCommandIntentUpdateBranch {
+			if command.Intent != repositoryMonitorCommandIntentUpdateBranch {
 				return nil, nil
 			}
 		}

@@ -91,9 +91,11 @@ func (r *RepositoryMonitorReconciler) syncRepositoryMonitorRepairValidationAttem
 	if err != nil {
 		return repositoryMonitorRepairValidationRetryState{}, err
 	}
-	exhausted := repositoryMonitorValidationRetryableAfterRepair(record.ValidationStatus) &&
-		monitor.Spec.Repair.MaxValidationRetries != nil &&
-		attempts > int(*monitor.Spec.Repair.MaxValidationRetries)
+	maxValidationRetries := 2
+	if monitor.Spec.Repair.MaxValidationRetries != nil {
+		maxValidationRetries = int(*monitor.Spec.Repair.MaxValidationRetries)
+	}
+	exhausted := repositoryMonitorValidationRetryableAfterRepair(record.ValidationStatus) && attempts > maxValidationRetries
 	desiredError := ""
 	if exhausted {
 		desiredError = repositoryMonitorValidationRetryExhaustedReason
@@ -171,9 +173,11 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepairValidationRetryStat
 	if err != nil || job == nil {
 		return repositoryMonitorRepairValidationRetryState{}, err
 	}
-	exhausted := monitor.Spec.Repair.MaxValidationRetries != nil &&
-		job.LastError == repositoryMonitorValidationRetryExhaustedReason &&
-		job.ValidationAttempts > int(*monitor.Spec.Repair.MaxValidationRetries)
+	maxValidationRetries := 2
+	if monitor.Spec.Repair.MaxValidationRetries != nil {
+		maxValidationRetries = int(*monitor.Spec.Repair.MaxValidationRetries)
+	}
+	exhausted := job.LastError == repositoryMonitorValidationRetryExhaustedReason && job.ValidationAttempts > maxValidationRetries
 	return repositoryMonitorRepairValidationRetryState{associated: true, exhausted: exhausted}, nil
 }
 
@@ -188,6 +192,12 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 			return false, 0, nil
 		}
 		return false, 0, err
+	}
+	if item.SkipReason == repositoryMonitorIssueSkipStoppedByCommand && command.Intent != repositoryMonitorCommandIntentStop && command.Intent != repositoryMonitorCommandIntentResume {
+		if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "", repositoryMonitorCommandActionKind(command.Intent), repositoryMonitorWorkActionStatusBlocked, "stopped", "", item.SkipReason); err != nil {
+			return true, 0, err
+		}
+		return true, 0, r.Store.UpsertMonitorItem(ctx, item)
 	}
 	switch command.Intent {
 	case repositoryMonitorCommandIntentStop:
@@ -216,12 +226,7 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 		item.RepairState = ""
 		item.SkipReason = ""
 		return true, 0, r.Store.UpsertMonitorItem(ctx, item)
-	case repositoryMonitorCommandIntentAutomerge:
-		if cancelled, err := r.repositoryMonitorWorkActionCancelled(ctx, monitor, command.ID, repositoryMonitorCommandIntentAutomerge); err != nil || cancelled {
-			return true, 0, err
-		}
-		handled, err := r.tryProcessPullRequestAutomergeCommand(ctx, monitor, run, command, owner, repository, pr, item)
-		return handled, 0, err
+
 	case repositoryMonitorCommandIntentReview:
 		if blockedLabel := repositoryMonitorBlockedLabel(monitor.Spec, pr.Labels); blockedLabel != "" {
 			item.LastVerdict = repositoryMonitorVerdictSkipped
@@ -853,10 +858,17 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepairPolicy(ctx context.
 		}
 		cursor = next
 	}
-	if max := monitor.Spec.Repair.MaxRepairsPerPR; max != nil && repairCountPR >= int(*max) {
+	maxPR, maxHead := 5, 2
+	if max := monitor.Spec.Repair.MaxRepairsPerPR; max != nil {
+		maxPR = int(*max)
+	}
+	if max := monitor.Spec.Repair.MaxRepairsPerHead; max != nil {
+		maxHead = int(*max)
+	}
+	if repairCountPR >= maxPR {
 		return repositoryMonitorRepairPRBudgetReason, repairCountPR, repairCountHead, nil
 	}
-	if max := monitor.Spec.Repair.MaxRepairsPerHead; max != nil && repairCountHead >= int(*max) {
+	if repairCountHead >= maxHead {
 		return "repair_head_budget_exhausted", repairCountPR, repairCountHead, nil
 	}
 	return "", repairCountPR, repairCountHead, nil
@@ -1211,9 +1223,17 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorRepairTask
 		}
 		item, err := r.Store.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, strconv.FormatInt(job.PRNumber, 10))
 		if err == nil {
-			item.RepairState = job.Phase
-			if job.Phase == repositoryMonitorRepairPhaseSucceeded {
-				repositoryMonitorResetItemAfterRepairPush(item)
+			if item.HeadSHA == job.HeadSHA || (job.PushedSHA != "" && item.HeadSHA == job.PushedSHA) {
+				item.RepairState = job.Phase
+				if job.Phase == repositoryMonitorRepairPhaseSucceeded {
+					repositoryMonitorResetItemAfterRepairPush(item)
+				}
+			} else {
+				state, stateErr := r.repositoryMonitorRepairStateForHead(ctx, monitor, job.PRNumber, item.HeadSHA)
+				if stateErr != nil {
+					return ingested, stateErr
+				}
+				item.RepairState = state
 			}
 			if updateErr := r.Store.UpsertMonitorItem(ctx, item); updateErr != nil {
 				return ingested, updateErr
@@ -1237,9 +1257,42 @@ func repositoryMonitorResetItemAfterRepairPush(item *store.MonitorItem) {
 	}
 	item.LastReviewedHeadSHA = ""
 	item.AutomergeState = ""
-	item.SkipReason = ""
+	if item.SkipReason != repositoryMonitorIssueSkipStoppedByCommand {
+		item.SkipReason = ""
+	}
 	if item.LastVerdict == repositoryMonitorRunPhaseQueued && strings.TrimSpace(item.LastReviewID) != "" {
 		return
 	}
 	item.LastVerdict = ""
+}
+
+// A branch may move while an older repair finishes. Only active branch work or
+// terminal evidence for the current head can affect current readiness.
+func (r *RepositoryMonitorReconciler) repositoryMonitorRepairStateForHead(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, number int64, head string) (string, error) {
+	cursor, state := "", ""
+	for {
+		jobs, next, err := r.Store.ListRepairJobs(ctx, store.RepairJobFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, PRNumber: number, Limit: 200, Cursor: cursor})
+		if err != nil {
+			return "", err
+		}
+		for _, job := range jobs {
+			if job.Phase == repositoryMonitorRepairPhaseQueued {
+				active, err := r.repositoryMonitorRepairJobConsumesBudget(ctx, monitor.Namespace, &job)
+				if err != nil {
+					return "", err
+				}
+				if active {
+					return repositoryMonitorRepairPhaseQueued, nil
+				}
+				continue
+			}
+			if state == "" && (job.HeadSHA == head || (job.PushedSHA != "" && job.PushedSHA == head)) {
+				state = job.Phase
+			}
+		}
+		if next == "" {
+			return state, nil
+		}
+		cursor = next
+	}
 }

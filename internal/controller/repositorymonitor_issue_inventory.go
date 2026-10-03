@@ -131,6 +131,13 @@ func (r *RepositoryMonitorReconciler) processIssueInventoryRun(ctx context.Conte
 			return selected, createdTasks, skipped, err
 		}
 		item := repositoryMonitorItemFromIssue(monitor, issue, existing)
+		if run.CommandEventID == "" && item.SkipReason == repositoryMonitorIssueSkipStoppedByCommand {
+			if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
+				return selected, createdTasks, skipped, err
+			}
+			skipped++
+			continue
+		}
 		skipReason := ""
 		if strings.TrimSpace(run.CommandEventID) != "" {
 			skipReason = repositoryMonitorIssueCommandSkipReason(monitor.Spec, issue)
@@ -157,6 +164,9 @@ func (r *RepositoryMonitorReconciler) processIssueInventoryRun(ctx context.Conte
 			item.LastVerdict = repositoryMonitorVerdictSkipped
 			item.SkipReason = skipReason
 			item.WorkflowPhase = repositoryMonitorIssuePhaseBlocked
+			if existing != nil && existing.LastActionKind == repositoryMonitorIssueActionPlan && repositoryMonitorIssuePhaseAwaitingTask(existing.WorkflowPhase) && repositoryMonitorMatchingLabel(repositoryMonitorPauseLabels(monitor.Spec), issue.Labels) != "" {
+				item.WorkflowPhase = repositoryMonitorIssuePhasePaused
+			}
 			if strings.TrimSpace(run.CommandEventID) != "" {
 				command, commandErr := r.Store.GetCommandEvent(ctx, monitor.Namespace, run.CommandEventID)
 				if commandErr != nil {
@@ -435,7 +445,7 @@ func repositoryMonitorIssueCommandLabelNames(monitor *corev1alpha1.RepositoryMon
 		return nil
 	}
 	labels := monitor.Spec.Triggers.GitHub.Labels.Issues
-	return []string{labels.Triage, labels.Research, labels.Plan, labels.ApprovePlan, labels.Implement, labels.Decompose, labels.Stop, labels.Resume}
+	return append([]string{labels.Implement}, repositoryMonitorPauseLabels(monitor.Spec)...)
 }
 
 func repositoryMonitorIssueContentDigest(issue repositoryMonitorIssue, ignoredLabels ...string) string {
