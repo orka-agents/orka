@@ -381,8 +381,6 @@ func main() {
 	var fakeWorkspaceProviderEnabled bool
 	var tlsOpts []func(*tls.Config)
 
-	executionWorkspaceDefaultProvider := controller.ExecutionWorkspaceDefaultProviderFromEnv(os.Getenv)
-	executionWorkspaceDefaultProviderFlag := string(executionWorkspaceDefaultProvider)
 	agentSandboxEnabled = strings.EqualFold(os.Getenv("ORKA_AGENT_SANDBOX_ENABLED"), "true")
 	acpWorkspaceDispatchEnabled = strings.EqualFold(os.Getenv("ORKA_ACP_WORKSPACE_DISPATCH_ENABLED"), "true")
 	agentSandboxConfig, agentSandboxConfigErr := controller.AgentSandboxConfigFromEnv(os.Getenv)
@@ -577,9 +575,6 @@ func main() {
 		"Mounted file containing the authenticated provider proxy bearer token.")
 	flag.StringVar(&acpE2EPromptWriteAmbiguityMarker, "acp-e2e-prompt-write-ambiguity-marker", os.Getenv("ORKA_ACP_E2E_PROMPT_WRITE_AMBIGUITY_MARKER"),
 		"Test-only exact prompt marker that aborts a fully validated ACP prompt request before acceptance is recorded.")
-	flag.StringVar(&executionWorkspaceDefaultProviderFlag, "execution-workspace-default-provider",
-		executionWorkspaceDefaultProviderFlag,
-		"Default execution workspace provider when Task execution.workspace.provider is omitted (agent-sandbox, substrate).")
 	flag.BoolVar(&agentSandboxEnabled, "agent-sandbox-enabled", agentSandboxEnabled,
 		"Enable experimental agent sandbox workspace execution for agent Tasks.")
 	flag.BoolVar(&acpWorkspaceDispatchEnabled, "acp-workspace-dispatch-enabled", acpWorkspaceDispatchEnabled,
@@ -588,7 +583,7 @@ func main() {
 		"Agent sandbox router base URL used by worker Jobs for workspace claims.")
 	flag.StringVar(&agentSandboxConfig.DefaultTemplate, "agent-sandbox-default-template",
 		agentSandboxConfig.DefaultTemplate,
-		"Default agent-sandbox SandboxWarmPool name used when a Task omits execution.workspace.templateRef.name.")
+		"Default agent-sandbox template for direct administrator integrations. Task workspaces select a class.")
 	flag.StringVar(&agentSandboxConfig.WarmPoolPolicy, "agent-sandbox-warm-pool-policy",
 		agentSandboxConfig.WarmPoolPolicy,
 		"Agent sandbox warm pool policy (disabled, template).")
@@ -625,10 +620,10 @@ func main() {
 	flag.StringVar(&substrateConfig.ActorDNSSuffix, "substrate-actor-dns-suffix", substrateConfig.ActorDNSSuffix,
 		"DNS suffix used to route HTTP requests to active Substrate actors.")
 	flag.StringVar(&substrateConfig.DefaultTemplate, "substrate-default-template", substrateConfig.DefaultTemplate,
-		"Default Substrate ActorTemplate name used when a Task omits execution.workspace.templateRef.name.")
+		"Default Substrate ActorTemplate for direct administrator integrations. Task workspaces select a class.")
 	flag.StringVar(&substrateConfig.DefaultTemplateNS, "substrate-default-template-namespace",
 		substrateConfig.DefaultTemplateNS,
-		"Default Substrate ActorTemplate namespace used when a Task omits execution.workspace.templateRef.namespace.")
+		"Default Substrate ActorTemplate namespace for direct administrator integrations.")
 	flag.StringVar(&substrateConfig.BootstrapSecretName, "substrate-bootstrap-token-secret-name",
 		substrateConfig.BootstrapSecretName,
 		"Kubernetes Secret name containing the Substrate workspace daemon bootstrap token in each Task namespace.")
@@ -926,12 +921,6 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 	setupLog.Info("configured isolated controller mode", "mode", mode, "namespace", watchNamespace)
 
-	executionWorkspaceDefaultProvider = corev1alpha1.WorkspaceProvider(executionWorkspaceDefaultProviderFlag)
-	if !controller.WorkspaceProviderSupported(executionWorkspaceDefaultProvider) {
-		setupLog.Error(fmt.Errorf("unsupported execution workspace default provider %q", executionWorkspaceDefaultProvider),
-			"invalid execution workspace configuration")
-		os.Exit(1)
-	}
 	agentSandboxConfig.CleanupPolicy = corev1alpha1.WorkspaceCleanupPolicy(agentSandboxCleanupPolicy)
 	agentSandboxConfig = agentSandboxConfig.WithDefaults()
 	if agentSandboxEnabled {
@@ -1705,7 +1694,6 @@ func main() {
 
 		EnforceNamespaceIsolation:         enforceNamespaceIsolation,
 		MaxTasksPerNamespace:              maxTasksPerNamespaceValue,
-		ExecutionWorkspaceDefaultProvider: executionWorkspaceDefaultProvider,
 		WorkspaceProviderAPIEnabled:       workspaceProviderAPIEnabled,
 		WorkspaceSettlementProtected:      taskProvenanceProtected,
 		ACPWorkspaceDispatchEnabled:       acpWorkspaceDispatchEnabled,

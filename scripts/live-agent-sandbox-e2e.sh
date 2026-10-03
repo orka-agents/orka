@@ -851,7 +851,7 @@ patch_controller_for_agent_sandbox() {
   rollout_id="${e2e_run_id}"
 
   local workspace_api="false"
-  if [[ "${suspend_resume_enabled}" == "1" ]]; then
+  if [[ "${acp_task_smoke_enabled}" == "1" || "${suspend_resume_enabled}" == "1" || "${lifecycle_enabled}" == "1" ]]; then
     workspace_api="true"
     # The dedicated admission runtime below is the API server boundary. These
     # controller flags also register equivalent local handlers, so give the
@@ -1399,6 +1399,63 @@ wait_for_nonempty_jsonpath() {
   done
 }
 
+apply_workspace_task_class() {
+  kubectl apply -f - <<YAML
+apiVersion: acp.workspace.orka.ai/v1alpha1
+kind: RuntimeProviderConfig
+metadata:
+  name: acp-sandbox-task-e2e
+spec:
+  backend: agent-sandbox
+---
+apiVersion: workspace.orka.ai/v1alpha1
+kind: ExecutionWorkspaceProvider
+metadata:
+  name: acp-sandbox-task-e2e
+spec:
+  controllerName: acp.workspace.orka.ai/runtime-pool
+  parametersRef:
+    group: acp.workspace.orka.ai
+    kind: RuntimeProviderConfig
+    name: acp-sandbox-task-e2e
+  lifecycleState: Active
+  requiredContracts: [workspace.orka.ai/v1]
+---
+apiVersion: acp.workspace.orka.ai/v1alpha1
+kind: RuntimeWorkspaceProfile
+metadata:
+  name: acp-sandbox-task
+  namespace: ${acp_task_namespace}
+spec: {}
+---
+apiVersion: workspace.orka.ai/v1alpha1
+kind: ExecutionWorkspaceClass
+metadata:
+  name: acp-sandbox-task
+  namespace: ${acp_task_namespace}
+spec:
+  providerRef:
+    name: acp-sandbox-task-e2e
+  parametersRef:
+    group: acp.workspace.orka.ai
+    kind: RuntimeWorkspaceProfile
+    name: acp-sandbox-task
+  mode: Interactive
+  allowedReuseScopes: [None, Session]
+  lifecycle:
+    defaultOnDetach: Delete
+    allowedOnDetach: [Delete]
+    detachTimeout: 2m
+    maxLifetime: 2h
+    deletionPolicy:
+      providerResources: Delete
+      persistentVolumes: Delete
+      checkpoints: Delete
+YAML
+  wait_for_jsonpath executionworkspaceclass "${acp_task_namespace}" acp-sandbox-task \
+    '{.status.conditions[?(@.type=="Ready")].status}' "True" 180
+}
+
 # run_workspace_backed_acp_task_smoke proves the Phase-1 workspace-provider
 # adapter live against upstream agent-sandbox:
 #   1. a Task.spec.execution.workspace agent Task is admitted (not rejected
@@ -1412,6 +1469,7 @@ wait_for_nonempty_jsonpath() {
 #   5. Task status stays provider-neutral (no claim identifiers);
 #   6. pool deletion removes the claim, warm pool, and template.
 run_workspace_backed_acp_task_smoke() {
+  apply_workspace_task_class
   log "Running workspace-backed ACP Task infrastructure smoke"
 
   bash "${repo_root}/scripts/lib/ensure-static-mode-namespace.sh" \
@@ -1445,11 +1503,10 @@ spec:
   timeout: 10m0s
   execution:
     workspace:
-      enabled: true
-      provider: agent-sandbox
+      classRef:
+        name: acp-sandbox-task
       reusePolicy: none
-      cleanupPolicy: delete
-  prompt: "Reply exactly: ORKA_WS_SANDBOX_OK"
+  prompt: "ORKA_HOLD_30S Reply exactly: ORKA_WS_SANDBOX_OK"
 YAML
 
   local pool_name
@@ -1523,7 +1580,7 @@ YAML
 
   log "Cleaning up the workspace-backed Task and pool"
   run kubectl -n "${acp_task_namespace}" delete task "${acp_task_name}" --wait=true --timeout=3m
-  run kubectl -n "${acp_task_namespace}" delete runtimepool "${pool_name}" --wait=true --timeout=4m
+  run kubectl -n "${acp_task_namespace}" delete runtimepool "${pool_name}" --ignore-not-found=true --wait=true --timeout=4m
   local remaining
   remaining="$(kubectl get sandboxclaims,sandboxwarmpools,sandboxtemplates -n "${acp_runtime_namespace}"     -l "orka.ai/runtime-pool-name=${pool_name}" -o name | wc -l | tr -d ' ')"
   [[ "${remaining}" == "0" ]] ||
@@ -2032,6 +2089,11 @@ fixture_marker_disconnects() {
 
 apply_lifecycle_task() {
   local name="$1" session="$2" create="$3" prompt="$4" timeout="${5:-15m0s}"
+  local capture_success=0
+  if [[ "${prompt}" == "Reply exactly: ORKA_WS_LC_"* ]]; then
+    prompt="ORKA_HOLD_30S ${prompt}"
+    capture_success=1
+  fi
   kubectl apply -f - <<YAML
 apiVersion: core.orka.ai/v1alpha1
 kind: Task
@@ -2050,11 +2112,16 @@ spec:
     create: ${create}
   execution:
     workspace:
-      enabled: true
-      provider: agent-sandbox
+      classRef:
+        name: acp-sandbox-task
       reusePolicy: session
   prompt: "${prompt}"
 YAML
+  if [[ "${capture_success}" == "1" ]]; then
+    wait_for_jsonpath task "${acp_task_namespace}" "${name}" '{.status.execution.state}' Running 900
+    capture_lc_running_fence "${name}" "${work_dir}/lc-running-fence-${name}.json" \
+      "${work_dir}/lc-success-pool-${name}.json"
+  fi
 }
 
 # assert_lc_task_success_tuple requires the COMPLETE canonical successful
@@ -2078,16 +2145,8 @@ assert_lc_task_success_tuple() {
   }
 }
 
-# assert_lc_task_success_fence applies the complete canonical execution fence
-# (mirroring assert_task_fence in agent-runtime-e2e) to a successful turn:
-# the Task's projected pool label and identity must match the RuntimePool's
-# OWN name/UID/instance/epoch exactly, with a complete prompt identity and
-# exactly one attempt - a self-consistent but incomplete or mis-projected
-# fence must fail the lane. The pool can legitimately drain its active
-# instance moments after a turn completes (observed live: the settled pool's
-# activeInstance was already cleared when this ran), so the instance
-# cross-check applies only while the pool still projects one; pool
-# name/UID/epoch and the complete Task-side fence are required regardless.
+# Compare the terminal Task fence with the independent RuntimePool snapshot
+# captured while Running. The class deletes the pool before terminal settlement.
 assert_lc_task_success_fence() {
   local task="$1"
   local fence_file="${work_dir}/lc-success-fence-${task}.json"
@@ -2096,10 +2155,7 @@ assert_lc_task_success_fence() {
   kubectl -n "${acp_task_namespace}" get task "${task}" -o json >"${fence_file}"
   fence_pool="$(jq -r '.status.execution.runtimePoolName // ""' "${fence_file}")"
   [[ -n "${fence_pool}" ]] || die "Task ${task} exposes no runtimePoolName for its success fence"
-  kubectl -n "${acp_task_namespace}" get runtimepool "${fence_pool}" -o json |
-    jq '{poolName: .metadata.name, poolUID: .metadata.uid,
-         controllerEpoch: .status.controllerEpoch,
-         runtimeInstanceID: .status.activeInstance.runtimeInstanceID}' >"${pool_file}"
+  [[ -s "${pool_file}" ]] || die "Task ${task} has no independently captured Running pool identity"
   jq -e --slurpfile snap "${pool_file}" '
     $snap[0] as $s
     | .status.execution as $e
@@ -2125,118 +2181,19 @@ assert_lc_task_success_fence() {
   }
 }
 
-# Start the watch before changing desiredReplicas so even short-lived barriers
-# are recorded. Success requires every exact lifecycle/admission pair in order.
-drain_lc_pool_to_zero() {
-  local pool="$1" timeout_seconds="$2"
-  local events_file="${work_dir}/${pool}-drain-events.tsv"
-  local watch_log="${work_dir}/${pool}-drain-watch.log"
-  local watch_pid started now
-  : >"${events_file}"
-  : >"${watch_log}"
-  (
-    kubectl -n "${acp_task_namespace}" get runtimepool "${pool}" \
-      --watch --output-watch-events --request-timeout="${timeout_seconds}s" -o json |
-      jq --unbuffered -r '
-        (.object // .) as $pool
-        | [
-            $pool.metadata.resourceVersion,
-            ($pool.spec.desiredReplicas // ""),
-            (($pool.status.lifecycle // "") + "/" + ($pool.status.admissionState // ""))
-          ]
-        | @tsv
-      '
-  ) >"${events_file}" 2>"${watch_log}" &
-  watch_pid=$!
-  started="$(date +%s)"
-
-  while ! awk -F '\t' 'NF >= 3 { found = 1 } END { exit(found ? 0 : 1) }' "${events_file}"; do
-    if ! kill -0 "${watch_pid}" 2>/dev/null; then
-      wait "${watch_pid}" 2>/dev/null || true
-      cat "${watch_log}" >&2 || true
-      die "RuntimePool/${pool} lifecycle watch exited before its initial snapshot"
-    fi
-    now="$(date +%s)"
-    if (( now - started >= 30 )); then
-      kill "${watch_pid}" 2>/dev/null || true
-      wait "${watch_pid}" 2>/dev/null || true
-      cat "${watch_log}" >&2 || true
-      die "timed out establishing the RuntimePool/${pool} lifecycle watch"
-    fi
-    sleep 1
-  done
-
-  if ! run kubectl -n "${acp_task_namespace}" patch runtimepool "${pool}" --type=merge \
-    -p '{"spec":{"desiredReplicas":0}}'; then
-    kill "${watch_pid}" 2>/dev/null || true
-    wait "${watch_pid}" 2>/dev/null || true
-    return 1
-  fi
-
-  while ! awk -F '\t' '
-    $2 != "0" { next }
-    step == 0 && $3 == "Draining/Draining" { step = 1; next }
-    step == 1 && $3 == "Quiescent/Draining" { step = 2; next }
-    step == 2 && $3 == "Stopping/Closed" { step = 3; next }
-    step == 3 && $3 == "Stopped/Closed" { step = 4; exit }
-    END { exit(step == 4 ? 0 : 1) }
-  ' "${events_file}"; do
-    if ! kill -0 "${watch_pid}" 2>/dev/null; then
-      wait "${watch_pid}" 2>/dev/null || true
-      cat "${watch_log}" >&2 || true
-      cat "${events_file}" >&2 || true
-      die "RuntimePool/${pool} lifecycle watch ended before the exact drain sequence completed"
-    fi
-    now="$(date +%s)"
-    if (( now - started >= timeout_seconds )); then
-      kill "${watch_pid}" 2>/dev/null || true
-      wait "${watch_pid}" 2>/dev/null || true
-      cat "${events_file}" >&2 || true
-      kubectl -n "${acp_task_namespace}" get runtimepool "${pool}" -o yaml >&2 || true
-      die "RuntimePool/${pool} did not traverse the exact drain sequence within ${timeout_seconds}s"
-    fi
-    sleep 1
-  done
-
-  kill "${watch_pid}" 2>/dev/null || true
-  wait "${watch_pid}" 2>/dev/null || true
-  log "RuntimePool/${pool} traversed Draining/Draining, Quiescent/Draining, Stopping/Closed, and Stopped/Closed"
-}
-
-wait_for_lc_pool_stopped() {
+wait_for_lc_pool_retired() {
   local pool="$1" timeout_seconds="$2"
   local started now payload
   started="$(date +%s)"
   while true; do
-    payload="$(kubectl -n "${acp_task_namespace}" get runtimepool "${pool}" -o json 2>/dev/null || true)"
-    if jq -e '
-      .metadata.deletionTimestamp == null
-      and .status.observedGeneration == .metadata.generation
-      and .spec.desiredReplicas == 0
-      and (.status.desiredReplicas // 0) == 0
-      and (.status.currentReplicas // 0) == 0
-      and .status.lifecycle == "Stopped"
-      and .status.admissionState == "Closed"
-      and (.status.activeInstance == null)
-      and (.status.capacity.residentSessions // 0) == 0
-      and (.status.capacity.runningPrompts // 0) == 0
-      and (.status.capacity.queuedTasks // 0) == 0
-      and (.status.capacity.reservedSessions // 0) == 0
-      and (.status.capacity.reservedPrompts // 0) == 0
-      and (.status.capacity.pendingPermissions // 0) == 0
-      and (.status.capacity.finalizingSessions // 0) == 0
-      and (.status.capacity.liveDescendants // 0) == 0
-      and ((.status.capacity.reservations // []) | length) == 0
-    ' <<<"${payload}" >/dev/null 2>&1; then
-      return 0
-    fi
+    payload="$(kubectl -n "${acp_task_namespace}" get runtimepool "${pool}" --ignore-not-found=true -o name)" ||
+      die "could not verify retirement of RuntimePool/${pool}"
+    [[ -z "${payload}" ]] && break
     now="$(date +%s)"
-    (( now - started >= timeout_seconds )) && {
-      kubectl -n "${acp_task_namespace}" get runtimepool "${pool}" -o yaml >&2 || true
-      die "RuntimePool/${pool} did not reach the exact stopped state within ${timeout_seconds}s"
-    }
+    (( now - started >= timeout_seconds )) && die "RuntimePool/${pool} was not retired by its Delete class"
     sleep 3
   done
+  wait_for_lc_sandbox_runtime_zero "${pool}" "${timeout_seconds}"
 }
 
 wait_for_lc_sandbox_runtime_zero() {
@@ -2540,11 +2497,12 @@ assert_lc_sandbox_replacement_identity() {
 }
 
 # run_workspace_lifecycle_acp_task proves issue #411 through agent-sandbox:
-# continuation, authenticated drain and recovery from zero, timeout and
+# continuation, authenticated retirement and recovery from zero, timeout and
 # explicit cancellation of Running prompts, controller restart without replay,
 # physical RuntimePool replacement, and exact cleanup while preserving the
 # logical Session across every continuation.
 run_workspace_lifecycle_acp_task() {
+  apply_workspace_task_class
   log "Running workspace-backed lifecycle/recovery conformance (agent-sandbox)"
   # Keep fault histories in distinct Sessions. Finalized v2 OutcomeUnknown
   # turns retain their outcome during cleanup; archival still requires exact
@@ -2619,7 +2577,8 @@ YAML
   [[ "${pool_name}" == acp-ws-session-* && -n "${pool_uid}" && -n "${session_uid}" && -n "${first_instance}" ]] ||
     die "lifecycle Task did not bind a session workspace pool with runtime identities (pool=${pool_name:-<empty>} uid=${pool_uid:-<empty>})"
 
-  log "Continuing the Session on the same physical runtime"
+  wait_for_lc_pool_retired "${pool_name}" 600
+  log "Continuing the Session after the class retires its prior runtime"
   apply_lifecycle_task orka-ws-lc-second orka-ws-lc-session false "Reply exactly: ORKA_WS_LC_SECOND_OK"
   wait_for_jsonpath task "${acp_task_namespace}" orka-ws-lc-second '{.status.phase}' "Succeeded" 600
   assert_task_result_contains "${acp_task_namespace}" orka-ws-lc-second "ORKA_WS_LC_SECOND_OK"
@@ -2636,11 +2595,10 @@ YAML
     -o jsonpath='{.status.execution.runtimePoolUID}')"
   [[ "${second_session}" == "${session_uid}" ]] ||
     die "continuation changed the RuntimeSession UID (${second_session:-<empty>} != ${session_uid})"
-  # Session reuse must retain the SAME dedicated workspace pool: a second
-  # Task selecting or creating another pool would both duplicate the
-  # workspace and leak an untracked pool.
-  [[ "${second_pool}" == "${pool_name}" && "${second_pool_uid}" == "${pool_uid}" ]] ||
-    die "continuation moved to a different workspace pool (${second_pool:-<empty>}/${second_pool_uid:-<empty>} != ${pool_name}/${pool_uid})"
+  # The logical Session retains its pool name, but Delete requires a fresh
+  # allocation and pool UID after the predecessor's authenticated retirement.
+  [[ "${second_pool}" == "${pool_name}" && -n "${second_pool_uid}" && "${second_pool_uid}" != "${pool_uid}" ]] ||
+    die "Delete-class continuation did not create a fresh incarnation of ${pool_name}"
   # Semantic continuation proof: the fixture must have seen the replayed
   # session history in the continuation request, not just a fresh prompt that
   # happens to carry its own marker.
@@ -2677,12 +2635,10 @@ YAML
     log "Continuation recovered the Session on a fresh physical runtime instance"
   fi
 
-  log "Draining the Session pool to zero through every authenticated lifecycle barrier"
-  drain_lc_pool_to_zero "${pool_name}" 600
-  wait_for_lc_pool_stopped "${pool_name}" 600
-  wait_for_lc_sandbox_runtime_zero "${pool_name}" 300
+  log "Waiting for the class to retire the Session pool and provider allocation"
+  wait_for_lc_pool_retired "${pool_name}" 600
 
-  log "Recovering the same logical Session from the stopped pool"
+  log "Recovering the same logical Session after allocation retirement"
   apply_lifecycle_task orka-ws-lc-drained orka-ws-lc-session false \
     "Reply exactly: ORKA_WS_LC_DRAINED_OK"
   wait_for_jsonpath task "${acp_task_namespace}" orka-ws-lc-drained '{.status.phase}' "Succeeded" 900
@@ -2702,8 +2658,8 @@ YAML
     -o jsonpath='{.status.execution.runtimeSessionGeneration}')"
   [[ "${drained_session}" == "${session_uid}" ]] ||
     die "scale-to-zero recovery changed the RuntimeSession UID"
-  [[ "${drained_pool}" == "${pool_name}" && "${drained_pool_uid}" == "${pool_uid}" ]] ||
-    die "scale-to-zero recovery replaced the logical RuntimePool (${drained_pool:-<empty>}/${drained_pool_uid:-<empty>} != ${pool_name}/${pool_uid})"
+  [[ "${drained_pool}" == "${pool_name}" && -n "${drained_pool_uid}" && "${drained_pool_uid}" != "${second_pool_uid}" ]] ||
+    die "recovery after Delete did not create a fresh incarnation of ${pool_name}"
   [[ -n "${drained_instance}" && "${drained_instance}" != "${second_instance}" ]] ||
     die "scale-to-zero recovery reused the stopped runtime instance"
   [[ "${drained_generation}" =~ ^[0-9]+$ && "${drained_generation}" -gt "${second_generation}" ]] ||
@@ -3076,6 +3032,21 @@ YAML
   # ACP upgrade drain, which waits out the held prompt before the old
   # controller exits and never exercises takeover of an interrupted Running
   # prompt. Killing the Pod without its preStop hook does.
+  local restart_epoch_watch_pid restart_epoch_events="${work_dir}/restart-pool-epochs.jsonl"
+  kubectl -n "${acp_task_namespace}" get runtimepool "${restart_fence_pool}" \
+    --watch --output-watch-events --request-timeout=600s -o json >"${restart_epoch_events}" &
+  restart_epoch_watch_pid=$!
+  local restart_watch_started="$(date +%s)"
+  while ! jq -s -e --slurpfile snap "${restart_pool_snapshot}" '
+    any(.[]; (.object // .).metadata.uid == $snap[0].poolUID)
+  ' "${restart_epoch_events}" >/dev/null 2>&1; do
+    if (( $(date +%s) - restart_watch_started >= 30 )); then
+      kill "${restart_epoch_watch_pid}" 2>/dev/null || true
+      wait "${restart_epoch_watch_pid}" 2>/dev/null || true
+      die "could not establish the independent RuntimePool epoch watch before restart"
+    fi
+    sleep 1
+  done
   kubectl -n "${orka_namespace}" delete pod -l control-plane=controller-manager \
     --grace-period=0 --force --wait=true
   run kubectl -n "${orka_namespace}" rollout status deployment/"${orka_controller_deployment}" --timeout=5m
@@ -3191,36 +3162,18 @@ YAML
     return 1
   }
   log "Accepted prompt survived the controller restart with no replay (fixture requests: ${restart_count_before})"
-  # Operation fencing must actually advance across the forced restart: read
-  # the RuntimePool AFTER the replacement manager took over and require its
-  # controller epoch to be strictly greater than the pre-restart snapshot
-  # (canonical agent-runtime-e2e restart check). A regressed epoch
-  # rotation would otherwise pass every >= comparison above.
-  local epoch_advance_started epoch_advance_now takeover_pool_json takeover_epoch
-  epoch_advance_started="$(date +%s)"
-  while true; do
-    takeover_pool_json="$(kubectl -n "${acp_task_namespace}" get runtimepool "${restart_fence_pool}" -o json 2>/dev/null || true)"
-    if jq -e --slurpfile snap "${restart_pool_snapshot}" '
-      ((.status.controllerEpoch | type) == "number")
-      and (.metadata.uid == $snap[0].poolUID)
-      and (.status.controllerEpoch > $snap[0].controllerEpoch)
-    ' <<<"${takeover_pool_json}" >/dev/null 2>&1; then
-      break
-    fi
-    epoch_advance_now="$(date +%s)"
-    (( epoch_advance_now - epoch_advance_started >= 120 )) &&
-      die "the RuntimePool controller epoch did not advance across the forced restart"
-    sleep 3
-  done
-  takeover_epoch="$(jq -r '.status.controllerEpoch' <<<"${takeover_pool_json}")"
-  restart_json="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-restart -o json)"
-  jq -e --argjson takeoverEpoch "${takeover_epoch}" '
-    (.status.execution.controllerEpoch | type) == "number"
+  # The independent watch survives pool deletion and must have observed the
+  # exact pool enter a newer controller epoch before class retirement.
+  kill "${restart_epoch_watch_pid}" 2>/dev/null || true
+  wait "${restart_epoch_watch_pid}" 2>/dev/null || true
+  local takeover_epoch
+  takeover_epoch="$(jq -s --slurpfile snap "${restart_pool_snapshot}" '
+    [.[] | (.object // .) | select(.metadata.uid == $snap[0].poolUID and (.status.controllerEpoch | type) == "number") | .status.controllerEpoch] | max // 0
+  ' "${restart_epoch_events}")"
+  jq -e --argjson takeoverEpoch "${takeover_epoch}" --slurpfile snap "${restart_pool_snapshot}" '
+    $takeoverEpoch > $snap[0].controllerEpoch
     and .status.execution.controllerEpoch == $takeoverEpoch
-  ' <<<"${restart_json}" >/dev/null || {
-    kubectl -n "${acp_task_namespace}" get task orka-ws-lc-restart -o yaml >&2 || true
-    die "restart Task controller epoch does not match the takeover RuntimePool epoch"
-  }
+  ' <<<"${restart_json}" >/dev/null || die "restart did not preserve the observed takeover epoch"
   local restart_pool
   restart_pool="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-restart \
     -o jsonpath='{.status.execution.runtimePoolName}')"
@@ -3235,7 +3188,7 @@ YAML
     -o jsonpath='{.status.execution.runtimeSessionGeneration}')"
   [[ "${pre_replacement_generation}" =~ ^[0-9]+$ && "${pre_replacement_generation}" -ge 1 ]] ||
     die "post-drain continuation carries no valid runtimeSessionGeneration (${pre_replacement_generation:-<empty>})"
-  run kubectl -n "${acp_task_namespace}" delete runtimepool "${pool_name}" --wait=true --timeout=5m
+  wait_for_lc_pool_retired "${pool_name}" 600
   # RuntimePool finalization does not wait for provider-created Sandbox and
   # Pod dependents; recreating the deterministic pool while garbage
   # collection still drains them would overlap the incarnations and let the
@@ -3258,6 +3211,11 @@ YAML
     sleep 5
   done
   apply_lifecycle_task orka-ws-lc-replaced orka-ws-lc-session false "Reply exactly: ORKA_WS_LC_REPLACED_OK"
+  local running_replacement_pool_uid running_replacement_instance
+  running_replacement_pool_uid="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-replaced -o jsonpath='{.status.execution.runtimePoolUID}')"
+  running_replacement_instance="$(kubectl -n "${acp_task_namespace}" get task orka-ws-lc-replaced -o jsonpath='{.status.execution.runtimeInstanceID}')"
+  assert_lc_sandbox_replacement_identity \
+    "${pool_name}" "${running_replacement_pool_uid}" "${running_replacement_instance}" "${drained_instance}"
   wait_for_jsonpath task "${acp_task_namespace}" orka-ws-lc-replaced '{.status.phase}' "Succeeded" 900
   assert_task_result_contains "${acp_task_namespace}" orka-ws-lc-replaced "ORKA_WS_LC_REPLACED_OK"
   assert_lc_task_success_tuple orka-ws-lc-replaced
@@ -3290,8 +3248,6 @@ YAML
     -o jsonpath='{.status.execution.runtimeSessionGeneration}')"
   [[ "${replaced_generation}" =~ ^[0-9]+$ && "${replaced_generation}" -gt "${pre_replacement_generation}" ]] ||
     die "replacement did not advance the session generation (${replaced_generation:-<empty>} <= ${pre_replacement_generation})"
-  assert_lc_sandbox_replacement_identity \
-    "${replaced_pool}" "${replaced_pool_uid}" "${replaced_instance}" "${drained_instance}"
   [[ "$(fixture_marker_count "ORKA_WS_LC_REPLACED_OK")" == "1" ]] ||
     die "post-replacement turn was delivered $(fixture_marker_count "ORKA_WS_LC_REPLACED_OK") times; want exactly one"
 

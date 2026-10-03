@@ -77,10 +77,7 @@ func (s failingAgentExecutionSnapshotPersistStore) PersistAgentExecutionSnapshot
 
 func workspaceBindingTestTask(mutate func(*corev1alpha1.ExecutionWorkspaceSpec)) *corev1alpha1.Task {
 	task := bindingTestTask()
-	workspace := &corev1alpha1.ExecutionWorkspaceSpec{
-		Enabled:  true,
-		Provider: corev1alpha1.WorkspaceProviderAgentSandbox,
-	}
+	workspace := &corev1alpha1.ExecutionWorkspaceSpec{ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "acp-class"}}
 	if mutate != nil {
 		mutate(workspace)
 	}
@@ -89,184 +86,48 @@ func workspaceBindingTestTask(mutate func(*corev1alpha1.ExecutionWorkspaceSpec))
 }
 
 func TestResolveACPWorkspaceBinding(t *testing.T) {
-	tests := []struct {
-		name                      string
-		task                      *corev1alpha1.Task
-		wantErr                   string
-		wantNil                   bool
-		wantSession               string
-		sessionUID                string
-		enforceNamespaceIsolation bool
+	resolved := testResolvedACPWorkspaceClass(t)
+	for _, tc := range []struct {
+		name       string
+		task       *corev1alpha1.Task
+		class      *acpResolvedWorkspaceClass
+		sessionUID string
+		wantErr    string
+		wantNil    bool
 	}{
-		{name: "nil task", task: nil, wantNil: true},
+		{name: "no task", wantNil: true},
 		{name: "no workspace", task: bindingTestTask(), wantNil: true},
-		{
-			name:    "disabled workspace",
-			task:    workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) { ws.Enabled = false }),
-			wantNil: true,
-		},
-		{
-			name:        "defaults resolve to a per-task binding",
-			task:        workspaceBindingTestTask(nil),
-			wantSession: "task:11111111-1111-1111-1111-111111111111",
-		},
-		{
-			name: "session reuse binds to the continued session",
-			task: func() *corev1alpha1.Task {
-				task := workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
-					ws.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
-				})
-				task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: acpWorkspaceTestSessionName}
-				return task
-			}(),
-			sessionUID:  "session-uid-review-loop",
-			wantSession: "session:session-uid-review-loop",
-		},
-		{
-			name: "session reuse rejects non-default workspace slot",
-			task: func() *corev1alpha1.Task {
-				task := workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
-					ws.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
-					ws.WorkspaceSlot = "secondary"
-				})
-				task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: acpWorkspaceTestSessionName}
-				return task
-			}(),
-			sessionUID: "session-uid-review-loop",
-			wantErr:    "supports only workspaceSlot",
-		},
-		{
-			name:    "substrate without templateRef fails closed",
-			task:    workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) { ws.Provider = corev1alpha1.WorkspaceProviderSubstrate }),
-			wantErr: acpWorkspaceTestTemplateRefRequiredError,
-		},
-		{
-			name: "substrate with an infrastructure template resolves",
-			task: workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
-				ws.Provider = corev1alpha1.WorkspaceProviderSubstrate
-				ws.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: substrateTestBaseTemplateName, Namespace: substrateTestTemplateNamespace}
-			}),
-			wantSession: "task:11111111-1111-1111-1111-111111111111",
-		},
-		{
-			name: "substrate rejects invalid template namespace",
-			task: workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
-				ws.Provider = corev1alpha1.WorkspaceProviderSubstrate
-				ws.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: substrateTestBaseTemplateName, Namespace: "Bad_NS"}
-			}),
-			wantErr: "templateRef.namespace",
-		},
-		{
-			name: "substrate rejects invalid template name",
-			task: workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
-				ws.Provider = corev1alpha1.WorkspaceProviderSubstrate
-				ws.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: "bad/name", Namespace: substrateTestTemplateNamespace}
-			}),
-			wantErr: "templateRef.name",
-		},
-		{
-			name: "substrate cross-namespace template fails under namespace isolation",
-			task: workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
-				ws.Provider = corev1alpha1.WorkspaceProviderSubstrate
-				ws.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: substrateTestBaseTemplateName, Namespace: substrateTestTemplateNamespace}
-			}),
-			enforceNamespaceIsolation: true,
-			wantErr:                   "cross-namespace execution workspace templateRef is not allowed",
-		},
-		{
-			name:    "unknown provider fails closed",
-			task:    workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) { ws.Provider = corev1alpha1.WorkspaceProvider("other") }),
-			wantErr: "does not support ACP RuntimeSessions",
-		},
-		{
-			name: "templateRef fails closed",
-			task: workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
-				ws.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: "operator-template"}
-			}),
-			wantErr: acpWorkspaceTestTemplateRefForbiddenError,
-		},
-		{
-			name: "retain cleanup fails closed",
-			task: workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
-				ws.CleanupPolicy = corev1alpha1.WorkspaceCleanupPolicyRetain
-			}),
-			wantErr: acpWorkspaceTestCleanupDeleteError,
-		},
-		{
-			name:    "onDetach fails closed",
-			task:    workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) { ws.OnDetach = corev1alpha1.WorkspaceOnDetachSuspend }),
-			wantErr: "onDetach is not supported",
-		},
-		{
-			name:    "boot fails closed",
-			task:    workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) { ws.Boot = true }),
-			wantErr: "not supported for ACP RuntimeSessions",
-		},
-		{
-			name: "session reuse without sessionRef fails closed",
-			task: workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
-				ws.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
-			}),
-			wantErr: acpWorkspaceTestSessionReferenceRequiredError,
-		},
-		{
-			name: "task-scoped workspace with sessionRef fails closed",
-			task: func() *corev1alpha1.Task {
-				task := workspaceBindingTestTask(nil)
-				task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: acpWorkspaceTestSessionName}
-				return task
-			}(),
-			wantErr: "reusePolicy none cannot be used with spec.sessionRef",
-		},
-		{
-			name: "classRef fails closed without a resolved class",
-			task: workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
-				ws.Enabled = false
-				ws.ClassRef = &corev1alpha1.WorkspaceClassReference{Name: "class"}
-			}),
-			wantErr: "requires a resolved workspace class",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			binding, err := resolveACPWorkspaceBinding(tt.task, corev1alpha1.WorkspaceProviderAgentSandbox, tt.enforceNamespaceIsolation, tt.sessionUID)
-			if tt.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("error = %v, want substring %q", err, tt.wantErr)
+		{name: "missing classRef", task: workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) { ws.ClassRef = nil }), class: resolved, wantErr: "classRef.name is required"},
+		{name: "empty class name", task: workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) { ws.ClassRef.Name = " " }), class: resolved, wantErr: "classRef.name is required"},
+		{name: "unresolved class", task: workspaceBindingTestTask(nil), wantErr: "requires a resolved workspace class"},
+		{name: "task workspace", task: workspaceBindingTestTask(nil), class: resolved},
+		{name: "session requires reference", task: workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+			ws.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
+		}), class: resolved, wantErr: "requires spec.sessionRef.name"},
+		{name: "suspend requires class permission", task: workspaceBindingTestTask(func(ws *corev1alpha1.ExecutionWorkspaceSpec) { ws.OnDetach = corev1alpha1.WorkspaceOnDetachSuspend }), class: resolved, wantErr: "not allowed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			binding, err := resolveACPWorkspaceBindingWithClass(tc.task, tc.sessionUID, tc.class)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("binding error = %v, want %q", err, tc.wantErr)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("resolveACPWorkspaceBinding() error = %v", err)
+				t.Fatal(err)
 			}
-			if tt.wantNil {
+			if tc.wantNil {
 				if binding != nil {
 					t.Fatalf("binding = %#v, want nil", binding)
 				}
 				return
 			}
-			if binding == nil {
-				t.Fatal("binding = nil, want resolved binding")
-			}
-			if binding.SessionKey != tt.wantSession {
-				t.Fatalf("session key = %q, want %q", binding.SessionKey, tt.wantSession)
-			}
-			if binding.SessionUID != tt.sessionUID {
-				t.Fatalf("session UID = %q, want %q", binding.SessionUID, tt.sessionUID)
-			}
-			if binding.CleanupPolicy != corev1alpha1.WorkspaceCleanupPolicyDelete || binding.WorkspaceSlot != defaultWorkspaceSlotName {
-				t.Fatalf("binding defaults = %q/%q, want delete/default", binding.CleanupPolicy, binding.WorkspaceSlot)
-			}
-			if binding.Provider == corev1alpha1.WorkspaceProviderSubstrate &&
-				(binding.TemplateNamespace == "" || binding.TemplateName == "") {
-				t.Fatalf("substrate binding template = %q/%q, want frozen infrastructure template reference", binding.TemplateNamespace, binding.TemplateName)
-			}
-			digest, err := acpWorkspaceBindingDigest(binding)
-			if err != nil || digest != binding.BindingDigest {
-				t.Fatalf("binding digest = %q (err=%v), want canonical %q", binding.BindingDigest, err, digest)
+			if binding == nil || binding.Class == nil || binding.SessionKey != "task:"+string(tc.task.UID) {
+				t.Fatalf("binding = %#v, want class-bound Task identity", binding)
 			}
 			if err := validateACPWorkspaceBindingValues(binding); err != nil {
-				t.Fatalf("resolved binding failed re-verification: %v", err)
+				t.Fatalf("verify binding: %v", err)
 			}
 		})
 	}
@@ -286,7 +147,7 @@ func TestApplyACPWorkspaceBindingToPlanChangesPoolIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	binding, err := resolveACPWorkspaceBinding(workspaceBindingTestTask(nil), corev1alpha1.WorkspaceProviderAgentSandbox, false, "")
+	binding, err := resolveTestACPWorkspaceBinding(t, workspaceBindingTestTask(nil), "")
 	if err != nil || binding == nil {
 		t.Fatalf("resolveACPWorkspaceBinding() = %#v, %v", binding, err)
 	}
@@ -330,9 +191,7 @@ func TestSessionWorkspacePoolIdentityRejectsRuntimeProfileRotation(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	binding, err := resolveACPWorkspaceBinding(
-		task, corev1alpha1.WorkspaceProviderAgentSandbox, false, "session-uid-review-loop",
-	)
+	binding, err := resolveTestACPWorkspaceBinding(t, task, "session-uid-review-loop")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -385,9 +244,7 @@ func TestSessionWorkspacePoolIdentityRejectsWorkspaceSelectionRotation(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	firstBinding, err := resolveACPWorkspaceBinding(
-		firstTask, corev1alpha1.WorkspaceProviderAgentSandbox, false, "session-uid-review-loop",
-	)
+	firstBinding, err := resolveTestACPWorkspaceBinding(t, firstTask, "session-uid-review-loop")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,13 +254,9 @@ func TestSessionWorkspacePoolIdentityRejectsWorkspaceSelectionRotation(t *testin
 	}
 
 	rotatedTask := firstTask.DeepCopy()
-	rotatedTask.Spec.Execution.Workspace.Provider = corev1alpha1.WorkspaceProviderSubstrate
-	rotatedTask.Spec.Execution.Workspace.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{
-		Namespace: substrateTestTemplateNamespace, Name: substrateTestBaseTemplateName,
-	}
-	rotatedBinding, err := resolveACPWorkspaceBinding(
-		rotatedTask, corev1alpha1.WorkspaceProviderAgentSandbox, false, "session-uid-review-loop",
-	)
+	rotatedClass := testResolvedACPWorkspaceClass(t)
+	rotatedClass.Binding.UID = "replacement-class-uid"
+	rotatedBinding, err := resolveACPWorkspaceBindingWithClass(rotatedTask, "session-uid-review-loop", rotatedClass)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -439,7 +292,7 @@ func TestAgentExecutionBindingFreezesWorkspaceBinding(t *testing.T) {
 	task := workspaceBindingTestTask(nil)
 	agent := bindingTestAgent()
 	reconciler, _ := newBindingTestReconciler(t, task, bindingTestNamespace())
-	reconciler.ExecutionWorkspaceDefaultProvider = corev1alpha1.WorkspaceProviderAgentSandbox
+	installTestACPWorkspaceClass(t, reconciler)
 
 	live := task.DeepCopy()
 	if _, err, handled := reconciler.ensureAgentExecutionBinding(ctx, live, agent); err != nil || handled {
@@ -477,7 +330,7 @@ func TestAgentExecutionBindingFreezesImmutableWorkspaceSessionUID(t *testing.T) 
 	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: acpWorkspaceTestSessionName, Create: true, Append: true}
 	agent := bindingTestAgent()
 	reconciler, durableStore := newBindingTestReconciler(t, task, bindingTestNamespace())
-	reconciler.ExecutionWorkspaceDefaultProvider = corev1alpha1.WorkspaceProviderAgentSandbox
+	installTestACPWorkspaceClass(t, reconciler)
 	reconciler.DurableControlStore = durableStore
 	reconciler.SessionManager = NewSessionManager(durableStore)
 	epochs := NewControllerEpochManager(durableStore, "workspace-session-binding-test")
@@ -578,7 +431,7 @@ func TestResolveAgentExecutionCandidateDoesNotCreateWorkspaceSessionBeforeValida
 	})
 	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "invalid-candidate", Create: true, Append: true}
 	reconciler, durableStore := newBindingTestReconciler(t, task)
-	reconciler.ExecutionWorkspaceDefaultProvider = corev1alpha1.WorkspaceProviderAgentSandbox
+	installTestACPWorkspaceClass(t, reconciler)
 	reconciler.DurableControlStore = durableStore
 	reconciler.SessionManager = NewSessionManager(durableStore)
 	reconciler.ControllerEpochManager = NewControllerEpochManager(durableStore, "workspace-session-pure-candidate-test")
@@ -602,7 +455,7 @@ func TestResolveAgentExecutionCandidateClassifiesMissingWorkspaceSessionAsPerman
 	})
 	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: acpWorkspaceTestMissingSessionName, Create: false, Append: true}
 	reconciler, durableStore := newBindingTestReconciler(t, task, bindingTestNamespace())
-	reconciler.ExecutionWorkspaceDefaultProvider = corev1alpha1.WorkspaceProviderAgentSandbox
+	installTestACPWorkspaceClass(t, reconciler)
 	reconciler.DurableControlStore = durableStore
 	reconciler.SessionManager = NewSessionManager(durableStore)
 	reconciler.ControllerEpochManager = NewControllerEpochManager(durableStore, "workspace-session-missing-test")
@@ -631,7 +484,7 @@ func TestAgentExecutionBindingDoesNotCreateWorkspaceSessionBeforeSnapshotPersist
 	})
 	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "snapshot-failure", Create: true, Append: true}
 	reconciler, durableStore := newBindingTestReconciler(t, task, bindingTestNamespace())
-	reconciler.ExecutionWorkspaceDefaultProvider = corev1alpha1.WorkspaceProviderAgentSandbox
+	installTestACPWorkspaceClass(t, reconciler)
 	reconciler.DurableControlStore = durableStore
 	reconciler.SessionManager = NewSessionManager(durableStore)
 	reconciler.ControllerEpochManager = NewControllerEpochManager(durableStore, "workspace-session-snapshot-test")
@@ -666,11 +519,11 @@ func TestSessionWorkspacePoolIdentityRotatesWithSessionUID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := resolveACPWorkspaceBinding(task, corev1alpha1.WorkspaceProviderAgentSandbox, false, "session-incarnation-one")
+	first, err := resolveTestACPWorkspaceBinding(t, task, "session-incarnation-one")
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := resolveACPWorkspaceBinding(task, corev1alpha1.WorkspaceProviderAgentSandbox, false, "session-incarnation-two")
+	second, err := resolveTestACPWorkspaceBinding(t, task, "session-incarnation-two")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -732,12 +585,13 @@ func TestVerifiedSnapshotWorkspaceBindingRejectsTamperedIdentity(t *testing.T) {
 	binding := &corev1alpha1.AgentExecutionBinding{
 		Task: corev1alpha1.AgentExecutionBindingTaskRef{UID: types.UID("11111111-1111-1111-1111-111111111111")},
 	}
-	frozen, err := resolveACPWorkspaceBinding(workspaceBindingTestTask(nil), corev1alpha1.WorkspaceProviderAgentSandbox, false, "")
+	frozen, err := resolveTestACPWorkspaceBinding(t, workspaceBindingTestTask(nil), "")
 	if err != nil || frozen == nil {
 		t.Fatalf("resolveACPWorkspaceBinding() = %#v, %v", frozen, err)
 	}
 	valid := agentExecutionSnapshotWorkspaceBinding{
 		Provider:      string(frozen.Provider),
+		Class:         snapshotWorkspaceClassFromBinding(frozen.Class),
 		ReusePolicy:   string(frozen.ReusePolicy),
 		CleanupPolicy: string(frozen.CleanupPolicy),
 		WorkspaceSlot: frozen.WorkspaceSlot,
@@ -756,6 +610,7 @@ func TestVerifiedSnapshotWorkspaceBindingRejectsTamperedIdentity(t *testing.T) {
 	tamperedSession.SessionKey = "task:another-task-uid"
 	recomputed, err := acpWorkspaceBindingDigest(&ACPRuntimeWorkspaceBinding{
 		Provider:      corev1alpha1.WorkspaceProvider(tamperedSession.Provider),
+		Class:         workspaceClassBindingFromSnapshot(tamperedSession.Class),
 		ReusePolicy:   corev1alpha1.WorkspaceReusePolicy(tamperedSession.ReusePolicy),
 		CleanupPolicy: corev1alpha1.WorkspaceCleanupPolicy(tamperedSession.CleanupPolicy),
 		WorkspaceSlot: tamperedSession.WorkspaceSlot,
@@ -786,7 +641,7 @@ func TestVerifiedSnapshotWorkspaceBindingAcceptsLegacyClassOnDetachDigest(t *tes
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	frozen, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	frozen, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
 	if err != nil {
 		t.Fatalf("resolve class binding: %v", err)
 	}
@@ -843,7 +698,7 @@ func TestEnsureACPRuntimePoolCreatesWorkspaceBackedPool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	binding, err := resolveACPWorkspaceBinding(task, corev1alpha1.WorkspaceProviderAgentSandbox, false, "")
+	binding, err := resolveTestACPWorkspaceBinding(t, task, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -901,7 +756,7 @@ func TestEnsureACPRuntimePoolValidatesCreateRaceWinner(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		binding, err := resolveACPWorkspaceBinding(task, corev1alpha1.WorkspaceProviderAgentSandbox, false, "")
+		binding, err := resolveTestACPWorkspaceBinding(t, task, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -2126,15 +1981,50 @@ func TestProjectACPExecutionWorkspaceStatusRetriesOnIdentityReadFailure(t *testi
 	}
 }
 
-// resolveACPWorkspaceBinding is the legacy (class-less) test entry point for
-// resolveACPWorkspaceBindingWithClass.
-//
-//nolint:unparam // Keeps the production signature so call sites read as the real resolver.
-func resolveACPWorkspaceBinding(
-	task *corev1alpha1.Task,
-	defaultProvider corev1alpha1.WorkspaceProvider,
-	enforceNamespaceIsolation bool,
-	sessionUID string,
-) (*ACPRuntimeWorkspaceBinding, error) {
-	return resolveACPWorkspaceBindingWithClass(task, defaultProvider, enforceNamespaceIsolation, sessionUID, nil)
+func testResolvedACPWorkspaceClass(t *testing.T) *acpResolvedWorkspaceClass {
+	t.Helper()
+	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	r := acpClassTestReconciler(t, fixture.objects()...)
+	resolved, err := r.resolveACPWorkspaceClass(t.Context(), acpClassTestTask())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resolved
+}
+
+func resolveTestACPWorkspaceBinding(t *testing.T, task *corev1alpha1.Task, sessionUID string) (*ACPRuntimeWorkspaceBinding, error) {
+	t.Helper()
+	return resolveACPWorkspaceBindingWithClass(task, sessionUID, testResolvedACPWorkspaceClass(t))
+}
+
+func installTestACPWorkspaceClass(t *testing.T, r *TaskReconciler) {
+	t.Helper()
+	if err := acpworkspacev1alpha1.AddToScheme(r.Scheme); err != nil {
+		t.Fatal(err)
+	}
+	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	for _, obj := range []client.Object{fixture.class, fixture.provider, fixture.config, fixture.profile} {
+		if err := r.Create(t.Context(), obj); err != nil && !apierrors.IsAlreadyExists(err) {
+			t.Fatal(err)
+		}
+	}
+	r.WorkspaceProviderAPIEnabled = true
+}
+
+func TestVerifiedSnapshotWorkspaceBindingRejectsRetiredClasslessBinding(t *testing.T) {
+	task := workspaceBindingTestTask(nil)
+	frozen, err := resolveTestACPWorkspaceBinding(t, task, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozen.Class = nil
+	digest, err := acpWorkspaceBindingDigest(frozen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := agentExecutionSnapshotWorkspaceBinding{Provider: string(frozen.Provider), ReusePolicy: string(frozen.ReusePolicy), CleanupPolicy: string(frozen.CleanupPolicy), WorkspaceSlot: frozen.WorkspaceSlot, SessionKey: frozen.SessionKey, BindingDigest: digest}
+	binding := &corev1alpha1.AgentExecutionBinding{Task: corev1alpha1.AgentExecutionBindingTaskRef{UID: task.UID}}
+	if _, err := verifiedSnapshotWorkspaceBinding(binding, agentExecutionSnapshotBody{ExecutionWorkspace: &snapshot}); err == nil || !strings.Contains(err.Error(), "requires a class") {
+		t.Fatalf("classless snapshot error = %v", err)
+	}
 }

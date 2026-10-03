@@ -28,11 +28,10 @@ infrastructure template through `kubectl ate create actor-template -f`, with
 `metadata.atespace` and `metadata.name`, rather than applying an ActorTemplate
 CRD. In Orka's `templateRef`, `namespace` names the native Atespace.
 
-ACP dispatch requires `--substrate-enabled` and
-`--acp-workspace-dispatch-enabled`, plus the direct egress configuration below.
-Class-backed suspension and checkpoint
-restore also require `--enable-workspace-provider-api`, Task provenance and
-workspace-use admission, and the matching CRDs and webhooks.
+ACP dispatch requires `--substrate-enabled`, `--acp-workspace-dispatch-enabled`,
+and `--enable-workspace-provider-api`, plus the direct egress configuration below.
+Every Task selects an administrator-managed workspace class. Task provenance and
+workspace-use admission and the matching CRDs and webhooks must be installed.
 
 Configure these controller connection settings:
 

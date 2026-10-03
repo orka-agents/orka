@@ -271,9 +271,10 @@ kubectl config use-context kind-orka-agent-substrate-e2e
 # any other DEMO_NAMESPACE leaves the Tasks unreconciled.
 DEMO_NAMESPACE=orka-system DEMO_RUNTIME_TYPE=codex DEMO_RUNTIME_MODEL=gpt-5.5 \
   DEMO_RUNTIME_SECRET_REF=sandbox-model-key DEMO_GIT_SECRET_REF=github-credentials \
-  DEMO_SANDBOX_TEMPLATE_REF=orka-live-template ./hack/demos/60-agent-sandbox.sh
+  DEMO_SANDBOX_CLASS_REF=sandbox-coding ./hack/demos/60-agent-sandbox.sh
 
-# Demo 70 (substrate): sets provider: substrate explicitly; runs in `default`.
+# Both demos require the selected ExecutionWorkspaceClass to exist first.
+# Demo 70 selects DEMO_SUBSTRATE_CLASS_REF, default substrate-coding.
 ./hack/demos/70-agent-substrate.sh
 
 # Model-backed SDLC demos share one env file (points at the in-cluster vekil + secrets):

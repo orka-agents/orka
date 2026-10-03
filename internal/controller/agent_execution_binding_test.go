@@ -257,6 +257,7 @@ func TestSettleACPClassWorkspaceRequiresFrozenSessionUID(t *testing.T) {
 				},
 			}
 			reconciler, _ := newBindingTestReconciler(t, task, bindingTestNamespace(), workspace)
+			installTestACPWorkspaceClass(t, reconciler)
 			reconciler.APIReader = reconciler.Client
 			reconciler.WorkspaceSettlementProtected = true
 			candidate, err := reconciler.resolveAgentExecutionCandidateWithWorkspaceSessionUID(

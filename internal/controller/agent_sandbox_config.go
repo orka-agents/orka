@@ -170,42 +170,6 @@ func (c AgentSandboxConfig) Validate() error {
 	return nil
 }
 
-func executionWorkspaceTemplateName(ws *corev1alpha1.ExecutionWorkspaceSpec, cfg AgentSandboxConfig) string {
-	if ws != nil && ws.TemplateRef != nil && ws.TemplateRef.Name != "" {
-		return ws.TemplateRef.Name
-	}
-	return cfg.WithDefaults().DefaultTemplate
-}
-
-func executionWorkspaceTemplateNamespace(ws *corev1alpha1.ExecutionWorkspaceSpec, taskNamespace string, cfg AgentSandboxConfig) string {
-	if ws != nil && ws.TemplateRef != nil && strings.TrimSpace(ws.TemplateRef.Namespace) != "" {
-		return strings.TrimSpace(ws.TemplateRef.Namespace)
-	}
-	cfg = cfg.WithDefaults()
-	if cfg.NamespaceStrategy == AgentSandboxNamespaceStrategyController && strings.TrimSpace(cfg.ControllerNamespace) != "" {
-		return strings.TrimSpace(cfg.ControllerNamespace)
-	}
-	return taskNamespace
-}
-
-func substrateTemplateName(ws *corev1alpha1.ExecutionWorkspaceSpec, cfg SubstrateConfig) string {
-	if ws != nil && ws.TemplateRef != nil && strings.TrimSpace(ws.TemplateRef.Name) != "" {
-		return strings.TrimSpace(ws.TemplateRef.Name)
-	}
-	return strings.TrimSpace(cfg.WithDefaults().DefaultTemplate)
-}
-
-func substrateTemplateNamespace(ws *corev1alpha1.ExecutionWorkspaceSpec, taskNamespace string, cfg SubstrateConfig) string {
-	if ws != nil && ws.TemplateRef != nil && strings.TrimSpace(ws.TemplateRef.Namespace) != "" {
-		return strings.TrimSpace(ws.TemplateRef.Namespace)
-	}
-	cfg = cfg.WithDefaults()
-	if strings.TrimSpace(cfg.DefaultTemplateNS) != "" {
-		return strings.TrimSpace(cfg.DefaultTemplateNS)
-	}
-	return taskNamespace
-}
-
 func substrateActorPoolReference(ref *corev1alpha1.SubstrateActorPoolReference, defaultNamespace string) (string, string) {
 	if ref == nil {
 		return "", ""

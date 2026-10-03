@@ -164,7 +164,6 @@ if kubectl -n "${orka_namespace}" get deployment "${controller_deployment}" >/de
         --arg routerURL "${sandbox_router_url}" \
         --arg template "${sandbox_default_template}" \
         --arg cleanup  "${sandbox_cleanup_policy}" \
-        --arg defaultProvider "agent-sandbox" \
         '
         def upsert_arg($name; $value):
           . as $args
@@ -179,7 +178,6 @@ if kubectl -n "${orka_namespace}" get deployment "${controller_deployment}" >/de
             | .args = ((.args // []) | upsert_arg("--agent-sandbox-router-url"; $routerURL))
             | .args = ((.args // []) | upsert_arg("--agent-sandbox-default-template"; $template))
             | .args = ((.args // []) | upsert_arg("--agent-sandbox-cleanup-policy"; $cleanup))
-            | .args = ((.args // []) | upsert_arg("--execution-workspace-default-provider"; $defaultProvider))
           else . end
         )
         ' \

@@ -328,7 +328,7 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	if err != nil {
 		return nil, classifyACPWorkspaceClassResolutionError(err)
 	}
-	workspaceBinding, err := validateACPWorkspaceBindingRequestWithClass(task, r.ExecutionWorkspaceDefaultProvider, r.EnforceNamespaceIsolation, resolvedClass)
+	workspaceBinding, err := validateACPWorkspaceBindingRequestWithClass(task, resolvedClass)
 	if err != nil {
 		return nil, permanentACPAgentConfiguration(err)
 	}
@@ -351,7 +351,7 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 			}
 		}
 		workspaceBinding, err = resolveACPWorkspaceBindingWithClass(
-			task, r.ExecutionWorkspaceDefaultProvider, r.EnforceNamespaceIsolation, workspaceSessionUID, resolvedClass,
+			task, workspaceSessionUID, resolvedClass,
 		)
 		if err != nil {
 			return nil, permanentACPAgentConfiguration(err)

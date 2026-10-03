@@ -282,7 +282,6 @@ deploy_orka() {
                   "--watch-namespace=orka-system",
                   "--enforce-namespace-isolation=true",
                   "--execution-mode-controller-usernames=system:serviceaccount:orka-system:orka-controller-manager",
-                  "--execution-workspace-default-provider=substrate",
                   "--agent-sandbox-enabled=false",
                   "--substrate-enabled=true",
                   "--substrate-direct-egress-enabled=true",

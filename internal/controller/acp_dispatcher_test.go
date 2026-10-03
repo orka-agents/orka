@@ -409,6 +409,9 @@ func prepareBoundACPDispatcherTaskWithStoresForTest(
 	if len(epochs) > 0 {
 		binder.ControllerEpochManager = epochs[0]
 	}
+	if taskRequestsExecutionWorkspace(task) {
+		installTestACPWorkspaceClass(t, binder)
+	}
 	bound := bindACPQueueTaskForTest(t, ctx, binder, task, agent)
 	verified, err := binder.loadVerifiedBoundExecution(ctx, bound, bound.Status.AgentExecutionBinding)
 	if err != nil {
@@ -2789,9 +2792,7 @@ func testACPDispatcherDeadlineCancellation(t *testing.T, workspaceLifetime bool)
 		}},
 	}
 	if workspaceLifetime {
-		task.Spec.Execution = &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
-			Enabled: true, Provider: corev1alpha1.WorkspaceProviderAgentSandbox,
-		}}
+		task.Spec.Execution = &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "acp-class"}}}
 	}
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "agent", UID: types.UID("agent-uid"), Generation: 1},
@@ -2805,7 +2806,7 @@ func testACPDispatcherDeadlineCancellation(t *testing.T, workspaceLifetime bool)
 	images := ACPRuntimeImages{Codex: "docker.io/example/acp@sha256:" + strings.Repeat("a", 64)}
 	plan := frozenACPDispatcherPlanForTest(t, task, agent, images)
 	if workspaceLifetime {
-		binding, err := resolveACPWorkspaceBinding(task, corev1alpha1.WorkspaceProviderAgentSandbox, false, "")
+		binding, err := resolveTestACPWorkspaceBinding(t, task, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -2887,7 +2888,7 @@ func testACPDispatcherDeadlineCancellation(t *testing.T, workspaceLifetime bool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	task = prepareBoundACPDispatcherTaskForTest(t, ctx, kubeClient, scheme, controlStore, task, agent, images)
+	task = prepareBoundACPDispatcherTaskWithStoresForTest(t, ctx, kubeClient, scheme, controlStore, controlStore, task, agent, images, epochs)
 	key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID}
 	attemptID, err := key.CanonicalID()
 	if err != nil {

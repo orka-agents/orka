@@ -2211,7 +2211,7 @@ func TestValidateACPWorkspaceClassBindingAllowsLegacyUnboundedRetention(t *testi
 	if err != nil {
 		t.Fatalf("resolve bounded class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, suspendTestSessionUID, resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, suspendTestSessionUID, resolved)
 	if err != nil {
 		t.Fatalf("resolve bounded workspace binding: %v", err)
 	}
@@ -2289,7 +2289,7 @@ func TestACPWorkspaceSuspendQuotaAdmitsQuotaBlockedReadyContinuation(t *testing.
 	if err != nil {
 		t.Fatalf("resolve holder class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(holder, "", false, suspendTestSessionUID, resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(holder, suspendTestSessionUID, resolved)
 	if err != nil {
 		t.Fatalf("resolve holder binding: %v", err)
 	}
@@ -2382,7 +2382,7 @@ func TestSettleACPClassWorkspaceEnforcesSuspendQuota(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve class with headroom: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "session-uid-1", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "session-uid-1", resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}

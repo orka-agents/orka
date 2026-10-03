@@ -45,7 +45,7 @@ func nativeACPRecoveryFixture(t *testing.T) (*nativeRuntimeTestHarness, *TaskRec
 	task = bindSuspendableSessionTaskForSettlement(t, r, task)
 	resolved, err := r.resolveACPWorkspaceClass(t.Context(), task)
 	require.NoError(t, err)
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, suspendTestSessionUID, resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, suspendTestSessionUID, resolved)
 	require.NoError(t, err)
 	plan := ACPRuntimePlan{PoolName: h.pool.Name, Workspace: binding}
 	_, _, err = r.ensureACPClassWorkspace(t.Context(), task, plan)

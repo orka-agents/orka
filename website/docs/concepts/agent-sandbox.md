@@ -41,15 +41,15 @@ spec:
 ```
 
 `Task.spec.execution.workspace` additionally requests a physical
-execution-workspace provider for the RuntimeSession:
+execution workspace through an administrator-managed class for the RuntimeSession:
 
 ```yaml
 spec:
   type: agent
   execution:
     workspace:
-      enabled: true
-      provider: agent-sandbox
+      classRef:
+        name: sandbox-coding
       # reusePolicy: session   # with spec.sessionRef, continuation reuses the
       #                        # same workspace-backed pool while it is alive
 ```
@@ -77,8 +77,10 @@ NetworkPolicy is disabled.
 
 ## Enablement and fail-closed boundaries
 
-Dispatch requires both controller flags:
+Create an `ExecutionWorkspaceClass` named `sandbox-coding` in the Task namespace,
+backed by an admitted Agent Sandbox provider. Dispatch requires these controller flags:
 
+- `--enable-workspace-provider-api` and the workspace-use admission webhooks;
 - `--agent-sandbox-enabled` — the provider is installed and admitted;
 - `--acp-workspace-dispatch-enabled` — workspace-provider-backed RuntimeSession
   dispatch (also `ORKA_ACP_WORKSPACE_DISPATCH_ENABLED=true`).
@@ -87,13 +89,11 @@ Everything the adapter cannot host is rejected before any workspace or
 RuntimePool demand exists, with the reason projected to
 `Task.status.executionWorkspace`:
 
-- unsupported providers (only `agent-sandbox` and `substrate` are implemented; see the [Substrate](substrate.md) page for the Phase 2 backend);
-- `templateRef` — ACP RuntimeSessions run only controller-rendered sandbox
-  templates, because the immutable runtime image, fence environment,
-  materialization attestation, and signed bootstrap key must be rendered as one
-  exact unit. The provider-visible template carries no credential references;
-- `cleanupPolicy: retain`, `onDetach`, `boot`, `poolRef`, `snapshot`,
-  `hibernation`;
+- missing or empty `classRef`, unavailable classes, and class policies that do not
+  permit the requested reuse or detach action;
+- provider-specific Task fields such as `provider`, `templateRef`, `poolRef`,
+  `boot`, `snapshot`, `hibernation`, `enabled`, and `cleanupPolicy` have been
+  removed. Configure the provider and profile through the selected class;
 - any workspace request on the harness-v1 path — there is no cross-mode
   fallback in either direction;
 - missing provider CRDs — the pool degrades and closes admission rather than
@@ -132,3 +132,16 @@ validation should verify RuntimePool scale-up, exact-instance fencing, Session
 continuation, cancellation, workspace validation, clean-room publication,
 controller restart behavior, pool replacement, and cleanup — including the
 workspace-backed pool variants when the dispatch flag is enabled.
+
+## Upgrade from direct provider requests
+
+Before upgrading, finish and delete Tasks and RuntimePools created with direct
+provider requests. Saved execution bindings without a class cannot be adopted or
+resumed. Create an administrator-managed class and submit new Tasks with
+`execution.workspace.classRef.name`. Existing class bindings retain their stored
+digests, including the previous class detach-policy digest.
+
+Remove `--execution-workspace-default-provider` from controller arguments and
+`controller.executionWorkspace.defaultProvider` from Helm overrides. Omit
+`execution.workspace` entirely for ordinary execution. An empty workspace object
+is rejected, including when Kubernetes prunes retired fields from a request.

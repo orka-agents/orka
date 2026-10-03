@@ -125,15 +125,13 @@ controller:
   executionWorkspace:
     # Enables dispatch of ACP Tasks into configured execution-workspace providers.
     dispatchEnabled: false
-    # Default provider used when Task execution.workspace.provider is omitted.
-    defaultProvider: agent-sandbox
 
   agentSandbox:
     # Enables workspace-backed execution for agent Tasks that set Task execution.workspace.
     enabled: false
     # Optional upstream agent-sandbox router base URL used for workspace claims.
     routerUrl: ""
-    # Optional default execution workspace template name used when a Task omits execution.workspace.templateRef.name.
+    # Optional default template for direct administrator integrations; Task workspaces select a class.
     defaultTemplate: ""
     # Warm pool policy: disabled, template.
     warmPoolPolicy: disabled

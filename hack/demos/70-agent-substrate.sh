@@ -220,7 +220,7 @@ else
 fi
 _substrate_recap \
   "A real ${model} agent, running inside a gVisor Actor, cloned ${pr_repo} and made a change. It reached the model proxy AND github.com from inside runsc. Orka pushed the branch; the demo opened the PR." \
-  "This is the same Orka agent Task contract as Demo 60 — only execution.workspace.provider changed. The agent gets gVisor isolation for free."
+  "This is the same Orka agent Task contract as Demo 60 — only execution.workspace.classRef changed. The agent gets gVisor isolation for free."
 
 # Chapter 5 ------------------------------------------------------------------
 narrate "Beat 2 (WARM) — a second Task with the same sessionRef reattaches the retained workspace. Repo already cloned, no cold start."

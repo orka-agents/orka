@@ -701,7 +701,7 @@ func TestResolveACPWorkspaceClassAllowsDeleteContinuationAfterSuspendWithdrawal(
 	if err != nil {
 		t.Fatalf("resolve Delete-bound continuation after Suspend withdrawal: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, sessionUID, resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, sessionUID, resolved)
 	if err != nil {
 		t.Fatalf("freeze Delete-bound continuation: %v", err)
 	}
@@ -786,7 +786,7 @@ func TestResolveACPClassWorkspaceBindingPolicy(t *testing.T) {
 
 	t.Run("binding freezes class identity into the digest", func(t *testing.T) {
 		task := acpClassTestTask()
-		binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+		binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
 		if err != nil {
 			t.Fatalf("resolve binding: %v", err)
 		}
@@ -800,15 +800,14 @@ func TestResolveACPClassWorkspaceBindingPolicy(t *testing.T) {
 		if err := validateACPWorkspaceBindingValues(binding); err != nil {
 			t.Fatalf("frozen binding validation: %v", err)
 		}
-		legacyTask := acpClassTestTask(func(task *corev1alpha1.Task) {
-			task.Spec.Execution.Workspace = &corev1alpha1.ExecutionWorkspaceSpec{Enabled: true}
-		})
-		legacy, err := resolveACPWorkspaceBinding(legacyTask, corev1alpha1.WorkspaceProviderAgentSandbox, false, "")
+		classless := *binding
+		classless.Class = nil
+		legacyDigest, err := acpWorkspaceBindingDigest(&classless)
 		if err != nil {
-			t.Fatalf("resolve legacy binding: %v", err)
+			t.Fatal(err)
 		}
-		if legacy.BindingDigest == binding.BindingDigest {
-			t.Fatalf("class-backed binding digest must differ from the legacy digest")
+		if legacyDigest == binding.BindingDigest {
+			t.Fatal("class identity must affect the binding digest")
 		}
 	})
 
@@ -816,7 +815,7 @@ func TestResolveACPClassWorkspaceBindingPolicy(t *testing.T) {
 		task := acpClassTestTask(func(task *corev1alpha1.Task) {
 			task.Spec.Execution.Workspace.OnDetach = corev1alpha1.WorkspaceOnDetachSuspend
 		})
-		_, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+		_, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
 		if err == nil || !strings.Contains(err.Error(), "is not allowed by class") {
 			t.Fatalf("error = %v", err)
 		}
@@ -834,7 +833,7 @@ func TestResolveACPClassWorkspaceBindingPolicy(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolve class: %v", err)
 		}
-		if _, err := resolveACPWorkspaceBindingWithClass(acpClassTestTask(), "", false, "", suspendResolved); err == nil ||
+		if _, err := resolveACPWorkspaceBindingWithClass(acpClassTestTask(), "", suspendResolved); err == nil ||
 			!strings.Contains(err.Error(), "permits DataOnly suspension") {
 			t.Fatalf("error = %v", err)
 		}
@@ -842,7 +841,7 @@ func TestResolveACPClassWorkspaceBindingPolicy(t *testing.T) {
 		deleteTask := acpClassTestTask(func(task *corev1alpha1.Task) {
 			task.Spec.Execution.Workspace.OnDetach = corev1alpha1.WorkspaceOnDetachDelete
 		})
-		if _, err := resolveACPWorkspaceBindingWithClass(deleteTask, "", false, "", suspendResolved); err != nil {
+		if _, err := resolveACPWorkspaceBindingWithClass(deleteTask, "", suspendResolved); err != nil {
 			t.Fatalf("explicit Delete action: %v", err)
 		}
 	})
@@ -860,7 +859,7 @@ func TestResolveACPClassWorkspaceBindingPolicy(t *testing.T) {
 			task.Spec.Execution.Workspace.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
 			task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: acpTestSessionName, Create: true}
 		})
-		if _, err := resolveACPWorkspaceBindingWithClass(task, "", false, "session-uid-1", noneResolved); err == nil ||
+		if _, err := resolveACPWorkspaceBindingWithClass(task, "session-uid-1", noneResolved); err == nil ||
 			!strings.Contains(err.Error(), "not allowed by class") {
 			t.Fatalf("error = %v", err)
 		}
@@ -929,7 +928,7 @@ func TestACPWorkspaceClassBindingSnapshotRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(acpClassTestTask(), "", false, "", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(acpClassTestTask(), "", resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -972,7 +971,7 @@ func TestEnsureACPClassWorkspaceLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -1150,7 +1149,7 @@ func TestEnsureACPClassWorkspaceDependencyLossIsTerminal(t *testing.T) {
 			if err != nil {
 				t.Fatalf("resolve class: %v", err)
 			}
-			binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+			binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
 			if err != nil {
 				t.Fatalf("resolve binding: %v", err)
 			}
@@ -1215,7 +1214,7 @@ func TestEnsureACPClassWorkspacePersistsLinkBeforeCreation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "session-uid-1", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "session-uid-1", resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -1243,7 +1242,7 @@ func TestEnsureACPClassWorkspaceFailedStateIsTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -1281,7 +1280,7 @@ func TestEnsureACPClassWorkspaceBlocksContinuationDuringPendingSuspend(t *testin
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -1346,11 +1345,11 @@ func TestEnsureACPClassWorkspaceSessionContention(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	holderBinding, err := resolveACPWorkspaceBindingWithClass(holder, "", false, "session-uid-1", resolved)
+	holderBinding, err := resolveACPWorkspaceBindingWithClass(holder, "session-uid-1", resolved)
 	if err != nil {
 		t.Fatalf("resolve holder binding: %v", err)
 	}
-	competitorBinding, err := resolveACPWorkspaceBindingWithClass(competitor, "", false, "session-uid-1", resolved)
+	competitorBinding, err := resolveACPWorkspaceBindingWithClass(competitor, "session-uid-1", resolved)
 	if err != nil {
 		t.Fatalf("resolve competitor binding: %v", err)
 	}
@@ -1396,7 +1395,7 @@ func TestEnsureACPClassWorkspaceRejectsSuspendedAttachedWorkspace(t *testing.T) 
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -1482,11 +1481,11 @@ func TestEnsureACPClassWorkspaceQueuesRevisedSessionBehindPredecessor(t *testing
 			if err != nil {
 				t.Fatalf("resolve class: %v", err)
 			}
-			holderBinding, err := resolveACPWorkspaceBindingWithClass(holder, "", false, "session-revision-uid", resolved)
+			holderBinding, err := resolveACPWorkspaceBindingWithClass(holder, "session-revision-uid", resolved)
 			if err != nil {
 				t.Fatalf("resolve holder binding: %v", err)
 			}
-			successorBinding, err := resolveACPWorkspaceBindingWithClass(successor, "", false, "session-revision-uid", resolved)
+			successorBinding, err := resolveACPWorkspaceBindingWithClass(successor, "session-revision-uid", resolved)
 			if err != nil {
 				t.Fatalf("resolve successor binding: %v", err)
 			}
@@ -1558,7 +1557,7 @@ func TestEnsureACPClassWorkspaceRejectsForeignAdoption(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -1610,7 +1609,7 @@ func TestEnsureACPClassWorkspaceBackfillsAndValidatesSuspendedCap(t *testing.T) 
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, suspendTestSessionUID, resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, suspendTestSessionUID, resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -1724,7 +1723,7 @@ func TestEnsureACPClassWorkspaceRejectsProviderIdentityDrift(t *testing.T) {
 			if err != nil {
 				t.Fatalf("resolve class: %v", err)
 			}
-			binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+			binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
 			if err != nil {
 				t.Fatalf("resolve binding: %v", err)
 			}
@@ -1821,7 +1820,7 @@ func TestSettleACPClassWorkspaceSkipsRecreatedIncarnation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -1961,7 +1960,7 @@ func TestSettleACPClassWorkspaceQuarantinesPastDetachTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -2156,7 +2155,7 @@ func TestSettleACPClassWorkspaceRevokesAndDeletes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -2236,7 +2235,7 @@ func TestValidateACPWorkspaceClassBindingRejectsRetainActions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(acpClassTestTask(), "", false, "", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(acpClassTestTask(), "", resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -2257,7 +2256,7 @@ func TestValidateACPWorkspaceClassBindingRejectsInvalidLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(acpClassTestTask(), "", false, "", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(acpClassTestTask(), "", resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -2403,7 +2402,7 @@ func TestEnsureACPClassWorkspaceQueuesBehindFailedAttachedPredecessor(t *testing
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -2451,7 +2450,7 @@ func TestEnsureACPClassWorkspaceRefusesReadyPastMaxLifetime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -2498,7 +2497,7 @@ func TestEnsureACPClassWorkspaceRotatesExpiredAttachmentBeforeReady(t *testing.T
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -2579,7 +2578,7 @@ func TestHandleRunningRotatesExpiredACPClassWorkspaceAttachment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}

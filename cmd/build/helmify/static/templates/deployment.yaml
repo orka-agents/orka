@@ -328,9 +328,6 @@ spec:
             {{- if .Values.controller.executionWorkspace.dispatchEnabled }}
             - --acp-workspace-dispatch-enabled=true
             {{- end }}
-            {{- with .Values.controller.executionWorkspace }}
-            - --execution-workspace-default-provider={{ .defaultProvider | default "agent-sandbox" }}
-            {{- end }}
             {{- with .Values.controller.agentSandbox }}
             {{- if .enabled }}
             - --agent-sandbox-enabled=true

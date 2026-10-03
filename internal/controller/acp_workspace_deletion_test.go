@@ -139,7 +139,7 @@ func deletingSessionWorkspaceFixture(t *testing.T) (*TaskReconciler, *corev1alph
 	task = bindSuspendableSessionTaskForSettlement(t, r, task)
 	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
 	require.NoError(t, err)
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, suspendTestSessionUID, resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, suspendTestSessionUID, resolved)
 	require.NoError(t, err)
 	plan := ACPRuntimePlan{PoolName: suspendTestRuntimePoolName, Workspace: binding}
 	_, _, err = r.ensureACPClassWorkspace(ctx, task, plan)

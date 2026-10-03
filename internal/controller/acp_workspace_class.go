@@ -775,7 +775,7 @@ func (r *TaskReconciler) readySessionWorkspaceAwaitingSuspendQuota(
 		task.Spec.Execution.Workspace.ReusePolicy != corev1alpha1.WorkspaceReusePolicySession {
 		return false, nil
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, sessionUID, resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, sessionUID, resolved)
 	if err != nil {
 		return false, err
 	}
@@ -824,7 +824,7 @@ func (r *TaskReconciler) frozenACPContinuationSandboxVolume(
 	probeResolved := *resolved
 	probeResolved.Binding = resolved.Binding
 	probeResolved.Binding.SandboxVolume = requested
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, workspaceSessionUID, &probeResolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, workspaceSessionUID, &probeResolved)
 	if err != nil {
 		return nil, false, err
 	}
@@ -882,7 +882,7 @@ func (r *TaskReconciler) frozenACPContinuationSandboxVolume(
 		Capacity:         frozen.Capacity,
 	}
 	probeResolved.Binding.SandboxVolume = continuation
-	continuationBinding, err := resolveACPWorkspaceBindingWithClass(task, "", false, workspaceSessionUID, &probeResolved)
+	continuationBinding, err := resolveACPWorkspaceBindingWithClass(task, workspaceSessionUID, &probeResolved)
 	if err != nil {
 		return nil, false, err
 	}

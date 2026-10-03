@@ -698,7 +698,7 @@ second provider — **Agent Substrate** — where each workspace is a
 gVisor-isolated Actor drawn from a pre-warmed WorkerPool and kept warm between
 turns. A **real `gpt-5.5` codex agent** runs inside the gVisor sandbox: it
 clones a repo, makes a change, and a real PR is opened. The message: swap one
-field (`execution.workspace.provider: substrate`) and the entire agent Task
+field (`execution.workspace.classRef.name: substrate-coding`) and the entire agent Task
 contract — model call, git push, PR — is unchanged. Orka abstracts the
 execution substrate.
 
@@ -909,11 +909,9 @@ spec:
   prompt: <contents of prompt-file>
   execution:
     workspace:
-      enabled: true
-      templateRef:
-        name: orka-live-template
+      classRef:
+        name: sandbox-coding
       reusePolicy: session
-      cleanupPolicy: retain
 ```
 
 Turn 1 passes `--create-session`; turns 2 and 3 omit it. The session store
@@ -946,12 +944,11 @@ demo only applies the Orka `Agent` + two `Task`s and opens the PR. All carry
   `OPENAI_API_KEY`. The system prompt tells the agent to edit files only and stop. A revived v2
   demo requires the Workspace/Publisher to prepare, publish, verify, and reconcile the PR.
 - **Task** (`render_substrate_task <name> <none|session> <create> <prompt>`) —
-  agent Task whose `execution.workspace` selects `provider: substrate` with
-  `templateRef` → `ate-demo/orka-codex-ci`, plus top-level `spec.workspace`
+  agent Task whose `execution.workspace` selects `classRef.name: substrate-coding`, plus top-level `spec.workspace`
   (`intent`, `gitRepo`, `branch`, `readCredentialRef`, `publicationGitRepo`,
   `publicationCredentialRef`, and `pushBranch`) and
   `env: ORKA_CODEX_DISABLE_SANDBOX=true` (gVisor is the sandbox). `reusePolicy`
-  defaults to `session`; `cleanupPolicy` is `retain` for session tasks so the
+  defaults to `session`; the class controls retention so the
   workspace stays warm. The 3rd arg sets `sessionRef.create`.
   - Cold beat: `render_substrate_task <n> session true  "<prompt>"` (**creates**
     the session — `create: true`).

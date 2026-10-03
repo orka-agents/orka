@@ -101,7 +101,6 @@ spec:
           - --gateway-delivery-timeout=15s
           - --gateway-delivery-max-attempts=10
 
-          - --execution-workspace-default-provider=agent-sandbox
           - --agent-sandbox-enabled=false
           - --agent-sandbox-warm-pool-policy=disabled
           - --agent-sandbox-namespace-strategy=task

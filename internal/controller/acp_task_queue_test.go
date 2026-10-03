@@ -15,6 +15,8 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
+	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
@@ -223,18 +225,15 @@ func TestQueueACPRuntimeTaskRejectsUnsafeRepositoryBeforePoolDemand(t *testing.T
 }
 
 func TestQueueACPRuntimeTaskRejectsSubstrateTemplateInRuntimeNamespaceBeforePoolDemand(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := corev1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
+	scheme := testACPWorkspaceScheme(t)
+	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendSubstrate, func(f *acpClassFixture) {
+		f.profile.Spec.Substrate.TemplateRef.Namespace = acpTestRuntimeNamespace
+	})
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "shared-substrate-namespace", UID: types.UID("88888888-8888-8888-8888-888888888888"), Generation: 1},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent, Prompt: "inspect",
-			Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
-				Enabled: true, Provider: corev1alpha1.WorkspaceProviderSubstrate,
-				TemplateRef: &corev1alpha1.WorkspaceTemplateReference{Name: substrateTestBaseTemplateName, Namespace: acpTestRuntimeNamespace},
-			}},
+			Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "acp-class"}}},
 		},
 	}
 	agent := &corev1alpha1.Agent{
@@ -243,7 +242,7 @@ func TestQueueACPRuntimeTaskRejectsSubstrateTemplateInRuntimeNamespaceBeforePool
 			Type: corev1alpha1.AgentRuntimeCodex, ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 		}},
 	}
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.RuntimePool{}).WithObjects(task).Build()
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.RuntimePool{}, &workspacev1alpha1.ExecutionWorkspace{}).WithObjects(task).WithObjects(fixture.objects()...).Build()
 	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "store.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -262,12 +261,31 @@ func TestQueueACPRuntimeTaskRejectsSubstrateTemplateInRuntimeNamespaceBeforePool
 	reconciler := &TaskReconciler{
 		Client: kubeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(10), DurableControlStore: controlStore,
 		ControllerEpochManager: epochs, ACPRuntimeEnabled: true, ACPRuntimeNamespace: acpTestRuntimeNamespace,
-		ACPWorkspaceDispatchEnabled: true, SubstrateEnabled: true,
+		ACPWorkspaceDispatchEnabled: true, SubstrateEnabled: true, WorkspaceProviderAPIEnabled: true,
 		ACPRuntimeImages: ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)},
 	}
 	bound := bindACPQueueTaskForTest(t, ctx, reconciler, task, agent)
 	if _, err := reconciler.queueACPRuntimeTask(ctx, bound, agent); err != nil {
 		t.Fatal(err)
+	}
+	// Class workspaces complete admission and the attachment acknowledgement
+	// before the queue reaches RuntimePool creation and its namespace guard.
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	for pass := range 2 {
+		if err := kubeClient.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, bound); err != nil {
+			t.Fatal(err)
+		}
+		if err := kubeClient.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: bound.Labels[acpExecutionWorkspaceLinkLabel]}, workspace); err != nil {
+			t.Fatal(err)
+		}
+		if pass == 0 {
+			admitTestACPWorkspace(t, reconciler, workspace)
+		} else {
+			acknowledgeTestACPWorkspaceAttachment(t, reconciler, workspace)
+		}
+		if _, err := reconciler.queueACPRuntimeTask(ctx, bound, agent); err != nil {
+			t.Fatal(err)
+		}
 	}
 	var pools corev1alpha1.RuntimePoolList
 	if err := kubeClient.List(ctx, &pools); err != nil {

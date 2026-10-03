@@ -59,7 +59,7 @@ func TestResolveACPWorkspaceClassPreservesDormantSubstrateSuspendBindingIdentity
 	if err != nil {
 		t.Fatalf("resolve Delete-only class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
 	if err != nil {
 		t.Fatalf("freeze Delete-only class binding: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestFrozenBindingRejectsFullSuspendModeTamper(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(suspendableSessionTask(), "", false, "session-uid-1", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(suspendableSessionTask(), "session-uid-1", resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}

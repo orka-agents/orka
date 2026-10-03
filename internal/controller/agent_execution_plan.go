@@ -173,11 +173,10 @@ func (r *TaskReconciler) planAgentExecution(
 //nolint:staticcheck // Field path begins the user-facing validation message.
 const harnessV1ExecutionWorkspaceUnsupportedReason = "Task.spec.execution.workspace is not supported on the harness v1 execution path; workspace-provider-backed RuntimeSessions require the Orka harness v2 RuntimePool path, and repository access uses Task.spec.workspace"
 
-// taskRequestsExecutionWorkspace reports whether the Task carries an enabled
-// legacy-shaped or class-shaped execution-workspace request.
+// taskRequestsExecutionWorkspace treats every present workspace as a request.
+// Malformed or pruned requests must fail validation rather than run normally.
 func taskRequestsExecutionWorkspace(task *corev1alpha1.Task) bool {
-	return task != nil && task.Spec.Execution != nil && task.Spec.Execution.Workspace != nil &&
-		(task.Spec.Execution.Workspace.Enabled || task.Spec.Execution.Workspace.ClassRef != nil)
+	return task != nil && task.Spec.Execution != nil && task.Spec.Execution.Workspace != nil
 }
 
 // rejectUnsupportedACPWorkspacePlan fails closed on every workspace request the
@@ -206,7 +205,7 @@ func (r *TaskReconciler) rejectUnsupportedACPWorkspacePlan(ctx context.Context, 
 		}
 		return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err), true
 	}
-	binding, err := validateACPWorkspaceBindingRequestWithClass(task, r.ExecutionWorkspaceDefaultProvider, r.EnforceNamespaceIsolation, resolvedClass)
+	binding, err := validateACPWorkspaceBindingRequestWithClass(task, resolvedClass)
 	if err != nil {
 		return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err), true
 	}

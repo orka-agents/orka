@@ -175,6 +175,7 @@ func workspaceClassTaskFixture(className string) *corev1alpha1.Task {
 	if className == "" {
 		return task
 	}
+	task.Spec.Type = corev1alpha1.TaskTypeAgent
 	task.Spec.Execution = &corev1alpha1.ExecutionSpec{
 		Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
 			ClassRef: &corev1alpha1.WorkspaceClassReference{Name: className},
@@ -220,4 +221,25 @@ func mustMarshalWorkspaceClassObject(t *testing.T, object runtime.Object) []byte
 	data, err := json.Marshal(object)
 	require.NoError(t, err)
 	return data
+}
+
+func TestWorkspaceClassUseValidatorRejectsClasslessRequests(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	authorizer := &capturedClassUse{}
+	validator := newWorkspaceClassUseValidator(scheme, authorizer, workspaceClassTask)
+	for _, workspace := range []string{`{}`, `{"classRef":null}`, `{"classRef":{}}`, `{"classRef":{"name":""}}`, `{"enabled":true,"provider":"substrate","templateRef":{"name":"infra"}}`} {
+		t.Run(workspace, func(t *testing.T) {
+			for _, operation := range []admissionv1.Operation{admissionv1.Create, admissionv1.Update} {
+				request := ctrladmission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
+					Operation: operation, Namespace: admissionTestNamespace,
+					Object: runtime.RawExtension{Raw: []byte(`{"apiVersion":"core.orka.ai/v1alpha1","kind":"Task","spec":{"type":"agent","execution":{"workspace":` + workspace + `}}}`)},
+				}}
+				response := validator.Handle(t.Context(), request)
+				require.False(t, response.Allowed)
+				require.Contains(t, response.Result.Message, "classRef.name is required")
+			}
+		})
+	}
+	require.Zero(t, authorizer.calls)
 }

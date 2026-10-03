@@ -15,7 +15,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	sandboxextv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -228,69 +227,6 @@ func TestPlanAgentExecutionMatrix(t *testing.T) {
 			wantWorkspaceStatusErr:      "agent-sandbox-enabled",
 		},
 		{
-			name: "workspace templateRef is rejected for ACP RuntimeSessions",
-			mutateTask: plannerWorkspaceTask(func(workspace *corev1alpha1.ExecutionWorkspaceSpec) {
-				workspace.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: runtimePoolSandboxTemplateSuffix}
-			}),
-			objects: []client.Object{
-				&sandboxextv1beta1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{Name: runtimePoolSandboxTemplateSuffix, Namespace: defaultNS}},
-				&sandboxextv1beta1.SandboxWarmPool{ObjectMeta: metav1.ObjectMeta{Name: runtimePoolSandboxTemplateSuffix, Namespace: defaultNS}},
-			},
-			agentSandboxEnabled:         true,
-			acpRuntimeEnabled:           true,
-			acpWorkspaceDispatchEnabled: true,
-			wantPath:                    agentExecutionPathRejected,
-			wantReason:                  acpWorkspaceTestTemplateRefForbiddenError,
-			wantWorkspaceStatusErr:      acpWorkspaceTestTemplateRefForbiddenError,
-		},
-		{
-			name: "substrate execution workspace without templateRef fails closed before any demand",
-			mutateTask: plannerWorkspaceTask(func(workspace *corev1alpha1.ExecutionWorkspaceSpec) {
-				workspace.Provider = corev1alpha1.WorkspaceProviderSubstrate
-			}),
-			substrateEnabled:            true,
-			acpRuntimeEnabled:           true,
-			acpWorkspaceDispatchEnabled: true,
-			wantPath:                    agentExecutionPathRejected,
-			wantReason:                  acpWorkspaceTestTemplateRefRequiredError,
-			wantWorkspaceStatusErr:      acpWorkspaceTestTemplateRefRequiredError,
-		},
-		{
-			name: "substrate-backed agent task uses ACP RuntimePool when dispatch is enabled",
-			mutateTask: plannerWorkspaceTask(func(workspace *corev1alpha1.ExecutionWorkspaceSpec) {
-				workspace.Provider = corev1alpha1.WorkspaceProviderSubstrate
-				workspace.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: substrateTestBaseTemplateName, Namespace: substrateTestTemplateNamespace}
-			}),
-			substrateEnabled:            true,
-			acpRuntimeEnabled:           true,
-			acpWorkspaceDispatchEnabled: true,
-			wantPath:                    agentExecutionPathACP,
-		},
-		{
-			name: "substrate-backed agent task fails closed when substrate is disabled",
-			mutateTask: plannerWorkspaceTask(func(workspace *corev1alpha1.ExecutionWorkspaceSpec) {
-				workspace.Provider = corev1alpha1.WorkspaceProviderSubstrate
-				workspace.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: substrateTestBaseTemplateName, Namespace: substrateTestTemplateNamespace}
-			}),
-			acpRuntimeEnabled:           true,
-			acpWorkspaceDispatchEnabled: true,
-			wantPath:                    agentExecutionPathRejected,
-			wantReason:                  "substrate-enabled",
-			wantWorkspaceStatusErr:      "substrate-enabled",
-		},
-		{
-			name: "workspace cleanupPolicy retain fails closed",
-			mutateTask: plannerWorkspaceTask(func(workspace *corev1alpha1.ExecutionWorkspaceSpec) {
-				workspace.CleanupPolicy = corev1alpha1.WorkspaceCleanupPolicyRetain
-			}),
-			agentSandboxEnabled:         true,
-			acpRuntimeEnabled:           true,
-			acpWorkspaceDispatchEnabled: true,
-			wantPath:                    agentExecutionPathRejected,
-			wantReason:                  acpWorkspaceTestCleanupDeleteError,
-			wantWorkspaceStatusErr:      acpWorkspaceTestCleanupDeleteError,
-		},
-		{
 			name: "workspace session reuse without sessionRef fails closed",
 			mutateTask: plannerWorkspaceTask(func(workspace *corev1alpha1.ExecutionWorkspaceSpec) {
 				workspace.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
@@ -333,6 +269,7 @@ func TestPlanAgentExecutionMatrix(t *testing.T) {
 			}
 
 			r := newUnitReconciler(scheme, tt.objects...)
+			installTestACPWorkspaceClass(t, r)
 			r.AgentSandboxEnabled = tt.agentSandboxEnabled
 			r.SubstrateEnabled = tt.substrateEnabled
 			r.ACPRuntimeEnabled = tt.acpRuntimeEnabled
@@ -426,10 +363,7 @@ func plannerRuntimeRefAgent() *corev1alpha1.Agent {
 func plannerWorkspaceTask(mutate func(*corev1alpha1.ExecutionWorkspaceSpec)) func(*corev1alpha1.Task) {
 	return func(task *corev1alpha1.Task) {
 		task.UID = "task-uid-workspace"
-		workspace := &corev1alpha1.ExecutionWorkspaceSpec{
-			Enabled:  true,
-			Provider: corev1alpha1.WorkspaceProviderAgentSandbox,
-		}
+		workspace := &corev1alpha1.ExecutionWorkspaceSpec{ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "acp-class"}}
 		if mutate != nil {
 			mutate(workspace)
 		}

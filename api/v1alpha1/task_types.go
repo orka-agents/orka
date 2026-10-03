@@ -141,6 +141,7 @@ type TaskTransaction struct {
 // +kubebuilder:validation:XValidation:rule="self.type != 'container' || !has(self.workspace) || (!has(self.workspace.createPR) || !self.workspace.createPR)",message="container Tasks do not support workspace.createPR"
 // +kubebuilder:validation:XValidation:rule="self.type != 'container' || !has(self.workspace) || (!has(self.workspace.maxChangedFiles) && (!has(self.workspace.allowedPaths) || self.workspace.allowedPaths.size() == 0) && (!has(self.workspace.denyRepositoryControlPaths) || !self.workspace.denyRepositoryControlPaths) && (!has(self.workspace.rejectBinaryFiles) || !self.workspace.rejectBinaryFiles) && (!has(self.workspace.rejectSecretLikeContent) || !self.workspace.rejectSecretLikeContent))",message="container Tasks do not support clean-room workspace publication policies"
 // +kubebuilder:validation:XValidation:rule="self.type != 'container' || !has(self.workspace) || !has(self.workspace.pushBranch) || self.workspace.pushBranch.size() == 0 || !has(self.image) || self.image.size() == 0",message="custom-image container Tasks do not support workspace.pushBranch publication"
+// +kubebuilder:validation:XValidation:rule="!has(self.execution) || !has(self.execution.workspace) || self.type == 'agent'",message="execution.workspace is only supported for agent Tasks"
 type TaskSpec struct {
 	// Type specifies the task type: "container" or "ai"
 	// +kubebuilder:validation:Required
