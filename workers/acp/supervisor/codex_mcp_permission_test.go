@@ -9,8 +9,8 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
-// Exact structural envelopes from the pinned codex-acp 1.1.7 bundle's
-// createMcpToolCallUpdate and buildPermissionRequest. The permission callback
+// Exact structural envelopes from the pinned codex-acp 2.1.1 bundle's
+// McpToolReporter and buildMcpPermissionRequest. The permission callback
 // must retain the structured identity from the same prompt's preceding update.
 func TestCodexMCPPermissionUsesPinnedStructuredIdentity(t *testing.T) {
 	server, cfg, _ := newTestServer(t, "immediate")
@@ -39,7 +39,7 @@ func TestCodexMCPPermissionUsesPinnedStructuredIdentity(t *testing.T) {
 		Permission: &acp.PermissionRequestEvent{RequestID: "permission-1", Request: acp.RequestPermissionRequest{
 			ToolCall: json.RawMessage(`{"toolCallId":"call-1","kind":"execute","status":"pending"}`),
 			Meta:     acp.Meta{"is_mcp_tool_approval": true},
-			Options:  []acp.PermissionOption{{OptionID: "accept", Name: "Allow once", Kind: "allow_once"}, {OptionID: "decline", Name: "Decline", Kind: "reject_once"}},
+			Options:  []acp.PermissionOption{{OptionID: "allow_once", Name: "Allow", Kind: "allow_once"}, {OptionID: "cancel", Name: "Cancel", Kind: "reject_once"}},
 		}},
 	})
 	if err != nil {
