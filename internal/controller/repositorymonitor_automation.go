@@ -67,7 +67,7 @@ func (r *RepositoryMonitorReconciler) tryRepositoryMonitorAutomaticRepair(ctx co
 	command, err := r.Store.GetCommandEvent(ctx, monitor.Namespace, id)
 	if errors.Is(err, store.ErrNotFound) {
 		now := time.Now()
-		command = &store.CommandEvent{ID: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, MonitorGeneration: monitor.Generation, Repo: owner + "/" + repo, Kind: repositoryMonitorPullRequestKind, Number: pr.Number, Source: "controller_policy", Author: repositoryMonitorControllerActor, Permission: "repository_repair_policy", Intent: intent, Command: intent, HeadSHA: pr.HeadSHA, Status: repositoryMonitorCommandAccepted, CreatedAt: now, ProcessedAt: &now}
+		command = &store.CommandEvent{ID: id, CommentID: id, DedupeKey: id, IdempotencyKey: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, MonitorGeneration: monitor.Generation, Repo: owner + "/" + repo, Kind: repositoryMonitorPullRequestKind, Number: pr.Number, Source: "controller_policy", Author: repositoryMonitorControllerActor, Permission: "repository_repair_policy", Intent: intent, Command: intent, HeadSHA: pr.HeadSHA, Status: repositoryMonitorCommandAccepted, CreatedAt: now}
 		if err := r.Store.CreateCommandEvent(ctx, command); err != nil {
 			return false, 0, err
 		}
@@ -77,9 +77,14 @@ func (r *RepositoryMonitorReconciler) tryRepositoryMonitorAutomaticRepair(ctx co
 	if command.Status != repositoryMonitorCommandAccepted {
 		return false, 0, nil
 	}
-	policyRun := *run
-	policyRun.CommandEventID = command.ID
-	return r.tryProcessPullRequestCommandRun(ctx, monitor, &policyRun, owner, repo, pr, item)
+	// Use the same durable command queue as label/API requests. Executing inline
+	// under the inventory run would race command recovery with a different run
+	// identity and could reject the already-created Task as a metadata mismatch.
+	if _, err := r.enqueueAcceptedRepositoryMonitorCommands(ctx, monitor); err != nil {
+		return false, 0, err
+	}
+	item.RepairState = repositoryMonitorRepairPhaseQueued
+	return true, 0, r.Store.UpsertMonitorItem(ctx, item)
 }
 
 // Polling advances CI and review/repair outcomes even when GitHub emits no new

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -46,7 +47,7 @@ func TestRepositoryMonitorAutomaticallyRepairsFailedCI(t *testing.T) {
 	configureRepositoryMonitorTestWriteCredentials(monitor)
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}, &corev1alpha1.Task{}).
 		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore, GitHubAPIBaseURL: server.URL}
@@ -55,6 +56,15 @@ func TestRepositoryMonitorAutomaticallyRepairsFailedCI(t *testing.T) {
 	}
 	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "pr-fix"}}); err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
+	}
+	// Policy selection only queues an accepted command. The next reconciliation
+	// executes its canonical run, with no parallel inline Task creation.
+	var queuedTasks corev1alpha1.TaskList
+	if err := cl.List(ctx, &queuedTasks); err != nil || len(queuedTasks.Items) != 0 {
+		t.Fatalf("automatic repair bypassed command queue: tasks=%d err=%v", len(queuedTasks.Items), err)
+	}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "pr-fix"}}); err != nil {
+		t.Fatal(err)
 	}
 	item, err := monitorStore.GetMonitorItem(ctx, "default", "pr-fix", repositoryMonitorPullRequestKind, "31")
 	if err != nil {
@@ -91,6 +101,40 @@ func TestRepositoryMonitorAutomaticallyRepairsFailedCI(t *testing.T) {
 	var tasks corev1alpha1.TaskList
 	if err := cl.List(ctx, &tasks); err != nil || len(tasks.Items) != 1 {
 		t.Fatalf("duplicate or concurrent task: count=%d err=%v", len(tasks.Items), err)
+	}
+	// Recovering accepted commands must retain the same Task/run identity.
+	if _, err := reconciler.enqueueAcceptedRepositoryMonitorCommands(ctx, monitor); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range commands {
+		if command.CommentID != command.ID || command.DedupeKey != command.ID || command.IdempotencyKey != command.ID {
+			t.Fatalf("policy command is missing a unique durable identity: %+v", command)
+		}
+		if task.Annotations[labels.AnnotationMonitorRunID] != repositoryMonitorCommandRunIDFromCommand(command.ID) {
+			t.Fatal("Task does not use the canonical command run")
+		}
+	}
+	// A failed Task consumes one attempt, but a second same-head attempt must
+	// get its own command identity rather than collide on the legacy SQL key.
+	task.Status.Phase = corev1alpha1.TaskPhaseFailed
+	if err := cl.Status().Update(ctx, &task); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconciler.ingestCompletedRepositoryMonitorRepairTasks(ctx, monitor); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := reconciler.processPullRequestInventoryRun(ctx, monitor, &store.MonitorRun{ID: "retry-inventory", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: 31, TargetSHA: "head31"}, "orka-agents", "orka"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "pr-fix"}}); err != nil {
+		t.Fatal(err)
+	}
+	commands, _, err = monitorStore.ListCommandEvents(ctx, store.CommandEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name})
+	if err != nil || len(commands) != 2 {
+		t.Fatalf("retry commands=%+v err=%v", commands, err)
+	}
+	if err := cl.List(ctx, &tasks); err != nil || len(tasks.Items) != 2 {
+		t.Fatalf("retry tasks=%d err=%v", len(tasks.Items), err)
 	}
 }
 
@@ -375,6 +419,50 @@ func TestRepositoryMonitorInventoryHonorsReadinessRefresh(t *testing.T) {
 				if (guard == "pause" && !strings.Contains(item.LabelsJSON, "orka:pause")) || (guard == "draft" && !item.Draft) {
 					t.Fatalf("stored item lost the fresh guard: %+v", item)
 				}
+			}
+		})
+	}
+}
+
+func TestRepositoryMonitorRepairPromptIncludesOnlyMatchingReviewEvidence(t *testing.T) {
+	ctx := context.Background()
+	db := setupControllerSQLiteStore(t)
+	monitor, _ := repositoryMonitorInventoryTestObjects("repair-evidence")
+	r := &RepositoryMonitorReconciler{Store: db}
+	item := &store.MonitorItem{LastReviewID: "review-evidence", LastVerdict: repositoryMonitorReviewVerdictNeedsChanges}
+	pr := repositoryMonitorPullRequest{Number: 31, HeadSHA: "head"}
+	review := &store.ReviewRecord{ID: item.LastReviewID, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 31, HeadSHA: "head", Summary: "Initialize the retry result", FindingsJSON: `[{"file":"scripts/smoke.sh","line":42,"body":"The result variable is unset after success"}]`, ValidationEvidence: "shell test failed"}
+	if err := db.CreateReviewRecord(ctx, review); err != nil {
+		t.Fatal(err)
+	}
+	prompt, err := r.buildRepositoryMonitorRepairPrompt(ctx, monitor, "fix_ci", "orka-agents/orka", pr, item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Initialize the retry result", "scripts/smoke.sh", "shell test failed", "untrusted data"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("repair prompt is missing %q", want)
+		}
+	}
+	for _, change := range []string{"head", "pr", "monitor", "missing"} {
+		t.Run(change, func(t *testing.T) {
+			otherPR, otherMonitor, otherItem := pr, *monitor, *item
+			switch change {
+			case "head":
+				otherPR.HeadSHA = "different"
+			case "pr":
+				otherPR.Number++
+			case "monitor":
+				otherMonitor.Name = "different"
+			case "missing":
+				otherItem.LastReviewID = "absent"
+			}
+			prompt, err := r.buildRepositoryMonitorRepairPrompt(ctx, &otherMonitor, "fix_ci", "orka-agents/orka", otherPR, &otherItem)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(prompt, "reviewEvidence") || strings.Contains(prompt, "validationEvidence") {
+				t.Fatal("included stale or differently scoped evidence")
 			}
 		})
 	}
