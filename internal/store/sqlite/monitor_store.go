@@ -1284,10 +1284,15 @@ func (s *Store) GetGitHubMutationRecord(ctx context.Context, namespace, id strin
 // ListGitHubMutationRecords lists mutation records ordered newest first.
 func (s *Store) ListGitHubMutationRecords(ctx context.Context, filter store.GitHubMutationRecordFilter) ([]store.GitHubMutationRecord, string, error) {
 	q := newMonitorQuery(githubMutationRecordSelectSQL(), filter.Namespace)
+	if filter.AllNamespaces {
+		q = &monitorQuery{}
+		q.sql.WriteString(githubMutationRecordSelectSQL() + " WHERE 1 = 1")
+	}
 	monitorFilter(q, "monitor_name", filter.MonitorName)
 	monitorFilter(q, "operation", filter.Operation)
 	monitorFilter(q, "target_kind", filter.TargetKind)
 	monitorFilter(q, "target_number", filter.TargetNumber)
+	monitorFilter(q, "target_sha", filter.TargetSHA)
 	monitorFilter(q, "status", filter.Status)
 	return queryPage(ctx, s.db, q, "created_at DESC, id DESC", filter.Cursor, filter.Limit, scanGitHubMutationRecord)
 }

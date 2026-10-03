@@ -88,8 +88,7 @@ func (r *RepositoryMonitorReconciler) ensureNoExistingCommandRunBlocksQueue(ctx 
 	}
 	if run.Phase == repositoryMonitorRunPhaseSucceeded {
 		item, itemErr := r.Store.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, command.Kind, fmt.Sprintf("%d", command.Number))
-		pending := itemErr == nil && ((command.Intent == repositoryMonitorCommandIntentAutomerge && item.AutomergeState == repositoryMonitorAutomergeStatePending) ||
-			(command.Intent == repositoryMonitorCommandIntentUpdateBranch && item.RepairState == repositoryMonitorRepairPhaseQueued))
+		pending := itemErr == nil && (command.Intent == repositoryMonitorCommandIntentUpdateBranch && item.RepairState == repositoryMonitorRepairPhaseQueued)
 		if pending {
 			now := time.Now()
 			run.Phase = repositoryMonitorRunPhaseQueued
@@ -241,15 +240,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCommandWorkActionTerminal
 
 func (r *RepositoryMonitorReconciler) terminalizeRepositoryMonitorFailedCommand(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command store.CommandEvent, run *store.MonitorRun, reason string) error {
 	actionKind := repositoryMonitorCommandActionKind(command.Intent)
-	if command.Intent == repositoryMonitorCommandIntentAutomerge {
-		preserveSuccess, err := r.terminalizeRepositoryMonitorAutomerge(ctx, monitor, command, reason)
-		if err != nil {
-			return err
-		}
-		if preserveSuccess {
-			return r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, &command, command.Kind, command.Number, command.HeadSHA, command.IssueSnapshotDigest, actionKind, repositoryMonitorWorkActionStatusSucceeded, repositoryMonitorAutomergeStateMerged, "", "")
-		}
-	}
 	if command.Intent == repositoryMonitorCommandIntentUpdateBranch {
 		preserveSuccess, err := r.terminalizeRepositoryMonitorUpdateBranch(ctx, monitor, command, reason)
 		if err != nil {
@@ -272,63 +262,12 @@ func (r *RepositoryMonitorReconciler) terminalizeRepositoryMonitorFailedCommand(
 	return r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, &command, command.Kind, command.Number, command.HeadSHA, command.IssueSnapshotDigest, actionKind, repositoryMonitorWorkActionStatusFailed, repositoryMonitorRunFailurePermanent, "", reason)
 }
 
-func (r *RepositoryMonitorReconciler) terminalizeRepositoryMonitorAutomerge(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command store.CommandEvent, reason string) (bool, error) {
-	mutationID := "ghmut-" + repositoryMonitorShortHash(command.ID+"-merge")
-	mutation, err := r.Store.GetGitHubMutationRecord(ctx, monitor.Namespace, mutationID)
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		return false, err
-	}
-	item, itemErr := r.Store.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, fmt.Sprintf("%d", command.Number))
-	if itemErr != nil && !errors.Is(itemErr, store.ErrNotFound) {
-		return false, itemErr
-	}
-	if mutation != nil && mutation.Status == repositoryMonitorRunPhaseSucceeded {
-		if item != nil && strings.TrimSpace(command.HeadSHA) != "" && strings.TrimSpace(item.HeadSHA) == strings.TrimSpace(command.HeadSHA) {
-			item.State = repositoryMonitorAutomergeStateMerged
-			item.AutomergeState = repositoryMonitorAutomergeStateMerged
-			item.SkipReason = ""
-			if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
-				return false, err
-			}
-		}
-		return true, nil
-	}
-	sameHead := item != nil && strings.TrimSpace(command.HeadSHA) != "" && strings.TrimSpace(item.HeadSHA) == strings.TrimSpace(command.HeadSHA)
-	if sameHead && (item.AutomergeState == repositoryMonitorAutomergeStateMerged || strings.EqualFold(strings.TrimSpace(item.State), repositoryMonitorAutomergeStateMerged)) {
-		if mutation != nil {
-			mutation.Status = repositoryMonitorRunPhaseSucceeded
-			mutation.Error = ""
-			if err := r.updateRepositoryMonitorGitHubMutation(ctx, monitor, mutation); err != nil {
-				return false, err
-			}
-		}
-		return true, nil
-	}
-	if item != nil && strings.TrimSpace(command.HeadSHA) != "" && strings.TrimSpace(item.HeadSHA) == strings.TrimSpace(command.HeadSHA) {
-		item.AutomergeState = repositoryMonitorAutomergeStateFailed
-		item.SkipReason = reason
-		if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
-			return false, err
-		}
-	}
-	if mutation == nil {
-		return false, nil
-	}
-	mutation.Status = repositoryMonitorRunPhaseFailed
-	mutation.Error = reason
-	return false, r.updateRepositoryMonitorGitHubMutation(ctx, monitor, mutation)
-}
-
 func repositoryMonitorCommandActionKind(intent string) string {
 	switch strings.TrimSpace(intent) {
 	case repositoryMonitorCommandIntentReview:
 		return "pr_review"
 	case repositoryMonitorCommandIntentFix:
 		return "pr_repair"
-	case repositoryMonitorCommandIntentAutomerge:
-		return repositoryMonitorActionAutomerge
-	case repositoryMonitorCommandIntentApprovePlan:
-		return repositoryMonitorIssueActionApprove
 	default:
 		return strings.TrimSpace(intent)
 	}

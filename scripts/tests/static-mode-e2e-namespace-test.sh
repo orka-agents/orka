@@ -13,7 +13,6 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 security_script="${root}/scripts/security-scan-e2e.sh"
 substrate_script="${root}/scripts/agent-substrate-e2e.sh"
 substrate_helper="${root}/scripts/lib/substrate-orka-local.sh"
-label_script="${root}/scripts/live-github-label-trigger-e2e.sh"
 e2e_suite="${root}/test/e2e/e2e_suite_test.go"
 tls_helper="${root}/scripts/lib/e2e-admission-tls.sh"
 
@@ -25,8 +24,6 @@ grep -Fq '[[ "${test_namespace}" == "${orka_namespace}" ]]' "${security_script}"
 grep -Fq 'ORKA_NAMESPACE=orka-system' "${substrate_script}"
 grep -Fq 'source "${ROOT_DIR}/scripts/lib/e2e-admission-tls.sh"' "${substrate_script}"
 grep -Fq 'source "${ROOT_DIR}/scripts/lib/substrate-orka-local.sh"' "${substrate_script}"
-grep -Fq 'ORKA_GITHUB_LABEL_TRIGGER_NAMESPACE="${orka_namespace}"' "${label_script}"
-grep -Fq 'namespace: ${orka_namespace}' "${label_script}"
 grep -Fq 'scripts", "lib", "ensure-static-mode-namespace.sh"' "${e2e_suite}"
 if grep -Fq 'exec.Command("kubectl", "create", "ns", namespace)' "${e2e_suite}"; then
   echo 'Go E2E must not pre-create an unlabeled controller namespace' >&2
@@ -309,7 +306,7 @@ if [[ ! "${namespace_create_line}" =~ ^[0-9]+$ || ! "${secret_line}" =~ ^[0-9]+$
   exit 1
 fi
 
-for script in "${security_script}" "${substrate_script}" "${substrate_helper}" "${label_script}"; do
+for script in "${security_script}" "${substrate_script}" "${substrate_helper}"; do
   if grep -Eq '(^|[[:space:]])-n[[:space:]]+default([[:space:]]|$)|^[[:space:]]*namespace:[[:space:]]+default([[:space:]]|$)|^[[:space:]]*value:[[:space:]]+default([[:space:]]|$)' "${script}"; then
     echo "${script#"${root}/"} still places controller-owned resources in the pre-isolation default namespace" >&2
     exit 1
