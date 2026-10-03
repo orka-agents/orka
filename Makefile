@@ -464,6 +464,8 @@ verify-static-mode-crds: ## Refuse workload deployment until the platform-owned 
 		agentruntimes.core.orka.ai \
 		agents.core.orka.ai \
 		branchclaims.core.orka.ai \
+		connections.core.orka.ai \
+		connectorproviders.core.orka.ai \
 		controllerepochs.core.orka.ai \
 		executionworkspaceclasses.workspace.orka.ai \
 		executionworkspacepools.workspace.orka.ai \
