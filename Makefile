@@ -64,7 +64,7 @@ help: ## Display this help.
 ##@ Development
 
 .PHONY: manifests
-manifests: controller-gen kustomize ## Generate canonical and staged manifests.
+manifests: controller-gen kustomize workspace-crds ## Generate canonical and staged manifests.
 	# A module pattern excludes nested provider checkouts used by local conformance.
 	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd:allowDangerousTypes=true webhook paths="github.com/orka-agents/orka/..." output:crd:artifacts:config=config/crd/bases
 	@set -euo pipefail; \
@@ -92,6 +92,12 @@ manifests: controller-gen kustomize ## Generate canonical and staged manifests.
 		tmp=""; \
 		trap - EXIT; \
 		if [[ -n "$$backup" ]]; then rm -rf "$$backup"; fi
+
+.PHONY: workspace-crds
+workspace-crds: ## Source workspace CRDs from the pinned shared module.
+	go mod download github.com/orka-agents/orka-workspace
+	@workspace_module_dir="$$(go list -m -f '{{.Dir}}' github.com/orka-agents/orka-workspace)"; \
+		cp "$$workspace_module_dir"/config/crd/bases/workspace.orka.ai_*.yaml config/crd/bases/
 
 .PHONY: release-manifest
 release-manifest: ## Prepare staging manifests for NEWVERSION=vX.Y.Z[-beta.N|-rc.N].

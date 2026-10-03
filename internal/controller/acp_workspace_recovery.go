@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"time"
 
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 )
 
 // failedACPWorkspaceHasNativeCheckpoint checks the exact retained reference,

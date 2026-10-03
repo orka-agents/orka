@@ -2,8 +2,10 @@
 
 Provider adapters watch `workspace.orka.ai/v1alpha1` resources whose immutable
 `spec.controllerName` matches the adapter. They import only
-`api/workspace/v1alpha1`, `pkg/workspaceprovider`, and `pkg/workspaceagent` from
-a tagged Orka module version.
+`api/v1alpha1`, `sdk`, and `sdk/workspaceagent` from a tagged
+[`orka-workspace`](https://github.com/orka-agents/orka-workspace) module version.
+The `sdk` import retains the Go package name `workspaceprovider`. Orka consumes
+the same shared module and sources its workspace CRDs from that module.
 
 ## Parameter CRD read aggregation
 
@@ -65,9 +67,8 @@ contract rather than silently carrying the patch onto changed code.
 ## Workspace-agent connection Secret contract
 
 A ready workspace that exposes the workspace-agent data plane sets
-`WorkspaceObservation.ConnectionSecretRef`. The referenced Secret uses the
-versioned public contract in `pkg/workspaceprovider` rather than adapter-specific
-keys. Adapters should build its `data` map with `EncodeConnectionData`; core and
+`ExecutionWorkspace.status.connectionSecretRef`. The referenced Secret uses the
+versioned public contract in `orka-workspace/sdk`. Adapters should build its `data` map with `EncodeConnectionData`; core and
 tests decode it with `ParseConnectionData` before constructing a
 `workspaceagent.Client`.
 
@@ -89,6 +90,7 @@ a full control-authenticated reset using the binding generation reported by
 `GET /v1/capabilities`, then use the rotated generation returned by reset for
 attachment activation.
 
-The shared conformance suite requires a disposable data-plane workspace and
-exercises health, capabilities, attachment fencing, idempotent exec, advertised
-file operations, revocation, and reset through the public client.
+The shared lifecycle contract and its provider conformance suite live in
+[`orka-workspace`](https://github.com/orka-agents/orka-workspace). Providers must
+pass that suite before advertising a supported contract. Workspace-agent
+implementations must also preserve the data-plane protocol described above.

@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	"github.com/stretchr/testify/require"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
