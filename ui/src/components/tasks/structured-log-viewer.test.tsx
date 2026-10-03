@@ -61,6 +61,56 @@ describe('StructuredLogViewer', () => {
     expect(screen.getByText('(3 lines)')).toBeInTheDocument()
   })
 
+  it.each([
+    ['{"level":"info","msg":"error count is zero"}', 'text-foreground'],
+    ['{"level":"INFO","msg":"warning and debug counts are zero"}', 'text-foreground'],
+    ['{"level":"warn","msg":"error threshold approaching"}', 'text-yellow-600'],
+    ['{"level":"WaRnInG","msg":"error threshold approaching"}', 'text-yellow-600'],
+    ['{"level":"DEBUG","msg":"no error or warning"}', 'text-muted-foreground'],
+    ['{"level":"ERROR","msg":"info request failed"}', 'text-red-600'],
+    ['  {"level":"info","msg":"error count is zero"}', 'text-foreground'],
+  ])('prioritizes the explicit JSON level in %s', (line, color) => {
+    mockedUseTaskLogs.mockReturnValue({
+      logs: [line],
+      isStreaming: false,
+      isLive: false,
+      error: null,
+      refetch: vi.fn(),
+      clear: vi.fn(),
+    })
+
+    render(<StructuredLogViewer taskId="task-1" />)
+    expect(screen.getByTestId('log-line')).toHaveClass(color)
+  })
+
+  it.each([
+    ['[ERROR] Request failed', 'text-red-600'],
+    ['[WARNING] Retrying request', 'text-yellow-600'],
+    ['[DEBUG] Request details', 'text-muted-foreground'],
+    ['[INFO] Request started', 'text-foreground'],
+    ['Request started', 'text-foreground'],
+    ['{"level":"info","msg":"error"', 'text-red-600'],
+    ['{"level":"trace","msg":"warning threshold approaching"}', 'text-yellow-600'],
+    ['{"msg":"error reading response"}', 'text-red-600'],
+    ['{"level":42,"msg":"error reading response"}', 'text-red-600'],
+    ['{"level":null,"msg":"debug details"}', 'text-muted-foreground'],
+    ['["error"]', 'text-red-600'],
+    ['"warning"', 'text-yellow-600'],
+    ['null', 'text-foreground'],
+  ])('preserves text fallback for %s', (line, color) => {
+    mockedUseTaskLogs.mockReturnValue({
+      logs: [line],
+      isStreaming: false,
+      isLive: false,
+      error: null,
+      refetch: vi.fn(),
+      clear: vi.fn(),
+    })
+
+    render(<StructuredLogViewer taskId="task-1" />)
+    expect(screen.getByTestId('log-line')).toHaveClass(color)
+  })
+
   it('filters logs based on search input', async () => {
     mockedUseTaskLogs.mockReturnValue({
       logs: ['[INFO] Starting process', '[ERROR] Something failed', '[DEBUG] Trace info'],
