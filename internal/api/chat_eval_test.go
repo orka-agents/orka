@@ -234,21 +234,27 @@ func TestChatEvalProviderRefExtraction(t *testing.T) {
 
 // TestChatEvalInjectedDirectivesReferenceExistingProviders checks text that
 // HandleChat adds to the user's message. Those directives are mandatory for the
-// model, so every Provider they name must exist in the namespace.
+// model, so every Provider they name must exist in the namespace. Without a
+// selected agent, the message must reach the model unchanged.
 func TestChatEvalInjectedDirectivesReferenceExistingProviders(t *testing.T) {
 	tests := []struct {
-		name        string
-		req         ChatRequest
-		knownDefect string
+		name          string
+		req           ChatRequest
+		wantDirective bool
 	}{
 		{
-			name: "runtime agent hint",
-			req:  ChatRequest{Message: "refactor the auth middleware in https://github.com/acme/api", AgentRef: "coder"},
+			name:          "runtime agent hint",
+			req:           ChatRequest{Message: "refactor the auth middleware in https://github.com/acme/api", AgentRef: "coder"},
+			wantDirective: true,
 		},
 		{
-			name:        "issue workflow",
-			req:         ChatRequest{Message: "pick up https://github.com/acme/api/issues/42 and open a PR for it"},
-			knownDefect: `the issue-workflow directive hard-codes providerRef="copilot" instead of an available Provider`,
+			name:          "non-runtime agent hint",
+			req:           ChatRequest{Message: "review the design doc at https://example.com/design.md", AgentRef: "reviewer"},
+			wantDirective: true,
+		},
+		{
+			name: "issue request without an agent",
+			req:  ChatRequest{Message: "pick up https://github.com/acme/api/issues/42 and open a PR for it"},
 		},
 	}
 	for _, tt := range tests {
@@ -260,6 +266,10 @@ func TestChatEvalInjectedDirectivesReferenceExistingProviders(t *testing.T) {
 			content := messages[len(messages)-1].Content
 			require.True(t, strings.HasSuffix(content, tt.req.Message), "user message was not preserved: %q", content)
 			injected := strings.TrimSuffix(content, tt.req.Message)
+			if !tt.wantDirective {
+				require.Empty(t, injected, "HandleChat rewrote a message that selects no agent")
+				return
+			}
 			require.NotEmpty(t, strings.TrimSpace(injected), "expected HandleChat to inject a directive")
 
 			var providers corev1alpha1.ProviderList
@@ -274,7 +284,7 @@ func TestChatEvalInjectedDirectivesReferenceExistingProviders(t *testing.T) {
 					missing = append(missing, ref)
 				}
 			}
-			expectChatEvalCheck(t, len(missing) == 0, "injected directive names missing Providers "+strings.Join(missing, ","), tt.knownDefect)
+			require.Empty(t, missing, "injected directive names Providers that do not exist")
 		})
 	}
 }

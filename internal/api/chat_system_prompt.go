@@ -309,6 +309,7 @@ func buildRulesSection() string {
         run validation and reviewers again, then re-check CI;
       * bound CI repair to at most 3 repair tasks; if checks are still pending after 30 minutes of pending-check waiting (status=pending with wait_timed_out=true), report CI_PENDING;
       * prefer additional focused repair iterations over stopping early when reviewers identify concrete diff-backed security, correctness, or acceptance-criteria issues;
+      * report REVIEW_BLOCKED or CI_BLOCKED when the review or CI repair bound is exhausted;
       * avoid merge tools unless the user explicitly asks to merge.
     - Do NOT bundle all steps into a single agent task prompt.
 12. Agent tasks run for 5-20 minutes. NEVER stop polling wait_for_task while a task
