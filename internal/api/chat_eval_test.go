@@ -347,11 +347,10 @@ func TestChatEvalModelDecisionsFailFast(t *testing.T) {
 			args: `{"name":"planner","providerRef":"openai","coordination":{"enabled":true}}`,
 		},
 		{
-			name:        "create agent with a missing provider",
-			tool:        "create_agent",
-			args:        `{"name":"planner","providerRef":"copilot","coordination":{"enabled":true}}`,
-			wantReject:  true,
-			knownDefect: "create_agent accepts a providerRef that names no Provider; tasks using the Agent fail later",
+			name:       "create agent with a missing provider",
+			tool:       "create_agent",
+			args:       `{"name":"planner","providerRef":"copilot","coordination":{"enabled":true}}`,
+			wantReject: true,
 		},
 		{
 			name:       "create an agent that already exists",
@@ -365,11 +364,10 @@ func TestChatEvalModelDecisionsFailFast(t *testing.T) {
 			args: `{"name":"refactor-auth","agentRef":"coder","prompt":"refactor the auth middleware","timeout":"20m"}`,
 		},
 		{
-			name:        "agent task for a non-runtime agent",
-			tool:        "create_agent_task",
-			args:        `{"name":"review-doc","agentRef":"reviewer","prompt":"review the design doc","timeout":"20m"}`,
-			wantReject:  true,
-			knownDefect: "create_agent_task accepts an Agent without a runtime; the controller fails the Task later",
+			name:       "agent task for a non-runtime agent",
+			tool:       "create_agent_task",
+			args:       `{"name":"review-doc","agentRef":"reviewer","prompt":"review the design doc","timeout":"20m"}`,
+			wantReject: true,
 		},
 	}
 	for _, tt := range tests {

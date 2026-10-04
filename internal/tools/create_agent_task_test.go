@@ -495,6 +495,33 @@ func TestCreateAgentTaskTool_Execute_PullRequestMetadata(t *testing.T) {
 	})
 }
 
+func TestCreateAgentTaskTool_Execute_RejectsAgentWithoutRuntime(t *testing.T) {
+	fc := newFakeClient(&corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "reviewer", Namespace: defaultNamespace},
+		Spec:       corev1alpha1.AgentSpec{ProviderRef: &corev1alpha1.ProviderReference{Name: testProviderOpenAI}},
+	})
+	ctx := newCreateAgentTaskToolCtx(fc)
+
+	result, err := (&CreateAgentTaskTool{}).Execute(ctx, json.RawMessage(`{"prompt":"Review the design","agentRef":"reviewer"}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	var response ChatToolResult
+	if err := json.Unmarshal([]byte(result), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Success || response.ErrorType != errTypeInvalidArgs || !strings.Contains(response.Suggestion, "create_ai_task") {
+		t.Fatalf("response = %#v, want invalid arguments pointing to create_ai_task", response)
+	}
+	var tasks corev1alpha1.TaskList
+	if err := fc.List(context.Background(), &tasks); err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks.Items) != 0 {
+		t.Fatalf("created %d Tasks, want none", len(tasks.Items))
+	}
+}
+
 func TestCreateAgentTaskTool_Execute_RejectsNonObjectWorkspace(t *testing.T) {
 	for _, workspace := range []string{`"repo"`, `["repo"]`, `null`} {
 		t.Run(workspace, func(t *testing.T) {
