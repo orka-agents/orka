@@ -190,7 +190,6 @@ func TestToolEvalRegistriesCoverKnownTools(t *testing.T) {
 func TestToolEvalMalformedArguments(t *testing.T) {
 	evalToolSandbox(t)
 	const (
-		ignoredName        = "the create_*_task schemas require name, but the tools ignore it and always generate one"
 		droppedWorkspace   = "a workspace that is not an object is ignored, so the Task runs without the repository"
 		modelStringAsName  = "a JSON-encoded model object is stored as the model name"
 		droppedCoordinator = "a coordination value that is not an object is ignored, so the Agent is created without coordination"
@@ -201,11 +200,7 @@ func TestToolEvalMalformedArguments(t *testing.T) {
 		"chat/create_agent: model as JSON string":                modelStringAsName,
 		"chat/create_agent: runtime as JSON string":              droppedRuntime,
 		"chat/update_agent: model as JSON string":                modelStringAsName,
-		"chat/create_container_task: empty object":               ignoredName,
-		"chat/create_container_task: null":                       ignoredName,
 		"chat/create_container_task: workspace as JSON string":   droppedWorkspace,
-		"worker/create_container_task: empty object":             ignoredName,
-		"worker/create_container_task: null":                     ignoredName,
 		"worker/create_container_task: workspace as JSON string": droppedWorkspace,
 	}
 	wrongValue := map[string]string{
