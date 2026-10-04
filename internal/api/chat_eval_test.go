@@ -176,22 +176,19 @@ func TestChatEvalRequestContextReachesModel(t *testing.T) {
 			variant: ChatRequest{Message: message, AgentRef: "coder"},
 		},
 		{
-			name:        "non-runtime agent selection",
-			base:        ChatRequest{Message: message},
-			variant:     ChatRequest{Message: message, AgentRef: "reviewer"},
-			knownDefect: "HandleChat only tells the model about a selected agent when it has a runtime, but the prompt says to use create_ai_task with agentRef for non-runtime agents",
+			name:    "non-runtime agent selection",
+			base:    ChatRequest{Message: message},
+			variant: ChatRequest{Message: message, AgentRef: "reviewer"},
 		},
 		{
-			name:        "request namespace",
-			base:        ChatRequest{Message: message, Namespace: defaultNamespace},
-			variant:     ChatRequest{Message: message, Namespace: chatEvalNamespace},
-			knownDefect: `the model is never told the request namespace, yet the prompt says "use the namespace from the request or ask the user"; tools silently default to it`,
+			name:    "request namespace",
+			base:    ChatRequest{Message: message, Namespace: defaultNamespace},
+			variant: ChatRequest{Message: message, Namespace: chatEvalNamespace},
 		},
 		{
-			name:        "session provider",
-			base:        ChatRequest{Message: message, Provider: "openai"},
-			variant:     ChatRequest{Message: message, Provider: "secondary"},
-			knownDefect: `the prompt says "Use the same provider that this chat session is using" but lists providers without marking the session's`,
+			name:    "session provider",
+			base:    ChatRequest{Message: message, Provider: "openai"},
+			variant: ChatRequest{Message: message, Provider: "secondary"},
 		},
 	}
 	for _, tt := range tests {

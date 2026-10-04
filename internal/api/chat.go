@@ -391,6 +391,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	// Build system prompt
 	discoveryClient := newExternalToolClient(ch.client, ch.kubeClient, userInfo, namespace, ch.watchNamespace, ch.enforceNamespaceIsolation, ch.gatewayEventStore)
 	promptBuilder := NewSystemPromptBuilder(externalToolDiscoveryClient{Client: discoveryClient}, namespace, ch.config.RuntimeAvailability)
+	promptBuilder.SetChatProvider(providerInfo.Name)
 	systemPrompt, err := promptBuilder.BuildSystemPrompt(ctx, req.SystemPrompt)
 	if err != nil {
 		chatLog.Error(err, "failed to build system prompt")
@@ -409,8 +410,8 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	}
 	persistedCount := len(messages)
 
-	// Append user message — if an agentRef is set and the agent has a runtime,
-	// prepend context so the LLM knows to use create_agent_task.
+	// Append user message — if an agentRef is set, prepend context so the LLM
+	// knows which agent the user selected and which task tool runs it.
 	userContent := req.Message
 	if req.AgentRef != "" {
 		agentObj := &corev1alpha1.Agent{}
@@ -418,6 +419,9 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 			if agentObj.Spec.Runtime != nil {
 				userContent = fmt.Sprintf("[Using agent %q which has runtime %q — use create_agent_task with agent=%q for this request.]\n\n%s",
 					req.AgentRef, agentObj.Spec.Runtime.Type, req.AgentRef, req.Message)
+			} else {
+				userContent = fmt.Sprintf("[Using agent %q which has no runtime — use create_ai_task with agentRef=%q for this request.]\n\n%s",
+					req.AgentRef, req.AgentRef, req.Message)
 			}
 		}
 	}

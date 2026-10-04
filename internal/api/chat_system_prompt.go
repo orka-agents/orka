@@ -27,6 +27,7 @@ type SystemPromptBuilder struct {
 	client              client.Client
 	namespace           string
 	runtimeAvailability ACPRuntimeAvailability
+	chatProvider        string
 }
 
 // NewSystemPromptBuilder creates a new SystemPromptBuilder.
@@ -36,6 +37,12 @@ func NewSystemPromptBuilder(c client.Client, namespace string, availability ACPR
 		namespace:           namespace,
 		runtimeAvailability: availability,
 	}
+}
+
+// SetChatProvider names the Provider serving this chat session so the prompt
+// can tell the model which provider to reuse.
+func (b *SystemPromptBuilder) SetChatProvider(name string) {
+	b.chatProvider = name
 }
 
 // BuildSystemPrompt assembles the full system prompt with dynamic context.
@@ -269,11 +276,12 @@ func buildRulesSection() string {
 2. Use create_ai_task ONLY for work that requires a SEPARATE long-running LLM job
    (e.g., code generation, detailed code review, multi-file analysis). Do NOT
    create an AI task just to answer a question — answer it yourself directly.
-3. When creating an ai task, always set providerRef to an available provider name
-   (e.g., "openai"). Use the same provider that this chat session is using.
+3. When creating an ai task, always set providerRef to an available provider name.
+   Use this chat session's provider (chat_provider in the Runtime line) unless the user asks for another.
 4. After creating a task, IMMEDIATELY call wait_for_task then fetch_task_output
    in the SAME turn — do not stop to narrate between tool calls.
-5. Never guess namespace — use the namespace from the request or ask the user.
+5. Use the current namespace (namespace in the Runtime line) unless the user names another.
+   Tool calls that omit namespace run there, so do not ask which namespace to use.
 6. Provide clear summaries of what you did, what succeeded, and what failed.
 7. If a task fails, check the error and try a different approach before giving up.
 8. Do not create more tasks than necessary.
@@ -427,8 +435,12 @@ func (b *SystemPromptBuilder) buildDynamicContext(ctx context.Context) (agentsSe
 		runtimeInfo = strings.Join(availableRuntimes, ", ")
 	}
 
-	providersSection = fmt.Sprintf("Runtime: providers=[%s] | agents=%d | tools=%d | container=yes | agent_runtimes=[%s]\n",
-		strings.Join(providerNames, ", "), len(agentList.Items), len(toolList.Items)+5, runtimeInfo)
+	sessionInfo := fmt.Sprintf("namespace=%s", b.namespace)
+	if b.chatProvider != "" {
+		sessionInfo += fmt.Sprintf(" | chat_provider=%s", b.chatProvider)
+	}
+	providersSection = fmt.Sprintf("Runtime: %s | providers=[%s] | agents=%d | tools=%d | container=yes | agent_runtimes=[%s]\n",
+		sessionInfo, strings.Join(providerNames, ", "), len(agentList.Items), len(toolList.Items)+5, runtimeInfo)
 
 	// Fetch skills
 	var skillList corev1alpha1.SkillList
