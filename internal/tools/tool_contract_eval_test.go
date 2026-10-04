@@ -119,6 +119,23 @@ var evalToolClusters = map[string]func() client.Client{
 
 const evalPlaceholder = "eval"
 
+// evalToolContextFor gives chat tools the chat executor's context and worker
+// tools the narrower context a worker builds, so each takes its real path.
+func evalToolContextFor(label string, fc client.Client) context.Context {
+	if label == "worker" {
+		return WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace, ExecutionMode: executionmode.HarnessV2})
+	}
+	return evalToolContext(fc)
+}
+
+// evalRegistryExecute runs a tool through Registry.Execute, the path chat and
+// worker calls take, converting a panic into a reported failure.
+func evalRegistryExecute(ctx context.Context, registry *Registry, name, args string) (result string, panicked any, err error) {
+	defer func() { panicked = recover() }()
+	result, err = registry.Execute(ctx, name, json.RawMessage(args))
+	return result, nil, err
+}
+
 // evalToolContext is the chat tool context, with the execution mode a real
 // installation selects so runtime Agents can be created.
 func evalToolContext(fc client.Client) context.Context {
@@ -189,20 +206,11 @@ func TestToolEvalRegistriesCoverKnownTools(t *testing.T) {
 // the model as an unknown tool.
 func TestToolEvalMalformedArguments(t *testing.T) {
 	evalToolSandbox(t)
-	const (
-		droppedWorkspace   = "a workspace that is not an object is ignored, so the Task runs without the repository"
-		modelStringAsName  = "a JSON-encoded model object is stored as the model name"
-		droppedCoordinator = "a coordination value that is not an object is ignored, so the Agent is created without coordination"
-		droppedRuntime     = "a runtime value that is not an object is ignored, so a runtime Agent is created as a plain AI Agent"
-	)
-	knownDefects := map[string]string{
-		"chat/create_agent: coordination as JSON string":         droppedCoordinator,
-		"chat/create_agent: model as JSON string":                modelStringAsName,
-		"chat/create_agent: runtime as JSON string":              droppedRuntime,
-		"chat/update_agent: model as JSON string":                modelStringAsName,
-		"chat/create_container_task: workspace as JSON string":   droppedWorkspace,
-		"worker/create_container_task: workspace as JSON string": droppedWorkspace,
-	}
+	// Worker tools resolve their parent Task from the environment; the seeded
+	// cluster holds it.
+	t.Setenv(envOrkaTaskName, evalPlaceholder)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	knownDefects := map[string]string{}
 	wrongValue := map[string]string{
 		"string": `{"k":"v"}`, "integer": `"many"`, "number": `"many"`, "boolean": `"yes"`, "array": `"a,b"`, "object": `"{\"k\":\"v\"}"`,
 	}
@@ -244,8 +252,7 @@ func TestToolEvalMalformedArguments(t *testing.T) {
 			for _, input := range inputNames {
 				for _, cluster := range []string{"empty", "seeded"} {
 					fc := evalToolClusters[cluster]()
-					fresh, _ := evalToolRegistries(fc)[label].Get(name)
-					result, panicked, err := evalToolExecute(evalToolContext(fc), fresh, inputs[input])
+					result, panicked, err := evalRegistryExecute(evalToolContextFor(label, fc), evalToolRegistries(fc)[label], name, inputs[input])
 					key := fmt.Sprintf("%s/%s: %s", label, name, input)
 					failed, message := evalToolFailure(result, err)
 					switch {
@@ -290,8 +297,7 @@ func evalObjectStringHandling(label, name string, required []any, properties map
 			}
 			raw, _ := json.Marshal(args)
 			fc := evalToolClusters[cluster]()
-			tool, _ := evalToolRegistries(fc)[label].Get(name)
-			result, panicked, err := evalToolExecute(evalToolContext(fc), tool, string(raw))
+			result, panicked, err := evalRegistryExecute(evalToolContextFor(label, fc), evalToolRegistries(fc)[label], name, string(raw))
 			failed, _ := evalToolFailure(result, err)
 			return failed || panicked != nil, evalClusterSnapshot(fc)
 		}
@@ -363,7 +369,8 @@ func evalObjectPayload(prop string, schema map[string]any) map[string]any {
 	return payload
 }
 
-// evalClusterSnapshot renders the Agents and Tasks a tool call left behind.
+// evalClusterSnapshot renders the specs of the Agents and Tasks a tool call
+// left behind. Names are left out because worker tools add random suffixes.
 func evalClusterSnapshot(fc client.Client) string {
 	var agents corev1alpha1.AgentList
 	var tasks corev1alpha1.TaskList
@@ -372,11 +379,11 @@ func evalClusterSnapshot(fc client.Client) string {
 	parts := make([]string, 0, len(agents.Items)+len(tasks.Items))
 	for i := range agents.Items {
 		spec, _ := json.Marshal(agents.Items[i].Spec)
-		parts = append(parts, "agent "+agents.Items[i].Name+" "+string(spec))
+		parts = append(parts, "agent "+string(spec))
 	}
 	for i := range tasks.Items {
 		spec, _ := json.Marshal(tasks.Items[i].Spec)
-		parts = append(parts, "task "+tasks.Items[i].Name+" "+string(spec))
+		parts = append(parts, "task "+string(spec))
 	}
 	sort.Strings(parts)
 	return strings.Join(parts, "\n")

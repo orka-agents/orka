@@ -76,6 +76,11 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 	if name == "" {
 		return ChatToolErrorResult("invalid_arguments", "name is required", "Provide a name for the agent")
 	}
+	for _, key := range []string{"coordination", runtimeField} {
+		if r, ok := requireChatObjectArg(a, key); !ok {
+			return r, nil
+		}
+	}
 
 	namespace := chatGetStringArgDefault(a, namespaceField, tc.Namespace)
 	if r, ok := checkChatNamespaceScope(tc, namespace); !ok {
@@ -136,6 +141,9 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 			} else {
 				agent.Spec.Model = &corev1alpha1.ModelConfig{Name: modelName}
 			}
+		case nil:
+		default:
+			return ChatToolErrorResult("invalid_arguments", "model must be an object or a provider/model string", "Pass model as a JSON object, or as a string such as openai/gpt-4.1")
 		}
 	}
 

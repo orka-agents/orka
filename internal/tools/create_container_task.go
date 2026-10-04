@@ -80,6 +80,9 @@ func (t *CreateContainerTaskTool) Execute(ctx context.Context, args json.RawMess
 		return r, nil
 	}
 
+	if r, ok := requireChatObjectArg(a, workspaceField); !ok {
+		return r, nil
+	}
 	task := buildContainerTask(a)
 	if err := applyContainerPriorTaskWorkspace(ctx, tc.Client, namespace, task); err != nil {
 		return classifyChatK8sErr(err)
@@ -145,6 +148,9 @@ func (t *CreateContainerTaskTool) executeCoordination(ctx context.Context, args 
 		return "", fmt.Errorf("failed to get parent task: %w", err)
 	}
 
+	if r, ok := requireChatObjectArg(a, workspaceField); !ok {
+		return r, nil
+	}
 	task := buildContainerTask(a)
 	if err := applyContainerPriorTaskWorkspace(ctx, t.k8sClient, namespace, task); err != nil {
 		return classifyChatK8sErr(err)

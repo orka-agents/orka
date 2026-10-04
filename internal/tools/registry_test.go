@@ -327,3 +327,37 @@ func TestRegisterBuiltinTools(t *testing.T) {
 		}
 	}
 }
+
+func TestRegistryExecuteDecodesStringifiedObjectArgs(t *testing.T) {
+	var received string
+	r := NewRegistry()
+	r.Register(&mockTool{
+		name:       "configure",
+		parameters: json.RawMessage(`{"type":"object","properties":{"workspace":{"type":"object"},"label":{"type":"string"}}}`),
+		executeFunc: func(_ context.Context, args json.RawMessage) (string, error) {
+			received = string(args)
+			return "ok", nil
+		},
+	})
+
+	tests := []struct {
+		name string
+		args string
+		want string
+	}{
+		{name: "object sent as a string", args: `{"workspace":"{\"gitRepo\":\"https://github.com/acme/api\",\"depth\":9007199254740993}"}`, want: `{"workspace":{"gitRepo":"https://github.com/acme/api","depth":9007199254740993}}`},
+		{name: "string property left alone", args: `{"label":"{\"k\":\"v\"}"}`, want: `{"label":"{\"k\":\"v\"}"}`},
+		{name: "string that is not an object", args: `{"workspace":"main"}`, want: `{"workspace":"main"}`},
+		{name: "object passed through", args: `{"workspace":{"gitRepo":"x"}}`, want: `{"workspace":{"gitRepo":"x"}}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := r.Execute(context.Background(), "configure", json.RawMessage(tt.args)); err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			if received != tt.want {
+				t.Errorf("tool received %s, want %s", received, tt.want)
+			}
+		})
+	}
+}
