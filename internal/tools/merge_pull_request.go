@@ -96,6 +96,9 @@ func (t *MergePullRequestTool) Execute(ctx context.Context, argsJSON json.RawMes
 	if args.MergeMethod == "" {
 		args.MergeMethod = defaultMergeMethod
 	}
+	if err := validateMergeMethod(args.MergeMethod); err != nil {
+		return "", err
+	}
 
 	// Determine namespace from environment
 	ns := os.Getenv(envOrkaTaskNamespace)
@@ -313,6 +316,16 @@ func checkGitHubCIStatus(ctx context.Context, token, owner, repo, sha, baseURL s
 }
 
 // mergeGitHubPR merges a pull request via the GitHub REST API.
+// validateMergeMethod rejects a merge method GitHub does not support before
+// any GitHub call is made.
+func validateMergeMethod(method string) error {
+	switch method {
+	case mergeMethodMerge, defaultMergeMethod, mergeMethodRebase:
+		return nil
+	}
+	return fmt.Errorf("invalid merge_method %q: must be %s, %s, or %s", method, mergeMethodMerge, defaultMergeMethod, mergeMethodRebase)
+}
+
 func mergeGitHubPR(ctx context.Context, token, owner, repo string, prNumber int, mergeMethod, commitTitle, commitMessage, baseURL string) (string, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/merge", baseURL, owner, repo, prNumber)
 

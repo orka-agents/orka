@@ -331,6 +331,14 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 	} else if strings.TrimSpace(a.SystemPrompt) == "" {
 		return "", fmt.Errorf("systemPrompt is required")
 	}
+	if a.Model != nil {
+		if a.Model.ContextWindow != nil && *a.Model.ContextWindow < 1 {
+			return "", fmt.Errorf("model.contextWindow must be at least 1")
+		}
+		if a.Model.MaxTokens != nil && *a.Model.MaxTokens < 1 {
+			return "", fmt.Errorf("model.maxTokens must be at least 1")
+		}
+	}
 	effectiveModel := a.Model
 	if runtimeType != string(corev1alpha1.AgentRuntimeOpencode) &&
 		(effectiveModel == nil || strings.TrimSpace(effectiveModel.Name) == "") {

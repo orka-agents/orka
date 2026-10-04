@@ -740,7 +740,6 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 				tool, ctx := workerTool("create_agent", newFakeClient(&corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: defaultNamespace}}))
 				return evalRejects(ctx, tool, `{"role":"coder","systemPrompt":"s","model":{"name":"m","maxTokens":0}}`, "maxTokens")
 			},
-			knownDefect: "worker create_agent stores maxTokens below 1, and the Agent CRD sets no minimum for it",
 		},
 		{
 			name:   "worker delegate_task workspace",
@@ -822,7 +821,6 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 					},
 				)
 			},
-			knownDefect: "merge tools forward an unsupported merge_method to GitHub instead of rejecting it",
 		},
 		{
 			name:   "worker post_review_comment event",
@@ -859,9 +857,8 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			},
 		},
 		{
-			name:        "worker request_approval severity",
-			limits:      []string{"worker/request_approval.severity enum"},
-			knownDefect: "request_approval forwards an unsupported severity to the approval emitter instead of rejecting it",
+			name:   "worker request_approval severity",
+			limits: []string{"worker/request_approval.severity enum"},
 			check: func(t *testing.T) (bool, string) {
 				var emitted []approvals.ApprovalTarget
 				tool, _ := workerTool("request_approval", newFakeClient())
@@ -892,9 +889,8 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			},
 		},
 		{
-			name:        "worker update_plan progress",
-			limits:      []string{"worker/update_plan.progress_pct maximum", "worker/update_plan.progress_pct minimum"},
-			knownDefect: "update_plan sends an out-of-range progress_pct to the controller instead of rejecting or clamping it",
+			name:   "worker update_plan progress",
+			limits: []string{"worker/update_plan.progress_pct maximum", "worker/update_plan.progress_pct minimum"},
 			check: func(t *testing.T) (bool, string) {
 				controller := newEvalHTTPStub(t)
 				t.Setenv(envOrkaControllerURL, controller.URL)
