@@ -9,9 +9,12 @@ package api
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"slices"
 	"strings"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	chattools "github.com/orka-agents/orka/internal/tools"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -28,7 +31,19 @@ type SystemPromptBuilder struct {
 	namespace           string
 	runtimeAvailability ACPRuntimeAvailability
 	chatProvider        string
+	// availableChatTools, when set, holds the only chat tools offered on the
+	// turn; nil means every chat tool is offered.
+	availableChatTools map[string]bool
 }
+
+// chatToolMentionPatterns match the chat tool names a prompt section refers to.
+var chatToolMentionPatterns = func() map[string]*regexp.Regexp {
+	patterns := make(map[string]*regexp.Regexp)
+	for _, name := range chattools.ChatToolNames() {
+		patterns[name] = regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
+	}
+	return patterns
+}()
 
 // NewSystemPromptBuilder creates a new SystemPromptBuilder.
 func NewSystemPromptBuilder(c client.Client, namespace string, availability ACPRuntimeAvailability) *SystemPromptBuilder {
@@ -45,6 +60,29 @@ func (b *SystemPromptBuilder) SetChatProvider(name string) {
 	b.chatProvider = name
 }
 
+// SetAvailableChatTools limits the prompt to the chat tools offered on this
+// turn, such as for a caller whose token allows only some tools. Guidance
+// sections that name any other chat tool are left out, so the model is never
+// told to call a tool it does not have.
+func (b *SystemPromptBuilder) SetAvailableChatTools(names []string) {
+	b.availableChatTools = make(map[string]bool, len(names))
+	for _, name := range names {
+		b.availableChatTools[name] = true
+	}
+}
+
+// writeSection adds a guidance section unless it names an unavailable chat tool.
+func (b *SystemPromptBuilder) writeSection(sb *strings.Builder, section string) {
+	if b.availableChatTools != nil {
+		for name, pattern := range chatToolMentionPatterns {
+			if !b.availableChatTools[name] && pattern.MatchString(section) {
+				return
+			}
+		}
+	}
+	sb.WriteString(section)
+}
+
 // BuildSystemPrompt assembles the full system prompt with dynamic context.
 func (b *SystemPromptBuilder) BuildSystemPrompt(ctx context.Context, userSystemPrompt string) (string, error) {
 	agentsSection, toolsSection, providersSection, skillsSection, err := b.buildDynamicContext(ctx)
@@ -55,13 +93,20 @@ func (b *SystemPromptBuilder) BuildSystemPrompt(ctx context.Context, userSystemP
 	var sb strings.Builder
 
 	sb.WriteString(buildIdentitySection())
-	sb.WriteString(buildCapabilitiesSection())
-	sb.WriteString(buildBehaviorSection())
-	sb.WriteString(buildToolCallStyleSection())
-	sb.WriteString(buildTaskTypesSection())
-	sb.WriteString(buildValidationSection())
-	sb.WriteString(buildCoordinationSection())
-	sb.WriteString(buildSchedulingSection())
+	for _, section := range []string{
+		buildCapabilitiesSection(),
+		buildBehaviorSection(),
+		buildToolCallStyleSection(),
+		b.taskTypesSection(),
+		buildValidationSection(),
+		buildCoordinationSection(),
+		buildSchedulingSection(),
+	} {
+		b.writeSection(&sb, section)
+	}
+	if b.availableChatTools != nil {
+		sb.WriteString(b.availableChatToolsSection())
+	}
 
 	// Dynamic context
 	sb.WriteString("<available_agents>\n")
@@ -81,8 +126,8 @@ func (b *SystemPromptBuilder) BuildSystemPrompt(ctx context.Context, userSystemP
 		sb.WriteString("</available_skills>\n\n")
 	}
 
-	sb.WriteString(buildRulesSection())
-	sb.WriteString(buildExamplesSection())
+	b.writeSection(&sb, buildRulesSection())
+	b.writeSection(&sb, buildExamplesSection())
 
 	if userSystemPrompt != "" {
 		sb.WriteString("\n<user_instructions>\n")
@@ -91,6 +136,19 @@ func (b *SystemPromptBuilder) BuildSystemPrompt(ctx context.Context, userSystemP
 	}
 
 	return sb.String(), nil
+}
+
+func (b *SystemPromptBuilder) availableChatToolsSection() string {
+	names := make([]string, 0, len(b.availableChatTools))
+	for name := range b.availableChatTools {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	if len(names) == 0 {
+		return "<available_chat_tools>\nThis conversation cannot use Orka tools. Answer directly.\n</available_chat_tools>\n\n"
+	}
+	return "<available_chat_tools>\nThis conversation can use only these Orka tools: " + strings.Join(names, ", ") +
+		". Answer other requests directly, or explain that the tool they need is not available.\n</available_chat_tools>\n\n"
 }
 
 func buildIdentitySection() string {
@@ -142,28 +200,29 @@ Keep narration brief and value-dense; avoid repeating obvious steps.
 `
 }
 
-func buildTaskTypesSection() string {
-	var sb strings.Builder
-	sb.WriteString(`<task_types>
-- container: Run a command in a container. Use create_container_task.
+// taskTypeParts describes each task type separately so a caller offered only
+// some task tools still gets guidance for the ones it has.
+func taskTypeParts() []string {
+	return []string{
+		`- container: Run a command in a container. Use create_container_task.
   PREFERRED for: shell commands, CLI tools, scripts, data processing.
-`)
-	sb.WriteString(`  Common images (Chainguard, hardened, non-root):
+  Common images (Chainguard, hardened, non-root):
     • bash/shell: "cgr.dev/chainguard/bash:latest"
     • python: "cgr.dev/chainguard/python:latest-dev" (includes pip)
     • node: "cgr.dev/chainguard/node:latest-dev" (includes npm)
     • go: "cgr.dev/chainguard/go:latest"
     • curl: "cgr.dev/chainguard/curl:latest"
     • git: "cgr.dev/chainguard/git:latest-dev"
-`)
-	sb.WriteString(`  All containers run as non-root with read-only root filesystem.
+  All containers run as non-root with read-only root filesystem.
   Writable paths: /tmp, /home/nonroot. Do NOT assume root access.
-- ai: Run an LLM-powered task. Use create_ai_task with a providerRef.
+`,
+		`- ai: Run an LLM-powered task. Use create_ai_task with a providerRef.
   Use for: reasoning, analysis, content generation, code review, summarization,
   answering questions about data. The AI worker has built-in tools (code_exec,
   web_search, file_read, web_fetch, file_write) but runs in a minimal container without CLI tools.
   Do NOT use for infrastructure commands.
-- agent: Run an external CLI runtime (Copilot, Claude Code, Codex, OpenCode).
+`,
+		`- agent: Run an external CLI runtime (Copilot, Claude Code, Codex, OpenCode).
   Use create_agent_task only for Agents that have runtime listed in available_agents.
   Use for: code changes in a git repo, multi-file refactoring.
   IMPORTANT: When the user specifies an agent (via --agent or agentRef) that has a
@@ -183,10 +242,24 @@ func buildTaskTypesSection() string {
   Agent tasks need more time than AI tasks. Set timeout to at least 15m.
   Do NOT use create_container_task or create_ai_task for runtime agents.
   Do NOT use create_agent_task for non-runtime agents.
-</task_types>
+`,
+	}
+}
 
-`)
-	return sb.String()
+func buildTaskTypesSection() string {
+	return "<task_types>\n" + strings.Join(taskTypeParts(), "") + "</task_types>\n\n"
+}
+
+// taskTypesSection describes the task types whose tools are offered.
+func (b *SystemPromptBuilder) taskTypesSection() string {
+	var parts strings.Builder
+	for _, part := range taskTypeParts() {
+		b.writeSection(&parts, part)
+	}
+	if parts.Len() == 0 {
+		return ""
+	}
+	return "<task_types>\n" + parts.String() + "</task_types>\n\n"
 }
 
 func buildValidationSection() string {

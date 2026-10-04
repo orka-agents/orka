@@ -9,6 +9,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -753,5 +754,34 @@ func TestBuildDynamicContextSkillListError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "listing skills") {
 		t.Errorf("error = %q, expected 'listing skills' message", err.Error())
+	}
+}
+
+func TestBuildSystemPromptLimitsGuidanceToAvailableChatTools(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+	full, err := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{}).BuildSystemPrompt(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(full, "<available_chat_tools>") {
+		t.Error("unrestricted prompt must not list available chat tools")
+	}
+
+	b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
+	b.SetAvailableChatTools([]string{"create_container_task", "wait_for_task", "fetch_task_output"})
+	limited, err := b.BuildSystemPrompt(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(limited, "- container:") || !strings.Contains(limited, "Writable paths") {
+		t.Error("container guidance must stay when create_container_task is offered")
+	}
+	for _, unavailable := range []string{"create_ai_task", "create_agent_task", "create_agent"} {
+		if regexp.MustCompile(`\b` + unavailable + `\b`).MatchString(limited) {
+			t.Errorf("limited prompt names unavailable tool %s", unavailable)
+		}
+	}
+	if !strings.Contains(limited, "only these Orka tools: create_container_task, fetch_task_output, wait_for_task") {
+		t.Error("limited prompt must list the offered chat tools")
 	}
 }

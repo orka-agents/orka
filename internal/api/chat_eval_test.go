@@ -219,7 +219,6 @@ func TestChatEvalScopedCallerPromptMatchesTools(t *testing.T) {
 		{
 			name:         "read-only tools allowed",
 			allowedTools: []string{"list_tasks", "list_agents", "check_task_progress", "fetch_task_output"},
-			knownDefect:  "the system prompt is static, so a token's allowedTools removes tools the prompt still tells the model to call",
 		},
 	}
 	for _, tt := range tests {
