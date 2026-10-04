@@ -80,11 +80,13 @@ func TestScannerEvalIgnoreInstructionsPattern(t *testing.T) {
 // Scanned repositories and their findings are attacker-controllable, and the
 // patch stage edits files that Orka publishes.
 func TestScannerEvalPromptsTreatRepositoryContentAsUntrusted(t *testing.T) {
-	const knownDefect = "no scanner prompt tells the model to ignore instructions embedded in repository content; the review prompt labels inlined repository excerpts as TRUSTED context"
 	for name, prompt := range scannerEvalPrompts() {
 		t.Run(name, func(t *testing.T) {
 			expectScannerEvalCheck(t, scannerEvalIgnoreInstructionsPattern.MatchString(prompt),
-				"prompt has no instruction to ignore directives inside repository content", knownDefect)
+				"prompt has no instruction to ignore directives inside repository content", "")
+			if regexp.MustCompile(`\bTRUSTED\b`).MatchString(prompt) {
+				t.Errorf("prompt labels content as trusted")
+			}
 		})
 	}
 }
