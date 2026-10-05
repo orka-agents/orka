@@ -709,6 +709,8 @@ func TestChatCreateAgentTool_Execute_RejectsWrongTypedCoordination(t *testing.T)
 		{`{"enabled":true,"allowedAgents":{"name":"coder"}}`, "coordination.allowedAgents"},
 		{`{"enabled":true,"maxDepth":"2"}`, "coordination.maxDepth"},
 		{`{"enabled":true,"maxConcurrentChildren":1.5}`, "coordination.maxConcurrentChildren"},
+		{`{"enabled":true,"maxConcurrentChildren":4294967297}`, "coordination.maxConcurrentChildren"},
+		{`{"enabled":true,"maxDepth":4294967298}`, "coordination.maxDepth"},
 		{`{"enabled":"true"}`, "coordination.enabled"},
 	} {
 		r, agents := run(tt.coordination)

@@ -490,8 +490,10 @@ func parseCoordinationConfig(a map[string]any, agent *corev1alpha1.Agent) (strin
 		if value == nil {
 			continue
 		}
+		// Out-of-range values would wrap when narrowed to int32, possibly into
+		// the range the Agent CRD accepts.
 		number, ok := value.(float64)
-		if !ok || number != math.Trunc(number) {
+		if !ok || number != math.Trunc(number) || number < math.MinInt32 || number > math.MaxInt32 {
 			return invalid(limit.field, "a whole number")
 		}
 		*limit.target = int32(number)
