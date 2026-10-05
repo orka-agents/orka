@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -262,6 +263,8 @@ func TestChatEvalScopedCallerPromptMatchesTools(t *testing.T) {
 			for _, tool := range req.Tools {
 				offered[tool.Name] = true
 			}
+			require.Equal(t, slices.Sorted(slices.Values(tt.allowedTools)), slices.Sorted(maps.Keys(offered)),
+				"offered chat tools must match the token's allowedTools")
 			var unavailable []string
 			for _, name := range chattools.ChatToolNames() {
 				if !offered[name] && regexp.MustCompile(`\b`+name+`\b`).MatchString(req.SystemPrompt) {
