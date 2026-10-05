@@ -56,6 +56,7 @@ func TestNormalizeArgTypes(t *testing.T) {
 		{name: "underflowing exponent", args: `{"count":"1e-400"}`, wantErr: "count must be a whole number, got a fraction"},
 		{name: "overflowing number", args: `{"ratio":"1e400"}`, wantErr: "ratio must be a number, got a non-numeric string"},
 		{name: "non-JSON number syntax", args: `{"ratio":"1/2"}`, wantErr: "ratio must be a number, got a non-numeric string"},
+		{name: "leading zero is not a JSON number", args: `{"count":"01"}`, wantErr: "count must be a whole number, got a non-numeric string"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
