@@ -32,6 +32,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -75,14 +76,32 @@ func evalToolRegistries(fc client.Client) map[string]*Registry {
 			brokered.Register(tool)
 		}
 	}
+	evalGuardWebClients(worker, brokered)
 	return map[string]*Registry{"chat": chat, "worker": worker, "brokered": brokered}
+}
+
+// evalGuardWebClients gives the web tools a client that uses
+// http.DefaultTransport, which evalToolSandbox guards. Their own clients dial
+// public endpoints directly and would bypass the guard.
+func evalGuardWebClients(registries ...*Registry) {
+	for _, registry := range registries {
+		for _, name := range registry.Names() {
+			tool, _ := registry.Get(name)
+			switch web := tool.(type) {
+			case *WebSearchTool:
+				web.client = &http.Client{Timeout: 10 * time.Second}
+			case *WebFetchTool:
+				web.client = &http.Client{Timeout: 10 * time.Second}
+			}
+		}
+	}
 }
 
 // evalToolSandbox clears forge credentials and replaces http.DefaultTransport
 // with a clone that dials only loopback addresses, where test servers listen,
-// so a tool that gets past validation cannot reach a real service. Tools that
-// clone the default transport inherit the guard. The test fails if any dial was
-// blocked.
+// so a tool that gets past validation cannot reach a real service. Every tool
+// in evalToolRegistries sends HTTP through http.DefaultTransport (see
+// evalGuardWebClients). The test fails if any dial was blocked.
 func evalToolSandbox(t *testing.T) {
 	t.Helper()
 	t.Setenv("GITHUB_TOKEN", "")
@@ -228,7 +247,9 @@ func TestToolEvalMalformedArguments(t *testing.T) {
 		"string": `{"k":"v"}`, "integer": `"many"`, "number": `"many"`, "boolean": `"yes"`, "array": `"a,b"`, "object": `"{\"k\":\"v\"}"`,
 	}
 	violations := map[string]string{}
-	var inconclusive []string
+	// Panics, Go errors from chat tools, and failures without a message are
+	// never accepted as known defects.
+	var fatal, inconclusive []string
 	for label, registry := range evalToolRegistries(newFakeClient()) {
 		names := registry.Names()
 		sort.Strings(names)
@@ -247,10 +268,12 @@ func TestToolEvalMalformedArguments(t *testing.T) {
 				}
 				if typ == "object" {
 					key := fmt.Sprintf("%s/%s: %s as JSON string", label, name, prop)
-					switch verdict := evalObjectStringHandling(label, name, required, properties, prop); verdict {
-					case "":
-					case evalInconclusive:
+					switch verdict := evalObjectStringHandling(label, name, required, properties, prop); {
+					case verdict == "":
+					case verdict == evalInconclusive:
 						inconclusive = append(inconclusive, key)
+					case strings.HasPrefix(verdict, evalPanicked):
+						fatal = append(fatal, key+": "+verdict)
 					default:
 						violations[key] = verdict
 					}
@@ -270,11 +293,11 @@ func TestToolEvalMalformedArguments(t *testing.T) {
 					failed, message := evalToolFailure(result, err)
 					switch {
 					case panicked != nil:
-						violations[key] = fmt.Sprintf("panicked: %v", panicked)
+						fatal = append(fatal, fmt.Sprintf("%s: panicked: %v", key, panicked))
 					case label == "chat" && err != nil:
-						violations[key] = fmt.Sprintf("returned Go error %q, which the chat executor reports as an unknown tool", err)
+						fatal = append(fatal, fmt.Sprintf("%s: returned Go error %q, which the chat executor reports as an unknown tool", key, err))
 					case failed && strings.TrimSpace(message) == "":
-						violations[key] = fmt.Sprintf("failed without an error message: %q", result)
+						fatal = append(fatal, fmt.Sprintf("%s: failed without an error message: %q", key, result))
 					case (input == "empty object" || input == "null") && len(required) > 0 && !failed:
 						violations[key] = fmt.Sprintf("reported success without required fields %v in the %s cluster", required, cluster)
 					}
@@ -282,12 +305,18 @@ func TestToolEvalMalformedArguments(t *testing.T) {
 			}
 		}
 	}
+	for _, failure := range fatal {
+		t.Error(failure)
+	}
 	sort.Strings(inconclusive)
 	t.Logf("object-as-string handling not observable without more setup: %v", inconclusive)
 	evalToolReportViolations(t, violations, knownDefects)
 }
 
-const evalInconclusive = "inconclusive"
+const (
+	evalInconclusive = "inconclusive"
+	evalPanicked     = "panicked"
+)
 
 // evalObjectStringHandling runs a tool three ways: with a nested object built
 // from its schema, with the same object encoded as a JSON string, and with the
@@ -311,12 +340,20 @@ func evalObjectStringHandling(label, name string, required []any, properties map
 			raw, _ := json.Marshal(args)
 			fc := evalToolClusters[cluster]()
 			result, panicked, err := evalRegistryExecute(evalToolContextFor(label, fc), evalToolRegistries(fc)[label], name, string(raw))
+			if panicked != nil {
+				return true, evalPanicked + fmt.Sprintf(": %v", panicked)
+			}
 			failed, _ := evalToolFailure(result, err)
-			return failed || panicked != nil, evalClusterSnapshot(fc)
+			return failed, evalClusterSnapshot(fc)
 		}
 		stringFailed, asString := run(string(encoded))
 		objectFailed, asObject := run(payload)
 		_, omitted := run(nil)
+		for _, snapshot := range []string{asString, asObject, omitted} {
+			if strings.HasPrefix(snapshot, evalPanicked) {
+				return snapshot
+			}
+		}
 		switch {
 		case objectFailed || asObject == omitted:
 			continue
@@ -786,12 +823,13 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			name:   "brokered web_fetch url",
 			limits: []string{"brokered/web_fetch.url maxLength"},
 			check: func(t *testing.T) (bool, string) {
-				// maxLength is the character count that keeps any UTF-8 URL within
-				// the 64 KiB byte limit the tool enforces; past that limit the URL
-				// is rejected before it is parsed or fetched.
+				// One character past the advertised maxLength. The over-limit
+				// max_chars stops the call before any request if the URL passes.
 				tool, _ := evalToolRegistries(newFakeClient())["brokered"].Get("web_fetch")
-				return evalRejects(context.Background(), tool, `{"url":"https://1.1.1.1/`+long(brokeredWebFetchMaxURLBytes)+`"}`, "url")
+				url := "https://1.1.1.1/" + long(brokeredWebFetchMaxURLBytes/utf8.UTFMax)
+				return evalRejects(context.Background(), tool, `{"url":"`+url+`","max_chars":50001}`, "url")
 			},
+			knownDefect: "brokered web_fetch advertises url maxLength in characters but only enforces its 64 KiB byte limit",
 		},
 		{
 			name:   "worker create_agent model contextWindow",
@@ -806,7 +844,7 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			name:   "worker create_agent model maxTokens",
 			limits: []string{"worker/create_agent.model.maxTokens minimum"},
 			check: func(t *testing.T) (bool, string) {
-				if limits := evalCRDModelField(t, "maxTokens"); limits["minimum"] != nil {
+				if limits := evalCRDModelField(t, "maxTokens"); limits["minimum"] == float64(1) {
 					return true, ""
 				}
 				t.Setenv(envOrkaTaskName, "parent")
@@ -870,30 +908,16 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			},
 		},
 		{
-			name:   "worker merge methods",
-			limits: []string{"worker/auto_merge_pull_request.merge_method enum", "worker/merge_pull_request.merge_method enum"},
-			check: func(t *testing.T) (bool, string) {
-				enforced := func(make func(client.Client, string) Tool) (bool, string) {
-					stub := newEvalHTTPStub(t)
-					tool := make(githubTask(), stub.URL)
-					args := fmt.Sprintf(`{"task_name":%q,"pr_number":1,"merge_method":"fast-forward"}`, testCoderTaskName)
-					ok, detail := evalRejects(context.Background(), tool, args, "merge_method")
-					if !ok && stub.sent(`"merge_method":"fast-forward"`) {
-						detail = tool.Name() + " sent merge_method=fast-forward to GitHub"
-					}
-					return ok, detail
-				}
-				return evalAll(
-					func() (bool, string) {
-						return enforced(func(c client.Client, url string) Tool { return &MergePullRequestTool{k8sClient: c, apiBaseURL: url} })
-					},
-					func() (bool, string) {
-						return enforced(func(c client.Client, url string) Tool {
-							return &AutoMergePullRequestTool{k8sClient: c, apiBaseURL: url}
-						})
-					},
-				)
-			},
+			name:   "worker merge_pull_request merge_method",
+			limits: []string{"worker/merge_pull_request.merge_method enum"},
+			check:  evalMergeMethodEnforced(func(c client.Client, url string) Tool { return &MergePullRequestTool{k8sClient: c, apiBaseURL: url} }),
+		},
+		{
+			name:   "worker auto_merge_pull_request merge_method",
+			limits: []string{"worker/auto_merge_pull_request.merge_method enum"},
+			check: evalMergeMethodEnforced(func(c client.Client, url string) Tool {
+				return &AutoMergePullRequestTool{k8sClient: c, apiBaseURL: url}
+			}),
 		},
 		{
 			name:   "worker post_review_comment event",
@@ -962,26 +986,14 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			},
 		},
 		{
-			name:   "worker update_plan progress",
-			limits: []string{"worker/update_plan.progress_pct maximum", "worker/update_plan.progress_pct minimum"},
-			check: func(t *testing.T) (bool, string) {
-				controller := newEvalHTTPStub(t)
-				t.Setenv(envOrkaControllerURL, controller.URL)
-				t.Setenv(envOrkaTaskName, "task")
-				t.Setenv(workerenv.ServiceAccountToken, "token")
-				tool, ctx := workerTool("update_plan", newFakeClient())
-				reported := func(progress int) (bool, string) {
-					ok, detail := evalRejects(ctx, tool, fmt.Sprintf(`{"summary":"s","plan_document":"p","progress_pct":%d}`, progress), "progress")
-					if !ok && controller.sent(fmt.Sprintf(`"progress_pct":%d`, progress)) {
-						detail = fmt.Sprintf("sent progress_pct=%d to the controller", progress)
-					}
-					return ok, detail
-				}
-				return evalAll(
-					func() (bool, string) { return reported(150) },
-					func() (bool, string) { return reported(-10) },
-				)
-			},
+			name:   "worker update_plan progress maximum",
+			limits: []string{"worker/update_plan.progress_pct maximum"},
+			check:  evalProgressEnforced(150),
+		},
+		{
+			name:   "worker update_plan progress minimum",
+			limits: []string{"worker/update_plan.progress_pct minimum"},
+			check:  evalProgressEnforced(-10),
 		},
 	}
 
@@ -991,6 +1003,9 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			covered[limit] = true
 		}
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.knownDefect != "" && len(tc.limits) != 1 {
+				t.Fatalf("a known-defect case must cover exactly one limit, or its failure can hide a regression in the others")
+			}
 			ok, detail := tc.check(t)
 			switch {
 			case ok && tc.knownDefect != "":
@@ -1012,5 +1027,38 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 		if !slices.Contains(declared, limit) {
 			t.Errorf("enforcement case covers %q, which no schema declares; remove it", limit)
 		}
+	}
+}
+
+// evalMergeMethodEnforced checks that a merge tool rejects an unsupported
+// merge_method, reporting whether the value reached the GitHub stub.
+func evalMergeMethodEnforced(build func(client.Client, string) Tool) func(*testing.T) (bool, string) {
+	return func(t *testing.T) (bool, string) {
+		task, secret := githubRepoTaskWithSecret(testOrgTestRepoURL)
+		stub := newEvalHTTPStub(t)
+		tool := build(newFakeClient(task, secret), stub.URL)
+		args := fmt.Sprintf(`{"task_name":%q,"pr_number":1,"merge_method":"fast-forward"}`, testCoderTaskName)
+		ok, detail := evalRejects(context.Background(), tool, args, "merge_method")
+		if !ok && stub.sent(`"merge_method":"fast-forward"`) {
+			detail = tool.Name() + " sent merge_method=fast-forward to GitHub"
+		}
+		return ok, detail
+	}
+}
+
+// evalProgressEnforced checks that update_plan rejects an out-of-range
+// progress_pct, reporting whether the value reached the controller stub.
+func evalProgressEnforced(progress int) func(*testing.T) (bool, string) {
+	return func(t *testing.T) (bool, string) {
+		controller := newEvalHTTPStub(t)
+		t.Setenv(envOrkaControllerURL, controller.URL)
+		t.Setenv(envOrkaTaskName, "task")
+		t.Setenv(workerenv.ServiceAccountToken, "token")
+		tool, _ := evalToolRegistries(newFakeClient())["worker"].Get("update_plan")
+		ok, detail := evalRejects(context.Background(), tool, fmt.Sprintf(`{"summary":"s","plan_document":"p","progress_pct":%d}`, progress), "progress")
+		if !ok && controller.sent(fmt.Sprintf(`"progress_pct":%d`, progress)) {
+			detail = fmt.Sprintf("sent progress_pct=%d to the controller", progress)
+		}
+		return ok, detail
 	}
 }
