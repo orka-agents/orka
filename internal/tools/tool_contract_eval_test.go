@@ -1097,6 +1097,11 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			check:  evalReviewCommentFieldRequired("line"),
 		},
 		{
+			name:   "worker post_review_comment comment line minimum",
+			limits: []string{"worker/post_review_comment.comments[].line minimum=1"},
+			check:  evalReviewCommentLine(0),
+		},
+		{
 			name:   "worker post_review_comment comment body",
 			limits: []string{"worker/post_review_comment.comments[].body required"},
 			check:  evalReviewCommentFieldRequired("body"),
@@ -1191,6 +1196,23 @@ func evalReviewCommentFieldRequired(field string) func(*testing.T) (bool, string
 		ok, detail := evalRejects(context.Background(), tool, string(raw), "comments")
 		if !ok && stub.sent(`"comments":[`) {
 			detail = "sent a line comment without " + field + " to GitHub"
+		}
+		return ok, detail
+	}
+}
+
+// evalReviewCommentLine checks that post_review_comment rejects a line comment
+// with an out-of-range line, reporting whether it reached the GitHub stub.
+func evalReviewCommentLine(line int) func(*testing.T) (bool, string) {
+	return func(t *testing.T) (bool, string) {
+		task, secret := githubRepoTaskWithSecret(testOrgTestRepoURL)
+		stub := newEvalHTTPStub(t)
+		t.Setenv(envOrkaTaskName, testCoderTaskName)
+		tool := &PostReviewCommentTool{k8sClient: newFakeClient(task, secret), apiBaseURL: stub.URL}
+		raw, _ := json.Marshal(map[string]any{"task_name": testCoderTaskName, "pr_number": 1, "body": "x", "event": "COMMENT", "comments": []any{map[string]any{"path": "main.go", "line": line, "body": "nit"}}})
+		ok, detail := evalRejects(context.Background(), tool, string(raw), "line")
+		if !ok && stub.sent(`"comments":[`) {
+			detail = fmt.Sprintf("sent a line comment with line %d to GitHub", line)
 		}
 		return ok, detail
 	}
