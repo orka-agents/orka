@@ -136,12 +136,8 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReadyOutcome(ctx context.
 // GitHub statuses belong to commits, not PRs. Aggregate every outcome across
 // open PRs sharing the head, so peers neither overwrite a blocker with success
 // nor alternate persistent blocking descriptions on every inventory poll.
-func (r *RepositoryMonitorReconciler) repositoryMonitorSharedHeadReadiness(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, owner, repo, token string, pr repositoryMonitorPullRequest, currentItem *store.MonitorItem) (string, string, error) {
+func (r *RepositoryMonitorReconciler) repositoryMonitorSharedHeadReadiness(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest, currentItem *store.MonitorItem, peers []repositoryMonitorPullRequest) (string, string, error) {
 	result, resultDescription, err := r.repositoryMonitorReadyOutcome(ctx, monitor, pr, currentItem)
-	if err != nil {
-		return "", "", err
-	}
-	peers, err := r.listRepositoryMonitorPullRequests(ctx, owner, repo, token, effectiveRepositoryMonitorBranch(monitor))
 	if err != nil {
 		return "", "", err
 	}
@@ -177,7 +173,8 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorSharedHeadReadiness(ctx c
 
 // Readiness is a commit status, so existing repository credentials can publish
 // it without a GitHub App. GitHub alone controls approvals and merging.
-func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorReadiness(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr *repositoryMonitorPullRequest, item *store.MonitorItem) error {
+// Inventory callers can supply the complete open-PR list to reuse it for peers.
+func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorReadiness(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr *repositoryMonitorPullRequest, item *store.MonitorItem, inventory ...[]repositoryMonitorPullRequest) error {
 	if !monitor.Spec.Review.Publish.Enabled || !repositoryMonitorManagedWorkflow(monitor) || r.Store == nil {
 		return nil
 	}
@@ -202,6 +199,7 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorReadiness(ctx co
 	// readiness must also block subsequent repair/review stages in this poll.
 	expectedHead := pr.HeadSHA
 	pr.State, pr.HeadSHA, pr.BaseBranch = current.State, current.Head.SHA, current.Base.Ref
+	pr.MergeableState = current.MergeableState
 	if pr.State != repositoryMonitorItemStateOpen || pr.HeadSHA != expectedHead || pr.BaseBranch != effectiveRepositoryMonitorBranch(monitor) {
 		return nil
 	}
@@ -220,7 +218,16 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorReadiness(ctx co
 	if err != nil {
 		return err
 	}
-	state, description, err := r.repositoryMonitorSharedHeadReadiness(ctx, monitor, owner, repo, token, *pr, item)
+	var peers []repositoryMonitorPullRequest
+	if len(inventory) > 0 {
+		peers = inventory[0]
+	} else {
+		peers, err = r.listRepositoryMonitorPullRequests(ctx, owner, repo, token, effectiveRepositoryMonitorBranch(monitor))
+		if err != nil {
+			return err
+		}
+	}
+	state, description, err := r.repositoryMonitorSharedHeadReadiness(ctx, monitor, *pr, item, peers)
 	if err != nil {
 		return err
 	}

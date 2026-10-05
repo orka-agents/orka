@@ -32,7 +32,10 @@ const (
 	apiFieldLabel    = "label"
 )
 
-const githubWebhookActionLabeled = "labeled"
+const (
+	githubWebhookActionLabeled   = "labeled"
+	githubWebhookActionUnlabeled = "unlabeled"
+)
 
 const (
 	githubWebhookSecretEnv                     = "ORKA_GITHUB_WEBHOOK_SECRET"
@@ -183,19 +186,16 @@ func (h *Handlers) HandleGitHubWebhook(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if pauseResult.Matched > 0 {
-		return githubRepositoryMonitorEventResponse(c, pauseResult)
-	}
-
-	var monitorResult githubRepositoryMonitorEventResult
+	monitorResult := pauseResult
 	if payload.Action != githubWebhookActionLabeled {
 		if event == githubEventPullRequest {
 			var err error
 			delivery := strings.TrimSpace(c.Get(githubDeliveryHeader))
-			monitorResult, err = h.enqueueRepositoryMonitorPullRequestEventRuns(c, body, delivery, payload)
+			prResult, err := h.enqueueRepositoryMonitorPullRequestEventRuns(c, body, delivery, payload)
 			if err != nil {
 				return err
 			}
+			monitorResult = mergeGitHubRepositoryMonitorEventResults(monitorResult, prResult)
 		}
 		if monitorResult.Matched > 0 {
 			return githubRepositoryMonitorEventResponse(c, monitorResult)
@@ -219,20 +219,22 @@ func (h *Handlers) HandleGitHubWebhook(c fiber.Ctx) error {
 		if event == githubEventPullRequest {
 			var err error
 			delivery := strings.TrimSpace(c.Get(githubDeliveryHeader))
-			monitorResult, err = h.enqueueRepositoryMonitorPullRequestEventRuns(c, body, delivery, payload)
+			prResult, err := h.enqueueRepositoryMonitorPullRequestEventRuns(c, body, delivery, payload)
 			if err != nil {
 				return err
 			}
+			monitorResult = mergeGitHubRepositoryMonitorEventResults(monitorResult, prResult)
 		}
 		return githubRepositoryMonitorEventResponse(c, mergeGitHubRepositoryMonitorEventResults(monitorResult, commandResult))
 	}
 	if event == githubEventPullRequest && !handledCommand {
 		var err error
 		delivery := strings.TrimSpace(c.Get(githubDeliveryHeader))
-		monitorResult, err = h.enqueueRepositoryMonitorPullRequestEventRuns(c, body, delivery, payload)
+		prResult, err := h.enqueueRepositoryMonitorPullRequestEventRuns(c, body, delivery, payload)
 		if err != nil {
 			return err
 		}
+		monitorResult = mergeGitHubRepositoryMonitorEventResults(monitorResult, prResult)
 	}
 
 	if monitorResult.Matched > 0 {
@@ -262,6 +264,9 @@ func (h *Handlers) enqueueRepositoryMonitorPullRequestEventRuns(c fiber.Ctx, bod
 	}
 	for i := range monitors.Items {
 		monitor := &monitors.Items[i]
+		if (payload.Action == githubWebhookActionLabeled || payload.Action == githubWebhookActionUnlabeled) && repositoryMonitorWebhookMatchingLabel(repositoryMonitorAPIPauseLabels(monitor), []string{payload.Label.Name}) != "" && repositoryMonitorAcceptsLabelCommand(monitor, payload.Repository, target, commandIntentResume) {
+			continue
+		}
 		if intent, isCommand := repositoryMonitorCommandIntentForLabel(monitor, target, payload.Label.Name); isCommand && repositoryMonitorAcceptsLabelCommand(monitor, payload.Repository, target, intent) {
 			continue
 		}

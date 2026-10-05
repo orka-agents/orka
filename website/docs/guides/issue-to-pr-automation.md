@@ -1,10 +1,10 @@
 ---
-description: "The full orka:* label workflow that takes an issue through to a merged pull request."
+description: "The orka:implement workflow from issue planning through pull request readiness."
 ---
 
 # Issue-to-PR automation
 
-RepositoryMonitor can run a durable maintainer-controlled issue-to-PR loop from `orka:*` labels or equivalent API/CLI/UI commands.
+RepositoryMonitor runs a durable issue-to-PR loop from `orka:implement` or the equivalent API/CLI/UI command. Planning, implementation, PR review, and bounded repair continue automatically when policy permits them.
 
 ## Flow
 
@@ -12,12 +12,13 @@ RepositoryMonitor can run a durable maintainer-controlled issue-to-PR loop from 
 2. Orka verifies the webhook signature and current GitHub actor permission, then records a durable `command_event`.
 3. A `work_action` is queued with the monitor generation, target snapshot digest, dedupe key, and command ID.
 4. Orka inventories the issue and computes a content digest that excludes Orka-authored labels/comments.
-5. Optional triage and research commands run as hardened read-only agent tasks. If an `implement` command has no approved plan, Orka queues a read-only planning task first.
-6. If policy requires approval, the workflow stops until `orka:approve-plan` or the equivalent CLI/API/UI command; otherwise the original implement command continues automatically.
-7. Implementation runs as a patch-only task. The agent returns an `orka.issueImplementation.v1` status, and the worker-owned result finalizer captures the actual workspace diff and changed paths.
-8. The controller validates and stores an `orka.patch.v1` artifact, then creates a deterministic general-worker mutation task with a configured push branch.
-9. The mutation task applies and pushes only the validated prior-task diff; the controller creates or reuses the PR and records GitHub mutation audit rows.
-10. PR review and repair continue on exact heads until the PR reaches `merge_ready` or a clear blocked state.
+5. With `spec.issueWorkflow.implementation.requirePlan: true`, the default, Orka queues a read-only planning task if there is no current ready plan. Triage and research remain available through ad hoc API/CLI commands.
+6. A current `ready` plan continues the original implement command automatically. A `blocked` or `needs_human` result stops progression and records the reason.
+7. Implementation runs in a writable sanitized workspace on a controller-selected push branch. The agent leaves changes for the separate Workspace Publisher, which freezes and validates the delta, publishes it, and verifies the remote.
+8. The controller accepts only a matching `VerifiedExact` delivery receipt, then creates or reuses the PR and records GitHub mutation audit rows.
+9. PR review and bounded repair continue on exact heads until the PR reaches `merge_ready` or a clear blocked state.
+
+Managed workflows with `review.publish.enabled: true` publish the commit status `orka/<namespace>/<monitor-name>/ready`. Require this status alongside your CI and approving-review rules. GitHub's per-PR auto-merge setting owns merging. Orka never enables it or calls the merge endpoint; when it is disabled, the PR stays open and ready.
 
 ## Safety model
 
@@ -29,13 +30,12 @@ RepositoryMonitor can run a durable maintainer-controlled issue-to-PR loop from 
 - Stop commands cancel queued workflow actions and active monitor Tasks, and prevent post-task mutation from stale task results.
 - Repair commands execute only when `spec.repair.enabled` is true and remain bounded by `maxRepairsPerPR` and `maxRepairsPerHead` when configured.
 - Plans and implementation are bound to issue content digests; human edits make downstream artifacts stale.
-- `planning.requireHumanApprovalFor` matches either a plan risk level (for example `high`) or a plan category (for example `security` or `database-migration`). Legacy plan results without a `categories` field require approval when category-based policy is configured.
+- `orka:pause` blocks further workflow actions and readiness. A running bounded Task may finish, including publication. Removing the label queues fresh reconciliation; unresolved plans still block implementation.
 
 ## CLI quick reference
 
 ```bash
 orka monitor issue plan orka-main 123
-orka monitor issue approve-plan orka-main 123
 orka monitor issue implement orka-main 123
 orka monitor issue implementation get orka-main 123
 orka monitor mutations list orka-main --kind issue --number 123
@@ -59,9 +59,9 @@ Blocked records include a low-cardinality reason such as `stale_command_snapshot
 
 ## Implementation budgets and path policy
 
-`spec.issueWorkflow.implementation` bounds code-changing work before a mutation task can push a branch:
+`spec.issueWorkflow.implementation` bounds code-changing work and publication:
 
-- `maxActive` caps active issue implementation/mutation jobs per monitor (default `2`).
+- `maxActive` caps active issue implementation jobs per monitor (default `2`).
 - `maxAttemptsPerIssue` caps implementation attempts for one issue (default `2`).
 - `maxChangedFiles` caps files in an `orka.patch.v1` artifact (default `12`).
 - `allowedPaths` optionally restricts patch files to monitor-owned glob/prefix allowlists such as `api/**`, `internal/**`, or `docs/**`.
@@ -95,7 +95,7 @@ For the broader local validation bundle that also checks generated CLI docs, exa
 make repository-monitor-validate
 ```
 
-The suite covers durable command intake, replay/coalescing, guard-label blocking, issue implementation to PR, stop/resume late-task safety, PR review/repair/readiness, and optional automerge against fake GitHub servers. The `Repository Monitor Smoke` GitHub Actions workflow runs the same fake-GitHub E2E script on relevant PRs.
+The suite covers durable command intake, replay/coalescing, guard-label blocking, issue implementation to PR, stop/resume late-task safety, and PR review/repair/readiness against fake GitHub servers. The `Repository Monitor Smoke` GitHub Actions workflow runs the same fake-GitHub E2E script on relevant PRs.
 
 Patch previews are available through `orka monitor issue patch preview <monitor> <issue-number>` or `GET /api/v1/monitors/implementation-jobs/{id}/patch-preview`; the endpoint returns safe `orka.patch.v1` metadata instead of blindly streaming arbitrary task output.
 

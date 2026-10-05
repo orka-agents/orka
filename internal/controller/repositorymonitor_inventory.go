@@ -120,6 +120,7 @@ func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context
 	}
 	pullRequests = filterRepositoryMonitorBasePullRequests(pullRequests, baseBranch)
 	seenPullRequestKeys := repositoryMonitorPullRequestKeys(pullRequests)
+	readinessInventory := pullRequests
 	pullRequests = filterRepositoryMonitorTargetPullRequests(pullRequests, run)
 	slices.SortFunc(pullRequests, func(a, b repositoryMonitorPullRequest) int {
 		return int(a.Number - b.Number)
@@ -144,7 +145,11 @@ func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context
 			}
 			item.RepairState = state
 		}
-		if err := r.reconcileRepositoryMonitorReadiness(ctx, monitor, &pr, item); err != nil {
+		var inventories [][]repositoryMonitorPullRequest
+		if run.TargetNumber == 0 {
+			inventories = append(inventories, readinessInventory)
+		}
+		if err := r.reconcileRepositoryMonitorReadiness(ctx, monitor, &pr, item, inventories...); err != nil {
 			return selected, createdTasks, skipped, err
 		}
 		// Readiness may observe a newer head or a PR leaving this monitor's scope.
@@ -162,18 +167,17 @@ func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context
 		}
 		if selected < maxPerRun {
 			repairWasQueued := item.RepairState == repositoryMonitorRepairPhaseQueued
-			if handled, created, err := r.tryRepositoryMonitorAutomaticRepair(ctx, monitor, run, owner, repository, pr, item); err != nil {
+			if handled, err := r.tryRepositoryMonitorAutomaticRepair(ctx, monitor, run, owner, repository, pr, item); err != nil {
 				return selected, createdTasks, skipped, err
 			} else if handled {
 				// Only newly started work consumes a slot. Active or exhausted
 				// repairs must not starve later PRs on every workflow poll.
 				// GitHub update-branch queues work without creating a Task.
-				if created > 0 || (!repairWasQueued && item.RepairState == repositoryMonitorRepairPhaseQueued) {
+				if !repairWasQueued && item.RepairState == repositoryMonitorRepairPhaseQueued {
 					selected++
 				} else {
 					skipped++
 				}
-				createdTasks += created
 				continue
 			}
 		}

@@ -728,6 +728,30 @@ func repositoryMonitorIssuePhaseAwaitingTask(phase string) bool {
 	}
 }
 
+func (r *RepositoryMonitorReconciler) resumeRepositoryMonitorPausedIssue(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem) error {
+	if item.WorkflowPhase != repositoryMonitorIssuePhasePaused {
+		return nil
+	}
+	if strings.TrimSpace(item.LastActionTaskName) == "" {
+		item.WorkflowPhase = repositoryMonitorIssuePhaseDiscovered
+		item.SkipReason = ""
+		return nil
+	}
+	if r.ResultStore == nil {
+		return nil
+	}
+	var task corev1alpha1.Task
+	if err := r.Get(ctx, types.NamespacedName{Namespace: monitor.Namespace, Name: item.LastActionTaskName}, &task); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if !repositoryMonitorReviewTaskTerminal(task.Status.Phase) {
+		return nil
+	}
+	// Apply the retained result before a new command can restart its workflow.
+	_, err := r.ingestCompletedRepositoryMonitorIssueTask(ctx, monitor, item, &task)
+	return err
+}
+
 func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorIssueTask(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, task *corev1alpha1.Task) (bool, error) {
 	actionKind := strings.TrimSpace(task.Annotations[repositoryMonitorIssueAnnotationActionKind])
 	if actionKind == "" {
@@ -1135,7 +1159,8 @@ func (r *RepositoryMonitorReconciler) applyIssueActionRecord(ctx context.Context
 	item.LastActionTaskName = record.TaskName
 	item.LastVerdict = record.Verdict
 	item.SkipReason = ""
-	if record.ActionKind == repositoryMonitorIssueActionPlan && r.repositoryMonitorCommandIntentForID(ctx, monitor, record.CommandEventID, item.LastCommandIntent) == repositoryMonitorCommandIntentImplement {
+	recordBlocksProgress := repositoryMonitorActionRecordBlocksProgress(record.Verdict)
+	if !recordBlocksProgress {
 		var currentLabels []string
 		if item.LabelsJSON != "" {
 			if err := json.Unmarshal([]byte(item.LabelsJSON), &currentLabels); err != nil {
@@ -1151,7 +1176,6 @@ func (r *RepositoryMonitorReconciler) applyIssueActionRecord(ctx context.Context
 			return true, r.Store.UpsertMonitorItem(ctx, item)
 		}
 	}
-	recordBlocksProgress := repositoryMonitorActionRecordBlocksProgress(record.Verdict)
 	if recordBlocksProgress {
 		item.WorkflowPhase = repositoryMonitorIssuePhaseBlocked
 		item.SkipReason = record.Verdict

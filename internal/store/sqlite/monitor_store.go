@@ -224,7 +224,9 @@ func deleteRepositoryMonitorDependentState(ctx context.Context, tx *sql.Tx, name
 		`DELETE FROM review_publish_records WHERE monitor_namespace = ? AND monitor_name = ?`,
 		`DELETE FROM command_events WHERE monitor_namespace = ? AND monitor_name = ?`,
 		`DELETE FROM implementation_jobs WHERE monitor_namespace = ? AND monitor_name = ?`,
-		`DELETE FROM github_mutation_records WHERE monitor_namespace = ? AND monitor_name = ?`,
+		// GitHub commit statuses outlive monitors. Retain recorded readiness IDs
+		// so peer monitors still recognize and exclude them from repository CI.
+		`DELETE FROM github_mutation_records WHERE monitor_namespace = ? AND monitor_name = ? AND (operation != 'readiness_status' OR external_id = '')`,
 		`DELETE FROM repair_jobs WHERE monitor_namespace = ? AND monitor_name = ?`,
 		`DELETE FROM monitor_events WHERE monitor_namespace = ? AND monitor_name = ?`,
 	} {

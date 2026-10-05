@@ -1,8 +1,10 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,7 +22,7 @@ func repositoryMonitorAPIPauseLabels(monitor *corev1alpha1.RepositoryMonitor) []
 
 func (h *Handlers) handleRepositoryMonitorPauseEvent(c fiber.Ctx, body []byte, payload githubLabelWebhookPayload) (githubRepositoryMonitorEventResult, error) {
 	var result githubRepositoryMonitorEventResult
-	if h.repositoryMonitorStore == nil || (payload.Action != githubWebhookActionLabeled && payload.Action != "unlabeled") {
+	if h.repositoryMonitorStore == nil || (payload.Action != githubWebhookActionLabeled && payload.Action != githubWebhookActionUnlabeled) {
 		return result, nil
 	}
 	target, ok := payload.target()
@@ -61,11 +63,23 @@ func (h *Handlers) handleRepositoryMonitorPauseEvent(c fiber.Ctx, body []byte, p
 			run.TargetSHA = target.HeadSHA
 		}
 		existing, lookupErr := h.repositoryMonitorStore.GetMonitorRun(c.Context(), monitor.Namespace, id)
-		if lookupErr == nil {
-			if existing.Phase != repositoryMonitorRunPhaseFailed {
-				result.Duplicate++
-				continue
+		if lookupErr == nil && existing.Phase != repositoryMonitorRunPhaseFailed {
+			result.Duplicate++
+			continue
+		}
+		if lookupErr != nil && !errors.Is(lookupErr, store.ErrNotFound) {
+			return result, lookupErr
+		}
+		// Reconciliation ingests completed Tasks before queued inventory runs.
+		// Persist this guard before exposing a run so its handoff sees the pause.
+		if payload.Action == githubWebhookActionLabeled {
+			if err := h.persistRepositoryMonitorPauseLabel(c, monitor, payload, target); err != nil {
+				return result, err
 			}
+		}
+		// Removal deliveries can arrive before or after a newer label addition.
+		// Only fresh inventory may clear the durable pause guard.
+		if lookupErr == nil {
 			requeued, err := h.requeueFailedRepositoryMonitorEventRun(c, run)
 			if err != nil {
 				return result, err
@@ -74,8 +88,6 @@ func (h *Handlers) handleRepositoryMonitorPauseEvent(c fiber.Ctx, body []byte, p
 				result.Duplicate++
 				continue
 			}
-		} else if !errors.Is(lookupErr, store.ErrNotFound) {
-			return result, lookupErr
 		} else if err := h.repositoryMonitorStore.CreateMonitorRun(c.Context(), run); err != nil {
 			if errors.Is(err, store.ErrConflict) {
 				result.Duplicate++
@@ -97,4 +109,33 @@ func (h *Handlers) handleRepositoryMonitorPauseEvent(c fiber.Ctx, body []byte, p
 		result.RunIDs = append(result.RunIDs, id)
 	}
 	return result, nil
+}
+
+func (h *Handlers) persistRepositoryMonitorPauseLabel(c fiber.Ctx, monitor *corev1alpha1.RepositoryMonitor, payload githubLabelWebhookPayload, target githubLabelTarget) error {
+	item, err := h.repositoryMonitorStore.GetMonitorItem(c.Context(), monitor.Namespace, monitor.Name, target.Kind, strconv.Itoa(target.Number))
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var labels []string
+	if item.LabelsJSON != "" {
+		if err := json.Unmarshal([]byte(item.LabelsJSON), &labels); err != nil {
+			return fmt.Errorf("invalid stored monitor item labels: %w", err)
+		}
+	}
+	updated := make([]string, 0, len(labels)+1)
+	for _, label := range labels {
+		if !strings.EqualFold(strings.TrimSpace(label), strings.TrimSpace(payload.Label.Name)) {
+			updated = append(updated, label)
+		}
+	}
+	updated = append(updated, payload.Label.Name)
+	data, err := json.Marshal(updated)
+	if err != nil {
+		return err
+	}
+	item.LabelsJSON = string(data)
+	return h.repositoryMonitorStore.UpsertMonitorItem(c.Context(), item)
 }

@@ -858,6 +858,25 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepairPolicy(ctx context.
 		}
 		cursor = next
 	}
+	// Branch updates mutate GitHub directly and have no RepairJob. Their durable
+	// mutation records still consume the same finite repair budgets.
+	cursor = ""
+	for {
+		mutations, next, err := r.Store.ListGitHubMutationRecords(ctx, store.GitHubMutationRecordFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Operation: repositoryMonitorUpdateBranchOperation, TargetKind: repositoryMonitorPullRequestKind, TargetNumber: pr.Number, Limit: 200, Cursor: cursor})
+		if err != nil {
+			return "", 0, 0, err
+		}
+		for _, mutation := range mutations {
+			repairCountPR++
+			if strings.TrimSpace(mutation.TargetSHA) == strings.TrimSpace(pr.HeadSHA) {
+				repairCountHead++
+			}
+		}
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
 	maxPR, maxHead := 5, 2
 	if max := monitor.Spec.Repair.MaxRepairsPerPR; max != nil {
 		maxPR = int(*max)
@@ -1285,16 +1304,20 @@ func repositoryMonitorResetItemAfterRepairPush(item *store.MonitorItem) {
 	item.LastVerdict = ""
 }
 
-// A branch may move while an older repair finishes. Only active branch work or
-// terminal evidence for the current head can affect current readiness.
+// A branch may move while an older repair finishes. Only work or terminal
+// evidence for the current head can affect current readiness.
 func (r *RepositoryMonitorReconciler) repositoryMonitorRepairStateForHead(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, number int64, head string) (string, error) {
 	cursor, state := "", ""
+	var latest time.Time
 	for {
 		jobs, next, err := r.Store.ListRepairJobs(ctx, store.RepairJobFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, PRNumber: number, Limit: 200, Cursor: cursor})
 		if err != nil {
 			return "", err
 		}
 		for _, job := range jobs {
+			if job.HeadSHA != head && (job.PushedSHA == "" || job.PushedSHA != head) {
+				continue
+			}
 			if job.Phase == repositoryMonitorRepairPhaseQueued {
 				active, err := r.repositoryMonitorRepairJobConsumesBudget(ctx, monitor.Namespace, &job)
 				if err != nil {
@@ -1305,8 +1328,29 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepairStateForHead(ctx co
 				}
 				continue
 			}
-			if state == "" && (job.HeadSHA == head || (job.PushedSHA != "" && job.PushedSHA == head)) {
-				state = job.Phase
+			if state == "" || job.CreatedAt.After(latest) {
+				state, latest = job.Phase, job.CreatedAt
+			}
+		}
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
+	cursor = ""
+	for {
+		mutations, next, err := r.Store.ListGitHubMutationRecords(ctx, store.GitHubMutationRecordFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Operation: repositoryMonitorUpdateBranchOperation, TargetKind: repositoryMonitorPullRequestKind, TargetNumber: number, TargetSHA: head, Limit: 200, Cursor: cursor})
+		if err != nil {
+			return "", err
+		}
+		for _, mutation := range mutations {
+			switch mutation.Status {
+			case repositoryMonitorAutomergeStateStarted, repositoryMonitorUpdateBranchSubmitting, repositoryMonitorAutomergeStatePending:
+				return repositoryMonitorRepairPhaseQueued, nil
+			case repositoryMonitorRunPhaseFailed, repositoryMonitorRunPhaseSucceeded:
+				if state == "" || mutation.CreatedAt.After(latest) {
+					state, latest = mutation.Status, mutation.CreatedAt
+				}
 			}
 		}
 		if next == "" {

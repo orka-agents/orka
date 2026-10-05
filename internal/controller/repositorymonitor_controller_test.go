@@ -1780,6 +1780,9 @@ func TestRepositoryMonitorReviewPublishDisabledSkipsWithoutGitHubCall(t *testing
 	t.Cleanup(server.Close)
 
 	monitor := repositoryMonitorReviewIngestTestMonitor("publish-disabled")
+	// Suspend new inventory while testing publication of existing reviews.
+	suspend := true
+	monitor.Spec.Suspend = &suspend
 	task := repositoryMonitorReviewIngestTestTask("publish-disabled-task", "publish-disabled", 1, reviewHeadSHA)
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -1828,6 +1831,9 @@ func TestRepositoryMonitorReviewPublishPostsCommentReviewWithInlineFindings(t *t
 	maxComments := int32(1)
 	postNeedsChanges := true
 	monitor := repositoryMonitorReviewIngestTestMonitor("publish-inline")
+	// Suspend new inventory while testing publication of existing reviews.
+	suspend := true
+	monitor.Spec.Suspend = &suspend
 	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: "github-token"}
 	monitor.Spec.Review.Publish = corev1alpha1.RepositoryMonitorReviewPublishSpec{
 		Enabled:          true,
@@ -2034,6 +2040,9 @@ func TestRepositoryMonitorReviewPublishSafetySkips(t *testing.T) {
 			t.Cleanup(publishServer.Close)
 
 			monitor := repositoryMonitorReviewIngestTestMonitor(monitorName)
+			// Suspend new inventory while testing publication of existing reviews.
+			suspend := true
+			monitor.Spec.Suspend = &suspend
 			monitor.Spec.Review.Publish.Enabled = true
 			monitor.Spec.Review.Publish.Event = repositoryMonitorPublishEventComment
 			if tt.mutateMonitor != nil {
@@ -2106,6 +2115,9 @@ func TestRepositoryMonitorReviewPublishRetriesReviewRecordWithoutTerminalPublish
 
 	postNeedsChanges := true
 	monitor := repositoryMonitorReviewIngestTestMonitor("publish-pending")
+	// Suspend new inventory while testing publication of existing reviews.
+	suspend := true
+	monitor.Spec.Suspend = &suspend
 	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: "github-token"}
 	monitor.Spec.Review.Publish = corev1alpha1.RepositoryMonitorReviewPublishSpec{Enabled: true, Event: repositoryMonitorPublishEventComment, PostNeedsChanges: &postNeedsChanges}
 	task := repositoryMonitorReviewIngestTestTask("publish-pending-task", "publish-pending", 1, reviewHeadSHA)
@@ -2171,6 +2183,9 @@ func TestRepositoryMonitorReviewPublishRetriesRecoverableSkippedRecord(t *testin
 
 	postNeedsChanges := true
 	monitor := repositoryMonitorReviewIngestTestMonitor("publish-recoverable-skip")
+	// Suspend new inventory while testing publication of existing reviews.
+	suspend := true
+	monitor.Spec.Suspend = &suspend
 	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: "github-token"}
 	monitor.Spec.Review.Publish = corev1alpha1.RepositoryMonitorReviewPublishSpec{Enabled: true, Event: repositoryMonitorPublishEventComment, PostNeedsChanges: &postNeedsChanges}
 	task := repositoryMonitorReviewIngestTestTask("publish-recoverable-skip-task", "publish-recoverable-skip", 1, reviewHeadSHA)
@@ -2254,6 +2269,9 @@ func TestRepositoryMonitorReviewPublishWaitsBeforeRetryingRecentRecoverableSkip(
 
 	postNeedsChanges := true
 	monitor := repositoryMonitorReviewIngestTestMonitor("publish-recent-skip")
+	// Suspend new inventory while testing publication of existing reviews.
+	suspend := true
+	monitor.Spec.Suspend = &suspend
 	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: "github-token"}
 	monitor.Spec.Review.Publish = corev1alpha1.RepositoryMonitorReviewPublishSpec{Enabled: true, Event: repositoryMonitorPublishEventComment, PostNeedsChanges: &postNeedsChanges}
 	task := repositoryMonitorReviewIngestTestTask("publish-recent-skip-task", "publish-recent-skip", 1, reviewHeadSHA)
@@ -2338,6 +2356,9 @@ func TestRepositoryMonitorReviewPublishGitHubPermissionFailureCreatesFailedRecor
 
 	postNeedsChanges := true
 	monitor := repositoryMonitorReviewIngestTestMonitor("publish-forbidden")
+	// Suspend new inventory while testing publication of existing reviews.
+	suspend := true
+	monitor.Spec.Suspend = &suspend
 	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: "github-token"}
 	monitor.Spec.Review.Publish = corev1alpha1.RepositoryMonitorReviewPublishSpec{Enabled: true, Event: repositoryMonitorPublishEventComment, PostNeedsChanges: &postNeedsChanges}
 	task := repositoryMonitorReviewIngestTestTask("publish-forbidden-task", "publish-forbidden", 1, reviewHeadSHA)

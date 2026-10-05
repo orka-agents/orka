@@ -1,6 +1,8 @@
 package api
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -57,4 +59,84 @@ func TestGitHubWebhookPauseRemovalQueuesInventoryWithoutACommand(t *testing.T) {
 	}
 	assertNoTasks(t, fc)
 
+}
+
+func TestGitHubWebhookPausePersistsUntilFreshInventory(t *testing.T) {
+	permissionServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"permission":"write"}`))
+	}))
+	t.Cleanup(permissionServer.Close)
+	secret := configureGitHubWebhookTest(t, map[string]string{githubAPIBaseURLEnv: permissionServer.URL})
+	monitor := githubWebhookRepositoryMonitor("pause-intake", false)
+	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
+	monitor.Spec.Targets.Issues.Enabled = true
+	monitor.Spec.Triggers.GitHub.Labels.Enabled = true
+	fc := newGitHubWebhookFakeClient(t, monitor, githubWebhookGitSecret())
+	db := setupGitHubWebhookMonitorStore(t)
+	server := NewServer(fc, nil, ServerConfig{RepositoryMonitorStore: db})
+	if err := db.UpsertMonitorItem(t.Context(), &store.MonitorItem{
+		MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: "issue", ItemKey: "12", Number: 12,
+		LabelsJSON: `["bug"]`, SnapshotDigest: "sha256:current", WorkflowPhase: "implementing", LastActionTaskName: "active-task",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// A stale removal delivery must not clear a later addition. Inventory
+	// confirms the live label state before a paused workflow can resume.
+	for _, action := range []string{"labeled", "unlabeled"} {
+		body := fmt.Appendf(nil, `{"action":%q,"label":{"name":"orka:pause"},"repository":{"full_name":"sozercan/vekil"},"issue":{"number":12,"state":"open","labels":[]},"sender":{"login":"octocat"}}`, action)
+		resp := performSignedGitHubWebhook(t, server, githubEventIssues, "pause-"+action, secret, body)
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("%s status = %d; body: %s", action, resp.StatusCode, readRespBody(t, resp))
+		}
+		item, err := db.GetMonitorItem(t.Context(), monitor.Namespace, monitor.Name, "issue", "12")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var labels []string
+		if err := json.Unmarshal([]byte(item.LabelsJSON), &labels); err != nil {
+			t.Fatal(err)
+		}
+		paused := repositoryMonitorWebhookMatchingLabel(repositoryMonitorAPIPauseLabels(monitor), labels) != ""
+		if !paused || repositoryMonitorWebhookMatchingLabel([]string{"bug"}, labels) == "" {
+			t.Fatalf("%s labels = %s", action, item.LabelsJSON)
+		}
+		if item.WorkflowPhase != "implementing" || item.LastActionTaskName != "active-task" || item.SnapshotDigest != "sha256:current" {
+			t.Fatalf("pause intake changed active workflow: %+v", item)
+		}
+	}
+}
+
+func TestGitHubWebhookPauseDoesNotSuppressAnotherMonitorCommand(t *testing.T) {
+	permissionServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"permission":"write"}`))
+	}))
+	t.Cleanup(permissionServer.Close)
+	secret := configureGitHubWebhookTest(t, map[string]string{githubAPIBaseURLEnv: permissionServer.URL})
+	pauseMonitor := githubWebhookRepositoryMonitor("pause-loop", false)
+	pauseMonitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
+	pauseMonitor.Spec.Targets.Issues.Enabled = true
+	pauseMonitor.Spec.Triggers.GitHub.Labels.Enabled = true
+	pauseMonitor.Spec.Policy.PauseLabels = []string{"hold"}
+	implementMonitor := pauseMonitor.DeepCopy()
+	implementMonitor.Name = "implement-loop"
+	implementMonitor.Spec.Policy.PauseLabels = []string{"other-pause"}
+	implementMonitor.Spec.Triggers.GitHub.Labels.Issues.Implement = "hold"
+	fc := newGitHubWebhookFakeClient(t, pauseMonitor, implementMonitor, githubWebhookGitSecret())
+	db := setupGitHubWebhookMonitorStore(t)
+	server := NewServer(fc, nil, ServerConfig{RepositoryMonitorStore: db})
+	body := []byte(`{"action":"labeled","label":{"name":"hold"},"repository":{"full_name":"sozercan/vekil"},"issue":{"number":12,"state":"open","labels":[{"name":"hold"}]},"sender":{"login":"octocat"}}`)
+	resp := performSignedGitHubWebhook(t, server, githubEventIssues, "shared-label", secret, body)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d; body: %s", resp.StatusCode, readRespBody(t, resp))
+	}
+	commands, _, err := db.ListCommandEvents(t.Context(), store.CommandEventFilter{Namespace: implementMonitor.Namespace, MonitorName: implementMonitor.Name})
+	if err != nil || len(commands) != 1 || commands[0].Intent != githubActionImplement || commands[0].Status != githubCommandStatusAccepted {
+		t.Fatalf("other monitor command = %+v, err = %v", commands, err)
+	}
+	runs, _, err := db.ListMonitorRuns(t.Context(), store.MonitorRunFilter{Namespace: implementMonitor.Namespace})
+	if err != nil || len(runs) != 2 {
+		t.Fatalf("runs = %+v, err = %v, want pause and implement runs", runs, err)
+	}
 }

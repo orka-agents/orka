@@ -164,8 +164,19 @@ func (r *RepositoryMonitorReconciler) processIssueInventoryRun(ctx context.Conte
 			item.LastVerdict = repositoryMonitorVerdictSkipped
 			item.SkipReason = skipReason
 			item.WorkflowPhase = repositoryMonitorIssuePhaseBlocked
-			if existing != nil && existing.LastActionKind == repositoryMonitorIssueActionPlan && repositoryMonitorIssuePhaseAwaitingTask(existing.WorkflowPhase) && repositoryMonitorMatchingLabel(repositoryMonitorPauseLabels(monitor.Spec), issue.Labels) != "" {
-				item.WorkflowPhase = repositoryMonitorIssuePhasePaused
+			if existing != nil && repositoryMonitorMatchingLabel(repositoryMonitorPauseLabels(monitor.Spec), issue.Labels) != "" &&
+				(repositoryMonitorIssueWorkflowRetainedUnderRunLimit(existing) ||
+					(existing.WorkflowPhase == repositoryMonitorIssuePhaseBlocked && !repositoryMonitorIssueInventoryBlockCanClear(existing.SkipReason))) {
+				// Pause holds the next action. Preserve the current Task or its
+				// completed result, including failures that release job budgets.
+				item.WorkflowPhase = existing.WorkflowPhase
+				item.LastActionID = existing.LastActionID
+				item.LastActionKind = existing.LastActionKind
+				item.LastActionTaskName = existing.LastActionTaskName
+				item.LastVerdict = existing.LastVerdict
+				if existing.WorkflowPhase == repositoryMonitorIssuePhaseBlocked {
+					item.SkipReason = existing.SkipReason
+				}
 			}
 			if strings.TrimSpace(run.CommandEventID) != "" {
 				command, commandErr := r.Store.GetCommandEvent(ctx, monitor.Namespace, run.CommandEventID)
@@ -183,6 +194,9 @@ func (r *RepositoryMonitorReconciler) processIssueInventoryRun(ctx context.Conte
 				return selected, createdTasks, skipped, err
 			}
 			continue
+		}
+		if err := r.resumeRepositoryMonitorPausedIssue(ctx, monitor, item); err != nil {
+			return selected, createdTasks, skipped, err
 		}
 		created, err := r.processIssueCommandRun(ctx, monitor, run, item, owner, repository)
 		if err != nil {

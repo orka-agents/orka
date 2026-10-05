@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -23,7 +24,6 @@ func TestRepositoryMonitorReadinessStatusLifecycle(t *testing.T) {
 			ctx := context.Background()
 			db := setupControllerSQLiteStore(t)
 			monitor, secret := repositoryMonitorInventoryTestObjects("ready-status")
-			monitor.Spec.Repair.Enabled = true
 			monitor.Spec.Review.Publish.Enabled = true
 			scheme := runtime.NewScheme()
 			if err := corev1.AddToScheme(scheme); err != nil {
@@ -275,6 +275,106 @@ func TestRepositoryMonitorReadinessContextSeparatesNamespaces(t *testing.T) {
 	}
 }
 
+func TestRepositoryMonitorReadinessRefreshQueuesConflictRepair(t *testing.T) {
+	ctx := context.Background()
+	db := setupControllerSQLiteStore(t)
+	monitor, secret := repositoryMonitorInventoryTestObjects("fresh-conflict")
+	monitor.Spec.Repair.Enabled = true
+	monitor.Spec.Review.Publish.Enabled = true
+	monitor.Spec.Agents.Repairer = &corev1alpha1.AgentReference{Name: "repairer"}
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	r := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(), Store: db}
+	writes := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/pulls/31"):
+			_, _ = w.Write([]byte(`{"number":31,"state":"open","mergeable_state":"dirty","head":{"sha":"head"},"base":{"ref":"main"}}`))
+		case req.Method == http.MethodPost && strings.Contains(req.URL.Path, "/statuses/"):
+			var status repositoryMonitorCommitStatus
+			if err := json.NewDecoder(req.Body).Decode(&status); err != nil {
+				t.Error(err)
+			}
+			writes++
+			status.ID = int64(writes)
+			_ = json.NewEncoder(w).Encode(status)
+		default:
+			t.Errorf("unexpected request: %s %s", req.Method, req.URL.Path)
+			http.Error(w, "unexpected", 500)
+		}
+	}))
+	defer server.Close()
+	r.GitHubAPIBaseURL = server.URL
+	pr := repositoryMonitorPullRequest{Number: 31, State: "open", HeadSHA: "head", BaseBranch: "main", HeadRepo: "orka-agents/orka"}
+	item := repositoryMonitorItemFromPullRequest(monitor, pr, nil)
+	if err := r.reconcileRepositoryMonitorReadiness(ctx, monitor, &pr, item, []repositoryMonitorPullRequest{pr}); err != nil {
+		t.Fatal(err)
+	}
+	handled, err := r.tryRepositoryMonitorAutomaticRepair(ctx, monitor, &store.MonitorRun{ID: "fresh-conflict-run"}, "orka-agents", "orka", pr, item)
+	if err != nil || !handled {
+		t.Fatalf("conflict repair selection: handled=%v err=%v", handled, err)
+	}
+	commands, _, err := db.ListCommandEvents(ctx, store.CommandEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name})
+	if err != nil || len(commands) != 1 || commands[0].Intent != repositoryMonitorCommandIntentUpdateBranch {
+		t.Fatalf("conflict did not queue update-branch: commands=%+v err=%v", commands, err)
+	}
+}
+
+func TestRepositoryMonitorInventoryReusesReadinessPullRequestList(t *testing.T) {
+	ctx := context.Background()
+	db := setupControllerSQLiteStore(t)
+	monitor, secret := repositoryMonitorInventoryTestObjects("reuse-pr-inventory")
+	monitor.Spec.Repair.Enabled = true
+	monitor.Spec.Review.Publish.Enabled = true
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	r := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(), Store: db}
+	prs := make([]map[string]any, 0, 3)
+	for number := range 3 {
+		prs = append(prs, map[string]any{"number": number + 1, "state": "open", "head": map[string]string{"sha": fmt.Sprint("head-", number)}, "base": map[string]string{"ref": "main"}, "labels": []map[string]string{{"name": "orka:pause"}}})
+	}
+	lists, writes := 0, 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/pulls"):
+			lists++
+			_ = json.NewEncoder(w).Encode(prs)
+		case req.Method == http.MethodGet && strings.Contains(req.URL.Path, "/pulls/"):
+			number, err := strconv.Atoi(req.URL.Path[strings.LastIndex(req.URL.Path, "/")+1:])
+			if err != nil || number < 1 || number > len(prs) {
+				t.Errorf("unexpected PR request: %s", req.URL.Path)
+				http.Error(w, "unexpected", 500)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(prs[number-1])
+		case req.Method == http.MethodPost && strings.Contains(req.URL.Path, "/statuses/"):
+			var status repositoryMonitorCommitStatus
+			if err := json.NewDecoder(req.Body).Decode(&status); err != nil {
+				t.Error(err)
+			}
+			writes++
+			status.ID = int64(writes)
+			_ = json.NewEncoder(w).Encode(status)
+		default:
+			t.Errorf("unexpected request: %s %s", req.Method, req.URL.Path)
+			http.Error(w, "unexpected", 500)
+		}
+	}))
+	defer server.Close()
+	r.GitHubAPIBaseURL = server.URL
+	run := &store.MonitorRun{ID: "reuse-pr-inventory-run", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, TargetKind: repositoryMonitorPullRequestKind}
+	_, _, skipped, err := r.processPullRequestInventoryRun(ctx, monitor, run, "orka-agents", "orka")
+	if err != nil || skipped != len(prs) || lists != 1 || writes != 2*len(prs) {
+		t.Fatalf("inventory requests: lists=%d writes=%d skipped=%d err=%v", lists, writes, skipped, err)
+	}
+}
+
 func TestRepositoryMonitorReadinessAggregatesSharedHeads(t *testing.T) {
 	ctx := context.Background()
 	db := setupControllerSQLiteStore(t)
@@ -288,7 +388,7 @@ func TestRepositoryMonitorReadinessAggregatesSharedHeads(t *testing.T) {
 	r := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(), Store: db}
 	peerClosed, firstDraft, reversePeers := false, false, false
 	latest := repositoryMonitorCommitStatus{}
-	writes := 0
+	writes, lists := 0, 0
 	prJSON := func(number int) map[string]any {
 		labels := []map[string]string{}
 		if number == 2 {
@@ -304,6 +404,7 @@ func TestRepositoryMonitorReadinessAggregatesSharedHeads(t *testing.T) {
 		case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/pulls/2"):
 			_ = json.NewEncoder(w).Encode(prJSON(2))
 		case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/pulls"):
+			lists++
 			prs := []any{prJSON(1)}
 			if !peerClosed {
 				prs = append(prs, prJSON(2))
@@ -339,10 +440,10 @@ func TestRepositoryMonitorReadinessAggregatesSharedHeads(t *testing.T) {
 		}
 		items = append(items, item)
 	}
-	reconcile := func(item *store.MonitorItem, want string) {
+	reconcile := func(item *store.MonitorItem, want string, inventory ...[]repositoryMonitorPullRequest) {
 		t.Helper()
 		pr := repositoryMonitorPullRequest{Number: item.Number, HeadSHA: "head", State: "open", BaseBranch: "main"}
-		if err := r.reconcileRepositoryMonitorReadiness(ctx, monitor, &pr, item); err != nil {
+		if err := r.reconcileRepositoryMonitorReadiness(ctx, monitor, &pr, item, inventory...); err != nil {
 			t.Fatal(err)
 		}
 		if latest.State != want {
@@ -367,6 +468,17 @@ func TestRepositoryMonitorReadinessAggregatesSharedHeads(t *testing.T) {
 	}
 	if writes != stableWrites {
 		t.Fatalf("unchanged distinct blockers wrote %d extra statuses", writes-stableWrites)
+	}
+	// Reusing inventory must preserve the peer's blocker without another list.
+	beforeLists := lists
+	inventory := []repositoryMonitorPullRequest{
+		{Number: 1, HeadSHA: "head", State: "open", BaseBranch: "main", Draft: firstDraft},
+		{Number: 2, HeadSHA: "head", State: "open", BaseBranch: "main", Labels: []string{"orka:pause"}},
+	}
+	reconcile(items[0], repositoryMonitorStatusFailure, inventory)
+	reconcile(items[1], repositoryMonitorStatusFailure, inventory)
+	if lists != beforeLists || writes != stableWrites {
+		t.Fatalf("inventory reuse changed the shared outcome: lists=%d writes=%d", lists-beforeLists, writes-stableWrites)
 	}
 	firstDraft = false
 	// Once the peer closes, the shared audit must permit a fresh success. A
