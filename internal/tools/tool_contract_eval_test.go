@@ -630,7 +630,7 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 	}
 	workerTool := func(name string, fc client.Client) (Tool, context.Context) {
 		tool, _ := evalToolRegistries(fc)["worker"].Get(name)
-		return tool, evalToolContext(fc)
+		return tool, evalToolContextFor("worker", fc)
 	}
 	githubTask := func() client.Client {
 		task, secret := githubRepoTaskWithSecret(testOrgTestRepoURL)
@@ -829,7 +829,6 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 				url := "https://1.1.1.1/" + long(brokeredWebFetchMaxURLBytes/utf8.UTFMax)
 				return evalRejects(context.Background(), tool, `{"url":"`+url+`","max_chars":50001}`, "url")
 			},
-			knownDefect: "brokered web_fetch advertises url maxLength in characters but only enforces its 64 KiB byte limit",
 		},
 		{
 			name:   "worker create_agent model contextWindow",

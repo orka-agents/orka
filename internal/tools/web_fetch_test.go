@@ -345,7 +345,7 @@ func TestBrokeredWebFetchToolWorstCaseEscapingFitsMCPResultLimit(t *testing.T) {
 	tool.client = server.Client()
 	tool.allowPrivateForTests = true
 	urlPrefix := server.URL + "/?"
-	worstCaseURL := urlPrefix + strings.Repeat("&", brokeredWebFetchMaxURLBytes-len(urlPrefix))
+	worstCaseURL := urlPrefix + strings.Repeat("&", brokeredWebFetchMaxURLBytes/utf8.UTFMax-len(urlPrefix))
 	args, err := json.Marshal(WebFetchArgs{URL: worstCaseURL, MaxChars: brokeredWebFetchMaxChars})
 	if err != nil {
 		t.Fatal(err)
