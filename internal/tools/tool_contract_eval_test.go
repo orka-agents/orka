@@ -1184,6 +1184,21 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			check:  evalReviewCommentFieldRequired("line"),
 		},
 		{
+			name: "worker post_review_comment comment text",
+			limits: []string{
+				"worker/post_review_comment.comments[].path minLength=1", "worker/post_review_comment.comments[].path pattern=\\S",
+				"worker/post_review_comment.comments[].body minLength=1", "worker/post_review_comment.comments[].body pattern=\\S",
+			},
+			check: func(t *testing.T) (bool, string) {
+				return evalAll(
+					func() (bool, string) { return evalReviewCommentText(t, "path", "") },
+					func() (bool, string) { return evalReviewCommentText(t, "path", " ") },
+					func() (bool, string) { return evalReviewCommentText(t, "body", "") },
+					func() (bool, string) { return evalReviewCommentText(t, "body", " ") },
+				)
+			},
+		},
+		{
 			name:   "worker post_review_comment comment line minimum",
 			limits: []string{"worker/post_review_comment.comments[].line minimum=1"},
 			check:  evalReviewCommentLine(0),
@@ -1332,6 +1347,23 @@ func evalReviewCommentFieldRequired(field string) func(*testing.T) (bool, string
 		}
 		return ok, detail
 	}
+}
+
+// evalReviewCommentText checks that post_review_comment rejects a line comment
+// whose path or body is the given text.
+func evalReviewCommentText(t *testing.T, field, text string) (bool, string) {
+	task, secret := githubRepoTaskWithSecret(testOrgTestRepoURL)
+	stub := newEvalHTTPStub(t)
+	t.Setenv(envOrkaTaskName, testCoderTaskName)
+	tool := &PostReviewCommentTool{k8sClient: newFakeClient(task, secret), apiBaseURL: stub.URL}
+	review := func(value string) string {
+		comment := map[string]any{"path": "main.go", "line": 1, "body": "nit"}
+		comment[field] = value
+		raw, _ := json.Marshal(map[string]any{"task_name": testCoderTaskName, "pr_number": 1, "body": "x", "event": "COMMENT", "comments": []any{comment}})
+		return string(raw)
+	}
+	call := func() (Tool, context.Context) { return tool, context.Background() }
+	return evalRejectsChange(call, review(map[string]string{"path": "main.go", "body": "nit"}[field]), review(text), field)
 }
 
 // evalReviewCommentLine checks that post_review_comment rejects a line comment
