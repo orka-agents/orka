@@ -58,9 +58,9 @@ var jsonNumberPattern = regexp.MustCompile(`^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:
 // some tools read as shorthand, and numbers and booleans stay allowed for
 // strings. Fields the schema does not declare pass through unchanged.
 func normalizeArgTypes(tool Tool, args json.RawMessage) (json.RawMessage, error) {
-	values, ok := decodeArgObject(args)
-	if !ok || len(values) == 0 {
-		return args, nil
+	values, err := decodeArgObject(args)
+	if err != nil || len(values) == 0 {
+		return args, err
 	}
 	var schema struct {
 		Properties map[string]struct {
@@ -92,7 +92,10 @@ func normalizeArgTypes(tool Tool, args json.RawMessage) (json.RawMessage, error)
 			changed = true
 		}
 	}
-	if !changed {
+	// Re-encoding would replace invalid Unicode escapes, which
+	// reply_in_conversation rejects, so such a document goes on unchanged once
+	// its types check out.
+	if !changed || !protocol.ValidJSONUnicode(args) {
 		return args, nil
 	}
 	normalized, err := json.Marshal(values)
@@ -102,38 +105,36 @@ func normalizeArgTypes(tool Tool, args json.RawMessage) (json.RawMessage, error)
 	return normalized, nil
 }
 
-// decodeArgObject decodes a JSON object of arguments. It reports false for a
-// document that re-encoding would change beyond the normalized values: invalid
-// JSON, trailing data, invalid Unicode escapes, a duplicate key, or a
-// non-object. The tool then gets the original document and applies its own
-// checks, as reply_in_conversation does for duplicate keys and Unicode.
-func decodeArgObject(args json.RawMessage) (map[string]any, bool) {
-	// ValidJSONUnicode also rejects anything but a single JSON value.
-	if !protocol.ValidJSONUnicode(args) {
-		return nil, false
+// decodeArgObject decodes a JSON object of arguments. It returns nil values
+// for invalid JSON, trailing data, or a non-object, which the tool rejects
+// itself. A duplicate key is an error: the tool would see only one of the
+// values, and the others would skip the type check.
+func decodeArgObject(args json.RawMessage) (map[string]any, error) {
+	if !json.Valid(args) {
+		return nil, nil
 	}
 	decoder := json.NewDecoder(bytes.NewReader(args))
 	decoder.UseNumber()
 	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
-		return nil, false
+		return nil, nil
 	}
 	values := map[string]any{}
 	for decoder.More() {
 		token, err := decoder.Token()
 		key, isKey := token.(string)
 		if err != nil || !isKey {
-			return nil, false
+			return nil, nil
 		}
 		if _, duplicate := values[key]; duplicate {
-			return nil, false
+			return nil, &ToolArgumentError{Field: key, Want: "sent once", Got: "a duplicate"}
 		}
 		var value any
 		if err := decoder.Decode(&value); err != nil {
-			return nil, false
+			return nil, nil
 		}
 		values[key] = value
 	}
-	return values, true
+	return values, nil
 }
 
 // canonicalJSONInteger returns the plain spelling of an integral JSON number

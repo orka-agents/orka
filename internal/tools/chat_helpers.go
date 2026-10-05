@@ -94,6 +94,17 @@ func chatGetIntArg(args map[string]any, key string, defaultVal int) int {
 	}
 	switch n := v.(type) {
 	case float64:
+		// Saturate rather than convert out of range, which wraps, so a huge
+		// value still meets the caller's clamp: wait_for_task turned a huge
+		// timeout into a negative one that had already expired.
+		switch {
+		case math.IsNaN(n):
+			return defaultVal
+		case n >= math.MaxInt:
+			return math.MaxInt
+		case n <= math.MinInt:
+			return math.MinInt
+		}
 		return int(n)
 	case int:
 		return n
