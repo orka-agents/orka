@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -456,9 +457,10 @@ func normalizeChatOpenCodeModel(agent *corev1alpha1.Agent) (string, bool) {
 }
 
 // parseCoordinationConfig extracts coordination configuration from chat args
-// into the agent spec. It returns an error result and false when an allowed
-// agent has no name; dropping it would widen delegation to any agent when it
-// was the only entry.
+// into the agent spec. It returns an error result and false for a field with
+// the wrong JSON type or an allowed agent without a name. Ignoring either would
+// drop a restriction: an empty allowedAgents lets the Agent delegate to any
+// agent.
 func parseCoordinationConfig(a map[string]any, agent *corev1alpha1.Agent) (string, bool) {
 	coord, ok := a["coordination"]
 	if !ok {
@@ -468,17 +470,37 @@ func parseCoordinationConfig(a map[string]any, agent *corev1alpha1.Agent) (strin
 	if !ok {
 		return "", true
 	}
+	invalid := func(field, want string) (string, bool) {
+		result, _ := ChatToolErrorResult(invalidArgumentsErrorType, "coordination."+field+" must be "+want, "Resend coordination."+field+" as "+want)
+		return result, false
+	}
 	coordCfg := &corev1alpha1.CoordinationConfig{}
-	if enabled, ok := coordMap[enabledString].(bool); ok {
+	if value := coordMap[enabledString]; value != nil {
+		enabled, ok := value.(bool)
+		if !ok {
+			return invalid(enabledString, "a boolean")
+		}
 		coordCfg.Enabled = enabled
 	}
-	if maxCC, ok := coordMap["maxConcurrentChildren"].(float64); ok {
-		coordCfg.MaxConcurrentChildren = int32(maxCC)
+	for _, limit := range []struct {
+		field  string
+		target *int32
+	}{{"maxConcurrentChildren", &coordCfg.MaxConcurrentChildren}, {"maxDepth", &coordCfg.MaxDepth}} {
+		value := coordMap[limit.field]
+		if value == nil {
+			continue
+		}
+		number, ok := value.(float64)
+		if !ok || number != math.Trunc(number) {
+			return invalid(limit.field, "a whole number")
+		}
+		*limit.target = int32(number)
 	}
-	if maxD, ok := coordMap["maxDepth"].(float64); ok {
-		coordCfg.MaxDepth = int32(maxD)
-	}
-	if allowed, ok := coordMap["allowedAgents"].([]any); ok {
+	if value := coordMap["allowedAgents"]; value != nil {
+		allowed, ok := value.([]any)
+		if !ok {
+			return invalid("allowedAgents", "an array of agents")
+		}
 		for i, item := range allowed {
 			aMap, _ := item.(map[string]any)
 			aa := corev1alpha1.AllowedAgent{
