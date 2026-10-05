@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"maps"
 	"net/http"
@@ -209,11 +210,13 @@ func TestChatEvalRequestContextReachesModel(t *testing.T) {
 
 // TestChatEvalScopedCallerPromptMatchesTools checks that a caller whose token
 // limits the tools it may use is not told to call the tools it lost. Chat tool
-// names in the system prompt must be among the tools offered on the turn.
+// names in the model input must be among the tools offered on the turn, and a
+// selected agent must stay visible even when its tool is not offered.
 func TestChatEvalScopedCallerPromptMatchesTools(t *testing.T) {
 	tests := []struct {
 		name         string
 		allowedTools []string
+		agentRef     string
 		knownDefect  string
 	}{
 		{name: "all chat tools allowed", allowedTools: chattools.ChatToolNames()},
@@ -221,6 +224,12 @@ func TestChatEvalScopedCallerPromptMatchesTools(t *testing.T) {
 			name:         "read-only tools allowed",
 			allowedTools: []string{"list_tasks", "list_agents", "check_task_progress", "fetch_task_output"},
 			knownDefect:  "the system prompt is static, so a token's allowedTools removes tools the prompt still tells the model to call",
+		},
+		{
+			name:         "selected runtime agent without its task tool",
+			allowedTools: []string{"list_tasks", "list_agents", "check_task_progress", "fetch_task_output"},
+			agentRef:     "coder",
+			knownDefect:  "the prompt and the selected-agent hint name task tools that a token's allowedTools removed",
 		},
 	}
 	for _, tt := range tests {
@@ -244,7 +253,7 @@ func TestChatEvalScopedCallerPromptMatchesTools(t *testing.T) {
 			app.Use(NewAuthMiddleware(c, AuthConfig{ContextTokens: testContextTokenConfig(t, oidc, "")}))
 			app.Post("/api/v1/chat", ch.HandleChat)
 
-			body, err := json.Marshal(ChatRequest{SessionID: "chat-eval", Message: "list the pods in kube-system", Provider: "openai"})
+			body, err := json.Marshal(ChatRequest{SessionID: "chat-eval", Message: "list the pods in kube-system", Provider: "openai", AgentRef: tt.agentRef})
 			require.NoError(t, err)
 			httpReq := httptest.NewRequest(http.MethodPost, "/api/v1/chat", bytes.NewReader(body))
 			httpReq.Header.Set("Content-Type", "application/json")
@@ -267,11 +276,14 @@ func TestChatEvalScopedCallerPromptMatchesTools(t *testing.T) {
 				"offered chat tools must match the token's allowedTools")
 			var unavailable []string
 			for _, name := range chattools.ChatToolNames() {
-				if !offered[name] && regexp.MustCompile(`\b`+name+`\b`).MatchString(req.SystemPrompt) {
+				if !offered[name] && regexp.MustCompile(`\b`+name+`\b`).MatchString(chatEvalModelInput(req)) {
 					unavailable = append(unavailable, name)
 				}
 			}
-			expectChatEvalCheck(t, len(unavailable) == 0, "prompt names tools the caller cannot use: "+strings.Join(unavailable, ","), tt.knownDefect)
+			expectChatEvalCheck(t, len(unavailable) == 0, "model input names tools the caller cannot use: "+strings.Join(unavailable, ","), tt.knownDefect)
+			if tt.agentRef != "" {
+				require.Contains(t, req.Messages[len(req.Messages)-1].Content, fmt.Sprintf("%q", tt.agentRef), "the selected agent must stay visible to the model")
+			}
 		})
 	}
 }

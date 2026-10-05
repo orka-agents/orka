@@ -85,7 +85,7 @@ func TestScannerEvalIgnoreInstructionsPattern(t *testing.T) {
 // Scanned repositories and their findings are attacker-controllable, and the
 // patch stage edits files that Orka publishes.
 func TestScannerEvalPromptsTreatRepositoryContentAsUntrusted(t *testing.T) {
-	const knownDefect = "no scanner prompt tells the model to ignore instructions embedded in repository content; the review prompt labels inlined repository excerpts as TRUSTED context"
+	const knownDefect = "no scanner prompt tells the model to ignore instructions embedded in repository content"
 	for name, prompt := range scannerEvalPrompts() {
 		t.Run(name, func(t *testing.T) {
 			if name == "review" && !strings.Contains(prompt, scannerEvalRepositoryExcerpt) {
@@ -96,6 +96,15 @@ func TestScannerEvalPromptsTreatRepositoryContentAsUntrusted(t *testing.T) {
 				"prompt has no instruction to ignore directives inside repository content", knownDefect)
 		})
 	}
+}
+
+// TestScannerEvalReviewPromptDoesNotTrustRepositoryContent checks that the
+// review prompt does not introduce inlined repository excerpts as trusted.
+func TestScannerEvalReviewPromptDoesNotTrustRepositoryContent(t *testing.T) {
+	prompt := strings.ReplaceAll(scannerEvalPrompts()["review"], scannerEvalRepositoryExcerpt, "")
+	expectScannerEvalCheck(t, !regexp.MustCompile(`\bTRUSTED\b`).MatchString(prompt),
+		"review prompt labels repository content as TRUSTED",
+		"the review prompt introduces inlined repository excerpts as TRUSTED context")
 }
 
 // TestScannerEvalCustomPolicyCannotDisplaceDefaults checks that ConfigMap
@@ -109,9 +118,12 @@ func TestScannerEvalCustomPolicyCannotDisplaceDefaults(t *testing.T) {
 		CustomScanSource:       "configmap/scan-policy",
 		FalsePositiveSource:    "configmap/scan-policy",
 	}
+	// Each prompt's mandatory text that the custom policy must follow. The
+	// threat model has no finding policy, so use its last built-in requirement.
 	defaults := map[string]string{
-		"review":     ScannerFindingQualityPolicy(),
-		"validation": ScannerValidationQualityPolicy(),
+		"threat model": "- Call out important uncertainties explicitly instead of inventing details.",
+		"review":       ScannerFindingQualityPolicy(),
+		"validation":   ScannerValidationQualityPolicy(),
 	}
 	for name, prompt := range scannerEvalPrompts(custom) {
 		if name == "patch" {
