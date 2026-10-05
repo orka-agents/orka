@@ -266,7 +266,7 @@ func TestToolEvalMalformedArguments(t *testing.T) {
 	violations := map[string]string{}
 	// Panics, Go errors from chat tools, and failures without a message are
 	// never accepted as known defects.
-	var fatal, inconclusive []string
+	var fatal, inconclusive, untested []string
 	for label, registry := range evalToolRegistries(newFakeClient()) {
 		names := registry.Names()
 		sort.Strings(names)
@@ -278,8 +278,11 @@ func TestToolEvalMalformedArguments(t *testing.T) {
 
 			inputs := map[string]string{"null": `null`, "array": `[]`, "string": `"text"`, "number": `42`, "empty object": `{}`}
 			// Omit each required field on its own, so a field the tool checks
-			// cannot hide one it ignores.
+			// cannot hide one it ignores. The call with every required field is
+			// the baseline: where it fails too, a failure proves nothing.
 			if len(required) > 1 {
+				baseline, _ := json.Marshal(evalToolRequiredArgs(required, properties))
+				inputs["all required"] = string(baseline)
 				for i, field := range required {
 					args, _ := json.Marshal(evalToolRequiredArgs(slices.Delete(slices.Clone(required), i, i+1), properties))
 					inputs[fmt.Sprintf("missing %v", field)] = string(args)
@@ -310,6 +313,7 @@ func TestToolEvalMalformedArguments(t *testing.T) {
 			}
 			sort.Strings(inputNames)
 
+			baselineFailed := map[string]bool{}
 			for _, input := range inputNames {
 				for _, cluster := range []string{"empty", "seeded"} {
 					fc := evalToolClusters[cluster]()
@@ -325,8 +329,12 @@ func TestToolEvalMalformedArguments(t *testing.T) {
 						fatal = append(fatal, fmt.Sprintf("%s: failed without an error message: %q", key, result))
 					case (input == "empty object" || input == "null") && len(required) > 0 && !failed:
 						violations[key] = fmt.Sprintf("reported success without required fields %v in the %s cluster", required, cluster)
+					case input == "all required" && failed:
+						baselineFailed[cluster] = true
 					case strings.HasPrefix(input, "missing ") && !failed:
 						violations[key] = fmt.Sprintf("reported success without required field %s in the %s cluster", strings.TrimPrefix(input, "missing "), cluster)
+					case strings.HasPrefix(input, "missing ") && baselineFailed[cluster]:
+						untested = append(untested, key+" ("+cluster+")")
 					}
 				}
 			}
@@ -337,6 +345,7 @@ func TestToolEvalMalformedArguments(t *testing.T) {
 	}
 	sort.Strings(inconclusive)
 	t.Logf("object-as-string handling not observable without more setup: %v", inconclusive)
+	t.Logf("missing required fields not tested because the call with every required field also failed: %v", untested)
 	evalToolReportViolations(t, violations, knownDefects)
 }
 
@@ -573,8 +582,45 @@ func evalLimitValue(value any) string {
 	return fmt.Sprint(value)
 }
 
+// evalBaselineFailures counts calls that a check expected to succeed but that
+// failed, so a case whose valid call breaks cannot pass or be excused as a
+// known defect.
+var evalBaselineFailures atomic.Int64
+
+// evalCall returns a fresh tool and context for one call, so one call's side
+// effects cannot cause another call's failure.
+type evalCall func() (Tool, context.Context)
+
+// evalSucceeds runs a call that must succeed, counting a failure in
+// evalBaselineFailures.
+func evalSucceeds(call evalCall, args string) (bool, string) {
+	tool, ctx := call()
+	result, panicked, err := evalToolExecute(ctx, tool, args)
+	if panicked != nil {
+		return false, fmt.Sprintf("panicked: %v", panicked)
+	}
+	if failed, message := evalToolFailure(result, err); failed {
+		evalBaselineFailures.Add(1)
+		return false, fmt.Sprintf("valid call %s failed: %s", args, message)
+	}
+	return true, ""
+}
+
+// evalRejectsChange checks one change to a valid call: the valid call must
+// succeed, and the same call with one field changed must fail with a message
+// naming that field.
+func evalRejectsChange(call evalCall, valid, invalid, field string) (bool, string) {
+	if ok, detail := evalSucceeds(call, valid); !ok {
+		return false, detail
+	}
+	tool, ctx := call()
+	return evalRejects(ctx, tool, invalid, field)
+}
+
 // evalRejects reports whether a tool call failed with a message naming the
-// limited field, so a rejection for an unrelated reason does not count.
+// limited field, so a rejection for an unrelated reason does not count. Use it
+// directly only where no call can succeed in the eval, such as tools that need
+// a real network or gateway; otherwise use evalRejectsChange.
 func evalRejects(ctx context.Context, tool Tool, args, field string) (bool, string) {
 	result, panicked, err := evalToolExecute(ctx, tool, args)
 	if panicked != nil {
@@ -590,26 +636,16 @@ func evalRejects(ctx context.Context, tool Tool, args, field string) (bool, stri
 	return true, ""
 }
 
-// evalEnumEnforced checks that a value outside the enum is rejected and that
-// no declared value is. A declared value counts as rejected only if it fails
-// with the message the invalid value produced, so a call that fails for
-// unrelated missing context still accepts the value.
-func evalEnumEnforced(ctx context.Context, tool Tool, args func(value string) string, field, invalid string, declared ...string) (bool, string) {
-	if ok, detail := evalRejects(ctx, tool, args(invalid), field); !ok {
-		return false, detail
-	}
-	result, _, err := evalToolExecute(ctx, tool, args(invalid))
-	_, rejection := evalToolFailure(result, err)
+// evalEnumEnforced checks that every declared value succeeds and that a value
+// outside the enum fails with a message naming the field.
+func evalEnumEnforced(call evalCall, args func(value string) string, field, invalid string, declared ...string) (bool, string) {
 	for _, value := range declared {
-		result, panicked, err := evalToolExecute(ctx, tool, args(value))
-		if panicked != nil {
-			return false, fmt.Sprintf("%s %q panicked: %v", field, value, panicked)
-		}
-		if failed, message := evalToolFailure(result, err); failed && (message == rejection || message == strings.ReplaceAll(rejection, invalid, value)) {
-			return false, fmt.Sprintf("rejected declared %s %q: %s", field, value, message)
+		if ok, detail := evalSucceeds(call, args(value)); !ok {
+			return false, detail
 		}
 	}
-	return true, ""
+	tool, ctx := call()
+	return evalRejects(ctx, tool, args(invalid), field)
 }
 
 // evalRecordingCodeExec returns a code_exec tool whose sandbox only records the
@@ -758,13 +794,16 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			name:   "chat create_agent model counts",
 			limits: []string{"chat/create_agent.model.contextWindow minimum=1", "chat/create_agent.model.maxTokens minimum=1"},
 			check: func(t *testing.T) (bool, string) {
-				tool, ctx := chatTool("create_agent", newFakeClient())
+				call := func() (Tool, context.Context) { return chatTool("create_agent", newFakeClient()) }
+				model := func(field string, v int) string {
+					return fmt.Sprintf(`{"name":"a","model":{"name":"m","%s":%d}}`, field, v)
+				}
 				return evalAll(
 					func() (bool, string) {
-						return evalRejects(ctx, tool, `{"name":"a","model":{"name":"m","contextWindow":0}}`, "contextWindow")
+						return evalRejectsChange(call, model("contextWindow", 1), model("contextWindow", 0), "contextWindow")
 					},
 					func() (bool, string) {
-						return evalRejects(ctx, tool, `{"name":"a","model":{"name":"m","maxTokens":0}}`, "maxTokens")
+						return evalRejectsChange(call, model("maxTokens", 1), model("maxTokens", 0), "maxTokens")
 					},
 				)
 			},
@@ -783,19 +822,20 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			name:   "chat update_agent model",
 			limits: []string{"chat/update_agent.model.contextWindow minimum=1", "chat/update_agent.model.maxTokens minimum=1", "chat/update_agent.model.temperature maximum=2", "chat/update_agent.model.temperature minimum=0"},
 			check: func(t *testing.T) (bool, string) {
-				tool, ctx := chatTool("update_agent", evalToolClusters["seeded"]())
+				call := func() (Tool, context.Context) { return chatTool("update_agent", evalToolClusters["seeded"]()) }
+				model := func(field, v string) string { return fmt.Sprintf(`{"name":"eval","model":{"%s":%s}}`, field, v) }
 				return evalAll(
 					func() (bool, string) {
-						return evalRejects(ctx, tool, `{"name":"eval","model":{"contextWindow":0}}`, "contextWindow")
+						return evalRejectsChange(call, model("contextWindow", "1"), model("contextWindow", "0"), "contextWindow")
 					},
 					func() (bool, string) {
-						return evalRejects(ctx, tool, `{"name":"eval","model":{"maxTokens":0}}`, "maxTokens")
+						return evalRejectsChange(call, model("maxTokens", "1"), model("maxTokens", "0"), "maxTokens")
 					},
 					func() (bool, string) {
-						return evalRejects(ctx, tool, `{"name":"eval","model":{"temperature":2.5}}`, "temperature")
+						return evalRejectsChange(call, model("temperature", "2"), model("temperature", "2.5"), "temperature")
 					},
 					func() (bool, string) {
-						return evalRejects(ctx, tool, `{"name":"eval","model":{"temperature":-1}}`, "temperature")
+						return evalRejectsChange(call, model("temperature", "0"), model("temperature", "-1"), "temperature")
 					},
 				)
 			},
@@ -804,14 +844,11 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			name:   "chat create_agent_task maxTurns",
 			limits: []string{"chat/create_agent_task.maxTurns maximum=1000", "chat/create_agent_task.maxTurns minimum=1"},
 			check: func(t *testing.T) (bool, string) {
-				tool, ctx := chatTool("create_agent_task", newFakeClient())
+				call := func() (Tool, context.Context) { return chatTool("create_agent_task", evalRuntimeAgentCluster()) }
+				turns := func(v int) string { return fmt.Sprintf(`{"name":"t","prompt":"p","agentRef":"a","maxTurns":%d}`, v) }
 				return evalAll(
-					func() (bool, string) {
-						return evalRejects(ctx, tool, `{"name":"t","prompt":"p","agentRef":"a","maxTurns":1001}`, "maxTurns")
-					},
-					func() (bool, string) {
-						return evalRejects(ctx, tool, `{"name":"t","prompt":"p","agentRef":"a","maxTurns":0}`, "maxTurns")
-					},
+					func() (bool, string) { return evalRejectsChange(call, turns(1000), turns(1001), "maxTurns") },
+					func() (bool, string) { return evalRejectsChange(call, turns(1), turns(0), "maxTurns") },
 				)
 			},
 		},
@@ -819,18 +856,20 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			name:   "chat create_agent_task workspace",
 			limits: []string{"chat/create_agent_task.workspace.intent enum=read|write", "chat/create_agent_task.workspace.prBody maxLength=32768", "chat/create_agent_task.workspace.prTitle maxLength=256"},
 			check: func(t *testing.T) (bool, string) {
-				tool, ctx := chatTool("create_agent_task", newFakeClient())
+				call := func() (Tool, context.Context) { return chatTool("create_agent_task", evalRuntimeAgentCluster()) }
 				base := `{"name":"t","prompt":"p","agentRef":"a","workspace":{"gitRepo":"https://github.com/acme/api",%s}}`
+				pr := func(field string, n int) string {
+					return fmt.Sprintf(base, `"intent":"write","publicationCredentialRef":"git-write","createPR":true,"prBaseBranch":"main","forgeCredentialRef":"forge","`+field+`":"`+long(n)+`"`)
+				}
 				return evalAll(
 					func() (bool, string) {
-						intent := func(v string) string { return fmt.Sprintf(base, `"intent":"`+v+`"`) }
-						return evalEnumEnforced(ctx, tool, intent, "intent", "delete", "read", "write")
+						return evalEnumEnforced(call, evalWorkspaceIntent(base), "intent", "delete", "read", "write")
 					},
 					func() (bool, string) {
-						return evalRejects(ctx, tool, fmt.Sprintf(base, `"intent":"write","createPR":true,"prTitle":"`+long(257)+`"`), "prTitle")
+						return evalRejectsChange(call, pr("prTitle", 256), pr("prTitle", 257), "prTitle")
 					},
 					func() (bool, string) {
-						return evalRejects(ctx, tool, fmt.Sprintf(base, `"intent":"write","createPR":true,"prBody":"`+long(32769)+`"`), "prBody")
+						return evalRejectsChange(call, pr("prBody", 32768), pr("prBody", 32769), "prBody")
 					},
 				)
 			},
@@ -866,13 +905,13 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 					}
 					return true, ""
 				}
-				tool, ctx := chatTool("create_pr_monitor", agent())
+				call := func() (Tool, context.Context) { return chatTool("create_pr_monitor", agent()) }
 				return evalAll(
 					func() (bool, string) { return pagesClamped(500) },
 					func() (bool, string) { return pagesClamped(-5) },
 					func() (bool, string) {
 						event := func(v string) string { return fmt.Sprintf(base, `,"review_event":"`+v+`"`) }
-						return evalEnumEnforced(ctx, tool, event, "review_event", "MAYBE", "COMMENT", "APPROVE", "REQUEST_CHANGES")
+						return evalEnumEnforced(call, event, "review_event", "MAYBE", "COMMENT", "APPROVE", "REQUEST_CHANGES")
 					},
 				)
 			},
@@ -884,8 +923,9 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 				// Clamping an over-maximum timeout is pinned by
 				// TestCodeExecTool_Execute_TimeoutClampsToMax.
 				tool, _ := evalRecordingCodeExec(t)
+				call := func() (Tool, context.Context) { return tool, context.Background() }
 				language := func(v string) string { return `{"language":"` + v + `","code":"echo test"}` }
-				return evalEnumEnforced(context.Background(), tool, language, "language", "cobol", "python", "python3", "javascript", "node", "bash", "sh")
+				return evalEnumEnforced(call, language, "language", "cobol", "python", "python3", "javascript", "node", "bash", "sh")
 			},
 		},
 		{
@@ -894,8 +934,11 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			check: func(t *testing.T) (bool, string) {
 				// Zero is the value just below the minimum.
 				tool, sandbox := evalRecordingCodeExec(t)
-				if ok, _ := evalRejects(context.Background(), tool, `{"language":"bash","code":"echo test","timeout":0}`, "timeout"); ok {
-					return true, ""
+				call := func() (Tool, context.Context) { return tool, context.Background() }
+				timeout := func(v int) string { return fmt.Sprintf(`{"language":"bash","code":"echo test","timeout":%d}`, v) }
+				ok, detail := evalRejectsChange(call, timeout(1), timeout(0), "timeout")
+				if ok || strings.HasPrefix(detail, "valid call") {
+					return ok, detail
 				}
 				if sandbox.calls > 0 && sandbox.req.Timeout == time.Second {
 					return true, ""
@@ -954,29 +997,31 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 					return true, ""
 				}
 				t.Setenv(envOrkaTaskName, "parent")
-				tool, ctx := workerTool("create_agent", newFakeClient(&corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: defaultNamespace}}))
-				return evalRejects(ctx, tool, `{"role":"coder","systemPrompt":"s","model":{"name":"m","maxTokens":0}}`, "maxTokens")
+				call := func() (Tool, context.Context) { return workerTool("create_agent", evalParentTaskCluster()) }
+				tokens := func(v int) string {
+					return fmt.Sprintf(`{"role":"coder","systemPrompt":"s","model":{"name":"m","maxTokens":%d}}`, v)
+				}
+				return evalRejectsChange(call, tokens(1), tokens(0), "maxTokens")
 			},
 		},
 		{
 			name:   "worker delegate_task workspace",
 			limits: []string{"worker/delegate_task.workspace.intent enum=read|write", "worker/delegate_task.workspace.prBody maxLength=32768", "worker/delegate_task.workspace.prTitle maxLength=256"},
 			check: func(t *testing.T) (bool, string) {
-				tool, ctx := workerTool("delegate_task", newFakeClient(&corev1alpha1.Agent{
-					ObjectMeta: metav1.ObjectMeta{Name: "coder", Namespace: defaultNamespace},
-					Spec:       corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex}},
-				}))
+				call := func() (Tool, context.Context) { return workerTool("delegate_task", evalDelegateCluster()) }
 				base := `{"agent":"coder","prompt":"p","workspace":{"gitRepo":"https://github.com/acme/api",%s}}`
+				pr := func(field string, n int) string {
+					return fmt.Sprintf(base, `"intent":"write","publicationCredentialRef":"git-write","createPR":true,"prBaseBranch":"main","forgeCredentialRef":"forge","`+field+`":"`+long(n)+`"`)
+				}
 				return evalAll(
 					func() (bool, string) {
-						intent := func(v string) string { return fmt.Sprintf(base, `"intent":"`+v+`"`) }
-						return evalEnumEnforced(ctx, tool, intent, "intent", "delete", "read", "write")
+						return evalEnumEnforced(call, evalWorkspaceIntent(base), "intent", "delete", "read", "write")
 					},
 					func() (bool, string) {
-						return evalRejects(ctx, tool, fmt.Sprintf(base, `"intent":"write","createPR":true,"prTitle":"`+long(257)+`"`), "prTitle")
+						return evalRejectsChange(call, pr("prTitle", 256), pr("prTitle", 257), "prTitle")
 					},
 					func() (bool, string) {
-						return evalRejects(ctx, tool, fmt.Sprintf(base, `"intent":"write","createPR":true,"prBody":"`+long(32769)+`"`), "prBody")
+						return evalRejectsChange(call, pr("prBody", 32768), pr("prBody", 32769), "prBody")
 					},
 				)
 			},
@@ -987,8 +1032,9 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			check: func(t *testing.T) (bool, string) {
 				dir := t.TempDir()
 				tool := &FileWriteTool{workDir: dir, maxFileSize: 1 << 20, allowedPaths: []string{dir}}
+				call := func() (Tool, context.Context) { return tool, context.Background() }
 				mode := func(v string) string { return `{"path":"eval.txt","content":"x","mode":"` + v + `"}` }
-				return evalEnumEnforced(context.Background(), tool, mode, "mode", "truncate", "write", "append")
+				return evalEnumEnforced(call, mode, "mode", "truncate", "write", "append")
 			},
 		},
 		{
@@ -1042,20 +1088,29 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 				event := func(v string) string {
 					return fmt.Sprintf(`{"task_name":%q,"pr_number":1,"body":"x","event":%q}`, testCoderTaskName, v)
 				}
-				return evalEnumEnforced(context.Background(), tool, event, "event", "MAYBE", "APPROVE", "REQUEST_CHANGES", "COMMENT")
+				call := func() (Tool, context.Context) { return tool, context.Background() }
+				return evalEnumEnforced(call, event, "event", "MAYBE", "APPROVE", "REQUEST_CHANGES", "COMMENT")
 			},
 		},
 		{
 			name:   "worker memory limits",
 			limits: []string{"worker/recall_memory.limit minimum=0", "worker/search_transcript.limit minimum=0", "worker/search_transcript.max_snippet_length minimum=0"},
 			check: func(t *testing.T) (bool, string) {
-				recall, ctx := workerTool("recall_memory", newFakeClient())
-				search, _ := workerTool("search_transcript", newFakeClient())
+				controller := newEvalHTTPStub(t)
+				t.Setenv(envOrkaControllerURL, controller.URL)
+				t.Setenv(envOrkaTaskName, "task")
+				t.Setenv(workerenv.ServiceAccountToken, "token")
+				recall := func() (Tool, context.Context) { return workerTool("recall_memory", newFakeClient()) }
+				search := func() (Tool, context.Context) { return workerTool("search_transcript", newFakeClient()) }
 				return evalAll(
-					func() (bool, string) { return evalRejects(ctx, recall, `{"query":"q","limit":-1}`, "limit") },
-					func() (bool, string) { return evalRejects(ctx, search, `{"query":"q","limit":-1}`, "limit") },
 					func() (bool, string) {
-						return evalRejects(ctx, search, `{"query":"q","max_snippet_length":-1}`, "snippet")
+						return evalRejectsChange(recall, `{"query":"q","limit":0}`, `{"query":"q","limit":-1}`, "limit")
+					},
+					func() (bool, string) {
+						return evalRejectsChange(search, `{"query":"q","limit":0}`, `{"query":"q","limit":-1}`, "limit")
+					},
+					func() (bool, string) {
+						return evalRejectsChange(search, `{"query":"q","max_snippet_length":0}`, `{"query":"q","max_snippet_length":-1}`, "snippet")
 					},
 				)
 			},
@@ -1087,9 +1142,10 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 				severity := func(v string) string {
 					return `{"action":"deploy","targetTool":"deploy_service","targetArguments":{},"severity":"` + v + `"}`
 				}
-				ok, detail := evalEnumEnforced(ctx, tool, severity, "severity", "meh", "warning", "critical")
-				if !ok && len(emitted) > 0 && emitted[0].Severity == "meh" {
-					detail = fmt.Sprintf("emitted an approval with severity %q", emitted[0].Severity)
+				call := func() (Tool, context.Context) { return tool, ctx }
+				ok, detail := evalEnumEnforced(call, severity, "severity", "meh", "warning", "critical")
+				if !ok && slices.ContainsFunc(emitted, func(target approvals.ApprovalTarget) bool { return target.Severity == "meh" }) {
+					detail = `emitted an approval with severity "meh"`
 				}
 				return ok, detail
 			},
@@ -1140,12 +1196,12 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 		{
 			name:   "worker update_plan progress maximum",
 			limits: []string{"worker/update_plan.progress_pct maximum=100"},
-			check:  evalProgressEnforced(101),
+			check:  evalProgressEnforced(100, 101),
 		},
 		{
 			name:   "worker update_plan progress minimum",
 			limits: []string{"worker/update_plan.progress_pct minimum=0"},
-			check:  evalProgressEnforced(-1),
+			check:  evalProgressEnforced(0, -1),
 		},
 	}
 
@@ -1158,11 +1214,13 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			if tc.knownDefect != "" && len(tc.limits) != 1 {
 				t.Fatalf("a known-defect case must cover exactly one limit, or its failure can hide a regression in the others")
 			}
-			panics := evalPanics.Load()
+			panics, baselines := evalPanics.Load(), evalBaselineFailures.Load()
 			ok, detail := tc.check(t)
 			switch {
 			case evalPanics.Load() != panics:
 				t.Errorf("a tool panicked: %s", detail)
+			case evalBaselineFailures.Load() != baselines:
+				t.Errorf("a valid call failed, so the case does not test its limit: %s", detail)
 			case ok && tc.knownDefect != "":
 				t.Errorf("known defect no longer reproduces; remove knownDefect: %s", tc.knownDefect)
 			case !ok && tc.knownDefect == "":
@@ -1195,12 +1253,46 @@ func evalMergeMethodEnforced(build func(client.Client, string) Tool) func(*testi
 		method := func(v string) string {
 			return fmt.Sprintf(`{"task_name":%q,"pr_number":1,"merge_method":%q}`, testCoderTaskName, v)
 		}
-		ok, detail := evalEnumEnforced(context.Background(), tool, method, "merge_method", "fast-forward", "merge", "squash", "rebase")
+		call := func() (Tool, context.Context) { return tool, context.Background() }
+		ok, detail := evalEnumEnforced(call, method, "merge_method", "fast-forward", "merge", "squash", "rebase")
 		if !ok && stub.sent(`"merge_method":"fast-forward"`) {
 			detail = tool.Name() + " sent merge_method=fast-forward to GitHub"
 		}
 		return ok, detail
 	}
+}
+
+// evalWorkspaceIntent builds a workspace with the given intent; write intent
+// also names the publication credential it requires.
+func evalWorkspaceIntent(base string) func(string) string {
+	return func(v string) string {
+		if v == "write" {
+			return fmt.Sprintf(base, `"intent":"write","publicationCredentialRef":"git-write"`)
+		}
+		return fmt.Sprintf(base, `"intent":"`+v+`"`)
+	}
+}
+
+// evalRuntimeAgentCluster holds a runtime Agent named "a" for create_agent_task.
+func evalRuntimeAgentCluster() client.Client {
+	return newFakeClient(&corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: defaultNamespace},
+		Spec:       corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex}},
+	})
+}
+
+// evalParentTaskCluster holds the parent Task worker tools resolve from
+// ORKA_TASK_NAME=parent.
+func evalParentTaskCluster() client.Client {
+	return newFakeClient(&corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: defaultNamespace}})
+}
+
+// evalDelegateCluster holds a runtime Agent named "coder" for delegate_task.
+func evalDelegateCluster() client.Client {
+	return newFakeClient(&corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder", Namespace: defaultNamespace},
+		Spec:       corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex}},
+	})
 }
 
 // evalAllowedAgentNameRequired checks that create_agent, given its required
@@ -1210,8 +1302,11 @@ func evalMergeMethodEnforced(build func(client.Client, string) Tool) func(*testi
 func evalAllowedAgentNameRequired(get func(string, client.Client) (Tool, context.Context), required string) func(*testing.T) (bool, string) {
 	return func(t *testing.T) (bool, string) {
 		t.Setenv(envOrkaTaskName, "parent")
-		tool, ctx := get("create_agent", newFakeClient(&corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: defaultNamespace}}))
-		return evalRejects(ctx, tool, `{`+required+`,"coordination":{"enabled":true,"allowedAgents":[{"namespace":"default"}]}}`, "allowedAgents")
+		call := func() (Tool, context.Context) { return get("create_agent", evalParentTaskCluster()) }
+		allowed := func(agent string) string {
+			return `{` + required + `,"coordination":{"enabled":true,"allowedAgents":[` + agent + `]}}`
+		}
+		return evalRejectsChange(call, allowed(`{"name":"coder","namespace":"default"}`), allowed(`{"namespace":"default"}`), "allowedAgents")
 	}
 }
 
@@ -1224,10 +1319,14 @@ func evalReviewCommentFieldRequired(field string) func(*testing.T) (bool, string
 		stub := newEvalHTTPStub(t)
 		t.Setenv(envOrkaTaskName, testCoderTaskName)
 		tool := &PostReviewCommentTool{k8sClient: newFakeClient(task, secret), apiBaseURL: stub.URL}
-		comment := map[string]any{"path": "main.go", "line": 1, "body": "nit"}
-		delete(comment, field)
-		raw, _ := json.Marshal(map[string]any{"task_name": testCoderTaskName, "pr_number": 1, "body": "x", "event": "COMMENT", "comments": []any{comment}})
-		ok, detail := evalRejects(context.Background(), tool, string(raw), "comments")
+		review := func(drop string) string {
+			comment := map[string]any{"path": "main.go", "line": 1, "body": "nit"}
+			delete(comment, drop)
+			raw, _ := json.Marshal(map[string]any{"task_name": testCoderTaskName, "pr_number": 1, "body": "x", "event": "COMMENT", "comments": []any{comment}})
+			return string(raw)
+		}
+		call := func() (Tool, context.Context) { return tool, context.Background() }
+		ok, detail := evalRejectsChange(call, review(""), review(field), "comments")
 		if !ok && stub.sent(`"comments":[`) {
 			detail = "sent a line comment without " + field + " to GitHub"
 		}
@@ -1243,8 +1342,12 @@ func evalReviewCommentLine(line int) func(*testing.T) (bool, string) {
 		stub := newEvalHTTPStub(t)
 		t.Setenv(envOrkaTaskName, testCoderTaskName)
 		tool := &PostReviewCommentTool{k8sClient: newFakeClient(task, secret), apiBaseURL: stub.URL}
-		raw, _ := json.Marshal(map[string]any{"task_name": testCoderTaskName, "pr_number": 1, "body": "x", "event": "COMMENT", "comments": []any{map[string]any{"path": "main.go", "line": line, "body": "nit"}}})
-		ok, detail := evalRejects(context.Background(), tool, string(raw), "line")
+		review := func(line int) string {
+			raw, _ := json.Marshal(map[string]any{"task_name": testCoderTaskName, "pr_number": 1, "body": "x", "event": "COMMENT", "comments": []any{map[string]any{"path": "main.go", "line": line, "body": "nit"}}})
+			return string(raw)
+		}
+		call := func() (Tool, context.Context) { return tool, context.Background() }
+		ok, detail := evalRejectsChange(call, review(1), review(line), "line")
 		if !ok && stub.sent(`"comments":[`) {
 			detail = fmt.Sprintf("sent a line comment with line %d to GitHub", line)
 		}
@@ -1254,14 +1357,16 @@ func evalReviewCommentLine(line int) func(*testing.T) (bool, string) {
 
 // evalProgressEnforced checks that update_plan rejects an out-of-range
 // progress_pct, reporting whether the value reached the controller stub.
-func evalProgressEnforced(progress int) func(*testing.T) (bool, string) {
+func evalProgressEnforced(valid, progress int) func(*testing.T) (bool, string) {
 	return func(t *testing.T) (bool, string) {
 		controller := newEvalHTTPStub(t)
 		t.Setenv(envOrkaControllerURL, controller.URL)
 		t.Setenv(envOrkaTaskName, "task")
 		t.Setenv(workerenv.ServiceAccountToken, "token")
 		tool, _ := evalToolRegistries(newFakeClient())["worker"].Get("update_plan")
-		ok, detail := evalRejects(context.Background(), tool, fmt.Sprintf(`{"summary":"s","plan_document":"p","progress_pct":%d}`, progress), "progress")
+		call := func() (Tool, context.Context) { return tool, context.Background() }
+		plan := func(v int) string { return fmt.Sprintf(`{"summary":"s","plan_document":"p","progress_pct":%d}`, v) }
+		ok, detail := evalRejectsChange(call, plan(valid), plan(progress), "progress")
 		if !ok && controller.sent(fmt.Sprintf(`"progress_pct":%d`, progress)) {
 			detail = fmt.Sprintf("sent progress_pct=%d to the controller", progress)
 		}
