@@ -816,4 +816,13 @@ func TestBuildSystemPromptKeepsGuidanceForEachOfferedTaskTool(t *testing.T) {
 			t.Error("limited prompt names a tool that is not offered")
 		}
 	}
+	// Without a task creation tool, the model must not be told to create tasks.
+	for _, prompt := range []string{build("wait_for_task", "fetch_task_output"), build("list_agents"), build()} {
+		if strings.Contains(prompt, "create_*_task") || strings.Contains(prompt, "CRITICAL RULE") {
+			t.Error("prompt without a task creation tool still tells the model to create tasks")
+		}
+		if !strings.Contains(prompt, "<behavior>\nAct first, summarize after.") {
+			t.Error("prompt without a task creation tool must keep the act-first rule")
+		}
+	}
 }

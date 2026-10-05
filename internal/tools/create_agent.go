@@ -456,7 +456,10 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 			MaxDepth:              a.Coordination.MaxDepth,
 			MaxConcurrentChildren: a.Coordination.MaxConcurrentChildren,
 		}
-		for _, aa := range a.Coordination.AllowedAgents {
+		for i, aa := range a.Coordination.AllowedAgents {
+			if strings.TrimSpace(aa.Name) == "" {
+				return "", fmt.Errorf("coordination.allowedAgents[%d].name is required", i)
+			}
 			coord.AllowedAgents = append(coord.AllowedAgents, corev1alpha1.AllowedAgent{
 				Name:      aa.Name,
 				Namespace: aa.Namespace,

@@ -184,7 +184,9 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 			"Use the built-in runtime contract selected by this Orka installation.",
 		)
 	}
-	parseCoordinationConfig(a, agent)
+	if errResult, ok := parseCoordinationConfig(a, agent); !ok {
+		return errResult, nil
+	}
 
 	if chatGetStringArg(a, "initialPrompt") != "" && tc.AuthorizeAgentInitialTask != nil {
 		if err := tc.AuthorizeAgentInitialTask(ctx, agent); err != nil {
@@ -453,15 +455,18 @@ func normalizeChatOpenCodeModel(agent *corev1alpha1.Agent) (string, bool) {
 	return "", true
 }
 
-// parseCoordinationConfig extracts coordination configuration from chat args into the agent spec.
-func parseCoordinationConfig(a map[string]any, agent *corev1alpha1.Agent) {
+// parseCoordinationConfig extracts coordination configuration from chat args
+// into the agent spec. It returns an error result and false when an allowed
+// agent has no name; dropping it would widen delegation to any agent when it
+// was the only entry.
+func parseCoordinationConfig(a map[string]any, agent *corev1alpha1.Agent) (string, bool) {
 	coord, ok := a["coordination"]
 	if !ok {
-		return
+		return "", true
 	}
 	coordMap, ok := coord.(map[string]any)
 	if !ok {
-		return
+		return "", true
 	}
 	coordCfg := &corev1alpha1.CoordinationConfig{}
 	if enabled, ok := coordMap[enabledString].(bool); ok {
@@ -474,18 +479,17 @@ func parseCoordinationConfig(a map[string]any, agent *corev1alpha1.Agent) {
 		coordCfg.MaxDepth = int32(maxD)
 	}
 	if allowed, ok := coordMap["allowedAgents"].([]any); ok {
-		for _, item := range allowed {
-			aMap, ok := item.(map[string]any)
-			if !ok {
-				continue
-			}
+		for i, item := range allowed {
+			aMap, _ := item.(map[string]any)
 			aa := corev1alpha1.AllowedAgent{
 				Name:      chatGetStringArg(aMap, nameField),
 				Namespace: chatGetStringArg(aMap, namespaceField),
 			}
-			if aa.Name != "" {
-				coordCfg.AllowedAgents = append(coordCfg.AllowedAgents, aa)
+			if strings.TrimSpace(aa.Name) == "" {
+				result, _ := ChatToolErrorResult(invalidArgumentsErrorType, fmt.Sprintf("coordination.allowedAgents[%d].name is required", i), "Give each allowed agent a name, or omit allowedAgents to allow any agent")
+				return result, false
 			}
+			coordCfg.AllowedAgents = append(coordCfg.AllowedAgents, aa)
 		}
 	}
 	agent.Spec.Coordination = coordCfg
@@ -493,4 +497,5 @@ func parseCoordinationConfig(a map[string]any, agent *corev1alpha1.Agent) {
 		agent.Spec.Runtime = nil
 		agent.Spec.SecretRef = nil
 	}
+	return "", true
 }

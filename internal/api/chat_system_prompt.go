@@ -71,7 +71,12 @@ func (b *SystemPromptBuilder) SetAvailableChatTools(names []string) {
 	}
 }
 
-// writeSection adds a guidance section unless it names an unavailable chat tool.
+// chatTaskCreatorMention matches guidance that refers to the task creation
+// tools as a group.
+var chatTaskCreatorMention = regexp.MustCompile(`\bcreate_\*_task\b`)
+
+// writeSection adds a guidance section unless it names an unavailable chat
+// tool, or refers to create_*_task when no task creation tool is offered.
 func (b *SystemPromptBuilder) writeSection(sb *strings.Builder, section string) {
 	if b.availableChatTools != nil {
 		for name, pattern := range chatToolMentionPatterns {
@@ -79,8 +84,24 @@ func (b *SystemPromptBuilder) writeSection(sb *strings.Builder, section string) 
 				return
 			}
 		}
+		if !b.offersTaskCreator() && chatTaskCreatorMention.MatchString(section) {
+			return
+		}
 	}
 	sb.WriteString(section)
+}
+
+// offersTaskCreator reports whether any create_*_task tool is offered.
+func (b *SystemPromptBuilder) offersTaskCreator() bool {
+	if b.availableChatTools == nil {
+		return true
+	}
+	for name := range b.availableChatTools {
+		if strings.HasPrefix(name, "create_") && strings.HasSuffix(name, "_task") {
+			return true
+		}
+	}
+	return false
 }
 
 // BuildSystemPrompt assembles the full system prompt with dynamic context.
@@ -175,19 +196,24 @@ wait for results, and report back.
 `
 }
 
+// behaviorCallToolRule tells the model to call a tool for run and create
+// requests. It applies only when a task creation tool is offered.
+const behaviorCallToolRule = `CRITICAL RULE: When the user asks you to run, create, or execute something,
+you MUST call the appropriate tool in your response. NEVER respond with only text
+like "I'll create that task" or "Let me run that" — you MUST include the tool
+call in the SAME response. `
+
 // behaviorParts splits the behavior guidance so the instruction to call tools
 // in the same response survives when the polling tools are not offered.
 func behaviorParts() []string {
 	return []string{
 		`<behavior>
-CRITICAL RULE: When the user asks you to run, create, or execute something,
-you MUST call the appropriate tool in your response. NEVER respond with only text
-like "I'll create that task" or "Let me run that" — you MUST include the tool
-call in the SAME response.`,
-		` If you need to create a task AND fetch its result,
+`,
+		behaviorCallToolRule,
+		`If you need to create a task AND fetch its result,
 call create_*_task, then wait_for_task, then fetch_task_output all in sequence
-without stopping to narrate between steps.`,
-		` Act first, summarize after.
+without stopping to narrate between steps. `,
+		`Act first, summarize after.
 
 `,
 		`LONG-RUNNING TASKS: Agent tasks (Copilot, Claude Code, Codex, OpenCode) typically run for 5-20 minutes.
@@ -210,6 +236,9 @@ func buildBehaviorSection() string {
 func (b *SystemPromptBuilder) behaviorSection() string {
 	var sb strings.Builder
 	for _, part := range behaviorParts() {
+		if part == behaviorCallToolRule && !b.offersTaskCreator() {
+			continue
+		}
 		b.writeSection(&sb, part)
 	}
 	return sb.String()

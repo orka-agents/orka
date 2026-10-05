@@ -605,7 +605,9 @@ func TestParseCoordinationConfig_EnabledClearsRuntimeAndSecretRef(t *testing.T) 
 		},
 	}
 
-	parseCoordinationConfig(args, agent)
+	if _, ok := parseCoordinationConfig(args, agent); !ok {
+		t.Fatal("parseCoordinationConfig() rejected valid coordination")
+	}
 
 	if agent.Spec.Coordination == nil {
 		t.Fatal("agent.Spec.Coordination is nil")
