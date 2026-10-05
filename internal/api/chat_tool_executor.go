@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -267,8 +268,16 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 	// Execute via registry
 	resultStr, err := e.registry.Execute(toolCtx, toolCall.Name, argsJSON)
 	if err != nil {
-		result := toolError("unknown_tool", fmt.Sprintf("unknown tool: %s", toolCall.Name), "Use one of the available tools")
-		return marshalResult(result)
+		var argErr *tools.ToolArgumentError
+		var notFound *tools.ToolNotFoundError
+		switch {
+		case errors.As(err, &argErr):
+			return marshalResult(toolError("invalid_arguments", argErr.Error(), "Resend the call with "+argErr.Field+" as "+argErr.Want))
+		case errors.As(err, &notFound):
+			return marshalResult(toolError("unknown_tool", fmt.Sprintf("unknown tool: %s", toolCall.Name), "Use one of the available tools"))
+		default:
+			return marshalResult(toolError("tool_error", err.Error(), ""))
+		}
 	}
 
 	// Registry tools return JSON-marshaled ChatToolResult strings. Validate

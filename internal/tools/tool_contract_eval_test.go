@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -232,10 +233,10 @@ func TestToolEvalRegistriesCoverKnownTools(t *testing.T) {
 // TestToolEvalMalformedArguments sends each tool arguments a model gets wrong:
 // non-object JSON, missing required fields, wrong JSON types, and nested
 // objects encoded as strings. A tool must never panic, must never report
-// success for a call missing required fields or for an object sent as a
-// string, and must always explain a failure. Chat tools must return a
-// structured result instead of a Go error, which the chat executor reports to
-// the model as an unknown tool.
+// success for a call missing required fields or with a wrong-typed value, must
+// not drop an object sent as a string, and must always explain a failure. Chat
+// tools must return a structured result, or a ToolArgumentError that the chat
+// executor turns into one, instead of another Go error.
 func TestToolEvalMalformedArguments(t *testing.T) {
 	evalToolSandbox(t)
 	// Worker tools resolve their parent Task from the environment; the seeded
@@ -260,11 +261,15 @@ func TestToolEvalMalformedArguments(t *testing.T) {
 			properties, _ := schema["properties"].(map[string]any)
 
 			inputs := map[string]string{"null": `null`, "array": `[]`, "string": `"text"`, "number": `42`, "empty object": `{}`}
+			wrongTypeAllowed := map[string]bool{}
 			for prop, raw := range properties {
 				propSchema, _ := raw.(map[string]any)
 				typ, _ := propSchema["type"].(string)
 				if value, ok := wrongValue[typ]; ok {
-					inputs[fmt.Sprintf("%s as wrong type", prop)] = fmt.Sprintf(`{%q:%s}`, prop, value)
+					input := fmt.Sprintf("%s as wrong type", prop)
+					inputs[input] = fmt.Sprintf(`{%q:%s}`, prop, value)
+					// An object sent as a JSON string is decoded and honored.
+					wrongTypeAllowed[input] = typ == "object"
 				}
 				if typ == "object" {
 					key := fmt.Sprintf("%s/%s: %s as JSON string", label, name, prop)
@@ -294,12 +299,14 @@ func TestToolEvalMalformedArguments(t *testing.T) {
 					switch {
 					case panicked != nil:
 						fatal = append(fatal, fmt.Sprintf("%s: panicked: %v", key, panicked))
-					case label == "chat" && err != nil:
-						fatal = append(fatal, fmt.Sprintf("%s: returned Go error %q, which the chat executor reports as an unknown tool", key, err))
+					case label == "chat" && err != nil && !errors.As(err, new(*ToolArgumentError)):
+						fatal = append(fatal, fmt.Sprintf("%s: returned Go error %q instead of a structured result", key, err))
 					case failed && strings.TrimSpace(message) == "":
 						fatal = append(fatal, fmt.Sprintf("%s: failed without an error message: %q", key, result))
 					case (input == "empty object" || input == "null") && len(required) > 0 && !failed:
 						violations[key] = fmt.Sprintf("reported success without required fields %v in the %s cluster", required, cluster)
+					case strings.HasSuffix(input, "as wrong type") && !wrongTypeAllowed[input] && !failed:
+						violations[key] = fmt.Sprintf("reported success with a wrong-typed value in the %s cluster", cluster)
 					}
 				}
 			}

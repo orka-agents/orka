@@ -1,0 +1,130 @@
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
+package tools
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"strings"
+	"testing"
+
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+)
+
+func TestNormalizeArgTypes(t *testing.T) {
+	tool := &mockTool{
+		name:       "typed",
+		parameters: json.RawMessage(`{"type":"object","properties":{"text":{"type":"string"},"count":{"type":"integer"},"ratio":{"type":"number"},"flag":{"type":"boolean"},"items":{"type":"array"},"config":{"type":"object"}}}`),
+	}
+	tests := []struct {
+		name    string
+		args    string
+		want    string
+		wantErr string
+	}{
+		{name: "valid values pass", args: `{"text":"a","count":2,"ratio":1.5,"flag":true,"items":["x"],"config":{"k":"v"}}`, want: `{"text":"a","count":2,"ratio":1.5,"flag":true,"items":["x"],"config":{"k":"v"}}`},
+		{name: "null counts as omitted", args: `{"text":null,"count":3}`, want: `{"count":3}`},
+		{name: "numeric string becomes a number", args: `{"count":" 10 "}`, want: `{"count":10}`},
+		{name: "precise numbers survive", args: `{"count":"9007199254740993","text":null}`, want: `{"count":9007199254740993}`},
+		{name: "boolean string becomes a boolean", args: `{"flag":"TRUE"}`, want: `{"flag":true}`},
+		{name: "number for a string stays", args: `{"text":42}`, want: `{"text":42}`},
+		{name: "string for an object stays", args: `{"config":"openai/gpt-4.1"}`, want: `{"config":"openai/gpt-4.1"}`},
+		{name: "undeclared field passes", args: `{"name":{"k":"v"}}`, want: `{"name":{"k":"v"}}`},
+		{name: "non-object arguments pass to the tool", args: `[]`, want: `[]`},
+		{name: "object for a string", args: `{"text":{"k":"v"}}`, wantErr: "text must be a string, got an object"},
+		{name: "array for a string", args: `{"text":["a"]}`, wantErr: "text must be a string, got an array"},
+		{name: "word for an integer", args: `{"count":"many"}`, wantErr: "count must be a whole number, got a non-numeric string"},
+		{name: "fraction for an integer", args: `{"count":1.5}`, wantErr: "count must be a whole number, got a fraction"},
+		{name: "NaN for a number", args: `{"ratio":"NaN"}`, wantErr: "ratio must be a number, got a non-numeric string"},
+		{name: "boolean for a number", args: `{"ratio":true}`, wantErr: "ratio must be a number, got a boolean"},
+		{name: "word for a boolean", args: `{"flag":"yes"}`, wantErr: "flag must be a boolean, got a non-boolean string"},
+		{name: "number for a boolean", args: `{"flag":1}`, wantErr: "flag must be a boolean, got a number"},
+		{name: "string for an array", args: `{"items":"echo hi"}`, wantErr: "items must be an array, got a string"},
+		{name: "number for an object", args: `{"config":1}`, wantErr: "config must be an object, got a number"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := normalizeArgTypes(tool, json.RawMessage(tt.args))
+			if tt.wantErr != "" {
+				var argErr *ToolArgumentError
+				if !errors.As(err, &argErr) || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("normalizeArgTypes() error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("normalizeArgTypes() error = %v", err)
+			}
+			var gotValue, wantValue any
+			if json.Unmarshal(got, &gotValue) != nil || json.Unmarshal([]byte(tt.want), &wantValue) != nil {
+				t.Fatalf("normalizeArgTypes() = %s, want %s", got, tt.want)
+			}
+			if string(mustMarshalTest(t, gotValue)) != string(mustMarshalTest(t, wantValue)) || (tt.name == "precise numbers survive" && !strings.Contains(string(got), "9007199254740993")) {
+				t.Fatalf("normalizeArgTypes() = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+func mustMarshalTest(t *testing.T, value any) []byte {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func TestRegistryExecuteRejectsWrongArgumentTypesBeforeTheTool(t *testing.T) {
+	called := false
+	r := NewRegistry()
+	r.Register(&mockTool{
+		name:       "typed",
+		parameters: json.RawMessage(`{"type":"object","properties":{"count":{"type":"integer"}}}`),
+		executeFunc: func(context.Context, json.RawMessage) (string, error) {
+			called = true
+			return "ok", nil
+		},
+	})
+	_, err := r.Execute(context.Background(), "typed", json.RawMessage(`{"count":"many"}`))
+	var argErr *ToolArgumentError
+	if !errors.As(err, &argErr) || argErr.Field != "count" {
+		t.Fatalf("Execute() error = %v, want a ToolArgumentError for count", err)
+	}
+	if called {
+		t.Fatal("the tool ran with a wrong-typed argument")
+	}
+
+	_, err = r.Execute(context.Background(), "missing", json.RawMessage(`{}`))
+	var notFound *ToolNotFoundError
+	if !errors.As(err, &notFound) || err.Error() != `tool "missing" not found` {
+		t.Fatalf("Execute() error = %v, want ToolNotFoundError", err)
+	}
+}
+
+// A null name used to reach the tool as the literal string "<nil>" and create
+// an Agent with that name.
+func TestRegistryExecuteTreatsNullArgumentsAsOmitted(t *testing.T) {
+	fc := newFakeClient()
+	r := NewRegistry()
+	RegisterChatTools(r)
+	result, err := r.Execute(newCreateAgentTaskToolCtx(fc), "create_agent", json.RawMessage(`{"name":null}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !strings.Contains(result, "name is required") {
+		t.Fatalf("Execute() = %s, want the missing-name error", result)
+	}
+	var agents corev1alpha1.AgentList
+	if err := fc.List(context.Background(), &agents); err != nil {
+		t.Fatal(err)
+	}
+	if len(agents.Items) != 0 {
+		t.Fatalf("created %d Agents, want none", len(agents.Items))
+	}
+}

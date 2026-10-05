@@ -1484,6 +1484,46 @@ func TestRequestApprovalToolValidationErrorReturnsWholeBatchToModel(t *testing.T
 	}
 }
 
+// The registry rejects a wrong-typed argument before request_approval runs;
+// the model must still get the batch back to correct the call.
+func TestRequestApprovalToolArgumentTypeErrorReturnsWholeBatchToModel(t *testing.T) {
+	restore := replaceDefaultToolRegistryForTest(t)
+	defer restore()
+	toolspkg.DefaultRegistry.Register(toolspkg.NewRequestApprovalTool())
+	t.Setenv(workerenv.AutonomousMode, "true")
+
+	result, err := executeAgentLoopWithEvents(
+		context.Background(),
+		&mockProvider{responses: []*llm.CompletionResponse{
+			{
+				Content: "bad approval",
+				ToolCalls: []llm.ToolCall{{
+					ID:        "call-approval",
+					Name:      "request_approval",
+					Arguments: json.RawMessage(`{"action":{"k":"v"},"targetTool":"deploy","targetArguments":{}}`),
+				}},
+				StopReason: "tool_use",
+			},
+			{Content: correctedResult, StopReason: "end_turn"},
+		}},
+		[]llm.Message{{Role: "user", Content: "handle incident"}},
+		"",
+		"test-model",
+		modelSettings{maxTokens: 4096},
+		toolspkg.DefaultRegistry.ToLLMTools([]string{"request_approval"}),
+		nil,
+		nil,
+		common.NewFakeEventRecorder(),
+		&toolspkg.ToolContext{Namespace: "default", TaskID: "incident-task", TaskUID: "task-uid-1"},
+	)
+	if err != nil {
+		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
+	}
+	if result != correctedResult {
+		t.Fatalf("result = %q, want corrected", result)
+	}
+}
+
 func TestRequestApprovalToolDuplicateTerminalDecisionReturnsWholeBatchToModel(t *testing.T) {
 	restore := replaceDefaultToolRegistryForTest(t)
 	defer restore()

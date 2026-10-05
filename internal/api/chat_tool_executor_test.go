@@ -2242,3 +2242,32 @@ func TestExecuteListTasks_WithLimit(t *testing.T) {
 		t.Errorf("expected 2 tasks (limit), got %d", len(data))
 	}
 }
+
+func TestExecuteReportsWrongArgumentTypesAsInvalidArguments(t *testing.T) {
+	e := newTestExecutor()
+	out, err := e.Execute(context.Background(), llm.ToolCall{ID: "call-1", Name: "create_ai_task", Arguments: json.RawMessage(`{"prompt":{"k":"v"}}`)})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	var r ToolResult
+	if err := json.Unmarshal([]byte(out), &r); err != nil {
+		t.Fatal(err)
+	}
+	if r.Success || r.ErrorType != "invalid_arguments" || !strings.Contains(r.Error, "prompt must be a string, got an object") {
+		t.Fatalf("result = %#v, want invalid_arguments naming prompt", r)
+	}
+}
+
+func TestExecuteHonorsNumericStringsForNumberFields(t *testing.T) {
+	e := newTestExecutor()
+	if _, err := e.Execute(context.Background(), llm.ToolCall{ID: "call-1", Name: "create_ai_task", Arguments: json.RawMessage(`{"prompt":"p","priority":"10"}`)}); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	var tasks corev1alpha1.TaskList
+	if err := e.client.List(context.Background(), &tasks); err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks.Items) != 1 || tasks.Items[0].Spec.Priority == nil || *tasks.Items[0].Spec.Priority != 10 {
+		t.Fatalf("tasks = %#v, want one Task with priority 10", tasks.Items)
+	}
+}
