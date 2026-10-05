@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -223,7 +224,8 @@ func TestToolEvalRegistriesCoverKnownTools(t *testing.T) {
 }
 
 // TestToolEvalMalformedArguments sends each tool arguments a model gets wrong:
-// non-object JSON, missing required fields, wrong JSON types, and nested
+// non-object JSON, missing required fields (all at once and each on its own),
+// wrong JSON types, and nested
 // objects encoded as strings. A tool must never panic, must never report
 // success for a call missing required fields or for an object sent as a
 // string, and must always explain a failure. Chat tools must return a
@@ -246,6 +248,8 @@ func TestToolEvalMalformedArguments(t *testing.T) {
 		"chat/create_container_task: empty object":               ignoredName,
 		"chat/create_container_task: null":                       ignoredName,
 		"chat/create_container_task: workspace as JSON string":   droppedWorkspace,
+		"chat/create_agent_task: missing name":                   ignoredName,
+		"chat/create_ai_task: missing name":                      ignoredName,
 		"worker/create_container_task: empty object":             ignoredName,
 		"worker/create_container_task: null":                     ignoredName,
 		"worker/create_container_task: workspace as JSON string": droppedWorkspace,
@@ -267,6 +271,14 @@ func TestToolEvalMalformedArguments(t *testing.T) {
 			properties, _ := schema["properties"].(map[string]any)
 
 			inputs := map[string]string{"null": `null`, "array": `[]`, "string": `"text"`, "number": `42`, "empty object": `{}`}
+			// Omit each required field on its own, so a field the tool checks
+			// cannot hide one it ignores.
+			if len(required) > 1 {
+				for i, field := range required {
+					args, _ := json.Marshal(evalToolRequiredArgs(slices.Delete(slices.Clone(required), i, i+1), properties))
+					inputs[fmt.Sprintf("missing %v", field)] = string(args)
+				}
+			}
 			for prop, raw := range properties {
 				propSchema, _ := raw.(map[string]any)
 				typ, _ := propSchema["type"].(string)
@@ -308,6 +320,8 @@ func TestToolEvalMalformedArguments(t *testing.T) {
 						fatal = append(fatal, fmt.Sprintf("%s: failed without an error message: %q", key, result))
 					case (input == "empty object" || input == "null") && len(required) > 0 && !failed:
 						violations[key] = fmt.Sprintf("reported success without required fields %v in the %s cluster", required, cluster)
+					case strings.HasPrefix(input, "missing ") && !failed:
+						violations[key] = fmt.Sprintf("reported success without required field %s in the %s cluster", strings.TrimPrefix(input, "missing "), cluster)
 					}
 				}
 			}
@@ -493,8 +507,10 @@ func evalToolRequiredArgs(required []any, properties map[string]any) map[string]
 }
 
 // evalToolLimits lists every limit (minimum, maximum, enum, length, pattern)
-// that a tool schema declares, keyed like "chat/create_agent_task.maxTurns
-// maximum", and every required field of a nested object, keyed like
+// that a tool schema declares with its value, keyed like
+// "chat/create_agent_task.maxTurns maximum=100", so changing a schema value
+// also requires updating the case that probes it. It also lists every required
+// field of a nested object, keyed like
 // "chat/create_agent.coordination.allowedAgents[].name required".
 // TestToolEvalMalformedArguments covers top-level required fields.
 func evalToolLimits(t *testing.T) []string {
@@ -503,8 +519,8 @@ func evalToolLimits(t *testing.T) []string {
 	var walk func(prefix string, schema map[string]any, nested bool)
 	walk = func(prefix string, schema map[string]any, nested bool) {
 		for _, keyword := range []string{"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "enum", "minLength", "maxLength", "minItems", "maxItems", "pattern"} {
-			if _, ok := schema[keyword]; ok {
-				limits = append(limits, prefix+" "+keyword)
+			if value, ok := schema[keyword]; ok {
+				limits = append(limits, prefix+" "+keyword+"="+evalLimitValue(value))
 			}
 		}
 		if required, _ := schema["required"].([]any); nested {
@@ -530,6 +546,22 @@ func evalToolLimits(t *testing.T) []string {
 	}
 	sort.Strings(limits)
 	return limits
+}
+
+// evalLimitValue formats a schema keyword's value for a limit key: a number in
+// plain notation, or enum values joined with "|".
+func evalLimitValue(value any) string {
+	switch v := value.(type) {
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	case []any:
+		parts := make([]string, len(v))
+		for i, item := range v {
+			parts[i] = fmt.Sprint(item)
+		}
+		return strings.Join(parts, "|")
+	}
+	return fmt.Sprint(value)
 }
 
 // evalRejects reports whether a tool call failed with a message naming the
@@ -699,7 +731,7 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 	}{
 		{
 			name:   "chat create_agent model counts",
-			limits: []string{"chat/create_agent.model.contextWindow minimum", "chat/create_agent.model.maxTokens minimum"},
+			limits: []string{"chat/create_agent.model.contextWindow minimum=1", "chat/create_agent.model.maxTokens minimum=1"},
 			check: func(t *testing.T) (bool, string) {
 				tool, ctx := chatTool("create_agent", newFakeClient())
 				return evalAll(
@@ -714,7 +746,7 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 		},
 		{
 			name:   "chat create_agent model temperature",
-			limits: []string{"chat/create_agent.model.temperature maximum", "chat/create_agent.model.temperature minimum"},
+			limits: []string{"chat/create_agent.model.temperature maximum=2", "chat/create_agent.model.temperature minimum=0"},
 			check: func(t *testing.T) (bool, string) {
 				// The tool stores temperature as given; the Agent CRD rejects it on create.
 				limits := evalCRDModelField(t, "temperature")
@@ -724,7 +756,7 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 		},
 		{
 			name:   "chat update_agent model",
-			limits: []string{"chat/update_agent.model.contextWindow minimum", "chat/update_agent.model.maxTokens minimum", "chat/update_agent.model.temperature maximum", "chat/update_agent.model.temperature minimum"},
+			limits: []string{"chat/update_agent.model.contextWindow minimum=1", "chat/update_agent.model.maxTokens minimum=1", "chat/update_agent.model.temperature maximum=2", "chat/update_agent.model.temperature minimum=0"},
 			check: func(t *testing.T) (bool, string) {
 				tool, ctx := chatTool("update_agent", evalToolClusters["seeded"]())
 				return evalAll(
@@ -745,7 +777,7 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 		},
 		{
 			name:   "chat create_agent_task maxTurns",
-			limits: []string{"chat/create_agent_task.maxTurns maximum", "chat/create_agent_task.maxTurns minimum"},
+			limits: []string{"chat/create_agent_task.maxTurns maximum=1000", "chat/create_agent_task.maxTurns minimum=1"},
 			check: func(t *testing.T) (bool, string) {
 				tool, ctx := chatTool("create_agent_task", newFakeClient())
 				return evalAll(
@@ -760,7 +792,7 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 		},
 		{
 			name:   "chat create_agent_task workspace",
-			limits: []string{"chat/create_agent_task.workspace.intent enum", "chat/create_agent_task.workspace.prBody maxLength", "chat/create_agent_task.workspace.prTitle maxLength"},
+			limits: []string{"chat/create_agent_task.workspace.intent enum=read|write", "chat/create_agent_task.workspace.prBody maxLength=32768", "chat/create_agent_task.workspace.prTitle maxLength=256"},
 			check: func(t *testing.T) (bool, string) {
 				tool, ctx := chatTool("create_agent_task", newFakeClient())
 				base := `{"name":"t","prompt":"p","agentRef":"a","workspace":{"gitRepo":"https://github.com/acme/api",%s}}`
@@ -780,7 +812,7 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 		},
 		{
 			name:   "chat create_pr_monitor",
-			limits: []string{"chat/create_pr_monitor.per_page maximum", "chat/create_pr_monitor.per_page minimum", "chat/create_pr_monitor.review_event enum"},
+			limits: []string{"chat/create_pr_monitor.per_page maximum=100", "chat/create_pr_monitor.per_page minimum=1", "chat/create_pr_monitor.review_event enum=COMMENT|APPROVE|REQUEST_CHANGES"},
 			check: func(t *testing.T) (bool, string) {
 				_, secret := githubRepoTaskWithSecret(testOrgTestRepoURL)
 				base := `{"name":"m","repo_url":"https://github.com/acme/api","schedule":"0 * * * *","agentRef":"a","readCredentialRef":"` + secret.Name + `"%s}`
@@ -822,7 +854,7 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 		},
 		{
 			name:   "worker code_exec language and maximum timeout",
-			limits: []string{"worker/code_exec.language enum", "worker/code_exec.timeout maximum"},
+			limits: []string{"worker/code_exec.language enum=python|python3|javascript|node|bash|sh", "worker/code_exec.timeout maximum=60"},
 			check: func(t *testing.T) (bool, string) {
 				// Clamping an over-maximum timeout is pinned by
 				// TestCodeExecTool_Execute_TimeoutClampsToMax.
@@ -833,7 +865,7 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 		},
 		{
 			name:   "worker code_exec minimum timeout",
-			limits: []string{"worker/code_exec.timeout minimum"},
+			limits: []string{"worker/code_exec.timeout minimum=1"},
 			check: func(t *testing.T) (bool, string) {
 				// Zero is the value just below the minimum.
 				tool, sandbox := evalRecordingCodeExec(t)
@@ -849,7 +881,7 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 		},
 		{
 			name:   "brokered web_search",
-			limits: []string{"brokered/web_search.limit maximum", "brokered/web_search.query maxLength"},
+			limits: []string{"brokered/web_search.limit maximum=10", "brokered/web_search.query maxLength=4096"},
 			check: func(t *testing.T) (bool, string) {
 				// Both limits are checked before any request.
 				tool, _ := evalToolRegistries(newFakeClient())["brokered"].Get("web_search")
@@ -862,7 +894,7 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 		},
 		{
 			name:   "brokered web_fetch max_chars",
-			limits: []string{"brokered/web_fetch.max_chars maximum"},
+			limits: []string{"brokered/web_fetch.max_chars maximum=50000"},
 			check: func(t *testing.T) (bool, string) {
 				// A public IP literal needs no DNS lookup, and max_chars is
 				// checked before any request.
@@ -872,7 +904,7 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 		},
 		{
 			name:   "brokered web_fetch url",
-			limits: []string{"brokered/web_fetch.url maxLength"},
+			limits: []string{"brokered/web_fetch.url maxLength=16384"},
 			check: func(t *testing.T) (bool, string) {
 				// One character past the advertised maxLength. The over-limit
 				// max_chars stops the call before any request if the URL passes.
@@ -884,7 +916,7 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 		},
 		{
 			name:   "worker create_agent model contextWindow",
-			limits: []string{"worker/create_agent.model.contextWindow minimum"},
+			limits: []string{"worker/create_agent.model.contextWindow minimum=1"},
 			check: func(t *testing.T) (bool, string) {
 				// The tool stores contextWindow as given; the Agent CRD rejects it on create.
 				limits := evalCRDModelField(t, "contextWindow")
@@ -893,7 +925,7 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 		},
 		{
 			name:   "worker create_agent model maxTokens",
-			limits: []string{"worker/create_agent.model.maxTokens minimum"},
+			limits: []string{"worker/create_agent.model.maxTokens minimum=1"},
 			check: func(t *testing.T) (bool, string) {
 				if limits := evalCRDModelField(t, "maxTokens"); limits["minimum"] == float64(1) {
 					return true, ""
@@ -906,7 +938,7 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 		},
 		{
 			name:   "worker delegate_task workspace",
-			limits: []string{"worker/delegate_task.workspace.intent enum", "worker/delegate_task.workspace.prBody maxLength", "worker/delegate_task.workspace.prTitle maxLength"},
+			limits: []string{"worker/delegate_task.workspace.intent enum=read|write", "worker/delegate_task.workspace.prBody maxLength=32768", "worker/delegate_task.workspace.prTitle maxLength=256"},
 			check: func(t *testing.T) (bool, string) {
 				tool, ctx := workerTool("delegate_task", newFakeClient(&corev1alpha1.Agent{
 					ObjectMeta: metav1.ObjectMeta{Name: "coder", Namespace: defaultNamespace},
@@ -929,7 +961,7 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 		},
 		{
 			name:   "worker file_write mode",
-			limits: []string{"worker/file_write.mode enum"},
+			limits: []string{"worker/file_write.mode enum=write|append"},
 			check: func(t *testing.T) (bool, string) {
 				dir := t.TempDir()
 				tool := &FileWriteTool{workDir: dir, maxFileSize: 1 << 20, allowedPaths: []string{dir}}
@@ -939,7 +971,7 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 		},
 		{
 			name:   "worker list pages",
-			limits: []string{"worker/list_issues.per_page maximum", "worker/list_issues.per_page minimum", "worker/list_pull_requests.per_page maximum", "worker/list_pull_requests.per_page minimum"},
+			limits: []string{"worker/list_issues.per_page maximum=100", "worker/list_issues.per_page minimum=1", "worker/list_pull_requests.per_page maximum=100", "worker/list_pull_requests.per_page minimum=1"},
 			check: func(t *testing.T) (bool, string) {
 				clamped := func(make func(client.Client, string) Tool, perPage int) (bool, string) {
 					stub := newEvalHTTPStub(t)
@@ -966,13 +998,13 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 		},
 		{
 			name:        "worker merge_pull_request merge_method",
-			limits:      []string{"worker/merge_pull_request.merge_method enum"},
+			limits:      []string{"worker/merge_pull_request.merge_method enum=merge|squash|rebase"},
 			check:       evalMergeMethodEnforced(func(c client.Client, url string) Tool { return &MergePullRequestTool{k8sClient: c, apiBaseURL: url} }),
 			knownDefect: "merge_pull_request forwards an unsupported merge_method to GitHub instead of rejecting it",
 		},
 		{
 			name:   "worker auto_merge_pull_request merge_method",
-			limits: []string{"worker/auto_merge_pull_request.merge_method enum"},
+			limits: []string{"worker/auto_merge_pull_request.merge_method enum=merge|squash|rebase"},
 			check: evalMergeMethodEnforced(func(c client.Client, url string) Tool {
 				return &AutoMergePullRequestTool{k8sClient: c, apiBaseURL: url}
 			}),
@@ -980,7 +1012,7 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 		},
 		{
 			name:   "worker post_review_comment event",
-			limits: []string{"worker/post_review_comment.event enum"},
+			limits: []string{"worker/post_review_comment.event enum=APPROVE|REQUEST_CHANGES|COMMENT"},
 			check: func(t *testing.T) (bool, string) {
 				task, secret := githubRepoTaskWithSecret(testOrgTestRepoURL)
 				stub := newEvalHTTPStub(t)
@@ -994,7 +1026,7 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 		},
 		{
 			name:   "worker memory limits",
-			limits: []string{"worker/recall_memory.limit minimum", "worker/search_transcript.limit minimum", "worker/search_transcript.max_snippet_length minimum"},
+			limits: []string{"worker/recall_memory.limit minimum=0", "worker/search_transcript.limit minimum=0", "worker/search_transcript.max_snippet_length minimum=0"},
 			check: func(t *testing.T) (bool, string) {
 				recall, ctx := workerTool("recall_memory", newFakeClient())
 				search, _ := workerTool("search_transcript", newFakeClient())
@@ -1009,7 +1041,7 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 		},
 		{
 			name:   "worker reply_in_conversation content",
-			limits: []string{"worker/reply_in_conversation.content maxLength", "worker/reply_in_conversation.content minLength"},
+			limits: []string{"worker/reply_in_conversation.content maxLength=16384", "worker/reply_in_conversation.content minLength=1"},
 			check: func(t *testing.T) (bool, string) {
 				tool, ctx := workerTool("reply_in_conversation", newFakeClient())
 				return evalAll(
@@ -1020,7 +1052,7 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 		},
 		{
 			name:        "worker request_approval severity",
-			limits:      []string{"worker/request_approval.severity enum"},
+			limits:      []string{"worker/request_approval.severity enum=warning|critical"},
 			knownDefect: "request_approval forwards an unsupported severity to the approval emitter instead of rejecting it",
 			check: func(t *testing.T) (bool, string) {
 				var emitted []approvals.ApprovalTarget
@@ -1044,7 +1076,7 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 		},
 		{
 			name:   "brokered run_validation command",
-			limits: []string{"brokered/run_validation.command maxLength", "brokered/run_validation.command minLength"},
+			limits: []string{"brokered/run_validation.command maxLength=8192", "brokered/run_validation.command minLength=1"},
 			check: func(t *testing.T) (bool, string) {
 				fc := newFakeClient()
 				tool, _ := evalToolRegistries(fc)["brokered"].Get("run_validation")
@@ -1087,13 +1119,13 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 		},
 		{
 			name:        "worker update_plan progress maximum",
-			limits:      []string{"worker/update_plan.progress_pct maximum"},
+			limits:      []string{"worker/update_plan.progress_pct maximum=100"},
 			check:       evalProgressEnforced(101),
 			knownDefect: "update_plan sends a progress_pct above 100 to the controller instead of rejecting or clamping it",
 		},
 		{
 			name:        "worker update_plan progress minimum",
-			limits:      []string{"worker/update_plan.progress_pct minimum"},
+			limits:      []string{"worker/update_plan.progress_pct minimum=0"},
 			check:       evalProgressEnforced(-1),
 			knownDefect: "update_plan sends a negative progress_pct to the controller instead of rejecting or clamping it",
 		},
