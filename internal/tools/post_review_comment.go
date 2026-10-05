@@ -83,9 +83,9 @@ func (t *PostReviewCommentTool) Parameters() json.RawMessage {
 			jsonSchemaDescriptionField: "Review verdict: APPROVE, REQUEST_CHANGES, or COMMENT",
 		},
 		"comments": map[string]any{jsonSchemaTypeField: jsonSchemaTypeArray, jsonSchemaDescriptionField: "Optional line-level review comments", itemsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{
-			"path":          map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "File path relative to repo root", "minLength": 1, "pattern": `\S`},
+			"path":          map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "File path relative to repo root", jsonSchemaMinLengthField: 1, jsonSchemaPatternField: `\S`},
 			"line":          map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Line number in the diff (new file line number)", jsonSchemaMinimumField: 1},
-			githubBodyField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Comment text", "minLength": 1, "pattern": `\S`},
+			githubBodyField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Comment text", jsonSchemaMinLengthField: 1, jsonSchemaPatternField: `\S`},
 		}, jsonSchemaRequiredField: []string{"path", "line", githubBodyField},
 		},
 		},
