@@ -275,13 +275,15 @@ func (r *Registry) Names() []string {
 func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessage) (string, error) {
 	tool, ok := r.Get(name)
 	// call checks argument types inside the instrumented path, so a rejected
-	// call is recorded like any other tool error.
+	// call is recorded like any other tool error. The check runs on the
+	// arguments as sent, before decoding stringified objects collapses
+	// duplicate keys.
 	call := func(ctx context.Context) (string, error) {
-		normalized, err := normalizeArgTypes(tool, decodeStringifiedObjectArgs(tool, args))
+		normalized, err := normalizeArgTypes(tool, args)
 		if err != nil {
 			return "", err
 		}
-		return tool.Execute(ctx, normalized)
+		return tool.Execute(ctx, decodeStringifiedObjectArgs(tool, normalized))
 	}
 	if telemetryDisabled() {
 		if !ok {

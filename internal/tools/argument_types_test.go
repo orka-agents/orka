@@ -49,8 +49,9 @@ func TestNormalizeArgTypes(t *testing.T) {
 		{name: "trailing data is left for the tool", args: `{"count":"10"}garbage`, want: "raw"},
 		{name: "duplicate keys", args: `{"text":"a","text":"b"}`, wantErr: "text must be sent once, got a duplicate"},
 		{name: "duplicate key hiding a wrong type", args: `{"text":"safe","text":{"k":"v"}}`, wantErr: "text must be sent once, got a duplicate"},
-		{name: "invalid unicode is left for the tool", args: `{"text":"\ud800","count":null}`, want: "raw"},
-		{name: "invalid unicode is still type-checked", args: `{"text":{"k":"v"},"other":"\ud800"}`, wantErr: "text must be a string, got an object"},
+		{name: "invalid unicode", args: `{"text":"\ud800"}`, wantErr: "text must be valid Unicode text, got invalid Unicode"},
+		{name: "invalid unicode beside a null", args: `{"text":null,"other":"\ud800"}`, wantErr: "other must be valid Unicode text, got invalid Unicode"},
+		{name: "invalid unicode in a field name", args: `{"te\ud800xt":"a"}`, wantErr: "every field name must be valid Unicode text, got invalid Unicode"},
 		{name: "undeclared null is left for the tool", args: `{"text":"a","unused":null}`, want: "raw"},
 		{name: "undeclared null survives re-encoding", args: `{"count":"5","unused":null}`, want: `{"count":5,"unused":null}`},
 		{name: "integer too large for int64", args: `{"count":"9223372036854775808"}`, wantErr: "count must be a whole number, got a number out of range"},
@@ -174,5 +175,28 @@ func TestRegistryExecuteTreatsNullArgumentsAsOmitted(t *testing.T) {
 	}
 	if len(agents.Items) != 0 {
 		t.Fatalf("created %d Agents, want none", len(agents.Items))
+	}
+}
+
+// Decoding stringified objects keeps only the last of duplicate keys, so the
+// duplicate check must see the arguments as sent.
+func TestRegistryExecuteRejectsDuplicateStringifiedObjects(t *testing.T) {
+	called := false
+	r := NewRegistry()
+	r.Register(&mockTool{
+		name:       "configured",
+		parameters: json.RawMessage(`{"type":"object","properties":{"config":{"type":"object"}}}`),
+		executeFunc: func(context.Context, json.RawMessage) (string, error) {
+			called = true
+			return "ok", nil
+		},
+	})
+	_, err := r.Execute(context.Background(), "configured", json.RawMessage(`{"config":"{\"a\":1}","config":"{\"b\":2}"}`))
+	var argErr *ToolArgumentError
+	if !errors.As(err, &argErr) || argErr.Field != "config" {
+		t.Fatalf("Execute() error = %v, want a duplicate-key ToolArgumentError for config", err)
+	}
+	if called {
+		t.Fatal("the tool ran with a duplicate key")
 	}
 }

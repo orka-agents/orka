@@ -92,10 +92,7 @@ func normalizeArgTypes(tool Tool, args json.RawMessage) (json.RawMessage, error)
 			changed = true
 		}
 	}
-	// Re-encoding would replace invalid Unicode escapes, which
-	// reply_in_conversation rejects, so such a document goes on unchanged once
-	// its types check out.
-	if !changed || !protocol.ValidJSONUnicode(args) {
+	if !changed {
 		return args, nil
 	}
 	normalized, err := json.Marshal(values)
@@ -108,7 +105,9 @@ func normalizeArgTypes(tool Tool, args json.RawMessage) (json.RawMessage, error)
 // decodeArgObject decodes a JSON object of arguments. It returns nil values
 // for invalid JSON, trailing data, or a non-object, which the tool rejects
 // itself. A duplicate key is an error: the tool would see only one of the
-// values, and the others would skip the type check.
+// values, and the others would skip the type check. So is invalid Unicode
+// (invalid UTF-8 or an unpaired surrogate escape), which decoding would
+// silently replace.
 func decodeArgObject(args json.RawMessage) (map[string]any, error) {
 	if !json.Valid(args) {
 		return nil, nil
@@ -128,13 +127,32 @@ func decodeArgObject(args json.RawMessage) (map[string]any, error) {
 		if _, duplicate := values[key]; duplicate {
 			return nil, &ToolArgumentError{Field: key, Want: "sent once", Got: "a duplicate"}
 		}
-		var value any
-		if err := decoder.Decode(&value); err != nil {
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil {
+			return nil, nil
+		}
+		if !protocol.ValidJSONUnicode(raw) {
+			return nil, &ToolArgumentError{Field: key, Want: "valid Unicode text", Got: "invalid Unicode"}
+		}
+		value, err := decodeArgValue(raw)
+		if err != nil {
 			return nil, nil
 		}
 		values[key] = value
 	}
+	if !protocol.ValidJSONUnicode(args) {
+		return nil, &ToolArgumentError{Field: "every field name", Want: "valid Unicode text", Got: "invalid Unicode"}
+	}
 	return values, nil
+}
+
+// decodeArgValue decodes one argument value, keeping numbers as json.Number.
+func decodeArgValue(raw json.RawMessage) (any, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	err := decoder.Decode(&value)
+	return value, err
 }
 
 // canonicalJSONInteger returns the plain spelling of an integral JSON number
