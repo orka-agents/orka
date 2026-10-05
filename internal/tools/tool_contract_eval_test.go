@@ -789,12 +789,7 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 		return newFakeClient(task, secret)
 	}
 
-	cases := []struct {
-		name        string
-		limits      []string
-		check       func(t *testing.T) (bool, string)
-		knownDefect string
-	}{
+	cases := []evalLimitCase{
 		{
 			name:   "chat create_agent model counts",
 			limits: []string{"chat/create_agent.model.contextWindow minimum=1", "chat/create_agent.model.maxTokens minimum=1"},
@@ -1218,6 +1213,21 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 		},
 	}
 
+	evalRunLimitCases(t, cases)
+}
+
+// evalLimitCase checks that one or more declared schema limits are enforced.
+type evalLimitCase struct {
+	name        string
+	limits      []string
+	check       func(t *testing.T) (bool, string)
+	knownDefect string
+}
+
+// evalRunLimitCases runs each case and requires the cases to cover exactly the
+// limits the tool schemas declare.
+func evalRunLimitCases(t *testing.T, cases []evalLimitCase) {
+	t.Helper()
 	covered := map[string]bool{}
 	for _, tc := range cases {
 		for _, limit := range tc.limits {
