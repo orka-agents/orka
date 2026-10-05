@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -21,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	chattools "github.com/orka-agents/orka/internal/tools"
 )
 
 func TestNewSystemPromptBuilder(t *testing.T) {
@@ -811,8 +813,10 @@ func TestBuildSystemPromptKeepsGuidanceForEachOfferedTaskTool(t *testing.T) {
 	if !strings.Contains(containerOnly, "you MUST include the tool\ncall in the SAME response.") || !strings.Contains(containerOnly, "Act first, summarize after.") {
 		t.Error("prompt without polling tools must keep the rule to call tools in the same response")
 	}
+	// Whole words, so the coordinator's own wait_for_tasks tool does not count.
+	unoffered := regexp.MustCompile(`\b(?:wait_for_task|create_ai_task)\b`)
 	for _, prompt := range []string{agentOnly, containerOnly} {
-		if strings.Contains(prompt, "wait_for_task") || strings.Contains(prompt, "create_ai_task") {
+		if unoffered.MatchString(prompt) {
 			t.Error("limited prompt names a tool that is not offered")
 		}
 	}
@@ -833,6 +837,52 @@ func TestBuildSystemPromptKeepsGuidanceForEachOfferedTaskTool(t *testing.T) {
 		}
 		if !strings.Contains(prompt, "<behavior>\nAct first, summarize after.") {
 			t.Error("prompt without a task creation tool must keep the act-first rule")
+		}
+	}
+}
+
+// TestPromptPartsDeclareTheChatToolsTheyName keeps each guidance part's
+// declared requirements in step with its text: a part that names a chat tool
+// must require it, and a part that refers to create_*_task must need a task
+// creation tool.
+func TestPromptPartsDeclareTheChatToolsTheyName(t *testing.T) {
+	for section, parts := range promptSections() {
+		for i, part := range parts {
+			for _, name := range chattools.ChatToolNames() {
+				if regexp.MustCompile(`\b`+name+`\b`).MatchString(part.text) && !slices.Contains(part.requires, name) {
+					t.Errorf("%s part %d names %s but does not require it", section, i, name)
+				}
+			}
+			if strings.Contains(part.text, "create_*_task") && !slices.Equal(part.anyOf, promptTaskCreators) {
+				t.Errorf("%s part %d refers to create_*_task but does not need a task creation tool", section, i)
+			}
+		}
+	}
+}
+
+// A scoped caller keeps the general rules even when it lacks tools that other
+// rules name, and the kept rules are numbered without gaps.
+func TestBuildSystemPromptKeepsGeneralRulesForScopedCallers(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+	b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
+	b.SetAvailableChatTools([]string{"list_agents", "list_tasks"})
+	prompt, err := b.BuildSystemPrompt(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"<rules>\n1. Use the current namespace (namespace in the Runtime line)",
+		"2. Provide clear summaries of what you did",
+		"4. Do not create more tasks than necessary.",
+		"<tool_call_style>",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("scoped prompt is missing %q", want)
+		}
+	}
+	for _, unwanted := range []string{"<examples>", "<scheduling>", "<validation>", "create_*_task"} {
+		if strings.Contains(prompt, unwanted) {
+			t.Errorf("scoped prompt without task tools contains %q", unwanted)
 		}
 	}
 }
