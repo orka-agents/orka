@@ -2297,3 +2297,29 @@ func TestExecuteRejectsPriorityThatWouldWrap(t *testing.T) {
 		t.Fatalf("created %d Tasks, want none", len(tasks.Items))
 	}
 }
+
+type recordingChatTool struct{ args json.RawMessage }
+
+func (r *recordingChatTool) Name() string        { return "record_args" }
+func (r *recordingChatTool) Description() string { return "records its arguments" }
+func (r *recordingChatTool) Parameters() json.RawMessage {
+	return json.RawMessage(`{"type":"object","properties":{"pr_number":{"type":"integer"}}}`)
+}
+func (r *recordingChatTool) Execute(_ context.Context, args json.RawMessage) (string, error) {
+	r.args = args
+	return tools.ChatToolSuccess(map[string]any{})
+}
+
+// The chat executor passes arguments to the registry as sent, so an integer
+// beyond float64 precision is not rounded on the way.
+func TestExecutePreservesPreciseIntegers(t *testing.T) {
+	e := newTestExecutor()
+	recorder := &recordingChatTool{}
+	e.registry.Register(recorder)
+	if _, err := e.Execute(context.Background(), llm.ToolCall{ID: "call-1", Name: "record_args", Arguments: json.RawMessage(`{"pr_number":9007199254740993}`)}); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !strings.Contains(string(recorder.args), "9007199254740993") {
+		t.Fatalf("tool received %s, want pr_number 9007199254740993", recorder.args)
+	}
+}

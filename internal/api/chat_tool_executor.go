@@ -262,14 +262,9 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 	toolCtx = tools.WithToolContext(toolCtx, tc)
 
 	// Marshal args to JSON for the Tool interface
-	argsJSON, err := json.Marshal(args)
-	if err != nil {
-		result := toolError("internal_error", fmt.Sprintf("failed to marshal arguments: %v", err), "")
-		return marshalResult(result)
-	}
-
-	// Execute via registry
-	resultStr, err := e.registry.Execute(toolCtx, toolCall.Name, argsJSON)
+	// Execute via registry with the arguments as sent. Re-encoding the decoded
+	// map would round integers beyond float64 precision.
+	resultStr, err := e.registry.Execute(toolCtx, toolCall.Name, toolCall.Arguments)
 	if err != nil {
 		var argErr *tools.ToolArgumentError
 		var notFound *tools.ToolNotFoundError
