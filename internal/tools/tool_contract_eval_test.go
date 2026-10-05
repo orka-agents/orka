@@ -59,13 +59,14 @@ func evalToolRegistries(fc client.Client) map[string]*Registry {
 		NewMergePullRequestTool(fc), NewAutoMergePullRequestTool(fc), NewReviewPullRequestTool(fc),
 		NewPostReviewCommentTool(fc), NewCheckPRReviewMarkerTool(fc), NewListIssuesTool(fc), NewListPullRequestsTool(fc),
 		NewGetIssueTool(fc), NewCommentOnIssueTool(fc), NewCreateAgentTool(fc, executionmode.HarnessV2),
-		NewDeleteAgentTool(fc), NewUpdatePlanTool(), NewRunValidationTool(fc),
+		NewDeleteAgentTool(fc), NewUpdatePlanTool(),
 		NewRecallMemoryTool(), NewRememberMemoryTool(), NewProposeMemoryTool(), NewSearchTranscriptTool(),
 	} {
 		worker.Register(tool)
 	}
-	// The ACP broker builds its own registry. Sweep its tools whose schema
-	// differs from the worker tool of the same name; the rest are covered.
+	// The ACP broker builds its own registry. Sweep the tools only it offers,
+	// such as run_validation, and those whose schema differs from the worker
+	// tool of the same name; the rest are covered.
 	brokeredAll := NewRegistry()
 	_ = RegisterBrokeredCoordinationTools(brokeredAll, fc)
 	_ = RegisterBrokeredWebTools(brokeredAll)
@@ -150,6 +151,15 @@ var evalToolClusters = map[string]func() client.Client{
 }
 
 const evalPlaceholder = "eval"
+
+// evalToolContextFor gives brokered tools the authenticated context the ACP
+// broker builds and other tools the chat context, so each takes its real path.
+func evalToolContextFor(label string, fc client.Client) context.Context {
+	if label == "brokered" {
+		return WithToolContext(context.Background(), &ToolContext{Client: fc, Brokered: true, Namespace: defaultNamespace, TaskID: evalPlaceholder, TaskUID: "eval-uid"})
+	}
+	return evalToolContext(fc)
+}
 
 // evalToolContext is the chat tool context, with the execution mode a real
 // installation selects so runtime Agents can be created.
@@ -286,7 +296,7 @@ func TestToolEvalMalformedArguments(t *testing.T) {
 				for _, cluster := range []string{"empty", "seeded"} {
 					fc := evalToolClusters[cluster]()
 					fresh, _ := evalToolRegistries(fc)[label].Get(name)
-					result, panicked, err := evalToolExecute(evalToolContext(fc), fresh, inputs[input])
+					result, panicked, err := evalToolExecute(evalToolContextFor(label, fc), fresh, inputs[input])
 					key := fmt.Sprintf("%s/%s: %s", label, name, input)
 					failed, message := evalToolFailure(result, err)
 					switch {
@@ -338,7 +348,7 @@ func evalObjectStringHandling(label, name string, required []any, properties map
 			raw, _ := json.Marshal(args)
 			fc := evalToolClusters[cluster]()
 			tool, _ := evalToolRegistries(fc)[label].Get(name)
-			result, panicked, err := evalToolExecute(evalToolContext(fc), tool, string(raw))
+			result, panicked, err := evalToolExecute(evalToolContextFor(label, fc), tool, string(raw))
 			if panicked != nil {
 				return true, evalPanicked + fmt.Sprintf(": %v", panicked)
 			}
@@ -482,32 +492,40 @@ func evalToolRequiredArgs(required []any, properties map[string]any) map[string]
 	return args
 }
 
-// evalToolLimits lists every limit (minimum, maximum, enum, length) that a tool
-// schema declares, keyed like "chat/create_agent_task.maxTurns maximum".
+// evalToolLimits lists every limit (minimum, maximum, enum, length, pattern)
+// that a tool schema declares, keyed like "chat/create_agent_task.maxTurns
+// maximum", and every required field of a nested object, keyed like
+// "chat/create_agent.coordination.allowedAgents[].name required".
+// TestToolEvalMalformedArguments covers top-level required fields.
 func evalToolLimits(t *testing.T) []string {
 	t.Helper()
 	var limits []string
-	var walk func(prefix string, schema map[string]any)
-	walk = func(prefix string, schema map[string]any) {
+	var walk func(prefix string, schema map[string]any, nested bool)
+	walk = func(prefix string, schema map[string]any, nested bool) {
 		for _, keyword := range []string{"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "enum", "minLength", "maxLength", "minItems", "maxItems", "pattern"} {
 			if _, ok := schema[keyword]; ok {
 				limits = append(limits, prefix+" "+keyword)
 			}
 		}
+		if required, _ := schema["required"].([]any); nested {
+			for _, field := range required {
+				limits = append(limits, fmt.Sprintf("%s.%v required", prefix, field))
+			}
+		}
 		properties, _ := schema["properties"].(map[string]any)
 		for name, raw := range properties {
 			if child, ok := raw.(map[string]any); ok {
-				walk(prefix+"."+name, child)
+				walk(prefix+"."+name, child, true)
 			}
 		}
 		if items, ok := schema["items"].(map[string]any); ok {
-			walk(prefix+"[]", items)
+			walk(prefix+"[]", items, true)
 		}
 	}
 	for label, registry := range evalToolRegistries(newFakeClient()) {
 		for _, name := range registry.Names() {
 			tool, _ := registry.Get(name)
-			walk(label+"/"+name, evalToolSchema(t, tool))
+			walk(label+"/"+name, evalToolSchema(t, tool), false)
 		}
 	}
 	sort.Strings(limits)
@@ -1025,16 +1043,47 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			},
 		},
 		{
-			name:   "worker run_validation command",
-			limits: []string{"worker/run_validation.command maxLength", "worker/run_validation.command minLength"},
+			name:   "brokered run_validation command",
+			limits: []string{"brokered/run_validation.command maxLength", "brokered/run_validation.command minLength"},
 			check: func(t *testing.T) (bool, string) {
-				tool, _ := workerTool("run_validation", newFakeClient())
-				ctx := WithToolContext(context.Background(), &ToolContext{Brokered: true, Namespace: defaultNamespace, TaskID: "task", TaskUID: "task-uid"})
+				fc := newFakeClient()
+				tool, _ := evalToolRegistries(fc)["brokered"].Get("run_validation")
+				ctx := evalToolContextFor("brokered", fc)
 				return evalAll(
 					func() (bool, string) { return evalRejects(ctx, tool, `{"command":""}`, "command") },
 					func() (bool, string) { return evalRejects(ctx, tool, `{"command":"`+long(8193)+`"}`, "command") },
 				)
 			},
+		},
+		{
+			name:        "chat create_agent allowed agent name",
+			limits:      []string{"chat/create_agent.coordination.allowedAgents[].name required"},
+			check:       evalAllowedAgentNameRequired(chatTool, `"name":"a","systemPrompt":"p"`),
+			knownDefect: "chat create_agent drops an allowed agent without a name and reports success",
+		},
+		{
+			name:        "worker create_agent allowed agent name",
+			limits:      []string{"worker/create_agent.coordination.allowedAgents[].name required"},
+			check:       evalAllowedAgentNameRequired(workerTool, `"role":"coder","systemPrompt":"p"`),
+			knownDefect: "worker create_agent stores an allowed agent with an empty name",
+		},
+		{
+			name:        "worker post_review_comment comment path",
+			limits:      []string{"worker/post_review_comment.comments[].path required"},
+			check:       evalReviewCommentFieldRequired("path"),
+			knownDefect: "post_review_comment forwards a line comment without path to GitHub instead of rejecting it",
+		},
+		{
+			name:        "worker post_review_comment comment line",
+			limits:      []string{"worker/post_review_comment.comments[].line required"},
+			check:       evalReviewCommentFieldRequired("line"),
+			knownDefect: "post_review_comment forwards a line comment without line to GitHub instead of rejecting it",
+		},
+		{
+			name:        "worker post_review_comment comment body",
+			limits:      []string{"worker/post_review_comment.comments[].body required"},
+			check:       evalReviewCommentFieldRequired("body"),
+			knownDefect: "post_review_comment forwards a line comment without body to GitHub instead of rejecting it",
 		},
 		{
 			name:        "worker update_plan progress maximum",
@@ -1096,6 +1145,38 @@ func evalMergeMethodEnforced(build func(client.Client, string) Tool) func(*testi
 		ok, detail := evalEnumEnforced(context.Background(), tool, method, "merge_method", "fast-forward", "merge", "squash", "rebase")
 		if !ok && stub.sent(`"merge_method":"fast-forward"`) {
 			detail = tool.Name() + " sent merge_method=fast-forward to GitHub"
+		}
+		return ok, detail
+	}
+}
+
+// evalAllowedAgentNameRequired checks that create_agent, given its required
+// fields, rejects an allowed agent without a name instead of dropping it or
+// storing it unnamed. The worker tool resolves its parent Task from the
+// environment.
+func evalAllowedAgentNameRequired(get func(string, client.Client) (Tool, context.Context), required string) func(*testing.T) (bool, string) {
+	return func(t *testing.T) (bool, string) {
+		t.Setenv(envOrkaTaskName, "parent")
+		tool, ctx := get("create_agent", newFakeClient(&corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: defaultNamespace}}))
+		return evalRejects(ctx, tool, `{`+required+`,"coordination":{"enabled":true,"allowedAgents":[{"namespace":"default"}]}}`, "allowedAgents")
+	}
+}
+
+// evalReviewCommentFieldRequired checks that post_review_comment rejects a line
+// comment missing a required field, reporting whether it reached the GitHub
+// stub.
+func evalReviewCommentFieldRequired(field string) func(*testing.T) (bool, string) {
+	return func(t *testing.T) (bool, string) {
+		task, secret := githubRepoTaskWithSecret(testOrgTestRepoURL)
+		stub := newEvalHTTPStub(t)
+		t.Setenv(envOrkaTaskName, testCoderTaskName)
+		tool := &PostReviewCommentTool{k8sClient: newFakeClient(task, secret), apiBaseURL: stub.URL}
+		comment := map[string]any{"path": "main.go", "line": 1, "body": "nit"}
+		delete(comment, field)
+		raw, _ := json.Marshal(map[string]any{"task_name": testCoderTaskName, "pr_number": 1, "body": "x", "event": "COMMENT", "comments": []any{comment}})
+		ok, detail := evalRejects(context.Background(), tool, string(raw), "comments")
+		if !ok && stub.sent(`"comments":[`) {
+			detail = "sent a line comment without " + field + " to GitHub"
 		}
 		return ok, detail
 	}
