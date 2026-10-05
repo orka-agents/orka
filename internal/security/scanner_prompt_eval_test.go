@@ -93,11 +93,16 @@ func TestScannerEvalPromptsTreatRepositoryContentAsUntrusted(t *testing.T) {
 			prompt = strings.ReplaceAll(prompt, scannerEvalRepositoryExcerpt, "")
 			expectScannerEvalCheck(t, scannerEvalIgnoreInstructionsPattern.MatchString(prompt),
 				"prompt has no instruction to ignore directives inside repository content", "")
-			if regexp.MustCompile(`\bTRUSTED\b`).MatchString(prompt) {
-				t.Errorf("prompt labels content as trusted")
-			}
 		})
 	}
+}
+
+// TestScannerEvalReviewPromptDoesNotTrustRepositoryContent checks that the
+// review prompt does not introduce inlined repository excerpts as trusted.
+func TestScannerEvalReviewPromptDoesNotTrustRepositoryContent(t *testing.T) {
+	prompt := strings.ReplaceAll(scannerEvalPrompts()["review"], scannerEvalRepositoryExcerpt, "")
+	expectScannerEvalCheck(t, !regexp.MustCompile(`\bTRUSTED\b`).MatchString(prompt),
+		"review prompt labels repository content as TRUSTED", "")
 }
 
 // TestScannerEvalCustomPolicyCannotDisplaceDefaults checks that ConfigMap
@@ -111,9 +116,12 @@ func TestScannerEvalCustomPolicyCannotDisplaceDefaults(t *testing.T) {
 		CustomScanSource:       "configmap/scan-policy",
 		FalsePositiveSource:    "configmap/scan-policy",
 	}
+	// Each prompt's mandatory text that the custom policy must follow. The
+	// threat model has no finding policy, so use its last built-in requirement.
 	defaults := map[string]string{
-		"review":     ScannerFindingQualityPolicy(),
-		"validation": ScannerValidationQualityPolicy(),
+		"threat model": "- Call out important uncertainties explicitly instead of inventing details.",
+		"review":       ScannerFindingQualityPolicy(),
+		"validation":   ScannerValidationQualityPolicy(),
 	}
 	for name, prompt := range scannerEvalPrompts(custom) {
 		if name == "patch" {

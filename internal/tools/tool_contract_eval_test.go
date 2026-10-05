@@ -533,6 +533,44 @@ func evalRejects(ctx context.Context, tool Tool, args, field string) (bool, stri
 	return true, ""
 }
 
+// evalEnumEnforced checks that a value outside the enum is rejected and that
+// no declared value is. A declared value counts as rejected only if it fails
+// with the message the invalid value produced, so a call that fails for
+// unrelated missing context still accepts the value.
+func evalEnumEnforced(ctx context.Context, tool Tool, args func(value string) string, field, invalid string, declared ...string) (bool, string) {
+	if ok, detail := evalRejects(ctx, tool, args(invalid), field); !ok {
+		return false, detail
+	}
+	result, _, err := evalToolExecute(ctx, tool, args(invalid))
+	_, rejection := evalToolFailure(result, err)
+	for _, value := range declared {
+		result, panicked, err := evalToolExecute(ctx, tool, args(value))
+		if panicked != nil {
+			return false, fmt.Sprintf("%s %q panicked: %v", field, value, panicked)
+		}
+		if failed, message := evalToolFailure(result, err); failed && (message == rejection || message == strings.ReplaceAll(rejection, invalid, value)) {
+			return false, fmt.Sprintf("rejected declared %s %q: %s", field, value, message)
+		}
+	}
+	return true, ""
+}
+
+// evalRecordingCodeExec returns a code_exec tool whose sandbox only records the
+// request, so no code runs.
+func evalRecordingCodeExec(t *testing.T) (*CodeExecTool, *recordingCodeExecutor) {
+	t.Helper()
+	sandbox := &recordingCodeExecutor{result: CodeExecResult{Output: "ok"}}
+	return &CodeExecTool{
+		workDir:          t.TempDir(),
+		timeout:          defaultCodeExecTimeout,
+		allowedLangs:     defaultCodeExecAllowedLangs(),
+		denyPatterns:     defaultDenyPatterns,
+		executor:         sandbox,
+		backend:          codeExecBackendKubernetes,
+		outputLimitBytes: defaultCodeExecOutputLimitBytes,
+	}, sandbox
+}
+
 func evalAll(checks ...func() (bool, string)) (bool, string) {
 	for _, check := range checks {
 		if ok, detail := check(); !ok {
@@ -711,7 +749,10 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 				tool, ctx := chatTool("create_agent_task", newFakeClient())
 				base := `{"name":"t","prompt":"p","agentRef":"a","workspace":{"gitRepo":"https://github.com/acme/api",%s}}`
 				return evalAll(
-					func() (bool, string) { return evalRejects(ctx, tool, fmt.Sprintf(base, `"intent":"delete"`), "intent") },
+					func() (bool, string) {
+						intent := func(v string) string { return fmt.Sprintf(base, `"intent":"`+v+`"`) }
+						return evalEnumEnforced(ctx, tool, intent, "intent", "delete", "read", "write")
+					},
 					func() (bool, string) {
 						return evalRejects(ctx, tool, fmt.Sprintf(base, `"intent":"write","createPR":true,"prTitle":"`+long(257)+`"`), "prTitle")
 					},
@@ -757,7 +798,8 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 					func() (bool, string) { return pagesClamped(500) },
 					func() (bool, string) { return pagesClamped(-5) },
 					func() (bool, string) {
-						return evalRejects(ctx, tool, fmt.Sprintf(base, `,"review_event":"MAYBE"`), "review_event")
+						event := func(v string) string { return fmt.Sprintf(base, `,"review_event":"`+v+`"`) }
+						return evalEnumEnforced(ctx, tool, event, "review_event", "MAYBE", "COMMENT", "APPROVE", "REQUEST_CHANGES")
 					},
 				)
 			},
@@ -768,32 +810,24 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			check: func(t *testing.T) (bool, string) {
 				// Clamping an over-maximum timeout is pinned by
 				// TestCodeExecTool_Execute_TimeoutClampsToMax.
-				tool, ctx := workerTool("code_exec", newFakeClient())
-				return evalRejects(ctx, tool, `{"language":"cobol","code":"DISPLAY 'x'."}`, "cobol")
+				tool, _ := evalRecordingCodeExec(t)
+				language := func(v string) string { return `{"language":"` + v + `","code":"echo test"}` }
+				return evalEnumEnforced(context.Background(), tool, language, "language", "cobol", "python", "python3", "javascript", "node", "bash", "sh")
 			},
 		},
 		{
 			name:   "worker code_exec minimum timeout",
 			limits: []string{"worker/code_exec.timeout minimum"},
 			check: func(t *testing.T) (bool, string) {
-				// A recording executor stands in for the sandbox, so no code runs.
-				sandbox := &recordingCodeExecutor{result: CodeExecResult{Output: "ok"}}
-				tool := &CodeExecTool{
-					workDir:          t.TempDir(),
-					timeout:          defaultCodeExecTimeout,
-					allowedLangs:     defaultCodeExecAllowedLangs(),
-					denyPatterns:     defaultDenyPatterns,
-					executor:         sandbox,
-					backend:          codeExecBackendKubernetes,
-					outputLimitBytes: defaultCodeExecOutputLimitBytes,
-				}
-				if ok, _ := evalRejects(context.Background(), tool, `{"language":"bash","code":"echo test","timeout":-1}`, "timeout"); ok {
+				// Zero is the value just below the minimum.
+				tool, sandbox := evalRecordingCodeExec(t)
+				if ok, _ := evalRejects(context.Background(), tool, `{"language":"bash","code":"echo test","timeout":0}`, "timeout"); ok {
 					return true, ""
 				}
 				if sandbox.calls > 0 && sandbox.req.Timeout == time.Second {
 					return true, ""
 				}
-				return false, fmt.Sprintf("timeout -1 ran with %s", sandbox.req.Timeout)
+				return false, fmt.Sprintf("timeout 0 ran with %s", sandbox.req.Timeout)
 			},
 		},
 		{
@@ -861,7 +895,10 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 				}))
 				base := `{"agent":"coder","prompt":"p","workspace":{"gitRepo":"https://github.com/acme/api",%s}}`
 				return evalAll(
-					func() (bool, string) { return evalRejects(ctx, tool, fmt.Sprintf(base, `"intent":"delete"`), "intent") },
+					func() (bool, string) {
+						intent := func(v string) string { return fmt.Sprintf(base, `"intent":"`+v+`"`) }
+						return evalEnumEnforced(ctx, tool, intent, "intent", "delete", "read", "write")
+					},
 					func() (bool, string) {
 						return evalRejects(ctx, tool, fmt.Sprintf(base, `"intent":"write","createPR":true,"prTitle":"`+long(257)+`"`), "prTitle")
 					},
@@ -875,8 +912,10 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			name:   "worker file_write mode",
 			limits: []string{"worker/file_write.mode enum"},
 			check: func(t *testing.T) (bool, string) {
-				tool, ctx := workerTool("file_write", newFakeClient())
-				return evalRejects(ctx, tool, `{"path":"eval.txt","content":"x","mode":"truncate"}`, "mode")
+				dir := t.TempDir()
+				tool := &FileWriteTool{workDir: dir, maxFileSize: 1 << 20, allowedPaths: []string{dir}}
+				mode := func(v string) string { return `{"path":"eval.txt","content":"x","mode":"` + v + `"}` }
+				return evalEnumEnforced(context.Background(), tool, mode, "mode", "truncate", "write", "append")
 			},
 		},
 		{
@@ -922,8 +961,14 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			name:   "worker post_review_comment event",
 			limits: []string{"worker/post_review_comment.event enum"},
 			check: func(t *testing.T) (bool, string) {
-				tool, ctx := workerTool("post_review_comment", newFakeClient())
-				return evalRejects(ctx, tool, `{"pr_number":1,"body":"x","event":"MAYBE"}`, "event")
+				task, secret := githubRepoTaskWithSecret(testOrgTestRepoURL)
+				stub := newEvalHTTPStub(t)
+				t.Setenv(envOrkaTaskName, testCoderTaskName)
+				tool := &PostReviewCommentTool{k8sClient: newFakeClient(task, secret), apiBaseURL: stub.URL}
+				event := func(v string) string {
+					return fmt.Sprintf(`{"task_name":%q,"pr_number":1,"body":"x","event":%q}`, testCoderTaskName, v)
+				}
+				return evalEnumEnforced(context.Background(), tool, event, "event", "MAYBE", "APPROVE", "REQUEST_CHANGES", "COMMENT")
 			},
 		},
 		{
@@ -965,8 +1010,11 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 						return nil
 					},
 				})
-				ok, detail := evalRejects(ctx, tool, `{"action":"deploy","targetTool":"deploy_service","targetArguments":{},"severity":"meh"}`, "severity")
-				if !ok && len(emitted) > 0 {
+				severity := func(v string) string {
+					return `{"action":"deploy","targetTool":"deploy_service","targetArguments":{},"severity":"` + v + `"}`
+				}
+				ok, detail := evalEnumEnforced(ctx, tool, severity, "severity", "meh", "warning", "critical")
+				if !ok && len(emitted) > 0 && emitted[0].Severity == "meh" {
 					detail = fmt.Sprintf("emitted an approval with severity %q", emitted[0].Severity)
 				}
 				return ok, detail
@@ -987,12 +1035,12 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 		{
 			name:   "worker update_plan progress maximum",
 			limits: []string{"worker/update_plan.progress_pct maximum"},
-			check:  evalProgressEnforced(150),
+			check:  evalProgressEnforced(101),
 		},
 		{
 			name:   "worker update_plan progress minimum",
 			limits: []string{"worker/update_plan.progress_pct minimum"},
-			check:  evalProgressEnforced(-10),
+			check:  evalProgressEnforced(-1),
 		},
 	}
 
@@ -1036,8 +1084,10 @@ func evalMergeMethodEnforced(build func(client.Client, string) Tool) func(*testi
 		task, secret := githubRepoTaskWithSecret(testOrgTestRepoURL)
 		stub := newEvalHTTPStub(t)
 		tool := build(newFakeClient(task, secret), stub.URL)
-		args := fmt.Sprintf(`{"task_name":%q,"pr_number":1,"merge_method":"fast-forward"}`, testCoderTaskName)
-		ok, detail := evalRejects(context.Background(), tool, args, "merge_method")
+		method := func(v string) string {
+			return fmt.Sprintf(`{"task_name":%q,"pr_number":1,"merge_method":%q}`, testCoderTaskName, v)
+		}
+		ok, detail := evalEnumEnforced(context.Background(), tool, method, "merge_method", "fast-forward", "merge", "squash", "rebase")
 		if !ok && stub.sent(`"merge_method":"fast-forward"`) {
 			detail = tool.Name() + " sent merge_method=fast-forward to GitHub"
 		}
