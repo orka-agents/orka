@@ -21,27 +21,18 @@ const (
 )
 
 const (
-	mergeSHAField            = "mergeSHA"
 	githubPermissionAdmin    = "admin"
 	githubPermissionMaintain = "maintain"
 	bearerAuthScheme         = "Bearer"
 )
 
 const (
-	repositoryMonitorActionAutomerge                     = "pr_automerge"
-	repositoryMonitorAutomergeStateMerged                = "merged"
-	repositoryMonitorAutomergeStateMergeReady            = "merge_ready"
-	repositoryMonitorAutomergeStateBlocked               = "blocked"
-	repositoryMonitorAutomergeStateFailed                = "failed"
-	repositoryMonitorAutomergeStateStarted               = "started"
-	repositoryMonitorAutomergeStatePending               = repositoryMonitorReviewTaskStatePending
-	repositoryMonitorAutomergeReasonDisabled             = "automerge_disabled"
-	repositoryMonitorAutomergeReasonCIPending            = "ci_pending"
-	repositoryMonitorAutomergeReasonCICheckRetry         = "ci_check_error_retry"
-	repositoryMonitorAutomergeReasonMergeabilityPending  = "mergeability_pending"
-	repositoryMonitorAutomergeReasonValidationCheckRetry = "validation_check_error_retry"
-	repositoryMonitorAutomergeGateEnv                    = "ORKA_REPOSITORY_MONITOR_AUTOMERGE_GATE"
-	repositoryMonitorAutomergeMethodSquash               = "squash"
+	repositoryMonitorAutomergeStateMerged     = "merged"
+	repositoryMonitorAutomergeStateMergeReady = "merge_ready"
+	repositoryMonitorAutomergeStateBlocked    = "blocked"
+	repositoryMonitorAutomergeStateStarted    = "started"
+	repositoryMonitorAutomergeStatePending    = repositoryMonitorReviewTaskStatePending
+	repositoryMonitorAutomergeReasonCIPending = "ci_pending"
 )
 
 func (r *RepositoryMonitorReconciler) repositoryMonitorValidationAllowsAutomerge(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, headSHA string) (bool, error) {
