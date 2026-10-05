@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -111,6 +112,11 @@ func (t *PostReviewCommentTool) Execute(ctx context.Context, argsJSON json.RawMe
 		// valid
 	default:
 		return "", fmt.Errorf("invalid event value %q: must be APPROVE, REQUEST_CHANGES, or COMMENT", args.Event)
+	}
+	for i, comment := range args.Comments {
+		if strings.TrimSpace(comment.Path) == "" || comment.Line < 1 || strings.TrimSpace(comment.Body) == "" {
+			return "", fmt.Errorf("comments[%d] needs a path, a line of at least 1, and a body", i)
+		}
 	}
 
 	owner, repo, token, _, err := resolveScopedForgeRepoAndToken(ctx, t.k8sClient, args.TaskName, args.RepoURL, t.apiBaseURL)
