@@ -124,7 +124,7 @@ func (b *SystemPromptBuilder) BuildSystemPrompt(ctx context.Context, userSystemP
 		buildToolCallStyleSection(),
 		b.taskTypesSection(),
 		buildValidationSection(),
-		buildCoordinationSection(),
+		b.coordinationSection(),
 		buildSchedulingSection(),
 	} {
 		b.writeSection(&sb, section)
@@ -340,9 +340,11 @@ Report the selected validation image, command, workspace ref/branch, and evidenc
 `
 }
 
-func buildCoordinationSection() string {
-	return `<coordination>
-For complex multi-step tasks, use the self-bootstrapping coordinator pattern:
+// coordinationParts splits the coordination guidance by the chat tools each
+// part relies on, so a caller offered only some of them keeps the rest.
+func coordinationParts() []string {
+	return []string{
+		`For complex multi-step tasks, use the self-bootstrapping coordinator pattern:
 
 PREFERRED (one-shot): Create a coordinator agent with initialPrompt to instantly start:
   create_agent(name="coordinator", coordination={enabled: true}, 
@@ -358,7 +360,8 @@ The coordinator agent will then:
 4. Synthesize results and iterate if needed
 5. Specialist agents are auto-cleaned up when the coordinator task is deleted
 
-INTER-AGENT MESSAGING: Child tasks delegated by a coordinator can communicate with
+`,
+		`INTER-AGENT MESSAGING: Child tasks delegated by a coordinator can communicate with
 each other using send_message and check_messages. This is useful when:
 - One task produces results that a sibling task needs before it can start
 - Tasks need to coordinate or exchange intermediate findings
@@ -368,24 +371,67 @@ The coordinator should instruct child tasks to use send_message (with to_task="*
 broadcast to all siblings) and check_messages in their prompts. For reliable delivery,
 delegate the sender first, wait for it to complete, then delegate the receiver.
 
-CANCEL: The coordinator can use cancel_task to cancel running child tasks. This is
+`,
+		`CANCEL: The coordinator can use cancel_task to cancel running child tasks. This is
 useful for race patterns (start multiple tasks, keep the first result, cancel the rest)
 or when a child task's result makes other tasks unnecessary.
 
-MANUAL (multi-step): For more control, create agents separately:
+`,
+		`MANUAL (multi-step): For more control, create agents separately:
 1. Create specialist agents with create_agent
 2. Create a coordinator agent with coordination.enabled=true
 3. Create a task referencing the coordinator: use create_agent_task only when the
    coordinator has runtime listed; otherwise use create_ai_task with agentRef and providerRef.
 
-When no agents exist and the user needs complex work done:
-- For simple commands (e.g., "list pods", "check disk"): use create_container_task
-  with an appropriate image. No LLM needed.
-- For questions needing reasoning (e.g., "explain this error"): use create_ai_task.
-- For complex workflows: use the one-shot coordinator pattern above.
-</coordination>
+`,
+	}
+}
 
+const coordinationFallbackHeader = `When no agents exist and the user needs complex work done:
 `
+
+// coordinationOneShotFallback points to the one-shot pattern, which needs
+// create_agent.
+const coordinationOneShotFallback = `- For complex workflows: use the one-shot coordinator pattern above.
+`
+
+// coordinationFallbackParts says what to use when no agents exist.
+func coordinationFallbackParts() []string {
+	return []string{
+		`- For simple commands (e.g., "list pods", "check disk"): use create_container_task
+  with an appropriate image. No LLM needed.
+`,
+		`- For questions needing reasoning (e.g., "explain this error"): use create_ai_task.
+`,
+		coordinationOneShotFallback,
+	}
+}
+
+func buildCoordinationSection() string {
+	return "<coordination>\n" + strings.Join(coordinationParts(), "") +
+		coordinationFallbackHeader + strings.Join(coordinationFallbackParts(), "") + "</coordination>\n\n"
+}
+
+// coordinationSection keeps the coordination guidance whose tools are offered.
+func (b *SystemPromptBuilder) coordinationSection() string {
+	var parts, fallback strings.Builder
+	for _, part := range coordinationParts() {
+		b.writeSection(&parts, part)
+	}
+	for _, part := range coordinationFallbackParts() {
+		if part == coordinationOneShotFallback && b.availableChatTools != nil && !b.availableChatTools["create_agent"] {
+			continue
+		}
+		b.writeSection(&fallback, part)
+	}
+	if fallback.Len() > 0 {
+		parts.WriteString(coordinationFallbackHeader)
+		parts.WriteString(fallback.String())
+	}
+	if parts.Len() == 0 {
+		return ""
+	}
+	return "<coordination>\n" + parts.String() + "</coordination>\n\n"
 }
 
 func buildSchedulingSection() string {

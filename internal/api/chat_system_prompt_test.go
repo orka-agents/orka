@@ -816,6 +816,16 @@ func TestBuildSystemPromptKeepsGuidanceForEachOfferedTaskTool(t *testing.T) {
 			t.Error("limited prompt names a tool that is not offered")
 		}
 	}
+	// Coordination guidance for create_agent survives without the other task tools.
+	coordinator := build("create_agent", "create_ai_task")
+	for _, want := range []string{"PREFERRED (one-shot)", "initialPrompt=", "use create_ai_task.", "use the one-shot coordinator pattern above"} {
+		if !strings.Contains(coordinator, want) {
+			t.Errorf("create_agent prompt is missing %q", want)
+		}
+	}
+	if aiOnly := build("create_ai_task"); !strings.Contains(aiOnly, "use create_ai_task.") || strings.Contains(aiOnly, "one-shot coordinator") {
+		t.Error("prompt without create_agent must keep the create_ai_task fallback and drop the one-shot pattern")
+	}
 	// Without a task creation tool, the model must not be told to create tasks.
 	for _, prompt := range []string{build("wait_for_task", "fetch_task_output"), build("list_agents"), build()} {
 		if strings.Contains(prompt, "create_*_task") || strings.Contains(prompt, "CRITICAL RULE") {

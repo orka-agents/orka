@@ -27,11 +27,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -192,9 +194,17 @@ func evalToolSchema(t *testing.T, tool Tool) map[string]any {
 	return schema
 }
 
+// evalPanics counts the panics evalToolExecute recovers, so a check that
+// reports failure cannot pass a panic off as a known defect.
+var evalPanics atomic.Int64
+
 // evalToolExecute runs a tool, converting a panic into a reported failure.
 func evalToolExecute(ctx context.Context, tool Tool, args string) (result string, panicked any, err error) {
-	defer func() { panicked = recover() }()
+	defer func() {
+		if panicked = recover(); panicked != nil {
+			evalPanics.Add(1)
+		}
+	}()
 	result, err = tool.Execute(ctx, json.RawMessage(args))
 	return result, nil, err
 }
@@ -292,7 +302,7 @@ func TestToolEvalMalformedArguments(t *testing.T) {
 					case verdict == "":
 					case verdict == evalInconclusive:
 						inconclusive = append(inconclusive, key)
-					case strings.HasPrefix(verdict, evalPanicked):
+					case strings.HasPrefix(verdict, evalPanicked), strings.HasPrefix(verdict, evalGoError):
 						fatal = append(fatal, key+": "+verdict)
 					default:
 						violations[key] = verdict
@@ -340,6 +350,7 @@ func TestToolEvalMalformedArguments(t *testing.T) {
 const (
 	evalInconclusive = "inconclusive"
 	evalPanicked     = "panicked"
+	evalGoError      = "returned Go error"
 )
 
 // evalObjectStringHandling runs a tool three ways: with a nested object built
@@ -367,6 +378,9 @@ func evalObjectStringHandling(label, name string, required []any, properties map
 			if panicked != nil {
 				return true, evalPanicked + fmt.Sprintf(": %v", panicked)
 			}
+			if label == "chat" && err != nil && !errors.As(err, new(*ToolArgumentError)) {
+				return true, evalGoError + fmt.Sprintf(" %q instead of a structured result", err)
+			}
 			failed, _ := evalToolFailure(result, err)
 			return failed, evalClusterSnapshot(fc)
 		}
@@ -374,7 +388,7 @@ func evalObjectStringHandling(label, name string, required []any, properties map
 		objectFailed, asObject := run(payload)
 		_, omitted := run(nil)
 		for _, snapshot := range []string{asString, asObject, omitted} {
-			if strings.HasPrefix(snapshot, evalPanicked) {
+			if strings.HasPrefix(snapshot, evalPanicked) || strings.HasPrefix(snapshot, evalGoError) {
 				return snapshot
 			}
 		}
@@ -663,6 +677,22 @@ func newEvalHTTPStub(t *testing.T) *evalHTTPStub {
 	t.Cleanup(stub.Close)
 	return stub
 }
+
+// perPage returns the per_page values the stub received.
+func (s *evalHTTPStub) perPage() []int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var values []int
+	for _, request := range s.requests {
+		for _, match := range evalPerPagePattern.FindAllStringSubmatch(request, -1) {
+			value, _ := strconv.Atoi(match[1])
+			values = append(values, value)
+		}
+	}
+	return values
+}
+
+var evalPerPagePattern = regexp.MustCompile(`[?&]per_page=(-?[0-9]+)`)
 
 func (s *evalHTTPStub) sent(fragment string) bool {
 	s.mu.Lock()
@@ -977,11 +1007,12 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 					tool := make(githubTask(), stub.URL)
 					args := fmt.Sprintf(`{"task_name":%q,"repo_url":%q,"per_page":%d}`, testCoderTaskName, testOrgTestRepoURL, perPage)
 					_, _, _ = evalToolExecute(context.Background(), tool, args)
+					sent := stub.perPage()
 					switch {
-					case stub.sent(fmt.Sprintf("per_page=%d", perPage)):
-						return false, fmt.Sprintf("%s sent per_page=%d to GitHub", tool.Name(), perPage)
-					case !stub.sent("per_page="):
+					case len(sent) == 0:
 						return false, fmt.Sprintf("%s made no list request for per_page=%d", tool.Name(), perPage)
+					case slices.ContainsFunc(sent, func(v int) bool { return v < 1 || v > 100 }):
+						return false, fmt.Sprintf("%s sent per_page=%v to GitHub for per_page=%d", tool.Name(), sent, perPage)
 					}
 					return true, ""
 				}
@@ -1104,6 +1135,11 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			check:  evalReviewCommentFieldRequired("line"),
 		},
 		{
+			name:   "worker post_review_comment comment line minimum",
+			limits: []string{"worker/post_review_comment.comments[].line minimum=1"},
+			check:  evalReviewCommentLine(0),
+		},
+		{
 			name:   "worker post_review_comment comment body",
 			limits: []string{"worker/post_review_comment.comments[].body required"},
 			check:  evalReviewCommentFieldRequired("body"),
@@ -1129,8 +1165,11 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			if tc.knownDefect != "" && len(tc.limits) != 1 {
 				t.Fatalf("a known-defect case must cover exactly one limit, or its failure can hide a regression in the others")
 			}
+			panics := evalPanics.Load()
 			ok, detail := tc.check(t)
 			switch {
+			case evalPanics.Load() != panics:
+				t.Errorf("a tool panicked: %s", detail)
 			case ok && tc.knownDefect != "":
 				t.Errorf("known defect no longer reproduces; remove knownDefect: %s", tc.knownDefect)
 			case !ok && tc.knownDefect == "":
@@ -1198,6 +1237,23 @@ func evalReviewCommentFieldRequired(field string) func(*testing.T) (bool, string
 		ok, detail := evalRejects(context.Background(), tool, string(raw), "comments")
 		if !ok && stub.sent(`"comments":[`) {
 			detail = "sent a line comment without " + field + " to GitHub"
+		}
+		return ok, detail
+	}
+}
+
+// evalReviewCommentLine checks that post_review_comment rejects a line comment
+// with an out-of-range line, reporting whether it reached the GitHub stub.
+func evalReviewCommentLine(line int) func(*testing.T) (bool, string) {
+	return func(t *testing.T) (bool, string) {
+		task, secret := githubRepoTaskWithSecret(testOrgTestRepoURL)
+		stub := newEvalHTTPStub(t)
+		t.Setenv(envOrkaTaskName, testCoderTaskName)
+		tool := &PostReviewCommentTool{k8sClient: newFakeClient(task, secret), apiBaseURL: stub.URL}
+		raw, _ := json.Marshal(map[string]any{"task_name": testCoderTaskName, "pr_number": 1, "body": "x", "event": "COMMENT", "comments": []any{map[string]any{"path": "main.go", "line": line, "body": "nit"}}})
+		ok, detail := evalRejects(context.Background(), tool, string(raw), "line")
+		if !ok && stub.sent(`"comments":[`) {
+			detail = fmt.Sprintf("sent a line comment with line %d to GitHub", line)
 		}
 		return ok, detail
 	}
