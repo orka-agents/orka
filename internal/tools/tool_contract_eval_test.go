@@ -758,7 +758,6 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 				}
 				return false, fmt.Sprintf("timeout -1 ran with %s", sandbox.req.Timeout)
 			},
-			knownDefect: "code_exec treats a negative timeout as unset and uses the 30s default instead of rejecting or clamping it",
 		},
 		{
 			name:   "brokered web_search",

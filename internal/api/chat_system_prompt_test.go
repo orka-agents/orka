@@ -763,8 +763,8 @@ func TestBuildSystemPromptLimitsGuidanceToAvailableChatTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(full, "<available_chat_tools>") {
-		t.Error("unrestricted prompt must not list available chat tools")
+	if strings.Contains(full, "<available_chat_tools>") || !strings.Contains(full, "<capabilities>") {
+		t.Error("unrestricted prompt must keep the capabilities section and not list available chat tools")
 	}
 
 	b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
@@ -772,6 +772,9 @@ func TestBuildSystemPromptLimitsGuidanceToAvailableChatTools(t *testing.T) {
 	limited, err := b.BuildSystemPrompt(context.Background(), "")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if strings.Contains(limited, "<capabilities>") {
+		t.Error("limited prompt must not claim the unrestricted capabilities")
 	}
 	if !strings.Contains(limited, "- container:") || !strings.Contains(limited, "Writable paths") {
 		t.Error("container guidance must stay when create_container_task is offered")

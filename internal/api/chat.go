@@ -433,6 +433,11 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 			case agentObj.Spec.Runtime == nil && slices.Contains(offeredChatTools, "create_ai_task"):
 				userContent = fmt.Sprintf("[Using agent %q which has no runtime — use create_ai_task with agentRef=%q for this request.]\n\n%s",
 					req.AgentRef, req.AgentRef, req.Message)
+			default:
+				// The tool that runs this agent is not offered; keep the selection
+				// visible without telling the model to call it.
+				userContent = fmt.Sprintf("[Using agent %q. The tool that runs it is not available in this conversation.]\n\n%s",
+					req.AgentRef, req.Message)
 			}
 		}
 	}

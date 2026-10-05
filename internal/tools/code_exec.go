@@ -391,6 +391,9 @@ func (t *CodeExecTool) Execute(ctx context.Context, args json.RawMessage) (strin
 		return "", fmt.Errorf("unsupported language: %s", execArgs.Language)
 	}
 
+	if execArgs.Timeout < 0 {
+		return "", fmt.Errorf("timeout must be at least 1 second")
+	}
 	timeout := t.timeout
 	if timeout <= 0 {
 		timeout = defaultCodeExecTimeout

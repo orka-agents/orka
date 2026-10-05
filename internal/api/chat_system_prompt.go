@@ -93,8 +93,12 @@ func (b *SystemPromptBuilder) BuildSystemPrompt(ctx context.Context, userSystemP
 	var sb strings.Builder
 
 	sb.WriteString(buildIdentitySection())
+	if b.availableChatTools == nil {
+		// Restricted callers get the available_chat_tools section instead,
+		// which states what they can do.
+		sb.WriteString(buildCapabilitiesSection())
+	}
 	for _, section := range []string{
-		buildCapabilitiesSection(),
 		buildBehaviorSection(),
 		buildToolCallStyleSection(),
 		b.taskTypesSection(),
