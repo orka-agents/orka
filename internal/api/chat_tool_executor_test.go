@@ -632,6 +632,7 @@ func TestExecute_ChildSessionNamespace(t *testing.T) {
 		namespace    any
 		sessionRef   string
 		schedule     any
+		nullFields   []string
 		isolation    bool
 		watchNS      string
 		wantError    string
@@ -644,6 +645,8 @@ func TestExecute_ChildSessionNamespace(t *testing.T) {
 		{name: "stringified namespace permits same name", namespace: 789, sessionRef: "sess-12345678", wantTaskNS: "789"},
 		{name: "same namespace permits other session", sessionRef: "child-session", wantTaskNS: "default"},
 		{name: "empty schedule rejects active session", sessionRef: "sess-12345678", schedule: "", wantError: "invalid_arguments"},
+		{name: "null schedule rejects active session", sessionRef: "sess-12345678", nullFields: []string{"schedule"}, wantError: "invalid_arguments"},
+		{name: "null namespace rejects active session", sessionRef: "sess-12345678", nullFields: []string{"namespace"}, wantError: "invalid_arguments"},
 		{name: "scheduled parent permits active session", sessionRef: "sess-12345678", schedule: "0 */6 * * *", wantTaskNS: "default", wantSchedule: "0 */6 * * *"},
 		{name: "stringified schedule permits active session", sessionRef: "sess-12345678", schedule: 123, wantTaskNS: "default", wantSchedule: "123"},
 		{name: "namespace isolation remains enforced", namespace: "other", sessionRef: "sess-12345678", isolation: true, wantError: "permission_denied"},
@@ -659,6 +662,9 @@ func TestExecute_ChildSessionNamespace(t *testing.T) {
 			}
 			if tt.namespace != nil {
 				args["namespace"] = tt.namespace
+			}
+			for _, field := range tt.nullFields {
+				args[field] = nil
 			}
 			result, err := e.Execute(context.Background(), llm.ToolCall{
 				ID: "child-call", Name: "create_ai_task", Arguments: mustJSON(args),

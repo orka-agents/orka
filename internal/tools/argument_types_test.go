@@ -46,6 +46,16 @@ func TestNormalizeArgTypes(t *testing.T) {
 		{name: "number for a boolean", args: `{"flag":1}`, wantErr: "flag must be a boolean, got a number"},
 		{name: "string for an array", args: `{"items":"echo hi"}`, wantErr: "items must be an array, got a string"},
 		{name: "number for an object", args: `{"config":1}`, wantErr: "config must be an object, got a number"},
+		{name: "trailing data is left for the tool", args: `{"count":"10"}garbage`, want: "raw"},
+		{name: "duplicate keys are left for the tool", args: `{"text":"a","text":"b","count":null}`, want: "raw"},
+		{name: "invalid unicode is left for the tool", args: `{"text":"\ud800","count":null}`, want: "raw"},
+		{name: "integral decimal stays a number", args: `{"count":"10.0"}`, want: `{"count":10.0}`},
+		{name: "integral exponent stays a number", args: `{"count":"100e-2"}`, want: `{"count":100e-2}`},
+		{name: "fraction float64 would round away", args: `{"count":"1.0000000000000001"}`, wantErr: "count must be a whole number, got a fraction"},
+		{name: "half beyond float64 precision", args: `{"count":9007199254740992.5}`, wantErr: "count must be a whole number, got a fraction"},
+		{name: "underflowing exponent", args: `{"count":"1e-400"}`, wantErr: "count must be a whole number, got a fraction"},
+		{name: "overflowing number", args: `{"ratio":"1e400"}`, wantErr: "ratio must be a number, got a non-numeric string"},
+		{name: "non-JSON number syntax", args: `{"ratio":"1/2"}`, wantErr: "ratio must be a number, got a non-numeric string"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -59,6 +69,12 @@ func TestNormalizeArgTypes(t *testing.T) {
 			}
 			if err != nil {
 				t.Fatalf("normalizeArgTypes() error = %v", err)
+			}
+			if tt.want == "raw" {
+				if string(got) != tt.args {
+					t.Fatalf("normalizeArgTypes() = %s, want the original %s", got, tt.args)
+				}
+				return
 			}
 			var gotValue, wantValue any
 			if json.Unmarshal(got, &gotValue) != nil || json.Unmarshal([]byte(tt.want), &wantValue) != nil {
