@@ -785,12 +785,12 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			name:   "brokered web_fetch url",
 			limits: []string{"brokered/web_fetch.url maxLength"},
 			check: func(t *testing.T) (bool, string) {
-				// The over-limit max_chars stops the call before any request if
-				// the URL is accepted.
+				// maxLength is the character count that keeps any UTF-8 URL within
+				// the 64 KiB byte limit the tool enforces; past that limit the URL
+				// is rejected before it is parsed or fetched.
 				tool, _ := evalToolRegistries(newFakeClient())["brokered"].Get("web_fetch")
-				return evalRejects(context.Background(), tool, `{"url":"https://1.1.1.1/`+long(16384)+`","max_chars":50001}`, "url")
+				return evalRejects(context.Background(), tool, `{"url":"https://1.1.1.1/`+long(brokeredWebFetchMaxURLBytes)+`"}`, "url")
 			},
-			knownDefect: "brokered web_fetch advertises url maxLength in characters but enforces 64 KiB in bytes, so it accepts ASCII URLs past the advertised limit",
 		},
 		{
 			name:   "worker create_agent model contextWindow",
