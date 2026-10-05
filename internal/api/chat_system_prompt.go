@@ -99,7 +99,7 @@ func (b *SystemPromptBuilder) BuildSystemPrompt(ctx context.Context, userSystemP
 		sb.WriteString(buildCapabilitiesSection())
 	}
 	for _, section := range []string{
-		buildBehaviorSection(),
+		b.behaviorSection(),
 		buildToolCallStyleSection(),
 		b.taskTypesSection(),
 		buildValidationSection(),
@@ -175,23 +175,44 @@ wait for results, and report back.
 `
 }
 
-func buildBehaviorSection() string {
-	return `<behavior>
+// behaviorParts splits the behavior guidance so the instruction to call tools
+// in the same response survives when the polling tools are not offered.
+func behaviorParts() []string {
+	return []string{
+		`<behavior>
 CRITICAL RULE: When the user asks you to run, create, or execute something,
 you MUST call the appropriate tool in your response. NEVER respond with only text
 like "I'll create that task" or "Let me run that" — you MUST include the tool
-call in the SAME response. If you need to create a task AND fetch its result,
+call in the SAME response.`,
+		` If you need to create a task AND fetch its result,
 call create_*_task, then wait_for_task, then fetch_task_output all in sequence
-without stopping to narrate between steps. Act first, summarize after.
+without stopping to narrate between steps.`,
+		` Act first, summarize after.
 
-LONG-RUNNING TASKS: Agent tasks (Copilot, Claude Code, Codex, OpenCode) typically run for 5-20 minutes.
+`,
+		`LONG-RUNNING TASKS: Agent tasks (Copilot, Claude Code, Codex, OpenCode) typically run for 5-20 minutes.
 You MUST keep calling wait_for_task in a loop until the task reaches a terminal state
 (Succeeded or Failed). Do NOT give up after a few polls — keep waiting. If wait_for_task
 returns "still running", immediately call wait_for_task again. Only stop when the task
 has completed or failed. After completion, call fetch_task_output to get the result.
-</behavior>
+`,
+		`</behavior>
 
-`
+`,
+	}
+}
+
+func buildBehaviorSection() string {
+	return strings.Join(behaviorParts(), "")
+}
+
+// behaviorSection keeps the behavior guidance whose tools are offered.
+func (b *SystemPromptBuilder) behaviorSection() string {
+	var sb strings.Builder
+	for _, part := range behaviorParts() {
+		b.writeSection(&sb, part)
+	}
+	return sb.String()
 }
 
 func buildToolCallStyleSection() string {
@@ -204,8 +225,9 @@ Keep narration brief and value-dense; avoid repeating obvious steps.
 `
 }
 
-// taskTypeParts describes each task type separately so a caller offered only
-// some task tools still gets guidance for the ones it has.
+// taskTypeParts describes each task type separately, and splits out sentences
+// that point to another task tool, so a caller offered only some task tools
+// still gets guidance for the ones it has.
 func taskTypeParts() []string {
 	return []string{
 		`- container: Run a command in a container. Use create_container_task.
@@ -231,9 +253,11 @@ func taskTypeParts() []string {
   Use for: code changes in a git repo, multi-file refactoring.
   IMPORTANT: When the user specifies an agent (via --agent or agentRef) that has a
   runtime configured, ALWAYS use create_agent_task with that agent name.
-  If the specified Agent has no runtime listed, including coordinator Agents backed
+`,
+		`  If the specified Agent has no runtime listed, including coordinator Agents backed
   by providerRef/model only, use create_ai_task with agentRef and providerRef instead.
-  When the task involves a git repository, ALWAYS include the gitRepo URL in the
+`,
+		`  When the task involves a git repository, ALWAYS include the gitRepo URL in the
   workspace config so credentials are automatically mounted:
     create_agent_task(agent: "coder", prompt: "...", gitRepo: "https://github.com/org/repo", timeout: "15m")
   When creating new agents for coding tasks, check the agent_runtimes in the Runtime line above.
@@ -242,10 +266,14 @@ func taskTypeParts() []string {
   and does not use runtime.secretRef. When omitted, OpenCode defaults defaultAllowedTools to Read, Write, Edit, Bash, Glob,
   and Grep, with defaultAllowBash=true; only override these when the user asks.
   Use whichever runtime is available. If multiple runtimes are available, prefer codex, then copilot.
-  If no agent runtimes are available, use create_ai_task with agentRef/providerRef for existing non-runtime agents, or create_ai_task directly for LLM-only work.
-  Agent tasks need more time than AI tasks. Set timeout to at least 15m.
-  Do NOT use create_container_task or create_ai_task for runtime agents.
-  Do NOT use create_agent_task for non-runtime agents.
+`,
+		`  If no agent runtimes are available, use create_ai_task with agentRef/providerRef for existing non-runtime agents, or create_ai_task directly for LLM-only work.
+`,
+		`  Agent tasks need more time than AI tasks. Set timeout to at least 15m.
+`,
+		`  Do NOT use create_container_task or create_ai_task for runtime agents.
+`,
+		`  Do NOT use create_agent_task for non-runtime agents.
 `,
 	}
 }

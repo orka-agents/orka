@@ -788,3 +788,32 @@ func TestBuildSystemPromptLimitsGuidanceToAvailableChatTools(t *testing.T) {
 		t.Error("limited prompt must list the offered chat tools")
 	}
 }
+
+func TestBuildSystemPromptKeepsGuidanceForEachOfferedTaskTool(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+	build := func(allowed ...string) string {
+		b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
+		b.SetAvailableChatTools(allowed)
+		prompt, err := b.BuildSystemPrompt(context.Background(), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return prompt
+	}
+
+	agentOnly := build("create_agent_task")
+	for _, want := range []string{"- agent:", "ALWAYS include the gitRepo URL", "Set timeout to at least 15m", "Do NOT use create_agent_task for non-runtime agents"} {
+		if !strings.Contains(agentOnly, want) {
+			t.Errorf("agent-task-only prompt is missing %q", want)
+		}
+	}
+	containerOnly := build("create_container_task")
+	if !strings.Contains(containerOnly, "you MUST include the tool\ncall in the SAME response.") || !strings.Contains(containerOnly, "Act first, summarize after.") {
+		t.Error("prompt without polling tools must keep the rule to call tools in the same response")
+	}
+	for _, prompt := range []string{agentOnly, containerOnly} {
+		if strings.Contains(prompt, "wait_for_task") || strings.Contains(prompt, "create_ai_task") {
+			t.Error("limited prompt names a tool that is not offered")
+		}
+	}
+}
