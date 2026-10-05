@@ -49,12 +49,17 @@ func TestNormalizeArgTypes(t *testing.T) {
 		{name: "trailing data is left for the tool", args: `{"count":"10"}garbage`, want: "raw"},
 		{name: "duplicate keys are left for the tool", args: `{"text":"a","text":"b","count":null}`, want: "raw"},
 		{name: "invalid unicode is left for the tool", args: `{"text":"\ud800","count":null}`, want: "raw"},
-		{name: "integral decimal stays a number", args: `{"count":"10.0"}`, want: `{"count":10.0}`},
-		{name: "integral exponent stays a number", args: `{"count":"100e-2"}`, want: `{"count":100e-2}`},
+		{name: "undeclared null is left for the tool", args: `{"text":"a","unused":null}`, want: "raw"},
+		{name: "undeclared null survives re-encoding", args: `{"count":"5","unused":null}`, want: `{"count":5,"unused":null}`},
+		{name: "integer too large for int64", args: `{"count":"9223372036854775808"}`, wantErr: "count must be a whole number, got a number out of range"},
+		{name: "huge integral exponent", args: `{"count":1e400}`, wantErr: "count must be a whole number, got a number out of range"},
+		{name: "most negative int64 exponent", args: `{"count":"1e-9223372036854775808"}`, wantErr: "count must be a whole number, got a fraction"},
+		{name: "largest int64 exponent", args: `{"count":"1e9223372036854775807"}`, wantErr: "count must be a whole number, got a number out of range"},
+		{name: "exponent beyond int64", args: `{"count":"1e-99999999999999999999"}`, wantErr: "count must be a whole number, got a fraction"},
 		{name: "fraction float64 would round away", args: `{"count":"1.0000000000000001"}`, wantErr: "count must be a whole number, got a fraction"},
 		{name: "half beyond float64 precision", args: `{"count":9007199254740992.5}`, wantErr: "count must be a whole number, got a fraction"},
 		{name: "underflowing exponent", args: `{"count":"1e-400"}`, wantErr: "count must be a whole number, got a fraction"},
-		{name: "overflowing number", args: `{"ratio":"1e400"}`, wantErr: "ratio must be a number, got a non-numeric string"},
+		{name: "overflowing number", args: `{"ratio":"1e400"}`, wantErr: "ratio must be a number, got a number out of range"},
 		{name: "non-JSON number syntax", args: `{"ratio":"1/2"}`, wantErr: "ratio must be a number, got a non-numeric string"},
 		{name: "leading zero is not a JSON number", args: `{"count":"01"}`, wantErr: "count must be a whole number, got a non-numeric string"},
 	}
@@ -85,6 +90,30 @@ func TestNormalizeArgTypes(t *testing.T) {
 				t.Fatalf("normalizeArgTypes() = %s, want %s", got, tt.want)
 			}
 		})
+	}
+}
+
+// Integral values are rewritten to the plain integer spelling Go integer
+// decoders accept.
+func TestNormalizeArgTypesCanonicalizesIntegers(t *testing.T) {
+	tool := &mockTool{name: "typed", parameters: json.RawMessage(`{"type":"object","properties":{"count":{"type":"integer"}}}`)}
+	for args, want := range map[string]string{
+		`{"count":"10.0"}`:                   `{"count":10}`,
+		`{"count":10.0}`:                     `{"count":10}`,
+		`{"count":"1e3"}`:                    `{"count":1000}`,
+		`{"count":100e-2}`:                   `{"count":1}`,
+		`{"count":"-0"}`:                     `{"count":0}`,
+		`{"count":"-12.50e1"}`:               `{"count":-125}`,
+		`{"count":"0e-9223372036854775808"}`: `{"count":0}`,
+	} {
+		got, err := normalizeArgTypes(tool, json.RawMessage(args))
+		if err != nil || string(got) != want {
+			t.Errorf("normalizeArgTypes(%s) = %s, %v; want %s", args, got, err, want)
+		}
+		var decoded struct{ Count int }
+		if err := json.Unmarshal(got, &decoded); err != nil {
+			t.Errorf("an int field cannot decode %s: %v", got, err)
+		}
 	}
 }
 

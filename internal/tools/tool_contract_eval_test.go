@@ -882,6 +882,35 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			},
 		},
 		{
+			name: "task priority",
+			limits: []string{
+				"chat/create_ai_task.priority maximum=1000", "chat/create_ai_task.priority minimum=0",
+				"chat/create_container_task.priority maximum=1000", "chat/create_container_task.priority minimum=0",
+				"worker/create_container_task.priority maximum=1000", "worker/create_container_task.priority minimum=0",
+			},
+			check: func(t *testing.T) (bool, string) {
+				t.Setenv(envOrkaTaskName, "parent")
+				ai := func() (Tool, context.Context) { return chatTool("create_ai_task", newFakeClient()) }
+				chatContainer := func() (Tool, context.Context) { return chatTool("create_container_task", newFakeClient()) }
+				workerContainer := func() (Tool, context.Context) { return workerTool("create_container_task", evalParentTaskCluster()) }
+				aiTask := func(p int) string { return fmt.Sprintf(`{"prompt":"p","priority":%d}`, p) }
+				containerTask := func(p int) string {
+					return fmt.Sprintf(`{"image":"cgr.dev/chainguard/bash:latest","command":["echo","hi"],"priority":%d}`, p)
+				}
+				checks := make([]func() (bool, string), 0, 6)
+				for _, c := range []struct {
+					call evalCall
+					args func(int) string
+				}{{ai, aiTask}, {chatContainer, containerTask}, {workerContainer, containerTask}} {
+					checks = append(checks,
+						func() (bool, string) { return evalRejectsChange(c.call, c.args(1000), c.args(1001), "priority") },
+						func() (bool, string) { return evalRejectsChange(c.call, c.args(0), c.args(-1), "priority") },
+					)
+				}
+				return evalAll(checks...)
+			},
+		},
+		{
 			name:   "chat create_pr_monitor",
 			limits: []string{"chat/create_pr_monitor.per_page maximum=100", "chat/create_pr_monitor.per_page minimum=1", "chat/create_pr_monitor.review_event enum=COMMENT|APPROVE|REQUEST_CHANGES"},
 			check: func(t *testing.T) (bool, string) {

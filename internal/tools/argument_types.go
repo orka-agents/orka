@@ -48,8 +48,8 @@ func (e *ToolArgumentError) Error() string {
 var jsonNumberPattern = regexp.MustCompile(`^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$`)
 
 // normalizeArgTypes checks top-level arguments against the JSON types the tool
-// schema declares, before the tool sees them. A null argument counts as
-// omitted. Numeric strings become numbers for integer and number fields, and
+// schema declares, before the tool sees them. A null value for a declared
+// field counts as omitted. Numeric strings become numbers for integer and number fields, and
 // strconv.ParseBool strings become booleans, matching the leniency tools
 // already apply. A value whose type plainly contradicts the schema is
 // rejected: an object or array for a string, a non-numeric value for a number,
@@ -74,8 +74,12 @@ func normalizeArgTypes(tool Tool, args json.RawMessage) (json.RawMessage, error)
 	changed := false
 	for name, value := range values {
 		if value == nil {
-			delete(values, name)
-			changed = true
+			// Undeclared fields, null or not, are left for the tool to judge,
+			// as reply_in_conversation does when it rejects extra fields.
+			if _, declared := schema.Properties[name]; declared {
+				delete(values, name)
+				changed = true
+			}
 			continue
 		}
 		want, _ := schema.Properties[name].Type.(string)
@@ -132,27 +136,56 @@ func decodeArgObject(args json.RawMessage) (map[string]any, bool) {
 	return values, true
 }
 
-// jsonNumberIsInteger reports whether a JSON number literal has no fractional
-// part. It works on the text, so float64 rounding cannot hide a fraction.
-func jsonNumberIsInteger(text string) bool {
+// canonicalJSONInteger returns the plain spelling of an integral JSON number
+// literal, such as "10" for "10.0" or "1e3", which tools decoding into Go
+// integers accept. It works on the text, so float64 rounding cannot hide a
+// fraction. got describes the value when it is not a whole number that fits in
+// an int64.
+func canonicalJSONInteger(text string) (canonical, got string) {
+	const outOfRange = "a number out of range"
+	// Clamp the exponent so the arithmetic below cannot overflow. A value this
+	// far out is a fraction or out of range either way.
+	const maxExponent = 1 << 20
 	mantissa, exponent, _ := strings.Cut(strings.ToLower(text), "e")
 	exp := 0
 	if exponent != "" {
 		parsed, err := strconv.Atoi(exponent)
 		if err != nil {
-			return false
+			parsed = maxExponent
+			if strings.HasPrefix(exponent, "-") {
+				parsed = -maxExponent
+			}
 		}
-		exp = parsed
+		exp = max(-maxExponent, min(parsed, maxExponent))
 	}
-	whole, fraction, _ := strings.Cut(strings.TrimPrefix(mantissa, "-"), ".")
+	sign := ""
+	if rest, negative := strings.CutPrefix(mantissa, "-"); negative {
+		sign, mantissa = "-", rest
+	}
+	whole, fraction, _ := strings.Cut(mantissa, ".")
 	fraction = strings.TrimRight(fraction, "0")
 	digits := strings.TrimLeft(whole+fraction, "0")
-	// The value is digits * 10^-scale.
-	scale := len(fraction) - exp
-	if digits == "" || scale <= 0 {
-		return true
+	if digits == "" {
+		return "0", ""
 	}
-	return len(digits)-len(strings.TrimRight(digits, "0")) >= scale
+	// The value is digits * 10^-scale.
+	switch scale := len(fraction) - exp; {
+	case scale > 0:
+		if len(digits)-len(strings.TrimRight(digits, "0")) < scale {
+			return "", "a fraction"
+		}
+		digits = digits[:len(digits)-scale]
+	case scale < 0:
+		// Bound the zeros before writing them; an int64 has at most 19 digits.
+		if len(digits)-scale > 19 {
+			return "", outOfRange
+		}
+		digits += strings.Repeat("0", -scale)
+	}
+	if _, err := strconv.ParseInt(sign+digits, 10, 64); err != nil {
+		return "", outOfRange
+	}
+	return sign + digits, ""
 }
 
 // normalizeArgType returns a replacement value, nil to keep the value as is,
@@ -178,14 +211,24 @@ func normalizeArgType(name, want string, value any) (any, error) {
 		default:
 			return nil, &ToolArgumentError{Field: name, Want: kind, Got: jsonValueKind(value)}
 		}
-		parsed, err := strconv.ParseFloat(text, 64)
-		if !jsonNumberPattern.MatchString(text) || err != nil || math.IsInf(parsed, 0) {
+		if !jsonNumberPattern.MatchString(text) {
 			return nil, &ToolArgumentError{Field: name, Want: kind, Got: "a non-numeric string"}
 		}
-		if want == jsonSchemaTypeInteger && !jsonNumberIsInteger(text) {
-			return nil, &ToolArgumentError{Field: name, Want: kind, Got: "a fraction"}
+		_, isString := value.(string)
+		if want == jsonSchemaTypeInteger {
+			canonical, got := canonicalJSONInteger(text)
+			if got != "" {
+				return nil, &ToolArgumentError{Field: name, Want: kind, Got: got}
+			}
+			if isString || canonical != text {
+				return json.Number(canonical), nil
+			}
+			return nil, nil
 		}
-		if _, isString := value.(string); isString {
+		if parsed, err := strconv.ParseFloat(text, 64); err != nil || math.IsInf(parsed, 0) {
+			return nil, &ToolArgumentError{Field: name, Want: kind, Got: "a number out of range"}
+		}
+		if isString {
 			return json.Number(text), nil
 		}
 	case jsonSchemaTypeBoolean:

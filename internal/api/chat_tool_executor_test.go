@@ -2277,3 +2277,23 @@ func TestExecuteHonorsNumericStringsForNumberFields(t *testing.T) {
 		t.Fatalf("tasks = %#v, want one Task with priority 10", tasks.Items)
 	}
 }
+
+// A numeric string the registry converts must still be range-checked before it
+// is narrowed to int32, where 4294967296 would wrap to priority 0.
+func TestExecuteRejectsPriorityThatWouldWrap(t *testing.T) {
+	e := newTestExecutor()
+	result, err := e.Execute(context.Background(), llm.ToolCall{ID: "call-1", Name: "create_ai_task", Arguments: json.RawMessage(`{"prompt":"p","priority":"4294967296"}`)})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !strings.Contains(result, "priority must be a whole number from 0 to 1000") {
+		t.Fatalf("Execute() = %s, want the priority range error", result)
+	}
+	var tasks corev1alpha1.TaskList
+	if err := e.client.List(context.Background(), &tasks); err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks.Items) != 0 {
+		t.Fatalf("created %d Tasks, want none", len(tasks.Items))
+	}
+}

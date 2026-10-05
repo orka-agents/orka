@@ -104,6 +104,23 @@ func chatGetIntArg(args map[string]any, key string, defaultVal int) int {
 	}
 }
 
+// chatPriorityArg reads the optional priority argument. It returns an error
+// result and false for a value that is not a whole number from 0 to 1000; a
+// larger value would wrap when narrowed to int32, possibly into that range.
+func chatPriorityArg(a map[string]any) (*int32, string, bool) {
+	value := a[priorityField]
+	if value == nil {
+		return nil, "", true
+	}
+	number, ok := value.(float64)
+	if !ok || number != math.Trunc(number) || number < 0 || number > 1000 {
+		result, _ := ChatToolErrorResult(invalidArgumentsErrorType, "priority must be a whole number from 0 to 1000", "Use a priority from 0 to 1000; the default is 500")
+		return nil, result, false
+	}
+	p := int32(number)
+	return &p, "", true
+}
+
 // chatParseBoolArg parses a bool tool argument that may arrive as a JSON
 // boolean or a string boolean.
 func chatParseBoolArg(value any) (bool, error) {

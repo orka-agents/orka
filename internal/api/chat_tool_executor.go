@@ -13,7 +13,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -174,22 +173,22 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 		recordRejectedToolCall(ctx, toolCall, resultStr)
 		return resultStr, marshalErr
 	}
-	// Registry.Execute treats a null argument as omitted, so these checks must
-	// too, or a null schedule would read as "<nil>" and skip the session guard.
-	maps.DeleteFunc(args, func(_ string, value any) bool { return value == nil })
-	// Match the effective string values used by the tools when constructing Tasks.
+	// Match the effective string values used by the tools when constructing
+	// Tasks. Registry.Execute treats a null declared field as omitted, so these
+	// checks do too, or a null schedule would read as "<nil>" and skip the
+	// session guard.
 	targetNamespace := e.namespace
-	if value, present := args[toolNamespaceArg]; present && fmt.Sprint(value) != "" {
+	if value := args[toolNamespaceArg]; value != nil && fmt.Sprint(value) != "" {
 		targetNamespace = fmt.Sprint(value)
 	}
 	var sessionRef string
-	if value, present := args["sessionRef"]; present {
+	if value := args["sessionRef"]; value != nil {
 		sessionRef = fmt.Sprint(value)
 	}
 	// Scheduled parents do not acquire the session lock, and their future runs
 	// are not part of this chat turn's wait set.
 	var schedule string
-	if value, present := args["schedule"]; present {
+	if value := args["schedule"]; value != nil {
 		schedule = fmt.Sprint(value)
 	}
 	if toolCall.Name == chatCreateAITaskTool && schedule == "" &&
