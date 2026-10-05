@@ -324,11 +324,10 @@ func TestChatEvalModelContextBudget(t *testing.T) {
 	c := chatEvalCluster(t, defaultNamespace)
 	provider, _ := runChatEvalTurn(t, c, ChatRequest{Message: "hello"}, &llm.CompletionResponse{Content: "ok"})
 	req := provider.requests[0]
-	size := len(req.SystemPrompt)
-	for _, tool := range req.Tools {
-		size += len(tool.Name) + len(tool.Description) + len(tool.Parameters)
-	}
-	t.Logf("system prompt %d bytes, %d tools, total %d bytes", len(req.SystemPrompt), len(req.Tools), size)
+	tools, err := json.Marshal(req.Tools)
+	require.NoError(t, err)
+	size := len(req.SystemPrompt) + len(tools)
+	t.Logf("system prompt %d bytes, %d tools as %d bytes of JSON, total %d bytes", len(req.SystemPrompt), len(req.Tools), len(tools), size)
 	require.LessOrEqual(t, size, chatEvalMaxModelContextBytes, "chat model context grew past the budget")
 }
 
