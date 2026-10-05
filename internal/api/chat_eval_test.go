@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -261,6 +262,8 @@ func TestChatEvalScopedCallerPromptMatchesTools(t *testing.T) {
 			for _, tool := range req.Tools {
 				offered[tool.Name] = true
 			}
+			require.Equal(t, slices.Sorted(slices.Values(tt.allowedTools)), slices.Sorted(maps.Keys(offered)),
+				"offered chat tools must match the token's allowedTools")
 			var unavailable []string
 			for _, name := range chattools.ChatToolNames() {
 				if !offered[name] && regexp.MustCompile(`\b`+name+`\b`).MatchString(req.SystemPrompt) {
@@ -398,11 +401,10 @@ func TestChatEvalModelContextBudget(t *testing.T) {
 	c := chatEvalCluster(t, defaultNamespace)
 	provider, _ := runChatEvalTurn(t, c, ChatRequest{Message: "hello"}, &llm.CompletionResponse{Content: "ok"})
 	req := provider.requests[0]
-	size := len(req.SystemPrompt)
-	for _, tool := range req.Tools {
-		size += len(tool.Name) + len(tool.Description) + len(tool.Parameters)
-	}
-	t.Logf("system prompt %d bytes, %d tools, total %d bytes", len(req.SystemPrompt), len(req.Tools), size)
+	tools, err := json.Marshal(req.Tools)
+	require.NoError(t, err)
+	size := len(req.SystemPrompt) + len(tools)
+	t.Logf("system prompt %d bytes, %d tools as %d bytes of JSON, total %d bytes", len(req.SystemPrompt), len(req.Tools), len(tools), size)
 	require.LessOrEqual(t, size, chatEvalMaxModelContextBytes, "chat model context grew past the budget")
 }
 

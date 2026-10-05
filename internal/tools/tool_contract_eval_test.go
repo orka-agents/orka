@@ -15,6 +15,7 @@ package tools
 // fix also removes the knownDefect marker.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -62,7 +63,19 @@ func evalToolRegistries(fc client.Client) map[string]*Registry {
 	} {
 		worker.Register(tool)
 	}
-	return map[string]*Registry{"chat": chat, "worker": worker}
+	// The ACP broker builds its own registry. Sweep its tools whose schema
+	// differs from the worker tool of the same name; the rest are covered.
+	brokeredAll := NewRegistry()
+	_ = RegisterBrokeredCoordinationTools(brokeredAll, fc)
+	_ = RegisterBrokeredWebTools(brokeredAll)
+	brokered := NewRegistry()
+	for _, name := range brokeredAll.Names() {
+		tool, _ := brokeredAll.Get(name)
+		if same, ok := worker.Get(name); !ok || !bytes.Equal(same.Parameters(), tool.Parameters()) {
+			brokered.Register(tool)
+		}
+	}
+	return map[string]*Registry{"chat": chat, "worker": worker, "brokered": brokered}
 }
 
 // evalToolSandbox clears forge credentials and replaces http.DefaultTransport
@@ -713,14 +726,73 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			},
 		},
 		{
-			name:   "worker code_exec",
-			limits: []string{"worker/code_exec.language enum", "worker/code_exec.timeout maximum", "worker/code_exec.timeout minimum"},
+			name:   "worker code_exec language and maximum timeout",
+			limits: []string{"worker/code_exec.language enum", "worker/code_exec.timeout maximum"},
 			check: func(t *testing.T) (bool, string) {
-				// Timeout clamping is pinned by TestCodeExecTool_Execute_TimeoutClampsToMax,
-				// which runs against a recording executor instead of real code.
+				// Clamping an over-maximum timeout is pinned by
+				// TestCodeExecTool_Execute_TimeoutClampsToMax.
 				tool, ctx := workerTool("code_exec", newFakeClient())
 				return evalRejects(ctx, tool, `{"language":"cobol","code":"DISPLAY 'x'."}`, "cobol")
 			},
+		},
+		{
+			name:   "worker code_exec minimum timeout",
+			limits: []string{"worker/code_exec.timeout minimum"},
+			check: func(t *testing.T) (bool, string) {
+				// A recording executor stands in for the sandbox, so no code runs.
+				sandbox := &recordingCodeExecutor{result: CodeExecResult{Output: "ok"}}
+				tool := &CodeExecTool{
+					workDir:          t.TempDir(),
+					timeout:          defaultCodeExecTimeout,
+					allowedLangs:     defaultCodeExecAllowedLangs(),
+					denyPatterns:     defaultDenyPatterns,
+					executor:         sandbox,
+					backend:          codeExecBackendKubernetes,
+					outputLimitBytes: defaultCodeExecOutputLimitBytes,
+				}
+				if ok, _ := evalRejects(context.Background(), tool, `{"language":"bash","code":"echo test","timeout":-1}`, "timeout"); ok {
+					return true, ""
+				}
+				if sandbox.calls > 0 && sandbox.req.Timeout == time.Second {
+					return true, ""
+				}
+				return false, fmt.Sprintf("timeout -1 ran with %s", sandbox.req.Timeout)
+			},
+			knownDefect: "code_exec treats a negative timeout as unset and uses the 30s default instead of rejecting or clamping it",
+		},
+		{
+			name:   "brokered web_search",
+			limits: []string{"brokered/web_search.limit maximum", "brokered/web_search.query maxLength"},
+			check: func(t *testing.T) (bool, string) {
+				// Both limits are checked before any request.
+				tool, _ := evalToolRegistries(newFakeClient())["brokered"].Get("web_search")
+				ctx := context.Background()
+				return evalAll(
+					func() (bool, string) { return evalRejects(ctx, tool, `{"query":"q","limit":11}`, "limit") },
+					func() (bool, string) { return evalRejects(ctx, tool, `{"query":"`+long(4097)+`"}`, "query") },
+				)
+			},
+		},
+		{
+			name:   "brokered web_fetch max_chars",
+			limits: []string{"brokered/web_fetch.max_chars maximum"},
+			check: func(t *testing.T) (bool, string) {
+				// A public IP literal needs no DNS lookup, and max_chars is
+				// checked before any request.
+				tool, _ := evalToolRegistries(newFakeClient())["brokered"].Get("web_fetch")
+				return evalRejects(context.Background(), tool, `{"url":"https://1.1.1.1/","max_chars":50001}`, "max_chars")
+			},
+		},
+		{
+			name:   "brokered web_fetch url",
+			limits: []string{"brokered/web_fetch.url maxLength"},
+			check: func(t *testing.T) (bool, string) {
+				// The over-limit max_chars stops the call before any request if
+				// the URL is accepted.
+				tool, _ := evalToolRegistries(newFakeClient())["brokered"].Get("web_fetch")
+				return evalRejects(context.Background(), tool, `{"url":"https://1.1.1.1/`+long(16384)+`","max_chars":50001}`, "url")
+			},
+			knownDefect: "brokered web_fetch advertises url maxLength in characters but enforces 64 KiB in bytes, so it accepts ASCII URLs past the advertised limit",
 		},
 		{
 			name:   "worker create_agent model contextWindow",
