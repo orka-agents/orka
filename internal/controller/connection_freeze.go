@@ -253,7 +253,10 @@ type connectorToolInfo struct {
 
 // connectorToolsFor returns, for every named Tool backed by a connection-mode
 // policy, its policy, provider, and class. Unknown tools and tools without
-// such a policy are skipped; read failures are returned so callers retry.
+// a policy are skipped. A Tool whose referenced policy does not exist cannot
+// be classified, so it returns a retryable error rather than counting as a
+// plain Tool: a binding made then could later run under a policy recreated
+// in another mode. Read failures are returned so callers retry.
 func connectorToolsFor(ctx context.Context, reader client.Reader, namespace string, toolNames []string) (map[string]connectorToolInfo, error) {
 	if reader == nil {
 		return nil, nil
@@ -282,14 +285,13 @@ func connectorToolsFor(ctx context.Context, reader client.Reader, namespace stri
 			policy = &corev1alpha1.OutboundAccessPolicy{}
 			if err := reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: policyName}, policy); err != nil {
 				if apierrors.IsNotFound(err) {
-					policies[policyName] = nil
-					continue
+					return nil, fmt.Errorf("tool %q references outbound access policy %q, which does not exist; binding waits for it", name, policyName)
 				}
 				return nil, fmt.Errorf("load outbound access policy %q: %w", policyName, err)
 			}
 			policies[policyName] = policy
 		}
-		if policy == nil || policy.Spec.Connection == nil {
+		if policy.Spec.Connection == nil {
 			continue
 		}
 		result[name] = connectorToolInfo{
