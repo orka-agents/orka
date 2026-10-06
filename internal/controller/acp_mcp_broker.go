@@ -149,8 +149,9 @@ type acpMCPConnectionDigester interface {
 // and its request digest must not depend on transient read availability.
 func (e RegistryACPMCPToolExecutor) ConnectionDigest(ctx context.Context, request harnessv2.MCPBrokerCallRequest, descriptor harnessv2.MCPToolDescriptor) (string, error) {
 	if descriptor.Source == harnessv2.MCPToolSourceBrokeredBuiltin {
-		// A catalog built-in runs under the link frozen for it, if any;
-		// the record then names that binding, and nothing otherwise.
+		// A catalog built-in runs in the broker only under the link frozen
+		// for it. Without one it can never run, so the call fails here,
+		// before an approval or effect record is made for it.
 		if _, linked := connectors.BuiltinConnectorToolClass(descriptor.Name); !linked {
 			return "", nil
 		}
@@ -158,7 +159,12 @@ func (e RegistryACPMCPToolExecutor) ConnectionDigest(ctx context.Context, reques
 		if err != nil {
 			return "", err
 		}
-		return frozenConnectionDigest(frozen, outboundaccess.BuiltinConnectionKey(descriptor.Name)), nil
+		key := outboundaccess.BuiltinConnectionKey(descriptor.Name)
+		digest := frozenConnectionDigest(frozen, key)
+		if digest == "" {
+			return "", fmt.Errorf("linked built-in %q has no Connection frozen for it", descriptor.Name)
+		}
+		return digest, nil
 	}
 	if descriptor.Source != harnessv2.MCPToolSourceBrokeredCustom {
 		return "", nil

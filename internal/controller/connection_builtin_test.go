@@ -415,10 +415,11 @@ func TestRegistryACPMCPToolExecutorBindsLinkedAccountsForBuiltins(t *testing.T) 
 	if digest, err := executor.ConnectionDigest(ctx, request, harnessv2.MCPToolDescriptor{Name: "web_search", Source: harnessv2.MCPToolSourceBrokeredBuiltin}); err != nil || digest != "" {
 		t.Fatalf("web_search digest = %q err = %v", digest, err)
 	}
-	// A catalog built-in with nothing frozen has no digest, and its
+	// A catalog built-in with nothing frozen can never run, so naming its
+	// binding fails before any approval or effect record is made, and its
 	// binding refuses the call rather than letting it run on anything else.
-	if digest, err := executor.ConnectionDigest(ctx, request, harnessv2.MCPToolDescriptor{Name: "get_issue", Source: harnessv2.MCPToolSourceBrokeredBuiltin}); err != nil || digest != "" {
-		t.Fatalf("unfrozen digest = %q err = %v", digest, err)
+	if digest, err := executor.ConnectionDigest(ctx, request, harnessv2.MCPToolDescriptor{Name: "get_issue", Source: harnessv2.MCPToolSourceBrokeredBuiltin}); err == nil || digest != "" {
+		t.Fatalf("unfrozen digest = %q err = %v, want refusal", digest, err)
 	}
 	issueTool := &contextCapturingTool{name: "get_issue"}
 	registry.Register(issueTool)
@@ -467,6 +468,36 @@ func TestBrokeredLinkedBuiltins(t *testing.T) {
 	}
 	if got := brokeredLinkedBuiltins(tools.NewRegistry(), names); len(got) != 0 {
 		t.Fatalf("an unregistered catalog name is not brokered: %v", got)
+	}
+	// Without a broker registry (the ACP broker is not configured, as for a
+	// harness-v1-only controller) nothing runs under a linked account, so
+	// GitHub tools the native registry carries keep their Task credentials
+	// and v1 Tasks that allow them are not refused.
+	if got := brokeredLinkedBuiltins(nil, names); len(got) != 0 {
+		t.Fatalf("a nil broker registry brokers nothing: %v", got)
+	}
+}
+
+// TestClassifyConnectorToolsWithoutBrokerRegistry covers a controller with
+// no ACP broker: catalog names are never classified as linked built-ins,
+// however the native registry is populated.
+func TestClassifyConnectorToolsWithoutBrokerRegistry(t *testing.T) {
+	f := newConnectorToolFixture(t)
+	github := acceptedBuiltinProvider("github", "list_pull_requests", "create_pull_request")
+	infos, err := classifyConnectorTools(context.Background(), f.reader(github), nil, "tenant",
+		[]string{"list_pull_requests", "create_pull_request"}, connectorScope{builtins: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, info := range infos {
+		if info.Builtin {
+			t.Fatalf("%s classified as a linked built-in without a broker registry: %+v", name, info)
+		}
+	}
+	visible, write, err := FilterBrokeredConnectorToolsForRequester(context.Background(), f.reader(github), nil, f.task,
+		[]string{"list_pull_requests", "create_pull_request"})
+	if err != nil || len(visible) != 2 || len(write) != 0 {
+		t.Fatalf("visible = %v write = %v err = %v, want both kept on their own credentials", visible, write, err)
 	}
 }
 

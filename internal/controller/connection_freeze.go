@@ -189,6 +189,9 @@ func classifyConnectorTools(ctx context.Context, reader client.Reader, registry 
 	if reader == nil {
 		return nil, nil
 	}
+	// Only a configured broker registry executes linked built-ins; the
+	// fallback below decides only that a built-in shadows a Tool resource.
+	brokerRegistry := registry
 	registry = classificationRegistry(registry)
 	result := map[string]connectorToolInfo{}
 	policies := map[string]*corev1alpha1.OutboundAccessPolicy{}
@@ -202,7 +205,10 @@ func classifyConnectorTools(ctx context.Context, reader client.Reader, registry 
 		// A built-in tool wins over a Tool resource of the same name in every
 		// runtime, so such a resource is never the implementation here.
 		if _, builtin := registry.Get(name); builtin {
-			if !scope.builtins {
+			if !scope.builtins || brokerRegistry == nil {
+				continue
+			}
+			if _, brokered := brokerRegistry.Get(name); !brokered {
 				continue
 			}
 			class, linked := connectors.BuiltinConnectorToolClass(name)
@@ -294,10 +300,14 @@ func builtinToolProvider(providers *corev1alpha1.ConnectorProviderList, name str
 }
 
 // brokeredLinkedBuiltins returns the names that are catalog built-ins the
-// given registry can execute: tools that reach an agent only through a
-// linked account frozen at dispatch.
+// given broker registry can execute: tools that reach an agent only through
+// a linked account frozen at dispatch. Without a broker registry (the ACP
+// broker is not configured) nothing runs under a linked account, so the
+// native registry's GitHub tools keep their Task-credential path.
 func brokeredLinkedBuiltins(registry *tools.Registry, toolNames []string) []string {
-	registry = classificationRegistry(registry)
+	if registry == nil {
+		return nil
+	}
 	var linked []string
 	for _, name := range toolNames {
 		if _, catalog := connectors.BuiltinConnectorToolClass(name); !catalog {
@@ -630,12 +640,12 @@ func filterConnectorToolsForRequester(
 			return nil, nil, err
 		}
 	}
-	registry = classificationRegistry(registry)
 	// brokeredBuiltin reports a catalog built-in the broker could execute:
 	// the requester reaches it only through a linked account, so without
-	// one it is hidden rather than run on other credentials.
+	// one it is hidden rather than run on other credentials. Without a
+	// broker registry nothing is brokered.
 	brokeredBuiltin := func(name string) bool {
-		if !scope.builtins {
+		if !scope.builtins || registry == nil {
 			return false
 		}
 		_, linked := connectors.BuiltinConnectorToolClass(name)
