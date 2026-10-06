@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 
@@ -23,240 +21,19 @@ const (
 )
 
 const (
-	mergeSHAField            = "mergeSHA"
 	githubPermissionAdmin    = "admin"
 	githubPermissionMaintain = "maintain"
 	bearerAuthScheme         = "Bearer"
 )
 
 const (
-	repositoryMonitorActionAutomerge                     = "pr_automerge"
-	repositoryMonitorAutomergeStateMerged                = "merged"
-	repositoryMonitorAutomergeStateMergeReady            = "merge_ready"
-	repositoryMonitorAutomergeStateBlocked               = "blocked"
-	repositoryMonitorAutomergeStateFailed                = "failed"
-	repositoryMonitorAutomergeStateStarted               = "started"
-	repositoryMonitorAutomergeStatePending               = repositoryMonitorReviewTaskStatePending
-	repositoryMonitorAutomergeReasonDisabled             = "automerge_disabled"
-	repositoryMonitorAutomergeReasonCIPending            = "ci_pending"
-	repositoryMonitorAutomergeReasonCICheckRetry         = "ci_check_error_retry"
-	repositoryMonitorAutomergeReasonMergeabilityPending  = "mergeability_pending"
-	repositoryMonitorAutomergeReasonValidationCheckRetry = "validation_check_error_retry"
-	repositoryMonitorCommandIntentAutomerge              = "automerge"
-	repositoryMonitorAutomergeGateEnv                    = "ORKA_REPOSITORY_MONITOR_AUTOMERGE_GATE"
-	repositoryMonitorAutomergeMethodSquash               = "squash"
+	repositoryMonitorAutomergeStateMerged     = "merged"
+	repositoryMonitorAutomergeStateMergeReady = "merge_ready"
+	repositoryMonitorAutomergeStateBlocked    = "blocked"
+	repositoryMonitorAutomergeStateStarted    = "started"
+	repositoryMonitorAutomergeStatePending    = repositoryMonitorReviewTaskStatePending
+	repositoryMonitorAutomergeReasonCIPending = "ci_pending"
 )
-
-func (r *RepositoryMonitorReconciler) tryProcessPullRequestAutomergeCommand(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, command *store.CommandEvent, owner, repository string, pr repositoryMonitorPullRequest, item *store.MonitorItem) (bool, error) {
-	if command.Intent != repositoryMonitorCommandIntentAutomerge {
-		return false, nil
-	}
-	verdict, reason := r.repositoryMonitorAutomergeGate(ctx, monitor, command, pr, item)
-	if verdict != repositoryMonitorIssueVerdictReady {
-		if reason == repositoryMonitorAutomergeReasonCIPending || reason == repositoryMonitorAutomergeReasonCICheckRetry || reason == repositoryMonitorAutomergeReasonMergeabilityPending || reason == repositoryMonitorAutomergeReasonValidationCheckRetry {
-			item.AutomergeState = repositoryMonitorAutomergeStatePending
-			item.SkipReason = reason
-			if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
-				return true, err
-			}
-			return true, r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStatePending, "waiting for CI checks", map[string]any{eventReasonField: reason})
-		}
-		preserveSuccess, err := r.terminalizeRepositoryMonitorAutomerge(ctx, monitor, *command, reason)
-		if err != nil {
-			return true, err
-		}
-		if preserveSuccess {
-			return true, nil
-		}
-		item.AutomergeState = repositoryMonitorAutomergeStateBlocked
-		item.SkipReason = reason
-		if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
-			return true, err
-		}
-		return true, r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStateBlocked, reason, map[string]any{eventReasonField: reason})
-	}
-	if err := r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStateStarted, "merge attempt started", map[string]any{repositoryMonitorFieldHeadSHA: pr.HeadSHA}); err != nil {
-		return true, err
-	}
-	method := repositoryMonitorAutomergeMethod(monitor)
-	mutationID := "ghmut-" + repositoryMonitorShortHash(command.ID+"-merge")
-	mutation := &store.GitHubMutationRecord{ID: mutationID, RunID: run.ID, CommandEventID: command.ID, Operation: "merge_pr", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: pr.Number, TargetSHA: pr.HeadSHA, Reason: "automerge", Status: repositoryMonitorAutomergeStateStarted}
-	existing, getErr := r.Store.GetGitHubMutationRecord(ctx, monitor.Namespace, mutationID)
-	if getErr == nil {
-		mutation = existing
-		if mutation.Status != repositoryMonitorRunPhaseSucceeded {
-			mutation.Status = repositoryMonitorAutomergeStateStarted
-			mutation.Error = ""
-			mutation.ExternalID = ""
-			if err := r.updateRepositoryMonitorGitHubMutation(ctx, monitor, mutation); err != nil {
-				return true, err
-			}
-		}
-	} else if errors.Is(getErr, store.ErrNotFound) {
-		if err := r.recordRepositoryMonitorGitHubMutation(ctx, monitor, mutation); err != nil {
-			return true, err
-		}
-	} else {
-		return true, getErr
-	}
-	sha := mutation.ExternalID
-	if mutation.Status != repositoryMonitorRunPhaseSucceeded {
-		var err error
-		sha, err = r.mergeRepositoryMonitorPullRequest(ctx, monitor, owner, repository, pr.Number, method, pr.HeadSHA)
-		if err != nil {
-			failureState := repositoryMonitorRunFailureState(err)
-			retryable := repositoryMonitorFailedCommandRunRetryable("[" + failureState + "]")
-			mutation.Status = repositoryMonitorRunPhaseFailed
-			if retryable {
-				mutation.Status = repositoryMonitorAutomergeStatePending
-			}
-			mutation.Error = err.Error()
-			if auditErr := r.updateRepositoryMonitorGitHubMutation(ctx, monitor, mutation); auditErr != nil {
-				return true, fmt.Errorf("automerge failed: %w; additionally failed to update mutation audit: %v", err, auditErr)
-			}
-			if retryable {
-				item.AutomergeState = repositoryMonitorAutomergeStatePending
-				item.SkipReason = failureState
-				if updateErr := r.Store.UpsertMonitorItem(ctx, item); updateErr != nil {
-					return true, updateErr
-				}
-				if recordErr := r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStatePending, err.Error(), map[string]any{mergeMethodField: method, errorField: err.Error(), eventReasonField: failureState}); recordErr != nil {
-					return true, recordErr
-				}
-				return true, err
-			}
-			item.AutomergeState = repositoryMonitorAutomergeStateFailed
-			item.SkipReason = "automerge_failed"
-			if updateErr := r.Store.UpsertMonitorItem(ctx, item); updateErr != nil {
-				return true, updateErr
-			}
-			if recordErr := r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStateFailed, err.Error(), map[string]any{mergeMethodField: method, errorField: err.Error()}); recordErr != nil {
-				return true, recordErr
-			}
-			return true, err
-		}
-		mutation.Status = repositoryMonitorRunPhaseSucceeded
-		mutation.Error = ""
-		mutation.ExternalID = sha
-		if err := r.updateRepositoryMonitorGitHubMutation(ctx, monitor, mutation); err != nil {
-			return true, err
-		}
-	}
-	item.AutomergeState = repositoryMonitorAutomergeStateMerged
-	item.SkipReason = ""
-	item.State = repositoryMonitorAutomergeStateMerged
-	if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
-		return true, err
-	}
-	if err := r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStateMerged, "pull request merged", map[string]any{mergeMethodField: method, mergeSHAField: sha}); err != nil {
-		return true, err
-	}
-	return true, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "automerge_succeeded", fmt.Sprintf("Pull request #%d automerged", pr.Number), map[string]any{mergeSHAField: sha, mergeMethodField: method})
-}
-
-func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorCompletedAutomerge(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, pullRequests []repositoryMonitorPullRequest) (bool, error) {
-	if run == nil || strings.TrimSpace(run.CommandEventID) == "" || run.TargetNumber == 0 {
-		return false, nil
-	}
-	command, err := r.Store.GetCommandEvent(ctx, monitor.Namespace, run.CommandEventID)
-	if err != nil {
-		return false, err
-	}
-	if command.Intent != repositoryMonitorCommandIntentAutomerge {
-		return false, nil
-	}
-	var pr *repositoryMonitorPullRequest
-	for i := range pullRequests {
-		if pullRequests[i].Number == run.TargetNumber {
-			pr = &pullRequests[i]
-			break
-		}
-	}
-	if pr == nil {
-		return false, nil
-	}
-	mutationID := "ghmut-" + repositoryMonitorShortHash(command.ID+"-merge")
-	mutation, err := r.Store.GetGitHubMutationRecord(ctx, monitor.Namespace, mutationID)
-	if errors.Is(err, store.ErrNotFound) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	if mutation.Status != repositoryMonitorRunPhaseSucceeded && !pr.Merged {
-		return false, nil
-	}
-	targetSHA := firstNonEmptyString(strings.TrimSpace(run.TargetSHA), strings.TrimSpace(mutation.TargetSHA))
-	if targetSHA == "" || pr.HeadSHA != targetSHA || (strings.TrimSpace(mutation.TargetSHA) != "" && pr.HeadSHA != strings.TrimSpace(mutation.TargetSHA)) {
-		return false, nil
-	}
-	if mutation.Status != repositoryMonitorRunPhaseSucceeded {
-		mutation.Status = repositoryMonitorRunPhaseSucceeded
-		mutation.Error = ""
-		mutation.ExternalID = firstNonEmptyString(pr.MergeCommitSHA, mutation.ExternalID)
-		if err := r.updateRepositoryMonitorGitHubMutation(ctx, monitor, mutation); err != nil {
-			return false, err
-		}
-	}
-	existing, getErr := r.Store.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, fmt.Sprintf("%d", pr.Number))
-	if getErr != nil && !errors.Is(getErr, store.ErrNotFound) {
-		return false, getErr
-	}
-	item := repositoryMonitorItemFromPullRequest(monitor, *pr, existing)
-	item.AutomergeState = repositoryMonitorAutomergeStateMerged
-	item.SkipReason = ""
-	item.State = repositoryMonitorAutomergeStateMerged
-	if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
-		return false, err
-	}
-	if err := r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStateMerged, "pull request merged", map[string]any{mergeSHAField: mutation.ExternalID, "recovered": true}); err != nil {
-		return false, err
-	}
-	if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "automerge_succeeded", fmt.Sprintf("Pull request #%d automerge state recovered", pr.Number), map[string]any{mergeSHAField: mutation.ExternalID, "recovered": true}); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-func (r *RepositoryMonitorReconciler) repositoryMonitorAutomergeGate(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, pr repositoryMonitorPullRequest, item *store.MonitorItem) (string, string) {
-	switch {
-	case !monitor.Spec.Automerge.Enabled:
-		return repositoryMonitorIssuePhaseBlocked, repositoryMonitorAutomergeReasonDisabled
-	case repositoryMonitorAutomergeRequiresGlobalGate(monitor) && !strings.EqualFold(os.Getenv(repositoryMonitorAutomergeGateEnv), "true"):
-		return repositoryMonitorIssuePhaseBlocked, "global_merge_gate_disabled"
-	case !repositoryMonitorAutomergeActorAllowed(monitor, command.Permission):
-		return repositoryMonitorIssuePhaseBlocked, "actor_permission_insufficient"
-	case command.HeadSHA == "" || command.HeadSHA != pr.HeadSHA:
-		return repositoryMonitorIssuePhaseBlocked, repositoryMonitorReviewSkipReasonStaleHead
-	case repositoryMonitorBlockedLabel(monitor.Spec, pr.Labels) != "":
-		return repositoryMonitorIssuePhaseBlocked, repositoryMonitorSkipReasonBlockedLabel
-	case item.LastVerdict != repositoryMonitorReviewVerdictPassed || item.LastReviewedHeadSHA != pr.HeadSHA:
-		return repositoryMonitorIssuePhaseBlocked, "orka_review_not_passed"
-	}
-	validationAllowed, err := r.repositoryMonitorValidationAllowsAutomerge(ctx, monitor, item, pr.HeadSHA)
-	if err != nil {
-		return repositoryMonitorIssuePhaseBlocked, repositoryMonitorAutomergeReasonValidationCheckRetry
-	}
-	if !validationAllowed {
-		return repositoryMonitorIssuePhaseBlocked, "orka_validation_not_passed"
-	}
-	switch {
-	case repositoryMonitorAutomergeRepairStateBlocks(item.RepairState):
-		return repositoryMonitorIssuePhaseBlocked, "active_or_failed_repair_state"
-	case strings.TrimSpace(pr.MergeableState) == "" || strings.EqualFold(pr.MergeableState, "unknown"):
-		return repositoryMonitorIssuePhaseBlocked, repositoryMonitorAutomergeReasonMergeabilityPending
-	case !repositoryMonitorAutomergeMergeableStateCanCheckCI(pr.MergeableState):
-		return repositoryMonitorIssuePhaseBlocked, "pull_request_not_mergeable"
-	}
-	ci, err := r.repositoryMonitorCheckCI(ctx, monitor, pr.HeadSHA)
-	if err != nil {
-		return repositoryMonitorIssuePhaseBlocked, repositoryMonitorAutomergeReasonCICheckRetry
-	}
-	if !ci.passed {
-		return repositoryMonitorIssuePhaseBlocked, ci.reason
-	}
-	return repositoryMonitorIssueVerdictReady, ""
-}
 
 func (r *RepositoryMonitorReconciler) repositoryMonitorValidationAllowsAutomerge(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, headSHA string) (bool, error) {
 	if r.Store == nil || item == nil || strings.TrimSpace(item.LastReviewID) == "" {
@@ -267,7 +44,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorValidationAllowsAutomerge
 		if errors.Is(err, store.ErrNotFound) {
 			return false, nil
 		}
-		return false, fmt.Errorf("load automerge validation review record: %w", err)
+		return false, fmt.Errorf("load readiness validation review record: %w", err)
 	}
 	if record.MonitorName != monitor.Name || record.Kind != repositoryMonitorPullRequestKind ||
 		record.Number != item.Number || record.HeadSHA != headSHA || record.Verdict != repositoryMonitorReviewVerdictPassed ||
@@ -277,15 +54,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorValidationAllowsAutomerge
 	return true, nil
 }
 
-func repositoryMonitorAutomergeMergeableStateCanCheckCI(state string) bool {
-	switch strings.ToLower(strings.TrimSpace(state)) {
-	case "clean", "unstable":
-		return true
-	default:
-		return false
-	}
-}
-
 func repositoryMonitorAutomergeRepairStateBlocks(state string) bool {
 	switch strings.TrimSpace(state) {
 	case "", repositoryMonitorRepairPhaseSucceeded:
@@ -293,61 +61,6 @@ func repositoryMonitorAutomergeRepairStateBlocks(state string) bool {
 	default:
 		return true
 	}
-}
-
-func repositoryMonitorAutomergeRequiresGlobalGate(monitor *corev1alpha1.RepositoryMonitor) bool {
-	return monitor.Spec.Automerge.RequireGlobalMergeGate == nil || *monitor.Spec.Automerge.RequireGlobalMergeGate
-}
-
-func repositoryMonitorAutomergeActorAllowed(monitor *corev1alpha1.RepositoryMonitor, permission string) bool {
-	if strings.EqualFold(strings.TrimSpace(permission), "orka:monitors:write") {
-		return true
-	}
-	permission = strings.ToLower(strings.TrimSpace(permission))
-	policy := monitor.Spec.Policy.AllowedRepositoryPermissions
-	if len(policy) > 0 && !repositoryMonitorAutomergePermissionInList(permission, policy) {
-		return false
-	}
-	return repositoryMonitorAutomergePermissionInList(permission, repositoryMonitorAutomergePermissionsAtLeast(monitor.Spec.Triggers.GitHub.Labels.RequireActorPermission))
-}
-
-func repositoryMonitorAutomergePermissionsAtLeast(minimum string) []string {
-	switch strings.ToLower(strings.TrimSpace(minimum)) {
-	case githubPermissionAdmin:
-		return []string{githubPermissionAdmin}
-	case githubPermissionMaintain:
-		return []string{githubPermissionMaintain, githubPermissionAdmin}
-	default:
-		return []string{"write", githubPermissionMaintain, githubPermissionAdmin}
-	}
-}
-
-func repositoryMonitorAutomergePermissionInList(permission string, allowed []string) bool {
-	for _, candidate := range allowed {
-		if strings.EqualFold(strings.TrimSpace(candidate), permission) {
-			return true
-		}
-	}
-	return false
-}
-
-func repositoryMonitorAutomergeMethod(monitor *corev1alpha1.RepositoryMonitor) string {
-	allowed := monitor.Spec.Automerge.AllowedMergeMethods
-	if len(allowed) == 0 {
-		return repositoryMonitorAutomergeMethodSquash
-	}
-	for _, method := range allowed {
-		switch strings.TrimSpace(method) {
-		case repositoryMonitorAutomergeMethodSquash, "merge", "rebase":
-			return strings.TrimSpace(method)
-		}
-	}
-	return repositoryMonitorAutomergeMethodSquash
-}
-
-type repositoryMonitorCIResult struct {
-	passed bool
-	reason string
 }
 
 func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCI(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, sha string) (repositoryMonitorCIResult, error) {
@@ -365,6 +78,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCI(ctx context.Conte
 	}
 	total := -1
 	var checks []struct {
+		ID         int64  `json:"id"`
 		Name       string `json:"name"`
 		Status     string `json:"status"`
 		Conclusion string `json:"conclusion"`
@@ -374,6 +88,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCI(ctx context.Conte
 		var response struct {
 			TotalCount int `json:"total_count"`
 			CheckRuns  []struct {
+				ID         int64  `json:"id"`
 				Name       string `json:"name"`
 				Status     string `json:"status"`
 				Conclusion string `json:"conclusion"`
@@ -397,7 +112,9 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCI(ctx context.Conte
 		return repositoryMonitorCIResult{reason: "ci_checks_incomplete"}, nil
 	}
 	var pending, failed []string
+	considered := 0
 	for _, check := range checks {
+		considered++
 		if check.Status != "completed" {
 			pending = append(pending, fmt.Sprintf("%s:%s/%s", check.Name, check.Status, check.Conclusion))
 			continue
@@ -407,7 +124,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCI(ctx context.Conte
 		}
 	}
 	if len(failed) > 0 {
-		return repositoryMonitorCIResult{reason: "ci_not_green"}, nil
+		return repositoryMonitorCIResult{reason: repositoryMonitorCINotGreen}, nil
 	}
 	if len(pending) > 0 {
 		return repositoryMonitorCIResult{reason: repositoryMonitorAutomergeReasonCIPending}, nil
@@ -416,7 +133,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCI(ctx context.Conte
 	if err != nil {
 		return repositoryMonitorCIResult{}, err
 	}
-	if status.reason == "ci_checks_missing" {
+	if status.reason == "ci_checks_missing" && considered > 0 {
 		return repositoryMonitorCIResult{passed: true}, nil
 	}
 	return status, nil
@@ -432,28 +149,49 @@ func repositoryMonitorCheckRunConclusionPassing(conclusion string) bool {
 }
 
 func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCommitStatus(ctx context.Context, baseURL, owner, repo, token, sha string) (repositoryMonitorCIResult, error) {
-	endpoint := fmt.Sprintf("%s/repos/%s/%s/commits/%s/status", baseURL, url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(sha))
-	var response struct {
-		State    string `json:"state"`
-		Statuses []struct {
-			Context string `json:"context"`
-			State   string `json:"state"`
-		} `json:"statuses"`
-	}
-	if err := r.fetchRepositoryMonitorAuthorizedJSON(ctx, endpoint, token, &response); err != nil {
+	owned, err := r.repositoryMonitorOwnedReadinessStatuses(ctx, sha)
+	if err != nil {
 		return repositoryMonitorCIResult{}, err
 	}
-	if len(response.Statuses) == 0 {
+	considered, pending := 0, false
+	// Combined status is paginated and contains only the latest status for each
+	// context. Recompute after excluding audited IDs; its aggregate includes us.
+	for page := 1; ; page++ {
+		endpoint := fmt.Sprintf("%s/repos/%s/%s/commits/%s/status?per_page=100&page=%d", baseURL, url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(sha), page)
+		var response struct {
+			TotalCount int                             `json:"total_count"`
+			Statuses   []repositoryMonitorCommitStatus `json:"statuses"`
+		}
+		if err := r.fetchRepositoryMonitorAuthorizedJSON(ctx, endpoint, token, &response); err != nil {
+			return repositoryMonitorCIResult{}, err
+		}
+		for _, status := range response.Statuses {
+			if _, skip := owned[status.ID]; skip {
+				continue
+			}
+			considered++
+			switch status.State {
+			case repositoryMonitorStatusSuccess:
+			case repositoryMonitorStatusPending:
+				pending = true
+			default:
+				return repositoryMonitorCIResult{reason: repositoryMonitorCINotGreen}, nil
+			}
+		}
+		if len(response.Statuses) < 100 {
+			if page*100-100+len(response.Statuses) < response.TotalCount {
+				return repositoryMonitorCIResult{reason: "ci_checks_incomplete"}, nil
+			}
+			break
+		}
+	}
+	if pending {
+		return repositoryMonitorCIResult{reason: repositoryMonitorAutomergeReasonCIPending}, nil
+	}
+	if considered == 0 {
 		return repositoryMonitorCIResult{reason: "ci_checks_missing"}, nil
 	}
-	switch response.State {
-	case "success":
-		return repositoryMonitorCIResult{passed: true}, nil
-	case repositoryMonitorAutomergeStatePending:
-		return repositoryMonitorCIResult{reason: repositoryMonitorAutomergeReasonCIPending}, nil
-	default:
-		return repositoryMonitorCIResult{reason: "ci_not_green"}, nil
-	}
+	return repositoryMonitorCIResult{passed: true}, nil
 }
 
 func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorAuthorizedJSON(ctx context.Context, endpoint, token string, out any) error {
@@ -481,85 +219,4 @@ func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorAuthorizedJSON(ctx c
 		return &repositoryMonitorGitHubAPIError{Operation: "automerge gate", StatusCode: resp.StatusCode, Body: string(data)}
 	}
 	return json.Unmarshal(data, out)
-}
-
-func (r *RepositoryMonitorReconciler) mergeRepositoryMonitorPullRequest(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, owner, repository string, number int64, method, expectedSHA string) (string, error) {
-	token, err := r.repositoryMonitorForgeToken(ctx, monitor)
-	if err != nil {
-		return "", err
-	}
-	baseURL := strings.TrimRight(r.GitHubAPIBaseURL, "/")
-	if baseURL == "" {
-		baseURL = repositoryMonitorDefaultGitHubAPIBaseURL
-	}
-	payload, _ := json.Marshal(map[string]any{"merge_method": method, shaField: expectedSHA})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, fmt.Sprintf("%s/repos/%s/%s/pulls/%d/merge", baseURL, url.PathEscape(owner), url.PathEscape(repository), number), bytes.NewReader(payload))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", strings.Join([]string{bearerAuthScheme, token}, " "))
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	httpClient := r.HTTPClient
-	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 30 * time.Second}
-	}
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close() //nolint:errcheck
-	data, err := io.ReadAll(io.LimitReader(resp.Body, repositoryMonitorGitHubResponseLimit))
-	if err != nil {
-		return "", err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", &repositoryMonitorGitHubAPIError{Operation: "automerge", StatusCode: resp.StatusCode, Body: string(data)}
-	}
-	var parsed struct {
-		SHA string `json:"sha"`
-	}
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		return "", err
-	}
-	return parsed.SHA, nil
-}
-
-func (r *RepositoryMonitorReconciler) createRepositoryMonitorAutomergeRecord(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, item *store.MonitorItem, verdict, summary string, payload map[string]any) error {
-	if payload == nil {
-		payload = map[string]any{}
-	}
-	payload["commandEventID"] = command.ID
-	payload[repositoryMonitorFieldHeadSHA] = command.HeadSHA
-	payloadJSON, _ := json.Marshal(payload)
-	record := &store.ActionRecord{
-		ID:                "act-" + repositoryMonitorShortHash(command.ID+"-automerge-"+verdict),
-		MonitorNamespace:  monitor.Namespace,
-		MonitorName:       monitor.Name,
-		Kind:              repositoryMonitorPullRequestKind,
-		Number:            item.Number,
-		ActionKind:        repositoryMonitorActionAutomerge,
-		HeadSHA:           command.HeadSHA,
-		CommandEventID:    command.ID,
-		MonitorGeneration: monitor.Generation,
-		Verdict:           verdict,
-		Summary:           boundedString(summary, repositoryMonitorReviewTextMaxRunes),
-		PayloadJSON:       string(payloadJSON),
-		CreatedAt:         time.Now(),
-	}
-	if err := r.Store.CreateActionRecord(ctx, record); err != nil && !strings.Contains(strings.ToLower(err.Error()), "constraint") {
-		return err
-	}
-	status := repositoryMonitorWorkActionStatusSucceeded
-	switch verdict {
-	case repositoryMonitorAutomergeStateBlocked:
-		status = repositoryMonitorWorkActionStatusBlocked
-	case repositoryMonitorAutomergeStateFailed:
-		status = repositoryMonitorWorkActionStatusFailed
-	case repositoryMonitorAutomergeStateStarted, repositoryMonitorAutomergeStatePending:
-		status = repositoryMonitorWorkActionStatusRunning
-	}
-	workReason := strings.TrimSpace(summary)
-	return r.recordRepositoryMonitorWorkActionState(ctx, monitor, nil, command, repositoryMonitorPullRequestKind, item.Number, command.HeadSHA, "", repositoryMonitorActionAutomerge, status, verdict, "", workReason)
 }

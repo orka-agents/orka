@@ -650,12 +650,20 @@ func TestMonitorWorkflowStoresActionsJobsAndMutations(t *testing.T) {
 	if err := s.CreateWorkAction(ctx, retryPending); err != nil {
 		t.Fatalf("CreateWorkAction(retry pending) error = %v", err)
 	}
-	cancelled, err := s.CancelWorkActions(ctx, "demo", "orka", "issue", 123, "stopped_by_command")
+	control := &store.WorkAction{ID: "wa-stop", MonitorNamespace: "demo", MonitorName: "orka", TargetKind: "issue", TargetNumber: 123, Intent: "stop", DesiredAction: "stop", Status: "queued"}
+	if err := s.CreateWorkAction(ctx, control); err != nil {
+		t.Fatal(err)
+	}
+	cancelled, err := s.CancelWorkActions(ctx, "demo", "orka", "issue", 123, "stopped_by_command", control.ID)
 	if err != nil {
 		t.Fatalf("CancelWorkActions() error = %v", err)
 	}
 	if cancelled != 2 {
 		t.Fatalf("CancelWorkActions() = %d, want 2", cancelled)
+	}
+	retained, err := s.GetWorkAction(ctx, "demo", control.ID)
+	if err != nil || retained.Status != "queued" || retained.CompletedAt != nil {
+		t.Fatalf("executing stop action = %#v, err=%v, want retryable queued action", retained, err)
 	}
 	gotAction, err := s.GetWorkAction(ctx, "demo", "wa-1")
 	if err != nil {
@@ -715,5 +723,33 @@ func TestMonitorWorkflowStoresActionsJobsAndMutations(t *testing.T) {
 	}
 	if len(mutations) != 1 || mutations[0].GitHubURL == "" {
 		t.Fatalf("mutations = %#v, want create_pr mutation", mutations)
+	}
+}
+
+func TestGitHubMutationCrossNamespaceLookupRequiresExplicitOptIn(t *testing.T) {
+	ctx := context.Background()
+	s := setupTestStore(t)
+	for _, ns := range []string{"one", "two"} {
+		for _, sha := range []string{"head", "old-head"} {
+			if err := s.CreateGitHubMutationRecord(ctx, &store.GitHubMutationRecord{ID: ns + sha, MonitorNamespace: ns, MonitorName: "monitor", Operation: "readiness_status", TargetSHA: sha}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, tc := range []struct {
+		name   string
+		filter store.GitHubMutationRecordFilter
+		want   int
+	}{
+		{"empty namespace is not global", store.GitHubMutationRecordFilter{TargetSHA: "head"}, 0},
+		{"namespace scoped", store.GitHubMutationRecordFilter{Namespace: "one", TargetSHA: "head"}, 1},
+		{"explicit global", store.GitHubMutationRecordFilter{AllNamespaces: true, Operation: "readiness_status", TargetSHA: "head"}, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			records, _, err := s.ListGitHubMutationRecords(ctx, tc.filter)
+			if err != nil || len(records) != tc.want {
+				t.Fatalf("records=%+v err=%v, want %d", records, err, tc.want)
+			}
+		})
 	}
 }

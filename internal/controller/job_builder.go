@@ -449,6 +449,8 @@ func buildTaskJobName(task *corev1alpha1.Task) string {
 // JobBuildOptions carries optional inputs that affect Job rendering while keeping
 // the historical Build signature stable.
 type JobBuildOptions struct {
+	// GatewayReplyEligible is resolved from an exact durable event/TaskUID binding.
+	GatewayReplyEligible        bool
 	ResolvedApprovalsJSON       string
 	RepositoryMonitorValidation bool
 	// ConnectionBindings are the requester's Connections frozen for this
@@ -806,6 +808,7 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 	envVars = setControllerEnv(envVars, workerenv.ResultEndpoint, fmt.Sprintf("%s/internal/v1/results/%s/%s", b.ControllerURL, task.Namespace, task.Name))
 	envVars = setControllerEnv(envVars, workerenv.ControllerURL, b.ControllerURL)
 	envVars = setControllerEnvValue(envVars, workerenv.AITools, "")
+	envVars = setControllerEnvValue(envVars, workerenv.GatewayReplyEnabled, "")
 	envVars = setControllerEnvValue(envVars, workerenv.CoordinationEnabled, "")
 	envVars = setControllerEnvValue(envVars, workerenv.AutonomousMode, "")
 	envVars = setControllerEnvValue(envVars, workerenv.ResolvedApprovals, "")
@@ -1177,7 +1180,7 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 		}
 	}
 
-	cfg.tools = aitools.Resolve(task, agent)
+	cfg.tools = aitools.ResolveWithGatewayReply(task, agent, opts.GatewayReplyEligible)
 	coordinationConfigured := agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled
 
 	// Connector-backed write tools are hidden from readOnly links and
@@ -1199,8 +1202,11 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 		connectorWrite = nil
 	}
 
-	if len(cfg.tools) > 0 {
-		envVars = setControllerEnvValue(envVars, workerenv.AITools, strings.Join(cfg.tools, ","))
+	// The tool list is always controller-owned, even when empty, so Task env
+	// and Agent Secret EnvFrom cannot supply it.
+	envVars = setControllerEnvValue(envVars, workerenv.AITools, strings.Join(cfg.tools, ","))
+	if slices.Contains(cfg.tools, aitools.GatewayReplyToolName) {
+		envVars = setControllerEnvValue(envVars, workerenv.GatewayReplyEnabled, "true")
 	}
 	// The controller executes a connector-backed tool only as it was defined
 	// when the worker was dispatched with it.

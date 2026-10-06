@@ -25,14 +25,23 @@ func testGit(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(result.stdout)
 }
 
+func initTestGitRemoteAndCheckout(t *testing.T, root, remote, checkout string) {
+	t.Helper()
+	// Disable receive-pack housekeeping before any push into the bare fixture.
+	// Detached maintenance can otherwise outlive Git and race TempDir cleanup.
+	testGit(t, root, "init", "--bare", remote)
+	testGit(t, root, "--git-dir", remote, "config", "--local", "receive.autogc", "false")
+	// Clone persists this setting before fetching; it also covers later commits and fetches.
+	testGit(t, root, "clone", "--config", "maintenance.auto=false", remote, checkout)
+}
+
 func newPreparationFixture(t *testing.T) *preparationFixture {
 	t.Helper()
 	f := newReleaseFixture(t)
 	p := &preparationFixture{
 		releaseFixture: f, remote: filepath.Join(f.root, "origin.git"), checkout: filepath.Join(f.root, "checkout"),
 	}
-	testGit(t, f.root, "init", "--bare", p.remote)
-	testGit(t, f.root, "clone", p.remote, p.checkout)
+	initTestGitRemoteAndCheckout(t, f.root, p.remote, p.checkout)
 	p.git(t, "checkout", "--orphan", "main")
 	p.git(t, "config", "user.name", "Test")
 	p.git(t, "config", "user.email", "test@example.invalid")
@@ -130,6 +139,16 @@ func (p *preparationFixture) apiRequest(t *testing.T, request apiRequest) (any, 
 		return map[string]any{"workflow_runs": runs}, nil, true
 	}
 	return nil, nil, false
+}
+
+func TestPreparationFixtureDisablesAutomaticGitMaintenance(t *testing.T) {
+	p := newPreparationFixture(t)
+	if got := testGit(t, p.remote, "config", "--local", "--bool", "--get", "receive.autogc"); got != "false" {
+		t.Fatalf("bare fixture receive.autogc = %q, want false", got)
+	}
+	if got := p.git(t, "config", "--local", "--bool", "--get", "maintenance.auto"); got != "false" {
+		t.Fatalf("checkout fixture maintenance.auto = %q, want false", got)
+	}
 }
 
 func TestPreparationCreatesReleaseBranchAndLeavesMainUnchanged(t *testing.T) {
@@ -358,8 +377,7 @@ func TestExactChartPublicationPreservesSiteRepairsIndexAndRetries(t *testing.T) 
 	f.data, err = loadBundle(f.directory)
 	must(t, err)
 	remote, checkout := filepath.Join(f.root, "pages.git"), filepath.Join(f.root, "pages")
-	testGit(t, f.root, "init", "--bare", remote)
-	testGit(t, f.root, "clone", remote, checkout)
+	initTestGitRemoteAndCheckout(t, f.root, remote, checkout)
 	testGit(t, checkout, "checkout", "--orphan", pagesBranch)
 	writeTestFile(t, filepath.Join(checkout, "index.html"), "preserved website")
 	must(t, os.MkdirAll(filepath.Join(checkout, "charts"), 0o700))
@@ -376,7 +394,12 @@ func TestExactChartPublicationPreservesSiteRepairsIndexAndRetries(t *testing.T) 
 		if len(spec.args) >= 4 && slices.Equal(spec.args[:4], []string{"git", "remote", "add", "origin"}) {
 			spec.args = []string{"git", "remote", "add", "origin", remote}
 		}
-		return runCommand(spec), true
+		result := runCommand(spec)
+		if result.err == nil && slices.Equal(spec.args, []string{"git", "init", "--quiet"}) {
+			// Keep publishChart's scratch checkouts isolated from background maintenance too.
+			testGit(t, spec.dir, "config", "--local", "maintenance.auto", "false")
+		}
+		return result, true
 	}
 	first, firstHash, err := f.w.publishChart(f.data, f.directory)
 	must(t, err)
