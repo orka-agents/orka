@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link2, Unplug } from 'lucide-react'
 import { toast } from 'sonner'
-import { api, isConflictError, isForbiddenError, isNotImplementedError, isUnauthorizedError } from '@/lib/api-client'
+import { api, isConflictError, isForbiddenError, isNotFoundError, isNotImplementedError, isUnauthorizedError } from '@/lib/api-client'
 import {
   callbackReasonMessage, clearConsentCallback, completionCommand, isKubernetesNamespace, openAuthorizeURL, readCompletionToken,
   type Connection, type ConnectionAuthorizeResponse, type ConnectionMode, type ConnectorCallbackSearch, type ConnectorProvider,
@@ -137,9 +137,15 @@ function ConnectorsPageContent({ namespace, search, clearCallback }: { namespace
         return
       }
       const command = completionCommand(search.connection, search.namespace)
+      const fallback = command ? `, or run: ${command}` : ''
+      // The API answers 404 for another person's Connection rather than
+      // revealing it, so a dashboard signed in as someone else sees "not
+      // found"; it gets the same sign-in and CLI fallback.
       const hint = isForbiddenError(error) || isUnauthorizedError(error)
-        ? ` Sign in as yourself and retry${command ? `, or run: ${command}` : ''}.`
-        : ''
+        ? ` Sign in as yourself and retry${fallback}.`
+        : isNotFoundError(error)
+          ? ` If you are signed in as someone else, sign in as the person who started this link and retry${fallback}.`
+          : ''
       setCallbackNotice({ tone: 'error', text: `Could not finish linking: ${errorText(error)}.${hint}`, retry: true })
     },
   })

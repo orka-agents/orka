@@ -205,3 +205,38 @@ func TestListConnectionsToolHonoursConnectorReadGate(t *testing.T) {
 		t.Fatalf("denied output = %s", out)
 	}
 }
+
+// TestListConnectionsToolListsUnlabeledLinks covers a link without the owner
+// index label (created through Kubernetes, or with the label stripped): it
+// is still the person's and still listed, as credential resolution sees it.
+func TestListConnectionsToolListsUnlabeledLinks(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	requester := &corev1alpha1.RequestedBy{Issuer: "https://issuer.example.test", Subject: "alice"}
+	provider := &corev1alpha1.ConnectorProvider{
+		ObjectMeta: metav1.ObjectMeta{Name: "github", Namespace: "tenant", Generation: 1},
+		Status: corev1alpha1.ConnectorProviderStatus{Conditions: []metav1.Condition{
+			{Type: corev1alpha1.ConnectorProviderConditionAccepted, Status: metav1.ConditionTrue, Reason: "Accepted", ObservedGeneration: 1},
+			{Type: corev1alpha1.ConnectorProviderConditionResolvedRefs, Status: metav1.ConditionTrue, Reason: "Resolved", ObservedGeneration: 1},
+		}},
+	}
+	unlabeled := &corev1alpha1.Connection{
+		ObjectMeta: metav1.ObjectMeta{Name: "adopted-github-link", Namespace: "tenant"},
+		Spec: corev1alpha1.ConnectionSpec{Subject: corev1alpha1.ConnectionSubject{Issuer: requester.Issuer, Subject: requester.Subject},
+			ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}},
+	}
+	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(provider, unlabeled).Build()
+	out, err := (&ListConnectionsTool{}).Execute(WithToolContext(context.Background(), &ToolContext{Namespace: "tenant", PolicyReader: reader, Requester: requester}), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		Data ListConnectionsResult `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed.Data.Connections) != 1 || parsed.Data.Connections[0].Provider != "github" || len(parsed.Data.Available) != 0 {
+		t.Fatalf("connections = %+v available = %+v, want the unlabeled link listed as linked", parsed.Data.Connections, parsed.Data.Available)
+	}
+}

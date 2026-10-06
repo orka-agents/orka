@@ -360,11 +360,12 @@ func TestConnectionReconcilerRepairsIndexLabels(t *testing.T) {
 	if value := repaired.Labels[connectors.ConnectionProviderLabel]; len(value) > 63 || !strings.HasPrefix(value, "sha256-") {
 		t.Fatalf("a long provider name must be label-encoded, got %q", value)
 	}
-	// The repaired object is now found by the label-indexed listing.
-	owned, err := connectors.ListSubjectConnections(context.Background(), c, "tenant",
-		&corev1alpha1.RequestedBy{Issuer: repaired.Spec.Subject.Issuer, Subject: repaired.Spec.Subject.Subject})
-	if err != nil || len(owned) != 1 {
-		t.Fatalf("owned = %d err = %v", len(owned), err)
+	// The repaired object is now found by a label-indexed listing.
+	owned := &corev1alpha1.ConnectionList{}
+	if err := c.List(context.Background(), owned, ctrlclient.InNamespace("tenant"), ctrlclient.MatchingLabels{
+		connectors.ConnectionSubjectLabel: connectors.ConnectionSubjectLabelValue(repaired.Spec.Subject.Issuer, repaired.Spec.Subject.Subject),
+	}); err != nil || len(owned.Items) != 1 {
+		t.Fatalf("owned = %d err = %v", len(owned.Items), err)
 	}
 }
 
