@@ -60,11 +60,14 @@ func connectorSchemaStatements() []string {
 			authority_digest    TEXT NOT NULL DEFAULT '',
 			revocation_digest   TEXT NOT NULL DEFAULT '',
 			scopes              TEXT NOT NULL DEFAULT '',
+			sequence            INTEGER NOT NULL DEFAULT 0,
 			expires_at          TIMESTAMP NOT NULL,
 			created_at          TIMESTAMP NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_connector_consents_connection
 			ON connector_consents(connection_uid)`,
+		// consent_grant marks a grant a re-consent replaced; only these
+		// count toward the per-Connection bound.
 		`CREATE TABLE IF NOT EXISTS connector_retired_credentials (
 			id             INTEGER PRIMARY KEY AUTOINCREMENT,
 			connection_uid TEXT NOT NULL,
@@ -73,6 +76,7 @@ func connectorSchemaStatements() []string {
 			nonce          BLOB NOT NULL,
 			ciphertext     BLOB NOT NULL,
 			revocable_until TIMESTAMP,
+			consent_grant  INTEGER NOT NULL DEFAULT 0,
 			retired_at     TIMESTAMP NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_connector_retired_credentials_connection
@@ -85,6 +89,7 @@ func connectorSchemaStatements() []string {
 			subject_digest  TEXT NOT NULL,
 			provider        TEXT NOT NULL,
 			mode            TEXT NOT NULL,
+			consent_sequence INTEGER NOT NULL DEFAULT 0,
 			payload_nonce   BLOB NOT NULL,
 			payload         BLOB NOT NULL,
 			expires_at      TIMESTAMP NOT NULL,
@@ -96,12 +101,24 @@ func connectorSchemaStatements() []string {
 			connection_uid  TEXT PRIMARY KEY,
 			last_version    INTEGER NOT NULL
 		)`,
+		// issued numbers each Connection's consents; committed is the
+		// newest consent whose tokens became custody, so an older consent
+		// can never be committed over it.
+		`CREATE TABLE IF NOT EXISTS connector_consent_sequences (
+			connection_uid  TEXT PRIMARY KEY,
+			issued          INTEGER NOT NULL,
+			committed       INTEGER NOT NULL DEFAULT 0
+		)`,
 		`CREATE TABLE IF NOT EXISTS connector_credential_tombstones (
 			connection_uid  TEXT PRIMARY KEY,
 			deleted_at      TIMESTAMP NOT NULL
 		)`,
 	}
 }
+
+// maxRetiredConnectorCredentials bounds the superseded grants one
+// Connection retains for revocation at disconnect.
+const maxRetiredConnectorCredentials = 16
 
 var errConnectorCipherRequired = errors.New("connector credential encryption is not configured; connector custody fails closed")
 
@@ -137,18 +154,19 @@ func connectorCredentialAdditionalData(ref store.ConnectorCredentialRef) []byte 
 // column the callback fence reads, including the OAuth-authority digest, so
 // an altered row cannot steer the code exchange to a different endpoint.
 func connectorConsentAdditionalData(consent store.ConnectorConsent) []byte {
-	return fmt.Appendf(nil, "orka.connector-consent\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%d",
+	return fmt.Appendf(nil, "orka.connector-consent\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%d\x00%d",
 		consent.Nonce, consent.ConnectionUID, consent.Namespace, consent.Name, consent.SubjectDigest,
-		consent.Provider, consent.Mode, consent.AuthorityDigest, consent.RevocationDigest, strings.Join(consent.Scopes, " "), consent.ExpiresAt.UTC().Unix())
+		consent.Provider, consent.Mode, consent.AuthorityDigest, consent.RevocationDigest, strings.Join(consent.Scopes, " "),
+		consent.ExpiresAt.UTC().UnixNano(), consent.Sequence)
 }
 
 // connectorCompletionAdditionalData binds the sealed payload to every
 // plaintext column the completion fence reads, so a row whose mode, name,
 // provider, or expiry was altered no longer opens.
 func connectorCompletionAdditionalData(completion store.ConnectorCompletion) []byte {
-	return fmt.Appendf(nil, "orka.connector-completion\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%d",
+	return fmt.Appendf(nil, "orka.connector-completion\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%d\x00%d",
 		completion.Nonce, completion.ConnectionUID, completion.SubjectDigest,
-		completion.Namespace, completion.Name, completion.Provider, completion.Mode, completion.ExpiresAt.UTC().Unix())
+		completion.Namespace, completion.Name, completion.Provider, completion.Mode, completion.ExpiresAt.UTC().UnixNano(), completion.ConsentSequence)
 }
 
 // sealedConnectorCompletionPayload is a parked completion's sealed body: the
@@ -407,12 +425,11 @@ func (s *Store) CommitConnectorCompletion(ctx context.Context, nonce string, ref
 	var (
 		completion            store.ConnectorCompletion
 		payloadNonce, payload []byte
-		rowID                 int64
 	)
-	err = tx.QueryRowContext(ctx, `SELECT rowid, nonce, connection_uid, namespace, name, subject_digest, provider, mode,
+	err = tx.QueryRowContext(ctx, `SELECT nonce, connection_uid, namespace, name, subject_digest, provider, mode, consent_sequence,
 		payload_nonce, payload, expires_at FROM connector_completions WHERE nonce = ?`, nonce).
-		Scan(&rowID, &completion.Nonce, &completion.ConnectionUID, &completion.Namespace, &completion.Name, &completion.SubjectDigest,
-			&completion.Provider, &completion.Mode, &payloadNonce, &payload, &completion.ExpiresAt)
+		Scan(&completion.Nonce, &completion.ConnectionUID, &completion.Namespace, &completion.Name, &completion.SubjectDigest,
+			&completion.Provider, &completion.Mode, &completion.ConsentSequence, &payloadNonce, &payload, &completion.ExpiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return store.ConnectorCredential{}, store.ErrNotFound
 	}
@@ -442,6 +459,32 @@ func (s *Store) CommitConnectorCompletion(ctx context.Context, nonce string, ref
 	if fields.Committed {
 		return store.ConnectorCredential{}, store.ErrConnectorCompletionCommitted
 	}
+	// A newer consent's grant is custody already: this older consent's
+	// tokens never replace it, and its row is dropped.
+	committedSequence, err := connectorCommittedConsentTx(ctx, tx, completion.ConnectionUID)
+	if err != nil {
+		return store.ConnectorCredential{}, err
+	}
+	if completion.ConsentSequence <= committedSequence {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM connector_completions WHERE nonce = ?`, nonce); err != nil {
+			return store.ConnectorCredential{}, fmt.Errorf("drop superseded connector completion: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return store.ConnectorCredential{}, err
+		}
+		_ = s.truncateWAL(ctx)
+		return store.ConnectorCredential{}, store.ErrConnectorConsentSuperseded
+	}
+	// Grants a re-consent superseded are kept so disconnect can revoke them;
+	// a bound keeps repeated relinking from growing custody without limit.
+	var retained int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM connector_retired_credentials WHERE connection_uid = ? AND consent_grant = 1`,
+		ref.ConnectionUID).Scan(&retained); err != nil {
+		return store.ConnectorCredential{}, fmt.Errorf("count retired connector credentials: %w", err)
+	}
+	if retained >= maxRetiredConnectorCredentials {
+		return store.ConnectorCredential{}, store.ErrConnectorRetiredLimit
+	}
 	// A re-consent replaces a whole grant: its refresh token outlives its
 	// access token, so the row is kept until disconnect revokes it.
 	if err := s.retireConnectorCredentialTx(ctx, tx, ref, credential, time.Now().UTC(), retireGrant); err != nil {
@@ -467,7 +510,12 @@ func (s *Store) CommitConnectorCompletion(ctx context.Context, nonce string, ref
 	if _, err := tx.ExecContext(ctx, `UPDATE connector_completions SET payload_nonce = ?, payload = ? WHERE nonce = ?`, newNonce, newPayload, nonce); err != nil {
 		return store.ConnectorCredential{}, fmt.Errorf("mark connector completion committed: %w", err)
 	}
-	dropped, err := s.dropSupersededCompletionsTx(ctx, tx, completion.ConnectionUID, rowID)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO connector_consent_sequences (connection_uid, issued, committed) VALUES (?, ?, ?)
+		ON CONFLICT(connection_uid) DO UPDATE SET committed = excluded.committed, issued = MAX(issued, excluded.issued)`,
+		completion.ConnectionUID, completion.ConsentSequence, completion.ConsentSequence); err != nil {
+		return store.ConnectorCredential{}, fmt.Errorf("record committed connector consent: %w", err)
+	}
+	dropped, err := s.dropSupersededCompletionsTx(ctx, tx, completion.ConnectionUID, completion.ConsentSequence)
 	if err != nil {
 		return store.ConnectorCredential{}, err
 	}
@@ -483,29 +531,47 @@ func (s *Store) CommitConnectorCompletion(ctx context.Context, nonce string, ref
 }
 
 // dropSupersededCompletionsTx deletes the Connection's uncommitted
-// completions parked before the one being committed (rowid order is park
-// order: a Connection holds one pending consent at a time, so a later
-// completion always comes from a later consent). Without this, an older
-// consent's tokens could be committed after this grant and replace it.
-// Their tokens are never revoked (Orka revokes only material it committed),
-// and committed rows stay as recovery records until their status lands. A
-// row that cannot be opened is dropped too: it could never be committed.
-func (s *Store) dropSupersededCompletionsTx(ctx context.Context, tx *sql.Tx, connectionUID string, beforeRowID int64) (int, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT nonce, connection_uid, namespace, name, subject_digest, provider, mode,
-		payload_nonce, payload, expires_at FROM connector_completions WHERE connection_uid = ? AND rowid < ?`, connectionUID, beforeRowID)
+// completions from consents older than sequence, so an older consent's
+// tokens can never be committed after this grant and replace it. Their
+// tokens are never revoked (Orka revokes only material it committed), and
+// committed rows stay as recovery records until their status lands.
+func (s *Store) dropSupersededCompletionsTx(ctx context.Context, tx *sql.Tx, connectionUID string, sequence int64) (int, error) {
+	parked, err := s.uncommittedCompletionsTx(ctx, tx, connectionUID)
 	if err != nil {
-		return 0, fmt.Errorf("read superseded connector completions: %w", err)
+		return 0, err
 	}
-	var superseded []string
+	dropped := 0
+	for _, completion := range parked {
+		if completion.ConsentSequence >= sequence {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM connector_completions WHERE nonce = ?`, completion.Nonce); err != nil {
+			return 0, fmt.Errorf("drop superseded connector completion: %w", err)
+		}
+		dropped++
+	}
+	return dropped, nil
+}
+
+// uncommittedCompletionsTx returns the Connection's parked completions that
+// are not committed. A row that cannot be opened is included: it can never
+// be committed, so it is only ever dropped.
+func (s *Store) uncommittedCompletionsTx(ctx context.Context, tx *sql.Tx, connectionUID string) ([]store.ConnectorCompletion, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT nonce, connection_uid, namespace, name, subject_digest, provider, mode, consent_sequence,
+		payload_nonce, payload, expires_at FROM connector_completions WHERE connection_uid = ?`, connectionUID)
+	if err != nil {
+		return nil, fmt.Errorf("read parked connector completions: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var parked []store.ConnectorCompletion
 	for rows.Next() {
 		var (
 			completion            store.ConnectorCompletion
 			payloadNonce, payload []byte
 		)
 		if err := rows.Scan(&completion.Nonce, &completion.ConnectionUID, &completion.Namespace, &completion.Name, &completion.SubjectDigest,
-			&completion.Provider, &completion.Mode, &payloadNonce, &payload, &completion.ExpiresAt); err != nil {
-			_ = rows.Close()
-			return 0, fmt.Errorf("scan superseded connector completion: %w", err)
+			&completion.Provider, &completion.Mode, &completion.ConsentSequence, &payloadNonce, &payload, &completion.ExpiresAt); err != nil {
+			return nil, fmt.Errorf("scan parked connector completion: %w", err)
 		}
 		completion.ExpiresAt = completion.ExpiresAt.UTC()
 		if body, err := s.snapshotCipher.aead.Open(nil, payloadNonce, payload, connectorCompletionAdditionalData(completion)); err == nil {
@@ -513,20 +579,26 @@ func (s *Store) dropSupersededCompletionsTx(ctx context.Context, tx *sql.Tx, con
 				continue
 			}
 		}
-		superseded = append(superseded, completion.Nonce)
-	}
-	if err := rows.Close(); err != nil {
-		return 0, fmt.Errorf("close superseded connector completions: %w", err)
+		parked = append(parked, completion)
 	}
 	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("iterate superseded connector completions: %w", err)
+		return nil, fmt.Errorf("iterate parked connector completions: %w", err)
 	}
-	for _, nonce := range superseded {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM connector_completions WHERE nonce = ?`, nonce); err != nil {
-			return 0, fmt.Errorf("drop superseded connector completion: %w", err)
-		}
+	return parked, nil
+}
+
+// connectorCommittedConsentTx returns the sequence of the newest consent
+// whose tokens became the Connection's custody, or zero.
+func connectorCommittedConsentTx(ctx context.Context, tx *sql.Tx, connectionUID string) (int64, error) {
+	var committed int64
+	err := tx.QueryRowContext(ctx, `SELECT committed FROM connector_consent_sequences WHERE connection_uid = ?`, connectionUID).Scan(&committed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
 	}
-	return len(superseded), nil
+	if err != nil {
+		return 0, fmt.Errorf("read committed connector consent: %w", err)
+	}
+	return committed, nil
 }
 
 // GetConnectorCredential implements store.ConnectorCredentialStore.
@@ -655,6 +727,10 @@ func reapConnectorTombstonesTx(ctx context.Context, tx *sql.Tx, now time.Time) e
 	if _, err := tx.ExecContext(ctx, `DELETE FROM connector_credential_versions WHERE connection_uid IN
 		(SELECT connection_uid FROM connector_credential_tombstones WHERE deleted_at < ?)`, cutoff); err != nil {
 		return fmt.Errorf("reap connector version counters: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM connector_consent_sequences WHERE connection_uid IN
+		(SELECT connection_uid FROM connector_credential_tombstones WHERE deleted_at < ?)`, cutoff); err != nil {
+		return fmt.Errorf("reap connector consent counters: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM connector_credential_tombstones WHERE deleted_at < ?`, cutoff); err != nil {
 		return fmt.Errorf("reap connector tombstones: %w", err)
@@ -806,9 +882,9 @@ func (s *Store) retireConnectorCredentialTx(ctx context.Context, tx *sql.Tx, ref
 		return nil
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO connector_retired_credentials
-		(connection_uid, dek_nonce, dek_ciphertext, nonce, ciphertext, revocable_until, retired_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		ref.ConnectionUID, dekNonce, dekCiphertext, nonce, ciphertext, revocableUntil, now); err != nil {
+		(connection_uid, dek_nonce, dek_ciphertext, nonce, ciphertext, revocable_until, consent_grant, retired_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		ref.ConnectionUID, dekNonce, dekCiphertext, nonce, ciphertext, revocableUntil, retirement == retireGrant, now); err != nil {
 		return fmt.Errorf("retire replaced connector credential: %w", err)
 	}
 	return nil
@@ -935,17 +1011,24 @@ func (s *Store) CreateConnectorConsent(ctx context.Context, consent store.Connec
 	if consent.ExpiresAt.IsZero() {
 		return errors.New("connector consent expiry is required")
 	}
-	verifierNonce, verifierCiphertext, err := sealWithAEAD(s.snapshotCipher.aead,
-		connectorConsentAdditionalData(consent), []byte(consent.CodeVerifier))
-	if err != nil {
-		return err
-	}
 	now := time.Now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin connector consent transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	// Each consent gets the Connection's next sequence number, sealed with
+	// its verifier; commits follow this order, not callback arrival.
+	if err := tx.QueryRowContext(ctx, `INSERT INTO connector_consent_sequences (connection_uid, issued, committed) VALUES (?, 1, 0)
+		ON CONFLICT(connection_uid) DO UPDATE SET issued = issued + 1
+		RETURNING issued`, consent.ConnectionUID).Scan(&consent.Sequence); err != nil {
+		return fmt.Errorf("number connector consent: %w", err)
+	}
+	verifierNonce, verifierCiphertext, err := sealWithAEAD(s.snapshotCipher.aead,
+		connectorConsentAdditionalData(consent), []byte(consent.CodeVerifier))
+	if err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM connector_consents WHERE expires_at < ?`, now); err != nil {
 		return fmt.Errorf("purge expired connector consents: %w", err)
 	}
@@ -955,10 +1038,10 @@ func (s *Store) CreateConnectorConsent(ctx context.Context, consent store.Connec
 		return fmt.Errorf("replace pending connector consents: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO connector_consents
-		(nonce, connection_uid, namespace, name, subject_digest, provider, mode, verifier_nonce, verifier_ciphertext, authority_digest, revocation_digest, scopes, expires_at, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(nonce, connection_uid, namespace, name, subject_digest, provider, mode, verifier_nonce, verifier_ciphertext, authority_digest, revocation_digest, scopes, sequence, expires_at, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		consent.Nonce, consent.ConnectionUID, consent.Namespace, consent.Name, consent.SubjectDigest, consent.Provider,
-		consent.Mode, verifierNonce, verifierCiphertext, consent.AuthorityDigest, consent.RevocationDigest, strings.Join(consent.Scopes, " "), consent.ExpiresAt.UTC(), now); err != nil {
+		consent.Mode, verifierNonce, verifierCiphertext, consent.AuthorityDigest, consent.RevocationDigest, strings.Join(consent.Scopes, " "), consent.Sequence, consent.ExpiresAt.UTC(), now); err != nil {
 		return fmt.Errorf("persist connector consent: %w", err)
 	}
 	return tx.Commit()
@@ -986,9 +1069,9 @@ func (s *Store) ConsumeConnectorConsent(ctx context.Context, nonce string) (stor
 	)
 	var scopes string
 	err = tx.QueryRowContext(ctx, `SELECT nonce, connection_uid, namespace, name, subject_digest, provider, mode,
-		verifier_nonce, verifier_ciphertext, authority_digest, revocation_digest, scopes, expires_at FROM connector_consents WHERE nonce = ?`, nonce).
+		verifier_nonce, verifier_ciphertext, authority_digest, revocation_digest, scopes, sequence, expires_at FROM connector_consents WHERE nonce = ?`, nonce).
 		Scan(&consent.Nonce, &consent.ConnectionUID, &consent.Namespace, &consent.Name, &consent.SubjectDigest,
-			&consent.Provider, &consent.Mode, &verifierNonce, &verifierCiphertext, &consent.AuthorityDigest, &consent.RevocationDigest, &scopes, &consent.ExpiresAt)
+			&consent.Provider, &consent.Mode, &verifierNonce, &verifierCiphertext, &consent.AuthorityDigest, &consent.RevocationDigest, &scopes, &consent.Sequence, &consent.ExpiresAt)
 	consent.Scopes = strings.Fields(scopes)
 	if errors.Is(err, sql.ErrNoRows) {
 		return store.ConnectorConsent{}, store.ErrNotFound
@@ -1058,14 +1141,47 @@ func (s *Store) CreateConnectorCompletion(ctx context.Context, completion store.
 	if tombstoned > 0 {
 		return store.ErrConnectorCustodyTombstoned
 	}
+	// Consent order, not callback order, decides: a completion from a
+	// consent older than the committed grant, or than one already parked,
+	// is refused. Older uncommitted completions are replaced, so a
+	// Connection parks at most one uncommitted completion at a time.
+	committed, err := connectorCommittedConsentTx(ctx, tx, completion.ConnectionUID)
+	if err != nil {
+		return err
+	}
+	if completion.ConsentSequence <= committed {
+		return store.ErrConnectorConsentSuperseded
+	}
+	parked, err := s.uncommittedCompletionsTx(ctx, tx, completion.ConnectionUID)
+	if err != nil {
+		return err
+	}
+	for _, other := range parked {
+		if other.ConsentSequence >= completion.ConsentSequence {
+			return store.ErrConnectorConsentSuperseded
+		}
+	}
+	for _, other := range parked {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM connector_completions WHERE nonce = ?`, other.Nonce); err != nil {
+			return fmt.Errorf("replace older connector completion: %w", err)
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO connector_completions
-		(nonce, connection_uid, namespace, name, subject_digest, provider, mode, payload_nonce, payload, expires_at, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(nonce, connection_uid, namespace, name, subject_digest, provider, mode, consent_sequence, payload_nonce, payload, expires_at, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		completion.Nonce, completion.ConnectionUID, completion.Namespace, completion.Name, completion.SubjectDigest,
-		completion.Provider, completion.Mode, payloadNonce, payload, completion.ExpiresAt.UTC(), now); err != nil {
+		completion.Provider, completion.Mode, completion.ConsentSequence, payloadNonce, payload, completion.ExpiresAt.UTC(), now); err != nil {
 		return fmt.Errorf("persist connector completion: %w", err)
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if len(parked) > 0 {
+		// Best effort: a log that readers kept busy is truncated by the
+		// next custody deletion.
+		_ = s.truncateWAL(ctx)
+	}
+	return nil
 }
 
 // ConsumeConnectorCompletion implements store.ConnectorConsentStore.
@@ -1085,10 +1201,10 @@ func (s *Store) ConsumeConnectorCompletion(ctx context.Context, nonce string) (s
 		completion            store.ConnectorCompletion
 		payloadNonce, payload []byte
 	)
-	err = tx.QueryRowContext(ctx, `SELECT nonce, connection_uid, namespace, name, subject_digest, provider, mode,
+	err = tx.QueryRowContext(ctx, `SELECT nonce, connection_uid, namespace, name, subject_digest, provider, mode, consent_sequence,
 		payload_nonce, payload, expires_at FROM connector_completions WHERE nonce = ?`, nonce).
 		Scan(&completion.Nonce, &completion.ConnectionUID, &completion.Namespace, &completion.Name, &completion.SubjectDigest,
-			&completion.Provider, &completion.Mode, &payloadNonce, &payload, &completion.ExpiresAt)
+			&completion.Provider, &completion.Mode, &completion.ConsentSequence, &payloadNonce, &payload, &completion.ExpiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return store.ConnectorCompletion{}, store.ErrNotFound
 	}
@@ -1167,7 +1283,7 @@ func (s *Store) ListConnectorCompletionsForConnection(ctx context.Context, conne
 // Redemption paths exclude expired rows; revocation paths include them. Rows
 // that fail to open are skipped rather than returned.
 func (s *Store) queryConnectorCompletions(ctx context.Context, where string, arg any, includeExpired bool) ([]store.ConnectorCompletion, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT nonce, connection_uid, namespace, name, subject_digest, provider, mode,
+	rows, err := s.db.QueryContext(ctx, `SELECT nonce, connection_uid, namespace, name, subject_digest, provider, mode, consent_sequence,
 		payload_nonce, payload, expires_at FROM connector_completions `+where, arg)
 	if err != nil {
 		return nil, fmt.Errorf("read connector completions: %w", err)
@@ -1181,7 +1297,7 @@ func (s *Store) queryConnectorCompletions(ctx context.Context, where string, arg
 			payloadNonce, payload []byte
 		)
 		if err := rows.Scan(&completion.Nonce, &completion.ConnectionUID, &completion.Namespace, &completion.Name, &completion.SubjectDigest,
-			&completion.Provider, &completion.Mode, &payloadNonce, &payload, &completion.ExpiresAt); err != nil {
+			&completion.Provider, &completion.Mode, &completion.ConsentSequence, &payloadNonce, &payload, &completion.ExpiresAt); err != nil {
 			return nil, fmt.Errorf("scan connector completion: %w", err)
 		}
 		completion.ExpiresAt = completion.ExpiresAt.UTC()
@@ -1284,8 +1400,10 @@ func (s *Store) verifyConnectorRowsWithCipher(snapshotCipher *AgentExecutionSnap
 			return fmt.Errorf("iterate connector custody (%s) while verifying key: %w", table, err)
 		}
 	}
+	// An expired consent holds no token and can never be used, so it does
+	// not block activating a key that cannot open it.
 	consents, err := s.db.Query(`SELECT nonce, connection_uid, namespace, name, subject_digest, provider, mode, authority_digest, revocation_digest, scopes,
-		expires_at, verifier_nonce, verifier_ciphertext FROM connector_consents`)
+		sequence, expires_at, verifier_nonce, verifier_ciphertext FROM connector_consents WHERE expires_at > ?`, time.Now().UTC())
 	if err != nil {
 		return fmt.Errorf("verify connector consents key: %w", err)
 	}
@@ -1296,7 +1414,7 @@ func (s *Store) verifyConnectorRowsWithCipher(snapshotCipher *AgentExecutionSnap
 			verifierNonce, sealed []byte
 		)
 		if err := consents.Scan(&consent.Nonce, &consent.ConnectionUID, &consent.Namespace, &consent.Name, &consent.SubjectDigest,
-			&consent.Provider, &consent.Mode, &consent.AuthorityDigest, &consent.RevocationDigest, &scopes, &consent.ExpiresAt, &verifierNonce, &sealed); err != nil {
+			&consent.Provider, &consent.Mode, &consent.AuthorityDigest, &consent.RevocationDigest, &scopes, &consent.Sequence, &consent.ExpiresAt, &verifierNonce, &sealed); err != nil {
 			_ = consents.Close()
 			return fmt.Errorf("scan connector consent while verifying key: %w", err)
 		}
@@ -1312,7 +1430,7 @@ func (s *Store) verifyConnectorRowsWithCipher(snapshotCipher *AgentExecutionSnap
 	if err != nil {
 		return fmt.Errorf("iterate connector consents while verifying key: %w", err)
 	}
-	completions, err := s.db.Query(`SELECT nonce, connection_uid, namespace, name, subject_digest, provider, mode,
+	completions, err := s.db.Query(`SELECT nonce, connection_uid, namespace, name, subject_digest, provider, mode, consent_sequence,
 		payload_nonce, payload, expires_at FROM connector_completions`)
 	if err != nil {
 		return fmt.Errorf("verify connector completions key: %w", err)
@@ -1323,7 +1441,7 @@ func (s *Store) verifyConnectorRowsWithCipher(snapshotCipher *AgentExecutionSnap
 			payloadNonce, payload []byte
 		)
 		if err := completions.Scan(&completion.Nonce, &completion.ConnectionUID, &completion.Namespace, &completion.Name, &completion.SubjectDigest,
-			&completion.Provider, &completion.Mode, &payloadNonce, &payload, &completion.ExpiresAt); err != nil {
+			&completion.Provider, &completion.Mode, &completion.ConsentSequence, &payloadNonce, &payload, &completion.ExpiresAt); err != nil {
 			_ = completions.Close()
 			return fmt.Errorf("scan connector completion while verifying key: %w", err)
 		}

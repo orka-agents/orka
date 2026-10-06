@@ -437,18 +437,22 @@ func (r *ConnectionReconciler) revokeTokens(ctx context.Context, connection *cor
 	}
 	secret := &corev1.Secret{}
 	secretRef := provider.Spec.OAuth.ClientSecretRef
-	// A missing Secret is recoverable while the provider stays: an operator
-	// restores it and the disconnect finishes. A provider being deleted
-	// (namespace teardown deletes the Secret first and nothing can be
-	// recreated in a terminating namespace) is not: the tokens are left to
-	// expire rather than holding the namespace forever.
+	// A missing Secret is recoverable while the namespace stays: an operator
+	// restores it and the disconnect finishes, even while the provider alone
+	// is being deleted. Namespace teardown is not: it deletes the Secret
+	// first and nothing can be recreated in a terminating namespace, so the
+	// tokens are left to expire rather than holding the namespace forever.
 	unavailable := func(err error) error {
-		if !provider.DeletionTimestamp.IsZero() {
-			logger.Info("provider is being deleted and its client secret is gone; tokens are left to expire unrevoked",
-				"connection", connection.Name, "provider", provider.Name)
-			return nil
+		if provider.DeletionTimestamp.IsZero() {
+			return err
 		}
-		return err
+		namespace := &corev1.Namespace{}
+		if nsErr := r.referenceReader().Get(ctx, types.NamespacedName{Name: provider.Namespace}, namespace); nsErr != nil || namespace.DeletionTimestamp.IsZero() {
+			return err
+		}
+		logger.Info("namespace is terminating and the provider's client secret is gone; tokens are left to expire unrevoked",
+			"connection", connection.Name, "provider", provider.Name)
+		return nil
 	}
 	if err := r.referenceReader().Get(ctx, types.NamespacedName{Namespace: provider.Namespace, Name: secretRef.Name}, secret); err != nil {
 		return unavailable(fmt.Errorf("%w: client secret %q: %w", errRevocationUnavailable, secretRef.Name, err))

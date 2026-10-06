@@ -142,8 +142,7 @@ func TestConnectorProviderSpecRules(t *testing.T) {
 			timeout   string
 			wantError bool
 		}
-		var cases []timeoutCase
-		for _, test := range []timeoutCase{
+		cases := []timeoutCase{
 			{timeout: "30s"}, {timeout: "10m"}, {timeout: "0.5s"}, {timeout: "600s"}, {timeout: "250ms"},
 			{timeout: "30 seconds", wantError: true}, {timeout: "", wantError: true}, {timeout: "-5s", wantError: true},
 			{timeout: "1m30s"}, {timeout: "500µs"}, {timeout: "1m0.5s"}, {timeout: "10m0.000000001s", wantError: true},
@@ -152,12 +151,12 @@ func TestConnectorProviderSpecRules(t *testing.T) {
 			// time.ParseDuration overflows on these even though they look well-formed.
 			{timeout: "9223372036854775808ns", wantError: true}, {timeout: "9223372037s", wantError: true},
 			{timeout: "999999h999999h999999h", wantError: true},
-		} {
-			cases = append(cases, test)
 		}
 		// The forms a typed client sends: metav1.Duration serializes through
 		// time.Duration.String, so 10m arrives as "10m0s" and 0.5ms as "500µs".
-		for _, d := range []time.Duration{10 * time.Minute, 150 * time.Second, 90 * time.Second, 30 * time.Second, 1500 * time.Millisecond, 500 * time.Microsecond, time.Nanosecond} {
+		durations := []time.Duration{10 * time.Minute, 150 * time.Second, 90 * time.Second, 30 * time.Second, 1500 * time.Millisecond, 500 * time.Microsecond, time.Nanosecond}
+		typed := make([]timeoutCase, 0, len(durations))
+		for _, d := range durations {
 			raw, err := json.Marshal(metav1.Duration{Duration: d})
 			if err != nil {
 				t.Fatal(err)
@@ -166,9 +165,9 @@ func TestConnectorProviderSpecRules(t *testing.T) {
 			if err := json.Unmarshal(raw, &serialized); err != nil {
 				t.Fatal(err)
 			}
-			cases = append(cases, timeoutCase{timeout: serialized})
+			typed = append(typed, timeoutCase{timeout: serialized})
 		}
-		for _, test := range cases {
+		for _, test := range append(cases, typed...) {
 			spec := makeSpec(func(s map[string]any) {
 				tool := s["tools"].([]any)[0].(map[string]any)
 				tool["source"] = "HTTP"
