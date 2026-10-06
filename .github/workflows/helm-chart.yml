@@ -20,6 +20,7 @@ on:
       - "Makefile"
       - "workers/harness/**"
       - "scripts/apply-helm-crds.sh"
+      - "scripts/tests/apply-helm-crds-test.sh"
       - "scripts/lib/ensure-static-mode-namespace.sh"
       - "scripts/tests/release-manifest-test.sh"
       - "scripts/static-mode-crd-validate.sh"
@@ -43,6 +44,7 @@ on:
       - "Makefile"
       - "workers/harness/**"
       - "scripts/apply-helm-crds.sh"
+      - "scripts/tests/apply-helm-crds-test.sh"
       - "scripts/lib/ensure-static-mode-namespace.sh"
       - "scripts/tests/release-manifest-test.sh"
       - "scripts/static-mode-crd-validate.sh"
@@ -94,6 +96,9 @@ jobs:
           bash -n scripts/static-mode-crd-validate.sh
           bash -n scripts/validate-release-manifest.sh scripts/tests/release-manifest-test.sh
           bash scripts/tests/release-manifest-test.sh
+          bash -n scripts/apply-helm-crds.sh
+          bash -n scripts/tests/apply-helm-crds-test.sh
+          bash scripts/tests/apply-helm-crds-test.sh
           make manifests
           if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
             echo "Generated staging manifests are stale." >&2

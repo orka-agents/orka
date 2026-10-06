@@ -122,6 +122,7 @@ func assertExternalRuntimePoolMaterializationNetwork(t *testing.T, request *work
 	}
 }
 
+//nolint:gocyclo // Explicit field checks keep the frozen materialization contract auditable.
 func assertExternalRuntimePoolMaterializationLayout(t *testing.T, request *workspacev1alpha1.WorkloadRequest, native, durable bool) {
 	t.Helper()
 	container := request.Runtime.Template.Spec.Containers[0]
