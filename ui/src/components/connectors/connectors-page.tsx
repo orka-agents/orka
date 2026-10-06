@@ -4,7 +4,7 @@ import { Link2, Unplug } from 'lucide-react'
 import { toast } from 'sonner'
 import { api, isConflictError, isForbiddenError, isNotImplementedError, isUnauthorizedError } from '@/lib/api-client'
 import {
-  callbackReasonMessage, clearConsentCallback, completionCommand, openAuthorizeURL, readCompletionToken,
+  callbackReasonMessage, clearConsentCallback, completionCommand, isKubernetesNamespace, openAuthorizeURL, readCompletionToken,
   type Connection, type ConnectionAuthorizeResponse, type ConnectionMode, type ConnectorCallbackSearch, type ConnectorProvider,
 } from '@/lib/connectors'
 import { useUIStore } from '@/stores/ui'
@@ -80,7 +80,10 @@ function ConnectorsPageContent({ namespace, search, clearCallback }: { namespace
   // namespace the consent was sealed in, never the page's current pick.
   const returning = search.status === 'pending' && Boolean(search.connection)
   const [completionToken] = useState(() => (returning ? readCompletionToken() : null))
-  const completionNamespace = search.namespace || namespace
+  // The namespace arrives in the address bar: anything that is not a
+  // Kubernetes namespace is ignored rather than used or persisted.
+  const callbackNamespace = isKubernetesNamespace(search.namespace) ? search.namespace : undefined
+  const completionNamespace = callbackNamespace || namespace
   const completionParams = completionNamespace ? { namespace: completionNamespace } : undefined
   const completionAttempted = useRef(false)
   // A failed consent that was sealed in another namespace is recovered
@@ -88,8 +91,8 @@ function ConnectorsPageContent({ namespace, search, clearCallback }: { namespace
   // affected provider and Connection (the content remounts with the same
   // callback search, so the error notice is kept).
   useEffect(() => {
-    if (search.status === 'error' && search.namespace && search.namespace !== namespace) setNamespace(search.namespace)
-  }, [search.status, search.namespace, namespace, setNamespace])
+    if (search.status === 'error' && callbackNamespace && callbackNamespace !== namespace) setNamespace(callbackNamespace)
+  }, [search.status, callbackNamespace, namespace, setNamespace])
   const [callbackNotice, setCallbackNotice] = useState<{ tone: 'error' | 'info'; text: string; retry?: boolean } | null>(() => {
     if (search.status === 'error') return { tone: 'error', text: callbackReasonMessage(search.reason) }
     if (returning && !completionToken) return { tone: 'error', text: 'The consent came back without a completion token. Start the link again.' }
@@ -210,6 +213,9 @@ function ConnectorsPageContent({ namespace, search, clearCallback }: { namespace
   const providerNames = new Set((providers.data?.items ?? []).map((p) => p.name))
   const retained = (connections.data?.items ?? []).filter((c) => !providerNames.has(c.provider))
   const duplicates = extras.filter((c) => providerNames.has(c.provider))
+  // Resolution refuses every link to a provider while duplicates exist, so
+  // the card's own link is unusable too, not only the extra ones.
+  const duplicated = new Set(duplicates.map((c) => c.provider))
 
   return (
     <div className="space-y-6">
@@ -254,6 +260,7 @@ function ConnectorsPageContent({ namespace, search, clearCallback }: { namespace
         <div className="grid gap-4 md:grid-cols-2">
           {providers.data!.items.map((provider) => (
             <ProviderCard key={provider.name} provider={provider} connection={byProvider.get(provider.name)} busy={busy}
+              duplicate={duplicated.has(provider.name)}
               onConnect={(mode) => start.mutate({ provider: provider.name, mode })}
               onChangeMode={(name, mode) => changeMode.mutate({ name, mode })}
               onReauthorize={(name) => reauthorize.mutate(name)}
@@ -302,13 +309,15 @@ interface ProviderCardProps {
   provider: ConnectorProvider
   connection?: Connection
   busy: boolean
+  /** The person holds more than one link to this provider, so none of them can be used. */
+  duplicate?: boolean
   onConnect: (mode: ConnectionMode) => void
   onChangeMode: (name: string, mode: ConnectionMode) => void
   onReauthorize: (name: string) => void
   onDisconnect: (name: string) => void
 }
 
-function ProviderCard({ provider, connection, busy, onConnect, onChangeMode, onReauthorize, onDisconnect }: ProviderCardProps) {
+function ProviderCard({ provider, connection, busy, duplicate, onConnect, onChangeMode, onReauthorize, onDisconnect }: ProviderCardProps) {
   const title = provider.displayName || provider.name
   const readTools = provider.tools.filter((t) => t.class === 'read').map((t) => t.name)
   const writeTools = provider.tools.filter((t) => t.class === 'write').map((t) => t.name)
@@ -319,14 +328,19 @@ function ProviderCard({ provider, connection, busy, onConnect, onChangeMode, onR
           <CardTitle className="text-base">{title}</CardTitle>
           <p className="text-xs text-muted-foreground">{provider.name}</p>
         </div>
-        <ConnectionBadge provider={provider} connection={connection} />
+        <ConnectionBadge provider={provider} connection={connection} duplicate={duplicate} />
       </CardHeader>
       <CardContent className="space-y-3 text-sm">
         {readTools.length > 0 && <p><span className="text-muted-foreground">Reads:</span> {readTools.join(', ')}</p>}
         {writeTools.length > 0 && <p><span className="text-muted-foreground">Writes (ask for approval):</span> {writeTools.join(', ')}</p>}
-        {connection?.message && connection.state !== 'Ready' && <p className="text-muted-foreground">{connection.message}</p>}
+        {connection?.message && !duplicate && (connection.state !== 'Ready' || !connection.ready) && <p className="text-muted-foreground">{connection.message}</p>}
         {connection?.deleting ? (
           <p className="text-muted-foreground">Revoking tokens and removing the link.</p>
+        ) : connection && duplicate ? (
+          <div className="flex flex-wrap gap-2">
+            <p className="w-full text-muted-foreground">You hold more than one link to this provider; its tools will not run until the extra links are disconnected.</p>
+            <Button size="sm" variant="destructive" disabled={busy} onClick={() => onDisconnect(connection.name)}>Disconnect</Button>
+          </div>
         ) : connection && !provider.ready ? (
           <div className="flex flex-wrap gap-2">
             <p className="w-full text-muted-foreground">The provider is not accepted right now, so this link cannot be used or changed until it is.</p>
@@ -358,13 +372,17 @@ function ProviderCard({ provider, connection, busy, onConnect, onChangeMode, onR
   )
 }
 
-function ConnectionBadge({ provider, connection }: { provider: ConnectorProvider; connection?: Connection }) {
+function ConnectionBadge({ provider, connection, duplicate }: { provider: ConnectorProvider; connection?: Connection; duplicate?: boolean }) {
   if (!connection) return <Badge variant="outline">{provider.ready ? 'Not linked' : 'Unavailable'}</Badge>
   if (connection.deleting) return <Badge variant="secondary">Disconnecting…</Badge>
+  if (duplicate) return <Badge variant="secondary">Duplicate links</Badge>
   // A link is usable only while its provider is accepted; the Connection's
   // own conditions can lag a provider change.
   if (!provider.ready) return <Badge variant="secondary">Linked · provider unavailable</Badge>
+  // The API folds the current provider's consent and scope checks into
+  // ready, so a stale Ready state is shown as needing a reconnect.
   if (connection.ready) return <Badge>{connection.mode === 'readWrite' ? 'Linked · read and write' : 'Linked · read only'}</Badge>
+  if (connection.state === 'Ready') return <Badge variant="secondary">Reconnect needed</Badge>
   return <Badge variant="secondary">{connection.state || 'Pending'}</Badge>
 }
 

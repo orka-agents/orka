@@ -1806,3 +1806,63 @@ func TestConnectionRevocationIdentityBoundAtConsentStart(t *testing.T) {
 		t.Fatalf("sealed revocation digest = %q err = %v, want the identity consent started under (%q), not the moved endpoint (%q)", credential.RevocationDigest, err, original, moved)
 	}
 }
+
+// TestConnectionViewsRevalidateAgainstCurrentProvider covers the window in
+// which a provider has changed but the Connection's own conditions still
+// say Ready: the API views apply the checks credential resolution applies,
+// so the dashboard and CLI never advertise a link it would refuse.
+func TestConnectionViewsRevalidateAgainstCurrentProvider(t *testing.T) {
+	h := newConnectorTestHarness(t, acceptedTestProvider())
+	created := h.create("readOnly")
+	h.link(created)
+	name := created.Connection.Name
+	views := func() (ConnectionResponse, ConnectionResponse) {
+		t.Helper()
+		var got ConnectionResponse
+		resp, raw := h.do(http.MethodGet, "/api/v1/connections/"+name, nil)
+		if resp.StatusCode != http.StatusOK || json.Unmarshal(raw, &got) != nil {
+			t.Fatalf("get = %d %s", resp.StatusCode, raw)
+		}
+		var list struct {
+			Items []ConnectionResponse `json:"items"`
+		}
+		resp, raw = h.do(http.MethodGet, "/api/v1/connections", nil)
+		if resp.StatusCode != http.StatusOK || json.Unmarshal(raw, &list) != nil || len(list.Items) != 1 {
+			t.Fatalf("list = %d %s", resp.StatusCode, raw)
+		}
+		return got, list.Items[0]
+	}
+	if got, listed := views(); !got.Ready || !listed.Ready {
+		t.Fatalf("linked: get = %+v list = %+v, want ready", got, listed)
+	}
+	updateProvider := func(mutate func(*corev1alpha1.ConnectorProvider)) {
+		t.Helper()
+		provider := &corev1alpha1.ConnectorProvider{}
+		if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: "github"}, provider); err != nil {
+			t.Fatal(err)
+		}
+		mutate(provider)
+		if err := h.client.Update(context.Background(), provider); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A new OAuth client: the recorded consent no longer matches.
+	updateProvider(func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.ClientID = "rotated-client" })
+	for _, view := range func() []ConnectionResponse { g, l := views(); return []ConnectionResponse{g, l} }() {
+		if view.Ready || view.State != corev1alpha1.ConnectionStateReady || !strings.Contains(view.Message, "changed since you consented") {
+			t.Fatalf("rotated client: view = %+v, want not ready with a relink message", view)
+		}
+	}
+
+	// The same client, but a read scope the grant lacks.
+	updateProvider(func(p *corev1alpha1.ConnectorProvider) {
+		p.Spec.OAuth.ClientID = "client-id"
+		p.Spec.OAuth.Scopes.Read = append(p.Spec.OAuth.Scopes.Read, "read:org")
+	})
+	for _, view := range func() []ConnectionResponse { g, l := views(); return []ConnectionResponse{g, l} }() {
+		if view.Ready || !strings.Contains(view.Message, "requires scopes") {
+			t.Fatalf("widened scopes: view = %+v, want not ready with a scope message", view)
+		}
+	}
+}

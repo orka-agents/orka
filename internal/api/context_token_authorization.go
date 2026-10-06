@@ -2044,10 +2044,17 @@ func connectorReadToolAuthorizer(ui *UserInfo, cfg ContextTokenAuthorizationConf
 			}
 		}
 	}
-	if contextTokenAllowsConnectorRead(ui, cfg) {
+	if !cfg.Enabled() || ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil ||
+		hasAnyScope(ui.ContextToken.Scopes, cfg.ConnectorReadScopes) {
 		return nil
 	}
+	failures := []string{fmt.Sprintf("missing one of required scopes %q", strings.Join(cfg.ConnectorReadScopes, ","))}
 	return func() *toolspkg.ChatToolError {
+		// Audit mode allows the call but records the failure, as the
+		// connector routes do for the same scope.
+		if err := handleContextTokenAuthorizationFailures(cfg, ui.ContextToken, string(connectorActionRead), failures); err == nil {
+			return nil
+		}
 		return &toolspkg.ChatToolError{
 			Type:       "unauthorized_tool",
 			Message:    fmt.Sprintf("this token lacks one of the scopes %q needed to read linked accounts", strings.Join(cfg.ConnectorReadScopes, ",")),

@@ -235,12 +235,33 @@ describe('ConnectorsPage', () => {
     await waitFor(() => expect(screen.getByText('Extra link to this provider')).toBeInTheDocument())
     expect(screen.getByText(/github · my-second-github-link/)).toBeInTheDocument()
     expect(screen.getAllByRole('button', { name: 'Disconnect' })).toHaveLength(2)
+    // The card's own link is unusable too: no linked badge, no mode or reconnect actions.
+    expect(screen.getByText('Duplicate links')).toBeInTheDocument()
+    expect(screen.queryByText('Linked · read only')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Allow writes' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Reconnect' })).not.toBeInTheDocument()
+  })
+
+  it('offers a reconnect for a Ready link the API reports unusable', async () => {
+    useProviders([github], [{ ...linked, ready: false, message: 'the provider changed since you consented; reconnect this link before its tools can run' }])
+    render(<ConnectorsPage />)
+    await waitFor(() => expect(screen.getByText('Reconnect needed')).toBeInTheDocument())
+    expect(screen.queryByText('Linked · read only')).not.toBeInTheDocument()
+    expect(screen.getByText(/changed since you consented/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Reconnect' })).toBeInTheDocument()
   })
 
   it('explains a failed callback', async () => {
     useProviders([github])
     render(<ConnectorsPage search={{ status: 'error', reason: 'scopes_denied' }} />)
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('fewer permissions'))
+  })
+
+  it('ignores a callback namespace that is not a Kubernetes namespace', async () => {
+    useProviders([github])
+    render(<ConnectorsPage search={{ status: 'error', reason: 'access_denied', connection: 'github-abc', namespace: 'Not A Namespace!' }} />)
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('cancelled'))
+    expect(useUIStore.getState().namespace).toBe('orka-system')
   })
 
   it('switches to the consent namespace when a callback fails elsewhere', async () => {

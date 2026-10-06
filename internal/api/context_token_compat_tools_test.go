@@ -20,11 +20,13 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	dto "github.com/prometheus/client_model/go"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/llm"
+	"github.com/orka-agents/orka/internal/metrics"
 )
 
 func TestContextTokenAllowedToolsFiltersInjectedProxyTools(t *testing.T) {
@@ -309,5 +311,49 @@ func TestContextTokenConnectorReadScopeGatesListConnections(t *testing.T) {
 	probe(ContextTokenScopeToolsUse + " " + ContextTokenScopeConnectorsRead)
 	if !slices.Contains(gotNames, "list_connections") || gateDenied {
 		t.Fatalf("with connectors:read: names = %v denied = %t", gotNames, gateDenied)
+	}
+}
+
+// TestConnectorReadToolAuthorizerRecordsAuditFailures allows list_connections
+// in audit mode for a token without the connector-read scope but records the
+// failure, as the connector routes do; enforce mode refuses and records it.
+func TestConnectorReadToolAuthorizerRecordsAuditFailures(t *testing.T) {
+	ui := &UserInfo{AuthType: AuthTypeContextToken, Subject: "alice", Issuer: "https://issuer.example.test",
+		ContextToken: &ContextToken{Subject: "alice", Issuer: "https://issuer.example.test", Scopes: []string{ContextTokenScopeToolsUse}}}
+	counter := func(result string) float64 {
+		var m dto.Metric
+		if err := metrics.ContextTokenAuthorizationTotal.WithLabelValues("connectorsRead", result, "missing_scope").Write(&m); err != nil {
+			t.Fatal(err)
+		}
+		return m.GetCounter().GetValue()
+	}
+	for _, tc := range []struct {
+		mode   string
+		result string
+		denied bool
+	}{
+		{mode: ContextTokenAuthorizationModeAudit, result: "audit"},
+		{mode: ContextTokenAuthorizationModeEnforce, result: "denied", denied: true},
+	} {
+		authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: tc.mode})
+		if err != nil {
+			t.Fatal(err)
+		}
+		gate := connectorReadToolAuthorizer(ui, authz, true)
+		if gate == nil {
+			t.Fatalf("%s: a token without the connector-read scope must be checked at call time", tc.mode)
+		}
+		before := counter(tc.result)
+		if denied := gate(); (denied != nil) != tc.denied {
+			t.Fatalf("%s: denied = %+v, want denied = %t", tc.mode, denied, tc.denied)
+		}
+		if after := counter(tc.result); after != before+1 {
+			t.Fatalf("%s: %s failures recorded = %v, want %v", tc.mode, tc.result, after, before+1)
+		}
+		withScope := *ui
+		withScope.ContextToken = &ContextToken{Subject: "alice", Issuer: "https://issuer.example.test", Scopes: []string{ContextTokenScopeConnectorsRead}}
+		if connectorReadToolAuthorizer(&withScope, authz, true) != nil {
+			t.Fatalf("%s: a token with the connector-read scope needs no check", tc.mode)
+		}
 	}
 }
