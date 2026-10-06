@@ -222,6 +222,9 @@ func TestValidateProviderSpec(t *testing.T) {
 		{name: "parameters nested property not a schema", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.Tools[2].Parameters = &apiextensionsv1.JSON{Raw: []byte(`{"type":"object","properties":{"q":1}}`)}
 		}, want: "valid JSON Schema"},
+		{name: "parameters credential-bearing remote ref", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].Parameters = &apiextensionsv1.JSON{Raw: []byte(`{"type":"object","properties":{"q":{"$ref":"https://schemas.example.test/q.json?access_token=s3cr3t"}}}`)}
+		}, want: "resolvable JSON Schema with only local references"},
 		{name: "parameters unresolvable ref", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.Tools[2].Parameters = &apiextensionsv1.JSON{Raw: []byte(`{"type":"object","properties":{"q":{"$ref":"#/$defs/missing"}}}`)}
 		}, want: "resolvable JSON Schema"},
@@ -323,6 +326,11 @@ func TestValidateProviderSpec(t *testing.T) {
 			}
 			if issue.Reason != ReasonInvalidProvider {
 				t.Fatalf("reason = %q, want %q", issue.Reason, ReasonInvalidProvider)
+			}
+			// The message becomes public provider status: it never repeats
+			// a credential-bearing value from the spec.
+			if strings.Contains(issue.Message, "s3cr3t") || strings.Contains(issue.Message, "access_token") {
+				t.Fatalf("issue echoed a credential-bearing value: %s", issue.Message)
 			}
 		})
 	}
