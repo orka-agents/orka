@@ -66,6 +66,20 @@ func boundGetIssueResult(result GetIssueResult, limit int) GetIssueResult {
 	return result
 }
 
+// maxGitHubErrorNoteBytes bounds a GitHub error quoted in a result or an
+// error: it can carry a response body of up to the response limit, which a
+// result's size bound never trims.
+const maxGitHubErrorNoteBytes = 512
+
+// boundedNote cuts text to at most maxGitHubErrorNoteBytes of valid UTF-8,
+// marking a cut.
+func boundedNote(text string) string {
+	if len(text) <= maxGitHubErrorNoteBytes {
+		return text
+	}
+	return strings.ToValidUTF8(text[:maxGitHubErrorNoteBytes], "") + "…"
+}
+
 // GetIssueArgs are the arguments for the get_issue tool.
 type GetIssueArgs struct {
 	// TaskName is the name of the task to read workspace config from (optional).
@@ -158,7 +172,7 @@ func (t *GetIssueTool) Execute(ctx context.Context, argsJSON json.RawMessage) (s
 		issueResult.Comments = comments
 	} else {
 		issueResult.Truncated = true
-		issueResult.TruncationNote = "comments could not be fetched: " + err.Error()
+		issueResult.TruncationNote = "comments could not be fetched: " + boundedNote(err.Error())
 	}
 
 	resultJSON, _ := json.Marshal(boundGetIssueResult(*issueResult, t.maxResultBytes))

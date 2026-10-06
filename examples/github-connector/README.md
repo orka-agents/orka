@@ -5,7 +5,7 @@ act as them through Orka's built-in GitHub tools. See the
 [Connectors guide](../../website/docs/guides/connectors.md) for the full flow.
 
 1. Register a GitHub OAuth App whose callback URL is
-   `<--connector-callback-base-url>/api/v1/connections/callback`.
+   `<connector-callback-base-url>/api/v1/connections/callback`.
 2. Run the controller with `--connectors-enabled`,
    `--connector-callback-base-url`, Task provenance admission, and a sign-in
    that yields an issuer and subject (OIDC or a context-token profile).

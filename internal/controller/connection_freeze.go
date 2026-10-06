@@ -67,6 +67,11 @@ var ErrLinkedRepositoryScope = errors.New("the task's workspace reaches beyond t
 // permanentLinkedBuiltinError turns the configuration refusals of the
 // linked built-in path into permanent ACP configuration errors and leaves
 // every other error retryable.
+// ErrLinkedBuiltinChanged reports a requester link that disappeared or was
+// narrowed between planning, which exposed a linked built-in, and the
+// freeze; binding retries and plans again.
+var ErrLinkedBuiltinChanged = errors.New("the requester's linked account changed while the task was being bound; retrying")
+
 func permanentLinkedBuiltinError(err error) error {
 	if errors.Is(err, ErrBuiltinToolProviderAmbiguous) || errors.Is(err, ErrLinkedRepositoryScope) {
 		return permanentACPAgentConfiguration(err)
@@ -177,9 +182,10 @@ func connectorToolsFor(ctx context.Context, reader client.Reader, registry *tool
 
 // classifyConnectorTools is connectorToolsFor with a choice about a policy
 // that is missing: a classification treats the Tool as not connector-backed
-// (its execution fails on its own), while a snapshot freeze (strictPolicies)
-// retries instead, so a policy of the same name recreated later in another
-// mode can never pass the adapter-change guard through an omitted entry.
+// (its execution fails on its own), while a snapshot freeze or a binding that
+// refuses connector Tools (strictPolicies) retries instead, so a policy of
+// the same name recreated later in another mode can never pass the
+// adapter-change guard through an omitted entry.
 func classifyConnectorTools(ctx context.Context, reader client.Reader, registry *tools.Registry, namespace string, toolNames []string, scope connectorScope) (map[string]connectorToolInfo, error) {
 	if reader == nil {
 		return nil, nil
@@ -759,9 +765,20 @@ func freezeRequesterConnectionsForTools(
 			// A built-in is frozen only with a usable link: without one
 			// the broker never offers it, and a link made after dispatch
 			// is never picked up, so the approval set computed at dispatch
-			// stays true for the whole run.
+			// stays true for the whole run. The names here are the ones
+			// planning exposed, and planning hides a built-in without a
+			// usable link (and a write built-in without readWrite), so a
+			// link missing or narrowed now changed between the two reads:
+			// binding retries rather than freeze a policy no call can use.
 			if connection == nil {
+				if scope.builtins {
+					return nil, fmt.Errorf("%w: %s", ErrLinkedBuiltinChanged, name)
+				}
 				continue
+			}
+			if class, _ := connectors.BuiltinConnectorToolClass(name); scope.builtins && class == corev1alpha1.ConnectorToolClassWrite &&
+				connection.Spec.Mode != corev1alpha1.ConnectionModeReadWrite {
+				return nil, fmt.Errorf("%w: %s", ErrLinkedBuiltinChanged, name)
 			}
 			frozen = append(frozen, agentExecutionSnapshotConnection{
 				PolicyName: info.PolicyName, Tool: name, Provider: info.Provider, ConnectionName: connection.Name,
@@ -844,8 +861,10 @@ func FrozenConnectionsFromTaskStatus(task *corev1alpha1.Task) map[string]outboun
 	}
 	frozen := make(map[string]outboundaccess.FrozenConnection, len(task.Status.ConnectionBindings))
 	for _, binding := range task.Status.ConnectionBindings {
+		// The provider travels with the binding, so a policy retargeted to
+		// another provider after dispatch is refused on this path too.
 		frozen[binding.PolicyName] = outboundaccess.FrozenConnection{
-			Name: binding.ConnectionName, UID: binding.UID, Generation: binding.Generation, GrantSequence: binding.GrantSequence,
+			Name: binding.ConnectionName, UID: binding.UID, Generation: binding.Generation, GrantSequence: binding.GrantSequence, Provider: binding.Provider,
 		}
 	}
 	return frozen

@@ -142,15 +142,30 @@ func TestFreezeAndFilterBuiltinConnectorTools(t *testing.T) {
 		configuration.ToolPolicy.Tools = append(configuration.ToolPolicy.Tools, harnessv2.MCPToolDescriptor{Name: name, Source: harnessv2.MCPToolSourceBrokeredBuiltin})
 	}
 
-	// No link: nothing is frozen, and every brokered GitHub built-in is
-	// hidden, declared by the provider or not; only the web tool stays.
-	frozen, err := freezeRequesterConnections(ctx, f.reader(github), registry, f.task, configuration)
-	if err != nil || len(frozen) != 0 {
-		t.Fatalf("no link: frozen = %+v err = %v", frozen, err)
-	}
+	// No link: every brokered GitHub built-in is hidden, declared by the
+	// provider or not; only the web tool stays, and freezing that planned
+	// policy binds nothing.
 	visible, write, err := FilterBrokeredConnectorToolsForRequester(ctx, f.reader(github), registry, f.task, names)
 	if err != nil || strings.Join(visible, ",") != "web_search" || len(write) != 0 {
 		t.Fatalf("no link: visible = %v write = %v err = %v", visible, write, err)
+	}
+	planned := harnessv2.MCPPolicyConfiguration{}
+	planned.ToolPolicy.Tools = []harnessv2.MCPToolDescriptor{{Name: "web_search", Source: harnessv2.MCPToolSourceBrokeredBuiltin}}
+	frozen, err := freezeRequesterConnections(ctx, f.reader(github), registry, f.task, planned)
+	if err != nil || len(frozen) != 0 {
+		t.Fatalf("no link: frozen = %+v err = %v", frozen, err)
+	}
+	// A policy planned while the link existed but frozen after it went away
+	// is a binding race: freezing it would offer a tool no call can use, so
+	// binding retries and plans again.
+	if _, err := freezeRequesterConnections(ctx, f.reader(github), registry, f.task, configuration); !errors.Is(err, ErrLinkedBuiltinChanged) {
+		t.Fatalf("link removed after planning: err = %v, want ErrLinkedBuiltinChanged", err)
+	}
+	// The same for a write built-in planned under a readWrite link that was
+	// narrowed to readOnly before the freeze.
+	narrowed := f.reader(github, f.connection(corev1alpha1.ConnectionModeReadOnly, true))
+	if _, err := freezeRequesterConnections(ctx, narrowed, registry, f.task, configuration); !errors.Is(err, ErrLinkedBuiltinChanged) {
+		t.Fatalf("link narrowed after planning: err = %v, want ErrLinkedBuiltinChanged", err)
 	}
 	anonymous := f.task.DeepCopy()
 	anonymous.Spec.RequestedBy = nil

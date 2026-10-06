@@ -507,3 +507,36 @@ func TestGetIssueTool_EnvVarRepoFallback(t *testing.T) {
 		t.Errorf("number = %d, want 1", issue.Number)
 	}
 }
+
+// TestGetIssueTool_CommentsFailureNoteIsBounded covers a comments request
+// that fails with a large GitHub body: the quoted error is cut, so the
+// result still fits the broker's size bound.
+func TestGetIssueTool_CommentsFailureNoteIsBounded(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/issues/7"):
+			_, _ = fmt.Fprint(w, `{"number": 7, "title": "t", "body": "b", "state": "open", "comments": 3, "user": {"login": "a"}}`)
+		case strings.HasSuffix(r.URL.Path, "/issues/7/comments"):
+			w.WriteHeader(502)
+			_, _ = fmt.Fprint(w, strings.Repeat("x", 512<<10))
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
+	const limit = 64 << 10
+	tool := (&GetIssueTool{apiBaseURL: server.URL}).WithMaxResultBytes(limit)
+	args, _ := json.Marshal(GetIssueArgs{RepoURL: testOrgRepoURL, IssueNumber: 7})
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var issue GetIssueResult
+	if err := json.Unmarshal([]byte(result), &issue); err != nil {
+		t.Fatal(err)
+	}
+	if len(result) > limit || !issue.Truncated || len(issue.TruncationNote) > maxGitHubErrorNoteBytes+64 {
+		t.Fatalf("result = %d bytes note = %d bytes, want both bounded", len(result), len(issue.TruncationNote))
+	}
+}

@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -841,5 +842,47 @@ func TestReviewPullRequestTool_CustomPasswordKey(t *testing.T) {
 	}
 	if reviewResult.Status != testFetched {
 		t.Errorf("unexpected status: %s", reviewResult.Status)
+	}
+}
+
+// TestReviewPullRequestTool_RefusesOversizedPages covers a files page past
+// the GitHub document limit and a diff past the diff limit: both are refused
+// before use instead of being parsed or returned from a cut prefix.
+func TestReviewPullRequestTool_RefusesOversizedPages(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		bigFiles  bool
+		wantError string
+	}{
+		{name: "diff", wantError: "failed to fetch PR diff"},
+		{name: "files", bigFiles: true, wantError: "failed to fetch PR files"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/repos/sozercan/ayna/pulls/7" && r.Header.Get("Accept") == testDiffAccept:
+					if tc.bigFiles {
+						_, _ = fmt.Fprint(w, "diff --git a/x b/x\n")
+						return
+					}
+					_, _ = w.Write(bytes.Repeat([]byte("+"), int(prDiffResponseLimit)+1))
+				case r.URL.Path == "/repos/sozercan/ayna/pulls/7":
+					_, _ = fmt.Fprint(w, `{"title": "t", "user": {"login": "a"}, "base": {"ref": "main"}, "head": {"ref": "b"}}`)
+				case r.URL.Path == "/repos/sozercan/ayna/pulls/7/files":
+					_, _ = fmt.Fprintf(w, `[{"filename": "x", "patch": %q}]`, strings.Repeat("y", int(githubResponseLimit)))
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+			task, secret := githubRepoTaskWithSecret(testSozercanAynaRepoURL)
+			task.Spec.Workspace.ForgeCredentialRef = nil
+			tool := &ReviewPullRequestTool{k8sClient: newFakeClient(task, secret), apiBaseURL: server.URL}
+			args, _ := json.Marshal(ReviewPullRequestArgs{RepoURL: testSozercanAynaRepoURL, PRNumber: 7})
+			_, err := tool.Execute(contextWithTaskScope(), args)
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) || !strings.Contains(err.Error(), "exceeds") {
+				t.Fatalf("err = %v, want %q refusing the oversized response", err, tc.wantError)
+			}
+		})
 	}
 }

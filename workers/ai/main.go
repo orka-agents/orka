@@ -469,7 +469,11 @@ func loadCustomTools(
 		tool := &corev1alpha1.Tool{}
 		key := client.ObjectKey{Namespace: namespace, Name: name}
 		if err := readCustomTool(ctx, k8sClient, key, tool, frozen); err != nil {
-			if frozen && !apierrors.IsNotFound(err) {
+			// A dispatched connector-backed Tool that is gone fails startup
+			// too: the Job ends (it is never retried at the Job level) and
+			// the controller's retry re-dispatches with a fresh freeze,
+			// rather than this worker running a tool set nobody dispatched.
+			if frozen {
 				return nil, fmt.Errorf("load connector-backed tool %q: %w", name, err)
 			}
 			fmt.Printf("Warning: tool %q not found as built-in or CRD: %v\n", name, err)
