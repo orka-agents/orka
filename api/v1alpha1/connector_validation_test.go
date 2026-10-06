@@ -1,15 +1,18 @@
 package v1alpha1
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	structuralschema "k8s.io/apiextensions-apiserver/pkg/apiserver/schema"
 	"k8s.io/apiextensions-apiserver/pkg/apiserver/schema/cel"
 	schemavalidation "k8s.io/apiextensions-apiserver/pkg/apiserver/validation"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	celconfig "k8s.io/apiserver/pkg/apis/cel"
 	"sigs.k8s.io/yaml"
 )
@@ -135,18 +138,37 @@ func TestConnectorProviderSpecRules(t *testing.T) {
 	requireSpecAtRoot(t, "core.orka.ai_connectorproviders.yaml", makeSpec(nil))
 	t.Run("http timeout must decode as a bounded duration", func(t *testing.T) {
 		rootValidator := loadRootValidator(t, "core.orka.ai_connectorproviders.yaml")
-		for _, test := range []struct {
+		type timeoutCase struct {
 			timeout   string
 			wantError bool
-		}{
+		}
+		var cases []timeoutCase
+		for _, test := range []timeoutCase{
 			{timeout: "30s"}, {timeout: "10m"}, {timeout: "0.5s"}, {timeout: "600s"}, {timeout: "250ms"},
 			{timeout: "30 seconds", wantError: true}, {timeout: "", wantError: true}, {timeout: "-5s", wantError: true},
-			{timeout: "1m30s", wantError: true},
+			{timeout: "1m30s"}, {timeout: "500µs"}, {timeout: "1m0.5s"}, {timeout: "10m0.000000001s", wantError: true},
+			{timeout: "1h0m0s", wantError: true}, {timeout: "1m30", wantError: true}, {timeout: "30sm", wantError: true},
 			{timeout: "11m", wantError: true}, {timeout: "1h", wantError: true}, {timeout: "0s", wantError: true},
 			// time.ParseDuration overflows on these even though they look well-formed.
 			{timeout: "9223372036854775808ns", wantError: true}, {timeout: "9223372037s", wantError: true},
 			{timeout: "999999h999999h999999h", wantError: true},
 		} {
+			cases = append(cases, test)
+		}
+		// The forms a typed client sends: metav1.Duration serializes through
+		// time.Duration.String, so 10m arrives as "10m0s" and 0.5ms as "500µs".
+		for _, d := range []time.Duration{10 * time.Minute, 150 * time.Second, 90 * time.Second, 30 * time.Second, 1500 * time.Millisecond, 500 * time.Microsecond, time.Nanosecond} {
+			raw, err := json.Marshal(metav1.Duration{Duration: d})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var serialized string
+			if err := json.Unmarshal(raw, &serialized); err != nil {
+				t.Fatal(err)
+			}
+			cases = append(cases, timeoutCase{timeout: serialized})
+		}
+		for _, test := range cases {
 			spec := makeSpec(func(s map[string]any) {
 				tool := s["tools"].([]any)[0].(map[string]any)
 				tool["source"] = "HTTP"
