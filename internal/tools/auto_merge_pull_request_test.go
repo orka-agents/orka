@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1385,5 +1386,65 @@ func TestAutoMergePullRequestTool_Transient5xx(t *testing.T) {
 	}
 	if merged {
 		t.Error("expected merged to be false")
+	}
+}
+
+// TestCheckCIStatusDetailedReadsEveryPage covers commits with more check
+// runs than one page: a failure on a later page is found, and runs that
+// could not be read keep CI from being reported as passed.
+func TestCheckCIStatusDetailedReadsEveryPage(t *testing.T) {
+	page := func(total int, runs []string) string {
+		entries := make([]string, 0, len(runs))
+		for _, conclusion := range runs {
+			entries = append(entries, fmt.Sprintf(`{"name":"c","status":"completed","conclusion":%q}`, conclusion))
+		}
+		return fmt.Sprintf(`{"total_count":%d,"check_runs":[%s]}`, total, strings.Join(entries, ","))
+	}
+	repeat := func(conclusion string, n int) []string {
+		out := make([]string, n)
+		for i := range out {
+			out[i] = conclusion
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name    string
+		serve   func(page int) string
+		passed  bool
+		failed  bool
+		pending bool
+	}{
+		{name: "failure on the second page", serve: func(p int) string {
+			if p == 1 {
+				return page(130, repeat("success", 100))
+			}
+			return page(130, append(repeat("success", 29), "failure"))
+		}, failed: true},
+		{name: "all pages pass", serve: func(p int) string {
+			if p == 1 {
+				return page(130, repeat("success", 100))
+			}
+			return page(130, repeat("success", 30))
+		}, passed: true},
+		{name: "fewer runs readable than the total", serve: func(int) string { return page(31, repeat("success", 30)) }, pending: true},
+		{name: "more pages than the bound", serve: func(int) string { return page(5000, repeat("success", 100)) }, pending: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Query().Get("per_page") != "100" {
+					t.Errorf("per_page = %q, want 100", r.URL.Query().Get("per_page"))
+				}
+				p, _ := strconv.Atoi(r.URL.Query().Get("page"))
+				_, _ = fmt.Fprint(w, tc.serve(p))
+			}))
+			defer server.Close()
+			result, err := checkCIStatusDetailed(context.Background(), "token", "o", "r", "sha", server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Passed != tc.passed || result.Failed != tc.failed || result.Pending != tc.pending {
+				t.Fatalf("result = %+v", result)
+			}
+		})
 	}
 }

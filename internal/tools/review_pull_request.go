@@ -10,7 +10,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -202,7 +201,7 @@ func fetchPRDetails(ctx context.Context, httpClient *http.Client, baseURL, token
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", "", "", "", "", fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(respBody))
+		return "", "", "", "", "", fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, boundedNote(string(respBody)))
 	}
 
 	var prResp struct {
@@ -243,14 +242,23 @@ func fetchPRDiff(ctx context.Context, httpClient *http.Client, baseURL, token, o
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	// A diff past the limit is refused rather than silently cut: a cut
+	// diff would read as the whole change. Below it, the result bound trims
+	// the diff and says so.
+	respBody, err := readGitHubResponse(resp.Body, prDiffResponseLimit)
+	if err != nil {
+		return "", err
+	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(respBody))
+		return "", fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, boundedNote(string(respBody)))
 	}
 
 	return string(respBody), nil
 }
+
+// prDiffResponseLimit bounds the unified diff read for a pull request.
+const prDiffResponseLimit int64 = 10 << 20
 
 // fetchPRFiles fetches the list of changed files in a PR.
 func fetchPRFiles(ctx context.Context, httpClient *http.Client, baseURL, token, owner, repo string, prNumber int) ([]FileChange, error) {
@@ -270,10 +278,15 @@ func fetchPRFiles(ctx context.Context, httpClient *http.Client, baseURL, token, 
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	// One page of file entries is a JSON document: an oversized page is
+	// refused before decoding, never parsed from a cut prefix.
+	respBody, err := readGitHubResponse(resp.Body, githubResponseLimit)
+	if err != nil {
+		return nil, err
+	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, boundedNote(string(respBody)))
 	}
 
 	var filesResp []struct {
