@@ -136,7 +136,7 @@ func (r *TaskReconciler) resolveHarnessV1ExecutionCandidate(
 	// the v2 execution snapshot; the v1 path has no such binding, so they
 	// must never be exposed there.
 	candidates := connectorCandidateTools(task, agent, nil)
-	if connectorTools, err := connectorToolsFor(ctx, reader, r.MCPRegistry, task.Namespace, candidates); err != nil {
+	if connectorTools, err := classifyConnectorTools(ctx, reader, r.MCPRegistry, task.Namespace, candidates, connectorScope{strictPolicies: true}); err != nil {
 		return nil, err
 	} else if len(connectorTools) > 0 {
 		return nil, permanentHarnessV1Candidate(errors.New("connector-backed tools require harness v2 execution"))

@@ -24,6 +24,11 @@ import (
 // request. The worker that produced the arguments is not trusted to have
 // honored the schema; the controller is the boundary.
 func ValidateToolArguments(parameters *apiextensionsv1.JSON, arguments json.RawMessage) error {
+	// An empty payload is the empty object, as the executor treats it, so a
+	// parameterless call is judged rather than refused as malformed.
+	if len(bytes.TrimSpace(arguments)) == 0 {
+		arguments = json.RawMessage(`{}`)
+	}
 	// Numbers decode as float64 on purpose: the schema library judges
 	// json.Number as a string, which would let "integer" constraints pass
 	// for any value. The raw arguments, not this decoded copy, are executed,

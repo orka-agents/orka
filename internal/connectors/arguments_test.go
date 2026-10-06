@@ -30,6 +30,10 @@ func TestValidateToolArguments(t *testing.T) {
 		{name: "trailing value", parameters: schema, arguments: `{"q":"x"} {}`, wantErr: true},
 		{name: "no schema still needs an object", parameters: nil, arguments: `"q"`, wantErr: true},
 		{name: "no schema accepts any object", parameters: nil, arguments: `{"anything":1}`},
+		// A parameterless call arrives empty and is judged as {}.
+		{name: "empty payload is the empty object", parameters: &apiextensionsv1.JSON{Raw: []byte(`{"type":"object","properties":{"q":{"type":"string"}}}`)}, arguments: ``},
+		{name: "blank payload is the empty object", parameters: nil, arguments: "  \n"},
+		{name: "empty payload still meets required fields", parameters: schema, arguments: ``, wantErr: true},
 		{name: "invalid schema fails closed", parameters: &apiextensionsv1.JSON{Raw: []byte(`{"type":7}`)}, arguments: `{}`, wantErr: true},
 		// The schema is judged on a float64 copy; a number that copy cannot
 		// hold exactly could pass a bound the raw value violates, so it is

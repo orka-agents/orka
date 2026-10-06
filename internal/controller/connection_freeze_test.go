@@ -431,3 +431,23 @@ func TestACPChildTaskSealerRetriesTransientFailures(t *testing.T) {
 		t.Fatalf("child = %v err = %v, want it sealed", sealed.Annotations, err)
 	}
 }
+
+// TestConnectorToolsForWaitsForAMissingPolicy covers a Tool whose policy is
+// absent while a binding is made: it cannot be classified, so the binding
+// retries instead of treating the Tool as plain and later running it under a
+// policy recreated in another mode.
+func TestConnectorToolsForWaitsForAMissingPolicy(t *testing.T) {
+	scheme := connectorTestScheme(t)
+	tool, _, _, _ := freezeFixtures(true)
+	reader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(tool).Build()
+	if _, err := classifyConnectorTools(context.Background(), reader, nil, "tenant", []string{"gh_search"}, connectorScope{strictPolicies: true}); err == nil {
+		t.Fatal("a Tool whose policy is missing must not be classified as a plain Tool")
+	}
+	// A Tool without any policy is plain, and an unknown Tool is skipped.
+	plain := tool.(*corev1alpha1.Tool).DeepCopy()
+	plain.Spec.HTTP.OutboundAccessPolicyRef = nil
+	reader = ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(plain).Build()
+	if infos, err := classifyConnectorTools(context.Background(), reader, nil, "tenant", []string{"gh_search", "unknown"}, connectorScope{strictPolicies: true}); err != nil || len(infos) != 0 {
+		t.Fatalf("plain and unknown tools: infos = %v err = %v", infos, err)
+	}
+}

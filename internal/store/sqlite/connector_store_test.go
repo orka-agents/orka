@@ -1262,3 +1262,38 @@ func TestConnectorKeyActivationSkipsExpiredConsents(t *testing.T) {
 		t.Fatalf("an expired consent must not block key activation: %v", err)
 	}
 }
+
+// TestConnectorReplaceBoundsRotatedRefreshGrants covers a long-lived link
+// whose provider rotates refresh tokens on every refresh: the grants kept
+// until disconnect are bounded, the oldest dropped first.
+func TestConnectorReplaceBoundsRotatedRefreshGrants(t *testing.T) {
+	s := newConnectorTestStore(t)
+	ctx := context.Background()
+	ref := store.ConnectorCredentialRef{ConnectionUID: "uid-1", Namespace: "tenant", Name: "github-abc", SubjectDigest: "digest-a", Provider: "github"}
+	future := time.Now().Add(time.Hour).UTC()
+	if err := s.PutConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho_0", RefreshToken: "ghr_0", ExpiresAt: future}); err != nil {
+		t.Fatal(err)
+	}
+	rotations := maxRefreshRetiredConnectorCredentials + 4
+	for i := 1; i <= rotations; i++ {
+		held, err := s.GetConnectorCredential(ctx, ref)
+		if err != nil {
+			t.Fatal(err)
+		}
+		next := store.ConnectorCredential{AccessToken: fmt.Sprintf("gho_%d", i), RefreshToken: fmt.Sprintf("ghr_%d", i), ExpiresAt: future}
+		if err := s.ReplaceConnectorCredential(ctx, ref, next, held.Version); err != nil {
+			t.Fatal(err)
+		}
+	}
+	retired, err := s.ListRetiredConnectorCredentials(ctx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(retired) != maxRefreshRetiredConnectorCredentials {
+		t.Fatalf("retired = %d, want %d", len(retired), maxRefreshRetiredConnectorCredentials)
+	}
+	oldest, newest := retired[0].RefreshToken, retired[len(retired)-1].RefreshToken
+	if oldest != fmt.Sprintf("ghr_%d", rotations-maxRefreshRetiredConnectorCredentials) || newest != fmt.Sprintf("ghr_%d", rotations-1) {
+		t.Fatalf("retired range = %s..%s, want the newest rotated-away grants", oldest, newest)
+	}
+}
