@@ -45,6 +45,15 @@ func (r *RepositoryMonitorReconciler) processRepositoryMonitorInventoryRun(ctx c
 	if err := validateRepositoryMonitorRunTargetKind(run); err != nil {
 		return 0, 0, 0, err
 	}
+	if run != nil && strings.TrimSpace(run.CommandEventID) != "" {
+		command, err := r.Store.GetCommandEvent(ctx, monitor.Namespace, run.CommandEventID)
+		if err != nil {
+			return 0, 0, 0, err
+		}
+		if reason := repositoryMonitorRetiredCommandReason(command.Intent); reason != "" {
+			return 0, 0, 0, r.retireRepositoryMonitorCommand(ctx, monitor, command, run, reason)
+		}
+	}
 	targetKind := strings.TrimSpace(run.TargetKind)
 	if targetKind == repositoryMonitorIssueKind {
 		return r.processIssueInventoryRun(ctx, monitor, run, owner, repository)
@@ -132,6 +141,13 @@ func (r *RepositoryMonitorReconciler) processIssueInventoryRun(ctx context.Conte
 		}
 		repositoryMonitorNormalizeLegacyIssuePhase(existing)
 		item := repositoryMonitorItemFromIssue(monitor, issue, existing)
+		supersededPausedResult := existing != nil && existing.WorkflowPhase == repositoryMonitorIssuePhasePaused && existing.LastActionID != "" &&
+			existing.SnapshotDigest != item.SnapshotDigest && repositoryMonitorMatchingLabel(repositoryMonitorPauseLabels(monitor.Spec), issue.Labels) == ""
+		if supersededPausedResult {
+			if err := r.settleRepositoryMonitorSupersededPausedIssue(ctx, monitor, existing, item); err != nil {
+				return selected, createdTasks, skipped, err
+			}
+		}
 		if run.CommandEventID == "" && item.SkipReason == repositoryMonitorIssueSkipStoppedByCommand {
 			if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
 				return selected, createdTasks, skipped, err
@@ -144,7 +160,7 @@ func (r *RepositoryMonitorReconciler) processIssueInventoryRun(ctx context.Conte
 			skipReason = repositoryMonitorIssueCommandSkipReason(monitor.Spec, issue)
 		} else {
 			skipReason = repositoryMonitorIssueSkipReason(monitor.Spec, issue, selected, maxPerRun)
-			if skipReason == repositoryMonitorSkipReasonOverLimit &&
+			if skipReason == repositoryMonitorSkipReasonOverLimit && !supersededPausedResult &&
 				repositoryMonitorIssueRetainWorkflowUnderRunLimit(item, existing) {
 				// The per-run cap bounds newly selected issues. An issue already
 				// past discovery keeps its recorded workflow even when its current

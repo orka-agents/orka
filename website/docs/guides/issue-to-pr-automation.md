@@ -20,9 +20,9 @@ RepositoryMonitor runs a durable issue-to-PR loop from `orka:implement` or the e
 
 Managed workflows with `review.publish.enabled: true` publish the commit status `orka/<namespace>/<monitor-name>/ready`. Require this status alongside your CI and approving-review rules. GitHub's per-PR auto-merge setting owns merging. Orka never enables it or calls the merge endpoint; when it is disabled, the PR stays open and ready.
 
-`spec.suspend` pauses background monitor runs; queued and manual runs can still finish. Use `orka:pause` to block a specific issue or PR and its readiness.
+`spec.suspend` pauses background monitor runs; queued and manual runs can still finish. Use `orka:pause` to block a specific issue or PR and its readiness. Pause labels rely on observed GitHub state; use an explicit `stop` command for a durable halt independent of label propagation.
 
-Before disabling readiness publication or deleting a monitor, remove or replace its required status in GitHub branch protection. GitHub commit statuses persist after the monitor is removed, and Orka does not currently revoke them as part of monitor deletion or publication disablement.
+Before disabling readiness publication, deleting a monitor, or changing its repository, remove or replace its required status in the affected GitHub repository's branch protection. GitHub commit statuses persist after the monitor is removed or repointed, and Orka does not currently revoke them as part of these configuration changes.
 
 ## Safety model
 
@@ -118,10 +118,10 @@ If Docker is not running, the preflight exits before creating or modifying a kin
 
 ## Completion audit helper
 
-Run the local validation bundle plus the live preflight with:
+Run the local validation bundle and report the remaining live validation with:
 
 ```bash
 make repository-monitor-completion-audit
 ```
 
-The audit exits non-zero when the live preflight is blocked (for example, Docker is not running), but still prints which RepositoryMonitor requirements are covered by the local fake-GitHub validation bundle.
+The audit exits non-zero if local validation fails. Live model execution, publication, and GitHub rule enforcement require separate validation against an explicitly selected repository.

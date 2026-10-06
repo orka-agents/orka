@@ -76,6 +76,7 @@ const (
 	repositoryMonitorIssuePhasePlanReady            = "plan_ready"
 	repositoryMonitorIssuePhasePlanned              = "planned"
 	repositoryMonitorIssuePhasePaused               = "paused"
+	repositoryMonitorIssueSnapshotSuperseded        = "issue_snapshot_superseded"
 	repositoryMonitorIssuePhaseImplementationQueued = "implementation_queued"
 	repositoryMonitorIssuePhaseImplementing         = "implementing"
 	repositoryMonitorIssuePhasePatchReady           = "patch_ready"
@@ -121,6 +122,9 @@ func (r *RepositoryMonitorReconciler) processIssueCommandRun(ctx context.Context
 			return 0, nil
 		}
 		return 0, err
+	}
+	if reason := repositoryMonitorRetiredCommandReason(command.Intent); reason != "" {
+		return 0, r.retireRepositoryMonitorCommand(ctx, monitor, command, run, reason)
 	}
 	item.LastCommandID = command.ID
 	item.LastCommandIntent = command.Intent
@@ -726,6 +730,67 @@ func repositoryMonitorIssuePhaseAwaitingTask(phase string) bool {
 	default:
 		return false
 	}
+}
+
+func (r *RepositoryMonitorReconciler) settleRepositoryMonitorSupersededPausedIssue(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, existing, item *store.MonitorItem) error {
+	if existing == nil || existing.WorkflowPhase != repositoryMonitorIssuePhasePaused || existing.LastActionID == "" || existing.SnapshotDigest == item.SnapshotDigest {
+		return nil
+	}
+	// Paused items retain a completed ActionRecord. Settle its attempt before
+	// inventory drops the identity; failures leave that identity available to retry.
+	record, err := r.Store.GetActionRecord(ctx, monitor.Namespace, existing.LastActionID)
+	if err != nil {
+		return err
+	}
+	jobs, _, err := r.Store.ListImplementationJobs(ctx, store.ImplementationJobFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, TaskName: record.TaskName, Limit: 1})
+	if err != nil {
+		return err
+	}
+	if len(jobs) > 0 && repositoryMonitorImplementationJobActive(jobs[0].Phase) {
+		job := &jobs[0]
+		now := time.Now()
+		job.Phase = repositoryMonitorIssuePhaseBlocked
+		job.ValidationState = repositoryMonitorReviewVerdictStale
+		job.Error = repositoryMonitorIssueSnapshotSuperseded
+		job.CompletedAt = &now
+		if err := r.Store.UpdateImplementationJob(ctx, job); err != nil {
+			return err
+		}
+	}
+	if record.CommandEventID == "" {
+		return nil
+	}
+	command, err := r.Store.GetCommandEvent(ctx, monitor.Namespace, record.CommandEventID)
+	if err != nil {
+		return err
+	}
+	if store.RepositoryMonitorDesiredActionForActionKind(record.ActionKind) != store.RepositoryMonitorDesiredActionForActionKind(repositoryMonitorCommandActionKind(command.Intent)) {
+		// An implement command can be waiting on its completed plan action.
+		actionID := store.RepositoryMonitorWorkActionID(command.ID, store.RepositoryMonitorDesiredActionForActionKind(record.ActionKind))
+		action, lookupErr := r.Store.GetWorkAction(ctx, monitor.Namespace, actionID)
+		if lookupErr != nil && !errors.Is(lookupErr, store.ErrNotFound) {
+			return lookupErr
+		}
+		terminal := false
+		if action != nil {
+			switch action.Status {
+			case repositoryMonitorWorkActionStatusCancelled, repositoryMonitorWorkActionStatusSucceeded, repositoryMonitorWorkActionStatusFailed, repositoryMonitorWorkActionStatusBlocked:
+				terminal = true
+			}
+		}
+		if !terminal {
+			if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, nil, command, existing.Kind, existing.Number, "", existing.SnapshotDigest, record.ActionKind, repositoryMonitorWorkActionStatusFailed, repositoryMonitorRunFailurePermanent, record.TaskName, repositoryMonitorIssueSnapshotSuperseded); err != nil {
+				return err
+			}
+		}
+	}
+	if err := r.terminalizeRepositoryMonitorFailedCommand(ctx, monitor, *command, nil, repositoryMonitorIssueSnapshotSuperseded); err != nil {
+		return err
+	}
+	if command.Status == "accepted" {
+		_, err = r.repositoryMonitorCommandWorkActionTerminal(ctx, monitor, *command)
+	}
+	return err
 }
 
 func (r *RepositoryMonitorReconciler) resumeRepositoryMonitorPausedIssue(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem) error {

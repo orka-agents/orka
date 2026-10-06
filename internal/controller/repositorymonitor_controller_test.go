@@ -1920,11 +1920,6 @@ func TestRepositoryMonitorReviewPublishSafetySkips(t *testing.T) {
 		wantPosts         int
 	}{
 		{
-			name:       "missing git secret",
-			verdict:    repositoryMonitorReviewVerdictNeedsChanges,
-			wantReason: repositoryMonitorPublishSkipMissingGitSecret,
-		},
-		{
 			name:    "head changed",
 			verdict: repositoryMonitorReviewVerdictNeedsChanges,
 			mutateMonitor: func(m *corev1alpha1.RepositoryMonitor) {
@@ -2045,6 +2040,7 @@ func TestRepositoryMonitorReviewPublishSafetySkips(t *testing.T) {
 			monitor.Spec.Suspend = &suspend
 			monitor.Spec.Review.Publish.Enabled = true
 			monitor.Spec.Review.Publish.Event = repositoryMonitorPublishEventComment
+			monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: "github-token"}
 			if tt.mutateMonitor != nil {
 				tt.mutateMonitor(monitor)
 			}

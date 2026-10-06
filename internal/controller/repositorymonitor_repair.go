@@ -193,8 +193,8 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 		}
 		return false, 0, err
 	}
-	if command.Intent == repositoryMonitorRetiredAutomergeIntent {
-		return true, 0, r.retireRepositoryMonitorAutomergeCommand(ctx, monitor, command, run)
+	if reason := repositoryMonitorRetiredCommandReason(command.Intent); reason != "" {
+		return true, 0, r.retireRepositoryMonitorCommand(ctx, monitor, command, run, reason)
 	}
 	if item.SkipReason == repositoryMonitorIssueSkipStoppedByCommand && command.Intent != repositoryMonitorCommandIntentStop && command.Intent != repositoryMonitorCommandIntentResume {
 		if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "", repositoryMonitorCommandActionKind(command.Intent), repositoryMonitorWorkActionStatusBlocked, "stopped", "", item.SkipReason); err != nil {

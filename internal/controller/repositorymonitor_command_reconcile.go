@@ -23,7 +23,9 @@ const (
 	repositoryMonitorCommandMaxRetries             = 3
 	repositoryMonitorCommandProcessed              = "processed"
 	repositoryMonitorRetiredAutomergeIntent        = "automerge"
+	repositoryMonitorRetiredApprovePlanIntent      = "approve_plan"
 	repositoryMonitorAutomergeCommandRetiredReason = "automerge_command_retired"
+	repositoryMonitorApprovePlanRetiredReason      = "approve_plan_command_retired"
 )
 
 func (r *RepositoryMonitorReconciler) enqueueAcceptedRepositoryMonitorCommands(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (bool, error) {
@@ -39,8 +41,8 @@ func (r *RepositoryMonitorReconciler) enqueueAcceptedRepositoryMonitorCommands(c
 			if strings.TrimSpace(command.Kind) == "" || command.Number == 0 {
 				continue
 			}
-			if command.Intent == repositoryMonitorRetiredAutomergeIntent {
-				if err := r.retireRepositoryMonitorAutomergeCommand(ctx, monitor, &command, nil); err != nil {
+			if reason := repositoryMonitorRetiredCommandReason(command.Intent); reason != "" {
+				if err := r.retireRepositoryMonitorCommand(ctx, monitor, &command, nil, reason); err != nil {
 					return queued, err
 				}
 				continue
@@ -82,14 +84,25 @@ func (r *RepositoryMonitorReconciler) enqueueAcceptedRepositoryMonitorCommands(c
 	}
 }
 
-func (r *RepositoryMonitorReconciler) retireRepositoryMonitorAutomergeCommand(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, run *store.MonitorRun) error {
-	if err := r.terminalizeRepositoryMonitorFailedCommand(ctx, monitor, *command, run, repositoryMonitorAutomergeCommandRetiredReason); err != nil {
+func repositoryMonitorRetiredCommandReason(intent string) string {
+	switch intent {
+	case repositoryMonitorRetiredAutomergeIntent:
+		return repositoryMonitorAutomergeCommandRetiredReason
+	case repositoryMonitorRetiredApprovePlanIntent:
+		return repositoryMonitorApprovePlanRetiredReason
+	default:
+		return ""
+	}
+}
+
+func (r *RepositoryMonitorReconciler) retireRepositoryMonitorCommand(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, run *store.MonitorRun, reason string) error {
+	if err := r.terminalizeRepositoryMonitorFailedCommand(ctx, monitor, *command, run, reason); err != nil {
 		return err
 	}
 	now := time.Now()
 	command.Status = repositoryMonitorCommandProcessed
 	command.ProcessedAt = &now
-	command.Error = repositoryMonitorAutomergeCommandRetiredReason
+	command.Error = reason
 	return r.Store.UpdateCommandEvent(ctx, command)
 }
 
@@ -288,6 +301,9 @@ func repositoryMonitorCommandActionKind(intent string) string {
 		return "pr_review"
 	case repositoryMonitorCommandIntentFix:
 		return "pr_repair"
+	case repositoryMonitorRetiredApprovePlanIntent:
+		// Retired plan approval keeps the identity of persisted work actions.
+		return "approve"
 	default:
 		return strings.TrimSpace(intent)
 	}

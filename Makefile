@@ -167,7 +167,7 @@ repository-monitor-validate: ensure-ui-embed ## Run full local RepositoryMonitor
 	bash scripts/repository-monitor-validate.sh
 
 .PHONY: repository-monitor-completion-audit
-repository-monitor-completion-audit: ensure-ui-embed ## Run local validation plus live preflight audit for RepositoryMonitor plan completion
+repository-monitor-completion-audit: ensure-ui-embed ## Run local RepositoryMonitor validation and report remaining live validation
 	bash scripts/repository-monitor-completion-audit.sh
 
 .PHONY: test
