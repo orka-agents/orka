@@ -972,3 +972,58 @@ func TestNonrefreshableTokenWithinHorizonKeepsTheLinkReady(t *testing.T) {
 		t.Fatal("a token without a refresh token must not be refreshed")
 	}
 }
+
+// flakyCustody fails the next replace or the next few retirements, as a
+// transient store error would.
+type flakyCustody struct {
+	*sqlite.Store
+	failReplace bool
+	failRetire  int
+	retires     int
+}
+
+func (f *flakyCustody) ReplaceConnectorCredential(ctx context.Context, ref store.ConnectorCredentialRef, credential store.ConnectorCredential, expectedVersion int64) error {
+	if f.failReplace {
+		f.failReplace = false
+		return errors.New("database is locked")
+	}
+	return f.Store.ReplaceConnectorCredential(ctx, ref, credential, expectedVersion)
+}
+
+func (f *flakyCustody) RetireConnectorCredential(ctx context.Context, ref store.ConnectorCredentialRef, credential store.ConnectorCredential) error {
+	f.retires++
+	if f.failRetire > 0 {
+		f.failRetire--
+		return errors.New("database is locked")
+	}
+	return f.Store.RetireConnectorCredential(ctx, ref, credential)
+}
+
+// TestRefreshKeepsIssuedMaterialWhenCustodyWriteFails covers a refresh the
+// provider completed but custody could not store: the issued pair is kept in
+// sealed retirement custody, retried past a transient failure, so disconnect
+// can still revoke it.
+func TestRefreshKeepsIssuedMaterialWhenCustodyWriteFails(t *testing.T) {
+	previous := refreshRetireBackoff
+	refreshRetireBackoff = time.Millisecond
+	t.Cleanup(func() { refreshRetireBackoff = previous })
+	h := newHarness(t)
+	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", TokenType: "bearer", ExpiresAt: h.now.Add(30 * time.Second), Scopes: []string{"repo"}})
+	flaky := &flakyCustody{Store: h.store, failReplace: true, failRetire: 1}
+	h.source.Credentials = flaky
+	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil {
+		t.Fatal("a refresh custody could not store must fail the call")
+	}
+	ref, _ := connectors.CredentialRef(h.connection)
+	retired, err := h.store.ListRetiredConnectorCredentials(context.Background(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept := false
+	for _, credential := range retired {
+		kept = kept || (credential.AccessToken == "gho_new" && credential.RefreshToken == "ghr_new")
+	}
+	if !kept || flaky.retires != 2 {
+		t.Fatalf("retired = %+v retires = %d, want the issued pair retired after one retry", retired, flaky.retires)
+	}
+}

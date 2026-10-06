@@ -977,6 +977,8 @@ type Store struct {
 	executionEventMu sync.Mutex
 	// pendingWALTruncate remembers a connector custody deletion whose log
 	// truncation found the log busy; the next custody operation finishes it.
+	// It starts set, so a truncation a previous process could not finish is
+	// completed by this process's first custody operation.
 	pendingWALTruncate atomic.Bool
 
 	// snapshotCipher encrypts immutable agent execution snapshot bodies at
@@ -995,7 +997,9 @@ type Store struct {
 // NewStore creates a new Store backed by the given SQLite database.
 // The dbPath is the filesystem path to the database file (used for metrics and logging).
 func NewStore(db *sql.DB, dbPath string) *Store {
-	return &Store{db: db, dbPath: dbPath}
+	s := &Store{db: db, dbPath: dbPath}
+	s.pendingWALTruncate.Store(true)
+	return s
 }
 
 // OpenLockedStore acquires the process-lifetime filesystem lock adjacent to
@@ -1012,7 +1016,9 @@ func OpenLockedStore(path string) (*Store, error) {
 		_ = lock.Close()
 		return nil, err
 	}
-	return &Store{db: db, dbPath: path, processLock: lock}, nil
+	store := &Store{db: db, dbPath: path, processLock: lock}
+	store.pendingWALTruncate.Store(true)
+	return store, nil
 }
 
 // Start runs background maintenance and blocks until ctx is cancelled,

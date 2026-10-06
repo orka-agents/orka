@@ -417,3 +417,46 @@ func TestFreezeRequesterConnectionsRequiresOneOwnedLink(t *testing.T) {
 		t.Fatalf("foreign canonical object: frozen = %+v err = %v, want the adopted link", frozen, err)
 	}
 }
+
+// TestACPChildTaskSealerRetriesTransientFailures covers a brokered child
+// whose seal first fails on a transient parent read: nothing repairs a seal
+// later, so the sealer retries and the child ends up sealed.
+func TestACPChildTaskSealerRetriesTransientFailures(t *testing.T) {
+	SetRequesterStampKey(testRequesterStampKey)
+	t.Cleanup(func() { SetRequesterStampKey(nil) })
+	previous := acpChildSealRetryBackoff
+	acpChildSealRetryBackoff = time.Millisecond
+	t.Cleanup(func() { acpChildSealRetryBackoff = previous })
+	requester := &corev1alpha1.RequestedBy{Issuer: "https://issuer.example.test", Subject: "alice"}
+	parent := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: "tenant", UID: "parent-uid", Annotations: map[string]string{
+			labels.AnnotationRequestedBySource: labels.RequestedBySourceAPI,
+			labels.AnnotationRequestedByStamp:  connectors.RequesterStamp(testRequesterStampKey, "parent-uid", requester.Issuer, requester.Subject),
+		}},
+		Spec: corev1alpha1.TaskSpec{RequestedBy: requester},
+	}
+	isController := true
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "child", Namespace: "tenant", UID: "child-uid", OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: parent.Name, UID: parent.UID, Controller: &isController,
+		}}},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, RequestedBy: requester},
+	}
+	var failed atomic.Bool
+	c := ctrlfake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(parent, child).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, cl ctrlclient.WithWatch, key ctrlclient.ObjectKey, obj ctrlclient.Object, opts ...ctrlclient.GetOption) error {
+				if key.Name == "parent" && failed.CompareAndSwap(false, true) {
+					return errors.New("apiserver unavailable")
+				}
+				return cl.Get(ctx, key, obj, opts...)
+			},
+		}).Build()
+	if err := ACPChildTaskSealer(c, parent.Namespace, parent.Name, string(parent.UID))(context.Background(), c, child.DeepCopy()); err != nil {
+		t.Fatalf("seal after a transient failure: %v", err)
+	}
+	sealed := &corev1alpha1.Task{}
+	if err := c.Get(context.Background(), ctrlclient.ObjectKeyFromObject(child), sealed); err != nil || !connectors.RequesterStampValid(testRequesterStampKey, sealed) {
+		t.Fatalf("child = %v err = %v, want it sealed", sealed.Annotations, err)
+	}
+}

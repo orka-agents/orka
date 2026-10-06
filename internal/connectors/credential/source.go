@@ -358,6 +358,15 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 		s.revokeUnstorable(ctx, cfg, provider, refreshed, logger)
 		return store.ConnectorCredential{}, errors.New("connection was disconnected during refresh")
 	case err != nil:
+		// The provider already issued this pair and may have invalidated the
+		// previous refresh token, so it is kept in sealed retirement custody,
+		// where disconnect revokes it, rather than dropped.
+		switch retireErr := s.retireRefreshed(ctx, ref, refreshed); {
+		case errors.Is(retireErr, store.ErrConnectorCustodyTombstoned):
+			s.revokeUnstorable(ctx, cfg, provider, refreshed, logger)
+		case retireErr != nil:
+			logger.Info("refreshed credential could not be stored or retired; it is left to expire")
+		}
 		return store.ConnectorCredential{}, fmt.Errorf("store refreshed connection credential: %w", err)
 	}
 	// The row as stored (its version comes from the store's sequence) is
@@ -384,6 +393,30 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 	}
 	return refreshed, nil
 }
+
+// retireRefreshed keeps a refreshed pair that could not become custody in
+// sealed retirement custody, so disconnect can still revoke it. A transient
+// store failure is retried a few times, and the call's own cancellation
+// does not abandon material the provider already issued.
+func (s *Source) retireRefreshed(ctx context.Context, ref store.ConnectorCredentialRef, refreshed store.ConnectorCredential) error {
+	ctx = context.WithoutCancel(ctx)
+	var err error
+	for attempt := range refreshRetireAttempts {
+		if attempt > 0 {
+			time.Sleep(refreshRetireBackoff << (attempt - 1))
+		}
+		if err = s.Credentials.RetireConnectorCredential(ctx, ref, refreshed); err == nil || errors.Is(err, store.ErrConnectorCustodyTombstoned) {
+			return err
+		}
+	}
+	return err
+}
+
+// refreshRetireAttempts bounds the retries of retiring refreshed material;
+// refreshRetireBackoff is the first wait, doubled each time.
+const refreshRetireAttempts = 3
+
+var refreshRetireBackoff = 100 * time.Millisecond
 
 // revokeUnstorable revokes, best effort, a refreshed credential that custody
 // refused because the Connection was disconnected meanwhile.
@@ -639,7 +672,7 @@ func (s *Source) refreshLostToConsent(ctx context.Context, cfg connectors.OAuthP
 	// every token of a grant together, which would kill the winning
 	// consent that just committed.
 	if winner.AccessToken != refreshed.AccessToken || winner.RefreshToken != refreshed.RefreshToken {
-		switch err := s.Credentials.RetireConnectorCredential(ctx, ref, refreshed); {
+		switch err := s.retireRefreshed(ctx, ref, refreshed); {
 		case errors.Is(err, store.ErrConnectorCustodyTombstoned):
 			// The Connection is being disconnected: the whole grant goes.
 			s.revokeUnstorable(ctx, cfg, provider, refreshed, logger)
