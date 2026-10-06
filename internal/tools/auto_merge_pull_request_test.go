@@ -1448,3 +1448,20 @@ func TestCheckCIStatusDetailedReadsEveryPage(t *testing.T) {
 		})
 	}
 }
+
+// TestCheckCIStatusDetailed_RefusesOversizedPage covers a check-runs page
+// past the 1 MiB read limit: it is refused rather than decoded from a cut
+// prefix or accepted with trailing bytes ignored.
+func TestCheckCIStatusDetailed_RefusesOversizedPage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(200)
+		// A complete, valid document followed by padding past the limit.
+		_, _ = fmt.Fprint(w, `{"total_count":1,"check_runs":[{"name":"build","status":"completed","conclusion":"success"}]}`)
+		_, _ = fmt.Fprint(w, strings.Repeat(" ", 1<<20))
+	}))
+	defer server.Close()
+
+	if result, err := checkCIStatusDetailed(context.Background(), testGitHubToken, testGitHubOwner, testRepositoryName, checkPullRequestCITestSHA, server.URL); err == nil {
+		t.Fatalf("result = %+v, want the oversized page refused", result)
+	}
+}

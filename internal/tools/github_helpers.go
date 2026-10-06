@@ -301,6 +301,13 @@ func loadGitHubTaskScopes(ctx context.Context, k8sClient client.Client, taskName
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: taskName, Namespace: ns}, &task); err != nil {
 		return githubTaskContext{}, fmt.Errorf("failed to get task %s: %w", taskName, err)
 	}
+	// The current Task is fenced by the UID the call was authenticated as:
+	// a Task recreated under the same name since then is another Task, and
+	// its workspace never scopes this call's credential.
+	if tc := GetToolContext(ctx); tc != nil && strings.TrimSpace(tc.TaskUID) != "" &&
+		taskName == strings.TrimSpace(tc.TaskID) && string(task.UID) != strings.TrimSpace(tc.TaskUID) {
+		return githubTaskContext{}, fmt.Errorf("task %s was replaced since this call was authorized; its workspace does not scope the call", taskName)
+	}
 
 	var result githubTaskContext
 	var scopes []githubRepoScope

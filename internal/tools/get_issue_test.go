@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -75,8 +76,8 @@ func TestGetIssueTool_FullDetails(t *testing.T) {
 				"created_at": "2025-01-15T10:00:00Z"
 			}`)
 		case strings.HasSuffix(r.URL.Path, "/issues/42/comments"):
-			if r.URL.Query().Get(perPageField) != "30" {
-				t.Errorf("expected per_page=30, got %s", r.URL.Query().Get(perPageField))
+			if r.URL.Query().Get(perPageField) != "100" || r.URL.Query().Get("page") != "1" {
+				t.Errorf("expected per_page=100 page=1, got %s", r.URL.RawQuery)
 			}
 			_, _ = fmt.Fprint(w, `[
 				{"user": {"login": "dave"}, "body": "I can reproduce this.", "created_at": "2025-01-15T11:00:00Z"},
@@ -538,5 +539,54 @@ func TestGetIssueTool_CommentsFailureNoteIsBounded(t *testing.T) {
 	}
 	if len(result) > limit || !issue.Truncated || len(issue.TruncationNote) > maxGitHubErrorNoteBytes+64 {
 		t.Fatalf("result = %d bytes note = %d bytes, want both bounded", len(result), len(issue.TruncationNote))
+	}
+}
+
+// TestGetIssueTool_PaginatesNewestComments covers an issue with more
+// comments than one page holds: the newest pages are read, and a result
+// that still omits older comments says so instead of looking complete.
+func TestGetIssueTool_PaginatesNewestComments(t *testing.T) {
+	total := (maxIssueCommentPages+1)*issueCommentsPerPage + 7
+	var pages []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/issues/42"):
+			_, _ = fmt.Fprintf(w, `{"number":42,"title":"t","state":"open","comments":%d,"user":{"login":"alice"}}`, total)
+		case strings.HasSuffix(r.URL.Path, "/issues/42/comments"):
+			page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+			pages = append(pages, r.URL.Query().Get("page"))
+			count := issueCommentsPerPage
+			if page == (total+issueCommentsPerPage-1)/issueCommentsPerPage {
+				count = total % issueCommentsPerPage
+			}
+			comments := make([]string, count)
+			for i := range comments {
+				comments[i] = fmt.Sprintf(`{"user":{"login":"u"},"body":"p%d-%d","created_at":"2025-01-15T11:00:00Z"}`, page, i)
+			}
+			_, _ = fmt.Fprint(w, "["+strings.Join(comments, ",")+"]")
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("GITHUB_TOKEN", "")
+	task, secret := githubRepoTaskWithSecret(testOrgTestRepoURL)
+	task.Spec.Workspace.ForgeCredentialRef = nil
+	tool := &GetIssueTool{k8sClient: newFakeClient(task, secret), apiBaseURL: server.URL}
+	args, _ := json.Marshal(GetIssueArgs{TaskName: testCoderTaskName, RepoURL: testOrgTestRepoURL, IssueNumber: 42})
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var res GetIssueResult
+	if err := json.Unmarshal([]byte(result), &res); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(pages, ",") != "3,4,5,6,7" {
+		t.Fatalf("pages read = %v, want the newest %d", pages, maxIssueCommentPages)
+	}
+	if len(res.Comments) != total-2*issueCommentsPerPage || !res.Truncated || !strings.Contains(res.TruncationNote, "newest") {
+		t.Fatalf("comments = %d truncated = %t note = %q", len(res.Comments), res.Truncated, res.TruncationNote)
 	}
 }

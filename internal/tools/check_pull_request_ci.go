@@ -114,6 +114,12 @@ func (t *CheckPullRequestCITool) Execute(ctx context.Context, argsJSON json.RawM
 // keep polling; a larger wait_timeout is clamped to it.
 const maxPullRequestCIWait = 10 * time.Minute
 
+// pullRequestCIFinalCheckBudget bounds the status check that may still be
+// running when the wait deadline passes, so a whole call stays within the
+// maximum wait plus this budget, inside the catalog's polling-tool timeout.
+// It is a variable only so tests can shorten it.
+var pullRequestCIFinalCheckBudget = 45 * time.Second
+
 // minPullRequestCIPollInterval keeps a poll loop from exhausting the
 // caller's GitHub rate limit; a shorter poll_interval is raised to it. It
 // is a variable only so tests can poll a local fixture quickly.
@@ -159,11 +165,24 @@ func waitForPullRequestCI(
 	var lastPending *CheckPullRequestCIResult
 	var lastTransientErr error
 	deadline := time.Now().Add(waitTimeout)
+	// The whole wait, including a check still running at the deadline, is
+	// bounded: a paginated status check is several sequential requests.
+	pollCtx := ctx
+	if waitTimeout > 0 {
+		var cancel context.CancelFunc
+		pollCtx, cancel = context.WithDeadline(ctx, deadline.Add(pullRequestCIFinalCheckBudget))
+		defer cancel()
+	}
 
 	for {
 		attempts++
-		result, terminal, err := checkPullRequestCIOnce(ctx, token, owner, repo, prNumber, baseURL)
+		result, terminal, err := checkPullRequestCIOnce(pollCtx, token, owner, repo, prNumber, baseURL)
 		if err != nil {
+			if ctx.Err() == nil && pollCtx.Err() != nil {
+				// The wait's budget ran out mid-check: report the wait as
+				// timed out with what the earlier checks saw.
+				break
+			}
 			if waitTimeout > 0 && isTransientHTTPError(err) {
 				lastTransientErr = err
 			} else {
