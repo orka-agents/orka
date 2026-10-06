@@ -116,6 +116,10 @@ export function callbackReasonMessage(reason: string | undefined): string {
       return 'The provider granted fewer permissions than this link needs. Try again and accept every requested permission.'
     case 'provider_changed':
       return 'The provider configuration changed while you were consenting. Start the link again.'
+    case 'mode_changed':
+      return 'The link was switched between read only and read and write while you were consenting. Start the link again.'
+    case 'consent_superseded':
+      return 'A newer consent for this link was already finished, so this older one was not used.'
     case 'access_denied':
       return 'You cancelled the consent, so nothing was linked.'
     case undefined:
