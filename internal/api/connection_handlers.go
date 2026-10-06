@@ -379,9 +379,11 @@ func (h *Handlers) ListConnections(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	// Ownership is judged from spec.subject, never the index label alone:
+	// a Connection created through Kubernetes, or whose label was
+	// stripped, is still listed for its owner.
 	list := &corev1alpha1.ConnectionList{}
-	if err := h.client.List(c.Context(), list, client.InNamespace(namespace),
-		client.MatchingLabels{ConnectionSubjectDigestLabel: connectionSubjectLabel(ui)}); err != nil {
+	if err := h.client.List(c.Context(), list, client.InNamespace(namespace)); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to list connections")
 	}
 	items := make([]ConnectionResponse, 0, len(list.Items))
@@ -460,8 +462,9 @@ func (h *Handlers) CreateConnection(c fiber.Ctx) error {
 		if apierrors.IsAlreadyExists(err) {
 			// A concurrent request for the same identity and provider created
 			// it first; this one reuses it under the same ownership checks.
+			// Read uncached: the informer may not have seen the winner yet.
 			connection = &corev1alpha1.Connection{}
-			err = h.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, connection)
+			err = h.providerReader().Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, connection)
 		} else if err != nil {
 			return fiber.NewError(fiber.StatusInternalServerError, "failed to create connection")
 		} else {
@@ -792,8 +795,10 @@ func (h *Handlers) ConnectionCallback(c fiber.Ctx) error {
 	if strings.TrimSpace(code) == "" {
 		return h.connectorCallbackRedirect(c, consent.Name, "missing_code", "")
 	}
+	// Read uncached: the fences below decide whether a code is exchanged
+	// at all, so they judge the Connection as it is now.
 	connection := &corev1alpha1.Connection{}
-	if err := h.client.Get(ctx, types.NamespacedName{Namespace: consent.Namespace, Name: consent.Name}, connection); err != nil {
+	if err := h.providerReader().Get(ctx, types.NamespacedName{Namespace: consent.Namespace, Name: consent.Name}, connection); err != nil {
 		return h.connectorCallbackRedirect(c, consent.Name, "connection_missing", "")
 	}
 	if !connectionCustodyProtected(connection) {
@@ -803,6 +808,11 @@ func (h *Handlers) ConnectionCallback(c fiber.Ctx) error {
 		connectors.SubjectDigest(connection.Spec.Subject.Issuer, connection.Spec.Subject.Subject) != consent.SubjectDigest ||
 		connection.Spec.ProviderRef.Name != consent.Provider {
 		return h.connectorCallbackRedirect(c, consent.Name, "connection_mismatch", "")
+	}
+	// The mode changed while the person was at the provider: completion
+	// would refuse the result, so no code is exchanged and no token issued.
+	if currentMode, err := normalizeConnectionMode(connection.Spec.Mode); err != nil || currentMode != consent.Mode {
+		return h.connectorCallbackRedirect(c, consent.Name, "mode_changed", "")
 	}
 	provider := &corev1alpha1.ConnectorProvider{}
 	if err := h.providerReader().Get(ctx, types.NamespacedName{Namespace: consent.Namespace, Name: consent.Provider}, provider); err != nil || !connectors.ProviderAccepted(provider) {
@@ -878,12 +888,18 @@ func (h *Handlers) ConnectionCallback(c fiber.Ctx) error {
 		// The full authority the person consented to (client identity plus
 		// tool destinations), verified again at completion.
 		ConsentAuthorityDigest: consent.AuthorityDigest,
+		ConsentSequence:        consent.Sequence,
 		ExpiresAt:              h.connectors.now().Add(connectors.ConsentTTL),
 	}); err != nil {
 		if errors.Is(err, store.ErrConnectorCustodyTombstoned) {
 			// The link was disconnected while the code was being exchanged.
 			// The material is dropped and left to expire, never revoked.
 			return h.connectorCallbackRedirect(c, consent.Name, "disconnected", "")
+		}
+		if errors.Is(err, store.ErrConnectorConsentSuperseded) {
+			// A newer consent for this Connection already parked or
+			// committed its tokens; this older one is dropped.
+			return h.connectorCallbackRedirect(c, consent.Name, "consent_superseded", "")
 		}
 		log.Error(err, "connector completion could not be sealed", "connection", consent.Name)
 		return h.connectorCallbackRedirect(c, consent.Name, "storage_failed", "")
@@ -985,19 +1001,7 @@ func (h *Handlers) CompleteConnection(c fiber.Ctx) error {
 	} else if committed, err := h.connectors.Consents.CommitConnectorCompletion(ctx, nonce, ref, completion.Credential); err == nil {
 		completion.Credential = committed
 	} else {
-		if errors.Is(err, store.ErrConnectorCustodyTombstoned) {
-			h.discardCompletion(ctx, completion, nonce)
-			return fiber.NewError(fiber.StatusConflict, "connection was disconnected; create it again")
-		}
-		if errors.Is(err, store.ErrConnectorCompletionCommitted) {
-			// Another API replica committed it meanwhile; a retry resumes it.
-			return fiber.NewError(fiber.StatusConflict, "completion was already committed; retry to finish it")
-		}
-		if errors.Is(err, store.ErrNotFound) {
-			return fiber.NewError(fiber.StatusConflict, "completion token was already used or has expired")
-		}
-		log.Error(err, "connector credential could not be sealed", "connection", connection.Name)
-		return fiber.NewError(fiber.StatusInternalServerError, "failed to store credential")
+		return h.completionCommitError(ctx, err, completion, nonce, connection.Name)
 	}
 	if err := h.markConnectionLinked(ctx, connection, provider, completion.Credential); err != nil {
 		log.Error(err, "connection status could not be updated after completion; the completion token remains valid for retry", "connection", connection.Name)
@@ -1007,6 +1011,28 @@ func (h *Handlers) CompleteConnection(c fiber.Ctx) error {
 		log.Error(err, "consumed completion could not be removed", "connection", connection.Name)
 	}
 	return c.JSON(connectionResponse(connection))
+}
+
+// completionCommitError maps a failed custody commit to the response, and
+// discards the parked completion when it can never be committed.
+func (h *Handlers) completionCommitError(ctx context.Context, err error, completion store.ConnectorCompletion, nonce, connectionName string) error {
+	switch {
+	case errors.Is(err, store.ErrConnectorCustodyTombstoned):
+		h.discardCompletion(ctx, completion, nonce)
+		return fiber.NewError(fiber.StatusConflict, "connection was disconnected; create it again")
+	case errors.Is(err, store.ErrConnectorCompletionCommitted):
+		// Another API replica committed it meanwhile; a retry resumes it.
+		return fiber.NewError(fiber.StatusConflict, "completion was already committed; retry to finish it")
+	case errors.Is(err, store.ErrNotFound):
+		return fiber.NewError(fiber.StatusConflict, "completion token was already used or has expired")
+	case errors.Is(err, store.ErrConnectorConsentSuperseded):
+		return fiber.NewError(fiber.StatusConflict, "a newer consent for this connection superseded this one; finish that consent or start again")
+	case errors.Is(err, store.ErrConnectorRetiredLimit):
+		h.discardCompletion(ctx, completion, nonce)
+		return fiber.NewError(fiber.StatusConflict, "this connection retains too many superseded grants; disconnect it and link again")
+	}
+	log.Error(err, "connector credential could not be sealed", "connection", connectionName)
+	return fiber.NewError(fiber.StatusInternalServerError, "failed to store credential")
 }
 
 // completionFenceError judges a parked completion against the Connection
