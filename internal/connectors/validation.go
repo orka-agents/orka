@@ -62,6 +62,10 @@ const (
 	maxAuthorizeParametersEncodedBytes = 2048
 	maxEndpointQueryBytes              = 1024
 	maxScopesEncodedBytes              = 2048
+	// Static tool headers stay well inside common server header limits.
+	maxToolHeaderNameBytes  = 128
+	maxToolHeaderValueBytes = 1024
+	maxToolHeadersBytes     = 4096
 
 	// MaxHTTPToolTimeout bounds curated HTTP tool requests.
 	MaxHTTPToolTimeout = 10 * time.Minute
@@ -616,11 +620,17 @@ func validateHTTPTool(name string, spec corev1alpha1.ConnectorHTTPTool) *Issue {
 	if issue := validateURL("tools."+name+".url", spec.URL, true, false); issue != nil {
 		return &Issue{Reason: ReasonInvalidProvider, Message: strings.Replace(issue.Message, "oauth.", "", 1)}
 	}
+	// The curated URL is the exact destination the person consented to:
+	// Tool URL templates would let call arguments rewrite its path or query.
+	if strings.Contains(spec.URL, "{{") || strings.Contains(spec.URL, "}}") || strings.Contains(spec.URL, "%7B%7B") || strings.Contains(spec.URL, "%7b%7b") {
+		return invalid(fmt.Sprintf("HTTP tool %q url must not contain template placeholders; it is the exact destination", name))
+	}
 	switch spec.Method {
 	case "", http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
 	default:
 		return invalid(fmt.Sprintf("HTTP tool %q method is not supported", name))
 	}
+	headerBytes := 0
 	for key, value := range spec.Headers {
 		if !validHeaderToken(key) {
 			return invalid(fmt.Sprintf("HTTP tool %q header names must be valid HTTP tokens", name))
@@ -640,6 +650,13 @@ func validateHTTPTool(name string, spec corev1alpha1.ConnectorHTTPTool) *Issue {
 		if !validHeaderValue(value) {
 			return invalid(fmt.Sprintf("HTTP tool %q header values must not contain control bytes", name))
 		}
+		if len(key) > maxToolHeaderNameBytes || len(value) > maxToolHeaderValueBytes {
+			return invalid(fmt.Sprintf("HTTP tool %q header names must be at most %d bytes and values at most %d bytes", name, maxToolHeaderNameBytes, maxToolHeaderValueBytes))
+		}
+		headerBytes += len(key) + len(value)
+	}
+	if headerBytes > maxToolHeadersBytes {
+		return invalid(fmt.Sprintf("HTTP tool %q headers must total at most %d bytes", name, maxToolHeadersBytes))
 	}
 	if spec.Timeout != nil && (spec.Timeout.Duration <= 0 || spec.Timeout.Duration > MaxHTTPToolTimeout) {
 		return invalid(fmt.Sprintf("HTTP tool %q timeout must be positive and at most %s", name, MaxHTTPToolTimeout))
