@@ -47,3 +47,38 @@ func TestRepositoryMonitorStatusCountsUsesReadinessState(t *testing.T) {
 		})
 	}
 }
+
+func TestRepositoryMonitorStatusCountsIncludesPausedIssues(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		state       string
+		phase       string
+		verdict     string
+		wantOpen    int32
+		wantBlocked int32
+		wantPending int32
+	}{
+		{name: "paused ready result", state: repositoryMonitorItemStateOpen, phase: repositoryMonitorIssuePhasePaused, verdict: "ready", wantOpen: 1, wantBlocked: 1},
+		{name: "paused successful result", state: repositoryMonitorItemStateOpen, phase: repositoryMonitorIssuePhasePaused, verdict: "success", wantOpen: 1, wantBlocked: 1},
+		{name: "paused failed result counted once", state: repositoryMonitorItemStateOpen, phase: repositoryMonitorIssuePhasePaused, verdict: repositoryMonitorReviewVerdictFailed, wantOpen: 1, wantBlocked: 1},
+		{name: "resumed discovery", state: repositoryMonitorItemStateOpen, phase: repositoryMonitorIssuePhaseDiscovered, verdict: "ready", wantOpen: 1},
+		{name: "queued implementation", state: repositoryMonitorItemStateOpen, phase: repositoryMonitorIssuePhaseImplementationQueued, verdict: "ready", wantOpen: 1, wantPending: 1},
+		{name: "closed paused result", state: "closed", phase: repositoryMonitorIssuePhasePaused, verdict: "success"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := setupControllerSQLiteStore(t)
+			monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "paused-counts", Namespace: defaultNS}}
+			require.NoError(t, db.UpsertMonitorItem(t.Context(), &store.MonitorItem{
+				MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name,
+				Kind: repositoryMonitorIssueKind, Number: 1, ItemKey: "1", State: tc.state,
+				WorkflowPhase: tc.phase, LastVerdict: tc.verdict,
+			}))
+			r := &RepositoryMonitorReconciler{Store: db}
+			counts, err := r.repositoryMonitorStatusCounts(t.Context(), monitor)
+			require.NoError(t, err)
+			require.Equal(t, tc.wantOpen, counts.openIssues)
+			require.Equal(t, tc.wantBlocked, counts.blockedIssues)
+			require.Equal(t, tc.wantPending, counts.pendingIssueActions)
+		})
+	}
+}

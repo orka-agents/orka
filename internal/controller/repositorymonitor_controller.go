@@ -991,7 +991,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorStatusCounts(ctx context.
 		switch item.WorkflowPhase {
 		case "triage_queued", "research_queued", "plan_queued", "implementation_queued", "mutation_queued":
 			counts.pendingIssueActions++
-		case repositoryMonitorIssuePhaseBlocked:
+		case repositoryMonitorIssuePhaseBlocked, repositoryMonitorIssuePhasePaused:
 			counts.blockedIssues++
 		default:
 			if repositoryMonitorItemVerdictBlocked(item.LastVerdict) {
