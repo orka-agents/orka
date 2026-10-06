@@ -37,8 +37,11 @@ type TaskJobAuthorityStore interface {
 // The transactional context supports SaveResult, SaveArtifact, SavePlan,
 // GetPlan, SendMessage, GetMessages, GetSession, GetSessionType, LoadTranscript,
 // LoadTranscriptThrough, SearchTranscript, GetGatewayEventForTask,
-// AppendExecutionEvent (including deduplicated and plan-aware variants), and
-// ListHarnessV1AttemptsByTask and CheckTaskJobAuthority. Other store methods must
+// AppendExecutionEvent (including deduplicated and plan-aware variants),
+// ListExecutionEvents, ListHarnessV1AttemptsByTask, and CheckTaskJobAuthority.
+// ListExecutionEvents and appends share the writer for retained-history proofs;
+// stream-head and session-event queries are not transaction-supported.
+// Other store methods must
 // not be called from the callback.
 type TaskDataTransactionStore interface {
 	TaskJobAuthorityStore

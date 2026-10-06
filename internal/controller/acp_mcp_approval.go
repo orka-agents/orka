@@ -312,20 +312,35 @@ func (b *ACPMCPBroker) approvalOutcome(ctx context.Context, call *acpMCPApproval
 	if err != nil {
 		return err
 	}
-	return b.appendApprovalEvent(ctx, call, events.ExecutionEventTypeApprovalExecutionUpdated, "execution:"+outcome,
-		"Tool execution "+outcome, json.RawMessage(content))
+	retained, err := withRetainedMCPApproval(ctx, b.ApprovalEvents, call.Task.Namespace, call.Task.Name,
+		approvals.Approval{ID: call.ID, TaskUID: call.Task.UID, Binding: approvalCallBinding(call), ExpiresAt: &call.ExpiresAt},
+		func(txCtx context.Context, _ approvals.Approval, _ []store.ExecutionEvent) error {
+			return b.appendApprovalEvent(txCtx, call, events.ExecutionEventTypeApprovalExecutionUpdated, "execution:"+outcome,
+				"Tool execution "+outcome, json.RawMessage(content))
+		})
+	if err == nil && !retained && outcome == "running" {
+		// Unlike optional receipt projections, the start record is required
+		// before remote execution. Missing history must never count as success.
+		return errors.New("approval start requires the retained request")
+	}
+	return err
 }
 
 func (b *ACPMCPBroker) approvalDecision(ctx context.Context, call *acpMCPApprovalCall, eventType, reason string) error {
-	err := b.appendApprovalEvent(ctx, call, eventType, eventType, reason,
-		struct {
-			ApprovalID string `json:"approvalID"`
-			TaskUID    string `json:"taskUID"`
-			Reason     string `json:"reason"`
-		}{ApprovalID: call.ID, TaskUID: call.Task.UID, Reason: reason})
-	if errors.Is(err, store.ErrConflict) {
-		return nil // A reviewer decision may have won; execution still rechecks authority and expiry.
-	}
+	_, err := withRetainedMCPApproval(ctx, b.ApprovalEvents, call.Task.Namespace, call.Task.Name,
+		approvals.Approval{ID: call.ID, TaskUID: call.Task.UID, Binding: approvalCallBinding(call), ExpiresAt: &call.ExpiresAt},
+		func(txCtx context.Context, _ approvals.Approval, _ []store.ExecutionEvent) error {
+			err := b.appendApprovalEvent(txCtx, call, eventType, eventType, reason,
+				struct {
+					ApprovalID string `json:"approvalID"`
+					TaskUID    string `json:"taskUID"`
+					Reason     string `json:"reason"`
+				}{ApprovalID: call.ID, TaskUID: call.Task.UID, Reason: reason})
+			if errors.Is(err, store.ErrConflict) {
+				return nil // A reviewer decision may have won; execution still rechecks authority and expiry.
+			}
+			return err
+		})
 	return err
 }
 

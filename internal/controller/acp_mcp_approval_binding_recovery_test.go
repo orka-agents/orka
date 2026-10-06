@@ -176,7 +176,7 @@ func TestMCPApprovalBindingRecoveryDoesNotBorrowAnotherTasksEffect(t *testing.T)
 			object := patchMCPApprovalRecoveryHint(t, f, effect.ID, string(other.UID))
 			_, before := f.approval(t)
 			f.restart(t)
-			observed := &approvalRecoveryEventStore{DeduplicatingExecutionEventStore: f.events}
+			observed := &approvalRecoveryEventStore{DeduplicatingExecutionEventStore: f.events, TaskDataTransactionStore: f.events}
 			f.dispatcher.EventStore = observed
 			count := f.count.Load()
 

@@ -287,6 +287,11 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 		}
 		return r.resolveExternalAgentExecutionCandidate(ctx, task, agent)
 	}
+	var err error
+	task, err = r.projectACPReplyPolicy(ctx, task, agent, false)
+	if err != nil {
+		return nil, err
+	}
 	reader := uncachedReader(r.APIReader, r.Client)
 	configuration, err := resolveACPAgentSessionConfiguration(ctx, reader, task, agent)
 	if err != nil {
@@ -504,6 +509,10 @@ func (r *TaskReconciler) resolveExternalAgentExecutionCandidate(
 		return nil, errors.New("external AgentRuntime immutable identity is incomplete")
 	}
 	profile, external, err := r.resolveExternalAgentRuntimeSnapshot(ctx, task, runtime)
+	if err != nil {
+		return nil, err
+	}
+	task, err = r.projectACPReplyPolicy(ctx, task, agent, true)
 	if err != nil {
 		return nil, err
 	}
