@@ -2914,7 +2914,11 @@ func testACPDispatcherDeadlineCancellation(t *testing.T, workspaceLifetime bool)
 		// authenticated cancellation. The Task's own 30-second timeout must
 		// not be the cause of settlement within this test's 10-second bound.
 		dispatcher.runtimeContextFactory = nil
-		workspace := testAdmittedNativeDispatchWorkspace(t, plan.Workspace, pool, server.URL)
+		bootstrapPort, err := strconv.ParseInt(parsed.Port(), 10, 32)
+		if err != nil {
+			t.Fatal(err)
+		}
+		workspace := testAdmittedNativeDispatchWorkspace(t, plan.Workspace, pool, server.URL, int32(bootstrapPort))
 		workspace.CreationTimestamp = metav1.NewTime(time.Now().UTC().Truncate(time.Second))
 		workspace.Spec.Lifecycle.MaxLifetime = &metav1.Duration{Duration: 5 * time.Second}
 		if err := kubeClient.Create(ctx, workspace); err != nil {

@@ -279,7 +279,7 @@ func testExternalPoolWorkspaceSpec(binding *ACPRuntimeWorkspaceBinding, name str
 	}
 }
 
-func testAdmittedNativeDispatchWorkspace(t *testing.T, binding *ACPRuntimeWorkspaceBinding, pool *corev1alpha1.RuntimePool, endpoint string) *workspacev1alpha1.ExecutionWorkspace {
+func testAdmittedNativeDispatchWorkspace(t *testing.T, binding *ACPRuntimeWorkspaceBinding, pool *corev1alpha1.RuntimePool, endpoint string, bootstrapPort int32) *workspacev1alpha1.ExecutionWorkspace {
 	t.Helper()
 	class := binding.Class
 	cb := workspacev1alpha1.ImmutableObjectBinding{Name: class.Name, UID: types.UID(class.UID), Generation: class.Generation, ProfileHash: class.ProfileHash}
@@ -295,7 +295,7 @@ func testAdmittedNativeDispatchWorkspace(t *testing.T, binding *ACPRuntimeWorksp
 	request := &workspacev1alpha1.WorkloadRequest{
 		Sequence: 1, Key: workspacev1alpha1.AllocationKey{Namespace: w.Namespace, Name: w.Name, WorkspaceUID: w.UID, ProviderUID: pb.UID}, Image: pool.Spec.Runtime.Image,
 		ParametersRef: class.ParametersRef.DeepCopy(), ParametersBinding: class.ParametersBinding.DeepCopy(),
-		Runtime: &workspacev1alpha1.RuntimeWorkload{BootstrapPort: 8080, PoolBinding: workspacev1alpha1.ImmutableObjectBinding{Name: pool.Name, UID: pool.UID, Generation: pool.Generation, ProfileHash: pool.Spec.Runtime.Profile.Digest}, ClassBinding: cb,
+		Runtime: &workspacev1alpha1.RuntimeWorkload{BootstrapPort: bootstrapPort, PoolBinding: workspacev1alpha1.ImmutableObjectBinding{Name: pool.Name, UID: pool.UID, Generation: pool.Generation, ProfileHash: pool.Spec.Runtime.Profile.Digest}, ClassBinding: cb,
 			RequiredFeatures: []workspacev1alpha1.ExecutionWorkspaceFeature{workspacev1alpha1.WorkspaceFeatureNativeProcess},
 			Protocol:         harnessv2.ProtocolVersion, ContainerName: "runtime", Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Namespace: pool.Spec.RuntimeNamespace, Annotations: map[string]string{}}, Spec: corev1.PodSpec{AutomountServiceAccountToken: new(false), Containers: []corev1.Container{{Name: "runtime", Image: pool.Spec.Runtime.Image}}}}},
 	}

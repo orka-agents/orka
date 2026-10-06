@@ -221,6 +221,55 @@ func normalizeRuntimePoolWorkspaceContainer(container *corev1.Container) {
 			fieldRef.FieldRef.APIVersion = "v1"
 		}
 	}
+	normalizeRuntimePoolWorkspaceProbe(container.LivenessProbe)
+	normalizeRuntimePoolWorkspaceProbe(container.ReadinessProbe)
+	normalizeRuntimePoolWorkspaceProbe(container.StartupProbe)
+	if container.Lifecycle != nil {
+		if container.Lifecycle.PostStart != nil {
+			normalizeRuntimePoolWorkspaceHTTPGet(container.Lifecycle.PostStart.HTTPGet)
+		}
+		if container.Lifecycle.PreStop != nil {
+			normalizeRuntimePoolWorkspaceHTTPGet(container.Lifecycle.PreStop.HTTPGet)
+		}
+	}
+}
+
+func normalizeRuntimePoolWorkspaceProbe(probe *corev1.Probe) {
+	if probe == nil {
+		return
+	}
+	if probe.TimeoutSeconds == 0 {
+		probe.TimeoutSeconds = 1
+	}
+	if probe.PeriodSeconds == 0 {
+		probe.PeriodSeconds = 10
+	}
+	if probe.SuccessThreshold == 0 {
+		probe.SuccessThreshold = 1
+	}
+	if probe.FailureThreshold == 0 {
+		probe.FailureThreshold = 3
+	}
+	normalizeRuntimePoolWorkspaceHTTPGet(probe.HTTPGet)
+	if probe.GRPC != nil && probe.GRPC.Service == nil {
+		probe.GRPC.Service = new(string)
+	}
+}
+
+func normalizeRuntimePoolWorkspaceHTTPGet(action *corev1.HTTPGetAction) {
+	if action == nil {
+		return
+	}
+	if action.Path == "" {
+		action.Path = "/"
+	}
+	if action.Scheme == "" {
+		action.Scheme = corev1.URISchemeHTTP
+	}
+	// Nil uses HTTP/1.1 whether or not H2CContainerProbe writes its default.
+	if action.Protocol == nil {
+		action.Protocol = new(corev1.HTTPProtocolHTTP1)
+	}
 }
 
 func runtimePoolWorkspaceExplicitTolerations(tolerations []corev1.Toleration) []corev1.Toleration {
