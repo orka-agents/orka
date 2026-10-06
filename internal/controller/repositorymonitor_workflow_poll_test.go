@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -26,8 +27,10 @@ func TestRepositoryMonitorWorkflowPollCooldownTracksPullRequestInventory(t *test
 		priorPR      bool
 		wantPoll     bool
 		onlyIssues   bool
+		pollConflict bool
 	}{
 		{name: "issue_only", recentKind: repositoryMonitorIssueKind, recentNumber: 42, recentCount: 1, wantPoll: true},
+		{name: "concurrent_poll_insert", recentKind: repositoryMonitorIssueKind, recentCount: 1, wantPoll: true, pollConflict: true},
 		{name: "open_issues_without_pull_requests", recentKind: repositoryMonitorIssueKind, recentNumber: 42, recentCount: 1, onlyIssues: true},
 		{name: "commit_only", recentKind: "commit", recentCount: 1, wantPoll: true},
 		{name: "pull_request_inventory", recentKind: repositoryMonitorPullRequestKind, recentCount: 1},
@@ -66,6 +69,9 @@ func TestRepositoryMonitorWorkflowPollCooldownTracksPullRequestInventory(t *test
 			}))
 			t.Cleanup(server.Close)
 			r := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: db, GitHubAPIBaseURL: server.URL}
+			if tc.pollConflict {
+				r.Store = repositoryMonitorWorkflowPollConflictStore{RepositoryMonitorStore: db}
+			}
 			itemKind := repositoryMonitorPullRequestKind
 			if tc.onlyIssues {
 				itemKind = repositoryMonitorIssueKind
@@ -103,4 +109,19 @@ func TestRepositoryMonitorWorkflowPollCooldownTracksPullRequestInventory(t *test
 			}
 		})
 	}
+}
+
+type repositoryMonitorWorkflowPollConflictStore struct {
+	store.RepositoryMonitorStore
+}
+
+func (s repositoryMonitorWorkflowPollConflictStore) CreateMonitorRun(ctx context.Context, run *store.MonitorRun) error {
+	// Another writer inserts the same deterministic poll after its existence
+	// checks. The second insert returns the real SQLite conflict error.
+	if run.Trigger == "workflow" {
+		if err := s.RepositoryMonitorStore.CreateMonitorRun(ctx, run); err != nil {
+			return err
+		}
+	}
+	return s.RepositoryMonitorStore.CreateMonitorRun(ctx, run)
 }

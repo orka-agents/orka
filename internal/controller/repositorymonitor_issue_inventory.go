@@ -307,6 +307,9 @@ func (r *RepositoryMonitorReconciler) retireMissingRepositoryMonitorIssues(ctx c
 		if item.State == repositoryMonitorItemStateOutOfScope && item.SkipReason == repositoryMonitorSkipReasonMissing {
 			continue
 		}
+		if err := r.settleRepositoryMonitorPausedIssue(ctx, monitor, &item, repositoryMonitorSkipReasonMissing); err != nil {
+			return err
+		}
 		item.State = repositoryMonitorItemStateOutOfScope
 		item.LastVerdict = repositoryMonitorVerdictSkipped
 		item.WorkflowPhase = repositoryMonitorIssuePhaseBlocked
