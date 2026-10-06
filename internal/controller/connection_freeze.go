@@ -356,9 +356,41 @@ const acpChildSealAttempts = 4
 // the child itself, so it seals the child directly against that Task as the
 // parent, re-reading both when a concurrent write fences the patch.
 func ACPChildTaskSealer(reader client.Reader, parentNamespace, parentName, parentUID string) func(context.Context, client.Client, *corev1alpha1.Task) error {
+	sealOnce := acpChildTaskSealOnce(reader, parentNamespace, parentName, parentUID)
+	// Nothing repairs a seal later, and an unsealed child fails closed for
+	// connector tools, so a transient read or patch failure is retried a
+	// few times; a refusal is final.
+	return func(ctx context.Context, c client.Client, child *corev1alpha1.Task) error {
+		var err error
+		backoff := acpChildSealRetryBackoff
+		for attempt := range acpChildSealTransientAttempts {
+			if attempt > 0 {
+				select {
+				case <-ctx.Done():
+					return err
+				case <-time.After(backoff):
+				}
+				backoff *= 2
+			}
+			if err = sealOnce(ctx, c, child); err == nil || errors.Is(err, ErrChildSealRefused) {
+				return err
+			}
+		}
+		return err
+	}
+}
+
+// acpChildSealTransientAttempts bounds the retries of a brokered child seal
+// that failed for a transient reason; acpChildSealRetryBackoff is the first
+// wait, doubled each time.
+const acpChildSealTransientAttempts = 3
+
+var acpChildSealRetryBackoff = 200 * time.Millisecond
+
+func acpChildTaskSealOnce(reader client.Reader, parentNamespace, parentName, parentUID string) func(context.Context, client.Client, *corev1alpha1.Task) error {
 	return func(ctx context.Context, c client.Client, child *corev1alpha1.Task) error {
 		if reader == nil || child == nil || strings.TrimSpace(parentUID) == "" {
-			return errors.New("sealing a brokered child task requires the authenticated parent")
+			return fmt.Errorf("%w: sealing a brokered child task requires the authenticated parent", ErrChildSealRefused)
 		}
 		parent := &corev1alpha1.Task{}
 		if err := reader.Get(ctx, client.ObjectKey{Namespace: parentNamespace, Name: parentName}, parent); err != nil {

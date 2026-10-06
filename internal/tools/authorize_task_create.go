@@ -9,6 +9,8 @@ package tools
 import (
 	"context"
 
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
@@ -29,5 +31,9 @@ func sealTaskCreate(ctx context.Context, tc *ToolContext, task *corev1alpha1.Tas
 	if tc == nil || tc.SealTaskCreate == nil || tc.Client == nil {
 		return
 	}
-	_ = tc.SealTaskCreate(ctx, tc.Client, task)
+	// An unsealed child is still created; it fails closed for connector
+	// tools, so the failure is recorded rather than returned to the agent.
+	if err := tc.SealTaskCreate(ctx, tc.Client, task); err != nil {
+		log.FromContext(ctx).Info("child task could not be sealed for connector use", "task", task.Name, "error", err.Error())
+	}
 }
