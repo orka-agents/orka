@@ -205,6 +205,16 @@ func TestValidateProviderSpec(t *testing.T) {
 		{name: "octal loopback host", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://0177.0.0.1/token" }, want: "canonical IP"},
 		{name: "hex loopback host", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://0x7f000001/token" }, want: "canonical IP"},
 		{name: "numeric tld host", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://example.123/token" }, want: "canonical IP"},
+		{name: "percent-encoded ideographic dots", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.TokenURL = "https://127%E3%80%820%E3%80%820%E3%80%821/token"
+		}, want: "host must be ASCII"},
+		{name: "fullwidth digits host", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.AuthorizeURL = "https://%EF%BC%91%EF%BC%92%EF%BC%97.0.0.1/authorize"
+		}, want: "host must be ASCII"},
+		{name: "unicode tool host", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].HTTP.URL = "https://127%E3%80%820%E3%80%820%E3%80%821/x"
+		}, want: "host must be ASCII"},
+		{name: "punycode hostname ok", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://xn--bcher-kva.example/token" }},
 		{name: "hexish hostname ok", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://ab12.cafe.example.com/token" }},
 		{name: "http tool credential query", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.Tools[2].HTTP.URL = "https://api.github.com/x?token=abc"

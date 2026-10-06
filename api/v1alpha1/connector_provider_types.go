@@ -180,13 +180,15 @@ type ConnectorHTTPTool struct {
 	// +optional
 	Headers map[string]string `json:"headers,omitempty"`
 
-	// Timeout bounds the request. Defaults to 30s and may not exceed 10m. A
-	// single bounded component ("30s", "2.5m", "600s") keeps every stored value
-	// decodable as a Go duration without overflow, so one malformed provider
-	// cannot break the typed informer for every provider.
+	// Timeout bounds the request. Defaults to 30s and may not exceed 10m. It
+	// is a single bounded component ("30s", "2.5m", "500µs") or the canonical
+	// form a typed client serializes ("10m0s", "2m30s"). Every component is
+	// bounded, so each stored value decodes as a Go duration without
+	// overflow and one malformed provider cannot break the typed informer
+	// for every provider.
 	// +kubebuilder:validation:Type=string
 	// +kubebuilder:validation:MaxLength=16
-	// +kubebuilder:validation:Pattern=`^[0-9]{1,4}(\.[0-9]{1,3})?(ms|s|m|h)$`
+	// +kubebuilder:validation:Pattern=`^([0-9]{1,4}(\.[0-9]{1,9})?(ns|us|µs|μs|ms|s|m|h)|([0-9]{1,4}h)?([0-9]{1,4}m)?[0-9]{1,4}(\.[0-9]{1,9})?s)$`
 	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s') && duration(self) <= duration('10m')",message="timeout must be positive and at most 10m"
 	// +optional
 	Timeout *metav1.Duration `json:"timeout,omitempty"`
