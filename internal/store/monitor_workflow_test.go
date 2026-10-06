@@ -14,9 +14,9 @@ func TestRepositoryMonitorWorkActionIDIsDeterministicAndUnambiguous(t *testing.T
 
 func TestRepositoryMonitorDesiredActionForIntentNormalizesBeforeMapping(t *testing.T) {
 	tests := map[string]string{
-		" fix ":          repositoryMonitorDesiredActionRepair,
-		" approve_plan ": "approve",
-		" review ":       "review",
+		" fix ": repositoryMonitorDesiredActionRepair,
+
+		" review ": "review",
 	}
 	for input, want := range tests {
 		if got := RepositoryMonitorDesiredActionForIntent(input); got != want {

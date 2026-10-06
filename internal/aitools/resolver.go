@@ -185,7 +185,7 @@ func Resolve(task *corev1alpha1.Task, agent *corev1alpha1.Agent) []string {
 	seen := make(map[string]struct{})
 	appendTool := func(raw string) {
 		name := strings.TrimSpace(raw)
-		if name == "" {
+		if name == "" || name == GatewayReplyToolName {
 			return
 		}
 		if _, ok := seen[name]; ok {

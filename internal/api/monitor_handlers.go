@@ -107,6 +107,9 @@ func (h *Handlers) normalizeRepositoryMonitorSpec(spec *corev1alpha1.RepositoryM
 		maxPerRun := int32(20)
 		spec.Targets.PullRequests.MaxPerRun = &maxPerRun
 	}
+	if spec.Policy.PauseLabels == nil {
+		spec.Policy.PauseLabels = []string{"orka:pause"}
+	}
 	if spec.Review.Event == "" {
 		spec.Review.Event = "COMMENT"
 	}
@@ -143,26 +146,36 @@ func validateRepositoryMonitorSpec(spec corev1alpha1.RepositoryMonitorSpec) erro
 	if spec.Triggers.GitHub.Labels.Enabled && (spec.ForgeCredentialRef == nil || strings.TrimSpace(spec.ForgeCredentialRef.Name) == "") {
 		return fiber.NewError(fiber.StatusBadRequest, "spec.forgeCredentialRef is required when GitHub label triggers are enabled")
 	}
+	if (spec.Review.Publish.Enabled || spec.Repair.Enabled) && repositoryMonitorCredentialRefName(spec.ForgeCredentialRef) == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "spec.forgeCredentialRef is required when review publication or repair is enabled")
+	}
 	return nil
 }
 
 func validateRepositoryMonitorCommandLabels(spec corev1alpha1.RepositoryMonitorSpec) error {
-	labels := spec.Triggers.GitHub.Labels
-	groups := [][]struct{ intent, label string }{
-		{{"triage", labels.Issues.Triage}, {"research", labels.Issues.Research}, {"plan", labels.Issues.Plan}, {commandIntentApprovePlan, labels.Issues.ApprovePlan}, {githubActionImplement, labels.Issues.Implement}, {commandIntentDecompose, labels.Issues.Decompose}, {commandIntentStop, labels.Issues.Stop}, {commandIntentResume, labels.Issues.Resume}},
-		{{"review", labels.PullRequests.Review}, {githubActionFix, labels.PullRequests.Fix}, {commandIntentFixCI, labels.PullRequests.FixCI}, {commandIntentUpdateBranch, labels.PullRequests.UpdateBranch}, {"automerge", labels.PullRequests.Automerge}, {commandIntentStop, labels.PullRequests.Stop}, {commandIntentResume, labels.PullRequests.Resume}},
+	if !spec.Targets.Issues.Enabled || !spec.Triggers.GitHub.Labels.Enabled {
+		return nil
 	}
-	for _, group := range groups {
-		seen := map[string]string{}
-		for _, entry := range group {
-			label := strings.ToLower(strings.TrimSpace(entry.label))
-			if label == "" {
-				label = repositoryMonitorDefaultCommandLabel(entry.intent)
+	label := strings.TrimSpace(spec.Triggers.GitHub.Labels.Issues.Implement)
+	if label == "" {
+		label = "orka:implement"
+	}
+	guards := append([]string(nil), spec.Policy.ProtectedLabels...)
+	if spec.Policy.PauseLabels == nil {
+		guards = append(guards, "orka:pause")
+	} else {
+		guards = append(guards, spec.Policy.PauseLabels...)
+	}
+	for _, guard := range guards {
+		if strings.EqualFold(strings.TrimSpace(guard), label) {
+			return fiber.NewError(fiber.StatusBadRequest, "implementation label must not also be a pause or protected label")
+		}
+	}
+	if spec.Targets.Issues.Enabled && spec.Triggers.GitHub.Labels.Enabled && spec.Triggers.GitHub.Labels.ConsumeCommandLabels {
+		for _, required := range spec.Targets.Issues.IncludeLabels {
+			if strings.EqualFold(strings.TrimSpace(required), label) {
+				return fiber.NewError(fiber.StatusBadRequest, "spec.targets.issues.includeLabels must not contain the implementation label when command labels are consumed")
 			}
-			if previous := seen[label]; previous != "" {
-				return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("command label %q is configured for both %s and %s", label, previous, entry.intent))
-			}
-			seen[label] = entry.intent
 		}
 	}
 	return nil
@@ -1190,17 +1203,14 @@ func repositoryMonitorLabelsFromItem(item *store.MonitorItem) []string {
 
 func repositoryMonitorCommandRequiresWrite(req CreateRepositoryMonitorCommandRequest) bool {
 	switch req.Intent {
-	case commandIntentApprovePlan, commandIntentStop, commandIntentResume, githubActionImplement, commandIntentDecompose, githubActionFix, commandIntentFixCI, commandIntentUpdateBranch, repositoryMonitorIntentAutomerge:
+	case commandIntentStop, commandIntentResume, githubActionImplement, commandIntentDecompose, githubActionFix, commandIntentFixCI, commandIntentUpdateBranch:
 		return true
 	default:
 		return false
 	}
 }
 
-func repositoryMonitorAPICommandPermission(req CreateRepositoryMonitorCommandRequest) string {
-	if req.Kind == repositoryMonitorTargetKindPullRequest && req.Intent == repositoryMonitorIntentAutomerge {
-		return "orka:monitors:write"
-	}
+func repositoryMonitorAPICommandPermission(_ CreateRepositoryMonitorCommandRequest) string {
 	return "orka:monitors:operate"
 }
 
@@ -1229,12 +1239,12 @@ func validateRepositoryMonitorCommandRequest(req CreateRepositoryMonitorCommandR
 	switch req.Kind {
 	case repositoryMonitorTargetKindIssue:
 		switch intent {
-		case "triage", "research", "plan", "approve_plan", githubActionImplement, commandIntentDecompose, finishReasonStop, "resume":
+		case "triage", "research", "plan", githubActionImplement, commandIntentDecompose, finishReasonStop, "resume":
 			return nil
 		}
 	case repositoryMonitorTargetKindPullRequest:
 		switch intent {
-		case "review", githubActionFix, commandIntentFixCI, commandIntentUpdateBranch, repositoryMonitorIntentAutomerge, finishReasonStop, "resume":
+		case "review", githubActionFix, commandIntentFixCI, commandIntentUpdateBranch, finishReasonStop, "resume":
 			return nil
 		}
 	}

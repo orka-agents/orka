@@ -120,6 +120,8 @@ type ToolContext struct {
 	}
 	// MessageStore for inter-agent messaging when tools execute in-process from the controller broker.
 	MessageStore TaskMessageStore
+	// GatewayReplySender is injected only for a durably eligible gateway Task.
+	GatewayReplySender GatewayReplySender
 	// SessionDeleter for deleting sessions (controller.SessionManager)
 	SessionDeleter interface {
 		DeleteSession(ctx context.Context, namespace, sessionID string) error
@@ -604,6 +606,7 @@ func RegisterBuiltinTools() {
 	DefaultRegistry.Register(NewWebFetchTool())
 	DefaultRegistry.Register(NewFileWriteTool())
 	DefaultRegistry.Register(NewRequestApprovalTool())
+	DefaultRegistry.Register(NewReplyInConversationTool())
 }
 
 // RegisterCoordinationTools registers coordination tools that require a K8s client

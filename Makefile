@@ -166,12 +166,8 @@ repository-monitor-fake-e2e: ensure-ui-embed ## Run fake-GitHub RepositoryMonito
 repository-monitor-validate: ensure-ui-embed ## Run full local RepositoryMonitor fake-E2E/docs/example validation
 	bash scripts/repository-monitor-validate.sh
 
-.PHONY: repository-monitor-live-preflight
-repository-monitor-live-preflight: ## Check prerequisites for live GitHub label trigger E2E without changing the cluster
-	bash scripts/live-github-label-trigger-e2e.sh --preflight-only
-
 .PHONY: repository-monitor-completion-audit
-repository-monitor-completion-audit: ensure-ui-embed ## Run local validation plus live preflight audit for RepositoryMonitor plan completion
+repository-monitor-completion-audit: ensure-ui-embed ## Run local RepositoryMonitor validation and report remaining live validation
 	bash scripts/repository-monitor-completion-audit.sh
 
 .PHONY: test

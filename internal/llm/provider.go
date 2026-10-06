@@ -36,6 +36,12 @@ type CompletionRequest struct {
 	Tools          []Tool          `json:"tools,omitempty"`
 	StopSequences  []string        `json:"stop_sequences,omitempty"`
 	ResponseFormat *ResponseFormat `json:"response_format,omitempty"`
+	// Store preserves explicit stateless requests through provider translation.
+	// Nil retains the provider default for existing callers.
+	Store *bool `json:"store,omitempty"`
+	// ResponsesInput identifies compat Responses requests, preserving native
+	// input/output item order. Turn-based adapters may group adjacent input items.
+	ResponsesInput bool `json:"-"`
 }
 
 // HasTemperature reports explicit presence or a legacy positive scalar value.
@@ -57,20 +63,31 @@ type JSONSchemaFormat struct {
 	Description string         `json:"description,omitempty"`
 }
 
+// AssistantOutputItem retains a provider's ordered text/function output.
+// Existing consumers continue to use the aggregate Content and ToolCalls fields.
+type AssistantOutputItem struct {
+	Content  string
+	ToolCall *ToolCall
+	// Status retains an optional native message status for Responses output.
+	Status string
+}
+
 // CompletionResponse represents a completion response
 type CompletionResponse struct {
-	Content               string     `json:"content"`
-	ToolCalls             []ToolCall `json:"tool_calls,omitempty"`
-	StopReason            string     `json:"stop_reason"`
-	InputTokens           int        `json:"input_tokens"`
-	OutputTokens          int        `json:"output_tokens"`
-	CachedInputTokens     *int64     `json:"cached_input_tokens,omitempty"`
-	CacheWriteInputTokens *int64     `json:"cache_write_input_tokens,omitempty"`
-	InputExcludesCache    bool       `json:"-"`
-	UsageReported         bool       `json:"usage_reported,omitempty"`
-	Model                 string     `json:"model"`
-	Provider              string     `json:"provider,omitempty"`
-	ID                    string     `json:"id,omitempty"`
+	// OutputItems is optional in-memory ordering metadata for Responses requests.
+	OutputItems           []AssistantOutputItem `json:"-"`
+	Content               string                `json:"content"`
+	ToolCalls             []ToolCall            `json:"tool_calls,omitempty"`
+	StopReason            string                `json:"stop_reason"`
+	InputTokens           int                   `json:"input_tokens"`
+	OutputTokens          int                   `json:"output_tokens"`
+	CachedInputTokens     *int64                `json:"cached_input_tokens,omitempty"`
+	CacheWriteInputTokens *int64                `json:"cache_write_input_tokens,omitempty"`
+	InputExcludesCache    bool                  `json:"-"`
+	UsageReported         bool                  `json:"usage_reported,omitempty"`
+	Model                 string                `json:"model"`
+	Provider              string                `json:"provider,omitempty"`
+	ID                    string                `json:"id,omitempty"`
 }
 
 // CompletionOutcome describes the provider-neutral result of a completion.
@@ -124,18 +141,22 @@ func completionOutcomeForStopReason(reason string) CompletionOutcome {
 
 // Message represents a chat message
 type Message struct {
-	Role       string     `json:"role"` // user, assistant, system, tool
-	Content    string     `json:"content,omitempty"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
-	Name       string     `json:"name,omitempty"` // For tool results
+	// Keep an ordered assistant turn in one message so truncation retains its
+	// tool calls and adjacent results atomically. It is never persisted.
+	OutputItems []AssistantOutputItem `json:"-"`
+	Role        string                `json:"role"` // user, assistant, system, tool
+	Content     string                `json:"content,omitempty"`
+	ToolCalls   []ToolCall            `json:"tool_calls,omitempty"`
+	ToolCallID  string                `json:"tool_call_id,omitempty"`
+	Name        string                `json:"name,omitempty"` // For tool results
 }
 
 // Tool represents a tool definition
 type Tool struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
-	Parameters  json.RawMessage `json:"parameters"` // JSON Schema
+	Parameters  json.RawMessage `json:"parameters"`
+	Strict      *bool           `json:"strict,omitempty"` // JSON Schema
 }
 
 // ToolCall represents a tool call from the model
@@ -147,6 +168,10 @@ type ToolCall struct {
 
 // StreamChunk represents a chunk of a streaming response
 type StreamChunk struct {
+	// Native Responses item metadata is consumed before exposing compat SSE.
+	OutputIndex           *int64    `json:"-"`
+	OutputItemDone        bool      `json:"-"`
+	OutputItemStatus      string    `json:"-"`
 	Content               string    `json:"content,omitempty"`
 	ToolCall              *ToolCall `json:"tool_call,omitempty"`
 	Done                  bool      `json:"done"`
