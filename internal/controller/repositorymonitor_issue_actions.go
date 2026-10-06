@@ -1350,6 +1350,11 @@ func (r *RepositoryMonitorReconciler) applyIssueActionRecord(ctx context.Context
 			}
 		}
 	}
+	if item.WorkflowPhase == repositoryMonitorIssuePhasePROpened {
+		if err := r.queueRepositoryMonitorLinkedPullRequest(ctx, monitor, item.LinkedPRNumber); err != nil {
+			return false, err
+		}
+	}
 	workStatus := repositoryMonitorWorkActionStatusSucceeded
 	if recordBlocksProgress || item.WorkflowPhase == repositoryMonitorIssuePhaseBlocked {
 		workStatus = repositoryMonitorWorkActionStatusBlocked
@@ -1378,6 +1383,24 @@ func (r *RepositoryMonitorReconciler) applyIssueActionRecord(ctx context.Context
 		}
 	}
 	return true, r.createMonitorEvent(ctx, monitor, "", repositoryMonitorIssueKind, item.Number, item.SnapshotDigest, "issue_action_recorded", fmt.Sprintf("Issue #%d %s completed", item.Number, record.ActionKind), map[string]any{"actionRecordID": record.ID, eventVerdictField: record.Verdict})
+}
+
+func (r *RepositoryMonitorReconciler) queueRepositoryMonitorLinkedPullRequest(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, number int64) error {
+	if !repositoryMonitorPullRequestsEnabled(monitor.Spec) || number <= 0 {
+		return nil
+	}
+	// Continue accepted implementation work independently of opened webhooks or
+	// schedules. Targeted inventory verifies current PR scope and head itself.
+	id := "issue-pr-" + repositoryMonitorShortHash(fmt.Sprintf("%s|%d|%d", monitor.UID, monitor.Generation, number))
+	err := r.Store.CreateMonitorRun(ctx, &store.MonitorRun{
+		ID: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name,
+		Trigger: "workflow", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: number,
+		Phase: repositoryMonitorRunPhaseQueued, StartedAt: time.Now(),
+	})
+	if errors.Is(err, store.ErrConflict) {
+		return nil
+	}
+	return err
 }
 
 func (r *RepositoryMonitorReconciler) advanceRepositoryMonitorImplementAfterPlan(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, plan *store.ActionRecord, task *corev1alpha1.Task) error {
