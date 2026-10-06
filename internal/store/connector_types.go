@@ -25,6 +25,15 @@ var ErrConnectorCustodyTombstoned = errors.New("connector custody for this conne
 // finished; the caller resumes it instead of committing again.
 var ErrConnectorCompletionCommitted = errors.New("connector completion was already committed")
 
+// ErrConnectorConsentSuperseded reports a completion from a consent older
+// than one that was already parked or committed for the same Connection; an
+// older consent's tokens never replace a newer grant.
+var ErrConnectorConsentSuperseded = errors.New("a newer consent for this connection superseded this one")
+
+// ErrConnectorRetiredLimit reports a Connection that already retains the
+// maximum number of superseded grants; disconnecting revokes them all.
+var ErrConnectorRetiredLimit = errors.New("this connection retains too many superseded grants; disconnect and link again")
+
 // ConnectorCredentialRef binds sealed token material to exactly one
 // Connection. Every field participates in the AEAD additional data, so a row
 // copied to another Connection, subject, or provider fails to open.
@@ -148,6 +157,10 @@ type ConnectorConsent struct {
 	// set.
 	Scopes    []string
 	ExpiresAt time.Time
+	// Sequence orders the Connection's consents: the store assigns it when
+	// the consent starts, and completions carry it so commits follow consent
+	// order rather than callback arrival.
+	Sequence int64
 }
 
 // ConnectorCompletion is the second half of a consent: token material the
@@ -174,6 +187,10 @@ type ConnectorCompletion struct {
 	// instead of writing the parked tokens again over a newer commit, and no
 	// plaintext column can flip it.
 	Committed bool
+	// ConsentSequence is the Sequence of the consent this completion came
+	// from; a completion whose consent is older than one already parked or
+	// committed for the Connection is refused.
+	ConsentSequence int64
 }
 
 // ConnectorConsentStore holds pending consents and pending completions.

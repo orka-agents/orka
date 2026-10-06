@@ -1809,3 +1809,48 @@ func TestConnectionRevocationIdentityBoundAtConsentStart(t *testing.T) {
 		t.Fatalf("sealed revocation digest = %q err = %v, want the identity consent started under (%q), not the moved endpoint (%q)", credential.RevocationDigest, err, original, moved)
 	}
 }
+
+// TestConnectionCallbackRefusesModeChangeBeforeExchange covers a mode change
+// while the person is at the provider: the callback refuses before any code
+// exchange, so no token is issued that completion would only discard.
+func TestConnectionCallbackRefusesModeChangeBeforeExchange(t *testing.T) {
+	h := newConnectorTestHarness(t, acceptedTestProvider())
+	created := h.create("readWrite")
+	connection := &corev1alpha1.Connection{}
+	key := types.NamespacedName{Namespace: connectorTestNamespace, Name: created.Connection.Name}
+	if err := h.client.Get(context.Background(), key, connection); err != nil {
+		t.Fatal(err)
+	}
+	connection.Spec.Mode = corev1alpha1.ConnectionModeReadOnly
+	if err := h.client.Update(context.Background(), connection); err != nil {
+		t.Fatal(err)
+	}
+	location := h.consentAndCallback(created)
+	if !strings.Contains(location, "reason=mode_changed") || strings.Contains(location, "completion=") {
+		t.Fatalf("callback after mode change location = %q", location)
+	}
+	if h.tokens != 0 {
+		t.Fatalf("token endpoint calls = %d, want no exchange after a mode change", h.tokens)
+	}
+}
+
+// TestConnectionListIncludesUnlabeledOwnedConnections covers a Connection
+// created through Kubernetes without the owner index label: ownership comes
+// from spec.subject, so its owner still sees it.
+func TestConnectionListIncludesUnlabeledOwnedConnections(t *testing.T) {
+	h := newConnectorTestHarness(t, acceptedTestProvider())
+	created := h.create("readOnly")
+	connection := &corev1alpha1.Connection{}
+	key := types.NamespacedName{Namespace: connectorTestNamespace, Name: created.Connection.Name}
+	if err := h.client.Get(context.Background(), key, connection); err != nil {
+		t.Fatal(err)
+	}
+	connection.Labels = nil
+	if err := h.client.Update(context.Background(), connection); err != nil {
+		t.Fatal(err)
+	}
+	resp, raw := h.do(http.MethodGet, "/api/v1/connections", nil)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(raw), created.Connection.Name) {
+		t.Fatalf("list = %d %s, want the unlabeled owned Connection", resp.StatusCode, raw)
+	}
+}
