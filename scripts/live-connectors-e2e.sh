@@ -24,6 +24,17 @@ ORKA_REDACT_SECRET_VARS=(token other_token model_credential client_secret)
 redact_all() {
   redact | sed -E 's/fx-(access|refresh)-[A-Za-z0-9._~+\/=-]+/fx-\1-[REDACTED]/g'
 }
+
+# controller_pod_names prints the controller Deployment's live pods, sorted,
+# one per line; pods already terminating are left out.
+controller_pod_names() {
+  local selector
+  selector="$(kubectl -n "${namespace}" get deployment/"${deployment}" -o json \
+    | jq -r '.spec.selector.matchLabels | to_entries | map("\(.key)=\(.value)") | join(",")')" || return 1
+  kubectl -n "${namespace}" get pods -l "${selector}" -o json \
+    | jq -r '.items[] | select(.metadata.deletionTimestamp == null) | .metadata.name' | sort
+}
+
 . "${script_dir}/lib/kind-local-registry.sh"
 . "${script_dir}/lib/e2e-admission-tls.sh"
 
@@ -306,6 +317,10 @@ kubectl -n "${namespace}" set env deployment/"${deployment}" \
   ORKA_CONNECTORS_ALLOW_PRIVATE_ENDPOINTS=i-understand-tokens-may-leave-the-cluster \
   ORKA_OIDC_JWKS_URL- ORKA_CONTEXT_TOKEN_PROFILE- ORKA_CONTEXT_TOKEN_ISSUER- ORKA_CONTEXT_TOKEN_AUDIENCE-
 kubectl -n "${namespace}" rollout status deployment/"${deployment}" --timeout=5m
+# The leak check at the end reads these pods' logs. A pod replaced mid-lane
+# would take its logs with it, so the set is recorded now and must not change.
+controller_pods="$(controller_pod_names)"
+[[ -n "${controller_pods}" ]] || die "no running controller pods after the rollout"
 start_port_forwards
 wait_for_http "http://127.0.0.1:${api_port}/readyz" "Orka API"
 wait_for_http "http://127.0.0.1:${fixture_port}/healthz" "connectors fixture"
@@ -517,8 +532,23 @@ fixture_state | jq '{codeExchanges, refreshes, revocations, reads, writes, disti
 
 log "No token material in controller logs"
 # The logs are captured first, so an unreadable log can never pass as "no match".
-kubectl -n "${namespace}" logs deployment/"${deployment}" --all-containers=true > "${workdir}/controller.log" \
-  || die "could not read the controller logs for the leak check"
+# Every controller container is read, including the previous instance of
+# one that restarted, and the pods must be the ones the lane started with:
+# a replaced or restarted container's earlier output is part of the check.
+current_pods="$(controller_pod_names)"
+[[ "${current_pods}" == "${controller_pods}" ]] \
+  || die "the controller pods changed during the lane (${controller_pods} -> ${current_pods}); their earlier logs cannot be checked for leaks"
+: > "${workdir}/controller.log"
+for pod in ${controller_pods}; do
+  kubectl -n "${namespace}" logs pod/"${pod}" --all-containers=true >> "${workdir}/controller.log" \
+    || die "could not read the controller logs of ${pod} for the leak check"
+  restarted="$(kubectl -n "${namespace}" get pod "${pod}" -o json | jq -r '.status.containerStatuses[]? | select(.restartCount > 0) | .name')" \
+    || die "could not read the container restarts of ${pod} for the leak check"
+  for container in ${restarted}; do
+    kubectl -n "${namespace}" logs pod/"${pod}" -c "${container}" --previous >> "${workdir}/controller.log" \
+      || die "container ${container} of ${pod} restarted and its previous logs cannot be read for the leak check"
+  done
+done
 [[ -s "${workdir}/controller.log" ]] || die "the controller logs are empty; the leak check proves nothing"
 if grep -Eq 'fx-access-|fx-refresh-' "${workdir}/controller.log"; then
   die "linked token material appeared in controller logs"
