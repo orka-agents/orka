@@ -29,7 +29,7 @@ func nativeSessionSchemaStatements() []string {
 			request_digest TEXT NOT NULL,
 			kind TEXT NOT NULL,
 			receipt BLOB NOT NULL,
-			PRIMARY KEY(namespace, session_name, operation_id),
+			PRIMARY KEY(namespace, session_name, kind, operation_id),
 			FOREIGN KEY(namespace, session_name) REFERENCES sessions(namespace, name) ON DELETE CASCADE
 		)`,
 		`CREATE TABLE IF NOT EXISTS native_session_finalizations (

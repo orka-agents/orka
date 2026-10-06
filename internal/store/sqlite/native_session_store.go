@@ -224,7 +224,7 @@ func (s *Store) saveNativeSessionTx(ctx context.Context, tx *sql.Tx, record stor
 		return store.ErrConflict
 	}
 	var priorDigest, kind string
-	err = tx.QueryRowContext(ctx, `SELECT request_digest,kind FROM native_session_operations WHERE namespace=? AND session_name=? AND operation_id=?`, record.Namespace, record.SessionName, record.SourceOperationID).Scan(&priorDigest, &kind)
+	err = tx.QueryRowContext(ctx, `SELECT request_digest,kind FROM native_session_operations WHERE namespace=? AND session_name=? AND kind='capture' AND operation_id=?`, record.Namespace, record.SessionName, record.SourceOperationID).Scan(&priorDigest, &kind)
 	if err == nil {
 		if priorDigest == requestDigest && kind == "capture" {
 			return nil
@@ -326,7 +326,7 @@ func (s *Store) StageNativeSessionImport(ctx context.Context, request store.Nati
 	}
 	var digest, kind string
 	var encoded []byte
-	err = tx.QueryRowContext(ctx, `SELECT request_digest,kind,receipt FROM native_session_operations WHERE namespace=? AND session_name=? AND operation_id=?`, request.Namespace, request.SessionName, request.OperationID).Scan(&digest, &kind, &encoded)
+	err = tx.QueryRowContext(ctx, `SELECT request_digest,kind,receipt FROM native_session_operations WHERE namespace=? AND session_name=? AND kind='import' AND operation_id=?`, request.Namespace, request.SessionName, request.OperationID).Scan(&digest, &kind, &encoded)
 	if err == nil {
 		if digest != request.RequestDigest || kind != "import" {
 			return nil, store.ErrDuplicateMismatch

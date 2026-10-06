@@ -74,6 +74,43 @@ func TestNativeSessionImportOwnershipAndRetry(t *testing.T) {
 	require.ErrorIs(t, err, store.ErrGatewayOwnedSession)
 }
 
+func TestNativeSessionImportAndCaptureOperationIDsAreIndependent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "operation-kinds.db")
+	s := nativeTestStore(t, path)
+	ctx := t.Context()
+	request := nativeImportFixture(t, "shared-operation", "imported native history")
+	request.OperationID = "capture-native-g1-prompt-a"
+	receipt, err := s.StageNativeSessionImport(ctx, request)
+	require.NoError(t, err)
+	require.NoError(t, s.BindSessionCleanupIdentity(ctx, request.Namespace, request.SessionName, "canonical-uid"))
+	require.NoError(t, s.AppendMessages(ctx, request.Namespace, request.SessionName, []store.SessionMessage{
+		{ID: "new-result", Role: "assistant", Content: "continued result"},
+	}))
+	capture := store.NativeSessionRecord{
+		Namespace: request.Namespace, SessionName: request.SessionName, SessionUID: "canonical-uid",
+		Snapshot:     storetest.NativeSessionSnapshot(t, "continued native history"),
+		MessageCount: 1, ThroughMessageID: "new-result", RuntimeSessionGeneration: 1,
+		SourceOperationID: request.OperationID,
+	}
+	require.NoError(t, s.SaveNativeSession(ctx, capture))
+	require.NoError(t, s.db.Close())
+	s = nativeTestStore(t, path)
+	require.NoError(t, s.SaveNativeSession(ctx, capture), "capture retry must use its own immutable receipt")
+	retry, err := s.StageNativeSessionImport(ctx, request)
+	require.NoError(t, err)
+	require.Equal(t, receipt, retry, "import retry must retain its original receipt after capture")
+	changedImport := nativeImportFixture(t, request.SessionName, "different imported history")
+	changedImport.OperationID = request.OperationID
+	_, err = s.StageNativeSessionImport(ctx, changedImport)
+	require.ErrorIs(t, err, store.ErrDuplicateMismatch)
+	changedCapture := capture
+	changedCapture.Snapshot = storetest.NativeSessionSnapshot(t, "different continued history")
+	require.ErrorIs(t, s.SaveNativeSession(ctx, changedCapture), store.ErrDuplicateMismatch)
+	checkpoint, err := s.GetNativeSession(ctx, request.Namespace, request.SessionName, capture.SessionUID)
+	require.NoError(t, err)
+	require.Equal(t, capture.Snapshot.Data, checkpoint.Snapshot.Data)
+}
+
 func TestNativeSessionRejectsChatTurnWithoutChangingCheckpoint(t *testing.T) {
 	for _, bound := range []bool{false, true} {
 		t.Run(map[bool]string{false: "staged import", true: "bound native Session"}[bound], func(t *testing.T) {
