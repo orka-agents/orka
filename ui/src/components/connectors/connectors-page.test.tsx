@@ -99,6 +99,18 @@ describe('ConnectorsPage', () => {
     expect(screen.getByRole('alert')).not.toHaveTextContent('orka connection complete')
   })
 
+  it('offers the sign-in and CLI fallback when completion answers not found', async () => {
+    // The API hides another person's Connection as 404, so a dashboard
+    // signed in as someone else must still get the fallback.
+    useProviders([github])
+    window.history.replaceState(null, '', '/settings/connectors?status=pending&connection=github-abc#completion=one-time')
+    server.use(http.post(`${API}/connections/github-abc/complete`, () => new HttpResponse('connection not found', { status: 404 })))
+    render(<ConnectorsPage search={{ status: 'pending', connection: 'github-abc' }} />)
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('sign in as the person who started this link'))
+    expect(screen.getByRole('alert')).toHaveTextContent('orka connection complete github-abc')
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+  })
+
   it('keeps the completion token for a retry when finishing fails', async () => {
     useProviders([github], [{ ...linked, state: 'Pending', ready: false }])
     window.history.replaceState(null, '', '/settings/connectors?status=pending&connection=github-abc#completion=one-time')

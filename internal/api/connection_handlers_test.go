@@ -1868,6 +1868,37 @@ func TestConnectionViewsRevalidateAgainstCurrentProvider(t *testing.T) {
 			t.Fatalf("widened scopes: view = %+v, want not ready with a scope message", view)
 		}
 	}
+
+	// The original configuration, but no longer accepted (its references
+	// broke or its generation moved on): resolution refuses the link.
+	updateProvider(func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.Scopes.Read = []string{"read:user"} })
+	unaccepted := &corev1alpha1.ConnectorProvider{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: "github"}, unaccepted); err != nil {
+		t.Fatal(err)
+	}
+	unaccepted.Status.Conditions = nil
+	if err := h.client.Status().Update(context.Background(), unaccepted); err != nil {
+		t.Fatal(err)
+	}
+	for _, view := range func() []ConnectionResponse { g, l := views(); return []ConnectionResponse{g, l} }() {
+		if view.Ready || !strings.Contains(view.Message, "not accepted") {
+			t.Fatalf("unaccepted provider: view = %+v, want not ready", view)
+		}
+	}
+
+	// The provider is deleted: the link keeps its tokens but is unusable.
+	provider := &corev1alpha1.ConnectorProvider{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: "github"}, provider); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.client.Delete(context.Background(), provider); err != nil {
+		t.Fatal(err)
+	}
+	for _, view := range func() []ConnectionResponse { g, l := views(); return []ConnectionResponse{g, l} }() {
+		if view.Ready || !strings.Contains(view.Message, "no longer configured") {
+			t.Fatalf("deleted provider: view = %+v, want not ready", view)
+		}
+	}
 }
 
 // TestConnectionCallbackRefusesModeChangeBeforeExchange covers a mode change

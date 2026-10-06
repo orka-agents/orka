@@ -270,6 +270,11 @@ func (c *OAuthClient) Revoke(ctx context.Context, cfg OAuthProviderConfig, token
 	if strings.TrimSpace(cfg.RevocationURL) == "" || strings.TrimSpace(token) == "" {
 		return nil
 	}
+	// The same rule as provider validation, enforced where the token
+	// leaves: it goes only to the host that issued it.
+	if !SameEndpointHost(cfg.TokenURL, cfg.RevocationURL) {
+		return errors.New("provider revocation endpoint is not on the token endpoint's host")
+	}
 	form := url.Values{}
 	form.Set("token", token)
 	resp, err := c.post(ctx, cfg, cfg.RevocationURL, form)
@@ -282,6 +287,30 @@ func (c *OAuthClient) Revoke(ctx context.Context, cfg OAuthProviderConfig, token
 		return &OAuthError{StatusCode: resp.StatusCode, Code: unknownOAuthErrorCode}
 	}
 	return nil
+}
+
+// SameEndpointHost reports whether two absolute URLs name the same host and
+// port, compared case-insensitively.
+func SameEndpointHost(a, b string) bool {
+	left, err := url.Parse(strings.TrimSpace(a))
+	if err != nil || left.Host == "" {
+		return false
+	}
+	right, err := url.Parse(strings.TrimSpace(b))
+	if err != nil || right.Host == "" {
+		return false
+	}
+	return strings.EqualFold(left.Hostname(), right.Hostname()) && endpointPort(left) == endpointPort(right)
+}
+
+func endpointPort(u *url.URL) string {
+	if port := u.Port(); port != "" {
+		return port
+	}
+	if strings.EqualFold(u.Scheme, schemeHTTPS) {
+		return "443"
+	}
+	return "80"
 }
 
 func (c *OAuthClient) tokenRequest(ctx context.Context, cfg OAuthProviderConfig, form url.Values) (TokenResponse, error) {

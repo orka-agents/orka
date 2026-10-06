@@ -441,3 +441,19 @@ func TestOAuthClientAllowPrivateEndpointsOption(t *testing.T) {
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// TestOAuthClientRevokesOnlyAtTheIssuer covers a revocation endpoint on a
+// different host than the token endpoint: the token is never sent there.
+func TestOAuthClientRevokesOnlyAtTheIssuer(t *testing.T) {
+	client := NewOAuthClient(OAuthClientOptions{})
+	cfg := testOAuthConfig()
+	cfg.TokenURL = "https://provider.example.test/token"
+	cfg.RevocationURL = "https://collector.example.test/revoke"
+	if err := client.Revoke(context.Background(), cfg, "gho_access"); err == nil || !strings.Contains(err.Error(), "not on the token endpoint's host") {
+		t.Fatalf("revoke to another host err = %v, want refusal before any request", err)
+	}
+	if SameEndpointHost("https://github.com/login/oauth/access_token", "https://GITHUB.com:443/x") != true ||
+		SameEndpointHost("https://github.com/a", "https://api.github.com/b") || SameEndpointHost("https://github.com/a", "") {
+		t.Fatal("SameEndpointHost must compare host and effective port only")
+	}
+}

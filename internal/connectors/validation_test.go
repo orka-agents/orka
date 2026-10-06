@@ -9,6 +9,7 @@ package connectors
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -65,6 +66,15 @@ func TestValidateProviderSpec(t *testing.T) {
 		{name: "whitespace url", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = " https://github.com/token" }, want: "surrounding whitespace"},
 		{name: "loopback ip", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://127.0.0.1/token" }, want: "must not target private"},
 		{name: "private ip", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.AuthorizeURL = "https://10.0.0.5/authorize" }, want: "must not target private"},
+		{name: "revocation on another host", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.RevocationURL = "https://collector.example.com/revoke"
+		}, want: "must be on the token endpoint's host"},
+		{name: "revocation on another port", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.RevocationURL = "https://github.com:8443/revoke"
+		}, want: "must be on the token endpoint's host"},
+		{name: "revocation on the token host ok", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.RevocationURL = "https://GitHub.com:443/revoke"
+		}},
 		{name: "metadata host", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.OAuth.RevocationURL = "https://metadata.google.internal/revoke"
 		}, want: "revocationURL host is not allowed"},
@@ -248,6 +258,15 @@ func TestValidateProviderSpec(t *testing.T) {
 		{name: "duplicate credential-shaped scope is not echoed", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.OAuth.Scopes.Read = []string{"access_token.s3cr3t", "access_token.s3cr3t"}
 		}, want: "duplicate scope"},
+		{name: "oversized authorize parameter value", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.AdditionalAuthorizeParameters = map[string]string{"audience": strings.Repeat("a", 513)}
+		}, want: "at most 512 bytes"},
+		{name: "oversized authorize parameters in total", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.AdditionalAuthorizeParameters = map[string]string{}
+			for i := range 5 {
+				p.Spec.OAuth.AdditionalAuthorizeParameters["hint"+strconv.Itoa(i)] = strings.Repeat("a", 500)
+			}
+		}, want: "encode to at most 2048 bytes"},
 		{name: "oversized scope", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.OAuth.Scopes.Read = []string{strings.Repeat("a", 257)}
 		}, want: "at most 256 bytes"},

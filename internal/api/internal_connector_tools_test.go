@@ -970,3 +970,19 @@ func TestConnectorToolTimeoutClamps(t *testing.T) {
 		t.Fatalf("timeout = %v, want the default", got)
 	}
 }
+
+// TestConnectorBindingDigestSeparatesGrants covers a re-link of the same
+// Connection object: each consent is a distinct grant, so the audit digest
+// recorded with an approved call differs, as the ACP broker's does.
+func TestConnectorBindingDigestSeparatesGrants(t *testing.T) {
+	first := corev1alpha1.ConnectionBinding{PolicyName: "github-conn", UID: "conn-uid", Generation: 3, GrantSequence: 1}
+	relinked := first
+	relinked.GrantSequence = 2
+	if connectorBindingDigest(first) == connectorBindingDigest(relinked) {
+		t.Fatal("calls under different grants must record different connection digests")
+	}
+	again := first
+	if connectorBindingDigest(first) != connectorBindingDigest(again) {
+		t.Fatal("the digest must be stable for one grant")
+	}
+}

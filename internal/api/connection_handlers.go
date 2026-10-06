@@ -271,16 +271,25 @@ func connectionResponse(connection *corev1alpha1.Connection) ConnectionResponse 
 }
 
 // revalidateConnectionView applies the checks credential resolution makes
-// against the current provider to a Ready view: a provider changed since
-// consent, or one that now requires scopes the grant lacks, refuses the
-// token at once, before the Connection's own conditions catch up. The
+// against the current provider to a Ready view: a provider that is gone or
+// not accepted, one changed since consent, or one that now requires scopes
+// the grant lacks refuses the token at once, before the Connection's own
+// conditions catch up. The
 // dashboard and CLI only see this view, so it must not advertise a link
 // that resolution refuses.
 func revalidateConnectionView(view *ConnectionResponse, connection *corev1alpha1.Connection, provider *corev1alpha1.ConnectorProvider) {
-	if view == nil || !view.Ready || connection == nil || provider == nil {
+	if view == nil || !view.Ready || connection == nil {
 		return
 	}
 	switch {
+	case provider == nil:
+		// The Connection keeps its tokens until disconnected, but nothing
+		// resolves a link whose provider is gone.
+		view.Ready = false
+		view.Message = "the provider is no longer configured; this link cannot be used and should be disconnected"
+	case !connectors.ProviderAccepted(provider):
+		view.Ready = false
+		view.Message = "the provider is not accepted right now, so this link cannot be used"
 	case !connectors.ConsentMatchesProvider(connection, provider):
 		view.Ready = false
 		view.Message = "the provider changed since you consented; reconnect this link before its tools can run"
@@ -447,7 +456,9 @@ func (h *Handlers) GetConnection(c fiber.Ctx) error {
 	switch err := h.client.Get(c.Context(), types.NamespacedName{Namespace: connection.Namespace, Name: connection.Spec.ProviderRef.Name}, provider); {
 	case err == nil:
 		revalidateConnectionView(&view, connection, provider)
-	case !apierrors.IsNotFound(err):
+	case apierrors.IsNotFound(err):
+		revalidateConnectionView(&view, connection, nil)
+	default:
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to read connector provider")
 	}
 	return c.JSON(view)

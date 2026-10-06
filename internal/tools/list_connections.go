@@ -106,8 +106,11 @@ func (t *ListConnectionsTool) Execute(ctx context.Context, _ json.RawMessage) (s
 	}
 	// The person's Connections are listed on their own, so a link whose
 	// provider was removed (it keeps its tokens until disconnected) is
-	// still reported, as unusable, rather than silently dropped.
-	owned, err := connectors.ListSubjectConnections(ctx, reader, tc.Namespace, requester)
+	// still reported, as unusable, rather than silently dropped. Ownership
+	// comes from spec.subject, not the index label, the same listing
+	// credential resolution uses, so a link created outside the API or with
+	// its label stripped is never reported as missing.
+	owned, err := connectors.ListSubjectConnectionsAuthoritative(ctx, reader, tc.Namespace, requester)
 	if err != nil {
 		return classifyChatK8sErr(err)
 	}

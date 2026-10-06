@@ -56,6 +56,11 @@ const (
 	// to scopes a provider reports, so a scope can never push the
 	// authorization URL past what browsers and proxies accept.
 	maxScopeBytes = 256
+	// maxAuthorizeParameterValueBytes and maxAuthorizeParametersEncodedBytes
+	// keep static authorize parameters from pushing the authorization URL
+	// past what browsers, proxies, and providers accept.
+	maxAuthorizeParameterValueBytes    = 512
+	maxAuthorizeParametersEncodedBytes = 2048
 
 	// MaxHTTPToolTimeout bounds curated HTTP tool requests.
 	MaxHTTPToolTimeout = 10 * time.Minute
@@ -289,6 +294,12 @@ func ValidateProviderSpec(provider *corev1alpha1.ConnectorProvider, knownBuiltin
 	if issue := validateEndpointURL("revocationURL", oauth.RevocationURL, false); issue != nil {
 		return issue
 	}
+	// Disconnect posts the person's tokens to the revocation endpoint. On
+	// another host than the issuer's token endpoint it could collect tokens
+	// another service issued (a GitHub provider's linked tokens, say).
+	if strings.TrimSpace(oauth.RevocationURL) != "" && !SameEndpointHost(oauth.TokenURL, oauth.RevocationURL) {
+		return invalid("oauth.revocationURL must be on the token endpoint's host; tokens are only sent back to their issuer")
+	}
 	if !validClientID(oauth.ClientID) {
 		return invalid("oauth.clientID is required and must be printable ASCII without surrounding whitespace")
 	}
@@ -320,6 +331,18 @@ func ValidateProviderSpec(provider *corev1alpha1.ConnectorProvider, knownBuiltin
 		if !validAuthorizeParameterValue(value) {
 			return invalid("oauth.additionalAuthorizeParameters values must be printable text without control bytes")
 		}
+		if len(value) > maxAuthorizeParameterValueBytes {
+			return invalid(fmt.Sprintf("oauth.additionalAuthorizeParameters values must be at most %d bytes", maxAuthorizeParameterValueBytes))
+		}
+	}
+	// The parameters ride in the browser's authorization URL, so their
+	// encoded total is bounded like the scopes.
+	encoded := url.Values{}
+	for key, value := range oauth.AdditionalAuthorizeParameters {
+		encoded.Set(key, value)
+	}
+	if len(encoded.Encode()) > maxAuthorizeParametersEncodedBytes {
+		return invalid(fmt.Sprintf("oauth.additionalAuthorizeParameters must encode to at most %d bytes", maxAuthorizeParametersEncodedBytes))
 	}
 	return validateTools(provider, knownBuiltin)
 }

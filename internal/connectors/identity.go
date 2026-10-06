@@ -60,28 +60,6 @@ func ConnectionSubjectLabelValue(issuer, subject string) string {
 	return SubjectDigest(issuer, subject)[:connectionSubjectLabelLength]
 }
 
-// ListSubjectConnections returns the person's Connections in namespace:
-// the label narrows the list, and the exact subject on each object is
-// what admits it, so a digest collision never lends somebody else's link.
-func ListSubjectConnections(ctx context.Context, reader client.Reader, namespace string, requester *corev1alpha1.RequestedBy) ([]corev1alpha1.Connection, error) {
-	if reader == nil || requester == nil {
-		return nil, nil
-	}
-	list := &corev1alpha1.ConnectionList{}
-	if err := reader.List(ctx, list, client.InNamespace(namespace),
-		client.MatchingLabels{ConnectionSubjectLabel: ConnectionSubjectLabelValue(requester.Issuer, requester.Subject)}); err != nil {
-		return nil, err
-	}
-	var owned []corev1alpha1.Connection
-	for i := range list.Items {
-		connection := &list.Items[i]
-		if connection.Spec.Subject.Issuer == requester.Issuer && connection.Spec.Subject.Subject == requester.Subject {
-			owned = append(owned, *connection)
-		}
-	}
-	return owned, nil
-}
-
 // ConnectionProviderLabel indexes Connections by provider.
 const ConnectionProviderLabel = "orka.ai/connector-provider"
 
