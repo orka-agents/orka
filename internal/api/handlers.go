@@ -103,6 +103,7 @@ type Handlers struct {
 	contextTokenAuthorization ContextTokenAuthorizationConfig
 	resultStore               store.ResultStore
 	sessionStore              store.SessionStore
+	nativeSessionStore        store.NativeSessionImportStore
 	sessionManager            *controller.SessionManager
 	planStore                 store.PlanStore
 	healthChecker             store.HealthChecker
@@ -147,6 +148,7 @@ type HandlersConfig struct {
 
 // NewHandlers creates a new Handlers instance
 func NewHandlers(cfg HandlersConfig) *Handlers {
+	nativeSessions, _ := cfg.SessionStore.(store.NativeSessionImportStore)
 	return &Handlers{
 		client:                    cfg.Client,
 		apiReader:                 cfg.APIReader,
@@ -157,6 +159,7 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		contextTokenAuthorization: cfg.ContextTokenAuthorization,
 		resultStore:               cfg.ResultStore,
 		sessionStore:              cfg.SessionStore,
+		nativeSessionStore:        nativeSessions,
 		sessionManager:            cfg.SessionManager,
 		planStore:                 cfg.PlanStore,
 		healthChecker:             cfg.HealthChecker,

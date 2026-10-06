@@ -289,6 +289,28 @@ func (c *Client) FinalizeRuntimeSessionPublication(ctx context.Context, sessionI
 	return &response, nil
 }
 
+func (c *Client) CaptureNativeSession(ctx context.Context, sessionID RuntimeSessionID, request CaptureNativeSessionRequest) (*CaptureNativeSessionResponse, error) {
+	const operation = "capture_native_session"
+	if err := request.ValidateAt(time.Now().UTC()); err != nil {
+		return nil, c.validationError(operation, err)
+	}
+	relative, err := RuntimeSessionNativeSessionPath(sessionID)
+	if err != nil {
+		return nil, c.validationError(operation, err)
+	}
+	var response CaptureNativeSessionResponse
+	if err := c.mutateJSON(ctx, operation, http.MethodPost, relative, request.Metadata, request, &response); err != nil {
+		return nil, err
+	}
+	if err := response.ValidateFor(request); err != nil {
+		return nil, c.protocolError(operation, 0, err)
+	}
+	if response.Session.RuntimeSessionID != sessionID {
+		return nil, c.protocolError(operation, 0, fmt.Errorf("native capture response session ID does not match request path"))
+	}
+	return &response, nil
+}
+
 func (c *Client) DeleteRuntimeSession(ctx context.Context, sessionID RuntimeSessionID, request DeleteRuntimeSessionRequest) (*DeleteRuntimeSessionResponse, error) {
 	const operation = "delete_runtime_session"
 	now := time.Now().UTC()
@@ -906,19 +928,20 @@ func validateHTTPErrorMapping(status int, response ErrorResponse) error {
 		return nil
 	}
 	allowed := map[ErrorCode]map[int]struct{}{
-		ErrorCodeInvalidRequest:      {http.StatusBadRequest: {}, http.StatusNotFound: {}, http.StatusConflict: {}, http.StatusNotImplemented: {}},
-		ErrorCodeUnauthenticated:     {http.StatusUnauthorized: {}},
-		ErrorCodeForbidden:           {http.StatusForbidden: {}},
-		ErrorCodeExpired:             {http.StatusGone: {}},
-		ErrorCodeStaleFence:          {http.StatusGone: {}},
-		ErrorCodeDigestConflict:      {http.StatusConflict: {}},
-		ErrorCodeAlreadyAccepted:     {http.StatusConflict: {}},
-		ErrorCodeSettled:             {http.StatusGone: {}},
-		ErrorCodeRateLimited:         {http.StatusTooManyRequests: {}},
-		ErrorCodeSessionPoisoned:     {http.StatusConflict: {}, http.StatusBadGateway: {}, http.StatusInternalServerError: {}},
-		ErrorCodeWorkspaceResumeLost: {http.StatusConflict: {}},
-		ErrorCodeOutcomeUnknown:      {http.StatusInternalServerError: {}},
-		ErrorCodeCleanupUnproven:     {http.StatusConflict: {}},
+		ErrorCodeInvalidRequest:           {http.StatusBadRequest: {}, http.StatusNotFound: {}, http.StatusConflict: {}, http.StatusNotImplemented: {}},
+		ErrorCodeUnauthenticated:          {http.StatusUnauthorized: {}},
+		ErrorCodeForbidden:                {http.StatusForbidden: {}},
+		ErrorCodeExpired:                  {http.StatusGone: {}},
+		ErrorCodeStaleFence:               {http.StatusGone: {}},
+		ErrorCodeDigestConflict:           {http.StatusConflict: {}},
+		ErrorCodeAlreadyAccepted:          {http.StatusConflict: {}},
+		ErrorCodeSettled:                  {http.StatusGone: {}},
+		ErrorCodeRateLimited:              {http.StatusTooManyRequests: {}},
+		ErrorCodeSessionPoisoned:          {http.StatusConflict: {}, http.StatusBadGateway: {}, http.StatusInternalServerError: {}},
+		ErrorCodeNativeCaptureUnsupported: {http.StatusUnprocessableEntity: {}},
+		ErrorCodeWorkspaceResumeLost:      {http.StatusConflict: {}},
+		ErrorCodeOutcomeUnknown:           {http.StatusInternalServerError: {}},
+		ErrorCodeCleanupUnproven:          {http.StatusConflict: {}},
 	}
 	statuses, ok := allowed[response.Code]
 	if !ok {

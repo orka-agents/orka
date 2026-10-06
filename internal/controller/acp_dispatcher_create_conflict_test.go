@@ -188,6 +188,7 @@ func newTaskScopedCreateConflictFixture(
 	name string,
 	taskUID types.UID,
 	serverFactory func(profile harnessv2.RuntimeProfile, digest harnessv2.ProfileDigest, kubeClient *client.Client) *httptest.Server,
+	taskOptions ...func(*corev1alpha1.Task),
 ) *taskScopedCreateConflictFixture {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -208,6 +209,9 @@ func newTaskScopedCreateConflictFixture(
 			State: corev1alpha1.TaskExecutionStateQueued, Attempt: 1, PromptID: promptID, RuntimePoolName: "pool", RuntimePoolUID: "pool-uid",
 			RequestDigest: testControlDigestForDispatcher(name + "-request"), ControllerEpoch: 1,
 		}},
+	}
+	for _, option := range taskOptions {
+		option(task)
 	}
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "agent", UID: types.UID("agent-uid"), Generation: 1},
@@ -254,7 +258,7 @@ func newTaskScopedCreateConflictFixture(
 	}
 	kubeClient = fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.RuntimePool{}).
-		WithObjects(task, pool, secret, agent).Build()
+		WithObjects(task, pool, secret, agent, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default", UID: "default-namespace-uid"}}).Build()
 	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), name+".db"))
 	if err != nil {
 		t.Fatal(err)

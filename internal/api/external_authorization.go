@@ -98,6 +98,9 @@ var externalAPIPolicies = map[string]apiRoutePolicy{
 
 	"GET /api/v1/sessions":            coreAPIPolicy("list", "sessions", ""),
 	"GET /api/v1/sessions/:id":        coreAPIPolicy("get", "sessions", "id"),
+	"GET /api/v1/sessions/:id/native": coreAPIPolicy("get", "sessions", "id"),
+	"POST /api/v1/sessions/:id/native": coreAPIPolicy("create", "sessions", "",
+		apiResourcePermission{corev1alpha1.GroupVersion.Group, "sessions", "get", "id"}),
 	"GET /api/v1/sessions/:id/events": coreAPIPolicy("get", "sessions", "id"),
 	"GET /api/v1/sessions/:id/stream": coreAPIPolicy("get", "sessions", "id"),
 	"DELETE /api/v1/sessions/:id":     coreAPIPolicy("delete", "sessions", "id"),

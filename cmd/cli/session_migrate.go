@@ -1,0 +1,292 @@
+//go:build !windows
+
+package main
+
+import (
+	"bytes"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+
+	"github.com/orka-agents/orka/internal/codexstate"
+	"github.com/spf13/cobra"
+	"golang.org/x/sys/unix"
+)
+
+type migrationState struct {
+	Direction   string `json:"direction"`
+	Server      string `json:"server"`
+	Namespace   string `json:"namespace"`
+	Session     string `json:"session"`
+	Home        string `json:"home"`
+	Thread      string `json:"thread,omitempty"`
+	CWD         string `json:"cwd,omitempty"`
+	OperationID string `json:"operationID"`
+	Data        []byte `json:"data"`
+}
+
+func migrationDir(name string, create bool) (string, error) {
+	abs, err := filepath.Abs(name)
+	if err != nil {
+		return "", err
+	}
+	if create {
+		if err := os.MkdirAll(abs, 0o700); err != nil {
+			return "", err
+		}
+	}
+	return filepath.EvalSymlinks(abs)
+}
+
+func privateMigrationJournal(name, home string) (string, error) {
+	dir, err := migrationDir(name, true)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
+		return "", errors.New("migration journal must be a private directory (0700)")
+	}
+	for _, pair := range [][2]string{{home, dir}, {dir, home}} {
+		rel, err := filepath.Rel(pair[0], pair[1])
+		if err != nil {
+			return "", err
+		}
+		if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return "", errors.New("migration journal and Codex home must not overlap")
+		}
+	}
+	return dir, nil
+}
+
+func readMigrationState(journal string, expected migrationState) (*migrationState, error) {
+	file, err := os.OpenFile(filepath.Join(journal, "request.json"), os.O_RDONLY|unix.O_NOFOLLOW, 0)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() > 1<<20 {
+		return nil, errors.New("invalid migration journal")
+	}
+	var saved migrationState
+	decoder := json.NewDecoder(io.LimitReader(file, (1<<20)+1))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&saved); err != nil {
+		return nil, errors.New("invalid migration journal")
+	}
+	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
+		return nil, errors.New("invalid migration journal tail")
+	}
+	if !bytes.Equal(identityJSON(saved), identityJSON(expected)) {
+		return nil, errors.New("migration journal belongs to another operation or target")
+	}
+	if saved.OperationID == "" || len(saved.Data) == 0 {
+		return nil, errors.New("incomplete migration journal")
+	}
+	return &saved, nil
+}
+
+// Compare only fixed operation identity; Data is deliberately retained from the
+// first request so an uncertain retry cannot capture a newer conversation.
+func identityJSON(state migrationState) []byte {
+	state.Data, state.OperationID = nil, ""
+	data, _ := json.Marshal(state)
+	return data
+}
+
+func persistMigrationState(journal string, state migrationState) error {
+	return publishMigrationJSON(journal, "request.json", state)
+}
+
+func publishMigrationJSON(journal, target string, value any) error {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	file, err := os.CreateTemp(journal, ".request-")
+	if err != nil {
+		return err
+	}
+	name := file.Name()
+	defer func() { _ = os.Remove(name) }()
+	_, err = file.Write(data)
+	if err == nil {
+		err = file.Sync()
+	}
+	err = errors.Join(err, file.Close())
+	if err != nil {
+		return err
+	}
+	// Publish without replacing another invocation's immutable request.
+	if err := os.Link(name, filepath.Join(journal, target)); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			old, readErr := os.ReadFile(filepath.Join(journal, target))
+			if readErr == nil && bytes.Equal(old, data) {
+				return nil
+			}
+		}
+		return err
+	}
+	dir, err := os.Open(journal)
+	if err != nil {
+		return err
+	}
+	return errors.Join(dir.Sync(), dir.Close())
+}
+
+func migrationOperationID() (string, error) {
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", err
+	}
+	return "native-" + hex.EncodeToString(random[:]), nil
+}
+
+func newSessionMigrateCmd() *cobra.Command {
+	cmd := &cobra.Command{Use: "migrate", Short: "Move Codex 0.160.0 paginated conversation state"}
+	cmd.AddCommand(newSessionMigrateImportCmd(), newSessionMigrateExportCmd())
+	return cmd
+}
+
+func newSessionMigrateImportCmd() *cobra.Command {
+	var home, thread, journal string
+	var stopped bool
+	cmd := &cobra.Command{
+		Use: "import <new-session-name>", Short: "Stage a stopped local Codex thread for its first Orka Task", Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if !stopped {
+				return errors.New("stop all source Codex writers, then pass --source-stopped")
+			}
+			resolvedHome, err := migrationDir(home, false)
+			if err != nil {
+				return err
+			}
+			resolvedJournal, err := privateMigrationJournal(journal, resolvedHome)
+			if err != nil {
+				return err
+			}
+			c := newClientFromCmd(cmd)
+			expected := migrationState{Direction: "import", Server: c.BaseURL, Namespace: c.Namespace, Session: args[0], Home: resolvedHome, Thread: thread}
+			saved, err := readMigrationState(resolvedJournal, expected)
+			if err != nil {
+				return err
+			}
+			if saved == nil {
+				expected.Data, err = codexstate.Capture(cmd.Context(), resolvedHome, thread)
+				if err != nil {
+					return err
+				}
+				expected.OperationID, err = migrationOperationID()
+				if err != nil {
+					return err
+				}
+				if err := persistMigrationState(resolvedJournal, expected); err != nil {
+					return fmt.Errorf("persist migration request before import: %w", err)
+				}
+				saved = &expected
+			}
+			receipt, err := c.ImportNativeSession(cmd.Context(), args[0], saved.OperationID, saved.Data)
+			if err != nil {
+				return fmt.Errorf("%w; retry using the same --journal-dir", err)
+			}
+			if receipt.OperationID != saved.OperationID || receipt.DataDigest != codexstate.DataDigest(saved.Data) || receipt.ProviderSessionID != thread || receipt.SessionName != args[0] || receipt.Namespace != c.Namespace {
+				return errors.New("native import receipt does not match the saved request")
+			}
+			if err := publishMigrationJSON(resolvedJournal, "import-receipt.json", receipt); err != nil {
+				return fmt.Errorf("save import receipt: %w; retry using the same --journal-dir", err)
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Staged thread %s in Session %s. Submit a Task with this Session to continue.\n", thread, args[0])
+			return err
+		},
+	}
+	cmd.Flags().StringVar(&home, "codex-home", "", "Source CODEX_HOME (must already exist)")
+	cmd.Flags().StringVar(&thread, "thread", "", "Native thread UUID")
+	cmd.Flags().StringVar(&journal, "journal-dir", "", "Private directory retained for exact retries")
+	cmd.Flags().BoolVar(&stopped, "source-stopped", false, "Confirm every source Codex writer has stopped")
+	for _, flag := range []string{"codex-home", "thread", "journal-dir"} {
+		_ = cmd.MarkFlagRequired(flag)
+	}
+	return cmd
+}
+
+func newSessionMigrateExportCmd() *cobra.Command {
+	var home, cwd, journal, binary string
+	cmd := &cobra.Command{
+		Use: "export <session-name>", Short: "Install a saved Orka checkpoint into a fresh local Codex home", Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			version, err := exec.CommandContext(cmd.Context(), binary, "--version").Output()
+			if err != nil || strings.TrimSpace(string(version)) != "codex-cli 0.160.0" {
+				return errors.New("destination requires codex-cli 0.160.0 (--codex-bin)")
+			}
+			resolvedHome, err := migrationDir(home, true)
+			if err != nil {
+				return err
+			}
+			resolvedCWD, err := migrationDir(cwd, false)
+			if err != nil {
+				return err
+			}
+			resolvedJournal, err := privateMigrationJournal(journal, resolvedHome)
+			if err != nil {
+				return err
+			}
+			c := newClientFromCmd(cmd)
+			expected := migrationState{Direction: "export", Server: c.BaseURL, Namespace: c.Namespace, Session: args[0], Home: resolvedHome, CWD: resolvedCWD}
+			saved, err := readMigrationState(resolvedJournal, expected)
+			if err != nil {
+				return err
+			}
+			if saved == nil {
+				response, err := c.ExportNativeSession(cmd.Context(), args[0])
+				if err != nil {
+					return err
+				}
+				summary, err := codexstate.Inspect(cmd.Context(), response.Data)
+				if err != nil {
+					return err
+				}
+				if summary.DataDigest != response.DataDigest || summary.ThreadID != response.ProviderSessionID {
+					return errors.New("native export identity mismatch")
+				}
+				expected.Data = response.Data
+				expected.OperationID, err = migrationOperationID()
+				if err != nil {
+					return err
+				}
+				if err := persistMigrationState(resolvedJournal, expected); err != nil {
+					return err
+				}
+				saved = &expected
+			}
+			receipt, err := codexstate.Install(cmd.Context(), saved.Data, resolvedHome, resolvedCWD, resolvedJournal)
+			if err != nil {
+				return fmt.Errorf("install outcome %s: %w; retain the journal and retry it", receipt.Outcome, err)
+			}
+			summary, err := codexstate.Inspect(cmd.Context(), saved.Data)
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Installed thread %s in %s. Authenticate this home with current local credentials, then resume that UUID from %s.\n", summary.ThreadID, resolvedHome, resolvedCWD)
+			return err
+		},
+	}
+	cmd.Flags().StringVar(&home, "codex-home", "", "Fresh isolated destination CODEX_HOME")
+	cmd.Flags().StringVar(&cwd, "cwd", "", "Existing destination working directory")
+	cmd.Flags().StringVar(&journal, "journal-dir", "", "Private directory outside CODEX_HOME, retained for retries")
+	cmd.Flags().StringVar(&binary, "codex-bin", "codex", "Codex 0.160.0 executable")
+	for _, flag := range []string{"codex-home", "cwd", "journal-dir"} {
+		_ = cmd.MarkFlagRequired(flag)
+	}
+	return cmd
+}

@@ -3806,6 +3806,7 @@ Available Commands:
   follow      Follow session execution events
   get         Get a session resource
   list        List session resources
+  migrate     Move Codex 0.160.0 paginated conversation state
 
 Flags:
   -h, --help   help for session
@@ -3974,6 +3975,80 @@ Flags:
   -h, --help              help for list
       --limit int         Maximum number of results (default 100)
   -o, --output string     Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka session migrate`
+
+```text
+Move Codex 0.160.0 paginated conversation state
+
+Usage:
+  orka session migrate [command]
+
+Available Commands:
+  export      Install a saved Orka checkpoint into a fresh local Codex home
+  import      Stage a stopped local Codex thread for its first Orka Task
+
+Flags:
+  -h, --help   help for migrate
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka session migrate [command] --help" for more information about a command.
+```
+
+## `orka session migrate export`
+
+```text
+Install a saved Orka checkpoint into a fresh local Codex home
+
+Usage:
+  orka session migrate export <session-name> [flags]
+
+Flags:
+      --codex-bin string     Codex 0.160.0 executable (default "codex")
+      --codex-home string    Fresh isolated destination CODEX_HOME
+      --cwd string           Existing destination working directory
+  -h, --help                 help for export
+      --journal-dir string   Private directory outside CODEX_HOME, retained for retries
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka session migrate import`
+
+```text
+Stage a stopped local Codex thread for its first Orka Task
+
+Usage:
+  orka session migrate import <new-session-name> [flags]
+
+Flags:
+      --codex-home string    Source CODEX_HOME (must already exist)
+  -h, --help                 help for import
+      --journal-dir string   Private directory retained for exact retries
+      --source-stopped       Confirm every source Codex writer has stopped
+      --thread string        Native thread UUID
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file

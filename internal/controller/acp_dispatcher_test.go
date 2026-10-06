@@ -3823,8 +3823,12 @@ type dispatcherRuntimeServerOptions struct {
 	// resident makes the runtime keep reporting the exact requested session as
 	// Idle, as a supervisor does after an earlier send of the same create
 	// already created it.
-	rejectCreate func(request harnessv2.CreateRuntimeSessionRequest) (status int, response *harnessv2.ErrorResponse, resident bool)
-	onDelete     func(harnessv2.DeleteRuntimeSessionRequest)
+	rejectCreate            func(request harnessv2.CreateRuntimeSessionRequest) (status int, response *harnessv2.ErrorResponse, resident bool)
+	onDelete                func(harnessv2.DeleteRuntimeSessionRequest)
+	nativeSnapshot          *harnessv2.NativeSessionSnapshot
+	nativeInstallUnresolved bool
+	onNativeCapture         func(harnessv2.CaptureNativeSessionRequest) error
+	onPrompt                func(harnessv2.StartPromptRequest)
 }
 
 func newDispatcherRuntimeServerWithOptions(
@@ -3858,7 +3862,11 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 		descriptorMu.Lock()
 		current := descriptor
 		descriptorMu.Unlock()
-		writeDispatcherJSON(w, dispatcherRuntimeStatusResponseForPool(digest, poolUID, current))
+		response := dispatcherRuntimeStatusResponseForPool(digest, poolUID, current)
+		if options.nativeInstallUnresolved && len(response.Sessions) > 0 {
+			response.Sessions[0].NativeInstallUnresolved = true
+		}
+		writeDispatcherJSON(w, response)
 	})
 	mux.HandleFunc("GET "+harnessv2.CapabilitiesPath, func(w http.ResponseWriter, _ *http.Request) {
 		writeDispatcherJSON(w, harnessv2.CapabilitiesResponse{
@@ -3868,6 +3876,7 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 			Provider:                          harnessv2.ProviderCapabilities{ProviderKinds: []string{profile.ProviderKind}, Models: []string{profile.Model}, SupportsCancel: true, SupportsPermissions: !options.disablePermissions, SupportsTools: true},
 			WorkspaceGovernance:               harnessv2.StrictWorkspaceGovernanceCapabilities(),
 			SupportsDrain:                     true,
+			SupportsNativeSessions:            options.nativeSnapshot != nil,
 			SupportsAgentSessionConfiguration: !options.disableAgentSessionConfiguration,
 		})
 	})
@@ -3890,6 +3899,14 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 			SupervisorBootID: request.Metadata.Fence.SupervisorBootID, RuntimeProfileDigest: request.Metadata.Fence.RuntimeProfileDigest,
 			State: harnessv2.RuntimeSessionStateIdle, ProviderSessionID: "provider-session", WorkspaceBaseline: request.Workspace.Baseline,
 			CreatedAt: now, LastTransitionAt: now,
+		}
+		if request.NativeRestore != nil {
+			created.ProviderSessionID = request.NativeRestore.Snapshot.ProviderSessionID
+			created.NativeRestoration = &harnessv2.NativeSessionRestoration{DataDigest: request.NativeRestore.Snapshot.DataDigest, ProviderSessionID: created.ProviderSessionID, Loaded: true}
+		}
+		if options.nativeInstallUnresolved {
+			created.State = harnessv2.RuntimeSessionStatePoisoned
+			created.NativeRestoration = nil
 		}
 		if options.rejectCreate != nil {
 			if status, response, resident := options.rejectCreate(request); response != nil {
@@ -3916,6 +3933,9 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 			t.Errorf("decode prompt: %v", err)
 			w.WriteHeader(http.StatusBadRequest)
 			return
+		}
+		if options.onPrompt != nil {
+			options.onPrompt(request)
 		}
 		w.Header().Set("Content-Type", harnessv2.NDJSONMediaType)
 		encoder, err := harnessv2.NewEventEncoder(w, harnessv2.EventStreamLimits{
@@ -4006,6 +4026,37 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 			},
 		})
 	})
+	mux.HandleFunc("POST /v2/runtime-sessions/{sessionID}/native-session", func(w http.ResponseWriter, r *http.Request) {
+		var request harnessv2.CaptureNativeSessionRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode native capture: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if options.onNativeCapture != nil {
+			if err := options.onNativeCapture(request); err != nil {
+				status, code, retryable := http.StatusConflict, harnessv2.ErrorCodeAlreadyAccepted, true
+				if clientErr, ok := errors.AsType[*harnessv2.ClientError](err); ok {
+					status, code, retryable = clientErr.StatusCode, clientErr.Code, clientErr.Retryable
+				}
+				writeDispatcherJSONStatus(w, status, harnessv2.ErrorResponse{Protocol: harnessv2.ProtocolVersion, Code: code, Message: "native capture rejected by test runtime", Retryable: retryable})
+				return
+			}
+		}
+		if options.nativeSnapshot == nil {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		snapshot := *options.nativeSnapshot
+		snapshot.RuntimeSessionUID = request.Metadata.Fence.RuntimeSessionUID
+		snapshot.RuntimeProfileDigest = request.Metadata.Fence.RuntimeProfileDigest
+		descriptorMu.Lock()
+		descriptor.ProviderSessionID = snapshot.ProviderSessionID
+		descriptor.State = harnessv2.RuntimeSessionStatePoisoned
+		captured := descriptor
+		descriptorMu.Unlock()
+		writeDispatcherJSON(w, harnessv2.CaptureNativeSessionResponse{Protocol: harnessv2.ProtocolVersion, Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh}, Session: captured, Snapshot: snapshot})
+	})
 	mux.HandleFunc("DELETE /v2/runtime-sessions/{sessionID}", func(w http.ResponseWriter, r *http.Request) {
 		var request harnessv2.DeleteRuntimeSessionRequest
 		_ = json.NewDecoder(r.Body).Decode(&request)
@@ -4049,7 +4100,7 @@ func dispatcherRuntimeStatusResponseForPool(
 	if descriptor.RuntimeSessionUID != "" {
 		response.Sessions = append(response.Sessions, harnessv2.RuntimeSessionStatus{
 			RuntimeSessionID: descriptor.RuntimeSessionID, RuntimeSessionUID: descriptor.RuntimeSessionUID,
-			Generation: descriptor.Generation, State: descriptor.State, LastTransitionAt: descriptor.LastTransitionAt,
+			Generation: descriptor.Generation, State: descriptor.State, LastTransitionAt: descriptor.LastTransitionAt, NativeRestoration: descriptor.NativeRestoration,
 		})
 		response.Pressure.ResidentSessions = 1
 	}

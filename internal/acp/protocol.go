@@ -13,6 +13,7 @@ const (
 	MethodInitialize        = "initialize"
 	MethodAuthenticate      = "authenticate"
 	MethodSessionNew        = "session/new"
+	MethodSessionLoad       = "session/load"
 	MethodSessionPrompt     = "session/prompt"
 	MethodSessionCancel     = "session/cancel"
 	MethodSessionUpdate     = "session/update"
@@ -151,6 +152,20 @@ type NewSessionRequest struct {
 
 type NewSessionResponse struct {
 	SessionID     string            `json:"sessionId"`
+	Modes         json.RawMessage   `json:"modes,omitempty"`
+	ConfigOptions []json.RawMessage `json:"configOptions,omitempty"`
+	Meta          Meta              `json:"_meta,omitempty"`
+}
+
+type LoadSessionRequest struct {
+	SessionID             string      `json:"sessionId"`
+	CWD                   string      `json:"cwd"`
+	AdditionalDirectories []string    `json:"additionalDirectories,omitempty"`
+	MCPServers            []MCPServer `json:"mcpServers"`
+	Meta                  Meta        `json:"_meta,omitempty"`
+}
+
+type LoadSessionResponse struct {
 	Modes         json.RawMessage   `json:"modes,omitempty"`
 	ConfigOptions []json.RawMessage `json:"configOptions,omitempty"`
 	Meta          Meta              `json:"_meta,omitempty"`

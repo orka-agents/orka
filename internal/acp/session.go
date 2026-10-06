@@ -26,8 +26,11 @@ type RuntimeSessionConfig struct {
 	Process        ProcessConfig
 	MCPServers     []MCPServer
 	NewSessionMeta Meta
-	AuthMethodID   string
-	ClientInfo     Implementation
+	// LoadSessionID requests an installed native provider session. Failure to
+	// advertise or complete load must fail creation without session/new.
+	LoadSessionID string
+	AuthMethodID  string
+	ClientInfo    Implementation
 
 	InitializeTimeout time.Duration
 	PromptLease       time.Duration
@@ -251,6 +254,22 @@ func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (*RuntimeS
 			_ = stopProcessBestEffort(process, cfg.CancelGrace)
 			return nil, fmt.Errorf("authenticate ACP adapter: %w", err)
 		}
+	}
+	if cfg.LoadSessionID != "" {
+		if !initialized.AgentCapabilities.LoadSession {
+			_ = stopProcessBestEffort(process, cfg.CancelGrace)
+			return nil, fmt.Errorf("ACP adapter did not advertise session/load support")
+		}
+		_, err := process.Client().LoadSession(initCtx, LoadSessionRequest{
+			SessionID: cfg.LoadSessionID, CWD: cfg.Process.Paths.Workspace,
+			MCPServers: append([]MCPServer{}, cfg.MCPServers...), Meta: newSessionMeta,
+		})
+		if err != nil {
+			_ = stopProcessBestEffort(process, cfg.CancelGrace)
+			return nil, fmt.Errorf("load ACP provider session: %w", err)
+		}
+		session.providerSessionID = cfg.LoadSessionID
+		return session, nil
 	}
 	newSession, err := process.Client().NewSession(initCtx, NewSessionRequest{
 		CWD:        cfg.Process.Paths.Workspace,

@@ -1,0 +1,96 @@
+---
+title: Codex session migration
+description: Move supported native Codex conversation state between local homes and Orka Sessions.
+---
+
+# Codex session migration
+
+`orka session migrate` preserves Codex's original thread UUID and rollout bytes.
+It supports the `codex/paginated@0.160.0` profile on Linux and macOS. Legacy
+rollouts and encrypted reasoning context are outside this delivery.
+
+Orka transports at most 512 KiB of encoded bundle data. This is a consumer
+transport limit, separate from SessionKit's native storage limits. A bundle
+contains the verified manifest and rollout. Authentication files, native SQLite
+databases, provider configuration, and process memory are excluded.
+
+The controller and runtime must both support native Sessions. Use the pinned
+Codex 0.160.0 / codex-acp 2.1.1 runtime image. Private checkpoints use the
+controller's existing execution-snapshot encryption key with separate associated
+data. Retain that key with the SQLite backup.
+
+## Import a local thread
+
+Stop every Codex process using the source home before capture. `--source-stopped`
+records that assertion; it does not terminate a local client. Use a new Session
+name and a journal directory outside the source home:
+
+```bash
+orka session migrate import migrated-review \
+  --codex-home /absolute/source/codex-home \
+  --thread 01a10020-1222-76e3-977d-d5165792ae72 \
+  --journal-dir /absolute/private/import-journal \
+  --source-stopped
+```
+
+Import reserves a fresh non-Gateway Session. It allocates no runtime or Task
+lease. An existing Session, including an empty one, cannot be overwritten.
+
+Submit a normal Codex Task with `spec.sessionRef.name: migrated-review` and its
+current workspace and tool policy. During admission, Orka installs the bundle in
+the child's fresh private `CODEX_HOME` before starting codex-acp. It uses
+`session/load` with the original UUID and current cwd, provider, MCP tools,
+approvals, and sandbox configuration. The runtime must prove loading the exact
+bundle before Orka sends the new user prompt. Canonical history is not injected
+again. The imported history stays native; the Orka transcript records new Tasks.
+
+## Export a checkpoint
+
+After a successful Task, Orka proves the provider and its descendants have exited
+before capture. The checkpoint and canonical terminal result commit together
+before the Session lease is released. The runtime home is deleted only after
+that commit. The next Task cold-starts with the saved checkpoint and fresh
+credentials.
+
+Export uses the last committed checkpoint. It does not force an active Task to
+stop. The checkpoint must still match the exact Session owner and canonical
+transcript boundary.
+
+```bash
+orka session migrate export migrated-review \
+  --codex-home /absolute/fresh/codex-home \
+  --cwd /absolute/local/workspace \
+  --journal-dir /absolute/private/export-journal \
+  --codex-bin /absolute/codex-0.160.0
+```
+
+The destination must be a fresh isolated Codex home. The journal must be outside
+it and private, with directory mode `0700`. Authenticate the destination with
+current local credentials and configure its provider before resuming the UUID.
+Migration does not copy source authentication or source policy into authority.
+
+## Retry and failure handling
+
+Retain the journal and repeat the same command after an uncertain response. The
+CLI reuses its saved bundle and operation ID. Export also reuses the same frozen
+SessionKit install plan and receipt. Changing the target, bundle, or cwd with
+that journal is rejected.
+
+An uncertain runtime install retains its target and frozen journal and closes
+pool admission. Exact create retries report that retained outcome without
+allocating another home or starting a child. Automatic reconciliation of that
+supervisor creation state is not part of this delivery.
+
+A failed or cancelled Task does not publish a new native checkpoint. A changed
+canonical boundary makes an older checkpoint unavailable for restore or export.
+If a native-continuity Session cannot produce a supported checkpoint, Orka
+retains the runtime evidence and blocks finalization. It does not silently start
+a new provider thread. An ordinary Session with no native checkpoint may use
+canonical continuity after a terminal format or size rejection, but only after
+the runtime proves process exit.
+
+Native bundles are private Session data, accessible only through the migration
+endpoint. Export requires `get` on `core.orka.ai/sessions`. Import requires
+`create` on the Session collection and `get` on the requested name, plus the
+corresponding context-token Session scopes when enabled. Session deletion removes
+the native bundle and its receipts with the existing cleanup flow.

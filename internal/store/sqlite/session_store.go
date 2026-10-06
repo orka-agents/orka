@@ -26,6 +26,9 @@ func (s *Store) CreateSession(ctx context.Context, session *store.SessionRecord)
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := ensureNativeSessionNameAvailableTx(ctx, tx, session.Namespace, session.Name); err != nil {
+		return err
+	}
 	// Non-Gateway transcript-only completions permit deliberate name reuse.
 	// Kubernetes identities and Gateway continuation chains remain reserved.
 	if _, err := tx.ExecContext(ctx,
@@ -274,6 +277,9 @@ func (s *Store) DeleteSession(ctx context.Context, namespace, name string) error
 	if err := advanceTaskDataCleanupGeneration(ctx, tx, namespace); err != nil {
 		return err
 	}
+	if err := deleteNativeSessionTx(ctx, tx, namespace, name); err != nil {
+		return err
+	}
 	deleteResult, err := tx.ExecContext(ctx,
 		`DELETE FROM sessions WHERE namespace = ? AND name = ? AND session_type <> ?`,
 		namespace, name, store.SessionTypeGateway,
@@ -491,6 +497,9 @@ func (s *Store) AcquireChatTurn(
 		return false, err
 	}
 	defer tx.Rollback() //nolint:errcheck
+	if err := ensureNativeSessionNameAvailableTx(ctx, tx, session.Namespace, session.Name); err != nil {
+		return false, err
+	}
 
 	if err := ensureNoSessionCleanupIntentTx(ctx, tx, session.Namespace, session.Name); err != nil {
 		return false, err

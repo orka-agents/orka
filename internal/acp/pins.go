@@ -45,5 +45,5 @@ const (
 	OpenCodeRipgrepLinuxX64BinarySHA256   = "af751db9b06d308fd5078aa973880cc8c75678289386bf1a6ee5faa614aa6f2d"
 	OpenCodeRipgrepLinuxARM64BinarySHA256 = "d3febe5d02e2a15da0909200caeb5af0be65e58736331c2ab88b7086d62e942b"
 	OpenCodeRootInstructionSHA256         = "b8e691e210a9502c9689ba20705806dfb1b5b10b5ca1062f73f9a85b1043a812"
-	OpenCodeImageNoticeSHA256             = "93167c1d7505d3e38efce8bf019c2af4e10ef56529465b87c34e4b3401508a98"
+	OpenCodeImageNoticeSHA256             = "0327bebb4a2fe44b09b19b4de3bc3de7e6c148712e17eff346ba346abc7c3349"
 )

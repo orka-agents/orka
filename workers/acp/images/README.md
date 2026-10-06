@@ -119,7 +119,7 @@ OpenCode inputs:
 | ripgrep `linux/amd64` | Debian `15.2.0-1` glibc package from immutable snapshot file `096560a159a8be70155f16209d91777019011677` with a versioned Debian-pool fallback; package SHA-256 `d9d86586969e925b8627936ec4387d10cc65baf7d42195258743a49e711b6157`; extracted `rg` SHA-256 `af751db9b06d308fd5078aa973880cc8c75678289386bf1a6ee5faa614aa6f2d` |
 | ripgrep `linux/arm64` | Debian `15.2.0-1` glibc package from immutable snapshot file `482bbe93dc82997d7d84c901990e8d9f4327457c` with a versioned Debian-pool fallback; package SHA-256 `8f18379cd499dd890d27190a359fe194d0bce92d7efad8e47b0f636e64bf4b46`; extracted `rg` SHA-256 `d3febe5d02e2a15da0909200caeb5af0be65e58736331c2ab88b7086d62e942b` |
 | Orka root instruction | `workers/acp/images/opencode/AGENTS.md`; SHA-256 `b8e691e210a9502c9689ba20705806dfb1b5b10b5ca1062f73f9a85b1043a812` |
-| Image third-party notice | `workers/acp/images/opencode/NOTICE.md` (mirrors root `NOTICE.md`); SHA-256 `93167c1d7505d3e38efce8bf019c2af4e10ef56529465b87c34e4b3401508a98` |
+| Image third-party notice | `workers/acp/images/opencode/NOTICE.md` (mirrors root `NOTICE.md`); SHA-256 `0327bebb4a2fe44b09b19b4de3bc3de7e6c148712e17eff346ba346abc7c3349` |
 
 Codex and Claude adapters are compiled from exact GitHub source archives after
 frozen `package-lock.json` installs with `npm ci --ignore-scripts`. Their

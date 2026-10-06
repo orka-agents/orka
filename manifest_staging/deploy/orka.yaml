@@ -637,6 +637,7 @@ rules:
   verbs:
   - get
   - list
+  - create
   - update
   - delete
 - apiGroups:

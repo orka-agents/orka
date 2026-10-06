@@ -574,7 +574,7 @@ func NormalizeSessionTurnForCreate(turn SessionTurn, fence ControllerEpochFence)
 		turn.State = SessionTurnOpen
 	}
 	if turn.State != SessionTurnOpen || turn.TerminalKind != "" || turn.TerminalContent != "" ||
-		turn.FinalizationDigest != "" || turn.PublicationID != "" || turn.PublicationReceipt != nil || turn.FinalizedAt != nil {
+		turn.FinalizationDigest != "" || turn.NativeSessionDigest != "" || turn.PublicationID != "" || turn.PublicationReceipt != nil || turn.FinalizedAt != nil {
 		return SessionTurn{}, ControllerEpochFence{}, ValidationErrorf("new session turn must be open and must not contain finalization data")
 	}
 	fence, err = NormalizeEpochFence(fence)

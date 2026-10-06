@@ -634,6 +634,7 @@ type ACPFinalizeAssistantRequest struct {
 	SessionTurn     ACPSessionTurn
 	Fence           store.ControllerEpochFence
 	AssistantResult string
+	NativeSession   *store.NativeSessionRecord
 	PublicationID   string
 	Projection      ACPFinalizationProjection
 	FinalizedAt     time.Time
@@ -712,7 +713,7 @@ func (c *ACPSessionContinuity) FinalizeAssistantResult(ctx context.Context, requ
 		return nil, err
 	}
 	return c.finalizeTurn(ctx, request.SessionTurn, request.Fence, store.SessionTurnAssistantResult,
-		request.AssistantResult, request.PublicationID, request.Projection, request.FinalizedAt)
+		request.AssistantResult, request.PublicationID, request.Projection, request.FinalizedAt, request.NativeSession)
 }
 
 // FinalizeOutcomeUnknown atomically appends the user prompt and an explicit
@@ -730,7 +731,7 @@ func (c *ACPSessionContinuity) FinalizeOutcomeUnknown(ctx context.Context, reque
 		return nil, err
 	}
 	return c.finalizeTurn(ctx, request.SessionTurn, request.Fence, store.SessionTurnOutcomeMarker,
-		marker, request.PublicationID, request.Projection, request.FinalizedAt)
+		marker, request.PublicationID, request.Projection, request.FinalizedAt, nil)
 }
 
 func (c *ACPSessionContinuity) FinalizeOutcomeMarker(ctx context.Context, request ACPFinalizeOutcomeMarkerRequest) (*ACPSessionFinalization, error) {
@@ -749,7 +750,7 @@ func (c *ACPSessionContinuity) FinalizeOutcomeMarker(ctx context.Context, reques
 		return nil, err
 	}
 	return c.finalizeTurn(ctx, request.SessionTurn, request.Fence, store.SessionTurnOutcomeMarker,
-		string(markerBytes), "", request.Projection, request.FinalizedAt)
+		string(markerBytes), "", request.Projection, request.FinalizedAt, nil)
 }
 
 func (c *ACPSessionContinuity) finalizeTurn(
@@ -761,6 +762,7 @@ func (c *ACPSessionContinuity) finalizeTurn(
 	publicationID string,
 	projectionInput ACPFinalizationProjection,
 	finalizedAt time.Time,
+	native *store.NativeSessionRecord,
 ) (*ACPSessionFinalization, error) {
 	if err := validateACPSessionLease(&sessionTurn.Lease.Session, sessionTurn.Lease.Key); err != nil {
 		return nil, err
@@ -780,6 +782,9 @@ func (c *ACPSessionContinuity) finalizeTurn(
 	finalizationIdentity := map[string]any{
 		"turnID": sessionTurn.Turn.ID, "terminalKind": terminalKind, "terminalContent": terminalContent,
 		publicationIDField: publicationID, "projectionID": projection.ID, "projectionPayloadDigest": projection.PayloadDigest,
+	}
+	if native != nil {
+		finalizationIdentity["nativeSessionDigest"] = store.NativeSessionCaptureDigest(native)
 	}
 	if blockReason != "" {
 		finalizationIdentity["blockReason"] = blockReason
@@ -802,6 +807,7 @@ func (c *ACPSessionContinuity) finalizeTurn(
 		Key: sessionTurn.Turn.Key, Fence: fence,
 		ExpectedSessionVersion: sessionTurn.Lease.Session.Version, ExpectedTurnVersion: sessionTurn.Turn.Version,
 		FinalizationDigest: finalizationDigest, TerminalKind: terminalKind, TerminalContent: terminalContent,
+		NativeSession:        native,
 		SkipTranscriptAppend: sessionTurn.SkipTranscriptAppend,
 		SkipUserPromptAppend: sessionTurn.SkipUserPromptAppend,
 		PublicationID:        publicationID,

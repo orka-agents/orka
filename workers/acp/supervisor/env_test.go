@@ -27,7 +27,7 @@ func TestProviderProfilesDisableUpdatesAndUsePrivateHomes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if codexEnv["NO_BROWSER"] != "1" || codexEnv["CODEX_HOME"] != "/sessions/private/home/.codex" || !strings.Contains(codexEnv["CODEX_CONFIG"], proxy.BaseURL) || codexEnv["CODEX_API_KEY"] != proxy.Credential {
+	if codexEnv["NO_BROWSER"] != "1" || codexEnv["CODEX_HOME"] != "/sessions/private/home/.codex" || !strings.Contains(codexEnv["CODEX_CONFIG"], proxy.BaseURL) || codexEnv["CODEX_API_KEY"] != proxy.Credential || codexEnv["MODEL_PROVIDER"] != codexProviderID {
 		t.Fatalf("unexpected Codex environment: %#v", codexEnv)
 	}
 	var codexConfig map[string]any

@@ -698,7 +698,8 @@ func (s *Store) FinalizeSessionTurn(ctx context.Context, request store.FinalizeS
 	}
 	if turn.State == store.SessionTurnFinalized {
 		if turn.FinalizationDigest == request.FinalizationDigest && turn.TerminalKind == request.TerminalKind &&
-			turn.TerminalContent == request.TerminalContent && turn.PublicationID == request.PublicationID {
+			turn.TerminalContent == request.TerminalContent && turn.PublicationID == request.PublicationID &&
+			turn.NativeSessionDigest == store.NativeSessionCaptureDigest(request.NativeSession) {
 			return &turn, nil
 		}
 		return nil, store.ConflictErrorf("session turn %q was finalized with different terminal data or digest", turn.ID)
@@ -797,6 +798,12 @@ func (s *Store) FinalizeSessionTurn(ctx context.Context, request store.FinalizeS
 		request.Key.TaskUID, messageCountDelta, request.FinalizedAt); err != nil {
 		return nil, err
 	}
+	if request.NativeSession != nil && (request.TerminalKind != store.SessionTurnAssistantResult || request.SkipTranscriptAppend) {
+		return nil, store.ValidationErrorf("native capture requires canonical assistant-result finalization")
+	}
+	if err := s.commitNativeSessionFinalizationTx(ctx, tx, turn.ID, control.Namespace, control.SessionName, request.Key.SessionUID, request.NativeSession); err != nil {
+		return nil, err
+	}
 
 	verifiedRepositoryID, verifiedRef, verifiedSHA := baselineColumns(verifiedBaseline)
 	relatedPromptAttemptID := ""
@@ -854,6 +861,7 @@ func (s *Store) FinalizeSessionTurn(ctx context.Context, request store.FinalizeS
 	turn.TerminalKind = request.TerminalKind
 	turn.TerminalContent = request.TerminalContent
 	turn.FinalizationDigest = request.FinalizationDigest
+	turn.NativeSessionDigest = store.NativeSessionCaptureDigest(request.NativeSession)
 	turn.PublicationID = request.PublicationID
 	turn.PublicationReceipt = receipt
 	turn.ProjectionID = projection.ID
@@ -1130,6 +1138,10 @@ func getSessionTurn(ctx context.Context, q controlQueryRower, id string) (store.
 	}
 	if projectionAvailableAt.Valid {
 		turn.ProjectionAvailableAt = projectionAvailableAt.Time
+	}
+	err = q.QueryRowContext(ctx, `SELECT capture_digest FROM native_session_finalizations WHERE turn_id=?`, turn.ID).Scan(&turn.NativeSessionDigest)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return store.SessionTurn{}, fmt.Errorf("get native SessionTurn receipt: %w", err)
 	}
 	return turn, nil
 }

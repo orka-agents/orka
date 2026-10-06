@@ -43,6 +43,7 @@ type CommitSessionTurnFinalizationRequest struct {
 	PublicationReceipt   *PublicationReceipt     `json:"publicationReceipt,omitempty"`
 	Projection           OutboxProjection        `json:"projection"`
 	FinalizedAt          time.Time               `json:"finalizedAt"`
+	NativeSession        *NativeSessionRecord    `json:"-"`
 }
 
 // ActivateSessionTurnProjectionRequest releases the deferred outbox record

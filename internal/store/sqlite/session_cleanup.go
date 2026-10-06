@@ -349,6 +349,9 @@ func completeSessionCleanupTx(ctx context.Context, tx *sql.Tx, request store.Com
 		return err
 	}
 	completedAt := time.Now().UTC()
+	if err := deleteNativeSessionTx(ctx, tx, request.Namespace, request.SessionName); err != nil {
+		return err
+	}
 	receiptResult, err := tx.ExecContext(ctx,
 		`INSERT INTO session_cleanup_completions(namespace, session_name, session_uid, operation_id, operation_digest, completed_at)
 		 VALUES (?, ?, ?, ?, ?, ?)

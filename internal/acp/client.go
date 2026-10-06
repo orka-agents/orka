@@ -296,6 +296,17 @@ func (c *Client) NewSession(ctx context.Context, request NewSessionRequest) (New
 	return response, nil
 }
 
+func (c *Client) LoadSession(ctx context.Context, request LoadSessionRequest) (LoadSessionResponse, error) {
+	if request.SessionID == "" {
+		return LoadSessionResponse{}, fmt.Errorf("ACP session/load requires sessionId")
+	}
+	var response LoadSessionResponse
+	if err := c.Call(ctx, MethodSessionLoad, request, &response); err != nil {
+		return LoadSessionResponse{}, err
+	}
+	return response, nil
+}
+
 func (c *Client) Prompt(ctx context.Context, request PromptRequest) (PromptResponse, error) {
 	return c.PromptWithWritten(ctx, request, nil)
 }

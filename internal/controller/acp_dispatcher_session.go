@@ -20,6 +20,8 @@ type acpTaskSession struct {
 	Turn             *ACPSessionTurn
 	Binding          ACPRuntimeSessionBinding
 	Bootstrap        *ACPBootstrapTranscript
+	NativeSession    *store.NativeSessionRecord
+	NativeCapture    *store.NativeSessionRecord
 	UserPrompt       string
 	VerifiedBaseline *store.VerifiedBranchBaseline
 	Reused           bool
@@ -166,6 +168,9 @@ func (d *ACPDispatcher) reconcileUnfinalizedTaskSession(
 	if session == nil || session.Turn == nil || session.finalized || session.requeued {
 		return nil
 	}
+	if errors.Is(cause, errNativeSessionInstallUnresolved) || task.Annotations[nativeInstallUnresolvedAnnotation] != "" {
+		return errNativeSessionInstallUnresolved
+	}
 	attemptID := session.Turn.Turn.PromptAttemptID
 	attempt, err := d.Store.GetPromptAttempt(ctx, attemptID)
 	if err != nil {
@@ -204,6 +209,7 @@ type acpTaskSessionPreparation struct {
 	current          *ACPRuntimeSessionBinding
 	plan             ACPRuntimeSessionPlan
 	bootstrap        *ACPBootstrapTranscript
+	nativeSession    *store.NativeSessionRecord
 	userPrompt       string
 	verifiedBaseline *store.VerifiedBranchBaseline
 }
@@ -351,7 +357,7 @@ func (d *ACPDispatcher) prepareTaskSession(
 		"durableGeneration", preparation.control.RuntimeSessionGeneration,
 	)
 	return &acpTaskSession{
-		Turn: turn, Binding: preparation.plan.Binding, Bootstrap: preparation.bootstrap,
+		Turn: turn, Binding: preparation.plan.Binding, Bootstrap: preparation.bootstrap, NativeSession: preparation.nativeSession,
 		UserPrompt:       preparation.userPrompt,
 		VerifiedBaseline: preparation.verifiedBaseline, Reused: !preparation.plan.Recreate,
 		LeaseGeneration: lease.Key.LeaseGeneration,
@@ -425,9 +431,13 @@ func (d *ACPDispatcher) planTaskSession(
 	if err != nil {
 		return nil, err
 	}
+	native, err := d.loadTaskNativeSession(ctx, task, control)
+	if err != nil {
+		return nil, err
+	}
 	var userPrompt string
 	var bootstrap *ACPBootstrapTranscript
-	if plan.BootstrapRequired {
+	if plan.BootstrapRequired && native == nil {
 		bootstrap, userPrompt, err = d.resolveTaskSessionBootstrap(ctx, task, control)
 	} else {
 		userPrompt, err = d.resolveTaskSessionPrompt(ctx, task, control)
@@ -442,7 +452,7 @@ func (d *ACPDispatcher) planTaskSession(
 	}
 	return &acpTaskSessionPreparation{
 		control: control, current: current, plan: plan, bootstrap: bootstrap, userPrompt: userPrompt,
-		verifiedBaseline: verifiedBaseline,
+		verifiedBaseline: verifiedBaseline, nativeSession: native,
 	}, nil
 }
 
@@ -877,7 +887,7 @@ func (d *ACPDispatcher) finalizeTaskSessionResult(
 		return err
 	}
 	_, err = d.Sessions.FinalizeAssistantResult(ctx, ACPFinalizeAssistantRequest{
-		SessionTurn: *session.Turn, Fence: fence, AssistantResult: result,
+		SessionTurn: *session.Turn, Fence: fence, AssistantResult: result, NativeSession: session.NativeCapture,
 		PublicationID: publicationID,
 		Projection:    ACPFinalizationProjection{ProjectionKind: taskTerminalProjectionKind, Payload: payload, AvailableAt: time.Now().UTC()},
 		FinalizedAt:   time.Now().UTC(),
@@ -1048,7 +1058,7 @@ func (d *ACPDispatcher) retireRecoveredRuntimeSessionBinding(task *corev1alpha1.
 	reusable := task != nil && attempt != nil && sessionUID != "" &&
 		attempt.ExecutionState == store.PromptExecutionSucceeded &&
 		(attempt.DeliveryState == store.PromptDeliveryNotRequested || attempt.DeliveryState == store.PromptDeliveryReadValidated) &&
-		task.Spec.SessionRef != nil &&
+		task.Spec.SessionRef != nil && task.Annotations[nativeCaptureIntentAnnotation] == "" &&
 		(task.Spec.Workspace == nil || task.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentWrite)
 	if reusable {
 		if binding.Generation > 0 {

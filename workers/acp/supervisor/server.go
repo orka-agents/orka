@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/orka-agents/orka/internal/acp"
+	"github.com/orka-agents/orka/internal/codexstate"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/workspacedelta"
 )
@@ -236,6 +237,8 @@ func sessionCreationStage(err error) string {
 }
 
 type sessionState struct {
+	supportsNativeSessions  bool
+	nativeInstallUnresolved *failedCreateReplay
 	id                      harnessv2.RuntimeSessionID
 	runtime                 *acp.RuntimeSession
 	promptMutations         promptMutationExecutor
@@ -258,6 +261,7 @@ type sessionState struct {
 	creating                bool
 	drainCleanupScheduled   bool
 	publicationFinalization *harnessv2.PublicationFinalizationReceipt
+	nativeCapture           *nativeSessionCapture
 }
 
 type promptState struct {
@@ -468,6 +472,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}", s.handleCreateSession)
 	s.mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/publication-finalization", s.handleFinalizeSessionPublication)
 	s.mux.HandleFunc("DELETE /v2/runtime-sessions/{sessionID}", s.handleDeleteSession)
+	s.mux.HandleFunc("POST /v2/runtime-sessions/{sessionID}/native-session", s.handleCaptureNativeSession)
 	s.mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/prompts/{promptID}", s.handleStartPrompt)
 	s.mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/prompts/{promptID}/lease", s.handleRenewLease)
 	s.mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/prompts/{promptID}/permissions/{requestID}", s.handleResolvePermission)
@@ -645,6 +650,8 @@ func (s *Server) status() harnessv2.StatusResponse {
 	for _, state := range s.sessions {
 		pruneSessionOperationsLocked(state, now)
 		status := harnessv2.RuntimeSessionStatus{
+			NativeInstallUnresolved: state.nativeInstallUnresolved != nil,
+			NativeRestoration:       state.descriptor.NativeRestoration,
 			RuntimeSessionID:        state.descriptor.RuntimeSessionID,
 			RuntimeSessionUID:       state.descriptor.RuntimeSessionUID,
 			Generation:              state.descriptor.Generation,
@@ -779,6 +786,11 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if classification.Class == harnessv2.RequestClassificationDuplicate && !existing.creating {
+			if replay := existing.nativeInstallUnresolved; replay != nil {
+				s.mu.Unlock()
+				writeError(w, replay.statusCode, replay.code, replay.message, nil, replay.retryable)
+				return
+			}
 			response := harnessv2.CreateRuntimeSessionResponse{Protocol: harnessv2.ProtocolVersion, Classification: classification, Session: existing.descriptor}
 			s.mu.Unlock()
 			writeJSON(w, http.StatusOK, response)
@@ -824,8 +836,9 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	state := &sessionState{
-		id:       request.RuntimeSessionID,
-		creating: true,
+		id:                     request.RuntimeSessionID,
+		creating:               true,
+		supportsNativeSessions: s.cfg.Capabilities.SupportsNativeSessions,
 		descriptor: harnessv2.RuntimeSessionDescriptor{
 			RuntimeSessionID: request.RuntimeSessionID, RuntimeSessionUID: request.Metadata.Fence.RuntimeSessionUID,
 			Generation: request.Metadata.Fence.RuntimeSessionGeneration, RuntimeInstanceID: s.cfg.Fence.RuntimeInstanceID,
@@ -849,6 +862,11 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 
 	runtimeSession, descriptor, paths, baseline, providerProxy, mcpProxy, diagnosticFilter, createErr := s.createSession(r.Context(), request, now, uid, gid)
 	if createErr != nil {
+		if isNativeInstallUnknown(createErr) && paths.Root != "" {
+			s.retainUnresolvedNativeInstall(state, request, paths, now)
+			writeError(w, http.StatusConflict, harnessv2.ErrorCodeCleanupUnproven, nativeInstallUnknownMessage, nil, false)
+			return
+		}
 		// The allocated UID/GID is permanently consumed (identities are never
 		// reused). Tombstone the failed create so a replay of the same request
 		// is classified as a duplicate instead of allocating another identity
@@ -1152,6 +1170,26 @@ func (s *Server) createSession(
 		maps.Copy(envValues, values)
 	}
 	maps.Copy(envValues, projection.Environment)
+	loadSessionID := ""
+	if request.NativeRestore != nil {
+		snapshot := request.NativeRestore.Snapshot
+		if !s.cfg.Capabilities.SupportsNativeSessions || s.cfg.Provider.Kind != providerKindCodex || snapshot.ProviderVersion != acp.CodexCLIVersion {
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("native session compatibility", fmt.Errorf("native session requires the pinned Codex provider"))
+		}
+		summary, inspectErr := codexstate.Inspect(ctx, snapshot.Data)
+		if inspectErr != nil || summary.ThreadID != snapshot.ProviderSessionID || summary.DataDigest != snapshot.DataDigest {
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("native session validation", fmt.Errorf("native bundle does not match restore metadata"))
+		}
+		journalDir := filepath.Join(s.cfg.SessionBaseDir, ".native-install", pathID)
+		if _, installErr := codexstate.Install(ctx, snapshot.Data, filepath.Join(paths.Home, ".codex"), paths.Workspace, journalDir); installErr != nil {
+			if isNativeInstallUnknown(installErr) {
+				cleanup = false
+				return nil, harnessv2.RuntimeSessionDescriptor{}, paths, nil, nil, nil, nil, sessionCreationFailed("native session installation", installErr)
+			}
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("native session installation", installErr)
+		}
+		loadSessionID = snapshot.ProviderSessionID
+	}
 	if err := acp.FinalizeSessionOwnership(paths.Root, uid, gid); err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("ownership finalization", err)
 	}
@@ -1197,6 +1235,7 @@ func (s *Server) createSession(
 		},
 		MCPServers:            []acp.MCPServer{mcpServer},
 		NewSessionMeta:        projection.NewSessionMeta,
+		LoadSessionID:         loadSessionID,
 		AuthMethodID:          s.cfg.Provider.AuthMethodID,
 		InitializeTimeout:     defaultDuration(s.cfg.InitializeTimeout, acp.DefaultInitializeTimeout),
 		PromptLease:           time.Duration(s.cfg.Capabilities.Limits.MaxPromptLeaseMillis) * time.Millisecond,
@@ -1252,6 +1291,9 @@ func (s *Server) createSession(
 		WorkspaceBaseline:    request.Workspace.Baseline,
 		CreatedAt:            now,
 		LastTransitionAt:     now,
+	}
+	if request.NativeRestore != nil {
+		descriptor.NativeRestoration = &harnessv2.NativeSessionRestoration{DataDigest: request.NativeRestore.Snapshot.DataDigest, ProviderSessionID: loadSessionID, Loaded: true}
 	}
 	return runtimeSession, descriptor, paths, baseline, providerProxy, mcpProxy, projection.AgentDiagnosticFilter, nil
 }
@@ -1451,7 +1493,7 @@ func (s *Server) startDrainCleanup(cleanup []drainCleanupCandidate) {
 }
 
 func isDrainCleanupState(state *sessionState) bool {
-	if state == nil {
+	if state == nil || retainsNativeCaptureEvidence(state) {
 		return false
 	}
 	switch state.descriptor.State {
@@ -1499,7 +1541,7 @@ func (s *Server) cleanupDrainedSession(sessionID harnessv2.RuntimeSessionID, sta
 		s.failDrainCleanup(sessionID, state, "drain_session_root_ownership_reclaim_unproven")
 		return
 	}
-	if err := os.RemoveAll(state.paths.Root); err != nil {
+	if err := s.removeSessionPrivateFiles(state); err != nil {
 		s.failDrainCleanup(sessionID, state, "drain_session_root_cleanup_unproven")
 		return
 	}
@@ -1575,6 +1617,18 @@ func (s *Server) Close(ctx context.Context) error {
 	s.mu.Unlock()
 	var errs []error
 	for _, state := range sessions {
+		s.mu.Lock()
+		capture := state.nativeCapture
+		retainEvidence := retainsNativeCaptureEvidence(state)
+		s.mu.Unlock()
+		if capture != nil {
+			select {
+			case <-capture.done:
+			case <-ctx.Done():
+				errs = append(errs, fmt.Errorf("native session capture still in progress: %w", ctx.Err()))
+				continue
+			}
+		}
 		if state.mcpProxy != nil {
 			state.mcpProxy.close()
 		}
@@ -1590,8 +1644,10 @@ func (s *Server) Close(ctx context.Context) error {
 				errs = append(errs, fmt.Errorf("runtime session cleanup unproven: %w", err))
 			} else if err := reclaimStoppedSessionOwnership(state.paths); err != nil {
 				errs = append(errs, fmt.Errorf("runtime session filesystem ownership reclaim: %w", err))
-			} else if err := os.RemoveAll(state.paths.Root); err != nil {
-				errs = append(errs, fmt.Errorf("runtime session filesystem cleanup: %w", err))
+			} else if !retainEvidence {
+				if err := s.removeSessionPrivateFiles(state); err != nil {
+					errs = append(errs, fmt.Errorf("runtime session filesystem cleanup: %w", err))
+				}
 			}
 		}
 	}
