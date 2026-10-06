@@ -30,6 +30,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -57,6 +58,7 @@ const (
 	// past what browsers, proxies, and providers accept.
 	maxAuthorizeParameterValueBytes    = 512
 	maxAuthorizeParametersEncodedBytes = 2048
+	maxEndpointQueryBytes              = 1024
 
 	// MaxHTTPToolTimeout bounds curated HTTP tool requests.
 	MaxHTTPToolTimeout = 10 * time.Minute
@@ -195,6 +197,11 @@ func ValidateProviderSpec(provider *corev1alpha1.ConnectorProvider, knownBuiltin
 	}
 	if strings.TrimSpace(oauth.ClientSecretRef.Name) == "" || strings.TrimSpace(oauth.ClientSecretRef.Key) == "" {
 		return invalid("oauth.clientSecretRef requires name and key")
+	}
+	// A reference no Secret could ever have would fail every resolution
+	// as a transient error; it is an invalid spec instead.
+	if len(k8svalidation.IsDNS1123Subdomain(oauth.ClientSecretRef.Name)) > 0 || len(k8svalidation.IsConfigMapKey(oauth.ClientSecretRef.Key)) > 0 {
+		return invalid("oauth.clientSecretRef must name a valid Secret and data key")
 	}
 	switch oauth.ClientAuthentication {
 	case "", corev1alpha1.ConnectorClientAuthSecretBasic, corev1alpha1.ConnectorClientAuthSecretPost:
@@ -375,6 +382,12 @@ func nonCanonicalNumericHost(host string) bool {
 func validateEndpointQuery(field, rawQuery string, oauthEndpoint bool) *Issue {
 	if rawQuery == "" {
 		return nil
+	}
+	// The authorization URL is opened by the browser and tool URLs carry
+	// the person's token; a static query is bounded so neither can exceed
+	// what browsers, proxies, and providers accept.
+	if len(rawQuery) > maxEndpointQueryBytes {
+		return invalid(fmt.Sprintf("oauth.%s query must be at most %d bytes", field, maxEndpointQueryBytes))
 	}
 	if strings.Contains(rawQuery, ";") {
 		return invalid(fmt.Sprintf("oauth.%s query must not use semicolon separators", field))
