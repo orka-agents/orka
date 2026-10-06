@@ -113,6 +113,9 @@ type ToolExecutor struct {
 	requester                   *corev1alpha1.RequestedBy
 	frozenConnections           map[string]outboundaccess.FrozenConnection
 	checkedPolicies             map[string]outboundaccess.PolicyIdentity
+	// sendGate, when set, is judged after every lookup and credential
+	// resolution and immediately before the request leaves the process.
+	sendGate func(context.Context) error
 
 	ttsMu        sync.Mutex
 	ttsClient    *contexttoken.TTSClient
@@ -146,6 +149,17 @@ func (e *ToolExecutor) SetFrozenConnections(frozen map[string]outboundaccess.Fro
 	}
 	e.frozenConnections = make(map[string]outboundaccess.FrozenConnection, len(frozen))
 	maps.Copy(e.frozenConnections, frozen)
+}
+
+// SetSendGate installs a check run immediately before the tool request is
+// sent, after policy reads and credential resolution (which can refresh a
+// token and take a while). A failing gate sends nothing; its error is
+// returned unmarked, so the caller can tell nothing was attempted.
+func (e *ToolExecutor) SetSendGate(gate func(context.Context) error) {
+	if e == nil {
+		return
+	}
+	e.sendGate = gate
 }
 
 // SetCheckedPolicy records the OutboundAccessPolicy object the caller
@@ -436,6 +450,12 @@ func (e *ToolExecutor) executePreparedToolRequest(ctx context.Context, prepared 
 		}
 		httpClient, err = directCredentialHTTPClient(httpClient, dialContext)
 		if err != nil {
+			return "", err
+		}
+	}
+
+	if e.sendGate != nil {
+		if err := e.sendGate(ctx); err != nil {
 			return "", err
 		}
 	}
@@ -975,6 +995,7 @@ func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *core
 			Headers: tool.Spec.HTTP.Headers, Parameters: tool.Spec.Parameters,
 			Timeout: toolHTTPTimeout(tool), TimeoutSet: tool.Spec.HTTP.Timeout != nil,
 		},
+		Arguments: args,
 	})
 	if err != nil {
 		return fmt.Errorf("resolve outbound access policy: %w", err)

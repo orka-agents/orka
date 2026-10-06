@@ -733,6 +733,13 @@ type ConnectionBinding struct {
 	GrantSequence int64 `json:"grantSequence"`
 	// Mode is the Connection mode at freeze time.
 	Mode string `json:"mode"`
+	// PolicyUID and PolicyGeneration pin the policy object the binding was
+	// frozen under, so a policy deleted and recreated, or edited, after
+	// dispatch is refused rather than executed under the old binding.
+	// +optional
+	PolicyUID string `json:"policyUID,omitempty"`
+	// +optional
+	PolicyGeneration int64 `json:"policyGeneration,omitempty"`
 }
 
 // +kubebuilder:object:root=true

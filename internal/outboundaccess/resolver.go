@@ -81,6 +81,10 @@ type ResolveRequest struct {
 	// same URL, method, and class, so a policy cannot be attached to an
 	// arbitrary endpoint to exfiltrate a person's token.
 	Tool ToolBinding
+	// Arguments are the call's arguments. Connection-mode resolution judges
+	// them against the provider's curated schema before any credential is
+	// resolved, so a rejected call never refreshes or shreds custody.
+	Arguments json.RawMessage
 }
 
 // ToolBinding is the executing Tool's identity for connector checks.
@@ -469,6 +473,9 @@ func (r *KubernetesResolver) resolveConnection(ctx context.Context, policy *core
 	declared, err := DeclaredConnectorTool(provider, req.Tool)
 	if err != nil {
 		return Resolution{}, err
+	}
+	if err := connectors.ValidateToolArguments(declared.Parameters, req.Arguments); err != nil {
+		return Resolution{}, fmt.Errorf("connection credential request arguments rejected: %w", err)
 	}
 	credential, err := r.Connections.ResolveConnectionCredential(ctx, ConnectionCredentialRequest{
 		Namespace: policy.Namespace,

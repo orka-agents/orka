@@ -61,6 +61,7 @@ const (
 	maxAuthorizeParameterValueBytes    = 512
 	maxAuthorizeParametersEncodedBytes = 2048
 	maxEndpointQueryBytes              = 1024
+	maxScopesEncodedBytes              = 2048
 
 	// MaxHTTPToolTimeout bounds curated HTTP tool requests.
 	MaxHTTPToolTimeout = 10 * time.Minute
@@ -230,6 +231,11 @@ func ValidateProviderSpec(provider *corev1alpha1.ConnectorProvider, knownBuiltin
 	}
 	if issue := validateScopes("write", oauth.Scopes.Write); issue != nil {
 		return issue
+	}
+	// A readWrite consent requests both groups in one scope parameter of
+	// the browser's authorization URL, so their encoded total is bounded.
+	if len(url.QueryEscape(strings.Join(ScopesForMode(provider, corev1alpha1.ConnectionModeReadWrite), " "))) > maxScopesEncodedBytes {
+		return invalid(fmt.Sprintf("oauth.scopes must encode to at most %d bytes in total", maxScopesEncodedBytes))
 	}
 	for key, value := range oauth.AdditionalAuthorizeParameters {
 		normalized := strings.ToLower(strings.TrimSpace(key))
@@ -653,7 +659,9 @@ func validateHTTPTool(name string, spec corev1alpha1.ConnectorHTTPTool) *Issue {
 			return invalid(fmt.Sprintf("HTTP tool %q may not set the %s header", name, canonical))
 		}
 		if credentialLikeParameter(canonical) {
-			return invalid(fmt.Sprintf("HTTP tool %q header %s looks like a credential; the linked account is the only credential", name, canonical))
+			// The header name is not repeated: a credential pasted into it
+			// must not travel into public provider status.
+			return invalid(fmt.Sprintf("HTTP tool %q has a header whose name looks like a credential; the linked account is the only credential", name))
 		}
 		if !validHeaderValue(value) {
 			return invalid(fmt.Sprintf("HTTP tool %q header values must not contain control bytes", name))

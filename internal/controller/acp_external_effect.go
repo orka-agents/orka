@@ -459,6 +459,52 @@ func SettleExternalEffect(
 	return settleExternalEffectStore(ctx, effects, fence, identity, state, nil)
 }
 
+// ErrExternalEffectNotPending reports an effect another execution moved out
+// of Pending (it is in flight, or settled); only that execution settles it.
+var ErrExternalEffectNotPending = errors.New("external effect is no longer pending")
+
+// SettlePendingExternalEffect moves an effect that is still exactly Pending
+// (reserved, never started) to state. An effect already in state is left
+// as is; one in flight or settled otherwise belongs to another execution and
+// is reported with ErrExternalEffectNotPending, never transitioned.
+func SettlePendingExternalEffect(
+	ctx context.Context,
+	effects store.ExternalEffectStore,
+	fence store.ControllerEpochFence,
+	identity store.ExternalEffectIdentity,
+	state store.ExternalEffectState,
+) error {
+	id, err := identity.CanonicalID()
+	if err != nil {
+		return err
+	}
+	effect, err := effects.GetExternalEffect(ctx, id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	if effect.State == state {
+		return nil
+	}
+	if effect.State != store.ExternalEffectPending {
+		return fmt.Errorf("%w: external effect %s is %s", ErrExternalEffectNotPending, effect.ID, effect.State)
+	}
+	// Pinned to the Pending state and version just read: an execution that
+	// claims the record meanwhile makes this transition fail instead.
+	if _, err := effects.TransitionExternalEffect(ctx, store.ExternalEffectTransition{
+		ID: effect.ID, Fence: fence, ExpectedVersion: effect.Version, ExpectedState: store.ExternalEffectPending,
+		NewState: state, RequestDigest: effect.RequestDigest, ExpectedLeaseOwner: effect.LeaseOwner, UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			return fmt.Errorf("%w: %w", ErrExternalEffectNotPending, err)
+		}
+		return err
+	}
+	return nil
+}
+
 // ExternalEffectRequestDigest is the digest under which RunExternalEffectWithReplay
 // reserves an effect, so a caller can recognize its own committed record.
 func ExternalEffectRequestDigest(identity store.ExternalEffectIdentity, request any) (string, error) {

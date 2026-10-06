@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -23,10 +24,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/acp"
 	"github.com/orka-agents/orka/internal/connectors"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/tools"
 	workerexecutor "github.com/orka-agents/orka/internal/worker"
 )
 
@@ -109,15 +112,17 @@ func TestFreezeRequesterConnections(t *testing.T) {
 		len(frozen) != 1 || frozen[0].UID != "" {
 		t.Fatalf("anonymous: frozen = %+v err = %v, want the policy frozen without a Connection", frozen, err)
 	}
-	// Non-connection policy or unknown tool: nothing frozen, no error.
+	// A non-connection policy freezes nothing. A brokered Tool that vanished
+	// between descriptor building and the freeze makes binding retry: a Tool
+	// recreated under a policy in another mode must never run unfrozen.
 	direct := policy.(*corev1alpha1.OutboundAccessPolicy).DeepCopy()
 	direct.Spec = corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{}}
 	reader = ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(tool, direct, connection).Build()
 	if frozen, err := freezeRequesterConnections(context.Background(), reader, nil, task, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 0 {
 		t.Fatalf("direct: frozen = %+v err = %v", frozen, err)
 	}
-	if frozen, err := freezeRequesterConnections(context.Background(), reader, nil, task, brokeredConfiguration("missing_tool")); err != nil || len(frozen) != 0 {
-		t.Fatalf("missing tool: frozen = %+v err = %v", frozen, err)
+	if _, err := freezeRequesterConnections(context.Background(), reader, nil, task, brokeredConfiguration("missing_tool")); err == nil || !strings.Contains(err.Error(), "binding retries") {
+		t.Fatalf("missing tool: err = %v, want a retry", err)
 	}
 
 	// Read failures propagate so binding retries.
@@ -449,5 +454,22 @@ func TestConnectorToolsForWaitsForAMissingPolicy(t *testing.T) {
 	reader = ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(plain).Build()
 	if infos, err := classifyConnectorTools(context.Background(), reader, nil, "tenant", []string{"gh_search", "unknown"}, connectorScope{strictPolicies: true}); err != nil || len(infos) != 0 {
 		t.Fatalf("plain and unknown tools: infos = %v err = %v", infos, err)
+	}
+}
+
+// TestBrokeredCustomCandidatesFollowDescriptorPrecedence covers a Tool CR
+// that shares a name with a registered built-in or a provider-native tool:
+// those take precedence and the CR is never exposed, so it cannot make the
+// Task connector-backed.
+func TestBrokeredCustomCandidatesFollowDescriptorPrecedence(t *testing.T) {
+	native := acp.BuiltInRuntimeNativeToolNames("codex")
+	if len(native) == 0 {
+		t.Skip("no provider-native tools for codex")
+	}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewWebSearchTool())
+	got := brokeredCustomCandidates([]string{native[0], "web_search", "gh_search"}, "codex", registry)
+	if len(got) != 1 || got[0] != "gh_search" {
+		t.Fatalf("candidates = %v, want only the custom Tool", got)
 	}
 }

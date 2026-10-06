@@ -557,32 +557,13 @@ func (r *TaskReconciler) resolveExternalAgentExecutionCandidate(
 	if err != nil {
 		return nil, err
 	}
-	// An external runtime's MCP policy is fixed by its registered profile,
-	// so per-requester links cannot narrow it. Tools behind connection-mode
-	// policies therefore fail closed here, with a definitive reason, rather
-	// than being advertised as tools whose every call would fail for want
-	// of a frozen Connection. GitHub built-ins under a linked account are
-	// carried only when the requester's link leaves the registered policy
-	// exactly as registered; see checkExternalLinkedBuiltins.
-	var runtimeDisallowed []string
-	if runtime.Spec.Capabilities.MCPPolicy != nil {
-		runtimeDisallowed = runtime.Spec.Capabilities.MCPPolicy.DisallowedTools
-	}
-	candidates := connectorCandidateTools(task, agent, runtimeDisallowed)
-	if connectorTools, err := classifyConnectorTools(ctx, reader, r.MCPRegistry, task.Namespace, candidates, connectorScope{strictPolicies: true}); err != nil {
-		return nil, err
-	} else if len(connectorTools) > 0 {
-		return nil, permanentACPAgentConfiguration(errors.New("connector-backed tools are not supported on external v2 AgentRuntimes"))
-	}
-	linkedBuiltins := brokeredLinkedBuiltins(r.MCPRegistry, candidates)
-	if len(linkedBuiltins) > 0 {
-		if err := checkExternalLinkedBuiltins(ctx, reader, r.MCPRegistry, task, runtime, candidates); err != nil {
-			return nil, err
-		}
-	}
 	registry := r.MCPRegistry
 	if registry == nil {
 		registry = tools.DefaultRegistry
+	}
+	linkedBuiltins, err := r.checkExternalConnectorTools(ctx, reader, task, agent, runtime, profile.ProviderKind, registry)
+	if err != nil {
+		return nil, err
 	}
 	mcpConfiguration, err := buildExternalRuntimeSessionMCPConfigurationWithRegistry(
 		ctx, reader, task, agent, runtime, profile, registry,
@@ -1582,4 +1563,63 @@ func checkExternalLinkedBuiltins(
 		}
 	}
 	return nil
+}
+
+// checkExternalConnectorTools applies the connector rules to an external v2
+// runtime. Its MCP policy is fixed by its registered profile, so
+// per-requester links cannot narrow it. Tools behind connection-mode
+// policies therefore fail closed here, with a definitive reason, rather than
+// being advertised as tools whose every call would fail for want of a frozen
+// Connection; only names that resolve to brokered custom Tools count. GitHub
+// built-ins under a linked account are carried only when the requester's
+// link leaves the registered policy exactly as registered; see
+// checkExternalLinkedBuiltins.
+func (r *TaskReconciler) checkExternalConnectorTools(
+	ctx context.Context,
+	reader client.Reader,
+	task *corev1alpha1.Task,
+	agent *corev1alpha1.Agent,
+	runtime *corev1alpha1.AgentRuntime,
+	providerKind string,
+	registry *tools.Registry,
+) (linkedBuiltins []string, err error) {
+	var runtimeDisallowed []string
+	if runtime.Spec.Capabilities.MCPPolicy != nil {
+		runtimeDisallowed = runtime.Spec.Capabilities.MCPPolicy.DisallowedTools
+	}
+	candidates := connectorCandidateTools(task, agent, runtimeDisallowed)
+	custom := brokeredCustomCandidates(candidates, providerKind, registry)
+	if connectorTools, err := classifyConnectorTools(ctx, reader, r.MCPRegistry, task.Namespace, custom, connectorScope{strictPolicies: true}); err != nil {
+		return nil, err
+	} else if len(connectorTools) > 0 {
+		return nil, permanentACPAgentConfiguration(errors.New("connector-backed tools are not supported on external v2 AgentRuntimes"))
+	}
+	linkedBuiltins = brokeredLinkedBuiltins(r.MCPRegistry, candidates)
+	if len(linkedBuiltins) > 0 {
+		if err := checkExternalLinkedBuiltins(ctx, reader, r.MCPRegistry, task, runtime, candidates); err != nil {
+			return nil, err
+		}
+	}
+	return linkedBuiltins, nil
+}
+
+// brokeredCustomCandidates keeps the names that would resolve to brokered
+// custom Tools, mirroring buildCanonicalMCPToolDescriptors: a registered
+// built-in or a provider-native tool takes precedence over a same-named Tool
+// CR, which is then never exposed and cannot make a Task connector-backed.
+func brokeredCustomCandidates(names []string, providerKind string, registry *tools.Registry) []string {
+	native := providerNativeTools[strings.ToLower(providerKind)]
+	kept := make([]string, 0, len(names))
+	for _, name := range names {
+		if registry != nil {
+			if _, builtin := registry.Get(name); builtin {
+				continue
+			}
+		}
+		if _, isNative := native[strings.ToLower(name)]; isNative {
+			continue
+		}
+		kept = append(kept, name)
+	}
+	return kept
 }
