@@ -466,12 +466,16 @@ func TestExternalAPIMonitorCommandPreflightsRunCreation(t *testing.T) {
 }
 
 func TestExternalAPIAuthorizedChatProviderInvocation(t *testing.T) {
-	for _, path := range []string{"/api/v1/chat", "/openai/v1/chat/completions", "/anthropic/v1/messages"} {
+	for _, path := range []string{"/api/v1/chat", "/openai/v1/chat/completions", "/openai/v1/responses", "/anthropic/v1/messages"} {
 		t.Run(path, func(t *testing.T) {
 			f := newExternalAuthorizationFixture(t)
 			f.allowRoute(t, "POST "+path)
 			before := f.changes(t)
-			status, body := f.request(t, http.MethodPost, path, `{"message":"hello","model":"protected/fixture","max_tokens":128,"messages":[{"role":"user","content":"hello"}]}`)
+			requestBody := `{"message":"hello","model":"protected/fixture","max_tokens":128,"messages":[{"role":"user","content":"hello"}]}`
+			if path == "/openai/v1/responses" {
+				requestBody = `{"model":"protected/fixture","store":false,"input":"hello"}`
+			}
+			status, body := f.request(t, http.MethodPost, path, requestBody)
 			require.Equal(t, http.StatusOK, status, body)
 			require.Contains(t, body, "Done.")
 			require.Equal(t, int64(1), f.externalCalls.Load())

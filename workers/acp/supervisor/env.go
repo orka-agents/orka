@@ -496,7 +496,7 @@ func codexBaseConfig(model, baseURL string) map[string]any {
 // only the immutable HTTP profile, so that attempt failed with 403 and Codex
 // prepended "Warning: Falling back from WebSockets to HTTPS transport" to the
 // first agent message. A custom provider with wire_api=responses uses plain
-// HTTPS from the start (verified against codex-cli 0.145.0).
+// HTTPS from the start (verified against codex-cli 0.160.0).
 const codexProviderID = "orka"
 
 func codexProviderDefinition(baseURL string) map[string]any {

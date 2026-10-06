@@ -185,7 +185,7 @@ func providerReadItem(provider *corev1alpha1.Provider) fiber.Map {
 	return fiber.Map{
 		apiFieldName:     provider.Name,
 		toolNamespaceArg: provider.Namespace,
-		"type":           provider.Spec.Type,
+		apiFieldType:     provider.Spec.Type,
 		"defaultModel":   provider.Spec.DefaultModel,
 		"ready":          provider.Status.Ready,
 	}
@@ -730,7 +730,7 @@ func (s *Server) handleAuthWhoAmI(c fiber.Ctx) error {
 	if ui.ContextToken != nil {
 		identity["transaction"] = fiber.Map{
 			"profile":            ui.ContextToken.Profile,
-			"type":               ui.ContextToken.Type,
+			apiFieldType:         ui.ContextToken.Type,
 			"id":                 ui.ContextToken.TransactionID,
 			"issuer":             ui.ContextToken.Issuer,
 			"subject":            ui.ContextToken.Subject,

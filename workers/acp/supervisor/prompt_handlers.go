@@ -2136,14 +2136,21 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 		if err != nil {
 			return nil, err
 		}
-		if name, known := prompt.toolCallNames[permission.ToolCallID]; known {
+		name, known := prompt.toolCallNames[permission.ToolCallID]
+		if known {
 			if permission.ToolName != "" && permission.ToolName != name {
 				return nil, fmt.Errorf("ACP permission does not match the recorded tool identity")
 			}
 			permission.ToolName = name
 		}
 		if state.mcpProxy != nil {
-			permission.ToolName = canonicalPermissionToolName(state.profile.ProviderKind, state.mcpProxy.configuration.ToolPolicy, permission.ToolName)
+			policy := state.mcpProxy.configuration.ToolPolicy
+			permission.ToolName = canonicalPermissionToolName(state.profile.ProviderKind, policy, permission.ToolName)
+			if state.profile.ProviderKind == providerKindCodex && !known {
+				if descriptor, allowed := policy.Descriptor(permission.ToolName); allowed && descriptor.Source.Brokered() {
+					return nil, fmt.Errorf("codex brokered permission lacks a correlated MCP tool identity")
+				}
+			}
 		}
 		if prompt.permissionRequestIDs == nil {
 			prompt.permissionRequestIDs = make(map[harnessv2.PermissionRequestID]struct{})

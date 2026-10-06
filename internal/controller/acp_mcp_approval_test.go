@@ -679,6 +679,7 @@ func TestMCPApprovalPendingPromptRevocationStopsWait(t *testing.T) {
 }
 
 type approvalCancelDuringRevocationStore struct {
+	store.TaskDataTransactionStore
 	store.DeduplicatingExecutionEventStore
 	cancel    context.CancelFunc
 	cancelled atomic.Bool
@@ -698,7 +699,7 @@ func TestMCPApprovalRevocationSettlesWhenCallerContextEnds(t *testing.T) {
 	f := newMCPApprovalFixture(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
-	storage := &approvalCancelDuringRevocationStore{DeduplicatingExecutionEventStore: f.events, cancel: cancel}
+	storage := &approvalCancelDuringRevocationStore{DeduplicatingExecutionEventStore: f.events, TaskDataTransactionStore: f.events, cancel: cancel}
 	f.broker.ApprovalEvents = storage
 	done := f.startContext(ctx, f.request)
 	pending := f.pending()

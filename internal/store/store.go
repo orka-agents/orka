@@ -162,6 +162,7 @@ type GatewayEventStore interface {
 
 // GatewayDeliveryStore handles durable adapter outbox records.
 type GatewayDeliveryStore interface {
+	GetGatewayMessageBudget(ctx context.Context, query GatewayMessageBudgetQuery) (*GatewayMessageBudget, error)
 	EnqueueGatewayMessage(ctx context.Context, request GatewayMessageEnqueue) (*GatewayDelivery, bool, error)
 	CreateGatewayDelivery(ctx context.Context, delivery *GatewayDelivery) (*GatewayDelivery, bool, error)
 	GetGatewayDelivery(ctx context.Context, namespace, id string) (*GatewayDelivery, error)
@@ -275,7 +276,7 @@ type RepositoryMonitorStore interface {
 	UpdateWorkAction(ctx context.Context, action *WorkAction) error
 	GetWorkAction(ctx context.Context, namespace, id string) (*WorkAction, error)
 	ListWorkActions(ctx context.Context, filter WorkActionFilter) ([]WorkAction, string, error)
-	CancelWorkActions(ctx context.Context, namespace, monitorName, targetKind string, targetNumber int64, reason string) (int, error)
+	CancelWorkActions(ctx context.Context, namespace, monitorName, targetKind string, targetNumber int64, reason, exceptActionID string) (int, error)
 
 	CreateActionRecord(ctx context.Context, record *ActionRecord) error
 	UpdateActionRecord(ctx context.Context, record *ActionRecord) error

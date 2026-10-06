@@ -19,7 +19,6 @@ const (
 	cliIntentTriage       = "triage"
 	cliIntentResearch     = "research"
 	cliIntentPlan         = "plan"
-	cliIntentApprovePlan  = "approve_plan"
 	cliIntentImplement    = "implement"
 	cliIntentDecompose    = "decompose"
 	cliIntentStop         = "stop"
@@ -29,7 +28,6 @@ const (
 	cliIntentFix          = "fix"
 	cliIntentFixCI        = "fix_ci"
 	cliIntentUpdateBranch = "update_branch"
-	cliIntentAutomerge    = "automerge"
 )
 
 func newMonitorCmd() *cobra.Command {
@@ -165,7 +163,7 @@ func newMonitorItemsCmd() *cobra.Command {
 	cmd.Flags().StringVar(&state, "state", "", "Filter by state")
 	cmd.Flags().StringVar(&verdict, "verdict", "", "Filter by review verdict")
 	cmd.Flags().StringVar(&repairState, "repair-state", "", "Filter by repair state")
-	cmd.Flags().StringVar(&automergeState, "automerge-state", "", "Filter by automerge state")
+	cmd.Flags().StringVar(&automergeState, "automerge-state", "", "Filter by merge readiness state")
 	return cmd
 }
 
@@ -609,7 +607,6 @@ func newMonitorIssueWorkflowCmd() *cobra.Command {
 		{"triage <name> <number>", "Queue issue triage", cliIntentTriage},
 		{"research <name> <number>", "Queue issue research", cliIntentResearch},
 		{"plan <name> <number>", "Queue issue planning", cliIntentPlan},
-		{"approve-plan <name> <number>", "Approve the current issue plan", cliIntentApprovePlan},
 		{"implement <name> <number>", "Queue issue implementation", cliIntentImplement},
 		{"decompose <name> <number>", "Queue issue decomposition", cliIntentDecompose},
 		{"stop <name> <number>", "Stop issue automation", cliIntentStop},
@@ -739,7 +736,6 @@ func newMonitorPRWorkflowCmd() *cobra.Command {
 		{"fix <name> <number>", "Queue PR finding repair", cliIntentFix},
 		{"fix-ci <name> <number>", "Queue PR CI repair", cliIntentFixCI},
 		{"update-branch <name> <number>", "Queue PR branch update", cliIntentUpdateBranch},
-		{"automerge <name> <number>", "Request head-bound automerge", cliIntentAutomerge},
 		{"stop <name> <number>", "Stop PR automation", cliIntentStop},
 		{"resume <name> <number>", "Resume PR automation", cliIntentResume},
 	} {
@@ -852,10 +848,7 @@ func validateMonitorTriggerLabels(result any) error {
 	triggers, _ := spec["triggers"].(map[string]any)
 	github, _ := triggers["github"].(map[string]any)
 	labels, _ := github["labels"].(map[string]any)
-	groups := map[string][]struct{ field, intent string }{
-		"issues":       {{cliIntentTriage, cliIntentTriage}, {cliIntentResearch, cliIntentResearch}, {cliIntentPlan, cliIntentPlan}, {"approvePlan", cliIntentApprovePlan}, {cliIntentImplement, cliIntentImplement}, {cliIntentDecompose, cliIntentDecompose}, {cliIntentStop, cliIntentStop}, {cliIntentResume, cliIntentResume}},
-		"pullRequests": {{cliIntentReview, cliIntentReview}, {cliIntentFix, cliIntentFix}, {"fixCI", cliIntentFixCI}, {"updateBranch", cliIntentUpdateBranch}, {cliIntentAutomerge, cliIntentAutomerge}, {cliIntentStop, cliIntentStop}, {cliIntentResume, cliIntentResume}},
-	}
+	groups := map[string][]struct{ field, intent string }{"issues": {{cliIntentImplement, cliIntentImplement}}}
 	for groupName, entries := range groups {
 		seen := map[string]string{}
 		group, _ := labels[groupName].(map[string]any)
@@ -863,7 +856,7 @@ func validateMonitorTriggerLabels(result any) error {
 			configured, _ := group[entry.field].(string)
 			label := strings.ToLower(strings.TrimSpace(configured))
 			if label == "" {
-				label = defaultMonitorCommandLabel(entry.intent)
+				label = "orka:implement"
 			}
 			key := groupName + "." + entry.field
 			if previous := seen[label]; previous != "" {
@@ -873,21 +866,6 @@ func validateMonitorTriggerLabels(result any) error {
 		}
 	}
 	return nil
-}
-
-func defaultMonitorCommandLabel(intent string) string {
-	switch intent {
-	case cliIntentApprovePlan:
-		return "orka:approve-plan"
-	case cliIntentFixCI:
-		return "orka:fix-ci"
-	case cliIntentUpdateBranch:
-		return "orka:update-branch"
-	case cliIntentDecompose:
-		return "orka:to-issues"
-	default:
-		return "orka:" + strings.ReplaceAll(intent, "_", "-")
-	}
 }
 
 func newMonitorDoctorCmd() *cobra.Command {

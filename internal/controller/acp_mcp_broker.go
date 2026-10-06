@@ -194,6 +194,7 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 				copy.Namespace = request.Namespace
 				copy.TaskUID = string(request.Metadata.TaskUID)
 				copy.ToolCallID = request.Call.CallID
+				copy.OperationID = string(request.Metadata.OperationID)
 				if copy.Tenant == "" {
 					copy.Tenant = request.Namespace
 				}
@@ -247,6 +248,15 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 
 func acpMCPToolExecutionResult(ctx context.Context, descriptor harnessv2.MCPToolDescriptor, result string, err error) (json.RawMessage, error) {
 	if err != nil {
+		if rejection, ok := errors.AsType[*tools.GatewayReplyRejection](err); ok &&
+			descriptor.Source == harnessv2.MCPToolSourceBrokeredBuiltin && descriptor.Name == "reply_in_conversation" {
+			// Definitive admission rejection is a safe tool result, not an
+			// ambiguous external effect. Post-call authority checks still apply.
+			return json.Marshal(struct {
+				IsError bool   `json:"isError"`
+				Error   string `json:"error"`
+			}{true, rejection.Error()})
+		}
 		_, executionFailed := errors.AsType[workerexecutor.ToolExecutionError](err)
 		// A read-only Tool may reach its own request deadline while the
 		// enclosing prompt is still active. Preparation failures never carry

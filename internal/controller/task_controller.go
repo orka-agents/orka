@@ -51,6 +51,7 @@ import (
 	"github.com/orka-agents/orka/internal/artifactcap"
 	execevents "github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/executionmode"
+	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
@@ -114,6 +115,7 @@ type TaskReconciler struct {
 	APIReader                    client.Reader
 	Scheme                       *runtime.Scheme
 	JobBuilder                   *JobBuilder
+	GatewayService               *gatewayruntime.Service
 	SessionManager               *SessionManager
 	WebhookNotifier              *WebhookNotifier
 	Recorder                     record.EventRecorder
@@ -1511,10 +1513,50 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		}
 	}
 
+	// Do not freeze a tool-less Job in the create-before-durable-link window.
+	gatewayReplyEligible, err := r.GatewayService.ResolveReplyEligibility(ctx, latest)
+	if errors.Is(err, store.ErrNotReady) {
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	existingGatewayJob := false
+	if gatewayReplyEligible && jobTask.Spec.Type == corev1alpha1.TaskTypeAI {
+		// A recorded UID can belong to an earlier attempt. Check the exact name
+		// we would build, and keep existing Jobs on the identity recovery path.
+		key := client.ObjectKey{Namespace: jobTask.Namespace, Name: buildTaskJobName(jobTask)}
+		err := reader.Get(ctx, key, &batchv1.Job{})
+		if err != nil && !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, err
+		}
+		existingGatewayJob = err == nil
+		if !existingGatewayJob {
+			// Compatibility and provider resolution used the caller's snapshots.
+			// Defer the entire tuple rather than mix fresh policy with old inputs.
+			if latest.UID != task.UID || latest.Generation != task.Generation || task.Spec.AgentRef == nil || agent == nil {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+			agentKey := client.ObjectKey{Namespace: task.Spec.AgentRef.Namespace, Name: task.Spec.AgentRef.Name}
+			if agentKey.Namespace == "" {
+				agentKey.Namespace = task.Namespace
+			}
+			latestAgent := &corev1alpha1.Agent{}
+			if err := reader.Get(ctx, agentKey, latestAgent); err != nil {
+				return ctrl.Result{}, fmt.Errorf("recheck gateway Job Agent: %w", err)
+			}
+			if latestAgent.UID != agent.UID || latestAgent.Generation != agent.Generation || !latestAgent.DeletionTimestamp.IsZero() {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+		}
+	}
+
 	// Create the Job
 	job, err := r.JobBuilder.BuildWithOptions(ctx, jobTask, agent, provider, JobBuildOptions{
 		ResolvedApprovalsJSON:       resolvedApprovalsJSON,
 		RepositoryMonitorValidation: validationTask,
+		GatewayReplyEligible:        gatewayReplyEligible,
 	})
 	if err != nil {
 		log.Error(err, "failed to build Job")
@@ -1527,21 +1569,24 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		return ctrl.Result{}, err
 	}
 
-	// Create the Job
-	if err := r.Create(ctx, job); err != nil {
-		if apierrors.IsAlreadyExists(err) {
-			existing, recoveryErr := r.recoverTaskJob(ctx, latest, job, validationTask)
-			if recoveryErr != nil {
-				if errors.Is(recoveryErr, errTaskJobIdentity) || errors.Is(recoveryErr, errRepositoryMonitorValidationConfinement) {
-					return r.failTask(ctx, task, recoveryErr.Error())
-				}
-				return ctrl.Result{}, recoveryErr
+	// Once an existing gateway Job was observed, recover rather than create:
+	// deletion between the reads must not turn a skipped freshness check into
+	// a new execution from stale inputs.
+	if !existingGatewayJob {
+		err = r.Create(ctx, job)
+	}
+	if existingGatewayJob || apierrors.IsAlreadyExists(err) {
+		existing, recoveryErr := r.recoverTaskJob(ctx, latest, job, validationTask)
+		if recoveryErr != nil {
+			if errors.Is(recoveryErr, errTaskJobIdentity) || errors.Is(recoveryErr, errRepositoryMonitorValidationConfinement) {
+				return r.failTask(ctx, task, recoveryErr.Error())
 			}
-			job = existing
-		} else {
-			log.Error(err, "failed to create Job")
-			return r.failTask(ctx, task, fmt.Sprintf("failed to create job: %v", err))
+			return ctrl.Result{}, recoveryErr
 		}
+		job = existing
+	} else if err != nil {
+		log.Error(err, "failed to create Job")
+		return r.failTask(ctx, task, fmt.Sprintf("failed to create job: %v", err))
 	}
 	task.Status.JobName = job.Name
 	task.Status.JobUID = string(job.UID)

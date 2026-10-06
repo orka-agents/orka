@@ -38,6 +38,8 @@ import (
 )
 
 const (
+	apiFieldType        = "type"
+	apiFieldCode        = "code"
 	apiFieldDescription = "description"
 	apiFieldChecks      = "checks"
 	apiFieldItems       = "items"
@@ -55,6 +57,7 @@ var builtinToolsList = []fiber.Map{
 	builtinToolResponse(tools.NewWebFetchTool()),
 	builtinToolResponse(tools.NewFileWriteTool()),
 	builtinToolResponse(tools.NewRequestApprovalTool()),
+	builtinToolResponse(tools.NewReplyInConversationTool()),
 }
 
 // builtinToolsMap indexes built-in tools by name for single-tool lookup.
