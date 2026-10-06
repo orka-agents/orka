@@ -65,6 +65,8 @@ func connectorSchemaStatements() []string {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_connector_consents_connection
 			ON connector_consents(connection_uid)`,
+		// consent_grant marks a grant a re-consent replaced; only these
+		// count toward the per-Connection bound.
 		`CREATE TABLE IF NOT EXISTS connector_retired_credentials (
 			id             INTEGER PRIMARY KEY AUTOINCREMENT,
 			connection_uid TEXT NOT NULL,
@@ -72,6 +74,7 @@ func connectorSchemaStatements() []string {
 			dek_ciphertext BLOB NOT NULL,
 			nonce          BLOB NOT NULL,
 			ciphertext     BLOB NOT NULL,
+			consent_grant  INTEGER NOT NULL DEFAULT 0,
 			retired_at     TIMESTAMP NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_connector_retired_credentials_connection
@@ -410,8 +413,8 @@ func (s *Store) retireConnectorCredentialTx(ctx context.Context, tx *sql.Tx, ref
 		return nil
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO connector_retired_credentials
-		(connection_uid, dek_nonce, dek_ciphertext, nonce, ciphertext, retired_at)
-		VALUES (?, ?, ?, ?, ?, ?)`,
+		(connection_uid, dek_nonce, dek_ciphertext, nonce, ciphertext, consent_grant, retired_at)
+		VALUES (?, ?, ?, ?, ?, 1, ?)`,
 		ref.ConnectionUID, dekNonce, dekCiphertext, nonce, ciphertext, now); err != nil {
 		return fmt.Errorf("retire replaced connector credential: %w", err)
 	}
@@ -489,10 +492,11 @@ func (s *Store) CommitConnectorCompletion(ctx context.Context, nonce string, ref
 		_ = s.truncateWAL(ctx)
 		return store.ConnectorCredential{}, store.ErrConnectorConsentSuperseded
 	}
-	// Superseded grants are kept so disconnect can revoke them; a bound
-	// keeps repeated relinking from growing custody without limit.
+	// Grants a re-consent superseded are kept so disconnect can revoke them;
+	// a bound keeps repeated relinking from growing custody without limit.
 	var retained int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM connector_retired_credentials WHERE connection_uid = ?`, ref.ConnectionUID).Scan(&retained); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM connector_retired_credentials WHERE connection_uid = ? AND consent_grant = 1`,
+		ref.ConnectionUID).Scan(&retained); err != nil {
 		return store.ConnectorCredential{}, fmt.Errorf("count retired connector credentials: %w", err)
 	}
 	if retained >= maxRetiredConnectorCredentials {
