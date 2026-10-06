@@ -9,6 +9,7 @@ package connectors
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -234,6 +235,15 @@ func TestValidateProviderSpec(t *testing.T) {
 		{name: "duplicate credential-shaped scope is not echoed", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.OAuth.Scopes.Read = []string{"access_token.s3cr3t", "access_token.s3cr3t"}
 		}, want: "duplicate scope"},
+		{name: "oversized authorize parameter value", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.AdditionalAuthorizeParameters = map[string]string{"audience": strings.Repeat("a", 513)}
+		}, want: "at most 512 bytes"},
+		{name: "oversized authorize parameters in total", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.AdditionalAuthorizeParameters = map[string]string{}
+			for i := range 5 {
+				p.Spec.OAuth.AdditionalAuthorizeParameters["hint"+strconv.Itoa(i)] = strings.Repeat("a", 500)
+			}
+		}, want: "encode to at most 2048 bytes"},
 		{name: "oversized scope", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.OAuth.Scopes.Read = []string{strings.Repeat("a", 257)}
 		}, want: "at most 256 bytes"},
