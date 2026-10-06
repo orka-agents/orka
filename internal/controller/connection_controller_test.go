@@ -420,6 +420,8 @@ type fakeConnectorCredentialStore struct {
 	tombstoned         []string
 	deletedCompletions []string
 	grants             map[string]int64
+	// getErr, when set, fails custody reads as a transient store error.
+	getErr error
 }
 
 func newFakeConnectorCredentialStore() *fakeConnectorCredentialStore {
@@ -439,6 +441,9 @@ func (f *fakeConnectorCredentialStore) PutConnectorCredential(_ context.Context,
 }
 
 func (f *fakeConnectorCredentialStore) GetConnectorCredential(_ context.Context, ref store.ConnectorCredentialRef) (store.ConnectorCredential, error) {
+	if f.getErr != nil {
+		return store.ConnectorCredential{}, f.getErr
+	}
 	credential, ok := f.credentials[ref.ConnectionUID]
 	if !ok {
 		return store.ConnectorCredential{}, store.ErrNotFound
@@ -1140,5 +1145,83 @@ func TestConnectionReconcilerPersistsScopesGrantedOnlyChange(t *testing.T) {
 	granted := meta.FindStatusCondition(stored.Status.Conditions, corev1alpha1.ConnectionConditionScopesGranted)
 	if granted == nil || granted.Status != metav1.ConditionTrue || stored.Status.State != corev1alpha1.ConnectionStateReady {
 		t.Fatalf("ScopesGranted = %#v state = %q, want the scope change persisted", granted, stored.Status.State)
+	}
+}
+
+// TestConnectionReconcilerKeepsCommittedCompletionWhenCustodyUnreadable
+// covers a committed completion whose status write was lost: a custody read
+// that fails transiently proves no grant mismatch, so the completion, the
+// only record that can repair the status, is kept for the next pass.
+func TestConnectionReconcilerKeepsCommittedCompletionWhenCustodyUnreadable(t *testing.T) {
+	scheme := connectorTestScheme(t)
+	provider := acceptedConnectorProvider()
+	connection := testConnection("tenant", "github-alice", "github")
+	connection.Finalizers = []string{ConnectionCustodyFinalizer}
+	credentials := newFakeConnectorCredentialStore()
+	material := store.ConnectorCredential{
+		AccessToken: "gho_done", RefreshToken: "ghr_done", AuthorityDigest: connectors.ProviderIssuerDigest(provider),
+		RevocationDigest: connectors.ProviderRevocationDigest(provider), ExpiresAt: time.Now().Add(time.Hour),
+	}
+	credentials.credentials[string(connection.UID)] = material
+	credentials.parked[string(connection.UID)] = []store.ConnectorCompletion{
+		{Nonce: "done", Committed: true, Mode: corev1alpha1.ConnectionModeReadOnly, ExpiresAt: time.Now().Add(-time.Minute),
+			ConsentAuthorityDigest: connectors.ProviderAuthorityDigest(provider), Credential: material},
+	}
+	credentials.getErr = errors.New("database is locked")
+	c := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(connection, provider, connectorClientSecret("tenant")).
+		WithStatusSubresource(&corev1alpha1.Connection{}).Build()
+	reconciler := &ConnectionReconciler{Client: c, APIReader: c, Scheme: scheme, Credentials: credentials, Consents: credentials}
+	key := types.NamespacedName{Namespace: "tenant", Name: "github-alice"}
+	_, _ = reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: key})
+	if remaining := credentials.parked[string(connection.UID)]; len(remaining) != 1 || len(credentials.deletedCompletions) != 0 {
+		t.Fatalf("remaining = %+v deleted = %v, want the committed completion kept", remaining, credentials.deletedCompletions)
+	}
+	credentials.getErr = nil
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	updated := &corev1alpha1.Connection{}
+	if err := c.Get(context.Background(), key, updated); err != nil {
+		t.Fatal(err)
+	}
+	if !connectors.ConnectionLinked(updated) || len(credentials.parked[string(connection.UID)]) != 0 {
+		t.Fatalf("status = %+v remaining = %+v, want the link recorded once custody reads", updated.Status, credentials.parked[string(connection.UID)])
+	}
+}
+
+// TestConnectionReconcilerRevocationReadsProviderUncached covers an operator
+// who retargets the revocation endpoint and disconnects before the informer
+// catches up: the provider is read uncached before any token is disclosed,
+// so the stale cached endpoint never receives them.
+func TestConnectionReconcilerRevocationReadsProviderUncached(t *testing.T) {
+	scheme := connectorTestScheme(t)
+	cachedProvider := acceptedConnectorProvider()
+	cachedProvider.Spec.OAuth.RevocationURL = "https://github.com/revoke"
+	currentProvider := cachedProvider.DeepCopy()
+	currentProvider.Spec.OAuth.RevocationURL = "https://github.com/revoke-v2"
+	connection := testConnection("tenant", "github-alice", "github")
+	connection.Finalizers = []string{ConnectionCustodyFinalizer}
+	credentials := newFakeConnectorCredentialStore()
+	credentials.credentials[string(connection.UID)] = store.ConnectorCredential{
+		AccessToken: "gho_access", RefreshToken: "ghr_refresh", AuthorityDigest: connectors.ProviderIssuerDigest(cachedProvider),
+		RevocationDigest: connectors.ProviderRevocationDigest(cachedProvider),
+	}
+	revoker := &fakeConnectorRevoker{}
+	cached := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(connection, cachedProvider, connectorClientSecret("tenant")).
+		WithStatusSubresource(&corev1alpha1.Connection{}).Build()
+	api := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(currentProvider, connectorClientSecret("tenant")).Build()
+	reconciler := &ConnectionReconciler{Client: cached, APIReader: api, Scheme: scheme, Credentials: credentials, Consents: credentials, Revoker: revoker}
+	key := types.NamespacedName{Namespace: "tenant", Name: "github-alice"}
+	if err := cached.Delete(context.Background(), connection); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	if len(revoker.tokens) != 0 {
+		t.Fatalf("tokens were sent to the stale cached endpoint: %v", revoker.tokens)
+	}
+	if len(credentials.deleted) != 1 {
+		t.Fatal("custody must still be deleted")
 	}
 }
