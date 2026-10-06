@@ -327,7 +327,7 @@ Use `orka:implement` on an issue to start the managed workflow. `orka:pause` is 
 
 ## Issue triage, research, planning, and implementation
 
-The implementation label drives these phases automatically. Individual API/CLI commands remain available for ad hoc work:
+`orka:implement` runs planning when a required ready plan is missing, then continues to implementation if policy permits it. Triage and research are ad hoc API/CLI operations:
 
 - `triage` API/CLI command creates a read-only issue triage task and stores an `issue_triage` action record.
 - `research` API/CLI command creates a read-only issue research task and stores an `issue_research` action record.

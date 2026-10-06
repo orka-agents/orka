@@ -77,6 +77,7 @@ const (
 	repositoryMonitorIssuePhasePlanned              = "planned"
 	repositoryMonitorIssuePhasePaused               = "paused"
 	repositoryMonitorIssueSnapshotSuperseded        = "issue_snapshot_superseded"
+	repositoryMonitorIssuePausedTaskMissing         = "paused_task_missing"
 	repositoryMonitorIssuePhaseImplementationQueued = "implementation_queued"
 	repositoryMonitorIssuePhaseImplementing         = "implementing"
 	repositoryMonitorIssuePhasePatchReady           = "patch_ready"
@@ -738,7 +739,7 @@ func (r *RepositoryMonitorReconciler) settleRepositoryMonitorPausedIssue(ctx con
 		return nil
 	}
 	// Paused items retain a completed ActionRecord. Settle its attempt before
-	// inventory drops the identity; failures leave that identity available to retry.
+	// inventory retires it; failures leave that identity available to retry.
 	record, err := r.Store.GetActionRecord(ctx, monitor.Namespace, existing.LastActionID)
 	if err != nil {
 		return err
@@ -808,7 +809,18 @@ func (r *RepositoryMonitorReconciler) resumeRepositoryMonitorPausedIssue(ctx con
 	}
 	var task corev1alpha1.Task
 	if err := r.Get(ctx, types.NamespacedName{Namespace: monitor.Namespace, Name: item.LastActionTaskName}, &task); err != nil {
-		return client.IgnoreNotFound(err)
+		if !apierrors.IsNotFound(err) || item.LastActionID == "" {
+			return client.IgnoreNotFound(err)
+		}
+		// The retained result cannot advance without its Task receipt. Release
+		// the completed attempt, retaining its audit identity on the blocked item.
+		if err := r.settleRepositoryMonitorPausedIssue(ctx, monitor, item, repositoryMonitorIssuePausedTaskMissing); err != nil {
+			return err
+		}
+		item.WorkflowPhase = repositoryMonitorIssuePhaseBlocked
+		item.SkipReason = repositoryMonitorIssuePausedTaskMissing
+		item.LastVerdict = repositoryMonitorReviewVerdictFailed
+		return nil
 	}
 	if !repositoryMonitorReviewTaskTerminal(task.Status.Phase) {
 		return nil

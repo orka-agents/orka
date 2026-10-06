@@ -283,6 +283,9 @@ func (r *RepositoryMonitorReconciler) validateRepositoryMonitorSpec(ctx context.
 }
 
 func validateRepositoryMonitorCommandLabels(spec corev1alpha1.RepositoryMonitorSpec) error {
+	if !spec.Targets.Issues.Enabled || !spec.Triggers.GitHub.Labels.Enabled {
+		return nil
+	}
 	label := strings.TrimSpace(spec.Triggers.GitHub.Labels.Issues.Implement)
 	if label == "" {
 		label = "orka:implement"

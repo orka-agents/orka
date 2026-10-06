@@ -39,6 +39,8 @@ Before disabling readiness publication, deleting a monitor, or changing its repo
 
 Pause-label intake and workflow reconciliation can update the same item concurrently. A stale write can overwrite the stored label or workflow progress. Coordinating these writes atomically remains a follow-up; the current workflow does not guarantee pause enforcement across this race.
 
+With automatic repair enabled and readiness publication disabled, full workflow polls fetch details for every open PR before applying `maxPerRun`. That limit bounds started work, not GitHub reads. Fair, bounded refresh and caching remain a follow-up for repositories with many open PRs.
+
 ## CLI quick reference
 
 ```bash
