@@ -222,6 +222,21 @@ func TestOAuthClientRejectsUnsafeEndpoints(t *testing.T) {
 			t.Fatalf("%s endpoint must be rejected", name)
 		}
 	}
+	// The validator's host rules apply at call time too, before any DNS
+	// lookup or dial, for endpoints stored before a rule existed.
+	for name, tokenURL := range map[string]string{
+		"metadata name":        "https://metadata.google.internal/token",
+		"cluster service":      "https://kubernetes.default.svc/token",
+		"loopback shorthand":   "https://127.1/token",
+		"hex loopback":         "https://0x7f000001/token",
+		"ideographic dot host": "https://127%E3%80%820%E3%80%820%E3%80%821/token",
+	} {
+		cfg := testOAuthConfig()
+		cfg.TokenURL = tokenURL
+		if _, err := client.ExchangeCode(ctx, cfg, "code", "verifier", "https://orka.example.test/cb"); err == nil || !strings.Contains(err.Error(), "host is not allowed") {
+			t.Fatalf("%s endpoint err = %v, want the host refused before dialing", name, err)
+		}
+	}
 	cfg := testOAuthConfig()
 	if _, err := client.ExchangeCode(ctx, cfg, "", "verifier", "https://orka.example.test/cb"); err == nil {
 		t.Fatal("empty code must be rejected")

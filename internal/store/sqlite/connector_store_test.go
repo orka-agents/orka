@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -242,12 +243,18 @@ func TestConnectorConsentSingleUseAndExpiry(t *testing.T) {
 	}
 }
 
+// testConsentSequence numbers fixture completions as if each came from a
+// newer consent than the last, so a test that parks several completions in
+// order models consents started in that order.
+var testConsentSequence atomic.Int64
+
 func testConnectorCompletion() store.ConnectorCompletion {
 	return store.ConnectorCompletion{
 		Nonce: "completion-1", ConnectionUID: "uid-1", Namespace: "tenant", Name: "github-abc",
 		SubjectDigest: "digest-a", Provider: "github", Mode: "readOnly", ConsentAuthorityDigest: "consent-authority-1",
-		Credential: store.ConnectorCredential{AccessToken: "gho_parked", RefreshToken: "ghr_parked", Scopes: []string{"repo"}, AuthorityDigest: "authority-1"},
-		ExpiresAt:  time.Now().Add(10 * time.Minute),
+		Credential:      store.ConnectorCredential{AccessToken: "gho_parked", RefreshToken: "ghr_parked", Scopes: []string{"repo"}, AuthorityDigest: "authority-1"},
+		ExpiresAt:       time.Now().Add(10 * time.Minute),
+		ConsentSequence: testConsentSequence.Add(1),
 	}
 }
 
@@ -557,6 +564,7 @@ func TestConnectorCommitDoesNotRetireIdenticalMaterial(t *testing.T) {
 	}
 	for i := range 3 {
 		completion.Nonce = fmt.Sprintf("nonce-%d", i)
+		completion.ConsentSequence = testConsentSequence.Add(1)
 		if err := s.CreateConnectorCompletion(ctx, completion); err != nil {
 			t.Fatal(err)
 		}
@@ -569,6 +577,7 @@ func TestConnectorCommitDoesNotRetireIdenticalMaterial(t *testing.T) {
 	}
 	// Genuinely different material is still kept for revocation.
 	completion.Nonce = "nonce-new"
+	completion.ConsentSequence = testConsentSequence.Add(1)
 	completion.Credential.AccessToken = "gho_different"
 	if err := s.CreateConnectorCompletion(ctx, completion); err != nil {
 		t.Fatal(err)
@@ -1131,5 +1140,125 @@ func TestConnectorCommitDropsSupersededCompletions(t *testing.T) {
 	}
 	if peeked, err := s.PeekConnectorCompletion(ctx, committedOld.Nonce); err != nil || !peeked.Committed {
 		t.Fatalf("older committed record = %+v err = %v, want it kept for status recovery", peeked, err)
+	}
+}
+
+// TestConnectorConsentsAreNumberedAndFenceCompletions covers overlapping
+// authorization flows whose callbacks finish out of order: consent order,
+// not callback arrival, decides which tokens may become custody.
+func TestConnectorConsentsAreNumberedAndFenceCompletions(t *testing.T) {
+	s := newConnectorTestStore(t)
+	ctx := context.Background()
+	first := testConnectorConsent()
+	if err := s.CreateConnectorConsent(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	consumedFirst, err := s.ConsumeConnectorConsent(ctx, first.Nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := testConnectorConsent()
+	second.Nonce = "nonce-2"
+	if err := s.CreateConnectorConsent(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	consumedSecond, err := s.ConsumeConnectorConsent(ctx, second.Nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if consumedFirst.Sequence < 1 || consumedSecond.Sequence <= consumedFirst.Sequence {
+		t.Fatalf("sequences = %d, %d, want increasing from 1", consumedFirst.Sequence, consumedSecond.Sequence)
+	}
+	park := func(nonce, token string, sequence int64) error {
+		completion := testConnectorCompletion()
+		completion.Nonce, completion.Credential.AccessToken, completion.ConsentSequence = nonce, token, sequence
+		return s.CreateConnectorCompletion(ctx, completion)
+	}
+	ref := store.ConnectorCredentialRef{ConnectionUID: "uid-1", Namespace: "tenant", Name: "github-abc", SubjectDigest: "digest-a", Provider: "github"}
+
+	// The newer consent's callback parks first; the older one, arriving
+	// later, is refused instead of replacing it.
+	if err := park("newer", "gho_newer", consumedSecond.Sequence); err != nil {
+		t.Fatal(err)
+	}
+	if err := park("older", "gho_older", consumedFirst.Sequence); !errors.Is(err, store.ErrConnectorConsentSuperseded) {
+		t.Fatalf("older park after newer err = %v, want ErrConnectorConsentSuperseded", err)
+	}
+	if _, err := s.CommitConnectorCompletion(ctx, "newer", ref, store.ConnectorCredential{AccessToken: "gho_newer"}); err != nil {
+		t.Fatal(err)
+	}
+	// Once the newer consent is custody, no older consent can park again.
+	if err := park("older-again", "gho_older", consumedFirst.Sequence); !errors.Is(err, store.ErrConnectorConsentSuperseded) {
+		t.Fatalf("older park after commit err = %v, want ErrConnectorConsentSuperseded", err)
+	}
+	if held, err := s.GetConnectorCredential(ctx, ref); err != nil || held.AccessToken != "gho_newer" {
+		t.Fatalf("custody = %+v err = %v, want the newer grant", held, err)
+	}
+
+	// A newer park replaces an older uncommitted one, so a Connection holds
+	// at most one uncommitted completion.
+	if err := park("third", "gho_third", consumedSecond.Sequence+1); err != nil {
+		t.Fatal(err)
+	}
+	if err := park("fourth", "gho_fourth", consumedSecond.Sequence+2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PeekConnectorCompletion(ctx, "third"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("replaced completion peek err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestConnectorCommitBoundsRetainedGrants covers repeated relinking: the
+// superseded grants kept for revocation are bounded, and a commit past the
+// bound is refused with custody unchanged.
+func TestConnectorCommitBoundsRetainedGrants(t *testing.T) {
+	s := newConnectorTestStore(t)
+	ctx := context.Background()
+	ref := store.ConnectorCredentialRef{ConnectionUID: "uid-1", Namespace: "tenant", Name: "github-abc", SubjectDigest: "digest-a", Provider: "github"}
+	var last string
+	for i := range maxRetiredConnectorCredentials + 2 {
+		completion := testConnectorCompletion()
+		completion.Nonce = fmt.Sprintf("grant-%d", i)
+		completion.Credential.AccessToken = fmt.Sprintf("gho_%d", i)
+		if err := s.CreateConnectorCompletion(ctx, completion); err != nil {
+			t.Fatal(err)
+		}
+		_, err := s.CommitConnectorCompletion(ctx, completion.Nonce, ref, completion.Credential)
+		if i <= maxRetiredConnectorCredentials {
+			if err != nil {
+				t.Fatalf("grant %d: %v", i, err)
+			}
+			last = completion.Credential.AccessToken
+			continue
+		}
+		if !errors.Is(err, store.ErrConnectorRetiredLimit) {
+			t.Fatalf("grant %d err = %v, want ErrConnectorRetiredLimit", i, err)
+		}
+	}
+	if held, err := s.GetConnectorCredential(ctx, ref); err != nil || held.AccessToken != last {
+		t.Fatalf("custody = %+v err = %v, want %s kept", held, err, last)
+	}
+	if retired, err := s.ListRetiredConnectorCredentials(ctx, ref); err != nil || len(retired) != maxRetiredConnectorCredentials {
+		t.Fatalf("retired = %d err = %v, want %d", len(retired), err, maxRetiredConnectorCredentials)
+	}
+}
+
+// TestConnectorKeyActivationSkipsExpiredConsents covers key rotation after a
+// pending consent's TTL passed: it holds no token and can never be used, so
+// it does not block activating a key that cannot open it.
+func TestConnectorKeyActivationSkipsExpiredConsents(t *testing.T) {
+	s := newConnectorTestStore(t)
+	ctx := context.Background()
+	expired := testConnectorConsent()
+	expired.ExpiresAt = time.Now().Add(-time.Minute)
+	if err := s.CreateConnectorConsent(ctx, expired); err != nil {
+		t.Fatal(err)
+	}
+	other, err := NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{0x24}, AgentExecutionSnapshotKeyBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetAgentExecutionSnapshotCipher(other); err != nil {
+		t.Fatalf("an expired consent must not block key activation: %v", err)
 	}
 }
