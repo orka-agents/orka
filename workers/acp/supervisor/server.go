@@ -239,6 +239,7 @@ func sessionCreationStage(err error) string {
 type sessionState struct {
 	supportsNativeSessions  bool
 	nativeInstallUnresolved *failedCreateReplay
+	nativeInstallJournal    string
 	id                      harnessv2.RuntimeSessionID
 	runtime                 *acp.RuntimeSession
 	promptMutations         promptMutationExecutor
@@ -863,8 +864,13 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	runtimeSession, descriptor, paths, baseline, providerProxy, mcpProxy, diagnosticFilter, createErr := s.createSession(r.Context(), request, now, uid, gid)
 	if createErr != nil {
 		if isNativeInstallUnknown(createErr) && paths.Root != "" {
-			s.retainUnresolvedNativeInstall(state, request, paths, now)
+			s.retainUnresolvedNativeInstall(state, request, paths, nil, nativeInstallUnknownMessage, now)
 			writeError(w, http.StatusConflict, harnessv2.ErrorCodeCleanupUnproven, nativeInstallUnknownMessage, nil, false)
+			return
+		}
+		if _, retained := errors.AsType[*nativeCreateCleanupUnprovenError](createErr); retained && paths.Root != "" {
+			s.retainUnresolvedNativeInstall(state, request, paths, runtimeSession, nativeCreateCleanupUnprovenMessage, now)
+			writeError(w, http.StatusConflict, harnessv2.ErrorCodeCleanupUnproven, nativeCreateCleanupUnprovenMessage, nil, false)
 			return
 		}
 		// The allocated UID/GID is permanently consumed (identities are never
@@ -934,16 +940,30 @@ func (s *Server) createSession(
 	now time.Time,
 	uid int,
 	gid int,
-) (*acp.RuntimeSession, harnessv2.RuntimeSessionDescriptor, acp.SessionPaths, *workspacedelta.Snapshot, *providerProxySession, *mcpProxySession, *AgentDiagnosticFilter, error) {
+) (
+	resultRuntime *acp.RuntimeSession, resultDescriptor harnessv2.RuntimeSessionDescriptor, resultPaths acp.SessionPaths,
+	resultBaseline *workspacedelta.Snapshot, resultProviderProxy *providerProxySession, resultMCPProxy *mcpProxySession,
+	resultDiagnosticFilter *AgentDiagnosticFilter, resultErr error,
+) {
 	pathID := sessionPathID(request.Metadata.Fence.RuntimeSessionUID, request.Metadata.Fence.RuntimeSessionGeneration)
 	paths, err := acp.PrepareSessionPaths(s.cfg.SessionBaseDir, pathID)
 	if err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("path preparation", err)
 	}
 	cleanup := true
+	nativeJournalDir := ""
+	ownsNativeJournal := false
 	defer func() {
-		if cleanup {
+		if !cleanup {
+			return
+		}
+		if nativeJournalDir == "" {
 			_ = os.RemoveAll(paths.Root)
+			return
+		}
+		if cleanupErr := cleanupFailedNativeCreate(paths, nativeJournalDir, ownsNativeJournal); cleanupErr != nil {
+			resultPaths = paths
+			resultErr = sessionCreationFailed("native create filesystem cleanup", &nativeCreateCleanupUnprovenError{Err: errors.Join(resultErr, cleanupErr)})
 		}
 	}()
 	// Under a durable workspace root, the repository workspace of one logical
@@ -1180,8 +1200,13 @@ func (s *Server) createSession(
 		if inspectErr != nil || summary.ThreadID != snapshot.ProviderSessionID || summary.DataDigest != snapshot.DataDigest {
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("native session validation", fmt.Errorf("native bundle does not match restore metadata"))
 		}
-		journalDir := filepath.Join(s.cfg.SessionBaseDir, ".native-install", pathID)
-		if _, installErr := codexstate.Install(ctx, snapshot.Data, filepath.Join(paths.Home, ".codex"), paths.Workspace, journalDir); installErr != nil {
+		nativeJournalDir = filepath.Join(s.cfg.SessionBaseDir, ".native-install", pathID)
+		_, journalErr := os.Lstat(nativeJournalDir)
+		if journalErr != nil && !errors.Is(journalErr, os.ErrNotExist) {
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("native session journal inspection", journalErr)
+		}
+		ownsNativeJournal = errors.Is(journalErr, os.ErrNotExist)
+		if _, installErr := codexstate.Install(ctx, snapshot.Data, filepath.Join(paths.Home, ".codex"), paths.Workspace, nativeJournalDir); installErr != nil {
 			if isNativeInstallUnknown(installErr) {
 				cleanup = false
 				return nil, harnessv2.RuntimeSessionDescriptor{}, paths, nil, nil, nil, nil, sessionCreationFailed("native session installation", installErr)
@@ -1245,6 +1270,10 @@ func (s *Server) createSession(
 		MaxBufferedEventBytes: supervisorMaxBufferedPromptEventBytes,
 	})
 	if err != nil {
+		if initialization, failed := errors.AsType[*acp.InitializationError](err); request.NativeRestore != nil && failed && !initialization.Cleanup.Proven {
+			cleanup = false
+			return initialization.RuntimeSession(), harnessv2.RuntimeSessionDescriptor{}, paths, nil, nil, nil, nil, sessionCreationFailed("provider adapter initialization", &nativeCreateCleanupUnprovenError{Err: err})
+		}
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider adapter initialization", err)
 	}
 	if s.cfg.DurableWorkspaceDir != "" {
@@ -1271,6 +1300,10 @@ func (s *Server) createSession(
 			// later pool lifecycle decisions would proceed over it.
 			cleanupResult, deleteErr := runtimeSession.Delete(ctx)
 			if deleteErr != nil || !cleanupResult.Proven {
+				if request.NativeRestore != nil {
+					cleanup = false
+					return runtimeSession, harnessv2.RuntimeSessionDescriptor{}, paths, nil, nil, nil, nil, sessionCreationFailed("durable workspace commit", &nativeCreateCleanupUnprovenError{Err: errors.Join(commitErr, deleteErr)})
+				}
 				s.poisonPool("durable_commit_session_cleanup_unproven")
 			}
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace commit", commitErr)

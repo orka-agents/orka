@@ -85,8 +85,11 @@ pool admission. Exact create retries report that retained outcome without
 allocating another home or starting a child. Automatic reconciliation of that
 supervisor creation state is not part of this delivery.
 
-A failed or cancelled Task does not publish a new native checkpoint. A changed
-canonical boundary makes an older checkpoint unavailable for restore or export.
+Failed or cancelled provider prompts do not publish a new native checkpoint.
+A successful prompt can retain its native state after delivery failure once
+workspace finalization and canonical settlement complete. Poisoned workspace
+validation failures cannot produce a native checkpoint. A changed canonical
+boundary makes an older checkpoint unavailable for restore or export.
 If a native-continuity Session cannot produce a supported checkpoint, Orka
 retains the runtime evidence and blocks finalization. It does not silently start
 a new provider thread. An ordinary Session with no native checkpoint may use

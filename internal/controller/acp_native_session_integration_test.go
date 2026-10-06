@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -22,6 +23,180 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
+
+type nativeDeliveryFailureStore struct {
+	store.DurableControlStore
+	fail bool
+}
+
+func (s *nativeDeliveryFailureStore) TransitionPromptAttemptDelivery(ctx context.Context, request store.PromptAttemptDeliveryTransition) (*store.PromptAttempt, error) {
+	if s.fail && (request.NewState == store.PromptDeliveryNoChange || request.NewState == store.PromptDeliveryReadValidated) {
+		return nil, errors.New("injected terminal delivery transition failure")
+	}
+	return s.DurableControlStore.TransitionPromptAttemptDelivery(ctx, request)
+}
+
+func TestACPDispatcherFirstNativeCaptureRecoveryPreservesExactEvidence(t *testing.T) {
+	for _, takeover := range []bool{false, true} {
+		name := "same-epoch-restart"
+		if takeover {
+			name = "epoch-takeover"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			defer cancel()
+			snapshot := storetest.NativeSessionSnapshot(t, "first native checkpoint interrupted before capture intent")
+			captures, deletes, prompts := 0, 0, 0
+			var persistence *sqlite.Store
+			fixture := newTaskScopedCreateConflictFixture(t, ctx, "native-recovery-"+name, "77777777-7777-7777-7777-777777777777",
+				func(profile harnessv2.RuntimeProfile, digest harnessv2.ProfileDigest, _ *client.Client) *httptest.Server {
+					return newDispatcherRuntimeServerWithOptions(t, profile, digest, dispatcherRuntimeServerOptions{
+						nativeSnapshot: &snapshot,
+						onNativeCapture: func(request harnessv2.CaptureNativeSessionRequest) error {
+							captures++
+							require.Empty(t, request.OriginalOperationID, "the first same-epoch recovery starts one exact capture")
+							return nil
+						},
+						onDelete: func(harnessv2.DeleteRuntimeSessionRequest) { deletes++ },
+						onPrompt: func(harnessv2.StartPromptRequest) { prompts++ },
+					}, func(request harnessv2.CreateRuntimeSessionRequest) {
+						require.NoError(t, persistence.BindSessionCleanupIdentity(ctx, "default", "first-native-recovery", string(request.Metadata.Fence.RuntimeSessionUID)))
+					})
+				}, func(task *corev1alpha1.Task) {
+					task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "first-native-recovery", Create: true, Append: true}
+				})
+			defer func() { fixture.stop() }()
+			persistence = fixture.dispatcher.ResultStore.(*sqlite.Store)
+			failure := &nativeDeliveryFailureStore{DurableControlStore: persistence, fail: true}
+			fixture.dispatcher.Store = failure
+			fixture.dispatcher.EventStore = persistence
+			continuity, err := NewACPSessionContinuity(ACPSessionContinuityConfig{
+				SessionControls: failure, Transcripts: persistence, Publications: persistence, BranchClaims: persistence,
+			})
+			require.NoError(t, err)
+			fixture.dispatcher.Sessions = continuity
+			reserved, target, err := fixture.dispatcher.reserveTask(ctx, fixture.task)
+			require.NoError(t, err)
+			require.NotNil(t, reserved)
+			require.ErrorContains(t, fixture.dispatcher.executeReservedTask(ctx, reserved, target), "injected terminal delivery transition failure")
+			current := fixture.currentTask(t, ctx)
+			require.Empty(t, current.Annotations[nativeCaptureIntentAnnotation])
+			require.Zero(t, captures)
+			require.Zero(t, deletes, "accepted runtime evidence must survive a delivery error before capture intent")
+			require.Equal(t, 1, prompts)
+			control, err := persistence.GetSessionControl(ctx, "default", "first-native-recovery")
+			require.NoError(t, err)
+			require.NotNil(t, control.Lease)
+			_, err = persistence.GetNativeSession(ctx, control.Namespace, control.SessionName, control.SessionUID)
+			require.ErrorIs(t, err, store.ErrNotFound)
+			failure.fail = false
+			fence, err := fixture.dispatcher.Epochs.CurrentFence(ctx)
+			require.NoError(t, err)
+			require.NoError(t, fixture.dispatcher.transitionDelivery(ctx, fixture.attemptID, fence, store.PromptDeliveryValidating, store.PromptDeliveryNoChange, "recover-terminal-delivery", ""))
+			epochs := fixture.dispatcher.Epochs
+			if takeover {
+				fixture.stop()
+				fixture.stop = func() {}
+				var stopEpoch func()
+				epochs, stopEpoch = startACPRecoveryEpochManager(t, ctx, persistence, "native-recovery-takeover")
+				defer stopEpoch()
+				fence, err = epochs.CurrentFence(ctx)
+				require.NoError(t, err)
+				require.Greater(t, fence.Epoch, current.Status.Execution.ControllerEpoch)
+			}
+			restarted := &ACPDispatcher{Client: fixture.kubeClient, APIReader: fixture.kubeClient, Store: failure,
+				ResultStore: persistence, EventStore: persistence, Snapshots: persistence, Sessions: continuity, Epochs: epochs}
+			err = restarted.recoverStaleTask(ctx, current, fence)
+			if takeover {
+				require.ErrorContains(t, err, "stale controller epoch", "an old pool authority cannot authorize a new capture after takeover")
+				require.Zero(t, captures)
+				require.Zero(t, deletes)
+				retained, err := persistence.GetSessionControl(ctx, control.Namespace, control.SessionName)
+				require.NoError(t, err)
+				require.Equal(t, control.Lease, retained.Lease)
+				require.Empty(t, fixture.currentTask(t, ctx).Annotations[nativeCaptureIntentAnnotation])
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, 1, captures)
+			require.Equal(t, 1, deletes)
+			require.Equal(t, 1, prompts, "recovery must not replay an accepted prompt")
+			record, err := persistence.GetNativeSession(ctx, control.Namespace, control.SessionName, control.SessionUID)
+			require.NoError(t, err)
+			require.Equal(t, snapshot.DataDigest, record.Snapshot.DataDigest)
+			require.Equal(t, 2, record.MessageCount)
+			settled, err := persistence.GetSessionControl(ctx, control.Namespace, control.SessionName)
+			require.NoError(t, err)
+			require.Nil(t, settled.Lease)
+		})
+	}
+}
+
+func TestACPDispatcherPoisonedWorkspaceFailureDoesNotAttemptNativeCapture(t *testing.T) {
+	for _, validationError := range []bool{false, true} {
+		name := "read-only-modified"
+		if validationError {
+			name = "validation-error"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			defer cancel()
+			snapshot := storetest.NativeSessionSnapshot(t, "unsupported poisoned workspace has no native checkpoint")
+			captures, deletes := 0, 0
+			fixture := newTaskScopedCreateConflictFixture(t, ctx, "native-workspace-"+name, "77777777-7777-7777-7777-777777777777",
+				func(profile harnessv2.RuntimeProfile, digest harnessv2.ProfileDigest, _ *client.Client) *httptest.Server {
+					options := dispatcherRuntimeServerOptions{
+						nativeSnapshot: &snapshot, workspaceDeltaState: harnessv2.WorkspaceDeltaReadOnlyModified,
+						onDelete: func(harnessv2.DeleteRuntimeSessionRequest) { deletes++ },
+						onNativeCapture: func(harnessv2.CaptureNativeSessionRequest) error {
+							captures++
+							return &harnessv2.ClientError{Code: harnessv2.ErrorCodeSessionPoisoned, StatusCode: http.StatusConflict}
+						},
+					}
+					if validationError {
+						options.workspaceDeltaFailure = &harnessv2.ErrorResponse{Protocol: harnessv2.ProtocolVersion,
+							Code: harnessv2.ErrorCodeSessionPoisoned, Message: "workspace validation failed"}
+					}
+					return newDispatcherRuntimeServerWithOptions(t, profile, digest, options)
+				}, func(task *corev1alpha1.Task) {
+					task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "poisoned-workspace", Create: true, Append: true}
+				})
+			defer fixture.stop()
+			persistence := fixture.dispatcher.ResultStore.(*sqlite.Store)
+			fixture.dispatcher.EventStore = persistence
+			continuity, err := NewACPSessionContinuity(ACPSessionContinuityConfig{
+				SessionControls: persistence, Transcripts: persistence, Publications: persistence, BranchClaims: persistence,
+			})
+			require.NoError(t, err)
+			fixture.dispatcher.Sessions = continuity
+			reserved, target, err := fixture.dispatcher.reserveTask(ctx, fixture.task)
+			require.NoError(t, err)
+			require.NotNil(t, reserved)
+			if err := fixture.dispatcher.executeReservedTask(ctx, reserved, target); err != nil {
+				require.ErrorIs(t, err, store.ErrNotReady, "the existing deferred cleanup can await reconstructed terminal settlement")
+			}
+			current := fixture.currentTask(t, ctx)
+			require.Equal(t, corev1alpha1.TaskPhaseFailed, current.Status.Phase)
+			require.Equal(t, corev1alpha1.TaskExecutionOutcomeSucceeded, current.Status.Execution.Outcome)
+			if validationError {
+				require.Equal(t, corev1alpha1.TaskDeliveryStateDeliveryConflict, current.Status.Delivery.State)
+			} else {
+				require.Equal(t, corev1alpha1.TaskDeliveryStateReadOnlyWorkspaceModified, current.Status.Delivery.State)
+			}
+			fence, err := fixture.dispatcher.Epochs.CurrentFence(ctx)
+			require.NoError(t, err)
+			require.NoError(t, fixture.dispatcher.recoverStaleTask(ctx, current, fence))
+			require.Empty(t, current.Annotations[nativeCaptureIntentAnnotation])
+			require.Zero(t, captures)
+			require.LessOrEqual(t, deletes, 1)
+			control, err := persistence.GetSessionControl(ctx, "default", "poisoned-workspace")
+			require.NoError(t, err)
+			require.Nil(t, control.Lease)
+			_, err = persistence.GetNativeSession(ctx, control.Namespace, control.SessionName, control.SessionUID)
+			require.ErrorIs(t, err, store.ErrNotFound)
+		})
+	}
+}
 
 func TestNativeCapturePersistsUnderCanonicalSessionOwner(t *testing.T) {
 	ctx := t.Context()

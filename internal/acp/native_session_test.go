@@ -2,8 +2,10 @@ package acp
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -36,12 +38,13 @@ func TestRuntimeSessionLoadRequiresSupportAndNeverCreatesFallback(t *testing.T) 
 				t.Fatal(err)
 			}
 			const nativeID = "01970b26-25ad-71ef-bd22-9374ec0b741b"
+			command, helperCommand := testAdapterCommand(t), testExecHelperCommand(t)
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			session, err := NewRuntimeSession(ctx, RuntimeSessionConfig{
 				ID: "load-session", Generation: 1, ProfileDigest: "sha256:profile", LoadSessionID: nativeID,
 				MCPServers:  []MCPServer{{Name: "current-mcp", Type: "http", URL: "http://current.example/mcp"}},
-				Process:     ProcessConfig{Command: testAdapterCommand(t), Args: []string{"-test.run=TestACPHelperProcess"}, Environment: env, Paths: paths, UID: uid, GID: gid, ExecHelperCommand: testExecHelperCommand(t)},
+				Process:     ProcessConfig{Command: command, Args: []string{"-test.run=TestACPHelperProcess"}, Environment: env, Paths: paths, UID: uid, GID: gid, ExecHelperCommand: helperCommand},
 				CancelGrace: 100 * time.Millisecond,
 			})
 			if mode != "load-success" {
@@ -55,6 +58,26 @@ func TestRuntimeSessionLoadRequiresSupportAndNeverCreatesFallback(t *testing.T) 
 				}
 				if !strings.Contains(err.Error(), want) {
 					t.Fatalf("native load error = %v, want %s", err, want)
+				}
+				initialization, ok := errors.AsType[*InitializationError](err)
+				if !ok || initialization.RuntimeSession() == nil || session != nil {
+					t.Fatalf("failed load lost its runtime cleanup handle: %v", err)
+				}
+				if mode == "load-error" {
+					if rpc, ok := errors.AsType[*RPCError](err); !ok || rpc.Code != -32602 {
+						t.Fatalf("failed load lost its RPC cause: %v", err)
+					}
+				}
+				failedSession := initialization.RuntimeSession()
+				if _, err := failedSession.StartPrompt(ctx, "after-failed-load", "digest", []ContentBlock{Text("continue")}); err == nil {
+					t.Fatal("failed initialization admitted a prompt")
+				}
+				if initialization.Cleanup.Proven != (runtime.GOOS == "linux") {
+					t.Fatalf("initialization cleanup proof = %#v", initialization.Cleanup)
+				}
+				cleanup, stopErr := failedSession.Delete(ctx)
+				if runtime.GOOS == "linux" && (stopErr != nil || !cleanup.Proven) {
+					t.Fatalf("retained cleanup retry: %#v %v", cleanup, stopErr)
 				}
 				return
 			}

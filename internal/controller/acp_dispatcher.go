@@ -1434,6 +1434,12 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	runtimePublicationFinalizationRequired := false
 	runtimePublicationFinalized := false
 	var runtimePublicationFinalization *runtimeSessionPublicationFinalization
+	captureSuccessfulRuntimeSession := func() error {
+		if !nativeCaptureEligible(sessionExecution, nativeSessionsSupported) {
+			return nil
+		}
+		return d.captureTaskNativeSession(context.WithoutCancel(ctx), runtimeClient, task, runtimeFence, sessionExecution)
+	}
 	finalizePreparedRuntimeSession := func() error {
 		if !runtimePublicationFinalizationRequired || runtimePublicationFinalized {
 			return nil
@@ -2301,6 +2307,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			if err := finalizePreparedRuntimeSession(); err != nil {
 				return err
 			}
+			if err := captureSuccessfulRuntimeSession(); err != nil {
+				return err
+			}
 			if err := d.finalizeTaskSessionResult(
 				ctx, task, fence, sessionExecution, resultText, publicationID, projectionPhase, deliveryStatus,
 			); err != nil {
@@ -2339,10 +2348,8 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	if err := finalizePreparedRuntimeSession(); err != nil {
 		return err
 	}
-	if nativeCaptureEligible(sessionExecution, nativeSessionsSupported) {
-		if err := d.captureTaskNativeSession(context.WithoutCancel(ctx), runtimeClient, task, runtimeFence, sessionExecution); err != nil {
-			return err
-		}
+	if err := captureSuccessfulRuntimeSession(); err != nil {
+		return err
 	}
 	if err := d.finalizeTaskSessionResult(
 		ctx, task, fence, sessionExecution, resultText, publicationID, corev1alpha1.TaskPhaseSucceeded, deliveryStatus,

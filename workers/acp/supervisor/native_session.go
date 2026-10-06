@@ -196,22 +196,45 @@ func retainsNativeCaptureEvidence(state *sessionState) bool {
 }
 
 const nativeInstallUnknownMessage = "native installation outcome is unknown; original plan and private destination retained"
+const nativeCreateCleanupUnprovenMessage = "native runtime creation cleanup could not be proven; private home and original journal retained"
+
+type nativeCreateCleanupUnprovenError struct{ Err error }
+
+func (e *nativeCreateCleanupUnprovenError) Error() string { return e.Err.Error() }
+func (e *nativeCreateCleanupUnprovenError) Unwrap() error { return e.Err }
+
+// Only an unstarted or provably stopped writer permits this cleanup. A journal
+// that predates this create may bind another private destination and is retained.
+func cleanupFailedNativeCreate(paths acp.SessionPaths, journalDir string, ownsJournal bool) error {
+	if err := acp.ReclaimSessionOwnership(paths.Root); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(paths.Root); err != nil {
+		return err
+	}
+	if ownsJournal {
+		return os.RemoveAll(journalDir)
+	}
+	return nil
+}
 
 func isNativeInstallUnknown(err error) bool {
 	_, unknown := errors.AsType[*sessionkit.UnknownOutcomeError](err)
 	return unknown
 }
 
-func (s *Server) retainUnresolvedNativeInstall(state *sessionState, request harnessv2.CreateRuntimeSessionRequest, paths acp.SessionPaths, now time.Time) {
+func (s *Server) retainUnresolvedNativeInstall(state *sessionState, request harnessv2.CreateRuntimeSessionRequest, paths acp.SessionPaths, runtime *acp.RuntimeSession, message string, now time.Time) {
 	s.mu.Lock()
 	state.paths = paths
+	state.runtime = runtime
+	state.nativeInstallJournal = filepath.Join(s.cfg.SessionBaseDir, ".native-install", sessionPathID(state.descriptor.RuntimeSessionUID, state.descriptor.Generation))
 	state.profile = request.Profile
 	state.creating = false
 	state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
 	state.descriptor.LastTransitionAt = now
 	state.nativeInstallUnresolved = &failedCreateReplay{
 		operationID: request.Metadata.OperationID, requestDigest: request.Metadata.RequestDigest,
-		statusCode: http.StatusConflict, code: harnessv2.ErrorCodeCleanupUnproven, message: nativeInstallUnknownMessage,
+		statusCode: http.StatusConflict, code: harnessv2.ErrorCodeCleanupUnproven, message: message,
 	}
 	cleanup := s.poisonPoolLocked("native_install_outcome_unknown")
 	s.mu.Unlock()
@@ -227,6 +250,9 @@ func (s *Server) removeSessionPrivateFiles(state *sessionState) error {
 		// never from imported metadata or an agent-controlled path.
 		journal := filepath.Join(s.cfg.SessionBaseDir, ".native-install", sessionPathID(state.descriptor.RuntimeSessionUID, state.descriptor.Generation))
 		return os.RemoveAll(journal)
+	}
+	if state.nativeInstallJournal != "" {
+		return os.RemoveAll(state.nativeInstallJournal)
 	}
 	return nil
 }

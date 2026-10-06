@@ -2406,19 +2406,27 @@ func TestACPDispatcherUsesFrozenAgentAndToolAfterLiveResourcesChange(t *testing.
 }
 
 func TestACPDispatcherWriteSessionFinalizesPublicationBeforeDeleteAndPersistsCleanupReceipt(t *testing.T) {
-	testACPDispatcherWriteSessionFinalization(t, false, false)
+	testACPDispatcherWriteSessionFinalization(t, false, false, false)
 }
 
 func TestACPDispatcherWriteSessionSurvivesCreateConflictRequeue(t *testing.T) {
-	testACPDispatcherWriteSessionFinalization(t, true, false)
+	testACPDispatcherWriteSessionFinalization(t, true, false, false)
 }
 
 func TestACPDispatcherWriteTaskSettlesPublicationOwnerConflict(t *testing.T) {
-	testACPDispatcherWriteSessionFinalization(t, false, true)
+	testACPDispatcherWriteSessionFinalization(t, false, true, false)
+}
+
+func TestACPDispatcherNativeWriteSessionCapturesAfterPublicationFinalization(t *testing.T) {
+	testACPDispatcherWriteSessionFinalization(t, false, false, true)
+}
+
+func TestACPDispatcherNativeWriteSessionCapturesAfterTerminalPublicationFailure(t *testing.T) {
+	testACPDispatcherWriteSessionFinalization(t, false, true, true)
 }
 
 //nolint:goconst,gocyclo // The end-to-end write-session lifecycle assertions intentionally stay together.
-func testACPDispatcherWriteSessionFinalization(t *testing.T, requeueAfterCreateConflict, publicationOwnerConflict bool) {
+func testACPDispatcherWriteSessionFinalization(t *testing.T, requeueAfterCreateConflict, publicationOwnerConflict, nativeCapture bool) {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
@@ -2452,7 +2460,9 @@ func testACPDispatcherWriteSessionFinalization(t *testing.T, requeueAfterCreateC
 		}},
 	}
 	if publicationOwnerConflict {
-		task.Spec.SessionRef = nil
+		if !nativeCapture {
+			task.Spec.SessionRef = nil
+		}
 		task.Spec.Workspace.PushBranch = "orka/claimed-branch"
 	}
 	spanHarness, parentSpanID := stampACPTaskTrace(t, task)
@@ -2474,6 +2484,12 @@ func testACPDispatcherWriteSessionFinalization(t *testing.T, requeueAfterCreateC
 	var operationMu sync.Mutex
 	operations := make([]string, 0, 2)
 	var finalizationRequest harnessv2.FinalizeRuntimeSessionPublicationRequest
+	var persistence *sqlite.Store
+	var nativeSnapshot *harnessv2.NativeSessionSnapshot
+	if nativeCapture {
+		snapshot := storetest.NativeSessionSnapshot(t, "completed write-session native conversation")
+		nativeSnapshot = &snapshot
+	}
 	var creationPending atomic.Bool
 	creationPending.Store(requeueAfterCreateConflict)
 	runtimeServer := newDispatcherWriteRuntimeServer(
@@ -2484,11 +2500,25 @@ func testACPDispatcherWriteSessionFinalization(t *testing.T, requeueAfterCreateC
 			operations = append(operations, "finalize")
 			finalizationRequest = request
 		},
-		func(harnessv2.DeleteRuntimeSessionRequest) {
+		func(request harnessv2.DeleteRuntimeSessionRequest) {
+			if nativeCapture {
+				record, err := persistence.GetNativeSession(context.Background(), task.Namespace, task.Spec.SessionRef.Name, string(request.Metadata.Fence.RuntimeSessionUID))
+				if err != nil {
+					t.Errorf("read native checkpoint before runtime deletion: %v", err)
+				} else if record.MessageCount != 2 || record.Snapshot.DataDigest != nativeSnapshot.DataDigest {
+					t.Errorf("runtime deletion preceded the updated atomic native checkpoint: count=%d digest=%s", record.MessageCount, record.Snapshot.DataDigest)
+				}
+			}
 			operationMu.Lock()
 			defer operationMu.Unlock()
 			operations = append(operations, "delete")
 		},
+		dispatcherRuntimeServerOptions{nativeSnapshot: nativeSnapshot, onNativeCapture: func(harnessv2.CaptureNativeSessionRequest) error {
+			operationMu.Lock()
+			defer operationMu.Unlock()
+			operations = append(operations, "capture")
+			return nil
+		}},
 	)
 	defer runtimeServer.Close()
 	parsed, err := url.Parse(runtimeServer.URL)
@@ -2534,6 +2564,7 @@ func testACPDispatcherWriteSessionFinalization(t *testing.T, requeueAfterCreateC
 	}
 	defer db.Close() //nolint:errcheck
 	controlStore := sqlite.NewStore(db, "test")
+	persistence = controlStore
 	epochs := NewControllerEpochManager(controlStore, "controller-write-session")
 	epochCtx, cancelEpoch := context.WithCancel(context.Background())
 	epochDone := make(chan error, 1)
@@ -2591,9 +2622,24 @@ func testACPDispatcherWriteSessionFinalization(t *testing.T, requeueAfterCreateC
 			operations = append(operations, "settle")
 		},
 	}
-	continuity, err := NewACPSessionContinuity(ACPSessionContinuityConfig{
+	continuityConfig := ACPSessionContinuityConfig{
 		SessionControls: recordingControls, Transcripts: controlStore, Publications: controlStore, BranchClaims: controlStore,
-	})
+	}
+	if nativeCapture {
+		continuityConfig.NewSessionUID = func() (string, error) { return "native-write-owner", nil }
+		prior := storetest.NativeSessionSnapshot(t, "prior write-session native conversation")
+		prior.RuntimeSessionUID, prior.RuntimeProfileDigest, prior.WorkingDirectory = "", "", ""
+		if _, err := controlStore.StageNativeSessionImport(ctx, store.NativeSessionImport{
+			Namespace: task.Namespace, SessionName: task.Spec.SessionRef.Name, OperationID: "stage-write-native",
+			RequestDigest: store.NativeSessionImportDigest(task.Namespace, task.Spec.SessionRef.Name, prior.DataDigest), Snapshot: prior,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := controlStore.BindSessionCleanupIdentity(ctx, task.Namespace, task.Spec.SessionRef.Name, "native-write-owner"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	continuity, err := NewACPSessionContinuity(continuityConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2664,6 +2710,23 @@ func testACPDispatcherWriteSessionFinalization(t *testing.T, requeueAfterCreateC
 		if attempt.ExecutionState != store.PromptExecutionSucceeded || attempt.DeliveryState != store.PromptDeliveryConflict {
 			t.Fatalf("conflict attempt = %#v", attempt)
 		}
+		if nativeCapture {
+			operationMu.Lock()
+			gotOperations := append([]string(nil), operations...)
+			operationMu.Unlock()
+			if fmt.Sprint(gotOperations) != "[finalize capture settle delete]" {
+				t.Fatalf("terminal publication failure native ordering = %v", gotOperations)
+			}
+			control, err := controlStore.GetSessionControl(ctx, task.Namespace, task.Spec.SessionRef.Name)
+			if err != nil || control.Lease != nil {
+				t.Fatalf("native publication failure did not settle its Session lease: control=%v err=%v", control, err)
+			}
+			cancelEpoch()
+			if err := <-epochDone; err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
 		if exists, err := dispatcher.validateExistingStandaloneTaskProjection(ctx, completed, attempt); err != nil || !exists {
 			t.Fatalf("conflict terminal projection: exists=%v err=%v", exists, err)
 		}
@@ -2721,7 +2784,11 @@ func testACPDispatcherWriteSessionFinalization(t *testing.T, requeueAfterCreateC
 	gotOperations := append([]string(nil), operations...)
 	gotFinalization := finalizationRequest
 	operationMu.Unlock()
-	if fmt.Sprint(gotOperations) != "[finalize settle delete]" {
+	wantOperations := "[finalize settle delete]"
+	if nativeCapture {
+		wantOperations = "[finalize capture settle delete]"
+	}
+	if fmt.Sprint(gotOperations) != wantOperations {
 		t.Fatalf("runtime cleanup operations = %v, want publication finalization, Session settlement, then deletion", gotOperations)
 	}
 	if gotFinalization.WorkspaceDeltaID != harnessv2.WorkspaceDeltaID("delta-"+promptID) ||
@@ -3612,8 +3679,13 @@ func newDispatcherWriteRuntimeServer(
 	creationPending *atomic.Bool,
 	onFinalize func(harnessv2.FinalizeRuntimeSessionPublicationRequest),
 	onDelete func(harnessv2.DeleteRuntimeSessionRequest),
+	options ...dispatcherRuntimeServerOptions,
 ) *httptest.Server {
 	t.Helper()
+	var nativeOptions dispatcherRuntimeServerOptions
+	if len(options) > 0 {
+		nativeOptions = options[0]
+	}
 	mux := http.NewServeMux()
 	limits := harnessv2.DefaultProtocolLimits()
 	deltaDigest := "sha256:" + strings.Repeat("5", 64)
@@ -3646,6 +3718,7 @@ func newDispatcherWriteRuntimeServer(
 			SupportsDrain:                     true,
 			SupportsPublicationFinalization:   true,
 			SupportsAgentSessionConfiguration: true,
+			SupportsNativeSessions:            nativeOptions.nativeSnapshot != nil,
 		})
 	})
 	mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}", func(w http.ResponseWriter, r *http.Request) {
@@ -3663,6 +3736,10 @@ func newDispatcherWriteRuntimeServer(
 			SupervisorBootID: request.Metadata.Fence.SupervisorBootID, RuntimeProfileDigest: request.Metadata.Fence.RuntimeProfileDigest,
 			State: harnessv2.RuntimeSessionStateIdle, ProviderSessionID: "provider-session", WorkspaceBaseline: request.Workspace.Baseline,
 			CreatedAt: now, LastTransitionAt: now,
+		}
+		if request.NativeRestore != nil {
+			descriptor.ProviderSessionID = request.NativeRestore.Snapshot.ProviderSessionID
+			descriptor.NativeRestoration = &harnessv2.NativeSessionRestoration{DataDigest: request.NativeRestore.Snapshot.DataDigest, ProviderSessionID: descriptor.ProviderSessionID, Loaded: true}
 		}
 		responseDescriptor := descriptor
 		descriptorMu.Unlock()
@@ -3767,6 +3844,29 @@ func newDispatcherWriteRuntimeServer(
 			},
 		})
 	})
+	mux.HandleFunc("POST /v2/runtime-sessions/{sessionID}/native-session", func(w http.ResponseWriter, r *http.Request) {
+		var request harnessv2.CaptureNativeSessionRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil || nativeOptions.nativeSnapshot == nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if nativeOptions.onNativeCapture != nil {
+			if err := nativeOptions.onNativeCapture(request); err != nil {
+				t.Errorf("native write capture: %v", err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+		}
+		snapshot := *nativeOptions.nativeSnapshot
+		snapshot.RuntimeSessionUID = request.Metadata.Fence.RuntimeSessionUID
+		snapshot.RuntimeProfileDigest = request.Metadata.Fence.RuntimeProfileDigest
+		descriptorMu.Lock()
+		descriptor.ProviderSessionID = snapshot.ProviderSessionID
+		descriptor.State = harnessv2.RuntimeSessionStatePoisoned
+		captured := descriptor
+		descriptorMu.Unlock()
+		writeDispatcherJSON(w, harnessv2.CaptureNativeSessionResponse{Protocol: harnessv2.ProtocolVersion, Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh}, Session: captured, Snapshot: snapshot})
+	})
 	mux.HandleFunc("DELETE /v2/runtime-sessions/{sessionID}", func(w http.ResponseWriter, r *http.Request) {
 		var request harnessv2.DeleteRuntimeSessionRequest
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -3831,6 +3931,8 @@ type dispatcherRuntimeServerOptions struct {
 	nativeInstallUnresolved bool
 	onNativeCapture         func(harnessv2.CaptureNativeSessionRequest) error
 	onPrompt                func(harnessv2.StartPromptRequest)
+	workspaceDeltaState     harnessv2.WorkspaceDeltaState
+	workspaceDeltaFailure   *harnessv2.ErrorResponse
 }
 
 func newDispatcherRuntimeServerWithOptions(
@@ -4019,12 +4121,25 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
+		if options.workspaceDeltaFailure != nil {
+			writeDispatcherJSONStatus(w, http.StatusConflict, *options.workspaceDeltaFailure)
+			return
+		}
+		deltaState := harnessv2.WorkspaceDeltaNoChange
+		var entryCount uint32
+		if options.workspaceDeltaState != "" {
+			deltaState = options.workspaceDeltaState
+		}
+		if deltaState == harnessv2.WorkspaceDeltaReadOnlyModified {
+			entryCount = 1
+		}
 		writeDispatcherJSON(w, harnessv2.CreateWorkspaceDeltaResponse{
 			Protocol: harnessv2.ProtocolVersion, Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh},
 			Delta: harnessv2.WorkspaceDeltaDescriptor{
 				DeltaID: request.DeltaID, RuntimeSessionUID: request.Metadata.Fence.RuntimeSessionUID,
-				SessionGeneration: request.Metadata.Fence.RuntimeSessionGeneration, State: harnessv2.WorkspaceDeltaNoChange,
-				Intent: request.Intent, VerifiedBaseline: request.VerifiedBaseline, NoFollowVerified: true, PublicationSafe: true, FrozenAt: time.Now().UTC(),
+				SessionGeneration: request.Metadata.Fence.RuntimeSessionGeneration, State: deltaState,
+				EntryCount: entryCount, ChangedFileCount: entryCount,
+				Intent: request.Intent, VerifiedBaseline: request.VerifiedBaseline, NoFollowVerified: true, PublicationSafe: deltaState != harnessv2.WorkspaceDeltaReadOnlyModified, FrozenAt: time.Now().UTC(),
 			},
 		})
 	})

@@ -7,9 +7,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -450,6 +452,13 @@ func handleSupervisorNativeLoad(writer *bufio.Writer, id, params json.RawMessage
 	})
 	if json.Unmarshal(params, &request) != nil || request.SessionID != testNativeThreadID || request.CWD != cwd || len(request.MCPServers) != 1 || !installed {
 		writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(id), "error": map[string]any{"code": -32602, "message": "native load did not find installed current-cwd rollout and MCP"}})
+		return
+	}
+	if mode := os.Getenv("SUPERVISOR_ACP_HELPER_MODE"); strings.HasPrefix(mode, "native-load-reject") {
+		if strings.HasSuffix(mode, "-held") {
+			signal.Ignore(syscall.SIGTERM)
+		}
+		writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(id), "error": map[string]any{"code": -32602, "message": "native load rejected"}})
 		return
 	}
 	writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "method": acp.MethodSessionUpdate, "params": map[string]any{"sessionId": sessionID, "update": map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "imported history"}}}})

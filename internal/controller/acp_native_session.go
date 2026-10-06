@@ -269,12 +269,42 @@ func (d *ACPDispatcher) recoverTaskNativeCapture(ctx context.Context, task *core
 	}
 	session.NativeSession = native
 	pending := task.Annotations[nativeCaptureIntentAnnotation] != ""
-	if !pending && native == nil {
+	if !pending && native == nil && d.nativeSessionStore() == nil {
 		return nil
+	}
+	if !pending && native == nil && task.Status.AgentExecutionBinding != nil &&
+		task.Status.AgentExecutionBinding.RuntimeType != corev1alpha1.AgentRuntimeCodex {
+		return nil
+	}
+	if !pending {
+		attempt, err := d.Store.GetPromptAttempt(ctx, session.Turn.Turn.PromptAttemptID)
+		if err != nil {
+			return err
+		}
+		delivery := task.Status.Delivery
+		if attempt.DeliveryState == store.PromptDeliveryConflict && d.APIReader != nil {
+			latest := &corev1alpha1.Task{}
+			if err := d.APIReader.Get(ctx, client.ObjectKeyFromObject(task), latest); err != nil {
+				return err
+			}
+			if latest.UID != task.UID {
+				return fmt.Errorf("%w: native capture recovery Task UID changed", store.ErrConflict)
+			}
+			delivery = latest.Status.Delivery
+		}
+		// Poisoned workspace validation cannot produce a native checkpoint.
+		// An existing capture intent still requires its exact receipt recovery.
+		if attempt.DeliveryState == store.PromptDeliveryReadOnlyWorkspaceModified ||
+			delivery != nil && delivery.Reason == "WorkspaceValidationFailed" {
+			return nil
+		}
 	}
 	execution := task.Status.Execution
 	pool := &corev1alpha1.RuntimePool{}
 	if execution == nil || execution.RuntimePoolName == "" {
+		if !pending && native == nil {
+			return nil
+		}
 		return fmt.Errorf("%w: native capture recovery requires its exact RuntimePool", store.ErrConflict)
 	}
 	if err := d.APIReader.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: execution.RuntimePoolName}, pool); err != nil {
@@ -285,9 +315,25 @@ func (d *ACPDispatcher) recoverTaskNativeCapture(ctx context.Context, task *core
 		active.BootID != execution.RuntimeSessionSupervisorBootID || pool.Spec.Runtime.Profile.Digest != execution.RuntimeSessionProfileDigest {
 		return fmt.Errorf("%w: native capture runtime was replaced before its durable receipt", store.ErrConflict)
 	}
+	if pool.Spec.Runtime.Profile.ProviderKind != runtimePoolProviderCodex {
+		if pending || native != nil {
+			return errNativeSessionRuntimeUnsupported
+		}
+		return nil
+	}
 	runtimeClient, runtimeFence, _, _, err := d.runtimePoolClient(ctx, pool)
 	if err != nil {
 		return err
+	}
+	capabilities, err := runtimeClient.Capabilities(ctx)
+	if err != nil {
+		return err
+	}
+	if !capabilities.SupportsNativeSessions {
+		if pending || native != nil {
+			return errNativeSessionRuntimeUnsupported
+		}
+		return nil
 	}
 	runtimeFence.RuntimeSessionUID = harnessv2.RuntimeSessionUID(execution.RuntimeSessionUID)
 	runtimeFence.RuntimeSessionGeneration = uint64(execution.RuntimeSessionGeneration)
