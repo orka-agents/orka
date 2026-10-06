@@ -22,6 +22,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -344,12 +345,7 @@ func (f *Fixture) bearerAccepted(r *http.Request) (string, bool) {
 
 // hasScope reports whether a space-separated granted scope carries want.
 func hasScope(granted, want string) bool {
-	for _, scope := range strings.Fields(granted) {
-		if scope == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(strings.Fields(granted), want)
 }
 
 // scopeRefused records a bearer that is live but not granted the scope.
