@@ -633,13 +633,15 @@ func validateToolParameters(name string, parameters *apiextensionsv1.JSON) *Issu
 		}
 	}
 	// The execution path resolves the whole schema, so a nested shape it
-	// would reject must not be accepted here.
+	// would reject must not be accepted here. The library's error text is
+	// not repeated: it can quote schema values and whole $ref URLs, and
+	// this message becomes public provider status.
 	var full jsonschema.Schema
 	if err := json.Unmarshal(parameters.Raw, &full); err != nil {
-		return invalid(fmt.Sprintf("HTTP tool %q parameters must be a valid JSON Schema: %s", name, err.Error()))
+		return invalid(fmt.Sprintf("HTTP tool %q parameters must be a valid JSON Schema", name))
 	}
 	if _, err := full.Resolve(nil); err != nil {
-		return invalid(fmt.Sprintf("HTTP tool %q parameters must be a resolvable JSON Schema: %s", name, err.Error()))
+		return invalid(fmt.Sprintf("HTTP tool %q parameters must be a resolvable JSON Schema with only local references", name))
 	}
 	return nil
 }
