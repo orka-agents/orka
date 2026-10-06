@@ -198,6 +198,13 @@ func (r *ConnectionReconciler) applyCommittedCompletions(ctx context.Context, co
 			continue
 		}
 		held, err := r.Credentials.GetConnectorCredential(ctx, ref)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			// The completion is the only durable record that can repair
+			// the status; a custody read that failed proves no mismatch,
+			// so it is kept for the next pass.
+			log.FromContext(ctx).Info("custody could not be read to finish a committed completion; retrying", "connection", connection.Name)
+			continue
+		}
 		if err == nil && held.GrantSequence == completion.Credential.GrantSequence && held.AccessToken == completion.Credential.AccessToken &&
 			held.RefreshToken == completion.Credential.RefreshToken && held.AuthorityDigest == completion.Credential.AuthorityDigest {
 			// The same fence the API applies to a retried completion: the
@@ -395,8 +402,11 @@ func (r *ConnectionReconciler) revokeTokens(ctx context.Context, connection *cor
 		return nil
 	}
 	logger := log.FromContext(ctx)
+	// Read uncached: tokens are disclosed to the endpoint this spec names,
+	// so an operator's change to the client or revocation URL must be seen
+	// even when the informer has not caught up.
 	provider := &corev1alpha1.ConnectorProvider{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: connection.Namespace, Name: connection.Spec.ProviderRef.Name}, provider); err != nil {
+	if err := r.referenceReader().Get(ctx, types.NamespacedName{Namespace: connection.Namespace, Name: connection.Spec.ProviderRef.Name}, provider); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil
 		}
