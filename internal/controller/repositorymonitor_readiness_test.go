@@ -375,6 +375,7 @@ func TestRepositoryMonitorInventoryReusesReadinessPullRequestList(t *testing.T) 
 	}
 }
 
+//nolint:gocyclo // Exercise blockers, ordering, idempotency, inventory reuse, and peer closure on one shared head.
 func TestRepositoryMonitorReadinessAggregatesSharedHeads(t *testing.T) {
 	ctx := context.Background()
 	db := setupControllerSQLiteStore(t)

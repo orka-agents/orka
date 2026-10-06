@@ -20,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
+//nolint:gocyclo // Keep automatic selection, Task creation, recovery, and bounded retry in one lifecycle fixture.
 func TestRepositoryMonitorAutomaticallyRepairsFailedCI(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)

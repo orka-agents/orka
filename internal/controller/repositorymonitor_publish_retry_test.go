@@ -25,6 +25,8 @@ import (
 // Exercise ingestion, durable publication records, Secret reload and real HTTP
 // requests through Reconcile. Only the Kubernetes client and GitHub service are
 // substituted; no LLM execution is needed to republish a completed review.
+//
+//nolint:gocyclo // Keep credential rotation, cooldown, restart, and terminal outcomes in one publication lifecycle fixture.
 func TestRepositoryMonitorReviewPublishRecoversAfterTokenRefresh(t *testing.T) {
 	tests := []struct {
 		name           string
