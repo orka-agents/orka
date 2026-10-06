@@ -526,4 +526,9 @@ fi
 if grep -Fq -e "${token}" -e "${other_token}" "${workdir}/controller.log"; then
   die "an OIDC token appeared in controller logs"
 fi
+# The controller reads the provider's OAuth client secret for every code
+# exchange, refresh, and revocation; it must never reach a log either.
+if grep -Fq -e "${client_secret}" "${workdir}/controller.log"; then
+  die "the OAuth client secret appeared in controller logs"
+fi
 log "Live connectors E2E passed"
