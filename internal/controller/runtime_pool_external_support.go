@@ -23,8 +23,9 @@ import (
 )
 
 const (
-	runtimePoolDurableWorkspaceVolume    = "orka-workspace"
-	runtimePoolDurableWorkspaceMountPath = "/durable/orka-workspace"
+	runtimePoolDurableWorkspaceVolume          = "orka-workspace"
+	runtimePoolDurableWorkspaceMountPath       = "/durable/orka-workspace"
+	runtimePoolNativeProcessPort         int32 = 80
 )
 
 var errWorkspaceCredentialConflict = errors.New("workspace supervisor credential bootstrap conflict")
@@ -39,6 +40,9 @@ func runtimePoolNativeProcessTemplate(template corev1.PodTemplateSpec) corev1.Po
 	result.Spec.SecurityContext = &corev1.PodSecurityContext{RunAsUser: new(int64(0)), RunAsGroup: new(int64(0)), RunAsNonRoot: new(false)}
 	// Native worker placement is fixed by the provider's pinned Linux WorkerPool.
 	result.Spec.NodeSelector = nil
+	// Native Actor health and shutdown are provider-owned. Kubernetes probes,
+	// lifecycle hooks and grace periods cannot describe those guarantees.
+	result.Spec.TerminationGracePeriodSeconds = nil
 	scratch := map[string]bool{}
 	volumes := result.Spec.Volumes[:0]
 	for _, volume := range result.Spec.Volumes {
@@ -51,6 +55,26 @@ func runtimePoolNativeProcessTemplate(template corev1.PodTemplateSpec) corev1.Po
 	result.Spec.Volumes = volumes
 	for i := range result.Spec.Containers {
 		container := &result.Spec.Containers[i]
+		container.StartupProbe, container.ReadinessProbe, container.LivenessProbe = nil, nil, nil
+		container.Lifecycle = nil
+		for j := range container.Ports {
+			if container.Ports[j].ContainerPort == runtimePoolPort {
+				container.Ports[j].ContainerPort = runtimePoolNativeProcessPort
+			}
+		}
+		env := container.Env[:0]
+		for _, variable := range container.Env {
+			switch variable.Name {
+			case "ORKA_ACP_SESSION_BASE_DIR", "ORKA_ACP_MCP_BROKER_URL", "ORKA_ACP_POD_NAMESPACE":
+				// The native adapter uses supervisor defaults and SystemInfo
+				// identity instead of these Pod-specific overrides.
+				continue
+			case "ORKA_ACP_LISTEN_ADDRESS":
+				variable = corev1.EnvVar{Name: variable.Name, Value: ":80"}
+			}
+			env = append(env, variable)
+		}
+		container.Env = env
 		var capabilities *corev1.Capabilities
 		if container.SecurityContext != nil && container.SecurityContext.Capabilities != nil {
 			capabilities = container.SecurityContext.Capabilities.DeepCopy()

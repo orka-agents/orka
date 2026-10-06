@@ -159,6 +159,24 @@ func assertExternalRuntimePoolMaterializationLayout(t *testing.T, request *works
 		t.Fatal("scratch mounts differ from admitted materialization")
 	}
 	env := runtimePoolLiteralEnvironment(container.Env)
+	wantPort, wantListener := runtimePoolPort, ":8080"
+	if native {
+		wantPort, wantListener = 80, ":80"
+		if container.StartupProbe != nil || container.ReadinessProbe != nil || container.LivenessProbe != nil || container.Lifecycle != nil || request.Runtime.Template.Spec.TerminationGracePeriodSeconds != nil {
+			t.Fatal("native intent declares Kubernetes health or shutdown guarantees")
+		}
+	} else if container.StartupProbe == nil || container.ReadinessProbe == nil || container.LivenessProbe == nil || container.Lifecycle == nil || request.Runtime.Template.Spec.TerminationGracePeriodSeconds == nil {
+		t.Fatal("Pod health or shutdown guarantees changed")
+	}
+	if request.Runtime.BootstrapPort != wantPort || env["ORKA_ACP_LISTEN_ADDRESS"] != wantListener || len(container.Ports) != 1 || container.Ports[0].ContainerPort != wantPort {
+		t.Fatal("public bootstrap listener differs from provider materialization")
+	}
+	for _, name := range []string{"ORKA_ACP_SESSION_BASE_DIR", "ORKA_ACP_MCP_BROKER_URL", "ORKA_ACP_POD_NAMESPACE"} {
+		present := slices.ContainsFunc(container.Env, func(variable corev1.EnvVar) bool { return variable.Name == name })
+		if present == native {
+			t.Fatalf("public environment override %s differs from provider materialization", name)
+		}
+	}
 	if env[runtimePoolBootstrapNonceEnv] == "" || env["ORKA_ACP_CREDENTIAL_BOOTSTRAP_PUBLIC_KEY"] == "" ||
 		(env["ORKA_ACP_DURABLE_WORKSPACE_DIR"] == runtimePoolDurableWorkspaceMountPath) != durable ||
 		(env["ORKA_ACP_DURABLE_WORKSPACE_KEY"] == "shared") != durable {

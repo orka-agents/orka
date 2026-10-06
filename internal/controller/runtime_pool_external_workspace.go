@@ -255,8 +255,10 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 	template.Spec.Containers[0].Command = []string{"/usr/local/bin/orka-acp-runtime"}
 	template.Spec.RestartPolicy = corev1.RestartPolicyNever
 	template.Namespace = cfg.namespace
+	bootstrapPort := runtimePoolPort
 	if nativeProcess {
 		template = runtimePoolNativeProcessTemplate(template)
+		bootstrapPort = runtimePoolNativeProcessPort
 	}
 	if slices.Contains(w.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend) {
 		template = runtimePoolDurableWorkspaceTemplate(template)
@@ -269,7 +271,7 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 		Sequence:    1, Key: workspacev1alpha1.AllocationKey{Namespace: w.Namespace, Name: w.Name, WorkspaceUID: w.UID, ProviderUID: w.Spec.ProviderBinding.UID},
 		Image: container.Image, Command: container.Command, Args: container.Args, Resources: container.Resources,
 		ParametersRef: pool.Spec.ExecutionWorkspace.ParametersRef, ParametersBinding: pool.Spec.ExecutionWorkspace.ParametersBinding,
-		Runtime: &workspacev1alpha1.RuntimeWorkload{BootstrapPort: runtimePoolPort, PoolBinding: workspacev1alpha1.ImmutableObjectBinding{Name: pool.Name, UID: pool.UID, Generation: pool.Generation, ProfileHash: pool.Spec.Runtime.Profile.Digest}, ClassBinding: w.Spec.ClassBinding, Protocol: harnessv2.ProtocolVersion, ContainerName: container.Name, Template: template},
+		Runtime: &workspacev1alpha1.RuntimeWorkload{BootstrapPort: bootstrapPort, PoolBinding: workspacev1alpha1.ImmutableObjectBinding{Name: pool.Name, UID: pool.UID, Generation: pool.Generation, ProfileHash: pool.Spec.Runtime.Profile.Digest}, ClassBinding: w.Spec.ClassBinding, Protocol: harnessv2.ProtocolVersion, ContainerName: container.Name, Template: template},
 	}
 	network := &networkingv1.NetworkPolicySpec{PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{runtimePoolKeyLabel: cfg.labels[runtimePoolKeyLabel]}}, PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress}}
 	if nativeProcess {

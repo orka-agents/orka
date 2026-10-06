@@ -31,7 +31,12 @@ mounts, and publishes only runtime Egress policy. The native supervisor intent
 declares UID/GID 0 and its exact capability set. The pinned gVisor backend does not
 support Kubernetes seccomp profiles or allowPrivilegeEscalation controls, so Core
 omits those fields and its Pod node selector from fresh native requests. Native
-placement uses the provider's pinned Linux WorkerPool. Pod-backed requests retain their
+placement uses the provider's pinned Linux WorkerPool. Core freezes the native
+bootstrap listener at port 80 and omits Kubernetes probes, lifecycle hooks and
+termination grace periods; the provider owns Actor readiness and exact retirement.
+Native requests use supervisor session-directory defaults and SystemInfo identity,
+and omit the Pod namespace and configured Core MCP broker environment overrides.
+Pod-backed requests retain their health and shutdown settings,
 scratch mounts and Ingress/Egress policy. Existing admitted requests keep their
 original layout and cannot switch startup evidence kinds. Native operators must
 confine worker and router ingress while permitting Orka's authenticated routes.
