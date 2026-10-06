@@ -188,7 +188,7 @@ func newConnectorToolHarness(t *testing.T, resolver outboundaccess.Resolver, ena
 		if err != nil {
 			t.Fatal(err)
 		}
-		digests[name] = digest
+		digests[name] = controller.NativeConnectorToolDispatchDigest(string(fixtureTools[name].UID), string(policy.UID), digest)
 	}
 	digestsJSON, _ := json.Marshal(digests)
 	bindingsJSON, _ := json.Marshal(task.Status.ConnectionBindings)
@@ -984,5 +984,93 @@ func TestConnectorBindingDigestSeparatesGrants(t *testing.T) {
 	again := first
 	if connectorBindingDigest(first) != connectorBindingDigest(again) {
 		t.Fatal("the digest must be stable for one grant")
+	}
+}
+
+// revokingResolver resolves a usable linked-account credential but, while it
+// does (as a slow refresh would), the worker Pod loses its authority.
+type revokingResolver struct {
+	client client.Client
+}
+
+func (r *revokingResolver) Resolve(ctx context.Context, _ outboundaccess.ResolveRequest) (outboundaccess.Resolution, error) {
+	pod := &corev1.Pod{}
+	if err := r.client.Get(ctx, client.ObjectKey{Namespace: "default", Name: "pod-a"}, pod); err == nil {
+		_ = r.client.Delete(ctx, pod)
+	}
+	return outboundaccess.Resolution{Adapter: outboundaccess.AdapterConnection, CredentialHeader: "Authorization", CredentialValue: "Bearer gho_person"}, nil
+}
+
+// TestExecuteConnectorToolRechecksAuthorityAtTheSendBoundary covers a Task
+// whose worker loses its authority while the call resolves its credential:
+// the request never leaves, the approved write is reported refused rather
+// than attempted, its effect settles Failed, and the approval is handed back.
+func TestExecuteConnectorToolRechecksAuthorityAtTheSendBoundary(t *testing.T) {
+	resolver := &revokingResolver{}
+	h := newConnectorToolHarness(t, resolver, true, connectorToolAppOptions{mode: "readWrite", approvalRequired: []string{"gh_write"}})
+	resolver.client = h.client
+	seedApproval(t, h.events, "ap-1", `{"q":"x"}`, true)
+	status, body := postConnectorTool(t, h.app, "gh_write", `{"arguments":{"q":"x"},"approvalId":"ap-1"}`)
+	if status == http.StatusBadGateway || status < 400 || status >= 500 {
+		t.Fatalf("revoked caller = %d %s, want a refusal before any provider request", status, body)
+	}
+	claims, err := h.events.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "task-a",
+		EventTypes: []string{events.ExecutionEventTypeApprovalExecutionUpdated}, Limit: 10,
+	})
+	if err != nil || len(claims) != 2 {
+		t.Fatalf("claim/release events = %d err = %v, want the claim handed back", len(claims), err)
+	}
+}
+
+// TestSettlePendingConnectorEffectLeavesInFlightRecords covers settling a
+// claim's reserved record when its call never started: only a record still
+// Pending moves; one another execution holds in flight is left alone and
+// reported, so its approval is never reopened while it may reach the provider.
+func TestSettlePendingConnectorEffectLeavesInFlightRecords(t *testing.T) {
+	h := newConnectorToolHarness(t, &stubOutboundResolver{}, true, connectorToolAppOptions{mode: "readWrite", approvalRequired: []string{"gh_write"}})
+	task := connectorToolFixtures()
+	identity := func(releases int) store.ExternalEffectIdentity {
+		return connectorToolEffectIdentity(task, &connectorApprovalClaim{key: fmt.Sprintf("connector-approval-claim:ap-1:1:%d", releases)})
+	}
+	seedConnectorEffect(t, h, "gh_write", `{"q":"x"}`, 1, 0, store.ExternalEffectInFlight, time.Now().Add(time.Hour))
+	if err := controller.SettlePendingExternalEffect(context.Background(), h.effects, h.fence, identity(0), store.ExternalEffectFailed); !errors.Is(err, controller.ErrExternalEffectNotPending) {
+		t.Fatalf("settling an in-flight record err = %v, want ErrExternalEffectNotPending", err)
+	}
+	id, _ := identity(0).CanonicalID()
+	if effect, err := h.effects.GetExternalEffect(context.Background(), id); err != nil || effect.State != store.ExternalEffectInFlight {
+		t.Fatalf("in-flight record = %+v err = %v, want it untouched", effect, err)
+	}
+	seedConnectorEffect(t, h, "gh_write", `{"q":"x"}`, 1, 1, store.ExternalEffectPending, time.Time{})
+	if err := controller.SettlePendingExternalEffect(context.Background(), h.effects, h.fence, identity(1), store.ExternalEffectFailed); err != nil {
+		t.Fatalf("settling a pending record: %v", err)
+	}
+	id, _ = identity(1).CanonicalID()
+	if effect, err := h.effects.GetExternalEffect(context.Background(), id); err != nil || effect.State != store.ExternalEffectFailed {
+		t.Fatalf("pending record = %+v err = %v, want Failed", effect, err)
+	}
+}
+
+// TestExecuteConnectorToolRefusesARecreatedTool covers a Tool deleted and
+// recreated with the same spec after dispatch: the running Job's dispatch
+// identity names the old object, so the new one is refused.
+func TestExecuteConnectorToolRefusesARecreatedTool(t *testing.T) {
+	resolver := &stubOutboundResolver{err: errors.New("the requester has no connection to this provider")}
+	h := newConnectorToolHarness(t, resolver, true, connectorToolAppOptions{mode: "readWrite", approvalRequired: []string{"gh_write"}})
+	live := &corev1alpha1.Tool{}
+	if err := h.client.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "gh_search"}, live); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.client.Delete(context.Background(), live); err != nil {
+		t.Fatal(err)
+	}
+	recreated := h.tools["gh_search"].DeepCopy()
+	recreated.UID = "recreated-uid"
+	recreated.ResourceVersion = ""
+	if err := h.client.Create(context.Background(), recreated); err != nil {
+		t.Fatal(err)
+	}
+	if status, body := postConnectorTool(t, h.app, "gh_search", `{"arguments":{"q":"x"}}`); status != http.StatusConflict || !strings.Contains(body, "changed since dispatch") {
+		t.Fatalf("recreated tool = %d %s", status, body)
 	}
 }

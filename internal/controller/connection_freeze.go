@@ -23,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/approvals"
 	"github.com/orka-agents/orka/internal/connectors"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -47,6 +48,56 @@ type connectorToolInfo struct {
 	// classification was read from, so execution can refuse another.
 	PolicyUID        string
 	PolicyGeneration int64
+	// ToolUID is the Tool object read, so a Tool deleted and recreated with
+	// the same spec is still a different object to a running native Job.
+	ToolUID string
+}
+
+// NativeConnectorToolDispatchDigest is the dispatch identity a native Job
+// freezes for one connector-backed Tool: the spec digest of the Tool and its
+// policy (ConnectorToolDispatchDigest) bound to both objects' UIDs, so a
+// Tool or policy deleted and recreated with the same spec is refused like a
+// changed one.
+func NativeConnectorToolDispatchDigest(toolUID, policyUID, specDigest string) string {
+	sum := sha256.Sum256([]byte("orka.native-connector-tool\x00" + toolUID + "\x00" + policyUID + "\x00" + specDigest))
+	return hex.EncodeToString(sum[:])
+}
+
+// nativeBuiltinName stands in for a built-in the native worker registers
+// itself, so classification skips a Tool resource of the same name; it is
+// never executed.
+type nativeBuiltinName string
+
+func (n nativeBuiltinName) Name() string                { return string(n) }
+func (n nativeBuiltinName) Description() string         { return "" }
+func (n nativeBuiltinName) Parameters() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
+func (n nativeBuiltinName) Execute(context.Context, json.RawMessage) (string, error) {
+	return "", errors.New("classification placeholder is not executable")
+}
+
+// NativeWorkerToolRegistry is the built-in registry a native type: ai worker
+// resolves the Task's tools against: the default registry plus the memory
+// tools every worker registers and, when the worker registers them for this
+// Task, the coordination tools. A Tool resource shadowed by one of these is
+// never what the worker runs, so it is never classified as connector-backed.
+func NativeWorkerToolRegistry(task *corev1alpha1.Task, agent *corev1alpha1.Agent) *tools.Registry {
+	registry := tools.NewRegistry()
+	for _, name := range tools.DefaultRegistry.Names() {
+		if tool, ok := tools.DefaultRegistry.Get(name); ok {
+			registry.Register(tool)
+		}
+	}
+	extra := aitools.MemoryToolNames()
+	coordination := agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled
+	if coordination || aitools.RegistersCoordinationTools(task, agent) {
+		extra = append(extra, aitools.CoordinationToolNames()...)
+	}
+	for _, name := range extra {
+		if _, ok := registry.Get(name); !ok {
+			registry.Register(nativeBuiltinName(name))
+		}
+	}
+	return registry
 }
 
 // ConnectorToolDispatchDigest digests everything that shapes a connector-backed
@@ -140,6 +191,7 @@ func classifyConnectorTools(ctx context.Context, reader client.Reader, registry 
 			SpecDigest:       specDigest,
 			PolicyUID:        string(policy.UID),
 			PolicyGeneration: policy.Generation,
+			ToolUID:          string(tool.UID),
 		}
 	}
 	return result, nil
@@ -269,14 +321,20 @@ func FrozenConnectorToolDigests(ctx context.Context, reader client.Reader, names
 	if err != nil {
 		return nil, err
 	}
+	return nativeConnectorToolDigests(infos), nil
+}
+
+// nativeConnectorToolDigests is the native dispatch identity of each
+// classified connector tool.
+func nativeConnectorToolDigests(infos map[string]connectorToolInfo) map[string]string {
 	if len(infos) == 0 {
-		return nil, nil
+		return nil
 	}
 	digests := make(map[string]string, len(infos))
 	for name, info := range infos {
-		digests[name] = info.SpecDigest
+		digests[name] = NativeConnectorToolDispatchDigest(info.ToolUID, info.PolicyUID, info.SpecDigest)
 	}
-	return digests, nil
+	return digests
 }
 
 // FrozenConnectionBindingsFromJob decodes the Connection bindings the Job
@@ -434,21 +492,13 @@ func FilterConnectorToolsForRequester(
 	if err != nil {
 		return nil, nil, err
 	}
-	if len(infos) == 0 {
-		return toolNames, nil, nil
-	}
 	modes := map[string]string{}
-	for _, name := range toolNames {
-		info, ok := infos[name]
-		if !ok {
-			visible = append(visible, name)
-			continue
-		}
+	return filterClassifiedConnectorTools(toolNames, infos, func(info connectorToolInfo) (string, error) {
 		mode, cached := modes[info.Provider]
 		if !cached {
 			connection, err := requesterConnection(ctx, reader, task, info.Provider)
 			if err != nil {
-				return nil, nil, err
+				return "", err
 			}
 			if connection != nil {
 				mode = connection.Spec.Mode
@@ -457,6 +507,31 @@ func FilterConnectorToolsForRequester(
 				}
 			}
 			modes[info.Provider] = mode
+		}
+		return mode, nil
+	})
+}
+
+// filterClassifiedConnectorTools applies the readOnly rule to one
+// classification: modeFor returns the requester's link mode behind a
+// connector tool ("" when there is no link).
+func filterClassifiedConnectorTools(
+	toolNames []string,
+	infos map[string]connectorToolInfo,
+	modeFor func(connectorToolInfo) (string, error),
+) (visible []string, connectorWrite []string, err error) {
+	if len(infos) == 0 {
+		return toolNames, nil, nil
+	}
+	for _, name := range toolNames {
+		info, ok := infos[name]
+		if !ok {
+			visible = append(visible, name)
+			continue
+		}
+		mode, err := modeFor(info)
+		if err != nil {
+			return nil, nil, err
 		}
 		if info.Class == corev1alpha1.AgentRuntimeBrokeredToolClassWrite && mode == corev1alpha1.ConnectionModeReadOnly {
 			continue
@@ -467,6 +542,79 @@ func FilterConnectorToolsForRequester(
 		}
 	}
 	return visible, connectorWrite, nil
+}
+
+// errConnectorDispatchDrift reports a Tool or policy that changed between
+// the dispatch's Connection freeze and its Job build; the dispatch retries.
+var errConnectorDispatchDrift = errors.New("a connector tool or its policy changed while the task was being dispatched; retrying")
+
+// nativeConnectorDispatch classifies a native Job's tools once and derives
+// visibility, the approval set, and the dispatch digests from that single
+// classification. With frozen bindings, link modes come from the bindings
+// (not a second Connection read), and a connector tool whose policy has no
+// binding of the same policy object is drift since the freeze: the build
+// fails so the dispatch retries instead of mixing revisions in one Job.
+func nativeConnectorDispatch(
+	ctx context.Context,
+	reader client.Reader,
+	registry *tools.Registry,
+	task *corev1alpha1.Task,
+	toolNames []string,
+	bindings []corev1alpha1.ConnectionBinding,
+	frozen bool,
+) (visible, connectorWrite []string, digests map[string]string, err error) {
+	if reader == nil || task == nil || len(toolNames) == 0 {
+		return toolNames, nil, nil, nil
+	}
+	infos, err := classifyConnectorTools(ctx, reader, registry, task.Namespace, toolNames, true)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if !frozen {
+		modes := map[string]string{}
+		visible, connectorWrite, err = filterClassifiedConnectorTools(toolNames, infos, func(info connectorToolInfo) (string, error) {
+			mode, cached := modes[info.Provider]
+			if !cached {
+				connection, err := requesterConnection(ctx, reader, task, info.Provider)
+				if err != nil {
+					return "", err
+				}
+				if connection != nil {
+					mode = connection.Spec.Mode
+					if mode == "" {
+						mode = corev1alpha1.ConnectionModeReadOnly
+					}
+				}
+				modes[info.Provider] = mode
+			}
+			return mode, nil
+		})
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		return visible, connectorWrite, nativeConnectorToolDigests(infos), nil
+	}
+	byPolicy := make(map[string]corev1alpha1.ConnectionBinding, len(bindings))
+	for _, binding := range bindings {
+		byPolicy[binding.PolicyName] = binding
+	}
+	visible, connectorWrite, err = filterClassifiedConnectorTools(toolNames, infos, func(info connectorToolInfo) (string, error) {
+		binding, ok := byPolicy[info.PolicyName]
+		if !ok || binding.PolicyUID != info.PolicyUID || binding.PolicyGeneration != info.PolicyGeneration || binding.Provider != info.Provider {
+			return "", errConnectorDispatchDrift
+		}
+		if binding.UID == "" {
+			return "", nil
+		}
+		if binding.Mode == "" {
+			return corev1alpha1.ConnectionModeReadOnly, nil
+		}
+		return binding.Mode, nil
+	})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return visible, connectorWrite, nativeConnectorToolDigests(infos), nil
 }
 
 // freezeRequesterConnectionsForTools records, for every connection-mode
@@ -553,6 +701,7 @@ func taskConnectionBindings(frozen []agentExecutionSnapshotConnection) []corev1a
 		bindings = append(bindings, corev1alpha1.ConnectionBinding{
 			PolicyName: connection.PolicyName, Provider: connection.Provider, ConnectionName: connection.ConnectionName,
 			UID: connection.UID, Generation: connection.Generation, GrantSequence: connection.GrantSequence, Mode: connection.Mode,
+			PolicyUID: connection.PolicyUID, PolicyGeneration: connection.PolicyGeneration,
 		})
 	}
 	return bindings
@@ -568,6 +717,7 @@ func FrozenConnectionsFromTaskStatus(task *corev1alpha1.Task) map[string]outboun
 	for _, binding := range task.Status.ConnectionBindings {
 		frozen[binding.PolicyName] = outboundaccess.FrozenConnection{
 			UID: binding.UID, Generation: binding.Generation, GrantSequence: binding.GrantSequence,
+			PolicyUID: binding.PolicyUID, PolicyGeneration: binding.PolicyGeneration,
 		}
 	}
 	return frozen
