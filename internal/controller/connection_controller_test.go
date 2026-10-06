@@ -75,10 +75,27 @@ func TestConnectionReconcilerProviderResolution(t *testing.T) {
 		wantGranted metav1.ConditionStatus
 	}{
 		{
-			name:       "provider missing",
-			wantStatus: metav1.ConditionFalse,
-			wantReason: corev1alpha1.ConnectionReasonProviderMissing,
-			wantState:  corev1alpha1.ConnectionStateError,
+			name:        "provider missing",
+			wantStatus:  metav1.ConditionFalse,
+			wantReason:  corev1alpha1.ConnectionReasonProviderMissing,
+			wantState:   corev1alpha1.ConnectionStateError,
+			wantGranted: metav1.ConditionUnknown,
+		},
+		{
+			// A provider that stops being accepted never leaves an earlier
+			// ScopesGranted=True beside ProviderResolved=False.
+			name:    "provider not accepted clears a granted verdict",
+			objects: []runtime.Object{testConnectorProvider("tenant", "github")},
+			existing: &corev1alpha1.ConnectionStatus{
+				Conditions: []metav1.Condition{
+					{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonLinked},
+					{Type: corev1alpha1.ConnectionConditionScopesGranted, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonScopesGranted},
+				},
+			},
+			wantStatus:  metav1.ConditionFalse,
+			wantReason:  corev1alpha1.ConnectionReasonProviderInvalid,
+			wantState:   corev1alpha1.ConnectionStateError,
+			wantGranted: metav1.ConditionUnknown,
 		},
 		{
 			name:       "provider not accepted",
@@ -415,8 +432,11 @@ func TestConnectionReconcilerSteadyStateAndErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	resolved := meta.FindStatusCondition(updated.Status.Conditions, corev1alpha1.ConnectionConditionProviderResolved)
-	if resolved == nil || resolved.Status != metav1.ConditionUnknown {
-		t.Fatalf("ProviderResolved = %#v, want Unknown", resolved)
+	if resolved == nil || resolved.Status != metav1.ConditionUnknown || resolved.Reason != corev1alpha1.ConnectionReasonProviderReadFailed {
+		t.Fatalf("ProviderResolved = %#v, want Unknown with ProviderReadFailed", resolved)
+	}
+	if granted := meta.FindStatusCondition(updated.Status.Conditions, corev1alpha1.ConnectionConditionScopesGranted); granted == nil || granted.Status != metav1.ConditionUnknown {
+		t.Fatalf("ScopesGranted = %#v, want Unknown while the provider cannot be read", granted)
 	}
 }
 
