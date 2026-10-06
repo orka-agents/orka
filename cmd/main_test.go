@@ -795,6 +795,38 @@ func TestWorkspaceCleanupAPIsInstalled(t *testing.T) {
 	if !installed {
 		t.Fatal("complete workspace API discovery reported missing")
 	}
+	checkpointInstalled, err := workspaceCheckpointAPIInstalled(mapper)
+	if err != nil || checkpointInstalled {
+		t.Fatalf("checkpoint API discovery = %t, %v; cleanup must not require the optional CRD", checkpointInstalled, err)
+	}
+}
+
+func TestWorkspaceCheckpointAPIInstalled(t *testing.T) {
+	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{workspacev1alpha1.GroupVersion})
+	installed, err := workspaceCheckpointAPIInstalled(mapper)
+	if err != nil || installed {
+		t.Fatalf("absent checkpoint API discovery = %t, %v", installed, err)
+	}
+	mapper.Add(workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspaceCheckpoint"), meta.RESTScopeNamespace)
+	installed, err = workspaceCheckpointAPIInstalled(mapper)
+	if err != nil || !installed {
+		t.Fatalf("installed checkpoint API discovery = %t, %v", installed, err)
+	}
+
+	discoveryErr := errors.New("discovery unavailable")
+	installed, err = workspaceCheckpointAPIInstalled(checkpointDiscoveryErrorMapper{RESTMapper: mapper, err: discoveryErr})
+	if installed || !errors.Is(err, discoveryErr) {
+		t.Fatalf("failed checkpoint API discovery = %t, %v; want discovery error", installed, err)
+	}
+}
+
+type checkpointDiscoveryErrorMapper struct {
+	meta.RESTMapper
+	err error
+}
+
+func (m checkpointDiscoveryErrorMapper) RESTMapping(schema.GroupKind, ...string) (*meta.RESTMapping, error) {
+	return nil, m.err
 }
 
 func TestManagerWebhookAdmissionEnabled(t *testing.T) {

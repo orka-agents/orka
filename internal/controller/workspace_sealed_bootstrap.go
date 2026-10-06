@@ -37,7 +37,7 @@ func seedSealedWorkspaceCredentials(ctx context.Context, transport *http.Client,
 	}
 	if response.StatusCode != http.StatusOK {
 		_ = response.Body.Close()
-		return false, fmt.Errorf("native Substrate bootstrap challenge returned HTTP %d", response.StatusCode)
+		return false, fmt.Errorf("workspace bootstrap challenge returned HTTP %d", response.StatusCode)
 	}
 	var challenge harnessv2.SealedBootstrapChallenge
 	decoder := json.NewDecoder(io.LimitReader(response.Body, 8193))
@@ -50,7 +50,7 @@ func seedSealedWorkspaceCredentials(ctx context.Context, transport *http.Client,
 	}
 	_ = response.Body.Close()
 	if err != nil {
-		return false, fmt.Errorf("native Substrate bootstrap challenge is invalid")
+		return false, fmt.Errorf("workspace bootstrap challenge is invalid")
 	}
 	if err := challenge.Validate(nonce, expected); err != nil {
 		return false, errWorkspaceCredentialFenceConflict
@@ -62,7 +62,7 @@ func seedSealedWorkspaceCredentials(ctx context.Context, transport *http.Client,
 	}
 	envelope, err := harnessv2.SealCredentialBootstrap(challenge, nonce, expected, plaintext)
 	if err != nil {
-		return false, fmt.Errorf("seal Substrate bootstrap payload: %w", err)
+		return false, fmt.Errorf("seal workspace bootstrap payload: %w", err)
 	}
 	signature, err := harnessv2.SignCredentialBootstrap(signingSeed, nonce, envelope)
 	if err != nil {
@@ -90,6 +90,6 @@ func seedSealedWorkspaceCredentials(ctx context.Context, transport *http.Client,
 	case http.StatusForbidden:
 		return false, errWorkspaceCredentialFenceConflict
 	default:
-		return false, fmt.Errorf("sealed Substrate bootstrap returned HTTP %d", response.StatusCode)
+		return false, fmt.Errorf("sealed workspace bootstrap returned HTTP %d", response.StatusCode)
 	}
 }

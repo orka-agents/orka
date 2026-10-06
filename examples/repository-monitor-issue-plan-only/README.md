@@ -1,6 +1,6 @@
 # RepositoryMonitor issue plan-only workflow
 
-Use this example when you want durable triage/research/planning and approval records but do **not** want Orka to implement code.
+Use this example when you want durable triage/research/planning and plan records but do **not** want Orka to implement code.
 
 Apply with:
 
@@ -8,7 +8,7 @@ Apply with:
 kubectl -n orka-system apply -k examples/repository-monitor-issue-plan-only
 ```
 
-Then add `orka:plan` to an issue and inspect:
+Request planning with `orka monitor issue plan <monitor> <issue-number>`, then inspect:
 
 ```bash
 orka -n orka-system monitor actions list issue-plan-only --kind issue --number '<issue-number>'

@@ -227,6 +227,17 @@ func (r *ExecutionWorkspaceProviderReconciler) providerHasReferences(
 			return true, nil
 		}
 	}
+	if r.RESTMapper != nil {
+		gvk := workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspaceCheckpoint")
+		if _, err := r.RESTMapper.RESTMapping(gvk.GroupKind(), gvk.Version); err != nil {
+			// Cleanup-only installations may have just the four base workspace
+			// APIs. Discovery must prove absence before omitting this scan.
+			if apimeta.IsNoMatchError(err) {
+				return false, nil
+			}
+			return false, fmt.Errorf("discover workspace checkpoints: %w", err)
+		}
+	}
 	var checkpoints workspacev1alpha1.ExecutionWorkspaceCheckpointList
 	if err := reader.List(ctx, &checkpoints); err != nil {
 		return false, fmt.Errorf("list workspace checkpoints: %w", err)

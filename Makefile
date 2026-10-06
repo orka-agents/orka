@@ -174,12 +174,8 @@ repository-monitor-fake-e2e: ensure-ui-embed ## Run fake-GitHub RepositoryMonito
 repository-monitor-validate: ensure-ui-embed ## Run full local RepositoryMonitor fake-E2E/docs/example validation
 	bash scripts/repository-monitor-validate.sh
 
-.PHONY: repository-monitor-live-preflight
-repository-monitor-live-preflight: ## Check prerequisites for live GitHub label trigger E2E without changing the cluster
-	bash scripts/live-github-label-trigger-e2e.sh --preflight-only
-
 .PHONY: repository-monitor-completion-audit
-repository-monitor-completion-audit: ensure-ui-embed ## Run local validation plus live preflight audit for RepositoryMonitor plan completion
+repository-monitor-completion-audit: ensure-ui-embed ## Run local RepositoryMonitor validation and report remaining live validation
 	bash scripts/repository-monitor-completion-audit.sh
 
 .PHONY: test
@@ -236,7 +232,7 @@ lint-fix: ensure-ui-embed golangci-lint ## Run golangci-lint linter and perform 
 ##@ Demos
 
 .PHONY: demo-cluster-up
-demo-cluster-up: ## Bootstrap a kind cluster with Orka + agent-sandbox
+demo-cluster-up: ## Bootstrap Orka + agent-sandbox demo assets; ACP providers installed separately
 	hack/demos/cluster/cluster-up.sh
 	hack/demos/cluster/install-agent-sandbox.sh
 	hack/demos/cluster/install-demo-model.sh
@@ -246,15 +242,15 @@ demo-cluster-down: ## Tear down the kind demo cluster
 	hack/demos/cluster/cluster-down.sh
 
 .PHONY: demo-substrate-up
-demo-substrate-up: ## Bootstrap a DEDICATED kind cluster with Agent Substrate + Orka (Demo 70)
+demo-substrate-up: ## Bootstrap a dedicated Substrate MCP Tools conformance cluster (no ACP provider)
 	hack/demos/cluster/install-substrate.sh
 
 .PHONY: demo-substrate-down
-demo-substrate-down: ## Tear down the Agent Substrate demo cluster (Demo 70)
+demo-substrate-down: ## Tear down the Substrate MCP Tools conformance cluster
 	kind delete cluster --name $${KIND_CLUSTER:-orka-agent-substrate-e2e}
 
 .PHONY: demo-cluster-up-all
-demo-cluster-up-all: ## ONE substrate-flavored kind cluster that runs the local demos (00-40, 60-70)
+demo-cluster-up-all: ## Bootstrap Substrate MCP Tools + Orka demo assets; ACP providers installed separately
 	hack/demos/cluster/install-substrate.sh
 	ORKA_DEMO_CLUSTER=$${KIND_CLUSTER:-orka-agent-substrate-e2e} hack/demos/cluster/install-demo-model.sh
 	ORKA_DEMO_CLUSTER=$${KIND_CLUSTER:-orka-agent-substrate-e2e} hack/demos/cluster/install-agent-sandbox.sh

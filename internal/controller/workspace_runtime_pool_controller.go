@@ -47,16 +47,9 @@ func (r *WorkspaceRuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl
 		return ctrl.Result{}, fmt.Errorf("workspace RuntimePool link identifies another incarnation")
 	}
 	deleting := !w.DeletionTimestamp.IsZero() || w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
-	remaining, bounded := acpWorkspaceMaxLifetimeRemaining(w, time.Now())
-	if bounded && remaining <= 0 && !deleting {
-		before := w.DeepCopy()
-		w.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
-		w.Spec.Attachment = nil
-		if err := r.Patch(ctx, w, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
-			return ctrl.Result{}, err
-		}
-		deleting = true
-	}
+	// The retention controller owns lifetime expiry and requests API deletion
+	// with the exact workspace UID. Setting desiredState here first would stop
+	// retention before it establishes the metadata deletion/finalizer path.
 	if deleting {
 		if pool.DeletionTimestamp.IsZero() {
 			if err := r.Delete(ctx, pool, deleteCurrentObjectPreconditions(pool)...); err != nil && !apierrors.IsNotFound(err) {
@@ -73,9 +66,6 @@ func (r *WorkspaceRuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl
 				return ctrl.Result{}, err
 			}
 		}
-	}
-	if bounded {
-		return ctrl.Result{RequeueAfter: remaining}, nil
 	}
 	return ctrl.Result{}, nil
 }

@@ -113,6 +113,37 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "orka.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
+{{- if and $harnessV2 .Values.controller.executionWorkspace.dispatchEnabled }}
+---
+# Providers opt their parameter read permissions into this release's controller.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "orka.controllerClusterRoleName" . }}-workspace-parameter-reader
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+aggregationRule:
+  clusterRoleSelectors:
+    - matchLabels:
+        workspace.orka.ai/aggregate-to-parameter-reader: "true"
+rules: []
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "orka.controllerClusterRoleName" . }}-workspace-parameter-reader
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "orka.controllerClusterRoleName" . }}-workspace-parameter-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "orka.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
 {{- if $harnessV2 }}
 ---
 # Runtime child resources are confined to the v2 installation's runtime namespace.
@@ -441,7 +472,7 @@ rules:
     resources: ["secrets"]
     verbs: ["get", "create", "update", "delete"]
   - apiGroups: ["core.orka.ai"]
-    resources: ["tools"]
+    resources: ["tools", "outboundaccesspolicies"]
     verbs: ["get", "list"]
   - apiGroups: ["core.orka.ai"]
     resources: ["agents"]
@@ -529,7 +560,7 @@ rules:
     resources: ["configmaps"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["core.orka.ai"]
-    resources: ["tools"]
+    resources: ["tools", "outboundaccesspolicies"]
     verbs: ["get", "list"]
   - apiGroups: ["core.orka.ai"]
     resources: ["agents"]

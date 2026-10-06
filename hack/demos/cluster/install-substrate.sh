@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Install and validate the official Substrate pin in a dedicated local cluster.
+# Install and validate the official Substrate pin for pooled MCP Tools in a
+# dedicated local cluster. External ACP providers/classes are installed separately.
 set -Eeuo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/../../.." && pwd)"
@@ -17,3 +18,4 @@ fi
 export PATH="${repo_root}/bin:$(go env GOPATH)/bin:${PATH}"
 bash "${repo_root}/scripts/agent-substrate-e2e.sh"
 printf 'Scoped kubeconfig: %s/kubeconfig\n' "${SUBSTRATE_E2E_RUN_DIR}"
+printf 'MCP conformance environment only; no external ACP provider or substrate-coding class installed.\n'

@@ -116,7 +116,6 @@ The repository has additional GitHub Actions workflows in addition to the normal
 - `Agent Runtime E2E` runs on trusted default-branch changes, nightly, or by manual dispatch. It builds the current controller and all four built-in runtime images, bootstraps Kind plus Vekil and the production ACP topology, and executes Codex, OpenCode, Claude, and Copilot RuntimePools against real model providers. It uses the repository's `COPILOT_GITHUB_TOKEN` secret and runs as ordinary CI without a deployment environment.
 - `Release Qualification` verifies the candidate chart, recovery, agent execution, Git publication and GitHub API fixture tests, and cleanup. The release workflow dispatches it automatically; environment approval permits model-provider access. GitHub observations use the job token, with no stored Git publication credentials.
 - `Live Copilot Proxy E2E` — exercises native `type: ai` and compatibility API paths through an external proxy used as test infrastructure. `Agent Runtime E2E` separately executes the built-in Codex, OpenCode, Claude, and Copilot RuntimePools end to end.
-- `Live GitHub Label Trigger E2E` — builds the PR controller image, deploys it to Kind, configures a generated webhook secret and synthetic runtime Agent, then verifies signed label webhooks create scoped agent Tasks while invalid signatures and duplicate deliveries are handled correctly. This workflow is manual, model-free, and secret-free.
 - `Live GitHub OIDC E2E` — builds the PR controller image, deploys it to Kind, authenticates to Orka with a real GitHub Actions OIDC token, and verifies `spec.requestedBy` stamping plus client provenance-tampering rejection.
 - `Gateway Live E2E` — runs on relevant pushes and pull requests or by manual dispatch. It creates a fresh Kind cluster, generates disposable TLS and bearer credentials, deploys the TLS reference adapter and deterministic echo `AgentRuntime`, and verifies invalid authentication, accepted and duplicate ingress, runtime-backed Task completion, final delivery, idempotency, and correlation metadata. It is model-free and secret-free and does not use repository or provider credentials.
 - `Repository Monitor Smoke` — runs automatically on PRs and pushes touching monitor-relevant Go, CRD/config, worker, or dependency paths. It creates the UI embed stub and runs focused Go tests for monitor store/API/controller behavior, GitHub pull request event queueing, targeted single-PR inventory runs, read-only review task job construction, stdout result forwarding, `create_pr_monitor` repository URL and credential validation, GitHub tool `repo_url` scope enforcement, and PR review marker tooling.
@@ -126,12 +125,10 @@ Validate workflow/script edits locally before pushing:
 ```bash
 bash -n scripts/live-copilot-proxy-e2e.sh
 bash -n scripts/agent-runtime-e2e.sh scripts/agent-runtime-kind-e2e.sh scripts/lib/agent-runtime-kind-bootstrap.sh
-bash -n scripts/live-github-label-trigger-e2e.sh
 bash -n scripts/live-github-oidc-e2e.sh
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-copilot-proxy-e2e.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/agent-runtime-e2e.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/release-qualification.yml
-go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-github-label-trigger-e2e.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-github-oidc-e2e.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/gateway-e2e.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/repository-monitor-smoke.yml

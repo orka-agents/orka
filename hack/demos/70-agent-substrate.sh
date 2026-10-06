@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Demo 70 — Agent Substrate (a real agent in a gVisor workspace)
+# Demo 70 — Agent Substrate (archived gVisor workspace prototype)
+# Requires migration to harness v2 and a separately installed external provider
+# and substrate-coding class; see docs/development/workspace-provider-authoring.md.
 #
 # Orka's workspace executor is provider-neutral. Demo 60 backed agent Tasks
 # with agent-sandbox; this demo backs the SAME Task API with Agent Substrate —
@@ -19,9 +21,8 @@
 # the work succeeded.) The Task sets ORKA_CODEX_DISABLE_SANDBOX=true because
 # gVisor is the sandbox — codex's inner bubblewrap cannot nest under runsc.
 #
-# Prerequisites (hack/demos/cluster/install-substrate.sh): the Substrate control
-# plane, a WorkerPool + ActorTemplate on a codex-capable image, an in-cluster
-# model proxy (vekil), and the model + git Secrets.
+# hack/demos/cluster/install-substrate.sh prepares pooled MCP Tools conformance
+# only. It does not install this demo's ACP provider, class, runtime, or credentials.
 #
 # Pacing is controlled by DEMO_RECORD_PROFILE (presenter|docs|social|hero).
 

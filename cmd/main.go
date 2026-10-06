@@ -166,6 +166,17 @@ func workspaceCleanupAPIsInstalled(mapper meta.RESTMapper) (bool, error) {
 	return true, nil
 }
 
+func workspaceCheckpointAPIInstalled(mapper meta.RESTMapper) (bool, error) {
+	gvk := workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspaceCheckpoint")
+	if _, err := mapper.RESTMapping(gvk.GroupKind(), gvk.Version); err != nil {
+		if meta.IsNoMatchError(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("discover %s: %w", gvk.String(), err)
+	}
+	return true, nil
+}
+
 func managerWebhookAdmissionEnabled(taskProvenanceEnabled, workspaceClassUseEnabled bool) bool {
 	return taskProvenanceEnabled || workspaceClassUseEnabled
 }
@@ -1792,9 +1803,18 @@ func main() {
 		}
 	}
 	if registerWorkspaceCoreControllers && acpRuntimeEnabled {
-		if err := (&controller.WorkspaceCheckpointRoutingReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader()}).SetupWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to create controller", "controller", "WorkspaceCheckpointRouting")
+		checkpointAPIInstalled, err := workspaceCheckpointAPIInstalled(mgr.GetRESTMapper())
+		if err != nil {
+			setupLog.Error(err, "unable to discover workspace checkpoint API")
 			os.Exit(1)
+		}
+		if checkpointAPIInstalled {
+			if err := (&controller.WorkspaceCheckpointRoutingReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader()}).SetupWithManager(mgr); err != nil {
+				setupLog.Error(err, "unable to create controller", "controller", "WorkspaceCheckpointRouting")
+				os.Exit(1)
+			}
+		} else {
+			setupLog.Info("workspace checkpoint CRD is not installed; skipping checkpoint routing controller")
 		}
 		if err := (&controller.WorkspaceRuntimePoolReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader()}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "WorkspaceRuntimePool")

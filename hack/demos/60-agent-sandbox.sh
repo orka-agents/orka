@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Demo 60 — Agent Sandbox (session reuse across turns)
+# Demo 60 — Agent Sandbox (archived session-reuse prototype)
+# Requires migration to harness v2 and a separately installed external provider
+# and sandbox-coding class. install-agent-sandbox.sh installs backend/assets only;
+# see docs/development/workspace-provider-authoring.md.
 #
 # Three Tasks share a single SandboxClaim through sessionRef. Turn 1 is the
 # scout (read-only). Turn 2 is the builder (file write + git push + gh PR).

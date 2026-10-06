@@ -7,10 +7,8 @@ FROM --platform=$TARGETPLATFORM docker.io/library/debian:bookworm-slim@sha256:7b
 ARG GIT_VERSION
 ARG GIT_SOURCE_SHA256
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      build-essential=12.9 ca-certificates=20230311+deb12u1 \
-      libcurl4-openssl-dev=7.88.1-10+deb12u15 libexpat1-dev=2.5.0-1+deb12u4 \
-      libssl-dev=3.0.22-1~deb12u1 perl=5.36.0-7+deb12u3 pkg-config=1.8.1-1 \
-      xz-utils=5.4.1-1+deb12u1 zlib1g-dev=1:1.2.13.dfsg-1 \
+      build-essential ca-certificates libcurl4-openssl-dev libexpat1-dev \
+      libssl-dev perl pkg-config xz-utils zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 ADD --checksum=sha256:457fdb04dc8728e007d4688695e6912e6f680727920f2a40bf11eacc17505357 \
     https://www.kernel.org/pub/software/scm/git/git-2.55.0.tar.xz /tmp/git.tar.xz
@@ -55,10 +53,10 @@ LABEL org.opencontainers.image.title="Orka workspace publisher" \
       ai.orka.git.revision="e9019fcafe0040228b8631c30f97ae1adb61bcdc" \
       ai.orka.git.source.digest="sha256:457fdb04dc8728e007d4688695e6912e6f680727920f2a40bf11eacc17505357"
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates=20230311+deb12u1 \
-      libcurl4=7.88.1-10+deb12u15 \
-      libexpat1=2.5.0-1+deb12u4 \
-      zlib1g=1:1.2.13.dfsg-1 \
+      ca-certificates \
+      libcurl4 \
+      libexpat1 \
+      zlib1g \
     && rm -rf /var/lib/apt/lists/* \
     && install -d -m 0700 -o 65532 -g 65532 \
       /data/publications /data/service /tmp/orka-workspace-publisher/home \

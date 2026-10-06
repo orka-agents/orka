@@ -29,7 +29,7 @@ func TestWorkspaceRuntimePoolReconcilerDemandAndRetirementPreserveProviderStatus
 		{name: "detached ready workspace", desired: workspacev1alpha1.ExecutionWorkspaceDesiredReady},
 		{name: "suspending workspace", desired: workspacev1alpha1.ExecutionWorkspaceDesiredSuspended, attached: true},
 		{name: "workspace deletion", desired: workspacev1alpha1.ExecutionWorkspaceDesiredDeleted, wantReplicas: 1, wantDeleting: true},
-		{name: "expired attached workspace", desired: workspacev1alpha1.ExecutionWorkspaceDesiredReady, attached: true, expired: true, wantReplicas: 1, wantDeleting: true},
+		{name: "expiry belongs to retention", desired: workspacev1alpha1.ExecutionWorkspaceDesiredReady, attached: true, expired: true, wantReplicas: 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -64,8 +64,8 @@ func TestWorkspaceRuntimePoolReconcilerDemandAndRetirementPreserveProviderStatus
 			if !reflect.DeepEqual(&current.Status, originalStatus) {
 				t.Fatal("core demand controller changed provider-owned workspace status")
 			}
-			if test.expired && (current.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredDeleted || current.Spec.Attachment != nil) {
-				t.Fatal("expired workspace did not close attachment before requesting retirement")
+			if test.expired && (current.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady || current.Spec.Attachment == nil || !current.DeletionTimestamp.IsZero()) {
+				t.Fatal("pool demand reconciliation took ownership of workspace lifetime expiry")
 			}
 		})
 	}

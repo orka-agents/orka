@@ -674,10 +674,11 @@ func (r *ExecutionWorkspaceReconciler) reconcileWorkspaceDeletion(
 		return ctrl.Result{RequeueAfter: workspaceRequeueInterval}, nil
 	}
 	var dispositionErr error
-	if workspace.Spec.Workload != nil {
+	if workspaceCarriesACPMaterializationMarkers(workspace) {
 		// External providers never held core's credentials. Their disposition
 		// covers provider resources; core separately proves pool and attachment
-		// credentials gone before applying the interactive cleanup requirement.
+		// credentials gone. The protected materialization markers identify this
+		// ownership before the pool publishes its first workload request.
 		dispositionErr = workspaceprovider.ValidateDeletedDisposition(workspace.Status.Disposition, workspace.Spec.Lifecycle.DeletionPolicy)
 		if dispositionErr == nil {
 			core := &workspaceCoreCleanup{Client: r.Client, APIReader: r.APIReader}
