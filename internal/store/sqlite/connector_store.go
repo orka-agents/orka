@@ -120,6 +120,10 @@ func connectorSchemaStatements() []string {
 // Connection retains for revocation at disconnect.
 const maxRetiredConnectorCredentials = 16
 
+// maxRefreshRetiredConnectorCredentials bounds the grants a refresh rotated
+// away that one Connection keeps until disconnect.
+const maxRefreshRetiredConnectorCredentials = 16
+
 var errConnectorCipherRequired = errors.New("connector credential encryption is not configured; connector custody fails closed")
 
 const connectorDataKeyBytes = 32
@@ -895,6 +899,24 @@ func (s *Store) retireConnectorCredentialTx(ctx context.Context, tx *sql.Tx, ref
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		ref.ConnectionUID, dekNonce, dekCiphertext, nonce, ciphertext, revocableUntil, retirement == retireGrant, now); err != nil {
 		return fmt.Errorf("retire replaced connector credential: %w", err)
+	}
+	// Grants a refresh rotated away are kept until disconnect only up to a
+	// bound, so a long-lived Connection cannot grow custody (and the serial
+	// revocations at disconnect) without limit. The oldest are dropped, never
+	// revoked: providers that rotate refresh tokens invalidate the old one,
+	// and revoking a rotated token can revoke the whole grant at providers
+	// that detect reuse.
+	if retirement != retireGrant && !revocableUntil.Valid {
+		result, err := tx.ExecContext(ctx, `DELETE FROM connector_retired_credentials WHERE id IN (
+			SELECT id FROM connector_retired_credentials
+			WHERE connection_uid = ? AND consent_grant = 0 AND revocable_until IS NULL
+			ORDER BY id DESC LIMIT -1 OFFSET ?)`, ref.ConnectionUID, maxRefreshRetiredConnectorCredentials)
+		if err != nil {
+			return fmt.Errorf("bound refresh-retired connector credentials: %w", err)
+		}
+		if dropped, _ := result.RowsAffected(); dropped > 0 {
+			s.pendingWALTruncate.Store(true)
+		}
 	}
 	return nil
 }

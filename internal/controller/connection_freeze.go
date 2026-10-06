@@ -81,9 +81,10 @@ func connectorToolsFor(ctx context.Context, reader client.Reader, registry *tool
 
 // classifyConnectorTools is connectorToolsFor with a choice about a policy
 // that is missing: a classification treats the Tool as not connector-backed
-// (its execution fails on its own), while a snapshot freeze (strictPolicies)
-// retries instead, so a policy of the same name recreated later in another
-// mode can never pass the adapter-change guard through an omitted entry.
+// (its execution fails on its own), while a snapshot freeze or a binding that
+// refuses connector Tools (strictPolicies) retries instead, so a policy of
+// the same name recreated later in another mode can never pass the
+// adapter-change guard through an omitted entry.
 func classifyConnectorTools(ctx context.Context, reader client.Reader, registry *tools.Registry, namespace string, toolNames []string, strictPolicies bool) (map[string]connectorToolInfo, error) {
 	if reader == nil {
 		return nil, nil

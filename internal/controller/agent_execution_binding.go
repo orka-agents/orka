@@ -561,7 +561,7 @@ func (r *TaskReconciler) resolveExternalAgentExecutionCandidate(
 	if runtime.Spec.Capabilities.MCPPolicy != nil {
 		runtimeDisallowed = runtime.Spec.Capabilities.MCPPolicy.DisallowedTools
 	}
-	if connectorTools, err := connectorToolsFor(ctx, reader, r.MCPRegistry, task.Namespace, connectorCandidateTools(task, agent, runtimeDisallowed)); err != nil {
+	if connectorTools, err := classifyConnectorTools(ctx, reader, r.MCPRegistry, task.Namespace, connectorCandidateTools(task, agent, runtimeDisallowed), true); err != nil {
 		return nil, err
 	} else if len(connectorTools) > 0 {
 		return nil, permanentACPAgentConfiguration(errors.New("connector-backed tools are not supported on external v2 AgentRuntimes"))

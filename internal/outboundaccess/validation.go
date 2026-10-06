@@ -99,6 +99,11 @@ func validateCredentialOutput(output *corev1alpha1.OutboundCredentialOutput) *Is
 	if output != nil && output.Prefix != nil && strings.ContainsAny(*output.Prefix, "\r\n") {
 		return invalid("output prefix must not contain carriage returns or newlines")
 	}
+	// The prefix is joined with the credential into one header value, so it
+	// must itself be a valid field value: no other control bytes or DEL.
+	if output != nil && output.Prefix != nil && !validHeaderValueBytes(*output.Prefix) {
+		return invalid("output prefix must be a valid HTTP header value without control bytes")
+	}
 	return nil
 }
 
@@ -519,8 +524,24 @@ func ValidateCredentialHeader(name string) error {
 		// access applies, so a credential bound to it would collide on
 		// every call: such a policy could be accepted but never used.
 		return fmt.Errorf("output header %q is set by the request body", name)
+	case "idempotency-key":
+		// Brokered consequential calls carry their approval operation key
+		// here before outbound access applies; a credential bound to it
+		// would collide on every write.
+		return fmt.Errorf("output header %q carries the approval operation key", name)
 	}
 	return nil
+}
+
+// validHeaderValueBytes reports whether value is a valid HTTP field value:
+// visible ASCII, spaces, tabs, and obs-text, with no other control byte.
+func validHeaderValueBytes(value string) bool {
+	for i := 0; i < len(value); i++ {
+		if c := value[i]; (c < ' ' && c != '\t') || c == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 func validHeaderName(name string) bool {
