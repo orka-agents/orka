@@ -402,6 +402,10 @@ type checkRunsPage struct {
 	CheckRuns  []checkRun `json:"check_runs"`
 }
 
+// checkRunsErrorBodyLimit caps the error body kept from a failed check-runs
+// request.
+const checkRunsErrorBodyLimit = 4 << 10
+
 // fetchCheckRunsPage reads one page of a commit's check runs.
 func fetchCheckRunsPage(ctx context.Context, token, owner, repo, sha, baseURL string, page int) (checkRunsPage, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/commits/%s/check-runs?per_page=%d&page=%d", baseURL, owner, repo, sha, checkRunsPerPage, page)
@@ -421,13 +425,19 @@ func fetchCheckRunsPage(ctx context.Context, token, owner, repo, sha, baseURL st
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// The error body only explains the status; it is capped so a large
+		// one cannot swell the tool result.
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, checkRunsErrorBodyLimit))
 		return checkRunsPage{}, &githubAPIError{
 			StatusCode: resp.StatusCode,
 			Body:       string(respBody),
 		}
+	}
+	// An oversized page is refused, never decoded from a cut prefix.
+	respBody, err := readGitHubResponse(resp.Body, 1<<20)
+	if err != nil {
+		return checkRunsPage{}, err
 	}
 
 	var checkResp checkRunsPage

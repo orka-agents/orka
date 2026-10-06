@@ -934,3 +934,21 @@ func TestReadGitHubResponseRefusesOversizedDocuments(t *testing.T) {
 		t.Fatalf("oversized err = %v", err)
 	}
 }
+
+// TestLoadGitHubTaskScopesFencesTheCurrentTaskUID covers a current Task
+// deleted and recreated under the same name after the call was
+// authenticated: the replacement's workspace never scopes the call.
+func TestLoadGitHubTaskScopesFencesTheCurrentTaskUID(t *testing.T) {
+	task, secret := githubRepoTaskWithSecret("https://github.com/orka-agents/orka")
+	task.UID = "replacement-uid"
+	k8sClient := newFakeClient(task, secret)
+	ctx := WithToolContext(context.Background(), &ToolContext{Namespace: defaultNamespace, TaskID: task.Name, TaskUID: "authenticated-uid"})
+	if _, err := loadGitHubTaskScopes(ctx, k8sClient, "", true); err == nil || !strings.Contains(err.Error(), "was replaced") {
+		t.Fatalf("err = %v, want the replaced current Task refused", err)
+	}
+	ctx = WithToolContext(context.Background(), &ToolContext{Namespace: defaultNamespace, TaskID: task.Name, TaskUID: "replacement-uid"})
+	scopes, err := loadGitHubTaskScopes(ctx, k8sClient, "", true)
+	if err != nil || len(scopes.scopes) == 0 {
+		t.Fatalf("scopes = %+v err = %v, want the authenticated Task's workspace", scopes, err)
+	}
+}

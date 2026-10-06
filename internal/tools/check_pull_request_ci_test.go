@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -477,5 +478,43 @@ func TestParsePullRequestCIWaitConfigBounds(t *testing.T) {
 	}
 	if _, _, err := parsePullRequestCIWaitConfig("", "0s"); err == nil {
 		t.Fatal("a nonpositive poll_interval is still an error")
+	}
+}
+
+// TestWaitForPullRequestCIBoundsTheFinalCheck covers a status check still
+// running when the wait deadline passes: the whole call is bounded by the
+// wait plus a fixed final-check budget instead of running every paginated
+// request of one more check to completion.
+func TestWaitForPullRequestCIBoundsTheFinalCheck(t *testing.T) {
+	previousMinimum, previousBudget := minPullRequestCIPollInterval, pullRequestCIFinalCheckBudget
+	minPullRequestCIPollInterval, pullRequestCIFinalCheckBudget = time.Millisecond, 50*time.Millisecond
+	t.Cleanup(func() { minPullRequestCIPollInterval, pullRequestCIFinalCheckBudget = previousMinimum, previousBudget })
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/pulls/42"):
+			if calls.Add(1) > 1 {
+				// Every later check stalls until the caller gives up.
+				<-r.Context().Done()
+				return
+			}
+			_, _ = fmt.Fprintf(w, `{"head":{"sha":%q},"state":"open","merged":false}`, checkPullRequestCITestSHA)
+		case strings.Contains(r.URL.Path, "/check-runs"):
+			_, _ = fmt.Fprint(w, `{"total_count":1,"check_runs":[{"name":"build","status":"queued","conclusion":""}]}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	start := time.Now()
+	result, err := waitForPullRequestCI(context.Background(), "token", "o", "r", 42, server.URL, 30*time.Millisecond, time.Millisecond)
+	if err != nil {
+		t.Fatalf("wait err = %v, want a timed-out result", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("wait took %s, want it bounded by the wait plus the final-check budget", elapsed)
+	}
+	if !result.WaitTimedOut || result.Status != "pending" {
+		t.Fatalf("result = %+v, want a pending timed-out result from the earlier check", result)
 	}
 }

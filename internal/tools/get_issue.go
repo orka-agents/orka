@@ -167,9 +167,13 @@ func (t *GetIssueTool) Execute(ctx context.Context, argsJSON json.RawMessage) (s
 	}
 
 	// Fetch comments (non-fatal on failure, but never silent)
-	comments, err := fetchIssueComments(ctx, httpClient, baseURL, token, owner, repo, args.IssueNumber)
+	comments, err := fetchIssueComments(ctx, httpClient, baseURL, token, owner, repo, args.IssueNumber, issueResult.CommentCount)
 	if err == nil {
 		issueResult.Comments = comments
+		if len(comments) < issueResult.CommentCount {
+			issueResult.Truncated = true
+			issueResult.TruncationNote = fmt.Sprintf("only the newest %d of %d comments were fetched", len(comments), issueResult.CommentCount)
+		}
 	} else {
 		issueResult.Truncated = true
 		issueResult.TruncationNote = "comments could not be fetched: " + boundedNote(err.Error())
@@ -254,8 +258,35 @@ func fetchIssueDetails(ctx context.Context, httpClient *http.Client, baseURL, to
 }
 
 // fetchIssueComments fetches the first page of comments for a GitHub issue.
-func fetchIssueComments(ctx context.Context, httpClient *http.Client, baseURL, token, owner, repo string, issueNumber int) ([]IssueComment, error) {
-	url := fmt.Sprintf("%s/repos/%s/%s/issues/%d/comments?per_page=30", baseURL, owner, repo, issueNumber)
+// issueCommentsPerPage and maxIssueCommentPages bound the comment pages one
+// get_issue call reads: the newest pages first, since a size-bounded result
+// keeps the newest comments.
+const (
+	issueCommentsPerPage = 100
+	maxIssueCommentPages = 5
+)
+
+// fetchIssueComments reads up to maxIssueCommentPages pages of an issue's
+// comments, ending at the newest page for total comments.
+func fetchIssueComments(ctx context.Context, httpClient *http.Client, baseURL, token, owner, repo string, issueNumber, total int) ([]IssueComment, error) {
+	lastPage := max(1, (total+issueCommentsPerPage-1)/issueCommentsPerPage)
+	firstPage := max(1, lastPage-maxIssueCommentPages+1)
+	var comments []IssueComment
+	for page := firstPage; page <= lastPage; page++ {
+		pageComments, err := fetchIssueCommentsPage(ctx, httpClient, baseURL, token, owner, repo, issueNumber, page)
+		if err != nil {
+			return nil, err
+		}
+		comments = append(comments, pageComments...)
+		if len(pageComments) < issueCommentsPerPage {
+			break
+		}
+	}
+	return comments, nil
+}
+
+func fetchIssueCommentsPage(ctx context.Context, httpClient *http.Client, baseURL, token, owner, repo string, issueNumber, page int) ([]IssueComment, error) {
+	url := fmt.Sprintf("%s/repos/%s/%s/issues/%d/comments?per_page=%d&page=%d", baseURL, owner, repo, issueNumber, issueCommentsPerPage, page)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {

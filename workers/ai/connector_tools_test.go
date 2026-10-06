@@ -376,3 +376,36 @@ func TestLoadCustomToolsKeepsFrozenConnectorTools(t *testing.T) {
 		t.Fatalf("unfrozen tool: %v err = %v, want skipped", loaded, err)
 	}
 }
+
+// TestExecuteConnectorToolDoesNotFollowRedirectsOrProxies covers the default
+// client: a redirect from the controller URL is not followed (the worker's
+// ServiceAccount token never reaches another host), and inherited proxy
+// settings are ignored.
+func TestExecuteConnectorToolDoesNotFollowRedirectsOrProxies(t *testing.T) {
+	var elsewhere atomic.Int32
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		elsewhere.Add(1)
+		_, _ = w.Write([]byte(`{"result":"leaked"}`))
+	}))
+	defer other.Close()
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	defer controller.Close()
+	t.Setenv(workerenv.ControllerURL, controller.URL)
+	t.Setenv(workerenv.TaskNamespace, "default")
+	t.Setenv(workerenv.TaskName, "task-a")
+	t.Setenv(workerenv.ServiceAccountTokenPath, "")
+	t.Setenv(workerenv.ServiceAccountToken, "sa-token")
+	tool := &corev1alpha1.Tool{ObjectMeta: metav1.ObjectMeta{Name: "gh_search"}}
+	if _, err := executeConnectorToolViaController(context.Background(), nil, tool, nil, "", ""); err == nil {
+		t.Fatal("a redirect from the controller must not succeed")
+	}
+	if elsewhere.Load() != 0 {
+		t.Fatalf("the redirect target was called %d times; the token must stay with the controller", elsewhere.Load())
+	}
+	client := controllerHTTPClient()
+	if transport, ok := client.Transport.(*http.Transport); !ok || transport.Proxy != nil {
+		t.Fatalf("transport = %#v, want inherited proxies disabled", client.Transport)
+	}
+}

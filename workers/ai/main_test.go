@@ -1755,3 +1755,17 @@ func TestSealChildTaskViaControllerRetriesConflicts(t *testing.T) {
 		t.Fatalf("bounded attempts = %d, want 4", got+1000)
 	}
 }
+
+// TestSealHTTPClientStaysOnTheController covers the client that carries the
+// worker's ServiceAccount token to the controller: it ignores proxy settings
+// and never follows a redirect elsewhere.
+func TestSealHTTPClientStaysOnTheController(t *testing.T) {
+	client := sealHTTPClient()
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok || transport.Proxy != nil {
+		t.Fatalf("transport = %#v, want no proxy", client.Transport)
+	}
+	if client.CheckRedirect == nil || client.CheckRedirect(nil, nil) != http.ErrUseLastResponse {
+		t.Fatal("the seal client must not follow redirects")
+	}
+}

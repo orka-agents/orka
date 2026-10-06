@@ -3027,8 +3027,10 @@ func TestJobBuilder_buildEnvVars_ConnectorWriteToolsRequireApprovalAndHideOnRead
 	if err := json.Unmarshal([]byte(digestsEnv.Value), &digests); err != nil {
 		t.Fatalf("%s = %q: %v", workerenv.ConnectorToolDigests, digestsEnv.Value, err)
 	}
-	wantRead, _ := ConnectorToolDispatchDigest(connectorTool("gh_read", corev1alpha1.AgentRuntimeBrokeredToolClassRead).Spec, policy.Spec)
-	wantWrite, _ := ConnectorToolDispatchDigest(connectorTool("gh_write", corev1alpha1.AgentRuntimeBrokeredToolClassWrite).Spec, policy.Spec)
+	readSpec, _ := ConnectorToolDispatchDigest(connectorTool("gh_read", corev1alpha1.AgentRuntimeBrokeredToolClassRead).Spec, policy.Spec)
+	writeSpec, _ := ConnectorToolDispatchDigest(connectorTool("gh_write", corev1alpha1.AgentRuntimeBrokeredToolClassWrite).Spec, policy.Spec)
+	wantRead := NativeConnectorToolDispatchDigest(string(connectorTool("gh_read", corev1alpha1.AgentRuntimeBrokeredToolClassRead).UID), string(policy.UID), readSpec)
+	wantWrite := NativeConnectorToolDispatchDigest(string(connectorTool("gh_write", corev1alpha1.AgentRuntimeBrokeredToolClassWrite).UID), string(policy.UID), writeSpec)
 	if len(digests) != 2 || digests["gh_read"] != wantRead || digests["gh_write"] != wantWrite {
 		t.Fatalf("%s = %v, want both connector tools digested", workerenv.ConnectorToolDigests, digests)
 	}
@@ -3611,5 +3613,93 @@ func TestValidateContainerDeliveredPromptSize(t *testing.T) {
 	containerTask := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer, Image: "alpine", Prompt: oversized}}
 	if err := builder().validateContainerDeliveredPromptSize(ctx, containerTask, nil); err != nil {
 		t.Fatalf("container task rejected on unused prompt field: %v", err)
+	}
+}
+
+// TestJobBuilder_buildEnvVars_ConnectorDispatchUsesTheFreezeAndNativeRegistry
+// covers one native dispatch: link modes come from the bindings the dispatch
+// froze (not a second Connection read), a policy that changed since the
+// freeze fails the build so the dispatch retries, and a Tool resource
+// shadowed by a coordination built-in the worker registers is never
+// classified as connector-backed.
+func TestJobBuilder_buildEnvVars_ConnectorDispatchUsesTheFreezeAndNativeRegistry(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	policy := &corev1alpha1.OutboundAccessPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "github-conn", Namespace: defaultNS, UID: "policy-uid", Generation: 3},
+		Spec:       corev1alpha1.OutboundAccessPolicySpec{Connection: &corev1alpha1.ConnectionOutboundAccess{ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}}},
+	}
+	connectorTool := func(name string, class corev1alpha1.AgentRuntimeBrokeredToolClass) *corev1alpha1.Tool {
+		return &corev1alpha1.Tool{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: defaultNS, UID: types.UID(name + "-uid")},
+			Spec: corev1alpha1.ToolSpec{Description: name, BrokeredToolClass: class, HTTP: &corev1alpha1.HTTPExecution{
+				URL: "https://api.github.example.test/" + name, OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "github-conn"},
+			}},
+		}
+	}
+	builder := setupJobBuilder()
+	builder.Client = fake.NewClientBuilder().WithScheme(scheme).WithObjects(policy,
+		connectorTool("gh_read", corev1alpha1.AgentRuntimeBrokeredToolClassRead),
+		connectorTool("gh_write", corev1alpha1.AgentRuntimeBrokeredToolClassWrite),
+		// Same name as a coordination built-in the worker registers.
+		connectorTool("delegate_task", corev1alpha1.AgentRuntimeBrokeredToolClassWrite),
+	).Build()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS, UID: "task-uid"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "Review"},
+	}
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{
+		Model:        &corev1alpha1.ModelConfig{Provider: "anthropic", Name: "claude"},
+		Tools:        []corev1alpha1.ToolReference{{Name: "gh_read"}, {Name: "gh_write"}, {Name: "delegate_task"}},
+		Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true},
+	}}
+	binding := corev1alpha1.ConnectionBinding{
+		PolicyName: "github-conn", Provider: "github", ConnectionName: "github-abc", UID: "conn-uid", Generation: 1, GrantSequence: 1,
+		Mode: corev1alpha1.ConnectionModeReadOnly, PolicyUID: "policy-uid", PolicyGeneration: 3,
+	}
+	build := func(bindings ...corev1alpha1.ConnectionBinding) ([]corev1.EnvVar, error) {
+		return builder.buildEnvVarsWithOptions(context.Background(), task, agent, nil,
+			JobBuildOptions{ConnectionBindings: bindings, ConnectionBindingsFrozen: true})
+	}
+
+	envVars, err := build(binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolsEnv, _ := findEnvVar(envVars, workerenv.AITools)
+	if strings.Contains(toolsEnv.Value, "gh_write") || !strings.Contains(toolsEnv.Value, "gh_read") || !strings.Contains(toolsEnv.Value, "delegate_task") {
+		t.Fatalf("tools = %q, want the frozen readOnly link to hide gh_write and the built-in kept", toolsEnv.Value)
+	}
+	digestsEnv, _ := findEnvVar(envVars, workerenv.ConnectorToolDigests)
+	if !strings.Contains(digestsEnv.Value, "gh_read") || strings.Contains(digestsEnv.Value, "gh_write") || strings.Contains(digestsEnv.Value, "delegate_task") {
+		t.Fatalf("digests = %q, want only the dispatched connector tool", digestsEnv.Value)
+	}
+	approval, _ := findEnvVar(envVars, workerenv.ApprovalRequiredTools)
+	if strings.Contains(approval.Value, "delegate_task") {
+		t.Fatalf("approval set = %q, a shadowed Tool resource must not gate the built-in", approval.Value)
+	}
+
+	// A readWrite binding exposes and gates the write tool.
+	readWrite := binding
+	readWrite.Mode = corev1alpha1.ConnectionModeReadWrite
+	envVars, err = build(readWrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolsEnv, _ = findEnvVar(envVars, workerenv.AITools)
+	if !strings.Contains(toolsEnv.Value, "gh_write") {
+		t.Fatalf("tools = %q, want the readWrite link to expose gh_write", toolsEnv.Value)
+	}
+
+	// The policy object changed since the freeze: the build fails so the
+	// dispatch retries rather than mixing revisions.
+	stale := binding
+	stale.PolicyGeneration = 2
+	if _, err := build(stale); !errors.Is(err, ErrConnectorToolResolution) {
+		t.Fatalf("stale binding err = %v, want ErrConnectorToolResolution", err)
+	}
+	if _, err := build(); !errors.Is(err, ErrConnectorToolResolution) {
+		t.Fatalf("missing binding err = %v, want ErrConnectorToolResolution", err)
 	}
 }

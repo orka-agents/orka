@@ -2480,8 +2480,17 @@ spec:
                     mode:
                       description: Mode is the Connection mode at freeze time.
                       type: string
+                    policyGeneration:
+                      format: int64
+                      type: integer
                     policyName:
                       description: PolicyName is the connection-mode OutboundAccessPolicy.
+                      type: string
+                    policyUID:
+                      description: |-
+                        PolicyUID and PolicyGeneration pin the policy object the binding was
+                        frozen under, so a policy deleted and recreated, or edited, after
+                        dispatch is refused rather than executed under the old binding.
                       type: string
                     provider:
                       description: Provider is the ConnectorProvider the policy selects.

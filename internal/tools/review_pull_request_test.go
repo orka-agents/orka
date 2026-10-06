@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -884,5 +885,38 @@ func TestReviewPullRequestTool_RefusesOversizedPages(t *testing.T) {
 				t.Fatalf("err = %v, want %q refusing the oversized response", err, tc.wantError)
 			}
 		})
+	}
+}
+
+// TestFetchPRFilesPaginates covers a pull request with more changed files
+// than one page holds: every page is read up to the cap, and a list cut at
+// the cap is reported as possibly incomplete.
+func TestFetchPRFilesPaginates(t *testing.T) {
+	serve := func(totalFiles int) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+			if r.URL.Query().Get("per_page") != strconv.Itoa(prFilesPerPage) || page < 1 {
+				t.Errorf("unexpected query %s", r.URL.RawQuery)
+			}
+			start := (page - 1) * prFilesPerPage
+			count := min(prFilesPerPage, max(0, totalFiles-start))
+			entries := make([]string, count)
+			for i := range entries {
+				entries[i] = fmt.Sprintf(`{"filename":"f%d.go","status":"modified","additions":1,"deletions":0}`, start+i)
+			}
+			_, _ = fmt.Fprint(w, "["+strings.Join(entries, ",")+"]")
+		}))
+	}
+	small := serve(prFilesPerPage + 5)
+	defer small.Close()
+	files, complete, err := fetchPRFiles(context.Background(), small.Client(), small.URL, "token", "o", "r", 42)
+	if err != nil || !complete || len(files) != prFilesPerPage+5 {
+		t.Fatalf("files = %d complete = %t err = %v, want every file across two pages", len(files), complete, err)
+	}
+	large := serve((maxPRFilePages + 2) * prFilesPerPage)
+	defer large.Close()
+	files, complete, err = fetchPRFiles(context.Background(), large.Client(), large.URL, "token", "o", "r", 42)
+	if err != nil || complete || len(files) != maxPRFilePages*prFilesPerPage {
+		t.Fatalf("files = %d complete = %t err = %v, want the cap reported incomplete", len(files), complete, err)
 	}
 }

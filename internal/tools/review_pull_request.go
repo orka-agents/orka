@@ -78,8 +78,12 @@ func boundReviewPullRequestResult(result ReviewPullRequestResult, limit int) Rev
 	if len(encoded) <= limit {
 		return result
 	}
+	listNote := ""
+	if result.Truncated {
+		listNote = result.TruncationNote + "; "
+	}
 	result.Truncated = true
-	result.TruncationNote = "file patches omitted to fit the result size limit; the unified diff carries the changes"
+	result.TruncationNote = listNote + "file patches omitted to fit the result size limit; the unified diff carries the changes"
 	files := make([]FileChange, len(result.Files))
 	for i, file := range result.Files {
 		file.Patch = ""
@@ -95,7 +99,7 @@ func boundReviewPullRequestResult(result ReviewPullRequestResult, limit int) Rev
 		} else {
 			result.Diff = strings.ToValidUTF8(result.Diff[:len(result.Diff)-cut], "")
 		}
-		result.TruncationNote = "file patches omitted and the unified diff cut to fit the result size limit; fetch the remaining hunks separately"
+		result.TruncationNote = listNote + "file patches omitted and the unified diff cut to fit the result size limit; fetch the remaining hunks separately"
 		encoded, _ = json.Marshal(result)
 	}
 	return result
@@ -158,7 +162,7 @@ func (t *ReviewPullRequestTool) Execute(ctx context.Context, argsJSON json.RawMe
 	}
 
 	// Fetch PR files
-	files, err := fetchPRFiles(ctx, httpClient, baseURL, token, owner, repo, args.PRNumber)
+	files, complete, err := fetchPRFiles(ctx, httpClient, baseURL, token, owner, repo, args.PRNumber)
 	if err != nil {
 		return "", fmt.Errorf("failed to fetch PR files: %w", err)
 	}
@@ -172,6 +176,10 @@ func (t *ReviewPullRequestTool) Execute(ctx context.Context, argsJSON json.RawMe
 		Diff:       diff,
 		Files:      files,
 		Status:     "fetched",
+	}
+	if !complete {
+		result.Truncated = true
+		result.TruncationNote = fmt.Sprintf("only the first %d changed files are listed; the unified diff carries the changes", len(files))
 	}
 	resultJSON, _ := json.Marshal(boundReviewPullRequestResult(result, t.maxResultBytes))
 	return string(resultJSON), nil
@@ -261,8 +269,32 @@ func fetchPRDiff(ctx context.Context, httpClient *http.Client, baseURL, token, o
 const prDiffResponseLimit int64 = 10 << 20
 
 // fetchPRFiles fetches the list of changed files in a PR.
-func fetchPRFiles(ctx context.Context, httpClient *http.Client, baseURL, token, owner, repo string, prNumber int) ([]FileChange, error) {
-	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/files", baseURL, owner, repo, prNumber)
+// prFilesPerPage and maxPRFilePages bound the changed-file pages one
+// review_pull_request call reads.
+const (
+	prFilesPerPage = 100
+	maxPRFilePages = 10
+)
+
+// fetchPRFiles reads the pull request's changed files page by page, up to
+// maxPRFilePages; complete is false when the last page read was full at
+// that cap, so more files may exist.
+func fetchPRFiles(ctx context.Context, httpClient *http.Client, baseURL, token, owner, repo string, prNumber int) (files []FileChange, complete bool, err error) {
+	for page := 1; page <= maxPRFilePages; page++ {
+		pageFiles, err := fetchPRFilesPage(ctx, httpClient, baseURL, token, owner, repo, prNumber, page)
+		if err != nil {
+			return nil, false, err
+		}
+		files = append(files, pageFiles...)
+		if len(pageFiles) < prFilesPerPage {
+			return files, true, nil
+		}
+	}
+	return files, false, nil
+}
+
+func fetchPRFilesPage(ctx context.Context, httpClient *http.Client, baseURL, token, owner, repo string, prNumber, page int) ([]FileChange, error) {
+	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/files?per_page=%d&page=%d", baseURL, owner, repo, prNumber, prFilesPerPage, page)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
