@@ -269,40 +269,27 @@ func (d *ACPDispatcher) recoverTaskNativeCapture(ctx context.Context, task *core
 	}
 	session.NativeSession = native
 	pending := task.Annotations[nativeCaptureIntentAnnotation] != ""
-	if !pending && native == nil && d.nativeSessionStore() == nil {
+	nativeRequired := pending || native != nil
+	if !nativeRequired && d.nativeSessionStore() == nil {
 		return nil
 	}
-	if !pending && native == nil && task.Status.AgentExecutionBinding != nil &&
+	if !nativeRequired && task.Status.AgentExecutionBinding != nil &&
 		task.Status.AgentExecutionBinding.RuntimeType != corev1alpha1.AgentRuntimeCodex {
 		return nil
 	}
 	if !pending {
-		attempt, err := d.Store.GetPromptAttempt(ctx, session.Turn.Turn.PromptAttemptID)
+		unsupported, err := d.nativeCaptureWorkspaceUnsupported(ctx, task, session.Turn.Turn.PromptAttemptID)
 		if err != nil {
 			return err
 		}
-		delivery := task.Status.Delivery
-		if attempt.DeliveryState == store.PromptDeliveryConflict && d.APIReader != nil {
-			latest := &corev1alpha1.Task{}
-			if err := d.APIReader.Get(ctx, client.ObjectKeyFromObject(task), latest); err != nil {
-				return err
-			}
-			if latest.UID != task.UID {
-				return fmt.Errorf("%w: native capture recovery Task UID changed", store.ErrConflict)
-			}
-			delivery = latest.Status.Delivery
-		}
-		// Poisoned workspace validation cannot produce a native checkpoint.
-		// An existing capture intent still requires its exact receipt recovery.
-		if attempt.DeliveryState == store.PromptDeliveryReadOnlyWorkspaceModified ||
-			delivery != nil && delivery.Reason == "WorkspaceValidationFailed" {
+		if unsupported {
 			return nil
 		}
 	}
 	execution := task.Status.Execution
 	pool := &corev1alpha1.RuntimePool{}
 	if execution == nil || execution.RuntimePoolName == "" {
-		if !pending && native == nil {
+		if !nativeRequired {
 			return nil
 		}
 		return fmt.Errorf("%w: native capture recovery requires its exact RuntimePool", store.ErrConflict)
@@ -316,7 +303,7 @@ func (d *ACPDispatcher) recoverTaskNativeCapture(ctx context.Context, task *core
 		return fmt.Errorf("%w: native capture runtime was replaced before its durable receipt", store.ErrConflict)
 	}
 	if pool.Spec.Runtime.Profile.ProviderKind != runtimePoolProviderCodex {
-		if pending || native != nil {
+		if nativeRequired {
 			return errNativeSessionRuntimeUnsupported
 		}
 		return nil
@@ -330,7 +317,7 @@ func (d *ACPDispatcher) recoverTaskNativeCapture(ctx context.Context, task *core
 		return err
 	}
 	if !capabilities.SupportsNativeSessions {
-		if pending || native != nil {
+		if nativeRequired {
 			return errNativeSessionRuntimeUnsupported
 		}
 		return nil
@@ -338,4 +325,26 @@ func (d *ACPDispatcher) recoverTaskNativeCapture(ctx context.Context, task *core
 	runtimeFence.RuntimeSessionUID = harnessv2.RuntimeSessionUID(execution.RuntimeSessionUID)
 	runtimeFence.RuntimeSessionGeneration = uint64(execution.RuntimeSessionGeneration)
 	return d.captureTaskNativeSession(ctx, runtimeClient, task, runtimeFence, session)
+}
+
+// Poisoned workspace validation cannot produce a native checkpoint. Callers
+// with an existing capture intent must still reconcile its exact receipt.
+func (d *ACPDispatcher) nativeCaptureWorkspaceUnsupported(ctx context.Context, task *corev1alpha1.Task, attemptID string) (bool, error) {
+	attempt, err := d.Store.GetPromptAttempt(ctx, attemptID)
+	if err != nil {
+		return false, err
+	}
+	delivery := task.Status.Delivery
+	if attempt.DeliveryState == store.PromptDeliveryConflict && d.APIReader != nil {
+		latest := &corev1alpha1.Task{}
+		if err := d.APIReader.Get(ctx, client.ObjectKeyFromObject(task), latest); err != nil {
+			return false, err
+		}
+		if latest.UID != task.UID {
+			return false, fmt.Errorf("%w: native capture recovery Task UID changed", store.ErrConflict)
+		}
+		delivery = latest.Status.Delivery
+	}
+	return attempt.DeliveryState == store.PromptDeliveryReadOnlyWorkspaceModified ||
+		delivery != nil && delivery.Reason == "WorkspaceValidationFailed", nil
 }
