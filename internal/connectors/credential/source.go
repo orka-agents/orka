@@ -154,6 +154,12 @@ func (s *Source) ResolveConnectionCredential(ctx context.Context, req outboundac
 		if err := frozenGrantHolds(req, credential); err != nil {
 			return outboundaccess.ConnectionCredential{}, err
 		}
+	} else if connection, err = s.loadLiveConnection(ctx, req); err != nil {
+		// A disconnect that began after the first read tombstones custody
+		// but keeps the row for revocation, and the custody read does not
+		// consult tombstones: the Connection is read again (its deletion
+		// timestamp is set before the finalizer runs) before any release.
+		return outboundaccess.ConnectionCredential{}, err
 	}
 	return outboundaccess.ConnectionCredential{
 		AccessToken:   credential.AccessToken,
