@@ -235,7 +235,9 @@ spec:
                       pattern: ^[a-z][a-z0-9_]*$
                       type: string
                     parameters:
-                      description: Parameters is the JSON Schema for HTTP tool parameters.
+                      description: |-
+                        Parameters is the JSON Schema for HTTP tool parameters. When set, its
+                        root must declare type "object".
                       x-kubernetes-preserve-unknown-fields: true
                     source:
                       description: |-

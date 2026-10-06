@@ -458,11 +458,11 @@ func validateToolParameters(name string, parameters *apiextensionsv1.JSON) *Issu
 	if err := json.Unmarshal(parameters.Raw, &schema); err != nil || schema == nil {
 		return invalid(fmt.Sprintf("HTTP tool %q parameters must be a JSON Schema object", name))
 	}
-	if raw, ok := schema["type"]; ok {
-		var typeName string
-		if err := json.Unmarshal(raw, &typeName); err != nil || typeName != "object" {
-			return invalid(fmt.Sprintf("HTTP tool %q parameters must describe an object", name))
-		}
+	// The root type is required: without it JSON Schema accepts non-object
+	// inputs, which the HTTP executor cannot map onto request arguments.
+	var typeName string
+	if raw, ok := schema["type"]; !ok || json.Unmarshal(raw, &typeName) != nil || typeName != "object" {
+		return invalid(fmt.Sprintf("HTTP tool %q parameters must declare type \"object\"", name))
 	}
 	if raw, ok := schema["properties"]; ok {
 		var properties map[string]json.RawMessage

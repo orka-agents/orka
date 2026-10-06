@@ -150,7 +150,8 @@ type ConnectorTool struct {
 	// +optional
 	Description string `json:"description,omitempty"`
 
-	// Parameters is the JSON Schema for HTTP tool parameters.
+	// Parameters is the JSON Schema for HTTP tool parameters. When set, its
+	// root must declare type "object".
 	// +optional
 	Parameters *apiextensionsv1.JSON `json:"parameters,omitempty"`
 
