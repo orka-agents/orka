@@ -10,14 +10,15 @@ namespace, where the API checks the caller's permissions and executes tools.
 
 The router serves exactly these routes:
 
-| API | Messages | Model discovery |
+| API | Requests | Model discovery |
 | --- | --- | --- |
-| OpenAI | `POST /openai/v1/chat/completions` | `GET /openai/v1/models` |
+| OpenAI | `POST /openai/v1/chat/completions`, `POST /openai/v1/responses` | `GET /openai/v1/models` |
 | Anthropic | `POST /anthropic/v1/messages` | `GET /anthropic/v1/models` |
 
-Ordinary JSON and SSE responses retain the installation's format. Both message
-routes take conversation history in `messages`. The router has no conversation
-store and does not call model Providers itself.
+Ordinary JSON and SSE responses retain the installation's format. Chat Completions
+and Anthropic Messages take history in `messages`. Responses takes history in
+`input` and requires `store:false`; see the [supported Responses subset](../reference/openai-compat.md).
+The router has no conversation store and does not call model Providers itself.
 
 :::tip[Video demo]
 Watch [Two teams, one AI endpoint](https://www.youtube.com/watch?v=-x0tKk9epWU).
@@ -83,8 +84,10 @@ and imposes no additional whole-response timeout. Connection and TLS handshake
 attempts time out after five seconds. The installation retains its chat and
 tool deadlines.
 
-The router bounds request uploads with `--read-timeout` (default `30s`) but
-leaves response writes unrestricted, so this limit does not cut off long chats.
+The router bounds request uploads with `--read-timeout` (default `30s`). Responses
+has a separate 30-second limit on each downstream write or flush, so a stalled
+reader cannot keep a socket blocked after the installation finishes. This does
+not limit time waiting for model inference or affect other compatibility routes.
 On shutdown, `--shutdown-timeout` allows active requests to finish (default
 `30m`, matching the installation's default chat limit). The example Deployment
 sets `terminationGracePeriodSeconds: 1810`. If an installation permits longer
@@ -93,7 +96,7 @@ least ten seconds longer. Keep the Deployment progress deadline above that
 window too (the example allows `2100` seconds). New connections stop being
 accepted during shutdown.
 
-Browser clients can make unauthenticated CORS preflight requests for the four
+Browser clients can make unauthenticated CORS preflight requests for the
 compatibility routes. Actual API requests still require authentication. Set
 `ORKA_CORS_ALLOWED_ORIGINS` on the router to a comma-separated list of exact UI
 origins, such as `https://chat.example.com`; the default is `*`, as on the

@@ -114,7 +114,13 @@ func TestValidateProviderSpec(t *testing.T) {
 		}, want: "parameters must be a JSON Schema object"},
 		{name: "parameters wrong type", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.Tools[2].Parameters = &apiextensionsv1.JSON{Raw: []byte(`{"type":"string"}`)}
-		}, want: "parameters must describe an object"},
+		}, want: `parameters must declare type "object"`},
+		{name: "parameters missing type", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].Parameters = &apiextensionsv1.JSON{Raw: []byte(`{}`)}
+		}, want: `parameters must declare type "object"`},
+		{name: "parameters properties without type", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].Parameters = &apiextensionsv1.JSON{Raw: []byte(`{"properties":{"q":{"type":"string"}}}`)}
+		}, want: `parameters must declare type "object"`},
 		{name: "parameters bad properties", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.Tools[2].Parameters = &apiextensionsv1.JSON{Raw: []byte(`{"type":"object","properties":[]}`)}
 		}, want: "parameters.properties must be an object"},
