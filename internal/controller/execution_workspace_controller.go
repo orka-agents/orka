@@ -674,7 +674,29 @@ func (r *ExecutionWorkspaceReconciler) reconcileWorkspaceDeletion(
 		return ctrl.Result{RequeueAfter: workspaceRequeueInterval}, nil
 	}
 	var dispositionErr error
-	if workspace.Spec.Mode == workspacev1alpha1.ExecutionWorkspaceModeInteractive {
+	if workspace.Spec.Workload != nil {
+		// External providers never held core's credentials. Their disposition
+		// covers provider resources; core separately proves pool and attachment
+		// credentials gone before applying the interactive cleanup requirement.
+		dispositionErr = workspaceprovider.ValidateDeletedDisposition(workspace.Status.Disposition, workspace.Spec.Lifecycle.DeletionPolicy)
+		if dispositionErr == nil {
+			core := &workspaceCoreCleanup{Client: r.Client, APIReader: r.APIReader}
+			gone, foreign, err := core.ensureLinkedRuntimePoolDeleted(ctx, workspace)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if !gone || foreign {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+			credentialsGone, err := core.ensureACPWorkspaceAttachmentCredentialsDeleted(ctx, workspace)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if !credentialsGone {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+		}
+	} else if workspace.Spec.Mode == workspacev1alpha1.ExecutionWorkspaceModeInteractive {
 		dispositionErr = workspaceprovider.ValidateInteractiveDeletedDisposition(
 			workspace.Status.Disposition,
 			workspace.Spec.Lifecycle.DeletionPolicy,

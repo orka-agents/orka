@@ -28,7 +28,7 @@ func TestStaticChartMountsRotatableSubstrateCredentials(t *testing.T) {
 		t.Run(tc.harness+"/"+tc.auth+"/enabled="+strconv.FormatBool(tc.enabled), func(t *testing.T) {
 			args := []string{
 				"--set-string", "controller.mode=" + tc.harness,
-				"--set", "controller.substrate.enabled=" + strconv.FormatBool(tc.enabled),
+				"--set", "controller.substrate.mcpToolsEnabled=" + strconv.FormatBool(tc.enabled),
 				"--set-string", "controller.substrate.apiCredentials.existingSecret=substrate-control",
 				"--set-string", "controller.substrate.apiCredentials.caKey=server-ca",
 				"--show-only", "templates/deployment.yaml",
@@ -63,7 +63,7 @@ func TestStaticChartMountsRotatableSubstrateCredentials(t *testing.T) {
 					t.Errorf("controller is missing %s", arg)
 				}
 			}
-			if slices.Contains(container.Args, "--substrate-enabled=true") != tc.enabled {
+			if slices.Contains(container.Args, "--substrate-mcp-tools-enabled=true") != tc.enabled {
 				t.Fatal("retaining cleanup credentials changed Substrate admission")
 			}
 			mountIndex := slices.IndexFunc(container.VolumeMounts, func(m corev1.VolumeMount) bool {
@@ -106,7 +106,7 @@ func TestStaticChartRejectsIncompleteSubstrateCredentials(t *testing.T) {
 		"apiCredentials.existingSecret=client,apiCredentials.bearerTokenKey=token,apiBearerTokenFile=/custom/token",
 	} {
 		t.Run(selection, func(t *testing.T) {
-			args := []string{"--set", "controller.substrate.enabled=true", "--show-only", "templates/deployment.yaml"}
+			args := []string{"--set", "controller.substrate.mcpToolsEnabled=true", "--show-only", "templates/deployment.yaml"}
 			for value := range strings.SplitSeq(selection, ",") {
 				if value != "" {
 					args = append(args, "--set-string", "controller.substrate."+value)
@@ -138,7 +138,7 @@ func TestStaticChartRequiresSubstrateServerTrust(t *testing.T) {
 	} {
 		for _, enabled := range []bool{true, false} {
 			t.Run(tc.name+" enabled="+strconv.FormatBool(enabled), func(t *testing.T) {
-				args := []string{"--set", "controller.substrate.enabled=" + strconv.FormatBool(enabled),
+				args := []string{"--set", "controller.substrate.mcpToolsEnabled=" + strconv.FormatBool(enabled),
 					"--show-only", "templates/deployment.yaml"}
 				for value := range strings.SplitSeq(tc.selection, ",") {
 					args = append(args, "--set-string", "controller.substrate."+value)
@@ -165,10 +165,10 @@ func TestStaticChartRequiresSubstrateServerTrust(t *testing.T) {
 	}
 }
 
-func TestStaticChartConfinesSubstrateWorkerPermissions(t *testing.T) {
-	rendered := requireHelmRender(t, "--set", "controller.substrate.enabled=false",
-		"--set-string", "controller.substrate.workerNamespaces[0]=ate-workers",
-		"--show-only", "templates/substrate-worker-rbac.yaml")
+func TestStaticChartExternalWorkerPermissionsAreReadOnly(t *testing.T) {
+	rendered := requireHelmRender(t, "--set", "controller.substrate.mcpToolsEnabled=false",
+		"--set-string", "controller.executionWorkspace.workerNamespaces[0]=ate-workers",
+		"--show-only", "templates/external-runtime-worker-rbac.yaml")
 	var role rbacv1.Role
 	if err := yaml.Unmarshal([]byte(requireRenderedDocument(t, rendered, "kind: Role\n")), &role); err != nil {
 		t.Fatal(err)
@@ -176,14 +176,19 @@ func TestStaticChartConfinesSubstrateWorkerPermissions(t *testing.T) {
 	if role.Namespace != "ate-workers" {
 		t.Fatal("Substrate worker authority escaped the selected provider namespace")
 	}
-	for _, verb := range []string{"get", "list", "delete"} {
+	for _, verb := range []string{"get", "list", "watch"} {
 		if !testSubstrateRuleAllows(role.Rules, "", "pods", verb) {
 			t.Errorf("worker cleanup lacks Pod %s permission", verb)
 		}
 	}
-	for _, verb := range []string{"get", "create", "patch", "delete"} {
-		if !testSubstrateRuleAllows(role.Rules, "networking.k8s.io", "networkpolicies", verb) {
-			t.Errorf("worker confinement lacks NetworkPolicy %s permission", verb)
+	for _, verb := range []string{"create", "update", "patch", "delete"} {
+		if testSubstrateRuleAllows(role.Rules, "", "pods", verb) {
+			t.Errorf("worker observation permits compute mutation: %s", verb)
+		}
+	}
+	for _, verb := range []string{"get", "list", "create", "patch", "delete"} {
+		if testSubstrateRuleAllows(role.Rules, "networking.k8s.io", "networkpolicies", verb) {
+			t.Errorf("worker reader can mutate or inspect network policies: %s", verb)
 		}
 	}
 	for _, resource := range []string{"secrets", "pods/exec", "serviceaccounts/token"} {

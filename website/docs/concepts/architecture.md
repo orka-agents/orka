@@ -142,8 +142,8 @@ Read them when you are debugging. Do not edit them.
 These live in their own API groups.
 
 The source Helm chart (`manifest_staging/charts/orka`) and Kustomize CRD bundle
-(`config/crd`) both contain all 27 production CRDs. The two development-only
-`fake.workspace.orka.ai` CRDs are excluded. With Kustomize, install the shared CRDs through
+(`config/crd`) package Orka's core APIs and shared workspace contracts. Provider-owned
+configuration and profile CRDs are installed with each external provider. With Kustomize, install the shared CRDs through
 the cluster's designated CRD owner before deploying workloads. `config/acp-production`
 excludes CRDs, and `make deploy` checks that the required shared CRDs are already established.
 
@@ -156,7 +156,10 @@ The class-based workspace path requires these gates:
 - `--task-provenance-admission-enabled` — protects reserved Task metadata
 - `--workspace-class-use-admission-enabled` — authorizes workspace class use
 - `--acp-workspace-dispatch-enabled` — lets Tasks actually dispatch onto a workspace
-- the provider flag — `--agent-sandbox-enabled` or `--substrate-enabled`
+
+A separate provider Deployment and admitted registration/class complete this path;
+core has no Sandbox or Substrate ACP allocation flag. Its generic attachment manager
+consumes the frozen public request and independently verifies startup and retirement.
 
 The controller refuses to start with the provider API enabled unless both admission gates
 are enabled. They require working TLS-backed webhooks with a serving certificate and
@@ -170,7 +173,12 @@ Without the dispatch gate, Tasks that reference a class are still rejected.
 | **Gateway**, **GatewayClass**, **GatewayBinding** | `gateway.orka.ai` | Accept work from an external system through an adapter. See [Gateways](../operations/gateways.md) |
 | **ExecutionWorkspace**, **ExecutionWorkspaceClass**, **ExecutionWorkspacePool**, **ExecutionWorkspaceProvider** | `workspace.orka.ai` | The class-based lifecycle for running an agent inside an external sandbox. See [Configuration](../reference/configuration.md#workspace-providers) |
 | **ExecutionWorkspaceCheckpoint** | `workspace.orka.ai` | A saved copy of workspace data for export or restore. Requires the workspace provider API |
-| **RuntimeProviderConfig**, **RuntimeWorkspaceProfile** | `acp.workspace.orka.ai` | Provider settings and per-workspace profile parameters referenced by an `ExecutionWorkspaceClass` |
+| **Provider-owned config and profile kinds** | `sandbox.workspace.orka.ai`, `substrate.workspace.orka.ai`, or another installed provider group | Immutable operator parameters referenced by provider registrations and classes; installed separately from core |
+
+Old in-tree ACP allocations must be drained by their original owner before applying
+the pruned RuntimePool schema or starting the new binary. Startup rejects retained
+legacy pools and workspace labels across all namespaces and states. See
+[external workspace migration](../operations/upgrading.md#external-workspace-migration).
 
 ### Execution images
 

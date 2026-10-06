@@ -2,10 +2,47 @@
 
 Provider adapters watch `workspace.orka.ai/v1alpha1` resources whose immutable
 `spec.controllerName` matches the adapter. They import only
-`api/v1alpha1`, `sdk`, and `sdk/workspaceagent` from a tagged
+`api/v1alpha1`, `sdk`, and `sdk/workspaceagent` from an immutable published
 [`orka-workspace`](https://github.com/orka-agents/orka-workspace) module version.
 The `sdk` import retains the Go package name `workspaceprovider`. Orka consumes
 the same shared module and sources its workspace CRDs from that module.
+
+## External ACP providers
+
+ACP classes may select any independently deployed adapter that supports
+`orka.workspace.lifecycle.v1` and `acp.runtime.v2`. Its registered
+ServiceAccount must hold the registration-scoped virtual `provider-status`
+permission. The class uses the adapter's own configuration/profile kinds; core
+resolves and freezes their UIDs, generations, and functional hashes through the
+REST mapper. Grant read access to both kinds used in that resolution.
+
+Core admits and attaches the exact materialized workspace before publishing
+physical demand. The provider acknowledges attachment without waiting for a
+running supervisor. Core then writes a numbered immutable public workload to
+the workspace. The provider reports exact instance and request-revision evidence;
+core independently checks accessible compute/storage, performs the sealed
+bootstrap exchange, and opens admission only after the authenticated v2 probe.
+Generation acknowledgement is asynchronous and does not authorize prompt dispatch.
+
+Private runtime credentials stay core-owned. Retirement closes admission and
+drains the authenticated instance before the provider receives exact sequence
+and instance authorization. A missing provider response retains both ownership
+fences and finalizers. Independent checkpoint restore additionally binds the
+checkpoint UID, digest, class, and provider revision; the provider must acquire
+durable artifact ownership before native creation.
+
+The shared repository contains the [provider installation and retirement
+guide](https://github.com/orka-agents/orka-workspace/blob/feat/workspace-external-providers/docs/external-providers.md),
+provider-specific prerequisites, and conformance/live proof scripts. External ACP
+providers use the generic workspace API and ACP dispatch flags. Legacy ACP
+cleanup belongs to the previous release; the removal release retains only pooled
+Substrate MCP Tools. Its startup gate names legacy allocations that must retire under their
+original owner before cutover; copying provider labels does not migrate them.
+
+The workspace-agent connection contract below applies when an adapter exposes
+that protocol. ACP's sealed bootstrap and authenticated harness are separate
+capabilities; `acp.runtime.v2` alone does not advertise workspace-agent exec,
+reset, files, or TLS endpoints.
 
 ## Parameter CRD read aggregation
 
@@ -54,16 +91,6 @@ used by task commands must also remain traversable by the configured command
 identity; a provider-owned `0700` rootfs directory makes every post-drop exec
 fail even when the capability set is correct.
 
-The local Agent Substrate integration currently applies a reviewed compatibility
-patch to the pinned upstream OCI generator because that revision omits these two
-capabilities and creates every extracted rootfs with mode `0700`. For the
-explicit `/orka-workspace-agent` entrypoint only, the patch grants the set-ID
-capabilities and changes the extracted rootfs directory to `0755`; other Actor
-containers keep the pinned Substrate capability and rootfs policy. The installer
-verifies the exact upstream source blob before applying the patch. Re-pinning
-Substrate therefore requires an explicit review of the upstream OCI runtime
-contract rather than silently carrying the patch onto changed code.
-
 ## Workspace-agent connection Secret contract
 
 A ready workspace that exposes the workspace-agent data plane sets
@@ -94,3 +121,32 @@ The shared lifecycle contract and its provider conformance suite live in
 [`orka-workspace`](https://github.com/orka-agents/orka-workspace). Providers must
 pass that suite before advertising a supported contract. Workspace-agent
 implementations must also preserve the data-plane protocol described above.
+
+## Drain before upgrading from in-tree ACP providers
+
+The external provider API and binaries are installed from the same
+`orka-workspace` revision that Orka pins in its Go module. The [shared installation
+and compatibility guide](https://github.com/orka-agents/orka-workspace/blob/feat/workspace-external-providers/docs/external-providers.md)
+lists the supported Kubernetes and backend versions and the provider-owned schemas.
+
+Before replacing Orka or applying the new RuntimePool CRD, drain every legacy ACP
+pool, workspace, and retained artifact with its original release and native
+backend. The removal release has no in-tree Sandbox or Substrate ACP cleanup
+implementation. Its unconditional startup gate names old-shaped RuntimePools and
+every workspace bearing the legacy controller label, including Ready, Suspended,
+Failed, and Deleted resources. Persisting a pool after schema pruning does not
+bypass the gate. The old owner must remove these objects before cutover; copying
+labels or native identifiers never authorizes adoption.
+
+Provider configuration and profiles belong to separate deployments. Install them
+and their read-only parameter grants, then enable the generic workspace API and
+ACP dispatch with class-use and Task provenance admission. There is no core
+Sandbox or native ACP provider flag. Core independently observes exact runtime
+Pods and storage and verifies authenticated supervisor admission; a provider's
+Ready observation alone is insufficient.
+
+Pooled Substrate MCP Tools remain an explicit in-tree boundary. Their only enable
+flag is `--substrate-mcp-tools-enabled`, with native control TLS/authentication
+settings. It does not enable ACP allocations. Helm's
+`controller.executionWorkspace.workerNamespaces` grants read-only Pod access in
+external worker namespaces; compute and worker confinement belong to providers.

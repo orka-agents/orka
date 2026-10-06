@@ -27,7 +27,7 @@ func nativeActorPoolIdentityHarness(t *testing.T) (*SubstrateActorPoolReconciler
 	executor := &recordingSubstratePoolExecutor{}
 	r := &SubstrateActorPoolReconciler{
 		Client: fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(pool).WithObjects(pool).Build(),
-		Scheme: scheme, SubstrateEnabled: true,
+		Scheme: scheme, SubstrateMCPToolsEnabled: true,
 		SubstrateTemplateValidator: func(_ context.Context, request *ExecutionWorkspaceRequest) error {
 			request.TemplateUID = "original-native-template-uid"
 			return nil

@@ -2847,9 +2847,7 @@ func testACPDispatcherDeadlineCancellation(t *testing.T, workspaceLifetime bool)
 		},
 	}
 	if workspaceLifetime {
-		pool.Spec.ExecutionWorkspace = &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
-			Provider: plan.Workspace.Provider, BindingDigest: plan.Workspace.BindingDigest,
-		}
+		pool.Spec.ExecutionWorkspace = testExternalPoolWorkspaceSpec(plan.Workspace, "expiring-workspace", "expiring-workspace-uid")
 		pool.Labels = map[string]string{acpExecutionWorkspaceLinkLabel: "expiring-workspace"}
 		pool.Annotations = map[string]string{acpExecutionWorkspaceUIDAnnotation: "expiring-workspace-uid"}
 	}
@@ -2871,7 +2869,7 @@ func testACPDispatcherDeadlineCancellation(t *testing.T, workspaceLifetime bool)
 		}
 		pool.Annotations[runtimePoolPrivateAuthSecretBindingAnnotation(1)] = secret.Name + "/" + string(secret.UID)
 	}
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.RuntimePool{}).WithObjects(task, pool, secret, agent).Build()
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.RuntimePool{}, &workspacev1alpha1.ExecutionWorkspace{}).WithObjects(task, pool, secret, agent).Build()
 	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "timeout-store.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -2916,17 +2914,27 @@ func testACPDispatcherDeadlineCancellation(t *testing.T, workspaceLifetime bool)
 		// authenticated cancellation. The Task's own 30-second timeout must
 		// not be the cause of settlement within this test's 10-second bound.
 		dispatcher.runtimeContextFactory = nil
-		workspace := &workspacev1alpha1.ExecutionWorkspace{
-			ObjectMeta: metav1.ObjectMeta{
-				Namespace: task.Namespace, Name: "expiring-workspace", UID: types.UID("expiring-workspace-uid"),
-				CreationTimestamp: metav1.NewTime(time.Now().UTC().Truncate(time.Second)),
-				Annotations:       map[string]string{acpExecutionWorkspacePoolAnnotation: pool.Name},
-			},
-			Spec: workspacev1alpha1.ExecutionWorkspaceSpec{Lifecycle: workspacev1alpha1.ExecutionWorkspaceLifecycle{
-				MaxLifetime: &metav1.Duration{Duration: 5 * time.Second},
-			}},
-		}
+		workspace := testAdmittedNativeDispatchWorkspace(t, plan.Workspace, pool, server.URL)
+		workspace.CreationTimestamp = metav1.NewTime(time.Now().UTC().Truncate(time.Second))
+		workspace.Spec.Lifecycle.MaxLifetime = &metav1.Duration{Duration: 5 * time.Second}
 		if err := kubeClient.Create(ctx, workspace); err != nil {
+			t.Fatal(err)
+		}
+		worker := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "orka-runtimes", Name: "deadline-worker", UID: "deadline-worker-uid"}}
+		if err := kubeClient.Create(ctx, worker); err != nil {
+			t.Fatal(err)
+		}
+		// Model the core fence persisted after the one-time native challenge. This
+		// test exercises deadline settlement; the endpoint test verifies admission.
+		if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(pool), pool); err != nil {
+			t.Fatal(err)
+		}
+		pool.Status.ActiveInstance.PodAddress = parsed.Hostname()
+		if err := kubeClient.Status().Update(ctx, pool); err != nil {
+			t.Fatal(err)
+		}
+		observer := &RuntimePoolReconciler{Client: kubeClient, APIReader: kubeClient}
+		if err := observer.bindExternalRuntimeInstanceEvidence(ctx, pool, workspace); err != nil {
 			t.Fatal(err)
 		}
 	} else {
@@ -3317,6 +3325,7 @@ type dispatcherPublisherServerOptions struct {
 	inspectPullRequest    func(publisher.PullRequestIntent)
 }
 
+//nolint:gocyclo // Publisher test fixture exposes protocol operations and their fault-injection controls.
 func newDispatcherPublisherServer(t *testing.T, treeOID, commitOID, bundleDigest string, options ...dispatcherPublisherServerOptions) *httptest.Server {
 	t.Helper()
 	bundleArtifactID, err := artifactcap.ArtifactIDForDigest(bundleDigest)

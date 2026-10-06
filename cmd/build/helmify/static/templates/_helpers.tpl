@@ -895,11 +895,11 @@ remain outside rendered Helm manifests.
 */}}
 {{- define "orka.validateHarnessV1" -}}
 {{- if eq .Values.controller.mode "harness-v1" -}}
-{{- if .Values.controller.agentSandbox.enabled -}}
-{{- fail "controller.agentSandbox.enabled is unsupported when controller.mode=harness-v1; Agent Sandbox requires harness-v2" -}}
+{{- if .Values.controller.executionWorkspace.dispatchEnabled -}}
+{{- fail "controller.executionWorkspace.dispatchEnabled requires harness-v2" -}}
 {{- end -}}
-{{- if .Values.controller.substrate.enabled -}}
-{{- fail "controller.substrate.enabled is unsupported when controller.mode=harness-v1; Substrate requires harness-v2" -}}
+{{- if .Values.controller.substrate.mcpToolsEnabled -}}
+{{- fail "controller.substrate.mcpToolsEnabled is unsupported when controller.mode=harness-v1; Substrate MCP Tools require harness-v2" -}}
 {{- end -}}
 {{- if not (trim (default "" .Values.harnessV1.image.repository)) -}}
 {{- fail "harnessV1.image.repository is required when controller.mode=harness-v1" -}}

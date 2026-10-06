@@ -20,7 +20,7 @@ func TestAgentExecutionBindingPreservesCheckpointRestore(t *testing.T) {
 			ctx := context.Background()
 			fixture := suspendableSubstrateFixture(t)
 			fixture.provider.Status.SupportedFeatures = append(fixture.provider.Status.SupportedFeatures,
-				workspacev1alpha1.WorkspaceFeatureRestore)
+				workspacev1alpha1.WorkspaceFeatureRestore, workspacev1alpha1.WorkspaceFeatureCheckpoint)
 			task := bindingTestTask()
 			checkpoint := &corev1alpha1.WorkspaceCheckpointReference{
 				Name: "saved-workspace", UID: "checkpoint-uid", Digest: "sha256:" + strings.Repeat("b", 64),

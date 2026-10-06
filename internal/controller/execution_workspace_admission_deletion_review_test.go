@@ -88,7 +88,6 @@ func TestExecutionWorkspaceCoreAdmissionPrecedesAdapterStatus(t *testing.T) {
 		Build()
 	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}}
 	core := &ExecutionWorkspaceReconciler{Client: c, APIReader: c, RESTMapper: mapper}
-	adapter := &FakeExecutionWorkspaceReconciler{Client: c, APIReader: c}
 
 	if _, err := core.Reconcile(context.Background(), request); err != nil {
 		t.Fatalf("prepublish core admission condition: %v", err)
@@ -101,11 +100,6 @@ func TestExecutionWorkspaceCoreAdmissionPrecedesAdapterStatus(t *testing.T) {
 	if current.Spec.CoreAdmission != nil || condition == nil || condition.Status != metav1.ConditionTrue ||
 		condition.ObservedGeneration != current.Generation+1 {
 		t.Fatalf("pre-admission state = marker %#v, condition %#v", current.Spec.CoreAdmission, condition)
-	}
-	if result, err := adapter.Reconcile(context.Background(), request); err != nil {
-		t.Fatalf("adapter before spec marker: %v", err)
-	} else if result.RequeueAfter != workspaceRequeueInterval {
-		t.Fatalf("adapter RequeueAfter = %s, want %s", result.RequeueAfter, workspaceRequeueInterval)
 	}
 
 	if _, err := core.Reconcile(context.Background(), request); err != nil {
@@ -127,8 +121,9 @@ func TestExecutionWorkspaceCoreAdmissionPrecedesAdapterStatus(t *testing.T) {
 		t.Fatalf("workspace core admission = %#v at generation %d, want current", current.Spec.CoreAdmission, current.Generation)
 	}
 
-	if _, err := adapter.Reconcile(context.Background(), request); err != nil {
-		t.Fatalf("adapter after dual core admission: %v", err)
+	current.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
+	if err := c.Status().Update(context.Background(), current); err != nil {
+		t.Fatal(err)
 	}
 	if err := c.Get(context.Background(), request.NamespacedName, current); err != nil {
 		t.Fatalf("get admitted workspace: %v", err)

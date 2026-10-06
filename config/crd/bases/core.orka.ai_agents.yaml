@@ -1096,7 +1096,7 @@ spec:
                     description: |-
                       Workspace selects an ExecutionWorkspaceClass for an ACP agent Task.
                       Omit workspace for ordinary execution. Workspace dispatch requires the
-                      workspace provider API, ACP workspace dispatch, and matching provider flags.
+                      workspace provider API, ACP workspace dispatch, and an installed provider.
                     properties:
                       classRef:
                         description: ClassRef selects an immutable ExecutionWorkspaceClass

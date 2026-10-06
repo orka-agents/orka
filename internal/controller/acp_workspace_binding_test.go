@@ -25,7 +25,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
-	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
@@ -213,8 +212,10 @@ func TestSessionWorkspacePoolIdentityRejectsRuntimeProfileRotation(t *testing.T)
 	if rotatedPlan.PoolName != firstPlan.PoolName {
 		t.Fatalf("session workspace pool rotated with the runtime profile: first=%q rotated=%q", firstPlan.PoolName, rotatedPlan.PoolName)
 	}
-	if _, _, err := reconciler.ensureACPRuntimePool(ctx, task.Namespace, firstPlan); err != nil {
-		t.Fatalf("create session workspace RuntimePool: %v", err)
+	pool := runtimePoolForImageRotationTest(task.Namespace, "workspace-pool-uid", firstPlan)
+	pool.Spec.ExecutionWorkspace = testExternalPoolWorkspaceSpec(firstPlan.Workspace, "workspace", "workspace-uid")
+	if err := reconciler.Create(ctx, pool); err != nil {
+		t.Fatal(err)
 	}
 	if _, _, err := reconciler.ensureACPRuntimePool(ctx, task.Namespace, rotatedPlan); !errors.Is(err, store.ErrValidation) ||
 		!strings.Contains(err.Error(), "cannot rotate the runtime image or profile") {
@@ -270,8 +271,10 @@ func TestSessionWorkspacePoolIdentityRejectsWorkspaceSelectionRotation(t *testin
 	if rotatedPlan.PoolName != firstPlan.PoolName {
 		t.Fatalf("session workspace pool rotated with workspace selection: first=%q rotated=%q", firstPlan.PoolName, rotatedPlan.PoolName)
 	}
-	if _, _, err := reconciler.ensureACPRuntimePool(ctx, firstTask.Namespace, firstPlan); err != nil {
-		t.Fatalf("create session workspace RuntimePool: %v", err)
+	pool := runtimePoolForImageRotationTest(firstTask.Namespace, "workspace-pool-uid", firstPlan)
+	pool.Spec.ExecutionWorkspace = testExternalPoolWorkspaceSpec(firstPlan.Workspace, "workspace", "workspace-uid")
+	if err := reconciler.Create(ctx, pool); err != nil {
+		t.Fatal(err)
 	}
 	if _, _, err := reconciler.ensureACPRuntimePool(ctx, firstTask.Namespace, rotatedPlan); !errors.Is(err, store.ErrValidation) ||
 		!strings.Contains(err.Error(), "cannot change the workspace provider") {
@@ -376,7 +379,7 @@ func TestAgentExecutionBindingFreezesImmutableWorkspaceSessionUID(t *testing.T) 
 func TestResolveAgentExecutionCandidateKeepsPostSessionQuotaFailureTransient(t *testing.T) {
 	ctx := context.Background()
 	limit := int32(1)
-	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendSubstrate, func(f *acpClassFixture) {
+	fixture := newACPClassFixture(t, RuntimeProviderBackendSubstrate, func(f *acpClassFixture) {
 		f.provider.Status.SupportedFeatures = append(
 			f.provider.Status.SupportedFeatures,
 			workspacev1alpha1.WorkspaceFeatureSuspend,
@@ -386,10 +389,10 @@ func TestResolveAgentExecutionCandidateKeepsPostSessionQuotaFailureTransient(t *
 			workspacev1alpha1.WorkspaceOnDetachSuspend,
 			workspacev1alpha1.WorkspaceOnDetachDelete,
 		}
-		f.profile.Spec.Substrate.Suspend = &acpworkspacev1alpha1.SubstrateSuspendPolicy{
-			Mode: acpworkspacev1alpha1.SubstrateSuspendModeDataOnly,
+		f.profile.Spec.Substrate.Suspend = &SubstrateSuspendPolicy{
+			Mode: SubstrateSuspendModeDataOnly,
 		}
-		f.profile.Spec.Retention = &acpworkspacev1alpha1.RetentionPolicy{MaxSuspendedWorkspaces: &limit}
+		f.profile.Spec.Retention = &RetentionPolicy{MaxSuspendedWorkspaces: &limit}
 	})
 	task := bindingTestTask()
 	task.Spec.Execution = &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
@@ -635,7 +638,7 @@ func TestVerifiedSnapshotWorkspaceBindingRejectsTamperedIdentity(t *testing.T) {
 
 func TestVerifiedSnapshotWorkspaceBindingAcceptsLegacyClassOnDetachDigest(t *testing.T) {
 	task := acpClassTestTask()
-	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox)
 	reconciler := acpClassTestReconciler(t, fixture.objects()...)
 	resolved, err := reconciler.resolveACPWorkspaceClass(context.Background(), task)
 	if err != nil {
@@ -685,184 +688,9 @@ func TestVerifiedSnapshotWorkspaceBindingAcceptsLegacyClassOnDetachDigest(t *tes
 	}
 }
 
-func TestEnsureACPRuntimePoolCreatesWorkspaceBackedPool(t *testing.T) {
-	ctx := context.Background()
-	task := workspaceBindingTestTask(nil)
-	agent := bindingTestAgent()
-	reconciler, _ := newBindingTestReconciler(t, task, bindingTestNamespace())
-	configuration, err := resolveACPAgentSessionConfiguration(ctx, reconciler.Client, task, agent)
-	if err != nil {
-		t.Fatal(err)
-	}
-	plan, err := PlanACPRuntimeWithConfiguration(task, agent, reconciler.ACPRuntimeImages, configuration)
-	if err != nil {
-		t.Fatal(err)
-	}
-	binding, err := resolveTestACPWorkspaceBinding(t, task, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	plan, err = applyACPWorkspaceBindingToPlan(plan, binding)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	pool, preexisting, err := reconciler.ensureACPRuntimePool(ctx, task.Namespace, plan)
-	if err != nil {
-		t.Fatalf("ensureACPRuntimePool() error = %v", err)
-	}
-	if preexisting {
-		t.Fatal("new workspace RuntimePool reported as preexisting")
-	}
-	if pool.Spec.ExecutionWorkspace == nil ||
-		pool.Spec.ExecutionWorkspace.Provider != corev1alpha1.WorkspaceProviderAgentSandbox ||
-		pool.Spec.ExecutionWorkspace.BindingDigest != binding.BindingDigest {
-		t.Fatalf("pool executionWorkspace = %#v, want frozen binding", pool.Spec.ExecutionWorkspace)
-	}
-	if pool.Spec.Capacity == nil || pool.Spec.Capacity.MaxResidentSessions != 1 || pool.Spec.Capacity.MaxRunningPrompts != 1 {
-		t.Fatalf("pool capacity = %#v, want single-session 1/1", pool.Spec.Capacity)
-	}
-	if pool.Labels[acpRuntimeWorkspaceProviderLabel] != string(corev1alpha1.WorkspaceProviderAgentSandbox) {
-		t.Fatalf("pool labels = %#v, want workspace provider label", pool.Labels)
-	}
-	reattached, preexisting, err := reconciler.ensureACPRuntimePool(ctx, task.Namespace, plan)
-	if err != nil {
-		t.Fatalf("reattach workspace RuntimePool: %v", err)
-	}
-	if !preexisting || reattached.UID != pool.UID {
-		t.Fatalf("reattached pool = %s/%t, want existing UID %s", reattached.UID, preexisting, pool.UID)
-	}
-
-	// A frozen plain plan must never bind to a workspace-backed pool.
-	plainPlan := plan
-	plainPlan.Workspace = nil
-	if _, _, err := reconciler.ensureACPRuntimePool(ctx, task.Namespace, plainPlan); err == nil ||
-		!strings.Contains(err.Error(), "execution workspace binding does not match") {
-		t.Fatalf("mismatched pool binding error = %v, want exact-binding rejection", err)
-	}
-}
-
-func TestEnsureACPRuntimePoolValidatesCreateRaceWinner(t *testing.T) {
-	newFixture := func(t *testing.T) (*TaskReconciler, *corev1alpha1.Task, ACPRuntimePlan) {
-		t.Helper()
-		ctx := context.Background()
-		task := workspaceBindingTestTask(nil)
-		reconciler, _ := newBindingTestReconciler(t, task, bindingTestNamespace())
-		configuration, err := resolveACPAgentSessionConfiguration(ctx, reconciler.Client, task, bindingTestAgent())
-		if err != nil {
-			t.Fatal(err)
-		}
-		plan, err := PlanACPRuntimeWithConfiguration(task, bindingTestAgent(), reconciler.ACPRuntimeImages, configuration)
-		if err != nil {
-			t.Fatal(err)
-		}
-		binding, err := resolveTestACPWorkspaceBinding(t, task, "")
-		if err != nil {
-			t.Fatal(err)
-		}
-		plan, err = applyACPWorkspaceBindingToPlan(plan, binding)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return reconciler, task, plan
-	}
-
-	t.Run("rejects mismatched winner", func(t *testing.T) {
-		reconciler, task, plan := newFixture(t)
-		withWatch, ok := reconciler.Client.(client.WithWatch)
-		if !ok {
-			t.Fatal("binding test client does not support watch")
-		}
-		reconciler.Client = interceptor.NewClient(withWatch, interceptor.Funcs{
-			Create: func(ctx context.Context, _ client.WithWatch, object client.Object, options ...client.CreateOption) error {
-				pool, ok := object.(*corev1alpha1.RuntimePool)
-				if !ok {
-					return withWatch.Create(ctx, object, options...)
-				}
-				winner := pool.DeepCopy()
-				winner.Spec.ExecutionWorkspace = nil
-				if err := withWatch.Create(ctx, winner, options...); err != nil {
-					return err
-				}
-				return apierrors.NewAlreadyExists(
-					schema.GroupResource{Group: corev1alpha1.GroupVersion.Group, Resource: "runtimepools"}, pool.Name,
-				)
-			},
-		})
-
-		if _, _, err := reconciler.ensureACPRuntimePool(context.Background(), task.Namespace, plan); err == nil ||
-			!strings.Contains(err.Error(), "execution workspace binding does not match") {
-			t.Fatalf("create-race winner error = %v, want exact workspace-binding rejection", err)
-		}
-	})
-
-	t.Run("activates matching winner", func(t *testing.T) {
-		reconciler, task, plan := newFixture(t)
-		withWatch, ok := reconciler.Client.(client.WithWatch)
-		if !ok {
-			t.Fatal("binding test client does not support watch")
-		}
-		reconciler.Client = interceptor.NewClient(withWatch, interceptor.Funcs{
-			Create: func(ctx context.Context, _ client.WithWatch, object client.Object, options ...client.CreateOption) error {
-				pool, ok := object.(*corev1alpha1.RuntimePool)
-				if !ok {
-					return withWatch.Create(ctx, object, options...)
-				}
-				winner := pool.DeepCopy()
-				winner.Spec.DesiredReplicas = 0
-				if err := withWatch.Create(ctx, winner, options...); err != nil {
-					return err
-				}
-				return apierrors.NewAlreadyExists(
-					schema.GroupResource{Group: corev1alpha1.GroupVersion.Group, Resource: "runtimepools"}, pool.Name,
-				)
-			},
-		})
-
-		pool, preexisting, err := reconciler.ensureACPRuntimePool(context.Background(), task.Namespace, plan)
-		if err != nil {
-			t.Fatalf("activate matching create-race winner: %v", err)
-		}
-		if !preexisting || pool.Spec.DesiredReplicas != 1 {
-			t.Fatalf("create-race winner = preexisting:%t desired:%d, want true/1", preexisting, pool.Spec.DesiredReplicas)
-		}
-	})
-}
-
-func TestACPRuntimePoolWorkspaceMatchesPlanRequiresExactProviderFields(t *testing.T) {
-	digest := "sha256:" + strings.Repeat("9", 64)
-	plan := ACPRuntimePlan{Workspace: &ACPRuntimeWorkspaceBinding{
-		Provider: corev1alpha1.WorkspaceProviderSubstrate, BindingDigest: digest,
-		TemplateNamespace: substrateTestTemplateNamespace, TemplateName: substrateTestBaseTemplateName,
-	}}
-	pool := &corev1alpha1.RuntimePool{Spec: corev1alpha1.RuntimePoolSpec{
-		ExecutionWorkspace: &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
-			Provider: corev1alpha1.WorkspaceProviderSubstrate, BindingDigest: digest,
-			Substrate: &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
-				BaseTemplateNamespace: substrateTestTemplateNamespace, BaseTemplateName: substrateTestBaseTemplateName,
-			},
-		},
-	}}
-	if !acpRuntimePoolWorkspaceMatchesPlan(pool, plan) {
-		t.Fatal("exact Substrate workspace binding did not match")
-	}
-
-	pool.Spec.ExecutionWorkspace.Substrate.BaseTemplateName = "other-infrastructure"
-	if acpRuntimePoolWorkspaceMatchesPlan(pool, plan) {
-		t.Fatal("Substrate workspace binding ignored the infrastructure template name")
-	}
-	pool.Spec.ExecutionWorkspace.Substrate.BaseTemplateName = plan.Workspace.TemplateName
-	pool.Spec.ExecutionWorkspace.Substrate.BaseTemplateNamespace = acpWorkspaceTestOtherNamespace
-	if acpRuntimePoolWorkspaceMatchesPlan(pool, plan) {
-		t.Fatal("Substrate workspace binding ignored the infrastructure template namespace")
-	}
-}
-
-// The queue path must use the linked workspace's creation-time runtime
-// namespace after mutable controller configuration drifts. Validating the
-// current flag before loading the workspace would reject this continuation
-// before the frozen namespace can govern pool creation or reuse.
-func TestQueueACPRuntimeTaskUsesFrozenWorkspaceRuntimeNamespace(t *testing.T) {
+// Legacy workspace metadata preserves the frozen cleanup namespace even when
+// new dispatch is rejected after mutable controller configuration drifts.
+func TestQueueACPRuntimeTaskKeepsFrozenExternalWorkspaceNamespace(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	fixture := suspendableSubstrateFixture(t)
@@ -877,7 +705,6 @@ func TestQueueACPRuntimeTaskUsesFrozenWorkspaceRuntimeNamespace(t *testing.T) {
 	reconciler.DurableControlStore = controlStore
 	reconciler.ControllerEpochManager = NewControllerEpochManager(controlStore, "controller-test")
 	reconciler.ACPWorkspaceDispatchEnabled = true
-	reconciler.SubstrateEnabled = true
 	epochCtx, cancelEpoch := context.WithCancel(context.Background())
 	epochDone := make(chan error, 1)
 	go func() { epochDone <- reconciler.ControllerEpochManager.Start(epochCtx) }()
@@ -922,9 +749,8 @@ func TestQueueACPRuntimeTaskUsesFrozenWorkspaceRuntimeNamespace(t *testing.T) {
 	}
 	acknowledgeTestACPWorkspaceAttachment(t, reconciler, workspace)
 
-	// The current flag now aliases the Substrate template namespace and is
-	// invalid for new workspaces. This existing workspace remains valid
-	// because its provider-child namespace was frozen before the drift.
+	// The current flag aliases the native template namespace. The original
+	// namespace remains pinned while the legacy dispatch gate rejects new pools.
 	reconciler.ACPRuntimeNamespace = acpTestSubstrateNamespace
 	if err := reconciler.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
 		t.Fatal(err)
@@ -936,17 +762,14 @@ func TestQueueACPRuntimeTaskUsesFrozenWorkspaceRuntimeNamespace(t *testing.T) {
 	if err := reconciler.List(ctx, &pools); err != nil {
 		t.Fatal(err)
 	}
-	if len(pools.Items) != 1 || pools.Items[0].Spec.RuntimeNamespace != acpTestRuntimeNamespace {
-		t.Fatalf("workspace pools = %#v, want one pool in frozen runtime namespace %q", pools.Items, acpTestRuntimeNamespace)
+	if len(pools.Items) != 1 || pools.Items[0].Spec.RuntimeNamespace != acpTestRuntimeNamespace || !runtimePoolHasExternalWorkspace(&pools.Items[0]) {
+		t.Fatalf("pool lost frozen external workspace namespace: %#v", pools.Items)
 	}
-	if err := reconciler.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+	if err := reconciler.Get(ctx, client.ObjectKeyFromObject(workspace), workspace); err != nil {
 		t.Fatal(err)
 	}
-	if current.Status.Execution == nil || current.Status.Execution.State != corev1alpha1.TaskExecutionStateQueued {
-		t.Fatalf("queue status = %#v, want Queued", current.Status.Execution)
-	}
-	if _, err := reconciler.queueACPRuntimeTask(ctx, current, bindingTestAgent()); err != nil {
-		t.Fatalf("reuse pool with frozen workspace namespace: %v", err)
+	if got := workspace.Annotations[acpWorkspaceRuntimeNamespaceAnnotation]; got != acpTestRuntimeNamespace {
+		t.Fatalf("legacy cleanup namespace after rejection = %q, want %q", got, acpTestRuntimeNamespace)
 	}
 }
 
@@ -1983,7 +1806,7 @@ func TestProjectACPExecutionWorkspaceStatusRetriesOnIdentityReadFailure(t *testi
 
 func testResolvedACPWorkspaceClass(t *testing.T) *acpResolvedWorkspaceClass {
 	t.Helper()
-	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox)
 	r := acpClassTestReconciler(t, fixture.objects()...)
 	resolved, err := r.resolveACPWorkspaceClass(t.Context(), acpClassTestTask())
 	if err != nil {
@@ -1999,10 +1822,12 @@ func resolveTestACPWorkspaceBinding(t *testing.T, task *corev1alpha1.Task, sessi
 
 func installTestACPWorkspaceClass(t *testing.T, r *TaskReconciler) {
 	t.Helper()
-	if err := acpworkspacev1alpha1.AddToScheme(r.Scheme); err != nil {
+	if err := addACPFixtureAPIToScheme(r.Scheme); err != nil {
 		t.Fatal(err)
 	}
-	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox)
+	r.Client = authorizedACPFixtureClient{r.Client}
+	r.APIReader = r.Client
 	for _, obj := range []client.Object{fixture.class, fixture.provider, fixture.config, fixture.profile} {
 		if err := r.Create(t.Context(), obj); err != nil && !apierrors.IsAlreadyExists(err) {
 			t.Fatal(err)

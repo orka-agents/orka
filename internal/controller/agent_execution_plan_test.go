@@ -33,8 +33,6 @@ func TestPlanAgentExecutionMatrix(t *testing.T) {
 		mutateTask                  func(*corev1alpha1.Task)
 		mutateAgent                 func(*corev1alpha1.Agent)
 		objects                     []client.Object
-		agentSandboxEnabled         bool
-		substrateEnabled            bool
 		acpRuntimeEnabled           bool
 		acpWorkspaceDispatchEnabled bool
 		harnessV1Enabled            bool
@@ -203,7 +201,6 @@ func TestPlanAgentExecutionMatrix(t *testing.T) {
 		{
 			name:                        "workspace-backed agent task uses ACP RuntimePool when dispatch is enabled",
 			mutateTask:                  plannerWorkspaceTask(nil),
-			agentSandboxEnabled:         true,
 			acpRuntimeEnabled:           true,
 			acpWorkspaceDispatchEnabled: true,
 			wantPath:                    agentExecutionPathACP,
@@ -211,27 +208,16 @@ func TestPlanAgentExecutionMatrix(t *testing.T) {
 		{
 			name:                   "workspace-backed dispatch disabled fails closed",
 			mutateTask:             plannerWorkspaceTask(nil),
-			agentSandboxEnabled:    true,
 			acpRuntimeEnabled:      true,
 			wantPath:               agentExecutionPathRejected,
 			wantReason:             "acp-workspace-dispatch-enabled",
 			wantWorkspaceStatusErr: "acp-workspace-dispatch-enabled",
 		},
 		{
-			name:                        "workspace-backed agent task fails closed when agent-sandbox is disabled",
-			mutateTask:                  plannerWorkspaceTask(nil),
-			acpRuntimeEnabled:           true,
-			acpWorkspaceDispatchEnabled: true,
-			wantPath:                    agentExecutionPathRejected,
-			wantReason:                  "agent-sandbox-enabled",
-			wantWorkspaceStatusErr:      "agent-sandbox-enabled",
-		},
-		{
 			name: "workspace session reuse without sessionRef fails closed",
 			mutateTask: plannerWorkspaceTask(func(workspace *corev1alpha1.ExecutionWorkspaceSpec) {
 				workspace.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
 			}),
-			agentSandboxEnabled:         true,
 			acpRuntimeEnabled:           true,
 			acpWorkspaceDispatchEnabled: true,
 			wantPath:                    agentExecutionPathRejected,
@@ -247,7 +233,6 @@ func TestPlanAgentExecutionMatrix(t *testing.T) {
 				agent.Spec.Runtime.Type = corev1alpha1.AgentRuntimeCodex
 				agent.Spec.Runtime.ContractVersion = new(corev1alpha1.AgentRuntimeContractHarnessV1)
 			},
-			agentSandboxEnabled:         true,
 			acpRuntimeEnabled:           true,
 			acpWorkspaceDispatchEnabled: true,
 			harnessV1Enabled:            true,
@@ -270,8 +255,6 @@ func TestPlanAgentExecutionMatrix(t *testing.T) {
 
 			r := newUnitReconciler(scheme, tt.objects...)
 			installTestACPWorkspaceClass(t, r)
-			r.AgentSandboxEnabled = tt.agentSandboxEnabled
-			r.SubstrateEnabled = tt.substrateEnabled
 			r.ACPRuntimeEnabled = tt.acpRuntimeEnabled
 			r.ACPWorkspaceDispatchEnabled = tt.acpWorkspaceDispatchEnabled
 			r.HarnessV1Enabled = tt.harnessV1Enabled

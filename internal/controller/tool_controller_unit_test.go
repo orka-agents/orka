@@ -284,10 +284,10 @@ func TestToolReconcilerMCPSubstrateActorPublishesEndpoint(t *testing.T) {
 	}
 	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true, false}}
 	r := &ToolReconciler{
-		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
-		Scheme:           scheme,
-		HTTPClient:       srv.Client(),
-		SubstrateEnabled: true,
+		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:                   scheme,
+		HTTPClient:               srv.Client(),
+		SubstrateMCPToolsEnabled: true,
 		SubstrateConfig: SubstrateConfig{
 			RouterURL:      srv.URL,
 			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
@@ -381,10 +381,10 @@ func TestToolReconcilerMCPSubstrateActorPollsEndpointReadiness(t *testing.T) {
 	}
 	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true, false}}
 	r := &ToolReconciler{
-		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
-		Scheme:           scheme,
-		HTTPClient:       srv.Client(),
-		SubstrateEnabled: true,
+		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:                   scheme,
+		HTTPClient:               srv.Client(),
+		SubstrateMCPToolsEnabled: true,
 		SubstrateConfig: SubstrateConfig{
 			RouterURL:      srv.URL,
 			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
@@ -449,10 +449,10 @@ func TestToolReconcilerMCPSubstrateActorBootsRecreatedActor(t *testing.T) {
 	}
 	executor := &recordingToolWorkspaceExecutor{claimCreated: true}
 	r := &ToolReconciler{
-		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
-		Scheme:           scheme,
-		HTTPClient:       srv.Client(),
-		SubstrateEnabled: true,
+		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:                   scheme,
+		HTTPClient:               srv.Client(),
+		SubstrateMCPToolsEnabled: true,
 		SubstrateConfig: SubstrateConfig{
 			RouterURL:      srv.URL,
 			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
@@ -509,10 +509,10 @@ func TestToolReconcilerMCPSubstrateActorRetriesBootAfterWaitReadyFailure(t *test
 		waitReadyErrs: []error{errors.New("timed out waiting for actor readiness")},
 	}
 	r := &ToolReconciler{
-		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
-		Scheme:           scheme,
-		HTTPClient:       srv.Client(),
-		SubstrateEnabled: true,
+		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:                   scheme,
+		HTTPClient:               srv.Client(),
+		SubstrateMCPToolsEnabled: true,
 		SubstrateConfig: SubstrateConfig{
 			RouterURL:      srv.URL,
 			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
@@ -639,10 +639,10 @@ func TestToolReconcilerMCPSubstrateActorSeedsBootedAnnotationWithoutReboot(t *te
 	}
 	executor := &recordingToolWorkspaceExecutor{}
 	r := &ToolReconciler{
-		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
-		Scheme:           scheme,
-		HTTPClient:       srv.Client(),
-		SubstrateEnabled: true,
+		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:                   scheme,
+		HTTPClient:               srv.Client(),
+		SubstrateMCPToolsEnabled: true,
 		SubstrateConfig: SubstrateConfig{
 			RouterURL:      srv.URL,
 			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
@@ -690,10 +690,10 @@ func TestToolReconcilerMCPSubstrateActorRequiresEndpointReadiness(t *testing.T) 
 	}
 	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true, false}}
 	r := &ToolReconciler{
-		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
-		Scheme:           scheme,
-		HTTPClient:       srv.Client(),
-		SubstrateEnabled: true,
+		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:                   scheme,
+		HTTPClient:               srv.Client(),
+		SubstrateMCPToolsEnabled: true,
 		SubstrateConfig: SubstrateConfig{
 			RouterURL:      srv.URL,
 			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
@@ -761,10 +761,10 @@ func TestToolReconcilerMCPSubstrateActorReplacementIgnoresNonPooledAnnotationOwn
 	}
 	executor := &recordingToolWorkspaceExecutor{claimCreated: true}
 	r := &ToolReconciler{
-		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
-		Scheme:           scheme,
-		HTTPClient:       srv.Client(),
-		SubstrateEnabled: true,
+		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:                   scheme,
+		HTTPClient:               srv.Client(),
+		SubstrateMCPToolsEnabled: true,
 		SubstrateConfig: SubstrateConfig{
 			RouterURL:      srv.URL,
 			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
@@ -857,10 +857,10 @@ func TestToolReconcilerMCPSubstrateActorReplacementRetriesNonPooledCleanupAfterD
 		deleteErrs: []error{errors.New("temporary delete failure")},
 	}
 	r := &ToolReconciler{
-		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
-		Scheme:           scheme,
-		HTTPClient:       srv.Client(),
-		SubstrateEnabled: true,
+		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:                   scheme,
+		HTTPClient:               srv.Client(),
+		SubstrateMCPToolsEnabled: true,
 		SubstrateConfig: SubstrateConfig{
 			RouterURL:      srv.URL,
 			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
@@ -947,10 +947,10 @@ func TestToolReconcilerMCPSubstrateActorReplacementDeletesAnnotatedPooledActorBe
 	lease := newSubstrateMCPPoolActorLease(tool, defaultNS, oldActorID, oldActorID)
 	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true, false}}
 	r := &ToolReconciler{
-		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template, lease).Build(),
-		Scheme:           scheme,
-		HTTPClient:       srv.Client(),
-		SubstrateEnabled: true,
+		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template, lease).Build(),
+		Scheme:                   scheme,
+		HTTPClient:               srv.Client(),
+		SubstrateMCPToolsEnabled: true,
 		SubstrateConfig: SubstrateConfig{
 			RouterURL:      srv.URL,
 			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
@@ -1038,10 +1038,10 @@ func TestToolReconcilerMCPSubstrateActorFailedReplacementPreservesPreviousEndpoi
 	}
 	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true, false}}
 	r := &ToolReconciler{
-		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
-		Scheme:           scheme,
-		HTTPClient:       srv.Client(),
-		SubstrateEnabled: true,
+		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:                   scheme,
+		HTTPClient:               srv.Client(),
+		SubstrateMCPToolsEnabled: true,
 		SubstrateConfig: SubstrateConfig{
 			RouterURL:      srv.URL,
 			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
@@ -1126,10 +1126,10 @@ func TestToolReconcilerMCPSubstrateActorUsesPoolRef(t *testing.T) {
 	}
 	executor := &recordingToolWorkspaceExecutor{claimCreated: true}
 	r := &ToolReconciler{
-		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template, pool).Build(),
-		Scheme:           scheme,
-		HTTPClient:       srv.Client(),
-		SubstrateEnabled: true,
+		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template, pool).Build(),
+		Scheme:                   scheme,
+		HTTPClient:               srv.Client(),
+		SubstrateMCPToolsEnabled: true,
 		SubstrateConfig: SubstrateConfig{
 			RouterURL:      srv.URL,
 			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
@@ -1265,9 +1265,9 @@ func TestToolReconcilerMCPSubstrateActorWaitsForLegacyTaskCleanup(t *testing.T) 
 		Client: fake.NewClientBuilder().WithScheme(scheme).
 			WithStatusSubresource(&corev1alpha1.Tool{}, &corev1alpha1.Task{}).
 			WithObjects(tool, template, pool, legacyTask, legacyLease).Build(),
-		Scheme:           scheme,
-		HTTPClient:       srv.Client(),
-		SubstrateEnabled: true,
+		Scheme:                   scheme,
+		HTTPClient:               srv.Client(),
+		SubstrateMCPToolsEnabled: true,
 		SubstrateConfig: SubstrateConfig{
 			RouterURL:      srv.URL,
 			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
@@ -1370,10 +1370,10 @@ func TestToolReconcilerMCPSubstrateActorBootsPrecreatedPooledActor(t *testing.T)
 	}
 	executor := &recordingToolWorkspaceExecutor{}
 	r := &ToolReconciler{
-		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template, pool).Build(),
-		Scheme:           scheme,
-		HTTPClient:       srv.Client(),
-		SubstrateEnabled: true,
+		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template, pool).Build(),
+		Scheme:                   scheme,
+		HTTPClient:               srv.Client(),
+		SubstrateMCPToolsEnabled: true,
 		SubstrateConfig: SubstrateConfig{
 			RouterURL:      srv.URL,
 			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
@@ -1478,9 +1478,9 @@ func TestToolReconcilerMCPSubstrateActorMigratesPooledLeaseOutsideTarget(t *test
 			WithStatusSubresource(&corev1alpha1.Tool{}).
 			WithObjects(tool, template, pool, oldLease).
 			Build(),
-		Scheme:           scheme,
-		HTTPClient:       srv.Client(),
-		SubstrateEnabled: true,
+		Scheme:                   scheme,
+		HTTPClient:               srv.Client(),
+		SubstrateMCPToolsEnabled: true,
 		SubstrateConfig: SubstrateConfig{
 			RouterURL:      srv.URL,
 			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
@@ -1593,9 +1593,9 @@ func TestToolReconcilerMCPSubstrateActorProbesPoolOnLeaseCollision(t *testing.T)
 			WithStatusSubresource(&corev1alpha1.Tool{}).
 			WithObjects(tool, template, pool, holder, busyLease).
 			Build(),
-		Scheme:           scheme,
-		HTTPClient:       srv.Client(),
-		SubstrateEnabled: true,
+		Scheme:                   scheme,
+		HTTPClient:               srv.Client(),
+		SubstrateMCPToolsEnabled: true,
 		SubstrateConfig: SubstrateConfig{
 			RouterURL:      srv.URL,
 			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
@@ -2203,7 +2203,7 @@ func TestToolReconcilerMCPSubstrateActorRejectsCrossNamespaceTemplateWhenIsolati
 	r := &ToolReconciler{
 		Client:                    fake.NewClientBuilder().WithScheme(scheme).WithObjects(tool, template).Build(),
 		Scheme:                    scheme,
-		SubstrateEnabled:          true,
+		SubstrateMCPToolsEnabled:  true,
 		EnforceNamespaceIsolation: true,
 	}
 	r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
@@ -2237,9 +2237,9 @@ func TestToolReconcilerMCPSubstrateActorRejectsUnapprovedTemplate(t *testing.T) 
 	}
 	var executorFactoryCalled bool
 	r := &ToolReconciler{
-		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
-		Scheme:           scheme,
-		SubstrateEnabled: true,
+		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:                   scheme,
+		SubstrateMCPToolsEnabled: true,
 		SubstrateConfig: SubstrateConfig{
 			RouterURL:      "http://atenet-router.ate-system.svc",
 			ActorDNSSuffix: "actors.resources.substrate.ate.dev",
@@ -2290,9 +2290,9 @@ func TestToolReconcilerMCPSubstrateActorRejectsInvalidAuthConfig(t *testing.T) {
 	}
 	var executorFactoryCalled bool
 	r := &ToolReconciler{
-		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
-		Scheme:           scheme,
-		SubstrateEnabled: true,
+		Client:                   fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:                   scheme,
+		SubstrateMCPToolsEnabled: true,
 		SubstrateConfig: SubstrateConfig{
 			RouterURL:      "http://atenet-router.ate-system.svc",
 			ActorDNSSuffix: "actors.resources.substrate.ate.dev",

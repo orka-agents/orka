@@ -8,10 +8,12 @@ package v1alpha1
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
@@ -179,5 +181,37 @@ func TestRuntimePoolRegisteredWithScheme(t *testing.T) {
 	}
 	if _, ok := obj.(*RuntimePool); !ok {
 		t.Fatalf("scheme.New(RuntimePool) returned %T", obj)
+	}
+}
+
+func TestRuntimePoolExternalWorkspaceRoundTripAndDeepCopy(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	pool := &RuntimePool{Spec: RuntimePoolSpec{ExecutionWorkspace: &RuntimePoolExecutionWorkspaceSpec{
+		Provider: "third-party.example", BindingDigest: digest,
+		WorkspaceRef:      &workspacev1alpha1.ObjectIdentityReference{Name: "workspace", UID: "workspace-uid"},
+		ParametersRef:     &workspacev1alpha1.TypedObjectReference{Group: "third-party.example", Kind: "Profile", Name: "profile"},
+		ParametersBinding: &workspacev1alpha1.ImmutableObjectBinding{Name: "profile", UID: "profile-uid", Generation: 1, ProfileHash: digest},
+		Workload:          &RuntimePoolWorkspaceWorkloadSpec{ContractVersion: workspacev1alpha1.LifecycleContractV1, ProtocolVersion: RuntimePoolProtocolHarnessV2, RequiredFeatures: []workspacev1alpha1.ExecutionWorkspaceFeature{workspacev1alpha1.WorkspaceFeatureRestore}},
+		RestoreFrom:       &workspacev1alpha1.WorkloadCheckpointReference{Name: "checkpoint", UID: "checkpoint-uid", Digest: digest},
+	}}}
+	encoded, err := json.Marshal(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded := &RuntimePool{}
+	if err := json.Unmarshal(encoded, decoded); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(decoded.Spec.ExecutionWorkspace, pool.Spec.ExecutionWorkspace) {
+		t.Fatal("generic workload or checkpoint pins were lost in the API roundtrip")
+	}
+	copy := pool.DeepCopy()
+	copy.Spec.ExecutionWorkspace.WorkspaceRef.UID = "replaced-workspace"
+	copy.Spec.ExecutionWorkspace.ParametersBinding.UID = "replaced-profile"
+	copy.Spec.ExecutionWorkspace.Workload.RequiredFeatures[0] = workspacev1alpha1.WorkspaceFeatureCheckpoint
+	copy.Spec.ExecutionWorkspace.RestoreFrom.UID = "replaced-checkpoint"
+	if pool.Spec.ExecutionWorkspace.WorkspaceRef.UID != "workspace-uid" || pool.Spec.ExecutionWorkspace.ParametersBinding.UID != "profile-uid" ||
+		pool.Spec.ExecutionWorkspace.Workload.RequiredFeatures[0] != workspacev1alpha1.WorkspaceFeatureRestore || pool.Spec.ExecutionWorkspace.RestoreFrom.UID != "checkpoint-uid" {
+		t.Fatal("RuntimePool DeepCopy aliased frozen workspace or checkpoint pins")
 	}
 }

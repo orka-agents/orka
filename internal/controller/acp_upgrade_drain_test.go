@@ -32,8 +32,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-const acpUpgradeDrainTestBaseTemplateName = "orka-codex"
-
 func TestACPUpgradeDrainOptionsBindManifestFlags(t *testing.T) {
 	options := DefaultACPUpgradeDrainOptions()
 	flags := flag.NewFlagSet("upgrade-drain", flag.ContinueOnError)
@@ -197,115 +195,6 @@ func TestACPUpgradeDrainCoordinatorDrainsPreservedOldGenerationInstance(t *testi
 	}
 	if supervisor.drainCallCount() != 1 {
 		t.Fatalf("old-generation drain calls = %d, want 1", supervisor.drainCallCount())
-	}
-}
-
-func TestACPUpgradeDrainCoordinatorDrainsSubstrateActorWithoutPod(t *testing.T) {
-	scheme := upgradeDrainTestScheme(t)
-	pool, pod, auth, supervisor := upgradeDrainRuntimePoolFixture(t)
-	pool.Spec.ExecutionWorkspace = &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
-		Provider:      corev1alpha1.WorkspaceProviderSubstrate,
-		BindingDigest: "sha256:" + strings.Repeat("a", 64),
-		Substrate: &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
-			BaseTemplateNamespace: substrateTestTemplateNamespace,
-			BaseTemplateName:      acpUpgradeDrainTestBaseTemplateName,
-		},
-	}
-	const runtimeNamespace = "runtime-system"
-	pool.Spec.RuntimeNamespace = runtimeNamespace
-	pool.Status.ActiveInstance.PodNamespace = runtimeNamespace
-	auth.Namespace = runtimeNamespace
-	auth.Name = runtimePoolChildName(runtimePoolResourceName(pool.Namespace, pool.Name), "auth-e7-"+strings.Repeat("a", 24))
-	auth.UID = "bound-auth-secret-uid"
-	immutable := true
-	auth.Immutable = &immutable
-	auth.Labels = map[string]string{
-		runtimePoolManagedByLabel:       runtimePoolManagedByLabelValue,
-		runtimePoolApplicationLabel:     runtimePoolApplicationLabelValue,
-		runtimePoolKeyLabel:             runtimePoolKey(pool.Namespace, pool.Name),
-		runtimePoolNameLabel:            pool.Name,
-		runtimePoolNamespaceLabel:       pool.Namespace,
-		runtimePoolUIDLabel:             string(pool.UID),
-		runtimePoolNetworkRoleLabel:     "provider-client",
-		runtimePoolAuthLabel:            booleanTrueValue,
-		runtimePoolCredentialEpochLabel: "7",
-	}
-	auth.Data[runtimePoolBootstrapNonceKey] = []byte(strings.Repeat("n", 32))
-	auth.Data[runtimePoolBootstrapSigningSeedKey] = []byte(strings.Repeat("s", 32))
-	if pool.Annotations == nil {
-		pool.Annotations = map[string]string{}
-	}
-	pool.Annotations[runtimePoolPrivateAuthSecretBindingAnnotation(7)] = auth.Name + "/" + string(auth.UID)
-	const actorID = "acp-ws-codex-actor"
-	routeHost := actorID + ".actors.local"
-	instanceUID := substrateActorInstanceUID(actorID)
-	providerGeneration := pod.Annotations[runtimePoolProviderTokenGenerationAnnotation]
-	pool.Status.ActiveInstance.PodName = actorID
-	pool.Status.ActiveInstance.PodAddress = routeHost
-	pool.Status.ActiveInstance.PodUID = instanceUID
-	pool.Status.ActiveInstance.ProviderTokenGeneration = providerGeneration
-	pool.Status.ActiveInstance.RuntimeInstanceID = runtimePoolRuntimeInstanceID(types.UID(instanceUID), "boot-upgrade")
-	syntheticPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{UID: types.UID(instanceUID)}}
-	supervisor.probe = runtimePoolValidProbe(pool, syntheticPod, "boot-upgrade", false)
-	supervisor.expectedEndpoint = "http://" + routeHost
-
-	fence := store.ControllerEpochFence{Name: store.DefaultControllerEpochName, Epoch: 7, HolderID: "controller-7"}
-	epochRecord, epochLease := upgradeDrainEpochObjects(fence)
-	kubeClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&corev1alpha1.RuntimePool{}).
-		WithObjects(pool, auth, epochRecord, epochLease).
-		Build()
-	coordinator := NewACPUpgradeDrainCoordinator(
-		kubeClient,
-		kubeClient,
-		fixedUpgradeDrainEpochSource{fence: fence},
-		&fakeUpgradeDrainEpochStore{current: store.ControllerEpoch{Name: fence.Name, Epoch: fence.Epoch, HolderID: fence.HolderID}},
-		ACPUpgradeDrainBarrierObserverFunc(func(context.Context) (ACPUpgradeDrainBarrierSnapshot, error) {
-			return ACPUpgradeDrainBarrierSnapshot{}, nil
-		}),
-		NewACPAdmissionGate(),
-		testUpgradeDrainOptions(),
-	)
-	coordinator.SupervisorClient = supervisor
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if err := coordinator.Trigger(ctx); err != nil {
-		t.Fatalf("Trigger() error = %v", err)
-	}
-	if supervisor.drainCallCount() != 1 {
-		t.Fatalf("Substrate actor drain calls = %d, want 1", supervisor.drainCallCount())
-	}
-}
-
-func TestACPUpgradeDrainRequiresStoppedSubstrateLifecycleWithoutActiveInstance(t *testing.T) {
-	pool, _, _, _ := upgradeDrainRuntimePoolFixture(t)
-	pool.Spec.ExecutionWorkspace = &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
-		Provider: corev1alpha1.WorkspaceProviderSubstrate,
-		Substrate: &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
-			BaseTemplateNamespace: substrateTestTemplateNamespace,
-			BaseTemplateName:      acpUpgradeDrainTestBaseTemplateName,
-		},
-	}
-	pool.Status.ActiveInstance = nil
-	pool.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
-	fence := store.ControllerEpochFence{Epoch: pool.Status.ControllerEpoch}
-	coordinator := &ACPUpgradeDrainCoordinator{}
-
-	err := coordinator.observeAndDrainRuntimePool(context.Background(), fence, pool, &ACPUpgradeDrainSnapshot{})
-	if err == nil || !strings.Contains(err.Error(), "does not prove the provider workspace is stopped") {
-		t.Fatalf("Stopping Substrate pool without active instance error = %v, want teardown proof rejection", err)
-	}
-	pool.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopped
-	pool.Status.ObservedGeneration = pool.Generation - 1
-	if err := coordinator.observeAndDrainRuntimePool(context.Background(), fence, pool, &ACPUpgradeDrainSnapshot{}); err == nil ||
-		!strings.Contains(err.Error(), "instead of current generation") {
-		t.Fatalf("stale Stopped Substrate pool error = %v, want generation-fence rejection", err)
-	}
-	pool.Status.ObservedGeneration = pool.Generation
-	if err := coordinator.observeAndDrainRuntimePool(context.Background(), fence, pool, &ACPUpgradeDrainSnapshot{}); err != nil {
-		t.Fatalf("fully stopped Substrate pool rejected: %v", err)
 	}
 }
 

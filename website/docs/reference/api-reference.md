@@ -104,10 +104,11 @@ copied to Task status or delivered to the ACP process tree.
 
 The durable ACP attempt is exposed in `status.execution`. Workspace validation and publication use `status.delivery`, including publication ID, repository identities, branch, starting/remote/tree/commit SHAs, artifact digest, and optional PR receipt. A Task is not delivered merely because the model reports success; require a terminal verified delivery outcome.
 
-`Task.spec.execution.workspace` runs the agent inside an external sandbox provider instead of a
-plain runtime Pod. It is off unless the operator turns it on: `--acp-workspace-dispatch-enabled`
-plus the flag for the provider you want (`--agent-sandbox-enabled` or `--substrate-enabled`).
-Without them the field is rejected rather than ignored. See
+`Task.spec.execution.workspace.classRef` selects an administrator-managed class
+backed by a separately deployed workspace provider. The operator must enable
+`--enable-workspace-provider-api` and `--acp-workspace-dispatch-enabled`, install the
+required admission webhooks, and admit the registered provider and class. Otherwise
+the request fails closed. Provider-specific Task selectors have been removed. See
 [Agent Sandbox](../concepts/agent-sandbox.md) or [Agent Substrate](../concepts/substrate.md) for
 the two supported providers, and [Configuration](configuration.md#workspace-providers)
 for the flags and the class-based lifecycle.

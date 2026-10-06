@@ -28,7 +28,7 @@ type ExecutionSpec struct {
 
 	// Workspace selects an ExecutionWorkspaceClass for an ACP agent Task.
 	// Omit workspace for ordinary execution. Workspace dispatch requires the
-	// workspace provider API, ACP workspace dispatch, and matching provider flags.
+	// workspace provider API, ACP workspace dispatch, and an installed provider.
 	// +optional
 	Workspace *ExecutionWorkspaceSpec `json:"workspace,omitempty"`
 }
@@ -55,14 +55,16 @@ const (
 	WorkspaceCleanupPolicyRetain WorkspaceCleanupPolicy = "retain"
 )
 
-// WorkspaceProvider selects the execution workspace backend.
-// +kubebuilder:validation:Enum=agent-sandbox;substrate
+// WorkspaceProvider identifies a registered execution workspace controller.
+// Resolution against an ExecutionWorkspaceProvider validates installed support.
+// +kubebuilder:validation:MinLength=1
+// +kubebuilder:validation:MaxLength=253
 type WorkspaceProvider string
 
 const (
-	// WorkspaceProviderAgentSandbox uses the Kubernetes SIG agent-sandbox backend.
+	// WorkspaceProviderAgentSandbox is the legacy snapshot identity; new bindings use registered controller names.
 	WorkspaceProviderAgentSandbox WorkspaceProvider = "agent-sandbox"
-	// WorkspaceProviderSubstrate uses the Agent Substrate actor backend.
+	// WorkspaceProviderSubstrate identifies retained Substrate MCP Tools and legacy snapshots.
 	WorkspaceProviderSubstrate WorkspaceProvider = "substrate"
 )
 

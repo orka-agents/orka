@@ -37,7 +37,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/record"
-	sandboxextv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -74,7 +73,6 @@ func newTestScheme() *runtime.Scheme {
 	_ = batchv1.AddToScheme(s)
 	_ = coordinationv1.AddToScheme(s)
 	_ = rbacv1.AddToScheme(s)
-	_ = sandboxextv1beta1.AddToScheme(s)
 	return s
 }
 
@@ -5302,7 +5300,6 @@ func TestHandlePending_ClasslessWorkspaceFailsBeforeJobBackend(t *testing.T) {
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
 	}
 	r := newUnitReconciler(scheme, task, agent)
-	r.AgentSandboxEnabled = true
 	r.ACPRuntimeEnabled = true
 
 	result, err := r.handlePending(context.Background(), task)
@@ -5457,7 +5454,6 @@ func TestHandlePending_ExecutionWorkspaceDispatchDisabledFailsClosed(t *testing.
 	}
 	r := newUnitReconciler(scheme, task, agent)
 	installTestACPWorkspaceClass(t, r)
-	r.AgentSandboxEnabled = true
 	r.ACPRuntimeEnabled = true
 
 	result, err := r.handlePending(context.Background(), task)

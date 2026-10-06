@@ -74,8 +74,8 @@ type ToolReconciler struct {
 	// SkipSSRFValidation disables SSRF protection for testing. Do NOT set to true in production.
 	SkipSSRFValidation bool
 
-	// SubstrateEnabled enables durable MCP tool actors.
-	SubstrateEnabled            bool
+	// SubstrateMCPToolsEnabled enables durable MCP tool actors.
+	SubstrateMCPToolsEnabled    bool
 	SubstrateConfig             SubstrateConfig
 	EnforceNamespaceIsolation   bool
 	WorkspaceProviderAPIEnabled bool
@@ -288,7 +288,7 @@ func (r *ToolReconciler) validateToolHTTPAuth(ctx context.Context, tool *corev1a
 }
 
 func (r *ToolReconciler) validateSubstrateMCPTool(ctx context.Context, tool *corev1alpha1.Tool) error {
-	if !r.SubstrateEnabled {
+	if !r.SubstrateMCPToolsEnabled {
 		return fmt.Errorf("MCP substrateActor requires substrate to be enabled")
 	}
 	actor := tool.Spec.MCP.SubstrateActor

@@ -212,18 +212,7 @@ func (r *TaskReconciler) rejectUnsupportedACPWorkspacePlan(ctx context.Context, 
 	if binding == nil {
 		return agentExecutionPlan{}, false
 	}
-	switch binding.Provider {
-	case corev1alpha1.WorkspaceProviderAgentSandbox:
-		if !r.AgentSandboxEnabled {
-			err := fmt.Errorf("execution workspace provider agent-sandbox is disabled; enable --agent-sandbox-enabled")
-			return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err), true
-		}
-	case corev1alpha1.WorkspaceProviderSubstrate:
-		if !r.SubstrateEnabled {
-			err := fmt.Errorf("execution workspace provider substrate is disabled; enable --substrate-enabled")
-			return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err), true
-		}
-	}
+
 	if !r.ACPWorkspaceDispatchEnabled {
 		err := fmt.Errorf("workspace-provider-backed RuntimeSession dispatch is disabled; enable --acp-workspace-dispatch-enabled to host this Task's RuntimeSession in a %s workspace", binding.Provider)
 		return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err), true
@@ -350,19 +339,13 @@ func agentHarnessV1InheritedAuthorityUnsupportedReason(agent *corev1alpha1.Agent
 // recovery reach it through the queue chokepoint, so a flag disabled after
 // the binding froze can never create new RuntimePool demand.
 func (r *TaskReconciler) frozenWorkspaceDispatchDisabledReason(binding *ACPRuntimeWorkspaceBinding) string {
+	if binding != nil && (binding.Class == nil || binding.Class.ControllerName == "") {
+		return "legacy execution workspace bindings are cleanup-only and must retire under their original controller before upgrade"
+	}
 	if binding == nil {
 		return ""
 	}
-	switch binding.Provider {
-	case corev1alpha1.WorkspaceProviderAgentSandbox:
-		if !r.AgentSandboxEnabled {
-			return "execution workspace provider agent-sandbox is disabled; enable --agent-sandbox-enabled"
-		}
-	case corev1alpha1.WorkspaceProviderSubstrate:
-		if !r.SubstrateEnabled {
-			return "execution workspace provider substrate is disabled; enable --substrate-enabled"
-		}
-	}
+
 	if !r.ACPWorkspaceDispatchEnabled {
 		return "workspace-provider-backed RuntimeSession dispatch is disabled; enable --acp-workspace-dispatch-enabled"
 	}

@@ -62,7 +62,7 @@ func (r *ExecutionWorkspaceProviderReconciler) Reconcile(ctx context.Context, re
 				Type:               string(workspacev1alpha1.ConditionProviderReady),
 				Status:             metav1.ConditionFalse,
 				Reason:             "ReferencesRemain",
-				Message:            "provider deletion is blocked by bound pools or workspaces",
+				Message:            "provider deletion is blocked by bound pools, classes, workspaces or checkpoints",
 				ObservedGeneration: provider.Generation,
 			}); err != nil {
 				return ctrl.Result{}, err
@@ -224,6 +224,15 @@ func (r *ExecutionWorkspaceProviderReconciler) providerHasReferences(
 	for i := range workspaces.Items {
 		binding := workspaces.Items[i].Spec.ProviderBinding
 		if binding.Name == provider.Name && (binding.UID == "" || binding.UID == provider.UID) {
+			return true, nil
+		}
+	}
+	var checkpoints workspacev1alpha1.ExecutionWorkspaceCheckpointList
+	if err := reader.List(ctx, &checkpoints); err != nil {
+		return false, fmt.Errorf("list workspace checkpoints: %w", err)
+	}
+	for _, checkpoint := range checkpoints.Items {
+		if checkpoint.Labels[workspaceCheckpointProviderNameLabel] == provider.Name {
 			return true, nil
 		}
 	}
