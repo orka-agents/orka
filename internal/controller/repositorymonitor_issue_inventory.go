@@ -170,6 +170,12 @@ func (r *RepositoryMonitorReconciler) processIssueInventoryRun(ctx context.Conte
 					(existing.WorkflowPhase == repositoryMonitorIssuePhaseBlocked && !repositoryMonitorIssueInventoryBlockCanClear(existing.SkipReason))) {
 				// Pause holds the next action. Preserve the current Task or its
 				// completed result, including failures that release job budgets.
+				// Keep its snapshot too, so edits are rediscovered on unpause
+				// instead of attaching the old result to new requirements.
+				item.SnapshotDigest = existing.SnapshotDigest
+				item.Title = existing.Title
+				item.Body = existing.Body
+				item.GitHubUpdatedAt = existing.GitHubUpdatedAt
 				item.WorkflowPhase = existing.WorkflowPhase
 				item.LastActionID = existing.LastActionID
 				item.LastActionKind = existing.LastActionKind

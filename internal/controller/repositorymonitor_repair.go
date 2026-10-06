@@ -193,6 +193,9 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 		}
 		return false, 0, err
 	}
+	if command.Intent == repositoryMonitorRetiredAutomergeIntent {
+		return true, 0, r.retireRepositoryMonitorAutomergeCommand(ctx, monitor, command, run)
+	}
 	if item.SkipReason == repositoryMonitorIssueSkipStoppedByCommand && command.Intent != repositoryMonitorCommandIntentStop && command.Intent != repositoryMonitorCommandIntentResume {
 		if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "", repositoryMonitorCommandActionKind(command.Intent), repositoryMonitorWorkActionStatusBlocked, "stopped", "", item.SkipReason); err != nil {
 			return true, 0, err
@@ -886,7 +889,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepairPolicy(ctx context.
 	// Accepted commands retain their existing run and retry budget.
 	cursor = ""
 	for {
-		commands, next, err := r.Store.ListCommandEvents(ctx, store.CommandEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: pr.Number, Status: "processed", Limit: 200, Cursor: cursor})
+		commands, next, err := r.Store.ListCommandEvents(ctx, store.CommandEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: pr.Number, Status: repositoryMonitorCommandProcessed, Limit: 200, Cursor: cursor})
 		if err != nil {
 			return "", 0, 0, err
 		}

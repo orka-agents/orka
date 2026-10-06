@@ -122,7 +122,7 @@ func (h *Handlers) recordRepositoryMonitorPauseRejection(c fiber.Ctx, monitor *c
 		MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name,
 		ItemKind: target.Kind, ItemNumber: int64(target.Number), ItemSHA: target.HeadSHA,
 		EventType: "pause_label_rejected", Actor: "github-webhook",
-		Summary:      "Pause-label change rejected: sender permission is not allowed for this monitor",
+		Summary:      "Pause-label reconciliation trigger rejected: sender permission is not allowed for this monitor",
 		MetadataJSON: string(metadata),
 	}
 	if err := h.repositoryMonitorStore.CreateMonitorEvent(c.Context(), event); err != nil {

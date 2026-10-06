@@ -18,9 +18,12 @@ const (
 )
 
 const (
-	repositoryMonitorTriggerLabelCommand = "github_label_command"
-	repositoryMonitorCommandRetryDelay   = 30 * time.Second
-	repositoryMonitorCommandMaxRetries   = 3
+	repositoryMonitorTriggerLabelCommand           = "github_label_command"
+	repositoryMonitorCommandRetryDelay             = 30 * time.Second
+	repositoryMonitorCommandMaxRetries             = 3
+	repositoryMonitorCommandProcessed              = "processed"
+	repositoryMonitorRetiredAutomergeIntent        = "automerge"
+	repositoryMonitorAutomergeCommandRetiredReason = "automerge_command_retired"
 )
 
 func (r *RepositoryMonitorReconciler) enqueueAcceptedRepositoryMonitorCommands(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (bool, error) {
@@ -34,6 +37,12 @@ func (r *RepositoryMonitorReconciler) enqueueAcceptedRepositoryMonitorCommands(c
 		for i := range commands {
 			command := commands[i]
 			if strings.TrimSpace(command.Kind) == "" || command.Number == 0 {
+				continue
+			}
+			if command.Intent == repositoryMonitorRetiredAutomergeIntent {
+				if err := r.retireRepositoryMonitorAutomergeCommand(ctx, monitor, &command, nil); err != nil {
+					return queued, err
+				}
 				continue
 			}
 			runID := repositoryMonitorCommandRunIDFromCommand(command.ID)
@@ -71,6 +80,17 @@ func (r *RepositoryMonitorReconciler) enqueueAcceptedRepositoryMonitorCommands(c
 		}
 		cursor = next
 	}
+}
+
+func (r *RepositoryMonitorReconciler) retireRepositoryMonitorAutomergeCommand(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, run *store.MonitorRun) error {
+	if err := r.terminalizeRepositoryMonitorFailedCommand(ctx, monitor, *command, run, repositoryMonitorAutomergeCommandRetiredReason); err != nil {
+		return err
+	}
+	now := time.Now()
+	command.Status = repositoryMonitorCommandProcessed
+	command.ProcessedAt = &now
+	command.Error = repositoryMonitorAutomergeCommandRetiredReason
+	return r.Store.UpdateCommandEvent(ctx, command)
 }
 
 //nolint:gocyclo // Command recovery must settle existing runs before permitting the next queued run.
@@ -226,7 +246,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCommandWorkActionTerminal
 	switch action.Status {
 	case repositoryMonitorWorkActionStatusSucceeded, repositoryMonitorWorkActionStatusFailed, repositoryMonitorWorkActionStatusBlocked, repositoryMonitorWorkActionStatusCancelled:
 		now := time.Now()
-		command.Status = "processed"
+		command.Status = repositoryMonitorCommandProcessed
 		command.ProcessedAt = &now
 		command.Error = firstNonEmptyWorkflow(action.Error, action.BlockedReason)
 		if err := r.Store.UpdateCommandEvent(ctx, &command); err != nil {

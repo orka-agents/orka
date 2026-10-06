@@ -20,6 +20,10 @@ RepositoryMonitor runs a durable issue-to-PR loop from `orka:implement` or the e
 
 Managed workflows with `review.publish.enabled: true` publish the commit status `orka/<namespace>/<monitor-name>/ready`. Require this status alongside your CI and approving-review rules. GitHub's per-PR auto-merge setting owns merging. Orka never enables it or calls the merge endpoint; when it is disabled, the PR stays open and ready.
 
+`spec.suspend` pauses background monitor runs; queued and manual runs can still finish. Use `orka:pause` to block a specific issue or PR and its readiness.
+
+Before disabling readiness publication or deleting a monitor, remove or replace its required status in GitHub branch protection. GitHub commit statuses persist after the monitor is removed, and Orka does not currently revoke them as part of monitor deletion or publication disablement.
+
 ## Safety model
 
 - Issue and PR text is untrusted input.
@@ -31,6 +35,7 @@ Managed workflows with `review.publish.enabled: true` publish the commit status 
 - Repair commands execute only when `spec.repair.enabled` is true and remain bounded by `maxRepairsPerPR` and `maxRepairsPerHead` when configured.
 - Plans and implementation are bound to issue content digests; human edits make downstream artifacts stale.
 - `orka:pause` blocks further workflow actions and readiness. A running bounded Task may finish, including publication. Removing the label queues fresh reconciliation; unresolved plans still block implementation.
+- Policy labels follow current GitHub repository state. `triggers.github.labels.requireActorPermission` authorizes command and webhook intake; it does not override GitHub permissions for editing policy labels. A rejected pause-label webhook does not queue a run, but later inventory still observes the repository's labels.
 
 ## CLI quick reference
 
