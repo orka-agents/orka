@@ -136,6 +136,14 @@ func TestACPDispatcherCapturesNativeSessionBeforeDeletion(t *testing.T) {
 				require.Equal(t, 1, captureCalls)
 				require.Equal(t, 1, deleteCalls)
 				require.True(t, taskScopedRuntimeSessionCleanupComplete(fixture.currentTask(t, ctx)))
+				current := fixture.currentTask(t, ctx)
+				recoveryFence, err := fixture.dispatcher.Epochs.CurrentFence(ctx)
+				require.NoError(t, err)
+				restarted := &ACPDispatcher{Client: fixture.kubeClient, APIReader: fixture.kubeClient, Store: failing,
+					ResultStore: persistence, EventStore: persistence, Snapshots: persistence, Sessions: continuity, Epochs: fixture.dispatcher.Epochs}
+				require.NoError(t, restarted.recoverStaleTask(ctx, current, recoveryFence), "the committed native settlement receipt must resume without an in-memory capture")
+				require.Equal(t, 1, captureCalls, "committed native settlement must not recapture")
+				require.Equal(t, 1, deleteCalls)
 				// A subsequent real Task receives native continuation only once,
 				// with no canonical conversation replay in its prompt.
 				continued := fixture.task.DeepCopy()
@@ -212,12 +220,13 @@ func TestACPDispatcherUnsupportedNativeCapturePreservesContinuityPolicy(t *testi
 			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
 			snapshot := storetest.NativeSessionSnapshot(t, "native imported context")
-			deletes := 0
+			captures, deletes := 0, 0
 			fixture := newTaskScopedCreateConflictFixture(t, ctx, "unsupported-"+name, "77777777-7777-7777-7777-777777777777",
 				func(profile harnessv2.RuntimeProfile, digest harnessv2.ProfileDigest, _ *client.Client) *httptest.Server {
 					return newDispatcherRuntimeServerWithOptions(t, profile, digest, dispatcherRuntimeServerOptions{
 						nativeSnapshot: &snapshot,
 						onNativeCapture: func(harnessv2.CaptureNativeSessionRequest) error {
+							captures++
 							return &harnessv2.ClientError{StatusCode: http.StatusUnprocessableEntity, Code: harnessv2.ErrorCodeNativeCaptureUnsupported}
 						},
 						onDelete: func(harnessv2.DeleteRuntimeSessionRequest) { deletes++ },
@@ -259,6 +268,11 @@ func TestACPDispatcherUnsupportedNativeCapturePreservesContinuityPolicy(t *testi
 				require.Equal(t, 1, deletes, "proven stopped unsupported state may be retired")
 				require.Nil(t, control.Lease)
 				require.Equal(t, corev1alpha1.TaskPhaseSucceeded, fixture.currentTask(t, ctx).Status.Phase)
+				fence, err := fixture.dispatcher.Epochs.CurrentFence(ctx)
+				require.NoError(t, err)
+				require.NoError(t, fixture.dispatcher.recoverStaleTask(ctx, fixture.currentTask(t, ctx), fence))
+				require.Equal(t, 1, captures, "the durable unsupported fallback must not retry capture")
+				require.Equal(t, 1, deletes)
 			}
 		})
 	}

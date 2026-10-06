@@ -866,6 +866,9 @@ func (d *ACPDispatcher) finalizeTaskSessionResult(
 			"namespace", task.Namespace, "task", task.Name)
 		return nil
 	}
+	if err := d.guardNativeSessionSettlement(ctx, task, session, session.NativeCapture); err != nil {
+		return err
+	}
 	execution, err := taskSessionProjectionExecution(task, corev1alpha1.TaskExecutionStatus{
 		State: corev1alpha1.TaskExecutionStateSucceeded, Outcome: corev1alpha1.TaskExecutionOutcomeSucceeded,
 		Attempt: task.Status.Execution.Attempt, PromptID: task.Status.Execution.PromptID,
@@ -912,6 +915,9 @@ func (d *ACPDispatcher) finalizeTaskSessionUnknown(ctx context.Context, task *co
 	if session == nil || session.Turn == nil || session.finalized {
 		return nil
 	}
+	if err := d.guardNativeSessionSettlement(ctx, task, session, nil); err != nil {
+		return err
+	}
 	execution, err := taskSessionProjectionExecution(task, corev1alpha1.TaskExecutionStatus{
 		State: corev1alpha1.TaskExecutionStateOutcomeUnknown, Outcome: corev1alpha1.TaskExecutionOutcomeOutcomeUnknown,
 		Attempt: task.Status.Execution.Attempt, PromptID: task.Status.Execution.PromptID,
@@ -950,6 +956,9 @@ func (d *ACPDispatcher) finalizeTaskSessionMarker(
 ) error {
 	if session == nil || session.Turn == nil || session.finalized {
 		return nil
+	}
+	if err := d.guardNativeSessionSettlement(ctx, task, session, nil); err != nil {
+		return err
 	}
 	var err error
 	execution, err = taskSessionProjectionExecution(task, execution)
@@ -1060,6 +1069,7 @@ func (d *ACPDispatcher) removeRuntimeSessionBinding(sessionUID string) {
 func (d *ACPDispatcher) retireRecoveredRuntimeSessionBinding(task *corev1alpha1.Task, attempt *store.PromptAttempt, binding ACPRuntimeSessionBinding) {
 	sessionUID := strings.TrimSpace(binding.SessionUID)
 	reusable := task != nil && attempt != nil && sessionUID != "" &&
+		!binding.RecreationRequired &&
 		attempt.ExecutionState == store.PromptExecutionSucceeded &&
 		(attempt.DeliveryState == store.PromptDeliveryNotRequested || attempt.DeliveryState == store.PromptDeliveryReadValidated) &&
 		task.Spec.SessionRef != nil && task.Annotations[nativeCaptureIntentAnnotation] == "" &&

@@ -1405,6 +1405,11 @@ func TestSupervisorACPHelper(t *testing.T) {
 					os.Exit(4)
 				}
 			}
+			if strings.HasPrefix(mode, "native-prompt-error") {
+				writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(promptID), "error": map[string]any{"code": -32603, "message": "native provider prompt failed"}})
+				promptID = nil
+				continue
+			}
 			if mode == toolBurstRPCErrorMode {
 				writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "method": acp.MethodSessionUpdate, "params": map[string]any{
 					"sessionId": sessionID, "update": map[string]any{

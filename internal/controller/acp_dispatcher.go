@@ -1462,6 +1462,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		if !runtimeSessionCleanupPending {
 			return nil
 		}
+		if err := d.guardNativeSessionSettlement(context.WithoutCancel(ctx), task, sessionExecution, nil); err != nil {
+			return err
+		}
 		if err := finalizePreparedRuntimeSession(); err != nil {
 			return err
 		}
@@ -1470,6 +1473,15 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 		if runtimeSessionSettlementRequired && sessionExecution != nil && sessionExecution.Turn != nil && !sessionExecution.finalized {
 			return fmt.Errorf("%w: RuntimeSession deletion requires durable Session terminal settlement", store.ErrNotReady)
+		}
+		if nativeSessionsSupported && sessionExecution != nil && !task.Status.Execution.RuntimeSessionRecreationPending {
+			sessionExecution.Binding.RecreationRequired = true
+			d.setRuntimeSessionBinding(sessionExecution.Binding)
+			if err := d.patchExecution(context.WithoutCancel(ctx), task, func(execution *corev1alpha1.TaskExecutionStatus) {
+				execution.RuntimeSessionRecreationPending = true
+			}); err != nil {
+				return err
+			}
 		}
 		cleanupErr := d.deleteRuntimeSession(
 			context.WithoutCancel(ctx), runtimeClient, createRequest.RuntimeSessionID, task, runtimeFence, reason,
@@ -1800,6 +1812,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	}
 	if err := d.patchExecution(ctx, task, func(status *corev1alpha1.TaskExecutionStatus) {
 		status.State = corev1alpha1.TaskExecutionStateSubmitting
+		if nativeSessionsSupported && sessionExecution != nil {
+			status.RuntimeSessionRecreationPending = true
+		}
 		status.LastTransitionTime = nowMeta()
 	}); err != nil {
 		return err
@@ -1873,8 +1888,15 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 						return err
 					}
 					accepted = true
+					if nativeSessionsSupported && sessionExecution != nil {
+						sessionExecution.Binding.RecreationRequired = true
+						d.setRuntimeSessionBinding(sessionExecution.Binding)
+					}
 					if err := d.patchExecution(ctx, task, func(status *corev1alpha1.TaskExecutionStatus) {
 						status.State = corev1alpha1.TaskExecutionStateRunning
+						if nativeSessionsSupported && sessionExecution != nil {
+							status.RuntimeSessionRecreationPending = true
+						}
 						status.Reason = ""
 						status.Message = ""
 						status.LastTransitionTime = nowMeta()
@@ -2198,6 +2220,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			Reason: "WorkspaceValidationFailed", Message: validationMessage, LastTransitionTime: nowMeta(),
 		}
 		_ = d.patchDeliveryStatus(ctx, task, status)
+		if err := d.guardNativeSessionSettlement(ctx, task, sessionExecution, nil); err != nil {
+			return err
+		}
 		_ = cleanupRuntimeSession("workspace_validation_failed")
 		if sessionExecution != nil {
 			d.forgetRuntimeSessionBinding(sessionExecution.Binding.SessionUID)

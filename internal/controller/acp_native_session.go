@@ -20,6 +20,37 @@ const nativeInstallUnresolvedAnnotation = "orka.ai/native-session-install-unreso
 
 var errNativeSessionInstallUnresolved = fmt.Errorf("%w: native Session installation outcome is unresolved; original runtime home and frozen plan require receipt reconciliation", store.ErrNotReady)
 var errNativeSessionRuntimeUnsupported = fmt.Errorf("%w: staged native Session requires a Codex runtime advertising native sessions", store.ErrConflict)
+var errNativeSessionCheckpointRequired = fmt.Errorf("%w: native Session continuity requires a checkpoint before canonical settlement; exact lease and runtime evidence retained", store.ErrNotReady)
+
+// Appending a terminal marker or result without the corresponding native state
+// would make the previous checkpoint diverge from canonical history.
+func (d *ACPDispatcher) guardNativeSessionSettlement(ctx context.Context, task *corev1alpha1.Task, session *acpTaskSession, checkpoint *store.NativeSessionRecord) error {
+	if session == nil || session.Turn == nil || session.finalized || session.Turn.Turn.State == store.SessionTurnFinalized || checkpoint != nil {
+		return nil
+	}
+	pending := task.Annotations[nativeCaptureIntentAnnotation] != ""
+	if session.Turn.SkipTranscriptAppend && !pending {
+		return nil
+	}
+	native := session.NativeSession
+	if native == nil {
+		var err error
+		native, err = d.loadTaskNativeSession(ctx, task, &session.Turn.Lease.Session)
+		if err != nil {
+			return err
+		}
+	}
+	if native == nil && pending {
+		var intent nativeCaptureIntent
+		if json.Unmarshal([]byte(task.Annotations[nativeCaptureIntentAnnotation]), &intent) == nil && intent.Unsupported {
+			return nil
+		}
+	}
+	if native != nil || pending {
+		return errNativeSessionCheckpointRequired
+	}
+	return nil
+}
 
 func (d *ACPDispatcher) retainNativeSessionInstall(ctx context.Context, task *corev1alpha1.Task, metadata harnessv2.MutationMetadata) error {
 	body, err := json.Marshal(metadata)

@@ -174,11 +174,11 @@ func matchesTerminalNativeTask(state *sessionState, metadata harnessv2.MutationM
 		metadata.TaskAttempt == state.prompt.request.Metadata.TaskAttempt
 }
 
-// A successful native turn belongs to the controller until it saves the
-// capture or explicitly deletes the runtime. Drain and shutdown may stop its
-// writer, but cannot discard its private state in the capture admission gap.
+// A restored conversation and a successful native turn belong to the controller
+// until it saves the capture or explicitly deletes the runtime. Drain and
+// shutdown may stop the writer, but cannot discard failed continuation evidence.
 func retainsNativeCaptureEvidence(state *sessionState) bool {
-	if state.nativeCapture != nil || state.nativeInstallUnresolved != nil {
+	if state.descriptor.NativeRestoration != nil || state.nativeCapture != nil || state.nativeInstallUnresolved != nil {
 		return true
 	}
 	if !state.supportsNativeSessions || state.profile.ProviderKind != providerKindCodex || state.prompt == nil || state.prompt.settlement == nil ||

@@ -454,10 +454,11 @@ func handleSupervisorNativeLoad(writer *bufio.Writer, id, params json.RawMessage
 		writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(id), "error": map[string]any{"code": -32602, "message": "native load did not find installed current-cwd rollout and MCP"}})
 		return
 	}
-	if mode := os.Getenv("SUPERVISOR_ACP_HELPER_MODE"); strings.HasPrefix(mode, "native-load-reject") {
-		if strings.HasSuffix(mode, "-held") {
-			signal.Ignore(syscall.SIGTERM)
-		}
+	mode := os.Getenv("SUPERVISOR_ACP_HELPER_MODE")
+	if strings.HasSuffix(mode, "-held") {
+		signal.Ignore(syscall.SIGTERM)
+	}
+	if strings.HasPrefix(mode, "native-load-reject") {
 		writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(id), "error": map[string]any{"code": -32602, "message": "native load rejected"}})
 		return
 	}

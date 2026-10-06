@@ -3927,6 +3927,7 @@ type dispatcherRuntimeServerOptions struct {
 	// already created it.
 	rejectCreate            func(request harnessv2.CreateRuntimeSessionRequest) (status int, response *harnessv2.ErrorResponse, resident bool)
 	onDelete                func(harnessv2.DeleteRuntimeSessionRequest)
+	deleteFailure           func() *harnessv2.ErrorResponse
 	nativeSnapshot          *harnessv2.NativeSessionSnapshot
 	nativeInstallUnresolved bool
 	onNativeCapture         func(harnessv2.CaptureNativeSessionRequest) error
@@ -4179,6 +4180,12 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 		_ = json.NewDecoder(r.Body).Decode(&request)
 		if options.onDelete != nil {
 			options.onDelete(request)
+		}
+		if options.deleteFailure != nil {
+			if failure := options.deleteFailure(); failure != nil {
+				writeDispatcherJSONStatus(w, http.StatusConflict, *failure)
+				return
+			}
 		}
 		descriptorMu.Lock()
 		descriptor = harnessv2.RuntimeSessionDescriptor{}

@@ -1239,7 +1239,8 @@ func taskScopedRuntimeSessionCleanupCompleteForUID(task *corev1alpha1.Task, task
 		return true
 	}
 	if task.DeletionTimestamp.IsZero() && task.Spec.SessionRef != nil &&
-		(task.Spec.Workspace == nil || task.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentWrite) {
+		(task.Spec.Workspace == nil || task.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentWrite) &&
+		task.Annotations[nativeCaptureIntentAnnotation] == "" && !task.Status.Execution.RuntimeSessionRecreationPending {
 		// A live read Session retains its conversation process between Tasks.
 		// Deleting Tasks must keep their frozen authority until Session cleanup
 		// has recorded an exact runtime cleanup receipt.
@@ -1685,7 +1686,8 @@ func (d *ACPDispatcher) reconcileRecoveredTaskScopedRuntimeSession(
 ) (bool, error) {
 	if task != nil && task.Spec.SessionRef != nil &&
 		(task.Spec.Workspace == nil || task.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentWrite) &&
-		task.Annotations[nativeCaptureIntentAnnotation] == "" {
+		task.Annotations[nativeCaptureIntentAnnotation] == "" &&
+		(task.Status.Execution == nil || !task.Status.Execution.RuntimeSessionRecreationPending) {
 		return true, nil
 	}
 	return d.reconcileRecoveredRuntimeSession(ctx, task, taskUID, deleteAfterSettlement, nil)
