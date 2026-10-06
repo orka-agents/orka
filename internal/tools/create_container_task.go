@@ -224,6 +224,9 @@ func (t *CreateContainerTaskTool) executeCoordination(ctx context.Context, args 
 			return classifyChatK8sErr(err)
 		}
 	}
+	// The owned child inherits requestedBy; the seal binds it to the child's
+	// UID so connector-backed execution can trust it, as delegate_task does.
+	sealTaskCreate(ctx, GetToolContext(ctx), task)
 	return ChatToolSuccess(map[string]any{nameField: task.Name, namespaceField: task.Namespace, phaseField: taskPhasePendingString, messageField: taskCreatedMsg(task.Spec.Schedule)})
 }
 
