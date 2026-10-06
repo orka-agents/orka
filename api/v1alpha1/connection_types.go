@@ -38,9 +38,14 @@ const (
 	// because its provider is missing or invalid.
 	ConnectionStateError = "Error"
 
-	ConnectionReasonProviderResolved = "ProviderResolved"
-	ConnectionReasonProviderMissing  = "ProviderMissing"
-	ConnectionReasonProviderInvalid  = "ProviderInvalid"
+	ConnectionReasonProviderResolved   = "ProviderResolved"
+	ConnectionReasonProviderMissing    = "ProviderMissing"
+	ConnectionReasonProviderInvalid    = "ProviderInvalid"
+	ConnectionReasonProviderReadFailed = "ProviderReadFailed"
+	// ConnectionReasonProviderUnavailable marks ScopesGranted as Unknown
+	// while the provider is missing, invalid, or unreadable: scopes cannot
+	// be judged against a provider that is not resolved.
+	ConnectionReasonProviderUnavailable = "ProviderUnavailable"
 
 	// Ready condition reasons. The reason, not status.state, is the durable
 	// record of the link, so a transient provider outage cannot erase it.
