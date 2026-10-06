@@ -449,3 +449,26 @@ func TestKubernetesResolverConnectionModeJudgesArgumentsFirst(t *testing.T) {
 		t.Fatalf("accepted arguments err = %v calls = %d", err, source.calls)
 	}
 }
+
+// TestKubernetesResolverConnectionModeRefusesUnboundDestinationsFirst covers
+// Tools whose requests could not reach the exact curated destination: an
+// MCP-backed Tool and a templated URL are refused before the credential
+// source runs.
+func TestKubernetesResolverConnectionModeRefusesUnboundDestinationsFirst(t *testing.T) {
+	f := newConnectionModeFixture(t)
+	source := &fakeConnectionSource{credential: ConnectionCredential{AccessToken: "gho", Mode: corev1alpha1.ConnectionModeReadOnly}}
+	resolver := &KubernetesResolver{Reader: f.newReader().Build(), Connections: source}
+	mcp := f.base
+	mcp.MCPBacked = true
+	if _, err := resolver.Resolve(context.Background(), mcp); err == nil || !strings.Contains(err.Error(), "MCP-backed") {
+		t.Fatalf("MCP-backed err = %v", err)
+	}
+	templated := f.base
+	templated.Tool.URL = "https://api.github.com/search/issues?q={{q}}"
+	if _, err := resolver.Resolve(context.Background(), templated); err == nil || !strings.Contains(err.Error(), "template") {
+		t.Fatalf("templated err = %v", err)
+	}
+	if source.calls != 0 {
+		t.Fatalf("credential source calls = %d, want none", source.calls)
+	}
+}

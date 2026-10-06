@@ -1923,17 +1923,14 @@ func main() {
 	// it, and that finalizer must be released by a running controller even
 	// after an operator disables connectors.
 	{
-		knownBuiltinTools := map[string]struct{}{}
-		for _, name := range tools.KnownBuiltInToolNames() {
-			knownBuiltinTools[name] = struct{}{}
-		}
 		if err := (&controller.ConnectorProviderReconciler{
 			Client:    mgr.GetClient(),
 			APIReader: mgr.GetAPIReader(),
 			Scheme:    mgr.GetScheme(),
+			// Looked up at reconcile time, not snapshotted here: tools such as
+			// the proxy PR tools are registered later in startup.
 			KnownBuiltinTool: func(name string) bool {
-				_, ok := knownBuiltinTools[name]
-				return ok
+				return slices.Contains(tools.KnownBuiltInToolNames(), name)
 			},
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "ConnectorProvider")
