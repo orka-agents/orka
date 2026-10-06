@@ -361,7 +361,11 @@ Repair Tasks are exact-head write Tasks: `workspace.ref` and `workspace.expected
 
 ## GitHub merge readiness
 
-Managed workflows with `review.publish.enabled: true` publish the commit status `orka/<namespace>/<monitor-name>/ready` on the exact PR head. Require this status context together with your normal CI and approving-review rules. The forge credential needs commit-status write permission, such as OAuth `repo:status` or `repo`; a GitHub App is not required. Reserve this context for Orka. Orka excludes only status IDs persisted in its mutation audit when evaluating CI, including peer monitors, so readiness cannot wait on itself. Check-run IDs are never excluded.
+Managed workflows with `review.publish.enabled: true` publish the commit status `orka/<namespace>/<monitor-name>/ready` on the exact PR head. Require this status context together with your normal CI and approving-review rules. A GitHub App is not required.
+
+The controller uses `forgeCredentialRef` for both status writes and readiness reads, including PR inventory and check runs. For private repositories, classic personal access tokens and OAuth tokens need the [`repo` scope](https://docs.github.com/en/enterprise-cloud@latest/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps). `repo:status` alone cannot read private PRs or check runs. Fine-grained credentials need Commit statuses write, [Pull requests read](https://docs.github.com/en/rest/pulls/pulls#list-pull-requests), and [Checks read](https://docs.github.com/en/rest/checks/runs#list-check-runs-for-a-git-reference); publishing reviews also requires Pull requests write.
+
+Reserve this context for Orka. Orka excludes only status IDs persisted in its mutation audit when evaluating CI, including peer monitors, so readiness cannot wait on itself. Check-run IDs are never excluded.
 
 The status stays pending or failed while review, validation, or repair is incomplete. Statuses are commit-scoped: when multiple open PRs on the monitored base branch share a head SHA, all must be ready before that commit receives success. A paused or unreviewed peer blocks the shared status. A new head requires new evidence. Repair defaults to at most five attempts per PR and two per head; explicit lower limits are honored. Workflow polling observes CI and completed Tasks without requiring another command label.
 

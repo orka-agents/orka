@@ -23,6 +23,7 @@ const (
 	repositoryMonitorStatusSuccess       = "success"
 	repositoryMonitorStatusFailure       = "failure"
 	repositoryMonitorStatusSubmitting    = "submitting"
+	repositoryMonitorMergeableStateDirty = "dirty"
 	repositoryMonitorReadinessOperation  = "readiness_status"
 	repositoryMonitorReadinessTargetKind = "commit"
 	repositoryMonitorReadinessSuccess    = "Orka workflow evidence is current. GitHub controls required approvals and merging."
@@ -105,7 +106,16 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReadyOutcome(ctx context.
 	if repositoryMonitorAutomergeRepairStateBlocks(item.RepairState) {
 		return repositoryMonitorStatusPending, "Repair is in progress.", nil
 	}
-	if pr.MergeableState == "dirty" {
+	if item.LastVerdict == repositoryMonitorReviewVerdictNeedsChanges && item.LastReviewedHeadSHA == pr.HeadSHA {
+		eligible, err := r.repositoryMonitorNeedsChangesRepairEligible(ctx, monitor, pr, item)
+		if err != nil {
+			return "", "", err
+		}
+		if !eligible {
+			return repositoryMonitorStatusFailure, "Review requires changes that automation cannot repair.", nil
+		}
+	}
+	if pr.MergeableState == repositoryMonitorMergeableStateDirty {
 		return repositoryMonitorStatusPending, "Waiting for pull request merge conflicts to be resolved.", nil
 	}
 	if item.LastVerdict != repositoryMonitorReviewVerdictPassed || item.LastReviewedHeadSHA != pr.HeadSHA {
@@ -136,6 +146,41 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReadyOutcome(ctx context.
 		return repositoryMonitorStatusPending, "Waiting for repository CI to pass.", nil
 	}
 	return repositoryMonitorStatusSuccess, repositoryMonitorReadinessSuccess, nil
+}
+
+func (r *RepositoryMonitorReconciler) repositoryMonitorNeedsChangesRepairEligible(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest, item *store.MonitorItem) (bool, error) {
+	owner, repo, err := security.ParseGitHubRepositoryURL(monitor.Spec.RepoURL)
+	if err != nil {
+		return false, err
+	}
+	intent := repositoryMonitorCommandIntentFix
+	if pr.MergeableState == repositoryMonitorMergeableStateDirty {
+		intent = repositoryMonitorCommandIntentUpdateBranch
+	}
+	reason, _, _, err := r.repositoryMonitorRepairPolicy(ctx, monitor, owner+"/"+repo, pr, "", intent)
+	if err != nil || reason != "" {
+		return false, err
+	}
+	if intent == repositoryMonitorCommandIntentUpdateBranch {
+		return true, nil
+	}
+	// Automatic selection prefers failed CI, even if review findings cannot
+	// be repaired. Both intents share the same repair policy and budget.
+	ci, err := r.repositoryMonitorCheckCI(ctx, monitor, pr.HeadSHA)
+	if err != nil {
+		return false, err
+	}
+	if ci.reason == repositoryMonitorCINotGreen {
+		return true, nil
+	}
+	if item.LastReviewID == "" {
+		return false, nil
+	}
+	review, err := r.Store.GetReviewRecord(ctx, monitor.Namespace, item.LastReviewID)
+	if err != nil {
+		return false, err
+	}
+	return review.HeadSHA == pr.HeadSHA && review.Repairable, nil
 }
 
 // GitHub statuses belong to commits, not PRs. Aggregate every outcome across

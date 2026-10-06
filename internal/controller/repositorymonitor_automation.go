@@ -30,7 +30,7 @@ func (r *RepositoryMonitorReconciler) tryRepositoryMonitorAutomaticRepair(ctx co
 		return true, nil
 	}
 	intent := ""
-	if pr.MergeableState == "dirty" {
+	if pr.MergeableState == repositoryMonitorMergeableStateDirty {
 		intent = repositoryMonitorCommandIntentUpdateBranch
 	} else {
 		if monitor.Spec.Agents.Repairer == nil || strings.TrimSpace(monitor.Spec.Agents.Repairer.Name) == "" {
@@ -97,7 +97,7 @@ func (r *RepositoryMonitorReconciler) queueRepositoryMonitorWorkflowPoll(ctx con
 	if repositoryMonitorSuspended(monitor) || !repositoryMonitorManagedWorkflow(monitor) || !repositoryMonitorPullRequestsEnabled(monitor.Spec) {
 		return nil
 	}
-	items, _, err := r.Store.ListMonitorItems(ctx, store.MonitorItemFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, State: repositoryMonitorItemStateOpen, Limit: 1})
+	items, _, err := r.Store.ListMonitorItems(ctx, store.MonitorItemFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, State: repositoryMonitorItemStateOpen, Limit: 1})
 	if err != nil {
 		return err
 	}

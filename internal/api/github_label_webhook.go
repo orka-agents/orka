@@ -433,12 +433,12 @@ func (h *Handlers) createRepositoryMonitorEventRunAudit(c fiber.Ctx, monitor *co
 		MonitorNamespace: monitor.Namespace,
 		MonitorName:      monitor.Name,
 		RunID:            run.ID,
-		ItemKind:         repositoryMonitorTargetKindPullRequest,
+		ItemKind:         target.Kind,
 		ItemNumber:       int64(target.Number),
 		ItemSHA:          target.HeadSHA,
 		EventType:        eventType,
 		Actor:            "github-webhook",
-		Summary:          fmt.Sprintf("Exact pull request event queued repository monitor run for PR #%d", target.Number),
+		Summary:          fmt.Sprintf("GitHub %s event queued repository monitor run for %s #%d", payload.Action, strings.ReplaceAll(target.Kind, "_", " "), target.Number),
 		MetadataJSON:     string(metadataJSON),
 	}); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to record repository monitor event run audit: %v", err))

@@ -25,8 +25,10 @@ func TestRepositoryMonitorWorkflowPollCooldownTracksPullRequestInventory(t *test
 		recentCount  int
 		priorPR      bool
 		wantPoll     bool
+		onlyIssues   bool
 	}{
 		{name: "issue_only", recentKind: repositoryMonitorIssueKind, recentNumber: 42, recentCount: 1, wantPoll: true},
+		{name: "open_issues_without_pull_requests", recentKind: repositoryMonitorIssueKind, recentNumber: 42, recentCount: 1, onlyIssues: true},
 		{name: "commit_only", recentKind: "commit", recentCount: 1, wantPoll: true},
 		{name: "pull_request_inventory", recentKind: repositoryMonitorPullRequestKind, recentCount: 1},
 		{name: "pull_request_target", recentKind: repositoryMonitorPullRequestKind, recentNumber: 1, recentCount: 1},
@@ -64,7 +66,11 @@ func TestRepositoryMonitorWorkflowPollCooldownTracksPullRequestInventory(t *test
 			}))
 			t.Cleanup(server.Close)
 			r := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: db, GitHubAPIBaseURL: server.URL}
-			if err := db.UpsertMonitorItem(t.Context(), &store.MonitorItem{MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 1, State: repositoryMonitorItemStateOpen, HeadSHA: "head1"}); err != nil {
+			itemKind := repositoryMonitorPullRequestKind
+			if tc.onlyIssues {
+				itemKind = repositoryMonitorIssueKind
+			}
+			if err := db.UpsertMonitorItem(t.Context(), &store.MonitorItem{MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: itemKind, Number: 1, State: repositoryMonitorItemStateOpen, HeadSHA: "head1"}); err != nil {
 				t.Fatal(err)
 			}
 			now := time.Now()

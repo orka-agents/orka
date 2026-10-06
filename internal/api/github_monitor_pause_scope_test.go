@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -230,6 +231,24 @@ func TestGitHubWebhookPausePolicyScope(t *testing.T) {
 				}
 				if tc.wantQueued && (runs[0].Trigger != "pause_label_event" || runs[0].TargetKind != kind || runs[0].TargetNumber != 12 || tc.pullRequest && runs[0].TargetSHA != githubWebhookTestHeadSHA) {
 					t.Fatalf("pause queued the wrong target: %+v", runs[0])
+				}
+				events, _, err := db.ListMonitorEvents(t.Context(), store.MonitorEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, ItemKind: kind, ItemNumber: 12, EventType: "pause_label_changed", Limit: 10})
+				if err != nil || len(events) != wantRuns {
+					t.Fatalf("pause audits for %s=%+v, want %d, err=%v", kind, events, wantRuns, err)
+				}
+				if tc.wantQueued {
+					kindName, otherKind, wantSHA := "issue", repositoryMonitorTargetKindPullRequest, ""
+					if tc.pullRequest {
+						kindName, otherKind, wantSHA = "pull request", repositoryMonitorTargetKindIssue, githubWebhookTestHeadSHA
+					}
+					wantSummary := fmt.Sprintf("GitHub %s event queued repository monitor run for %s #12", action, kindName)
+					if events[0].RunID != runs[0].ID || events[0].ItemSHA != wantSHA || events[0].Summary != wantSummary {
+						t.Fatalf("pause audit described the wrong target: %+v", events[0])
+					}
+					wrongKindEvents, _, err := db.ListMonitorEvents(t.Context(), store.MonitorEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, ItemKind: otherKind, ItemNumber: 12, EventType: "pause_label_changed", Limit: 10})
+					if err != nil || len(wrongKindEvents) != 0 {
+						t.Fatalf("pause audit appeared under %s: %+v, err=%v", otherKind, wrongKindEvents, err)
+					}
 				}
 				if monitor.Spec.Suspend != nil && *monitor.Spec.Suspend {
 					var current corev1alpha1.RepositoryMonitor
