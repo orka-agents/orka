@@ -48,6 +48,10 @@ func (r *ConnectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		}
 		return ctrl.Result{}, err
 	}
+	// The status as read, before any pass mutates it: the write decision
+	// compares against this, so a change made only to ScopesGranted is
+	// persisted rather than mistaken for no change.
+	before := connection.Status.DeepCopy()
 	if !connection.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, nil
 	}
@@ -73,7 +77,7 @@ func (r *ConnectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		providerResolved.Status = metav1.ConditionUnknown
 		providerResolved.Reason = connectors.ReasonResolutionFailed
 		providerResolved.Message = "ConnectorProvider could not be read"
-		return r.updateStatus(ctx, connection, providerResolved, err)
+		return r.updateStatus(ctx, connection, before, providerResolved, err)
 	case !connectors.ProviderAccepted(provider):
 		providerResolved.Status = metav1.ConditionFalse
 		providerResolved.Reason = corev1alpha1.ConnectionReasonProviderInvalid
@@ -82,7 +86,7 @@ func (r *ConnectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if providerResolved.Status == metav1.ConditionTrue {
 		meta.SetStatusCondition(&connection.Status.Conditions, scopesGrantedCondition(connection, provider, now))
 	}
-	return r.updateStatus(ctx, connection, providerResolved, nil)
+	return r.updateStatus(ctx, connection, before, providerResolved, nil)
 }
 
 // scopesGrantedCondition compares the scopes granted at the last consent with
@@ -131,10 +135,10 @@ func scopesGrantedCondition(connection *corev1alpha1.Connection, provider *corev
 func (r *ConnectionReconciler) updateStatus(
 	ctx context.Context,
 	connection *corev1alpha1.Connection,
+	before *corev1alpha1.ConnectionStatus,
 	providerResolved metav1.Condition,
 	reconcileErr error,
 ) (ctrl.Result, error) {
-	before := connection.Status.DeepCopy()
 	connection.Status.ObservedGeneration = connection.Generation
 	meta.SetStatusCondition(&connection.Status.Conditions, providerResolved)
 	connection.Status.State = projectConnectionState(connection, providerResolved)
