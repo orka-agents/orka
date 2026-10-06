@@ -814,8 +814,10 @@ func FrozenConnectionsFromTaskStatus(task *corev1alpha1.Task) map[string]outboun
 	}
 	frozen := make(map[string]outboundaccess.FrozenConnection, len(task.Status.ConnectionBindings))
 	for _, binding := range task.Status.ConnectionBindings {
+		// The provider travels with the binding, so a policy retargeted to
+		// another provider after dispatch is refused on this path too.
 		frozen[binding.PolicyName] = outboundaccess.FrozenConnection{
-			UID: binding.UID, Generation: binding.Generation, GrantSequence: binding.GrantSequence,
+			UID: binding.UID, Generation: binding.Generation, GrantSequence: binding.GrantSequence, Provider: binding.Provider,
 		}
 	}
 	return frozen

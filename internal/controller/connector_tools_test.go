@@ -174,8 +174,8 @@ func TestFreezeAndBindNativeConnections(t *testing.T) {
 	if executor.Requester() == nil || executor.Requester().Subject != "alice" {
 		t.Fatalf("requester = %+v", executor.Requester())
 	}
-	if got := executor.FrozenConnections()["github-conn"]; got.UID != "conn-uid" || got.Generation != 3 {
-		t.Fatalf("frozen map = %+v", executor.FrozenConnections())
+	if got := executor.FrozenConnections()["github-conn"]; got.UID != "conn-uid" || got.Generation != 3 || got.Provider != bindings[0].Provider || got.Provider == "" {
+		t.Fatalf("frozen map = %+v, want the binding's provider carried for the provider fence", executor.FrozenConnections())
 	}
 	if FrozenConnectionsFromTaskStatus(nil) != nil || FrozenConnectionsFromTaskStatus(f.task) != nil {
 		t.Fatal("tasks without bindings must yield nil")

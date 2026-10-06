@@ -196,6 +196,12 @@ func ValidateProviderSpec(provider *corev1alpha1.ConnectorProvider, knownBuiltin
 	if issue := validateEndpointURL("revocationURL", oauth.RevocationURL, false); issue != nil {
 		return issue
 	}
+	// Disconnect posts the person's tokens to the revocation endpoint. On
+	// another host than the issuer's token endpoint it could collect tokens
+	// another service issued (a GitHub provider's linked tokens, say).
+	if strings.TrimSpace(oauth.RevocationURL) != "" && !SameEndpointHost(oauth.TokenURL, oauth.RevocationURL) {
+		return invalid("oauth.revocationURL must be on the token endpoint's host; tokens are only sent back to their issuer")
+	}
 	if !validClientID(oauth.ClientID) {
 		return invalid("oauth.clientID is required and must be printable ASCII without surrounding whitespace")
 	}
