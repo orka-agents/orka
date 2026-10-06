@@ -267,13 +267,30 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorReadiness(ctx co
 	if err != nil {
 		return err
 	}
-	if pr.State != repositoryMonitorItemStateOpen || pr.BaseBranch != effectiveRepositoryMonitorBranch(monitor) {
+	outOfScope := pr.State != repositoryMonitorItemStateOpen || pr.BaseBranch != effectiveRepositoryMonitorBranch(monitor)
+	previous, err := r.Store.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, strconv.FormatInt(pr.Number, 10))
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	// A retry's list can already contain the new head. Keep the persisted prior
+	// head authoritative for cleanup until the replacement item can be saved.
+	if previous != nil && previous.HeadSHA != "" && previous.HeadSHA != expectedHead && (previous.HeadSHA != pr.HeadSHA || outOfScope) {
+		if err := r.reconcileRepositoryMonitorDepartedHead(ctx, monitor, pr.Number, previous.HeadSHA, endpoint, token); err != nil {
+			return err
+		}
+	}
+	if outOfScope {
 		return r.reconcileRepositoryMonitorDepartedHead(ctx, monitor, pr.Number, expectedHead, endpoint, token)
 	}
-	// Stop applies to the pull request across head changes. Its failure outcome
-	// uses no positive review evidence from the previous head.
-	if pr.HeadSHA != expectedHead && item.SkipReason != repositoryMonitorIssueSkipStoppedByCommand {
-		return nil
+	if pr.HeadSHA != expectedHead {
+		if err := r.reconcileRepositoryMonitorDepartedHead(ctx, monitor, pr.Number, expectedHead, endpoint, token); err != nil {
+			return err
+		}
+		// Stop applies across head changes without using positive review evidence
+		// from the previous head. Other outcomes need the next inventory snapshot.
+		if item.SkipReason != repositoryMonitorIssueSkipStoppedByCommand {
+			return nil
+		}
 	}
 	item.Draft = pr.Draft
 	labelsJSON, err := json.Marshal(pr.Labels)
