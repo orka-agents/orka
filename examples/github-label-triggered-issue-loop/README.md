@@ -3,8 +3,10 @@
 This example configures a `RepositoryMonitor` for the durable `orka:*` workflow:
 
 ```text
-issue label -> command event -> triage/research/plan -> implementation -> PR -> exact-head review -> repair/readiness
+orka:implement issue label -> command event -> plan (when requirePlan is true) -> implementation -> PR -> exact-head review -> repair/readiness
 ```
+
+Triage and research are ad hoc API/CLI operations.
 
 ## Secrets
 
