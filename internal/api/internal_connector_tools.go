@@ -185,13 +185,15 @@ func (h *InternalHandlers) ExecuteConnectorTool(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusForbidden, "tool was not in the tool list dispatched with the task's job")
 	}
 	// Only the definition the worker was dispatched with executes: a Tool
-	// retargeted after dispatch (URL, method, headers, schema) or a policy
-	// whose credential output changed is refused whether or not the call
-	// needs an approval.
-	liveDigest, err := controller.ConnectorToolDispatchDigest(tool.Spec, policy.Spec)
+	// retargeted after dispatch (URL, method, headers, schema), a policy
+	// whose credential output changed, or either object deleted and
+	// recreated (even with the same spec) is refused whether or not the
+	// call needs an approval.
+	specDigest, err := controller.ConnectorToolDispatchDigest(tool.Spec, policy.Spec)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to digest tool configuration")
 	}
+	liveDigest := controller.NativeConnectorToolDispatchDigest(string(tool.UID), string(policy.UID), specDigest)
 	if dispatchedDigest, ok := frozen.digests[toolName]; !ok || dispatchedDigest != liveDigest {
 		return fiber.NewError(fiber.StatusConflict, "tool configuration changed since dispatch; re-dispatch the task")
 	}
@@ -245,6 +247,11 @@ func (h *InternalHandlers) runConnectorTool(c fiber.Ctx, run connectorToolRun) e
 			// once that terminal transition is durable, else the retry is
 			// asked to try again with the claim still held.
 			if err := h.settleReservedConnectorEffect(ctx, run, store.ExternalEffectFailed); err != nil {
+				if errors.Is(err, controller.ErrExternalEffectNotPending) {
+					// Another execution holds the record; it settles it, and
+					// the claim stays spent until then.
+					return fiber.NewError(fiber.StatusConflict, "the approved action is being handled by another request; retry to learn its outcome")
+				}
 				log.Error(err, "reserved connector effect could not be settled", "task", run.task.Name, "tool", toolName)
 				return fiber.NewError(fiber.StatusServiceUnavailable, message+"; the effect record could not be settled, retry")
 			}
@@ -268,6 +275,16 @@ func (h *InternalHandlers) runConnectorTool(c fiber.Ctx, run connectorToolRun) e
 	// resolution may inject under; a policy replaced or edited in between
 	// is refused rather than executed under a configuration never checked.
 	executor.SetCheckedPolicy(run.policy.Name, outboundaccess.PolicyIdentity{UID: string(run.policy.UID), Generation: run.policy.Generation})
+	// Policy reads and credential resolution (possibly a token refresh) run
+	// inside Execute; the caller's authority is judged once more right
+	// before the request leaves, so a Task cancelled or a Job replaced in
+	// that window never reaches the provider.
+	executor.SetSendGate(func(context.Context) error {
+		if _, err := run.authorizer.verifyTaskCaller(c, run.task.Namespace, run.task.Name); err != nil {
+			return connectorCallerRevokedError{err: err}
+		}
+		return nil
+	})
 	execCtx := ctx
 	if strings.TrimSpace(run.req.CallID) != "" {
 		execCtx = workerexecutor.WithToolCallID(execCtx, run.req.CallID)
@@ -312,6 +329,11 @@ func (h *InternalHandlers) runConnectorTool(c fiber.Ctx, run connectorToolRun) e
 		if errors.Is(err, errConnectorEffectLedgerUnavailable) {
 			return fail(fiber.StatusServiceUnavailable, err.Error())
 		}
+		if !attempted {
+			if refusal, handled := unattemptedConnectorCallRefusal(run, err, fail); handled {
+				return refusal
+			}
+		}
 		status := fiber.StatusBadGateway
 		if !attempted {
 			// Resolution failed before any request was sent (no connection,
@@ -335,6 +357,26 @@ func (h *InternalHandlers) runConnectorTool(c fiber.Ctx, run connectorToolRun) e
 		response["replayed"] = true
 	}
 	return c.JSON(response)
+}
+
+// unattemptedConnectorCallRefusal maps a call that sent nothing to its
+// response when the reason is not an ordinary precondition failure: a caller
+// that lost its authority at the send gate is refused (and the claim handed
+// back through fail), and a claim whose effect record another request moved
+// is reported without settling or releasing anything, since that request
+// owns the record.
+func unattemptedConnectorCallRefusal(run connectorToolRun, err error, fail func(int, string) error) (error, bool) {
+	if revoked, ok := errors.AsType[connectorCallerRevokedError](err); ok {
+		status, message := fiber.StatusForbidden, "task caller is no longer authorized"
+		if fiberErr, ok := errors.AsType[*fiber.Error](revoked.err); ok {
+			status, message = fiberErr.Code, fiberErr.Message
+		}
+		return fail(status, message), true
+	}
+	if run.claim != nil && errors.Is(err, store.ErrConflict) {
+		return fiber.NewError(fiber.StatusConflict, "the approved action is being handled by another request; retry to learn its outcome"), true
+	}
+	return nil, false
 }
 
 // runConnectorToolEffect records an approval-claimed call in the durable
@@ -412,8 +454,9 @@ func connectorToolTimeout(tool *corev1alpha1.Tool) time.Duration {
 }
 
 // settleReservedConnectorEffect moves the claim's reserved effect record to a
-// terminal state when the call never reached the ledger's run path. The
-// settlement re-reads the record and only a non-terminal one is moved.
+// terminal state when the call never started. Only a record still exactly
+// Pending is moved; one another execution holds in flight, or settled, is
+// reported with controller.ErrExternalEffectNotPending and left alone.
 func (h *InternalHandlers) settleReservedConnectorEffect(ctx context.Context, run connectorToolRun, state store.ExternalEffectState) error {
 	cfg := h.connectorTools
 	if cfg.ExternalEffects == nil || cfg.ControllerEpochs == nil || run.claim == nil {
@@ -425,8 +468,17 @@ func (h *InternalHandlers) settleReservedConnectorEffect(ctx context.Context, ru
 	}
 	settleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
-	return controller.SettleExternalEffect(settleCtx, cfg.ExternalEffects, fence, connectorToolEffectIdentity(run.task, run.claim), state)
+	return controller.SettlePendingExternalEffect(settleCtx, cfg.ExternalEffects, fence, connectorToolEffectIdentity(run.task, run.claim), state)
 }
+
+// connectorCallerRevokedError is the send gate's refusal: the caller lost
+// its authority before the request left, so nothing was attempted.
+type connectorCallerRevokedError struct{ err error }
+
+func (e connectorCallerRevokedError) Error() string {
+	return "task caller is no longer authorized: " + e.err.Error()
+}
+func (e connectorCallerRevokedError) Unwrap() error { return e.err }
 
 func connectorToolEffectIdentity(task *corev1alpha1.Task, claim *connectorApprovalClaim) store.ExternalEffectIdentity {
 	return store.ExternalEffectIdentity{

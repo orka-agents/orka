@@ -25,7 +25,16 @@ interface ConnectorsPageProps {
 
 export function ConnectorsPage({ search, clearCallback }: ConnectorsPageProps) {
   const namespace = useUIStore((s) => s.namespace)
-  return <ConnectorsPageContent key={namespace} namespace={namespace} search={search ?? {}} clearCallback={clearCallback} />
+  // A completion spent in another namespace remounts the content before the
+  // router has cleared the callback search. The spent callback is remembered
+  // here, outside the namespace-keyed content, so the new content never
+  // replays it (and never reports a consent "without a completion token").
+  const [callbackSpent, setCallbackSpent] = useState(false)
+  const spend = () => {
+    setCallbackSpent(true)
+    clearCallback?.()
+  }
+  return <ConnectorsPageContent key={namespace} namespace={namespace} search={callbackSpent ? {} : (search ?? {})} clearCallback={spend} />
 }
 
 function ConnectorsPageContent({ namespace, search, clearCallback }: { namespace: string; search: ConnectorCallbackSearch; clearCallback?: () => void }) {
@@ -133,7 +142,7 @@ function ConnectorsPageContent({ namespace, search, clearCallback }: { namespace
       if (isForbiddenError(error) && scopeDenied(error)) {
         // Signed in as themselves, but the delegated token may not manage
         // links; the CLI fallback would fail with the same token.
-        setCallbackNotice({ tone: 'error', text: `Could not finish linking: ${errorText(error)}. This token lacks the connector-manage scope (orka:connectors:manage); finish with a token that carries it.`, retry: true })
+        setCallbackNotice({ tone: 'error', text: `Could not finish linking: ${errorText(error)}. This token lacks the scope your controller requires to manage linked accounts; finish with a token that carries it.`, retry: true })
         return
       }
       const command = completionCommand(search.connection, search.namespace)
@@ -251,7 +260,7 @@ function ConnectorsPageContent({ namespace, search, clearCallback }: { namespace
         ) : isForbiddenError(providers.error ?? connections.error) ? (
           scopeDenied(providers.error ?? connections.error) ? (
             <EmptyState icon={Link2} headline="This token cannot read linked accounts"
-              hint={`You are signed in, but this context token is not delegated the connector scope: ${errorText(providers.error ?? connections.error)}. Use a token that carries orka:connectors:read.`} />
+              hint={`You are signed in, but this context token is not delegated the connector scope: ${errorText(providers.error ?? connections.error)}. Use a token that carries the scope your controller requires to read linked accounts.`} />
           ) : (
             <EmptyState icon={Link2} headline="Sign in as yourself to link accounts"
               hint="Linked accounts belong to a person. This token is not a personal identity (OIDC or context token), so there is nothing to link here." />

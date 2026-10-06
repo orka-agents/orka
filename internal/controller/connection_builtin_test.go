@@ -416,10 +416,11 @@ func TestRegistryACPMCPToolExecutorBindsLinkedAccountsForBuiltins(t *testing.T) 
 	if digest, err := executor.ConnectionDigest(ctx, request, harnessv2.MCPToolDescriptor{Name: "web_search", Source: harnessv2.MCPToolSourceBrokeredBuiltin}); err != nil || digest != "" {
 		t.Fatalf("web_search digest = %q err = %v", digest, err)
 	}
-	// A catalog built-in with nothing frozen has no digest, and its
+	// A catalog built-in with nothing frozen can never run, so naming its
+	// binding fails before any approval or effect record is made, and its
 	// binding refuses the call rather than letting it run on anything else.
-	if digest, err := executor.ConnectionDigest(ctx, request, harnessv2.MCPToolDescriptor{Name: "get_issue", Source: harnessv2.MCPToolSourceBrokeredBuiltin}); err != nil || digest != "" {
-		t.Fatalf("unfrozen digest = %q err = %v", digest, err)
+	if digest, err := executor.ConnectionDigest(ctx, request, harnessv2.MCPToolDescriptor{Name: "get_issue", Source: harnessv2.MCPToolSourceBrokeredBuiltin}); err == nil || digest != "" {
+		t.Fatalf("unfrozen digest = %q err = %v, want refusal", digest, err)
 	}
 	issueTool := &contextCapturingTool{name: "get_issue"}
 	registry.Register(issueTool)
@@ -468,6 +469,36 @@ func TestBrokeredLinkedBuiltins(t *testing.T) {
 	}
 	if got := brokeredLinkedBuiltins(tools.NewRegistry(), names); len(got) != 0 {
 		t.Fatalf("an unregistered catalog name is not brokered: %v", got)
+	}
+	// Without a broker registry (the ACP broker is not configured, as for a
+	// harness-v1-only controller) nothing runs under a linked account, so
+	// GitHub tools the native registry carries keep their Task credentials
+	// and v1 Tasks that allow them are not refused.
+	if got := brokeredLinkedBuiltins(nil, names); len(got) != 0 {
+		t.Fatalf("a nil broker registry brokers nothing: %v", got)
+	}
+}
+
+// TestClassifyConnectorToolsWithoutBrokerRegistry covers a controller with
+// no ACP broker: catalog names are never classified as linked built-ins,
+// however the native registry is populated.
+func TestClassifyConnectorToolsWithoutBrokerRegistry(t *testing.T) {
+	f := newConnectorToolFixture(t)
+	github := acceptedBuiltinProvider("github", "list_pull_requests", "create_pull_request")
+	infos, err := classifyConnectorTools(context.Background(), f.reader(github), nil, "tenant",
+		[]string{"list_pull_requests", "create_pull_request"}, connectorScope{builtins: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, info := range infos {
+		if info.Builtin {
+			t.Fatalf("%s classified as a linked built-in without a broker registry: %+v", name, info)
+		}
+	}
+	visible, write, err := FilterBrokeredConnectorToolsForRequester(context.Background(), f.reader(github), nil, f.task,
+		[]string{"list_pull_requests", "create_pull_request"})
+	if err != nil || len(visible) != 2 || len(write) != 0 {
+		t.Fatalf("visible = %v write = %v err = %v, want both kept on their own credentials", visible, write, err)
 	}
 }
 
@@ -561,6 +592,30 @@ func TestLinkedRepositoryScopeInherited(t *testing.T) {
 	}
 }
 
+// requireLinkRefused fails unless resolving tool through accounts is
+// refused, unbound, with an error containing every want.
+func requireLinkRefused(t *testing.T, label string, accounts tools.LinkedAccountCredentials, tool string, want ...string) {
+	t.Helper()
+	_, bound, err := accounts.BuiltinToolCredential(context.Background(), tool)
+	if bound || err == nil {
+		t.Fatalf("%s: bound = %t err = %v, want a refusal", label, bound, err)
+	}
+	for _, w := range want {
+		if !strings.Contains(err.Error(), w) {
+			t.Fatalf("%s: err = %v, want it to contain %q", label, err, w)
+		}
+	}
+}
+
+// requireLinkUnbound fails unless tool keeps its own credential path: not
+// bound to a link, and no error.
+func requireLinkUnbound(t *testing.T, label string, accounts tools.LinkedAccountCredentials, tool string) {
+	t.Helper()
+	if _, bound, err := accounts.BuiltinToolCredential(context.Background(), tool); bound || err != nil {
+		t.Fatalf("%s: bound = %t err = %v, want the tool's own path", label, bound, err)
+	}
+}
+
 func TestLiveLinkedAccounts(t *testing.T) {
 	f := newConnectorToolFixture(t)
 	ctx := context.Background()
@@ -573,9 +628,7 @@ func TestLiveLinkedAccounts(t *testing.T) {
 	}
 	// No link: the built-in keeps its own path.
 	accounts := LiveLinkedAccounts(f.reader(github), registry, source, "tenant", f.requester)
-	if _, bound, err := accounts.BuiltinToolCredential(ctx, "list_pull_requests"); bound || err != nil {
-		t.Fatalf("no link: bound = %t err = %v", bound, err)
-	}
+	requireLinkUnbound(t, "no link", accounts, "list_pull_requests")
 	// A Ready link is bound as it is right now and resolved through the source.
 	accounts = LiveLinkedAccounts(f.reader(github, f.connection(corev1alpha1.ConnectionModeReadOnly, true)), registry, source, "tenant", f.requester)
 	credential, bound, err := accounts.BuiltinToolCredential(ctx, "list_pull_requests")
@@ -605,15 +658,11 @@ func TestLiveLinkedAccounts(t *testing.T) {
 	second := custom.DeepCopy()
 	second.Name, second.UID = "my-other-github-link", "conn-uid-2"
 	twice := LiveLinkedAccounts(f.reader(github, custom, second), registry, source, "tenant", f.requester)
-	if _, bound, err := twice.BuiltinToolCredential(ctx, "list_pull_requests"); bound || err == nil || !strings.Contains(err.Error(), "2 links") {
-		t.Fatalf("two non-canonical links: bound = %t err = %v", bound, err)
-	}
+	requireLinkRefused(t, "two non-canonical links", twice, "list_pull_requests", "2 links")
 	// A canonical link plus an extra one is just as ambiguous: the canonical
 	// name never wins silently.
 	canonicalPlus := LiveLinkedAccounts(f.reader(github, f.connection(corev1alpha1.ConnectionModeReadOnly, true), custom), registry, source, "tenant", f.requester)
-	if _, bound, err := canonicalPlus.BuiltinToolCredential(ctx, "list_pull_requests"); bound || err == nil || !strings.Contains(err.Error(), "2 links") {
-		t.Fatalf("canonical plus extra link: bound = %t err = %v", bound, err)
-	}
+	requireLinkRefused(t, "canonical plus extra link", canonicalPlus, "list_pull_requests", "2 links")
 	// Somebody else's object under the canonical name does not hide the
 	// person's own link under another name.
 	squatter := f.connection(corev1alpha1.ConnectionModeReadOnly, true)
@@ -625,22 +674,15 @@ func TestLiveLinkedAccounts(t *testing.T) {
 		t.Fatalf("squatted canonical name: credential = %+v bound = %t err = %v", credential, bound, err)
 	}
 	// Not in the catalog, or declared by no provider: not the resolver's concern.
-	if _, bound, err := accounts.BuiltinToolCredential(ctx, "web_search"); bound || err != nil {
-		t.Fatalf("web_search: bound = %t err = %v", bound, err)
-	}
+	requireLinkUnbound(t, "web_search", accounts, "web_search")
 	// A tool the linked GitHub provider does not declare is refused while the
 	// link exists (the link stays bound); with no link it keeps its own path.
-	if _, bound, err := accounts.BuiltinToolCredential(ctx, "get_issue"); bound || err == nil || !strings.Contains(err.Error(), "no longer offers") {
-		t.Fatalf("undeclared with a link: bound = %t err = %v", bound, err)
-	}
-	if _, bound, err := LiveLinkedAccounts(f.reader(github), registry, source, "tenant", f.requester).BuiltinToolCredential(ctx, "get_issue"); bound || err != nil {
-		t.Fatalf("undeclared without a link: bound = %t err = %v", bound, err)
-	}
+	requireLinkRefused(t, "undeclared with a link", accounts, "get_issue", "no longer offers")
+	requireLinkUnbound(t, "undeclared without a link", LiveLinkedAccounts(f.reader(github), registry, source, "tenant", f.requester), "get_issue")
 }
 
 func TestLiveLinkedAccountsUnusableLinkFailsClosed(t *testing.T) {
 	f := newConnectorToolFixture(t)
-	ctx := context.Background()
 	registry := brokeredGitHubRegistry(t)
 	github := acceptedBuiltinProvider("github", "list_pull_requests", "create_pull_request")
 	source := &fakeLinkedSource{credential: outboundaccess.ConnectionCredential{AccessToken: "gho_live", ConnectionUID: "conn-uid", Mode: corev1alpha1.ConnectionModeReadWrite}}
@@ -649,16 +691,12 @@ func TestLiveLinkedAccountsUnusableLinkFailsClosed(t *testing.T) {
 	pending := f.connection(corev1alpha1.ConnectionModeReadWrite, false)
 	pending.Status.State = "Pending"
 	unready := LiveLinkedAccounts(f.reader(github, pending), registry, source, "tenant", f.requester)
-	if _, bound, err := unready.BuiltinToolCredential(ctx, "list_pull_requests"); bound || err == nil || !strings.Contains(err.Error(), "not usable right now") || !strings.Contains(err.Error(), "Pending") {
-		t.Fatalf("unready: bound = %t err = %v", bound, err)
-	}
+	requireLinkRefused(t, "unready", unready, "list_pull_requests", "not usable right now", "Pending")
 	deleting := f.connection(corev1alpha1.ConnectionModeReadWrite, true)
 	deleting.DeletionTimestamp = &metav1.Time{Time: time.Now()}
 	deleting.Finalizers = []string{"test"}
 	gone := LiveLinkedAccounts(f.reader(github, deleting), registry, source, "tenant", f.requester)
-	if _, bound, err := gone.BuiltinToolCredential(ctx, "list_pull_requests"); bound || err == nil || !strings.Contains(err.Error(), "being deleted") {
-		t.Fatalf("deleting: bound = %t err = %v", bound, err)
-	}
+	requireLinkRefused(t, "deleting", gone, "list_pull_requests", "being deleted")
 	if source.request.Tool.Name != "" {
 		t.Fatalf("an unusable link must never reach the credential source: %+v", source.request)
 	}
@@ -669,28 +707,20 @@ func TestLiveLinkedAccountsUnusableLinkFailsClosed(t *testing.T) {
 	lagging.Generation++
 	linkedToLagging := LiveLinkedAccounts(f.reader(lagging, f.connection(corev1alpha1.ConnectionModeReadWrite, true)), registry, source, "tenant", f.requester)
 	for _, tool := range []string{"list_pull_requests", "create_pull_request"} {
-		if _, bound, err := linkedToLagging.BuiltinToolCredential(ctx, tool); bound || err == nil || !strings.Contains(err.Error(), "not accepted") {
-			t.Fatalf("%s under a lagging provider: bound = %t err = %v", tool, bound, err)
-		}
+		requireLinkRefused(t, tool+" under a lagging provider", linkedToLagging, tool, "not accepted")
 	}
 	// With no link to that provider the tool simply keeps its own path.
 	unlinked := LiveLinkedAccounts(f.reader(lagging), registry, source, "tenant", f.requester)
-	if _, bound, err := unlinked.BuiltinToolCredential(ctx, "list_pull_requests"); bound || err != nil {
-		t.Fatalf("lagging provider without a link: bound = %t err = %v", bound, err)
-	}
+	requireLinkUnbound(t, "lagging provider without a link", unlinked, "list_pull_requests")
 	// The same, for a link under a non-canonical name to the lagging provider.
 	customLagging := f.connection(corev1alpha1.ConnectionModeReadWrite, true)
 	customLagging.Name = "my-github-link"
-	if _, bound, err := LiveLinkedAccounts(f.reader(lagging, customLagging), registry, source, "tenant", f.requester).BuiltinToolCredential(ctx, "create_pull_request"); bound || err == nil || !strings.Contains(err.Error(), "not accepted") {
-		t.Fatalf("non-canonical link under a lagging provider: bound = %t err = %v", bound, err)
-	}
+	requireLinkRefused(t, "non-canonical link under a lagging provider", LiveLinkedAccounts(f.reader(lagging, customLagging), registry, source, "tenant", f.requester), "create_pull_request", "not accepted")
 	// A provider that dropped the tool from its catalog still owns the link:
 	// removing create_pull_request must not restore operator-credential writes.
 	narrowed := acceptedBuiltinProvider("github", "list_pull_requests")
 	narrowedLink := LiveLinkedAccounts(f.reader(narrowed, f.connection(corev1alpha1.ConnectionModeReadWrite, true)), registry, source, "tenant", f.requester)
-	if _, bound, err := narrowedLink.BuiltinToolCredential(ctx, "create_pull_request"); bound || err == nil || !strings.Contains(err.Error(), "no longer offers") {
-		t.Fatalf("withdrawn tool: bound = %t err = %v", bound, err)
-	}
+	requireLinkRefused(t, "withdrawn tool", narrowedLink, "create_pull_request", "no longer offers")
 	// Two GitHub providers: A declares the tool and is unlinked, B owns the
 	// person's link but withdrew the tool. The link to B keeps the call
 	// bound; A's declaration is no reason to fall back.
@@ -700,9 +730,7 @@ func TestLiveLinkedAccountsUnusableLinkFailsClosed(t *testing.T) {
 	linkToOther.Name = connectors.ConnectionName("github2", f.requester.Issuer, f.requester.Subject)
 	linkToOther.Spec.ProviderRef.Name = "github2"
 	two := LiveLinkedAccounts(f.reader(acceptedBuiltinProvider("github", "create_pull_request"), other, linkToOther), registry, source, "tenant", f.requester)
-	if _, bound, err := two.BuiltinToolCredential(ctx, "create_pull_request"); bound || err == nil || !strings.Contains(err.Error(), "no longer offers") {
-		t.Fatalf("withdrawn tool on a second provider: bound = %t err = %v", bound, err)
-	}
+	requireLinkRefused(t, "withdrawn tool on a second provider", two, "create_pull_request", "no longer offers")
 	// A provider retargeted since consent (endpoints moved off github.com,
 	// built-ins removed) is recognised by the consent-time authority digest:
 	// the link stays bound until the person relinks or disconnects.
@@ -713,9 +741,7 @@ func TestLiveLinkedAccountsUnusableLinkFailsClosed(t *testing.T) {
 	movedLink.Spec.ProviderRef.Name = "moved"
 	movedLink.Status.Consent = &corev1alpha1.ConnectionConsent{AuthorityDigest: "digest-at-consent-time"}
 	retargeted := LiveLinkedAccounts(f.reader(acceptedBuiltinProvider("github", "create_pull_request"), moved, movedLink), registry, source, "tenant", f.requester)
-	if _, bound, err := retargeted.BuiltinToolCredential(ctx, "create_pull_request"); bound || err == nil || !strings.Contains(err.Error(), "changed since you consented") {
-		t.Fatalf("retargeted provider: bound = %t err = %v", bound, err)
-	}
+	requireLinkRefused(t, "retargeted provider", retargeted, "create_pull_request", "changed since you consented")
 	// An unrelated provider whose authority is unchanged (a Jira link, say)
 	// is not a GitHub link and does not block the tool's own path.
 	jira := acceptedBuiltinProvider("jira")
@@ -725,9 +751,7 @@ func TestLiveLinkedAccountsUnusableLinkFailsClosed(t *testing.T) {
 	jiraLink.Spec.ProviderRef.Name = "jira"
 	jiraLink.Status.Consent = &corev1alpha1.ConnectionConsent{AuthorityDigest: connectors.ProviderAuthorityDigest(jira)}
 	unrelated := LiveLinkedAccounts(f.reader(acceptedBuiltinProvider("github", "create_pull_request"), jira, jiraLink), registry, source, "tenant", f.requester)
-	if _, bound, err := unrelated.BuiltinToolCredential(ctx, "create_pull_request"); bound || err != nil {
-		t.Fatalf("unrelated provider link: bound = %t err = %v", bound, err)
-	}
+	requireLinkUnbound(t, "unrelated provider link", unrelated, "create_pull_request")
 	// A link whose provider was deleted outright is bound and unusable too:
 	// nothing can say any more which tools it declared. It is found even
 	// without its index label (created outside the API, or label stripped).
@@ -736,9 +760,7 @@ func TestLiveLinkedAccountsUnusableLinkFailsClosed(t *testing.T) {
 	orphan.Spec.ProviderRef.Name = "gone"
 	orphan.Labels = nil
 	orphaned := LiveLinkedAccounts(f.reader(orphan), registry, source, "tenant", f.requester)
-	if _, bound, err := orphaned.BuiltinToolCredential(ctx, "create_pull_request"); bound || err == nil || !strings.Contains(err.Error(), "no longer configured") {
-		t.Fatalf("orphaned link: bound = %t err = %v", bound, err)
-	}
+	requireLinkRefused(t, "orphaned link", orphaned, "create_pull_request", "no longer configured")
 }
 
 func TestRegistryACPMCPToolExecutorHandsRequesterToListConnections(t *testing.T) {

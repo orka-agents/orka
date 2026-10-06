@@ -13,6 +13,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/cli/client"
 
 	"github.com/spf13/cobra"
@@ -228,6 +229,9 @@ func duplicateProvidersFor(ctx context.Context, c *client.Client) (map[string]bo
 
 // joinProviderReadiness folds the provider's acceptance and the person's
 // duplicate links into the view.
+// stateNotUsableSuffix marks a stored Ready state the API judged unusable.
+const stateNotUsableSuffix = " (not usable)"
+
 func joinProviderReadiness(item connectionView, providersReady map[string]bool, duplicated map[string]bool) connectionView {
 	// A disconnect in progress (tokens being revoked, possibly retrying)
 	// is neither ready nor something to relink.
@@ -244,6 +248,12 @@ func joinProviderReadiness(item connectionView, providersReady map[string]bool, 
 		return item
 	}
 	if !item.Ready {
+		// The API reports a link it judged unusable (its provider changed or
+		// is gone) with the stored state still Ready; the state says so, and
+		// 'orka connection get' shows why.
+		if item.State == corev1alpha1.ConnectionStateReady {
+			item.State += stateNotUsableSuffix
+		}
 		return item
 	}
 	if providerReady, configured := providersReady[item.Provider]; !configured || !providerReady {
@@ -274,6 +284,9 @@ func joinProviderReadinessInto(item map[string]any, providersReady map[string]bo
 	}
 	ready, _ := item["ready"].(bool)
 	if !ready {
+		if state, _ := item["state"].(string); state == corev1alpha1.ConnectionStateReady {
+			item["state"] = state + stateNotUsableSuffix
+		}
 		return
 	}
 	provider, _ := item["provider"].(string)
@@ -525,7 +538,7 @@ func connectionError(err error) error {
 	}
 	if strings.Contains(err.Error(), "HTTP 403") {
 		if strings.Contains(err.Error(), "not authorized") {
-			return errors.Join(err, errors.New("this context token is not delegated the connector scope this command needs (orka:connectors:read to list, orka:connectors:manage to link or disconnect)"))
+			return errors.Join(err, errors.New("this context token is not delegated the scope your controller requires for this command (the connector-read scope to list, the connector-manage scope to link or disconnect)"))
 		}
 		return errors.Join(err, errors.New("linked accounts belong to a signed-in person: pass your OIDC token with --token, or a context token with --txn-token (ServiceAccount tokens cannot link accounts)"))
 	}

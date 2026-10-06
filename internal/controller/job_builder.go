@@ -461,6 +461,10 @@ type JobBuildOptions struct {
 	// bindings through; connector visibility and dispatch digests are read
 	// through the same reader so one Job never mixes revisions.
 	Reader client.Reader
+	// ConnectionBindingsFrozen marks ConnectionBindings as this dispatch's
+	// freeze: link modes come from them, and a connector tool whose policy
+	// no longer matches its binding fails the build so the dispatch retries.
+	ConnectionBindingsFrozen bool
 }
 
 // connectorReader is the reader connector dispatch data is derived from.
@@ -1188,7 +1192,11 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 	// build so dispatch retries: starting the worker with a connector write
 	// tool advertised but missing from the approval set would let it run
 	// without the promised approval.
-	visible, connectorWrite, err := FilterConnectorToolsForRequester(ctx, b.connectorReader(opts), tools.DefaultRegistry, task, cfg.tools)
+	// Visibility, the approval set, and the dispatch digests all come from
+	// one classification against the registry the native worker resolves
+	// tools with; a dispatch that froze bindings supplies the link modes.
+	visible, connectorWrite, digests, err := nativeConnectorDispatch(ctx, b.connectorReader(opts), NativeWorkerToolRegistry(task, agent),
+		task, cfg.tools, opts.ConnectionBindings, opts.ConnectionBindingsFrozen)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrConnectorToolResolution, err)
 	}
@@ -1209,10 +1217,12 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 		envVars = setControllerEnvValue(envVars, workerenv.GatewayReplyEnabled, "true")
 	}
 	// The controller executes a connector-backed tool only as it was defined
-	// when the worker was dispatched with it.
-	digests, err := FrozenConnectorToolDigests(ctx, b.connectorReader(opts), task.Namespace, cfg.tools)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrConnectorToolResolution, err)
+	// when the worker was dispatched with it. A write tool withdrawn above
+	// keeps no digest, so it can never be executed for this Job.
+	for name := range digests {
+		if !slices.Contains(cfg.tools, name) {
+			delete(digests, name)
+		}
 	}
 	frozenDigests := ""
 	if len(digests) > 0 {

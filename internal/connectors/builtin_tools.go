@@ -76,7 +76,7 @@ const (
 	// requests: the credential must stay valid for this long.
 	BuiltinToolTimeout = 2 * time.Minute
 	// BuiltinPollingToolTimeout bounds check_pull_request_ci, which may
-	// poll for up to its maximum wait plus one request.
+	// poll for up to its maximum wait plus a bounded final status check.
 	BuiltinPollingToolTimeout = 11 * time.Minute
 )
 

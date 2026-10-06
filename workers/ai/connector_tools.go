@@ -232,6 +232,19 @@ type connectorToolResponse struct {
 	Error  string `json:"error,omitempty"`
 }
 
+// controllerHTTPClient is the client for the worker's authenticated calls to
+// the controller's internal API: inherited proxy settings are ignored and
+// redirects are not followed, so the projected ServiceAccount token is only
+// ever sent to the controller URL itself.
+func controllerHTTPClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	return &http.Client{
+		Transport:     transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+}
+
 // executeConnectorToolViaController runs a connector-backed tool in the
 // controller. Errors after the request was sent are marked as attempted so
 // the approval gate does not re-fire a consequential action.
@@ -270,7 +283,7 @@ func executeConnectorToolViaController(
 	callCtx, cancel := context.WithTimeout(ctx, connectorToolProxyTimeout(tool))
 	defer cancel()
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = controllerHTTPClient()
 	}
 	backoff := connectorToolRetryBackoff
 	for attempt := 0; ; attempt++ {

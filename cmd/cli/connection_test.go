@@ -209,36 +209,68 @@ func TestConnectRejectsUnknownModeAndExplainsForbidden(t *testing.T) {
 	}
 }
 
-func TestConnectionListGetDeleteAndProviders(t *testing.T) {
-	providerReady := true
-	connectionDeleting := false
-	connectionDuplicated := false
-	t.Setenv("HOME", t.TempDir())
-	var deleted string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/connections":
-			items := []map[string]any{
-				{"name": "github-abc", "provider": "github", "mode": "readOnly", "state": "Ready", "ready": true, "linkedAt": "2026-09-28T10:00:00Z", "deleting": connectionDeleting},
-			}
-			if connectionDuplicated {
-				items = append(items, map[string]any{"name": "my-other-github", "provider": "github", "mode": "readOnly", "state": "Ready", "ready": true})
-			}
-			json.NewEncoder(w).Encode(map[string]any{"items": items}) //nolint:errcheck
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/connections/github-abc":
-			json.NewEncoder(w).Encode(map[string]any{"name": "github-abc", "provider": "github", "mode": "readOnly", "state": "Ready", "ready": true, "message": "linked", "deleting": connectionDeleting}) //nolint:errcheck
-		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/connections/github-abc":
-			deleted = r.URL.Path
-			w.WriteHeader(http.StatusNoContent)
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/connectors":
-			json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{ //nolint:errcheck
-				{"name": "github", "displayName": "GitHub", "ready": providerReady, "tools": []map[string]any{{"name": "list_pull_requests", "class": "read"}}},
-			}})
-		default:
-			w.WriteHeader(http.StatusNotFound)
+// connectionListFixture serves the connector API for the list/get/delete
+// test; its fields switch the scenario the next CLI call sees.
+type connectionListFixture struct {
+	providerReady bool
+	deleting      bool
+	duplicated    bool
+	// revalidated models the API judging a stored-Ready link unusable.
+	revalidated bool
+	deleted     string
+}
+
+func (f *connectionListFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	switch {
+	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/connections":
+		items := []map[string]any{
+			{"name": "github-abc", "provider": "github", "mode": "readOnly", "state": "Ready", "ready": !f.revalidated, "linkedAt": "2026-09-28T10:00:00Z", "deleting": f.deleting},
 		}
-	}))
+		if f.duplicated {
+			items = append(items, map[string]any{"name": "my-other-github", "provider": "github", "mode": "readOnly", "state": "Ready", "ready": true})
+		}
+		json.NewEncoder(w).Encode(map[string]any{"items": items}) //nolint:errcheck
+	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/connections/github-abc":
+		message := "linked"
+		if f.revalidated {
+			message = "the provider changed since you consented; reconnect this link before its tools can run"
+		}
+		json.NewEncoder(w).Encode(map[string]any{"name": "github-abc", "provider": "github", "mode": "readOnly", "state": "Ready", "ready": !f.revalidated, "message": message, "deleting": f.deleting}) //nolint:errcheck
+	case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/connections/github-abc":
+		f.deleted = r.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/connectors":
+		json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{ //nolint:errcheck
+			{"name": "github", "displayName": "GitHub", "ready": f.providerReady, "tools": []map[string]any{{"name": "list_pull_requests", "class": "read"}}},
+		}})
+	default:
+		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
+// requireOutput fails unless out contains every want.
+func requireOutput(t *testing.T, label, out string, want ...string) {
+	t.Helper()
+	for _, w := range want {
+		if !strings.Contains(out, w) {
+			t.Fatalf("%s = %q, want it to contain %q", label, out, w)
+		}
+	}
+}
+
+// requireMatch fails unless out matches pattern exactly when match is true.
+func requireMatch(t *testing.T, label, out, pattern string, match bool) {
+	t.Helper()
+	if regexp.MustCompile(pattern).MatchString(out) != match {
+		t.Fatalf("%s = %q, want match %s = %t", label, out, pattern, match)
+	}
+}
+
+func TestConnectionListGetDeleteAndProviders(t *testing.T) {
+	fixture := &connectionListFixture{providerReady: true}
+	t.Setenv("HOME", t.TempDir())
+	srv := httptest.NewServer(fixture)
 	defer srv.Close()
 	run := func(args ...string) string {
 		root := newRootCmd()
@@ -250,53 +282,48 @@ func TestConnectionListGetDeleteAndProviders(t *testing.T) {
 		}
 		return out.String()
 	}
-	if out := run("connection", "list"); !strings.Contains(out, "github-abc") || !strings.Contains(out, "readOnly") || !strings.Contains(out, "PROVIDER") {
-		t.Fatalf("list = %q", out)
-	}
-	if out := run("connection", "list", "-o", "json"); !strings.Contains(out, `"provider": "github"`) {
-		t.Fatalf("list json = %q", out)
-	}
+	const anyTrue, readyFalse = `\s+true\s+`, `Ready:\s+false`
+	requireOutput(t, "list", run("connection", "list"), "github-abc", "readOnly", "PROVIDER")
+	requireOutput(t, "list json", run("connection", "list", "-o", "json"), `"provider": "github"`)
 	// A link whose provider is not accepted right now is not called ready.
-	providerReady = false
-	if out := run("connection", "list"); !strings.Contains(out, "Ready (provider unavailable)") || regexp.MustCompile(`\s+true\s+`).MatchString(out) {
-		t.Fatalf("list with an unaccepted provider = %q", out)
-	}
-	if out := run("connection", "get", "github-abc"); !strings.Contains(out, "provider unavailable") || !regexp.MustCompile(`Ready:\s+false`).MatchString(out) {
-		t.Fatalf("get with an unaccepted provider = %q", out)
-	}
+	fixture.providerReady = false
+	out := run("connection", "list")
+	requireOutput(t, "list with an unaccepted provider", out, "Ready (provider unavailable)")
+	requireMatch(t, "list with an unaccepted provider", out, anyTrue, false)
+	out = run("connection", "get", "github-abc")
+	requireOutput(t, "get with an unaccepted provider", out, "provider unavailable")
+	requireMatch(t, "get with an unaccepted provider", out, readyFalse, true)
 	// A disconnect still finishing is shown as such, in every format.
-	connectionDeleting = true
-	if out := run("connection", "get", "github-abc"); !strings.Contains(out, "Disconnecting") || !regexp.MustCompile(`Ready:\s+false`).MatchString(out) {
-		t.Fatalf("get while deleting = %q", out)
-	}
-	if out := run("connection", "list", "-o", "json"); !strings.Contains(out, `"state": "Disconnecting"`) || !strings.Contains(out, `"ready": false`) {
-		t.Fatalf("list -o json while deleting = %q", out)
-	}
-	connectionDeleting = false
+	fixture.deleting = true
+	out = run("connection", "get", "github-abc")
+	requireOutput(t, "get while deleting", out, "Disconnecting")
+	requireMatch(t, "get while deleting", out, readyFalse, true)
+	requireOutput(t, "list -o json while deleting", run("connection", "list", "-o", "json"), `"state": "Disconnecting"`, `"ready": false`)
+	fixture.deleting = false
 	// A second link to the same provider makes both unusable, in every format.
-	connectionDuplicated = true
-	if out := run("connection", "list"); !strings.Contains(out, "(duplicate link)") || regexp.MustCompile(`\s+true\s+`).MatchString(out) {
-		t.Fatalf("list with duplicate links = %q", out)
-	}
-	if out := run("connection", "get", "github-abc", "-o", "json"); !strings.Contains(out, `"ready": false`) || !strings.Contains(out, "duplicate link") {
-		t.Fatalf("get -o json with duplicate links = %q", out)
-	}
-	connectionDuplicated = false
+	fixture.duplicated = true
+	out = run("connection", "list")
+	requireOutput(t, "list with duplicate links", out, "(duplicate link)")
+	requireMatch(t, "list with duplicate links", out, anyTrue, false)
+	requireOutput(t, "get -o json with duplicate links", run("connection", "get", "github-abc", "-o", "json"), `"ready": false`, "duplicate link")
+	fixture.duplicated = false
 	// Structured output carries the same joined readiness.
-	if out := run("connection", "list", "-o", "json"); !strings.Contains(out, `"ready": false`) || !strings.Contains(out, "provider unavailable") || !strings.Contains(out, `"linkedAt"`) {
-		t.Fatalf("list -o json with an unaccepted provider = %q", out)
+	requireOutput(t, "list -o json with an unaccepted provider", run("connection", "list", "-o", "json"), `"ready": false`, "provider unavailable", `"linkedAt"`)
+	requireOutput(t, "get -o json with an unaccepted provider", run("connection", "get", "github-abc", "-o", "json"), `"ready": false`, `"message": "linked"`)
+	fixture.providerReady = true
+	// A stored Ready state the API judged unusable never reads as usable,
+	// and get shows why.
+	fixture.revalidated = true
+	out = run("connection", "list")
+	requireOutput(t, "list with a revalidated link", out, "Ready (not usable)")
+	requireMatch(t, "list with a revalidated link", out, anyTrue, false)
+	requireOutput(t, "get with a revalidated link", run("connection", "get", "github-abc"), "Ready (not usable)", "changed since you consented")
+	requireOutput(t, "list -o json with a revalidated link", run("connection", "list", "-o", "json"), `"state": "Ready (not usable)"`)
+	fixture.revalidated = false
+	requireOutput(t, "get", run("connection", "get", "github-abc"), "Provider:", "linked")
+	requireOutput(t, "delete", run("connection", "delete", "github-abc"), "Disconnect requested for github-abc")
+	if fixture.deleted != "/api/v1/connections/github-abc" {
+		t.Fatalf("delete path = %q", fixture.deleted)
 	}
-	if out := run("connection", "get", "github-abc", "-o", "json"); !strings.Contains(out, `"ready": false`) || !strings.Contains(out, `"message": "linked"`) {
-		t.Fatalf("get -o json with an unaccepted provider = %q", out)
-	}
-	providerReady = true
-	if out := run("connection", "get", "github-abc"); !strings.Contains(out, "Provider:") || !strings.Contains(out, "linked") {
-		t.Fatalf("get = %q", out)
-	}
-	if out := run("connection", "delete", "github-abc"); deleted != "/api/v1/connections/github-abc" || !strings.Contains(out, "Disconnect requested for github-abc") {
-		t.Fatalf("delete = %q path = %q", out, deleted)
-	}
-	if out := run("connection", "providers"); !strings.Contains(out, "GitHub") || !strings.Contains(out, "list_pull_requests (read)") {
-		t.Fatalf("providers = %q", out)
-	}
+	requireOutput(t, "providers", run("connection", "providers"), "GitHub", "list_pull_requests (read)")
 }

@@ -8,6 +8,7 @@ package outboundaccess
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -492,5 +493,27 @@ func TestResolveConnectionRefusesBuiltinBindingsAndForeignProviders(t *testing.T
 	}
 	if source.calls != 1 {
 		t.Fatalf("source calls = %d, want only the matching resolution", source.calls)
+	}
+}
+
+// TestKubernetesResolverConnectionModeJudgesArgumentsFirst covers a call
+// whose arguments the curated schema rejects: it is refused before the
+// credential source runs, so it can never refresh or shred custody.
+func TestKubernetesResolverConnectionModeJudgesArgumentsFirst(t *testing.T) {
+	f := newConnectionModeFixture(t)
+	source := &fakeConnectionSource{credential: ConnectionCredential{AccessToken: "gho", Mode: corev1alpha1.ConnectionModeReadOnly}}
+	resolver := &KubernetesResolver{Reader: f.newReader().Build(), Connections: source}
+	rejected := f.base
+	rejected.Arguments = json.RawMessage(`"not an object"`)
+	if _, err := resolver.Resolve(context.Background(), rejected); err == nil || !strings.Contains(err.Error(), "arguments rejected") {
+		t.Fatalf("err = %v, want the arguments rejected", err)
+	}
+	if source.calls != 0 {
+		t.Fatalf("credential source calls = %d, want none for rejected arguments", source.calls)
+	}
+	accepted := f.base
+	accepted.Arguments = json.RawMessage(`{}`)
+	if _, err := resolver.Resolve(context.Background(), accepted); err != nil || source.calls != 1 {
+		t.Fatalf("accepted arguments err = %v calls = %d", err, source.calls)
 	}
 }

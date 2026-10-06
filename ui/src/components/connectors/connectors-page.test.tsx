@@ -88,6 +88,11 @@ describe('ConnectorsPage', () => {
     // A reload of the address bar no longer looks like an unfinished consent.
     expect(window.location.hash).toBe('')
     expect(window.location.search).toBe('')
+    // The content remounted for team-a before the router cleared the search
+    // (here it never does): it must not replay the spent callback.
+    await waitFor(() => expect(screen.getByText('GitHub')).toBeInTheDocument())
+    expect(screen.queryByText(/without a completion token/)).not.toBeInTheDocument()
+    expect(completions).toHaveLength(1)
   })
 
   it('withholds the CLI fallback when the callback names are not Kubernetes names', async () => {
@@ -218,6 +223,9 @@ describe('ConnectorsPage', () => {
     render(<ConnectorsPage />)
     await waitFor(() => expect(screen.getByText('This token cannot read linked accounts')).toBeInTheDocument())
     expect(screen.queryByText('Sign in as yourself to link accounts')).not.toBeInTheDocument()
+    // The read scope is operator-configurable, so the default is never named.
+    expect(screen.getByText(/scope your controller requires to read linked accounts/)).toBeInTheDocument()
+    expect(screen.queryByText(/orka:connectors/)).not.toBeInTheDocument()
   })
 
   it('keeps polling after a mode change until the list shows the new mode', async () => {
@@ -283,12 +291,14 @@ describe('ConnectorsPage', () => {
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('cancelled'))
   })
 
-  it('names the missing manage scope when completion is refused for it', async () => {
+  it('explains the missing manage scope when completion is refused for it', async () => {
     useProviders([github], [{ ...linked, state: 'Pending', ready: false }])
     window.history.replaceState(null, '', '/settings/connectors?status=pending&connection=github-abc#completion=one-time')
     server.use(http.post(`${API}/connections/github-abc/complete`, () => new HttpResponse('context token is not authorized for connectorsManage', { status: 403 })))
     render(<ConnectorsPage search={{ status: 'pending', connection: 'github-abc' }} />)
-    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('orka:connectors:manage'))
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('scope your controller requires to manage linked accounts'))
+    // The scope name is operator-configurable, so the default is never named.
+    expect(screen.getByRole('alert')).not.toHaveTextContent('orka:connectors')
     expect(screen.getByRole('alert')).not.toHaveTextContent('orka connection complete')
     expect(screen.getByRole('alert')).not.toHaveTextContent('Sign in as yourself')
   })
