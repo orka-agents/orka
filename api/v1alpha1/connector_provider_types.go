@@ -60,7 +60,7 @@ type ConnectorProviderSpec struct {
 // +kubebuilder:validation:XValidation:rule="self.authorizeURL.startsWith('https://')",message="authorizeURL must use https"
 // +kubebuilder:validation:XValidation:rule="self.tokenURL.startsWith('https://')",message="tokenURL must use https"
 // +kubebuilder:validation:XValidation:rule="!has(self.revocationURL) || self.revocationURL.startsWith('https://')",message="revocationURL must use https"
-// +kubebuilder:validation:XValidation:rule="!has(self.additionalAuthorizeParameters) || self.additionalAuthorizeParameters.all(k, !(k.lowerAscii() in ['client_id','client_secret','redirect_uri','response_type','scope','state','code_challenge','code_challenge_method','code','grant_type','refresh_token']))",message="additionalAuthorizeParameters must not contain reserved OAuth fields"
+// +kubebuilder:validation:XValidation:rule="!has(self.additionalAuthorizeParameters) || self.additionalAuthorizeParameters.all(k, !(k.lowerAscii() in ['client_id','client_secret','redirect_uri','response_type','scope','state','code_challenge','code_challenge_method','code','code_verifier','grant_type','refresh_token']))",message="additionalAuthorizeParameters must not contain reserved OAuth fields"
 type ConnectorOAuthConfig struct {
 	// AuthorizeURL is the provider's absolute HTTPS authorization endpoint.
 	// +kubebuilder:validation:MinLength=1
@@ -116,11 +116,13 @@ type ConnectorOAuthConfig struct {
 type ConnectorScopes struct {
 	// Read scopes are requested for every Connection.
 	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:items:MaxLength=256
 	// +optional
 	Read []string `json:"read,omitempty"`
 
 	// Write scopes are additionally requested for readWrite Connections.
 	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:items:MaxLength=256
 	// +optional
 	Write []string `json:"write,omitempty"`
 }

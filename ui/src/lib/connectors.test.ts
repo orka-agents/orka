@@ -39,6 +39,8 @@ describe('connectors helpers', () => {
   it('words the callback reasons', () => {
     expect(callbackReasonMessage('scopes_denied')).toMatch(/fewer permissions/)
     expect(callbackReasonMessage('provider_changed')).toMatch(/changed/)
+    expect(callbackReasonMessage('mode_changed')).toMatch(/read only and read and write/)
+    expect(callbackReasonMessage('consent_superseded')).toMatch(/newer consent/)
     expect(callbackReasonMessage(undefined)).toBe('Linking failed.')
     expect(callbackReasonMessage('weird')).toBe('Linking failed (weird).')
   })

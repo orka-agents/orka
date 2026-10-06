@@ -381,7 +381,15 @@ func (c *OAuthClient) post(ctx context.Context, cfg OAuthProviderConfig, endpoin
 	if err != nil || parsed.Scheme != schemeHTTPS || parsed.Host == "" || parsed.User != nil {
 		return nil, errors.New("provider endpoint is not an absolute HTTPS URL")
 	}
-	if host := parsed.Hostname(); host == "" || strings.HasSuffix(host, ".") || strings.Contains(host, "%") || !asciiHost(host) {
+	// The same host rules as provider validation: an endpoint stored before
+	// a rule existed, or that bypassed admission, is refused here too rather
+	// than left to DNS resolution alone. The fixture allowance relaxes only
+	// the general private and cluster-local names; infrastructure hosts stay
+	// denied.
+	host := parsed.Hostname()
+	if host == "" || strings.HasSuffix(host, ".") || strings.Contains(host, "%") || !asciiHost(host) ||
+		(net.ParseIP(host) == nil && nonCanonicalNumericHost(host)) || InfrastructureHostDenied(host) ||
+		(!c.allowPrivate && hostDenied(strings.ToLower(host))) {
 		return nil, errors.New("provider endpoint host is not allowed")
 	}
 	if ip := net.ParseIP(parsed.Hostname()); ip != nil && !tokenexchange.IsPublicAddress(ip) && !c.allowPrivate {

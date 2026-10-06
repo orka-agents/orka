@@ -245,6 +245,35 @@ func TestValidateProviderSpec(t *testing.T) {
 			p.Spec.Tools[2].Parameters = &apiextensionsv1.JSON{Raw: []byte(`{"type":"object","properties":{"q":{"type":"string","minLength":1},"tags":{"type":"array","items":{"type":"string"}}},"required":["q"]}`)}
 		}},
 		{name: "duplicate scope", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.Scopes.Write = []string{"repo", "repo"} }, want: "duplicate scope"},
+		{name: "duplicate credential-shaped scope is not echoed", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.Scopes.Read = []string{"access_token.s3cr3t", "access_token.s3cr3t"}
+		}, want: "duplicate scope"},
+		{name: "oversized scope", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.Scopes.Read = []string{strings.Repeat("a", 257)}
+		}, want: "at most 256 bytes"},
+		{name: "token url presets code verifier", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.TokenURL = "https://example.com/token?code_verifier=abc"
+		}, want: "must not preset reserved"},
+		{name: "authorize parameter code verifier", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.AdditionalAuthorizeParameters = map[string]string{"code_verifier": "abc"}
+		}, want: "reserved OAuth fields"},
+		{name: "empty dns label", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://example..com/token" }, want: "valid DNS name"},
+		{name: "label starts with hyphen", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.TokenURL = "https://-bad.example/token" }, want: "valid DNS name"},
+		{name: "overlong dns label", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.TokenURL = "https://" + strings.Repeat("a", 64) + ".example/token"
+		}, want: "valid DNS name"},
+		{name: "tool connection header", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].HTTP.Headers = map[string]string{"Connection": "Authorization"}
+		}, want: "may not set the Connection header"},
+		{name: "tool upgrade header", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].HTTP.Headers = map[string]string{"Upgrade": "h2c"}
+		}, want: "may not set the Upgrade header"},
+		{name: "tool url api filter named state ok", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].HTTP.URL = "https://api.github.com/repos/o/r/pulls?state=open"
+		}},
+		{name: "tool url credential query still rejected", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].HTTP.URL = "https://api.github.com/x?access_token=abc"
+		}, want: "must not carry credentials"},
 		{name: "reserved authorize parameter", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.OAuth.AdditionalAuthorizeParameters = map[string]string{"redirect_uri": "https://evil.example"}
 		}, want: "reserved OAuth fields"},

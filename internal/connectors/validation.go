@@ -52,6 +52,10 @@ const (
 
 	maxToolCount = 64
 	maxScopes    = 32
+	// maxScopeBytes bounds one configured scope, matching the bound applied
+	// to scopes a provider reports, so a scope can never push the
+	// authorization URL past what browsers and proxies accept.
+	maxScopeBytes = 256
 
 	// MaxHTTPToolTimeout bounds curated HTTP tool requests.
 	MaxHTTPToolTimeout = 10 * time.Minute
@@ -65,7 +69,7 @@ var (
 	reservedAuthorizeParameters = map[string]struct{}{
 		"client_id": {}, "client_secret": {}, "redirect_uri": {}, "response_type": {},
 		"scope": {}, "state": {}, "code_challenge": {}, "code_challenge_method": {},
-		"code": {}, "grant_type": {}, "refresh_token": {},
+		"code": {}, "code_verifier": {}, "grant_type": {}, "refresh_token": {},
 	}
 
 	// deniedHosts are cluster-internal or metadata endpoints that must never be
@@ -82,6 +86,10 @@ var (
 	reservedToolHeaders = map[string]struct{}{
 		"Authorization": {}, "Cookie": {}, "Host": {}, "Txn-Token": {}, "Proxy-Authorization": {},
 		"Content-Length": {}, "Transfer-Encoding": {},
+		// Hop-by-hop fields: Connection could nominate the injected
+		// Authorization header for removal by an intermediary, and all of
+		// them are invalid on HTTP/2.
+		"Connection": {}, "Keep-Alive": {}, "Proxy-Connection": {}, "Te": {}, "Trailer": {}, "Upgrade": {},
 	}
 )
 
@@ -317,6 +325,13 @@ func ValidateProviderSpec(provider *corev1alpha1.ConnectorProvider, knownBuiltin
 }
 
 func validateEndpointURL(field, raw string, required bool) *Issue {
+	return validateURL(field, raw, required, true)
+}
+
+// validateURL checks an OAuth endpoint (oauthEndpoint) or an HTTP tool URL.
+// Both follow the same host rules; only OAuth endpoints refuse flow-owned
+// query names, since a tool's API may use names such as state as filters.
+func validateURL(field, raw string, required, oauthEndpoint bool) *Issue {
 	if strings.TrimSpace(raw) == "" {
 		if required {
 			return invalid(fmt.Sprintf("oauth.%s is required", field))
@@ -346,6 +361,9 @@ func validateEndpointURL(field, raw string, required bool) *Issue {
 	if !asciiHost(host) {
 		return invalid(fmt.Sprintf("oauth.%s host must be ASCII; use the punycode (xn--) form of an internationalized name", field))
 	}
+	if net.ParseIP(host) == nil && !validDNSName(host) {
+		return invalid(fmt.Sprintf("oauth.%s host must be a valid DNS name", field))
+	}
 	if !PrivateEndpointsAllowed() {
 		if hostDenied(strings.ToLower(host)) {
 			return invalid(fmt.Sprintf("oauth.%s host is not allowed", field))
@@ -364,7 +382,37 @@ func validateEndpointURL(field, raw string, required bool) *Issue {
 	if ip := net.ParseIP(host); ip == nil && nonCanonicalNumericHost(host) {
 		return invalid(fmt.Sprintf("oauth.%s host must be a hostname or a canonical IP address", field))
 	}
-	return validateEndpointQuery(field, parsed.RawQuery)
+	return validateEndpointQuery(field, parsed.RawQuery, oauthEndpoint)
+}
+
+// validDNSName reports whether host is a syntactically valid DNS name:
+// at most 253 bytes of dot-separated labels of 1 to 63 letters, digits,
+// hyphens, or underscores, none starting or ending with a hyphen. A name
+// that fails this can never resolve, so it is refused rather than accepted
+// and left permanently unusable.
+func validDNSName(host string) bool {
+	if len(host) == 0 || len(host) > 253 {
+		return false
+	}
+	for label := range strings.SplitSeq(host, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for i := 0; i < len(label); i++ {
+			if !dnsLabelByte(label[i]) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func dnsLabelByte(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '_':
+		return true
+	}
+	return false
 }
 
 // asciiHost reports whether host is printable ASCII.
@@ -420,7 +468,7 @@ func nonCanonicalNumericHost(host string) bool {
 // parameters on every endpoint, and flow-owned OAuth parameters on the
 // authorization endpoint, so a preconfigured state, redirect URI, or secret
 // can never ride along in public configuration.
-func validateEndpointQuery(field, rawQuery string) *Issue {
+func validateEndpointQuery(field, rawQuery string, oauthEndpoint bool) *Issue {
 	if rawQuery == "" {
 		return nil
 	}
@@ -436,9 +484,9 @@ func validateEndpointQuery(field, rawQuery string) *Issue {
 		if credentialLikeParameter(normalized) {
 			return invalid(fmt.Sprintf("oauth.%s query must not carry credentials; the spec is public configuration", field))
 		}
-		// Flow-owned fields (code, grant_type, refresh_token, state, ...) are
-		// never legitimate static configuration on any endpoint.
-		if _, reserved := reservedAuthorizeParameters[normalized]; reserved {
+		// Flow-owned fields (code, code_verifier, grant_type, state, ...) are
+		// never legitimate static configuration on an OAuth endpoint.
+		if _, reserved := reservedAuthorizeParameters[normalized]; reserved && oauthEndpoint {
 			return invalid(fmt.Sprintf("oauth.%s query must not preset reserved OAuth fields", field))
 		}
 	}
@@ -474,8 +522,12 @@ func validateScopes(group string, scopes []string) *Issue {
 		if !validScopeToken(scope) {
 			return invalid(fmt.Sprintf("oauth.scopes.%s entries must be non-empty RFC 6749 scope tokens", group))
 		}
+		if len(scope) > maxScopeBytes {
+			return invalid(fmt.Sprintf("oauth.scopes.%s entries must be at most %d bytes", group, maxScopeBytes))
+		}
+		// The value is not repeated: this message becomes public status.
 		if _, dup := seen[scope]; dup {
-			return invalid(fmt.Sprintf("oauth.scopes.%s contains duplicate scope %q", group, scope))
+			return invalid(fmt.Sprintf("oauth.scopes.%s contains a duplicate scope", group))
 		}
 		seen[scope] = struct{}{}
 	}
@@ -647,7 +699,7 @@ func validateToolParameters(name string, parameters *apiextensionsv1.JSON) *Issu
 }
 
 func validateHTTPTool(name string, spec corev1alpha1.ConnectorHTTPTool) *Issue {
-	if issue := validateEndpointURL("tools."+name+".url", spec.URL, true); issue != nil {
+	if issue := validateURL("tools."+name+".url", spec.URL, true, false); issue != nil {
 		return &Issue{Reason: ReasonInvalidProvider, Message: strings.Replace(issue.Message, "oauth.", "", 1)}
 	}
 	switch spec.Method {

@@ -16,6 +16,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -1125,7 +1126,9 @@ func TestConnectionReconcilerFinishesDisconnectWhenProviderIsBeingDeleted(t *tes
 		AuthorityDigest: connectors.ProviderIssuerDigest(provider), RevocationDigest: connectors.ProviderRevocationDigest(provider),
 	}
 	revoker := &fakeConnectorRevoker{}
-	c := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(connection, provider).
+	now := metav1.Now()
+	terminating := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "tenant", DeletionTimestamp: &now, Finalizers: []string{"kubernetes"}}}
+	c := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(connection, provider).WithObjects(terminating).
 		WithStatusSubresource(&corev1alpha1.Connection{}).Build()
 	reconciler := &ConnectionReconciler{Client: c, APIReader: c, Scheme: scheme, Credentials: credentials, Consents: credentials, Revoker: revoker}
 	key := types.NamespacedName{Namespace: "tenant", Name: "github-alice"}
@@ -1143,6 +1146,45 @@ func TestConnectionReconcilerFinishesDisconnectWhenProviderIsBeingDeleted(t *tes
 	}
 	if err := c.Get(context.Background(), key, &corev1alpha1.Connection{}); err == nil || !apierrors.IsNotFound(err) {
 		t.Fatalf("finalizer must be released, err = %v", err)
+	}
+}
+
+// TestConnectionReconcilerKeepsCustodyWhenOnlyProviderIsDeleted covers a
+// provider deleted outside namespace teardown while its client Secret is
+// missing: the Secret can still be restored, so custody and the finalizer
+// are kept instead of leaving live tokens unrevoked.
+func TestConnectionReconcilerKeepsCustodyWhenOnlyProviderIsDeleted(t *testing.T) {
+	scheme := connectorTestScheme(t)
+	provider := acceptedConnectorProvider()
+	provider.Spec.OAuth.RevocationURL = "https://github.com/revoke"
+	provider.Finalizers = []string{ConnectorProviderConnectionsFinalizer}
+	connection := testConnection("tenant", "github-alice", "github")
+	connection.Finalizers = []string{ConnectionCustodyFinalizer}
+	credentials := newFakeConnectorCredentialStore()
+	credentials.credentials[string(connection.UID)] = store.ConnectorCredential{
+		AccessToken: "gho_access", RefreshToken: "ghr_refresh",
+		AuthorityDigest: connectors.ProviderIssuerDigest(provider), RevocationDigest: connectors.ProviderRevocationDigest(provider),
+	}
+	revoker := &fakeConnectorRevoker{}
+	active := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "tenant"}}
+	c := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(connection, provider).WithObjects(active).
+		WithStatusSubresource(&corev1alpha1.Connection{}).Build()
+	reconciler := &ConnectionReconciler{Client: c, APIReader: c, Scheme: scheme, Credentials: credentials, Consents: credentials, Revoker: revoker}
+	key := types.NamespacedName{Namespace: "tenant", Name: "github-alice"}
+	if err := c.Delete(context.Background(), provider); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Delete(context.Background(), connection); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	if len(credentials.deleted) != 0 {
+		t.Fatalf("custody deleted = %v, want it kept until the Secret returns", credentials.deleted)
+	}
+	if err := c.Get(context.Background(), key, &corev1alpha1.Connection{}); err != nil {
+		t.Fatalf("the finalizer must hold the Connection, err = %v", err)
 	}
 }
 
