@@ -678,6 +678,9 @@ func TestConnectionCreateValidation(t *testing.T) {
 	}{
 		{"subject in body", `{"provider":"github","subject":{"subject":"mallory"}}`, http.StatusBadRequest},
 		{"spec in body", `{"provider":"github","spec":{}}`, http.StatusBadRequest},
+		{"trailing value", `{"provider":"github"} {"subject":"mallory"}`, http.StatusBadRequest},
+		{"trailing garbage", `{"provider":"github"} x`, http.StatusBadRequest},
+		{"trailing whitespace ok", "{\"provider\":\"github\"}\n\t ", http.StatusCreated},
 		{"missing provider", `{}`, http.StatusBadRequest},
 		{"bad mode", `{"provider":"github","mode":"admin"}`, http.StatusBadRequest},
 		{"unknown provider", `{"provider":"gmail"}`, http.StatusNotFound},

@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"strings"
 	"sync"
@@ -343,6 +344,11 @@ func decodeStrictJSON(body []byte, target any) error {
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body: only documented fields are accepted")
+	}
+	// One JSON object and nothing after it: a second value would otherwise
+	// be ignored, carrying fields the first one was refused for.
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid request body: only one JSON object is accepted")
 	}
 	return nil
 }
