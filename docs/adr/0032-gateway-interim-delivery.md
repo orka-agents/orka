@@ -4,10 +4,10 @@ Date: 2026-09-17
 
 ## Status
 
-Accepted for W76 PR1 (`orka.gateway.v1`). Extends the inbox/outbox decision in
+Accepted (`orka.gateway.v1`), including the gateway-only native/ACP
+`reply_in_conversation` tool. Extends the inbox/outbox decision in
 [ADR 0012](0012-gateway-inbox-outbox-semantics.md), without changing canonical
 terminal history ownership in [ADR 0020](0020-gateway-session-canonical-history.md).
-Production native/ACP agent-facing tools are a separate PR2, blocked on PR1 merge.
 Approvals are out of scope and require a separate ADR.
 
 ## Context
@@ -34,7 +34,8 @@ are unchanged. Interim messages use the ordinary outbox and stable provider
 receipts, not a second delivery channel.
 
 The controller derives all routing from the exact Task UID's admitted durable
-event. Callers supply only content and a stable internal request ID. The native
+event. Execution hosts supply content and a stable internal request ID; the model
+supplies only content through the tool described below. The native
 worker endpoint uses the existing TokenReview and current Pod/Job/Task UID
 fences, with no controller-ServiceAccount or runtime impersonation exception.
 Live Task/Gateway/capability checks happen before the authorized SQLite writer.
@@ -53,6 +54,56 @@ delivery ID and its current status without a second enqueue or quota charge.
 “Different content” means different sanitized text and is a conflict. Only the
 sanitized text is retained, with no raw-content digest or additional persisted
 identity. The HTTP receipt acknowledges durable admission, not provider send.
+
+### Expose a content-only tool, not a general send API
+
+The production native worker and ACP broker register `reply_in_conversation`.
+Its only argument is `content`: a required string with schema `minLength: 1`,
+`maxLength: 16384`, and `additionalProperties: false`. Execute also enforces the
+strict object shape, valid Unicode, nonempty sanitized text, and the stronger
+16 KiB UTF-8 **byte** bound. There is no target, recipient, request ID, quota
+configuration, or approval argument.
+
+The controller proves durable origin by exact admitted event/Task UID linkage,
+not prompt inspection or provenance metadata alone. Pending linkage defers
+Job/session configuration. Readiness and interim capability are admission gates,
+not origin evidence: their withdrawal does not permanently remove the tool from
+an authenticated execution. Explicit tool denials, closed allowlists, and
+transaction scopes remain authoritative. Ordinary, delegated, container, and
+compatibility-proxy callers do not gain the tool.
+
+Native bootstrap uses an authenticated, content-free origin read, then Execute
+uses a read-only budget/replay snapshot before enqueueing. All three native
+routes retain current Pod/Job/Task authentication and revocation fences. A
+transient origin-service failure can omit the optional tool while normal work
+continues; no unavailable response grants identity. Successful origin proof is
+not a quota reservation or permission to bypass later admission.
+
+ACP policy and descriptors are frozen before session creation. Built-in
+providers preserve their implicit native defaults when adding reply. External
+runtime profiles must explicitly opt in and exactly match their registered,
+conformed policy; profiles without reply remain final-only. Restoring an existing
+frozen session does not add the tool. ACP execution uses the signed broker call's
+active prompt/session guard and authorized task-data transaction, not a native
+HTTP endpoint or a synthetic Job. Live preparation happens outside the SQLite
+writer; durable admission and mutation fences run inside the authorized writer.
+
+The host supplies a stable logical operation identity. The tool derives a bounded,
+domain-separated request ID from that identity, namespace, and Task UID, never
+from content. Native identity is scoped to the worker execution/model turn/call;
+ACP uses the sealed operation ID, not a raw JSON-RPC ID. Same-operation retries
+reuse the receipt, while distinct calls with identical text remain distinct.
+Regeneration after restart is not an exactly-once guarantee. The authoritative
+budget counts all accepted messages and recognizes retained receipts even at
+exhaustion; final atomic admission still arbitrates concurrent callers.
+
+Tool success contains only `deliveryID`, current `status`, and `created` in the
+normal success envelope, not the submitted text or destination. Known admission
+rejections are safe model-visible failures. Uncertain transport/backend outcomes
+must not be treated as definite rejection or retried with a fresh operation ID.
+ACP retains both the gateway receipt ledger and the consequential external-effect
+ledger, including its `OutcomeUnknown` fence. No approval stop or terminal
+lifecycle transition is added.
 
 ### Bound storage and preserve terminal ownership
 
@@ -120,7 +171,18 @@ apply; the unchanged schema is not proof of behavioral downgrade safety.
   visible messages**, not just one, and must use an authorized test event that
   has not already received terminal delivery. Routing/privacy protections remain
   unchanged; non-capable adapters receive no message probes.
-- Live E2E retains external-v2 coverage and uses a deterministic **test-only**
-  native worker image with genuine controller-created identities. The fixture
-  holds final behind a local release fence so the suite can observe a delivered
-  interim receipt while the Task is still Running. It is not the PR2 tool.
+- The three-spec Gateway live E2E suite retains external-v2 final-only/no-Job
+  coverage and uses a deterministic **test-only** native worker with genuine
+  controller-created identities. That fixture authenticates origin and executes
+  the production reply tool and reusable native client, including budget and
+  replay, before releasing final. It requires an adapter receipt while the Task
+  is still Running; the unsupported-capability case sends no message and still
+  delivers final.
+- The fixture does not exercise model-driven registration or a live ACP tool
+  call. Native worker unit/integration tests cover actual registration,
+  advertisement, dispatch, and normal-loop continuation. ACP integration tests
+  use real SQLite, a signed broker capability, an active prompt, the retained
+  prompt/session guard, and no Job. Kubernetes resources and broker credential
+  resolution use test fixtures, not a live RuntimePool/provider. Tagged
+  compilation and local integration passes are not a live-cluster E2E result;
+  the Gateway workflow supplies that proof when its three specs actually run.

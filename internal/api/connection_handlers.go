@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"strings"
 	"sync"
@@ -269,6 +270,26 @@ func connectionResponse(connection *corev1alpha1.Connection) ConnectionResponse 
 	return response
 }
 
+// revalidateConnectionView applies the checks credential resolution makes
+// against the current provider to a Ready view: a provider changed since
+// consent, or one that now requires scopes the grant lacks, refuses the
+// token at once, before the Connection's own conditions catch up. The
+// dashboard and CLI only see this view, so it must not advertise a link
+// that resolution refuses.
+func revalidateConnectionView(view *ConnectionResponse, connection *corev1alpha1.Connection, provider *corev1alpha1.ConnectorProvider) {
+	if view == nil || !view.Ready || connection == nil || provider == nil {
+		return
+	}
+	switch {
+	case !connectors.ConsentMatchesProvider(connection, provider):
+		view.Ready = false
+		view.Message = "the provider changed since you consented; reconnect this link before its tools can run"
+	case !connectors.ScopesCover(connection.Status.GrantedScopes, connectors.ScopesForMode(provider, view.Mode)):
+		view.Ready = false
+		view.Message = "the provider now requires scopes this link was not granted; reconnect it before its tools can run"
+	}
+}
+
 // connectorIdentity returns the verified human identity behind a request.
 // ServiceAccount and other TokenReview callers fail closed: a shared
 // ServiceAccount must never be able to link or use a person's accounts.
@@ -323,6 +344,11 @@ func decodeStrictJSON(body []byte, target any) error {
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body: only documented fields are accepted")
+	}
+	// One JSON object and nothing after it: a second value would otherwise
+	// be ignored, carrying fields the first one was refused for.
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid request body: only one JSON object is accepted")
 	}
 	return nil
 }
@@ -385,10 +411,20 @@ func (h *Handlers) ListConnections(c fiber.Ctx) error {
 		client.MatchingLabels{ConnectionSubjectDigestLabel: connectionSubjectLabel(ui)}); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to list connections")
 	}
+	providers := &corev1alpha1.ConnectorProviderList{}
+	if err := h.client.List(c.Context(), providers, client.InNamespace(namespace)); err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, "failed to list connector providers")
+	}
+	byName := make(map[string]*corev1alpha1.ConnectorProvider, len(providers.Items))
+	for i := range providers.Items {
+		byName[providers.Items[i].Name] = &providers.Items[i]
+	}
 	items := make([]ConnectionResponse, 0, len(list.Items))
 	for i := range list.Items {
 		if connectionOwnedBy(&list.Items[i], ui) {
-			items = append(items, connectionResponse(&list.Items[i]))
+			view := connectionResponse(&list.Items[i])
+			revalidateConnectionView(&view, &list.Items[i], byName[list.Items[i].Spec.ProviderRef.Name])
+			items = append(items, view)
 		}
 	}
 	return c.JSON(fiber.Map{"items": items})
@@ -404,7 +440,15 @@ func (h *Handlers) GetConnection(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	return c.JSON(connectionResponse(connection))
+	view := connectionResponse(connection)
+	provider := &corev1alpha1.ConnectorProvider{}
+	switch err := h.client.Get(c.Context(), types.NamespacedName{Namespace: connection.Namespace, Name: connection.Spec.ProviderRef.Name}, provider); {
+	case err == nil:
+		revalidateConnectionView(&view, connection, provider)
+	case !apierrors.IsNotFound(err):
+		return fiber.NewError(fiber.StatusInternalServerError, "failed to read connector provider")
+	}
+	return c.JSON(view)
 }
 
 // CreateConnection creates (or reuses) the caller's Connection to a provider

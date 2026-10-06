@@ -45,6 +45,15 @@ func (r *RepositoryMonitorReconciler) processRepositoryMonitorInventoryRun(ctx c
 	if err := validateRepositoryMonitorRunTargetKind(run); err != nil {
 		return 0, 0, 0, err
 	}
+	if run != nil && strings.TrimSpace(run.CommandEventID) != "" {
+		command, err := r.Store.GetCommandEvent(ctx, monitor.Namespace, run.CommandEventID)
+		if err != nil {
+			return 0, 0, 0, err
+		}
+		if reason := repositoryMonitorRetiredCommandReason(command.Intent); reason != "" {
+			return 0, 0, 0, r.retireRepositoryMonitorCommand(ctx, monitor, command, run, reason)
+		}
+	}
 	targetKind := strings.TrimSpace(run.TargetKind)
 	if targetKind == repositoryMonitorIssueKind {
 		return r.processIssueInventoryRun(ctx, monitor, run, owner, repository)
@@ -130,13 +139,28 @@ func (r *RepositoryMonitorReconciler) processIssueInventoryRun(ctx context.Conte
 		if err != nil && !errorsIsStoreNotFound(err) {
 			return selected, createdTasks, skipped, err
 		}
+		repositoryMonitorNormalizeLegacyIssuePhase(existing)
 		item := repositoryMonitorItemFromIssue(monitor, issue, existing)
+		supersededPausedResult := existing != nil && existing.WorkflowPhase == repositoryMonitorIssuePhasePaused && existing.LastActionID != "" &&
+			existing.SnapshotDigest != item.SnapshotDigest && repositoryMonitorMatchingLabel(repositoryMonitorPauseLabels(monitor.Spec), issue.Labels) == ""
+		if supersededPausedResult {
+			if err := r.settleRepositoryMonitorPausedIssue(ctx, monitor, existing, repositoryMonitorIssueSnapshotSuperseded); err != nil {
+				return selected, createdTasks, skipped, err
+			}
+		}
+		if run.CommandEventID == "" && item.SkipReason == repositoryMonitorIssueSkipStoppedByCommand {
+			if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
+				return selected, createdTasks, skipped, err
+			}
+			skipped++
+			continue
+		}
 		skipReason := ""
 		if strings.TrimSpace(run.CommandEventID) != "" {
 			skipReason = repositoryMonitorIssueCommandSkipReason(monitor.Spec, issue)
 		} else {
 			skipReason = repositoryMonitorIssueSkipReason(monitor.Spec, issue, selected, maxPerRun)
-			if skipReason == repositoryMonitorSkipReasonOverLimit &&
+			if skipReason == repositoryMonitorSkipReasonOverLimit && !supersededPausedResult &&
 				repositoryMonitorIssueRetainWorkflowUnderRunLimit(item, existing) {
 				// The per-run cap bounds newly selected issues. An issue already
 				// past discovery keeps its recorded workflow even when its current
@@ -153,10 +177,35 @@ func (r *RepositoryMonitorReconciler) processIssueInventoryRun(ctx context.Conte
 			}
 		}
 		if skipReason != "" {
+			if !supersededPausedResult && skipReason != repositoryMonitorSkipReasonOverLimit && repositoryMonitorMatchingLabel(repositoryMonitorPauseLabels(monitor.Spec), issue.Labels) == "" {
+				if err := r.settleRepositoryMonitorPausedIssue(ctx, monitor, existing, skipReason); err != nil {
+					return selected, createdTasks, skipped, err
+				}
+			}
 			skipped++
 			item.LastVerdict = repositoryMonitorVerdictSkipped
 			item.SkipReason = skipReason
 			item.WorkflowPhase = repositoryMonitorIssuePhaseBlocked
+			if existing != nil && repositoryMonitorMatchingLabel(repositoryMonitorPauseLabels(monitor.Spec), issue.Labels) != "" &&
+				(repositoryMonitorIssueWorkflowRetainedUnderRunLimit(existing) ||
+					(existing.WorkflowPhase == repositoryMonitorIssuePhaseBlocked && !repositoryMonitorIssueInventoryBlockCanClear(existing.SkipReason))) {
+				// Pause holds the next action. Preserve the current Task or its
+				// completed result, including failures that release job budgets.
+				// Keep its snapshot too, so edits are rediscovered on unpause
+				// instead of attaching the old result to new requirements.
+				item.SnapshotDigest = existing.SnapshotDigest
+				item.Title = existing.Title
+				item.Body = existing.Body
+				item.GitHubUpdatedAt = existing.GitHubUpdatedAt
+				item.WorkflowPhase = existing.WorkflowPhase
+				item.LastActionID = existing.LastActionID
+				item.LastActionKind = existing.LastActionKind
+				item.LastActionTaskName = existing.LastActionTaskName
+				item.LastVerdict = existing.LastVerdict
+				if existing.WorkflowPhase == repositoryMonitorIssuePhaseBlocked {
+					item.SkipReason = existing.SkipReason
+				}
+			}
 			if strings.TrimSpace(run.CommandEventID) != "" {
 				command, commandErr := r.Store.GetCommandEvent(ctx, monitor.Namespace, run.CommandEventID)
 				if commandErr != nil {
@@ -173,6 +222,9 @@ func (r *RepositoryMonitorReconciler) processIssueInventoryRun(ctx context.Conte
 				return selected, createdTasks, skipped, err
 			}
 			continue
+		}
+		if err := r.resumeRepositoryMonitorPausedIssue(ctx, monitor, item); err != nil {
+			return selected, createdTasks, skipped, err
 		}
 		created, err := r.processIssueCommandRun(ctx, monitor, run, item, owner, repository)
 		if err != nil {
@@ -254,6 +306,9 @@ func (r *RepositoryMonitorReconciler) retireMissingRepositoryMonitorIssues(ctx c
 		}
 		if item.State == repositoryMonitorItemStateOutOfScope && item.SkipReason == repositoryMonitorSkipReasonMissing {
 			continue
+		}
+		if err := r.settleRepositoryMonitorPausedIssue(ctx, monitor, &item, repositoryMonitorSkipReasonMissing); err != nil {
+			return err
 		}
 		item.State = repositoryMonitorItemStateOutOfScope
 		item.LastVerdict = repositoryMonitorVerdictSkipped
@@ -435,7 +490,7 @@ func repositoryMonitorIssueCommandLabelNames(monitor *corev1alpha1.RepositoryMon
 		return nil
 	}
 	labels := monitor.Spec.Triggers.GitHub.Labels.Issues
-	return []string{labels.Triage, labels.Research, labels.Plan, labels.ApprovePlan, labels.Implement, labels.Decompose, labels.Stop, labels.Resume}
+	return append([]string{labels.Implement}, repositoryMonitorPauseLabels(monitor.Spec)...)
 }
 
 func repositoryMonitorIssueContentDigest(issue repositoryMonitorIssue, ignoredLabels ...string) string {

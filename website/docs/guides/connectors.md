@@ -339,6 +339,13 @@ working installation looks like; see
 - **`Ready=False` with `ConsentRequired`**: the provider or the mode now
   needs scopes the last consent did not grant. `POST
   /api/v1/connections/<name>/authorize` starts consent again.
+- **A link in state `Ready` is reported as not ready** (the dashboard shows
+  *Reconnect needed*): the provider's client, endpoints, tools, or required
+  scopes changed since the person consented, and credential resolution
+  refuses the old grant before the Connection's conditions catch up.
+  Reconnect the link. *Duplicate links* means the person holds more than one
+  link to the provider; every one is unusable until the extras are
+  disconnected.
 - **The agent does not see the GitHub tools**: check that the Task was
   created through the API by a signed-in person, that the Connection is
   `Ready`, and that the Agent's allowed tools include them. Write tools also

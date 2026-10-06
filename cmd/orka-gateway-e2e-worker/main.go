@@ -4,8 +4,8 @@ Copyright (c) 2026.
 MIT License - see LICENSE file for details.
 */
 
-// Test-only deterministic native worker. It uses the real projected Pod token
-// and controller endpoints; it is not an agent-facing tool or an auth bypass.
+// Test-only deterministic native worker. It executes the production reply tool
+// and client with the real projected Pod token, not a model or an auth bypass.
 package main
 
 import (
@@ -21,6 +21,10 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/orka-agents/orka/internal/gateway/workerclient"
+	"github.com/orka-agents/orka/internal/tools"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 const (
@@ -29,62 +33,64 @@ const (
 	finalText        = "Gateway interim E2E final"
 )
 
-type messageReceipt struct {
-	DeliveryID string `json:"deliveryID"`
-	Status     string `json:"status"`
-	Created    bool   `json:"created"`
-}
-
 type workerReport struct {
-	First     messageReceipt `json:"first"`
-	Replay    messageReceipt `json:"replay"`
-	ErrorCode string         `json:"errorCode,omitempty"`
+	First     tools.GatewayReplyReceipt `json:"first"`
+	Replay    tools.GatewayReplyReceipt `json:"replay"`
+	ErrorCode string                    `json:"errorCode,omitempty"`
 }
 
 type workerConfig struct {
-	controllerURL, namespace, task, token string
-	capable                               bool
-	client                                *http.Client
-	retryInterval                         time.Duration
+	controllerURL, namespace, task, taskUID, tokenFile string
+	capable                                            bool
+	client                                             *http.Client
+	retryInterval                                      time.Duration
 }
 
 func runWorker(
 	ctx context.Context, cfg workerConfig, ready func(workerReport) error, release func(context.Context) error,
 ) error {
-	path := "/internal/v1/tasks/" + url.PathEscape(cfg.namespace) + "/" + url.PathEscape(cfg.task) + "/gateway-messages"
-	body, _ := json.Marshal(struct {
-		Content   string `json:"content"`
-		RequestID string `json:"requestID"`
-	}{interimText, "gateway-e2e-message"})
-	data, status, err := cfg.post(ctx, path, body)
+	sender, err := workerclient.New(workerclient.Config{
+		ControllerURL: cfg.controllerURL, Namespace: cfg.namespace, TaskName: cfg.task,
+		TaskUID: cfg.taskUID, TokenFile: cfg.tokenFile,
+	})
 	if err != nil {
 		return err
 	}
+	if err := sender.AuthenticateOrigin(ctx); err != nil {
+		return err
+	}
+	// This deterministic fixture makes one logical call per Task UID. Keep its
+	// host-owned identity fixed across replay; it is never a model argument.
+	const hostOperationID = "gateway-e2e-interim-call"
+	toolCtx := tools.WithToolContext(ctx, &tools.ToolContext{
+		Namespace: cfg.namespace, TaskID: cfg.task, TaskUID: cfg.taskUID,
+		OperationID: hostOperationID, GatewayReplySender: sender,
+	})
+	tool := tools.NewReplyInConversationTool()
+	args, _ := json.Marshal(map[string]string{"content": interimText})
+	result, err := tool.Execute(toolCtx, args)
 	report := workerReport{}
 	if cfg.capable {
-		if status != http.StatusAccepted || json.Unmarshal(data, &report.First) != nil ||
-			!report.First.Created || report.First.DeliveryID == "" || report.First.Status == "" {
-			return errors.New("initial message receipt invalid")
-		}
-		data, status, err = cfg.post(ctx, path, body)
 		if err != nil {
 			return err
 		}
-		if status != http.StatusOK || json.Unmarshal(data, &report.Replay) != nil || report.Replay.Created ||
-			report.Replay.DeliveryID != report.First.DeliveryID || report.Replay.Status == "" {
+		if report.First, err = parseReceipt(result); err != nil || !report.First.Created {
+			return errors.New("initial message receipt invalid")
+		}
+		result, err = tool.Execute(toolCtx, args)
+		if err != nil {
+			return err
+		}
+		if report.Replay, err = parseReceipt(result); err != nil || report.Replay.Created ||
+			report.Replay.DeliveryID != report.First.DeliveryID {
 			return errors.New("message replay receipt invalid")
 		}
 	} else {
-		var rejection struct {
-			Error struct {
-				Code string `json:"code"`
-			} `json:"error"`
+		rejection, ok := errors.AsType[*tools.GatewayReplyRejection](err)
+		if !ok || rejection.Error() != tools.NewGatewayReplyRejection("interim_delivery_unsupported", nil).Error() {
+			return errors.New("expected typed unsupported capability rejection from reply tool")
 		}
-		if status != http.StatusConflict || json.Unmarshal(data, &rejection) != nil ||
-			rejection.Error.Code != "interim_delivery_unsupported" {
-			return errors.New("expected explicit unsupported capability rejection")
-		}
-		report.ErrorCode = rejection.Error.Code
+		report.ErrorCode = "interim_delivery_unsupported"
 	}
 	if err := ready(report); err != nil {
 		return err
@@ -94,7 +100,7 @@ func runWorker(
 		return err
 	}
 	resultPath := "/internal/v1/results/" + url.PathEscape(cfg.namespace) + "/" + url.PathEscape(cfg.task)
-	_, status, err = cfg.post(ctx, resultPath, []byte(finalText))
+	_, status, err := cfg.post(ctx, resultPath, []byte(finalText))
 	if err != nil {
 		return err
 	}
@@ -104,14 +110,32 @@ func runWorker(
 	return nil
 }
 
+func parseReceipt(result string) (tools.GatewayReplyReceipt, error) {
+	var envelope struct {
+		Success bool                      `json:"success"`
+		Data    tools.GatewayReplyReceipt `json:"data"`
+	}
+	if json.Unmarshal([]byte(result), &envelope) != nil || !envelope.Success ||
+		envelope.Data.DeliveryID == "" || envelope.Data.Status == "" {
+		return tools.GatewayReplyReceipt{}, errors.New("invalid reply tool success receipt")
+	}
+	return envelope.Data, nil
+}
+
+// Only final-result publication uses the fixture transport. Interim calls go
+// through the production tool and workerclient, including its bootstrap retry.
 func (cfg workerConfig) post(ctx context.Context, path string, body []byte) ([]byte, int, error) {
 	for {
+		token, err := workerenv.ReadTokenFile(cfg.tokenFile, "projected worker token")
+		if err != nil {
+			return nil, 0, errors.New("projected worker token unavailable")
+		}
 		endpoint := strings.TrimRight(cfg.controllerURL, "/") + path
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 		if err != nil {
 			return nil, 0, errors.New("invalid fixture controller URL")
 		}
-		req.Header.Set("Authorization", "Bearer "+cfg.token)
+		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Content-Type", "application/json")
 		response, err := cfg.client.Do(req)
 		if err != nil {
@@ -125,8 +149,8 @@ func (cfg workerConfig) post(ctx context.Context, path string, body []byte) ([]b
 		if response.StatusCode != http.StatusServiceUnavailable {
 			return data, response.StatusCode, nil
 		}
-		// A fast real worker can precede publication of its Job identity. Retry only
-		// transient 503, with the same request ID; never retry authorization failures.
+		// Preserve the final publisher's transient-503 retry; never retry an
+		// authorization failure. Message replay belongs to workerclient above.
 		if err := wait(ctx, cfg.retryInterval); err != nil {
 			return nil, 0, err
 		}
@@ -181,20 +205,16 @@ func main() {
 		_, _ = os.Stdout.Write(data)
 		return
 	}
-	agent := os.Getenv("ORKA_AGENT_NAME")
+	agent := os.Getenv(workerenv.AgentName)
 	if *mode != "ai" || (agent != "gateway-e2e-native" && agent != "gateway-e2e-native-legacy") {
 		fmt.Fprintln(os.Stderr, "unsupported fixture worker configuration")
 		os.Exit(1)
 	}
-	token, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/token")
-	if err != nil || len(bytes.TrimSpace(token)) == 0 {
-		fmt.Fprintln(os.Stderr, "projected worker token unavailable")
-		os.Exit(1)
-	}
 	cfg := workerConfig{
-		controllerURL: os.Getenv("ORKA_CONTROLLER_URL"), namespace: os.Getenv("ORKA_TASK_NAMESPACE"),
-		task: os.Getenv("ORKA_TASK_NAME"), token: strings.TrimSpace(string(token)),
-		capable: agent == "gateway-e2e-native", retryInterval: time.Second,
+		controllerURL: os.Getenv(workerenv.ControllerURL), namespace: os.Getenv(workerenv.TaskNamespace),
+		task: os.Getenv(workerenv.TaskName), taskUID: os.Getenv(workerenv.TaskUID),
+		tokenFile: workerenv.ServiceAccountTokenFile,
+		capable:   agent == "gateway-e2e-native", retryInterval: time.Second,
 		client: &http.Client{
 			Timeout:       10 * time.Second,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
@@ -202,7 +222,7 @@ func main() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	err = waitForFile(ctx, "start")
+	err := waitForFile(ctx, "start")
 	if err == nil {
 		err = runWorker(ctx, cfg, func(report workerReport) error {
 			data, err := json.Marshal(report)

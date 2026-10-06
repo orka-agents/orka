@@ -339,6 +339,13 @@ func validateEndpointURL(field, raw string, required bool) *Issue {
 			return invalid(fmt.Sprintf("oauth.%s port must be between 1 and 65535", field))
 		}
 	}
+	// Clients IDNA-normalize a non-ASCII host before resolving it, so
+	// 127。0。0。1 (ideographic full stops, possibly percent-encoded)
+	// dials loopback while matching none of the checks below. Hosts must
+	// arrive in their ASCII (punycode) form.
+	if !asciiHost(host) {
+		return invalid(fmt.Sprintf("oauth.%s host must be ASCII; use the punycode (xn--) form of an internationalized name", field))
+	}
 	if !PrivateEndpointsAllowed() {
 		if hostDenied(strings.ToLower(host)) {
 			return invalid(fmt.Sprintf("oauth.%s host is not allowed", field))
@@ -358,6 +365,16 @@ func validateEndpointURL(field, raw string, required bool) *Issue {
 		return invalid(fmt.Sprintf("oauth.%s host must be a hostname or a canonical IP address", field))
 	}
 	return validateEndpointQuery(field, parsed.RawQuery)
+}
+
+// asciiHost reports whether host is printable ASCII.
+func asciiHost(host string) bool {
+	for i := 0; i < len(host); i++ {
+		if host[i] <= ' ' || host[i] > '~' {
+			return false
+		}
+	}
+	return true
 }
 
 // nonCanonicalNumericHost reports whether host is a numeric spelling that
@@ -597,11 +614,11 @@ func validateToolParameters(name string, parameters *apiextensionsv1.JSON) *Issu
 	if err := json.Unmarshal(parameters.Raw, &schema); err != nil || schema == nil {
 		return invalid(fmt.Sprintf("HTTP tool %q parameters must be a JSON Schema object", name))
 	}
-	if raw, ok := schema["type"]; ok {
-		var typeName string
-		if err := json.Unmarshal(raw, &typeName); err != nil || typeName != "object" {
-			return invalid(fmt.Sprintf("HTTP tool %q parameters must describe an object", name))
-		}
+	// The root type is required: without it JSON Schema accepts non-object
+	// inputs, which the HTTP executor cannot map onto request arguments.
+	var typeName string
+	if raw, ok := schema["type"]; !ok || json.Unmarshal(raw, &typeName) != nil || typeName != "object" {
+		return invalid(fmt.Sprintf("HTTP tool %q parameters must declare type \"object\"", name))
 	}
 	if raw, ok := schema["properties"]; ok {
 		var properties map[string]json.RawMessage

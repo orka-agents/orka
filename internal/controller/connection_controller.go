@@ -75,8 +75,8 @@ func (r *ConnectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 	// The status as read, before any pass mutates it: the write decision
-	// compares against this, so a change made only by a recovered
-	// completion is persisted rather than mistaken for no change.
+	// compares against this, so a change made only to ScopesGranted or by
+	// a recovered completion is persisted rather than mistaken for no change.
 	before := connection.Status.DeepCopy()
 	if !connection.DeletionTimestamp.IsZero() {
 		return r.finalize(ctx, connection)

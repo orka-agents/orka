@@ -381,7 +381,7 @@ func (c *OAuthClient) post(ctx context.Context, cfg OAuthProviderConfig, endpoin
 	if err != nil || parsed.Scheme != schemeHTTPS || parsed.Host == "" || parsed.User != nil {
 		return nil, errors.New("provider endpoint is not an absolute HTTPS URL")
 	}
-	if host := parsed.Hostname(); host == "" || strings.HasSuffix(host, ".") || strings.Contains(host, "%") {
+	if host := parsed.Hostname(); host == "" || strings.HasSuffix(host, ".") || strings.Contains(host, "%") || !asciiHost(host) {
 		return nil, errors.New("provider endpoint host is not allowed")
 	}
 	if ip := net.ParseIP(parsed.Hostname()); ip != nil && !tokenexchange.IsPublicAddress(ip) && !c.allowPrivate {

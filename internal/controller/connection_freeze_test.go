@@ -388,3 +388,32 @@ func TestACPChildTaskSealerSealsOwnedChildren(t *testing.T) {
 func frozenWithoutConnection(frozen []agentExecutionSnapshotConnection) bool {
 	return len(frozen) == 1 && frozen[0].PolicyName == "github-conn" && frozen[0].UID == "" && frozen[0].GrantSequence == 0
 }
+
+// TestFreezeRequesterConnectionsRequiresOneOwnedLink freezes a Connection
+// only when the requester holds exactly one link to the provider, whatever
+// its name, matching the live resolver and list_connections.
+func TestFreezeRequesterConnectionsRequiresOneOwnedLink(t *testing.T) {
+	scheme := connectorTestScheme(t)
+	tool, policy, canonical, task := freezeFixtures(true)
+	adopted := canonical.(*corev1alpha1.Connection).DeepCopy()
+	adopted.Name, adopted.UID = "github-adopted", "adopted-uid"
+
+	// A Ready canonical link and an adopted duplicate: ambiguous, so the
+	// policy is frozen without a Connection and the call fails closed.
+	reader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(tool, policy, canonical, adopted).Build()
+	frozen, err := freezeRequesterConnections(context.Background(), reader, nil, task, brokeredConfiguration("gh_search"))
+	if err != nil || len(frozen) != 1 || frozen[0].PolicyName != "github-conn" || frozen[0].UID != "" {
+		t.Fatalf("duplicate links: frozen = %+v err = %v, want the policy frozen without a Connection", frozen, err)
+	}
+
+	// Another person's object under the canonical name does not hide the
+	// requester's one adopted link.
+	foreign := canonical.(*corev1alpha1.Connection).DeepCopy()
+	foreign.UID = "foreign-uid"
+	foreign.Spec.Subject.Subject = "mallory"
+	reader = ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(tool, policy, foreign, adopted).Build()
+	frozen, err = freezeRequesterConnections(context.Background(), reader, nil, task, brokeredConfiguration("gh_search"))
+	if err != nil || len(frozen) != 1 || frozen[0].UID != "adopted-uid" {
+		t.Fatalf("foreign canonical object: frozen = %+v err = %v, want the adopted link", frozen, err)
+	}
+}

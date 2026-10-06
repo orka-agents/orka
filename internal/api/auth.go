@@ -118,6 +118,12 @@ type AuthConfig struct {
 	// the normalized audience set so a token authenticated on an unscoped
 	// listener cannot be replayed against an audience-bound listener.
 	TokenReviewAudiences []string
+
+	// ReportTokenReviewUnavailable opts TokenReview-only listeners into returning
+	// 503 when the backend request or status reports a failure, without authenticating the caller.
+	// Explicit authentication denials still return 401. The default preserves historical
+	// 401 responses; OIDC and context-token validation are unchanged.
+	ReportTokenReviewUnavailable bool
 }
 
 // parseServiceAccountNamespace extracts the namespace from a ServiceAccount username.
@@ -179,6 +185,9 @@ func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
 		}
 		if err != nil {
 			log.Error(err, "token validation failed")
+			if cfg.ReportTokenReviewUnavailable && errors.Is(err, errTokenReviewUnavailable) {
+				return fiber.NewError(fiber.StatusServiceUnavailable, "token authentication is temporarily unavailable")
+			}
 			return fiber.NewError(fiber.StatusUnauthorized, "invalid token")
 		}
 
@@ -226,6 +235,8 @@ func authenticateContextToken(ctx context.Context, token string, profile Context
 	return contextTokenToUserInfo(contextToken), nil
 }
 
+var errTokenReviewUnavailable = errors.New("TokenReview backend unavailable")
+
 // validateToken validates a ServiceAccount token using TokenReview with caching.
 func validateToken(ctx context.Context, c client.Client, token string, audiences ...string) (*UserInfo, error) {
 	audiences = normalizedTokenReviewAudiences(audiences)
@@ -250,9 +261,16 @@ func validateToken(ctx context.Context, c client.Client, token string, audiences
 		},
 	}
 
-	// Submit the token review
+	// Submit the token review. Backend diagnostics are opaque and must not reach
+	// the middleware logger; retain only the availability classification.
 	if err := c.Create(ctx, review); err != nil {
-		return nil, err
+		return nil, errTokenReviewUnavailable
+	}
+
+	// A status error means the token could not be checked, even if the response
+	// also claims authentication. Never expose its opaque diagnostic in logs.
+	if review.Status.Error != "" {
+		return nil, errTokenReviewUnavailable
 	}
 
 	// Check if the token is valid
