@@ -58,6 +58,7 @@ admission_runtime_manifest="${work_dir}/admission-runtime-manifest.json"
 workload_manifest="${work_dir}/workload-manifest.json"
 workload_prerequisite_manifest="${work_dir}/workload-prerequisite-manifest.json"
 controller_manifest="${work_dir}/controller-manifest.json"
+lease_policy_manifest="${work_dir}/lease-policy-manifest.json"
 workload_dependency_endpoints="${work_dir}/workload-dependency-endpoints.json"
 snapshot_secret="${work_dir}/agent-execution-snapshot-key.json"
 snapshot_key="${work_dir}/snapshot-key"
@@ -199,6 +200,17 @@ jq -e --arg controller_sa "'orka-controller-manager'" '
   echo "workload prerequisite wave must contain each publisher/proxy Deployment exactly once, no controller Deployment, and the controller-scoped ACP workspace Lease admission policy" >&2
   exit 1
 }
+jq '
+  {
+    apiVersion: "v1",
+    kind: "List",
+    items: [.items[] | select(
+      .apiVersion == "admissionregistration.k8s.io/v1" and
+      (.kind == "ValidatingAdmissionPolicy" or .kind == "ValidatingAdmissionPolicyBinding") and
+      .metadata.name == "orka-acp-workspace-lease-protection"
+    )]
+  }
+' "${workload_prerequisite_manifest}" >"${lease_policy_manifest}"
 jq -esc '
   [.[] | if .kind == "List" then .items[] else . end] as $items
   | ($items | map(select(.apiVersion == "apps/v1" and .kind == "Deployment" and
@@ -600,6 +612,9 @@ validate_existing_controller_identity
 validate_admission_tls_secret
 ensure_snapshot_secret
 "${kubectl}" apply -f "${runtime_config}"
+# Activate the CEL Lease guard before the admission plane can drop the legacy
+# Lease webhook, so an interrupted run never leaves reserved Leases unguarded.
+"${kubectl}" apply -f "${lease_policy_manifest}"
 "${kubectl}" apply -f "${admission_runtime_manifest}"
 wait_for_admission_endpoints
 smoke_admission_handlers

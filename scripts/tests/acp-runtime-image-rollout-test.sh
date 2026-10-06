@@ -703,7 +703,24 @@ fi
   exit 2
 }
 
+if jq -e '
+  if .kind == "List" then
+    ([.items[] | "\(.kind)/\(.metadata.name)"] | sort) == [
+      "ValidatingAdmissionPolicy/orka-acp-workspace-lease-protection",
+      "ValidatingAdmissionPolicyBinding/orka-acp-workspace-lease-protection"
+    ]
+  else false end
+' "$3" >/dev/null; then
+  : >"${FAKE_KUBE_STATE}/lease-policy"
+  printf 'lease-policy:orka-acp-workspace-lease-protection\n' >>"${FAKE_KUBE_LOG}"
+  exit 0
+fi
+
 if jq -e 'if .kind == "List" then any(.items[]?; .kind == "ValidatingWebhookConfiguration" and .metadata.name == "orka-admission") else false end' "$3" >/dev/null; then
+  [[ -e "${FAKE_KUBE_STATE}/lease-policy" ]] || {
+    echo 'admission webhooks applied before the ACP workspace Lease policy' >&2
+    exit 61
+  }
   [[ -e "${FAKE_KUBE_STATE}/admission-endpoints" ]] || { echo 'admission webhooks applied before ready endpoints' >&2; exit 38; }
   [[ "$(grep -c '^smoke:' "${FAKE_KUBE_LOG}")" -ge 8 ]] || { echo 'admission webhooks applied before every handler smoke' >&2; exit 39; }
   jq -e '
@@ -957,6 +974,7 @@ assert_converged() {
   [[ -s "${state_dir}/snapshot-key" ]]
   [[ -e "${state_dir}/admission-runtime" ]]
   [[ -e "${state_dir}/admission-endpoints" ]]
+  [[ -e "${state_dir}/lease-policy" ]]
   [[ -e "${state_dir}/admission-webhooks" ]]
   [[ -e "${state_dir}/dependency-workload" ]]
   for dependency in orka-provider-auth-proxy orka-scm-egress-proxy orka-workspace-publisher; do
