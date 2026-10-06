@@ -424,10 +424,11 @@ func (s *Store) CommitConnectorCompletion(ctx context.Context, nonce string, ref
 	var (
 		completion            store.ConnectorCompletion
 		payloadNonce, payload []byte
+		rowID                 int64
 	)
-	err = tx.QueryRowContext(ctx, `SELECT nonce, connection_uid, namespace, name, subject_digest, provider, mode,
+	err = tx.QueryRowContext(ctx, `SELECT rowid, nonce, connection_uid, namespace, name, subject_digest, provider, mode,
 		payload_nonce, payload, expires_at FROM connector_completions WHERE nonce = ?`, nonce).
-		Scan(&completion.Nonce, &completion.ConnectionUID, &completion.Namespace, &completion.Name, &completion.SubjectDigest,
+		Scan(&rowID, &completion.Nonce, &completion.ConnectionUID, &completion.Namespace, &completion.Name, &completion.SubjectDigest,
 			&completion.Provider, &completion.Mode, &payloadNonce, &payload, &completion.ExpiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return store.ConnectorCredential{}, store.ErrNotFound
@@ -481,10 +482,66 @@ func (s *Store) CommitConnectorCompletion(ctx context.Context, nonce string, ref
 	if _, err := tx.ExecContext(ctx, `UPDATE connector_completions SET payload_nonce = ?, payload = ? WHERE nonce = ?`, newNonce, newPayload, nonce); err != nil {
 		return store.ConnectorCredential{}, fmt.Errorf("mark connector completion committed: %w", err)
 	}
+	dropped, err := s.dropSupersededCompletionsTx(ctx, tx, completion.ConnectionUID, rowID)
+	if err != nil {
+		return store.ConnectorCredential{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return store.ConnectorCredential{}, err
 	}
+	if dropped > 0 {
+		// The commit stands either way: a log that readers kept busy is
+		// truncated by the next custody deletion.
+		_ = s.truncateWAL(ctx)
+	}
 	return credential, nil
+}
+
+// dropSupersededCompletionsTx deletes the Connection's uncommitted
+// completions parked before the one being committed (rowid order is park
+// order: a Connection holds one pending consent at a time, so a later
+// completion always comes from a later consent). Without this, an older
+// consent's tokens could be committed after this grant and replace it.
+// Their tokens are never revoked (Orka revokes only material it committed),
+// and committed rows stay as recovery records until their status lands. A
+// row that cannot be opened is dropped too: it could never be committed.
+func (s *Store) dropSupersededCompletionsTx(ctx context.Context, tx *sql.Tx, connectionUID string, beforeRowID int64) (int, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT nonce, connection_uid, namespace, name, subject_digest, provider, mode,
+		payload_nonce, payload, expires_at FROM connector_completions WHERE connection_uid = ? AND rowid < ?`, connectionUID, beforeRowID)
+	if err != nil {
+		return 0, fmt.Errorf("read superseded connector completions: %w", err)
+	}
+	var superseded []string
+	for rows.Next() {
+		var (
+			completion            store.ConnectorCompletion
+			payloadNonce, payload []byte
+		)
+		if err := rows.Scan(&completion.Nonce, &completion.ConnectionUID, &completion.Namespace, &completion.Name, &completion.SubjectDigest,
+			&completion.Provider, &completion.Mode, &payloadNonce, &payload, &completion.ExpiresAt); err != nil {
+			_ = rows.Close()
+			return 0, fmt.Errorf("scan superseded connector completion: %w", err)
+		}
+		completion.ExpiresAt = completion.ExpiresAt.UTC()
+		if body, err := s.snapshotCipher.aead.Open(nil, payloadNonce, payload, connectorCompletionAdditionalData(completion)); err == nil {
+			if _, fields, err := decodeSealedConnectorCompletionPayload(body); err == nil && fields.Committed {
+				continue
+			}
+		}
+		superseded = append(superseded, completion.Nonce)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, fmt.Errorf("close superseded connector completions: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate superseded connector completions: %w", err)
+	}
+	for _, nonce := range superseded {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM connector_completions WHERE nonce = ?`, nonce); err != nil {
+			return 0, fmt.Errorf("drop superseded connector completion: %w", err)
+		}
+	}
+	return len(superseded), nil
 }
 
 // GetConnectorCredential implements store.ConnectorCredentialStore.
@@ -794,8 +851,8 @@ func (s *Store) CreateConnectorCompletion(ctx context.Context, completion store.
 		return fmt.Errorf("begin connector completion transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	// Expired completions are not purged here: they may hold live provider
-	// tokens that only the Connection reconciler can revoke before deletion.
+	// Expired completions are not purged here: the Connection reconciler
+	// reaps them (their tokens are left to expire, never revoked).
 	// A callback that was mid-exchange while the Connection was disconnected
 	// must not park tokens for the tombstoned UID.
 	var tombstoned int

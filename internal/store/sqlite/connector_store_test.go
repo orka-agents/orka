@@ -836,3 +836,44 @@ func TestConnectorDeletionLeavesNoCiphertextInFiles(t *testing.T) {
 		}
 	}
 }
+
+// TestConnectorCommitDropsSupersededCompletions covers two parked
+// completions for one Connection (an older consent was approved, then a
+// newer one): once the newer one commits, the older one can never be
+// committed over it, while an older committed recovery record is kept.
+func TestConnectorCommitDropsSupersededCompletions(t *testing.T) {
+	s := newConnectorTestStore(t)
+	ctx := context.Background()
+	committedOld := testConnectorCompletion()
+	committedOld.Nonce = "committed-old"
+	older := testConnectorCompletion()
+	older.Nonce = "older"
+	older.Credential.AccessToken = "gho_older"
+	newer := testConnectorCompletion()
+	newer.Nonce = "newer"
+	newer.Credential.AccessToken = "gho_newer"
+	ref := store.ConnectorCredentialRef{ConnectionUID: newer.ConnectionUID, Namespace: newer.Namespace, Name: newer.Name, SubjectDigest: newer.SubjectDigest, Provider: newer.Provider}
+	if err := s.CreateConnectorCompletion(ctx, committedOld); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CommitConnectorCompletion(ctx, committedOld.Nonce, ref, committedOld.Credential); err != nil {
+		t.Fatal(err)
+	}
+	for _, completion := range []store.ConnectorCompletion{older, newer} {
+		if err := s.CreateConnectorCompletion(ctx, completion); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.CommitConnectorCompletion(ctx, newer.Nonce, ref, newer.Credential); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CommitConnectorCompletion(ctx, older.Nonce, ref, older.Credential); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("commit of a superseded completion err = %v, want ErrNotFound", err)
+	}
+	if held, err := s.GetConnectorCredential(ctx, ref); err != nil || held.AccessToken != "gho_newer" {
+		t.Fatalf("custody = %+v err = %v, want the newer grant kept", held, err)
+	}
+	if peeked, err := s.PeekConnectorCompletion(ctx, committedOld.Nonce); err != nil || !peeked.Committed {
+		t.Fatalf("older committed record = %+v err = %v, want it kept for status recovery", peeked, err)
+	}
+}
