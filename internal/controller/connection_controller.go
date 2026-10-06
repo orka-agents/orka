@@ -109,8 +109,9 @@ func (r *ConnectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		providerResolved.Message = "ConnectorProvider was not found"
 	case err != nil:
 		providerResolved.Status = metav1.ConditionUnknown
-		providerResolved.Reason = connectors.ReasonResolutionFailed
+		providerResolved.Reason = corev1alpha1.ConnectionReasonProviderReadFailed
 		providerResolved.Message = "ConnectorProvider could not be read"
+		meta.SetStatusCondition(&connection.Status.Conditions, scopesUnknownCondition(connection, now))
 		return r.updateStatus(ctx, connection, before, providerResolved, err)
 	case !connectors.ProviderAccepted(provider):
 		providerResolved.Status = metav1.ConditionFalse
@@ -121,6 +122,8 @@ func (r *ConnectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if providerResolved.Status == metav1.ConditionTrue {
 		meta.SetStatusCondition(&connection.Status.Conditions, scopesGrantedCondition(connection, provider, now))
 		applied = r.applyCommittedCompletions(ctx, connection, provider, now)
+	} else {
+		meta.SetStatusCondition(&connection.Status.Conditions, scopesUnknownCondition(connection, now))
 	}
 	r.expireLinkedCredential(ctx, connection, now)
 	result, err := r.updateStatus(ctx, connection, before, providerResolved, nil)
@@ -226,6 +229,20 @@ func (r *ConnectionReconciler) applyCommittedCompletions(ctx context.Context, co
 		}
 	}
 	return applied
+}
+
+// scopesUnknownCondition replaces a ScopesGranted verdict while the provider
+// is not resolved, so the conditions never pair ProviderResolved=False with
+// a stale ScopesGranted=True.
+func scopesUnknownCondition(connection *corev1alpha1.Connection, now metav1.Time) metav1.Condition {
+	return metav1.Condition{
+		Type:               corev1alpha1.ConnectionConditionScopesGranted,
+		Status:             metav1.ConditionUnknown,
+		Reason:             corev1alpha1.ConnectionReasonProviderUnavailable,
+		Message:            "Granted scopes cannot be judged while the provider is unavailable",
+		ObservedGeneration: connection.Generation,
+		LastTransitionTime: now,
+	}
 }
 
 // scopesGrantedCondition compares the scopes granted at the last consent with
