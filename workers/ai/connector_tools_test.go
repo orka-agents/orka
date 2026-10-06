@@ -362,6 +362,13 @@ func TestLoadCustomToolsKeepsFrozenConnectorTools(t *testing.T) {
 	if _, err := loadCustomTools(context.Background(), c, "default", []string{"gh_search"}); err == nil {
 		t.Fatal("a frozen connector tool that stays unreadable must fail startup")
 	}
+	// A frozen tool that was deleted after dispatch fails startup as well.
+	reads.Store(0)
+	t.Setenv(workerenv.ConnectorToolDigests, `{"gh_missing":"digest-b"}`)
+	if _, err := loadCustomTools(context.Background(), c, "default", []string{"gh_missing"}); err == nil {
+		t.Fatal("a frozen connector tool that no longer exists must fail startup")
+	}
+	reads.Store(-1000)
 	// A tool the Job did not freeze is still skipped with a warning.
 	t.Setenv(workerenv.ConnectorToolDigests, "")
 	loaded, err = loadCustomTools(context.Background(), c, "default", []string{"gh_search"})

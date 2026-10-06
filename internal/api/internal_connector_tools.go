@@ -447,9 +447,12 @@ func connectorToolEffectRequest(run connectorToolRun) map[string]any {
 }
 
 // connectorBindingDigest names a frozen Connection without exposing more
-// than its policy, UID, and generation.
+// than its policy, UID, generation, and grant sequence. The grant sequence
+// separates consents to the same Connection object, matching the digest the
+// ACP broker records, so audit can tell which consent authorized a call.
 func connectorBindingDigest(binding corev1alpha1.ConnectionBinding) string {
-	sum := sha256.Sum256([]byte(binding.PolicyName + "\x00" + binding.UID + "\x00" + strconv.FormatInt(binding.Generation, 10)))
+	sum := sha256.Sum256([]byte(binding.PolicyName + "\x00" + binding.UID + "\x00" + strconv.FormatInt(binding.Generation, 10) +
+		"\x00" + strconv.FormatInt(binding.GrantSequence, 10)))
 	return hex.EncodeToString(sum[:])
 }
 
