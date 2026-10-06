@@ -49,6 +49,26 @@ describe('Sidebar', () => {
     expect(screen.getByText('Tools')).toBeInTheDocument()
   })
 
+  it('asks the connectors API when chat is off and hides Connectors on 501', async () => {
+    server.use(
+      http.get('/api/v1/chat/config', () => HttpResponse.json({ error: 'not found' }, { status: 404 })),
+      http.get('/api/v1/connectors', () => HttpResponse.json({ error: 'connectors are not enabled on this controller' }, { status: 501 })),
+    )
+    render(<Sidebar />)
+    await waitFor(() => expect(screen.queryByText('Connectors')).not.toBeInTheDocument())
+  })
+
+  it('keeps Connectors when chat is off but connectors answer', async () => {
+    let probed = false
+    server.use(
+      http.get('/api/v1/chat/config', () => HttpResponse.json({ error: 'not found' }, { status: 404 })),
+      http.get('/api/v1/connectors', () => { probed = true; return HttpResponse.json({ items: [] }) }),
+    )
+    render(<Sidebar />)
+    await waitFor(() => expect(probed).toBe(true))
+    expect(screen.getByText('Connectors')).toBeInTheDocument()
+  })
+
   it('active nav item has correct styling', () => {
     render(<Sidebar />)
     const dashboardLink = screen.getByText('Dashboard').closest('a')

@@ -27,6 +27,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/metrics"
+	toolspkg "github.com/orka-agents/orka/internal/tools"
 )
 
 func TestContextTokenAllowedToolsFiltersInjectedProxyTools(t *testing.T) {
@@ -355,5 +356,36 @@ func TestConnectorReadToolAuthorizerRecordsAuditFailures(t *testing.T) {
 		if connectorReadToolAuthorizer(&withScope, authz, true) != nil {
 			t.Fatalf("%s: a token with the connector-read scope needs no check", tc.mode)
 		}
+	}
+}
+
+// TestResponsesWiresConnectorSettings covers the OpenAI Responses endpoint:
+// it offers list_connections and resolves linked accounts exactly as Chat
+// Completions does when connectors are enabled.
+func TestResponsesWiresConnectorSettings(t *testing.T) {
+	handler, app := setupTestOpenAIHandler()
+	handler.config.ConnectorsEnabled = true
+	var factoryCalls int
+	handler.config.LinkedAccounts = func(string, *corev1alpha1.RequestedBy) toolspkg.LinkedAccountCredentials {
+		factoryCalls++
+		return nil
+	}
+	if setup := handler.responsesCoordinatorSetup("default"); !setup.ConnectorsEnabled {
+		t.Fatal("the Responses coordinator setup must carry ConnectorsEnabled")
+	}
+	app.Get("/ctx", func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{AuthType: AuthTypeOIDC, Subject: "alice", Issuer: "https://issuer.example.test"})
+		toolCtx := handler.responsesToolContext(c, "default", ProviderResolutionInfo{})
+		if toolCtx == nil || toolCtx.AuthorizeConnectorRead != nil {
+			t.Errorf("tool context = %+v, want connector reads allowed", toolCtx)
+		}
+		return c.SendStatus(http.StatusNoContent)
+	})
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/ctx", nil))
+	if err != nil || resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("probe = %v %v", resp, err)
+	}
+	if factoryCalls != 1 {
+		t.Fatalf("linked-account factory calls = %d, want 1", factoryCalls)
 	}
 }

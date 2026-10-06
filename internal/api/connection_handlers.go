@@ -422,19 +422,28 @@ func (h *Handlers) ListConnections(c fiber.Ctx) error {
 	if err := h.client.List(c.Context(), list, client.InNamespace(namespace)); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to list connections")
 	}
+	// Providers are read uncached, as credential resolution reads them, so
+	// informer lag never advertises a link resolution already refuses.
 	providers := &corev1alpha1.ConnectorProviderList{}
-	if err := h.client.List(c.Context(), providers, client.InNamespace(namespace)); err != nil {
+	if err := h.providerReader().List(c.Context(), providers, client.InNamespace(namespace)); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to list connector providers")
 	}
 	byName := make(map[string]*corev1alpha1.ConnectorProvider, len(providers.Items))
 	for i := range providers.Items {
 		byName[providers.Items[i].Name] = &providers.Items[i]
 	}
+	links := map[string]int{}
+	for i := range list.Items {
+		if connectionOwnedBy(&list.Items[i], ui) {
+			links[list.Items[i].Spec.ProviderRef.Name]++
+		}
+	}
 	items := make([]ConnectionResponse, 0, len(list.Items))
 	for i := range list.Items {
 		if connectionOwnedBy(&list.Items[i], ui) {
 			view := connectionResponse(&list.Items[i])
 			revalidateConnectionView(&view, &list.Items[i], byName[list.Items[i].Spec.ProviderRef.Name])
+			markDuplicateLink(&view, links[list.Items[i].Spec.ProviderRef.Name])
 			items = append(items, view)
 		}
 	}
@@ -453,7 +462,7 @@ func (h *Handlers) GetConnection(c fiber.Ctx) error {
 	}
 	view := connectionResponse(connection)
 	provider := &corev1alpha1.ConnectorProvider{}
-	switch err := h.client.Get(c.Context(), types.NamespacedName{Namespace: connection.Namespace, Name: connection.Spec.ProviderRef.Name}, provider); {
+	switch err := h.providerReader().Get(c.Context(), types.NamespacedName{Namespace: connection.Namespace, Name: connection.Spec.ProviderRef.Name}, provider); {
 	case err == nil:
 		revalidateConnectionView(&view, connection, provider)
 	case apierrors.IsNotFound(err):
@@ -461,7 +470,29 @@ func (h *Handlers) GetConnection(c fiber.Ctx) error {
 	default:
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to read connector provider")
 	}
+	owned := &corev1alpha1.ConnectionList{}
+	if err := h.client.List(c.Context(), owned, client.InNamespace(connection.Namespace)); err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, "failed to list connections")
+	}
+	links := 0
+	for i := range owned.Items {
+		if connectionOwnedBy(&owned.Items[i], ui) && owned.Items[i].Spec.ProviderRef.Name == connection.Spec.ProviderRef.Name {
+			links++
+		}
+	}
+	markDuplicateLink(&view, links)
 	return c.JSON(view)
+}
+
+// markDuplicateLink marks a link unusable when the person holds more than
+// one link to its provider: credential resolution refuses every one of them
+// as ambiguous, so none may be advertised as ready.
+func markDuplicateLink(view *ConnectionResponse, links int) {
+	if view == nil || links <= 1 {
+		return
+	}
+	view.Ready = false
+	view.Message = "you hold several links to this provider; disconnect the extra ones before its tools can run"
 }
 
 // CreateConnection creates (or reuses) the caller's Connection to a provider

@@ -48,8 +48,10 @@ const (
 )
 
 type connectorTestHarness struct {
-	t        *testing.T
-	app      *fiber.App
+	t   *testing.T
+	app *fiber.App
+	// handlers lets a test replace the uncached reader to model informer lag.
+	handlers *Handlers
 	client   client.Client
 	store    *sqlite.Store
 	identity *UserInfo
@@ -266,6 +268,7 @@ func buildConnectorTestHarness(t *testing.T, authz ContextTokenAuthorizationConf
 			},
 		},
 	})
+	h.handlers = handlers
 	h.identity = &UserInfo{AuthType: AuthTypeOIDC, Username: "alice", Subject: "alice", Issuer: connectorTestIssuer, Namespace: connectorTestNamespace}
 	app := fiber.New()
 	app.Use(func(c fiber.Ctx) error {
@@ -1943,5 +1946,68 @@ func TestConnectionListIncludesUnlabeledOwnedConnections(t *testing.T) {
 	resp, raw := h.do(http.MethodGet, "/api/v1/connections", nil)
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(raw), created.Connection.Name) {
 		t.Fatalf("list = %d %s, want the unlabeled owned Connection", resp.StatusCode, raw)
+	}
+}
+
+// TestConnectionViewsReadProvidersUncached covers informer lag after a
+// provider change: the views judge the provider as the API server holds it,
+// as credential resolution does, not as the cache last saw it.
+func TestConnectionViewsReadProvidersUncached(t *testing.T) {
+	h := newConnectorTestHarness(t, acceptedTestProvider())
+	created := h.create("readOnly")
+	h.link(created)
+	current := acceptedTestProvider()
+	current.Spec.OAuth.ClientID = "rotated-client"
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	h.handlers.apiReader = fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(current).Build()
+	for _, path := range []string{"/api/v1/connections/" + created.Connection.Name, "/api/v1/connections"} {
+		resp, raw := h.do(http.MethodGet, path, nil)
+		if resp.StatusCode != http.StatusOK || !strings.Contains(string(raw), `"ready":false`) || !strings.Contains(string(raw), "changed since you consented") {
+			t.Fatalf("GET %s = %d %s, want the uncached provider's verdict", path, resp.StatusCode, raw)
+		}
+	}
+}
+
+// TestConnectionViewsMarkDuplicateLinksUnready covers a person holding two
+// links to one provider: resolution refuses both as ambiguous, so neither
+// view advertises a usable link.
+func TestConnectionViewsMarkDuplicateLinksUnready(t *testing.T) {
+	h := newConnectorTestHarness(t, acceptedTestProvider())
+	created := h.create("readOnly")
+	h.link(created)
+	stored := &corev1alpha1.Connection{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: created.Connection.Name}, stored); err != nil {
+		t.Fatal(err)
+	}
+	extra := &corev1alpha1.Connection{
+		ObjectMeta: metav1.ObjectMeta{Name: "github-extra", Namespace: connectorTestNamespace},
+		Spec:       stored.Spec,
+	}
+	if err := h.client.Create(context.Background(), extra); err != nil {
+		t.Fatal(err)
+	}
+	extra.Status = stored.Status
+	if err := h.client.Status().Update(context.Background(), extra); err != nil {
+		t.Fatal(err)
+	}
+	var list struct {
+		Items []ConnectionResponse `json:"items"`
+	}
+	resp, raw := h.do(http.MethodGet, "/api/v1/connections", nil)
+	if resp.StatusCode != http.StatusOK || json.Unmarshal(raw, &list) != nil || len(list.Items) != 2 {
+		t.Fatalf("list = %d %s", resp.StatusCode, raw)
+	}
+	for _, item := range list.Items {
+		if item.Ready || !strings.Contains(item.Message, "several links") {
+			t.Fatalf("listed %s = %+v, want unready as a duplicate", item.Name, item)
+		}
+	}
+	for _, name := range []string{created.Connection.Name, extra.Name} {
+		var got ConnectionResponse
+		resp, raw := h.do(http.MethodGet, "/api/v1/connections/"+name, nil)
+		if resp.StatusCode != http.StatusOK || json.Unmarshal(raw, &got) != nil || got.Ready || !strings.Contains(got.Message, "several links") {
+			t.Fatalf("get %s = %d %s, want unready as a duplicate", name, resp.StatusCode, raw)
+		}
 	}
 }
