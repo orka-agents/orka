@@ -6,12 +6,12 @@ Orka is a Kubernetes-native task execution platform that manages Jobs and Pods f
 
 - **Never commit, log, or print credentials** — API keys, tokens, or secrets of any kind. Use Kubernetes Secrets or env vars.
 - **No binaries in the repository** — put build artifacts in `bin/` (gitignored) or CI release pipelines.
-- **Scope discipline** — implement exactly what was asked, nothing more.
+- **Scope discipline** — implement exactly what was asked, nothing more. Report incidental, out-of-scope findings rather than fixing them, unless necessary for the requested outcome.
 - **Never push to `main`.** Push to the current branch after a change when it is not `main`.
 - **Transaction-token integration is fail-closed** — never store raw TxTokens in Task specs/status/logs. Use owner-referenced Secrets for child tokens, safe metadata/digests for audit, subset checks for child scopes, and fail-closed TTS exchanges for outbound scopes.
 - **Never edit generated files** (below), and never delete `// +kubebuilder:scaffold:*` comments.
 
-## Generated — do not edit
+## Review before landing
 
 For non-trivial code changes, run `$autoreview` (`.agents/skills/autoreview/SKILL.md`) before final/commit/ship and keep going until there are no accepted/actionable findings, unless the change is trivial/docs-only, equivalent manual review already happened, or the human opts out.
 
@@ -35,7 +35,7 @@ make docker-build-all   # Controller, AI/general workers, ACP runtimes, publishe
 make deploy IMG=<repo>@sha256:<digest> ACP_CODEX_RUNTIME_IMG=<repo>@sha256:<digest> ACP_CLAUDE_RUNTIME_IMG=<repo>@sha256:<digest> ACP_COPILOT_RUNTIME_IMG=<repo>@sha256:<digest> ACP_OPENCODE_RUNTIME_IMG=<repo>@sha256:<digest> WORKSPACE_PUBLISHER_IMG=<repo>@sha256:<digest>
 ```
 
-UI: `cd ui && bun install && bun run dev` (dev server on :5173). See @website/docs/development/development.md for full commands.
+UI: `cd ui && bun install && bun run dev` (dev server on :5173). See `website/docs/development/development.md` for full commands.
 
 For testing against a local Kubernetes cluster, use the `$kindctl` skill to manage repo/worktree-scoped kind clusters without touching the global kubeconfig.
 
@@ -66,8 +66,6 @@ Single test: `go test ./internal/api/ -run TestHandlerName -v`
 - `PROJECT` — kubebuilder CLI
 - `ui/src/routeTree.gen.ts` — TanStack Router
 
-Do NOT delete `// +kubebuilder:scaffold:*` comments.
-
 ## Code Style
 
 - Use `orka.ai` and its subdomains for Orka domains, Kubernetes API groups, and label/annotation prefixes. Use `ai.orka.*` for reverse-domain identifiers such as Docker labels.
@@ -75,18 +73,20 @@ Do NOT delete `// +kubebuilder:scaffold:*` comments.
 - LLM tool args for nested objects arrive as `map[string]any`, not strings — always type-switch
 - Put model-readable tool constraints in JSON Schema (`maximum`, `minimum`, `enum`, `default`), then validate and enforce them again in `Execute`; schema is guidance, not a runtime trust boundary
 - Memory features are governance-first: `remember` and `propose_memory` create review proposals, not durable memories
-- Kontxt integration is fail-closed: never store raw TxTokens in Task specs/status/logs; use owner-referenced Secrets for child tokens, safe metadata/digests for audit, subset checks for child scopes, and fail-closed TTS exchanges for outbound scopes.
 
 ## Gotchas
 
 - Worker filesystem is read-only except `/tmp`, `/home/worker`, and `/workspace`
-- `make build` requires UI assets — run `make ui-build` first (or `ensure-ui-embed` creates a stub)
+- Go builds embed `internal/uiembed/dist`: `make build` builds the UI itself and `make vet`/`lint`/`test` create a stub, but in a fresh checkout run `make ensure-ui-embed` before raw `go build`/`go vet`/`go test`
 - AI worker truncates messages on context overflow — keeps system prompt + newest, drops middle atomically with structured metadata
 - `code_exec` timeout is clamped to 60s — a larger caller value becomes 60s, not an error. 30s is the default only when the caller supplies none
-- Built-in AI worker tools: `web_search`, `code_exec`, `file_read`, `web_fetch`, `file_write`, `request_approval`. Only the first five are proxied through the OpenAI/Anthropic compatibility endpoints (`builtinProxyTools`)
+- Built-in AI worker tools: `web_search`, `code_exec`, `file_read`, `web_fetch`, `file_write`, `request_approval`, and gateway-only `reply_in_conversation` (also registered in the production ACP broker). Reply accepts only `content`, requires authenticated durable gateway origin and permitted tool/transaction policy, and does not stop the normal tool loop. External ACP profiles must explicitly opt in before session freezing. Only the first five tools are proxied through the OpenAI/Anthropic compatibility endpoints (`builtinProxyTools`)
 - Built-in agent runtimes (`codex`, `claude`, `copilot`, `opencode`) use only the `orka.harness.v2` ACP RuntimePool path; there is no per-Task Job or legacy fallback.
-- `Task.spec.execution.workspace` is flag-gated behind `--acp-workspace-dispatch-enabled` plus the provider flag: `agent-sandbox` (`--agent-sandbox-enabled`, `templateRef` forbidden — SandboxClaim hosts the supervisor) or `substrate` (`--substrate-enabled`, infrastructure `templateRef` required — a gVisor Actor hosts it via a controller-derived ActorTemplate; the native cold path follows ADR 0031; authenticated DataOnly checkpointing precedes exact worker Pod termination and source Actor deletion). Each binds a dedicated single-session `acp-ws-*` RuntimePool; `retain`, boot/pool/snapshot/hibernation, legacy-path `onDetach`, and harness-v1 requests fail closed, and provider-native identifiers never enter Task status (ADRs 0024/0025/0031).
-- `Task.spec.execution.workspace.classRef` (with `--enable-workspace-provider-api` plus the dispatch/provider flags) binds the same ACP path to the controller-first `ExecutionWorkspaceClass` lifecycle: reserved adapter `controllerName acp.workspace.orka.ai/runtime-pool`, `RuntimeProviderConfig`/`RuntimeWorkspaceProfile` parameter kinds, frozen class identity in the execution snapshot, and epoch-fenced Task attachment. `Delete` is always executable; `Suspend` is executable only for session-reused classes whose profile permits `DataOnly` suspension: substrate via `substrate.suspend.mode` (derived template renders a DurableDir volume with explicit `Data`/`Data`/`ColdBoot` snapshot policy) or agent-sandbox via `agentSandbox.suspend` (the claim requests one durable workspace PVC — forcing a cold start — and suspension patches the exact Sandbox to `operatingMode: Suspended`). Resume rotates bootstrap material and cold-boots against preserved data. Native Substrate uses a fresh Actor from an immutable Tag and a new template revision; agent-sandbox refreshes its Sandbox blueprint. Public ExecutionWorkspaceCheckpoint exports require source use permission, and restoreFrom requires checkpoint use permission. Retained deletion policies and pooled classes fail closed until retention lands (ADRs 0026/0027/0028).
+- Execution workspaces (`Task.spec.execution.workspace`, including `classRef`) are flag-gated (`--acp-workspace-dispatch-enabled` plus `--agent-sandbox-enabled` or `--substrate-enabled`; `classRef` also needs `--enable-workspace-provider-api`), bind a dedicated single-session `acp-ws-*` RuntimePool, and fail closed on unsupported options, including pooled classes, harness-v1, and retention past workspace deletion. For any change touching workspace admission, RBAC, runtime auth, checkpoints, or cleanup:
+  - Class identity is frozen in the execution snapshot; Task attachment is exclusive and epoch-fenced; provider-native identifiers never enter Task status.
+  - Checkpoint export needs `use` on the source workspace; `restoreFrom` needs `use` on the checkpoint.
+  - Suspension preserves data only, never process memory, and is reported only after the exact worker Pod is observed gone; resume cold-boots with rotated bootstrap credentials.
+  - Read `docs/adr/README.md` and ADRs 0024–0031 first (0031 supersedes parts of 0027/0030).
 - `Task.spec.workspace` is the only agent repository surface. Keep clone/read credentials in `readCredentialRef` and publication/forge credentials in `publicationCredentialRef`; neither enters the ACP process tree.
 - RuntimePools are controller-owned, digest-pinned, scale-to-zero resources. Only `Serving` + `Accepting` admits new RuntimeSessions; drain/finalization must complete before replacement or scale-down.
 - Safe v2 probes are `GET /v2/health` and `GET /v2/capabilities`; status and all mutations require controller authentication plus operation-scoped authorization and exact fences.

@@ -371,7 +371,9 @@ func (p gatewayTaskPolicyEvaluator) allows(t *testing.T, operation apiserveradmi
 	attributes := apiserveradmission.NewAttributesRecord(newRuntimeObject, oldRuntimeObject, kind, admissionTestNamespace, admissionTestTaskName,
 		resource, subresource, operation, nil, false, &user.DefaultInfo{Name: username})
 	versioned := &apiserveradmission.VersionedAttributes{
-		Attributes: attributes, VersionedKind: kind, VersionedObject: newRuntimeObject, VersionedOldObject: oldRuntimeObject,
+		Attributes: attributes, VersionedKind: kind,
+		VersionedObject:    apiserveradmission.NewLazyObject(newRuntimeObject),
+		VersionedOldObject: apiserveradmission.NewLazyObject(oldRuntimeObject),
 	}
 	request := admissioncel.CreateAdmissionRequest(attributes, metav1.GroupVersionResource(resource), metav1.GroupVersionKind(kind))
 	ctx := p.compiler.CreateContext(context.Background())

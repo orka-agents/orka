@@ -13,7 +13,12 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-const defaultEpochCASRetries = 16
+const (
+	// A crashed process can leave a two-minute control-store mutation lease.
+	// Wait beyond its expiry without weakening the lease's fencing checks.
+	defaultEpochAcquisitionTimeout = 3 * time.Minute
+	defaultEpochCASMaxRetryDelay   = time.Second
+)
 
 // ControllerEpochManager acquires one durable epoch after controller-runtime
 // leader election. Every ACP control-store mutation must use CurrentFence so a
@@ -59,7 +64,9 @@ func (m *ControllerEpochManager) Start(ctx context.Context) error {
 	if m.HolderID == "" {
 		return fmt.Errorf("controller epoch holder ID is required")
 	}
-	current, err := readControllerEpoch(ctx, m.Store, m.Name)
+	acquisitionCtx, cancelAcquisition := context.WithTimeout(ctx, defaultEpochAcquisitionTimeout)
+	defer cancelAcquisition()
+	current, err := readControllerEpoch(acquisitionCtx, m.Store, m.Name)
 	if err != nil {
 		return err
 	}
@@ -68,8 +75,11 @@ func (m *ControllerEpochManager) Start(ctx context.Context) error {
 		return err
 	}
 	var acquired *store.ControllerEpoch
-	for attempt := range defaultEpochCASRetries {
-		candidate, casErr := m.Store.CompareAndSwapControllerEpoch(ctx, pending.change)
+	for attempt := 0; ; attempt++ {
+		if err := acquisitionCtx.Err(); err != nil {
+			return fmt.Errorf("advance controller epoch: %w", err)
+		}
+		candidate, casErr := m.Store.CompareAndSwapControllerEpoch(acquisitionCtx, pending.change)
 		err = casErr
 		if err == nil {
 			if !controllerEpochMatchesCAS(candidate, pending.change) {
@@ -81,7 +91,7 @@ func (m *ControllerEpochManager) Start(ctx context.Context) error {
 		if !errors.Is(err, store.ErrConflict) {
 			return fmt.Errorf("advance controller epoch: %w", err)
 		}
-		observed, readErr := readControllerEpoch(ctx, m.Store, m.Name)
+		observed, readErr := readControllerEpoch(acquisitionCtx, m.Store, m.Name)
 		if readErr != nil {
 			return fmt.Errorf("reconcile controller epoch CAS conflict: %w", readErr)
 		}
@@ -104,15 +114,14 @@ func (m *ControllerEpochManager) Start(ctx context.Context) error {
 		if acquired != nil {
 			break
 		}
+		delay := min(time.Duration(attempt+1)*10*time.Millisecond, defaultEpochCASMaxRetryDelay)
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(time.Duration(attempt+1) * 10 * time.Millisecond):
+		case <-acquisitionCtx.Done():
+			return fmt.Errorf("controller epoch acquisition did not converge: %w; last CAS conflict: %v", acquisitionCtx.Err(), casErr)
+		case <-time.After(delay):
 		}
 	}
-	if acquired == nil {
-		return fmt.Errorf("controller epoch CAS did not converge after %d attempts", defaultEpochCASRetries)
-	}
+	cancelAcquisition()
 	for i, mirror := range m.Mirrors {
 		if mirror == nil {
 			return fmt.Errorf("controller epoch mirror %d is nil", i)

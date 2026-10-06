@@ -27,7 +27,7 @@ set -Eeuo pipefail
 
 cluster_name="${ORKA_DEMO_CLUSTER:-orka-demo}"
 # Must match the sigs.k8s.io/agent-sandbox module version in go.mod.
-agent_sandbox_version="${ORKA_AGENT_SANDBOX_VERSION:-v1.0.0}"
+agent_sandbox_version="${ORKA_AGENT_SANDBOX_VERSION:-v1.0.3}"
 demo_namespace="${DEMO_NAMESPACE:-orka-system}"
 orka_namespace="${ORKA_NAMESPACE:-orka-system}"
 controller_deployment="${ORKA_CONTROLLER_DEPLOYMENT:-orka-controller-manager}"

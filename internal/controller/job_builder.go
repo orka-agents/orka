@@ -447,6 +447,8 @@ func buildTaskJobName(task *corev1alpha1.Task) string {
 // JobBuildOptions carries optional inputs that affect Job rendering while keeping
 // the historical Build signature stable.
 type JobBuildOptions struct {
+	// GatewayReplyEligible is resolved from an exact durable event/TaskUID binding.
+	GatewayReplyEligible        bool
 	ResolvedApprovalsJSON       string
 	RepositoryMonitorValidation bool
 }
@@ -780,6 +782,7 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 	envVars = setControllerEnv(envVars, workerenv.ResultEndpoint, fmt.Sprintf("%s/internal/v1/results/%s/%s", b.ControllerURL, task.Namespace, task.Name))
 	envVars = setControllerEnv(envVars, workerenv.ControllerURL, b.ControllerURL)
 	envVars = setControllerEnvValue(envVars, workerenv.AITools, "")
+	envVars = setControllerEnvValue(envVars, workerenv.GatewayReplyEnabled, "")
 	envVars = setControllerEnvValue(envVars, workerenv.CoordinationEnabled, "")
 	envVars = setControllerEnvValue(envVars, workerenv.AutonomousMode, "")
 	envVars = setControllerEnvValue(envVars, workerenv.ResolvedApprovals, "")
@@ -819,6 +822,11 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 	// Add AI-specific env vars
 	if task.Spec.Type == corev1alpha1.TaskTypeAI {
 		envVars = b.addAIEnvVars(ctx, envVars, task, agent, provider)
+		names := aitools.ResolveWithGatewayReply(task, agent, opts.GatewayReplyEligible)
+		envVars = setControllerEnvValue(envVars, workerenv.AITools, strings.Join(names, ","))
+		if slices.Contains(names, aitools.GatewayReplyToolName) {
+			envVars = setControllerEnvValue(envVars, workerenv.GatewayReplyEnabled, "true")
+		}
 	}
 
 	if task.Spec.Type == corev1alpha1.TaskTypeContainer {
