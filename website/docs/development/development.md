@@ -168,6 +168,13 @@ Default kind CNI checks policy objects without proving packet enforcement.
 See the [shared proof instructions](https://github.com/orka-agents/orka-workspace/blob/main/hack/external-workspace-e2e/README.md)
 for prerequisites, frozen source/image evidence, and private artifact handling.
 
+The additional `scripts/external-substrate-core-e2e.sh proof` runs an actual Task
+through deployed Core and native provider controllers. It verifies authenticated
+Serving on port 80, RuntimeSession execution, persisted result, and exact native,
+Core pool, and credential retirement. Follow the
+[native Core proof instructions](https://github.com/orka-agents/orka-workspace/blob/f4495c5/hack/external-substrate-e2e/README.md#actual-core-and-deployed-provider-task-proof)
+after installing its dedicated backend cluster.
+
 `scripts/external-workspace-upgrade-e2e.sh` uses the same released core image to
 prove stock startup rejects retained legacy objects, even after old backend
 settings have been pruned by the new CRD. It creates isolated synthetic records,

@@ -198,8 +198,13 @@ The [external Substrate proof](https://github.com/orka-agents/orka-workspace/blo
 uses an actual gVisor worker, verifies confinement labels and policy before native
 Resume, writes a filesystem marker, captures data, observes exact worker/Actor
 cleanup, and restores that marker in a fresh process after source deletion. It
-proves native provider lifecycle and checkpoint behavior. Actual authenticated
-core RuntimeSession and Task execution is covered by the
-[separate fake-provider proof](https://github.com/orka-agents/orka-workspace/blob/main/hack/external-workspace-e2e/README.md).
-The standalone native proof does not claim real core credential bootstrap or
-packet enforcement with kind's default CNI.
+proves native provider lifecycle and checkpoint behavior. Its standalone lane
+uses fixture Core admission.
+
+The [native Core Task proof](https://github.com/orka-agents/orka-workspace/blob/f4495c5/hack/external-substrate-e2e/README.md#actual-core-and-deployed-provider-task-proof)
+also passed with deployed Core and provider controllers. It verifies real
+fail-closed Task admission, sealed bootstrap, authenticated Serving on port 80,
+RuntimeSession execution, and a persisted prompt result. Exact Actor, worker,
+private pool, Core pool, and credential retirement are required. The agent is
+deterministic and makes no external model requests. Neither native lane proves
+packet enforcement with kind's default CNI; full-memory restore remains gated.
