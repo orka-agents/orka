@@ -1064,3 +1064,32 @@ func TestResolveRechecksDisconnectAfterReadingCustody(t *testing.T) {
 		t.Fatalf("credential = %+v, want refusal once the disconnect began", got)
 	}
 }
+
+// countingCustody counts custody reads.
+type countingCustody struct {
+	*sqlite.Store
+	reads int
+}
+
+func (c *countingCustody) GetConnectorCredential(ctx context.Context, ref store.ConnectorCredentialRef) (store.ConnectorCredential, error) {
+	c.reads++
+	return c.Store.GetConnectorCredential(ctx, ref)
+}
+
+// TestResolveRefusesWritesOnReadOnlyLinksBeforeCustody covers a write tool
+// on a readOnly link near expiry: it is refused before custody is read, so it
+// can never refresh, rotate, or shred the credential.
+func TestResolveRefusesWritesOnReadOnlyLinksBeforeCustody(t *testing.T) {
+	h := newHarness(t)
+	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", TokenType: "bearer", ExpiresAt: h.now.Add(30 * time.Second), Scopes: []string{"repo"}})
+	counting := &countingCustody{Store: h.store}
+	h.source.Credentials = counting
+	req := h.request()
+	req.Tool.Class = corev1alpha1.AgentRuntimeBrokeredToolClassWrite
+	if _, err := h.source.ResolveConnectionCredential(context.Background(), req); err == nil || !strings.Contains(err.Error(), "readOnly") {
+		t.Fatalf("err = %v, want the readOnly refusal", err)
+	}
+	if counting.reads != 0 || h.refresher.calls.Load() != 0 {
+		t.Fatalf("custody reads = %d refreshes = %d, want none", counting.reads, h.refresher.calls.Load())
+	}
+}

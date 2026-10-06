@@ -85,6 +85,10 @@ type ResolveRequest struct {
 	// them against the provider's curated schema before any credential is
 	// resolved, so a rejected call never refreshes or shreds custody.
 	Arguments json.RawMessage
+	// MCPBacked marks a Tool whose requests go to an MCP actor endpoint
+	// rather than its declared URL; connection mode refuses it before any
+	// credential work.
+	MCPBacked bool
 }
 
 // ToolBinding is the executing Tool's identity for connector checks.
@@ -452,6 +456,16 @@ func (r *KubernetesResolver) resolveConnection(ctx context.Context, policy *core
 	requester := req.Requester
 	if requester == nil || strings.TrimSpace(requester.Issuer) == "" || strings.TrimSpace(requester.Subject) == "" {
 		return Resolution{}, errors.New("connection outbound access requires a Task with a verified requester")
+	}
+	// The person's token is bound to the exact curated destination. A Tool
+	// that sends to an MCP actor endpoint, or whose URL is a template the
+	// call's arguments would rewrite, can never satisfy that, so it is
+	// refused before any credential work.
+	if req.MCPBacked {
+		return Resolution{}, errors.New("connection outbound access policies are not supported on MCP-backed tools")
+	}
+	if strings.Contains(req.Tool.URL, "{{") {
+		return Resolution{}, errors.New("connection outbound access requires a Tool URL without template placeholders")
 	}
 	frozen, ok := req.FrozenConnections[policy.Name]
 	if !ok || strings.TrimSpace(frozen.UID) == "" {
