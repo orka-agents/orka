@@ -119,7 +119,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReadyOutcome(ctx context.
 		return repositoryMonitorStatusPending, "Waiting for pull request merge conflicts to be resolved.", nil
 	}
 	if item.LastVerdict != repositoryMonitorReviewVerdictPassed || item.LastReviewedHeadSHA != pr.HeadSHA {
-		if item.LastVerdict == repositoryMonitorReviewVerdictFailed || item.LastVerdict == repositoryMonitorReviewVerdictNeedsHuman || item.LastVerdict == repositoryMonitorReviewVerdictSecuritySensitive {
+		if item.LastReviewedHeadSHA == pr.HeadSHA && (item.LastVerdict == repositoryMonitorReviewVerdictFailed || item.LastVerdict == repositoryMonitorReviewVerdictNeedsHuman || item.LastVerdict == repositoryMonitorReviewVerdictSecuritySensitive) {
 			return repositoryMonitorStatusFailure, "Review did not establish readiness.", nil
 		}
 		return repositoryMonitorStatusPending, "Waiting for a clean review of this commit.", nil

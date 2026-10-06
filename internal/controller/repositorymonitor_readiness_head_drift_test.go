@@ -145,6 +145,46 @@ func TestRepositoryMonitorReadinessRetriesDepartedHeadWrite(t *testing.T) {
 	f.assertNoTasks(t)
 }
 
+func TestRepositoryMonitorReadinessTerminalReviewRequiresCurrentHead(t *testing.T) {
+	for _, verdict := range []string{repositoryMonitorReviewVerdictFailed, repositoryMonitorReviewVerdictNeedsHuman, repositoryMonitorReviewVerdictSecuritySensitive} {
+		for _, current := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/current=%t", verdict, current), func(t *testing.T) {
+				f := newRepositoryMonitorReadinessHeadDriftFixture(t, false)
+				item, err := f.r.Store.GetMonitorItem(t.Context(), f.monitor.Namespace, f.monitor.Name, repositoryMonitorPullRequestKind, "1")
+				if err != nil {
+					t.Fatal(err)
+				}
+				item.LastReviewID, item.LastVerdict = "terminal-review", verdict
+				if err := f.r.Store.CreateReviewRecord(t.Context(), &store.ReviewRecord{
+					ID: item.LastReviewID, MonitorNamespace: f.monitor.Namespace, MonitorName: f.monitor.Name,
+					Kind: repositoryMonitorPullRequestKind, Number: item.Number, HeadSHA: item.HeadSHA, Verdict: verdict,
+				}); err != nil {
+					t.Fatal(err)
+				}
+				if err := f.r.Store.UpsertMonitorItem(t.Context(), item); err != nil {
+					t.Fatal(err)
+				}
+				want := repositoryMonitorStatusFailure
+				if !current {
+					f.listHead, f.detailHead = "new-head", "new-head"
+					want = repositoryMonitorStatusPending
+				}
+				pr := repositoryMonitorPullRequest{Number: item.Number, HeadSHA: f.listHead, State: repositoryMonitorItemStateOpen, BaseBranch: "main"}
+				item = repositoryMonitorItemFromPullRequest(f.monitor, pr, item)
+				if err := f.r.reconcileRepositoryMonitorReadiness(t.Context(), f.monitor, &pr, item); err != nil {
+					t.Fatal(err)
+				}
+				if got := f.latest[pr.HeadSHA]; got.State != want {
+					t.Fatalf("readiness=%+v, want %s", got, want)
+				}
+				if item.LastVerdict != verdict || item.LastReviewedHeadSHA != "old-head" {
+					t.Fatal("readiness rewrote historical review evidence")
+				}
+			})
+		}
+	}
+}
+
 type repositoryMonitorReadinessHeadDriftFixture struct {
 	r                *RepositoryMonitorReconciler
 	monitor          *corev1alpha1.RepositoryMonitor
