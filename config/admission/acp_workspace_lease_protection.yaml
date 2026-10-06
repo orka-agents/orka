@@ -1,0 +1,56 @@
+# ACP workspace coordination Leases (acp-suspend-quota-* and
+# acp-retention-fence-*) serialize suspension quota and idle-expiry admission.
+# Only the controller may write them; Kubernetes cleanup controllers may delete
+# them through owner references or namespace deletion. This is CEL rather than
+# a webhook so the guard never depends on a webhook endpoint, and so managed
+# control planes that refuse fail-closed Lease webhooks (AKS stop/start) still
+# accept the cluster. Patch the identity and namespace to match the controller,
+# exactly as for gateway_task_protection.yaml.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: acp-workspace-lease-protection
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: ORKA_NAMESPACE
+    resourceRules:
+    - apiGroups: ["coordination.k8s.io"]
+      apiVersions: ["v1"]
+      operations: ["CREATE", "UPDATE", "DELETE"]
+      resources: ["leases"]
+  matchConditions:
+  - name: reserved-acp-workspace-lease-name
+    expression: >-
+      request.?name.orValue('').startsWith('acp-suspend-quota-') ||
+      request.?name.orValue('').startsWith('acp-retention-fence-') ||
+      (request.operation == 'CREATE' &&
+      (object.metadata.?generateName.orValue('').startsWith('acp-suspend-quota-') ||
+      object.metadata.?generateName.orValue('').startsWith('acp-retention-fence-')))
+  variables:
+  - name: controllerNamespace
+    expression: "'ORKA_NAMESPACE'"
+  - name: controllerServiceAccount
+    expression: "'CONTROLLER_SA'"
+  - name: controllerUser
+    expression: "'system:serviceaccount:' + variables.controllerNamespace + ':' + variables.controllerServiceAccount"
+  - name: cleanupController
+    expression: >-
+      request.userInfo.username in [
+        'system:serviceaccount:kube-system:generic-garbage-collector',
+        'system:serviceaccount:kube-system:garbage-collector',
+        'system:serviceaccount:kube-system:namespace-controller',
+        'system:kube-controller-manager']
+  validations:
+  - expression: "request.userInfo.username == variables.controllerUser || (request.operation == 'DELETE' && variables.cleanupController)"
+    message: only the Orka controller may create, update, or delete ACP workspace coordination Leases
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: acp-workspace-lease-protection
+spec:
+  policyName: acp-workspace-lease-protection
+  validationActions: [Deny]
