@@ -1018,6 +1018,7 @@ func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *core
 			Timeout: toolHTTPTimeout(tool), TimeoutSet: tool.Spec.HTTP.Timeout != nil,
 		},
 		Arguments: args,
+		MCPBacked: isMCPSubstrateActorTool(tool) || prepared.mcp,
 	})
 	if err != nil {
 		return fmt.Errorf("resolve outbound access policy: %w", err)

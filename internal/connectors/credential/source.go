@@ -104,6 +104,12 @@ func (s *Source) ResolveConnectionCredential(ctx context.Context, req outboundac
 	if err != nil {
 		return outboundaccess.ConnectionCredential{}, err
 	}
+	// A write on a readOnly link is refused before custody is read, so a call
+	// that can never run never refreshes, rotates, or shreds the credential.
+	if req.Tool.Class == corev1alpha1.AgentRuntimeBrokeredToolClassWrite &&
+		(connection.Spec.Mode == "" || connection.Spec.Mode == corev1alpha1.ConnectionModeReadOnly) {
+		return outboundaccess.ConnectionCredential{}, errors.New("connection is readOnly; write tools are not available")
+	}
 	ref, err := connectors.CredentialRef(connection)
 	if err != nil {
 		return outboundaccess.ConnectionCredential{}, err
