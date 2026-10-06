@@ -74,6 +74,39 @@ func TestNativeSessionImportOwnershipAndRetry(t *testing.T) {
 	require.ErrorIs(t, err, store.ErrGatewayOwnedSession)
 }
 
+func TestNativeSessionRejectsChatTurnWithoutChangingCheckpoint(t *testing.T) {
+	for _, bound := range []bool{false, true} {
+		t.Run(map[bool]string{false: "staged import", true: "bound native Session"}[bound], func(t *testing.T) {
+			s := nativeTestStore(t, ":memory:")
+			request := nativeImportFixture(t, "imported", "private source history")
+			_, err := s.StageNativeSessionImport(t.Context(), request)
+			require.NoError(t, err)
+			uid := ""
+			if bound {
+				uid = "canonical-uid"
+				require.NoError(t, s.BindSessionCleanupIdentity(t.Context(), request.Namespace, request.SessionName, uid))
+			}
+			before, err := s.GetNativeSession(t.Context(), request.Namespace, request.SessionName, uid)
+			require.NoError(t, err)
+			created, err := s.AcquireChatTurn(t.Context(), &store.SessionRecord{
+				Namespace: request.Namespace, Name: request.SessionName, SessionType: store.SessionTypeChat,
+			}, "unrelated-chat", time.Now().Add(time.Minute))
+			require.False(t, created)
+			require.ErrorIs(t, err, store.ErrConflict)
+			after, err := s.GetNativeSession(t.Context(), request.Namespace, request.SessionName, uid)
+			require.NoError(t, err)
+			require.Equal(t, before, after)
+			session, err := s.GetSession(t.Context(), request.Namespace, request.SessionName)
+			require.NoError(t, err)
+			require.Zero(t, session.MessageCount)
+			require.Empty(t, session.Messages)
+			// A rejected chat must leave no lease blocking the first real Task.
+			require.NoError(t, s.AcquireLock(t.Context(), request.Namespace, request.SessionName, "agent-task", "agent-task-uid"))
+			require.NoError(t, s.ReleaseLock(t.Context(), request.Namespace, request.SessionName, "agent-task", "agent-task-uid"))
+		})
+	}
+}
+
 func TestNativeSessionCaptureMonotonicBoundary(t *testing.T) {
 	s := nativeTestStore(t, ":memory:")
 	ctx := t.Context()

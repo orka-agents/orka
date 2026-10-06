@@ -111,6 +111,9 @@ func TestMigrateExportInstallsAndReconcilesSamePlan(t *testing.T) {
 	}))
 	defer server.Close()
 	home, cwd, journal := t.TempDir(), t.TempDir(), t.TempDir()
+	if err := os.Chmod(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Chmod(journal, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -173,6 +176,39 @@ func TestMigrateRequiresStoppedSourceAndPrivateJournal(t *testing.T) {
 	}
 	if _, err := privateMigrationJournal(filepath.Join(home, "journal"), canonicalHome); err == nil {
 		t.Fatal("journal overlaps home")
+	}
+}
+
+func TestMigrateExportRejectsPublicHomeBeforeAPI(t *testing.T) {
+	serverCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serverCalls++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	binary := filepath.Join(t.TempDir(), "codex")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\nprintf 'codex-cli 0.160.0\\n'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	if err := os.Chmod(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "home")
+	if err := os.Symlink(home, link); err != nil {
+		t.Fatal(err)
+	}
+	for _, destination := range []string{home, link} {
+		if err := migrationCommand(t, server.URL, "export", "source", "--codex-home", destination, "--cwd", t.TempDir(), "--journal-dir", t.TempDir(), "--codex-bin", binary); err == nil {
+			t.Fatal("public destination accepted")
+		}
+	}
+	if serverCalls != 0 {
+		t.Fatal("public destination reached the API")
+	}
+	entries, err := os.ReadDir(home)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("rejected destination changed: %v", err)
 	}
 }
 

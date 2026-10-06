@@ -19,6 +19,9 @@ Codex 0.160.0 / codex-acp 2.1.1 runtime image. Private checkpoints use the
 controller's existing execution-snapshot encryption key with separate associated
 data. Retain that key with the SQLite backup.
 
+Deploy this schema on a new installation. Existing Orka databases are not
+upgraded in place; see [Upgrading](../operations/upgrading.md).
+
 ## Import a local thread
 
 Stop every Codex process using the source home before capture. `--source-stopped`
@@ -64,8 +67,9 @@ orka session migrate export migrated-review \
   --codex-bin /absolute/codex-0.160.0
 ```
 
-The destination must be a fresh isolated Codex home. The journal must be outside
-it and private, with directory mode `0700`. Authenticate the destination with
+The destination must be a fresh isolated Codex home with directory mode `0700`.
+The journal must be outside it and private, also with directory mode `0700`.
+Authenticate the destination with
 current local credentials and configure its provider before resuming the UUID.
 Migration does not copy source authentication or source policy into authority.
 

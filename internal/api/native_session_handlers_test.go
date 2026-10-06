@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	storetest "github.com/orka-agents/orka/internal/store/storetest"
@@ -106,6 +107,53 @@ func TestNativeSessionMigrationAPIImportExportAndConflict(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusNotFound, resp.StatusCode)
 	_ = resp.Body.Close()
+}
+
+func TestNativeSessionMigrationAPIRejectsChatBeforeProviderInvocation(t *testing.T) {
+	const providerType = "native-import-chat-admission-test"
+	provider := &chatMockProvider{name: providerType}
+	llm.RegisterProvider(providerType, func(llm.ProviderConfig) (llm.Provider, error) {
+		return provider, nil
+	})
+	s := nativeAPIStore(t)
+	app := nativeAPIApp(t, HandlersConfig{SessionStore: s}, nil)
+	client := fake.NewClientBuilder().WithScheme(newTestScheme()).WithRuntimeObjects(
+		providerCRD("default", "default", providerType, "test-model")...,
+	).Build()
+	config := DefaultChatConfig()
+	config.Provider = "default"
+	chat := newTestChatHandler(t, client, s, s, config)
+	app.Post("/api/v1/chat", chat.HandleChat)
+	snapshot := storetest.NativeSessionSnapshot(t, "private imported history")
+	response := nativeAPIRequest(t, app, http.MethodPost, "/sessions/imported/native", nativeSessionImportRequest{
+		OperationID: "import-operation", Data: snapshot.Data,
+	})
+	require.Equal(t, http.StatusCreated, response.StatusCode)
+	_ = response.Body.Close()
+
+	body, err := json.Marshal(ChatRequest{Message: "unrelated chat", SessionID: "imported", Namespace: "default"})
+	require.NoError(t, err)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/chat", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json")
+	response, err = app.Test(request, fiber.TestConfig{Timeout: 10 * time.Second})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusConflict, response.StatusCode)
+	_ = response.Body.Close()
+	require.Zero(t, provider.callCount)
+
+	session, err := s.GetSession(t.Context(), "default", "imported")
+	require.NoError(t, err)
+	require.Zero(t, session.MessageCount)
+	require.Empty(t, session.Messages)
+	response, err = app.Test(httptest.NewRequest(http.MethodGet, "/sessions/imported/native", nil), fiber.TestConfig{Timeout: 10 * time.Second})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, response.StatusCode)
+	var exported nativeSessionExportResponse
+	require.NoError(t, json.NewDecoder(response.Body).Decode(&exported))
+	_ = response.Body.Close()
+	require.Equal(t, snapshot.Data, exported.Data)
+	require.Equal(t, snapshot.DataDigest, exported.DataDigest)
 }
 
 func TestNativeSessionMigrationAPISessionRBAC(t *testing.T) {

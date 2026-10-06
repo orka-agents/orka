@@ -500,6 +500,16 @@ func (s *Store) AcquireChatTurn(
 	if err := ensureNativeSessionNameAvailableTx(ctx, tx, session.Namespace, session.Name); err != nil {
 		return false, err
 	}
+	var nativeSnapshot bool
+	if err := tx.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM native_session_snapshots WHERE namespace = ? AND session_name = ?)`,
+		session.Namespace, session.Name,
+	).Scan(&nativeSnapshot); err != nil {
+		return false, err
+	}
+	if nativeSnapshot {
+		return false, store.ConflictErrorf("native Session must continue through an agent Task")
+	}
 
 	if err := ensureNoSessionCleanupIntentTx(ctx, tx, session.Namespace, session.Name); err != nil {
 		return false, err

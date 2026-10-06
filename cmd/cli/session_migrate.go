@@ -42,7 +42,17 @@ func migrationDir(name string, create bool) (string, error) {
 			return "", err
 		}
 	}
-	return filepath.EvalSymlinks(abs)
+	dir, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", err
+	}
+	if create {
+		info, err := os.Stat(dir)
+		if err != nil || !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
+			return "", errors.New("migration destination must be a private directory (0700)")
+		}
+	}
+	return dir, nil
 }
 
 func privateMigrationJournal(name, home string) (string, error) {

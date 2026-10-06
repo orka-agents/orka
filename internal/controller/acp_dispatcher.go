@@ -1079,6 +1079,12 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		return d.requeueReservedTask(ctx, task, acpReservedRetryProfile, errors.New("runtime profile does not match the immutable execution snapshot"))
 	}
 	profile = bound.plan.Profile
+	if nativeErr := d.validateTaskNativeSessionRuntime(runtimeCtx, task, nativeSessionsSupported); nativeErr != nil {
+		if errors.Is(nativeErr, errNativeSessionRuntimeUnsupported) {
+			return d.rejectNativeSessionRuntime(ctx, task, attemptID, fence)
+		}
+		return d.requeueReservedTask(ctx, task, acpReservedRetrySessionPreparation, nativeErr)
+	}
 	promptLimits := harnessv2.DefaultProtocolLimits()
 	if bound.body.ExternalRuntime != nil {
 		promptLimits = bound.body.ExternalRuntime.Limits
@@ -1123,10 +1129,13 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	defer func() { endSessionTrace(retErr) }()
 	sessionExecution, err = d.prepareTaskSession(
 		sessionCtx, task, fence, runtimeFence.RuntimeProfileDigest, mcpBindingDigest,
-		runtimeFence.RuntimeInstanceID, runtimeFence.SupervisorBootID, lineage,
+		runtimeFence.RuntimeInstanceID, runtimeFence.SupervisorBootID, lineage, nativeSessionsSupported,
 	)
 	if err != nil {
 		endSessionTrace(err)
+		if errors.Is(err, errNativeSessionRuntimeUnsupported) {
+			return d.rejectNativeSessionRuntime(ctx, task, attemptID, fence)
+		}
 		if errors.Is(runtimeContextError(runtimeCtx), context.DeadlineExceeded) {
 			recoveredSession, cleanupErr := d.quiesceInterruptedTaskSessionPreparation(ctx, task, attemptID, fence)
 			if cleanupErr != nil {

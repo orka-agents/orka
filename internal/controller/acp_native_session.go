@@ -19,6 +19,7 @@ const nativeCaptureIntentAnnotation = "orka.ai/native-session-capture"
 const nativeInstallUnresolvedAnnotation = "orka.ai/native-session-install-unresolved"
 
 var errNativeSessionInstallUnresolved = fmt.Errorf("%w: native Session installation outcome is unresolved; original runtime home and frozen plan require receipt reconciliation", store.ErrNotReady)
+var errNativeSessionRuntimeUnsupported = fmt.Errorf("%w: staged native Session requires a Codex runtime advertising native sessions", store.ErrConflict)
 
 func (d *ACPDispatcher) retainNativeSessionInstall(ctx context.Context, task *corev1alpha1.Task, metadata harnessv2.MutationMetadata) error {
 	body, err := json.Marshal(metadata)
@@ -79,12 +80,44 @@ func (d *ACPDispatcher) loadTaskNativeSession(ctx context.Context, task *corev1a
 	return record, nil
 }
 
+// Reject an incompatible Task without binding a staged import to a new Session
+// control or acquiring its mutation lease. The preparation path checks again
+// before opening a turn in case an import was staged after this read.
+func (d *ACPDispatcher) validateTaskNativeSessionRuntime(ctx context.Context, task *corev1alpha1.Task, supported bool) error {
+	if supported || task.Spec.SessionRef == nil || d.nativeSessionStore() == nil {
+		return nil
+	}
+	control, err := d.Store.GetSessionControl(ctx, task.Namespace, task.Spec.SessionRef.Name)
+	if errors.Is(err, store.ErrNotFound) {
+		control = &store.SessionControl{SessionName: task.Spec.SessionRef.Name}
+	} else if err != nil {
+		return err
+	}
+	native, err := d.loadTaskNativeSession(ctx, task, control)
+	if err != nil {
+		return err
+	}
+	if native != nil {
+		return errNativeSessionRuntimeUnsupported
+	}
+	return nil
+}
+
+func (d *ACPDispatcher) rejectNativeSessionRuntime(ctx context.Context, task *corev1alpha1.Task, attemptID string, fence store.ControllerEpochFence) error {
+	reason := corev1alpha1.TaskExecutionReason("NativeSessionRuntimeUnsupported")
+	message := errNativeSessionRuntimeUnsupported.Error()
+	if err := d.transitionAttemptToFailed(ctx, attemptID, fence, "native-session-runtime-unsupported", reason, message); err != nil {
+		return err
+	}
+	return d.failTaskBeforeSessionBinding(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, reason, message)
+}
+
 func nativeRestoreForTask(session *acpTaskSession, request harnessv2.CreateRuntimeSessionRequest, supported bool) (*harnessv2.NativeSessionRestore, error) {
 	if session == nil || session.NativeSession == nil {
 		return nil, nil
 	}
 	if !supported || request.Profile.ProviderKind != runtimePoolProviderCodex {
-		return nil, fmt.Errorf("%w: staged native Session requires a Codex runtime advertising native sessions", store.ErrConflict)
+		return nil, errNativeSessionRuntimeUnsupported
 	}
 	snapshot := session.NativeSession.Snapshot
 	// Imported/captured runtime and policy identities never become destination
@@ -213,7 +246,7 @@ func (d *ACPDispatcher) captureTaskNativeSession(ctx context.Context, runtimeCli
 		return fmt.Errorf("capture private native Session; exact runtime evidence retained: %w", err)
 	}
 	session.NativeCapture = &store.NativeSessionRecord{
-		Namespace: task.Namespace, SessionName: task.Spec.SessionRef.Name, SessionUID: string(runtimeFence.RuntimeSessionUID),
+		Namespace: session.Turn.Lease.Session.Namespace, SessionName: session.Turn.Lease.Session.SessionName, SessionUID: session.Turn.Lease.Session.SessionUID,
 		Snapshot: response.Snapshot, RuntimeSessionGeneration: int64(runtimeFence.RuntimeSessionGeneration),
 		SourceOperationID: string(intent.Request.Metadata.OperationID),
 	}
