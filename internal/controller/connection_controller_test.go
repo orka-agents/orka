@@ -458,3 +458,25 @@ func TestConnectionReconcilerPersistsScopesGrantedOnlyChange(t *testing.T) {
 		t.Fatalf("ScopesGranted = %#v state = %q, want the scope change persisted", granted, stored.Status.State)
 	}
 }
+
+// TestConnectionReconcilerRefusesInvalidProviderReference covers a provider
+// reference no object could ever have: it is a stable invalid reference,
+// not a read failure retried forever.
+func TestConnectionReconcilerRefusesInvalidProviderReference(t *testing.T) {
+	scheme := connectorTestScheme(t)
+	connection := testConnection("tenant", "github-alice", "bad/name")
+	c := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(connection).WithStatusSubresource(&corev1alpha1.Connection{}).Build()
+	reconciler := &ConnectionReconciler{Client: c, Scheme: scheme}
+	key := types.NamespacedName{Namespace: "tenant", Name: "github-alice"}
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatalf("an invalid reference must not surface as a retryable error: %v", err)
+	}
+	stored := &corev1alpha1.Connection{}
+	if err := c.Get(context.Background(), key, stored); err != nil {
+		t.Fatal(err)
+	}
+	resolved := meta.FindStatusCondition(stored.Status.Conditions, corev1alpha1.ConnectionConditionProviderResolved)
+	if resolved == nil || resolved.Status != metav1.ConditionFalse || resolved.Reason != corev1alpha1.ConnectionReasonProviderMissing {
+		t.Fatalf("ProviderResolved = %#v, want False/ProviderMissing", resolved)
+	}
+}

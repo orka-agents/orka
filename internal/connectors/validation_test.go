@@ -256,6 +256,15 @@ func TestValidateProviderSpec(t *testing.T) {
 				p.Spec.OAuth.AdditionalAuthorizeParameters["hint"+strconv.Itoa(i)] = strings.Repeat("a", 500)
 			}
 		}, want: "encode to at most 2048 bytes"},
+		{name: "credential-shaped header name is not echoed", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].HTTP.Headers = map[string]string{"X-S3cr3t-Key": "v"}
+		}, want: "header whose name looks like a credential"},
+		{name: "oversized scope set in total", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.Scopes.Read, p.Spec.OAuth.Scopes.Write = nil, nil
+			for i := range 12 {
+				p.Spec.OAuth.Scopes.Read = append(p.Spec.OAuth.Scopes.Read, strconv.Itoa(i)+strings.Repeat("r", 200))
+			}
+		}, want: "oauth.scopes must encode to at most 2048 bytes"},
 		{name: "oversized scope", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.OAuth.Scopes.Read = []string{strings.Repeat("a", 257)}
 		}, want: "at most 256 bytes"},
@@ -379,7 +388,7 @@ func TestValidateProviderSpec(t *testing.T) {
 			}
 			// The message becomes public provider status: it never repeats
 			// a credential-bearing value from the spec.
-			if strings.Contains(issue.Message, "s3cr3t") || strings.Contains(issue.Message, "access_token") {
+			if strings.Contains(strings.ToLower(issue.Message), "s3cr3t") || strings.Contains(issue.Message, "access_token") {
 				t.Fatalf("issue echoed a credential-bearing value: %s", issue.Message)
 			}
 		})

@@ -17,6 +17,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -67,7 +68,14 @@ func (r *ConnectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	provider := &corev1alpha1.ConnectorProvider{}
-	err := r.Get(ctx, types.NamespacedName{Namespace: connection.Namespace, Name: connection.Spec.ProviderRef.Name}, provider)
+	var err error
+	// A name no provider could ever have is a stable invalid reference, not
+	// a read failure to retry forever.
+	if len(k8svalidation.IsDNS1123Subdomain(connection.Spec.ProviderRef.Name)) > 0 {
+		err = apierrors.NewNotFound(corev1alpha1.GroupVersion.WithResource("connectorproviders").GroupResource(), connection.Spec.ProviderRef.Name)
+	} else {
+		err = r.Get(ctx, types.NamespacedName{Namespace: connection.Namespace, Name: connection.Spec.ProviderRef.Name}, provider)
+	}
 	switch {
 	case apierrors.IsNotFound(err):
 		providerResolved.Status = metav1.ConditionFalse
