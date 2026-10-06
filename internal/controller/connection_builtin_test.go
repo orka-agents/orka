@@ -816,6 +816,18 @@ func TestRegistryACPMCPToolExecutorHandsRequesterToListConnections(t *testing.T)
 	if listTool.captured == nil || listTool.captured.AuthorizeConnectorRead != nil {
 		t.Fatalf("widened captured = %+v", listTool.captured)
 	}
+	// A transaction carrying only the legacy space-separated Scope is read
+	// the same way.
+	legacy := task.DeepCopy()
+	legacy.Spec.Transaction = &corev1alpha1.TaskTransaction{ID: "txn-3", Scope: "orka:tools:use orka:connectors:read"}
+	executor.Reader = f.reader(legacy)
+	listTool.captured = nil
+	if _, err := executor.ExecuteACPMCPTool(ctx, request, descriptor); err != nil {
+		t.Fatal(err)
+	}
+	if listTool.captured == nil || listTool.captured.AuthorizeConnectorRead != nil {
+		t.Fatalf("legacy scope captured = %+v", listTool.captured)
+	}
 	// Audit mode records but never narrows.
 	executor.EnforceTransactionCredentialAuth = false
 	executor.Reader = f.reader(narrowed)

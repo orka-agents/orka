@@ -220,7 +220,13 @@ func brokerConnectorReadAuthorizer(transaction *corev1alpha1.TaskTransaction, re
 	if !enforce || transaction == nil || len(readScopes) == 0 {
 		return nil
 	}
-	for _, scope := range transaction.Scopes {
+	// Scopes falls back to the legacy space-separated Scope, as the
+	// transaction-authority binder reads it.
+	scopes := transaction.Scopes
+	if len(scopes) == 0 {
+		scopes = strings.Fields(transaction.Scope)
+	}
+	for _, scope := range scopes {
 		if slices.Contains(readScopes, scope) {
 			return nil
 		}
