@@ -130,6 +130,7 @@ func (r *RepositoryMonitorReconciler) processIssueInventoryRun(ctx context.Conte
 		if err != nil && !errorsIsStoreNotFound(err) {
 			return selected, createdTasks, skipped, err
 		}
+		repositoryMonitorNormalizeLegacyIssuePhase(existing)
 		item := repositoryMonitorItemFromIssue(monitor, issue, existing)
 		if run.CommandEventID == "" && item.SkipReason == repositoryMonitorIssueSkipStoppedByCommand {
 			if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {

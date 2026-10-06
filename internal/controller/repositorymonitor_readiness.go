@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -18,12 +19,13 @@ import (
 )
 
 const (
-	repositoryMonitorStatusPending      = "pending"
-	repositoryMonitorStatusSuccess      = "success"
-	repositoryMonitorStatusFailure      = "failure"
-	repositoryMonitorStatusSubmitting   = "submitting"
-	repositoryMonitorReadinessOperation = "readiness_status"
-	repositoryMonitorReadinessSuccess   = "Orka workflow evidence is current. GitHub controls required approvals and merging."
+	repositoryMonitorStatusPending       = "pending"
+	repositoryMonitorStatusSuccess       = "success"
+	repositoryMonitorStatusFailure       = "failure"
+	repositoryMonitorStatusSubmitting    = "submitting"
+	repositoryMonitorReadinessOperation  = "readiness_status"
+	repositoryMonitorReadinessTargetKind = "commit"
+	repositoryMonitorReadinessSuccess    = "Orka workflow evidence is current. GitHub controls required approvals and merging."
 )
 
 func repositoryMonitorReadinessContext(monitor *corev1alpha1.RepositoryMonitor) string {
@@ -103,6 +105,9 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReadyOutcome(ctx context.
 	if repositoryMonitorAutomergeRepairStateBlocks(item.RepairState) {
 		return repositoryMonitorStatusPending, "Repair is in progress.", nil
 	}
+	if pr.MergeableState == "dirty" {
+		return repositoryMonitorStatusPending, "Waiting for pull request merge conflicts to be resolved.", nil
+	}
 	if item.LastVerdict != repositoryMonitorReviewVerdictPassed || item.LastReviewedHeadSHA != pr.HeadSHA {
 		if item.LastVerdict == repositoryMonitorReviewVerdictFailed || item.LastVerdict == repositoryMonitorReviewVerdictNeedsHuman || item.LastVerdict == repositoryMonitorReviewVerdictSecuritySensitive {
 			return repositoryMonitorStatusFailure, "Review did not establish readiness.", nil
@@ -136,7 +141,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReadyOutcome(ctx context.
 // GitHub statuses belong to commits, not PRs. Aggregate every outcome across
 // open PRs sharing the head, so peers neither overwrite a blocker with success
 // nor alternate persistent blocking descriptions on every inventory poll.
-func (r *RepositoryMonitorReconciler) repositoryMonitorSharedHeadReadiness(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest, currentItem *store.MonitorItem, peers []repositoryMonitorPullRequest) (string, string, error) {
+func (r *RepositoryMonitorReconciler) repositoryMonitorSharedHeadReadiness(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest, currentItem *store.MonitorItem, peers []repositoryMonitorPullRequest, endpoint, token string) (string, string, error) {
 	result, resultDescription, err := r.repositoryMonitorReadyOutcome(ctx, monitor, pr, currentItem)
 	if err != nil {
 		return "", "", err
@@ -145,16 +150,16 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorSharedHeadReadiness(ctx c
 		if peer.Number == pr.Number || peer.HeadSHA != pr.HeadSHA || peer.State != repositoryMonitorItemStateOpen || peer.BaseBranch != effectiveRepositoryMonitorBranch(monitor) {
 			continue
 		}
-		existing, err := r.Store.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, strconv.FormatInt(peer.Number, 10))
-		if err != nil && !errors.Is(err, store.ErrNotFound) {
+		peer, err = r.refreshRepositoryMonitorReadinessPullRequest(ctx, peer, endpoint, token)
+		if err != nil {
 			return "", "", err
 		}
-		item := repositoryMonitorItemFromPullRequest(monitor, peer, existing)
-		if item.SkipReason != repositoryMonitorIssueSkipStoppedByCommand {
-			item.RepairState, err = r.repositoryMonitorRepairStateForHead(ctx, monitor, peer.Number, peer.HeadSHA)
-			if err != nil {
-				return "", "", err
-			}
+		if peer.HeadSHA != pr.HeadSHA || peer.State != repositoryMonitorItemStateOpen || peer.BaseBranch != effectiveRepositoryMonitorBranch(monitor) {
+			continue
+		}
+		item, err := r.repositoryMonitorSharedHeadItem(ctx, monitor, peer)
+		if err != nil {
+			return "", "", err
 		}
 		state, description, err := r.repositoryMonitorReadyOutcome(ctx, monitor, peer, item)
 		if err != nil {
@@ -171,6 +176,34 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorSharedHeadReadiness(ctx c
 	return result, resultDescription, nil
 }
 
+// List responses omit mergeable_state. Refresh every evaluated peer so a known
+// conflict cannot be treated as ready when another PR sharing its commit moves.
+func (r *RepositoryMonitorReconciler) refreshRepositoryMonitorReadinessPullRequest(ctx context.Context, pr repositoryMonitorPullRequest, endpoint, token string) (repositoryMonitorPullRequest, error) {
+	var current repositoryMonitorPullRequestResponse
+	if err := r.fetchRepositoryMonitorAuthorizedJSON(ctx, fmt.Sprintf("%s/pulls/%d", endpoint, pr.Number), token, &current); err != nil {
+		return pr, err
+	}
+	pr.State, pr.HeadSHA, pr.BaseBranch = current.State, current.Head.SHA, current.Base.Ref
+	pr.MergeableState, pr.Draft = current.MergeableState, current.Draft
+	pr.Labels = nil
+	for _, label := range current.Labels {
+		pr.Labels = append(pr.Labels, label.Name)
+	}
+	return pr, nil
+}
+
+func (r *RepositoryMonitorReconciler) repositoryMonitorSharedHeadItem(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest) (*store.MonitorItem, error) {
+	existing, err := r.Store.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, strconv.FormatInt(pr.Number, 10))
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return nil, err
+	}
+	item := repositoryMonitorItemFromPullRequest(monitor, pr, existing)
+	if item.SkipReason != repositoryMonitorIssueSkipStoppedByCommand {
+		item.RepairState, err = r.repositoryMonitorRepairStateForHead(ctx, monitor, pr.Number, pr.HeadSHA)
+	}
+	return item, err
+}
+
 // Readiness is a commit status, so existing repository credentials can publish
 // it without a GitHub App. GitHub alone controls approvals and merging.
 // Inventory callers can supply the complete open-PR list to reuse it for peers.
@@ -178,35 +211,22 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorReadiness(ctx co
 	if !monitor.Spec.Review.Publish.Enabled || !repositoryMonitorManagedWorkflow(monitor) || r.Store == nil {
 		return nil
 	}
-	owner, repo, err := security.ParseGitHubRepositoryURL(monitor.Spec.RepoURL)
+	endpoint, token, err := r.repositoryMonitorReadinessEndpoint(ctx, monitor)
 	if err != nil {
-		return err
-	}
-	token, err := r.repositoryMonitorForgeToken(ctx, monitor)
-	if err != nil {
-		return err
-	}
-	base := strings.TrimRight(r.GitHubAPIBaseURL, "/")
-	if base == "" {
-		base = repositoryMonitorDefaultGitHubAPIBaseURL
-	}
-	endpoint := fmt.Sprintf("%s/repos/%s/%s", base, url.PathEscape(owner), url.PathEscape(repo))
-	var current repositoryMonitorPullRequestResponse
-	if err := r.fetchRepositoryMonitorAuthorizedJSON(ctx, fmt.Sprintf("%s/pulls/%d", endpoint, pr.Number), token, &current); err != nil {
 		return err
 	}
 	// Return the observed snapshot to inventory selection. A refresh that blocks
 	// readiness must also block subsequent repair/review stages in this poll.
 	expectedHead := pr.HeadSHA
-	pr.State, pr.HeadSHA, pr.BaseBranch = current.State, current.Head.SHA, current.Base.Ref
-	pr.MergeableState = current.MergeableState
-	if pr.State != repositoryMonitorItemStateOpen || pr.HeadSHA != expectedHead || pr.BaseBranch != effectiveRepositoryMonitorBranch(monitor) {
-		return nil
+	*pr, err = r.refreshRepositoryMonitorReadinessPullRequest(ctx, *pr, endpoint, token)
+	if err != nil {
+		return err
 	}
-	pr.Draft = current.Draft
-	pr.Labels = nil
-	for _, label := range current.Labels {
-		pr.Labels = append(pr.Labels, label.Name)
+	if pr.State != repositoryMonitorItemStateOpen || pr.BaseBranch != effectiveRepositoryMonitorBranch(monitor) {
+		return r.reconcileRepositoryMonitorDepartedHead(ctx, monitor, pr.Number, expectedHead, endpoint, token)
+	}
+	if pr.HeadSHA != expectedHead {
+		return nil
 	}
 	item.Draft = pr.Draft
 	labelsJSON, err := json.Marshal(pr.Labels)
@@ -222,12 +242,16 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorReadiness(ctx co
 	if len(inventory) > 0 {
 		peers = inventory[0]
 	} else {
+		owner, repo, err := security.ParseGitHubRepositoryURL(monitor.Spec.RepoURL)
+		if err != nil {
+			return err
+		}
 		peers, err = r.listRepositoryMonitorPullRequests(ctx, owner, repo, token, effectiveRepositoryMonitorBranch(monitor))
 		if err != nil {
 			return err
 		}
 	}
-	state, description, err := r.repositoryMonitorSharedHeadReadiness(ctx, monitor, *pr, item, peers)
+	state, description, err := r.repositoryMonitorSharedHeadReadiness(ctx, monitor, *pr, item, peers, endpoint, token)
 	if err != nil {
 		return err
 	}
@@ -248,19 +272,103 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorReadiness(ctx co
 	return r.Store.UpsertMonitorItem(ctx, item)
 }
 
+func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorDepartedHead(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, departingNumber int64, sha, endpoint, token string) error {
+	owner, repo, err := security.ParseGitHubRepositoryURL(monitor.Spec.RepoURL)
+	if err != nil {
+		return err
+	}
+	// The old inventory can still contain the departed PR. Use a fresh list and
+	// exclude the exact PR whose detail response established it left scope.
+	peers, err := r.listRepositoryMonitorPullRequests(ctx, owner, repo, token, effectiveRepositoryMonitorBranch(monitor))
+	if err != nil {
+		return err
+	}
+	peers = slices.DeleteFunc(peers, func(peer repositoryMonitorPullRequest) bool { return peer.Number == departingNumber })
+	for _, peer := range peers {
+		if peer.HeadSHA != sha || peer.State != repositoryMonitorItemStateOpen || peer.BaseBranch != effectiveRepositoryMonitorBranch(monitor) {
+			continue
+		}
+		peer, err = r.refreshRepositoryMonitorReadinessPullRequest(ctx, peer, endpoint, token)
+		if err != nil {
+			return err
+		}
+		if peer.HeadSHA != sha || peer.State != repositoryMonitorItemStateOpen || peer.BaseBranch != effectiveRepositoryMonitorBranch(monitor) {
+			continue
+		}
+		item, err := r.repositoryMonitorSharedHeadItem(ctx, monitor, peer)
+		if err != nil {
+			return err
+		}
+		mutation, err := r.ensureRepositoryMonitorReadinessStatus(ctx, monitor, peer, endpoint, token)
+		if err != nil {
+			return err
+		}
+		state, description, err := r.repositoryMonitorSharedHeadReadiness(ctx, monitor, peer, item, peers, endpoint, token)
+		if err != nil {
+			return err
+		}
+		return r.publishRepositoryMonitorReadinessStatus(ctx, monitor, mutation, endpoint, token, state, description)
+	}
+	return r.revokeRepositoryMonitorReadiness(ctx, monitor, sha)
+}
+
+func (r *RepositoryMonitorReconciler) repositoryMonitorReadinessEndpoint(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (string, string, error) {
+	owner, repo, err := security.ParseGitHubRepositoryURL(monitor.Spec.RepoURL)
+	if err != nil {
+		return "", "", err
+	}
+	token, err := r.repositoryMonitorForgeToken(ctx, monitor)
+	if err != nil {
+		return "", "", err
+	}
+	base := strings.TrimRight(r.GitHubAPIBaseURL, "/")
+	if base == "" {
+		base = repositoryMonitorDefaultGitHubAPIBaseURL
+	}
+	return fmt.Sprintf("%s/repos/%s/%s", base, url.PathEscape(owner), url.PathEscape(repo)), token, nil
+}
+
+func repositoryMonitorReadinessMutationID(monitor *corev1alpha1.RepositoryMonitor, sha string) string {
+	identity := fmt.Sprintf("orka-ready:%s:%s:%s", monitor.UID, strings.ToLower(monitor.Spec.RepoURL), sha)
+	return "ghmut-" + repositoryMonitorShortHash(identity)
+}
+
+// A PR can leave the base-filtered inventory without changing its commit. Revoke
+// any status we already published before retiring it, including retained items
+// from an earlier controller version. Do not create statuses for untracked heads.
+func (r *RepositoryMonitorReconciler) revokeRepositoryMonitorReadiness(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, sha string) error {
+	if !monitor.Spec.Review.Publish.Enabled || !repositoryMonitorManagedWorkflow(monitor) || r.Store == nil || sha == "" {
+		return nil
+	}
+	mutation, err := r.Store.GetGitHubMutationRecord(ctx, monitor.Namespace, repositoryMonitorReadinessMutationID(monitor, sha))
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if mutation.Operation != repositoryMonitorReadinessOperation || mutation.TargetKind != repositoryMonitorReadinessTargetKind || mutation.TargetNumber != 0 || mutation.TargetSHA != sha {
+		return fmt.Errorf("readiness audit identity does not match the commit")
+	}
+	endpoint, token, err := r.repositoryMonitorReadinessEndpoint(ctx, monitor)
+	if err != nil {
+		return err
+	}
+	return r.publishRepositoryMonitorReadinessStatus(ctx, monitor, mutation, endpoint, token, repositoryMonitorStatusFailure, "A pull request left this monitor's open base-branch inventory.")
+}
+
 func (r *RepositoryMonitorReconciler) ensureRepositoryMonitorReadinessStatus(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest, endpoint, token string) (*store.GitHubMutationRecord, error) {
-	identity := fmt.Sprintf("orka-ready:%s:%s:%s", monitor.UID, strings.ToLower(monitor.Spec.RepoURL), pr.HeadSHA)
-	mutationID := "ghmut-" + repositoryMonitorShortHash(identity)
+	mutationID := repositoryMonitorReadinessMutationID(monitor, pr.HeadSHA)
 	mutation, err := r.Store.GetGitHubMutationRecord(ctx, monitor.Namespace, mutationID)
 	if errors.Is(err, store.ErrNotFound) {
-		mutation = &store.GitHubMutationRecord{ID: mutationID, Operation: repositoryMonitorReadinessOperation, TargetKind: "commit", TargetSHA: pr.HeadSHA, Status: "started"}
+		mutation = &store.GitHubMutationRecord{ID: mutationID, Operation: repositoryMonitorReadinessOperation, TargetKind: repositoryMonitorReadinessTargetKind, TargetSHA: pr.HeadSHA, Status: "started"}
 		if err := r.recordRepositoryMonitorGitHubMutation(ctx, monitor, mutation); err != nil {
 			return nil, err
 		}
 	} else if err != nil {
 		return nil, err
 	}
-	if mutation.Operation != repositoryMonitorReadinessOperation || mutation.TargetKind != "commit" || mutation.TargetNumber != 0 || mutation.TargetSHA != pr.HeadSHA {
+	if mutation.Operation != repositoryMonitorReadinessOperation || mutation.TargetKind != repositoryMonitorReadinessTargetKind || mutation.TargetNumber != 0 || mutation.TargetSHA != pr.HeadSHA {
 		return nil, fmt.Errorf("readiness audit identity does not match the commit")
 	}
 	if mutation.ExternalID == "" || mutation.Status == repositoryMonitorStatusSubmitting {

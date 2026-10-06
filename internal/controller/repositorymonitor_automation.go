@@ -52,8 +52,8 @@ func (r *RepositoryMonitorReconciler) tryRepositoryMonitorAutomaticRepair(ctx co
 	if intent == "" {
 		return false, nil
 	}
-	// The policy helper counts durable repair jobs and branch-update attempts
-	// before another command identity can be created.
+	// The policy helper counts durable attempts, including commands exhausted
+	// before Task creation, before another command identity can be created.
 	reason, prCount, headCount, err := r.repositoryMonitorRepairPolicy(ctx, monitor, owner+"/"+repo, pr, "")
 	if err != nil {
 		return false, err

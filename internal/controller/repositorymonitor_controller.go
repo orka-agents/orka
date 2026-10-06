@@ -126,7 +126,7 @@ func (r *RepositoryMonitorReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, err
 	}
 	result, err = r.reconcileRepositoryMonitorRuns(ctx, monitor, state)
-	if err == nil && !state.suspended && repositoryMonitorManagedWorkflow(monitor) && (result.RequeueAfter == 0 || result.RequeueAfter > repositoryMonitorWorkflowPollInterval) {
+	if err == nil && !state.suspended && repositoryMonitorPullRequestsEnabled(monitor.Spec) && repositoryMonitorManagedWorkflow(monitor) && (result.RequeueAfter == 0 || result.RequeueAfter > repositoryMonitorWorkflowPollInterval) {
 		result.RequeueAfter = repositoryMonitorWorkflowPollInterval
 	}
 	if err == nil && (result.RequeueAfter == 0 || result.RequeueAfter > usageOutcomeBacklogInterval) {

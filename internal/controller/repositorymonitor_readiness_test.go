@@ -288,11 +288,16 @@ func TestRepositoryMonitorReadinessRefreshQueuesConflictRepair(t *testing.T) {
 	}
 	r := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(), Store: db}
 	writes := 0
+	latest := repositoryMonitorCommitStatus{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/pulls/31"):
 			_, _ = w.Write([]byte(`{"number":31,"state":"open","mergeable_state":"dirty","head":{"sha":"head"},"base":{"ref":"main"}}`))
+		case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/check-runs"):
+			_, _ = w.Write([]byte(`{"total_count":1,"check_runs":[{"id":99,"name":"tests","status":"completed","conclusion":"success"}]}`))
+		case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/status"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 1, "statuses": []repositoryMonitorCommitStatus{latest}})
 		case req.Method == http.MethodPost && strings.Contains(req.URL.Path, "/statuses/"):
 			var status repositoryMonitorCommitStatus
 			if err := json.NewDecoder(req.Body).Decode(&status); err != nil {
@@ -300,6 +305,10 @@ func TestRepositoryMonitorReadinessRefreshQueuesConflictRepair(t *testing.T) {
 			}
 			writes++
 			status.ID = int64(writes)
+			latest = status
+			if status.State == repositoryMonitorStatusSuccess {
+				t.Error("conflicted PR received a successful readiness status")
+			}
 			_ = json.NewEncoder(w).Encode(status)
 		default:
 			t.Errorf("unexpected request: %s %s", req.Method, req.URL.Path)
@@ -310,8 +319,13 @@ func TestRepositoryMonitorReadinessRefreshQueuesConflictRepair(t *testing.T) {
 	r.GitHubAPIBaseURL = server.URL
 	pr := repositoryMonitorPullRequest{Number: 31, State: "open", HeadSHA: "head", BaseBranch: "main", HeadRepo: "orka-agents/orka"}
 	item := repositoryMonitorItemFromPullRequest(monitor, pr, nil)
+	item.LastReviewID = seedRepositoryMonitorAutomergeReview(t, ctx, db, monitor.Name, pr.Number, pr.HeadSHA)
+	item.LastReviewedHeadSHA, item.LastVerdict = pr.HeadSHA, repositoryMonitorReviewVerdictPassed
 	if err := r.reconcileRepositoryMonitorReadiness(ctx, monitor, &pr, item, []repositoryMonitorPullRequest{pr}); err != nil {
 		t.Fatal(err)
+	}
+	if latest.State != repositoryMonitorStatusPending {
+		t.Fatalf("conflict readiness=%+v, want pending", latest)
 	}
 	handled, err := r.tryRepositoryMonitorAutomaticRepair(ctx, monitor, &store.MonitorRun{ID: "fresh-conflict-run"}, "orka-agents", "orka", pr, item)
 	if err != nil || !handled {

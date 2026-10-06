@@ -64,8 +64,13 @@ spec:
     maxRepairsPerPR: 5
     maxRepairsPerHead: 2
   policy:
-    protectedLabels: []
+    protectedLabels:
+    - security
+    - security-sensitive
+    - orka:needs-human
     pauseLabels:
+    - blocked
+    - waiting-external
     - orka:pause
     allowedRepositoryPermissions:
     - write

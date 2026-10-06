@@ -119,7 +119,6 @@ func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context
 		return 0, 0, 1, r.blockRepositoryMonitorTargetCommand(ctx, monitor, run, reason)
 	}
 	pullRequests = filterRepositoryMonitorBasePullRequests(pullRequests, baseBranch)
-	seenPullRequestKeys := repositoryMonitorPullRequestKeys(pullRequests)
 	readinessInventory := pullRequests
 	pullRequests = filterRepositoryMonitorTargetPullRequests(pullRequests, run)
 	slices.SortFunc(pullRequests, func(a, b repositoryMonitorPullRequest) int {
@@ -292,7 +291,7 @@ func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context
 	}
 
 	if repositoryMonitorRunCoversFullInventory(run) {
-		if err := r.retireMissingRepositoryMonitorPullRequests(ctx, monitor, run, seenPullRequestKeys); err != nil {
+		if err := r.retireMissingRepositoryMonitorPullRequests(ctx, monitor, run, readinessInventory); err != nil {
 			return selected, createdTasks, skipped, err
 		}
 	}
@@ -794,15 +793,26 @@ func (r *RepositoryMonitorReconciler) listRepositoryMonitorPullRequestItems(ctx 
 	}
 }
 
-func (r *RepositoryMonitorReconciler) retireMissingRepositoryMonitorPullRequests(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, seenKeys map[string]struct{}) error {
+func (r *RepositoryMonitorReconciler) retireMissingRepositoryMonitorPullRequests(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, inventory []repositoryMonitorPullRequest) error {
 	items, err := r.listRepositoryMonitorPullRequestItems(ctx, monitor)
 	if err != nil {
 		return err
+	}
+	seenKeys := repositoryMonitorPullRequestKeys(inventory)
+	seenHeads := map[string]struct{}{}
+	for _, pr := range inventory {
+		seenHeads[pr.HeadSHA] = struct{}{}
 	}
 	for i := range items {
 		item := items[i]
 		if _, ok := seenKeys[item.ItemKey]; ok {
 			continue
+		}
+		// An in-scope peer already reconciled the shared commit outcome above.
+		if _, shared := seenHeads[item.HeadSHA]; !shared {
+			if err := r.revokeRepositoryMonitorReadiness(ctx, monitor, item.HeadSHA); err != nil {
+				return err
+			}
 		}
 		if item.State == repositoryMonitorItemStateOutOfScope && item.SkipReason == repositoryMonitorSkipReasonMissing {
 			continue

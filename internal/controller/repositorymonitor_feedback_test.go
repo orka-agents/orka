@@ -8,7 +8,49 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
+
+func TestRepositoryMonitorWorkflowRequeueRequiresPullRequestTarget(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprint(enabled), func(t *testing.T) {
+			monitor, _ := repositoryMonitorInventoryTestObjects("poll-target")
+			monitor.Spec.Targets.PullRequests.Enabled = &enabled
+			monitor.Spec.Targets.Issues.Enabled = true
+			monitor.Spec.Agents.Implementer = &corev1alpha1.AgentReference{Name: "implementer"}
+			configureRepositoryMonitorTestWriteCredentials(monitor)
+			monitor.Spec.GitSecretRef = nil
+			scheme := runtime.NewScheme()
+			if err := corev1alpha1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			if err := corev1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(monitor).WithObjects(repositoryMonitorControllerObjects(monitor)...).Build()
+			r := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: setupControllerSQLiteStore(t)}
+			key := types.NamespacedName{Namespace: monitor.Namespace, Name: monitor.Name}
+			result, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: key})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := cl.Get(t.Context(), key, monitor); err != nil || monitor.Status.Phase != repositoryMonitorPhaseReady {
+				t.Fatalf("monitor not ready: phase=%s conditions=%+v err=%v", monitor.Status.Phase, monitor.Status.Conditions, err)
+			}
+			want := time.Duration(0)
+			if enabled {
+				want = repositoryMonitorWorkflowPollInterval
+			}
+			if result.RequeueAfter != want {
+				t.Fatalf("poll requeue=%v, want %v", result.RequeueAfter, want)
+			}
+		})
+	}
+}
 
 func TestRepositoryMonitorPublishOnlyWorkflowPoll(t *testing.T) {
 	ctx := context.Background()

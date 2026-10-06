@@ -43,8 +43,11 @@ spec:
     maxRepairsPerPR: 5
     maxRepairsPerHead: 2
   policy:
-    protectedLabels: []
+    protectedLabels:
+    - security
+    - security-sensitive
     pauseLabels:
     - orka:pause
+    - blocked
   validation:
     image: ghcr.io/example-org/example-repo-validation@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa

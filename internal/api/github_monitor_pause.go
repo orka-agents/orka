@@ -39,13 +39,7 @@ func (h *Handlers) handleRepositoryMonitorPauseEvent(c fiber.Ctx, body []byte, p
 	}
 	for i := range monitors.Items {
 		monitor := &monitors.Items[i]
-		matches := false
-		for _, label := range repositoryMonitorAPIPauseLabels(monitor) {
-			if strings.EqualFold(strings.TrimSpace(label), strings.TrimSpace(payload.Label.Name)) {
-				matches = true
-				break
-			}
-		}
+		matches := repositoryMonitorWebhookMatchingLabel(repositoryMonitorAPIPauseLabels(monitor), []string{payload.Label.Name}) != ""
 		if !matches || !repositoryMonitorAcceptsLabelCommand(monitor, payload.Repository, target, commandIntentResume) {
 			continue
 		}
@@ -55,7 +49,10 @@ func (h *Handlers) handleRepositoryMonitorPauseEvent(c fiber.Ctx, body []byte, p
 			return result, fiber.NewError(fiber.StatusServiceUnavailable, "cannot verify pause-label sender permission")
 		}
 		if !repositoryMonitorPermissionAllowed(monitor, permission) {
-			return result, fiber.NewError(fiber.StatusForbidden, "pause-label sender is not authorized to operate this monitor")
+			if err := h.recordRepositoryMonitorPauseRejection(c, monitor, payload, target, delivery, permission); err != nil {
+				return result, err
+			}
+			continue
 		}
 		id := githubRepositoryMonitorExactRunID(monitor, delivery+"|pause")
 		run := &store.MonitorRun{ID: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Trigger: "pause_label_event", TargetKind: target.Kind, TargetNumber: int64(target.Number), Phase: repositoryMonitorRunPhaseQueued, StartedAt: time.Now()}
@@ -109,6 +106,34 @@ func (h *Handlers) handleRepositoryMonitorPauseEvent(c fiber.Ctx, body []byte, p
 		result.RunIDs = append(result.RunIDs, id)
 	}
 	return result, nil
+}
+
+func (h *Handlers) recordRepositoryMonitorPauseRejection(c fiber.Ctx, monitor *corev1alpha1.RepositoryMonitor, payload githubLabelWebhookPayload, target githubLabelTarget, delivery, permission string) error {
+	metadata, err := json.Marshal(map[string]string{
+		apiFieldAction: payload.Action, apiFieldLabel: payload.Label.Name,
+		"delivery": delivery, "repository": payload.Repository.FullName,
+		"sender": payload.Sender.Login, "permission": permission,
+	})
+	if err != nil {
+		return err
+	}
+	event := &store.MonitorEvent{
+		ID:               "mevt-" + githubRepositoryMonitorExactRunID(monitor, delivery+"|pause-rejected"),
+		MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name,
+		ItemKind: target.Kind, ItemNumber: int64(target.Number), ItemSHA: target.HeadSHA,
+		EventType: "pause_label_rejected", Actor: "github-webhook",
+		Summary:      "Pause-label change rejected: sender permission is not allowed for this monitor",
+		MetadataJSON: string(metadata),
+	}
+	if err := h.repositoryMonitorStore.CreateMonitorEvent(c.Context(), event); err != nil {
+		// Delivery retries retain one rejection receipt, like accepted intake.
+		existing, _, lookupErr := h.repositoryMonitorStore.ListMonitorEvents(c.Context(), store.MonitorEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, ID: event.ID, Limit: 1})
+		if lookupErr == nil && len(existing) == 1 {
+			return nil
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to record pause-label rejection: %v", err))
+	}
+	return nil
 }
 
 func (h *Handlers) persistRepositoryMonitorPauseLabel(c fiber.Ctx, monitor *corev1alpha1.RepositoryMonitor, payload githubLabelWebhookPayload, target githubLabelTarget) error {

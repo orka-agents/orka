@@ -831,6 +831,8 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepairPolicy(ctx context.
 	}
 	repairCountPR := 0
 	repairCountHead := 0
+	countedJobs := map[string]struct{}{currentJobID: {}}
+	countedCommands := map[string]struct{}{}
 	cursor := ""
 	for {
 		jobs, next, err := r.Store.ListRepairJobs(ctx, store.RepairJobFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, PRNumber: pr.Number, Limit: 200, Cursor: cursor})
@@ -848,6 +850,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepairPolicy(ctx context.
 			if !consumesBudget {
 				continue
 			}
+			countedJobs[job.ID] = struct{}{}
 			repairCountPR++
 			if strings.TrimSpace(job.HeadSHA) == strings.TrimSpace(pr.HeadSHA) {
 				repairCountHead++
@@ -867,8 +870,43 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepairPolicy(ctx context.
 			return "", 0, 0, err
 		}
 		for _, mutation := range mutations {
+			countedCommands[mutation.CommandEventID] = struct{}{}
 			repairCountPR++
 			if strings.TrimSpace(mutation.TargetSHA) == strings.TrimSpace(pr.HeadSHA) {
+				repairCountHead++
+			}
+		}
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
+	// A policy command can exhaust retries before its Task exists. Count that
+	// terminal attempt once so the next poll gets a new bounded command identity.
+	// Accepted commands retain their existing run and retry budget.
+	cursor = ""
+	for {
+		commands, next, err := r.Store.ListCommandEvents(ctx, store.CommandEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: pr.Number, Status: "processed", Limit: 200, Cursor: cursor})
+		if err != nil {
+			return "", 0, 0, err
+		}
+		for _, command := range commands {
+			if command.Source != "controller_policy" {
+				continue
+			}
+			switch command.Intent {
+			case repositoryMonitorCommandIntentFix, repositoryMonitorCommandIntentFixCI, repositoryMonitorCommandIntentUpdateBranch:
+			default:
+				continue
+			}
+			if _, counted := countedJobs["repair-"+repositoryMonitorShortHash(command.ID)]; counted {
+				continue
+			}
+			if _, counted := countedCommands[command.ID]; counted {
+				continue
+			}
+			repairCountPR++
+			if strings.TrimSpace(command.HeadSHA) == strings.TrimSpace(pr.HeadSHA) {
 				repairCountHead++
 			}
 		}

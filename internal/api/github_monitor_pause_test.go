@@ -107,36 +107,74 @@ func TestGitHubWebhookPausePersistsUntilFreshInventory(t *testing.T) {
 	}
 }
 
+//nolint:gocyclo // Keep mixed-monitor authorization and replay assertions in one fixture.
 func TestGitHubWebhookPauseDoesNotSuppressAnotherMonitorCommand(t *testing.T) {
-	permissionServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"permission":"write"}`))
-	}))
-	t.Cleanup(permissionServer.Close)
-	secret := configureGitHubWebhookTest(t, map[string]string{githubAPIBaseURLEnv: permissionServer.URL})
-	pauseMonitor := githubWebhookRepositoryMonitor("pause-loop", false)
-	pauseMonitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
-	pauseMonitor.Spec.Targets.Issues.Enabled = true
-	pauseMonitor.Spec.Triggers.GitHub.Labels.Enabled = true
-	pauseMonitor.Spec.Policy.PauseLabels = []string{"hold"}
-	implementMonitor := pauseMonitor.DeepCopy()
-	implementMonitor.Name = "implement-loop"
-	implementMonitor.Spec.Policy.PauseLabels = []string{"other-pause"}
-	implementMonitor.Spec.Triggers.GitHub.Labels.Issues.Implement = "hold"
-	fc := newGitHubWebhookFakeClient(t, pauseMonitor, implementMonitor, githubWebhookGitSecret())
-	db := setupGitHubWebhookMonitorStore(t)
-	server := NewServer(fc, nil, ServerConfig{RepositoryMonitorStore: db})
-	body := []byte(`{"action":"labeled","label":{"name":"hold"},"repository":{"full_name":"sozercan/vekil"},"issue":{"number":12,"state":"open","labels":[{"name":"hold"}]},"sender":{"login":"octocat"}}`)
-	resp := performSignedGitHubWebhook(t, server, githubEventIssues, "shared-label", secret, body)
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("status = %d; body: %s", resp.StatusCode, readRespBody(t, resp))
-	}
-	commands, _, err := db.ListCommandEvents(t.Context(), store.CommandEventFilter{Namespace: implementMonitor.Namespace, MonitorName: implementMonitor.Name})
-	if err != nil || len(commands) != 1 || commands[0].Intent != githubActionImplement || commands[0].Status != githubCommandStatusAccepted {
-		t.Fatalf("other monitor command = %+v, err = %v", commands, err)
-	}
-	runs, _, err := db.ListMonitorRuns(t.Context(), store.MonitorRunFilter{Namespace: implementMonitor.Namespace})
-	if err != nil || len(runs) != 2 {
-		t.Fatalf("runs = %+v, err = %v, want pause and implement runs", runs, err)
+	for _, tc := range []struct {
+		name     string
+		minimum  string
+		allowed  []string
+		wantRuns int
+	}{
+		{name: "authorized_pause", minimum: githubPermissionWrite, wantRuns: 1},
+		{name: "stricter_minimum", minimum: githubPermissionAdmin},
+		{name: "stricter_policy", minimum: githubPermissionWrite, allowed: []string{githubPermissionAdmin}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			permissionServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"permission":"write"}`))
+			}))
+			t.Cleanup(permissionServer.Close)
+			secret := configureGitHubWebhookTest(t, map[string]string{githubAPIBaseURLEnv: permissionServer.URL})
+			pauseMonitor := githubWebhookRepositoryMonitor("pause-loop", false)
+			pauseMonitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
+			pauseMonitor.Spec.Targets.Issues.Enabled = true
+			pauseMonitor.Spec.Triggers.GitHub.Labels.Enabled = true
+			pauseMonitor.Spec.Triggers.GitHub.Labels.RequireActorPermission = tc.minimum
+			pauseMonitor.Spec.Policy.AllowedRepositoryPermissions = tc.allowed
+			pauseMonitor.Spec.Policy.PauseLabels = []string{"hold"}
+			implementMonitor := pauseMonitor.DeepCopy()
+			implementMonitor.Name = "implement-loop"
+			implementMonitor.Spec.Policy.PauseLabels = []string{"other-pause"}
+			implementMonitor.Spec.Policy.AllowedRepositoryPermissions = nil
+			implementMonitor.Spec.Triggers.GitHub.Labels.RequireActorPermission = githubPermissionWrite
+			implementMonitor.Spec.Triggers.GitHub.Labels.Issues.Implement = "hold"
+			fc := newGitHubWebhookFakeClient(t, pauseMonitor, implementMonitor, githubWebhookGitSecret())
+			db := setupGitHubWebhookMonitorStore(t)
+			server := NewServer(fc, nil, ServerConfig{RepositoryMonitorStore: db})
+			if err := db.UpsertMonitorItem(t.Context(), &store.MonitorItem{MonitorNamespace: pauseMonitor.Namespace, MonitorName: pauseMonitor.Name, Kind: "issue", ItemKey: "12", Number: 12, LabelsJSON: `[]`}); err != nil {
+				t.Fatal(err)
+			}
+			body := []byte(`{"action":"labeled","label":{"name":"hold"},"repository":{"full_name":"sozercan/vekil"},"issue":{"number":12,"state":"open","labels":[{"name":"hold"}]},"sender":{"login":"octocat"}}`)
+			for attempt := range 2 {
+				resp := performSignedGitHubWebhook(t, server, githubEventIssues, "shared-label", secret, body)
+				wantStatus := http.StatusCreated
+				if attempt > 0 {
+					wantStatus = http.StatusAccepted
+				}
+				if resp.StatusCode != wantStatus {
+					t.Fatalf("status = %d; body: %s", resp.StatusCode, readRespBody(t, resp))
+				}
+			}
+			commands, _, err := db.ListCommandEvents(t.Context(), store.CommandEventFilter{Namespace: implementMonitor.Namespace, MonitorName: implementMonitor.Name})
+			if err != nil || len(commands) != 1 || commands[0].Intent != githubActionImplement || commands[0].Status != githubCommandStatusAccepted {
+				t.Fatalf("other monitor command = %+v, err = %v", commands, err)
+			}
+			runs, _, err := db.ListMonitorRuns(t.Context(), store.MonitorRunFilter{Namespace: pauseMonitor.Namespace, MonitorName: pauseMonitor.Name})
+			if err != nil || len(runs) != tc.wantRuns {
+				t.Fatalf("pause runs = %+v, err = %v, want %d", runs, err, tc.wantRuns)
+			}
+			item, err := db.GetMonitorItem(t.Context(), pauseMonitor.Namespace, pauseMonitor.Name, "issue", "12")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantRuns == 0 && item.LabelsJSON != `[]` {
+				t.Fatalf("rejected sender changed stored pause labels: %s", item.LabelsJSON)
+			}
+			events, _, err := db.ListMonitorEvents(t.Context(), store.MonitorEventFilter{Namespace: pauseMonitor.Namespace, MonitorName: pauseMonitor.Name, EventType: "pause_label_rejected"})
+			if err != nil || len(events) != 1-tc.wantRuns {
+				t.Fatalf("rejection receipts = %+v, err = %v", events, err)
+			}
+		})
 	}
 }

@@ -1,5 +1,31 @@
 package controller
 
+import "github.com/orka-agents/orka/internal/store"
+
+const repositoryMonitorLegacyPlanRequiresReplanning = "legacy_plan_requires_replanning"
+
+func repositoryMonitorNormalizeLegacyIssuePhase(item *store.MonitorItem) {
+	if item == nil {
+		return
+	}
+	if item.SkipReason == repositoryMonitorIssueSkipStoppedByCommand {
+		switch item.WorkflowPhase {
+		case "approved", "approval_required":
+			item.WorkflowPhase = repositoryMonitorIssuePhaseBlocked
+		}
+		return
+	}
+	switch item.WorkflowPhase {
+	case "approved":
+		item.WorkflowPhase = repositoryMonitorIssuePhasePlanned
+	case "approval_required":
+		// This state also covered plans that needed human input. Preserve
+		// that hold until a fresh command requests a plan under current policy.
+		item.WorkflowPhase = repositoryMonitorIssuePhaseBlocked
+		item.SkipReason = repositoryMonitorLegacyPlanRequiresReplanning
+	}
+}
+
 func repositoryMonitorIssuePhaseTransitionAllowed(from, to string) bool {
 	if from == "" || from == to {
 		return true
