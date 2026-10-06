@@ -126,6 +126,7 @@ spec:
                       read:
                         description: Read scopes are requested for every Connection.
                         items:
+                          maxLength: 256
                           type: string
                         maxItems: 32
                         type: array
@@ -133,6 +134,7 @@ spec:
                         description: Write scopes are additionally requested for readWrite
                           Connections.
                         items:
+                          maxLength: 256
                           type: string
                         maxItems: 32
                         type: array
@@ -159,7 +161,7 @@ spec:
                 - message: additionalAuthorizeParameters must not contain reserved
                     OAuth fields
                   rule: '!has(self.additionalAuthorizeParameters) || self.additionalAuthorizeParameters.all(k,
-                    !(k.lowerAscii() in [''client_id'',''client_secret'',''redirect_uri'',''response_type'',''scope'',''state'',''code_challenge'',''code_challenge_method'',''code'',''grant_type'',''refresh_token'']))'
+                    !(k.lowerAscii() in [''client_id'',''client_secret'',''redirect_uri'',''response_type'',''scope'',''state'',''code_challenge'',''code_challenge_method'',''code'',''code_verifier'',''grant_type'',''refresh_token'']))'
               tools:
                 description: |-
                   Tools declares the tools this provider offers to agents acting for a
