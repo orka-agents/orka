@@ -14,13 +14,44 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/connectors"
 )
 
-func TestListConnectionsTool(t *testing.T) {
+// listConnectionsFor runs list_connections for requester against a reader
+// holding objects and decodes the result.
+func listConnectionsFor(t *testing.T, scheme *runtime.Scheme, requester *corev1alpha1.RequestedBy, objects ...client.Object) ListConnectionsResult {
+	t.Helper()
+	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+	out, err := (&ListConnectionsTool{}).Execute(WithToolContext(context.Background(), &ToolContext{Namespace: "tenant", PolicyReader: reader, Requester: requester}), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope struct {
+		Data ListConnectionsResult `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &envelope); err != nil {
+		t.Fatalf("decode %s: %v", out, err)
+	}
+	return envelope.Data
+}
+
+// listConnectionsFixture is the providers and links the list_connections
+// tests read: an accepted GitHub provider with the requester's Ready link,
+// an unlinked Slack provider, an unaccepted Jira provider, somebody else's
+// Connection under the requester's Slack name, and a link whose provider
+// was removed.
+type listConnectionsFixture struct {
+	scheme                    *runtime.Scheme
+	requester                 *corev1alpha1.RequestedBy
+	github, slack, pending    *corev1alpha1.ConnectorProvider
+	linked, foreign, retained *corev1alpha1.Connection
+}
+
+func newListConnectionsFixture() listConnectionsFixture {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
 	requester := &corev1alpha1.RequestedBy{Issuer: "https://issuer.example.test", Subject: "alice"}
@@ -67,6 +98,13 @@ func TestListConnectionsTool(t *testing.T) {
 			ProviderRef: corev1alpha1.LocalObjectReference{Name: "gone"}, Mode: corev1alpha1.ConnectionModeReadWrite},
 		Status: corev1alpha1.ConnectionStatus{State: "Ready", GrantSequence: 1},
 	}
+	return listConnectionsFixture{scheme: scheme, requester: requester, github: github, slack: slack, pending: pending, linked: linked, foreign: foreign, retained: retained}
+}
+
+func TestListConnectionsTool(t *testing.T) {
+	f := newListConnectionsFixture()
+	scheme, requester := f.scheme, f.requester
+	github, slack, pending, linked, foreign, retained := f.github, f.slack, f.pending, f.linked, f.foreign, f.retained
 	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(github, slack, pending, linked, foreign, retained).Build()
 	tool := &ListConnectionsTool{}
 	if tool.Name() != ListConnectionsToolName || !strings.Contains(tool.Description(), ConnectorSettingsPath) {
@@ -90,81 +128,6 @@ func TestListConnectionsTool(t *testing.T) {
 		strings.Join(result.Connections[0].Tools, ",") != "list_pull_requests (read),create_pull_request (write)" {
 		t.Fatalf("connections = %+v", result.Connections)
 	}
-	// A link whose provider is not accepted right now is reported unusable.
-	unaccepted := github.DeepCopy()
-	unaccepted.Generation++
-	fresh := linked.DeepCopy()
-	fresh.Status.State = "" // not reconciled yet
-	lagging := fake.NewClientBuilder().WithScheme(scheme).WithObjects(unaccepted, fresh).Build()
-	laggingOut, err := tool.Execute(WithToolContext(context.Background(), &ToolContext{Namespace: "tenant", PolicyReader: lagging, Requester: requester}), json.RawMessage(`{}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var laggingParsed struct {
-		Data ListConnectionsResult `json:"data"`
-	}
-	if err := json.Unmarshal([]byte(laggingOut), &laggingParsed); err != nil {
-		t.Fatal(err)
-	}
-	if len(laggingParsed.Data.Connections) != 1 || laggingParsed.Data.Connections[0].Ready || !strings.Contains(laggingParsed.Data.Connections[0].Message, "not accepted") ||
-		laggingParsed.Data.Connections[0].State != corev1alpha1.ConnectionStatePending {
-		t.Fatalf("lagging provider connections = %+v", laggingParsed.Data.Connections)
-	}
-	// Two links to one provider are both reported, both unusable.
-	duplicate := linked.DeepCopy()
-	duplicate.Name = "my-second-github-link"
-	dupReader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(github, linked, duplicate).Build()
-	dupOut, err := tool.Execute(WithToolContext(context.Background(), &ToolContext{Namespace: "tenant", PolicyReader: dupReader, Requester: requester}), json.RawMessage(`{}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var dupParsed struct {
-		Data ListConnectionsResult `json:"data"`
-	}
-	if err := json.Unmarshal([]byte(dupOut), &dupParsed); err != nil {
-		t.Fatal(err)
-	}
-	if len(dupParsed.Data.Connections) != 2 || dupParsed.Data.Connections[0].Ready || dupParsed.Data.Connections[1].Ready ||
-		!strings.Contains(dupParsed.Data.Connections[0].Message, "several links") {
-		t.Fatalf("duplicate connections = %+v", dupParsed.Data.Connections)
-	}
-	// A provider changed since consent refuses the token at once, so the
-	// listing says so before the Connection's conditions catch up.
-	retargeted := github.DeepCopy()
-	retargeted.Spec.OAuth.TokenURL = "https://github.example.test/login/oauth/access_token"
-	retargetedReader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(retargeted, linked).Build()
-	retargetedOut, err := tool.Execute(WithToolContext(context.Background(), &ToolContext{Namespace: "tenant", PolicyReader: retargetedReader, Requester: requester}), json.RawMessage(`{}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var retargetedParsed struct {
-		Data ListConnectionsResult `json:"data"`
-	}
-	if err := json.Unmarshal([]byte(retargetedOut), &retargetedParsed); err != nil {
-		t.Fatal(err)
-	}
-	if len(retargetedParsed.Data.Connections) != 1 || retargetedParsed.Data.Connections[0].Ready || !strings.Contains(retargetedParsed.Data.Connections[0].Message, "changed since you consented") {
-		t.Fatalf("retargeted provider connections = %+v", retargetedParsed.Data.Connections)
-	}
-	// A link being disconnected says so instead of a contradictory Ready.
-	terminating := linked.DeepCopy()
-	terminating.DeletionTimestamp = &metav1.Time{Time: metav1.Now().Time}
-	terminating.Finalizers = []string{"test"}
-	deletingReader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(github, terminating).Build()
-	deletingOut, err := tool.Execute(WithToolContext(context.Background(), &ToolContext{Namespace: "tenant", PolicyReader: deletingReader, Requester: requester}), json.RawMessage(`{}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var deletingParsed struct {
-		Data ListConnectionsResult `json:"data"`
-	}
-	if err := json.Unmarshal([]byte(deletingOut), &deletingParsed); err != nil {
-		t.Fatal(err)
-	}
-	if len(deletingParsed.Data.Connections) != 1 || !deletingParsed.Data.Connections[0].Deleting || deletingParsed.Data.Connections[0].Ready ||
-		deletingParsed.Data.Connections[0].State != "Disconnecting" {
-		t.Fatalf("deleting connections = %+v", deletingParsed.Data.Connections)
-	}
 	// The link to the removed provider is reported, unusable, with no tools.
 	if gone := result.Connections[1]; gone.Provider != "gone" || !gone.ProviderMissing || gone.Ready || len(gone.Tools) != 0 ||
 		!strings.Contains(gone.Message, "no longer configured") {
@@ -186,6 +149,48 @@ func TestListConnectionsTool(t *testing.T) {
 	}
 	if out, err := tool.Execute(context.Background(), json.RawMessage(`{}`)); err != nil || !strings.Contains(out, "missing tool context") {
 		t.Fatalf("no context = %s err = %v", out, err)
+	}
+}
+
+// TestListConnectionsToolReportsUnusableLinks covers links the resolver
+// refuses: each is reported, unusable, with the reason.
+func TestListConnectionsToolReportsUnusableLinks(t *testing.T) {
+	f := newListConnectionsFixture()
+	scheme, requester, github, linked := f.scheme, f.requester, f.github, f.linked
+	// A link whose provider is not accepted right now is reported unusable.
+	unaccepted := github.DeepCopy()
+	unaccepted.Generation++
+	fresh := linked.DeepCopy()
+	fresh.Status.State = "" // not reconciled yet
+	laggingResult := listConnectionsFor(t, scheme, requester, unaccepted, fresh)
+	if len(laggingResult.Connections) != 1 || laggingResult.Connections[0].Ready || !strings.Contains(laggingResult.Connections[0].Message, "not accepted") ||
+		laggingResult.Connections[0].State != corev1alpha1.ConnectionStatePending {
+		t.Fatalf("lagging provider connections = %+v", laggingResult.Connections)
+	}
+	// Two links to one provider are both reported, both unusable.
+	duplicate := linked.DeepCopy()
+	duplicate.Name = "my-second-github-link"
+	dupResult := listConnectionsFor(t, scheme, requester, github, linked, duplicate)
+	if len(dupResult.Connections) != 2 || dupResult.Connections[0].Ready || dupResult.Connections[1].Ready ||
+		!strings.Contains(dupResult.Connections[0].Message, "several links") {
+		t.Fatalf("duplicate connections = %+v", dupResult.Connections)
+	}
+	// A provider changed since consent refuses the token at once, so the
+	// listing says so before the Connection's conditions catch up.
+	retargeted := github.DeepCopy()
+	retargeted.Spec.OAuth.TokenURL = "https://github.example.test/login/oauth/access_token"
+	retargetedResult := listConnectionsFor(t, scheme, requester, retargeted, linked)
+	if len(retargetedResult.Connections) != 1 || retargetedResult.Connections[0].Ready || !strings.Contains(retargetedResult.Connections[0].Message, "changed since you consented") {
+		t.Fatalf("retargeted provider connections = %+v", retargetedResult.Connections)
+	}
+	// A link being disconnected says so instead of a contradictory Ready.
+	terminating := linked.DeepCopy()
+	terminating.DeletionTimestamp = &metav1.Time{Time: metav1.Now().Time}
+	terminating.Finalizers = []string{"test"}
+	deletingResult := listConnectionsFor(t, scheme, requester, github, terminating)
+	if len(deletingResult.Connections) != 1 || !deletingResult.Connections[0].Deleting || deletingResult.Connections[0].Ready ||
+		deletingResult.Connections[0].State != "Disconnecting" {
+		t.Fatalf("deleting connections = %+v", deletingResult.Connections)
 	}
 }
 
