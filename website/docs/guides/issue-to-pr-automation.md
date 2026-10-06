@@ -22,7 +22,7 @@ Managed workflows with `review.publish.enabled: true` publish the commit status 
 
 `spec.suspend` pauses background monitor runs; queued and manual runs can still finish. Use `orka:pause` to block a specific issue or PR and its readiness. Pause labels rely on observed GitHub state; use an explicit `stop` command for a durable halt independent of label propagation.
 
-Before disabling readiness publication, deleting a monitor, or changing its repository, remove or replace its required status in the affected GitHub repository's branch protection. GitHub commit statuses persist after the monitor is removed or repointed, and Orka does not currently revoke them as part of these configuration changes.
+Before disabling readiness publication, deleting a monitor, or changing its repository or tracked branch, remove or replace its required status in the affected GitHub repository's branch protection. GitHub commit statuses persist after the monitor is removed or repointed, and Orka does not currently revoke them as part of these configuration changes.
 
 ## Safety model
 

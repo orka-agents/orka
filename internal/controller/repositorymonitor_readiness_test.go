@@ -11,7 +11,6 @@ import (
 	"strings"
 	"testing"
 
-	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -281,7 +280,6 @@ func TestRepositoryMonitorReadinessRefreshQueuesConflictRepair(t *testing.T) {
 	monitor, secret := repositoryMonitorInventoryTestObjects("fresh-conflict")
 	monitor.Spec.Repair.Enabled = true
 	monitor.Spec.Review.Publish.Enabled = true
-	monitor.Spec.Agents.Repairer = &corev1alpha1.AgentReference{Name: "repairer"}
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
@@ -334,6 +332,39 @@ func TestRepositoryMonitorReadinessRefreshQueuesConflictRepair(t *testing.T) {
 	commands, _, err := db.ListCommandEvents(ctx, store.CommandEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name})
 	if err != nil || len(commands) != 1 || commands[0].Intent != repositoryMonitorCommandIntentUpdateBranch {
 		t.Fatalf("conflict did not queue update-branch: commands=%+v err=%v", commands, err)
+	}
+}
+
+func TestRepositoryMonitorAutomaticAgentRepairRequiresRepairer(t *testing.T) {
+	for _, verdict := range []string{"", repositoryMonitorReviewVerdictNeedsChanges} {
+		t.Run("verdict="+verdict, func(t *testing.T) {
+			db := setupControllerSQLiteStore(t)
+			monitor, secret := repositoryMonitorInventoryTestObjects("missing-repairer")
+			monitor.Spec.Repair.Enabled = true
+			scheme := runtime.NewScheme()
+			if err := corev1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			r := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(), Store: db}
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requests++
+				http.Error(w, "unexpected request", http.StatusInternalServerError)
+			}))
+			defer server.Close()
+			r.GitHubAPIBaseURL = server.URL
+			pr := repositoryMonitorPullRequest{Number: 31, State: "open", HeadSHA: "head", BaseBranch: "main", HeadRepo: "orka-agents/orka", MergeableState: "clean"}
+			item := repositoryMonitorItemFromPullRequest(monitor, pr, nil)
+			item.LastVerdict, item.LastReviewedHeadSHA, item.LastReviewID = verdict, pr.HeadSHA, "review"
+			handled, err := r.tryRepositoryMonitorAutomaticRepair(t.Context(), monitor, &store.MonitorRun{}, "orka-agents", "orka", pr, item)
+			if err != nil || handled || requests != 0 {
+				t.Fatalf("agent repair without repairer: handled=%v requests=%d err=%v", handled, requests, err)
+			}
+			commands, _, err := db.ListCommandEvents(t.Context(), store.CommandEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name})
+			if err != nil || len(commands) != 0 {
+				t.Fatalf("missing repairer queued commands: %+v err=%v", commands, err)
+			}
+		})
 	}
 }
 

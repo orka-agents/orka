@@ -93,7 +93,6 @@ func TestRepositoryMonitorUpdateBranchBudgetAndOutcome(t *testing.T) {
 	db := setupControllerSQLiteStore(t)
 	monitor, _ := repositoryMonitorInventoryTestObjects("update-budget")
 	monitor.Spec.Repair.Enabled = true
-	monitor.Spec.Agents.Repairer = &corev1alpha1.AgentReference{Name: "repairer"}
 	limit := int32(2)
 	monitor.Spec.Repair.MaxRepairsPerPR, monitor.Spec.Repair.MaxRepairsPerHead = &limit, &limit
 	r := &RepositoryMonitorReconciler{Store: db}
@@ -125,7 +124,7 @@ func TestRepositoryMonitorUpdateBranchBudgetAndOutcome(t *testing.T) {
 	}
 	for _, head := range []string{"head", "new-head"} {
 		pr.HeadSHA = head
-		reason, countPR, countHead, err := r.repositoryMonitorRepairPolicy(ctx, monitor, "orka-agents/orka", pr, "")
+		reason, countPR, countHead, err := r.repositoryMonitorRepairPolicy(ctx, monitor, "orka-agents/orka", pr, "", repositoryMonitorCommandIntentUpdateBranch)
 		if err != nil || reason != repositoryMonitorRepairPRBudgetReason || countPR != 2 || (head == "head" && countHead != 2) || (head == "new-head" && countHead != 0) {
 			t.Fatalf("head=%s budget=%s PR=%d head=%d err=%v", head, reason, countPR, countHead, err)
 		}

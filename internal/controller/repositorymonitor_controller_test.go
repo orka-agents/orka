@@ -6580,17 +6580,17 @@ func TestRepositoryMonitorRepairPolicyBlocksDisabledAndBudgets(t *testing.T) {
 	pr := repositoryMonitorPullRequest{Number: 31, HeadSHA: "head31", HeadRepo: "orka-agents/orka"}
 	reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
 
-	if reason, _, _, err := reconciler.repositoryMonitorRepairPolicy(ctx, monitor, "orka-agents/orka", pr, ""); err != nil || reason != "repair_disabled" {
+	if reason, _, _, err := reconciler.repositoryMonitorRepairPolicy(ctx, monitor, "orka-agents/orka", pr, "", repositoryMonitorCommandIntentFix); err != nil || reason != "repair_disabled" {
 		t.Fatalf("disabled repair reason=%q err=%v", reason, err)
 	}
 	monitor.Spec.Repair.Enabled = true
-	if reason, _, _, err := reconciler.repositoryMonitorRepairPolicy(ctx, monitor, "orka-agents/orka", pr, ""); err != nil || reason != "missing_repairer_agent" {
+	if reason, _, _, err := reconciler.repositoryMonitorRepairPolicy(ctx, monitor, "orka-agents/orka", pr, "", repositoryMonitorCommandIntentFix); err != nil || reason != "missing_repairer_agent" {
 		t.Fatalf("missing repairer reason=%q err=%v", reason, err)
 	}
 	monitor.Spec.Agents.Repairer = &corev1alpha1.AgentReference{Name: "repairer"}
 	forkPR := pr
 	forkPR.HeadRepo = "contributor/fork"
-	if reason, _, _, err := reconciler.repositoryMonitorRepairPolicy(ctx, monitor, "orka-agents/orka", forkPR, ""); err != nil || reason != "fork_pr_repair_not_writable" {
+	if reason, _, _, err := reconciler.repositoryMonitorRepairPolicy(ctx, monitor, "orka-agents/orka", forkPR, "", repositoryMonitorCommandIntentFix); err != nil || reason != "fork_pr_repair_not_writable" {
 		t.Fatalf("fork repair reason=%q err=%v", reason, err)
 	}
 	maxPR := int32(1)
@@ -6598,7 +6598,7 @@ func TestRepositoryMonitorRepairPolicyBlocksDisabledAndBudgets(t *testing.T) {
 	if err := monitorStore.CreateRepairJob(ctx, &store.RepairJob{ID: "existing-repair", MonitorNamespace: "default", MonitorName: monitor.Name, Repo: "orka-agents/orka", PRNumber: 31, HeadSHA: "old-head", Phase: repositoryMonitorRepairPhaseFailed, CreatedAt: time.Now()}); err != nil {
 		t.Fatalf("CreateRepairJob() error = %v", err)
 	}
-	if reason, _, _, err := reconciler.repositoryMonitorRepairPolicy(ctx, monitor, "orka-agents/orka", pr, ""); err != nil || reason != "repair_pr_budget_exhausted" {
+	if reason, _, _, err := reconciler.repositoryMonitorRepairPolicy(ctx, monitor, "orka-agents/orka", pr, "", repositoryMonitorCommandIntentFix); err != nil || reason != "repair_pr_budget_exhausted" {
 		t.Fatalf("PR budget reason=%q err=%v", reason, err)
 	}
 	monitor.Spec.Repair.MaxRepairsPerPR = nil
@@ -6607,7 +6607,7 @@ func TestRepositoryMonitorRepairPolicyBlocksDisabledAndBudgets(t *testing.T) {
 	if err := monitorStore.CreateRepairJob(ctx, &store.RepairJob{ID: "existing-head-repair", MonitorNamespace: "default", MonitorName: monitor.Name, Repo: "orka-agents/orka", PRNumber: 31, HeadSHA: "head31", Phase: repositoryMonitorRepairPhaseFailed, CreatedAt: time.Now()}); err != nil {
 		t.Fatalf("CreateRepairJob(head) error = %v", err)
 	}
-	if reason, _, _, err := reconciler.repositoryMonitorRepairPolicy(ctx, monitor, "orka-agents/orka", pr, ""); err != nil || reason != "repair_head_budget_exhausted" {
+	if reason, _, _, err := reconciler.repositoryMonitorRepairPolicy(ctx, monitor, "orka-agents/orka", pr, "", repositoryMonitorCommandIntentFix); err != nil || reason != "repair_head_budget_exhausted" {
 		t.Fatalf("head budget reason=%q err=%v", reason, err)
 	}
 
@@ -6624,13 +6624,13 @@ func TestRepositoryMonitorRepairPolicyBlocksDisabledAndBudgets(t *testing.T) {
 	}
 	presentTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "present-task", Namespace: "default"}}
 	orphanReconciler := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(presentTask).Build(), Store: monitorStore}
-	if reason, countPR, countHead, err := orphanReconciler.repositoryMonitorRepairPolicy(ctx, orphanMonitor, "orka-agents/orka", pr, "replacement-repair"); err != nil || reason != "" || countPR != 0 || countHead != 0 {
+	if reason, countPR, countHead, err := orphanReconciler.repositoryMonitorRepairPolicy(ctx, orphanMonitor, "orka-agents/orka", pr, "replacement-repair", repositoryMonitorCommandIntentFix); err != nil || reason != "" || countPR != 0 || countHead != 0 {
 		t.Fatalf("orphan queued job consumed repair budget: reason=%q countPR=%d countHead=%d err=%v", reason, countPR, countHead, err)
 	}
 	if err := monitorStore.CreateRepairJob(ctx, &store.RepairJob{ID: "live-repair", MonitorNamespace: "default", MonitorName: orphanMonitor.Name, Repo: "orka-agents/orka", PRNumber: 31, HeadSHA: "head31", Phase: repositoryMonitorRepairPhaseQueued, TaskName: presentTask.Name, CreatedAt: time.Now()}); err != nil {
 		t.Fatalf("CreateRepairJob(live) error = %v", err)
 	}
-	if reason, countPR, countHead, err := orphanReconciler.repositoryMonitorRepairPolicy(ctx, orphanMonitor, "orka-agents/orka", pr, "replacement-repair"); err != nil || reason != "repair_pr_budget_exhausted" || countPR != 1 || countHead != 1 {
+	if reason, countPR, countHead, err := orphanReconciler.repositoryMonitorRepairPolicy(ctx, orphanMonitor, "orka-agents/orka", pr, "replacement-repair", repositoryMonitorCommandIntentFix); err != nil || reason != "repair_pr_budget_exhausted" || countPR != 1 || countHead != 1 {
 		t.Fatalf("live queued job budget result: reason=%q countPR=%d countHead=%d err=%v", reason, countPR, countHead, err)
 	}
 }

@@ -146,8 +146,8 @@ func validateRepositoryMonitorSpec(spec corev1alpha1.RepositoryMonitorSpec) erro
 	if spec.Triggers.GitHub.Labels.Enabled && (spec.ForgeCredentialRef == nil || strings.TrimSpace(spec.ForgeCredentialRef.Name) == "") {
 		return fiber.NewError(fiber.StatusBadRequest, "spec.forgeCredentialRef is required when GitHub label triggers are enabled")
 	}
-	if spec.Review.Publish.Enabled && repositoryMonitorCredentialRefName(spec.ForgeCredentialRef) == "" {
-		return fiber.NewError(fiber.StatusBadRequest, "spec.forgeCredentialRef is required when review publication is enabled")
+	if (spec.Review.Publish.Enabled || spec.Repair.Enabled) && repositoryMonitorCredentialRefName(spec.ForgeCredentialRef) == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "spec.forgeCredentialRef is required when review publication or repair is enabled")
 	}
 	return nil
 }

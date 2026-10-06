@@ -207,7 +207,6 @@ missing or mismatched artifacts staying not ready.
 - Security Scan E2E is secret-free and model-free, but requires Docker plus the
   local Go, Kind, kubectl, curl, and jq toolchain.
 
-- The live GitHub label trigger workflow is manual, model-free, and secret-free. It requires Docker, Kind, kubectl, curl, jq, and Python locally, accepts `GITHUB_LABEL_TRIGGER_TARGET_REPO_URL` and `GITHUB_LABEL_TRIGGER_TARGET_NUMBER` overrides, and sends only synthetic webhook payloads to the local Orka API.
 - Gateway Live E2E is model-free and secret-free. Its focused invocation sets `E2E_GATEWAY=true` and `E2E_EPHEMERAL_CLUSTER=true`; the last flag skips per-resource suite cleanup because the caller deletes the entire Kind cluster.
 - GitHub Actions `id-token: write` permission: required by the live GitHub OIDC workflow. For local/manual runs of `scripts/live-github-oidc-e2e.sh`, set `ORKA_GITHUB_OIDC_TOKEN` to a valid JWT instead. Provider-specific transaction-token E2E lives in the external integration repositories.
 - `E2E_LIVE_COPILOT_PROXY_BASE_URL` (or `E2E_COPILOT_PROXY_BASE_URL` / `COPILOT_PROXY_BASE_URL`): enables the focused live copilot-proxy spec against a running proxy

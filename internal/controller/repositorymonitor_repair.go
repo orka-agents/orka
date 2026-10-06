@@ -315,7 +315,7 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 		}
 		monitoredRepo := owner + "/" + repository
 		currentRepairJobID := "repair-" + repositoryMonitorShortHash(command.ID)
-		reason, repairCountPR, repairCountHead, err := r.repositoryMonitorRepairPolicy(ctx, monitor, monitoredRepo, pr, currentRepairJobID)
+		reason, repairCountPR, repairCountHead, err := r.repositoryMonitorRepairPolicy(ctx, monitor, monitoredRepo, pr, currentRepairJobID, command.Intent)
 		if err != nil {
 			return true, 0, err
 		}
@@ -819,11 +819,12 @@ func (r *RepositoryMonitorReconciler) updateRepositoryMonitorPullRequestBranch(c
 	return strings.TrimSpace(response.Header.Get("X-GitHub-Request-Id")), nil
 }
 
-func (r *RepositoryMonitorReconciler) repositoryMonitorRepairPolicy(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, monitoredRepo string, pr repositoryMonitorPullRequest, currentJobID string) (string, int, int, error) {
+//nolint:gocyclo // Keep task, branch-mutation, and exhausted-command budget accounting together.
+func (r *RepositoryMonitorReconciler) repositoryMonitorRepairPolicy(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, monitoredRepo string, pr repositoryMonitorPullRequest, currentJobID, intent string) (string, int, int, error) {
 	if monitor == nil || !monitor.Spec.Repair.Enabled {
 		return "repair_disabled", 0, 0, nil
 	}
-	if monitor.Spec.Agents.Repairer == nil || strings.TrimSpace(monitor.Spec.Agents.Repairer.Name) == "" {
+	if intent != repositoryMonitorCommandIntentUpdateBranch && (monitor.Spec.Agents.Repairer == nil || strings.TrimSpace(monitor.Spec.Agents.Repairer.Name) == "") {
 		return "missing_repairer_agent", 0, 0, nil
 	}
 	if !strings.EqualFold(strings.TrimSpace(pr.HeadRepo), strings.TrimSpace(monitoredRepo)) {

@@ -436,16 +436,20 @@ func TestCreateRepositoryMonitor_AcceptsSafePublishConfig(t *testing.T) {
 	require.True(t, *created.Spec.Review.Publish.PostPassed)
 }
 
-func TestRepositoryMonitorHandlers_ReviewPublicationRequiresForgeCredential(t *testing.T) {
+func TestRepositoryMonitorHandlers_ControllerMutationsRequireForgeCredential(t *testing.T) {
 	tests := []struct {
 		name    string
 		enabled bool
+		repair  bool
 		forge   *corev1.LocalObjectReference
 		want    int
 	}{
 		{name: "missing reference", enabled: true, want: http.StatusBadRequest},
 		{name: "blank reference", enabled: true, forge: &corev1.LocalObjectReference{Name: " "}, want: http.StatusBadRequest},
 		{name: "valid reference", enabled: true, forge: &corev1.LocalObjectReference{Name: "forge"}, want: http.StatusOK},
+		{name: "agentless repair missing reference", repair: true, want: http.StatusBadRequest},
+		{name: "agentless repair blank reference", repair: true, forge: &corev1.LocalObjectReference{Name: " "}, want: http.StatusBadRequest},
+		{name: "agentless repair valid reference", repair: true, forge: &corev1.LocalObjectReference{Name: "forge"}, want: http.StatusOK},
 		{name: "read-only publication disabled", want: http.StatusOK},
 	}
 	for _, method := range []string{http.MethodPost, http.MethodPut} {
@@ -474,6 +478,7 @@ func TestRepositoryMonitorHandlers_ReviewPublicationRequiresForgeCredential(t *t
 						Publish: corev1alpha1.RepositoryMonitorReviewPublishSpec{Enabled: tt.enabled},
 					},
 				}
+				spec.Repair.Enabled = tt.repair
 				body, err := json.Marshal(CreateRepositoryMonitorRequest{Name: "repo-monitor", Namespace: "demo", Spec: spec})
 				require.NoError(t, err)
 				req := httptest.NewRequest(method, path, strings.NewReader(string(body)))
@@ -487,6 +492,7 @@ func TestRepositoryMonitorHandlers_ReviewPublicationRequiresForgeCredential(t *t
 					var monitor corev1alpha1.RepositoryMonitor
 					require.NoError(t, json.NewDecoder(resp.Body).Decode(&monitor))
 					require.Equal(t, tt.enabled, monitor.Spec.Review.Publish.Enabled)
+					require.Equal(t, tt.repair, monitor.Spec.Repair.Enabled)
 					require.Equal(t, tt.forge, monitor.Spec.ForgeCredentialRef)
 				}
 			})

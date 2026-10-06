@@ -14,16 +14,20 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-func TestRepositoryMonitorReconcileReviewPublicationRequiresForgeCredential(t *testing.T) {
+func TestRepositoryMonitorReconcileControllerMutationsRequireForgeCredential(t *testing.T) {
 	tests := []struct {
 		name    string
 		enabled bool
+		repair  bool
 		forge   *corev1.LocalObjectReference
 		valid   bool
 	}{
 		{name: "missing reference", enabled: true},
 		{name: "blank reference", enabled: true, forge: &corev1.LocalObjectReference{Name: " "}},
 		{name: "valid reference", enabled: true, forge: &corev1.LocalObjectReference{Name: repositoryMonitorTestForgeCredential}, valid: true},
+		{name: "agentless repair missing reference", repair: true},
+		{name: "agentless repair blank reference", repair: true, forge: &corev1.LocalObjectReference{Name: " "}},
+		{name: "agentless repair valid reference", repair: true, forge: &corev1.LocalObjectReference{Name: repositoryMonitorTestForgeCredential}, valid: true},
 		{name: "read-only publication disabled", valid: true},
 	}
 	for _, tt := range tests {
@@ -35,6 +39,7 @@ func TestRepositoryMonitorReconcileReviewPublicationRequiresForgeCredential(t *t
 			require.NoError(t, corev1.AddToScheme(scheme))
 			monitor := repositoryMonitorReviewIngestTestMonitor("publication-credentials")
 			monitor.Spec.Review.Publish.Enabled = tt.enabled
+			monitor.Spec.Repair.Enabled = tt.repair
 			monitor.Spec.ForgeCredentialRef = tt.forge
 			cl := fake.NewClientBuilder().
 				WithScheme(scheme).

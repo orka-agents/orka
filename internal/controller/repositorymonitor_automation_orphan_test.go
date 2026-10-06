@@ -134,7 +134,7 @@ func TestRepositoryMonitorRepairPolicyCountsTerminalCommandsOnce(t *testing.T) {
 			}
 			r := &RepositoryMonitorReconciler{Store: db}
 			pr := repositoryMonitorPullRequest{Number: 1, HeadSHA: "head", HeadRepo: "orka-agents/orka"}
-			reason, countPR, countHead, err := r.repositoryMonitorRepairPolicy(ctx, monitor, "orka-agents/orka", pr, "")
+			reason, countPR, countHead, err := r.repositoryMonitorRepairPolicy(ctx, monitor, "orka-agents/orka", pr, "", repositoryMonitorCommandIntentFixCI)
 			if err != nil || reason != "" || countPR != 1 || countHead != 1 {
 				t.Fatalf("terminal command budget: reason=%q PR=%d head=%d err=%v", reason, countPR, countHead, err)
 			}
