@@ -154,7 +154,8 @@ func (r *RepositoryMonitorReconciler) processIssueCommandRun(ctx context.Context
 		if err := r.cancelRepositoryMonitorTargetTasks(ctx, monitor, repositoryMonitorIssueKind, item.Number, repositoryMonitorIssueSkipStoppedByCommand); err != nil {
 			return 0, err
 		}
-		if _, err := r.Store.CancelWorkActions(ctx, monitor.Namespace, monitor.Name, repositoryMonitorIssueKind, item.Number, repositoryMonitorIssueSkipStoppedByCommand); err != nil {
+		stopActionID := store.RepositoryMonitorWorkActionID(command.ID, repositoryMonitorCommandIntentStop)
+		if _, err := r.Store.CancelWorkActions(ctx, monitor.Namespace, monitor.Name, repositoryMonitorIssueKind, item.Number, repositoryMonitorIssueSkipStoppedByCommand, stopActionID); err != nil {
 			return 0, err
 		}
 		if err := r.cancelRepositoryMonitorImplementationJobs(ctx, monitor, item.Number, repositoryMonitorIssueSkipStoppedByCommand); err != nil {
@@ -732,8 +733,8 @@ func repositoryMonitorIssuePhaseAwaitingTask(phase string) bool {
 	}
 }
 
-func (r *RepositoryMonitorReconciler) settleRepositoryMonitorSupersededPausedIssue(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, existing, item *store.MonitorItem) error {
-	if existing == nil || existing.WorkflowPhase != repositoryMonitorIssuePhasePaused || existing.LastActionID == "" || existing.SnapshotDigest == item.SnapshotDigest {
+func (r *RepositoryMonitorReconciler) settleRepositoryMonitorPausedIssue(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, existing *store.MonitorItem, reason string) error {
+	if existing == nil || existing.WorkflowPhase != repositoryMonitorIssuePhasePaused || existing.LastActionID == "" {
 		return nil
 	}
 	// Paused items retain a completed ActionRecord. Settle its attempt before
@@ -751,7 +752,7 @@ func (r *RepositoryMonitorReconciler) settleRepositoryMonitorSupersededPausedIss
 		now := time.Now()
 		job.Phase = repositoryMonitorIssuePhaseBlocked
 		job.ValidationState = repositoryMonitorReviewVerdictStale
-		job.Error = repositoryMonitorIssueSnapshotSuperseded
+		job.Error = reason
 		job.CompletedAt = &now
 		if err := r.Store.UpdateImplementationJob(ctx, job); err != nil {
 			return err
@@ -779,12 +780,12 @@ func (r *RepositoryMonitorReconciler) settleRepositoryMonitorSupersededPausedIss
 			}
 		}
 		if !terminal {
-			if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, nil, command, existing.Kind, existing.Number, "", existing.SnapshotDigest, record.ActionKind, repositoryMonitorWorkActionStatusFailed, repositoryMonitorRunFailurePermanent, record.TaskName, repositoryMonitorIssueSnapshotSuperseded); err != nil {
+			if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, nil, command, existing.Kind, existing.Number, "", existing.SnapshotDigest, record.ActionKind, repositoryMonitorWorkActionStatusFailed, repositoryMonitorRunFailurePermanent, record.TaskName, reason); err != nil {
 				return err
 			}
 		}
 	}
-	if err := r.terminalizeRepositoryMonitorFailedCommand(ctx, monitor, *command, nil, repositoryMonitorIssueSnapshotSuperseded); err != nil {
+	if err := r.terminalizeRepositoryMonitorFailedCommand(ctx, monitor, *command, nil, reason); err != nil {
 		return err
 	}
 	if command.Status == "accepted" {

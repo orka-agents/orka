@@ -10,6 +10,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 //nolint:gocyclo // Exercise policy intake and rejected scopes through signed webhooks.
@@ -56,9 +57,16 @@ func TestGitHubWebhookPausePolicyScope(t *testing.T) {
 		{name: "incomplete_pull_request", configure: func(_ *corev1alpha1.RepositoryMonitor, p *githubLabelWebhookPayload) {
 			p.Issue.PullRequest = &githubIssuePullRequestID{}
 		}},
-		{name: "suspended_monitor", configure: func(m *corev1alpha1.RepositoryMonitor, _ *githubLabelWebhookPayload) {
+		{name: "suspended_monitor", wantQueued: true, wantPermissions: 1, configure: func(m *corev1alpha1.RepositoryMonitor, _ *githubLabelWebhookPayload) {
 			suspended := true
 			m.Spec.Suspend = &suspended
+			m.Spec.Triggers.GitHub.Labels.Enabled = false
+		}},
+		{name: "suspended_monitor_permission_still_required", wantPermissions: 1, configure: func(m *corev1alpha1.RepositoryMonitor, _ *githubLabelWebhookPayload) {
+			suspended := true
+			m.Spec.Suspend = &suspended
+			m.Spec.Triggers.GitHub.Labels.Enabled = false
+			m.Spec.Triggers.GitHub.Labels.RequireActorPermission = githubPermissionAdmin
 		}},
 		{name: "permission_still_required", wantPermissions: 1, configure: func(m *corev1alpha1.RepositoryMonitor, _ *githubLabelWebhookPayload) {
 			m.Spec.Triggers.GitHub.Labels.Enabled = false
@@ -222,6 +230,18 @@ func TestGitHubWebhookPausePolicyScope(t *testing.T) {
 				}
 				if tc.wantQueued && (runs[0].Trigger != "pause_label_event" || runs[0].TargetKind != kind || runs[0].TargetNumber != 12 || tc.pullRequest && runs[0].TargetSHA != githubWebhookTestHeadSHA) {
 					t.Fatalf("pause queued the wrong target: %+v", runs[0])
+				}
+				if monitor.Spec.Suspend != nil && *monitor.Spec.Suspend {
+					var current corev1alpha1.RepositoryMonitor
+					if err := fc.Get(t.Context(), types.NamespacedName{Namespace: monitor.Namespace, Name: monitor.Name}, &current); err != nil {
+						t.Fatal(err)
+					}
+					if current.Spec.Suspend == nil || !*current.Spec.Suspend {
+						t.Fatal("pause intake resumed the suspended schedule")
+					}
+					if tc.wantQueued && current.Annotations[repositoryMonitorRunRequestAnnotation] != runs[0].ID {
+						t.Fatal("suspended monitor did not receive its pause inventory signal")
+					}
 				}
 				item, err := db.GetMonitorItem(t.Context(), monitor.Namespace, monitor.Name, kind, "12")
 				if err != nil {

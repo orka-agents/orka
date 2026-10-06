@@ -144,7 +144,7 @@ func (r *RepositoryMonitorReconciler) processIssueInventoryRun(ctx context.Conte
 		supersededPausedResult := existing != nil && existing.WorkflowPhase == repositoryMonitorIssuePhasePaused && existing.LastActionID != "" &&
 			existing.SnapshotDigest != item.SnapshotDigest && repositoryMonitorMatchingLabel(repositoryMonitorPauseLabels(monitor.Spec), issue.Labels) == ""
 		if supersededPausedResult {
-			if err := r.settleRepositoryMonitorSupersededPausedIssue(ctx, monitor, existing, item); err != nil {
+			if err := r.settleRepositoryMonitorPausedIssue(ctx, monitor, existing, repositoryMonitorIssueSnapshotSuperseded); err != nil {
 				return selected, createdTasks, skipped, err
 			}
 		}
@@ -177,6 +177,11 @@ func (r *RepositoryMonitorReconciler) processIssueInventoryRun(ctx context.Conte
 			}
 		}
 		if skipReason != "" {
+			if !supersededPausedResult && skipReason != repositoryMonitorSkipReasonOverLimit && repositoryMonitorMatchingLabel(repositoryMonitorPauseLabels(monitor.Spec), issue.Labels) == "" {
+				if err := r.settleRepositoryMonitorPausedIssue(ctx, monitor, existing, skipReason); err != nil {
+					return selected, createdTasks, skipped, err
+				}
+			}
 			skipped++
 			item.LastVerdict = repositoryMonitorVerdictSkipped
 			item.SkipReason = skipReason

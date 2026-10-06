@@ -207,15 +207,20 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 		if err := r.cancelRepositoryMonitorTargetTasks(ctx, monitor, repositoryMonitorPullRequestKind, pr.Number, repositoryMonitorIssueSkipStoppedByCommand); err != nil {
 			return true, 0, err
 		}
-		if _, err := r.Store.CancelWorkActions(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, pr.Number, repositoryMonitorIssueSkipStoppedByCommand); err != nil {
-			return true, 0, err
-		}
-		if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "", repositoryMonitorCommandIntentStop, repositoryMonitorWorkActionStatusSucceeded, "blocked", "", repositoryMonitorIssueSkipStoppedByCommand); err != nil {
+		// Keep this control action retryable until its stop transition settles.
+		stopActionID := store.RepositoryMonitorWorkActionID(command.ID, repositoryMonitorCommandIntentStop)
+		if _, err := r.Store.CancelWorkActions(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, pr.Number, repositoryMonitorIssueSkipStoppedByCommand, stopActionID); err != nil {
 			return true, 0, err
 		}
 		item.RepairState = repositoryMonitorRepairPhaseFailed
 		item.SkipReason = repositoryMonitorIssueSkipStoppedByCommand
-		return true, 0, r.Store.UpsertMonitorItem(ctx, item)
+		if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
+			return true, 0, err
+		}
+		if err := r.reconcileRepositoryMonitorReadiness(ctx, monitor, &pr, item); err != nil {
+			return true, 0, err
+		}
+		return true, 0, r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "", repositoryMonitorCommandIntentStop, repositoryMonitorWorkActionStatusSucceeded, "blocked", "", repositoryMonitorIssueSkipStoppedByCommand)
 	case repositoryMonitorCommandIntentResume:
 		if repositoryMonitorBlockedLabel(monitor.Spec, pr.Labels) != "" {
 			if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "", repositoryMonitorCommandIntentResume, repositoryMonitorWorkActionStatusBlocked, "resume_blocked", "", repositoryMonitorSkipReasonBlockedLabel); err != nil {
@@ -223,12 +228,15 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 			}
 			return true, 0, nil
 		}
-		if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "", repositoryMonitorCommandIntentResume, repositoryMonitorWorkActionStatusSucceeded, "resumed", "", ""); err != nil {
-			return true, 0, err
-		}
 		item.RepairState = ""
 		item.SkipReason = ""
-		return true, 0, r.Store.UpsertMonitorItem(ctx, item)
+		if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
+			return true, 0, err
+		}
+		if err := r.reconcileRepositoryMonitorReadiness(ctx, monitor, &pr, item); err != nil {
+			return true, 0, err
+		}
+		return true, 0, r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "", repositoryMonitorCommandIntentResume, repositoryMonitorWorkActionStatusSucceeded, "resumed", "", "")
 
 	case repositoryMonitorCommandIntentReview:
 		if blockedLabel := repositoryMonitorBlockedLabel(monitor.Spec, pr.Labels); blockedLabel != "" {

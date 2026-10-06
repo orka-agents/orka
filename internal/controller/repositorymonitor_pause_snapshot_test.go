@@ -346,7 +346,7 @@ func TestRepositoryMonitorPauseSupersessionPreservesTerminalStates(t *testing.T)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := r.settleRepositoryMonitorSupersededPausedIssue(t.Context(), monitor, existing, &store.MonitorItem{SnapshotDigest: "edited"}); err != nil {
+			if err := r.settleRepositoryMonitorPausedIssue(t.Context(), monitor, existing, repositoryMonitorIssueSnapshotSuperseded); err != nil {
 				t.Fatal(err)
 			}
 			newJob, err := db.GetImplementationJob(t.Context(), monitor.Namespace, job.ID)

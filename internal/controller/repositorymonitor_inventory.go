@@ -132,6 +132,19 @@ func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context
 	skipped := 0
 
 	for _, pr := range pullRequests {
+		// PR lists omit mergeability. Automatic repair needs detail even when
+		// readiness publication is disabled; targeted runs already fetch it.
+		if monitor.Spec.Repair.Enabled && !monitor.Spec.Review.Publish.Enabled && run.TargetNumber == 0 {
+			current, err := r.fetchRepositoryMonitorPullRequest(ctx, owner, repository, token, pr.Number)
+			if err != nil {
+				return selected, createdTasks, skipped, err
+			}
+			if current.State != repositoryMonitorItemStateOpen || current.HeadSHA != pr.HeadSHA || current.BaseBranch != baseBranch {
+				skipped++
+				continue
+			}
+			pr = *current
+		}
 		existing, err := r.Store.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, fmt.Sprintf("%d", pr.Number))
 		if err != nil && !errorsIsStoreNotFound(err) {
 			return selected, createdTasks, skipped, err

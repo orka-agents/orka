@@ -1037,13 +1037,13 @@ func (s *Store) ListWorkActions(ctx context.Context, filter store.WorkActionFilt
 	return queryPage(ctx, s.db, q, "updated_at DESC, id DESC", filter.Cursor, filter.Limit, scanWorkAction)
 }
 
-// CancelWorkActions cancels non-terminal workflow actions for a target.
-func (s *Store) CancelWorkActions(ctx context.Context, namespace, monitorName, targetKind string, targetNumber int64, reason string) (int, error) {
+// CancelWorkActions cancels non-terminal target actions except the executing control action.
+func (s *Store) CancelWorkActions(ctx context.Context, namespace, monitorName, targetKind string, targetNumber int64, reason, exceptActionID string) (int, error) {
 	now := time.Now()
 	result, err := s.db.ExecContext(ctx,
 		`UPDATE work_actions SET status = 'cancelled', blocked_reason = ?, error = '', completed_at = ?, updated_at = ?
 		 WHERE monitor_namespace = ? AND monitor_name = ? AND target_kind = ? AND target_number = ?
-		 AND status IN ('queued', 'leased', 'running', 'retry_pending')`, reason, now, now, namespace, monitorName, targetKind, targetNumber)
+		 AND id <> ? AND status IN ('queued', 'leased', 'running', 'retry_pending')`, reason, now, now, namespace, monitorName, targetKind, targetNumber, exceptActionID)
 	if err != nil {
 		return 0, err
 	}

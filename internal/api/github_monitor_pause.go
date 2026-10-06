@@ -22,7 +22,8 @@ func repositoryMonitorAPIPauseLabels(monitor *corev1alpha1.RepositoryMonitor) []
 }
 
 func repositoryMonitorAcceptsPauseEvent(monitor *corev1alpha1.RepositoryMonitor, repo githubWebhookRepository, target githubLabelTarget) bool {
-	if monitor == nil || repositoryMonitorWebhookSuspended(monitor) || target.IncompletePR {
+	// Suspension only pauses scheduling; completed Task handoffs still need pause intake.
+	if monitor == nil || target.IncompletePR {
 		return false
 	}
 	owner, repository, err := parseRepositoryMonitorGitHubURL(monitor.Spec.RepoURL)

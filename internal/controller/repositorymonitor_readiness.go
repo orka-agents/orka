@@ -225,7 +225,9 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorReadiness(ctx co
 	if pr.State != repositoryMonitorItemStateOpen || pr.BaseBranch != effectiveRepositoryMonitorBranch(monitor) {
 		return r.reconcileRepositoryMonitorDepartedHead(ctx, monitor, pr.Number, expectedHead, endpoint, token)
 	}
-	if pr.HeadSHA != expectedHead {
+	// Stop applies to the pull request across head changes. Its failure outcome
+	// uses no positive review evidence from the previous head.
+	if pr.HeadSHA != expectedHead && item.SkipReason != repositoryMonitorIssueSkipStoppedByCommand {
 		return nil
 	}
 	item.Draft = pr.Draft
@@ -426,12 +428,17 @@ func (r *RepositoryMonitorReconciler) writeRepositoryMonitorCommitStatus(ctx con
 		return result, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return result, fmt.Errorf("GitHub readiness status failed with HTTP %d", resp.StatusCode)
-	}
 	data, err := readRepositoryMonitorGitHubResponse(resp.Body, repositoryMonitorGitHubResponseLimit)
 	if err != nil {
 		return result, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		detail := ""
+		if repositoryMonitorGitHubErrorLooksRateLimited(string(data)) {
+			// Preserve retry classification using safe diagnostic metadata.
+			detail = "rate limit"
+		}
+		return result, &repositoryMonitorGitHubAPIError{Operation: "readiness status", StatusCode: resp.StatusCode, Body: detail}
 	}
 	err = json.Unmarshal(data, &result)
 	return result, err
