@@ -406,6 +406,7 @@ func nextConnectorCredentialVersion(ctx context.Context, tx *sql.Tx, connectionU
 
 // CommitConnectorCompletion implements store.ConnectorConsentStore.
 func (s *Store) CommitConnectorCompletion(ctx context.Context, nonce string, ref store.ConnectorCredentialRef, credential store.ConnectorCredential) (store.ConnectorCredential, error) {
+	s.finishPendingWALTruncate(ctx)
 	if strings.TrimSpace(nonce) == "" {
 		return store.ConnectorCredential{}, errors.New("connector completion nonce is required")
 	}
@@ -477,6 +478,11 @@ func (s *Store) CommitConnectorCompletion(ctx context.Context, nonce string, ref
 	}
 	// Grants a re-consent superseded are kept so disconnect can revoke them;
 	// a bound keeps repeated relinking from growing custody without limit.
+	// Rows with nothing left to revoke are pruned first, so they never count.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM connector_retired_credentials
+		WHERE connection_uid = ? AND revocable_until IS NOT NULL AND revocable_until <= ?`, ref.ConnectionUID, time.Now().UTC()); err != nil {
+		return store.ConnectorCredential{}, fmt.Errorf("prune expired retired connector credentials: %w", err)
+	}
 	var retained int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM connector_retired_credentials WHERE connection_uid = ? AND consent_grant = 1`,
 		ref.ConnectionUID).Scan(&retained); err != nil {
@@ -603,6 +609,7 @@ func connectorCommittedConsentTx(ctx context.Context, tx *sql.Tx, connectionUID 
 
 // GetConnectorCredential implements store.ConnectorCredentialStore.
 func (s *Store) GetConnectorCredential(ctx context.Context, ref store.ConnectorCredentialRef) (store.ConnectorCredential, error) {
+	s.finishPendingWALTruncate(ctx)
 	if s.snapshotCipher == nil {
 		return store.ConnectorCredential{}, errConnectorCipherRequired
 	}
@@ -657,6 +664,7 @@ func (s *Store) openConnectorCredentialRow(ref store.ConnectorCredentialRef, dek
 
 // ListRetiredConnectorCredentials implements store.ConnectorCredentialStore.
 func (s *Store) ListRetiredConnectorCredentials(ctx context.Context, ref store.ConnectorCredentialRef) ([]store.ConnectorCredential, error) {
+	s.finishPendingWALTruncate(ctx)
 	if s.snapshotCipher == nil {
 		return nil, errConnectorCipherRequired
 	}
@@ -690,6 +698,7 @@ func (s *Store) ListRetiredConnectorCredentials(ctx context.Context, ref store.C
 
 // TombstoneConnectorCustody implements store.ConnectorCredentialStore.
 func (s *Store) TombstoneConnectorCustody(ctx context.Context, connectionUID string) error {
+	s.finishPendingWALTruncate(ctx)
 	if strings.TrimSpace(connectionUID) == "" {
 		return errors.New("connector credential connection UID is required")
 	}
@@ -996,6 +1005,7 @@ func (s *Store) finishPendingWALTruncate(ctx context.Context) {
 
 // CreateConnectorConsent implements store.ConnectorConsentStore.
 func (s *Store) CreateConnectorConsent(ctx context.Context, consent store.ConnectorConsent) error {
+	s.finishPendingWALTruncate(ctx)
 	if s.snapshotCipher == nil {
 		return errConnectorCipherRequired
 	}
@@ -1049,6 +1059,7 @@ func (s *Store) CreateConnectorConsent(ctx context.Context, consent store.Connec
 
 // ConsumeConnectorConsent implements store.ConnectorConsentStore.
 func (s *Store) ConsumeConnectorConsent(ctx context.Context, nonce string) (store.ConnectorConsent, error) {
+	s.finishPendingWALTruncate(ctx)
 	if s.snapshotCipher == nil {
 		return store.ConnectorConsent{}, errConnectorCipherRequired
 	}
@@ -1100,6 +1111,7 @@ func (s *Store) ConsumeConnectorConsent(ctx context.Context, nonce string) (stor
 
 // CreateConnectorCompletion implements store.ConnectorConsentStore.
 func (s *Store) CreateConnectorCompletion(ctx context.Context, completion store.ConnectorCompletion) error {
+	s.finishPendingWALTruncate(ctx)
 	if s.snapshotCipher == nil {
 		return errConnectorCipherRequired
 	}
@@ -1186,6 +1198,7 @@ func (s *Store) CreateConnectorCompletion(ctx context.Context, completion store.
 
 // ConsumeConnectorCompletion implements store.ConnectorConsentStore.
 func (s *Store) ConsumeConnectorCompletion(ctx context.Context, nonce string) (store.ConnectorCompletion, error) {
+	s.finishPendingWALTruncate(ctx)
 	if s.snapshotCipher == nil {
 		return store.ConnectorCompletion{}, errConnectorCipherRequired
 	}
@@ -1238,6 +1251,7 @@ func (s *Store) ConsumeConnectorCompletion(ctx context.Context, nonce string) (s
 
 // PeekConnectorCompletion implements store.ConnectorConsentStore.
 func (s *Store) PeekConnectorCompletion(ctx context.Context, nonce string) (store.ConnectorCompletion, error) {
+	s.finishPendingWALTruncate(ctx)
 	if s.snapshotCipher == nil {
 		return store.ConnectorCompletion{}, errConnectorCipherRequired
 	}
@@ -1268,6 +1282,7 @@ func (s *Store) DeleteConnectorCompletion(ctx context.Context, nonce string) err
 
 // ListConnectorCompletionsForConnection implements store.ConnectorConsentStore.
 func (s *Store) ListConnectorCompletionsForConnection(ctx context.Context, connectionUID string) ([]store.ConnectorCompletion, error) {
+	s.finishPendingWALTruncate(ctx)
 	if s.snapshotCipher == nil {
 		return nil, errConnectorCipherRequired
 	}
@@ -1461,6 +1476,7 @@ func (s *Store) verifyConnectorRowsWithCipher(snapshotCipher *AgentExecutionSnap
 
 // RetireConnectorCredential implements store.ConnectorCredentialStore.
 func (s *Store) RetireConnectorCredential(ctx context.Context, ref store.ConnectorCredentialRef, credential store.ConnectorCredential) error {
+	s.finishPendingWALTruncate(ctx)
 	if s.snapshotCipher == nil {
 		return errConnectorCipherRequired
 	}
