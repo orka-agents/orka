@@ -687,6 +687,19 @@ func freezeRequesterConnections(
 			names = append(names, descriptor.Name)
 		}
 	}
+	// Every descriptor was just built from an existing Tool: one removed
+	// mid-binding makes binding retry, or a Tool recreated under a policy in
+	// another mode could run without a frozen-policy entry.
+	if reader != nil && task != nil {
+		for _, name := range names {
+			if err := reader.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: name}, &corev1alpha1.Tool{}); err != nil {
+				if apierrors.IsNotFound(err) {
+					return nil, fmt.Errorf("tool %q was removed while the task was being bound; binding retries", name)
+				}
+				return nil, fmt.Errorf("load tool %q: %w", name, err)
+			}
+		}
+	}
 	return freezeRequesterConnectionsForTools(ctx, reader, registry, task, names)
 }
 

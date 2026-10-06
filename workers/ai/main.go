@@ -1950,4 +1950,15 @@ func sealChildTaskViaController(ctx context.Context, _ client.Client, task *core
 // conflict; each retry doubles it.
 var sealConflictBackoff = 250 * time.Millisecond
 
-var sealHTTPClient = func() *http.Client { return &http.Client{Timeout: 15 * time.Second} }
+// It carries the worker's ServiceAccount token, so it neither honors proxy
+// environment variables nor follows redirects: the token reaches the
+// controller and nothing else.
+var sealHTTPClient = func() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	return &http.Client{
+		Timeout:       15 * time.Second,
+		Transport:     transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+}
