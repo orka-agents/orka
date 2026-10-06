@@ -236,6 +236,18 @@ func TestValidateProviderSpec(t *testing.T) {
 		{name: "duplicate credential-shaped scope is not echoed", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.OAuth.Scopes.Read = []string{"access_token.s3cr3t", "access_token.s3cr3t"}
 		}, want: "duplicate scope"},
+		{name: "invalid client secret name", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.ClientSecretRef.Name = "bad/name"
+		}, want: "valid Secret and data key"},
+		{name: "invalid client secret key", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.ClientSecretRef.Key = "bad key"
+		}, want: "valid Secret and data key"},
+		{name: "oversized endpoint query", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.AuthorizeURL = "https://example.com/authorize?prompt=" + strings.Repeat("a", 1100)
+		}, want: "query must be at most 1024 bytes"},
+		{name: "oversized tool url query", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools[2].HTTP.URL = "https://api.github.com/x?filter=" + strings.Repeat("a", 1100)
+		}, want: "query must be at most 1024 bytes"},
 		{name: "oversized authorize parameter value", mutate: func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.OAuth.AdditionalAuthorizeParameters = map[string]string{"audience": strings.Repeat("a", 513)}
 		}, want: "at most 512 bytes"},
