@@ -1088,3 +1088,39 @@ func TestConnectionReconcilerFinishesDisconnectWhenProviderIsBeingDeleted(t *tes
 		t.Fatalf("finalizer must be released, err = %v", err)
 	}
 }
+
+// TestConnectionReconcilerPersistsScopesGrantedOnlyChange covers a pass whose
+// only change is ScopesGranted: the consent owner already wrote Ready=True and
+// state Ready, so nothing else moves, and the write must still happen.
+func TestConnectionReconcilerPersistsScopesGrantedOnlyChange(t *testing.T) {
+	scheme := connectorTestScheme(t)
+	connection := testConnection("tenant", "github-alice", "github")
+	connection.Status = corev1alpha1.ConnectionStatus{
+		ObservedGeneration: connection.Generation,
+		State:              corev1alpha1.ConnectionStateReady,
+		GrantedScopes:      []string{"read:user"},
+		Conditions: []metav1.Condition{
+			{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonLinked, ObservedGeneration: connection.Generation},
+			{Type: corev1alpha1.ConnectionConditionScopesGranted, Status: metav1.ConditionFalse, Reason: corev1alpha1.ConnectionReasonPendingConsent,
+				Message: "Consent has not completed", ObservedGeneration: connection.Generation},
+			{Type: corev1alpha1.ConnectionConditionProviderResolved, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonProviderResolved,
+				Message: "ConnectorProvider is accepted", ObservedGeneration: connection.Generation},
+		},
+	}
+	provider := scopedConnectorProvider()
+	connection.Status.Consent = &corev1alpha1.ConnectionConsent{ProviderUID: string(provider.UID), AuthorityDigest: connectors.ProviderAuthorityDigest(provider)}
+	c := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(connection, provider).WithStatusSubresource(&corev1alpha1.Connection{}).Build()
+	reconciler := &ConnectionReconciler{Client: c, Scheme: scheme}
+	key := types.NamespacedName{Namespace: "tenant", Name: "github-alice"}
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	stored := &corev1alpha1.Connection{}
+	if err := c.Get(context.Background(), key, stored); err != nil {
+		t.Fatal(err)
+	}
+	granted := meta.FindStatusCondition(stored.Status.Conditions, corev1alpha1.ConnectionConditionScopesGranted)
+	if granted == nil || granted.Status != metav1.ConditionTrue || stored.Status.State != corev1alpha1.ConnectionStateReady {
+		t.Fatalf("ScopesGranted = %#v state = %q, want the scope change persisted", granted, stored.Status.State)
+	}
+}

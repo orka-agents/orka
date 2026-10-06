@@ -246,6 +246,13 @@ func validateEndpointURL(field, raw string, required bool) *Issue {
 			return invalid(fmt.Sprintf("oauth.%s port must be between 1 and 65535", field))
 		}
 	}
+	// Clients IDNA-normalize a non-ASCII host before resolving it, so
+	// 127。0。0。1 (ideographic full stops, possibly percent-encoded)
+	// dials loopback while matching none of the checks below. Hosts must
+	// arrive in their ASCII (punycode) form.
+	if !asciiHost(host) {
+		return invalid(fmt.Sprintf("oauth.%s host must be ASCII; use the punycode (xn--) form of an internationalized name", field))
+	}
 	if hostDenied(strings.ToLower(host)) {
 		return invalid(fmt.Sprintf("oauth.%s host is not allowed", field))
 	}
@@ -256,6 +263,16 @@ func validateEndpointURL(field, raw string, required bool) *Issue {
 		return invalid(fmt.Sprintf("oauth.%s host must be a hostname or a canonical IP address", field))
 	}
 	return validateEndpointQuery(field, parsed.RawQuery)
+}
+
+// asciiHost reports whether host is printable ASCII.
+func asciiHost(host string) bool {
+	for i := 0; i < len(host); i++ {
+		if host[i] <= ' ' || host[i] > '~' {
+			return false
+		}
+	}
+	return true
 }
 
 // nonCanonicalNumericHost reports whether host is a numeric spelling that
