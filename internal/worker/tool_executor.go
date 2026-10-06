@@ -952,6 +952,7 @@ func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *core
 			Headers: tool.Spec.HTTP.Headers, Parameters: tool.Spec.Parameters,
 			Timeout: toolHTTPTimeout(tool), TimeoutSet: tool.Spec.HTTP.Timeout != nil,
 		},
+		Arguments: args,
 	})
 	if err != nil {
 		return fmt.Errorf("resolve outbound access policy: %w", err)

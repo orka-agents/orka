@@ -554,14 +554,15 @@ func (r *TaskReconciler) resolveExternalAgentExecutionCandidate(
 	if runtime.Spec.Capabilities.MCPPolicy != nil {
 		runtimeDisallowed = runtime.Spec.Capabilities.MCPPolicy.DisallowedTools
 	}
-	if connectorTools, err := connectorToolsFor(ctx, reader, task.Namespace, connectorCandidateTools(task, agent, runtimeDisallowed)); err != nil {
-		return nil, err
-	} else if len(connectorTools) > 0 {
-		return nil, permanentACPAgentConfiguration(errors.New("connector-backed tools are not supported on external v2 AgentRuntimes"))
-	}
 	registry := r.MCPRegistry
 	if registry == nil {
 		registry = tools.DefaultRegistry
+	}
+	candidates := brokeredCustomCandidates(connectorCandidateTools(task, agent, runtimeDisallowed), profile.ProviderKind, registry)
+	if connectorTools, err := connectorToolsFor(ctx, reader, task.Namespace, candidates); err != nil {
+		return nil, err
+	} else if len(connectorTools) > 0 {
+		return nil, permanentACPAgentConfiguration(errors.New("connector-backed tools are not supported on external v2 AgentRuntimes"))
 	}
 	mcpConfiguration, err := buildExternalRuntimeSessionMCPConfigurationWithRegistry(
 		ctx, reader, task, agent, runtime, profile, registry,
@@ -1506,4 +1507,25 @@ func (r *TaskReconciler) ensureAgentExecutionBinding(
 		return result, handleErr, true
 	}
 	return ctrl.Result{}, nil, false
+}
+
+// brokeredCustomCandidates keeps the names that would resolve to brokered
+// custom Tools, mirroring buildCanonicalMCPToolDescriptors: a registered
+// built-in or a provider-native tool takes precedence over a same-named Tool
+// CR, which is then never exposed and cannot make a Task connector-backed.
+func brokeredCustomCandidates(names []string, providerKind string, registry *tools.Registry) []string {
+	native := providerNativeTools[strings.ToLower(providerKind)]
+	kept := make([]string, 0, len(names))
+	for _, name := range names {
+		if registry != nil {
+			if _, builtin := registry.Get(name); builtin {
+				continue
+			}
+		}
+		if _, isNative := native[strings.ToLower(name)]; isNative {
+			continue
+		}
+		kept = append(kept, name)
+	}
+	return kept
 }

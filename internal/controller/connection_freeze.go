@@ -65,7 +65,10 @@ func freezeRequesterConnections(
 		tool := &corev1alpha1.Tool{}
 		if err := reader.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: descriptor.Name}, tool); err != nil {
 			if apierrors.IsNotFound(err) {
-				continue
+				// The descriptor was just frozen from this Tool: its removal
+				// mid-binding is retried, or a Tool recreated under a policy in
+				// another mode could run without a frozen-policy entry.
+				return nil, fmt.Errorf("tool %q was removed while the task was being bound; binding retries", descriptor.Name)
 			}
 			return nil, fmt.Errorf("load tool %q: %w", descriptor.Name, err)
 		}
